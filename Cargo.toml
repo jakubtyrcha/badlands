@@ -1,0 +1,18 @@
+[package]
+name = "badlands"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.25.1", features = ["derive"] }
+env_logger = "0.11.11"
+fontdue = "0.9.3"
+glam = { version = "0.33.2", features = ["bytemuck"] }
+log = "0.4.33"
+naga = { version = "30", features = ["wgsl-in"] }
+panes = "0.20.0"
+png = "0.18.1"
+pollster = "1.0.1"
+wesl = "0.4.0"
+wgpu = "30.0.0"
+winit = "0.30.13"
