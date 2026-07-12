@@ -313,21 +313,6 @@ pub fn create_bind_group(
 // walk up from the executable looking for a directory containing the marker
 // shader, then fall back to the source tree and CWD.
 fn find_shader_directory() -> PathBuf {
-    let marker = Path::new("common/frame.wesl");
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(Path::to_path_buf);
-        while let Some(d) = dir {
-            candidates.push(d.join("shaders"));
-            dir = d.parent().map(Path::to_path_buf);
-        }
-    }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders"));
-    candidates.push(PathBuf::from("shaders"));
-    for candidate in candidates {
-        if candidate.join(marker).is_file() {
-            return candidate;
-        }
-    }
-    panic!("shader directory not found (marker common/frame.wesl)");
+    crate::assets::find_asset_dir("shaders", "common/frame.wesl")
+        .expect("shader directory not found (marker common/frame.wesl)")
 }

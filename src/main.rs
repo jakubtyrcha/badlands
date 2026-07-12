@@ -1,8 +1,15 @@
 mod app;
+mod assets;
 mod game;
+mod game_ffi;
 mod gpu;
 mod scene;
 mod ui;
+
+// The C++ game static lib (build.rs) references the noiser C FFI; depending on
+// the crates here guarantees their rlibs are on the final link line.
+use noiser_compiler as _;
+use noiser_vm as _;
 
 use winit::event_loop::EventLoop;
 

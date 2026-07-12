@@ -1,0 +1,15 @@
+[submodule "third_party/noiser"]
+	path = third_party/noiser
+	url = https://github.com/kolore-org/noiser
+[submodule "third_party/catch2"]
+	path = third_party/catch2
+	url = https://github.com/catchorg/Catch2
+[submodule "third_party/entt"]
+	path = third_party/entt
+	url = https://github.com/skypjack/entt
+[submodule "third_party/glm"]
+	path = third_party/glm
+	url = https://github.com/g-truc/glm
+[submodule "third_party/spdlog"]
+	path = third_party/spdlog
+	url = https://github.com/gabime/spdlog

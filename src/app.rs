@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use glam::{Vec2, Vec4};
 use winit::application::ApplicationHandler;
@@ -16,6 +17,7 @@ use winit::window::{Window, WindowId};
 
 use crate::game::top_down_camera::TopDownCamera;
 use crate::game::world::World;
+use crate::game_ffi::Game;
 use crate::gpu::context::GpuContext;
 use crate::gpu::frame::FrameContext;
 use crate::gpu::graph::ProcessingGraph;
@@ -29,6 +31,16 @@ use crate::ui::render::UiRenderer;
 pub struct RunConfig {
     pub max_frames: Option<u32>,
     pub screenshot_path: Option<PathBuf>,
+}
+
+const TICK_DT: f32 = 1.0 / 30.0;
+
+const BRAIN_SCRIPT_MARKER: &str = "brains/warrior.noiser";
+
+// The brain script is optional: the game runs mock-brains-only without it.
+fn find_brain_script() -> Option<PathBuf> {
+    crate::assets::find_asset_dir("scripts", BRAIN_SCRIPT_MARKER)
+        .map(|dir| dir.join(BRAIN_SCRIPT_MARKER))
 }
 
 pub struct App {
@@ -54,11 +66,15 @@ struct GameState {
     ui: UiRenderer,
     world: World,
     camera: TopDownCamera,
+    sim: Game,
+    brain_script_path: Option<PathBuf>,
 
     dragging: bool,
     cursor: Vec2,
     shift_down: bool,
     frame_count: u32,
+    last_tick: Instant,
+    tick_accumulator: f32,
 }
 
 impl GameState {
@@ -68,6 +84,23 @@ impl GameState {
         let world = World::new();
         let scene = SceneRenderer::new(&gpu.device, &gpu.queue, &world, gpu.width, gpu.height);
         let ui = UiRenderer::new(&gpu.device, &gpu.queue, window.scale_factor() as f32);
+
+        let brain_script_path = find_brain_script();
+        let brain_script = brain_script_path.as_ref().and_then(|path| {
+            std::fs::read_to_string(path)
+                .inspect_err(|err| log::error!("failed to read {}: {err}", path.display()))
+                .ok()
+        });
+        match &brain_script_path {
+            Some(path) => log::info!("brain script: {}", path.display()),
+            None => log::warn!("brain script not found; running mock brains only"),
+        }
+        // The Stage-2 duelists, spawned on a lane clear of the buildings;
+        // their stats come from the engine's canonical descriptors.
+        let mut sim = Game::new(brain_script.as_deref());
+        sim.spawn(&crate::game_ffi::mercenary_desc(-8.0, -12.0));
+        sim.spawn(&crate::game_ffi::goblin_desc(8.0, -12.0));
+
         GameState {
             window,
             gpu,
@@ -77,10 +110,45 @@ impl GameState {
             ui,
             world,
             camera: TopDownCamera::new(),
+            sim,
+            brain_script_path,
             dragging: false,
             cursor: Vec2::ZERO,
             shift_down: false,
             frame_count: 0,
+            last_tick: Instant::now(),
+            tick_accumulator: 0.0,
+        }
+    }
+
+    // Fixed-step simulation: one tick per frame on --frames runs (so
+    // screenshots are deterministic), a real-time accumulator otherwise.
+    fn step_simulation(&mut self, config: &RunConfig) {
+        if config.max_frames.is_some() {
+            self.sim.tick(TICK_DT);
+            return;
+        }
+        let now = Instant::now();
+        self.tick_accumulator += now.duration_since(self.last_tick).as_secs_f32().min(0.25);
+        self.last_tick = now;
+        while self.tick_accumulator >= TICK_DT {
+            self.sim.tick(TICK_DT);
+            self.tick_accumulator -= TICK_DT;
+        }
+    }
+
+    fn reload_brain_script(&mut self) {
+        let Some(path) = &self.brain_script_path else {
+            log::warn!("no brain script to reload");
+            return;
+        };
+        match std::fs::read_to_string(path) {
+            Ok(source) => {
+                if self.sim.reload_script(&source) {
+                    log::info!("brain script reloaded");
+                } // failure keeps last-good; the C++ side already logged why
+            }
+            Err(err) => log::error!("failed to read {}: {err}", path.display()),
         }
     }
 
@@ -105,6 +173,9 @@ impl GameState {
     }
 
     fn render(&mut self, config: &RunConfig) -> bool {
+        self.step_simulation(config);
+        let characters = self.sim.state();
+
         let uniforms = self.build_uniforms();
         let mut frame = FrameContext::begin(&self.gpu.device, &uniforms);
 
@@ -116,6 +187,7 @@ impl GameState {
             &mut frame,
             &mut self.pipelines,
             &self.world,
+            &characters,
             camera_pos,
         );
 
@@ -134,6 +206,15 @@ impl GameState {
             &format!("Gold: {}", self.world.gold),
             [0.98, 0.83, 0.36, 1.0],
         );
+        let stats = self.sim.stats();
+        if stats.noiser_bugs > 0 {
+            self.ui.push_text(
+                220.0 * scale,
+                baseline,
+                &format!("noiser bugs: {}", stats.noiser_bugs),
+                [0.95, 0.35, 0.30, 1.0],
+            );
+        }
 
         // Tonemap resolve HDR -> swapchain via the processing graph, then the
         // UI pass. Skipped (not fatal) while the window is occluded.
@@ -378,13 +459,18 @@ impl ApplicationHandler for App {
                 state.shift_down = modifiers.state().shift_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // Shift+S: shader hot reload (port of the SdlViewerApp binding).
-                if event.state == ElementState::Pressed
-                    && !event.repeat
-                    && state.shift_down
-                    && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("s"))
-                {
-                    state.pipelines.reload_all(&state.gpu.device);
+                if event.state == ElementState::Pressed && !event.repeat && state.shift_down {
+                    // Shift+S: shader hot reload (port of the SdlViewerApp
+                    // binding). Shift+N: noiser brain-script hot reload;
+                    // both keep the last-good version on failure.
+                    if matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("s"))
+                    {
+                        state.pipelines.reload_all(&state.gpu.device);
+                    }
+                    if matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("n"))
+                    {
+                        state.reload_brain_script();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {

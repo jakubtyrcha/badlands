@@ -1,0 +1,67 @@
+// Combat brain. One coroutine per entity; the engine resumes it once per
+// tick. Perception is pulled and intents are pushed through @fn host calls
+// (the engine stays authoritative — intents are validated before they land).
+//
+// Host interface (bound in game/src/brain.cpp):
+//   perceive_self(e)   -> (pos_x, pos_z, hp, cooldown_remaining)
+//   perceive_target(e) -> (pos_x, pos_z, hp, has_target 0/1)  [nearest enemy]
+//   attack_range(e)    -> f32
+//   intent_move(e, dx, dz), intent_attack(e)  [at most one intent per tick]
+
+import { Vec2, vec2 } from core::linalg;
+
+// Perception returns are flat f32 tuples rather than vec4: host functions
+// declared `-> vec4` ICE the compiler (docs/noiser-feedback.md, "vecN host-fn
+// returns"). The C++ side still binds glm::vec4 — both map to kTuple/4.
+@fn.perceive_self: fn(e: i32) -> (f32, f32, f32, f32);
+@fn.perceive_target: fn(e: i32) -> (f32, f32, f32, f32);
+@fn.attack_range: fn(e: i32) -> f32;
+@fn.intent_move: fn(e: i32, dx: f32, dz: f32) -> void;
+@fn.intent_attack: fn(e: i32) -> void;
+
+struct GameCtx { entity: i32 }
+
+impl GameCtx {
+    fn self_state(self) -> (f32, f32, f32, f32) = @fn.perceive_self(self.entity);
+    fn target_state(self) -> (f32, f32, f32, f32) = @fn.perceive_target(self.entity);
+    fn range(self) -> f32 = @fn.attack_range(self.entity);
+    fn move_toward(self, dir: Vec2) { @fn.intent_move(self.entity, dir.x, dir.y); }
+    fn attack(self) { @fn.intent_attack(self.entity); }
+}
+
+// Utility-style goal scoring. Stubs for now: attack wins whenever the target
+// is in reach; approach wins while a target exists. Fear, greed and errands
+// slot in here as additional scorers.
+fn score_attack(dist: f32, range: f32) -> f32 {
+    if dist <= range { 1.0 } else { 0.0 }
+}
+
+fn score_approach(has_target: f32) -> f32 {
+    if has_target > 0.5 { 0.5 } else { 0.0 }
+}
+
+pub gen fn brain(entity: i32) -> i32 {
+    let ctx = GameCtx { entity: entity };
+    loop {
+        let (self_x, self_z, self_hp, cooldown) = ctx.self_state();
+        let (target_x, target_z, target_hp, has_target) = ctx.target_state();
+        let sp = vec2(self_x, self_z);
+        let tp = vec2(target_x, target_z);
+        let dist = sp.distance(tp);
+
+        let attack = score_attack(dist, ctx.range()) * score_approach(has_target);
+        let approach = score_approach(has_target);
+
+        if attack > 0.0 {
+            // In reach: swing when the cooldown allows, otherwise hold.
+            if cooldown <= 0.0 {
+                ctx.attack();
+            }
+        } else if approach > 0.0 {
+            ctx.move_toward((tp - sp).normalize());
+        }
+        // No intent emitted means idle.
+        yield 0;
+    }
+}
+0.0

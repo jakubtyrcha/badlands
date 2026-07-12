@@ -8,6 +8,7 @@ use glam::{Mat4, Vec3, Vec4};
 
 use crate::game::ground_texture;
 use crate::game::world::World;
+use crate::game_ffi::GameCharacterState;
 use crate::gpu::frame::FrameContext;
 use crate::gpu::graph::{FullscreenNode, ProcessingGraph};
 use crate::gpu::pipelines::{
@@ -93,6 +94,7 @@ impl SceneRenderer {
         frame: &mut FrameContext,
         pipelines: &mut PipelineGenerator,
         world: &World,
+        characters: &[GameCharacterState],
         camera_world_pos: Vec3,
     ) {
         let ground_pipeline = pipelines.get_render_pipeline(
@@ -153,17 +155,33 @@ impl SceneRenderer {
 
         // Per-object uniforms: model translation rebased to camera-offset
         // space (world_pos - camera_world_pos), as in render_textured_mesh.cpp.
-        let mut building_offsets = Vec::with_capacity(world.buildings.len());
-        for building in &world.buildings {
-            let world_pos = Vec3::new(building.pos.x, 0.0, building.pos.y);
-            let model = Mat4::from_translation(world_pos - camera_world_pos)
-                * Mat4::from_scale(building.size);
-            let uniforms = ObjectUniforms {
-                model_matrix: model,
-                color: building.color.extend(1.0),
+        // Characters are just more tinted cubes (the cube sits on the ground,
+        // so y = 0 like the buildings).
+        let mut object_offsets = Vec::with_capacity(world.buildings.len() + characters.len());
+        {
+            let mut push_object = |pos: Vec3, size: Vec3, color: Vec4| {
+                let uniforms = ObjectUniforms {
+                    model_matrix: Mat4::from_translation(pos - camera_world_pos)
+                        * Mat4::from_scale(size),
+                    color,
+                };
+                object_offsets
+                    .push(frame.allocate_dynamic_uniform(queue, bytemuck::bytes_of(&uniforms)));
             };
-            building_offsets
-                .push(frame.allocate_dynamic_uniform(queue, bytemuck::bytes_of(&uniforms)));
+            for building in &world.buildings {
+                push_object(
+                    Vec3::new(building.pos.x, 0.0, building.pos.y),
+                    building.size,
+                    building.color.extend(1.0),
+                );
+            }
+            for character in characters {
+                push_object(
+                    Vec3::new(character.pos_x, 0.0, character.pos_z),
+                    Vec3::new(character.size_x, character.size_y, character.size_z),
+                    Vec4::new(character.color_r, character.color_g, character.color_b, 1.0),
+                );
+            }
         }
 
         let mut pass = frame.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -204,7 +222,7 @@ impl SceneRenderer {
         pass.set_pipeline(&building_pipeline.pipeline);
         pass.set_bind_group(0, &building_frame_group, &[]);
         pass.set_vertex_buffer(0, self.cube_vertex_buffer.slice(..));
-        for offset in &building_offsets {
+        for offset in &object_offsets {
             pass.set_bind_group(1, &building_object_group, &[*offset]);
             pass.draw(0..self.cube_vertex_count, 0..1);
         }

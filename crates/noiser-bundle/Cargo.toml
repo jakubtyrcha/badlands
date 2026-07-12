@@ -1,0 +1,13 @@
+[package]
+name = "noiser-bundle"
+version = "0.1.0"
+edition = "2024"
+
+# Aggregates the noiser FFI surface into ONE Rust staticlib so the C++ test
+# binary links libstd exactly once (two Rust staticlibs collide on std symbols).
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+noiser-compiler = { path = "../../third_party/noiser/noiser-compiler" }
+noiser-vm = { path = "../../third_party/noiser/noiser-vm" }
