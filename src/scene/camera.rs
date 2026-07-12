@@ -38,8 +38,11 @@ impl Camera {
     }
 
     // Port of Camera::GetProj(): GL-style ([-1,1] NDC Z) perspective remapped
-    // for reversed-Z (z' = w - z; near -> 1, far -> 0). frame.wesl's
-    // reconstructLinearZ assumes exactly this matrix.
+    // with z' = w - z. Far maps to depth 0; the configured near plane maps to
+    // depth 2, so the effective near clip (depth 1) sits at
+    // 2*near*far/(far+near) ~= 2*near_plane. This is the sampo engine's own
+    // convention — frame.wesl's reconstructLinearZ encodes exactly this
+    // matrix, so don't "fix" it here without changing the shaders.
     pub fn proj(&self) -> Mat4 {
         let proj = glam::camera::rh::proj::opengl::perspective(
             self.fov.to_radians(),

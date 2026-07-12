@@ -66,10 +66,15 @@ pub struct CompiledPipeline {
     pub bind_group_layouts: Vec<wgpu::BindGroupLayout>,
 }
 
+struct CacheEntry {
+    decl: RenderPipelineDeclaration,
+    pipeline: Arc<CompiledPipeline>,
+}
+
 pub struct PipelineGenerator {
     shader_dir: PathBuf,
     wesl: Wesl<StandardResolver>,
-    cache: HashMap<String, Arc<CompiledPipeline>>,
+    cache: HashMap<String, CacheEntry>,
 }
 
 impl PipelineGenerator {
@@ -83,14 +88,25 @@ impl PipelineGenerator {
         }
     }
 
-    // Port of GpuPipelineGenerator::ReloadAll(): clears the cache so the next
-    // GetPipeline recompiles from disk.
-    pub fn reload_all(&mut self) {
+    // Port of GpuPipelineGenerator::ReloadAll(): recompiles every cached
+    // pipeline from disk, keeping the last-good pipeline (and logging) when a
+    // shader fails to compile — a broken shader must not kill the session.
+    pub fn reload_all(&mut self, device: &wgpu::Device) {
         log::info!("reloading shaders");
-        self.cache.clear();
+        for entry in self.cache.values_mut() {
+            match Self::build_pipeline_impl(&self.wesl, &self.shader_dir, device, &entry.decl) {
+                Ok(pipeline) => entry.pipeline = Arc::new(pipeline),
+                Err(err) => log::error!(
+                    "shader reload failed, keeping previous pipeline for '{}':\n{err}",
+                    entry.decl.shader_path
+                ),
+            }
+        }
     }
 
     // Port of the sync GpuPipelineGenerator::GetPipeline(declaration, targets).
+    // The first compile of a declaration is fatal on error (broken shader at
+    // startup); reload_all handles subsequent errors gracefully.
     pub fn get_render_pipeline(
         &mut self,
         device: &wgpu::Device,
@@ -98,43 +114,64 @@ impl PipelineGenerator {
     ) -> Arc<CompiledPipeline> {
         let key = format!("{decl:?}");
         if let Some(cached) = self.cache.get(&key) {
-            return cached.clone();
+            return cached.pipeline.clone();
         }
-        let compiled = Arc::new(self.build_pipeline(device, decl));
-        self.cache.insert(key, compiled.clone());
+        let compiled = Arc::new(
+            Self::build_pipeline_impl(&self.wesl, &self.shader_dir, device, decl)
+                .unwrap_or_else(|err| panic!("{err}")),
+        );
+        self.cache.insert(
+            key,
+            CacheEntry {
+                decl: decl.clone(),
+                pipeline: compiled.clone(),
+            },
+        );
         compiled
     }
 
     // Port of GpuPipelineGenerator::CompileWesl (via wesl-ffi in C++).
-    fn compile_wesl(&self, shader_path: &str) -> String {
+    fn compile_wesl(
+        wesl: &Wesl<StandardResolver>,
+        shader_dir: &Path,
+        shader_path: &str,
+    ) -> Result<String, String> {
         let module = ModulePath {
             origin: PathOrigin::Absolute,
             components: shader_path.split('/').map(str::to_string).collect(),
         };
-        match self.wesl.compile(&module) {
-            Ok(result) => result.to_string(),
-            Err(err) => panic!(
+        match wesl.compile(&module) {
+            Ok(result) => Ok(result.to_string()),
+            Err(err) => Err(format!(
                 "WESL compilation of '{shader_path}' (in {}) failed:\n{err}",
-                self.shader_dir.display()
-            ),
+                shader_dir.display()
+            )),
         }
     }
 
-    fn build_pipeline(
-        &self,
+    fn build_pipeline_impl(
+        wesl: &Wesl<StandardResolver>,
+        shader_dir: &Path,
         device: &wgpu::Device,
         decl: &RenderPipelineDeclaration,
-    ) -> CompiledPipeline {
-        let wgsl = self.compile_wesl(&decl.shader_path);
+    ) -> Result<CompiledPipeline, String> {
+        let wgsl = Self::compile_wesl(wesl, shader_dir, &decl.shader_path)?;
 
-        let naga_module = match naga::front::wgsl::parse_str(&wgsl) {
-            Ok(module) => module,
-            Err(err) => panic!(
+        let naga_module = naga::front::wgsl::parse_str(&wgsl).map_err(|err| {
+            format!(
                 "naga failed to parse WGSL for '{}':\n{}",
                 decl.shader_path,
                 err.emit_to_string(&wgsl)
-            ),
-        };
+            )
+        })?;
+        for entry_point in ["vs_main", "fs_main"] {
+            if !naga_module.entry_points.iter().any(|ep| ep.name == entry_point) {
+                return Err(format!(
+                    "shader '{}' is missing entry point '{entry_point}'",
+                    decl.shader_path
+                ));
+            }
+        }
         let reflected = reflect_bind_group_layouts(&naga_module);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -211,10 +248,10 @@ impl PipelineGenerator {
             cache: None,
         });
 
-        CompiledPipeline {
+        Ok(CompiledPipeline {
             pipeline,
             bind_group_layouts,
-        }
+        })
     }
 }
 

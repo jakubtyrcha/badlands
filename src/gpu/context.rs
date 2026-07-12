@@ -71,11 +71,11 @@ impl GpuContext {
         {
             return wgpu::TextureFormat::Rgba16Float;
         }
-        if caps
-            .formats
-            .contains(&wgpu::TextureFormat::Bgra8UnormSrgb)
-        {
-            return wgpu::TextureFormat::Bgra8UnormSrgb;
+        // Non-sRGB on purpose: with output_is_linear == 0 the tonemap and UI
+        // shaders sRGB-encode manually (tonemapping.wesl), so an -Srgb target
+        // would encode twice. Matches the C++ BGRA8Unorm default.
+        if caps.formats.contains(&wgpu::TextureFormat::Bgra8Unorm) {
+            return wgpu::TextureFormat::Bgra8Unorm;
         }
         caps.formats[0]
     }
@@ -107,8 +107,12 @@ impl GpuContext {
         );
     }
 
-    // Port of GpuContext::AcquireSwapchainTexture().
-    pub fn acquire_swapchain_texture(&self) -> Option<(wgpu::SurfaceTexture, wgpu::TextureView)> {
+    // Port of GpuContext::AcquireSwapchainTexture(). Outdated/Lost surfaces
+    // are reconfigured so the next acquire can recover; Occluded/Timeout just
+    // skip the present.
+    pub fn acquire_swapchain_texture(
+        &mut self,
+    ) -> Option<(wgpu::SurfaceTexture, wgpu::TextureView)> {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => {
@@ -116,6 +120,12 @@ impl GpuContext {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
                 Some((tex, view))
+            }
+            status @ (wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Lost) => {
+                log::warn!("swapchain {status:?}; reconfiguring surface");
+                self.configure_surface(self.width, self.height);
+                None
             }
             status => {
                 log::warn!("failed to acquire swapchain texture: {status:?}");

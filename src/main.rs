@@ -28,6 +28,10 @@ fn parse_args() -> RunConfig {
             other => panic!("unknown argument: {other}"),
         }
     }
+    if config.screenshot_path.is_some() && config.max_frames.is_none() {
+        log::warn!("--screenshot without --frames: defaulting to --frames 10");
+        config.max_frames = Some(10);
+    }
     config
 }
 

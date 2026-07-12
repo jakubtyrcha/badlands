@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const ATLAS_SIZE: u32 = 512;
+const ATLAS_SIZE: u32 = 1024;
 const PADDING: u32 = 1;
 
 #[derive(Clone, Copy)]

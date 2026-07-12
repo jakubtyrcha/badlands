@@ -138,6 +138,11 @@ impl GameState {
         // Tonemap resolve HDR -> swapchain via the processing graph, then the
         // UI pass. Skipped (not fatal) while the window is occluded.
         let surface = self.gpu.acquire_swapchain_texture();
+        if surface.is_none() {
+            // No present means no vsync pacing; don't spin the loop flat-out
+            // while the window is occluded.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         if let Some((_, surface_view)) = &surface {
             self.scene.add_tonemap_node(
                 &mut self.graph,
@@ -182,6 +187,15 @@ impl GameState {
 
     fn prepare_screenshot(&mut self, frame: &mut FrameContext) -> PendingScreenshot {
         let (width, height) = (self.gpu.width, self.gpu.height);
+        // The shaders' sRGB-encode decision follows output_is_linear (set from
+        // the surface format), so the screenshot target must match: shader
+        // output is linear -> sRGB view encodes; shader output is already
+        // sRGB-encoded -> plain Unorm view stores it as-is.
+        let format = if self.gpu.output_is_linear() {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
         let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("screenshot target"),
             size: wgpu::Extent3d {
@@ -192,7 +206,7 @@ impl GameState {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -200,7 +214,7 @@ impl GameState {
 
         // Same composition as the swapchain: tonemap + UI.
         self.scene
-            .add_tonemap_node(&mut self.graph, view.clone(), wgpu::TextureFormat::Rgba8UnormSrgb);
+            .add_tonemap_node(&mut self.graph, view.clone(), format);
         self.graph
             .execute(&self.gpu.device, frame, &mut self.pipelines);
         self.ui.draw(
@@ -208,7 +222,7 @@ impl GameState {
             frame,
             &mut self.pipelines,
             &view,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
+            format,
         );
 
         let padded_bytes_per_row = (width * 4).div_ceil(256) * 256;
@@ -346,6 +360,12 @@ impl ApplicationHandler for App {
                     .scene
                     .resize(&state.gpu.device, state.gpu.width, state.gpu.height);
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // Rebake the glyph atlas at the new DPI; layout and pen
+                // positions already track the live scale factor.
+                state.ui =
+                    UiRenderer::new(&state.gpu.device, &state.gpu.queue, scale_factor as f32);
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 state.handle_pointer_moved(Vec2::new(position.x as f32, position.y as f32));
             }
@@ -364,7 +384,7 @@ impl ApplicationHandler for App {
                     && state.shift_down
                     && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("s"))
                 {
-                    state.pipelines.reload_all();
+                    state.pipelines.reload_all(&state.gpu.device);
                 }
             }
             WindowEvent::RedrawRequested => {

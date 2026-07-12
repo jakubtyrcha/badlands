@@ -26,7 +26,7 @@ pub fn reflect_bind_group_layouts(module: &naga::Module) -> ReflectedLayouts {
             binding.binding,
             wgpu::BindGroupLayoutEntry {
                 binding: binding.binding,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                visibility: visibility_for(&ty),
                 ty,
                 count: None,
             },
@@ -44,6 +44,24 @@ pub fn reflect_bind_group_layouts(module: &naga::Module) -> ReflectedLayouts {
         );
     }
     ReflectedLayouts { groups: out }
+}
+
+// Writable storage bindings are invalid in the vertex stage under WebGPU
+// validation, so restrict them to fragment. (The C++ reflection derived
+// visibility from the stages that actually reference each binding.)
+fn visibility_for(ty: &wgpu::BindingType) -> wgpu::ShaderStages {
+    match ty {
+        wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            ..
+        } => wgpu::ShaderStages::FRAGMENT,
+        wgpu::BindingType::StorageTexture { access, .. }
+            if *access != wgpu::StorageTextureAccess::ReadOnly =>
+        {
+            wgpu::ShaderStages::FRAGMENT
+        }
+        _ => wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+    }
 }
 
 fn binding_type_for(
