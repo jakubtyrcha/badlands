@@ -147,3 +147,57 @@ pub fn build_unit_cube() -> MeshData {
     }
     mesh
 }
+
+// Unit capsule for characters: XZ radius 0.5, base at y=0, top at y=2 (two
+// hemispherical caps of radius 0.5 around a cylinder of height 1). The canonical
+// height is 2 so scaling by (size_x, size_y*0.5, size_z) yields radius
+// 0.5*size_x and total height size_y (spherical caps when size_y == 2*size_x).
+pub fn build_unit_capsule() -> MeshData {
+    const SEG: usize = 20; // segments around
+    const CAP: usize = 5; // latitude rings per hemisphere
+    let r = 0.5f32;
+    let bottom_center = 0.5f32;
+    let top_center = 1.5f32;
+
+    // Ring definitions: (y, xz_radius, normal_y). The bottom-hemisphere equator
+    // and the top-hemisphere equator (both normal_y = 0) bound the cylinder.
+    let mut rings: Vec<(f32, f32, f32)> = Vec::new();
+    for i in 0..=CAP {
+        let phi = -std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_2 * (i as f32 / CAP as f32);
+        rings.push((bottom_center + r * phi.sin(), r * phi.cos(), phi.sin()));
+    }
+    for i in 0..=CAP {
+        let phi = std::f32::consts::FRAC_PI_2 * (i as f32 / CAP as f32);
+        rings.push((top_center + r * phi.sin(), r * phi.cos(), phi.sin()));
+    }
+
+    let mut mesh = MeshData {
+        vertices: Vec::new(),
+        vertex_count: 0,
+    };
+    let vert = |y: f32, rad: f32, ny: f32, j: usize| -> (Vec3, [f32; 2], Vec3, Vec3) {
+        let theta = std::f32::consts::TAU * (j as f32 / SEG as f32);
+        let (st, ct) = theta.sin_cos();
+        let nxz = (1.0 - ny * ny).max(0.0).sqrt();
+        (
+            Vec3::new(rad * ct, y, rad * st),
+            [j as f32 / SEG as f32, y * 0.5],
+            Vec3::new(nxz * ct, ny, nxz * st),
+            Vec3::new(-st, 0.0, ct),
+        )
+    };
+    for i in 0..rings.len() - 1 {
+        let (y0, r0, ny0) = rings[i];
+        let (y1, r1, ny1) = rings[i + 1];
+        for j in 0..SEG {
+            let a = vert(y0, r0, ny0, j);
+            let b = vert(y1, r1, ny1, j);
+            let c = vert(y1, r1, ny1, j + 1);
+            let d = vert(y0, r0, ny0, j + 1);
+            for v in [a, b, c, a, c, d] {
+                mesh.push_vertex(v.0, v.1, v.2, v.3);
+            }
+        }
+    }
+    mesh
+}

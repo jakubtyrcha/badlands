@@ -53,7 +53,7 @@ GameCharacterDesc hero_desc(int32_t hero_class, float x, float z) {
     d.attack_damage = 3.0f;
     d.attack_cooldown = 1.0f;
     d.size_x = 0.9f;
-    d.size_y = 1.7f;
+    d.size_y = 1.8f;  // hero capsule height in meters
     d.size_z = 0.9f;
     d.color_r = c.x;
     d.color_g = c.y;

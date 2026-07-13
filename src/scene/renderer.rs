@@ -20,6 +20,9 @@ use crate::scene::mesh;
 
 pub const ACCUMULATION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+// World size (meters) of one ground-texture tile.
+const GROUND_TILE_METERS: f32 = 5.0;
+
 // Overlay depth: still tested against the reversed-Z scene depth (buildings
 // occlude the grid) but writes disabled so it never blocks later geometry.
 const DEPTH_OVERLAY: DepthConfig = DepthConfig {
@@ -57,6 +60,8 @@ pub struct SceneRenderer {
     ground_vertex_count: u32,
     cube_vertex_buffer: wgpu::Buffer,
     cube_vertex_count: u32,
+    capsule_vertex_buffer: wgpu::Buffer,
+    capsule_vertex_count: u32,
     ground_texture_view: wgpu::TextureView,
     ground_sampler: wgpu::Sampler,
 }
@@ -71,8 +76,10 @@ impl SceneRenderer {
     ) -> SceneRenderer {
         let (hdr_view, depth_view) = create_targets(device, width, height);
 
-        let ground = mesh::build_ground_quad(ground_half_extent, ground_half_extent / 4.0);
+        let uv_tiles = (2.0 * ground_half_extent) / GROUND_TILE_METERS;
+        let ground = mesh::build_ground_quad(ground_half_extent, uv_tiles);
         let cube = mesh::build_unit_cube();
+        let capsule = mesh::build_unit_capsule();
         let ground_texture_view = ground_texture::create(device, queue);
 
         let ground_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -94,6 +101,8 @@ impl SceneRenderer {
             ground_vertex_buffer: ground.upload(device, "ground vertices"),
             cube_vertex_count: cube.vertex_count,
             cube_vertex_buffer: cube.upload(device, "cube vertices"),
+            capsule_vertex_count: capsule.vertex_count,
+            capsule_vertex_buffer: capsule.upload(device, "capsule vertices"),
             ground_texture_view,
             ground_sampler,
         }
@@ -181,42 +190,42 @@ impl SceneRenderer {
 
         // Per-object uniforms: model translation rebased to camera-offset
         // space (world_pos - camera_world_pos), as in render_textured_mesh.cpp.
-        // Characters are just more tinted cubes (the cube sits on the ground,
-        // so y = 0 like the buildings).
-        let mut object_offsets = Vec::with_capacity(buildings.len() + characters.len());
+        // Buildings + the ghost draw the cube mesh; characters draw the capsule
+        // mesh (canonical height 2, so its y-scale is size_y * 0.5).
+        let mut cube_offsets = Vec::with_capacity(buildings.len() + 1);
+        let mut capsule_offsets = Vec::with_capacity(characters.len());
         {
-            let mut push_object = |pos: Vec3, size: Vec3, yaw: f32, color: Vec4| {
+            let mut alloc = |pos: Vec3, size: Vec3, yaw: f32, color: Vec4| -> u32 {
                 let uniforms = ObjectUniforms {
                     model_matrix: Mat4::from_translation(pos - camera_world_pos)
                         * Mat4::from_rotation_y(yaw)
                         * Mat4::from_scale(size),
                     color,
                 };
-                object_offsets
-                    .push(frame.allocate_dynamic_uniform(queue, bytemuck::bytes_of(&uniforms)));
+                frame.allocate_dynamic_uniform(queue, bytemuck::bytes_of(&uniforms))
             };
             for building in buildings {
                 let info = catalog::info(BuildingKind::from_i32(building.kind));
                 // The drawn box must match the grid footprint (diagonal snaps to
                 // a lattice diamond, so its box is not (width, depth) at rot*45).
                 let bbox = render_box(building.kind, building.rotation_index);
-                push_object(
+                cube_offsets.push(alloc(
                     Vec3::new(building.center_x, 0.0, building.center_z),
                     Vec3::new(bbox.size_x, info.height, bbox.size_z),
                     bbox.yaw_radians,
                     info.color.extend(1.0),
-                );
+                ));
             }
             for character in characters {
-                push_object(
+                capsule_offsets.push(alloc(
                     Vec3::new(character.pos_x, 0.0, character.pos_z),
-                    Vec3::new(character.size_x, character.size_y, character.size_z),
+                    Vec3::new(character.size_x, character.size_y * 0.5, character.size_z),
                     0.0,
                     Vec4::new(character.color_r, character.color_g, character.color_b, 1.0),
-                );
+                ));
             }
             if let Some(ghost) = ghost {
-                push_object(ghost.pos, ghost.size, ghost.yaw, ghost.color);
+                cube_offsets.push(alloc(ghost.pos, ghost.size, ghost.yaw, ghost.color));
             }
         }
 
@@ -287,10 +296,17 @@ impl SceneRenderer {
 
         pass.set_pipeline(&building_pipeline.pipeline);
         pass.set_bind_group(0, &building_frame_group, &[]);
+        // Buildings + ghost: cube mesh.
         pass.set_vertex_buffer(0, self.cube_vertex_buffer.slice(..));
-        for offset in &object_offsets {
+        for offset in &cube_offsets {
             pass.set_bind_group(1, &building_object_group, &[*offset]);
             pass.draw(0..self.cube_vertex_count, 0..1);
+        }
+        // Characters: capsule mesh.
+        pass.set_vertex_buffer(0, self.capsule_vertex_buffer.slice(..));
+        for offset in &capsule_offsets {
+            pass.set_bind_group(1, &building_object_group, &[*offset]);
+            pass.draw(0..self.capsule_vertex_count, 0..1);
         }
 
         if let Some((pipeline, frame_group, vertex_buffer, vertex_count)) = &overlay {
