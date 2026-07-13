@@ -15,8 +15,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::game::angled_camera::AngledCamera;
 use crate::game::catalog;
-use crate::game::top_down_camera::TopDownCamera;
 use crate::game_ffi::{
     BuildingKind, GRID_HALF_EXTENT_TILES, Game, GameBuildingState, GameGridTriangle,
     GamePlacementDesc, render_box,
@@ -80,7 +80,7 @@ struct GameState {
     graph: ProcessingGraph,
     scene: SceneRenderer,
     ui: UiRenderer,
-    camera: TopDownCamera,
+    camera: AngledCamera,
     sim: Game,
     brain_script_path: Option<PathBuf>,
 
@@ -125,7 +125,7 @@ impl GameState {
             graph: ProcessingGraph::default(),
             scene,
             ui,
-            camera: TopDownCamera::new(),
+            camera: AngledCamera::new(),
             sim,
             brain_script_path,
             placement: None,
@@ -435,8 +435,8 @@ impl GameState {
 
     fn handle_pointer_moved(&mut self, position: Vec2) {
         if self.dragging {
-            let delta = position - self.cursor;
-            self.camera.pan(delta, self.gpu.height as f32, PAN_EXTENT);
+            let screen = Vec2::new(self.gpu.width as f32, self.gpu.height as f32);
+            self.camera.pan(self.cursor, position, screen, PAN_EXTENT);
         }
         self.cursor = position;
     }
