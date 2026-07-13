@@ -573,13 +573,11 @@ impl GameState {
                     } else {
                         let ground = self.camera.screen_to_ground(self.cursor, screen);
                         let buildings = self.sim.buildings();
-                        match building_at_world(&buildings, ground) {
-                            Some(id) => self.selected_building = Some(id),
-                            None => {
-                                self.selected_building = None;
-                                self.dragging = true;
-                            }
-                        }
+                        // A building under the cursor selects it; empty ground
+                        // clears the selection. Either way the press can start a
+                        // pan (a click with no motion just selects/clears).
+                        self.selected_building = building_at_world(&buildings, ground);
+                        self.dragging = true;
                     }
                 }
             }

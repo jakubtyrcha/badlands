@@ -99,7 +99,7 @@ fn expand_footprint(footprint: &[Vec2], radius: f32) -> Option<(Vec<Vec2>, Conve
 
     let expanded = flattened
         .into_iter()
-        .max_by(|a, b| abs_area(a).partial_cmp(&abs_area(b)).unwrap())?;
+        .max_by(|a, b| abs_area(a).partial_cmp(&abs_area(b)).unwrap_or(std::cmp::Ordering::Equal))?;
     if expanded.len() < 3 {
         return None;
     }
@@ -259,21 +259,30 @@ impl Graph {
         }
     }
 
-    /// Project a point out of any expanded polygon it lies inside, skipping the
-    /// exempt building. Returns the (possibly recovered) point.
+    /// Project a point out of every expanded polygon it lies inside, skipping
+    /// the exempt building. Overlapping expanded footprints can nest the point,
+    /// so this repeats until the point is clear of all of them (bounded).
     fn recover(&self, p: Vec2, exempt: Option<u32>) -> Vec2 {
-        for (bid, poly) in &self.polys {
-            if exempt == Some(*bid) {
-                continue;
+        let mut q = p;
+        for _ in 0..8 {
+            let mut moved = false;
+            for (bid, poly) in &self.polys {
+                if exempt == Some(*bid) {
+                    continue;
+                }
+                let proj = poly.project_local_point(q, false);
+                if proj.is_inside {
+                    // Push a hair past the boundary so LoS from here is clean.
+                    let dir = (proj.point - q).normalize_or_zero();
+                    q = proj.point + dir * NODE_NUDGE;
+                    moved = true;
+                }
             }
-            let proj = poly.project_local_point(p, false);
-            if proj.is_inside {
-                // Push a hair past the boundary so LoS from here is clean.
-                let dir = (proj.point - p).normalize_or_zero();
-                return proj.point + dir * NODE_NUDGE;
+            if !moved {
+                break;
             }
         }
-        p
+        q
     }
 
     /// Shortest clearance-respecting path from `start` to `goal`. Returns the
@@ -341,7 +350,7 @@ impl Graph {
 
         let result = astar(
             &s_idx,
-            |&i| adj[i].iter().copied().collect::<Vec<_>>(),
+            |&i| adj[i].iter().copied(),
             |&i| cost(pos[i].distance(g)),
             |&i| i == g_idx,
         );
@@ -420,7 +429,11 @@ pub unsafe extern "C" fn nav_add_obstacle(
     let n = n_verts as usize;
     let flat = unsafe { std::slice::from_raw_parts(poly_xz, n * 2) };
     let footprint: Vec<Vec2> = (0..n).map(|i| Vec2::new(flat[i * 2], flat[i * 2 + 1])).collect();
-    nav.add_obstacle(building_id, footprint);
+    // Contain any geometry-library panic here; a panic across the extern "C"
+    // boundary aborts the process, so a bad footprint would crash the game.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        nav.add_obstacle(building_id, footprint);
+    }));
 }
 
 /// # Safety
@@ -452,7 +465,11 @@ pub unsafe extern "C" fn nav_find_path(
     }
     let nav = unsafe { &mut *(ctx as *mut NavContext) };
     let exempt = (exempt_building != u32::MAX).then_some(exempt_building);
-    let waypoints = nav.find_path(Vec2::new(sx, sz), Vec2::new(gx, gz), radius, exempt);
+    // Contain any geometry-library panic; on failure report NoPath (0 waypoints).
+    let waypoints = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        nav.find_path(Vec2::new(sx, sz), Vec2::new(gx, gz), radius, exempt)
+    }))
+    .unwrap_or_default();
     let count = waypoints.len();
     if !out_xz.is_null() && cap > 0 {
         let out = unsafe { std::slice::from_raw_parts_mut(out_xz, (cap as usize) * 2) };

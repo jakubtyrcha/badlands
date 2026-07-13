@@ -281,6 +281,9 @@ void separate_units(BadlandsGame& game) {
 
     bool has_pf = game.pathfinder.find_path != nullptr;
     for (entt::entity e : view) {
+        if (reg.all_of<MeleeLock>(e)) {
+            continue;  // locked units are immovable colliders (never pushed, reprojected, or clamped)
+        }
         Position& pos = view.get<Position>(e);
         auto pit = push.find(e);
         if (pit != push.end()) {

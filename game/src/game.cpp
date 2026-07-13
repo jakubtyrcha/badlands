@@ -206,7 +206,9 @@ void game_tick(BadlandsGame* game, float dt) {
     // move Intent (intent_move). MoveTarget-driven units (mock brains, town
     // heroes) are moved by the pipeline below instead. Phase 6 unifies these
     // once warrior.noiser switches to intent_move_to.
-    for (auto [e, intent, pos, stats] : registry.view<const Intent, Position, const Stats>().each()) {
+    for (auto [e, intent, pos, stats] :
+         registry.view<const Intent, Position, const Stats>(entt::exclude<MeleeLock, InsideBuilding>)
+             .each()) {
         if (intent.kind != 1) {
             continue;
         }
