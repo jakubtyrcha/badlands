@@ -9,6 +9,7 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -101,5 +102,9 @@ float poppable_score(const PlacementState& st, glm::vec2 candidate);
 // Spawns any owed poppables near `anchor` (sewers before houses), stopping a
 // kind early when the neighbourhood has no valid spot (retried next placement).
 void process_poppables(BadlandsGame& game, glm::vec2 anchor);
+
+// The 4 world-XZ corners of a building's drawn footprint box (the oriented box
+// game_render_box describes), fed to the nav pathfinder as an obstacle polygon.
+std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b);
 
 }  // namespace badlands

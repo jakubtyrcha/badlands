@@ -171,6 +171,31 @@ typedef struct GameWorldState {
 } GameWorldState;
 void game_world(const BadlandsGame* game, GameWorldState* out);
 
+// ---------------------------------------------------------------------------
+// Pathfinding provider (v0.3)
+//
+// The engine owns movement and unit/ECS state; it delegates path *geometry* to
+// a pluggable provider (the Rust nav service — a 2D visibility graph). Obstacles
+// mutate one building at a time (add_obstacle/remove_obstacle) so the provider
+// maintains its graph incrementally rather than rebuilding it. find_path writes
+// up to `cap` XZ waypoint pairs and returns the total waypoint count (a value
+// > cap means truncated — the game_state snapshot idiom); 0 means no path.
+// `exempt_building` (UINT32_MAX for none) is a building whose clearance is
+// ignored, so a unit can path to the very building it is entering. With no
+// provider registered the engine falls back to a straight-line path.
+// ---------------------------------------------------------------------------
+typedef struct GamePathfinder {
+    void* ctx;
+    void (*add_obstacle)(void* ctx, uint32_t building_id, const float* poly_xz, int32_t n_verts);
+    void (*remove_obstacle)(void* ctx, uint32_t building_id);
+    int32_t (*find_path)(void* ctx, float sx, float sz, float gx, float gz, float radius,
+                         uint32_t exempt_building, float* out_xz, int32_t cap);
+} GamePathfinder;
+
+// Registers the provider (copied by value) and back-fills every alive building
+// via add_obstacle so the provider's obstacle set matches. Pass NULL to clear.
+void game_set_pathfinder(BadlandsGame* game, const GamePathfinder* pathfinder);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

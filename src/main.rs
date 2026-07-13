@@ -3,6 +3,7 @@ mod assets;
 mod game;
 mod game_ffi;
 mod gpu;
+mod nav;
 mod scene;
 mod ui;
 

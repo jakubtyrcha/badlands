@@ -352,6 +352,20 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor) {
     }
 }
 
+std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b) {
+    // Reuse the render-box geometry so the obstacle polygon matches what the
+    // renderer draws (axis-aligned for rot 0/90, a 45 deg diamond otherwise).
+    GameRenderBox rb = game_render_box(b.kind, b.rot);
+    float hx = rb.size_x * 0.5f;
+    float hz = rb.size_z * 0.5f;
+    float c = std::cos(rb.yaw_radians);
+    float s = std::sin(rb.yaw_radians);
+    auto corner = [&](float lx, float lz) {
+        return b.center + glm::vec2(c * lx - s * lz, s * lx + c * lz);
+    };
+    return {corner(-hx, -hz), corner(hx, -hz), corner(hx, hz), corner(-hx, hz)};
+}
+
 uint32_t place_building(BadlandsGame& game, const GamePlacementDesc& desc, bool player) {
     PlacementState& st = game.placement;
     int rot = ((desc.rotation_index % 4) + 4) % 4;

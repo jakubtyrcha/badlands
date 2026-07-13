@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "noiser-docs": {
+      "command": "./third_party/noiser/target/release/noiser-docs-mcp",
+      "env": {
+        "RUST_LOG": "noiser_docs_mcp=info"
+      }
+    }
+  }
+}

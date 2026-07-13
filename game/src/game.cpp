@@ -295,4 +295,26 @@ bool game_reload_script(BadlandsGame* game, const char* source) {
     return true;
 }
 
+void game_set_pathfinder(BadlandsGame* game, const GamePathfinder* pathfinder) {
+    if (game == nullptr) {
+        return;
+    }
+    game->pathfinder = pathfinder ? *pathfinder : GamePathfinder{};
+    if (game->pathfinder.add_obstacle == nullptr) {
+        return;
+    }
+    // Back-fill the provider with every building already placed (the prebuilt
+    // castle, and any placed before registration) so its obstacle set matches.
+    const auto& buildings = game->placement.buildings;
+    for (uint32_t id = 0; id < buildings.size(); ++id) {
+        std::array<glm::vec2, 4> corners = badlands::building_footprint_corners(buildings[id]);
+        float flat[8];
+        for (int i = 0; i < 4; ++i) {
+            flat[i * 2] = corners[i].x;
+            flat[i * 2 + 1] = corners[i].y;
+        }
+        game->pathfinder.add_obstacle(game->pathfinder.ctx, id, flat, 4);
+    }
+}
+
 }  // extern "C"

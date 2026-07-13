@@ -28,6 +28,10 @@ struct BadlandsGame {
     badlands::PlacementState placement;
     uint32_t gold = 1000;
 
+    // Pluggable path-geometry provider (Rust nav service); zero-initialized
+    // means "no provider" -> straight-line fallback in the movement pipeline.
+    GamePathfinder pathfinder{};
+
     uint64_t ticks = 0;
     uint64_t script_intents = 0;
     uint32_t noiser_bugs = 0;

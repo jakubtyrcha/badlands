@@ -1,7 +1,8 @@
 // Safe wrapper over the C++ game simulation (game/include/badlands_game.h).
 
+use crate::nav;
 use std::ffi::CString;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -161,6 +162,17 @@ pub struct GameWorldState {
     pub urban_quarters: u32,
 }
 
+// Mirror of GamePathfinder: a pluggable path-geometry provider. We construct
+// one wrapping a Rust NavContext and register it via game_set_pathfinder.
+#[repr(C)]
+pub struct GamePathfinder {
+    pub ctx: *mut c_void,
+    pub add_obstacle: unsafe extern "C" fn(*mut c_void, u32, *const f32, i32),
+    pub remove_obstacle: unsafe extern "C" fn(*mut c_void, u32),
+    pub find_path:
+        unsafe extern "C" fn(*mut c_void, f32, f32, f32, f32, f32, u32, *mut f32, i32) -> i32,
+}
+
 #[repr(C)]
 struct BadlandsGame {
     _opaque: [u8; 0],
@@ -189,6 +201,7 @@ unsafe extern "C" {
     fn game_world(game: *const BadlandsGame, out: *mut GameWorldState);
     fn game_building_def(kind: i32) -> GameBuildingDef;
     fn game_render_box(kind: i32, rotation_index: i32) -> GameRenderBox;
+    fn game_set_pathfinder(game: *mut BadlandsGame, pathfinder: *const GamePathfinder);
 }
 
 // Static footprint size + poppable flag for a kind (no game handle needed).
@@ -213,6 +226,9 @@ pub fn goblin_desc(pos_x: f32, pos_z: f32) -> GameCharacterDesc {
 
 pub struct Game {
     handle: *mut BadlandsGame,
+    // Rust path-geometry provider handed to the sim via game_set_pathfinder.
+    // Owned here (raw box) so it outlives the sim; freed in Drop after the sim.
+    nav: *mut nav::NavContext,
 }
 
 impl Game {
@@ -228,9 +244,20 @@ impl Game {
                 .ok()
         });
         let ptr = source.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
-        Game {
-            handle: unsafe { game_create(ptr) },
-        }
+        let handle = unsafe { game_create(ptr) };
+
+        // Register the Rust nav path service. game_set_pathfinder copies the
+        // vtable by value and back-fills any already-placed buildings (castle).
+        let nav = Box::into_raw(Box::new(nav::NavContext::new()));
+        let pathfinder = GamePathfinder {
+            ctx: nav as *mut c_void,
+            add_obstacle: nav::nav_add_obstacle,
+            remove_obstacle: nav::nav_remove_obstacle,
+            find_path: nav::nav_find_path,
+        };
+        unsafe { game_set_pathfinder(handle, &pathfinder) };
+
+        Game { handle, nav }
     }
 
     pub fn spawn(&mut self, desc: &GameCharacterDesc) -> u32 {
@@ -331,7 +358,12 @@ impl Game {
 
 impl Drop for Game {
     fn drop(&mut self) {
+        // Destroy the sim first (it holds a copy of the vtable + ctx), then
+        // free the nav box the ctx pointed at.
         unsafe { game_destroy(self.handle) };
+        if !self.nav.is_null() {
+            drop(unsafe { Box::from_raw(self.nav) });
+        }
     }
 }
 

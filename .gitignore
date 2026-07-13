@@ -1,3 +1,4 @@
 /target
 .DS_Store
 /shot*.png
+/.fastembed_cache
