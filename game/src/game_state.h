@@ -4,6 +4,7 @@
 #pragma once
 
 #include "components.h"
+#include "placement.h"
 
 #include <entt/entt.hpp>
 
@@ -22,6 +23,10 @@ struct BadlandsGame {
     std::vector<entt::entity> slots;
     // Compiled brain program + host bindings; null -> mock brains only.
     std::unique_ptr<badlands::BrainRuntime> brains;
+
+    // World state (the sim owns gold and the building/placement grid).
+    badlands::PlacementState placement;
+    uint32_t gold = 1000;
 
     uint64_t ticks = 0;
     uint64_t script_intents = 0;

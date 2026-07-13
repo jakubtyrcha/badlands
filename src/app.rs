@@ -7,25 +7,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::{Vec2, Vec4};
+use glam::{Vec2, Vec3, Vec4};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::Key;
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::game::catalog;
 use crate::game::top_down_camera::TopDownCamera;
-use crate::game::world::World;
-use crate::game_ffi::Game;
+use crate::game_ffi::{
+    BuildingKind, GRID_HALF_EXTENT_TILES, Game, GameBuildingState, GameGridTriangle,
+    GamePlacementDesc, render_box,
+};
 use crate::gpu::context::GpuContext;
 use crate::gpu::frame::FrameContext;
 use crate::gpu::graph::ProcessingGraph;
 use crate::gpu::pipelines::PipelineGenerator;
-use crate::scene::camera::UniformData;
-use crate::scene::renderer::SceneRenderer;
-use crate::ui::layout::{UiLayout, compute as compute_ui_layout};
+use crate::scene::camera::{Camera, UniformData};
+use crate::scene::overlay;
+use crate::scene::renderer::{GhostInstance, SceneRenderer};
+use crate::ui::layout::{UiLayout, compute as compute_ui_layout, rect_contains};
 use crate::ui::render::UiRenderer;
+use crate::ui::sidebar;
 
 #[derive(Default, Clone)]
 pub struct RunConfig {
@@ -34,6 +39,17 @@ pub struct RunConfig {
 }
 
 const TICK_DT: f32 = 1.0 / 30.0;
+
+// How far the camera center may pan from the origin (keeps the map edge mostly
+// off-screen). A presentation concern, so it lives on the render side.
+const PAN_EXTENT: f32 = 14.0;
+const GROUND_HALF_EXTENT: f32 = GRID_HALF_EXTENT_TILES as f32;
+
+// The building being placed: kind + current rotation (0..3 -> 0/45/90/135 deg).
+struct PlacementMode {
+    kind: BuildingKind,
+    rotation_index: i32,
+}
 
 const BRAIN_SCRIPT_MARKER: &str = "brains/warrior.noiser";
 
@@ -64,10 +80,12 @@ struct GameState {
     graph: ProcessingGraph,
     scene: SceneRenderer,
     ui: UiRenderer,
-    world: World,
     camera: TopDownCamera,
     sim: Game,
     brain_script_path: Option<PathBuf>,
+
+    placement: Option<PlacementMode>,
+    probe_triangles: Vec<GameGridTriangle>,
 
     dragging: bool,
     cursor: Vec2,
@@ -81,8 +99,7 @@ impl GameState {
     fn new(window: Arc<Window>) -> GameState {
         let gpu = GpuContext::new(window.clone());
         let pipelines = PipelineGenerator::new();
-        let world = World::new();
-        let scene = SceneRenderer::new(&gpu.device, &gpu.queue, &world, gpu.width, gpu.height);
+        let scene = SceneRenderer::new(&gpu.device, &gpu.queue, GROUND_HALF_EXTENT, gpu.width, gpu.height);
         let ui = UiRenderer::new(&gpu.device, &gpu.queue, window.scale_factor() as f32);
 
         let brain_script_path = find_brain_script();
@@ -108,10 +125,11 @@ impl GameState {
             graph: ProcessingGraph::default(),
             scene,
             ui,
-            world,
             camera: TopDownCamera::new(),
             sim,
             brain_script_path,
+            placement: None,
+            probe_triangles: Vec::new(),
             dragging: false,
             cursor: Vec2::ZERO,
             shift_down: false,
@@ -172,29 +190,99 @@ impl GameState {
         uniforms
     }
 
+    // The placement request under the cursor for the active tool. Shared by the
+    // preview probe and the actual place so the ghost and the placed building
+    // can never disagree.
+    fn placement_desc(&self, mode: &PlacementMode, screen: Vec2) -> GamePlacementDesc {
+        let ground = self.camera.screen_to_ground(self.cursor, screen);
+        GamePlacementDesc {
+            kind: mode.kind as i32,
+            rotation_index: mode.rotation_index,
+            world_x: ground.x,
+            world_z: ground.y,
+        }
+    }
+
+    // Projects each building's top to screen space and draws its name centered
+    // above it (a camera-facing debug label; the UI pass has no depth test, so
+    // labels always render on top).
+    fn push_building_labels(&mut self, camera: &Camera, buildings: &[GameBuildingState], screen: Vec2) {
+        let view_proj = camera.proj() * camera.view_at_origin();
+        for building in buildings {
+            let info = catalog::info(BuildingKind::from_i32(building.kind));
+            let anchor = Vec3::new(building.center_x, info.height + 0.5, building.center_z);
+            let clip = view_proj * (anchor - camera.position).extend(1.0);
+            if clip.w <= 1e-4 {
+                continue; // behind the camera
+            }
+            let ndc = clip.truncate() / clip.w;
+            if ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 {
+                continue; // off-screen: don't bleed labels onto the UI edges
+            }
+            let px = (ndc.x * 0.5 + 0.5) * screen.x;
+            let py = (1.0 - (ndc.y * 0.5 + 0.5)) * screen.y - 8.0;
+            let width = self.ui.atlas.measure(info.name);
+            self.ui
+                .push_text(px - width * 0.5, py, info.name, [0.96, 0.96, 0.99, 1.0]);
+        }
+    }
+
     fn render(&mut self, config: &RunConfig) -> bool {
         self.step_simulation(config);
         let characters = self.sim.state();
+        let buildings = self.sim.buildings();
+
+        let aspect = self.gpu.width as f32 / self.gpu.height.max(1) as f32;
+        let camera = self.camera.camera(aspect);
+        let camera_pos = camera.position;
+        let screen = Vec2::new(self.gpu.width as f32, self.gpu.height as f32);
+        let layout = self.ui_layout();
+
+        // Placement preview: a ghost cube + grid overlay from a per-frame probe
+        // (read-only, so it self-heals on pan/rotate/place).
+        let mut ghost = None;
+        let mut overlay_vertices: Vec<f32> = Vec::new();
+        if let Some(mode) = &self.placement {
+            if rect_contains(&layout.viewport, self.cursor.x, self.cursor.y) {
+                let desc = self.placement_desc(mode, screen);
+                let probe = self.sim.probe_placement(&desc, &mut self.probe_triangles);
+                overlay_vertices = overlay::build_vertices(&self.probe_triangles);
+                let bbox = render_box(mode.kind as i32, mode.rotation_index);
+                let info = catalog::info(mode.kind);
+                let color = if probe.valid == 1 {
+                    info.color.extend(1.0)
+                } else {
+                    Vec4::new(0.85, 0.32, 0.30, 1.0) // pale red = can't place
+                };
+                ghost = Some(GhostInstance {
+                    pos: Vec3::new(probe.snapped_x, 0.0, probe.snapped_z),
+                    size: Vec3::new(bbox.size_x, info.height, bbox.size_z),
+                    yaw: bbox.yaw_radians,
+                    color,
+                });
+            }
+        }
 
         let uniforms = self.build_uniforms();
         let mut frame = FrameContext::begin(&self.gpu.device, &uniforms);
 
-        let aspect = self.gpu.width as f32 / self.gpu.height.max(1) as f32;
-        let camera_pos = self.camera.camera(aspect).position;
         self.scene.render(
             &self.gpu.device,
             &self.gpu.queue,
             &mut frame,
             &mut self.pipelines,
-            &self.world,
+            &buildings,
             &characters,
+            ghost.as_ref(),
+            &overlay_vertices,
             camera_pos,
         );
 
-        // UI: top bar with the player's gold. Built regardless of surface
-        // availability so the screenshot path can draw it too.
-        let layout = self.ui_layout();
+        // UI: top bar (gold), the build sidebar, and floating building labels.
+        // Built regardless of surface availability so the screenshot path draws
+        // it too.
         let scale = self.window.scale_factor() as f32;
+        let world = self.sim.world();
         self.ui.begin();
         self.ui
             .push_rect(&layout.top_bar, [0.09, 0.08, 0.07, 0.92]);
@@ -203,7 +291,7 @@ impl GameState {
         self.ui.push_text(
             16.0 * scale,
             baseline,
-            &format!("Gold: {}", self.world.gold),
+            &format!("Gold: {}", world.gold),
             [0.98, 0.83, 0.36, 1.0],
         );
         let stats = self.sim.stats();
@@ -215,6 +303,9 @@ impl GameState {
                 [0.95, 0.35, 0.30, 1.0],
             );
         }
+        let selected = self.placement.as_ref().map(|m| m.kind);
+        sidebar::draw(&mut self.ui, &layout, scale, selected);
+        self.push_building_labels(&camera, &buildings, screen);
 
         // Tonemap resolve HDR -> swapchain via the processing graph, then the
         // UI pass. Skipped (not fatal) while the window is occluded.
@@ -345,8 +436,7 @@ impl GameState {
     fn handle_pointer_moved(&mut self, position: Vec2) {
         if self.dragging {
             let delta = position - self.cursor;
-            self.camera
-                .pan(delta, self.gpu.height as f32, self.world.pan_extent);
+            self.camera.pan(delta, self.gpu.height as f32, PAN_EXTENT);
         }
         self.cursor = position;
     }
@@ -354,15 +444,32 @@ impl GameState {
     fn handle_pointer_button(&mut self, state: ElementState) {
         match state {
             ElementState::Pressed => {
-                // Drags starting on the top bar belong to the UI, not the map.
                 let layout = self.ui_layout();
-                let viewport = layout.viewport;
-                if self.cursor.y >= viewport.y
-                    && self.cursor.y <= viewport.y + viewport.h
-                    && self.cursor.x >= viewport.x
-                    && self.cursor.x <= viewport.x + viewport.w
-                {
-                    self.dragging = true;
+                let scale = self.window.scale_factor() as f32;
+
+                // Sidebar: select a building to place (clicking the active one
+                // cancels).
+                if rect_contains(&layout.sidebar, self.cursor.x, self.cursor.y) {
+                    if let Some(kind) = sidebar::hit_test(&layout, scale, self.cursor.x, self.cursor.y) {
+                        let active = self.placement.as_ref().map(|m| m.kind) == Some(kind);
+                        self.placement = (!active).then_some(PlacementMode {
+                            kind,
+                            rotation_index: 0,
+                        });
+                    }
+                    return;
+                }
+
+                // Viewport: place the selected building, else start a pan drag.
+                if rect_contains(&layout.viewport, self.cursor.x, self.cursor.y) {
+                    if let Some(mode) = &self.placement {
+                        let screen = Vec2::new(self.gpu.width as f32, self.gpu.height as f32);
+                        let desc = self.placement_desc(mode, screen);
+                        // Stays in placement mode; an invalid spot is a no-op.
+                        self.sim.place_building(&desc);
+                    } else {
+                        self.dragging = true;
+                    }
                 }
             }
             ElementState::Released => self.dragging = false,
@@ -459,17 +566,30 @@ impl ApplicationHandler for App {
                 state.shift_down = modifiers.state().shift_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed && !event.repeat && state.shift_down {
-                    // Shift+S: shader hot reload (port of the SdlViewerApp
-                    // binding). Shift+N: noiser brain-script hot reload;
-                    // both keep the last-good version on failure.
-                    if matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("s"))
-                    {
-                        state.pipelines.reload_all(&state.gpu.device);
-                    }
-                    if matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("n"))
-                    {
-                        state.reload_brain_script();
+                if event.state == ElementState::Pressed && !event.repeat {
+                    if state.shift_down {
+                        // Shift+S: shader hot reload (port of the SdlViewerApp
+                        // binding). Shift+N: noiser brain-script hot reload;
+                        // both keep the last-good version on failure.
+                        if matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("s"))
+                        {
+                            state.pipelines.reload_all(&state.gpu.device);
+                        }
+                        if matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("n"))
+                        {
+                            state.reload_brain_script();
+                        }
+                    } else {
+                        // Placement controls: 'r' rotates 45 deg, Esc cancels.
+                        match &event.logical_key {
+                            Key::Character(c) if c.eq_ignore_ascii_case("r") => {
+                                if let Some(mode) = &mut state.placement {
+                                    mode.rotation_index = (mode.rotation_index + 1) % 4;
+                                }
+                            }
+                            Key::Named(NamedKey::Escape) => state.placement = None,
+                            _ => {}
+                        }
                     }
                 }
             }

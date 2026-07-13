@@ -133,6 +133,14 @@ impl FontAtlas {
             descent_px: line_metrics.descent,
         }
     }
+
+    // Total advance width of a string in pixels (for centering labels).
+    pub fn measure(&self, text: &str) -> f32 {
+        text.chars()
+            .filter_map(|ch| self.glyphs.get(&ch))
+            .map(|glyph| glyph.advance)
+            .sum()
+    }
 }
 
 // Same walk-up strategy as the shader directory: exe-adjacent first, then the

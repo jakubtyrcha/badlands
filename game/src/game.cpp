@@ -3,6 +3,7 @@
 #include "brain.h"
 #include "components.h"
 #include "game_state.h"
+#include "placement.h"
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -93,6 +94,10 @@ BadlandsGame* game_create(const char* brain_script_source) {
             report_bug(*game, "compile", error);
         }
     }
+    // The colony starts with only the castle, prebuilt at the origin. Not a
+    // player placement: it seeds no urban sprawl.
+    place_building(*game, GamePlacementDesc{GAME_BUILDING_CASTLE, 0, 0.0f, 0.0f},
+                   /*player=*/false);
     return game;
 }
 

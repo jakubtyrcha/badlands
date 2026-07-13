@@ -21,6 +21,8 @@ pub enum VertexLayoutKind {
     TexturedMesh,
     // UI quads: pos_px(2) + uv(2) + color(4).
     Ui,
+    // Ground overlay triangles: world pos(3) + color(4).
+    OverlayColored,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -267,6 +269,10 @@ fn vertex_buffer_layouts(kind: VertexLayoutKind) -> Vec<wgpu::VertexBufferLayout
         1 => Float32x2, // uv
         2 => Float32x4, // color (sRGB)
     ];
+    const OVERLAY: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+        0 => Float32x3, // world position
+        1 => Float32x4, // color (linear, straight alpha)
+    ];
     match kind {
         VertexLayoutKind::None => vec![],
         VertexLayoutKind::TexturedMesh => vec![wgpu::VertexBufferLayout {
@@ -278,6 +284,11 @@ fn vertex_buffer_layouts(kind: VertexLayoutKind) -> Vec<wgpu::VertexBufferLayout
             array_stride: 8 * 4,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &UI,
+        }],
+        VertexLayoutKind::OverlayColored => vec![wgpu::VertexBufferLayout {
+            array_stride: 7 * 4,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &OVERLAY,
         }],
     }
 }

@@ -9,8 +9,11 @@ use crate::scene::camera::UniformData;
 
 pub const DYNAMIC_UNIFORM_ALIGNMENT: u64 = 256;
 // Port of FrameContext::ReserveDynamicUniform — sized up front so the buffer
-// never reallocates mid-frame (which would invalidate bind groups).
-const DYNAMIC_UNIFORM_CAPACITY: u64 = 256 * 1024;
+// never reallocates mid-frame (which would invalidate bind groups). At 256
+// bytes/slot this holds 4096 objects/frame; every sim building, poppable,
+// character, and the placement ghost each take a slot, so the ceiling has to
+// clear a busy late-game map (a truly unbounded map needs instanced draws).
+const DYNAMIC_UNIFORM_CAPACITY: u64 = 1024 * 1024;
 
 pub struct FrameContext {
     pub encoder: wgpu::CommandEncoder,
