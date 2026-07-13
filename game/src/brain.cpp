@@ -1,11 +1,14 @@
 #include "brain.h"
 
 #include "game_state.h"
+#include "heroes.h"
+#include "placement.h"
 
 #include <pthread.h>
 
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -111,6 +114,104 @@ void intent_attack(BadlandsGame& game, int32_t slot) {
     ++game.script_intents;
 }
 
+// --- v0.3 town host calls ---------------------------------------------------
+// Perception returns are flat f32 tuples (bound as glm::vec4); the building id
+// is never returned to the brain -- intent_enter(kind) re-derives nearest-of-kind
+// engine-side, so the hero standing at that door is unambiguous.
+
+// (door_x, door_z, exists, _) for the nearest alive building of `kind`.
+glm::vec4 perceive_building(BadlandsGame& game, int32_t slot, int32_t kind) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "perceive_building", "invalid entity slot " + std::to_string(slot));
+        return glm::vec4(0.0f);
+    }
+    glm::vec2 p = game.registry.get<Position>(self).pos;
+    uint32_t bid = nearest_building_of(game.placement, kind, p);
+    if (bid == std::numeric_limits<uint32_t>::max()) {
+        return glm::vec4(0.0f);
+    }
+    glm::vec2 tile;
+    if (!building_approach_tile(game.placement, game.placement.buildings[bid], tile)) {
+        return glm::vec4(0.0f);
+    }
+    return {tile.x, tile.y, 1.0f, 0.0f};
+}
+
+// (door_x, door_z, exists, _) for the hero's home guild.
+glm::vec4 perceive_home(BadlandsGame& game, int32_t slot) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "perceive_home", "invalid entity slot " + std::to_string(slot));
+        return glm::vec4(0.0f);
+    }
+    int32_t home = game.registry.get<Home>(self).building_id;
+    auto& bs = game.placement.buildings;
+    if (home < 0 || static_cast<size_t>(home) >= bs.size() || !bs[home].alive) {
+        return glm::vec4(0.0f);
+    }
+    glm::vec2 tile;
+    if (!building_approach_tile(game.placement, bs[home], tile)) {
+        return glm::vec4(0.0f);
+    }
+    return {tile.x, tile.y, 1.0f, 0.0f};
+}
+
+float inventory_count(BadlandsGame& game, int32_t slot) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "inventory_count", "invalid entity slot " + std::to_string(slot));
+        return 0.0f;
+    }
+    return static_cast<float>(game.registry.get<Inventory>(self).count);
+}
+
+// Durable walk goal (engine navmesh-paths); replaces intent_move for town heroes.
+void intent_move_to(BadlandsGame& game, int32_t slot, float x, float z) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "intent_move_to", "invalid entity slot " + std::to_string(slot));
+        return;
+    }
+    MoveTarget& mt = game.registry.get<MoveTarget>(self);
+    mt.kind = MoveTarget::Kind::Point;
+    mt.point = {x, z};
+    mt.entity = entt::null;
+    mt.building = UINT32_MAX;
+    mt.stop_distance = 0.0f;
+    ++game.script_intents;
+}
+
+void intent_enter(BadlandsGame& game, int32_t slot, int32_t kind) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "intent_enter", "invalid entity slot " + std::to_string(slot));
+        return;
+    }
+    hero_enter(game, self, kind);
+    ++game.script_intents;
+}
+
+void intent_enter_home(BadlandsGame& game, int32_t slot) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "intent_enter_home", "invalid entity slot " + std::to_string(slot));
+        return;
+    }
+    hero_enter_home(game, self);
+    ++game.script_intents;
+}
+
+void intent_buy(BadlandsGame& game, int32_t slot) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "intent_buy", "invalid entity slot " + std::to_string(slot));
+        return;
+    }
+    hero_buy(game, self);
+    ++game.script_intents;
+}
+
 }  // namespace
 
 std::unique_ptr<BrainRuntime> BrainRuntime::create(BadlandsGame& game,
@@ -125,27 +226,43 @@ std::unique_ptr<BrainRuntime> BrainRuntime::create(BadlandsGame& game,
     runtime->program = std::move(*compiled);
 
     BadlandsGame* g = &game;  // outlives the program: game owns the runtime
-    bool bound =
-        runtime->program->BindCallableByName(
-            "perceive_self",
-            std::function<glm::vec4(int32_t)>([g](int32_t e) { return perceive_self(*g, e); })) &&
-        runtime->program->BindCallableByName(
-            "perceive_target",
-            std::function<glm::vec4(int32_t)>([g](int32_t e) { return perceive_target(*g, e); })) &&
-        runtime->program->BindCallableByName(
-            "attack_range",
-            std::function<float(int32_t)>([g](int32_t e) { return attack_range(*g, e); })) &&
-        runtime->program->BindCallableByName(
-            "intent_move", std::function<void(int32_t, float, float)>(
-                               [g](int32_t e, float dx, float dz) { intent_move(*g, e, dx, dz); })) &&
-        runtime->program->BindCallableByName(
-            "intent_attack",
-            std::function<void(int32_t)>([g](int32_t e) { intent_attack(*g, e); }));
-    if (!bound) {
-        out_error = "BindCallableByName failed: script @fn declarations drifted from the host";
+    NoiserProgram& prog = *runtime->program;
+
+    // Resilient binding: bind only the host functions the script actually
+    // declares (probed via GetCallableLocation), and fail only if a *declared*
+    // @fn cannot be bound (real drift). This lets the town brain declare the
+    // fuller interface while the duel/downgrade fixtures declare a minimal set,
+    // without a "declared but unbound" failure. A script that declares a @fn the
+    // host does not implement is left unbound and fails loudly at resume.
+    bool ok = true;
+    auto bind = [&](const char* name, auto fn) {
+        if (!prog.GetCallableLocation(name).has_value()) {
+            return;  // script does not declare it; nothing to bind
+        }
+        if (!prog.BindCallableByName(name, std::function(std::move(fn)))) {
+            ok = false;
+        }
+    };
+
+    bind("perceive_self", [g](int32_t e) { return perceive_self(*g, e); });
+    bind("perceive_target", [g](int32_t e) { return perceive_target(*g, e); });
+    bind("attack_range", [g](int32_t e) { return attack_range(*g, e); });
+    bind("perceive_building",
+         [g](int32_t e, int32_t kind) { return perceive_building(*g, e, kind); });
+    bind("perceive_home", [g](int32_t e) { return perceive_home(*g, e); });
+    bind("inventory_count", [g](int32_t e) { return inventory_count(*g, e); });
+    bind("intent_move", [g](int32_t e, float dx, float dz) { intent_move(*g, e, dx, dz); });
+    bind("intent_move_to", [g](int32_t e, float x, float z) { intent_move_to(*g, e, x, z); });
+    bind("intent_attack", [g](int32_t e) { intent_attack(*g, e); });
+    bind("intent_enter", [g](int32_t e, int32_t kind) { intent_enter(*g, e, kind); });
+    bind("intent_enter_home", [g](int32_t e) { intent_enter_home(*g, e); });
+    bind("intent_buy", [g](int32_t e) { intent_buy(*g, e); });
+
+    if (!ok) {
+        out_error = "BindCallableByName failed: a declared @fn has no host implementation";
         return nullptr;
     }
-    runtime->program->FreezeHostThunks();
+    prog.FreezeHostThunks();
     return runtime;
 }
 
