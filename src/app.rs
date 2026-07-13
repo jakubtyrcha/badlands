@@ -142,6 +142,26 @@ impl GameState {
         }
     }
 
+    // A scripted scene for --frames/--screenshot runs (exercised end-to-end via
+    // the real dispatch path): place a guild + apothecary + tavern, recruit a
+    // hero, and select the guild so the panel + a recruited hero are visible.
+    // Interactive runs start clean (the peaceful sandbox = castle + the duel).
+    fn seed_demo(&mut self) {
+        let place = |kind: BuildingKind, x: f32, z: f32| GamePlacementDesc {
+            kind: kind as i32,
+            rotation_index: 0,
+            world_x: x,
+            world_z: z,
+        };
+        let guild = self.sim.place_building(&place(BuildingKind::FreeCompanyQuarters, -8.0, 5.0));
+        self.sim.place_building(&place(BuildingKind::Apothecary, 8.0, 5.0));
+        self.sim.place_building(&place(BuildingKind::Tavern, 0.0, 9.0));
+        if let Some(guild_id) = guild {
+            self.sim.recruit(guild_id);
+            self.selected_building = Some(guild_id);
+        }
+    }
+
     // Fixed-step simulation: one tick per frame on --frames runs (so
     // screenshots are deterministic), a real-time accumulator otherwise.
     fn step_simulation(&mut self, config: &RunConfig) {
@@ -624,7 +644,11 @@ impl ApplicationHandler for App {
                 )
                 .expect("failed to create window"),
         );
-        self.state = Some(GameState::new(window));
+        let mut state = GameState::new(window);
+        if self.config.max_frames.is_some() {
+            state.seed_demo();
+        }
+        self.state = Some(state);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
