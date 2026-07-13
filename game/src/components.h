@@ -55,7 +55,7 @@ struct Intent {
 
 // --- v0.3 hero/town state ---------------------------------------------------
 
-// Hero archetype (Warrior/Ranger/Rogue/Wizard). Decorative in v0.3: it only
+// Hero archetype (Mercenary/Hunter/Grave Robber/Apprentice). Decorative in v0.3: it only
 // distinguishes spawn color; the class name is derived renderer-side from the
 // home guild's kind, so this value never crosses the C API.
 struct HeroClass {

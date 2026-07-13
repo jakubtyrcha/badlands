@@ -223,14 +223,14 @@ mod tests {
 
     #[test]
     fn recruit_button_hits_on_an_open_guild() {
-        let m = model(Some(HeroClass::Warrior), 2, false);
+        let m = model(Some(HeroClass::Mercenary), 2, false);
         let (x, y) = recruit_center(&m);
         assert_eq!(hit_test(&m, 1.0, x, y), Hit::Button(PanelButton::Recruit));
     }
 
     #[test]
     fn a_full_guild_recruit_button_is_greyed_and_consumes() {
-        let m = model(Some(HeroClass::Warrior), CAPACITY, false);
+        let m = model(Some(HeroClass::Mercenary), CAPACITY, false);
         let (x, y) = recruit_center(&m);
         // Same spot, but greyed => not a live button, just swallowed.
         assert_eq!(hit_test(&m, 1.0, x, y), Hit::Consumed);
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn destroy_button_only_exists_when_destroyable() {
-        let destroyable = model(Some(HeroClass::Warrior), 0, true);
+        let destroyable = model(Some(HeroClass::Mercenary), 0, true);
         let r = rects(&destroyable, 1.0);
         let dr = r.destroy.expect("destroyable => a destroy button");
         assert_eq!(
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn clicks_outside_the_panel_miss() {
-        let m = model(Some(HeroClass::Warrior), 0, true);
+        let m = model(Some(HeroClass::Mercenary), 0, true);
         assert_eq!(hit_test(&m, 1.0, 1000.0, 1000.0), Hit::Miss);
     }
 }

@@ -16,10 +16,10 @@ namespace badlands {
 
 // Guild classes. Decorative in v0.3 (name/color only); one baseline brain.
 enum HeroClassId : int32_t {
-    HERO_WARRIOR = 0,
-    HERO_RANGER,
-    HERO_ROGUE,
-    HERO_WIZARD,
+    HERO_MERCENARY = 0,
+    HERO_HUNTER,
+    HERO_GRAVE_ROBBER,
+    HERO_APPRENTICE,
     HERO_CLASS_COUNT
 };
 

@@ -62,10 +62,10 @@ TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
         int32_t cls;
     };
     Guild guilds[] = {
-        {GAME_BUILDING_FREE_COMPANY_QUARTERS, HERO_WARRIOR},
-        {GAME_BUILDING_HUNTERS_CAMP, HERO_RANGER},
-        {GAME_BUILDING_THIEVES_DEN, HERO_ROGUE},
-        {GAME_BUILDING_SCRIPTORIUM, HERO_WIZARD},
+        {GAME_BUILDING_FREE_COMPANY_QUARTERS, HERO_MERCENARY},
+        {GAME_BUILDING_HUNTERS_CAMP, HERO_HUNTER},
+        {GAME_BUILDING_THIEVES_DEN, HERO_GRAVE_ROBBER},
+        {GAME_BUILDING_SCRIPTORIUM, HERO_APPRENTICE},
     };
     for (const Guild& gd : guilds) {
         BadlandsGame* game = game_create(nullptr);

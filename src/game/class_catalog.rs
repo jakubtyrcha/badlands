@@ -11,19 +11,19 @@ use crate::game_ffi::BuildingKind;
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeroClass {
-    Warrior = 0,
-    Ranger = 1,
-    Rogue = 2,
-    Wizard = 3,
+    Mercenary = 0,
+    Hunter = 1,
+    GraveRobber = 2,
+    Apprentice = 3,
 }
 
 impl HeroClass {
     pub fn from_i32(value: i32) -> Option<HeroClass> {
         match value {
-            0 => Some(HeroClass::Warrior),
-            1 => Some(HeroClass::Ranger),
-            2 => Some(HeroClass::Rogue),
-            3 => Some(HeroClass::Wizard),
+            0 => Some(HeroClass::Mercenary),
+            1 => Some(HeroClass::Hunter),
+            2 => Some(HeroClass::GraveRobber),
+            3 => Some(HeroClass::Apprentice),
             _ => None,
         }
     }
@@ -38,20 +38,20 @@ pub struct ClassInfo {
 // rendered hero cube read as the same class.
 pub fn info(class: HeroClass) -> ClassInfo {
     match class {
-        HeroClass::Warrior => ClassInfo {
-            name: "Warrior",
+        HeroClass::Mercenary => ClassInfo {
+            name: "Mercenary",
             color: Vec3::new(0.35, 0.45, 0.80),
         },
-        HeroClass::Ranger => ClassInfo {
-            name: "Ranger",
+        HeroClass::Hunter => ClassInfo {
+            name: "Hunter",
             color: Vec3::new(0.30, 0.70, 0.35),
         },
-        HeroClass::Rogue => ClassInfo {
-            name: "Rogue",
+        HeroClass::GraveRobber => ClassInfo {
+            name: "Grave Robber",
             color: Vec3::new(0.60, 0.45, 0.75),
         },
-        HeroClass::Wizard => ClassInfo {
-            name: "Wizard",
+        HeroClass::Apprentice => ClassInfo {
+            name: "Apprentice",
             color: Vec3::new(0.45, 0.78, 0.85),
         },
     }
@@ -60,10 +60,10 @@ pub fn info(class: HeroClass) -> ClassInfo {
 // The class a guild recruits, or None for non-guild buildings.
 pub fn guild_class(kind: BuildingKind) -> Option<HeroClass> {
     match kind {
-        BuildingKind::FreeCompanyQuarters => Some(HeroClass::Warrior),
-        BuildingKind::HuntersCamp => Some(HeroClass::Ranger),
-        BuildingKind::ThievesDen => Some(HeroClass::Rogue),
-        BuildingKind::Scriptorium => Some(HeroClass::Wizard),
+        BuildingKind::FreeCompanyQuarters => Some(HeroClass::Mercenary),
+        BuildingKind::HuntersCamp => Some(HeroClass::Hunter),
+        BuildingKind::ThievesDen => Some(HeroClass::GraveRobber),
+        BuildingKind::Scriptorium => Some(HeroClass::Apprentice),
         _ => None,
     }
 }
@@ -74,18 +74,18 @@ mod tests {
 
     #[test]
     fn hero_class_from_i32_round_trips_and_rejects() {
-        assert_eq!(HeroClass::from_i32(0), Some(HeroClass::Warrior));
-        assert_eq!(HeroClass::from_i32(3), Some(HeroClass::Wizard));
+        assert_eq!(HeroClass::from_i32(0), Some(HeroClass::Mercenary));
+        assert_eq!(HeroClass::from_i32(3), Some(HeroClass::Apprentice));
         assert_eq!(HeroClass::from_i32(4), None);
         assert_eq!(HeroClass::from_i32(-1), None);
     }
 
     #[test]
     fn guild_class_maps_the_four_guilds() {
-        assert_eq!(guild_class(BuildingKind::FreeCompanyQuarters), Some(HeroClass::Warrior));
-        assert_eq!(guild_class(BuildingKind::HuntersCamp), Some(HeroClass::Ranger));
-        assert_eq!(guild_class(BuildingKind::ThievesDen), Some(HeroClass::Rogue));
-        assert_eq!(guild_class(BuildingKind::Scriptorium), Some(HeroClass::Wizard));
+        assert_eq!(guild_class(BuildingKind::FreeCompanyQuarters), Some(HeroClass::Mercenary));
+        assert_eq!(guild_class(BuildingKind::HuntersCamp), Some(HeroClass::Hunter));
+        assert_eq!(guild_class(BuildingKind::ThievesDen), Some(HeroClass::GraveRobber));
+        assert_eq!(guild_class(BuildingKind::Scriptorium), Some(HeroClass::Apprentice));
         assert_eq!(guild_class(BuildingKind::Tavern), None);
         assert_eq!(guild_class(BuildingKind::Castle), None);
     }

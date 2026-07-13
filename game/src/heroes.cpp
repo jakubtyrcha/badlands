@@ -18,13 +18,13 @@ namespace badlands {
 int32_t guild_hero_class(int kind) {
     switch (kind) {
         case GAME_BUILDING_FREE_COMPANY_QUARTERS:
-            return HERO_WARRIOR;
+            return HERO_MERCENARY;
         case GAME_BUILDING_HUNTERS_CAMP:
-            return HERO_RANGER;
+            return HERO_HUNTER;
         case GAME_BUILDING_THIEVES_DEN:
-            return HERO_ROGUE;
+            return HERO_GRAVE_ROBBER;
         case GAME_BUILDING_SCRIPTORIUM:
-            return HERO_WIZARD;
+            return HERO_APPRENTICE;
         default:
             return -1;
     }
@@ -34,13 +34,13 @@ GameCharacterDesc hero_desc(int32_t hero_class, float x, float z) {
     // Baseline stats shared by every class; color is the only distinguishing
     // field (the panel derives the class name from the home guild's kind).
     constexpr glm::vec3 kColors[HERO_CLASS_COUNT] = {
-        {0.35f, 0.45f, 0.80f},  // Warrior  - blue
-        {0.30f, 0.70f, 0.35f},  // Ranger   - green
-        {0.60f, 0.45f, 0.75f},  // Rogue    - violet
-        {0.45f, 0.78f, 0.85f},  // Wizard   - cyan
+        {0.35f, 0.45f, 0.80f},  // Mercenary    - blue
+        {0.30f, 0.70f, 0.35f},  // Hunter       - green
+        {0.60f, 0.45f, 0.75f},  // Grave Robber - violet
+        {0.45f, 0.78f, 0.85f},  // Apprentice   - cyan
     };
     static_assert(sizeof(kColors) / sizeof(kColors[0]) == HERO_CLASS_COUNT, "hero color table");
-    int idx = (hero_class >= 0 && hero_class < HERO_CLASS_COUNT) ? hero_class : HERO_WARRIOR;
+    int idx = (hero_class >= 0 && hero_class < HERO_CLASS_COUNT) ? hero_class : HERO_MERCENARY;
     glm::vec3 c = kColors[idx];
 
     GameCharacterDesc d{};
