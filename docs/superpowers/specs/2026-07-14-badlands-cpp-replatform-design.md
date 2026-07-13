@@ -55,7 +55,27 @@ Top-level `CMakeLists.txt` cribbed from `../sampo/CMakeLists.txt`:
 - **Corrosion** (`FetchContent`) + `corrosion_import_crate(MANIFEST_PATH <crate>/Cargo.toml)` per Rust
   crate, with `corrosion_set_env_vars(<crate> "RUSTFLAGS=-Cpanic=unwind")`; C++ targets link the crate
   name (e.g. `wesl_ffi`, `nav_ffi`) — exactly sampo's mechanism.
-- Reuse the existing C++ third-party (glm, EnTT, spdlog) already vendored under `game/`/`third_party/`.
+- Reuse the existing C++ third-party (glm, EnTT, spdlog) already vendored under `third_party/`.
+
+### Repository layout (target)
+Everything badlands-authored lives under `src/`:
+- **`src/engine/`** — the C++ engine ported from sampo: rendering, input gathering, **UI rendering**,
+  GPU/pipeline/reflection/frame infra, material system, scene graph + scene renderer (forward + tonemap),
+  GPU mip generation, the `Camera` math type. **No game logic.**
+- **`src/game/`** — C++ game logic (the current `game/src/*` migrated here): EnTT world sim, placement,
+  movement, terrain/ploppable world data, brains, geometry generation, scene construction, the camera
+  controller + input *handling*, UI *logic*.
+- **`src/core/`** — generic shared C++: math glue, shared value types (e.g. `GeometryType`), small
+  utilities used by both engine and game.
+- **`src/crates/`** — badlands' Rust feature-libs (Corrosion-linked static libs): `nav` (from
+  `src/nav.rs`), `wesl` (wraps `wesl`), `assets` (wraps `image`+`gltf`). The `noiser` submodule stays
+  under `third_party/noiser`, referenced by path.
+- **`third_party/`** — vendored C++ deps (glm, EnTT, spdlog) + the noiser submodule; Dawn/SDL3/Corrosion
+  via CMake `FetchContent`.
+
+Migration is staged: **Stage 1 creates `src/engine`, `src/core`, `src/crates`** (+ the C++ `main`); the
+current `game/` moves to `src/game/` and is wired in **Stage 2**. The Rust host (`src/*.rs`,
+`crates/noiser-bundle`) is deleted as its pieces are replaced.
 
 ## Decomposition (each stage: spec → plan → build)
 1. **Platform + core engine port** — *this spec*.
@@ -75,6 +95,12 @@ Top-level `CMakeLists.txt` cribbed from `../sampo/CMakeLists.txt`:
 **Goal.** badlands is a C++/Dawn/SDL3 app that renders a hardcoded lit, textured, **mipmapped** test
 scene through the **ported** engine (material system + scene graph + forward-opaque pass + tonemap),
 with the Rust feature-libs linked and callable across the C ABI.
+
+**Bare-bones + swappable seam.** `main` sets up the platform + engine + a fixed camera and calls a
+placeholder `build_test_scene(engine)` that adds one sphere node. **That single call is the only
+game-specific seam** — Stage 2 replaces it with the game's world→scene construction; the app shell,
+render loop, engine, and Rust libs stay identical. Keep app state minimal and the engine free of game
+types so the swap is a one-function change. The current `game/` is untouched in Stage 1.
 
 **Build.**
 - New top-level `CMakeLists.txt` (as above): SDL3 + Dawn(from-source, pinned) + Corrosion; C++23; Metal.
