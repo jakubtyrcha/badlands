@@ -18,8 +18,8 @@ use winit::window::{Window, WindowId};
 use crate::game::angled_camera::AngledCamera;
 use crate::game::catalog;
 use crate::game_ffi::{
-    BuildingKind, GRID_HALF_EXTENT_TILES, Game, GameBuildingState, GameGridTriangle,
-    GamePlacementDesc, render_box,
+    BuildingKind, GRID_HALF_EXTENT_TILES, Game, GameBuildingState, GameCharacterState,
+    GameGridTriangle, GamePlacementDesc, building_at_world, render_box,
 };
 use crate::gpu::context::GpuContext;
 use crate::gpu::frame::FrameContext;
@@ -29,6 +29,7 @@ use crate::scene::camera::{Camera, UniformData};
 use crate::scene::overlay;
 use crate::scene::renderer::{GhostInstance, SceneRenderer};
 use crate::ui::layout::{UiLayout, compute as compute_ui_layout, rect_contains};
+use crate::ui::panel::{self, Hit, PanelButton};
 use crate::ui::render::UiRenderer;
 use crate::ui::sidebar;
 
@@ -85,6 +86,7 @@ struct GameState {
     brain_script_path: Option<PathBuf>,
 
     placement: Option<PlacementMode>,
+    selected_building: Option<u32>,
     probe_triangles: Vec<GameGridTriangle>,
 
     dragging: bool,
@@ -129,6 +131,7 @@ impl GameState {
             sim,
             brain_script_path,
             placement: None,
+            selected_building: None,
             probe_triangles: Vec::new(),
             dragging: false,
             cursor: Vec2::ZERO,
@@ -227,6 +230,42 @@ impl GameState {
         }
     }
 
+    // Screen anchor (top-left) for the selected building's floating panel,
+    // clamped inside the viewport; a fixed corner if the center projects behind
+    // the camera.
+    fn panel_anchor(&self, camera: &Camera, center: Vec3, screen: Vec2, layout: &UiLayout, scale: f32) -> Vec2 {
+        let vp = &layout.viewport;
+        let pad = 8.0 * scale;
+        let max_x = (vp.x + vp.w - panel::PANEL_W * scale - pad).max(vp.x + pad);
+        let max_y = (vp.y + vp.h - 160.0 * scale).max(vp.y + pad);
+        match camera.world_to_screen(center, screen) {
+            Some(p) => Vec2::new(
+                p.x.clamp(vp.x + pad, max_x),
+                (p.y + 12.0 * scale).clamp(vp.y + pad, max_y),
+            ),
+            None => Vec2::new(vp.x + pad, vp.y + pad),
+        }
+    }
+
+    // The selection panel model from in-hand snapshots, or None if the selection
+    // no longer refers to a live building.
+    fn selected_panel_model(
+        &self,
+        camera: &Camera,
+        buildings: &[GameBuildingState],
+        characters: &[GameCharacterState],
+        screen: Vec2,
+        layout: &UiLayout,
+        scale: f32,
+    ) -> Option<panel::PanelModel> {
+        let id = self.selected_building?;
+        let building = buildings.iter().find(|b| b.id == id)?;
+        let info = catalog::info(BuildingKind::from_i32(building.kind));
+        let center = Vec3::new(building.center_x, info.height + 0.5, building.center_z);
+        let anchor = self.panel_anchor(camera, center, screen, layout, scale);
+        Some(panel::build_model(building, buildings, characters, anchor))
+    }
+
     fn render(&mut self, config: &RunConfig) -> bool {
         self.step_simulation(config);
         let characters = self.sim.state();
@@ -266,13 +305,21 @@ impl GameState {
         let uniforms = self.build_uniforms();
         let mut frame = FrameContext::begin(&self.gpu.device, &uniforms);
 
+        // Heroes hidden inside a building are excluded from the scene (but stay
+        // in the panel's visitor list).
+        let visible: Vec<GameCharacterState> = characters
+            .iter()
+            .copied()
+            .filter(|c| c.inside_building_id < 0)
+            .collect();
+
         self.scene.render(
             &self.gpu.device,
             &self.gpu.queue,
             &mut frame,
             &mut self.pipelines,
             &buildings,
-            &characters,
+            &visible,
             ghost.as_ref(),
             &overlay_vertices,
             camera_pos,
@@ -306,6 +353,13 @@ impl GameState {
         let selected = self.placement.as_ref().map(|m| m.kind);
         sidebar::draw(&mut self.ui, &layout, scale, selected);
         self.push_building_labels(&camera, &buildings, screen);
+
+        // The floating selection panel (recruit/destroy + visitor list).
+        if let Some(model) =
+            self.selected_panel_model(&camera, &buildings, &characters, screen, &layout, scale)
+        {
+            panel::draw(&mut self.ui, &model, scale);
+        }
 
         // Tonemap resolve HDR -> swapchain via the processing graph, then the
         // UI pass. Skipped (not fatal) while the window is occluded.
@@ -446,8 +500,9 @@ impl GameState {
             ElementState::Pressed => {
                 let layout = self.ui_layout();
                 let scale = self.window.scale_factor() as f32;
+                let screen = Vec2::new(self.gpu.width as f32, self.gpu.height as f32);
 
-                // Sidebar: select a building to place (clicking the active one
+                // 1. Sidebar: select a placement tool (clicking the active one
                 // cancels).
                 if rect_contains(&layout.sidebar, self.cursor.x, self.cursor.y) {
                     if let Some(kind) = sidebar::hit_test(&layout, scale, self.cursor.x, self.cursor.y) {
@@ -460,15 +515,51 @@ impl GameState {
                     return;
                 }
 
-                // Viewport: place the selected building, else start a pan drag.
+                // 2. Open selection panel: recruit / destroy / swallow the click.
+                if self.selected_building.is_some() {
+                    let aspect = self.gpu.width as f32 / self.gpu.height.max(1) as f32;
+                    let camera = self.camera.camera(aspect);
+                    let buildings = self.sim.buildings();
+                    let characters = self.sim.state();
+                    match self
+                        .selected_panel_model(&camera, &buildings, &characters, screen, &layout, scale)
+                    {
+                        Some(model) => {
+                            match panel::hit_test(&model, scale, self.cursor.x, self.cursor.y) {
+                                Hit::Button(PanelButton::Recruit) => {
+                                    self.sim.recruit(model.building_id);
+                                    return;
+                                }
+                                Hit::Button(PanelButton::Destroy) => {
+                                    self.sim.destroy_building(model.building_id);
+                                    self.selected_building = None;
+                                    return;
+                                }
+                                Hit::Consumed => return,
+                                Hit::Miss => {}
+                            }
+                        }
+                        // Selection went stale (destroyed elsewhere).
+                        None => self.selected_building = None,
+                    }
+                }
+
+                // 3. Viewport: place with the active tool, else pick a building,
+                // else start a pan drag (empty ground clears the selection).
                 if rect_contains(&layout.viewport, self.cursor.x, self.cursor.y) {
                     if let Some(mode) = &self.placement {
-                        let screen = Vec2::new(self.gpu.width as f32, self.gpu.height as f32);
                         let desc = self.placement_desc(mode, screen);
-                        // Stays in placement mode; an invalid spot is a no-op.
-                        self.sim.place_building(&desc);
+                        self.sim.place_building(&desc); // invalid spot is a no-op
                     } else {
-                        self.dragging = true;
+                        let ground = self.camera.screen_to_ground(self.cursor, screen);
+                        let buildings = self.sim.buildings();
+                        match building_at_world(&buildings, ground) {
+                            Some(id) => self.selected_building = Some(id),
+                            None => {
+                                self.selected_building = None;
+                                self.dragging = true;
+                            }
+                        }
                     }
                 }
             }
@@ -587,7 +678,10 @@ impl ApplicationHandler for App {
                                     mode.rotation_index = (mode.rotation_index + 1) % 4;
                                 }
                             }
-                            Key::Named(NamedKey::Escape) => state.placement = None,
+                            Key::Named(NamedKey::Escape) => {
+                                state.placement = None;
+                                state.selected_building = None;
+                            }
                             _ => {}
                         }
                     }

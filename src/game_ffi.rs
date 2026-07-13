@@ -1,6 +1,7 @@
 // Safe wrapper over the C++ game simulation (game/include/badlands_game.h).
 
 use crate::nav;
+use glam::Vec2;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 
@@ -238,6 +239,30 @@ pub fn building_def(kind: BuildingKind) -> GameBuildingDef {
 // footprint. Handles the diagonal lattice-diamond spans, which are not (w,d).
 pub fn render_box(kind: i32, rotation_index: i32) -> GameRenderBox {
     unsafe { game_render_box(kind, rotation_index) }
+}
+
+// Point-in-oriented-box test in the ground (XZ) plane. `half` is the box's
+// half-extents; `yaw` matches the renderer's Mat4::from_rotation_y, so a pick
+// agrees with what is drawn. Inverts R_y to test in the box's local frame.
+pub fn point_in_oriented_box(center: Vec2, half: Vec2, yaw: f32, p: Vec2) -> bool {
+    let d = p - center;
+    let (s, c) = yaw.sin_cos();
+    let local = Vec2::new(c * d.x - s * d.y, s * d.x + c * d.y);
+    local.x.abs() <= half.x && local.y.abs() <= half.y
+}
+
+// The topmost building whose drawn oriented box contains `world`, or None. Later
+// (last-placed) buildings win on overlap, matching draw order.
+pub fn building_at_world(buildings: &[GameBuildingState], world: Vec2) -> Option<u32> {
+    for b in buildings.iter().rev() {
+        let bx = render_box(b.kind, b.rotation_index);
+        let center = Vec2::new(b.center_x, b.center_z);
+        let half = Vec2::new(bx.size_x * 0.5, bx.size_z * 0.5);
+        if point_in_oriented_box(center, half, bx.yaw_radians, world) {
+            return Some(b.id);
+        }
+    }
+    None
 }
 
 // Canonical Stage-2 duelists, defined once in C++ and shared with the tests.
@@ -518,6 +543,54 @@ mod tests {
         assert_eq!((castle.user_destructible, castle.enemy_targettable), (0, 1));
         let guild = building_def(BuildingKind::FreeCompanyQuarters);
         assert_eq!((guild.user_destructible, guild.enemy_targettable), (1, 0));
+    }
+
+    #[test]
+    fn glam_rotation_y_sign_is_pinned() {
+        use glam::{Mat4, Vec3};
+        // Oriented-box picking inverts this rotation; if glam ever flips the
+        // handedness, picks would silently mis-rotate. (1,0,0) about +90deg -> (0,0,-1).
+        let r = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2) * Vec3::X.extend(1.0);
+        assert!(r.x.abs() < 1e-5);
+        assert!((r.z + 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn point_in_oriented_box_axis_and_diamond() {
+        use std::f32::consts::FRAC_PI_4;
+        let center = Vec2::new(5.0, -3.0);
+        let half = Vec2::new(1.0, 0.5);
+        // Axis-aligned.
+        assert!(point_in_oriented_box(center, half, 0.0, center + Vec2::new(0.9, 0.4)));
+        assert!(!point_in_oriented_box(center, half, 0.0, center + Vec2::new(1.1, 0.0)));
+        assert!(!point_in_oriented_box(center, half, 0.0, center + Vec2::new(0.0, 0.6)));
+        // 45deg: local axes now point diagonally in world space.
+        let along_x = Vec2::new(FRAC_PI_4.cos(), -FRAC_PI_4.sin());
+        let along_y = Vec2::new(FRAC_PI_4.sin(), FRAC_PI_4.cos());
+        assert!(point_in_oriented_box(center, half, FRAC_PI_4, center + along_x * 0.9));
+        assert!(!point_in_oriented_box(center, half, FRAC_PI_4, center + along_x * 1.2));
+        assert!(point_in_oriented_box(center, half, FRAC_PI_4, center + along_y * 0.4));
+        assert!(!point_in_oriented_box(center, half, FRAC_PI_4, center + along_y * 0.6));
+    }
+
+    #[test]
+    fn building_at_world_picks_the_footprint_and_misses_outside() {
+        let mut game = Game::new(None);
+        let id = game
+            .place_building(&GamePlacementDesc {
+                kind: BuildingKind::FreeCompanyQuarters as i32,
+                rotation_index: 0,
+                world_x: 24.0,
+                world_z: -8.0,
+            })
+            .unwrap();
+        let buildings = game.buildings();
+        let b = buildings.iter().find(|b| b.id == id).unwrap();
+        assert_eq!(
+            building_at_world(&buildings, Vec2::new(b.center_x, b.center_z)),
+            Some(id)
+        );
+        assert_eq!(building_at_world(&buildings, Vec2::new(40.0, 40.0)), None);
     }
 
     #[test]

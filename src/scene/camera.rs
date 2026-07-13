@@ -58,6 +58,20 @@ impl Camera {
         );
         remap * proj
     }
+
+    // Project a world point to physical screen pixels. None if it is behind the
+    // camera (w <= 0); off-screen points still project (callers clamp/cull).
+    pub fn world_to_screen(&self, world: Vec3, screen: Vec2) -> Option<Vec2> {
+        let clip = (self.proj() * self.view_at_origin()) * (world - self.position).extend(1.0);
+        if clip.w <= 1e-4 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        Some(Vec2::new(
+            (ndc.x * 0.5 + 0.5) * screen.x,
+            (1.0 - (ndc.y * 0.5 + 0.5)) * screen.y,
+        ))
+    }
 }
 
 // Port of struct UniformData (camera.hpp). Matches FrameUniforms in
