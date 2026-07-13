@@ -38,6 +38,8 @@ pub struct GameCharacterState {
     pub color_r: f32,
     pub color_g: f32,
     pub color_b: f32,
+    pub home_building_id: i32,   // recruiting guild; -1 = homeless / not a hero
+    pub inside_building_id: i32, // -1 = outside; >=0 => hidden (don't draw)
 }
 
 #[repr(C)]
@@ -103,6 +105,29 @@ pub struct GameBuildingDef {
     pub width_tiles: i32,
     pub depth_tiles: i32,
     pub poppable: u32,
+    pub user_destructible: u32,
+    pub enemy_targettable: u32,
+}
+
+// Mirror of GameActionKind. Discriminants must match the C enum order (asserted
+// by a test below and pinned C-side with static_assert in game.cpp).
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameActionKind {
+    PlaceBuilding = 0,
+    RecruitHero = 1,
+    DestroyBuilding = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GameAction {
+    pub kind: i32,
+    pub target_id: u32,
+    pub world_x: f32,
+    pub world_z: f32,
+    pub param_a: i32,
+    pub param_b: i32,
 }
 
 // The world-space box to draw for a building so the cuboid matches its grid
@@ -196,7 +221,7 @@ unsafe extern "C" {
         out_triangles: *mut GameGridTriangle,
         cap: u32,
     ) -> u32;
-    fn game_place_building(game: *mut BadlandsGame, desc: *const GamePlacementDesc) -> u32;
+    fn game_dispatch(game: *mut BadlandsGame, action: *const GameAction) -> i64;
     fn game_buildings(game: *const BadlandsGame, out: *mut GameBuildingState, cap: u32) -> u32;
     fn game_world(game: *const BadlandsGame, out: *mut GameWorldState);
     fn game_building_def(kind: i32) -> GameBuildingDef;
@@ -348,11 +373,44 @@ impl Game {
         }
     }
 
+    /// The single player->world action entry point. Returns >= 0 on success
+    /// (a new building/hero id, or 0 for id-less actions), < 0 on error.
+    pub fn dispatch(&mut self, action: GameAction) -> i64 {
+        unsafe { game_dispatch(self.handle, &action) }
+    }
+
     /// Places a building; returns its id, or None if the snapped footprint is
-    /// invalid (sim state left untouched).
+    /// invalid (sim state left untouched). Thin builder over dispatch.
     pub fn place_building(&mut self, desc: &GamePlacementDesc) -> Option<u32> {
-        let id = unsafe { game_place_building(self.handle, desc) };
-        (id != u32::MAX).then_some(id)
+        let r = self.dispatch(GameAction {
+            kind: GameActionKind::PlaceBuilding as i32,
+            world_x: desc.world_x,
+            world_z: desc.world_z,
+            param_a: desc.kind,
+            param_b: desc.rotation_index,
+            ..Default::default()
+        });
+        (r >= 0).then_some(r as u32)
+    }
+
+    /// Recruits a hero at the given guild building; returns the new hero id or
+    /// None on rejection (not a guild, roster full, no free approach tile).
+    pub fn recruit(&mut self, building_id: u32) -> Option<u32> {
+        let r = self.dispatch(GameAction {
+            kind: GameActionKind::RecruitHero as i32,
+            target_id: building_id,
+            ..Default::default()
+        });
+        (r >= 0).then_some(r as u32)
+    }
+
+    /// Destroys a user-destructible building; returns true on success.
+    pub fn destroy_building(&mut self, building_id: u32) -> bool {
+        self.dispatch(GameAction {
+            kind: GameActionKind::DestroyBuilding as i32,
+            target_id: building_id,
+            ..Default::default()
+        }) >= 0
     }
 }
 
@@ -421,6 +479,45 @@ mod tests {
         let world = game.world();
         assert_eq!(world.gold, 1000);
         assert_eq!(world.grid_half_extent_tiles, GRID_HALF_EXTENT_TILES);
+    }
+
+    #[test]
+    fn game_action_kind_discriminants_match_the_c_enum() {
+        // Pinned C-side with static_assert in game.cpp; both sides key off 0/1/2.
+        assert_eq!(GameActionKind::PlaceBuilding as i32, 0);
+        assert_eq!(GameActionKind::RecruitHero as i32, 1);
+        assert_eq!(GameActionKind::DestroyBuilding as i32, 2);
+    }
+
+    #[test]
+    fn dispatch_places_and_rejects_via_the_generic_trigger() {
+        let mut game = Game::new(None);
+        // PLACE_BUILDING round-trips like the old game_place_building.
+        let placed = game.place_building(&GamePlacementDesc {
+            kind: BuildingKind::Watchtower as i32,
+            rotation_index: 0,
+            world_x: 24.0,
+            world_z: 24.0,
+        });
+        let id = placed.expect("placement should succeed");
+
+        // Unknown action kind -> error.
+        assert!(game.dispatch(GameAction { kind: 999, ..Default::default() }) < 0);
+        // Recruit is not wired until Phase 5.
+        assert!(game.recruit(id).is_none());
+        // Castle (id 0) is not user-destructible.
+        assert!(!game.destroy_building(0));
+        // The placed watchtower is destructible.
+        assert!(game.destroy_building(id));
+        assert!(!game.destroy_building(id)); // already gone
+    }
+
+    #[test]
+    fn building_def_flags_are_decoupled() {
+        let castle = building_def(BuildingKind::Castle);
+        assert_eq!((castle.user_destructible, castle.enemy_targettable), (0, 1));
+        let guild = building_def(BuildingKind::FreeCompanyQuarters);
+        assert_eq!((guild.user_destructible, guild.enemy_targettable), (1, 0));
     }
 
     #[test]

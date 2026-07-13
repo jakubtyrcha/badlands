@@ -10,9 +10,20 @@
 #include <glm/glm.hpp>
 
 #include <cstdio>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
+
+// Discriminant pins for the generic action trigger + building kinds. The Rust
+// mirrors in src/game_ffi.rs assert the same literals (a #[test]); together
+// they keep the C enum and its #[repr(i32)] mirror in lockstep.
+static_assert(GAME_ACTION_PLACE_BUILDING == 0, "GameActionKind order");
+static_assert(GAME_ACTION_RECRUIT_HERO == 1, "GameActionKind order");
+static_assert(GAME_ACTION_DESTROY_BUILDING == 2, "GameActionKind order");
+static_assert(GAME_ACTION_KIND_COUNT == 3, "GameActionKind count");
+static_assert(GAME_BUILDING_CASTLE == 0, "GameBuildingKind order");
+static_assert(GAME_BUILDING_KIND_COUNT == 10, "GameBuildingKind count");
 
 using namespace badlands;
 
@@ -282,6 +293,11 @@ uint32_t game_state(const BadlandsGame* game, GameCharacterState* out, uint32_t 
                 .color_r = shape.color.x,
                 .color_g = shape.color.y,
                 .color_b = shape.color.z,
+                .home_building_id =
+                    game->registry.all_of<Home>(e) ? game->registry.get<Home>(e).building_id : -1,
+                .inside_building_id = game->registry.all_of<InsideBuilding>(e)
+                                          ? game->registry.get<InsideBuilding>(e).building_id
+                                          : -1,
             };
         }
         ++total;
@@ -318,6 +334,40 @@ bool game_reload_script(BadlandsGame* game, const char* source) {
         }
     }
     return true;
+}
+
+int64_t game_dispatch(BadlandsGame* game, const GameAction* action) {
+    if (game == nullptr || action == nullptr) {
+        return -1;
+    }
+    switch (action->kind) {
+        case GAME_ACTION_PLACE_BUILDING: {
+            GamePlacementDesc desc{action->param_a, action->param_b, action->world_x,
+                                   action->world_z};
+            uint32_t id = badlands::place_building(*game, desc, /*player=*/true);
+            return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
+        }
+        case GAME_ACTION_RECRUIT_HERO:
+            return -1;  // handler lands in Phase 5 (heroes)
+        case GAME_ACTION_DESTROY_BUILDING: {
+            uint32_t id = action->target_id;
+            auto& buildings = game->placement.buildings;
+            if (id >= buildings.size() || !buildings[id].alive) {
+                return -1;  // unknown or already destroyed
+            }
+            if (!game_building_def(buildings[id].kind).user_destructible) {
+                return -2;  // Castle/House/Sewer are not player-destructible
+            }
+            buildings[id].alive = false;
+            ++game->placement.nav_epoch;
+            badlands::rebuild_occupancy(game->placement);
+            badlands::notify_obstacle_removed(*game, id);
+            // Phase 5 extends this to expel/reassign resident heroes.
+            return 0;
+        }
+        default:
+            return -1;
+    }
 }
 
 void game_set_pathfinder(BadlandsGame* game, const GamePathfinder* pathfinder) {

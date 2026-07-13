@@ -132,4 +132,7 @@ void rebuild_occupancy(PlacementState& st);
 // when no provider is registered (game.pathfinder is zero-initialized).
 void notify_obstacle_added(BadlandsGame& game, uint32_t building_id);
 
+// Removes a destroyed building from the nav pathfinder. No-op with no provider.
+void notify_obstacle_removed(BadlandsGame& game, uint32_t building_id);
+
 }  // namespace badlands

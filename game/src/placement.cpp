@@ -10,18 +10,21 @@ namespace badlands {
 
 namespace {
 
-// Footprint sizes and poppable flag, indexed by GameBuildingKind.
+// Footprint sizes + flags, indexed by GameBuildingKind.
+// { width, depth, poppable, user_destructible, enemy_targettable }.
+// user_destructible: the 7 player-buildable kinds (guilds + Tavern/Apothecary/
+// Watchtower). enemy_targettable is decoupled (Castle + House); unused in v0.3.
 constexpr GameBuildingDef kDefs[GAME_BUILDING_KIND_COUNT] = {
-    {4, 4, 0},  // Castle
-    {3, 3, 0},  // Free Company Quarters
-    {3, 3, 0},  // Hunter's Camp
-    {3, 3, 0},  // Thieves' Den
-    {3, 3, 0},  // Scriptorium
-    {2, 1, 0},  // Tavern
-    {2, 1, 0},  // Apothecary
-    {1, 1, 0},  // Watchtower
-    {2, 1, 1},  // House (poppable)
-    {1, 1, 1},  // Sewer (poppable)
+    {4, 4, 0, 0, 1},  // Castle
+    {3, 3, 0, 1, 0},  // Free Company Quarters
+    {3, 3, 0, 1, 0},  // Hunter's Camp
+    {3, 3, 0, 1, 0},  // Thieves' Den
+    {3, 3, 0, 1, 0},  // Scriptorium
+    {2, 1, 0, 1, 0},  // Tavern
+    {2, 1, 0, 1, 0},  // Apothecary
+    {1, 1, 0, 1, 0},  // Watchtower
+    {2, 1, 1, 0, 1},  // House (poppable)
+    {1, 1, 1, 0, 0},  // Sewer (poppable)
 };
 
 // Urban-sprawl contribution in quarter-units. Watchtower is a small structure
@@ -468,6 +471,13 @@ void notify_obstacle_added(BadlandsGame& game, uint32_t building_id) {
     pf.add_obstacle(pf.ctx, building_id, flat, 4);
 }
 
+void notify_obstacle_removed(BadlandsGame& game, uint32_t building_id) {
+    const GamePathfinder& pf = game.pathfinder;
+    if (pf.remove_obstacle != nullptr) {
+        pf.remove_obstacle(pf.ctx, building_id);
+    }
+}
+
 uint32_t place_building(BadlandsGame& game, const GamePlacementDesc& desc, bool player) {
     PlacementState& st = game.placement;
     int rot = ((desc.rotation_index % 4) + 4) % 4;
@@ -516,10 +526,6 @@ GameRenderBox game_render_box(int32_t kind, int32_t rotation_index) {
         box.yaw_radians = 0.7853981634f;   // 45 deg
     }
     return box;
-}
-
-uint32_t game_place_building(BadlandsGame* game, const GamePlacementDesc* desc) {
-    return place_building(*game, *desc, /*player=*/true);
 }
 
 uint32_t game_probe_placement(const BadlandsGame* game, const GamePlacementDesc* desc,

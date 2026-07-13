@@ -37,6 +37,8 @@ typedef struct GameCharacterState {
     float hp, max_hp;
     float size_x, size_y, size_z;
     float color_r, color_g, color_b;
+    int32_t home_building_id;    // recruiting guild; -1 = homeless / not a hero
+    int32_t inside_building_id;  // -1 = outside; >=0 => hidden (don't draw; list in panel)
 } GameCharacterState;
 
 typedef struct GameStats {
@@ -98,10 +100,12 @@ typedef enum GameBuildingKind {
     GAME_BUILDING_KIND_COUNT
 } GameBuildingKind;
 
-// Static per-kind footprint size (tiles) and whether it auto-spawns.
+// Static per-kind footprint size (tiles) and behavior flags.
 typedef struct GameBuildingDef {
     int32_t width_tiles, depth_tiles;
-    uint32_t poppable;  // 1 = auto-spawned (House/Sewer), never player-placed
+    uint32_t poppable;           // 1 = auto-spawned (House/Sewer), never player-placed
+    uint32_t user_destructible;  // 1 = player may DESTROY (the 7 buildable kinds)
+    uint32_t enemy_targettable;  // 1 = future monster attacks may target (Castle/House); unused in v0.3
 } GameBuildingDef;
 GameBuildingDef game_building_def(int32_t kind);
 
@@ -146,11 +150,35 @@ uint32_t game_probe_placement(const BadlandsGame* game, const GamePlacementDesc*
                               GamePlacementProbe* out, GameGridTriangle* out_triangles,
                               uint32_t cap);
 
-// Places a building. Returns the new building id, or UINT32_MAX if the snapped
-// footprint is invalid (state left untouched). A successful player placement
-// stamps footprint+margin, advances the urban-sprawl counter, and immediately
-// spawns any owed poppables (sewers before houses).
-uint32_t game_place_building(BadlandsGame* game, const GamePlacementDesc* desc);
+// ---------------------------------------------------------------------------
+// Generic player->world action trigger (v0.3)
+//
+// Every player action crosses this single entry point: a new mechanic adds a
+// GameActionKind value + a C++ handler, never a new C API signature. This keeps
+// UX and world decoupled and independently testable (tests dispatch actions
+// directly, with no UI). The read-only game_probe_placement preview stays a
+// query, not an action.
+// ---------------------------------------------------------------------------
+typedef enum GameActionKind {
+    GAME_ACTION_PLACE_BUILDING = 0,  // world_x/z, param_a = kind, param_b = rotation_index
+    GAME_ACTION_RECRUIT_HERO,        // target_id = guild building id
+    GAME_ACTION_DESTROY_BUILDING,    // target_id = building id
+    GAME_ACTION_KIND_COUNT
+} GameActionKind;
+
+typedef struct GameAction {
+    int32_t kind;        // GameActionKind
+    uint32_t target_id;  // building/entity id for id-addressed actions
+    float world_x, world_z;
+    int32_t param_a, param_b;
+} GameAction;
+
+// Executes a player action. Returns >= 0 on success (a new building/hero id, or
+// 0 for id-less actions) and < 0 on error. A successful PLACE_BUILDING stamps
+// footprint+margin, advances the urban-sprawl counter, and spawns owed
+// poppables (sewers before houses); DESTROY_BUILDING rejects non-destructible
+// (Castle/House/Sewer) or already-dead buildings.
+int64_t game_dispatch(BadlandsGame* game, const GameAction* action);
 
 // Per-building snapshot row (game_state pattern). ids are stable and dense.
 typedef struct GameBuildingState {

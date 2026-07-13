@@ -39,6 +39,15 @@ std::vector<GameBuildingState> snapshot(const BadlandsGame* game) {
     return rows;
 }
 
+// Placement now goes through the generic action trigger; this preserves the old
+// game_place_building return semantics (id, or UINT32_MAX on rejection).
+uint32_t place(BadlandsGame* game, const GamePlacementDesc* desc) {
+    GameAction a{GAME_ACTION_PLACE_BUILDING, 0, desc->world_x, desc->world_z, desc->kind,
+                 desc->rotation_index};
+    int64_t r = game_dispatch(game, &a);
+    return (r < 0) ? UINT32_MAX : static_cast<uint32_t>(r);
+}
+
 int count_kind(const std::vector<GameBuildingState>& rows, int kind) {
     return static_cast<int>(std::count_if(rows.begin(), rows.end(),
                                           [kind](const GameBuildingState& b) { return b.kind == kind; }));
@@ -122,15 +131,15 @@ TEST_CASE("placement respects the castle footprint and margin") {
     BadlandsGame* game = game_create(nullptr);
     // Inside the castle -> invalid, state untouched.
     GamePlacementDesc on_castle{GAME_BUILDING_WATCHTOWER, 0, 0.0f, 0.0f};
-    CHECK(game_place_building(game, &on_castle) == UINT32_MAX);
+    CHECK(place(game, &on_castle) == UINT32_MAX);
     CHECK(snapshot(game).size() == 1);
 
     // Castle spans tiles [-2,2); its margin reaches tile x=2, so a tower there
     // is blocked, but far out is clear.
     GamePlacementDesc in_margin{GAME_BUILDING_WATCHTOWER, 0, 2.5f, 0.5f};
-    CHECK(game_place_building(game, &in_margin) == UINT32_MAX);
+    CHECK(place(game, &in_margin) == UINT32_MAX);
     GamePlacementDesc clear{GAME_BUILDING_WATCHTOWER, 0, 30.5f, 0.5f};
-    CHECK(game_place_building(game, &clear) != UINT32_MAX);
+    CHECK(place(game, &clear) != UINT32_MAX);
     game_destroy(game);
 }
 
@@ -139,13 +148,13 @@ TEST_CASE("blocking is symmetric regardless of placement order") {
     GamePlacementDesc b{GAME_BUILDING_WATCHTOWER, 0, 21.5f, 20.5f};  // adjacent tile
 
     BadlandsGame* g1 = game_create(nullptr);
-    CHECK(game_place_building(g1, &a) != UINT32_MAX);
-    CHECK(game_place_building(g1, &b) == UINT32_MAX);
+    CHECK(place(g1, &a) != UINT32_MAX);
+    CHECK(place(g1, &b) == UINT32_MAX);
     game_destroy(g1);
 
     BadlandsGame* g2 = game_create(nullptr);
-    CHECK(game_place_building(g2, &b) != UINT32_MAX);
-    CHECK(game_place_building(g2, &a) == UINT32_MAX);
+    CHECK(place(g2, &b) != UINT32_MAX);
+    CHECK(place(g2, &a) == UINT32_MAX);
     game_destroy(g2);
 }
 
@@ -340,16 +349,16 @@ TEST_CASE("probe reports green for a clear spot and red near a building") {
 TEST_CASE("footprints flush to the grid edge are valid; crossing it is not") {
     BadlandsGame* game = game_create(nullptr);
     GamePlacementDesc flush{GAME_BUILDING_WATCHTOWER, 0, 47.5f, 0.5f};  // tile (47,0), x1=48
-    CHECK(game_place_building(game, &flush) != UINT32_MAX);
+    CHECK(place(game, &flush) != UINT32_MAX);
     GamePlacementDesc over{GAME_BUILDING_WATCHTOWER, 0, 48.5f, 0.5f};  // tile (48,..) OOB
-    CHECK(game_place_building(game, &over) == UINT32_MAX);
+    CHECK(place(game, &over) == UINT32_MAX);
     game_destroy(game);
 }
 
 TEST_CASE("a normal placement spawns one nearby house") {
     BadlandsGame* game = game_create(nullptr);
     GamePlacementDesc tavern{GAME_BUILDING_TAVERN, 0, 12.0f, 0.0f};
-    REQUIRE(game_place_building(game, &tavern) != UINT32_MAX);
+    REQUIRE(place(game, &tavern) != UINT32_MAX);
 
     auto rows = snapshot(game);
     CHECK(count_kind(rows, GAME_BUILDING_HOUSE) == 1);
@@ -375,8 +384,8 @@ TEST_CASE("the second normal placement adds a sewer before the house") {
     BadlandsGame* game = game_create(nullptr);
     GamePlacementDesc t1{GAME_BUILDING_TAVERN, 0, 12.0f, 0.0f};
     GamePlacementDesc t2{GAME_BUILDING_APOTHECARY, 0, 12.0f, 12.0f};
-    REQUIRE(game_place_building(game, &t1) != UINT32_MAX);
-    REQUIRE(game_place_building(game, &t2) != UINT32_MAX);
+    REQUIRE(place(game, &t1) != UINT32_MAX);
+    REQUIRE(place(game, &t2) != UINT32_MAX);
 
     auto rows = snapshot(game);
     CHECK(count_kind(rows, GAME_BUILDING_HOUSE) == 2);
@@ -402,7 +411,7 @@ TEST_CASE("the urban score drives poppables; watchtowers contribute less") {
         {GAME_BUILDING_WATCHTOWER, 0, 30.5f, -30.5f},
         {GAME_BUILDING_WATCHTOWER, 0, 30.5f, 30.5f},
     };
-    for (auto& d : wt) REQUIRE(game_place_building(towers, &d) != UINT32_MAX);
+    for (auto& d : wt) REQUIRE(place(towers, &d) != UINT32_MAX);
     auto trows = snapshot(towers);
     CHECK(count_kind(trows, GAME_BUILDING_HOUSE) == 3);
     CHECK(count_kind(trows, GAME_BUILDING_SEWER) == 1);
@@ -419,7 +428,7 @@ TEST_CASE("the urban score drives poppables; watchtowers contribute less") {
         {GAME_BUILDING_SCRIPTORIUM, 0, 30.0f, -30.0f},
         {GAME_BUILDING_SCRIPTORIUM, 0, 30.0f, 30.0f},
     };
-    for (auto& d : fc) REQUIRE(game_place_building(halls, &d) != UINT32_MAX);
+    for (auto& d : fc) REQUIRE(place(halls, &d) != UINT32_MAX);
     auto hrows = snapshot(halls);
     CHECK(count_kind(hrows, GAME_BUILDING_HOUSE) == 4);
     CHECK(count_kind(hrows, GAME_BUILDING_SEWER) == 2);
@@ -452,7 +461,7 @@ TEST_CASE("identical placement sequences are deterministic") {
             {GAME_BUILDING_APOTHECARY, 1, -14.0f, 6.0f},
             {GAME_BUILDING_SCRIPTORIUM, 0, 0.0f, 20.0f},
         };
-        for (auto& d : seq) game_place_building(game, &d);
+        for (auto& d : seq) place(game, &d);
         auto rows = snapshot(game);
         game_destroy(game);
         return rows;
@@ -528,4 +537,56 @@ TEST_CASE("v0.3 placement helpers: approach tile, nearest-of-kind, occupancy reb
     }
 
     game_destroy(game);
+}
+
+TEST_CASE("game_dispatch is the generic action trigger") {
+    BadlandsGame* game = game_create(nullptr);  // castle id 0
+
+    SECTION("PLACE_BUILDING round-trips and rejects overlap") {
+        GameAction ok{GAME_ACTION_PLACE_BUILDING, 0, 24.0f, 24.0f, GAME_BUILDING_TAVERN, 0};
+        int64_t id = game_dispatch(game, &ok);
+        CHECK(id >= 0);
+        // Same footprint again -> rejected.
+        CHECK(game_dispatch(game, &ok) < 0);
+    }
+
+    SECTION("unknown action kind returns an error") {
+        GameAction bogus{999, 0, 0.0f, 0.0f, 0, 0};
+        CHECK(game_dispatch(game, &bogus) < 0);
+    }
+
+    SECTION("DESTROY_BUILDING rejects the non-destructible castle") {
+        GameAction destroy_castle{GAME_ACTION_DESTROY_BUILDING, 0, 0.0f, 0.0f, 0, 0};
+        CHECK(game_dispatch(game, &destroy_castle) < 0);
+        CHECK(snapshot(game).size() == 1);  // castle still standing
+    }
+
+    SECTION("DESTROY_BUILDING removes a user-destructible building") {
+        GamePlacementDesc tower{GAME_BUILDING_WATCHTOWER, 0, 24.0f, -24.0f};
+        uint32_t id = place(game, &tower);
+        REQUIRE(id != UINT32_MAX);
+        size_t before = snapshot(game).size();
+        GameAction destroy{GAME_ACTION_DESTROY_BUILDING, id, 0.0f, 0.0f, 0, 0};
+        CHECK(game_dispatch(game, &destroy) == 0);
+        CHECK(snapshot(game).size() == before - 1);
+        // Destroying it again fails (already dead).
+        CHECK(game_dispatch(game, &destroy) < 0);
+    }
+
+    game_destroy(game);
+}
+
+TEST_CASE("GameBuildingDef flags: user_destructible and enemy_targettable are decoupled") {
+    // Castle: enemy target but not user-destructible.
+    GameBuildingDef castle = game_building_def(GAME_BUILDING_CASTLE);
+    CHECK(castle.user_destructible == 0);
+    CHECK(castle.enemy_targettable == 1);
+    // A guild: user-destructible but not an enemy target.
+    GameBuildingDef guild = game_building_def(GAME_BUILDING_FREE_COMPANY_QUARTERS);
+    CHECK(guild.user_destructible == 1);
+    CHECK(guild.enemy_targettable == 0);
+    // House (poppable): enemy target, not user-destructible.
+    GameBuildingDef house = game_building_def(GAME_BUILDING_HOUSE);
+    CHECK(house.user_destructible == 0);
+    CHECK(house.enemy_targettable == 1);
 }
