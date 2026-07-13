@@ -248,6 +248,13 @@ std::unique_ptr<BrainRuntime> BrainRuntime::create(BadlandsGame& game,
     // fuller interface while the duel/downgrade fixtures declare a minimal set,
     // without a "declared but unbound" failure. A script that declares a @fn the
     // host does not implement is left unbound and fails loudly at resume.
+    //
+    // Tradeoff: because create() no longer fails when a script simply omits a
+    // declaration, a hot-reloaded brain that drops a needed @fn binds fine and
+    // just stops performing that action (visible in dev). game_reload_script
+    // still keeps-last-good on a genuine build failure (compile error or a
+    // declared-but-unbound @fn). The undeclared-bind-fail smoke test pins the
+    // failure half of this contract.
     bool ok = true;
     auto bind = [&](const char* name, auto fn) {
         if (!prog.GetCallableLocation(name).has_value()) {

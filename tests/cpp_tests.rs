@@ -129,10 +129,17 @@ fn cpp_game_tests() {
     }
 
     // 3. Run it; Catch2 output goes straight to the terminal.
+    //    BADLANDS_BRAIN_SCRIPT = the shipping hero brain (framework smoke tests it
+    //    "runs clean"); BADLANDS_COMBAT_SCRIPT = the dedicated, stable duel brain
+    //    (the combat gate must not pin the evolving hero brain).
     run(Command::new(&binary)
         .env(
             "BADLANDS_BRAIN_SCRIPT",
-            root.join("scripts/brains/warrior.noiser"),
+            root.join("scripts/brains/hero.noiser"),
+        )
+        .env(
+            "BADLANDS_COMBAT_SCRIPT",
+            root.join("scripts/brains/combat_test.noiser"),
         )
         .current_dir(&root));
 }

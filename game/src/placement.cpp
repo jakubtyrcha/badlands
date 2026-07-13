@@ -605,6 +605,7 @@ void game_world(const BadlandsGame* game, GameWorldState* out) {
         .grid_half_extent_tiles = kGridHalf,
         .queued_poppables = queued,
         .urban_quarters = st.urban_quarters,
+        .guild_roster_cap = static_cast<uint32_t>(kGuildRosterCap),
     };
 }
 

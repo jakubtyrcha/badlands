@@ -472,10 +472,21 @@ pub unsafe extern "C" fn nav_find_path(
     .unwrap_or_default();
     let count = waypoints.len();
     if !out_xz.is_null() && cap > 0 {
-        let out = unsafe { std::slice::from_raw_parts_mut(out_xz, (cap as usize) * 2) };
-        for (i, wp) in waypoints.iter().take(cap as usize).enumerate() {
+        let cap = cap as usize;
+        let n = count.min(cap);
+        let out = unsafe { std::slice::from_raw_parts_mut(out_xz, cap * 2) };
+        for (i, wp) in waypoints.iter().take(n).enumerate() {
             out[i * 2] = wp.x;
             out[i * 2 + 1] = wp.y;
+        }
+        // Path longer than the caller's buffer: force the last emitted waypoint
+        // to the true goal so the unit still heads toward it (the dropped middle
+        // re-plans on the next cycle) instead of marching to a non-goal interior
+        // waypoint and stalling there. (count is still returned so the caller
+        // sees the snapshot-idiom truncation.)
+        if count > cap && n > 0 {
+            out[(n - 1) * 2] = gx;
+            out[(n - 1) * 2 + 1] = gz;
         }
     }
     count as i32

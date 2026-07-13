@@ -132,6 +132,12 @@ fn rects(model: &PanelModel, scale: f32) -> Rects {
     }
 }
 
+// The panel's real pixel height for this model/scale (the same box draw() and
+// hit_test() use), so callers can place/clamp it without guessing.
+pub fn height(model: &PanelModel, scale: f32) -> f32 {
+    rects(model, scale).bg.h
+}
+
 pub fn hit_test(model: &PanelModel, scale: f32, x: f32, y: f32) -> Hit {
     let r = rects(model, scale);
     if model.recruit_enabled {

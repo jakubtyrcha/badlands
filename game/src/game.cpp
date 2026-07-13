@@ -203,9 +203,11 @@ void game_tick(BadlandsGame* game, float dt) {
     }
 
     // Legacy direct movement for scripted brains that still push a per-tick
-    // move Intent (intent_move). MoveTarget-driven units (mock brains, town
-    // heroes) are moved by the pipeline below instead. Phase 6 unifies these
-    // once warrior.noiser switches to intent_move_to.
+    // move Intent (intent_move). The shipping brains (hero.noiser,
+    // combat_test.noiser) and the mock brain all move via MoveTarget +
+    // intent_move_to, so this loop is inert today; it is kept for any brain that
+    // still drives a kind-1 move Intent (and for the intent_move host binding the
+    // downgrade fixtures may exercise).
     for (auto [e, intent, pos, stats] :
          registry.view<const Intent, Position, const Stats>(entt::exclude<MeleeLock, InsideBuilding>)
              .each()) {

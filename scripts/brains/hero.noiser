@@ -121,18 +121,18 @@ fn score(b: Behaviour, v: WorldView, profile: Profile, roll: f32) -> f32 {
     }
 }
 
-fn act(b: Behaviour, v: WorldView, dx: f32, dz: f32) -> (Goal, Command) {
+fn act(b: Behaviour, v: WorldView, roam_x: f32, roam_z: f32) -> (Goal, Command) {
     match b {
         Behaviour::Buy => (Goal::GoTo(v.apothecary_px, v.apothecary_pz), Command::Buy),
         Behaviour::GoHome => (Goal::GoTo(v.home_px, v.home_pz), Command::EnterHome),
         Behaviour::VisitTavern => (Goal::GoTo(v.tavern_px, v.tavern_pz), Command::Enter(TAVERN)),
-        Behaviour::Roam => (Goal::GoTo(v.px + dx, v.pz + dz), Command::NoOp),
+        Behaviour::Roam => (Goal::GoTo(roam_x, roam_z), Command::NoOp),
         Behaviour::Idle => (Goal::Hold, Command::NoOp),
     }
 }
 
 // --- selection: hard combat pre-empt, then weighted soft argmax ---------------
-fn decide(v: WorldView, profile: Profile, roll: f32, dx: f32, dz: f32) -> (Goal, Command) {
+fn decide(v: WorldView, profile: Profile, roll: f32, roam_x: f32, roam_z: f32) -> (Goal, Command) {
     if v.enemy_exists > 0.5 {
         combat_act(v)
     } else {
@@ -146,22 +146,36 @@ fn decide(v: WorldView, profile: Profile, roll: f32, dx: f32, dz: f32) -> (Goal,
                 best = b;
             }
         }
-        act(best, v, dx, dz)
+        act(best, v, roam_x, roam_z)
     }
 }
 
 pub gen fn brain(entity: i32) -> i32 {
     var rng = from_seed(entity + 1);
+    // A committed roam destination: re-drawn only when its ~1s lease expires, so
+    // the hero wanders smoothly (and the Point goal stays stable, so plan_paths
+    // does not repath every tick) rather than jittering to a fresh point.
+    var roam_x = 0.0;
+    var roam_z = 0.0;
+    var roam_ttl = 0;
     loop {
         let view = observe(entity);
         let profile = profile_for(view.class);
 
-        let (roll, r1) = next_float(rng);
-        let (dx, r2) = range_f32(r1, 0.0 - ROAM_RADIUS, ROAM_RADIUS);
-        let (dz, r3) = range_f32(r2, 0.0 - ROAM_RADIUS, ROAM_RADIUS);
+        if roam_ttl <= 0 {
+            let (dx, r1) = range_f32(rng, 0.0 - ROAM_RADIUS, ROAM_RADIUS);
+            let (dz, r2) = range_f32(r1, 0.0 - ROAM_RADIUS, ROAM_RADIUS);
+            rng = r2;
+            roam_x = view.px + dx;
+            roam_z = view.pz + dz;
+            roam_ttl = 30;
+        }
+        roam_ttl = roam_ttl - 1;
+
+        let (roll, r3) = next_float(rng);
         rng = r3;
 
-        let (goal, command) = decide(view, profile, roll, dx, dz);
+        let (goal, command) = decide(view, profile, roll, roam_x, roam_z);
 
         match goal {
             Goal::GoTo(x, z) => @fn.intent_move_to(entity, x, z),

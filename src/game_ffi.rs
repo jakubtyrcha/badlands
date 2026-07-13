@@ -186,6 +186,7 @@ pub struct GameWorldState {
     pub grid_half_extent_tiles: i32,
     pub queued_poppables: u32,
     pub urban_quarters: u32,
+    pub guild_roster_cap: u32,
 }
 
 // Mirror of GamePathfinder: a pluggable path-geometry provider. We construct
@@ -504,6 +505,8 @@ mod tests {
         let world = game.world();
         assert_eq!(world.gold, 1000);
         assert_eq!(world.grid_half_extent_tiles, GRID_HALF_EXTENT_TILES);
+        // The panel's roster cap must track the sim's kGuildRosterCap.
+        assert_eq!(world.guild_roster_cap, crate::ui::panel::CAPACITY);
     }
 
     #[test]

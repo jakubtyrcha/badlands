@@ -1,8 +1,9 @@
-// Stage-2 integration: the Mercenary-vs-Goblin duel driven by the real
-// warrior.noiser brain script. Prefers noiser at every stage; if the script
-// fails anywhere, the affected entity downgrades to the mock brain, the bug
-// is recorded, and the duel still resolves — the suite stays green while the
-// failure is impossible to miss.
+// Stage-2 integration: the Mercenary-vs-Goblin duel driven by the dedicated
+// combat_test.noiser brain (a stable combat-only script, NOT the evolving hero
+// brain — the gate must not pin behaviour that changes over time). Prefers
+// noiser at every stage; if the script fails anywhere, the affected entity
+// downgrades to the mock brain, the bug is recorded, and the duel still
+// resolves — the suite stays green while the failure is impossible to miss.
 
 #include "badlands_game.h"
 #include "duel_common.h"
@@ -19,7 +20,7 @@ using namespace testfix;
 namespace {
 
 std::string load_brain_script() {
-    const char* path = std::getenv("BADLANDS_BRAIN_SCRIPT");
+    const char* path = std::getenv("BADLANDS_COMBAT_SCRIPT");
     REQUIRE(path != nullptr);  // exported by tests/cpp_tests.rs
     std::ifstream file(path);
     REQUIRE(file.good());

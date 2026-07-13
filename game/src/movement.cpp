@@ -45,7 +45,11 @@ std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2
         }
         return wp;
     }
-    // No provider: straight line (start included so follow_paths advances past it).
+    // No provider registered: straight-line fallback, obstacle-oblivious BY
+    // DESIGN. This path only runs in headless sims / C++ tests that never call
+    // game_set_pathfinder; the app registers a NavContext provider at
+    // construction (before any tick), so shipping units always route around
+    // buildings. (start included so follow_paths advances past it.)
     return {start, goal};
 }
 
@@ -151,7 +155,12 @@ void plan_paths(BadlandsGame& game, float dt) {
         }
 
         np.repath_cooldown = std::max(0.0f, np.repath_cooldown - dt);
-        bool goal_drifted = mt.kind != MoveTarget::Kind::Point && !np.waypoints.empty() &&
+        // Repath when the resolved goal has drifted from the planned route's end.
+        // Applies to Kind::Point too: scripted pursuit re-issues intent_move_to
+        // (a Point) at the target's fresh position every tick, so a moving Point
+        // must re-plan or the pursuer trails one route-length behind. A static
+        // Point (a committed move order) has back()==goal, so it never repaths.
+        bool goal_drifted = !np.waypoints.empty() &&
                             glm::distance(np.waypoints.back(), goal) > kGoalMovedThreshold;
         bool need = np.waypoints.empty() || np.cursor >= np.waypoints.size() ||
                     np.epoch != game.placement.nav_epoch || goal_drifted;
@@ -160,7 +169,6 @@ void plan_paths(BadlandsGame& game, float dt) {
             np.cursor = 0;
             np.epoch = game.placement.nav_epoch;
             np.repath_cooldown = kRepathCooldown;
-            np.blocked = np.waypoints.empty();
         }
     }
 }
@@ -281,13 +289,16 @@ void separate_units(BadlandsGame& game) {
 
     bool has_pf = game.pathfinder.find_path != nullptr;
     for (entt::entity e : view) {
-        if (reg.all_of<MeleeLock>(e)) {
-            continue;  // locked units are immovable colliders (never pushed, reprojected, or clamped)
-        }
         Position& pos = view.get<Position>(e);
-        auto pit = push.find(e);
-        if (pit != push.end()) {
-            pos.pos += pit->second;
+        // Locked units are immovable colliders: they are never *pushed* by
+        // separation. They are still reprojected out of footprints and clamped
+        // to the world bound, so a unit that locks while overlapping a building
+        // or past the edge is corrected instead of left embedded.
+        if (!reg.all_of<MeleeLock>(e)) {
+            auto pit = push.find(e);
+            if (pit != push.end()) {
+                pos.pos += pit->second;
+            }
         }
         if (has_pf) {
             reproject_out_of_footprints(game, pos.pos);

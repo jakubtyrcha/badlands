@@ -1,0 +1,34 @@
+// Dedicated combat brain for the duel regression test (game/tests/duel_test.cpp).
+// Deliberately minimal and STABLE — independent of the evolving hero brain
+// (scripts/brains/hero.noiser), so the combat gate never pins hero behaviour
+// that changes over time. Approach the nearest enemy and swing when in range;
+// the engine re-validates range + cooldown before applying damage.
+
+@fn.perceive_self:   fn(e: i32) -> (f32, f32, f32, f32);   // (x, z, hp, cooldown)
+@fn.perceive_target: fn(e: i32) -> (f32, f32, f32, f32);   // (x, z, hp, has_target)
+@fn.attack_range:    fn(e: i32) -> f32;
+@fn.intent_move_to:  fn(e: i32, x: f32, z: f32) -> void;
+@fn.intent_attack:   fn(e: i32) -> void;
+
+fn dist2(ax: f32, az: f32, bx: f32, bz: f32) -> f32 {
+    let dx = ax - bx;
+    let dz = az - bz;
+    dx * dx + dz * dz
+}
+
+pub gen fn brain(entity: i32) -> i32 {
+    loop {
+        let (sx, sz, hp, cd) = @fn.perceive_self(entity);
+        let (tx, tz, thp, has) = @fn.perceive_target(entity);
+        if has > 0.5 {
+            // Approach every tick; the engine melee-locks us in range.
+            @fn.intent_move_to(entity, tx, tz);
+            let range = @fn.attack_range(entity);
+            if dist2(sx, sz, tx, tz) <= range * range {
+                @fn.intent_attack(entity);
+            }
+        }
+        yield 0;
+    }
+}
+0.0

@@ -52,7 +52,7 @@ struct PlacementMode {
     rotation_index: i32,
 }
 
-const BRAIN_SCRIPT_MARKER: &str = "brains/warrior.noiser";
+const BRAIN_SCRIPT_MARKER: &str = "brains/hero.noiser";
 
 // The brain script is optional: the game runs mock-brains-only without it.
 fn find_brain_script() -> Option<PathBuf> {
@@ -230,34 +230,29 @@ impl GameState {
     // above it (a camera-facing debug label; the UI pass has no depth test, so
     // labels always render on top).
     fn push_building_labels(&mut self, camera: &Camera, buildings: &[GameBuildingState], screen: Vec2) {
-        let view_proj = camera.proj() * camera.view_at_origin();
         for building in buildings {
             let info = catalog::info(BuildingKind::from_i32(building.kind));
             let anchor = Vec3::new(building.center_x, info.height + 0.5, building.center_z);
-            let clip = view_proj * (anchor - camera.position).extend(1.0);
-            if clip.w <= 1e-4 {
+            let Some(p) = camera.world_to_screen(anchor, screen) else {
                 continue; // behind the camera
-            }
-            let ndc = clip.truncate() / clip.w;
-            if ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 {
+            };
+            if p.x < 0.0 || p.x > screen.x || p.y < 0.0 || p.y > screen.y {
                 continue; // off-screen: don't bleed labels onto the UI edges
             }
-            let px = (ndc.x * 0.5 + 0.5) * screen.x;
-            let py = (1.0 - (ndc.y * 0.5 + 0.5)) * screen.y - 8.0;
             let width = self.ui.atlas.measure(info.name);
             self.ui
-                .push_text(px - width * 0.5, py, info.name, [0.96, 0.96, 0.99, 1.0]);
+                .push_text(p.x - width * 0.5, p.y - 8.0, info.name, [0.96, 0.96, 0.99, 1.0]);
         }
     }
 
     // Screen anchor (top-left) for the selected building's floating panel,
     // clamped inside the viewport; a fixed corner if the center projects behind
     // the camera.
-    fn panel_anchor(&self, camera: &Camera, center: Vec3, screen: Vec2, layout: &UiLayout, scale: f32) -> Vec2 {
+    fn panel_anchor(&self, camera: &Camera, center: Vec3, screen: Vec2, layout: &UiLayout, scale: f32, height: f32) -> Vec2 {
         let vp = &layout.viewport;
         let pad = 8.0 * scale;
         let max_x = (vp.x + vp.w - panel::PANEL_W * scale - pad).max(vp.x + pad);
-        let max_y = (vp.y + vp.h - 160.0 * scale).max(vp.y + pad);
+        let max_y = (vp.y + vp.h - height - pad).max(vp.y + pad);
         match camera.world_to_screen(center, screen) {
             Some(p) => Vec2::new(
                 p.x.clamp(vp.x + pad, max_x),
@@ -282,8 +277,13 @@ impl GameState {
         let building = buildings.iter().find(|b| b.id == id)?;
         let info = catalog::info(BuildingKind::from_i32(building.kind));
         let center = Vec3::new(building.center_x, info.height + 0.5, building.center_z);
-        let anchor = self.panel_anchor(camera, center, screen, layout, scale);
-        Some(panel::build_model(building, buildings, characters, anchor))
+        // Build with a provisional anchor to learn the real panel height (it
+        // depends on the visitor count, not the anchor position), then place and
+        // clamp it against that height.
+        let mut model = panel::build_model(building, buildings, characters, Vec2::ZERO);
+        let height = panel::height(&model, scale);
+        model.anchor = self.panel_anchor(camera, center, screen, layout, scale, height);
+        Some(model)
     }
 
     fn render(&mut self, config: &RunConfig) -> bool {

@@ -196,6 +196,7 @@ typedef struct GameWorldState {
     int32_t grid_half_extent_tiles;
     uint32_t queued_poppables;  // owed but not yet placeable (crowded map)
     uint32_t urban_quarters;    // sprawl accumulator in quarter-units
+    uint32_t guild_roster_cap;  // kGuildRosterCap (heroes per guild); UI mirrors it
 } GameWorldState;
 void game_world(const BadlandsGame* game, GameWorldState* out);
 

@@ -106,8 +106,6 @@ struct NavPath {
     uint32_t cursor = 0;
     uint32_t epoch = 0;            // nav_epoch the path was planned against
     float repath_cooldown = 0.0f;
-    uint16_t stuck_ticks = 0;
-    bool blocked = false;
 };
 
 }  // namespace badlands

@@ -253,7 +253,7 @@ TEST_CASE("v0.3 town host-call surface binds and fires through the resilient bra
     game_destroy(game);
 }
 
-TEST_CASE("real warrior.noiser behaviour framework loads and runs clean") {
+TEST_CASE("real hero.noiser behaviour framework loads and runs clean") {
     // Runtime smoke of the SHIPPING brain (the composable behaviour framework:
     // WorldView perception, enum Behaviour argmax, core::random, Decision + the
     // intent_* bridge). Loads the real script and asserts it RUNS in the VM
