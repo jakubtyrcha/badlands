@@ -16,6 +16,7 @@ pub const GAME_SOURCES: &[&str] = &[
     "game/src/brain.cpp",
     "game/src/placement.cpp",
     "game/src/movement.cpp",
+    "game/src/heroes.cpp",
     "game/src/noiser_jit_stubs.cpp",
 ];
 
@@ -31,6 +32,7 @@ pub const TEST_SOURCES: &[&str] = &[
     "game/tests/duel_test.cpp",
     "game/tests/placement_tests.cpp",
     "game/tests/movement_tests.cpp",
+    "game/tests/heroes_tests.cpp",
     "third_party/catch2/extras/catch_amalgamated.cpp",
 ];
 

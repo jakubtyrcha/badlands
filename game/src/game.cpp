@@ -3,6 +3,7 @@
 #include "brain.h"
 #include "components.h"
 #include "game_state.h"
+#include "heroes.h"
 #include "movement.h"
 #include "placement.h"
 
@@ -51,7 +52,8 @@ entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self) {
     entt::entity best = entt::null;
     float best_dist = 0.0f;
     for (auto [e, pos, team, health] :
-         game.registry.view<const Position, const Team, const Health>().each()) {
+         game.registry.view<const Position, const Team, const Health>(entt::exclude<InsideBuilding>)
+             .each()) {
         if (team.id == self_team || health.hp <= 0.0f) {
             continue;
         }
@@ -164,28 +166,9 @@ void game_destroy(BadlandsGame* game) {
 }
 
 uint32_t game_spawn(BadlandsGame* game, const GameCharacterDesc* desc) {
-    entt::entity e = game->registry.create();
-    uint32_t slot = static_cast<uint32_t>(game->slots.size());
-    game->slots.push_back(e);
-
-    game->registry.emplace<Position>(e, glm::vec2{desc->pos_x, desc->pos_z});
-    game->registry.emplace<Team>(e, desc->team);
-    game->registry.emplace<Health>(e, desc->hp, desc->hp);
-    game->registry.emplace<Stats>(e, desc->move_speed, desc->attack_range, desc->attack_damage,
-                                  desc->attack_cooldown);
-    game->registry.emplace<CooldownTimer>(e, 0.0f);
-    game->registry.emplace<RenderShape>(e, glm::vec3{desc->size_x, desc->size_y, desc->size_z},
-                                        glm::vec3{desc->color_r, desc->color_g, desc->color_b});
-    game->registry.emplace<Intent>(e, 0, glm::vec2{0.0f, 0.0f});
-    // Movement components: a sub-tile agent, an (initially idle) durable goal,
-    // and an empty route. Phase 5 folds this into heroes::spawn_entity.
-    float radius = 0.5f * std::min(desc->size_x, desc->size_z);
-    game->registry.emplace<Agent>(e, radius);
-    game->registry.emplace<MoveTarget>(e);
-    game->registry.emplace<NavPath>(e);
-    game->registry.emplace<Brain>(
-        e, game->brains ? spawn_brain(*game->brains, slot) : nullptr);
-    return slot;
+    // Plain (home-less) spawn; heroes::spawn_entity emplaces the full component
+    // set shared with recruit.
+    return badlands::spawn_entity(*game, *desc, -1);
 }
 
 void game_tick(BadlandsGame* game, float dt) {
@@ -195,6 +178,9 @@ void game_tick(BadlandsGame* game, float dt) {
         cooldown.remaining = std::max(0.0f, cooldown.remaining - dt);
     }
 
+    // Reappear hidden heroes whose stay has elapsed, before they think again.
+    badlands::advance_inside_timers(*game, dt);
+
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.
     for (auto [e, intent] : registry.view<Intent>().each()) {
@@ -202,8 +188,8 @@ void game_tick(BadlandsGame* game, float dt) {
     }
     for (size_t slot = 0; slot < game->slots.size(); ++slot) {
         entt::entity e = game->slots[slot];
-        if (!registry.valid(e)) {
-            continue;
+        if (!registry.valid(e) || registry.all_of<InsideBuilding>(e)) {
+            continue;  // hidden heroes don't think
         }
         auto& brain = registry.get<Brain>(e);
         bool scripted = brain.state && !brain.state->downgraded && game->brains;
@@ -240,7 +226,9 @@ void game_tick(BadlandsGame* game, float dt) {
     // Combat: the engine is authoritative — an attack intent only lands when
     // the nearest enemy is in range and the cooldown has elapsed.
     for (auto [e, intent, pos, stats, cooldown] :
-         registry.view<const Intent, const Position, const Stats, CooldownTimer>().each()) {
+         registry.view<const Intent, const Position, const Stats, CooldownTimer>(
+                     entt::exclude<InsideBuilding>)
+             .each()) {
         if (intent.kind != 2 || cooldown.remaining > 0.0f) {
             continue;
         }
@@ -347,24 +335,12 @@ int64_t game_dispatch(BadlandsGame* game, const GameAction* action) {
             uint32_t id = badlands::place_building(*game, desc, /*player=*/true);
             return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
         }
-        case GAME_ACTION_RECRUIT_HERO:
-            return -1;  // handler lands in Phase 5 (heroes)
-        case GAME_ACTION_DESTROY_BUILDING: {
-            uint32_t id = action->target_id;
-            auto& buildings = game->placement.buildings;
-            if (id >= buildings.size() || !buildings[id].alive) {
-                return -1;  // unknown or already destroyed
-            }
-            if (!game_building_def(buildings[id].kind).user_destructible) {
-                return -2;  // Castle/House/Sewer are not player-destructible
-            }
-            buildings[id].alive = false;
-            ++game->placement.nav_epoch;
-            badlands::rebuild_occupancy(game->placement);
-            badlands::notify_obstacle_removed(*game, id);
-            // Phase 5 extends this to expel/reassign resident heroes.
-            return 0;
+        case GAME_ACTION_RECRUIT_HERO: {
+            uint32_t id = badlands::recruit(*game, action->target_id);
+            return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
         }
+        case GAME_ACTION_DESTROY_BUILDING:
+            return badlands::destroy_building_impl(*game, action->target_id);
         default:
             return -1;
     }
