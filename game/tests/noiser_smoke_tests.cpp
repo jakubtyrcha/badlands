@@ -10,6 +10,10 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using sampo::noiser::CompileError;
@@ -245,6 +249,94 @@ TEST_CASE("v0.3 town host-call surface binds and fires through the resilient bra
     } else {
         WARN("[noiser-bug] town host-call surface tripped " << stats.noiser_bugs
                                                             << " bug(s); see docs/noiser-bugs-upstream");
+    }
+    game_destroy(game);
+}
+
+TEST_CASE("real warrior.noiser behaviour framework loads and runs clean") {
+    // Runtime smoke of the SHIPPING brain (the composable behaviour framework:
+    // WorldView perception, enum Behaviour argmax, core::random, Decision + the
+    // intent_* bridge). Loads the real script and asserts it RUNS in the VM
+    // without tripping a noiser bug. Smoke ONLY — no behavioural assertion; the
+    // brain is a moving target (see docs/noiser-brain-interop.md, testing line).
+    const char* path = std::getenv("BADLANDS_BRAIN_SCRIPT");
+    REQUIRE(path != nullptr);  // exported by tests/cpp_tests.rs
+    std::ifstream file(path);
+    REQUIRE(file.good());
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string source = buffer.str();
+
+    BadlandsGame* game = game_create(source.c_str());
+    // A lone home-less hero with no enemy and no town buildings exercises the
+    // full path: observe() (every perceive_* call) -> decide() (soft argmax ->
+    // Roam) -> apply() (intent_move_to).
+    GameCharacterDesc d{};
+    d.pos_x = 3.0f;
+    d.pos_z = 3.0f;
+    d.team = 0;
+    d.hp = 10.0f;
+    d.move_speed = 1.0f;
+    d.attack_range = 1.0f;
+    d.attack_damage = 1.0f;
+    d.attack_cooldown = 1.0f;
+    d.size_x = d.size_y = d.size_z = 1.0f;
+    game_spawn(game, &d);
+
+    for (int i = 0; i < 5; ++i) {
+        game_tick(game, 1.0f / 30.0f);
+    }
+
+    GameStats stats;
+    game_stats(game, &stats);
+    CHECK(stats.noiser_bugs == 0);
+    game_destroy(game);
+}
+
+TEST_CASE("perceive_class binds and echoes the hero class") {
+    // The one new host call the framework adds. A synthetic script echoes the
+    // perceived class into a durable move goal so we can read it back — proving
+    // the binding + HeroClass component read, deterministically.
+    const char* script = R"(
+        @fn.perceive_class: fn(e: i32) -> i32;
+        @fn.intent_move_to: fn(e: i32, x: f32, z: f32) -> void;
+        pub gen fn brain(entity: i32) -> i32 {
+            loop {
+                let c = @fn.perceive_class(entity);
+                @fn.intent_move_to(entity, f32(c), 0.0);
+                yield 0;
+            }
+        }
+        0.0
+    )";
+    BadlandsGame* game = game_create(script);
+    GameCharacterDesc d{};
+    d.pos_x = 4.0f;
+    d.pos_z = 4.0f;
+    d.team = 0;
+    d.hp = 10.0f;
+    d.move_speed = 1.0f;
+    d.attack_range = 1.0f;
+    d.attack_damage = 1.0f;
+    d.attack_cooldown = 1.0f;
+    d.size_x = d.size_y = d.size_z = 1.0f;
+    uint32_t hid = game_spawn(game, &d);
+
+    // Force a known class on the spawned entity (Grave Robber = 2).
+    entt::entity e = game->slots[hid];
+    game->registry.emplace_or_replace<badlands::HeroClass>(e, 2);
+
+    game_tick(game, 1.0f / 30.0f);
+
+    GameStats stats;
+    game_stats(game, &stats);
+    if (stats.noiser_bugs == 0) {
+        const badlands::MoveTarget& mt = game->registry.get<badlands::MoveTarget>(e);
+        CHECK(mt.kind == badlands::MoveTarget::Kind::Point);
+        CHECK(mt.point.x == 2.0f);  // the perceived class, echoed
+    } else {
+        WARN("[noiser-bug] perceive_class script tripped " << stats.noiser_bugs
+                                                           << " bug(s); see docs/noiser-bugs-upstream");
     }
     game_destroy(game);
 }

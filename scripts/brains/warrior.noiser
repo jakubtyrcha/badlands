@@ -1,66 +1,179 @@
-// Combat brain. One coroutine per entity; the engine resumes it once per
-// tick. Perception is pulled and intents are pushed through @fn host calls
-// (the engine stays authoritative — intents are validated before they land).
+// Badlands hero brain — composable behaviour framework.
 //
-// Host interface (bound in game/src/brain.cpp):
-//   perceive_self(e)   -> (pos_x, pos_z, hp, cooldown_remaining)
-//   perceive_target(e) -> (pos_x, pos_z, hp, has_target 0/1)  [nearest enemy]
-//   attack_range(e)    -> f32
-//   intent_move(e, dx, dz), intent_attack(e)  [at most one intent per tick]
+// Perception-in / goals-and-commands-out. The brain observes a WorldView (its
+// idea of the world), composes per-class weighted townsfolk Behaviours, and
+// produces a (Goal, Command) decision. Combat is a separate module invoked as a
+// HARD deterministic pre-empt; the core errand (Buy -> Home, driven by
+// inventory) and soft, seeded, class-weighted detours (VisitTavern / Roam)
+// compose as an argmax over scored Behaviours. See docs/noiser-brain-interop.md
+// for the ideal contract this approximates (the decision is applied via the
+// proven intent_* host-call bridge rather than an engine-decoded yield).
+//
+// Two noiser workarounds shape the data model:
+//  * WorldView is ALL-FLAT f32 (no core::linalg::Vec2, no nested structs): the
+//    Vec2 struct vs tuple-optimized (f32,f32) are distinct types (Path A), and
+//    a struct-of-enums built from host-call-sourced data is corrupted on return
+//    (docs/noiser-bugs-upstream/2026-07-13-struct-of-enums-return-from-perception-corrupts.md).
+//  * The decision crosses function boundaries as a (Goal, Command) TUPLE, never
+//    a Decision struct, for the same reason.
 
-import { Vec2, vec2 } from core::linalg;
+import { Rng, from_seed, next_float, range_f32 } from core::random;
 
-// Perception returns are flat f32 tuples rather than vec4: host functions
-// declared `-> vec4` ICE the compiler (docs/noiser-feedback.md, "vecN host-fn
-// returns"). The C++ side still binds glm::vec4 — both map to kTuple/4.
-@fn.perceive_self: fn(e: i32) -> (f32, f32, f32, f32);
-@fn.perceive_target: fn(e: i32) -> (f32, f32, f32, f32);
-@fn.attack_range: fn(e: i32) -> f32;
-@fn.intent_move: fn(e: i32, dx: f32, dz: f32) -> void;
-@fn.intent_attack: fn(e: i32) -> void;
+// --- host surface (perception in; commands out via the intent_* bridge) ------
+// Perception returns are flat f32 tuples: host fns declared `-> vecN` ICE the
+// compiler (docs/noiser-feedback.md #1). The C++ side binds glm::vec4.
+@fn.perceive_self:     fn(e: i32) -> (f32, f32, f32, f32);            // (x, z, hp, cooldown)
+@fn.perceive_target:   fn(e: i32) -> (f32, f32, f32, f32);            // (x, z, hp, has_target)
+@fn.perceive_building: fn(e: i32, kind: i32) -> (f32, f32, f32, f32); // (door_x, door_z, exists, _)
+@fn.perceive_home:     fn(e: i32) -> (f32, f32, f32, f32);            // (door_x, door_z, exists, _)
+@fn.perceive_class:    fn(e: i32) -> i32;                             // HeroClassId
+@fn.inventory_count:   fn(e: i32) -> f32;
+@fn.attack_range:      fn(e: i32) -> f32;
+@fn.intent_move_to:    fn(e: i32, x: f32, z: f32) -> void;
+@fn.intent_attack:     fn(e: i32) -> void;
+@fn.intent_enter:      fn(e: i32, kind: i32) -> void;
+@fn.intent_enter_home: fn(e: i32) -> void;
+@fn.intent_buy:        fn(e: i32) -> void;
 
-struct GameCtx { entity: i32 }
+// --- constants (mirror GameBuildingKind / HeroClassId / kInventoryCap) --------
+const TAVERN: i32 = 5;
+const APOTHECARY: i32 = 6;
+const INVENTORY_CAP: i32 = 2;
+const CLASS_HUNTER: i32 = 1;
+const CLASS_GRAVE_ROBBER: i32 = 2;
+const CLASS_APPRENTICE: i32 = 3;
+const ROAM_RADIUS: f32 = 6.0;
 
-impl GameCtx {
-    fn self_state(self) -> (f32, f32, f32, f32) = @fn.perceive_self(self.entity);
-    fn target_state(self) -> (f32, f32, f32, f32) = @fn.perceive_target(self.entity);
-    fn range(self) -> f32 = @fn.attack_range(self.entity);
-    fn move_toward(self, dir: Vec2) { @fn.intent_move(self.entity, dir.x, dir.y); }
-    fn attack(self) { @fn.intent_attack(self.entity); }
+// --- perception model: the hero's idea of the world (ALL FLAT) ----------------
+struct WorldView {
+    px: f32, pz: f32, range: f32,
+    enemy_px: f32, enemy_pz: f32, enemy_exists: f32,
+    apothecary_px: f32, apothecary_pz: f32, apothecary_exists: f32,
+    tavern_px: f32, tavern_pz: f32, tavern_exists: f32,
+    home_px: f32, home_pz: f32, home_exists: f32,
+    inventory: i32, class: i32,
 }
 
-// Utility-style goal scoring. Stubs for now: attack wins whenever the target
-// is in reach; approach wins while a target exists. Fear, greed and errands
-// slot in here as additional scorers.
-fn score_attack(dist: f32, range: f32) -> f32 {
-    if dist <= range { 1.0 } else { 0.0 }
+fn observe(e: i32) -> WorldView {
+    let (sx, sz, hp, cd) = @fn.perceive_self(e);
+    let (tx, tz, thp, has) = @fn.perceive_target(e);
+    let (ax, az, aex, _) = @fn.perceive_building(e, APOTHECARY);
+    let (vx, vz, vex, _) = @fn.perceive_building(e, TAVERN);
+    let (hx, hz, hex, _) = @fn.perceive_home(e);
+    WorldView {
+        px: sx, pz: sz, range: @fn.attack_range(e),
+        enemy_px: tx, enemy_pz: tz, enemy_exists: has,
+        apothecary_px: ax, apothecary_pz: az, apothecary_exists: aex,
+        tavern_px: vx, tavern_pz: vz, tavern_exists: vex,
+        home_px: hx, home_pz: hz, home_exists: hex,
+        inventory: i32(@fn.inventory_count(e)),
+        class: @fn.perceive_class(e),
+    }
 }
 
-fn score_approach(has_target: f32) -> f32 {
-    if has_target > 0.5 { 0.5 } else { 0.0 }
+fn dist2(ax: f32, az: f32, bx: f32, bz: f32) -> f32 {
+    let dx = ax - bx;
+    let dz = az - bz;
+    dx * dx + dz * dz
+}
+
+// --- goals + commands (the brain's structured output) -------------------------
+// Crosses function boundaries only as a (Goal, Command) tuple (see header).
+enum Goal { Hold, GoTo(f32, f32) }
+enum Command { NoOp, Attack, Buy, EnterHome, Enter(i32) }
+
+// --- per-class factors --------------------------------------------------------
+struct Profile { roam_weight: f32, tavern_weight: f32 }
+
+fn profile_for(class: i32) -> Profile {
+    if class == CLASS_HUNTER {
+        Profile { roam_weight: 9.0, tavern_weight: 5.0 }        // ranges the wilds
+    } else if class == CLASS_GRAVE_ROBBER {
+        Profile { roam_weight: 4.0, tavern_weight: 7.0 }        // haunts taverns
+    } else if class == CLASS_APPRENTICE {
+        Profile { roam_weight: 3.0, tavern_weight: 4.0 }        // homebody
+    } else {
+        Profile { roam_weight: 4.0, tavern_weight: 5.0 }        // mercenary baseline
+    }
+}
+
+// --- combat module (separate; invoked as a hard pre-empt) ---------------------
+fn combat_act(v: WorldView) -> (Goal, Command) {
+    // Approach every tick; the engine melee-locks (freezes) us in range and
+    // re-validates the swing. Attack once inside attack_range.
+    let in_range = dist2(v.px, v.pz, v.enemy_px, v.enemy_pz) <= v.range * v.range;
+    let cmd = if in_range { Command::Attack } else { Command::NoOp };
+    (Goal::GoTo(v.enemy_px, v.enemy_pz), cmd)
+}
+
+// --- townsfolk behaviours (composed via score/act + per-class profile) --------
+enum Behaviour { Buy, GoHome, VisitTavern, Roam, Idle }
+
+fn score(b: Behaviour, v: WorldView, profile: Profile, roll: f32) -> f32 {
+    match b {
+        // Core errand, deterministic and inventory-driven.
+        Behaviour::Buy => if v.inventory < INVENTORY_CAP && v.apothecary_exists > 0.5 { 10.0 } else { 0.0 },
+        Behaviour::GoHome => if v.inventory >= INVENTORY_CAP && v.home_exists > 0.5 { 8.0 } else { 0.0 },
+        // Soft, seeded, class-weighted detours.
+        Behaviour::VisitTavern => if v.tavern_exists > 0.5 { profile.tavern_weight * roll } else { 0.0 },
+        Behaviour::Roam => profile.roam_weight * roll,
+        Behaviour::Idle => 0.1,
+    }
+}
+
+fn act(b: Behaviour, v: WorldView, dx: f32, dz: f32) -> (Goal, Command) {
+    match b {
+        Behaviour::Buy => (Goal::GoTo(v.apothecary_px, v.apothecary_pz), Command::Buy),
+        Behaviour::GoHome => (Goal::GoTo(v.home_px, v.home_pz), Command::EnterHome),
+        Behaviour::VisitTavern => (Goal::GoTo(v.tavern_px, v.tavern_pz), Command::Enter(TAVERN)),
+        Behaviour::Roam => (Goal::GoTo(v.px + dx, v.pz + dz), Command::NoOp),
+        Behaviour::Idle => (Goal::Hold, Command::NoOp),
+    }
+}
+
+// --- selection: hard combat pre-empt, then weighted soft argmax ---------------
+fn decide(v: WorldView, profile: Profile, roll: f32, dx: f32, dz: f32) -> (Goal, Command) {
+    if v.enemy_exists > 0.5 {
+        combat_act(v)
+    } else {
+        let behaviours = [Behaviour::Buy, Behaviour::GoHome, Behaviour::VisitTavern, Behaviour::Roam, Behaviour::Idle];
+        var best = Behaviour::Idle;
+        var best_score = 0.0 - 1.0;
+        for b in behaviours {
+            let s = score(b, v, profile, roll);
+            if s > best_score {
+                best_score = s;
+                best = b;
+            }
+        }
+        act(best, v, dx, dz)
+    }
 }
 
 pub gen fn brain(entity: i32) -> i32 {
-    let ctx = GameCtx { entity: entity };
+    var rng = from_seed(entity + 1);
     loop {
-        let (self_x, self_z, self_hp, cooldown) = ctx.self_state();
-        let (target_x, target_z, target_hp, has_target) = ctx.target_state();
-        let sp = vec2(self_x, self_z);
-        let tp = vec2(target_x, target_z);
-        let dist = sp.distance(tp);
+        let view = observe(entity);
+        let profile = profile_for(view.class);
 
-        let attack = score_attack(dist, ctx.range()) * score_approach(has_target);
-        let approach = score_approach(has_target);
+        let (roll, r1) = next_float(rng);
+        let (dx, r2) = range_f32(r1, 0.0 - ROAM_RADIUS, ROAM_RADIUS);
+        let (dz, r3) = range_f32(r2, 0.0 - ROAM_RADIUS, ROAM_RADIUS);
+        rng = r3;
 
-        if attack > 0.0 {
-            // In reach: swing when the cooldown allows, otherwise hold.
-            if cooldown <= 0.0 {
-                ctx.attack();
-            }
-        } else if approach > 0.0 {
-            ctx.move_toward((tp - sp).normalize());
+        let (goal, command) = decide(view, profile, roll, dx, dz);
+
+        match goal {
+            Goal::GoTo(x, z) => @fn.intent_move_to(entity, x, z),
+            Goal::Hold => {},
         }
-        // No intent emitted means idle.
+        match command {
+            Command::Attack => @fn.intent_attack(entity),
+            Command::Buy => @fn.intent_buy(entity),
+            Command::EnterHome => @fn.intent_enter_home(entity),
+            Command::Enter(k) => @fn.intent_enter(entity, k),
+            Command::NoOp => {},
+        }
         yield 0;
     }
 }

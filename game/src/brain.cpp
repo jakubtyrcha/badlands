@@ -166,6 +166,20 @@ float inventory_count(BadlandsGame& game, int32_t slot) {
     return static_cast<float>(game.registry.get<Inventory>(self).count);
 }
 
+// The hero's class (HeroClassId), so the brain can pick its per-class behaviour
+// profile. -1 for a home-less/non-hero entity (still runs the shared brain).
+int32_t perceive_class(BadlandsGame& game, int32_t slot) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "perceive_class", "invalid entity slot " + std::to_string(slot));
+        return -1;
+    }
+    if (!game.registry.all_of<HeroClass>(self)) {
+        return -1;
+    }
+    return game.registry.get<HeroClass>(self).value;
+}
+
 // Durable walk goal (engine navmesh-paths); replaces intent_move for town heroes.
 void intent_move_to(BadlandsGame& game, int32_t slot, float x, float z) {
     entt::entity self = entity_for_slot(game, slot);
@@ -251,6 +265,7 @@ std::unique_ptr<BrainRuntime> BrainRuntime::create(BadlandsGame& game,
          [g](int32_t e, int32_t kind) { return perceive_building(*g, e, kind); });
     bind("perceive_home", [g](int32_t e) { return perceive_home(*g, e); });
     bind("inventory_count", [g](int32_t e) { return inventory_count(*g, e); });
+    bind("perceive_class", [g](int32_t e) { return perceive_class(*g, e); });
     bind("intent_move", [g](int32_t e, float dx, float dz) { intent_move(*g, e, dx, dz); });
     bind("intent_move_to", [g](int32_t e, float x, float z) { intent_move_to(*g, e, x, z); });
     bind("intent_attack", [g](int32_t e) { intent_attack(*g, e); });
