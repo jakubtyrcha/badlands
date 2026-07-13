@@ -242,6 +242,9 @@ float poppable_score(const PlacementState& st, glm::vec2 candidate) {
     float d_castle = std::numeric_limits<float>::infinity();
     float d_apoth = std::numeric_limits<float>::infinity();
     for (const PlacedBuilding& b : st.buildings) {
+        if (!b.alive) {
+            continue;
+        }
         float d = glm::distance(candidate, b.center);
         if (b.kind == GAME_BUILDING_CASTLE) {
             d_castle = std::min(d_castle, d);
@@ -278,6 +281,7 @@ uint32_t commit(PlacementState& st, int kind, int rot, glm::vec2 center) {
     const GameBuildingDef& def = def_of(kind);
     uint32_t id = static_cast<uint32_t>(st.buildings.size());
     st.buildings.push_back({kind, center, rot, def.width_tiles, def.depth_tiles});
+    ++st.nav_epoch;
     return id;
 }
 
@@ -364,6 +368,90 @@ std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b) {
         return b.center + glm::vec2(c * lx - s * lz, s * lx + c * lz);
     };
     return {corner(-hx, -hz), corner(hx, -hz), corner(hx, hz), corner(-hx, hz)};
+}
+
+glm::vec2 building_entrance(const PlacedBuilding& b) {
+    // Midpoint of the +Z (local) footprint edge, rotated into world space.
+    GameRenderBox rb = game_render_box(b.kind, b.rot);
+    float hz = rb.size_z * 0.5f;
+    float c = std::cos(rb.yaw_radians);
+    float s = std::sin(rb.yaw_radians);
+    return b.center + glm::vec2(-s * hz, c * hz);
+}
+
+bool building_approach_tile(const PlacementState& st, const PlacedBuilding& b, glm::vec2& out) {
+    glm::vec2 door = building_entrance(b);
+    int reach = std::max(b.w, b.d) + 2;
+    int cx = static_cast<int>(std::floor(b.center.x));
+    int cz = static_cast<int>(std::floor(b.center.y));
+    bool found = false;
+    float best = std::numeric_limits<float>::infinity();
+    for (int tz = cz - reach; tz <= cz + reach; ++tz) {
+        for (int tx = cx - reach; tx <= cx + reach; ++tx) {
+            if (!in_bounds_tile(tx, tz)) {
+                continue;
+            }
+            bool free = true;
+            for (int c = 0; c < 4; ++c) {
+                if (st.blocked[tri_index(tx, tz, c)]) {
+                    free = false;
+                    break;
+                }
+            }
+            if (!free) {
+                continue;
+            }
+            glm::vec2 center{tx + 0.5f, tz + 0.5f};
+            float d = glm::distance(center, door);
+            if (d < best) {
+                best = d;
+                out = center;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+uint32_t nearest_building_of(const PlacementState& st, int kind, glm::vec2 p) {
+    uint32_t best = std::numeric_limits<uint32_t>::max();
+    float bestd = std::numeric_limits<float>::infinity();
+    for (uint32_t i = 0; i < st.buildings.size(); ++i) {
+        const PlacedBuilding& b = st.buildings[i];
+        if (!b.alive || b.kind != kind) {
+            continue;
+        }
+        float d = glm::distance(p, b.center);
+        if (d < bestd) {
+            bestd = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+void rebuild_occupancy(PlacementState& st) {
+    std::fill(st.blocked.begin(), st.blocked.end(), uint8_t{0});
+    std::fill(st.footprint.begin(), st.footprint.end(), uint8_t{0});
+    std::vector<TriRef> foot, marg;
+    for (const PlacedBuilding& b : st.buildings) {
+        if (!b.alive) {
+            continue;
+        }
+        Footprint fp = make_footprint(b.kind, b.rot, b.center);
+        foot.clear();
+        marg.clear();
+        footprint_triangles(fp, foot);
+        margin_triangles(fp, marg);
+        for (const TriRef& t : foot) {
+            int idx = tri_index(t.tx, t.tz, static_cast<int>(t.corner));
+            st.footprint[idx] = 1;
+            st.blocked[idx] = 1;
+        }
+        for (const TriRef& t : marg) {
+            st.blocked[tri_index(t.tx, t.tz, static_cast<int>(t.corner))] = 1;
+        }
+    }
 }
 
 uint32_t place_building(BadlandsGame& game, const GamePlacementDesc& desc, bool player) {
@@ -462,20 +550,28 @@ uint32_t game_probe_placement(const BadlandsGame* game, const GamePlacementDesc*
 
 uint32_t game_buildings(const BadlandsGame* game, GameBuildingState* out, uint32_t cap) {
     const PlacementState& st = game->placement;
-    uint32_t total = static_cast<uint32_t>(st.buildings.size());
-    for (uint32_t i = 0; i < total && i < cap; ++i) {
+    // Skip tombstoned buildings; each emitted row keeps its stable slot id, and
+    // the return is the ALIVE count (count-return snapshot idiom).
+    uint32_t alive = 0;
+    for (uint32_t i = 0; i < st.buildings.size(); ++i) {
         const PlacedBuilding& b = st.buildings[i];
-        out[i] = GameBuildingState{
-            .id = i,
-            .kind = b.kind,
-            .center_x = b.center.x,
-            .center_z = b.center.y,
-            .rotation_index = b.rot,
-            .width_tiles = b.w,
-            .depth_tiles = b.d,
-        };
+        if (!b.alive) {
+            continue;
+        }
+        if (alive < cap) {
+            out[alive] = GameBuildingState{
+                .id = i,
+                .kind = b.kind,
+                .center_x = b.center.x,
+                .center_z = b.center.y,
+                .rotation_index = b.rot,
+                .width_tiles = b.w,
+                .depth_tiles = b.d,
+            };
+        }
+        ++alive;
     }
-    return total;
+    return alive;
 }
 
 void game_world(const BadlandsGame* game, GameWorldState* out) {

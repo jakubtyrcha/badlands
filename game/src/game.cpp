@@ -307,6 +307,9 @@ void game_set_pathfinder(BadlandsGame* game, const GamePathfinder* pathfinder) {
     // castle, and any placed before registration) so its obstacle set matches.
     const auto& buildings = game->placement.buildings;
     for (uint32_t id = 0; id < buildings.size(); ++id) {
+        if (!buildings[id].alive) {
+            continue;
+        }
         std::array<glm::vec2, 4> corners = badlands::building_footprint_corners(buildings[id]);
         float flat[8];
         for (int i = 0; i < 4; ++i) {

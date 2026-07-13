@@ -467,3 +467,65 @@ TEST_CASE("identical placement sequences are deterministic") {
         CHECK(a[i].rotation_index == b[i].rotation_index);
     }
 }
+
+TEST_CASE("v0.3 placement helpers: approach tile, nearest-of-kind, occupancy rebuild") {
+    BadlandsGame* game = game_create(nullptr);  // castle id 0 at origin
+    PlacementState& st = game->placement;
+
+    // Place a tavern (id 1) and apothecary (id 2) without triggering poppables.
+    GamePlacementDesc tav{GAME_BUILDING_TAVERN, 0, 16.0f, 0.0f};
+    GamePlacementDesc apo{GAME_BUILDING_APOTHECARY, 0, 16.0f, 8.0f};
+    uint32_t tav_id = place_building(*game, tav, /*player=*/false);
+    uint32_t apo_id = place_building(*game, apo, /*player=*/false);
+    REQUIRE(tav_id == 1u);
+    REQUIRE(apo_id == 2u);
+
+    SECTION("building_approach_tile returns a free exterior tile") {
+        glm::vec2 tile;
+        REQUIRE(building_approach_tile(st, st.buildings[tav_id], tile));
+        int tx = static_cast<int>(std::floor(tile.x));
+        int tz = static_cast<int>(std::floor(tile.y));
+        for (int c = 0; c < 4; ++c) {
+            CHECK(st.blocked[tri_index(tx, tz, c)] == 0);
+        }
+    }
+
+    SECTION("nearest_building_of is alive-aware") {
+        CHECK(nearest_building_of(st, GAME_BUILDING_APOTHECARY, {16.0f, 8.0f}) == apo_id);
+        CHECK(nearest_building_of(st, GAME_BUILDING_CASTLE, {0.0f, 0.0f}) == 0u);
+        CHECK(nearest_building_of(st, GAME_BUILDING_WATCHTOWER, {0.0f, 0.0f}) == UINT32_MAX);
+        // Tombstone the apothecary: it drops out of nearest-of-kind queries.
+        st.buildings[apo_id].alive = false;
+        CHECK(nearest_building_of(st, GAME_BUILDING_APOTHECARY, {16.0f, 8.0f}) == UINT32_MAX);
+    }
+
+    SECTION("rebuild_occupancy frees a tombstoned footprint; ids stay stable") {
+        Footprint fp = make_footprint(GAME_BUILDING_TAVERN, 0, st.buildings[tav_id].center);
+        std::vector<TriRef> foot;
+        footprint_triangles(fp, foot);
+        REQUIRE(!foot.empty());
+        int idx = tri_index(foot[0].tx, foot[0].tz, static_cast<int>(foot[0].corner));
+        CHECK(st.blocked[idx] == 1);
+
+        st.buildings[tav_id].alive = false;
+        rebuild_occupancy(st);
+        CHECK(st.blocked[idx] == 0);
+
+        // game_buildings skips the dead tavern but the apothecary keeps id 2.
+        auto rows = snapshot(game);
+        bool saw_apo = false, saw_tav = false;
+        for (const auto& r : rows) {
+            if (r.id == apo_id) {
+                saw_apo = true;
+                CHECK(r.kind == GAME_BUILDING_APOTHECARY);
+            }
+            if (r.id == tav_id) {
+                saw_tav = true;
+            }
+        }
+        CHECK(saw_apo);
+        CHECK(!saw_tav);
+    }
+
+    game_destroy(game);
+}

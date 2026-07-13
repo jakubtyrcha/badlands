@@ -26,7 +26,11 @@ struct PlacedBuilding {
     glm::vec2 center;  // XZ, snapped
     int32_t rot;       // 0..3
     int32_t w, d;      // footprint tiles
+    bool alive = true; // tombstone: destruction sets false; id is never reused
 };
+
+// Home roster capacity (heroes with Home == this building's id).
+constexpr int kGuildRosterCap = 4;
 
 struct PlacementState {
     // Union of every placed footprint and margin, indexed by tri_index(). A set
@@ -35,10 +39,12 @@ struct PlacementState {
     // Footprints only (no margins), so blocking can be checked both ways: a
     // candidate's margin may not cover an existing footprint either.
     std::vector<uint8_t> footprint = std::vector<uint8_t>(kTriangleCount, 0);
-    std::vector<PlacedBuilding> buildings;  // index == public id; never removed
+    std::vector<PlacedBuilding> buildings;  // index == public id; never removed (tombstoned)
     uint32_t urban_quarters = 0;            // sprawl accumulator (base 4)
     uint32_t houses_made = 0;
     uint32_t sewers_made = 0;
+    // Bumped on every placement/destruction; drives NavPath repath invalidation.
+    uint32_t nav_epoch = 0;
 };
 
 struct TriRef {
@@ -106,5 +112,20 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor);
 // The 4 world-XZ corners of a building's drawn footprint box (the oriented box
 // game_render_box describes), fed to the nav pathfinder as an obstacle polygon.
 std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b);
+
+// A door point on the building's perimeter (midpoint of one footprint edge).
+glm::vec2 building_entrance(const PlacedBuilding& b);
+
+// The free exterior tile center nearest the entrance (all four triangles
+// unblocked). Serves as recruit-spawn, enter/stand, and reappear point.
+// Returns false if no free tile exists in the search window.
+bool building_approach_tile(const PlacementState& st, const PlacedBuilding& b, glm::vec2& out);
+
+// Nearest ALIVE building of `kind` to `p`; UINT32_MAX if none.
+uint32_t nearest_building_of(const PlacementState& st, int kind, glm::vec2 p);
+
+// Clears and restamps footprint/blocked from the ALIVE buildings only (after a
+// destruction frees a footprint).
+void rebuild_occupancy(PlacementState& st);
 
 }  // namespace badlands
