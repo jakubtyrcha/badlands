@@ -29,7 +29,7 @@ pub struct FontAtlas {
 
 impl FontAtlas {
     pub fn bake(device: &wgpu::Device, queue: &wgpu::Queue, size_px: f32) -> FontAtlas {
-        let font_path = find_asset_dir().join("fonts/Inter-Variable.ttf");
+        let font_path = find_asset_dir().join("fonts/CormorantUnicase-Regular.ttf");
         let data = std::fs::read(&font_path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", font_path.display()));
         let font = fontdue::Font::from_bytes(data, fontdue::FontSettings::default())
@@ -146,7 +146,7 @@ impl FontAtlas {
 // Same walk-up strategy as the shader directory: exe-adjacent first, then the
 // source tree.
 fn find_asset_dir() -> PathBuf {
-    let marker = Path::new("fonts/Inter-Variable.ttf");
+    let marker = Path::new("fonts/CormorantUnicase-Regular.ttf");
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(Path::to_path_buf);
@@ -162,5 +162,5 @@ fn find_asset_dir() -> PathBuf {
             return candidate;
         }
     }
-    panic!("asset directory not found (marker assets/fonts/Inter-Variable.ttf)");
+    panic!("asset directory not found (marker assets/fonts/CormorantUnicase-Regular.ttf)");
 }
