@@ -3,6 +3,7 @@
 #include "brain.h"
 #include "components.h"
 #include "game_state.h"
+#include "movement.h"
 #include "placement.h"
 
 #include <entt/entt.hpp>
@@ -55,21 +56,29 @@ entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self) {
 namespace {
 
 // Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain: close in, swing when ready.
-Intent mock_think(const BadlandsGame& game, entt::entity self) {
+// downgraded) script brain: set a durable MoveTarget on the nearest enemy and
+// swing when in range. The movement pipeline walks the MoveTarget; the combat
+// pass re-validates the attack Intent authoritatively.
+void mock_think(BadlandsGame& game, entt::entity self) {
+    auto& reg = game.registry;
+    MoveTarget& mt = reg.get<MoveTarget>(self);
     entt::entity target = nearest_enemy(game, self);
     if (target == entt::null) {
-        return {.kind = 0, .dir = {0.0f, 0.0f}};
+        mt.kind = MoveTarget::Kind::None;
+        return;
     }
-    glm::vec2 self_pos = game.registry.get<Position>(self).pos;
-    glm::vec2 target_pos = game.registry.get<Position>(target).pos;
-    const auto& stats = game.registry.get<Stats>(self);
-    float dist = glm::distance(self_pos, target_pos);
-    if (dist <= stats.attack_range) {
-        bool ready = game.registry.get<CooldownTimer>(self).remaining <= 0.0f;
-        return {.kind = ready ? 2 : 0, .dir = {0.0f, 0.0f}};
+    const Stats& stats = reg.get<Stats>(self);
+    mt.kind = MoveTarget::Kind::Entity;
+    mt.entity = target;
+    mt.building = UINT32_MAX;
+    mt.stop_distance = stats.attack_range;
+
+    glm::vec2 self_pos = reg.get<Position>(self).pos;
+    glm::vec2 target_pos = reg.get<Position>(target).pos;
+    if (glm::distance(self_pos, target_pos) <= stats.attack_range &&
+        reg.get<CooldownTimer>(self).remaining <= 0.0f) {
+        reg.get<Intent>(self).kind = 2;  // swing (Intent was reset to idle this tick)
     }
-    return {.kind = 1, .dir = target_pos - self_pos};
 }
 
 }  // namespace
@@ -157,6 +166,12 @@ uint32_t game_spawn(BadlandsGame* game, const GameCharacterDesc* desc) {
     game->registry.emplace<RenderShape>(e, glm::vec3{desc->size_x, desc->size_y, desc->size_z},
                                         glm::vec3{desc->color_r, desc->color_g, desc->color_b});
     game->registry.emplace<Intent>(e, 0, glm::vec2{0.0f, 0.0f});
+    // Movement components: a sub-tile agent, an (initially idle) durable goal,
+    // and an empty route. Phase 5 folds this into heroes::spawn_entity.
+    float radius = 0.5f * std::min(desc->size_x, desc->size_z);
+    game->registry.emplace<Agent>(e, radius);
+    game->registry.emplace<MoveTarget>(e);
+    game->registry.emplace<NavPath>(e);
     game->registry.emplace<Brain>(
         e, game->brains ? spawn_brain(*game->brains, slot) : nullptr);
     return slot;
@@ -186,11 +201,14 @@ void game_tick(BadlandsGame* game, float dt) {
             scripted = false;
         }
         if (!scripted) {
-            registry.get<Intent>(e) = mock_think(*game, e);
+            mock_think(*game, e);
         }
     }
 
-    // Movement.
+    // Legacy direct movement for scripted brains that still push a per-tick
+    // move Intent (intent_move). MoveTarget-driven units (mock brains, town
+    // heroes) are moved by the pipeline below instead. Phase 6 unifies these
+    // once warrior.noiser switches to intent_move_to.
     for (auto [e, intent, pos, stats] : registry.view<const Intent, Position, const Stats>().each()) {
         if (intent.kind != 1) {
             continue;
@@ -200,6 +218,13 @@ void game_tick(BadlandsGame* game, float dt) {
             pos.pos += intent.dir / len * stats.move_speed * dt;
         }
     }
+
+    // Navmesh movement pipeline: plan/follow durable MoveTargets, maintain melee
+    // locks, and resolve unit-unit collisions. All exclude hidden (inside) heroes.
+    plan_paths(*game, dt);
+    follow_paths(*game, dt);
+    update_melee_locks(*game);
+    separate_units(*game);
 
     // Combat: the engine is authoritative — an attack intent only lands when
     // the nearest enemy is in range and the cooldown has elapsed.
@@ -303,20 +328,13 @@ void game_set_pathfinder(BadlandsGame* game, const GamePathfinder* pathfinder) {
     if (game->pathfinder.add_obstacle == nullptr) {
         return;
     }
-    // Back-fill the provider with every building already placed (the prebuilt
-    // castle, and any placed before registration) so its obstacle set matches.
+    // Back-fill the provider with every alive building already placed (the
+    // prebuilt castle, and any placed before registration).
     const auto& buildings = game->placement.buildings;
     for (uint32_t id = 0; id < buildings.size(); ++id) {
-        if (!buildings[id].alive) {
-            continue;
+        if (buildings[id].alive) {
+            badlands::notify_obstacle_added(*game, id);
         }
-        std::array<glm::vec2, 4> corners = badlands::building_footprint_corners(buildings[id]);
-        float flat[8];
-        for (int i = 0; i < 4; ++i) {
-            flat[i * 2] = corners[i].x;
-            flat[i * 2 + 1] = corners[i].y;
-        }
-        game->pathfinder.add_obstacle(game->pathfinder.ctx, id, flat, 4);
     }
 }
 

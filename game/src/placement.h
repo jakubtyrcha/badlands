@@ -128,4 +128,8 @@ uint32_t nearest_building_of(const PlacementState& st, int kind, glm::vec2 p);
 // destruction frees a footprint).
 void rebuild_occupancy(PlacementState& st);
 
+// Pushes a newly-committed building to the nav pathfinder as an obstacle. No-op
+// when no provider is registered (game.pathfinder is zero-initialized).
+void notify_obstacle_added(BadlandsGame& game, uint32_t building_id);
+
 }  // namespace badlands
