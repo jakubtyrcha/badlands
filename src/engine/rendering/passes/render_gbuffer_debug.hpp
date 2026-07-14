@@ -20,7 +20,7 @@ class GpuPipelineGenerator;
 // Compiles (once, cached) the "passes/gbuffer_debug" pipeline via
 // `pipeline_gen` for a single color target of `target_format`, binds frame
 // UBO @0 + the G-buffer depth/normals/albedo/material views @1-4 + the lit
-// HDR view @5 + a debug-mode uniform @6 (matches
+// HDR view @5 + a debug-mode uniform @6 + the GTAO AO view @7 (matches
 // shaders/passes/gbuffer_debug.wesl's binding declarations), and draws the
 // fullscreen triangle selecting `mode`'s channel.
 //
@@ -36,6 +36,7 @@ bool RenderGBufferDebug(RenderPassContext& pass, FrameContext& frame,
                         wgpu::TextureView normals_view,
                         wgpu::TextureView albedo_view,
                         wgpu::TextureView material_view,
-                        wgpu::TextureView hdr_view, GBufferDebugMode mode);
+                        wgpu::TextureView hdr_view,
+                        wgpu::TextureView ao_view, GBufferDebugMode mode);
 
 }  // namespace badlands

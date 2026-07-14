@@ -5,15 +5,16 @@
 // Adapted from sampo's src/shaders/passes/deferred_lighting.wesl. Kept:
 // world-pos reconstruction from reversed-Z depth, octahedron normal decode, the
 // sun directional term (EON retro diffuse + GGX spec), the SH ambient diffuse
-// term, and (task S2.B2) the IBL ambient-specular split-sum term. STILL REMOVED
-// (return in later tasks): shadow-map PCF (binding 5/6), GTAO (7), contact
-// shadows (8) — hardcoded shadow=1; ao (task M4) is the baked-AO channel from
-// the material G-buffer (min'd with real-time GTAO once M6 lands).
+// term, (task S2.B2) the IBL ambient-specular split-sum term, and (task M6)
+// screen-space GTAO (binding 7): final AO = min(gtao, baked-AO). STILL REMOVED
+// (return in later tasks): shadow-map PCF (binding 5/6), contact shadows (8) —
+// hardcoded shadow=1.
 //
-// B2 group-0 layout: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
-// material @4 (all textureLoad'd), prefiltered env cube @9 + its sampler @10,
-// BRDF split-sum LUT @11 + its sampler @12. Bindings 5-8 stay unused (WGSL
-// bindings need not be contiguous). The SceneRenderer ALWAYS binds @9..@12
+// M6 group-0 layout: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
+// material @4 (all textureLoad'd), GTAO ao @7, prefiltered env cube @9 + its
+// sampler @10, BRDF split-sum LUT @11 + its sampler @12. Bindings 5/6/8 stay
+// unused (WGSL bindings need not be contiguous). The SceneRenderer ALWAYS binds
+// @7 (a GTAO texture, or a 1.0-cleared texture when GTAO is off) and @9..@12
 // (prefiltered cube or a 1x1 black fallback cube + the BRDF LUT), so this
 // layout is always satisfiable.
 import package::common::frame::{frame, getFullscreenTriangleVertex, reconstructLinearZ, reconstructViewSpacePosition, viewSpaceToWorldOffsetedSpacePosition, decodeOctahedron};
@@ -27,6 +28,7 @@ const F0_DIELECTRIC: vec3<f32> = vec3<f32>(0.04);
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
 @group(0) @binding(3) var albedo_texture: texture_2d<f32>;
 @group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow, B=baked AO
+@group(0) @binding(7) var ao_texture: texture_2d<f32>;          // GTAO screen-space AO (R8: 1=unoccluded)
 @group(0) @binding(9) var prefiltered_env: texture_cube<f32>;   // IBL prefiltered environment
 @group(0) @binding(10) var prefiltered_sampler: sampler;
 @group(0) @binding(11) var brdf_lut: texture_2d<f32>;           // Split-sum BRDF LUT (R=scale, G=bias)
@@ -44,6 +46,14 @@ fn vs_main(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
     output.Position = fullscreen.clipPosition;
     output.screenUV = fullscreen.screenUV;
     return output;
+}
+
+// Computes Specular Occlusion (ported from sampo's deferred_lighting.wesl).
+// Prevents ambient specular 'glow' from leaking into deep cracks (AO areas):
+// scales the AO influence by roughness and the viewing angle so sharp
+// reflections (low roughness) are occluded more strictly.
+fn computeSpecularOcclusion(NdotV: f32, ao: f32, roughness: f32) -> f32 {
+    return clamp(pow(NdotV + ao, roughness) - 1.0 + ao, 0.0, 1.0);
 }
 
 @fragment
@@ -75,10 +85,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let roughness = materialData.r;
 
     // 4. Shadowing / occlusion — no shadow map or contact shadows yet (B1);
-    // ao is the baked AO from the ARM texture's R channel (M6 upgrades this
-    // to min(gtao, materialData.b) once the GTAO compute pass lands).
+    // final AO = min(screen-space GTAO, baked AO). `enableGtao` gates whether
+    // the GTAO compute pass ran this frame: when it didn't, gtao=1.0 so
+    // ao = min(1.0, baked) = baked (M4 behaviour).
     let shadow = 1.0;
-    let ao = materialData.b;
+    let gtao = select(1.0, textureLoad(ao_texture, texCoord, 0).r, frame.enableGtao != 0u);
+    let ao = min(gtao, materialData.b);
 
     // 5. Lighting calculation
     let albedoLinear = srgb_to_linear(textureLoad(albedo_texture, texCoord, 0).rgb);
@@ -102,7 +114,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let brdfLutSample = textureSampleLevel(brdf_lut, brdf_lut_sampler, vec2<f32>(NdotV, roughness), 0.0).rg;
     let specularScale = F0_DIELECTRIC * brdfLutSample.r + brdfLutSample.g;
-    let ambientSpecular = prefilteredColor * specularScale * ao;
+    // Specular occlusion: roughness/view-angle-aware AO for the IBL specular
+    // term (prevents ambient specular leaking into cracks — sampo parity).
+    let specOcclusion = computeSpecularOcclusion(NdotV, ao, roughness);
+    let ambientSpecular = prefilteredColor * specularScale * specOcclusion;
 
     // Roughness-aware indirect Fresnel to keep energy in check: the diffuse
     // term is dimmed where the specular term picks up (Lagarde approximation).

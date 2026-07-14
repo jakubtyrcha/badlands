@@ -20,7 +20,8 @@ bool RenderGBufferDebug(RenderPassContext& pass, FrameContext& frame,
                         wgpu::TextureView normals_view,
                         wgpu::TextureView albedo_view,
                         wgpu::TextureView material_view,
-                        wgpu::TextureView hdr_view, GBufferDebugMode mode) {
+                        wgpu::TextureView hdr_view,
+                        wgpu::TextureView ao_view, GBufferDebugMode mode) {
   if (mode == GBufferDebugMode::None) {
     return false;
   }
@@ -45,9 +46,9 @@ bool RenderGBufferDebug(RenderPassContext& pass, FrameContext& frame,
       frame.CreateUniformBuffer(sizeof(uint32_t), &mode_value);
 
   // Group 0: frame UBO @0, gbuffer depth/normals/albedo/material @1-4, lit
-  // HDR @5, debug-mode uniform @6 — matches
+  // HDR @5, debug-mode uniform @6, GTAO AO @7 — matches
   // shaders/passes/gbuffer_debug.wesl's binding declarations.
-  std::array<wgpu::BindGroupEntry, 7> entries{};
+  std::array<wgpu::BindGroupEntry, 8> entries{};
   entries[0].binding = 0;
   entries[0].buffer = frame.GetFrameUniformBuffer();
   entries[0].offset = 0;
@@ -66,6 +67,8 @@ bool RenderGBufferDebug(RenderPassContext& pass, FrameContext& frame,
   entries[6].buffer = mode_buffer;
   entries[6].offset = 0;
   entries[6].size = sizeof(uint32_t);
+  entries[7].binding = 7;
+  entries[7].textureView = ao_view;
 
   wgpu::BindGroup bind_group =
       frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);

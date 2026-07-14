@@ -94,8 +94,19 @@ void DrawGBufferDebugSelector(SceneRenderer& renderer) {
   if (ImGui::RadioButton("HDR", mode == GBufferDebugMode::Hdr)) {
     mode = GBufferDebugMode::Hdr;
   }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("AO", mode == GBufferDebugMode::Ao)) {
+    mode = GBufferDebugMode::Ao;
+  }
 
   renderer.SetDebugMode(mode);
+
+  // GTAO screen-space AO toggle (M6). Drives SceneRenderer::SetGtaoEnabled;
+  // final AO = min(GTAO, baked AO) when on, baked AO only when off.
+  bool gtao_enabled = renderer.GetGtaoEnabled();
+  if (ImGui::Checkbox("GTAO", &gtao_enabled)) {
+    renderer.SetGtaoEnabled(gtao_enabled);
+  }
 }
 
 void DrawStats(float dt_seconds) {

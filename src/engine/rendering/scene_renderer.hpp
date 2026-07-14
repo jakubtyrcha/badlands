@@ -55,6 +55,8 @@ enum class GBufferDebugMode {
   Hdr,        // the lit HDR buffer, tonemapped — same as kNone, a convenience
               // passthrough so the selector can cover the whole HDR->surface
               // resolve without a separate "off" state.
+  Ao,         // the GTAO screen-space AO field (grayscale, dark at contacts).
+              // Shows 1.0 (white) everywhere when GTAO is off / unsupported.
 };
 
 // Deferred renderer: G-buffer geometry pass -> deferred lighting (sun + SH
@@ -124,6 +126,14 @@ class SceneRenderer {
   void SetDebugMode(GBufferDebugMode mode) { debug_mode_ = mode; }
   GBufferDebugMode GetDebugMode() const { return debug_mode_; }
 
+  // GTAO screen-space AO toggle (Task M6). GTAO only runs when both this flag
+  // is set AND the device supports R8Unorm storage textures
+  // (has_r8unorm_storage_, from Initialize). When it does not run, the deferred
+  // pass's `enableGtao` uniform is 0 so final AO falls back to the baked-AO
+  // channel. Takes effect on the next Render() call.
+  void SetGtaoEnabled(bool enabled) { gtao_enabled_ = enabled; }
+  bool GetGtaoEnabled() const { return gtao_enabled_; }
+
   // HDR accumulation target format and reversed-Z depth-buffer format —
   // fixed constants in this trimmed renderer (not configurable via
   // Initialize). Exposed so callers can build MaterialInstanceFactory
@@ -160,6 +170,14 @@ class SceneRenderer {
   // lighting pass) — there is no separate standalone depth texture.
   GBuffer gbuffer_;
 
+  // === GTAO (M6) ===
+  // Screen-space AO target (R8Unorm), sized to the G-buffer. Written by the
+  // GTAO compute pass (StorageBinding, only when has_r8unorm_storage_), read
+  // by the deferred-lighting pass @7 (TextureBinding), and cleared to 1.0 at
+  // creation (RenderAttachment) so it is valid even when GTAO never runs.
+  wgpu::Texture ao_texture_;
+  wgpu::TextureView ao_view_;
+
   // Resolved-material-instance cache, shared across the forward pass's
   // draw calls (and across frames — keyed by factory + geometry + pass +
   // texture/uniform config, see material_instance_cache.hpp).
@@ -188,6 +206,10 @@ class SceneRenderer {
 
   // See Initialize()'s has_r8unorm_storage param.
   bool has_r8unorm_storage_ = false;
+
+  // GTAO on/off (SetGtaoEnabled). GTAO runs only when this AND
+  // has_r8unorm_storage_ are true. Default on.
+  bool gtao_enabled_ = true;
 };
 
 }  // namespace badlands

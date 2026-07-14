@@ -135,6 +135,47 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
   // G-buffer (3 MRT color targets + reversed-Z depth). Its depth target is
   // this renderer's depth buffer; the deferred lighting pass samples it.
   gbuffer_.Create(device_, width, height);
+
+  // === GTAO AO target (M6) ===
+  // R8Unorm, G-buffer sized. Always TextureBinding (deferred pass reads it @7)
+  // + RenderAttachment (the clear-to-1.0 pass below); StorageBinding is added
+  // only when the device supports R8Unorm storage textures (the GTAO compute
+  // pass writes it). Recreated here on every CreateTargets (Initialize/Resize).
+  wgpu::TextureDescriptor ao_desc;
+  ao_desc.size = {width, height, 1};
+  ao_desc.format = wgpu::TextureFormat::R8Unorm;
+  ao_desc.usage = wgpu::TextureUsage::TextureBinding |
+                  wgpu::TextureUsage::RenderAttachment;
+  if (has_r8unorm_storage_) {
+    ao_desc.usage |= wgpu::TextureUsage::StorageBinding;
+  }
+  ao_desc.mipLevelCount = 1;
+  ao_desc.sampleCount = 1;
+  ao_desc.dimension = wgpu::TextureDimension::e2D;
+  ao_texture_ = device_.CreateTexture(&ao_desc);
+  ao_view_ = ao_texture_.CreateView();
+
+  // Clear the AO target to 1.0 (fully unoccluded) once at creation so it is
+  // valid even before/without a GTAO dispatch (e.g. no R8Unorm-storage device,
+  // GTAO toggled off, or the first frame). A trivial RenderAttachment clear.
+  {
+    wgpu::RenderPassColorAttachment ao_clear;
+    ao_clear.view = ao_view_;
+    ao_clear.loadOp = wgpu::LoadOp::Clear;
+    ao_clear.storeOp = wgpu::StoreOp::Store;
+    ao_clear.clearValue = {1.0, 1.0, 1.0, 1.0};
+
+    wgpu::RenderPassDescriptor clear_desc;
+    clear_desc.colorAttachmentCount = 1;
+    clear_desc.colorAttachments = &ao_clear;
+    clear_desc.depthStencilAttachment = nullptr;
+
+    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&clear_desc);
+    pass.End();
+    wgpu::CommandBuffer commands = encoder.Finish();
+    queue_.Submit(1, &commands);
+  }
 }
 
 void SceneRenderer::Resize(uint32_t width, uint32_t height) {
@@ -165,6 +206,11 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // applied to vertex positions).
   glm::vec3 camera_world_pos = camera.GetPosition();
 
+  // GTAO runs only when enabled AND the device supports R8Unorm storage
+  // textures. `enable_gtao` (set below) tells the deferred pass whether to read
+  // the AO texture (else it uses 1.0 → final AO = baked AO).
+  const bool run_gtao = has_r8unorm_storage_ && gtao_enabled_;
+
   UniformData frame_uniforms{};
   frame_uniforms.view = glm::lookAt(glm::vec3(0.0f), camera.direction, camera.up);
   frame_uniforms.proj = camera.GetProj();
@@ -185,7 +231,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   frame_uniforms.far_plane = camera.far_plane;
   frame_uniforms.screen_size =
       glm::vec2(static_cast<float>(width_), static_cast<float>(height_));
-  frame_uniforms.enable_gtao = 0;      // no GTAO pass
+  frame_uniforms.enable_gtao = run_gtao ? 1u : 0u;
   frame_uniforms.tonemap_mode = 0;     // kClamp (TonemapMode not ported;
                                        // shaders/common/frame.wesl: 0 = kClamp)
   frame_uniforms.output_is_linear =
@@ -237,6 +283,50 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     pass.End();
   }
 
+  // === Pass 1.5: GTAO compute — screen-space ambient occlusion (M6).
+  // Runs BETWEEN the G-buffer pass (its depth + normals are the inputs) and
+  // the skybox/deferred passes (deferred reads the AO output @7). Skipped when
+  // GTAO is off or the device lacks R8Unorm storage — the AO texture then
+  // keeps its 1.0 clear and enable_gtao=0 makes deferred ignore it. ===
+  if (run_gtao) {
+    auto gtao_pipeline = pipeline_generator_->GetComputePipeline("compute/gtao");
+    if (!gtao_pipeline || !gtao_pipeline->pipeline) {
+      spdlog::error("SceneRenderer::Render: failed to compile compute/gtao");
+    } else {
+      // Group 0: frame UBO @0.
+      std::array<wgpu::BindGroupEntry, 1> group0_entries{};
+      group0_entries[0].binding = 0;
+      group0_entries[0].buffer = frame.GetFrameUniformBuffer();
+      group0_entries[0].offset = 0;
+      group0_entries[0].size = sizeof(UniformData);
+      wgpu::BindGroup gtao_group0 = frame.CreateBindGroup(
+          gtao_pipeline->bind_group_layouts[0], group0_entries);
+
+      // Group 1: gbuffer depth @0, normals @1, AO storage output @2.
+      std::array<wgpu::BindGroupEntry, 3> group1_entries{};
+      group1_entries[0].binding = 0;
+      group1_entries[0].textureView = gbuffer_.GetDepthView();
+      group1_entries[1].binding = 1;
+      group1_entries[1].textureView = gbuffer_.GetNormalsView();
+      group1_entries[2].binding = 2;
+      group1_entries[2].textureView = ao_view_;
+      wgpu::BindGroup gtao_group1 = frame.CreateBindGroup(
+          gtao_pipeline->bind_group_layouts[1], group1_entries);
+
+      const uint32_t ws_x = gtao_pipeline->workgroup_size[0];
+      const uint32_t ws_y = gtao_pipeline->workgroup_size[1];
+      const uint32_t dispatch_x = (width_ + ws_x - 1) / ws_x;
+      const uint32_t dispatch_y = (height_ + ws_y - 1) / ws_y;
+
+      wgpu::ComputePassEncoder compute_pass = frame.BeginComputePass();
+      compute_pass.SetPipeline(gtao_pipeline->pipeline);
+      compute_pass.SetBindGroup(0, gtao_group0, 0, nullptr);
+      compute_pass.SetBindGroup(1, gtao_group1, 0, nullptr);
+      compute_pass.DispatchWorkgroups(dispatch_x, dispatch_y, 1);
+      compute_pass.End();
+    }
+  }
+
   // === Pass 2: Skybox background — fill the HDR target from the source
   // environment cube (fullscreen, standard cube sampling along the per-pixel
   // world ray). Runs BEFORE deferred lighting: it clears + fills the whole
@@ -285,18 +375,18 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
           "pipeline");
     } else {
       // Group 0: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
-      // material @4 (all textureLoad'd — no sampler), then IBL: prefiltered
-      // env cube @9 + sampler @10, BRDF LUT @11 + sampler @12. Matches
-      // shaders/passes/deferred_lighting.wesl's binding declarations. The IBL
-      // cube is the prefiltered env when available, else a 1x1 black fallback
-      // (so the specular term is zero) — bindings are always valid.
+      // material @4 (all textureLoad'd — no sampler), GTAO ao @7, then IBL:
+      // prefiltered env cube @9 + sampler @10, BRDF LUT @11 + sampler @12.
+      // Matches shaders/passes/deferred_lighting.wesl's binding declarations.
+      // The IBL cube is the prefiltered env when available, else a 1x1 black
+      // fallback (so the specular term is zero) — bindings are always valid.
       const bool use_prefiltered = has_prefiltered_ && prefiltered_.IsValid();
       wgpu::TextureView ibl_cube_view =
           use_prefiltered ? prefiltered_.GetView() : fallback_cube_view_;
       wgpu::Sampler ibl_cube_sampler =
           use_prefiltered ? prefiltered_.GetSampler() : fallback_cube_sampler_;
 
-      std::array<wgpu::BindGroupEntry, 9> entries{};
+      std::array<wgpu::BindGroupEntry, 10> entries{};
       entries[0].binding = 0;
       entries[0].buffer = frame.GetFrameUniformBuffer();
       entries[0].offset = 0;
@@ -309,14 +399,16 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       entries[3].textureView = gbuffer_.GetAlbedoView();
       entries[4].binding = 4;
       entries[4].textureView = gbuffer_.GetMaterialView();
-      entries[5].binding = 9;
-      entries[5].textureView = ibl_cube_view;
-      entries[6].binding = 10;
-      entries[6].sampler = ibl_cube_sampler;
-      entries[7].binding = 11;
-      entries[7].textureView = brdf_lut_.GetView();
-      entries[8].binding = 12;
-      entries[8].sampler = brdf_lut_.GetSampler();
+      entries[5].binding = 7;
+      entries[5].textureView = ao_view_;
+      entries[6].binding = 9;
+      entries[6].textureView = ibl_cube_view;
+      entries[7].binding = 10;
+      entries[7].sampler = ibl_cube_sampler;
+      entries[8].binding = 11;
+      entries[8].textureView = brdf_lut_.GetView();
+      entries[9].binding = 12;
+      entries[9].sampler = brdf_lut_.GetSampler();
 
       wgpu::BindGroup bind_group =
           frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
@@ -363,7 +455,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       RenderGBufferDebug(pass, frame, *pipeline_generator_, surface_format_,
                          gbuffer_.GetDepthView(), gbuffer_.GetNormalsView(),
                          gbuffer_.GetAlbedoView(), gbuffer_.GetMaterialView(),
-                         hdr_color_view_, debug_mode_);
+                         hdr_color_view_, ao_view_, debug_mode_);
     } else {
       RenderPipelineDeclaration decl;
       decl.shader_path = "passes/tonemapping";
