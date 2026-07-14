@@ -14,6 +14,7 @@
 #include "engine/app/orbit_camera_controller.hpp"
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
+#include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/texture_loader.hpp"
 #include "engine/scene/scene_graph.hpp"
@@ -35,6 +36,12 @@ class PlaceholderView : public AppView {
  private:
   LoadedTexture albedo_;
   wgpu::Sampler sampler_;
+  // Procedural sky environment for IBL (built once in Initialize).
+  CubemapBuilder sky_cube_;
+  // Temporary verification aid: a ~0.15 solid-gray 1x1 roughness override so
+  // the sphere is smooth enough to show a visible sky/sun reflection. Real
+  // per-material roughness arrives with the material-pack loader later.
+  wgpu::TextureView roughness_view_;
   std::unique_ptr<MaterialInstanceFactory> factory_;
   SceneGraph scene_;
   entt::registry registry_;

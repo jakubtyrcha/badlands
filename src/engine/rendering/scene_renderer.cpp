@@ -15,6 +15,8 @@
 #include "engine/rendering/scene_renderer.hpp"
 
 #include <array>
+#include <cstdint>
+#include <cstdlib>
 
 #include <spdlog/spdlog.h>
 
@@ -41,6 +43,86 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
   }
 
   CreateTargets(width, height);
+
+  // === IBL setup ===
+  // BRDF split-sum LUT — one-time (roughness-only integral, view-independent).
+  brdf_lut_.Generate(device_, queue_, *pipeline_generator_);
+
+  // 1x1 black fallback cube + filtering sampler. The deferred-lighting IBL
+  // bindings (@9/@10) must always be valid, even with no skybox — and this
+  // sampler also serves as the source-cube sampler for the prefilter pass
+  // (linear/clamp is exactly what GGX pre-filtering wants).
+  {
+    wgpu::TextureDescriptor desc;
+    desc.size = {1, 1, 6};
+    desc.format = wgpu::TextureFormat::RGBA16Float;
+    desc.usage =
+        wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+    desc.dimension = wgpu::TextureDimension::e2D;
+    desc.mipLevelCount = 1;
+    desc.sampleCount = 1;
+    fallback_cube_texture_ = device_.CreateTexture(&desc);
+
+    std::array<uint16_t, 6 * 4> zeros{};  // RGBA16Float black, all 6 faces
+    wgpu::TexelCopyTextureInfo dst;
+    dst.texture = fallback_cube_texture_;
+    dst.mipLevel = 0;
+    dst.origin = {0, 0, 0};
+    wgpu::TexelCopyBufferLayout layout;
+    layout.bytesPerRow = 4 * sizeof(uint16_t);
+    layout.rowsPerImage = 1;
+    wgpu::Extent3D extent = {1, 1, 6};
+    queue_.WriteTexture(&dst, zeros.data(), zeros.size() * sizeof(uint16_t),
+                        &layout, &extent);
+
+    wgpu::TextureViewDescriptor vdesc;
+    vdesc.format = wgpu::TextureFormat::RGBA16Float;
+    vdesc.dimension = wgpu::TextureViewDimension::Cube;
+    vdesc.baseMipLevel = 0;
+    vdesc.mipLevelCount = 1;
+    vdesc.baseArrayLayer = 0;
+    vdesc.arrayLayerCount = 6;
+    fallback_cube_view_ = fallback_cube_texture_.CreateView(&vdesc);
+
+    wgpu::SamplerDescriptor sdesc;
+    sdesc.addressModeU = wgpu::AddressMode::ClampToEdge;
+    sdesc.addressModeV = wgpu::AddressMode::ClampToEdge;
+    sdesc.addressModeW = wgpu::AddressMode::ClampToEdge;
+    sdesc.minFilter = wgpu::FilterMode::Linear;
+    sdesc.magFilter = wgpu::FilterMode::Linear;
+    sdesc.mipmapFilter = wgpu::MipmapFilterMode::Linear;
+    sdesc.maxAnisotropy = 1;
+    fallback_cube_sampler_ = device_.CreateSampler(&sdesc);
+  }
+
+  // Verification hook: force the black fallback into the IBL binding so the
+  // sky/sun reflection vanishes, proving the reflection is driven by the
+  // prefiltered env (before/after in the task's DoD).
+  ibl_disabled_ = std::getenv("BADLANDS_IBL_DISABLE") != nullptr;
+  if (ibl_disabled_) {
+    spdlog::warn(
+        "SceneRenderer: BADLANDS_IBL_DISABLE set — IBL specular forced to the "
+        "black fallback cube");
+  }
+}
+
+void SceneRenderer::UpdateIbl(const SceneContext& scene) {
+  if (ibl_disabled_) return;          // keep fallback (verification path)
+  if (!scene.skybox_cubemap) return;  // no source env -> fallback stays bound
+
+  const bool source_changed =
+      scene.skybox_cubemap.Get() != ibl_source_view_.Get();
+  if (has_prefiltered_ && !source_changed &&
+      scene.skybox_generation == ibl_source_generation_) {
+    return;  // up to date
+  }
+
+  if (prefiltered_.Generate(device_, queue_, *pipeline_generator_,
+                            scene.skybox_cubemap, fallback_cube_sampler_)) {
+    has_prefiltered_ = true;
+    ibl_source_view_ = scene.skybox_cubemap;
+    ibl_source_generation_ = scene.skybox_generation;
+  }
 }
 
 void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
@@ -77,6 +159,10 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   if (!surface_view || width_ == 0 || height_ == 0 || !pipeline_generator_) {
     return;
   }
+
+  // Refresh the prefiltered specular env if the scene's skybox changed. Does
+  // its own encoder/submit (queue-ordered before this frame's work below).
+  UpdateIbl(scene);
 
   // World camera-offsetting: the view matrix has the camera fixed at the
   // origin (pure rotation, no translation) for float precision — geometry is
@@ -176,9 +262,19 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
           "pipeline");
     } else {
       // Group 0: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
-      // material @4 (all textureLoad'd — no sampler). Matches
-      // shaders/passes/deferred_lighting.wesl's binding declarations.
-      std::array<wgpu::BindGroupEntry, 5> entries{};
+      // material @4 (all textureLoad'd — no sampler), then IBL: prefiltered
+      // env cube @9 + sampler @10, BRDF LUT @11 + sampler @12. Matches
+      // shaders/passes/deferred_lighting.wesl's binding declarations. The IBL
+      // cube is the prefiltered env when available, else a 1x1 black fallback
+      // (so the specular term is zero) — bindings are always valid.
+      const bool use_prefiltered =
+          !ibl_disabled_ && has_prefiltered_ && prefiltered_.IsValid();
+      wgpu::TextureView ibl_cube_view =
+          use_prefiltered ? prefiltered_.GetView() : fallback_cube_view_;
+      wgpu::Sampler ibl_cube_sampler =
+          use_prefiltered ? prefiltered_.GetSampler() : fallback_cube_sampler_;
+
+      std::array<wgpu::BindGroupEntry, 9> entries{};
       entries[0].binding = 0;
       entries[0].buffer = frame.GetFrameUniformBuffer();
       entries[0].offset = 0;
@@ -191,6 +287,14 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       entries[3].textureView = gbuffer_.GetAlbedoView();
       entries[4].binding = 4;
       entries[4].textureView = gbuffer_.GetMaterialView();
+      entries[5].binding = 9;
+      entries[5].textureView = ibl_cube_view;
+      entries[6].binding = 10;
+      entries[6].sampler = ibl_cube_sampler;
+      entries[7].binding = 11;
+      entries[7].textureView = brdf_lut_.GetView();
+      entries[8].binding = 12;
+      entries[8].sampler = brdf_lut_.GetSampler();
 
       wgpu::BindGroup bind_group =
           frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);

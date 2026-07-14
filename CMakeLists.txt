@@ -87,6 +87,9 @@ add_library(badlands_engine STATIC
     src/engine/rendering/gbuffer.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
+    src/engine/rendering/cubemap_builder.cpp
+    src/engine/rendering/brdf_lut.cpp
+    src/engine/rendering/prefiltered_cubemap.cpp
     src/engine/app/sdl_viewer_app.cpp
     src/engine/app/placeholder_view.cpp
     src/engine/app/screenshot.cpp

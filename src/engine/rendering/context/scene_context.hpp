@@ -19,6 +19,8 @@
 // alongside whichever future task ports the subsystem that actually consumes
 // it.
 #include <array>
+#include <cstdint>
+#include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
@@ -36,6 +38,14 @@ struct SceneContext {
   glm::vec3 sun_color{1.0f, 1.0f, 1.0f};      // Directional light color
   // Spherical Harmonics L2 (9 coefficients) for directional ambient lighting
   std::array<glm::vec3, 9> ambient_sh{};
+
+  // Source environment cubemap for IBL specular (a standard RGBA16Float cube,
+  // e.g. built by CubemapBuilder from a procedural sky). Null = no environment,
+  // in which case SceneRenderer binds a 1x1 black fallback cube (IBL specular
+  // contributes nothing). SceneRenderer regenerates its prefiltered cube
+  // whenever `skybox_generation` changes — bump it after replacing the view.
+  wgpu::TextureView skybox_cubemap;
+  uint32_t skybox_generation{0};
 
   // Clear/background color
   glm::vec4 clear_color{0.1f, 0.1f, 0.1f, 1.0f};

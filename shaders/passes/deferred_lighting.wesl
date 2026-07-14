@@ -1,18 +1,24 @@
 // Deferred lighting pass — sun directional (EON diffuse + GGX specular) +
-// spherical-harmonic ambient diffuse, evaluated in World-Camera-Offseted Space.
+// spherical-harmonic ambient diffuse + IBL ambient specular (split-sum),
+// evaluated in World-Camera-Offseted Space.
 //
-// Adapted from sampo's src/shaders/passes/deferred_lighting.wesl for badlands
-// task S2.B1. Kept: world-pos reconstruction from reversed-Z depth, octahedron
-// normal decode, the sun directional term (EON retro diffuse + GGX spec), and
-// the SH ambient diffuse term. REMOVED (return in later B tasks): shadow-map
-// PCF (binding 5/6), GTAO (7), contact shadows (8) — hardcoded shadow=1/ao=1;
-// and IBL specular (prefiltered env 9/10 + BRDF LUT 11/12). B1's group-0
-// layout is therefore: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
-// material @4 (all textureLoad'd — no sampler needed).
+// Adapted from sampo's src/shaders/passes/deferred_lighting.wesl. Kept:
+// world-pos reconstruction from reversed-Z depth, octahedron normal decode, the
+// sun directional term (EON retro diffuse + GGX spec), the SH ambient diffuse
+// term, and (task S2.B2) the IBL ambient-specular split-sum term. STILL REMOVED
+// (return in later B tasks): shadow-map PCF (binding 5/6), GTAO (7), contact
+// shadows (8) — hardcoded shadow=1/ao=1.
+//
+// B2 group-0 layout: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
+// material @4 (all textureLoad'd), prefiltered env cube @9 + its sampler @10,
+// BRDF split-sum LUT @11 + its sampler @12. Bindings 5-8 stay unused (WGSL
+// bindings need not be contiguous). The SceneRenderer ALWAYS binds @9..@12
+// (prefiltered cube or a 1x1 black fallback cube + the BRDF LUT), so this
+// layout is always satisfiable.
 import package::common::frame::{frame, getFullscreenTriangleVertex, reconstructLinearZ, reconstructViewSpacePosition, viewSpaceToWorldOffsetedSpacePosition, decodeOctahedron};
 import package::common::color::srgb_to_linear;
 import package::common::sh_lighting::evaluateAmbientSHL2;
-import package::common::brdf::{evaluateEonRetroBrdf, evaluateSpecularGgxBrdf};
+import package::common::brdf::{evaluateEonRetroBrdf, evaluateSpecularGgxBrdf, evaluateLagardeFresnel};
 
 const F0_DIELECTRIC: vec3<f32> = vec3<f32>(0.04);
 
@@ -20,6 +26,10 @@ const F0_DIELECTRIC: vec3<f32> = vec3<f32>(0.04);
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
 @group(0) @binding(3) var albedo_texture: texture_2d<f32>;
 @group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow
+@group(0) @binding(9) var prefiltered_env: texture_cube<f32>;   // IBL prefiltered environment
+@group(0) @binding(10) var prefiltered_sampler: sampler;
+@group(0) @binding(11) var brdf_lut: texture_2d<f32>;           // Split-sum BRDF LUT (R=scale, G=bias)
+@group(0) @binding(12) var brdf_lut_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) Position: vec4<f32>,
@@ -76,9 +86,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let specularTerm = evaluateSpecularGgxBrdf(normal, viewDir, lightDir, roughness, F0_DIELECTRIC);
     let directLighting = (diffuseTerm * albedoLinear + specularTerm) * shadow * NdotL * frame.sunColor.xyz;
 
-    // Ambient lighting (SH L2 diffuse only — IBL specular returns in B2)
+    // Ambient lighting: SH L2 diffuse + IBL split-sum specular.
     let ambientDiffuse = evaluateAmbientSHL2(normal, frame.ambientSH) * ao;
-    let indirectLighting = ambientDiffuse * albedoLinear;
+
+    // Ambient specular (IBL). Sample the prefiltered environment cube along the
+    // reflection vector at a roughness-selected mip, then apply the split-sum
+    // BRDF LUT (indexed by NdotV, roughness) — specular = F0 * lut.r + lut.g.
+    let R = reflect(-viewDir, normal);
+    let max_mip = f32(textureNumLevels(prefiltered_env) - 1u);
+    let mip_level = roughness * max_mip;
+    let prefilteredColor = textureSampleLevel(prefiltered_env, prefiltered_sampler, R, mip_level).rgb;
+
+    let brdfLutSample = textureSampleLevel(brdf_lut, brdf_lut_sampler, vec2<f32>(NdotV, roughness), 0.0).rg;
+    let specularScale = F0_DIELECTRIC * brdfLutSample.r + brdfLutSample.g;
+    let ambientSpecular = prefilteredColor * specularScale * ao;
+
+    // Roughness-aware indirect Fresnel to keep energy in check: the diffuse
+    // term is dimmed where the specular term picks up (Lagarde approximation).
+    let indirectFresnel = evaluateLagardeFresnel(NdotV, roughness, F0_DIELECTRIC);
+    let diffuseWeight = 1.0 - indirectFresnel;
+
+    let indirectLighting = (ambientDiffuse * albedoLinear * diffuseWeight) + ambientSpecular;
 
     let finalColorLinear = directLighting + indirectLighting;
     return vec4<f32>(finalColorLinear, 1.0);

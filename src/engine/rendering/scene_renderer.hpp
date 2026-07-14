@@ -31,8 +31,10 @@
 #include <dawn/webgpu_cpp.h>
 
 #include "engine/core/camera.hpp"
+#include "engine/rendering/brdf_lut.hpp"
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/material/material_instance_cache.hpp"
+#include "engine/rendering/prefiltered_cubemap.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 
 namespace badlands {
@@ -108,6 +110,9 @@ class SceneRenderer {
 
  private:
   void CreateTargets(uint32_t width, uint32_t height);
+  // Lazily (re)builds prefiltered_ from scene.skybox_cubemap when the source
+  // view or generation changes. No-op when unchanged.
+  void UpdateIbl(const SceneContext& scene);
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -132,6 +137,26 @@ class SceneRenderer {
   // draw calls (and across frames — keyed by factory + geometry + pass +
   // texture/uniform config, see material_instance_cache.hpp).
   MaterialInstanceCache material_instance_cache_;
+
+  // === IBL (S2.B2) ===
+  // BRDF split-sum LUT — generated once in Initialize (view-independent).
+  BrdfLut brdf_lut_;
+  // Prefiltered specular environment — regenerated from scene.skybox_cubemap
+  // when its generation changes (see UpdateIbl). May be invalid (no skybox).
+  PrefilteredCubemap prefiltered_;
+  // 1x1 black fallback cube + sampler so the deferred-lighting IBL bindings
+  // (@9/@10) are ALWAYS valid even without a skybox (or with IBL disabled).
+  wgpu::Texture fallback_cube_texture_;
+  wgpu::TextureView fallback_cube_view_;
+  wgpu::Sampler fallback_cube_sampler_;
+  // Tracks the source cube (view + generation) prefiltered_ was built from.
+  wgpu::TextureView ibl_source_view_;
+  uint32_t ibl_source_generation_ = 0;
+  bool has_prefiltered_ = false;
+  // Debug/verification: BADLANDS_IBL_DISABLE forces the black fallback cube
+  // into @9 (proves the reflection is driven by the prefiltered env). Read
+  // once in Initialize.
+  bool ibl_disabled_ = false;
 
   uint32_t min_uniform_offset_alignment_ = 256;
 };
