@@ -57,11 +57,19 @@ void SdlViewerApp::InitImGui(int width, int height) {
   spdlog::info("SdlViewerApp: ImGui initialized");
 }
 
+namespace {
+// Default recording directory for the F2 live-toggle (no path argument).
+constexpr const char* kDefaultRecordDir = "recordings";
+}  // namespace
+
 int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   std::string screenshot_path;
+  std::string record_dir;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
       screenshot_path = argv[++i];
+    } else if (std::strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
+      record_dir = argv[++i];
     }
   }
   const bool screenshot_mode = !screenshot_path.empty();
@@ -113,6 +121,10 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     return ok ? 0 : 1;
   }
 
+  if (!record_dir.empty()) {
+    recorder_.Start(record_dir);
+  }
+
   const uint64_t perf_freq = SDL_GetPerformanceFrequency();
   uint64_t last_time = SDL_GetPerformanceCounter();
 
@@ -138,6 +150,13 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
         }
       } else if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
         if (!ImGui::GetIO().WantCaptureKeyboard) {
+          if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F2) {
+            if (recorder_.active()) {
+              recorder_.Stop();
+            } else {
+              recorder_.Start(kDefaultRecordDir);
+            }
+          }
           view_->HandleEvent(e, width, height);
         }
       } else {
@@ -200,6 +219,12 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     }
 
     gpu_.Present();
+
+    if (recorder_.active()) {
+      recorder_.CaptureFrame(gpu_, *pipeline_gen_, *view_,
+                             static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height));
+    }
 
     if (!render_ok_logged) {
       render_ok_logged = true;

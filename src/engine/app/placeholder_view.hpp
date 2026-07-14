@@ -11,6 +11,7 @@
 #include <entt/entt.hpp>
 
 #include "engine/app/app_view.hpp"
+#include "engine/app/orbit_camera_controller.hpp"
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
@@ -39,6 +40,8 @@ class PlaceholderView : public AppView {
   entt::registry registry_;
   SceneContext scene_context_;
   Camera camera_;
+  OrbitCameraController orbit_;
+  bool left_mouse_down_ = false;
   float dt_ = 0.0f;
 };
 

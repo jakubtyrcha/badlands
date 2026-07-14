@@ -14,6 +14,7 @@
 
 #include "engine/app/app_view.hpp"
 #include "engine/app/render_context.hpp"
+#include "engine/app/screenshot_recorder.hpp"
 #include "engine/rendering/gpu_context.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
@@ -60,6 +61,7 @@ class SdlViewerApp {
   std::unique_ptr<GpuPipelineGenerator> pipeline_gen_;
   SceneRenderer renderer_;
   std::unique_ptr<AppView> view_;
+  ScreenshotRecorder recorder_;
 };
 
 }  // namespace badlands

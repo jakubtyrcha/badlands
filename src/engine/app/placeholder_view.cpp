@@ -101,15 +101,37 @@ void PlaceholderView::Initialize(const RenderContext& ctx) {
 
   BuildSphereScene(scene_, factory_.get(), sphere_params);
 
-  camera_.position = glm::vec3(0.0f, 1.5f, 4.0f);
-  camera_.LookAt(glm::vec3(0.0f));
+  orbit_.FrameBounds(glm::vec3(0.0f), 1.0f);
+  orbit_.UpdateCamera(camera_);
 }
 
-void PlaceholderView::HandleEvent(const SDL_Event& /*event*/, int /*width*/,
-                                  int /*height*/) {}
+void PlaceholderView::HandleEvent(const SDL_Event& event, int /*width*/,
+                                  int /*height*/) {
+  if (ImGui::GetIO().WantCaptureMouse) return;
+
+  switch (event.type) {
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      if (event.button.button == SDL_BUTTON_LEFT) left_mouse_down_ = true;
+      break;
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      if (event.button.button == SDL_BUTTON_LEFT) left_mouse_down_ = false;
+      break;
+    case SDL_EVENT_MOUSE_MOTION:
+      if (left_mouse_down_) {
+        orbit_.HandleMouseDrag(event.motion.xrel, event.motion.yrel);
+      }
+      break;
+    case SDL_EVENT_MOUSE_WHEEL:
+      orbit_.HandleMouseWheel(event.wheel.y);
+      break;
+    default:
+      break;
+  }
+}
 
 void PlaceholderView::Update(float dt, const bool* /*keyboard_state*/) {
   dt_ = dt;
+  orbit_.UpdateCamera(camera_);
   scene_.SyncToRegistry(registry_, scene_context_);
 }
 
