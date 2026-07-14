@@ -58,15 +58,9 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
   hdr_color_texture_ = device_.CreateTexture(&hdr_desc);
   hdr_color_view_ = hdr_color_texture_.CreateView();
 
-  wgpu::TextureDescriptor depth_desc;
-  depth_desc.size = {width, height, 1};
-  depth_desc.format = kDepthFormat;
-  depth_desc.usage = wgpu::TextureUsage::RenderAttachment;
-  depth_desc.mipLevelCount = 1;
-  depth_desc.sampleCount = 1;
-  depth_desc.dimension = wgpu::TextureDimension::e2D;
-  depth_texture_ = device_.CreateTexture(&depth_desc);
-  depth_view_ = depth_texture_.CreateView();
+  // G-buffer (3 MRT color targets + reversed-Z depth). Its depth target is
+  // this renderer's depth buffer; the deferred lighting pass samples it.
+  gbuffer_.Create(device_, width, height);
 }
 
 void SceneRenderer::Resize(uint32_t width, uint32_t height) {
@@ -122,17 +116,31 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   FrameContext frame;
   frame.Begin(device_, queue_, frame_uniforms, min_uniform_offset_alignment_);
 
-  // === Forward-opaque pass: clear HDR + depth, draw textured meshes ===
+  // === Pass 1: G-buffer — clear MRT (normals/albedo/material) + depth,
+  // draw textured meshes with their kGBuffer pipeline variant ===
   {
-    wgpu::RenderPassColorAttachment color_attachment;
-    color_attachment.view = hdr_color_view_;
-    color_attachment.loadOp = wgpu::LoadOp::Clear;
-    color_attachment.storeOp = wgpu::StoreOp::Store;
-    color_attachment.clearValue = {scene.clear_color.r, scene.clear_color.g,
-                                   scene.clear_color.b, scene.clear_color.a};
+    std::array<wgpu::RenderPassColorAttachment, 3> color_attachments{};
+
+    // Normals (RG16Float, octahedron-encoded world normal).
+    color_attachments[0].view = gbuffer_.GetNormalsView();
+    color_attachments[0].loadOp = wgpu::LoadOp::Clear;
+    color_attachments[0].storeOp = wgpu::StoreOp::Store;
+    color_attachments[0].clearValue = {0.0, 0.0, 0.0, 0.0};
+
+    // Albedo (BGRA8Unorm, base color).
+    color_attachments[1].view = gbuffer_.GetAlbedoView();
+    color_attachments[1].loadOp = wgpu::LoadOp::Clear;
+    color_attachments[1].storeOp = wgpu::StoreOp::Store;
+    color_attachments[1].clearValue = {0.0, 0.0, 0.0, 0.0};
+
+    // Material (RGBA8Unorm: R=roughness default 0.75, G=shadow 1.0 = lit).
+    color_attachments[2].view = gbuffer_.GetMaterialView();
+    color_attachments[2].loadOp = wgpu::LoadOp::Clear;
+    color_attachments[2].storeOp = wgpu::StoreOp::Store;
+    color_attachments[2].clearValue = {0.75, 1.0, 0.0, 0.0};
 
     wgpu::RenderPassDepthStencilAttachment depth_attachment;
-    depth_attachment.view = depth_view_;
+    depth_attachment.view = gbuffer_.GetDepthView();
     depth_attachment.depthClearValue = 0.0f;  // reversed-Z: 0 = far
     depth_attachment.depthLoadOp = wgpu::LoadOp::Clear;
     depth_attachment.depthStoreOp = wgpu::StoreOp::Store;
@@ -140,17 +148,74 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
 
     wgpu::RenderPassDescriptor desc;
-    desc.colorAttachmentCount = 1;
-    desc.colorAttachments = &color_attachment;
+    desc.colorAttachmentCount = color_attachments.size();
+    desc.colorAttachments = color_attachments.data();
     desc.depthStencilAttachment = &depth_attachment;
 
     RenderPassContext pass = frame.BeginRenderPass(desc);
     RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
-                         RenderPassType::kForward, material_instance_cache_);
+                         RenderPassType::kGBuffer, material_instance_cache_);
     pass.End();
   }
 
-  // === Tonemap resolve: HDR -> surface ===
+  // === Pass 2: Deferred lighting — fullscreen pass reading the G-buffer,
+  // lighting it (sun directional + SH ambient) into the HDR target. Clears
+  // to scene.clear_color so sky/no-geometry pixels (where the shader
+  // discards) keep the background color. ===
+  {
+    RenderPipelineDeclaration decl;
+    decl.shader_path = "passes/deferred_lighting";
+    // vertex_layout defaults to VertexLayout::kFullscreen (fullscreen
+    // triangle from @builtin(vertex_index); no vertex buffer, no depth).
+
+    RenderTargetFormats target_formats = {accumulation_format_};
+    auto compiled = pipeline_generator_->GetPipeline(decl, target_formats);
+    if (!compiled) {
+      spdlog::error(
+          "SceneRenderer::Render: failed to compile deferred_lighting "
+          "pipeline");
+    } else {
+      // Group 0: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
+      // material @4 (all textureLoad'd — no sampler). Matches
+      // shaders/passes/deferred_lighting.wesl's binding declarations.
+      std::array<wgpu::BindGroupEntry, 5> entries{};
+      entries[0].binding = 0;
+      entries[0].buffer = frame.GetFrameUniformBuffer();
+      entries[0].offset = 0;
+      entries[0].size = sizeof(UniformData);
+      entries[1].binding = 1;
+      entries[1].textureView = gbuffer_.GetDepthView();
+      entries[2].binding = 2;
+      entries[2].textureView = gbuffer_.GetNormalsView();
+      entries[3].binding = 3;
+      entries[3].textureView = gbuffer_.GetAlbedoView();
+      entries[4].binding = 4;
+      entries[4].textureView = gbuffer_.GetMaterialView();
+
+      wgpu::BindGroup bind_group =
+          frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
+
+      wgpu::RenderPassColorAttachment color_attachment;
+      color_attachment.view = hdr_color_view_;
+      color_attachment.loadOp = wgpu::LoadOp::Clear;
+      color_attachment.storeOp = wgpu::StoreOp::Store;
+      color_attachment.clearValue = {scene.clear_color.r, scene.clear_color.g,
+                                     scene.clear_color.b, scene.clear_color.a};
+
+      wgpu::RenderPassDescriptor desc;
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color_attachment;
+      desc.depthStencilAttachment = nullptr;  // reads depth as a texture
+
+      RenderPassContext pass = frame.BeginRenderPass(desc);
+      pass.SetPipeline(compiled->pipeline);
+      pass.SetBindGroup(0, bind_group);
+      pass.Draw(3);
+      pass.End();
+    }
+  }
+
+  // === Pass 3: Tonemap resolve: HDR -> surface ===
   {
     RenderPipelineDeclaration decl;
     decl.shader_path = "passes/tonemapping";

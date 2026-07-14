@@ -31,6 +31,7 @@
 #include <dawn/webgpu_cpp.h>
 
 #include "engine/core/camera.hpp"
+#include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 
@@ -38,7 +39,8 @@ namespace badlands {
 
 struct SceneContext;
 
-// Forward-opaque + tonemap renderer: the whole Stage-1 render path.
+// Deferred renderer: G-buffer geometry pass -> deferred lighting (sun + SH
+// ambient) into an HDR target -> fullscreen tonemap resolve to the surface.
 //
 // Usage:
 //   SceneRenderer renderer;
@@ -73,13 +75,14 @@ class SceneRenderer {
                   wgpu::TextureFormat surface_format, uint32_t width,
                   uint32_t height);
 
-  // Recreates the HDR/depth targets at a new size (e.g. on
+  // Recreates the HDR + G-buffer targets at a new size (e.g. on
   // SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED). No-op if unchanged.
   void Resize(uint32_t width, uint32_t height);
 
-  // Renders one frame: clears + runs the forward-opaque textured-mesh pass
-  // into the HDR target, then resolves HDR -> surface_view with a
-  // fullscreen tonemap pass. surface_view must be a view of a texture with
+  // Renders one frame: geometry into the G-buffer (kGBuffer variant), a
+  // fullscreen deferred-lighting pass (sun + SH ambient) into the HDR
+  // target, then a fullscreen tonemap resolve HDR -> surface_view.
+  // surface_view must be a view of a texture with
   // this renderer's configured surface_format and (width, height) (from
   // Initialize/Resize) — e.g. GpuContext::AcquireSurfaceTexture()'s result.
   void Render(const Camera& camera, entt::registry& registry,
@@ -116,13 +119,14 @@ class SceneRenderer {
   uint32_t width_ = 0;
   uint32_t height_ = 0;
 
-  // HDR accumulation target (forward pass renders here).
+  // HDR accumulation target (deferred lighting resolves here).
   wgpu::Texture hdr_color_texture_;
   wgpu::TextureView hdr_color_view_;
 
-  // Reversed-Z depth buffer.
-  wgpu::Texture depth_texture_;
-  wgpu::TextureView depth_view_;
+  // Deferred G-buffer: 3 MRT color targets + reversed-Z depth. The depth
+  // target doubles as this renderer's depth buffer (sampled by the deferred
+  // lighting pass) — there is no separate standalone depth texture.
+  GBuffer gbuffer_;
 
   // Resolved-material-instance cache, shared across the forward pass's
   // draw calls (and across frames — keyed by factory + geometry + pass +

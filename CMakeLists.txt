@@ -84,6 +84,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
+    src/engine/rendering/gbuffer.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/app/sdl_viewer_app.cpp

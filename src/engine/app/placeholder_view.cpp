@@ -8,6 +8,7 @@
 
 #include "core/geometry_type.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
+#include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/scene/scene_attachment.hpp"
@@ -34,7 +35,7 @@ void BuildSphereScene(SceneGraph& scene, MaterialInstanceFactory* mat,
   scene.AddAttachment(node, MeshAttachment{
       .mesh = std::move(resolved_mesh),
       .factory = mat,
-      .pass_type = MaterialPassType::kForwardOpaque,
+      .pass_type = MaterialPassType::kDeferred,
       .params = params,
   });
 
@@ -69,31 +70,34 @@ void PlaceholderView::Initialize(const RenderContext& ctx) {
   samp_desc.maxAnisotropy = 16;  // grazing-angle sharpness
   sampler_ = ctx.device.CreateSampler(&samp_desc);
 
-  // Build the textured_mesh material factory, targeting the forward pass's
-  // render-target formats (SceneRenderer's fixed HDR + reversed-Z depth
-  // formats) so pipelines compiled through it match what the forward pass
-  // actually renders into.
-  FactoryDescriptor textured_mesh_desc;
-  textured_mesh_desc.shader_name = "textured_mesh";
-  textured_mesh_desc.shader_path = "material/textured_mesh.wesl";
-  textured_mesh_desc.supported_pass_types = {MaterialPassType::kForwardOpaque};
-  textured_mesh_desc.supported_geometry_types = {GeometryType::kTexturedMesh};
-  textured_mesh_desc.color_formats = {SceneRenderer::kAccumulationFormat};
-  textured_mesh_desc.depth_format = SceneRenderer::kDepthFormat;
+  // Build the normalmapped (deferred) material factory, targeting the
+  // G-buffer's MRT color formats + reversed-Z depth so the kGBuffer pipeline
+  // variant compiled through it matches what the G-buffer pass renders into.
+  // Normal + roughness slots fall back to the factory's 1x1 defaults
+  // (flat_normal / full_roughness); only albedo is overridden.
+  FactoryDescriptor normalmapped_desc;
+  normalmapped_desc.shader_name = "normalmapped";
+  normalmapped_desc.shader_path = "material/normalmapped.wesl";
+  normalmapped_desc.supported_pass_types = {MaterialPassType::kDeferred};
+  normalmapped_desc.supported_geometry_types = {GeometryType::kTexturedMesh};
+  normalmapped_desc.color_formats = {GBuffer::kNormalsFormat,
+                                     GBuffer::kAlbedoFormat,
+                                     GBuffer::kMaterialFormat};
+  normalmapped_desc.depth_format = GBuffer::kDepthFormat;
 
-  factory_ = BuildMaterialInstanceFactory(textured_mesh_desc, ctx.device,
+  factory_ = BuildMaterialInstanceFactory(normalmapped_desc, ctx.device,
                                           ctx.queue, ctx.pipeline_gen,
                                           /*script_provider=*/nullptr);
   if (!factory_) {
     spdlog::error(
-        "PlaceholderView::Initialize: failed to build textured_mesh "
+        "PlaceholderView::Initialize: failed to build normalmapped "
         "material factory");
     return;
   }
 
   InstanceParams sphere_params;
   sphere_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "mesh_texture",
+      .param_name = "albedo",
       .view = albedo_.view,
       .sampler = sampler_,
       .type = TextureType::k2D,
