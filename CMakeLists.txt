@@ -51,6 +51,7 @@ add_executable(badlands
 target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
 target_include_directories(badlands PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
     ${CMAKE_SOURCE_DIR}/src/crates/nav/include
