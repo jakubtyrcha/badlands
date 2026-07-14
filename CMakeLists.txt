@@ -11,12 +11,31 @@ FetchContent_MakeAvailable(SDL3)
 # Dawn (WebGPU), built from source and pinned — see cmake/FetchDawn.cmake.
 include(cmake/FetchDawn.cmake)
 
+# Corrosion for Rust integration (crib from ../sampo/CMakeLists.txt lines ~199-208).
+FetchContent_Declare(
+    Corrosion
+    GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+    GIT_TAG        v0.5
+)
+FetchContent_MakeAvailable(Corrosion)
+
+# wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
+# The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
+# the `wesl` 0.4 crate, and Corrosion invokes `cargo rustc --package <name>`,
+# which errors ("specification `wesl` is ambiguous") if the package shares a
+# name with one of its own dependencies.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/wesl/Cargo.toml)
+# Corrosion's default panic=abort would make catch_unwind in the wesl_ffi
+# crate's extern "C" thunks abort the process instead of catching; override
+# to unwind.
+corrosion_set_env_vars(wesl_ffi "RUSTFLAGS=-Cpanic=unwind")
+
 add_executable(badlands
     src/main.cpp
     src/engine/rendering/gpu_context.cpp
 )
-target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu)
-target_include_directories(badlands PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi)
+target_include_directories(badlands PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/crates/wesl/include)
 
 if(APPLE)
     # Use the new linker on Apple platforms (crib from ../sampo/CMakeLists.txt);

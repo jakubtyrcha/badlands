@@ -1,0 +1,32 @@
+[package]
+# Named "wesl_ffi" (not "wesl") to avoid colliding with the `wesl` 0.4
+# dependency below: Corrosion invokes `cargo rustc --package <name>`, which
+# fails with "specification `wesl` is ambiguous" if the package and one of
+# its dependencies share a name (confirmed empirically — this is a hard
+# build failure, not just a lint). Sampo's own equivalent crate is named
+# `wesl-ffi` for the same reason.
+name = "wesl_ffi"
+version = "0.1.0"
+edition = "2024"
+
+# Standalone: this crate lives inside the badlands repo tree but is not a
+# member of the root Cargo workspace (that workspace's `members` list does
+# not include it). The empty [workspace] table below makes it its own
+# workspace root so `cargo` commands run against this manifest don't error
+# with "current package believes it's in a workspace when it's not".
+[workspace]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+wesl = "0.4"
+
+# Default to panic=abort; Corrosion overrides this back to unwind at the
+# CMake link step (RUSTFLAGS=-Cpanic=unwind) so the `catch_unwind` in the
+# extern "C" thunks can actually catch panics instead of aborting the process.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
