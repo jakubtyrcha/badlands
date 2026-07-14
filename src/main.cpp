@@ -19,6 +19,7 @@
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
+#include "engine/rendering/texture_loader.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
 #include "engine/scene/scene_graph.hpp"
 
@@ -210,6 +211,26 @@ int main(int argc, char** argv) {
 
   badlands::GpuPipelineGenerator pipeline_gen(gpu.GetDevice(),
                                               badlands::FindShaderDirectory());
+
+  // TODO(E1 smoke): temporary hook verifying LoadTexture2D's GPU mip-chain
+  // generation end to end. E2 adds the real call (texturing the sphere);
+  // remove this block once E2 lands.
+  {
+    auto loaded = badlands::LoadTexture2D(
+        gpu.GetDevice(), gpu.GetQueue(), pipeline_gen,
+        "assets/materials/rocky_trail_1k.gltf/textures/"
+        "rocky_trail_diff_1k.jpg");
+    if (!loaded.texture) {
+      spdlog::error("E1 smoke: LoadTexture2D FAILED");
+    } else {
+      uint32_t mip_count = loaded.texture.GetMipLevelCount();
+      spdlog::info("E1 smoke: loaded texture mip_level_count={}", mip_count);
+      if (mip_count != 11) {
+        spdlog::error("E1 smoke: expected mip_level_count == 11, got {}",
+                      mip_count);
+      }
+    }
+  }
 
   // Build the textured_mesh material factory (D1), targeting the forward
   // pass's render-target formats (SceneRenderer's fixed HDR + reversed-Z

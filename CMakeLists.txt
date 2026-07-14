@@ -65,6 +65,7 @@ add_executable(badlands
     src/engine/scene/scene_graph.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
     src/engine/rendering/scene_renderer.cpp
+    src/engine/rendering/texture_loader.cpp
 )
 target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
