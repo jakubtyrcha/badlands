@@ -103,7 +103,6 @@ add_library(badlands_engine STATIC
     src/engine/rendering/brdf_lut.cpp
     src/engine/rendering/prefiltered_cubemap.cpp
     src/engine/app/sdl_viewer_app.cpp
-    src/engine/app/placeholder_view.cpp
     src/engine/app/screenshot.cpp
     src/engine/app/screenshot_recorder.cpp
     src/engine/app/orbit_camera_controller.cpp

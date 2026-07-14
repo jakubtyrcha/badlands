@@ -49,8 +49,10 @@ TexturedMeshResult BuildExtrusionMesh(const std::vector<glm::vec2>& ring, float 
   }
 
   // Angled walls (one quad per base edge). Normals point outward for a mesa
-  // and inward for a basin, so the visible face lights correctly (geometry
-  // is expected to be drawn with cull_mode None regardless).
+  // and inward for a basin, so the visible face lights correctly. This
+  // geometry is drawn with the deferred normalmapped material's default
+  // back-face culling (not cull_mode None); the winding below is authored
+  // to be front-facing in world space accordingly.
   const bool want_outward = delta_y >= 0.0f;
   for (size_t i = 0; i < n; ++i) {
     size_t j = (i + 1) % n;

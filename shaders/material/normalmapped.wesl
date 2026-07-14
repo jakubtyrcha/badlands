@@ -1,12 +1,9 @@
 // Copied verbatim from sampo's src/shaders/material/normalmapped.wesl (Task
-// D1). NOTE: this shader is currently INERT in badlands — it imports
-// `package::common::gbuffer_encode` and (for sphere_mode) `package::common::
-// eac`, neither of which is ported yet (they belong to the G-buffer/deferred
-// rendering pipeline, out of scope for the material-system port). It won't
-// compile via GpuPipelineGenerator::GetPipeline until those shared modules
-// land. It's kept here so MaterialRequirementsRegistry's "normalmapped"
-// entry (material_requirements.cpp) has a corresponding shader file, per the
-// D1 task brief. The exercised path for this task is textured_mesh.wesl only.
+// D1). This is the active deferred (G-buffer) PBR material shader: it
+// imports `package::common::gbuffer_encode` and (for sphere_mode)
+// `package::common::eac`, and is compiled via GpuPipelineGenerator::GetPipeline
+// as part of the deferred rendering pipeline. MaterialRequirementsRegistry's
+// "normalmapped" entry (material_requirements.cpp) points at this file.
 //
 // Normalmapped material shader for textured surfaces
 // Outputs to GBuffer for deferred rendering

@@ -148,7 +148,7 @@ TexturedMeshResult GenerateCone(float radius, float height, int segments) {
     float u1 = static_cast<float>(j + 1) / static_cast<float>(segments);
 
     glm::vec3 edge = b1 - b0;
-    glm::vec3 n = glm::length(edge) > 1e-8f ? glm::normalize(glm::cross(edge, apex - b0))
+    glm::vec3 n = glm::length(edge) > 1e-8f ? glm::normalize(glm::cross(apex - b0, edge))
                                             : glm::vec3(0, 1, 0);
     glm::vec3 tan = glm::length(edge) > 1e-8f ? glm::normalize(edge) : glm::vec3(1, 0, 0);
 

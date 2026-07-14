@@ -101,6 +101,28 @@ TEST_CASE("GenerateCone: well-formed, has base cap, sane bounds") {
   CHECK(has_normal_near(result, glm::vec3(0, -1, 0)));
   CHECK(result.local_bounds.min == glm::vec3(-1.0f, 0.0f, -1.0f));
   CHECK(result.local_bounds.max == glm::vec3(1.0f, 2.5f, 1.0f));
+
+  // Regression: side normals must point outward (away from the cone axis),
+  // not inward. Sample every side vertex (skip the base-cap triangles, whose
+  // normal is (0,-1,0)) and check the normal has a positive outward radial
+  // component and a positive Y component.
+  const auto& verts = result.mesh.vertices;
+  int side_vertices_checked = 0;
+  for (size_t i = 0; i < verts.size(); i += kTexturedMeshFloatsPerVertex) {
+    glm::vec3 pos(verts[i], verts[i + 1], verts[i + 2]);
+    glm::vec3 normal(verts[i + 5], verts[i + 6], verts[i + 7]);
+    if (normal.y < -0.5f) continue;  // base-cap vertex, skip.
+
+    glm::vec3 radial = glm::vec3(pos.x, 0.0f, pos.z);
+    if (glm::length(radial) < 1e-4f) continue;  // apex vertex, no radial dir.
+    glm::vec3 outward = glm::normalize(radial);
+
+    CAPTURE(i / kTexturedMeshFloatsPerVertex);
+    CHECK(glm::dot(normal, outward) > 0.0f);
+    CHECK(normal.y > 0.0f);
+    ++side_vertices_checked;
+  }
+  CHECK(side_vertices_checked > 0);
 }
 
 TEST_CASE("GenerateGableRoof: well-formed, ridge + base bounds") {

@@ -172,9 +172,18 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data,
     g_IndexBuffer = g_Device.CreateBuffer(&desc);
   }
 
-  // Upload vertex and index data
-  std::vector<ImDrawVert> vtx_dst(draw_data->TotalVtxCount);
-  std::vector<ImDrawIdx> idx_dst(draw_data->TotalIdxCount);
+  // Upload vertex and index data. Size the staging vectors to the 4-byte-
+  // aligned byte counts (not the raw element counts) so the WriteBuffer
+  // calls below -- which write the aligned byte size -- never read past the
+  // end of the vector (matters for idx_dst when TotalIdxCount is odd, since
+  // ImDrawIdx is 2 bytes).
+  size_t vtx_size = static_cast<size_t>(draw_data->TotalVtxCount) * sizeof(ImDrawVert);
+  size_t idx_size = static_cast<size_t>(draw_data->TotalIdxCount) * sizeof(ImDrawIdx);
+  // Align to 4 bytes for WebGPU
+  vtx_size = (vtx_size + 3) & ~3;
+  idx_size = (idx_size + 3) & ~3;
+  std::vector<ImDrawVert> vtx_dst(vtx_size / sizeof(ImDrawVert));
+  std::vector<ImDrawIdx> idx_dst(idx_size / sizeof(ImDrawIdx));
 
   ImDrawVert* vtx_ptr = vtx_dst.data();
   ImDrawIdx* idx_ptr = idx_dst.data();
@@ -199,11 +208,6 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data,
     idx_remaining -= idx_count;
   }
 
-  size_t vtx_size = draw_data->TotalVtxCount * sizeof(ImDrawVert);
-  size_t idx_size = draw_data->TotalIdxCount * sizeof(ImDrawIdx);
-  // Align to 4 bytes for WebGPU
-  vtx_size = (vtx_size + 3) & ~3;
-  idx_size = (idx_size + 3) & ~3;
   g_Queue.WriteBuffer(g_VertexBuffer, 0, vtx_dst.data(), vtx_size);
   g_Queue.WriteBuffer(g_IndexBuffer, 0, idx_dst.data(), idx_size);
 
