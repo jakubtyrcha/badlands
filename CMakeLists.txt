@@ -76,6 +76,7 @@ add_library(badlands_engine STATIC
     src/engine/app/sdl_viewer_app.cpp
     src/engine/app/placeholder_view.cpp
     src/engine/app/screenshot.cpp
+    src/engine/ui/imgui_impl_wgpu_custom.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp

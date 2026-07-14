@@ -48,6 +48,11 @@ class SdlViewerApp {
   int Run(int argc, char** argv, const ViewFactory& factory);
 
  private:
+  // Dear ImGui context + custom Dawn backend init (Task S2.A2). Windowed
+  // path only -- screenshot mode never calls this, so ImGui stays
+  // uninitialized (and the destructor's shutdown is guarded accordingly).
+  void InitImGui(int width, int height);
+
   SdlViewerConfig config_;
 
   SDL_Window* window_ = nullptr;

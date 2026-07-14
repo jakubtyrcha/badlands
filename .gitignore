@@ -3,3 +3,4 @@
 /shot*.png
 /.fastembed_cache
 build/
+/imgui.ini

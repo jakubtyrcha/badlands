@@ -24,6 +24,7 @@ class PlaceholderView : public AppView {
   void Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
   void Update(float dt, const bool* keyboard_state) override;
+  void DrawUI() override;
   void OnResize(int width, int height) override;
 
   Camera& GetCamera() override { return camera_; }
@@ -38,6 +39,7 @@ class PlaceholderView : public AppView {
   entt::registry registry_;
   SceneContext scene_context_;
   Camera camera_;
+  float dt_ = 0.0f;
 };
 
 }  // namespace badlands

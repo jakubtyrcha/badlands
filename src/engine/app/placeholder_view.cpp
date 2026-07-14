@@ -3,6 +3,7 @@
 #include <utility>
 
 #include <glm/glm.hpp>
+#include <imgui.h>
 #include <spdlog/spdlog.h>
 
 #include "core/geometry_type.hpp"
@@ -107,8 +108,15 @@ void PlaceholderView::Initialize(const RenderContext& ctx) {
 void PlaceholderView::HandleEvent(const SDL_Event& /*event*/, int /*width*/,
                                   int /*height*/) {}
 
-void PlaceholderView::Update(float /*dt*/, const bool* /*keyboard_state*/) {
+void PlaceholderView::Update(float dt, const bool* /*keyboard_state*/) {
+  dt_ = dt;
   scene_.SyncToRegistry(registry_, scene_context_);
+}
+
+void PlaceholderView::DrawUI() {
+  ImGui::Begin("badlands");
+  ImGui::Text("%.1f FPS (%.2f ms)", dt_ > 0 ? 1.0f / dt_ : 0.0f, dt_ * 1000.0f);
+  ImGui::End();
 }
 
 void PlaceholderView::OnResize(int width, int height) {

@@ -8,8 +8,12 @@
 
 #include <spdlog/spdlog.h>
 
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+
 #include "engine/app/screenshot.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
+#include "engine/ui/imgui_impl_wgpu_custom.hpp"
 
 namespace badlands {
 
@@ -17,11 +21,40 @@ SdlViewerApp::SdlViewerApp(SdlViewerConfig config) : config_(std::move(config)) 
 
 SdlViewerApp::~SdlViewerApp() {
   view_.reset();
+  if (ImGui::GetCurrentContext()) {
+    ImGui_ImplWGPU_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
+  }
   gpu_.Shutdown();
   if (window_) {
     SDL_DestroyWindow(window_);
   }
   SDL_Quit();
+}
+
+void SdlViewerApp::InitImGui(int width, int height) {
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO& io = ImGui::GetIO();
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+  ImGui::StyleColorsDark();
+
+  ImGui_ImplSDL3_InitForOther(window_);
+
+  ImGui_ImplWGPU_InitInfo info = {};
+  info.Device = gpu_.GetDevice();
+  info.NumFramesInFlight = 3;
+  info.RenderTargetFormat = gpu_.GetSurfaceFormat();
+  info.DepthStencilFormat = wgpu::TextureFormat::Undefined;  // 2D overlay, no depth
+  info.FramebufferWidth = static_cast<uint32_t>(width);
+  info.FramebufferHeight = static_cast<uint32_t>(height);
+  info.OutputIsLinear =
+      (gpu_.GetSurfaceFormat() == wgpu::TextureFormat::RGBA16Float);  // false for BGRA8
+  ImGui_ImplWGPU_Init(&info);
+
+  spdlog::info("SdlViewerApp: ImGui initialized");
 }
 
 int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
@@ -57,6 +90,12 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
                        gpu_.GetSurfaceFormat(), static_cast<uint32_t>(width),
                        static_cast<uint32_t>(height));
 
+  // ImGui is windowed-path only: screenshot mode renders offscreen via
+  // SaveScreenshot() and must stay ImGui-free.
+  if (!screenshot_mode) {
+    InitImGui(width, height);
+  }
+
   RenderContext ctx{gpu_.GetDevice(), gpu_.GetQueue(), pipeline_gen_.get(),
                     &renderer_, gpu_.GetSurfaceFormat()};
   view_ = factory(ctx);
@@ -82,6 +121,8 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   while (running) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+      ImGui_ImplSDL3_ProcessEvent(&e);
+
       if (e.type == SDL_EVENT_QUIT) {
         running = false;
       } else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
@@ -92,6 +133,12 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
           renderer_.Resize(static_cast<uint32_t>(width),
                            static_cast<uint32_t>(height));
           view_->OnResize(width, height);
+          ImGui_ImplWGPU_SetFramebufferSize(static_cast<uint32_t>(width),
+                                            static_cast<uint32_t>(height));
+        }
+      } else if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
+        if (!ImGui::GetIO().WantCaptureKeyboard) {
+          view_->HandleEvent(e, width, height);
         }
       } else {
         view_->HandleEvent(e, width, height);
@@ -110,8 +157,47 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     wgpu::TextureView surface = gpu_.AcquireSurfaceTexture();
     if (!surface) continue;
 
+    // ImGui frame: started here (after the surface-acquire check) rather
+    // than immediately after Update() so a skipped frame (surface
+    // unavailable) never leaves an ImGui::NewFrame() unmatched by
+    // ImGui::Render() -- ImGui asserts on back-to-back NewFrame() calls.
+    ImGui_ImplWGPU_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+    ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
+                                 ImGuiDockNodeFlags_PassthruCentralNode);
+    view_->DrawUI();
+
     renderer_.Render(view_->GetCamera(), view_->GetRegistry(),
                      view_->GetSceneContext(), surface);
+
+    // App-owned ImGui composite pass: a SEPARATE render pass on the same
+    // surface view, loading (not clearing) the scene the renderer just
+    // wrote, with no depth attachment (ImGui is a 2D overlay).
+    {
+      wgpu::CommandEncoder encoder = gpu_.GetDevice().CreateCommandEncoder();
+
+      wgpu::RenderPassColorAttachment color_attachment;
+      color_attachment.view = surface;
+      color_attachment.loadOp = wgpu::LoadOp::Load;
+      color_attachment.storeOp = wgpu::StoreOp::Store;
+      color_attachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+      wgpu::RenderPassDescriptor desc;
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color_attachment;
+      desc.depthStencilAttachment = nullptr;
+
+      wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&desc);
+
+      ImGui::Render();
+      ImDrawData* dd = ImGui::GetDrawData();
+      if (dd && dd->CmdListsCount > 0) ImGui_ImplWGPU_RenderDrawData(dd, pass);
+
+      pass.End();
+      wgpu::CommandBuffer commands = encoder.Finish();
+      gpu_.GetQueue().Submit(1, &commands);
+    }
 
     gpu_.Present();
 
