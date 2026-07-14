@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/rock_boulder_cracked_diff_1k.jpg",
+  "normal": "textures/rock_boulder_cracked_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/rock_boulder_cracked_arm_1k.png",
+  "displacement": "textures/rock_boulder_cracked_disp_1k.png"
+}

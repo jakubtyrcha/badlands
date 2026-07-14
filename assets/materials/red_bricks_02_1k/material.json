@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/red_bricks_02_diff_1k.jpg",
+  "normal": "textures/red_bricks_02_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/red_bricks_02_arm_1k.png",
+  "displacement": "textures/red_bricks_02_disp_1k.png"
+}

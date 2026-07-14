@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/cobblestone_floor_08_diff_1k.jpg",
+  "normal": "textures/cobblestone_floor_08_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/cobblestone_floor_08_arm_1k.png",
+  "displacement": "textures/cobblestone_floor_08_disp_1k.png"
+}

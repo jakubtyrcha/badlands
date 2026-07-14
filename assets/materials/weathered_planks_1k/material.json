@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/weathered_planks_diff_1k.jpg",
+  "normal": "textures/weathered_planks_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/weathered_planks_arm_1k.png",
+  "displacement": "textures/weathered_planks_disp_1k.png"
+}

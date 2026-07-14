@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/rocky_terrain_02_diff_1k.jpg",
+  "normal": "textures/rocky_terrain_02_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/rocky_terrain_02_arm_1k.png",
+  "displacement": "textures/rocky_terrain_02_disp_1k.png"
+}

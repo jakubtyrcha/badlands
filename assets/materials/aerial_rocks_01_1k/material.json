@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/aerial_rocks_01_diff_1k.jpg",
+  "normal": "textures/aerial_rocks_01_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/aerial_rocks_01_arm_1k.png",
+  "displacement": "textures/aerial_rocks_01_disp_1k.png"
+}

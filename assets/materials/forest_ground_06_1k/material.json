@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/forest_ground_06_diff_1k.jpg",
+  "normal": "textures/forest_ground_06_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/forest_ground_06_arm_1k.png",
+  "displacement": "textures/forest_ground_06_disp_1k.png"
+}

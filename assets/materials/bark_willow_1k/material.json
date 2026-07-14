@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/bark_willow_diff_1k.jpg",
+  "normal": "textures/bark_willow_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/bark_willow_arm_1k.png",
+  "displacement": "textures/bark_willow_disp_1k.png"
+}

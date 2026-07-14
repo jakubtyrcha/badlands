@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/roof_slates_02_diff_1k.jpg",
+  "normal": "textures/roof_slates_02_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/roof_slates_02_arm_1k.png",
+  "displacement": "textures/roof_slates_02_disp_1k.png"
+}

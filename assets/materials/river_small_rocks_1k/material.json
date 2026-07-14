@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/river_small_rocks_diff_1k.jpg",
+  "normal": "textures/river_small_rocks_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/river_small_rocks_arm_1k.png",
+  "displacement": "textures/river_small_rocks_disp_1k.png"
+}

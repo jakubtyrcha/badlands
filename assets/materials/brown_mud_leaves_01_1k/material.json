@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/brown_mud_leaves_01_diff_1k.jpg",
+  "normal": "textures/brown_mud_leaves_01_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/brown_mud_leaves_01_arm_1k.png",
+  "displacement": "textures/brown_mud_leaves_01_disp_1k.png"
+}

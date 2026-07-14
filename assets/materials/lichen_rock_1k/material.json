@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/lichen_rock_diff_1k.jpg",
+  "normal": "textures/lichen_rock_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/lichen_rock_arm_1k.png",
+  "displacement": "textures/lichen_rock_disp_1k.png"
+}

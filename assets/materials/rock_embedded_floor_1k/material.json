@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/rock_embedded_floor_diff_1k.jpg",
+  "normal": "textures/rock_embedded_floor_nor_dx_1k.png",
+  "normal_format": "dx",
+  "arm": "textures/rock_embedded_floor_arm_1k.png",
+  "displacement": "textures/rock_embedded_floor_disp_1k.png"
+}
