@@ -52,12 +52,19 @@ add_executable(badlands
     src/engine/rendering/shader/gpu_pipeline_generator.cpp
     src/engine/rendering/context/render_pass_context.cpp
     src/engine/rendering/context/frame_context.cpp
+    src/engine/rendering/material/material.cpp
+    src/engine/rendering/material/material_instance.cpp
+    src/engine/rendering/material/material_requirements.cpp
+    src/engine/rendering/material/material_instance_cache.cpp
+    src/engine/rendering/material/standard_material_factory.cpp
+    src/engine/rendering/material/standard_rendering_material_instance.cpp
 )
 target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
 target_include_directories(badlands PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
     ${CMAKE_SOURCE_DIR}/src/crates/nav/include
