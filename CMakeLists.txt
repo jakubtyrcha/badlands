@@ -164,6 +164,9 @@ add_library(badlands_game_lib STATIC
     src/game/geometry/ploppable_rings.cpp
     # Task S2.D: MaterialId -> PBR glTF pack mapping (src/game/material_pack.h).
     src/game/material_pack.cpp
+    # Task S2.G: walled AI-sandbox arena (src/game/arena.h), reusing
+    # placement.h's centered-grid convention (kGridHalf/in_bounds_tile).
+    src/game/arena.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
 # noiser_common.h intentionally ships [[deprecated]] shims.
@@ -179,14 +182,19 @@ target_include_directories(badlands_game_lib PUBLIC
     # header search path only, no engine/SDL/Dawn dependency added.
     ${CMAKE_SOURCE_DIR}/src
 )
+# Task S2.G: arena.cpp includes game/src/placement.h directly (kGridHalf/
+# in_bounds_tile grid reuse) -- PRIVATE since it's an implementation detail
+# of badlands_game_lib, not part of its public header surface.
+target_include_directories(badlands_game_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/game/src
+)
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 
 # Three thin executables, each with its own main, all linking badlands_engine
-# and badlands_game_lib. Stage 2 grows each one's own real AppView;
-# ai_sandbox still shares PlaceholderView (Stage 1's lit textured sphere)
-# until its own task (S2.G) lands -- badlands_viewer got its real AppView
-# (ModelViewerView) in Task S2.E, badlands_game got its (GameView) in Task
-# S2.F.
+# and badlands_game_lib. Stage 2 grows each one's own real AppView --
+# badlands_viewer got its real AppView (ModelViewerView) in Task S2.E,
+# badlands_game got its (GameView) in Task S2.F, badlands_ai_sandbox got its
+# (AiSandboxView) in Task S2.G.
 set(badlands_app_sources_viewer src/viewer/main_viewer.cpp src/viewer/model_viewer_view.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
@@ -198,7 +206,12 @@ set(badlands_app_sources_game
     src/game/main_game.cpp
     src/game/scene/building_scene.cpp
     src/game/views/game_view.cpp)
-set(badlands_app_sources_ai_sandbox src/ai_sandbox/main_ai_sandbox.cpp)
+# Task S2.G: AiSandboxView (walled arena via game/arena.h + 2 static
+# capsules, deferred + GameCameraController). Compiled directly into the
+# executable, same rationale as badlands_app_sources_game above.
+set(badlands_app_sources_ai_sandbox
+    src/ai_sandbox/main_ai_sandbox.cpp
+    src/ai_sandbox/ai_sandbox_view.cpp)
 
 foreach(app viewer game ai_sandbox)
     add_executable(badlands_${app} ${badlands_app_sources_${app}})
