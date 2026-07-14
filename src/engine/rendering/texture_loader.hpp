@@ -12,6 +12,7 @@
 // compute-path kernel, copied verbatim but landed present-but-unused in
 // Stage 1 — RGBA8Unorm is filterable+renderable, so only the render path
 // runs, same as normalmapped.wesl being inert).
+#include <cstdint>
 #include <string>
 
 #include <dawn/webgpu_cpp.h>
@@ -39,5 +40,23 @@ struct LoadedTexture {
 LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
                             GpuPipelineGenerator& pipeline_gen,
                             const std::string& path);
+
+// Uploads `width`x`height` tightly-packed RGBA8 pixels (`rgba`, already in
+// memory -- no JPEG decode) as mip level 0 of a new RGBA8Unorm Dawn texture
+// sized to a full mip chain, GPU-generates all lower mips (same render-path
+// box downsample as LoadTexture2D), and returns a view over all mip levels.
+//
+// This is LoadTexture2D's upload+mipgen tail, factored out so callers that
+// already have decoded/derived pixels in memory (e.g. MaterialLibrary's
+// repacked-roughness texture, built by copying a decoded JPEG's G channel
+// into R) can reuse it without a redundant decode. LoadTexture2D itself
+// decodes then delegates here.
+//
+// Returns a default-constructed LoadedTexture (null members) on failure
+// (texture creation or pipeline compile failure) after logging.
+LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
+                                      GpuPipelineGenerator& pipeline_gen,
+                                      uint32_t width, uint32_t height,
+                                      const uint8_t* rgba);
 
 }  // namespace badlands

@@ -35,7 +35,7 @@ struct ImageGuard {
 LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
                             GpuPipelineGenerator& pipeline_gen,
                             const std::string& path) {
-  // 1. Decode.
+  // Decode.
   BadlandsImage img = badlands_decode_jpeg(path.c_str());
   ImageGuard guard{img};
   if (img.rgba == nullptr) {
@@ -43,14 +43,21 @@ LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
     return {};
   }
 
-  // 2. Texture (full mip chain sized to the larger dimension).
+  return UploadTexture2DWithMips(device, queue, pipeline_gen, img.width,
+                                 img.height, img.rgba);
+}
+
+LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
+                                      GpuPipelineGenerator& pipeline_gen,
+                                      uint32_t width, uint32_t height,
+                                      const uint8_t* rgba) {
+  // 1. Texture (full mip chain sized to the larger dimension).
   uint32_t mip_level_count =
-      static_cast<uint32_t>(
-          std::floor(std::log2(std::max(img.width, img.height)))) +
+      static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) +
       1;
 
   wgpu::TextureDescriptor tex_desc;
-  tex_desc.size = {img.width, img.height, 1};
+  tex_desc.size = {width, height, 1};
   tex_desc.format = wgpu::TextureFormat::RGBA8Unorm;
   tex_desc.usage = wgpu::TextureUsage::TextureBinding |
                    wgpu::TextureUsage::RenderAttachment |
@@ -60,28 +67,28 @@ LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
   tex_desc.dimension = wgpu::TextureDimension::e2D;
   wgpu::Texture texture = device.CreateTexture(&tex_desc);
   if (!texture) {
-    spdlog::error("LoadTexture2D: failed to create texture for '{}'", path);
+    spdlog::error("UploadTexture2DWithMips: failed to create {}x{} texture",
+                  width, height);
     return {};
   }
 
-  // 3. Upload level 0. WriteTexture has no 256-byte row-alignment
+  // 2. Upload level 0. WriteTexture has no 256-byte row-alignment
   // requirement (that only applies to buffer<->texture copies), so the
-  // tightly-packed decode output can be uploaded directly.
+  // tightly-packed pixel buffer can be uploaded directly.
   wgpu::TexelCopyTextureInfo dst;
   dst.texture = texture;
   dst.mipLevel = 0;
   dst.origin = {0, 0, 0};
 
   wgpu::TexelCopyBufferLayout layout;
-  layout.bytesPerRow = img.width * 4;
-  layout.rowsPerImage = img.height;
+  layout.bytesPerRow = width * 4;
+  layout.rowsPerImage = height;
 
-  wgpu::Extent3D extent = {img.width, img.height, 1};
-  queue.WriteTexture(&dst, img.rgba,
-                     static_cast<size_t>(img.width) * img.height * 4, &layout,
-                     &extent);
+  wgpu::Extent3D extent = {width, height, 1};
+  queue.WriteTexture(&dst, rgba, static_cast<size_t>(width) * height * 4,
+                     &layout, &extent);
 
-  // 4. Generate mips (render-path box downsample), one level at a time.
+  // 3. Generate mips (render-path box downsample), one level at a time.
   // The pipeline declaration is identical every iteration (and results are
   // cached by GpuPipelineGenerator anyway) so it's compiled once, outside
   // the loop; likewise the sampler is created once and reused.
@@ -95,9 +102,8 @@ LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
   auto pipeline = pipeline_gen.GetPipeline(decl, target_formats);
   if (!pipeline) {
     spdlog::error(
-        "LoadTexture2D: failed to compile mip_generator_render pipeline "
-        "for '{}'",
-        path);
+        "UploadTexture2DWithMips: failed to compile mip_generator_render "
+        "pipeline");
     return {};
   }
 
@@ -155,7 +161,7 @@ LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
   wgpu::CommandBuffer commands = encoder.Finish();
   queue.Submit(1, &commands);
 
-  // 5. Return a view over all mip levels.
+  // 4. Return a view over all mip levels.
   wgpu::TextureViewDescriptor full_view_desc;
   full_view_desc.baseMipLevel = 0;
   full_view_desc.mipLevelCount = mip_level_count;

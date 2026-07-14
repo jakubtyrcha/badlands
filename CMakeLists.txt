@@ -93,6 +93,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/gbuffer.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
+    src/engine/rendering/material_library.cpp
     src/engine/rendering/cubemap_builder.cpp
     src/engine/rendering/light_environment.cpp
     src/engine/rendering/brdf_lut.cpp
@@ -157,6 +158,8 @@ add_library(badlands_game_lib STATIC
     # src/game/geometry/ploppable_rings.{h,cpp}).
     src/game/building_catalog.cpp
     src/game/geometry/ploppable_rings.cpp
+    # Task S2.D: MaterialId -> PBR glTF pack mapping (src/game/material_pack.h).
+    src/game/material_pack.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
 # noiser_common.h intentionally ships [[deprecated]] shims.
