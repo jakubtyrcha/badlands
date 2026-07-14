@@ -47,7 +47,8 @@ bool ScreenshotRecorder::EnsureTarget(GpuContext& gpu,
     // First use: build the persistent offscreen renderer once (BRDF LUT +
     // fallback cube + IBL prefilter machinery live here and are reused).
     offscreen_renderer_.Initialize(device, gpu.GetQueue(), &pipeline_gen,
-                                   wgpu::TextureFormat::RGBA8Unorm, w, h);
+                                   wgpu::TextureFormat::RGBA8Unorm, w, h,
+                                   gpu.HasR8UnormStorage());
     renderer_ready_ = true;
   } else {
     // Size changed: resize the existing renderer's targets in place.

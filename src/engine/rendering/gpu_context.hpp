@@ -56,6 +56,13 @@ class GpuContext {
   wgpu::Surface GetSurface() const { return surface_; }
   wgpu::TextureFormat GetSurfaceFormat() const { return surface_format_; }
 
+  // Whether the device has the `TextureFormatsTier1` feature (Dawn's native
+  // name for R8Unorm storage-texture support — the standalone
+  // `R8UnormStorage` feature was subsumed into it). Requested opportunistically
+  // in Initialize() when the adapter advertises it; never required (Stage 3
+  // M6's GTAO compute pass gates its StorageBinding AO texture usage on this).
+  bool HasR8UnormStorage() const { return has_r8unorm_storage_; }
+
  private:
   static wgpu::Surface CreateSurface(wgpu::Instance instance,
                                      SDL_Window* window);
@@ -73,6 +80,7 @@ class GpuContext {
   wgpu::Surface surface_;
   wgpu::TextureFormat surface_format_ = wgpu::TextureFormat::BGRA8Unorm;
   wgpu::PresentMode present_mode_ = wgpu::PresentMode::Fifo;
+  bool has_r8unorm_storage_ = false;
 };
 
 /// Flag set by the uncaptured WebGPU error callback. Callers may poll and

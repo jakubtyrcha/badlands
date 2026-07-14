@@ -17,6 +17,28 @@
 
 namespace badlands {
 
+namespace {
+// Stage 3 M5: compiles shaders/compute/mip_generator.wesl (a real, present-
+// but-otherwise-unused compute shader — rgba8unorm storage-write, needs no
+// device feature) via GetComputePipeline and logs the result. Proves the
+// compute-pipeline infrastructure (dead/untested before this task) actually
+// works with no Dawn validation error, ahead of M6's GTAO compute pass.
+void RunComputeSmokeTest(GpuPipelineGenerator& pipeline_gen) {
+  auto pipeline = pipeline_gen.GetComputePipeline("compute/mip_generator");
+  if (!pipeline || !pipeline->pipeline) {
+    spdlog::error(
+        "Compute smoke test FAILED: compute/mip_generator did not compile "
+        "into a valid pipeline");
+    return;
+  }
+  spdlog::info(
+      "Compute smoke test OK: compute/mip_generator pipeline valid, "
+      "workgroup_size=({},{},{}), bindings={}",
+      pipeline->workgroup_size[0], pipeline->workgroup_size[1],
+      pipeline->workgroup_size[2], pipeline->reflected_bindings.size());
+}
+}  // namespace
+
 SdlViewerApp::SdlViewerApp(SdlViewerConfig config) : config_(std::move(config)) {}
 
 SdlViewerApp::~SdlViewerApp() {
@@ -96,7 +118,15 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
 
   renderer_.Initialize(gpu_.GetDevice(), gpu_.GetQueue(), pipeline_gen_.get(),
                        gpu_.GetSurfaceFormat(), static_cast<uint32_t>(width),
-                       static_cast<uint32_t>(height));
+                       static_cast<uint32_t>(height), gpu_.HasR8UnormStorage());
+
+  // M5: one-shot startup smoke test for badlands' first live compute
+  // pipeline. Proves GpuPipelineGenerator::GetComputePipeline works
+  // end-to-end (WESL->WGSL compile, naga workgroup/binding reflection, Dawn
+  // auto-layout compute pipeline creation) ahead of Stage 3 M6's GTAO pass,
+  // which is the real compute exercise. No dispatch -- compile-only. Safe to
+  // remove once M6 lands.
+  RunComputeSmokeTest(*pipeline_gen_);
 
   // ImGui is windowed-path only: screenshot mode renders offscreen via
   // SaveScreenshot() and must stay ImGui-free.

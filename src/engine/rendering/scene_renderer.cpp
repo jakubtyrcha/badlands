@@ -31,12 +31,14 @@ namespace badlands {
 void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
                                GpuPipelineGenerator* pipeline_gen,
                                wgpu::TextureFormat surface_format,
-                               uint32_t width, uint32_t height) {
+                               uint32_t width, uint32_t height,
+                               bool has_r8unorm_storage) {
   device_ = device;
   queue_ = queue;
   pipeline_generator_ = pipeline_gen;
   surface_format_ = surface_format;
   accumulation_format_ = kAccumulationFormat;
+  has_r8unorm_storage_ = has_r8unorm_storage;
 
   wgpu::Limits limits{};
   if (device_.GetLimits(&limits) == wgpu::Status::Success) {

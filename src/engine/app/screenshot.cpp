@@ -134,7 +134,8 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
 
   SceneRenderer renderer;
   renderer.Initialize(device, queue, &pipeline_gen,
-                      wgpu::TextureFormat::RGBA8Unorm, width, height);
+                      wgpu::TextureFormat::RGBA8Unorm, width, height,
+                      gpu.HasR8UnormStorage());
   renderer.SetDebugMode(debug_mode);
 
   view.Update(0.0f, SDL_GetKeyboardState(nullptr));

@@ -4,6 +4,9 @@
 
 #include <cstdio>
 #include <string_view>
+#include <vector>
+
+#include <spdlog/spdlog.h>
 
 namespace badlands {
 
@@ -131,6 +134,22 @@ bool GpuContext::Initialize(SDL_Window* window) {
   wgpu::DeviceDescriptor device_desc;
   device_desc.label = "GpuContext Device";
 
+  // Opportunistically request TextureFormatsTier1 (Dawn's current name for
+  // the R8Unorm storage-texture capability the old standalone
+  // `R8UnormStorage` feature exposed) — Stage 3 M6's GTAO compute pass
+  // writes an R8Unorm storage texture and needs it. Never required: an
+  // adapter that lacks a requested feature fails device creation outright,
+  // so this is gated on adapter_.HasFeature and simply omitted otherwise;
+  // HasR8UnormStorage() reports the outcome post-creation.
+  std::vector<wgpu::FeatureName> required_features;
+  if (adapter_.HasFeature(wgpu::FeatureName::TextureFormatsTier1)) {
+    required_features.push_back(wgpu::FeatureName::TextureFormatsTier1);
+  }
+  if (!required_features.empty()) {
+    device_desc.requiredFeatureCount = required_features.size();
+    device_desc.requiredFeatures = required_features.data();
+  }
+
   device_desc.SetUncapturedErrorCallback(
       [](const wgpu::Device&, wgpu::ErrorType type, wgpu::StringView message) {
         std::fprintf(stderr, "WebGPU Error: %d - %s\n",
@@ -159,6 +178,10 @@ bool GpuContext::Initialize(SDL_Window* window) {
     std::fprintf(stderr, "Could not get WebGPU device!\n");
     return false;
   }
+
+  has_r8unorm_storage_ =
+      device_.HasFeature(wgpu::FeatureName::TextureFormatsTier1);
+  spdlog::info("GpuContext: HasR8UnormStorage() = {}", has_r8unorm_storage_);
 
   queue_ = device_.GetQueue();
   surface_format_ = GetPreferredFormat();

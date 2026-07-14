@@ -63,7 +63,8 @@ enum class GBufferDebugMode {
 // Usage:
 //   SceneRenderer renderer;
 //   renderer.Initialize(gpu.GetDevice(), gpu.GetQueue(), &pipeline_gen,
-//                       gpu.GetSurfaceFormat(), width, height);
+//                       gpu.GetSurfaceFormat(), width, height,
+//                       gpu.HasR8UnormStorage());
 //   ...
 //   renderer.Render(camera, registry, scene_context, surface_view);
 class SceneRenderer {
@@ -88,10 +89,15 @@ class SceneRenderer {
   // surface_format: the presentation surface's texture format — the
   // tonemap pass's resolve target format.
   // width/height: initial HDR/depth target size (surface pixel size).
+  // has_r8unorm_storage: GpuContext::HasR8UnormStorage() — whether the
+  // device has the TextureFormatsTier1 feature (R8Unorm storage-texture
+  // support). Recorded as has_r8unorm_storage_; Stage 3 M6's GTAO compute
+  // pass gates its AO texture's StorageBinding usage (and whether GTAO runs
+  // at all) on this.
   void Initialize(wgpu::Device device, wgpu::Queue queue,
                   GpuPipelineGenerator* pipeline_gen,
                   wgpu::TextureFormat surface_format, uint32_t width,
-                  uint32_t height);
+                  uint32_t height, bool has_r8unorm_storage);
 
   // Recreates the HDR + G-buffer targets at a new size (e.g. on
   // SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED). No-op if unchanged.
@@ -179,6 +185,9 @@ class SceneRenderer {
   GBufferDebugMode debug_mode_ = GBufferDebugMode::None;
 
   uint32_t min_uniform_offset_alignment_ = 256;
+
+  // See Initialize()'s has_r8unorm_storage param.
+  bool has_r8unorm_storage_ = false;
 };
 
 }  // namespace badlands
