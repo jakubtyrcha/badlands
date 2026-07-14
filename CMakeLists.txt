@@ -58,6 +58,11 @@ add_executable(badlands
     src/engine/rendering/material/material_instance_cache.cpp
     src/engine/rendering/material/standard_material_factory.cpp
     src/engine/rendering/material/standard_rendering_material_instance.cpp
+    src/engine/rendering/geometry/aabb.cpp
+    src/engine/rendering/geometry/cube_sphere.cpp
+    src/engine/rendering/geometry/textured_mesh_builders.cpp
+    src/engine/rendering/components/mesh_components.cpp
+    src/engine/scene/scene_graph.cpp
 )
 target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
 target_include_directories(badlands PRIVATE
