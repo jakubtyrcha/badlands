@@ -74,6 +74,11 @@ bool GameView::Initialize(const RenderContext& ctx) {
   gamecam_.pitch_deg = 50.0f;
   gamecam_.height = 42.0f;
   gamecam_.UpdateCamera(camera_);
+
+  if (!matlib_.ok()) {
+    spdlog::error("GameView::Initialize: material pack(s) failed to load");
+    return false;
+  }
   return true;
 }
 

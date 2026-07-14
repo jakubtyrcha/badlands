@@ -63,6 +63,12 @@ bool AiSandboxView::Initialize(const RenderContext& ctx) {
   // Frame the camera once, here (the framing is aspect-independent -- see
   // FrameCamera). OnResize only refreshes camera_.aspect afterwards.
   FrameCamera();
+
+  if (!matlib_.ok()) {
+    spdlog::error(
+        "AiSandboxView::Initialize: material pack(s) failed to load");
+    return false;
+  }
   return true;
 }
 

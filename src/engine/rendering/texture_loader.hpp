@@ -45,11 +45,17 @@ wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue
                                           uint8_t r, uint8_t g, uint8_t b,
                                           uint8_t a = 255);
 
-// Decodes the JPEG at `path` (via the `assets` Rust crate), uploads it as
+// Decodes the JPEG/PNG at `path` (via the `assets` Rust crate), uploads it as
 // mip level 0 of an RGBA8Unorm Dawn texture sized to a full mip chain, then
 // GPU-generates all lower mips via a render-path box downsample (see
 // shaders/compute/mip_generator_render.wesl), and returns a view over all
 // mip levels.
+//
+// `flip_green_dx`: when true, the decoded RGBA buffer's green channel is
+// CPU-flipped (`g = 255 - g`) before upload -- converts a DirectX-convention
+// normal map (green = -Y) to OpenGL convention (green = +Y) so the mip chain
+// is generated from, and every mip samples, already-GL-convention data.
+// Irrelevant for non-normal textures (albedo, ARM); leave it false.
 //
 // `device`/`queue`/`pipeline_gen` must be the app's existing instances (this
 // function does not create its own GpuPipelineGenerator or Dawn device).
@@ -57,7 +63,8 @@ wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue
 // (decode error, pipeline compile failure) after logging.
 LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
                             GpuPipelineGenerator& pipeline_gen,
-                            const std::string& path);
+                            const std::string& path,
+                            bool flip_green_dx = false);
 
 // Uploads `width`x`height` tightly-packed RGBA8 pixels (`rgba`, already in
 // memory -- no JPEG decode) as mip level 0 of a new RGBA8Unorm Dawn texture

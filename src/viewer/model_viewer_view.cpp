@@ -50,6 +50,12 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
 
   ApplyEnvironment();
   RebuildScene();
+
+  if (!matlib_.ok()) {
+    spdlog::error(
+        "ModelViewerView::Initialize: material pack(s) failed to load");
+    return false;
+  }
   return true;
 }
 

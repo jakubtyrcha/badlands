@@ -102,6 +102,7 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
     spdlog::error("MaterialLibrary: failed to resolve pack textures -- "
                   "missing manifest '{}'",
                   manifest_path);
+    load_failed_ = true;
     return result;
   }
 
@@ -118,20 +119,19 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
         "MaterialLibrary: failed to resolve pack textures -- unparseable "
         "manifest '{}': {}",
         manifest_path, e.what());
+    load_failed_ = true;
     return result;
   }
 
-  // normalmapped.wesl hardcodes an unconditional DirectX->GL green-channel
-  // flip; it has no uniform to toggle this. Packs whose normal maps are not
-  // DirectX-convention will render with inverted normal-map Y and need
-  // either a re-export or a shader-side toggle -- flag it loudly rather than
-  // silently shading wrong.
-  if (normal_format != "dx") {
-    spdlog::warn(
-        "MaterialLibrary: pack '{}' declares normal_format='{}', but "
-        "normalmapped.wesl assumes DirectX-convention normals ('dx') and "
-        "always flips green -- this pack's normal maps will render "
-        "inverted",
+  // normal_format now drives loader behavior directly (see LoadTexture2D's
+  // flip_green_dx param): DirectX-convention packs get their green channel
+  // CPU-flipped at load, so every pack's uploaded normal map is GL-convention
+  // regardless of source convention -- no footgun, just an info log.
+  const bool is_dx_normal = (normal_format == "dx");
+  if (!is_dx_normal && normal_format != "gl") {
+    spdlog::info(
+        "MaterialLibrary: pack '{}' declares normal_format='{}' (expected "
+        "'dx' or 'gl') -- treating as already GL-convention (no flip)",
         dir, normal_format);
   }
 
@@ -140,13 +140,15 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
   const std::string arm_path = dir + "/" + arm_rel;
 
   result.albedo = LoadTexture2D(device_, queue_, *pipeline_gen_, albedo_path);
-  result.normal = LoadTexture2D(device_, queue_, *pipeline_gen_, normal_path);
+  result.normal = LoadTexture2D(device_, queue_, *pipeline_gen_, normal_path,
+                                /*flip_green_dx=*/is_dx_normal);
   result.arm = LoadTexture2D(device_, queue_, *pipeline_gen_, arm_path);
 
   if (!result.albedo.texture || !result.normal.texture ||
       !result.arm.texture) {
     spdlog::error("MaterialLibrary: pack '{}' loaded with missing texture(s)",
                   dir);
+    load_failed_ = true;
     return result;
   }
 
@@ -166,6 +168,12 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
 }
 
 DeferredMaterial MaterialLibrary::Get(const std::string& dir) {
+  auto params_it = params_cache_.find(dir);
+  if (params_it != params_cache_.end()) {
+    return DeferredMaterial{.factory = factory_.get(),
+                            .params = params_it->second};
+  }
+
   auto it = cache_.find(dir);
   if (it == cache_.end()) {
     it = cache_.emplace(dir, LoadPack(dir)).first;
@@ -192,7 +200,8 @@ DeferredMaterial MaterialLibrary::Get(const std::string& dir) {
       .type = TextureType::k2D,
   });
 
-  return DeferredMaterial{.factory = factory_.get(), .params = std::move(params)};
+  params_it = params_cache_.emplace(dir, std::move(params)).first;
+  return DeferredMaterial{.factory = factory_.get(), .params = params_it->second};
 }
 
 }  // namespace badlands

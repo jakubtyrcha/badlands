@@ -59,7 +59,11 @@ class MaterialLibrary {
   //
   // On a load failure (missing manifest, decode error), returns a
   // DeferredMaterial with the shared factory but texture_overrides pointing
-  // at null views -- logged via spdlog::error.
+  // at null views -- logged via spdlog::error, and marks ok() false. Callers
+  // that build their scene through Get()/SolidColor MUST check ok() once
+  // afterward and fail their own Initialize() if it's false (see ok()) --
+  // otherwise a null-view material silently renders the factory's 1x1
+  // white defaults instead of failing loudly.
   DeferredMaterial Get(const std::string& dir);
 
   // Returns a cached deferred `normalmapped` material with a flat 1x1 albedo
@@ -75,6 +79,15 @@ class MaterialLibrary {
   // The shared normalmapped kDeferred factory (valid after Initialize()).
   MaterialInstanceFactory* factory() const { return factory_.get(); }
 
+  // False if any pack has hard-failed to load since construction (missing
+  // manifest, unparseable JSON, or a missing/undecodable texture) -- see
+  // LoadPack. Callers MUST check this after building their scene (which
+  // calls Get() for every pack the scene references) and fail their own
+  // Initialize() if false: a load failure otherwise silently renders with
+  // the material factory's 1x1 white-default textures instead of failing
+  // loudly.
+  bool ok() const { return !load_failed_; }
+
  private:
   struct PackTextures {
     LoadedTexture albedo;
@@ -82,6 +95,11 @@ class MaterialLibrary {
     LoadedTexture arm;  // whole ARM: R=AO, G=roughness, B=metallic
   };
 
+  // Loads the pack at `dir` from its material.json manifest. On ANY hard
+  // failure (missing manifest, unparseable JSON, missing/undecodable
+  // texture) sets load_failed_ = true (mutable: LoadPack is const, called
+  // from Get()) and returns a PackTextures with null texture members --
+  // logged via spdlog::error in every case.
   PackTextures LoadPack(const std::string& dir) const;
 
   wgpu::Device device_;
@@ -92,10 +110,16 @@ class MaterialLibrary {
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: dir
+  // Get()'s built InstanceParams, cached per dir alongside `cache_`'s
+  // textures -- avoids rebuilding the 3-entry texture_overrides vector on
+  // every Get() call for an already-loaded pack.
+  std::unordered_map<std::string, InstanceParams> params_cache_;
   // key: r<<24 | g<<16 | b<<8 | roughness (all 8-bit). The stored
   // InstanceParams own the 1x1 texture views (which keep their textures
   // alive) for SolidColor's whole lifetime.
   std::unordered_map<uint32_t, InstanceParams> solid_cache_;
+
+  mutable bool load_failed_ = false;
 };
 
 }  // namespace badlands

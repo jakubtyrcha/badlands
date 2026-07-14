@@ -17,8 +17,11 @@
 //
 // Textures:
 // - Albedo: RGB color (2D or cubemap)
-// - Normal: Tangent-space normal map (DirectX convention -- green channel
-//   flipped to GL on sample, see fs_main)
+// - Normal: Tangent-space normal map, OpenGL convention (green = +Y). Any
+//   DirectX-convention source packs are green-flipped once at load time
+//   (engine/rendering/texture_loader.cpp's LoadTexture2D flip_green_dx,
+//   driven by material_library.cpp's LoadPack reading the manifest's
+//   normal_format) -- this shader always samples GL-convention data.
 // - ARM: R=baked ambient occlusion, G=roughness, B=metallic (unused)
 
 @if(!shadow_pass)
@@ -180,12 +183,10 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
     let roughness = arm.g;
     let ao = arm.r;
 
-    // Unpack normal from [0,1] to [-1,1] range. Source packs are DirectX
-    // convention (green channel flipped vs. GL) -- flip it back before
-    // building world space.
+    // Unpack normal from [0,1] to [-1,1] range. Arrives GL-convention from
+    // the loader (see the file-level Textures comment) -- no flip needed.
     let tangentNormal = normalMap * 2.0 - 1.0;
-    let fixedTangentNormal = vec3<f32>(tangentNormal.x, -tangentNormal.y, tangentNormal.z);
-    let worldNormal = normalize(TBN * fixedTangentNormal);
+    let worldNormal = normalize(TBN * tangentNormal);
 
     output.normals = encodeOctahedron(worldNormal);
     output.albedo = vec4<f32>(albedo, 1.0);
@@ -216,12 +217,10 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
     let roughness = arm.g;
     let ao = arm.r;
 
-    // Unpack normal from [0,1] to [-1,1] range. Source packs are DirectX
-    // convention (green channel flipped vs. GL) -- flip it back before
-    // building world space.
+    // Unpack normal from [0,1] to [-1,1] range. Arrives GL-convention from
+    // the loader (see the file-level Textures comment) -- no flip needed.
     let tangentNormal = normalMap * 2.0 - 1.0;
-    let fixedTangentNormal = vec3<f32>(tangentNormal.x, -tangentNormal.y, tangentNormal.z);
-    let worldNormal = normalize(TBN * fixedTangentNormal);
+    let worldNormal = normalize(TBN * tangentNormal);
 
     output.normals = encodeOctahedron(worldNormal);
     output.albedo = vec4<f32>(albedo, 1.0);

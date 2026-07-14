@@ -14,6 +14,7 @@
 // `FullscreenShaderNode::Execute` built, just assembled inline.
 #include "engine/rendering/scene_renderer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -326,8 +327,10 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     wgpu::BindGroup gtao_group1 = frame.CreateBindGroup(
         gtao_pipeline->bind_group_layouts[1], group1_entries);
 
-    const uint32_t ws_x = gtao_pipeline->workgroup_size[0];
-    const uint32_t ws_y = gtao_pipeline->workgroup_size[1];
+    // Guard against a reflected workgroup dim of 0 (unsigned underflow +
+    // divide-by-zero in the dispatch-count math below).
+    const uint32_t ws_x = std::max(1u, gtao_pipeline->workgroup_size[0]);
+    const uint32_t ws_y = std::max(1u, gtao_pipeline->workgroup_size[1]);
     const uint32_t dispatch_x = (width_ + ws_x - 1) / ws_x;
     const uint32_t dispatch_y = (height_ + ws_y - 1) / ws_y;
 

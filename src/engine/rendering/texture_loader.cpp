@@ -48,13 +48,25 @@ wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue
 
 LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
                             GpuPipelineGenerator& pipeline_gen,
-                            const std::string& path) {
+                            const std::string& path, bool flip_green_dx) {
   // Decode (format auto-detected from content: JPEG albedo, PNG normal/ARM).
   BadlandsImage img = badlands_decode_image(path.c_str());
   ImageGuard guard{img};
   if (img.rgba == nullptr) {
     spdlog::error("LoadTexture2D: failed to decode image '{}'", path);
     return {};
+  }
+
+  if (flip_green_dx) {
+    // DirectX -> OpenGL normal-map convention: invert the green (Y) channel
+    // in place, on the decoded level-0 buffer, before mip generation --
+    // every downsampled mip is then already GL-convention (see the shader's
+    // former hardcoded flip, now removed: shaders/material/normalmapped.wesl).
+    const size_t pixel_count = static_cast<size_t>(img.width) * img.height;
+    for (size_t i = 0; i < pixel_count; ++i) {
+      uint8_t& g = img.rgba[i * 4 + 1];
+      g = 255 - g;
+    }
   }
 
   return UploadTexture2DWithMips(device, queue, pipeline_gen, img.width,

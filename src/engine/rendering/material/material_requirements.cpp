@@ -17,7 +17,8 @@ std::string MaterialRequirementsRegistry::MakeKey(const std::string& name,
 MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
   // Register built-in materials
 
-  // normalmapped.wesl - PBR material with albedo, normal, roughness textures
+  // normalmapped.wesl - PBR material with albedo, normal, ARM (AO=R /
+  // roughness=G / metallic=B) textures
   RegisterMaterial(
       "normalmapped",
       // textured_mesh mode: 2D textures
