@@ -30,7 +30,8 @@
 // albedo texture; later game-layer tasks replace this whole function with a
 // world/scene translation.
 static void build_test_scene(badlands::SceneGraph& scene,
-                             badlands::MaterialInstanceFactory* mat) {
+                             badlands::MaterialInstanceFactory* mat,
+                             const badlands::InstanceParams& params) {
   auto sphere = badlands::GenerateSphereTexturedMesh(1.0f, 48);
 
   badlands::ResolvedMesh resolved_mesh{
@@ -45,7 +46,7 @@ static void build_test_scene(badlands::SceneGraph& scene,
       .mesh = std::move(resolved_mesh),
       .factory = mat,
       .pass_type = badlands::MaterialPassType::kForwardOpaque,
-      .params = {},
+      .params = params,
   });
 
   scene.SetSunDirection(glm::normalize(glm::vec3(0.3f, 1.0f, 0.4f)));
@@ -212,25 +213,33 @@ int main(int argc, char** argv) {
   badlands::GpuPipelineGenerator pipeline_gen(gpu.GetDevice(),
                                               badlands::FindShaderDirectory());
 
-  // TODO(E1 smoke): temporary hook verifying LoadTexture2D's GPU mip-chain
-  // generation end to end. E2 adds the real call (texturing the sphere);
-  // remove this block once E2 lands.
-  {
-    auto loaded = badlands::LoadTexture2D(
-        gpu.GetDevice(), gpu.GetQueue(), pipeline_gen,
-        "assets/materials/rocky_trail_1k.gltf/textures/"
-        "rocky_trail_diff_1k.jpg");
-    if (!loaded.texture) {
-      spdlog::error("E1 smoke: LoadTexture2D FAILED");
-    } else {
-      uint32_t mip_count = loaded.texture.GetMipLevelCount();
-      spdlog::info("E1 smoke: loaded texture mip_level_count={}", mip_count);
-      if (mip_count != 11) {
-        spdlog::error("E1 smoke: expected mip_level_count == 11, got {}",
-                      mip_count);
-      }
-    }
+  // Sphere albedo (E1 loader): JPEG -> RGBA8 Dawn texture with a GPU-
+  // generated mip chain. Kept alive for the whole render loop -- the bind
+  // group ref-keeps the view+texture, but the owning handle stays in scope
+  // regardless.
+  badlands::LoadedTexture albedo = badlands::LoadTexture2D(
+      gpu.GetDevice(), gpu.GetQueue(), pipeline_gen,
+      "assets/materials/rocky_trail_1k.gltf/textures/rocky_trail_diff_1k.jpg");
+  if (!albedo.texture) {
+    spdlog::error("main: failed to load sphere albedo texture");
+    gpu.Shutdown();
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 1;
   }
+  spdlog::info("main: sphere albedo mip_level_count={}",
+               albedo.texture.GetMipLevelCount());  // expect 11
+
+  // Trilinear + anisotropic sampler: the material factory's default sampler
+  // uses mipmapFilter=Nearest, which would defeat the GPU mip chain above.
+  wgpu::SamplerDescriptor samp_desc = {};
+  samp_desc.minFilter = wgpu::FilterMode::Linear;
+  samp_desc.magFilter = wgpu::FilterMode::Linear;
+  samp_desc.mipmapFilter = wgpu::MipmapFilterMode::Linear;  // trilinear
+  samp_desc.addressModeU = wgpu::AddressMode::Repeat;  // UV sphere wraps in u
+  samp_desc.addressModeV = wgpu::AddressMode::Repeat;
+  samp_desc.maxAnisotropy = 16;  // grazing-angle sharpness
+  wgpu::Sampler albedo_sampler = gpu.GetDevice().CreateSampler(&samp_desc);
 
   // Build the textured_mesh material factory (D1), targeting the forward
   // pass's render-target formats (SceneRenderer's fixed HDR + reversed-Z
@@ -276,8 +285,16 @@ int main(int argc, char** argv) {
     }
   }
 
+  badlands::InstanceParams sphere_params;
+  sphere_params.texture_overrides.push_back(badlands::DefaultTextureView{
+      .param_name = "mesh_texture",
+      .view = albedo.view,
+      .sampler = albedo_sampler,
+      .type = badlands::TextureType::k2D,
+  });
+
   badlands::SceneGraph scene;
-  build_test_scene(scene, textured_mesh_factory.get());
+  build_test_scene(scene, textured_mesh_factory.get(), sphere_params);
 
   entt::registry registry;
   badlands::SceneContext scene_context;
