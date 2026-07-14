@@ -424,6 +424,12 @@ std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
       target.color_formats =
           (pass == RenderPassType::kShadow) ? RenderTargetFormats{} : desc.color_formats;
       target.depth_format = desc.depth_format;
+      // Placeholder: depth_write/depth_compare are hardcoded uniformly here
+      // rather than derived per-pass the way sampo's RenderState presets did
+      // (e.g. a shadow pass writing depth vs. a forward-transparent pass
+      // testing but not writing it). Inert today since depth_format defaults
+      // to Undefined (no depth buffer yet); revisit once a real depth buffer
+      // is wired and a RenderState port lands.
       target.depth_write = true;
       target.depth_compare = wgpu::CompareFunction::Less;
       pass_targets.emplace(pass, std::move(target));

@@ -69,10 +69,20 @@ std::shared_ptr<const CompiledPipeline> MeshRenderingMaterial::GetCompiledPipeli
   if (!generator_) {
     return nullptr;
   }
-  RenderTargetFormats formats;
-  if (auto it = pass_targets_.find(pass_type); it != pass_targets_.end()) {
-    formats = it->second.color_formats;
+  // This variant wasn't configured for pass_type (see pass_targets_ /
+  // TargetConfig in material.hpp): fail fast, mirroring sampo's map-lookup
+  // nullopt for an unregistered (geometry, pass) combo. Without this guard,
+  // `formats` below stays empty and BuildDeclaration falls back to defaults,
+  // so we'd compile a real pipeline with zero color targets / no depth
+  // attachment against a shader with real fragment outputs — a Dawn
+  // validation error on every call, and a break of the documented
+  // MaterialInstanceFactory::CreateInstance contract ("returns nullptr if
+  // the combination is not available").
+  auto it = pass_targets_.find(pass_type);
+  if (it == pass_targets_.end()) {
+    return nullptr;
   }
+  RenderTargetFormats formats = it->second.color_formats;
   RenderPipelineDeclaration decl = BuildDeclaration(geometry_type, pass_type, config);
   return generator_->GetPipeline(decl, formats);
 }
