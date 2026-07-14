@@ -21,7 +21,7 @@ FetchContent_MakeAvailable(Corrosion)
 
 # wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
 # The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
-# the `wesl` 0.4 crate, and Corrosion invokes `cargo rustc --package <name>`,
+# the `wesl` 0.2 crate, and Corrosion invokes `cargo rustc --package <name>`,
 # which errors ("specification `wesl` is ambiguous") if the package shares a
 # name with one of its own dependencies.
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/wesl/Cargo.toml)

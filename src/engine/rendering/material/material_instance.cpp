@@ -9,6 +9,26 @@
 
 namespace badlands {
 
+namespace {
+
+// The reflected uniform buffers for a shader include both the imported
+// `frame` UBO (group 0) and the per-object UBO (group 1). Which one lands at
+// index [0] depends on declaration order in the shader source (not
+// consistent across shaders — e.g. `textured_mesh` happens to emit `object`
+// before `frame`, but `ground`/`overlay` don't). Select the per-object
+// buffer explicitly by group instead of assuming position.
+const ReflectedUniformBuffer* FindPerObjectBuffer(
+    const std::vector<ReflectedUniformBuffer>& uniform_buffers) {
+  for (const auto& buffer : uniform_buffers) {
+    if (buffer.group == 1) {
+      return &buffer;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 MaterialInstance::MaterialInstance(const MeshRenderingMaterial* base_material,
                                    GeometryType geometry_type,
                                    RenderPassType pass_type)
@@ -266,11 +286,11 @@ uint32_t MaterialInstance::GetUniformBufferSize() const {
     return 0;
   }
   const auto& uniform_buffers = base_material_->GetUniformBuffers(geometry_type_, pass_type_);
-  if (uniform_buffers.empty()) {
+  const ReflectedUniformBuffer* per_object = FindPerObjectBuffer(uniform_buffers);
+  if (!per_object) {
     return 0;
   }
-  // Return size of first uniform buffer (typically group 1 binding 0)
-  return uniform_buffers[0].total_size;
+  return per_object->total_size;
 }
 
 wgpu::Buffer MaterialInstance::GetOrCreateUniformBuffer(wgpu::Device device) {
@@ -300,9 +320,14 @@ void MaterialInstance::BuildUniformBuffer(wgpu::Device device) {
     return;
   }
 
-  // Use first uniform buffer (typically group 1 binding 0 for per-object
-  // uniforms)
-  const ReflectedUniformBuffer& buffer_info = uniform_buffers[0];
+  // Select the per-object (group 1) uniform buffer explicitly -- see
+  // FindPerObjectBuffer for why positional [0] is unsafe.
+  const ReflectedUniformBuffer* buffer_info_ptr = FindPerObjectBuffer(uniform_buffers);
+  if (!buffer_info_ptr) {
+    // Shader has no per-object (group 1) uniform buffer -- nothing to build.
+    return;
+  }
+  const ReflectedUniformBuffer& buffer_info = *buffer_info_ptr;
   uint32_t buffer_size = buffer_info.total_size;
 
   if (buffer_size == 0) {

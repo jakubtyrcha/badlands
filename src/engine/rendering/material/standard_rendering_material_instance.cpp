@@ -257,6 +257,14 @@ void StandardRenderingMaterialInstance::BuildParameterMap() const {
   const auto& uniform_buffers = material_->GetUniformBuffers(geometry_type_, pass_type_);
   uint32_t next_handle = 1;
   for (const auto& buffer : uniform_buffers) {
+    // Only the per-object (group 1) buffer's members are per-instance
+    // material parameters. Group 0 is the imported `frame` UBO, whose
+    // members are managed by FrameContext, not per-instance -- and whose
+    // offsets don't correspond to the group-1 buffer that BuildUniformBuffer
+    // actually writes.
+    if (buffer.group != 1) {
+      continue;
+    }
     for (const auto& member : buffer.members) {
       MaterialParameterId pid;
       pid.handle = next_handle++;

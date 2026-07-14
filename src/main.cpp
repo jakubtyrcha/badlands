@@ -64,9 +64,16 @@ uint32_t AlignUp(uint32_t value, uint32_t alignment) {
 }
 
 // Renders one frame of `scene`/`camera` into an offscreen
-// Rgba8UnormSrgb texture (instead of the SDL surface), reads it back, and
+// Rgba8Unorm texture (instead of the SDL surface), reads it back, and
 // writes it to `path` as a PNG via the `assets` crate. Blocks until the
 // GPU work + readback complete. Returns false (after logging) on failure.
+//
+// The offscreen texture uses a non-sRGB format (RGBA8Unorm) to match the
+// window surface's BGRA8Unorm (also non-sRGB): the tonemap shader manually
+// applies linear_to_srgb encoding when output_is_linear==0. An sRGB target
+// format (e.g. RGBA8UnormSrgb) would have the hardware sRGB-encode the
+// already-encoded output a second time on store, producing a too-bright
+// image.
 bool RenderScreenshot(badlands::GpuContext& gpu,
                       badlands::GpuPipelineGenerator& pipeline_gen,
                       badlands::SceneGraph& scene,
@@ -78,12 +85,12 @@ bool RenderScreenshot(badlands::GpuContext& gpu,
   wgpu::Device device = gpu.GetDevice();
   wgpu::Queue queue = gpu.GetQueue();
 
-  // Offscreen tonemap target: same convention a swapchain surface view
-  // would present (sRGB-encoded 8-bit color), but with COPY_SRC instead of
-  // presentation usage so we can read it back.
+  // Offscreen tonemap target: same convention the window surface uses
+  // (non-sRGB 8-bit color, manually sRGB-encoded by the tonemap shader),
+  // but with COPY_SRC instead of presentation usage so we can read it back.
   wgpu::TextureDescriptor offscreen_desc;
   offscreen_desc.size = {width, height, 1};
-  offscreen_desc.format = wgpu::TextureFormat::RGBA8UnormSrgb;
+  offscreen_desc.format = wgpu::TextureFormat::RGBA8Unorm;
   offscreen_desc.usage =
       wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
   offscreen_desc.mipLevelCount = 1;
@@ -98,7 +105,7 @@ bool RenderScreenshot(badlands::GpuContext& gpu,
 
   badlands::SceneRenderer renderer;
   renderer.Initialize(device, queue, &pipeline_gen,
-                      wgpu::TextureFormat::RGBA8UnormSrgb, width, height);
+                      wgpu::TextureFormat::RGBA8Unorm, width, height);
 
   scene.SyncToRegistry(registry, scene_context);
   renderer.Render(camera, registry, scene_context, offscreen_view);
@@ -206,6 +213,8 @@ int main(int argc, char** argv) {
     SDL_Quit();
     return 1;
   }
+  spdlog::info("main: window surface format = {}",
+               static_cast<int>(gpu.GetSurfaceFormat()));
 
   int width = 0, height = 0;
   SDL_GetWindowSizeInPixels(window, &width, &height);
@@ -339,9 +348,9 @@ int main(int argc, char** argv) {
       if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
         int w = 0, h = 0;
         SDL_GetWindowSizeInPixels(window, &w, &h);
-        gpu.Configure(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-        renderer.Resize(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-        if (h > 0) {
+        if (w > 0 && h > 0) {
+          gpu.Configure(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+          renderer.Resize(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
           camera.aspect = static_cast<float>(w) / static_cast<float>(h);
         }
       }
