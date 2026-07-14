@@ -85,6 +85,7 @@ add_library(badlands_engine STATIC
     src/engine/scene/scene_graph.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
     src/engine/rendering/passes/render_skybox.cpp
+    src/engine/rendering/passes/render_gbuffer_debug.cpp
     src/engine/rendering/gbuffer.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
@@ -99,6 +100,7 @@ add_library(badlands_engine STATIC
     src/engine/app/orbit_camera_controller.cpp
     src/engine/app/game_camera_controller.cpp
     src/engine/ui/imgui_impl_wgpu_custom.cpp
+    src/engine/ui/editor_ui.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp

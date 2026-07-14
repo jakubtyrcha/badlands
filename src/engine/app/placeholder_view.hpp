@@ -35,11 +35,21 @@ class PlaceholderView : public AppView {
   SceneContext& GetSceneContext() override { return scene_context_; }
 
  private:
+  // GPU handles (from RenderContext, stored so DrawUI can re-run
+  // ApplyLightEnvironment when the EditorUI light-environment editor changes
+  // env_ live).
+  wgpu::Device device_;
+  wgpu::Queue queue_;
+  // Shared renderer (owned by the app, outlives this view) — DrawUI drives its
+  // G-buffer debug selector via EditorUI.
+  SceneRenderer* scene_renderer_ = nullptr;
+
   LoadedTexture albedo_;
   wgpu::Sampler sampler_;
   // Shared light environment (sun + analytic sky). ApplyLightEnvironment builds
   // sky_cube_ + the SH ambient + the sun from it in Initialize (replaces B2's
-  // hardcoded inline sky/SH). The B4 ImGui editor will mutate env_ live.
+  // hardcoded inline sky/SH), and again live from DrawUI whenever the EditorUI
+  // light-environment editor reports a change.
   LightEnvironment env_;
   CubemapBuilder sky_cube_;
   // Temporary verification aid: a ~0.4 solid-gray 1x1 roughness override so the

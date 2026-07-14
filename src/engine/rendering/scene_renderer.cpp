@@ -16,13 +16,13 @@
 
 #include <array>
 #include <cstdint>
-#include <cstdlib>
 
 #include <spdlog/spdlog.h>
 
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
 #include "engine/rendering/context/scene_context.hpp"
+#include "engine/rendering/passes/render_gbuffer_debug.hpp"
 #include "engine/rendering/passes/render_skybox.hpp"
 #include "engine/rendering/passes/render_textured_mesh.hpp"
 
@@ -95,20 +95,9 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
     sdesc.maxAnisotropy = 1;
     fallback_cube_sampler_ = device_.CreateSampler(&sdesc);
   }
-
-  // Verification hook: force the black fallback into the IBL binding so the
-  // sky/sun reflection vanishes, proving the reflection is driven by the
-  // prefiltered env (before/after in the task's DoD).
-  ibl_disabled_ = std::getenv("BADLANDS_IBL_DISABLE") != nullptr;
-  if (ibl_disabled_) {
-    spdlog::warn(
-        "SceneRenderer: BADLANDS_IBL_DISABLE set — IBL specular forced to the "
-        "black fallback cube");
-  }
 }
 
 void SceneRenderer::UpdateIbl(const SceneContext& scene) {
-  if (ibl_disabled_) return;          // keep fallback (verification path)
   if (!scene.skybox_cubemap) return;  // no source env -> fallback stays bound
 
   const bool source_changed =
@@ -298,8 +287,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       // shaders/passes/deferred_lighting.wesl's binding declarations. The IBL
       // cube is the prefiltered env when available, else a 1x1 black fallback
       // (so the specular term is zero) — bindings are always valid.
-      const bool use_prefiltered =
-          !ibl_disabled_ && has_prefiltered_ && prefiltered_.IsValid();
+      const bool use_prefiltered = has_prefiltered_ && prefiltered_.IsValid();
       wgpu::TextureView ibl_cube_view =
           use_prefiltered ? prefiltered_.GetView() : fallback_cube_view_;
       wgpu::Sampler ibl_cube_sampler =
@@ -351,49 +339,60 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     }
   }
 
-  // === Pass 4: Tonemap resolve: HDR -> surface ===
+  // === Pass 4: Final resolve: HDR -> surface. Normally the tonemap pass;
+  // when a G-buffer debug mode is selected (SetDebugMode), gbuffer_debug.wesl
+  // visualizes the selected channel instead (S2.B4). ===
   {
-    RenderPipelineDeclaration decl;
-    decl.shader_path = "passes/tonemapping";
-    // vertex_layout defaults to VertexLayout::kFullscreen (no vertex
-    // buffer — the shader generates a fullscreen triangle from
-    // @builtin(vertex_index)); cull_mode/depth default to off, matching a
-    // depth-less fullscreen blit.
+    wgpu::RenderPassColorAttachment color_attachment;
+    color_attachment.view = surface_view;
+    color_attachment.loadOp = wgpu::LoadOp::Clear;
+    color_attachment.storeOp = wgpu::StoreOp::Store;
+    color_attachment.clearValue = {0.0, 0.0, 0.0, 1.0};
 
-    RenderTargetFormats target_formats = {surface_format_};
-    auto compiled = pipeline_generator_->GetPipeline(decl, target_formats);
-    if (!compiled) {
-      spdlog::error(
-          "SceneRenderer::Render: failed to compile tonemap pipeline");
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color_attachment;
+    desc.depthStencilAttachment = nullptr;
+
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+
+    if (debug_mode_ != GBufferDebugMode::None) {
+      RenderGBufferDebug(pass, frame, *pipeline_generator_, surface_format_,
+                         gbuffer_.GetDepthView(), gbuffer_.GetNormalsView(),
+                         gbuffer_.GetAlbedoView(), gbuffer_.GetMaterialView(),
+                         hdr_color_view_, debug_mode_);
     } else {
-      std::array<wgpu::BindGroupEntry, 2> entries{};
-      entries[0].binding = 0;
-      entries[0].buffer = frame.GetFrameUniformBuffer();
-      entries[0].offset = 0;
-      entries[0].size = sizeof(UniformData);
-      entries[1].binding = 1;
-      entries[1].textureView = hdr_color_view_;
+      RenderPipelineDeclaration decl;
+      decl.shader_path = "passes/tonemapping";
+      // vertex_layout defaults to VertexLayout::kFullscreen (no vertex
+      // buffer — the shader generates a fullscreen triangle from
+      // @builtin(vertex_index)); cull_mode/depth default to off, matching a
+      // depth-less fullscreen blit.
 
-      wgpu::BindGroup bind_group =
-          frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
+      RenderTargetFormats target_formats = {surface_format_};
+      auto compiled = pipeline_generator_->GetPipeline(decl, target_formats);
+      if (!compiled) {
+        spdlog::error(
+            "SceneRenderer::Render: failed to compile tonemap pipeline");
+      } else {
+        std::array<wgpu::BindGroupEntry, 2> entries{};
+        entries[0].binding = 0;
+        entries[0].buffer = frame.GetFrameUniformBuffer();
+        entries[0].offset = 0;
+        entries[0].size = sizeof(UniformData);
+        entries[1].binding = 1;
+        entries[1].textureView = hdr_color_view_;
 
-      wgpu::RenderPassColorAttachment color_attachment;
-      color_attachment.view = surface_view;
-      color_attachment.loadOp = wgpu::LoadOp::Clear;
-      color_attachment.storeOp = wgpu::StoreOp::Store;
-      color_attachment.clearValue = {0.0, 0.0, 0.0, 1.0};
+        wgpu::BindGroup bind_group =
+            frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
 
-      wgpu::RenderPassDescriptor desc;
-      desc.colorAttachmentCount = 1;
-      desc.colorAttachments = &color_attachment;
-      desc.depthStencilAttachment = nullptr;
-
-      RenderPassContext pass = frame.BeginRenderPass(desc);
-      pass.SetPipeline(compiled->pipeline);
-      pass.SetBindGroup(0, bind_group);
-      pass.Draw(3);
-      pass.End();
+        pass.SetPipeline(compiled->pipeline);
+        pass.SetBindGroup(0, bind_group);
+        pass.Draw(3);
+      }
     }
+
+    pass.End();
   }
 
   wgpu::CommandBuffer commands = frame.End();

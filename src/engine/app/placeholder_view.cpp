@@ -14,6 +14,7 @@
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/scene/scene_attachment.hpp"
+#include "engine/ui/editor_ui.hpp"
 
 namespace badlands {
 
@@ -72,6 +73,10 @@ void BuildSphereScene(SceneGraph& scene, MaterialInstanceFactory* mat,
 }  // namespace
 
 void PlaceholderView::Initialize(const RenderContext& ctx) {
+  device_ = ctx.device;
+  queue_ = ctx.queue;
+  scene_renderer_ = ctx.scene_renderer;
+
   // Sphere albedo (Stage 1 E1 loader): JPEG -> RGBA8 Dawn texture with a
   // GPU-generated mip chain. Kept alive for the whole view lifetime -- the
   // bind group ref-keeps the view+texture, but the owning handle stays in
@@ -201,9 +206,21 @@ void PlaceholderView::Update(float dt, const bool* /*keyboard_state*/) {
 }
 
 void PlaceholderView::DrawUI() {
-  ImGui::Begin("badlands");
-  ImGui::Text("%.1f FPS (%.2f ms)", dt_ > 0 ? 1.0f / dt_ : 0.0f, dt_ * 1000.0f);
-  ImGui::End();
+  if (!scene_renderer_) return;
+
+  const bool env_changed =
+      EditorUI::DrawDebugPanel(env_, *scene_renderer_, dt_);
+  if (env_changed) {
+    // Rebuild the sky cube + SH ambient + sun from the edited env_ (bumps
+    // skybox_generation so SceneRenderer re-prefilters the IBL cube next
+    // frame — same call Initialize makes), then re-mirror the derived
+    // lighting into the SceneGraph so SyncToRegistry doesn't clobber it with
+    // its own defaults (as Initialize's comment explains).
+    ApplyLightEnvironment(env_, device_, queue_, sky_cube_, scene_context_);
+    scene_.SetSunDirection(scene_context_.sun_direction);
+    scene_.SetSunColor(scene_context_.sun_color);
+    scene_.SetAmbientSH(scene_context_.ambient_sh);
+  }
 }
 
 void PlaceholderView::OnResize(int width, int height) {

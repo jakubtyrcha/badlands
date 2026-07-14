@@ -41,6 +41,22 @@ namespace badlands {
 
 struct SceneContext;
 
+// G-buffer debug visualization modes (Task S2.B4). When the SceneRenderer's
+// mode is not kNone, the final surface resolve runs
+// shaders/passes/gbuffer_debug.wesl (visualizing the selected channel)
+// INSTEAD OF the tonemap pass — see SceneRenderer::Render's Pass 4 and
+// engine/rendering/passes/render_gbuffer_debug.hpp.
+enum class GBufferDebugMode {
+  None,
+  Depth,      // linearized depth, grayscale
+  Normals,    // decoded world normal, n*0.5+0.5
+  Albedo,     // raw (unlit) albedo
+  Roughness,  // material.r, grayscale
+  Hdr,        // the lit HDR buffer, tonemapped — same as kNone, a convenience
+              // passthrough so the selector can cover the whole HDR->surface
+              // resolve without a separate "off" state.
+};
+
 // Deferred renderer: G-buffer geometry pass -> deferred lighting (sun + SH
 // ambient) into an HDR target -> fullscreen tonemap resolve to the surface.
 //
@@ -96,6 +112,11 @@ class SceneRenderer {
   MaterialInstanceCache& GetMaterialInstanceCache() {
     return material_instance_cache_;
   }
+
+  // G-buffer debug visualization (Task S2.B4). SetDebugMode takes effect on
+  // the next Render() call.
+  void SetDebugMode(GBufferDebugMode mode) { debug_mode_ = mode; }
+  GBufferDebugMode GetDebugMode() const { return debug_mode_; }
 
   // HDR accumulation target format and reversed-Z depth-buffer format —
   // fixed constants in this trimmed renderer (not configurable via
@@ -153,10 +174,9 @@ class SceneRenderer {
   wgpu::TextureView ibl_source_view_;
   uint32_t ibl_source_generation_ = 0;
   bool has_prefiltered_ = false;
-  // Debug/verification: BADLANDS_IBL_DISABLE forces the black fallback cube
-  // into @9 (proves the reflection is driven by the prefiltered env). Read
-  // once in Initialize.
-  bool ibl_disabled_ = false;
+
+  // === G-buffer debug (S2.B4) ===
+  GBufferDebugMode debug_mode_ = GBufferDebugMode::None;
 
   uint32_t min_uniform_offset_alignment_ = 256;
 };
