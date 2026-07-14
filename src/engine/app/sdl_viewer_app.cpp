@@ -111,13 +111,23 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     spdlog::error("SdlViewerApp: view factory returned null");
     return 1;
   }
-  view_->Initialize(ctx);
+  if (!view_->Initialize(ctx)) {
+    spdlog::error("SdlViewerApp: view initialization failed");
+    return 1;
+  }
   view_->OnResize(width, height);
 
   if (screenshot_mode) {
-    bool ok = SaveScreenshot(gpu_, *pipeline_gen_, *view_,
-                             static_cast<uint32_t>(width),
-                             static_cast<uint32_t>(height), screenshot_path);
+    // Deterministic capture size: config_ (fixed logical size), NOT the
+    // HiDPI window pixel size, which is 2x+ on Retina and would silently
+    // change the output resolution. Refresh the view's camera aspect to the
+    // capture size before rendering offscreen. renderer_.GetDebugMode()
+    // forwards the live G-buffer debug visualization into the capture.
+    const uint32_t shot_w = static_cast<uint32_t>(config_.width);
+    const uint32_t shot_h = static_cast<uint32_t>(config_.height);
+    view_->OnResize(config_.width, config_.height);
+    bool ok = SaveScreenshot(gpu_, *pipeline_gen_, *view_, shot_w, shot_h,
+                             screenshot_path, renderer_.GetDebugMode());
     return ok ? 0 : 1;
   }
 
@@ -221,9 +231,16 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     gpu_.Present();
 
     if (recorder_.active()) {
+      // Deterministic capture size (config_, not HiDPI window pixels). Match
+      // the camera aspect to the capture size for this offscreen render, then
+      // restore the live window aspect so the on-screen view is unaffected.
+      // renderer_.GetDebugMode() forwards the live debug visualization.
+      view_->OnResize(config_.width, config_.height);
       recorder_.CaptureFrame(gpu_, *pipeline_gen_, *view_,
-                             static_cast<uint32_t>(width),
-                             static_cast<uint32_t>(height));
+                             static_cast<uint32_t>(config_.width),
+                             static_cast<uint32_t>(config_.height),
+                             renderer_.GetDebugMode());
+      view_->OnResize(width, height);
     }
 
     if (!render_ok_logged) {

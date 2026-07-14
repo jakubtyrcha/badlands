@@ -24,4 +24,10 @@ struct BuildingVisual {
 
 BuildingVisual building_visual(GameBuildingKind kind);
 
+// Human-readable display label for `kind` (e.g. GAME_BUILDING_CASTLE ->
+// "Castle"), in enum-declaration order. Returns "?" for an unknown/out-of-
+// range value. Shared by the viewer's prefab catalog and the game view's
+// building list (each of which used to keep its own copy of this table).
+const char* building_label(GameBuildingKind kind);
+
 }  // namespace badlands

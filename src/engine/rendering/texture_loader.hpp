@@ -17,15 +17,33 @@
 
 #include <dawn/webgpu_cpp.h>
 
+#include "badlands_assets.h"  // BadlandsImage / badlands_image_free (ImageGuard)
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 
 namespace badlands {
+
+// RAII guard: frees a BadlandsImage's malloc'd pixel buffer on every exit path
+// (badlands_image_free is safe to call on a failure/all-NULL result too).
+// Shared by texture_loader.cpp and material_library.cpp (which decode JPEGs
+// through the same `assets` C ABI).
+struct ImageGuard {
+  BadlandsImage image;
+  ~ImageGuard() { badlands_image_free(image); }
+};
 
 // A loaded 2D texture with a full GPU-generated mip chain.
 struct LoadedTexture {
   wgpu::Texture texture;  // owns the GPU texture
   wgpu::TextureView view; // 2D view over all mip levels
 };
+
+// Creates a 1x1 solid-color RGBA8Unorm texture and returns a view over it
+// (the returned view keeps the underlying single-mip texture alive). Used for
+// procedural floor/capsule albedo + roughness slots that need no JPEG decode.
+// No mip chain (1x1 has none), so any sampler's mipmapFilter is irrelevant.
+wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue,
+                                          uint8_t r, uint8_t g, uint8_t b,
+                                          uint8_t a = 255);
 
 // Decodes the JPEG at `path` (via the `assets` Rust crate), uploads it as
 // mip level 0 of an RGBA8Unorm Dawn texture sized to a full mip chain, then

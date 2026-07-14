@@ -11,7 +11,6 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/rendering/geometry/primitive_mesh_builders.hpp"
-#include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
@@ -21,32 +20,14 @@ namespace badlands {
 
 namespace {
 
-// Creates a 1x1 solid-color RGBA8Unorm texture view (procedural floor/
-// capsule albedo/roughness). Same pattern as GameView/ModelViewerView's
-// CreateSolid1x1 -- a small file-local utility, not a shared deliverable.
-wgpu::TextureView CreateSolid1x1(wgpu::Device device, wgpu::Queue queue, uint8_t r,
-                                 uint8_t g, uint8_t b, uint8_t a) {
-  wgpu::TextureDescriptor desc;
-  desc.size = {1, 1, 1};
-  desc.format = wgpu::TextureFormat::RGBA8Unorm;
-  desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
-  desc.dimension = wgpu::TextureDimension::e2D;
-  desc.mipLevelCount = 1;
-  desc.sampleCount = 1;
-  wgpu::Texture tex = device.CreateTexture(&desc);
-
-  const uint8_t data[4] = {r, g, b, a};
-  wgpu::TexelCopyTextureInfo dst;
-  dst.texture = tex;
-  dst.mipLevel = 0;
-  dst.origin = {0, 0, 0};
-  wgpu::TexelCopyBufferLayout layout;
-  layout.bytesPerRow = 4;
-  layout.rowsPerImage = 1;
-  wgpu::Extent3D extent = {1, 1, 1};
-  queue.WriteTexture(&dst, data, sizeof(data), &layout, &extent);
-  return tex.CreateView();
-}
+// Capsule solid colors (linear 0..1 RGB) + shared mid roughness, resolved to
+// cached deferred materials via MaterialLibrary::SolidColor. Normal falls
+// back to the normalmapped factory's flat-normal default.
+constexpr glm::vec3 kCapsuleRedRgb{200.0f / 255.0f, 30.0f / 255.0f,
+                                   30.0f / 255.0f};
+constexpr glm::vec3 kCapsuleBlueRgb{30.0f / 255.0f, 60.0f / 255.0f,
+                                    200.0f / 255.0f};
+constexpr float kCapsuleRoughness = 140.0f / 255.0f;
 
 // Wall block footprint/height (world units; tile = 1.0 world unit).
 constexpr float kWallHalfFootprint = 0.5f;
@@ -58,37 +39,25 @@ constexpr float kCapsuleCylinderHeight = 0.6f;
 
 }  // namespace
 
-void AiSandboxView::Initialize(const RenderContext& ctx) {
+bool AiSandboxView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
   scene_renderer_ = ctx.scene_renderer;
 
-  matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen);
-
-  // Neutral gray floor (same albedo/roughness values + rationale as
-  // GameView/ModelViewerView's AddFloor).
-  floor_albedo_view_ = CreateSolid1x1(ctx.device, ctx.queue, 110, 110, 110, 255);
-  floor_roughness_view_ = CreateSolid1x1(ctx.device, ctx.queue, 229, 229, 229, 255);
-  wgpu::SamplerDescriptor samp_desc = {};
-  samp_desc.minFilter = wgpu::FilterMode::Linear;
-  samp_desc.magFilter = wgpu::FilterMode::Linear;
-  samp_desc.mipmapFilter = wgpu::MipmapFilterMode::Linear;
-  samp_desc.addressModeU = wgpu::AddressMode::Repeat;
-  samp_desc.addressModeV = wgpu::AddressMode::Repeat;
-  floor_sampler_ = ctx.device.CreateSampler(&samp_desc);
-
-  // Capsule solid colors: red + blue, mid roughness (~0.55) shared by both.
-  // Normal falls back to the normalmapped factory's flat-normal default.
-  capsule_red_albedo_view_ = CreateSolid1x1(ctx.device, ctx.queue, 200, 30, 30, 255);
-  capsule_blue_albedo_view_ = CreateSolid1x1(ctx.device, ctx.queue, 30, 60, 200, 255);
-  capsule_roughness_view_ = CreateSolid1x1(ctx.device, ctx.queue, 140, 140, 140, 255);
+  if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
+    spdlog::error("AiSandboxView::Initialize: MaterialLibrary init failed");
+    return false;
+  }
 
   ApplyEnvironment();
 
   arena_ = build_arena();
   BuildScene();
 
+  // Frame the camera once, here (the framing is aspect-independent -- see
+  // FrameCamera). OnResize only refreshes camera_.aspect afterwards.
   FrameCamera();
+  return true;
 }
 
 void AiSandboxView::ApplyEnvironment() {
@@ -102,46 +71,22 @@ void AiSandboxView::BuildScene() {
   // Fresh graph: re-mirror scene_context_'s (already-derived-from-env_)
   // lighting right after, same as ApplyEnvironment does for the live-edit
   // path (SceneGraph's constructor resets sun/ambient to its own defaults).
+  // (See GameView::BuildScene's NOTE(lighting) on centralizing this mirror.)
   scene_ = SceneGraph();
   scene_.SetSunDirection(scene_context_.sun_direction);
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  AddFloor();
-  AddWalls();
-  AddCapsules();
-}
-
-void AiSandboxView::AddFloor() {
-  // Covers the whole arena footprint (interior + wall ring) with headroom;
-  // scales with the configured arena size instead of a fixed constant.
+  // Floor covers the whole arena footprint (interior + wall ring) with
+  // headroom; scales with the configured arena size instead of a fixed
+  // constant.
   const float full_x = static_cast<float>(arena_.accessible.x + 2);
   const float full_z = static_cast<float>(arena_.accessible.y + 2);
-  const float size = std::max(full_x, full_z) + 4.0f;
+  const float floor_size = std::max(full_x, full_z) + 4.0f;
+  AddGrayFloor(scene_, matlib_, floor_size);
 
-  auto quad = GenerateQuadTexturedMesh(size);
-
-  // GenerateQuadTexturedMesh spans X/Y at Z=0 with normal +Z; rotate -90deg
-  // about X so the normal becomes +Y (up) and the quad spans X/Z at Y=0.
-  const glm::mat4 transform =
-      glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-
-  InstanceParams floor_params;
-  floor_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "albedo",
-      .view = floor_albedo_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-  floor_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "roughness",
-      .view = floor_roughness_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-
-  DeferredMaterial floor_mat{.factory = matlib_.factory(), .params = floor_params};
-  AddMeshEntity(scene_, "floor", std::move(quad), floor_mat, transform);
+  AddWalls();
+  AddCapsules();
 }
 
 void AiSandboxView::AddWalls() {
@@ -188,35 +133,10 @@ void AiSandboxView::AddCapsules() {
   capsule_a_pos_ = arena_tile_center(tile_a);
   capsule_b_pos_ = arena_tile_center(tile_b);
 
-  InstanceParams red_params;
-  red_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "albedo",
-      .view = capsule_red_albedo_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-  red_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "roughness",
-      .view = capsule_roughness_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-  const DeferredMaterial red_mat{.factory = matlib_.factory(), .params = red_params};
-
-  InstanceParams blue_params;
-  blue_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "albedo",
-      .view = capsule_blue_albedo_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-  blue_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "roughness",
-      .view = capsule_roughness_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-  const DeferredMaterial blue_mat{.factory = matlib_.factory(), .params = blue_params};
+  const DeferredMaterial red_mat =
+      matlib_.SolidColor(kCapsuleRedRgb, kCapsuleRoughness);
+  const DeferredMaterial blue_mat =
+      matlib_.SolidColor(kCapsuleBlueRgb, kCapsuleRoughness);
 
   // GenerateCapsule's base is already at y=0 (see primitive_mesh_builders.hpp).
   auto capsule_a = GenerateCapsule(kCapsuleRadius, kCapsuleCylinderHeight, 16);
@@ -288,6 +208,11 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
 void AiSandboxView::DrawUI() {
   if (!scene_renderer_) return;
 
+  // NOTE(lighting): on any frame the editor changes env_, ApplyEnvironment
+  // re-derives the full sky (6 faces x face x face radiance), a 2048-sample SH
+  // projection, and a GPU cube rebuild + IBL re-prefilter next frame -- to be
+  // debounced / made incremental in the future lighting commit. No behavior
+  // change here.
   const bool env_changed = EditorUI::DrawDebugPanel(env_, *scene_renderer_, dt_);
   if (env_changed) {
     ApplyEnvironment();
@@ -304,9 +229,13 @@ void AiSandboxView::DrawUI() {
 }
 
 void AiSandboxView::OnResize(int width, int height) {
+  // Only refresh the aspect. FrameCamera() (run once in Initialize) must NOT
+  // be called here: it resets gamecam_.focus to the origin, which would
+  // discard any WASD pan on every window resize. The framing is
+  // aspect-independent (see FrameCamera's coefficient comment), so nothing
+  // needs re-framing on resize.
   camera_.aspect =
       height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
-  FrameCamera();
 }
 
 }  // namespace badlands

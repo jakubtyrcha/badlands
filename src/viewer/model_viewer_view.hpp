@@ -32,7 +32,7 @@ namespace badlands {
 
 class ModelViewerView : public AppView {
  public:
-  void Initialize(const RenderContext& ctx) override;
+  bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
   void Update(float dt, const bool* keyboard_state) override;
   void DrawUI() override;
@@ -69,7 +69,6 @@ class ModelViewerView : public AppView {
   // orbit camera on the prefab's bounds. Called by Initialize() and whenever
   // DrawUI's prefab combo selection changes.
   void RebuildScene();
-  void AddFloor();
   // Adds `entry`'s entities to scene_ (one for a rock, one per building part)
   // and returns their combined LOCAL-space bounds (entities are placed at the
   // scene origin, untransformed) for orbit_.FrameBounds().
@@ -84,13 +83,6 @@ class ModelViewerView : public AppView {
   MaterialLibrary matlib_;
   LightEnvironment env_;
   CubemapBuilder sky_cube_;
-
-  // Neutral gray floor material resources (created once in Initialize; the
-  // floor's InstanceParams reference these views/sampler for the view's
-  // whole lifetime).
-  wgpu::TextureView floor_albedo_view_;
-  wgpu::TextureView floor_roughness_view_;
-  wgpu::Sampler floor_sampler_;
 
   SceneGraph scene_;
   entt::registry registry_;

@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include <glm/gtc/matrix_transform.hpp>
+
 #include "engine/scene/scene_attachment.hpp"
 
 namespace badlands {
@@ -27,6 +29,19 @@ NodeHandle AddMeshEntity(SceneGraph& scene, const char* name,
                             });
 
   return node;
+}
+
+void AddGrayFloor(SceneGraph& scene, MaterialLibrary& matlib, float size,
+                  glm::vec3 tint, float roughness) {
+  auto quad = GenerateQuadTexturedMesh(size);
+
+  // GenerateQuadTexturedMesh spans X/Y at Z=0 with normal +Z; rotate -90deg
+  // about X so the normal becomes +Y (up) and the quad spans X/Z at Y=0.
+  const glm::mat4 transform = glm::rotate(
+      glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+
+  AddMeshEntity(scene, "floor", std::move(quad),
+                matlib.SolidColor(tint, roughness), transform);
 }
 
 }  // namespace badlands

@@ -1,10 +1,41 @@
 #include "game/building_catalog.h"
 
+#include <cstddef>
+
 namespace badlands {
 
 namespace {
 constexpr MaterialId kSlateRoof = MaterialId::RoofSlates;
+
+// GameBuildingKind -> display label, in enum declaration order
+// (badlands_game.h). Single source of truth for building_label().
+struct BuildingLabel {
+  GameBuildingKind kind;
+  const char* label;
+};
+constexpr BuildingLabel kBuildingLabels[] = {
+    {GAME_BUILDING_CASTLE, "Castle"},
+    {GAME_BUILDING_FREE_COMPANY_QUARTERS, "Free Company Quarters"},
+    {GAME_BUILDING_HUNTERS_CAMP, "Hunters Camp"},
+    {GAME_BUILDING_THIEVES_DEN, "Thieves Den"},
+    {GAME_BUILDING_SCRIPTORIUM, "Scriptorium"},
+    {GAME_BUILDING_TAVERN, "Tavern"},
+    {GAME_BUILDING_APOTHECARY, "Apothecary"},
+    {GAME_BUILDING_WATCHTOWER, "Watchtower"},
+    {GAME_BUILDING_HOUSE, "House"},
+    {GAME_BUILDING_SEWER, "Sewer"},
+};
+static_assert(sizeof(kBuildingLabels) / sizeof(kBuildingLabels[0]) ==
+                  GAME_BUILDING_KIND_COUNT,
+              "kBuildingLabels must cover every GameBuildingKind");
 }  // namespace
+
+const char* building_label(GameBuildingKind kind) {
+  for (const BuildingLabel& b : kBuildingLabels) {
+    if (b.kind == kind) return b.label;
+  }
+  return "?";
+}
 
 BuildingVisual building_visual(GameBuildingKind kind) {
   switch (kind) {

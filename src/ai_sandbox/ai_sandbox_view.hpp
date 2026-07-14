@@ -27,7 +27,7 @@ namespace badlands {
 
 class AiSandboxView : public AppView {
  public:
-  void Initialize(const RenderContext& ctx) override;
+  bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
   void Update(float dt, const bool* keyboard_state) override;
   void DrawUI() override;
@@ -47,14 +47,14 @@ class AiSandboxView : public AppView {
   // lighting, then adds the floor + wall ring + 2 capsules. Called once from
   // Initialize -- this stage's arena is static.
   void BuildScene();
-  void AddFloor();
   void AddWalls();
   void AddCapsules();
   // Centers the game camera on the arena origin and picks a height (at
   // GameCameraController's fixed pitch) so the whole arena -- including the
-  // wall ring -- stays inside the frustum, using camera_.aspect. Called from
-  // Initialize (with the default aspect) and again from OnResize once the
-  // real window aspect is known.
+  // wall ring -- stays inside the frustum. The framing is aspect-independent
+  // (it uses fixed empirical coefficients, not camera_.aspect), so it is run
+  // once from Initialize; OnResize only refreshes camera_.aspect and must NOT
+  // re-run this (it resets gamecam_.focus, discarding any WASD pan).
   void FrameCamera();
 
   // GPU handles (from RenderContext, stored so DrawUI can re-run
@@ -67,20 +67,9 @@ class AiSandboxView : public AppView {
   LightEnvironment env_;
   CubemapBuilder sky_cube_;
 
-  // Neutral gray floor material resources (created once in Initialize; the
-  // floor's InstanceParams reference these views/sampler for the view's
-  // whole lifetime). Also reused as the capsules' sampler (plain linear, no
-  // mips needed for 1x1 solid-color textures).
-  wgpu::TextureView floor_albedo_view_;
-  wgpu::TextureView floor_roughness_view_;
-  wgpu::Sampler floor_sampler_;
-
-  // Capsule solid-color material resources: distinct albedo per capsule, a
-  // shared mid-roughness override (normal falls back to the factory's
-  // flat-normal default -- see material_requirements.cpp).
-  wgpu::TextureView capsule_red_albedo_view_;
-  wgpu::TextureView capsule_blue_albedo_view_;
-  wgpu::TextureView capsule_roughness_view_;
+  // Floor + capsule materials are cached solid-color deferred materials from
+  // MaterialLibrary::SolidColor (the library owns their 1x1 textures), so no
+  // per-view texture/sampler handles are needed here anymore.
 
   Arena arena_;
   // World-space XZ positions of the 2 capsules, recorded by AddCapsules()

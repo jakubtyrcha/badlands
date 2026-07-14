@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 
 #include "badlands_game.h"  // GameBuildingKind
+#include "engine/rendering/geometry/aabb.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 
@@ -31,7 +32,12 @@ namespace badlands {
 // this helper does not reproduce. Applying a raw idx*45deg yaw to the
 // orthogonal box is exact for rotation_index 0/2 and an approximation for
 // 1/3 -- fine for this stage, whose buildings are all placed orthogonally.
-void AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
+//
+// Returns the union of the parts' LOCAL (pre-transform) bounds. For a
+// building placed at the origin with yaw 0 (center_world = {0,0}) this equals
+// its world bounds, which the model viewer uses to frame its orbit camera;
+// callers that place buildings elsewhere (the game view) simply ignore it.
+Aabb AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
                         GameBuildingKind kind, glm::vec2 center_world,
                         float yaw_radians);
 

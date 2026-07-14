@@ -237,6 +237,12 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data,
 
         if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y) continue;
 
+        // Clamp negative clip coords to 0 before the float->uint32_t cast: a
+        // negative value would wrap to ~4.29e9, yielding an invalid
+        // SetScissorRect (matches the canonical ImGui WGPU backend).
+        if (clip_min.x < 0.0f) clip_min.x = 0.0f;
+        if (clip_min.y < 0.0f) clip_min.y = 0.0f;
+
         // Clamp scissor rect to framebuffer bounds
         uint32_t rect_x = (uint32_t)clip_min.x;
         uint32_t rect_y = (uint32_t)clip_min.y;

@@ -19,7 +19,10 @@ class AppView {
   virtual ~AppView() = default;
 
   // Called once after the GPU/renderer exist. Build scene + materials here.
-  virtual void Initialize(const RenderContext& ctx) = 0;
+  // Returns false (after logging) if setup failed (e.g. a material factory
+  // could not be built); the app aborts with a nonzero exit code rather than
+  // rendering an empty scene.
+  virtual bool Initialize(const RenderContext& ctx) = 0;
 
   // One SDL event. (ImGui gating is added in A2.)
   virtual void HandleEvent(const SDL_Event& event, int width, int height) = 0;

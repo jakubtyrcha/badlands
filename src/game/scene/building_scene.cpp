@@ -13,7 +13,7 @@
 
 namespace badlands {
 
-void AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
+Aabb AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
                         GameBuildingKind kind, glm::vec2 center_world,
                         float yaw_radians) {
   const BuildingVisual bv = building_visual(kind);
@@ -27,6 +27,7 @@ void AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
                      glm::vec3(center_world.x, 0.0f, center_world.y)) *
       glm::rotate(glm::mat4(1.0f), yaw_radians, glm::vec3(0.0f, 1.0f, 0.0f));
 
+  Aabb local_bounds = Aabb::Empty();
   int part_index = 0;
   for (BuildingPart& part : parts) {
     const MaterialId mat_id = (part.kind == BuildingPartKind::Wall)
@@ -35,9 +36,11 @@ void AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
     const MaterialPack pack = material_pack(mat_id);
     const DeferredMaterial mat = matlib.Get(pack.dir, pack.base);
 
+    local_bounds = local_bounds.Union(part.mesh.local_bounds);
     const std::string name = "building_part_" + std::to_string(part_index++);
     AddMeshEntity(scene, name.c_str(), std::move(part.mesh), mat, transform);
   }
+  return local_bounds;
 }
 
 }  // namespace badlands

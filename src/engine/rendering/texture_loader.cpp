@@ -21,16 +21,30 @@
 
 namespace badlands {
 
-namespace {
+wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue,
+                                          uint8_t r, uint8_t g, uint8_t b,
+                                          uint8_t a) {
+  wgpu::TextureDescriptor desc;
+  desc.size = {1, 1, 1};
+  desc.format = wgpu::TextureFormat::RGBA8Unorm;
+  desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+  desc.dimension = wgpu::TextureDimension::e2D;
+  desc.mipLevelCount = 1;
+  desc.sampleCount = 1;
+  wgpu::Texture tex = device.CreateTexture(&desc);
 
-// RAII guard: frees a BadlandsImage's pixel buffer on every exit path
-// (badlands_image_free is safe to call on a failure result too).
-struct ImageGuard {
-  BadlandsImage image;
-  ~ImageGuard() { badlands_image_free(image); }
-};
-
-}  // namespace
+  const uint8_t data[4] = {r, g, b, a};
+  wgpu::TexelCopyTextureInfo dst;
+  dst.texture = tex;
+  dst.mipLevel = 0;
+  dst.origin = {0, 0, 0};
+  wgpu::TexelCopyBufferLayout layout;
+  layout.bytesPerRow = 4;
+  layout.rowsPerImage = 1;
+  wgpu::Extent3D extent = {1, 1, 1};
+  queue.WriteTexture(&dst, data, sizeof(data), &layout, &extent);
+  return tex.CreateView();
+}
 
 LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
                             GpuPipelineGenerator& pipeline_gen,

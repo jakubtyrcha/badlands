@@ -10,74 +10,15 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
-#include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/building_catalog.h"
 #include "game/scene/building_scene.h"
 
 namespace badlands {
 
 namespace {
-
-// Creates a 1x1 solid-color RGBA8Unorm texture view (procedural floor
-// albedo/roughness). Same pattern as ModelViewerView's CreateSolid1x1
-// (src/viewer/model_viewer_view.cpp) -- duplicated per that file's comment:
-// a small file-local utility, not a shared deliverable.
-wgpu::TextureView CreateSolid1x1(wgpu::Device device, wgpu::Queue queue, uint8_t r,
-                                 uint8_t g, uint8_t b, uint8_t a) {
-  wgpu::TextureDescriptor desc;
-  desc.size = {1, 1, 1};
-  desc.format = wgpu::TextureFormat::RGBA8Unorm;
-  desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
-  desc.dimension = wgpu::TextureDimension::e2D;
-  desc.mipLevelCount = 1;
-  desc.sampleCount = 1;
-  wgpu::Texture tex = device.CreateTexture(&desc);
-
-  const uint8_t data[4] = {r, g, b, a};
-  wgpu::TexelCopyTextureInfo dst;
-  dst.texture = tex;
-  dst.mipLevel = 0;
-  dst.origin = {0, 0, 0};
-  wgpu::TexelCopyBufferLayout layout;
-  layout.bytesPerRow = 4;
-  layout.rowsPerImage = 1;
-  wgpu::Extent3D extent = {1, 1, 1};
-  queue.WriteTexture(&dst, data, sizeof(data), &layout, &extent);
-  return tex.CreateView();
-}
-
-// GameBuildingKind -> display label for the World panel's building list, in
-// enum declaration order (badlands_game.h). Mirrors ModelViewerView's
-// kBuildingLabels (src/viewer/model_viewer_view.cpp) -- file-local, not
-// factored into a shared header since only these two views need it so far.
-struct BuildingLabel {
-  GameBuildingKind kind;
-  const char* label;
-};
-constexpr BuildingLabel kBuildingLabels[] = {
-    {GAME_BUILDING_CASTLE, "Castle"},
-    {GAME_BUILDING_FREE_COMPANY_QUARTERS, "Free Company Quarters"},
-    {GAME_BUILDING_HUNTERS_CAMP, "Hunters Camp"},
-    {GAME_BUILDING_THIEVES_DEN, "Thieves Den"},
-    {GAME_BUILDING_SCRIPTORIUM, "Scriptorium"},
-    {GAME_BUILDING_TAVERN, "Tavern"},
-    {GAME_BUILDING_APOTHECARY, "Apothecary"},
-    {GAME_BUILDING_WATCHTOWER, "Watchtower"},
-    {GAME_BUILDING_HOUSE, "House"},
-    {GAME_BUILDING_SEWER, "Sewer"},
-};
-static_assert(sizeof(kBuildingLabels) / sizeof(kBuildingLabels[0]) ==
-                 GAME_BUILDING_KIND_COUNT,
-             "kBuildingLabels must cover every GameBuildingKind");
-
-const char* LabelFor(int32_t kind) {
-  for (const BuildingLabel& b : kBuildingLabels) {
-    if (static_cast<int32_t>(b.kind) == kind) return b.label;
-  }
-  return "?";
-}
 
 // rotation_index 0..3 -> 0/45/90/135deg world yaw about Y (badlands_game.h's
 // GamePlacementDesc convention) -- see building_scene.h's AddBuildingToScene
@@ -99,24 +40,15 @@ GameView::~GameView() {
   }
 }
 
-void GameView::Initialize(const RenderContext& ctx) {
+bool GameView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
   scene_renderer_ = ctx.scene_renderer;
 
-  matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen);
-
-  // Neutral gray floor (same albedo/roughness values + rationale as
-  // ModelViewerView's AddFloor -- src/viewer/model_viewer_view.cpp).
-  floor_albedo_view_ = CreateSolid1x1(ctx.device, ctx.queue, 110, 110, 110, 255);
-  floor_roughness_view_ = CreateSolid1x1(ctx.device, ctx.queue, 229, 229, 229, 255);
-  wgpu::SamplerDescriptor samp_desc = {};
-  samp_desc.minFilter = wgpu::FilterMode::Linear;
-  samp_desc.magFilter = wgpu::FilterMode::Linear;
-  samp_desc.mipmapFilter = wgpu::MipmapFilterMode::Linear;
-  samp_desc.addressModeU = wgpu::AddressMode::Repeat;
-  samp_desc.addressModeV = wgpu::AddressMode::Repeat;
-  floor_sampler_ = ctx.device.CreateSampler(&samp_desc);
+  if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
+    spdlog::error("GameView::Initialize: MaterialLibrary init failed");
+    return false;
+  }
 
   ApplyEnvironment();
 
@@ -136,6 +68,7 @@ void GameView::Initialize(const RenderContext& ctx) {
   gamecam_.pitch_deg = 50.0f;
   gamecam_.height = 42.0f;
   gamecam_.UpdateCamera(camera_);
+  return true;
 }
 
 void GameView::ApplyEnvironment() {
@@ -180,55 +113,38 @@ void GameView::PlaceDemoBuildings() {
 }
 
 void GameView::BuildScene() {
-  // Fresh graph: re-mirror scene_context_'s (already-derived-from-env_)
-  // lighting right after, same as ApplyEnvironment does for the live-edit
-  // path (SceneGraph's constructor resets sun/ambient to its own defaults).
+  // NOTE(lighting): the SceneGraph() reset + Set{SunDirection,SunColor,
+  // AmbientSH} sequence below mirrors scene_context_'s already-derived-from-
+  // env_ lighting into the fresh graph (whose constructor otherwise resets
+  // sun/ambient to SceneGraph's own defaults, which the per-frame
+  // SyncToRegistry would then write back over scene_context_). This same
+  // 4-line mirror is repeated at every rebuild/apply site across the three
+  // views; it will be centralized in the future lighting refactor. No
+  // behavior change now.
   scene_ = SceneGraph();
   scene_.SetSunDirection(scene_context_.sun_direction);
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  AddFloor();
+  AddGrayFloor(scene_, matlib_, 80.0f);
 
-  std::vector<GameBuildingState> rows(kMaxBuildingRows);
-  const uint32_t total = game_buildings(game_, rows.data(), kMaxBuildingRows);
+  if (building_rows_.size() < kMaxBuildingRows) {
+    building_rows_.resize(kMaxBuildingRows);
+  }
+  const uint32_t total =
+      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
   if (total > kMaxBuildingRows) {
     spdlog::warn("GameView::BuildScene: {} buildings truncated to {}", total,
                 kMaxBuildingRows);
   }
-  rows.resize(std::min(total, kMaxBuildingRows));
+  const uint32_t count = std::min(total, kMaxBuildingRows);
 
-  for (const GameBuildingState& b : rows) {
+  for (uint32_t i = 0; i < count; ++i) {
+    const GameBuildingState& b = building_rows_[i];
     AddBuildingToScene(scene_, matlib_, static_cast<GameBuildingKind>(b.kind),
                        glm::vec2(b.center_x, b.center_z),
                        yaw_from_rotation_index(b.rotation_index));
   }
-}
-
-void GameView::AddFloor() {
-  auto quad = GenerateQuadTexturedMesh(80.0f);
-
-  // GenerateQuadTexturedMesh spans X/Y at Z=0 with normal +Z; rotate -90deg
-  // about X so the normal becomes +Y (up) and the quad spans X/Z at Y=0.
-  const glm::mat4 transform =
-      glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-
-  InstanceParams floor_params;
-  floor_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "albedo",
-      .view = floor_albedo_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-  floor_params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "roughness",
-      .view = floor_roughness_view_,
-      .sampler = floor_sampler_,
-      .type = TextureType::k2D,
-  });
-
-  DeferredMaterial floor_mat{.factory = matlib_.factory(), .params = floor_params};
-  AddMeshEntity(scene_, "floor", std::move(quad), floor_mat, transform);
 }
 
 void GameView::HandleEvent(const SDL_Event& /*event*/, int /*width*/,
@@ -263,6 +179,11 @@ void GameView::Update(float dt, const bool* keyboard_state) {
 void GameView::DrawUI() {
   if (!scene_renderer_) return;
 
+  // NOTE(lighting): on any frame the light-environment editor changes env_,
+  // ApplyEnvironment re-derives the full sky (6 faces x face x face radiance),
+  // a 2048-sample SH projection, and a GPU cube rebuild + IBL re-prefilter
+  // next frame -- to be debounced / made incremental in the future lighting
+  // commit. No behavior change here.
   const bool env_changed = EditorUI::DrawDebugPanel(env_, *scene_renderer_, dt_);
   if (env_changed) {
     ApplyEnvironment();
@@ -273,17 +194,24 @@ void GameView::DrawUI() {
   GameWorldState world{};
   game_world(game_, &world);
 
-  std::vector<GameBuildingState> rows(kMaxBuildingRows);
-  const uint32_t total = game_buildings(game_, rows.data(), kMaxBuildingRows);
-  rows.resize(std::min(total, kMaxBuildingRows));
+  // Reused member buffer (kMaxBuildingRows capacity) -- avoids a per-frame
+  // heap allocation for the read-back building rows.
+  if (building_rows_.size() < kMaxBuildingRows) {
+    building_rows_.resize(kMaxBuildingRows);
+  }
+  const uint32_t total =
+      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
+  const uint32_t count = std::min(total, kMaxBuildingRows);
 
   ImGui::Begin("World");
   ImGui::Text("Gold: %u", world.gold);
   ImGui::Text("Buildings: %u", total);
   ImGui::Separator();
-  for (const GameBuildingState& b : rows) {
-    ImGui::Text("#%u %-24s (%.1f, %.1f)", b.id, LabelFor(b.kind), b.center_x,
-               b.center_z);
+  for (uint32_t i = 0; i < count; ++i) {
+    const GameBuildingState& b = building_rows_[i];
+    ImGui::Text("#%u %-24s (%.1f, %.1f)", b.id,
+               building_label(static_cast<GameBuildingKind>(b.kind)),
+               b.center_x, b.center_z);
   }
   ImGui::End();
 }

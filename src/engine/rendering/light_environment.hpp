@@ -45,6 +45,14 @@ struct LightEnvironment {
 //
 // `device`/`queue` upload the cube (CubemapBuilder needs them — this parameter
 // pair is the one addition to the struct-only signature in the task brief).
+//
+// NOTE(lighting): this is not cheap to call every frame. It re-evaluates the
+// full 6-face sky radiance (face_size x face_size texels/face), runs a
+// 2048-sample SH projection, and bumps skybox_generation so the SceneRenderer
+// rebuilds the GPU cube + re-prefilters the IBL next frame. The views call it
+// only when the live editor mutates `env`; a future lighting commit will
+// debounce / make it incremental. Callers should not invoke it unconditionally
+// per frame.
 void ApplyLightEnvironment(const LightEnvironment& env, wgpu::Device device,
                            wgpu::Queue queue, CubemapBuilder& sky_cube,
                            SceneContext& out, uint32_t face_size = 128);

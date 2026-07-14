@@ -1,5 +1,8 @@
 #include "engine/rendering/material_library.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -13,13 +16,11 @@ namespace badlands {
 
 namespace {
 
-// RAII guards freeing the `assets` crate's malloc'd C-ABI outputs on every
-// exit path (both are safe to call on an all-NULL/failure result).
-struct ImageGuard {
-  BadlandsImage image;
-  ~ImageGuard() { badlands_image_free(image); }
-};
+// ImageGuard (RAII free of the `assets` crate's malloc'd JPEG buffer) is
+// shared -- see engine/rendering/texture_loader.hpp.
 
+// RAII guard freeing badlands_gltf_pack_textures' malloc'd C-ABI strings on
+// every exit path (safe to call on an all-NULL/failure result).
 struct GltfTexturesGuard {
   BadlandsGltfTextures textures;
   ~GltfTexturesGuard() {
@@ -59,7 +60,7 @@ LoadedTexture LoadRepackedRoughness(wgpu::Device device, wgpu::Queue queue,
 
 }  // namespace
 
-void MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
+bool MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
                                  GpuPipelineGenerator* pipeline_gen) {
   device_ = device;
   queue_ = queue;
@@ -84,6 +85,7 @@ void MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
     spdlog::error(
         "MaterialLibrary::Initialize: failed to build normalmapped "
         "material factory");
+    return false;
   }
 
   // Shared trilinear + anisotropic sampler: the material factory's default
@@ -97,6 +99,43 @@ void MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
   samp_desc.addressModeV = wgpu::AddressMode::Repeat;
   samp_desc.maxAnisotropy = 16;
   sampler_ = device.CreateSampler(&samp_desc);
+  return true;
+}
+
+DeferredMaterial MaterialLibrary::SolidColor(glm::vec3 rgb, float roughness) {
+  auto to_byte = [](float c) {
+    return static_cast<uint8_t>(
+        std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f));
+  };
+  const uint8_t r = to_byte(rgb.r);
+  const uint8_t g = to_byte(rgb.g);
+  const uint8_t b = to_byte(rgb.b);
+  const uint8_t rough = to_byte(roughness);
+  const uint32_t key = (static_cast<uint32_t>(r) << 24) |
+                       (static_cast<uint32_t>(g) << 16) |
+                       (static_cast<uint32_t>(b) << 8) |
+                       static_cast<uint32_t>(rough);
+
+  auto it = solid_cache_.find(key);
+  if (it == solid_cache_.end()) {
+    InstanceParams params;
+    params.texture_overrides.push_back(DefaultTextureView{
+        .param_name = "albedo",
+        .view = CreateSolidColorTexture(device_, queue_, r, g, b, 255),
+        .sampler = sampler_,
+        .type = TextureType::k2D,
+    });
+    params.texture_overrides.push_back(DefaultTextureView{
+        .param_name = "roughness",
+        .view = CreateSolidColorTexture(device_, queue_, rough, rough, rough,
+                                        255),
+        .sampler = sampler_,
+        .type = TextureType::k2D,
+    });
+    it = solid_cache_.emplace(key, std::move(params)).first;
+  }
+
+  return DeferredMaterial{.factory = factory_.get(), .params = it->second};
 }
 
 MaterialLibrary::PackTextures MaterialLibrary::LoadPack(

@@ -28,18 +28,8 @@ uint32_t AlignUp(uint32_t value, uint32_t alignment) {
 
 }  // namespace
 
-// The offscreen texture uses a non-sRGB format (RGBA8Unorm) to match the
-// window surface's BGRA8Unorm (also non-sRGB): the tonemap shader manually
-// applies linear_to_srgb encoding when output_is_linear==0. An sRGB target
-// format (e.g. RGBA8UnormSrgb) would have the hardware sRGB-encode the
-// already-encoded output a second time on store, producing a too-bright
-// image.
-bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
-                    AppView& view, uint32_t width, uint32_t height,
-                    const std::string& path) {
-  wgpu::Device device = gpu.GetDevice();
-  wgpu::Queue queue = gpu.GetQueue();
-
+wgpu::Texture CreateScreenshotTarget(wgpu::Device device, uint32_t width,
+                                     uint32_t height) {
   wgpu::TextureDescriptor offscreen_desc;
   offscreen_desc.size = {width, height, 1};
   offscreen_desc.format = wgpu::TextureFormat::RGBA8Unorm;
@@ -48,21 +38,12 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
   offscreen_desc.mipLevelCount = 1;
   offscreen_desc.sampleCount = 1;
   offscreen_desc.dimension = wgpu::TextureDimension::e2D;
-  wgpu::Texture offscreen_texture = device.CreateTexture(&offscreen_desc);
-  wgpu::TextureView offscreen_view = offscreen_texture.CreateView();
-  if (!offscreen_view) {
-    spdlog::error("SaveScreenshot: failed to create offscreen texture");
-    return false;
-  }
+  return device.CreateTexture(&offscreen_desc);
+}
 
-  SceneRenderer renderer;
-  renderer.Initialize(device, queue, &pipeline_gen,
-                      wgpu::TextureFormat::RGBA8Unorm, width, height);
-
-  view.Update(0.0f, SDL_GetKeyboardState(nullptr));
-  renderer.Render(view.GetCamera(), view.GetRegistry(), view.GetSceneContext(),
-                  offscreen_view);
-
+bool WriteTextureToPng(wgpu::Device device, wgpu::Queue queue,
+                       const wgpu::Texture& texture, uint32_t width,
+                       uint32_t height, const std::string& path) {
   // Read the offscreen texture back: CopyTextureToBuffer requires
   // bytesPerRow to be a multiple of 256, which the tightly-packed RGBA8
   // buffer badlands_write_png expects generally isn't -- strip the padding
@@ -83,7 +64,7 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
   wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
 
   wgpu::TexelCopyTextureInfo copy_src;
-  copy_src.texture = offscreen_texture;
+  copy_src.texture = texture;
   copy_src.mipLevel = 0;
   copy_src.origin = {0, 0, 0};
   copy_src.aspect = wgpu::TextureAspect::All;
@@ -111,7 +92,7 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
   while (!map_done) SDL_Delay(5);
 
   if (map_status != wgpu::MapAsyncStatus::Success) {
-    spdlog::error("SaveScreenshot: buffer map failed (status={})",
+    spdlog::error("WriteTextureToPng: buffer map failed (status={})",
                   static_cast<int>(map_status));
     return false;
   }
@@ -119,7 +100,7 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
   const auto* mapped = static_cast<const uint8_t*>(
       readback_buffer.GetConstMappedRange(0, buffer_size));
   if (!mapped) {
-    spdlog::error("SaveScreenshot: GetConstMappedRange returned null");
+    spdlog::error("WriteTextureToPng: GetConstMappedRange returned null");
     readback_buffer.Unmap();
     return false;
   }
@@ -134,8 +115,34 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
   readback_buffer.Unmap();
 
   badlands_write_png(path.c_str(), packed.data(), width, height);
-  spdlog::info("SaveScreenshot: wrote {} ({}x{})", path, width, height);
+  spdlog::info("WriteTextureToPng: wrote {} ({}x{})", path, width, height);
   return true;
+}
+
+bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
+                    AppView& view, uint32_t width, uint32_t height,
+                    const std::string& path, GBufferDebugMode debug_mode) {
+  wgpu::Device device = gpu.GetDevice();
+  wgpu::Queue queue = gpu.GetQueue();
+
+  wgpu::Texture offscreen_texture = CreateScreenshotTarget(device, width, height);
+  wgpu::TextureView offscreen_view = offscreen_texture.CreateView();
+  if (!offscreen_view) {
+    spdlog::error("SaveScreenshot: failed to create offscreen texture");
+    return false;
+  }
+
+  SceneRenderer renderer;
+  renderer.Initialize(device, queue, &pipeline_gen,
+                      wgpu::TextureFormat::RGBA8Unorm, width, height);
+  renderer.SetDebugMode(debug_mode);
+
+  view.Update(0.0f, SDL_GetKeyboardState(nullptr));
+  renderer.Render(view.GetCamera(), view.GetRegistry(), view.GetSceneContext(),
+                  offscreen_view);
+
+  return WriteTextureToPng(device, queue, offscreen_texture, width, height,
+                           path);
 }
 
 }  // namespace badlands

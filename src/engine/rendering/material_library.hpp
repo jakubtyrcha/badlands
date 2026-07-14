@@ -5,11 +5,13 @@
 // deferred `normalmapped` material instance. Engine, game-agnostic: keyed
 // purely by (pack directory, base filename) -- no game::MaterialId here (see
 // src/game/material_pack.h for the game-side MaterialId -> pack mapping).
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
 
 #include <dawn/webgpu_cpp.h>
+#include <glm/glm.hpp>
 
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
@@ -40,8 +42,11 @@ class MaterialLibrary {
   // Builds the shared normalmapped kDeferred factory (color formats =
   // GBuffer's normals/albedo/material targets, depth = GBuffer's depth) and
   // a shared trilinear + 16x-anisotropic repeat sampler used by every loaded
-  // pack. Must be called once before Get().
-  void Initialize(wgpu::Device device, wgpu::Queue queue,
+  // pack. Must be called once before Get(). Returns false (after logging) if
+  // the factory build failed -- callers MUST propagate the failure, since
+  // every DeferredMaterial produced afterwards would carry a null factory and
+  // render nothing.
+  bool Initialize(wgpu::Device device, wgpu::Queue queue,
                   GpuPipelineGenerator* pipeline_gen);
 
   // Returns the cached deferred material for the pack at `dir`/`base`,
@@ -61,6 +66,15 @@ class MaterialLibrary {
   // DeferredMaterial with the shared factory but texture_overrides pointing
   // at null views -- logged via spdlog::error.
   DeferredMaterial Get(const std::string& dir, const std::string& base);
+
+  // Returns a cached deferred `normalmapped` material with a flat 1x1 albedo
+  // of `rgb` (linear 0..1, quantized to 8-bit) and a 1x1 grayscale roughness
+  // of `roughness`, both sampled through the library's shared sampler. The
+  // normal slot falls back to the factory's flat-normal default. Caches by
+  // the quantized (rgb, roughness) tuple so repeated requests for the same
+  // color reuse one pair of textures. DRYs the hand-rolled solid-color floor
+  // + capsule materials the views used to build inline.
+  DeferredMaterial SolidColor(glm::vec3 rgb, float roughness);
 
   // The shared normalmapped kDeferred factory (valid after Initialize()).
   MaterialInstanceFactory* factory() const { return factory_.get(); }
@@ -82,6 +96,10 @@ class MaterialLibrary {
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: "dir/base"
+  // key: r<<24 | g<<16 | b<<8 | roughness (all 8-bit). The stored
+  // InstanceParams own the 1x1 texture views (which keep their textures
+  // alive) for SolidColor's whole lifetime.
+  std::unordered_map<uint32_t, InstanceParams> solid_cache_;
 };
 
 }  // namespace badlands

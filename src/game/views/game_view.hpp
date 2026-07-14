@@ -8,6 +8,7 @@
 // are NOT in this stage -- buildings only.
 
 #include <cstdint>
+#include <vector>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
@@ -28,7 +29,7 @@ class GameView : public AppView {
  public:
   ~GameView() override;
 
-  void Initialize(const RenderContext& ctx) override;
+  bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
   void Update(float dt, const bool* keyboard_state) override;
   void DrawUI() override;
@@ -53,7 +54,6 @@ class GameView : public AppView {
   // buildings are static (no game_tick, no further placement UI), so nothing
   // else triggers a rebuild yet.
   void BuildScene();
-  void AddFloor();
 
   // GPU handles (from RenderContext, stored so DrawUI can re-run
   // ApplyEnvironment when the light-environment editor changes env_ live).
@@ -65,13 +65,6 @@ class GameView : public AppView {
   LightEnvironment env_;
   CubemapBuilder sky_cube_;
 
-  // Neutral gray floor material resources (created once in Initialize; the
-  // floor's InstanceParams reference these views/sampler for the view's
-  // whole lifetime).
-  wgpu::TextureView floor_albedo_view_;
-  wgpu::TextureView floor_roughness_view_;
-  wgpu::Sampler floor_sampler_;
-
   SceneGraph scene_;
   entt::registry registry_;
   SceneContext scene_context_;
@@ -80,6 +73,10 @@ class GameView : public AppView {
 
   // Owns the sim; created in Initialize, destroyed in ~GameView.
   BadlandsGame* game_ = nullptr;
+
+  // Reused read-back buffer for game_buildings() (BuildScene + DrawUI), sized
+  // to kMaxBuildingRows once -- avoids a per-frame heap allocation.
+  std::vector<GameBuildingState> building_rows_;
 
   float dt_ = 0.0f;
 };
