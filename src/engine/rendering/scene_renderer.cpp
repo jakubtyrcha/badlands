@@ -211,6 +211,21 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // the AO texture (else it uses 1.0 → final AO = baked AO).
   const bool run_gtao = has_r8unorm_storage_ && gtao_enabled_;
 
+  // Resolve the GTAO compute pipeline up front (before frame_uniforms is
+  // uploaded via frame.Begin() below) so enable_gtao reflects whether a
+  // dispatch will actually be recorded, not just whether GTAO was requested.
+  // If compilation fails, enable_gtao must stay 0 so the deferred pass falls
+  // back to baked AO instead of reading an AO texture nothing wrote to.
+  std::shared_ptr<const CompiledComputePipeline> gtao_pipeline;
+  if (run_gtao) {
+    gtao_pipeline = pipeline_generator_->GetComputePipeline("compute/gtao");
+    if (!gtao_pipeline || !gtao_pipeline->pipeline) {
+      spdlog::error("SceneRenderer::Render: failed to compile compute/gtao");
+      gtao_pipeline.reset();
+    }
+  }
+  const bool gtao_will_run = run_gtao && gtao_pipeline != nullptr;
+
   UniformData frame_uniforms{};
   frame_uniforms.view = glm::lookAt(glm::vec3(0.0f), camera.direction, camera.up);
   frame_uniforms.proj = camera.GetProj();
@@ -231,7 +246,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   frame_uniforms.far_plane = camera.far_plane;
   frame_uniforms.screen_size =
       glm::vec2(static_cast<float>(width_), static_cast<float>(height_));
-  frame_uniforms.enable_gtao = run_gtao ? 1u : 0u;
+  frame_uniforms.enable_gtao = gtao_will_run ? 1u : 0u;
   frame_uniforms.tonemap_mode = 0;     // kClamp (TonemapMode not ported;
                                        // shaders/common/frame.wesl: 0 = kClamp)
   frame_uniforms.output_is_linear =
@@ -286,45 +301,42 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // === Pass 1.5: GTAO compute — screen-space ambient occlusion (M6).
   // Runs BETWEEN the G-buffer pass (its depth + normals are the inputs) and
   // the skybox/deferred passes (deferred reads the AO output @7). Skipped when
-  // GTAO is off or the device lacks R8Unorm storage — the AO texture then
-  // keeps its 1.0 clear and enable_gtao=0 makes deferred ignore it. ===
-  if (run_gtao) {
-    auto gtao_pipeline = pipeline_generator_->GetComputePipeline("compute/gtao");
-    if (!gtao_pipeline || !gtao_pipeline->pipeline) {
-      spdlog::error("SceneRenderer::Render: failed to compile compute/gtao");
-    } else {
-      // Group 0: frame UBO @0.
-      std::array<wgpu::BindGroupEntry, 1> group0_entries{};
-      group0_entries[0].binding = 0;
-      group0_entries[0].buffer = frame.GetFrameUniformBuffer();
-      group0_entries[0].offset = 0;
-      group0_entries[0].size = sizeof(UniformData);
-      wgpu::BindGroup gtao_group0 = frame.CreateBindGroup(
-          gtao_pipeline->bind_group_layouts[0], group0_entries);
+  // GTAO is off, the device lacks R8Unorm storage, or the pipeline failed to
+  // compile (checked above, before frame_uniforms.enable_gtao was set) — the
+  // AO texture then keeps its 1.0 clear and enable_gtao=0 makes deferred
+  // ignore it. ===
+  if (gtao_will_run) {
+    // Group 0: frame UBO @0.
+    std::array<wgpu::BindGroupEntry, 1> group0_entries{};
+    group0_entries[0].binding = 0;
+    group0_entries[0].buffer = frame.GetFrameUniformBuffer();
+    group0_entries[0].offset = 0;
+    group0_entries[0].size = sizeof(UniformData);
+    wgpu::BindGroup gtao_group0 = frame.CreateBindGroup(
+        gtao_pipeline->bind_group_layouts[0], group0_entries);
 
-      // Group 1: gbuffer depth @0, normals @1, AO storage output @2.
-      std::array<wgpu::BindGroupEntry, 3> group1_entries{};
-      group1_entries[0].binding = 0;
-      group1_entries[0].textureView = gbuffer_.GetDepthView();
-      group1_entries[1].binding = 1;
-      group1_entries[1].textureView = gbuffer_.GetNormalsView();
-      group1_entries[2].binding = 2;
-      group1_entries[2].textureView = ao_view_;
-      wgpu::BindGroup gtao_group1 = frame.CreateBindGroup(
-          gtao_pipeline->bind_group_layouts[1], group1_entries);
+    // Group 1: gbuffer depth @0, normals @1, AO storage output @2.
+    std::array<wgpu::BindGroupEntry, 3> group1_entries{};
+    group1_entries[0].binding = 0;
+    group1_entries[0].textureView = gbuffer_.GetDepthView();
+    group1_entries[1].binding = 1;
+    group1_entries[1].textureView = gbuffer_.GetNormalsView();
+    group1_entries[2].binding = 2;
+    group1_entries[2].textureView = ao_view_;
+    wgpu::BindGroup gtao_group1 = frame.CreateBindGroup(
+        gtao_pipeline->bind_group_layouts[1], group1_entries);
 
-      const uint32_t ws_x = gtao_pipeline->workgroup_size[0];
-      const uint32_t ws_y = gtao_pipeline->workgroup_size[1];
-      const uint32_t dispatch_x = (width_ + ws_x - 1) / ws_x;
-      const uint32_t dispatch_y = (height_ + ws_y - 1) / ws_y;
+    const uint32_t ws_x = gtao_pipeline->workgroup_size[0];
+    const uint32_t ws_y = gtao_pipeline->workgroup_size[1];
+    const uint32_t dispatch_x = (width_ + ws_x - 1) / ws_x;
+    const uint32_t dispatch_y = (height_ + ws_y - 1) / ws_y;
 
-      wgpu::ComputePassEncoder compute_pass = frame.BeginComputePass();
-      compute_pass.SetPipeline(gtao_pipeline->pipeline);
-      compute_pass.SetBindGroup(0, gtao_group0, 0, nullptr);
-      compute_pass.SetBindGroup(1, gtao_group1, 0, nullptr);
-      compute_pass.DispatchWorkgroups(dispatch_x, dispatch_y, 1);
-      compute_pass.End();
-    }
+    wgpu::ComputePassEncoder compute_pass = frame.BeginComputePass();
+    compute_pass.SetPipeline(gtao_pipeline->pipeline);
+    compute_pass.SetBindGroup(0, gtao_group0, 0, nullptr);
+    compute_pass.SetBindGroup(1, gtao_group1, 0, nullptr);
+    compute_pass.DispatchWorkgroups(dispatch_x, dispatch_y, 1);
+    compute_pass.End();
   }
 
   // === Pass 2: Skybox background — fill the HDR target from the source

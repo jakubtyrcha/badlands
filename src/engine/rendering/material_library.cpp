@@ -106,18 +106,33 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
   }
 
   nlohmann::json manifest;
-  std::string albedo_rel, normal_rel, arm_rel;
+  std::string albedo_rel, normal_rel, arm_rel, normal_format;
   try {
     manifest_file >> manifest;
     albedo_rel = manifest.at("albedo").get<std::string>();
     normal_rel = manifest.at("normal").get<std::string>();
     arm_rel = manifest.at("arm").get<std::string>();
+    normal_format = manifest.value("normal_format", std::string("dx"));
   } catch (const nlohmann::json::exception& e) {
     spdlog::error(
         "MaterialLibrary: failed to resolve pack textures -- unparseable "
         "manifest '{}': {}",
         manifest_path, e.what());
     return result;
+  }
+
+  // normalmapped.wesl hardcodes an unconditional DirectX->GL green-channel
+  // flip; it has no uniform to toggle this. Packs whose normal maps are not
+  // DirectX-convention will render with inverted normal-map Y and need
+  // either a re-export or a shader-side toggle -- flag it loudly rather than
+  // silently shading wrong.
+  if (normal_format != "dx") {
+    spdlog::warn(
+        "MaterialLibrary: pack '{}' declares normal_format='{}', but "
+        "normalmapped.wesl assumes DirectX-convention normals ('dx') and "
+        "always flips green -- this pack's normal maps will render "
+        "inverted",
+        dir, normal_format);
   }
 
   const std::string albedo_path = dir + "/" + albedo_rel;

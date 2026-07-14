@@ -16,7 +16,7 @@ import package::common::color::linear_to_srgb;
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
 @group(0) @binding(3) var albedo_texture: texture_2d<f32>;
-@group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness
+@group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow, B=baked AO
 @group(0) @binding(5) var hdr_texture: texture_2d<f32>;       // lit HDR accumulation
 @group(0) @binding(6) var<uniform> debug_mode: u32;           // 1=Depth 2=Normals 3=Albedo 4=Roughness 5=Hdr 6=Ao
 @group(0) @binding(7) var ao_texture: texture_2d<f32>;        // GTAO screen-space AO (R8)
