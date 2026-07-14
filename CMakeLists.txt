@@ -36,15 +36,24 @@ corrosion_set_env_vars(wesl_ffi "RUSTFLAGS=-Cpanic=unwind")
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo.toml)
 corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 
+# nav: 2D visibility-graph path service (src/crates/nav), Rust staticlib,
+# behind the GamePathfinder C ABI. Game-layer pathfinding — unused in Stage 1
+# (link-only here; wired up by the C++ game layer in Stage 2). No dependency
+# of this crate shares its own name, so no Corrosion package-ambiguity
+# workaround is needed (as with assets, unlike wesl_ffi).
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/nav/Cargo.toml)
+corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
+
 add_executable(badlands
     src/main.cpp
     src/engine/rendering/gpu_context.cpp
 )
-target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets)
+target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
 target_include_directories(badlands PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${CMAKE_SOURCE_DIR}/src/crates/nav/include
 )
 
 if(APPLE)
