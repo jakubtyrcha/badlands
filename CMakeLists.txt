@@ -11,6 +11,11 @@ FetchContent_MakeAvailable(SDL3)
 # Dawn (WebGPU), built from source and pinned — see cmake/FetchDawn.cmake.
 include(cmake/FetchDawn.cmake)
 
+# Dear ImGui (docking branch). Task S2.A1 only compiles it into
+# badlands_engine to de-risk the fetch/build; A2 wires up ImGui calls.
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG docking)
+FetchContent_MakeAvailable(imgui)
+
 # Corrosion for Rust integration (crib from ../sampo/CMakeLists.txt lines ~199-208).
 FetchContent_Declare(
     Corrosion
@@ -44,8 +49,10 @@ corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/nav/Cargo.toml)
 corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 
-add_executable(badlands
-    src/main.cpp
+# badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
+# game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
+# types/logic live here — see src/engine/app/app_view.hpp.
+add_library(badlands_engine STATIC
     src/engine/rendering/gpu_context.cpp
     src/engine/rendering/vertex_layout.cpp
     src/engine/rendering/shader/shader_reflection.cpp
@@ -66,16 +73,26 @@ add_executable(badlands
     src/engine/rendering/passes/render_textured_mesh.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
+    src/engine/app/sdl_viewer_app.cpp
+    src/engine/app/placeholder_view.cpp
+    src/engine/app/screenshot.cpp
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
+target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets nav)
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
 # but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
 # this, glm::perspective() maps the near plane to NDC z=2.0 (outside the
 # [0,1] clip volume -> clipped) instead of z=1.0, and Camera::GetProj()'s
 # reversed-Z remap (src/engine/core/camera.hpp) lands its near/far boundary
-# in the wrong place. Applies to all engine sources compiled into `badlands`.
-target_compile_definitions(badlands PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
-target_include_directories(badlands PRIVATE
+# in the wrong place. Applies to all engine/app sources compiled into
+# `badlands_engine` (PUBLIC so it also applies to the executables' own TUs).
+target_compile_definitions(badlands_engine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
@@ -83,10 +100,24 @@ target_include_directories(badlands PRIVATE
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
     ${CMAKE_SOURCE_DIR}/src/crates/nav/include
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
 )
 
-if(APPLE)
-    # Use the new linker on Apple platforms (crib from ../sampo/CMakeLists.txt);
-    # avoids issues linking the large monolithic Dawn dylib.
-    target_link_options(badlands PRIVATE "-Wl,-ld_new")
-endif()
+# Three thin executables, each with its own main, all linking badlands_engine.
+# Stage 2 grows each one's own real AppView; this task (S2.A1) has all three
+# share PlaceholderView (Stage 1's lit textured sphere) as a foundation.
+set(badlands_app_dir_viewer src/viewer)
+set(badlands_app_dir_game src/game)
+set(badlands_app_dir_ai_sandbox src/ai_sandbox)
+
+foreach(app viewer game ai_sandbox)
+    add_executable(badlands_${app} ${badlands_app_dir_${app}}/main_${app}.cpp)
+    target_link_libraries(badlands_${app} PRIVATE badlands_engine)
+    if(APPLE)
+        # Use the new linker on Apple platforms (crib from
+        # ../sampo/CMakeLists.txt); avoids issues linking the large
+        # monolithic Dawn dylib.
+        target_link_options(badlands_${app} PRIVATE "-Wl,-ld_new")
+    endif()
+endforeach()
