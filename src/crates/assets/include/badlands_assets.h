@@ -28,8 +28,10 @@ typedef struct BadlandsImage {
 // glTF image `name` field, which authoring tools are known to leave
 // stale/misleading.
 //
-// Each field is a malloc'd NUL-terminated string, or NULL if missing,
-// unresolvable, or the whole document failed to open.
+// All-or-nothing: either all three fields are non-NULL malloc'd
+// NUL-terminated strings, or all three are NULL. Any single URI being
+// missing/unresolvable, or the whole document failing to open, NULLs all
+// three fields — fields are never independently NULL.
 typedef struct BadlandsGltfTextures {
   char* base_color;
   char* normal;
@@ -50,8 +52,9 @@ void badlands_image_free(BadlandsImage image);
 // Resolve the base color / normal / metallic-roughness texture URIs of the
 // first material in the glTF document at `gltf_path`.
 //
-// Returns a BadlandsGltfTextures owned by the caller; free each non-NULL
-// field with badlands_string_free().
+// Returns a BadlandsGltfTextures owned by the caller; the result is
+// all-or-nothing (see BadlandsGltfTextures above) — on success, free each of
+// the three fields with badlands_string_free().
 BadlandsGltfTextures badlands_gltf_pack_textures(const char* gltf_path);
 
 // Free a string previously returned in a BadlandsGltfTextures by

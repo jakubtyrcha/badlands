@@ -58,8 +58,10 @@ pub struct BadlandsImage {
 }
 
 /// C-ABI-compatible bundle of the three PBR texture URIs resolved from a
-/// glTF pack's first material. Each field is a malloc'd (`CString::into_raw`)
-/// NUL-terminated string, or NULL if missing/unresolvable.
+/// glTF pack's first material. All-or-nothing: either all three fields are
+/// malloc'd (`CString::into_raw`) NUL-terminated strings, or all three are
+/// NULL — any single URI being missing/unresolvable, or the whole document
+/// failing to open, NULLs all three fields.
 #[repr(C)]
 pub struct BadlandsGltfTextures {
     pub base_color: *mut c_char,
@@ -123,12 +125,16 @@ pub unsafe extern "C" fn badlands_decode_jpeg(path: *const c_char) -> BadlandsIm
 /// already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn badlands_image_free(image: BadlandsImage) {
-    let _ = panic::catch_unwind(|| {
+    if panic::catch_unwind(|| {
         if !image.rgba.is_null() {
             let len = (image.width as usize) * (image.height as usize) * 4;
             drop(unsafe { Vec::from_raw_parts(image.rgba, len, len) });
         }
-    });
+    })
+    .is_err()
+    {
+        eprintln!("badlands_image_free: panicked");
+    }
 }
 
 fn opt_string_to_raw(s: Option<String>) -> *mut c_char {
@@ -144,11 +150,12 @@ fn opt_string_to_raw(s: Option<String>) -> *mut c_char {
 /// `gltf_path` must be a valid NUL-terminated C string.
 ///
 /// # Returns
-/// Each of `base_color`/`normal`/`metallic_roughness` is a malloc'd (via
-/// `CString::into_raw`) NUL-terminated string on success, owned by the
-/// caller and must be freed with `badlands_string_free`; NULL if missing,
+/// All-or-nothing (see `BadlandsGltfTextures`): on success, each of
+/// `base_color`/`normal`/`metallic_roughness` is a malloc'd (via
+/// `CString::into_raw`) NUL-terminated string, owned by the caller and must
+/// be freed with `badlands_string_free`. If any one URI is missing or
 /// unresolvable, or the whole document fails to open (invalid input, no
-/// materials, or an internal panic).
+/// materials, or an internal panic), all three fields are NULL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn badlands_gltf_pack_textures(
     gltf_path: *const c_char,
@@ -185,11 +192,15 @@ pub unsafe extern "C" fn badlands_gltf_pack_textures(
 /// `badlands_gltf_pack_textures` that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn badlands_string_free(ptr: *mut c_char) {
-    let _ = panic::catch_unwind(|| {
+    if panic::catch_unwind(|| {
         if !ptr.is_null() {
             drop(unsafe { CString::from_raw(ptr) });
         }
-    });
+    })
+    .is_err()
+    {
+        eprintln!("badlands_string_free: panicked");
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +234,77 @@ mod tests {
         assert!(base.contains("_diff"), "base: {base}");
         assert!(normal.contains("_nor_gl"), "normal: {normal}");
         assert!(mr.contains("_arm"), "mr: {mr}");
+    }
+
+    // The tests below exercise the actual `extern "C"` thunks (not just the
+    // safe inner `decode`/`pack_uris` helpers) via `unsafe`, so the
+    // allocate -> reconstruct -> drop round-trip that crosses the FFI
+    // boundary is covered by `cargo test` (and, in CI configurations that
+    // run it, `cargo miri`/ASan). In particular
+    // `badlands_image_free`'s `Vec::from_raw_parts(rgba, w*h*4, w*h*4)`
+    // relies on `image::to_rgba8().into_raw()` producing a buffer with
+    // `len == capacity == width * height * 4` — behavior `image` does not
+    // guarantee in its public API — so this round-trip is the signal that
+    // would catch a future `image` version regressing it.
+
+    #[test]
+    fn ffi_decode_jpeg_roundtrip() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../assets/materials/rocky_trail_1k.gltf/textures/rocky_trail_diff_1k.jpg"
+        );
+        let c_path = CString::new(path).unwrap();
+
+        let image = unsafe { badlands_decode_jpeg(c_path.as_ptr()) };
+        assert!(!image.rgba.is_null());
+        assert_eq!((image.width, image.height), (1024, 1024));
+
+        unsafe { badlands_image_free(image) };
+    }
+
+    #[test]
+    fn ffi_decode_jpeg_missing_file_returns_null() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/does/not/exist.jpg");
+        let c_path = CString::new(path).unwrap();
+
+        let image = unsafe { badlands_decode_jpeg(c_path.as_ptr()) };
+        assert!(image.rgba.is_null());
+        assert_eq!((image.width, image.height), (0, 0));
+
+        // Freeing a failure result (NULL rgba) must be a safe no-op.
+        unsafe { badlands_image_free(image) };
+    }
+
+    #[test]
+    fn ffi_gltf_pack_textures_roundtrip() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../assets/materials/rocky_trail_1k.gltf/rocky_trail_1k.gltf"
+        );
+        let c_path = CString::new(path).unwrap();
+
+        let textures = unsafe { badlands_gltf_pack_textures(c_path.as_ptr()) };
+        assert!(!textures.base_color.is_null());
+        assert!(!textures.normal.is_null());
+        assert!(!textures.metallic_roughness.is_null());
+
+        let base = unsafe { CStr::from_ptr(textures.base_color) }
+            .to_str()
+            .unwrap();
+        let normal = unsafe { CStr::from_ptr(textures.normal) }
+            .to_str()
+            .unwrap();
+        let mr = unsafe { CStr::from_ptr(textures.metallic_roughness) }
+            .to_str()
+            .unwrap();
+        assert!(base.contains("_diff"), "base: {base}");
+        assert!(normal.contains("_nor_gl"), "normal: {normal}");
+        assert!(mr.contains("_arm"), "mr: {mr}");
+
+        unsafe {
+            badlands_string_free(textures.base_color);
+            badlands_string_free(textures.normal);
+            badlands_string_free(textures.metallic_roughness);
+        }
     }
 }
