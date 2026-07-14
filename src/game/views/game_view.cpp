@@ -31,6 +31,12 @@ float yaw_from_rotation_index(int32_t rotation_index) {
 // comfortably above this stage's Castle + 4 demo buildings.
 constexpr uint32_t kMaxBuildingRows = 64;
 
+constexpr const char* kFloorPackDir =
+    "assets/materials/monastery_stone_floor_1k";
+// Repeat the floor pack roughly once per 2 world units instead of stretching
+// one copy across the whole floor.
+constexpr float kFloorUvRepeatSpacing = 2.0f;
+
 }  // namespace
 
 GameView::~GameView() {
@@ -126,7 +132,9 @@ void GameView::BuildScene() {
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  AddGrayFloor(scene_, matlib_, 80.0f);
+  constexpr float kFloorSize = 80.0f;
+  AddFloor(scene_, matlib_, kFloorSize, kFloorPackDir,
+           kFloorSize / kFloorUvRepeatSpacing);
 
   if (building_rows_.size() < kMaxBuildingRows) {
     building_rows_.resize(kMaxBuildingRows);

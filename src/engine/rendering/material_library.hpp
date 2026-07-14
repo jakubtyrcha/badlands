@@ -52,12 +52,10 @@ class MaterialLibrary {
   // three textures (with full mip chains) from `<dir>/material.json` on
   // first request.
   //
-  // The roughness texture is always produced with roughness in the R
-  // channel (the `normalmapped` shader samples `.r`): the manifest's `arm`
-  // source is decoded and its G channel (glTF 2.0's roughness channel) is
-  // copied into R/G/B of a new texture. This is a no-op for already-
-  // grayscale sources (R==G==B) and repacks `_arm` sources (R=AO,
-  // G=roughness, B=metallic) correctly.
+  // The ARM texture is bound whole (R=AO, G=roughness, B=metallic -- the
+  // `normalmapped` shader samples `.g` for roughness and `.r` for baked AO;
+  // metallic is currently unused). No repacking: the manifest's `arm` source
+  // is loaded as-is.
   //
   // On a load failure (missing manifest, decode error), returns a
   // DeferredMaterial with the shared factory but texture_overrides pointing
@@ -65,12 +63,13 @@ class MaterialLibrary {
   DeferredMaterial Get(const std::string& dir);
 
   // Returns a cached deferred `normalmapped` material with a flat 1x1 albedo
-  // of `rgb` (linear 0..1, quantized to 8-bit) and a 1x1 grayscale roughness
-  // of `roughness`, both sampled through the library's shared sampler. The
-  // normal slot falls back to the factory's flat-normal default. Caches by
-  // the quantized (rgb, roughness) tuple so repeated requests for the same
-  // color reuse one pair of textures. DRYs the hand-rolled solid-color floor
-  // + capsule materials the views used to build inline.
+  // of `rgb` (linear 0..1, quantized to 8-bit) and a 1x1 ARM texture encoding
+  // `roughness` (R=255 i.e. AO=1, G=roughness*255, B=0), both sampled
+  // through the library's shared sampler. The normal slot falls back to the
+  // factory's flat-normal default. Caches by the quantized (rgb, roughness)
+  // tuple so repeated requests for the same color reuse one pair of
+  // textures. DRYs the hand-rolled solid-color floor + capsule materials the
+  // views used to build inline.
   DeferredMaterial SolidColor(glm::vec3 rgb, float roughness);
 
   // The shared normalmapped kDeferred factory (valid after Initialize()).
@@ -80,7 +79,7 @@ class MaterialLibrary {
   struct PackTextures {
     LoadedTexture albedo;
     LoadedTexture normal;
-    LoadedTexture roughness;  // repacked so roughness is in R
+    LoadedTexture arm;  // whole ARM: R=AO, G=roughness, B=metallic
   };
 
   PackTextures LoadPack(const std::string& dir) const;

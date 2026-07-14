@@ -30,8 +30,13 @@ TexturedMeshResult GenerateSphereTexturedMesh(float radius,
 
 // UV-mapped quad mesh in XY plane
 // Quad spans [-size/2, size/2] in X and Y, Z=0
+// `uv_scale` multiplies the generated [0,1] UVs (e.g. 2.0 makes the texture
+// repeat twice across the quad) -- combine with a Repeat-address-mode
+// sampler to tile a texture across a large quad instead of stretching one
+// copy across it.
 TexturedMeshResult GenerateQuadTexturedMesh(float size = 1.0f,
-                                            int resolution = 1);
+                                            int resolution = 1,
+                                            float uv_scale = 1.0f);
 
 // Cubemap-sampled sphere mesh (for spherical/EAC sampling)
 // No UV - direction-based cubemap sampling

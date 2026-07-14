@@ -17,7 +17,7 @@ class GBuffer {
   // pipeline's color/depth formats and the deferred_lighting pass's samples):
   //   normals  RG16Float   octahedron-encoded world normal
   //   albedo   BGRA8Unorm  base color
-  //   material RGBA8Unorm  R=roughness, G=shadow, B/A=reserved
+  //   material RGBA8Unorm  R=roughness, G=shadow, B=baked AO, A=reserved
   //   depth    Depth32Float reversed-Z (0 = far)
   static constexpr wgpu::TextureFormat kNormalsFormat =
       wgpu::TextureFormat::RG16Float;

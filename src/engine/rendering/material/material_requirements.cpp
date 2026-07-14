@@ -32,10 +32,10 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
                .texture_binding = 3,
                .sampler_binding = 2,
                .default_texture = "flat_normal"},
-              {.slot_name = "roughness",
+              {.slot_name = "arm",
                .texture_binding = 4,
                .sampler_binding = 2,
-               .default_texture = "full_roughness"},
+               .default_texture = "white"},
           }},
       // spherical_mesh mode: cubemap textures
       MaterialRequirements{
@@ -49,10 +49,10 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
                .texture_binding = 3,
                .sampler_binding = 2,
                .default_texture = "flat_normal"},
-              {.slot_name = "roughness",
+              {.slot_name = "arm",
                .texture_binding = 4,
                .sampler_binding = 2,
-               .default_texture = "full_roughness"},
+               .default_texture = "white"},
           }});
 
   // textured_mesh.wesl - Simple lit textured mesh

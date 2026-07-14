@@ -5,51 +5,14 @@
 #include <cstdint>
 #include <fstream>
 #include <utility>
-#include <vector>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
-#include "badlands_assets.h"
 #include "core/geometry_type.hpp"
 #include "engine/rendering/gbuffer.hpp"
 
 namespace badlands {
-
-namespace {
-
-// ImageGuard (RAII free of the `assets` crate's malloc'd JPEG buffer) is
-// shared -- see engine/rendering/texture_loader.hpp.
-
-// Decodes the metallic-roughness JPEG at `path` and uploads a new
-// RGBA8Unorm+mips texture with that image's G channel (glTF 2.0's roughness
-// channel) copied into R/G/B -- see MaterialLibrary::Get's doc comment.
-LoadedTexture LoadRepackedRoughness(wgpu::Device device, wgpu::Queue queue,
-                                    GpuPipelineGenerator& pipeline_gen,
-                                    const std::string& path) {
-  BadlandsImage img = badlands_decode_jpeg(path.c_str());
-  ImageGuard guard{img};
-  if (img.rgba == nullptr) {
-    spdlog::error("MaterialLibrary: failed to decode roughness JPEG '{}'",
-                  path);
-    return {};
-  }
-
-  const size_t pixel_count = static_cast<size_t>(img.width) * img.height;
-  std::vector<uint8_t> repacked(pixel_count * 4);
-  for (size_t i = 0; i < pixel_count; ++i) {
-    const uint8_t roughness = img.rgba[i * 4 + 1];  // G
-    repacked[i * 4 + 0] = roughness;
-    repacked[i * 4 + 1] = roughness;
-    repacked[i * 4 + 2] = roughness;
-    repacked[i * 4 + 3] = 255;
-  }
-
-  return UploadTexture2DWithMips(device, queue, pipeline_gen, img.width,
-                                 img.height, repacked.data());
-}
-
-}  // namespace
 
 bool MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
                                  GpuPipelineGenerator* pipeline_gen) {
@@ -116,10 +79,10 @@ DeferredMaterial MaterialLibrary::SolidColor(glm::vec3 rgb, float roughness) {
         .sampler = sampler_,
         .type = TextureType::k2D,
     });
+    // 1x1 ARM: R=255 (AO=1, no occlusion), G=roughness*255, B=0 (non-metal).
     params.texture_overrides.push_back(DefaultTextureView{
-        .param_name = "roughness",
-        .view = CreateSolidColorTexture(device_, queue_, rough, rough, rough,
-                                        255),
+        .param_name = "arm",
+        .view = CreateSolidColorTexture(device_, queue_, 255, rough, 0, 255),
         .sampler = sampler_,
         .type = TextureType::k2D,
     });
@@ -159,15 +122,14 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
 
   const std::string albedo_path = dir + "/" + albedo_rel;
   const std::string normal_path = dir + "/" + normal_rel;
-  const std::string roughness_path = dir + "/" + arm_rel;
+  const std::string arm_path = dir + "/" + arm_rel;
 
   result.albedo = LoadTexture2D(device_, queue_, *pipeline_gen_, albedo_path);
   result.normal = LoadTexture2D(device_, queue_, *pipeline_gen_, normal_path);
-  result.roughness =
-      LoadRepackedRoughness(device_, queue_, *pipeline_gen_, roughness_path);
+  result.arm = LoadTexture2D(device_, queue_, *pipeline_gen_, arm_path);
 
   if (!result.albedo.texture || !result.normal.texture ||
-      !result.roughness.texture) {
+      !result.arm.texture) {
     spdlog::error("MaterialLibrary: pack '{}' loaded with missing texture(s)",
                   dir);
     return result;
@@ -175,15 +137,15 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
 
   spdlog::info(
       "MaterialLibrary: loaded pack '{}' -- albedo {}x{} ({} mips), "
-      "normal {}x{} ({} mips), roughness {}x{} ({} mips)",
+      "normal {}x{} ({} mips), arm {}x{} ({} mips)",
       dir, result.albedo.texture.GetWidth(),
       result.albedo.texture.GetHeight(),
       result.albedo.texture.GetMipLevelCount(),
       result.normal.texture.GetWidth(), result.normal.texture.GetHeight(),
       result.normal.texture.GetMipLevelCount(),
-      result.roughness.texture.GetWidth(),
-      result.roughness.texture.GetHeight(),
-      result.roughness.texture.GetMipLevelCount());
+      result.arm.texture.GetWidth(),
+      result.arm.texture.GetHeight(),
+      result.arm.texture.GetMipLevelCount());
 
   return result;
 }
@@ -209,8 +171,8 @@ DeferredMaterial MaterialLibrary::Get(const std::string& dir) {
       .type = TextureType::k2D,
   });
   params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "roughness",
-      .view = pack.roughness.view,
+      .param_name = "arm",
+      .view = pack.arm.view,
       .sampler = sampler_,
       .type = TextureType::k2D,
   });

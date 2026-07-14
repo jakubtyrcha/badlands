@@ -8,7 +8,7 @@
 struct GBufferOutput {
     @location(0) normals: vec2<f32>,           // RG16F: octahedron-encoded world normal
     @location(1) albedo: vec4<f32>,            // BGRA8: base color
-    @location(2) material: vec4<f32>,          // RGBA8: R=roughness, G=shadow, B/A=reserved
+    @location(2) material: vec4<f32>,          // RGBA8: R=roughness, G=shadow, B=baked AO, A=reserved
 }
 
 // Octahedron encoding for unit normal -> RG [-1,1]

@@ -60,7 +60,8 @@ TexturedMeshResult GenerateSphereTexturedMesh(float radius, int resolution) {
   return {.mesh = std::move(result), .local_bounds = bounds};
 }
 
-TexturedMeshResult GenerateQuadTexturedMesh(float size, int resolution) {
+TexturedMeshResult GenerateQuadTexturedMesh(float size, int resolution,
+                                            float uv_scale) {
   StaticTexturedMeshComponent result;
 
   if (resolution <= 1) {
@@ -75,8 +76,8 @@ TexturedMeshResult GenerateQuadTexturedMesh(float size, int resolution) {
       result.vertices.push_back(x);
       result.vertices.push_back(y);
       result.vertices.push_back(0.0f);
-      result.vertices.push_back(u);
-      result.vertices.push_back(v);
+      result.vertices.push_back(u * uv_scale);
+      result.vertices.push_back(v * uv_scale);
       result.vertices.push_back(normal.x);
       result.vertices.push_back(normal.y);
       result.vertices.push_back(normal.z);
@@ -104,7 +105,7 @@ TexturedMeshResult GenerateQuadTexturedMesh(float size, int resolution) {
 
     for (uint32_t idx : quad.indices) {
       glm::vec3 pos = quad.positions[idx] * size;
-      glm::vec2 uv = quad.uvs[idx];
+      glm::vec2 uv = quad.uvs[idx] * uv_scale;
       glm::vec3 normal(0.0f, 0.0f, 1.0f);
       glm::vec3 tangent = quad.tangents[idx];
 

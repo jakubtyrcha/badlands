@@ -6,8 +6,9 @@
 // world-pos reconstruction from reversed-Z depth, octahedron normal decode, the
 // sun directional term (EON retro diffuse + GGX spec), the SH ambient diffuse
 // term, and (task S2.B2) the IBL ambient-specular split-sum term. STILL REMOVED
-// (return in later B tasks): shadow-map PCF (binding 5/6), GTAO (7), contact
-// shadows (8) — hardcoded shadow=1/ao=1.
+// (return in later tasks): shadow-map PCF (binding 5/6), GTAO (7), contact
+// shadows (8) — hardcoded shadow=1; ao (task M4) is the baked-AO channel from
+// the material G-buffer (min'd with real-time GTAO once M6 lands).
 //
 // B2 group-0 layout: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
 // material @4 (all textureLoad'd), prefiltered env cube @9 + its sampler @10,
@@ -25,7 +26,7 @@ const F0_DIELECTRIC: vec3<f32> = vec3<f32>(0.04);
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
 @group(0) @binding(3) var albedo_texture: texture_2d<f32>;
-@group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow
+@group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow, B=baked AO
 @group(0) @binding(9) var prefiltered_env: texture_cube<f32>;   // IBL prefiltered environment
 @group(0) @binding(10) var prefiltered_sampler: sampler;
 @group(0) @binding(11) var brdf_lut: texture_2d<f32>;           // Split-sum BRDF LUT (R=scale, G=bias)
@@ -73,9 +74,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let materialData = textureLoad(material_texture, texCoord, 0);
     let roughness = materialData.r;
 
-    // 4. Shadowing / occlusion — no shadow map, contact shadows or GTAO in B1
+    // 4. Shadowing / occlusion — no shadow map or contact shadows yet (B1);
+    // ao is the baked AO from the ARM texture's R channel (M6 upgrades this
+    // to min(gtao, materialData.b) once the GTAO compute pass lands).
     let shadow = 1.0;
-    let ao = 1.0;
+    let ao = materialData.b;
 
     // 5. Lighting calculation
     let albedoLinear = srgb_to_linear(textureLoad(albedo_texture, texCoord, 0).rgb);

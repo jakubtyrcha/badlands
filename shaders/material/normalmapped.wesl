@@ -17,8 +17,9 @@
 //
 // Textures:
 // - Albedo: RGB color (2D or cubemap)
-// - Normal: Tangent-space normal map
-// - Roughness: Grayscale roughness value
+// - Normal: Tangent-space normal map (DirectX convention -- green channel
+//   flipped to GL on sample, see fs_main)
+// - ARM: R=baked ambient occlusion, G=roughness, B=metallic (unused)
 
 @if(!shadow_pass)
 import package::common::frame::{frame, worldCameraOffsetedSpaceToClipSpace};
@@ -49,9 +50,9 @@ struct NormalmappedUniforms {
 @group(0) @binding(3) var normal_cubemap: texture_cube<f32>;
 
 @if(!sphere_mode)
-@group(0) @binding(4) var roughness_texture: texture_2d<f32>;
+@group(0) @binding(4) var arm_texture: texture_2d<f32>;
 @if(sphere_mode)
-@group(0) @binding(4) var roughness_cubemap: texture_cube<f32>;
+@group(0) @binding(4) var arm_cubemap: texture_cube<f32>;
 
 @group(1) @binding(0) var<uniform> object: NormalmappedUniforms;
 
@@ -175,16 +176,21 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
     // Sample textures
     let albedo = textureSample(albedo_texture, material_sampler, input.uv).rgb;
     let normalMap = textureSample(normal_texture, material_sampler, input.uv).rgb;
-    let roughness = textureSample(roughness_texture, material_sampler, input.uv).r;
+    let arm = textureSample(arm_texture, material_sampler, input.uv);
+    let roughness = arm.g;
+    let ao = arm.r;
 
-    // Unpack normal from [0,1] to [-1,1] range and transform to world space
+    // Unpack normal from [0,1] to [-1,1] range. Source packs are DirectX
+    // convention (green channel flipped vs. GL) -- flip it back before
+    // building world space.
     let tangentNormal = normalMap * 2.0 - 1.0;
-    let worldNormal = normalize(TBN * tangentNormal);
+    let fixedTangentNormal = vec3<f32>(tangentNormal.x, -tangentNormal.y, tangentNormal.z);
+    let worldNormal = normalize(TBN * fixedTangentNormal);
 
     output.normals = encodeOctahedron(worldNormal);
     output.albedo = vec4<f32>(albedo, 1.0);
-    // Material: R=roughness, G=shadow (1.0 = no shadow), B/A=reserved
-    output.material = vec4<f32>(roughness, 1.0, 0.0, 0.0);
+    // Material: R=roughness, G=shadow (1.0 = no shadow), B=baked AO, A=reserved
+    output.material = vec4<f32>(roughness, 1.0, ao, 0.0);
 
     return output;
 }
@@ -206,16 +212,21 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
     // Sample cubemap textures
     let albedo = sampleEACCubemap(albedo_cubemap, material_sampler, dir).rgb;
     let normalMap = sampleEACCubemap(normal_cubemap, material_sampler, dir).rgb;
-    let roughness = sampleEACCubemap(roughness_cubemap, material_sampler, dir).r;
+    let arm = sampleEACCubemap(arm_cubemap, material_sampler, dir);
+    let roughness = arm.g;
+    let ao = arm.r;
 
-    // Unpack normal from [0,1] to [-1,1] range and transform to world space
+    // Unpack normal from [0,1] to [-1,1] range. Source packs are DirectX
+    // convention (green channel flipped vs. GL) -- flip it back before
+    // building world space.
     let tangentNormal = normalMap * 2.0 - 1.0;
-    let worldNormal = normalize(TBN * tangentNormal);
+    let fixedTangentNormal = vec3<f32>(tangentNormal.x, -tangentNormal.y, tangentNormal.z);
+    let worldNormal = normalize(TBN * fixedTangentNormal);
 
     output.normals = encodeOctahedron(worldNormal);
     output.albedo = vec4<f32>(albedo, 1.0);
-    // Material: R=roughness, G=shadow (1.0 = no shadow), B/A=reserved
-    output.material = vec4<f32>(roughness, 1.0, 0.0, 0.0);
+    // Material: R=roughness, G=shadow (1.0 = no shadow), B=baked AO, A=reserved
+    output.material = vec4<f32>(roughness, 1.0, ao, 0.0);
 
     return output;
 }

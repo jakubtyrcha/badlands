@@ -19,6 +19,16 @@
 
 namespace badlands {
 
+namespace {
+
+constexpr const char* kFloorPackDir =
+    "assets/materials/monastery_stone_floor_1k";
+// Repeat the floor pack roughly once per 2 world units instead of stretching
+// one copy across the whole floor.
+constexpr float kFloorUvRepeatSpacing = 2.0f;
+
+}  // namespace
+
 bool ModelViewerView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
@@ -87,7 +97,9 @@ void ModelViewerView::RebuildScene() {
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  AddGrayFloor(scene_, matlib_, 40.0f);
+  constexpr float kFloorSize = 40.0f;
+  AddFloor(scene_, matlib_, kFloorSize, kFloorPackDir,
+           kFloorSize / kFloorUvRepeatSpacing);
 
   const Aabb bounds = AddPrefab(catalog_[prefab_index_]);
   const glm::vec3 center = bounds.Center();
@@ -103,7 +115,7 @@ Aabb ModelViewerView::AddPrefab(const PrefabEntry& entry) {
                                                  /*delta_y=*/0.8f, /*shrink=*/0.3f);
     const Aabb bounds = mesh.local_bounds;
 
-    const MaterialPack pack = material_pack(MaterialId::RockWall);
+    const MaterialPack pack = material_pack(MaterialId::RockyTrail);
     const DeferredMaterial mat = matlib_.Get(pack.dir);
     AddMeshEntity(scene_, "rock", std::move(mesh), mat);
     return bounds;

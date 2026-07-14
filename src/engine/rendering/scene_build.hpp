@@ -10,6 +10,8 @@
 // (Tasks S2.E/F/G) can reuse it instead of re-deriving it. Engine,
 // game-agnostic: no game types appear here.
 
+#include <string>
+
 #include <glm/glm.hpp>
 
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
@@ -31,16 +33,14 @@ NodeHandle AddMeshEntity(SceneGraph& scene, const char* name,
 
 // Adds a horizontal ground quad named "floor" spanning [-size/2, size/2] in
 // X and Z at Y=0 (GenerateQuadTexturedMesh in the XY plane, rotated -90deg
-// about X so its normal is +Y), with a neutral solid-color material from
-// `matlib.SolidColor(tint, roughness)`. Factors out the near-identical floor
-// builder the three views each had.
-//
-// `tint` defaults to ~110/255 gray: an upward-facing floor is near-parallel
-// to the default sun and gets close to the scene's highest NdotL, so a
-// brighter albedo clips to white after tonemapping (see model_viewer_view.cpp
-// AddFloor's original comment / the S2.E task report's empirical sweep).
-void AddGrayFloor(SceneGraph& scene, MaterialLibrary& matlib, float size,
-                  glm::vec3 tint = glm::vec3(110.0f / 255.0f),
-                  float roughness = 0.9f);
+// about X so its normal is +Y), textured with the PBR pack at `pack_dir`
+// (loaded via `matlib.Get`) and its UVs tiled so the pack repeats across the
+// floor rather than stretching one copy across it: `uv_scale` is the number
+// of texture repeats across the full `size` span (e.g. size=80, uv_scale=40
+// repeats the pack every 2 world units -- matlib's shared sampler is
+// Repeat-addressed, so out-of-[0,1] UVs wrap). Factors out the
+// near-identical floor builder the three views each had.
+NodeHandle AddFloor(SceneGraph& scene, MaterialLibrary& matlib, float size,
+                    const std::string& pack_dir, float uv_scale);
 
 }  // namespace badlands

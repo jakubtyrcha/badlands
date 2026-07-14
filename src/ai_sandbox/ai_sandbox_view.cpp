@@ -33,6 +33,12 @@ constexpr float kCapsuleRoughness = 140.0f / 255.0f;
 constexpr float kWallHalfFootprint = 0.5f;
 constexpr float kWallHalfHeight = 0.6f;  // 1.2 tall
 
+constexpr const char* kFloorPackDir =
+    "assets/materials/monastery_stone_floor_1k";
+// Repeat the floor pack roughly once per 2 world units instead of stretching
+// one copy across the whole floor.
+constexpr float kFloorUvRepeatSpacing = 2.0f;
+
 // Capsule dimensions (world units).
 constexpr float kCapsuleRadius = 0.35f;
 constexpr float kCapsuleCylinderHeight = 0.6f;
@@ -83,7 +89,8 @@ void AiSandboxView::BuildScene() {
   const float full_x = static_cast<float>(arena_.accessible.x + 2);
   const float full_z = static_cast<float>(arena_.accessible.y + 2);
   const float floor_size = std::max(full_x, full_z) + 4.0f;
-  AddGrayFloor(scene_, matlib_, floor_size);
+  AddFloor(scene_, matlib_, floor_size, kFloorPackDir,
+           floor_size / kFloorUvRepeatSpacing);
 
   AddWalls();
   AddCapsules();

@@ -209,11 +209,12 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     color_attachments[1].storeOp = wgpu::StoreOp::Store;
     color_attachments[1].clearValue = {0.0, 0.0, 0.0, 0.0};
 
-    // Material (RGBA8Unorm: R=roughness default 0.75, G=shadow 1.0 = lit).
+    // Material (RGBA8Unorm: R=roughness default 0.75, G=shadow 1.0 = lit,
+    // B=AO default 1.0 = no occlusion).
     color_attachments[2].view = gbuffer_.GetMaterialView();
     color_attachments[2].loadOp = wgpu::LoadOp::Clear;
     color_attachments[2].storeOp = wgpu::StoreOp::Store;
-    color_attachments[2].clearValue = {0.75, 1.0, 0.0, 0.0};
+    color_attachments[2].clearValue = {0.75, 1.0, 1.0, 0.0};
 
     wgpu::RenderPassDepthStencilAttachment depth_attachment;
     depth_attachment.view = gbuffer_.GetDepthView();
