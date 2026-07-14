@@ -4,3 +4,5 @@
 /.fastembed_cache
 build/
 /imgui.ini
+.claude/
+.superpowers/
