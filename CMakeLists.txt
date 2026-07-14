@@ -182,12 +182,22 @@ target_include_directories(badlands_game_lib PUBLIC
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 
 # Three thin executables, each with its own main, all linking badlands_engine
-# and badlands_game_lib. Stage 2 grows each one's own real AppView; game and
-# ai_sandbox still share PlaceholderView (Stage 1's lit textured sphere) until
-# their own tasks (S2.F/G) land -- badlands_viewer got its real AppView
-# (ModelViewerView) in Task S2.E.
+# and badlands_game_lib. Stage 2 grows each one's own real AppView;
+# ai_sandbox still shares PlaceholderView (Stage 1's lit textured sphere)
+# until its own task (S2.G) lands -- badlands_viewer got its real AppView
+# (ModelViewerView) in Task S2.E, badlands_game got its (GameView) in Task
+# S2.F.
 set(badlands_app_sources_viewer src/viewer/main_viewer.cpp src/viewer/model_viewer_view.cpp)
-set(badlands_app_sources_game src/game/main_game.cpp)
+# Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
+# its building_scene helper. Compiled directly into the executable (like
+# model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
+# it needs both libraries' headers (SceneGraph/MaterialLibrary +
+# GameBuildingKind/building_visual), which the final executable link already
+# provides transitively.
+set(badlands_app_sources_game
+    src/game/main_game.cpp
+    src/game/scene/building_scene.cpp
+    src/game/views/game_view.cpp)
 set(badlands_app_sources_ai_sandbox src/ai_sandbox/main_ai_sandbox.cpp)
 
 foreach(app viewer game ai_sandbox)
