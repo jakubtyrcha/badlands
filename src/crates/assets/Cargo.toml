@@ -18,7 +18,7 @@ edition = "2024"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 gltf = { version = "1.4", default-features = false }
 
 # Default to panic=abort; Corrosion overrides this back to unwind at the

@@ -137,6 +137,46 @@ pub unsafe extern "C" fn badlands_image_free(image: BadlandsImage) {
     }
 }
 
+/// Write an RGBA8 image to a PNG file at `path`. Used by the C++ app's
+/// `--screenshot` mode (src/main.cpp) to dump a rendered frame for visual
+/// verification.
+///
+/// Failures (null input, non-UTF8/unwritable path, encode error, or an
+/// internal panic) are logged to stderr; there is no success/failure signal
+/// across the C ABI (the caller has nothing actionable to do beyond
+/// checking whether the file exists afterward).
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string. `rgba` must point at at
+/// least `width * height * 4` readable bytes (tightly packed RGBA8, no row
+/// padding).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_write_png(
+    path: *const c_char,
+    rgba: *const u8,
+    width: u32,
+    height: u32,
+) {
+    let result = panic::catch_unwind(|| {
+        if path.is_null() || rgba.is_null() {
+            return Err("null path or pixel buffer".to_string());
+        }
+        let path = unsafe { CStr::from_ptr(path) }
+            .to_str()
+            .map_err(|e| e.to_string())?;
+        let len = (width as usize) * (height as usize) * 4;
+        let pixels = unsafe { std::slice::from_raw_parts(rgba, len) };
+        image::save_buffer(path, pixels, width, height, image::ColorType::Rgba8)
+            .map_err(|e| e.to_string())
+    });
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => eprintln!("badlands_write_png: failed: {msg}"),
+        Err(_) => eprintln!("badlands_write_png: panicked"),
+    }
+}
+
 fn opt_string_to_raw(s: Option<String>) -> *mut c_char {
     s.and_then(|s| CString::new(s).ok())
         .map(CString::into_raw)
@@ -306,5 +346,31 @@ mod tests {
             badlands_string_free(textures.normal);
             badlands_string_free(textures.metallic_roughness);
         }
+    }
+
+    #[test]
+    fn write_png_roundtrip() {
+        let path = std::env::temp_dir().join("badlands_write_png_roundtrip_test.png");
+        let path_str = path.to_str().expect("temp path is valid UTF-8");
+        let c_path = CString::new(path_str).unwrap();
+
+        // 2x2 RGBA8: red, green, blue, white.
+        #[rustfmt::skip]
+        let pixels: [u8; 16] = [
+            255, 0,   0,   255,
+            0,   255, 0,   255,
+            0,   0,   255, 255,
+            255, 255, 255, 255,
+        ];
+
+        unsafe { badlands_write_png(c_path.as_ptr(), pixels.as_ptr(), 2, 2) };
+
+        let decoded = image::open(&path).expect("decode written png");
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        let rgba = decoded.to_rgba8();
+        assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(rgba.get_pixel(1, 1).0, [255, 255, 255, 255]);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

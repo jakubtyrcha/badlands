@@ -426,12 +426,19 @@ std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
       target.depth_format = desc.depth_format;
       // Placeholder: depth_write/depth_compare are hardcoded uniformly here
       // rather than derived per-pass the way sampo's RenderState presets did
-      // (e.g. a shadow pass writing depth vs. a forward-transparent pass
-      // testing but not writing it). Inert today since depth_format defaults
-      // to Undefined (no depth buffer yet); revisit once a real depth buffer
-      // is wired and a RenderState port lands.
+      // (e.g. a forward-transparent pass testing but not writing depth).
+      // Revisit once a real RenderState port lands.
+      //
+      // depth_compare DOES vary by pass: SceneRenderer's kForward/kGBuffer
+      // depth attachment uses reversed-Z (cleared to 0.0 = far, 1.0 = near —
+      // see scene_renderer.cpp's depthClearValue), so fragments must pass
+      // when their NDC z is >= the stored value. kShadow, if/when a shadow
+      // pass lands, keeps the conventional (non-reversed, cleared to 1.0)
+      // Less test sampo used.
       target.depth_write = true;
-      target.depth_compare = wgpu::CompareFunction::Less;
+      target.depth_compare = (pass == RenderPassType::kShadow)
+                                  ? wgpu::CompareFunction::Less
+                                  : wgpu::CompareFunction::GreaterEqual;
       pass_targets.emplace(pass, std::move(target));
     }
 

@@ -67,6 +67,13 @@ add_executable(badlands
     src/engine/rendering/scene_renderer.cpp
 )
 target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
+# WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
+# but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
+# this, glm::perspective() maps the near plane to NDC z=2.0 (outside the
+# [0,1] clip volume -> clipped) instead of z=1.0, and Camera::GetProj()'s
+# reversed-Z remap (src/engine/core/camera.hpp) lands its near/far boundary
+# in the wrong place. Applies to all engine sources compiled into `badlands`.
+target_compile_definitions(badlands PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(badlands PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm

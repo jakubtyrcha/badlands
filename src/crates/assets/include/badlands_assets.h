@@ -61,6 +61,16 @@ BadlandsGltfTextures badlands_gltf_pack_textures(const char* gltf_path);
 // badlands_gltf_pack_textures(). Safe to call with NULL.
 void badlands_string_free(char* s);
 
+// Write an RGBA8 image (tightly packed, `width * height * 4` bytes, no row
+// padding) to a PNG file at `path`. Used by the app's `--screenshot` mode
+// to dump a rendered frame for visual verification.
+//
+// Failures (null input, unwritable path, encode error, or an internal
+// panic) are logged to stderr; there is no success/failure return value
+// across the C ABI.
+void badlands_write_png(const char* path, const uint8_t* rgba, uint32_t width,
+                        uint32_t height);
+
 #ifdef __cplusplus
 }
 #endif
