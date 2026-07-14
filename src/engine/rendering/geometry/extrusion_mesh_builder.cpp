@@ -44,15 +44,16 @@ TexturedMeshResult BuildExtrusionMesh(const std::vector<glm::vec2>& ring, float 
     glm::vec3 a(top[i].x, top_y, top[i].y);
     glm::vec3 b(top[(i + 1) % n].x, top_y, top[(i + 1) % n].y);
     PushExtrusionVertex(verts, a, glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
-    PushExtrusionVertex(verts, b, glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
     PushExtrusionVertex(verts, c_top, glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
+    PushExtrusionVertex(verts, b, glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
   }
 
   // Angled walls (one quad per base edge). Normals point outward for a mesa
-  // and inward for a basin, so the visible face lights correctly. This
-  // geometry is drawn with the deferred normalmapped material's default
-  // back-face culling (not cull_mode None); the winding below is authored
-  // to be front-facing in world space accordingly.
+  // and inward for a basin, so the visible face lights correctly. Drawn with
+  // the deferred normalmapped material's default back-face culling
+  // (CullMode::Back / FrontFace::CCW); the winding below is reversed from the
+  // base_i->base_j->top_j order so the geometric front-face normal matches the
+  // shading normal and the visible surface survives culling.
   const bool want_outward = delta_y >= 0.0f;
   for (size_t i = 0; i < n; ++i) {
     size_t j = (i + 1) % n;
@@ -75,7 +76,7 @@ TexturedMeshResult BuildExtrusionMesh(const std::vector<glm::vec2>& ring, float 
     glm::vec3 edge = base_j - base_i;
     glm::vec3 tangent = glm::length(edge) > 1e-8f ? glm::normalize(edge) : glm::vec3(1, 0, 0);
 
-    for (const glm::vec3& v : {base_i, base_j, top_j, base_i, top_j, top_i}) {
+    for (const glm::vec3& v : {base_i, top_j, base_j, base_i, top_i, top_j}) {
       PushExtrusionVertex(verts, v, normal, tangent);
     }
   }

@@ -18,6 +18,7 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <set>
 #include <tuple>
@@ -45,6 +46,38 @@ void check_well_formed(const TexturedMeshResult& result, const char* label) {
     CHECK(glm::length(normal) == Catch::Approx(1.0f).margin(0.01));
     CHECK(glm::length(tangent) == Catch::Approx(1.0f).margin(0.01));
     CHECK(std::abs(glm::dot(normal, tangent)) < 0.1f);
+  }
+
+  // Triangle WINDING must agree with the shading normals. Under the deferred
+  // material's default CullMode::Back / FrontFace::CCW, a triangle is drawn
+  // only if its geometric normal cross(v1-v0, v2-v0) faces the camera; if that
+  // winding normal opposes the (correct) outward shading normal, the outer
+  // surface is back-face-culled and the mesh renders inside-out even though the
+  // shading normal looks right. (Reversed cone/cylinder/extrusion winding
+  // shipped past two reviews precisely because only shading normals were
+  // checked — this guards every generator against that class of bug.)
+  REQUIRE(result.mesh.vertex_count % 3 == 0);
+  for (size_t t = 0; t + 3 * kTexturedMeshFloatsPerVertex <= verts.size();
+       t += 3 * kTexturedMeshFloatsPerVertex) {
+    auto at = [&](int k) {
+      size_t o = t + static_cast<size_t>(k) * kTexturedMeshFloatsPerVertex;
+      return std::pair<glm::vec3, glm::vec3>(
+          glm::vec3(verts[o], verts[o + 1], verts[o + 2]),
+          glm::vec3(verts[o + 5], verts[o + 6], verts[o + 7]));
+    };
+    auto [p0, n0] = at(0);
+    auto [p1, n1] = at(1);
+    auto [p2, n2] = at(2);
+    // Skip degenerate/collapsed triangles (e.g. a capsule/sphere's pole
+    // triangles, where one edge shrinks to ~0): their geometric normal is
+    // ill-defined and their ~zero area makes them irrelevant to culling. A
+    // genuine winding reversal is a strongly negative dot, not float noise.
+    float min_edge = std::min({glm::length(p1 - p0), glm::length(p2 - p0),
+                               glm::length(p2 - p1)});
+    if (min_edge < 1e-4f) continue;
+    glm::vec3 geo = glm::cross(p1 - p0, p2 - p0);
+    CAPTURE(t / (3 * kTexturedMeshFloatsPerVertex));
+    CHECK(glm::dot(geo, n0 + n1 + n2) > 0.0f);
   }
 }
 

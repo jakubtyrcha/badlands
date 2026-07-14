@@ -105,23 +105,25 @@ TexturedMeshResult GenerateCylinder(float radius, float height, int segments) {
     glm::vec3 tan0(-s0, 0.0f, c0), tan1(-s1, 0.0f, c1);
 
     // Side (two triangles), smooth radial normals, tangent along circumference.
+    // Wound so the geometric (front-face) normal matches the outward radial
+    // shading normal (CullMode::Back / FrontFace::CCW keeps the outer surface).
     PushVertex(verts, b0, {u0, 0.0f}, n0, tan0);
+    PushVertex(verts, t1, {u1, 1.0f}, n1, tan1);
     PushVertex(verts, b1, {u1, 0.0f}, n1, tan1);
-    PushVertex(verts, t1, {u1, 1.0f}, n1, tan1);
     PushVertex(verts, b0, {u0, 0.0f}, n0, tan0);
-    PushVertex(verts, t1, {u1, 1.0f}, n1, tan1);
     PushVertex(verts, t0, {u0, 1.0f}, n0, tan0);
+    PushVertex(verts, t1, {u1, 1.0f}, n1, tan1);
 
-    // Top cap fan, normal +Y.
+    // Top cap fan, normal +Y (wound CCW seen from above / outside).
     PushVertex(verts, t0, cap_uv(t0), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
-    PushVertex(verts, t1, cap_uv(t1), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
     PushVertex(verts, top_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
+    PushVertex(verts, t1, cap_uv(t1), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
 
-    // Bottom cap fan (reversed ring order so it faces -Y from outside).
+    // Bottom cap fan, normal -Y (wound CCW seen from below / outside).
     PushVertex(verts, b1, cap_uv(b1), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
-    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
     PushVertex(verts, bottom_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, -1, 0),
               glm::vec3(1, 0, 0));
+    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
   }
 
   return Finish(std::move(verts), Aabb::FromMinMax(glm::vec3(-radius, 0.0f, -radius),
@@ -152,15 +154,17 @@ TexturedMeshResult GenerateCone(float radius, float height, int segments) {
                                             : glm::vec3(0, 1, 0);
     glm::vec3 tan = glm::length(edge) > 1e-8f ? glm::normalize(edge) : glm::vec3(1, 0, 0);
 
-    // Side (CCW seen from outside): base0 -> base1 -> apex.
+    // Side: base0 -> apex -> base1. Wound so the geometric (front-face) normal
+    // matches the outward shading normal `n`, so the outer surface survives the
+    // deferred material's default CullMode::Back / FrontFace::CCW.
     PushVertex(verts, b0, {u0, 0.0f}, n, tan);
-    PushVertex(verts, b1, {u1, 0.0f}, n, tan);
     PushVertex(verts, apex, {(u0 + u1) * 0.5f, 1.0f}, n, tan);
+    PushVertex(verts, b1, {u1, 0.0f}, n, tan);
 
     // Base cap (downward), matching GenerateCylinder's bottom cap.
     PushVertex(verts, b1, cap_uv(b1), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
-    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
     PushVertex(verts, base_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
+    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
   }
 
   return Finish(std::move(verts), Aabb::FromMinMax(glm::vec3(-radius, 0.0f, -radius),
