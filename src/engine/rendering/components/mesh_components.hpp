@@ -4,17 +4,24 @@
 // namespace sampo -> badlands.
 //
 // Deviations:
-// - Dropped `StaticMeshGpuComponent`, `StaticTexturedMeshGpuComponent`, and
-//   `StaticCubeMapTexturedMeshGpu` (the wgpu::Buffer-owning GPU-side
-//   counterparts). Each one's `on_destroy` hook deferred buffer deletion via
-//   `registry.ctx().find<sampo::GpuResourceManager*>()`, and
+// - Dropped `StaticMeshGpuComponent` and `StaticCubeMapTexturedMeshGpu` (the
+//   wgpu::Buffer-owning GPU-side counterparts for the mesh kinds D3's forward
+//   pass doesn't draw). Each one's `on_destroy` hook deferred buffer deletion
+//   via `registry.ctx().find<sampo::GpuResourceManager*>()`, and
 //   `GpuResourceManager` isn't ported to badlands yet — D1 already dropped
 //   the same dependency from `MaterialInstance` for the same reason (see
-//   task-D1-report.md deviation 4). None of `SceneGraph::SyncToRegistry` or
-//   the mesh builders touch these GPU-buffer components (they're populated
-//   later, by a mesh-upload render pass not yet ported), so dropping them
-//   doesn't affect this task's interface. Revisit once GpuResourceManager
-//   lands.
+//   task-D1-report.md deviation 4). Revisit once GpuResourceManager lands.
+// - `StaticTexturedMeshGpuComponent` (below) was dropped by D2 for the same
+//   reason and is re-added here, minimally, by D3: the forward-opaque mesh
+//   pass (`rendering/passes/render_textured_mesh.cpp`) needs somewhere to
+//   cache the uploaded vertex buffer across frames so it doesn't re-upload
+//   every draw. Trimmed to just `{vertex_buffer, vertex_count}` — sampo's
+//   `buffer_size`/`line_index_buffer`/`line_index_count` (wireframe support)
+//   and `on_destroy` GpuResourceManager hook are omitted: D3's pass doesn't
+//   support wireframe, and Dawn's `wgpu::Buffer` is itself a ref-counted
+//   handle — the old buffer, if any, simply releases when overwritten or the
+//   entity/component is destroyed (registry teardown), same reasoning as
+//   `MaterialInstance`'s dropped `GpuResourceManager*` (D1 deviation 4).
 // - Dropped the `#ifndef __EMSCRIPTEN__` guard (badlands Stage 1 has no
 //   Emscripten/WASM build target; CMakeLists.txt targets native Dawn only).
 // - Sampo defines these ECS component structs at *global* scope (only the
@@ -65,6 +72,16 @@ struct StaticTexturedMeshComponent {
 
   // Geometry type affects how materials sample textures (2D vs cubemap)
   GeometryType geometry_type = GeometryType::kTexturedMesh;
+};
+
+// GPU-side vertex buffer for a StaticTexturedMeshComponent, uploaded lazily
+// by the forward-opaque mesh pass on first draw (or after the CPU-side mesh
+// is marked dirty again). See the file-level deviation note above for why
+// this is a minimal re-addition (no GpuResourceManager, no wireframe index
+// buffer) rather than sampo's full `StaticTexturedMeshGpuComponent`.
+struct StaticTexturedMeshGpuComponent {
+  wgpu::Buffer vertex_buffer;
+  uint32_t vertex_count = 0;
 };
 
 class MaterialInstance;

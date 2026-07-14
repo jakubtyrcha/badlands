@@ -63,6 +63,8 @@ add_executable(badlands
     src/engine/rendering/geometry/textured_mesh_builders.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
+    src/engine/rendering/passes/render_textured_mesh.cpp
+    src/engine/rendering/scene_renderer.cpp
 )
 target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
 target_include_directories(badlands PRIVATE
