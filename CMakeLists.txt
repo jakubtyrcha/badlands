@@ -30,12 +30,22 @@ corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/wesl/Cargo.t
 # to unwind.
 corrosion_set_env_vars(wesl_ffi "RUSTFLAGS=-Cpanic=unwind")
 
+# assets: JPEG decode + glTF pack texture-URI parsing (src/crates/assets),
+# Rust staticlib. Unlike wesl_ffi, no dependency of this crate shares its
+# own name, so no Corrosion package-ambiguity workaround is needed here.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo.toml)
+corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
+
 add_executable(badlands
     src/main.cpp
     src/engine/rendering/gpu_context.cpp
 )
-target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi)
-target_include_directories(badlands PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/crates/wesl/include)
+target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets)
+target_include_directories(badlands PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+)
 
 if(APPLE)
     # Use the new linker on Apple platforms (crib from ../sampo/CMakeLists.txt);
