@@ -1,0 +1,58 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Working agreement
+- **Concise. Bullet points. No fluff.**
+- **Frontload interface design.** Clarify details and assumptions with the user *before* building. Make autonomous decisions only for implementation details — never for interfaces or architecture.
+- **The rendering/engine interface is general and stable.** Keep it game-agnostic (no game types in `src/engine/` or `src/core/`). ALWAYS get user approval before changing the rendering/engine interface.
+- **UI is two separate surfaces:** game UI (in-world pane) vs debug UI (Dear ImGui). Do not conflate them.
+- Co-design one decision at a time. For features, use superpowers brainstorming → spec → plan → subagent-driven-development.
+
+## Repository state — mid-migration
+badlands is being **re-platformed from a Rust-hosted (winit/wgpu) app to a C++/Dawn/SDL3-hosted app** by porting the sibling engine `sampo` (`/Users/jakub/repos/sampo`), keeping substantial Rust features as Corrosion-linked static libs.
+- **Shipping path (C++/Dawn):** branch `worktree-cpp-replatform-stage1` + future stages. Stage 1 done (engine renders a lit, textured, mipmapped sphere). Built with CMake.
+- **Reference (Rust/wgpu):** branch `building-placement-mechanic` @ `8ee93cc` — v0.35 content (terrain/biomes/ploppables/buildings) + world logic. Kept as the behavioral/visual reference until the C++ port reaches parity (Stage 3). Built with cargo. **Do not add new features here.**
+- Design/plan/progress: `docs/superpowers/specs/`, `docs/superpowers/plans/`, and `.superpowers/sdd/progress.md` (the task-by-task ledger — read it to resume).
+
+## Build & run — C++/Dawn (shipping path)
+Run from the repo root (`shaders/` + `assets/` resolve relative to cwd).
+```sh
+cmake -S . -B build -G Ninja                     # configure (first Dawn-from-source build is long, then cached)
+cmake --build build                              # build `badlands` + the Rust staticlibs
+./build/badlands                                 # run (opens an SDL3 window)
+./build/badlands --screenshot out.png            # headless: render one frame to PNG (offscreen readback)
+perl -e 'alarm 30; exec @ARGV' ./build/badlands  # SIGALRM-bounded headless smoke run
+```
+Rust feature-lib tests — **use `--lib`** (bare `cargo test` here prints only the empty doctest target):
+```sh
+cargo test --manifest-path src/crates/wesl/Cargo.toml   --lib
+cargo test --manifest-path src/crates/assets/Cargo.toml --lib
+cargo test --manifest-path src/crates/nav/Cargo.toml    --lib
+#   single test: append its name, e.g. ... --lib write_png_roundtrip
+```
+- Prereqs: `git-lfs` + initialized submodules (`noiser`, `catch2`, `entt`, `glm`, `spdlog`). See README for clone/LFS setup.
+- Dawn is pinned (SHA in `cmake/FetchDawn.cmake`). Do not bump it without approval.
+- There is no C++ unit-test target yet; Stage 1 verification is "builds + runs + no Dawn validation errors + screenshot".
+
+## Build & run — Rust reference (legacy, `building-placement-mechanic`)
+`cargo run` · `cargo run -- --frames 60 --screenshot out.png` · `cargo test` · `cargo test --test cpp_tests` (C++ Catch2 game suite). See README.
+
+## Architecture (C++/Dawn) — the layer boundary is deliberate
+- **`src/engine/`** — engine ported from sampo (`sampo::` → `badlands::`): rendering, GPU/pipeline/reflection/frame infra, data-driven material system, scene graph + scene renderer (forward-opaque + tonemap), GPU mip generation, `Camera`. **No game logic or game types.**
+- **`src/game/`** — C++ game logic: EnTT world sim, placement/movement/terrain/ploppables, brains, geometry generation, scene construction, camera + input *handling*, UI *logic*. (Migrated from `game/` and wired in Stage 2 — currently the old `game/` still holds it.)
+- **`src/core/`** — generic shared C++ (math glue, `GeometryType`, small utils).
+- **`src/crates/`** — Rust feature-libs behind narrow C ABIs, linked via Corrosion: `wesl` (`.wesl`→WGSL + reflection), `assets` (JPEG decode + glTF parse + PNG write), `nav` (`GamePathfinder` pathfinding). `noiser` (scripting) stays under `third_party/`, linked in Stage 2.
+
+Ownership: **C++ owns** window, GPU, render loop, renderer, world, geometry, camera, input, scene construction, GPU mips. **Rust owns** the four feature-libs. The one game seam in Stage 1 is `build_test_scene()` in `src/main.cpp`; Stage 2 replaces it with world→scene construction.
+
+Data flow: WESL (Rust) → WGSL → Dawn pipeline + reflection → material instance (bind group) → scene-graph node → forward pass → tonemap → SDL3. JPEG (Rust `assets`) → Dawn texture → GPU mips → sampled.
+
+## Non-obvious conventions (read the cited code before touching these)
+- **Shader reflection is naga-in-Rust, not tint.** `shader_reflection.cpp` / `gpu_pipeline_generator.cpp` call the `wesl` crate's `wgsl_reflect*` (naga). Pipelines use **explicit reflection-derived** bind-group layouts (not Dawn AUTO); build bind groups via `CreateBindGroup(device, pipeline, group, entries)`.
+- **Reversed-Z end to end:** depth clears to `0.0` (far); opaque depth-compare `GreaterEqual` (`Less` only for the shadow pass); `GLM_FORCE_DEPTH_ZERO_TO_ONE` is set project-wide; `Camera::GetProj` maps near→1, far→0. `static_assert(sizeof(UniformData)==576)` must hold and match `shaders/common/frame.wesl`.
+- **The per-object uniform buffer is the `group==1` UBO, not `uniform_buffers[0]`** — reflection returns *all* UBOs including the group-0 `frame` UBO, whose emission order varies by shader.
+- **Material textures resolve by `param_name == slot_name`** (e.g. `textured_mesh`'s albedo slot is `"mesh_texture"`). `InstanceParams.texture_overrides` carry their own sampler; the factory's default sampler uses `mipmapFilter=Nearest`, so supply a trilinear+aniso sampler when you want the mip chain used.
+- **Corrosion crate quirks:** each `src/crates/*/Cargo.toml` needs an empty `[workspace]` table (so cargo doesn't walk up to the root workspace, whose `noiser-bundle` member isn't checked out here); crate profiles set `panic="abort"` and Corrosion overrides to `-Cpanic=unwind` at link so the extern-"C" `catch_unwind` thunks actually catch. The `wesl` crate's Cargo *target* is named `wesl_ffi` to avoid colliding with the `wesl` dependency.
+- **FFI is data-only and mockable.** Cross-language seams are contracts (narrow C ABIs, tested across the boundary). Keep them low-level — no game concepts leak into the Rust libs.
+- **Binary assets are git LFS** (`*.bin/*.jpg/*.jpeg/*.png/*.ttf`); a plain `git add` stores an LFS pointer. `.claude/` is **not** gitignored — never `git add -A` / `git add .claude` (it would sweep worktrees + Dawn build artifacts into a commit). Stage exact paths.
