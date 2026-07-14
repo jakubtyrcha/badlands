@@ -104,7 +104,7 @@ Aabb ModelViewerView::AddPrefab(const PrefabEntry& entry) {
     const Aabb bounds = mesh.local_bounds;
 
     const MaterialPack pack = material_pack(MaterialId::RockWall);
-    const DeferredMaterial mat = matlib_.Get(pack.dir, pack.base);
+    const DeferredMaterial mat = matlib_.Get(pack.dir);
     AddMeshEntity(scene_, "rock", std::move(mesh), mat);
     return bounds;
   }

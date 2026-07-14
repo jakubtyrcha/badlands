@@ -91,7 +91,7 @@ void AiSandboxView::BuildScene() {
 
 void AiSandboxView::AddWalls() {
   const MaterialPack pack = material_pack(MaterialId::RockWall);
-  const DeferredMaterial wall_mat = matlib_.Get(pack.dir, pack.base);
+  const DeferredMaterial wall_mat = matlib_.Get(pack.dir);
 
   int index = 0;
   for (const glm::ivec2& tile : arena_.wall_tiles) {

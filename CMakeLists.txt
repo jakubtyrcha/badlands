@@ -24,6 +24,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Corrosion)
 
+# nlohmann/json: header-only JSON parser, used by MaterialLibrary to read
+# each pack's material.json manifest (Stage 3 M3).
+FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
 # The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
 # the `wesl` 0.2 crate, and Corrosion invokes `cargo rustc --package <name>`,
@@ -116,7 +121,7 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets nav)
+target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets nav nlohmann_json::nlohmann_json)
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
 # but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
 # this, glm::perspective() maps the near plane to NDC z=2.0 (outside the
@@ -161,7 +166,7 @@ add_library(badlands_game_lib STATIC
     # src/game/geometry/ploppable_rings.{h,cpp}).
     src/game/building_catalog.cpp
     src/game/geometry/ploppable_rings.cpp
-    # Task S2.D: MaterialId -> PBR glTF pack mapping (src/game/material_pack.h).
+    # Task S2.D: MaterialId -> PBR pack mapping (src/game/material_pack.h).
     src/game/material_pack.cpp
     # Task S2.G: walled AI-sandbox arena (src/game/arena.h), reusing
     # placement.h's centered-grid convention (kGridHalf/in_bounds_tile).

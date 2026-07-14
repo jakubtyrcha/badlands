@@ -34,7 +34,7 @@ Aabb AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
                                   ? bv.wall_material
                                   : bv.roof_material;
     const MaterialPack pack = material_pack(mat_id);
-    const DeferredMaterial mat = matlib.Get(pack.dir, pack.base);
+    const DeferredMaterial mat = matlib.Get(pack.dir);
 
     local_bounds = local_bounds.Union(part.mesh.local_bounds);
     const std::string name = "building_part_" + std::to_string(part_index++);

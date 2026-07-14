@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 #include "badlands_assets.h"
@@ -18,17 +20,6 @@ namespace {
 
 // ImageGuard (RAII free of the `assets` crate's malloc'd JPEG buffer) is
 // shared -- see engine/rendering/texture_loader.hpp.
-
-// RAII guard freeing badlands_gltf_pack_textures' malloc'd C-ABI strings on
-// every exit path (safe to call on an all-NULL/failure result).
-struct GltfTexturesGuard {
-  BadlandsGltfTextures textures;
-  ~GltfTexturesGuard() {
-    badlands_string_free(textures.base_color);
-    badlands_string_free(textures.normal);
-    badlands_string_free(textures.metallic_roughness);
-  }
-};
 
 // Decodes the metallic-roughness JPEG at `path` and uploads a new
 // RGBA8Unorm+mips texture with that image's G channel (glTF 2.0's roughness
@@ -139,23 +130,36 @@ DeferredMaterial MaterialLibrary::SolidColor(glm::vec3 rgb, float roughness) {
 }
 
 MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
-    const std::string& dir, const std::string& base) const {
+    const std::string& dir) const {
   PackTextures result;
 
-  const std::string gltf_path = dir + "/" + base + "_1k.gltf";
-  BadlandsGltfTextures uris = badlands_gltf_pack_textures(gltf_path.c_str());
-  GltfTexturesGuard guard{uris};
-  if (uris.base_color == nullptr || uris.normal == nullptr ||
-      uris.metallic_roughness == nullptr) {
-    spdlog::error(
-        "MaterialLibrary: failed to resolve pack textures from '{}'",
-        gltf_path);
+  const std::string manifest_path = dir + "/material.json";
+  std::ifstream manifest_file(manifest_path);
+  if (!manifest_file) {
+    spdlog::error("MaterialLibrary: failed to resolve pack textures -- "
+                  "missing manifest '{}'",
+                  manifest_path);
     return result;
   }
 
-  const std::string albedo_path = dir + "/" + uris.base_color;
-  const std::string normal_path = dir + "/" + uris.normal;
-  const std::string roughness_path = dir + "/" + uris.metallic_roughness;
+  nlohmann::json manifest;
+  std::string albedo_rel, normal_rel, arm_rel;
+  try {
+    manifest_file >> manifest;
+    albedo_rel = manifest.at("albedo").get<std::string>();
+    normal_rel = manifest.at("normal").get<std::string>();
+    arm_rel = manifest.at("arm").get<std::string>();
+  } catch (const nlohmann::json::exception& e) {
+    spdlog::error(
+        "MaterialLibrary: failed to resolve pack textures -- unparseable "
+        "manifest '{}': {}",
+        manifest_path, e.what());
+    return result;
+  }
+
+  const std::string albedo_path = dir + "/" + albedo_rel;
+  const std::string normal_path = dir + "/" + normal_rel;
+  const std::string roughness_path = dir + "/" + arm_rel;
 
   result.albedo = LoadTexture2D(device_, queue_, *pipeline_gen_, albedo_path);
   result.normal = LoadTexture2D(device_, queue_, *pipeline_gen_, normal_path);
@@ -164,15 +168,15 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
 
   if (!result.albedo.texture || !result.normal.texture ||
       !result.roughness.texture) {
-    spdlog::error("MaterialLibrary: pack '{}/{}' loaded with missing texture(s)",
-                  dir, base);
+    spdlog::error("MaterialLibrary: pack '{}' loaded with missing texture(s)",
+                  dir);
     return result;
   }
 
   spdlog::info(
-      "MaterialLibrary: loaded pack '{}/{}' -- albedo {}x{} ({} mips), "
+      "MaterialLibrary: loaded pack '{}' -- albedo {}x{} ({} mips), "
       "normal {}x{} ({} mips), roughness {}x{} ({} mips)",
-      dir, base, result.albedo.texture.GetWidth(),
+      dir, result.albedo.texture.GetWidth(),
       result.albedo.texture.GetHeight(),
       result.albedo.texture.GetMipLevelCount(),
       result.normal.texture.GetWidth(), result.normal.texture.GetHeight(),
@@ -184,12 +188,10 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
   return result;
 }
 
-DeferredMaterial MaterialLibrary::Get(const std::string& dir,
-                                      const std::string& base) {
-  const std::string key = dir + "/" + base;
-  auto it = cache_.find(key);
+DeferredMaterial MaterialLibrary::Get(const std::string& dir) {
+  auto it = cache_.find(dir);
   if (it == cache_.end()) {
-    it = cache_.emplace(key, LoadPack(dir, base)).first;
+    it = cache_.emplace(dir, LoadPack(dir)).first;
   }
   const PackTextures& pack = it->second;
 

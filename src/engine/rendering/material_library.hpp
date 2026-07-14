@@ -1,9 +1,10 @@
 #pragma once
 
-// Task S2.D: PBR material-pack loader + cache. Turns a glTF PBR pack
-// (albedo/normal/roughness textures under `<dir>/textures/`) into a cached
+// Task S2.D (M3: swapped glTF URIs for per-pack material.json manifests).
+// PBR material-pack loader + cache. Turns a PBR pack (a `material.json`
+// manifest + albedo/normal/arm textures under `<dir>/`) into a cached
 // deferred `normalmapped` material instance. Engine, game-agnostic: keyed
-// purely by (pack directory, base filename) -- no game::MaterialId here (see
+// purely by pack directory -- no game::MaterialId here (see
 // src/game/material_pack.h for the game-side MaterialId -> pack mapping).
 #include <cstdint>
 #include <memory>
@@ -28,15 +29,12 @@ struct DeferredMaterial {
   InstanceParams params;
 };
 
-// Builds and caches deferred `normalmapped` materials from PBR glTF packs.
+// Builds and caches deferred `normalmapped` materials from PBR packs.
 //
-// A "pack" is a directory (`dir`) containing `<base>_1k.gltf` + a
-// `textures/` subdirectory with albedo/normal/metallic-roughness JPEGs. The
-// glTF document's first material is the source of truth for which texture
-// file fills each slot (resolved via the `assets` crate's
-// `badlands_gltf_pack_textures`, by texture URI) -- not filename
-// conventions, since packs are inconsistent about the roughness source
-// file's name (`_arm_1k.jpg` vs `_rough_1k.jpg` vs other suffixes).
+// A "pack" is a directory (`dir`) containing a `material.json` manifest
+// (albedo/normal/arm relative paths, e.g. under a `textures/` subdirectory)
+// plus the textures it points at. The manifest is the source of truth for
+// which file fills each slot -- not filename conventions.
 class MaterialLibrary {
  public:
   // Builds the shared normalmapped kDeferred factory (color formats =
@@ -49,23 +47,22 @@ class MaterialLibrary {
   bool Initialize(wgpu::Device device, wgpu::Queue queue,
                   GpuPipelineGenerator* pipeline_gen);
 
-  // Returns the cached deferred material for the pack at `dir`/`base`,
-  // loading + GPU-uploading its three textures (with full mip chains) on
-  // first request. `dir` is the pack directory (e.g.
-  // "assets/materials/rocky_trail_1k.gltf"); `base` is the glTF/texture
-  // filename stem (e.g. "rocky_trail" -> "<dir>/rocky_trail_1k.gltf").
+  // Returns the cached deferred material for the pack at `dir` (e.g.
+  // "assets/materials/rocky_terrain_02_1k"), loading + GPU-uploading its
+  // three textures (with full mip chains) from `<dir>/material.json` on
+  // first request.
   //
   // The roughness texture is always produced with roughness in the R
-  // channel (the `normalmapped` shader samples `.r`): the glTF's
-  // metallic-roughness source is decoded and its G channel (glTF 2.0's
-  // roughness channel) is copied into R/G/B of a new texture. This is a
-  // no-op for already-grayscale `_rough` sources (R==G==B) and repacks
-  // `_arm` sources (R=AO, G=roughness, B=metallic) correctly.
+  // channel (the `normalmapped` shader samples `.r`): the manifest's `arm`
+  // source is decoded and its G channel (glTF 2.0's roughness channel) is
+  // copied into R/G/B of a new texture. This is a no-op for already-
+  // grayscale sources (R==G==B) and repacks `_arm` sources (R=AO,
+  // G=roughness, B=metallic) correctly.
   //
-  // On a load failure (missing pack, decode error), returns a
+  // On a load failure (missing manifest, decode error), returns a
   // DeferredMaterial with the shared factory but texture_overrides pointing
   // at null views -- logged via spdlog::error.
-  DeferredMaterial Get(const std::string& dir, const std::string& base);
+  DeferredMaterial Get(const std::string& dir);
 
   // Returns a cached deferred `normalmapped` material with a flat 1x1 albedo
   // of `rgb` (linear 0..1, quantized to 8-bit) and a 1x1 grayscale roughness
@@ -86,7 +83,7 @@ class MaterialLibrary {
     LoadedTexture roughness;  // repacked so roughness is in R
   };
 
-  PackTextures LoadPack(const std::string& dir, const std::string& base) const;
+  PackTextures LoadPack(const std::string& dir) const;
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -95,7 +92,7 @@ class MaterialLibrary {
   std::unique_ptr<MaterialInstanceFactory> factory_;
   wgpu::Sampler sampler_;
 
-  std::unordered_map<std::string, PackTextures> cache_;  // key: "dir/base"
+  std::unordered_map<std::string, PackTextures> cache_;  // key: dir
   // key: r<<24 | g<<16 | b<<8 | roughness (all 8-bit). The stored
   // InstanceParams own the 1x1 texture views (which keep their textures
   // alive) for SolidColor's whole lifetime.
