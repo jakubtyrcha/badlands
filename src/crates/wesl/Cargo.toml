@@ -1,13 +1,19 @@
 [package]
-# Named "wesl_ffi" (not "wesl") to avoid colliding with the `wesl` 0.4
-# dependency below: Corrosion invokes `cargo rustc --package <name>`, which
-# fails with "specification `wesl` is ambiguous" if the package and one of
-# its dependencies share a name (confirmed empirically — this is a hard
-# build failure, not just a lint). Sampo's own equivalent crate is named
-# `wesl-ffi` for the same reason.
+# Named "wesl_ffi" (not "wesl") to avoid colliding with the `wesl` dependency
+# below: Corrosion invokes `cargo rustc --package <name>`, which fails with
+# "specification `wesl` is ambiguous" if the package and one of its
+# dependencies share a name (confirmed empirically — this is a hard build
+# failure, not just a lint). Sampo's own equivalent crate is named `wesl-ffi`
+# for the same reason.
 name = "wesl_ffi"
 version = "0.1.0"
-edition = "2024"
+# 2021 (not 2024, unlike badlands' other crates): this crate's body is a
+# faithful port of sampo's wesl-ffi/src/lib.rs, which relies on edition
+# 2021's implicit-unsafe-block-in-unsafe-fn behavior throughout its
+# `unsafe extern "C"` thunks. Edition 2024 makes that a hard error
+# (E0133), which would require rewriting every thunk body — done here by
+# just keeping the edition sampo's source was written against instead.
+edition = "2021"
 
 # Standalone: this crate lives inside the badlands repo tree but is not a
 # member of the root Cargo workspace (that workspace's `members` list does
@@ -20,7 +26,14 @@ edition = "2024"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-wesl = "0.4"
+# Pinned to 0.2 (not 0.4) to match sampo's wesl-ffi: this version's API
+# (Wesl::new_barebones + a custom Resolver) is what the faithfully-ported
+# reflection/compile glue below is written against. 0.2's barebones compiler
+# skips the strict WGSL-spec texture-format validation that 0.4 tightened,
+# which matters for Dawn-specific formats like r8unorm behind
+# chromium_internal_graphite (see enable_directive_tests below).
+wesl = "0.2"
+naga = { version = "24", features = ["wgsl-in"] }
 
 # Default to panic=abort; Corrosion overrides this back to unwind at the
 # CMake link step (RUSTFLAGS=-Cpanic=unwind) so the `catch_unwind` in the

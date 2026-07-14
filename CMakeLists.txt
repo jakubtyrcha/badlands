@@ -47,11 +47,17 @@ corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 add_executable(badlands
     src/main.cpp
     src/engine/rendering/gpu_context.cpp
+    src/engine/rendering/vertex_layout.cpp
+    src/engine/rendering/shader/shader_reflection.cpp
+    src/engine/rendering/shader/gpu_pipeline_generator.cpp
+    src/engine/rendering/context/render_pass_context.cpp
+    src/engine/rendering/context/frame_context.cpp
 )
 target_link_libraries(badlands PRIVATE SDL3::SDL3 webgpu wesl_ffi assets nav)
 target_include_directories(badlands PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
     ${CMAKE_SOURCE_DIR}/src/crates/nav/include
