@@ -15,6 +15,7 @@
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
+#include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/texture_loader.hpp"
 #include "engine/scene/scene_graph.hpp"
@@ -36,10 +37,13 @@ class PlaceholderView : public AppView {
  private:
   LoadedTexture albedo_;
   wgpu::Sampler sampler_;
-  // Procedural sky environment for IBL (built once in Initialize).
+  // Shared light environment (sun + analytic sky). ApplyLightEnvironment builds
+  // sky_cube_ + the SH ambient + the sun from it in Initialize (replaces B2's
+  // hardcoded inline sky/SH). The B4 ImGui editor will mutate env_ live.
+  LightEnvironment env_;
   CubemapBuilder sky_cube_;
-  // Temporary verification aid: a ~0.15 solid-gray 1x1 roughness override so
-  // the sphere is smooth enough to show a visible sky/sun reflection. Real
+  // Temporary verification aid: a ~0.4 solid-gray 1x1 roughness override so the
+  // sphere is smooth enough to show a visible skybox reflection. Real
   // per-material roughness arrives with the material-pack loader later.
   wgpu::TextureView roughness_view_;
   std::unique_ptr<MaterialInstanceFactory> factory_;

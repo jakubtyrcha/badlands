@@ -23,6 +23,7 @@
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
 #include "engine/rendering/context/scene_context.hpp"
+#include "engine/rendering/passes/render_skybox.hpp"
 #include "engine/rendering/passes/render_textured_mesh.hpp"
 
 namespace badlands {
@@ -244,10 +245,40 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     pass.End();
   }
 
-  // === Pass 2: Deferred lighting — fullscreen pass reading the G-buffer,
-  // lighting it (sun directional + SH ambient) into the HDR target. Clears
-  // to scene.clear_color so sky/no-geometry pixels (where the shader
-  // discards) keep the background color. ===
+  // === Pass 2: Skybox background — fill the HDR target from the source
+  // environment cube (fullscreen, standard cube sampling along the per-pixel
+  // world ray). Runs BEFORE deferred lighting: it clears + fills the whole
+  // HDR, then deferred lighting (Pass 3, LoadOp::Load) discards far/sky pixels
+  // so the skybox shows through wherever there is no geometry.
+  //
+  // When the scene has no source cube (scene.skybox_cubemap null), this pass is
+  // skipped and Pass 3 falls back to clearing scene.clear_color (B1/B2
+  // behavior). ===
+  const bool have_skybox = static_cast<bool>(scene.skybox_cubemap);
+  if (have_skybox) {
+    wgpu::RenderPassColorAttachment color_attachment;
+    color_attachment.view = hdr_color_view_;
+    color_attachment.loadOp = wgpu::LoadOp::Clear;
+    color_attachment.storeOp = wgpu::StoreOp::Store;
+    // clearValue is irrelevant — the fullscreen skybox overwrites every pixel.
+    color_attachment.clearValue = {0.0, 0.0, 0.0, 1.0};
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color_attachment;
+    desc.depthStencilAttachment = nullptr;  // no depth: fills the whole target
+
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    RenderSkybox(pass, frame, *pipeline_generator_, accumulation_format_,
+                 scene.skybox_cubemap, fallback_cube_sampler_);
+    pass.End();
+  }
+
+  // === Pass 3: Deferred lighting — fullscreen pass reading the G-buffer,
+  // lighting it (sun directional + SH ambient + IBL) into the HDR target.
+  // With a skybox present it LOADs (keeps the skybox and discards far/sky
+  // pixels); otherwise it CLEARs to scene.clear_color so sky/no-geometry
+  // pixels keep the background color. ===
   {
     RenderPipelineDeclaration decl;
     decl.shader_path = "passes/deferred_lighting";
@@ -301,7 +332,8 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
 
       wgpu::RenderPassColorAttachment color_attachment;
       color_attachment.view = hdr_color_view_;
-      color_attachment.loadOp = wgpu::LoadOp::Clear;
+      color_attachment.loadOp =
+          have_skybox ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear;
       color_attachment.storeOp = wgpu::StoreOp::Store;
       color_attachment.clearValue = {scene.clear_color.r, scene.clear_color.g,
                                      scene.clear_color.b, scene.clear_color.a};
@@ -319,7 +351,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     }
   }
 
-  // === Pass 3: Tonemap resolve: HDR -> surface ===
+  // === Pass 4: Tonemap resolve: HDR -> surface ===
   {
     RenderPipelineDeclaration decl;
     decl.shader_path = "passes/tonemapping";

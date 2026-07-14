@@ -84,10 +84,12 @@ add_library(badlands_engine STATIC
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
+    src/engine/rendering/passes/render_skybox.cpp
     src/engine/rendering/gbuffer.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/cubemap_builder.cpp
+    src/engine/rendering/light_environment.cpp
     src/engine/rendering/brdf_lut.cpp
     src/engine/rendering/prefiltered_cubemap.cpp
     src/engine/app/sdl_viewer_app.cpp
