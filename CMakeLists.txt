@@ -94,6 +94,10 @@ add_library(badlands_engine STATIC
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
+    # Task S2.E: shared scene-building helper (TexturedMeshResult + a
+    # MaterialLibrary DeferredMaterial -> a SceneGraph node), reused by
+    # badlands_viewer/game/ai_sandbox's real AppViews.
+    src/engine/rendering/scene_build.cpp
     src/engine/rendering/cubemap_builder.cpp
     src/engine/rendering/light_environment.cpp
     src/engine/rendering/brdf_lut.cpp
@@ -178,15 +182,16 @@ target_include_directories(badlands_game_lib PUBLIC
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 
 # Three thin executables, each with its own main, all linking badlands_engine
-# and badlands_game_lib. Stage 2 grows each one's own real AppView; this task
-# (S2.A1) has all three share PlaceholderView (Stage 1's lit textured sphere)
-# as a foundation, so badlands_game_lib is unused by them for now.
-set(badlands_app_dir_viewer src/viewer)
-set(badlands_app_dir_game src/game)
-set(badlands_app_dir_ai_sandbox src/ai_sandbox)
+# and badlands_game_lib. Stage 2 grows each one's own real AppView; game and
+# ai_sandbox still share PlaceholderView (Stage 1's lit textured sphere) until
+# their own tasks (S2.F/G) land -- badlands_viewer got its real AppView
+# (ModelViewerView) in Task S2.E.
+set(badlands_app_sources_viewer src/viewer/main_viewer.cpp src/viewer/model_viewer_view.cpp)
+set(badlands_app_sources_game src/game/main_game.cpp)
+set(badlands_app_sources_ai_sandbox src/ai_sandbox/main_ai_sandbox.cpp)
 
 foreach(app viewer game ai_sandbox)
-    add_executable(badlands_${app} ${badlands_app_dir_${app}}/main_${app}.cpp)
+    add_executable(badlands_${app} ${badlands_app_sources_${app}})
     target_link_libraries(badlands_${app} PRIVATE badlands_engine badlands_game_lib)
     if(APPLE)
         # Use the new linker on Apple platforms (crib from
