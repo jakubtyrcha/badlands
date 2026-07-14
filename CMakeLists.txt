@@ -81,6 +81,10 @@ add_library(badlands_engine STATIC
     src/engine/rendering/geometry/aabb.cpp
     src/engine/rendering/geometry/cube_sphere.cpp
     src/engine/rendering/geometry/textured_mesh_builders.cpp
+    src/engine/rendering/geometry/mesh_builder_utils.cpp
+    src/engine/rendering/geometry/primitive_mesh_builders.cpp
+    src/engine/rendering/geometry/extrusion_mesh_builder.cpp
+    src/engine/rendering/geometry/building_parts_builder.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
@@ -148,6 +152,11 @@ add_library(badlands_game_lib STATIC
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
     third_party/noiser/noiser-vm/src/noiser_crash.cpp
+    # Task S2.C: procedural-geometry game data (no engine/SDL/Dawn deps — see
+    # the file-level comments in src/game/building_catalog.{h,cpp} and
+    # src/game/geometry/ploppable_rings.{h,cpp}).
+    src/game/building_catalog.cpp
+    src/game/geometry/ploppable_rings.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
 # noiser_common.h intentionally ships [[deprecated]] shims.
@@ -159,6 +168,9 @@ target_include_directories(badlands_game_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    # For "core/roof_shape.hpp" + "game/material_id.hpp" etc (Task S2.C) —
+    # header search path only, no engine/SDL/Dawn dependency added.
+    ${CMAKE_SOURCE_DIR}/src
 )
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 
@@ -201,3 +213,21 @@ target_include_directories(badlands_game_tests PRIVATE
 target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
 target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_geometry_tests: Catch2 suite for Task S2.C's procedural geometry
+# (primitives/rocks/building parts, src/engine/rendering/geometry) + the
+# building visual catalog / ploppable rings (src/game). Pure CPU — no GPU
+# init needed — despite linking badlands_engine (StaticTexturedMeshComponent
+# carries wgpu::TextureView/Sampler members that are never touched here).
+add_executable(badlands_geometry_tests
+    game/tests/geometry_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_geometry_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_geometry_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
