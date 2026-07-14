@@ -1,5 +1,5 @@
-//! JPEG decode + glTF pack texture-URI parsing, exposed to the C++ engine
-//! via a small C ABI.
+//! Format-autodetecting image decode (JPEG/PNG) + glTF pack texture-URI
+//! parsing, exposed to the C++ engine via a small C ABI.
 //!
 //! Ported from badlands v0.35's `src/scene/material.rs` (`decode_rgba` /
 //! `load_pack_uris`), minus mip generation (mips are GPU-side in Stage 1).
@@ -9,17 +9,27 @@ use std::os::raw::c_char;
 use std::panic;
 use std::ptr;
 
-/// Decode a JPEG file at `path` to raw RGBA8 pixels at native resolution
-/// (no resize, no mip generation — that's GPU-side later).
-///
-/// Returns `(rgba_bytes, width, height)` on success, `None` on any failure
-/// (file read, JPEG decode).
-fn decode(path: &str) -> Option<(Vec<u8>, u32, u32)> {
-    let bytes = std::fs::read(path).ok()?;
-    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok()?;
+/// Decode raw image bytes to RGBA8, auto-detecting the format (JPEG, PNG,
+/// ...) from content signature rather than a file extension. Shared by the
+/// `badlands_decode_jpeg` and `badlands_decode_image` C-ABI thunks below —
+/// both now accept any format `image::load_from_memory` can sniff; the
+/// "_jpeg" name reflects its original callers, not a format restriction.
+fn decode_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let img = image::load_from_memory(bytes).ok()?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     Some((rgba.into_raw(), w, h))
+}
+
+/// Decode an image file at `path` to raw RGBA8 pixels at native resolution
+/// (no resize, no mip generation — that's GPU-side later). Format
+/// (JPEG/PNG/...) is auto-detected from file content.
+///
+/// Returns `(rgba_bytes, width, height)` on success, `None` on any failure
+/// (file read, decode).
+fn decode(path: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    decode_bytes(&bytes)
 }
 
 /// Resolve the texture URI referenced by a glTF `Texture`, if any. Only
@@ -116,13 +126,59 @@ pub unsafe extern "C" fn badlands_decode_jpeg(path: *const c_char) -> BadlandsIm
     }
 }
 
+/// Decode the image file at `path` to raw RGBA8 across the C ABI, with the
+/// format (JPEG, PNG, ...) auto-detected from file content. Mirrors
+/// `badlands_decode_jpeg` exactly (same panic-safe wrapping, same
+/// `BadlandsImage` return, same null-on-error) — the two thunks share the
+/// same `decode`/`decode_bytes` implementation; `badlands_decode_image` is
+/// the format-general entry point new callers (e.g. PNG normal/ARM maps)
+/// should use.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string.
+///
+/// # Returns
+/// On success, `rgba` points at a malloc'd (via `Vec::into_raw_parts`)
+/// buffer of `width * height * 4` bytes, owned by the caller and must be
+/// freed with `badlands_image_free`. On failure (invalid input, missing
+/// file, decode error, or an internal panic), `rgba` is NULL and
+/// `width`/`height` are both 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_decode_image(path: *const c_char) -> BadlandsImage {
+    let result = panic::catch_unwind(|| {
+        if path.is_null() {
+            return None;
+        }
+        let path = unsafe { CStr::from_ptr(path) }.to_str().ok()?;
+        decode(path)
+    });
+
+    match result {
+        Ok(Some((rgba, width, height))) => {
+            // Leak the Vec's buffer to the caller; badlands_image_free
+            // reconstructs it via Vec::from_raw_parts using the same
+            // length/capacity (rgba8 buffers have no spare capacity, so
+            // len == capacity == width * height * 4).
+            let mut rgba = std::mem::ManuallyDrop::new(rgba);
+            let ptr = rgba.as_mut_ptr();
+            BadlandsImage { rgba: ptr, width, height }
+        }
+        Ok(None) => failed_image(),
+        Err(_) => {
+            eprintln!("badlands_decode_image: panicked");
+            failed_image()
+        }
+    }
+}
+
 /// Free the pixel buffer of a `BadlandsImage` returned by
-/// `badlands_decode_jpeg`. Safe to call on a failure result (NULL `rgba`).
+/// `badlands_decode_jpeg` or `badlands_decode_image`. Safe to call on a
+/// failure result (NULL `rgba`).
 ///
 /// # Safety
 /// `image.rgba` must be either NULL or a pointer previously returned by
-/// `badlands_decode_jpeg` (with matching `width`/`height`) that has not
-/// already been freed.
+/// `badlands_decode_jpeg`/`badlands_decode_image` (with matching
+/// `width`/`height`) that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn badlands_image_free(image: BadlandsImage) {
     if panic::catch_unwind(|| {
@@ -265,6 +321,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_bytes_png_roundtrip() {
+        // Build a tiny 2x2 RGBA image in memory, encode it to PNG bytes
+        // (via the `image` crate), and decode those bytes back through
+        // `decode_bytes` — the same format-auto-detecting code path used by
+        // `badlands_decode_image` (and, since M1, `badlands_decode_jpeg`).
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([10, 20, 30, 255]));
+        img.put_pixel(1, 0, image::Rgba([40, 50, 60, 255]));
+        img.put_pixel(0, 1, image::Rgba([70, 80, 90, 255]));
+        img.put_pixel(1, 1, image::Rgba([100, 110, 120, 255]));
+
+        let mut png_bytes: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .expect("encode png");
+        // Sanity-check we actually built a PNG (not accidentally testing a
+        // format the decoder would auto-detect some other way).
+        assert_eq!(&png_bytes[0..8], b"\x89PNG\r\n\x1a\n");
+
+        let (rgba, w, h) = decode_bytes(&png_bytes).expect("decode png bytes");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        assert_eq!(&rgba[0..4], &[10, 20, 30, 255], "pixel (0,0)");
+        assert_eq!(&rgba[12..16], &[100, 110, 120, 255], "pixel (1,1)");
+    }
+
+    #[test]
     fn pack_uris_resolves_base_normal_mr() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -298,6 +381,52 @@ mod tests {
         let image = unsafe { badlands_decode_jpeg(c_path.as_ptr()) };
         assert!(!image.rgba.is_null());
         assert_eq!((image.width, image.height), (1024, 1024));
+
+        unsafe { badlands_image_free(image) };
+    }
+
+    #[test]
+    fn ffi_decode_image_roundtrip_jpeg() {
+        // badlands_decode_image auto-detects JPEG too (not just PNG).
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../assets/materials/rocky_trail_1k.gltf/textures/rocky_trail_diff_1k.jpg"
+        );
+        let c_path = CString::new(path).unwrap();
+
+        let image = unsafe { badlands_decode_image(c_path.as_ptr()) };
+        assert!(!image.rgba.is_null());
+        assert_eq!((image.width, image.height), (1024, 1024));
+
+        unsafe { badlands_image_free(image) };
+    }
+
+    #[test]
+    fn ffi_decode_image_roundtrip_png() {
+        // A real PNG normal map from an M2 material pack (weathered_planks) —
+        // this is the format-autodetection case badlands_decode_image exists
+        // for: JPEG-only decode would fail on this file.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../assets/materials/weathered_planks_1k/textures/weathered_planks_nor_dx_1k.png"
+        );
+        let c_path = CString::new(path).unwrap();
+
+        let image = unsafe { badlands_decode_image(c_path.as_ptr()) };
+        assert!(!image.rgba.is_null());
+        assert_eq!((image.width, image.height), (1024, 1024));
+
+        unsafe { badlands_image_free(image) };
+    }
+
+    #[test]
+    fn ffi_decode_image_missing_file_returns_null() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/does/not/exist.png");
+        let c_path = CString::new(path).unwrap();
+
+        let image = unsafe { badlands_decode_image(c_path.as_ptr()) };
+        assert!(image.rgba.is_null());
+        assert_eq!((image.width, image.height), (0, 0));
 
         unsafe { badlands_image_free(image) };
     }

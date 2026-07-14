@@ -1,5 +1,6 @@
-// C ABI for the `assets` Rust crate (src/crates/assets): JPEG decode + glTF
-// pack texture-URI parsing. Linked into the badlands C++ app via Corrosion.
+// C ABI for the `assets` Rust crate (src/crates/assets): format-
+// autodetecting image decode (JPEG/PNG) + glTF pack texture-URI parsing.
+// Linked into the badlands C++ app via Corrosion.
 //
 // Note: no mip generation here — mips are produced GPU-side later. Images
 // are decoded to raw RGBA8 at native resolution only.
@@ -45,8 +46,20 @@ typedef struct BadlandsGltfTextures {
 // are both 0.
 BadlandsImage badlands_decode_jpeg(const char* path);
 
+// Decode the image file at `path` to raw RGBA8 at native resolution, with
+// the format (JPEG, PNG, ...) auto-detected from file content rather than
+// the path's extension. Same contract as badlands_decode_jpeg(); prefer
+// this for any new caller (e.g. PNG normal/ARM maps) since it also handles
+// JPEG.
+//
+// Returns a BadlandsImage owned by the caller; free its pixel buffer with
+// badlands_image_free(). On failure, `rgba` is NULL and `width`/`height`
+// are both 0.
+BadlandsImage badlands_decode_image(const char* path);
+
 // Free the pixel buffer of a BadlandsImage previously returned by
-// badlands_decode_jpeg(). Safe to call on a failure result (NULL `rgba`).
+// badlands_decode_jpeg() or badlands_decode_image(). Safe to call on a
+// failure result (NULL `rgba`).
 void badlands_image_free(BadlandsImage image);
 
 // Resolve the base color / normal / metallic-roughness texture URIs of the

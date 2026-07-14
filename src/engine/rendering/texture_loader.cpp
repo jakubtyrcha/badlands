@@ -49,11 +49,11 @@ wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue
 LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
                             GpuPipelineGenerator& pipeline_gen,
                             const std::string& path) {
-  // Decode.
-  BadlandsImage img = badlands_decode_jpeg(path.c_str());
+  // Decode (format auto-detected from content: JPEG albedo, PNG normal/ARM).
+  BadlandsImage img = badlands_decode_image(path.c_str());
   ImageGuard guard{img};
   if (img.rgba == nullptr) {
-    spdlog::error("LoadTexture2D: failed to decode JPEG '{}'", path);
+    spdlog::error("LoadTexture2D: failed to decode image '{}'", path);
     return {};
   }
 
