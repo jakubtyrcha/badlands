@@ -3,6 +3,18 @@ name = "noiser-bundle"
 version = "0.1.0"
 edition = "2024"
 
+# Standalone: this crate lives inside the badlands repo tree but is not a
+# member of the root Cargo workspace (that workspace's `members` list does
+# not include it). The root package ("badlands", the legacy Rust/wgpu/winit
+# app) also lives at the repo root; without this empty [workspace] table,
+# `cargo` commands run against this manifest walk up and find that root
+# Cargo.toml as the workspace root and (per Corrosion's `cargo metadata`
+# resolution) import + build EVERY workspace member — including the heavy
+# legacy app — instead of just noiser-bundle. The empty [workspace] table
+# below makes this crate its own workspace root, exactly like
+# src/crates/{wesl,assets,nav}/Cargo.toml.
+[workspace]
+
 # Aggregates the noiser FFI surface into ONE Rust staticlib so the C++ test
 # binary links libstd exactly once (two Rust staticlibs collide on std symbols).
 [lib]

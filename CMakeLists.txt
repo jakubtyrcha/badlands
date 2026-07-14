@@ -49,6 +49,19 @@ corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/nav/Cargo.toml)
 corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 
+# noiser-bundle: aggregates noiser-compiler + noiser-vm (third_party/noiser)
+# into ONE Rust staticlib (crates/noiser-bundle) so the noiser C++ VM wrapper
+# (third_party/noiser/noiser-vm/src, compiled into badlands_game_lib below)
+# links libstd exactly once. It is a member of the root workspace (which also
+# contains the legacy Rust app); Corrosion invokes `cargo build -p
+# noiser-bundle`, which only resolves noiser-bundle + its two path deps, not
+# the legacy app's wgpu/winit/naga deps. The package name has a dash, and
+# Corrosion's imported CMake target always replaces dashes with underscores
+# (CorrosionGenerator.cmake), so the target is `noiser_bundle`, not
+# `noiser-bundle`.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/crates/noiser-bundle/Cargo.toml)
+corrosion_set_env_vars(noiser_bundle "RUSTFLAGS=-Cpanic=unwind")
+
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
 # types/logic live here — see src/engine/app/app_view.hpp.
@@ -108,16 +121,50 @@ target_include_directories(badlands_engine PUBLIC
     ${imgui_SOURCE_DIR}/backends
 )
 
-# Three thin executables, each with its own main, all linking badlands_engine.
-# Stage 2 grows each one's own real AppView; this task (S2.A1) has all three
-# share PlaceholderView (Stage 1's lit textured sphere) as a foundation.
+# badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog + the
+# noiser-scripted brains), pure C++ with no engine/SDL/Dawn deps — geometry
+# that needs engine types comes in a later task (S2.C). Includes the
+# sampo::noiser C++ VM wrapper (pure delegation over the noiser Rust VM's C
+# ABI); badlands uses the VM only, so noiser_jit_stubs.cpp stubs the JIT
+# (Cranelift) C ABI.
+#
+# Named badlands_game_lib, not badlands_game: the "game" app executable below
+# is already named badlands_game (from S2.A1/A3), and CMake target names must
+# be globally unique.
+add_library(badlands_game_lib STATIC
+    game/src/game.cpp
+    game/src/brain.cpp
+    game/src/placement.cpp
+    game/src/movement.cpp
+    game/src/heroes.cpp
+    game/src/noiser_jit_stubs.cpp
+    third_party/noiser/noiser-vm/src/noiser.cpp
+    third_party/noiser/noiser-vm/src/noiser_crash.cpp
+)
+target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
+# noiser_common.h intentionally ships [[deprecated]] shims.
+target_compile_options(badlands_game_lib PRIVATE -Wno-deprecated-declarations)
+target_include_directories(badlands_game_lib PUBLIC
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/third_party/noiser/noiser-vm/src
+    ${CMAKE_SOURCE_DIR}/third_party/noiser
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+)
+target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
+
+# Three thin executables, each with its own main, all linking badlands_engine
+# and badlands_game_lib. Stage 2 grows each one's own real AppView; this task
+# (S2.A1) has all three share PlaceholderView (Stage 1's lit textured sphere)
+# as a foundation, so badlands_game_lib is unused by them for now.
 set(badlands_app_dir_viewer src/viewer)
 set(badlands_app_dir_game src/game)
 set(badlands_app_dir_ai_sandbox src/ai_sandbox)
 
 foreach(app viewer game ai_sandbox)
     add_executable(badlands_${app} ${badlands_app_dir_${app}}/main_${app}.cpp)
-    target_link_libraries(badlands_${app} PRIVATE badlands_engine)
+    target_link_libraries(badlands_${app} PRIVATE badlands_engine badlands_game_lib)
     if(APPLE)
         # Use the new linker on Apple platforms (crib from
         # ../sampo/CMakeLists.txt); avoids issues linking the large
@@ -125,3 +172,24 @@ foreach(app viewer game ai_sandbox)
         target_link_options(badlands_${app} PRIVATE "-Wl,-ld_new")
     endif()
 endforeach()
+
+# badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
+# re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
+# see tests/cpp_tests.rs on the legacy Rust reference branch).
+enable_testing()
+add_executable(badlands_game_tests
+    game/tests/sim_tests.cpp
+    game/tests/noiser_smoke_tests.cpp
+    game/tests/duel_test.cpp
+    game/tests/placement_tests.cpp
+    game/tests/movement_tests.cpp
+    game/tests/heroes_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_game_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/game/src
+)
+target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
+target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib)
+add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
