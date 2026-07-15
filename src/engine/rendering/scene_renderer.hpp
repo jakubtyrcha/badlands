@@ -86,6 +86,14 @@ struct ShadowConfig {
                                        // near side in view)
   bool enable_shadow_map = true;
   bool enable_contact_shadows = true;
+  // Task T3-fix-2, test-only: forces shaders/common/shadow_sampling.wesl's
+  // sampleShadowMapPCF into its hard (single unfiltered tap, no PCF, no
+  // RPDB) debug path via frame_uniforms.shadow_params.w. Defaults false —
+  // production always gets the soft PCF path; only the T4 shadow test
+  // harness's edge-leak test sets this true, to validate the raw
+  // pre-filtered shadow signal instead of the PCF kernel's inherent soft
+  // silhouette edge (see task-3fix2-brief.md).
+  bool hard_shadow_debug = false;
 };
 
 // Deferred renderer: G-buffer geometry pass -> deferred lighting (sun + SH

@@ -221,6 +221,7 @@ Image RenderShadowFrame(const ShadowTestConfig& config, const Scene& world_scene
   shadow_config.backward_extension = 100.0f;
   shadow_config.enable_shadow_map = config.enable_shadow_map;
   shadow_config.enable_contact_shadows = config.enable_contact_shadows;
+  shadow_config.hard_shadow_debug = config.hard_shadow_debug;
   renderer.SetShadowConfig(shadow_config);
   renderer.SetShadowDebugMode(config.mode);
 

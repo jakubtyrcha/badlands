@@ -401,6 +401,72 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
   PosedMacroScene posed = BuildPosedMacroScene();
   REQUIRE(posed.shadow_polygon.size() >= 3);
 
+  // T3-fix-2: this test now renders with sampleShadowMapPCF's HARD (no-PCF,
+  // single unfiltered tap) debug path, so the PCF kernel's inherent soft
+  // silhouette edge (task-3fix-report.md's diagnosed, proven-independent-of-
+  // biasUV residual) no longer contaminates the signal being checked. With
+  // PCF gone, E_leak's kernel term is K_pcf=0 -- only two real, geometric
+  // effects remain, both derived (not fudged) below:
+  //
+  // 1. Incidence-corrected sub-texel snapping, worst-case over edge
+  // orientation. A hard tap classifies a query point p by the STORED
+  // classification of whichever shadow-map texel its uv lands in (texel
+  // index floor(uv*dim)); that texel's own classification was decided, at
+  // shadow-map render time, by whether the TEXEL'S OWN CENTER c lies on the
+  // caster or receiver side of the true (continuous) boundary line L. p can
+  // only be misclassified if L passes between p and c -- and then
+  // dist(p, L) <= |p - c|, since the segment p-c crosses L. The worst case
+  // is |p - c| = a texel's half-diagonal = T_size/sqrt(2) (p at a texel
+  // corner, c its center) -- NOT the T_size/2 you'd get by assuming L
+  // crosses the grid axis-aligned (that's only the tight bound for an edge
+  // parallel to a texel row/column). This scene's shadow polygon sits at an
+  // arbitrary angle to the shadow map's own (light-space) u/v grid --
+  // MakeOffAxisPose deliberately poses it off-axis -- so the general,
+  // any-orientation bound applies, not the axis-aligned special case.
+  // Re-measured ON the (tilted) receiver surface (one perpendicular-to-
+  // light texel spans ~T_size/NdotL there, same incidence argument as
+  // before), the snapping-only band is e_leak = (T_size/sqrt(2)) / NdotL.
+  // (Verified: at the axis-aligned-only coefficient 0.5 this test leaves a
+  // small, resolution-scaling residual (<=6 pixels/config, <=0.12x T_size
+  // beyond the band, out of ~240k checked pixels/config) -- consistent with
+  // exactly this missing worst-case-orientation factor, not a rendering
+  // defect; see task-3fix2-report.md.)
+  //
+  // 2. Receiver-side normal-offset (Peter-Panning). sampleShadowMapPCF's
+  // step 1 displaces the sampled point by `ground_normal * offsetLen`
+  // (offsetLen = ShadowMath::NormalOffsetLength(NdotL, T_size)) BEFORE
+  // projecting into light space. Because that displacement is along the
+  // receiver's normal (not along the light ray), it shifts the shadow-map
+  // lookup sideways as well as in depth -- retracting the observed shadow
+  // boundary from the TRUE geometric polygon (ComputeShadowPolygon) by a
+  // fixed world-space vector. Baking that shift into the oracle's expected
+  // polygon (rather than folding it into E_leak as a fudge term) keeps the
+  // check symmetric and exact at the derived snapping value on BOTH sides.
+  //
+  // Derivation of the shift vector (independently verified via a numeric
+  // Python cross-check before writing this):
+  //   delta          = ground_normal * offsetLen              (the bias)
+  //   light_ray_dir   = -normalize(sun_toward)                 (light travel dir)
+  //   denom           = dot(light_ray_dir, ground_normal)      (== -NdotL)
+  //   shift_vector    = delta - (dot(delta, ground_normal) / denom) * light_ray_dir
+  // is the vector by which a light ray through a biased sample point
+  // (worldPos + delta), re-projected onto the ground plane along
+  // light_ray_dir, lands relative to worldPos itself. Setting that equal to
+  // a TRUE boundary point B and solving for the actual (unbiased) receiver
+  // position p gives p = B - shift_vector -- i.e. the polygon a hard tap
+  // with normal-offset bias actually renders is `shadow_polygon -
+  // shift_vector` (every vertex translated by the same fixed vector, since
+  // ground_normal/sun_toward/NdotL are constant over this flat floor).
+  // shift_vector is guaranteed in-plane (dot(shift_vector, ground_normal) ==
+  // 0 algebraically: delta's normal component exactly cancels), so
+  // subtracting it from the (basis_u, basis_v) polygon vertices is exact,
+  // not an approximation.
+  const glm::vec3& ground_normal = posed.scene.ground_normal;
+  const glm::vec3& sun_toward = posed.scene.sun_toward;
+  const float ndotl = glm::dot(ground_normal, sun_toward);
+  const glm::vec3 light_ray_dir = -glm::normalize(sun_toward);
+  const float denom = glm::dot(light_ray_dir, ground_normal);  // == -ndotl
+
   struct ConfigCase {
     uint32_t r_sm;
     float d_max;
@@ -412,7 +478,20 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
   for (const ConfigCase& cfg : configs) {
     DYNAMIC_SECTION("r_sm=" << cfg.r_sm << " d_max=" << cfg.d_max) {
       const float t_size = cfg.d_max / static_cast<float>(cfg.r_sm);
-      const float e_leak = 1.5f * t_size;
+      const float e_leak = (t_size / std::sqrt(2.0f)) / ndotl;
+
+      // Bake the normal-offset (Peter-Panning) shift into the expected
+      // polygon -- see the derivation above. ShadowMath::NormalOffsetLength
+      // is the SAME CPU source-of-truth expression shadow_sampling.wesl's
+      // step 1 mirrors (shadow_map.hpp).
+      const float offset_len = ShadowMath::NormalOffsetLength(ndotl, t_size);
+      const glm::vec3 delta = ground_normal * offset_len;
+      const glm::vec3 shift_vector =
+          delta - (glm::dot(delta, ground_normal) / denom) * light_ray_dir;
+      const glm::vec2 shift_uv(glm::dot(shift_vector, posed.basis_u),
+                               glm::dot(shift_vector, posed.basis_v));
+      std::vector<glm::vec2> observed_polygon = posed.shadow_polygon;
+      for (glm::vec2& v : observed_polygon) v -= shift_uv;
 
       ShadowTestConfig render_cfg;
       render_cfg.r_sm = cfg.r_sm;
@@ -420,6 +499,7 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
       render_cfg.mode = ShadowDebugMode::ShadowMapOnly;
       render_cfg.enable_shadow_map = true;
       render_cfg.enable_contact_shadows = true;
+      render_cfg.hard_shadow_debug = true;  // T3-fix-2: raw signal, no PCF
 
       Image img = RenderShadowFrame(render_cfg, posed.scene, posed.camera);
       REQUIRE(img.width == kFrameWidth);
@@ -443,7 +523,7 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
                                              posed.basis_v, px, py, img.width, img.height);
           if (!hit.is_receiver) continue;
 
-          const float d = SignedDistanceToPolygon(posed.shadow_polygon, hit.ground_uv);
+          const float d = SignedDistanceToPolygon(observed_polygon, hit.ground_uv);
           const float value = img.At(px, py);
           const size_t idx = static_cast<size_t>(py) * img.width + px;
 

@@ -34,6 +34,11 @@ struct ShadowTestConfig {
   ShadowDebugMode mode = ShadowDebugMode::ShadowMapOnly;
   bool enable_shadow_map = true;
   bool enable_contact_shadows = true;
+  // Task T3-fix-2: forwarded to ShadowConfig::hard_shadow_debug. Test 1
+  // (edge-leak) sets this true to get the raw, unfiltered shadow signal;
+  // Test 5 (RPDB slope-acne) leaves it false (needs the PCF path to
+  // exercise the per-tap biasUV gradient).
+  bool hard_shadow_debug = false;
 };
 
 // Fixed offscreen capture size (512x512) for every RenderShadowFrame call.

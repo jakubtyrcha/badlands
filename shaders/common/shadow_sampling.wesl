@@ -1,6 +1,7 @@
 // Directional shadow-map sampling: normal-offset bias (receiver-side) +
 // receiver-plane depth-bias (RPDB) 3x3 PCF. Task T3 (T3-fix: RPDB gradient
-// is now analytic — see step 4 below).
+// is now analytic — see step 4 below; T3-fix-2: added a hard/no-PCF debug
+// path — see step 4a below).
 //
 // Adapted (NOT a verbatim port) from sampo's src/shaders/common/
 // shadow_sampling.wesl, which samples a reversed-Z shadow map with a single
@@ -25,7 +26,12 @@
 // textureSampleCompare must run in uniform control flow: no early return /
 // branch guards it below. The frustum test is folded into the return value
 // via `mix` instead (matches the `select`-as-multiplier idiom in sampo's
-// shadow_sampling.wesl:26-31).
+// shadow_sampling.wesl:26-31). The hard-shadow branch added in step 4a IS a
+// branch (an early return) ahead of the PCF path's textureSampleCompare —
+// that's still safe: it's gated on frame.shadowParams.w, a per-FRAME
+// uniform-buffer value (identical for every invocation this draw), not a
+// per-pixel value like the frustum test above, so it can't introduce
+// non-uniform control flow around the PCF path's textureSampleCompare.
 import package::common::frame::frame;
 
 fn sampleShadowMapPCF(worldPos: vec3<f32>, normal: vec3<f32>, NdotL: f32,
@@ -48,6 +54,31 @@ fn sampleShadowMapPCF(worldPos: vec3<f32>, normal: vec3<f32>, NdotL: f32,
     // textureSampleCompare below in uniform control flow.
     let inFrustum = f32(all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)) &&
                         ndc.z >= 0.0 && ndc.z <= 1.0);
+
+    // 3a. Hard-shadow debug path (T3-fix-2, test-only): a single, nearest,
+    // UNFILTERED tap — bypasses the 3x3 PCF loop, the hardware-bilinear
+    // comparison sampler, and the RPDB gradient (step 4) entirely. Exists so
+    // T4's edge-leak test (Test 1) can validate the raw pre-filtered shadow
+    // signal (a crisp edge) instead of the PCF kernel's inherent soft edge
+    // at silhouettes, which is a display filter, not a correctness bug (see
+    // task-3fix-report.md). Gated on frame.shadowParams.w (0 = PCF/
+    // production, >0.5 = hard); SceneRenderer only sets this nonzero when
+    // ShadowConfig::hard_shadow_debug is explicitly set, which no app does
+    // (production always takes the PCF path below).
+    //
+    // `receiverDepth` here still carries the normal-offset bias from step 1
+    // — that bias is part of the correctness signal Test 1 checks (its
+    // Peter-Panning displacement is baked into the test's expected-shadow
+    // oracle polygon, not stripped out).
+    if (frame.shadowParams.w > 0.5) {
+        let dim = vec2<f32>(textureDimensions(shadowMap));
+        let texel_i = vec2<i32>(clamp(uv * dim, vec2<f32>(0.0), dim - 1.0));
+        let storedDepth = textureLoad(shadowMap, texel_i, 0);
+        // Conventional-Z: lit when the receiver is nearer to (or level
+        // with) the light than whatever is stored at that texel.
+        let lit = select(0.0, 1.0, receiverDepth <= storedDepth);
+        return mix(1.0, lit, inFrustum);
+    }
 
     // 4. Receiver-plane depth-bias gradient (RPDB), computed ANALYTICALLY
     // (T3-fix) instead of via screen-space derivatives. The directional

@@ -335,9 +335,9 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // T1's plan.
   const float t_size = shadow_config_.coverage_dmax /
                         static_cast<float>(shadow_config_.resolution);
-  frame_uniforms.shadow_params =
-      glm::vec4(t_size, 1.0f / static_cast<float>(shadow_config_.resolution),
-                1.5f * t_size / 0.05f, 0.0f);
+  frame_uniforms.shadow_params = glm::vec4(
+      t_size, 1.0f / static_cast<float>(shadow_config_.resolution),
+      1.5f * t_size / 0.05f, shadow_config_.hard_shadow_debug ? 1.0f : 0.0f);
 
   FrameContext frame;
   frame.Begin(device_, queue_, frame_uniforms, min_uniform_offset_alignment_);
