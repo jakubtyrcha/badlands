@@ -177,6 +177,41 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
     wgpu::CommandBuffer commands = encoder.Finish();
     queue_.Submit(1, &commands);
   }
+
+  // === Contact-shadow target (T2) ===
+  // Window-sized R8Unorm, cleared to 1.0 (fully lit / no occlusion) at
+  // creation, exactly like the AO target above. T2 only creates + clears
+  // this (a no-op input for now) -- T5's SSCS compute pass writes it, T3
+  // binds it for the deferred pass's min(shadow map, contact) term.
+  wgpu::TextureDescriptor contact_desc;
+  contact_desc.size = {width, height, 1};
+  contact_desc.format = wgpu::TextureFormat::R8Unorm;
+  contact_desc.usage = wgpu::TextureUsage::TextureBinding |
+                       wgpu::TextureUsage::RenderAttachment;
+  contact_desc.mipLevelCount = 1;
+  contact_desc.sampleCount = 1;
+  contact_desc.dimension = wgpu::TextureDimension::e2D;
+  contact_shadow_texture_ = device_.CreateTexture(&contact_desc);
+  contact_shadow_view_ = contact_shadow_texture_.CreateView();
+
+  {
+    wgpu::RenderPassColorAttachment contact_clear;
+    contact_clear.view = contact_shadow_view_;
+    contact_clear.loadOp = wgpu::LoadOp::Clear;
+    contact_clear.storeOp = wgpu::StoreOp::Store;
+    contact_clear.clearValue = {1.0, 1.0, 1.0, 1.0};
+
+    wgpu::RenderPassDescriptor clear_desc;
+    clear_desc.colorAttachmentCount = 1;
+    clear_desc.colorAttachments = &contact_clear;
+    clear_desc.depthStencilAttachment = nullptr;
+
+    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&clear_desc);
+    pass.End();
+    wgpu::CommandBuffer commands = encoder.Finish();
+    queue_.Submit(1, &commands);
+  }
 }
 
 void SceneRenderer::Resize(uint32_t width, uint32_t height) {
@@ -227,13 +262,30 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   }
   const bool gtao_will_run = run_gtao && gtao_pipeline != nullptr;
 
+  // Directional shadow map (T2): (re)create the depth texture if the
+  // configured resolution changed, then fit the light's fixed-coverage
+  // ortho frustum to a point ahead of the camera. Computed here (before
+  // frame_uniforms is populated below) because light_view_proj must be set
+  // BEFORE frame.Begin() uploads the frame UBO -- the shadow pass shares
+  // this same per-frame uniform buffer with the rest of the frame.
+  if (!shadow_map_.IsValid() ||
+      shadow_map_.GetResolution() != shadow_config_.resolution) {
+    shadow_map_.CreateTexture(device_, shadow_config_.resolution);
+  }
+  const glm::vec3 shadow_center_world =
+      camera_world_pos +
+      camera.direction * (0.5f * shadow_config_.coverage_dmax);
+  shadow_map_.UpdateLightMatrices(
+      scene.sun_direction, shadow_center_world, shadow_config_.coverage_dmax,
+      shadow_config_.resolution, shadow_config_.backward_extension);
+
   UniformData frame_uniforms{};
   frame_uniforms.view = glm::lookAt(glm::vec3(0.0f), camera.direction, camera.up);
   frame_uniforms.proj = camera.GetProj();
   // No motion vectors/TAA yet — previous-frame matrices equal current.
   frame_uniforms.view_prev = frame_uniforms.view;
   frame_uniforms.proj_prev = frame_uniforms.proj;
-  frame_uniforms.light_view_proj = glm::mat4(1.0f);  // no shadow map
+  frame_uniforms.light_view_proj = shadow_map_.GetLightViewProj();
   frame_uniforms.camera_world_pos = glm::vec4(camera_world_pos, 0.0f);
   frame_uniforms.sunDir = glm::vec4(scene.sun_direction, 0.0f);
   frame_uniforms.sunColor = glm::vec4(scene.sun_color, 0.0f);
@@ -254,8 +306,10 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       (surface_format_ == wgpu::TextureFormat::RGBA16Float) ? 1 : 0;
   frame_uniforms.debug_flags = static_cast<uint32_t>(shadow_debug_mode_);
   // Derived shadow constants (T1: computed here, consumed by T3/T5's
-  // shadow-map PCF / contact-shadow ray march). No shadow map exists yet —
-  // light_view_proj stays identity (see above).
+  // shadow-map PCF / contact-shadow ray march). t_size already matches
+  // shadow_map_.TexelWorldSize() (both = coverage_dmax / resolution); left
+  // as its own computation here rather than reading the ShadowMap back, per
+  // T1's plan.
   const float t_size = shadow_config_.coverage_dmax /
                         static_cast<float>(shadow_config_.resolution);
   frame_uniforms.shadow_params =
@@ -264,6 +318,38 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
 
   FrameContext frame;
   frame.Begin(device_, queue_, frame_uniforms, min_uniform_offset_alignment_);
+
+  // === Pass 0: Shadow depth (T2) — depth-only render of casters from the
+  // sun's point of view into shadow_map_'s Depth32Float target (conventional
+  // Z: cleared to 1.0 = far, kShadow pipeline compares Less -- see
+  // shadow_map.hpp). Guarded on shadow_config_.enable_shadow_map: when off,
+  // the map still clears to 1.0 (all lit) but casters are skipped, so T3's
+  // (future) sampling reads "no shadow" everywhere instead of stale data.
+  // Uses this SAME frame/UBO (light_view_proj was set into frame_uniforms
+  // above, before frame.Begin() uploaded it) -- normalmapped.wesl's
+  // shadow_pass vertex path reads frame.lightViewProj directly. No color
+  // targets: the shadow fragment shader writes nothing but depth. ===
+  {
+    wgpu::RenderPassDepthStencilAttachment shadow_depth_attachment;
+    shadow_depth_attachment.view = shadow_map_.GetDepthView();
+    shadow_depth_attachment.depthClearValue = 1.0f;  // conventional-Z: far
+    shadow_depth_attachment.depthLoadOp = wgpu::LoadOp::Clear;
+    shadow_depth_attachment.depthStoreOp = wgpu::StoreOp::Store;
+    shadow_depth_attachment.stencilLoadOp = wgpu::LoadOp::Undefined;
+    shadow_depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 0;
+    desc.colorAttachments = nullptr;
+    desc.depthStencilAttachment = &shadow_depth_attachment;
+
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    if (shadow_config_.enable_shadow_map) {
+      RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
+                           RenderPassType::kShadow, material_instance_cache_);
+    }
+    pass.End();
+  }
 
   // === Pass 1: G-buffer — clear MRT (normals/albedo/material) + depth,
   // draw textured meshes with their kGBuffer pipeline variant ===

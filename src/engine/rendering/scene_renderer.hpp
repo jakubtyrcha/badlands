@@ -36,6 +36,7 @@
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/prefiltered_cubemap.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
+#include "engine/rendering/shadow_map.hpp"
 
 namespace badlands {
 
@@ -252,9 +253,20 @@ class SceneRenderer {
   // has_r8unorm_storage_ are true. Default on.
   bool gtao_enabled_ = true;
 
-  // === Directional shadows (T1) ===
+  // === Directional shadows (T1/T2) ===
   ShadowConfig shadow_config_;
   ShadowDebugMode shadow_debug_mode_ = ShadowDebugMode::Off;
+
+  // Shadow depth map (T2): owns the Depth32Float shadow texture + the
+  // fixed-coverage light view/proj fit. (Re)created when shadow_config_.
+  // resolution changes (see Render()).
+  ShadowMap shadow_map_;
+
+  // Contact-shadow term (T2 creates + clears it; T5's SSCS compute pass
+  // writes it; T3 binds it for sampling). Window-sized R8Unorm, cleared to
+  // 1.0 (fully lit / no-op) at creation exactly like ao_texture_ above.
+  wgpu::Texture contact_shadow_texture_;
+  wgpu::TextureView contact_shadow_view_;
 };
 
 }  // namespace badlands

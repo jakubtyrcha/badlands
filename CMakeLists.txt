@@ -96,6 +96,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/passes/render_skybox.cpp
     src/engine/rendering/passes/render_gbuffer_debug.cpp
     src/engine/rendering/gbuffer.cpp
+    src/engine/rendering/shadow_map.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
