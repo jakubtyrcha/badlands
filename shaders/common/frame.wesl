@@ -21,7 +21,13 @@ struct FrameUniforms {
     enableGtao: u32,              // 1 = AO enabled, 0 = disabled (use 1.0 for AO)
     tonemapMode: u32,             // TonemapMode enum (0 = kClamp)
     outputIsLinear: u32,          // 1 = RGBA16Float (linear output), 0 = sRGB
-    _padding0: f32,               // was dpiScale, now unused — keep for struct alignment
+    debugFlags: u32,              // ShadowDebugMode value (0 = Off); was
+                                   // `_padding0` — repurposed by T1 (directional
+                                   // shadows) as the shadow-debug-mode selector.
+    // Derived shadow constants (T1: computed, unused until T3/T5 consume
+    // them for shadow-map PCF / contact shadows). xyz = (tSizeWorld,
+    // invShadowRes, sscsMaxRayWorld); w unused.
+    shadowParams: vec4<f32>,
 }
 
 // Get near and far plane distances

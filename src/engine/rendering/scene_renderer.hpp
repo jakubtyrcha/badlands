@@ -59,6 +59,34 @@ enum class GBufferDebugMode {
               // Shows 1.0 (white) everywhere when GTAO is off / unsupported.
 };
 
+// Directional-shadow debug visualization modes (Task T1). debug_flags == 0
+// (Off) means "no debug output" — the deferred pass returns normally lit
+// color. Any nonzero value short-circuits the deferred pass to return the
+// `shadow` term as grayscale (see shaders/passes/deferred_lighting.wesl).
+// At T1 `shadow` is hardcoded 1.0, so every nonzero mode renders all-white;
+// T3 wires up the real shadow-map/contact-shadow terms and gives Combined/
+// ShadowMapOnly/ContactOnly distinct output.
+enum class ShadowDebugMode : uint32_t {
+  Off = 0,
+  Combined = 1,       // min(shadow map PCF, contact shadow) — T3
+  ShadowMapOnly = 2,  // shadow map PCF term alone — T3
+  ContactOnly = 3,    // contact shadow term alone — T3
+};
+
+// Directional-shadow configuration (Task T1). Game-agnostic — consumed by
+// SceneRenderer to size/derive the shadow map and its shadow-space
+// constants (frame_uniforms.shadow_params, T3/T5). No shadow map or render
+// pass exists yet (T2+); this struct only carries the parameters.
+struct ShadowConfig {
+  float coverage_dmax = 128.0f;       // Ortho shadow-frustum width D_max (m)
+  uint32_t resolution = 2048;         // Shadow map is resolution x resolution
+  float backward_extension = 100.0f;  // Extra light-space Z toward the light
+                                       // (keeps casters outside the frustum's
+                                       // near side in view)
+  bool enable_shadow_map = true;
+  bool enable_contact_shadows = true;
+};
+
 // Deferred renderer: G-buffer geometry pass -> deferred lighting (sun + SH
 // ambient) into an HDR target -> fullscreen tonemap resolve to the surface.
 //
@@ -133,6 +161,19 @@ class SceneRenderer {
   // channel. Takes effect on the next Render() call.
   void SetGtaoEnabled(bool enabled) { gtao_enabled_ = enabled; }
   bool GetGtaoEnabled() const { return gtao_enabled_; }
+
+  // Directional-shadow configuration (Task T1). Takes effect on the next
+  // Render() call. No shadow map exists yet (T2+) — this only feeds the
+  // derived shadow constants uploaded to frame_uniforms.shadow_params.
+  void SetShadowConfig(const ShadowConfig& config) { shadow_config_ = config; }
+  const ShadowConfig& GetShadowConfig() const { return shadow_config_; }
+
+  // Directional-shadow debug visualization (Task T1). Takes effect on the
+  // next Render() call. See ShadowDebugMode above for what each mode means;
+  // at T1 all nonzero modes render all-white (shadow is hardcoded 1.0 until
+  // T3).
+  void SetShadowDebugMode(ShadowDebugMode mode) { shadow_debug_mode_ = mode; }
+  ShadowDebugMode GetShadowDebugMode() const { return shadow_debug_mode_; }
 
   // HDR accumulation target format and reversed-Z depth-buffer format —
   // fixed constants in this trimmed renderer (not configurable via
@@ -210,6 +251,10 @@ class SceneRenderer {
   // GTAO on/off (SetGtaoEnabled). GTAO runs only when this AND
   // has_r8unorm_storage_ are true. Default on.
   bool gtao_enabled_ = true;
+
+  // === Directional shadows (T1) ===
+  ShadowConfig shadow_config_;
+  ShadowDebugMode shadow_debug_mode_ = ShadowDebugMode::Off;
 };
 
 }  // namespace badlands

@@ -252,6 +252,15 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
                                        // shaders/common/frame.wesl: 0 = kClamp)
   frame_uniforms.output_is_linear =
       (surface_format_ == wgpu::TextureFormat::RGBA16Float) ? 1 : 0;
+  frame_uniforms.debug_flags = static_cast<uint32_t>(shadow_debug_mode_);
+  // Derived shadow constants (T1: computed here, consumed by T3/T5's
+  // shadow-map PCF / contact-shadow ray march). No shadow map exists yet —
+  // light_view_proj stays identity (see above).
+  const float t_size = shadow_config_.coverage_dmax /
+                        static_cast<float>(shadow_config_.resolution);
+  frame_uniforms.shadow_params =
+      glm::vec4(t_size, 1.0f / static_cast<float>(shadow_config_.resolution),
+                1.5f * t_size / 0.05f, 0.0f);
 
   FrameContext frame;
   frame.Begin(device_, queue_, frame_uniforms, min_uniform_offset_alignment_);

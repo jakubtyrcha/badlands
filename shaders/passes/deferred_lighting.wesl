@@ -127,5 +127,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let indirectLighting = (ambientDiffuse * albedoLinear * diffuseWeight) + ambientSpecular;
 
     let finalColorLinear = directLighting + indirectLighting;
+
+    // Directional-shadow debug visualization (T1 plumbing; see
+    // ShadowDebugMode in scene_renderer.hpp). Uniform branch (frame.debugFlags
+    // is the same for every pixel this frame), so this does not diverge
+    // per-fragment. At T1 `shadow` is hardcoded 1.0 above, so any nonzero
+    // mode renders all-white — that's the expected "plumbing works" state.
+    // T3 replaces the hardcoded `shadow` with the real
+    // min(shadowMapPCF, contactShadow) term and expands this branch to
+    // select per-mode (1=combined, 2=map-only, 3=contact-only).
+    if (frame.debugFlags != 0u) {
+        return vec4<f32>(shadow, shadow, shadow, 1.0);
+    }
+
     return vec4<f32>(finalColorLinear, 1.0);
 }
