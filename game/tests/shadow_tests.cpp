@@ -70,6 +70,46 @@ PosedMacroScene BuildPosedMacroScene() {
   return result;
 }
 
+// Task T3-fix Test 5's scene: MakeSlopeScene() (no caster), posed at the
+// SAME fixed off-axis world transform as the macro scene (see
+// MakeOffAxisPose's doc comment).
+//
+// Camera: straight down the slope's own (pre-pose) normal from a modest
+// height, looking at ground_point -- NOT MakeMacroCamera's oblique framing.
+// kFloorHalfSize's doc comment notes Test 1's camera/floor combo keeps the
+// worst-case ray length well under the floor's 500m bound (so the CPU
+// oracle's ClassifyPixel, which has no far_plane clip, never disagrees with
+// the GPU's far-plane discard) -- that "well under" margin is a property of
+// a near-HORIZONTAL floor with an elevated, moderately-downward-looking
+// camera. Reusing that same camera against a 45-degree-tilted plane breaks
+// it: corner rays can run nearly parallel to the tilted plane and travel
+// hundreds of world units (past the camera's far_plane=250, see
+// BuildCamera) before landing inside the 500m bound -- the oracle then
+// calls a pixel "receiver" that the GPU actually far-plane-discarded to the
+// harness's clear color (0.1), which read as spurious near-zero-visibility
+// "acne". A straight-down view bounds every visible ray to a short,
+// predictable distance (no grazing geometry), restoring the same margin
+// Test 1 relies on.
+struct PosedSlopeScene {
+  Scene scene;
+  Camera camera;
+  glm::vec3 basis_u, basis_v;
+};
+
+PosedSlopeScene BuildPosedSlopeScene() {
+  PosedSlopeScene result;
+  result.scene = MakeSlopeScene();
+
+  TestCamera cam;
+  cam.position = result.scene.ground_normal * 15.0f;
+  cam.target = result.scene.ground_point;
+
+  ApplyPose(result.scene, cam, MakeOffAxisPose());
+  result.camera = BuildCamera(cam);
+  PlaneBasis(result.scene.ground_normal, result.basis_u, result.basis_v);
+  return result;
+}
+
 void EnsureDiagnosticsDir(const std::filesystem::path& dir) {
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
@@ -158,6 +198,46 @@ void DumpTest1Failure(const std::string& tag, const Image& img,
   diag_map.UpdateLightMatrices(scene.sun_toward, shadow_center_world, d_max, r_sm, 100.0f);
   const glm::mat4& lvp = diag_map.GetLightViewProj();
   spdlog::error("Shadow Test 1 [{}]: light_view_proj (column-major rows below) =", tag);
+  for (int row = 0; row < 4; ++row) {
+    spdlog::error("  [{:>10.4f} {:>10.4f} {:>10.4f} {:>10.4f}]", lvp[0][row], lvp[1][row],
+                 lvp[2][row], lvp[3][row]);
+  }
+}
+
+// Dumps the visibility + diagnosis PNGs and logs r_sm/d_max/min_value +
+// light_view_proj for a failed Test 5 (slope-acne) config -- same shape as
+// DumpTest1Failure but simpler (no E_leak band / shadow-side; every checked
+// receiver pixel is expected lit).
+void DumpTest5Failure(const std::string& tag, const Image& img,
+                     const std::vector<uint8_t>& diag, const Scene& scene,
+                     const Camera& camera, uint32_t r_sm, float d_max, size_t checked,
+                     size_t failed, float min_value,
+                     const std::vector<FailureExample>& examples) {
+  const std::filesystem::path dir = std::filesystem::path("build") / "shadow_test_failures";
+  EnsureDiagnosticsDir(dir);
+
+  const std::vector<uint8_t> visibility_rgba = VisibilityToRgba8(img);
+  const std::string visibility_path = (dir / (tag + "_visibility.png")).string();
+  badlands_write_png(visibility_path.c_str(), visibility_rgba.data(), img.width, img.height);
+
+  const std::vector<uint8_t> diagnosis_rgba = DiagnosisToRgba8(diag);
+  const std::string diagnosis_path = (dir / (tag + "_diagnosis.png")).string();
+  badlands_write_png(diagnosis_path.c_str(), diagnosis_rgba.data(), img.width, img.height);
+
+  spdlog::error(
+      "Shadow Test 5 [{}] FAILED: r_sm={} d_max={} checked={} failed={} min_value={:.6f}", tag,
+      r_sm, d_max, checked, failed, min_value);
+  spdlog::error("Shadow Test 5 [{}]: dumped {} and {}", tag, visibility_path, diagnosis_path);
+  for (const FailureExample& ex : examples) {
+    spdlog::error("  pixel ({},{}) value={:.6f} expected=lit(>0.99)", ex.px, ex.py, ex.value);
+  }
+
+  ShadowMap diag_map;
+  const glm::vec3 shadow_center_world =
+      camera.GetPosition() + camera.direction * (0.5f * d_max);
+  diag_map.UpdateLightMatrices(scene.sun_toward, shadow_center_world, d_max, r_sm, 100.0f);
+  const glm::mat4& lvp = diag_map.GetLightViewProj();
+  spdlog::error("Shadow Test 5 [{}]: light_view_proj (column-major rows below) =", tag);
   for (int row = 0; row < 4; ++row) {
     spdlog::error("  [{:>10.4f} {:>10.4f} {:>10.4f} {:>10.4f}]", lvp[0][row], lvp[1][row],
                  lvp[2][row], lvp[3][row]);
@@ -347,9 +427,12 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
 
       size_t checked = 0;
       size_t failed = 0;
-      // Worst-case (D - e_leak) among lit-side failures -- reported on
-      // failure to distinguish "modest overshoot near the edge" from
-      // "a large, resolution-independent leak" (see task-4-report.md).
+      // Worst-case excess beyond the E_leak band among failures -- (d -
+      // e_leak) on the lit side, (-e_leak - d) on the shadow side -- reported
+      // on failure to distinguish "modest overshoot near the edge" from "a
+      // large, resolution-independent leak" (see task-4-report.md). T3-fix
+      // review minor: originally only tracked the lit-side term, silently
+      // leaving shadow-side failures out of the diagnostic.
       float max_excess_d = 0.0f;
       std::vector<FailureExample> examples;
       std::vector<uint8_t> diag(static_cast<size_t>(img.width) * img.height, 0);
@@ -381,6 +464,7 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
             } else {
               diag[idx] = 4;
               ++failed;
+              max_excess_d = std::max(max_excess_d, -e_leak - d);
               if (examples.size() < 8) examples.push_back({px, py, d, value, false});
             }
           } else {
@@ -403,6 +487,78 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
       // number of receiver pixels outside the E_leak band -- a near-zero
       // count here would mean this config isn't actually testing anything
       // (a framing/oracle bug hiding as a false pass), not a real result.
+      CHECK(checked > 1000);
+      CHECK(failed == 0);
+    }
+  }
+}
+
+// ============================================================================
+// Test 5 (T3-fix): RPDB slope-acne. MakeSlopeScene() (a single 45-degree-
+// tilted receiver plane, NO caster) across R_sm in {512, 1024, 2048} at a
+// fixed D_max -- every LIT receiver pixel must read visibility ~1.0
+// (>0.99): with no caster anywhere in the scene, nothing can legitimately
+// occlude any of these pixels, so any pixel below 1.0 is self-shadow acne
+// from an incorrect receiver-plane depth-bias gradient. Isolates biasUV
+// correctness from Test 1's silhouette/cast-shadow concerns.
+// ============================================================================
+TEST_CASE("Shadow Test 5: RPDB slope-acne") {
+  PosedSlopeScene posed = BuildPosedSlopeScene();
+
+  const std::vector<uint32_t> resolutions = {512, 1024, 2048};
+  const float d_max = 100.0f;
+
+  for (uint32_t r_sm : resolutions) {
+    DYNAMIC_SECTION("r_sm=" << r_sm) {
+      ShadowTestConfig render_cfg;
+      render_cfg.r_sm = r_sm;
+      render_cfg.d_max = d_max;
+      render_cfg.mode = ShadowDebugMode::ShadowMapOnly;
+      render_cfg.enable_shadow_map = true;
+      render_cfg.enable_contact_shadows = true;
+
+      Image img = RenderShadowFrame(render_cfg, posed.scene, posed.camera);
+      REQUIRE(img.width == kFrameWidth);
+      REQUIRE(img.height == kFrameHeight);
+
+      size_t checked = 0;
+      size_t failed = 0;
+      float min_value = 1.0f;
+      std::vector<FailureExample> examples;
+      std::vector<uint8_t> diag(static_cast<size_t>(img.width) * img.height, 0);
+
+      for (uint32_t py = 0; py < img.height; ++py) {
+        for (uint32_t px = 0; px < img.width; ++px) {
+          const PixelHit hit = ClassifyPixel(posed.scene, posed.camera, posed.basis_u,
+                                             posed.basis_v, px, py, img.width, img.height);
+          if (!hit.is_receiver) continue;
+
+          ++checked;
+          const float value = img.At(px, py);
+          min_value = std::min(min_value, value);
+          const size_t idx = static_cast<size_t>(py) * img.width + px;
+          if (value > 0.99f) {
+            diag[idx] = 2;
+          } else {
+            diag[idx] = 4;
+            ++failed;
+            if (examples.size() < 8) examples.push_back({px, py, 0.0f, value, true});
+          }
+        }
+      }
+
+      INFO("r_sm=" << r_sm << " d_max=" << d_max << " checked=" << checked
+                   << " failed=" << failed << " min_value=" << min_value);
+
+      if (failed > 0) {
+        const std::string tag = "test5_r" + std::to_string(r_sm);
+        DumpTest5Failure(tag, img, diag, posed.scene, posed.camera, r_sm, d_max, checked, failed,
+                         min_value, examples);
+      }
+
+      // Sanity: the scene/camera framing should exercise a meaningful
+      // receiver area -- a near-zero count would mean this config isn't
+      // actually testing anything.
       CHECK(checked > 1000);
       CHECK(failed == 0);
     }

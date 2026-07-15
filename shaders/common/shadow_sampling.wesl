@@ -1,5 +1,6 @@
 // Directional shadow-map sampling: normal-offset bias (receiver-side) +
-// receiver-plane depth-bias (RPDB) 3x3 PCF. Task T3.
+// receiver-plane depth-bias (RPDB) 3x3 PCF. Task T3 (T3-fix: RPDB gradient
+// is now analytic — see step 4 below).
 //
 // Adapted (NOT a verbatim port) from sampo's src/shaders/common/
 // shadow_sampling.wesl, which samples a reversed-Z shadow map with a single
@@ -10,14 +11,21 @@
 //     the CPU-side ShadowMath::NormalOffsetLength (shadow_map.hpp) — keep
 //     both in sync if this expression ever changes.
 //   - a per-PCF-tap receiver-plane depth-bias gradient (Isidoro, "Shadow
-//     Mapping: GPU-based Tips and Techniques", GDC 2006), solved from the
-//     screen-space derivatives of the shadow UV/depth so the bias follows
-//     the receiver surface's actual slope instead of a flat epsilon.
+//     Mapping: GPU-based Tips and Techniques", GDC 2006), computed
+//     ANALYTICALLY (T3-fix) from the G-buffer normal + frame.lightViewProj
+//     instead of screen-space derivatives: dpdx/dpdy of the shadow UV/depth
+//     corrupt at object silhouettes (the 2x2 derivative quad straddles a
+//     caster/receiver depth discontinuity), wrongly darkening genuinely-lit
+//     receiver pixels hugging object edges (T4 Test 1). The directional
+//     light is orthographic, so shadow-map (u, v, depth) are affine
+//     functions of world position and the receiver plane's exact gradient
+//     is a constant derivable from the plane normal + the matrix alone —
+//     see step 4 for the derivation.
 //
-// dpdx/dpdy and textureSampleCompare must run in uniform control flow: no
-// early return / branch guards them below. The frustum test is folded into
-// the return value via `mix` instead (matches the `select`-as-multiplier
-// idiom in sampo's shadow_sampling.wesl:26-31).
+// textureSampleCompare must run in uniform control flow: no early return /
+// branch guards it below. The frustum test is folded into the return value
+// via `mix` instead (matches the `select`-as-multiplier idiom in sampo's
+// shadow_sampling.wesl:26-31).
 import package::common::frame::frame;
 
 fn sampleShadowMapPCF(worldPos: vec3<f32>, normal: vec3<f32>, NdotL: f32,
@@ -36,22 +44,61 @@ fn sampleShadowMapPCF(worldPos: vec3<f32>, normal: vec3<f32>, NdotL: f32,
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let receiverDepth = ndc.z;
 
-    // 3. Frustum test as a multiplier (not a branch) — keeps the
-    // derivatives/compare below in uniform control flow.
+    // 3. Frustum test as a multiplier (not a branch) — keeps
+    // textureSampleCompare below in uniform control flow.
     let inFrustum = f32(all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)) &&
                         ndc.z >= 0.0 && ndc.z <= 1.0);
 
-    // 4. Receiver-plane depth-bias gradient (RPDB): solve dDepth/dU,
-    // dDepth/dV in shadow-UV space from the screen-space derivatives of
-    // (uv, receiverDepth), so each PCF tap below gets a bias that tracks the
-    // receiver plane's slope instead of a flat epsilon.
-    let duvz_dx = vec3<f32>(dpdx(uv), dpdx(receiverDepth));
-    let duvz_dy = vec3<f32>(dpdy(uv), dpdy(receiverDepth));
-    let det = duvz_dx.x * duvz_dy.y - duvz_dy.x * duvz_dx.y;
-    var biasUV = vec2<f32>(
-        duvz_dy.y * duvz_dx.z - duvz_dx.y * duvz_dy.z,
-        duvz_dx.x * duvz_dy.z - duvz_dy.x * duvz_dx.z);
-    biasUV = select(vec2<f32>(0.0), biasUV / det, abs(det) > 1e-8);
+    // 4. Receiver-plane depth-bias gradient (RPDB), computed ANALYTICALLY
+    // (T3-fix) instead of via screen-space derivatives. The directional
+    // light is orthographic (glm::ortho => clip.w == 1 identically), so
+    // (u, v, receiverDepth) are affine (linear) functions of world
+    // position — the receiver plane's dDepth/dU, dDepth/dV are therefore
+    // EXACT constants derived from the plane normal and frame.lightViewProj
+    // alone, not derivative estimates that can be corrupted by a
+    // neighboring pixel across a silhouette.
+    //
+    // M is column-major (WGSL mat4x4: M[c][r] = row r, col c). Its rows are
+    // the world-space gradients of the (pre-divide) NDC components; since
+    // w == 1 everywhere for this ortho matrix, no perspective-divide
+    // correction is needed.
+    let M = frame.lightViewProj;
+    let rowX = vec3<f32>(M[0].x, M[1].x, M[2].x); // grad_world(ndc.x)
+    let rowY = vec3<f32>(M[0].y, M[1].y, M[2].y); // grad_world(ndc.y)
+    let rowZ = vec3<f32>(M[0].z, M[1].z, M[2].z); // grad_world(ndc.z == depth)
+
+    let gu = 0.5 * rowX;   // grad_world(u), u = 0.5*ndc.x + 0.5
+    let gv = -0.5 * rowY;  // grad_world(v), v = 0.5 - 0.5*ndc.y
+    let gd = rowZ;         // grad_world(depth)
+
+    // Project each gradient onto the receiver plane's tangent space (drop
+    // the component along the surface normal `n`) — a PCF tap only ever
+    // slides across the receiver surface itself, so only the tangential
+    // part of each gradient is physically meaningful here.
+    let n = normal;
+    let tu = gu - dot(gu, n) * n;
+    let tv = gv - dot(gv, n) * n;
+    let td = gd - dot(gd, n) * n;
+
+    // Solve for biasUV = (dDepth/dU, dDepth/dV) ON THE PLANE via the 2x2
+    // Gram system: a tangent displacement a*tu + b*tv induces
+    // du = [tu.tu, tu.tv]·(a,b), dv = [tu.tv, tv.tv]·(a,b),
+    // ddepth = [td.tu, td.tv]·(a,b) -- invert the (symmetric) Gram matrix
+    // to solve for biasUV = (ddepth/du, ddepth/dv).
+    let guu = dot(tu, tu);
+    let guv = dot(tu, tv);
+    let gvv = dot(tv, tv);
+    let du  = dot(td, tu);
+    let dv  = dot(td, tv);
+    let det = guu * gvv - guv * guv;
+    var biasUV = vec2<f32>(0.0, 0.0);
+    if (abs(det) > 1e-12) {
+        biasUV = vec2<f32>(du * gvv - dv * guv, dv * guu - du * guv) / det;
+    }
+    // det ~= 0 only when the plane is edge-on to the light (the tangent
+    // projection degenerates) -- biasUV stays 0 (no RPDB) there, which is
+    // correct: such a surface is already at grazing incidence (NdotL ~= 0
+    // floors the normal-offset bias above regardless).
 
     // 5. 3x3 PCF, adaptive per-tap depth (unrolled so textureSampleCompare
     // stays in unambiguous uniform control flow). texel = invShadowRes

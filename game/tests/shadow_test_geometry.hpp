@@ -64,6 +64,16 @@ inline constexpr float kFloorHalfSize = 500.0f;
 Scene MakeMacroScene();
 TestCamera MakeMacroCamera();
 
+// Task T3-fix's Test 5 (RPDB slope-acne) scene: a single planar receiver
+// through the local origin, tilted 45 degrees off horizontal (about local
+// X) -- meaningfully oblique to MakeMacroScene's `sun_toward` (NdotL ~0.62,
+// vs. the flat macro floor's ~0.70) so shadow-map texels stretch
+// non-trivially across the surface, the case that needs a correct
+// receiver-plane depth bias. NO casters: this isolates self-acne on a LIT
+// slope from cast-shadow edge behavior (Test 1's concern). Reuses
+// `sun_toward` from MakeMacroScene for consistency.
+Scene MakeSlopeScene();
+
 // A fixed, non-axis-aligned rigid pose: M = translate(t) * rotate(R), t far
 // from the origin, R = Euler(35, -50, 20) degrees composed about X, Y, Z --
 // chosen so no resulting camera axis is parallel to a world axis.

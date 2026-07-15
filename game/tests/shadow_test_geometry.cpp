@@ -24,6 +24,21 @@ Scene MakeMacroScene() {
   return scene;
 }
 
+Scene MakeSlopeScene() {
+  Scene scene;
+  scene.ground_point = glm::vec3(0.0f);
+  // 45-degree tilt about local X: (0,1,0) -> (0, cos45, sin45). Chosen
+  // (rather than e.g. about Z) because it's meaningfully oblique to
+  // sun_toward=(1,1,0.25) below -- a tilt about Z would land close to
+  // face-on (NdotL ~0.98, barely testing RPDB at all).
+  const glm::mat4 tilt =
+      glm::rotate(glm::mat4(1.0f), glm::radians(45.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+  scene.ground_normal = glm::normalize(glm::vec3(tilt * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f)));
+  scene.casters.clear();  // no caster -- self-acne test only, see file comment.
+  scene.sun_toward = glm::normalize(glm::vec3(1.0f, 1.0f, 0.25f));  // same sun as MakeMacroScene
+  return scene;
+}
+
 TestCamera MakeMacroCamera() {
   TestCamera cam;
   // Steep, elevated diagonal view framing both the box (footprint
