@@ -273,3 +273,25 @@ if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_shadow_test: Task T4's Catch2 suite for the directional-shadow
+# system (T2's ShadowMap + T3's deferred sampling) -- a headless GPU render
+# harness (shadow_test_harness.*, hidden-window Dawn device + offscreen
+# RGBA16Float readback) + a pure-CPU signed-distance edge oracle
+# (shadow_test_geometry.*) + Test 1 (edge-leak) and Test 2 (sub-texel
+# snapping). Unlike badlands_geometry_tests, this DOES exercise the GPU
+# (SceneRenderer::Render) -- see task-4-report.md for the harness approach.
+add_executable(badlands_shadow_test
+    game/tests/shadow_test_geometry.cpp
+    game/tests/shadow_test_harness.cpp
+    game/tests/shadow_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_shadow_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_shadow_test PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_shadow_test PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_shadow_test COMMAND badlands_shadow_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
