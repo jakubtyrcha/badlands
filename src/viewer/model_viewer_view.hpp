@@ -6,9 +6,9 @@
 // LightEnvironment. Replaces PlaceholderView for the viewer executable.
 //
 // Lives in src/viewer/ (an app, not the engine): it uses game types
-// (GameBuildingKind, GamePloppableKind, building_visual, ploppable_local_ring,
-// MaterialId, material_pack) to build its prefab catalog, which CLAUDE.md's
-// layer boundary reserves for src/game / app code, not src/engine.
+// (GameBuildingKind, GamePloppableKind, building_visual, ploppable_local_ring)
+// to build its prefab catalog, which CLAUDE.md's layer boundary reserves for
+// src/game / app code, not src/engine.
 
 #include <string>
 #include <vector>

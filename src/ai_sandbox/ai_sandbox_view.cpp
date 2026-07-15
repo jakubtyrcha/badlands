@@ -14,7 +14,6 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
-#include "game/material_pack.h"
 
 namespace badlands {
 
@@ -29,13 +28,20 @@ constexpr glm::vec3 kCapsuleBlueRgb{30.0f / 255.0f, 60.0f / 255.0f,
                                     200.0f / 255.0f};
 constexpr float kCapsuleRoughness = 140.0f / 255.0f;
 
+// Flat light-gray debug material for the floor + walls (Task T0): rgb is
+// pre-encoded so that, after SolidColor's non-sRGB texture is re-linearized
+// by deferred_lighting.wesl's srgb_to_linear, the surface lands at linear
+// 0.75 reflectance (linear_to_srgb(0.75) ~= 0.881). Roughness is maxed to
+// keep the surface diffuse-looking (minimal specular) so shadows read
+// clearly against it.
+constexpr glm::vec3 kDebugGray{0.881f};
+constexpr float kDebugGrayRoughness = 1.0f;
+
 // Wall block footprint/height (world units; tile = 1.0 world unit).
 constexpr float kWallHalfFootprint = 0.5f;
 constexpr float kWallHalfHeight = 0.6f;  // 1.2 tall
 
-constexpr const char* kFloorPackDir =
-    "assets/materials/monastery_stone_floor_1k";
-// Repeat the floor pack roughly once per 2 world units instead of stretching
+// Repeat the floor UVs roughly once per 2 world units instead of stretching
 // one copy across the whole floor.
 constexpr float kFloorUvRepeatSpacing = 2.0f;
 
@@ -95,7 +101,7 @@ void AiSandboxView::BuildScene() {
   const float full_x = static_cast<float>(arena_.accessible.x + 2);
   const float full_z = static_cast<float>(arena_.accessible.y + 2);
   const float floor_size = std::max(full_x, full_z) + 4.0f;
-  AddFloor(scene_, matlib_, floor_size, kFloorPackDir,
+  AddFloor(scene_, floor_size, matlib_.SolidColor(kDebugGray, kDebugGrayRoughness),
            floor_size / kFloorUvRepeatSpacing);
 
   AddWalls();
@@ -103,8 +109,8 @@ void AiSandboxView::BuildScene() {
 }
 
 void AiSandboxView::AddWalls() {
-  const MaterialPack pack = material_pack(MaterialId::RockWall);
-  const DeferredMaterial wall_mat = matlib_.Get(pack.dir);
+  const DeferredMaterial wall_mat =
+      matlib_.SolidColor(kDebugGray, kDebugGrayRoughness);
 
   int index = 0;
   for (const glm::ivec2& tile : arena_.wall_tiles) {
