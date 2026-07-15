@@ -99,6 +99,13 @@ add_library(badlands_engine STATIC
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
+    # Render-test primitives ported from sampo (CpuImage/ColorRenderTarget/
+    # TextureReadback); exercised by badlands_readback_tests. CpuImage is
+    # game-agnostic (src/core) but its .cpp routes PNG I/O through the assets
+    # crate, so it compiles here where `assets` is linked.
+    src/core/util/cpu_image.cpp
+    src/engine/rendering/color_render_target.cpp
+    src/engine/rendering/texture_readback.cpp
     # Task S2.E: shared scene-building helper (TexturedMeshResult + a
     # MaterialLibrary DeferredMaterial -> a SceneGraph node), reused by
     # badlands_viewer/game/ai_sandbox's real AppViews.
@@ -272,3 +279,23 @@ if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_readback_tests: GPU texture-readback suite ported from sampo
+# (tests/readback_tests.cpp -> ReadbackTests). Exercises the four render-test
+# primitives ported from sampo — CpuImage, TextureReadback, ColorRenderTarget,
+# and the headless gpu_test_helpers. Unlike the two suites above this actually
+# creates a Dawn device and renders, so it needs a working GPU adapter (Metal
+# on macOS); there is no CI, so it runs locally via ctest.
+add_executable(badlands_readback_tests
+    src/engine/tests/readback_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_readback_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_readback_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_readback_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_readback_tests COMMAND badlands_readback_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

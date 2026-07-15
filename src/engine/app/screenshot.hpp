@@ -37,12 +37,14 @@ wgpu::Texture CreateScreenshotTarget(wgpu::Device device, uint32_t width,
                                      uint32_t height);
 
 // Reads an already-rendered RGBA8Unorm CopySrc `texture` (size `width`x
-// `height`) back to CPU and writes it to `path` as a PNG via the `assets`
-// crate. Blocks until the copy + buffer map complete. Shared by
-// SaveScreenshot and ScreenshotRecorder. Returns false (after logging) on
-// failure.
-bool WriteTextureToPng(wgpu::Device device, wgpu::Queue queue,
-                       const wgpu::Texture& texture, uint32_t width,
-                       uint32_t height, const std::string& path);
+// `height`) back to CPU (via TextureReadback -> CpuImage) and writes it to
+// `path` as a PNG via the `assets` crate. Blocks until the copy + buffer map
+// complete. Shared by SaveScreenshot and ScreenshotRecorder. `instance` is
+// used to pump Dawn's event loop while awaiting the readback. Returns false
+// (after logging) on failure.
+bool WriteTextureToPng(wgpu::Instance instance, wgpu::Device device,
+                       wgpu::Queue queue, const wgpu::Texture& texture,
+                       uint32_t width, uint32_t height,
+                       const std::string& path);
 
 }  // namespace badlands

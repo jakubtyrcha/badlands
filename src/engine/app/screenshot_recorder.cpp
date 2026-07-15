@@ -84,8 +84,8 @@ void ScreenshotRecorder::CaptureFrame(GpuContext& gpu,
   std::snprintf(name, sizeof(name), "frame_%05u.png", frame_index_);
   std::filesystem::path path = std::filesystem::path(dir_) / name;
 
-  if (WriteTextureToPng(gpu.GetDevice(), gpu.GetQueue(), offscreen_texture_, w,
-                        h, path.string())) {
+  if (WriteTextureToPng(gpu.GetInstance(), gpu.GetDevice(), gpu.GetQueue(),
+                        offscreen_texture_, w, h, path.string())) {
     ++frame_index_;
   } else {
     spdlog::error("ScreenshotRecorder::CaptureFrame: failed to write {}",
