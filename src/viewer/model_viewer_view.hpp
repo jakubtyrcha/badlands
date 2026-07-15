@@ -25,6 +25,7 @@
 #include "engine/rendering/geometry/aabb.hpp"
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
+#include "engine/rendering/scene_renderer.hpp"  // ShadowDebugMode
 #include "engine/scene/scene_graph.hpp"
 #include "game/geometry/ploppable_rings.h"  // GamePloppableKind
 
@@ -47,6 +48,15 @@ class ModelViewerView : public AppView {
   // CLI arg uses it for headless screenshot verification. Out-of-range
   // indices are clamped in Initialize().
   void SetInitialPrefabIndex(int index) { prefab_index_ = index; }
+
+  // Selects the initial ShadowDebugMode (Task T3). Must be called before
+  // Initialize() -- main_viewer.cpp's `--shadow-debug <n>` CLI arg uses it
+  // for headless screenshot verification of the shadow-map/contact-shadow
+  // terms (0=Off, 1=Combined, 2=ShadowMapOnly, 3=ContactOnly). Not part of
+  // the stable CLI surface (same category as --prefab above).
+  void SetInitialShadowDebugMode(ShadowDebugMode mode) {
+    initial_shadow_debug_mode_ = mode;
+  }
 
  private:
   enum class PrefabCategory { Rock, Building };
@@ -92,6 +102,7 @@ class ModelViewerView : public AppView {
 
   std::vector<PrefabEntry> catalog_;
   int prefab_index_ = 0;
+  ShadowDebugMode initial_shadow_debug_mode_ = ShadowDebugMode::Off;
 
   bool left_mouse_down_ = false;
   float dt_ = 0.0f;

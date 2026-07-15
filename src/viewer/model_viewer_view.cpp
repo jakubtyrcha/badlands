@@ -56,6 +56,7 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
 
   ApplyEnvironment();
   RebuildScene();
+  scene_renderer_->SetShadowDebugMode(initial_shadow_debug_mode_);
 
   if (!matlib_.ok()) {
     spdlog::error(

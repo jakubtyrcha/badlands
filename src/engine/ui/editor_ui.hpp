@@ -37,6 +37,12 @@ bool DrawLightEnvironmentEditor(LightEnvironment& env);
 // selection.
 void DrawGBufferDebugSelector(SceneRenderer& renderer);
 
+// Radio-button group selecting `renderer`'s ShadowDebugMode (Off/Combined/
+// ShadowMapOnly/ContactOnly, Task T3). Reads the current mode from
+// `renderer.GetShadowDebugMode()` and calls
+// `renderer.SetShadowDebugMode(...)` on selection.
+void DrawShadowDebugSelector(SceneRenderer& renderer);
+
 // FPS + frame-time text line (e.g. "60.0 FPS (16.67 ms)").
 void DrawStats(float dt_seconds);
 

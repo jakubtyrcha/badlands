@@ -165,11 +165,26 @@ fn isValidDepth(depth: f32) -> bool {
 // Reconstruct linear view-space distance from reversed-Z depth buffer value
 // depth=1 at near plane, depth=0 at far plane (reversed-Z)
 // Returns positive distance from camera
+//
+// Fixed (Task T3): the previous formula (2*near*far / (depth*(far-near) +
+// 2*near)) had a spurious factor of 2 on both the numerator and the `near`
+// term, making it diverge from the true inverse of Camera::GetProj()'s
+// reversed-Z projection (glm::perspective + the z' = 1-z remap) by close to
+// 2x for near-camera geometry, decaying to 0 error at the far plane (exactly
+// matching depth->0 in both formulas). Verified by inverting the actual
+// projection algebraically: z_view = -far*near / (depth*(far-near) + near),
+// and by boundary checks (depth=1 -> near, depth=0 -> far) that the old
+// formula failed (depth=1 gave ~2*near, not near). This bug was invisible
+// pre-T3 because every earlier consumer (GTAO's relative depth comparisons,
+// the log-scale depth debug view, IBL's viewDir/reflection which only uses
+// this position's *normalized direction*) tolerated or didn't expose a
+// uniform ~2x scale error; T3's shadow-map projection is the first consumer
+// that needs the ABSOLUTE world position to be metrically correct.
 fn reconstructLinearZ(depth: f32) -> f32 {
     let near = frame.nearPlane;
     let far = frame.farPlane;
-    // Derived from reversed-Z projection: z = 2*near*far / (depth * (far - near) + 2*near)
-    return 2.0 * near * far / (depth * (far - near) + 2.0 * near);
+    // Derived from reversed-Z projection: z = near*far / (depth * (far - near) + near)
+    return near * far / (depth * (far - near) + near);
 }
 
 // Reconstruct view-space position from screen UV and depth buffer value

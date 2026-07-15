@@ -121,13 +121,16 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     // Deterministic capture size: config_ (fixed logical size), NOT the
     // HiDPI window pixel size, which is 2x+ on Retina and would silently
     // change the output resolution. Refresh the view's camera aspect to the
-    // capture size before rendering offscreen. renderer_.GetDebugMode()
-    // forwards the live G-buffer debug visualization into the capture.
+    // capture size before rendering offscreen. renderer_.GetDebugMode() /
+    // GetShadowDebugMode() forward the live G-buffer / shadow debug
+    // visualization into the capture (SaveScreenshot's renderer is a
+    // separate throwaway instance — see its comment).
     const uint32_t shot_w = static_cast<uint32_t>(config_.width);
     const uint32_t shot_h = static_cast<uint32_t>(config_.height);
     view_->OnResize(config_.width, config_.height);
     bool ok = SaveScreenshot(gpu_, *pipeline_gen_, *view_, shot_w, shot_h,
-                             screenshot_path, renderer_.GetDebugMode());
+                             screenshot_path, renderer_.GetDebugMode(),
+                             renderer_.GetShadowDebugMode());
     return ok ? 0 : 1;
   }
 

@@ -98,6 +98,29 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
     sdesc.maxAnisotropy = 1;
     fallback_cube_sampler_ = device_.CreateSampler(&sdesc);
   }
+
+  // === Shadow-map comparison sampler (T3) ===
+  // Hardware PCF (bilinear-filtered compare) for sampleShadowMapPCF's 3x3 tap
+  // pattern. CompareFunction::LessEqual matches shadow_map_'s conventional-Z
+  // depth (near->0, far->1, cleared to 1.0=far) -- a receiver is lit when
+  // its (biased) depth is <= the stored occluder depth. Do NOT change to
+  // GreaterEqual/Less -- see shadow_map.hpp's Z-convention note.
+  {
+    wgpu::SamplerDescriptor sampler_desc{};
+    sampler_desc.addressModeU = wgpu::AddressMode::ClampToEdge;
+    sampler_desc.addressModeV = wgpu::AddressMode::ClampToEdge;
+    sampler_desc.addressModeW = wgpu::AddressMode::ClampToEdge;
+    sampler_desc.magFilter = wgpu::FilterMode::Linear;
+    sampler_desc.minFilter = wgpu::FilterMode::Linear;
+    sampler_desc.maxAnisotropy = 1;
+    sampler_desc.compare = wgpu::CompareFunction::LessEqual;
+    shadow_comparison_sampler_ = device_.CreateSampler(&sampler_desc);
+    if (!shadow_comparison_sampler_) {
+      spdlog::error(
+          "SceneRenderer::Initialize: failed to create shadow comparison "
+          "sampler");
+    }
+  }
 }
 
 void SceneRenderer::UpdateIbl(const SceneContext& scene) {
@@ -485,18 +508,20 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
           "pipeline");
     } else {
       // Group 0: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
-      // material @4 (all textureLoad'd — no sampler), GTAO ao @7, then IBL:
-      // prefiltered env cube @9 + sampler @10, BRDF LUT @11 + sampler @12.
-      // Matches shaders/passes/deferred_lighting.wesl's binding declarations.
-      // The IBL cube is the prefiltered env when available, else a 1x1 black
-      // fallback (so the specular term is zero) — bindings are always valid.
+      // material @4 (all textureLoad'd — no sampler), shadow map @5 + its
+      // comparison sampler @6, GTAO ao @7, contact shadow @8 (textureLoad'd),
+      // then IBL: prefiltered env cube @9 + sampler @10, BRDF LUT @11 +
+      // sampler @12. Matches shaders/passes/deferred_lighting.wesl's binding
+      // declarations. The IBL cube is the prefiltered env when available,
+      // else a 1x1 black fallback (so the specular term is zero) — bindings
+      // are always valid.
       const bool use_prefiltered = has_prefiltered_ && prefiltered_.IsValid();
       wgpu::TextureView ibl_cube_view =
           use_prefiltered ? prefiltered_.GetView() : fallback_cube_view_;
       wgpu::Sampler ibl_cube_sampler =
           use_prefiltered ? prefiltered_.GetSampler() : fallback_cube_sampler_;
 
-      std::array<wgpu::BindGroupEntry, 10> entries{};
+      std::array<wgpu::BindGroupEntry, 13> entries{};
       entries[0].binding = 0;
       entries[0].buffer = frame.GetFrameUniformBuffer();
       entries[0].offset = 0;
@@ -509,16 +534,22 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       entries[3].textureView = gbuffer_.GetAlbedoView();
       entries[4].binding = 4;
       entries[4].textureView = gbuffer_.GetMaterialView();
-      entries[5].binding = 7;
-      entries[5].textureView = ao_view_;
-      entries[6].binding = 9;
-      entries[6].textureView = ibl_cube_view;
-      entries[7].binding = 10;
-      entries[7].sampler = ibl_cube_sampler;
-      entries[8].binding = 11;
-      entries[8].textureView = brdf_lut_.GetView();
-      entries[9].binding = 12;
-      entries[9].sampler = brdf_lut_.GetSampler();
+      entries[5].binding = 5;
+      entries[5].textureView = shadow_map_.GetDepthView();
+      entries[6].binding = 6;
+      entries[6].sampler = shadow_comparison_sampler_;
+      entries[7].binding = 7;
+      entries[7].textureView = ao_view_;
+      entries[8].binding = 8;
+      entries[8].textureView = contact_shadow_view_;
+      entries[9].binding = 9;
+      entries[9].textureView = ibl_cube_view;
+      entries[10].binding = 10;
+      entries[10].sampler = ibl_cube_sampler;
+      entries[11].binding = 11;
+      entries[11].textureView = brdf_lut_.GetView();
+      entries[12].binding = 12;
+      entries[12].sampler = brdf_lut_.GetSampler();
 
       wgpu::BindGroup bind_group =
           frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);

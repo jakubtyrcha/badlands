@@ -267,6 +267,11 @@ class SceneRenderer {
   // 1.0 (fully lit / no-op) at creation exactly like ao_texture_ above.
   wgpu::Texture contact_shadow_texture_;
   wgpu::TextureView contact_shadow_view_;
+
+  // Comparison sampler for the shadow map's hardware PCF (T3). LessEqual —
+  // matches shadow_map_'s conventional-Z depth (near->0, far->1): a receiver
+  // is lit when receiverDepth <= storedDepth. Created once in Initialize.
+  wgpu::Sampler shadow_comparison_sampler_;
 };
 
 }  // namespace badlands
