@@ -86,6 +86,8 @@ class StandardMaterialFactory : public MaterialInstanceFactory {
     wgpu::TextureView cube_flat_normal;
     wgpu::TextureView cube_full_roughness;
     wgpu::TextureView cube_gray;
+    // Neutral-gray e2DArray default for texture_2d_array slots (kTerrainBlend).
+    wgpu::TextureView array_default;
     wgpu::Sampler sampler;
   };
   std::optional<DefaultTextures> default_textures_;

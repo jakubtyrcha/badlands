@@ -101,8 +101,14 @@ TEST_CASE("BuildTerrainMesh: vertex heights follow the heightmap") {
     const Vertex v = Unpack(mesh.vertices, i);
     min_y = std::min(min_y, v.pos.y);
     max_y = std::max(max_y, v.pos.y);
-    if (v.pos.x > 1.0f && v.pos.x < static_cast<float>(W - 2)) {
+    if (v.pos.x > 2.0f && v.pos.x < static_cast<float>(W - 3)) {
       CHECK(v.pos.y == Catch::Approx(v.pos.x).margin(0.01));
+      // h = x ramp -> slope +1 in x, 0 in z -> normal ~ normalize(-1, 1, 0).
+      // (Locks the NormalAt coordinate handling; it computes at the vertex's
+      // world position, so this holds for any kMetersPerSample.)
+      CHECK(v.normal.x < -0.5f);
+      CHECK(v.normal.y > 0.5f);
+      CHECK(std::abs(v.normal.z) < 0.05f);
     }
   }
   CHECK(max_y - min_y > 12.0f);  // the ramp really spans a range

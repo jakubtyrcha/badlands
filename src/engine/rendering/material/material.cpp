@@ -42,6 +42,13 @@ RenderPipelineDeclaration MeshRenderingMaterial::BuildDeclaration(
     case GeometryType::kTexturedMesh:
       decl.vertex_layout = VertexLayout::kTexturedMesh;
       break;
+    default:
+      // Safe fallback for any future GeometryType not yet wired here. This
+      // build enables neither -Werror nor -Wswitch, so without it an unhandled
+      // enum would silently leave vertex_layout at its kFullscreen default (no
+      // vertex buffers -> a broken draw). Matches the pre-switch ternary's else.
+      decl.vertex_layout = VertexLayout::kTexturedMesh;
+      break;
   }
   decl.cull_mode = cull_mode_;
   decl.blend_enabled = blend_enabled_;

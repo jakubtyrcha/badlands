@@ -79,9 +79,11 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
           }});
 
   // terrain_blend.wesl - texture_2d_array of albedo layers, blended per-vertex.
-  // The array view is always supplied as an instance override (an e2DArray
-  // binding has no 1x1 array default; "white" here is only a nominal fallback
-  // and must not actually be bound).
+  // Normally the array view is supplied as an instance override (see
+  // MaterialLibrary::TerrainBlend); if it is missing, kTerrainBlend geometry
+  // resolves the slot to the factory's neutral-gray e2DArray default
+  // (GetDefaultTextureForSlot / TextureType::kArray) — a valid array view, so
+  // the missing-texture case renders gray rather than failing validation.
   MaterialRequirements terrain_blend_reqs{
       .shader_name = "terrain_blend",
       .textures = {

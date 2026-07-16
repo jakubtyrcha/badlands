@@ -28,6 +28,7 @@
 #include <array>
 
 #include "engine/rendering/material/script_texture_provider.hpp"
+#include "engine/rendering/texture_loader.hpp"  // CreateSolidColorArray
 #include "engine/rendering/material/standard_rendering_material_instance.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 
@@ -185,9 +186,12 @@ StandardMaterialFactory::CreateInstance(GeometryType geometry_type,
   }
 
   // Determine expected texture type from geometry
-  TextureType expected_type = (geometry_type == GeometryType::kSphericalMesh)
-                                  ? TextureType::kCubemap
-                                  : TextureType::k2D;
+  TextureType expected_type = TextureType::k2D;
+  if (geometry_type == GeometryType::kSphericalMesh) {
+    expected_type = TextureType::kCubemap;
+  } else if (geometry_type == GeometryType::kTerrainBlend) {
+    expected_type = TextureType::kArray;
+  }
 
   // Lazily resolve scripts for this geometry type
   const auto& resolved_scripts = GetResolvedScripts(geometry_type);
@@ -282,6 +286,17 @@ StandardMaterialFactory::CreateInstance(GeometryType geometry_type,
 StandardMaterialFactory::DefaultTextures&
 StandardMaterialFactory::GetDefaultTextures() {
   if (!default_textures_) {
+    // 8-layer neutral-gray e2DArray default for texture_2d_array slots: any
+    // layer index samples gray, so a kTerrainBlend instance built without an
+    // albedo_array override binds a valid array view (not a 2D view that would
+    // fail e2DArray bind-group validation) and renders a generic default color.
+    std::array<uint8_t, 8 * 4> gray_layers{};
+    for (int i = 0; i < 8; ++i) {
+      gray_layers[i * 4 + 0] = 128;
+      gray_layers[i * 4 + 1] = 128;
+      gray_layers[i * 4 + 2] = 128;
+      gray_layers[i * 4 + 3] = 255;
+    }
     default_textures_ = DefaultTextures{
         .white = CreateSolidColor1x1(device_, queue_, 255, 255, 255, 255),
         .flat_normal = CreateSolidColor1x1(device_, queue_, 128, 128, 255, 255),
@@ -296,6 +311,8 @@ StandardMaterialFactory::GetDefaultTextures() {
             CreateSolidColorCubemap1x1(device_, queue_, 255, 255, 255, 255),
         .cube_gray =
             CreateSolidColorCubemap1x1(device_, queue_, 128, 128, 128, 255),
+        .array_default =
+            CreateSolidColorArray(device_, queue_, gray_layers.data(), 8),
         .sampler = default_nearest_sampler_,
     };
   }
@@ -305,6 +322,11 @@ StandardMaterialFactory::GetDefaultTextures() {
 wgpu::TextureView StandardMaterialFactory::GetDefaultTextureForSlot(
     const std::string& default_name, TextureType type) {
   auto& defaults = GetDefaultTextures();
+  if (type == TextureType::kArray) {
+    // texture_2d_array slots: one neutral-gray array default (see
+    // GetDefaultTextures); the name doesn't select a variant here.
+    return defaults.array_default;
+  }
   if (type == TextureType::kCubemap) {
     if (default_name == "white") return defaults.cube_white;
     if (default_name == "flat_normal") return defaults.cube_flat_normal;

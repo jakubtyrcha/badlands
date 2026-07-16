@@ -1,8 +1,9 @@
-// Verifies the terrain-blend material by rendering a kTerrainBlend quad whose
-// per-vertex weights blend a 3-layer red/green/blue "debug material" array, and
-// reading back the unlit G-buffer ALBEDO via the engine's albedo debug view
-// (GBufferDebugMode::Albedo). The blend is thus checked directly, isolated from
-// lighting. Also dumps terrain_blend_albedo.png for eyeballing.
+// GPU tests for the terrain-blend material. Renders a kTerrainBlend quad and
+// reads back the unlit G-buffer ALBEDO via GBufferDebugMode::Albedo (so the
+// blend is checked directly, isolated from lighting):
+//   1. per-vertex red/green/blue blend of a 3-layer debug array;
+//   2. a kTerrainBlend material with NO albedo_array override renders the
+//      factory's default (a neutral gray array), not a Dawn view-dimension error.
 
 #include <catch_amalgamated.hpp>
 
@@ -32,8 +33,11 @@ using namespace badlands;
 
 namespace {
 
-// Pack one kTerrainBlend vertex (pos3 + normal3 + weights4 + indices4) into the
-// flat float buffer; the u32 layer indices are bitcast into 4 float slots.
+constexpr uint32_t kW = 256;
+constexpr uint32_t kH = 256;
+
+// Pack one kTerrainBlend vertex (pos3 + normal3 + weights4 + indices4); the u32
+// layer indices are bitcast into 4 float slots.
 void PushTerrainVertex(std::vector<float>& out, glm::vec3 pos, glm::vec3 nrm,
                        glm::vec4 w, std::array<uint32_t, 4> idx) {
   out.insert(out.end(), {pos.x, pos.y, pos.z, nrm.x, nrm.y, nrm.z, w.x, w.y,
@@ -45,107 +49,73 @@ void PushTerrainVertex(std::vector<float>& out, glm::vec3 pos, glm::vec3 nrm,
   }
 }
 
-}  // namespace
-
-TEST_CASE("terrain_blend: per-vertex R/G/B blend via the albedo debug view") {
-  wgpu::Instance instance = wgpu::CreateInstance();
-  wgpu::Adapter adapter = test::RequestAdapter(instance);
-  REQUIRE(adapter);
-  wgpu::Device device = test::RequestDevice(adapter, "terrain_blend_test");
-  REQUIRE(device);
-  wgpu::Queue queue = device.GetQueue();
-
-  GpuPipelineGenerator pipeline_gen(device, FindShaderDirectory());
-
-  MaterialLibrary lib;
-  REQUIRE(lib.Initialize(device, queue, &pipeline_gen));
-
-  // Three debug materials: solid red, green, blue as array layers 0, 1, 2.
-  const std::array<uint8_t, 12> layer_colors = {
-      255, 0, 0, 255,  // layer 0 = red
-      0, 255, 0, 255,  // layer 1 = green
-      0, 0, 255, 255,  // layer 2 = blue
-  };
-  wgpu::TextureView array_view =
-      CreateSolidColorArray(device, queue, layer_colors.data(), 3);
-  wgpu::SamplerDescriptor samp_desc = {};
-  samp_desc.minFilter = wgpu::FilterMode::Linear;
-  samp_desc.magFilter = wgpu::FilterMode::Linear;
-  wgpu::Sampler sampler = device.CreateSampler(&samp_desc);
-
-  DeferredMaterial mat = lib.TerrainBlend(array_view, sampler);
-  REQUIRE(mat.factory != nullptr);
-
-  // A kTerrainBlend quad in the XZ plane (y=0), normal +Y. Corners carry pure
-  // one-hot weights on layers R/G/B (+ a 3-way mix); all vertices share the
-  // same layer_indices (flat), so weights carry the blend. Emitted
-  // double-sided so the material's default back-face cull can't hide it.
+// Add a double-sided kTerrainBlend quad (XZ plane, +Y normal) whose four corners
+// (A,B,C,D) carry the given per-vertex weights over a shared layer-index set.
+void AddTerrainQuad(entt::registry& reg, MaterialInstanceFactory* factory,
+                    InstanceParams params,
+                    const std::array<glm::vec4, 4>& corner_w,
+                    const std::array<uint32_t, 4>& idx) {
   const float S = 3.0f;
-  const glm::vec3 up_normal(0.0f, 1.0f, 0.0f);
-  const std::array<uint32_t, 4> idx = {0, 1, 2, 0};
+  const glm::vec3 nY(0, 1, 0);
   const glm::vec3 A(-S, 0, -S), B(S, 0, -S), C(-S, 0, S), D(S, 0, S);
-  const glm::vec4 wR(1, 0, 0, 0), wG(0, 1, 0, 0), wB(0, 0, 1, 0);
-  const glm::vec4 wMix(1.0f / 3, 1.0f / 3, 1.0f / 3, 0);
-
-  std::vector<float> verts;
-  auto emit_tri = [&](glm::vec3 p0, glm::vec4 w0, glm::vec3 p1, glm::vec4 w1,
-                      glm::vec3 p2, glm::vec4 w2) {
-    PushTerrainVertex(verts, p0, up_normal, w0, idx);
-    PushTerrainVertex(verts, p1, up_normal, w1, idx);
-    PushTerrainVertex(verts, p2, up_normal, w2, idx);
-    // reversed winding (double-sided)
-    PushTerrainVertex(verts, p0, up_normal, w0, idx);
-    PushTerrainVertex(verts, p2, up_normal, w2, idx);
-    PushTerrainVertex(verts, p1, up_normal, w1, idx);
+  std::vector<float> v;
+  auto tri = [&](glm::vec3 p0, glm::vec4 w0, glm::vec3 p1, glm::vec4 w1,
+                 glm::vec3 p2, glm::vec4 w2) {
+    PushTerrainVertex(v, p0, nY, w0, idx);
+    PushTerrainVertex(v, p1, nY, w1, idx);
+    PushTerrainVertex(v, p2, nY, w2, idx);
+    PushTerrainVertex(v, p0, nY, w0, idx);  // reversed winding (double-sided)
+    PushTerrainVertex(v, p2, nY, w2, idx);
+    PushTerrainVertex(v, p1, nY, w1, idx);
   };
-  emit_tri(A, wR, B, wG, C, wB);
-  emit_tri(B, wG, D, wMix, C, wB);
-  const uint32_t vertex_count = static_cast<uint32_t>(verts.size() / 14);
+  tri(A, corner_w[0], B, corner_w[1], C, corner_w[2]);
+  tri(B, corner_w[1], D, corner_w[3], C, corner_w[2]);
 
-  entt::registry registry;
-  entt::entity e = registry.create();
-  auto& mesh = registry.emplace<StaticTexturedMeshComponent>(e);
-  mesh.vertices = std::move(verts);
-  mesh.vertex_count = vertex_count;
+  entt::entity e = reg.create();
+  auto& mesh = reg.emplace<StaticTexturedMeshComponent>(e);
+  const uint32_t vcount = static_cast<uint32_t>(v.size() / 14);
+  mesh.vertices = std::move(v);
+  mesh.vertex_count = vcount;
   mesh.dirty = true;
   mesh.geometry_type = GeometryType::kTerrainBlend;
   mesh.transform = glm::mat4(1.0f);
 
   MaterialFactoryComponent fmc;
-  fmc.factory = mat.factory;
+  fmc.factory = factory;
   fmc.pass_type = MaterialPassType::kDeferred;
-  fmc.params = mat.params;
+  fmc.params = std::move(params);
   fmc.config_hash = ComputeFactoryConfigHash(fmc);
-  registry.emplace<MaterialFactoryComponent>(e, std::move(fmc));
+  reg.emplace<MaterialFactoryComponent>(e, std::move(fmc));
+}
 
-  // Top-down camera centered on the quad — quad center projects to the image
-  // center; the quad fills most of the frame.
-  const uint32_t W = 256, H = 256;
-  Camera camera;
+// Render the registry top-down and read back the unlit albedo debug view.
+CpuImage RenderAlbedo(wgpu::Instance instance, wgpu::Device device,
+                      wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
+                      entt::registry& registry) {
+  Camera camera;  // top-down, centred on the quad, quad fills most of the frame
   camera.position = glm::vec3(0.0f, 10.0f, 0.0f);
   camera.direction = glm::vec3(0.0f, -1.0f, 0.0f);
   camera.up = glm::vec3(0.0f, 0.0f, -1.0f);
   camera.fov = 45.0f;
-  camera.aspect = static_cast<float>(W) / static_cast<float>(H);
+  camera.aspect = static_cast<float>(kW) / static_cast<float>(kH);
   camera.near_plane = 0.5f;
   camera.far_plane = 100.0f;
 
   SceneContext scene;
   scene.registry = &registry;
 
-  wgpu::TextureDescriptor target_desc = {};
-  target_desc.size = {W, H, 1};
-  target_desc.format = wgpu::TextureFormat::RGBA8Unorm;
-  target_desc.usage =
-      wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
-  target_desc.mipLevelCount = 1;
-  target_desc.sampleCount = 1;
-  target_desc.dimension = wgpu::TextureDimension::e2D;
-  wgpu::Texture target = device.CreateTexture(&target_desc);
+  wgpu::TextureDescriptor td = {};
+  td.size = {kW, kH, 1};
+  td.format = wgpu::TextureFormat::RGBA8Unorm;
+  td.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+  td.mipLevelCount = 1;
+  td.sampleCount = 1;
+  td.dimension = wgpu::TextureDimension::e2D;
+  wgpu::Texture target = device.CreateTexture(&td);
 
   SceneRenderer renderer;
   renderer.Initialize(device, queue, &pipeline_gen,
-                      wgpu::TextureFormat::RGBA8Unorm, W, H,
+                      wgpu::TextureFormat::RGBA8Unorm, kW, kH,
                       /*has_r8unorm_storage=*/false);
   renderer.SetDebugMode(GBufferDebugMode::Albedo);
   renderer.Render(camera, registry, scene, target.CreateView());
@@ -153,31 +123,107 @@ TEST_CASE("terrain_blend: per-vertex R/G/B blend via the albedo debug view") {
   TextureReadback readback(instance, device, queue);
   CpuImage image;
   REQUIRE(readback.ReadTexture(target).AwaitInto(image));
-  REQUIRE(image.GetWidth() == W);
-  REQUIRE(image.GetHeight() == H);
+  REQUIRE(image.GetWidth() == kW);
+  REQUIRE(image.GetHeight() == kH);
+  return image;
+}
+
+struct TestGpu {
+  wgpu::Instance instance;
+  wgpu::Device device;
+  wgpu::Queue queue;
+};
+
+TestGpu MakeGpu() {
+  TestGpu g;
+  g.instance = wgpu::CreateInstance();
+  wgpu::Adapter adapter = test::RequestAdapter(g.instance);
+  REQUIRE(adapter);
+  g.device = test::RequestDevice(adapter, "terrain_blend_test");
+  REQUIRE(g.device);
+  g.queue = g.device.GetQueue();
+  return g;
+}
+
+wgpu::Sampler LinearSampler(wgpu::Device device) {
+  wgpu::SamplerDescriptor sd = {};
+  sd.minFilter = wgpu::FilterMode::Linear;
+  sd.magFilter = wgpu::FilterMode::Linear;
+  return device.CreateSampler(&sd);
+}
+
+}  // namespace
+
+TEST_CASE("terrain_blend: per-vertex R/G/B blend via the albedo debug view") {
+  TestGpu g = MakeGpu();
+  GpuPipelineGenerator pipeline_gen(g.device, FindShaderDirectory());
+  MaterialLibrary lib;
+  REQUIRE(lib.Initialize(g.device, g.queue, &pipeline_gen));
+
+  // Three debug materials: solid red / green / blue as array layers 0, 1, 2.
+  const std::array<uint8_t, 12> layer_colors = {
+      255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255};
+  wgpu::TextureView array_view =
+      CreateSolidColorArray(g.device, g.queue, layer_colors.data(), 3);
+  DeferredMaterial mat = lib.TerrainBlend(array_view, LinearSampler(g.device));
+  REQUIRE(mat.factory != nullptr);
+
+  entt::registry registry;
+  AddTerrainQuad(registry, mat.factory, mat.params,
+                 {glm::vec4(1, 0, 0, 0), glm::vec4(0, 1, 0, 0),
+                  glm::vec4(0, 0, 1, 0),
+                  glm::vec4(1.0f / 3, 1.0f / 3, 1.0f / 3, 0)},
+                 {0, 1, 2, 0});
+
+  CpuImage image = RenderAlbedo(g.instance, g.device, g.queue, pipeline_gen,
+                                registry);
   image.WritePng("terrain_blend_albedo.png");
 
-  // The quad center lies on the B(green)->C(blue) triangulation edge, so its
-  // albedo is a 50/50 green+blue blend (~0,128,128) — the core 2-layer check.
-  const CpuImage::Color center = image.GetPixel(W / 2, H / 2);
-  INFO("center RGBA = " << int(center.r) << "," << int(center.g) << ","
-                        << int(center.b) << "," << int(center.a));
-  CHECK(center.r < 60);
-  CHECK(std::abs(int(center.g) - 128) < 45);
-  CHECK(std::abs(int(center.b) - 128) < 45);
+  // Center lies on the B(green)->C(blue) triangulation edge: a 50/50 blend.
+  const CpuImage::Color c = image.GetPixel(kW / 2, kH / 2);
+  INFO("center RGBA = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  CHECK(c.r < 60);
+  CHECK(std::abs(int(c.g) - 128) < 45);
+  CHECK(std::abs(int(c.b) - 128) < 45);
 
-  // Each pure-weight corner must sample its layer: some pixel is red-dominant,
-  // some green-dominant, some blue-dominant (proves layer lookup + one-hot).
+  // Each pure-weight corner samples its layer (proves layer lookup + one-hot).
   bool saw_red = false, saw_green = false, saw_blue = false;
-  for (uint32_t y = 0; y < H; ++y) {
-    for (uint32_t x = 0; x < W; ++x) {
-      const CpuImage::Color c = image.GetPixel(x, y);
-      if (c.r > 200 && c.g < 80 && c.b < 80) saw_red = true;
-      if (c.g > 200 && c.r < 80 && c.b < 80) saw_green = true;
-      if (c.b > 200 && c.r < 80 && c.g < 80) saw_blue = true;
+  for (uint32_t y = 0; y < kH; ++y) {
+    for (uint32_t x = 0; x < kW; ++x) {
+      const CpuImage::Color p = image.GetPixel(x, y);
+      if (p.r > 200 && p.g < 80 && p.b < 80) saw_red = true;
+      if (p.g > 200 && p.r < 80 && p.b < 80) saw_green = true;
+      if (p.b > 200 && p.r < 80 && p.g < 80) saw_blue = true;
     }
   }
   CHECK(saw_red);
   CHECK(saw_green);
   CHECK(saw_blue);
+}
+
+TEST_CASE("terrain_blend: missing albedo_array binds the default (no override)") {
+  // Regression: a kTerrainBlend instance built WITHOUT an albedo_array override
+  // must fall back to a valid texture_2d_array default (a neutral gray), not a
+  // 2D 1x1 view that fails Dawn's e2DArray bind-group validation (which would
+  // skip the draw and leave the quad unrendered).
+  TestGpu g = MakeGpu();
+  GpuPipelineGenerator pipeline_gen(g.device, FindShaderDirectory());
+  MaterialLibrary lib;
+  REQUIRE(lib.Initialize(g.device, g.queue, &pipeline_gen));
+
+  entt::registry registry;
+  AddTerrainQuad(registry, lib.terrain_factory(), InstanceParams{},
+                 {glm::vec4(1, 0, 0, 0), glm::vec4(1, 0, 0, 0),
+                  glm::vec4(1, 0, 0, 0), glm::vec4(1, 0, 0, 0)},
+                 {0, 0, 0, 0});
+
+  CpuImage image = RenderAlbedo(g.instance, g.device, g.queue, pipeline_gen,
+                                registry);
+
+  // The quad rendered the default gray albedo (not the background clear).
+  const CpuImage::Color c = image.GetPixel(kW / 2, kH / 2);
+  INFO("center RGBA = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  CHECK(std::abs(int(c.r) - 128) < 45);
+  CHECK(std::abs(int(c.g) - 128) < 45);
+  CHECK(std::abs(int(c.b) - 128) < 45);
 }
