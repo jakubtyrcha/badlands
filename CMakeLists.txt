@@ -477,6 +477,7 @@ add_executable(badlands_ray_tests
     src/engine/tests/game_camera_controller_tests.cpp
     src/engine/core/ray.cpp
     src/engine/app/game_camera_controller.cpp
+    src/engine/app/orbit_camera_controller.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_ray_tests PRIVATE
