@@ -64,7 +64,16 @@ corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 # Corrosion's imported CMake target always replaces dashes with underscores
 # (CorrosionGenerator.cmake), so the target is `noiser_bundle`, not
 # `noiser-bundle`.
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/crates/noiser-bundle/Cargo.toml)
+#
+# PROFILE release — ALWAYS, even in a Debug C++ build. The noiser VM is an
+# interpreter sitting on mapgen's hot path: the field script evaluates ~16
+# Perlin octaves per sample, so a 2000x2000 map is ~64M octave evaluations
+# through it. Built with cargo's dev profile (opt-level 0, which is what
+# CMAKE_BUILD_TYPE=Debug otherwise selects) that alone costs ~39s of a ~40s
+# generation. Nothing here is C++-debuggable anyway — it's a prebuilt staticlib
+# behind a C ABI — so there is no debuggability to trade away.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/crates/noiser-bundle/Cargo.toml
+                       PROFILE release)
 corrosion_set_env_vars(noiser_bundle "RUSTFLAGS=-Cpanic=unwind")
 
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
