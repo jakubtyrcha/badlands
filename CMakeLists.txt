@@ -340,3 +340,36 @@ if(APPLE)
     target_link_options(badlands_readback_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_readback_tests COMMAND badlands_readback_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_terrain_blend_tests: GPU test for the terrain-blend material — renders
+# a kTerrainBlend quad blending an R/G/B texture_2d_array and reads back the
+# unlit G-buffer albedo via GBufferDebugMode::Albedo. Needs a working GPU
+# adapter (Metal on macOS) + the shaders/ dir (WORKING_DIRECTORY = repo root).
+add_executable(badlands_terrain_blend_tests
+    src/engine/tests/terrain_blend_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_terrain_blend_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_terrain_blend_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_terrain_blend_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_terrain_blend_tests COMMAND badlands_terrain_blend_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_terrain_mesh_tests: pure-CPU tests for the tessellated-block terrain
+# mesh builder (src/game/geometry/terrain_mesh) — no GPU. Only needs glm + the
+# header-only mapgen Field2D/Biome types.
+add_executable(badlands_terrain_mesh_tests
+    src/game/geometry/terrain_mesh.cpp
+    game/tests/terrain_mesh_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_terrain_mesh_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_terrain_mesh_tests COMMAND badlands_terrain_mesh_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

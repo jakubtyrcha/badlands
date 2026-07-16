@@ -77,6 +77,20 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
                .sampler_binding = 2,
                .default_texture = "white"},
           }});
+
+  // terrain_blend.wesl - texture_2d_array of albedo layers, blended per-vertex.
+  // The array view is always supplied as an instance override (an e2DArray
+  // binding has no 1x1 array default; "white" here is only a nominal fallback
+  // and must not actually be bound).
+  MaterialRequirements terrain_blend_reqs{
+      .shader_name = "terrain_blend",
+      .textures = {
+          {.slot_name = "albedo_array",
+           .texture_binding = 1,
+           .sampler_binding = 2,
+           .default_texture = "white"},
+      }};
+  RegisterMaterial("terrain_blend", terrain_blend_reqs, terrain_blend_reqs);
 }
 
 std::string MaterialRequirementsRegistry::ResolveName(

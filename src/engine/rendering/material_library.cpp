@@ -42,6 +42,27 @@ bool MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
     return false;
   }
 
+  // Deferred terrain-blend factory: same G-buffer targets, kTerrainBlend
+  // geometry, and the fs_gbuffer entry (blends the texture_2d_array layers into
+  // one albedo). The array view is supplied per-instance by TerrainBlend().
+  FactoryDescriptor terrain_desc;
+  terrain_desc.shader_name = "terrain_blend";
+  terrain_desc.shader_path = "material/terrain_blend.wesl";
+  terrain_desc.fs_entry = "fs_gbuffer";
+  terrain_desc.supported_pass_types = {MaterialPassType::kDeferred};
+  terrain_desc.supported_geometry_types = {GeometryType::kTerrainBlend};
+  terrain_desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                                GBuffer::kMaterialFormat};
+  terrain_desc.depth_format = GBuffer::kDepthFormat;
+  terrain_factory_ = BuildMaterialInstanceFactory(
+      terrain_desc, device, queue, pipeline_gen, /*script_provider=*/nullptr);
+  if (!terrain_factory_) {
+    spdlog::error(
+        "MaterialLibrary::Initialize: failed to build terrain_blend "
+        "material factory");
+    return false;
+  }
+
   // Shared trilinear + anisotropic sampler: the material factory's default
   // sampler uses mipmapFilter=Nearest, which would defeat every pack's GPU
   // mip chain.
@@ -90,6 +111,21 @@ DeferredMaterial MaterialLibrary::SolidColor(glm::vec3 rgb, float roughness) {
   }
 
   return DeferredMaterial{.factory = factory_.get(), .params = it->second};
+}
+
+DeferredMaterial MaterialLibrary::TerrainBlend(wgpu::TextureView array_view,
+                                               wgpu::Sampler sampler) {
+  InstanceParams params;
+  // Matched by param_name against the "albedo_array" slot; TextureType is only
+  // used to filter default-view recipes, so k2D is fine for an override.
+  params.texture_overrides.push_back(DefaultTextureView{
+      .param_name = "albedo_array",
+      .view = array_view,
+      .sampler = sampler,
+      .type = TextureType::k2D,
+  });
+  return DeferredMaterial{.factory = terrain_factory_.get(),
+                          .params = std::move(params)};
 }
 
 MaterialLibrary::PackTextures MaterialLibrary::LoadPack(

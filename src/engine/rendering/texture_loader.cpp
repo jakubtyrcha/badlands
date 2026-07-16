@@ -46,6 +46,41 @@ wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue
   return tex.CreateView();
 }
 
+wgpu::TextureView CreateSolidColorArray(wgpu::Device device, wgpu::Queue queue,
+                                        const uint8_t* colors,
+                                        uint32_t layer_count) {
+  wgpu::TextureDescriptor desc;
+  desc.size = {1, 1, layer_count};
+  desc.format = wgpu::TextureFormat::RGBA8Unorm;
+  desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+  desc.dimension = wgpu::TextureDimension::e2D;
+  desc.mipLevelCount = 1;
+  desc.sampleCount = 1;
+  wgpu::Texture tex = device.CreateTexture(&desc);
+
+  for (uint32_t layer = 0; layer < layer_count; ++layer) {
+    wgpu::TexelCopyBufferLayout layout;
+    layout.bytesPerRow = 4;
+    layout.rowsPerImage = 1;
+    wgpu::TexelCopyTextureInfo dst;
+    dst.texture = tex;
+    dst.mipLevel = 0;
+    dst.origin = {0, 0, layer};
+    wgpu::Extent3D extent = {1, 1, 1};
+    queue.WriteTexture(&dst, colors + static_cast<size_t>(layer) * 4, 4,
+                       &layout, &extent);
+  }
+
+  wgpu::TextureViewDescriptor view_desc;
+  view_desc.dimension = wgpu::TextureViewDimension::e2DArray;
+  view_desc.arrayLayerCount = layer_count;
+  view_desc.baseArrayLayer = 0;
+  view_desc.mipLevelCount = 1;
+  view_desc.baseMipLevel = 0;
+  view_desc.format = wgpu::TextureFormat::RGBA8Unorm;
+  return tex.CreateView(&view_desc);
+}
+
 LoadedTexture LoadTexture2D(wgpu::Device device, wgpu::Queue queue,
                             GpuPipelineGenerator& pipeline_gen,
                             const std::string& path, bool flip_green_dx) {

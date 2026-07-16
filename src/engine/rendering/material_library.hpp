@@ -76,8 +76,21 @@ class MaterialLibrary {
   // views used to build inline.
   DeferredMaterial SolidColor(glm::vec3 rgb, float roughness);
 
+  // Returns a deferred terrain-blend material bound to `array_view` (a
+  // texture_2d_array of albedo layers) sampled through `sampler`. Meshes drawn
+  // with it must use GeometryType::kTerrainBlend (per-vertex blend_weights +
+  // layer_indices). The caller owns/keeps the array view alive; all instances
+  // share one terrain_blend kDeferred factory. Valid after Initialize().
+  DeferredMaterial TerrainBlend(wgpu::TextureView array_view,
+                                wgpu::Sampler sampler);
+
   // The shared normalmapped kDeferred factory (valid after Initialize()).
   MaterialInstanceFactory* factory() const { return factory_.get(); }
+
+  // The shared terrain_blend kDeferred factory (valid after Initialize()).
+  MaterialInstanceFactory* terrain_factory() const {
+    return terrain_factory_.get();
+  }
 
   // False if any pack has hard-failed to load since construction (missing
   // manifest, unparseable JSON, or a missing/undecodable texture) -- see
@@ -107,6 +120,7 @@ class MaterialLibrary {
   GpuPipelineGenerator* pipeline_gen_ = nullptr;
 
   std::unique_ptr<MaterialInstanceFactory> factory_;
+  std::unique_ptr<MaterialInstanceFactory> terrain_factory_;
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: dir

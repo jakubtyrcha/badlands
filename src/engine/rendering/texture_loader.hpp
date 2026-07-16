@@ -45,6 +45,17 @@ wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue
                                           uint8_t r, uint8_t g, uint8_t b,
                                           uint8_t a = 255);
 
+// Creates an N-layer 1x1 solid-color RGBA8Unorm texture ARRAY (one color per
+// layer) and returns a 2D-array (e2DArray) view over all layers. `colors` is
+// `layer_count * 4` bytes (one RGBA per layer). The returned view keeps the
+// underlying texture alive. No mip chain (1x1). Used for terrain-blend layer
+// arrays — e.g. the red/green/blue debug materials, or the biome palette.
+// Modeled on standard_material_factory.cpp's CreateSolidColorCubemap1x1 (a
+// cubemap is just a 6-layer array).
+wgpu::TextureView CreateSolidColorArray(wgpu::Device device, wgpu::Queue queue,
+                                        const uint8_t* colors,
+                                        uint32_t layer_count);
+
 // Decodes the JPEG/PNG at `path` (via the `assets` Rust crate), uploads it as
 // mip level 0 of an RGBA8Unorm Dawn texture sized to a full mip chain, then
 // GPU-generates all lower mips via a render-path box downsample (see

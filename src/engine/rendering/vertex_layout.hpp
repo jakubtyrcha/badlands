@@ -13,6 +13,8 @@ enum class VertexLayout {
   kStaticMesh,    // pos(vec3) + color(vec3) + normal(vec3) = 36 bytes
   kTerrainMesh,   // pos(vec3) + color(vec3) + normal(vec3) + cell_index(u32)
                   // = 40 bytes
+  kTerrainBlend,  // pos(vec3) + normal(vec3) + blend_weights(vec4) +
+                  // layer_indices(uvec4) = 56 bytes
   kTexturedMesh,  // pos(vec3) + uv(vec2) + normal(vec3) + tangent(vec3) = 44
                   // bytes
   kCubeMapMesh,   // pos(vec3) + normal(vec3) + tangent(vec3) = 36 bytes (no

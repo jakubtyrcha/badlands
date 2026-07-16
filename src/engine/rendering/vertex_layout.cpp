@@ -54,6 +54,32 @@ VertexLayoutInfo GetVertexLayoutInfo(VertexLayout layout) {
       break;
     }
 
+    case VertexLayout::kTerrainBlend: {
+      // pos(vec3) + normal(vec3) + blend_weights(vec4) + layer_indices(uvec4)
+      // = 14 elements = 56 bytes. layer_indices are u32 bitcast into the flat
+      // float vertex buffer (like kTerrainMesh's cell_index).
+      info.attributes.resize(4);
+
+      info.attributes[0].format = wgpu::VertexFormat::Float32x3;
+      info.attributes[0].offset = 0;
+      info.attributes[0].shaderLocation = 0;
+
+      info.attributes[1].format = wgpu::VertexFormat::Float32x3;
+      info.attributes[1].offset = sizeof(float) * 3;
+      info.attributes[1].shaderLocation = 1;
+
+      info.attributes[2].format = wgpu::VertexFormat::Float32x4;
+      info.attributes[2].offset = sizeof(float) * 6;
+      info.attributes[2].shaderLocation = 2;
+
+      info.attributes[3].format = wgpu::VertexFormat::Uint32x4;
+      info.attributes[3].offset = sizeof(float) * 10;
+      info.attributes[3].shaderLocation = 3;
+
+      info.stride = sizeof(float) * 14;
+      break;
+    }
+
     case VertexLayout::kTexturedMesh: {
       // pos(vec3) + uv(vec2) + normal(vec3) + tangent(vec3) = 11 floats = 44
       // bytes
