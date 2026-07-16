@@ -241,6 +241,47 @@ foreach(app viewer game ai_sandbox)
     endif()
 endforeach()
 
+# badlands_mapgen: offline CPU map generator (heightmap + biomes + sections).
+# A pure-CPU CLI tool — no window/GPU/AppView. Links badlands_engine for
+# CpuImage (PNG write via the `assets` crate) and badlands_game_lib for the
+# sampo::noiser C++ VM wrapper (parallel noise-field evaluation). This is the
+# same both-libraries link as badlands_geometry_tests: engine is linked for a
+# CPU-only helper and the GPU is never touched. -Wno-deprecated-declarations
+# matches badlands_game_lib (the noiser headers ship [[deprecated]] shims).
+set(badlands_mapgen_sources
+    src/mapgen/main_mapgen.cpp
+    src/mapgen/config.cpp
+    src/mapgen/fields.cpp
+    src/mapgen/outputs.cpp
+    src/mapgen/voronoi.cpp
+    src/mapgen/biome_assign.cpp
+    src/mapgen/heightmap.cpp
+    src/mapgen/sections.cpp)
+add_executable(badlands_mapgen ${badlands_mapgen_sources})
+target_link_libraries(badlands_mapgen PRIVATE badlands_engine badlands_game_lib)
+target_compile_options(badlands_mapgen PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_mapgen PRIVATE "-Wl,-ld_new")
+endif()
+
+# badlands_mapgen_tests: Catch2 unit tests for the deterministic mapgen analysis
+# (block reduction, section flood-fill + graph, biome classification, height
+# composition). Pure CPU — compiles just those TUs (no noiser/Dawn/CpuImage),
+# so it links nothing but Catch2. Runs on tiny synthetic patches.
+add_executable(badlands_mapgen_tests
+    src/mapgen/mapgen_tests.cpp
+    src/mapgen/sections.cpp
+    src/mapgen/biome_assign.cpp
+    src/mapgen/heightmap.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_mapgen_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_mapgen_tests COMMAND badlands_mapgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
 # see tests/cpp_tests.rs on the legacy Rust reference branch).

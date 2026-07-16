@@ -1,0 +1,62 @@
+// Continuous noise fields for badlands mapgen.
+//
+// Returns (elevation, moisture, ridged, fine) per heightmap sample, each in
+// ~[0,1]. These are BIOME-AGNOSTIC ingredients: the C++ side clusters voronoi
+// cells into biomes (using elevation+moisture) and then composites the final
+// per-pixel height by biome. Domain coords come from the @warpId/@warpSize
+// builtins (px, py) / (width, height). Tunables arrive as f32 uniforms set by
+// the host once per ExecutionContext.
+
+@uni.seed: f32 = 1.0;
+@uni.elev_freq: f32 = 2.0;
+@uni.moist_freq: f32 = 3.0;
+@uni.ridged_freq: f32 = 8.0;
+@uni.fine_freq: f32 = 24.0;
+
+fn remap01(x: f32) -> f32 = x * 0.5 + 0.5;
+
+// Fractional Brownian motion: summed octaves of Perlin noise, halving amplitude
+// and doubling frequency each octave. Output in ~[-1, 1].
+fn fbm(p: (f32, f32, f32), seed: i32, freq: f32, octaves: i32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var f = freq;
+    var i = 0;
+    while i < octaves {
+        sum = sum + Perlin3d { seed: seed + i * 1013, freq: f }.at(p) * amp;
+        f = f * 2.0;
+        amp = amp * 0.5;
+        i = i + 1;
+    }
+    sum
+}
+
+// Ridged multifractal: 1 - |noise| sharpens ridge lines. Output in ~[0, 1].
+fn ridged(p: (f32, f32, f32), seed: i32, freq: f32, octaves: i32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var f = freq;
+    var i = 0;
+    while i < octaves {
+        let n = Perlin3d { seed: seed + i * 2749, freq: f }.at(p);
+        sum = sum + (1.0 - n.abs()) * amp;
+        f = f * 2.0;
+        amp = amp * 0.5;
+        i = i + 1;
+    }
+    sum
+}
+
+let base_seed = i32(@uni.seed);
+let u = (f32(@warpId.0) + 0.5) / f32(@warpSize.0);
+let v = (f32(@warpId.1) + 0.5) / f32(@warpSize.1);
+let p = (u, v, 0.0);
+
+// Low-frequency elevation/moisture => large coherent regions. Decorrelated
+// seeds keep the two fields independent.
+let elevation = remap01(fbm(p, base_seed,        @uni.elev_freq,  5));
+let moisture  = remap01(fbm(p, base_seed + 4099, @uni.moist_freq, 4));
+let ridge     = ridged(p, base_seed + 8191, @uni.ridged_freq, 4).clamp(0.0, 1.0);
+let fine      = remap01(fbm(p, base_seed + 9973, @uni.fine_freq,  3));
+
+(elevation, moisture, ridge, fine)
