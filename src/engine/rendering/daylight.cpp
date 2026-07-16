@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/math/spherical_harmonics.hpp"
+#include "core/profiler.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/hosek_wilkie.hpp"
@@ -82,6 +83,7 @@ void ApplyDaylightEnvironment(const DaylightState& state,
                               wgpu::Queue queue, CubemapBuilder& sky_cube,
                               SceneContext& out, uint32_t face_size,
                               int sh_samples) {
+  PROFILE_SCOPE("ApplyDaylightEnvironment");
   const HosekWilkieState hw = HosekWilkieInit(cfg.turbidity, cfg.ground_albedo,
                                               state.hw_solar_elevation_rad);
   const glm::vec3 sun_dir = glm::normalize(state.sun_direction);
@@ -130,15 +132,21 @@ void ApplyDaylightEnvironment(const DaylightState& state,
     return glm::vec4(c, 1.0f);
   };
 
-  if (!sky_cube.Build(device, queue, face_size, sky_radiance)) {
-    spdlog::error("ApplyDaylightEnvironment: failed to build sky cubemap");
-  } else {
-    out.skybox_cubemap = sky_cube.GetView();
-    ++out.skybox_generation;
+  {
+    PROFILE_SCOPE("hw_cube_build");  // 6 x face^2 CPU HW evals + GPU upload
+    if (!sky_cube.Build(device, queue, face_size, sky_radiance)) {
+      spdlog::error("ApplyDaylightEnvironment: failed to build sky cubemap");
+    } else {
+      out.skybox_cubemap = sky_cube.GetView();
+      ++out.skybox_generation;
+    }
   }
 
-  out.ambient_sh = sh::ProjectFunctionToSHL2(
-      [&](glm::vec3 d) { return sky_base(d); }, sh_samples);
+  {
+    PROFILE_SCOPE("sh_project");  // sh_samples-sample Monte-Carlo SH projection
+    out.ambient_sh = sh::ProjectFunctionToSHL2(
+        [&](glm::vec3 d) { return sky_base(d); }, sh_samples);
+  }
 
   out.sun_direction = glm::normalize(state.light_direction);
   out.sun_color = state.light_color * state.light_intensity;

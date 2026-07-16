@@ -12,6 +12,7 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 
+#include "core/profiler.hpp"
 #include "engine/app/fixed_timestep.hpp"
 #include "engine/app/screenshot.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
@@ -145,6 +146,9 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
 
   const uint64_t perf_freq = SDL_GetPerformanceFrequency();
   uint64_t last_time = SDL_GetPerformanceCounter();
+#ifdef BADLANDS_PROFILING
+  double profile_report_accum = 0.0;  // dump the scope profile every ~2 s
+#endif
 
   bool render_ok_logged = false;
   bool running = true;
@@ -255,6 +259,18 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
                              renderer_.GetDebugMode());
       view_->OnResize(width, height);
     }
+
+#ifdef BADLANDS_PROFILING
+    // Dump the accumulated scope profile to stderr roughly every 2 s. Called
+    // here at end-of-frame, after every PROFILE_SCOPE this iteration has
+    // closed, so the reported tree is well-formed. Report() also resets the
+    // buffers, so each dump is a ~2 s window.
+    profile_report_accum += frame_dt;
+    if (profile_report_accum >= 2.0) {
+      profiler::ReportToStderr();
+      profile_report_accum = 0.0;
+    }
+#endif
 
     if (!render_ok_logged) {
       render_ok_logged = true;

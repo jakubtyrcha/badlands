@@ -29,6 +29,17 @@ FetchContent_MakeAvailable(Corrosion)
 FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# Taskflow (header-only task-based parallelism, from sampo). Backs the shared
+# thread pool in src/core/parallel.* (e.g. the multithreaded sky cube bake).
+set(TF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(TF_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    taskflow
+    GIT_REPOSITORY https://github.com/taskflow/taskflow.git
+    GIT_TAG        v3.6.0
+)
+FetchContent_MakeAvailable(taskflow)
+
 # wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
 # The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
 # the `wesl` 0.2 crate, and Corrosion invokes `cargo rustc --package <name>`,
@@ -105,6 +116,8 @@ add_library(badlands_engine STATIC
     # game-agnostic (src/core) but its .cpp routes PNG I/O through the assets
     # crate, so it compiles here where `assets` is linked.
     src/core/util/cpu_image.cpp
+    src/core/profiler.cpp
+    src/core/parallel.cpp
     src/engine/rendering/color_render_target.cpp
     src/engine/rendering/texture_readback.cpp
     # Task S2.E: shared scene-building helper (TexturedMeshResult + a
@@ -140,6 +153,13 @@ target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets n
 # in the wrong place. Applies to all engine/app sources compiled into
 # `badlands_engine` (PUBLIC so it also applies to the executables' own TUs).
 target_compile_definitions(badlands_engine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+# Lightweight CPU scope profiler (PROFILE_SCOPE markers; ported from sampo).
+# PUBLIC so the define reaches the executables' own TUs (GameView etc.) that
+# place markers. Compiled out entirely when OFF.
+option(BADLANDS_SCOPE_PROFILING "Enable the CPU scope profiler (PROFILE_SCOPE)" ON)
+if(BADLANDS_SCOPE_PROFILING)
+    target_compile_definitions(badlands_engine PUBLIC BADLANDS_PROFILING)
+endif()
 target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
@@ -150,6 +170,7 @@ target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/src/crates/nav/include
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+    ${taskflow_SOURCE_DIR}
 )
 
 # badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog + the

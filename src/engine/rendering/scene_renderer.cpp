@@ -20,6 +20,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/profiler.hpp"
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
 #include "engine/rendering/context/scene_context.hpp"
@@ -235,10 +236,16 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   if (!surface_view || width_ == 0 || height_ == 0 || !pipeline_generator_) {
     return;
   }
+  PROFILE_SCOPE("SceneRenderer::Render");
 
   // Refresh the prefiltered specular env if the scene's skybox changed. Does
   // its own encoder/submit (queue-ordered before this frame's work below).
-  UpdateIbl(scene);
+  // (The GGX prefilter fires here whenever the daylight re-bake bumped the
+  // skybox generation -- watch this marker for the IBL cost.)
+  {
+    PROFILE_SCOPE("UpdateIbl");
+    UpdateIbl(scene);
+  }
 
   // World camera-offsetting: the view matrix has the camera fixed at the
   // origin (pure rotation, no translation) for float precision — geometry is
@@ -686,8 +693,11 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     pass.End();
   }
 
-  wgpu::CommandBuffer commands = frame.End();
-  queue_.Submit(1, &commands);
+  {
+    PROFILE_SCOPE("frame_submit");  // Finish encoding + queue submit
+    wgpu::CommandBuffer commands = frame.End();
+    queue_.Submit(1, &commands);
+  }
 }
 
 }  // namespace badlands

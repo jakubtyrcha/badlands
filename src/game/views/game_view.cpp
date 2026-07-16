@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include "core/profiler.hpp"
 #include "engine/app/fixed_timestep.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
@@ -42,6 +43,11 @@ constexpr double kRebakeIntervalSeconds = 1.0 / 20.0;  // ~20 Hz sky/IBL refresh
 // Real seconds for one in-game day (overrides SimClock's 5-minute default).
 // Short for now so the whole cycle is quick to see.
 constexpr float kRealSecondsPerDay = 16.0f;
+
+// Dynamic sky/IBL source-cube face resolution. 64 keeps the (throttled, now
+// multithreaded) HW bake cheap; the HW sky is smooth so 64 reads fine as the
+// skybox background + IBL prefilter source.
+constexpr uint32_t kSkyCubeFaceSize = 64;
 
 // Where the live day/night clock starts (t01: 0.30 = mid-morning).
 constexpr float kInitialTimeOfDay = 0.30f;
@@ -132,7 +138,7 @@ void GameView::ApplyDaylightNow() {
 
 void GameView::RebakeSky(const DaylightState& state) {
   ApplyDaylightEnvironment(state, daylight_cfg_, device_, queue_, sky_cube_,
-                           scene_context_);
+                           scene_context_, kSkyCubeFaceSize);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 }
 
@@ -213,6 +219,7 @@ void GameView::HandleEvent(const SDL_Event& /*event*/, int /*width*/,
 }
 
 void GameView::Update(float dt, const bool* keyboard_state) {
+  PROFILE_SCOPE("GameView::Update");
   dt_ = dt;
 
   // Advance the single time source: real dt -> * sim speed -> sim time. Both
@@ -225,18 +232,24 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // the clock's tick target. Bounded (real dt is clamped in Advance); the
   // budget is pure spiral-of-death safety. Ticks scale with sim speed because
   // the target is derived from sim time.
-  const unsigned long long tick_target = sim_clock_.TickTarget();
-  int budget = kMaxSimTicksPerFrame;
-  while (sim_ticks_done_ < tick_target && budget-- > 0) {
-    if (game_) game_tick(game_, static_cast<float>(kTickDt));
-    ++sim_ticks_done_;
+  {
+    PROFILE_SCOPE("game_ticks");
+    const unsigned long long tick_target = sim_clock_.TickTarget();
+    int budget = kMaxSimTicksPerFrame;
+    while (sim_ticks_done_ < tick_target && budget-- > 0) {
+      if (game_) game_tick(game_, static_cast<float>(kTickDt));
+      ++sim_ticks_done_;
+    }
   }
 
   // Day/night rendering, driven by the clock's time-of-day. The sky re-bake is
   // throttled by real time (accumulated here); the directional light moves
   // every frame inside UpdateDaylight.
   rebake_accum_ += real_dt;
-  UpdateDaylight();
+  {
+    PROFILE_SCOPE("daylight");
+    UpdateDaylight();
+  }
 
   // ImGui context guard: Update() runs even in --screenshot mode, where no
   // ImGui context exists (SdlViewerApp only calls InitImGui() for the
