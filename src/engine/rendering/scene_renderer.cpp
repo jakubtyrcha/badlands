@@ -717,9 +717,9 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     queue_.Submit(1, &commands);
   }
 
-  // Periodically (a harvest frame) blocking-read the last frame's per-pass GPU
-  // times and print them; a cheap no-op on every other frame / when disabled.
-  gpu_timer_.MaybeReport(std::cerr);
+  // Advance the async per-pass GPU-timing readback (non-blocking) and print a
+  // breakdown when one completes; a cheap no-op when disabled.
+  gpu_timer_.EndFrame(std::cerr);
 }
 
 }  // namespace badlands

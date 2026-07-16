@@ -49,9 +49,11 @@ bool CubemapBuilder::Build(wgpu::Device device, wgpu::Queue queue,
 
   // 4 half-float channels per texel; one contiguous buffer for all 6 faces so
   // the per-texel radiance evaluation can be parallelized without contention.
+  // Reused across rebuilds (resize is a no-op when face_size is unchanged).
   const uint32_t texels = face_size * face_size;
   const size_t face_stride = static_cast<size_t>(texels) * 4;  // uint16 per face
-  std::vector<uint16_t> data(face_stride * 6);
+  std::vector<uint16_t>& data = texel_buffer_;
+  data.resize(face_stride * 6);
 
   // Evaluate `fn` per texel across the global thread pool, parallelized over
   // all 6 faces' rows (6 * face_size units). Each row writes a disjoint slice,
