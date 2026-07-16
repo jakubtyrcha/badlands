@@ -466,8 +466,10 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // === Pass 1.75: Contact shadows (SSCS, T5) — short view-space ray-march
   // along the sun direction, filling the small Peter-Panning gap the shadow
   // map's normal-offset bias opens near contact points. Runs after the
-  // G-buffer pass (reads its depth @1) and before deferred lighting (which
-  // samples the result @8). Runs every frame and ALWAYS clears
+  // G-buffer pass (reads its depth @1 and normals @2, the latter used
+  // (T5-fix) to derive the actual per-pixel normal-offset gap to march) and
+  // before deferred lighting (which samples the result @8). Runs every
+  // frame and ALWAYS clears
   // contact_shadow_texture_ to 1.0 first (supersedes CreateTargets'
   // create-time one-shot clear, so there is never stale contents); the
   // fullscreen ray-march only draws when shadow_config_.enable_contact_shadows
@@ -498,14 +500,18 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
 
     RenderPassContext pass = frame.BeginRenderPass(desc);
     if (compiled && shadow_config_.enable_contact_shadows) {
-      // Group 0: frame UBO @0, gbuffer depth @1.
-      std::array<wgpu::BindGroupEntry, 2> entries{};
+      // Group 0: frame UBO @0, gbuffer depth @1, gbuffer normals @2 (T5-fix:
+      // the receiver normal, needed to compute per-pixel NdotL and derive
+      // the actual normal-offset gap to march).
+      std::array<wgpu::BindGroupEntry, 3> entries{};
       entries[0].binding = 0;
       entries[0].buffer = frame.GetFrameUniformBuffer();
       entries[0].offset = 0;
       entries[0].size = sizeof(UniformData);
       entries[1].binding = 1;
       entries[1].textureView = gbuffer_.GetDepthView();
+      entries[2].binding = 2;
+      entries[2].textureView = gbuffer_.GetNormalsView();
 
       wgpu::BindGroup bind_group =
           frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);

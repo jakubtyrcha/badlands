@@ -9,11 +9,18 @@
 // (Task T5):
 //   - all DEBUG_MODE visualization scaffolding stripped — production path
 //     only.
-//   - ray length is the WORLD-SPACE frame.shadowParams.z (= E_gap =
-//     30*T_size, the exact max normal-offset distance, T1), not sampo's
-//     0.2*NDC screen-space cap. Bounding the ray to exactly the gap it
-//     needs to fill is what keeps this pass from painting long false-shadow
-//     streaks on open floor far from any caster.
+//   - ray length is WORLD-SPACE and derived per-pixel (Task T5-fix):
+//     1.5*T_size/max(NdotL, 0.05) — the exact normal-offset gap
+//     (ShadowMath::NormalOffsetLength, shadow_map.hpp) the shadow map opened
+//     at THIS receiver pixel, using the real per-pixel NdotL. This is
+//     bounded above by the grazing worst case E_gap = 30*T_size
+//     (frame.shadowParams.z, T1) as NdotL -> N_clamp, so it still never
+//     exceeds the max normal-offset distance and keeps this pass from
+//     painting long false-shadow streaks on open floor far from any caster
+//     — but for typical (non-grazing) pixels it is far shorter than E_gap,
+//     which concentrates the fixed 8-step budget on the real gap instead of
+//     over-marching ~15x past it, so small casters are no longer straddled
+//     between samples.
 //
 // Depth convention: this pass reads the MAIN camera G-buffer depth, which
 // is REVERSED-Z (0 = far, 1 = near) — unlike the shadow map (T2), which is
@@ -21,9 +28,10 @@
 // stays reversed-Z, unchanged from sampo.
 import package::common::frame::{frame, getFullscreenTriangleVertex,
     reconstructViewSpacePosition, worldSpaceToViewSpaceDirection, isSkyDepth,
-    isValidDepth};
+    isValidDepth, decodeOctahedron};
 
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
+@group(0) @binding(2) var normals_texture: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) Position: vec4<f32>,
@@ -60,11 +68,17 @@ fn fs_main(input: VertexOutput) -> @location(0) f32 {
     // Light direction in view space, pointing TOWARD the sun.
     let lightDirVS = normalize(worldSpaceToViewSpaceDirection(frame.sunDirection.xyz));
 
-    // Ray length: world-space E_gap (T1's shadowParams.z) — the exact max
-    // normal-offset distance, not a screen-space fraction. This bound is
-    // what prevents long false-shadow streaks on open floor far from any
-    // caster.
-    let rayLengthWorld = frame.shadowParams.z;
+    // Receiver normal (world-space, octahedron-encoded G-buffer normal, same
+    // decode as deferred_lighting.wesl) + its NdotL, needed to reconstruct
+    // the actual per-pixel normal-offset gap below.
+    let normal = decodeOctahedron(textureLoad(normals_texture, texCoord, 0).xy);
+    let NdotL = max(dot(normal, normalize(frame.sunDirection.xyz)), 0.0);
+
+    // Ray length: the actual per-pixel normal-offset gap —
+    // 1.5*T_size/max(NdotL, 0.05), mirroring ShadowMath::NormalOffsetLength
+    // (shadow_map.hpp) with the receiver's real NdotL, instead of the fixed
+    // grazing worst case E_gap = shadowParams.z. See file header for why.
+    let rayLengthWorld = 1.5 * frame.shadowParams.x / max(NdotL, 0.05);
     let numSteps = 8;
 
     // Transform ray start/end to clip space, then perspective-divide to NDC.
