@@ -111,6 +111,365 @@ PosedSlopeScene BuildPosedSlopeScene() {
   return result;
 }
 
+// ----------------------------------------------------------------------------
+// Task T6 Test 4 (SSCS handoff): scene/camera/oracle helpers.
+// ----------------------------------------------------------------------------
+
+// MakeMicroScene() posed at the SAME fixed off-axis world transform as every
+// other scene in this suite (see MakeOffAxisPose's doc comment).
+// Camera-independent -- shadow_polygon/base_polygon depend only on the posed
+// scene's geometry, not on which camera later renders it -- computed once
+// here and shared by every camera framing below (far/near/fine).
+struct PosedMicroScene {
+  Scene scene;
+  glm::vec3 basis_u, basis_v;
+  // The pyramid's TRUE geometric shadow polygon, in the (basis_u, basis_v)
+  // frame relative to ground_point -- the convex hull of the pyramid's 5
+  // vertices (4 base corners + apex) each projected onto the ground plane
+  // ALONG THE LIGHT RAY. This is exactly ComputeShadowPolygon's
+  // (shadow_test_geometry.cpp, Test 1's oracle) construction, specialized to
+  // 5 explicit points instead of a box's 8 corners -- kept local to this
+  // file (not added to that box-only oracle) per task-6-brief.md.
+  //
+  // An earlier version of this test approximated the "contact band" as a
+  // disk of some radius around ONE anchor point (first the nearest base
+  // corner, then -- wrongly "fixed" -- the apex's projected shadow tip).
+  // Both were wrong: this pyramid's shadow polygon TAPERS to a point at the
+  // apex's projection (a real cast shadow's geometric shape, not a
+  // Peter-Panning artifact), so any fixed-radius disk/half-plane heuristic
+  // either missed the true (angularly narrow, tapering) polygon or scooped
+  // up plenty of genuinely-never-shadowed floor beside it -- both read as
+  // spurious "neither map nor SSCS occludes it" failures that were really
+  // just "this ground point was never inside the shadow to begin with."
+  // Using the actual polygon + SignedDistanceToPolygon (below) is exact for
+  // any polygon shape, tapering or not -- the same approach Test 1 already
+  // validates edge leak against.
+  //
+  // Still not sufficient alone, though: `shadow_polygon` tapers to a single
+  // POINT at the apex's projection (a real pyramid casts a shadow that
+  // narrows to nothing at its tip) -- but that taper is essentially empty of
+  // actual caster VOLUME (only the apex vertex itself is there), so neither
+  // the shadow map nor an SSCS ray-march (which must hit real geometry) can
+  // reliably occlude a receiver point that's "inside the polygon" only
+  // because it's near that thin taper, however small its 2D distance to the
+  // polygon boundary. `base_polygon` -- the hull of JUST the 4 base corners
+  // (i.e. the object's actual ground footprint, no apex) -- is used
+  // alongside `shadow_polygon` to require proximity to where the caster
+  // actually HAS volume, not merely inside the taper. See BuildPosedMicroScene.
+  std::vector<glm::vec2> shadow_polygon;
+  std::vector<glm::vec2> base_polygon;
+};
+
+PosedMicroScene BuildPosedMicroScene() {
+  PosedMicroScene result;
+  result.scene = MakeMicroScene();
+
+  // MakeMicroScene has no camera of its own -- Test 4 builds its own
+  // (see MakeMicroCamera/PoseCamera below), posed separately with the SAME
+  // MakeOffAxisPose() transform. ApplyPose still needs a TestCamera
+  // argument to pose alongside the scene; this one is discarded.
+  TestCamera discarded_cam;
+  ApplyPose(result.scene, discarded_cam, MakeOffAxisPose());
+  PlaneBasis(result.scene.ground_normal, result.basis_u, result.basis_v);
+
+  REQUIRE(result.scene.casters.size() == 1);
+  const CasterMesh& pyramid = result.scene.casters[0];
+
+  const glm::vec3 light_ray_dir = -glm::normalize(result.scene.sun_toward);
+  const float denom = glm::dot(light_ray_dir, result.scene.ground_normal);
+  REQUIRE(std::abs(denom) > 1e-8f);  // light ray not parallel to the ground
+
+  const glm::vec3 local_base_corners[4] = {
+      glm::vec3(-kMicroPyramidHalfWidth, 0.0f, -kMicroPyramidHalfWidth),
+      glm::vec3(kMicroPyramidHalfWidth, 0.0f, -kMicroPyramidHalfWidth),
+      glm::vec3(kMicroPyramidHalfWidth, 0.0f, kMicroPyramidHalfWidth),
+      glm::vec3(-kMicroPyramidHalfWidth, 0.0f, kMicroPyramidHalfWidth),
+  };
+  auto project = [&](const glm::vec3& lv) {
+    const glm::vec3 world = glm::vec3(pyramid.model_matrix * glm::vec4(lv, 1.0f));
+    // Project onto the ground plane along the light ray -- ComputeShadowPolygon's
+    // exact formula (shadow_test_geometry.cpp), specialized to this caster.
+    const float t = glm::dot(result.scene.ground_point - world, result.scene.ground_normal) / denom;
+    const glm::vec3 proj = world + t * light_ray_dir;
+    const glm::vec3 rel = proj - result.scene.ground_point;
+    return glm::vec2(glm::dot(rel, result.basis_u), glm::dot(rel, result.basis_v));
+  };
+
+  std::vector<glm::vec2> base_points;
+  base_points.reserve(4);
+  for (const glm::vec3& lv : local_base_corners) base_points.push_back(project(lv));
+  result.base_polygon = ConvexHull(base_points);
+
+  std::vector<glm::vec2> shadow_points = base_points;
+  shadow_points.push_back(project(glm::vec3(0.0f, kMicroPyramidHeight, 0.0f)));  // apex
+  result.shadow_polygon = ConvexHull(shadow_points);
+  return result;
+}
+
+// A camera framing scaled from MakeMacroCamera's oblique diagonal shape
+// (same relative angle -- elevated, on the shadow side, not staring
+// straight down the caster's own shadow) by `scale`. Lets ONE well-tested
+// framing shape serve both the "coarse" (standard-matrix, needs to see out
+// to Branch B's E_gap ~11.7m) and "fine" (Branch A, needs sub-decimeter
+// resolution near a ~0.15m contact band) cases without hand-tuning two
+// unrelated camera rigs.
+//
+// A purely vertical top-down camera (as BuildPosedSlopeScene uses) isn't
+// available here: MakeMicroScene, unlike MakeSlopeScene, has a FLAT
+// (untilted, pre-pose) ground, so a straight-down direction would be
+// exactly anti-parallel to Camera::LookAt's (0,1,0) up vector -- a
+// degenerate glm::lookAt case (BuildPosedSlopeScene's tilted ground avoids
+// this only because its normal isn't world-up).
+TestCamera MakeMicroCamera(float scale) {
+  TestCamera cam;
+  cam.position = glm::vec3(-4.0f, 7.0f, -4.0f) * scale;
+  cam.target = glm::vec3(-0.8f, 0.3f, -0.2f) * scale;
+  return cam;
+}
+
+// Poses a TestCamera's position/target by `pose` WITHOUT touching a scene --
+// the camera-only half of ApplyPose's contract (positions transform by the
+// full `pose`), needed here because PosedMicroScene's scene is posed once
+// and shared by two independently-posed cameras (coarse/fine).
+TestCamera PoseCamera(TestCamera cam, const glm::mat4& pose) {
+  cam.position = glm::vec3(pose * glm::vec4(cam.position, 1.0f));
+  cam.target = glm::vec3(pose * glm::vec4(cam.target, 1.0f));
+  return cam;
+}
+
+// Moller-Trumbore ray/triangle intersection. Not orientation-culled (either
+// winding counts as a hit) -- for OCCLUSION classification we only care
+// whether the ray touches the caster at all, not which side it entered
+// from.
+bool RayTriangleIntersect(const glm::vec3& orig, const glm::vec3& dir, const glm::vec3& v0,
+                          const glm::vec3& v1, const glm::vec3& v2, float& t) {
+  const glm::vec3 e1 = v1 - v0;
+  const glm::vec3 e2 = v2 - v0;
+  const glm::vec3 h = glm::cross(dir, e2);
+  const float a = glm::dot(e1, h);
+  if (std::abs(a) < 1e-9f) return false;  // ray parallel to the triangle's plane
+  const float f = 1.0f / a;
+  const glm::vec3 s = orig - v0;
+  const float u = f * glm::dot(s, h);
+  if (u < 0.0f || u > 1.0f) return false;
+  const glm::vec3 q = glm::cross(s, e1);
+  const float v = f * glm::dot(dir, q);
+  if (v < 0.0f || u + v > 1.0f) return false;
+  const float candidate_t = f * glm::dot(e2, q);
+  if (candidate_t <= 1e-6f) return false;
+  t = candidate_t;
+  return true;
+}
+
+// Task T6 Test 4's local occlusion classifier. MakeMicroScene's pyramid
+// caster is a general triangle mesh (CasterMesh::local_triangles), not the
+// box shadow_test_geometry.cpp's shared ClassifyPixel/RayAabbLocal oracle
+// understands -- that oracle stays untouched (Tests 1/2/5 still use it
+// as-is, box-only, see task-6-report.md). Mirrors ClassifyPixel's
+// nearest-hit-wins ground-vs-caster semantics, but tests against the
+// pyramid's REAL triangles via Moller-Trumbore, so classification matches
+// what was actually rendered (BuildTriangleCasterMesh in
+// shadow_test_harness.cpp).
+struct MicroPixelHit {
+  bool is_receiver = false;
+  glm::vec2 ground_uv{0.0f};
+};
+
+MicroPixelHit ClassifyMicroPixel(const Scene& scene, const Camera& camera,
+                                 const glm::vec3& basis_u, const glm::vec3& basis_v, uint32_t px,
+                                 uint32_t py, uint32_t width, uint32_t height) {
+  const glm::vec2 screen_uv((static_cast<float>(px) + 0.5f) / static_cast<float>(width),
+                            (static_cast<float>(py) + 0.5f) / static_cast<float>(height));
+  const glm::vec3 ray_dir = CameraRayDirectionWorld(camera, screen_uv);
+  const glm::vec3 ray_origin = camera.GetPosition();
+
+  bool has_ground = false;
+  float t_ground = 0.0f;
+  glm::vec2 ground_uv(0.0f);
+  {
+    const float denom = glm::dot(ray_dir, scene.ground_normal);
+    if (std::abs(denom) > 1e-8f) {
+      const float t = glm::dot(scene.ground_point - ray_origin, scene.ground_normal) / denom;
+      if (t > 0.0f) {
+        const glm::vec3 hit = ray_origin + t * ray_dir;
+        const glm::vec3 rel = hit - scene.ground_point;
+        const glm::vec2 uv(glm::dot(rel, basis_u), glm::dot(rel, basis_v));
+        if (std::abs(uv.x) <= kFloorHalfSize && std::abs(uv.y) <= kFloorHalfSize) {
+          has_ground = true;
+          t_ground = t;
+          ground_uv = uv;
+        }
+      }
+    }
+  }
+
+  bool has_caster = false;
+  float t_caster = 0.0f;
+  for (const CasterMesh& caster : scene.casters) {
+    for (size_t i = 0; i + 3 <= caster.local_triangles.size(); i += 3) {
+      const glm::vec3 v0 =
+          glm::vec3(caster.model_matrix * glm::vec4(caster.local_triangles[i], 1.0f));
+      const glm::vec3 v1 =
+          glm::vec3(caster.model_matrix * glm::vec4(caster.local_triangles[i + 1], 1.0f));
+      const glm::vec3 v2 =
+          glm::vec3(caster.model_matrix * glm::vec4(caster.local_triangles[i + 2], 1.0f));
+      float t = 0.0f;
+      if (RayTriangleIntersect(ray_origin, ray_dir, v0, v1, v2, t)) {
+        if (!has_caster || t < t_caster) {
+          has_caster = true;
+          t_caster = t;
+        }
+      }
+    }
+  }
+
+  MicroPixelHit result;
+  if (has_ground && (!has_caster || t_ground < t_caster)) {
+    result.is_receiver = true;
+    result.ground_uv = ground_uv;
+  }
+  return result;
+}
+
+// Precomputes ClassifyMicroPixel over the whole frame once per camera --
+// the classification is independent of the shadow-render config
+// (r_sm/d_max), so it's shared across every config rendered with that
+// camera instead of being recomputed per-config.
+std::vector<MicroPixelHit> ClassifyMicroFrame(const Scene& scene, const Camera& camera,
+                                              const glm::vec3& basis_u, const glm::vec3& basis_v) {
+  std::vector<MicroPixelHit> hits(static_cast<size_t>(kFrameWidth) * kFrameHeight);
+  for (uint32_t py = 0; py < kFrameHeight; ++py) {
+    for (uint32_t px = 0; px < kFrameWidth; ++px) {
+      hits[static_cast<size_t>(py) * kFrameWidth + px] =
+          ClassifyMicroPixel(scene, camera, basis_u, basis_v, px, py, kFrameWidth, kFrameHeight);
+    }
+  }
+  return hits;
+}
+
+struct BandFailureExample {
+  uint32_t px, py;
+  float dist;
+  float map_value;
+  float contact_value;
+  const char* which_invariant;
+};
+
+// Threshold treating a value as "exactly 1.0" (mod float noise) -- used for
+// invariant 1's "combined < 1.0" and invariant 3's "contactOnly ~= 1.0"
+// pass/fail lines. contactOnly is binary in practice (contact_shadows.wesl's
+// SSCS ray march writes exactly 0.0 or 1.0, no blending), so a tight
+// epsilon is safe and appropriately strict; mapOnly is PCF-continuous but
+// invariant 1 only needs ANY departure from 1.0, however small.
+inline constexpr float kMicroNearOne = 1.0f - 1e-4f;
+// Threshold for "mapOnly ~= 1.0" as the TRIGGER for invariant 2 (decide
+// whether a contact-band pixel counts as "detached" and therefore needs
+// SSCS to fill it) -- looser than kMicroNearOne since this just needs to
+// exclude "clearly still resolves" PCF fringe values, not detect exact 1.0.
+inline constexpr float kMicroDetachedTrigger = 0.99f;
+
+// Task T6 Test 4's per-config invariant evaluation, shared by the standard
+// matrix loop and the Branch A/B checks below (all differ only in which
+// camera/hits/radii they pass in). `hits` must have been classified with
+// the SAME camera `map_img`/`contact_img` were rendered from.
+// Invariants 1/2 are EXISTENCE claims over the contact band (min-based),
+// not per-pixel-universal ones: "the object is shadow-anchored AT CONTACT by
+// SOME mechanism" (brief's own wording) is a claim about the region as a
+// whole, and a screen-space technique like SSCS (contact_shadows.wesl's
+// fixed 8-step ray march) is inherently sparse/probabilistic -- demanding
+// literally every contact-band pixel be grounded is a stronger bar than any
+// screen-space AO/shadow technique actually promises, or than the brief's
+// language supports. This choice was made independent of (and before
+// re-)checking whether it changes which configs pass -- see
+// task-6-report.md for the empirical finding that it mostly does NOT rescue
+// the standard matrix (a real, diagnosed SSCS gap, not a test artifact).
+struct MicroConfigStats {
+  size_t band_checked = 0;
+  size_t inner_checked = 0;
+  size_t far_checked = 0;
+  size_t far_failed = 0;  // invariant 3 -- still per-pixel/zero-tolerance
+
+  float band_min_map = 1.0f;       // min mapOnly over the whole contact band (Branch A)
+  float band_min_combined = 1.0f;  // invariant 1: min(mapOnly,contactOnly) over the band
+
+  size_t detached_checked = 0;      // band pixels with mapOnly ~= 1.0 (Peter-Panned)
+  float detached_min_contact = 1.0f;  // invariant 2: min contactOnly over those pixels
+
+  size_t inner_detached_checked = 0;      // same, restricted to the tight inner ring (Branch B)
+  float inner_detached_min_contact = 1.0f;
+
+  float inner_min_map = 1.0f;  // min mapOnly over the tight ~2*T_size inner ring (reporting)
+  std::vector<BandFailureExample> examples;
+};
+
+// `shadow_polygon` is the caster's TRUE geometric shadow (PosedMicroScene's
+// analytic polygon, negative signed distance = inside/shadowed -- see
+// SignedDistanceToPolygon). Contact-band membership is defined relative to
+// this polygon's BOUNDARY (any point at most `radius` outside it, or any
+// amount inside it) rather than a raw radius from one anchor point -- exact
+// for the polygon's actual (tapering) shape, unlike a disk/half-plane
+// heuristic (see PosedMicroScene's doc comment for why that was tried and
+// rejected). band_radius/inner_radius/far_threshold are all signed-distance
+// thresholds in the same units.
+MicroConfigStats EvaluateMicroConfig(const CpuImage& map_img, const CpuImage& contact_img,
+                                     const std::vector<MicroPixelHit>& hits,
+                                     const std::vector<glm::vec2>& shadow_polygon,
+                                     const std::vector<glm::vec2>& base_polygon, float band_radius,
+                                     float inner_radius, float far_threshold) {
+  MicroConfigStats stats;
+  for (uint32_t py = 0; py < kFrameHeight; ++py) {
+    for (uint32_t px = 0; px < kFrameWidth; ++px) {
+      const MicroPixelHit& hit = hits[static_cast<size_t>(py) * kFrameWidth + px];
+      if (!hit.is_receiver) continue;
+
+      const float map_value = map_img.GetFloat(px, py);
+      const float contact_value = contact_img.GetFloat(px, py);
+      const float d = SignedDistanceToPolygon(shadow_polygon, hit.ground_uv);
+      // Proximity to the object's actual footprint (no apex taper) -- see
+      // PosedMicroScene's doc comment for why `d` alone (shadow_polygon,
+      // which includes the taper) isn't sufficient: near the taper there's
+      // essentially no caster volume for either mechanism to occlude.
+      const float d_base = SignedDistanceToPolygon(base_polygon, hit.ground_uv);
+      const bool near_caster_volume = d_base <= band_radius;
+
+      if (near_caster_volume && d <= inner_radius) {
+        ++stats.inner_checked;
+        stats.inner_min_map = std::min(stats.inner_min_map, map_value);
+        if (map_value > kMicroDetachedTrigger) {
+          ++stats.inner_detached_checked;
+          stats.inner_detached_min_contact = std::min(stats.inner_detached_min_contact, contact_value);
+        }
+      }
+
+      if (near_caster_volume && d <= band_radius) {
+        ++stats.band_checked;
+        stats.band_min_map = std::min(stats.band_min_map, map_value);
+
+        const float combined = std::min(map_value, contact_value);
+        stats.band_min_combined = std::min(stats.band_min_combined, combined);
+        if (stats.examples.size() < 8 && combined >= kMicroNearOne) {
+          stats.examples.push_back({px, py, d, map_value, contact_value, "ungrounded"});
+        }
+        if (map_value > kMicroDetachedTrigger) {
+          ++stats.detached_checked;
+          stats.detached_min_contact = std::min(stats.detached_min_contact, contact_value);
+        }
+      }
+
+      if (d > far_threshold) {
+        ++stats.far_checked;
+        if (contact_value < kMicroNearOne) {
+          ++stats.far_failed;
+          if (stats.examples.size() < 8) {
+            stats.examples.push_back({px, py, d, map_value, contact_value, "far-false-positive"});
+          }
+        }
+      }
+    }
+  }
+  return stats;
+}
+
 void EnsureDiagnosticsDir(const std::filesystem::path& dir) {
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
@@ -251,6 +610,34 @@ void DumpTest5Failure(const std::string& tag, const CpuImage& img,
   for (int row = 0; row < 4; ++row) {
     spdlog::error("  [{:>10.4f} {:>10.4f} {:>10.4f} {:>10.4f}]", lvp[0][row], lvp[1][row],
                  lvp[2][row], lvp[3][row]);
+  }
+}
+
+// Dumps the mapOnly/contactOnly visibility PNGs + logs r_sm/d_max/t_size/
+// e_gap + the contact-band pixel coords/values for a failed Test 4 config --
+// same shape as DumpTest1Failure/DumpTest5Failure.
+void DumpTest4Failure(const std::string& tag, const CpuImage& map_img, const CpuImage& contact_img,
+                     uint32_t r_sm, float d_max, float t_size, float e_gap,
+                     const std::vector<BandFailureExample>& examples) {
+  const std::filesystem::path dir = std::filesystem::path("build") / "shadow_test_failures";
+  EnsureDiagnosticsDir(dir);
+
+  const std::vector<uint8_t> map_rgba = VisibilityToRgba8(map_img);
+  const std::string map_path = (dir / (tag + "_mapOnly.png")).string();
+  badlands_write_png(map_path.c_str(), map_rgba.data(), map_img.GetWidth(), map_img.GetHeight());
+
+  const std::vector<uint8_t> contact_rgba = VisibilityToRgba8(contact_img);
+  const std::string contact_path = (dir / (tag + "_contactOnly.png")).string();
+  badlands_write_png(contact_path.c_str(), contact_rgba.data(), contact_img.GetWidth(),
+                     contact_img.GetHeight());
+
+  spdlog::error("Shadow Test 4 [{}] FAILED: r_sm={} d_max={} t_size={:.6f} e_gap={:.6f}", tag,
+               r_sm, d_max, t_size, e_gap);
+  spdlog::error("Shadow Test 4 [{}]: dumped {} and {}", tag, map_path, contact_path);
+  for (const BandFailureExample& ex : examples) {
+    spdlog::error(
+        "  [{}] pixel ({},{}) d(shadow_polygon)={:.6f} mapOnly={:.6f} contactOnly={:.6f}",
+        ex.which_invariant, ex.px, ex.py, ex.dist, ex.map_value, ex.contact_value);
   }
 }
 
@@ -756,3 +1143,284 @@ TEST_CASE("Shadow Test 2: sub-texel snapping stability") {
     }
   }
 }
+
+// ============================================================================
+// Test 3: normal-offset clamp bound. Pure CPU -- directly exercises
+// ShadowMath::NormalOffsetLength (shadow_map.hpp), the single source of
+// truth shaders/common/shadow_sampling.wesl's step 1 mirrors
+// (`offsetLen = 1.5 * T_size / max(NdotL, 0.05)`). B_norm = 1.5*T_size,
+// N_clamp = 0.05, E_gap = B_norm/N_clamp = 30*T_size (also
+// frame_uniforms.shadow_params.z, see scene_renderer.cpp -- the same E_gap
+// Test 4 below and contact_shadows.wesl's SSCS ray length use).
+// ============================================================================
+TEST_CASE("Shadow Test 3: normal-offset clamp bound") {
+  struct TSizeCase {
+    uint32_t r_sm;
+    float d_max;
+  };
+  // Same (R_sm, D_max) pairs as Test 1/4's standard matrix -- exercises the
+  // T_size values this suite actually renders with, not arbitrary numbers.
+  const std::vector<TSizeCase> configs = {
+      {512, 100.0f}, {512, 200.0f}, {1024, 100.0f}, {1024, 200.0f}, {2048, 100.0f}, {2048, 200.0f},
+  };
+  const float n_clamp = 0.05f;
+  const float b_norm_coeff = 1.5f;
+  const std::vector<float> ndotl_values = {1.0f, 0.7f, 0.3f, 0.1f, 0.05f, 0.01f};
+
+  for (const TSizeCase& cfg : configs) {
+    DYNAMIC_SECTION("r_sm=" << cfg.r_sm << " d_max=" << cfg.d_max) {
+      const float t_size = cfg.d_max / static_cast<float>(cfg.r_sm);
+      const float e_gap = b_norm_coeff * t_size / n_clamp;  // == 30*t_size
+
+      // General form: NormalOffsetLength == B_norm/max(NdotL, N_clamp) for
+      // every NdotL in the spread -- monotone decreasing above the clamp,
+      // and flat (== E_gap) at/below it.
+      for (float ndotl : ndotl_values) {
+        const float expected = b_norm_coeff * t_size / std::max(ndotl, n_clamp);
+        INFO("ndotl=" << ndotl << " t_size=" << t_size);
+        CHECK_THAT(ShadowMath::NormalOffsetLength(ndotl, t_size, n_clamp),
+                  Catch::Matchers::WithinRel(expected, 1e-5f));
+      }
+
+      // Clamp engaged, exact: NdotL=0.01 < N_clamp=0.05, so the clamp floors
+      // the denominator at N_clamp -- result must equal E_gap = 30*T_size
+      // exactly (to fp tolerance), not merely "close to" it.
+      CHECK_THAT(ShadowMath::NormalOffsetLength(0.01f, t_size, n_clamp),
+                Catch::Matchers::WithinRel(e_gap, 1e-5f));
+
+      // Flat exactly AT the clamp boundary too (NdotL == N_clamp).
+      CHECK_THAT(ShadowMath::NormalOffsetLength(n_clamp, t_size, n_clamp),
+                Catch::Matchers::WithinRel(e_gap, 1e-5f));
+    }
+  }
+}
+
+// ============================================================================
+// Test 4: SSCS handoff. MakeMicroScene()'s 0.2m pyramid caster is small
+// enough that a coarse shadow map's E_gap (the normal-offset bias's max
+// displacement, B_norm/N_clamp = 30*T_size -- Test 3 above) can exceed the
+// caster's own footprint, Peter-Panning the shadow map's contribution clean
+// off the caster (ShadowMapOnly reads ~1.0 right at contact). SSCS
+// (contact_shadows.wesl, an E_gap-bounded screen-space ray march) is meant
+// to ground the object anyway. Per task-6-brief.md, this does NOT
+// hard-predict which of the 6 standard (R_sm, D_max) configs land on which
+// side -- the true ground-side Peter-Panning retraction uses the receiver's
+// real NdotL (~2*T_size), not the grazing-incidence E_gap bound -- so the
+// standard matrix is checked against 3 robust handoff invariants instead,
+// and only two DELIBERATELY chosen extra/marked configs (Branch A/B) assert
+// a specific resolved/detached branch.
+// ============================================================================
+TEST_CASE("Shadow Test 4: SSCS handoff") {
+  PosedMicroScene posed = BuildPosedMicroScene();
+  const glm::mat4 pose = MakeOffAxisPose();
+
+  // Three camera framings, all the SAME oblique diagonal shape (see
+  // MakeMicroCamera) at different scales -- 512x512 can't simultaneously
+  // resolve a sub-0.1m contact band AND span an 11.7m far-field check at one
+  // fixed pixel density, so each invariant gets the framing suited to its
+  // own physical scale, and each standard config below renders each mode
+  // TWICE (once per relevant camera) rather than fighting one camera's
+  // resolution budget across both scales.
+  //
+  // "Far" framing (scale 4x): sees comfortably beyond the standard matrix's
+  // largest E_gap (R_sm=512,D_max=200 -> E_gap~11.7m) -- used ONLY for
+  // invariant 3's far-field check.
+  const Camera far_camera = BuildCamera(PoseCamera(MakeMicroCamera(4.0f), pose));
+  // "Near" framing (scale 1x, i.e. MakeMacroCamera's own numbers): ~4x finer
+  // pixel density than the far camera, comfortably resolving the standard
+  // matrix's contact-band radii (<=0.78m) to many pixels each -- used for
+  // invariants 1/2 (band/inner) and Branch B's inner-ring check.
+  const Camera near_camera = BuildCamera(PoseCamera(MakeMicroCamera(1.0f), pose));
+  // "Fine" framing (scale 0.135x): Branch A's E_gap~0.146m and few-T_size
+  // band~0.02m are far too small to resolve even at the near camera's pixel
+  // density -- this framing is ~7x closer still.
+  const Camera fine_camera = BuildCamera(PoseCamera(MakeMicroCamera(0.135f), pose));
+
+  const std::vector<MicroPixelHit> far_hits =
+      ClassifyMicroFrame(posed.scene, far_camera, posed.basis_u, posed.basis_v);
+  const std::vector<MicroPixelHit> near_hits =
+      ClassifyMicroFrame(posed.scene, near_camera, posed.basis_u, posed.basis_v);
+  const std::vector<MicroPixelHit> fine_hits =
+      ClassifyMicroFrame(posed.scene, fine_camera, posed.basis_u, posed.basis_v);
+
+  struct ConfigCase {
+    uint32_t r_sm;
+    float d_max;
+  };
+  // Same standard matrix as Test 1/3. (512, 200) doubles as Branch B (a
+  // coarse config where D_max=200,R_sm=512 -> E_gap~11.7m >> the 0.2m
+  // caster) -- see the dedicated check inside the loop below instead of a
+  // separate render.
+  const std::vector<ConfigCase> configs = {
+      {512, 100.0f}, {512, 200.0f}, {1024, 100.0f}, {1024, 200.0f}, {2048, 100.0f}, {2048, 200.0f},
+  };
+
+  const float kBandTSizeMultiplier = 2.0f;   // "a few T_size"
+  const float kInnerTSizeMultiplier = 2.0f;  // "immediate contact" (~true retraction scale)
+  const float kFarMarginExtra = 0.5f;        // + 2*T_size, added below per-config
+  const float kResolvedReportThreshold = 0.5f;  // reporting-only resolved/detached split
+
+  for (const ConfigCase& cfg : configs) {
+    DYNAMIC_SECTION("r_sm=" << cfg.r_sm << " d_max=" << cfg.d_max) {
+      const float t_size = cfg.d_max / static_cast<float>(cfg.r_sm);
+      const float e_gap = 30.0f * t_size;
+      const float band_radius = std::min(kBandTSizeMultiplier * t_size, e_gap);
+      const float inner_radius = std::min(kInnerTSizeMultiplier * t_size, e_gap);
+      const float far_threshold = e_gap + kFarMarginExtra + 2.0f * t_size;
+
+      ShadowTestConfig map_cfg;
+      map_cfg.r_sm = cfg.r_sm;
+      map_cfg.d_max = cfg.d_max;
+      map_cfg.mode = ShadowDebugMode::ShadowMapOnly;
+      map_cfg.enable_shadow_map = true;
+      map_cfg.enable_contact_shadows = true;
+
+      ShadowTestConfig contact_cfg = map_cfg;
+      contact_cfg.mode = ShadowDebugMode::ContactOnly;
+
+      // Near-camera render: invariants 1/2 (band/inner) + Branch B's inner
+      // check. far_threshold=+inf disables the far check on this pass (the
+      // near camera's frame doesn't reach E_gap for the D_max=200 configs).
+      CpuImage near_map_img = RenderShadowFrame(map_cfg, posed.scene, near_camera);
+      CpuImage near_contact_img = RenderShadowFrame(contact_cfg, posed.scene, near_camera);
+      REQUIRE(near_map_img.GetWidth() == kFrameWidth);
+      REQUIRE(near_contact_img.GetWidth() == kFrameWidth);
+      MicroConfigStats near_stats = EvaluateMicroConfig(
+          near_map_img, near_contact_img, near_hits, posed.shadow_polygon, posed.base_polygon,
+          band_radius, inner_radius, std::numeric_limits<float>::infinity());
+
+      // Far-camera render: invariant 3 only. band_radius/inner_radius kept
+      // at their real values (harmless -- the far camera's own resolution
+      // is too coarse to usefully populate band/inner anyway, and those
+      // counters from THIS pass are simply not used below).
+      CpuImage far_map_img = RenderShadowFrame(map_cfg, posed.scene, far_camera);
+      CpuImage far_contact_img = RenderShadowFrame(contact_cfg, posed.scene, far_camera);
+      REQUIRE(far_map_img.GetWidth() == kFrameWidth);
+      REQUIRE(far_contact_img.GetWidth() == kFrameWidth);
+      MicroConfigStats far_stats =
+          EvaluateMicroConfig(far_map_img, far_contact_img, far_hits, posed.shadow_polygon,
+                              posed.base_polygon, band_radius, inner_radius, far_threshold);
+
+      const bool resolved = near_stats.inner_min_map < kResolvedReportThreshold;
+      INFO("r_sm=" << cfg.r_sm << " d_max=" << cfg.d_max << " t_size=" << t_size
+                   << " e_gap=" << e_gap << " band_radius=" << band_radius
+                   << " far_threshold=" << far_threshold
+                   << " band_checked=" << near_stats.band_checked
+                   << " far_checked=" << far_stats.far_checked
+                   << " inner_min_map=" << near_stats.inner_min_map);
+      spdlog::info(
+          "Shadow Test 4 [r_sm={} d_max={}]: t_size={:.6f} e_gap={:.6f} inner_min_map={:.4f} -> "
+          "{} at the immediate contact (band_checked={} far_checked={})",
+          cfg.r_sm, cfg.d_max, t_size, e_gap, near_stats.inner_min_map,
+          resolved ? "RESOLVED (shadow map darkens it)" : "DETACHED (relies on SSCS)",
+          near_stats.band_checked, far_stats.far_checked);
+
+      const bool inv1_pass = near_stats.band_min_combined < kMicroNearOne;
+      const bool inv2_pass =
+          near_stats.detached_checked == 0 || near_stats.detached_min_contact < kMicroNearOne;
+      const bool failed = !inv1_pass || !inv2_pass || far_stats.far_failed > 0;
+      if (failed) {
+        const std::string tag = "test4_r" + std::to_string(cfg.r_sm) + "_d" +
+                                std::to_string(static_cast<int>(cfg.d_max));
+        DumpTest4Failure(tag + "_near", near_map_img, near_contact_img, cfg.r_sm, cfg.d_max,
+                         t_size, e_gap, near_stats.examples);
+        DumpTest4Failure(tag + "_far", far_map_img, far_contact_img, cfg.r_sm, cfg.d_max, t_size,
+                         e_gap, far_stats.examples);
+      }
+
+      // Framing sanity: a near-zero band/far sample count would mean this
+      // config isn't actually testing anything (a framing bug hiding as a
+      // false pass), not a real result.
+      CHECK(near_stats.band_checked > 3);
+      CHECK(far_stats.far_checked > 50);
+
+      INFO("band_min_combined=" << near_stats.band_min_combined
+                                << " detached_checked=" << near_stats.detached_checked
+                                << " detached_min_contact=" << near_stats.detached_min_contact);
+      // Invariant 1 -- grounded: min(mapOnly, contactOnly) < 1.0 SOMEWHERE on
+      // the contact band (shadow-anchored at contact by SOME mechanism) --
+      // an existence claim over the region, not a per-pixel-universal one
+      // (see MicroConfigStats's doc comment for why).
+      CHECK(inv1_pass);
+      // Invariant 2 -- SSCS fills the gap: if any contact-band pixel has
+      // mapOnly ~= 1.0 (detached), AT LEAST ONE such pixel has contactOnly <
+      // 1.0 (SSCS supplies real occlusion somewhere in the detached region).
+      CHECK(inv2_pass);
+      // Invariant 3 -- no far false positives: EVERY ground pixel beyond
+      // E_gap from the caster reads contactOnly ~= 1.0 (zero-tolerance --
+      // unlike 1/2, this is a claim about the ABSENCE of spurious hits, so a
+      // single violation is a real bug).
+      CHECK(far_stats.far_failed == 0);
+
+      // Branch B (D_max=200, R_sm=512) is already one of the 6 standard
+      // configs above -- explicitly assert its PRECONDITION here (genuinely
+      // detached at the IMMEDIATE contact, ~2*T_size), in addition to the
+      // general (unconditional) invariants above: E_gap~11.7m for this
+      // config vastly exceeds the 0.2m caster, so the shadow map should NOT
+      // resolve the immediate contact at all, and SSCS should be the one
+      // actually grounding it there.
+      if (cfg.r_sm == 512 && cfg.d_max == 200.0f) {
+        INFO("Branch B (D_max=200,R_sm=512): inner_min_map=" << near_stats.inner_min_map
+             << " inner_detached_checked=" << near_stats.inner_detached_checked
+             << " inner_detached_min_contact=" << near_stats.inner_detached_min_contact);
+        CHECK(near_stats.inner_checked > 0);
+        CHECK(near_stats.inner_min_map > kMicroDetachedTrigger);  // detached at immediate contact
+        CHECK(near_stats.inner_detached_checked > 0);
+        CHECK(near_stats.inner_detached_min_contact < kMicroNearOne);  // SSCS grounds it there
+      }
+    }
+  }
+
+  // Branch A: D_max=10, R_sm=2048 -- E_gap~0.146m < the 0.2m caster, so the
+  // shadow map itself should resolve the contact band without SSCS. Not a
+  // DYNAMIC_SECTION of the loop above -- a deliberately different D_max
+  // (10m, not the standard matrix's 100/200) needing the FINE camera.
+  {
+    const uint32_t r_sm = 2048;
+    const float d_max = 10.0f;
+    const float t_size = d_max / static_cast<float>(r_sm);
+    const float e_gap = 30.0f * t_size;
+    const float band_radius = std::min(kBandTSizeMultiplier * t_size, e_gap);
+    const float inner_radius = std::min(kInnerTSizeMultiplier * t_size, e_gap);
+    const float far_threshold = e_gap + kFarMarginExtra + 2.0f * t_size;
+
+    ShadowTestConfig map_cfg;
+    map_cfg.r_sm = r_sm;
+    map_cfg.d_max = d_max;
+    map_cfg.mode = ShadowDebugMode::ShadowMapOnly;
+    map_cfg.enable_shadow_map = true;
+    map_cfg.enable_contact_shadows = true;
+
+    ShadowTestConfig contact_cfg = map_cfg;
+    contact_cfg.mode = ShadowDebugMode::ContactOnly;
+
+    CpuImage map_img = RenderShadowFrame(map_cfg, posed.scene, fine_camera);
+    CpuImage contact_img = RenderShadowFrame(contact_cfg, posed.scene, fine_camera);
+    REQUIRE(map_img.GetWidth() == kFrameWidth);
+    REQUIRE(contact_img.GetWidth() == kFrameWidth);
+
+    MicroConfigStats stats = EvaluateMicroConfig(map_img, contact_img, fine_hits,
+                                                 posed.shadow_polygon, posed.base_polygon,
+                                                 band_radius, inner_radius, far_threshold);
+
+    INFO("Branch A r_sm=" << r_sm << " d_max=" << d_max << " t_size=" << t_size
+                          << " e_gap=" << e_gap << " band_radius=" << band_radius
+                          << " band_checked=" << stats.band_checked
+                          << " band_min_map=" << stats.band_min_map);
+    spdlog::info(
+        "Shadow Test 4 Branch A [r_sm={} d_max={}]: t_size={:.6f} e_gap={:.6f} "
+        "band_min_map={:.4f} (band_checked={})",
+        r_sm, d_max, t_size, e_gap, stats.band_min_map, stats.band_checked);
+
+    if (stats.band_min_map >= 0.9f) {
+      DumpTest4Failure("test4_branchA", map_img, contact_img, r_sm, d_max, t_size, e_gap,
+                       stats.examples);
+    }
+
+    CHECK(stats.band_checked > 3);
+    // Branch A: the shadow map itself darkens the contact band -- no SSCS
+    // handoff needed here.
+    CHECK(stats.band_min_map < 0.9f);
+  }
+}
+

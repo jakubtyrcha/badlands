@@ -28,6 +28,22 @@ namespace badlands::shadowtest {
 struct CasterMesh {
   glm::mat4 model_matrix{1.0f};
   glm::vec3 half_extents{0.5f};
+
+  // Task T6: when non-empty, this caster is a general triangle SOUP in
+  // LOCAL space (matching these positions BEFORE `model_matrix`), one
+  // triangle per 3 consecutive entries, wound CCW as viewed from outside
+  // (matches GenerateCube/GenerateCone's convention -- the deferred
+  // material's pipelines cull CullMode::Back/FrontFace::CCW, see
+  // primitive_mesh_builders.cpp). Used by MakeMicroScene's pyramid caster,
+  // whose actual sloped silhouette (not a box proxy) is what Test 4's SSCS
+  // handoff exercises. `half_extents` is unused for rendering when this is
+  // set (kept only so pre-existing box-caster call sites/oracle code that
+  // never read it are unaffected). Test 4's own contact-band pixel
+  // classification uses a small local ray/triangle routine against these
+  // triangles directly (see shadow_tests.cpp) -- NOT this file's shared
+  // ClassifyPixel/RayAabbLocal oracle, which stays box-only/unchanged and is
+  // exactly what Tests 1/2/5 still use.
+  std::vector<glm::vec3> local_triangles;
 };
 
 // Test scene: an analytic ground plane (receiver) + a list of box casters +
@@ -73,6 +89,25 @@ TestCamera MakeMacroCamera();
 // slope from cast-shadow edge behavior (Test 1's concern). Reuses
 // `sun_toward` from MakeMacroScene for consistency.
 Scene MakeSlopeScene();
+
+// Task T6 Test 4's SSCS-handoff scene: ground (local Y=0, same convention as
+// MakeMacroScene) + ONE micro caster -- a square-base pyramid, footprint
+// kMicroPyramidHalfWidth*2 square centered at the local origin (base on
+// y=0, so its base-contact point IS the local origin/ground_point), apex at
+// y=kMicroPyramidHeight. Deliberately small (0.2m) relative to every
+// (R_sm,D_max) config's shadow-map texel size -- the case a coarse shadow
+// map's normal-offset bias can Peter-Pan clean off of (E_gap can exceed the
+// caster's own footprint), which SSCS (contact_shadows.wesl) is meant to
+// ground. Represented via CasterMesh::local_triangles (its ACTUAL sloped
+// triangles) rather than a box proxy, so the shadow map / camera G-buffer
+// both render the real silhouette. Reuses sun_toward from MakeMacroScene.
+Scene MakeMicroScene();
+
+// MakeMicroScene's pyramid half-width (X/Z, local) and height (Y, local) --
+// exposed so shadow_tests.cpp's Test 4 can locate the base-contact point /
+// footprint corners without re-deriving them from the triangle soup.
+inline constexpr float kMicroPyramidHalfWidth = 0.1f;
+inline constexpr float kMicroPyramidHeight = 0.2f;
 
 // A fixed, non-axis-aligned rigid pose: M = translate(t) * rotate(R), t far
 // from the origin, R = Euler(35, -50, 20) degrees composed about X, Y, Z --

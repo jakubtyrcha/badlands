@@ -39,6 +39,53 @@ Scene MakeSlopeScene() {
   return scene;
 }
 
+namespace {
+// Appends the 4 side-face triangles of a square-base pyramid (base at y=0
+// spanning [-half_width, half_width] in local X/Z, apex at (0, height, 0))
+// to `out`, wound CCW as viewed from outside (see CasterMesh's doc comment).
+// No base cap (bottom face) is emitted: the pyramid's base sits exactly on
+// the ground plane it's tested against, and every camera/light in this
+// suite looks down from above, so an invisible bottom face would only risk
+// z-fighting against the coincident floor quad for zero visual benefit.
+void AppendPyramidTriangles(std::vector<glm::vec3>& out, float half_width, float height) {
+  const glm::vec3 apex(0.0f, height, 0.0f);
+  const glm::vec3 corners[4] = {
+      glm::vec3(-half_width, 0.0f, -half_width),
+      glm::vec3(half_width, 0.0f, -half_width),
+      glm::vec3(half_width, 0.0f, half_width),
+      glm::vec3(-half_width, 0.0f, half_width),
+  };
+  // Triangle (corners[i+1], corners[i], apex) is the outward-wound face
+  // spanning base edge i -- verified via cross((corners[i]-corners[i+1]),
+  // (apex-corners[i+1])) pointing away from the pyramid's central axis for
+  // all 4 edges (a symmetric, analytically-derived check, not eyeballed).
+  for (int i = 0; i < 4; ++i) {
+    out.push_back(corners[(i + 1) % 4]);
+    out.push_back(corners[i]);
+    out.push_back(apex);
+  }
+}
+}  // namespace
+
+Scene MakeMicroScene() {
+  Scene scene;
+  scene.ground_point = glm::vec3(0.0f);
+  scene.ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+
+  CasterMesh pyramid;
+  pyramid.model_matrix = glm::mat4(1.0f);  // base already centered at local origin, on y=0
+  // Bounding half-extents kept for documentation/debug only -- rendering and
+  // Test 4's oracle both use local_triangles, not this box (see CasterMesh's
+  // doc comment).
+  pyramid.half_extents =
+      glm::vec3(kMicroPyramidHalfWidth, 0.5f * kMicroPyramidHeight, kMicroPyramidHalfWidth);
+  AppendPyramidTriangles(pyramid.local_triangles, kMicroPyramidHalfWidth, kMicroPyramidHeight);
+  scene.casters.push_back(pyramid);
+
+  scene.sun_toward = glm::normalize(glm::vec3(1.0f, 1.0f, 0.25f));  // same sun as MakeMacroScene
+  return scene;
+}
+
 TestCamera MakeMacroCamera() {
   TestCamera cam;
   // Steep, elevated diagonal view framing both the box (footprint

@@ -9,6 +9,8 @@
 
 #include "engine/rendering/color_render_target.hpp"
 #include "engine/rendering/context/scene_context.hpp"
+#include "engine/rendering/geometry/aabb.hpp"
+#include "engine/rendering/geometry/mesh_builder_utils.hpp"
 #include "engine/rendering/geometry/primitive_mesh_builders.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/material_library.hpp"
@@ -73,6 +75,42 @@ TestGpu& GetTestGpu() {
   return *instance;
 }
 
+// Task T6: builds a flat-shaded (per-triangle normal), UV-trivial mesh from
+// an explicit LOCAL-space triangle soup (CasterMesh::local_triangles) -- the
+// render-side counterpart of a caster whose actual (non-box) shape matters,
+// e.g. MakeMicroScene's pyramid. UVs are a constant (0,0) and tangent is
+// each triangle's first edge direction -- the flat gray debug material
+// (MaterialLibrary::SolidColor) never samples either, so both are only
+// present to satisfy the kTexturedMesh vertex layout.
+TexturedMeshResult BuildTriangleCasterMesh(const std::vector<glm::vec3>& local_triangles) {
+  std::vector<float> verts;
+  verts.reserve(local_triangles.size() * kTexturedMeshFloatsPerVertex);
+  Aabb bounds = Aabb::Empty();
+  bool has_bounds = false;
+
+  for (size_t i = 0; i + 3 <= local_triangles.size(); i += 3) {
+    const glm::vec3& p0 = local_triangles[i];
+    const glm::vec3& p1 = local_triangles[i + 1];
+    const glm::vec3& p2 = local_triangles[i + 2];
+    const glm::vec3 normal = glm::normalize(glm::cross(p1 - p0, p2 - p0));
+    const glm::vec3 tangent = glm::normalize(p1 - p0);
+    PushVertex(verts, p0, glm::vec2(0.0f), normal, tangent);
+    PushVertex(verts, p1, glm::vec2(0.0f), normal, tangent);
+    PushVertex(verts, p2, glm::vec2(0.0f), normal, tangent);
+
+    const Aabb tri_bounds = Aabb::FromMinMax(glm::min(p0, glm::min(p1, p2)),
+                                             glm::max(p0, glm::max(p1, p2)));
+    bounds = has_bounds ? bounds.Union(tri_bounds) : tri_bounds;
+    has_bounds = true;
+  }
+
+  StaticTexturedMeshComponent mesh;
+  mesh.vertices = std::move(verts);
+  mesh.vertex_count = static_cast<uint32_t>(mesh.vertices.size() / kTexturedMeshFloatsPerVertex);
+  mesh.dirty = true;
+  return {.mesh = std::move(mesh), .local_bounds = bounds};
+}
+
 }  // namespace
 
 CpuImage RenderShadowFrame(const ShadowTestConfig& config, const Scene& world_scene,
@@ -108,8 +146,15 @@ CpuImage RenderShadowFrame(const ShadowTestConfig& config, const Scene& world_sc
   int caster_index = 0;
   for (const CasterMesh& caster : world_scene.casters) {
     const std::string name = "caster_" + std::to_string(caster_index++);
-    AddMeshEntity(graph, name.c_str(), GenerateCube(caster.half_extents), gray,
-                 caster.model_matrix);
+    if (caster.local_triangles.empty()) {
+      AddMeshEntity(graph, name.c_str(), GenerateCube(caster.half_extents), gray,
+                   caster.model_matrix);
+    } else {
+      // Task T6: an explicit triangle-soup caster (e.g. MakeMicroScene's
+      // pyramid) -- render its actual shape, not a box proxy.
+      AddMeshEntity(graph, name.c_str(), BuildTriangleCasterMesh(caster.local_triangles), gray,
+                   caster.model_matrix);
+    }
   }
 
   entt::registry registry;
