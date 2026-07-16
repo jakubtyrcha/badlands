@@ -38,4 +38,12 @@ struct Ray {
 Ray ScreenPointToRay(const Camera& camera, glm::vec2 pixel,
                      glm::vec2 screen_size);
 
+// First intersection of `ray` with the horizontal plane y == plane_y.
+//
+// Returns false when the ray is parallel to the plane or points away from it
+// (the hit would be behind the origin) — e.g. a cursor on the horizon or above
+// it. Callers must handle that: it is the normal case near the skyline, not an
+// error.
+bool IntersectGroundPlane(const Ray& ray, float plane_y, glm::vec3& out_hit);
+
 }  // namespace badlands

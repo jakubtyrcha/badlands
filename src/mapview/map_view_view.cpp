@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/geometry_type.hpp"
+#include "engine/app/sdl_input_util.hpp"
 #include "engine/core/ray.hpp"
 #include "engine/rendering/components/material_factory_component.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
@@ -99,12 +100,17 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   spdlog::info("MapViewView: {}x{} map, {} chunks, {} sections", cfg_.width,
                cfg_.height, chunk_count_, map_.graph.nodes.size());
 
-  // Frame the fixed-angle camera on the map centre.
+  // Start on the map centre at ground-level framing, matching the game's own
+  // camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye view —
+  // this is meant to show the map as it will actually be played. Scroll to zoom
+  // out; max_height reaches far enough to take in the whole map.
   const float map_depth_m = static_cast<float>(cfg_.height) *
                             mapgen::kMetersPerSample;
   gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_depth_m * 0.5f);
-  gamecam_.pitch_deg = 55.0f;
-  gamecam_.height = std::max(200.0f, map_size_m_ * 0.5f);
+  gamecam_.pitch_deg = 50.0f;
+  gamecam_.height = 42.0f;
+  gamecam_.min_height = 5.0f;
+  gamecam_.max_height = std::max(400.0f, map_size_m_);
   gamecam_.UpdateCamera(camera_);
 
   // The grid follows the mouse, so there is nothing to draw until the cursor is
@@ -185,26 +191,38 @@ void MapViewView::RebuildVisibleGrid() {
 
 void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
                               int /*height*/) {
-  if (event.type != SDL_EVENT_MOUSE_MOTION) return;
   if (ImGui::GetIO().WantCaptureMouse) return;
 
-  // The width/height passed in are the DRAWABLE size (physical pixels), but SDL
-  // reports mouse positions in logical points — on a HiDPI display those differ
-  // by the window's pixel density, which would scale the ray away from the
-  // cursor. Resolve the window off the event and use its logical size so both
-  // are in the same space.
-  SDL_Window* window = SDL_GetWindowFromID(event.motion.windowID);
-  int lw = 0, lh = 0;
-  if (window == nullptr || !SDL_GetWindowSize(window, &lw, &lh) || lw <= 0 ||
-      lh <= 0) {
-    hover_valid_ = false;
-    return;
+  // Mouse coords are logical points; HandleEvent's width/height are physical
+  // pixels. EventWindowLogicalSize keeps both in one space (see its docs).
+  switch (event.type) {
+    case SDL_EVENT_MOUSE_MOTION: {
+      glm::vec2 screen;
+      if (!EventWindowLogicalSize(event.motion.windowID, screen)) {
+        hover_valid_ = false;
+        return;
+      }
+      const Ray ray = ScreenPointToRay(
+          camera_, glm::vec2(event.motion.x, event.motion.y), screen);
+      hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
+      break;
+    }
+    case SDL_EVENT_MOUSE_WHEEL: {
+      glm::vec2 screen;
+      if (!EventWindowLogicalSize(event.wheel.windowID, screen)) return;
+      const glm::vec2 pixel(event.wheel.mouse_x, event.wheel.mouse_y);
+      ZoomAtCursor(gamecam_, camera_, NormalizedWheelY(event.wheel), pixel,
+                   screen);
+      // The camera moved under a stationary cursor, so the hover point is stale
+      // -- re-pick now rather than waiting for the next motion event (which may
+      // never come if the user is only scrolling).
+      const Ray ray = ScreenPointToRay(camera_, pixel, screen);
+      hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
+      break;
+    }
+    default:
+      break;
   }
-
-  const Ray ray = ScreenPointToRay(
-      camera_, glm::vec2(event.motion.x, event.motion.y),
-      glm::vec2(static_cast<float>(lw), static_cast<float>(lh)));
-  hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
 }
 
 void MapViewView::Update(float dt, const bool* keyboard_state) {

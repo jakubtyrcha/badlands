@@ -101,6 +101,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/geometry/building_parts_builder.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
+    src/engine/app/sdl_input_util.cpp
     src/engine/core/ray.cpp
     src/engine/rendering/frustum.cpp
     src/engine/rendering/debug_line_buffer.cpp
@@ -468,10 +469,12 @@ target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohm
 add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
-# (src/engine/core/ray) against the real fixed-angle GameCameraController.
-# glm-only: camera.hpp is header-only and the controller pulls in nothing else.
+# (src/engine/core/ray) and the fixed-angle GameCameraController's zoom that
+# rides on it. glm-only: camera.hpp is header-only and the controller pulls in
+# nothing else (deliberately no sdl_input_util here — that would drag in SDL3).
 add_executable(badlands_ray_tests
     src/engine/tests/ray_tests.cpp
+    src/engine/tests/game_camera_controller_tests.cpp
     src/engine/core/ray.cpp
     src/engine/app/game_camera_controller.cpp
     third_party/catch2/extras/catch_amalgamated.cpp

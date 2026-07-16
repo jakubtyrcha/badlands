@@ -28,4 +28,12 @@ Ray ScreenPointToRay(const Camera& camera, glm::vec2 pixel,
   return ray;
 }
 
+bool IntersectGroundPlane(const Ray& ray, float plane_y, glm::vec3& out_hit) {
+  if (std::abs(ray.dir.y) < 1e-6f) return false;  // parallel to the plane
+  const float t = (plane_y - ray.origin.y) / ray.dir.y;
+  if (t < 0.0f) return false;  // plane is behind the ray (looking at the sky)
+  out_hit = ray.At(t);
+  return true;
+}
+
 }  // namespace badlands
