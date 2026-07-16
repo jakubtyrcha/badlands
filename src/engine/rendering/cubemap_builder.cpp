@@ -6,6 +6,8 @@
 #include <glm/gtc/packing.hpp>
 #include <spdlog/spdlog.h>
 
+#include "core/parallel.hpp"
+
 namespace badlands {
 
 glm::vec3 CubemapBuilder::FaceUVToDirection(uint32_t face, float u, float v) {
@@ -45,25 +47,37 @@ bool CubemapBuilder::Build(wgpu::Device device, wgpu::Queue queue,
     return false;
   }
 
-  // 4 half-float channels per texel.
+  // 4 half-float channels per texel; one contiguous buffer for all 6 faces so
+  // the per-texel radiance evaluation can be parallelized without contention.
+  // Reused across rebuilds (resize is a no-op when face_size is unchanged).
   const uint32_t texels = face_size * face_size;
-  std::vector<uint16_t> face_data(static_cast<size_t>(texels) * 4);
+  const size_t face_stride = static_cast<size_t>(texels) * 4;  // uint16 per face
+  std::vector<uint16_t>& data = texel_buffer_;
+  data.resize(face_stride * 6);
 
-  for (uint32_t face = 0; face < 6; ++face) {
-    for (uint32_t py = 0; py < face_size; ++py) {
-      const float v = (static_cast<float>(py) + 0.5f) / face_size;
-      for (uint32_t px = 0; px < face_size; ++px) {
-        const float u = (static_cast<float>(px) + 0.5f) / face_size;
-        const glm::vec3 dir = FaceUVToDirection(face, u, v);
-        const glm::vec4 c = fn(dir);
-        const size_t i = (static_cast<size_t>(py) * face_size + px) * 4;
-        face_data[i + 0] = glm::packHalf1x16(c.r);
-        face_data[i + 1] = glm::packHalf1x16(c.g);
-        face_data[i + 2] = glm::packHalf1x16(c.b);
-        face_data[i + 3] = glm::packHalf1x16(c.a);
-      }
+  // Evaluate `fn` per texel across the global thread pool, parallelized over
+  // all 6 faces' rows (6 * face_size units). Each row writes a disjoint slice,
+  // so no synchronization is needed; RadianceFn must be thread-safe (pure).
+  const size_t total_rows = static_cast<size_t>(face_size) * 6;
+  ParallelFor(total_rows, [&](size_t r) {
+    const uint32_t face = static_cast<uint32_t>(r / face_size);
+    const uint32_t py = static_cast<uint32_t>(r % face_size);
+    const float v = (static_cast<float>(py) + 0.5f) / face_size;
+    const size_t row_base = face * face_stride + static_cast<size_t>(py) * face_size * 4;
+    for (uint32_t px = 0; px < face_size; ++px) {
+      const float u = (static_cast<float>(px) + 0.5f) / face_size;
+      const glm::vec3 dir = FaceUVToDirection(face, u, v);
+      const glm::vec4 c = fn(dir);
+      const size_t i = row_base + static_cast<size_t>(px) * 4;
+      data[i + 0] = glm::packHalf1x16(c.r);
+      data[i + 1] = glm::packHalf1x16(c.g);
+      data[i + 2] = glm::packHalf1x16(c.b);
+      data[i + 3] = glm::packHalf1x16(c.a);
     }
+  });
 
+  // GPU upload stays serial (the Dawn queue is used single-threaded here).
+  for (uint32_t face = 0; face < 6; ++face) {
     wgpu::TexelCopyTextureInfo dst;
     dst.texture = texture_;
     dst.mipLevel = 0;
@@ -74,8 +88,8 @@ bool CubemapBuilder::Build(wgpu::Device device, wgpu::Queue queue,
     layout.rowsPerImage = face_size;
 
     wgpu::Extent3D extent = {face_size, face_size, 1};
-    queue.WriteTexture(&dst, face_data.data(),
-                       face_data.size() * sizeof(uint16_t), &layout, &extent);
+    queue.WriteTexture(&dst, data.data() + face * face_stride,
+                       face_stride * sizeof(uint16_t), &layout, &extent);
   }
 
   wgpu::TextureViewDescriptor view_desc;

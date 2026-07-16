@@ -18,8 +18,11 @@
 #include <array>
 #include <cstdint>
 
+#include <iostream>
+
 #include <spdlog/spdlog.h>
 
+#include "core/profiler.hpp"
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
 #include "engine/rendering/context/scene_context.hpp"
@@ -101,6 +104,29 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
     sdesc.maxAnisotropy = 1;
     fallback_cube_sampler_ = device_.CreateSampler(&sdesc);
   }
+
+  // === Shadow-map comparison sampler (T3) ===
+  // Hardware PCF (bilinear-filtered compare) for sampleShadowMapPCF's 3x3 tap
+  // pattern. CompareFunction::LessEqual matches shadow_map_'s conventional-Z
+  // depth (near->0, far->1, cleared to 1.0=far) -- a receiver is lit when
+  // its (biased) depth is <= the stored occluder depth. Do NOT change to
+  // GreaterEqual/Less -- see shadow_map.hpp's Z-convention note.
+  {
+    wgpu::SamplerDescriptor sampler_desc{};
+    sampler_desc.addressModeU = wgpu::AddressMode::ClampToEdge;
+    sampler_desc.addressModeV = wgpu::AddressMode::ClampToEdge;
+    sampler_desc.addressModeW = wgpu::AddressMode::ClampToEdge;
+    sampler_desc.magFilter = wgpu::FilterMode::Linear;
+    sampler_desc.minFilter = wgpu::FilterMode::Linear;
+    sampler_desc.maxAnisotropy = 1;
+    sampler_desc.compare = wgpu::CompareFunction::LessEqual;
+    shadow_comparison_sampler_ = device_.CreateSampler(&sampler_desc);
+    if (!shadow_comparison_sampler_) {
+      spdlog::error(
+          "SceneRenderer::Initialize: failed to create shadow comparison "
+          "sampler");
+    }
+  }
 }
 
 void SceneRenderer::UpdateIbl(const SceneContext& scene) {
@@ -180,6 +206,25 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
     wgpu::CommandBuffer commands = encoder.Finish();
     queue_.Submit(1, &commands);
   }
+
+  // === Contact-shadow target (T2) ===
+  // Window-sized R8Unorm. No create-time clear needed: T5's SSCS fullscreen
+  // render pass (Pass 1.75, Render()) unconditionally clears this same view
+  // (LoadOp::Clear) every frame, BEFORE the deferred pass (Pass 3) ever
+  // reads it @8 -- so a stale/uninitialized first frame is not observable.
+  // (Unlike ao_texture_ above, which the GTAO compute pass only
+  // conditionally writes and can be read before that -- hence its
+  // create-time clear stays.)
+  wgpu::TextureDescriptor contact_desc;
+  contact_desc.size = {width, height, 1};
+  contact_desc.format = wgpu::TextureFormat::R8Unorm;
+  contact_desc.usage = wgpu::TextureUsage::TextureBinding |
+                       wgpu::TextureUsage::RenderAttachment;
+  contact_desc.mipLevelCount = 1;
+  contact_desc.sampleCount = 1;
+  contact_desc.dimension = wgpu::TextureDimension::e2D;
+  contact_shadow_texture_ = device_.CreateTexture(&contact_desc);
+  contact_shadow_view_ = contact_shadow_texture_.CreateView();
 }
 
 void SceneRenderer::Resize(uint32_t width, uint32_t height) {
@@ -190,16 +235,28 @@ void SceneRenderer::Resize(uint32_t width, uint32_t height) {
   CreateTargets(width, height);
 }
 
+void SceneRenderer::EnableGpuProfiling(wgpu::Instance instance,
+                                       bool timestamp_supported) {
+  gpu_timer_.Initialize(instance, device_, timestamp_supported);
+}
+
 void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
                            const SceneContext& scene,
                            wgpu::TextureView surface_view) {
   if (!surface_view || width_ == 0 || height_ == 0 || !pipeline_generator_) {
     return;
   }
+  PROFILE_SCOPE("SceneRenderer::Render");
+  gpu_timer_.BeginFrame();
 
   // Refresh the prefiltered specular env if the scene's skybox changed. Does
   // its own encoder/submit (queue-ordered before this frame's work below).
-  UpdateIbl(scene);
+  // (The GGX prefilter fires here whenever the daylight re-bake bumped the
+  // skybox generation -- watch this marker for the IBL cost.)
+  {
+    PROFILE_SCOPE("UpdateIbl");
+    UpdateIbl(scene);
+  }
 
   // World camera-offsetting: the view matrix has the camera fixed at the
   // origin (pure rotation, no translation) for float precision — geometry is
@@ -230,13 +287,30 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   }
   const bool gtao_will_run = run_gtao && gtao_pipeline != nullptr;
 
+  // Directional shadow map (T2): (re)create the depth texture if the
+  // configured resolution changed, then fit the light's fixed-coverage
+  // ortho frustum to a point ahead of the camera. Computed here (before
+  // frame_uniforms is populated below) because light_view_proj must be set
+  // BEFORE frame.Begin() uploads the frame UBO -- the shadow pass shares
+  // this same per-frame uniform buffer with the rest of the frame.
+  if (!shadow_map_.IsValid() ||
+      shadow_map_.GetResolution() != shadow_config_.resolution) {
+    shadow_map_.CreateTexture(device_, shadow_config_.resolution);
+  }
+  const glm::vec3 shadow_center_world =
+      camera_world_pos +
+      camera.direction * (0.5f * shadow_config_.coverage_dmax);
+  shadow_map_.UpdateLightMatrices(
+      scene.sun_direction, shadow_center_world, shadow_config_.coverage_dmax,
+      shadow_config_.resolution, shadow_config_.backward_extension);
+
   UniformData frame_uniforms{};
   frame_uniforms.view = glm::lookAt(glm::vec3(0.0f), camera.direction, camera.up);
   frame_uniforms.proj = camera.GetProj();
   // No motion vectors/TAA yet — previous-frame matrices equal current.
   frame_uniforms.view_prev = frame_uniforms.view;
   frame_uniforms.proj_prev = frame_uniforms.proj;
-  frame_uniforms.light_view_proj = glm::mat4(1.0f);  // no shadow map
+  frame_uniforms.light_view_proj = shadow_map_.GetLightViewProj();
   frame_uniforms.camera_world_pos = glm::vec4(camera_world_pos, 0.0f);
   frame_uniforms.sunDir = glm::vec4(scene.sun_direction, 0.0f);
   frame_uniforms.sunColor = glm::vec4(scene.sun_color, 0.0f);
@@ -254,10 +328,72 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   frame_uniforms.tonemap_mode = 0;     // kClamp (TonemapMode not ported;
                                        // shaders/common/frame.wesl: 0 = kClamp)
   frame_uniforms.output_is_linear =
-      (surface_format_ == wgpu::TextureFormat::RGBA16Float) ? 1 : 0;
+      (surface_format_ == wgpu::TextureFormat::RGBA16Float ||
+       surface_format_ == wgpu::TextureFormat::R32Float)
+          ? 1
+          : 0;
+  frame_uniforms.debug_flags = static_cast<uint32_t>(shadow_debug_mode_);
+  // Derived shadow constants (T1: computed here, consumed by T3/T5's
+  // shadow-map PCF / contact-shadow ray march). t_size already matches
+  // shadow_map_.TexelWorldSize() (both = coverage_dmax / resolution); left
+  // as its own computation here rather than reading the ShadowMap back, per
+  // T1's plan. coverage_dmax is epsilon-guarded (mirrors
+  // ShadowMap::UpdateLightMatrices' guard, shadow_map.cpp) so a
+  // misconfigured 0 coverage can't produce a zero/NaN t_size here either;
+  // unreachable in-tree (ShadowConfig defaults coverage_dmax = 128).
+  const float t_size = std::max(shadow_config_.coverage_dmax, 1e-3f) /
+                        static_cast<float>(shadow_config_.resolution);
+  // .z is unused: the SSCS ray length used to be precomputed here
+  // (1.5*t_size/N_clamp, the grazing worst case) but is now computed
+  // per-pixel in contact_shadows.wesl via the real per-pixel NdotL (see
+  // shaders/common/frame.wesl's shadowNormalOffsetLength).
+  frame_uniforms.shadow_params = glm::vec4(
+      t_size, 1.0f / static_cast<float>(shadow_config_.resolution), 0.0f,
+      shadow_config_.hard_shadow_debug ? 1.0f : 0.0f);
 
   FrameContext frame;
   frame.Begin(device_, queue_, frame_uniforms, min_uniform_offset_alignment_);
+
+  // === Pass 0: Shadow depth (T2) — depth-only render of casters from the
+  // sun's point of view into shadow_map_'s Depth32Float target (conventional
+  // Z: cleared to 1.0 = far, kShadow pipeline compares Less -- see
+  // shadow_map.hpp). Guarded on shadow_config_.enable_shadow_map: when off,
+  // the map still clears to 1.0 (all lit) but casters are skipped, so T3's
+  // (future) sampling reads "no shadow" everywhere instead of stale data.
+  // Uses this SAME frame/UBO (light_view_proj was set into frame_uniforms
+  // above, before frame.Begin() uploaded it) -- normalmapped.wesl's
+  // shadow_pass vertex path reads frame.lightViewProj directly. No color
+  // targets: the shadow fragment shader writes nothing but depth. ===
+  {
+    wgpu::RenderPassDepthStencilAttachment shadow_depth_attachment;
+    shadow_depth_attachment.view = shadow_map_.GetDepthView();
+    shadow_depth_attachment.depthClearValue = 1.0f;  // conventional-Z: far
+    shadow_depth_attachment.depthLoadOp = wgpu::LoadOp::Clear;
+    shadow_depth_attachment.depthStoreOp = wgpu::StoreOp::Store;
+    shadow_depth_attachment.stencilLoadOp = wgpu::LoadOp::Undefined;
+    shadow_depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 0;
+    desc.colorAttachments = nullptr;
+    desc.depthStencilAttachment = &shadow_depth_attachment;
+
+    desc.timestampWrites = gpu_timer_.BeginPass("shadow");
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    if (shadow_config_.enable_shadow_map) {
+      // Cull casters against the LIGHT's frustum, not the camera's: a caster
+      // outside the view still shadows into it. This is free correctness-wise —
+      // anything outside the light frustum is clipped by the GPU and cannot
+      // rasterize into the shadow map anyway, and straddling AABBs still count
+      // as intersecting — so it only skips work.
+      const Frustum shadow_frustum =
+          Frustum::FromViewProj(shadow_map_.GetLightViewProj());
+      RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
+                           RenderPassType::kShadow, material_instance_cache_,
+                           shadow_frustum);
+    }
+    pass.End();
+  }
 
   // === Pass 1: G-buffer — clear MRT (normals/albedo/material) + depth,
   // draw textured meshes with their kGBuffer pipeline variant ===
@@ -296,6 +432,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = color_attachments.data();
     desc.depthStencilAttachment = &depth_attachment;
 
+    desc.timestampWrites = gpu_timer_.BeginPass("gbuffer");
     RenderPassContext pass = frame.BeginRenderPass(desc);
     // World-space view frustum for per-entity AABB culling (built from the
     // full world VP; the offset-view rendering is only for GPU precision).
@@ -342,12 +479,75 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     const uint32_t dispatch_x = (width_ + ws_x - 1) / ws_x;
     const uint32_t dispatch_y = (height_ + ws_y - 1) / ws_y;
 
-    wgpu::ComputePassEncoder compute_pass = frame.BeginComputePass();
+    wgpu::ComputePassEncoder compute_pass =
+        frame.BeginComputePass(gpu_timer_.BeginPass("gtao"));
     compute_pass.SetPipeline(gtao_pipeline->pipeline);
     compute_pass.SetBindGroup(0, gtao_group0, 0, nullptr);
     compute_pass.SetBindGroup(1, gtao_group1, 0, nullptr);
     compute_pass.DispatchWorkgroups(dispatch_x, dispatch_y, 1);
     compute_pass.End();
+  }
+
+  // === Pass 1.75: Contact shadows (SSCS, T5) — a fullscreen render pass
+  // doing a short view-space ray-march along the sun direction, filling the
+  // small Peter-Panning gap the shadow map's normal-offset bias opens near
+  // contact points. Runs after the G-buffer pass (reads its depth @1 and
+  // normals @2, the latter used (T5-fix) to derive the actual per-pixel
+  // normal-offset gap to march) and before deferred lighting (which samples
+  // the result @8). Runs every frame and ALWAYS clears contact_shadow_texture_
+  // to 1.0 first (the only clear it gets -- see CreateTargets, which creates
+  // but no longer separately clears it), so there is never stale contents;
+  // the fullscreen ray-march only draws when
+  // shadow_config_.enable_contact_shadows (or if the pipeline failed to
+  // compile), leaving a bare 1.0 clear otherwise — same enable-gate pattern
+  // as Pass 0's shadow map. ===
+  {
+    RenderPipelineDeclaration decl;
+    decl.shader_path = "passes/contact_shadows";
+
+    RenderTargetFormats target_formats = {wgpu::TextureFormat::R8Unorm};
+    auto compiled = pipeline_generator_->GetPipeline(decl, target_formats);
+    if (!compiled) {
+      spdlog::error(
+          "SceneRenderer::Render: failed to compile contact_shadows "
+          "pipeline");
+    }
+
+    wgpu::RenderPassColorAttachment color_attachment;
+    color_attachment.view = contact_shadow_view_;
+    color_attachment.loadOp = wgpu::LoadOp::Clear;
+    color_attachment.storeOp = wgpu::StoreOp::Store;
+    color_attachment.clearValue = {1.0, 1.0, 1.0, 1.0};
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color_attachment;
+    desc.depthStencilAttachment = nullptr;
+
+    desc.timestampWrites = gpu_timer_.BeginPass("contact");
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    if (compiled && shadow_config_.enable_contact_shadows) {
+      // Group 0: frame UBO @0, gbuffer depth @1, gbuffer normals @2 (T5-fix:
+      // the receiver normal, needed to compute per-pixel NdotL and derive
+      // the actual normal-offset gap to march).
+      std::array<wgpu::BindGroupEntry, 3> entries{};
+      entries[0].binding = 0;
+      entries[0].buffer = frame.GetFrameUniformBuffer();
+      entries[0].offset = 0;
+      entries[0].size = sizeof(UniformData);
+      entries[1].binding = 1;
+      entries[1].textureView = gbuffer_.GetDepthView();
+      entries[2].binding = 2;
+      entries[2].textureView = gbuffer_.GetNormalsView();
+
+      wgpu::BindGroup bind_group =
+          frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
+
+      pass.SetPipeline(compiled->pipeline);
+      pass.SetBindGroup(0, bind_group);
+      pass.Draw(3);
+    }
+    pass.End();
   }
 
   // === Pass 2: Skybox background — fill the HDR target from the source
@@ -373,6 +573,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = &color_attachment;
     desc.depthStencilAttachment = nullptr;  // no depth: fills the whole target
 
+    desc.timestampWrites = gpu_timer_.BeginPass("skybox");
     RenderPassContext pass = frame.BeginRenderPass(desc);
     RenderSkybox(pass, frame, *pipeline_generator_, accumulation_format_,
                  scene.skybox_cubemap, fallback_cube_sampler_);
@@ -398,18 +599,20 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
           "pipeline");
     } else {
       // Group 0: frame UBO @0, gbuffer depth @1, normals @2, albedo @3,
-      // material @4 (all textureLoad'd — no sampler), GTAO ao @7, then IBL:
-      // prefiltered env cube @9 + sampler @10, BRDF LUT @11 + sampler @12.
-      // Matches shaders/passes/deferred_lighting.wesl's binding declarations.
-      // The IBL cube is the prefiltered env when available, else a 1x1 black
-      // fallback (so the specular term is zero) — bindings are always valid.
+      // material @4 (all textureLoad'd — no sampler), shadow map @5 + its
+      // comparison sampler @6, GTAO ao @7, contact shadow @8 (textureLoad'd),
+      // then IBL: prefiltered env cube @9 + sampler @10, BRDF LUT @11 +
+      // sampler @12. Matches shaders/passes/deferred_lighting.wesl's binding
+      // declarations. The IBL cube is the prefiltered env when available,
+      // else a 1x1 black fallback (so the specular term is zero) — bindings
+      // are always valid.
       const bool use_prefiltered = has_prefiltered_ && prefiltered_.IsValid();
       wgpu::TextureView ibl_cube_view =
           use_prefiltered ? prefiltered_.GetView() : fallback_cube_view_;
       wgpu::Sampler ibl_cube_sampler =
           use_prefiltered ? prefiltered_.GetSampler() : fallback_cube_sampler_;
 
-      std::array<wgpu::BindGroupEntry, 10> entries{};
+      std::array<wgpu::BindGroupEntry, 13> entries{};
       entries[0].binding = 0;
       entries[0].buffer = frame.GetFrameUniformBuffer();
       entries[0].offset = 0;
@@ -422,16 +625,22 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       entries[3].textureView = gbuffer_.GetAlbedoView();
       entries[4].binding = 4;
       entries[4].textureView = gbuffer_.GetMaterialView();
-      entries[5].binding = 7;
-      entries[5].textureView = ao_view_;
-      entries[6].binding = 9;
-      entries[6].textureView = ibl_cube_view;
-      entries[7].binding = 10;
-      entries[7].sampler = ibl_cube_sampler;
-      entries[8].binding = 11;
-      entries[8].textureView = brdf_lut_.GetView();
-      entries[9].binding = 12;
-      entries[9].sampler = brdf_lut_.GetSampler();
+      entries[5].binding = 5;
+      entries[5].textureView = shadow_map_.GetDepthView();
+      entries[6].binding = 6;
+      entries[6].sampler = shadow_comparison_sampler_;
+      entries[7].binding = 7;
+      entries[7].textureView = ao_view_;
+      entries[8].binding = 8;
+      entries[8].textureView = contact_shadow_view_;
+      entries[9].binding = 9;
+      entries[9].textureView = ibl_cube_view;
+      entries[10].binding = 10;
+      entries[10].sampler = ibl_cube_sampler;
+      entries[11].binding = 11;
+      entries[11].textureView = brdf_lut_.GetView();
+      entries[12].binding = 12;
+      entries[12].sampler = brdf_lut_.GetSampler();
 
       wgpu::BindGroup bind_group =
           frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
@@ -449,6 +658,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       desc.colorAttachments = &color_attachment;
       desc.depthStencilAttachment = nullptr;  // reads depth as a texture
 
+      desc.timestampWrites = gpu_timer_.BeginPass("lighting");
       RenderPassContext pass = frame.BeginRenderPass(desc);
       pass.SetPipeline(compiled->pipeline);
       pass.SetBindGroup(0, bind_group);
@@ -528,6 +738,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = &color_attachment;
     desc.depthStencilAttachment = nullptr;
 
+    desc.timestampWrites = gpu_timer_.BeginPass("tonemap");
     RenderPassContext pass = frame.BeginRenderPass(desc);
 
     if (debug_mode_ != GBufferDebugMode::None) {
@@ -569,8 +780,18 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     pass.End();
   }
 
-  wgpu::CommandBuffer commands = frame.End();
-  queue_.Submit(1, &commands);
+  // Resolve this frame's GPU timestamps onto the frame encoder before submit.
+  gpu_timer_.ResolveFrame(frame.GetEncoder());
+
+  {
+    PROFILE_SCOPE("frame_submit");  // Finish encoding + queue submit
+    wgpu::CommandBuffer commands = frame.End();
+    queue_.Submit(1, &commands);
+  }
+
+  // Advance the async per-pass GPU-timing readback (non-blocking) and print a
+  // breakdown when one completes; a cheap no-op when disabled.
+  gpu_timer_.EndFrame(std::cerr);
 }
 
 }  // namespace badlands

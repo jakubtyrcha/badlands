@@ -20,8 +20,8 @@
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
+#include "engine/rendering/daylight.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
-#include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "mapgen/config.hpp"
 #include "mapgen/pipeline.hpp"
@@ -51,8 +51,14 @@ class MapViewView : public AppView {
   wgpu::Queue queue_;
 
   MaterialLibrary matlib_;
-  LightEnvironment env_;
   CubemapBuilder sky_cube_;
+
+  // Daylight (Hosek-Wilkie sky + directional sun), same system the game uses.
+  // Static rather than a running cycle: this is a map inspector, so the light
+  // holds still unless you scrub it. 0.5 == noon (daylight.cpp's solar arc).
+  DaylightConfig daylight_cfg_;
+  float time_of_day_ = 0.5f;
+  void ApplyDaylight();  // re-bakes sky + IBL; not cheap, call on change only
 
   // Per-biome PBR texture arrays (albedo/normal/arm), layer index = Biome enum
   // value. Held here to keep the GPU textures alive for the material's lifetime.

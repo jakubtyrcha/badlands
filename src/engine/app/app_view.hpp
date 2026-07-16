@@ -27,9 +27,21 @@ class AppView {
   // One SDL event. (ImGui gating is added in A2.)
   virtual void HandleEvent(const SDL_Event& event, int width, int height) = 0;
 
-  // Per-frame update: sim/camera + sync this view's scene into GetRegistry()/
-  // GetSceneContext() so the app can render it.
+  // Per-frame update, driven by the render loop with a real-time `dt` (wall
+  // time live, or a fixed presentation step when recording). The view owns its
+  // own time model: it advances its SimClock from `dt` (applying sim speed),
+  // steps its fixed-rate game logic and time-driven visuals (e.g. day/night)
+  // off that clock, updates the camera, then syncs its scene into
+  // GetRegistry()/GetSceneContext() so the app can render it. Sim vs render
+  // decoupling lives inside the view (fixed sim ticks vs continuous visuals),
+  // not in the loop — see sim_clock.hpp.
   virtual void Update(float dt, const bool* keyboard_state) = 0;
+
+  // Headless determinism hook: jump any presentation clock (e.g. day/night) to
+  // an absolute normalized time-of-day t in [0,1) and refresh derived state, so
+  // --screenshot renders a chosen time and captures are reproducible. Default
+  // no-op (views without a time-of-day).
+  virtual void SeekToTimeOfDay(float t01) { (void)t01; }
 
   // Per-frame ImGui windows (no-op until A2).
   virtual void DrawUI() {}

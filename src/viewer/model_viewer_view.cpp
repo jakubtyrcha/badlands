@@ -15,16 +15,22 @@
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
-#include "game/material_pack.h"
 #include "game/scene/building_scene.h"
 
 namespace badlands {
 
 namespace {
 
-constexpr const char* kFloorPackDir =
-    "assets/materials/monastery_stone_floor_1k";
-// Repeat the floor pack roughly once per 2 world units instead of stretching
+// Flat light-gray debug material for the floor + rock (Task T0): rgb is
+// pre-encoded so that, after SolidColor's non-sRGB texture is re-linearized
+// by deferred_lighting.wesl's srgb_to_linear, the surface lands at linear
+// 0.75 reflectance (linear_to_srgb(0.75) ~= 0.881). Roughness is maxed to
+// keep the surface diffuse-looking (minimal specular) so shadows read
+// clearly against it.
+constexpr glm::vec3 kDebugGray{0.881f};
+constexpr float kDebugGrayRoughness = 1.0f;
+
+// Repeat the floor UVs roughly once per 2 world units instead of stretching
 // one copy across the whole floor.
 constexpr float kFloorUvRepeatSpacing = 2.0f;
 
@@ -51,6 +57,7 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
 
   ApplyEnvironment();
   RebuildScene();
+  scene_renderer_->SetShadowDebugMode(initial_shadow_debug_mode_);
 
   if (!matlib_.ok()) {
     spdlog::error(
@@ -105,7 +112,7 @@ void ModelViewerView::RebuildScene() {
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
   constexpr float kFloorSize = 40.0f;
-  AddFloor(scene_, matlib_, kFloorSize, kFloorPackDir,
+  AddFloor(scene_, kFloorSize, matlib_.SolidColor(kDebugGray, kDebugGrayRoughness),
            kFloorSize / kFloorUvRepeatSpacing);
 
   const Aabb bounds = AddPrefab(catalog_[prefab_index_]);
@@ -122,8 +129,7 @@ Aabb ModelViewerView::AddPrefab(const PrefabEntry& entry) {
                                                  /*delta_y=*/0.8f, /*shrink=*/0.3f);
     const Aabb bounds = mesh.local_bounds;
 
-    const MaterialPack pack = material_pack(MaterialId::RockyTrail);
-    const DeferredMaterial mat = matlib_.Get(pack.dir);
+    const DeferredMaterial mat = matlib_.SolidColor(kDebugGray, kDebugGrayRoughness);
     AddMeshEntity(scene_, "rock", std::move(mesh), mat);
     return bounds;
   }

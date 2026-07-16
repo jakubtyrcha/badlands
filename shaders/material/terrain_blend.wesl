@@ -10,7 +10,16 @@
 // A forward variant (blend + one inline BRDF, e.g. a future water material) can
 // be added as a second fragment entry when a forward-opaque pass exists.
 
+// shadow_pass: depth-only render from the sun's point of view (the kShadow
+// pipeline variant, material.cpp pushes the feature). It MUST project through
+// the light's matrix, not the camera's — without this path the terrain writes
+// camera-projected depth into the light's shadow map and the whole map shadows
+// itself.
+@if(!shadow_pass)
 import package::common::frame::{frame, worldCameraOffsetedSpaceToClipSpace};
+@if(shadow_pass)
+import package::common::frame::{frame, worldCameraOffsetedSpaceToLightClipSpace};
+@if(!shadow_pass)
 import package::common::gbuffer_encode::{GBufferOutput, encodeOctahedron};
 
 struct TerrainUniforms {
@@ -45,6 +54,29 @@ struct VertexOutput {
     @location(3) w1: vec4<f32>,   // interpolated weights for layers 4..7
 }
 
+// Shadow pass writes depth only — no normals, no blend weights.
+struct VertexOutputShadow {
+    @builtin(position) position: vec4<f32>,
+}
+
+@if(shadow_pass)
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutputShadow {
+    var output: VertexOutputShadow;
+    // modelMatrix is already rebased into camera-offset space on the CPU; the
+    // helper undoes that before applying frame.lightViewProj.
+    let world_offset_pos = (object.modelMatrix * vec4<f32>(input.pos, 1.0)).xyz;
+    output.position = worldCameraOffsetedSpaceToLightClipSpace(world_offset_pos);
+    return output;
+}
+
+@if(shadow_pass)
+@fragment
+fn fs_gbuffer(input: VertexOutputShadow) {
+    // Depth is written automatically via @builtin(position).
+}
+
+@if(!shadow_pass)
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
@@ -154,6 +186,7 @@ fn sample_blended(uv: vec2<f32>, w0: vec4<f32>, w1: vec4<f32>,
     return out;
 }
 
+@if(!shadow_pass)
 @fragment
 fn fs_gbuffer(input: VertexOutput) -> GBufferOutput {
     var output: GBufferOutput;

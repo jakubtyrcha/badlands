@@ -43,4 +43,12 @@ NodeHandle AddMeshEntity(SceneGraph& scene, const char* name,
 NodeHandle AddFloor(SceneGraph& scene, MaterialLibrary& matlib, float size,
                     const std::string& pack_dir, float uv_scale);
 
+// Same quad/transform/UV-tiling as the pack-dir overload above, but attaches
+// a pre-built `mat` directly instead of resolving one from a pack dir --
+// e.g. a MaterialLibrary::SolidColor() debug material. Stays game-agnostic
+// (engine types only): callers that want a gray debug floor build the
+// DeferredMaterial themselves and pass it in.
+NodeHandle AddFloor(SceneGraph& scene, float size, const DeferredMaterial& mat,
+                    float uv_scale);
+
 }  // namespace badlands

@@ -37,7 +37,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     spdlog::error("MapViewView: MaterialLibrary init failed");
     return false;
   }
-  ApplyLightEnvironment(env_, device_, queue_, sky_cube_, scene_context_);
+  ApplyDaylight();
   scene_context_.registry = &registry_;
 
   // One PBR pack per biome, layer index = Biome enum value. The mapping is data
@@ -116,6 +116,12 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // The grid follows the mouse, so there is nothing to draw until the cursor is
   // over the terrain (Update wires debug_lines once hover_valid_).
   return true;
+}
+
+void MapViewView::ApplyDaylight() {
+  const DaylightState state = ComputeDaylight(daylight_cfg_, time_of_day_);
+  ApplyDaylightEnvironment(state, daylight_cfg_, device_, queue_, sky_cube_,
+                           scene_context_);
 }
 
 float MapViewView::SectionHeight(const mapgen::Block& b) const {
@@ -269,6 +275,11 @@ void MapViewView::DrawUI() {
   }
   ImGui::Checkbox("Grid (block + section)", &grid_visible_);
   ImGui::SliderInt("Grid radius (blocks)", &grid_radius_blocks_, 1, 30);
+  // Scrub the sun. Re-bakes only on change (the bake is a CPU per-texel sky
+  // eval + SH projection -- see ApplyDaylightEnvironment).
+  if (ImGui::SliderFloat("Time of day", &time_of_day_, 0.0f, 1.0f, "%.3f")) {
+    ApplyDaylight();
+  }
   ImGui::End();
 }
 
