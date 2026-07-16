@@ -326,7 +326,10 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   frame_uniforms.tonemap_mode = 0;     // kClamp (TonemapMode not ported;
                                        // shaders/common/frame.wesl: 0 = kClamp)
   frame_uniforms.output_is_linear =
-      (surface_format_ == wgpu::TextureFormat::RGBA16Float) ? 1 : 0;
+      (surface_format_ == wgpu::TextureFormat::RGBA16Float ||
+       surface_format_ == wgpu::TextureFormat::R32Float)
+          ? 1
+          : 0;
   frame_uniforms.debug_flags = static_cast<uint32_t>(shadow_debug_mode_);
   // Derived shadow constants (T1: computed here, consumed by T3/T5's
   // shadow-map PCF / contact-shadow ray march). t_size already matches

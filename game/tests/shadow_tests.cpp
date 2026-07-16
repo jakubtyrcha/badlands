@@ -22,6 +22,7 @@
 #include <spdlog/spdlog.h>
 
 #include "badlands_assets.h"
+#include "core/util/cpu_image.hpp"
 #include "engine/rendering/shadow_map.hpp"
 #include "shadow_test_geometry.hpp"
 #include "shadow_test_harness.hpp"
@@ -119,15 +120,20 @@ void EnsureDiagnosticsDir(const std::filesystem::path& dir) {
   }
 }
 
-std::vector<uint8_t> VisibilityToRgba8(const Image& img) {
-  std::vector<uint8_t> out(static_cast<size_t>(img.width) * img.height * 4);
-  for (size_t i = 0; i < img.pixels.size(); ++i) {
-    const uint8_t v =
-        static_cast<uint8_t>(std::clamp(img.pixels[i], 0.0f, 1.0f) * 255.0f + 0.5f);
-    out[i * 4 + 0] = v;
-    out[i * 4 + 1] = v;
-    out[i * 4 + 2] = v;
-    out[i * 4 + 3] = 255;
+std::vector<uint8_t> VisibilityToRgba8(const CpuImage& img) {
+  const uint32_t width = img.GetWidth();
+  const uint32_t height = img.GetHeight();
+  std::vector<uint8_t> out(static_cast<size_t>(width) * height * 4);
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      const size_t i = static_cast<size_t>(y) * width + x;
+      const uint8_t v =
+          static_cast<uint8_t>(std::clamp(img.GetFloat(x, y), 0.0f, 1.0f) * 255.0f + 0.5f);
+      out[i * 4 + 0] = v;
+      out[i * 4 + 1] = v;
+      out[i * 4 + 2] = v;
+      out[i * 4 + 3] = 255;
+    }
   }
   return out;
 }
@@ -166,7 +172,7 @@ struct FailureExample {
 // CPU-only ShadowMap, mirroring exactly what SceneRenderer::Render computes
 // each frame, see scene_renderer.cpp's shadow_center_world/UpdateLightMatrices
 // call) for a failed Test 1 config.
-void DumpTest1Failure(const std::string& tag, const Image& img,
+void DumpTest1Failure(const std::string& tag, const CpuImage& img,
                      const std::vector<uint8_t>& diag, const Scene& scene,
                      const Camera& camera, uint32_t r_sm, float d_max, float t_size,
                      float e_leak, size_t checked, size_t failed, float max_excess_d,
@@ -176,11 +182,13 @@ void DumpTest1Failure(const std::string& tag, const Image& img,
 
   const std::vector<uint8_t> visibility_rgba = VisibilityToRgba8(img);
   const std::string visibility_path = (dir / (tag + "_visibility.png")).string();
-  badlands_write_png(visibility_path.c_str(), visibility_rgba.data(), img.width, img.height);
+  badlands_write_png(visibility_path.c_str(), visibility_rgba.data(), img.GetWidth(),
+                     img.GetHeight());
 
   const std::vector<uint8_t> diagnosis_rgba = DiagnosisToRgba8(diag);
   const std::string diagnosis_path = (dir / (tag + "_diagnosis.png")).string();
-  badlands_write_png(diagnosis_path.c_str(), diagnosis_rgba.data(), img.width, img.height);
+  badlands_write_png(diagnosis_path.c_str(), diagnosis_rgba.data(), img.GetWidth(),
+                     img.GetHeight());
 
   spdlog::error(
       "Shadow Test 1 [{}] FAILED: r_sm={} d_max={} t_size={:.6f} e_leak={:.6f} "
@@ -208,7 +216,7 @@ void DumpTest1Failure(const std::string& tag, const Image& img,
 // light_view_proj for a failed Test 5 (slope-acne) config -- same shape as
 // DumpTest1Failure but simpler (no E_leak band / shadow-side; every checked
 // receiver pixel is expected lit).
-void DumpTest5Failure(const std::string& tag, const Image& img,
+void DumpTest5Failure(const std::string& tag, const CpuImage& img,
                      const std::vector<uint8_t>& diag, const Scene& scene,
                      const Camera& camera, uint32_t r_sm, float d_max, size_t checked,
                      size_t failed, float min_value,
@@ -218,11 +226,13 @@ void DumpTest5Failure(const std::string& tag, const Image& img,
 
   const std::vector<uint8_t> visibility_rgba = VisibilityToRgba8(img);
   const std::string visibility_path = (dir / (tag + "_visibility.png")).string();
-  badlands_write_png(visibility_path.c_str(), visibility_rgba.data(), img.width, img.height);
+  badlands_write_png(visibility_path.c_str(), visibility_rgba.data(), img.GetWidth(),
+                     img.GetHeight());
 
   const std::vector<uint8_t> diagnosis_rgba = DiagnosisToRgba8(diag);
   const std::string diagnosis_path = (dir / (tag + "_diagnosis.png")).string();
-  badlands_write_png(diagnosis_path.c_str(), diagnosis_rgba.data(), img.width, img.height);
+  badlands_write_png(diagnosis_path.c_str(), diagnosis_rgba.data(), img.GetWidth(),
+                     img.GetHeight());
 
   spdlog::error(
       "Shadow Test 5 [{}] FAILED: r_sm={} d_max={} checked={} failed={} min_value={:.6f}", tag,
@@ -247,11 +257,11 @@ void DumpTest5Failure(const std::string& tag, const Image& img,
 }  // namespace
 
 // ============================================================================
-// Milestone 1: harness smoke test -- prove the offscreen render + RGBA16Float
-// readback + half-float decode round-trip reads back LINEAR values, using a
-// scene where the expected answer is known independent of the oracle (shadow
-// map disabled -> the map stays cleared to far/1.0 everywhere -> every
-// receiver/caster pixel's shadow term is ~1.0).
+// Milestone 1: harness smoke test -- prove the offscreen render + R32Float
+// readback round-trip reads back LINEAR values, using a scene where the
+// expected answer is known independent of the oracle (shadow map disabled ->
+// the map stays cleared to far/1.0 everywhere -> every receiver/caster
+// pixel's shadow term is ~1.0).
 // ============================================================================
 TEST_CASE("shadowtest harness: linear readback reads back ~1.0 when the shadow map is disabled") {
   PosedMacroScene posed = BuildPosedMacroScene();
@@ -263,9 +273,9 @@ TEST_CASE("shadowtest harness: linear readback reads back ~1.0 when the shadow m
   config.enable_shadow_map = false;  // no casters drawn -> depth map stays cleared to far (1.0)
   config.enable_contact_shadows = false;
 
-  Image img = RenderShadowFrame(config, posed.scene, posed.camera);
-  REQUIRE(img.width == kFrameWidth);
-  REQUIRE(img.height == kFrameHeight);
+  CpuImage img = RenderShadowFrame(config, posed.scene, posed.camera);
+  REQUIRE(img.GetWidth() == kFrameWidth);
+  REQUIRE(img.GetHeight() == kFrameHeight);
 
   // Aggregate check: with no casters, the floor (which covers the whole
   // frame -- see kFloorHalfSize) and the box should both read back
@@ -273,12 +283,16 @@ TEST_CASE("shadowtest harness: linear readback reads back ~1.0 when the shadow m
   // than demanding literally every one of 262144 pixels.
   size_t near_one = 0;
   float min_value = 1.0f;
-  for (float v : img.pixels) {
-    if (v > 0.99f) ++near_one;
-    min_value = std::min(min_value, v);
+  const size_t pixel_count = static_cast<size_t>(img.GetWidth()) * img.GetHeight();
+  for (uint32_t py = 0; py < img.GetHeight(); ++py) {
+    for (uint32_t px = 0; px < img.GetWidth(); ++px) {
+      const float v = img.GetFloat(px, py);
+      if (v > 0.99f) ++near_one;
+      min_value = std::min(min_value, v);
+    }
   }
   INFO("min pixel value = " << min_value);
-  CHECK(static_cast<double>(near_one) / static_cast<double>(img.pixels.size()) > 0.99);
+  CHECK(static_cast<double>(near_one) / static_cast<double>(pixel_count) > 0.99);
 
   // Precise check at a KNOWN ground/receiver point (the shadow polygon's
   // centroid -- guaranteed to be a receiver pixel by the sanity-check test
@@ -300,7 +314,7 @@ TEST_CASE("shadowtest harness: linear readback reads back ~1.0 when the shadow m
   REQUIRE(uv.y <= 1.0f);
   const uint32_t px = std::min(kFrameWidth - 1, static_cast<uint32_t>(uv.x * kFrameWidth));
   const uint32_t py = std::min(kFrameHeight - 1, static_cast<uint32_t>(uv.y * kFrameHeight));
-  CHECK_THAT(img.At(px, py), Catch::Matchers::WithinAbs(1.0f, 1e-3f));
+  CHECK_THAT(img.GetFloat(px, py), Catch::Matchers::WithinAbs(1.0f, 1e-3f));
 }
 
 // ============================================================================
@@ -501,9 +515,9 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
       render_cfg.enable_contact_shadows = true;
       render_cfg.hard_shadow_debug = true;  // T3-fix-2: raw signal, no PCF
 
-      Image img = RenderShadowFrame(render_cfg, posed.scene, posed.camera);
-      REQUIRE(img.width == kFrameWidth);
-      REQUIRE(img.height == kFrameHeight);
+      CpuImage img = RenderShadowFrame(render_cfg, posed.scene, posed.camera);
+      REQUIRE(img.GetWidth() == kFrameWidth);
+      REQUIRE(img.GetHeight() == kFrameHeight);
 
       size_t checked = 0;
       size_t failed = 0;
@@ -515,17 +529,18 @@ TEST_CASE("Shadow Test 1: macro core & edge leak") {
       // leaving shadow-side failures out of the diagnostic.
       float max_excess_d = 0.0f;
       std::vector<FailureExample> examples;
-      std::vector<uint8_t> diag(static_cast<size_t>(img.width) * img.height, 0);
+      std::vector<uint8_t> diag(static_cast<size_t>(img.GetWidth()) * img.GetHeight(), 0);
 
-      for (uint32_t py = 0; py < img.height; ++py) {
-        for (uint32_t px = 0; px < img.width; ++px) {
+      for (uint32_t py = 0; py < img.GetHeight(); ++py) {
+        for (uint32_t px = 0; px < img.GetWidth(); ++px) {
           const PixelHit hit = ClassifyPixel(posed.scene, posed.camera, posed.basis_u,
-                                             posed.basis_v, px, py, img.width, img.height);
+                                             posed.basis_v, px, py, img.GetWidth(),
+                                             img.GetHeight());
           if (!hit.is_receiver) continue;
 
           const float d = SignedDistanceToPolygon(observed_polygon, hit.ground_uv);
-          const float value = img.At(px, py);
-          const size_t idx = static_cast<size_t>(py) * img.width + px;
+          const float value = img.GetFloat(px, py);
+          const size_t idx = static_cast<size_t>(py) * img.GetWidth() + px;
 
           if (d > e_leak) {
             ++checked;
@@ -597,26 +612,27 @@ TEST_CASE("Shadow Test 5: RPDB slope-acne") {
       render_cfg.enable_shadow_map = true;
       render_cfg.enable_contact_shadows = true;
 
-      Image img = RenderShadowFrame(render_cfg, posed.scene, posed.camera);
-      REQUIRE(img.width == kFrameWidth);
-      REQUIRE(img.height == kFrameHeight);
+      CpuImage img = RenderShadowFrame(render_cfg, posed.scene, posed.camera);
+      REQUIRE(img.GetWidth() == kFrameWidth);
+      REQUIRE(img.GetHeight() == kFrameHeight);
 
       size_t checked = 0;
       size_t failed = 0;
       float min_value = 1.0f;
       std::vector<FailureExample> examples;
-      std::vector<uint8_t> diag(static_cast<size_t>(img.width) * img.height, 0);
+      std::vector<uint8_t> diag(static_cast<size_t>(img.GetWidth()) * img.GetHeight(), 0);
 
-      for (uint32_t py = 0; py < img.height; ++py) {
-        for (uint32_t px = 0; px < img.width; ++px) {
+      for (uint32_t py = 0; py < img.GetHeight(); ++py) {
+        for (uint32_t px = 0; px < img.GetWidth(); ++px) {
           const PixelHit hit = ClassifyPixel(posed.scene, posed.camera, posed.basis_u,
-                                             posed.basis_v, px, py, img.width, img.height);
+                                             posed.basis_v, px, py, img.GetWidth(),
+                                             img.GetHeight());
           if (!hit.is_receiver) continue;
 
           ++checked;
-          const float value = img.At(px, py);
+          const float value = img.GetFloat(px, py);
           min_value = std::min(min_value, value);
-          const size_t idx = static_cast<size_t>(py) * img.width + px;
+          const size_t idx = static_cast<size_t>(py) * img.GetWidth() + px;
           if (value > 0.99f) {
             diag[idx] = 2;
           } else {

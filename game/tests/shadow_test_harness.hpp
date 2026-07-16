@@ -3,30 +3,21 @@
 // Task T4: headless GPU render harness for the directional-shadow Catch2
 // suite. Test-only (see shadow_test_geometry.hpp's file comment for why this
 // isn't part of badlands_engine).
+//
+// Task T8: re-plumbed onto the sampo-ported GPU-test infra
+// (src/engine/tests/gpu_test_helpers.hpp + badlands::ColorRenderTarget +
+// badlands::TextureReadback) instead of a home-grown hidden-SDL-window
+// device + hand-rolled RGBA16Float readback. See task-8-brief.md /
+// task-8-report.md.
 
 #include <cstdint>
-#include <vector>
 
+#include "core/util/cpu_image.hpp"
 #include "engine/core/camera.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "shadow_test_geometry.hpp"
 
 namespace badlands::shadowtest {
-
-// A width*height row-major image of LINEAR visibility values in [0,1]
-// (top-left origin, y=0 = top row -- matches WGSL's @builtin(position).xy /
-// screenUV convention, see CameraRayDirectionWorld's doc comment). Read back
-// from an RGBA16Float target's R channel (the shadow debug modes write
-// vec4(v,v,v,1)).
-struct Image {
-  uint32_t width = 0;
-  uint32_t height = 0;
-  std::vector<float> pixels;
-
-  float At(uint32_t x, uint32_t y) const {
-    return pixels[static_cast<size_t>(y) * width + x];
-  }
-};
 
 struct ShadowTestConfig {
   uint32_t r_sm = 2048;
@@ -47,11 +38,17 @@ inline constexpr uint32_t kFrameHeight = 512;
 
 // Renders `world_scene` (already posed into world space -- see ApplyPose)
 // from `camera` through a fresh, throwaway SceneRenderer configured per
-// `config`, and reads back the LINEAR shadow-debug-mode value at every
-// pixel. Builds a lazily-initialized, process-lifetime headless GPU context
-// (hidden SDL window + Dawn device) on first call -- see
-// shadow_test_harness.cpp's GetTestGpu().
-Image RenderShadowFrame(const ShadowTestConfig& config, const Scene& world_scene,
-                        const Camera& camera);
+// `config`, into an R32Float offscreen ColorRenderTarget, and reads it back
+// as a CpuImage of LINEAR shadow-debug-mode values (top-left origin, y=0 =
+// top row -- matches WGSL's @builtin(position).xy / screenUV convention, see
+// CameraRayDirectionWorld's doc comment). Sample a pixel via
+// `img.GetFloat(x, y)`.
+//
+// Builds a lazily-initialized, process-lifetime headless GPU context (no
+// SDL window -- see badlands::test::RequestAdapter/RequestDevice in
+// gpu_test_helpers.hpp) on first call -- see shadow_test_harness.cpp's
+// GetTestGpu().
+CpuImage RenderShadowFrame(const ShadowTestConfig& config, const Scene& world_scene,
+                           const Camera& camera);
 
 }  // namespace badlands::shadowtest
