@@ -28,6 +28,21 @@ badlands::CpuImage::Color id_color(int id) {
 
 }  // namespace
 
+void write_preview_images(const MapgenConfig& cfg, const MapArtifacts& a) {
+  const std::string& d = cfg.out_dir;
+  // Raw noise fields (diagnostics).
+  write_gray_png(a.fields.elevation, d + "/elevation.png");
+  write_gray_png(a.fields.moisture, d + "/moisture.png");
+  write_gray_png(a.fields.ridged, d + "/ridged.png");
+  write_gray_png(a.fields.fine, d + "/fine.png");
+  // Structure + semantics.
+  write_hashed_png(a.voronoi.cell, d + "/voronoi.png");
+  write_biome_png(a.biomes.pixel, d + "/biome.png");
+  write_gray_png(a.heightmap, d + "/heightmap.png");
+  write_sections_png(a.blocks, d + "/sections.png");
+  write_section_graph_json(a.graph, d + "/sections.json");
+}
+
 void write_gray_png(const Field2D<float>& field, const std::string& path,
                     bool normalize) {
   float lo = 0.0f;

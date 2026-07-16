@@ -2,10 +2,22 @@
 
 #include <string>
 
+#include "mapgen/config.hpp"
 #include "mapgen/field2d.hpp"
+#include "mapgen/pipeline.hpp"
 #include "mapgen/sections.hpp"
 
 namespace badlands::mapgen {
+
+// Dumps every debug raster + the section graph for one generated map into
+// cfg.out_dir: elevation/moisture/ridged/fine (raw noise fields), voronoi,
+// biome, heightmap, sections (.png) and sections.json -- i.e. the full set the
+// offline tool has always produced.
+//
+// The caller is responsible for creating cfg.out_dir first (see
+// std::filesystem::create_directories); a missing directory surfaces as
+// per-file write failures.
+void write_preview_images(const MapgenConfig& cfg, const MapArtifacts& a);
 
 // Write a float field as an 8-bit grayscale PNG. If `normalize`, the field's
 // [min,max] is stretched to [0,255]; otherwise values are clamped to [0,1].

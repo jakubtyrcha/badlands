@@ -11,18 +11,14 @@
 #include <spdlog/spdlog.h>
 
 #include "core/geometry_type.hpp"
+#include "engine/core/ray.hpp"
 #include "engine/rendering/components/material_factory_component.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
 #include "game/geometry/terrain_mesh.hpp"
-#include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
-#include "mapgen/biome_assign.hpp"
-#include "mapgen/biomes.hpp"
-#include "mapgen/config.hpp"
-#include "mapgen/fields.hpp"
-#include "mapgen/heightmap.hpp"
 #include "mapgen/mapgen_constants.hpp"
-#include "mapgen/voronoi.hpp"
+#include "mapgen/pipeline.hpp"
+#include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
 
 namespace badlands {
 
@@ -54,43 +50,27 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
 
-  // Generate the map in-process.
-  mapgen::MapgenConfig cfg;
-  cfg.seed = seed_;
-  cfg.width = resolution_;
-  cfg.height = resolution_;
-  mapgen::Fields fields;
+  // Generate the map in-process — the same pipeline --preview-image-only dumps,
+  // so the rendered terrain and the preview PNGs can never disagree.
   std::string err;
-  if (!mapgen::evaluate_fields(cfg, "scripts/mapgen/fields.noiser", fields,
-                               err)) {
+  if (!mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser", map_, err)) {
     spdlog::error("MapViewView: {}", err);
     return false;
   }
-  mapgen::Voronoi voronoi = mapgen::build_voronoi(cfg);
-  mapgen::BiomeMap biomes = mapgen::assign_biomes(cfg, voronoi, fields);
-  mapgen::Field2D<float> heightmap =
-      mapgen::compose_heightmap(cfg, fields, biomes);
-  map_size_m_ = static_cast<float>(resolution_) * mapgen::kMetersPerSample;
-
-  // Blocks + sections drive the debug grid (kept for the per-frame windowed
-  // rebuild in Update / RebuildVisibleGrid).
-  block_grid_ = mapgen::reduce_to_blocks(heightmap, biomes.pixel,
-                                         cfg.reduce_median);
-  mapgen::SectionGraph graph = mapgen::extract_sections(
-      block_grid_, cfg.section_step_m, cfg.min_section_blocks);
-  section_count_ = static_cast<int>(graph.nodes.size());
+  map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
   // One indexed kTerrainBlend chunk entity per N x N block region.
-  const int blocks = resolution_ / mapgen::kSamplesPerBlock;
-  for (int bz = 0; bz < blocks; bz += kChunkBlocks) {
-    for (int bx = 0; bx < blocks; bx += kChunkBlocks) {
+  const int blocks_x = cfg_.width / mapgen::kSamplesPerBlock;
+  const int blocks_z = cfg_.height / mapgen::kSamplesPerBlock;
+  for (int bz = 0; bz < blocks_z; bz += kChunkBlocks) {
+    for (int bx = 0; bx < blocks_x; bx += kChunkBlocks) {
       TerrainMeshParams p;
       p.subdiv = kSubdiv;
       p.block_x0 = bx;
       p.block_z0 = bz;
-      p.blocks_x = std::min(kChunkBlocks, blocks - bx);
-      p.blocks_z = std::min(kChunkBlocks, blocks - bz);
-      TerrainMesh chunk = BuildTerrainMesh(heightmap, biomes.pixel, p);
+      p.blocks_x = std::min(kChunkBlocks, blocks_x - bx);
+      p.blocks_z = std::min(kChunkBlocks, blocks_z - bz);
+      TerrainMesh chunk = BuildTerrainMesh(map_.heightmap, map_.biomes.pixel, p);
       if (chunk.vertex_count == 0) continue;
 
       const Aabb box = ComputeLocalAabbFromVertices(
@@ -116,45 +96,63 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
       ++chunk_count_;
     }
   }
-  spdlog::info("MapViewView: {}x{} map, {} chunks", resolution_, resolution_,
-               chunk_count_);
+  spdlog::info("MapViewView: {}x{} map, {} chunks, {} sections", cfg_.width,
+               cfg_.height, chunk_count_, map_.graph.nodes.size());
 
   // Frame the fixed-angle camera on the map centre.
-  gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_size_m_ * 0.5f);
+  const float map_depth_m = static_cast<float>(cfg_.height) *
+                            mapgen::kMetersPerSample;
+  gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_depth_m * 0.5f);
   gamecam_.pitch_deg = 55.0f;
   gamecam_.height = std::max(200.0f, map_size_m_ * 0.5f);
   gamecam_.UpdateCamera(camera_);
 
-  // Build the initial grid window (Update rebuilds it as the camera pans; done
-  // here too so the first/headless frame has it).
-  RebuildVisibleGrid();
-  scene_context_.debug_lines = &grid_;
+  // The grid follows the mouse, so there is nothing to draw until the cursor is
+  // over the terrain (Update wires debug_lines once hover_valid_).
   return true;
+}
+
+float MapViewView::SectionHeight(const mapgen::Block& b) const {
+  if (b.section_id < 0 ||
+      b.section_id >= static_cast<int>(map_.graph.nodes.size())) {
+    return b.height;  // unsectioned block: fall back to its own height
+  }
+  return map_.graph.nodes[b.section_id].mean_height;
 }
 
 void MapViewView::RebuildVisibleGrid() {
   grid_.Clear();
-  const mapgen::Field2D<mapgen::Block>& blocks = block_grid_;
-  if (blocks.width == 0 || blocks.height == 0) return;
+  const mapgen::Field2D<mapgen::Block>& blocks = map_.blocks;
+  if (blocks.width == 0 || blocks.height == 0 || !hover_valid_) return;
 
   const float b = static_cast<float>(mapgen::kBlockSizeM);
-  const float lift_block = 0.3f;
-  const float lift_section = 0.7f;
+  // The grid is a flat plane per section, but the rendered terrain follows the
+  // full-resolution heightmap — so the surface rises above the section mean by
+  // the intra-section variation (cfg.variation_amp_m, up to ~0.3 m) plus the
+  // block-median-vs-sample error. Lift by more than that or the plane sinks into
+  // the terrain and the grid gets depth-occluded in patches. Still comfortably
+  // under a terrace step (cfg.terrace_step_m, 1.2 m by default), so the grid
+  // stays visually on its OWN terrace rather than floating up onto the next.
+  const float lift_block = 0.8f;
+  const float lift_section = 1.0f;
   const glm::vec3 block_color(0.55f, 0.55f, 0.6f);
   const glm::vec3 section_color(1.0f, 0.85f, 0.15f);
 
-  // Window of kGridRadiusBlocks around the camera focus projected on the map
-  // plane (XZ). Cost is O(window^2), independent of the map size.
-  const int cbx = static_cast<int>(std::floor(gamecam_.focus.x / b));
-  const int cbz = static_cast<int>(std::floor(gamecam_.focus.z / b));
-  const int x_lo = std::max(0, cbx - kGridRadiusBlocks);
-  const int x_hi = std::min(blocks.width - 1, cbx + kGridRadiusBlocks);
-  const int z_lo = std::max(0, cbz - kGridRadiusBlocks);
-  const int z_hi = std::min(blocks.height - 1, cbz + kGridRadiusBlocks);
+  // Window of grid_radius_blocks_ around the point the mouse is over. Cost is
+  // O(window^2), independent of the map size.
+  const int cbx = static_cast<int>(std::floor(hover_point_.x / b));
+  const int cbz = static_cast<int>(std::floor(hover_point_.z / b));
+  const int r = std::max(1, grid_radius_blocks_);
+  const int x_lo = std::max(0, cbx - r);
+  const int x_hi = std::min(blocks.width - 1, cbx + r);
+  const int z_lo = std::max(0, cbz - r);
+  const int z_hi = std::min(blocks.height - 1, cbz + r);
 
   for (int bz = z_lo; bz <= z_hi; ++bz) {
     for (int bx = x_lo; bx <= x_hi; ++bx) {
-      const float h = blocks.at(bx, bz).height + lift_block;
+      // Section height, not per-block height: a section is a terrace, so the
+      // whole grid over it reads as ONE flat plane instead of stair-stepping.
+      const float h = SectionHeight(blocks.at(bx, bz)) + lift_block;
       const float x0 = bx * b, x1 = (bx + 1) * b;
       const float z0 = bz * b, z1 = (bz + 1) * b;
       // North + west edges (each interior edge drawn once); the window's own
@@ -167,27 +165,47 @@ void MapViewView::RebuildVisibleGrid() {
 
       // Highlight ledges: edges to a neighbor in a different section (the
       // neighbor may be just outside the window — reading it is still in bounds).
+      // Drawn on the UPPER terrace so the ledge sits on the step, not in it.
       const int sid = blocks.at(bx, bz).section_id;
-      if (bx + 1 < blocks.width &&
-          blocks.at(bx + 1, bz).section_id != sid) {
-        const float hh =
-            std::max(blocks.at(bx, bz).height, blocks.at(bx + 1, bz).height) +
-            lift_section;
+      if (bx + 1 < blocks.width && blocks.at(bx + 1, bz).section_id != sid) {
+        const float hh = std::max(SectionHeight(blocks.at(bx, bz)),
+                                  SectionHeight(blocks.at(bx + 1, bz))) +
+                         lift_section;
         grid_.AddLine({x1, hh, z0}, {x1, hh, z1}, section_color, 2.5f);
       }
-      if (bz + 1 < blocks.height &&
-          blocks.at(bx, bz + 1).section_id != sid) {
-        const float hh =
-            std::max(blocks.at(bx, bz).height, blocks.at(bx, bz + 1).height) +
-            lift_section;
+      if (bz + 1 < blocks.height && blocks.at(bx, bz + 1).section_id != sid) {
+        const float hh = std::max(SectionHeight(blocks.at(bx, bz)),
+                                  SectionHeight(blocks.at(bx, bz + 1))) +
+                         lift_section;
         grid_.AddLine({x0, hh, z1}, {x1, hh, z1}, section_color, 2.5f);
       }
     }
   }
 }
 
-void MapViewView::HandleEvent(const SDL_Event& /*event*/, int /*w*/,
-                              int /*h*/) {}
+void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
+                              int /*height*/) {
+  if (event.type != SDL_EVENT_MOUSE_MOTION) return;
+  if (ImGui::GetIO().WantCaptureMouse) return;
+
+  // The width/height passed in are the DRAWABLE size (physical pixels), but SDL
+  // reports mouse positions in logical points — on a HiDPI display those differ
+  // by the window's pixel density, which would scale the ray away from the
+  // cursor. Resolve the window off the event and use its logical size so both
+  // are in the same space.
+  SDL_Window* window = SDL_GetWindowFromID(event.motion.windowID);
+  int lw = 0, lh = 0;
+  if (window == nullptr || !SDL_GetWindowSize(window, &lw, &lh) || lw <= 0 ||
+      lh <= 0) {
+    hover_valid_ = false;
+    return;
+  }
+
+  const Ray ray = ScreenPointToRay(
+      camera_, glm::vec2(event.motion.x, event.motion.y),
+      glm::vec2(static_cast<float>(lw), static_cast<float>(lh)));
+  hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
+}
 
 void MapViewView::Update(float dt, const bool* keyboard_state) {
   if (keyboard_state != nullptr && ImGui::GetCurrentContext() != nullptr &&
@@ -203,9 +221,10 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
   }
   gamecam_.UpdateCamera(camera_);
 
-  // Rebuild the grid window around the (possibly panned) camera each frame. No
-  // cache: the window is small (independent of map size), so this is cheap.
-  if (grid_visible_) {
+  // Rebuild the grid window around the hover point each frame (the camera may
+  // have panned under a stationary cursor). No cache: the window is small
+  // (independent of map size), so this is cheap.
+  if (grid_visible_ && hover_valid_) {
     RebuildVisibleGrid();
     scene_context_.debug_lines = &grid_;
   } else {
@@ -216,11 +235,22 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
 void MapViewView::DrawUI() {
   if (ImGui::GetCurrentContext() == nullptr) return;
   ImGui::Begin("Map");
-  ImGui::Text("seed %u  %dx%d m", seed_, static_cast<int>(map_size_m_),
-              static_cast<int>(map_size_m_));
-  ImGui::Text("chunks: %d   sections: %d", chunk_count_, section_count_);
+  ImGui::Text("seed %u  %dx%d m", cfg_.seed, cfg_.width, cfg_.height);
+  ImGui::Text("chunks: %d   sections: %zu", chunk_count_,
+              map_.graph.nodes.size());
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
+  if (hover_valid_) {
+    const int bx = static_cast<int>(hover_point_.x / mapgen::kBlockSizeM);
+    const int bz = static_cast<int>(hover_point_.z / mapgen::kBlockSizeM);
+    int sid = -1;
+    if (map_.blocks.in_bounds(bx, bz)) sid = map_.blocks.at(bx, bz).section_id;
+    ImGui::Text("hover: (%.1f, %.1f, %.1f)  block %d,%d  section %d",
+                hover_point_.x, hover_point_.y, hover_point_.z, bx, bz, sid);
+  } else {
+    ImGui::TextUnformatted("hover: (off terrain)");
+  }
   ImGui::Checkbox("Grid (block + section)", &grid_visible_);
+  ImGui::SliderInt("Grid radius (blocks)", &grid_radius_blocks_, 1, 30);
   ImGui::End();
 }
 

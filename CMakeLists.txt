@@ -92,6 +92,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/geometry/building_parts_builder.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
+    src/engine/core/ray.cpp
     src/engine/rendering/frustum.cpp
     src/engine/rendering/debug_line_buffer.cpp
     src/engine/rendering/debug_line_expand.cpp
@@ -245,20 +246,17 @@ foreach(app viewer game ai_sandbox)
     endif()
 endforeach()
 
-# badlands_mapgen: offline CPU map generator (heightmap + biomes + sections).
-# A pure-CPU CLI tool — no window/GPU/AppView. Links badlands_engine for
+# badlands_mapgen_lib: the map generation pipeline (config/fields/voronoi/biomes/
+# height/sections + PNG/JSON outputs) as a static lib. Links badlands_engine for
 # CpuImage (PNG write via the `assets` crate) and badlands_game_lib for the
-# sampo::noiser C++ VM wrapper (parallel noise-field evaluation). This is the
-# same both-libraries link as badlands_geometry_tests: engine is linked for a
-# CPU-only helper and the GPU is never touched. -Wno-deprecated-declarations
-# matches badlands_game_lib (the noiser headers ship [[deprecated]] shims).
-# badlands_mapgen_lib: the mapgen pipeline (config/fields/voronoi/biomes/height/
-# sections + PNG/JSON outputs) as a static lib, shared by the badlands_mapgen
-# CLI tool and the badlands_mapview app (which runs generation in-process).
+# sampo::noiser C++ VM wrapper (parallel noise-field evaluation).
+# -Wno-deprecated-declarations matches badlands_game_lib (the noiser headers ship
+# [[deprecated]] shims).
 add_library(badlands_mapgen_lib STATIC
     src/mapgen/config.cpp
     src/mapgen/fields.cpp
     src/mapgen/outputs.cpp
+    src/mapgen/pipeline.cpp
     src/mapgen/voronoi.cpp
     src/mapgen/biome_assign.cpp
     src/mapgen/heightmap.cpp
@@ -266,15 +264,11 @@ add_library(badlands_mapgen_lib STATIC
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine badlands_game_lib)
 target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
 
-add_executable(badlands_mapgen src/mapgen/main_mapgen.cpp)
-target_link_libraries(badlands_mapgen PRIVATE badlands_mapgen_lib)
-target_compile_options(badlands_mapgen PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_mapgen PRIVATE "-Wl,-ld_new")
-endif()
-
-# badlands_mapview: interactive terrain viewer — generates a map in-process and
-# renders it as indexed kTerrainBlend chunks with the biome-blend material.
+# badlands_mapview: THE map tool. `--preview-image-only` runs the generator and
+# dumps the debug rasters + section graph (pure CPU, no window — this replaces
+# the old standalone badlands_mapgen binary); otherwise it renders the generated
+# map as indexed kTerrainBlend chunks with the biome-blend material, with a
+# mouse-hover block/section grid.
 add_executable(badlands_mapview
     src/mapview/main_mapview.cpp
     src/mapview/map_view_view.cpp
@@ -381,12 +375,14 @@ if(APPLE)
 endif()
 add_test(NAME badlands_terrain_blend_tests COMMAND badlands_terrain_blend_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_terrain_mesh_tests: pure-CPU tests for the tessellated-block terrain
-# mesh builder (src/game/geometry/terrain_mesh) — no GPU. Only needs glm + the
-# header-only mapgen Field2D/Biome types.
+# badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
+# — the tessellated-block mesh builder plus the SampleHeight/RaycastTerrain
+# queries behind mouse picking. No GPU: only glm + the header-only mapgen
+# Field2D/Biome types and the header-only Ray struct.
 add_executable(badlands_terrain_mesh_tests
     src/game/geometry/terrain_mesh.cpp
     game/tests/terrain_mesh_tests.cpp
+    game/tests/terrain_raycast_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_terrain_mesh_tests PRIVATE
@@ -461,3 +457,20 @@ target_include_directories(badlands_biome_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
+# (src/engine/core/ray) against the real fixed-angle GameCameraController.
+# glm-only: camera.hpp is header-only and the controller pulls in nothing else.
+add_executable(badlands_ray_tests
+    src/engine/tests/ray_tests.cpp
+    src/engine/core/ray.cpp
+    src/engine/app/game_camera_controller.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_ray_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_compile_definitions(badlands_ray_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+add_test(NAME badlands_ray_tests COMMAND badlands_ray_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

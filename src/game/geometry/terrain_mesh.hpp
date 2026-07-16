@@ -1,16 +1,40 @@
 #pragma once
 
-// Builds a renderable terrain mesh from mapgen output by tessellating the block
-// grid. Game-side geometry (no engine/GPU deps) — the output is a flat vertex
-// buffer for the kTerrainBlend vertex layout, ready to drop into a
-// StaticTexturedMeshComponent and render with MaterialLibrary::TerrainBlend.
+// Terrain geometry + queries over mapgen output. Game-side and pure CPU (no GPU
+// deps; the only engine header is the header-only Ray struct) — BuildTerrainMesh
+// emits a flat vertex buffer for the kTerrainBlend vertex layout, ready to drop
+// into a StaticTexturedMeshComponent and render with
+// MaterialLibrary::TerrainBlend, while SampleHeight/RaycastTerrain answer
+// height + picking queries against the same heightmap.
 
 #include <cstdint>
 #include <vector>
 
+#include <glm/glm.hpp>
+
+#include "engine/core/ray.hpp"
 #include "mapgen/field2d.hpp"
 
 namespace badlands {
+
+// Bilinear terrain height (world meters) at world position (wx, wz) meters.
+// Takes WORLD coordinates and converts to heightmap sample space internally
+// (world_m / kMetersPerSample), so that convention lives in exactly one place.
+// Clamps to the map bounds, so off-map queries return the edge height.
+float SampleHeight(const mapgen::Field2D<float>& heightmap, float wx, float wz);
+
+// First intersection of `ray` with the terrain surface defined by `heightmap`.
+//
+// Marches the ray sampling SampleHeight until it passes below the surface, then
+// bisects to refine. Returns false when the ray never goes under the terrain
+// within the map's extent (pointing at the sky, or leaving the map) — callers
+// should treat that as "no hover".
+//
+// The surface is the bilinear heightmap, not the tessellated mesh, so a hit can
+// differ from the rendered triangles by the tessellation error (sub-decimeter at
+// the subdivisions used here) — fine for picking, not for physics.
+bool RaycastTerrain(const mapgen::Field2D<float>& heightmap, const Ray& ray,
+                    glm::vec3& out_hit);
 
 // A kTerrainBlend triangle mesh. Each vertex is 8 floats: pos(3) + normal(3) +
 // layer_indices(Uint8x4 packed as 1 float) + blend_weights(Unorm8x4 packed as 1

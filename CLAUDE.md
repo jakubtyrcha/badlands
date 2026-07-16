@@ -27,11 +27,18 @@ badlands runs on **C++/Dawn/SDL3**, with the engine ported from the sibling proj
 Run from the repo root (`shaders/` + `assets/` resolve relative to cwd).
 ```sh
 cmake -S . -B build -G Ninja                          # configure (first Dawn-from-source build is long, then cached)
-cmake --build build                                   # builds the three apps + Rust staticlibs
+cmake --build build                                   # builds the apps + Rust staticlibs
 ./build/badlands_game                                 # run (opens an SDL3 window); also: badlands_viewer, badlands_ai_sandbox
 ./build/badlands_game --screenshot out.png            # headless: render one frame to PNG (offscreen readback)
 ./build/badlands_game --record frames/                # headless: render a frame sequence into a dir
 perl -e 'alarm 30; exec @ARGV' ./build/badlands_game  # SIGALRM-bounded headless smoke run
+```
+`badlands_mapview` is the map tool: it generates a map and renders it (mouse-over
+draws the block/section grid). `--preview-image-only` instead dumps the debug
+rasters + section graph to `--out` and exits (pure CPU, no window).
+```sh
+./build/badlands_mapview --seed 2 --resolution 500x500              # view it
+./build/badlands_mapview --preview-image-only --out mapgen_out      # dump PNGs/JSON
 ```
 Rust feature-lib tests — **use `--lib`** (bare `cargo test` here prints only the empty doctest target):
 ```sh
