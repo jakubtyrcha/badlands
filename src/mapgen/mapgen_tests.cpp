@@ -4,6 +4,8 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
+
 #include <vector>
 
 #include "mapgen/biome_assign.hpp"
@@ -33,9 +35,15 @@ Field2D<Block> make_blocks(const std::vector<std::vector<float>>& rows) {
 }  // namespace
 
 TEST_CASE("reduce_to_blocks: median is outlier-robust; biome is footprint majority") {
-  // 20x10 samples -> 2x1 blocks (kSamplesPerBlock == 10).
+  // 2x1 blocks, whatever kSamplesPerBlock currently is.
   Field2D<float> height(2 * kSamplesPerBlock, kSamplesPerBlock);
   Field2D<uint8_t> biome(2 * kSamplesPerBlock, kSamplesPerBlock);
+  // Spike ONE column, partially: the point is that the spikes stay a strict
+  // minority of the block's footprint, so the median rejects them while a mean
+  // would not. Derived from kSamplesPerBlock -- a literal row count silently
+  // assumes a block big enough for that to still be a minority, which is
+  // exactly the assumption that breaks when the block size changes.
+  const int spike_rows = std::max(1, kSamplesPerBlock / 2);
   for (int y = 0; y < height.height; ++y) {
     for (int x = 0; x < height.width; ++x) {
       const bool left = x < kSamplesPerBlock;
@@ -44,7 +52,7 @@ TEST_CASE("reduce_to_blocks: median is outlier-robust; biome is footprint majori
       float h = left ? 5.0f : 3.0f;
       uint8_t b = left ? static_cast<uint8_t>(Biome::Plains)
                        : static_cast<uint8_t>(Biome::Forest);
-      if (!left && x == kSamplesPerBlock && y < 3) {
+      if (!left && x == kSamplesPerBlock && y < spike_rows) {
         h = 100.0f;                                    // outliers
         b = static_cast<uint8_t>(Biome::Lake);         // minority biome
       }

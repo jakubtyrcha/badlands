@@ -27,7 +27,7 @@ struct MapArtifacts {
   Voronoi voronoi;           // pre-section cells
   BiomeMap biomes;           // per-sample biome
   Field2D<float> heightmap;  // composed relief, world meters
-  Field2D<Block> blocks;     // 10 m block grid; section_id filled by extract_sections
+  Field2D<Block> blocks;     // kBlockSizeM grid; section_id filled by extract_sections
   SectionGraph graph;        // sections (terraces) + ledges between them.
                              // nodes[i].id == i, so a block's section height is
                              // graph.nodes[block.section_id].mean_height.

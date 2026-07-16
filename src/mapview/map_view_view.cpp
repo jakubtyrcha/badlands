@@ -24,7 +24,7 @@
 namespace badlands {
 
 namespace {
-constexpr int kChunkBlocks = 16;  // N x N blocks per chunk (160 m)
+constexpr int kChunkBlocks = 16;  // N x N blocks per chunk (kBlockSizeM each)
 constexpr int kSubdiv = 2;        // subgrid cells per block edge
 constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json";
 }  // namespace
@@ -149,7 +149,7 @@ void MapViewView::RebuildVisibleGrid() {
   const float lift_section = 1.0f;
   const glm::vec3 block_color(0.55f, 0.55f, 0.6f);
   const glm::vec3 section_color(1.0f, 0.85f, 0.15f);
-  // Subgrid: dimmer + thinner so the 10 m block structure still reads on top of
+  // Subgrid: dimmer + thinner so the block structure still reads on top of
   // it. Mirrors what BuildTerrainMesh actually emits (kSubdiv cells per block
   // edge, each X-split into 4 triangles meeting at the cell centre), so this is
   // the mesh's real triangulation, not a decorative grid.

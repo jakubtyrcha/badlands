@@ -16,8 +16,11 @@ namespace badlands::mapgen {
 // map size (width/height, in samples = meters) is runtime.
 struct MapgenConfig {
   uint32_t seed = 1;
-  int width = 2000;   // samples on X (meters at 1 m density)
-  int height = 2000;  // samples on Y
+  // 512x512 m for now: fast to generate + view while the terrain work is
+  // iterating, and a whole number of 4 m blocks (128) so no remainder samples
+  // are dropped. The 2 km target is a --resolution/--config away, not a rebuild.
+  int width = 512;   // samples on X (meters at 1 m density)
+  int height = 512;  // samples on Y
   std::string out_dir = "mapgen_out";
 
   // --- Voronoi pre-sections ---

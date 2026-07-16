@@ -44,21 +44,27 @@ Vertex Unpack(const std::vector<float>& d, size_t i) {
 }  // namespace
 
 TEST_CASE("BuildTerrainMesh: X-split counts, one-hot weights, biome boundary") {
-  // 2x2 blocks of flat terrain; left half biome 0, right half biome 1.
-  const int W = 2 * kSamplesPerBlock;  // 20
-  const int H = 2 * kSamplesPerBlock;
+  // NxN blocks of flat terrain; left half biome 0, right half biome 1.
+  // Everything below is derived from kBlocks/kSubdiv/kSamplesPerBlock — a
+  // literal count here would silently encode the block size and break the next
+  // time it changes (which is not what this test is about).
+  constexpr int kBlocks = 2;
+  constexpr int kSubdiv = 2;
+  const int W = kBlocks * kSamplesPerBlock;
+  const int H = kBlocks * kSamplesPerBlock;
   Field2D<float> height(W, H, 5.0f);
   Field2D<uint8_t> biome(W, H);
   for (int z = 0; z < H; ++z)
     for (int x = 0; x < W; ++x)
       biome.at(x, z) = static_cast<uint8_t>(x < W / 2 ? 0 : 1);
 
-  TerrainMesh mesh = BuildTerrainMesh(height, biome, {.subdiv = 2});
+  TerrainMesh mesh = BuildTerrainMesh(height, biome, {.subdiv = kSubdiv});
 
-  // Indexed: cells = (2*2)x(2*2) = 16; 5x5 corner nodes + 16 cell centres = 41
-  // shared verts; 16 cells x 4 tris x 3 = 192 indices.
-  const int corner_count = 5 * 5;
-  const int cells = 4 * 4;
+  // Indexed + X-split: one shared vertex per subgrid corner node plus one per
+  // cell centre; 4 triangles per cell.
+  const int cells_per_side = kBlocks * kSubdiv;
+  const int corner_count = (cells_per_side + 1) * (cells_per_side + 1);
+  const int cells = cells_per_side * cells_per_side;
   REQUIRE(mesh.vertex_count == static_cast<uint32_t>(corner_count + cells));
   REQUIRE(mesh.vertices.size() ==
           mesh.vertex_count * TerrainMesh::kFloatsPerVertex);
@@ -117,5 +123,10 @@ TEST_CASE("BuildTerrainMesh: vertex heights follow the heightmap") {
       CHECK(std::abs(v.normal.z) < 0.05f);
     }
   }
-  CHECK(max_y - min_y > 12.0f);  // the ramp really spans a range
+  // The ramp really spans its full range: h = x clamps at the last sample, and
+  // the mesh reaches x = 2*kBlockSizeM, so the span is (W-1) meters. Derived
+  // from W rather than a literal — a hard-coded bound silently encodes the
+  // sample-per-block count and breaks the moment kBlockSizeM changes.
+  CHECK(max_y - min_y ==
+        Catch::Approx(static_cast<float>(W - 1)).margin(0.5));
 }

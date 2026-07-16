@@ -41,13 +41,22 @@ Ray Down(glm::vec3 from) { return Ray{from, glm::vec3(0.0f, -1.0f, 0.0f)}; }
 }  // namespace
 
 TEST_CASE("SampleHeight: bilinear, clamped at the edges") {
-  Field2D<float> f = RampX(10, 10, 1.0f);  // h == world x
+  constexpr int kSize = 10;
+  constexpr float kSlope = 1.0f;
+  // RampX stores x * kMetersPerSample * slope, and SampleHeight converts world
+  // -> sample space, so h(world_x) == world_x * slope at ANY sample density.
+  Field2D<float> f = RampX(kSize, kSize, kSlope);
   CHECK(SampleHeight(f, 0.0f, 0.0f) == Catch::Approx(0.0f));
   CHECK(SampleHeight(f, 5.0f, 5.0f) == Catch::Approx(5.0f));
   CHECK(SampleHeight(f, 2.5f, 0.0f) == Catch::Approx(2.5f));  // between samples
-  // Off-map clamps to the edge rather than reading out of bounds.
+
+  // Off-map clamps to the edge rather than reading out of bounds. The last
+  // sample sits at world x = (kSize-1) * kMetersPerSample, so DERIVE the edge
+  // height: a literal here would assert a 1 m density and break if it changed.
+  const float edge_h =
+      static_cast<float>(kSize - 1) * kMetersPerSample * kSlope;
   CHECK(SampleHeight(f, -100.0f, 0.0f) == Catch::Approx(0.0f));
-  CHECK(SampleHeight(f, 1e6f, 0.0f) == Catch::Approx(9.0f));
+  CHECK(SampleHeight(f, 1e6f, 0.0f) == Catch::Approx(edge_h));
 }
 
 TEST_CASE("RaycastTerrain: straight down onto flat ground") {

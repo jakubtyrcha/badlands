@@ -76,7 +76,7 @@ class MapViewView : public AppView {
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;
-  // Half-extent (in 10 m blocks) of the grid window around the hover point.
+  // Half-extent (in blocks, kBlockSizeM each) of the grid window around the hover point.
   // Runtime, not compile-time: it's a debug-view knob (ImGui slider), not a
   // structural property of the map.
   int grid_radius_blocks_ = 8;

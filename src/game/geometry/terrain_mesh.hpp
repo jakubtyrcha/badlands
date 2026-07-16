@@ -49,7 +49,7 @@ struct TerrainMesh {
 };
 
 struct TerrainMeshParams {
-  int subdiv = 4;  // subgrid cells per 10 m block edge (subdiv+1 nodes/edge)
+  int subdiv = 4;  // subgrid cells per block edge (subdiv+1 nodes/edge)
   // Block sub-region to tessellate (for chunked terrain). Vertices are in
   // ABSOLUTE world meters regardless of the region. blocks_x/z < 0 means "to
   // the map edge" from block_x0/z0. Default = the whole map.
@@ -60,7 +60,7 @@ struct TerrainMeshParams {
 };
 
 // Tessellate the block grid of a heightmap (world meters) + per-sample biome
-// map into a terrain mesh. Each 10 m block becomes a subdiv x subdiv subgrid;
+// map into a terrain mesh. Each block becomes a subdiv x subdiv subgrid;
 // each subgrid cell is X-split into 4 triangles meeting at the cell centre.
 // Vertex heights are bilinearly sampled from the heightmap, normals from
 // central differences, and blend_weights/layer_indices from the biome map:
