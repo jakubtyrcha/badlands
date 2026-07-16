@@ -109,6 +109,29 @@ void DrawGBufferDebugSelector(SceneRenderer& renderer) {
   }
 }
 
+void DrawShadowDebugSelector(SceneRenderer& renderer) {
+  ShadowDebugMode mode = renderer.GetShadowDebugMode();
+
+  ImGui::TextUnformatted("Shadow Debug");
+  if (ImGui::RadioButton("Off", mode == ShadowDebugMode::Off)) {
+    mode = ShadowDebugMode::Off;
+  }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("Combined", mode == ShadowDebugMode::Combined)) {
+    mode = ShadowDebugMode::Combined;
+  }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("ShadowMapOnly", mode == ShadowDebugMode::ShadowMapOnly)) {
+    mode = ShadowDebugMode::ShadowMapOnly;
+  }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("ContactOnly", mode == ShadowDebugMode::ContactOnly)) {
+    mode = ShadowDebugMode::ContactOnly;
+  }
+
+  renderer.SetShadowDebugMode(mode);
+}
+
 void DrawStats(float dt_seconds) {
   ImGui::Text("%.1f FPS (%.2f ms)", dt_seconds > 0.0f ? 1.0f / dt_seconds : 0.0f,
              dt_seconds * 1000.0f);
@@ -122,6 +145,8 @@ bool DrawDebugPanel(LightEnvironment& env, SceneRenderer& renderer,
   const bool changed = DrawLightEnvironmentEditor(env);
   ImGui::Separator();
   DrawGBufferDebugSelector(renderer);
+  ImGui::Separator();
+  DrawShadowDebugSelector(renderer);
   ImGui::End();
   return changed;
 }

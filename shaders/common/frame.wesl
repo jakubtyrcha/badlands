@@ -20,8 +20,17 @@ struct FrameUniforms {
     // Rendering option flags
     enableGtao: u32,              // 1 = AO enabled, 0 = disabled (use 1.0 for AO)
     tonemapMode: u32,             // TonemapMode enum (0 = kClamp)
-    outputIsLinear: u32,          // 1 = RGBA16Float (linear output), 0 = sRGB
-    _padding0: f32,               // was dpiScale, now unused — keep for struct alignment
+    outputIsLinear: u32,          // 1 = linear target (RGBA16Float or R32Float), 0 = sRGB
+    debugFlags: u32,              // ShadowDebugMode value (0 = Off); was
+                                   // `_padding0` — repurposed by T1 (directional
+                                   // shadows) as the shadow-debug-mode selector.
+    // Derived shadow constants. x = tSizeWorld (shadow-map texel size,
+    // world units); y = invShadowRes (1 / shadow-map resolution); z =
+    // unused (the SSCS ray length used to be precomputed here; it is now
+    // computed per-pixel in contact_shadows.wesl); w = hard-shadow debug
+    // selector (0 = PCF/production, >0.5 = single unfiltered tap;
+    // test-only — see shadow_sampling.wesl).
+    shadowParams: vec4<f32>,
 }
 
 // Get near and far plane distances
@@ -159,11 +168,26 @@ fn isValidDepth(depth: f32) -> bool {
 // Reconstruct linear view-space distance from reversed-Z depth buffer value
 // depth=1 at near plane, depth=0 at far plane (reversed-Z)
 // Returns positive distance from camera
+//
+// Fixed (Task T3): the previous formula (2*near*far / (depth*(far-near) +
+// 2*near)) had a spurious factor of 2 on both the numerator and the `near`
+// term, making it diverge from the true inverse of Camera::GetProj()'s
+// reversed-Z projection (glm::perspective + the z' = 1-z remap) by close to
+// 2x for near-camera geometry, decaying to 0 error at the far plane (exactly
+// matching depth->0 in both formulas). Verified by inverting the actual
+// projection algebraically: z_view = -far*near / (depth*(far-near) + near),
+// and by boundary checks (depth=1 -> near, depth=0 -> far) that the old
+// formula failed (depth=1 gave ~2*near, not near). This bug was invisible
+// pre-T3 because every earlier consumer (GTAO's relative depth comparisons,
+// the log-scale depth debug view, IBL's viewDir/reflection which only uses
+// this position's *normalized direction*) tolerated or didn't expose a
+// uniform ~2x scale error; T3's shadow-map projection is the first consumer
+// that needs the ABSOLUTE world position to be metrically correct.
 fn reconstructLinearZ(depth: f32) -> f32 {
     let near = frame.nearPlane;
     let far = frame.farPlane;
-    // Derived from reversed-Z projection: z = 2*near*far / (depth * (far - near) + 2*near)
-    return 2.0 * near * far / (depth * (far - near) + 2.0 * near);
+    // Derived from reversed-Z projection: z = near*far / (depth * (far - near) + near)
+    return near * far / (depth * (far - near) + near);
 }
 
 // Reconstruct view-space position from screen UV and depth buffer value
@@ -249,4 +273,37 @@ fn decodeOctahedron(oct: vec2<f32>) -> vec3<f32> {
         );
     }
     return normalize(n);
+}
+
+// ============================================================================
+// Shadow Helpers
+// ============================================================================
+
+// Receiver-normal offset length (world units): the ONE shared expression for
+// "push a receiver-side sample off its surface along the normal by enough to
+// clear one sampling cell at grazing incidence". The sun shadow map and
+// screen-space contact shadows both use it, in different sampling frames:
+//   - shadow-map bias / SSCS ray LENGTH: cell = one shadow TEXEL (T_size),
+//     grazing term = N·L (sampling runs along the LIGHT), clamp 0.05.
+//   - SSCS ray ORIGIN offset: cell = one depth-buffer PIXEL (pixelWorld),
+//     grazing term = N·V (sampling runs along the CAMERA), clamp 0.10.
+// Shape: 1.5 · cellSize / max(cosTerm, cosClamp). The 1.5 (cells of clearance)
+// and the shape live here in exactly one place; callers supply the frame
+// (which cell size, which grazing cosine, which clamp).
+fn normalOffsetLength(cosTerm: f32, cellSize: f32, cosClamp: f32) -> f32 {
+    return 1.5 * cellSize / max(cosTerm, cosClamp);
+}
+
+// Sun-shadow specialization: cell = one shadow texel (tSize =
+// frame.shadowParams.x), grazing term = N·L, clamp 0.05. Shared by shadow-map
+// PCF (shadow_sampling.wesl's receiver-side bias) and the SSCS ray LENGTH
+// (contact_shadows.wesl) so those two stay byte-identical.
+//
+// The C++ ShadowMath::NormalOffsetLength (shadow_map.hpp) mirrors this same
+// expression on the CPU side (used by the shadow test harness as the
+// expected-bias oracle) — an unavoidable cross-language duplication since
+// WESL and C++ can't share a function; keep both in sync if this expression
+// ever changes.
+fn shadowNormalOffsetLength(NdotL: f32, tSize: f32) -> f32 {
+    return normalOffsetLength(NdotL, tSize, 0.05);
 }

@@ -36,6 +36,7 @@
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/prefiltered_cubemap.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
+#include "engine/rendering/shadow_map.hpp"
 
 namespace badlands {
 
@@ -57,6 +58,42 @@ enum class GBufferDebugMode {
               // resolve without a separate "off" state.
   Ao,         // the GTAO screen-space AO field (grayscale, dark at contacts).
               // Shows 1.0 (white) everywhere when GTAO is off / unsupported.
+};
+
+// Directional-shadow debug visualization modes (Task T1). debug_flags == 0
+// (Off) means "no debug output" — the deferred pass returns normally lit
+// color. Any nonzero value short-circuits the deferred pass to return the
+// `shadow` term as grayscale (see shaders/passes/deferred_lighting.wesl).
+// At T1 `shadow` is hardcoded 1.0, so every nonzero mode renders all-white;
+// T3 wires up the real shadow-map/contact-shadow terms and gives Combined/
+// ShadowMapOnly/ContactOnly distinct output.
+enum class ShadowDebugMode : uint32_t {
+  Off = 0,
+  Combined = 1,       // min(shadow map PCF, contact shadow) — T3
+  ShadowMapOnly = 2,  // shadow map PCF term alone — T3
+  ContactOnly = 3,    // contact shadow term alone — T3
+};
+
+// Directional-shadow configuration (Task T1). Game-agnostic — consumed by
+// SceneRenderer to size/derive the shadow map and its shadow-space
+// constants (frame_uniforms.shadow_params, T3/T5). No shadow map or render
+// pass exists yet (T2+); this struct only carries the parameters.
+struct ShadowConfig {
+  float coverage_dmax = 128.0f;       // Ortho shadow-frustum width D_max (m)
+  uint32_t resolution = 2048;         // Shadow map is resolution x resolution
+  float backward_extension = 100.0f;  // Extra light-space Z toward the light
+                                       // (keeps casters outside the frustum's
+                                       // near side in view)
+  bool enable_shadow_map = true;
+  bool enable_contact_shadows = true;
+  // Task T3-fix-2, test-only: forces shaders/common/shadow_sampling.wesl's
+  // sampleShadowMapPCF into its hard (single unfiltered tap, no PCF, no
+  // RPDB) debug path via frame_uniforms.shadow_params.w. Defaults false —
+  // production always gets the soft PCF path; only the T4 shadow test
+  // harness's edge-leak test sets this true, to validate the raw
+  // pre-filtered shadow signal instead of the PCF kernel's inherent soft
+  // silhouette edge (see task-3fix2-brief.md).
+  bool hard_shadow_debug = false;
 };
 
 // Deferred renderer: G-buffer geometry pass -> deferred lighting (sun + SH
@@ -134,6 +171,19 @@ class SceneRenderer {
   void SetGtaoEnabled(bool enabled) { gtao_enabled_ = enabled; }
   bool GetGtaoEnabled() const { return gtao_enabled_; }
 
+  // Directional-shadow configuration (Task T1). Takes effect on the next
+  // Render() call. No shadow map exists yet (T2+) — this only feeds the
+  // derived shadow constants uploaded to frame_uniforms.shadow_params.
+  void SetShadowConfig(const ShadowConfig& config) { shadow_config_ = config; }
+  const ShadowConfig& GetShadowConfig() const { return shadow_config_; }
+
+  // Directional-shadow debug visualization (Task T1). Takes effect on the
+  // next Render() call. See ShadowDebugMode above for what each mode means;
+  // at T1 all nonzero modes render all-white (shadow is hardcoded 1.0 until
+  // T3).
+  void SetShadowDebugMode(ShadowDebugMode mode) { shadow_debug_mode_ = mode; }
+  ShadowDebugMode GetShadowDebugMode() const { return shadow_debug_mode_; }
+
   // HDR accumulation target format and reversed-Z depth-buffer format —
   // fixed constants in this trimmed renderer (not configurable via
   // Initialize). Exposed so callers can build MaterialInstanceFactory
@@ -210,6 +260,28 @@ class SceneRenderer {
   // GTAO on/off (SetGtaoEnabled). GTAO runs only when this AND
   // has_r8unorm_storage_ are true. Default on.
   bool gtao_enabled_ = true;
+
+  // === Directional shadows (T1/T2) ===
+  ShadowConfig shadow_config_;
+  ShadowDebugMode shadow_debug_mode_ = ShadowDebugMode::Off;
+
+  // Shadow depth map (T2): owns the Depth32Float shadow texture + the
+  // fixed-coverage light view/proj fit. (Re)created when shadow_config_.
+  // resolution changes (see Render()).
+  ShadowMap shadow_map_;
+
+  // Contact-shadow term (T2 creates it; T5's SSCS fullscreen render pass
+  // clears + writes it every frame; T3 binds it for sampling). Window-sized
+  // R8Unorm — unlike ao_texture_ above, not cleared at creation, since
+  // Pass 1.75 (Render()) unconditionally clears it before Pass 3 ever reads
+  // it (see CreateTargets).
+  wgpu::Texture contact_shadow_texture_;
+  wgpu::TextureView contact_shadow_view_;
+
+  // Comparison sampler for the shadow map's hardware PCF (T3). LessEqual —
+  // matches shadow_map_'s conventional-Z depth (near->0, far->1): a receiver
+  // is lit when receiverDepth <= storedDepth. Created once in Initialize.
+  wgpu::Sampler shadow_comparison_sampler_;
 };
 
 }  // namespace badlands

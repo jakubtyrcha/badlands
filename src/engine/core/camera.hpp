@@ -52,8 +52,10 @@ struct Camera {
 // Mirrors `FrameUniforms` in shaders/common/frame.wesl (@group(0)@binding(0))
 // field-for-field — layout, order, and size must stay in sync with that
 // struct. sampo's last field was `dpi_scale`; badlands' frame.wesl retired it
-// to an unused `_padding0` float (kept only for struct alignment), so
-// `padding0` below mirrors that rather than sampo's original semantics.
+// to an unused `_padding0` float (kept only for struct alignment); T1
+// (directional shadows) repurposed that slot as `debug_flags` (the
+// shadow-debug-mode selector) and appended `shadow_params` after it — see
+// those fields below.
 struct UniformData {
   glm::mat4 view;  // World-offset view (camera at origin)
   glm::mat4 proj;
@@ -75,11 +77,21 @@ struct UniformData {
   // Rendering option flags
   uint32_t enable_gtao;       // 1 = AO enabled, 0 = disabled (use 1.0 for AO)
   uint32_t tonemap_mode;      // TonemapMode enum value
-  uint32_t output_is_linear;  // 1 = RGBA16Float (linear output), 0 = sRGB
-  float padding0 = 0.0f;      // Unused; matches frame.wesl's `_padding0`
+  uint32_t output_is_linear;  // 1 = linear target (RGBA16Float or
+                              // R32Float), 0 = sRGB
+  uint32_t debug_flags = 0u;  // ShadowDebugMode value (0 = Off); was
+                              // `padding0` — repurposed by T1 (directional
+                              // shadows) as the shadow-debug-mode selector.
+  // Derived shadow constants. x = tSizeWorld (shadow-map texel size, world
+  // units); y = invShadowRes (1 / shadow-map resolution); z = unused (the
+  // SSCS ray length used to be precomputed here; it is now computed
+  // per-pixel in contact_shadows.wesl); w = hard-shadow debug selector
+  // (0 = PCF/production, >0.5 = single unfiltered tap; test-only — see
+  // shaders/common/shadow_sampling.wesl and ShadowConfig::hard_shadow_debug).
+  glm::vec4 shadow_params{0.0f};
 };
 
-static_assert(sizeof(UniformData) == 576,
+static_assert(sizeof(UniformData) == 592,
               "UniformData must match FrameUniforms in "
               "shaders/common/frame.wesl (@group(0)@binding(0)) byte-for-byte");
 
