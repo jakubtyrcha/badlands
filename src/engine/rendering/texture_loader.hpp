@@ -96,8 +96,10 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
                                       uint32_t width, uint32_t height,
                                       const uint8_t* rgba);
 
-// Packs N already-mipped 2D textures into one RGBA8Unorm texture ARRAY (layer i
-// = layers[i]) and returns an e2DArray view over all layers + mip levels.
+// Packs N already-mipped 2D textures into one texture ARRAY (layer i =
+// layers[i]) and returns an e2DArray view over all layers + mip levels. The
+// array takes its format from the sources (RGBA8Unorm for everything
+// UploadTexture2DWithMips produces).
 //
 // Every source mip is copied straight across (CopyTextureToTexture), so the mip
 // chains the sources already carry are reused as-is -- this deliberately avoids
@@ -106,9 +108,10 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
 // cannot write layers > 0). Sources must therefore have been created with
 // CopySrc -- UploadTexture2DWithMips does that.
 //
-// All layers must share identical width/height/mipLevelCount; a mismatch is an
-// error (returns a null LoadedTexture after logging), because a texture array
-// has one size for every layer. `layers` must be non-empty.
+// All layers must be non-null and share identical width/height/mipLevelCount/
+// format -- a texture array has one size and one format for every layer, and
+// CopyTextureToTexture requires the formats to match. Any violation (or an
+// empty `layers`) returns a null LoadedTexture after logging.
 LoadedTexture PackTexturesIntoArray(wgpu::Device device, wgpu::Queue queue,
                                     const std::vector<wgpu::Texture>& layers);
 

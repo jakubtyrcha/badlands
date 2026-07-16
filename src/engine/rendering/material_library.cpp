@@ -124,25 +124,34 @@ MaterialLibrary::TerrainArrays MaterialLibrary::LoadTerrainArrays(
 
   // Load every pack first (manifest-driven; mips + DX->GL green flip handled by
   // LoadPack/LoadTexture2D), then transpose pack-major -> channel-major.
-  std::vector<wgpu::Texture> albedo_layers, normal_layers, arm_layers;
-  albedo_layers.reserve(pack_dirs.size());
-  normal_layers.reserve(pack_dirs.size());
-  arm_layers.reserve(pack_dirs.size());
-
+  //
+  // Deliberately NOT via cache_: the per-pack 2D textures are needed only long
+  // enough to copy into the arrays, so holding them would double terrain VRAM
+  // (~84 MB of sources shadowing ~84 MB of arrays). `packs` drops them on
+  // return -- safe right after Submit, because Dawn keeps its own reference to
+  // resources used by a submitted command buffer until it retires (nothing here
+  // calls Destroy()). Bypassing the cache also means there is no shared entry
+  // that a previously-failed Get() could have poisoned with null textures.
+  std::vector<PackTextures> packs;
+  packs.reserve(pack_dirs.size());
   for (const std::string& dir : pack_dirs) {
-    auto it = cache_.find(dir);
-    if (it == cache_.end()) {
-      PackTextures textures = LoadPack(dir);
-      if (!textures.albedo.texture || !textures.normal.texture ||
-          !textures.arm.texture) {
-        // LoadPack already logged + set load_failed_.
-        return {};
-      }
-      it = cache_.emplace(dir, std::move(textures)).first;
+    PackTextures textures = LoadPack(dir);
+    if (!textures.albedo.texture || !textures.normal.texture ||
+        !textures.arm.texture) {
+      // LoadPack already logged + set load_failed_.
+      return {};
     }
-    albedo_layers.push_back(it->second.albedo.texture);
-    normal_layers.push_back(it->second.normal.texture);
-    arm_layers.push_back(it->second.arm.texture);
+    packs.push_back(std::move(textures));
+  }
+
+  std::vector<wgpu::Texture> albedo_layers, normal_layers, arm_layers;
+  albedo_layers.reserve(packs.size());
+  normal_layers.reserve(packs.size());
+  arm_layers.reserve(packs.size());
+  for (const PackTextures& p : packs) {
+    albedo_layers.push_back(p.albedo.texture);
+    normal_layers.push_back(p.normal.texture);
+    arm_layers.push_back(p.arm.texture);
   }
 
   result.albedo = PackTexturesIntoArray(device_, queue_, albedo_layers);

@@ -278,6 +278,7 @@ endif()
 add_executable(badlands_mapview
     src/mapview/main_mapview.cpp
     src/mapview/map_view_view.cpp
+    src/mapview/biome_manifest.cpp
     src/game/geometry/terrain_mesh.cpp)
 target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib)
 target_compile_options(badlands_mapview PRIVATE -Wno-deprecated-declarations)
@@ -425,3 +426,38 @@ target_include_directories(badlands_debug_line_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_debug_line_tests COMMAND badlands_debug_line_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_texture_array_tests: GPU test for PackTexturesIntoArray — packs
+# mipped 2D textures into a texture_2d_array and reads back per-layer to check
+# layer identity/ordering + that the source mip chains survive the copy, plus
+# the null/size/format validation contracts. Needs a GPU adapter + shaders/.
+add_executable(badlands_texture_array_tests
+    src/engine/tests/texture_array_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_texture_array_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_texture_array_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_texture_array_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_texture_array_tests COMMAND badlands_texture_array_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_biome_manifest_tests: pure-CPU tests for the biome -> material-pack
+# manifest resolution (order == Biome enum == terrain array layer index).
+# Reads the shipped manifest, so WORKING_DIRECTORY = repo root.
+add_executable(badlands_biome_manifest_tests
+    src/mapview/tests/biome_manifest_tests.cpp
+    src/mapview/biome_manifest.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_biome_manifest_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

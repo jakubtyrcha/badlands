@@ -1,13 +1,9 @@
 #include "mapview/map_view_view.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <fstream>
 #include <string>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -18,8 +14,8 @@
 #include "engine/rendering/components/material_factory_component.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
-#include "engine/rendering/texture_loader.hpp"                   // CreateSolidColorArray
 #include "game/geometry/terrain_mesh.hpp"
+#include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
 #include "mapgen/biome_assign.hpp"
 #include "mapgen/biomes.hpp"
 #include "mapgen/config.hpp"
@@ -35,40 +31,6 @@ constexpr int kChunkBlocks = 16;  // N x N blocks per chunk (160 m)
 constexpr int kSubdiv = 2;        // subgrid cells per block edge
 constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json";
 }  // namespace
-
-bool ResolveBiomePacks(const std::string& manifest_path,
-                       std::vector<std::string>& out_pack_dirs) {
-  std::ifstream file(manifest_path);
-  if (!file) {
-    spdlog::error("MapViewView: missing biome manifest '{}'", manifest_path);
-    return false;
-  }
-  nlohmann::json manifest;
-  try {
-    file >> manifest;
-  } catch (const nlohmann::json::exception& e) {
-    spdlog::error("MapViewView: unparseable biome manifest '{}': {}",
-                  manifest_path, e.what());
-    return false;
-  }
-
-  // Layer index == Biome enum value, so resolve in enum order. Keyed by name so
-  // a reordered/renamed entry fails loudly instead of silently mis-mapping.
-  out_pack_dirs.clear();
-  out_pack_dirs.reserve(mapgen::kBiomeCount);
-  for (int i = 0; i < mapgen::kBiomeCount; ++i) {
-    const std::string name(
-        mapgen::biome_name(static_cast<mapgen::Biome>(i)));
-    if (!manifest.contains(name) || !manifest[name].is_string()) {
-      spdlog::error(
-          "MapViewView: biome manifest '{}' has no pack for biome '{}'",
-          manifest_path, name);
-      return false;
-    }
-    out_pack_dirs.push_back(manifest[name].get<std::string>());
-  }
-  return true;
-}
 
 bool MapViewView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;

@@ -241,16 +241,23 @@ LoadedTexture PackTexturesIntoArray(wgpu::Device device, wgpu::Queue queue,
     return {};
   }
 
-  // A texture array has ONE size for every layer -- validate before copying
-  // rather than letting Dawn reject a mismatched copy mid-loop.
-  const uint32_t width = layers[0].GetWidth();
-  const uint32_t height = layers[0].GetHeight();
-  const uint32_t mip_level_count = layers[0].GetMipLevelCount();
+  // Null-check EVERY layer before dereferencing any of them -- layers[0] is
+  // read for the reference size just below, so this cannot be folded into the
+  // size loop (that would deref layers[0] before guarding it).
   for (size_t i = 0; i < layers.size(); ++i) {
     if (!layers[i]) {
       spdlog::error("PackTexturesIntoArray: layer {} is null", i);
       return {};
     }
+  }
+
+  // A texture array has ONE size and ONE format for every layer -- validate
+  // before copying rather than letting Dawn reject a mismatched copy mid-loop.
+  const uint32_t width = layers[0].GetWidth();
+  const uint32_t height = layers[0].GetHeight();
+  const uint32_t mip_level_count = layers[0].GetMipLevelCount();
+  const wgpu::TextureFormat format = layers[0].GetFormat();
+  for (size_t i = 1; i < layers.size(); ++i) {
     if (layers[i].GetWidth() != width || layers[i].GetHeight() != height ||
         layers[i].GetMipLevelCount() != mip_level_count) {
       spdlog::error(
@@ -260,13 +267,23 @@ LoadedTexture PackTexturesIntoArray(wgpu::Device device, wgpu::Queue queue,
           layers[i].GetMipLevelCount(), width, height, mip_level_count);
       return {};
     }
+    if (layers[i].GetFormat() != format) {
+      spdlog::error(
+          "PackTexturesIntoArray: layer {} has format {}, expected {} (every "
+          "array layer must match)",
+          i, static_cast<uint32_t>(layers[i].GetFormat()),
+          static_cast<uint32_t>(format));
+      return {};
+    }
   }
 
   wgpu::TextureDescriptor tex_desc;
   tex_desc.size = {width, height, static_cast<uint32_t>(layers.size())};
-  tex_desc.format = wgpu::TextureFormat::RGBA8Unorm;
-  tex_desc.usage =
-      wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+  tex_desc.format = format;  // follow the sources; CopyTextureToTexture needs a match
+  // CopySrc so the packed array can be read back (debug/readback/tests) or
+  // copied on -- essentially free, and the array is otherwise write-only.
+  tex_desc.usage = wgpu::TextureUsage::TextureBinding |
+                   wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc;
   tex_desc.mipLevelCount = mip_level_count;
   tex_desc.sampleCount = 1;
   tex_desc.dimension = wgpu::TextureDimension::e2D;

@@ -105,15 +105,22 @@ struct BlendedSurface {
 // derivatives need uniform control flow), so dx/dy are computed once by the
 // caller (uniform) and fed to textureSampleGrad here.
 //
-// The array index is clamped to the bound arrays' real layer count, so an 8-slot
-// weight vector is safe against a smaller array (e.g. one layer per biome).
+// Each array index is clamped against THAT array's own layer count, so an
+// 8-slot weight vector is safe against a smaller array (e.g. one layer per
+// biome). The three arrays normally have equal layer counts (LoadTerrainArrays
+// builds them from one pack list), but any slot left unbound falls back to an
+// 8-layer default, so they can legitimately differ -- clamping them together
+// against one array's count would let an index run past a shorter one (an
+// out-of-range array_index is UNDEFINED in WGSL, not implicitly clamped).
 fn sample_blended(uv: vec2<f32>, w0: vec4<f32>, w1: vec4<f32>,
                   dx: vec2<f32>, dy: vec2<f32>) -> BlendedSurface {
     var albedo = vec3<f32>(0.0);
     var tn = vec3<f32>(0.0);
     var arm = vec2<f32>(0.0);   // (ao, roughness)
     var wsum = 0.0;
-    let max_layer = textureNumLayers(albedo_array) - 1u;
+    let max_albedo = textureNumLayers(albedo_array) - 1u;
+    let max_normal = textureNumLayers(normal_array) - 1u;
+    let max_arm = textureNumLayers(arm_array) - 1u;
 
     for (var i = 0u; i < 8u; i = i + 1u) {
         var w = 0.0;
@@ -123,11 +130,10 @@ fn sample_blended(uv: vec2<f32>, w0: vec4<f32>, w1: vec4<f32>,
             w = w1[i - 4u];
         }
         if (w > 0.0) {
-            let li = min(i, max_layer);
-            albedo = albedo + w * textureSampleGrad(albedo_array, terrain_sampler, uv, li, dx, dy).rgb;
-            let n = textureSampleGrad(normal_array, terrain_sampler, uv, li, dx, dy).rgb * 2.0 - 1.0;
+            albedo = albedo + w * textureSampleGrad(albedo_array, terrain_sampler, uv, min(i, max_albedo), dx, dy).rgb;
+            let n = textureSampleGrad(normal_array, terrain_sampler, uv, min(i, max_normal), dx, dy).rgb * 2.0 - 1.0;
             tn = tn + w * n;
-            let a = textureSampleGrad(arm_array, terrain_sampler, uv, li, dx, dy);
+            let a = textureSampleGrad(arm_array, terrain_sampler, uv, min(i, max_arm), dx, dy);
             arm = arm + w * vec2<f32>(a.r, a.g);
             wsum = wsum + w;
         }

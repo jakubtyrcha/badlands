@@ -96,6 +96,10 @@ class MaterialLibrary {
   // share one texture size (a texture array has one size for all layers) --
   // a mismatch fails the load.
   //
+  // Unlike Get(), the per-pack 2D textures are NOT cached: they exist only to
+  // be copied into the arrays, and keeping them would double terrain VRAM. A
+  // pack used both here and via Get() is therefore decoded twice.
+  //
   // On any failure returns a TerrainArrays with null members and marks ok()
   // false (same contract as Get()); callers MUST check ok().
   TerrainArrays LoadTerrainArrays(const std::vector<std::string>& pack_dirs);
