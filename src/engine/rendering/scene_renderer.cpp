@@ -460,6 +460,60 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     compute_pass.End();
   }
 
+  // === Pass 1.75: Contact shadows (SSCS, T5) — short view-space ray-march
+  // along the sun direction, filling the small Peter-Panning gap the shadow
+  // map's normal-offset bias opens near contact points. Runs after the
+  // G-buffer pass (reads its depth @1) and before deferred lighting (which
+  // samples the result @8). Runs every frame and ALWAYS clears
+  // contact_shadow_texture_ to 1.0 first (supersedes CreateTargets'
+  // create-time one-shot clear, so there is never stale contents); the
+  // fullscreen ray-march only draws when shadow_config_.enable_contact_shadows
+  // (or if the pipeline failed to compile), leaving a bare 1.0 clear
+  // otherwise — same enable-gate pattern as Pass 0's shadow map. ===
+  {
+    RenderPipelineDeclaration decl;
+    decl.shader_path = "passes/contact_shadows";
+
+    RenderTargetFormats target_formats = {wgpu::TextureFormat::R8Unorm};
+    auto compiled = pipeline_generator_->GetPipeline(decl, target_formats);
+    if (!compiled) {
+      spdlog::error(
+          "SceneRenderer::Render: failed to compile contact_shadows "
+          "pipeline");
+    }
+
+    wgpu::RenderPassColorAttachment color_attachment;
+    color_attachment.view = contact_shadow_view_;
+    color_attachment.loadOp = wgpu::LoadOp::Clear;
+    color_attachment.storeOp = wgpu::StoreOp::Store;
+    color_attachment.clearValue = {1.0, 1.0, 1.0, 1.0};
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color_attachment;
+    desc.depthStencilAttachment = nullptr;
+
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    if (compiled && shadow_config_.enable_contact_shadows) {
+      // Group 0: frame UBO @0, gbuffer depth @1.
+      std::array<wgpu::BindGroupEntry, 2> entries{};
+      entries[0].binding = 0;
+      entries[0].buffer = frame.GetFrameUniformBuffer();
+      entries[0].offset = 0;
+      entries[0].size = sizeof(UniformData);
+      entries[1].binding = 1;
+      entries[1].textureView = gbuffer_.GetDepthView();
+
+      wgpu::BindGroup bind_group =
+          frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
+
+      pass.SetPipeline(compiled->pipeline);
+      pass.SetBindGroup(0, bind_group);
+      pass.Draw(3);
+    }
+    pass.End();
+  }
+
   // === Pass 2: Skybox background — fill the HDR target from the source
   // environment cube (fullscreen, standard cube sampling along the per-pixel
   // world ray). Runs BEFORE deferred lighting: it clears + fills the whole
