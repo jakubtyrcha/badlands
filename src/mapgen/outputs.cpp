@@ -75,6 +75,22 @@ void write_gray_png(const Field2D<float>& field, const std::string& path,
   img.WritePng(path);
 }
 
+void write_gray_png_range(const Field2D<float>& field, const std::string& path,
+                          float lo, float hi) {
+  const float span = (hi > lo) ? (hi - lo) : 1.0f;
+  badlands::CpuImage img(static_cast<uint32_t>(field.width),
+                         static_cast<uint32_t>(field.height),
+                         wgpu::TextureFormat::R8Unorm);
+  for (int y = 0; y < field.height; ++y) {
+    for (int x = 0; x < field.width; ++x) {
+      const float t = std::clamp((field.at(x, y) - lo) / span, 0.0f, 1.0f);
+      img.SetPixelF32(static_cast<uint32_t>(x), static_cast<uint32_t>(y),
+                      {t, t, t, 1.0f});
+    }
+  }
+  img.WritePng(path);
+}
+
 void write_hashed_png(const Field2D<int>& field, const std::string& path) {
   badlands::CpuImage img(static_cast<uint32_t>(field.width),
                          static_cast<uint32_t>(field.height),

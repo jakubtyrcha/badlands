@@ -290,14 +290,27 @@ endforeach()
 add_library(badlands_mapgen_lib STATIC
     src/mapgen/config.cpp
     src/mapgen/fields.cpp
+    src/mapgen/hillshade.cpp
     src/mapgen/outputs.cpp
     src/mapgen/pipeline.cpp
+    src/mapgen/script_eval.cpp
     src/mapgen/voronoi.cpp
     src/mapgen/biome_assign.cpp
     src/mapgen/heightmap.cpp
     src/mapgen/sections.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine badlands_game_lib)
 target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
+
+# badlands_patchgen: renders ONE noiser terrain script over a world patch to a
+# grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
+# window. Scripts are functions of world meters, so a patch is a literal crop of the
+# world (see scripts/mapgen/biomes/README.md).
+add_executable(badlands_patchgen src/mapgen/main_patchgen.cpp)
+target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib)
+target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_patchgen PRIVATE "-Wl,-ld_new")
+endif()
 
 # badlands_mapview: THE map tool. `--preview-image-only` runs the generator and
 # dumps the debug rasters + section graph (pure CPU, no window — this replaces

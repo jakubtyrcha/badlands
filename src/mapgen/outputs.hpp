@@ -21,8 +21,18 @@ void write_preview_images(const MapgenConfig& cfg, const MapArtifacts& a);
 
 // Write a float field as an 8-bit grayscale PNG. If `normalize`, the field's
 // [min,max] is stretched to [0,255]; otherwise values are clamped to [0,1].
+//
+// NOTE: `normalize = true` autoscales PER IMAGE, so two images written this way are NOT
+// comparable to each other — the same grey means a different value in each. Use the
+// explicit-range overload below when images are meant to be compared.
 void write_gray_png(const Field2D<float>& field, const std::string& path,
                     bool normalize = true);
+
+// Write a float field as grayscale with an EXPLICIT value range: `lo` maps to black,
+// `hi` to white, out-of-range clamps. Use this to render several fields against one
+// shared range so their greys mean the same thing.
+void write_gray_png_range(const Field2D<float>& field, const std::string& path,
+                          float lo, float hi);
 
 // Write an int field as an RGBA PNG, colorizing each distinct id via a hash
 // (debug view of voronoi cell ids / section ids).
