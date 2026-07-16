@@ -67,46 +67,25 @@ glm::vec3 NormalAt(const Field2D<float>& h, float wx, float wz) {
   return glm::normalize(glm::vec3(-(hr - hl) / d, 1.0f, -(hu - hd) / d));
 }
 
-void PushVertex(std::vector<float>& out, const glm::vec3& pos,
-                const glm::vec3& nrm, const glm::vec4& w,
-                const std::array<uint32_t, 4>& idx) {
-  out.insert(out.end(), {pos.x, pos.y, pos.z, nrm.x, nrm.y, nrm.z, w.x, w.y,
-                         w.z, w.w});
-  for (uint32_t i : idx) {
-    float f;
-    std::memcpy(&f, &i, sizeof(float));
-    out.push_back(f);
-  }
+// Pack four u8 into one float slot (matches the Uint8x4 / Unorm8x4 attributes).
+float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+  const uint32_t u = static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) |
+                     (static_cast<uint32_t>(c) << 16) |
+                     (static_cast<uint32_t>(d) << 24);
+  float f;
+  std::memcpy(&f, &u, sizeof(float));
+  return f;
 }
 
-// Emit one triangle: its three vertices share the same (<=4) layer-index set
-// (the distinct biomes they span), each with a one-hot weight for its biome.
-void EmitTriangle(std::vector<float>& out, const Field2D<float>& h,
-                  const Node& a, const Node& b, const Node& c) {
-  std::array<uint32_t, 4> idx = {0, 0, 0, 0};
-  int n = 0;
-  auto add = [&](uint8_t bi) {
-    for (int i = 0; i < n; ++i)
-      if (idx[i] == bi) return;
-    if (n < 4) idx[n++] = bi;
-  };
-  add(a.biome);
-  add(b.biome);
-  add(c.biome);
-
-  auto emit = [&](const Node& node) {
-    glm::vec4 w(0.0f);
-    for (int i = 0; i < 4; ++i) {
-      if (idx[i] == node.biome) {
-        w[i] = 1.0f;
-        break;
-      }
-    }
-    PushVertex(out, node.pos, NormalAt(h, node.pos.x, node.pos.z), w, idx);
-  };
-  emit(a);
-  emit(b);
-  emit(c);
+// Emit one node as a vertex. Each grid node is a single biome (one-hot: pair 0
+// = {biome, weight 255}); the blend across a triangle comes from interpolating
+// these one-hots between differently-biomed vertices in the vertex shader.
+void EmitVertex(std::vector<float>& out, const Field2D<float>& h,
+                const Node& node) {
+  const glm::vec3 n = NormalAt(h, node.pos.x, node.pos.z);
+  out.insert(out.end(), {node.pos.x, node.pos.y, node.pos.z, n.x, n.y, n.z});
+  out.push_back(PackU8x4(node.biome, 0, 0, 0));  // layer_indices
+  out.push_back(PackU8x4(255, 0, 0, 0));         // blend_weights (one-hot)
 }
 
 }  // namespace
@@ -115,35 +94,72 @@ TerrainMesh BuildTerrainMesh(const Field2D<float>& heightmap,
                              const Field2D<uint8_t>& biome,
                              const TerrainMeshParams& params) {
   const int subdiv = std::max(1, params.subdiv);
-  const int blocks_x = heightmap.width / kSamplesPerBlock;
-  const int blocks_z = heightmap.height / kSamplesPerBlock;
-  const int cells_x = blocks_x * subdiv;
-  const int cells_z = blocks_z * subdiv;
+  const int blocks_total_x = heightmap.width / kSamplesPerBlock;
+  const int blocks_total_z = heightmap.height / kSamplesPerBlock;
+  const int bx0 = std::clamp(params.block_x0, 0, blocks_total_x);
+  const int bz0 = std::clamp(params.block_z0, 0, blocks_total_z);
+  const int bw = params.blocks_x < 0 ? blocks_total_x - bx0
+                                     : std::min(params.blocks_x,
+                                                blocks_total_x - bx0);
+  const int bh = params.blocks_z < 0 ? blocks_total_z - bz0
+                                     : std::min(params.blocks_z,
+                                                blocks_total_z - bz0);
+  const int cells_w = bw * subdiv;      // cells across the region
+  const int cells_h = bh * subdiv;
+  const int cx0 = bx0 * subdiv;         // absolute cell offset of the region
+  const int cz0 = bz0 * subdiv;
   const float step = static_cast<float>(kBlockSizeM) / subdiv;  // world meters
+  const int corner_cols = cells_w + 1;
+  const int corner_rows = cells_h + 1;
+  const int corner_count = corner_cols * corner_rows;
 
-  TerrainMesh mesh;
-  mesh.vertices.reserve(static_cast<size_t>(cells_x) * cells_z * 4 * 3 *
-                        TerrainMesh::kFloatsPerVertex);
-
+  // cx/cz are ABSOLUTE cell coords -> world meters (chunks share a world frame).
   auto make_node = [&](float cx, float cz) {
-    const float wx = cx * step;  // world meters
+    const float wx = cx * step;
     const float wz = cz * step;
     return Node{glm::vec3(wx, SampleHeight(heightmap, wx, wz), wz),
                 SampleBiome(biome, wx, wz)};
   };
 
-  for (int cz = 0; cz < cells_z; ++cz) {
-    for (int cx = 0; cx < cells_x; ++cx) {
-      const Node n00 = make_node(cx, cz);
-      const Node n10 = make_node(cx + 1, cz);
-      const Node n11 = make_node(cx + 1, cz + 1);
-      const Node n01 = make_node(cx, cz + 1);
-      const Node nc = make_node(cx + 0.5f, cz + 0.5f);
+  TerrainMesh mesh;
+  // Shared vertices: one per corner node + one per cell centre (X-split).
+  mesh.vertices.reserve(
+      static_cast<size_t>(corner_count + cells_w * cells_h) *
+      TerrainMesh::kFloatsPerVertex);
+  for (int lz = 0; lz < corner_rows; ++lz)
+    for (int lx = 0; lx < corner_cols; ++lx)
+      EmitVertex(mesh.vertices, heightmap,
+                 make_node(cx0 + lx, cz0 + lz));
+  for (int lz = 0; lz < cells_h; ++lz)
+    for (int lx = 0; lx < cells_w; ++lx)
+      EmitVertex(mesh.vertices, heightmap,
+                 make_node(cx0 + lx + 0.5f, cz0 + lz + 0.5f));
+
+  auto corner_idx = [&](int lx, int lz) {
+    return static_cast<uint32_t>(lz * corner_cols + lx);
+  };
+  auto center_idx = [&](int lx, int lz) {
+    return static_cast<uint32_t>(corner_count + lz * cells_w + lx);
+  };
+
+  mesh.indices.reserve(static_cast<size_t>(cells_w) * cells_h * 4 * 3);
+  auto tri = [&](uint32_t a, uint32_t b, uint32_t c) {
+    mesh.indices.push_back(a);
+    mesh.indices.push_back(b);
+    mesh.indices.push_back(c);
+  };
+  for (int lz = 0; lz < cells_h; ++lz) {
+    for (int lx = 0; lx < cells_w; ++lx) {
+      const uint32_t n00 = corner_idx(lx, lz);
+      const uint32_t n10 = corner_idx(lx + 1, lz);
+      const uint32_t n11 = corner_idx(lx + 1, lz + 1);
+      const uint32_t n01 = corner_idx(lx, lz + 1);
+      const uint32_t nc = center_idx(lx, lz);
       // X-split: 4 triangles around the cell centre (CCW seen from +Y).
-      EmitTriangle(mesh.vertices, heightmap, n00, nc, n10);
-      EmitTriangle(mesh.vertices, heightmap, n10, nc, n11);
-      EmitTriangle(mesh.vertices, heightmap, n11, nc, n01);
-      EmitTriangle(mesh.vertices, heightmap, n01, nc, n00);
+      tri(n00, nc, n10);
+      tri(n10, nc, n11);
+      tri(n11, nc, n01);
+      tri(n01, nc, n00);
     }
   }
 

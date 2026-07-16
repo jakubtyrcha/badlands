@@ -92,6 +92,10 @@ add_library(badlands_engine STATIC
     src/engine/rendering/geometry/building_parts_builder.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
+    src/engine/rendering/frustum.cpp
+    src/engine/rendering/debug_line_buffer.cpp
+    src/engine/rendering/debug_line_expand.cpp
+    src/engine/rendering/passes/render_debug_lines.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
     src/engine/rendering/passes/render_skybox.cpp
     src/engine/rendering/passes/render_gbuffer_debug.cpp
@@ -248,8 +252,10 @@ endforeach()
 # same both-libraries link as badlands_geometry_tests: engine is linked for a
 # CPU-only helper and the GPU is never touched. -Wno-deprecated-declarations
 # matches badlands_game_lib (the noiser headers ship [[deprecated]] shims).
-set(badlands_mapgen_sources
-    src/mapgen/main_mapgen.cpp
+# badlands_mapgen_lib: the mapgen pipeline (config/fields/voronoi/biomes/height/
+# sections + PNG/JSON outputs) as a static lib, shared by the badlands_mapgen
+# CLI tool and the badlands_mapview app (which runs generation in-process).
+add_library(badlands_mapgen_lib STATIC
     src/mapgen/config.cpp
     src/mapgen/fields.cpp
     src/mapgen/outputs.cpp
@@ -257,11 +263,26 @@ set(badlands_mapgen_sources
     src/mapgen/biome_assign.cpp
     src/mapgen/heightmap.cpp
     src/mapgen/sections.cpp)
-add_executable(badlands_mapgen ${badlands_mapgen_sources})
-target_link_libraries(badlands_mapgen PRIVATE badlands_engine badlands_game_lib)
+target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine badlands_game_lib)
+target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
+
+add_executable(badlands_mapgen src/mapgen/main_mapgen.cpp)
+target_link_libraries(badlands_mapgen PRIVATE badlands_mapgen_lib)
 target_compile_options(badlands_mapgen PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
     target_link_options(badlands_mapgen PRIVATE "-Wl,-ld_new")
+endif()
+
+# badlands_mapview: interactive terrain viewer — generates a map in-process and
+# renders it as indexed kTerrainBlend chunks with the biome-blend material.
+add_executable(badlands_mapview
+    src/mapview/main_mapview.cpp
+    src/mapview/map_view_view.cpp
+    src/game/geometry/terrain_mesh.cpp)
+target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib)
+target_compile_options(badlands_mapview PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
 endif()
 
 # badlands_mapgen_tests: Catch2 unit tests for the deterministic mapgen analysis
@@ -373,3 +394,34 @@ target_include_directories(badlands_terrain_mesh_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_terrain_mesh_tests COMMAND badlands_terrain_mesh_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_frustum_tests: pure-CPU tests for view-frustum AABB culling.
+add_executable(badlands_frustum_tests
+    src/engine/tests/frustum_tests.cpp
+    src/engine/rendering/frustum.cpp
+    src/engine/rendering/geometry/aabb.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_frustum_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_compile_definitions(badlands_frustum_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+add_test(NAME badlands_frustum_tests COMMAND badlands_frustum_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_debug_line_tests: pure-CPU tests for the world-space thick-line quad
+# expansion (near-plane clipping so segments crossing behind the camera don't
+# produce garbage vertices).
+add_executable(badlands_debug_line_tests
+    src/engine/tests/debug_line_expand_tests.cpp
+    src/engine/rendering/debug_line_expand.cpp
+    src/engine/rendering/debug_line_buffer.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_debug_line_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_debug_line_tests COMMAND badlands_debug_line_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

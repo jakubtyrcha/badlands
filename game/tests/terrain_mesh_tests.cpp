@@ -22,8 +22,8 @@ namespace {
 struct Vertex {
   glm::vec3 pos;
   glm::vec3 normal;
-  glm::vec4 weights;
-  std::array<uint32_t, 4> indices;
+  std::array<uint8_t, 4> indices;  // Uint8x4
+  std::array<uint8_t, 4> weights;  // Unorm8x4 (0..255)
 };
 
 Vertex Unpack(const std::vector<float>& d, size_t i) {
@@ -31,8 +31,13 @@ Vertex Unpack(const std::vector<float>& d, size_t i) {
   Vertex v;
   v.pos = {p[0], p[1], p[2]};
   v.normal = {p[3], p[4], p[5]};
-  v.weights = {p[6], p[7], p[8], p[9]};
-  for (int k = 0; k < 4; ++k) std::memcpy(&v.indices[k], &p[10 + k], 4);
+  uint32_t idx, w;
+  std::memcpy(&idx, &p[6], 4);
+  std::memcpy(&w, &p[7], 4);
+  for (int k = 0; k < 4; ++k) {
+    v.indices[k] = static_cast<uint8_t>((idx >> (8 * k)) & 0xffu);
+    v.weights[k] = static_cast<uint8_t>((w >> (8 * k)) & 0xffu);
+  }
   return v;
 }
 
@@ -50,34 +55,36 @@ TEST_CASE("BuildTerrainMesh: X-split counts, one-hot weights, biome boundary") {
 
   TerrainMesh mesh = BuildTerrainMesh(height, biome, {.subdiv = 2});
 
-  // cells = (2*2) x (2*2) = 16; X-split = 4 tris/cell x 3 verts = 12/cell.
-  REQUIRE(mesh.vertex_count == 16u * 12u);
+  // Indexed: cells = (2*2)x(2*2) = 16; 5x5 corner nodes + 16 cell centres = 41
+  // shared verts; 16 cells x 4 tris x 3 = 192 indices.
+  const int corner_count = 5 * 5;
+  const int cells = 4 * 4;
+  REQUIRE(mesh.vertex_count == static_cast<uint32_t>(corner_count + cells));
   REQUIRE(mesh.vertices.size() ==
           mesh.vertex_count * TerrainMesh::kFloatsPerVertex);
+  REQUIRE(mesh.indices.size() == static_cast<size_t>(cells) * 4 * 3);
 
-  bool saw_boundary_tri = false;
   for (uint32_t i = 0; i < mesh.vertex_count; ++i) {
     const Vertex v = Unpack(mesh.vertices, i);
-
     // Flat terrain -> every node at height 5, up-facing normal.
     CHECK(v.pos.y == Catch::Approx(5.0f));
     CHECK(v.normal.y == Catch::Approx(1.0f).margin(1e-4));
-
-    // Weights are one-hot and sum to 1 (each node belongs to a single biome).
-    const float wsum = v.weights.x + v.weights.y + v.weights.z + v.weights.w;
-    CHECK(wsum == Catch::Approx(1.0f));
-    int hot = 0;
-    for (int k = 0; k < 4; ++k)
-      if (v.weights[k] > 0.5f) ++hot;
-    CHECK(hot == 1);
+    // Each node is one biome: pair 0 = {biome, weight 255}, rest zero.
+    CHECK(v.weights[0] == 255);
+    CHECK(v.weights[1] == 0);
+    CHECK(v.weights[2] == 0);
+    CHECK(v.weights[3] == 0);
+    CHECK((v.indices[0] == 0 || v.indices[0] == 1));
   }
 
-  // Every triangle's three vertices share one index set; a boundary triangle
-  // spans both biome 0 and 1.
-  for (uint32_t t = 0; t < mesh.vertex_count; t += 3) {
-    const auto& idx = Unpack(mesh.vertices, t).indices;
-    const bool has0 = idx[0] == 0 || idx[1] == 0 || idx[2] == 0 || idx[3] == 0;
-    const bool has1 = idx[0] == 1 || idx[1] == 1 || idx[2] == 1 || idx[3] == 1;
+  // A boundary triangle references vertices of both biome 0 and biome 1.
+  bool saw_boundary_tri = false;
+  for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+    const uint8_t b0 = Unpack(mesh.vertices, mesh.indices[t + 0]).indices[0];
+    const uint8_t b1 = Unpack(mesh.vertices, mesh.indices[t + 1]).indices[0];
+    const uint8_t b2 = Unpack(mesh.vertices, mesh.indices[t + 2]).indices[0];
+    const bool has0 = b0 == 0 || b1 == 0 || b2 == 0;
+    const bool has1 = b0 == 1 || b1 == 1 || b2 == 1;
     if (has0 && has1) saw_boundary_tri = true;
   }
   CHECK(saw_boundary_tri);
@@ -95,7 +102,6 @@ TEST_CASE("BuildTerrainMesh: vertex heights follow the heightmap") {
   TerrainMesh mesh = BuildTerrainMesh(height, biome, {.subdiv = 4});
   REQUIRE(mesh.vertex_count > 0);
 
-  // Interior nodes sample the ramp: y ~= world x (edge nodes clamp, skip them).
   float min_y = 1e9f, max_y = -1e9f;
   for (uint32_t i = 0; i < mesh.vertex_count; ++i) {
     const Vertex v = Unpack(mesh.vertices, i);

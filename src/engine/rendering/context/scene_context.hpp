@@ -26,6 +26,8 @@
 
 namespace badlands {
 
+class DebugLineBuffer;
+
 // SceneContext holds scene-level state written by SceneGraph::SyncToRegistry
 // and read by (future) rendering passes. See the trim note above — this is
 // deliberately a small subset of sampo's SceneContext.
@@ -49,6 +51,11 @@ struct SceneContext {
 
   // Clear/background color
   glm::vec4 clear_color{0.1f, 0.1f, 0.1f, 1.0f};
+
+  // Optional world-space debug lines, drawn (screen-aligned + antialiased,
+  // depth-tested against the G-buffer) after deferred lighting and before
+  // tonemap. Null = none. Not owned; must outlive the frame.
+  const DebugLineBuffer* debug_lines = nullptr;
 };
 
 }  // namespace badlands

@@ -7,7 +7,9 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -36,46 +38,48 @@ namespace {
 constexpr uint32_t kW = 256;
 constexpr uint32_t kH = 256;
 
-// Pack one kTerrainBlend vertex (pos3 + normal3 + weights4 + indices4); the u32
-// layer indices are bitcast into 4 float slots.
+// Pack one kTerrainBlend vertex (8 floats): pos3 + normal3 + layer_indices
+// (Uint8x4 packed as 1 float) + blend_weights (Unorm8x4 packed as 1 float).
 void PushTerrainVertex(std::vector<float>& out, glm::vec3 pos, glm::vec3 nrm,
                        glm::vec4 w, std::array<uint32_t, 4> idx) {
-  out.insert(out.end(), {pos.x, pos.y, pos.z, nrm.x, nrm.y, nrm.z, w.x, w.y,
-                         w.z, w.w});
-  for (uint32_t i : idx) {
-    float f;
-    std::memcpy(&f, &i, sizeof(float));
-    out.push_back(f);
-  }
+  out.insert(out.end(), {pos.x, pos.y, pos.z, nrm.x, nrm.y, nrm.z});
+  const uint32_t pi = (idx[0] & 0xffu) | ((idx[1] & 0xffu) << 8) |
+                      ((idx[2] & 0xffu) << 16) | ((idx[3] & 0xffu) << 24);
+  auto b = [](float f) {
+    return static_cast<uint32_t>(std::lround(std::clamp(f, 0.0f, 1.0f) * 255.0f));
+  };
+  const uint32_t pw =
+      b(w.x) | (b(w.y) << 8) | (b(w.z) << 16) | (b(w.w) << 24);
+  float fi, fw;
+  std::memcpy(&fi, &pi, sizeof(float));
+  std::memcpy(&fw, &pw, sizeof(float));
+  out.push_back(fi);
+  out.push_back(fw);
 }
 
-// Add a double-sided kTerrainBlend quad (XZ plane, +Y normal) whose four corners
-// (A,B,C,D) carry the given per-vertex weights over a shared layer-index set.
+// Add a double-sided, INDEXED kTerrainBlend quad (XZ plane, +Y normal) whose
+// four corners (A,B,C,D) carry the given per-vertex weights. Indexed so the
+// test also exercises the DrawIndexed path.
 void AddTerrainQuad(entt::registry& reg, MaterialInstanceFactory* factory,
                     InstanceParams params,
                     const std::array<glm::vec4, 4>& corner_w,
                     const std::array<uint32_t, 4>& idx) {
   const float S = 3.0f;
   const glm::vec3 nY(0, 1, 0);
-  const glm::vec3 A(-S, 0, -S), B(S, 0, -S), C(-S, 0, S), D(S, 0, S);
+  const std::array<glm::vec3, 4> corners = {
+      glm::vec3(-S, 0, -S), glm::vec3(S, 0, -S), glm::vec3(-S, 0, S),
+      glm::vec3(S, 0, S)};  // A, B, C, D
   std::vector<float> v;
-  auto tri = [&](glm::vec3 p0, glm::vec4 w0, glm::vec3 p1, glm::vec4 w1,
-                 glm::vec3 p2, glm::vec4 w2) {
-    PushTerrainVertex(v, p0, nY, w0, idx);
-    PushTerrainVertex(v, p1, nY, w1, idx);
-    PushTerrainVertex(v, p2, nY, w2, idx);
-    PushTerrainVertex(v, p0, nY, w0, idx);  // reversed winding (double-sided)
-    PushTerrainVertex(v, p2, nY, w2, idx);
-    PushTerrainVertex(v, p1, nY, w1, idx);
-  };
-  tri(A, corner_w[0], B, corner_w[1], C, corner_w[2]);
-  tri(B, corner_w[1], D, corner_w[3], C, corner_w[2]);
+  for (int i = 0; i < 4; ++i)
+    PushTerrainVertex(v, corners[i], nY, corner_w[i], idx);
+  // Front tris (A,B,C),(B,D,C) + reversed for double-sidedness.
+  std::vector<uint32_t> indices = {0, 1, 2, 1, 3, 2, 0, 2, 1, 1, 2, 3};
 
   entt::entity e = reg.create();
   auto& mesh = reg.emplace<StaticTexturedMeshComponent>(e);
-  const uint32_t vcount = static_cast<uint32_t>(v.size() / 14);
   mesh.vertices = std::move(v);
-  mesh.vertex_count = vcount;
+  mesh.vertex_count = 4;
+  mesh.indices = std::move(indices);
   mesh.dirty = true;
   mesh.geometry_type = GeometryType::kTerrainBlend;
   mesh.transform = glm::mat4(1.0f);

@@ -183,6 +183,9 @@ class SceneRenderer {
   // texture/uniform config, see material_instance_cache.hpp).
   MaterialInstanceCache material_instance_cache_;
 
+  // Debug-line pass: per-frame CPU-expanded thick-line vertex buffer.
+  wgpu::Buffer debug_line_buffer_;
+
   // === IBL (S2.B2) ===
   // BRDF split-sum LUT — generated once in Initialize (view-independent).
   BrdfLut brdf_lut_;
