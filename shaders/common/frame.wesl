@@ -20,7 +20,7 @@ struct FrameUniforms {
     // Rendering option flags
     enableGtao: u32,              // 1 = AO enabled, 0 = disabled (use 1.0 for AO)
     tonemapMode: u32,             // TonemapMode enum (0 = kClamp)
-    outputIsLinear: u32,          // 1 = RGBA16Float (linear output), 0 = sRGB
+    outputIsLinear: u32,          // 1 = linear target (RGBA16Float or R32Float), 0 = sRGB
     debugFlags: u32,              // ShadowDebugMode value (0 = Off); was
                                    // `_padding0` — repurposed by T1 (directional
                                    // shadows) as the shadow-debug-mode selector.

@@ -123,6 +123,12 @@ fn sampleShadowMapPCF(worldPos: vec3<f32>, normal: vec3<f32>, NdotL: f32,
     let dv  = dot(td, tv);
     let det = guu * gvv - guv * guv;
     var biasUV = vec2<f32>(0.0, 0.0);
+    // NOTE: this 1e-12 floor is an ABSOLUTE threshold on a quantity that scales
+    // ~1/D_max^4 (the ortho matrix rows shrink with coverage): ~1e-8 at
+    // D_max=100, ~6e-10 at D_max=200 — safe for the production default
+    // (D_max=128) and every test config, and only at very large coverage
+    // (D_max >~ 1000 m) would a valid gradient risk being wrongly zeroed. Use a
+    // relative test (det > eps*guu*gvv) if such coverages are ever configured.
     if (abs(det) > 1e-12) {
         biasUV = vec2<f32>(du * gvv - dv * guv, dv * guu - du * guv) / det;
     }

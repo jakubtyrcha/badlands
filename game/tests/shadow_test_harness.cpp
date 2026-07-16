@@ -171,6 +171,12 @@ CpuImage RenderShadowFrame(const ShadowTestConfig& config, const Scene& world_sc
   ColorRenderTarget rt(device, kFrameWidth, kFrameHeight, wgpu::TextureFormat::R32Float);
 
   SceneRenderer renderer;
+  // NOTE: gpu_test_helpers' RequestDevice never sets requiredFeatures, so
+  // device.HasFeature(TextureFormatsTier1) is ALWAYS false here (unlike
+  // GpuContext::Initialize, which opportunistically REQUESTS the feature before
+  // creating the device). GTAO therefore never runs in this harness -- which is
+  // both correct and irrelevant: the shadow debug modes return the raw shadow
+  // term BEFORE any ambient/AO, so GTAO cannot affect what these tests measure.
   renderer.Initialize(device, queue, test_gpu.pipeline_gen.get(),
                       wgpu::TextureFormat::R32Float, kFrameWidth, kFrameHeight,
                       device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
