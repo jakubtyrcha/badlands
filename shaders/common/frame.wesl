@@ -24,9 +24,12 @@ struct FrameUniforms {
     debugFlags: u32,              // ShadowDebugMode value (0 = Off); was
                                    // `_padding0` — repurposed by T1 (directional
                                    // shadows) as the shadow-debug-mode selector.
-    // Derived shadow constants (T1: computed, unused until T3/T5 consume
-    // them for shadow-map PCF / contact shadows). xyz = (tSizeWorld,
-    // invShadowRes, sscsMaxRayWorld); w unused.
+    // Derived shadow constants. x = tSizeWorld (shadow-map texel size,
+    // world units); y = invShadowRes (1 / shadow-map resolution); z =
+    // unused (the SSCS ray length used to be precomputed here; it is now
+    // computed per-pixel in contact_shadows.wesl); w = hard-shadow debug
+    // selector (0 = PCF/production, >0.5 = single unfiltered tap;
+    // test-only — see shadow_sampling.wesl).
     shadowParams: vec4<f32>,
 }
 
@@ -270,4 +273,26 @@ fn decodeOctahedron(oct: vec2<f32>) -> vec3<f32> {
         );
     }
     return normalize(n);
+}
+
+// ============================================================================
+// Shadow Helpers
+// ============================================================================
+
+// Sun-shadow normal-offset bias length (world units): pushes a receiver-side
+// sample point off the surface along its normal by enough to clear one
+// shadow-map texel at grazing incidence. Shared by shadow-map PCF
+// (shadow_sampling.wesl's receiver-side bias) and screen-space contact
+// shadows (contact_shadows.wesl's SSCS ray length) so the factor/clamp live
+// in exactly one place.
+// NdotL: clamped grazing-angle term; tSize: shadow-map texel world size
+// (frame.shadowParams.x).
+//
+// The C++ ShadowMath::NormalOffsetLength (shadow_map.hpp) mirrors this same
+// expression on the CPU side (used by the shadow test harness as the
+// expected-bias oracle) — an unavoidable cross-language duplication since
+// WESL and C++ can't share a function; keep both in sync if this expression
+// ever changes.
+fn shadowNormalOffsetLength(NdotL: f32, tSize: f32) -> f32 {
+    return 1.5 * tSize / max(NdotL, 0.05);
 }

@@ -9,18 +9,22 @@
 // (Task T5):
 //   - all DEBUG_MODE visualization scaffolding stripped — production path
 //     only.
-//   - ray length is WORLD-SPACE and derived per-pixel (Task T5-fix):
-//     1.5*T_size/max(NdotL, 0.05) — the exact normal-offset gap
-//     (ShadowMath::NormalOffsetLength, shadow_map.hpp) the shadow map opened
+//   - ray length is WORLD-SPACE and derived per-pixel (Task T5-fix) via the
+//     shared shadowNormalOffsetLength(NdotL, T_size) helper (shaders/common/
+//     frame.wesl — also used by shadow_sampling.wesl's normal-offset bias)
+//     — the exact normal-offset gap (mirrors the CPU-side
+//     ShadowMath::NormalOffsetLength, shadow_map.hpp) the shadow map opened
 //     at THIS receiver pixel, using the real per-pixel NdotL. This is
-//     bounded above by the grazing worst case E_gap = 30*T_size
-//     (frame.shadowParams.z, T1) as NdotL -> N_clamp, so it still never
-//     exceeds the max normal-offset distance and keeps this pass from
+//     bounded above by the grazing worst case E_gap = 30*T_size (i.e.
+//     1.5*T_size / N_clamp, N_clamp = 0.05) as NdotL -> N_clamp, so it still
+//     never exceeds the max normal-offset distance and keeps this pass from
 //     painting long false-shadow streaks on open floor far from any caster
 //     — but for typical (non-grazing) pixels it is far shorter than E_gap,
 //     which concentrates the fixed 8-step budget on the real gap instead of
 //     over-marching ~15x past it, so small casters are no longer straddled
-//     between samples.
+//     between samples. (frame.shadowParams.z is unused: this used to be a
+//     precomputed worst-case constant there, but the ray length is now
+//     computed per-pixel here instead.)
 //
 // Depth convention: this pass reads the MAIN camera G-buffer depth, which
 // is REVERSED-Z (0 = far, 1 = near) — unlike the shadow map (T2), which is
@@ -28,7 +32,7 @@
 // stays reversed-Z, unchanged from sampo.
 import package::common::frame::{frame, getFullscreenTriangleVertex,
     reconstructViewSpacePosition, worldSpaceToViewSpaceDirection, isSkyDepth,
-    isValidDepth, decodeOctahedron};
+    isValidDepth, decodeOctahedron, shadowNormalOffsetLength};
 
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
@@ -74,11 +78,12 @@ fn fs_main(input: VertexOutput) -> @location(0) f32 {
     let normal = decodeOctahedron(textureLoad(normals_texture, texCoord, 0).xy);
     let NdotL = max(dot(normal, normalize(frame.sunDirection.xyz)), 0.0);
 
-    // Ray length: the actual per-pixel normal-offset gap —
-    // 1.5*T_size/max(NdotL, 0.05), mirroring ShadowMath::NormalOffsetLength
-    // (shadow_map.hpp) with the receiver's real NdotL, instead of the fixed
-    // grazing worst case E_gap = shadowParams.z. See file header for why.
-    let rayLengthWorld = 1.5 * frame.shadowParams.x / max(NdotL, 0.05);
+    // Ray length: the actual per-pixel normal-offset gap, via the shared
+    // shadowNormalOffsetLength helper (shaders/common/frame.wesl) — mirrors
+    // ShadowMath::NormalOffsetLength (shadow_map.hpp) with the receiver's
+    // real NdotL, instead of the fixed grazing worst case E_gap
+    // (shadowParams.z is unused — see file header for why).
+    let rayLengthWorld = shadowNormalOffsetLength(NdotL, frame.shadowParams.x);
     let numSteps = 8;
 
     // Transform ray start/end to clip space, then perspective-divide to NDC.

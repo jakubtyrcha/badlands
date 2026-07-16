@@ -270,9 +270,11 @@ class SceneRenderer {
   // resolution changes (see Render()).
   ShadowMap shadow_map_;
 
-  // Contact-shadow term (T2 creates + clears it; T5's SSCS compute pass
-  // writes it; T3 binds it for sampling). Window-sized R8Unorm, cleared to
-  // 1.0 (fully lit / no-op) at creation exactly like ao_texture_ above.
+  // Contact-shadow term (T2 creates it; T5's SSCS fullscreen render pass
+  // clears + writes it every frame; T3 binds it for sampling). Window-sized
+  // R8Unorm — unlike ao_texture_ above, not cleared at creation, since
+  // Pass 1.75 (Render()) unconditionally clears it before Pass 3 ever reads
+  // it (see CreateTargets).
   wgpu::Texture contact_shadow_texture_;
   wgpu::TextureView contact_shadow_view_;
 

@@ -8,9 +8,10 @@
 // flat depth bias (0.02). badlands' shadow map is conventional-Z (T2: near
 // -> 0, far -> 1, comparison sampler = LessEqual — see shadow_map.hpp) and
 // this version derives its bias from geometry instead of a tuned constant:
-//   - normal-offset length = 1.5 * T_size / max(NdotL, 0.05), identical to
-//     the CPU-side ShadowMath::NormalOffsetLength (shadow_map.hpp) — keep
-//     both in sync if this expression ever changes.
+//   - normal-offset length = shadowNormalOffsetLength(NdotL, T_size)
+//     (shaders/common/frame.wesl — shared with contact_shadows.wesl's SSCS
+//     ray length), identical to the CPU-side ShadowMath::NormalOffsetLength
+//     (shadow_map.hpp) — keep both in sync if this expression ever changes.
 //   - a per-PCF-tap receiver-plane depth-bias gradient (Isidoro, "Shadow
 //     Mapping: GPU-based Tips and Techniques", GDC 2006), computed
 //     ANALYTICALLY (T3-fix) from the G-buffer normal + frame.lightViewProj
@@ -32,15 +33,16 @@
 // uniform-buffer value (identical for every invocation this draw), not a
 // per-pixel value like the frustum test above, so it can't introduce
 // non-uniform control flow around the PCF path's textureSampleCompare.
-import package::common::frame::frame;
+import package::common::frame::{frame, shadowNormalOffsetLength};
 
 fn sampleShadowMapPCF(worldPos: vec3<f32>, normal: vec3<f32>, NdotL: f32,
                       shadowMap: texture_depth_2d, shadowSampler: sampler_comparison) -> f32 {
     // 1. Normal-offset bias (receiver-side): push the sampled point off the
     // surface along its normal so the PCF kernel doesn't self-shadow at
     // grazing angles. T_size = frame.shadowParams.x (world size of one
-    // shadow-map texel); N_clamp = 0.05.
-    let offsetLen = 1.5 * frame.shadowParams.x / max(NdotL, 0.05);
+    // shadow-map texel); N_clamp = 0.05 (baked into shadowNormalOffsetLength,
+    // shared with contact_shadows.wesl's SSCS ray length — see frame.wesl).
+    let offsetLen = shadowNormalOffsetLength(NdotL, frame.shadowParams.x);
     let biasedWorldPos = worldPos + normal * offsetLen;
 
     // 2. Project into light clip space. Conventional Z (T2, no reversed-Z

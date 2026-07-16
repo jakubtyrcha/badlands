@@ -202,10 +202,13 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
   }
 
   // === Contact-shadow target (T2) ===
-  // Window-sized R8Unorm, cleared to 1.0 (fully lit / no occlusion) at
-  // creation, exactly like the AO target above. T2 only creates + clears
-  // this (a no-op input for now) -- T5's SSCS compute pass writes it, T3
-  // binds it for the deferred pass's min(shadow map, contact) term.
+  // Window-sized R8Unorm. No create-time clear needed: T5's SSCS fullscreen
+  // render pass (Pass 1.75, Render()) unconditionally clears this same view
+  // (LoadOp::Clear) every frame, BEFORE the deferred pass (Pass 3) ever
+  // reads it @8 -- so a stale/uninitialized first frame is not observable.
+  // (Unlike ao_texture_ above, which the GTAO compute pass only
+  // conditionally writes and can be read before that -- hence its
+  // create-time clear stays.)
   wgpu::TextureDescriptor contact_desc;
   contact_desc.size = {width, height, 1};
   contact_desc.format = wgpu::TextureFormat::R8Unorm;
@@ -216,25 +219,6 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
   contact_desc.dimension = wgpu::TextureDimension::e2D;
   contact_shadow_texture_ = device_.CreateTexture(&contact_desc);
   contact_shadow_view_ = contact_shadow_texture_.CreateView();
-
-  {
-    wgpu::RenderPassColorAttachment contact_clear;
-    contact_clear.view = contact_shadow_view_;
-    contact_clear.loadOp = wgpu::LoadOp::Clear;
-    contact_clear.storeOp = wgpu::StoreOp::Store;
-    contact_clear.clearValue = {1.0, 1.0, 1.0, 1.0};
-
-    wgpu::RenderPassDescriptor clear_desc;
-    clear_desc.colorAttachmentCount = 1;
-    clear_desc.colorAttachments = &contact_clear;
-    clear_desc.depthStencilAttachment = nullptr;
-
-    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
-    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&clear_desc);
-    pass.End();
-    wgpu::CommandBuffer commands = encoder.Finish();
-    queue_.Submit(1, &commands);
-  }
 }
 
 void SceneRenderer::Resize(uint32_t width, uint32_t height) {
@@ -335,12 +319,19 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // shadow-map PCF / contact-shadow ray march). t_size already matches
   // shadow_map_.TexelWorldSize() (both = coverage_dmax / resolution); left
   // as its own computation here rather than reading the ShadowMap back, per
-  // T1's plan.
-  const float t_size = shadow_config_.coverage_dmax /
+  // T1's plan. coverage_dmax is epsilon-guarded (mirrors
+  // ShadowMap::UpdateLightMatrices' guard, shadow_map.cpp) so a
+  // misconfigured 0 coverage can't produce a zero/NaN t_size here either;
+  // unreachable in-tree (ShadowConfig defaults coverage_dmax = 128).
+  const float t_size = std::max(shadow_config_.coverage_dmax, 1e-3f) /
                         static_cast<float>(shadow_config_.resolution);
+  // .z is unused: the SSCS ray length used to be precomputed here
+  // (1.5*t_size/N_clamp, the grazing worst case) but is now computed
+  // per-pixel in contact_shadows.wesl via the real per-pixel NdotL (see
+  // shaders/common/frame.wesl's shadowNormalOffsetLength).
   frame_uniforms.shadow_params = glm::vec4(
-      t_size, 1.0f / static_cast<float>(shadow_config_.resolution),
-      1.5f * t_size / 0.05f, shadow_config_.hard_shadow_debug ? 1.0f : 0.0f);
+      t_size, 1.0f / static_cast<float>(shadow_config_.resolution), 0.0f,
+      shadow_config_.hard_shadow_debug ? 1.0f : 0.0f);
 
   FrameContext frame;
   frame.Begin(device_, queue_, frame_uniforms, min_uniform_offset_alignment_);
@@ -463,18 +454,19 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     compute_pass.End();
   }
 
-  // === Pass 1.75: Contact shadows (SSCS, T5) — short view-space ray-march
-  // along the sun direction, filling the small Peter-Panning gap the shadow
-  // map's normal-offset bias opens near contact points. Runs after the
-  // G-buffer pass (reads its depth @1 and normals @2, the latter used
-  // (T5-fix) to derive the actual per-pixel normal-offset gap to march) and
-  // before deferred lighting (which samples the result @8). Runs every
-  // frame and ALWAYS clears
-  // contact_shadow_texture_ to 1.0 first (supersedes CreateTargets'
-  // create-time one-shot clear, so there is never stale contents); the
-  // fullscreen ray-march only draws when shadow_config_.enable_contact_shadows
-  // (or if the pipeline failed to compile), leaving a bare 1.0 clear
-  // otherwise — same enable-gate pattern as Pass 0's shadow map. ===
+  // === Pass 1.75: Contact shadows (SSCS, T5) — a fullscreen render pass
+  // doing a short view-space ray-march along the sun direction, filling the
+  // small Peter-Panning gap the shadow map's normal-offset bias opens near
+  // contact points. Runs after the G-buffer pass (reads its depth @1 and
+  // normals @2, the latter used (T5-fix) to derive the actual per-pixel
+  // normal-offset gap to march) and before deferred lighting (which samples
+  // the result @8). Runs every frame and ALWAYS clears contact_shadow_texture_
+  // to 1.0 first (the only clear it gets -- see CreateTargets, which creates
+  // but no longer separately clears it), so there is never stale contents;
+  // the fullscreen ray-march only draws when
+  // shadow_config_.enable_contact_shadows (or if the pipeline failed to
+  // compile), leaving a bare 1.0 clear otherwise — same enable-gate pattern
+  // as Pass 0's shadow map. ===
   {
     RenderPipelineDeclaration decl;
     decl.shader_path = "passes/contact_shadows";

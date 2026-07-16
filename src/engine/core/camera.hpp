@@ -77,13 +77,17 @@ struct UniformData {
   // Rendering option flags
   uint32_t enable_gtao;       // 1 = AO enabled, 0 = disabled (use 1.0 for AO)
   uint32_t tonemap_mode;      // TonemapMode enum value
-  uint32_t output_is_linear;  // 1 = RGBA16Float (linear output), 0 = sRGB
+  uint32_t output_is_linear;  // 1 = linear target (RGBA16Float or
+                              // R32Float), 0 = sRGB
   uint32_t debug_flags = 0u;  // ShadowDebugMode value (0 = Off); was
                               // `padding0` — repurposed by T1 (directional
                               // shadows) as the shadow-debug-mode selector.
-  // Derived shadow constants (T1: computed, unused until T3/T5 consume
-  // them for shadow-map PCF / contact shadows). xyz = (tSizeWorld,
-  // invShadowRes, sscsMaxRayWorld); w unused.
+  // Derived shadow constants. x = tSizeWorld (shadow-map texel size, world
+  // units); y = invShadowRes (1 / shadow-map resolution); z = unused (the
+  // SSCS ray length used to be precomputed here; it is now computed
+  // per-pixel in contact_shadows.wesl); w = hard-shadow debug selector
+  // (0 = PCF/production, >0.5 = single unfiltered tap; test-only — see
+  // shaders/common/shadow_sampling.wesl and ShadowConfig::hard_shadow_debug).
   glm::vec4 shadow_params{0.0f};
 };
 

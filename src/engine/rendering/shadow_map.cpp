@@ -110,8 +110,15 @@ void ShadowMap::UpdateLightMatrices(const glm::vec3& sun_dir,
                                     const glm::vec3& center_world,
                                     float coverage_dmax, uint32_t resolution,
                                     float backward_extension) {
-  const float t_size =
-      coverage_dmax / static_cast<float>(std::max(resolution, 1u));
+  // Guard both divide operands: resolution against 0 (below) and
+  // coverage_dmax against 0 (mirrored at the same divide site in
+  // scene_renderer.cpp's shadow_params computation) -- coverage_dmax == 0
+  // would zero t_size, which the texel-snap below then divides by
+  // (cx/t_size etc.), producing a NaN light matrix. Unreachable in-tree
+  // (ShadowConfig defaults coverage_dmax = 128), but closes the asymmetry
+  // with the existing resolution guard.
+  const float t_size = std::max(coverage_dmax, 1e-3f) /
+                        static_cast<float>(std::max(resolution, 1u));
   const float half = 0.5f * coverage_dmax;
 
   // Shadow camera looks FROM the sun TOWARD the scene; sun_dir points
