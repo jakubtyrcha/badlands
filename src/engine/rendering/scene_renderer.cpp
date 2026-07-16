@@ -18,8 +18,11 @@
 #include <array>
 #include <cstdint>
 
+#include <iostream>
+
 #include <spdlog/spdlog.h>
 
+#include "core/profiler.hpp"
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
 #include "engine/rendering/context/scene_context.hpp"
@@ -229,16 +232,28 @@ void SceneRenderer::Resize(uint32_t width, uint32_t height) {
   CreateTargets(width, height);
 }
 
+void SceneRenderer::EnableGpuProfiling(wgpu::Instance instance,
+                                       bool timestamp_supported) {
+  gpu_timer_.Initialize(instance, device_, timestamp_supported);
+}
+
 void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
                            const SceneContext& scene,
                            wgpu::TextureView surface_view) {
   if (!surface_view || width_ == 0 || height_ == 0 || !pipeline_generator_) {
     return;
   }
+  PROFILE_SCOPE("SceneRenderer::Render");
+  gpu_timer_.BeginFrame();
 
   // Refresh the prefiltered specular env if the scene's skybox changed. Does
   // its own encoder/submit (queue-ordered before this frame's work below).
-  UpdateIbl(scene);
+  // (The GGX prefilter fires here whenever the daylight re-bake bumped the
+  // skybox generation -- watch this marker for the IBL cost.)
+  {
+    PROFILE_SCOPE("UpdateIbl");
+    UpdateIbl(scene);
+  }
 
   // World camera-offsetting: the view matrix has the camera fixed at the
   // origin (pure rotation, no translation) for float precision — geometry is
@@ -360,6 +375,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = nullptr;
     desc.depthStencilAttachment = &shadow_depth_attachment;
 
+    desc.timestampWrites = gpu_timer_.BeginPass("shadow");
     RenderPassContext pass = frame.BeginRenderPass(desc);
     if (shadow_config_.enable_shadow_map) {
       RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
@@ -405,6 +421,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = color_attachments.data();
     desc.depthStencilAttachment = &depth_attachment;
 
+    desc.timestampWrites = gpu_timer_.BeginPass("gbuffer");
     RenderPassContext pass = frame.BeginRenderPass(desc);
     RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
                          RenderPassType::kGBuffer, material_instance_cache_);
@@ -446,7 +463,8 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     const uint32_t dispatch_x = (width_ + ws_x - 1) / ws_x;
     const uint32_t dispatch_y = (height_ + ws_y - 1) / ws_y;
 
-    wgpu::ComputePassEncoder compute_pass = frame.BeginComputePass();
+    wgpu::ComputePassEncoder compute_pass =
+        frame.BeginComputePass(gpu_timer_.BeginPass("gtao"));
     compute_pass.SetPipeline(gtao_pipeline->pipeline);
     compute_pass.SetBindGroup(0, gtao_group0, 0, nullptr);
     compute_pass.SetBindGroup(1, gtao_group1, 0, nullptr);
@@ -490,6 +508,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = &color_attachment;
     desc.depthStencilAttachment = nullptr;
 
+    desc.timestampWrites = gpu_timer_.BeginPass("contact");
     RenderPassContext pass = frame.BeginRenderPass(desc);
     if (compiled && shadow_config_.enable_contact_shadows) {
       // Group 0: frame UBO @0, gbuffer depth @1, gbuffer normals @2 (T5-fix:
@@ -538,6 +557,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = &color_attachment;
     desc.depthStencilAttachment = nullptr;  // no depth: fills the whole target
 
+    desc.timestampWrites = gpu_timer_.BeginPass("skybox");
     RenderPassContext pass = frame.BeginRenderPass(desc);
     RenderSkybox(pass, frame, *pipeline_generator_, accumulation_format_,
                  scene.skybox_cubemap, fallback_cube_sampler_);
@@ -622,6 +642,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       desc.colorAttachments = &color_attachment;
       desc.depthStencilAttachment = nullptr;  // reads depth as a texture
 
+      desc.timestampWrites = gpu_timer_.BeginPass("lighting");
       RenderPassContext pass = frame.BeginRenderPass(desc);
       pass.SetPipeline(compiled->pipeline);
       pass.SetBindGroup(0, bind_group);
@@ -645,6 +666,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.colorAttachments = &color_attachment;
     desc.depthStencilAttachment = nullptr;
 
+    desc.timestampWrites = gpu_timer_.BeginPass("tonemap");
     RenderPassContext pass = frame.BeginRenderPass(desc);
 
     if (debug_mode_ != GBufferDebugMode::None) {
@@ -686,8 +708,18 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     pass.End();
   }
 
-  wgpu::CommandBuffer commands = frame.End();
-  queue_.Submit(1, &commands);
+  // Resolve this frame's GPU timestamps onto the frame encoder before submit.
+  gpu_timer_.ResolveFrame(frame.GetEncoder());
+
+  {
+    PROFILE_SCOPE("frame_submit");  // Finish encoding + queue submit
+    wgpu::CommandBuffer commands = frame.End();
+    queue_.Submit(1, &commands);
+  }
+
+  // Advance the async per-pass GPU-timing readback (non-blocking) and print a
+  // breakdown when one completes; a cheap no-op when disabled.
+  gpu_timer_.EndFrame(std::cerr);
 }
 
 }  // namespace badlands

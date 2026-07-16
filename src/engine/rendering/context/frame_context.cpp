@@ -187,8 +187,10 @@ RenderPassContext FrameContext::BeginRenderPass(
   return RenderPassContext(encoder);
 }
 
-wgpu::ComputePassEncoder FrameContext::BeginComputePass() {
+wgpu::ComputePassEncoder FrameContext::BeginComputePass(
+    const wgpu::PassTimestampWrites* timestamp_writes) {
   wgpu::ComputePassDescriptor desc;
+  desc.timestampWrites = timestamp_writes;
   return encoder_.BeginComputePass(&desc);
 }
 

@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -11,6 +12,8 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 
+#include "core/profiler.hpp"
+#include "engine/app/fixed_timestep.hpp"
 #include "engine/app/screenshot.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
 #include "engine/ui/imgui_impl_wgpu_custom.hpp"
@@ -65,11 +68,14 @@ constexpr const char* kDefaultRecordDir = "recordings";
 int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   std::string screenshot_path;
   std::string record_dir;
+  float screenshot_time = 0.5f;  // --time <t01>: time-of-day for --screenshot (noon)
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
       screenshot_path = argv[++i];
     } else if (std::strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
       record_dir = argv[++i];
+    } else if (std::strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
+      screenshot_time = static_cast<float>(std::atof(argv[++i]));
     }
   }
   const bool screenshot_mode = !screenshot_path.empty();
@@ -97,6 +103,10 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   renderer_.Initialize(gpu_.GetDevice(), gpu_.GetQueue(), pipeline_gen_.get(),
                        gpu_.GetSurfaceFormat(), static_cast<uint32_t>(width),
                        static_cast<uint32_t>(height), gpu_.HasR8UnormStorage());
+#ifdef BADLANDS_PROFILING
+  // Per-pass GPU timing in the live window (prints alongside the CPU profile).
+  renderer_.EnableGpuProfiling(gpu_.GetInstance(), gpu_.HasTimestampQuery());
+#endif
 
   // ImGui is windowed-path only: screenshot mode renders offscreen via
   // SaveScreenshot() and must stay ImGui-free.
@@ -130,7 +140,7 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     view_->OnResize(config_.width, config_.height);
     bool ok = SaveScreenshot(gpu_, *pipeline_gen_, *view_, shot_w, shot_h,
                              screenshot_path, renderer_.GetDebugMode(),
-                             renderer_.GetShadowDebugMode());
+                             renderer_.GetShadowDebugMode(), screenshot_time);
     return ok ? 0 : 1;
   }
 
@@ -140,6 +150,9 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
 
   const uint64_t perf_freq = SDL_GetPerformanceFrequency();
   uint64_t last_time = SDL_GetPerformanceCounter();
+#ifdef BADLANDS_PROFILING
+  double profile_report_accum = 0.0;  // dump the scope profile every ~2 s
+#endif
 
   bool render_ok_logged = false;
   bool running = true;
@@ -178,13 +191,18 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     }
 
     const uint64_t current_time = SDL_GetPerformanceCounter();
-    const float dt = perf_freq > 0
-                         ? static_cast<float>(current_time - last_time) /
-                               static_cast<float>(perf_freq)
-                         : (1.0f / 60.0f);
+    const double frame_dt = perf_freq > 0
+                                ? static_cast<double>(current_time - last_time) /
+                                      static_cast<double>(perf_freq)
+                                : (1.0 / 60.0);
     last_time = current_time;
 
-    view_->Update(dt, SDL_GetKeyboardState(nullptr));
+    // The view advances its own SimClock (sim speed, day/night, fixed game
+    // ticks) from this dt. Real wall time in the live window; a fixed step
+    // while recording so captures are deterministic (bypasses the wall clock).
+    const float pres_dt =
+        recorder_.active() ? kPresentationDt : static_cast<float>(frame_dt);
+    view_->Update(pres_dt, SDL_GetKeyboardState(nullptr));
 
     wgpu::TextureView surface = gpu_.AcquireSurfaceTexture();
     if (!surface) continue;
@@ -245,6 +263,18 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
                              renderer_.GetDebugMode());
       view_->OnResize(width, height);
     }
+
+#ifdef BADLANDS_PROFILING
+    // Dump the accumulated scope profile to stderr roughly every 2 s. Called
+    // here at end-of-frame, after every PROFILE_SCOPE this iteration has
+    // closed, so the reported tree is well-formed. Report() also resets the
+    // buffers, so each dump is a ~2 s window.
+    profile_report_accum += frame_dt;
+    if (profile_report_accum >= 2.0) {
+      profiler::ReportToStderr();
+      profile_report_accum = 0.0;
+    }
+#endif
 
     if (!render_ok_logged) {
       render_ok_logged = true;

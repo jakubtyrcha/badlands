@@ -29,6 +29,17 @@ FetchContent_MakeAvailable(Corrosion)
 FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# Taskflow (header-only task-based parallelism, from sampo). Backs the shared
+# thread pool in src/core/parallel.* (e.g. the multithreaded sky cube bake).
+set(TF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(TF_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    taskflow
+    GIT_REPOSITORY https://github.com/taskflow/taskflow.git
+    GIT_TAG        v3.6.0
+)
+FetchContent_MakeAvailable(taskflow)
+
 # wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
 # The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
 # the `wesl` 0.2 crate, and Corrosion invokes `cargo rustc --package <name>`,
@@ -97,6 +108,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/passes/render_gbuffer_debug.cpp
     src/engine/rendering/gbuffer.cpp
     src/engine/rendering/shadow_map.cpp
+    src/engine/rendering/gpu_timer.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
@@ -105,6 +117,8 @@ add_library(badlands_engine STATIC
     # game-agnostic (src/core) but its .cpp routes PNG I/O through the assets
     # crate, so it compiles here where `assets` is linked.
     src/core/util/cpu_image.cpp
+    src/core/profiler.cpp
+    src/core/parallel.cpp
     src/engine/rendering/color_render_target.cpp
     src/engine/rendering/texture_readback.cpp
     # Task S2.E: shared scene-building helper (TexturedMeshResult + a
@@ -113,6 +127,8 @@ add_library(badlands_engine STATIC
     src/engine/rendering/scene_build.cpp
     src/engine/rendering/cubemap_builder.cpp
     src/engine/rendering/light_environment.cpp
+    src/engine/rendering/hosek_wilkie.cpp
+    src/engine/rendering/daylight.cpp
     src/engine/rendering/brdf_lut.cpp
     src/engine/rendering/prefiltered_cubemap.cpp
     src/engine/app/sdl_viewer_app.cpp
@@ -138,6 +154,13 @@ target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets n
 # in the wrong place. Applies to all engine/app sources compiled into
 # `badlands_engine` (PUBLIC so it also applies to the executables' own TUs).
 target_compile_definitions(badlands_engine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+# Lightweight CPU scope profiler (PROFILE_SCOPE markers; ported from sampo).
+# PUBLIC so the define reaches the executables' own TUs (GameView etc.) that
+# place markers. Compiled out entirely when OFF.
+option(BADLANDS_SCOPE_PROFILING "Enable the CPU scope profiler (PROFILE_SCOPE)" ON)
+if(BADLANDS_SCOPE_PROFILING)
+    target_compile_definitions(badlands_engine PUBLIC BADLANDS_PROFILING)
+endif()
 target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
@@ -148,6 +171,7 @@ target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/src/crates/nav/include
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+    ${taskflow_SOURCE_DIR}
 )
 
 # badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog + the
@@ -280,6 +304,23 @@ if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_daylight_tests: Catch2 suite for the day/night system — the pure-CPU
+# Hosek-Wilkie RGB port (golden values vs the reference), the ComputeDaylight
+# sun/moon/handover math, and the fixed-timestep accumulator. Pure CPU (no GPU),
+# modeled on badlands_geometry_tests; links badlands_engine for daylight/HW.
+add_executable(badlands_daylight_tests
+    game/tests/daylight_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_daylight_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_daylight_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_daylight_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_daylight_tests COMMAND badlands_daylight_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_shadow_test: Task T4's Catch2 suite for the directional-shadow
 # system (T2's ShadowMap + T3's deferred sampling) -- a headless GPU render

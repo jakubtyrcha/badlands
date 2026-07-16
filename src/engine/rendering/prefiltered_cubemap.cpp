@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 
 #include <spdlog/spdlog.h>
@@ -31,6 +32,7 @@ bool PrefilteredCubemap::Generate(wgpu::Device device, wgpu::Queue queue,
     spdlog::error("PrefilteredCubemap::Generate: invalid arguments");
     return false;
   }
+  const auto t0 = std::chrono::steady_clock::now();
   face_size_ = face_size;
   mip_count_ = mip_count;
 
@@ -148,8 +150,18 @@ bool PrefilteredCubemap::Generate(wgpu::Device device, wgpu::Queue queue,
   wgpu::CommandBuffer commands = encoder.Finish();
   queue.Submit(1, &commands);
 
-  spdlog::info("Prefiltered cubemap generated ({}x{}, {} mips)", face_size,
-               face_size, mip_count);
+  // This runs on every daylight re-bake (throttled, ~10 Hz), so only log the
+  // notable/slow cases (e.g. the first call, which compiles the prefilter
+  // pipeline) rather than spamming the log each frame. Threshold on CPU encode
+  // time; steady-state re-prefilters are sub-millisecond.
+  const double elapsed_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - t0)
+          .count();
+  if (elapsed_ms >= 10.0) {
+    spdlog::info("Prefiltered cubemap generated ({}x{}, {} mips, {:.1f} ms)",
+                 face_size, face_size, mip_count, elapsed_ms);
+  }
   return true;
 }
 

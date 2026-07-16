@@ -34,6 +34,7 @@
 #include "engine/rendering/brdf_lut.hpp"
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/material/material_instance_cache.hpp"
+#include "engine/rendering/gpu_timer.hpp"
 #include "engine/rendering/prefiltered_cubemap.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/shadow_map.hpp"
@@ -137,6 +138,11 @@ class SceneRenderer {
                   GpuPipelineGenerator* pipeline_gen,
                   wgpu::TextureFormat surface_format, uint32_t width,
                   uint32_t height, bool has_r8unorm_storage);
+
+  // Enables per-pass GPU timing (GpuTimer). Windowed/profiling path only; a
+  // no-op unless the device supports timestamp queries. `instance` is pumped
+  // while awaiting the periodic timestamp readback.
+  void EnableGpuProfiling(wgpu::Instance instance, bool timestamp_supported);
 
   // Recreates the HDR + G-buffer targets at a new size (e.g. on
   // SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED). No-op if unchanged.
@@ -248,6 +254,9 @@ class SceneRenderer {
   wgpu::TextureView ibl_source_view_;
   uint32_t ibl_source_generation_ = 0;
   bool has_prefiltered_ = false;
+
+  // Per-pass GPU timing (inert unless EnableGpuProfiling ran).
+  GpuTimer gpu_timer_;
 
   // === G-buffer debug (S2.B4) ===
   GBufferDebugMode debug_mode_ = GBufferDebugMode::None;
