@@ -50,8 +50,9 @@ class MapViewView : public AppView {
   LightEnvironment env_;
   CubemapBuilder sky_cube_;
 
-  wgpu::TextureView biome_array_;   // 8-layer texture_2d_array (kept alive here)
-  wgpu::Sampler terrain_sampler_;
+  // Per-biome PBR texture arrays (albedo/normal/arm), layer index = Biome enum
+  // value. Held here to keep the GPU textures alive for the material's lifetime.
+  MaterialLibrary::TerrainArrays terrain_arrays_;
 
   entt::registry registry_;
   SceneContext scene_context_;

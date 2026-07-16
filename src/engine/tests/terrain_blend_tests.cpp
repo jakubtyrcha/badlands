@@ -92,10 +92,11 @@ void AddTerrainQuad(entt::registry& reg, MaterialInstanceFactory* factory,
   reg.emplace<MaterialFactoryComponent>(e, std::move(fmc));
 }
 
-// Render the registry top-down and read back the unlit albedo debug view.
-CpuImage RenderAlbedo(wgpu::Instance instance, wgpu::Device device,
-                      wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-                      entt::registry& registry) {
+// Render the registry top-down and read back the selected G-buffer debug view
+// (Albedo = unlit albedo; Normals = decoded world normal as n*0.5+0.5).
+CpuImage RenderDebug(wgpu::Instance instance, wgpu::Device device,
+                     wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
+                     entt::registry& registry, GBufferDebugMode mode) {
   Camera camera;  // top-down, centred on the quad, quad fills most of the frame
   camera.position = glm::vec3(0.0f, 10.0f, 0.0f);
   camera.direction = glm::vec3(0.0f, -1.0f, 0.0f);
@@ -121,7 +122,7 @@ CpuImage RenderAlbedo(wgpu::Instance instance, wgpu::Device device,
   renderer.Initialize(device, queue, &pipeline_gen,
                       wgpu::TextureFormat::RGBA8Unorm, kW, kH,
                       /*has_r8unorm_storage=*/false);
-  renderer.SetDebugMode(GBufferDebugMode::Albedo);
+  renderer.SetDebugMode(mode);
   renderer.Render(camera, registry, scene, target.CreateView());
 
   TextureReadback readback(instance, device, queue);
@@ -169,7 +170,12 @@ TEST_CASE("terrain_blend: per-vertex R/G/B blend via the albedo debug view") {
       255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255};
   wgpu::TextureView array_view =
       CreateSolidColorArray(g.device, g.queue, layer_colors.data(), 3);
-  DeferredMaterial mat = lib.TerrainBlend(array_view, LinearSampler(g.device));
+  // Only albedo is overridden; normal/arm stay null so they resolve to the
+  // factory's e2DArray defaults (flat_normal / default_arm) -- which keeps this
+  // test about the albedo blend alone.
+  MaterialLibrary::TerrainArrays arrays;
+  arrays.albedo.view = array_view;
+  DeferredMaterial mat = lib.TerrainBlend(arrays);
   REQUIRE(mat.factory != nullptr);
 
   entt::registry registry;
@@ -179,8 +185,8 @@ TEST_CASE("terrain_blend: per-vertex R/G/B blend via the albedo debug view") {
                   glm::vec4(1.0f / 3, 1.0f / 3, 1.0f / 3, 0)},
                  {0, 1, 2, 0});
 
-  CpuImage image = RenderAlbedo(g.instance, g.device, g.queue, pipeline_gen,
-                                registry);
+  CpuImage image = RenderDebug(g.instance, g.device, g.queue, pipeline_gen,
+                               registry, GBufferDebugMode::Albedo);
   image.WritePng("terrain_blend_albedo.png");
 
   // Center lies on the B(green)->C(blue) triangulation edge: a 50/50 blend.
@@ -221,8 +227,8 @@ TEST_CASE("terrain_blend: missing albedo_array binds the default (no override)")
                   glm::vec4(1, 0, 0, 0), glm::vec4(1, 0, 0, 0)},
                  {0, 0, 0, 0});
 
-  CpuImage image = RenderAlbedo(g.instance, g.device, g.queue, pipeline_gen,
-                                registry);
+  CpuImage image = RenderDebug(g.instance, g.device, g.queue, pipeline_gen,
+                               registry, GBufferDebugMode::Albedo);
 
   // The quad rendered the default gray albedo (not the background clear).
   const CpuImage::Color c = image.GetPixel(kW / 2, kH / 2);
@@ -230,4 +236,93 @@ TEST_CASE("terrain_blend: missing albedo_array binds the default (no override)")
   CHECK(std::abs(int(c.r) - 128) < 45);
   CHECK(std::abs(int(c.g) - 128) < 45);
   CHECK(std::abs(int(c.b) - 128) < 45);
+}
+
+TEST_CASE("terrain_blend: missing normal_array defaults to FLAT, not gray") {
+  // Regression: GetDefaultTextureForSlot used to return the neutral-gray
+  // e2DArray for EVERY kArray slot regardless of the slot's default_texture
+  // name. Gray (128,128,128) decodes to a tangent normal of ~(0.004,0.004,0.004)
+  // which normalizes to ~(0.577,0.577,0.577) -- a 45-degree skew -- so flat
+  // ground came out shaded as though it were tilted. The normal slot must fall
+  // back to flat_normal (128,128,255) => tangent normal ~(0,0,1).
+  TestGpu g = MakeGpu();
+  GpuPipelineGenerator pipeline_gen(g.device, FindShaderDirectory());
+  MaterialLibrary lib;
+  REQUIRE(lib.Initialize(g.device, g.queue, &pipeline_gen));
+
+  // Albedo only; normal/arm resolve to their defaults.
+  const std::array<uint8_t, 4> white = {255, 255, 255, 255};
+  MaterialLibrary::TerrainArrays arrays;
+  arrays.albedo.view = CreateSolidColorArray(g.device, g.queue, white.data(), 1);
+  DeferredMaterial mat = lib.TerrainBlend(arrays);
+
+  entt::registry registry;
+  AddTerrainQuad(registry, mat.factory, mat.params,
+                 {glm::vec4(1, 0, 0, 0), glm::vec4(1, 0, 0, 0),
+                  glm::vec4(1, 0, 0, 0), glm::vec4(1, 0, 0, 0)},
+                 {0, 0, 0, 0});
+
+  CpuImage image = RenderDebug(g.instance, g.device, g.queue, pipeline_gen,
+                               registry, GBufferDebugMode::Normals);
+
+  // Flat +Y ground => world normal (0,1,0) => debug n*0.5+0.5 = (0.5,1.0,0.5).
+  // With the gray default this reads ~(0.79,0.79,0.79) => (201,201,201).
+  const CpuImage::Color c = image.GetPixel(kW / 2, kH / 2);
+  INFO("center normal RGBA = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  CHECK(int(c.g) > 240);                 // +Y dominant
+  CHECK(std::abs(int(c.r) - 128) < 20);  // no X skew
+  CHECK(std::abs(int(c.b) - 128) < 20);  // no Z skew
+}
+
+TEST_CASE("terrain_blend: derived tangent basis orients the normal map") {
+  // kTerrainBlend carries no tangent/UV, so the shader derives the frame from
+  // the planar world-XZ projection: dP/du = +X, dP/dv = +Z. This pins BOTH axes
+  // on flat +Y ground:
+  //   tangent normal +u (255,128,128) -> world +X
+  //   tangent normal +v (128,255,128) -> world +Z   <-- the sign that's easy to
+  // get backwards: B = cross(T,N) gives +Z, while cross(N,T) would give -Z and
+  // silently invert the normal map's green channel.
+  TestGpu g = MakeGpu();
+  GpuPipelineGenerator pipeline_gen(g.device, FindShaderDirectory());
+  MaterialLibrary lib;
+  REQUIRE(lib.Initialize(g.device, g.queue, &pipeline_gen));
+
+  // Layer 0 = +u normal, layer 1 = +v normal. The albedo array must have the
+  // same layer count: the shader clamps the array index by
+  // textureNumLayers(albedo_array).
+  const std::array<uint8_t, 8> normal_layers = {255, 128, 128, 255,
+                                                128, 255, 128, 255};
+  const std::array<uint8_t, 8> albedo_layers = {255, 255, 255, 255,
+                                                255, 255, 255, 255};
+  MaterialLibrary::TerrainArrays arrays;
+  arrays.albedo.view =
+      CreateSolidColorArray(g.device, g.queue, albedo_layers.data(), 2);
+  arrays.normal.view =
+      CreateSolidColorArray(g.device, g.queue, normal_layers.data(), 2);
+  DeferredMaterial mat = lib.TerrainBlend(arrays);
+
+  auto render_layer = [&](uint32_t layer) {
+    entt::registry registry;
+    AddTerrainQuad(registry, mat.factory, mat.params,
+                   {glm::vec4(1, 0, 0, 0), glm::vec4(1, 0, 0, 0),
+                    glm::vec4(1, 0, 0, 0), glm::vec4(1, 0, 0, 0)},
+                   {layer, layer, layer, layer});
+    return RenderDebug(g.instance, g.device, g.queue, pipeline_gen, registry,
+                       GBufferDebugMode::Normals);
+  };
+
+  // +u tangent normal -> world +X => debug (1.0, 0.5, 0.5) => r high.
+  const CpuImage::Color u = render_layer(0).GetPixel(kW / 2, kH / 2);
+  INFO("+u normal RGBA = " << int(u.r) << "," << int(u.g) << "," << int(u.b));
+  CHECK(int(u.r) > 240);
+  CHECK(std::abs(int(u.g) - 128) < 25);
+  CHECK(std::abs(int(u.b) - 128) < 25);
+
+  // +v tangent normal -> world +Z => debug (0.5, 0.5, 1.0) => b high. A flipped
+  // bitangent would point -Z and read b ~= 0 here.
+  const CpuImage::Color v = render_layer(1).GetPixel(kW / 2, kH / 2);
+  INFO("+v normal RGBA = " << int(v.r) << "," << int(v.g) << "," << int(v.b));
+  CHECK(int(v.b) > 240);
+  CHECK(std::abs(int(v.r) - 128) < 25);
+  CHECK(std::abs(int(v.g) - 128) < 25);
 }

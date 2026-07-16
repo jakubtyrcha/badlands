@@ -297,6 +297,22 @@ StandardMaterialFactory::GetDefaultTextures() {
       gray_layers[i * 4 + 2] = 128;
       gray_layers[i * 4 + 3] = 255;
     }
+    // Same 8-layer shape, per-slot neutral values (see DefaultTextures).
+    auto uniform_layers = [](uint8_t r, uint8_t g, uint8_t b) {
+      std::array<uint8_t, 8 * 4> layers{};
+      for (int i = 0; i < 8; ++i) {
+        layers[i * 4 + 0] = r;
+        layers[i * 4 + 1] = g;
+        layers[i * 4 + 2] = b;
+        layers[i * 4 + 3] = 255;
+      }
+      return layers;
+    };
+    const std::array<uint8_t, 8 * 4> flat_normal_layers =
+        uniform_layers(128, 128, 255);
+    // ARM: R=AO=1, G=roughness~0.9 (229/255, matching terrain's old constant),
+    // B=metallic=0.
+    const std::array<uint8_t, 8 * 4> arm_layers = uniform_layers(255, 229, 0);
     default_textures_ = DefaultTextures{
         .white = CreateSolidColor1x1(device_, queue_, 255, 255, 255, 255),
         .flat_normal = CreateSolidColor1x1(device_, queue_, 128, 128, 255, 255),
@@ -313,6 +329,9 @@ StandardMaterialFactory::GetDefaultTextures() {
             CreateSolidColorCubemap1x1(device_, queue_, 128, 128, 128, 255),
         .array_default =
             CreateSolidColorArray(device_, queue_, gray_layers.data(), 8),
+        .array_flat_normal =
+            CreateSolidColorArray(device_, queue_, flat_normal_layers.data(), 8),
+        .array_arm = CreateSolidColorArray(device_, queue_, arm_layers.data(), 8),
         .sampler = default_nearest_sampler_,
     };
   }
@@ -323,9 +342,11 @@ wgpu::TextureView StandardMaterialFactory::GetDefaultTextureForSlot(
     const std::string& default_name, TextureType type) {
   auto& defaults = GetDefaultTextures();
   if (type == TextureType::kArray) {
-    // texture_2d_array slots: one neutral-gray array default (see
-    // GetDefaultTextures); the name doesn't select a variant here.
-    return defaults.array_default;
+    // texture_2d_array slots. The name DOES select a variant: binding the gray
+    // array to a normal slot would decode to a degenerate (0,0,0) normal.
+    if (default_name == "flat_normal") return defaults.array_flat_normal;
+    if (default_name == "default_arm") return defaults.array_arm;
+    return defaults.array_default;  // white/gray/unknown -> neutral gray
   }
   if (type == TextureType::kCubemap) {
     if (default_name == "white") return defaults.cube_white;

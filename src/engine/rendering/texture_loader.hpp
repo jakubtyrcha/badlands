@@ -14,6 +14,7 @@
 // runs, same as normalmapped.wesl being inert).
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <dawn/webgpu_cpp.h>
 
@@ -94,5 +95,21 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
                                       GpuPipelineGenerator& pipeline_gen,
                                       uint32_t width, uint32_t height,
                                       const uint8_t* rgba);
+
+// Packs N already-mipped 2D textures into one RGBA8Unorm texture ARRAY (layer i
+// = layers[i]) and returns an e2DArray view over all layers + mip levels.
+//
+// Every source mip is copied straight across (CopyTextureToTexture), so the mip
+// chains the sources already carry are reused as-is -- this deliberately avoids
+// needing array-aware mip generation (the render-path kernel
+// shaders/compute/mip_generator_render.wesl hardcodes `out.layer = 0` and so
+// cannot write layers > 0). Sources must therefore have been created with
+// CopySrc -- UploadTexture2DWithMips does that.
+//
+// All layers must share identical width/height/mipLevelCount; a mismatch is an
+// error (returns a null LoadedTexture after logging), because a texture array
+// has one size for every layer. `layers` must be non-empty.
+LoadedTexture PackTexturesIntoArray(wgpu::Device device, wgpu::Queue queue,
+                                    const std::vector<wgpu::Texture>& layers);
 
 }  // namespace badlands

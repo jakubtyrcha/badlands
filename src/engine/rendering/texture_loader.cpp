@@ -120,9 +120,11 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
   wgpu::TextureDescriptor tex_desc;
   tex_desc.size = {width, height, 1};
   tex_desc.format = wgpu::TextureFormat::RGBA8Unorm;
-  tex_desc.usage = wgpu::TextureUsage::TextureBinding |
-                   wgpu::TextureUsage::RenderAttachment |
-                   wgpu::TextureUsage::CopyDst;
+  // CopySrc so the finished mip chain can be copied into a texture-array layer
+  // (PackTexturesIntoArray) without regenerating mips per layer.
+  tex_desc.usage =
+      wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment |
+      wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc;
   tex_desc.mipLevelCount = mip_level_count;
   tex_desc.sampleCount = 1;
   tex_desc.dimension = wgpu::TextureDimension::e2D;
@@ -230,6 +232,83 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
   wgpu::TextureView view = texture.CreateView(&full_view_desc);
 
   return LoadedTexture{.texture = texture, .view = view};
+}
+
+LoadedTexture PackTexturesIntoArray(wgpu::Device device, wgpu::Queue queue,
+                                    const std::vector<wgpu::Texture>& layers) {
+  if (layers.empty()) {
+    spdlog::error("PackTexturesIntoArray: no layers");
+    return {};
+  }
+
+  // A texture array has ONE size for every layer -- validate before copying
+  // rather than letting Dawn reject a mismatched copy mid-loop.
+  const uint32_t width = layers[0].GetWidth();
+  const uint32_t height = layers[0].GetHeight();
+  const uint32_t mip_level_count = layers[0].GetMipLevelCount();
+  for (size_t i = 0; i < layers.size(); ++i) {
+    if (!layers[i]) {
+      spdlog::error("PackTexturesIntoArray: layer {} is null", i);
+      return {};
+    }
+    if (layers[i].GetWidth() != width || layers[i].GetHeight() != height ||
+        layers[i].GetMipLevelCount() != mip_level_count) {
+      spdlog::error(
+          "PackTexturesIntoArray: layer {} is {}x{} with {} mips, expected "
+          "{}x{} with {} mips (every array layer must match)",
+          i, layers[i].GetWidth(), layers[i].GetHeight(),
+          layers[i].GetMipLevelCount(), width, height, mip_level_count);
+      return {};
+    }
+  }
+
+  wgpu::TextureDescriptor tex_desc;
+  tex_desc.size = {width, height, static_cast<uint32_t>(layers.size())};
+  tex_desc.format = wgpu::TextureFormat::RGBA8Unorm;
+  tex_desc.usage =
+      wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+  tex_desc.mipLevelCount = mip_level_count;
+  tex_desc.sampleCount = 1;
+  tex_desc.dimension = wgpu::TextureDimension::e2D;
+  wgpu::Texture array_texture = device.CreateTexture(&tex_desc);
+  if (!array_texture) {
+    spdlog::error("PackTexturesIntoArray: failed to create {}x{}x{} array",
+                  width, height, layers.size());
+    return {};
+  }
+
+  // Copy every source mip straight across -- the sources already carry full mip
+  // chains (UploadTexture2DWithMips), so no array-aware mip generation needed.
+  wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+  for (uint32_t layer = 0; layer < layers.size(); ++layer) {
+    for (uint32_t mip = 0; mip < mip_level_count; ++mip) {
+      wgpu::TexelCopyTextureInfo src;
+      src.texture = layers[layer];
+      src.mipLevel = mip;
+      src.origin = {0, 0, 0};
+
+      wgpu::TexelCopyTextureInfo dst;
+      dst.texture = array_texture;
+      dst.mipLevel = mip;
+      dst.origin = {0, 0, layer};  // z selects the array layer
+
+      const wgpu::Extent3D extent = {std::max(1u, width >> mip),
+                                     std::max(1u, height >> mip), 1};
+      encoder.CopyTextureToTexture(&src, &dst, &extent);
+    }
+  }
+  wgpu::CommandBuffer commands = encoder.Finish();
+  queue.Submit(1, &commands);
+
+  wgpu::TextureViewDescriptor view_desc;
+  view_desc.baseMipLevel = 0;
+  view_desc.mipLevelCount = mip_level_count;
+  view_desc.baseArrayLayer = 0;
+  view_desc.arrayLayerCount = static_cast<uint32_t>(layers.size());
+  view_desc.dimension = wgpu::TextureViewDimension::e2DArray;
+  wgpu::TextureView view = array_texture.CreateView(&view_desc);
+
+  return LoadedTexture{.texture = array_texture, .view = view};
 }
 
 }  // namespace badlands

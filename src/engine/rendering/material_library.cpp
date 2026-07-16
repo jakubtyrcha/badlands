@@ -113,17 +113,77 @@ DeferredMaterial MaterialLibrary::SolidColor(glm::vec3 rgb, float roughness) {
   return DeferredMaterial{.factory = factory_.get(), .params = it->second};
 }
 
-DeferredMaterial MaterialLibrary::TerrainBlend(wgpu::TextureView array_view,
-                                               wgpu::Sampler sampler) {
+MaterialLibrary::TerrainArrays MaterialLibrary::LoadTerrainArrays(
+    const std::vector<std::string>& pack_dirs) {
+  TerrainArrays result;
+  if (pack_dirs.empty()) {
+    spdlog::error("MaterialLibrary::LoadTerrainArrays: no packs");
+    load_failed_ = true;
+    return result;
+  }
+
+  // Load every pack first (manifest-driven; mips + DX->GL green flip handled by
+  // LoadPack/LoadTexture2D), then transpose pack-major -> channel-major.
+  std::vector<wgpu::Texture> albedo_layers, normal_layers, arm_layers;
+  albedo_layers.reserve(pack_dirs.size());
+  normal_layers.reserve(pack_dirs.size());
+  arm_layers.reserve(pack_dirs.size());
+
+  for (const std::string& dir : pack_dirs) {
+    auto it = cache_.find(dir);
+    if (it == cache_.end()) {
+      PackTextures textures = LoadPack(dir);
+      if (!textures.albedo.texture || !textures.normal.texture ||
+          !textures.arm.texture) {
+        // LoadPack already logged + set load_failed_.
+        return {};
+      }
+      it = cache_.emplace(dir, std::move(textures)).first;
+    }
+    albedo_layers.push_back(it->second.albedo.texture);
+    normal_layers.push_back(it->second.normal.texture);
+    arm_layers.push_back(it->second.arm.texture);
+  }
+
+  result.albedo = PackTexturesIntoArray(device_, queue_, albedo_layers);
+  result.normal = PackTexturesIntoArray(device_, queue_, normal_layers);
+  result.arm = PackTexturesIntoArray(device_, queue_, arm_layers);
+
+  if (!result.albedo.view || !result.normal.view || !result.arm.view) {
+    spdlog::error(
+        "MaterialLibrary::LoadTerrainArrays: failed to pack {} packs into "
+        "arrays (do all packs share one texture size?)",
+        pack_dirs.size());
+    load_failed_ = true;
+    return {};
+  }
+  spdlog::info("MaterialLibrary: terrain arrays built from {} packs",
+               pack_dirs.size());
+  return result;
+}
+
+DeferredMaterial MaterialLibrary::TerrainBlend(const TerrainArrays& arrays) {
   InstanceParams params;
-  // Matched by param_name against the "albedo_array" slot; TextureType is only
+  // Matched by param_name against the terrain_blend slots; TextureType is only
   // used to filter default-view recipes, so k2D is fine for an override.
-  params.texture_overrides.push_back(DefaultTextureView{
-      .param_name = "albedo_array",
-      .view = array_view,
-      .sampler = sampler,
-      .type = TextureType::k2D,
-  });
+  // sampler_ is the shared trilinear + 16x-aniso one -- a bare sampler
+  // (mipmapFilter=Nearest) would defeat the arrays' mip chains.
+  // A null view is left UNBOUND so the factory resolves that slot's e2DArray
+  // default (flat_normal / default_arm) -- binding a null override would
+  // instead fail bind-group validation.
+  auto bind = [&](const char* slot, wgpu::TextureView view) {
+    if (!view) return;
+    params.texture_overrides.push_back(DefaultTextureView{
+        .param_name = slot,
+        .view = view,
+        .sampler = sampler_,
+        .type = TextureType::k2D,
+    });
+  };
+  bind("albedo_array", arrays.albedo.view);
+  bind("normal_array", arrays.normal.view);
+  bind("arm_array", arrays.arm.view);
+
   return DeferredMaterial{.factory = terrain_factory_.get(),
                           .params = std::move(params)};
 }

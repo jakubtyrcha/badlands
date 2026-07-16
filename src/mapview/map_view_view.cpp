@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -29,7 +33,42 @@ namespace badlands {
 namespace {
 constexpr int kChunkBlocks = 16;  // N x N blocks per chunk (160 m)
 constexpr int kSubdiv = 2;        // subgrid cells per block edge
+constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json";
 }  // namespace
+
+bool ResolveBiomePacks(const std::string& manifest_path,
+                       std::vector<std::string>& out_pack_dirs) {
+  std::ifstream file(manifest_path);
+  if (!file) {
+    spdlog::error("MapViewView: missing biome manifest '{}'", manifest_path);
+    return false;
+  }
+  nlohmann::json manifest;
+  try {
+    file >> manifest;
+  } catch (const nlohmann::json::exception& e) {
+    spdlog::error("MapViewView: unparseable biome manifest '{}': {}",
+                  manifest_path, e.what());
+    return false;
+  }
+
+  // Layer index == Biome enum value, so resolve in enum order. Keyed by name so
+  // a reordered/renamed entry fails loudly instead of silently mis-mapping.
+  out_pack_dirs.clear();
+  out_pack_dirs.reserve(mapgen::kBiomeCount);
+  for (int i = 0; i < mapgen::kBiomeCount; ++i) {
+    const std::string name(
+        mapgen::biome_name(static_cast<mapgen::Biome>(i)));
+    if (!manifest.contains(name) || !manifest[name].is_string()) {
+      spdlog::error(
+          "MapViewView: biome manifest '{}' has no pack for biome '{}'",
+          manifest_path, name);
+      return false;
+    }
+    out_pack_dirs.push_back(manifest[name].get<std::string>());
+  }
+  return true;
+}
 
 bool MapViewView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
@@ -42,23 +81,16 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   ApplyLightEnvironment(env_, device_, queue_, sky_cube_, scene_context_);
   scene_context_.registry = &registry_;
 
-  // 8-layer albedo array: layers 0..4 = biome palette, 5..7 = neutral gray.
-  std::array<uint8_t, 8 * 4> layers{};
-  for (int i = 0; i < 8; ++i) {
-    mapgen::Rgb c{128, 128, 128};
-    if (i < mapgen::kBiomeCount) c = mapgen::kBiomePalette[i];
-    layers[i * 4 + 0] = c.r;
-    layers[i * 4 + 1] = c.g;
-    layers[i * 4 + 2] = c.b;
-    layers[i * 4 + 3] = 255;
+  // One PBR pack per biome, layer index = Biome enum value. The mapping is data
+  // (assets/materials/terrain_biomes.json); the engine only sees "N packs".
+  std::vector<std::string> pack_dirs;
+  if (!ResolveBiomePacks(kBiomeManifestPath, pack_dirs)) return false;
+  terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
+  if (!matlib_.ok()) {
+    spdlog::error("MapViewView: terrain material packs failed to load");
+    return false;
   }
-  biome_array_ = CreateSolidColorArray(device_, queue_, layers.data(), 8);
-  wgpu::SamplerDescriptor sd = {};
-  sd.minFilter = wgpu::FilterMode::Linear;
-  sd.magFilter = wgpu::FilterMode::Linear;
-  terrain_sampler_ = device_.CreateSampler(&sd);
-  const DeferredMaterial terrain_mat =
-      matlib_.TerrainBlend(biome_array_, terrain_sampler_);
+  const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
 
   // Generate the map in-process.
   mapgen::MapgenConfig cfg;
