@@ -39,6 +39,87 @@ struct TerrainUniforms {
 // (stochastic/hex tiling — the V1 "sophisticated terrain blending" item).
 const TERRAIN_MATERIAL_SCALE: f32 = 2.5;  // meters per texture tile
 
+// Break up the visible repetition of the tiling textures (iq's "texture
+// repetition" Technique 3, https://iquilezles.org/articles/texturerepetition/).
+//
+// Several virtual copies of the tiling are made by offsetting the lookup; a
+// low-frequency index picks between them, so the plane is covered in patches
+// that use different copies. The index is float, and we blend the two nearest
+// copies, so the patch boundaries are smooth rather than seams.
+//
+// Compile-time: it doubles the texture fetches, and dead-strips to the plain
+// path when off. TERRAIN_MATERIAL_SCALE = 2.5 m tiles means a LOT of repeats on
+// screen, which is exactly what this hides.
+const TERRAIN_BREAK_TILING: bool = true;
+
+// Wavelength of the index pattern, in tiles: how big each same-virtual-copy
+// patch is.
+//
+// This has to be on the order of ONE tile, which is less obvious than it looks:
+// a patch shows its own copy of the tiling unbroken, so an 8-tile patch still
+// reads as an 8x8 lattice — measured, not guessed (8 and 3 both left a visible
+// grid at 2.5 m tiles; 1.5 removed it). The cost of going small is that more of
+// the surface is mid-crossfade between two copies, which softens detail; below
+// ~1 the blend never settles anywhere.
+const TILING_VARIATION_TILES: f32 = 1.5;
+
+fn hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 345.45));
+    q = q + vec2<f32>(dot(q, q + 34.345));
+    return fract(q.x * q.y);
+}
+
+// Smooth value noise in [0,1]. iq samples a LUT texture here (cache-friendly
+// and trivially filterable); this stays procedural to avoid another binding +
+// upload for one scalar, and it is low-frequency enough that the cost is noise,
+// not fetches.
+fn variation_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// The two virtual-copy offsets + the blend weight between them, for one uv.
+// Computed ONCE per fragment and shared by all three arrays: albedo, normal and
+// ARM must agree on which virtual copy they came from, or a fragment gets its
+// normal from one copy and its colour from another.
+struct TileVariation {
+    offa: vec2<f32>,
+    offb: vec2<f32>,
+    blend: f32,
+}
+
+fn tile_variation(uv: vec2<f32>) -> TileVariation {
+    var v: TileVariation;
+    let k = variation_noise(uv / TILING_VARIATION_TILES);
+    let index = k * 8.0;
+    let i = floor(index);
+    v.offa = sin(vec2<f32>(3.0, 7.0) * (i + 0.0));  // any hash works
+    v.offb = sin(vec2<f32>(3.0, 7.0) * (i + 1.0));
+    v.blend = fract(index);
+    return v;
+}
+
+// One layer fetch, with or without the de-tiling. `blend` is passed in (not
+// recomputed per array) to keep the three arrays coherent -- see TileVariation.
+fn sample_layer(t: texture_2d_array<f32>, uv: vec2<f32>, layer: u32,
+                dx: vec2<f32>, dy: vec2<f32>, v: TileVariation,
+                blend: f32) -> vec4<f32> {
+    if (!TERRAIN_BREAK_TILING) {
+        return textureSampleGrad(t, terrain_sampler, uv, layer, dx, dy);
+    }
+    // Explicit gradients are mandatory: the offsets introduce discontinuities,
+    // so implicit derivatives would pick a wildly wrong mip at every patch edge.
+    let cola = textureSampleGrad(t, terrain_sampler, uv + v.offa, layer, dx, dy);
+    let colb = textureSampleGrad(t, terrain_sampler, uv + v.offb, layer, dx, dy);
+    return mix(cola, colb, blend);
+}
+
 struct VertexInput {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -153,6 +234,8 @@ fn sample_blended(uv: vec2<f32>, w0: vec4<f32>, w1: vec4<f32>,
     let max_albedo = textureNumLayers(albedo_array) - 1u;
     let max_normal = textureNumLayers(normal_array) - 1u;
     let max_arm = textureNumLayers(arm_array) - 1u;
+    // Depends only on uv, so it is shared across every layer of this fragment.
+    let var_ = tile_variation(uv);
 
     for (var i = 0u; i < 8u; i = i + 1u) {
         var w = 0.0;
@@ -162,10 +245,22 @@ fn sample_blended(uv: vec2<f32>, w0: vec4<f32>, w1: vec4<f32>,
             w = w1[i - 4u];
         }
         if (w > 0.0) {
-            albedo = albedo + w * textureSampleGrad(albedo_array, terrain_sampler, uv, min(i, max_albedo), dx, dy).rgb;
-            let n = textureSampleGrad(normal_array, terrain_sampler, uv, min(i, max_normal), dx, dy).rgb * 2.0 - 1.0;
+            // Blend weight between the two virtual copies. iq boosts the
+            // contrast of the crossfade using the difference between them, which
+            // narrows the visible transition band; derive it from ALBEDO and
+            // reuse it for normal/ARM so all three stay on the same copy.
+            var blend = 0.0;
+            if (TERRAIN_BREAK_TILING) {
+                let ca = textureSampleGrad(albedo_array, terrain_sampler, uv + var_.offa, min(i, max_albedo), dx, dy).rgb;
+                let cb = textureSampleGrad(albedo_array, terrain_sampler, uv + var_.offb, min(i, max_albedo), dx, dy).rgb;
+                let d = ca - cb;
+                blend = smoothstep(0.2, 0.8, var_.blend - 0.1 * (d.x + d.y + d.z));
+            }
+
+            albedo = albedo + w * sample_layer(albedo_array, uv, min(i, max_albedo), dx, dy, var_, blend).rgb;
+            let n = sample_layer(normal_array, uv, min(i, max_normal), dx, dy, var_, blend).rgb * 2.0 - 1.0;
             tn = tn + w * n;
-            let a = textureSampleGrad(arm_array, terrain_sampler, uv, min(i, max_arm), dx, dy);
+            let a = sample_layer(arm_array, uv, min(i, max_arm), dx, dy, var_, blend);
             arm = arm + w * vec2<f32>(a.r, a.g);
             wsum = wsum + w;
         }

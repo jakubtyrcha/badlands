@@ -149,6 +149,13 @@ void MapViewView::RebuildVisibleGrid() {
   const float lift_section = 1.0f;
   const glm::vec3 block_color(0.55f, 0.55f, 0.6f);
   const glm::vec3 section_color(1.0f, 0.85f, 0.15f);
+  // Subgrid: dimmer + thinner so the 10 m block structure still reads on top of
+  // it. Mirrors what BuildTerrainMesh actually emits (kSubdiv cells per block
+  // edge, each X-split into 4 triangles meeting at the cell centre), so this is
+  // the mesh's real triangulation, not a decorative grid.
+  const glm::vec3 subgrid_color(0.40f, 0.40f, 0.45f);
+  const float subgrid_thickness = 0.6f;
+  const float cell = b / static_cast<float>(kSubdiv);
 
   // Window of grid_radius_blocks_ around the point the mouse is over. Cost is
   // O(window^2), independent of the map size.
@@ -167,6 +174,31 @@ void MapViewView::RebuildVisibleGrid() {
       const float h = SectionHeight(blocks.at(bx, bz)) + lift_block;
       const float x0 = bx * b, x1 = (bx + 1) * b;
       const float z0 = bz * b, z1 = (bz + 1) * b;
+
+      // Subgrid triangulation. Cell edges on a block boundary are skipped (cx/cz
+      // == 0) -- the block pass below draws those, and doubling them up would
+      // just overdraw two coincident AA quads.
+      for (int cz = 0; cz < kSubdiv; ++cz) {
+        for (int cx = 0; cx < kSubdiv; ++cx) {
+          const float cx0 = x0 + cx * cell, cx1 = cx0 + cell;
+          const float cz0 = z0 + cz * cell, cz1 = cz0 + cell;
+          if (cz > 0) {
+            grid_.AddLine({cx0, h, cz0}, {cx1, h, cz0}, subgrid_color,
+                          subgrid_thickness);
+          }
+          if (cx > 0) {
+            grid_.AddLine({cx0, h, cz0}, {cx0, h, cz1}, subgrid_color,
+                          subgrid_thickness);
+          }
+          // X-split: each cell is 4 triangles fanning from its centre.
+          const glm::vec3 c{0.5f * (cx0 + cx1), h, 0.5f * (cz0 + cz1)};
+          grid_.AddLine({cx0, h, cz0}, c, subgrid_color, subgrid_thickness);
+          grid_.AddLine({cx1, h, cz0}, c, subgrid_color, subgrid_thickness);
+          grid_.AddLine({cx1, h, cz1}, c, subgrid_color, subgrid_thickness);
+          grid_.AddLine({cx0, h, cz1}, c, subgrid_color, subgrid_thickness);
+        }
+      }
+
       // North + west edges (each interior edge drawn once); the window's own
       // south/east border is closed explicitly since the neighbor that would
       // otherwise draw it is outside the window.
