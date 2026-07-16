@@ -113,6 +113,8 @@ add_library(badlands_engine STATIC
     src/engine/rendering/scene_build.cpp
     src/engine/rendering/cubemap_builder.cpp
     src/engine/rendering/light_environment.cpp
+    src/engine/rendering/hosek_wilkie.cpp
+    src/engine/rendering/daylight.cpp
     src/engine/rendering/brdf_lut.cpp
     src/engine/rendering/prefiltered_cubemap.cpp
     src/engine/app/sdl_viewer_app.cpp
@@ -280,6 +282,23 @@ if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_daylight_tests: Catch2 suite for the day/night system — the pure-CPU
+# Hosek-Wilkie RGB port (golden values vs the reference), the ComputeDaylight
+# sun/moon/handover math, and the fixed-timestep accumulator. Pure CPU (no GPU),
+# modeled on badlands_geometry_tests; links badlands_engine for daylight/HW.
+add_executable(badlands_daylight_tests
+    game/tests/daylight_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_daylight_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_daylight_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_daylight_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_daylight_tests COMMAND badlands_daylight_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_shadow_test: Task T4's Catch2 suite for the directional-shadow
 # system (T2's ShadowMap + T3's deferred sampling) -- a headless GPU render

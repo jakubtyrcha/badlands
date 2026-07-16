@@ -62,7 +62,7 @@ bool WriteTextureToPng(wgpu::Instance instance, wgpu::Device device,
 bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
                     AppView& view, uint32_t width, uint32_t height,
                     const std::string& path, GBufferDebugMode debug_mode,
-                    ShadowDebugMode shadow_debug_mode) {
+                    ShadowDebugMode shadow_debug_mode, float time_of_day) {
   wgpu::Device device = gpu.GetDevice();
   wgpu::Queue queue = gpu.GetQueue();
 
@@ -80,6 +80,7 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
   renderer.SetDebugMode(debug_mode);
   renderer.SetShadowDebugMode(shadow_debug_mode);
 
+  view.SeekToTimeOfDay(time_of_day);  // deterministic time-of-day for the capture
   view.Update(0.0f, SDL_GetKeyboardState(nullptr));
   renderer.Render(view.GetCamera(), view.GetRegistry(), view.GetSceneContext(),
                   offscreen_view);

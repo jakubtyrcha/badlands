@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include "engine/app/fixed_timestep.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
@@ -30,6 +31,20 @@ float yaw_from_rotation_index(int32_t rotation_index) {
 // Up to this many rows are read from game_buildings/game_state per call --
 // comfortably above this stage's Castle + 4 demo buildings.
 constexpr uint32_t kMaxBuildingRows = 64;
+
+// Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
+// this much REAL time (the directional light + shadows still move every frame).
+// A real-time throttle bounds the ~per-frame HW cube bake cost independent of
+// framerate and sim speed; an Update(0) never re-bakes. Seeks/config edits
+// force an immediate re-bake.
+constexpr double kRebakeIntervalSeconds = 1.0 / 20.0;  // ~20 Hz sky/IBL refresh
+
+// Real seconds for one in-game day (overrides SimClock's 5-minute default).
+// Short for now so the whole cycle is quick to see.
+constexpr float kRealSecondsPerDay = 16.0f;
+
+// Where the live day/night clock starts (t01: 0.30 = mid-morning).
+constexpr float kInitialTimeOfDay = 0.30f;
 
 constexpr const char* kFloorPackDir =
     "assets/materials/monastery_stone_floor_1k";
@@ -56,7 +71,11 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
-  ApplyEnvironment();
+  // Seed the day/night cycle: set the day length, then jump to the initial
+  // time-of-day (bakes the sky/IBL/ambient + sets the sun into scene_context_
+  // before BuildScene mirrors it).
+  sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
+  SeekToTimeOfDay(kInitialTimeOfDay);
 
   // nullptr brain_script_source: mock brains only (no noiser script needed
   // for a static-buildings scaffold) -- game_create also prebuilds the
@@ -82,10 +101,38 @@ bool GameView::Initialize(const RenderContext& ctx) {
   return true;
 }
 
-void GameView::ApplyEnvironment() {
-  ApplyLightEnvironment(env_, device_, queue_, sky_cube_, scene_context_);
-  scene_.SetSunDirection(scene_context_.sun_direction);
-  scene_.SetSunColor(scene_context_.sun_color);
+void GameView::UpdateDaylight() {
+  const DaylightState state = ComputeDaylight(daylight_cfg_, sim_clock_.TimeOfDay());
+
+  // Cheap, every frame: move the directional light + shadows. (SetSunColor
+  // only sets sun_color_, so it does not disturb the SH ambient between
+  // re-bakes -- see scene_graph.cpp.)
+  scene_.SetSunDirection(state.light_direction);
+  scene_.SetSunColor(state.light_color * state.light_intensity);
+
+  // Expensive HW sky cube + SH + IBL: throttled by REAL time (rebake_accum_ is
+  // advanced by the caller), or forced by a DaylightConfig edit. Because the
+  // throttle keys on real time (not a frame counter), an Update(0) -- e.g. the
+  // recorder re-rendering a captured frame -- never triggers a redundant bake.
+  if (force_rebake_ || rebake_accum_ >= kRebakeIntervalSeconds) {
+    RebakeSky(state);
+    rebake_accum_ = 0.0;
+    force_rebake_ = false;
+  }
+}
+
+void GameView::ApplyDaylightNow() {
+  // Unconditional recompute + re-bake for the current time-of-day (init / seek).
+  const DaylightState state = ComputeDaylight(daylight_cfg_, sim_clock_.TimeOfDay());
+  scene_.SetSunDirection(state.light_direction);
+  scene_.SetSunColor(state.light_color * state.light_intensity);
+  RebakeSky(state);
+  rebake_accum_ = 0.0;
+}
+
+void GameView::RebakeSky(const DaylightState& state) {
+  ApplyDaylightEnvironment(state, daylight_cfg_, device_, queue_, sky_cube_,
+                           scene_context_);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 }
 
@@ -125,13 +172,11 @@ void GameView::PlaceDemoBuildings() {
 
 void GameView::BuildScene() {
   // NOTE(lighting): the SceneGraph() reset + Set{SunDirection,SunColor,
-  // AmbientSH} sequence below mirrors scene_context_'s already-derived-from-
-  // env_ lighting into the fresh graph (whose constructor otherwise resets
-  // sun/ambient to SceneGraph's own defaults, which the per-frame
-  // SyncToRegistry would then write back over scene_context_). This same
-  // 4-line mirror is repeated at every rebuild/apply site across the three
-  // views; it will be centralized in the future lighting refactor. No
-  // behavior change now.
+  // AmbientSH} sequence below mirrors scene_context_'s already-derived
+  // lighting (from the daylight bake in SeekToTimeOfDay/UpdateDaylight) into
+  // the fresh graph (whose constructor otherwise resets sun/ambient to
+  // SceneGraph's own defaults, which the per-frame SyncToRegistry would then
+  // write back over scene_context_).
   scene_ = SceneGraph();
   scene_.SetSunDirection(scene_context_.sun_direction);
   scene_.SetSunColor(scene_context_.sun_color);
@@ -170,6 +215,29 @@ void GameView::HandleEvent(const SDL_Event& /*event*/, int /*width*/,
 void GameView::Update(float dt, const bool* keyboard_state) {
   dt_ = dt;
 
+  // Advance the single time source: real dt -> * sim speed -> sim time. Both
+  // the day/night cycle and the fixed-rate game logic derive from this clock,
+  // so they run together at the current speed, independent of framerate.
+  const double real_dt = static_cast<double>(dt);
+  sim_clock_.Advance(real_dt);
+
+  // Fixed-interval game logic: run game_tick(kTickDt) until we've caught up to
+  // the clock's tick target. Bounded (real dt is clamped in Advance); the
+  // budget is pure spiral-of-death safety. Ticks scale with sim speed because
+  // the target is derived from sim time.
+  const unsigned long long tick_target = sim_clock_.TickTarget();
+  int budget = kMaxSimTicksPerFrame;
+  while (sim_ticks_done_ < tick_target && budget-- > 0) {
+    if (game_) game_tick(game_, static_cast<float>(kTickDt));
+    ++sim_ticks_done_;
+  }
+
+  // Day/night rendering, driven by the clock's time-of-day. The sky re-bake is
+  // throttled by real time (accumulated here); the directional light moves
+  // every frame inside UpdateDaylight.
+  rebake_accum_ += real_dt;
+  UpdateDaylight();
+
   // ImGui context guard: Update() runs even in --screenshot mode, where no
   // ImGui context exists (SdlViewerApp only calls InitImGui() for the
   // windowed loop) -- ImGui::GetIO() asserts without a current context.
@@ -189,18 +257,57 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   scene_.SyncToRegistry(registry_, scene_context_);
 }
 
+void GameView::SeekToTimeOfDay(float t01) {
+  // Discontinuous jump (headless capture / editor scrub): move the clock and
+  // sync the game-tick counter so we do NOT simulate the skipped time, then
+  // re-bake immediately so a single frame is correct.
+  sim_clock_.SeekTimeOfDay(t01);
+  sim_ticks_done_ = sim_clock_.TickTarget();
+  ApplyDaylightNow();
+}
+
 void GameView::DrawUI() {
   if (!scene_renderer_) return;
 
-  // NOTE(lighting): on any frame the light-environment editor changes env_,
-  // ApplyEnvironment re-derives the full sky (6 faces x face x face radiance),
-  // a 2048-sample SH projection, and a GPU cube rebuild + IBL re-prefilter
-  // next frame -- to be debounced / made incremental in the future lighting
-  // commit. No behavior change here.
-  const bool env_changed = EditorUI::DrawDebugPanel(env_, *scene_renderer_, dt_);
-  if (env_changed) {
-    ApplyEnvironment();
+  // Daylight + sim-time controls + the shared renderer-debug selectors + FPS.
+  // Editing a DaylightConfig value forces an immediate sky re-bake so the
+  // change is visible without waiting for the throttle.
+  ImGui::Begin("Daylight / Sim");
+
+  // Sim speed (0 = paused, 1/2/4x). Drives both the day/night cycle and the
+  // game logic via the shared SimClock.
+  ImGui::Text("Speed:");
+  const float kSpeeds[] = {0.0f, 1.0f, 2.0f, 4.0f};
+  const char* kSpeedLabels[] = {"Pause", "1x", "2x", "4x"};
+  for (int i = 0; i < 4; ++i) {
+    ImGui::SameLine();
+    if (ImGui::RadioButton(kSpeedLabels[i], sim_clock_.speed == kSpeeds[i])) {
+      sim_clock_.speed = kSpeeds[i];
+    }
   }
+
+  // Time-of-day scrubber + day counter.
+  float t01 = sim_clock_.TimeOfDay();
+  if (ImGui::SliderFloat("Time of day", &t01, 0.0f, 0.9999f)) {
+    SeekToTimeOfDay(t01);
+  }
+  ImGui::Text("Day %d  |  %05.2f h", sim_clock_.DayCounter(), t01 * 24.0f);
+  ImGui::SliderFloat("Real sec / day", &sim_clock_.real_seconds_per_day, 1.0f, 600.0f);
+
+  bool cfg_changed = false;
+  cfg_changed |= ImGui::SliderFloat("Turbidity", &daylight_cfg_.turbidity, 1.0f, 10.0f);
+  cfg_changed |= ImGui::SliderFloat("Ground albedo", &daylight_cfg_.ground_albedo, 0.0f, 1.0f);
+  cfg_changed |= ImGui::SliderFloat("Sky exposure", &daylight_cfg_.sky_exposure, 0.001f, 0.3f, "%.3f");
+  cfg_changed |= ImGui::SliderFloat("Sun intensity", &daylight_cfg_.sun_intensity_max, 0.0f, 10.0f);
+  cfg_changed |= ImGui::ColorEdit3("Moon color", &daylight_cfg_.moon_color.x);
+  cfg_changed |= ImGui::SliderFloat("Moon intensity", &daylight_cfg_.moon_intensity, 0.0f, 0.2f, "%.3f");
+  cfg_changed |= ImGui::SliderFloat("Ease minutes", &daylight_cfg_.ease_ingame_minutes, 1.0f, 120.0f);
+  cfg_changed |= ImGui::Checkbox("Moon disc", &daylight_cfg_.moon_disc);
+  if (cfg_changed) force_rebake_ = true;
+  EditorUI::DrawGBufferDebugSelector(*scene_renderer_);
+  EditorUI::DrawShadowDebugSelector(*scene_renderer_);
+  EditorUI::DrawStats(dt_);
+  ImGui::End();
 
   if (!game_) return;
 
