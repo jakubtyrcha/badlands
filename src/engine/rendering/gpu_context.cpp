@@ -145,6 +145,12 @@ bool GpuContext::Initialize(SDL_Window* window) {
   if (adapter_.HasFeature(wgpu::FeatureName::TextureFormatsTier1)) {
     required_features.push_back(wgpu::FeatureName::TextureFormatsTier1);
   }
+  // Opportunistically request TimestampQuery for GPU per-pass timing (GpuTimer,
+  // used by SceneRenderer when the profiler is enabled). Same gating rationale
+  // as TextureFormatsTier1: never required, omitted if the adapter lacks it.
+  if (adapter_.HasFeature(wgpu::FeatureName::TimestampQuery)) {
+    required_features.push_back(wgpu::FeatureName::TimestampQuery);
+  }
   if (!required_features.empty()) {
     device_desc.requiredFeatureCount = required_features.size();
     device_desc.requiredFeatures = required_features.data();
@@ -182,6 +188,9 @@ bool GpuContext::Initialize(SDL_Window* window) {
   has_r8unorm_storage_ =
       device_.HasFeature(wgpu::FeatureName::TextureFormatsTier1);
   spdlog::info("GpuContext: HasR8UnormStorage() = {}", has_r8unorm_storage_);
+
+  has_timestamp_query_ = device_.HasFeature(wgpu::FeatureName::TimestampQuery);
+  spdlog::info("GpuContext: HasTimestampQuery() = {}", has_timestamp_query_);
 
   queue_ = device_.GetQueue();
   surface_format_ = GetPreferredFormat();

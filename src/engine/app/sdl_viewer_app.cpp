@@ -103,6 +103,10 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   renderer_.Initialize(gpu_.GetDevice(), gpu_.GetQueue(), pipeline_gen_.get(),
                        gpu_.GetSurfaceFormat(), static_cast<uint32_t>(width),
                        static_cast<uint32_t>(height), gpu_.HasR8UnormStorage());
+#ifdef BADLANDS_PROFILING
+  // Per-pass GPU timing in the live window (prints alongside the CPU profile).
+  renderer_.EnableGpuProfiling(gpu_.GetInstance(), gpu_.HasTimestampQuery());
+#endif
 
   // ImGui is windowed-path only: screenshot mode renders offscreen via
   // SaveScreenshot() and must stay ImGui-free.

@@ -63,7 +63,10 @@ class FrameContext {
 
   // Pass management
   RenderPassContext BeginRenderPass(const wgpu::RenderPassDescriptor& desc);
-  wgpu::ComputePassEncoder BeginComputePass();
+  // `timestamp_writes` (optional) records GPU timestamps around the pass (see
+  // GpuTimer). Render passes inject theirs via the RenderPassDescriptor.
+  wgpu::ComputePassEncoder BeginComputePass(
+      const wgpu::PassTimestampWrites* timestamp_writes = nullptr);
 
   // Frame data access
   wgpu::Buffer GetFrameUniformBuffer() const { return frame_uniform_buffer_; }
