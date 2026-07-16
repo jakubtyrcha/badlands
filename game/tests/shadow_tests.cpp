@@ -1440,3 +1440,88 @@ TEST_CASE("Shadow Test 4: SSCS handoff") {
   }
 }
 
+// Test 6 -- SSCS must NOT self-occlude an open flat floor at a grazing sun.
+// Regression guard for the ray-origin normal-offset fix (contact_shadows.wesl's
+// normalOffsetLength(NdotV, pixelWorld, 0.10)): before it, a low sun grazing a
+// flat receiver made the SSCS ray graze its OWN surface and paint a false dark
+// band near the horizon. With NO casters present, ANY darkening of a floor
+// pixel by SSCS is that artifact. A differential probe (SSCS off vs on)
+// isolates it from the sky, which reads dark in ContactOnly. Local-space scene
+// posed off-axis (MakeOffAxisPose) like every other scene in this suite.
+TEST_CASE("Shadow Test 6: SSCS no self-occlusion on open floor") {
+  struct GrazeCam {
+    const char* name;
+    glm::vec3 position;
+    glm::vec3 target;
+  };
+  // Grazing local-space views across the floor toward -Z at low elevation --
+  // the regime where the pre-fix band was worst.
+  const GrazeCam cams[] = {
+      {"elev30", glm::vec3(0.0f, 5.0f, 9.0f), glm::vec3(0.0f, 0.5f, -6.0f)},
+      {"elev15", glm::vec3(0.0f, 2.5f, 9.0f), glm::vec3(0.0f, 0.6f, -12.0f)},
+  };
+  // Low sun grazing the floor, pointing AWAY from the cameras -- the trigger
+  // (a high sun, or one toward the camera, never produced the band).
+  const glm::vec3 local_sun = glm::normalize(glm::vec3(0.2f, 0.35f, -1.0f));
+
+  const std::vector<std::pair<uint32_t, float>> configs = {
+      {512, 100.0f},  {512, 200.0f},  {1024, 100.0f},
+      {1024, 200.0f}, {2048, 100.0f}, {2048, 200.0f},
+  };
+  const float kMaxArtifactFraction = 0.005f;  // <=0.5% of floor (the fix gives 0.00%)
+
+  for (const auto& cc : configs) {
+    for (const GrazeCam& c : cams) {
+      DYNAMIC_SECTION("r_sm=" << cc.first << " d_max=" << cc.second << " " << c.name) {
+        Scene scene;
+        scene.ground_point = glm::vec3(0.0f);
+        scene.ground_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+        scene.sun_toward = local_sun;
+        // No casters: an open floor, so SSCS has nothing legitimate to shadow.
+        TestCamera cam;
+        cam.position = c.position;
+        cam.target = c.target;
+        ApplyPose(scene, cam, MakeOffAxisPose());
+        const Camera world_cam = BuildCamera(cam);
+
+        ShadowTestConfig cfg;
+        cfg.r_sm = cc.first;
+        cfg.d_max = cc.second;
+        cfg.mode = ShadowDebugMode::ContactOnly;
+        cfg.enable_shadow_map = true;
+        cfg.enable_contact_shadows = false;
+        const CpuImage off = RenderShadowFrame(cfg, scene, world_cam);
+        cfg.enable_contact_shadows = true;
+        const CpuImage on = RenderShadowFrame(cfg, scene, world_cam);
+        REQUIRE(off.GetWidth() == kFrameWidth);
+
+        // Floor pixels read lit (~1.0) with SSCS OFF; sky reads ~0 (clear) and
+        // is excluded. Artifact = a floor pixel SSCS flips dark.
+        uint32_t floor_px = 0;
+        uint32_t artifact_px = 0;
+        for (uint32_t y = 0; y < off.GetHeight(); ++y) {
+          for (uint32_t x = 0; x < off.GetWidth(); ++x) {
+            if (off.GetFloat(x, y) > 0.5f) {
+              ++floor_px;
+              if (on.GetFloat(x, y) < 0.5f) ++artifact_px;
+            }
+          }
+        }
+        const float fraction =
+            floor_px ? static_cast<float>(artifact_px) / static_cast<float>(floor_px) : 0.0f;
+        INFO("r_sm=" << cc.first << " d_max=" << cc.second << " " << c.name
+                     << " floor_px=" << floor_px << " artifact_px=" << artifact_px
+                     << " fraction=" << fraction);
+        spdlog::info("Shadow Test 6 [r_sm={} d_max={} {}]: floor_px={} artifact={:.3f}% of floor",
+                     cc.first, cc.second, c.name, floor_px, 100.0f * fraction);
+
+        // Framing sanity: the floor must fill a meaningful part of the frame,
+        // else a framing bug could hide as a false pass.
+        CHECK(floor_px > kFrameWidth * kFrameHeight / 20);
+        // The fix: SSCS leaves the open floor essentially untouched.
+        CHECK(fraction < kMaxArtifactFraction);
+      }
+    }
+  }
+}
+

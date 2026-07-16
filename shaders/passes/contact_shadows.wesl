@@ -25,6 +25,11 @@
 //     between samples. (frame.shadowParams.z is unused: this used to be a
 //     precomputed worst-case constant there, but the ray length is now
 //     computed per-pixel here instead.)
+//   - the ray origin is lifted off the receiver along its normal by ~1.5
+//     depth-buffer pixels (÷ grazing-view cos), the screen-space analog of the
+//     shadow map's 1.5-texel normal-offset bias — a self-intersection guard so
+//     a grazing SUN can no longer make the ray graze its own flat surface and
+//     paint a false self-occlusion band on open floor — see the fs_main comment.
 //
 // Depth convention: this pass reads the MAIN camera G-buffer depth, which
 // is REVERSED-Z (0 = far, 1 = near) — unlike the shadow map (T2), which is
@@ -32,7 +37,7 @@
 // stays reversed-Z, unchanged from sampo.
 import package::common::frame::{frame, getFullscreenTriangleVertex,
     reconstructViewSpacePosition, worldSpaceToViewSpaceDirection, isSkyDepth,
-    isValidDepth, decodeOctahedron, shadowNormalOffsetLength};
+    isValidDepth, decodeOctahedron, shadowNormalOffsetLength, normalOffsetLength};
 
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
@@ -86,9 +91,45 @@ fn fs_main(input: VertexOutput) -> @location(0) f32 {
     let rayLengthWorld = shadowNormalOffsetLength(NdotL, frame.shadowParams.x);
     let numSteps = 8;
 
+    // Ray-origin normal offset (self-intersection guard) — the screen-space
+    // ANALOG of the shadow map's normal-offset bias (shadow_sampling.wesl).
+    //
+    // Why the ray self-shadows: at a grazing SUN the ray runs nearly parallel
+    // to a flat receiver, so its 8 discrete samples land back on the receiver's
+    // OWN surface at displaced pixels and read a false occluder — a dark band on
+    // open floor near the horizon. The depth read at a displaced sample is off
+    // by up to the receiver's depth change over ONE pixel of integer snapping:
+    // a SCREEN-SPACE error, largest far away and at grazing VIEW (foreshorten-
+    // ing). Lift the whole ray (start AND end, so direction/length are
+    // unchanged) off the receiver plane by enough to clear that ~1-pixel error.
+    //
+    // DERIVATION — the SAME shared expression as the shadow-map bias, via
+    // normalOffsetLength(cosTerm, cellSize, cosClamp) (frame.wesl), just in the
+    // camera's sampling frame instead of the light's:
+    //   shadow map:  normalOffsetLength(N·L, T_size,     0.05) — 1.5 shadow TEXELS,
+    //                                                            ÷ grazing LIGHT
+    //   SSCS (here): normalOffsetLength(N·V, pixelWorld, 0.10) — 1.5 screen PIXELS,
+    //                                                            ÷ grazing VIEW
+    // Both are 1.5 · (the sampling grid's world cell size) ÷ (cos between the
+    // receiver normal and the sampling direction). The shadow map samples along
+    // the LIGHT (cell = one shadow texel = T_size; divisor N·L); SSCS samples
+    // along the CAMERA (cell = one depth-buffer pixel; divisor N·V).
+    //   pixelWorld = world height of one depth-buffer pixel at this receiver's
+    //   depth = -posVS.z · 2 / (P[1][1] · screenHeight). It grows ∝ view depth,
+    //   so the offset is a CONSTANT ~1.5 pixels ON SCREEN — matching the
+    //   per-pixel snapping error it clears — and is automatically resolution/fov
+    //   correct (an earlier bare `-posVS.z · 0.002` silently baked in H=512,
+    //   fov=45°, N·V=1). Validated window ~[0.1, 3.5] pixels (artifact-clear ∩
+    //   SSCS-handoff Test 4, swept over the R_sm×D_max matrix); the shared 1.5
+    //   both matches the shadow map's 1.5-texel B_norm and sits centered.
+    let normalVS = normalize(worldSpaceToViewSpaceDirection(normal));
+    let NdotV = dot(normalVS, -normalize(posVS));
+    let pixelWorld = -posVS.z * 2.0 / (frame.projMatrix[1][1] * f32(textureDimensions(depth_texture).y));
+    let rayOriginVS = posVS + normalVS * normalOffsetLength(NdotV, pixelWorld, 0.1);
+
     // Transform ray start/end to clip space, then perspective-divide to NDC.
-    let rayStartClip = frame.projMatrix * vec4<f32>(posVS, 1.0);
-    let rayEndVS = posVS + lightDirVS * rayLengthWorld;
+    let rayStartClip = frame.projMatrix * vec4<f32>(rayOriginVS, 1.0);
+    let rayEndVS = rayOriginVS + lightDirVS * rayLengthWorld;
     let rayEndClip = frame.projMatrix * vec4<f32>(rayEndVS, 1.0);
 
     let rayStartNDC = rayStartClip.xyz / rayStartClip.w;

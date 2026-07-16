@@ -279,14 +279,25 @@ fn decodeOctahedron(oct: vec2<f32>) -> vec3<f32> {
 // Shadow Helpers
 // ============================================================================
 
-// Sun-shadow normal-offset bias length (world units): pushes a receiver-side
-// sample point off the surface along its normal by enough to clear one
-// shadow-map texel at grazing incidence. Shared by shadow-map PCF
-// (shadow_sampling.wesl's receiver-side bias) and screen-space contact
-// shadows (contact_shadows.wesl's SSCS ray length) so the factor/clamp live
-// in exactly one place.
-// NdotL: clamped grazing-angle term; tSize: shadow-map texel world size
-// (frame.shadowParams.x).
+// Receiver-normal offset length (world units): the ONE shared expression for
+// "push a receiver-side sample off its surface along the normal by enough to
+// clear one sampling cell at grazing incidence". The sun shadow map and
+// screen-space contact shadows both use it, in different sampling frames:
+//   - shadow-map bias / SSCS ray LENGTH: cell = one shadow TEXEL (T_size),
+//     grazing term = N·L (sampling runs along the LIGHT), clamp 0.05.
+//   - SSCS ray ORIGIN offset: cell = one depth-buffer PIXEL (pixelWorld),
+//     grazing term = N·V (sampling runs along the CAMERA), clamp 0.10.
+// Shape: 1.5 · cellSize / max(cosTerm, cosClamp). The 1.5 (cells of clearance)
+// and the shape live here in exactly one place; callers supply the frame
+// (which cell size, which grazing cosine, which clamp).
+fn normalOffsetLength(cosTerm: f32, cellSize: f32, cosClamp: f32) -> f32 {
+    return 1.5 * cellSize / max(cosTerm, cosClamp);
+}
+
+// Sun-shadow specialization: cell = one shadow texel (tSize =
+// frame.shadowParams.x), grazing term = N·L, clamp 0.05. Shared by shadow-map
+// PCF (shadow_sampling.wesl's receiver-side bias) and the SSCS ray LENGTH
+// (contact_shadows.wesl) so those two stay byte-identical.
 //
 // The C++ ShadowMath::NormalOffsetLength (shadow_map.hpp) mirrors this same
 // expression on the CPU side (used by the shadow test harness as the
@@ -294,5 +305,5 @@ fn decodeOctahedron(oct: vec2<f32>) -> vec3<f32> {
 // WESL and C++ can't share a function; keep both in sync if this expression
 // ever changes.
 fn shadowNormalOffsetLength(NdotL: f32, tSize: f32) -> f32 {
-    return 1.5 * tSize / max(NdotL, 0.05);
+    return normalOffsetLength(NdotL, tSize, 0.05);
 }

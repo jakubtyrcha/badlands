@@ -11,9 +11,15 @@
 namespace badlands {
 
 // CPU source of truth for the sun-shadow normal-offset bias length (world
-// units): B_norm / max(NdotL, N_clamp), where B_norm = 1.5 * t_size. T3's
-// WESL shadow-sampling code mirrors this exact expression -- keep both in
-// sync if it ever changes.
+// units): B_norm / max(NdotL, N_clamp), where B_norm = 1.5 * t_size. This is
+// the CPU twin of the WESL `normalOffsetLength(cosTerm, cellSize, cosClamp)`
+// primitive (frame.wesl) called with the shadow frame (cell = shadow texel
+// t_size, cos = NdotL, clamp 0.05); the WESL wrapper `shadowNormalOffsetLength`
+// is the same specialization. T3's shadow-sampling code mirrors this exact
+// expression -- keep both in sync if it ever changes. (The SSCS ray-origin
+// offset calls the same WESL primitive in the camera frame -- cell = one
+// depth-buffer pixel, cos = NdotV, clamp 0.10 -- but that path is shader-only,
+// so it has no CPU mirror here.)
 namespace ShadowMath {
 inline float NormalOffsetLength(float n_dot_l, float t_size,
                                 float n_clamp = 0.05f) {
