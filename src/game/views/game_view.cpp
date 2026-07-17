@@ -12,6 +12,7 @@
 
 #include "core/profiler.hpp"
 #include "engine/app/fixed_timestep.hpp"
+#include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
@@ -89,6 +90,7 @@ bool GameView::Initialize(const RenderContext& ctx) {
   game_ = game_create(nullptr);
   PlaceDemoBuildings();
   BuildScene();
+  SetupFogGenerator();
 
   // Fixed-angle game camera framing the demo town: the Castle sits at the
   // origin and the demo buildings spread to +-12 in X / up to +10 in Z (see
@@ -105,6 +107,66 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
   return true;
+}
+
+void GameView::SetupFogGenerator() {
+  if (!scene_renderer_) return;
+
+  // World-static volumetric emitters (phase placeholder; a real map would derive
+  // these from biomes). Authored in physical sigma_t (see the fog-density table).
+  std::vector<fog::Emitter> emitters;
+  {
+    fog::Emitter bog;  // clumpy dense fog, its volume scrolling upward over time
+    bog.center = {-15.0f, -10.0f};
+    bog.half_extent = {9.0f, 9.0f};
+    bog.shape = fog::EmitterShape::Disc;
+    bog.type = fog::EmitterType::Noise;
+    bog.base_y = 0.0f;
+    bog.height = 22.0f;
+    bog.magnitude = 0.08f;  // dense
+    bog.radial_falloff = 0.6f;
+    bog.vertical_falloff = 0.5f;
+    bog.noise_freq = 0.15f;
+    bog.noise_contrast = 1.6f;
+    bog.scroll = {0.0f, 0.6f, 0.0f};  // vertical scroll -> rising motion
+    bog.seed = 3.0f;
+    emitters.push_back(bog);
+
+    fog::Emitter forest;  // broad, uniform moderate fog (static disc)
+    forest.center = {16.0f, 12.0f};
+    forest.half_extent = {14.0f, 8.0f};
+    forest.rotation = 0.4f;
+    forest.shape = fog::EmitterShape::Obb;
+    forest.type = fog::EmitterType::Disc;
+    forest.base_y = 0.0f;
+    forest.height = 16.0f;
+    forest.magnitude = 0.006f;  // moderate
+    forest.radial_falloff = 0.5f;
+    forest.vertical_falloff = 0.6f;
+    emitters.push_back(forest);
+
+    fog::Emitter lake;  // light, gently drifting fog
+    lake.center = {2.0f, 24.0f};
+    lake.half_extent = {7.0f, 7.0f};
+    lake.shape = fog::EmitterShape::Disc;
+    lake.type = fog::EmitterType::Noise;
+    lake.base_y = 0.0f;
+    lake.height = 10.0f;
+    lake.magnitude = 0.02f;
+    lake.radial_falloff = 0.7f;
+    lake.vertical_falloff = 0.6f;
+    lake.noise_freq = 0.12f;
+    lake.noise_contrast = 1.2f;
+    lake.scroll = {0.1f, 0.25f, 0.0f};
+    lake.seed = 11.0f;
+    emitters.push_back(lake);
+  }
+
+  FogSimParams params;
+  params.map_min = {-48.0f, -48.0f};
+  params.map_max = {48.0f, 48.0f};
+  params.bp_cell_size = 32.0f;
+  scene_renderer_->GetFogSimulation().SetSources(emitters, params);
 }
 
 void GameView::UpdateDaylight() {
@@ -226,7 +288,14 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // the day/night cycle and the fixed-rate game logic derive from this clock,
   // so they run together at the current speed, independent of framerate.
   const double real_dt = static_cast<double>(dt);
-  sim_clock_.Advance(real_dt);
+  const double sim_dt = sim_clock_.Advance(real_dt);
+
+  // The map fog generator is a sim: advance it on sim-time so pause freezes it
+  // and game speed scales it. The renderer flushes the accumulated time into
+  // fixed steps during Render (which owns the GPU encoder).
+  if (scene_renderer_) {
+    scene_renderer_->GetFogSimulation().AddTime(static_cast<float>(sim_dt));
+  }
 
   // Fixed-interval game logic: run game_tick(kTickDt) until we've caught up to
   // the clock's tick target. Bounded (real dt is clamped in Advance); the

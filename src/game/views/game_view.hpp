@@ -67,6 +67,10 @@ class GameView : public AppView {
   // When dynamic entities land, BuildScene (or an incremental scene update)
   // must be re-driven from the sim each frame the world changes.
   void BuildScene();
+  // Map fog generator: seeds a few world-static fog emitters on the renderer's
+  // FogSimulation (the "map produces fog" seam). The composer then builds the
+  // volumetric media from them instead of the analytic placeholder shapes.
+  void SetupFogGenerator();
 
   // GPU handles (from RenderContext, stored so DrawUI can re-bake the sky when
   // a DaylightConfig value changes live).

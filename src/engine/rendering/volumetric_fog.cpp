@@ -14,17 +14,22 @@
 namespace badlands {
 namespace {
 
-// GPU-side mirror of shaders/compute/fog_fill.wesl's FogFillParams. 16 scalars,
-// 64 bytes (std140-safe: all 4-byte scalars, size a multiple of 16). Media is
-// now generated from analytic shapes in the shader, so there are no per-fill
-// density/extinction/colour params.
+// GPU-side mirror of shaders/compute/fog_fill.wesl's FogFillParams. 24 scalars,
+// 96 bytes (std140-safe: all 4-byte scalars, size a multiple of 16). The last 8
+// scalars drive the emitter composer (world-space broadphase grid + animation
+// time; use_emitters != 0), else the analytic fallback shapes.
 struct FogFillParams {
   int32_t min_voxel_x, min_voxel_z, box_off_x, box_off_z;
   int32_t box_size_x, box_size_z, res_xz, res_y;
   int32_t cascade_index, cascade_count, pad0, pad1;
   float voxel_size_xz, voxel_size_y, floor_y, height;
+  float bp_min_x, bp_min_z, bp_cell_size;
+  int32_t bp_nx, bp_nz;
+  uint32_t emitter_count;
+  int32_t use_emitters;
+  float time;
 };
-static_assert(sizeof(FogFillParams) == 64, "FogFillParams must match WGSL");
+static_assert(sizeof(FogFillParams) == 96, "FogFillParams must match WGSL");
 
 // GPU-side mirror of shaders/common/fog_types.wesl's FogUniforms. 16 f32,
 // 64 bytes.
@@ -43,6 +48,30 @@ void VolumetricFog::Initialize(wgpu::Device device, GpuPipelineGenerator* gen,
   device_ = device;
   pipeline_generator_ = gen;
   hdr_format_ = hdr_format;
+
+  // Dummy storage buffer bound at fog_fill bindings 2-4 when no emitter sources
+  // are set (analytic fallback); never read (use_emitters == 0). 80 bytes covers
+  // the largest element stride (GpuEmitter).
+  wgpu::BufferDescriptor bd;
+  bd.size = 80;
+  bd.usage = wgpu::BufferUsage::Storage;
+  dummy_storage_buf_ = device_.CreateBuffer(&bd);
+}
+
+void VolumetricFog::SetFogSources(wgpu::Buffer emitter_buf, wgpu::Buffer bp_cells,
+                                  wgpu::Buffer bp_indices, glm::vec2 bp_min,
+                                  float bp_cell_size, int bp_nx, int bp_nz,
+                                  uint32_t emitter_count, float time) {
+  fog_emitter_buf_ = emitter_buf;
+  fog_bp_cells_buf_ = bp_cells;
+  fog_bp_indices_buf_ = bp_indices;
+  fog_bp_min_ = bp_min;
+  fog_bp_cell_size_ = bp_cell_size;
+  fog_bp_nx_ = bp_nx;
+  fog_bp_nz_ = bp_nz;
+  fog_emitter_count_ = emitter_count;
+  fog_time_ = time;
+  has_fog_sources_ = true;
 }
 
 void VolumetricFog::EnsureTextures() {
@@ -162,6 +191,12 @@ void VolumetricFog::Render(FrameContext& frame, GpuTimer& gpu_timer,
 
   const glm::vec3 cam = camera.GetPosition();
 
+  // Emitters animate, so the whole media is stale each frame: force a full refill
+  // (not just the scrolled columns) while emitters drive the fog.
+  if (has_fog_sources_) {
+    force_fill_ = true;
+  }
+
   // === Fill (compute): refill newly-scrolled voxel columns per cascade. ===
   {
     wgpu::ComputePassEncoder cp =
@@ -193,15 +228,39 @@ void VolumetricFog::Render(FrameContext& frame, GpuTimer& gpu_timer,
         p.voxel_size_y = fog::CascadeVoxelSizeY(L);
         p.floor_y = L.floor_y;
         p.height = L.height;
+        p.bp_min_x = fog_bp_min_.x;
+        p.bp_min_z = fog_bp_min_.y;
+        p.bp_cell_size = fog_bp_cell_size_;
+        p.bp_nx = fog_bp_nx_;
+        p.bp_nz = fog_bp_nz_;
+        p.emitter_count = fog_emitter_count_;
+        p.use_emitters = has_fog_sources_ ? 1 : 0;
+        p.time = fog_time_;
+
+        const wgpu::Buffer emitters =
+            has_fog_sources_ ? fog_emitter_buf_ : dummy_storage_buf_;
+        const wgpu::Buffer bp_cells =
+            has_fog_sources_ ? fog_bp_cells_buf_ : dummy_storage_buf_;
+        const wgpu::Buffer bp_indices =
+            has_fog_sources_ ? fog_bp_indices_buf_ : dummy_storage_buf_;
 
         wgpu::Buffer ubo = frame.CreateUniformBuffer(sizeof(p), &p);
-        std::array<wgpu::BindGroupEntry, 2> e{};
+        std::array<wgpu::BindGroupEntry, 5> e{};
         e[0].binding = 0;
         e[0].buffer = ubo;
         e[0].offset = 0;
         e[0].size = sizeof(p);
         e[1].binding = 1;
         e[1].textureView = media_view_;
+        e[2].binding = 2;
+        e[2].buffer = emitters;
+        e[2].size = wgpu::kWholeSize;
+        e[3].binding = 3;
+        e[3].buffer = bp_cells;
+        e[3].size = wgpu::kWholeSize;
+        e[4].binding = 4;
+        e[4].buffer = bp_indices;
+        e[4].size = wgpu::kWholeSize;
         wgpu::BindGroup bg =
             frame.CreateBindGroup(fill_pipe->bind_group_layouts[0], e);
         cp.SetBindGroup(0, bg, 0, nullptr);

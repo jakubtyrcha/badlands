@@ -129,6 +129,10 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
   // Owns its media cascade 3D texture + fill/composite pipelines; the fog pass
   // runs between deferred lighting and tonemap, blending into the HDR target.
   volumetric_fog_.Initialize(device_, pipeline_generator_, accumulation_format_);
+
+  // Map fog generator: produces the sim density field VolumetricFog reconstructs
+  // the media from. Sources (emitters) are supplied by the game.
+  fog_sim_.Initialize(device_, queue_);
 }
 
 void SceneRenderer::UpdateIbl(const SceneContext& scene) {
@@ -660,6 +664,18 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // cascades (compute) then ray-march + composite into the HDR target, while
   // color is still linear HDR (before tonemap). Reads the G-buffer depth to
   // bound each ray at the scene surface. No-op when fog is disabled. ===
+  // Bind the fog generator's emitter + broadphase buffers as the composer's
+  // source, so the fill below composes the media from the emitters (animated by
+  // the game-fed time) rather than the analytic placeholder shapes.
+  if (fog_sim_.IsValid() && volumetric_fog_.GetConfig().enabled) {
+    volumetric_fog_.SetFogSources(
+        fog_sim_.EmitterBuffer(), fog_sim_.BpCellsBuffer(),
+        fog_sim_.BpIndicesBuffer(), fog_sim_.BpMin(), fog_sim_.BpCellSize(),
+        fog_sim_.BpNx(), fog_sim_.BpNz(), fog_sim_.EmitterCount(),
+        fog_sim_.Time());
+  } else {
+    volumetric_fog_.ClearFogSources();
+  }
   volumetric_fog_.Render(frame, gpu_timer_, camera, hdr_color_view_,
                          gbuffer_.GetDepthView(), shadow_map_.GetDepthView(),
                          shadow_comparison_sampler_, width_, height_);

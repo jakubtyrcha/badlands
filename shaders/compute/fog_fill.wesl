@@ -1,11 +1,13 @@
-// Fog media fill (Task: fog rendering). Writes media (scattering sigma_s in rgb,
-// extinction sigma_t in a) into a texel sub-box of one cascade of the height-band
-// clipmap. Dispatched per (cascade, dirty box): on a camera scroll only the
-// newly-exposed columns are refilled; the world-space density is a pure function
-// of position, so toroidal partial fills match a full refill.
+// Fog media composer (Task: map fog generator). Writes media (scattering sigma_s
+// in rgb, extinction sigma_t in a) into a texel sub-box of one cascade of the
+// height-band clipmap. For each froxel it reconstructs the world position, finds
+// the overlapping fog emitters via a world-space broadphase grid, evaluates each
+// (fog_emitters.wesl) and ACCUMULATES their sigma_t (extinction adds).
 //
-// Media comes from analytic test shapes (fog_shapes.wesl) evaluated per voxel.
+// When useEmitters == 0 (no sources) it falls back to the analytic placeholder
+// shapes (fog_shapes.wesl) so the viewer/ai_sandbox still show fog.
 import package::common::fog_shapes::{fogShapesDensity};
+import package::common::fog_emitters::{GpuEmitter, fogEmitterEval};
 
 struct FogFillParams {
     minVoxelX: i32,
@@ -24,20 +26,49 @@ struct FogFillParams {
     voxelSizeY: f32,
     floorY: f32,
     height: f32,
+    // Composer: world-space broadphase grid + animation time.
+    bpMinX: f32,
+    bpMinZ: f32,
+    bpCellSize: f32,
+    bpNx: i32,
+    bpNz: i32,
+    emitterCount: u32,
+    useEmitters: i32,
+    time: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: FogFillParams;
 @group(0) @binding(1) var mediaOut: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var<storage, read> emitters: array<GpuEmitter>;
+@group(0) @binding(3) var<storage, read> bpCells: array<vec2<u32>>;   // (offset,count)
+@group(0) @binding(4) var<storage, read> bpIndices: array<u32>;
 
-// Physical extinction at density 1: "pea-souper" extreme fog, visibility ~10 m
-// (Koschmieder: 3.912 / sigma_t ~= 13 m). Physical units, per metre.
+// Physical extinction at density 1 for the analytic FALLBACK only (pea-souper).
 const kFogExtinctionAtDensity1: f32 = 0.3;
-// White single-scatter albedo (albedo ~= 1) so dense fog takes over the pixel
-// colour with the lit fog colour rather than absorbing to black.
+// White single-scatter albedo so dense fog takes the lit fog colour, not black.
 const kFogScatterColor: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 
 fn fogPosMod(a: i32, n: i32) -> i32 {
     return ((a % n) + n) % n;
+}
+
+// Accumulate every emitter overlapping worldPos's broadphase cell.
+fn composeEmitters(worldPos: vec3<f32>) -> f32 {
+    let bpx = i32(floor((worldPos.x - params.bpMinX) / params.bpCellSize));
+    let bpz = i32(floor((worldPos.z - params.bpMinZ) / params.bpCellSize));
+    if (params.emitterCount == 0u || bpx < 0 || bpz < 0 ||
+        bpx >= params.bpNx || bpz >= params.bpNz) {
+        return 0.0;
+    }
+    let cell = bpCells[u32(bpz * params.bpNx + bpx)];
+    let offset = cell.x;
+    let count = cell.y;
+    var sigma_t = 0.0;
+    for (var k: u32 = 0u; k < count; k = k + 1u) {
+        let e = emitters[bpIndices[offset + k]];
+        sigma_t = sigma_t + fogEmitterEval(e, worldPos, params.time);
+    }
+    return sigma_t;
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -59,9 +90,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let worldX = (f32(wvx) + 0.5) * params.voxelSizeXZ;
     let worldZ = (f32(wvz) + 0.5) * params.voxelSizeXZ;
     let worldY = params.floorY + (f32(sy) + 0.5) * params.voxelSizeY;
+    let worldPos = vec3<f32>(worldX, worldY, worldZ);
 
-    let density = fogShapesDensity(vec3<f32>(worldX, worldY, worldZ));
-    let sigma_t = density * kFogExtinctionAtDensity1;
+    var sigma_t: f32;
+    if (params.useEmitters != 0) {
+        sigma_t = composeEmitters(worldPos);
+    } else {
+        sigma_t = fogShapesDensity(worldPos) * kFogExtinctionAtDensity1;
+    }
+    sigma_t = max(sigma_t, 0.0);
     let sigma_s = kFogScatterColor * sigma_t;
 
     let globalZ = params.cascadeIndex * params.resY + sy;

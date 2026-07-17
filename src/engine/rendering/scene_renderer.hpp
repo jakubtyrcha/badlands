@@ -39,6 +39,7 @@
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/shadow_map.hpp"
 #include "engine/rendering/volumetric_fog.hpp"
+#include "engine/rendering/fog_simulation.hpp"
 
 namespace badlands {
 
@@ -155,6 +156,8 @@ class SceneRenderer {
   // surface_view must be a view of a texture with
   // this renderer's configured surface_format and (width, height) (from
   // Initialize/Resize) — e.g. GpuContext::AcquireSurfaceTexture()'s result.
+  // Advances the fog generator by whatever sim-time the game accumulated on it
+  // via GetFogSimulation().AddTime(), then renders.
   void Render(const Camera& camera, entt::registry& registry,
               const SceneContext& scene, wgpu::TextureView surface_view);
 
@@ -198,6 +201,10 @@ class SceneRenderer {
   void SetFogConfig(const FogConfig& config) { volumetric_fog_.SetConfig(config); }
   const FogConfig& GetFogConfig() const { return volumetric_fog_.GetConfig(); }
   FogConfig& MutableFogConfig() { return volumetric_fog_.MutableConfig(); }
+
+  // The map fog generator. The game sets its sources (emitters) via this
+  // accessor; SceneRenderer advances it each Render() and feeds VolumetricFog.
+  FogSimulation& GetFogSimulation() { return fog_sim_; }
 
   // HDR accumulation target format and reversed-Z depth-buffer format —
   // fixed constants in this trimmed renderer (not configurable via
@@ -291,6 +298,7 @@ class SceneRenderer {
   // Volumetric terrain fog (Task: fog rendering). Owns the media cascade 3D
   // texture + pipelines; driven between deferred lighting and tonemap.
   VolumetricFog volumetric_fog_;
+  FogSimulation fog_sim_;
 
   // Contact-shadow term (T2 creates it; T5's SSCS fullscreen render pass
   // clears + writes it every frame; T3 binds it for sampling). Window-sized

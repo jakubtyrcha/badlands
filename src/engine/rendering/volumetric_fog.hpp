@@ -42,6 +42,21 @@ class VolumetricFog {
   const FogConfig& GetConfig() const { return config_; }
   FogConfig& MutableConfig() { return config_; }  // for the ImGui editor
 
+  // Fog-generator seam: bind the emitter + broadphase buffers (from
+  // FogSimulation) that the fill composes the media from, instead of the analytic
+  // placeholder shapes. Call once per frame with the current animation `time`;
+  // Clear reverts to the analytic fallback. Set forces a full media refill (the
+  // emitters animate, so the whole volume is stale each frame).
+  void SetFogSources(wgpu::Buffer emitter_buf, wgpu::Buffer bp_cells,
+                     wgpu::Buffer bp_indices, glm::vec2 bp_min, float bp_cell_size,
+                     int bp_nx, int bp_nz, uint32_t emitter_count, float time);
+  // Force one full refill so the (previously emitter-composed) media is flushed
+  // to the analytic fallback instead of leaving stale voxels until a scroll.
+  void ClearFogSources() {
+    if (has_fog_sources_) force_fill_ = true;
+    has_fog_sources_ = false;
+  }
+
   // Records the fill (compute) + composite (fullscreen blend into hdr_view)
   // onto `frame`. No-op when disabled / uninitialized / on pipeline-compile
   // failure. depth_view is the scene (G-buffer) reversed-Z depth;
@@ -75,6 +90,19 @@ class VolumetricFog {
   std::vector<glm::ivec2> last_min_voxel_;  // per-cascade toroidal window origin
   bool force_fill_ = true;
   bool logged_compile_error_ = false;
+
+  // Fog-generator composer sources (bound each frame via SetFogSources).
+  wgpu::Buffer fog_emitter_buf_;
+  wgpu::Buffer fog_bp_cells_buf_;
+  wgpu::Buffer fog_bp_indices_buf_;
+  bool has_fog_sources_ = false;
+  glm::vec2 fog_bp_min_{0.0f, 0.0f};
+  float fog_bp_cell_size_ = 32.0f;
+  int fog_bp_nx_ = 0, fog_bp_nz_ = 0;
+  uint32_t fog_emitter_count_ = 0;
+  float fog_time_ = 0.0f;
+  // Storage buffer bound at fill bindings 2-4 when no sources are set.
+  wgpu::Buffer dummy_storage_buf_;
 
   // Fog raymarch target (RGBA16Float: rgb = in-scatter, a = transmittance);
   // full or half screen. Upsampled + blended into HDR by the composite pass.

@@ -110,6 +110,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/shadow_map.cpp
     src/engine/rendering/gpu_timer.cpp
     src/engine/rendering/volumetric_fog.cpp
+    src/engine/rendering/fog_simulation.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
@@ -331,6 +332,7 @@ add_test(NAME badlands_daylight_tests COMMAND badlands_daylight_tests WORKING_DI
 # paths.
 add_executable(badlands_fog_tests
     game/tests/fog_cascade_tests.cpp
+    game/tests/fog_sim_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_fog_tests PRIVATE
@@ -386,6 +388,26 @@ if(APPLE)
     target_link_options(badlands_fog_gpu_test PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_fog_gpu_test COMMAND badlands_fog_gpu_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_fog_sim_gpu_test: headless GPU suite for the map fog GENERATOR
+# (FogSimulation emitters/broadphase + the compute/fog_fill composer +
+# shaders/common/fog_emitters.wesl). Composes the media from single emitters and
+# reads back sigma_t (via the tests/media_slice_extract R32Float copy), verifying
+# each emitter's cascade values against a CPU mirror: disc exact, physical
+# sigma_t, additivity, and noise determinism/animation. Needs a GPU adapter.
+add_executable(badlands_fog_sim_gpu_test
+    game/tests/fog_sim_gpu_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_fog_sim_gpu_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_fog_sim_gpu_test PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_fog_sim_gpu_test PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_fog_sim_gpu_test COMMAND badlands_fog_sim_gpu_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_readback_tests: GPU texture-readback suite ported from sampo
 # (tests/readback_tests.cpp -> ReadbackTests). Exercises the four render-test
