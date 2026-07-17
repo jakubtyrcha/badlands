@@ -24,6 +24,17 @@ typedef struct BadlandsImage {
   uint32_t height;
 } BadlandsImage;
 
+// A decoded 16-bit single-channel image: `luma` points at `width * height`
+// uint16 samples (native resolution, no resize/mips) owned by this struct.
+//
+// On failure (missing/unreadable file, decode error, or an internal panic),
+// `luma` is NULL and `width`/`height` are both 0.
+typedef struct BadlandsImage16 {
+  uint16_t* luma;
+  uint32_t width;
+  uint32_t height;
+} BadlandsImage16;
+
 // The three PBR texture URIs (relative to the glTF file's directory)
 // resolved from a glTF pack's first material, by texture *URI* — not the
 // glTF image `name` field, which authoring tools are known to leave
@@ -61,6 +72,25 @@ BadlandsImage badlands_decode_image(const char* path);
 // badlands_decode_jpeg() or badlands_decode_image(). Safe to call on a
 // failure result (NULL `rgba`).
 void badlands_image_free(BadlandsImage image);
+
+// Decode the image file at `path` to raw 16-bit single-channel luminance at
+// native resolution, format auto-detected from file content.
+//
+// The 16-bit counterpart to badlands_decode_image(), for single-channel data
+// where precision is the point rather than colour — the authored map's
+// heightmap. badlands_decode_image() cannot serve: it decodes via RGBA8 and
+// so truncates a 16-bit source to its high byte, which for a heightmap means
+// ~1.1 m elevation steps and visibly terraced terrain. An 8-bit source widens
+// losslessly (0..255 -> 0..65535), so this is safe on any input.
+//
+// Returns a BadlandsImage16 owned by the caller; free its sample buffer with
+// badlands_image16_free(). On failure, `luma` is NULL and `width`/`height`
+// are both 0.
+BadlandsImage16 badlands_decode_image16(const char* path);
+
+// Free the sample buffer of a BadlandsImage16 previously returned by
+// badlands_decode_image16(). Safe to call on a failure result (NULL `luma`).
+void badlands_image16_free(BadlandsImage16 image);
 
 // Resolve the base color / normal / metallic-roughness texture URIs of the
 // first material in the glTF document at `gltf_path`.
