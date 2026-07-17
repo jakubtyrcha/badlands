@@ -55,10 +55,34 @@ CROP_X, CROP_Y = 628, 241
 CROP_SIZE = 1024
 OUT_SIZE = 2048  # 2x upsample -> 1 source px = 2 world m
 
-# Elevation: luminance is remapped so the lake surface is the water datum (0 m) and the
-# brightest peak reaches PEAK_M. The render's own "0..2200m" legend is decorative Gemini
-# text ("Eivision"); taken literally it would be a ~45-degree wall across a 2 km map.
-PEAK_M = 250.0
+# Biome height tiers: each biome's terrain is remapped so its high end reaches `ceil_m`,
+# via a single GLOBAL monotonic height curve (tiered_remap) rather than per-biome. Global
+# is what keeps it continuous -- same input height maps to the same output everywhere, so
+# there are no cliffs at biome borders and the elevation order (lowland < forest < hills <
+# mountain) is preserved. Per-biome normalisation would instead invert the order at the
+# forest/hills seam and cliff there.
+#
+# Each tier's rise is out = floor + span * ease(t), where
+#   ease(t) = MIX*t + (1-MIX)*t**exp
+# a BLEND of linear and power, not a pure power. The power term pushes the bulk of a
+# highland tier toward its floor (more playable area, decorative peaks); the linear term
+# gives the curve a nonzero slope at t=0 so the tier rises immediately instead of sitting
+# dead-flat at its floor. A pure power (t**5) has zero slope there, which piled terrain
+# into visible flat TERRACES at the tier boundaries (20 m, 32 m) -- the linear mix is what
+# removes them while keeping the push-low shape (modelled: 47% flat -> 0%).
+#
+# `anchor_pct`: the input percentile that maps to `ceil_m`. The top tier uses ~p99.8, not
+# p97, so only the genuine peak reaches 128 -- anchoring lower would hard-clamp the top
+# few % of mountains to exactly 128 and flat-top them (the other terrace).
+EASE_MIX = 0.3
+BIOME_TIERS = [
+    # name        ceil_m  exp  anchor_pct   (floor = previous ceiling; lowland floor = 0)
+    ("lowland",     4.0,   1.0, 97.0),  # plains + swamp: flat, linear
+    ("forest",     20.0,   3.0, 97.0),  # partly playable
+    ("hills",      32.0,   3.0, 97.0),
+    ("mountain",   128.0,  3.0, 99.8),  # near-max anchor so peaks aren't a flat mesa
+]
+SWAMP_FLOOR_M = -0.5  # swamp dips just below the plains 0 m datum (wetland)
 
 # Smoothing sigma, in world meters (= output samples). NOT cosmetic — this is what makes
 # the result terrain rather than crumpled foil.
@@ -103,7 +127,7 @@ SMOOTH_SIGMA_M = 2.0
 #   lake   (d >> 42 m) -> 16 * (1 - exp(-inf))    ~= 16 m
 #   swamp pond         -> capped at 2 m, tightened by SWAMP_FALLOFF so small ponds still
 #                         reach their (shallow) cap rather than being ankle-deep
-WATER_DEPTH_M = 16.0    # lake bed cap below local land
+WATER_DEPTH_M = 8.0     # lake bed cap below local land (in scale with the 32 m hills)
 WATER_FALLOFF_M = 14.0  # how fast depth grows from the shore
 SWAMP_DEPTH_M = 2.0     # swamp ponds: a wetland, not a quarry
 SWAMP_FALLOFF_M = 3.0
@@ -216,6 +240,114 @@ def shore_level(h, water, factor=4):
     return gaussian(up, 4.0 * factor)
 
 
+def dist_from_shoreline(water, band):
+    """Distance (meters) from the water/land edge, on BOTH sides, capped at `band`.
+    0 on the edge pixels, growing to `band`; anything past the band reads > band."""
+    edge = np.zeros(water.shape, bool)
+    diff_v = water[1:, :] != water[:-1, :]
+    edge[1:, :] |= diff_v
+    edge[:-1, :] |= diff_v
+    diff_h = water[:, 1:] != water[:, :-1]
+    edge[:, 1:] |= diff_h
+    edge[:, :-1] |= diff_h
+
+    d = np.full(water.shape, band + 1.0)
+    d[edge] = 0.0
+    cur = edge.copy()
+    for i in range(1, band + 1):
+        nb = np.zeros_like(cur)
+        nb[1:, :] |= cur[:-1, :]
+        nb[:-1, :] |= cur[1:, :]
+        nb[:, 1:] |= cur[:, :-1]
+        nb[:, :-1] |= cur[:, 1:]
+        nb &= d > band  # only pixels not yet reached
+        if not nb.any():
+            break
+        d[nb] = i
+        cur = nb
+    return d
+
+
+def smooth_shoreline(h, water, band_m=32, sigma=14.0):
+    """Grade the coast across a band straddling the waterline.
+
+    The render draws a bright rim-light at the water's edge (measured: source land
+    pixels rise ~3 levels right at the shore), which maps to a raised lip of "land"
+    at the coast — and the de-emboss blur mixing dark water into the near-shore land
+    digs a small trough just inland of it. Both are decoration, not elevation. Not
+    filter ringing: bilinear/bicubic/lanczos all reproduce it identically, because it
+    is in the source.
+
+    So blend the heights toward a blurred copy within a band around the shoreline,
+    feathered by distance so the effect is strongest AT the edge and vanishes by
+    `band_m` inland — it grades the coast without touching terrain away from water.
+    """
+    d = dist_from_shoreline(water, band_m)
+    w = np.clip(1.0 - d / band_m, 0.0, 1.0)  # 1 on the shoreline -> 0 at band edge
+    w = w * w * (3 - 2 * w)  # smoothstep, so the band blends in without a seam
+    return h * (1.0 - w) + gaussian(h, sigma) * w
+
+
+def tiered_remap(alt, labels, names):
+    """Global monotonic height curve: remap the continuous de-embossed heights so each
+    biome tier reaches its BIOME_TIERS ceiling, with eased highland segments.
+
+    A single increasing function of height, so it is continuous everywhere and preserves
+    the elevation order -- no biome-edge cliffs. The tier ceilings are anchored at each
+    tier's ~p90 input height (measured, not hard-coded), and each segment rises as
+    t**ease from the tier below's ceiling, so highlands start flat (apron) and steepen to
+    decorative peaks. Returns heights in meters; water pixels get the lowland band as a
+    placeholder and are overwritten by rebuild_water_beds.
+    """
+    def group(tier):
+        if tier == "lowland":
+            return ["plains", "swamp"]
+        return [tier]
+
+    # Anchor input heights: p2 of the lowland is the floor (-> 0 m); each tier's p90 is
+    # where it reaches its ceiling. Force strictly increasing so the LUT is monotone even
+    # if two tiers overlap in height.
+    # Each tier's ceiling is anchored at its own input percentile (see BIOME_TIERS): the
+    # ~(100-pct)% above it climbs into the next tier's segment. The tail is real terrain
+    # (tall hills becoming low mountains), not spikes.
+    lowland_mask = np.isin(labels, [names.index(b) for b in ("plains", "swamp")])
+    in_anchors = [float(np.percentile(alt[lowland_mask], 2))]
+    out_anchors = [0.0]
+    ease = [1.0]
+    for name, ceil_m, e, pct in BIOME_TIERS:
+        m = np.isin(labels, [names.index(b) for b in group(name)])
+        pin = float(np.percentile(alt[m], pct))
+        in_anchors.append(max(pin, in_anchors[-1] + 1e-3))
+        out_anchors.append(ceil_m)
+        ease.append(e)
+
+    def shape(t, e):
+        # Linear below the floor blended with a power above -- nonzero start slope, so no
+        # flat terrace at the tier boundary (see EASE_MIX).
+        return t if e == 1.0 else EASE_MIX * t + (1.0 - EASE_MIX) * t ** e
+
+    out = np.empty_like(alt, np.float64)
+    # Below the floor / above the top peak: clamp to the ends. The top anchor is ~p99.8,
+    # so the high clamp touches only ~0.2% -- the true summit, not a mesa.
+    out[alt <= in_anchors[0]] = out_anchors[0]
+    out[alt >= in_anchors[-1]] = out_anchors[-1]
+    for i in range(len(in_anchors) - 1):
+        a_in, b_in = in_anchors[i], in_anchors[i + 1]
+        a_out, b_out = out_anchors[i], out_anchors[i + 1]
+        seg = (alt > a_in) & (alt < b_in)
+        t = (alt[seg] - a_in) / (b_in - a_in)
+        out[seg] = a_out + (b_out - a_out) * shape(t, ease[i + 1])
+
+    # Swamp is a wetland: drop its floor just below the plains datum so it reads as
+    # low ground rather than dry flat. (A small biome-specific offset on top of the
+    # global curve; it does not affect ordering since swamp is already the lowest tier.)
+    swamp = labels == names.index("swamp")
+    out[swamp] += SWAMP_FLOOR_M
+    print(f"tiers:     anchors(in->out) " +
+          ", ".join(f"{a:.0f}->{o:.0f}" for a, o in zip(in_anchors, out_anchors)))
+    return out
+
+
 def rebuild_water_beds(h, labels, names):
     """Replace the painted-in water cavities with beds graded from each shore.
 
@@ -308,28 +440,25 @@ def main():
     if SMOOTH_SIGMA_M > 0:
         alt_up = gaussian(alt_up, SMOOTH_SIGMA_M)
 
-    # --- elevation calibration: lake surface = 0 m, brightest peak = PEAK_M ----------
-    water = labels_up == names.index("lake")
-    datum = float(np.median(alt_up[water]))
-    k = PEAK_M / (float(alt_up.max()) - datum)
-    h = (alt_up - datum) * k
-    print(f"elevation: lake datum lum {datum:.1f} -> 0 m; k={k:.4f} m/level")
-    print(f"           raw heights {h.min():.1f}..{h.max():.1f} m")
+    # --- biome-tiered height curve: set the vertical scale per biome (see BIOME_TIERS) -
+    h = tiered_remap(alt_up, labels_up, names)
 
     # Water beds are REBUILT, not merely rescaled -- the render's darkness carries no
-    # depth information (see the WATER_DEPTH_M block).
+    # depth information (see the WATER_DEPTH_M block). Runs on the remapped land, so the
+    # lake surface picks up the ~0-4 m lowland level from its shore.
     h, water_report = rebuild_water_beds(h, labels_up, names)
     print(f"water:     {water_report}")
 
-    # Shift so the lowest WATER bed sits at 0 m. Deliberately the lowest *water*, not the
-    # global min: a handful of land pixels dip below 0 from river-bleed at the biome
-    # borders (label edges don't line up with the height edges to the pixel), and letting
-    # those artifacts set the floor would leave the real lakebed above 0. They are then
-    # clamped up to 0 -- 0 m becomes the water floor, and nothing sits beneath it.
-    water_mask = labels_up == names.index("lake")
-    shift = -float(h[water_mask].min())
-    h = np.maximum(h + shift, 0.0)
-    print(f"shift:     +{shift:.1f} m so lowest water = 0 m (land dips clamped up)")
+    # Grade the coast: dissolve the render's shoreline rim-light (see smooth_shoreline).
+    h = smooth_shoreline(h, labels_up == names.index("lake"))
+
+    # No global shift: tiered_remap already fixes the datum -- 0 m is the lowland/plains
+    # floor, water digs below it (lake bed to ~-8, swamp to -0.5). height_min_m is simply
+    # negative. The only sub-datum land is river-bleed at label borders; clamp those few
+    # up to the swamp floor so nothing non-water sits beneath the water table.
+    land = ~(labels_up == names.index("lake"))
+    h[land] = np.maximum(h[land], SWAMP_FLOOR_M)
+    print(f"datum:     0 m = lowland floor; min {h.min():.1f} m (water), max {h.max():.1f} m")
 
     hmin, hmax = float(h.min()), float(h.max())
     print(f"           heights {hmin:.1f}..{hmax:.1f} m")

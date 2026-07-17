@@ -8,3 +8,4 @@ build/
 /imgui.ini
 .claude/
 .superpowers/
+__pycache__/

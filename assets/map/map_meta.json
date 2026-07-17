@@ -2,8 +2,8 @@
   "width": 2048,
   "height": 2048,
   "meters_per_sample": 1.0,
-  "height_min_m": 0.0,
-  "height_max_m": 264.3007,
+  "height_min_m": -7.8188,
+  "height_max_m": 128.0,
   "water_level_m": 0.0,
   "encoding": "h_m = height_min_m + v/65535*(height_max_m-height_min_m)",
   "biomes": [
