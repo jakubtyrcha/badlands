@@ -38,6 +38,7 @@
 #include "engine/rendering/prefiltered_cubemap.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/shadow_map.hpp"
+#include "engine/rendering/volumetric_fog.hpp"
 
 namespace badlands {
 
@@ -190,6 +191,14 @@ class SceneRenderer {
   void SetShadowDebugMode(ShadowDebugMode mode) { shadow_debug_mode_ = mode; }
   ShadowDebugMode GetShadowDebugMode() const { return shadow_debug_mode_; }
 
+  // Volumetric terrain-fog configuration (Task: fog rendering). Takes effect on
+  // the next Render() call. The fog pass runs between deferred lighting and
+  // tonemap, blending into the HDR target. MutableFogConfig() is for the ImGui
+  // editor (EditorUI::DrawFogEditor).
+  void SetFogConfig(const FogConfig& config) { volumetric_fog_.SetConfig(config); }
+  const FogConfig& GetFogConfig() const { return volumetric_fog_.GetConfig(); }
+  FogConfig& MutableFogConfig() { return volumetric_fog_.MutableConfig(); }
+
   // HDR accumulation target format and reversed-Z depth-buffer format —
   // fixed constants in this trimmed renderer (not configurable via
   // Initialize). Exposed so callers can build MaterialInstanceFactory
@@ -278,6 +287,10 @@ class SceneRenderer {
   // fixed-coverage light view/proj fit. (Re)created when shadow_config_.
   // resolution changes (see Render()).
   ShadowMap shadow_map_;
+
+  // Volumetric terrain fog (Task: fog rendering). Owns the media cascade 3D
+  // texture + pipelines; driven between deferred lighting and tonemap.
+  VolumetricFog volumetric_fog_;
 
   // Contact-shadow term (T2 creates it; T5's SSCS fullscreen render pass
   // clears + writes it every frame; T3 binds it for sampling). Window-sized

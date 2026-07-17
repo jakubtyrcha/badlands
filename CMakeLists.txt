@@ -109,6 +109,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/gbuffer.cpp
     src/engine/rendering/shadow_map.cpp
     src/engine/rendering/gpu_timer.cpp
+    src/engine/rendering/volumetric_fog.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
@@ -322,6 +323,23 @@ if(APPLE)
 endif()
 add_test(NAME badlands_daylight_tests COMMAND badlands_daylight_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_fog_tests: Catch2 suite for the volumetric-fog cascade addressing
+# math (height-band clipmap: voxel sizes, camera-centered windows, cascade
+# selection, and the toroidal dirty-region computation). Pure CPU — the math
+# lives header-only in src/engine/rendering/fog_cascade.hpp (glm only, no
+# Dawn), so this target needs no engine/GPU link, just the src + glm include
+# paths.
+add_executable(badlands_fog_tests
+    game/tests/fog_cascade_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_fog_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+)
+add_test(NAME badlands_fog_tests COMMAND badlands_fog_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_shadow_test: Task T4's Catch2 suite for the directional-shadow
 # system (T2's ShadowMap + T3's deferred sampling) -- a headless GPU render
 # harness (shadow_test_harness.*, built on the sampo-ported GPU-test infra:
@@ -346,6 +364,28 @@ if(APPLE)
     target_link_options(badlands_shadow_test PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_shadow_test COMMAND badlands_shadow_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_fog_gpu_test: graphical volumetric-fog suite. Headless GPU harness
+# (self-contained, on gpu_test_helpers + ColorRenderTarget + TextureReadback)
+# that fills the media 3D texture (the interface under test) with an inlined
+# test-pattern shader (shaders/tests/fog_fill_test.wesl), runs the PRODUCTION
+# raymarch (shaders/passes/fog.wesl), and checks accumulation, shafts,
+# depth-aware upsample, phase, decoupled scattering, and band bounding against
+# analytic ground truth (+ reference PNGs). Needs a working GPU adapter (Metal
+# on macOS); runs locally via ctest.
+add_executable(badlands_fog_gpu_test
+    game/tests/fog_gpu_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_fog_gpu_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_fog_gpu_test PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_fog_gpu_test PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_fog_gpu_test COMMAND badlands_fog_gpu_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_readback_tests: GPU texture-readback suite ported from sampo
 # (tests/readback_tests.cpp -> ReadbackTests). Exercises the four render-test

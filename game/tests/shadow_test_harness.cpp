@@ -190,6 +190,9 @@ CpuImage RenderShadowFrame(const ShadowTestConfig& config, const Scene& world_sc
   shadow_config.hard_shadow_debug = config.hard_shadow_debug;
   renderer.SetShadowConfig(shadow_config);
   renderer.SetShadowDebugMode(config.mode);
+  // Volumetric fog (on by default) would haze the readback this shadow-edge
+  // test inspects; it is irrelevant to shadow correctness, so disable it here.
+  renderer.MutableFogConfig().enabled = false;
 
   renderer.Render(camera, registry, scene_context, rt.GetView());
   badlands::test::WaitForGpu(test_gpu.instance, device, queue);
