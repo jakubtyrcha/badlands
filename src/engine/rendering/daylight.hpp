@@ -42,11 +42,11 @@ struct DaylightConfig {
 
   // Moon. Physical sun:moon illuminance is ~6 orders of magnitude, which is
   // unrepresentable without banding/tonemap collapse — moon_intensity is
-  // artificially bumped so the ratio is ~2 orders (0.04 vs 4.0 = 100x), the
+  // artificially bumped so the ratio is ~1.5 orders (0.1 vs 4.0 = 40x), the
   // bright end of the intended 2-3 order compression, so night reads as a dim
   // moonlit scene rather than black.
   glm::vec3 moon_color{0.5f, 0.62f, 1.0f};
-  float moon_intensity = 0.04f;
+  float moon_intensity = 0.1f;
 
   // Sun<->moon handover + night. The sun always takes precedence while above
   // the horizon; the moon eases in over `ease_ingame_minutes` of the 1440-min

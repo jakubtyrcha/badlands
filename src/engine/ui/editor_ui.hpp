@@ -43,6 +43,10 @@ void DrawGBufferDebugSelector(SceneRenderer& renderer);
 // `renderer.SetShadowDebugMode(...)` on selection.
 void DrawShadowDebugSelector(SceneRenderer& renderer);
 
+// Sliders/toggles for volumetric terrain fog (FogConfig on `renderer`). Mutates
+// the renderer's fog config in place (takes effect next Render(); no re-bake).
+void DrawFogEditor(SceneRenderer& renderer);
+
 // FPS + frame-time text line (e.g. "60.0 FPS (16.67 ms)").
 void DrawStats(float dt_seconds);
 

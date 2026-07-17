@@ -14,6 +14,7 @@
 #include "engine/app/fixed_timestep.hpp"
 #include "engine/app/game_camera_controller.hpp"  // ZoomAtCursor
 #include "engine/app/sdl_input_util.hpp"
+#include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
@@ -91,6 +92,7 @@ bool GameView::Initialize(const RenderContext& ctx) {
   game_ = game_create(nullptr);
   PlaceDemoBuildings();
   BuildScene();
+  SetupFogGenerator();
 
   // Fixed-angle game camera framing the demo town: the Castle sits at the
   // origin and the demo buildings spread to +-12 in X / up to +10 in Z (see
@@ -107,6 +109,66 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
   return true;
+}
+
+void GameView::SetupFogGenerator() {
+  if (!scene_renderer_) return;
+
+  // World-static volumetric emitters (phase placeholder; a real map would derive
+  // these from biomes). Authored in physical sigma_t (see the fog-density table).
+  std::vector<fog::Emitter> emitters;
+  {
+    fog::Emitter bog;  // clumpy dense fog, its volume scrolling upward over time
+    bog.center = {-15.0f, -10.0f};
+    bog.half_extent = {9.0f, 9.0f};
+    bog.shape = fog::EmitterShape::Disc;
+    bog.type = fog::EmitterType::Noise;
+    bog.base_y = 0.0f;
+    bog.height = 22.0f;
+    bog.magnitude = 0.08f;  // dense
+    bog.radial_falloff = 0.6f;
+    bog.vertical_falloff = 0.5f;
+    bog.noise_freq = 0.15f;
+    bog.noise_contrast = 1.6f;
+    bog.scroll = {0.0f, 0.6f, 0.0f};  // vertical scroll -> rising motion
+    bog.seed = 3.0f;
+    emitters.push_back(bog);
+
+    fog::Emitter forest;  // broad, uniform moderate fog (static disc)
+    forest.center = {16.0f, 12.0f};
+    forest.half_extent = {14.0f, 8.0f};
+    forest.rotation = 0.4f;
+    forest.shape = fog::EmitterShape::Obb;
+    forest.type = fog::EmitterType::Disc;
+    forest.base_y = 0.0f;
+    forest.height = 16.0f;
+    forest.magnitude = 0.006f;  // moderate
+    forest.radial_falloff = 0.5f;
+    forest.vertical_falloff = 0.6f;
+    emitters.push_back(forest);
+
+    fog::Emitter lake;  // light, gently drifting fog
+    lake.center = {2.0f, 24.0f};
+    lake.half_extent = {7.0f, 7.0f};
+    lake.shape = fog::EmitterShape::Disc;
+    lake.type = fog::EmitterType::Noise;
+    lake.base_y = 0.0f;
+    lake.height = 10.0f;
+    lake.magnitude = 0.02f;
+    lake.radial_falloff = 0.7f;
+    lake.vertical_falloff = 0.6f;
+    lake.noise_freq = 0.12f;
+    lake.noise_contrast = 1.2f;
+    lake.scroll = {0.1f, 0.25f, 0.0f};
+    lake.seed = 11.0f;
+    emitters.push_back(lake);
+  }
+
+  FogSimParams params;
+  params.map_min = {-48.0f, -48.0f};
+  params.map_max = {48.0f, 48.0f};
+  params.bp_cell_size = 32.0f;
+  scene_renderer_->GetFogSimulation().SetSources(emitters, params);
 }
 
 void GameView::UpdateDaylight() {
@@ -234,7 +296,14 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // the day/night cycle and the fixed-rate game logic derive from this clock,
   // so they run together at the current speed, independent of framerate.
   const double real_dt = static_cast<double>(dt);
-  sim_clock_.Advance(real_dt);
+  const double sim_dt = sim_clock_.Advance(real_dt);
+
+  // The map fog generator is a sim: advance it on sim-time so pause freezes it
+  // and game speed scales it. The renderer flushes the accumulated time into
+  // fixed steps during Render (which owns the GPU encoder).
+  if (scene_renderer_) {
+    scene_renderer_->GetFogSimulation().AddTime(static_cast<float>(sim_dt));
+  }
 
   // Fixed-interval game logic: run game_tick(kTickDt) until we've caught up to
   // the clock's tick target. Bounded (real dt is clamped in Advance); the
@@ -293,38 +362,51 @@ void GameView::DrawUI() {
   // change is visible without waiting for the throttle.
   ImGui::Begin("Daylight / Sim");
 
-  // Sim speed (0 = paused, 1/2/4x). Drives both the day/night cycle and the
-  // game logic via the shared SimClock.
-  ImGui::Text("Speed:");
-  const float kSpeeds[] = {0.0f, 1.0f, 2.0f, 4.0f};
-  const char* kSpeedLabels[] = {"Pause", "1x", "2x", "4x"};
-  for (int i = 0; i < 4; ++i) {
-    ImGui::SameLine();
-    if (ImGui::RadioButton(kSpeedLabels[i], sim_clock_.speed == kSpeeds[i])) {
-      sim_clock_.speed = kSpeeds[i];
+  // --- Simulation (time) ---
+  if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // Sim speed (0 = paused, 1/2/4x). Drives both the day/night cycle and the
+    // game logic via the shared SimClock.
+    ImGui::Text("Speed:");
+    const float kSpeeds[] = {0.0f, 1.0f, 2.0f, 4.0f};
+    const char* kSpeedLabels[] = {"Pause", "1x", "2x", "4x"};
+    for (int i = 0; i < 4; ++i) {
+      ImGui::SameLine();
+      if (ImGui::RadioButton(kSpeedLabels[i], sim_clock_.speed == kSpeeds[i])) {
+        sim_clock_.speed = kSpeeds[i];
+      }
     }
+
+    // Time-of-day scrubber + day counter.
+    float t01 = sim_clock_.TimeOfDay();
+    if (ImGui::SliderFloat("Time of day", &t01, 0.0f, 0.9999f)) {
+      SeekToTimeOfDay(t01);
+    }
+    ImGui::Text("Day %d  |  %05.2f h", sim_clock_.DayCounter(), t01 * 24.0f);
+    ImGui::SliderFloat("Real sec / day", &sim_clock_.real_seconds_per_day, 1.0f, 600.0f);
   }
 
-  // Time-of-day scrubber + day counter.
-  float t01 = sim_clock_.TimeOfDay();
-  if (ImGui::SliderFloat("Time of day", &t01, 0.0f, 0.9999f)) {
-    SeekToTimeOfDay(t01);
+  // --- Directional light (daylight) ---
+  if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+    bool cfg_changed = false;
+    cfg_changed |= ImGui::SliderFloat("Turbidity", &daylight_cfg_.turbidity, 1.0f, 10.0f);
+    cfg_changed |= ImGui::SliderFloat("Ground albedo", &daylight_cfg_.ground_albedo, 0.0f, 1.0f);
+    cfg_changed |= ImGui::SliderFloat("Sky exposure", &daylight_cfg_.sky_exposure, 0.001f, 0.3f, "%.3f");
+    cfg_changed |= ImGui::SliderFloat("Sun intensity", &daylight_cfg_.sun_intensity_max, 0.0f, 10.0f);
+    cfg_changed |= ImGui::ColorEdit3("Moon color", &daylight_cfg_.moon_color.x);
+    cfg_changed |= ImGui::SliderFloat("Moon intensity", &daylight_cfg_.moon_intensity, 0.0f, 0.2f, "%.3f");
+    cfg_changed |= ImGui::SliderFloat("Ease minutes", &daylight_cfg_.ease_ingame_minutes, 1.0f, 120.0f);
+    cfg_changed |= ImGui::Checkbox("Moon disc", &daylight_cfg_.moon_disc);
+    if (cfg_changed) force_rebake_ = true;
   }
-  ImGui::Text("Day %d  |  %05.2f h", sim_clock_.DayCounter(), t01 * 24.0f);
-  ImGui::SliderFloat("Real sec / day", &sim_clock_.real_seconds_per_day, 1.0f, 600.0f);
 
-  bool cfg_changed = false;
-  cfg_changed |= ImGui::SliderFloat("Turbidity", &daylight_cfg_.turbidity, 1.0f, 10.0f);
-  cfg_changed |= ImGui::SliderFloat("Ground albedo", &daylight_cfg_.ground_albedo, 0.0f, 1.0f);
-  cfg_changed |= ImGui::SliderFloat("Sky exposure", &daylight_cfg_.sky_exposure, 0.001f, 0.3f, "%.3f");
-  cfg_changed |= ImGui::SliderFloat("Sun intensity", &daylight_cfg_.sun_intensity_max, 0.0f, 10.0f);
-  cfg_changed |= ImGui::ColorEdit3("Moon color", &daylight_cfg_.moon_color.x);
-  cfg_changed |= ImGui::SliderFloat("Moon intensity", &daylight_cfg_.moon_intensity, 0.0f, 0.2f, "%.3f");
-  cfg_changed |= ImGui::SliderFloat("Ease minutes", &daylight_cfg_.ease_ingame_minutes, 1.0f, 120.0f);
-  cfg_changed |= ImGui::Checkbox("Moon disc", &daylight_cfg_.moon_disc);
-  if (cfg_changed) force_rebake_ = true;
-  EditorUI::DrawGBufferDebugSelector(*scene_renderer_);
-  EditorUI::DrawShadowDebugSelector(*scene_renderer_);
+  // --- Fog (self-contained collapsing section) ---
+  EditorUI::DrawFogEditor(*scene_renderer_);
+
+  // --- Debug views ---
+  if (ImGui::CollapsingHeader("Debug Views")) {
+    EditorUI::DrawGBufferDebugSelector(*scene_renderer_);
+    EditorUI::DrawShadowDebugSelector(*scene_renderer_);
+  }
   EditorUI::DrawStats(dt_);
   ImGui::End();
 
