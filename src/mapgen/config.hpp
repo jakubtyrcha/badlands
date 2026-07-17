@@ -23,6 +23,12 @@ struct MapgenConfig {
   int height = 512;  // samples on Y
   std::string out_dir = "mapgen_out";
 
+  // Non-empty => load an AUTHORED map from this directory (heights + biome images,
+  // see authored_map.hpp) instead of generating one. width/height are then taken
+  // from the asset's map_meta.json and whatever is set above is overwritten -- the
+  // map's extent belongs to the images, not to the CLI.
+  std::string map_dir;
+
   // --- Voronoi pre-sections ---
   float cell_size_m = 130.0f;  // average voronoi cell edge (meters)
   float seed_jitter = 0.85f;   // 0..1 jitter of seeds within their grid cell

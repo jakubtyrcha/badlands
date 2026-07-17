@@ -51,10 +51,15 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
 
-  // Generate the map in-process — the same pipeline --preview-image-only dumps,
-  // so the rendered terrain and the preview PNGs can never disagree.
+  // Build the map in-process — the same pipeline --preview-image-only dumps, so the
+  // rendered terrain and the preview PNGs can never disagree. An authored map loads
+  // its terrain from images instead of generating it; both share everything after.
   std::string err;
-  if (!mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser", map_, err)) {
+  const bool ok = cfg_.map_dir.empty()
+                      ? mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser",
+                                             map_, err)
+                      : mapgen::run_authored_pipeline(cfg_, cfg_.map_dir, map_, err);
+  if (!ok) {
     spdlog::error("MapViewView: {}", err);
     return false;
   }

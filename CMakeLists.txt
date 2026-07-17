@@ -288,6 +288,7 @@ endforeach()
 # -Wno-deprecated-declarations matches badlands_game_lib (the noiser headers ship
 # [[deprecated]] shims).
 add_library(badlands_mapgen_lib STATIC
+    src/mapgen/authored_map.cpp
     src/mapgen/config.cpp
     src/mapgen/fields.cpp
     src/mapgen/hillshade.cpp
