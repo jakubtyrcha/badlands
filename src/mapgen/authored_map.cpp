@@ -178,4 +178,37 @@ bool load_authored_biome(const AuthoredMapMeta& meta, Field2D<uint8_t>& out,
   return true;
 }
 
+namespace {
+
+template <typename T>
+Field2D<T> crop_field(const Field2D<T>& src, int x, int y, int w, int h) {
+  Field2D<T> out(w, h);
+  for (int j = 0; j < h; ++j)
+    for (int i = 0; i < w; ++i) out.at(i, j) = src.at(x + i, y + j);
+  return out;
+}
+
+}  // namespace
+
+bool crop_authored_map(Field2D<float>& heights, Field2D<uint8_t>& biome, int x, int y,
+                       int w, int h, std::string& err) {
+  const int mw = heights.width, mh = heights.height;
+  if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > mw || y + h > mh) {
+    err = "authored map: crop region [" + std::to_string(x) + "," + std::to_string(y) +
+          " " + std::to_string(w) + "x" + std::to_string(h) +
+          "] does not fit inside the " + std::to_string(mw) + "x" + std::to_string(mh) +
+          " map";
+    return false;
+  }
+  if (w % kSamplesPerBlock != 0 || h % kSamplesPerBlock != 0) {
+    err = "authored map: crop size " + std::to_string(w) + "x" + std::to_string(h) +
+          " is not a multiple of kSamplesPerBlock (" + std::to_string(kSamplesPerBlock) +
+          ")";
+    return false;
+  }
+  heights = crop_field(heights, x, y, w, h);
+  biome = crop_field(biome, x, y, w, h);
+  return true;
+}
+
 }  // namespace badlands::mapgen

@@ -29,6 +29,12 @@ struct MapgenConfig {
   // map's extent belongs to the images, not to the CLI.
   std::string map_dir;
 
+  // Optional sub-region (in image pixels) of an authored map to load, so a large
+  // map can be focused to a smaller playable area without regenerating the images.
+  // The world scale is unchanged (1 sample = kMetersPerSample), so the loaded map
+  // is map_crop_w x map_crop_h meters. map_crop_w == 0 means "the whole map".
+  int map_crop_x = 0, map_crop_y = 0, map_crop_w = 0, map_crop_h = 0;
+
   // --- Voronoi pre-sections ---
   float cell_size_m = 130.0f;  // average voronoi cell edge (meters)
   float seed_jitter = 0.85f;   // 0..1 jitter of seeds within their grid cell

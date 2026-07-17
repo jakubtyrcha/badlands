@@ -14,6 +14,7 @@
 //                         [--preview-image-only] [--screenshot out.png]
 //                         [--record dir/]
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -44,6 +45,29 @@ std::optional<std::pair<int, int>> parse_resolution(const std::string& s) {
   } catch (const std::exception&) {
     return std::nullopt;
   }
+}
+
+// "X,Y,W,H" -> the four ints (a pixel sub-rectangle of an authored map).
+std::optional<std::array<int, 4>> parse_region(const std::string& s) {
+  std::array<int, 4> r{};
+  size_t start = 0;
+  for (int i = 0; i < 4; ++i) {
+    const size_t comma = s.find(',', start);
+    const std::string tok =
+        s.substr(start, comma == std::string::npos ? comma : comma - start);
+    try {
+      r[i] = std::stoi(tok);
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+    if (i < 3) {
+      if (comma == std::string::npos) return std::nullopt;  // too few fields
+      start = comma + 1;
+    } else if (comma != std::string::npos) {
+      return std::nullopt;  // too many fields
+    }
+  }
+  return r;
 }
 
 // Flags owned by the app layer (SdlViewerApp::Run parses these out of the raw
@@ -111,6 +135,7 @@ int main(int argc, char** argv) {
   std::optional<std::pair<int, int>> res_override;
   std::optional<std::string> out_override;
   std::optional<std::string> map_dir;
+  std::optional<std::array<int, 4>> map_region;
   bool preview_only = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -147,6 +172,15 @@ int main(int argc, char** argv) {
       if (auto v = next("--out")) out_override = *v; else return 2;
     } else if (a == "--map") {
       if (auto v = next("--map")) map_dir = *v; else return 2;
+    } else if (a == "--map-region") {
+      auto v = next("--map-region");
+      if (!v) return 2;
+      map_region = parse_region(*v);
+      if (!map_region) {
+        std::fprintf(stderr, "mapview: bad --map-region '%s' (want X,Y,W,H)\n",
+                     v->c_str());
+        return 2;
+      }
     } else if (is_app_flag_with_value(a)) {
       if (!next(a.c_str())) return 2;  // consume the value; SdlViewerApp reads it
     } else {
@@ -163,6 +197,12 @@ int main(int argc, char** argv) {
                  "map's size comes from its map_meta.json\n");
     return 2;
   }
+  // --map-region focuses a sub-rectangle of an authored map; it has no meaning
+  // for a generated one.
+  if (map_region && !map_dir) {
+    std::fprintf(stderr, "mapview: --map-region requires --map\n");
+    return 2;
+  }
 
   MapgenConfig cfg = badlands::mapgen::load_config(config_path);
   if (seed_override) cfg.seed = *seed_override;
@@ -172,6 +212,12 @@ int main(int argc, char** argv) {
   }
   if (out_override) cfg.out_dir = *out_override;
   if (map_dir) cfg.map_dir = *map_dir;
+  if (map_region) {
+    cfg.map_crop_x = (*map_region)[0];
+    cfg.map_crop_y = (*map_region)[1];
+    cfg.map_crop_w = (*map_region)[2];
+    cfg.map_crop_h = (*map_region)[3];
+  }
 
   // Only meaningful for a generated map: an authored one validates its own dims
   // against kSamplesPerBlock at load, and rejects a bad size rather than warning.

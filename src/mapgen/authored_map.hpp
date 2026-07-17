@@ -56,4 +56,14 @@ bool load_authored_heights(const AuthoredMapMeta& meta, Field2D<float>& out,
 bool load_authored_biome(const AuthoredMapMeta& meta, Field2D<uint8_t>& out,
                          std::string& err);
 
+// Focus a loaded authored map onto the [x, x+w) x [y, y+h) pixel sub-rectangle,
+// shrinking both fields in place at the same world scale. Lets a large map be
+// scoped to a smaller playable area without regenerating the images.
+//
+// `heights` and `biome` must already share the same dimensions (as the loaders
+// produce). Fails if the rectangle does not sit fully inside the map, or if w/h is
+// not a multiple of kSamplesPerBlock (the remainder would fall off the block grid).
+bool crop_authored_map(Field2D<float>& heights, Field2D<uint8_t>& biome, int x, int y,
+                       int w, int h, std::string& err);
+
 }  // namespace badlands::mapgen

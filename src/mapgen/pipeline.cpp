@@ -47,6 +47,18 @@ bool run_authored_pipeline(MapgenConfig& cfg, const std::string& map_dir,
   if (!load_authored_heights(meta, a.heightmap, err)) return false;
   if (!load_authored_biome(meta, a.biomes.pixel, err)) return false;
 
+  // Optional focus: keep only a sub-region of the loaded map (cfg.map_crop_*). The
+  // images are untouched; this windows the decoded fields and shrinks the map to the
+  // crop, at the same world scale.
+  if (cfg.map_crop_w > 0 && cfg.map_crop_h > 0) {
+    if (!crop_authored_map(a.heightmap, a.biomes.pixel, cfg.map_crop_x, cfg.map_crop_y,
+                           cfg.map_crop_w, cfg.map_crop_h, err)) {
+      return false;
+    }
+    cfg.width = cfg.map_crop_w;
+    cfg.height = cfg.map_crop_h;
+  }
+
   // fields/voronoi/biomes.cell_biome stay empty: nothing downstream reads them. The
   // preview writer knows to skip them (outputs.cpp), and that is the only consumer that
   // ever looked.

@@ -185,3 +185,51 @@ TEST_CASE("load_authored_heights: rejects an image whose size disagrees with the
   Field2D<float> h;
   CHECK_FALSE(load_authored_heights(m, h, err));
 }
+
+// --- crop_authored_map: window a loaded map onto a sub-rectangle ---------------
+
+namespace {
+// An 8x8 pair whose values encode their (x,y) so the crop offset is checkable.
+void make_88(Field2D<float>& h, Field2D<uint8_t>& b) {
+  h = Field2D<float>(8, 8);
+  b = Field2D<uint8_t>(8, 8);
+  for (int y = 0; y < 8; ++y)
+    for (int x = 0; x < 8; ++x) {
+      h.at(x, y) = static_cast<float>(y * 8 + x);
+      b.at(x, y) = static_cast<uint8_t>((x + y) % kBiomeCount);
+    }
+}
+}  // namespace
+
+TEST_CASE("crop_authored_map: windows both fields onto the sub-rectangle") {
+  Field2D<float> h;
+  Field2D<uint8_t> b;
+  make_88(h, b);
+  std::string err;
+  // bottom-left 4x4 quadrant: x[0,4) y[4,8) (kSamplesPerBlock == 4).
+  REQUIRE(crop_authored_map(h, b, 0, 4, 4, 4, err));
+  CHECK(h.width == 4);
+  CHECK(h.height == 4);
+  CHECK(b.width == 4);
+  // crop(0,0) is the original (0,4); crop(3,3) is the original (3,7).
+  CHECK(h.at(0, 0) == Catch::Approx(4 * 8 + 0));
+  CHECK(h.at(3, 3) == Catch::Approx(7 * 8 + 3));
+  CHECK(b.at(0, 0) == static_cast<uint8_t>((0 + 4) % kBiomeCount));
+}
+
+TEST_CASE("crop_authored_map: rejects a rectangle that spills outside the map") {
+  Field2D<float> h;
+  Field2D<uint8_t> b;
+  make_88(h, b);
+  std::string err;
+  CHECK_FALSE(crop_authored_map(h, b, 6, 0, 4, 4, err));  // 6+4 > 8
+  CHECK_FALSE(crop_authored_map(h, b, -1, 0, 4, 4, err));
+}
+
+TEST_CASE("crop_authored_map: rejects a size not divisible by kSamplesPerBlock") {
+  Field2D<float> h;
+  Field2D<uint8_t> b;
+  make_88(h, b);
+  std::string err;
+  CHECK_FALSE(crop_authored_map(h, b, 0, 0, 6, 4, err));  // 6 % 4 != 0
+}
