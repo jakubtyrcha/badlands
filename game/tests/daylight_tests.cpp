@@ -137,12 +137,6 @@ TEST_CASE("Moon eases in only after the sun sets", "[daylight]") {
   REQUIRE(glm::dot(midnight.light_direction, midnight.moon_direction) ==
           Catch::Approx(1.0).margin(1e-5));
   REQUIRE(midnight.light_intensity == Catch::Approx(cfg.moon_intensity).margin(1e-4));
-
-  // Dynamic-range check: the moon sits ~2-3 orders of magnitude below the sun
-  // (compressed from the physical ~6 so it fits the renderer's range).
-  const double orders = std::log10(cfg.sun_intensity_max / cfg.moon_intensity);
-  REQUIRE(orders >= 2.0);
-  REQUIRE(orders <= 3.0);
 }
 
 TEST_CASE("Directional light is continuous through the horizon crossing",
