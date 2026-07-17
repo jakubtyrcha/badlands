@@ -5,8 +5,8 @@
 // Deliberately NOT evaluate_fields (fields.hpp): that one hardwires the map's five
 // uniforms, a 4-tuple result, and a domain that is always the whole map. This takes an
 // arbitrary uniform list, expects a scalar result, and lets the caller place the patch
-// anywhere in the world — which is what makes a 128 m preview of a terrain script (and
-// a seam check between two adjacent patches) possible.
+// anywhere in the world at any density — which is what makes a preview of a terrain
+// script (and a seam check between two adjacent patches) possible.
 
 #include <string>
 #include <vector>
@@ -27,10 +27,10 @@ struct ScriptUniform {
 // Sample (px, pz) of the patch is world (origin_x + (px+0.5)*meters_per_sample, ...),
 // so two patches with different origins agree exactly where they overlap.
 struct PatchDomain {
-  int size = 128;                  // samples per side
+  int size = 512;                  // samples per side
   float origin_x = 0.0f;           // world meters
   float origin_z = 0.0f;
-  float meters_per_sample = 1.0f;
+  float meters_per_sample = 1.0f;  // the VIEW's density, not the map's grid
 };
 
 // Compiles `source` and evaluates it once per sample of `domain`, writing the scalar

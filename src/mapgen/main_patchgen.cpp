@@ -2,15 +2,28 @@
 //
 // The authoring loop for terrain scripts. A script is a function of WORLD METERS
 // returning a height in meters (water datum at 0) — see scripts/mapgen/biomes/README.md
-// — so a 128x128 m patch here is a literal crop of the world that script would build at
-// any map size.
+// — so a patch here is a literal crop of the world that script would build at any map
+// size.
+//
+// The VIEW is decoupled from the map's grid: --extent picks how much world to look at,
+// --res how many samples to look with, and meters_per_sample = extent/res follows. The
+// map's own density (mapgen_constants.hpp kMetersPerSample) is a different thing and is
+// deliberately NOT borrowed here — a preview is a view into a world-fixed signal, so it
+// chooses its own sampling rate. Widening --extent shows more world at the same terrain,
+// never different terrain.
+//
+// Two standard views:
+//   structure  --extent 2000 --res 512   (mps ~3.9 m) — large-scale organisation
+//   detail     --extent 512  --res 512   (mps  1.0 m) — the map's real extent + density
+// Sampling coarser than the signal aliases (Nyquist = 2*mps): the structure view judges
+// organisation, not fine detail. Confirm anything sub-8 m in the detail view.
 //
 // Run from the repo root.
 //
 // Usage:
-//   badlands_patchgen --script S.noiser --out DIR [--size 128] [--origin X,Z]
-//                     [--seed N] [--range LO,HI] [--uniform name=value]...
-//                     [--name STEM]
+//   badlands_patchgen --script S.noiser --out DIR [--extent 2000] [--res 512]
+//                     [--origin X,Z] [--seed N] [--range LO,HI]
+//                     [--uniform name=value]... [--scale 2] [--name STEM]
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +34,6 @@
 
 #include "mapgen/field2d.hpp"
 #include "mapgen/hillshade.hpp"
-#include "mapgen/mapgen_constants.hpp"
 #include "mapgen/outputs.hpp"
 #include "mapgen/script_eval.hpp"
 
@@ -63,8 +75,9 @@ int main(int argc, char** argv) {
   std::string script_path;
   std::string out_dir;
   std::string name;
-  int size = 128;
-  int scale = 4;  // display upscale only; evaluation stays at 1 m samples
+  float extent_m = 2000.0f;  // world meters across the patch (the VIEW's window)
+  int res = 512;             // samples per side (the VIEW's sampling rate)
+  int scale = 2;             // display upscale only; does not change what is sampled
   float origin_x = 0.0f, origin_z = 0.0f;
   std::optional<std::pair<float, float>> range;
   std::vector<ScriptUniform> uniforms;
@@ -82,12 +95,22 @@ int main(int argc, char** argv) {
       if (auto v = next("--out")) out_dir = *v; else return 2;
     } else if (a == "--name") {
       if (auto v = next("--name")) name = *v; else return 2;
-    } else if (a == "--size") {
-      auto v = next("--size");
+    } else if (a == "--extent") {
+      auto v = next("--extent");
       if (!v) return 2;
-      size = std::atoi(v->c_str());
-      if (size <= 0) {
-        std::fprintf(stderr, "patchgen: bad --size '%s'\n", v->c_str());
+      extent_m = static_cast<float>(std::atof(v->c_str()));
+      if (!(extent_m > 0.0f)) {
+        std::fprintf(stderr, "patchgen: bad --extent '%s' (world meters > 0)\n",
+                     v->c_str());
+        return 2;
+      }
+    } else if (a == "--res") {
+      auto v = next("--res");
+      if (!v) return 2;
+      res = std::atoi(v->c_str());
+      if (res <= 0) {
+        std::fprintf(stderr, "patchgen: bad --res '%s' (samples > 0)\n",
+                     v->c_str());
         return 2;
       }
     } else if (a == "--origin") {
@@ -141,8 +164,11 @@ int main(int argc, char** argv) {
   if (script_path.empty() || out_dir.empty()) {
     std::fprintf(stderr,
                  "usage: badlands_patchgen --script S.noiser --out DIR "
-                 "[--size N] [--scale N] [--origin X,Z] [--seed N] [--range LO,HI] "
-                 "[--uniform name=value]... [--name STEM]\n");
+                 "[--extent M] [--res N] [--scale N] [--origin X,Z] [--seed N] "
+                 "[--range LO,HI] [--uniform name=value]... [--name STEM]\n"
+                 "  --extent M  world meters across the patch (default 2000)\n"
+                 "  --res N     samples per side (default 512)\n"
+                 "              => meters_per_sample = extent/res\n");
     return 2;
   }
   if (name.empty()) name = stem_of(script_path);
@@ -155,12 +181,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // The view's sampling rate follows from the window and the sample count. This is
+  // deliberately NOT kMetersPerSample: that is the MAP's grid density, a separate
+  // concept. Borrowing it here would weld the preview to the map and make --extent
+  // impossible.
   PatchDomain domain;
-  domain.size = size;
+  domain.size = res;
   domain.origin_x = origin_x;
   domain.origin_z = origin_z;
-  domain.meters_per_sample =
-      static_cast<float>(badlands::mapgen::kMetersPerSample);
+  domain.meters_per_sample = extent_m / static_cast<float>(res);
 
   Field2D<float> height;
   std::string err;
@@ -178,12 +207,13 @@ int main(int argc, char** argv) {
     lo = std::min(lo, v);
     hi = std::max(hi, v);
   }
-  const float span_m = static_cast<float>(size) * domain.meters_per_sample;
-  std::printf("%-24s %.0fx%.0f m @ (%.0f,%.0f)  height %.2f .. %.2f m\n",
-              name.c_str(), span_m, span_m, origin_x, origin_z, lo, hi);
+  std::printf(
+      "%-24s %.0fx%.0f m @ (%.0f,%.0f)  %dpx  %.3f m/sample  height %.2f .. %.2f m\n",
+      name.c_str(), extent_m, extent_m, origin_x, origin_z, res,
+      domain.meters_per_sample, lo, hi);
 
-  // Shade at the REAL sample density (so slopes are true), then upscale the images for
-  // legibility -- a 128 m patch at 1 m samples is only 128 px.
+  // Shade at the view's REAL sample density (so slopes are true), then upscale the
+  // images for legibility -- 512 samples is only 512 px.
   const Field2D<float> shade =
       badlands::mapgen::compute_hillshade(height, domain.meters_per_sample);
   const Field2D<float> height_img =

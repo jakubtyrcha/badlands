@@ -346,6 +346,27 @@ target_include_directories(badlands_mapgen_tests PRIVATE
 )
 add_test(NAME badlands_mapgen_tests COMMAND badlands_mapgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_patch_eval_tests: the patch evaluator's world mapping (world =
+# origin + (i+0.5)*extent/res), pinned with analytic ramp scripts. Needs the
+# noiser VM, so it links badlands_game_lib (which PUBLIC-links noiser_bundle and
+# carries no engine/SDL/Dawn dependency) -- NOT badlands_mapgen_lib, which would
+# drag in the renderer for nothing.
+add_executable(badlands_patch_eval_tests
+    src/mapgen/patch_eval_tests.cpp
+    src/mapgen/script_eval.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_link_libraries(badlands_patch_eval_tests PRIVATE badlands_game_lib)
+target_include_directories(badlands_patch_eval_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_compile_options(badlands_patch_eval_tests PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_patch_eval_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_patch_eval_tests COMMAND badlands_patch_eval_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
 # see tests/cpp_tests.rs on the legacy Rust reference branch).

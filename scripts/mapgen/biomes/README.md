@@ -11,8 +11,19 @@ height in meters**.
 
 ```
 badlands_patchgen --script scripts/mapgen/biomes/hills_ridged_fbm.noiser \
-                  --out /tmp/patches --size 128 --seed 2
+                  --out /tmp/patches --extent 2000 --res 512 --seed 2
 ```
+
+`--extent` is how much world to look at (meters); `--res` is how many samples to look
+with. `meters_per_sample = extent/res` follows. The two standard views:
+
+| View | Flags | m/sample | Judges |
+|---|---|---|---|
+| structure | `--extent 2000 --res 512` | ~3.9 | large-scale organisation |
+| detail | `--extent 512 --res 512` | 1.0 | the map's real extent + density |
+
+Sampling coarser than the signal aliases (Nyquist = 2×mps), so confirm anything
+sub-8 m in the detail view.
 
 ### Height 0 is the water datum
 
@@ -29,9 +40,10 @@ say where the ground is.
 ### Frequency is in METERS, not cycles
 
 Every scale knob is a **wavelength in meters** (`*_wavelength_m`), never "cycles across
-the map". This is the whole reason a 128 m patch means anything: the script produces the
-same terrain at that spot regardless of map size or patch size, so a preview is a literal
-crop of the world, and a 512 m map is a representative sample of a 2 km one.
+the map". This is the whole reason a preview means anything: the script produces the same
+terrain at that spot regardless of map size, patch extent, or sample density, so a preview
+is a literal crop of the world, and a 512 m map is a representative sample of a 2 km one.
+Widening `--extent` shows *more world at the same terrain* — never different terrain.
 
 The host supplies the placement; the script turns it into meters:
 
