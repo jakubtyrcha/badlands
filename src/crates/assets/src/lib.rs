@@ -337,6 +337,48 @@ pub unsafe extern "C" fn badlands_write_png(
     }
 }
 
+/// Write a 16-bit single-channel image to a PNG file at `path`. The symmetric
+/// writer for `badlands_decode_image16` -- for heightmaps and other data where
+/// the 16-bit precision is the point (the RGBA8 `badlands_write_png` would
+/// truncate it, mirroring the decode side).
+///
+/// Failures (null input, non-UTF8/unwritable path, encode error, or an internal
+/// panic) are logged to stderr; there is no success/failure signal across the C
+/// ABI.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string. `luma` must point at at
+/// least `width * height` readable u16 samples (tightly packed, no row padding).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_write_png16(
+    path: *const c_char,
+    luma: *const u16,
+    width: u32,
+    height: u32,
+) {
+    let result = panic::catch_unwind(|| {
+        if path.is_null() || luma.is_null() {
+            return Err("null path or sample buffer".to_string());
+        }
+        let path = unsafe { CStr::from_ptr(path) }
+            .to_str()
+            .map_err(|e| e.to_string())?;
+        let n = (width as usize) * (height as usize);
+        let samples = unsafe { std::slice::from_raw_parts(luma, n) }.to_vec();
+        let img = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(width, height, samples)
+            .ok_or_else(|| "sample buffer too small for width*height".to_string())?;
+        image::DynamicImage::ImageLuma16(img)
+            .save(path)
+            .map_err(|e| e.to_string())
+    });
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => eprintln!("badlands_write_png16: failed: {msg}"),
+        Err(_) => eprintln!("badlands_write_png16: panicked"),
+    }
+}
+
 fn opt_string_to_raw(s: Option<String>) -> *mut c_char {
     s.and_then(|s| CString::new(s).ok())
         .map(CString::into_raw)
@@ -686,6 +728,25 @@ mod tests {
         assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
         assert_eq!(rgba.get_pixel(1, 1).0, [255, 255, 255, 255]);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ffi_write_png16_roundtrip() {
+        // write16 -> decode16 must preserve every u16 sample exactly, including
+        // values that could not survive an 8-bit round trip (not multiples of 257).
+        let path = std::env::temp_dir().join("badlands_write_png16_roundtrip.png");
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        let vals: [u16; 4] = [0x1234, 0xFFFF, 0x0001, 0xABCD];
+
+        unsafe { badlands_write_png16(c_path.as_ptr(), vals.as_ptr(), 2, 2) };
+
+        let img = unsafe { badlands_decode_image16(c_path.as_ptr()) };
+        assert!(!img.luma.is_null(), "written png16 should decode");
+        assert_eq!((img.width, img.height), (2, 2));
+        let got = unsafe { std::slice::from_raw_parts(img.luma, 4) }.to_vec();
+        assert_eq!(got, vals.to_vec(), "16-bit samples must survive write->decode");
+        unsafe { badlands_image16_free(img) };
         let _ = std::fs::remove_file(&path);
     }
 }

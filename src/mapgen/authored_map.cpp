@@ -102,6 +102,27 @@ bool read_authored_meta(const std::string& dir, AuthoredMapMeta& out, std::strin
     return false;
   }
 
+  // The biome image stores raw Biome enum values, so the asset's biome ordering must
+  // match the engine enum exactly -- otherwise every label silently maps to the wrong
+  // biome (e.g. forest textured as lake) with no error. Fail loudly like the checks
+  // above. (biome_name / kBiomeCount from biomes.hpp; same order-is-the-contract rule
+  // ResolveBiomePacks enforces on the material manifest.)
+  const auto biomes = j.find("biomes");
+  if (biomes == j.end() || !biomes->is_array() ||
+      biomes->size() != static_cast<size_t>(kBiomeCount)) {
+    err = "authored map: '" + path + "' must list all " + std::to_string(kBiomeCount) +
+          " biomes in enum order";
+    return false;
+  }
+  for (int i = 0; i < kBiomeCount; ++i) {
+    const std::string want(biome_name(static_cast<Biome>(i)));
+    if (!(*biomes)[i].is_string() || (*biomes)[i].get<std::string>() != want) {
+      err = "authored map: biome[" + std::to_string(i) + "] must be '" + want +
+            "' to match the engine enum";
+      return false;
+    }
+  }
+
   m.heights_png = png_path(dir, "heights", m.width);
   m.biome_png = png_path(dir, "biome", m.width);
   out = std::move(m);

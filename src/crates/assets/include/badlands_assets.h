@@ -114,6 +114,16 @@ void badlands_string_free(char* s);
 void badlands_write_png(const char* path, const uint8_t* rgba, uint32_t width,
                         uint32_t height);
 
+// Write a 16-bit single-channel image (tightly packed, `width * height` uint16
+// samples, no row padding) to a PNG file at `path`. The symmetric writer for
+// badlands_decode_image16() -- for heightmaps and other data where the 16-bit
+// precision is the point (badlands_write_png would truncate it).
+//
+// Failures (null input, unwritable path, encode error, or an internal panic)
+// are logged to stderr; there is no success/failure return across the C ABI.
+void badlands_write_png16(const char* path, const uint16_t* luma, uint32_t width,
+                          uint32_t height);
+
 #ifdef __cplusplus
 }
 #endif

@@ -368,6 +368,28 @@ if(APPLE)
 endif()
 add_test(NAME badlands_patch_eval_tests COMMAND badlands_patch_eval_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_authored_map_tests: the authored-map loader -- map_meta.json validation
+# (dims, block-multiple, height range, meters_per_sample, and the biome-order
+# label->enum contract) plus the two image decodes. Compiles authored_map.cpp
+# directly and links the `assets` crate for the PNG decode/encode C ABI + nlohmann
+# for the manifest parse; deliberately no engine/SDL/Dawn.
+add_executable(badlands_authored_map_tests
+    src/mapgen/authored_map_tests.cpp
+    src/mapgen/authored_map.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_link_libraries(badlands_authored_map_tests PRIVATE assets nlohmann_json::nlohmann_json)
+target_include_directories(badlands_authored_map_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+if(APPLE)
+    target_link_options(badlands_authored_map_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_authored_map_tests COMMAND badlands_authored_map_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
 # see tests/cpp_tests.rs on the legacy Rust reference branch).
