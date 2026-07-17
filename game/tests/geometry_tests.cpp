@@ -10,6 +10,7 @@
 #include "core/roof_shape.hpp"
 #include "engine/rendering/geometry/building_parts_builder.hpp"
 #include "engine/rendering/geometry/extrusion_mesh_builder.hpp"
+#include "engine/rendering/geometry/lake_surface_builder.hpp"
 #include "engine/rendering/geometry/primitive_mesh_builders.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "game/building_catalog.h"
@@ -328,4 +329,138 @@ TEST_CASE("ploppable_local_ring: footprints and rotation") {
   }
   CHECK((rmaxx - rminx) == Catch::Approx(3.6f).margin(1e-2));  // swapped
   CHECK((rmaxz - rminz) == Catch::Approx(7.0f).margin(1e-2));
+}
+
+// ---- water: heightmap terrain (lake bottom) + lake surface --------------
+
+namespace {
+
+// Iterate vertices as (pos, normal) pairs from a TexturedMeshResult.
+template <typename F>
+void for_each_vertex(const TexturedMeshResult& r, F&& fn) {
+  const auto& v = r.mesh.vertices;
+  for (size_t i = 0; i < v.size(); i += kTexturedMeshFloatsPerVertex) {
+    fn(glm::vec3(v[i], v[i + 1], v[i + 2]),
+       glm::vec3(v[i + 5], v[i + 6], v[i + 7]));
+  }
+}
+
+}  // namespace
+
+TEST_CASE("GenerateHeightmapMesh forms a well-formed Gaussian basin",
+          "[water][heightmap]") {
+  const float depth = 3.0f, sigma = 6.0f;
+  auto height = [=](float x, float z) {
+    return -depth * std::exp(-(x * x + z * z) / (sigma * sigma));
+  };
+  auto mesh = GenerateHeightmapMesh(40.0f, 32, height);
+  check_well_formed(mesh, "heightmap");
+
+  float min_y = 1e9f;
+  glm::vec3 center_normal(0.0f);
+  bool found_center = false, found_corner = false;
+  for_each_vertex(mesh, [&](glm::vec3 p, glm::vec3 n) {
+    min_y = std::min(min_y, p.y);
+    if (std::abs(p.x) < 1e-3f && std::abs(p.z) < 1e-3f) {
+      center_normal = n;
+      found_center = true;
+    }
+    if (std::abs(p.x - 20.0f) < 1e-3f && std::abs(p.z - 20.0f) < 1e-3f) {
+      CHECK(p.y == Catch::Approx(0.0f).margin(0.05));  // corner is flat
+      found_corner = true;
+    }
+  });
+  REQUIRE(found_center);
+  REQUIRE(found_corner);
+  CHECK(min_y == Catch::Approx(-depth).margin(0.05));  // deepest at center
+  // Gaussian gradient is 0 at the center -> normal points straight up.
+  CHECK(center_normal.y == Catch::Approx(1.0f).margin(1e-3));
+}
+
+TEST_CASE("PointInPolygon classifies inside/outside", "[water][lake]") {
+  std::vector<glm::vec2> square = {{-2, -2}, {2, -2}, {2, 2}, {-2, 2}};
+  CHECK(PointInPolygon(glm::vec2(0, 0), square));
+  CHECK_FALSE(PointInPolygon(glm::vec2(3, 0), square));
+  CHECK_FALSE(PointInPolygon(glm::vec2(0, 5), square));
+}
+
+TEST_CASE("GenerateLakeSurfaceMesh tessellates a concave polygon interior",
+          "[water][lake]") {
+  // Concave closed path (a notch cut into the top edge), world XZ.
+  std::vector<glm::vec2> path = {{-5, -5}, {5, -5}, {5, 5}, {0, 1}, {-5, 5}};
+  const float y = 1.5f, density = 1.0f;
+  auto mesh = GenerateLakeSurfaceMesh(path, density, y);
+  check_well_formed(mesh, "lake");
+  REQUIRE(mesh.mesh.vertex_count > 30 * 3);  // a decently tessellated interior
+
+  std::set<int> distinct_x;
+  for_each_vertex(mesh, [&](glm::vec3 p, glm::vec3 n) {
+    CHECK(p.y == Catch::Approx(y).margin(1e-4));     // flat surface
+    CHECK(n.x == Catch::Approx(0.0f).margin(1e-4));  // +Y normal
+    CHECK(n.y == Catch::Approx(1.0f).margin(1e-4));
+    CHECK(n.z == Catch::Approx(0.0f).margin(1e-4));
+    distinct_x.insert(static_cast<int>(std::lround(p.x / density)));
+  });
+  // Grid columns are spaced exactly `density` apart (contiguous integer steps).
+  REQUIRE(distinct_x.size() >= 3);
+  int prev = *distinct_x.begin();
+  for (auto it = std::next(distinct_x.begin()); it != distinct_x.end(); ++it) {
+    CHECK(*it - prev == 1);  // no gaps wider than one cell
+    prev = *it;
+  }
+
+  // Centroid-rule invariant: exactly one quad (6 verts) per grid cell whose
+  // centre is inside the polygon — no dropped boundary cells (holes) and no
+  // cells whose centre is outside. Replicates the generator's grid bounds.
+  glm::vec2 lo = path[0], hi = path[0];
+  for (const auto& v : path) {
+    lo = glm::min(lo, v);
+    hi = glm::max(hi, v);
+  }
+  const float x0 = std::floor(lo.x / density) * density;
+  const float z0 = std::floor(lo.y / density) * density;
+  const int nx = static_cast<int>(std::ceil((hi.x - x0) / density)) + 1;
+  const int nz = static_cast<int>(std::ceil((hi.y - z0) / density)) + 1;
+  uint32_t expected_cells = 0;
+  for (int iz = 0; iz + 1 < nz; ++iz) {
+    for (int ix = 0; ix + 1 < nx; ++ix) {
+      const glm::vec2 c(x0 + (ix + 0.5f) * density, z0 + (iz + 0.5f) * density);
+      if (PointInPolygon(c, path)) ++expected_cells;
+    }
+  }
+  CHECK(expected_cells > 30);  // the notch region is genuinely concave
+  CHECK(mesh.mesh.vertex_count == expected_cells * 6);
+}
+
+TEST_CASE("GenerateLakeSurfaceMesh fills a thin concave arm (no holes)",
+          "[water][lake]") {
+  // An L-shape with a 1.5 m-wide arm: the old all-corners rule would drop the
+  // arm's boundary-straddling cells, leaving a hole. The centroid rule fills it.
+  std::vector<glm::vec2> path = {{0, 0}, {10, 0},   {10, 1.5f},
+                                 {1.5f, 1.5f}, {1.5f, 10}, {0, 10}};
+  auto mesh = GenerateLakeSurfaceMesh(path, 1.0f, 0.0f);
+  check_well_formed(mesh, "L-lake");
+
+  // Point-in-triangle coverage: a point deep in the horizontal arm must be
+  // covered by some emitted triangle (i.e. there is water there, not a hole).
+  auto covers = [&](glm::vec2 q) {
+    const auto& v = mesh.mesh.vertices;
+    for (size_t t = 0; t + 3 * kTexturedMeshFloatsPerVertex <= v.size();
+         t += 3 * kTexturedMeshFloatsPerVertex) {
+      auto xz = [&](int k) {
+        size_t o = t + static_cast<size_t>(k) * kTexturedMeshFloatsPerVertex;
+        return glm::vec2(v[o], v[o + 2]);
+      };
+      const glm::vec2 a = xz(0), b = xz(1), c = xz(2);
+      const float d1 = (q.x - b.x) * (a.y - b.y) - (a.x - b.x) * (q.y - b.y);
+      const float d2 = (q.x - c.x) * (b.y - c.y) - (b.x - c.x) * (q.y - c.y);
+      const float d3 = (q.x - a.x) * (c.y - a.y) - (c.x - a.x) * (q.y - a.y);
+      const bool neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+      const bool pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+      if (!(neg && pos)) return true;  // same sign -> inside this triangle
+    }
+    return false;
+  };
+  CHECK(covers(glm::vec2(6.5f, 0.75f)));  // middle of the horizontal arm
+  CHECK(covers(glm::vec2(0.75f, 6.5f)));  // middle of the vertical arm
 }

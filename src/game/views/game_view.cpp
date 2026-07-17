@@ -12,9 +12,13 @@
 
 #include "core/profiler.hpp"
 #include "engine/app/fixed_timestep.hpp"
-#include "engine/rendering/fog_sim.hpp"
+#include "engine/app/game_camera_controller.hpp"  // ZoomAtCursor
+#include "engine/app/sdl_input_util.hpp"           // EventWindowLogicalSize
+#include "engine/rendering/geometry/lake_surface_builder.hpp"
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
+#include "engine/rendering/water_material.hpp"
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
 #include "game/scene/building_scene.h"
@@ -78,6 +82,13 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
+  water_factory_ =
+      BuildWaterForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen);
+  if (!water_factory_) {
+    spdlog::error("GameView::Initialize: water factory build failed");
+    return false;
+  }
+
   // Seed the day/night cycle: set the day length, then jump to the initial
   // time-of-day (bakes the sky/IBL/ambient + sets the sun into scene_context_
   // before BuildScene mirrors it).
@@ -90,16 +101,17 @@ bool GameView::Initialize(const RenderContext& ctx) {
   game_ = game_create(nullptr);
   PlaceDemoBuildings();
   BuildScene();
-  SetupFogGenerator();
+  // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
+  if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
 
   // Fixed-angle game camera framing the demo town: the Castle sits at the
   // origin and the demo buildings spread to +-12 in X / up to +10 in Z (see
   // PlaceDemoBuildings), so pull back further than GameCameraController's
   // defaults (pitch 55deg/height 30) to keep the whole spread inside the
   // 45deg-FOV frustum.
-  gamecam_.focus = glm::vec3(0.0f, 0.0f, 4.0f);
-  gamecam_.pitch_deg = 50.0f;
-  gamecam_.height = 42.0f;
+  gamecam_.focus = glm::vec3(0.0f, 0.0f, 0.0f);
+  gamecam_.pitch_deg = 68.0f;
+  gamecam_.height = 44.0f;
   gamecam_.UpdateCamera(camera_);
 
   if (!matlib_.ok()) {
@@ -107,66 +119,6 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
   return true;
-}
-
-void GameView::SetupFogGenerator() {
-  if (!scene_renderer_) return;
-
-  // World-static volumetric emitters (phase placeholder; a real map would derive
-  // these from biomes). Authored in physical sigma_t (see the fog-density table).
-  std::vector<fog::Emitter> emitters;
-  {
-    fog::Emitter bog;  // clumpy dense fog, its volume scrolling upward over time
-    bog.center = {-15.0f, -10.0f};
-    bog.half_extent = {9.0f, 9.0f};
-    bog.shape = fog::EmitterShape::Disc;
-    bog.type = fog::EmitterType::Noise;
-    bog.base_y = 0.0f;
-    bog.height = 22.0f;
-    bog.magnitude = 0.08f;  // dense
-    bog.radial_falloff = 0.6f;
-    bog.vertical_falloff = 0.5f;
-    bog.noise_freq = 0.15f;
-    bog.noise_contrast = 1.6f;
-    bog.scroll = {0.0f, 0.6f, 0.0f};  // vertical scroll -> rising motion
-    bog.seed = 3.0f;
-    emitters.push_back(bog);
-
-    fog::Emitter forest;  // broad, uniform moderate fog (static disc)
-    forest.center = {16.0f, 12.0f};
-    forest.half_extent = {14.0f, 8.0f};
-    forest.rotation = 0.4f;
-    forest.shape = fog::EmitterShape::Obb;
-    forest.type = fog::EmitterType::Disc;
-    forest.base_y = 0.0f;
-    forest.height = 16.0f;
-    forest.magnitude = 0.006f;  // moderate
-    forest.radial_falloff = 0.5f;
-    forest.vertical_falloff = 0.6f;
-    emitters.push_back(forest);
-
-    fog::Emitter lake;  // light, gently drifting fog
-    lake.center = {2.0f, 24.0f};
-    lake.half_extent = {7.0f, 7.0f};
-    lake.shape = fog::EmitterShape::Disc;
-    lake.type = fog::EmitterType::Noise;
-    lake.base_y = 0.0f;
-    lake.height = 10.0f;
-    lake.magnitude = 0.02f;
-    lake.radial_falloff = 0.7f;
-    lake.vertical_falloff = 0.6f;
-    lake.noise_freq = 0.12f;
-    lake.noise_contrast = 1.2f;
-    lake.scroll = {0.1f, 0.25f, 0.0f};
-    lake.seed = 11.0f;
-    emitters.push_back(lake);
-  }
-
-  FogSimParams params;
-  params.map_min = {-48.0f, -48.0f};
-  params.map_max = {48.0f, 48.0f};
-  params.bp_cell_size = 32.0f;
-  scene_renderer_->GetFogSimulation().SetSources(emitters, params);
 }
 
 void GameView::UpdateDaylight() {
@@ -250,34 +202,46 @@ void GameView::BuildScene() {
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  constexpr float kFloorSize = 80.0f;
-  AddFloor(scene_, matlib_, kFloorSize, kFloorPackDir,
-           kFloorSize / kFloorUvRepeatSpacing);
+  // Temporary water test map (decoupled from the sim/town): a terrain heightmap
+  // with a central cavity (the lake bottom) + a tessellated lake surface at a
+  // fixed water level. Exercises the forward water material end to end.
+  auto basin = GenerateHeightmapMesh(100.0f, 120, [](float x, float z) {
+    return -3.0f * std::exp(-(x * x + z * z) / (16.0f * 16.0f));  // Gaussian cavity
+  });
+  AddMeshEntity(scene_, "lake_bottom", std::move(basin),
+                matlib_.SolidColor(glm::vec3(0.20f, 0.17f, 0.13f), 0.9f));
 
-  if (building_rows_.size() < kMaxBuildingRows) {
-    building_rows_.resize(kMaxBuildingRows);
+  // Wobbly closed lake edge (world XZ), radius ~16 m with gentle variation.
+  std::vector<glm::vec2> path;
+  constexpr int kEdgePoints = 64;
+  for (int i = 0; i < kEdgePoints; ++i) {
+    const float a = 6.2831853f * static_cast<float>(i) / kEdgePoints;
+    const float r =
+        16.0f + 2.2f * std::sin(3.0f * a) + 1.0f * std::sin(7.0f * a);
+    path.emplace_back(r * std::cos(a), r * std::sin(a));
   }
-  const uint32_t total =
-      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
-  if (total > kMaxBuildingRows) {
-    spdlog::warn("GameView::BuildScene: {} buildings truncated to {}", total,
-                kMaxBuildingRows);
-  }
-  const uint32_t count = std::min(total, kMaxBuildingRows);
-
-  for (uint32_t i = 0; i < count; ++i) {
-    const GameBuildingState& b = building_rows_[i];
-    AddBuildingToScene(scene_, matlib_, static_cast<GameBuildingKind>(b.kind),
-                       glm::vec2(b.center_x, b.center_z),
-                       yaw_from_rotation_index(b.rotation_index));
-  }
+  auto lake = GenerateLakeSurfaceMesh(path, /*density=*/1.0f, /*y=*/0.0f);
+  AddTransparentMeshEntity(
+      scene_, "lake", std::move(lake), water_factory_.get(),
+      DefaultWaterParams(),
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -1.2f, 0.0f)));
 }
 
-void GameView::HandleEvent(const SDL_Event& /*event*/, int /*width*/,
+void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
                            int /*height*/) {
-  // Fixed-angle camera: no mouse orbit/zoom to wire up. Key panning is
-  // read directly from Update()'s keyboard_state snapshot instead of
-  // per-event, so there is nothing for this view to do here.
+  // Fixed-angle camera: only zoom is mouse-driven (wheel + trackpad, which SDL
+  // reports as the same event with fractional deltas). Key panning is read
+  // directly from Update()'s keyboard_state snapshot instead of per-event.
+  //
+  // Use the window's LOGICAL size (EventWindowLogicalSize), not HandleEvent's
+  // physical-pixel width/height: SDL mouse coords are points, so mixing them
+  // with a pixel extent scales the anchor ray off the cursor on HiDPI displays.
+  if (event.type != SDL_EVENT_MOUSE_WHEEL) return;
+  if (ImGui::GetIO().WantCaptureMouse) return;
+  glm::vec2 screen;
+  if (!EventWindowLogicalSize(event.wheel.windowID, screen)) return;
+  ZoomAtCursor(gamecam_, camera_, NormalizedWheelY(event.wheel),
+               glm::vec2(event.wheel.mouse_x, event.wheel.mouse_y), screen);
 }
 
 void GameView::Update(float dt, const bool* keyboard_state) {
@@ -289,6 +253,11 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // so they run together at the current speed, independent of framerate.
   const double real_dt = static_cast<double>(dt);
   const double sim_dt = sim_clock_.Advance(real_dt);
+
+  // Feed the presentation clock to time-animated forward materials (water
+  // waves). Deterministic under headless SeekToTimeOfDay (sim_seconds is set
+  // deterministically from t01), so screenshots/records are reproducible.
+  scene_context_.time_seconds = static_cast<float>(sim_clock_.sim_seconds);
 
   // The map fog generator is a sim: advance it on sim-time so pause freezes it
   // and game speed scales it. The renderer flushes the accumulated time into
@@ -345,6 +314,7 @@ void GameView::SeekToTimeOfDay(float t01) {
   // re-bake immediately so a single frame is correct.
   sim_clock_.SeekTimeOfDay(t01);
   sim_ticks_done_ = sim_clock_.TickTarget();
+  scene_context_.time_seconds = static_cast<float>(sim_clock_.sim_seconds);
   ApplyDaylightNow();
 }
 

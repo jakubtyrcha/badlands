@@ -89,6 +89,13 @@ struct FactoryDescriptor {
   // GpuContext::GetSurfaceFormat) with no depth buffer.
   RenderTargetFormats color_formats = {wgpu::TextureFormat::BGRA8Unorm};
   wgpu::TextureFormat depth_format = wgpu::TextureFormat::Undefined;
+
+  // Whether this material writes depth. A per-MATERIAL property, not derived
+  // from the pass type: e.g. a forward-transparent water surface tests but does
+  // NOT write depth (it renders against a depth-read-only attachment, which a
+  // depth-writing pipeline is invalid against). The shadow pass always writes
+  // depth regardless (it is depth-only); every other pass honors this flag.
+  bool depth_write = true;
 };
 
 // Build factory from descriptor. script_provider required when

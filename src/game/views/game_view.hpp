@@ -8,6 +8,7 @@
 // are NOT in this stage -- buildings only.
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <dawn/webgpu_cpp.h>
@@ -67,10 +68,6 @@ class GameView : public AppView {
   // When dynamic entities land, BuildScene (or an incremental scene update)
   // must be re-driven from the sim each frame the world changes.
   void BuildScene();
-  // Map fog generator: seeds a few world-static fog emitters on the renderer's
-  // FogSimulation (the "map produces fog" seam). The composer then builds the
-  // volumetric media from them instead of the analytic placeholder shapes.
-  void SetupFogGenerator();
 
   // GPU handles (from RenderContext, stored so DrawUI can re-bake the sky when
   // a DaylightConfig value changes live).
@@ -80,6 +77,9 @@ class GameView : public AppView {
 
   MaterialLibrary matlib_;
   CubemapBuilder sky_cube_;
+
+  // Forward-transparent water material factory (temporary water test map).
+  std::unique_ptr<MaterialInstanceFactory> water_factory_;
 
   // Time model (see sim_clock.hpp). `sim_clock_` accumulates real dt * speed;
   // the day/night cycle reads TimeOfDay()/DayCounter() and the fixed-rate game
