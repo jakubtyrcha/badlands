@@ -56,6 +56,7 @@ struct MapgenConfig {
       0.18f,  // Forest
       0.15f,  // Plains
       0.28f,  // Hills
+      0.32f,  // Mountain
   };
 
   // --- Section extraction ---

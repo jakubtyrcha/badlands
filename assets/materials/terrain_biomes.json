@@ -1,8 +1,9 @@
 {
-  "_comment": "Biome -> PBR pack for the terrain-blend texture arrays. Keyed by mapgen::biome_name() (src/mapgen/biomes.hpp); the array layer index is the Biome enum value (Lake=0, Swamp=1, Forest=2, Plains=3, Hills=4). Every biome must be present. All packs must share one texture size (currently 1024x1024) — a texture array has one size for all layers. No grass/sand/water pack exists yet, so these are the closest available; swapping one in later is a change to this file only.",
+  "_comment": "Biome -> PBR pack for the terrain-blend texture arrays. Keyed by mapgen::biome_name() (src/mapgen/biomes.hpp); the array layer index is the Biome enum value (Lake=0, Swamp=1, Forest=2, Plains=3, Hills=4, Mountain=5). Every biome must be present. All packs must share one texture size (currently 1024x1024) — a texture array has one size for all layers. No grass/sand/water pack exists yet, so these are the closest available; swapping one in later is a change to this file only.",
   "lake": "assets/materials/river_small_rocks_1k",
   "swamp": "assets/materials/brown_mud_03_1k",
   "forest": "assets/materials/forest_ground_06_1k",
   "plains": "assets/materials/rocky_terrain_02_1k",
-  "hills": "assets/materials/aerial_rocks_01_1k"
+  "hills": "assets/materials/aerial_rocks_01_1k",
+  "mountain": "assets/materials/lichen_rock_1k"
 }

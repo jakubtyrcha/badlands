@@ -31,11 +31,12 @@ struct TempManifest {
 };
 
 constexpr const char* kComplete = R"({
-  "lake":   "packs/lake",
-  "swamp":  "packs/swamp",
-  "forest": "packs/forest",
-  "plains": "packs/plains",
-  "hills":  "packs/hills"
+  "lake":     "packs/lake",
+  "swamp":    "packs/swamp",
+  "forest":   "packs/forest",
+  "plains":   "packs/plains",
+  "hills":    "packs/hills",
+  "mountain": "packs/mountain"
 })";
 
 }  // namespace
@@ -52,12 +53,14 @@ TEST_CASE("ResolveBiomePacks: resolves every biome in enum order") {
   CHECK(packs[static_cast<int>(mapgen::Biome::Forest)] == "packs/forest");
   CHECK(packs[static_cast<int>(mapgen::Biome::Plains)] == "packs/plains");
   CHECK(packs[static_cast<int>(mapgen::Biome::Hills)] == "packs/hills");
+  CHECK(packs[static_cast<int>(mapgen::Biome::Mountain)] == "packs/mountain");
 }
 
 TEST_CASE("ResolveBiomePacks: key order in the file does not matter") {
   // Name-keyed, so shuffling the JSON must not shuffle the layers.
   TempManifest m(R"({
     "hills":  "packs/hills",
+    "mountain": "packs/mountain",
     "forest": "packs/forest",
     "lake":   "packs/lake",
     "plains": "packs/plains",
@@ -73,7 +76,8 @@ TEST_CASE("ResolveBiomePacks: key order in the file does not matter") {
 TEST_CASE("ResolveBiomePacks: a missing biome is an error, not a short list") {
   TempManifest m(R"({
     "lake": "packs/lake", "swamp": "packs/swamp",
-    "forest": "packs/forest", "plains": "packs/plains"
+    "forest": "packs/forest", "plains": "packs/plains",
+    "mountain": "packs/mountain"
   })",
                  "nohills");  // hills omitted
   std::vector<std::string> packs;
@@ -84,7 +88,8 @@ TEST_CASE("ResolveBiomePacks: a missing biome is an error, not a short list") {
 TEST_CASE("ResolveBiomePacks: a non-string entry is an error") {
   TempManifest m(R"({
     "lake": 42, "swamp": "packs/swamp", "forest": "packs/forest",
-    "plains": "packs/plains", "hills": "packs/hills"
+    "plains": "packs/plains", "hills": "packs/hills",
+    "mountain": "packs/mountain"
   })",
                  "notstring");
   std::vector<std::string> packs;
