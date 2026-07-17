@@ -1,0 +1,126 @@
+// hills / glens — TWO-SCALE RIDGE STRUCTURE (user recipe, round 4).
+//
+// Goal: Cairngorms-style structure — long winding ridge crests with spurs, separated by
+// smooth deep glens and passes. The recipe, verbatim:
+//   - LOW frequency marks passes / valleys (the MAIN modulator);
+//   - HIGH frequency marks the ridges, applied only to the HIGHER ground (secondary
+//     modulator) — valleys stay smooth;
+//   - focus on the general structure, NOT details (no crumple/gully layers here).
+//
+//   h = base + low01 * low_relief + ridge01 * ridge_relief * gate(low01)
+//
+// low01  — 2 smooth simplex-fbm octaves at low_wavelength_m: the massif/glen layout.
+// ridge01 — the classic ridged recurrence (n = 1-|s|; n^2; n *= w; w = n), NON-inverted:
+//           its sharp crest LINES are the ridges, sitting up on the high ground. Crest
+//           lines wander naturally; octave 2 adds branch spurs.
+// gate   — low01 smoothstepped between gate_lo..gate_hi: below gate_lo pure smooth
+//           valley, above gate_hi full ridges. The gate WIDTH is the pass character:
+//           a wide gate lets ridges run far down the flanks.
+//
+// Every knob is a runtime uniform — the variation sweep in /tmp/round4/VARIATIONS.md
+// maps feedback ("V3 but deeper glens") straight onto uniform overrides.
+
+@uni.origin_x: f32 = 0.0;
+@uni.origin_z: f32 = 0.0;
+@uni.meters_per_sample: f32 = 1.0;
+@uni.seed: f32 = 1.0;
+
+// The main modulator: massif/glen spacing and depth.
+@uni.low_wavelength_m: f32 = 900.0;
+@uni.low_relief_m: f32 = 60.0;
+// The ridge marker: crest spacing and height above the local ground.
+// (320 m = the V2 pick from the round-4 sweep, now the baseline.)
+@uni.ridge_wavelength_m: f32 = 320.0;
+@uni.ridge_relief_m: f32 = 45.0;
+@uni.ridge_octaves: i32 = 2;
+// Trunk-and-spur lever: anisotropy of the RIDGE field only (1 = isotropic). Stretches
+// crest lines along ridge_angle_deg so they read as directional trunk ridges; the low
+// field (glens/passes) is never touched by it.
+@uni.ridge_aniso: f32 = 1.0;
+@uni.ridge_angle_deg: f32 = 35.0;
+// Where ridges live on the low field: 0 valley floor .. 1 massif top.
+@uni.gate_lo: f32 = 0.35;
+@uni.gate_hi: f32 = 0.75;
+@uni.base_m: f32 = 4.0;
+// Rocky detail layer (round-6 swatch picks: S03/S04/S12 — plain fbm stacks). Signed
+// texture riding the SAME height gate as the ridges, so valleys stay smooth. 0 = off.
+@uni.detail_amplitude_m: f32 = 8.0;   // full peak-to-valley span at full gate
+@uni.detail_wavelength_m: f32 = 80.0;
+@uni.detail_octaves: i32 = 5;
+@uni.detail_gain: f32 = 0.5;          // S04 = 0.65
+@uni.detail_weighted: f32 = 0.0;      // S12 = 1 (multifractal weight chain)
+
+fn height_m(wx: f32, wz: f32, seed: i32) -> f32 {
+    // LOW: smooth, unfolded — glens and passes. No creases at this scale.
+    let lwl = @uni.low_wavelength_m.max(1.0);
+    let l0 = Simplex2d { seed: seed + 11, freq: 1.0 }.at((wx / lwl, wz / lwl));
+    let l1 = Simplex2d { seed: seed + 11, freq: 1.0 }
+                 .at((wx * 2.0 / lwl, wz * 2.0 / lwl));
+    let low01 = (((l0 + 0.5 * l1) / 1.5) * 0.5 + 0.5).clamp(0.0, 1.0);
+
+    // HIGH: ridged crest lines (the JS reference recurrence, same instance per octave).
+    // Optionally sampled in a squashed frame (ridge_aniso > 1) for directional trunks.
+    let rwl = @uni.ridge_wavelength_m.max(1.0);
+    let ra = @uni.ridge_angle_deg * 0.017453292;
+    let ca = ra.cos();
+    let sa = ra.sin();
+    let ru = (wx * ca + wz * sa) / @uni.ridge_aniso.max(1.0);
+    let rv = 0.0 - wx * sa + wz * ca;
+    var sum = 0.0;
+    var amp = 1.0;
+    var norm = 0.0;
+    var weight = 1.0;
+    var f = 1.0;
+    var o = 0;
+    while o < @uni.ridge_octaves {
+        let s = Simplex2d { seed: seed + 77, freq: 1.0 }
+                    .at((ru * f / rwl, rv * f / rwl));
+        var n = 1.0 - s.abs();
+        n = n * n;
+        n = n * weight;
+        weight = n;
+        sum = sum + n * amp;
+        norm = norm + amp;
+        amp = amp * 0.5;
+        f = f * 2.0;
+        o = o + 1;
+    }
+    let ridge01 = (sum / norm.max(0.0001)).clamp(0.0, 1.0);
+
+    // Ridges only on the high ground; glens and passes stay smooth.
+    let gate = low01.smoothstep(@uni.gate_lo, @uni.gate_hi);
+
+    // DETAIL: the picked fbm stack (detail_stack.noiser mode 0), signed, riding the
+    // same gate — rocky texture on the massifs, none in the glens.
+    let dwl = @uni.detail_wavelength_m.max(1.0);
+    var dsum = 0.0;
+    var damp = 1.0;
+    var dnorm = 0.0;
+    var dweight = 1.0;
+    var df = 1.0;
+    var d = 0;
+    while d < @uni.detail_octaves {
+        var n = Simplex2d { seed: seed + 41, freq: 1.0 }
+                    .at((wx * df / dwl, wz * df / dwl));
+        if @uni.detail_weighted > 0.5 {
+            n = n * dweight;
+            dweight = (n * 0.5 + 0.5).clamp(0.0, 1.0);
+        } else {
+            n = n;
+        }
+        dsum = dsum + n * damp;
+        dnorm = dnorm + damp;
+        damp = damp * @uni.detail_gain;
+        df = df * 2.0;
+        d = d + 1;
+    }
+    let detail = dsum / dnorm.max(0.0001);
+
+    @uni.base_m + low01 * @uni.low_relief_m
+        + ridge01 * @uni.ridge_relief_m * gate
+        + detail * @uni.detail_amplitude_m * 0.5 * gate
+}
+
+let wx = (f32(@warpId.0) + 0.5) * @uni.meters_per_sample + @uni.origin_x;
+let wz = (f32(@warpId.1) + 0.5) * @uni.meters_per_sample + @uni.origin_z;
+height_m(wx, wz, i32(@uni.seed))

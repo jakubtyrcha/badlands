@@ -1,0 +1,88 @@
+// hills / ranges — a MACRO MASK organising warped ridges into distinct massifs.
+//
+// The round-1b diagnosis of every single-technique variant was "no organisation above the
+// wavelength": ridges everywhere, at one density, forever. Real hill country clusters —
+// massifs with passes and open ground between them.
+//
+// Fix by composition: a very-low-frequency mask (wavelength ~1.2 km) MULTIPLIES the ridged
+// field's amplitude. Where the mask is low there are gentle plains; where high, a full
+// ridge system. The mask also feeds the ridge WAVELENGTH slightly (denser ridges on the
+// massif cores), so density varies with the mask too, not just height.
+//
+// Composition ideas demonstrated: amplitude modulation by a macro field, parameter (not
+// just amplitude) modulation, two decoupled world scales.
+
+import { iq_warp_3 } from core::math::warp;
+
+@uni.origin_x: f32 = 0.0;
+@uni.origin_z: f32 = 0.0;
+@uni.meters_per_sample: f32 = 1.0;
+@uni.seed: f32 = 1.0;
+
+// Massif spacing (the macro organisation scale).
+@uni.massif_wavelength_m: f32 = 1200.0;
+// Ridge spacing inside a massif.
+@uni.ridge_wavelength_m: f32 = 170.0;
+@uni.relief_m: f32 = 36.0;
+// Gentle undulation amplitude on the open ground between massifs.
+@uni.plains_relief_m: f32 = 4.0;
+@uni.base_m: f32 = 4.0;
+@uni.octaves: i32 = 4;
+@uni.gain: f32 = 0.5;
+@uni.warp_strength: f32 = 0.4;
+@uni.warp_wavelength_m: f32 = 420.0;
+// Mask shaping: where the macro field crosses from plains into massif.
+@uni.massif_lo: f32 = 0.42;
+@uni.massif_hi: f32 = 0.72;
+
+fn ridged01(wx: f32, wz: f32, seed: i32, wl: f32) -> f32 {
+    let warp_wl = @uni.warp_wavelength_m.max(1.0);
+    let wp = iq_warp_3((wx / warp_wl, wz / warp_wl, 0.0), 1.0, seed + 4127,
+                       @uni.warp_strength);
+    var px = wp.0 * warp_wl / wl;
+    var pz = wp.1 * warp_wl / wl;
+
+    var sum = 0.0;
+    var amp = 0.5;
+    var norm = 0.0;
+    var weight = 1.0;
+    var f = 1.0;
+    var i = 0;
+    while i < @uni.octaves {
+        let nx0 = px * 0.7986 - pz * 0.6018;
+        pz = px * 0.6018 + pz * 0.7986;
+        px = nx0;
+        let n = Perlin3d { seed: seed + i * 2749, freq: 1.0 }.at((px * f, pz * f, 0.0));
+        let r = 1.0 - n.abs();
+        let contrib = r * r * weight;
+        weight = contrib.clamp(0.0, 1.0);
+        sum = sum + contrib * amp;
+        norm = norm + amp;
+        f = f * 2.0;
+        amp = amp * @uni.gain;
+        i = i + 1;
+    }
+    (sum / norm.max(0.0001)).clamp(0.0, 1.0)
+}
+
+fn height_m(wx: f32, wz: f32, seed: i32) -> f32 {
+    // Macro massif field: 2 octaves of plain fbm at the km scale.
+    let mwl = @uni.massif_wavelength_m.max(1.0);
+    let m0 = Perlin3d { seed: seed + 9001, freq: 1.0 }.at((wx / mwl, wz / mwl, 0.0));
+    let m1 = Perlin3d { seed: seed + 9002, freq: 1.0 }
+                 .at((wx * 2.0 / mwl, wz * 2.0 / mwl, 0.0));
+    let m01 = ((m0 + 0.5 * m1) / 1.5 * 0.5 + 0.5).clamp(0.0, 1.0);
+    let massif = m01.smoothstep(@uni.massif_lo, @uni.massif_hi);
+
+    // Ridges pack ~30% denser on massif cores than at their edges.
+    let wl = @uni.ridge_wavelength_m.max(1.0) * (1.0 - 0.3 * massif + 0.3);
+    let r = ridged01(wx, wz, seed, wl);
+
+    // Plains get a faint version of the same field (so the transition is textural,
+    // not just a fade); massifs get the full relief.
+    @uni.base_m + r * (@uni.plains_relief_m + massif * (@uni.relief_m - @uni.plains_relief_m))
+}
+
+let wx = (f32(@warpId.0) + 0.5) * @uni.meters_per_sample + @uni.origin_x;
+let wz = (f32(@warpId.1) + 0.5) * @uni.meters_per_sample + @uni.origin_z;
+height_m(wx, wz, i32(@uni.seed))

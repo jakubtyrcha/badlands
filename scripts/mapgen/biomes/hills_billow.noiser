@@ -1,0 +1,64 @@
+// hills / billow — |N| billow: rounded mounds separated by connected creases.
+//
+// The inverse fold of ridged: where ridged uses 1-|N| (creases become PEAKS), billow uses
+// |N| directly, so the zero-crossings of the noise become deep continuous creases and the
+// space between them bulges into rounded mounds.
+//
+// The interesting property: the zero-contour of a 2D noise field is a set of continuous
+// closed curves, so the creases form a connected graph of valleys and passes "for free" --
+// no cell structure needed. Worth testing against cellular_ravines, whose network is
+// connected but polygonal.
+//
+// The catch (visible at 2 km): those zero-contours are still CLOSED LOOPS. They connect,
+// but they do not drain -- there is no downhill, no trunk, no convergence.
+
+@uni.origin_x: f32 = 0.0;
+@uni.origin_z: f32 = 0.0;
+@uni.meters_per_sample: f32 = 1.0;
+@uni.seed: f32 = 1.0;
+
+// Distance between neighbouring creases.
+@uni.wavelength_m: f32 = 180.0;
+// Mound height above the crease floors.
+@uni.relief_m: f32 = 24.0;
+@uni.base_m: f32 = 4.0;
+@uni.octaves: i32 = 4;
+@uni.gain: f32 = 0.5;
+
+fn height_m(wx: f32, wz: f32, seed: i32) -> f32 {
+    let wl = @uni.wavelength_m.max(1.0);
+
+    var sum = 0.0;
+    var amp = 1.0;
+    var norm = 0.0;
+    var f = 1.0;
+    var px = wx / wl;
+    var pz = wz / wl;
+    var i = 0;
+    while i < @uni.octaves {
+        // Rotate BEFORE sampling, including octave 0. Perlin's gradient lattice is
+        // axis-aligned, so an unrotated dominant octave prints a visible axis-aligned grid
+        // across the terrain -- which is exactly what hills_ridged_fbm does (it rotates
+        // only AFTER its first sample, leaving its highest-amplitude octave aligned).
+        let nx = px * 0.7986 - pz * 0.6018;
+        pz = px * 0.6018 + pz * 0.7986;
+        px = nx;
+
+        let p = (px * f, pz * f, 0.0);
+        let n = Perlin3d { seed: seed + i * 2749, freq: 1.0 }.at(p);
+        // The fold: |n| creases at n=0 -> a connected valley line; between them it bulges.
+        sum = sum + n.abs() * amp;
+        norm = norm + amp;
+
+        f = f * 2.0;
+        amp = amp * @uni.gain;
+        i = i + 1;
+    }
+
+    let billow01 = (sum / norm.max(0.0001)).clamp(0.0, 1.0);
+    @uni.base_m + billow01 * @uni.relief_m
+}
+
+let wx = (f32(@warpId.0) + 0.5) * @uni.meters_per_sample + @uni.origin_x;
+let wz = (f32(@warpId.1) + 0.5) * @uni.meters_per_sample + @uni.origin_z;
+height_m(wx, wz, i32(@uni.seed))

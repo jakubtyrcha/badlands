@@ -1,0 +1,53 @@
+// swamp / bog — wide mud flats hugging the water datum, with pools and hummocks.
+//
+// Height 0 is the water level (biomes README), and a bog is terrain that CLINGS to it:
+// mostly within +-0.3 m, occasionally rising into a dry hummock or dipping into a pool.
+//
+// The shelf comes from an odd-power shaping: s = 2t-1 in [-1,1], then sign(s)*|s|^k.
+// With k ~ 3 the middle of the distribution is crushed flat against 0 (the mud), and
+// only the tails push meaningfully above or below — pools and hummocks as EXCEPTIONS,
+// which is what makes a bog read as a bog rather than as gentle terrain.
+//
+// Composition ideas demonstrated: distribution shaping (odd power) as landform control,
+// a micro-texture layer whose amplitude is metered by |height| (wobble on the mud flat
+// would break the waterline, so the flat stays flat).
+
+@uni.origin_x: f32 = 0.0;
+@uni.origin_z: f32 = 0.0;
+@uni.meters_per_sample: f32 = 1.0;
+@uni.seed: f32 = 1.0;
+
+@uni.patch_wavelength_m: f32 = 300.0;
+// Deepest pool / tallest hummock. (Retuned up from 1.4: fbm rarely exceeds |t|~0.6, and
+// 0.6^3 * 1.4 = 0.3 m left the whole bog within +-0.3 m — indistinguishable from flat.)
+@uni.amplitude_m: f32 = 2.6;
+// Higher = flatter mud, rarer pools/hummocks.
+@uni.shelf_power: f32 = 2.2;
+// Fine mud texture, only away from the waterline.
+@uni.texture_m: f32 = 0.18;
+@uni.texture_wavelength_m: f32 = 40.0;
+
+fn height_m(wx: f32, wz: f32, seed: i32) -> f32 {
+    let wl = @uni.patch_wavelength_m.max(1.0);
+
+    let n0 = Perlin3d { seed: seed + 41, freq: 1.0 }.at((wx / wl, wz / wl, 0.0));
+    let n1 = Perlin3d { seed: seed + 42, freq: 1.0 }
+                 .at((wx * 2.0 / wl, wz * 2.0 / wl, 0.0));
+    let t = ((n0 + 0.5 * n1) / 1.5).clamp(-1.0, 1.0);
+
+    // Odd-power shelf: crush the middle flat, keep the sign.
+    let sgn = if t >= 0.0 { 1.0 } else { 0.0 - 1.0 };
+    let shelf = sgn * t.abs().pow(@uni.shelf_power.max(1.0));
+    let h = shelf * @uni.amplitude_m;
+
+    // Texture fades to zero at the waterline so the mud/water edge stays crisp.
+    let twl = @uni.texture_wavelength_m.max(1.0);
+    let tex = Perlin3d { seed: seed + 43, freq: 1.0 }.at((wx / twl, wz / twl, 0.0));
+    let away = (h.abs() / (@uni.amplitude_m * 0.3)).clamp(0.0, 1.0);
+
+    h + tex * @uni.texture_m * away
+}
+
+let wx = (f32(@warpId.0) + 0.5) * @uni.meters_per_sample + @uni.origin_x;
+let wz = (f32(@warpId.1) + 0.5) * @uni.meters_per_sample + @uni.origin_z;
+height_m(wx, wz, i32(@uni.seed))

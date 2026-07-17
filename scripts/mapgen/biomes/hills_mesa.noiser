@@ -1,0 +1,72 @@
+// hills / mesa — a dissected tableland: flat tops, stratified scarps, lowland floor.
+//
+// Targets the Rievaulx reference read the other way round: instead of carving valleys out
+// of a plateau (cellular_ravines' closed-polygon trap), BUILD the plateau as a landform.
+// A macro field is shaped by smoothstep into three zones — lowland / scarp / tabletop —
+// and each zone gets its own treatment:
+//   tabletop  — dead flat + faint undulation,
+//   scarp     — PingPong strata (horizontal banding, the fractal built for it),
+//   lowland   — gentle billow texture.
+// The scarp mask is plat*(1-plat)*4: exactly 1 mid-transition, 0 on both flats — a cheap
+// way to say "only on the slope".
+//
+// Composition ideas demonstrated: zone shaping via smoothstep, per-zone landforms,
+// derivative-free slope masking (plat*(1-plat)), PingPong strata.
+
+import { iq_warp_3 } from core::math::warp;
+
+@uni.origin_x: f32 = 0.0;
+@uni.origin_z: f32 = 0.0;
+@uni.meters_per_sample: f32 = 1.0;
+@uni.seed: f32 = 1.0;
+
+// Size of a table (macro scale).
+@uni.table_wavelength_m: f32 = 800.0;
+// Tabletop height above the lowland floor.
+@uni.table_relief_m: f32 = 28.0;
+@uni.base_m: f32 = 5.0;
+// Where the macro field turns into table: width of this band = scarp steepness.
+@uni.scarp_lo: f32 = 0.48;
+@uni.scarp_hi: f32 = 0.60;
+// Strata banding depth on the scarps.
+@uni.strata_m: f32 = 3.5;
+@uni.strata_wavelength_m: f32 = 160.0;
+// Texture on top / lowland.
+@uni.detail_m: f32 = 1.6;
+@uni.detail_wavelength_m: f32 = 140.0;
+@uni.warp_strength: f32 = 0.45;
+
+fn height_m(wx: f32, wz: f32, seed: i32) -> f32 {
+    let twl = @uni.table_wavelength_m.max(1.0);
+
+    // Warped macro field -> organic table outlines instead of noise blobs.
+    let wp = iq_warp_3((wx / twl, wz / twl, 0.0), 1.0, seed + 551, @uni.warp_strength);
+    let m0 = Perlin3d { seed: seed + 11, freq: 1.0 }.at((wp.0, wp.1, 0.0));
+    let m1 = Perlin3d { seed: seed + 12, freq: 1.0 }.at((wp.0 * 2.0, wp.1 * 2.0, 0.0));
+    let m01 = ((m0 + 0.5 * m1) / 1.5 * 0.5 + 0.5).clamp(0.0, 1.0);
+
+    // Three zones from one field.
+    let plat = m01.smoothstep(@uni.scarp_lo, @uni.scarp_hi);   // 0 lowland .. 1 tabletop
+    let scarp = (plat * (1.0 - plat) * 4.0).clamp(0.0, 1.0);   // 1 only mid-slope
+
+    // Strata: PingPong's characteristic banding, applied on the scarp only. One octave,
+    // rotated off-axis — stacked/unrotated PingPong printed a maze-like lattice at 90 m
+    // (round-2 review), the same axis-lattice failure as unrotated Perlin octaves.
+    let swl = @uni.strata_wavelength_m.max(1.0);
+    let sx = (wx * 0.7986 - wz * 0.6018) / swl;
+    let sz = (wx * 0.6018 + wz * 0.7986) / swl;
+    let strata = PingPong3d { seed: seed + 77, freq: 1.0, octaves: 1,
+                              lacunarity: 2.0, gain: 0.5, strength: 2.0 }
+                     .at((sx, sz, 0.0));
+
+    // Gentle billow texture, faded on the scarp (so the banding stays legible).
+    let dwl = @uni.detail_wavelength_m.max(1.0);
+    let d = Perlin3d { seed: seed + 31, freq: 1.0 }.at((wx / dwl, wz / dwl, 0.0));
+    let texture = d.abs() * @uni.detail_m * (1.0 - scarp);
+
+    @uni.base_m + plat * @uni.table_relief_m + scarp * strata * @uni.strata_m + texture
+}
+
+let wx = (f32(@warpId.0) + 0.5) * @uni.meters_per_sample + @uni.origin_x;
+let wz = (f32(@warpId.1) + 0.5) * @uni.meters_per_sample + @uni.origin_z;
+height_m(wx, wz, i32(@uni.seed))
