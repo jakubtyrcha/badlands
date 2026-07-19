@@ -1,0 +1,6 @@
+// Simplex noise, grayscale. Run with --mode grayscale.
+//   badlands_noise_texgen assets/noiser/texgen/simplex_gray.noiser \
+//       --window 0,0,8,8 --res 512x512 --mode grayscale --out simplex.png
+import { domain_pos, unorm } from texgen;
+
+unorm(simplex2d(domain_pos(), 1.0, 42))

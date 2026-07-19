@@ -132,6 +132,41 @@ void DrawShadowDebugSelector(SceneRenderer& renderer) {
   renderer.SetShadowDebugMode(mode);
 }
 
+void DrawFogEditor(SceneRenderer& renderer) {
+  if (!ImGui::CollapsingHeader("Volumetric Fog", ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+  FogConfig& cfg = renderer.MutableFogConfig();
+
+  ImGui::Checkbox("Enabled##fog", &cfg.enabled);
+
+  // Cascades (changing count/res recreates the media texture next frame; the
+  // vertical band [floor, floor+height] is runtime-configurable, default 0..64).
+  ImGui::SeparatorText("Cascades");
+  ImGui::SliderFloat("Cascade Extent", &cfg.layout.base_half_extent, 8.0f, 512.0f, "%.0f m");
+  ImGui::SliderInt("Cascades", &cfg.layout.cascade_count, 1, 4);
+  ImGui::SliderInt("Res XZ", &cfg.layout.res_xz, 32, 256);
+  ImGui::SliderInt("Res Y", &cfg.layout.res_y, 8, 64);
+  ImGui::SliderFloat("Band Floor Y", &cfg.layout.floor_y, -20.0f, 40.0f, "%.1f m");
+  ImGui::SliderFloat("Band Height", &cfg.layout.height, 8.0f, 128.0f, "%.1f m");
+
+  // Raymarch / lighting.
+  ImGui::SeparatorText("Raymarch");
+  ImGui::SliderInt("Steps", &cfg.step_count, 4, 128);
+  ImGui::SliderFloat("Max Distance", &cfg.fog_max_distance, 20.0f, 2000.0f, "%.0f m");
+  ImGui::SliderFloat("Phase g", &cfg.phase_g, -0.9f, 0.9f);
+  ImGui::SliderFloat("Sun Scale", &cfg.sun_scale, 0.0f, 4.0f);
+  ImGui::SliderFloat("Ambient Scale", &cfg.ambient_scale, 0.0f, 4.0f);
+
+  // Stochastic / perf.
+  ImGui::SeparatorText("Stochastic / perf");
+  ImGui::Checkbox("Shafts", &cfg.enable_shafts);
+  ImGui::SameLine();
+  ImGui::Checkbox("Jitter", &cfg.jitter);
+  ImGui::SameLine();
+  ImGui::Checkbox("Half-res", &cfg.half_res);
+}
+
 void DrawStats(float dt_seconds) {
   ImGui::Text("%.1f FPS (%.2f ms)", dt_seconds > 0.0f ? 1.0f / dt_seconds : 0.0f,
              dt_seconds * 1000.0f);
@@ -141,12 +176,17 @@ bool DrawDebugPanel(LightEnvironment& env, SceneRenderer& renderer,
                     float dt_seconds) {
   ImGui::Begin("Debug");
   DrawStats(dt_seconds);
-  ImGui::Separator();
-  const bool changed = DrawLightEnvironmentEditor(env);
-  ImGui::Separator();
-  DrawGBufferDebugSelector(renderer);
-  ImGui::Separator();
-  DrawShadowDebugSelector(renderer);
+
+  bool changed = false;
+  if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+    changed = DrawLightEnvironmentEditor(env);
+  }
+  DrawFogEditor(renderer);  // self-contained collapsing section
+  if (ImGui::CollapsingHeader("Debug Views")) {
+    DrawGBufferDebugSelector(renderer);
+    ImGui::Separator();
+    DrawShadowDebugSelector(renderer);
+  }
   ImGui::End();
   return changed;
 }
