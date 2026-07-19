@@ -158,4 +158,36 @@ std::vector<fog::Emitter> GenerateBiomeFog(const Field2D<uint8_t>& biome,
   return out;
 }
 
+std::vector<fog::Emitter> BuildBorderFog(glm::vec2 map_min, glm::vec2 map_max,
+                                         const BorderFogParams& params) {
+  std::vector<fog::Emitter> out;
+  // Map corners in world XZ (glm::vec2 = (x, z)), CCW.
+  const glm::vec2 corner[4] = {{map_min.x, map_min.y},
+                               {map_max.x, map_min.y},
+                               {map_max.x, map_max.y},
+                               {map_min.x, map_max.y}};
+  const float band = params.band_m;
+  for (int i = 0; i < 4; ++i) {
+    const glm::vec2 a = corner[i], b = corner[(i + 1) % 4];
+    glm::vec2 dir = b - a;
+    const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+    if (len < 1e-3f) continue;
+    dir /= len;
+
+    fog::Emitter e;
+    e.center = 0.5f * (a + b);              // on the edge line
+    e.rotation = std::atan2(dir.y, dir.x);  // local x along the edge
+    e.half_extent = {0.5f * len + band, band};  // along edge (padded), perp band
+    e.shape = fog::EmitterShape::Obb;
+    e.type = fog::EmitterType::Disc;  // flat milk-white
+    e.base_y = 0.0f;
+    e.height = params.height_m;
+    e.magnitude = params.magnitude;
+    e.radial_falloff = std::clamp(params.ramp_m / std::max(band, 1e-3f), 0.0f, 1.0f);
+    e.vertical_falloff = 0.3f;
+    out.push_back(e);
+  }
+  return out;
+}
+
 }  // namespace badlands::mapgen

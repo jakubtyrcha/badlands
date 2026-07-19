@@ -140,64 +140,30 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   return true;
 }
 
-std::vector<fog::Emitter> MapViewView::BuildEdgeEmitters() const {
-  std::vector<fog::Emitter> out;
-  if (!edge_fog_.enabled) return out;
-
-  // Unproject the four screen corners to the ground plane. Any screen size works
-  // (the ray depends only on the normalized position), so use a unit square.
-  const glm::vec2 sz(1.0f, 1.0f);
-  const glm::vec2 px[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};  // TL, TR, BR, BL
-  glm::vec3 corner[4];
-  for (int i = 0; i < 4; ++i) {
-    if (!IntersectGroundPlane(ScreenPointToRay(camera_, px[i], sz), 0.0f, corner[i]))
-      return out;  // an edge points at/above the horizon: no wall this frame
-  }
-
-  const float band = edge_fog_.band_m;
-  for (int i = 0; i < 4; ++i) {
-    const glm::vec2 a(corner[i].x, corner[i].z);
-    const glm::vec2 b(corner[(i + 1) % 4].x, corner[(i + 1) % 4].z);
-    glm::vec2 dir = b - a;
-    const float len = glm::length(dir);
-    if (len < 1e-3f) continue;
-    dir /= len;
-
-    fog::Emitter e;
-    // OBB centred ON the edge line: full density at the edge (local perp 0),
-    // ramping to 0 by `band` inward (the outer half is off-screen). Extended past
-    // the corners so adjacent walls overlap (max-combined, no corner gap).
-    e.center = 0.5f * (a + b);
-    e.rotation = std::atan2(dir.y, dir.x);
-    e.half_extent = {0.5f * len + band, band};  // along edge (padded), perp band
-    e.shape = fog::EmitterShape::Obb;
-    e.type = fog::EmitterType::Disc;  // flat milk-white
-    e.base_y = 0.0f;
-    e.height = edge_fog_.height_m;
-    e.magnitude = edge_fog_.magnitude;
-    // Ramp only the outer `ramp_m` of the perpendicular reach; along-edge stays
-    // full because its normalized distance never exceeds ~0.5 across the view.
-    e.radial_falloff = std::clamp(edge_fog_.ramp_m / std::max(band, 1e-3f), 0.0f, 1.0f);
-    e.vertical_falloff = 0.3f;
-    out.push_back(e);
-  }
-  return out;
-}
-
 void MapViewView::SetFogSources() {
   if (scene_renderer_ == nullptr) return;
-  // Biome emitters (edited/picked) plus the transient edge-fog wall, appended
-  // after so they never shift the biome indices the editor addresses.
+  const glm::vec2 map_min(0.0f, 0.0f);
+  const glm::vec2 map_max(
+      static_cast<float>(cfg_.width) * mapgen::kMetersPerSample,
+      static_cast<float>(cfg_.height) * mapgen::kMetersPerSample);
+
+  // Biome emitters (edited/picked) plus the world-static map-border wall, appended
+  // after so they never shift the biome indices the editor addresses. The border
+  // is a function of the map bounds only -- no camera -- so it stays put as the
+  // view moves.
   std::vector<fog::Emitter> all = fog_emitters_;
-  const std::vector<fog::Emitter> edges = BuildEdgeEmitters();
-  all.insert(all.end(), edges.begin(), edges.end());
+  if (border_fog_enabled_) {
+    const std::vector<fog::Emitter> border =
+        mapgen::BuildBorderFog(map_min, map_max, border_fog_);
+    all.insert(all.end(), border.begin(), border.end());
+  }
 
   FogSimParams p;
-  // Include the camera's edge band, which can reach past the map, so the wall
-  // still buckets into the broadphase when the camera looks off the map edge.
-  p.map_min = {-256.0f, -256.0f};
-  p.map_max = {static_cast<float>(cfg_.width) * mapgen::kMetersPerSample + 256.0f,
-               static_cast<float>(cfg_.height) * mapgen::kMetersPerSample + 256.0f};
+  // The border OBBs straddle the edges, so pad the broadphase by the band so their
+  // (slightly off-map) footprint still buckets.
+  const float pad = border_fog_.band_m + 1.0f;
+  p.map_min = map_min - glm::vec2(pad);
+  p.map_max = map_max + glm::vec2(pad);
   p.bp_cell_size = 32.0f;
   scene_renderer_->GetFogSimulation().SetSources(all, p);
 }
@@ -406,9 +372,9 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
   }
   gamecam_.UpdateCamera(camera_);
 
-  // The edge-fog wall is placed from the current frustum, so refresh the fog
-  // sources each frame while it's on (cheap: a few hundred emitters + broadphase).
-  if (edge_fog_.enabled) SetFogSources();
+  // NB: the fog sources are NOT rebuilt per frame -- both the biome fog and the
+  // map-border wall are world-static, so they're uploaded once (Initialize) and
+  // only on edit (the editor). Nothing here depends on the camera.
 
   // Rebuild the debug-line overlay each frame into one buffer: the hover grid plus
   // the selected fog emitter's OBB. No cache: both are small (independent of map
@@ -480,13 +446,13 @@ void MapViewView::DrawFogEmitterEditor() {
   ImGui::SameLine();
   if (ImGui::Button("Deselect")) selected_emitter_ = -1;
 
-  // Screen-edge fog wall.
-  if (ImGui::CollapsingHeader("Edge fog", ImGuiTreeNodeFlags_DefaultOpen)) {
-    bool changed = ImGui::Checkbox("Enabled##edge", &edge_fog_.enabled);
-    changed |= ImGui::SliderFloat("Band (m)", &edge_fog_.band_m, 4.0f, 128.0f);
-    changed |= ImGui::SliderFloat("Ramp (m)", &edge_fog_.ramp_m, 0.0f, 32.0f);
-    changed |= ImGui::SliderFloat("Magnitude##edge", &edge_fog_.magnitude, 0.0f, 0.5f, "%.3f");
-    changed |= ImGui::SliderFloat("Height##edge", &edge_fog_.height_m, 1.0f, 128.0f);
+  // World-static fog wall around the map perimeter (does not move with the camera).
+  if (ImGui::CollapsingHeader("Border fog (map edge)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    bool changed = ImGui::Checkbox("Enabled##border", &border_fog_enabled_);
+    changed |= ImGui::SliderFloat("Band (m)", &border_fog_.band_m, 4.0f, 128.0f);
+    changed |= ImGui::SliderFloat("Ramp (m)", &border_fog_.ramp_m, 0.0f, 32.0f);
+    changed |= ImGui::SliderFloat("Magnitude##border", &border_fog_.magnitude, 0.0f, 0.5f, "%.3f");
+    changed |= ImGui::SliderFloat("Height##border", &border_fog_.height_m, 1.0f, 128.0f);
     if (changed) SetFogSources();  // reflect immediately (also removes the wall when off)
   }
 

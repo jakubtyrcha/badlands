@@ -27,6 +27,7 @@
 #include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "mapgen/config.hpp"
+#include "mapgen/fog_generator.hpp"  // BorderFogParams
 #include "mapgen/pipeline.hpp"
 
 namespace badlands {
@@ -86,21 +87,13 @@ class MapViewView : public AppView {
   std::vector<fog::Emitter> fog_emitters_;
   int selected_emitter_ = -1;  // index into fog_emitters_, or -1 (none)
 
-  // Screen-edge fog: world-space OBB emitters placed each frame along the visible
-  // frustum's four ground edges, so a milk-white fog wall frames the view. Reuses
-  // the emitter system (max-combined with the biome fog); tracks the camera.
-  struct EdgeFogConfig {
-    bool enabled = true;
-    float band_m = 32.0f;      // how far the wall reaches inward from the edge
-    float ramp_m = 4.0f;       // soft inner ramp width
-    float magnitude = 0.15f;   // peak sigma_t (milk-white via the white scatter)
-    float height_m = 30.0f;    // vertical extent above y=0
-  };
-  EdgeFogConfig edge_fog_;
-  // The four edge emitters for the current camera (empty if disabled/off-horizon).
-  std::vector<fog::Emitter> BuildEdgeEmitters() const;
+  // Border fog: a WORLD-STATIC milk-white fog wall around the map perimeter
+  // (mapgen::BuildBorderFog from the map bounds -- fixed in world space, does NOT
+  // move with the camera). Max-combined with the biome fog.
+  bool border_fog_enabled_ = true;
+  mapgen::BorderFogParams border_fog_;
 
-  // Uploads fog_emitters_ + the current edge emitters to the renderer's fog sim.
+  // Uploads fog_emitters_ + the map-border wall to the renderer's fog sim.
   void SetFogSources();
   // Emitter whose footprint contains world XZ (nearest centre), or -1.
   int PickEmitter(const glm::vec3& world) const;

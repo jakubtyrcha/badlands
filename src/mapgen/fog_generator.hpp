@@ -47,4 +47,19 @@ std::vector<fog::Emitter> GenerateBiomeFog(const Field2D<uint8_t>& biome,
                                            uint32_t seed,
                                            const BiomeFogParams& params = {});
 
+// A world-static milk-white fog wall around the map perimeter.
+struct BorderFogParams {
+  float band_m = 32.0f;     // how far the wall reaches inward from a map edge
+  float ramp_m = 4.0f;      // soft inner ramp width
+  float magnitude = 0.15f;  // peak sigma_t (milk-white via the white scatter)
+  float height_m = 30.0f;   // vertical extent above y=0
+};
+
+// One OBB emitter per map edge (4), fixed in WORLD SPACE: a pure function of the
+// map bounds [map_min, map_max] (world XZ) -- NO camera input, so the wall can
+// never move with the view. Each OBB is centred on its edge line (full density at
+// the edge, ramping to 0 by band_m inward, the outer half off-map).
+std::vector<fog::Emitter> BuildBorderFog(glm::vec2 map_min, glm::vec2 map_max,
+                                         const BorderFogParams& params = {});
+
 }  // namespace badlands::mapgen

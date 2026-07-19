@@ -88,6 +88,51 @@ TEST_CASE("GenerateBiomeFog: footprint orientation follows the biome elongation"
   CHECK(checked > 0);
 }
 
+TEST_CASE("BuildBorderFog: one OBB per map edge, fixed in world space") {
+  BorderFogParams p;
+  p.band_m = 20.0f;
+  const glm::vec2 lo(0.0f, 0.0f), hi(200.0f, 120.0f);
+  const auto ems = BuildBorderFog(lo, hi, p);
+
+  REQUIRE(ems.size() == 4);
+  for (const auto& e : ems) {
+    CHECK(e.shape == EmitterShape::Obb);
+    CHECK(e.magnitude > 0.0f);
+  }
+
+  // Each wall centres ON a map edge: exactly one of its centre coords sits on a
+  // boundary (x==0, x==200, z==0, or z==120), the other at the edge's midpoint.
+  auto on_edge = [&](const badlands::fog::Emitter& e) {
+    const bool x_edge = std::abs(e.center.x - lo.x) < 1e-3f ||
+                        std::abs(e.center.x - hi.x) < 1e-3f;
+    const bool z_edge = std::abs(e.center.y - lo.y) < 1e-3f ||
+                        std::abs(e.center.y - hi.y) < 1e-3f;
+    return x_edge != z_edge;  // on one boundary, not a corner
+  };
+  for (const auto& e : ems) CHECK(on_edge(e));
+
+  // THE contract this feature exists to guarantee: the wall is WORLD-static. The
+  // builder takes no camera/view -- only the map bounds -- so it is structurally
+  // impossible for the border to move with the view. Same bounds => same emitters,
+  // bit for bit. (The original bug placed these at the frustum edges, so they
+  // tracked the camera; this test + the camera-free signature lock that out.)
+  const auto again = BuildBorderFog(lo, hi, p);
+  REQUIRE(again.size() == ems.size());
+  for (size_t i = 0; i < ems.size(); ++i) {
+    CHECK(again[i].center.x == Catch::Approx(ems[i].center.x));
+    CHECK(again[i].center.y == Catch::Approx(ems[i].center.y));
+    CHECK(again[i].rotation == Catch::Approx(ems[i].rotation));
+  }
+
+  // Moving the map (different bounds) DOES move the wall -- it tracks the world,
+  // which is the whole point.
+  const auto shifted = BuildBorderFog(lo + glm::vec2(500.0f), hi + glm::vec2(500.0f), p);
+  bool differs = false;
+  for (size_t i = 0; i < ems.size() && i < shifted.size(); ++i)
+    differs |= std::abs(shifted[i].center.x - ems[i].center.x) > 1.0f;
+  CHECK(differs);
+}
+
 TEST_CASE("GenerateBiomeFog: deterministic in the seed") {
   Field2D<uint8_t> biome(96, 96, static_cast<uint8_t>(Biome::Forest));
   Field2D<float> height(96, 96, 0.0f);
