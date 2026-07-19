@@ -54,7 +54,17 @@ corrosion_set_env_vars(wesl_ffi "RUSTFLAGS=-Cpanic=unwind")
 # assets: JPEG decode + glTF pack texture-URI parsing (src/crates/assets),
 # Rust staticlib. Unlike wesl_ffi, no dependency of this crate shares its
 # own name, so no Corrosion package-ambiguity workaround is needed here.
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo.toml)
+#
+# PROFILE release — ALWAYS, even in a Debug C++ build (same reasoning as
+# noiser-bundle below). This crate is the image decoder, and terrain startup
+# decodes 18 material textures (1024^2 each) through it. Built with cargo's dev
+# profile (opt-level 0, what CMAKE_BUILD_TYPE=Debug otherwise selects) a single
+# 1024^2 JPEG/PNG decode costs ~130-200 ms instead of ~20 ms, so the six-pack
+# terrain load takes ~2.3 s of a Debug startup. Nothing here is C++-debuggable
+# anyway — it's a prebuilt staticlib behind a C ABI — so there is no
+# debuggability to trade away.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo.toml
+                       PROFILE release)
 corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 
 # nav: 2D visibility-graph path service (src/crates/nav), Rust staticlib,
