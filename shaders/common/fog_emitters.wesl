@@ -39,9 +39,17 @@ fn fogEmitterLocal(e: GpuEmitter, worldPos: vec3<f32>) -> vec3<f32> {
 }
 
 // Radial normalized distance from the footprint centre (0 centre → 1 edge).
+//   0 disc    — isotropic circle, radius halfExtent.x (halfExtent.y unused).
+//   1 OBB     — oriented rectangle (Chebyshev / max-norm) over halfExtent.
+//   2 ellipse — the OBB frame evaluated through an L2 radial: an oriented ellipse
+//               inscribed in halfExtent (what the biome-fit emitters use).
 fn fogRadialNd(e: GpuEmitter, local: vec3<f32>) -> f32 {
     if (e.shape == 0u) {
         return length(local.xz) / max(e.halfExtent.x, 1e-4);
+    }
+    if (e.shape == 2u) {
+        return length(vec2<f32>(local.x / max(e.halfExtent.x, 1e-4),
+                                local.z / max(e.halfExtent.y, 1e-4)));
     }
     return max(abs(local.x) / max(e.halfExtent.x, 1e-4),
                abs(local.z) / max(e.halfExtent.y, 1e-4));
