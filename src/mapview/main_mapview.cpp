@@ -21,6 +21,8 @@
 //                     small H for a near shot, a large one for a far shot).
 //   --lod-tau T       screen-space-error budget in pixels for cluster LOD
 //                     (default 1.5; higher = coarser / fewer draws).
+//   --lod-tint N      debug tint mode for cluster terrain: 0 shaded (default),
+//                     1 per-triangle position hash, 2 LOD level.
 
 #include <cstdio>
 #include <cstdlib>
@@ -103,6 +105,7 @@ int main(int argc, char** argv) {
   bool use_cluster_terrain = true;
   float camera_height = 0.0f;  // 0 = keep the default framing
   float lod_tau = 1.5f;
+  int lod_tint = 0;  // 0 shaded / 1 triangle hash / 2 LOD level
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -158,6 +161,21 @@ int main(int argc, char** argv) {
                      v->c_str());
         return 2;
       }
+    } else if (a == "--lod-tint") {
+      auto v = next("--lod-tint");
+      if (!v) return 2;
+      try {
+        lod_tint = std::stoi(*v);
+      } catch (const std::exception&) {
+        std::fprintf(stderr, "mapview: bad --lod-tint '%s' (want 0, 1, or 2)\n",
+                     v->c_str());
+        return 2;
+      }
+      if (lod_tint < 0 || lod_tint > 2) {
+        std::fprintf(stderr, "mapview: --lod-tint %d out of range (want 0..2)\n",
+                     lod_tint);
+        return 2;
+      }
     } else if (is_app_flag_with_value(a)) {
       if (!next(a.c_str())) return 2;  // consume the value; SdlViewerApp reads it
     } else {
@@ -186,9 +204,10 @@ int main(int argc, char** argv) {
 
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
   return app.Run(argc, argv,
-                 [cfg, use_cluster_terrain, camera_height, lod_tau](
+                 [cfg, use_cluster_terrain, camera_height, lod_tau, lod_tint](
                      const badlands::RenderContext&) {
                    return std::make_unique<badlands::MapViewView>(
-                       cfg, use_cluster_terrain, camera_height, lod_tau);
+                       cfg, use_cluster_terrain, camera_height, lod_tau,
+                       lod_tint);
                  });
 }

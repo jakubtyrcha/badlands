@@ -151,9 +151,13 @@ void MapViewView::BuildClusterTerrain() {
   MaterialFactoryComponent fmc;
   fmc.factory = cluster_factory_.get();
   fmc.pass_type = MaterialPassType::kDeferred;
-  // Debug source mode (0 = flat biome color); the tint UI lands in a later
-  // milestone. Set so the group-1 UBO's debug_params is deterministic.
-  fmc.params.uniform_overrides["debug_params"] = glm::vec4(0.0f);
+  // Debug source mode driving terrain_cluster.wesl's debug_params.x (0 = flat
+  // biome color, 1 = triangle hash, 2 = LOD level). Seeded from
+  // debug_tint_mode_ so a headless --lod-tint run renders tinted on frame one;
+  // the DrawUI combo flips it live via ApplyDebugTintMode. The config hash keys
+  // only override NAMES, so live value changes reuse the cached instance.
+  fmc.params.uniform_overrides["debug_params"] =
+      glm::vec4(static_cast<float>(debug_tint_mode_), 0.0f, 0.0f, 0.0f);
   fmc.config_hash = ComputeFactoryConfigHash(fmc);
   registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
 
@@ -218,6 +222,15 @@ void MapViewView::UpdateClusterLod() {
         sel_tri_count_);
     last_logged_sel_count_ = sel_cluster_count_;
   }
+}
+
+void MapViewView::ApplyDebugTintMode() {
+  if (cluster_entity_ == entt::null) return;
+  auto* fmc = registry_.try_get<MaterialFactoryComponent>(cluster_entity_);
+  if (fmc == nullptr) return;
+  // Rewrite the per-draw override; render_textured_mesh transfers it each frame.
+  fmc->params.uniform_overrides["debug_params"] =
+      glm::vec4(static_cast<float>(debug_tint_mode_), 0.0f, 0.0f, 0.0f);
 }
 
 void MapViewView::BuildLegacyTerrain() {
@@ -453,7 +466,26 @@ void MapViewView::DrawUI() {
     // The rewrite happens next Update, so the numbers below refresh a frame
     // later (fine — they are diagnostics, not a synchronous readout).
     ImGui::SliderFloat("LOD tau (px)", &tau_px_, 0.25f, 16.0f, "%.2f");
-    ImGui::Text("cut: %d clusters, %llu tris", sel_cluster_count_,
+
+    // Debug tint source. Drives debug_params.x in terrain_cluster.wesl via the
+    // live material override (ApplyDebugTintMode); the shader branches on it.
+    static const char* const kTintItems[] = {"Shaded (biome color)",
+                                              "Triangle hash", "LOD level"};
+    if (ImGui::Combo("Debug tint", &debug_tint_mode_, kTintItems,
+                     IM_ARRAYSIZE(kTintItems))) {
+      ApplyDebugTintMode();
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Shaded: albedo = per-vertex biome color.\n"
+          "Triangle hash: tint by a per-triangle position hash (NOT a stable\n"
+          "  per-cluster color — that needs an engine change, deferred).\n"
+          "LOD level: tint by the cluster's LOD level (hue wheel).");
+    }
+
+    // Compact stats block for the current LOD cut: totals then a one-line
+    // per-level histogram of how many clusters each level contributes.
+    ImGui::Text("cut: %d clusters   %llu tris", sel_cluster_count_,
                 static_cast<unsigned long long>(sel_tri_count_));
     std::string hist;
     for (size_t L = 0; L < sel_level_hist_.size(); ++L) {
@@ -461,8 +493,8 @@ void MapViewView::DrawUI() {
       if (!hist.empty()) hist += "  ";
       hist += "L" + std::to_string(L) + ":" + std::to_string(sel_level_hist_[L]);
     }
-    ImGui::TextUnformatted(hist.empty() ? "(no clusters selected)"
-                                        : hist.c_str());
+    ImGui::TextUnformatted(hist.empty() ? "  levels: (none selected)"
+                                        : ("  levels  " + hist).c_str());
   }
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {

@@ -41,14 +41,17 @@ class MapViewView : public AppView {
   // (the A/B baseline); the ImGui checkbox flips it at runtime.
   // `camera_height` overrides the starting camera height (0 = keep the default
   // ground-level framing); `lod_tau` seeds the screen-space-error budget in
-  // pixels. Both exist mainly so headless --screenshot runs can frame near/far
-  // and set the LOD threshold without touching the interactive defaults.
+  // pixels; `lod_tint` seeds the debug tint mode (0 shaded / 1 triangle hash /
+  // 2 LOD level). All exist mainly so headless --screenshot runs can frame
+  // near/far and set LOD/tint without touching the interactive defaults.
   explicit MapViewView(mapgen::MapgenConfig cfg, bool use_cluster_terrain = true,
-                       float camera_height = 0.0f, float lod_tau = 1.5f)
+                       float camera_height = 0.0f, float lod_tau = 1.5f,
+                       int lod_tint = 0)
       : cfg_(std::move(cfg)),
         use_cluster_terrain_(use_cluster_terrain),
         tau_px_(lod_tau),
-        camera_height_override_(camera_height) {}
+        camera_height_override_(camera_height),
+        debug_tint_mode_(lod_tint) {}
 
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
@@ -122,6 +125,14 @@ class MapViewView : public AppView {
   float tau_px_ = 1.5f;
   // Starting camera height override (0 = default); applied once in Initialize.
   float camera_height_override_ = 0.0f;
+  // Debug tint source driving the cluster material's debug_params.x uniform:
+  // 0 = normal shaded (albedo = biome vertex color), 1 = per-triangle position
+  // hash, 2 = LOD level. The ImGui combo flips it live; a headless run seeds it.
+  int debug_tint_mode_ = 0;
+  // Push debug_tint_mode_ into the live cluster entity's material override so the
+  // next frame's per-draw transfer picks it up (no cache invalidation — the
+  // override is per-draw data, not pipeline state).
+  void ApplyDebugTintMode();
   // Viewport height in pixels, tracked by OnResize — the projection metric's
   // numerator. Seeded so the first Update (before any resize) still has a sane
   // value in headless paths.
