@@ -23,6 +23,17 @@ namespace badlands {
 // Clamps to the map bounds, so off-map queries return the edge height.
 float SampleHeight(const mapgen::Field2D<float>& heightmap, float wx, float wz);
 
+// Surface normal at world position (wx, wz) from central height differences,
+// one sample (kMetersPerSample world meters) apart. A pure function of position
+// (SampleHeight clamps at the edges), so two callers sampling the same world
+// position get bitwise-identical normals — the terrain cluster DAG relies on
+// that for crack-free shared vertices.
+glm::vec3 NormalAt(const mapgen::Field2D<float>& heightmap, float wx, float wz);
+
+// Pack four u8 into one float slot (matches the Uint8x4 / Unorm8x4 attributes
+// of the terrain vertex layouts).
+float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+
 // First intersection of `ray` with the terrain surface defined by `heightmap`.
 //
 // Marches the ray sampling SampleHeight until it passes below the surface, then

@@ -39,28 +39,6 @@ uint8_t SampleBiome(const Field2D<uint8_t>& b, float wx, float wz) {
   return b.at(x, z);
 }
 
-// Surface normal at world position (wx, wz) from central height differences,
-// one sample (kMetersPerSample world meters) apart.
-glm::vec3 NormalAt(const Field2D<float>& h, float wx, float wz) {
-  const float step = static_cast<float>(kMetersPerSample);
-  const float hl = SampleHeight(h, wx - step, wz);
-  const float hr = SampleHeight(h, wx + step, wz);
-  const float hd = SampleHeight(h, wx, wz - step);
-  const float hu = SampleHeight(h, wx, wz + step);
-  const float d = 2.0f * step;
-  return glm::normalize(glm::vec3(-(hr - hl) / d, 1.0f, -(hu - hd) / d));
-}
-
-// Pack four u8 into one float slot (matches the Uint8x4 / Unorm8x4 attributes).
-float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-  const uint32_t u = static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) |
-                     (static_cast<uint32_t>(c) << 16) |
-                     (static_cast<uint32_t>(d) << 24);
-  float f;
-  std::memcpy(&f, &u, sizeof(float));
-  return f;
-}
-
 // Emit one node as a vertex. Each grid node is a single biome (one-hot: pair 0
 // = {biome, weight 255}); the blend across a triangle comes from interpolating
 // these one-hots between differently-biomed vertices in the vertex shader.
@@ -87,6 +65,25 @@ float SampleHeight(const Field2D<float>& h, float wx, float wz) {
   const float h00 = h.at(x0, z0), h10 = h.at(x1, z0);
   const float h01 = h.at(x0, z1), h11 = h.at(x1, z1);
   return glm::mix(glm::mix(h00, h10, tx), glm::mix(h01, h11, tx), tz);
+}
+
+glm::vec3 NormalAt(const Field2D<float>& h, float wx, float wz) {
+  const float step = static_cast<float>(kMetersPerSample);
+  const float hl = SampleHeight(h, wx - step, wz);
+  const float hr = SampleHeight(h, wx + step, wz);
+  const float hd = SampleHeight(h, wx, wz - step);
+  const float hu = SampleHeight(h, wx, wz + step);
+  const float d = 2.0f * step;
+  return glm::normalize(glm::vec3(-(hr - hl) / d, 1.0f, -(hu - hd) / d));
+}
+
+float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+  const uint32_t u = static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) |
+                     (static_cast<uint32_t>(c) << 16) |
+                     (static_cast<uint32_t>(d) << 24);
+  float f;
+  std::memcpy(&f, &u, sizeof(float));
+  return f;
 }
 
 bool RaycastTerrain(const Field2D<float>& heightmap, const Ray& ray,
