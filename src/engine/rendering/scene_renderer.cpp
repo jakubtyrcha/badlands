@@ -776,6 +776,8 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
         use_pref ? prefiltered_.GetSampler() : fallback_cube_sampler_;
     engine.brdf_lut = brdf_lut_.GetView();
     engine.brdf_lut_sampler = brdf_lut_.GetSampler();
+    engine.shadow_map = shadow_map_.GetDepthView();
+    engine.shadow_sampler = shadow_comparison_sampler_;
     engine.time_seconds = scene.time_seconds;
     RenderForwardTransparentMeshes(pass, frame, registry, camera_world_pos,
                                    material_instance_cache_, engine);

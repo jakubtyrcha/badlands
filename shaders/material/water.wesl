@@ -28,7 +28,13 @@ import package::common::gbuffer_encode::{GBufferOutput, encodeOctahedron};
 @if(transparent)
 import package::common::gbuffer_encode::{encodeOctahedron};
 @if(transparent)
-import package::common::brdf::{evaluateSpecularGgxBrdf, evaluateLagardeFresnel};
+import package::common::brdf::{evaluateSpecularGgxBrdf};
+@if(transparent)
+import package::common::sh_lighting::{evaluateAmbientSHL2};
+@if(transparent)
+import package::common::shadow_sampling::{sampleShadowMapPCF};
+@if(transparent)
+import package::common::water_noise::{waterDetailNormalTS};
 import package::common::water_waves::{waterWaveHeight, waterWaveNormal};
 
 struct WaterUniforms {
@@ -54,6 +60,8 @@ struct WaterUniforms {
 @if(transparent) @group(2) @binding(4) var iblSampler: sampler;
 @if(transparent) @group(2) @binding(5) var brdfLut: texture_2d<f32>;
 @if(transparent) @group(2) @binding(6) var brdfLutSampler: sampler;
+@if(transparent) @group(2) @binding(7) var shadowMap: texture_depth_2d;
+@if(transparent) @group(2) @binding(8) var shadowSampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
@@ -104,19 +112,8 @@ fn vs_main(input: VertexInput) -> VertexOutputShadow {
     return output;
 }
 
-// Procedural high-frequency detail as a tangent-space normal (scrolling
-// ripples). Forward-only enrichment; the G-buffer variant omits it so the
-// readback exactly matches the analytic wave normal.
-@if(transparent)
-fn waterDetailNormalTS(xz: vec2<f32>, t: f32, strength: f32) -> vec3<f32> {
-    let k1 = vec2<f32>(1.7, 0.9);
-    let k2 = vec2<f32>(-0.8, 1.9);
-    let p1 = dot(k1, xz) * 1.3 + t * 2.0;
-    let p2 = dot(k2, xz) * 1.7 - t * 1.6;
-    let dx = (cos(p1) * k1.x * 1.3 + cos(p2) * k2.x * 1.7) * strength;
-    let dz = (cos(p1) * k1.y * 1.3 + cos(p2) * k2.y * 1.7) * strength;
-    return normalize(vec3<f32>(-dx, -dz, 1.0));
-}
+// The high-frequency detail normal (fluid fBm + domain warp) lives in
+// shaders/common/water_noise.wesl (waterDetailNormalTS), forward-only.
 
 // === G-buffer variant: write the analytic wave normal (cross-checked) ===
 @if(!shadow_pass && !transparent)
@@ -169,23 +166,43 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         bgUV = screenUV;  // foreground at the offset -> sample straight through
     }
     let bg = textureSampleLevel(sceneColor, sceneColorSampler, bgUV, 0.0).rgb;
-    let waterTint = mix(object.shallowColor.rgb, object.deepColor.rgb, absorb);
-    let refracted = mix(bg, waterTint, absorb);
+    let L = normalize(frame.sunDirection.xyz);
+    let NdotL = max(dot(N, L), 0.0);
 
-    // Reflection: IBL (Fresnel-weighted) + additive sun specular glint.
+    // Sun shadow (PCF) at this water fragment's world position, so water in a
+    // terrain/rim shadow loses the sun's contribution.
+    let worldPos = input.worldOffsetPos + frame.cameraWorldPos.xyz;
+    let shadow = sampleShadowMapPCF(worldPos, N, NdotL, shadowMap, shadowSampler);
+
+    // Water body colour: absorption tint lit by the sky (SH, unshadowed) plus the
+    // SHADOWED sun, so it tracks time of day and darkens inside shadow. `bg` (the
+    // refracted background) is already lit; only the tint needs it.
+    let envLight = evaluateAmbientSHL2(N, frame.ambientSH)
+                   + NdotL * frame.sunColor.rgb * shadow;
+    let waterTint = mix(object.shallowColor.rgb, object.deepColor.rgb, absorb) * envLight;
+
+    // Scattering: sunlight forward-scattered through the water body toward the
+    // viewer — shadowed, stronger looking into the sun and in deeper water.
+    let scatter = object.shallowColor.rgb * frame.sunColor.rgb * shadow
+                  * pow(max(dot(V, -L), 0.0), 4.0) * absorb;
+
+    let transmitted = mix(bg, waterTint, absorb) + scatter;
+
+    // Reflection: a SINGLE Fresnel (split-sum LUT: ~F0 head-on, ~1 grazing) mixes
+    // the transmitted colour with the raw sky IBL, so the reflection shows the sky
+    // and grows at grazing angles (and tracks time of day via the prefiltered env).
     let R = reflect(-V, N);
     let maxMip = f32(textureNumLevels(iblPrefiltered) - 1u);
     let roughness = object.params.w;
     let reflColor = textureSampleLevel(iblPrefiltered, iblSampler, R, roughness * maxMip).rgb;
     let F0 = vec3<f32>(0.02);
-    let fres = evaluateLagardeFresnel(NdotV, roughness, F0);
     let brdf = textureSampleLevel(brdfLut, brdfLutSampler, vec2<f32>(NdotV, roughness), 0.0).rg;
-    let ibl = reflColor * (F0 * brdf.x + vec3<f32>(brdf.y));
-    let L = normalize(frame.sunDirection.xyz);
-    let sunSpec = evaluateSpecularGgxBrdf(N, V, L, roughness, F0) * max(dot(N, L), 0.0) * frame.sunColor.rgb;
+    // Clamp so the split-sum term never exceeds 1 (F0*scale can push it slightly
+    // over at grazing) — an unclamped mix factor would extrapolate past reflColor.
+    let fresnel = clamp(F0 * brdf.x + vec3<f32>(brdf.y), vec3<f32>(0.0), vec3<f32>(1.0));
+    let sunSpec = evaluateSpecularGgxBrdf(N, V, L, roughness, F0) * NdotL * frame.sunColor.rgb * shadow;
 
-    let reflFactor = clamp(max(fres.x, max(fres.y, fres.z)), 0.0, 1.0);
-    let rgb = mix(refracted, ibl, reflFactor) + sunSpec;
+    let rgb = mix(transmitted, reflColor, fresnel) + sunSpec;
 
     let alpha = clamp(coast, 0.0, 1.0);  // soft shoreline; interior saturates to 1
     return vec4<f32>(rgb * alpha, alpha);  // premultiplied

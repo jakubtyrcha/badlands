@@ -153,7 +153,7 @@ void RenderForwardTransparentMeshes(RenderPassContext& pass, FrameContext& frame
 
     if (wants_engine) {
       if (!engine_bg) {
-        std::array<wgpu::BindGroupEntry, 7> entries{};
+        std::array<wgpu::BindGroupEntry, 9> entries{};
         entries[0].binding = 0;
         entries[0].textureView = engine.scene_depth;
         entries[1].binding = 1;
@@ -168,6 +168,10 @@ void RenderForwardTransparentMeshes(RenderPassContext& pass, FrameContext& frame
         entries[5].textureView = engine.brdf_lut;
         entries[6].binding = 6;
         entries[6].sampler = engine.brdf_lut_sampler;
+        entries[7].binding = 7;
+        entries[7].textureView = engine.shadow_map;
+        entries[8].binding = 8;
+        entries[8].sampler = engine.shadow_sampler;
         engine_bg = frame.CreateBindGroup(
             instance->GetPipeline().GetBindGroupLayout(2), entries);
       }

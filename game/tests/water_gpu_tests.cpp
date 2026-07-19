@@ -404,6 +404,10 @@ TEST_CASE("water refraction rejects foreground bleed", "[water][gpu][refraction]
   u.camera_world_pos = glm::vec4(cam.position, 0.0f);
   u.sunDir = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
   u.sunColor = glm::vec4(0.0f);  // no sun glints
+  // Identity (not the zero default) so the shadow-map projection in
+  // sampleShadowMapPCF is a finite transform, not a 0/0 divide that could NaN
+  // the water and trivially satisfy the refraction assertion.
+  u.light_view_proj = glm::mat4(1.0f);
   u.near_plane = cam.near_plane;
   u.far_plane = cam.far_plane;
   u.screen_size = glm::vec2(W, W);
@@ -489,7 +493,12 @@ TEST_CASE("water refraction rejects foreground bleed", "[water][gpu][refraction]
     RenderPassContext pass = frame.BeginRenderPass(desc);
     REQUIRE(waterInst->Bind(pass, frame));
     REQUIRE(waterInst->BindPerObject(pass, frame));
-    std::array<wgpu::BindGroupEntry, 7> e{};
+    // Comparison sampler for the water shadow binding (binding 8). Shadows don't
+    // affect this test (sun colour is 0) but the pipeline layout requires it.
+    wgpu::SamplerDescriptor cmp{};
+    cmp.compare = wgpu::CompareFunction::LessEqual;
+    wgpu::Sampler shadowSampler = device.CreateSampler(&cmp);
+    std::array<wgpu::BindGroupEntry, 9> e{};
     e[0].binding = 0;
     e[0].textureView = sceneDepth.CreateView();
     e[1].binding = 1;
@@ -504,6 +513,10 @@ TEST_CASE("water refraction rejects foreground bleed", "[water][gpu][refraction]
     e[5].textureView = brdf.CreateView();
     e[6].binding = 6;
     e[6].sampler = nearest;
+    e[7].binding = 7;
+    e[7].textureView = sceneDepth.CreateView();  // reuse a depth texture as the shadow map
+    e[8].binding = 8;
+    e[8].sampler = shadowSampler;
     pass.SetBindGroup(2, frame.CreateBindGroup(
                              waterInst->GetPipeline().GetBindGroupLayout(2), e));
     pass.SetVertexBuffer(0, waterVerts);

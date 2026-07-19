@@ -39,6 +39,8 @@ struct ForwardEngineResources {
   wgpu::Sampler ibl_sampler;
   wgpu::TextureView brdf_lut;
   wgpu::Sampler brdf_lut_sampler;
+  wgpu::TextureView shadow_map;      // sun shadow map (texture_depth_2d)
+  wgpu::Sampler shadow_sampler;      // comparison sampler (LessEqual)
   float time_seconds{0.0f};
 };
 
