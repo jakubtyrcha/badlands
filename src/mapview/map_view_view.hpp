@@ -39,8 +39,16 @@ class MapViewView : public AppView {
   // everything --config exposes reaches the viewer. `use_cluster_terrain`
   // selects the cluster-LOD terrain (default) vs the legacy fixed-subdiv chunks
   // (the A/B baseline); the ImGui checkbox flips it at runtime.
-  explicit MapViewView(mapgen::MapgenConfig cfg, bool use_cluster_terrain = true)
-      : cfg_(std::move(cfg)), use_cluster_terrain_(use_cluster_terrain) {}
+  // `camera_height` overrides the starting camera height (0 = keep the default
+  // ground-level framing); `lod_tau` seeds the screen-space-error budget in
+  // pixels. Both exist mainly so headless --screenshot runs can frame near/far
+  // and set the LOD threshold without touching the interactive defaults.
+  explicit MapViewView(mapgen::MapgenConfig cfg, bool use_cluster_terrain = true,
+                       float camera_height = 0.0f, float lod_tau = 1.5f)
+      : cfg_(std::move(cfg)),
+        use_cluster_terrain_(use_cluster_terrain),
+        tau_px_(lod_tau),
+        camera_height_override_(camera_height) {}
 
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
@@ -103,6 +111,31 @@ class MapViewView : public AppView {
   void RebuildTerrain();
   void BuildClusterTerrain();
   void BuildLegacyTerrain();
+
+  // Per-frame LOD cut: pick the screen-space-error cluster cut for the current
+  // camera and rewrite the cluster entity's draw ranges from it. No-op unless
+  // the cluster terrain is live. Called from Update after the camera moves.
+  void UpdateClusterLod();
+
+  // Screen-space-error budget in pixels (the LOD knob). Higher = coarser. Seeded
+  // from the constructor; adjustable via the DrawUI slider.
+  float tau_px_ = 1.5f;
+  // Starting camera height override (0 = default); applied once in Initialize.
+  float camera_height_override_ = 0.0f;
+  // Viewport height in pixels, tracked by OnResize — the projection metric's
+  // numerator. Seeded so the first Update (before any resize) still has a sane
+  // value in headless paths.
+  float screen_h_px_ = 1080.0f;
+
+  // Scratch reused across frames so SelectClusters + the range rewrite don't
+  // reallocate every frame.
+  std::vector<uint32_t> selected_clusters_;
+  // Last cut's stats, surfaced in DrawUI (and logged once at startup): selected
+  // cluster count, drawn triangle count, and a per-level cluster histogram.
+  int sel_cluster_count_ = 0;
+  uint64_t sel_tri_count_ = 0;
+  std::vector<int> sel_level_hist_;
+  int last_logged_sel_count_ = -1;  // throttles the per-cut log line
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;

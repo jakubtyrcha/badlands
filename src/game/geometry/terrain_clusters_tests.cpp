@@ -13,6 +13,8 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <catch_amalgamated.hpp>
@@ -24,6 +26,8 @@
 
 using badlands::BuildTerrainClusterDag;
 using badlands::kNoGroup;
+using badlands::SelectClusters;
+using badlands::TerrainCluster;
 using badlands::TerrainClusterDag;
 using badlands::TerrainClusterParams;
 
@@ -228,6 +232,102 @@ void CheckAllInvariants(const TerrainClusterDag& dag) {
   CheckSeamCompleteness(dag);
 }
 
+// --- cut-validity helpers (test 4) ------------------------------------------
+// The build produces a clean group tree: every cluster a group emits is consumed
+// by the SAME parent group, so a leaf has a single chain of ancestor GROUPS
+// (g0 = leaf.parent_group, g1 = the group consuming g0's outputs, ...). All of a
+// group's emitted clusters share its LOD error+sphere, hence one selection
+// decision per group — so coverage is counted per selected GROUP, not per raw
+// cluster (a group emits kGroupSplitCount siblings that are selected in lockstep;
+// counting them individually would double-count the same cut level).
+
+// group index -> the parent group consuming its outputs (kNoGroup at the root).
+std::unordered_map<int, int> GroupParentGroup(const TerrainClusterDag& dag) {
+  std::unordered_map<int, int> out;
+  for (const auto& c : dag.clusters) {
+    if (c.own_group == kNoGroup) continue;
+    auto it = out.find(c.own_group);
+    if (it == out.end())
+      out.emplace(c.own_group, c.parent_group);
+    else
+      REQUIRE(it->second == c.parent_group);  // clean tree: single parent group
+  }
+  return out;
+}
+
+// group index -> whether its emitted clusters are selected. Asserts all-or-none
+// (group-consistent refinement: siblings share the identical own/parent test).
+std::unordered_map<int, bool> GroupSelected(
+    const TerrainClusterDag& dag, const std::unordered_set<uint32_t>& selected) {
+  std::unordered_map<int, int> count;  // group -> #selected emitted clusters
+  std::unordered_map<int, int> total;  // group -> #emitted clusters
+  for (uint32_t i = 0; i < dag.clusters.size(); ++i) {
+    const int g = dag.clusters[i].own_group;
+    if (g == kNoGroup) continue;
+    total[g]++;
+    if (selected.count(i)) count[g]++;
+  }
+  std::unordered_map<int, bool> out;
+  for (const auto& [g, n] : total) {
+    const int sel = count.count(g) ? count[g] : 0;
+    REQUIRE((sel == 0 || sel == n));  // all emitted siblings agree
+    out[g] = sel > 0;
+  }
+  return out;
+}
+
+// The two load-bearing cut properties, for one camera+tau:
+//  (a) antichain — no selected cluster is an ancestor of another selected one
+//      (walk parent_group chains up: no ancestor group may be selected).
+//  (b) exact cover — every leaf is covered by exactly one cut level: the leaf
+//      itself, or exactly one selected group along its ancestor-group chain.
+void CheckCutValidity(const TerrainClusterDag& dag, glm::vec3 cam, float fov_deg,
+                      float screen_h, float tau) {
+  std::vector<uint32_t> sel_vec;
+  SelectClusters(dag, cam, fov_deg, screen_h, tau, sel_vec);
+  const std::unordered_set<uint32_t> selected(sel_vec.begin(), sel_vec.end());
+  REQUIRE(sel_vec.size() == selected.size());  // no duplicates
+
+  const auto parent_group = GroupParentGroup(dag);
+  const auto group_selected = GroupSelected(dag, selected);
+  auto is_group_selected = [&](int g) {
+    auto it = group_selected.find(g);
+    return it != group_selected.end() && it->second;
+  };
+
+  // (a) antichain: from each selected cluster, no ancestor group is selected.
+  for (uint32_t cidx : sel_vec) {
+    int g = dag.clusters[cidx].parent_group;
+    while (g != kNoGroup) {
+      REQUIRE_FALSE(is_group_selected(g));
+      auto it = parent_group.find(g);
+      g = (it == parent_group.end()) ? kNoGroup : it->second;
+    }
+  }
+
+  // (b) exact cover: each leaf has exactly one selected level (self or one
+  // ancestor group).
+  for (uint32_t i = 0; i < dag.clusters.size(); ++i) {
+    const TerrainCluster& c = dag.clusters[i];
+    if (c.level != 0) continue;
+    int covers = selected.count(i) ? 1 : 0;
+    int g = c.parent_group;
+    while (g != kNoGroup) {
+      if (is_group_selected(g)) ++covers;
+      auto it = parent_group.find(g);
+      g = (it == parent_group.end()) ? kNoGroup : it->second;
+    }
+    REQUIRE(covers == 1);
+  }
+}
+
+uint64_t SelectedTriCount(const TerrainClusterDag& dag,
+                          const std::vector<uint32_t>& sel) {
+  uint64_t tris = 0;
+  for (uint32_t i : sel) tris += dag.clusters[i].index_count / 3;
+  return tris;
+}
+
 }  // namespace
 
 TEST_CASE("terrain cluster DAG: monotonic errors + nesting spheres", "[terrain_clusters]") {
@@ -273,6 +373,50 @@ TEST_CASE("terrain cluster DAG: grid arithmetic", "[terrain_clusters]") {
     REQUIRE(LeafCount(dag) == 13 * 8);
     CheckLeafCoverage(dag, w, h);
     CheckAllInvariants(dag);
+  }
+}
+
+TEST_CASE("terrain cluster DAG: SelectClusters cut validity", "[terrain_clusters]") {
+  const float fov = 45.0f;
+  const float screen_h = 1080.0f;
+  const float taus[] = {0.5f, 1.5f, 4.0f, 16.0f};
+
+  struct MapCase {
+    int w, h;
+    std::vector<glm::vec3> cameras;
+  };
+  const std::vector<MapCase> cases = {
+      // 64x64: near ground, mid, high overhead, outside the map.
+      {64, 64,
+       {{32, 4, 32}, {32, 40, 90}, {32, 400, 32}, {-120, 60, -120}}},
+      // non-square 100x60.
+      {100, 60,
+       {{50, 4, 30}, {50, 45, 110}, {50, 500, 30}, {220, 80, 140}}},
+  };
+
+  for (const MapCase& mc : cases) {
+    const auto dag =
+        BuildTerrainClusterDag(MakeHeightmap(mc.w, mc.h), MakeBiomes(mc.w, mc.h));
+    for (const glm::vec3& cam : mc.cameras) {
+      // Cut validity holds at every tau.
+      for (float tau : taus) {
+        CheckCutValidity(dag, cam, fov, screen_h, tau);
+      }
+      // Monotone sanity: raising tau (coarser threshold) never increases the
+      // selected triangle count for a fixed camera. Proven: each leaf's cut
+      // level moves same-or-coarser as tau rises, and a coarser cluster carries
+      // fewer triangles over the same footprint. (Cluster COUNT is not asserted
+      // monotone — it is not guaranteed level-by-level; triangles are the
+      // meaningful, theory-backed quantity.)
+      uint64_t prev = UINT64_MAX;
+      for (float tau : taus) {
+        std::vector<uint32_t> sel;
+        SelectClusters(dag, cam, fov, screen_h, tau, sel);
+        const uint64_t tris = SelectedTriCount(dag, sel);
+        REQUIRE(tris <= prev);
+        prev = tris;
+      }
+    }
   }
 }
 

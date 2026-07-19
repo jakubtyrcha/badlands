@@ -84,10 +84,10 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
-  RebuildTerrain();
-  spdlog::info("MapViewView: {}x{} map, {} sections", cfg_.width, cfg_.height,
-               map_.graph.nodes.size());
-
+  // Frame the camera BEFORE building the terrain, so the cluster path's initial
+  // LOD selection (BuildClusterTerrain -> UpdateClusterLod) already runs against
+  // the real camera position rather than the origin.
+  //
   // Start on the map centre at ground-level framing, matching the game's own
   // camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye view —
   // this is meant to show the map as it will actually be played. Scroll to zoom
@@ -99,7 +99,18 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   gamecam_.height = 42.0f;
   gamecam_.min_height = 5.0f;
   gamecam_.max_height = std::max(400.0f, map_size_m_);
+  // Headless framing override (--camera-height): clamp into the controller's
+  // range so a far shot can pull well back without escaping it.
+  if (camera_height_override_ > 0.0f) {
+    gamecam_.max_height = std::max(gamecam_.max_height, camera_height_override_);
+    gamecam_.height = std::clamp(camera_height_override_, gamecam_.min_height,
+                                 gamecam_.max_height);
+  }
   gamecam_.UpdateCamera(camera_);
+
+  RebuildTerrain();
+  spdlog::info("MapViewView: {}x{} map, {} sections", cfg_.width, cfg_.height,
+               map_.graph.nodes.size());
 
   // The grid follows the mouse, so there is nothing to draw until the cursor is
   // over the terrain (Update wires debug_lines once hover_valid_).
@@ -165,6 +176,48 @@ void MapViewView::BuildClusterTerrain() {
                leaf_range_count);
 
   cluster_entity_ = e;
+
+  // Seed the LOD cut once so the first rendered frame (headless --screenshot
+  // renders after a single Update) already draws the selected cut, not the raw
+  // leaf set above. UpdateClusterLod logs the resulting stats.
+  UpdateClusterLod();
+}
+
+void MapViewView::UpdateClusterLod() {
+  if (!use_cluster_terrain_ || cluster_entity_ == entt::null) return;
+  auto* ranges = registry_.try_get<MeshDrawRangesComponent>(cluster_entity_);
+  if (ranges == nullptr) return;
+
+  SelectClusters(terrain_dag_, camera_.position, camera_.fov, screen_h_px_,
+                 tau_px_, selected_clusters_);
+
+  // Rewrite the draw ranges in place from the selected cut (bounds carried from
+  // the DAG). The shared vertex/index buffers are untouched — the pass re-reads
+  // ranges each frame and culls them per-frustum, so we never touch mesh.dirty.
+  ranges->ranges.clear();
+  ranges->ranges.reserve(selected_clusters_.size());
+  sel_level_hist_.assign(terrain_dag_.level_count, 0);
+  sel_tri_count_ = 0;
+  for (uint32_t cidx : selected_clusters_) {
+    const TerrainCluster& c = terrain_dag_.clusters[cidx];
+    ranges->ranges.push_back(
+        MeshDrawRange{c.first_index, c.index_count, c.bounds});
+    sel_tri_count_ += c.index_count / 3;
+    if (c.level < static_cast<int>(sel_level_hist_.size())) ++sel_level_hist_[c.level];
+  }
+  sel_cluster_count_ = static_cast<int>(selected_clusters_.size());
+
+  // Log only when the cut size changes (not every frame) — one line per distinct
+  // LOD state: exactly what the headless screenshot / smoke runs want, without
+  // spamming an interactive fly-through.
+  if (sel_cluster_count_ != last_logged_sel_count_) {
+    spdlog::info(
+        "cluster LOD cut: tau={:.2f}px screen_h={:.0f} cam_h={:.0f} -> {} "
+        "clusters, {} tris",
+        tau_px_, screen_h_px_, gamecam_.height, sel_cluster_count_,
+        sel_tri_count_);
+    last_logged_sel_count_ = sel_cluster_count_;
+  }
 }
 
 void MapViewView::BuildLegacyTerrain() {
@@ -369,6 +422,10 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
   }
   gamecam_.UpdateCamera(camera_);
 
+  // Re-select the LOD cluster cut for the new camera and rewrite the draw
+  // ranges. Cheap flat pass over the DAG; no buffer re-upload.
+  UpdateClusterLod();
+
   // Rebuild the grid window around the hover point each frame (the camera may
   // have panned under a stationary cursor). No cache: the window is small
   // (independent of map size), so this is cheap.
@@ -390,6 +447,22 @@ void MapViewView::DrawUI() {
   // fixed-subdiv chunks. Flipping rebuilds the live terrain entities.
   if (ImGui::Checkbox("Cluster terrain", &use_cluster_terrain_)) {
     RebuildTerrain();
+  }
+  if (use_cluster_terrain_) {
+    // LOD budget: screen-space error in pixels. Lower = finer/more clusters.
+    // The rewrite happens next Update, so the numbers below refresh a frame
+    // later (fine — they are diagnostics, not a synchronous readout).
+    ImGui::SliderFloat("LOD tau (px)", &tau_px_, 0.25f, 16.0f, "%.2f");
+    ImGui::Text("cut: %d clusters, %llu tris", sel_cluster_count_,
+                static_cast<unsigned long long>(sel_tri_count_));
+    std::string hist;
+    for (size_t L = 0; L < sel_level_hist_.size(); ++L) {
+      if (sel_level_hist_[L] == 0) continue;
+      if (!hist.empty()) hist += "  ";
+      hist += "L" + std::to_string(L) + ":" + std::to_string(sel_level_hist_[L]);
+    }
+    ImGui::TextUnformatted(hist.empty() ? "(no clusters selected)"
+                                        : hist.c_str());
   }
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {
@@ -415,6 +488,10 @@ void MapViewView::DrawUI() {
 void MapViewView::OnResize(int width, int height) {
   camera_.aspect =
       height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+  // The LOD screen-space-error metric is in pixels, so it needs the viewport
+  // height in pixels — exactly what OnResize carries (physical pixels windowed,
+  // the capture height headless).
+  if (height > 0) screen_h_px_ = static_cast<float>(height);
 }
 
 }  // namespace badlands

@@ -17,6 +17,10 @@
 //   --legacy-terrain  render the fixed-subdiv chunk terrain instead of the
 //                     default cluster-LOD terrain (the A/B baseline; also
 //                     toggleable at runtime via the "Cluster terrain" checkbox).
+//   --camera-height H starting camera height in metres (headless framing: a
+//                     small H for a near shot, a large one for a far shot).
+//   --lod-tau T       screen-space-error budget in pixels for cluster LOD
+//                     (default 1.5; higher = coarser / fewer draws).
 
 #include <cstdio>
 #include <cstdlib>
@@ -97,6 +101,8 @@ int main(int argc, char** argv) {
   std::optional<std::string> out_override;
   bool preview_only = false;
   bool use_cluster_terrain = true;
+  float camera_height = 0.0f;  // 0 = keep the default framing
+  float lod_tau = 1.5f;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -132,6 +138,26 @@ int main(int argc, char** argv) {
       }
     } else if (a == "--out") {
       if (auto v = next("--out")) out_override = *v; else return 2;
+    } else if (a == "--camera-height") {
+      auto v = next("--camera-height");
+      if (!v) return 2;
+      try {
+        camera_height = std::stof(*v);
+      } catch (const std::exception&) {
+        std::fprintf(stderr, "mapview: bad --camera-height '%s' (want metres)\n",
+                     v->c_str());
+        return 2;
+      }
+    } else if (a == "--lod-tau") {
+      auto v = next("--lod-tau");
+      if (!v) return 2;
+      try {
+        lod_tau = std::stof(*v);
+      } catch (const std::exception&) {
+        std::fprintf(stderr, "mapview: bad --lod-tau '%s' (want pixels)\n",
+                     v->c_str());
+        return 2;
+      }
     } else if (is_app_flag_with_value(a)) {
       if (!next(a.c_str())) return 2;  // consume the value; SdlViewerApp reads it
     } else {
@@ -159,8 +185,10 @@ int main(int argc, char** argv) {
   if (preview_only) return RunPreviewOnly(cfg);
 
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
-  return app.Run(argc, argv, [cfg, use_cluster_terrain](
-                                 const badlands::RenderContext&) {
-    return std::make_unique<badlands::MapViewView>(cfg, use_cluster_terrain);
-  });
+  return app.Run(argc, argv,
+                 [cfg, use_cluster_terrain, camera_height, lod_tau](
+                     const badlands::RenderContext&) {
+                   return std::make_unique<badlands::MapViewView>(
+                       cfg, use_cluster_terrain, camera_height, lod_tau);
+                 });
 }

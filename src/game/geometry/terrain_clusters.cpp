@@ -5,6 +5,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <unordered_map>
 #include <vector>
@@ -378,6 +379,50 @@ void LogStats(const TerrainClusterDag& dag, double build_ms) {
 glm::vec4 TerrainClusterDag::ClusterOwnSphere(const TerrainCluster& c) const {
   if (c.own_group != kNoGroup) return groups[c.own_group].sphere;
   return SphereOfAabb(c.bounds);
+}
+
+void SelectClusters(const TerrainClusterDag& dag, glm::vec3 cam_pos,
+                    float fov_deg, float screen_h_px, float tau_px,
+                    std::vector<uint32_t>& out) {
+  out.clear();
+
+  // Shared perspective scale: a world-meter error e at LOD-sphere distance d
+  // projects to e * k / d pixels. k = screen_h / (2 tan(fov/2)).
+  const float half_fov = glm::radians(fov_deg) * 0.5f;
+  const float k = screen_h_px / (2.0f * std::tan(half_fov));
+  constexpr float kEps = 1e-4f;  // guards the division at the sphere surface
+
+  // Projected screen-space error of a cluster/group with LOD error `error_m`
+  // and LOD bounding sphere `sphere` (xyz center, w radius). A zero-error
+  // cluster (a leaf) projects to 0 from anywhere; a camera inside the sphere
+  // yields +inf so the cut is forced to refine past it.
+  auto proj = [&](float error_m, const glm::vec4& sphere) -> float {
+    if (error_m <= 0.0f) return 0.0f;
+    const float dist = glm::length(cam_pos - glm::vec3(sphere));
+    if (dist <= sphere.w) return std::numeric_limits<float>::infinity();
+    return error_m * k / std::max(dist - sphere.w, kEps);
+  };
+
+  // Flat pass over every cluster (no traversal, no frustum cull — the render
+  // pass culls each range per-frustum). A cluster is on the cut iff its own
+  // projected error is within budget but its parent group's is not: projected
+  // error is monotone along any leaf->root chain (errors grow, parent spheres
+  // enclose children), so the test fires on exactly one cluster per chain.
+  out.reserve(dag.clusters.size() / 4 + 1);
+  for (uint32_t i = 0; i < dag.clusters.size(); ++i) {
+    const TerrainCluster& c = dag.clusters[i];
+    if (proj(dag.ClusterOwnError(c), dag.ClusterOwnSphere(c)) > tau_px) {
+      continue;  // this cluster is itself too coarse -> a finer one covers here
+    }
+    float parent_proj;
+    if (c.parent_group == kNoGroup) {
+      parent_proj = std::numeric_limits<float>::infinity();  // root: never drop
+    } else {
+      const TerrainClusterGroup& pg = dag.groups[c.parent_group];
+      parent_proj = proj(pg.error_m, pg.sphere);
+    }
+    if (parent_proj > tau_px) out.push_back(i);
+  }
 }
 
 TerrainClusterDag BuildTerrainClusterDag(const Field2D<float>& heightmap,
