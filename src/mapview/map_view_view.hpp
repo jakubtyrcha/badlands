@@ -15,6 +15,9 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include <memory>
+#include <vector>
+
 #include "engine/app/app_view.hpp"
 #include "engine/app/game_camera_controller.hpp"
 #include "engine/core/camera.hpp"
@@ -22,6 +25,7 @@
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
+#include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "game/geometry/terrain_clusters.hpp"
 #include "mapgen/config.hpp"
@@ -32,8 +36,11 @@ namespace badlands {
 class MapViewView : public AppView {
  public:
   // `cfg` is the full generator config (seed/size/thresholds/terracing/...), so
-  // everything --config exposes reaches the viewer.
-  explicit MapViewView(mapgen::MapgenConfig cfg) : cfg_(std::move(cfg)) {}
+  // everything --config exposes reaches the viewer. `use_cluster_terrain`
+  // selects the cluster-LOD terrain (default) vs the legacy fixed-subdiv chunks
+  // (the A/B baseline); the ImGui checkbox flips it at runtime.
+  explicit MapViewView(mapgen::MapgenConfig cfg, bool use_cluster_terrain = true)
+      : cfg_(std::move(cfg)), use_cluster_terrain_(use_cluster_terrain) {}
 
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
@@ -75,10 +82,27 @@ class MapViewView : public AppView {
   // inputs.
   mapgen::MapArtifacts map_;
 
-  // Nanite-style terrain cluster-LOD DAG, built from the heightmap at load. M1
-  // only builds + logs it (the stats are the observable); rendering + LOD
-  // selection land in later milestones.
+  // Nanite-style terrain cluster-LOD DAG, built from the heightmap at load.
+  // Rendered (M2) as one entity whose MeshDrawRangesComponent draws all leaf
+  // clusters; LOD selection over these ranges lands in a later milestone.
   TerrainClusterDag terrain_dag_;
+
+  // Deferred material for the cluster terrain (game-owned; no engine-side
+  // MaterialLibrary entry). Held for the terrain entity's lifetime.
+  std::unique_ptr<MaterialInstanceFactory> cluster_factory_;
+
+  // Which terrain path is live. Only the selected set of entities exists in the
+  // registry at a time (RebuildTerrain destroys one and builds the other).
+  bool use_cluster_terrain_ = true;
+  entt::entity cluster_entity_ = entt::null;  // valid iff cluster terrain live
+  std::vector<entt::entity> legacy_entities_;  // valid iff legacy terrain live
+
+  // (Re)build the live terrain path from use_cluster_terrain_, destroying the
+  // other. Builds the cluster entity (all leaf clusters as draw ranges) or the
+  // legacy fixed-subdiv chunk entities.
+  void RebuildTerrain();
+  void BuildClusterTerrain();
+  void BuildLegacyTerrain();
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;

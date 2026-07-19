@@ -11,8 +11,12 @@
 // resolve relative to cwd).
 //
 // Usage: badlands_mapview [--config F] [--seed N] [--resolution WxH] [--out DIR]
-//                         [--preview-image-only] [--screenshot out.png]
-//                         [--record dir/]
+//                         [--preview-image-only] [--legacy-terrain]
+//                         [--screenshot out.png] [--record dir/]
+//
+//   --legacy-terrain  render the fixed-subdiv chunk terrain instead of the
+//                     default cluster-LOD terrain (the A/B baseline; also
+//                     toggleable at runtime via the "Cluster terrain" checkbox).
 
 #include <cstdio>
 #include <cstdlib>
@@ -92,6 +96,7 @@ int main(int argc, char** argv) {
   std::optional<std::pair<int, int>> res_override;
   std::optional<std::string> out_override;
   bool preview_only = false;
+  bool use_cluster_terrain = true;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -102,6 +107,8 @@ int main(int argc, char** argv) {
     };
     if (a == "--preview-image-only") {
       preview_only = true;
+    } else if (a == "--legacy-terrain") {
+      use_cluster_terrain = false;
     } else if (a == "--config") {
       if (auto v = next("--config")) config_path = *v; else return 2;
     } else if (a == "--seed") {
@@ -152,7 +159,8 @@ int main(int argc, char** argv) {
   if (preview_only) return RunPreviewOnly(cfg);
 
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
-  return app.Run(argc, argv, [cfg](const badlands::RenderContext&) {
-    return std::make_unique<badlands::MapViewView>(cfg);
+  return app.Run(argc, argv, [cfg, use_cluster_terrain](
+                                 const badlands::RenderContext&) {
+    return std::make_unique<badlands::MapViewView>(cfg, use_cluster_terrain);
   });
 }

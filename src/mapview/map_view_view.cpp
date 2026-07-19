@@ -1,6 +1,7 @@
 #include "mapview/map_view_view.hpp"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -15,6 +16,8 @@
 #include "engine/core/ray.hpp"
 #include "engine/rendering/components/material_factory_component.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
+#include "engine/rendering/gbuffer.hpp"
+#include "engine/rendering/geometry/aabb.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
 #include "game/geometry/terrain_mesh.hpp"
 #include "mapgen/mapgen_constants.hpp"
@@ -49,8 +52,6 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     spdlog::error("MapViewView: terrain material packs failed to load");
     return false;
   }
-  const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
-
   // Generate the map in-process — the same pipeline --preview-image-only dumps,
   // so the rendered terrain and the preview PNGs can never disagree.
   std::string err;
@@ -60,11 +61,114 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
-  // Build the terrain cluster-LOD DAG right after mapgen (M1: build + stats
-  // only; rendering/selection are later milestones). Stored for later use; the
-  // spdlog per-level summary is the observable for now.
-  terrain_dag_ =
-      BuildTerrainClusterDag(map_.heightmap, map_.biomes.pixel);
+  // Build the terrain cluster-LOD DAG right after mapgen. M2 renders all its
+  // leaf clusters; LOD selection over the ranges lands in a later milestone.
+  terrain_dag_ = BuildTerrainClusterDag(map_.heightmap, map_.biomes.pixel);
+
+  // Deferred cluster-terrain material factory (game-owned; mirrors the engine's
+  // terrain_blend descriptor but for kTerrainCluster geometry + the flat-color
+  // fs_gbuffer entry, and needs no textures — the vertex color is the albedo).
+  FactoryDescriptor cluster_desc;
+  cluster_desc.shader_name = "terrain_cluster";
+  cluster_desc.shader_path = "material/terrain_cluster.wesl";
+  cluster_desc.fs_entry = "fs_gbuffer";
+  cluster_desc.supported_pass_types = {MaterialPassType::kDeferred};
+  cluster_desc.supported_geometry_types = {GeometryType::kTerrainCluster};
+  cluster_desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                                GBuffer::kMaterialFormat};
+  cluster_desc.depth_format = GBuffer::kDepthFormat;
+  cluster_factory_ = BuildMaterialInstanceFactory(cluster_desc, ctx.device,
+                                                  ctx.queue, ctx.pipeline_gen);
+  if (!cluster_factory_) {
+    spdlog::error("MapViewView: failed to build terrain_cluster material factory");
+    return false;
+  }
+
+  RebuildTerrain();
+  spdlog::info("MapViewView: {}x{} map, {} sections", cfg_.width, cfg_.height,
+               map_.graph.nodes.size());
+
+  // Start on the map centre at ground-level framing, matching the game's own
+  // camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye view —
+  // this is meant to show the map as it will actually be played. Scroll to zoom
+  // out; max_height reaches far enough to take in the whole map.
+  const float map_depth_m = static_cast<float>(cfg_.height) *
+                            mapgen::kMetersPerSample;
+  gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_depth_m * 0.5f);
+  gamecam_.pitch_deg = 50.0f;
+  gamecam_.height = 42.0f;
+  gamecam_.min_height = 5.0f;
+  gamecam_.max_height = std::max(400.0f, map_size_m_);
+  gamecam_.UpdateCamera(camera_);
+
+  // The grid follows the mouse, so there is nothing to draw until the cursor is
+  // over the terrain (Update wires debug_lines once hover_valid_).
+  return true;
+}
+
+void MapViewView::RebuildTerrain() {
+  // Tear down whichever terrain path is currently live.
+  if (cluster_entity_ != entt::null) {
+    registry_.destroy(cluster_entity_);
+    cluster_entity_ = entt::null;
+  }
+  for (entt::entity e : legacy_entities_) registry_.destroy(e);
+  legacy_entities_.clear();
+  chunk_count_ = 0;
+
+  if (use_cluster_terrain_) {
+    BuildClusterTerrain();
+  } else {
+    BuildLegacyTerrain();
+  }
+}
+
+void MapViewView::BuildClusterTerrain() {
+  // One entity holds the whole shared cluster mesh; MeshDrawRangesComponent
+  // draws each leaf cluster as its own culled DrawIndexed range. The DAG is
+  // kept intact (copied, not moved) for the later LOD-selection milestone.
+  const entt::entity e = registry_.create();
+  auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(e);
+  mesh.vertices = terrain_dag_.vertices;
+  mesh.indices = terrain_dag_.indices;
+  mesh.vertex_count = static_cast<uint32_t>(terrain_dag_.vertices.size() /
+                                            kFloatsPerClusterVertex);
+  mesh.dirty = true;
+  mesh.geometry_type = GeometryType::kTerrainCluster;
+  mesh.transform = glm::mat4(1.0f);  // vertices are absolute world coords
+
+  MaterialFactoryComponent fmc;
+  fmc.factory = cluster_factory_.get();
+  fmc.pass_type = MaterialPassType::kDeferred;
+  // Debug source mode (0 = flat biome color); the tint UI lands in a later
+  // milestone. Set so the group-1 UBO's debug_params is deterministic.
+  fmc.params.uniform_overrides["debug_params"] = glm::vec4(0.0f);
+  fmc.config_hash = ComputeFactoryConfigHash(fmc);
+  registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
+
+  // All leaf clusters (level 0) as draw ranges, plus a whole-map AABB for the
+  // entity-level cull (per-range culling happens inside the pass). Leaves are
+  // full-resolution, so their union covers the entire terrain.
+  MeshDrawRangesComponent ranges;
+  glm::vec3 lo(FLT_MAX), hi(-FLT_MAX);
+  for (const TerrainCluster& c : terrain_dag_.clusters) {
+    if (c.level != 0) continue;
+    ranges.ranges.push_back(MeshDrawRange{c.first_index, c.index_count, c.bounds});
+    lo = glm::min(lo, c.bounds.min);
+    hi = glm::max(hi, c.bounds.max);
+  }
+  const size_t leaf_range_count = ranges.ranges.size();
+  registry_.emplace<MeshDrawRangesComponent>(e, std::move(ranges));
+  registry_.emplace<StaticMeshAabbComponent>(
+      e, StaticMeshAabbComponent{Aabb::FromMinMax(lo, hi)});
+  spdlog::info("MapViewView: cluster terrain, {} leaf draw ranges",
+               leaf_range_count);
+
+  cluster_entity_ = e;
+}
+
+void MapViewView::BuildLegacyTerrain() {
+  const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
 
   // One indexed kTerrainBlend chunk entity per N x N block region.
   const int blocks_x = cfg_.width / mapgen::kSamplesPerBlock;
@@ -100,28 +204,10 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
       registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
       registry_.emplace<StaticMeshAabbComponent>(e,
                                                  StaticMeshAabbComponent{box});
+      legacy_entities_.push_back(e);
       ++chunk_count_;
     }
   }
-  spdlog::info("MapViewView: {}x{} map, {} chunks, {} sections", cfg_.width,
-               cfg_.height, chunk_count_, map_.graph.nodes.size());
-
-  // Start on the map centre at ground-level framing, matching the game's own
-  // camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye view —
-  // this is meant to show the map as it will actually be played. Scroll to zoom
-  // out; max_height reaches far enough to take in the whole map.
-  const float map_depth_m = static_cast<float>(cfg_.height) *
-                            mapgen::kMetersPerSample;
-  gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_depth_m * 0.5f);
-  gamecam_.pitch_deg = 50.0f;
-  gamecam_.height = 42.0f;
-  gamecam_.min_height = 5.0f;
-  gamecam_.max_height = std::max(400.0f, map_size_m_);
-  gamecam_.UpdateCamera(camera_);
-
-  // The grid follows the mouse, so there is nothing to draw until the cursor is
-  // over the terrain (Update wires debug_lines once hover_valid_).
-  return true;
 }
 
 void MapViewView::ApplyDaylight() {
@@ -300,6 +386,11 @@ void MapViewView::DrawUI() {
   ImGui::Text("seed %u  %dx%d m", cfg_.seed, cfg_.width, cfg_.height);
   ImGui::Text("chunks: %d   sections: %zu", chunk_count_,
               map_.graph.nodes.size());
+  // A/B: cluster-LOD terrain (all leaf clusters, no LOD yet) vs the legacy
+  // fixed-subdiv chunks. Flipping rebuilds the live terrain entities.
+  if (ImGui::Checkbox("Cluster terrain", &use_cluster_terrain_)) {
+    RebuildTerrain();
+  }
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {
     const int bx = static_cast<int>(hover_point_.x / mapgen::kBlockSizeM);
