@@ -268,6 +268,26 @@ foreach(app viewer game ai_sandbox)
     endif()
 endforeach()
 
+# badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
+# it over a windowed 2D domain into a texture (8x8 patches across the shared
+# thread pool), and write a PNG. Links badlands_game_lib for the noiser C++ VM
+# and `assets` for PNG write; compiles src/core/parallel.cpp for ParallelFor.
+# No engine/SDL/Dawn — a fast, standalone tool. See src/tools/noise_texgen/.
+add_executable(badlands_noise_texgen
+    src/tools/noise_texgen/noise_texgen.cpp
+    src/tools/noise_texgen/texgen_core.cpp
+    src/core/parallel.cpp
+)
+target_link_libraries(badlands_noise_texgen PRIVATE badlands_game_lib assets)
+target_include_directories(badlands_noise_texgen PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR}
+)
+target_compile_options(badlands_noise_texgen PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_noise_texgen PRIVATE "-Wl,-ld_new")
+endif()
+
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
 # see tests/cpp_tests.rs on the legacy Rust reference branch).
@@ -428,3 +448,26 @@ if(APPLE)
     target_link_options(badlands_readback_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_readback_tests COMMAND badlands_readback_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_texgen_tests: Catch2 suite for the noise-texgen core
+# (src/tools/noise_texgen) — determinism, 8x8-patch tiling completeness, window
+# binding, mode/return-type validation, and linear-grayscale vs sRGB-color
+# encoding. Pure CPU; must run from the repo root so assets/noiser/texgen/*.noiser
+# resolve.
+add_executable(badlands_texgen_tests
+    src/tools/noise_texgen/texgen_tests.cpp
+    src/tools/noise_texgen/texgen_core.cpp
+    src/core/parallel.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_texgen_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR}
+)
+target_link_libraries(badlands_texgen_tests PRIVATE badlands_game_lib assets)
+target_compile_options(badlands_texgen_tests PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_texgen_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_texgen_tests COMMAND badlands_texgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
