@@ -34,6 +34,12 @@ class DebugLineBuffer {
 
   // 12 edges of an axis-aligned box.
   void AddBox(glm::vec3 min, glm::vec3 max, glm::vec3 color, float thickness = 1.0f);
+
+  // 12 edges of a box centred at `center` (world XZ), yawed by `rotation` about Y,
+  // with the given XZ half-extent, spanning [y0, y1] vertically. For visualising an
+  // oriented footprint (e.g. a fog emitter's OBB) that AddBox (axis-aligned) can't.
+  void AddOrientedBox(glm::vec2 center, float rotation, glm::vec2 half_extent,
+                      float y0, float y1, glm::vec3 color, float thickness = 1.0f);
 };
 
 }  // namespace badlands

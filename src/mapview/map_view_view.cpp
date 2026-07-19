@@ -166,7 +166,8 @@ float MapViewView::SectionHeight(const mapgen::Block& b) const {
 }
 
 void MapViewView::RebuildVisibleGrid() {
-  grid_.Clear();
+  // NB: does NOT clear grid_ -- the caller clears it once and may add other
+  // overlays (the selected fog emitter's OBB) to the same buffer.
   const mapgen::Field2D<mapgen::Block>& blocks = map_.blocks;
   if (blocks.width == 0 || blocks.height == 0 || !hover_valid_) return;
 
@@ -291,9 +292,41 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
       hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
       break;
     }
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+      if (event.button.button != SDL_BUTTON_LEFT) break;
+      glm::vec2 screen;
+      if (!EventWindowLogicalSize(event.button.windowID, screen)) break;
+      const Ray ray = ScreenPointToRay(
+          camera_, glm::vec2(event.button.x, event.button.y), screen);
+      glm::vec3 hit;
+      if (RaycastTerrain(map_.heightmap, ray, hit)) selected_emitter_ = PickEmitter(hit);
+      break;
+    }
     default:
       break;
   }
+}
+
+int MapViewView::PickEmitter(const glm::vec3& world) const {
+  // Which emitter footprint contains `world` (XZ), in its local frame. Nearest
+  // centre wins on overlap. -1 = none (deselect).
+  int best = -1;
+  float best_d2 = 1e30f;
+  for (size_t i = 0; i < fog_emitters_.size(); ++i) {
+    const fog::Emitter& e = fog_emitters_[i];
+    const glm::vec2 d = glm::vec2(world.x, world.z) - e.center;
+    const float cs = std::cos(e.rotation), sn = std::sin(e.rotation);
+    const glm::vec2 local(d.x * cs + d.y * sn, -d.x * sn + d.y * cs);  // rotate by -yaw
+    const glm::vec2 nd(local.x / std::max(e.half_extent.x, 1e-4f),
+                       local.y / std::max(e.half_extent.y, 1e-4f));
+    const bool inside = (e.shape == fog::EmitterShape::Obb)
+                            ? (std::abs(nd.x) <= 1.0f && std::abs(nd.y) <= 1.0f)
+                            : (nd.x * nd.x + nd.y * nd.y <= 1.0f);  // disc/ellipse
+    if (!inside) continue;
+    const float d2 = d.x * d.x + d.y * d.y;
+    if (d2 < best_d2) { best_d2 = d2; best = static_cast<int>(i); }
+  }
+  return best;
 }
 
 void MapViewView::Update(float dt, const bool* keyboard_state) {
@@ -321,15 +354,18 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
   }
   gamecam_.UpdateCamera(camera_);
 
-  // Rebuild the grid window around the hover point each frame (the camera may
-  // have panned under a stationary cursor). No cache: the window is small
-  // (independent of map size), so this is cheap.
-  if (grid_visible_ && hover_valid_) {
-    RebuildVisibleGrid();
-    scene_context_.debug_lines = &grid_;
-  } else {
-    scene_context_.debug_lines = nullptr;
+  // Rebuild the debug-line overlay each frame into one buffer: the hover grid plus
+  // the selected fog emitter's OBB. No cache: both are small (independent of map
+  // size), so this is cheap.
+  grid_.Clear();
+  if (grid_visible_ && hover_valid_) RebuildVisibleGrid();
+  if (selected_emitter_ >= 0 &&
+      selected_emitter_ < static_cast<int>(fog_emitters_.size())) {
+    const fog::Emitter& e = fog_emitters_[selected_emitter_];
+    grid_.AddOrientedBox(e.center, e.rotation, e.half_extent, e.base_y,
+                         e.base_y + e.height, glm::vec3(1.0f, 0.25f, 0.9f), 2.5f);
   }
+  scene_context_.debug_lines = grid_.empty() ? nullptr : &grid_;
 }
 
 void MapViewView::DrawUI() {
@@ -371,6 +407,60 @@ void MapViewView::DrawUI() {
     }
   }
   EditorUI::DrawStats(dt_);
+  ImGui::End();
+
+  DrawFogEmitterEditor();
+}
+
+void MapViewView::DrawFogEmitterEditor() {
+  ImGui::Begin("Fog Emitters");
+  ImGui::Text("%zu emitters   (click the terrain to select)", fog_emitters_.size());
+  if (ImGui::Button("Regenerate from biomes")) {
+    fog_emitters_ =
+        mapgen::GenerateBiomeFog(map_.biomes.pixel, map_.heightmap, cfg_.seed);
+    selected_emitter_ = -1;
+    SetFogSources();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Deselect")) selected_emitter_ = -1;
+
+  if (selected_emitter_ < 0 ||
+      selected_emitter_ >= static_cast<int>(fog_emitters_.size())) {
+    ImGui::TextUnformatted("No emitter selected.");
+    ImGui::End();
+    return;
+  }
+
+  fog::Emitter& e = fog_emitters_[selected_emitter_];
+  ImGui::SeparatorText("Selected emitter");
+  ImGui::Text("#%d  center (%.0f, %.0f)", selected_emitter_, e.center.x, e.center.y);
+
+  bool changed = false;
+  const char* kShapes[] = {"Disc", "OBB", "Ellipse"};
+  int shape = static_cast<int>(e.shape);
+  if (ImGui::Combo("Shape", &shape, kShapes, 3)) {
+    e.shape = static_cast<fog::EmitterShape>(shape);
+    changed = true;
+  }
+  const char* kTypes[] = {"Flat (Disc)", "Noise"};
+  int type = static_cast<int>(e.type);
+  if (ImGui::Combo("Type", &type, kTypes, 2)) {
+    e.type = static_cast<fog::EmitterType>(type);
+    changed = true;
+  }
+  changed |= ImGui::DragFloat2("Half extent", &e.half_extent.x, 0.1f, 0.5f, 200.0f);
+  changed |= ImGui::SliderAngle("Rotation", &e.rotation);
+  changed |= ImGui::DragFloat("Base Y", &e.base_y, 0.1f);
+  changed |= ImGui::SliderFloat("Height", &e.height, 1.0f, 128.0f);
+  changed |= ImGui::SliderFloat("Magnitude", &e.magnitude, 0.0f, 0.5f, "%.3f");
+  changed |= ImGui::SliderFloat("Radial falloff", &e.radial_falloff, 0.0f, 1.0f);
+  changed |= ImGui::SliderFloat("Vertical falloff", &e.vertical_falloff, 0.0f, 1.0f);
+  if (e.type == fog::EmitterType::Noise) {
+    changed |= ImGui::SliderFloat("Noise freq", &e.noise_freq, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Noise contrast", &e.noise_contrast, 0.1f, 4.0f);
+    changed |= ImGui::DragFloat3("Scroll", &e.scroll.x, 0.05f);
+  }
+  if (changed) SetFogSources();  // re-upload the whole set
   ImGui::End();
 }
 

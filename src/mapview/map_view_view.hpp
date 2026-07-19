@@ -82,9 +82,13 @@ class MapViewView : public AppView {
   mapgen::MapArtifacts map_;
 
   // Biome-derived fog emitters (see mapgen::GenerateBiomeFog). Retained so they
-  // can be picked/edited (later phases); pushed to the fog sim via SetFogSources.
+  // can be picked/edited; pushed to the fog sim via SetFogSources.
   std::vector<fog::Emitter> fog_emitters_;
+  int selected_emitter_ = -1;  // index into fog_emitters_, or -1 (none)
   void SetFogSources();  // (re)uploads fog_emitters_ to the renderer's fog sim
+  // Emitter whose footprint contains world XZ (nearest centre), or -1.
+  int PickEmitter(const glm::vec3& world) const;
+  void DrawFogEmitterEditor();  // the "Fog Emitters" ImGui window
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;
