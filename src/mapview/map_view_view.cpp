@@ -19,6 +19,7 @@
 #include "engine/rendering/scene_renderer.hpp"  // GetFogSimulation / MutableFogConfig
 #include "engine/ui/editor_ui.hpp"
 #include "game/geometry/terrain_mesh.hpp"
+#include "mapgen/fog_generator.hpp"
 #include "mapgen/mapgen_constants.hpp"
 #include "mapgen/pipeline.hpp"
 #include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
@@ -127,9 +128,26 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   gamecam_.max_height = std::max(400.0f, map_size_m_);
   gamecam_.UpdateCamera(camera_);
 
+  // Derive world-static fog emitters from the biome map (forest -> flat elliptical
+  // fog, swamp -> granular noise fog) and push them to the renderer's fog sim.
+  fog_emitters_ = mapgen::GenerateBiomeFog(map_.biomes.pixel, map_.heightmap,
+                                           cfg_.seed);
+  spdlog::info("MapViewView: {} biome fog emitters", fog_emitters_.size());
+  SetFogSources();
+
   // The grid follows the mouse, so there is nothing to draw until the cursor is
   // over the terrain (Update wires debug_lines once hover_valid_).
   return true;
+}
+
+void MapViewView::SetFogSources() {
+  if (scene_renderer_ == nullptr) return;
+  FogSimParams p;
+  p.map_min = {0.0f, 0.0f};
+  p.map_max = {static_cast<float>(cfg_.width) * mapgen::kMetersPerSample,
+               static_cast<float>(cfg_.height) * mapgen::kMetersPerSample};
+  p.bp_cell_size = 32.0f;
+  scene_renderer_->GetFogSimulation().SetSources(fog_emitters_, p);
 }
 
 void MapViewView::ApplyDaylight() {

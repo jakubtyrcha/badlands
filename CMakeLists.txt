@@ -302,6 +302,7 @@ endforeach()
 add_library(badlands_mapgen_lib STATIC
     src/mapgen/authored_map.cpp
     src/mapgen/config.cpp
+    src/mapgen/fog_generator.cpp
     src/mapgen/fields.cpp
     src/mapgen/hillshade.cpp
     src/mapgen/outputs.cpp
@@ -401,6 +402,21 @@ if(APPLE)
     target_link_options(badlands_authored_map_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_authored_map_tests COMMAND badlands_authored_map_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_fog_generator_tests: the biome -> fog-emitter generator. Pure CPU
+# (fog_sim.hpp is header-only glm; biomes/field2d are headers), so it compiles
+# fog_generator.cpp directly with no engine link.
+add_executable(badlands_fog_generator_tests
+    src/mapgen/fog_generator_tests.cpp
+    src/mapgen/fog_generator.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_fog_generator_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,

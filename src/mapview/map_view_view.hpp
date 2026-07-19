@@ -10,6 +10,7 @@
 // the hit point (see RebuildVisibleGrid).
 
 #include <cstdint>
+#include <vector>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
@@ -23,6 +24,7 @@
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
+#include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "mapgen/config.hpp"
 #include "mapgen/pipeline.hpp"
@@ -78,6 +80,11 @@ class MapViewView : public AppView {
   // per-section heights — both outlive Initialize, unlike the chunk tessellation
   // inputs.
   mapgen::MapArtifacts map_;
+
+  // Biome-derived fog emitters (see mapgen::GenerateBiomeFog). Retained so they
+  // can be picked/edited (later phases); pushed to the fog sim via SetFogSources.
+  std::vector<fog::Emitter> fog_emitters_;
+  void SetFogSources();  // (re)uploads fog_emitters_ to the renderer's fog sim
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;
