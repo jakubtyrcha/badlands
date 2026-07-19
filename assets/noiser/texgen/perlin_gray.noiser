@@ -1,0 +1,6 @@
+// Perlin noise, grayscale. Run with --mode grayscale.
+//   badlands_noise_texgen assets/noiser/texgen/perlin_gray.noiser \
+//       --window 0,0,8,8 --res 512x512 --mode grayscale --out perlin.png
+import { domain_pos, unorm } from texgen;
+
+unorm(perlin2d(domain_pos(), 1.0, 42))

@@ -37,6 +37,7 @@ namespace badlands {
 class FrameContext;
 class MaterialInstanceCache;
 class RenderPassContext;
+struct Frustum;
 
 // Renders every StaticTexturedMeshComponent entity that also has a
 // MaterialFactoryComponent: lazily uploads the mesh's vertex buffer to the
@@ -50,10 +51,13 @@ class RenderPassContext;
 // camera-offset rebase).
 // render_pass_type: which compiled pipeline variant to fetch (this port only
 // ever calls this with RenderPassType::kForward — see scene_renderer.cpp).
+// `frustum`: world-space view frustum; entities with a StaticMeshAabbComponent
+// whose world AABB falls fully outside it are skipped (chunk culling).
 void RenderTexturedMeshes(RenderPassContext& pass, FrameContext& frame,
                           entt::registry& registry,
                           const glm::vec3& camera_world_pos,
                           RenderPassType render_pass_type,
-                          MaterialInstanceCache& cache);
+                          MaterialInstanceCache& cache,
+                          const Frustum& frustum);
 
 }  // namespace badlands

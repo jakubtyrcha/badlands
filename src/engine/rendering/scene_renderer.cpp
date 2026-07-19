@@ -27,6 +27,9 @@
 #include "engine/rendering/context/render_pass_context.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/components/forward_component.hpp"
+#include "engine/rendering/debug_line_buffer.hpp"
+#include "engine/rendering/frustum.hpp"
+#include "engine/rendering/passes/render_debug_lines.hpp"
 #include "engine/rendering/passes/render_forward.hpp"
 #include "engine/rendering/passes/render_gbuffer_debug.hpp"
 #include "engine/rendering/passes/render_skybox.hpp"
@@ -410,8 +413,16 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.timestampWrites = gpu_timer_.BeginPass("shadow");
     RenderPassContext pass = frame.BeginRenderPass(desc);
     if (shadow_config_.enable_shadow_map) {
+      // Cull casters against the LIGHT's frustum, not the camera's: a caster
+      // outside the view still shadows into it. This is free correctness-wise —
+      // anything outside the light frustum is clipped by the GPU and cannot
+      // rasterize into the shadow map anyway, and straddling AABBs still count
+      // as intersecting — so it only skips work.
+      const Frustum shadow_frustum =
+          Frustum::FromViewProj(shadow_map_.GetLightViewProj());
       RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
-                           RenderPassType::kShadow, material_instance_cache_);
+                           RenderPassType::kShadow, material_instance_cache_,
+                           shadow_frustum);
     }
     pass.End();
   }
@@ -455,8 +466,13 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
 
     desc.timestampWrites = gpu_timer_.BeginPass("gbuffer");
     RenderPassContext pass = frame.BeginRenderPass(desc);
+    // World-space view frustum for per-entity AABB culling (built from the
+    // full world VP; the offset-view rendering is only for GPU precision).
+    const Frustum frustum =
+        Frustum::FromViewProj(camera.GetProj() * camera.GetView());
     RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
-                         RenderPassType::kGBuffer, material_instance_cache_);
+                         RenderPassType::kGBuffer, material_instance_cache_,
+                         frustum);
     pass.End();
   }
 
@@ -782,6 +798,62 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     RenderForwardTransparentMeshes(pass, frame, registry, camera_world_pos,
                                    material_instance_cache_, engine);
     pass.End();
+  }
+
+  // === Pass 3.6: Debug lines — world-space thick (screen-aligned, AA) lines
+  // into the HDR buffer, depth-tested against the G-buffer (so they are occluded
+  // by geometry) but not depth-writing. ===
+  if (scene.debug_lines != nullptr && !scene.debug_lines->empty()) {
+    const uint32_t line_verts = UploadDebugLines(
+        device_, debug_line_buffer_, *scene.debug_lines, frame_uniforms.view,
+        frame_uniforms.proj,
+        glm::vec2(static_cast<float>(width_), static_cast<float>(height_)),
+        camera_world_pos);
+
+    RenderPipelineDeclaration decl;
+    decl.shader_path = "geometry/thick_line";
+    decl.vertex_layout = VertexLayout::kThickLine;
+    decl.cull_mode = wgpu::CullMode::None;
+    decl.blend_enabled = true;
+    decl.depth_write = false;
+    decl.depth_compare = wgpu::CompareFunction::GreaterEqual;  // reversed-Z
+    decl.depth_format = kDepthFormat;
+    RenderTargetFormats target_formats = {accumulation_format_};
+    auto compiled = pipeline_generator_->GetPipeline(decl, target_formats);
+
+    if (line_verts > 0 && compiled) {
+      wgpu::RenderPassColorAttachment color_attachment;
+      color_attachment.view = hdr_color_view_;
+      color_attachment.loadOp = wgpu::LoadOp::Load;
+      color_attachment.storeOp = wgpu::StoreOp::Store;
+
+      wgpu::RenderPassDepthStencilAttachment depth_attachment;
+      depth_attachment.view = gbuffer_.GetDepthView();
+      depth_attachment.depthLoadOp = wgpu::LoadOp::Load;
+      depth_attachment.depthStoreOp = wgpu::StoreOp::Store;
+      depth_attachment.depthReadOnly = false;
+      depth_attachment.stencilLoadOp = wgpu::LoadOp::Undefined;
+      depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
+
+      wgpu::RenderPassDescriptor desc;
+      desc.colorAttachmentCount = 1;
+      desc.colorAttachments = &color_attachment;
+      desc.depthStencilAttachment = &depth_attachment;
+
+      RenderPassContext pass = frame.BeginRenderPass(desc);
+      std::array<wgpu::BindGroupEntry, 1> entries{};
+      entries[0].binding = 0;
+      entries[0].buffer = frame.GetFrameUniformBuffer();
+      entries[0].offset = 0;
+      entries[0].size = sizeof(UniformData);
+      wgpu::BindGroup bind_group =
+          frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);
+      pass.SetPipeline(compiled->pipeline);
+      pass.SetBindGroup(0, bind_group);
+      pass.SetVertexBuffer(0, debug_line_buffer_);
+      pass.Draw(line_verts);
+      pass.End();
+    }
   }
 
   // === Pass 4: Final resolve: HDR -> surface. Normally the tonemap pass;

@@ -1,6 +1,7 @@
 /target
 .DS_Store
 /shot*.png
+/terrain_blend_albedo.png
 /.fastembed_cache
 build/
 /imgui.ini

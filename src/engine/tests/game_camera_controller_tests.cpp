@@ -14,6 +14,7 @@
 #include <glm/glm.hpp>
 
 #include "engine/app/game_camera_controller.hpp"
+#include "engine/app/orbit_camera_controller.hpp"
 #include "engine/core/camera.hpp"
 #include "engine/core/ray.hpp"
 
@@ -149,6 +150,40 @@ TEST_CASE("ZoomAtCursor: a cursor above the horizon still zooms") {
 
   ZoomAtCursor(gc, cam, 2.0f, glm::vec2(kW * 0.5f, 0.0f), kScreen);
   CHECK(gc.height < start);
+}
+
+TEST_CASE("OrbitCameraController: wheel zoom is symmetric and safe") {
+  // Same contract as the game camera's Zoom (both go through ZoomScalar). The
+  // old linear form `distance *= (1 - wheel_y * zoom_speed)` drifted on every
+  // in/out pair and collapsed to min_distance at exactly 1/zoom_speed notches
+  // in a single event — reachable from a coalesced trackpad flick.
+  OrbitCameraController orbit;
+  orbit.distance = 8.0f;
+  orbit.min_distance = 0.5f;
+  orbit.max_distance = 100.0f;
+  const float start = orbit.distance;
+
+  // Positive wheel (scroll up) zooms IN -- direction preserved from the old form.
+  orbit.HandleMouseWheel(1.0f);
+  CHECK(orbit.distance < start);
+
+  // Reversible.
+  orbit.HandleMouseWheel(-1.0f);
+  CHECK(orbit.distance == Catch::Approx(start).margin(1e-3));
+
+  // 1/zoom_speed notches halves rather than annihilating (the old form's
+  // multiply-by-zero point).
+  orbit.HandleMouseWheel(1.0f / orbit.zoom_speed);
+  CHECK(orbit.distance == Catch::Approx(start * 0.5f).margin(1e-3));
+  orbit.HandleMouseWheel(-1.0f / orbit.zoom_speed);
+  CHECK(orbit.distance == Catch::Approx(start).margin(1e-3));
+
+  // Clamped, never <= 0, no matter the delta.
+  orbit.HandleMouseWheel(1e6f);
+  CHECK(orbit.distance == Catch::Approx(orbit.min_distance));
+  CHECK(orbit.distance > 0.0f);
+  orbit.HandleMouseWheel(-1e6f);
+  CHECK(orbit.distance == Catch::Approx(orbit.max_distance));
 }
 
 TEST_CASE("ZoomAtCursor: clamped zoom does not drag focus") {

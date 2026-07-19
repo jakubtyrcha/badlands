@@ -14,6 +14,7 @@
 // runs, same as normalmapped.wesl being inert).
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <dawn/webgpu_cpp.h>
 
@@ -44,6 +45,17 @@ struct LoadedTexture {
 wgpu::TextureView CreateSolidColorTexture(wgpu::Device device, wgpu::Queue queue,
                                           uint8_t r, uint8_t g, uint8_t b,
                                           uint8_t a = 255);
+
+// Creates an N-layer 1x1 solid-color RGBA8Unorm texture ARRAY (one color per
+// layer) and returns a 2D-array (e2DArray) view over all layers. `colors` is
+// `layer_count * 4` bytes (one RGBA per layer). The returned view keeps the
+// underlying texture alive. No mip chain (1x1). Used for terrain-blend layer
+// arrays — e.g. the red/green/blue debug materials, or the biome palette.
+// Modeled on standard_material_factory.cpp's CreateSolidColorCubemap1x1 (a
+// cubemap is just a 6-layer array).
+wgpu::TextureView CreateSolidColorArray(wgpu::Device device, wgpu::Queue queue,
+                                        const uint8_t* colors,
+                                        uint32_t layer_count);
 
 // Decodes the JPEG/PNG at `path` (via the `assets` Rust crate), uploads it as
 // mip level 0 of an RGBA8Unorm Dawn texture sized to a full mip chain, then
@@ -83,5 +95,24 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
                                       GpuPipelineGenerator& pipeline_gen,
                                       uint32_t width, uint32_t height,
                                       const uint8_t* rgba);
+
+// Packs N already-mipped 2D textures into one texture ARRAY (layer i =
+// layers[i]) and returns an e2DArray view over all layers + mip levels. The
+// array takes its format from the sources (RGBA8Unorm for everything
+// UploadTexture2DWithMips produces).
+//
+// Every source mip is copied straight across (CopyTextureToTexture), so the mip
+// chains the sources already carry are reused as-is -- this deliberately avoids
+// needing array-aware mip generation (the render-path kernel
+// shaders/compute/mip_generator_render.wesl hardcodes `out.layer = 0` and so
+// cannot write layers > 0). Sources must therefore have been created with
+// CopySrc -- UploadTexture2DWithMips does that.
+//
+// All layers must be non-null and share identical width/height/mipLevelCount/
+// format -- a texture array has one size and one format for every layer, and
+// CopyTextureToTexture requires the formats to match. Any violation (or an
+// empty `layers`) returns a null LoadedTexture after logging.
+LoadedTexture PackTexturesIntoArray(wgpu::Device device, wgpu::Queue queue,
+                                    const std::vector<wgpu::Texture>& layers);
 
 }  // namespace badlands

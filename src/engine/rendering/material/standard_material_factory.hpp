@@ -86,6 +86,12 @@ class StandardMaterialFactory : public MaterialInstanceFactory {
     wgpu::TextureView cube_flat_normal;
     wgpu::TextureView cube_full_roughness;
     wgpu::TextureView cube_gray;
+    // e2DArray defaults for texture_2d_array slots (kTerrainBlend). Per-slot,
+    // because a normal array MUST default to flat_normal, not gray: gray
+    // (128,128,128) decodes to a degenerate (0,0,0) normal after *2-1.
+    wgpu::TextureView array_default;      // neutral gray (albedo / unknown)
+    wgpu::TextureView array_flat_normal;  // (128,128,255) -> +Z tangent normal
+    wgpu::TextureView array_arm;          // (255,229,0): AO=1, rough~0.9, metal=0
     wgpu::Sampler sampler;
   };
   std::optional<DefaultTextures> default_textures_;

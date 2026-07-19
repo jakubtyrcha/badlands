@@ -26,6 +26,8 @@
 
 namespace badlands {
 
+class DebugLineBuffer;
+
 // SceneContext holds scene-level state written by SceneGraph::SyncToRegistry
 // and read by (future) rendering passes. See the trim note above — this is
 // deliberately a small subset of sampo's SceneContext.
@@ -54,6 +56,11 @@ struct SceneContext {
   // time-animated forward materials (e.g. water waves) via the forward pass.
   // Independent of the sim clock; deterministic under headless SeekToTimeOfDay.
   float time_seconds{0.0f};
+
+  // Optional world-space debug lines, drawn (screen-aligned + antialiased,
+  // depth-tested against the G-buffer) after deferred lighting and before
+  // tonemap. Null = none. Not owned; must outlive the frame.
+  const DebugLineBuffer* debug_lines = nullptr;
 };
 
 }  // namespace badlands

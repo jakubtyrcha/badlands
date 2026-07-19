@@ -8,6 +8,7 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include "engine/app/sdl_input_util.hpp"  // NormalizedWheelY
 #include "engine/rendering/geometry/extrusion_mesh_builder.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
@@ -156,7 +157,9 @@ void ModelViewerView::HandleEvent(const SDL_Event& event, int /*width*/,
       }
       break;
     case SDL_EVENT_MOUSE_WHEEL:
-      orbit_.HandleMouseWheel(event.wheel.y);
+      // Normalized: macOS natural scrolling sets SDL_MOUSEWHEEL_FLIPPED and
+      // negates y, which silently inverts zoom for those users.
+      orbit_.HandleMouseWheel(NormalizedWheelY(event.wheel));
       break;
     default:
       break;

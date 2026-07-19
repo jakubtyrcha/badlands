@@ -75,7 +75,16 @@ corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 # Corrosion's imported CMake target always replaces dashes with underscores
 # (CorrosionGenerator.cmake), so the target is `noiser_bundle`, not
 # `noiser-bundle`.
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/crates/noiser-bundle/Cargo.toml)
+#
+# PROFILE release — ALWAYS, even in a Debug C++ build. The noiser VM is an
+# interpreter sitting on mapgen's hot path: the field script evaluates ~16
+# Perlin octaves per sample, so a 2000x2000 map is ~64M octave evaluations
+# through it. Built with cargo's dev profile (opt-level 0, which is what
+# CMAKE_BUILD_TYPE=Debug otherwise selects) that alone costs ~39s of a ~40s
+# generation. Nothing here is C++-debuggable anyway — it's a prebuilt staticlib
+# behind a C ABI — so there is no debuggability to trade away.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/crates/noiser-bundle/Cargo.toml
+                       PROFILE release)
 corrosion_set_env_vars(noiser_bundle "RUSTFLAGS=-Cpanic=unwind")
 
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
@@ -105,6 +114,10 @@ add_library(badlands_engine STATIC
     src/engine/rendering/geometry/building_parts_builder.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
+    src/engine/rendering/frustum.cpp
+    src/engine/rendering/debug_line_buffer.cpp
+    src/engine/rendering/debug_line_expand.cpp
+    src/engine/rendering/passes/render_debug_lines.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
     src/engine/rendering/passes/render_forward.cpp
     src/engine/rendering/passes/render_skybox.cpp
@@ -273,6 +286,112 @@ foreach(app viewer game ai_sandbox)
     endif()
 endforeach()
 
+# badlands_mapgen_lib: the map generation pipeline (config/fields/voronoi/biomes/
+# height/sections + PNG/JSON outputs) as a static lib. Links badlands_engine for
+# CpuImage (PNG write via the `assets` crate) and badlands_game_lib for the
+# sampo::noiser C++ VM wrapper (parallel noise-field evaluation).
+# -Wno-deprecated-declarations matches badlands_game_lib (the noiser headers ship
+# [[deprecated]] shims).
+add_library(badlands_mapgen_lib STATIC
+    src/mapgen/config.cpp
+    src/mapgen/fields.cpp
+    src/mapgen/hillshade.cpp
+    src/mapgen/outputs.cpp
+    src/mapgen/pipeline.cpp
+    src/mapgen/script_eval.cpp
+    src/mapgen/voronoi.cpp
+    src/mapgen/biome_assign.cpp
+    src/mapgen/heightmap.cpp
+    src/mapgen/sections.cpp)
+target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine badlands_game_lib)
+target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
+
+# badlands_patchgen: renders ONE noiser terrain script over a world patch to a
+# grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
+# window. Scripts are functions of world meters, so a patch is a literal crop of the
+# world (see scripts/mapgen/biomes/README.md).
+add_executable(badlands_patchgen src/mapgen/main_patchgen.cpp)
+target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib)
+target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_patchgen PRIVATE "-Wl,-ld_new")
+endif()
+
+# badlands_mapview: THE map tool. `--preview-image-only` runs the generator and
+# dumps the debug rasters + section graph (pure CPU, no window — this replaces
+# the old standalone badlands_mapgen binary); otherwise it renders the generated
+# map as indexed kTerrainBlend chunks with the biome-blend material, with a
+# mouse-hover block/section grid.
+add_executable(badlands_mapview
+    src/mapview/main_mapview.cpp
+    src/mapview/map_view_view.cpp
+    src/mapview/biome_manifest.cpp
+    src/game/geometry/terrain_mesh.cpp)
+target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib)
+target_compile_options(badlands_mapview PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
+endif()
+
+# badlands_mapgen_tests: Catch2 unit tests for the deterministic mapgen analysis
+# (block reduction, section flood-fill + graph, biome classification, height
+# composition). Pure CPU — compiles just those TUs (no noiser/Dawn/CpuImage),
+# so it links nothing but Catch2. Runs on tiny synthetic patches.
+add_executable(badlands_mapgen_tests
+    src/mapgen/mapgen_tests.cpp
+    src/mapgen/sections.cpp
+    src/mapgen/biome_assign.cpp
+    src/mapgen/heightmap.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_mapgen_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_mapgen_tests COMMAND badlands_mapgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_patch_eval_tests: the patch evaluator's world mapping (world =
+# origin + (i+0.5)*extent/res), pinned with analytic ramp scripts. Needs the
+# noiser VM, so it links badlands_game_lib (which PUBLIC-links noiser_bundle and
+# carries no engine/SDL/Dawn dependency) -- NOT badlands_mapgen_lib, which would
+# drag in the renderer for nothing.
+add_executable(badlands_patch_eval_tests
+    src/mapgen/patch_eval_tests.cpp
+    src/mapgen/script_eval.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_link_libraries(badlands_patch_eval_tests PRIVATE badlands_game_lib)
+target_include_directories(badlands_patch_eval_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_compile_options(badlands_patch_eval_tests PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_patch_eval_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_patch_eval_tests COMMAND badlands_patch_eval_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
+# it over a windowed 2D domain into a texture (8x8 patches across the shared
+# thread pool), and write a PNG. Links badlands_game_lib for the noiser C++ VM
+# and `assets` for PNG write; compiles src/core/parallel.cpp for ParallelFor.
+# No engine/SDL/Dawn — a fast, standalone tool. See src/tools/noise_texgen/.
+add_executable(badlands_noise_texgen
+    src/tools/noise_texgen/noise_texgen.cpp
+    src/tools/noise_texgen/texgen_core.cpp
+    src/core/parallel.cpp
+)
+target_link_libraries(badlands_noise_texgen PRIVATE badlands_game_lib assets)
+target_include_directories(badlands_noise_texgen PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR}
+)
+target_compile_options(badlands_noise_texgen PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_noise_texgen PRIVATE "-Wl,-ld_new")
+endif()
+
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
 # see tests/cpp_tests.rs on the legacy Rust reference branch).
@@ -362,25 +481,6 @@ target_include_directories(badlands_water_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/glm
 )
 add_test(NAME badlands_water_tests COMMAND badlands_water_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-# badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
-# (src/engine/core/ray) and the fixed-angle GameCameraController's cursor-
-# anchored zoom that rides on it. glm-only: camera.hpp is header-only and the
-# controller pulls in nothing else (deliberately no sdl_input_util here — that
-# would drag in SDL3).
-add_executable(badlands_ray_tests
-    src/engine/tests/ray_tests.cpp
-    src/engine/tests/game_camera_controller_tests.cpp
-    src/engine/core/ray.cpp
-    src/engine/app/game_camera_controller.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_include_directories(badlands_ray_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
-)
-add_test(NAME badlands_ray_tests COMMAND badlands_ray_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_shadow_test: Task T4's Catch2 suite for the directional-shadow
 # system (T2's ShadowMap + T3's deferred sampling) -- a headless GPU render
@@ -506,3 +606,147 @@ if(APPLE)
     target_link_options(badlands_readback_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_readback_tests COMMAND badlands_readback_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_terrain_blend_tests: GPU test for the terrain-blend material — renders
+# a kTerrainBlend quad blending an R/G/B texture_2d_array and reads back the
+# unlit G-buffer albedo via GBufferDebugMode::Albedo. Needs a working GPU
+# adapter (Metal on macOS) + the shaders/ dir (WORKING_DIRECTORY = repo root).
+add_executable(badlands_terrain_blend_tests
+    src/engine/tests/terrain_blend_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_terrain_blend_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_terrain_blend_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_terrain_blend_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_terrain_blend_tests COMMAND badlands_terrain_blend_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
+# — the tessellated-block mesh builder plus the SampleHeight/RaycastTerrain
+# queries behind mouse picking. No GPU: only glm + the header-only mapgen
+# Field2D/Biome types and the header-only Ray struct.
+add_executable(badlands_terrain_mesh_tests
+    src/game/geometry/terrain_mesh.cpp
+    game/tests/terrain_mesh_tests.cpp
+    game/tests/terrain_raycast_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_terrain_mesh_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_terrain_mesh_tests COMMAND badlands_terrain_mesh_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_frustum_tests: pure-CPU tests for view-frustum AABB culling.
+add_executable(badlands_frustum_tests
+    src/engine/tests/frustum_tests.cpp
+    src/engine/rendering/frustum.cpp
+    src/engine/rendering/geometry/aabb.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_frustum_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_compile_definitions(badlands_frustum_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+add_test(NAME badlands_frustum_tests COMMAND badlands_frustum_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_debug_line_tests: pure-CPU tests for the world-space thick-line quad
+# expansion (near-plane clipping so segments crossing behind the camera don't
+# produce garbage vertices).
+add_executable(badlands_debug_line_tests
+    src/engine/tests/debug_line_expand_tests.cpp
+    src/engine/rendering/debug_line_expand.cpp
+    src/engine/rendering/debug_line_buffer.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_debug_line_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_debug_line_tests COMMAND badlands_debug_line_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_texture_array_tests: GPU test for PackTexturesIntoArray — packs
+# mipped 2D textures into a texture_2d_array and reads back per-layer to check
+# layer identity/ordering + that the source mip chains survive the copy, plus
+# the null/size/format validation contracts. Needs a GPU adapter + shaders/.
+add_executable(badlands_texture_array_tests
+    src/engine/tests/texture_array_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_texture_array_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_texture_array_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_texture_array_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_texture_array_tests COMMAND badlands_texture_array_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_biome_manifest_tests: pure-CPU tests for the biome -> material-pack
+# manifest resolution (order == Biome enum == terrain array layer index).
+# Reads the shipped manifest, so WORKING_DIRECTORY = repo root.
+add_executable(badlands_biome_manifest_tests
+    src/mapview/tests/biome_manifest_tests.cpp
+    src/mapview/biome_manifest.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_biome_manifest_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
+# (src/engine/core/ray) and the fixed-angle GameCameraController's zoom that
+# rides on it. glm-only: camera.hpp is header-only and the controller pulls in
+# nothing else (deliberately no sdl_input_util here — that would drag in SDL3).
+add_executable(badlands_ray_tests
+    src/engine/tests/ray_tests.cpp
+    src/engine/tests/game_camera_controller_tests.cpp
+    src/engine/core/ray.cpp
+    src/engine/app/game_camera_controller.cpp
+    src/engine/app/orbit_camera_controller.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_ray_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_compile_definitions(badlands_ray_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+add_test(NAME badlands_ray_tests COMMAND badlands_ray_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_texgen_tests: Catch2 suite for the noise-texgen core
+# (src/tools/noise_texgen) — determinism, 8x8-patch tiling completeness, window
+# binding, mode/return-type validation, and linear-grayscale vs sRGB-color
+# encoding. Pure CPU; must run from the repo root so assets/noiser/texgen/*.noiser
+# resolve.
+add_executable(badlands_texgen_tests
+    src/tools/noise_texgen/texgen_tests.cpp
+    src/tools/noise_texgen/texgen_core.cpp
+    src/core/parallel.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_texgen_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR}
+)
+target_link_libraries(badlands_texgen_tests PRIVATE badlands_game_lib assets)
+target_compile_options(badlands_texgen_tests PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_texgen_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_texgen_tests COMMAND badlands_texgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

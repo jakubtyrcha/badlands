@@ -16,7 +16,7 @@ namespace badlands {
 struct ReflectedBinding;
 
 // Texture type for material bindings
-enum class TextureType { k2D, kCubemap };
+enum class TextureType { k2D, kCubemap, kArray };
 
 // Single texture requirement for a material
 struct TextureRequirement {

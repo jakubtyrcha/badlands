@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "engine/app/camera_zoom.hpp"
 #include "engine/core/camera.hpp"
 #include "engine/core/ray.hpp"
 
@@ -14,8 +15,7 @@ void GameCameraController::Pan(glm::vec2 world_dxz) {
 }
 
 void GameCameraController::Zoom(float notches) {
-  height = std::clamp(height * std::exp2(-notches * zoom_speed), min_height,
-                      max_height);
+  height = ZoomScalar(height, notches, zoom_speed, min_height, max_height);
 }
 
 void GameCameraController::UpdateCamera(Camera& cam) const {
