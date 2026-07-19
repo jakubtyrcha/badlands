@@ -16,6 +16,8 @@
 #include "engine/rendering/components/material_factory_component.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
+#include "engine/rendering/scene_renderer.hpp"  // GetFogSimulation / MutableFogConfig
+#include "engine/ui/editor_ui.hpp"
 #include "game/geometry/terrain_mesh.hpp"
 #include "mapgen/mapgen_constants.hpp"
 #include "mapgen/pipeline.hpp"
@@ -32,13 +34,20 @@ constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json
 bool MapViewView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
+  scene_renderer_ = ctx.scene_renderer;  // shared debug/fog selectors need it
 
   if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
     spdlog::error("MapViewView: MaterialLibrary init failed");
     return false;
   }
+  // Start at noon, paused (an inspector holds still until you play/scrub).
+  sim_clock_.speed = 0.0f;
+  sim_clock_.SeekTimeOfDay(0.5f);
   ApplyDaylight();
   scene_context_.registry = &registry_;
+  // Fog renders when enabled; sources come from the biome generator (a later
+  // phase). Enabled here so the fog editor is exercisable.
+  if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = true;
 
   // One PBR pack per biome, layer index = Biome enum value. The mapping is data
   // (assets/materials/terrain_biomes.json); the engine only sees "N packs".
@@ -124,7 +133,8 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
 }
 
 void MapViewView::ApplyDaylight() {
-  const DaylightState state = ComputeDaylight(daylight_cfg_, time_of_day_);
+  const DaylightState state =
+      ComputeDaylight(daylight_cfg_, sim_clock_.TimeOfDay());
   ApplyDaylightEnvironment(state, daylight_cfg_, device_, queue_, sky_cube_,
                            scene_context_);
 }
@@ -269,6 +279,19 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
 }
 
 void MapViewView::Update(float dt, const bool* keyboard_state) {
+  dt_ = dt;
+
+  // Advance the shared clock; when it's running, move the sun and animate the
+  // fog by the same sim delta (paused => both hold). The daylight re-bake is
+  // throttled implicitly: ApplyDaylight is only called while time actually moves.
+  const double sim_dt = sim_clock_.Advance(dt);
+  if (sim_dt > 0.0) {
+    ApplyDaylight();
+    if (scene_renderer_) {
+      scene_renderer_->GetFogSimulation().AddTime(static_cast<float>(sim_dt));
+    }
+  }
+
   if (keyboard_state != nullptr && ImGui::GetCurrentContext() != nullptr &&
       !ImGui::GetIO().WantCaptureKeyboard) {
     glm::vec2 dir(0.0f);
@@ -310,11 +333,26 @@ void MapViewView::DrawUI() {
   }
   ImGui::Checkbox("Grid (block + section)", &grid_visible_);
   ImGui::SliderInt("Grid radius (blocks)", &grid_radius_blocks_, 1, 30);
-  // Scrub the sun. Re-bakes only on change (the bake is a CPU per-texel sky
-  // eval + SH projection -- see ApplyDaylightEnvironment).
-  if (ImGui::SliderFloat("Time of day", &time_of_day_, 0.0f, 1.0f, "%.3f")) {
-    ApplyDaylight();
+  ImGui::End();
+
+  // Shared sim/daylight/debug controls (same helpers the game uses). Re-bake the
+  // sky immediately on a scrub or a config edit so it's visible without waiting
+  // for the clock; while playing, Update already re-bakes as time advances.
+  ImGui::Begin("Sim / Daylight / Debug");
+  if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (EditorUI::DrawSimClockControls(sim_clock_)) ApplyDaylight();
   }
+  if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (EditorUI::DrawDaylightEditor(daylight_cfg_)) ApplyDaylight();
+  }
+  if (scene_renderer_ != nullptr) {
+    EditorUI::DrawFogEditor(*scene_renderer_);
+    if (ImGui::CollapsingHeader("Debug Views")) {
+      EditorUI::DrawGBufferDebugSelector(*scene_renderer_);
+      EditorUI::DrawShadowDebugSelector(*scene_renderer_);
+    }
+  }
+  EditorUI::DrawStats(dt_);
   ImGui::End();
 }
 

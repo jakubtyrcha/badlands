@@ -17,6 +17,7 @@
 
 #include "engine/app/app_view.hpp"
 #include "engine/app/game_camera_controller.hpp"
+#include "engine/app/sim_clock.hpp"
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
@@ -27,6 +28,8 @@
 #include "mapgen/pipeline.hpp"
 
 namespace badlands {
+
+class SceneRenderer;
 
 class MapViewView : public AppView {
  public:
@@ -49,15 +52,17 @@ class MapViewView : public AppView {
 
   wgpu::Device device_;
   wgpu::Queue queue_;
+  SceneRenderer* scene_renderer_ = nullptr;  // shared, owned by the app
+  float dt_ = 0.0f;                          // last real frame dt (for the FPS line)
 
   MaterialLibrary matlib_;
   CubemapBuilder sky_cube_;
 
-  // Daylight (Hosek-Wilkie sky + directional sun), same system the game uses.
-  // Static rather than a running cycle: this is a map inspector, so the light
-  // holds still unless you scrub it. 0.5 == noon (daylight.cpp's solar arc).
+  // Daylight (Hosek-Wilkie sky + directional sun), same system the game uses,
+  // driven by the shared SimClock (play/pause/speed + scrub). The clock also
+  // advances the fog animation. Seeded to noon; starts paused (an inspector).
   DaylightConfig daylight_cfg_;
-  float time_of_day_ = 0.5f;
+  SimClock sim_clock_;
   void ApplyDaylight();  // re-bakes sky + IBL; not cheap, call on change only
 
   // Per-biome PBR texture arrays (albedo/normal/arm), layer index = Biome enum

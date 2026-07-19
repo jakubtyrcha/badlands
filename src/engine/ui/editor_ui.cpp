@@ -6,6 +6,8 @@
 #include <glm/glm.hpp>
 #include <imgui.h>
 
+#include "engine/app/sim_clock.hpp"
+#include "engine/rendering/daylight.hpp"
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 
@@ -165,6 +167,43 @@ void DrawFogEditor(SceneRenderer& renderer) {
   ImGui::Checkbox("Jitter", &cfg.jitter);
   ImGui::SameLine();
   ImGui::Checkbox("Half-res", &cfg.half_res);
+}
+
+bool DrawSimClockControls(SimClock& clock) {
+  // Speed (0 = paused, 1/2/4x). Drives the day/night cycle (and, in the game, the
+  // sim tick) via the shared clock.
+  ImGui::Text("Speed:");
+  const float kSpeeds[] = {0.0f, 1.0f, 2.0f, 4.0f};
+  const char* kSpeedLabels[] = {"Pause", "1x", "2x", "4x"};
+  for (int i = 0; i < 4; ++i) {
+    ImGui::SameLine();
+    if (ImGui::RadioButton(kSpeedLabels[i], clock.speed == kSpeeds[i])) {
+      clock.speed = kSpeeds[i];
+    }
+  }
+
+  bool seek = false;
+  float t01 = clock.TimeOfDay();
+  if (ImGui::SliderFloat("Time of day", &t01, 0.0f, 0.9999f)) {
+    clock.SeekTimeOfDay(t01);
+    seek = true;
+  }
+  ImGui::Text("Day %d  |  %05.2f h", clock.DayCounter(), t01 * 24.0f);
+  ImGui::SliderFloat("Real sec / day", &clock.real_seconds_per_day, 1.0f, 600.0f);
+  return seek;
+}
+
+bool DrawDaylightEditor(DaylightConfig& cfg) {
+  bool changed = false;
+  changed |= ImGui::SliderFloat("Turbidity", &cfg.turbidity, 1.0f, 10.0f);
+  changed |= ImGui::SliderFloat("Ground albedo", &cfg.ground_albedo, 0.0f, 1.0f);
+  changed |= ImGui::SliderFloat("Sky exposure", &cfg.sky_exposure, 0.001f, 0.3f, "%.3f");
+  changed |= ImGui::SliderFloat("Sun intensity", &cfg.sun_intensity_max, 0.0f, 10.0f);
+  changed |= ImGui::ColorEdit3("Moon color", &cfg.moon_color.x);
+  changed |= ImGui::SliderFloat("Moon intensity", &cfg.moon_intensity, 0.0f, 0.2f, "%.3f");
+  changed |= ImGui::SliderFloat("Ease minutes", &cfg.ease_ingame_minutes, 1.0f, 120.0f);
+  changed |= ImGui::Checkbox("Moon disc", &cfg.moon_disc);
+  return changed;
 }
 
 void DrawStats(float dt_seconds) {
