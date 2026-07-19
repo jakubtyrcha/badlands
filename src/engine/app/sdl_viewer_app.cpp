@@ -40,7 +40,11 @@ void SdlViewerApp::InitImGui(int width, int height) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
-  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  // NOT NavEnableKeyboard: it makes ImGui auto-activate keyboard nav on a panel
+  // (navActive => WantCaptureKeyboard true) from startup, which gates the view's
+  // WSAD pan off until nav happens to deactivate. The apps don't use ImGui
+  // keyboard nav, so leaving it off keeps WantCaptureKeyboard false except when a
+  // text field is actually focused.
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
   ImGui::StyleColorsDark();
 
@@ -250,6 +254,13 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   if (!record_dir.empty()) {
     recorder_.Start(record_dir);
   }
+
+  // Make the window the key/active window on launch. A bare (non-bundled) macOS
+  // executable launched from a shell frequently opens WITHOUT input focus, so it
+  // shows but keyboard/clicks go to whatever was focused before -- until you
+  // click it. Raise it to request focus so WSAD/clicks work from the first frame
+  // (watch BADLANDS_INPUT_DEBUG's inputFocus field).
+  SDL_RaiseWindow(window_);
 
   const uint64_t perf_freq = SDL_GetPerformanceFrequency();
   uint64_t last_time = SDL_GetPerformanceCounter();
