@@ -63,6 +63,109 @@ void SdlViewerApp::InitImGui(int width, int height) {
 namespace {
 // Default recording directory for the F2 live-toggle (no path argument).
 constexpr const char* kDefaultRecordDir = "recordings";
+
+// --- Input/focus instrumentation ---------------------------------------------
+// Opt-in (BADLANDS_INPUT_DEBUG=1) diagnosis for the "window loses input" bug:
+// macOS routes mouse MOTION to the window under the cursor even when it is not
+// the key window, but withholds keyboard + swallows the activating click -- so
+// symptoms are "hover works, WSAD/clicks dead". This logs every window/input
+// EVENT as it happens (they are sparse), and a full state SNAPSHOT at a fixed
+// interval (never per frame). The load-bearing field is SDL_WINDOW_INPUT_FOCUS:
+// when broken it should read 0 while SDL_WINDOW_MOUSE_FOCUS reads 1.
+const bool kInputDebug = [] {
+  const char* v = std::getenv("BADLANDS_INPUT_DEBUG");
+  return v != nullptr && v[0] != '\0' && v[0] != '0';
+}();
+
+const char* WindowEventName(uint32_t t) {
+  switch (t) {
+    case SDL_EVENT_WINDOW_SHOWN: return "SHOWN";
+    case SDL_EVENT_WINDOW_HIDDEN: return "HIDDEN";
+    case SDL_EVENT_WINDOW_EXPOSED: return "EXPOSED";
+    case SDL_EVENT_WINDOW_MOVED: return "MOVED";
+    case SDL_EVENT_WINDOW_RESIZED: return "RESIZED";
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: return "PIXEL_SIZE_CHANGED";
+    case SDL_EVENT_WINDOW_MINIMIZED: return "MINIMIZED";
+    case SDL_EVENT_WINDOW_MAXIMIZED: return "MAXIMIZED";
+    case SDL_EVENT_WINDOW_RESTORED: return "RESTORED";
+    case SDL_EVENT_WINDOW_MOUSE_ENTER: return "MOUSE_ENTER";
+    case SDL_EVENT_WINDOW_MOUSE_LEAVE: return "MOUSE_LEAVE";
+    case SDL_EVENT_WINDOW_FOCUS_GAINED: return "FOCUS_GAINED";
+    case SDL_EVENT_WINDOW_FOCUS_LOST: return "FOCUS_LOST";
+    case SDL_EVENT_WINDOW_OCCLUDED: return "OCCLUDED";
+    case SDL_EVENT_WINDOW_ENTER_FULLSCREEN: return "ENTER_FULLSCREEN";
+    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: return "LEAVE_FULLSCREEN";
+    case SDL_EVENT_WINDOW_DISPLAY_CHANGED: return "DISPLAY_CHANGED";
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED: return "CLOSE_REQUESTED";
+    default: return "WINDOW_?";
+  }
+}
+
+// Per-interval event tallies (motion/wheel are too frequent to log each).
+struct InputCounts {
+  int motions = 0, wheels = 0, buttons = 0, keys = 0;
+};
+
+// Log one event if it is worth a line (window state changes + discrete button /
+// key presses). Motion + wheel are only counted (into `c`), never logged.
+void LogInputEvent(const SDL_Event& e, InputCounts& c) {
+  if (!kInputDebug) return;
+  if (e.type >= SDL_EVENT_WINDOW_FIRST && e.type <= SDL_EVENT_WINDOW_LAST) {
+    spdlog::info("[input] event WINDOW_{}", WindowEventName(e.type));
+    return;
+  }
+  switch (e.type) {
+    case SDL_EVENT_MOUSE_MOTION: ++c.motions; break;
+    case SDL_EVENT_MOUSE_WHEEL: ++c.wheels; break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      ++c.buttons;
+      spdlog::info("[input] event MOUSE_BUTTON_{} button={} at ({:.0f},{:.0f})",
+                   e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? "DOWN" : "UP",
+                   e.button.button, e.button.x, e.button.y);
+      break;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+      ++c.keys;
+      spdlog::info("[input] event KEY_{} key='{}' scancode={} repeat={}",
+                   e.type == SDL_EVENT_KEY_DOWN ? "DOWN" : "UP",
+                   SDL_GetKeyName(e.key.key), static_cast<int>(e.key.scancode),
+                   e.key.repeat);
+      break;
+    case SDL_EVENT_TEXT_INPUT:
+      spdlog::info("[input] event TEXT_INPUT '{}'", e.text.text);
+      break;
+    default: break;
+  }
+}
+
+// Full input/focus state, thrown out at a fixed interval (not per frame).
+void LogInputSnapshot(SDL_Window* w, InputCounts& c) {
+  if (!kInputDebug || ImGui::GetCurrentContext() == nullptr) return;
+  const SDL_WindowFlags f = SDL_GetWindowFlags(w);
+  const ImGuiIO& io = ImGui::GetIO();
+  float gx = 0, gy = 0, wx = 0, wy = 0;
+  SDL_GetGlobalMouseState(&gx, &gy);
+  SDL_GetMouseState(&wx, &wy);
+  const bool* ks = SDL_GetKeyboardState(nullptr);
+  spdlog::info(
+      "[input] SNAPSHOT win[inputFocus={} mouseFocus={} minimized={} hidden={} "
+      "occluded={} kbdGrab={} mouseGrab={}] imgui[wantMouse={} wantKbd={} "
+      "wantText={} navActive={} mouseDown={}{}{} mousePos=({:.0f},{:.0f})] "
+      "sdl[global=({:.0f},{:.0f}) win=({:.0f},{:.0f}) WSAD={}{}{}{}] "
+      "since[motion={} wheel={} button={} key={}]",
+      (f & SDL_WINDOW_INPUT_FOCUS) != 0, (f & SDL_WINDOW_MOUSE_FOCUS) != 0,
+      (f & SDL_WINDOW_MINIMIZED) != 0, (f & SDL_WINDOW_HIDDEN) != 0,
+      (f & SDL_WINDOW_OCCLUDED) != 0, (f & SDL_WINDOW_KEYBOARD_GRABBED) != 0,
+      (f & SDL_WINDOW_MOUSE_GRABBED) != 0, io.WantCaptureMouse,
+      io.WantCaptureKeyboard, io.WantTextInput, io.NavActive,
+      static_cast<int>(io.MouseDown[0]), static_cast<int>(io.MouseDown[1]),
+      static_cast<int>(io.MouseDown[2]), io.MousePos.x, io.MousePos.y, gx, gy, wx,
+      wy, static_cast<int>(ks[SDL_SCANCODE_W]), static_cast<int>(ks[SDL_SCANCODE_A]),
+      static_cast<int>(ks[SDL_SCANCODE_S]), static_cast<int>(ks[SDL_SCANCODE_D]),
+      c.motions, c.wheels, c.buttons, c.keys);
+  c = InputCounts{};  // reset tallies for the next interval
+}
 }  // namespace
 
 int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
@@ -156,10 +259,22 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
 
   bool render_ok_logged = false;
   bool running = true;
+  InputCounts input_counts;
+  double snapshot_accum = 0.0;
+  if (kInputDebug) {
+    const SDL_WindowFlags f0 = SDL_GetWindowFlags(window_);
+    spdlog::info("[input] START win[inputFocus={} mouseFocus={} minimized={}] "
+                 "(reproduce the stuck state, then watch inputFocus vs the "
+                 "FOCUS_GAINED/RESTORED events)",
+                 (f0 & SDL_WINDOW_INPUT_FOCUS) != 0,
+                 (f0 & SDL_WINDOW_MOUSE_FOCUS) != 0,
+                 (f0 & SDL_WINDOW_MINIMIZED) != 0);
+  }
   while (running) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
       ImGui_ImplSDL3_ProcessEvent(&e);
+      LogInputEvent(e, input_counts);
 
       if (e.type == SDL_EVENT_QUIT) {
         running = false;
@@ -216,6 +331,15 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     ImGui::NewFrame();
     ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
                                  ImGuiDockNodeFlags_PassthruCentralNode);
+
+    // Throttled input/focus snapshot (after NewFrame so io.WantCapture* are for
+    // this frame). Never per frame -- once a second, and only when opted in.
+    snapshot_accum += frame_dt;
+    if (snapshot_accum >= 1.0) {
+      snapshot_accum = 0.0;
+      LogInputSnapshot(window_, input_counts);
+    }
+
     view_->DrawUI();
 
     renderer_.Render(view_->GetCamera(), view_->GetRegistry(),
