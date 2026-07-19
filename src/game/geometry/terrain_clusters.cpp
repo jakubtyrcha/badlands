@@ -175,8 +175,10 @@ ClusterGeom BuildLeafGeom(const Field2D<float>& height,
     for (int li = 0; li < vx - 1; ++li) {
       const uint32_t n00 = vid(li, lj), n10 = vid(li + 1, lj);
       const uint32_t n01 = vid(li, lj + 1), n11 = vid(li + 1, lj + 1);
-      g.tris.insert(g.tris.end(), {n00, n10, n11});
-      g.tris.insert(g.tris.end(), {n00, n11, n01});
+      // CCW winding as seen from above (+Y up): geometric normal points +Y, so
+      // the tris are front faces under the renderer's CCW/back-cull convention.
+      g.tris.insert(g.tris.end(), {n00, n11, n10});
+      g.tris.insert(g.tris.end(), {n00, n01, n11});
     }
   }
   return g;
