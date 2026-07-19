@@ -52,6 +52,11 @@ struct SceneContext {
   // Clear/background color
   glm::vec4 clear_color{0.1f, 0.1f, 0.1f, 1.0f};
 
+  // Presentation-clock time in seconds, fed by the app each frame. Drives
+  // time-animated forward materials (e.g. water waves) via the forward pass.
+  // Independent of the sim clock; deterministic under headless SeekToTimeOfDay.
+  float time_seconds{0.0f};
+
   // Optional world-space debug lines, drawn (screen-aligned + antialiased,
   // depth-tested against the G-buffer) after deferred lighting and before
   // tonemap. Null = none. Not owned; must outlive the frame.

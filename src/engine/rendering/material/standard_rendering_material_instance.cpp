@@ -240,6 +240,14 @@ wgpu::RenderPipeline StandardRenderingMaterialInstance::GetPipeline() const {
                                 RenderConfig{.wireframe = wireframe_});
 }
 
+bool StandardRenderingMaterialInstance::DeclaresBindGroup(uint32_t group) const {
+  if (!material_) {
+    return false;
+  }
+  return !material_->GetExpectedBindings(geometry_type_, pass_type_, group)
+              .empty();
+}
+
 bool StandardRenderingMaterialInstance::IsValid() const {
   return material_ != nullptr && material_->IsValid() && instance_ != nullptr;
 }
