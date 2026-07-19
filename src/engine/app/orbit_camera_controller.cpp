@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "engine/app/camera_zoom.hpp"
 #include "engine/core/camera.hpp"
 
 namespace badlands {
@@ -23,8 +24,8 @@ void OrbitCameraController::HandleMouseDrag(float dx_px, float dy_px) {
 }
 
 void OrbitCameraController::HandleMouseWheel(float wheel_y) {
-  distance *= (1.0f - wheel_y * zoom_speed);
-  distance = std::clamp(distance, min_distance, max_distance);
+  distance =
+      ZoomScalar(distance, wheel_y, zoom_speed, min_distance, max_distance);
 }
 
 void OrbitCameraController::FrameBounds(const glm::vec3& center, float radius) {

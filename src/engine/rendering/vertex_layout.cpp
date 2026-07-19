@@ -54,6 +54,35 @@ VertexLayoutInfo GetVertexLayoutInfo(VertexLayout layout) {
       break;
     }
 
+    case VertexLayout::kTerrainBlend: {
+      // pos(vec3) + normal(vec3) + layer_indices(Uint8x4) + blend_weights
+      // (Unorm8x4) = 32 bytes. The two u8x4 attributes are packed (one u32
+      // each) into the last 2 float slots of the flat vertex buffer. The vertex
+      // shader scatters the (layer, weight) pairs into per-layer weights, so the
+      // mesh is indexable. layer_indices arrive as vec4<u32> (0..255),
+      // blend_weights as vec4<f32> (0..1).
+      info.attributes.resize(4);
+
+      info.attributes[0].format = wgpu::VertexFormat::Float32x3;
+      info.attributes[0].offset = 0;
+      info.attributes[0].shaderLocation = 0;
+
+      info.attributes[1].format = wgpu::VertexFormat::Float32x3;
+      info.attributes[1].offset = sizeof(float) * 3;
+      info.attributes[1].shaderLocation = 1;
+
+      info.attributes[2].format = wgpu::VertexFormat::Uint8x4;
+      info.attributes[2].offset = sizeof(float) * 6;
+      info.attributes[2].shaderLocation = 2;
+
+      info.attributes[3].format = wgpu::VertexFormat::Unorm8x4;
+      info.attributes[3].offset = sizeof(float) * 7;
+      info.attributes[3].shaderLocation = 3;
+
+      info.stride = sizeof(float) * 8;
+      break;
+    }
+
     case VertexLayout::kTexturedMesh: {
       // pos(vec3) + uv(vec2) + normal(vec3) + tangent(vec3) = 11 floats = 44
       // bytes

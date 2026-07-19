@@ -8,7 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **The rendering/engine interface is general and stable.** Keep it game-agnostic (no game types in `src/engine/` or `src/core/`). ALWAYS get user approval before changing the rendering/engine interface.
 - **UI is two separate surfaces:** game UI (in-world pane) vs debug UI (Dear ImGui). Do not conflate them.
 - Co-design one decision at a time. For features, use superpowers brainstorming → spec → plan → subagent-driven-development.
+- **Simplest thing for data presentation.** To show data/results, reach for the simplest option: write files and point to the paths, print a table. Build elaborate tools/visualizations/galleries only when explicitly asked.
 - **Work on `main` (or a normal branch) — avoid git worktrees here.** Dawn/CMake builds are heavy; worktrees multiply artifacts (`build/`, `target/`, Dawn cache).
+
+### Think before coding
+Don't assume. Don't hide confusion. Surface tradeoffs. Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them — don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
 
 ## Repository state
 badlands runs on **C++/Dawn/SDL3**, with the engine ported from the sibling project `sampo` (`/Users/jakub/repos/sampo`) and Rust feature-libs linked via Corrosion. The migration off the old Rust/winit/wgpu app is **largely complete** and all work lives on `main`; built with CMake.
@@ -19,11 +27,18 @@ badlands runs on **C++/Dawn/SDL3**, with the engine ported from the sibling proj
 Run from the repo root (`shaders/` + `assets/` resolve relative to cwd).
 ```sh
 cmake -S . -B build -G Ninja                          # configure (first Dawn-from-source build is long, then cached)
-cmake --build build                                   # builds the three apps + Rust staticlibs
+cmake --build build                                   # builds the apps + Rust staticlibs
 ./build/badlands_game                                 # run (opens an SDL3 window); also: badlands_viewer, badlands_ai_sandbox
 ./build/badlands_game --screenshot out.png            # headless: render one frame to PNG (offscreen readback)
 ./build/badlands_game --record frames/                # headless: render a frame sequence into a dir
 perl -e 'alarm 30; exec @ARGV' ./build/badlands_game  # SIGALRM-bounded headless smoke run
+```
+`badlands_mapview` is the map tool: it generates a map and renders it (mouse-over
+draws the block/section grid). `--preview-image-only` instead dumps the debug
+rasters + section graph to `--out` and exits (pure CPU, no window).
+```sh
+./build/badlands_mapview --seed 2 --resolution 500x500              # view it
+./build/badlands_mapview --preview-image-only --out mapgen_out      # dump PNGs/JSON
 ```
 Rust feature-lib tests — **use `--lib`** (bare `cargo test` here prints only the empty doctest target):
 ```sh

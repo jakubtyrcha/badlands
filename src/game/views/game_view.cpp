@@ -12,6 +12,8 @@
 
 #include "core/profiler.hpp"
 #include "engine/app/fixed_timestep.hpp"
+#include "engine/app/game_camera_controller.hpp"  // ZoomAtCursor
+#include "engine/app/sdl_input_util.hpp"
 #include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
@@ -273,11 +275,17 @@ void GameView::BuildScene() {
   }
 }
 
-void GameView::HandleEvent(const SDL_Event& /*event*/, int /*width*/,
+void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
                            int /*height*/) {
-  // Fixed-angle camera: no mouse orbit/zoom to wire up. Key panning is
-  // read directly from Update()'s keyboard_state snapshot instead of
-  // per-event, so there is nothing for this view to do here.
+  // Fixed-angle camera: only zoom is mouse-driven (wheel + trackpad, which SDL
+  // reports as the same event with fractional deltas). Key panning is read
+  // directly from Update()'s keyboard_state snapshot instead of per-event.
+  if (event.type != SDL_EVENT_MOUSE_WHEEL) return;
+  if (ImGui::GetIO().WantCaptureMouse) return;
+  glm::vec2 screen;
+  if (!EventWindowLogicalSize(event.wheel.windowID, screen)) return;
+  ZoomAtCursor(gamecam_, camera_, NormalizedWheelY(event.wheel),
+               glm::vec2(event.wheel.mouse_x, event.wheel.mouse_y), screen);
 }
 
 void GameView::Update(float dt, const bool* keyboard_state) {

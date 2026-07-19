@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <dawn/webgpu_cpp.h>
 #include <glm/glm.hpp>
@@ -76,8 +77,49 @@ class MaterialLibrary {
   // views used to build inline.
   DeferredMaterial SolidColor(glm::vec3 rgb, float roughness);
 
+  // A terrain layer set: one texture_2d_array per PBR channel, layer i built
+  // from the i'th pack passed to LoadTerrainArrays. Holds the textures (not
+  // just views) so the caller keeps them alive by keeping this.
+  struct TerrainArrays {
+    LoadedTexture albedo;
+    LoadedTexture normal;  // GL-convention (LoadPack flips DX packs at load)
+    LoadedTexture arm;     // R=AO, G=roughness, B=metallic
+  };
+
+  // Loads N PBR packs and packs them into three texture_2d_arrays (albedo /
+  // normal / arm), layer i = pack_dirs[i]. Engine-generic: "N packs -> 3
+  // arrays", with no notion of what the layers mean (the game maps its own
+  // concepts -- e.g. biomes -- onto layer indices).
+  //
+  // Reuses LoadPack (manifest-driven, full mip chains, DX->GL green flip) per
+  // pack, then PackTexturesIntoArray per channel. Every pack must therefore
+  // share one texture size (a texture array has one size for all layers) --
+  // a mismatch fails the load.
+  //
+  // Unlike Get(), the per-pack 2D textures are NOT cached: they exist only to
+  // be copied into the arrays, and keeping them would double terrain VRAM. A
+  // pack used both here and via Get() is therefore decoded twice.
+  //
+  // On any failure returns a TerrainArrays with null members and marks ok()
+  // false (same contract as Get()); callers MUST check ok().
+  TerrainArrays LoadTerrainArrays(const std::vector<std::string>& pack_dirs);
+
+  // Returns a deferred terrain-blend material bound to the three
+  // texture_2d_arrays of `arrays` (albedo/normal/arm layers), sampled through
+  // the library's shared trilinear + 16x-aniso sampler (a bare sampler would
+  // defeat the arrays' mip chains). Meshes drawn with it must use
+  // GeometryType::kTerrainBlend (per-vertex blend_weights + layer_indices).
+  // The caller owns/keeps `arrays` alive; all instances share one
+  // terrain_blend kDeferred factory. Valid after Initialize().
+  DeferredMaterial TerrainBlend(const TerrainArrays& arrays);
+
   // The shared normalmapped kDeferred factory (valid after Initialize()).
   MaterialInstanceFactory* factory() const { return factory_.get(); }
+
+  // The shared terrain_blend kDeferred factory (valid after Initialize()).
+  MaterialInstanceFactory* terrain_factory() const {
+    return terrain_factory_.get();
+  }
 
   // False if any pack has hard-failed to load since construction (missing
   // manifest, unparseable JSON, or a missing/undecodable texture) -- see
@@ -107,6 +149,7 @@ class MaterialLibrary {
   GpuPipelineGenerator* pipeline_gen_ = nullptr;
 
   std::unique_ptr<MaterialInstanceFactory> factory_;
+  std::unique_ptr<MaterialInstanceFactory> terrain_factory_;
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: dir

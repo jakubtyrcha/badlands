@@ -32,9 +32,24 @@ RenderPipelineDeclaration MeshRenderingMaterial::BuildDeclaration(
   decl.shader_path = shader_path_;
   decl.vs_entry = vs_entry_;
   decl.fs_entry = fs_entry_;
-  decl.vertex_layout = geometry_type == GeometryType::kSphericalMesh
-                           ? VertexLayout::kCubeMapMesh
-                           : VertexLayout::kTexturedMesh;
+  switch (geometry_type) {
+    case GeometryType::kSphericalMesh:
+      decl.vertex_layout = VertexLayout::kCubeMapMesh;
+      break;
+    case GeometryType::kTerrainBlend:
+      decl.vertex_layout = VertexLayout::kTerrainBlend;
+      break;
+    case GeometryType::kTexturedMesh:
+      decl.vertex_layout = VertexLayout::kTexturedMesh;
+      break;
+    default:
+      // Safe fallback for any future GeometryType not yet wired here. This
+      // build enables neither -Werror nor -Wswitch, so without it an unhandled
+      // enum would silently leave vertex_layout at its kFullscreen default (no
+      // vertex buffers -> a broken draw). Matches the pre-switch ternary's else.
+      decl.vertex_layout = VertexLayout::kTexturedMesh;
+      break;
+  }
   decl.cull_mode = cull_mode_;
   decl.blend_enabled = blend_enabled_;
   decl.premultiplied_alpha = premultiplied_alpha_;

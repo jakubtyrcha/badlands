@@ -77,6 +77,36 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
                .sampler_binding = 2,
                .default_texture = "white"},
           }});
+
+  // terrain_blend.wesl - three texture_2d_arrays (albedo / normal / ARM) whose
+  // layers are blended per-vertex. All three share one sampler binding (2), the
+  // same way normalmapped's three 2D slots do.
+  //
+  // Normally the array views are supplied as instance overrides (see
+  // MaterialLibrary::TerrainBlend); if one is missing, kTerrainBlend geometry
+  // resolves the slot to the factory's e2DArray default for that slot's
+  // default_texture name (GetDefaultTextureForSlot / TextureType::kArray) — a
+  // valid array view, so a missing texture renders neutrally rather than
+  // failing validation. The per-slot default NAME matters: a normal array must
+  // fall back to flat_normal (128,128,255), NOT gray — gray decodes to a
+  // degenerate (0,0,0) normal after *2-1.
+  MaterialRequirements terrain_blend_reqs{
+      .shader_name = "terrain_blend",
+      .textures = {
+          {.slot_name = "albedo_array",
+           .texture_binding = 1,
+           .sampler_binding = 2,
+           .default_texture = "white"},
+          {.slot_name = "normal_array",
+           .texture_binding = 3,
+           .sampler_binding = 2,
+           .default_texture = "flat_normal"},
+          {.slot_name = "arm_array",
+           .texture_binding = 4,
+           .sampler_binding = 2,
+           .default_texture = "default_arm"},
+      }};
+  RegisterMaterial("terrain_blend", terrain_blend_reqs, terrain_blend_reqs);
 }
 
 std::string MaterialRequirementsRegistry::ResolveName(

@@ -59,9 +59,15 @@ std::vector<glm::vec3> ExtractVertexPositions(const StaticMeshComponent& mesh);
 
 // Static textured mesh component with UV coordinates (CPU-side)
 struct StaticTexturedMeshComponent {
-  std::vector<float>
-      vertices;  // pos(3) + uv(2) + normal(3) + tangent(3) per vertex
+  // Raw interleaved vertex floats; the layout follows `geometry_type`:
+  //   kTexturedMesh: pos(3) + uv(2) + normal(3) + tangent(3)  (11 floats)
+  //   kTerrainBlend: pos(3) + normal(3) + layer_indices(Uint8x4 packed as 1
+  //                  float) + blend_weights(Unorm8x4 packed as 1 float) (8)
+  std::vector<float> vertices;
   uint32_t vertex_count = 0;
+  // Optional index buffer (u32). Empty -> non-indexed Draw; non-empty ->
+  // DrawIndexed. Used by indexed terrain chunks (kTerrainBlend).
+  std::vector<uint32_t> indices;
   bool dirty = true;
 
   wgpu::TextureView texture_view;
@@ -82,6 +88,8 @@ struct StaticTexturedMeshComponent {
 struct StaticTexturedMeshGpuComponent {
   wgpu::Buffer vertex_buffer;
   uint32_t vertex_count = 0;
+  wgpu::Buffer index_buffer;  // valid iff index_count > 0
+  uint32_t index_count = 0;
 };
 
 class MaterialInstance;
