@@ -23,6 +23,7 @@
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/material_library.hpp"
+#include "game/geometry/terrain_clusters.hpp"
 #include "mapgen/config.hpp"
 #include "mapgen/pipeline.hpp"
 
@@ -73,6 +74,11 @@ class MapViewView : public AppView {
   // per-section heights — both outlive Initialize, unlike the chunk tessellation
   // inputs.
   mapgen::MapArtifacts map_;
+
+  // Nanite-style terrain cluster-LOD DAG, built from the heightmap at load. M1
+  // only builds + logs it (the stats are the observable); rendering + LOD
+  // selection land in later milestones.
+  TerrainClusterDag terrain_dag_;
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;

@@ -40,6 +40,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(taskflow)
 
+# meshoptimizer: QEM mesh simplification with attribute + locked-vertex metrics,
+# the build-side of the terrain cluster-LOD DAG (src/game/geometry/
+# terrain_clusters.cpp). Vendored as a pinned submodule (v0.24, third_party/
+# meshoptimizer); exports the static-lib target `meshoptimizer`. Demo/gltfpack
+# off — we only need the library.
+set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/meshoptimizer)
+
 # wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
 # The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
 # the `wesl` 0.2 crate, and Corrosion invokes `cargo rustc --package <name>`,
@@ -323,8 +332,9 @@ add_executable(badlands_mapview
     src/mapview/main_mapview.cpp
     src/mapview/map_view_view.cpp
     src/mapview/biome_manifest.cpp
-    src/game/geometry/terrain_mesh.cpp)
-target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib)
+    src/game/geometry/terrain_mesh.cpp
+    src/game/geometry/terrain_clusters.cpp)
+target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib meshoptimizer)
 target_compile_options(badlands_mapview PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
     target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
@@ -347,6 +357,28 @@ target_include_directories(badlands_mapgen_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_mapgen_tests COMMAND badlands_mapgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_terrain_cluster_tests: Catch2 invariants for the terrain cluster-LOD
+# DAG build (error monotonicity, sphere nesting, crack-free seams, grid
+# arithmetic). Pure CPU on synthetic Field2D heightfields — compiles just the
+# build TU + its deps (terrain_mesh for SampleHeight/NormalAt/PackU8x4, the
+# header-only Aabb) and links meshoptimizer; no noiser/Dawn/GPU. Pattern of
+# badlands_mapgen_tests.
+add_executable(badlands_terrain_cluster_tests
+    src/game/geometry/terrain_clusters_tests.cpp
+    src/game/geometry/terrain_clusters.cpp
+    src/game/geometry/terrain_mesh.cpp
+    src/engine/rendering/geometry/aabb.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_terrain_cluster_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_terrain_cluster_tests PRIVATE meshoptimizer)
+add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_patch_eval_tests: the patch evaluator's world mapping (world =
 # origin + (i+0.5)*extent/res), pinned with analytic ramp scripts. Needs the

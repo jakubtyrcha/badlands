@@ -60,6 +60,12 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
+  // Build the terrain cluster-LOD DAG right after mapgen (M1: build + stats
+  // only; rendering/selection are later milestones). Stored for later use; the
+  // spdlog per-level summary is the observable for now.
+  terrain_dag_ =
+      BuildTerrainClusterDag(map_.heightmap, map_.biomes.pixel);
+
   // One indexed kTerrainBlend chunk entity per N x N block region.
   const int blocks_x = cfg_.width / mapgen::kSamplesPerBlock;
   const int blocks_z = cfg_.height / mapgen::kSamplesPerBlock;
