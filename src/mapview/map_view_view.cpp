@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "engine/core/ray.hpp"
 #include "engine/rendering/components/material_factory_component.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
+#include "engine/rendering/frustum.hpp"
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/geometry/aabb.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
@@ -61,9 +63,14 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
-  // Build the terrain cluster-LOD DAG right after mapgen. M2 renders all its
-  // leaf clusters; LOD selection over the ranges lands in a later milestone.
-  terrain_dag_ = BuildTerrainClusterDag(map_.heightmap, map_.biomes.pixel);
+  // Build the terrain cluster-LOD DAG right after mapgen. The per-group build is
+  // parallelized by default; --serial-build forces the single-threaded path for
+  // the perf A/B (both produce a bit-identical DAG — pinned by the determinism
+  // test). LogStats reports the build time + thread mode.
+  TerrainClusterParams cluster_params;
+  cluster_params.parallel_build = !serial_build_;
+  terrain_dag_ =
+      BuildTerrainClusterDag(map_.heightmap, map_.biomes.pixel, cluster_params);
 
   // Deferred cluster-terrain material factory (game-owned; mirrors the engine's
   // terrain_blend descriptor but for kTerrainCluster geometry + the flat-color
@@ -161,29 +168,29 @@ void MapViewView::BuildClusterTerrain() {
   fmc.config_hash = ComputeFactoryConfigHash(fmc);
   registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
 
-  // All leaf clusters (level 0) as draw ranges, plus a whole-map AABB for the
-  // entity-level cull (per-range culling happens inside the pass). Leaves are
-  // full-resolution, so their union covers the entire terrain.
-  MeshDrawRangesComponent ranges;
+  // Whole-map AABB for the entity-level cull (per-range culling happens inside
+  // the pass). Leaves are full-resolution, so their union is the whole terrain;
+  // this only reads their bounds — the actual draw ranges are the LOD cut that
+  // UpdateClusterLod fills below, so the component starts empty (no throwaway
+  // all-leaf fill).
   glm::vec3 lo(FLT_MAX), hi(-FLT_MAX);
+  int leaf_count = 0;
   for (const TerrainCluster& c : terrain_dag_.clusters) {
     if (c.level != 0) continue;
-    ranges.ranges.push_back(MeshDrawRange{c.first_index, c.index_count, c.bounds});
     lo = glm::min(lo, c.bounds.min);
     hi = glm::max(hi, c.bounds.max);
+    ++leaf_count;
   }
-  const size_t leaf_range_count = ranges.ranges.size();
-  registry_.emplace<MeshDrawRangesComponent>(e, std::move(ranges));
+  registry_.emplace<MeshDrawRangesComponent>(e);
   registry_.emplace<StaticMeshAabbComponent>(
       e, StaticMeshAabbComponent{Aabb::FromMinMax(lo, hi)});
-  spdlog::info("MapViewView: cluster terrain, {} leaf draw ranges",
-               leaf_range_count);
+  spdlog::info("MapViewView: cluster terrain, {} leaf clusters", leaf_count);
 
   cluster_entity_ = e;
 
   // Seed the LOD cut once so the first rendered frame (headless --screenshot
-  // renders after a single Update) already draws the selected cut, not the raw
-  // leaf set above. UpdateClusterLod logs the resulting stats.
+  // renders after a single Update) already draws the selected cut.
+  // UpdateClusterLod fills the draw ranges and logs the resulting stats.
   UpdateClusterLod();
 }
 
@@ -192,8 +199,13 @@ void MapViewView::UpdateClusterLod() {
   auto* ranges = registry_.try_get<MeshDrawRangesComponent>(cluster_entity_);
   if (ranges == nullptr) return;
 
+  // Time the pure CPU selection — the runtime perf number the spec asks for.
+  const auto t0 = std::chrono::steady_clock::now();
   SelectClusters(terrain_dag_, camera_.position, camera_.fov, screen_h_px_,
                  tau_px_, selected_clusters_);
+  sel_time_us_ = std::chrono::duration<double, std::micro>(
+                     std::chrono::steady_clock::now() - t0)
+                     .count();
 
   // Rewrite the draw ranges in place from the selected cut (bounds carried from
   // the DAG). The shared vertex/index buffers are untouched — the pass re-reads
@@ -211,15 +223,28 @@ void MapViewView::UpdateClusterLod() {
   }
   sel_cluster_count_ = static_cast<int>(selected_clusters_.size());
 
+  // Count the ranges that actually survive the CAMERA-pass frustum cull — the
+  // real per-pass ranged-draw count (selected ∩ camera frustum), which the cut
+  // size alone overstates. Replicates the pass's own test (render_textured_mesh:
+  // world VP frustum, identity model transform so bounds are already world-space
+  // — see scene_renderer.cpp's gbuffer pass). The shadow pass uses the light
+  // frustum and is not counted here.
+  const Frustum cam_frustum =
+      Frustum::FromViewProj(camera_.GetProj() * camera_.GetView());
+  sel_camera_drawn_ = 0;
+  for (const MeshDrawRange& r : ranges->ranges) {
+    if (cam_frustum.Intersects(r.bounds)) ++sel_camera_drawn_;
+  }
+
   // Log only when the cut size changes (not every frame) — one line per distinct
   // LOD state: exactly what the headless screenshot / smoke runs want, without
   // spamming an interactive fly-through.
   if (sel_cluster_count_ != last_logged_sel_count_) {
     spdlog::info(
         "cluster LOD cut: tau={:.2f}px screen_h={:.0f} cam_h={:.0f} -> {} "
-        "clusters, {} tris",
+        "clusters ({} in camera frustum), {} tris, select {:.1f} us",
         tau_px_, screen_h_px_, gamecam_.height, sel_cluster_count_,
-        sel_tri_count_);
+        sel_camera_drawn_, sel_tri_count_, sel_time_us_);
     last_logged_sel_count_ = sel_cluster_count_;
   }
 }
@@ -483,10 +508,12 @@ void MapViewView::DrawUI() {
           "LOD level: tint by the cluster's LOD level (hue wheel).");
     }
 
-    // Compact stats block for the current LOD cut: totals then a one-line
+    // Compact stats block for the current LOD cut: totals (with the camera-pass
+    // frustum-visible range count and the CPU selection time) then a one-line
     // per-level histogram of how many clusters each level contributes.
-    ImGui::Text("cut: %d clusters   %llu tris", sel_cluster_count_,
-                static_cast<unsigned long long>(sel_tri_count_));
+    ImGui::Text("cut: %d clusters (%d in frustum)   %llu tris   select %.1f us",
+                sel_cluster_count_, sel_camera_drawn_,
+                static_cast<unsigned long long>(sel_tri_count_), sel_time_us_);
     std::string hist;
     for (size_t L = 0; L < sel_level_hist_.size(); ++L) {
       if (sel_level_hist_[L] == 0) continue;

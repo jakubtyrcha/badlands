@@ -42,16 +42,19 @@ class MapViewView : public AppView {
   // `camera_height` overrides the starting camera height (0 = keep the default
   // ground-level framing); `lod_tau` seeds the screen-space-error budget in
   // pixels; `lod_tint` seeds the debug tint mode (0 shaded / 1 triangle hash /
-  // 2 LOD level). All exist mainly so headless --screenshot runs can frame
-  // near/far and set LOD/tint without touching the interactive defaults.
+  // 2 LOD level). `serial_build` forces the single-threaded DAG build (the perf
+  // A/B baseline; default is the parallel build). All exist mainly so headless
+  // --screenshot runs can frame near/far and set LOD/tint without touching the
+  // interactive defaults.
   explicit MapViewView(mapgen::MapgenConfig cfg, bool use_cluster_terrain = true,
                        float camera_height = 0.0f, float lod_tau = 1.5f,
-                       int lod_tint = 0)
+                       int lod_tint = 0, bool serial_build = false)
       : cfg_(std::move(cfg)),
         use_cluster_terrain_(use_cluster_terrain),
         tau_px_(lod_tau),
         camera_height_override_(camera_height),
-        debug_tint_mode_(lod_tint) {}
+        debug_tint_mode_(lod_tint),
+        serial_build_(serial_build) {}
 
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
@@ -147,6 +150,16 @@ class MapViewView : public AppView {
   uint64_t sel_tri_count_ = 0;
   std::vector<int> sel_level_hist_;
   int last_logged_sel_count_ = -1;  // throttles the per-cut log line
+  // SelectClusters wall time for the last cut (the CPU-selection perf number),
+  // and how many selected ranges actually survive the camera-pass frustum cull
+  // (selected ∩ camera frustum) — the real ranged-draw count for that pass,
+  // computed CPU-side by replicating the pass test (the shadow pass, which culls
+  // against the light frustum, is not instrumented here).
+  double sel_time_us_ = 0.0;
+  int sel_camera_drawn_ = 0;
+  // Force the single-threaded DAG build (perf A/B baseline); seeded once in
+  // Initialize, not runtime-toggleable (the DAG is built there).
+  bool serial_build_ = false;
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;

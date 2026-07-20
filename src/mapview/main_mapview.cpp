@@ -23,6 +23,9 @@
 //                     (default 1.5; higher = coarser / fewer draws).
 //   --lod-tint N      debug tint mode for cluster terrain: 0 shaded (default),
 //                     1 per-triangle position hash, 2 LOD level.
+//   --serial-build    build the cluster DAG single-threaded (default: parallel).
+//                     The output DAG is bit-identical either way; this is the
+//                     perf A/B baseline (build time shows in the stats log).
 
 #include <cstdio>
 #include <cstdlib>
@@ -106,6 +109,7 @@ int main(int argc, char** argv) {
   float camera_height = 0.0f;  // 0 = keep the default framing
   float lod_tau = 1.5f;
   int lod_tint = 0;  // 0 shaded / 1 triangle hash / 2 LOD level
+  bool serial_build = false;  // force single-threaded DAG build (perf A/B)
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -118,6 +122,8 @@ int main(int argc, char** argv) {
       preview_only = true;
     } else if (a == "--legacy-terrain") {
       use_cluster_terrain = false;
+    } else if (a == "--serial-build") {
+      serial_build = true;
     } else if (a == "--config") {
       if (auto v = next("--config")) config_path = *v; else return 2;
     } else if (a == "--seed") {
@@ -204,10 +210,10 @@ int main(int argc, char** argv) {
 
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
   return app.Run(argc, argv,
-                 [cfg, use_cluster_terrain, camera_height, lod_tau, lod_tint](
-                     const badlands::RenderContext&) {
+                 [cfg, use_cluster_terrain, camera_height, lod_tau, lod_tint,
+                  serial_build](const badlands::RenderContext&) {
                    return std::make_unique<badlands::MapViewView>(
                        cfg, use_cluster_terrain, camera_height, lod_tau,
-                       lod_tint);
+                       lod_tint, serial_build);
                  });
 }
