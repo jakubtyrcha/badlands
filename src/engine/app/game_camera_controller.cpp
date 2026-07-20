@@ -14,6 +14,14 @@ void GameCameraController::Pan(glm::vec2 world_dxz) {
   focus.z += world_dxz.y;
 }
 
+void GameCameraController::PanKeyboard(glm::vec2 dir, float dt) {
+  const float len = glm::length(dir);
+  if (len == 0.0f) return;
+  // Speed proportional to the zoom axis -- see pan_speed. Normalize so diagonals
+  // aren't sqrt(2) faster than the axes.
+  Pan(dir / len * (pan_speed * height * dt));
+}
+
 void GameCameraController::Zoom(float notches) {
   height = ZoomScalar(height, notches, zoom_speed, min_height, max_height);
 }

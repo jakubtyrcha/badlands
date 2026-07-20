@@ -2,12 +2,20 @@
 
 // Build-side of the Nanite-style terrain cluster-LOD DAG (see
 // docs/superpowers/specs/2026-07-19-terrain-cluster-lod-design.md). Pure CPU,
-// game-layer: it tessellates a mapgen heightmap into grid-tile leaf clusters and
-// repeatedly groups + boundary-locked-simplifies (meshoptimizer) + splits them
-// into a level hierarchy, recording per-group LOD error + bounding sphere. The
-// output DAG feeds runtime screen-space-error cluster selection (SelectClusters)
-// and per-cluster indexed draws. No engine/GPU dependency beyond the header-only
-// Aabb.
+// game-layer: it tessellates the frozen MapData lattice into grid-tile leaf
+// clusters and repeatedly groups + boundary-locked-simplifies (meshoptimizer) +
+// splits them into a level hierarchy, recording per-group LOD error + bounding
+// sphere. The output DAG feeds runtime screen-space-error cluster selection
+// (SelectClusters) and per-cluster indexed draws. No engine/GPU dependency
+// beyond the header-only Aabb.
+//
+// Input is a `const MapData&` (the frozen contract, game/map/map_data.hpp): the
+// leaf vertex grid IS the map lattice (nodes_x x nodes_z nodes at spacing_m),
+// heights are map.height(i,j), per-vertex color is the palette of the node's
+// DOMINANT biome. The map's spacing_m may differ from 1 m, so world positions
+// are node_index * spacing_m; the screen-space metric already works in world
+// meters. This is the "decimating / nanite-style builder" the MapData header
+// reserves the seam for.
 //
 // Seamlessness is a build invariant, not a runtime rule: a vertex on the
 // boundary between two groups of a level is LOCKED in both groups' simplify
@@ -23,7 +31,7 @@
 #include <glm/glm.hpp>
 
 #include "engine/rendering/geometry/aabb.hpp"
-#include "mapgen/field2d.hpp"
+#include "game/map/map_data.hpp"
 
 namespace badlands {
 
@@ -115,8 +123,8 @@ struct TerrainClusterDag {
   std::vector<TerrainClusterGroup> groups;
   std::vector<uint32_t> group_children; // consumed-cluster indices, per group
 
-  int map_quads_x = 0;  // heightmap.width  (leaf vertex grid is (w+1) wide)
-  int map_quads_z = 0;  // heightmap.height
+  int map_quads_x = 0;  // map.nodes_x() - 1 (leaf vertex grid is nodes_x wide)
+  int map_quads_z = 0;  // map.nodes_z() - 1
   int level_count = 0;  // number of LOD levels (leaves = level 0)
 
   // A cluster's own LOD error (leaves: 0) and the error above which it must be
@@ -128,12 +136,12 @@ struct TerrainClusterDag {
   glm::vec4 ClusterOwnSphere(const TerrainCluster& c) const;
 };
 
-// Build the DAG from a mapgen heightmap (world meters) + per-sample biome map.
-// Both fields are WxH samples; the leaf vertex grid is (W+1)x(H+1) at 1 m
-// spacing (edge verts clamp-sample), so W and H are also the quad counts and
-// W/tile_quads tiles span each axis. Logs per-level stats via spdlog.
-TerrainClusterDag BuildTerrainClusterDag(const mapgen::Field2D<float>& heightmap,
-                                         const mapgen::Field2D<uint8_t>& biomes,
+// Build the DAG from the frozen MapData contract. The leaf vertex grid is the
+// map lattice: nodes_x x nodes_z nodes at map.spacing_m() (world meters), so
+// (nodes_x-1) x (nodes_z-1) quads span the map and ceil(quads/tile_quads) tiles
+// cover each axis. Height = map.height(i,j); per-vertex color = the palette of
+// map.WeightsAtNode(i,j).Dominant(). Logs per-level stats via spdlog.
+TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
                                          const TerrainClusterParams& params = {});
 
 // Runtime cluster selection. Selects the cut where projected own-error <= tau and

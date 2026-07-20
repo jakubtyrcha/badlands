@@ -26,9 +26,11 @@
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
 #include "engine/rendering/context/scene_context.hpp"
+#include "engine/rendering/components/forward_component.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/frustum.hpp"
 #include "engine/rendering/passes/render_debug_lines.hpp"
+#include "engine/rendering/passes/render_forward.hpp"
 #include "engine/rendering/passes/render_gbuffer_debug.hpp"
 #include "engine/rendering/passes/render_skybox.hpp"
 #include "engine/rendering/passes/render_textured_mesh.hpp"
@@ -163,13 +165,34 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
   wgpu::TextureDescriptor hdr_desc;
   hdr_desc.size = {width, height, 1};
   hdr_desc.format = accumulation_format_;
-  hdr_desc.usage =
-      wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+  hdr_desc.usage = wgpu::TextureUsage::RenderAttachment |
+                   wgpu::TextureUsage::TextureBinding |
+                   wgpu::TextureUsage::CopySrc;  // snapshot for water refraction
   hdr_desc.mipLevelCount = 1;
   hdr_desc.sampleCount = 1;
   hdr_desc.dimension = wgpu::TextureDimension::e2D;
   hdr_color_texture_ = device_.CreateTexture(&hdr_desc);
   hdr_color_view_ = hdr_color_texture_.CreateView();
+
+  // Copy of the HDR scene colour, snapshotted before the forward-transparent
+  // pass so the water material can sample the scene behind it (normal-driven
+  // distortion / refraction) — a target can't be sampled while it's bound.
+  wgpu::TextureDescriptor hdr_copy_desc = hdr_desc;
+  hdr_copy_desc.usage =
+      wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+  hdr_color_copy_texture_ = device_.CreateTexture(&hdr_copy_desc);
+  hdr_color_copy_view_ = hdr_color_copy_texture_.CreateView();
+
+  if (!linear_clamp_sampler_) {
+    wgpu::SamplerDescriptor s;
+    s.magFilter = wgpu::FilterMode::Linear;
+    s.minFilter = wgpu::FilterMode::Linear;
+    s.mipmapFilter = wgpu::MipmapFilterMode::Nearest;
+    s.addressModeU = wgpu::AddressMode::ClampToEdge;
+    s.addressModeV = wgpu::AddressMode::ClampToEdge;
+    s.addressModeW = wgpu::AddressMode::ClampToEdge;
+    linear_clamp_sampler_ = device_.CreateSampler(&s);
+  }
 
   // G-buffer (3 MRT color targets + reversed-Z depth). Its depth target is
   // this renderer's depth buffer; the deferred lighting pass samples it.
@@ -696,9 +719,91 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
                          gbuffer_.GetDepthView(), shadow_map_.GetDepthView(),
                          shadow_comparison_sampler_, width_, height_);
 
+  // === Pass 3.7: Forward-opaque. Draws ForwardOpaqueRenderable meshes (which
+  // bypass the G-buffer and light themselves) into the HDR target with the
+  // G-buffer depth Load + write, so they occlude / are occluded by opaque
+  // geometry and depth-test the later transparent pass. Skipped when none exist
+  // (no such entities in the current scenes; wired so kForwardOpaque is not a
+  // silent no-op). ===
+  if (registry.view<ForwardOpaqueRenderable>().size() > 0) {
+    wgpu::RenderPassColorAttachment color_attachment;
+    color_attachment.view = hdr_color_view_;
+    color_attachment.loadOp = wgpu::LoadOp::Load;
+    color_attachment.storeOp = wgpu::StoreOp::Store;
+
+    wgpu::RenderPassDepthStencilAttachment depth_attachment;
+    depth_attachment.view = gbuffer_.GetDepthView();
+    depth_attachment.depthLoadOp = wgpu::LoadOp::Load;
+    depth_attachment.depthStoreOp = wgpu::StoreOp::Store;
+    depth_attachment.stencilLoadOp = wgpu::LoadOp::Undefined;
+    depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color_attachment;
+    desc.depthStencilAttachment = &depth_attachment;
+
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    RenderForwardMeshes(pass, frame, registry, camera_world_pos,
+                        material_instance_cache_);
+    pass.End();
+  }
+
+  // === Pass 3.8: Forward-transparent (water). Snapshot the HDR colour (so the
+  // water can sample the scene behind it for refraction), then draw
+  // ForwardTransparentRenderable meshes into the HDR target with the G-buffer
+  // depth bound read-only (test against opaque geometry, never write depth).
+  // Skipped when nothing transparent exists (no snapshot cost). ===
+  if (registry.view<ForwardTransparentRenderable>().size() > 0) {
+    wgpu::TexelCopyTextureInfo copy_src{};
+    copy_src.texture = hdr_color_texture_;
+    wgpu::TexelCopyTextureInfo copy_dst{};
+    copy_dst.texture = hdr_color_copy_texture_;
+    wgpu::Extent3D copy_ext = {width_, height_, 1};
+    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+
+    wgpu::RenderPassColorAttachment color_attachment;
+    color_attachment.view = hdr_color_view_;
+    color_attachment.loadOp = wgpu::LoadOp::Load;
+    color_attachment.storeOp = wgpu::StoreOp::Store;
+
+    wgpu::RenderPassDepthStencilAttachment depth_attachment;
+    depth_attachment.view = gbuffer_.GetDepthView();
+    depth_attachment.depthLoadOp = wgpu::LoadOp::Undefined;
+    depth_attachment.depthStoreOp = wgpu::StoreOp::Undefined;
+    depth_attachment.depthReadOnly = true;
+    depth_attachment.stencilLoadOp = wgpu::LoadOp::Undefined;
+    depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color_attachment;
+    desc.depthStencilAttachment = &depth_attachment;
+
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    const bool use_pref = has_prefiltered_ && prefiltered_.IsValid();
+    ForwardEngineResources engine;
+    engine.scene_depth = gbuffer_.GetDepthView();
+    engine.scene_color = hdr_color_copy_view_;
+    engine.scene_color_sampler = linear_clamp_sampler_;
+    engine.ibl_prefiltered =
+        use_pref ? prefiltered_.GetView() : fallback_cube_view_;
+    engine.ibl_sampler =
+        use_pref ? prefiltered_.GetSampler() : fallback_cube_sampler_;
+    engine.brdf_lut = brdf_lut_.GetView();
+    engine.brdf_lut_sampler = brdf_lut_.GetSampler();
+    engine.shadow_map = shadow_map_.GetDepthView();
+    engine.shadow_sampler = shadow_comparison_sampler_;
+    engine.time_seconds = scene.time_seconds;
+    RenderForwardTransparentMeshes(pass, frame, registry, camera_world_pos,
+                                   material_instance_cache_, engine);
+    pass.End();
+  }
+
   // === Pass 3.6: Debug lines — world-space thick (screen-aligned, AA) lines
   // into the HDR buffer, depth-tested against the G-buffer (so they are occluded
-  // by geometry) but not depth-writing. ===
+  // by geometry) but not depth-writing. After fog on purpose, so the debug
+  // overlay stays visible on top of fog rather than being dimmed by it. ===
   if (scene.debug_lines != nullptr && !scene.debug_lines->empty()) {
     const uint32_t line_verts = UploadDebugLines(
         device_, debug_line_buffer_, *scene.debug_lines, frame_uniforms.view,

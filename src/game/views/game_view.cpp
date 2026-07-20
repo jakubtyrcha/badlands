@@ -13,13 +13,23 @@
 #include "core/profiler.hpp"
 #include "engine/app/fixed_timestep.hpp"
 #include "engine/app/game_camera_controller.hpp"  // ZoomAtCursor
-#include "engine/app/sdl_input_util.hpp"
+#include "engine/app/sdl_input_util.hpp"           // EventWindowLogicalSize
+#include "core/geometry_type.hpp"
 #include "engine/rendering/fog_sim.hpp"
+#include "engine/rendering/geometry/mesh_builder_utils.hpp"
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
+#include "engine/rendering/water_material.hpp"
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
-#include "game/scene/building_scene.h"
+#include "game/geometry/terrain_mesh.hpp"
+#include "game/geometry/water_surface.hpp"
+#include "game/map/symbolic_map_generator.hpp"
+#include "game/scene/blockout_materials.hpp"
+#include "game/scene/building_composer.hpp"
+#include "game/visual/scene_composer.hpp"
+#include "mapview/biome_manifest.hpp"
 
 namespace badlands {
 
@@ -55,11 +65,40 @@ constexpr uint32_t kSkyCubeFaceSize = 64;
 // Where the live day/night clock starts (t01: 0.30 = mid-morning).
 constexpr float kInitialTimeOfDay = 0.30f;
 
-constexpr const char* kFloorPackDir =
-    "assets/materials/monastery_stone_floor_1k";
-// Repeat the floor pack roughly once per 2 world units instead of stretching
-// one copy across the whole floor.
-constexpr float kFloorUvRepeatSpacing = 2.0f;
+// Biome -> PBR pack manifest (detailed terrain); layer index == Biome enum.
+constexpr const char* kBiomeManifestPath =
+    "assets/materials/terrain_biomes.json";
+
+// Terrain chunking: N x N lattice cells per mesh entity. Mesh density is
+// lattice density (one X-split quad per cell), so there is no subdiv knob.
+constexpr int kChunkCells = 16;
+
+// The demo buildings (sim-placed around the origin) are shifted onto the
+// southern plains band of the origin-centered symbolic map so they sit on land
+// rather than in the central lake. ~one tile south of center.
+constexpr float kDemoBuildingsSouthShift = 51.2f;
+
+// Flat water surface mesh from the map's block-aligned lake triangles. Same
+// kTexturedMesh layout GenerateLakeSurfaceMesh emits (pos/uv/normal/tangent,
+// normal +Y, UV = world XZ), but fed an explicit triangle soup instead of
+// rasterizing a polygon -- the generator already decided the shape on the block
+// lattice, so there is nothing to rasterize.
+TexturedMeshResult BuildLakeMesh(const std::vector<glm::vec3>& tris) {
+  TexturedMeshResult result;
+  result.mesh.geometry_type = GeometryType::kTexturedMesh;
+  const glm::vec3 normal(0.0f, 1.0f, 0.0f);
+  const glm::vec3 tangent(1.0f, 0.0f, 0.0f);
+  auto& v = result.mesh.vertices;
+  v.reserve(tris.size() * kTexturedMeshFloatsPerVertex);
+  for (const glm::vec3& p : tris) {
+    PushVertex(v, p, glm::vec2(p.x, p.z), normal, tangent);
+  }
+  result.mesh.vertex_count =
+      static_cast<uint32_t>(v.size() / kTexturedMeshFloatsPerVertex);
+  result.local_bounds =
+      ComputeLocalAabbFromVertices(v, kTexturedMeshFloatsPerVertex);
+  return result;
+}
 
 }  // namespace
 
@@ -80,6 +119,34 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
+  // Mode-appropriate proxy materials for the symbolic map's water + terrain.
+  const bool blockout_mode = (mode_ == RenderMode::Blockout);
+  water_factory_ =
+      blockout_mode
+          ? BuildWaterBlockoutForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen)
+          : BuildWaterForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen);
+  if (!water_factory_) {
+    spdlog::error("GameView::Initialize: water factory build failed");
+    return false;
+  }
+
+  if (blockout_mode) {
+    // Debug solid-color terrain layers, indexed by biome enum value.
+    terrain_arrays_ = matlib_.DebugTerrainArrays(blockout::BiomeColors());
+  } else {
+    // PBR biome packs (same manifest the map tool uses); layer index == biome.
+    std::vector<std::string> pack_dirs;
+    if (!ResolveBiomePacks(kBiomeManifestPath, pack_dirs)) {
+      spdlog::error("GameView::Initialize: failed to resolve biome packs");
+      return false;
+    }
+    terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
+  }
+  if (!matlib_.ok()) {
+    spdlog::error("GameView::Initialize: terrain arrays failed to build");
+    return false;
+  }
+
   // Seed the day/night cycle: set the day length, then jump to the initial
   // time-of-day (bakes the sky/IBL/ambient + sets the sun into scene_context_
   // before BuildScene mirrors it).
@@ -92,16 +159,15 @@ bool GameView::Initialize(const RenderContext& ctx) {
   game_ = game_create(nullptr);
   PlaceDemoBuildings();
   BuildScene();
-  SetupFogGenerator();
+  // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
+  if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
 
-  // Fixed-angle game camera framing the demo town: the Castle sits at the
-  // origin and the demo buildings spread to +-12 in X / up to +10 in Z (see
-  // PlaceDemoBuildings), so pull back further than GameCameraController's
-  // defaults (pitch 55deg/height 30) to keep the whole spread inside the
-  // 45deg-FOV frustum.
-  gamecam_.focus = glm::vec3(0.0f, 0.0f, 4.0f);
-  gamecam_.pitch_deg = 50.0f;
-  gamecam_.height = 42.0f;
+  // Fixed-angle overview of the 256 m symbolic map (centered on the origin):
+  // a fairly top-down pitch keeps the whole biome layout + central lake legible;
+  // scroll to zoom in on the demo buildings on the southern plains.
+  gamecam_.focus = glm::vec3(0.0f, 0.0f, 0.0f);
+  gamecam_.pitch_deg = 64.0f;
+  gamecam_.height = 175.0f;
   gamecam_.UpdateCamera(camera_);
 
   if (!matlib_.ok()) {
@@ -109,66 +175,6 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
   return true;
-}
-
-void GameView::SetupFogGenerator() {
-  if (!scene_renderer_) return;
-
-  // World-static volumetric emitters (phase placeholder; a real map would derive
-  // these from biomes). Authored in physical sigma_t (see the fog-density table).
-  std::vector<fog::Emitter> emitters;
-  {
-    fog::Emitter bog;  // clumpy dense fog, its volume scrolling upward over time
-    bog.center = {-15.0f, -10.0f};
-    bog.half_extent = {9.0f, 9.0f};
-    bog.shape = fog::EmitterShape::Disc;
-    bog.type = fog::EmitterType::Noise;
-    bog.base_y = 0.0f;
-    bog.height = 22.0f;
-    bog.magnitude = 0.08f;  // dense
-    bog.radial_falloff = 0.6f;
-    bog.vertical_falloff = 0.5f;
-    bog.noise_freq = 0.15f;
-    bog.noise_contrast = 1.6f;
-    bog.scroll = {0.0f, 0.6f, 0.0f};  // vertical scroll -> rising motion
-    bog.seed = 3.0f;
-    emitters.push_back(bog);
-
-    fog::Emitter forest;  // broad, uniform moderate fog (static disc)
-    forest.center = {16.0f, 12.0f};
-    forest.half_extent = {14.0f, 8.0f};
-    forest.rotation = 0.4f;
-    forest.shape = fog::EmitterShape::Obb;
-    forest.type = fog::EmitterType::Disc;
-    forest.base_y = 0.0f;
-    forest.height = 16.0f;
-    forest.magnitude = 0.006f;  // moderate
-    forest.radial_falloff = 0.5f;
-    forest.vertical_falloff = 0.6f;
-    emitters.push_back(forest);
-
-    fog::Emitter lake;  // light, gently drifting fog
-    lake.center = {2.0f, 24.0f};
-    lake.half_extent = {7.0f, 7.0f};
-    lake.shape = fog::EmitterShape::Disc;
-    lake.type = fog::EmitterType::Noise;
-    lake.base_y = 0.0f;
-    lake.height = 10.0f;
-    lake.magnitude = 0.02f;
-    lake.radial_falloff = 0.7f;
-    lake.vertical_falloff = 0.6f;
-    lake.noise_freq = 0.12f;
-    lake.noise_contrast = 1.2f;
-    lake.scroll = {0.1f, 0.25f, 0.0f};
-    lake.seed = 11.0f;
-    emitters.push_back(lake);
-  }
-
-  FogSimParams params;
-  params.map_min = {-48.0f, -48.0f};
-  params.map_max = {48.0f, 48.0f};
-  params.bp_cell_size = 32.0f;
-  scene_renderer_->GetFogSimulation().SetSources(emitters, params);
 }
 
 void GameView::UpdateDaylight() {
@@ -252,27 +258,62 @@ void GameView::BuildScene() {
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  constexpr float kFloorSize = 80.0f;
-  AddFloor(scene_, matlib_, kFloorSize, kFloorPackDir,
-           kFloorSize / kFloorUvRepeatSpacing);
+  SceneComposer composer(mode_);
 
+  // Generate the symbolic greybox map and center it on the world origin (map
+  // coordinates are corner-origin, so shift the whole map by -size/2).
+  const MapData map = SymbolicMapGenerator{}.Generate();
+  const float half_x = map.size_x_m() * 0.5f;
+  const float half_z = map.size_z_m() * 0.5f;
+  const glm::mat4 center =
+      glm::translate(glm::mat4(1.0f), glm::vec3(-half_x, 0.0f, -half_z));
+
+  // Terrain: one kTerrainBlend chunk entity per N x N lattice-cell region.
+  const int cells_x = map.nodes_x() - 1;
+  const int cells_z = map.nodes_z() - 1;
+  for (int cz = 0; cz < cells_z; cz += kChunkCells) {
+    for (int cx = 0; cx < cells_x; cx += kChunkCells) {
+      TerrainMeshParams p;
+      p.cell_x0 = cx;
+      p.cell_z0 = cz;
+      p.cells_x = std::min(kChunkCells, cells_x - cx);
+      p.cells_z = std::min(kChunkCells, cells_z - cz);
+      TerrainMesh chunk = BuildTerrainMesh(map, p);
+      if (chunk.vertex_count == 0) continue;
+      composer.AddTerrain(std::move(chunk), center);
+    }
+  }
+
+  // Water surface, derived from the map's Lake-dominant cells (the frozen map
+  // contract carries no geometry) -- it lands on the same X-split lattice as
+  // the terrain, already at the map's water level.
+  const InstanceParams water_params = (mode_ == RenderMode::Blockout)
+                                          ? BlockoutWaterParams()
+                                          : DefaultWaterParams();
+  auto lake = BuildLakeMesh(BuildWaterSurfaceTriangles(map));
+  if (lake.mesh.vertex_count > 0) {
+    composer.AddWater(std::move(lake), water_params, center);
+  }
+
+  // Demo buildings from the sim, shifted onto the southern plains band (so they
+  // sit on land, not the central lake) and placed through the composer so they
+  // honor the render mode's materials.
   if (building_rows_.size() < kMaxBuildingRows) {
     building_rows_.resize(kMaxBuildingRows);
   }
   const uint32_t total =
       game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
-  if (total > kMaxBuildingRows) {
-    spdlog::warn("GameView::BuildScene: {} buildings truncated to {}", total,
-                kMaxBuildingRows);
-  }
   const uint32_t count = std::min(total, kMaxBuildingRows);
-
   for (uint32_t i = 0; i < count; ++i) {
     const GameBuildingState& b = building_rows_[i];
-    AddBuildingToScene(scene_, matlib_, static_cast<GameBuildingKind>(b.kind),
-                       glm::vec2(b.center_x, b.center_z),
-                       yaw_from_rotation_index(b.rotation_index));
+    const glm::vec2 world(b.center_x, b.center_z + kDemoBuildingsSouthShift);
+    // Ground height straight from the map's query API (world -> map-local).
+    const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
+    AddBuildingToComposer(composer, static_cast<GameBuildingKind>(b.kind), world,
+                          yaw_from_rotation_index(b.rotation_index), ground);
   }
+
+  composer.ComposeInto(scene_, matlib_, terrain_arrays_, water_factory_.get());
 }
 
 void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
@@ -280,6 +321,10 @@ void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
   // Fixed-angle camera: only zoom is mouse-driven (wheel + trackpad, which SDL
   // reports as the same event with fractional deltas). Key panning is read
   // directly from Update()'s keyboard_state snapshot instead of per-event.
+  //
+  // Use the window's LOGICAL size (EventWindowLogicalSize), not HandleEvent's
+  // physical-pixel width/height: SDL mouse coords are points, so mixing them
+  // with a pixel extent scales the anchor ray off the cursor on HiDPI displays.
   if (event.type != SDL_EVENT_MOUSE_WHEEL) return;
   if (ImGui::GetIO().WantCaptureMouse) return;
   glm::vec2 screen;
@@ -297,6 +342,11 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // so they run together at the current speed, independent of framerate.
   const double real_dt = static_cast<double>(dt);
   const double sim_dt = sim_clock_.Advance(real_dt);
+
+  // Feed the presentation clock to time-animated forward materials (water
+  // waves). Deterministic under headless SeekToTimeOfDay (sim_seconds is set
+  // deterministically from t01), so screenshots/records are reproducible.
+  scene_context_.time_seconds = static_cast<float>(sim_clock_.sim_seconds);
 
   // The map fog generator is a sim: advance it on sim-time so pause freezes it
   // and game speed scales it. The renderer flushes the accumulated time into
@@ -338,9 +388,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     if (keyboard_state[SDL_SCANCODE_S] || keyboard_state[SDL_SCANCODE_DOWN]) dir.y += 1.0f;
     if (keyboard_state[SDL_SCANCODE_A] || keyboard_state[SDL_SCANCODE_LEFT]) dir.x -= 1.0f;
     if (keyboard_state[SDL_SCANCODE_D] || keyboard_state[SDL_SCANCODE_RIGHT]) dir.x += 1.0f;
-    if (dir.x != 0.0f || dir.y != 0.0f) {
-      gamecam_.Pan(glm::normalize(dir) * gamecam_.pan_speed * dt);
-    }
+    gamecam_.PanKeyboard(dir, dt);  // zoom-scaled; no-op when dir is zero
   }
 
   gamecam_.UpdateCamera(camera_);
@@ -353,6 +401,7 @@ void GameView::SeekToTimeOfDay(float t01) {
   // re-bake immediately so a single frame is correct.
   sim_clock_.SeekTimeOfDay(t01);
   sim_ticks_done_ = sim_clock_.TickTarget();
+  scene_context_.time_seconds = static_cast<float>(sim_clock_.sim_seconds);
   ApplyDaylightNow();
 }
 
@@ -366,39 +415,14 @@ void GameView::DrawUI() {
 
   // --- Simulation (time) ---
   if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
-    // Sim speed (0 = paused, 1/2/4x). Drives both the day/night cycle and the
-    // game logic via the shared SimClock.
-    ImGui::Text("Speed:");
-    const float kSpeeds[] = {0.0f, 1.0f, 2.0f, 4.0f};
-    const char* kSpeedLabels[] = {"Pause", "1x", "2x", "4x"};
-    for (int i = 0; i < 4; ++i) {
-      ImGui::SameLine();
-      if (ImGui::RadioButton(kSpeedLabels[i], sim_clock_.speed == kSpeeds[i])) {
-        sim_clock_.speed = kSpeeds[i];
-      }
+    if (EditorUI::DrawSimClockControls(sim_clock_)) {
+      SeekToTimeOfDay(sim_clock_.TimeOfDay());  // re-sync tick counter + re-bake
     }
-
-    // Time-of-day scrubber + day counter.
-    float t01 = sim_clock_.TimeOfDay();
-    if (ImGui::SliderFloat("Time of day", &t01, 0.0f, 0.9999f)) {
-      SeekToTimeOfDay(t01);
-    }
-    ImGui::Text("Day %d  |  %05.2f h", sim_clock_.DayCounter(), t01 * 24.0f);
-    ImGui::SliderFloat("Real sec / day", &sim_clock_.real_seconds_per_day, 1.0f, 600.0f);
   }
 
   // --- Directional light (daylight) ---
   if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
-    bool cfg_changed = false;
-    cfg_changed |= ImGui::SliderFloat("Turbidity", &daylight_cfg_.turbidity, 1.0f, 10.0f);
-    cfg_changed |= ImGui::SliderFloat("Ground albedo", &daylight_cfg_.ground_albedo, 0.0f, 1.0f);
-    cfg_changed |= ImGui::SliderFloat("Sky exposure", &daylight_cfg_.sky_exposure, 0.001f, 0.3f, "%.3f");
-    cfg_changed |= ImGui::SliderFloat("Sun intensity", &daylight_cfg_.sun_intensity_max, 0.0f, 10.0f);
-    cfg_changed |= ImGui::ColorEdit3("Moon color", &daylight_cfg_.moon_color.x);
-    cfg_changed |= ImGui::SliderFloat("Moon intensity", &daylight_cfg_.moon_intensity, 0.0f, 0.2f, "%.3f");
-    cfg_changed |= ImGui::SliderFloat("Ease minutes", &daylight_cfg_.ease_ingame_minutes, 1.0f, 120.0f);
-    cfg_changed |= ImGui::Checkbox("Moon disc", &daylight_cfg_.moon_disc);
-    if (cfg_changed) force_rebake_ = true;
+    if (EditorUI::DrawDaylightEditor(daylight_cfg_)) force_rebake_ = true;
   }
 
   // --- Fog (self-contained collapsing section) ---

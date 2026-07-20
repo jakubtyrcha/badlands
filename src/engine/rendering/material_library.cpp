@@ -171,6 +171,42 @@ MaterialLibrary::TerrainArrays MaterialLibrary::LoadTerrainArrays(
   return result;
 }
 
+MaterialLibrary::TerrainArrays MaterialLibrary::DebugTerrainArrays(
+    const std::vector<glm::vec3>& srgb_colors) {
+  TerrainArrays result;
+  const uint32_t n = static_cast<uint32_t>(srgb_colors.size());
+  if (n == 0) {
+    spdlog::error("MaterialLibrary::DebugTerrainArrays: no colors");
+    load_failed_ = true;
+    return result;
+  }
+  auto to_byte = [](float c) {
+    return static_cast<uint8_t>(std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f));
+  };
+  // One RGBA per layer, per channel array. Normal = flat GL-convention (0,0,1)
+  // -> (128,128,255). ARM = AO 1 / roughness 1 (matte) / metallic 0.
+  std::vector<uint8_t> albedo(n * 4), normal(n * 4), arm(n * 4);
+  for (uint32_t i = 0; i < n; ++i) {
+    albedo[i * 4 + 0] = to_byte(srgb_colors[i].r);
+    albedo[i * 4 + 1] = to_byte(srgb_colors[i].g);
+    albedo[i * 4 + 2] = to_byte(srgb_colors[i].b);
+    albedo[i * 4 + 3] = 255;
+    normal[i * 4 + 0] = 128; normal[i * 4 + 1] = 128;
+    normal[i * 4 + 2] = 255; normal[i * 4 + 3] = 255;
+    arm[i * 4 + 0] = 255; arm[i * 4 + 1] = 255;
+    arm[i * 4 + 2] = 0;   arm[i * 4 + 3] = 255;
+  }
+  result.albedo.view = CreateSolidColorArray(device_, queue_, albedo.data(), n);
+  result.normal.view = CreateSolidColorArray(device_, queue_, normal.data(), n);
+  result.arm.view = CreateSolidColorArray(device_, queue_, arm.data(), n);
+  if (!result.albedo.view || !result.normal.view || !result.arm.view) {
+    spdlog::error("MaterialLibrary::DebugTerrainArrays: failed to build arrays");
+    load_failed_ = true;
+    return {};
+  }
+  return result;
+}
+
 DeferredMaterial MaterialLibrary::TerrainBlend(const TerrainArrays& arrays) {
   InstanceParams params;
   // Matched by param_name against the terrain_blend slots; TextureType is only

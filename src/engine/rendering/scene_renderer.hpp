@@ -237,6 +237,13 @@ class SceneRenderer {
   wgpu::Texture hdr_color_texture_;
   wgpu::TextureView hdr_color_view_;
 
+  // Snapshot of the HDR colour taken before the forward-transparent (water)
+  // pass, so the water material can sample the scene behind it for refraction.
+  wgpu::Texture hdr_color_copy_texture_;
+  wgpu::TextureView hdr_color_copy_view_;
+  // Linear clamp sampler for that snapshot (created once in CreateTargets).
+  wgpu::Sampler linear_clamp_sampler_;
+
   // Deferred G-buffer: 3 MRT color targets + reversed-Z depth. The depth
   // target doubles as this renderer's depth buffer (sampled by the deferred
   // lighting pass) — there is no separate standalone depth texture.

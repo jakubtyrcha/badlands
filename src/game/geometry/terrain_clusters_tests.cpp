@@ -1,5 +1,5 @@
 // Catch2 invariant suite for the terrain cluster-LOD DAG build
-// (terrain_clusters.cpp). Pure CPU: synthetic Field2D heightfields + a two-biome
+// (terrain_clusters.cpp). Pure CPU: synthetic MapData heightfields + a two-biome
 // split, no noiser scripts, no GPU. Pins the load-bearing seamlessness
 // invariants from the spec (docs/superpowers/specs/
 // 2026-07-19-terrain-cluster-lod-design.md, Verification section):
@@ -22,8 +22,8 @@
 #include <glm/glm.hpp>
 
 #include "game/geometry/terrain_clusters.hpp"
+#include "game/map/map_data.hpp"
 #include "mapgen/biomes.hpp"
-#include "mapgen/field2d.hpp"
 
 using badlands::BuildTerrainClusterDag;
 using badlands::kNoGroup;
@@ -34,35 +34,45 @@ using badlands::TerrainClusterParams;
 
 namespace {
 
-using badlands::mapgen::Field2D;
+using badlands::MapData;
+
+// The DAG's leaf grid is the MapData lattice: (nodes-1) quads over `nodes`
+// vertices per axis. The suite's `w`/`h` are QUAD counts (matching the old
+// heightmap width/height), so a w x h map is nodes = (w+1) x (h+1) at 1 m
+// spacing -- extent [0, w] x [0, h], preserving every leaf-count / coverage
+// assertion. One-hot slices, so WeightsAtNode(i,j).Dominant() is a single biome.
 
 // A ridged sine heightfield: enough curvature that simplification actually
 // collapses interior verts and reports non-trivial error, so the monotonicity
-// and sphere checks exercise real numbers rather than a flat plane.
-Field2D<float> MakeHeightmap(int w, int h) {
-  Field2D<float> hm(w, h);
-  for (int j = 0; j < h; ++j) {
-    for (int i = 0; i < w; ++i) {
+// and sphere checks exercise real numbers rather than a flat plane. Diagonal
+// two-biome split so vertex color varies and the attribute metric is engaged.
+MapData MakeMapData(int w, int h) {
+  const int nodes_x = w + 1, nodes_z = h + 1;
+  MapData m(nodes_x, nodes_z, 1.0f);
+  for (int j = 0; j < nodes_z; ++j) {
+    for (int i = 0; i < nodes_x; ++i) {
       const float fx = static_cast<float>(i);
       const float fz = static_cast<float>(j);
       const float base = 6.0f * std::sin(fx * 0.06f) * std::cos(fz * 0.05f);
       const float ridge = 3.0f * std::abs(std::sin(fx * 0.11f + fz * 0.03f));
-      hm.at(i, j) = base + ridge;
+      m.mutable_height(i, j) = base + ridge;
+      const badlands::mapgen::Biome b =
+          (i + j < (nodes_x + nodes_z) / 2) ? badlands::mapgen::Biome::Forest
+                                            : badlands::mapgen::Biome::Hills;
+      m.mutable_slice(static_cast<int>(b), i, j) = 255;
     }
   }
-  return hm;
+  return m;
 }
 
-// Two-biome split (diagonal), so vertex color varies and the attribute metric is
-// actually engaged; values are Biome enum indices.
-Field2D<uint8_t> MakeBiomes(int w, int h) {
-  Field2D<uint8_t> b(w, h);
-  for (int j = 0; j < h; ++j)
-    for (int i = 0; i < w; ++i)
-      b.at(i, j) = static_cast<uint8_t>(
-          (i + j < (w + h) / 2) ? badlands::mapgen::Biome::Forest
-                                : badlands::mapgen::Biome::Hills);
-  return b;
+// Flat single-biome map for the cheap grid-arithmetic checks.
+MapData MakeFlatMapData(int w, int h, badlands::mapgen::Biome biome) {
+  const int nodes_x = w + 1, nodes_z = h + 1;
+  MapData m(nodes_x, nodes_z, 1.0f);
+  for (int j = 0; j < nodes_z; ++j)
+    for (int i = 0; i < nodes_x; ++i)
+      m.mutable_slice(static_cast<int>(biome), i, j) = 255;
+  return m;
 }
 
 // --- bitwise vertex helpers -------------------------------------------------
@@ -333,7 +343,7 @@ uint64_t SelectedTriCount(const TerrainClusterDag& dag,
 
 TEST_CASE("terrain cluster DAG: monotonic errors + nesting spheres", "[terrain_clusters]") {
   const int w = 64, h = 64;
-  const auto dag = BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h));
+  const auto dag = BuildTerrainClusterDag(MakeMapData(w, h));
   REQUIRE(dag.clusters.size() > 0);
   REQUIRE(dag.groups.size() > 0);
   CheckMonotonicErrors(dag);
@@ -342,14 +352,14 @@ TEST_CASE("terrain cluster DAG: monotonic errors + nesting spheres", "[terrain_c
 
 TEST_CASE("terrain cluster DAG: crack-free shared boundaries", "[terrain_clusters]") {
   const int w = 64, h = 64;
-  const auto dag = BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h));
+  const auto dag = BuildTerrainClusterDag(MakeMapData(w, h));
   CheckSeamAgreement(dag);
   CheckSeamCompleteness(dag);
 }
 
 TEST_CASE("terrain cluster DAG: converges to a single root", "[terrain_clusters]") {
   const int w = 64, h = 64;
-  const auto dag = BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h));
+  const auto dag = BuildTerrainClusterDag(MakeMapData(w, h));
   int roots = 0;
   for (const auto& c : dag.clusters)
     if (c.parent_group == kNoGroup) ++roots;
@@ -359,17 +369,15 @@ TEST_CASE("terrain cluster DAG: converges to a single root", "[terrain_clusters]
 TEST_CASE("terrain cluster DAG: grid arithmetic", "[terrain_clusters]") {
   SECTION("512x512 -> 64x64 = 4096 leaves (arithmetic only)") {
     // Flat map keeps this cheap: it's an arithmetic check, not a shape check.
-    Field2D<float> flat(512, 512, 0.0f);
-    Field2D<uint8_t> biome(512, 512,
-                           static_cast<uint8_t>(badlands::mapgen::Biome::Plains));
-    const auto dag = BuildTerrainClusterDag(flat, biome);
+    const auto dag =
+        BuildTerrainClusterDag(MakeFlatMapData(512, 512, badlands::mapgen::Biome::Plains));
     REQUIRE(LeafCount(dag) == 64 * 64);
     CheckLeafCoverage(dag, 512, 512);
   }
 
   SECTION("non-square 100x60 covers the full extent + stays crack-free") {
     const int w = 100, h = 60;
-    const auto dag = BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h));
+    const auto dag = BuildTerrainClusterDag(MakeMapData(w, h));
     // ceil(100/8)=13, ceil(60/8)=8 leaf tiles.
     REQUIRE(LeafCount(dag) == 13 * 8);
     CheckLeafCoverage(dag, w, h);
@@ -397,7 +405,7 @@ TEST_CASE("terrain cluster DAG: SelectClusters cut validity", "[terrain_clusters
 
   for (const MapCase& mc : cases) {
     const auto dag =
-        BuildTerrainClusterDag(MakeHeightmap(mc.w, mc.h), MakeBiomes(mc.w, mc.h));
+        BuildTerrainClusterDag(MakeMapData(mc.w, mc.h));
     for (const glm::vec3& cam : mc.cameras) {
       // Cut validity holds at every tau.
       for (float tau : taus) {
@@ -429,7 +437,7 @@ TEST_CASE("terrain cluster DAG: SelectClusters cut validity", "[terrain_clusters
 TEST_CASE("terrain cluster DAG: SelectClusters valid non-empty cover for any tau",
           "[terrain_clusters]") {
   const int w = 64, h = 64;
-  const auto dag = BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h));
+  const auto dag = BuildTerrainClusterDag(MakeMapData(w, h));
   const glm::vec3 cam(32.0f, 80.0f, 32.0f);
   const float fov = 45.0f, screen_h = 900.0f;
   const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -501,7 +509,7 @@ TEST_CASE("terrain cluster DAG: parallel build == serial build (bitwise)",
   auto build = [](int w, int h, bool parallel) {
     TerrainClusterParams params;
     params.parallel_build = parallel;
-    return BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h), params);
+    return BuildTerrainClusterDag(MakeMapData(w, h), params);
   };
 
   SECTION("64x64") {
@@ -522,7 +530,7 @@ TEST_CASE("terrain cluster DAG: non-default constants hold invariants", "[terrai
   TerrainClusterParams params;
   params.tile_quads = 4;  // half the default leaf edge
   const auto dag =
-      BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h), params);
+      BuildTerrainClusterDag(MakeMapData(w, h), params);
   // ceil(64/4)=16, ceil(60/4)=15 leaf tiles.
   REQUIRE(LeafCount(dag) == 16 * 15);
   CheckLeafCoverage(dag, w, h);

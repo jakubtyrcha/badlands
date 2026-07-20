@@ -32,6 +32,29 @@ fn decode(path: &str) -> Option<(Vec<u8>, u32, u32)> {
     decode_bytes(&bytes)
 }
 
+/// Decode raw image bytes to 16-bit LUMINANCE, auto-detecting the format.
+///
+/// Deliberately separate from `decode_bytes`, which goes through `to_rgba8()`
+/// and so truncates a 16-bit source to 8 bits. That loss is invisible on a
+/// colour texture but fatal for a heightmap: the authored map spreads its
+/// elevation span across 16 bits, so 8 bits would quantize it to ~1.1 m steps
+/// and visibly terrace the terrain.
+///
+/// An 8-bit source widens losslessly (`to_luma16` scales 0..255 -> 0..65535),
+/// so this is safe on any input — it just buys nothing unless the source
+/// really carries 16 bits.
+fn decode_bytes_luma16(bytes: &[u8]) -> Option<(Vec<u16>, u32, u32)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let luma = img.to_luma16();
+    let (w, h) = luma.dimensions();
+    Some((luma.into_raw(), w, h))
+}
+
+fn decode_luma16(path: &str) -> Option<(Vec<u16>, u32, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    decode_bytes_luma16(&bytes)
+}
+
 /// Resolve the texture URI referenced by a glTF `Texture`, if any. Only
 /// `Source::Uri` images are supported (external files) — embedded
 /// `Source::View` (glb-bufferview) images have no URI to resolve.
@@ -79,9 +102,27 @@ pub struct BadlandsGltfTextures {
     pub metallic_roughness: *mut c_char,
 }
 
+/// C-ABI-compatible 16-bit single-channel image: `luma` points at
+/// `width * height` u16 samples owned by this struct. On failure `luma` is
+/// NULL and `width`/`height` are both 0.
+#[repr(C)]
+pub struct BadlandsImage16 {
+    pub luma: *mut u16,
+    pub width: u32,
+    pub height: u32,
+}
+
 fn failed_image() -> BadlandsImage {
     BadlandsImage {
         rgba: ptr::null_mut(),
+        width: 0,
+        height: 0,
+    }
+}
+
+fn failed_image16() -> BadlandsImage16 {
+    BadlandsImage16 {
+        luma: ptr::null_mut(),
         width: 0,
         height: 0,
     }
@@ -171,6 +212,69 @@ pub unsafe extern "C" fn badlands_decode_image(path: *const c_char) -> BadlandsI
     }
 }
 
+/// Decode the image file at `path` to raw 16-bit luminance across the C ABI,
+/// with the format auto-detected from file content.
+///
+/// The 16-bit counterpart to `badlands_decode_image`, for single-channel data
+/// where precision is the point rather than colour — the authored map's
+/// heightmap. See `decode_bytes_luma16` for why the RGBA8 path cannot serve.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string.
+///
+/// # Returns
+/// On success, `luma` points at a malloc'd buffer of `width * height` u16
+/// samples, owned by the caller and freed with `badlands_image16_free`. On
+/// failure (invalid input, missing file, decode error, or an internal panic),
+/// `luma` is NULL and `width`/`height` are both 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_decode_image16(path: *const c_char) -> BadlandsImage16 {
+    let result = panic::catch_unwind(|| {
+        if path.is_null() {
+            return None;
+        }
+        let path = unsafe { CStr::from_ptr(path) }.to_str().ok()?;
+        decode_luma16(path)
+    });
+
+    match result {
+        Ok(Some((luma, width, height))) => {
+            // Same leak-to-caller contract as badlands_decode_image: the Vec's
+            // buffer is handed over and reconstructed by badlands_image16_free
+            // with len == capacity == width * height.
+            let mut luma = std::mem::ManuallyDrop::new(luma);
+            let ptr = luma.as_mut_ptr();
+            BadlandsImage16 { luma: ptr, width, height }
+        }
+        Ok(None) => failed_image16(),
+        Err(_) => {
+            eprintln!("badlands_decode_image16: panicked");
+            failed_image16()
+        }
+    }
+}
+
+/// Free the sample buffer of a `BadlandsImage16` returned by
+/// `badlands_decode_image16`. Safe to call on a failure result (NULL `luma`).
+///
+/// # Safety
+/// `image.luma` must be either NULL or a pointer previously returned by
+/// `badlands_decode_image16` (with matching `width`/`height`) that has not
+/// already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_image16_free(image: BadlandsImage16) {
+    if panic::catch_unwind(|| {
+        if !image.luma.is_null() {
+            let n = (image.width as usize) * (image.height as usize);
+            drop(unsafe { Vec::from_raw_parts(image.luma, n, n) });
+        }
+    })
+    .is_err()
+    {
+        eprintln!("badlands_image16_free: panicked");
+    }
+}
+
 /// Free the pixel buffer of a `BadlandsImage` returned by
 /// `badlands_decode_jpeg` or `badlands_decode_image`. Safe to call on a
 /// failure result (NULL `rgba`).
@@ -230,6 +334,48 @@ pub unsafe extern "C" fn badlands_write_png(
         Ok(Ok(())) => {}
         Ok(Err(msg)) => eprintln!("badlands_write_png: failed: {msg}"),
         Err(_) => eprintln!("badlands_write_png: panicked"),
+    }
+}
+
+/// Write a 16-bit single-channel image to a PNG file at `path`. The symmetric
+/// writer for `badlands_decode_image16` -- for heightmaps and other data where
+/// the 16-bit precision is the point (the RGBA8 `badlands_write_png` would
+/// truncate it, mirroring the decode side).
+///
+/// Failures (null input, non-UTF8/unwritable path, encode error, or an internal
+/// panic) are logged to stderr; there is no success/failure signal across the C
+/// ABI.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string. `luma` must point at at
+/// least `width * height` readable u16 samples (tightly packed, no row padding).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_write_png16(
+    path: *const c_char,
+    luma: *const u16,
+    width: u32,
+    height: u32,
+) {
+    let result = panic::catch_unwind(|| {
+        if path.is_null() || luma.is_null() {
+            return Err("null path or sample buffer".to_string());
+        }
+        let path = unsafe { CStr::from_ptr(path) }
+            .to_str()
+            .map_err(|e| e.to_string())?;
+        let n = (width as usize) * (height as usize);
+        let samples = unsafe { std::slice::from_raw_parts(luma, n) }.to_vec();
+        let img = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(width, height, samples)
+            .ok_or_else(|| "sample buffer too small for width*height".to_string())?;
+        image::DynamicImage::ImageLuma16(img)
+            .save(path)
+            .map_err(|e| e.to_string())
+    });
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => eprintln!("badlands_write_png16: failed: {msg}"),
+        Err(_) => eprintln!("badlands_write_png16: panicked"),
     }
 }
 
@@ -345,6 +491,88 @@ mod tests {
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         assert_eq!(&rgba[0..4], &[10, 20, 30, 255], "pixel (0,0)");
         assert_eq!(&rgba[12..16], &[100, 110, 120, 255], "pixel (1,1)");
+    }
+
+    /// Encode a 16-bit grayscale PNG whose samples are deliberately NOT
+    /// multiples of 257 — i.e. values that cannot survive a round trip through
+    /// 8 bits. That is what makes these tests able to fail: with `to_rgba8()`
+    /// in the path, 0x1234 collapses to 0x1212, not 0x1234.
+    fn png16_fixture(vals: [u16; 4]) -> Vec<u8> {
+        let mut img = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(2, 2);
+        img.put_pixel(0, 0, image::Luma([vals[0]]));
+        img.put_pixel(1, 0, image::Luma([vals[1]]));
+        img.put_pixel(0, 1, image::Luma([vals[2]]));
+        img.put_pixel(1, 1, image::Luma([vals[3]]));
+        let mut bytes: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageLuma16(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .expect("encode png16");
+        assert_eq!(&bytes[0..8], b"\x89PNG\r\n\x1a\n");
+        bytes
+    }
+
+    #[test]
+    fn decode_bytes_luma16_preserves_full_precision() {
+        let vals = [0x1234u16, 0xFFFF, 0x0001, 0xABCD];
+        let (luma, w, h) = decode_bytes_luma16(&png16_fixture(vals)).expect("decode luma16");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(luma.len(), 4);
+        assert_eq!(luma, vals.to_vec(), "16-bit samples must survive exactly");
+    }
+
+    #[test]
+    fn decode_bytes_truncates_16bit_but_luma16_does_not() {
+        // Pins the exact reason badlands_decode_image16 has to exist: the RGBA8
+        // path silently destroys the low byte. If this ever starts passing with
+        // equal values, the two paths have converged and one is redundant.
+        let png = png16_fixture([0x1234, 0xFFFF, 0x0001, 0xABCD]);
+        let (rgba, _, _) = decode_bytes(&png).expect("decode rgba8");
+        assert_eq!(rgba[0], 0x12, "to_rgba8 keeps only the high byte");
+
+        let (luma, _, _) = decode_bytes_luma16(&png).expect("decode luma16");
+        assert_eq!(luma[0], 0x1234, "luma16 keeps both bytes");
+    }
+
+    #[test]
+    fn decode_bytes_luma16_widens_8bit_source_losslessly() {
+        // An 8-bit source must still decode, scaled 0..255 -> 0..65535, so the
+        // biome/label PNGs and any 8-bit height source stay readable.
+        let mut img = image::GrayImage::new(2, 1);
+        img.put_pixel(0, 0, image::Luma([0]));
+        img.put_pixel(1, 0, image::Luma([255]));
+        let mut bytes: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .expect("encode png8");
+        let (luma, _, _) = decode_bytes_luma16(&bytes).expect("decode luma16");
+        assert_eq!(luma, vec![0u16, 65535]);
+    }
+
+    #[test]
+    fn ffi_decode_image16_roundtrip() {
+        let vals = [0x1234u16, 0xFFFF, 0x0001, 0xABCD];
+        let dir = std::env::temp_dir().join("badlands_png16_ffi");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("h16.png");
+        std::fs::write(&path, png16_fixture(vals)).expect("write png16");
+
+        let c = CString::new(path.to_str().unwrap()).unwrap();
+        let img = unsafe { badlands_decode_image16(c.as_ptr()) };
+        assert!(!img.luma.is_null(), "decode16 should succeed");
+        assert_eq!((img.width, img.height), (2, 2));
+        let got = unsafe { std::slice::from_raw_parts(img.luma, 4) }.to_vec();
+        assert_eq!(got, vals.to_vec(), "16-bit precision must survive the C ABI");
+        unsafe { badlands_image16_free(img) };
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ffi_decode_image16_missing_file_returns_null() {
+        let c = CString::new("/nonexistent/nope16.png").unwrap();
+        let img = unsafe { badlands_decode_image16(c.as_ptr()) };
+        assert!(img.luma.is_null());
+        assert_eq!((img.width, img.height), (0, 0));
+        unsafe { badlands_image16_free(img) };  // must be safe on a failure result
     }
 
     #[test]
@@ -500,6 +728,25 @@ mod tests {
         assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
         assert_eq!(rgba.get_pixel(1, 1).0, [255, 255, 255, 255]);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ffi_write_png16_roundtrip() {
+        // write16 -> decode16 must preserve every u16 sample exactly, including
+        // values that could not survive an 8-bit round trip (not multiples of 257).
+        let path = std::env::temp_dir().join("badlands_write_png16_roundtrip.png");
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        let vals: [u16; 4] = [0x1234, 0xFFFF, 0x0001, 0xABCD];
+
+        unsafe { badlands_write_png16(c_path.as_ptr(), vals.as_ptr(), 2, 2) };
+
+        let img = unsafe { badlands_decode_image16(c_path.as_ptr()) };
+        assert!(!img.luma.is_null(), "written png16 should decode");
+        assert_eq!((img.width, img.height), (2, 2));
+        let got = unsafe { std::slice::from_raw_parts(img.luma, 4) }.to_vec();
+        assert_eq!(got, vals.to_vec(), "16-bit samples must survive write->decode");
+        unsafe { badlands_image16_free(img) };
         let _ = std::fs::remove_file(&path);
     }
 }

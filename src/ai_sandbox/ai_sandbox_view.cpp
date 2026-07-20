@@ -16,28 +16,16 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/scene/blockout_materials.hpp"
 
 namespace badlands {
 
 namespace {
 
-// Capsule solid colors (linear 0..1 RGB) + shared mid roughness, resolved to
-// cached deferred materials via MaterialLibrary::SolidColor. Normal falls
-// back to the normalmapped factory's flat-normal default.
-constexpr glm::vec3 kCapsuleRedRgb{200.0f / 255.0f, 30.0f / 255.0f,
-                                   30.0f / 255.0f};
-constexpr glm::vec3 kCapsuleBlueRgb{30.0f / 255.0f, 60.0f / 255.0f,
-                                    200.0f / 255.0f};
-constexpr float kCapsuleRoughness = 140.0f / 255.0f;
-
-// Flat light-gray debug material for the floor + walls (Task T0): rgb is
-// pre-encoded so that, after SolidColor's non-sRGB texture is re-linearized
-// by deferred_lighting.wesl's srgb_to_linear, the surface lands at linear
-// 0.75 reflectance (linear_to_srgb(0.75) ~= 0.881). Roughness is maxed to
-// keep the surface diffuse-looking (minimal specular) so shadows read
-// clearly against it.
-constexpr glm::vec3 kDebugGray{0.881f};
-constexpr float kDebugGrayRoughness = 1.0f;
+// Debug materials come from the shared blockout palette (game/scene/
+// blockout_materials.hpp) so the game's blockout mode and this arena draw from
+// one source of truth: blockout::kArenaGray/kArenaRoughness for the floor +
+// walls, blockout::kCapsuleRed/kCapsuleBlue/kCapsuleRoughness for the capsules.
 
 // Wall block footprint/height (world units; tile = 1.0 world unit).
 constexpr float kWallHalfFootprint = 0.5f;
@@ -103,7 +91,7 @@ void AiSandboxView::BuildScene() {
   const float full_x = static_cast<float>(arena_.accessible.x + 2);
   const float full_z = static_cast<float>(arena_.accessible.y + 2);
   const float floor_size = std::max(full_x, full_z) + 4.0f;
-  AddFloor(scene_, floor_size, matlib_.SolidColor(kDebugGray, kDebugGrayRoughness),
+  AddFloor(scene_, floor_size, matlib_.SolidColor(blockout::kArenaGray, blockout::kArenaRoughness),
            floor_size / kFloorUvRepeatSpacing);
 
   AddWalls();
@@ -112,7 +100,7 @@ void AiSandboxView::BuildScene() {
 
 void AiSandboxView::AddWalls() {
   const DeferredMaterial wall_mat =
-      matlib_.SolidColor(kDebugGray, kDebugGrayRoughness);
+      matlib_.SolidColor(blockout::kArenaGray, blockout::kArenaRoughness);
 
   int index = 0;
   for (const glm::ivec2& tile : arena_.wall_tiles) {
@@ -155,9 +143,9 @@ void AiSandboxView::AddCapsules() {
   capsule_b_pos_ = arena_tile_center(tile_b);
 
   const DeferredMaterial red_mat =
-      matlib_.SolidColor(kCapsuleRedRgb, kCapsuleRoughness);
+      matlib_.SolidColor(blockout::kCapsuleRed, blockout::kCapsuleRoughness);
   const DeferredMaterial blue_mat =
-      matlib_.SolidColor(kCapsuleBlueRgb, kCapsuleRoughness);
+      matlib_.SolidColor(blockout::kCapsuleBlue, blockout::kCapsuleRoughness);
 
   // GenerateCapsule's base is already at y=0 (see primitive_mesh_builders.hpp).
   auto capsule_a = GenerateCapsule(kCapsuleRadius, kCapsuleCylinderHeight, 16);
@@ -223,9 +211,7 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
     if (keyboard_state[SDL_SCANCODE_S] || keyboard_state[SDL_SCANCODE_DOWN]) dir.y += 1.0f;
     if (keyboard_state[SDL_SCANCODE_A] || keyboard_state[SDL_SCANCODE_LEFT]) dir.x -= 1.0f;
     if (keyboard_state[SDL_SCANCODE_D] || keyboard_state[SDL_SCANCODE_RIGHT]) dir.x += 1.0f;
-    if (dir.x != 0.0f || dir.y != 0.0f) {
-      gamecam_.Pan(glm::normalize(dir) * gamecam_.pan_speed * dt);
-    }
+    gamecam_.PanKeyboard(dir, dt);  // zoom-scaled; no-op when dir is zero
   }
 
   gamecam_.UpdateCamera(camera_);

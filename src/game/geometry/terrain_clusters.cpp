@@ -14,19 +14,40 @@
 #include <spdlog/spdlog.h>
 
 #include "core/parallel.hpp"  // ParallelFor (per-group build parallelism)
-#include "game/geometry/terrain_mesh.hpp"  // SampleHeight, NormalAt, PackU8x4
 #include "mapgen/biomes.hpp"
-#include "mapgen/mapgen_constants.hpp"
 
 namespace badlands {
 
 namespace {
 
-using mapgen::Field2D;
 using mapgen::kBiomePalette;
-using mapgen::kMetersPerSample;
 
-int clampi(int v, int lo, int hi) { return std::min(std::max(v, lo), hi); }
+// Pack four u8 into one float slot (matches the Uint8x4 / Unorm8x4 vertex
+// attributes). Local copy: the MapData-based terrain_mesh keeps its own
+// PackU8x4 internal, and the cluster build has no other terrain_mesh dependency.
+float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+  const uint32_t u = static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) |
+                     (static_cast<uint32_t>(c) << 16) |
+                     (static_cast<uint32_t>(d) << 24);
+  float f;
+  std::memcpy(&f, &u, sizeof(float));
+  return f;
+}
+
+// Surface normal from central differences of the map's bilinear heightmap, one
+// lattice spacing apart. A pure function of world position (HeightAt clamps at
+// the edges), so two callers sampling the same node get bitwise-identical
+// normals -- what makes shared boundary vertices crack-free. Mirrors the simple
+// terrain_mesh builder's normal so both agree on the surface.
+glm::vec3 NormalAt(const MapData& map, float wx, float wz) {
+  const float d = map.spacing_m();
+  const float hl = map.HeightAt(wx - d, wz);
+  const float hr = map.HeightAt(wx + d, wz);
+  const float hd = map.HeightAt(wx, wz - d);
+  const float hu = map.HeightAt(wx, wz + d);
+  return glm::normalize(glm::vec3(-(hr - hl) / (2.0f * d), 1.0f,
+                                  -(hu - hd) / (2.0f * d)));
+}
 
 // A leaf quad is 2 triangles, so a tile_quads^2 tile is this many triangles —
 // the per-cluster budget (mirrors kClusterTriBudget for the default tile_quads).
@@ -152,25 +173,24 @@ uint32_t EmitCluster(TerrainClusterDag& dag,
   return cidx;
 }
 
-// The 2-triangle-per-quad leaf tile [qx0,qx1] x [qz0,qz1] (in quads = samples),
-// vertex grid at 1 sample spacing, one consistent diagonal (n00->n11).
-ClusterGeom BuildLeafGeom(const Field2D<float>& height,
-                          const Field2D<uint8_t>& biomes, int qx0, int qz0,
-                          int qx1, int qz1) {
-  const float mps = static_cast<float>(kMetersPerSample);
+// The 2-triangle-per-quad leaf tile [qx0,qx1] x [qz0,qz1] (in lattice nodes),
+// vertex grid at map.spacing_m() spacing, one consistent diagonal (n00->n11).
+// Height/normal/biome sample the frozen MapData lattice directly.
+ClusterGeom BuildLeafGeom(const MapData& map, int qx0, int qz0, int qx1,
+                          int qz1) {
+  const float sp = map.spacing_m();
   const int vx = qx1 - qx0 + 1;
   const int vz = qz1 - qz0 + 1;
   ClusterGeom g;
   g.verts.reserve(static_cast<size_t>(vx) * vz);
   for (int j = qz0; j <= qz1; ++j) {
     for (int i = qx0; i <= qx1; ++i) {
-      const float wx = static_cast<float>(i) * mps;
-      const float wz = static_cast<float>(j) * mps;
+      const float wx = static_cast<float>(i) * sp;
+      const float wz = static_cast<float>(j) * sp;
       WorkVertex v;
-      v.pos = glm::vec3(wx, SampleHeight(height, wx, wz), wz);
-      v.normal = NormalAt(height, wx, wz);
-      v.biome = biomes.at(clampi(i, 0, biomes.width - 1),
-                          clampi(j, 0, biomes.height - 1));
+      v.pos = glm::vec3(wx, map.height(i, j), wz);
+      v.normal = NormalAt(map, wx, wz);
+      v.biome = static_cast<uint8_t>(map.WeightsAtNode(i, j).Dominant());
       g.verts.push_back(v);
     }
   }
@@ -440,20 +460,20 @@ void SelectClusters(const TerrainClusterDag& dag, glm::vec3 cam_pos,
   }
 }
 
-TerrainClusterDag BuildTerrainClusterDag(const Field2D<float>& heightmap,
-                                         const Field2D<uint8_t>& biomes,
+TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
                                          const TerrainClusterParams& params) {
   const auto t_start = std::chrono::steady_clock::now();
-  const float mps = static_cast<float>(kMetersPerSample);
+  const float sp = map.spacing_m();
   const int Q = std::max(1, params.tile_quads);
-  const int W = heightmap.width;
-  const int H = heightmap.height;
+  // Quads span the lattice: (nodes-1) quads over nodes vertices per axis.
+  const int W = std::max(0, map.nodes_x() - 1);
+  const int H = std::max(0, map.nodes_z() - 1);
 
   TerrainClusterDag dag;
   dag.map_quads_x = W;
   dag.map_quads_z = H;
-  const float map_w = static_cast<float>(W) * mps;
-  const float map_h = static_cast<float>(H) * mps;
+  const float map_w = static_cast<float>(W) * sp;
+  const float map_h = static_cast<float>(H) * sp;
 
   // Geometry of every cluster, parallel to dag.clusters, kept so each level can
   // consume the level below. EmitCluster appends to both in lock-step.
@@ -470,14 +490,14 @@ TerrainClusterDag BuildTerrainClusterDag(const Field2D<float>& heightmap,
     for (int tx = 0; tx < tiles_x; ++tx) {
       const int qx0 = tx * Q, qx1 = std::min((tx + 1) * Q, W);
       const int qz0 = tz * Q, qz1 = std::min((tz + 1) * Q, H);
-      ClusterGeom leaf = BuildLeafGeom(heightmap, biomes, qx0, qz0, qx1, qz1);
+      ClusterGeom leaf = BuildLeafGeom(map, qx0, qz0, qx1, qz1);
       const uint32_t cidx =
           EmitCluster(dag, cluster_geom, std::move(leaf), 0, kNoGroup);
       Region& r = grid.at(tx, tz);
-      r.x0 = qx0 * mps;
-      r.z0 = qz0 * mps;
-      r.x1 = qx1 * mps;
-      r.z1 = qz1 * mps;
+      r.x0 = qx0 * sp;
+      r.z0 = qz0 * sp;
+      r.x1 = qx1 * sp;
+      r.z1 = qz1 * sp;
       r.clusters = {cidx};
     }
   }
