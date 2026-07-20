@@ -125,11 +125,11 @@ uint32_t EmitCluster(TerrainClusterDag& dag,
 
   glm::vec3 lo(FLT_MAX), hi(-FLT_MAX);
   for (const WorkVertex& v : geom.verts) {
-    // Palette bytes are written RAW (no sRGB->linear decode), matching legacy
-    // terrain: the G-buffer albedo target is linear BGRA8Unorm and terrain_blend
-    // loads its textures as plain RGBA8Unorm (no sRGB decode), so both paths
-    // treat 8-bit albedo as linear. Linearizing here would make cluster terrain
-    // darker than legacy. See the M4 color-path finding in the docs note.
+    // Palette bytes are written RAW (no sRGB->linear decode), matching the
+    // engine terrain_blend material: the G-buffer albedo target is linear
+    // BGRA8Unorm and terrain_blend loads its textures as plain RGBA8Unorm (no
+    // sRGB decode), so both treat 8-bit albedo as linear. Linearizing here would
+    // make cluster terrain too dark. See the M4 color-path finding in the docs.
     const mapgen::Rgb col = kBiomePalette[v.biome];
     dag.vertices.push_back(v.pos.x);
     dag.vertices.push_back(v.pos.y);
@@ -337,10 +337,11 @@ GroupResult SimplifyAndSplit(ClusterGeom merged, const glm::vec4& footprint,
   return res;
 }
 
-// Bounding sphere of an AABB (center + half-diagonal).
+// Bounding sphere of an AABB (center + half-diagonal). Aabb::Extents() is the
+// full size (max-min), so half its length is the half-diagonal — bit-identical
+// to the previous 0.5*length(max-min).
 glm::vec4 SphereOfAabb(const Aabb& b) {
-  const glm::vec3 c = 0.5f * (b.min + b.max);
-  return glm::vec4(c, 0.5f * glm::length(b.max - b.min));
+  return glm::vec4(b.Center(), 0.5f * glm::length(b.Extents()));
 }
 
 // Per-level build summary — the observable for M1 (nothing renders yet).
@@ -393,6 +394,12 @@ void SelectClusters(const TerrainClusterDag& dag, glm::vec3 cam_pos,
                     float fov_deg, float screen_h_px, float tau_px,
                     std::vector<uint32_t>& out) {
   out.clear();
+
+  // Sanitize tau into a finite window: negative/0/+inf/NaN each otherwise yield
+  // an EMPTY cut (blank terrain) — see kMinTauPx/kMaxTauPx. Clamping guarantees a
+  // valid non-empty exact cover for any caller input.
+  tau_px = std::isnan(tau_px) ? kDefaultTauPx
+                              : std::clamp(tau_px, kMinTauPx, kMaxTauPx);
 
   // Shared perspective scale: a world-meter error e at LOD-sphere distance d
   // projects to e * k / d pixels. k = screen_h / (2 tan(fov/2)).
@@ -612,6 +619,14 @@ TerrainClusterDag BuildTerrainClusterDag(const Field2D<float>& heightmap,
       }
     }
     grid = std::move(next);
+    // Free the just-consumed level's scratch geometry. Every level-`cur` cluster
+    // was in `grid` and has now been welded into level cur+1; WeldChildren only
+    // ever reads the live grid's level, so this geom is dead. cluster_geom is
+    // parallel to dag.clusters and never serialized, so clearing it cannot
+    // perturb the DAG output (the determinism/invariant tests stay green).
+    for (uint32_t c = 0; c < cluster_geom.size(); ++c) {
+      if (dag.clusters[c].level == cur) cluster_geom[c] = ClusterGeom{};
+    }
     ++cur;
   }
   dag.level_count = cur + 1;

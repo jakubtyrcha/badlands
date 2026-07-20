@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -417,6 +418,29 @@ TEST_CASE("terrain cluster DAG: SelectClusters cut validity", "[terrain_clusters
         prev = tris;
       }
     }
+  }
+}
+
+// Any tau — including degenerate ones (negative, 0, NaN, +inf, absurdly large)
+// — must still yield a valid, NON-EMPTY exact cover, because SelectClusters
+// sanitizes tau into [kMinTauPx, kMaxTauPx]. Without the clamp, each of these
+// produces an EMPTY cut (blank terrain): the finding this guards. RED before the
+// clamp (cut.empty()), GREEN after.
+TEST_CASE("terrain cluster DAG: SelectClusters valid non-empty cover for any tau",
+          "[terrain_clusters]") {
+  const int w = 64, h = 64;
+  const auto dag = BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h));
+  const glm::vec3 cam(32.0f, 80.0f, 32.0f);
+  const float fov = 45.0f, screen_h = 900.0f;
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  std::vector<uint32_t> cut;
+  for (float tau : {-1.0f, 0.0f, nan, inf, 1e30f, 1.5f}) {
+    CAPTURE(tau);
+    SelectClusters(dag, cam, fov, screen_h, tau, cut);
+    REQUIRE_FALSE(cut.empty());
+    // Same antichain + exact-leaf-cover checks the cut-validity test uses.
+    CheckCutValidity(dag, cam, fov, screen_h, tau);
   }
 }
 

@@ -50,6 +50,15 @@ inline constexpr int kFloatsPerClusterVertex = 8;
 // root's parent_group (treated as +inf error by selection -> never coarsened).
 inline constexpr int kNoGroup = -1;
 
+// tau (screen-space-error budget, pixels): the runtime LOD knob. SelectClusters
+// sanitizes its tau into [kMinTauPx, kMaxTauPx] (NaN -> kDefaultTauPx) so no
+// input can blank the terrain — negative/0/NaN/+inf all otherwise yield an EMPTY
+// cut (for +inf even the roots fail parent_proj > tau). kMaxTauPx stays finite so
+// the roots remain selectable; the mapview slider uses the same min/max range.
+inline constexpr float kMinTauPx = 0.25f;    // finest budget (= slider min)
+inline constexpr float kMaxTauPx = 16.0f;    // coarsest; keeps roots selectable
+inline constexpr float kDefaultTauPx = 1.5f;
+
 // Build knobs. Every field defaults to the constexpr above (or a tuned weight);
 // the build reads these everywhere so a test can rebuild with, e.g., tile_quads
 // = 4 and assert the invariants still hold (spec Verification test 6).
