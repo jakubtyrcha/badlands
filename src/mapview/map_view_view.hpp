@@ -27,7 +27,6 @@
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
-#include "engine/rendering/material_library.hpp"
 #include "game/geometry/terrain_clusters.hpp"
 #include "mapgen/config.hpp"
 #include "mapgen/pipeline.hpp"
@@ -68,7 +67,6 @@ class MapViewView : public AppView {
   wgpu::Device device_;
   wgpu::Queue queue_;
 
-  MaterialLibrary matlib_;
   CubemapBuilder sky_cube_;
 
   // Daylight (Hosek-Wilkie sky + directional sun), same system the game uses.
@@ -77,10 +75,6 @@ class MapViewView : public AppView {
   DaylightConfig daylight_cfg_;
   float time_of_day_ = 0.5f;
   void ApplyDaylight();  // re-bakes sky + IBL; not cheap, call on change only
-
-  // Per-biome PBR texture arrays (albedo/normal/arm), layer index = Biome enum
-  // value. Held here to keep the GPU textures alive for the material's lifetime.
-  MaterialLibrary::TerrainArrays terrain_arrays_;
 
   entt::registry registry_;
   SceneContext scene_context_;

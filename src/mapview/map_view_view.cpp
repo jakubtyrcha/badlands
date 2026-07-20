@@ -23,35 +23,20 @@
 #include "game/geometry/terrain_mesh.hpp"  // SampleHeight, NormalAt, RaycastTerrain
 #include "mapgen/mapgen_constants.hpp"
 #include "mapgen/pipeline.hpp"
-#include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
 
 namespace badlands {
 
 namespace {
 constexpr int kSubdiv = 2;  // subgrid cells per block edge (grid-overlay only)
-constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json";
 }  // namespace
 
 bool MapViewView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
 
-  if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
-    spdlog::error("MapViewView: MaterialLibrary init failed");
-    return false;
-  }
   ApplyDaylight();
   scene_context_.registry = &registry_;
 
-  // One PBR pack per biome, layer index = Biome enum value. The mapping is data
-  // (assets/materials/terrain_biomes.json); the engine only sees "N packs".
-  std::vector<std::string> pack_dirs;
-  if (!ResolveBiomePacks(kBiomeManifestPath, pack_dirs)) return false;
-  terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
-  if (!matlib_.ok()) {
-    spdlog::error("MapViewView: terrain material packs failed to load");
-    return false;
-  }
   // Generate the map in-process — the same pipeline --preview-image-only dumps,
   // so the rendered terrain and the preview PNGs can never disagree.
   std::string err;
@@ -187,6 +172,9 @@ void MapViewView::UpdateClusterLod() {
   // function of camera POSITION + LOD sphere only (not orientation), tau, and
   // the viewport height — so if all three match the last cut, the ranges are
   // still exact and re-running SelectClusters would produce the identical set.
+  // fov is intentionally NOT in the guard: mapview's fov is constant. If a
+  // runtime FOV control is ever added, fov must join this check (it scales the
+  // projected-error metric).
   if (camera_.position == last_sel_cam_pos_ && tau_px_ == last_sel_tau_ &&
       screen_h_px_ == last_sel_screen_h_) {
     return;
