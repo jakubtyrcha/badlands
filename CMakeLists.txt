@@ -159,6 +159,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/brdf_lut.cpp
     src/engine/rendering/prefiltered_cubemap.cpp
     src/engine/app/sdl_viewer_app.cpp
+    src/engine/app/imgui_mouse_input.cpp
     src/engine/app/screenshot.cpp
     src/engine/app/screenshot_recorder.cpp
     src/engine/app/orbit_camera_controller.cpp
@@ -473,6 +474,25 @@ if(APPLE)
     target_link_options(badlands_daylight_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_daylight_tests COMMAND badlands_daylight_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_input_tests: Catch2 suite for the event-driven mouse tracker
+# (imgui_mouse_input). Pure tests for ImGuiButtonIndex/ApplyButton, headless-ImGui
+# behaviour (same-frame click, foreign-windowID release, drag-leaves-window,
+# idle-leave), and a RAII-guarded stock-backend repro of the windowID-drop wedge
+# the tracker sidesteps. Links badlands_engine (carries SDL3 + ImGui + the
+# imgui_impl_sdl3 backend); creates a hidden window in-test.
+add_executable(badlands_input_tests
+    game/tests/imgui_input_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_input_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_input_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_input_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_input_tests COMMAND badlands_input_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_fog_tests: Catch2 suite for the volumetric-fog cascade addressing
 # math (height-band clipmap: voxel sizes, camera-centered windows, cascade
