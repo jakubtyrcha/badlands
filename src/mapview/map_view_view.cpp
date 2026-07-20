@@ -23,11 +23,7 @@
 namespace badlands {
 
 namespace {
-constexpr int kSubdiv = 2;  // lattice cells per block edge (grid overlay + spacing)
-// The terrain lattice spacing: unchanged mesh density (one cell per
-// kBlockSizeM/kSubdiv metres, exactly what the old subdiv=2 builder emitted).
-constexpr float kLatticeSpacingM =
-    static_cast<float>(mapgen::kBlockSizeM) / kSubdiv;
+constexpr int kSubdiv = 2;  // subgrid cells per block edge (grid overlay only)
 
 // Wrap the mapgen pipeline output in the frozen MapData contract WITHOUT
 // changing what mapview renders: the lattice is sampled at the mesh's own
@@ -118,10 +114,14 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
-  // Wrap the pipeline output in the frozen MapData contract (one-hot biomes at
-  // the mesh's lattice spacing) -- the input to the cluster terrain and picking.
+  // Wrap the pipeline output in the frozen MapData contract (one-hot biomes) at
+  // the heightmap's NATIVE resolution -- the input to the cluster terrain and
+  // picking. The cluster LOD's job is to decimate from full detail, so the leaf
+  // lattice is the finest source data (1 m), not the coarse mesh density the old
+  // fixed-subdiv chunk builder used; LOD selection manages the triangle cost.
   t = clock::now();
-  terrain_map_ = MakeOneHotMapData(map_, kLatticeSpacingM);
+  terrain_map_ =
+      MakeOneHotMapData(map_, static_cast<float>(mapgen::kMetersPerSample));
   log_step("map->MapData", since(t));
 
   // Frame the camera BEFORE building the terrain, so the cluster path's initial
