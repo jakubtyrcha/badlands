@@ -298,7 +298,7 @@ TEST_CASE("fog emitter: physical sigma_t is written directly (no normalization)"
   REQUIRE(centre == Catch::Approx(0.006f).margin(3e-4f));
 }
 
-TEST_CASE("fog emitters: overlapping discs accumulate (sum)", "[fogsim][gpu]") {
+TEST_CASE("fog emitters: overlapping discs union (max, not sum)", "[fogsim][gpu]") {
   fog::Emitter a;
   a.center = {-4.0f, 0.0f};
   a.half_extent = {14.0f, 14.0f};
@@ -320,14 +320,18 @@ TEST_CASE("fog emitters: overlapping discs accumulate (sum)", "[fogsim][gpu]") {
   for (int tz = 0; tz < kL.res_xz; ++tz) {
     for (int tx = 0; tx < kL.res_xz; ++tx) {
       const glm::vec3 w = TexelWorld(tx, tz, slice);
-      const float ref = DiscEval(a, w) + DiscEval(b, w);  // additive extinction
+      // Extinction unions: composeEmitters takes the MAX of overlapping emitters.
+      const float ref = std::max(DiscEval(a, w), DiscEval(b, w));
       max_err = std::max(max_err, std::abs(img.GetFloat(tx, tz) - ref));
       peak = std::max(peak, ref);
     }
   }
-  spdlog::info("additive: peak={} max_err={}", peak, max_err);
-  REQUIRE(peak > 0.05f);       // overlap sums above either alone
-  REQUIRE(max_err < 0.002f);
+  spdlog::info("union(max): peak={} max_err={}", peak, max_err);
+  REQUIRE(max_err < 0.002f);   // GPU matches the max reference
+  // Peak is the stronger emitter's own magnitude (~0.04), NOT the 0.07 sum:
+  // overlap does not brighten beyond either emitter alone.
+  REQUIRE(peak > 0.035f);
+  REQUIRE(peak < 0.045f);
 }
 
 TEST_CASE("fog emitter: noise is deterministic, animated, and bounded",

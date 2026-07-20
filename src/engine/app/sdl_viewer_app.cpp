@@ -14,6 +14,7 @@
 
 #include "core/profiler.hpp"
 #include "engine/app/fixed_timestep.hpp"
+#include "engine/app/imgui_mouse_input.hpp"
 #include "engine/app/screenshot.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
 #include "engine/ui/imgui_impl_wgpu_custom.hpp"
@@ -40,7 +41,11 @@ void SdlViewerApp::InitImGui(int width, int height) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
-  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  // NOT NavEnableKeyboard: it makes ImGui auto-activate keyboard nav on a panel
+  // (navActive => WantCaptureKeyboard true) from startup, which gates the view's
+  // WSAD pan off until nav happens to deactivate. The apps don't use ImGui
+  // keyboard nav, so leaving it off keeps WantCaptureKeyboard false except when a
+  // text field is actually focused.
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
   ImGui::StyleColorsDark();
 
@@ -63,6 +68,18 @@ void SdlViewerApp::InitImGui(int width, int height) {
 namespace {
 // Default recording directory for the F2 live-toggle (no path argument).
 constexpr const char* kDefaultRecordDir = "recordings";
+
+// Opt-in (BADLANDS_PROFILE=1) performance logging. The CPU scope-profile tree
+// (profiler::ReportToStderr) and the per-pass GPU timings both dump to stderr
+// every ~2 s; that noise buries everything else in a normal run. Off by default;
+// the profiler is still COMPILED in (BADLANDS_PROFILING), so flipping this env
+// var turns it back on with no rebuild. When off, GPU timestamp collection is
+// skipped entirely (EnableGpuProfiling is not called), so there's zero cost.
+const bool kProfileDump = [] {
+  const char* v = std::getenv("BADLANDS_PROFILE");
+  return v != nullptr && v[0] != '\0' && v[0] != '0';
+}();
+
 }  // namespace
 
 int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
@@ -81,6 +98,14 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   const bool screenshot_mode = !screenshot_path.empty();
 
   if (!SDL_Init(SDL_INIT_VIDEO)) return 1;
+
+  // macOS: a bare (non-.app) binary launched from a shell often opens WITHOUT
+  // becoming the active application, so its window is not key. In that state the
+  // FIRST click is normally swallowed to activate the window (acceptsFirstMouse
+  // defaults NO) instead of being delivered. Turn on click-through so that
+  // activating click ALSO reaches the app -- the user's first click isn't wasted.
+  // No-op on platforms without the notion. (Read live per-event, but set early.)
+  SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
 
   // In screenshot mode we render into an offscreen texture, not the SDL
   // surface, but a window is still needed: GpuContext::Initialize requires
@@ -105,7 +130,10 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
                        static_cast<uint32_t>(height), gpu_.HasR8UnormStorage());
 #ifdef BADLANDS_PROFILING
   // Per-pass GPU timing in the live window (prints alongside the CPU profile).
-  renderer_.EnableGpuProfiling(gpu_.GetInstance(), gpu_.HasTimestampQuery());
+  // Only when BADLANDS_PROFILE is set -- otherwise skip the timestamp-query
+  // machinery entirely.
+  if (kProfileDump)
+    renderer_.EnableGpuProfiling(gpu_.GetInstance(), gpu_.HasTimestampQuery());
 #endif
 
   // ImGui is windowed-path only: screenshot mode renders offscreen via
@@ -148,6 +176,18 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     recorder_.Start(record_dir);
   }
 
+  // Event-based activation: raise the window the first time the OS reports it
+  // visible (SDL_EVENT_WINDOW_SHOWN, handled in the loop). A pre-loop raise is
+  // too early on macOS -- Cocoa_RaiseWindow only activates once the window is
+  // visible -- so we wait for that event instead of polling on a timeout.
+  // Combined with SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH (set at startup), input works
+  // from the first frames.
+  bool raised_on_show = false;
+  // Feeds mouse events to ImGui directly (bypassing the stock backend's fragile,
+  // wedge-prone mouse path) and owns OS mouse capture during drags. See
+  // imgui_mouse_input.
+  ImGuiMouseInput mouse_input;
+
   const uint64_t perf_freq = SDL_GetPerformanceFrequency();
   uint64_t last_time = SDL_GetPerformanceCounter();
 #ifdef BADLANDS_PROFILING
@@ -159,10 +199,28 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   while (running) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
-      ImGui_ImplSDL3_ProcessEvent(&e);
+      // Feed mouse events (motion/buttons/leave) to ImGui via our own tracker,
+      // NOT the stock backend -- its event path is what wedges on macOS (dropped
+      // BUTTON_UP on a foreign windowID, pos invalidated on LEAVE). Everything the
+      // tracker consumes it returns true for; forward the rest (wheel, keyboard,
+      // text, focus, resize) to the backend. The views still receive mouse events
+      // directly below (HandleEvent).
+      if (!mouse_input.ProcessEvent(e, ImGui::GetIO())) {
+        ImGui_ImplSDL3_ProcessEvent(&e);
+      }
 
       if (e.type == SDL_EVENT_QUIT) {
         running = false;
+      } else if (e.type == SDL_EVENT_WINDOW_SHOWN ||
+                 e.type == SDL_EVENT_WINDOW_EXPOSED) {
+        // The window is visible now, so SDL_RaiseWindow's Cocoa activate/makeKey
+        // actually takes (unlike the pre-loop attempt). One shot -- no retry.
+        // Triggered by SHOWN or the first EXPOSED (first paint), whichever the
+        // platform delivers, so a backend that omits SHOWN still activates.
+        if (!raised_on_show) {
+          SDL_RaiseWindow(window_);
+          raised_on_show = true;
+        }
       } else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
         SDL_GetWindowSizeInPixels(window_, &width, &height);
         if (width > 0 && height > 0) {
@@ -213,9 +271,13 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     // ImGui::Render() -- ImGui asserts on back-to-back NewFrame() calls.
     ImGui_ImplWGPU_NewFrame();
     ImGui_ImplSDL3_NewFrame();
+    // Mouse pos/buttons were already queued during the event loop above (via
+    // mouse_input, in temporal order), so ImGui's trickle handling works exactly
+    // as designed -- no post-NewFrame re-injection needed.
     ImGui::NewFrame();
     ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
                                  ImGuiDockNodeFlags_PassthruCentralNode);
+
     view_->DrawUI();
 
     renderer_.Render(view_->GetCamera(), view_->GetRegistry(),
@@ -265,14 +327,17 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     }
 
 #ifdef BADLANDS_PROFILING
-    // Dump the accumulated scope profile to stderr roughly every 2 s. Called
-    // here at end-of-frame, after every PROFILE_SCOPE this iteration has
-    // closed, so the reported tree is well-formed. Report() also resets the
-    // buffers, so each dump is a ~2 s window.
-    profile_report_accum += frame_dt;
-    if (profile_report_accum >= 2.0) {
-      profiler::ReportToStderr();
-      profile_report_accum = 0.0;
+    // Dump the accumulated scope profile to stderr roughly every 2 s (only when
+    // BADLANDS_PROFILE is set). Called here at end-of-frame, after every
+    // PROFILE_SCOPE this iteration has closed, so the reported tree is
+    // well-formed. Report() also resets the buffers, so each dump is a ~2 s
+    // window.
+    if (kProfileDump) {
+      profile_report_accum += frame_dt;
+      if (profile_report_accum >= 2.0) {
+        profiler::ReportToStderr();
+        profile_report_accum = 0.0;
+      }
     }
 #endif
 

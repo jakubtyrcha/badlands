@@ -30,17 +30,29 @@ badlands::CpuImage::Color id_color(int id) {
 
 void write_preview_images(const MapgenConfig& cfg, const MapArtifacts& a) {
   const std::string& d = cfg.out_dir;
-  // Raw noise fields (diagnostics).
-  write_gray_png(a.fields.elevation, d + "/elevation.png");
-  write_gray_png(a.fields.moisture, d + "/moisture.png");
-  write_gray_png(a.fields.ridged, d + "/ridged.png");
-  write_gray_png(a.fields.fine, d + "/fine.png");
+  // Raw noise fields + voronoi (diagnostics). An AUTHORED map has none of these --
+  // they are procedural intermediates it never computed -- so skip them rather than
+  // emit 0x0 PNGs. Keyed off the artifacts, not cfg, so this stays right for any
+  // caller that leaves them empty.
+  if (a.fields.elevation.size() > 0) {
+    write_gray_png(a.fields.elevation, d + "/elevation.png");
+    write_gray_png(a.fields.moisture, d + "/moisture.png");
+    write_gray_png(a.fields.ridged, d + "/ridged.png");
+    write_gray_png(a.fields.fine, d + "/fine.png");
+  }
+  if (a.voronoi.cell.size() > 0) {
+    write_hashed_png(a.voronoi.cell, d + "/voronoi.png");
+  }
   // Structure + semantics.
-  write_hashed_png(a.voronoi.cell, d + "/voronoi.png");
   write_biome_png(a.biomes.pixel, d + "/biome.png");
   write_gray_png(a.heightmap, d + "/heightmap.png");
-  write_sections_png(a.blocks, d + "/sections.png");
-  write_section_graph_json(a.graph, d + "/sections.json");
+  // Sections are terraces, which an authored map has none of (see
+  // run_authored_pipeline). With every section_id at -1 these two would be a
+  // uniform image and an empty graph -- omit them rather than imply a result.
+  if (!a.graph.nodes.empty()) {
+    write_sections_png(a.blocks, d + "/sections.png");
+    write_section_graph_json(a.graph, d + "/sections.json");
+  }
 }
 
 void write_gray_png(const Field2D<float>& field, const std::string& path,

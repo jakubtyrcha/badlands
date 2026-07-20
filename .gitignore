@@ -4,6 +4,8 @@
 /terrain_blend_albedo.png
 /.fastembed_cache
 build/
+/mapgen_out/
 /imgui.ini
 .claude/
 .superpowers/
+__pycache__/

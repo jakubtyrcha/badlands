@@ -68,6 +68,23 @@ TEST_CASE("rotated OBB AABB grows to the rotated extent", "[fogsim]") {
   REQUIRE(fog::EmitterAabbMax(e).y == Catch::Approx(expect).margin(1e-4f));
 }
 
+TEST_CASE("ellipse AABB matches the OBB (inscribed, so bound is the box)",
+          "[fogsim]") {
+  fog::Emitter e{};
+  e.center = {0.0f, 0.0f};
+  e.half_extent = {4.0f, 1.0f};
+  e.shape = fog::EmitterShape::Ellipse;
+
+  // Axis-aligned: same box bound as an OBB (the ellipse is inscribed in it).
+  REQUIRE(fog::EmitterAabbMax(e).x == Catch::Approx(4.0f));
+  REQUIRE(fog::EmitterAabbMax(e).y == Catch::Approx(1.0f));
+
+  // Rotated 90 deg swaps the extents, exactly like the OBB.
+  e.rotation = static_cast<float>(M_PI) * 0.5f;
+  REQUIRE(fog::EmitterAabbMax(e).x == Catch::Approx(1.0f).margin(1e-4f));
+  REQUIRE(fog::EmitterAabbMax(e).y == Catch::Approx(4.0f).margin(1e-4f));
+}
+
 // --- Broadphase: cell -> emitter-index buckets -------------------------------
 
 TEST_CASE("broadphase buckets a single emitter into one cell", "[fogsim]") {

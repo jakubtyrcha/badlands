@@ -16,7 +16,10 @@
 #include "engine/rendering/components/material_factory_component.hpp"
 #include "engine/rendering/components/mesh_components.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
+#include "engine/rendering/scene_renderer.hpp"  // GetFogSimulation / MutableFogConfig
+#include "engine/ui/editor_ui.hpp"
 #include "game/geometry/terrain_mesh.hpp"
+#include "mapgen/fog_generator.hpp"
 #include "mapgen/mapgen_constants.hpp"
 #include "mapgen/pipeline.hpp"
 #include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
@@ -32,13 +35,20 @@ constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json
 bool MapViewView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
+  scene_renderer_ = ctx.scene_renderer;  // shared debug/fog selectors need it
 
   if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
     spdlog::error("MapViewView: MaterialLibrary init failed");
     return false;
   }
+  // Start at noon, paused (an inspector holds still until you play/scrub).
+  sim_clock_.speed = 0.0f;
+  sim_clock_.SeekTimeOfDay(0.5f);
   ApplyDaylight();
   scene_context_.registry = &registry_;
+  // Fog renders when enabled; sources come from the biome generator (a later
+  // phase). Enabled here so the fog editor is exercisable.
+  if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = true;
 
   // One PBR pack per biome, layer index = Biome enum value. The mapping is data
   // (assets/materials/terrain_biomes.json); the engine only sees "N packs".
@@ -51,10 +61,15 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
 
-  // Generate the map in-process — the same pipeline --preview-image-only dumps,
-  // so the rendered terrain and the preview PNGs can never disagree.
+  // Build the map in-process — the same pipeline --preview-image-only dumps, so the
+  // rendered terrain and the preview PNGs can never disagree. An authored map loads
+  // its terrain from images instead of generating it; both share everything after.
   std::string err;
-  if (!mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser", map_, err)) {
+  const bool ok = cfg_.map_dir.empty()
+                      ? mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser",
+                                             map_, err)
+                      : mapgen::run_authored_pipeline(cfg_, cfg_.map_dir, map_, err);
+  if (!ok) {
     spdlog::error("MapViewView: {}", err);
     return false;
   }
@@ -113,13 +128,49 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   gamecam_.max_height = std::max(400.0f, map_size_m_);
   gamecam_.UpdateCamera(camera_);
 
+  // Derive world-static fog emitters from the biome map (forest -> flat elliptical
+  // fog, swamp -> granular noise fog) and push them to the renderer's fog sim.
+  fog_emitters_ = mapgen::GenerateBiomeFog(map_.biomes.pixel, map_.heightmap,
+                                           cfg_.seed);
+  spdlog::info("MapViewView: {} biome fog emitters", fog_emitters_.size());
+  SetFogSources();
+
   // The grid follows the mouse, so there is nothing to draw until the cursor is
   // over the terrain (Update wires debug_lines once hover_valid_).
   return true;
 }
 
+void MapViewView::SetFogSources() {
+  if (scene_renderer_ == nullptr) return;
+  const glm::vec2 map_min(0.0f, 0.0f);
+  const glm::vec2 map_max(
+      static_cast<float>(cfg_.width) * mapgen::kMetersPerSample,
+      static_cast<float>(cfg_.height) * mapgen::kMetersPerSample);
+
+  // Biome emitters (edited/picked) plus the world-static map-border wall, appended
+  // after so they never shift the biome indices the editor addresses. The border
+  // is a function of the map bounds only -- no camera -- so it stays put as the
+  // view moves.
+  std::vector<fog::Emitter> all = fog_emitters_;
+  if (border_fog_enabled_) {
+    const std::vector<fog::Emitter> border =
+        mapgen::BuildBorderFog(map_min, map_max, border_fog_);
+    all.insert(all.end(), border.begin(), border.end());
+  }
+
+  FogSimParams p;
+  // The border OBBs straddle the edges, so pad the broadphase by the band so their
+  // (slightly off-map) footprint still buckets.
+  const float pad = border_fog_.band_m + 1.0f;
+  p.map_min = map_min - glm::vec2(pad);
+  p.map_max = map_max + glm::vec2(pad);
+  p.bp_cell_size = 32.0f;
+  scene_renderer_->GetFogSimulation().SetSources(all, p);
+}
+
 void MapViewView::ApplyDaylight() {
-  const DaylightState state = ComputeDaylight(daylight_cfg_, time_of_day_);
+  const DaylightState state =
+      ComputeDaylight(daylight_cfg_, sim_clock_.TimeOfDay());
   ApplyDaylightEnvironment(state, daylight_cfg_, device_, queue_, sky_cube_,
                            scene_context_);
 }
@@ -133,7 +184,8 @@ float MapViewView::SectionHeight(const mapgen::Block& b) const {
 }
 
 void MapViewView::RebuildVisibleGrid() {
-  grid_.Clear();
+  // NB: does NOT clear grid_ -- the caller clears it once and may add other
+  // overlays (the selected fog emitter's OBB) to the same buffer.
   const mapgen::Field2D<mapgen::Block>& blocks = map_.blocks;
   if (blocks.width == 0 || blocks.height == 0 || !hover_valid_) return;
 
@@ -258,12 +310,57 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
       hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
       break;
     }
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+      if (event.button.button != SDL_BUTTON_LEFT) break;
+      glm::vec2 screen;
+      if (!EventWindowLogicalSize(event.button.windowID, screen)) break;
+      const Ray ray = ScreenPointToRay(
+          camera_, glm::vec2(event.button.x, event.button.y), screen);
+      glm::vec3 hit;
+      if (RaycastTerrain(map_.heightmap, ray, hit)) selected_emitter_ = PickEmitter(hit);
+      break;
+    }
     default:
       break;
   }
 }
 
+int MapViewView::PickEmitter(const glm::vec3& world) const {
+  // Which emitter footprint contains `world` (XZ), in its local frame. Nearest
+  // centre wins on overlap. -1 = none (deselect).
+  int best = -1;
+  float best_d2 = 1e30f;
+  for (size_t i = 0; i < fog_emitters_.size(); ++i) {
+    const fog::Emitter& e = fog_emitters_[i];
+    const glm::vec2 d = glm::vec2(world.x, world.z) - e.center;
+    const float cs = std::cos(e.rotation), sn = std::sin(e.rotation);
+    const glm::vec2 local(d.x * cs + d.y * sn, -d.x * sn + d.y * cs);  // rotate by -yaw
+    const glm::vec2 nd(local.x / std::max(e.half_extent.x, 1e-4f),
+                       local.y / std::max(e.half_extent.y, 1e-4f));
+    const bool inside = (e.shape == fog::EmitterShape::Obb)
+                            ? (std::abs(nd.x) <= 1.0f && std::abs(nd.y) <= 1.0f)
+                            : (nd.x * nd.x + nd.y * nd.y <= 1.0f);  // disc/ellipse
+    if (!inside) continue;
+    const float d2 = d.x * d.x + d.y * d.y;
+    if (d2 < best_d2) { best_d2 = d2; best = static_cast<int>(i); }
+  }
+  return best;
+}
+
 void MapViewView::Update(float dt, const bool* keyboard_state) {
+  dt_ = dt;
+
+  // Advance the shared clock; when it's running, move the sun and animate the
+  // fog by the same sim delta (paused => both hold). The daylight re-bake is
+  // throttled implicitly: ApplyDaylight is only called while time actually moves.
+  const double sim_dt = sim_clock_.Advance(dt);
+  if (sim_dt > 0.0) {
+    ApplyDaylight();
+    if (scene_renderer_) {
+      scene_renderer_->GetFogSimulation().AddTime(static_cast<float>(sim_dt));
+    }
+  }
+
   if (keyboard_state != nullptr && ImGui::GetCurrentContext() != nullptr &&
       !ImGui::GetIO().WantCaptureKeyboard) {
     glm::vec2 dir(0.0f);
@@ -271,21 +368,26 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
     if (keyboard_state[SDL_SCANCODE_S] || keyboard_state[SDL_SCANCODE_DOWN]) dir.y += 1.0f;
     if (keyboard_state[SDL_SCANCODE_A] || keyboard_state[SDL_SCANCODE_LEFT]) dir.x -= 1.0f;
     if (keyboard_state[SDL_SCANCODE_D] || keyboard_state[SDL_SCANCODE_RIGHT]) dir.x += 1.0f;
-    if (dir.x != 0.0f || dir.y != 0.0f) {
-      gamecam_.Pan(glm::normalize(dir) * gamecam_.pan_speed * dt);
-    }
+    gamecam_.PanKeyboard(dir, dt);  // zoom-scaled; no-op when dir is zero
   }
   gamecam_.UpdateCamera(camera_);
 
-  // Rebuild the grid window around the hover point each frame (the camera may
-  // have panned under a stationary cursor). No cache: the window is small
-  // (independent of map size), so this is cheap.
-  if (grid_visible_ && hover_valid_) {
-    RebuildVisibleGrid();
-    scene_context_.debug_lines = &grid_;
-  } else {
-    scene_context_.debug_lines = nullptr;
+  // NB: the fog sources are NOT rebuilt per frame -- both the biome fog and the
+  // map-border wall are world-static, so they're uploaded once (Initialize) and
+  // only on edit (the editor). Nothing here depends on the camera.
+
+  // Rebuild the debug-line overlay each frame into one buffer: the hover grid plus
+  // the selected fog emitter's OBB. No cache: both are small (independent of map
+  // size), so this is cheap.
+  grid_.Clear();
+  if (grid_visible_ && hover_valid_) RebuildVisibleGrid();
+  if (selected_emitter_ >= 0 &&
+      selected_emitter_ < static_cast<int>(fog_emitters_.size())) {
+    const fog::Emitter& e = fog_emitters_[selected_emitter_];
+    grid_.AddOrientedBox(e.center, e.rotation, e.half_extent, e.base_y,
+                         e.base_y + e.height, glm::vec3(1.0f, 0.25f, 0.9f), 2.5f);
   }
+  scene_context_.debug_lines = grid_.empty() ? nullptr : &grid_;
 }
 
 void MapViewView::DrawUI() {
@@ -307,11 +409,90 @@ void MapViewView::DrawUI() {
   }
   ImGui::Checkbox("Grid (block + section)", &grid_visible_);
   ImGui::SliderInt("Grid radius (blocks)", &grid_radius_blocks_, 1, 30);
-  // Scrub the sun. Re-bakes only on change (the bake is a CPU per-texel sky
-  // eval + SH projection -- see ApplyDaylightEnvironment).
-  if (ImGui::SliderFloat("Time of day", &time_of_day_, 0.0f, 1.0f, "%.3f")) {
-    ApplyDaylight();
+  ImGui::End();
+
+  // Shared sim/daylight/debug controls (same helpers the game uses). Re-bake the
+  // sky immediately on a scrub or a config edit so it's visible without waiting
+  // for the clock; while playing, Update already re-bakes as time advances.
+  ImGui::Begin("Sim / Daylight / Debug");
+  if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (EditorUI::DrawSimClockControls(sim_clock_)) ApplyDaylight();
   }
+  if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (EditorUI::DrawDaylightEditor(daylight_cfg_)) ApplyDaylight();
+  }
+  if (scene_renderer_ != nullptr) {
+    EditorUI::DrawFogEditor(*scene_renderer_);
+    if (ImGui::CollapsingHeader("Debug Views")) {
+      EditorUI::DrawGBufferDebugSelector(*scene_renderer_);
+      EditorUI::DrawShadowDebugSelector(*scene_renderer_);
+    }
+  }
+  EditorUI::DrawStats(dt_);
+  ImGui::End();
+
+  DrawFogEmitterEditor();
+}
+
+void MapViewView::DrawFogEmitterEditor() {
+  ImGui::Begin("Fog Emitters");
+  ImGui::Text("%zu emitters   (click the terrain to select)", fog_emitters_.size());
+  if (ImGui::Button("Regenerate from biomes")) {
+    fog_emitters_ =
+        mapgen::GenerateBiomeFog(map_.biomes.pixel, map_.heightmap, cfg_.seed);
+    selected_emitter_ = -1;
+    SetFogSources();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Deselect")) selected_emitter_ = -1;
+
+  // World-static fog wall around the map perimeter (does not move with the camera).
+  if (ImGui::CollapsingHeader("Border fog (map edge)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    bool changed = ImGui::Checkbox("Enabled##border", &border_fog_enabled_);
+    changed |= ImGui::SliderFloat("Band (m)", &border_fog_.band_m, 4.0f, 128.0f);
+    changed |= ImGui::SliderFloat("Ramp (m)", &border_fog_.ramp_m, 0.0f, 32.0f);
+    changed |= ImGui::SliderFloat("Magnitude##border", &border_fog_.magnitude, 0.0f, 0.5f, "%.3f");
+    changed |= ImGui::SliderFloat("Height##border", &border_fog_.height_m, 1.0f, 128.0f);
+    if (changed) SetFogSources();  // reflect immediately (also removes the wall when off)
+  }
+
+  if (selected_emitter_ < 0 ||
+      selected_emitter_ >= static_cast<int>(fog_emitters_.size())) {
+    ImGui::TextUnformatted("No emitter selected.");
+    ImGui::End();
+    return;
+  }
+
+  fog::Emitter& e = fog_emitters_[selected_emitter_];
+  ImGui::SeparatorText("Selected emitter");
+  ImGui::Text("#%d  center (%.0f, %.0f)", selected_emitter_, e.center.x, e.center.y);
+
+  bool changed = false;
+  const char* kShapes[] = {"Disc", "OBB", "Ellipse"};
+  int shape = static_cast<int>(e.shape);
+  if (ImGui::Combo("Shape", &shape, kShapes, 3)) {
+    e.shape = static_cast<fog::EmitterShape>(shape);
+    changed = true;
+  }
+  const char* kTypes[] = {"Flat (Disc)", "Noise"};
+  int type = static_cast<int>(e.type);
+  if (ImGui::Combo("Type", &type, kTypes, 2)) {
+    e.type = static_cast<fog::EmitterType>(type);
+    changed = true;
+  }
+  changed |= ImGui::DragFloat2("Half extent", &e.half_extent.x, 0.1f, 0.5f, 200.0f);
+  changed |= ImGui::SliderAngle("Rotation", &e.rotation);
+  changed |= ImGui::DragFloat("Base Y", &e.base_y, 0.1f);
+  changed |= ImGui::SliderFloat("Height", &e.height, 1.0f, 128.0f);
+  changed |= ImGui::SliderFloat("Magnitude", &e.magnitude, 0.0f, 0.5f, "%.3f");
+  changed |= ImGui::SliderFloat("Radial falloff", &e.radial_falloff, 0.0f, 1.0f);
+  changed |= ImGui::SliderFloat("Vertical falloff", &e.vertical_falloff, 0.0f, 1.0f);
+  if (e.type == fog::EmitterType::Noise) {
+    changed |= ImGui::SliderFloat("Noise freq", &e.noise_freq, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Noise contrast", &e.noise_contrast, 0.1f, 4.0f);
+    changed |= ImGui::DragFloat3("Scroll", &e.scroll.x, 0.05f);
+  }
+  if (changed) SetFogSources();  // re-upload the whole set
   ImGui::End();
 }
 

@@ -2,7 +2,8 @@
 // in rgb, extinction sigma_t in a) into a texel sub-box of one cascade of the
 // height-band clipmap. For each froxel it reconstructs the world position, finds
 // the overlapping fog emitters via a world-space broadphase grid, evaluates each
-// (fog_emitters.wesl) and ACCUMULATES their sigma_t (extinction adds).
+// (fog_emitters.wesl) and takes the MAX of their sigma_t (extinction unions, like the
+// analytic fallback shapes; overlapping emitters do not sum to a brighter core).
 //
 // When useEmitters == 0 (no sources) it falls back to the analytic placeholder
 // shapes (fog_shapes.wesl) so the viewer/ai_sandbox still show fog.
@@ -66,7 +67,8 @@ fn composeEmitters(worldPos: vec3<f32>) -> f32 {
     var sigma_t = 0.0;
     for (var k: u32 = 0u; k < count; k = k + 1u) {
         let e = emitters[bpIndices[offset + k]];
-        sigma_t = sigma_t + fogEmitterEval(e, worldPos, params.time);
+        // MAX, not sum: overlapping emitters union their density (fogEmitterEval >= 0).
+        sigma_t = max(sigma_t, fogEmitterEval(e, worldPos, params.time));
     }
     return sigma_t;
 }
