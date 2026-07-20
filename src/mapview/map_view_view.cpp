@@ -34,16 +34,44 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
 
+  // Map-load profiling: time each load step and log a per-step + cumulative
+  // breakdown once. `log_step` accumulates into cum_ms; the closing TOTAL line
+  // is the wall-clock span of the whole load (the tiny untimed bits — camera
+  // framing — are the only gap between the two).
+  using clock = std::chrono::steady_clock;
+  auto since = [](clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+  };
+  const auto t_load = clock::now();
+  double cum_ms = 0.0;
+  auto log_step = [&](const char* name, double ms) {
+    cum_ms += ms;
+    spdlog::info("  {:<13} {:>8.1f} ms   (cum {:>8.1f} ms)", name, ms, cum_ms);
+  };
+  spdlog::info("map load profile (seed {}, {}x{} m):", cfg_.seed, cfg_.width,
+               cfg_.height);
+
+  auto t = clock::now();
   ApplyDaylight();
   scene_context_.registry = &registry_;
+  log_step("daylight", since(t));
 
   // Generate the map in-process — the same pipeline --preview-image-only dumps,
-  // so the rendered terrain and the preview PNGs can never disagree.
+  // so the rendered terrain and the preview PNGs can never disagree. The
+  // pipeline reports its per-stage timings so they join the load profile.
   std::string err;
-  if (!mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser", map_, err)) {
+  mapgen::PipelineTimings pt;
+  if (!mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser", map_, err,
+                            &pt)) {
     spdlog::error("MapViewView: {}", err);
     return false;
   }
+  log_step("mg:fields", pt.fields_ms);
+  log_step("mg:voronoi", pt.voronoi_ms);
+  log_step("mg:biomes", pt.biomes_ms);
+  log_step("mg:heightmap", pt.heightmap_ms);
+  log_step("mg:blocks", pt.blocks_ms);
+  log_step("mg:sections", pt.sections_ms);
   map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
   // Build the terrain cluster-LOD DAG right after mapgen. The per-group build is
@@ -52,8 +80,10 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // test). LogStats reports the build time + thread mode.
   TerrainClusterParams cluster_params;
   cluster_params.parallel_build = !serial_build_;
+  t = clock::now();
   terrain_dag_ =
       BuildTerrainClusterDag(map_.heightmap, map_.biomes.pixel, cluster_params);
+  log_step("cluster DAG", since(t));
 
   // Deferred cluster-terrain material factory (game-owned; mirrors the engine's
   // terrain_blend descriptor but for kTerrainCluster geometry + the flat-color
@@ -67,12 +97,14 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   cluster_desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
                                 GBuffer::kMaterialFormat};
   cluster_desc.depth_format = GBuffer::kDepthFormat;
+  t = clock::now();
   cluster_factory_ = BuildMaterialInstanceFactory(cluster_desc, ctx.device,
                                                   ctx.queue, ctx.pipeline_gen);
   if (!cluster_factory_) {
     spdlog::error("MapViewView: failed to build terrain_cluster material factory");
     return false;
   }
+  log_step("material", since(t));
 
   // Frame the camera BEFORE building the terrain, so the cluster path's initial
   // LOD selection (BuildClusterTerrain -> UpdateClusterLod) already runs against
@@ -98,9 +130,12 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   gamecam_.UpdateCamera(camera_);
 
+  t = clock::now();
   BuildClusterTerrain();
-  spdlog::info("MapViewView: {}x{} map, {} sections", cfg_.width, cfg_.height,
-               map_.graph.nodes.size());
+  log_step("terrain build", since(t));
+
+  spdlog::info("map load: {:.1f} ms total  ({}x{} map, {} sections)",
+               since(t_load), cfg_.width, cfg_.height, map_.graph.nodes.size());
 
   // The grid follows the mouse, so there is nothing to draw until the cursor is
   // over the terrain (Update wires debug_lines once hover_valid_).
