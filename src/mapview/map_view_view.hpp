@@ -23,6 +23,7 @@
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/material_library.hpp"
+#include "game/map/map_data.hpp"
 #include "mapgen/config.hpp"
 #include "mapgen/pipeline.hpp"
 
@@ -73,6 +74,11 @@ class MapViewView : public AppView {
   // per-section heights — both outlive Initialize, unlike the chunk tessellation
   // inputs.
   mapgen::MapArtifacts map_;
+  // The pipeline output wrapped in the frozen MapData contract (one-hot biome
+  // slices at the mesh's own lattice spacing) -- what the terrain builder and
+  // mouse picking read. Deliberately NOT blended: mapview keeps its existing
+  // hard-edged voronoi borders.
+  MapData terrain_map_;
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;

@@ -14,14 +14,21 @@
 #include "engine/app/fixed_timestep.hpp"
 #include "engine/app/game_camera_controller.hpp"  // ZoomAtCursor
 #include "engine/app/sdl_input_util.hpp"           // EventWindowLogicalSize
-#include "engine/rendering/geometry/lake_surface_builder.hpp"
+#include "core/geometry_type.hpp"
+#include "engine/rendering/geometry/mesh_builder_utils.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/water_material.hpp"
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
-#include "game/scene/building_scene.h"
+#include "game/geometry/terrain_mesh.hpp"
+#include "game/geometry/water_surface.hpp"
+#include "game/map/symbolic_map_generator.hpp"
+#include "game/scene/blockout_materials.hpp"
+#include "game/scene/building_composer.hpp"
+#include "game/visual/scene_composer.hpp"
+#include "mapview/biome_manifest.hpp"
 
 namespace badlands {
 
@@ -57,11 +64,40 @@ constexpr uint32_t kSkyCubeFaceSize = 64;
 // Where the live day/night clock starts (t01: 0.30 = mid-morning).
 constexpr float kInitialTimeOfDay = 0.30f;
 
-constexpr const char* kFloorPackDir =
-    "assets/materials/monastery_stone_floor_1k";
-// Repeat the floor pack roughly once per 2 world units instead of stretching
-// one copy across the whole floor.
-constexpr float kFloorUvRepeatSpacing = 2.0f;
+// Biome -> PBR pack manifest (detailed terrain); layer index == Biome enum.
+constexpr const char* kBiomeManifestPath =
+    "assets/materials/terrain_biomes.json";
+
+// Terrain chunking: N x N lattice cells per mesh entity. Mesh density is
+// lattice density (one X-split quad per cell), so there is no subdiv knob.
+constexpr int kChunkCells = 16;
+
+// The demo buildings (sim-placed around the origin) are shifted onto the
+// southern plains band of the origin-centered symbolic map so they sit on land
+// rather than in the central lake. ~one tile south of center.
+constexpr float kDemoBuildingsSouthShift = 51.2f;
+
+// Flat water surface mesh from the map's block-aligned lake triangles. Same
+// kTexturedMesh layout GenerateLakeSurfaceMesh emits (pos/uv/normal/tangent,
+// normal +Y, UV = world XZ), but fed an explicit triangle soup instead of
+// rasterizing a polygon -- the generator already decided the shape on the block
+// lattice, so there is nothing to rasterize.
+TexturedMeshResult BuildLakeMesh(const std::vector<glm::vec3>& tris) {
+  TexturedMeshResult result;
+  result.mesh.geometry_type = GeometryType::kTexturedMesh;
+  const glm::vec3 normal(0.0f, 1.0f, 0.0f);
+  const glm::vec3 tangent(1.0f, 0.0f, 0.0f);
+  auto& v = result.mesh.vertices;
+  v.reserve(tris.size() * kTexturedMeshFloatsPerVertex);
+  for (const glm::vec3& p : tris) {
+    PushVertex(v, p, glm::vec2(p.x, p.z), normal, tangent);
+  }
+  result.mesh.vertex_count =
+      static_cast<uint32_t>(v.size() / kTexturedMeshFloatsPerVertex);
+  result.local_bounds =
+      ComputeLocalAabbFromVertices(v, kTexturedMeshFloatsPerVertex);
+  return result;
+}
 
 }  // namespace
 
@@ -82,10 +118,31 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
+  // Mode-appropriate proxy materials for the symbolic map's water + terrain.
+  const bool blockout_mode = (mode_ == RenderMode::Blockout);
   water_factory_ =
-      BuildWaterForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen);
+      blockout_mode
+          ? BuildWaterBlockoutForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen)
+          : BuildWaterForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen);
   if (!water_factory_) {
     spdlog::error("GameView::Initialize: water factory build failed");
+    return false;
+  }
+
+  if (blockout_mode) {
+    // Debug solid-color terrain layers, indexed by biome enum value.
+    terrain_arrays_ = matlib_.DebugTerrainArrays(blockout::BiomeColors());
+  } else {
+    // PBR biome packs (same manifest the map tool uses); layer index == biome.
+    std::vector<std::string> pack_dirs;
+    if (!ResolveBiomePacks(kBiomeManifestPath, pack_dirs)) {
+      spdlog::error("GameView::Initialize: failed to resolve biome packs");
+      return false;
+    }
+    terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
+  }
+  if (!matlib_.ok()) {
+    spdlog::error("GameView::Initialize: terrain arrays failed to build");
     return false;
   }
 
@@ -104,14 +161,12 @@ bool GameView::Initialize(const RenderContext& ctx) {
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
   if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
 
-  // Fixed-angle game camera framing the demo town: the Castle sits at the
-  // origin and the demo buildings spread to +-12 in X / up to +10 in Z (see
-  // PlaceDemoBuildings), so pull back further than GameCameraController's
-  // defaults (pitch 55deg/height 30) to keep the whole spread inside the
-  // 45deg-FOV frustum.
+  // Fixed-angle overview of the 256 m symbolic map (centered on the origin):
+  // a fairly top-down pitch keeps the whole biome layout + central lake legible;
+  // scroll to zoom in on the demo buildings on the southern plains.
   gamecam_.focus = glm::vec3(0.0f, 0.0f, 0.0f);
-  gamecam_.pitch_deg = 68.0f;
-  gamecam_.height = 44.0f;
+  gamecam_.pitch_deg = 64.0f;
+  gamecam_.height = 175.0f;
   gamecam_.UpdateCamera(camera_);
 
   if (!matlib_.ok()) {
@@ -202,29 +257,62 @@ void GameView::BuildScene() {
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  // Temporary water test map (decoupled from the sim/town): a terrain heightmap
-  // with a central cavity (the lake bottom) + a tessellated lake surface at a
-  // fixed water level. Exercises the forward water material end to end.
-  auto basin = GenerateHeightmapMesh(100.0f, 120, [](float x, float z) {
-    return -3.0f * std::exp(-(x * x + z * z) / (16.0f * 16.0f));  // Gaussian cavity
-  });
-  AddMeshEntity(scene_, "lake_bottom", std::move(basin),
-                matlib_.SolidColor(glm::vec3(0.20f, 0.17f, 0.13f), 0.9f));
+  SceneComposer composer(mode_);
 
-  // Wobbly closed lake edge (world XZ), radius ~16 m with gentle variation.
-  std::vector<glm::vec2> path;
-  constexpr int kEdgePoints = 64;
-  for (int i = 0; i < kEdgePoints; ++i) {
-    const float a = 6.2831853f * static_cast<float>(i) / kEdgePoints;
-    const float r =
-        16.0f + 2.2f * std::sin(3.0f * a) + 1.0f * std::sin(7.0f * a);
-    path.emplace_back(r * std::cos(a), r * std::sin(a));
+  // Generate the symbolic greybox map and center it on the world origin (map
+  // coordinates are corner-origin, so shift the whole map by -size/2).
+  const MapData map = SymbolicMapGenerator{}.Generate();
+  const float half_x = map.size_x_m() * 0.5f;
+  const float half_z = map.size_z_m() * 0.5f;
+  const glm::mat4 center =
+      glm::translate(glm::mat4(1.0f), glm::vec3(-half_x, 0.0f, -half_z));
+
+  // Terrain: one kTerrainBlend chunk entity per N x N lattice-cell region.
+  const int cells_x = map.nodes_x() - 1;
+  const int cells_z = map.nodes_z() - 1;
+  for (int cz = 0; cz < cells_z; cz += kChunkCells) {
+    for (int cx = 0; cx < cells_x; cx += kChunkCells) {
+      TerrainMeshParams p;
+      p.cell_x0 = cx;
+      p.cell_z0 = cz;
+      p.cells_x = std::min(kChunkCells, cells_x - cx);
+      p.cells_z = std::min(kChunkCells, cells_z - cz);
+      TerrainMesh chunk = BuildTerrainMesh(map, p);
+      if (chunk.vertex_count == 0) continue;
+      composer.AddTerrain(std::move(chunk), center);
+    }
   }
-  auto lake = GenerateLakeSurfaceMesh(path, /*density=*/1.0f, /*y=*/0.0f);
-  AddTransparentMeshEntity(
-      scene_, "lake", std::move(lake), water_factory_.get(),
-      DefaultWaterParams(),
-      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -1.2f, 0.0f)));
+
+  // Water surface, derived from the map's Lake-dominant cells (the frozen map
+  // contract carries no geometry) -- it lands on the same X-split lattice as
+  // the terrain, already at the map's water level.
+  const InstanceParams water_params = (mode_ == RenderMode::Blockout)
+                                          ? BlockoutWaterParams()
+                                          : DefaultWaterParams();
+  auto lake = BuildLakeMesh(BuildWaterSurfaceTriangles(map));
+  if (lake.mesh.vertex_count > 0) {
+    composer.AddWater(std::move(lake), water_params, center);
+  }
+
+  // Demo buildings from the sim, shifted onto the southern plains band (so they
+  // sit on land, not the central lake) and placed through the composer so they
+  // honor the render mode's materials.
+  if (building_rows_.size() < kMaxBuildingRows) {
+    building_rows_.resize(kMaxBuildingRows);
+  }
+  const uint32_t total =
+      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
+  const uint32_t count = std::min(total, kMaxBuildingRows);
+  for (uint32_t i = 0; i < count; ++i) {
+    const GameBuildingState& b = building_rows_[i];
+    const glm::vec2 world(b.center_x, b.center_z + kDemoBuildingsSouthShift);
+    // Ground height straight from the map's query API (world -> map-local).
+    const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
+    AddBuildingToComposer(composer, static_cast<GameBuildingKind>(b.kind), world,
+                          yaw_from_rotation_index(b.rotation_index), ground);
+  }
+
+  composer.ComposeInto(scene_, matlib_, terrain_arrays_, water_factory_.get());
 }
 
 void GameView::HandleEvent(const SDL_Event& event, int /*width*/,

@@ -133,12 +133,20 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
 @if(transparent)
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Base wave normal (per-fragment), enriched with a tangent-space detail normal.
-    let Nwave = waterWaveNormal(input.worldXZ, object.time);
-    let ts = waterDetailNormalTS(input.worldXZ, object.time, object.params2.x);
-    let T = normalize(cross(vec3<f32>(0.0, 0.0, 1.0), Nwave));
-    let B = cross(Nwave, T);
-    let N = normalize(T * ts.x + B * ts.y + Nwave * ts.z);
+    // Blockout/flat mode (params2.y > 0.5): a dead-flat +Y shading normal — no
+    // wave or detail perturbation — for the greybox look (the vertex stage still
+    // displaces by the waves, so the surface undulates but shades flat). Uniform
+    // branch (params2.y is a uniform), so the texture sampling below stays in
+    // uniform control flow.
+    var N = vec3<f32>(0.0, 1.0, 0.0);
+    if (object.params2.y <= 0.5) {
+        // Base wave normal (per-fragment), enriched with a tangent-space detail normal.
+        let Nwave = waterWaveNormal(input.worldXZ, object.time);
+        let ts = waterDetailNormalTS(input.worldXZ, object.time, object.params2.x);
+        let T = normalize(cross(vec3<f32>(0.0, 0.0, 1.0), Nwave));
+        let B = cross(Nwave, T);
+        N = normalize(T * ts.x + B * ts.y + Nwave * ts.z);
+    }
 
     let V = normalize(-input.worldOffsetPos);  // camera at origin in offset space
     let NdotV = max(dot(N, V), 1e-3);
@@ -199,8 +207,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let brdf = textureSampleLevel(brdfLut, brdfLutSampler, vec2<f32>(NdotV, roughness), 0.0).rg;
     // Clamp so the split-sum term never exceeds 1 (F0*scale can push it slightly
     // over at grazing) — an unclamped mix factor would extrapolate past reflColor.
-    let fresnel = clamp(F0 * brdf.x + vec3<f32>(brdf.y), vec3<f32>(0.0), vec3<f32>(1.0));
-    let sunSpec = evaluateSpecularGgxBrdf(N, V, L, roughness, F0) * NdotL * frame.sunColor.rgb * shadow;
+    var fresnel = clamp(F0 * brdf.x + vec3<f32>(brdf.y), vec3<f32>(0.0), vec3<f32>(1.0));
+    var sunSpec = evaluateSpecularGgxBrdf(N, V, L, roughness, F0) * NdotL * frame.sunColor.rgb * shadow;
+    // Blockout/flat mode: no sky reflection, no sun glint — just the depth tint.
+    // reflColor/brdf are still sampled above so this pipeline's @group(2) layout
+    // is identical to the detailed variant (the forward-transparent pass binds
+    // all 9 engine resources unconditionally — see RenderForwardTransparentMeshes).
+    if (object.params2.y > 0.5) {
+        fresnel = vec3<f32>(0.0);
+        sunSpec = vec3<f32>(0.0);
+    }
 
     let rgb = mix(transmitted, reflColor, fresnel) + sunSpec;
 

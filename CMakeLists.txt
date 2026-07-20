@@ -223,6 +223,10 @@ add_library(badlands_game_lib STATIC
     # Task S2.G: walled AI-sandbox arena (src/game/arena.h), reusing
     # placement.h's centered-grid convention (kGridHalf/in_bounds_tile).
     src/game/arena.cpp
+    # Frozen map-data contract + the symbolic greybox generator behind it
+    # (pure CPU: the mapgen Biome enum + glm, no engine/GPU deps).
+    src/game/map/map_data.cpp
+    src/game/map/symbolic_map_generator.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
 # noiser_common.h intentionally ships [[deprecated]] shims.
@@ -266,8 +270,15 @@ set(badlands_app_sources_viewer
 # provides transitively.
 set(badlands_app_sources_game
     src/game/main_game.cpp
-    src/game/scene/building_scene.cpp
-    src/game/views/game_view.cpp)
+    src/game/views/game_view.cpp
+    # Visual entity-component layer (SceneComposer) + terrain geometry + the
+    # symbolic-map building/biome plumbing, now that the game renders the
+    # symbolic map's terrain/water/buildings through the composer.
+    src/game/visual/scene_composer.cpp
+    src/game/scene/building_composer.cpp
+    src/game/geometry/terrain_mesh.cpp
+    src/game/geometry/water_surface.cpp
+    src/mapview/biome_manifest.cpp)
 # Task S2.G: AiSandboxView (walled arena via game/arena.h + 2 static
 # capsules, deferred + GameCameraController). Compiled directly into the
 # executable, same rationale as badlands_app_sources_game above.
@@ -630,9 +641,12 @@ add_test(NAME badlands_terrain_blend_tests COMMAND badlands_terrain_blend_tests 
 # queries behind mouse picking. No GPU: only glm + the header-only mapgen
 # Field2D/Biome types and the header-only Ray struct.
 add_executable(badlands_terrain_mesh_tests
+    src/game/map/map_data.cpp
     src/game/geometry/terrain_mesh.cpp
+    src/game/geometry/water_surface.cpp
     game/tests/terrain_mesh_tests.cpp
     game/tests/terrain_raycast_tests.cpp
+    game/tests/biome_blend_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_terrain_mesh_tests PRIVATE
@@ -641,6 +655,24 @@ target_include_directories(badlands_terrain_mesh_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_terrain_mesh_tests COMMAND badlands_terrain_mesh_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_symbolic_map_tests: pure-CPU tests for the symbolic greybox map
+# generator (src/game/map/symbolic_map_generator) — biome stamping, flat plane,
+# lake basin carve, and lake-outline extraction. No GPU: glm + header-only
+# mapgen Field2D/Biome only (same shape as badlands_terrain_mesh_tests).
+add_executable(badlands_symbolic_map_tests
+    src/game/map/map_data.cpp
+    src/game/map/symbolic_map_generator.cpp
+    src/game/geometry/water_surface.cpp
+    game/tests/symbolic_map_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_symbolic_map_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_symbolic_map_tests COMMAND badlands_symbolic_map_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_frustum_tests: pure-CPU tests for view-frustum AABB culling.
 add_executable(badlands_frustum_tests
