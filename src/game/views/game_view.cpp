@@ -15,6 +15,7 @@
 #include "engine/app/game_camera_controller.hpp"  // ZoomAtCursor
 #include "engine/app/sdl_input_util.hpp"           // EventWindowLogicalSize
 #include "core/geometry_type.hpp"
+#include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/geometry/mesh_builder_utils.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
@@ -387,9 +388,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     if (keyboard_state[SDL_SCANCODE_S] || keyboard_state[SDL_SCANCODE_DOWN]) dir.y += 1.0f;
     if (keyboard_state[SDL_SCANCODE_A] || keyboard_state[SDL_SCANCODE_LEFT]) dir.x -= 1.0f;
     if (keyboard_state[SDL_SCANCODE_D] || keyboard_state[SDL_SCANCODE_RIGHT]) dir.x += 1.0f;
-    if (dir.x != 0.0f || dir.y != 0.0f) {
-      gamecam_.Pan(glm::normalize(dir) * gamecam_.pan_speed * dt);
-    }
+    gamecam_.PanKeyboard(dir, dt);  // zoom-scaled; no-op when dir is zero
   }
 
   gamecam_.UpdateCamera(camera_);
@@ -416,39 +415,14 @@ void GameView::DrawUI() {
 
   // --- Simulation (time) ---
   if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
-    // Sim speed (0 = paused, 1/2/4x). Drives both the day/night cycle and the
-    // game logic via the shared SimClock.
-    ImGui::Text("Speed:");
-    const float kSpeeds[] = {0.0f, 1.0f, 2.0f, 4.0f};
-    const char* kSpeedLabels[] = {"Pause", "1x", "2x", "4x"};
-    for (int i = 0; i < 4; ++i) {
-      ImGui::SameLine();
-      if (ImGui::RadioButton(kSpeedLabels[i], sim_clock_.speed == kSpeeds[i])) {
-        sim_clock_.speed = kSpeeds[i];
-      }
+    if (EditorUI::DrawSimClockControls(sim_clock_)) {
+      SeekToTimeOfDay(sim_clock_.TimeOfDay());  // re-sync tick counter + re-bake
     }
-
-    // Time-of-day scrubber + day counter.
-    float t01 = sim_clock_.TimeOfDay();
-    if (ImGui::SliderFloat("Time of day", &t01, 0.0f, 0.9999f)) {
-      SeekToTimeOfDay(t01);
-    }
-    ImGui::Text("Day %d  |  %05.2f h", sim_clock_.DayCounter(), t01 * 24.0f);
-    ImGui::SliderFloat("Real sec / day", &sim_clock_.real_seconds_per_day, 1.0f, 600.0f);
   }
 
   // --- Directional light (daylight) ---
   if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
-    bool cfg_changed = false;
-    cfg_changed |= ImGui::SliderFloat("Turbidity", &daylight_cfg_.turbidity, 1.0f, 10.0f);
-    cfg_changed |= ImGui::SliderFloat("Ground albedo", &daylight_cfg_.ground_albedo, 0.0f, 1.0f);
-    cfg_changed |= ImGui::SliderFloat("Sky exposure", &daylight_cfg_.sky_exposure, 0.001f, 0.3f, "%.3f");
-    cfg_changed |= ImGui::SliderFloat("Sun intensity", &daylight_cfg_.sun_intensity_max, 0.0f, 10.0f);
-    cfg_changed |= ImGui::ColorEdit3("Moon color", &daylight_cfg_.moon_color.x);
-    cfg_changed |= ImGui::SliderFloat("Moon intensity", &daylight_cfg_.moon_intensity, 0.0f, 0.2f, "%.3f");
-    cfg_changed |= ImGui::SliderFloat("Ease minutes", &daylight_cfg_.ease_ingame_minutes, 1.0f, 120.0f);
-    cfg_changed |= ImGui::Checkbox("Moon disc", &daylight_cfg_.moon_disc);
-    if (cfg_changed) force_rebake_ = true;
+    if (EditorUI::DrawDaylightEditor(daylight_cfg_)) force_rebake_ = true;
   }
 
   // --- Fog (self-contained collapsing section) ---

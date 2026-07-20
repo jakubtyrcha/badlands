@@ -14,6 +14,7 @@
 //                         [--preview-image-only] [--screenshot out.png]
 //                         [--record dir/]
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -46,6 +47,29 @@ std::optional<std::pair<int, int>> parse_resolution(const std::string& s) {
   }
 }
 
+// "X,Y,W,H" -> the four ints (a pixel sub-rectangle of an authored map).
+std::optional<std::array<int, 4>> parse_region(const std::string& s) {
+  std::array<int, 4> r{};
+  size_t start = 0;
+  for (int i = 0; i < 4; ++i) {
+    const size_t comma = s.find(',', start);
+    const std::string tok =
+        s.substr(start, comma == std::string::npos ? comma : comma - start);
+    try {
+      r[i] = std::stoi(tok);
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+    if (i < 3) {
+      if (comma == std::string::npos) return std::nullopt;  // too few fields
+      start = comma + 1;
+    } else if (comma != std::string::npos) {
+      return std::nullopt;  // too many fields
+    }
+  }
+  return r;
+}
+
 // Flags owned by the app layer (SdlViewerApp::Run parses these out of the raw
 // argv itself). We must skip them + their value rather than reject them as
 // unknown, or --screenshot/--record would stop working here.
@@ -53,8 +77,8 @@ bool is_app_flag_with_value(const std::string& a) {
   return a == "--screenshot" || a == "--record";
 }
 
-// Runs the generator and dumps the rasters. Returns a process exit code.
-int RunPreviewOnly(const MapgenConfig& cfg) {
+// Builds the map and dumps the rasters. Returns a process exit code.
+int RunPreviewOnly(MapgenConfig& cfg) {
   std::error_code ec;
   std::filesystem::create_directories(cfg.out_dir, ec);
   if (ec) {
@@ -63,23 +87,42 @@ int RunPreviewOnly(const MapgenConfig& cfg) {
     return 1;
   }
 
-  std::printf("mapview: %dx%d seed=%u -> %s\n", cfg.width, cfg.height, cfg.seed,
-              cfg.out_dir.c_str());
-
+  const bool authored = !cfg.map_dir.empty();
   badlands::mapgen::MapArtifacts artifacts;
   std::string err;
-  if (!badlands::mapgen::run_pipeline(cfg, "scripts/mapgen/fields.noiser",
-                                      artifacts, err)) {
+  // An authored map takes its size from the asset, so print after the load, not
+  // before it -- cfg.width/height are not yet meaningful here.
+  const bool ok =
+      authored ? badlands::mapgen::run_authored_pipeline(cfg, cfg.map_dir,
+                                                         artifacts, err)
+               : badlands::mapgen::run_pipeline(cfg, "scripts/mapgen/fields.noiser",
+                                                artifacts, err);
+  if (!ok) {
     std::fprintf(stderr, "mapview: %s\n", err.c_str());
     return 1;
   }
+  if (authored) {
+    std::printf("mapview: %dx%d authored (%s) -> %s\n", cfg.width, cfg.height,
+                cfg.map_dir.c_str(), cfg.out_dir.c_str());
+  } else {
+    std::printf("mapview: %dx%d seed=%u -> %s\n", cfg.width, cfg.height, cfg.seed,
+                cfg.out_dir.c_str());
+  }
   badlands::mapgen::write_preview_images(cfg, artifacts);
 
-  std::printf("mapview: %d voronoi cells, %zu sections, %zu ledges (%dx%d "
-              "blocks)\n",
-              artifacts.voronoi.cell_count(), artifacts.graph.nodes.size(),
-              artifacts.graph.edges.size(), artifacts.blocks.width,
-              artifacts.blocks.height);
+  // An authored map has no voronoi cells -- reporting "0 cells" would read as a
+  // failure rather than as "that stage never ran".
+  if (authored) {
+    std::printf("mapview: %zu sections, %zu ledges (%dx%d blocks)\n",
+                artifacts.graph.nodes.size(), artifacts.graph.edges.size(),
+                artifacts.blocks.width, artifacts.blocks.height);
+  } else {
+    std::printf("mapview: %d voronoi cells, %zu sections, %zu ledges (%dx%d "
+                "blocks)\n",
+                artifacts.voronoi.cell_count(), artifacts.graph.nodes.size(),
+                artifacts.graph.edges.size(), artifacts.blocks.width,
+                artifacts.blocks.height);
+  }
   std::printf("mapview: done (%s)\n", cfg.out_dir.c_str());
   return 0;
 }
@@ -91,6 +134,8 @@ int main(int argc, char** argv) {
   std::optional<uint32_t> seed_override;
   std::optional<std::pair<int, int>> res_override;
   std::optional<std::string> out_override;
+  std::optional<std::string> map_dir;
+  std::optional<std::array<int, 4>> map_region;
   bool preview_only = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -125,12 +170,38 @@ int main(int argc, char** argv) {
       }
     } else if (a == "--out") {
       if (auto v = next("--out")) out_override = *v; else return 2;
+    } else if (a == "--map") {
+      if (auto v = next("--map")) map_dir = *v; else return 2;
+    } else if (a == "--map-region") {
+      auto v = next("--map-region");
+      if (!v) return 2;
+      map_region = parse_region(*v);
+      if (!map_region) {
+        std::fprintf(stderr, "mapview: bad --map-region '%s' (want X,Y,W,H)\n",
+                     v->c_str());
+        return 2;
+      }
     } else if (is_app_flag_with_value(a)) {
       if (!next(a.c_str())) return 2;  // consume the value; SdlViewerApp reads it
     } else {
       std::fprintf(stderr, "mapview: unknown arg '%s'\n", a.c_str());
       return 2;
     }
+  }
+
+  // An authored map's extent comes from its map_meta.json, so --resolution would be
+  // silently ignored. Say so instead of pretending to honour it.
+  if (map_dir && res_override) {
+    std::fprintf(stderr,
+                 "mapview: --resolution cannot be used with --map; an authored "
+                 "map's size comes from its map_meta.json\n");
+    return 2;
+  }
+  // --map-region focuses a sub-rectangle of an authored map; it has no meaning
+  // for a generated one.
+  if (map_region && !map_dir) {
+    std::fprintf(stderr, "mapview: --map-region requires --map\n");
+    return 2;
   }
 
   MapgenConfig cfg = badlands::mapgen::load_config(config_path);
@@ -140,9 +211,19 @@ int main(int argc, char** argv) {
     cfg.height = res_override->second;
   }
   if (out_override) cfg.out_dir = *out_override;
+  if (map_dir) cfg.map_dir = *map_dir;
+  if (map_region) {
+    cfg.map_crop_x = (*map_region)[0];
+    cfg.map_crop_y = (*map_region)[1];
+    cfg.map_crop_w = (*map_region)[2];
+    cfg.map_crop_h = (*map_region)[3];
+  }
 
-  if (cfg.width % badlands::mapgen::kSamplesPerBlock != 0 ||
-      cfg.height % badlands::mapgen::kSamplesPerBlock != 0) {
+  // Only meaningful for a generated map: an authored one validates its own dims
+  // against kSamplesPerBlock at load, and rejects a bad size rather than warning.
+  if (cfg.map_dir.empty() &&
+      (cfg.width % badlands::mapgen::kSamplesPerBlock != 0 ||
+       cfg.height % badlands::mapgen::kSamplesPerBlock != 0)) {
     std::fprintf(stderr,
                  "mapview: resolution %dx%d is not a multiple of %d; remainder "
                  "samples are dropped from the block grid\n",

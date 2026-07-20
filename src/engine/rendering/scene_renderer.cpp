@@ -802,7 +802,8 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
 
   // === Pass 3.6: Debug lines — world-space thick (screen-aligned, AA) lines
   // into the HDR buffer, depth-tested against the G-buffer (so they are occluded
-  // by geometry) but not depth-writing. ===
+  // by geometry) but not depth-writing. After fog on purpose, so the debug
+  // overlay stays visible on top of fog rather than being dimmed by it. ===
   if (scene.debug_lines != nullptr && !scene.debug_lines->empty()) {
     const uint32_t line_verts = UploadDebugLines(
         device_, debug_line_buffer_, *scene.debug_lines, frame_uniforms.view,

@@ -19,7 +19,12 @@ namespace badlands::fog {
 
 // --- Emitter ----------------------------------------------------------------
 
-enum class EmitterShape : uint32_t { Disc = 0, Obb = 1 };  // footprint / envelope shape
+// Footprint / radial-envelope shape (mirrored in fog_emitters.wesl::fogRadialNd):
+//   Disc    — isotropic circle, radius = half_extent.x.
+//   Obb     — oriented rectangle (max-norm) over half_extent, rotated by `rotation`.
+//   Ellipse — the OBB frame evaluated through an L2 radial → an oriented ellipse
+//             inscribed in half_extent (biome-fit emitters use this).
+enum class EmitterShape : uint32_t { Disc = 0, Obb = 1, Ellipse = 2 };
 enum class EmitterType : uint32_t { Disc = 0, Noise = 1 };  // evaluator (fill)
 
 // A world-static volumetric fog source. It owns its full 3D volume: the composer
@@ -58,6 +63,9 @@ inline glm::vec2 EmitterHalfAabb(const Emitter& e) {
     const float r = std::abs(e.half_extent.x);
     return glm::vec2(r, r);
   }
+  // Obb and Ellipse share the oriented half_extent box, so both use the
+  // projected-extent bound (an ellipse is inscribed in the OBB, so its AABB is
+  // conservative here — never smaller than the true footprint).
   const float c = std::abs(std::cos(e.rotation));
   const float s = std::abs(std::sin(e.rotation));
   return glm::vec2(e.half_extent.x * c + e.half_extent.y * s,

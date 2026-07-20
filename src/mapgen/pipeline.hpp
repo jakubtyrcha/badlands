@@ -43,4 +43,20 @@ struct MapArtifacts {
 bool run_pipeline(const MapgenConfig& cfg, const std::string& script_path,
                   MapArtifacts& out, std::string& err);
 
+// The AUTHORED alternative: read heights + biome from image assets in `map_dir`
+// (see authored_map.hpp), then run the identical blocks -> sections tail.
+//
+// `cfg.width`/`cfg.height` are OVERWRITTEN from the asset's map_meta.json -- the
+// map's extent is a property of the images, not of the CLI. Everything else in
+// `cfg` (reduce_median, section_step_m, ...) still applies.
+//
+// `fields`, `voronoi` and `biomes.cell_biome` are left default-constructed: they
+// are procedural intermediates with no consumer past the heightmap. Callers that
+// dump them (write_preview_images) must skip them for an authored map.
+//
+// Returns false with `err` set if the metadata or either image is missing,
+// malformed, or disagrees with the other. `out` is untouched on failure.
+bool run_authored_pipeline(MapgenConfig& cfg, const std::string& map_dir,
+                           MapArtifacts& out, std::string& err);
+
 }  // namespace badlands::mapgen

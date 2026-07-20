@@ -54,7 +54,17 @@ corrosion_set_env_vars(wesl_ffi "RUSTFLAGS=-Cpanic=unwind")
 # assets: JPEG decode + glTF pack texture-URI parsing (src/crates/assets),
 # Rust staticlib. Unlike wesl_ffi, no dependency of this crate shares its
 # own name, so no Corrosion package-ambiguity workaround is needed here.
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo.toml)
+#
+# PROFILE release — ALWAYS, even in a Debug C++ build (same reasoning as
+# noiser-bundle below). This crate is the image decoder, and terrain startup
+# decodes 18 material textures (1024^2 each) through it. Built with cargo's dev
+# profile (opt-level 0, what CMAKE_BUILD_TYPE=Debug otherwise selects) a single
+# 1024^2 JPEG/PNG decode costs ~130-200 ms instead of ~20 ms, so the six-pack
+# terrain load takes ~2.3 s of a Debug startup. Nothing here is C++-debuggable
+# anyway — it's a prebuilt staticlib behind a C ABI — so there is no
+# debuggability to trade away.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo.toml
+                       PROFILE release)
 corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 
 # nav: 2D visibility-graph path service (src/crates/nav), Rust staticlib,
@@ -150,6 +160,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/brdf_lut.cpp
     src/engine/rendering/prefiltered_cubemap.cpp
     src/engine/app/sdl_viewer_app.cpp
+    src/engine/app/imgui_mouse_input.cpp
     src/engine/app/screenshot.cpp
     src/engine/app/screenshot_recorder.cpp
     src/engine/app/orbit_camera_controller.cpp
@@ -304,7 +315,9 @@ endforeach()
 # -Wno-deprecated-declarations matches badlands_game_lib (the noiser headers ship
 # [[deprecated]] shims).
 add_library(badlands_mapgen_lib STATIC
+    src/mapgen/authored_map.cpp
     src/mapgen/config.cpp
+    src/mapgen/fog_generator.cpp
     src/mapgen/fields.cpp
     src/mapgen/hillshade.cpp
     src/mapgen/outputs.cpp
@@ -383,6 +396,43 @@ if(APPLE)
 endif()
 add_test(NAME badlands_patch_eval_tests COMMAND badlands_patch_eval_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_authored_map_tests: the authored-map loader -- map_meta.json validation
+# (dims, block-multiple, height range, meters_per_sample, and the biome-order
+# label->enum contract) plus the two image decodes. Compiles authored_map.cpp
+# directly and links the `assets` crate for the PNG decode/encode C ABI + nlohmann
+# for the manifest parse; deliberately no engine/SDL/Dawn.
+add_executable(badlands_authored_map_tests
+    src/mapgen/authored_map_tests.cpp
+    src/mapgen/authored_map.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_link_libraries(badlands_authored_map_tests PRIVATE assets nlohmann_json::nlohmann_json)
+target_include_directories(badlands_authored_map_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+if(APPLE)
+    target_link_options(badlands_authored_map_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_authored_map_tests COMMAND badlands_authored_map_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_fog_generator_tests: the biome -> fog-emitter generator. Pure CPU
+# (fog_sim.hpp is header-only glm; biomes/field2d are headers), so it compiles
+# fog_generator.cpp directly with no engine link.
+add_executable(badlands_fog_generator_tests
+    src/mapgen/fog_generator_tests.cpp
+    src/mapgen/fog_generator.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_fog_generator_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
 # it over a windowed 2D domain into a texture (8x8 patches across the shared
 # thread pool), and write a PNG. Links badlands_game_lib for the noiser C++ VM
@@ -458,6 +508,25 @@ if(APPLE)
     target_link_options(badlands_daylight_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_daylight_tests COMMAND badlands_daylight_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_input_tests: Catch2 suite for the event-driven mouse tracker
+# (imgui_mouse_input). Pure tests for ImGuiButtonIndex/ApplyButton, headless-ImGui
+# behaviour (same-frame click, foreign-windowID release, drag-leaves-window,
+# idle-leave), and a RAII-guarded stock-backend repro of the windowID-drop wedge
+# the tracker sidesteps. Links badlands_engine (carries SDL3 + ImGui + the
+# imgui_impl_sdl3 backend); creates a hidden window in-test.
+add_executable(badlands_input_tests
+    game/tests/imgui_input_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_input_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_input_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_input_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_input_tests COMMAND badlands_input_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_fog_tests: Catch2 suite for the volumetric-fog cascade addressing
 # math (height-band clipmap: voxel sizes, camera-centered windows, cascade

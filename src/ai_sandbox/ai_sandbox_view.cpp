@@ -211,9 +211,7 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
     if (keyboard_state[SDL_SCANCODE_S] || keyboard_state[SDL_SCANCODE_DOWN]) dir.y += 1.0f;
     if (keyboard_state[SDL_SCANCODE_A] || keyboard_state[SDL_SCANCODE_LEFT]) dir.x -= 1.0f;
     if (keyboard_state[SDL_SCANCODE_D] || keyboard_state[SDL_SCANCODE_RIGHT]) dir.x += 1.0f;
-    if (dir.x != 0.0f || dir.y != 0.0f) {
-      gamecam_.Pan(glm::normalize(dir) * gamecam_.pan_speed * dt);
-    }
+    gamecam_.PanKeyboard(dir, dt);  // zoom-scaled; no-op when dir is zero
   }
 
   gamecam_.UpdateCamera(camera_);

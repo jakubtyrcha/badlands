@@ -20,9 +20,26 @@
 namespace badlands {
 
 struct LightEnvironment;
+struct DaylightConfig;
+struct SimClock;
 class SceneRenderer;
 
 namespace EditorUI {
+
+// Sim-time controls over a SimClock: speed radios (0=pause / 1 / 2 / 4x), a
+// time-of-day scrubber, day counter, and real-seconds-per-day. Mutates `clock`
+// in place. Returns true if the time-of-day was scrubbed this frame -- the caller
+// should run its own seek/apply (e.g. re-bake the sky), since how time-of-day
+// maps to lighting is per-view policy, not a widget concern.
+bool DrawSimClockControls(SimClock& clock);
+
+// Sliders/toggles for a Hosek-Wilkie DaylightConfig (turbidity, ground albedo,
+// sky exposure, sun intensity, moon color/intensity, ease minutes, moon disc).
+// Mutates `cfg` in place. Returns true if any value changed this frame -- the
+// caller decides how to react (game forces a throttled re-bake; mapview re-bakes
+// immediately). Distinct from DrawLightEnvironmentEditor, which edits the direct
+// LightEnvironment model, not the daylight cycle.
+bool DrawDaylightEditor(DaylightConfig& cfg);
 
 // Sliders for sun direction (azimuth/elevation), sun color + intensity, sky/
 // horizon/ground colors, sky intensity, and sun disc size. Mutates `env` in
