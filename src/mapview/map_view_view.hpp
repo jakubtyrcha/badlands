@@ -97,8 +97,8 @@ class MapViewView : public AppView {
   mapgen::MapArtifacts map_;
 
   // Nanite-style terrain cluster-LOD DAG, built from the heightmap at load.
-  // Rendered (M2) as one entity whose MeshDrawRangesComponent draws all leaf
-  // clusters; LOD selection over these ranges lands in a later milestone.
+  // Rendered as one entity whose MeshDrawRangesComponent carries the per-frame
+  // LOD cut (UpdateClusterLod rewrites it from SelectClusters each frame).
   TerrainClusterDag terrain_dag_;
 
   // Deferred material for the cluster terrain (game-owned; no engine-side
@@ -112,8 +112,8 @@ class MapViewView : public AppView {
   std::vector<entt::entity> legacy_entities_;  // valid iff legacy terrain live
 
   // (Re)build the live terrain path from use_cluster_terrain_, destroying the
-  // other. Builds the cluster entity (all leaf clusters as draw ranges) or the
-  // legacy fixed-subdiv chunk entities.
+  // other. Builds the cluster entity (whole shared mesh + the LOD-cut draw
+  // ranges) or the legacy fixed-subdiv chunk entities.
   void RebuildTerrain();
   void BuildClusterTerrain();
   void BuildLegacyTerrain();

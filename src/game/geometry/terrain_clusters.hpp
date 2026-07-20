@@ -5,16 +5,17 @@
 // game-layer: it tessellates a mapgen heightmap into grid-tile leaf clusters and
 // repeatedly groups + boundary-locked-simplifies (meshoptimizer) + splits them
 // into a level hierarchy, recording per-group LOD error + bounding sphere. The
-// output DAG feeds runtime screen-space-error cluster selection (SelectClusters,
-// declared here but implemented in a later milestone) and per-cluster indexed
-// draws. No engine/GPU dependency beyond the header-only Aabb.
+// output DAG feeds runtime screen-space-error cluster selection (SelectClusters)
+// and per-cluster indexed draws. No engine/GPU dependency beyond the header-only
+// Aabb.
 //
 // Seamlessness is a build invariant, not a runtime rule: a vertex on the
 // boundary between two groups of a level is LOCKED in both groups' simplify
 // calls, so both sides keep it bitwise-identically -> adjacent clusters (even at
 // different LODs) share crack-free boundaries with no runtime coordination. The
 // Catch2 suite (terrain_clusters_tests.cpp) pins the load-bearing invariants:
-// error monotonicity, sphere nesting/sharing, and bitwise seam equality.
+// error monotonicity, sphere nesting/sharing, bitwise seam equality, cut
+// validity, and serial==parallel build determinism.
 
 #include <cstdint>
 #include <vector>
@@ -40,8 +41,8 @@ inline constexpr float kSimplifyTargetRatio =
 
 static_assert(kGroupDim * kGroupDim * kClusterTriBudget % kGroupSplitCount == 0);
 
-// Interleaved vertex: 8 floats (32 B), matching the kTerrainCluster layout added
-// in a later milestone: pos 3f, normal 3f, color Unorm8x4 packed as 1 float,
+// Interleaved vertex: 8 floats (32 B), matching the kTerrainCluster vertex
+// layout: pos 3f, normal 3f, color Unorm8x4 packed as 1 float,
 // meta Uint8x4 packed as 1 float {biome_id, cluster_hash_byte, lod_level, 0}.
 inline constexpr int kFloatsPerClusterVertex = 8;
 
@@ -126,9 +127,8 @@ TerrainClusterDag BuildTerrainClusterDag(const mapgen::Field2D<float>& heightmap
                                          const mapgen::Field2D<uint8_t>& biomes,
                                          const TerrainClusterParams& params = {});
 
-// Runtime cluster selection (implemented in a later milestone — declared here so
-// the DAG's consumers can link against the final interface). Selects the cut
-// where projected own-error <= tau and projected parent error > tau.
+// Runtime cluster selection. Selects the cut where projected own-error <= tau and
+// projected parent error > tau.
 void SelectClusters(const TerrainClusterDag& dag, glm::vec3 cam_pos,
                     float fov_deg, float screen_h_px, float tau_px,
                     std::vector<uint32_t>& out);

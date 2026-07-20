@@ -479,10 +479,16 @@ void MapViewView::DrawUI() {
   if (ImGui::GetCurrentContext() == nullptr) return;
   ImGui::Begin("Map");
   ImGui::Text("seed %u  %dx%d m", cfg_.seed, cfg_.width, cfg_.height);
-  ImGui::Text("chunks: %d   sections: %zu", chunk_count_,
-              map_.graph.nodes.size());
-  // A/B: cluster-LOD terrain (all leaf clusters, no LOD yet) vs the legacy
-  // fixed-subdiv chunks. Flipping rebuilds the live terrain entities.
+  // chunk_count_ is a legacy-terrain stat (always 0 in cluster mode) — show it
+  // only when the legacy path is live so the cluster view doesn't read "0".
+  if (use_cluster_terrain_) {
+    ImGui::Text("sections: %zu", map_.graph.nodes.size());
+  } else {
+    ImGui::Text("chunks: %d   sections: %zu", chunk_count_,
+                map_.graph.nodes.size());
+  }
+  // A/B: cluster-LOD terrain vs the legacy fixed-subdiv chunks. Flipping
+  // rebuilds the live terrain entities.
   if (ImGui::Checkbox("Cluster terrain", &use_cluster_terrain_)) {
     RebuildTerrain();
   }

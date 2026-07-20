@@ -77,8 +77,8 @@ Runtime (mapview ImGui "Map" panel, cluster terrain live):
   position hash of `meta.y`, NOT a stable per-cluster color — deferred) / `LOD level`
   (hue wheel). Drives `debug_params.x` in `terrain_cluster.wesl` via a live per-draw
   override.
-- Cut stats: selected cluster count, count in the camera frustum, drawn tris, CPU
-  selection µs, and a per-level histogram.
+- Cut stats: selected cluster count, count in the camera frustum, whole-cut tris,
+  CPU selection µs, and a per-level histogram.
 
 Headless CLI (`badlands_mapview`):
 - `--legacy-terrain` — render the legacy chunks instead of cluster terrain.
@@ -115,11 +115,11 @@ Per-frame runtime — `SelectClusters` ≈ **0.95–1.0 ms** (flat pass over ~8.
 clusters). Draw counts by camera (selected cut → survive the **camera-pass**
 frustum cull; the shadow pass uses the light frustum and is not instrumented):
 
-| camera                | cut clusters | in camera frustum | drawn tris |
-|-----------------------|--------------|-------------------|------------|
-| near (height 25)      | 880          | 11                | 112560     |
-| mid (height 120, τ 8) | 350          | 111               | 44729      |
-| far/overhead (500)    | 504          | 504               | 64429      |
+| camera                | cut clusters | in camera frustum | cut tris |
+|-----------------------|--------------|-------------------|----------|
+| near (height 25)      | 880          | 11                | 112560   |
+| mid (height 120, τ 8) | 350          | 111               | 44729    |
+| far/overhead (500)    | 504          | 504               | 64429    |
 
 The cut is the whole map (frustum-independent, so the shadow pass draws off-screen
 casters); the camera pass draws only the frustum-visible subset — near-ground
@@ -140,3 +140,13 @@ shrink the cut, as expected.
   required). Today's tint is a per-triangle position hash.
 - **DAG disk caching** — the DAG is always rebuilt at load. If map sizes grow enough
   that build time matters, cache the built DAG. Explicitly out of scope now.
+- **Direct cross-level seam test** — the suite proves seam agreement + completeness
+  between same-level neighbors; add a test that, for each group, asserts its locked
+  boundary vertex records appear bitwise-identically in its output clusters (the
+  parent-carries-the-locked-curve half of invariant 2, checked directly rather than
+  transitively).
+- **Build-loop progress guard** — if a level's simplify yields no triangle reduction,
+  force `num_out = 1` (or break) so the reduction can't stall; also covers the
+  theoretical `meshopt` returns-0-triangles case. Today the median split + region
+  reduction always makes progress on the tested maps, but the guard would make the
+  loop robust by construction.
