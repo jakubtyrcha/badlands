@@ -603,12 +603,10 @@ endif()
 add_test(NAME badlands_terrain_blend_tests COMMAND badlands_terrain_blend_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
-# — the tessellated-block mesh builder plus the SampleHeight/RaycastTerrain
-# queries behind mouse picking. No GPU: only glm + the header-only mapgen
-# Field2D/Biome types and the header-only Ray struct.
+# — the SampleHeight/RaycastTerrain queries behind mouse picking. No GPU: only
+# glm + the header-only mapgen Field2D/Biome types and the header-only Ray struct.
 add_executable(badlands_terrain_mesh_tests
     src/game/geometry/terrain_mesh.cpp
-    game/tests/terrain_mesh_tests.cpp
     game/tests/terrain_raycast_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )

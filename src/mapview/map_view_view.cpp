@@ -20,8 +20,7 @@
 #include "engine/rendering/frustum.hpp"
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/geometry/aabb.hpp"
-#include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
-#include "game/geometry/terrain_mesh.hpp"
+#include "game/geometry/terrain_mesh.hpp"  // SampleHeight, NormalAt, RaycastTerrain
 #include "mapgen/mapgen_constants.hpp"
 #include "mapgen/pipeline.hpp"
 #include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
@@ -29,8 +28,7 @@
 namespace badlands {
 
 namespace {
-constexpr int kChunkBlocks = 16;  // N x N blocks per chunk (kBlockSizeM each)
-constexpr int kSubdiv = 2;        // subgrid cells per block edge
+constexpr int kSubdiv = 2;  // subgrid cells per block edge (grid-overlay only)
 constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json";
 }  // namespace
 
@@ -115,7 +113,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   gamecam_.UpdateCamera(camera_);
 
-  RebuildTerrain();
+  BuildClusterTerrain();
   spdlog::info("MapViewView: {}x{} map, {} sections", cfg_.width, cfg_.height,
                map_.graph.nodes.size());
 
@@ -124,32 +122,18 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   return true;
 }
 
-void MapViewView::RebuildTerrain() {
-  // Tear down whichever terrain path is currently live.
-  if (cluster_entity_ != entt::null) {
-    registry_.destroy(cluster_entity_);
-    cluster_entity_ = entt::null;
-  }
-  for (entt::entity e : legacy_entities_) registry_.destroy(e);
-  legacy_entities_.clear();
-  chunk_count_ = 0;
-
-  if (use_cluster_terrain_) {
-    BuildClusterTerrain();
-  } else {
-    BuildLegacyTerrain();
-  }
-}
-
 void MapViewView::BuildClusterTerrain() {
   // One entity holds the whole shared cluster mesh; MeshDrawRangesComponent
-  // draws each leaf cluster as its own culled DrawIndexed range. The DAG is
-  // kept intact (copied, not moved) for the later LOD-selection milestone.
+  // draws each leaf cluster as its own culled DrawIndexed range. The DAG's
+  // geometry is MOVED into the mesh: the build runs once and SelectClusters
+  // reads only clusters/groups, never vertices/indices, so the DAG no longer
+  // needs its own copy. (Freeing the mesh's copy after GPU upload would need an
+  // engine keep_cpu_data toggle — recorded as a follow-up in the docs.)
   const entt::entity e = registry_.create();
   auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(e);
-  mesh.vertices = terrain_dag_.vertices;
-  mesh.indices = terrain_dag_.indices;
-  mesh.vertex_count = static_cast<uint32_t>(terrain_dag_.vertices.size() /
+  mesh.vertices = std::move(terrain_dag_.vertices);
+  mesh.indices = std::move(terrain_dag_.indices);
+  mesh.vertex_count = static_cast<uint32_t>(mesh.vertices.size() /
                                             kFloatsPerClusterVertex);
   mesh.dirty = true;
   mesh.geometry_type = GeometryType::kTerrainCluster;
@@ -195,9 +179,18 @@ void MapViewView::BuildClusterTerrain() {
 }
 
 void MapViewView::UpdateClusterLod() {
-  if (!use_cluster_terrain_ || cluster_entity_ == entt::null) return;
+  if (cluster_entity_ == entt::null) return;
   auto* ranges = registry_.try_get<MeshDrawRangesComponent>(cluster_entity_);
   if (ranges == nullptr) return;
+
+  // Skip the reselect when nothing the cut depends on changed. Selection is a
+  // function of camera POSITION + LOD sphere only (not orientation), tau, and
+  // the viewport height — so if all three match the last cut, the ranges are
+  // still exact and re-running SelectClusters would produce the identical set.
+  if (camera_.position == last_sel_cam_pos_ && tau_px_ == last_sel_tau_ &&
+      screen_h_px_ == last_sel_screen_h_) {
+    return;
+  }
 
   // Time the pure CPU selection — the runtime perf number the spec asks for.
   const auto t0 = std::chrono::steady_clock::now();
@@ -206,6 +199,9 @@ void MapViewView::UpdateClusterLod() {
   sel_time_us_ = std::chrono::duration<double, std::micro>(
                      std::chrono::steady_clock::now() - t0)
                      .count();
+  last_sel_cam_pos_ = camera_.position;
+  last_sel_tau_ = tau_px_;
+  last_sel_screen_h_ = screen_h_px_;
 
   // Rewrite the draw ranges in place from the selected cut (bounds carried from
   // the DAG). The shared vertex/index buffers are untouched — the pass re-reads
@@ -258,49 +254,6 @@ void MapViewView::ApplyDebugTintMode() {
       glm::vec4(static_cast<float>(debug_tint_mode_), 0.0f, 0.0f, 0.0f);
 }
 
-void MapViewView::BuildLegacyTerrain() {
-  const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
-
-  // One indexed kTerrainBlend chunk entity per N x N block region.
-  const int blocks_x = cfg_.width / mapgen::kSamplesPerBlock;
-  const int blocks_z = cfg_.height / mapgen::kSamplesPerBlock;
-  for (int bz = 0; bz < blocks_z; bz += kChunkBlocks) {
-    for (int bx = 0; bx < blocks_x; bx += kChunkBlocks) {
-      TerrainMeshParams p;
-      p.subdiv = kSubdiv;
-      p.block_x0 = bx;
-      p.block_z0 = bz;
-      p.blocks_x = std::min(kChunkBlocks, blocks_x - bx);
-      p.blocks_z = std::min(kChunkBlocks, blocks_z - bz);
-      TerrainMesh chunk = BuildTerrainMesh(map_.heightmap, map_.biomes.pixel, p);
-      if (chunk.vertex_count == 0) continue;
-
-      const Aabb box = ComputeLocalAabbFromVertices(
-          chunk.vertices, TerrainMesh::kFloatsPerVertex);
-
-      const entt::entity e = registry_.create();
-      auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(e);
-      mesh.vertices = std::move(chunk.vertices);
-      mesh.indices = std::move(chunk.indices);
-      mesh.vertex_count = chunk.vertex_count;
-      mesh.dirty = true;
-      mesh.geometry_type = GeometryType::kTerrainBlend;
-      mesh.transform = glm::mat4(1.0f);  // vertices are absolute world coords
-
-      MaterialFactoryComponent fmc;
-      fmc.factory = terrain_mat.factory;
-      fmc.pass_type = MaterialPassType::kDeferred;
-      fmc.params = terrain_mat.params;
-      fmc.config_hash = ComputeFactoryConfigHash(fmc);
-      registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
-      registry_.emplace<StaticMeshAabbComponent>(e,
-                                                 StaticMeshAabbComponent{box});
-      legacy_entities_.push_back(e);
-      ++chunk_count_;
-    }
-  }
-}
-
 void MapViewView::ApplyDaylight() {
   const DaylightState state = ComputeDaylight(daylight_cfg_, time_of_day_);
   ApplyDaylightEnvironment(state, daylight_cfg_, device_, queue_, sky_cube_,
@@ -333,9 +286,9 @@ void MapViewView::RebuildVisibleGrid() {
   const glm::vec3 block_color(0.55f, 0.55f, 0.6f);
   const glm::vec3 section_color(1.0f, 0.85f, 0.15f);
   // Subgrid: dimmer + thinner so the block structure still reads on top of
-  // it. Mirrors what BuildTerrainMesh actually emits (kSubdiv cells per block
-  // edge, each X-split into 4 triangles meeting at the cell centre), so this is
-  // the mesh's real triangulation, not a decorative grid.
+  // it. A kSubdiv-cells-per-block-edge subgrid, each cell X-split into 4
+  // triangles meeting at its centre — a legibility overlay for the block
+  // structure, independent of the rendered cluster-LOD triangulation.
   const glm::vec3 subgrid_color(0.40f, 0.40f, 0.45f);
   const float subgrid_thickness = 0.6f;
   const float cell = b / static_cast<float>(kSubdiv);
@@ -479,24 +432,16 @@ void MapViewView::DrawUI() {
   if (ImGui::GetCurrentContext() == nullptr) return;
   ImGui::Begin("Map");
   ImGui::Text("seed %u  %dx%d m", cfg_.seed, cfg_.width, cfg_.height);
-  // chunk_count_ is a legacy-terrain stat (always 0 in cluster mode) — show it
-  // only when the legacy path is live so the cluster view doesn't read "0".
-  if (use_cluster_terrain_) {
-    ImGui::Text("sections: %zu", map_.graph.nodes.size());
-  } else {
-    ImGui::Text("chunks: %d   sections: %zu", chunk_count_,
-                map_.graph.nodes.size());
-  }
-  // A/B: cluster-LOD terrain vs the legacy fixed-subdiv chunks. Flipping
-  // rebuilds the live terrain entities.
-  if (ImGui::Checkbox("Cluster terrain", &use_cluster_terrain_)) {
-    RebuildTerrain();
-  }
-  if (use_cluster_terrain_) {
+  ImGui::Text("sections: %zu", map_.graph.nodes.size());
+
+  // Terrain controls grouped into their own section. tau is a runtime knob (no
+  // CLI flag); it is sanitized in SelectClusters so no slider value can blank
+  // the terrain, but the slider range already keeps it in the valid window.
+  if (ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
     // LOD budget: screen-space error in pixels. Lower = finer/more clusters.
     // The rewrite happens next Update, so the numbers below refresh a frame
     // later (fine — they are diagnostics, not a synchronous readout).
-    ImGui::SliderFloat("LOD tau (px)", &tau_px_, 0.25f, 16.0f, "%.2f");
+    ImGui::SliderFloat("LOD tau (px)", &tau_px_, kMinTauPx, kMaxTauPx, "%.2f");
 
     // Debug tint source. Drives debug_params.x in terrain_cluster.wesl via the
     // live material override (ApplyDebugTintMode); the shader branches on it.

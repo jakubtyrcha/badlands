@@ -3,8 +3,15 @@
 A restricted, grid-aware Nanite for terrain: a cluster DAG built at map load,
 boundary-locked QEM simplification, and per-frame screen-space-error cut
 selection — **seamless LOD by construction** (no cracks, no skirts, no
-neighbor-LOD rules), hardware rasterization only. First integration is
-`badlands_mapview`; the game app is a later target.
+neighbor-LOD rules), hardware rasterization only. It is the terrain mesh in
+`badlands_mapview` (the only one — there is no separate chunk path); the game app
+is a later target.
+
+**Data-source contract:** the DAG is built purely from a `Field2D<float>`
+heightmap + `Field2D<uint8_t>` biome map (`BuildTerrainClusterDag`). Nothing in
+the build or the LOD path knows where those fields come from, so the terrain
+source (mapgen today, streamed/edited fields later) can change without touching
+the cluster-LOD code.
 
 Design SSOT (algorithm, why it's seamless, the four load-bearing invariants):
 `docs/superpowers/specs/2026-07-19-terrain-cluster-lod-design.md`. This note is
@@ -59,20 +66,20 @@ cut validity (antichain + exact cover) over several cameras/taus.
 ## Color path — palette bytes are written RAW (do NOT linearize)
 
 Verified end-to-end (M4): the G-buffer albedo target is linear `BGRA8Unorm`, and
-legacy `terrain_blend` loads its albedo textures as plain `RGBA8Unorm` with **no**
-sRGB→linear decode — both paths treat their 8-bit albedo as linear and share the
-same deferred lighting + tonemap (`linear_to_srgb` at resolve). So the biome
-palette bytes are packed raw (`PackU8x4`, byte/255) with no decode. **Linearizing
-the palette would make cluster terrain darker than legacy** — a mismatch. The
-cluster-vs-legacy look difference is content (flat vertex color vs PBR textures —
-a recorded follow-up), not a gamma bug. See the note at the palette bake in
-`terrain_clusters.cpp`.
+the engine `terrain_blend` material loads its albedo textures as plain
+`RGBA8Unorm` with **no** sRGB→linear decode — both treat their 8-bit albedo as
+linear and share the same deferred lighting + tonemap (`linear_to_srgb` at
+resolve). So the biome palette bytes are packed raw (`PackU8x4`, byte/255) with no
+decode. **Linearizing the palette would make cluster terrain too dark.** The flat
+vertex color vs PBR-texture look is a content difference (a recorded follow-up),
+not a gamma bug. See the note at the palette bake in `terrain_clusters.cpp`.
 
 ## Toggles and flags
 
-Runtime (mapview ImGui "Map" panel, cluster terrain live):
-- **Cluster terrain** checkbox — A/B against the legacy fixed-subdiv chunks.
-- **LOD tau (px)** slider — the τ budget (0.25–16).
+Runtime (mapview ImGui "Map" panel, "Terrain" section):
+- **LOD tau (px)** slider — the τ budget, range `kMinTauPx`..`kMaxTauPx`
+  (0.25–16). Runtime-only; `SelectClusters` sanitizes τ into that window
+  (NaN → `kDefaultTauPx`) so no value can blank the terrain.
 - **Debug tint** combo — `Shaded (biome color)` / `Triangle hash` (per-triangle
   position hash of `meta.y`, NOT a stable per-cluster color — deferred) / `LOD level`
   (hue wheel). Drives `debug_params.x` in `terrain_cluster.wesl` via a live per-draw
@@ -81,9 +88,7 @@ Runtime (mapview ImGui "Map" panel, cluster terrain live):
   CPU selection µs, and a per-level histogram.
 
 Headless CLI (`badlands_mapview`):
-- `--legacy-terrain` — render the legacy chunks instead of cluster terrain.
 - `--camera-height H` — starting camera height in metres (near/far framing).
-- `--lod-tau T` — seed τ in pixels (default 1.5).
 - `--lod-tint N` — seed tint mode (0 shaded / 1 triangle hash / 2 LOD level).
 - `--serial-build` — build the DAG single-threaded (perf A/B; bit-identical output).
 
@@ -132,7 +137,12 @@ shrink the cut, as expected.
   per-cluster `DrawIndexed` with compute selection and indirect draws.
 - **Biome texture-array sampling at near LOD** — biome id is already in the vertex
   layout; near clusters could sample the PBR terrain arrays instead of flat vertex
-  color (the current v1 look difference vs legacy).
+  color (the current v1 flat-color look).
+- **Free the terrain mesh's CPU-side copy after GPU upload** — the DAG geometry is
+  now MOVED into `StaticTexturedMeshComponent` (no duplicate copy), but the mesh
+  still keeps its vertices/indices on the CPU after upload. Freeing them would need
+  an engine `keep_cpu_data`-style toggle on the mesh component (engine-interface
+  change, approval required) — deferred, not built.
 - **Per-level normal re-derivation** — coarse LODs carry the leaf normals, so 1 m
   detail can shimmer; re-derive normals per level to fix it.
 - **Stable per-cluster debug tint** — needs a per-range user tag (`MeshDrawRange`) +

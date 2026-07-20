@@ -1,10 +1,11 @@
 #pragma once
 
 // badlands_mapview's AppView: generates a map in-process (the mapgen pipeline),
-// tessellates it into indexed kTerrainBlend chunks rendered with the biome
-// texture-array terrain material, and views it with the fixed-angle
-// GameCameraController. Terrain entities are created directly in the registry
-// (no SceneGraph — the terrain is a raw indexed mesh, not a MeshAttachment).
+// builds the Nanite-style terrain cluster-LOD DAG from it, and views it with the
+// fixed-angle GameCameraController. The terrain is one entity holding the shared
+// cluster mesh; a MeshDrawRangesComponent carries the per-frame LOD cut. Terrain
+// entities are created directly in the registry (no SceneGraph — the terrain is
+// a raw indexed mesh, not a MeshAttachment).
 //
 // Hovering the mouse over the terrain draws a block/section debug grid around
 // the hit point (see RebuildVisibleGrid).
@@ -36,22 +37,17 @@ namespace badlands {
 class MapViewView : public AppView {
  public:
   // `cfg` is the full generator config (seed/size/thresholds/terracing/...), so
-  // everything --config exposes reaches the viewer. `use_cluster_terrain`
-  // selects the cluster-LOD terrain (default) vs the legacy fixed-subdiv chunks
-  // (the A/B baseline); the ImGui checkbox flips it at runtime.
-  // `camera_height` overrides the starting camera height (0 = keep the default
-  // ground-level framing); `lod_tau` seeds the screen-space-error budget in
-  // pixels; `lod_tint` seeds the debug tint mode (0 shaded / 1 triangle hash /
-  // 2 LOD level). `serial_build` forces the single-threaded DAG build (the perf
-  // A/B baseline; default is the parallel build). All exist mainly so headless
-  // --screenshot runs can frame near/far and set LOD/tint without touching the
-  // interactive defaults.
-  explicit MapViewView(mapgen::MapgenConfig cfg, bool use_cluster_terrain = true,
-                       float camera_height = 0.0f, float lod_tau = 1.5f,
+  // everything --config exposes reaches the viewer. `camera_height` overrides
+  // the starting camera height (0 = keep the default ground-level framing);
+  // `lod_tint` seeds the debug tint mode (0 shaded / 1 triangle hash / 2 LOD
+  // level). `serial_build` forces the single-threaded DAG build (the perf A/B
+  // baseline; default is the parallel build). These exist mainly so headless
+  // --screenshot runs can frame near/far and set the tint without touching the
+  // interactive defaults. tau is a runtime-only knob (the DrawUI slider), seeded
+  // from kDefaultTauPx.
+  explicit MapViewView(mapgen::MapgenConfig cfg, float camera_height = 0.0f,
                        int lod_tint = 0, bool serial_build = false)
       : cfg_(std::move(cfg)),
-        use_cluster_terrain_(use_cluster_terrain),
-        tau_px_(lod_tau),
         camera_height_override_(camera_height),
         debug_tint_mode_(lod_tint),
         serial_build_(serial_build) {}
@@ -105,27 +101,20 @@ class MapViewView : public AppView {
   // MaterialLibrary entry). Held for the terrain entity's lifetime.
   std::unique_ptr<MaterialInstanceFactory> cluster_factory_;
 
-  // Which terrain path is live. Only the selected set of entities exists in the
-  // registry at a time (RebuildTerrain destroys one and builds the other).
-  bool use_cluster_terrain_ = true;
-  entt::entity cluster_entity_ = entt::null;  // valid iff cluster terrain live
-  std::vector<entt::entity> legacy_entities_;  // valid iff legacy terrain live
+  entt::entity cluster_entity_ = entt::null;  // the terrain entity
 
-  // (Re)build the live terrain path from use_cluster_terrain_, destroying the
-  // other. Builds the cluster entity (whole shared mesh + the LOD-cut draw
-  // ranges) or the legacy fixed-subdiv chunk entities.
-  void RebuildTerrain();
+  // Build the terrain entity (whole shared cluster mesh + the LOD-cut draw
+  // ranges). Called once from Initialize.
   void BuildClusterTerrain();
-  void BuildLegacyTerrain();
 
   // Per-frame LOD cut: pick the screen-space-error cluster cut for the current
-  // camera and rewrite the cluster entity's draw ranges from it. No-op unless
-  // the cluster terrain is live. Called from Update after the camera moves.
+  // camera and rewrite the cluster entity's draw ranges from it. Early-outs when
+  // none of the cut-affecting inputs changed. Called from Update.
   void UpdateClusterLod();
 
-  // Screen-space-error budget in pixels (the LOD knob). Higher = coarser. Seeded
-  // from the constructor; adjustable via the DrawUI slider.
-  float tau_px_ = 1.5f;
+  // Screen-space-error budget in pixels (the LOD knob). Higher = coarser.
+  // Runtime-only, adjustable via the DrawUI slider; seeded from kDefaultTauPx.
+  float tau_px_ = kDefaultTauPx;
   // Starting camera height override (0 = default); applied once in Initialize.
   float camera_height_override_ = 0.0f;
   // Debug tint source driving the cluster material's debug_params.x uniform:
@@ -157,6 +146,14 @@ class MapViewView : public AppView {
   // against the light frustum, is not instrumented here).
   double sel_time_us_ = 0.0;
   int sel_camera_drawn_ = 0;
+  // Inputs of the last computed cut. UpdateClusterLod early-outs when the camera
+  // position, tau, and viewport height all still match these — the cut is a pure
+  // function of exactly those three (orientation does not affect selection), so
+  // re-running SelectClusters would reproduce the same set. Seeded to values no
+  // real state matches (tau/height < 0) so the first call always recomputes.
+  glm::vec3 last_sel_cam_pos_{0.0f};
+  float last_sel_tau_ = -1.0f;
+  float last_sel_screen_h_ = -1.0f;
   // Force the single-threaded DAG build (perf A/B baseline); seeded once in
   // Initialize, not runtime-toggleable (the DAG is built there).
   bool serial_build_ = false;
@@ -173,7 +170,6 @@ class MapViewView : public AppView {
   glm::vec3 hover_point_{0.0f};
   bool hover_valid_ = false;
 
-  int chunk_count_ = 0;
   float map_size_m_ = 0.0f;
 
   // Rebuilds grid_ with block-boundary lines + highlighted section boundaries,
