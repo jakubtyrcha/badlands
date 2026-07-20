@@ -35,6 +35,7 @@ class StandardRenderingMaterialInstance : public RenderingMaterialInstance {
   GeometryType GetGeometryType() const override { return geometry_type_; }
   RenderPassType GetRenderPassType() const override { return pass_type_; }
   wgpu::RenderPipeline GetPipeline() const override;
+  bool DeclaresBindGroup(uint32_t group) const override;
   bool IsValid() const override;
 
  private:

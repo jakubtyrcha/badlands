@@ -119,16 +119,17 @@ add_library(badlands_engine STATIC
     src/engine/rendering/geometry/mesh_builder_utils.cpp
     src/engine/rendering/geometry/primitive_mesh_builders.cpp
     src/engine/rendering/geometry/extrusion_mesh_builder.cpp
+    src/engine/rendering/geometry/lake_surface_builder.cpp
+    src/engine/rendering/water_material.cpp
     src/engine/rendering/geometry/building_parts_builder.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
-    src/engine/app/sdl_input_util.cpp
-    src/engine/core/ray.cpp
     src/engine/rendering/frustum.cpp
     src/engine/rendering/debug_line_buffer.cpp
     src/engine/rendering/debug_line_expand.cpp
     src/engine/rendering/passes/render_debug_lines.cpp
     src/engine/rendering/passes/render_textured_mesh.cpp
+    src/engine/rendering/passes/render_forward.cpp
     src/engine/rendering/passes/render_skybox.cpp
     src/engine/rendering/passes/render_gbuffer_debug.cpp
     src/engine/rendering/gbuffer.cpp
@@ -164,6 +165,8 @@ add_library(badlands_engine STATIC
     src/engine/app/screenshot_recorder.cpp
     src/engine/app/orbit_camera_controller.cpp
     src/engine/app/game_camera_controller.cpp
+    src/engine/app/sdl_input_util.cpp
+    src/engine/core/ray.cpp
     src/engine/ui/imgui_impl_wgpu_custom.cpp
     src/engine/ui/editor_ui.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -419,6 +422,26 @@ target_include_directories(badlands_fog_generator_tests PRIVATE
 )
 add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
+# it over a windowed 2D domain into a texture (8x8 patches across the shared
+# thread pool), and write a PNG. Links badlands_game_lib for the noiser C++ VM
+# and `assets` for PNG write; compiles src/core/parallel.cpp for ParallelFor.
+# No engine/SDL/Dawn — a fast, standalone tool. See src/tools/noise_texgen/.
+add_executable(badlands_noise_texgen
+    src/tools/noise_texgen/noise_texgen.cpp
+    src/tools/noise_texgen/texgen_core.cpp
+    src/core/parallel.cpp
+)
+target_link_libraries(badlands_noise_texgen PRIVATE badlands_game_lib assets)
+target_include_directories(badlands_noise_texgen PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR}
+)
+target_compile_options(badlands_noise_texgen PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_noise_texgen PRIVATE "-Wl,-ld_new")
+endif()
+
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
 # see tests/cpp_tests.rs on the legacy Rust reference branch).
@@ -512,6 +535,22 @@ target_include_directories(badlands_fog_tests PRIVATE
 )
 add_test(NAME badlands_fog_tests COMMAND badlands_fog_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_water_tests: Catch2 suite for the water surface wave/normal math
+# (engine/rendering/water_waves.hpp) + the octahedron encode/decode CPU mirror
+# (engine/rendering/octahedron.hpp). Pure CPU — header-only glm math, no Dawn —
+# modeled on badlands_fog_tests. shaders/common/water_waves.wesl mirrors the
+# same constants; badlands_water_gpu_test is the GPU-vs-CPU cross-check.
+add_executable(badlands_water_tests
+    game/tests/water_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_water_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+)
+add_test(NAME badlands_water_tests COMMAND badlands_water_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_shadow_test: Task T4's Catch2 suite for the directional-shadow
 # system (T2's ShadowMap + T3's deferred sampling) -- a headless GPU render
 # harness (shadow_test_harness.*, built on the sampo-ported GPU-test infra:
@@ -558,6 +597,44 @@ if(APPLE)
     target_link_options(badlands_fog_gpu_test PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_fog_gpu_test COMMAND badlands_fog_gpu_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_water_gpu_test: headless GPU cross-check for the water surface. Renders
+# the water material's G-buffer variant (shaders/material/water.wesl) and reads
+# the shader-computed octahedron normal back from the RG16Float G-buffer normals
+# target, decoding + comparing against src/engine/rendering/water_waves.hpp (the
+# same C++ core badlands_water_tests unit-tests). Needs a working GPU adapter.
+add_executable(badlands_water_gpu_test
+    game/tests/water_gpu_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_water_gpu_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_water_gpu_test PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_water_gpu_test PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_water_gpu_test COMMAND badlands_water_gpu_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_forward_pass_test: headless GPU tests for the forward render path
+# (ported/adapted from sampo's forward material binding test). Verifies the
+# forward-opaque solid-colour variant and the forward-transparent premultiplied
+# blend against a depth-read-only attachment (which also validates depth_write
+# as a per-material property). Uses shaders/tests/forward_debug.wesl.
+add_executable(badlands_forward_pass_test
+    game/tests/forward_pass_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_forward_pass_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_forward_pass_test PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_forward_pass_test PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_forward_pass_test COMMAND badlands_forward_pass_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_fog_sim_gpu_test: headless GPU suite for the map fog GENERATOR
 # (FogSimulation emitters/broadphase + the compute/fog_fill composer +
@@ -719,3 +796,26 @@ target_include_directories(badlands_ray_tests PRIVATE
 )
 target_compile_definitions(badlands_ray_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 add_test(NAME badlands_ray_tests COMMAND badlands_ray_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_texgen_tests: Catch2 suite for the noise-texgen core
+# (src/tools/noise_texgen) — determinism, 8x8-patch tiling completeness, window
+# binding, mode/return-type validation, and linear-grayscale vs sRGB-color
+# encoding. Pure CPU; must run from the repo root so assets/noiser/texgen/*.noiser
+# resolve.
+add_executable(badlands_texgen_tests
+    src/tools/noise_texgen/texgen_tests.cpp
+    src/tools/noise_texgen/texgen_core.cpp
+    src/core/parallel.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_texgen_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR}
+)
+target_link_libraries(badlands_texgen_tests PRIVATE badlands_game_lib assets)
+target_compile_options(badlands_texgen_tests PRIVATE -Wno-deprecated-declarations)
+if(APPLE)
+    target_link_options(badlands_texgen_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_texgen_tests COMMAND badlands_texgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

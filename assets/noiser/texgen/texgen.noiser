@@ -1,0 +1,34 @@
+// texgen — domain + color helpers for the noise-texgen tool.
+//
+// The host (badlands_noise_texgen) dispatches one warp invocation per pixel
+// (@warpId = (px, py, 0), @warpSize = (width, height, 1)) and binds the domain
+// window as four scalar uniforms. domain_pos() maps the current pixel into that
+// window; the color helpers remap noise values into the [0,1] pixel range.
+
+@uni.win_min_x: f32 = 0.0;
+@uni.win_min_y: f32 = 0.0;
+@uni.win_max_x: f32 = 1.0;
+@uni.win_max_y: f32 = 1.0;
+
+/// Map the current warp pixel to a domain-space position inside the window,
+/// with a half-pixel offset so samples land at pixel centers.
+pub fn domain_pos() -> Vec2 {
+    let sx = f32(@warpSize.0);
+    let sy = f32(@warpSize.1);
+    let u = (f32(@warpId.0) + 0.5) / sx;
+    let v = (f32(@warpId.1) + 0.5) / sy;
+    let x = @uni.win_min_x + (@uni.win_max_x - @uni.win_min_x) * u;
+    let y = @uni.win_min_y + (@uni.win_max_y - @uni.win_min_y) * v;
+    vec2(x, y)
+}
+
+/// Remap a signed noise value in [-1, 1] to [0, 1].
+pub fn unorm(x: f32) -> f32 = x * 0.5 + 0.5;
+
+/// Clamp a value into [0, 1]. Used for noises whose natural range is not
+/// [-1, 1] (e.g. ridged ~[0,1], cellular distances >= 0, pre-scaled by the
+/// caller) so tiles are neither washed out nor clipped.
+pub fn clamp01(x: f32) -> f32 = max(0.0, min(1.0, x));
+
+/// Visualize a 2D noise gradient as color: dN/dx -> red, dN/dy -> green.
+pub fn grad_rgb(g: Vec2) -> Vec3 = vec3(unorm(g.x), unorm(g.y), 0.5);

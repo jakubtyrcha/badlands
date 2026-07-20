@@ -70,6 +70,10 @@ class RenderingMaterialInstance {
   virtual GeometryType GetGeometryType() const = 0;
   virtual RenderPassType GetRenderPassType() const = 0;
   virtual wgpu::RenderPipeline GetPipeline() const = 0;
+  // True if this material's shader declares any binding in bind group `group`
+  // (from reflection). Used by the forward-transparent pass to bind engine
+  // resources at @group(2) only for materials (e.g. water) that declare it.
+  virtual bool DeclaresBindGroup(uint32_t group) const = 0;
   virtual bool IsValid() const = 0;
 };
 

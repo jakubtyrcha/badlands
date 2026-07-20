@@ -1,0 +1,7 @@
+// Perlin noise gradient (partial derivatives) visualized as color. Returns a
+// vec3; run with --mode rgb.
+//   badlands_noise_texgen assets/noiser/texgen/perlin_gradient_rgb.noiser \
+//       --window 0,0,8,8 --res 512x512 --mode rgb --out perlin_gradient.png
+import { domain_pos, grad_rgb } from texgen;
+
+grad_rgb(Perlin2d { seed: 42, freq: 1.0 }.gradient(domain_pos()))

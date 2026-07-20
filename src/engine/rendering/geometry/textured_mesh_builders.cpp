@@ -5,7 +5,10 @@
 // aabb.hpp).
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 
+#include <algorithm>
+
 #include "engine/rendering/geometry/cube_sphere.hpp"
+#include "engine/rendering/geometry/mesh_builder_utils.hpp"
 
 namespace badlands {
 
@@ -162,6 +165,72 @@ StaticCubeMapTexturedMesh GenerateSphereCubeMapTexturedMesh(float radius,
   result.vertex_count = static_cast<uint32_t>(sphere.indices.size());
   result.dirty = true;
 
+  return result;
+}
+
+TexturedMeshResult GenerateHeightmapMesh(
+    float size, int resolution,
+    const std::function<float(float, float)>& height_fn, float uv_scale) {
+  TexturedMeshResult result;
+  result.mesh.geometry_type = GeometryType::kTexturedMesh;
+
+  const int res = std::max(resolution, 1);
+  const int samples = res + 1;
+  const float half = size * 0.5f;
+  const float step = size / static_cast<float>(res);
+  const float eps = step * 0.5f;
+
+  // Precompute a shared grid of position/normal/tangent/uv so adjacent cells
+  // reuse smooth per-vertex normals (central-difference of height_fn).
+  struct GridVertex {
+    glm::vec3 pos;
+    glm::vec3 normal;
+    glm::vec3 tangent;
+    glm::vec2 uv;
+  };
+  std::vector<GridVertex> grid(static_cast<size_t>(samples) * samples);
+  for (int j = 0; j < samples; ++j) {
+    for (int i = 0; i < samples; ++i) {
+      const float x = -half + static_cast<float>(i) * step;
+      const float z = -half + static_cast<float>(j) * step;
+      const float y = height_fn(x, z);
+      const float dhdx =
+          (height_fn(x + eps, z) - height_fn(x - eps, z)) / (2.0f * eps);
+      const float dhdz =
+          (height_fn(x, z + eps) - height_fn(x, z - eps)) / (2.0f * eps);
+      grid[static_cast<size_t>(j) * samples + i] = {
+          glm::vec3(x, y, z),
+          glm::normalize(glm::vec3(-dhdx, 1.0f, -dhdz)),
+          glm::normalize(glm::vec3(1.0f, dhdx, 0.0f)),
+          glm::vec2((x + half) / size, (z + half) / size) * uv_scale};
+    }
+  }
+
+  auto& v = result.mesh.vertices;
+  v.reserve(static_cast<size_t>(res) * res * 6 * kTexturedMeshFloatsPerVertex);
+  auto push = [&](const GridVertex& g) {
+    PushVertex(v, g.pos, g.uv, g.normal, g.tangent);
+  };
+  for (int j = 0; j + 1 < samples; ++j) {
+    for (int i = 0; i + 1 < samples; ++i) {
+      const GridVertex& a = grid[static_cast<size_t>(j) * samples + i];
+      const GridVertex& b = grid[static_cast<size_t>(j) * samples + (i + 1)];
+      const GridVertex& c = grid[static_cast<size_t>(j + 1) * samples + (i + 1)];
+      const GridVertex& d = grid[static_cast<size_t>(j + 1) * samples + i];
+      // Two triangles, wound CCW as seen from +Y.
+      push(a);
+      push(c);
+      push(b);
+      push(a);
+      push(d);
+      push(c);
+    }
+  }
+
+  result.mesh.vertex_count =
+      static_cast<uint32_t>(v.size() / kTexturedMeshFloatsPerVertex);
+  result.local_bounds =
+      ComputeLocalAabbFromVertices(v, kTexturedMeshFloatsPerVertex);
   return result;
 }
 

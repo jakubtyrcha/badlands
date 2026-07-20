@@ -31,6 +31,17 @@ NodeHandle AddMeshEntity(SceneGraph& scene, const char* name,
                          TexturedMeshResult&& mesh, const DeferredMaterial& mat,
                          const glm::mat4& transform = glm::mat4(1.0f));
 
+// Like AddMeshEntity, but attaches a forward-transparent MeshAttachment (routed
+// to the forward-transparent pass) from a raw factory + per-instance params
+// rather than a DeferredMaterial. Used for the water surface (built via
+// water_material.hpp's BuildWaterForwardFactory + DefaultWaterParams). Stays
+// game-agnostic: engine types only.
+NodeHandle AddTransparentMeshEntity(SceneGraph& scene, const char* name,
+                                    TexturedMeshResult&& mesh,
+                                    MaterialInstanceFactory* factory,
+                                    const InstanceParams& params,
+                                    const glm::mat4& transform = glm::mat4(1.0f));
+
 // Adds a horizontal ground quad named "floor" spanning [-size/2, size/2] in
 // X and Z at Y=0 (GenerateQuadTexturedMesh in the XY plane, rotated -90deg
 // about X so its normal is +Y), textured with the PBR pack at `pack_dir`

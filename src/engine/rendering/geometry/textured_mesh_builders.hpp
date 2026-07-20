@@ -4,6 +4,8 @@
 // namespace sampo -> badlands, verbatim otherwise (includes adapted to
 // badlands paths).
 
+#include <functional>
+
 #include <glm/glm.hpp>
 
 #include "engine/rendering/components/mesh_components.hpp"
@@ -37,6 +39,18 @@ TexturedMeshResult GenerateSphereTexturedMesh(float radius,
 TexturedMeshResult GenerateQuadTexturedMesh(float size = 1.0f,
                                             int resolution = 1,
                                             float uv_scale = 1.0f);
+
+// Height-field terrain mesh over the XZ plane (+Y up), spanning
+// [-size/2, size/2] in X and Z with `resolution` grid cells per side
+// (>=1; `resolution+1` samples per side). Vertex Y = `height_fn(x, z)`;
+// per-vertex normals come from central differences of `height_fn`, tangents
+// point along +X on the surface (T = normalize(vec3(1, dH/dx, 0)), so T.N == 0).
+// UV = XZ normalized to [0,1] * `uv_scale`. Non-indexed triangle list, wound
+// CCW as seen from +Y. Used for the test lake bottom (a dipped basin).
+TexturedMeshResult GenerateHeightmapMesh(
+    float size, int resolution,
+    const std::function<float(float x, float z)>& height_fn,
+    float uv_scale = 1.0f);
 
 // Cubemap-sampled sphere mesh (for spherical/EAC sampling)
 // No UV - direction-based cubemap sampling
