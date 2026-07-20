@@ -369,6 +369,7 @@ add_executable(badlands_terrain_cluster_tests
     src/game/geometry/terrain_clusters.cpp
     src/game/geometry/terrain_mesh.cpp
     src/engine/rendering/geometry/aabb.cpp
+    src/core/parallel.cpp  # ParallelFor: the DAG build's per-group parallelism
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_terrain_cluster_tests PRIVATE
@@ -376,6 +377,7 @@ target_include_directories(badlands_terrain_cluster_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${taskflow_SOURCE_DIR}  # taskflow backs src/core/parallel.cpp
 )
 target_link_libraries(badlands_terrain_cluster_tests PRIVATE meshoptimizer)
 add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

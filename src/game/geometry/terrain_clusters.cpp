@@ -13,6 +13,7 @@
 #include <meshoptimizer.h>
 #include <spdlog/spdlog.h>
 
+#include "core/parallel.hpp"  // ParallelFor (per-group build parallelism)
 #include "game/geometry/terrain_mesh.hpp"  // SampleHeight, NormalAt, PackU8x4
 #include "mapgen/biomes.hpp"
 #include "mapgen/mapgen_constants.hpp"
@@ -124,6 +125,11 @@ uint32_t EmitCluster(TerrainClusterDag& dag,
 
   glm::vec3 lo(FLT_MAX), hi(-FLT_MAX);
   for (const WorkVertex& v : geom.verts) {
+    // Palette bytes are written RAW (no sRGB->linear decode), matching legacy
+    // terrain: the G-buffer albedo target is linear BGRA8Unorm and terrain_blend
+    // loads its textures as plain RGBA8Unorm (no sRGB decode), so both paths
+    // treat 8-bit albedo as linear. Linearizing here would make cluster terrain
+    // darker than legacy. See the M4 color-path finding in the docs note.
     const mapgen::Rgb col = kBiomePalette[v.biome];
     dag.vertices.push_back(v.pos.x);
     dag.vertices.push_back(v.pos.y);
@@ -338,7 +344,8 @@ glm::vec4 SphereOfAabb(const Aabb& b) {
 }
 
 // Per-level build summary — the observable for M1 (nothing renders yet).
-void LogStats(const TerrainClusterDag& dag, double build_ms) {
+void LogStats(const TerrainClusterDag& dag, double build_ms, bool parallel,
+              unsigned workers) {
   size_t total_tris = 0, total_verts = 0;
   spdlog::info("terrain cluster DAG: {} levels, {} clusters, {} groups",
                dag.level_count, dag.clusters.size(), dag.groups.size());
@@ -370,8 +377,9 @@ void LogStats(const TerrainClusterDag& dag, double build_ms) {
         "err_m[{:.3f}..{:.3f}]",
         L, n, tmin, tsum / static_cast<uint64_t>(n), tmax, emin, emax);
   }
-  spdlog::info("  totals: {} tris, {} verts, build {:.1f} ms", total_tris,
-               total_verts, build_ms);
+  spdlog::info("  totals: {} tris, {} verts, build {:.1f} ms ({}, {} workers)",
+               total_tris, total_verts, build_ms,
+               parallel ? "parallel" : "serial", workers);
 }
 
 }  // namespace
@@ -501,23 +509,58 @@ TerrainClusterDag BuildTerrainClusterDag(const Field2D<float>& heightmap,
     next.nx = (grid.nx + bx - 1) / bx;
     next.nz = (grid.nz + bz - 1) / bz;
     next.cells.resize(static_cast<size_t>(next.nx) * next.nz);
+    const size_t group_count = next.cells.size();
 
+    // Phase A (serial): per-output-cell child list + footprint. The flat index
+    // g = orz*next.nx + orx makes the later serial emission run in the exact
+    // orz-major/orx-minor order the single-loop build used, so cluster/group
+    // ids and buffer offsets are assigned identically.
+    struct GroupWork {
+      std::vector<uint32_t> children;
+      glm::vec4 footprint{0.0f};
+    };
+    std::vector<GroupWork> work(group_count);
     for (int orz = 0; orz < next.nz; ++orz) {
       for (int orx = 0; orx < next.nx; ++orx) {
         const int rx0 = orx * bx, rx1 = std::min(rx0 + bx, grid.nx);
         const int rz0 = orz * bz, rz1 = std::min(rz0 + bz, grid.nz);
-
-        std::vector<uint32_t> children;
+        GroupWork& w = work[static_cast<size_t>(orz) * next.nx + orx];
         for (int rz = rz0; rz < rz1; ++rz)
           for (int rx = rx0; rx < rx1; ++rx)
-            for (uint32_t c : grid.at(rx, rz).clusters) children.push_back(c);
-        const glm::vec4 footprint(grid.at(rx0, rz0).x0, grid.at(rx0, rz0).z0,
-                                  grid.at(rx1 - 1, rz1 - 1).x1,
-                                  grid.at(rx1 - 1, rz1 - 1).z1);
+            for (uint32_t c : grid.at(rx, rz).clusters) w.children.push_back(c);
+        w.footprint = glm::vec4(grid.at(rx0, rz0).x0, grid.at(rx0, rz0).z0,
+                                grid.at(rx1 - 1, rz1 - 1).x1,
+                                grid.at(rx1 - 1, rz1 - 1).z1);
+      }
+    }
 
-        ClusterGeom merged = WeldChildren(cluster_geom, children);
-        GroupResult gr =
-            SimplifyAndSplit(std::move(merged), footprint, map_w, map_h, params);
+    // Phase B (parallel): weld + simplify + split each group into its own slot.
+    // Both are pure functions of the immutable cluster_geom below this level and
+    // the group's own inputs (meshopt is deterministic and thread-agnostic), so
+    // distinct groups never touch shared mutable state and the per-slot results
+    // are independent of scheduling — the determinism test pins parallel ==
+    // serial byte-for-byte.
+    std::vector<GroupResult> results(group_count);
+    auto compute = [&](size_t g) {
+      ClusterGeom merged = WeldChildren(cluster_geom, work[g].children);
+      results[g] = SimplifyAndSplit(std::move(merged), work[g].footprint, map_w,
+                                    map_h, params);
+    };
+    if (params.parallel_build) {
+      ParallelFor(group_count, compute);
+    } else {
+      for (size_t g = 0; g < group_count; ++g) compute(g);
+    }
+
+    // Phase C (serial, deterministic): emit clusters/groups + build spheres in
+    // the fixed g order. This is the only phase that mutates the DAG, so the
+    // output layout is independent of how Phase B was scheduled.
+    for (int orz = 0; orz < next.nz; ++orz) {
+      for (int orx = 0; orx < next.nx; ++orx) {
+        const size_t g = static_cast<size_t>(orz) * next.nx + orx;
+        const std::vector<uint32_t>& children = work[g].children;
+        const glm::vec4 footprint = work[g].footprint;
+        GroupResult& gr = results[g];
 
         // Reserve the group slot, emit its outputs (own_group = this group).
         const int gidx = static_cast<int>(dag.groups.size());
@@ -577,7 +620,7 @@ TerrainClusterDag BuildTerrainClusterDag(const Field2D<float>& heightmap,
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - t_start)
           .count();
-  LogStats(dag, build_ms);
+  LogStats(dag, build_ms, params.parallel_build, GetWorkerThreadCount());
   return dag;
 }
 

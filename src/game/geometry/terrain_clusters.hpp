@@ -61,6 +61,12 @@ struct TerrainClusterParams {
   // normal is unit-length, color is unpacked to [0,1] before weighting.
   float attr_weight_normal = 0.5f;
   float attr_weight_color = 0.5f;
+  // Parallelize the per-group weld+simplify+split within each level over the
+  // shared thread pool (ParallelFor). Only the pure per-group computation runs
+  // concurrently; cluster/group emission stays serial in a fixed order, so the
+  // output DAG is BIT-IDENTICAL to a serial build (pinned by the determinism
+  // test). Off = single-threaded, for the serial reference + perf A/B.
+  bool parallel_build = true;
 };
 
 // One LOD cluster: a range into the DAG's shared vertex/index buffers plus its

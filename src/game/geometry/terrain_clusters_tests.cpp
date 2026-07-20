@@ -420,6 +420,79 @@ TEST_CASE("terrain cluster DAG: SelectClusters cut validity", "[terrain_clusters
   }
 }
 
+// --- determinism gate (parallel build == serial build, bitwise) -------------
+// Compares two DAGs field-by-field on raw bit patterns (not float ==, so a
+// -0.0/0.0 or any last-bit drift is caught). This is the non-negotiable gate for
+// the ParallelFor build: the parallel phase only runs the pure per-group
+// weld+simplify+split; emission stays serial, so the output MUST be identical.
+
+template <typename T>
+bool BitsEqual(const T& a, const T& b) {
+  return std::memcmp(&a, &b, sizeof(T)) == 0;
+}
+
+void RequireDagsBitIdentical(const TerrainClusterDag& a,
+                             const TerrainClusterDag& b) {
+  REQUIRE(a.level_count == b.level_count);
+  REQUIRE(a.map_quads_x == b.map_quads_x);
+  REQUIRE(a.map_quads_z == b.map_quads_z);
+
+  REQUIRE(a.vertices.size() == b.vertices.size());
+  REQUIRE(std::memcmp(a.vertices.data(), b.vertices.data(),
+                      a.vertices.size() * sizeof(float)) == 0);
+
+  REQUIRE(a.indices == b.indices);
+  REQUIRE(a.group_children == b.group_children);
+
+  REQUIRE(a.clusters.size() == b.clusters.size());
+  for (size_t i = 0; i < a.clusters.size(); ++i) {
+    const TerrainCluster& ca = a.clusters[i];
+    const TerrainCluster& cb = b.clusters[i];
+    REQUIRE(ca.first_index == cb.first_index);
+    REQUIRE(ca.index_count == cb.index_count);
+    REQUIRE(ca.first_vertex == cb.first_vertex);
+    REQUIRE(ca.vertex_count == cb.vertex_count);
+    REQUIRE(ca.own_group == cb.own_group);
+    REQUIRE(ca.parent_group == cb.parent_group);
+    REQUIRE(ca.level == cb.level);
+    REQUIRE(BitsEqual(ca.bounds.min, cb.bounds.min));
+    REQUIRE(BitsEqual(ca.bounds.max, cb.bounds.max));
+  }
+
+  REQUIRE(a.groups.size() == b.groups.size());
+  for (size_t i = 0; i < a.groups.size(); ++i) {
+    const auto& ga = a.groups[i];
+    const auto& gb = b.groups[i];
+    REQUIRE(BitsEqual(ga.error_m, gb.error_m));
+    REQUIRE(BitsEqual(ga.sphere, gb.sphere));
+    REQUIRE(BitsEqual(ga.footprint, gb.footprint));
+    REQUIRE(ga.level == gb.level);
+    REQUIRE(ga.first_child == gb.first_child);
+    REQUIRE(ga.child_count == gb.child_count);
+  }
+}
+
+TEST_CASE("terrain cluster DAG: parallel build == serial build (bitwise)",
+          "[terrain_clusters]") {
+  auto build = [](int w, int h, bool parallel) {
+    TerrainClusterParams params;
+    params.parallel_build = parallel;
+    return BuildTerrainClusterDag(MakeHeightmap(w, h), MakeBiomes(w, h), params);
+  };
+
+  SECTION("64x64") {
+    RequireDagsBitIdentical(build(64, 64, false), build(64, 64, true));
+  }
+  SECTION("non-square 100x60") {
+    RequireDagsBitIdentical(build(100, 60, false), build(100, 60, true));
+  }
+  SECTION("parallel is reproducible run-to-run") {
+    // A second parallel build must match the first bitwise too — guards against
+    // any scheduling-dependent nondeterminism the serial reference can't expose.
+    RequireDagsBitIdentical(build(64, 64, true), build(64, 64, true));
+  }
+}
+
 TEST_CASE("terrain cluster DAG: non-default constants hold invariants", "[terrain_clusters]") {
   const int w = 64, h = 60;
   TerrainClusterParams params;
