@@ -28,7 +28,39 @@ namespace badlands {
 
 namespace {
 constexpr int kChunkBlocks = 16;  // N x N blocks per chunk (kBlockSizeM each)
-constexpr int kSubdiv = 2;        // subgrid cells per block edge
+constexpr int kSubdiv = 2;        // lattice cells per block edge
+// The terrain lattice spacing: unchanged mesh density (one X-split quad per
+// kBlockSizeM/kSubdiv metres, exactly what the old subdiv=2 builder emitted).
+constexpr float kLatticeSpacingM =
+    static_cast<float>(mapgen::kBlockSizeM) / kSubdiv;
+constexpr int kChunkCells = kChunkBlocks * kSubdiv;
+
+// Wrap the mapgen pipeline output in the frozen MapData contract WITHOUT
+// changing what mapview renders: the lattice is sampled at the mesh's own
+// spacing and the biome slices are ONE-HOT, i.e. exactly the hard per-pixel
+// assignment mapview drew before. Blended slices are the game's symbolic
+// generator's business; the map tool deliberately keeps its crisp voronoi
+// borders.
+MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, float spacing_m) {
+  const int sw = art.heightmap.width, sh = art.heightmap.height;
+  if (sw <= 0 || sh <= 0) return {};
+  const float mps = static_cast<float>(mapgen::kMetersPerSample);
+  const int nodes_x = static_cast<int>((sw * mps) / spacing_m) + 1;
+  const int nodes_z = static_cast<int>((sh * mps) / spacing_m) + 1;
+
+  MapData map(nodes_x, nodes_z, spacing_m);
+  for (int j = 0; j < nodes_z; ++j) {
+    for (int i = 0; i < nodes_x; ++i) {
+      const int sx = std::clamp(
+          static_cast<int>((static_cast<float>(i) * spacing_m) / mps), 0, sw - 1);
+      const int sz = std::clamp(
+          static_cast<int>((static_cast<float>(j) * spacing_m) / mps), 0, sh - 1);
+      map.mutable_height(i, j) = art.heightmap.at(sx, sz);
+      map.mutable_slice(art.biomes.pixel.at(sx, sz), i, j) = 255;
+    }
+  }
+  return map;
+}
 constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json";
 }  // namespace
 
@@ -75,18 +107,19 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
-  // One indexed kTerrainBlend chunk entity per N x N block region.
-  const int blocks_x = cfg_.width / mapgen::kSamplesPerBlock;
-  const int blocks_z = cfg_.height / mapgen::kSamplesPerBlock;
-  for (int bz = 0; bz < blocks_z; bz += kChunkBlocks) {
-    for (int bx = 0; bx < blocks_x; bx += kChunkBlocks) {
+  terrain_map_ = MakeOneHotMapData(map_, kLatticeSpacingM);
+
+  // One indexed kTerrainBlend chunk entity per N x N lattice-cell region.
+  const int cells_x = terrain_map_.nodes_x() - 1;
+  const int cells_z = terrain_map_.nodes_z() - 1;
+  for (int cz = 0; cz < cells_z; cz += kChunkCells) {
+    for (int cx = 0; cx < cells_x; cx += kChunkCells) {
       TerrainMeshParams p;
-      p.subdiv = kSubdiv;
-      p.block_x0 = bx;
-      p.block_z0 = bz;
-      p.blocks_x = std::min(kChunkBlocks, blocks_x - bx);
-      p.blocks_z = std::min(kChunkBlocks, blocks_z - bz);
-      TerrainMesh chunk = BuildTerrainMesh(map_.heightmap, map_.biomes.pixel, p);
+      p.cell_x0 = cx;
+      p.cell_z0 = cz;
+      p.cells_x = std::min(kChunkCells, cells_x - cx);
+      p.cells_z = std::min(kChunkCells, cells_z - cz);
+      TerrainMesh chunk = BuildTerrainMesh(terrain_map_, p);
       if (chunk.vertex_count == 0) continue;
 
       const Aabb box = ComputeLocalAabbFromVertices(
@@ -294,7 +327,7 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
       }
       const Ray ray = ScreenPointToRay(
           camera_, glm::vec2(event.motion.x, event.motion.y), screen);
-      hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
+      hover_valid_ = RaycastTerrain(terrain_map_, ray, hover_point_);
       break;
     }
     case SDL_EVENT_MOUSE_WHEEL: {
@@ -307,7 +340,7 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
       // -- re-pick now rather than waiting for the next motion event (which may
       // never come if the user is only scrolling).
       const Ray ray = ScreenPointToRay(camera_, pixel, screen);
-      hover_valid_ = RaycastTerrain(map_.heightmap, ray, hover_point_);
+      hover_valid_ = RaycastTerrain(terrain_map_, ray, hover_point_);
       break;
     }
     case SDL_EVENT_MOUSE_BUTTON_DOWN: {
@@ -317,7 +350,7 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
       const Ray ray = ScreenPointToRay(
           camera_, glm::vec2(event.button.x, event.button.y), screen);
       glm::vec3 hit;
-      if (RaycastTerrain(map_.heightmap, ray, hit)) selected_emitter_ = PickEmitter(hit);
+      if (RaycastTerrain(terrain_map_, ray, hit)) selected_emitter_ = PickEmitter(hit);
       break;
     }
     default:
