@@ -1,6 +1,7 @@
 #include "placement.h"
 
 #include "game_state.h"
+#include "heroes.h"  // guild_hero_class -- single source of "is this a guild"
 
 #include <algorithm>
 #include <cmath>
@@ -501,7 +502,14 @@ using namespace badlands;
 
 extern "C" {
 
-GameBuildingDef game_building_def(int32_t kind) { return def_of(kind); }
+GameBuildingDef game_building_def(int32_t kind) {
+    GameBuildingDef def = def_of(kind);
+    // Fill `recruits` from the guild classifier rather than a second hand-kept
+    // table column, so it can never drift from what recruit() actually accepts.
+    // (The static kDefs rows zero-init this field; this is its only writer.)
+    def.recruits = (guild_hero_class(kind) >= 0) ? 1u : 0u;
+    return def;
+}
 
 GameRenderBox game_render_box(int32_t kind, int32_t rotation_index) {
     int rot = ((rotation_index % 4) + 4) % 4;

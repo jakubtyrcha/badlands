@@ -106,6 +106,10 @@ typedef struct GameBuildingDef {
     uint32_t poppable;           // 1 = auto-spawned (House/Sewer), never player-placed
     uint32_t user_destructible;  // 1 = player may DESTROY (the 7 buildable kinds)
     uint32_t enemy_targettable;  // 1 = future monster attacks may target (Castle/House); unused in v0.3
+    uint32_t recruits;           // 1 = a guild that can RECRUIT_HERO (the 4 guild kinds).
+                                 // Derived from the sim's guild classification, so a UI
+                                 // that gates a Recruit button on this can't disagree with
+                                 // what game_dispatch(RECRUIT_HERO) will accept.
 } GameBuildingDef;
 GameBuildingDef game_building_def(int32_t kind);
 

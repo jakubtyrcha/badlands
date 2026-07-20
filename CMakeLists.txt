@@ -75,6 +75,22 @@ corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/nav/Cargo.toml)
 corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 
+# ui: the GAME UI feature-lib (src/crates/ui) — flexbox layout (`panes`) +
+# glyph rasterization/text layout (`fontdue`) behind a coarse C ABI (one
+# ui_build call per frame). This is the in-world game UI surface, deliberately
+# separate from the Dear ImGui DEBUG UI (see CLAUDE.md). The crate is
+# game-agnostic: it knows panels/labels/buttons, never heroes or gold. No
+# dependency of this crate shares its own name, so no Corrosion
+# package-ambiguity workaround is needed (as with assets/nav, unlike wesl_ffi).
+#
+# PROFILE release — same reasoning as `assets` above, for a different reason:
+# ui_build runs EVERY FRAME (layout solve + text run layout for the whole HUD),
+# so a cargo dev-profile build of `panes`/taffy would tax every frame of a
+# Debug C++ build. Nothing here is C++-debuggable anyway.
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/ui/Cargo.toml
+                       PROFILE release)
+corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
+
 # noiser-bundle: aggregates noiser-compiler + noiser-vm (third_party/noiser)
 # into ONE Rust staticlib (crates/noiser-bundle) so the noiser C++ VM wrapper
 # (third_party/noiser/noiser-vm/src, compiled into badlands_game_lib below)
@@ -169,6 +185,7 @@ add_library(badlands_engine STATIC
     src/engine/core/ray.cpp
     src/engine/ui/imgui_impl_wgpu_custom.cpp
     src/engine/ui/editor_ui.cpp
+    src/engine/ui/ui_renderer.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
@@ -176,7 +193,7 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets nav nlohmann_json::nlohmann_json)
+target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets nav ui nlohmann_json::nlohmann_json)
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
 # but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
 # this, glm::perspective() maps the near plane to NDC z=2.0 (outside the
@@ -200,6 +217,7 @@ target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
     ${CMAKE_SOURCE_DIR}/src/crates/nav/include
+    ${CMAKE_SOURCE_DIR}/src/crates/ui/include
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${taskflow_SOURCE_DIR}
@@ -289,6 +307,11 @@ set(badlands_app_sources_game
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
+    # Game UI (the in-world HUD + world picking), distinct from the ImGui debug
+    # UI. Game-specific, so it lives here rather than in badlands_engine --
+    # only the game-agnostic UiRenderer does.
+    src/game/ui/hud.cpp
+    src/game/ui/picking.cpp
     src/mapview/biome_manifest.cpp)
 # Task S2.G: AiSandboxView (walled arena via game/arena.h + 2 static
 # capsules, deferred + GameCameraController). Compiled directly into the
@@ -464,14 +487,24 @@ add_executable(badlands_game_tests
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
+    # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
+    # through the `ui` Rust crate (layout + font), never the GPU, so it runs
+    # here rather than needing a device.
+    game/tests/game_ui_tests.cpp
+    src/game/ui/hud.cpp
+    src/game/ui/picking.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
     ${CMAKE_SOURCE_DIR}/game/src
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/crates/ui/include
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
 )
 target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
-target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib)
+target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib ui)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_geometry_tests: Catch2 suite for Task S2.C's procedural geometry

@@ -310,6 +310,29 @@ VertexLayoutInfo GetVertexLayoutInfo(VertexLayout layout) {
       break;
     }
 
+    case VertexLayout::kUiVertex: {
+      // pos(vec2) + uv(vec2) + color(vec4) = 8 floats = 32 bytes.
+      // Screen-space game-UI quads (shaders/ui/ui.wesl): position in physical
+      // pixels, uv into the R8 glyph atlas (solid rects sample its reserved
+      // white texel), color in sRGB with straight alpha.
+      info.attributes.resize(3);
+
+      info.attributes[0].format = wgpu::VertexFormat::Float32x2;
+      info.attributes[0].offset = 0;
+      info.attributes[0].shaderLocation = 0;
+
+      info.attributes[1].format = wgpu::VertexFormat::Float32x2;
+      info.attributes[1].offset = sizeof(float) * 2;
+      info.attributes[1].shaderLocation = 1;
+
+      info.attributes[2].format = wgpu::VertexFormat::Float32x4;
+      info.attributes[2].offset = sizeof(float) * 4;
+      info.attributes[2].shaderLocation = 2;
+
+      info.stride = sizeof(float) * 8;
+      break;
+    }
+
     case VertexLayout::kPos2d: {
       // pos(vec2) = 2 floats = 8 bytes.
       // Screen-space quads for fragment-path demos (e.g. glyph_morph_demo).
