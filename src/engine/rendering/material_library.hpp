@@ -104,6 +104,15 @@ class MaterialLibrary {
   // false (same contract as Get()); callers MUST check ok().
   TerrainArrays LoadTerrainArrays(const std::vector<std::string>& pack_dirs);
 
+  // Builds debug (blockout) terrain arrays from N solid albedo colors: layer i
+  // = 1x1 (albedo = srgb_colors[i], flat normal, matte ARM). `srgb_colors` are
+  // stored as raw sRGB bytes -- deferred_lighting re-linearizes G-buffer albedo,
+  // so the surface renders as that sRGB color (same convention as SolidColor).
+  // Layer index is the caller's concept (e.g. biome enum value). The returned
+  // views keep their textures alive; the caller keeps this TerrainArrays to hold
+  // them. The blockout counterpart of LoadTerrainArrays; pair with TerrainBlend.
+  TerrainArrays DebugTerrainArrays(const std::vector<glm::vec3>& srgb_colors);
+
   // Returns a deferred terrain-blend material bound to the three
   // texture_2d_arrays of `arrays` (albedo/normal/arm layers), sampled through
   // the library's shared trilinear + 16x-aniso sampler (a bare sampler would

@@ -24,11 +24,13 @@
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
+#include "game/visual/render_mode.hpp"
 
 namespace badlands {
 
 class GameView : public AppView {
  public:
+  explicit GameView(RenderMode mode = RenderMode::Detailed) : mode_(mode) {}
   ~GameView() override;
 
   bool Initialize(const RenderContext& ctx) override;
@@ -60,13 +62,14 @@ class GameView : public AppView {
   // Seeds the demo town via game_dispatch(GAME_ACTION_PLACE_BUILDING) at a
   // few spread-out, non-overlapping tiles around the prebuilt origin Castle.
   void PlaceDemoBuildings();
-  // Clears scene_ and rebuilds it from scratch: re-mirrors scene_context_'s
-  // lighting, adds the gray floor, then adds every game_buildings() row via
-  // AddBuildingToScene. Called once from Initialize. NOTE: the sim now ticks
-  // (Update runs game_tick at a fixed rate), but this stage has no dynamic
-  // entities, so the building set never changes and the scene stays valid.
-  // When dynamic entities land, BuildScene (or an incremental scene update)
-  // must be re-driven from the sim each frame the world changes.
+  // Clears scene_ and rebuilds it from scratch through the visual SceneComposer:
+  // re-mirrors scene_context_'s lighting, generates the symbolic greybox map
+  // (SymbolicMapGenerator) and adds its terrain chunks + lake water surfaces,
+  // then adds every game_buildings() row via AddBuildingToComposer. mode_ picks
+  // blockout vs detailed materials. Called once from Initialize. NOTE: the sim
+  // ticks, but this stage has no dynamic entities, so the scene stays valid;
+  // when dynamic entities land, BuildScene (or an incremental update) must be
+  // re-driven from the sim each frame the world changes.
   void BuildScene();
 
   // GPU handles (from RenderContext, stored so DrawUI can re-bake the sky when
@@ -75,11 +78,21 @@ class GameView : public AppView {
   wgpu::Queue queue_;
   SceneRenderer* scene_renderer_ = nullptr;
 
+  // Detailed (PBR) vs Blockout (debug) proxy materials, set at construction
+  // from the USE_BLOCKOUT_MODE env toggle. Drives which material components the
+  // SceneComposer attaches + which water factory / terrain arrays are built.
+  RenderMode mode_ = RenderMode::Detailed;
+
   MaterialLibrary matlib_;
   CubemapBuilder sky_cube_;
 
-  // Forward-transparent water material factory (temporary water test map).
+  // Forward-transparent water surface material (BuildWaterForwardFactory in
+  // detailed mode, BuildWaterBlockoutForwardFactory in blockout mode).
   std::unique_ptr<MaterialInstanceFactory> water_factory_;
+  // Terrain-blend layer arrays for the symbolic map (PBR biome packs in detailed
+  // mode, DebugTerrainArrays solid colors in blockout mode). Held so the arrays
+  // outlive rendering.
+  MaterialLibrary::TerrainArrays terrain_arrays_;
 
   // Time model (see sim_clock.hpp). `sim_clock_` accumulates real dt * speed;
   // the day/night cycle reads TimeOfDay()/DayCounter() and the fixed-rate game

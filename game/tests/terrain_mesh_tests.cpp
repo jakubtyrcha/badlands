@@ -1,4 +1,4 @@
-// Pure-CPU tests for the tessellated-block terrain mesh builder (no GPU).
+// Pure-CPU tests for the terrain mesh builder over MapData (no GPU).
 
 #include <catch_amalgamated.hpp>
 
@@ -10,14 +10,14 @@
 #include <glm/glm.hpp>
 
 #include "game/geometry/terrain_mesh.hpp"
-#include "mapgen/field2d.hpp"
-#include "mapgen/mapgen_constants.hpp"
+#include "game/map/map_data.hpp"
 
 using namespace badlands;
-using badlands::mapgen::Field2D;
-using badlands::mapgen::kSamplesPerBlock;
+using badlands::mapgen::Biome;
 
 namespace {
+
+constexpr float kSpacing = 4.0f;
 
 struct Vertex {
   glm::vec3 pos;
@@ -41,29 +41,40 @@ Vertex Unpack(const std::vector<float>& d, size_t i) {
   return v;
 }
 
+int NonZero(const Vertex& v) {
+  int n = 0;
+  for (int k = 0; k < 4; ++k)
+    if (v.weights[k] > 0) ++n;
+  return n;
+}
+
+int SumWeights(const Vertex& v) {
+  int s = 0;
+  for (int k = 0; k < 4; ++k) s += v.weights[k];
+  return s;
+}
+
 }  // namespace
 
-TEST_CASE("BuildTerrainMesh: X-split counts, one-hot weights, biome boundary") {
-  // NxN blocks of flat terrain; left half biome 0, right half biome 1.
-  // Everything below is derived from kBlocks/kSubdiv/kSamplesPerBlock — a
-  // literal count here would silently encode the block size and break the next
-  // time it changes (which is not what this test is about).
-  constexpr int kBlocks = 2;
-  constexpr int kSubdiv = 2;
-  const int W = kBlocks * kSamplesPerBlock;
-  const int H = kBlocks * kSamplesPerBlock;
-  Field2D<float> height(W, H, 5.0f);
-  Field2D<uint8_t> biome(W, H);
-  for (int z = 0; z < H; ++z)
-    for (int x = 0; x < W; ++x)
-      biome.at(x, z) = static_cast<uint8_t>(x < W / 2 ? 0 : 1);
+TEST_CASE("BuildTerrainMesh: X-split topology and normalized weights") {
+  // Flat ground, hard left/right biome split (one-hot slices on every node).
+  constexpr int kNodes = 5;
+  MapData map(kNodes, kNodes, kSpacing);
+  for (int j = 0; j < kNodes; ++j) {
+    for (int i = 0; i < kNodes; ++i) {
+      map.mutable_height(i, j) = 5.0f;
+      const int b = (i < kNodes / 2) ? static_cast<int>(Biome::Lake)
+                                     : static_cast<int>(Biome::Swamp);
+      map.mutable_slice(b, i, j) = 255;
+    }
+  }
 
-  TerrainMesh mesh = BuildTerrainMesh(height, biome, {.subdiv = kSubdiv});
+  const TerrainMesh mesh = BuildTerrainMesh(map);
 
-  // Indexed + X-split: one shared vertex per subgrid corner node plus one per
-  // cell centre; 4 triangles per cell.
-  const int cells_per_side = kBlocks * kSubdiv;
-  const int corner_count = (cells_per_side + 1) * (cells_per_side + 1);
+  // Indexed + X-split: one shared vertex per lattice node plus one per cell
+  // centre; 4 triangles per cell. Mesh density IS lattice density.
+  const int cells_per_side = kNodes - 1;
+  const int corner_count = kNodes * kNodes;
   const int cells = cells_per_side * cells_per_side;
   REQUIRE(mesh.vertex_count == static_cast<uint32_t>(corner_count + cells));
   REQUIRE(mesh.vertices.size() ==
@@ -75,37 +86,58 @@ TEST_CASE("BuildTerrainMesh: X-split counts, one-hot weights, biome boundary") {
     // Flat terrain -> every node at height 5, up-facing normal.
     CHECK(v.pos.y == Catch::Approx(5.0f));
     CHECK(v.normal.y == Catch::Approx(1.0f).margin(1e-4));
-    // Each node is one biome: pair 0 = {biome, weight 255}, rest zero.
-    CHECK(v.weights[0] == 255);
-    CHECK(v.weights[1] == 0);
-    CHECK(v.weights[2] == 0);
-    CHECK(v.weights[3] == 0);
-    CHECK((v.indices[0] == 0 || v.indices[0] == 1));
+    // Every vertex is a fully normalized blend, whatever biomes it mixes.
+    CHECK(SumWeights(v) == 255);
+    for (int k = 0; k < 4; ++k) {
+      if (v.weights[k] > 0) {
+        CHECK((v.indices[k] == static_cast<uint8_t>(Biome::Lake) ||
+               v.indices[k] == static_cast<uint8_t>(Biome::Swamp)));
+      }
+    }
   }
 
-  // A boundary triangle references vertices of both biome 0 and biome 1.
+  // Corner vertices sit on one-hot nodes, so they stay one-hot...
+  for (uint32_t i = 0; i < static_cast<uint32_t>(corner_count); ++i) {
+    INFO("corner vertex " << i);
+    CHECK(NonZero(Unpack(mesh.vertices, i)) == 1);
+  }
+  // ...while a centre vertex straddling the border averages its 4 corners and
+  // comes out genuinely BLENDED. The old builder could only ever emit one-hot,
+  // which is exactly what made straight borders staircase.
+  bool saw_blended_centre = false;
+  for (uint32_t i = corner_count; i < mesh.vertex_count; ++i) {
+    if (NonZero(Unpack(mesh.vertices, i)) == 2) saw_blended_centre = true;
+  }
+  CHECK(saw_blended_centre);
+
+  // A boundary triangle references vertices carrying both biomes.
   bool saw_boundary_tri = false;
   for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
-    const uint8_t b0 = Unpack(mesh.vertices, mesh.indices[t + 0]).indices[0];
-    const uint8_t b1 = Unpack(mesh.vertices, mesh.indices[t + 1]).indices[0];
-    const uint8_t b2 = Unpack(mesh.vertices, mesh.indices[t + 2]).indices[0];
-    const bool has0 = b0 == 0 || b1 == 0 || b2 == 0;
-    const bool has1 = b0 == 1 || b1 == 1 || b2 == 1;
-    if (has0 && has1) saw_boundary_tri = true;
+    bool has_lake = false, has_swamp = false;
+    for (int k = 0; k < 3; ++k) {
+      const Vertex v = Unpack(mesh.vertices, mesh.indices[t + k]);
+      for (int s = 0; s < 4; ++s) {
+        if (v.weights[s] == 0) continue;
+        has_lake |= v.indices[s] == static_cast<uint8_t>(Biome::Lake);
+        has_swamp |= v.indices[s] == static_cast<uint8_t>(Biome::Swamp);
+      }
+    }
+    if (has_lake && has_swamp) saw_boundary_tri = true;
   }
   CHECK(saw_boundary_tri);
 }
 
 TEST_CASE("BuildTerrainMesh: vertex heights follow the heightmap") {
-  // A west->east height ramp: h(x,z) = x meters.
-  const int W = 2 * kSamplesPerBlock;
-  const int H = 1 * kSamplesPerBlock;
-  Field2D<float> height(W, H);
-  for (int z = 0; z < H; ++z)
-    for (int x = 0; x < W; ++x) height.at(x, z) = static_cast<float>(x);
-  Field2D<uint8_t> biome(W, H);  // all biome 0
+  // A west->east height ramp: h(x, z) = x meters, on a 1 m lattice so world x
+  // equals the node index.
+  constexpr int kNodesX = 9;
+  constexpr int kNodesZ = 5;
+  MapData map(kNodesX, kNodesZ, 1.0f);
+  for (int j = 0; j < kNodesZ; ++j)
+    for (int i = 0; i < kNodesX; ++i)
+      map.mutable_height(i, j) = static_cast<float>(i);
 
-  TerrainMesh mesh = BuildTerrainMesh(height, biome, {.subdiv = 4});
+  const TerrainMesh mesh = BuildTerrainMesh(map);
   REQUIRE(mesh.vertex_count > 0);
 
   float min_y = 1e9f, max_y = -1e9f;
@@ -113,20 +145,45 @@ TEST_CASE("BuildTerrainMesh: vertex heights follow the heightmap") {
     const Vertex v = Unpack(mesh.vertices, i);
     min_y = std::min(min_y, v.pos.y);
     max_y = std::max(max_y, v.pos.y);
-    if (v.pos.x > 2.0f && v.pos.x < static_cast<float>(W - 3)) {
+    if (v.pos.x > 2.0f && v.pos.x < static_cast<float>(kNodesX - 3)) {
       CHECK(v.pos.y == Catch::Approx(v.pos.x).margin(0.01));
       // h = x ramp -> slope +1 in x, 0 in z -> normal ~ normalize(-1, 1, 0).
-      // (Locks the NormalAt coordinate handling; it computes at the vertex's
-      // world position, so this holds for any kMetersPerSample.)
       CHECK(v.normal.x < -0.5f);
       CHECK(v.normal.y > 0.5f);
       CHECK(std::abs(v.normal.z) < 0.05f);
     }
   }
-  // The ramp really spans its full range: h = x clamps at the last sample, and
-  // the mesh reaches x = 2*kBlockSizeM, so the span is (W-1) meters. Derived
-  // from W rather than a literal — a hard-coded bound silently encodes the
-  // sample-per-block count and breaks the moment kBlockSizeM changes.
+  // The ramp spans its full range: nodes run x = 0 .. kNodesX-1.
   CHECK(max_y - min_y ==
-        Catch::Approx(static_cast<float>(W - 1)).margin(0.5));
+        Catch::Approx(static_cast<float>(kNodesX - 1)).margin(0.5));
+}
+
+TEST_CASE("BuildTerrainMesh: cell-region chunking covers the map exactly") {
+  constexpr int kNodes = 9;
+  MapData map(kNodes, kNodes, kSpacing);
+  for (int j = 0; j < kNodes; ++j)
+    for (int i = 0; i < kNodes; ++i)
+      map.mutable_slice(static_cast<int>(Biome::Plains), i, j) = 255;
+
+  const TerrainMesh whole = BuildTerrainMesh(map);
+  size_t chunked_tris = 0;
+  constexpr int kChunk = 3;  // deliberately not a divisor of 8 cells
+  for (int cz = 0; cz < kNodes - 1; cz += kChunk) {
+    for (int cx = 0; cx < kNodes - 1; cx += kChunk) {
+      TerrainMeshParams p;
+      p.cell_x0 = cx;
+      p.cell_z0 = cz;
+      p.cells_x = std::min(kChunk, (kNodes - 1) - cx);
+      p.cells_z = std::min(kChunk, (kNodes - 1) - cz);
+      chunked_tris += BuildTerrainMesh(map, p).indices.size() / 3;
+    }
+  }
+  CHECK(chunked_tris == whole.indices.size() / 3);
+}
+
+TEST_CASE("BuildTerrainMesh: an empty map is not a crash") {
+  const MapData empty;
+  const TerrainMesh mesh = BuildTerrainMesh(empty);
+  CHECK(mesh.vertex_count == 0);
+  CHECK(mesh.indices.empty());
 }

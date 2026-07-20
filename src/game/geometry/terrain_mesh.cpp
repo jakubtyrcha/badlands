@@ -4,54 +4,21 @@
 #include <array>
 #include <cmath>
 #include <cstring>
-
-#include <glm/glm.hpp>
-
-#include "mapgen/biomes.hpp"
-#include "mapgen/mapgen_constants.hpp"
+#include <numeric>
 
 namespace badlands {
 
 namespace {
 
-using mapgen::Field2D;
-using mapgen::kBlockSizeM;
-using mapgen::kMetersPerSample;
-using mapgen::kSamplesPerBlock;
-
-// One subgrid node: world position (with sampled height) + its biome.
+// One lattice node resolved into everything a vertex needs. The centre vertex
+// is built by averaging four of these, which is why blend lives here as full
+// per-biome weights (averaging already-truncated top-4 sets would be lossy).
 struct Node {
-  glm::vec3 pos;
-  uint8_t biome;
+  glm::vec3 pos{0.0f};
+  glm::vec3 normal{0.0f, 1.0f, 0.0f};
+  BiomeWeights blend;
 };
 
-int clampi(int v, int lo, int hi) { return std::min(std::max(v, lo), hi); }
-
-// All sampling below takes WORLD-meter coordinates and converts to heightmap
-// sample space internally (world_m / kMetersPerSample), so the coordinate
-// convention is centralized in one place and correct for any sample density.
-
-// Nearest biome at world position (wx, wz) meters.
-uint8_t SampleBiome(const Field2D<uint8_t>& b, float wx, float wz) {
-  const float mps = static_cast<float>(kMetersPerSample);
-  const int x = clampi(static_cast<int>(std::lround(wx / mps)), 0, b.width - 1);
-  const int z = clampi(static_cast<int>(std::lround(wz / mps)), 0, b.height - 1);
-  return b.at(x, z);
-}
-
-// Surface normal at world position (wx, wz) from central height differences,
-// one sample (kMetersPerSample world meters) apart.
-glm::vec3 NormalAt(const Field2D<float>& h, float wx, float wz) {
-  const float step = static_cast<float>(kMetersPerSample);
-  const float hl = SampleHeight(h, wx - step, wz);
-  const float hr = SampleHeight(h, wx + step, wz);
-  const float hd = SampleHeight(h, wx, wz - step);
-  const float hu = SampleHeight(h, wx, wz + step);
-  const float d = 2.0f * step;
-  return glm::normalize(glm::vec3(-(hr - hl) / d, 1.0f, -(hu - hd) / d));
-}
-
-// Pack four u8 into one float slot (matches the Uint8x4 / Unorm8x4 attributes).
 float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   const uint32_t u = static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) |
                      (static_cast<uint32_t>(c) << 16) |
@@ -61,78 +28,136 @@ float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   return f;
 }
 
-// Emit one node as a vertex. Each grid node is a single biome (one-hot: pair 0
-// = {biome, weight 255}); the blend across a triangle comes from interpolating
-// these one-hots between differently-biomed vertices in the vertex shader.
-void EmitVertex(std::vector<float>& out, const Field2D<float>& h,
-                const Node& node) {
-  const glm::vec3 n = NormalAt(h, node.pos.x, node.pos.z);
-  out.insert(out.end(), {node.pos.x, node.pos.y, node.pos.z, n.x, n.y, n.z});
-  out.push_back(PackU8x4(node.biome, 0, 0, 0));  // layer_indices
-  out.push_back(PackU8x4(255, 0, 0, 0));         // blend_weights (one-hot)
+// Surface normal from central differences of the bilinear heightmap.
+glm::vec3 NormalAt(const MapData& map, float wx, float wz) {
+  const float d = map.spacing_m();
+  const float hl = map.HeightAt(wx - d, wz);
+  const float hr = map.HeightAt(wx + d, wz);
+  const float hd = map.HeightAt(wx, wz - d);
+  const float hu = map.HeightAt(wx, wz + d);
+  return glm::normalize(glm::vec3(-(hr - hl) / (2.0f * d), 1.0f,
+                                  -(hu - hd) / (2.0f * d)));
+}
+
+Node MakeCornerNode(const MapData& map, int i, int j) {
+  Node n;
+  const float wx = static_cast<float>(i) * map.spacing_m();
+  const float wz = static_cast<float>(j) * map.spacing_m();
+  n.pos = glm::vec3(wx, map.height(i, j), wz);
+  n.normal = NormalAt(map, wx, wz);
+  n.blend = map.WeightsAtNode(i, j);
+  return n;
+}
+
+// The centre vertex is the average of the cell's four corners -- position,
+// normal, and biome weights alike.
+Node AverageNodes(const Node& a, const Node& b, const Node& c, const Node& d) {
+  Node n;
+  n.pos = (a.pos + b.pos + c.pos + d.pos) * 0.25f;
+  const glm::vec3 sum = a.normal + b.normal + c.normal + d.normal;
+  n.normal = glm::length(sum) > 1e-6f ? glm::normalize(sum)
+                                      : glm::vec3(0.0f, 1.0f, 0.0f);
+  for (int k = 0; k < kBiomeSliceCount; ++k) {
+    n.blend.w[k] = (a.blend.w[k] + b.blend.w[k] + c.blend.w[k] + d.blend.w[k]) *
+                   0.25f;
+  }
+  return n;
+}
+
+void EmitVertex(std::vector<float>& out, const Node& node) {
+  const VertexBlend vb = ResolveVertexBlend(node.blend);
+  out.insert(out.end(), {node.pos.x, node.pos.y, node.pos.z, node.normal.x,
+                         node.normal.y, node.normal.z});
+  out.push_back(PackU8x4(vb.layers[0], vb.layers[1], vb.layers[2], vb.layers[3]));
+  out.push_back(
+      PackU8x4(vb.weights[0], vb.weights[1], vb.weights[2], vb.weights[3]));
 }
 
 }  // namespace
 
-float SampleHeight(const Field2D<float>& h, float wx, float wz) {
-  const float mps = static_cast<float>(kMetersPerSample);
-  const float sx = std::clamp(wx / mps, 0.0f, static_cast<float>(h.width - 1));
-  const float sz = std::clamp(wz / mps, 0.0f, static_cast<float>(h.height - 1));
-  const int x0 = static_cast<int>(std::floor(sx));
-  const int z0 = static_cast<int>(std::floor(sz));
-  const int x1 = std::min(x0 + 1, h.width - 1);
-  const int z1 = std::min(z0 + 1, h.height - 1);
-  const float tx = sx - x0;
-  const float tz = sz - z0;
-  const float h00 = h.at(x0, z0), h10 = h.at(x1, z0);
-  const float h01 = h.at(x0, z1), h11 = h.at(x1, z1);
-  return glm::mix(glm::mix(h00, h10, tx), glm::mix(h01, h11, tx), tz);
+VertexBlend ResolveVertexBlend(const BiomeWeights& weights) {
+  VertexBlend out;  // layers default to 0, weights to 0 (the padding contract)
+
+  // Rank the biomes by weight. stable_sort on an index list keeps ties in
+  // ascending biome order, so selection is deterministic.
+  std::array<int, kBiomeSliceCount> order{};
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(),
+                   [&](int a, int b) { return weights.w[a] > weights.w[b]; });
+
+  // Keep the 4 strongest with actual coverage.
+  std::array<int, 4> keep{};
+  std::array<float, 4> kept_w{};
+  int n = 0;
+  for (int k = 0; k < kBiomeSliceCount && n < 4; ++k) {
+    const int b = order[k];
+    if (weights.w[b] <= 0.0f) break;  // sorted desc: nothing after this matters
+    keep[n] = b;
+    kept_w[n] = weights.w[b];
+    ++n;
+  }
+  if (n == 0) return out;  // no coverage: all-zero weights, never NaN
+
+  float sum = 0.0f;
+  for (int k = 0; k < n; ++k) sum += kept_w[k];
+  if (sum <= 0.0f) return out;
+
+  // Sum-preserving (largest-remainder) quantization so the packed weights total
+  // exactly 255 -- removes the drift naive per-slot rounding would leave.
+  std::array<int, 4> q{};
+  std::array<float, 4> frac{};
+  int total = 0;
+  for (int k = 0; k < n; ++k) {
+    const float exact = (kept_w[k] / sum) * 255.0f;
+    q[k] = static_cast<int>(std::floor(exact));
+    frac[k] = exact - static_cast<float>(q[k]);
+    total += q[k];
+  }
+  for (int remainder = 255 - total; remainder > 0; --remainder) {
+    int best = 0;
+    for (int k = 1; k < n; ++k) {
+      if (frac[k] > frac[best]) best = k;
+    }
+    q[best] += 1;
+    frac[best] = -1.0f;  // consumed
+  }
+
+  for (int k = 0; k < n; ++k) {
+    out.layers[k] = static_cast<uint8_t>(keep[k]);
+    out.weights[k] = static_cast<uint8_t>(std::clamp(q[k], 0, 255));
+  }
+  return out;
 }
 
-bool RaycastTerrain(const Field2D<float>& heightmap, const Ray& ray,
-                    glm::vec3& out_hit) {
-  if (heightmap.width <= 0 || heightmap.height <= 0) return false;
+bool RaycastTerrain(const MapData& map, const Ray& ray, glm::vec3& out_hit) {
+  if (map.empty()) return false;
+  const float step = map.spacing_m() * 0.5f;
+  const float max_t = 4.0f * std::max(map.size_x_m(), map.size_z_m());
 
-  const float mps = static_cast<float>(kMetersPerSample);
-  const float max_x = (heightmap.width - 1) * mps;
-  const float max_z = (heightmap.height - 1) * mps;
-  // Bound the march by the map diagonal + vertical span: past that the ray can
-  // only be leaving.
-  const float span = std::sqrt(max_x * max_x + max_z * max_z);
-  const float kStep = mps;  // one sample per step -- can't skip a whole cell
-  const float kMaxDist = span * 2.0f;
-
-  auto inside_xz = [&](const glm::vec3& p) {
-    return p.x >= 0.0f && p.z >= 0.0f && p.x <= max_x && p.z <= max_z;
-  };
-  // Signed height above the surface; negative once the ray is underground.
-  auto above = [&](const glm::vec3& p) {
-    return p.y - SampleHeight(heightmap, p.x, p.z);
+  auto below = [&](const glm::vec3& p) {
+    return p.y <= map.HeightAt(p.x, p.z);
   };
 
+  // A ray that STARTS underground never crosses the surface going forward, so
+  // there is nothing to pick (a camera below the terrain must not hover-hit).
   glm::vec3 prev = ray.origin;
-  // Starting underground (camera inside a hill): nothing sensible to pick.
-  if (inside_xz(prev) && above(prev) < 0.0f) return false;
+  if (below(prev)) return false;
 
-  for (float t = kStep; t <= kMaxDist; t += kStep) {
+  for (float t = step; t <= max_t; t += step) {
     const glm::vec3 cur = ray.At(t);
-    const float cur_above = above(cur);
-
-    if (inside_xz(cur) && cur_above <= 0.0f) {
-      // Crossed the surface between prev and cur -- bisect for the crossing.
+    if (below(cur)) {
+      // Bisect between prev (above) and cur (below).
       glm::vec3 lo = prev, hi = cur;
-      for (int i = 0; i < 24; ++i) {
+      for (int k = 0; k < 24; ++k) {
         const glm::vec3 mid = (lo + hi) * 0.5f;
-        if (above(mid) > 0.0f) {
-          lo = mid;
-        } else {
+        if (below(mid)) {
           hi = mid;
+        } else {
+          lo = mid;
         }
       }
       out_hit = (lo + hi) * 0.5f;
-      // Snap y onto the surface: bisection converges on t, and the ray may be
-      // shallow enough that a small t error shows up in y.
-      out_hit.y = SampleHeight(heightmap, out_hit.x, out_hit.z);
+      out_hit.y = map.HeightAt(out_hit.x, out_hit.z);
       return true;
     }
     prev = cur;
@@ -140,66 +165,66 @@ bool RaycastTerrain(const Field2D<float>& heightmap, const Ray& ray,
   return false;
 }
 
-TerrainMesh BuildTerrainMesh(const Field2D<float>& heightmap,
-                             const Field2D<uint8_t>& biome,
+TerrainMesh BuildTerrainMesh(const MapData& map,
                              const TerrainMeshParams& params) {
-  const int subdiv = std::max(1, params.subdiv);
-  const int blocks_total_x = heightmap.width / kSamplesPerBlock;
-  const int blocks_total_z = heightmap.height / kSamplesPerBlock;
-  const int bx0 = std::clamp(params.block_x0, 0, blocks_total_x);
-  const int bz0 = std::clamp(params.block_z0, 0, blocks_total_z);
-  const int bw = params.blocks_x < 0 ? blocks_total_x - bx0
-                                     : std::min(params.blocks_x,
-                                                blocks_total_x - bx0);
-  const int bh = params.blocks_z < 0 ? blocks_total_z - bz0
-                                     : std::min(params.blocks_z,
-                                                blocks_total_z - bz0);
-  const int cells_w = bw * subdiv;      // cells across the region
-  const int cells_h = bh * subdiv;
-  const int cx0 = bx0 * subdiv;         // absolute cell offset of the region
-  const int cz0 = bz0 * subdiv;
-  const float step = static_cast<float>(kBlockSizeM) / subdiv;  // world meters
-  const int corner_cols = cells_w + 1;
-  const int corner_rows = cells_h + 1;
+  TerrainMesh mesh;
+  if (map.empty()) return mesh;
+
+  const int cells_total_x = map.nodes_x() - 1;
+  const int cells_total_z = map.nodes_z() - 1;
+  if (cells_total_x <= 0 || cells_total_z <= 0) return mesh;
+
+  const int cx0 = std::clamp(params.cell_x0, 0, cells_total_x);
+  const int cz0 = std::clamp(params.cell_z0, 0, cells_total_z);
+  const int cw = params.cells_x < 0
+                     ? cells_total_x - cx0
+                     : std::min(params.cells_x, cells_total_x - cx0);
+  const int chh = params.cells_z < 0
+                      ? cells_total_z - cz0
+                      : std::min(params.cells_z, cells_total_z - cz0);
+  if (cw <= 0 || chh <= 0) return mesh;
+
+  const int corner_cols = cw + 1;
+  const int corner_rows = chh + 1;
   const int corner_count = corner_cols * corner_rows;
 
-  // cx/cz are ABSOLUTE cell coords -> world meters (chunks share a world frame).
-  auto make_node = [&](float cx, float cz) {
-    const float wx = cx * step;
-    const float wz = cz * step;
-    return Node{glm::vec3(wx, SampleHeight(heightmap, wx, wz), wz),
-                SampleBiome(biome, wx, wz)};
-  };
-
-  TerrainMesh mesh;
-  // Shared vertices: one per corner node + one per cell centre (X-split).
-  mesh.vertices.reserve(
-      static_cast<size_t>(corner_count + cells_w * cells_h) *
-      TerrainMesh::kFloatsPerVertex);
+  // Corner nodes first (shared between cells), then one derived centre per cell.
+  std::vector<Node> corners;
+  corners.reserve(static_cast<std::size_t>(corner_count));
   for (int lz = 0; lz < corner_rows; ++lz)
     for (int lx = 0; lx < corner_cols; ++lx)
-      EmitVertex(mesh.vertices, heightmap,
-                 make_node(cx0 + lx, cz0 + lz));
-  for (int lz = 0; lz < cells_h; ++lz)
-    for (int lx = 0; lx < cells_w; ++lx)
-      EmitVertex(mesh.vertices, heightmap,
-                 make_node(cx0 + lx + 0.5f, cz0 + lz + 0.5f));
+      corners.push_back(MakeCornerNode(map, cx0 + lx, cz0 + lz));
+
+  auto corner_at = [&](int lx, int lz) -> const Node& {
+    return corners[static_cast<std::size_t>(lz) * corner_cols + lx];
+  };
+
+  mesh.vertices.reserve(static_cast<std::size_t>(corner_count + cw * chh) *
+                        TerrainMesh::kFloatsPerVertex);
+  for (const Node& n : corners) EmitVertex(mesh.vertices, n);
+  for (int lz = 0; lz < chh; ++lz) {
+    for (int lx = 0; lx < cw; ++lx) {
+      EmitVertex(mesh.vertices,
+                 AverageNodes(corner_at(lx, lz), corner_at(lx + 1, lz),
+                              corner_at(lx + 1, lz + 1), corner_at(lx, lz + 1)));
+    }
+  }
 
   auto corner_idx = [&](int lx, int lz) {
     return static_cast<uint32_t>(lz * corner_cols + lx);
   };
   auto center_idx = [&](int lx, int lz) {
-    return static_cast<uint32_t>(corner_count + lz * cells_w + lx);
+    return static_cast<uint32_t>(corner_count + lz * cw + lx);
   };
 
-  mesh.indices.reserve(static_cast<size_t>(cells_w) * cells_h * 4 * 3);
+  mesh.indices.reserve(static_cast<std::size_t>(cw) * chh * 4 * 3);
   auto tri = [&](uint32_t a, uint32_t b, uint32_t c) {
     mesh.indices.push_back(a);
     mesh.indices.push_back(b);
     mesh.indices.push_back(c);
   };
-  for (int lz = 0; lz < cells_h; ++lz) {
-    for (int lx = 0; lx < cells_w; ++lx) {
+  for (int lz = 0; lz < chh; ++lz) {
+    for (int lx = 0; lx < cw; ++lx) {
       const uint32_t n00 = corner_idx(lx, lz);
       const uint32_t n10 = corner_idx(lx + 1, lz);
       const uint32_t n11 = corner_idx(lx + 1, lz + 1);
@@ -213,8 +238,8 @@ TerrainMesh BuildTerrainMesh(const Field2D<float>& heightmap,
     }
   }
 
-  mesh.vertex_count = static_cast<uint32_t>(mesh.vertices.size() /
-                                            TerrainMesh::kFloatsPerVertex);
+  mesh.vertex_count =
+      static_cast<uint32_t>(mesh.vertices.size() / TerrainMesh::kFloatsPerVertex);
   return mesh;
 }
 
