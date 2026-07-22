@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -17,6 +18,7 @@
 #include "core/geometry_type.hpp"
 #include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/geometry/mesh_builder_utils.hpp"
+#include "engine/rendering/geometry/primitive_mesh_builders.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
@@ -72,7 +74,6 @@ constexpr int kChunkCells = 16;
 // The demo buildings (sim-placed around the origin) are shifted onto the
 // southern plains band of the origin-centered symbolic map so they sit on land
 // rather than in the central lake. ~one tile south of center.
-constexpr float kDemoBuildingsSouthShift = 51.2f;
 
 // Flat water surface mesh from the map's block-aligned lake triangles. Same
 // kTexturedMesh layout GenerateLakeSurfaceMesh emits (pos/uv/normal/tangent,
@@ -147,17 +148,17 @@ bool GameView::Initialize(const RenderContext& ctx) {
   // sim_ is constructed with a nullptr brain_script_source (mock brains only;
   // no noiser script needed for a static-buildings scaffold) -- construction
   // also prebuilds the Castle at the origin.
-  PlaceDemoBuildings();
+  SeedTown();
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
   if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
 
-  // Fixed-angle overview of the 256 m symbolic map (centered on the origin):
-  // a fairly top-down pitch keeps the whole biome layout + central lake legible;
-  // scroll to zoom in on the demo buildings on the southern plains.
-  gamecam_.focus = glm::vec3(0.0f, 0.0f, 0.0f);
-  gamecam_.pitch_deg = 64.0f;
-  gamecam_.height = 175.0f;
+  // Frame the living town on the southern plains (where SeedTown placed it), not
+  // the empty origin lake -- close enough that the units read as characters.
+  // Scroll to zoom out to the whole 256 m map; WASD to roam.
+  gamecam_.focus = glm::vec3(0.0f, 0.0f, 52.0f);
+  gamecam_.pitch_deg = 58.0f;
+  gamecam_.height = 70.0f;
   gamecam_.UpdateCamera(camera_);
 
   if (!matlib_.ok()) {
@@ -202,37 +203,80 @@ void GameView::RebakeSky(const DaylightState& state) {
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 }
 
-void GameView::PlaceDemoBuildings() {
-  struct Demo {
+void GameView::SeedTown() {
+  // The town sits on the southern plains band (world z ~ +50), which is land --
+  // so buildings render where the sim places them, no shift. (The prebuilt
+  // origin Castle is out in the central lake; the town's Watchtower is the
+  // on-land deposit point the tax collector actually uses.)
+  struct Town {
     BuildingKind kind;
     float x, z;
     int32_t rotation_index;
   };
-  // Well clear of the origin Castle's 4x4 footprint + 1-tile margin, and
-  // spaced >= 8 world units apart so no demo building's footprint + margin
-  // can overlap another's regardless of rotation.
-  constexpr Demo kDemo[] = {
-      {BuildingKind::FreeCompanyQuarters, 12.0f, 0.0f, 0},
-      {BuildingKind::Tavern, 12.0f, 10.0f, 2},  // rotated 90deg -- proves yaw wiring
-      {BuildingKind::Watchtower, -12.0f, 0.0f, 0},
-      {BuildingKind::Apothecary, -12.0f, 10.0f, 0},
+  constexpr Town kTown[] = {
+      {BuildingKind::FreeCompanyQuarters, -16.0f, 48.0f, 0},
+      {BuildingKind::HuntersCamp, 16.0f, 48.0f, 0},
+      {BuildingKind::Tavern, -16.0f, 60.0f, 0},
+      {BuildingKind::Apothecary, 16.0f, 60.0f, 0},
+      {BuildingKind::Watchtower, 0.0f, 42.0f, 0},
+      {BuildingKind::House, -6.0f, 68.0f, 0},
+      {BuildingKind::House, 6.0f, 68.0f, 0},
+      {BuildingKind::Sewer, 28.0f, 56.0f, 0},
   };
-  for (const Demo& d : kDemo) {
-    Action action{
-        .kind = ActionKind::PlaceBuilding,
-        .target_id = 0,
-        .world_x = d.x,
-        .world_z = d.z,
-        .param_a = static_cast<int32_t>(d.kind),
-        .param_b = d.rotation_index,
-    };
-    const int64_t id = sim_.Dispatch(action);
+  for (const Town& t : kTown) {
+    Action place{.kind = ActionKind::PlaceBuilding,
+                 .target_id = 0,
+                 .world_x = t.x,
+                 .world_z = t.z,
+                 .param_a = static_cast<int32_t>(t.kind),
+                 .param_b = t.rotation_index};
+    const int64_t id = sim_.Dispatch(place);
     if (id < 0) {
-      spdlog::error(
-          "GameView::PlaceDemoBuildings: placement failed for kind={} at "
-          "({}, {}) rot={}",
-          static_cast<int32_t>(d.kind), d.x, d.z, d.rotation_index);
+      spdlog::warn("GameView::SeedTown: placing kind {} at ({}, {}) failed",
+                   static_cast<int32_t>(t.kind), t.x, t.z);
+      continue;
     }
+    // Recruit a few from each guild (Free Company + Hunter's Camp).
+    if (t.kind == BuildingKind::FreeCompanyQuarters ||
+        t.kind == BuildingKind::HuntersCamp) {
+      for (int i = 0; i < 3; ++i) {
+        Action recruit{.kind = ActionKind::RecruitHero,
+                       .target_id = static_cast<uint32_t>(id),
+                       .world_x = 0.0f,
+                       .world_z = 0.0f,
+                       .param_a = 0,
+                       .param_b = 0};
+        sim_.Dispatch(recruit);
+      }
+    }
+  }
+
+  // A deer herd in the forest near the town, so the hunter has prey in reach.
+  // Golden-angle search outward from the town centre for Forest spots.
+  const glm::vec2 town_center{0.0f, 56.0f};
+  int deer = 0;
+  for (int i = 0; i < 600 && deer < 6; ++i) {
+    const float ang = static_cast<float>(i) * 2.399963f;
+    const float rad = 12.0f + static_cast<float>(i % 30) * 2.0f;
+    const glm::vec2 p = town_center + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
+    if (sim_.BiomeAt(p.x, p.y) != 2 /* mapgen::Biome::Forest */) {
+      continue;
+    }
+    CharacterDesc d{};
+    d.archetype = Archetype::Critter;
+    d.pos_x = p.x;
+    d.pos_z = p.y;
+    d.team = 2;
+    d.hp = 8.0f;
+    d.move_speed = 3.0f;
+    d.attack_cooldown = 1.0f;
+    d.size_x = d.size_z = 0.7f;
+    d.size_y = 1.0f;
+    d.color_r = 0.62f;
+    d.color_g = 0.42f;
+    d.color_b = 0.20f;
+    sim_.Spawn(d);
+    ++deer;
   }
 }
 
@@ -250,11 +294,15 @@ void GameView::BuildScene() {
 
   SceneComposer composer(mode_);
 
-  // Generate the symbolic greybox map and center it on the world origin (map
-  // coordinates are corner-origin, so shift the whole map by -size/2).
-  const MapData map = SymbolicMapGenerator{}.Generate();
+  // Generate the symbolic map once and keep it (SyncUnits seats units on it).
+  // Map coordinates are corner-origin, so center it on the world origin by
+  // shifting the whole map by -size/2. World XZ -> map-local is world + half.
+  map_ = SymbolicMapGenerator{}.Generate();
+  const MapData& map = map_;
   const float half_x = map.size_x_m() * 0.5f;
   const float half_z = map.size_z_m() * 0.5f;
+  half_x_ = half_x;
+  half_z_ = half_z;
   const glm::mat4 center =
       glm::translate(glm::mat4(1.0f), glm::vec3(-half_x, 0.0f, -half_z));
 
@@ -285,19 +333,51 @@ void GameView::BuildScene() {
     composer.AddWater(std::move(lake), water_params, center);
   }
 
-  // Demo buildings from the sim, shifted onto the southern plains band (so they
-  // sit on land, not the central lake) and placed through the composer so they
-  // honor the render mode's materials.
+  // Buildings at their true sim positions (SeedTown placed the town on the
+  // plains, so no render shift is needed) -- sim and render coordinates match,
+  // which is what lets the biome-aware AI and its capsules line up with the
+  // terrain they reason about.
   sim_.Buildings(building_rows_);
   for (const BuildingState& b : building_rows_) {
-    const glm::vec2 world(b.center_x, b.center_z + kDemoBuildingsSouthShift);
-    // Ground height straight from the map's query API (world -> map-local).
+    const glm::vec2 world(b.center_x, b.center_z);
     const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
     AddBuildingToComposer(composer, b.kind, world,
                           yaw_from_rotation_index(b.rotation_index), ground);
   }
 
   composer.ComposeInto(scene_, matlib_, terrain_arrays_, water_factory_.get());
+  unit_nodes_.clear();  // ComposeInto rebuilt scene_; the unit pool is gone with it
+}
+
+void GameView::SyncUnits() {
+  // Rebuild the live unit capsules from the snapshot each frame, coloured per
+  // entity and seated on the terrain surface. A handful of units, so a rebuild
+  // (rather than a recoloured fixed pool) is the simple, correct choice; hidden
+  // (inside-building) units are skipped, matching the sim's snapshot contract.
+  for (NodeHandle n : unit_nodes_) {
+    scene_.DestroyNode(n);
+  }
+  unit_nodes_.clear();
+
+  char_rows_ = sim_.Characters();
+  int index = 0;
+  for (const CharacterState& c : char_rows_) {
+    if (c.inside_building_id >= 0) {
+      continue;  // hidden
+    }
+    const float ground = map_.empty()
+                             ? 0.0f
+                             : map_.HeightAt(c.pos_x + half_x_, c.pos_z + half_z_);
+    const float radius = 0.5f * std::min(c.size_x, c.size_z);
+    const float cyl = std::max(0.1f, c.size_y - 2.0f * radius);
+    auto capsule = GenerateCapsule(radius, cyl, 12);
+    const DeferredMaterial mat =
+        matlib_.SolidColor(glm::vec3(c.color_r, c.color_g, c.color_b), 0.6f);
+    const glm::mat4 xf =
+        glm::translate(glm::mat4(1.0f), glm::vec3(c.pos_x, ground, c.pos_z));
+    const std::string name = "unit_" + std::to_string(index++);
+    unit_nodes_.push_back(AddMeshEntity(scene_, name.c_str(), std::move(capsule), mat, xf));
+  }
 }
 
 void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
@@ -376,6 +456,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   }
 
   gamecam_.UpdateCamera(camera_);
+  SyncUnits();  // live AI capsules on the terrain, rebuilt from the snapshot
   scene_.SyncToRegistry(registry_, scene_context_);
 }
 

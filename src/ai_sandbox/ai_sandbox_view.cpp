@@ -177,6 +177,12 @@ bool AiSandboxView::Initialize(const RenderContext& ctx) {
   SeedTown();
   BuildScene();
 
+  // No volumetric fog over the greybox arena (it hazes the far edges). The
+  // engine's config fog defaults on; disable it here as GameView does.
+  if (scene_renderer_) {
+    scene_renderer_->MutableFogConfig().enabled = false;
+  }
+
   // Frame the camera once, here (the framing is aspect-independent -- see
   // FrameCamera). OnResize only refreshes camera_.aspect afterwards.
   FrameCamera();

@@ -24,6 +24,7 @@
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
+#include "game/map/map_data.hpp"
 #include "game/visual/render_mode.hpp"
 
 namespace badlands {
@@ -61,7 +62,13 @@ class GameView : public AppView {
   void RebakeSky(const DaylightState& state);
   // Seeds the demo town via sim_.Dispatch(ActionKind::PlaceBuilding) at a
   // few spread-out, non-overlapping tiles around the prebuilt origin Castle.
-  void PlaceDemoBuildings();
+  // Seed a living town on the plains (guilds/tavern/apothecary/houses/sewer/
+  // hunter's camp), recruit heroes, and release a deer herd into nearby forest --
+  // all through Sim::Dispatch/Spawn, so it is a logged command sequence.
+  void SeedTown();
+  // Rebuild the live unit capsules from the sim snapshot each frame, placed on
+  // the terrain surface and coloured per entity. Cheap (a handful of units).
+  void SyncUnits();
   // Clears scene_ and rebuilds it from scratch through the visual SceneComposer:
   // re-mirrors scene_context_'s lighting, generates the symbolic greybox map
   // (SymbolicMapGenerator) and adds its terrain chunks + lake water surfaces,
@@ -118,6 +125,18 @@ class GameView : public AppView {
   // Reused scratch buffer for sim_.Buildings(building_rows_), so the per-frame
   // DrawUI/BuildScene reads don't allocate a fresh vector each call.
   std::vector<badlands::BuildingState> building_rows_;
+
+  // The biome/height map, generated once in BuildScene and kept so SyncUnits can
+  // seat units on the terrain surface. half_x_/half_z_ convert world XZ (centred
+  // on the origin) to the map's corner-origin local coordinates.
+  MapData map_;
+  float half_x_ = 0.0f;
+  float half_z_ = 0.0f;
+
+  // Live unit capsules, rebuilt from the snapshot each frame (index-free; the
+  // handles are destroyed and re-added). Reused snapshot buffer alongside.
+  std::vector<badlands::CharacterState> char_rows_;
+  std::vector<NodeHandle> unit_nodes_;
 
   float dt_ = 0.0f;
 };
