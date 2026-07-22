@@ -226,6 +226,7 @@ target_include_directories(badlands_engine PUBLIC
 # be globally unique.
 add_library(badlands_game_lib STATIC
     game/src/game.cpp
+    game/src/sim.cpp
     game/src/brain.cpp
     game/src/placement.cpp
     game/src/movement.cpp
