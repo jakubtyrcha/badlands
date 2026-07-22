@@ -76,6 +76,7 @@ struct HeroFactors {
     float fatigue_night = 0.2f;    // lower bar once it is night
     float boredom_tavern = 0.5f;   // bored enough to seek the tavern
     float roam_radius = 6.0f;      // world units around the roam anchor
+    float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
 };
 
 // Critter (deer) tuning. Deer graze/roam in Forest/Plains and bolt from any
@@ -247,6 +248,7 @@ enum class CommandKindId : int32_t {
     CollectTax,
     Deposit,
     AttackBuilding,
+    Shoot,
 };
 
 struct CommandRecord {

@@ -56,6 +56,12 @@ struct WorldView {
     glm::vec2 threat_pos{0.0f, 0.0f};       bool has_threat = false;
     float threat_dist = 0.0f;
 
+    // --- hunter: nearest prey (a critter within hunt sight) ----------------
+    glm::vec2 prey_pos{0.0f, 0.0f};         bool has_prey = false;
+    uint32_t prey_slot = UINT32_MAX;
+    float prey_dist = 0.0f;
+    float self_attack_range = 0.0f;         // the observer's own reach, to gate a shot
+
     // --- townfolk (tax collector) ------------------------------------------
     // Nearest unvisited building that still owes tax (the next stop on the
     // round); and the nearest place to bank the carry (Castle/Watchtower).

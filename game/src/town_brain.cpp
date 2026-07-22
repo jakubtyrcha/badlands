@@ -6,6 +6,7 @@
 #include "behaviours/world_view.h"
 #include "command.h"
 #include "components.h"
+#include "heroes.h"  // HERO_HUNTER
 #include "game_state.h"
 #include "placement.h"
 
@@ -33,6 +34,30 @@ bool door_of_kind(const BadlandsGame& game, int kind, glm::vec2 pos, glm::vec2& 
 
 // Build the hero's perception. This is the ONLY place town_think reads the
 // registry/placement; blocks see only the returned WorldView.
+// Nearest deer (critter) within `radius` of `pos`, by slot: what a hunter hunts.
+// Perception only -- reads the registry so the Hunt block never does.
+bool nearest_prey(const BadlandsGame& game, glm::vec2 pos, float radius, glm::vec2& out_pos,
+                  uint32_t& out_slot, float& out_dist) {
+    float best = radius;
+    bool found = false;
+    for (uint32_t slot = 0; slot < game.slots.size(); ++slot) {
+        entt::entity e = game.slots[slot];
+        if (!game.registry.valid(e) || !game.registry.all_of<CritterState>(e)) {
+            continue;
+        }
+        const glm::vec2 p = game.registry.get<Position>(e).pos;
+        const float d = glm::distance(pos, p);
+        if (d <= best) {
+            best = d;
+            out_pos = p;
+            out_slot = slot;
+            found = true;
+        }
+    }
+    out_dist = found ? best : 0.0f;
+    return found;
+}
+
 WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) {
     const auto& sim = game.registry.get<HeroSimulationState>(e);
     WorldView v;
@@ -41,9 +66,16 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) 
     v.fatigue = sim.fatigue;
     v.boredom = sim.boredom;
     v.inventory = sim.inventory;
+    v.self_attack_range = game.registry.get<Stats>(e).attack_range;
     v.tod = time_of_day(game.world_millis);
     v.night = is_night(v.tod);
     v.roam_epoch = game.world_millis / kRoamLeaseMillis;
+
+    // Hunters perceive prey; other classes never populate it (Hunt not in list).
+    if (game.registry.get<HeroCharacter>(e).hero_class == HERO_HUNTER) {
+        v.has_prey = nearest_prey(game, v.pos, game.factors.hero.hunt_sight_radius,
+                                  v.prey_pos, v.prey_slot, v.prey_dist);
+    }
 
     if (sim.home_building_id >= 0 &&
         static_cast<size_t>(sim.home_building_id) < game.placement.buildings.size() &&
@@ -64,10 +96,21 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) 
     return v;
 }
 
-// The hero's behaviour list, highest priority first. Argmax over these tiered
-// scores reproduces the old GoHome > Buy > VisitTavern > Roam if-chain exactly.
+// The baseline hero block list, highest priority first. Argmax over these
+// tiered scores reproduces the old GoHome > Buy > VisitTavern > Roam if-chain.
 constexpr std::array<Candidate, 5> kHeroBlocks{{
     {score_go_home, act_go_home},
+    {score_buy, act_buy},
+    {score_visit_tavern, act_visit_tavern},
+    {score_roam, act_roam},
+    {score_idle, act_idle},
+}};
+
+// The hunter's list: the baseline plus Hunt (tiered below GoHome, above the
+// errands) -- so a hunter rests when tired but otherwise hunts before shopping.
+constexpr std::array<Candidate, 6> kHunterBlocks{{
+    {score_go_home, act_go_home},
+    {score_hunt, act_hunt},
     {score_buy, act_buy},
     {score_visit_tavern, act_visit_tavern},
     {score_roam, act_roam},
@@ -82,7 +125,11 @@ void town_think(BadlandsGame& game, uint32_t slot) {
         return;
     }
     const WorldView view = observe_hero(game, slot, e);
-    const BehaviourResult r = select_argmax(kHeroBlocks, view, game.factors);
+    // Class picks the block list: same shared blocks, hunters get one more.
+    const BehaviourResult r =
+        (game.registry.get<HeroCharacter>(e).hero_class == HERO_HUNTER)
+            ? select_argmax(kHunterBlocks, view, game.factors)
+            : select_argmax(kHeroBlocks, view, game.factors);
 
     // Decisions go out as commands like every other mutation (logged +
     // replayable), never as direct writes. Edge-triggered: re-stating an

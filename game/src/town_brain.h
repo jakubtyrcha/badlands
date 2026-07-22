@@ -27,6 +27,7 @@ enum class Behavior : int32_t {
     Graze,
     VisitTax,
     Deposit,
+    Hunt,
 };
 
 // Decide + enqueue commands for the hero in `slot` (no enemy case). Reads its

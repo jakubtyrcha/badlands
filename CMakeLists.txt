@@ -521,6 +521,7 @@ add_executable(badlands_game_tests
     game/tests/critter_tests.cpp
     game/tests/townfolk_tests.cpp
     game/tests/rat_tests.cpp
+    game/tests/hunter_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE

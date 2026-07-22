@@ -12,6 +12,7 @@ namespace {
 // higher-tier applicable block always wins the argmax -- reproducing the old
 // town_brain priority chain (GoHome > Buy > VisitTavern > Roam > Idle).
 constexpr float kTierGoHome = 5.0f;
+constexpr float kTierHunt = 4.5f;  // a hunter's job, below rest, above errands
 constexpr float kTierBuy = 4.0f;
 constexpr float kTierVisitTavern = 3.0f;
 constexpr float kTierRoam = 2.0f;
@@ -71,6 +72,20 @@ BehaviourResult act_visit_tavern(const WorldView& v, const SimFactors&) {
     Command enter{CommandKind::EnterBuilding, v.slot, UINT32_MAX, {0.0f, 0.0f},
                   static_cast<int32_t>(BuildingKind::Tavern)};
     return {Behavior::VisitTavern, v.tavern_door, enter, true};
+}
+
+// --- Hunt (hunter) ----------------------------------------------------------
+float score_hunt(const WorldView& v, const SimFactors&) {
+    return v.has_prey ? kTierHunt : 0.0f;
+}
+BehaviourResult act_hunt(const WorldView& v, const SimFactors&) {
+    BehaviourResult r{Behavior::Hunt, v.prey_pos, std::nullopt, false};
+    // Chase to prey_pos; once within the hunter's own reach, take the shot (the
+    // handler re-checks range + cooldown, so the log gets one entry per shot).
+    if (v.prey_dist <= v.self_attack_range) {
+        r.follow_up = Command{CommandKind::Shoot, v.slot, v.prey_slot};
+    }
+    return r;
 }
 
 // --- Roam (shared) ----------------------------------------------------------

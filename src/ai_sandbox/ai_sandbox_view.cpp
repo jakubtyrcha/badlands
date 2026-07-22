@@ -68,6 +68,7 @@ struct TownBuilding {
 constexpr TownBuilding kTown[] = {
     {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, -8.0f, 0},
     {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, 8.0f, 0},
+    {badlands::BuildingKind::HuntersCamp, -24.0f, 0.0f, 0},  // recruits a hunter
     {badlands::BuildingKind::Tavern, 14.0f, -8.0f, 0},
     {badlands::BuildingKind::Apothecary, 14.0f, 8.0f, 0},
     {badlands::BuildingKind::House, 6.0f, 16.0f, 0},   // accrue tax for the collector
@@ -95,6 +96,7 @@ const char* behavior_name(int32_t behavior) {
     case 6: return "Graze";
     case 7: return "VisitTax";
     case 8: return "Deposit";
+    case 9: return "Hunt";
     default: return "-";
   }
 }
@@ -123,6 +125,8 @@ const char* command_name(badlands::CommandKindId kind) {
     case badlands::CommandKindId::SetBehavior: return "SetBehavior";
     case badlands::CommandKindId::CollectTax: return "CollectTax";
     case badlands::CommandKindId::Deposit: return "Deposit";
+    case badlands::CommandKindId::AttackBuilding: return "AttackBuilding";
+    case badlands::CommandKindId::Shoot: return "Shoot";
     default: return "?";
   }
 }
@@ -207,7 +211,10 @@ void AiSandboxView::SeedTown() {
                    static_cast<int32_t>(b.kind), b.x, b.z);
       continue;
     }
-    if (b.kind != badlands::BuildingKind::FreeCompanyQuarters) continue;
+    if (b.kind != badlands::BuildingKind::FreeCompanyQuarters &&
+        b.kind != badlands::BuildingKind::HuntersCamp) {
+      continue;
+    }
     for (int i = 0; i < kSeedHeroesPerGuild; ++i) {
       badlands::Action recruit{badlands::ActionKind::RecruitHero, static_cast<uint32_t>(id),
                          0.0f, 0.0f, 0, 0};

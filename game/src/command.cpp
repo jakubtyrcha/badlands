@@ -145,6 +145,30 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             }
             return 0;
         }
+        case CommandKind::Shoot: {
+            // A hunter shoots a specific target (target_id = its slot) -- deer are
+            // neutral, so this bypasses the team-based combat pass. Authoritative:
+            // re-check both entities, range, and cooldown. The death pass reaps a
+            // target dropped to 0 hp.
+            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            entt::entity target = entity_for_slot(game, static_cast<int32_t>(cmd.target_id));
+            if (e == entt::null || target == entt::null) {
+                return 0;
+            }
+            auto& cd = game.registry.get<CooldownTimer>(e);
+            if (cd.remaining > 0.0f) {
+                return 0;
+            }
+            const auto& stats = game.registry.get<Stats>(e);
+            const glm::vec2 sp = game.registry.get<Position>(e).pos;
+            const glm::vec2 tp = game.registry.get<Position>(target).pos;
+            if (glm::distance(sp, tp) > stats.attack_range) {
+                return 0;  // out of range now
+            }
+            game.registry.get<Health>(target).hp -= stats.attack_damage;
+            cd.remaining = stats.attack_cooldown;
+            return 0;
+        }
     }
     return -1;
 }

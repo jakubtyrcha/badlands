@@ -42,6 +42,14 @@ BehaviourResult act_buy(const WorldView&, const SimFactors&);
 float score_visit_tavern(const WorldView&, const SimFactors&);
 BehaviourResult act_visit_tavern(const WorldView&, const SimFactors&);
 
+// --- hunter block -----------------------------------------------------------
+// Hunt chases the nearest perceived prey (a deer) and shoots it once within the
+// hunter's own attack range (a Shoot command targeting the prey slot). Scores
+// above the errand blocks but below GoHome, so a tired hunter still rests. Only
+// the hunter's block list includes it (town_brain.cpp).
+float score_hunt(const WorldView&, const SimFactors&);
+BehaviourResult act_hunt(const WorldView&, const SimFactors&);
+
 // --- shared blocks ----------------------------------------------------------
 // Roam walks to view.roam_goal (chosen in perception: hero rng ring, or deer
 // biome-filtered). Shared verbatim by the hero and critter brains.
