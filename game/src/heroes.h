@@ -29,7 +29,8 @@ int32_t guild_hero_class(int kind);
 // Shared baseline hero descriptor; color is the only class-distinguishing field.
 GameCharacterDesc hero_desc(int32_t hero_class, float x, float z);
 
-// Spawn an entity with the full component set (incl. HeroClass/Home/Inventory).
+// Spawn an entity with the full component set (incl. HeroCharacter/
+// HeroSimulationState/HeroDisplayState).
 // Shared by game_spawn (home = -1) and recruit. Returns the public slot id.
 uint32_t spawn_entity(BadlandsGame& game, const GameCharacterDesc& desc, int32_t home);
 

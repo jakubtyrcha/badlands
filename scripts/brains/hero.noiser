@@ -27,6 +27,7 @@ import { Rng, from_seed, next_float, range_f32 } from core::random;
 @fn.perceive_building: fn(e: i32, kind: i32) -> (f32, f32, f32, f32); // (door_x, door_z, exists, _)
 @fn.perceive_home:     fn(e: i32) -> (f32, f32, f32, f32);            // (door_x, door_z, exists, _)
 @fn.perceive_class:    fn(e: i32) -> i32;                             // HeroClassId
+@fn.perceive_needs:    fn(e: i32) -> (f32, f32, f32, f32);            // (fatigue, boredom, time_of_day, is_night)
 @fn.inventory_count:   fn(e: i32) -> f32;
 @fn.attack_range:      fn(e: i32) -> f32;
 @fn.intent_move_to:    fn(e: i32, x: f32, z: f32) -> void;
@@ -34,6 +35,7 @@ import { Rng, from_seed, next_float, range_f32 } from core::random;
 @fn.intent_enter:      fn(e: i32, kind: i32) -> void;
 @fn.intent_enter_home: fn(e: i32) -> void;
 @fn.intent_buy:        fn(e: i32) -> void;
+@fn.report_behavior:   fn(e: i32, behavior: i32) -> void;             // inspection only (badlands::Behavior)
 
 // --- constants (mirror GameBuildingKind / HeroClassId / kInventoryCap) --------
 const TAVERN: i32 = 5;
@@ -44,6 +46,21 @@ const CLASS_GRAVE_ROBBER: i32 = 2;
 const CLASS_APPRENTICE: i32 = 3;
 const ROAM_RADIUS: f32 = 6.0;
 
+// Behaviour ids, mirroring badlands::Behavior (game/src/town_brain.h). Reported
+// for inspection only; they never feed a decision.
+const B_IDLE: i32 = 0;
+const B_ROAM: i32 = 1;
+const B_BUY: i32 = 2;
+const B_GO_HOME: i32 = 3;
+const B_VISIT_TAVERN: i32 = 4;
+const B_COMBAT: i32 = 5;
+
+// Needs policy — placeholder thresholds, kept in lockstep with the C++ town
+// brain's constants so the two stay at parity.
+const FATIGUE_GO_HOME: f32 = 0.6;   // tired enough to head home by day
+const FATIGUE_NIGHT: f32 = 0.2;     // lower bar once it is night
+const BOREDOM_TAVERN: f32 = 0.5;    // bored enough to seek the tavern
+
 // --- perception model: the hero's idea of the world (ALL FLAT) ----------------
 struct WorldView {
     px: f32, pz: f32, range: f32,
@@ -51,6 +68,7 @@ struct WorldView {
     apothecary_px: f32, apothecary_pz: f32, apothecary_exists: f32,
     tavern_px: f32, tavern_pz: f32, tavern_exists: f32,
     home_px: f32, home_pz: f32, home_exists: f32,
+    fatigue: f32, boredom: f32, tod: f32, night: f32,
     inventory: i32, class: i32,
 }
 
@@ -60,12 +78,14 @@ fn observe(e: i32) -> WorldView {
     let (ax, az, aex, _) = @fn.perceive_building(e, APOTHECARY);
     let (vx, vz, vex, _) = @fn.perceive_building(e, TAVERN);
     let (hx, hz, hex, _) = @fn.perceive_home(e);
+    let (fat, bor, tod, night) = @fn.perceive_needs(e);
     WorldView {
         px: sx, pz: sz, range: @fn.attack_range(e),
         enemy_px: tx, enemy_pz: tz, enemy_exists: has,
         apothecary_px: ax, apothecary_pz: az, apothecary_exists: aex,
         tavern_px: vx, tavern_pz: vz, tavern_exists: vex,
         home_px: hx, home_pz: hz, home_exists: hex,
+        fatigue: fat, boredom: bor, tod: tod, night: night,
         inventory: i32(@fn.inventory_count(e)),
         class: @fn.perceive_class(e),
     }
@@ -109,15 +129,40 @@ fn combat_act(v: WorldView) -> (Goal, Command) {
 // --- townsfolk behaviours (composed via score/act + per-class profile) --------
 enum Behaviour { Buy, GoHome, VisitTavern, Roam, Idle }
 
+// Needs read as HARD scores that outrank the errand, mirroring the C++ chain's
+// priority order GoHome > Buy > VisitTavern > Roam. Below their thresholds the
+// old inventory errand and the soft class detours are unchanged.
+fn tired(v: WorldView) -> bool {
+    v.fatigue >= FATIGUE_GO_HOME || (v.night > 0.5 && v.fatigue >= FATIGUE_NIGHT)
+}
+
 fn score(b: Behaviour, v: WorldView, profile: Profile, roll: f32) -> f32 {
     match b {
         // Core errand, deterministic and inventory-driven.
         Behaviour::Buy => if v.inventory < INVENTORY_CAP && v.apothecary_exists > 0.5 { 10.0 } else { 0.0 },
-        Behaviour::GoHome => if v.inventory >= INVENTORY_CAP && v.home_exists > 0.5 { 8.0 } else { 0.0 },
-        // Soft, seeded, class-weighted detours.
-        Behaviour::VisitTavern => if v.tavern_exists > 0.5 { profile.tavern_weight * roll } else { 0.0 },
+        Behaviour::GoHome => if v.home_exists > 0.5 {
+            // Rest outranks the errand (12 > 10); a full pack still sends us home.
+            if tired(v) { 12.0 } else if v.inventory >= INVENTORY_CAP { 8.0 } else { 0.0 }
+        } else { 0.0 },
+        Behaviour::VisitTavern => if v.tavern_exists > 0.5 {
+            // Boredom is a daytime want: below Buy, above every soft detour.
+            if v.boredom >= BOREDOM_TAVERN && v.night < 0.5 { 9.5 }
+            else { profile.tavern_weight * roll }
+        } else { 0.0 },
+        // Soft, seeded, class-weighted detour.
         Behaviour::Roam => profile.roam_weight * roll,
         Behaviour::Idle => 0.1,
+    }
+}
+
+// badlands::Behavior id, for inspection only (see report_behavior).
+fn behavior_id(b: Behaviour) -> i32 {
+    match b {
+        Behaviour::Buy => B_BUY,
+        Behaviour::GoHome => B_GO_HOME,
+        Behaviour::VisitTavern => B_VISIT_TAVERN,
+        Behaviour::Roam => B_ROAM,
+        Behaviour::Idle => B_IDLE,
     }
 }
 
@@ -132,9 +177,10 @@ fn act(b: Behaviour, v: WorldView, roam_x: f32, roam_z: f32) -> (Goal, Command) 
 }
 
 // --- selection: hard combat pre-empt, then weighted soft argmax ---------------
-fn decide(v: WorldView, profile: Profile, roll: f32, roam_x: f32, roam_z: f32) -> (Goal, Command) {
+fn decide(v: WorldView, profile: Profile, roll: f32, roam_x: f32, roam_z: f32) -> (Goal, Command, i32) {
     if v.enemy_exists > 0.5 {
-        combat_act(v)
+        let (g, c) = combat_act(v);
+        (g, c, B_COMBAT)
     } else {
         let behaviours = [Behaviour::Buy, Behaviour::GoHome, Behaviour::VisitTavern, Behaviour::Roam, Behaviour::Idle];
         var best = Behaviour::Idle;
@@ -146,7 +192,8 @@ fn decide(v: WorldView, profile: Profile, roll: f32, roam_x: f32, roam_z: f32) -
                 best = b;
             }
         }
-        act(best, v, roam_x, roam_z)
+        let (g, c) = act(best, v, roam_x, roam_z);
+        (g, c, behavior_id(best))
     }
 }
 
@@ -175,7 +222,8 @@ pub gen fn brain(entity: i32) -> i32 {
         let (roll, r3) = next_float(rng);
         rng = r3;
 
-        let (goal, command) = decide(view, profile, roll, roam_x, roam_z);
+        let (goal, command, behavior) = decide(view, profile, roll, roam_x, roam_z);
+        @fn.report_behavior(entity, behavior);
 
         match goal {
             Goal::GoTo(x, z) => @fn.intent_move_to(entity, x, z),

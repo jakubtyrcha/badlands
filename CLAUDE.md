@@ -20,7 +20,8 @@ Don't assume. Don't hide confusion. Surface tradeoffs. Before implementing:
 
 ## Repository state
 badlands runs on **C++/Dawn/SDL3**, with the engine ported from the sibling project `sampo` (`/Users/jakub/repos/sampo`) and Rust feature-libs linked via Corrosion. The migration off the old Rust/winit/wgpu app is **largely complete** and all work lives on `main`; built with CMake.
-- **Not yet ported:** terrain & biomes. The game app currently renders a static demo town rather than driving the live sim/brains.
+- **Not yet ported:** terrain & biomes. `badlands_game` still renders a static demo town; `badlands_ai_sandbox` is the live view of the sim (ticking world, blockout capsules, inspector panel).
+- **Game systems are event-sourced** (`game/src/command.h`): every mutation — player action and AI decision alike — is a `Command` applied at one point and appended to `command_log`. `state = f(initial config, command log, N ticks)`, enforced by `game/tests/determinism_tests.cpp` (run-twice + replay-the-log). New mechanic = new `CommandKind` + handler; never a direct registry write from a brain.
 - Design/plan notes live under `docs/` (`docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/brainshitting/`).
 
 ## Build & run

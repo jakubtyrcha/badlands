@@ -7,6 +7,7 @@
 #include "badlands_game.h"
 #include "components.h"
 #include "game_state.h"
+#include "placement.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -324,7 +325,7 @@ TEST_CASE("perceive_class binds and echoes the hero class") {
 
     // Force a known class on the spawned entity (Grave Robber = 2).
     entt::entity e = game->slots[hid];
-    game->registry.emplace_or_replace<badlands::HeroClass>(e, 2);
+    game->registry.emplace_or_replace<badlands::HeroCharacter>(e, 2);
 
     game_tick(game, 1.0f / 30.0f);
 
@@ -337,6 +338,99 @@ TEST_CASE("perceive_class binds and echoes the hero class") {
     } else {
         WARN("[noiser-bug] perceive_class script tripped " << stats.noiser_bugs
                                                            << " bug(s); see docs/noiser-bugs-upstream");
+    }
+    game_destroy(game);
+}
+
+TEST_CASE("perceive_needs binds and echoes the hero's needs + clock") {
+    // The needs/clock perception the day-night loop adds. A synthetic script
+    // echoes two of the four flat f32s into a durable move goal, proving the
+    // binding + HeroSimulationState/world_millis read, deterministically.
+    const char* script = R"(
+        @fn.perceive_needs:  fn(e: i32) -> (f32, f32, f32, f32);
+        @fn.intent_move_to:  fn(e: i32, x: f32, z: f32) -> void;
+        pub gen fn brain(entity: i32) -> i32 {
+            loop {
+                let (fatigue, boredom, tod, night) = @fn.perceive_needs(entity);
+                @fn.intent_move_to(entity, fatigue + boredom, tod + night);
+                yield 0;
+            }
+        }
+        0.0
+    )";
+    BadlandsGame* game = game_create(script);
+    GameCharacterDesc d = game_desc_mercenary(4.0f, 4.0f);
+    uint32_t hid = game_spawn(game, &d);
+    entt::entity e = game->slots[hid];
+
+    auto& sim = game->registry.get<badlands::HeroSimulationState>(e);
+    sim.fatigue = 0.25f;
+    sim.boredom = 0.5f;
+    game->world_millis = badlands::kMillisPerDay / 2;  // midday -> tod 0.5, night 0
+
+    game_tick(game, 1.0f / 30.0f);
+
+    GameStats stats;
+    game_stats(game, &stats);
+    if (stats.noiser_bugs == 0) {
+        const badlands::MoveTarget& mt = game->registry.get<badlands::MoveTarget>(e);
+        CHECK(mt.kind == badlands::MoveTarget::Kind::Point);
+        // Needs advanced one tick before the brain observed them.
+        CHECK(mt.point.x == Catch::Approx(0.75f + badlands::kFatiguePerTick +
+                                          badlands::kBoredomPerTick));
+        CHECK(mt.point.y == Catch::Approx(0.5f).margin(0.01f));  // tod 0.5 + night 0
+    } else {
+        WARN("[noiser-bug] perceive_needs script tripped " << stats.noiser_bugs
+                                                           << " bug(s); see docs/noiser-bugs-upstream");
+    }
+    game_destroy(game);
+}
+
+TEST_CASE("hero.noiser sends a tired hero home (parity with the C++ town brain)") {
+    // Behavioural parity on the first system: the shipping noiser brain and the
+    // C++ reference brain (town_brain.cpp) must reach the same decision from the
+    // same world state. An apothecary + empty inventory would normally win the
+    // argmax (the core errand); high fatigue must override it, exactly as the
+    // C++ chain puts GoHome ahead of Buy. That override is the needs system.
+    const char* path = std::getenv("BADLANDS_BRAIN_SCRIPT");
+    REQUIRE(path != nullptr);
+    std::ifstream file(path);
+    REQUIRE(file.good());
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string source = buffer.str();
+
+    BadlandsGame* game = game_create(source.c_str());
+    GameAction place{GAME_ACTION_PLACE_BUILDING, 0, -20.0f, 20.0f,
+                     GAME_BUILDING_FREE_COMPANY_QUARTERS, 0};
+    uint32_t guild = static_cast<uint32_t>(game_dispatch(game, &place));
+    GameAction apo{GAME_ACTION_PLACE_BUILDING, 0, 20.0f, 20.0f, GAME_BUILDING_APOTHECARY, 0};
+    game_dispatch(game, &apo);
+    GameAction recruit{GAME_ACTION_RECRUIT_HERO, guild, 0.0f, 0.0f, 0, 0};
+    uint32_t hid = static_cast<uint32_t>(game_dispatch(game, &recruit));
+    REQUIRE(hid != UINT32_MAX);
+    entt::entity e = game->slots[hid];
+
+    glm::vec2 home_door;
+    REQUIRE(building_approach_tile(game->placement, game->placement.buildings[guild], home_door));
+
+    game->registry.get<badlands::Position>(e).pos = {40.0f, 40.0f};
+    auto& sim = game->registry.get<badlands::HeroSimulationState>(e);
+    sim.fatigue = 0.9f;
+    sim.inventory = 0;  // the errand is pending; fatigue must still win
+
+    game_tick(game, 1.0f / 30.0f);
+
+    GameStats stats;
+    game_stats(game, &stats);
+    if (stats.noiser_bugs == 0) {
+        const badlands::MoveTarget& mt = game->registry.get<badlands::MoveTarget>(e);
+        CHECK(mt.kind == badlands::MoveTarget::Kind::Point);
+        CHECK(mt.point.x == Catch::Approx(home_door.x));
+        CHECK(mt.point.y == Catch::Approx(home_door.y));
+    } else {
+        WARN("[noiser-bug] hero.noiser needs parity tripped " << stats.noiser_bugs
+                                                              << " bug(s); see docs/noiser-bugs-upstream");
     }
     game_destroy(game);
 }

@@ -5,12 +5,15 @@
 #include "game_state.h"
 #include "heroes.h"
 #include "movement.h"
+#include "needs.h"
 #include "placement.h"
+#include "town_brain.h"
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -69,15 +72,24 @@ entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self) {
 namespace {
 
 // Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain: set a durable MoveTarget on the nearest enemy and
-// swing when in range. The movement pipeline walks the MoveTarget; the combat
-// pass re-validates the attack Intent authoritatively.
-void mock_think(BadlandsGame& game, entt::entity self) {
+// downgraded) script brain. Combat pre-empt: set a durable MoveTarget on the
+// nearest enemy and swing when in range (the movement pipeline walks the
+// MoveTarget; the combat pass re-validates the attack Intent authoritatively).
+// With no enemy, delegate to the C++ town brain (needs/day-night loop).
+void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
     MoveTarget& mt = reg.get<MoveTarget>(self);
     entt::entity target = nearest_enemy(game, self);
     if (target == entt::null) {
-        mt.kind = MoveTarget::Kind::None;
+        // STOPGAP (remove with the entity-archetype slice): only townsfolk run
+        // the town loop. Without this every enemy/critter spawn shops at the
+        // player's apothecary, because spawn_entity emplaces the hero
+        // components on EVERY entity. The archetype dispatch replaces this.
+        if (reg.all_of<HeroSimulationState>(self)) {
+            town_think(game, slot);
+        } else {
+            mt.kind = MoveTarget::Kind::None;
+        }
         return;
     }
     const Stats& stats = reg.get<Stats>(self);
@@ -174,6 +186,13 @@ uint32_t game_spawn(BadlandsGame* game, const GameCharacterDesc* desc) {
 void game_tick(BadlandsGame* game, float dt) {
     auto& registry = game->registry;
 
+    // Replay: commands stamped at the CURRENT time were originally applied
+    // before this tick (player dispatches between ticks), so they land first.
+    badlands::apply_replay_commands(*game);
+
+    // Day/night clock: integer ms, fixed compile-time increment (deterministic).
+    game->world_millis += kMillisPerTick;
+
     for (auto [e, cooldown] : registry.view<CooldownTimer>().each()) {
         cooldown.remaining = std::max(0.0f, cooldown.remaining - dt);
     }
@@ -181,25 +200,39 @@ void game_tick(BadlandsGame* game, float dt) {
     // Reappear hidden heroes whose stay has elapsed, before they think again.
     badlands::advance_inside_timers(*game, dt);
 
+    // Needs system: fatigue/boredom rise for active (non-hidden) heroes, so
+    // brains this tick see fresh values.
+    badlands::advance_needs(*game);
+
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.
     for (auto [e, intent] : registry.view<Intent>().each()) {
         intent = {.kind = 0, .dir = {0.0f, 0.0f}};
     }
-    for (size_t slot = 0; slot < game->slots.size(); ++slot) {
-        entt::entity e = game->slots[slot];
-        if (!registry.valid(e) || registry.all_of<InsideBuilding>(e)) {
-            continue;  // hidden heroes don't think
+    if (game->replay_log != nullptr) {
+        // Replaying: this tick's decisions come from the log, not the brains.
+        badlands::apply_replay_commands(*game);
+    } else {
+        for (size_t slot = 0; slot < game->slots.size(); ++slot) {
+            entt::entity e = game->slots[slot];
+            if (!registry.valid(e) || registry.all_of<InsideBuilding>(e)) {
+                continue;  // hidden heroes don't think
+            }
+            auto& brain = registry.get<Brain>(e);
+            bool scripted = brain.state && !brain.state->downgraded && game->brains;
+            if (scripted && !resume_brain(*game, static_cast<uint32_t>(slot), *brain.state)) {
+                brain.state->downgraded = true;
+                scripted = false;
+            }
+            if (!scripted) {
+                mock_think(*game, e, static_cast<uint32_t>(slot));
+            }
         }
-        auto& brain = registry.get<Brain>(e);
-        bool scripted = brain.state && !brain.state->downgraded && game->brains;
-        if (scripted && !resume_brain(*game, static_cast<uint32_t>(slot), *brain.state)) {
-            brain.state->downgraded = true;
-            scripted = false;
-        }
-        if (!scripted) {
-            mock_think(*game, e);
-        }
+
+        // Drain AI commands enqueued during think, in one ordered pass (FIFO;
+        // producers iterate by slot). This is the single mutation point for AI
+        // decisions and appends each to command_log (the trace).
+        apply_commands(*game);
     }
 
     // Legacy direct movement for scripted brains that still push a per-tick
@@ -272,6 +305,24 @@ uint32_t game_state(const BadlandsGame* game, GameCharacterState* out, uint32_t 
             const auto& pos = game->registry.get<Position>(e);
             const auto& health = game->registry.get<Health>(e);
             const auto& shape = game->registry.get<RenderShape>(e);
+            const auto* sim = game->registry.try_get<HeroSimulationState>(e);
+            const auto* disp = game->registry.try_get<HeroDisplayState>(e);
+            const auto* mt = game->registry.try_get<MoveTarget>(e);
+            const auto* path = game->registry.try_get<NavPath>(e);
+            // Resolve the goal to a world point so the panel needs no lookup:
+            // an Entity/Building goal reports the thing's current position.
+            glm::vec2 goal{0.0f, 0.0f};
+            if (mt != nullptr) {
+                if (mt->kind == MoveTarget::Kind::Point) {
+                    goal = mt->point;
+                } else if (mt->kind == MoveTarget::Kind::Entity &&
+                           game->registry.valid(mt->entity)) {
+                    goal = game->registry.get<Position>(mt->entity).pos;
+                } else if (mt->kind == MoveTarget::Kind::Building &&
+                           mt->building < game->placement.buildings.size()) {
+                    goal = game->placement.buildings[mt->building].center;
+                }
+            }
             out[total] = GameCharacterState{
                 .id = slot,
                 .team = game->registry.get<Team>(e).id,
@@ -285,12 +336,25 @@ uint32_t game_state(const BadlandsGame* game, GameCharacterState* out, uint32_t 
                 .color_r = shape.color.x,
                 .color_g = shape.color.y,
                 .color_b = shape.color.z,
-                .home_building_id =
-                    game->registry.all_of<Home>(e) ? game->registry.get<Home>(e).building_id : -1,
+                .home_building_id = sim ? sim->home_building_id : -1,
                 .inside_building_id = game->registry.all_of<InsideBuilding>(e)
                                           ? game->registry.get<InsideBuilding>(e).building_id
                                           : -1,
+                .fatigue = sim ? sim->fatigue : 0.0f,
+                .boredom = sim ? sim->boredom : 0.0f,
+                .behavior = sim ? sim->behavior : -1,
+                .goal_kind = mt ? static_cast<int32_t>(mt->kind) : 0,
+                .goal_x = goal.x,
+                .goal_z = goal.y,
+                .path_waypoints =
+                    path ? static_cast<int32_t>(path->waypoints.size() - std::min<size_t>(
+                                                    path->cursor, path->waypoints.size()))
+                         : 0,
             };
+            const char* name = disp ? disp->name.c_str() : "";
+            std::size_t n = std::min(std::strlen(name), sizeof(out[total].name) - 1);
+            std::memcpy(out[total].name, name, n);
+            out[total].name[n] = '\0';
         }
         ++total;
     }
@@ -332,22 +396,29 @@ int64_t game_dispatch(BadlandsGame* game, const GameAction* action) {
     if (game == nullptr || action == nullptr) {
         return -1;
     }
+    // Player actions become Commands applied synchronously through the one
+    // apply_command mutation point (so they land in command_log like AI
+    // decisions); the synchronous result (new id / <0) is preserved.
+    badlands::Command cmd{};
     switch (action->kind) {
-        case GAME_ACTION_PLACE_BUILDING: {
-            GamePlacementDesc desc{action->param_a, action->param_b, action->world_x,
-                                   action->world_z};
-            uint32_t id = badlands::place_building(*game, desc, /*player=*/true);
-            return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
-        }
-        case GAME_ACTION_RECRUIT_HERO: {
-            uint32_t id = badlands::recruit(*game, action->target_id);
-            return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
-        }
+        case GAME_ACTION_PLACE_BUILDING:
+            cmd.kind = badlands::CommandKind::PlaceBuilding;
+            cmd.point = {action->world_x, action->world_z};
+            cmd.param_a = action->param_a;
+            cmd.param_b = action->param_b;
+            break;
+        case GAME_ACTION_RECRUIT_HERO:
+            cmd.kind = badlands::CommandKind::RecruitHero;
+            cmd.target_id = action->target_id;
+            break;
         case GAME_ACTION_DESTROY_BUILDING:
-            return badlands::destroy_building_impl(*game, action->target_id);
+            cmd.kind = badlands::CommandKind::DestroyBuilding;
+            cmd.target_id = action->target_id;
+            break;
         default:
             return -1;
     }
+    return badlands::apply_command(*game, cmd);
 }
 
 void game_set_pathfinder(BadlandsGame* game, const GamePathfinder* pathfinder) {

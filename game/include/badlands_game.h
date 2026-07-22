@@ -39,6 +39,15 @@ typedef struct GameCharacterState {
     float color_r, color_g, color_b;
     int32_t home_building_id;    // recruiting guild; -1 = homeless / not a hero
     int32_t inside_building_id;  // -1 = outside; >=0 => hidden (don't draw; list in panel)
+    // Hero simulation/display state, for the inspector. Zeroed for non-heroes.
+    float fatigue, boredom;  // drives, 0..1
+    int32_t behavior;        // last decided badlands::Behavior; -1 = none yet
+    char name[24];           // NUL-terminated display name; "" for non-heroes
+    // Current goal + pathfinding state, for the debug panel: what this entity is
+    // walking toward right now and how far along the route it is.
+    int32_t goal_kind;        // MoveTarget::Kind: 0 None, 1 Point, 2 Entity, 3 Building
+    float goal_x, goal_z;     // goal position in world XZ (0,0 when goal_kind == 0)
+    int32_t path_waypoints;   // waypoints remaining on the planned route; 0 = none
 } GameCharacterState;
 
 typedef struct GameStats {
@@ -197,8 +206,53 @@ typedef struct GameWorldState {
     uint32_t queued_poppables;  // owed but not yet placeable (crowded map)
     uint32_t urban_quarters;    // sprawl accumulator in quarter-units
     uint32_t guild_roster_cap;  // kGuildRosterCap (heroes per guild); UI mirrors it
+    // The sim clock. world_millis is the authoritative integer time (advanced by
+    // a compile-time constant per tick at a fixed 30 Hz); the rest are derived
+    // for convenience so observers need not mirror the day-length constants.
+    int64_t world_millis;
+    float time_of_day;  // 0..1 within the current day
+    uint32_t day;       // whole days elapsed
+    int32_t is_night;   // 0/1
 } GameWorldState;
 void game_world(const BadlandsGame* game, GameWorldState* out);
+
+// ---------------------------------------------------------------------------
+// Command log (the trace of record)
+//
+// Every mutation of the sim -- player action and AI decision alike -- is a
+// Command applied at a single point, in deterministic order, and appended here.
+// (initial config, seed, command log) reproduces a run exactly, so this is both
+// the replay input and what a debug panel shows.
+// ---------------------------------------------------------------------------
+enum GameCommandKind {
+    // Player commands (submitted via game_dispatch; applied immediately).
+    GAME_COMMAND_PLACE_BUILDING = 0,
+    GAME_COMMAND_RECRUIT_HERO = 1,
+    GAME_COMMAND_DESTROY_BUILDING = 2,
+    // AI/unit commands (enqueued by brains; drained in slot order each tick).
+    GAME_COMMAND_MOVE_TO = 3,
+    GAME_COMMAND_ENTER_BUILDING = 4,
+    GAME_COMMAND_ENTER_HOME = 5,
+    GAME_COMMAND_BUY = 6,
+    GAME_COMMAND_ATTACK = 7,
+    // A decision the brain made about ITSELF (inspection state). It goes
+    // through the command layer like any other mutation so it is logged and
+    // replayed -- a decision the trace could not reproduce would not be a trace.
+    GAME_COMMAND_SET_BEHAVIOR = 8,
+};
+
+typedef struct GameCommandRecord {
+    int32_t kind;    // GameCommandKind
+    uint32_t actor;  // entity id; UINT32_MAX = player/global
+    uint32_t target_id;
+    float point_x, point_z;
+    int32_t param_a, param_b;
+} GameCommandRecord;
+
+// Returns the TOTAL number of logged commands and writes the most recent
+// min(cap, total) of them, oldest-first (the game_state truncation idiom, but
+// tail-biased: a panel wants the latest N).
+uint32_t game_command_log(const BadlandsGame* game, GameCommandRecord* out, uint32_t cap);
 
 // ---------------------------------------------------------------------------
 // Pathfinding provider (v0.3)

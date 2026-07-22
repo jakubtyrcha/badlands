@@ -17,6 +17,9 @@ pub const GAME_SOURCES: &[&str] = &[
     "game/src/placement.cpp",
     "game/src/movement.cpp",
     "game/src/heroes.cpp",
+    "game/src/command.cpp",
+    "game/src/needs.cpp",
+    "game/src/town_brain.cpp",
     "game/src/noiser_jit_stubs.cpp",
 ];
 
@@ -33,6 +36,10 @@ pub const TEST_SOURCES: &[&str] = &[
     "game/tests/placement_tests.cpp",
     "game/tests/movement_tests.cpp",
     "game/tests/heroes_tests.cpp",
+    "game/tests/command_tests.cpp",
+    "game/tests/clock_tests.cpp",
+    "game/tests/needs_tests.cpp",
+    "game/tests/determinism_tests.cpp",
     "third_party/catch2/extras/catch_amalgamated.cpp",
 ];
 

@@ -218,9 +218,12 @@ target_include_directories(badlands_engine PUBLIC
 add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/brain.cpp
+    game/src/command.cpp
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/needs.cpp
+    game/src/town_brain.cpp
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
     third_party/noiser/noiser-vm/src/noiser_crash.cpp
@@ -464,6 +467,10 @@ add_executable(badlands_game_tests
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
+    game/tests/command_tests.cpp
+    game/tests/clock_tests.cpp
+    game/tests/needs_tests.cpp
+    game/tests/determinism_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
@@ -473,6 +480,11 @@ target_include_directories(badlands_game_tests PRIVATE
 target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
 target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+# The noiser smoke/duel cases load the SHIPPING brain scripts by path and REQUIRE
+# the env vars (historically exported only by the legacy Rust harness, so a bare
+# `ctest` failed on them). Set here so `ctest --test-dir build` is self-contained.
+set_tests_properties(badlands_game_tests PROPERTIES ENVIRONMENT
+    "BADLANDS_BRAIN_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/hero.noiser;BADLANDS_COMBAT_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/combat_test.noiser")
 
 # badlands_geometry_tests: Catch2 suite for Task S2.C's procedural geometry
 # (primitives/rocks/building parts, src/engine/rendering/geometry) + the

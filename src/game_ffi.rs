@@ -41,6 +41,16 @@ pub struct GameCharacterState {
     pub color_b: f32,
     pub home_building_id: i32,   // recruiting guild; -1 = homeless / not a hero
     pub inside_building_id: i32, // -1 = outside; >=0 => hidden (don't draw)
+    // Hero simulation/display state, for the inspector. Zeroed for non-heroes.
+    pub fatigue: f32,
+    pub boredom: f32,
+    pub behavior: i32,   // last decided badlands::Behavior; -1 = none yet
+    pub name: [u8; 24],  // NUL-terminated display name; "" for non-heroes
+    // Current goal + pathfinding state, for the debug panel.
+    pub goal_kind: i32, // MoveTarget::Kind: 0 None, 1 Point, 2 Entity, 3 Building
+    pub goal_x: f32,
+    pub goal_z: f32,
+    pub path_waypoints: i32,
 }
 
 #[repr(C)]
@@ -187,6 +197,26 @@ pub struct GameWorldState {
     pub queued_poppables: u32,
     pub urban_quarters: u32,
     pub guild_roster_cap: u32,
+    // The sim clock. world_millis is the authoritative integer time (advanced by
+    // a compile-time constant per tick at a fixed 30 Hz); the rest are derived.
+    pub world_millis: i64,
+    pub time_of_day: f32, // 0..1 within the current day
+    pub day: u32,
+    pub is_night: i32, // 0/1
+}
+
+// Mirror of GameCommandRecord: one row of the command log (the trace of record;
+// every mutation of the sim, in apply order).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GameCommandRecord {
+    pub kind: i32, // GameCommandKind
+    pub actor: u32,
+    pub target_id: u32,
+    pub point_x: f32,
+    pub point_z: f32,
+    pub param_a: i32,
+    pub param_b: i32,
 }
 
 // Mirror of GamePathfinder: a pluggable path-geometry provider. We construct
@@ -226,6 +256,11 @@ unsafe extern "C" {
     fn game_dispatch(game: *mut BadlandsGame, action: *const GameAction) -> i64;
     fn game_buildings(game: *const BadlandsGame, out: *mut GameBuildingState, cap: u32) -> u32;
     fn game_world(game: *const BadlandsGame, out: *mut GameWorldState);
+    fn game_command_log(
+        game: *const BadlandsGame,
+        out: *mut GameCommandRecord,
+        cap: u32,
+    ) -> u32;
     fn game_building_def(kind: i32) -> GameBuildingDef;
     fn game_render_box(kind: i32, rotation_index: i32) -> GameRenderBox;
     fn game_set_pathfinder(game: *mut BadlandsGame, pathfinder: *const GamePathfinder);

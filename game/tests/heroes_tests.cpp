@@ -75,9 +75,10 @@ TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
         REQUIRE(hid != UINT32_MAX);
 
         entt::entity e = game->slots[hid];
-        CHECK(game->registry.get<Home>(e).building_id == static_cast<int32_t>(bid));
-        CHECK(game->registry.get<HeroClass>(e).value == gd.cls);
-        CHECK(game->registry.get<Inventory>(e).count == 0);
+        CHECK(game->registry.get<HeroSimulationState>(e).home_building_id ==
+              static_cast<int32_t>(bid));
+        CHECK(game->registry.get<HeroCharacter>(e).hero_class == gd.cls);
+        CHECK(game->registry.get<HeroSimulationState>(e).inventory == 0);
 
         // Class-derived color matches hero_desc, and game_state exposes the home.
         GameCharacterDesc want = hero_desc(gd.cls, 0.0f, 0.0f);
@@ -160,14 +161,14 @@ TEST_CASE("buying at an apothecary fills the hero's inventory") {
     REQUIRE(hid != UINT32_MAX);
     entt::entity e = game->slots[hid];
 
-    CHECK(game->registry.get<Inventory>(e).count == 0);
+    CHECK(game->registry.get<HeroSimulationState>(e).inventory == 0);
     CHECK(!hero_buy(*game, e));  // too far from the apothecary
 
     glm::vec2 tile;
     REQUIRE(building_approach_tile(game->placement, game->placement.buildings[apo], tile));
     game->registry.get<Position>(e).pos = tile;
     CHECK(hero_buy(*game, e));
-    CHECK(game->registry.get<Inventory>(e).count == kInventoryCap);
+    CHECK(game->registry.get<HeroSimulationState>(e).inventory == kInventoryCap);
 
     game_destroy(game);
 }
@@ -190,7 +191,7 @@ TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footpr
         }
         CHECK(destroy_at(game, g1) == 0);
         for (uint32_t hid : heroes) {
-            CHECK(game->registry.get<Home>(game->slots[hid]).building_id ==
+            CHECK(game->registry.get<HeroSimulationState>(game->slots[hid]).home_building_id ==
                   static_cast<int32_t>(g2));
         }
         CHECK(roster_count(*game, g2) == 3);
@@ -200,8 +201,8 @@ TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footpr
         uint32_t h0 = recruit_at(game, g1);
         uint32_t h1 = recruit_at(game, g1);
         CHECK(destroy_at(game, g1) == 0);
-        CHECK(game->registry.get<Home>(game->slots[h0]).building_id == -1);
-        CHECK(game->registry.get<Home>(game->slots[h1]).building_id == -1);
+        CHECK(game->registry.get<HeroSimulationState>(game->slots[h0]).home_building_id == -1);
+        CHECK(game->registry.get<HeroSimulationState>(game->slots[h1]).home_building_id == -1);
     }
 
     SECTION("expels an inside hero and frees the footprint") {
