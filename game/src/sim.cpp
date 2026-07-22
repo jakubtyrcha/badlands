@@ -14,6 +14,8 @@
 #include "movement.h"
 #include "needs.h"
 #include "placement.h"
+
+#include "game/map/symbolic_map_generator.hpp"
 #include "town_brain.h"
 
 #include <entt/entt.hpp>
@@ -41,14 +43,18 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     MoveTarget& mt = reg.get<MoveTarget>(self);
     entt::entity target = nearest_enemy(game, self);
     if (target == entt::null) {
-        // STOPGAP (remove with the entity-archetype slice): only townsfolk run
-        // the town loop. Without this every enemy/critter spawn shops at the
-        // player's apothecary, because spawn_entity emplaces the hero
-        // components on EVERY entity. The archetype dispatch replaces this.
-        if (reg.all_of<HeroSimulationState>(self)) {
-            town_think(game, slot);
-        } else {
-            mt.kind = MoveTarget::Kind::None;
+        // No enemy: the archetype's brain decides. Nothing here asks what KIND
+        // of thing this is -- the recipe already chose the brain at spawn.
+        switch (reg.get<Brain>(self).kind) {
+            case BrainKind::Town:
+                town_think(game, slot);
+                break;
+            case BrainKind::None:
+            case BrainKind::Critter:
+            case BrainKind::Townfolk:
+            case BrainKind::Monster:
+                mt.kind = MoveTarget::Kind::None;  // brains land in later phases
+                break;
         }
         return;
     }
@@ -80,6 +86,13 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
                    [] { sampo::noiser::detail::SetHostCallProfiling(false); });
 
     auto game = std::make_unique<BadlandsGame>();
+    // Terrain/biomes the sim reasons about. SymbolicMapGenerator is a pure
+    // function of its compile-time constants, so every world would generate a
+    // byte-identical map -- generate once and copy (the shaping blur passes cost
+    // ~0.7 s, which a test suite creating a world per case cannot pay).
+    // Determinism is unaffected: the copied data is the same either way.
+    static const MapData kSymbolicMap = SymbolicMapGenerator{}.Generate();
+    game->map = kSymbolicMap;
     if (brain_script_source != nullptr) {
         std::string error;
         game->brains = BrainRuntime::create(*game, brain_script_source, error);
@@ -338,6 +351,8 @@ std::vector<CommandRecord> command_log_of(const BadlandsGame& g) {
     return rows;
 }
 
+void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = f; }
+
 SimStats stats_of(const BadlandsGame& g) {
     return SimStats{
         .ticks = g.ticks,
@@ -371,6 +386,7 @@ CharacterDesc MercenaryDesc(float pos_x, float pos_z) {
 
 CharacterDesc GoblinDesc(float pos_x, float pos_z) {
     return CharacterDesc{
+        .archetype = Archetype::Monster,
         .pos_x = pos_x,
         .pos_z = pos_z,
         .team = 1,
@@ -428,6 +444,8 @@ std::vector<BuildingState> Sim::Buildings() const {
 WorldState Sim::World() const { return world_of(*world_); }
 SimStats Sim::GetStats() const { return stats_of(*world_); }
 std::vector<CommandRecord> Sim::CommandLog() const { return command_log_of(*world_); }
+void Sim::SetFactors(const SimFactors& f) { set_factors_of(*world_, f); }
+const SimFactors& Sim::Factors() const { return world_->factors; }
 
 PlacementProbe Sim::ProbePlacement(const PlacementDesc& desc,
                                    std::vector<GridTriangle>& out_triangles) const {

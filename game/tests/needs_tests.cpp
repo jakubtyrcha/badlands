@@ -152,3 +152,43 @@ TEST_CASE("C++ town brain sends a bored hero to the tavern by day") {
     CHECK(mt.point.y == Catch::Approx(tavern_door.y));
 
     }
+
+TEST_CASE("hero thresholds come from SimFactors, not hardcoded constants") {
+    // Policy is data: the same world state must produce a different decision
+    // when the factors change. This is what makes assets/creatures/factors.json
+    // meaningful -- if the brain ignored factors the file would be decoration.
+    auto owned = make_world(nullptr);
+    BadlandsGame& g = *owned;
+
+    // Defaults are shipped and sane with no file loaded.
+    CHECK(g.factors.hero.fatigue_go_home == Catch::Approx(0.6f));
+
+    Action place{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,
+                 static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
+    uint32_t guild = static_cast<uint32_t>(dispatch_into(g, place));
+    Action recruit{ActionKind::RecruitHero, guild, 0.0f, 0.0f, 0, 0};
+    uint32_t hid = static_cast<uint32_t>(dispatch_into(g, recruit));
+    REQUIRE(hid != UINT32_MAX);
+    entt::entity e = g.slots[hid];
+
+    glm::vec2 home_door;
+    REQUIRE(building_approach_tile(g.placement, g.placement.buildings[guild], home_door));
+    g.registry.get<Position>(e).pos = {40.0f, 40.0f};
+    // Midday: at t=0 it is NIGHT (tod < kNightEnd), where the lower
+    // fatigue_night bar applies and would mask the daytime threshold.
+    g.world_millis = kMillisPerDay / 2;
+
+    // Fatigue 0.3 is BELOW the default 0.6 -> the hero must not head home.
+    g.registry.get<HeroSimulationState>(e).fatigue = 0.3f;
+    tick_world(g, 1.0f / 30.0f);
+    CHECK(g.registry.get<HeroSimulationState>(e).behavior !=
+          static_cast<int32_t>(Behavior::GoHome));
+
+    // Same fatigue, lower threshold from data -> now it does.
+    SimFactors f = g.factors;
+    f.hero.fatigue_go_home = 0.2f;
+    set_factors_of(g, f);
+    tick_world(g, 1.0f / 30.0f);
+    CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
+          static_cast<int32_t>(Behavior::GoHome));
+}

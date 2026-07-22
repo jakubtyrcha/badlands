@@ -1,12 +1,15 @@
 // Hero recruitment, residency, class, entering/hiding, and destruction cascade
-// (v0.3). All town game-logic lives here behind the game_dispatch handlers and
+// (v0.3). All town game-logic lives here behind the dispatch_into handlers and
 // is tested in C++ (heroes_tests.cpp), never through bespoke C API functions.
 
 #pragma once
 
 #include "badlands_sim.hpp"  // badlands::CharacterDesc
 
+#include "mapgen/biomes.hpp"  // mapgen::Biome (pure enum, no engine deps)
+
 #include <entt/entt.hpp>
+#include <glm/glm.hpp>
 
 #include <cstdint>
 
@@ -28,6 +31,14 @@ int32_t guild_hero_class(int kind);
 
 // Shared baseline hero descriptor; color is the only class-distinguishing field.
 CharacterDesc hero_desc(int32_t hero_class, float x, float z);
+
+// --- world <-> map queries --------------------------------------------------
+// MapData is indexed in MAP-LOCAL coordinates (origin at a corner); the sim
+// works in world XZ centred on the origin. These convert once, so no caller
+// re-derives the offset (the bug GameView's `world + half_extent` hand-rolling
+// invites). An empty map reports Plains / height 0.
+mapgen::Biome biome_at(const BadlandsGame& game, glm::vec2 world_xz);
+float height_at(const BadlandsGame& game, glm::vec2 world_xz);
 
 // Spawn an entity with the full component set (incl. HeroCharacter/
 // HeroSimulationState/HeroDisplayState).

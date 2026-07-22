@@ -510,6 +510,7 @@ add_executable(badlands_game_tests
     game/tests/clock_tests.cpp
     game/tests/needs_tests.cpp
     game/tests/determinism_tests.cpp
+    game/tests/archetype_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
@@ -858,6 +859,25 @@ target_include_directories(badlands_biome_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_factors_manifest_tests: behaviour tuning loaded as data
+# (assets/creatures/factors.json -> badlands::SimFactors). App-layer, so the sim
+# keeps its lean dependency set. Reads the shipped file, so cwd = repo root.
+add_executable(badlands_factors_manifest_tests
+    src/game/tests/factors_manifest_tests.cpp
+    src/game/factors_manifest.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_factors_manifest_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_factors_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_factors_manifest_tests COMMAND badlands_factors_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
 # (src/engine/core/ray) and the fixed-angle GameCameraController's zoom that

@@ -7,6 +7,8 @@
 #include "components.h"
 #include "placement.h"
 
+#include "game/map/map_data.hpp"
+
 #include <entt/entt.hpp>
 
 #include <cstdint>
@@ -49,6 +51,17 @@ struct BadlandsGame {
     // Day/night clock: integer milliseconds, advanced by kMillisPerTick each
     // tick (see components.h). Deterministic, no float drift.
     int64_t world_millis = 0;
+
+    // The terrain/biome field the sim reasons about (deer roam Forest/Plains,
+    // hunters seek Forest). Generated once in make_world; MapData is pure CPU
+    // data with no engine/GPU dependency, so the sim owns it directly. Map-local
+    // coordinates are world + size*0.5 -- use biome_at()/height_at() rather than
+    // querying MapData directly so that offset lives in exactly one place.
+    badlands::MapData map;
+
+    // Behaviour tuning (see SimFactors). Defaults are compiled in; an app may
+    // overwrite them from assets/creatures/factors.json before ticking.
+    badlands::SimFactors factors;
 
     uint64_t ticks = 0;
     uint64_t script_intents = 0;

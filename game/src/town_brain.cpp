@@ -14,13 +14,8 @@ namespace badlands {
 
 namespace {
 
-// Behaviour thresholds — policy placeholders (see town_brain.h), not the
-// architecture. Tuned so heroes sleep when tired / at night and seek the tavern
-// when bored during the day.
-constexpr float kFatigueGoHome = 0.6f;   // tired enough to head home by day
-constexpr float kFatigueNight = 0.2f;    // lower bar to go home once it is night
-constexpr float kBoredomTavern = 0.5f;   // bored enough to seek the tavern
-constexpr float kRoamRadius = 6.0f;
+// Behaviour thresholds live in SimFactors (badlands_sim.hpp), loaded from
+// assets/creatures/factors.json -- policy is data, not code. Defaults there.
 
 // int32_t discriminants of the scoped BuildingKind enum, so they can be passed
 // to the int32_t-keyed placement/hero helpers directly (same idiom as
@@ -56,6 +51,7 @@ void town_think(BadlandsGame& game, uint32_t slot) {
         return;
     }
     auto& sim = game.registry.get<HeroSimulationState>(e);
+    const HeroFactors& f = game.factors.hero;
     glm::vec2 pos = game.registry.get<Position>(e).pos;
     const float tod = time_of_day(game.world_millis);
     const bool night = is_night(tod);
@@ -78,7 +74,8 @@ void town_think(BadlandsGame& game, uint32_t slot) {
     Command follow_up{};
     bool have_follow_up = false;
 
-    if (has_home && (sim.fatigue >= kFatigueGoHome || (night && sim.fatigue >= kFatigueNight))) {
+    if (has_home && (sim.fatigue >= f.fatigue_go_home ||
+                     (night && sim.fatigue >= f.fatigue_night))) {
         chosen = Behavior::GoHome;
         target = home_door;
         follow_up = {CommandKind::EnterHome, slot};
@@ -88,7 +85,7 @@ void town_think(BadlandsGame& game, uint32_t slot) {
         target = apo_door;
         follow_up = {CommandKind::Buy, slot};
         have_follow_up = true;
-    } else if (has_tavern && !night && sim.boredom >= kBoredomTavern) {
+    } else if (has_tavern && !night && sim.boredom >= f.boredom_tavern) {
         chosen = Behavior::VisitTavern;
         target = tavern_door;
         follow_up = {CommandKind::EnterBuilding, slot, UINT32_MAX, {0.0f, 0.0f},
@@ -105,7 +102,7 @@ void town_think(BadlandsGame& game, uint32_t slot) {
             s = 1;
         }
         float ang = unit(s) * 6.2831853f;
-        float rad = unit(s) * kRoamRadius;
+        float rad = unit(s) * f.roam_radius;
         target = anchor + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
     }
 

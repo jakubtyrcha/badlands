@@ -46,8 +46,40 @@ inline constexpr int32_t kGridHalfExtentTiles = 48;  // was GAME_GRID_HALF_EXTEN
 
 // ---- POD result structs (field-for-field from badlands_game.h) -------------
 
+// What KIND of thing is being spawned. Archetype is a spawn recipe: it decides
+// which components and which brain the entity gets, and is not consulted again
+// at think time (perception is relational -- friend/neutral/enemy + threat --
+// never taxonomic).
+enum class Archetype : int32_t {
+    Hero = 0,   // needs, home, inventory, errands; the utility brain
+    Townfolk,   // simple sequential goals (route, commute); no needs
+    Critter,    // reactive: roam/graze, flee non-critters
+    Monster,    // combat; no needs
+};
+
+// ---- tuning factors (data, not code) ---------------------------------------
+// Per-archetype behaviour tuning. The sim ships the defaults below, so it is
+// fully usable -- and unit-testable -- with no file present; an app may load
+// assets/creatures/factors.json over them (src/game/factors_manifest.hpp) so
+// designers can tune without a rebuild.
+//
+// Factors are INITIAL CONFIG in the determinism contract
+// (state = f(seed, initial config, command log, N ticks)): a replay must use
+// the same factors, and the command log does not carry them.
+struct HeroFactors {
+    float fatigue_go_home = 0.6f;  // tired enough to head home by day
+    float fatigue_night = 0.2f;    // lower bar once it is night
+    float boredom_tavern = 0.5f;   // bored enough to seek the tavern
+    float roam_radius = 6.0f;      // world units around the roam anchor
+};
+
+struct SimFactors {
+    HeroFactors hero;
+};
+
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
+    Archetype archetype = Archetype::Hero;
     float pos_x, pos_z;
     int32_t team;
     float hp;
@@ -233,6 +265,10 @@ class Sim {
     // value-returning Buildings() delegates here.
     void Buildings(std::vector<BuildingState>& out) const;
     WorldState World() const;
+    // Replaces the tuning factors (see SimFactors). Call before ticking; a
+    // replay must use the same factors the recorded run used.
+    void SetFactors(const SimFactors& factors);
+    const SimFactors& Factors() const;
     // The applied-command trace, oldest-first (see CommandRecord).
     std::vector<CommandRecord> CommandLog() const;                         // was game_world
     SimStats GetStats() const;                        // was game_stats

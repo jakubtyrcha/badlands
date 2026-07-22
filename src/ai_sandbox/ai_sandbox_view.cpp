@@ -104,16 +104,26 @@ const char* command_name(badlands::CommandKindId kind) {
   }
 }
 
-// The noiser hero brain, if we can read it. Empty means "run the C++ town
-// brain" -- the parallel-brains model: a missing or broken script is not fatal,
-// the sim just falls back (and reports noiser_bugs in the panel).
+// noiser is PARKED: C++ brains drive every archetype by default.
+//
+// Upstream has seven open bugs (docs/noiser-bugs-upstream/), two of which block
+// composing brains at all -- sub-generators cannot be resumed from the entry
+// generator, and a file with 2+ `gen fn` runs an arbitrary one. The scripts and
+// the whole host-call surface stay in the tree and compiling
+// (game/src/brain.cpp, game/tests/noiser_smoke_tests.cpp keep exercising them),
+// so re-adopting per archetype is a switch flip once those land.
+//
+// Explicitly setting BADLANDS_BRAIN_SCRIPT opts back in for a session; unset
+// (the default) runs the C++ town brain.
 std::string load_brain_script() {
   const char* env = std::getenv("BADLANDS_BRAIN_SCRIPT");
-  const std::string path = env ? env : "scripts/brains/hero.noiser";
-  std::ifstream file(path);
+  if (env == nullptr) {
+    return {};  // parked
+  }
+  std::ifstream file(env);
   if (!file.good()) {
-    spdlog::warn("AiSandboxView: no brain script at '{}' -- using the C++ town brain",
-                 path);
+    spdlog::warn("AiSandboxView: BADLANDS_BRAIN_SCRIPT='{}' unreadable -- using the C++ brain",
+                 env);
     return {};
   }
   std::ostringstream buffer;

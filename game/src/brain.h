@@ -31,9 +31,22 @@ struct BrainState {
     bool downgraded = false;
 };
 
-// ECS component. Null state (or downgraded) -> mock brain drives the entity.
+// Which decision logic drives this entity when no script brain is running.
+// Set once by the spawn recipe (heroes.cpp) and dispatched on in tick_world --
+// this is how archetype selects a brain WITHOUT anything querying "is this a
+// Hero" at think time.
+enum class BrainKind : int32_t {
+    None = 0,   // no autonomous decisions (combat pre-empt only)
+    Town,       // hero errand/needs loop (town_brain.cpp)
+    Critter,    // reactive roam/graze/flee
+    Townfolk,   // sequential routes
+    Monster,    // seek and engage
+};
+
+// ECS component. Null state (or downgraded) -> the BrainKind mock drives it.
 struct Brain {
     std::unique_ptr<BrainState> state;
+    BrainKind kind = BrainKind::None;
 };
 
 // Fresh coroutine for the entity slot; the slot id is the generator's

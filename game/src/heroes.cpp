@@ -28,6 +28,29 @@ std::string hero_name(uint32_t slot) {
 }
 }  // namespace
 
+namespace {
+// Map-local = world + size*0.5 (MapData spans [0, size]; the world is centred).
+glm::vec2 to_map_local(const MapData& map, glm::vec2 world_xz) {
+    return {world_xz.x + map.size_x_m() * 0.5f, world_xz.y + map.size_z_m() * 0.5f};
+}
+}  // namespace
+
+mapgen::Biome biome_at(const BadlandsGame& game, glm::vec2 world_xz) {
+    if (game.map.empty()) {
+        return mapgen::Biome::Plains;
+    }
+    const glm::vec2 local = to_map_local(game.map, world_xz);
+    return game.map.DominantBiomeAt(local.x, local.y);
+}
+
+float height_at(const BadlandsGame& game, glm::vec2 world_xz) {
+    if (game.map.empty()) {
+        return 0.0f;
+    }
+    const glm::vec2 local = to_map_local(game.map, world_xz);
+    return game.map.HeightAt(local.x, local.y);
+}
+
 int32_t guild_hero_class(int kind) {
     switch (static_cast<BuildingKind>(kind)) {
         case BuildingKind::FreeCompanyQuarters:
@@ -95,21 +118,40 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     reg.emplace<MoveTarget>(e);
     reg.emplace<NavPath>(e);
 
-    // Hero state (all entities carry these; a plain spawn has class/home -1).
-    int32_t hero_class = -1;
-    if (home >= 0 && static_cast<size_t>(home) < game.placement.buildings.size()) {
-        hero_class = guild_hero_class(game.placement.buildings[home].kind);
+    // --- archetype recipe: ONLY heroes carry hero state -------------------
+    // This is what stops a goblin owning fatigue/inventory/a home and running
+    // the townsfolk errand loop. Generic combat/movement components above are
+    // archetype-independent and every entity gets them.
+    BrainKind brain_kind = BrainKind::None;
+    switch (desc.archetype) {
+        case Archetype::Hero: {
+            int32_t hero_class = -1;
+            if (home >= 0 && static_cast<size_t>(home) < game.placement.buildings.size()) {
+                hero_class = guild_hero_class(game.placement.buildings[home].kind);
+            }
+            reg.emplace<HeroCharacter>(e, hero_class);
+            HeroSimulationState sim{};
+            sim.inventory = 0;
+            sim.home_building_id = home;
+            reg.emplace<HeroSimulationState>(e, sim);
+            HeroDisplayState disp{};
+            disp.name = hero_name(slot);
+            reg.emplace<HeroDisplayState>(e, disp);
+            brain_kind = BrainKind::Town;
+            break;
+        }
+        case Archetype::Townfolk:
+            brain_kind = BrainKind::Townfolk;
+            break;
+        case Archetype::Critter:
+            brain_kind = BrainKind::Critter;
+            break;
+        case Archetype::Monster:
+            brain_kind = BrainKind::Monster;
+            break;
     }
-    reg.emplace<HeroCharacter>(e, hero_class);
-    HeroSimulationState sim{};
-    sim.inventory = 0;
-    sim.home_building_id = home;
-    reg.emplace<HeroSimulationState>(e, sim);
-    HeroDisplayState disp{};
-    disp.name = hero_name(slot);
-    reg.emplace<HeroDisplayState>(e, disp);
 
-    reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr);
+    reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr, brain_kind);
     return slot;
 }
 
