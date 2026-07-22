@@ -66,7 +66,6 @@ class AiSandboxView : public AppView {
   void BuildScene();
   void AddWalls();
   void AddBuildings();
-  void CreateUnitCapsules();
   // Per-frame: reads the game_state snapshot and moves/hides the capsule pool.
   // Heroes inside a building are hidden (scaled to zero), matching the sim's
   // "don't draw; list in the panel" contract for inside_building_id >= 0.

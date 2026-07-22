@@ -55,6 +55,12 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) 
                                     v.pos, v.apothecary_door);
     v.has_tavern =
         door_of_kind(game, static_cast<int32_t>(BuildingKind::Tavern), v.pos, v.tavern_door);
+
+    // Wander anchor: home when there is one, else the origin. The shared Roam
+    // block walks to roam_goal; the draw math lives here (perception) so the
+    // block never touches the registry.
+    const glm::vec2 anchor = v.has_home ? v.home_door : glm::vec2{0.0f, 0.0f};
+    v.roam_goal = roam_point(slot, v.roam_epoch, anchor, game.factors.hero.roam_radius);
     return v;
 }
 

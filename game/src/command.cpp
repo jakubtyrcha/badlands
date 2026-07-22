@@ -74,6 +74,8 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             if (e != entt::null) {
                 if (auto* sim = game.registry.try_get<HeroSimulationState>(e)) {
                     sim->behavior = cmd.param_a;
+                } else if (auto* cs = game.registry.try_get<CritterState>(e)) {
+                    cs->behavior = cmd.param_a;
                 }
             }
             return 0;
@@ -115,9 +117,17 @@ void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior) {
     if (e == entt::null) {
         return;
     }
-    const auto* sim = game.registry.try_get<HeroSimulationState>(e);
-    if (sim == nullptr || sim->behavior == behavior) {
-        return;  // unchanged (or nothing to record it on)
+    // Behaviour is recorded on whichever inspection carrier the entity has.
+    int32_t current = INT32_MIN;
+    if (const auto* sim = game.registry.try_get<HeroSimulationState>(e)) {
+        current = sim->behavior;
+    } else if (const auto* cs = game.registry.try_get<CritterState>(e)) {
+        current = cs->behavior;
+    } else {
+        return;  // nothing to record it on
+    }
+    if (current == behavior) {
+        return;  // unchanged -- not a decision
     }
     game.command_queue.push_back(
         {CommandKind::SetBehavior, slot, UINT32_MAX, {0.0f, 0.0f}, behavior});

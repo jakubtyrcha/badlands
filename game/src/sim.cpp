@@ -9,11 +9,13 @@
 
 #include "brain.h"
 #include "components.h"
-#include "heroes.h"
+#include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
 #include "movement.h"
 #include "needs.h"
 #include "placement.h"
+
+#include "critter_brain.h"
 
 #include "game/map/symbolic_map_generator.hpp"
 #include "town_brain.h"
@@ -41,20 +43,33 @@ namespace {
 void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
     MoveTarget& mt = reg.get<MoveTarget>(self);
+    const BrainKind kind = reg.get<Brain>(self).kind;
+
+    // Critters never fight -- they flee. Their brain owns threat handling, so
+    // they skip the combat pre-empt entirely (otherwise a neutral deer would
+    // read any other-team unit as an "enemy" and give chase).
+    if (kind == BrainKind::Critter) {
+        critter_think(game, slot);
+        return;
+    }
+
+    // Combat pre-empt for the fighting archetypes: chase and swing at the
+    // nearest enemy. The movement pipeline walks the MoveTarget; the combat pass
+    // re-validates the attack Intent authoritatively.
     entt::entity target = nearest_enemy(game, self);
     if (target == entt::null) {
-        // No enemy: the archetype's brain decides. Nothing here asks what KIND
-        // of thing this is -- the recipe already chose the brain at spawn.
-        switch (reg.get<Brain>(self).kind) {
+        // No enemy: the archetype's own brain decides.
+        switch (kind) {
             case BrainKind::Town:
                 town_think(game, slot);
                 break;
             case BrainKind::None:
-            case BrainKind::Critter:
             case BrainKind::Townfolk:
             case BrainKind::Monster:
                 mt.kind = MoveTarget::Kind::None;  // brains land in later phases
                 break;
+            case BrainKind::Critter:
+                break;  // handled above
         }
         return;
     }
@@ -283,6 +298,7 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
         const auto& shape = g.registry.get<RenderShape>(e);
         const auto* sim = g.registry.try_get<HeroSimulationState>(e);
         const auto* disp = g.registry.try_get<HeroDisplayState>(e);
+        const auto* crit = g.registry.try_get<CritterState>(e);
         const auto* mt = g.registry.try_get<MoveTarget>(e);
         const auto* path = g.registry.try_get<NavPath>(e);
         // Resolve the goal to a world point so observers need no lookup.
@@ -316,7 +332,7 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
                                       : -1,
             .fatigue = sim ? sim->fatigue : 0.0f,
             .boredom = sim ? sim->boredom : 0.0f,
-            .behavior = sim ? sim->behavior : -1,
+            .behavior = sim ? sim->behavior : (crit ? crit->behavior : -1),
             .goal_kind = mt ? static_cast<int32_t>(mt->kind) : 0,
             .goal_x = goal.x,
             .goal_z = goal.y,
@@ -324,6 +340,9 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
                 path ? static_cast<int32_t>(path->waypoints.size() -
                                             std::min<size_t>(path->cursor, path->waypoints.size()))
                      : 0,
+            .archetype = static_cast<int32_t>(
+                sim ? Archetype::Hero
+                    : (crit ? Archetype::Critter : Archetype::Monster)),
         });
         const char* nm = disp ? disp->name.c_str() : "";
         std::size_t n = std::min(std::strlen(nm), sizeof(rows.back().name) - 1);
@@ -352,6 +371,9 @@ std::vector<CommandRecord> command_log_of(const BadlandsGame& g) {
 }
 
 void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = f; }
+int32_t biome_at_of(const BadlandsGame& g, float x, float z) {
+    return static_cast<int32_t>(biome_at(g, {x, z}));
+}
 
 SimStats stats_of(const BadlandsGame& g) {
     return SimStats{
@@ -446,6 +468,7 @@ SimStats Sim::GetStats() const { return stats_of(*world_); }
 std::vector<CommandRecord> Sim::CommandLog() const { return command_log_of(*world_); }
 void Sim::SetFactors(const SimFactors& f) { set_factors_of(*world_, f); }
 const SimFactors& Sim::Factors() const { return world_->factors; }
+int32_t Sim::BiomeAt(float x, float z) const { return biome_at_of(*world_, x, z); }
 
 PlacementProbe Sim::ProbePlacement(const PlacementDesc& desc,
                                    std::vector<GridTriangle>& out_triangles) const {

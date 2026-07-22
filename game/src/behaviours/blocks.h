@@ -43,13 +43,30 @@ float score_visit_tavern(const WorldView&, const SimFactors&);
 BehaviourResult act_visit_tavern(const WorldView&, const SimFactors&);
 
 // --- shared blocks ----------------------------------------------------------
-// Roam wanders around an anchor (home door, or the origin) on a stable,
-// deterministic per-entity goal. Shared with critters in a later phase.
+// Roam walks to view.roam_goal (chosen in perception: hero rng ring, or deer
+// biome-filtered). Shared verbatim by the hero and critter brains.
 float score_roam(const WorldView&, const SimFactors&);
 BehaviourResult act_roam(const WorldView&, const SimFactors&);
+
+// Flee runs directly away from a perceived threat. Reads only the threat fields,
+// so it is archetype-agnostic -- the deer uses it now, a hero could later. The
+// flee radius/distance come from CritterFactors for now (the only current user).
+float score_flee(const WorldView&, const SimFactors&);
+BehaviourResult act_flee(const WorldView&, const SimFactors&);
 
 // Idle: the last resort. Always applicable at the lowest tier; holds position.
 float score_idle(const WorldView&, const SimFactors&);
 BehaviourResult act_idle(const WorldView&, const SimFactors&);
+
+// --- critter blocks ---------------------------------------------------------
+// Graze holds position during the graze half of the walk->graze cycle.
+float score_graze(const WorldView&, const SimFactors&);
+BehaviourResult act_graze(const WorldView&, const SimFactors&);
+
+// --- shared perception helper -----------------------------------------------
+// Deterministic wander point: a per-(slot,epoch) offset within `radius` of
+// `anchor`. Used by observe_* to fill WorldView::roam_goal; kept here so the
+// hero and deer draw wander goals with identical (bit-exact) math.
+glm::vec2 roam_point(uint32_t slot, int64_t epoch, glm::vec2 anchor, float radius);
 
 }  // namespace badlands

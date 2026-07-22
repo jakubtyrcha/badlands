@@ -143,9 +143,13 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
         case Archetype::Townfolk:
             brain_kind = BrainKind::Townfolk;
             break;
-        case Archetype::Critter:
+        case Archetype::Critter: {
+            CritterState cs{};
+            cs.roam_anchor = {desc.pos_x, desc.pos_z};  // wander around the spawn spot
+            reg.emplace<CritterState>(e, cs);
             brain_kind = BrainKind::Critter;
             break;
+        }
         case Archetype::Monster:
             brain_kind = BrainKind::Monster;
             break;

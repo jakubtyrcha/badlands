@@ -117,6 +117,14 @@ struct HeroDisplayState {
     std::string name;
 };
 
+// Critter (deer) dynamic state. Deer wander around a fixed home range and cycle
+// walk -> graze -> walk; the anchor keeps them near where they spawned (their
+// forest) instead of drifting off the map.
+struct CritterState {
+    glm::vec2 roam_anchor{0.0f, 0.0f};  // centre of the wander range (spawn spot)
+    int32_t behavior = -1;              // last chosen Behavior, for inspection
+};
+
 // Present while a hero is hidden inside a building; `timer` counts down to the
 // reappear at the approach tile. Its presence excludes the hero from movement,
 // combat, and enemy targeting (but not from the game_state snapshot).

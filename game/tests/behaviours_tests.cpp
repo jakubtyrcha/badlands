@@ -121,30 +121,37 @@ TEST_CASE("at night the lower fatigue bar sends a mildly-tired hero home") {
     CHECK(select_argmax(kHeroBlocks, v, f).id == Behavior::GoHome);
 }
 
-TEST_CASE("Roam is deterministic and factor-scaled") {
+TEST_CASE("roam_point is deterministic, anchored and radius-bounded") {
+    // The wander goal is drawn in perception (roam_point) and carried in
+    // view.roam_goal; act_roam just walks to it.
+    const glm::vec2 origin{0.0f, 0.0f};
+
+    const glm::vec2 a = roam_point(7, 42, origin, 6.0f);
+    const glm::vec2 b = roam_point(7, 42, origin, 6.0f);
+    CHECK(a.x == b.x);  // pure function of (slot, epoch, anchor, radius)
+    CHECK(a.y == b.y);
+    CHECK(glm::length(a) <= 6.0f + 1e-4f);
+
+    // A different epoch generally moves the goal; a different slot too.
+    const glm::vec2 c = roam_point(7, 43, origin, 6.0f);
+    CHECK((c.x != a.x || c.y != a.y));
+    const glm::vec2 d = roam_point(8, 42, origin, 6.0f);
+    CHECK((d.x != a.x || d.y != a.y));
+
+    // A wider radius reaches further; a non-origin anchor shifts the whole draw.
+    CHECK(glm::length(roam_point(7, 42, origin, 100.0f)) > 6.0f);
+    const glm::vec2 shifted = roam_point(7, 42, {50.0f, 50.0f}, 6.0f);
+    CHECK(glm::length(shifted - glm::vec2{50.0f, 50.0f}) <= 6.0f + 1e-4f);
+}
+
+TEST_CASE("act_roam walks to the perceived roam goal") {
     const SimFactors f;
-    WorldView v = hero_view();
-    v.has_home = false;  // anchor on origin
-    v.slot = 7;
-    v.roam_epoch = 42;
-
-    const BehaviourResult a = act_roam(v, f);
-    const BehaviourResult b = act_roam(v, f);
-    CHECK(a.target.x == b.target.x);  // pure function of (slot, epoch, factors)
-    CHECK(a.target.y == b.target.y);
-    CHECK(glm::length(a.target) <= f.hero.roam_radius + 1e-4f);  // within radius of origin
-
-    // A different epoch generally moves the goal.
-    v.roam_epoch = 43;
-    const BehaviourResult c = act_roam(v, f);
-    CHECK((c.target.x != a.target.x || c.target.y != a.target.y));
-
-    // A wider roam radius reaches further.
-    SimFactors wide = f;
-    wide.hero.roam_radius = 100.0f;
-    v.roam_epoch = 42;
-    const BehaviourResult w = act_roam(v, wide);
-    CHECK(glm::length(w.target) > f.hero.roam_radius);
+    WorldView v;
+    v.roam_goal = {12.0f, -3.0f};
+    const BehaviourResult r = act_roam(v, f);
+    CHECK(r.id == Behavior::Roam);
+    CHECK(r.target.x == 12.0f);
+    CHECK(r.target.y == -3.0f);
 }
 
 TEST_CASE("select returns Idle-in-place when nothing is applicable") {

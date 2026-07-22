@@ -73,8 +73,19 @@ struct HeroFactors {
     float roam_radius = 6.0f;      // world units around the roam anchor
 };
 
+// Critter (deer) tuning. Deer graze/roam in Forest/Plains and bolt from any
+// non-critter that comes within sight.
+struct CritterFactors {
+    float sight_radius = 12.0f;    // notices non-critters within this range
+    float flee_radius = 8.0f;      // bolts when one is this close
+    float flee_distance = 12.0f;   // how far it runs from the threat
+    float roam_radius = 14.0f;     // wander range around the home anchor
+    float graze_fraction = 0.4f;   // fraction of each roam cycle spent grazing
+};
+
 struct SimFactors {
     HeroFactors hero;
+    CritterFactors critter;
 };
 
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
@@ -111,6 +122,7 @@ struct CharacterState {
     int32_t goal_kind;       // MoveTarget::Kind: 0 None, 1 Point, 2 Entity, 3 Building
     float goal_x, goal_z;    // goal position in world XZ (0,0 when goal_kind == 0)
     int32_t path_waypoints;  // waypoints remaining on the planned route
+    int32_t archetype;       // Archetype (Hero/Townfolk/Critter/Monster)
 };
 
 // Run counters. NB: NOT `Stats` — badlands::Stats already exists (a sim
@@ -271,6 +283,11 @@ class Sim {
     const SimFactors& Factors() const;
     // The applied-command trace, oldest-first (see CommandRecord).
     std::vector<CommandRecord> CommandLog() const;                         // was game_world
+    // Dominant biome at a world XZ, as a mapgen::Biome index (0 Lake, 1 Swamp,
+    // 2 Forest, 3 Plains, 4 Hills, 5 Mountain). The sim owns the terrain field;
+    // callers (deer placement, later biome-weighted nav) query it here rather
+    // than re-deriving the world<->map offset. Out of bounds clamps.
+    int32_t BiomeAt(float world_x, float world_z) const;
     SimStats GetStats() const;                        // was game_stats
     // Placement preview; returns validity, fills out_triangles (was
     // game_probe_placement).

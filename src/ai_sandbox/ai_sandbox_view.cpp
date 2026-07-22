@@ -23,6 +23,7 @@
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
 #include "game/scene/blockout_materials.hpp"
+#include "mapgen/biomes.hpp"
 
 namespace badlands {
 
@@ -73,6 +74,7 @@ constexpr TownBuilding kTown[] = {
 // Heroes recruited per guild at seed time. Below kGuildRosterCap so the panel
 // can show a recruit that fails on a full roster if the cap ever shrinks.
 constexpr int kSeedHeroesPerGuild = 3;
+constexpr int kSeedDeer = 6;
 
 // Human-readable badlands::Behavior (game/src/town_brain.h). The sandbox is a
 // consumer of the ABI, so it mirrors the id space rather than including the
@@ -195,7 +197,36 @@ void AiSandboxView::SeedTown() {
     }
   }
 
-  char_rows_.resize(kMaxCharacterRows);
+  // A small herd of deer, placed on Plains so they graze/wander real terrain
+  // (the sandbox greybox does not draw the biome map, but the sim reasons about
+  // it). Deterministic search around a ring of candidate spots.
+  int deer_placed = 0;
+  for (int i = 0; i < 64 && deer_placed < kSeedDeer; ++i) {
+    const float ang = static_cast<float>(i) * 2.399963f;  // golden-angle spread
+    const float rad = 14.0f + static_cast<float>(i % 5) * 4.0f;
+    const glm::vec2 p{std::cos(ang) * rad, std::sin(ang) * rad};
+    if (sim_.BiomeAt(p.x, p.y) != static_cast<int32_t>(mapgen::Biome::Plains)) {
+      continue;
+    }
+    CharacterDesc d{};
+    d.archetype = badlands::Archetype::Critter;
+    d.pos_x = p.x;
+    d.pos_z = p.y;
+    d.team = 2;  // neutral wildlife
+    d.hp = 8.0f;
+    d.move_speed = 3.0f;
+    d.attack_range = 0.0f;
+    d.attack_damage = 0.0f;
+    d.attack_cooldown = 1.0f;
+    d.size_x = d.size_z = 0.7f;
+    d.size_y = 1.0f;
+    d.color_r = 0.62f;  // deer brown, distinct from the heroes' blue capsules
+    d.color_g = 0.42f;
+    d.color_b = 0.20f;
+    sim_.Spawn(d);
+    ++deer_placed;
+  }
+
   building_rows_.resize(kMaxBuildingRows);
   cmd_rows_.resize(kMaxCommandRows);
 }
@@ -220,7 +251,6 @@ void AiSandboxView::BuildScene() {
 
   AddWalls();
   AddBuildings();
-  CreateUnitCapsules();
 }
 
 void AiSandboxView::AddWalls() {
@@ -278,41 +308,31 @@ void AiSandboxView::AddBuildings() {
   }
 }
 
-void AiSandboxView::CreateUnitCapsules() {
-  // A fixed pool: one capsule node per possible snapshot row, parked out of
-  // sight (scale 0) until SyncUnits places it. Sized once so a hero spawning or
-  // dying is a transform write, never a scene rebuild.
-  const DeferredMaterial capsule_mat =
-      matlib_.SolidColor(blockout::kCapsuleRed, blockout::kCapsuleRoughness);
-
-  capsule_nodes_.clear();
-  capsule_nodes_.reserve(kMaxCharacterRows);
-  for (uint32_t i = 0; i < kMaxCharacterRows; ++i) {
-    // GenerateCapsule's base is already at y=0 (see primitive_mesh_builders.hpp).
-    auto capsule = GenerateCapsule(kCapsuleRadius, kCapsuleCylinderHeight, 16);
-    const std::string name = "unit_" + std::to_string(i);
-    const NodeHandle node =
-        AddMeshEntity(scene_, name.c_str(), std::move(capsule), capsule_mat);
-    scene_.SetScale(node, glm::vec3(0.0f));
-    capsule_nodes_.push_back(node);
-  }
-}
-
 void AiSandboxView::SyncUnits() {
-  
+  // Rebuild the (few) unit capsules each frame from the snapshot, coloured by
+  // each entity's own colour so deer (brown) read distinctly from heroes (blue).
+  // A fixed recoloured pool would be faster, but the sandbox holds a handful of
+  // units and SceneGraph has no cheap per-node material swap -- rebuild is the
+  // simple, correct choice for a debug view. Hidden (inside-building) units are
+  // skipped, matching the sim's "don't draw; list in the panel" contract.
+  for (NodeHandle n : capsule_nodes_) {
+    scene_.DestroyNode(n);
+  }
+  capsule_nodes_.clear();
 
   char_rows_ = sim_.Characters();
-  const uint32_t count =
-      std::min(static_cast<uint32_t>(char_rows_.size()), kMaxCharacterRows);
-  for (uint32_t i = 0; i < capsule_nodes_.size(); ++i) {
-    const bool live = i < count && char_rows_[i].inside_building_id < 0;
-    if (!live) {
-      scene_.SetScale(capsule_nodes_[i], glm::vec3(0.0f));
-      continue;
+  int index = 0;
+  for (const badlands::CharacterState& c : char_rows_) {
+    if (c.inside_building_id >= 0) {
+      continue;  // hidden
     }
-    const badlands::CharacterState& c = char_rows_[i];
-    scene_.SetScale(capsule_nodes_[i], glm::vec3(1.0f));
-    scene_.SetPosition(capsule_nodes_[i], glm::vec3(c.pos_x, 0.0f, c.pos_z));
+    auto capsule = GenerateCapsule(kCapsuleRadius, kCapsuleCylinderHeight, 16);
+    const DeferredMaterial mat = matlib_.SolidColor(
+        glm::vec3(c.color_r, c.color_g, c.color_b), blockout::kCapsuleRoughness);
+    const glm::mat4 xf = glm::translate(glm::mat4(1.0f), glm::vec3(c.pos_x, 0.0f, c.pos_z));
+    const std::string name = "unit_" + std::to_string(index++);
+    capsule_nodes_.push_back(
+        AddMeshEntity(scene_, name.c_str(), std::move(capsule), mat, xf));
   }
 
   cmd_rows_ = sim_.CommandLog();

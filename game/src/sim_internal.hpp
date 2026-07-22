@@ -27,6 +27,7 @@ WorldState world_of(const BadlandsGame&);
 SimStats stats_of(const BadlandsGame&);
 std::vector<CommandRecord> command_log_of(const BadlandsGame&);
 void set_factors_of(BadlandsGame&, const SimFactors&);
+int32_t biome_at_of(const BadlandsGame&, float world_x, float world_z);
 PlacementProbe probe_of(const BadlandsGame&, const PlacementDesc&, std::vector<GridTriangle>&);
 
 }  // namespace badlands

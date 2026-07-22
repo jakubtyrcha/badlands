@@ -17,6 +17,10 @@ constexpr float kTierVisitTavern = 3.0f;
 constexpr float kTierRoam = 2.0f;
 constexpr float kTierIdle = 1.0f;
 
+// Critter tiers: bolting always beats grazing/roaming.
+constexpr float kTierFlee = 10.0f;
+constexpr float kTierGraze = 3.0f;
+
 // Deterministic per-entity RNG for the roam goal (xorshift64; seed must be
 // non-zero). Identical math to the pre-refactor town_brain so replayed/repeated
 // runs stay bit-exact.
@@ -66,27 +70,48 @@ BehaviourResult act_visit_tavern(const WorldView& v, const SimFactors&) {
 }
 
 // --- Roam (shared) ----------------------------------------------------------
-float score_roam(const WorldView&, const SimFactors&) { return kTierRoam; }
-BehaviourResult act_roam(const WorldView& v, const SimFactors& f) {
-    // Anchor on home when there is one, else the origin. Seed off the slot and
-    // the roam epoch so the goal is stable within a lease window yet unique per
-    // entity -- and deterministic (no wall-clock, no unseeded RNG).
-    const glm::vec2 anchor = v.has_home ? v.home_door : glm::vec2{0.0f, 0.0f};
-    uint64_t s = (static_cast<uint64_t>(v.slot) * 2654435761ull) ^
-                 (static_cast<uint64_t>(v.roam_epoch) + 1ull);
+glm::vec2 roam_point(uint32_t slot, int64_t epoch, glm::vec2 anchor, float radius) {
+    // Seed off the slot and the roam epoch so the goal is stable within a lease
+    // window yet unique per entity -- deterministic (no wall-clock, no unseeded
+    // RNG). Math is unchanged from the pre-library town brain, so repeated and
+    // replayed runs stay bit-exact.
+    uint64_t s = (static_cast<uint64_t>(slot) * 2654435761ull) ^
+                 (static_cast<uint64_t>(epoch) + 1ull);
     if (s == 0) {
         s = 1;
     }
     const float ang = unit(s) * 6.2831853f;
-    const float rad = unit(s) * f.hero.roam_radius;
-    const glm::vec2 target = anchor + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
-    return {Behavior::Roam, target, std::nullopt, false};
+    const float rad = unit(s) * radius;
+    return anchor + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
+}
+float score_roam(const WorldView&, const SimFactors&) { return kTierRoam; }
+BehaviourResult act_roam(const WorldView& v, const SimFactors&) {
+    return {Behavior::Roam, v.roam_goal, std::nullopt, false};
+}
+
+// --- Flee (shared) ----------------------------------------------------------
+float score_flee(const WorldView& v, const SimFactors& f) {
+    return (v.has_threat && v.threat_dist <= f.critter.flee_radius) ? kTierFlee : 0.0f;
+}
+BehaviourResult act_flee(const WorldView& v, const SimFactors& f) {
+    glm::vec2 away = v.pos - v.threat_pos;
+    const float len = glm::length(away);
+    away = (len > 1e-4f) ? away / len : glm::vec2{1.0f, 0.0f};  // degenerate: pick a dir
+    return {Behavior::Roam, v.pos + away * f.critter.flee_distance, std::nullopt, false};
 }
 
 // --- Idle -------------------------------------------------------------------
 float score_idle(const WorldView&, const SimFactors&) { return kTierIdle; }
 BehaviourResult act_idle(const WorldView& v, const SimFactors&) {
     return {Behavior::Idle, v.pos, std::nullopt, false};
+}
+
+// --- Graze (critter) --------------------------------------------------------
+float score_graze(const WorldView& v, const SimFactors&) {
+    return v.grazing ? kTierGraze : 0.0f;
+}
+BehaviourResult act_graze(const WorldView& v, const SimFactors&) {
+    return {Behavior::Graze, v.pos, std::nullopt, false};  // hold and feed
 }
 
 }  // namespace badlands

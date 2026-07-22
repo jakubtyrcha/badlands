@@ -39,6 +39,13 @@ struct WorldView {
     // roam target is re-drawn only when this changes, so a wanderer does not
     // jitter to a fresh point every tick (and plan_paths does not repath).
     int64_t roam_epoch = 0;
+    // The wander goal, chosen in perception (observe_*): heroes draw it from an
+    // rng ring, deer biome-filter it to Forest/Plains. The shared Roam block
+    // just walks to it -- so map access stays in observe and the block stays
+    // registry-free and testable.
+    glm::vec2 roam_goal{0.0f, 0.0f};
+    // True during the graze half of a critter's walk->graze cycle.
+    bool grazing = false;
 
     // --- buildings this entity cares about (door tile + existence) ----------
     glm::vec2 home_door{0.0f, 0.0f};        bool has_home = false;
