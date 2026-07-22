@@ -288,8 +288,8 @@ void GameView::BuildScene() {
   // Demo buildings from the sim, shifted onto the southern plains band (so they
   // sit on land, not the central lake) and placed through the composer so they
   // honor the render mode's materials.
-  const auto rows = sim_.Buildings();
-  for (const BuildingState& b : rows) {
+  sim_.Buildings(building_rows_);
+  for (const BuildingState& b : building_rows_) {
     const glm::vec2 world(b.center_x, b.center_z + kDemoBuildingsSouthShift);
     // Ground height straight from the map's query API (world -> map-local).
     const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
@@ -421,13 +421,13 @@ void GameView::DrawUI() {
   ImGui::End();
 
   const auto world = sim_.World();
-  const auto rows = sim_.Buildings();
+  sim_.Buildings(building_rows_);
 
   ImGui::Begin("World");
   ImGui::Text("Gold: %u", world.gold);
-  ImGui::Text("Buildings: %u", static_cast<uint32_t>(rows.size()));
+  ImGui::Text("Buildings: %u", static_cast<uint32_t>(building_rows_.size()));
   ImGui::Separator();
-  for (const BuildingState& b : rows) {
+  for (const BuildingState& b : building_rows_) {
     ImGui::Text("#%u %-24s (%.1f, %.1f)", b.id,
                building_label(b.kind),
                b.center_x, b.center_z);

@@ -43,7 +43,7 @@ uint32_t recruit(BadlandsGame& game, uint32_t building_id);
 
 // Destroy a user-destructible building: expel inside heroes, reassign residents
 // to another same-class guild with room (else homeless), free the footprint and
-// nav obstacle. Returns 0 on success, <0 on rejection (matches game_dispatch).
+// nav obstacle. Returns 0 on success, <0 on rejection (matches Sim::Dispatch).
 int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id);
 
 // Errand mechanics (invoked by the brain host calls in Phase 6; engine

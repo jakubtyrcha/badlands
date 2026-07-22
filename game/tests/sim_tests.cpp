@@ -29,7 +29,32 @@ badlands::CharacterDesc dummy(float x, float z, int32_t team) {
 
 }  // namespace
 
-TEST_CASE("game_state echoes the spawn descriptor") {
+TEST_CASE("SetPathfinder back-fills every alive building") {
+    badlands::Sim sim(nullptr);
+    // make_world prebuilds the origin Castle, so at least one alive building.
+    REQUIRE(sim.Buildings().size() >= 1);
+
+    struct Recorder {
+        int add_obstacle_calls = 0;
+    } recorder;
+
+    badlands::Pathfinder pf{};
+    pf.ctx = &recorder;
+    pf.add_obstacle = [](void* ctx, uint32_t, const float*, int32_t) {
+        static_cast<Recorder*>(ctx)->add_obstacle_calls += 1;
+    };
+    pf.remove_obstacle = [](void*, uint32_t) {};  // non-null no-op
+    pf.find_path = [](void*, float, float, float, float, float, uint32_t, float*,
+                      int32_t) -> int32_t { return 0; };  // non-null no-op
+
+    sim.SetPathfinder(pf);
+
+    // notify_obstacle_added fires exactly once per alive building, and
+    // Buildings() applies the same alive-filter, so the counts must match.
+    REQUIRE(recorder.add_obstacle_calls == static_cast<int>(sim.Buildings().size()));
+}
+
+TEST_CASE("Characters() echoes the spawn descriptor") {
     badlands::Sim sim(nullptr);
     badlands::CharacterDesc desc = mercenary(-8.0f, -12.0f);
     uint32_t id = sim.Spawn(desc);

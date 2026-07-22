@@ -18,7 +18,7 @@
 namespace badlands {
 
 // Adds one building's parts (BuildBuildingParts, dimensioned from
-// game_render_box(kind, /*rotation_index=*/0)'s LOCAL, pre-rotation
+// badlands::RenderBoxOf(kind, /*rotation_index=*/0)'s LOCAL, pre-rotation
 // size_x/size_z + building_visual(kind)'s height/roof; Wall parts get
 // wall_material, Roof/Tower parts get roof_material, both resolved via
 // `matlib`) to `scene`, positioned at

@@ -571,16 +571,16 @@ PlacementProbe probe_of(const BadlandsGame& game, const PlacementDesc& desc,
     return probe;
 }
 
-std::vector<BuildingState> buildings_of(const BadlandsGame& game) {
+void buildings_of(const BadlandsGame& game, std::vector<BuildingState>& out) {
     const PlacementState& st = game.placement;
     // Skip tombstoned buildings; each emitted row keeps its stable slot id.
-    std::vector<BuildingState> rows;
+    out.clear();
     for (uint32_t i = 0; i < st.buildings.size(); ++i) {
         const PlacedBuilding& b = st.buildings[i];
         if (!b.alive) {
             continue;
         }
-        rows.push_back(BuildingState{
+        out.push_back(BuildingState{
             .id = i,
             .kind = static_cast<BuildingKind>(b.kind),
             .center_x = b.center.x,
@@ -590,6 +590,11 @@ std::vector<BuildingState> buildings_of(const BadlandsGame& game) {
             .depth_tiles = b.d,
         });
     }
+}
+
+std::vector<BuildingState> buildings_of(const BadlandsGame& game) {
+    std::vector<BuildingState> rows;
+    buildings_of(game, rows);
     return rows;
 }
 

@@ -115,6 +115,10 @@ class GameView : public AppView {
   // Owns the sim (RAII value member; nullptr script = mock brains).
   badlands::Sim sim_{nullptr};
 
+  // Reused scratch buffer for sim_.Buildings(building_rows_), so the per-frame
+  // DrawUI/BuildScene reads don't allocate a fresh vector each call.
+  std::vector<badlands::BuildingState> building_rows_;
+
   float dt_ = 0.0f;
 };
 

@@ -1,7 +1,8 @@
-// The shared sim operations, extracted so both badlands::Sim (sim.cpp) and the
-// game_* C ABI (game.cpp) call one implementation. This is what makes the
-// migration additive: the C ABI and Sim are thin wrappers over these free
-// functions over the UNCHANGED internal world (struct BadlandsGame).
+// The shared sim operations, extracted so they have a single implementation.
+// badlands::Sim (sim.cpp) is a thin wrapper over these free functions, and the
+// internal system tests (make_world / dispatch_into / characters_of, exercised
+// directly by the movement/heroes/placement tests) call them too — all over the
+// UNCHANGED internal world (struct BadlandsGame).
 
 #pragma once
 
@@ -21,6 +22,7 @@ int64_t dispatch_into(BadlandsGame&, const Action&);
 bool reload_script(BadlandsGame&, const std::string&);
 std::vector<CharacterState> characters_of(const BadlandsGame&);
 std::vector<BuildingState> buildings_of(const BadlandsGame&);
+void buildings_of(const BadlandsGame&, std::vector<BuildingState>& out);
 WorldState world_of(const BadlandsGame&);
 SimStats stats_of(const BadlandsGame&);
 PlacementProbe probe_of(const BadlandsGame&, const PlacementDesc&, std::vector<GridTriangle>&);

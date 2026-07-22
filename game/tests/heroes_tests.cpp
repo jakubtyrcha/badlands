@@ -75,7 +75,7 @@ TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
         CHECK(game->registry.get<HeroClass>(e).value == gd.cls);
         CHECK(game->registry.get<Inventory>(e).count == 0);
 
-        // Class-derived color matches hero_desc, and game_state exposes the home.
+        // Class-derived color matches hero_desc, and Characters() exposes the home.
         CharacterDesc want = hero_desc(gd.cls, 0.0f, 0.0f);
         CHECK_THAT(game->registry.get<RenderShape>(e).color.x,
                    Catch::Matchers::WithinAbs(want.color_r, 1e-4f));
@@ -108,7 +108,7 @@ TEST_CASE("recruit rejects non-guilds, missing buildings, and a full roster") {
 
 }
 
-TEST_CASE("a hero enters a building, hides from game_state's drawable set, then reappears") {
+TEST_CASE("a hero enters a building, hides from Characters()'s drawable set, then reappears") {
     auto owned = make_world(nullptr);
     BadlandsGame* game = owned.get();
     uint32_t guild = place_at(game, BuildingKind::Scriptorium, -30.0f, 30.0f);

@@ -3,8 +3,8 @@
 // Data in, data out: scenarios are composed by spawning CharacterDesc rows;
 // observers (renderer, tests) inspect CharacterState snapshots and SimStats.
 // `badlands::Sim` owns the sim world and exposes tick/spawn/dispatch/snapshot
-// as C++ methods. This is the forward-looking replacement for the data-only C
-// ABI in badlands_game.h; both are valid simultaneously during the migration.
+// as C++ methods. This C++ Sim API replaced the former extern-"C", data-only
+// game_* ABI, which has been removed.
 
 #pragma once
 
@@ -184,6 +184,10 @@ class Sim {
     // Snapshot accessors — identical semantics to the old ABI, POD vectors.
     std::vector<CharacterState> Characters() const;  // was game_state
     std::vector<BuildingState> Buildings() const;    // was game_buildings
+    // Out-param overload: reuses the caller's buffer (out.clear() then fill),
+    // avoiding a per-frame allocation on the render path. The primitive; the
+    // value-returning Buildings() delegates here.
+    void Buildings(std::vector<BuildingState>& out) const;
     WorldState World() const;                         // was game_world
     SimStats GetStats() const;                        // was game_stats
     // Placement preview; returns validity, fills out_triangles (was

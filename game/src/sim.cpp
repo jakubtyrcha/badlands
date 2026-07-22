@@ -2,8 +2,8 @@
 // (make_world / tick_world / *_of snapshots / spawn_into / dispatch_into /
 // reload_script) over the UNCHANGED internal world (struct BadlandsGame), plus
 // the handle-less helpers (RenderBoxOf / BuildingDefOf / MercenaryDesc /
-// GoblinDesc). Both badlands::Sim and the game_* C ABI (game.cpp) forward here,
-// so there is a single implementation of every operation.
+// GoblinDesc). badlands::Sim and the internal system tests call these free
+// functions directly, so there is a single implementation of every operation.
 
 #include "sim_internal.hpp"
 
@@ -330,7 +330,12 @@ void Sim::SetPathfinder(const Pathfinder& pf) {
 }
 
 std::vector<CharacterState> Sim::Characters() const { return characters_of(*world_); }
-std::vector<BuildingState> Sim::Buildings() const { return buildings_of(*world_); }
+void Sim::Buildings(std::vector<BuildingState>& out) const { buildings_of(*world_, out); }
+std::vector<BuildingState> Sim::Buildings() const {
+    std::vector<BuildingState> rows;
+    Buildings(rows);
+    return rows;
+}
 WorldState Sim::World() const { return world_of(*world_); }
 SimStats Sim::GetStats() const { return stats_of(*world_); }
 
