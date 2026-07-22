@@ -1,38 +1,26 @@
 #include "town_brain.h"
 
 #include "badlands_sim.hpp"
+#include "behaviours/blocks.h"
+#include "behaviours/selectors.h"
+#include "behaviours/world_view.h"
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
 #include "placement.h"
 
-#include <cmath>
+#include <array>
 
 #include <entt/entt.hpp>
+#include <glm/glm.hpp>
 
 namespace badlands {
 
 namespace {
 
-// Behaviour thresholds live in SimFactors (badlands_sim.hpp), loaded from
-// assets/creatures/factors.json -- policy is data, not code. Defaults there.
-
-// int32_t discriminants of the scoped BuildingKind enum, so they can be passed
-// to the int32_t-keyed placement/hero helpers directly (same idiom as
-// placement.cpp).
-constexpr int32_t kApothecary = static_cast<int32_t>(BuildingKind::Apothecary);
-constexpr int32_t kTavern = static_cast<int32_t>(BuildingKind::Tavern);
-
-// xorshift64 step (deterministic; seed must be non-zero).
-uint64_t xorshift(uint64_t& s) {
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    return s;
-}
-float unit(uint64_t& s) {
-    return static_cast<float>(xorshift(s) >> 40) * (1.0f / 16777216.0f);  // [0,1)
-}
+// Roam re-draws its goal only when this window rolls over (world_millis / lease),
+// so a wanderer holds a stable target for ~2 s instead of jittering each tick.
+constexpr int64_t kRoamLeaseMillis = 2000;
 
 // Approach-tile ("door") of the nearest alive building of `kind` to `pos`.
 bool door_of_kind(const BadlandsGame& game, int kind, glm::vec2 pos, glm::vec2& out) {
@@ -43,6 +31,43 @@ bool door_of_kind(const BadlandsGame& game, int kind, glm::vec2 pos, glm::vec2& 
     return building_approach_tile(game.placement, game.placement.buildings[bid], out);
 }
 
+// Build the hero's perception. This is the ONLY place town_think reads the
+// registry/placement; blocks see only the returned WorldView.
+WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) {
+    const auto& sim = game.registry.get<HeroSimulationState>(e);
+    WorldView v;
+    v.slot = slot;
+    v.pos = game.registry.get<Position>(e).pos;
+    v.fatigue = sim.fatigue;
+    v.boredom = sim.boredom;
+    v.inventory = sim.inventory;
+    v.tod = time_of_day(game.world_millis);
+    v.night = is_night(v.tod);
+    v.roam_epoch = game.world_millis / kRoamLeaseMillis;
+
+    if (sim.home_building_id >= 0 &&
+        static_cast<size_t>(sim.home_building_id) < game.placement.buildings.size() &&
+        game.placement.buildings[sim.home_building_id].alive) {
+        v.has_home = building_approach_tile(
+            game.placement, game.placement.buildings[sim.home_building_id], v.home_door);
+    }
+    v.has_apothecary = door_of_kind(game, static_cast<int32_t>(BuildingKind::Apothecary),
+                                    v.pos, v.apothecary_door);
+    v.has_tavern =
+        door_of_kind(game, static_cast<int32_t>(BuildingKind::Tavern), v.pos, v.tavern_door);
+    return v;
+}
+
+// The hero's behaviour list, highest priority first. Argmax over these tiered
+// scores reproduces the old GoHome > Buy > VisitTavern > Roam if-chain exactly.
+constexpr std::array<Candidate, 5> kHeroBlocks{{
+    {score_go_home, act_go_home},
+    {score_buy, act_buy},
+    {score_visit_tavern, act_visit_tavern},
+    {score_roam, act_roam},
+    {score_idle, act_idle},
+}};
+
 }  // namespace
 
 void town_think(BadlandsGame& game, uint32_t slot) {
@@ -50,72 +75,17 @@ void town_think(BadlandsGame& game, uint32_t slot) {
     if (e == entt::null) {
         return;
     }
-    auto& sim = game.registry.get<HeroSimulationState>(e);
-    const HeroFactors& f = game.factors.hero;
-    glm::vec2 pos = game.registry.get<Position>(e).pos;
-    const float tod = time_of_day(game.world_millis);
-    const bool night = is_night(tod);
+    const WorldView view = observe_hero(game, slot, e);
+    const BehaviourResult r = select_argmax(kHeroBlocks, view, game.factors);
 
-    glm::vec2 home_door{};
-    bool has_home = false;
-    if (sim.home_building_id >= 0 &&
-        static_cast<size_t>(sim.home_building_id) < game.placement.buildings.size() &&
-        game.placement.buildings[sim.home_building_id].alive) {
-        has_home = building_approach_tile(
-            game.placement, game.placement.buildings[sim.home_building_id], home_door);
-    }
-    glm::vec2 apo_door{};
-    bool has_apo = door_of_kind(game, kApothecary, pos, apo_door);
-    glm::vec2 tavern_door{};
-    bool has_tavern = door_of_kind(game, kTavern, pos, tavern_door);
-
-    Behavior chosen = Behavior::Idle;
-    glm::vec2 target = pos;
-    Command follow_up{};
-    bool have_follow_up = false;
-
-    if (has_home && (sim.fatigue >= f.fatigue_go_home ||
-                     (night && sim.fatigue >= f.fatigue_night))) {
-        chosen = Behavior::GoHome;
-        target = home_door;
-        follow_up = {CommandKind::EnterHome, slot};
-        have_follow_up = true;
-    } else if (has_apo && sim.inventory < kInventoryCap) {
-        chosen = Behavior::Buy;
-        target = apo_door;
-        follow_up = {CommandKind::Buy, slot};
-        have_follow_up = true;
-    } else if (has_tavern && !night && sim.boredom >= f.boredom_tavern) {
-        chosen = Behavior::VisitTavern;
-        target = tavern_door;
-        follow_up = {CommandKind::EnterBuilding, slot, UINT32_MAX, {0.0f, 0.0f},
-                     kTavern};
-        have_follow_up = true;
-    } else {
-        chosen = Behavior::Roam;
-        // Roam around the home (or origin), re-drawn each ~2 s window so the goal
-        // is stable (no per-tick repath jitter) yet deterministic.
-        glm::vec2 anchor = has_home ? home_door : glm::vec2{0.0f, 0.0f};
-        uint64_t s = (static_cast<uint64_t>(slot) * 2654435761ull) ^
-                     (static_cast<uint64_t>(game.world_millis / 2000) + 1ull);
-        if (s == 0) {
-            s = 1;
-        }
-        float ang = unit(s) * 6.2831853f;
-        float rad = unit(s) * f.roam_radius;
-        target = anchor + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
-    }
-
-    // Decisions go out as commands like every other mutation (so they are logged
-    // + replayable), never as direct writes. Edge-triggered: re-stating an
+    // Decisions go out as commands like every other mutation (logged +
+    // replayable), never as direct writes. Edge-triggered: re-stating an
     // unchanged goal is not a decision and must not enter the trace.
-    enqueue_set_behavior(game, slot, static_cast<int32_t>(chosen));
-    enqueue_move_to(game, slot, target);
-    // The enter/buy handler re-checks proximity authoritatively; emitting only
-    // once in range keeps the walk out of the trace (one attempt per arrival,
-    // not one per tick of the journey).
-    if (have_follow_up && glm::distance(pos, target) <= kEntranceRadius) {
-        game.command_queue.push_back(follow_up);
+    enqueue_set_behavior(game, slot, static_cast<int32_t>(r.id));
+    enqueue_move_to(game, slot, r.target);
+    if (r.follow_up.has_value() &&
+        (!r.follow_up_on_arrival || glm::distance(view.pos, r.target) <= kEntranceRadius)) {
+        game.command_queue.push_back(*r.follow_up);
     }
 }
 
