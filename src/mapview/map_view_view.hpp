@@ -1,13 +1,18 @@
 #pragma once
 
 // badlands_mapview's AppView: generates a map in-process (the mapgen pipeline),
-// tessellates it into indexed kTerrainBlend chunks rendered with the biome
-// texture-array terrain material, and views it with the fixed-angle
-// GameCameraController. Terrain entities are created directly in the registry
-// (no SceneGraph — the terrain is a raw indexed mesh, not a MeshAttachment).
+// wraps it in the frozen MapData contract, and renders it as Nanite-style
+// cluster-LOD terrain (the shared ClusterTerrain module) with the fixed-angle
+// GameCameraController. Terrain is one entity holding the shared cluster mesh; a
+// MeshDrawRangesComponent carries the per-frame LOD cut. Entities are created
+// directly in the registry (no SceneGraph -- the terrain is a raw indexed mesh,
+// not a MeshAttachment).
 //
-// Hovering the mouse over the terrain draws a block/section debug grid around
-// the hit point (see RebuildVisibleGrid).
+// Beyond the terrain the view carries main's map-tool features: biome-derived +
+// map-border fog emitters (with an editor), a shared SimClock driving the sun +
+// fog animation, cursor-anchored zoom, and the authored-map load path. Hovering
+// the mouse over the terrain draws a block/section debug grid around the hit
+// point (see RebuildVisibleGrid).
 
 #include <cstdint>
 #include <vector>
@@ -25,7 +30,7 @@
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/fog_sim.hpp"
-#include "engine/rendering/material_library.hpp"
+#include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
 #include "mapgen/config.hpp"
 #include "mapgen/fog_generator.hpp"  // BorderFogParams
@@ -38,8 +43,19 @@ class SceneRenderer;
 class MapViewView : public AppView {
  public:
   // `cfg` is the full generator config (seed/size/thresholds/terracing/...), so
-  // everything --config exposes reaches the viewer.
-  explicit MapViewView(mapgen::MapgenConfig cfg) : cfg_(std::move(cfg)) {}
+  // everything --config exposes reaches the viewer. `camera_height` overrides the
+  // starting camera height (0 = keep the default ground-level framing);
+  // `lod_tint` seeds the cluster debug tint (0 shaded / 1 triangle hash / 2 LOD
+  // level). `serial_build` forces the single-threaded DAG build (the perf A/B
+  // baseline; default is the parallel build). The overrides exist mainly so
+  // headless --screenshot runs can frame near/far and set the tint without
+  // touching the interactive defaults.
+  explicit MapViewView(mapgen::MapgenConfig cfg, float camera_height = 0.0f,
+                       int lod_tint = 0, bool serial_build = false)
+      : cfg_(std::move(cfg)),
+        camera_height_override_(camera_height),
+        initial_tint_(lod_tint),
+        serial_build_(serial_build) {}
 
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
@@ -59,7 +75,6 @@ class MapViewView : public AppView {
   SceneRenderer* scene_renderer_ = nullptr;  // shared, owned by the app
   float dt_ = 0.0f;                          // last real frame dt (for the FPS line)
 
-  MaterialLibrary matlib_;
   CubemapBuilder sky_cube_;
 
   // Daylight (Hosek-Wilkie sky + directional sun), same system the game uses,
@@ -69,24 +84,24 @@ class MapViewView : public AppView {
   SimClock sim_clock_;
   void ApplyDaylight();  // re-bakes sky + IBL; not cheap, call on change only
 
-  // Per-biome PBR texture arrays (albedo/normal/arm), layer index = Biome enum
-  // value. Held here to keep the GPU textures alive for the material's lifetime.
-  MaterialLibrary::TerrainArrays terrain_arrays_;
-
   entt::registry registry_;
   SceneContext scene_context_;
   Camera camera_;
   GameCameraController gamecam_;
 
   // The generated map. `heightmap` is kept for mouse picking and `graph` for
-  // per-section heights — both outlive Initialize, unlike the chunk tessellation
-  // inputs.
+  // per-section heights -- both outlive Initialize.
   mapgen::MapArtifacts map_;
   // The pipeline output wrapped in the frozen MapData contract (one-hot biome
-  // slices at the mesh's own lattice spacing) -- what the terrain builder and
-  // mouse picking read. Deliberately NOT blended: mapview keeps its existing
+  // slices at the mesh's own lattice spacing) -- what the cluster terrain builder
+  // and mouse picking read. Deliberately NOT blended: mapview keeps its existing
   // hard-edged voronoi borders.
   MapData terrain_map_;
+
+  // The shared cluster-LOD terrain module: owns the DAG, its vertex-color
+  // material factory, the terrain entity, the per-frame LOD cut, and the Terrain
+  // debug UI. Built with an identity model (mapview vertices are absolute world).
+  ClusterTerrain cluster_terrain_;
 
   // Biome-derived fog emitters (see mapgen::GenerateBiomeFog). Retained so they
   // can be picked/edited; pushed to the fog sim via SetFogSources.
@@ -107,18 +122,30 @@ class MapViewView : public AppView {
 
   DebugLineBuffer grid_;  // block + section lines, only around the hover point
   bool grid_visible_ = true;
-  // Half-extent (in blocks, kBlockSizeM each) of the grid window around the hover point.
-  // Runtime, not compile-time: it's a debug-view knob (ImGui slider), not a
-  // structural property of the map.
+  // Half-extent (in blocks, kBlockSizeM each) of the grid window around the hover
+  // point. Runtime, not compile-time: it's a debug-view knob (ImGui slider), not
+  // a structural property of the map.
   int grid_radius_blocks_ = 8;
 
   // Where the mouse ray last hit the terrain. `hover_valid_` is false when the
-  // cursor is off the terrain (sky / past the map edge) — the grid hides.
+  // cursor is off the terrain (sky / past the map edge) -- the grid hides.
   glm::vec3 hover_point_{0.0f};
   bool hover_valid_ = false;
 
-  int chunk_count_ = 0;
   float map_size_m_ = 0.0f;
+
+  // Starting camera height override (0 = default); applied once in Initialize.
+  float camera_height_override_ = 0.0f;
+  // Debug tint seed for the cluster terrain (headless --lod-tint); pushed into
+  // cluster_terrain_ before Build so frame one renders tinted.
+  int initial_tint_ = 0;
+  // Force the single-threaded cluster DAG build (perf A/B baseline); seeded once
+  // in Initialize, not runtime-toggleable (the DAG is built there).
+  bool serial_build_ = false;
+  // Viewport height in pixels, tracked by OnResize -- the LOD screen-space-error
+  // metric's numerator. Seeded so the first Update (before any resize) still has
+  // a sane value in headless paths.
+  float screen_h_px_ = 1080.0f;
 
   // Rebuilds grid_ with block-boundary lines + highlighted section boundaries,
   // limited to a grid_radius_blocks_ window around hover_point_ (so cost is

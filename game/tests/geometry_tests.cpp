@@ -6,7 +6,7 @@
 // TexturedMeshResult) carries wgpu::TextureView/Sampler members; they're
 // simply never touched here.
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"  // badlands::BuildingKind
 #include "core/roof_shape.hpp"
 #include "engine/rendering/geometry/building_parts_builder.hpp"
 #include "engine/rendering/geometry/extrusion_mesh_builder.hpp"
@@ -267,26 +267,26 @@ TEST_CASE("BuildBuildingParts: CornerTowers adds four Tower parts near the footp
 
 TEST_CASE("building_visual: expected material/roof per kind") {
   {
-    BuildingVisual v = building_visual(GAME_BUILDING_CASTLE);
+    BuildingVisual v = building_visual(BuildingKind::Castle);
     CHECK(v.height == 5.0f);
     CHECK(v.roof == RoofShape::CornerTowers);
     CHECK(v.wall_material == MaterialId::RockWall);
     CHECK(v.roof_material == MaterialId::RockWall);
   }
   {
-    BuildingVisual v = building_visual(GAME_BUILDING_TAVERN);
+    BuildingVisual v = building_visual(BuildingKind::Tavern);
     CHECK(v.height == 2.2f);
     CHECK(v.roof == RoofShape::Gable);
     CHECK(v.wall_material == MaterialId::Planks);
     CHECK(v.roof_material == MaterialId::RoofSlates);
   }
   {
-    BuildingVisual v = building_visual(GAME_BUILDING_SCRIPTORIUM);
+    BuildingVisual v = building_visual(BuildingKind::Scriptorium);
     CHECK(v.roof == RoofShape::Gable);
     CHECK(v.wall_material == MaterialId::Plaster);
   }
   {
-    BuildingVisual v = building_visual(GAME_BUILDING_SEWER);
+    BuildingVisual v = building_visual(BuildingKind::Sewer);
     CHECK(v.height == 0.4f);
     CHECK(v.roof == RoofShape::None);
     CHECK(v.wall_material == MaterialId::RockWall);

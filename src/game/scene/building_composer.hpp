@@ -7,14 +7,14 @@
 
 #include <glm/glm.hpp>
 
-#include "badlands_game.h"  // GameBuildingKind
+#include "badlands_sim.hpp"  // badlands::BuildingKind
 #include "game/visual/scene_composer.hpp"
 
 namespace badlands {
 
 // `ground_y` lifts the building so its base sits on the terrain surface at
 // `center_world` (the parts are built with their base at local y=0).
-void AddBuildingToComposer(SceneComposer& composer, GameBuildingKind kind,
+void AddBuildingToComposer(SceneComposer& composer, BuildingKind kind,
                            glm::vec2 center_world, float yaw_radians,
                            float ground_y = 0.0f);
 

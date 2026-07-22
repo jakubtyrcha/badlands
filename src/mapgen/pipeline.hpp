@@ -33,6 +33,19 @@ struct MapArtifacts {
                              // graph.nodes[block.section_id].mean_height.
 };
 
+// Per-stage wall-clock timings (milliseconds), filled when a caller passes a
+// PipelineTimings* to run_pipeline. Presentation is the caller's job -- mapgen
+// stays a pure library and does not log.
+struct PipelineTimings {
+  double fields_ms = 0.0;
+  double voronoi_ms = 0.0;
+  double biomes_ms = 0.0;
+  double heightmap_ms = 0.0;
+  double blocks_ms = 0.0;
+  double sections_ms = 0.0;
+  double total_ms = 0.0;
+};
+
 // Runs fields -> voronoi -> biomes -> heightmap -> blocks -> sections.
 //
 // `script_path` is the noiser field script (e.g. "scripts/mapgen/fields.noiser"),
@@ -40,8 +53,12 @@ struct MapArtifacts {
 //
 // Returns false with `err` set if field evaluation fails (the only stage that
 // can fail; the rest are pure CPU transforms). `out` is untouched on failure.
+//
+// If `timings` is non-null it receives the per-stage durations (only fully
+// populated on success; `fields_ms` is set even on failure).
 bool run_pipeline(const MapgenConfig& cfg, const std::string& script_path,
-                  MapArtifacts& out, std::string& err);
+                  MapArtifacts& out, std::string& err,
+                  PipelineTimings* timings = nullptr);
 
 // The AUTHORED alternative: read heights + biome from image assets in `map_dir`
 // (see authored_map.hpp), then run the identical blocks -> sections tail.

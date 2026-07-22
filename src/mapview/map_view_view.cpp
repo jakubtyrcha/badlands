@@ -1,6 +1,7 @@
 #include "mapview/map_view_view.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -10,37 +11,27 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
-#include "core/geometry_type.hpp"
 #include "engine/app/sdl_input_util.hpp"
 #include "engine/core/ray.hpp"
-#include "engine/rendering/components/material_factory_component.hpp"
-#include "engine/rendering/components/mesh_components.hpp"
-#include "engine/rendering/geometry/textured_mesh_builders.hpp"  // ComputeLocalAabbFromVertices
 #include "engine/rendering/scene_renderer.hpp"  // GetFogSimulation / MutableFogConfig
 #include "engine/ui/editor_ui.hpp"
-#include "game/geometry/terrain_mesh.hpp"
+#include "game/geometry/terrain_mesh.hpp"  // RaycastTerrain(MapData)
 #include "mapgen/fog_generator.hpp"
 #include "mapgen/mapgen_constants.hpp"
 #include "mapgen/pipeline.hpp"
-#include "mapview/biome_manifest.hpp"  // ResolveBiomePacks
 
 namespace badlands {
 
 namespace {
-constexpr int kChunkBlocks = 16;  // N x N blocks per chunk (kBlockSizeM each)
-constexpr int kSubdiv = 2;        // lattice cells per block edge
-// The terrain lattice spacing: unchanged mesh density (one X-split quad per
-// kBlockSizeM/kSubdiv metres, exactly what the old subdiv=2 builder emitted).
-constexpr float kLatticeSpacingM =
-    static_cast<float>(mapgen::kBlockSizeM) / kSubdiv;
-constexpr int kChunkCells = kChunkBlocks * kSubdiv;
+constexpr int kSubdiv = 2;  // subgrid cells per block edge (grid overlay only)
 
 // Wrap the mapgen pipeline output in the frozen MapData contract WITHOUT
 // changing what mapview renders: the lattice is sampled at the mesh's own
 // spacing and the biome slices are ONE-HOT, i.e. exactly the hard per-pixel
 // assignment mapview drew before. Blended slices are the game's symbolic
 // generator's business; the map tool deliberately keeps its crisp voronoi
-// borders.
+// borders. With one-hot slices, WeightsAtNode(i,j).Dominant() == the single
+// biome, so the cluster terrain's per-vertex color is unchanged from before.
 MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, float spacing_m) {
   const int sw = art.heightmap.width, sh = art.heightmap.height;
   if (sw <= 0 || sh <= 0) return {};
@@ -61,7 +52,6 @@ MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, float spacing_m) {
   }
   return map;
 }
-constexpr const char* kBiomeManifestPath = "assets/materials/terrain_biomes.json";
 }  // namespace
 
 bool MapViewView::Initialize(const RenderContext& ctx) {
@@ -69,89 +59,78 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   queue_ = ctx.queue;
   scene_renderer_ = ctx.scene_renderer;  // shared debug/fog selectors need it
 
-  if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
-    spdlog::error("MapViewView: MaterialLibrary init failed");
-    return false;
-  }
+  // Map-load profiling: time each load step and log a per-step + cumulative
+  // breakdown once. `log_step` accumulates into cum_ms; the closing TOTAL line is
+  // the wall-clock span of the whole load (the tiny untimed bits -- camera
+  // framing -- are the only gap between the two).
+  using clock = std::chrono::steady_clock;
+  auto since = [](clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+  };
+  const auto t_load = clock::now();
+  double cum_ms = 0.0;
+  auto log_step = [&](const char* name, double ms) {
+    cum_ms += ms;
+    spdlog::info("  {:<14} {:>8.1f} ms   (cum {:>8.1f} ms)", name, ms, cum_ms);
+  };
+  spdlog::info("map load profile (seed {}, {}x{} m):", cfg_.seed, cfg_.width,
+               cfg_.height);
+
+  auto t = clock::now();
   // Start at noon, paused (an inspector holds still until you play/scrub).
   sim_clock_.speed = 0.0f;
   sim_clock_.SeekTimeOfDay(0.5f);
   ApplyDaylight();
   scene_context_.registry = &registry_;
-  // Fog renders when enabled; sources come from the biome generator (a later
-  // phase). Enabled here so the fog editor is exercisable.
+  // Fog renders when enabled; sources come from the biome generator below.
   if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = true;
+  log_step("daylight", since(t));
 
-  // One PBR pack per biome, layer index = Biome enum value. The mapping is data
-  // (assets/materials/terrain_biomes.json); the engine only sees "N packs".
-  std::vector<std::string> pack_dirs;
-  if (!ResolveBiomePacks(kBiomeManifestPath, pack_dirs)) return false;
-  terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
-  if (!matlib_.ok()) {
-    spdlog::error("MapViewView: terrain material packs failed to load");
-    return false;
-  }
-  const DeferredMaterial terrain_mat = matlib_.TerrainBlend(terrain_arrays_);
-
-  // Build the map in-process — the same pipeline --preview-image-only dumps, so the
-  // rendered terrain and the preview PNGs can never disagree. An authored map loads
-  // its terrain from images instead of generating it; both share everything after.
+  // Build the map in-process -- the same pipeline --preview-image-only dumps, so
+  // the rendered terrain and the preview PNGs can never disagree. An authored map
+  // loads its terrain from images instead of generating it; both share everything
+  // after. The generated path reports per-stage timings so they join the profile.
   std::string err;
-  const bool ok = cfg_.map_dir.empty()
-                      ? mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser",
-                                             map_, err)
-                      : mapgen::run_authored_pipeline(cfg_, cfg_.map_dir, map_, err);
+  t = clock::now();
+  mapgen::PipelineTimings pt;
+  const bool ok =
+      cfg_.map_dir.empty()
+          ? mapgen::run_pipeline(cfg_, "scripts/mapgen/fields.noiser", map_, err,
+                                 &pt)
+          : mapgen::run_authored_pipeline(cfg_, cfg_.map_dir, map_, err);
   if (!ok) {
     spdlog::error("MapViewView: {}", err);
     return false;
   }
+  if (cfg_.map_dir.empty()) {
+    log_step("mg:fields", pt.fields_ms);
+    log_step("mg:voronoi", pt.voronoi_ms);
+    log_step("mg:biomes", pt.biomes_ms);
+    log_step("mg:heightmap", pt.heightmap_ms);
+    log_step("mg:blocks", pt.blocks_ms);
+    log_step("mg:sections", pt.sections_ms);
+  } else {
+    log_step("mg:authored", since(t));
+  }
   map_size_m_ = static_cast<float>(cfg_.width) * mapgen::kMetersPerSample;
 
-  terrain_map_ = MakeOneHotMapData(map_, kLatticeSpacingM);
+  // Wrap the pipeline output in the frozen MapData contract (one-hot biomes) at
+  // the heightmap's NATIVE resolution -- the input to the cluster terrain and
+  // picking. The cluster LOD's job is to decimate from full detail, so the leaf
+  // lattice is the finest source data (1 m), not the coarse mesh density the old
+  // fixed-subdiv chunk builder used; LOD selection manages the triangle cost.
+  t = clock::now();
+  terrain_map_ =
+      MakeOneHotMapData(map_, static_cast<float>(mapgen::kMetersPerSample));
+  log_step("map->MapData", since(t));
 
-  // One indexed kTerrainBlend chunk entity per N x N lattice-cell region.
-  const int cells_x = terrain_map_.nodes_x() - 1;
-  const int cells_z = terrain_map_.nodes_z() - 1;
-  for (int cz = 0; cz < cells_z; cz += kChunkCells) {
-    for (int cx = 0; cx < cells_x; cx += kChunkCells) {
-      TerrainMeshParams p;
-      p.cell_x0 = cx;
-      p.cell_z0 = cz;
-      p.cells_x = std::min(kChunkCells, cells_x - cx);
-      p.cells_z = std::min(kChunkCells, cells_z - cz);
-      TerrainMesh chunk = BuildTerrainMesh(terrain_map_, p);
-      if (chunk.vertex_count == 0) continue;
-
-      const Aabb box = ComputeLocalAabbFromVertices(
-          chunk.vertices, TerrainMesh::kFloatsPerVertex);
-
-      const entt::entity e = registry_.create();
-      auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(e);
-      mesh.vertices = std::move(chunk.vertices);
-      mesh.indices = std::move(chunk.indices);
-      mesh.vertex_count = chunk.vertex_count;
-      mesh.dirty = true;
-      mesh.geometry_type = GeometryType::kTerrainBlend;
-      mesh.transform = glm::mat4(1.0f);  // vertices are absolute world coords
-
-      MaterialFactoryComponent fmc;
-      fmc.factory = terrain_mat.factory;
-      fmc.pass_type = MaterialPassType::kDeferred;
-      fmc.params = terrain_mat.params;
-      fmc.config_hash = ComputeFactoryConfigHash(fmc);
-      registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
-      registry_.emplace<StaticMeshAabbComponent>(e,
-                                                 StaticMeshAabbComponent{box});
-      ++chunk_count_;
-    }
-  }
-  spdlog::info("MapViewView: {}x{} map, {} chunks, {} sections", cfg_.width,
-               cfg_.height, chunk_count_, map_.graph.nodes.size());
-
-  // Start on the map centre at ground-level framing, matching the game's own
-  // camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye view —
-  // this is meant to show the map as it will actually be played. Scroll to zoom
-  // out; max_height reaches far enough to take in the whole map.
+  // Frame the camera BEFORE building the terrain, so the cluster path's initial
+  // LOD selection already runs against the real camera position rather than the
+  // origin. Start on the map centre at ground-level framing, matching the game's
+  // own camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye
+  // view. Scroll to zoom out; max_height reaches far enough to take in the whole
+  // map. cfg_.width/height are final here (an authored map overwrote them at
+  // load).
   const float map_depth_m = static_cast<float>(cfg_.height) *
                             mapgen::kMetersPerSample;
   gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_depth_m * 0.5f);
@@ -159,14 +138,45 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   gamecam_.height = 42.0f;
   gamecam_.min_height = 5.0f;
   gamecam_.max_height = std::max(400.0f, map_size_m_);
+  // Headless framing override (--camera-height): clamp into the controller's
+  // range so a far shot can pull well back without escaping it.
+  if (camera_height_override_ > 0.0f) {
+    gamecam_.max_height = std::max(gamecam_.max_height, camera_height_override_);
+    gamecam_.height = std::clamp(camera_height_override_, gamecam_.min_height,
+                                 gamecam_.max_height);
+  }
   gamecam_.UpdateCamera(camera_);
 
-  // Derive world-static fog emitters from the biome map (forest -> flat elliptical
-  // fog, swamp -> granular noise fog) and push them to the renderer's fog sim.
+  // Build the shared cluster-LOD terrain (identity model -- mapview vertices are
+  // absolute world coords). --serial-build forces the single-threaded DAG build
+  // for the perf A/B (both produce a bit-identical DAG). Seed the debug tint from
+  // --lod-tint so a headless run renders tinted on frame one.
+  cluster_terrain_.debug_tint_mode() = initial_tint_;
+  TerrainClusterParams cluster_params;
+  cluster_params.parallel_build = !serial_build_;
+  t = clock::now();
+  if (!cluster_terrain_.Build(terrain_map_, ctx, registry_, glm::mat4(1.0f),
+                              cluster_params)) {
+    spdlog::error("MapViewView: cluster terrain build failed");
+    return false;
+  }
+  // Seed the LOD cut once so the first rendered frame (headless --screenshot
+  // renders after a single Update) already draws the selected cut.
+  cluster_terrain_.UpdateLod(camera_, screen_h_px_);
+  log_step("cluster terrain", since(t));
+
+  // Derive world-static fog emitters from the biome map (forest -> flat
+  // elliptical fog, swamp -> granular noise fog) and push them to the fog sim.
+  t = clock::now();
   fog_emitters_ = mapgen::GenerateBiomeFog(map_.biomes.pixel, map_.heightmap,
                                            cfg_.seed);
-  spdlog::info("MapViewView: {} biome fog emitters", fog_emitters_.size());
   SetFogSources();
+  log_step("fog", since(t));
+
+  spdlog::info("map load: {:.1f} ms total  ({}x{} map, {} sections, {} fog "
+               "emitters)",
+               since(t_load), cfg_.width, cfg_.height, map_.graph.nodes.size(),
+               fog_emitters_.size());
 
   // The grid follows the mouse, so there is nothing to draw until the cursor is
   // over the terrain (Update wires debug_lines once hover_valid_).
@@ -180,10 +190,10 @@ void MapViewView::SetFogSources() {
       static_cast<float>(cfg_.width) * mapgen::kMetersPerSample,
       static_cast<float>(cfg_.height) * mapgen::kMetersPerSample);
 
-  // Biome emitters (edited/picked) plus the world-static map-border wall, appended
-  // after so they never shift the biome indices the editor addresses. The border
-  // is a function of the map bounds only -- no camera -- so it stays put as the
-  // view moves.
+  // Biome emitters (edited/picked) plus the world-static map-border wall,
+  // appended after so they never shift the biome indices the editor addresses.
+  // The border is a function of the map bounds only -- no camera -- so it stays
+  // put as the view moves.
   std::vector<fog::Emitter> all = fog_emitters_;
   if (border_fog_enabled_) {
     const std::vector<fog::Emitter> border =
@@ -192,8 +202,8 @@ void MapViewView::SetFogSources() {
   }
 
   FogSimParams p;
-  // The border OBBs straddle the edges, so pad the broadphase by the band so their
-  // (slightly off-map) footprint still buckets.
+  // The border OBBs straddle the edges, so pad the broadphase by the band so
+  // their (slightly off-map) footprint still buckets.
   const float pad = border_fog_.band_m + 1.0f;
   p.map_min = map_min - glm::vec2(pad);
   p.map_max = map_max + glm::vec2(pad);
@@ -224,7 +234,7 @@ void MapViewView::RebuildVisibleGrid() {
 
   const float b = static_cast<float>(mapgen::kBlockSizeM);
   // The grid is a flat plane per section, but the rendered terrain follows the
-  // full-resolution heightmap — so the surface rises above the section mean by
+  // full-resolution heightmap -- so the surface rises above the section mean by
   // the intra-section variation (cfg.variation_amp_m, up to ~0.3 m) plus the
   // block-median-vs-sample error. Lift by more than that or the plane sinks into
   // the terrain and the grid gets depth-occluded in patches. Still comfortably
@@ -234,10 +244,10 @@ void MapViewView::RebuildVisibleGrid() {
   const float lift_section = 1.0f;
   const glm::vec3 block_color(0.55f, 0.55f, 0.6f);
   const glm::vec3 section_color(1.0f, 0.85f, 0.15f);
-  // Subgrid: dimmer + thinner so the block structure still reads on top of
-  // it. Mirrors what BuildTerrainMesh actually emits (kSubdiv cells per block
-  // edge, each X-split into 4 triangles meeting at the cell centre), so this is
-  // the mesh's real triangulation, not a decorative grid.
+  // Subgrid: dimmer + thinner so the block structure still reads on top of it. A
+  // kSubdiv-cells-per-block-edge subgrid, each cell X-split into 4 triangles
+  // meeting at its centre -- a legibility overlay for the block structure,
+  // independent of the rendered cluster-LOD triangulation.
   const glm::vec3 subgrid_color(0.40f, 0.40f, 0.45f);
   const float subgrid_thickness = 0.6f;
   const float cell = b / static_cast<float>(kSubdiv);
@@ -261,8 +271,8 @@ void MapViewView::RebuildVisibleGrid() {
       const float z0 = bz * b, z1 = (bz + 1) * b;
 
       // Subgrid triangulation. Cell edges on a block boundary are skipped (cx/cz
-      // == 0) -- the block pass below draws those, and doubling them up would
-      // just overdraw two coincident AA quads.
+      // == 0) -- the block pass below draws those, and doubling them up would just
+      // overdraw two coincident AA quads.
       for (int cz = 0; cz < kSubdiv; ++cz) {
         for (int cx = 0; cx < kSubdiv; ++cx) {
           const float cx0 = x0 + cx * cell, cx1 = cx0 + cell;
@@ -293,7 +303,7 @@ void MapViewView::RebuildVisibleGrid() {
       if (bz == z_hi) grid_.AddLine({x0, h, z1}, {x1, h, z1}, block_color, 1.0f);
 
       // Highlight ledges: edges to a neighbor in a different section (the
-      // neighbor may be just outside the window — reading it is still in bounds).
+      // neighbor may be just outside the window -- reading it is still in bounds).
       // Drawn on the UPPER terrace so the ledge sits on the step, not in it.
       const int sid = blocks.at(bx, bz).section_id;
       if (bx + 1 < blocks.width && blocks.at(bx + 1, bz).section_id != sid) {
@@ -385,7 +395,7 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
 
   // Advance the shared clock; when it's running, move the sun and animate the
   // fog by the same sim delta (paused => both hold). The daylight re-bake is
-  // throttled implicitly: ApplyDaylight is only called while time actually moves.
+  // throttled implicitly: ApplyDaylight only runs while time actually moves.
   const double sim_dt = sim_clock_.Advance(dt);
   if (sim_dt > 0.0) {
     ApplyDaylight();
@@ -405,13 +415,17 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
   }
   gamecam_.UpdateCamera(camera_);
 
+  // Re-select the LOD cluster cut for the new camera and rewrite the draw
+  // ranges. Cheap flat pass over the DAG; no buffer re-upload.
+  cluster_terrain_.UpdateLod(camera_, screen_h_px_);
+
   // NB: the fog sources are NOT rebuilt per frame -- both the biome fog and the
   // map-border wall are world-static, so they're uploaded once (Initialize) and
   // only on edit (the editor). Nothing here depends on the camera.
 
-  // Rebuild the debug-line overlay each frame into one buffer: the hover grid plus
-  // the selected fog emitter's OBB. No cache: both are small (independent of map
-  // size), so this is cheap.
+  // Rebuild the debug-line overlay each frame into one buffer: the hover grid
+  // plus the selected fog emitter's OBB. No cache: both are small (independent of
+  // map size), so this is cheap.
   grid_.Clear();
   if (grid_visible_ && hover_valid_) RebuildVisibleGrid();
   if (selected_emitter_ >= 0 &&
@@ -427,8 +441,12 @@ void MapViewView::DrawUI() {
   if (ImGui::GetCurrentContext() == nullptr) return;
   ImGui::Begin("Map");
   ImGui::Text("seed %u  %dx%d m", cfg_.seed, cfg_.width, cfg_.height);
-  ImGui::Text("chunks: %d   sections: %zu", chunk_count_,
-              map_.graph.nodes.size());
+  ImGui::Text("sections: %zu", map_.graph.nodes.size());
+
+  // Terrain LOD controls + cut stats (the shared module's section, identical in
+  // both apps).
+  cluster_terrain_.DrawDebugUI();
+
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {
     const int bx = static_cast<int>(hover_point_.x / mapgen::kBlockSizeM);
@@ -532,6 +550,10 @@ void MapViewView::DrawFogEmitterEditor() {
 void MapViewView::OnResize(int width, int height) {
   camera_.aspect =
       height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+  // The LOD screen-space-error metric is in pixels, so it needs the viewport
+  // height in pixels -- exactly what OnResize carries (physical pixels windowed,
+  // the capture height headless).
+  if (height > 0) screen_h_px_ = static_cast<float>(height);
 }
 
 }  // namespace badlands

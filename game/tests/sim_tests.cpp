@@ -2,7 +2,7 @@
 // stay green regardless of the scripting language's health — they are the
 // spec of the Stage-2 combat mechanics.
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"
 #include "duel_common.h"
 
 #include <catch_amalgamated.hpp>
@@ -13,8 +13,8 @@ using namespace testfix;
 
 namespace {
 
-GameCharacterDesc dummy(float x, float z, int32_t team) {
-    GameCharacterDesc desc{};
+badlands::CharacterDesc dummy(float x, float z, int32_t team) {
+    badlands::CharacterDesc desc{};
     desc.pos_x = x;
     desc.pos_z = z;
     desc.team = team;
@@ -29,12 +29,37 @@ GameCharacterDesc dummy(float x, float z, int32_t team) {
 
 }  // namespace
 
-TEST_CASE("game_state echoes the spawn descriptor") {
-    BadlandsGame* game = game_create(nullptr);
-    GameCharacterDesc desc = mercenary(-8.0f, -12.0f);
-    uint32_t id = game_spawn(game, &desc);
+TEST_CASE("SetPathfinder back-fills every alive building") {
+    badlands::Sim sim(nullptr);
+    // make_world prebuilds the origin Castle, so at least one alive building.
+    REQUIRE(sim.Buildings().size() >= 1);
 
-    auto rows = snapshot(game);
+    struct Recorder {
+        int add_obstacle_calls = 0;
+    } recorder;
+
+    badlands::Pathfinder pf{};
+    pf.ctx = &recorder;
+    pf.add_obstacle = [](void* ctx, uint32_t, const float*, int32_t) {
+        static_cast<Recorder*>(ctx)->add_obstacle_calls += 1;
+    };
+    pf.remove_obstacle = [](void*, uint32_t) {};  // non-null no-op
+    pf.find_path = [](void*, float, float, float, float, float, uint32_t, float*,
+                      int32_t) -> int32_t { return 0; };  // non-null no-op
+
+    sim.SetPathfinder(pf);
+
+    // notify_obstacle_added fires exactly once per alive building, and
+    // Buildings() applies the same alive-filter, so the counts must match.
+    REQUIRE(recorder.add_obstacle_calls == static_cast<int>(sim.Buildings().size()));
+}
+
+TEST_CASE("Characters() echoes the spawn descriptor") {
+    badlands::Sim sim(nullptr);
+    badlands::CharacterDesc desc = mercenary(-8.0f, -12.0f);
+    uint32_t id = sim.Spawn(desc);
+
+    auto rows = sim.Characters();
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].id == id);
     CHECK(rows[0].team == 0);
@@ -44,106 +69,91 @@ TEST_CASE("game_state echoes the spawn descriptor") {
     CHECK(rows[0].max_hp == desc.hp);
     CHECK(rows[0].size_y == desc.size_y);
     CHECK(rows[0].color_b == desc.color_b);
-
-    game_destroy(game);
 }
 
 TEST_CASE("movement is clamped to move_speed * dt") {
-    BadlandsGame* game = game_create(nullptr);
-    GameCharacterDesc a = dummy(0.0f, 0.0f, 0);
-    GameCharacterDesc b = dummy(10.0f, 0.0f, 1);
-    game_spawn(game, &a);
-    game_spawn(game, &b);
+    badlands::Sim sim(nullptr);
+    badlands::CharacterDesc a = dummy(0.0f, 0.0f, 0);
+    badlands::CharacterDesc b = dummy(10.0f, 0.0f, 1);
+    sim.Spawn(a);
+    sim.Spawn(b);
 
-    game_tick(game, kTickDt);
+    sim.Tick(kTickDt);
 
-    auto rows = snapshot(game);
+    auto rows = sim.Characters();
     REQUIRE(rows.size() == 2);
     float step = a.move_speed * kTickDt;
     CHECK_THAT(rows[0].pos_x, Catch::Matchers::WithinAbs(step, 1e-4f));
     CHECK(rows[0].pos_z == 0.0f);
     CHECK_THAT(rows[1].pos_x, Catch::Matchers::WithinAbs(10.0f - step, 1e-4f));
-
-    game_destroy(game);
 }
 
 TEST_CASE("attacks respect the cooldown") {
-    BadlandsGame* game = game_create(nullptr);
-    GameCharacterDesc attacker = dummy(0.0f, 0.0f, 0);
+    badlands::Sim sim(nullptr);
+    badlands::CharacterDesc attacker = dummy(0.0f, 0.0f, 0);
     attacker.attack_damage = 3.0f;
     attacker.attack_cooldown = 1.0f;
-    GameCharacterDesc victim = dummy(0.5f, 0.0f, 1);  // in range from tick one
+    badlands::CharacterDesc victim = dummy(0.5f, 0.0f, 1);  // in range from tick one
     victim.hp = 100.0f;
     victim.attack_damage = 0.0f;  // never hurts the attacker
-    game_spawn(game, &attacker);
-    game_spawn(game, &victim);
+    sim.Spawn(attacker);
+    sim.Spawn(victim);
 
     // dt of 0.25 is binary-exact, so the cooldown arithmetic is deterministic.
-    game_tick(game, 0.25f);
-    CHECK(snapshot(game)[1].hp == 97.0f);  // first swing lands immediately
+    sim.Tick(0.25f);
+    CHECK(sim.Characters()[1].hp == 97.0f);  // first swing lands immediately
 
     // Cooldown (1s) blocks the swing while it drains: 0.75, 0.5, 0.25.
     for (int i = 0; i < 3; ++i) {
-        game_tick(game, 0.25f);
+        sim.Tick(0.25f);
     }
-    CHECK(snapshot(game)[1].hp == 97.0f);
+    CHECK(sim.Characters()[1].hp == 97.0f);
 
-    game_tick(game, 0.25f);  // cooldown reaches zero -> swing lands
-    CHECK(snapshot(game)[1].hp == 94.0f);
-
-    game_destroy(game);
+    sim.Tick(0.25f);  // cooldown reaches zero -> swing lands
+    CHECK(sim.Characters()[1].hp == 94.0f);
 }
 
 TEST_CASE("dead entities leave the state snapshot") {
-    BadlandsGame* game = game_create(nullptr);
-    GameCharacterDesc killer = dummy(0.0f, 0.0f, 0);
+    badlands::Sim sim(nullptr);
+    badlands::CharacterDesc killer = dummy(0.0f, 0.0f, 0);
     killer.attack_damage = 100.0f;
-    GameCharacterDesc victim = dummy(0.5f, 0.0f, 1);
+    badlands::CharacterDesc victim = dummy(0.5f, 0.0f, 1);
     victim.attack_damage = 0.0f;
-    uint32_t killer_id = game_spawn(game, &killer);
-    game_spawn(game, &victim);
+    uint32_t killer_id = sim.Spawn(killer);
+    sim.Spawn(victim);
 
-    game_tick(game, kTickDt);
+    sim.Tick(kTickDt);
 
-    auto rows = snapshot(game);
+    auto rows = sim.Characters();
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].id == killer_id);
-
-    game_destroy(game);
 }
 
-TEST_CASE("game_state reports the total beyond the caller's cap") {
-    BadlandsGame* game = game_create(nullptr);
-    GameCharacterDesc desc = dummy(0.0f, 0.0f, 0);  // one team: nobody fights
+TEST_CASE("Characters() reports every spawned entity, no cap") {
+    badlands::Sim sim(nullptr);
+    badlands::CharacterDesc desc = dummy(0.0f, 0.0f, 0);  // one team: nobody fights
     for (int i = 0; i < 300; ++i) {
-        game_spawn(game, &desc);
+        sim.Spawn(desc);
     }
 
-    GameCharacterState rows[8];
-    CHECK(game_state(game, rows, 8) == 300);      // total, not written count
-    CHECK(snapshot(game).size() == 300);          // the helper must not cap
-
-    game_destroy(game);
+    CHECK(sim.Characters().size() == 300);  // the accessor must not cap
 }
 
 TEST_CASE("Stage-2 duel resolves with mock brains") {
-    BadlandsGame* game = game_create(nullptr);
-    GameCharacterDesc merc = mercenary(-8.0f, -12.0f);
-    GameCharacterDesc gob = goblin(8.0f, -12.0f);
-    uint32_t merc_id = game_spawn(game, &merc);
-    game_spawn(game, &gob);
+    badlands::Sim sim(nullptr);
+    badlands::CharacterDesc merc = mercenary(-8.0f, -12.0f);
+    badlands::CharacterDesc gob = goblin(8.0f, -12.0f);
+    uint32_t merc_id = sim.Spawn(merc);
+    sim.Spawn(gob);
 
-    GameCharacterState survivor = run_duel(game);
+    badlands::CharacterState survivor = run_duel(sim);
 
     CHECK(survivor.id == merc_id);
     CHECK(survivor.team == 0);
     CHECK(survivor.hp < survivor.max_hp);  // the goblin got its licks in
 
-    GameStats stats;
-    game_stats(game, &stats);
+    badlands::SimStats stats = sim.GetStats();
     CHECK(stats.ticks > 30);  // spawned 16 units apart: they must walk first
     CHECK(stats.script_intents == 0);
     CHECK(stats.noiser_bugs == 0);
-
-    game_destroy(game);
 }

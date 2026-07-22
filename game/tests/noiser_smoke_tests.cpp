@@ -4,7 +4,7 @@
 
 #include <noiser.hpp>
 
-#include "badlands_game.h"
+#include "sim_internal.hpp"  // make_world / spawn_into / tick_world / stats_of
 #include "components.h"
 #include "game_state.h"
 
@@ -220,8 +220,9 @@ TEST_CASE("v0.3 town host-call surface binds and fires through the resilient bra
         }
         0.0
     )";
-    BadlandsGame* game = game_create(script);
-    GameCharacterDesc d{};
+    auto owned = badlands::make_world(script);
+    BadlandsGame* game = owned.get();
+    badlands::CharacterDesc d{};
     d.pos_x = 20.0f;
     d.pos_z = 20.0f;
     d.team = 0;
@@ -231,12 +232,11 @@ TEST_CASE("v0.3 town host-call surface binds and fires through the resilient bra
     d.attack_damage = 1.0f;
     d.attack_cooldown = 1.0f;
     d.size_x = d.size_y = d.size_z = 1.0f;
-    uint32_t hid = game_spawn(game, &d);
+    uint32_t hid = badlands::spawn_into(*game, d);
 
-    game_tick(game, 1.0f / 30.0f);
+    badlands::tick_world(*game, 1.0f / 30.0f);
 
-    GameStats stats;
-    game_stats(game, &stats);
+    badlands::SimStats stats = badlands::stats_of(*game);
     if (stats.noiser_bugs == 0) {
         // The whole new surface bound + fired: the durable move goal landed and
         // the other (no-op) town calls did not error.
@@ -250,7 +250,6 @@ TEST_CASE("v0.3 town host-call surface binds and fires through the resilient bra
         WARN("[noiser-bug] town host-call surface tripped " << stats.noiser_bugs
                                                             << " bug(s); see docs/noiser-bugs-upstream");
     }
-    game_destroy(game);
 }
 
 TEST_CASE("real hero.noiser behaviour framework loads and runs clean") {
@@ -267,11 +266,13 @@ TEST_CASE("real hero.noiser behaviour framework loads and runs clean") {
     buffer << file.rdbuf();
     std::string source = buffer.str();
 
-    BadlandsGame* game = game_create(source.c_str());
+    auto owned = badlands::make_world(source.c_str());
+
+    BadlandsGame* game = owned.get();
     // A lone home-less hero with no enemy and no town buildings exercises the
     // full path: observe() (every perceive_* call) -> decide() (soft argmax ->
     // Roam) -> apply() (intent_move_to).
-    GameCharacterDesc d{};
+    badlands::CharacterDesc d{};
     d.pos_x = 3.0f;
     d.pos_z = 3.0f;
     d.team = 0;
@@ -281,16 +282,14 @@ TEST_CASE("real hero.noiser behaviour framework loads and runs clean") {
     d.attack_damage = 1.0f;
     d.attack_cooldown = 1.0f;
     d.size_x = d.size_y = d.size_z = 1.0f;
-    game_spawn(game, &d);
+    badlands::spawn_into(*game, d);
 
     for (int i = 0; i < 5; ++i) {
-        game_tick(game, 1.0f / 30.0f);
+        badlands::tick_world(*game, 1.0f / 30.0f);
     }
 
-    GameStats stats;
-    game_stats(game, &stats);
+    badlands::SimStats stats = badlands::stats_of(*game);
     CHECK(stats.noiser_bugs == 0);
-    game_destroy(game);
 }
 
 TEST_CASE("perceive_class binds and echoes the hero class") {
@@ -309,8 +308,9 @@ TEST_CASE("perceive_class binds and echoes the hero class") {
         }
         0.0
     )";
-    BadlandsGame* game = game_create(script);
-    GameCharacterDesc d{};
+    auto owned = badlands::make_world(script);
+    BadlandsGame* game = owned.get();
+    badlands::CharacterDesc d{};
     d.pos_x = 4.0f;
     d.pos_z = 4.0f;
     d.team = 0;
@@ -320,16 +320,15 @@ TEST_CASE("perceive_class binds and echoes the hero class") {
     d.attack_damage = 1.0f;
     d.attack_cooldown = 1.0f;
     d.size_x = d.size_y = d.size_z = 1.0f;
-    uint32_t hid = game_spawn(game, &d);
+    uint32_t hid = badlands::spawn_into(*game, d);
 
     // Force a known class on the spawned entity (Grave Robber = 2).
     entt::entity e = game->slots[hid];
     game->registry.emplace_or_replace<badlands::HeroClass>(e, 2);
 
-    game_tick(game, 1.0f / 30.0f);
+    badlands::tick_world(*game, 1.0f / 30.0f);
 
-    GameStats stats;
-    game_stats(game, &stats);
+    badlands::SimStats stats = badlands::stats_of(*game);
     if (stats.noiser_bugs == 0) {
         const badlands::MoveTarget& mt = game->registry.get<badlands::MoveTarget>(e);
         CHECK(mt.kind == badlands::MoveTarget::Kind::Point);
@@ -338,5 +337,4 @@ TEST_CASE("perceive_class binds and echoes the hero class") {
         WARN("[noiser-bug] perceive_class script tripped " << stats.noiser_bugs
                                                            << " bug(s); see docs/noiser-bugs-upstream");
     }
-    game_destroy(game);
 }

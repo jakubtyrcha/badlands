@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"  // badlands::CharacterDesc
 
 #include <entt/entt.hpp>
 
@@ -27,11 +27,11 @@ enum HeroClassId : int32_t {
 int32_t guild_hero_class(int kind);
 
 // Shared baseline hero descriptor; color is the only class-distinguishing field.
-GameCharacterDesc hero_desc(int32_t hero_class, float x, float z);
+CharacterDesc hero_desc(int32_t hero_class, float x, float z);
 
 // Spawn an entity with the full component set (incl. HeroClass/Home/Inventory).
-// Shared by game_spawn (home = -1) and recruit. Returns the public slot id.
-uint32_t spawn_entity(BadlandsGame& game, const GameCharacterDesc& desc, int32_t home);
+// Shared by Sim::Spawn (home = -1) and recruit. Returns the public slot id.
+uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t home);
 
 // Count of heroes whose Home is `building_id`.
 uint32_t roster_count(const BadlandsGame& game, uint32_t building_id);
@@ -43,7 +43,7 @@ uint32_t recruit(BadlandsGame& game, uint32_t building_id);
 
 // Destroy a user-destructible building: expel inside heroes, reassign residents
 // to another same-class guild with room (else homeless), free the footprint and
-// nav obstacle. Returns 0 on success, <0 on rejection (matches game_dispatch).
+// nav obstacle. Returns 0 on success, <0 on rejection (matches Sim::Dispatch).
 int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id);
 
 // Errand mechanics (invoked by the brain host calls in Phase 6; engine

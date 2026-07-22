@@ -5,7 +5,7 @@
 // downgrades to the mock brain, the bug is recorded, and the duel still
 // resolves — the suite stays green while the failure is impossible to miss.
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"
 #include "duel_common.h"
 
 #include <catch_amalgamated.hpp>
@@ -33,22 +33,21 @@ std::string load_brain_script() {
 
 TEST_CASE("Stage-2 duel with noiser brains") {
     std::string script = load_brain_script();
-    BadlandsGame* game = game_create(script.c_str());
+    badlands::Sim sim(script.c_str());
 
-    GameCharacterDesc merc = mercenary(-8.0f, -12.0f);
-    GameCharacterDesc gob = goblin(8.0f, -12.0f);
-    uint32_t merc_id = game_spawn(game, &merc);
-    game_spawn(game, &gob);
+    badlands::CharacterDesc merc = mercenary(-8.0f, -12.0f);
+    badlands::CharacterDesc gob = goblin(8.0f, -12.0f);
+    uint32_t merc_id = sim.Spawn(merc);
+    sim.Spawn(gob);
 
-    GameCharacterState survivor = run_duel(game);
+    badlands::CharacterState survivor = run_duel(sim);
 
     // Behavioral spec, independent of noiser's health.
     CHECK(survivor.id == merc_id);
     CHECK(survivor.team == 0);
     CHECK(survivor.hp < survivor.max_hp);
 
-    GameStats stats;
-    game_stats(game, &stats);
+    badlands::SimStats stats = sim.GetStats();
     CHECK(stats.ticks > 30);
 
     if (stats.noiser_bugs == 0) {
@@ -61,54 +60,47 @@ TEST_CASE("Stage-2 duel with noiser brains") {
         WARN("[noiser-bug] duel completed via mock fallback; bugs recorded: "
              << stats.noiser_bugs << " (see stderr; paste into docs/noiser-feedback.md)");
     }
-
-    game_destroy(game);
 }
 
 TEST_CASE("script reload keeps last-good on failure and swaps on success") {
     std::string script = load_brain_script();
-    BadlandsGame* game = game_create(script.c_str());
-    GameCharacterDesc merc = mercenary(-8.0f, -12.0f);
-    GameCharacterDesc gob = goblin(8.0f, -12.0f);
-    game_spawn(game, &merc);
-    game_spawn(game, &gob);
+    badlands::Sim sim(script.c_str());
+    badlands::CharacterDesc merc = mercenary(-8.0f, -12.0f);
+    badlands::CharacterDesc gob = goblin(8.0f, -12.0f);
+    sim.Spawn(merc);
+    sim.Spawn(gob);
 
     for (int i = 0; i < 10; ++i) {
-        game_tick(game, kTickDt);
+        sim.Tick(kTickDt);
     }
-    GameStats before;
-    game_stats(game, &before);
+    badlands::SimStats before = sim.GetStats();
     REQUIRE(before.noiser_bugs == 0);
     REQUIRE(before.script_intents > 0);
 
     // A broken script must not take: the old program keeps driving.
-    CHECK(!game_reload_script(game, "pub fn broken("));
+    CHECK(!sim.ReloadScript("pub fn broken("));
     for (int i = 0; i < 10; ++i) {
-        game_tick(game, kTickDt);
+        sim.Tick(kTickDt);
     }
-    GameStats after_failed;
-    game_stats(game, &after_failed);
+    badlands::SimStats after_failed = sim.GetStats();
     CHECK(after_failed.noiser_bugs == 0);
     CHECK(after_failed.script_intents > before.script_intents);
 
     // A good script swaps in; brains restart (counters reset) and keep driving.
-    CHECK(game_reload_script(game, script.c_str()));
+    CHECK(sim.ReloadScript(script));
     for (int i = 0; i < 10; ++i) {
-        game_tick(game, kTickDt);
+        sim.Tick(kTickDt);
     }
-    GameStats after_reload;
-    game_stats(game, &after_reload);
+    badlands::SimStats after_reload = sim.GetStats();
     CHECK(after_reload.noiser_bugs == 0);
     CHECK(after_reload.script_intents > 0);
-
-    game_destroy(game);
 }
 
 TEST_CASE("a failing brain downgrades to the mock and the duel still resolves") {
     // This brain divides by zero on its fourth tick. The engine must record
     // the bug, downgrade the entity, and finish the fight on mock brains.
     // It declares and calls the full host interface: brain scripts must, or
-    // game_create rejects them as signature drift.
+    // the Sim rejects them as signature drift.
     const char* script = R"(
         @fn.perceive_self: fn(e: i32) -> (f32, f32, f32, f32);
         @fn.perceive_target: fn(e: i32) -> (f32, f32, f32, f32);
@@ -133,19 +125,16 @@ TEST_CASE("a failing brain downgrades to the mock and the duel still resolves") 
         }
         0.0
     )";
-    BadlandsGame* game = game_create(script);
+    badlands::Sim sim(script);
 
-    GameCharacterDesc merc = mercenary(-8.0f, -12.0f);
-    GameCharacterDesc gob = goblin(8.0f, -12.0f);
-    uint32_t merc_id = game_spawn(game, &merc);
-    game_spawn(game, &gob);
+    badlands::CharacterDesc merc = mercenary(-8.0f, -12.0f);
+    badlands::CharacterDesc gob = goblin(8.0f, -12.0f);
+    uint32_t merc_id = sim.Spawn(merc);
+    sim.Spawn(gob);
 
-    GameCharacterState survivor = run_duel(game);
+    badlands::CharacterState survivor = run_duel(sim);
     CHECK(survivor.id == merc_id);
 
-    GameStats stats;
-    game_stats(game, &stats);
+    badlands::SimStats stats = sim.GetStats();
     CHECK(stats.noiser_bugs >= 2);  // both entities' brains hit the poison
-
-    game_destroy(game);
 }

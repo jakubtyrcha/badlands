@@ -1,12 +1,12 @@
 // Movement + collision pipeline (plan/follow/melee-lock/separate). The path
 // GEOMETRY is a Rust concern tested in src/nav.rs; here we inject a stub
-// GamePathfinder so the C++ movement systems are exercised in isolation.
+// Pathfinder so the C++ movement systems are exercised in isolation.
 
-#include "badlands_game.h"
 #include "components.h"
 #include "game_state.h"
 #include "movement.h"
 #include "placement.h"
+#include "sim_internal.hpp"  // make_world / spawn_into / tick_world / characters_of
 
 #include <catch_amalgamated.hpp>
 #include <entt/entt.hpp>
@@ -53,12 +53,12 @@ int32_t mv_stub_find(void* ctx, float sx, float sz, float gx, float gz, float /*
 }
 }  // extern "C"
 
-GamePathfinder stub_pathfinder(StubNav& nav) {
-    return GamePathfinder{&nav, mv_stub_add, mv_stub_remove, mv_stub_find};
+Pathfinder stub_pathfinder(StubNav& nav) {
+    return Pathfinder{&nav, mv_stub_add, mv_stub_remove, mv_stub_find};
 }
 
-GameCharacterDesc unit(float x, float z, int32_t team, float range = 1.0f) {
-    GameCharacterDesc d{};
+CharacterDesc unit(float x, float z, int32_t team, float range = 1.0f) {
+    CharacterDesc d{};
     d.pos_x = x;
     d.pos_z = z;
     d.team = team;
@@ -72,8 +72,8 @@ GameCharacterDesc unit(float x, float z, int32_t team, float range = 1.0f) {
 }
 
 uint32_t spawn_unit(BadlandsGame* game, float x, float z, int32_t team, float range = 1.0f) {
-    GameCharacterDesc d = unit(x, z, team, range);
-    return game_spawn(game, &d);
+    CharacterDesc d = unit(x, z, team, range);
+    return spawn_into(*game, d);
 }
 
 glm::vec2 pos_of(BadlandsGame* game, uint32_t id) {
@@ -83,10 +83,11 @@ glm::vec2 pos_of(BadlandsGame* game, uint32_t id) {
 }  // namespace
 
 TEST_CASE("plan/follow drive a unit to a clear point") {
-    BadlandsGame* game = game_create(nullptr);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
     StubNav nav;
-    GamePathfinder pf = stub_pathfinder(nav);
-    game_set_pathfinder(game, &pf);
+    Pathfinder pf = stub_pathfinder(nav);
+    game->pathfinder = pf;
 
     uint32_t id = spawn_unit(game, 10.0f, 10.0f, 0);
     entt::entity e = game->slots[id];
@@ -101,16 +102,15 @@ TEST_CASE("plan/follow drive a unit to a clear point") {
     }
     CHECK(glm::distance(pos_of(game, id), glm::vec2{15.0f, 10.0f}) < 0.2f);
     CHECK(nav.calls >= 1);  // the pathfinder contract was exercised
-
-    game_destroy(game);
 }
 
 TEST_CASE("follow_paths tracks a scripted multi-waypoint route without cutting the corner") {
-    BadlandsGame* game = game_create(nullptr);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
     StubNav nav;
     nav.scripted = {{10.0f, 10.0f}, {10.0f, 16.0f}, {16.0f, 16.0f}};  // L around a wall
-    GamePathfinder pf = stub_pathfinder(nav);
-    game_set_pathfinder(game, &pf);
+    Pathfinder pf = stub_pathfinder(nav);
+    game->pathfinder = pf;
 
     uint32_t id = spawn_unit(game, 10.0f, 10.0f, 0);
     entt::entity e = game->slots[id];
@@ -131,15 +131,14 @@ TEST_CASE("follow_paths tracks a scripted multi-waypoint route without cutting t
     // It walked up the x=10 leg first (never cut diagonally toward the goal).
     CHECK(max_x_before_turn < 11.0f);
     CHECK(glm::distance(pos_of(game, id), glm::vec2{16.0f, 16.0f}) < 0.3f);
-
-    game_destroy(game);
 }
 
 TEST_CASE("separate_units pushes two coincident units to r_i + r_j") {
-    BadlandsGame* game = game_create(nullptr);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
     StubNav nav;
-    GamePathfinder pf = stub_pathfinder(nav);
-    game_set_pathfinder(game, &pf);
+    Pathfinder pf = stub_pathfinder(nav);
+    game->pathfinder = pf;
 
     uint32_t a = spawn_unit(game, 20.0f, 20.0f, 0);
     uint32_t b = spawn_unit(game, 20.0f, 20.0f, 1);
@@ -148,15 +147,14 @@ TEST_CASE("separate_units pushes two coincident units to r_i + r_j") {
 
     float dist = glm::distance(pos_of(game, a), pos_of(game, b));
     CHECK_THAT(dist, Catch::Matchers::WithinAbs(1.0f, 1e-3f));  // 0.5 + 0.5
-
-    game_destroy(game);
 }
 
 TEST_CASE("melee lock freezes the locked unit's follow movement") {
-    BadlandsGame* game = game_create(nullptr);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
     StubNav nav;
-    GamePathfinder pf = stub_pathfinder(nav);
-    game_set_pathfinder(game, &pf);
+    Pathfinder pf = stub_pathfinder(nav);
+    game->pathfinder = pf;
 
     // Two enemies 0.5 apart (well within attack_range 1.0) far from the castle.
     uint32_t a = spawn_unit(game, -20.0f, -20.0f, 0);
@@ -176,15 +174,14 @@ TEST_CASE("melee lock freezes the locked unit's follow movement") {
     plan_paths(*game, 1.0f / 30.0f);
     follow_paths(*game, 1.0f / 30.0f);
     CHECK(glm::distance(pos_of(game, a), before) < 1e-5f);  // frozen
-
-    game_destroy(game);
 }
 
 TEST_CASE("plan_paths repaths when nav_epoch bumps") {
-    BadlandsGame* game = game_create(nullptr);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
     StubNav nav;
-    GamePathfinder pf = stub_pathfinder(nav);
-    game_set_pathfinder(game, &pf);
+    Pathfinder pf = stub_pathfinder(nav);
+    game->pathfinder = pf;
 
     uint32_t id = spawn_unit(game, 10.0f, 10.0f, 0);
     entt::entity e = game->slots[id];
@@ -201,36 +198,32 @@ TEST_CASE("plan_paths repaths when nav_epoch bumps") {
     ++game->placement.nav_epoch;  // a building was placed/destroyed elsewhere
     plan_paths(*game, 0.5f);      // epoch invalidated -> requery
     CHECK(nav.calls == 2);
-
-    game_destroy(game);
 }
 
 TEST_CASE("mock duel resolves through the movement pipeline and engages melee lock") {
-    BadlandsGame* game = game_create(nullptr);  // mock brains
+    auto owned = make_world(nullptr);  // mock brains
+    BadlandsGame* game = owned.get();
     StubNav nav;
-    GamePathfinder pf = stub_pathfinder(nav);
-    game_set_pathfinder(game, &pf);
+    Pathfinder pf = stub_pathfinder(nav);
+    game->pathfinder = pf;
 
-    GameCharacterDesc merc = game_desc_mercenary(-6.0f, -12.0f);
-    GameCharacterDesc gob = game_desc_goblin(6.0f, -12.0f);
-    game_spawn(game, &merc);
-    game_spawn(game, &gob);
+    CharacterDesc merc = MercenaryDesc(-6.0f, -12.0f);
+    CharacterDesc gob = GoblinDesc(6.0f, -12.0f);
+    spawn_into(*game, merc);
+    spawn_into(*game, gob);
 
     bool saw_lock = false;
     int survivors = 2;
     for (int i = 0; i < 3000; ++i) {
-        game_tick(game, 1.0f / 30.0f);
+        tick_world(*game, 1.0f / 30.0f);
         if (game->registry.view<MeleeLock>().begin() != game->registry.view<MeleeLock>().end()) {
             saw_lock = true;
         }
-        std::vector<GameCharacterState> rows(8);
-        survivors = static_cast<int>(game_state(game, rows.data(), 8));
+        survivors = static_cast<int>(characters_of(*game).size());
         if (survivors <= 1) {
             break;
         }
     }
     CHECK(survivors == 1);   // the duel resolved
     CHECK(saw_lock);         // the combatants locked at some point
-
-    game_destroy(game);
 }
