@@ -42,7 +42,12 @@ enum class ActionKind : int32_t {
     Count
 };
 
-inline constexpr int32_t kGridHalfExtentTiles = 48;  // was GAME_GRID_HALF_EXTENT_TILES
+// The placement/movement grid spans the WHOLE map: tile == 1 world unit == 1
+// map metre, and the symbolic map is 256 m (64 blocks x 4 m), so the grid is
+// [-128, 128). (It was 48 -- a 96 u window centred on the lake, which left the
+// map's Forest/Plains ring unreachable; sim.cpp static_asserts this stays equal
+// to the map span.)
+inline constexpr int32_t kGridHalfExtentTiles = 128;  // was GAME_GRID_HALF_EXTENT_TILES
 
 // ---- POD result structs (field-for-field from badlands_game.h) -------------
 

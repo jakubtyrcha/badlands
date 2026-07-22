@@ -47,9 +47,10 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 constexpr float kCapsuleRadius = 0.35f;
 constexpr float kCapsuleCylinderHeight = 0.6f;
 
-// The sandbox arena: big enough for a small town (the default 13x7 arena is a
-// duel pit). Still well inside the sim's 96x96 placement grid.
-constexpr glm::ivec2 kSandboxArena{44, 30};
+// The sandbox arena: large enough to show the town (lake-centred) plus the
+// surrounding Plains/Forest ring where the deer roam. Well inside the sim's
+// 256 u placement grid.
+constexpr glm::ivec2 kSandboxArena{90, 90};
 
 // Snapshot buffer caps. The sandbox town is tiny; a truncated snapshot would
 // only mean fewer rows drawn/listed, never a crash.
@@ -197,16 +198,19 @@ void AiSandboxView::SeedTown() {
     }
   }
 
-  // A small herd of deer, placed on Plains so they graze/wander real terrain
-  // (the sandbox greybox does not draw the biome map, but the sim reasons about
-  // it). Deterministic search around a ring of candidate spots.
+  // A small herd of deer on good terrain NEAR the town, so they are visible
+  // wandering/grazing/fleeing inside the arena. (Forest proper is a ring far
+  // outside this greybox pit; deer roaming real woods is covered by the tests.
+  // The sim reasons about the biome map even though the arena does not draw it.)
   int deer_placed = 0;
-  for (int i = 0; i < 64 && deer_placed < kSeedDeer; ++i) {
+  for (int i = 0; i < 600 && deer_placed < kSeedDeer; ++i) {
     const float ang = static_cast<float>(i) * 2.399963f;  // golden-angle spread
-    const float rad = 14.0f + static_cast<float>(i % 5) * 4.0f;
+    const float rad = 22.0f + static_cast<float>(i % 20) * 1.0f;  // the good-biome ring
     const glm::vec2 p{std::cos(ang) * rad, std::sin(ang) * rad};
-    if (sim_.BiomeAt(p.x, p.y) != static_cast<int32_t>(mapgen::Biome::Plains)) {
-      continue;
+    const int32_t b = sim_.BiomeAt(p.x, p.y);
+    if (b != static_cast<int32_t>(mapgen::Biome::Forest) &&
+        b != static_cast<int32_t>(mapgen::Biome::Plains)) {
+      continue;  // keep them off the central Lake
     }
     CharacterDesc d{};
     d.archetype = badlands::Archetype::Critter;

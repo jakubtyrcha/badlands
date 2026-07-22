@@ -106,6 +106,11 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
     // byte-identical map -- generate once and copy (the shaping blur passes cost
     // ~0.7 s, which a test suite creating a world per case cannot pay).
     // Determinism is unaffected: the copied data is the same either way.
+    // The placement/movement grid must span the whole map (tile == 1 world unit ==
+    // 1 map metre). If the map size changes, kGridHalfExtentTiles must track it.
+    static_assert(2 * kGridHalfExtentTiles ==
+                      static_cast<int>(SymbolicMapGenerator::kMapSizeM),
+                  "gameplay grid must span the full map");
     static const MapData kSymbolicMap = SymbolicMapGenerator{}.Generate();
     game->map = kSymbolicMap;
     if (brain_script_source != nullptr) {

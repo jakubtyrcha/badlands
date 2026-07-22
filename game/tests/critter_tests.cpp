@@ -24,14 +24,11 @@ using namespace badlands;
 
 namespace {
 
-// Find a world position whose dominant biome is `want`, WITHIN the interior of
-// the nav grid (half-extent 48). NOTE: the 256 m symbolic map's Forest is all in
-// the outer ring outside the ~96 u gameplay grid, so only Lake and Plains are
-// reachable today -- deer keep to Plains until the map/grid mismatch is
-// reconciled (needed before the hunter's forest hunt; tracked in the plan).
-// Interior bound keeps a fleeing/roaming deer off the grid edge, where the nav
-// pipeline would clamp it.
-constexpr float kInterior = 38.0f;
+// Find a world position whose dominant biome is `want`, within the interior of
+// the nav grid (now spanning the full 256 m map, so Forest/Plains/Swamp/Lake are
+// all reachable). The interior bound keeps a fleeing/roaming deer off the grid
+// edge, where the nav pipeline clamps.
+constexpr float kInterior = 100.0f;
 bool find_biome(const BadlandsGame& g, mapgen::Biome want, glm::vec2& out) {
     for (float z = -kInterior; z <= kInterior; z += 1.0f) {
         for (float x = -kInterior; x <= kInterior; x += 1.0f) {
@@ -108,17 +105,17 @@ TEST_CASE("Flee gates on the flee radius, and beats graze/roam") {
 TEST_CASE("a deer bolts from an approaching hero, then settles when it leaves") {
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
-    glm::vec2 meadow;
-    REQUIRE(find_biome(g, mapgen::Biome::Plains, meadow));
+    glm::vec2 woods;
+    REQUIRE(find_biome(g, mapgen::Biome::Forest, woods));
 
-    uint32_t deer = spawn_deer(g, meadow);
+    uint32_t deer = spawn_deer(g, woods);
     entt::entity de = g.slots[deer];
 
     // A threat right next to the deer.
-    CharacterDesc hunter = MercenaryDesc(meadow.x + 2.0f, meadow.y);
+    CharacterDesc hunter = MercenaryDesc(woods.x + 2.0f, woods.y);
     spawn_into(g, hunter);
 
-    const glm::vec2 threat{meadow.x + 2.0f, meadow.y};
+    const glm::vec2 threat{woods.x + 2.0f, woods.y};
     tick_world(g, 1.0f / 30.0f);
 
     const MoveTarget& mt = g.registry.get<MoveTarget>(de);
@@ -129,15 +126,18 @@ TEST_CASE("a deer bolts from an approaching hero, then settles when it leaves") 
     CHECK(g.registry.get<CritterState>(de).behavior == static_cast<int32_t>(Behavior::Roam));
 }
 
-// A plains cell whose roam ring is mostly good terrain -- a sensible deer home,
-// not a shore where half the range is Lake. (The corner-most plains cell has a
-// ~40% good ring; picking a home is the caller's job, and the sandbox does too.)
+// A Forest/Plains cell whose roam ring is mostly good terrain -- a sensible deer
+// home, not a shore where half the range is Lake. Picking a home is the caller's
+// job (the sandbox does too).
+bool good_home_biome(mapgen::Biome b) {
+    return b == mapgen::Biome::Forest || b == mapgen::Biome::Plains;
+}
 bool find_good_home(const BadlandsGame& g, float radius, glm::vec2& out) {
     glm::vec2 best{0.0f, 0.0f};
     float best_frac = -1.0f;
     for (float z = -kInterior; z <= kInterior; z += 2.0f) {
         for (float x = -kInterior; x <= kInterior; x += 2.0f) {
-            if (biome_at(g, {x, z}) != mapgen::Biome::Plains) {
+            if (!good_home_biome(biome_at(g, {x, z}))) {
                 continue;
             }
             int good = 0;
@@ -198,9 +198,9 @@ TEST_CASE("a deer wanders within its home range and keeps to good biome") {
 TEST_CASE("a deer carries no hero components and reports no name") {
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
-    glm::vec2 meadow;
-    REQUIRE(find_biome(g, mapgen::Biome::Plains, meadow));
-    uint32_t deer = spawn_deer(g, meadow);
+    glm::vec2 woods;
+    REQUIRE(find_biome(g, mapgen::Biome::Forest, woods));
+    uint32_t deer = spawn_deer(g, woods);
     entt::entity de = g.slots[deer];
 
     CHECK(g.registry.all_of<CritterState>(de));
