@@ -475,12 +475,13 @@ Convert the remaining C-ABI consumers (the internal tests + any straggler geomet
 
 **Files:**
 - Delete: `game/include/badlands_game.h`; remove the `game_*` function bodies from `game/src/game.cpp` (delete the file if nothing else lives in it, and drop it from CMake).
+- **Modify `game/src/placement.cpp` + `game/src/sim.cpp` — unwind the Task-2 layering inversion (carried debt).** In Task 2, `buildings_of`/`world_of`/`probe_of`/`RenderBoxOf`/`BuildingDefOf` (`sim.cpp`) delegate to the `extern "C"` `game_buildings`/`game_world`/`game_probe_placement`/`game_render_box`/`game_building_def` **defined in `placement.cpp`**, and `sim.cpp` `#include`s `badlands_game.h`. Deleting the C ABI breaks that. Fix: **move those five bodies out of `placement.cpp` into the `badlands::` free functions** (in `sim.cpp`, operating on `BadlandsGame&` / returning `badlands::` types), then remove `#include "badlands_game.h"` from `sim.cpp`. Also relocate `game_set_pathfinder`'s effect into `Sim::SetPathfinder` (it currently forwards to the C function in `game.cpp`). This is the increment that finally lets `placement.cpp` stop exporting `extern "C"` sim symbols.
 - Modify: `game/tests/movement_tests.cpp`, `heroes_tests.cpp`, `placement_tests.cpp` — replace `game_create(nullptr)`/`game_destroy(game)` with direct construction; keep `->registry` and the direct system calls.
 - Modify (if any remain): `src/game/views/model_viewer_view.{hpp,cpp}`, `src/game/scene/building_scene.cpp`, `src/game/main_*.cpp` — residual `#include "badlands_game.h"` / `GameBuildingKind` / `game_render_box` → `badlands_sim.hpp` / `badlands::BuildingKind` / `badlands::RenderBoxOf`.
 
 **Interfaces:**
 - Consumes: `badlands::make_world` (Task 2) for the internal tests' construction.
-- Produces: `badlands_game_lib` with a single public header, `badlands_sim.hpp`. No `extern "C"` sim ABI anywhere.
+- Produces: `badlands_game_lib` with a single public header, `badlands_sim.hpp`. No `extern "C"` sim ABI anywhere; no C++→C-ABI back-dependency. `RenderBoxOf`/`BuildingDefOf`/`buildings_of`/`world_of`/`probe_of` own their logic directly.
 
 - [ ] **Step 1: Convert the internal tests off `game_create`**
 
