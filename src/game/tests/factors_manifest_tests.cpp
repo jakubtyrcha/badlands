@@ -73,3 +73,25 @@ TEST_CASE("a failed parse leaves the caller's factors untouched") {
     CHECK_FALSE(LoadSimFactors(m.path, f));
     CHECK(f.hero.roam_radius == Catch::Approx(defaults.hero.roam_radius));
 }
+
+TEST_CASE("the shipped manifest tunes every archetype section") {
+    SimFactors f;
+    REQUIRE(LoadSimFactors("assets/creatures/factors.json", f));
+    CHECK(f.hero.hunt_sight_radius == Catch::Approx(22.0f));
+    CHECK(f.critter.flee_radius == Catch::Approx(8.0f));
+    CHECK(f.townfolk.house_income_per_day == 50u);
+    CHECK(f.townfolk.spawn_interval_millis == 60000);
+    CHECK(f.monster.max_alive == 4);
+}
+
+TEST_CASE("a non-numeric value in any section fails loudly") {
+    const SimFactors defaults;
+    {
+        std::string p = std::string(std::tmpnam(nullptr)) + ".json";
+        std::ofstream(p) << R"({ "monster": { "max_alive": "lots" } })";
+        SimFactors f;
+        CHECK_FALSE(LoadSimFactors(p, f));
+        CHECK(f.monster.max_alive == defaults.monster.max_alive);
+        std::remove(p.c_str());
+    }
+}

@@ -22,6 +22,7 @@
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
+#include "game/factors_manifest.hpp"
 #include "game/scene/blockout_materials.hpp"
 #include "mapgen/biomes.hpp"
 
@@ -198,6 +199,13 @@ void AiSandboxView::ApplyEnvironment() {
 void AiSandboxView::SeedTown() {
   const std::string brain = load_brain_script();
   sim_ = badlands::Sim(brain.empty() ? nullptr : brain.c_str());
+
+  // Behaviour tuning as data: load over the compiled defaults (a missing file
+  // just keeps them). Must happen before ticking -- factors are initial config.
+  badlands::SimFactors factors = sim_.Factors();
+  if (badlands::LoadSimFactors("assets/creatures/factors.json", factors)) {
+    sim_.SetFactors(factors);
+  }
 
   // Everything goes through game_dispatch, so the seed is itself a logged
   // command sequence -- (initial config, seed, command log) still reproduces

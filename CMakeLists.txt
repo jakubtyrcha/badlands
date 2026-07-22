@@ -314,7 +314,8 @@ set(badlands_app_sources_game
 # executable, same rationale as badlands_app_sources_game above.
 set(badlands_app_sources_ai_sandbox
     src/ai_sandbox/main_ai_sandbox.cpp
-    src/ai_sandbox/ai_sandbox_view.cpp)
+    src/ai_sandbox/ai_sandbox_view.cpp
+    src/game/factors_manifest.cpp)  # behaviour tuning loaded as data
 
 foreach(app viewer game ai_sandbox)
     add_executable(badlands_${app} ${badlands_app_sources_${app}})
