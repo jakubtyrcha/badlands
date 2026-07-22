@@ -30,7 +30,15 @@ struct PlacedBuilding {
     // Uncollected tax owed by this building; a tax collector banks it. Houses
     // accrue it at midnight (economy.cpp); a collector visit zeroes it.
     uint32_t taxable_income = 0;
+    // Structure health. Monsters (rats) chew buildings down; 0 razes it through
+    // the destruction cascade (raze_building), bypassing the player-only destroy
+    // policy. Placed at full health.
+    float hp = 100.0f;
+    float max_hp = 100.0f;
 };
+
+// Default structure health for a freshly placed building.
+inline constexpr float kBuildingMaxHp = 100.0f;
 
 // Home roster capacity (heroes with Home == this building's id).
 constexpr int kGuildRosterCap = 4;

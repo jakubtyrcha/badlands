@@ -31,6 +31,7 @@ enum class CommandKind : int32_t {
     SetBehavior,
     CollectTax,  // tax collector banks a building's taxable_income into its carry
     Deposit,     // tax collector banks its carry into player gold, then despawns
+    AttackBuilding,  // monster swings at a building (target_id); razes it at 0 hp
 };
 
 // The log is exposed verbatim through Sim::CommandLog(), so the two enums are
@@ -57,6 +58,8 @@ static_assert(static_cast<int32_t>(CommandKind::CollectTax) ==
               static_cast<int32_t>(CommandKindId::CollectTax));
 static_assert(static_cast<int32_t>(CommandKind::Deposit) ==
               static_cast<int32_t>(CommandKindId::Deposit));
+static_assert(static_cast<int32_t>(CommandKind::AttackBuilding) ==
+              static_cast<int32_t>(CommandKindId::AttackBuilding));
 
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional

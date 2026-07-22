@@ -193,13 +193,14 @@ uint32_t recruit(BadlandsGame& game, uint32_t building_id) {
     return spawn_entity(game, d, static_cast<int32_t>(building_id));
 }
 
-int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
+// The destruction cascade: expel occupants, tombstone + free the grid/nav
+// obstacle, and rehome residents. No policy check -- combat (raze) and the
+// player destroy action (destroy_building_impl) share this; the policy lives in
+// the caller. Returns 0, or -1 for unknown/already-dead.
+int64_t raze_building(BadlandsGame& game, uint32_t building_id) {
     auto& bs = game.placement.buildings;
     if (building_id >= bs.size() || !bs[building_id].alive) {
         return -1;  // unknown or already destroyed
-    }
-    if (!BuildingDefOf(static_cast<BuildingKind>(bs[building_id].kind)).user_destructible) {
-        return -2;  // Castle/House/Sewer are not player-destructible
     }
     entt::registry& reg = game.registry;
 
@@ -251,6 +252,18 @@ int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
         }
     }
     return 0;
+}
+
+// Player destroy action: only the 7 user-buildable kinds may be razed this way.
+int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
+    auto& bs = game.placement.buildings;
+    if (building_id >= bs.size() || !bs[building_id].alive) {
+        return -1;
+    }
+    if (!BuildingDefOf(static_cast<BuildingKind>(bs[building_id].kind)).user_destructible) {
+        return -2;  // Castle/House/Sewer are not player-destructible
+    }
+    return raze_building(game, building_id);
 }
 
 namespace {

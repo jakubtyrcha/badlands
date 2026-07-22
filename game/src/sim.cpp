@@ -17,6 +17,7 @@
 
 #include "critter_brain.h"
 #include "economy.h"
+#include "monster_brain.h"
 #include "townfolk_brain.h"
 
 #include "game/map/symbolic_map_generator.hpp"
@@ -70,9 +71,11 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
             case BrainKind::Town:
                 town_think(game, slot);
                 break;
-            case BrainKind::None:
             case BrainKind::Monster:
-                mt.kind = MoveTarget::Kind::None;  // monster brain lands in Phase 5
+                monster_think(game, slot);  // no unit enemy -> gnaw a building
+                break;
+            case BrainKind::None:
+                mt.kind = MoveTarget::Kind::None;
                 break;
             case BrainKind::Critter:
             case BrainKind::Townfolk:

@@ -73,6 +73,7 @@ constexpr TownBuilding kTown[] = {
     {badlands::BuildingKind::House, 6.0f, 16.0f, 0},   // accrue tax for the collector
     {badlands::BuildingKind::House, -6.0f, 16.0f, 0},
     {badlands::BuildingKind::Watchtower, 0.0f, -16.0f, 0},  // second deposit point
+    {badlands::BuildingKind::Sewer, 18.0f, -14.0f, 0},     // rats crawl out here
 };
 
 // Heroes recruited per guild at seed time. Below kGuildRosterCap so the panel

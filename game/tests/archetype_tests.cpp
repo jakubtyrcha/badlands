@@ -74,29 +74,28 @@ TEST_CASE("a hero spawn carries the full hero recipe") {
     CHECK(g.registry.all_of<HeroDisplayState>(e));
 }
 
-TEST_CASE("an enemy with no target never runs the townsfolk errand loop") {
-    // THE regression, stated directly. An apothecary exists and the goblin's
-    // inventory would be "empty" if it had one -- under the old recipe it walked
-    // over and emitted Buy. It must simply hold position.
+TEST_CASE("an enemy never runs the townsfolk errand loop") {
+    // THE regression, stated directly. An apothecary/tavern exist and the
+    // goblin's inventory would be "empty" if it had one -- under the old recipe
+    // it walked over and emitted Buy. It must never run a townsfolk errand.
+    // (A monster DOES seek a building to attack -- that is its own brain, tested
+    // in rat_tests -- so the invariant here is specifically "no shopping", not
+    // "no movement".)
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
     REQUIRE(place(g, BuildingKind::Apothecary, 14.0f, 8.0f) != UINT32_MAX);
     REQUIRE(place(g, BuildingKind::Tavern, 14.0f, -8.0f) != UINT32_MAX);
 
-    CharacterDesc goblin = GoblinDesc(-20.0f, -20.0f);  // far from both, no enemy
-    uint32_t slot = spawn_into(g, goblin);
-    entt::entity e = g.slots[slot];
-    const glm::vec2 spawn_pos = g.registry.get<Position>(e).pos;
+    CharacterDesc goblin = GoblinDesc(-20.0f, -20.0f);  // no enemy unit present
+    spawn_into(g, goblin);
 
     for (int i = 0; i < 60; ++i) {
         tick_world(g, 1.0f / 30.0f);
     }
 
-    CHECK(g.registry.get<MoveTarget>(e).kind == MoveTarget::Kind::None);
-    CHECK(g.registry.get<Position>(e).pos == spawn_pos);  // never moved
     CHECK_FALSE(log_has(g, CommandKind::Buy));
     CHECK_FALSE(log_has(g, CommandKind::EnterBuilding));
-    CHECK_FALSE(log_has(g, CommandKind::MoveTo));
+    CHECK_FALSE(log_has(g, CommandKind::EnterHome));
 }
 
 TEST_CASE("recruited heroes still run the town loop") {

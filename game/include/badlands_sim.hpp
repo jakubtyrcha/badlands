@@ -96,10 +96,18 @@ struct TownfolkFactors {
     uint32_t house_income_per_day = 50;     // each House accrues this each midnight
 };
 
+// Monster (rat) tuning. Rats spawn from the Sewer and attack the nearest hostile
+// unit, falling back to gnawing the nearest targettable building.
+struct MonsterFactors {
+    int64_t spawn_interval_millis = 20000;  // a rat crawls out this often
+    int32_t max_alive = 4;                  // cap on live rats
+};
+
 struct SimFactors {
     HeroFactors hero;
     CritterFactors critter;
     TownfolkFactors townfolk;
+    MonsterFactors monster;
 };
 
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
@@ -200,6 +208,7 @@ struct BuildingState {
     int32_t rotation_index;
     int32_t width_tiles, depth_tiles;
     uint32_t taxable_income;  // uncollected tax owed (Houses accrue at midnight)
+    float hp, max_hp;         // structure health (rats chew it down)
 };
 
 // World-level scalars (gold, grid size, sprawl bookkeeping).
@@ -237,6 +246,7 @@ enum class CommandKindId : int32_t {
     SetBehavior,
     CollectTax,
     Deposit,
+    AttackBuilding,
 };
 
 struct CommandRecord {

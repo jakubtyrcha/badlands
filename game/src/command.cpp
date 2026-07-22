@@ -121,6 +121,30 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             game.registry.destroy(e);  // round complete; slot stays invalid
             return 0;
         }
+        case CommandKind::AttackBuilding: {
+            // A monster swings at a building. Authoritative: re-check the target
+            // is alive and the swing is off cooldown (the brain gates on range +
+            // cooldown, but the handler is the single mutation point). At 0 hp
+            // the building is razed through the full cascade.
+            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            const uint32_t bid = cmd.target_id;
+            if (e == entt::null || bid >= game.placement.buildings.size() ||
+                !game.placement.buildings[bid].alive) {
+                return 0;
+            }
+            auto& cd = game.registry.get<CooldownTimer>(e);
+            if (cd.remaining > 0.0f) {
+                return 0;  // still recovering from the last swing
+            }
+            const auto& stats = game.registry.get<Stats>(e);
+            PlacedBuilding& b = game.placement.buildings[bid];
+            b.hp -= stats.attack_damage;
+            cd.remaining = stats.attack_cooldown;
+            if (b.hp <= 0.0f) {
+                raze_building(game, bid);
+            }
+            return 0;
+        }
     }
     return -1;
 }

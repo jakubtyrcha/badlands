@@ -38,6 +38,11 @@ CharacterDesc hero_desc(int32_t hero_class, float x, float z);
 // re-derives the offset (the bug GameView's `world + half_extent` hand-rolling
 // invites). An empty map reports Plains / height 0.
 mapgen::Biome biome_at(const BadlandsGame& game, glm::vec2 world_xz);
+
+// Razes a building through the full destruction cascade (expel/tombstone/nav/
+// rehome) with NO policy check -- combat uses this to destroy any building.
+// destroy_building_impl is the player-facing wrapper (user-destructible only).
+int64_t raze_building(BadlandsGame& game, uint32_t building_id);
 float height_at(const BadlandsGame& game, glm::vec2 world_xz);
 
 // Spawn an entity with the full component set (incl. HeroCharacter/
