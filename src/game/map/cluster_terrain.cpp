@@ -157,7 +157,7 @@ void ClusterTerrain::UpdateLod(const Camera& camera, float screen_h_px) {
   }
 
   if (sel_cluster_count_ != last_logged_sel_count_) {
-    spdlog::info(
+    spdlog::trace(
         "cluster LOD cut: tau={:.2f}px screen_h={:.0f} -> {} clusters ({} in "
         "camera frustum), {} tris, select {:.1f} us",
         tau_px_, screen_h_px, sel_cluster_count_, sel_camera_drawn_,
