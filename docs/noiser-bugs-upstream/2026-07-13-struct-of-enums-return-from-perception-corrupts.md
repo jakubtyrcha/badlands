@@ -1,10 +1,16 @@
 # Struct-of-enums return, built from perception data, is silently corrupted
 
-- **Label:** `compiler` (likely struct-return / RVO layout or codegen; produces wrong
+- **Label:** `compiler` (likely struct-return / RVO layout or codegen; produced wrong
   runtime values, no compile error and no runtime trap)
 - **Date:** 2026-07-13
+- **Version (noiser sha):** `7fd974a` (as filed) — re-tested on `52174b2c9e517d9daa2ad6f11fb4e264fd5fec0d`
+- **Status:** fixed (2026-07-22 — see [Resolution](#resolution))
 - **Discovered in:** badlands hero-brain framework (`scripts/brains/warrior.noiser`)
 - **Backends observed:** VM (badlands runs `NoiserBackend::kVM`); WASM not tested
+
+> **This bug no longer reproduces.** Everything below the Summary is kept as
+> filed, for history. See [Resolution](#resolution) at the end for the
+> 2026-07-22 re-verification.
 
 ## Summary
 
@@ -101,3 +107,89 @@ struct-of-enums return.
   move), with the tuple form it resolves normally.
 - No `--check`/compile error; full bytecode emits; no runtime trap; `noiser_bugs` stays 0. The
   only symptom is wrong runtime values (every enum `match` on the produced struct mis-dispatches).
+
+## Resolution
+
+**2026-07-22 — FIXED. Does not reproduce on noiser sha
+`52174b2c9e517d9daa2ad6f11fb4e264fd5fec0d`.** (Filed against `7fd974a`; no
+upstream commit was identified, the fix was found by re-testing.)
+
+Re-tested faithfully: a `View` struct assembled from **three** host calls
+(two 4-tuple returns plus a scalar) → `observe()` → `decide()` → `combat_act()`
+returning `struct Decision { goal: Goal, command: Command }` — both fields enums,
+one carrying an `(f32, f32)` payload — then two `match`es on the struct's fields.
+The struct form dispatches **correctly**, and its output is **identical** to the
+`(Goal, Command)` tuple control that was the shipped workaround.
+
+Both arms were exercised: with `exists > 0.5` the `Goal::GoTo` / `Command::Attack`
+arms fire (below); with the perception feeding `exists = 0` the `Goal::Hold` /
+`Command::NoOp` arms fire. No arm is skipped, no payload is corrupted.
+
+### Verification program (struct-of-enums — the failing form)
+
+Host surface: `feed4(e) -> (1, 2, 3, 1)`, `feed4b(e, k) -> (4, 5, 1, 0)`,
+`feed(e) -> 1`, `report(x)` prints. `report` stands in for
+`intent_move_to`/`intent_attack`.
+
+```noiser
+@fn.feed4:  fn(e: i32) -> (f32, f32, f32, f32);          // target -> (1, 2, 3, 1)
+@fn.feed4b: fn(e: i32, k: i32) -> (f32, f32, f32, f32);  // self   -> (4, 5, 1, 0)
+@fn.feed:   fn(e: i32) -> f32;                           // range  -> 1
+@fn.report: fn(x: f32) -> void;
+
+struct View { px: f32, pz: f32, range: f32, tx: f32, tz: f32, exists: f32 }
+enum Goal { Hold, GoTo(f32, f32) }
+enum Command { NoOp, Attack }
+struct Decision { goal: Goal, command: Command }   // <-- struct of enums
+
+fn observe(e: i32) -> View {
+    let (tx, tz, thp, has) = @fn.feed4(e);
+    let (sx, sz, hp, cd)   = @fn.feed4b(e, 0);
+    View { px: sx, pz: sz, range: @fn.feed(e) * 10.0, tx: tx, tz: tz, exists: has }
+}
+fn dist2(ax: f32, az: f32, bx: f32, bz: f32) -> f32 { let dx = ax - bx; let dz = az - bz; dx*dx + dz*dz }
+fn combat_act(v: View) -> Decision {
+    let in_range = dist2(v.px, v.pz, v.tx, v.tz) <= v.range * v.range;
+    let cmd = if in_range { Command::Attack } else { Command::NoOp };
+    Decision { goal: Goal::GoTo(v.tx, v.tz), command: cmd }
+}
+fn decide(v: View) -> Decision {
+    if v.exists > 0.5 { combat_act(v) } else { Decision { goal: Goal::Hold, command: Command::NoOp } }
+}
+pub gen fn brain(entity: i32) -> i32 {
+    loop {
+        let d = decide(observe(entity));
+        match d.goal    { Goal::GoTo(x, z) => @fn.report(x),    Goal::Hold    => {}, }
+        match d.command { Command::Attack  => @fn.report(99.0), Command::NoOp => {}, }
+        yield 0;
+    }
+}
+0.0
+```
+
+Output (3 resumes) — **correct**:
+
+```
+COMPILE OK
+    report(1)
+    report(99)
+    report(1)
+    report(99)
+    report(1)
+    report(99)
+DONE (6 host calls over 3 ticks)
+```
+
+### Control (tuple form — the shipped workaround)
+
+Same file with `combat_act`/`decide` returning `(Goal, Command)` and the brain
+doing `let (g, c) = decide(observe(entity));`. Output is **byte-identical** to
+the struct form above.
+
+### Consequence
+
+The `(Goal, Command)` tuple workaround in `scripts/brains/warrior.noiser` is no
+longer required; struct-of-enums returns built from host-call-sourced data are
+safe to use again. `docs/noiser-feedback.md` has been updated accordingly (the
+"tuples mix enums with scalars" positive finding is now a plain positive, not a
+workaround for this bug).
