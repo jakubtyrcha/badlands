@@ -42,10 +42,6 @@ float yaw_from_rotation_index(int32_t rotation_index) {
   return glm::radians(static_cast<float>(rotation_index) * 45.0f);
 }
 
-// Up to this many rows are read from game_buildings/game_state per call --
-// comfortably above this stage's Castle + 4 demo buildings.
-constexpr uint32_t kMaxBuildingRows = 64;
-
 // Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
 // this much REAL time (the directional light + shadows still move every frame).
 // A real-time throttle bounds the ~per-frame HW cube bake cost independent of
@@ -102,12 +98,7 @@ TexturedMeshResult BuildLakeMesh(const std::vector<glm::vec3>& tris) {
 
 }  // namespace
 
-GameView::~GameView() {
-  if (game_) {
-    game_destroy(game_);
-    game_ = nullptr;
-  }
-}
+GameView::~GameView() = default;
 
 bool GameView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
@@ -153,10 +144,9 @@ bool GameView::Initialize(const RenderContext& ctx) {
   sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
   SeekToTimeOfDay(kInitialTimeOfDay);
 
-  // nullptr brain_script_source: mock brains only (no noiser script needed
-  // for a static-buildings scaffold) -- game_create also prebuilds the
-  // Castle at the origin.
-  game_ = game_create(nullptr);
+  // sim_ is constructed with a nullptr brain_script_source (mock brains only;
+  // no noiser script needed for a static-buildings scaffold) -- construction
+  // also prebuilds the Castle at the origin.
   PlaceDemoBuildings();
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
@@ -214,7 +204,7 @@ void GameView::RebakeSky(const DaylightState& state) {
 
 void GameView::PlaceDemoBuildings() {
   struct Demo {
-    GameBuildingKind kind;
+    BuildingKind kind;
     float x, z;
     int32_t rotation_index;
   };
@@ -222,21 +212,21 @@ void GameView::PlaceDemoBuildings() {
   // spaced >= 8 world units apart so no demo building's footprint + margin
   // can overlap another's regardless of rotation.
   constexpr Demo kDemo[] = {
-      {GAME_BUILDING_FREE_COMPANY_QUARTERS, 12.0f, 0.0f, 0},
-      {GAME_BUILDING_TAVERN, 12.0f, 10.0f, 2},  // rotated 90deg -- proves yaw wiring
-      {GAME_BUILDING_WATCHTOWER, -12.0f, 0.0f, 0},
-      {GAME_BUILDING_APOTHECARY, -12.0f, 10.0f, 0},
+      {BuildingKind::FreeCompanyQuarters, 12.0f, 0.0f, 0},
+      {BuildingKind::Tavern, 12.0f, 10.0f, 2},  // rotated 90deg -- proves yaw wiring
+      {BuildingKind::Watchtower, -12.0f, 0.0f, 0},
+      {BuildingKind::Apothecary, -12.0f, 10.0f, 0},
   };
   for (const Demo& d : kDemo) {
-    GameAction action{
-        .kind = GAME_ACTION_PLACE_BUILDING,
+    Action action{
+        .kind = ActionKind::PlaceBuilding,
         .target_id = 0,
         .world_x = d.x,
         .world_z = d.z,
         .param_a = static_cast<int32_t>(d.kind),
         .param_b = d.rotation_index,
     };
-    const int64_t id = game_dispatch(game_, &action);
+    const int64_t id = sim_.Dispatch(action);
     if (id < 0) {
       spdlog::error(
           "GameView::PlaceDemoBuildings: placement failed for kind={} at "
@@ -298,18 +288,12 @@ void GameView::BuildScene() {
   // Demo buildings from the sim, shifted onto the southern plains band (so they
   // sit on land, not the central lake) and placed through the composer so they
   // honor the render mode's materials.
-  if (building_rows_.size() < kMaxBuildingRows) {
-    building_rows_.resize(kMaxBuildingRows);
-  }
-  const uint32_t total =
-      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
-  const uint32_t count = std::min(total, kMaxBuildingRows);
-  for (uint32_t i = 0; i < count; ++i) {
-    const GameBuildingState& b = building_rows_[i];
+  const auto rows = sim_.Buildings();
+  for (const BuildingState& b : rows) {
     const glm::vec2 world(b.center_x, b.center_z + kDemoBuildingsSouthShift);
     // Ground height straight from the map's query API (world -> map-local).
     const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
-    AddBuildingToComposer(composer, static_cast<GameBuildingKind>(b.kind), world,
+    AddBuildingToComposer(composer, b.kind, world,
                           yaw_from_rotation_index(b.rotation_index), ground);
   }
 
@@ -355,7 +339,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     scene_renderer_->GetFogSimulation().AddTime(static_cast<float>(sim_dt));
   }
 
-  // Fixed-interval game logic: run game_tick(kTickDt) until we've caught up to
+  // Fixed-interval game logic: run sim_.Tick(kTickDt) until we've caught up to
   // the clock's tick target. Bounded (real dt is clamped in Advance); the
   // budget is pure spiral-of-death safety. Ticks scale with sim speed because
   // the target is derived from sim time.
@@ -364,7 +348,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     const unsigned long long tick_target = sim_clock_.TickTarget();
     int budget = kMaxSimTicksPerFrame;
     while (sim_ticks_done_ < tick_target && budget-- > 0) {
-      if (game_) game_tick(game_, static_cast<float>(kTickDt));
+      sim_.Tick(static_cast<float>(kTickDt));
       ++sim_ticks_done_;
     }
   }
@@ -436,26 +420,14 @@ void GameView::DrawUI() {
   EditorUI::DrawStats(dt_);
   ImGui::End();
 
-  if (!game_) return;
-
-  GameWorldState world{};
-  game_world(game_, &world);
-
-  // Reused member buffer (kMaxBuildingRows capacity) -- avoids a per-frame
-  // heap allocation for the read-back building rows.
-  if (building_rows_.size() < kMaxBuildingRows) {
-    building_rows_.resize(kMaxBuildingRows);
-  }
-  const uint32_t total =
-      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
-  const uint32_t count = std::min(total, kMaxBuildingRows);
+  const auto world = sim_.World();
+  const auto rows = sim_.Buildings();
 
   ImGui::Begin("World");
   ImGui::Text("Gold: %u", world.gold);
-  ImGui::Text("Buildings: %u", total);
+  ImGui::Text("Buildings: %u", static_cast<uint32_t>(rows.size()));
   ImGui::Separator();
-  for (uint32_t i = 0; i < count; ++i) {
-    const GameBuildingState& b = building_rows_[i];
+  for (const BuildingState& b : rows) {
     ImGui::Text("#%u %-24s (%.1f, %.1f)", b.id,
                building_label(static_cast<GameBuildingKind>(b.kind)),
                b.center_x, b.center_z);

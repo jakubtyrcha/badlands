@@ -13,12 +13,12 @@
 
 namespace badlands {
 
-void AddBuildingToComposer(SceneComposer& composer, GameBuildingKind kind,
+void AddBuildingToComposer(SceneComposer& composer, BuildingKind kind,
                            glm::vec2 center_world, float yaw_radians,
                            float ground_y) {
-  const BuildingVisual bv = building_visual(kind);
-  const GameRenderBox box =
-      game_render_box(static_cast<int32_t>(kind), /*rotation_index=*/0);
+  const BuildingVisual bv =
+      building_visual(static_cast<GameBuildingKind>(kind));
+  const RenderBox box = RenderBoxOf(kind, /*rotation_index=*/0);
   std::vector<BuildingPart> parts =
       BuildBuildingParts(box.size_x, box.size_z, bv.height, bv.roof);
 
