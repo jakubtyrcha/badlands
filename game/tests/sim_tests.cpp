@@ -104,7 +104,7 @@ TEST_CASE("dead entities leave the state snapshot") {
     CHECK(rows[0].id == killer_id);
 }
 
-TEST_CASE("game_state reports the total beyond the caller's cap") {
+TEST_CASE("Characters() reports every spawned entity, no cap") {
     badlands::Sim sim(nullptr);
     badlands::CharacterDesc desc = dummy(0.0f, 0.0f, 0);  // one team: nobody fights
     for (int i = 0; i < 300; ++i) {

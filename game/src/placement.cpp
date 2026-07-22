@@ -1,6 +1,7 @@
 #include "placement.h"
 
 #include "game_state.h"
+#include "sim_internal.hpp"  // buildings_of / world_of / probe_of declarations
 
 #include <algorithm>
 #include <cmath>
@@ -10,40 +11,48 @@ namespace badlands {
 
 namespace {
 
-// Footprint sizes + flags, indexed by GameBuildingKind.
+// int32_t discriminants of the (scoped) BuildingKind enum, so the int32_t
+// PlacedBuilding::kind can be compared against them directly.
+constexpr int32_t kCastle = static_cast<int32_t>(BuildingKind::Castle);
+constexpr int32_t kWatchtower = static_cast<int32_t>(BuildingKind::Watchtower);
+constexpr int32_t kApothecary = static_cast<int32_t>(BuildingKind::Apothecary);
+constexpr int32_t kHouse = static_cast<int32_t>(BuildingKind::House);
+constexpr int32_t kSewer = static_cast<int32_t>(BuildingKind::Sewer);
+constexpr int32_t kKindCount = static_cast<int32_t>(BuildingKind::Count);
+
+// Footprint sizes + flags, indexed by BuildingKind.
 // { width, depth, poppable, user_destructible, enemy_targettable }.
 // user_destructible: the 7 player-buildable kinds (guilds + Tavern/Apothecary/
 // Watchtower). enemy_targettable is decoupled (Castle + House); unused in v0.3.
-constexpr GameBuildingDef kDefs[GAME_BUILDING_KIND_COUNT] = {
-    {4, 4, 0, 0, 1},  // Castle
-    {3, 3, 0, 1, 0},  // Free Company Quarters
-    {3, 3, 0, 1, 0},  // Hunter's Camp
-    {3, 3, 0, 1, 0},  // Thieves' Den
-    {3, 3, 0, 1, 0},  // Scriptorium
-    {2, 1, 0, 1, 0},  // Tavern
-    {2, 1, 0, 1, 0},  // Apothecary
-    {1, 1, 0, 1, 0},  // Watchtower
-    {2, 1, 1, 0, 1},  // House (poppable)
-    {1, 1, 1, 0, 0},  // Sewer (poppable)
+constexpr BuildingDef kDefs[kKindCount] = {
+    {4, 4, false, false, true},   // Castle
+    {3, 3, false, true, false},   // Free Company Quarters
+    {3, 3, false, true, false},   // Hunter's Camp
+    {3, 3, false, true, false},   // Thieves' Den
+    {3, 3, false, true, false},   // Scriptorium
+    {2, 1, false, true, false},   // Tavern
+    {2, 1, false, true, false},   // Apothecary
+    {1, 1, false, true, false},   // Watchtower
+    {2, 1, true, false, true},    // House (poppable)
+    {1, 1, true, false, false},   // Sewer (poppable)
 };
 
 // Urban-sprawl contribution in quarter-units. Watchtower is a small structure
 // (3/4); every other player building is a full unit (4/4). Poppables and the
 // castle contribute nothing.
 uint32_t urban_contribution(int kind) {
-    if (kind == GAME_BUILDING_WATCHTOWER) {
+    if (kind == kWatchtower) {
         return 3;
     }
-    if (kind == GAME_BUILDING_HOUSE || kind == GAME_BUILDING_SEWER ||
-        kind == GAME_BUILDING_CASTLE) {
+    if (kind == kHouse || kind == kSewer || kind == kCastle) {
         return 0;
     }
     return 4;
 }
 
-const GameBuildingDef& def_of(int kind) {
-    if (kind < 0 || kind >= GAME_BUILDING_KIND_COUNT) {
-        kind = GAME_BUILDING_WATCHTOWER;  // 1x1 fallback; never expected
+const BuildingDef& def_of(int kind) {
+    if (kind < 0 || kind >= kKindCount) {
+        kind = kWatchtower;  // 1x1 fallback; never expected
     }
     return kDefs[kind];
 }
@@ -85,7 +94,7 @@ glm::ivec2 diagonal_spans(int w, int d, int rot) {
 }
 
 glm::vec2 snap_center(int kind, int rot, glm::vec2 raw) {
-    const GameBuildingDef& def = def_of(kind);
+    const BuildingDef& def = def_of(kind);
     if (!is_diagonal(rot)) {
         int nx = (rot == 0) ? def.width_tiles : def.depth_tiles;
         int nz = (rot == 0) ? def.depth_tiles : def.width_tiles;
@@ -98,7 +107,7 @@ glm::vec2 snap_center(int kind, int rot, glm::vec2 raw) {
 }
 
 Footprint make_footprint(int kind, int rot, glm::vec2 center) {
-    const GameBuildingDef& def = def_of(kind);
+    const BuildingDef& def = def_of(kind);
     Footprint fp{};
     if (!is_diagonal(rot)) {
         fp.diagonal = false;
@@ -249,9 +258,9 @@ float poppable_score(const PlacementState& st, glm::vec2 candidate) {
             continue;
         }
         float d = glm::distance(candidate, b.center);
-        if (b.kind == GAME_BUILDING_CASTLE) {
+        if (b.kind == kCastle) {
             d_castle = std::min(d_castle, d);
-        } else if (b.kind == GAME_BUILDING_APOTHECARY) {
+        } else if (b.kind == kApothecary) {
             d_apoth = std::min(d_apoth, d);
         }
     }
@@ -281,7 +290,7 @@ uint32_t commit(PlacementState& st, int kind, int rot, glm::vec2 center) {
     for (const TriRef& t : marg) {
         st.blocked[tri_index(t.tx, t.tz, static_cast<int>(t.corner))] = 1;
     }
-    const GameBuildingDef& def = def_of(kind);
+    const BuildingDef& def = def_of(kind);
     uint32_t id = static_cast<uint32_t>(st.buildings.size());
     st.buildings.push_back({kind, center, rot, def.width_tiles, def.depth_tiles});
     ++st.nav_epoch;
@@ -290,7 +299,7 @@ uint32_t commit(PlacementState& st, int kind, int rot, glm::vec2 center) {
 
 // The distinct rotations for a kind: square footprints only need 0/45.
 int rotation_count(int kind) {
-    const GameBuildingDef& def = def_of(kind);
+    const BuildingDef& def = def_of(kind);
     return (def.width_tiles == def.depth_tiles) ? 2 : 4;
 }
 
@@ -342,19 +351,19 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor) {
     while (st.sewers_made < sewers_owed) {
         glm::vec2 center;
         int rot;
-        if (!best_poppable(st, GAME_BUILDING_SEWER, anchor, center, rot)) {
+        if (!best_poppable(st, kSewer, anchor, center, rot)) {
             break;
         }
-        notify_obstacle_added(game, commit(st, GAME_BUILDING_SEWER, rot, center));
+        notify_obstacle_added(game, commit(st, kSewer, rot, center));
         ++st.sewers_made;
     }
     while (st.houses_made < houses_owed) {
         glm::vec2 center;
         int rot;
-        if (!best_poppable(st, GAME_BUILDING_HOUSE, anchor, center, rot)) {
+        if (!best_poppable(st, kHouse, anchor, center, rot)) {
             break;
         }
-        notify_obstacle_added(game, commit(st, GAME_BUILDING_HOUSE, rot, center));
+        notify_obstacle_added(game, commit(st, kHouse, rot, center));
         ++st.houses_made;
     }
 }
@@ -362,7 +371,7 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor) {
 std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b) {
     // Reuse the render-box geometry so the obstacle polygon matches what the
     // renderer draws (axis-aligned for rot 0/90, a 45 deg diamond otherwise).
-    GameRenderBox rb = game_render_box(b.kind, b.rot);
+    RenderBox rb = RenderBoxOf(static_cast<BuildingKind>(b.kind), b.rot);
     float hx = rb.size_x * 0.5f;
     float hz = rb.size_z * 0.5f;
     float c = std::cos(rb.yaw_radians);
@@ -375,7 +384,7 @@ std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b) {
 
 glm::vec2 building_entrance(const PlacedBuilding& b) {
     // Midpoint of the +Z (local) footprint edge, rotated into world space.
-    GameRenderBox rb = game_render_box(b.kind, b.rot);
+    RenderBox rb = RenderBoxOf(static_cast<BuildingKind>(b.kind), b.rot);
     float hz = rb.size_z * 0.5f;
     float c = std::cos(rb.yaw_radians);
     float s = std::sin(rb.yaw_radians);
@@ -458,7 +467,7 @@ void rebuild_occupancy(PlacementState& st) {
 }
 
 void notify_obstacle_added(BadlandsGame& game, uint32_t building_id) {
-    const GamePathfinder& pf = game.pathfinder;
+    const Pathfinder& pf = game.pathfinder;
     if (pf.add_obstacle == nullptr || building_id >= game.placement.buildings.size()) {
         return;
     }
@@ -472,13 +481,13 @@ void notify_obstacle_added(BadlandsGame& game, uint32_t building_id) {
 }
 
 void notify_obstacle_removed(BadlandsGame& game, uint32_t building_id) {
-    const GamePathfinder& pf = game.pathfinder;
+    const Pathfinder& pf = game.pathfinder;
     if (pf.remove_obstacle != nullptr) {
         pf.remove_obstacle(pf.ctx, building_id);
     }
 }
 
-uint32_t place_building(BadlandsGame& game, const GamePlacementDesc& desc, bool player) {
+uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool player) {
     PlacementState& st = game.placement;
     int rot = ((desc.rotation_index % 4) + 4) % 4;
     glm::vec2 center = snap_center(desc.kind, rot, {desc.world_x, desc.world_z});
@@ -495,18 +504,14 @@ uint32_t place_building(BadlandsGame& game, const GamePlacementDesc& desc, bool 
     return id;
 }
 
-}  // namespace badlands
+// ---- snapshot + handle-less helpers (were the extern "C" game_* ABI) -------
 
-using namespace badlands;
+BuildingDef BuildingDefOf(BuildingKind kind) { return def_of(static_cast<int32_t>(kind)); }
 
-extern "C" {
-
-GameBuildingDef game_building_def(int32_t kind) { return def_of(kind); }
-
-GameRenderBox game_render_box(int32_t kind, int32_t rotation_index) {
+RenderBox RenderBoxOf(BuildingKind kind, int32_t rotation_index) {
     int rot = ((rotation_index % 4) + 4) % 4;
-    const GameBuildingDef& def = def_of(kind);
-    GameRenderBox box{};
+    const BuildingDef& def = def_of(static_cast<int32_t>(kind));
+    RenderBox box{};
     if (!is_diagonal(rot)) {
         // Axis-aligned: the box is the tile rectangle, rotated 0 or 90 degrees.
         box.size_x = static_cast<float>(def.width_tiles);
@@ -528,21 +533,21 @@ GameRenderBox game_render_box(int32_t kind, int32_t rotation_index) {
     return box;
 }
 
-uint32_t game_probe_placement(const BadlandsGame* game, const GamePlacementDesc* desc,
-                              GamePlacementProbe* out, GameGridTriangle* out_triangles,
-                              uint32_t cap) {
-    const PlacementState& st = game->placement;
-    int rot = ((desc->rotation_index % 4) + 4) % 4;
-    glm::vec2 center = snap_center(desc->kind, rot, {desc->world_x, desc->world_z});
-    Footprint fp = make_footprint(desc->kind, rot, center);
+PlacementProbe probe_of(const BadlandsGame& game, const PlacementDesc& desc,
+                        std::vector<GridTriangle>& out_triangles) {
+    const PlacementState& st = game.placement;
+    int rot = ((desc.rotation_index % 4) + 4) % 4;
+    glm::vec2 center = snap_center(desc.kind, rot, {desc.world_x, desc.world_z});
+    Footprint fp = make_footprint(desc.kind, rot, center);
 
-    out->valid = placement_valid(st, fp) ? 1u : 0u;
-    out->snapped_x = center.x;
-    out->snapped_z = center.y;
+    PlacementProbe probe{};
+    probe.valid = placement_valid(st, fp);
+    probe.snapped_x = center.x;
+    probe.snapped_z = center.y;
 
+    out_triangles.clear();
     int tx0, tx1, tz0, tz1;
     footprint_tile_bounds(fp, 2, tx0, tx1, tz0, tz1);
-    uint32_t total = 0;
     for (int tz = tz0; tz <= tz1; ++tz) {
         for (int tx = tx0; tx <= tx1; ++tx) {
             for (int c = 0; c < 4; ++c) {
@@ -554,54 +559,47 @@ uint32_t game_probe_placement(const BadlandsGame* game, const GamePlacementDesc*
                     bool would = in_footprint(fp, ct) || footprint_l1_dist(fp, ct) <= kMarginRadius;
                     state = would ? 2u : 0u;
                 }
-                if (total < cap) {
-                    out_triangles[total] = GameGridTriangle{
-                        .tile_x = tx,
-                        .tile_z = tz,
-                        .corner = static_cast<uint32_t>(c),
-                        .state = state,
-                    };
-                }
-                ++total;
+                out_triangles.push_back(GridTriangle{
+                    .tile_x = tx,
+                    .tile_z = tz,
+                    .corner = static_cast<uint32_t>(c),
+                    .state = state,
+                });
             }
         }
     }
-    return total;
+    return probe;
 }
 
-uint32_t game_buildings(const BadlandsGame* game, GameBuildingState* out, uint32_t cap) {
-    const PlacementState& st = game->placement;
-    // Skip tombstoned buildings; each emitted row keeps its stable slot id, and
-    // the return is the ALIVE count (count-return snapshot idiom).
-    uint32_t alive = 0;
+std::vector<BuildingState> buildings_of(const BadlandsGame& game) {
+    const PlacementState& st = game.placement;
+    // Skip tombstoned buildings; each emitted row keeps its stable slot id.
+    std::vector<BuildingState> rows;
     for (uint32_t i = 0; i < st.buildings.size(); ++i) {
         const PlacedBuilding& b = st.buildings[i];
         if (!b.alive) {
             continue;
         }
-        if (alive < cap) {
-            out[alive] = GameBuildingState{
-                .id = i,
-                .kind = b.kind,
-                .center_x = b.center.x,
-                .center_z = b.center.y,
-                .rotation_index = b.rot,
-                .width_tiles = b.w,
-                .depth_tiles = b.d,
-            };
-        }
-        ++alive;
+        rows.push_back(BuildingState{
+            .id = i,
+            .kind = static_cast<BuildingKind>(b.kind),
+            .center_x = b.center.x,
+            .center_z = b.center.y,
+            .rotation_index = b.rot,
+            .width_tiles = b.w,
+            .depth_tiles = b.d,
+        });
     }
-    return alive;
+    return rows;
 }
 
-void game_world(const BadlandsGame* game, GameWorldState* out) {
-    const PlacementState& st = game->placement;
+WorldState world_of(const BadlandsGame& game) {
+    const PlacementState& st = game.placement;
     uint32_t houses_owed = st.urban_quarters / 4;
     uint32_t sewers_owed = st.urban_quarters / 8;
     uint32_t queued = (houses_owed - st.houses_made) + (sewers_owed - st.sewers_made);
-    *out = GameWorldState{
-        .gold = game->gold,
+    return WorldState{
+        .gold = game.gold,
         .grid_half_extent_tiles = kGridHalf,
         .queued_poppables = queued,
         .urban_quarters = st.urban_quarters,
@@ -609,4 +607,4 @@ void game_world(const BadlandsGame* game, GameWorldState* out) {
     };
 }
 
-}  // extern "C"
+}  // namespace badlands

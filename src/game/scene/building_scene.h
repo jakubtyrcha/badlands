@@ -5,12 +5,12 @@
 // model_viewer_view.cpp) so badlands_game's GameView (and, potentially,
 // ModelViewerView) don't re-derive the same Wall->wall_material,
 // Roof/Tower->roof_material assembly. Game-layer, not engine (CLAUDE.md's
-// layer boundary): takes GameBuildingKind and reads game::building_visual /
+// layer boundary): takes badlands::BuildingKind and reads game::building_visual /
 // game::material_pack.
 
 #include <glm/glm.hpp>
 
-#include "badlands_game.h"  // GameBuildingKind
+#include "badlands_sim.hpp"  // badlands::BuildingKind, badlands::RenderBoxOf
 #include "engine/rendering/geometry/aabb.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
@@ -38,7 +38,7 @@ namespace badlands {
 // its world bounds, which the model viewer uses to frame its orbit camera;
 // callers that place buildings elsewhere (the game view) simply ignore it.
 Aabb AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
-                        GameBuildingKind kind, glm::vec2 center_world,
+                        BuildingKind kind, glm::vec2 center_world,
                         float yaw_radians);
 
 }  // namespace badlands

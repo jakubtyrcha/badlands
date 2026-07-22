@@ -1,6 +1,5 @@
 #include "movement.h"
 
-#include "badlands_game.h"
 #include "components.h"
 #include "game_state.h"
 #include "placement.h"
@@ -32,7 +31,7 @@ constexpr float kWorldBound = static_cast<float>(kGridHalf);
 // the waypoint polyline (empty = no path).
 std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2 goal, float radius,
                                   uint32_t exempt) {
-    const GamePathfinder& pf = game.pathfinder;
+    const Pathfinder& pf = game.pathfinder;
     if (pf.find_path != nullptr) {
         std::array<float, 2 * kMaxWaypoints> buf{};
         int n = pf.find_path(pf.ctx, start.x, start.y, goal.x, goal.y, radius, exempt, buf.data(),

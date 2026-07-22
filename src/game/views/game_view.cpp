@@ -429,7 +429,7 @@ void GameView::DrawUI() {
   ImGui::Separator();
   for (const BuildingState& b : rows) {
     ImGui::Text("#%u %-24s (%.1f, %.1f)", b.id,
-               building_label(static_cast<GameBuildingKind>(b.kind)),
+               building_label(b.kind),
                b.center_x, b.center_z);
   }
   ImGui::End();

@@ -6,7 +6,7 @@
 // LightEnvironment. Replaces PlaceholderView for the viewer executable.
 //
 // Lives in src/viewer/ (an app, not the engine): it uses game types
-// (GameBuildingKind, GamePloppableKind, building_visual, ploppable_local_ring)
+// (badlands::BuildingKind, GamePloppableKind, building_visual, ploppable_local_ring)
 // to build its prefab catalog, which CLAUDE.md's layer boundary reserves for
 // src/game / app code, not src/engine.
 
@@ -16,7 +16,7 @@
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
 
-#include "badlands_game.h"  // GameBuildingKind, GAME_BUILDING_KIND_COUNT
+#include "badlands_sim.hpp"  // badlands::BuildingKind, badlands::BuildingKind::Count
 #include "engine/app/app_view.hpp"
 #include "engine/app/orbit_camera_controller.hpp"
 #include "engine/core/camera.hpp"
@@ -65,7 +65,7 @@ class ModelViewerView : public AppView {
     std::string label;
     PrefabCategory category;
     GamePloppableKind rock_kind{};
-    GameBuildingKind building_kind{};
+    BuildingKind building_kind{};
   };
 
   void BuildCatalog();

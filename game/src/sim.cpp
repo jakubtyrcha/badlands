@@ -7,7 +7,6 @@
 
 #include "sim_internal.hpp"
 
-#include "badlands_game.h"  // extern "C" placement.cpp helpers + POD C structs
 #include "brain.h"
 #include "components.h"
 #include "heroes.h"
@@ -77,7 +76,8 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
     }
     // The colony starts with only the castle, prebuilt at the origin. Not a
     // player placement: it seeds no urban sprawl.
-    place_building(*game, GamePlacementDesc{GAME_BUILDING_CASTLE, 0, 0.0f, 0.0f},
+    place_building(*game,
+                   PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, 0.0f, 0.0f},
                    /*player=*/false);
     return game;
 }
@@ -175,29 +175,13 @@ void tick_world(BadlandsGame& g, float dt) {
 uint32_t spawn_into(BadlandsGame& g, const CharacterDesc& desc) {
     // Plain (home-less) spawn; heroes::spawn_entity emplaces the full component
     // set shared with recruit.
-    GameCharacterDesc c{
-        .pos_x = desc.pos_x,
-        .pos_z = desc.pos_z,
-        .team = desc.team,
-        .hp = desc.hp,
-        .move_speed = desc.move_speed,
-        .attack_range = desc.attack_range,
-        .attack_damage = desc.attack_damage,
-        .attack_cooldown = desc.attack_cooldown,
-        .size_x = desc.size_x,
-        .size_y = desc.size_y,
-        .size_z = desc.size_z,
-        .color_r = desc.color_r,
-        .color_g = desc.color_g,
-        .color_b = desc.color_b,
-    };
-    return spawn_entity(g, c, -1);
+    return spawn_entity(g, desc, -1);
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {
     switch (action.kind) {
         case ActionKind::PlaceBuilding: {
-            GamePlacementDesc desc{action.param_a, action.param_b, action.world_x, action.world_z};
+            PlacementDesc desc{action.param_a, action.param_b, action.world_x, action.world_z};
             uint32_t id = place_building(g, desc, /*player=*/true);
             return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
         }
@@ -265,41 +249,6 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
     return rows;
 }
 
-std::vector<BuildingState> buildings_of(const BadlandsGame& g) {
-    // Reuse the C ABI's alive-count snapshot: query the total, then fill.
-    uint32_t total = game_buildings(&g, nullptr, 0);
-    std::vector<GameBuildingState> tmp(total);
-    if (total > 0) {
-        game_buildings(&g, tmp.data(), total);
-    }
-    std::vector<BuildingState> rows;
-    rows.reserve(total);
-    for (const GameBuildingState& b : tmp) {
-        rows.push_back(BuildingState{
-            .id = b.id,
-            .kind = static_cast<BuildingKind>(b.kind),
-            .center_x = b.center_x,
-            .center_z = b.center_z,
-            .rotation_index = b.rotation_index,
-            .width_tiles = b.width_tiles,
-            .depth_tiles = b.depth_tiles,
-        });
-    }
-    return rows;
-}
-
-WorldState world_of(const BadlandsGame& g) {
-    GameWorldState w{};
-    game_world(&g, &w);
-    return WorldState{
-        .gold = w.gold,
-        .grid_half_extent_tiles = w.grid_half_extent_tiles,
-        .queued_poppables = w.queued_poppables,
-        .urban_quarters = w.urban_quarters,
-        .guild_roster_cap = w.guild_roster_cap,
-    };
-}
-
 SimStats stats_of(const BadlandsGame& g) {
     return SimStats{
         .ticks = g.ticks,
@@ -308,50 +257,9 @@ SimStats stats_of(const BadlandsGame& g) {
     };
 }
 
-PlacementProbe probe_of(const BadlandsGame& g, const PlacementDesc& desc,
-                        std::vector<GridTriangle>& out_triangles) {
-    GamePlacementDesc c{desc.kind, desc.rotation_index, desc.world_x, desc.world_z};
-    GamePlacementProbe probe{};
-    // First call gets the validity/snap + the total triangle count.
-    uint32_t total = game_probe_placement(&g, &c, &probe, nullptr, 0);
-    std::vector<GameGridTriangle> tmp(total);
-    if (total > 0) {
-        game_probe_placement(&g, &c, &probe, tmp.data(), total);
-    }
-    out_triangles.clear();
-    out_triangles.reserve(total);
-    for (const GameGridTriangle& t : tmp) {
-        out_triangles.push_back(GridTriangle{
-            .tile_x = t.tile_x,
-            .tile_z = t.tile_z,
-            .corner = t.corner,
-            .state = t.state,
-        });
-    }
-    return PlacementProbe{
-        .valid = probe.valid != 0u,
-        .snapped_x = probe.snapped_x,
-        .snapped_z = probe.snapped_z,
-    };
-}
-
 // ---- handle-less helpers ---------------------------------------------------
-
-BuildingDef BuildingDefOf(BuildingKind kind) {
-    GameBuildingDef d = game_building_def(static_cast<int32_t>(kind));
-    return BuildingDef{
-        .width_tiles = d.width_tiles,
-        .depth_tiles = d.depth_tiles,
-        .poppable = d.poppable != 0u,
-        .user_destructible = d.user_destructible != 0u,
-        .enemy_targettable = d.enemy_targettable != 0u,
-    };
-}
-
-RenderBox RenderBoxOf(BuildingKind kind, int32_t rotation_index) {
-    GameRenderBox b = game_render_box(static_cast<int32_t>(kind), rotation_index);
-    return RenderBox{.size_x = b.size_x, .size_z = b.size_z, .yaw_radians = b.yaw_radians};
-}
+// BuildingDefOf / RenderBoxOf / buildings_of / world_of / probe_of own their
+// logic directly in placement.cpp now (no C-ABI forwarding).
 
 CharacterDesc MercenaryDesc(float pos_x, float pos_z) {
     return CharacterDesc{
@@ -404,15 +312,21 @@ bool Sim::ReloadScript(const std::string& source) { return reload_script(*world_
 int64_t Sim::Dispatch(const Action& action) { return dispatch_into(*world_, action); }
 
 void Sim::SetPathfinder(const Pathfinder& pf) {
-    // Convert to the world's GamePathfinder member and reuse the C ABI's
-    // register + back-fill (game_set_pathfinder stays as-is).
-    GamePathfinder gpf{
-        .ctx = pf.ctx,
-        .add_obstacle = pf.add_obstacle,
-        .remove_obstacle = pf.remove_obstacle,
-        .find_path = pf.find_path,
-    };
-    game_set_pathfinder(world_.get(), &gpf);
+    // Store the provider by value, then back-fill it with every alive building
+    // already placed (the prebuilt castle, and any placed before registration)
+    // so its obstacle set matches the world. A default-constructed Pathfinder
+    // (null add_obstacle) clears the provider without back-filling.
+    BadlandsGame& game = *world_;
+    game.pathfinder = pf;
+    if (game.pathfinder.add_obstacle == nullptr) {
+        return;
+    }
+    const auto& buildings = game.placement.buildings;
+    for (uint32_t id = 0; id < buildings.size(); ++id) {
+        if (buildings[id].alive) {
+            notify_obstacle_added(game, id);
+        }
+    }
 }
 
 std::vector<CharacterState> Sim::Characters() const { return characters_of(*world_); }
