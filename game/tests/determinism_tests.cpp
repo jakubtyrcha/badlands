@@ -11,7 +11,7 @@
 //                       brains switched off, reproduces the state exactly. This
 //                       is what makes the log a TRACE and not just a debug list.
 
-#include "badlands_game.h"
+#include "sim_internal.hpp"
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
@@ -35,42 +35,37 @@ void seed_town(BadlandsGame* g) {
         float x, z;
     };
     const Seed kSeed[] = {
-        {GAME_BUILDING_FREE_COMPANY_QUARTERS, -14.0f, -8.0f},
-        {GAME_BUILDING_TAVERN, 14.0f, -8.0f},
-        {GAME_BUILDING_APOTHECARY, 14.0f, 8.0f},
+        {static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -14.0f, -8.0f},
+        {static_cast<int32_t>(BuildingKind::Tavern), 14.0f, -8.0f},
+        {static_cast<int32_t>(BuildingKind::Apothecary), 14.0f, 8.0f},
     };
     for (const Seed& s : kSeed) {
-        GameAction place{GAME_ACTION_PLACE_BUILDING, 0, s.x, s.z, s.kind, 0};
-        int64_t id = game_dispatch(g, &place);
+        Action place{ActionKind::PlaceBuilding, 0, s.x, s.z, s.kind, 0};
+        int64_t id = dispatch_into(*g, place);
         REQUIRE(id >= 0);
-        if (s.kind != GAME_BUILDING_FREE_COMPANY_QUARTERS) {
+        if (s.kind != static_cast<int32_t>(BuildingKind::FreeCompanyQuarters)) {
             continue;
         }
         for (int i = 0; i < 3; ++i) {
-            GameAction recruit{GAME_ACTION_RECRUIT_HERO, static_cast<uint32_t>(id),
+            Action recruit{ActionKind::RecruitHero, static_cast<uint32_t>(id),
                                0.0f, 0.0f, 0, 0};
-            REQUIRE(game_dispatch(g, &recruit) >= 0);
+            REQUIRE(dispatch_into(*g, recruit) >= 0);
         }
     }
 }
 
-// The observable state, read only through the C ABI (what any observer sees).
+// The observable state, read only through the Sim snapshot API.
 struct Snapshot {
-    std::vector<GameCharacterState> characters;
-    GameWorldState world{};
+    std::vector<CharacterState> characters;
+    WorldState world{};
     uint64_t ticks = 0;
 };
 
 Snapshot snapshot(BadlandsGame* g) {
     Snapshot s;
-    s.characters.resize(64);
-    uint32_t n = game_state(g, s.characters.data(), 64);
-    REQUIRE(n <= 64);
-    s.characters.resize(n);
-    game_world(g, &s.world);
-    GameStats stats{};
-    game_stats(g, &stats);
-    s.ticks = stats.ticks;
+    s.characters = characters_of(*g);
+    s.world = world_of(*g);
+    s.ticks = stats_of(*g).ticks;
     return s;
 }
 
@@ -80,8 +75,8 @@ void require_same(const Snapshot& a, const Snapshot& b) {
     CHECK(a.world.world_millis == b.world.world_millis);
     CHECK(a.world.gold == b.world.gold);
     for (size_t i = 0; i < a.characters.size(); ++i) {
-        const GameCharacterState& x = a.characters[i];
-        const GameCharacterState& y = b.characters[i];
+        const CharacterState& x = a.characters[i];
+        const CharacterState& y = b.characters[i];
         INFO("character row " << i << " (" << x.name << ")");
         CHECK(x.id == y.id);
         CHECK(x.pos_x == y.pos_x);  // bit-exact: no tolerance on a determinism test
@@ -104,13 +99,15 @@ bool same_command(const Command& a, const Command& b) {
 }  // namespace
 
 TEST_CASE("the same inputs produce the same state and the same command log") {
-    BadlandsGame* a = game_create(nullptr);
-    BadlandsGame* b = game_create(nullptr);
+    auto a_owned = make_world(nullptr);
+    BadlandsGame* a = a_owned.get();
+    auto b_owned = make_world(nullptr);
+    BadlandsGame* b = b_owned.get();
     seed_town(a);
     seed_town(b);
     for (int i = 0; i < kRunTicks; ++i) {
-        game_tick(a, 1.0f / 30.0f);
-        game_tick(b, 1.0f / 30.0f);
+        tick_world(*a, 1.0f / 30.0f);
+        tick_world(*b, 1.0f / 30.0f);
     }
 
     require_same(snapshot(a), snapshot(b));
@@ -123,15 +120,14 @@ TEST_CASE("the same inputs produce the same state and the same command log") {
         CHECK(same_command(a->command_log[i], b->command_log[i]));
     }
 
-    game_destroy(a);
-    game_destroy(b);
-}
+        }
 
 TEST_CASE("a recorded command log replays into a fresh sim exactly") {
-    BadlandsGame* live = game_create(nullptr);
+    auto live_owned = make_world(nullptr);
+    BadlandsGame* live = live_owned.get();
     seed_town(live);
     for (int i = 0; i < kRunTicks; ++i) {
-        game_tick(live, 1.0f / 30.0f);
+        tick_world(*live, 1.0f / 30.0f);
     }
     const std::vector<Command> log = live->command_log;
     REQUIRE(!log.empty());
@@ -139,31 +135,32 @@ TEST_CASE("a recorded command log replays into a fresh sim exactly") {
     // Fresh sim, brains OFF: every decision comes from the log. Note there is no
     // seed_town call -- the seed is IN the log, so the world is rebuilt from the
     // trace alone.
-    BadlandsGame* replay = game_create(nullptr);
+    auto replay_owned = make_world(nullptr);
+    BadlandsGame* replay = replay_owned.get();
     replay->replay_log = &log;
     for (int i = 0; i < kRunTicks; ++i) {
-        game_tick(replay, 1.0f / 30.0f);
+        tick_world(*replay, 1.0f / 30.0f);
     }
 
     CHECK(replay->replay_cursor == log.size());  // the whole trace was consumed
     require_same(snapshot(live), snapshot(replay));
 
-    game_destroy(live);
-    game_destroy(replay);
-}
+        }
 
 TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
-    BadlandsGame* live = game_create(nullptr);
+    auto live_owned = make_world(nullptr);
+    BadlandsGame* live = live_owned.get();
     seed_town(live);
     for (int i = 0; i < 120; ++i) {
-        game_tick(live, 1.0f / 30.0f);
+        tick_world(*live, 1.0f / 30.0f);
     }
     const std::vector<Command> log = live->command_log;
 
-    BadlandsGame* replay = game_create(nullptr);
+    auto replay_owned = make_world(nullptr);
+    BadlandsGame* replay = replay_owned.get();
     replay->replay_log = &log;
     for (int i = 0; i < 120; ++i) {
-        game_tick(replay, 1.0f / 30.0f);
+        tick_world(*replay, 1.0f / 30.0f);
     }
 
     REQUIRE(replay->command_log.size() == log.size());
@@ -172,6 +169,4 @@ TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
         CHECK(same_command(replay->command_log[i], log[i]));
     }
 
-    game_destroy(live);
-    game_destroy(replay);
-}
+        }

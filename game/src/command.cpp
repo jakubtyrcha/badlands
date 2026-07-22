@@ -23,7 +23,7 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
     switch (cmd.kind) {
         // --- player commands (apply synchronously via game_dispatch) ---------
         case CommandKind::PlaceBuilding: {
-            GamePlacementDesc desc{cmd.param_a, cmd.param_b, cmd.point.x, cmd.point.y};
+            PlacementDesc desc{cmd.param_a, cmd.param_b, cmd.point.x, cmd.point.y};
             uint32_t id = place_building(game, desc, /*player=*/true);
             return (id == kNoId) ? -1 : static_cast<int64_t>(id);
         }
@@ -139,27 +139,3 @@ void apply_replay_commands(BadlandsGame& game) {
 }
 
 }  // namespace badlands
-
-extern "C" {
-
-uint32_t game_command_log(const BadlandsGame* game, GameCommandRecord* out, uint32_t cap) {
-    const auto& log = game->command_log;
-    const auto total = static_cast<uint32_t>(log.size());
-    const uint32_t n = std::min(total, cap);
-    // Tail-biased: a panel wants the most recent n, still oldest-first.
-    for (uint32_t i = 0; i < n; ++i) {
-        const badlands::Command& c = log[total - n + i];
-        out[i] = GameCommandRecord{
-            .kind = static_cast<int32_t>(c.kind),
-            .actor = c.actor,
-            .target_id = c.target_id,
-            .point_x = c.point.x,
-            .point_z = c.point.y,
-            .param_a = c.param_a,
-            .param_b = c.param_b,
-        };
-    }
-    return total;
-}
-
-}  // extern "C"

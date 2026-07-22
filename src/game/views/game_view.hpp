@@ -14,7 +14,7 @@
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
 
-#include "badlands_game.h"  // BadlandsGame, GameBuildingKind
+#include "badlands_sim.hpp"  // badlands::Sim, badlands::BuildingState
 #include "engine/app/app_view.hpp"
 #include "engine/app/game_camera_controller.hpp"
 #include "engine/app/sim_clock.hpp"
@@ -59,13 +59,13 @@ class GameView : public AppView {
   // Bakes the HW sky/IBL/ambient/directional-light for `state` into
   // scene_context_ and mirrors ambient into scene_. The expensive path.
   void RebakeSky(const DaylightState& state);
-  // Seeds the demo town via game_dispatch(GAME_ACTION_PLACE_BUILDING) at a
+  // Seeds the demo town via sim_.Dispatch(ActionKind::PlaceBuilding) at a
   // few spread-out, non-overlapping tiles around the prebuilt origin Castle.
   void PlaceDemoBuildings();
   // Clears scene_ and rebuilds it from scratch through the visual SceneComposer:
   // re-mirrors scene_context_'s lighting, generates the symbolic greybox map
   // (SymbolicMapGenerator) and adds its terrain chunks + lake water surfaces,
-  // then adds every game_buildings() row via AddBuildingToComposer. mode_ picks
+  // then adds every sim_.Buildings() row via AddBuildingToComposer. mode_ picks
   // blockout vs detailed materials. Called once from Initialize. NOTE: the sim
   // ticks, but this stage has no dynamic entities, so the scene stays valid;
   // when dynamic entities land, BuildScene (or an incremental update) must be
@@ -112,12 +112,12 @@ class GameView : public AppView {
   Camera camera_;
   GameCameraController gamecam_;
 
-  // Owns the sim; created in Initialize, destroyed in ~GameView.
-  BadlandsGame* game_ = nullptr;
+  // Owns the sim (RAII value member; nullptr script = mock brains).
+  badlands::Sim sim_{nullptr};
 
-  // Reused read-back buffer for game_buildings() (BuildScene + DrawUI), sized
-  // to kMaxBuildingRows once -- avoids a per-frame heap allocation.
-  std::vector<GameBuildingState> building_rows_;
+  // Reused scratch buffer for sim_.Buildings(building_rows_), so the per-frame
+  // DrawUI/BuildScene reads don't allocate a fresh vector each call.
+  std::vector<badlands::BuildingState> building_rows_;
 
   float dt_ = 0.0f;
 };

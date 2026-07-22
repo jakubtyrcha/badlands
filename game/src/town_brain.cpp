@@ -1,6 +1,6 @@
 #include "town_brain.h"
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
@@ -21,6 +21,12 @@ constexpr float kFatigueGoHome = 0.6f;   // tired enough to head home by day
 constexpr float kFatigueNight = 0.2f;    // lower bar to go home once it is night
 constexpr float kBoredomTavern = 0.5f;   // bored enough to seek the tavern
 constexpr float kRoamRadius = 6.0f;
+
+// int32_t discriminants of the scoped BuildingKind enum, so they can be passed
+// to the int32_t-keyed placement/hero helpers directly (same idiom as
+// placement.cpp).
+constexpr int32_t kApothecary = static_cast<int32_t>(BuildingKind::Apothecary);
+constexpr int32_t kTavern = static_cast<int32_t>(BuildingKind::Tavern);
 
 // xorshift64 step (deterministic; seed must be non-zero).
 uint64_t xorshift(uint64_t& s) {
@@ -63,9 +69,9 @@ void town_think(BadlandsGame& game, uint32_t slot) {
             game.placement, game.placement.buildings[sim.home_building_id], home_door);
     }
     glm::vec2 apo_door{};
-    bool has_apo = door_of_kind(game, GAME_BUILDING_APOTHECARY, pos, apo_door);
+    bool has_apo = door_of_kind(game, kApothecary, pos, apo_door);
     glm::vec2 tavern_door{};
-    bool has_tavern = door_of_kind(game, GAME_BUILDING_TAVERN, pos, tavern_door);
+    bool has_tavern = door_of_kind(game, kTavern, pos, tavern_door);
 
     Behavior chosen = Behavior::Idle;
     glm::vec2 target = pos;
@@ -86,7 +92,7 @@ void town_think(BadlandsGame& game, uint32_t slot) {
         chosen = Behavior::VisitTavern;
         target = tavern_door;
         follow_up = {CommandKind::EnterBuilding, slot, UINT32_MAX, {0.0f, 0.0f},
-                     GAME_BUILDING_TAVERN};
+                     kTavern};
         have_follow_up = true;
     } else {
         chosen = Behavior::Roam;

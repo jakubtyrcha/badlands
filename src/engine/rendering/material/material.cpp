@@ -39,6 +39,9 @@ RenderPipelineDeclaration MeshRenderingMaterial::BuildDeclaration(
     case GeometryType::kTerrainBlend:
       decl.vertex_layout = VertexLayout::kTerrainBlend;
       break;
+    case GeometryType::kTerrainCluster:
+      decl.vertex_layout = VertexLayout::kTerrainCluster;
+      break;
     case GeometryType::kTexturedMesh:
       decl.vertex_layout = VertexLayout::kTexturedMesh;
       break;

@@ -10,8 +10,8 @@
 // This is the inspection surface for the game-systems architecture: the panel
 // shows the sim clock (day/night), every hero's needs + chosen behaviour, and
 // the tail of the command log (the trace of record). Everything it draws comes
-// through the data-only C ABI (game_state / game_buildings / game_world /
-// game_command_log) -- the view never reaches into the sim's registry.
+// through the badlands::Sim snapshot API (Characters / Buildings / World /
+// CommandLog) -- the view never reaches into the sim's registry.
 
 #include <cstdint>
 #include <vector>
@@ -20,7 +20,7 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"  // badlands::Sim + snapshot structs
 #include "engine/app/app_view.hpp"
 #include "engine/app/game_camera_controller.hpp"
 #include "engine/app/sim_clock.hpp"
@@ -36,8 +36,6 @@ namespace badlands {
 
 class AiSandboxView : public AppView {
  public:
-  ~AiSandboxView() override;
-
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
   void Update(float dt, const bool* keyboard_state) override;
@@ -100,8 +98,8 @@ class AiSandboxView : public AppView {
 
   Arena arena_;
 
-  // Owns the sim; created in SeedTown, destroyed in ~AiSandboxView.
-  BadlandsGame* game_ = nullptr;
+  // Owns the sim (RAII; no manual destroy). Seeded in SeedTown.
+  badlands::Sim sim_{nullptr};
 
   // Time model (see sim_clock.hpp): real dt * speed -> sim seconds; the sim
   // runs fixed game_ticks up to TickTarget(), so the speed control accelerates
@@ -110,9 +108,9 @@ class AiSandboxView : public AppView {
   unsigned long long sim_ticks_done_ = 0;
 
   // Reused snapshot read-back buffers (no per-frame heap churn).
-  std::vector<GameCharacterState> char_rows_;
-  std::vector<GameBuildingState> building_rows_;
-  std::vector<GameCommandRecord> cmd_rows_;
+  std::vector<badlands::CharacterState> char_rows_;
+  std::vector<badlands::BuildingState> building_rows_;
+  std::vector<badlands::CommandRecord> cmd_rows_;
   uint32_t command_log_total_ = 0;
 
   // Fixed pool of hero capsule nodes; index == game_state row index.

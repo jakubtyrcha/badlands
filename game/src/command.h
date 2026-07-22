@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"
 
 #include <glm/glm.hpp>
 
@@ -31,17 +31,26 @@ enum class CommandKind : int32_t {
     SetBehavior,
 };
 
-// The log is exposed verbatim over the C ABI (game_command_log), so the two
-// enums are one id space.
-static_assert(static_cast<int32_t>(CommandKind::PlaceBuilding) == GAME_COMMAND_PLACE_BUILDING);
-static_assert(static_cast<int32_t>(CommandKind::RecruitHero) == GAME_COMMAND_RECRUIT_HERO);
-static_assert(static_cast<int32_t>(CommandKind::DestroyBuilding) == GAME_COMMAND_DESTROY_BUILDING);
-static_assert(static_cast<int32_t>(CommandKind::MoveTo) == GAME_COMMAND_MOVE_TO);
-static_assert(static_cast<int32_t>(CommandKind::EnterBuilding) == GAME_COMMAND_ENTER_BUILDING);
-static_assert(static_cast<int32_t>(CommandKind::EnterHome) == GAME_COMMAND_ENTER_HOME);
-static_assert(static_cast<int32_t>(CommandKind::Buy) == GAME_COMMAND_BUY);
-static_assert(static_cast<int32_t>(CommandKind::Attack) == GAME_COMMAND_ATTACK);
-static_assert(static_cast<int32_t>(CommandKind::SetBehavior) == GAME_COMMAND_SET_BEHAVIOR);
+// The log is exposed verbatim through Sim::CommandLog(), so the two enums are
+// one id space.
+static_assert(static_cast<int32_t>(CommandKind::PlaceBuilding) ==
+              static_cast<int32_t>(CommandKindId::PlaceBuilding));
+static_assert(static_cast<int32_t>(CommandKind::RecruitHero) ==
+              static_cast<int32_t>(CommandKindId::RecruitHero));
+static_assert(static_cast<int32_t>(CommandKind::DestroyBuilding) ==
+              static_cast<int32_t>(CommandKindId::DestroyBuilding));
+static_assert(static_cast<int32_t>(CommandKind::MoveTo) ==
+              static_cast<int32_t>(CommandKindId::MoveTo));
+static_assert(static_cast<int32_t>(CommandKind::EnterBuilding) ==
+              static_cast<int32_t>(CommandKindId::EnterBuilding));
+static_assert(static_cast<int32_t>(CommandKind::EnterHome) ==
+              static_cast<int32_t>(CommandKindId::EnterHome));
+static_assert(static_cast<int32_t>(CommandKind::Buy) ==
+              static_cast<int32_t>(CommandKindId::Buy));
+static_assert(static_cast<int32_t>(CommandKind::Attack) ==
+              static_cast<int32_t>(CommandKindId::Attack));
+static_assert(static_cast<int32_t>(CommandKind::SetBehavior) ==
+              static_cast<int32_t>(CommandKindId::SetBehavior));
 
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional

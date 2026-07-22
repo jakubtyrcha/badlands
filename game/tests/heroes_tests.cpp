@@ -1,12 +1,12 @@
 // Hero recruitment, residency/class, entering/hiding, and the destruction
-// cascade. Driven through game_dispatch (recruit/destroy) and the internal
+// cascade. Driven through dispatch_into (recruit/destroy) and the internal
 // errand mechanics (enter/exit/buy) -- no UI, no brain.
 
-#include "badlands_game.h"
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
 #include "placement.h"
+#include "sim_internal.hpp"  // make_world / dispatch_into / characters_of / tick_world
 
 #include <catch_amalgamated.hpp>
 #include <entt/entt.hpp>
@@ -19,29 +19,24 @@ using namespace badlands;
 
 namespace {
 
-uint32_t place_at(BadlandsGame* g, int kind, float x, float z) {
-    GameAction a{GAME_ACTION_PLACE_BUILDING, 0, x, z, kind, 0};
-    int64_t r = game_dispatch(g, &a);
+uint32_t place_at(BadlandsGame* g, BuildingKind kind, float x, float z) {
+    Action a{ActionKind::PlaceBuilding, 0, x, z, static_cast<int32_t>(kind), 0};
+    int64_t r = dispatch_into(*g, a);
     return (r < 0) ? UINT32_MAX : static_cast<uint32_t>(r);
 }
 
 uint32_t recruit_at(BadlandsGame* g, uint32_t bid) {
-    GameAction a{GAME_ACTION_RECRUIT_HERO, bid, 0.0f, 0.0f, 0, 0};
-    int64_t r = game_dispatch(g, &a);
+    Action a{ActionKind::RecruitHero, bid, 0.0f, 0.0f, 0, 0};
+    int64_t r = dispatch_into(*g, a);
     return (r < 0) ? UINT32_MAX : static_cast<uint32_t>(r);
 }
 
 int64_t destroy_at(BadlandsGame* g, uint32_t bid) {
-    GameAction a{GAME_ACTION_DESTROY_BUILDING, bid, 0.0f, 0.0f, 0, 0};
-    return game_dispatch(g, &a);
+    Action a{ActionKind::DestroyBuilding, bid, 0.0f, 0.0f, 0, 0};
+    return dispatch_into(*g, a);
 }
 
-std::vector<GameCharacterState> chars(BadlandsGame* g) {
-    std::vector<GameCharacterState> rows(64);
-    uint32_t n = game_state(g, rows.data(), static_cast<uint32_t>(rows.size()));
-    rows.resize(n);
-    return rows;
-}
+std::vector<CharacterState> chars(BadlandsGame* g) { return characters_of(*g); }
 
 bool tile_free(const BadlandsGame* g, glm::vec2 p) {
     int tx = static_cast<int>(std::floor(p.x));
@@ -58,17 +53,18 @@ bool tile_free(const BadlandsGame* g, glm::vec2 p) {
 
 TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
     struct Guild {
-        int kind;
+        BuildingKind kind;
         int32_t cls;
     };
     Guild guilds[] = {
-        {GAME_BUILDING_FREE_COMPANY_QUARTERS, HERO_MERCENARY},
-        {GAME_BUILDING_HUNTERS_CAMP, HERO_HUNTER},
-        {GAME_BUILDING_THIEVES_DEN, HERO_GRAVE_ROBBER},
-        {GAME_BUILDING_SCRIPTORIUM, HERO_APPRENTICE},
+        {BuildingKind::FreeCompanyQuarters, HERO_MERCENARY},
+        {BuildingKind::HuntersCamp, HERO_HUNTER},
+        {BuildingKind::ThievesDen, HERO_GRAVE_ROBBER},
+        {BuildingKind::Scriptorium, HERO_APPRENTICE},
     };
     for (const Guild& gd : guilds) {
-        BadlandsGame* game = game_create(nullptr);
+        auto owned = make_world(nullptr);
+        BadlandsGame* game = owned.get();
         uint32_t bid = place_at(game, gd.kind, -30.0f, 30.0f);
         REQUIRE(bid != UINT32_MAX);
         uint32_t hid = recruit_at(game, bid);
@@ -80,8 +76,8 @@ TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
         CHECK(game->registry.get<HeroCharacter>(e).hero_class == gd.cls);
         CHECK(game->registry.get<HeroSimulationState>(e).inventory == 0);
 
-        // Class-derived color matches hero_desc, and game_state exposes the home.
-        GameCharacterDesc want = hero_desc(gd.cls, 0.0f, 0.0f);
+        // Class-derived color matches hero_desc, and Characters() exposes the home.
+        CharacterDesc want = hero_desc(gd.cls, 0.0f, 0.0f);
         CHECK_THAT(game->registry.get<RenderShape>(e).color.x,
                    Catch::Matchers::WithinAbs(want.color_r, 1e-4f));
         for (const auto& row : chars(game)) {
@@ -92,19 +88,18 @@ TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
         }
         // Spawned on a free exterior tile.
         CHECK(tile_free(game, game->registry.get<Position>(e).pos));
-
-        game_destroy(game);
     }
 }
 
 TEST_CASE("recruit rejects non-guilds, missing buildings, and a full roster") {
-    BadlandsGame* game = game_create(nullptr);
-    uint32_t tavern = place_at(game, GAME_BUILDING_TAVERN, -30.0f, 30.0f);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
+    uint32_t tavern = place_at(game, BuildingKind::Tavern, -30.0f, 30.0f);
     REQUIRE(tavern != UINT32_MAX);
     CHECK(recruit_at(game, tavern) == UINT32_MAX);  // not a guild
     CHECK(recruit_at(game, 999) == UINT32_MAX);     // no such building
 
-    uint32_t guild = place_at(game, GAME_BUILDING_FREE_COMPANY_QUARTERS, 30.0f, 30.0f);
+    uint32_t guild = place_at(game, BuildingKind::FreeCompanyQuarters, 30.0f, 30.0f);
     REQUIRE(guild != UINT32_MAX);
     for (int i = 0; i < kGuildRosterCap; ++i) {
         CHECK(recruit_at(game, guild) != UINT32_MAX);
@@ -112,13 +107,13 @@ TEST_CASE("recruit rejects non-guilds, missing buildings, and a full roster") {
     CHECK(recruit_at(game, guild) == UINT32_MAX);  // 5th over cap
     CHECK(roster_count(*game, guild) == static_cast<uint32_t>(kGuildRosterCap));
 
-    game_destroy(game);
 }
 
-TEST_CASE("a hero enters a building, hides from game_state's drawable set, then reappears") {
-    BadlandsGame* game = game_create(nullptr);
-    uint32_t guild = place_at(game, GAME_BUILDING_SCRIPTORIUM, -30.0f, 30.0f);
-    uint32_t apo = place_at(game, GAME_BUILDING_APOTHECARY, 30.0f, 30.0f);
+TEST_CASE("a hero enters a building, hides from Characters()'s drawable set, then reappears") {
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
+    uint32_t guild = place_at(game, BuildingKind::Scriptorium, -30.0f, 30.0f);
+    uint32_t apo = place_at(game, BuildingKind::Apothecary, 30.0f, 30.0f);
     uint32_t hid = recruit_at(game, guild);
     REQUIRE(hid != UINT32_MAX);
     entt::entity e = game->slots[hid];
@@ -127,7 +122,7 @@ TEST_CASE("a hero enters a building, hides from game_state's drawable set, then 
     glm::vec2 tile;
     REQUIRE(building_approach_tile(game->placement, game->placement.buildings[apo], tile));
     game->registry.get<Position>(e).pos = tile;
-    REQUIRE(hero_enter(*game, e, GAME_BUILDING_APOTHECARY));
+    REQUIRE(hero_enter(*game, e, static_cast<int32_t>(BuildingKind::Apothecary)));
 
     bool seen = false;
     for (const auto& row : chars(game)) {
@@ -140,7 +135,7 @@ TEST_CASE("a hero enters a building, hides from game_state's drawable set, then 
 
     // Tick past the stay: the hero reappears at the approach tile.
     for (int i = 0; i < 300 && game->registry.all_of<InsideBuilding>(e); ++i) {
-        game_tick(game, 1.0f / 30.0f);
+        tick_world(*game, 1.0f / 30.0f);
     }
     CHECK(!game->registry.all_of<InsideBuilding>(e));
     for (const auto& row : chars(game)) {
@@ -150,13 +145,13 @@ TEST_CASE("a hero enters a building, hides from game_state's drawable set, then 
     }
     CHECK(glm::distance(game->registry.get<Position>(e).pos, tile) < 1.5f);
 
-    game_destroy(game);
 }
 
 TEST_CASE("buying at an apothecary fills the hero's inventory") {
-    BadlandsGame* game = game_create(nullptr);
-    uint32_t guild = place_at(game, GAME_BUILDING_HUNTERS_CAMP, -30.0f, 30.0f);
-    uint32_t apo = place_at(game, GAME_BUILDING_APOTHECARY, 30.0f, 30.0f);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
+    uint32_t guild = place_at(game, BuildingKind::HuntersCamp, -30.0f, 30.0f);
+    uint32_t apo = place_at(game, BuildingKind::Apothecary, 30.0f, 30.0f);
     uint32_t hid = recruit_at(game, guild);
     REQUIRE(hid != UINT32_MAX);
     entt::entity e = game->slots[hid];
@@ -170,12 +165,12 @@ TEST_CASE("buying at an apothecary fills the hero's inventory") {
     CHECK(hero_buy(*game, e));
     CHECK(game->registry.get<HeroSimulationState>(e).inventory == kInventoryCap);
 
-    game_destroy(game);
 }
 
 TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footprint") {
-    BadlandsGame* game = game_create(nullptr);
-    uint32_t g1 = place_at(game, GAME_BUILDING_FREE_COMPANY_QUARTERS, -20.0f, 20.0f);
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
+    uint32_t g1 = place_at(game, BuildingKind::FreeCompanyQuarters, -20.0f, 20.0f);
     REQUIRE(g1 != UINT32_MAX);
 
     SECTION("rejects the non-destructible castle") {
@@ -184,7 +179,7 @@ TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footpr
     }
 
     SECTION("reassigns residents to another same-class guild with room") {
-        uint32_t g2 = place_at(game, GAME_BUILDING_FREE_COMPANY_QUARTERS, 20.0f, 20.0f);
+        uint32_t g2 = place_at(game, BuildingKind::FreeCompanyQuarters, 20.0f, 20.0f);
         std::vector<uint32_t> heroes;
         for (int i = 0; i < 3; ++i) {
             heroes.push_back(recruit_at(game, g1));
@@ -211,8 +206,8 @@ TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footpr
         game->registry.emplace<InsideBuilding>(e, static_cast<int32_t>(g1),
                                                kInsideDurationSeconds);
 
-        Footprint fp =
-            make_footprint(GAME_BUILDING_FREE_COMPANY_QUARTERS, 0, game->placement.buildings[g1].center);
+        Footprint fp = make_footprint(static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0,
+                                      game->placement.buildings[g1].center);
         std::vector<TriRef> foot;
         footprint_triangles(fp, foot);
         int idx = tri_index(foot[0].tx, foot[0].tz, static_cast<int>(foot[0].corner));
@@ -224,5 +219,4 @@ TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footpr
         CHECK(!game->placement.buildings[g1].alive);
     }
 
-    game_destroy(game);
 }

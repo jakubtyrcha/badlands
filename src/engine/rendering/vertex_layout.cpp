@@ -83,6 +83,33 @@ VertexLayoutInfo GetVertexLayoutInfo(VertexLayout layout) {
       break;
     }
 
+    case VertexLayout::kTerrainCluster: {
+      // pos(vec3) + normal(vec3) + color(Unorm8x4) + meta(Uint8x4) = 32 bytes.
+      // pos/normal occupy the first 6 float slots; color and meta are each a
+      // u32 (one packed float slot) at offsets 24 and 28. color arrives as
+      // vec4<f32> (0..1), meta as vec4<u32> (0..255, sampled @interpolate(flat)).
+      info.attributes.resize(4);
+
+      info.attributes[0].format = wgpu::VertexFormat::Float32x3;
+      info.attributes[0].offset = 0;
+      info.attributes[0].shaderLocation = 0;
+
+      info.attributes[1].format = wgpu::VertexFormat::Float32x3;
+      info.attributes[1].offset = sizeof(float) * 3;
+      info.attributes[1].shaderLocation = 1;
+
+      info.attributes[2].format = wgpu::VertexFormat::Unorm8x4;
+      info.attributes[2].offset = sizeof(float) * 6;
+      info.attributes[2].shaderLocation = 2;
+
+      info.attributes[3].format = wgpu::VertexFormat::Uint8x4;
+      info.attributes[3].offset = sizeof(float) * 7;
+      info.attributes[3].shaderLocation = 3;
+
+      info.stride = sizeof(float) * 8;
+      break;
+    }
+
     case VertexLayout::kTexturedMesh: {
       // pos(vec3) + uv(vec2) + normal(vec3) + tangent(vec3) = 11 floats = 44
       // bytes

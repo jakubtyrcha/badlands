@@ -3,7 +3,7 @@
 // tests pin the architecture — growth happens, is clamped, skips hidden heroes,
 // and is reset by entering home/tavern.
 
-#include "badlands_game.h"
+#include "sim_internal.hpp"
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
@@ -19,54 +19,55 @@ using namespace badlands;
 namespace {
 
 uint32_t place(BadlandsGame* g, int kind, float x, float z) {
-    GameAction a{GAME_ACTION_PLACE_BUILDING, 0, x, z, kind, 0};
-    return static_cast<uint32_t>(game_dispatch(g, &a));
+    Action a{ActionKind::PlaceBuilding, 0, x, z, kind, 0};
+    return static_cast<uint32_t>(dispatch_into(*g, a));
 }
 uint32_t recruit_at(BadlandsGame* g, uint32_t bid) {
-    GameAction a{GAME_ACTION_RECRUIT_HERO, bid, 0.0f, 0.0f, 0, 0};
-    return static_cast<uint32_t>(game_dispatch(g, &a));
+    Action a{ActionKind::RecruitHero, bid, 0.0f, 0.0f, 0, 0};
+    return static_cast<uint32_t>(dispatch_into(*g, a));
 }
 
 }  // namespace
 
 TEST_CASE("advance_needs raises fatigue/boredom each tick and clamps to 1") {
-    BadlandsGame* g = game_create(nullptr);
-    GameCharacterDesc d = game_desc_mercenary(0.0f, 0.0f);
-    uint32_t slot = game_spawn(g, &d);
+    auto g_owned = make_world(nullptr);
+    BadlandsGame* g = g_owned.get();
+    CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
+    uint32_t slot = spawn_into(*g, d);
     entt::entity e = g->slots[slot];
 
     CHECK(g->registry.get<HeroSimulationState>(e).fatigue == 0.0f);
-    game_tick(g, 1.0f / 30.0f);
+    tick_world(*g, 1.0f / 30.0f);
     CHECK(g->registry.get<HeroSimulationState>(e).fatigue == Catch::Approx(kFatiguePerTick));
     CHECK(g->registry.get<HeroSimulationState>(e).boredom == Catch::Approx(kBoredomPerTick));
 
     g->registry.get<HeroSimulationState>(e).fatigue = 0.999f;
     for (int i = 0; i < 200; ++i) {
-        game_tick(g, 1.0f / 30.0f);
+        tick_world(*g, 1.0f / 30.0f);
     }
     CHECK(g->registry.get<HeroSimulationState>(e).fatigue <= 1.0f);
     CHECK(g->registry.get<HeroSimulationState>(e).boredom <= 1.0f);
 
-    game_destroy(g);
-}
+    }
 
 TEST_CASE("hidden heroes do not accrue needs") {
-    BadlandsGame* g = game_create(nullptr);
-    GameCharacterDesc d = game_desc_mercenary(0.0f, 0.0f);
-    uint32_t slot = game_spawn(g, &d);
+    auto g_owned = make_world(nullptr);
+    BadlandsGame* g = g_owned.get();
+    CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
+    uint32_t slot = spawn_into(*g, d);
     entt::entity e = g->slots[slot];
     g->registry.emplace<InsideBuilding>(e, 0, 999.0f);  // hidden long enough
 
-    game_tick(g, 1.0f / 30.0f);
+    tick_world(*g, 1.0f / 30.0f);
     CHECK(g->registry.get<HeroSimulationState>(e).fatigue == 0.0f);
     CHECK(g->registry.get<HeroSimulationState>(e).boredom == 0.0f);
 
-    game_destroy(g);
-}
+    }
 
 TEST_CASE("entering home resets fatigue") {
-    BadlandsGame* g = game_create(nullptr);
-    uint32_t guild = place(g, GAME_BUILDING_FREE_COMPANY_QUARTERS, -20.0f, 20.0f);
+    auto g_owned = make_world(nullptr);
+    BadlandsGame* g = g_owned.get();
+    uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
     REQUIRE(hid != UINT32_MAX);
     entt::entity e = g->slots[hid];
@@ -79,13 +80,13 @@ TEST_CASE("entering home resets fatigue") {
     REQUIRE(hero_enter_home(*g, e));
     CHECK(g->registry.get<HeroSimulationState>(e).fatigue == 0.0f);
 
-    game_destroy(g);
-}
+    }
 
 TEST_CASE("entering the tavern resets boredom") {
-    BadlandsGame* g = game_create(nullptr);
-    uint32_t guild = place(g, GAME_BUILDING_FREE_COMPANY_QUARTERS, -20.0f, 20.0f);
-    uint32_t tavern = place(g, GAME_BUILDING_TAVERN, 20.0f, 20.0f);
+    auto g_owned = make_world(nullptr);
+    BadlandsGame* g = g_owned.get();
+    uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
+    uint32_t tavern = place(g, static_cast<int32_t>(BuildingKind::Tavern), 20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
     REQUIRE(hid != UINT32_MAX);
     entt::entity e = g->slots[hid];
@@ -95,15 +96,15 @@ TEST_CASE("entering the tavern resets boredom") {
     g->registry.get<Position>(e).pos = tile;
     g->registry.get<HeroSimulationState>(e).boredom = 0.7f;
 
-    REQUIRE(hero_enter(*g, e, GAME_BUILDING_TAVERN));
+    REQUIRE(hero_enter(*g, e, static_cast<int32_t>(BuildingKind::Tavern)));
     CHECK(g->registry.get<HeroSimulationState>(e).boredom == 0.0f);
 
-    game_destroy(g);
-}
+    }
 
 TEST_CASE("C++ town brain sends a tired hero toward home") {
-    BadlandsGame* g = game_create(nullptr);  // C++ brain (no noiser)
-    uint32_t guild = place(g, GAME_BUILDING_FREE_COMPANY_QUARTERS, -20.0f, 20.0f);
+    auto g_owned = make_world(nullptr);
+    BadlandsGame* g = g_owned.get();  // C++ brain (no noiser)
+    uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
     REQUIRE(hid != UINT32_MAX);
     entt::entity e = g->slots[hid];
@@ -114,7 +115,7 @@ TEST_CASE("C++ town brain sends a tired hero toward home") {
     g->registry.get<Position>(e).pos = {40.0f, 40.0f};  // far from home
     g->registry.get<HeroSimulationState>(e).fatigue = 0.9f;
 
-    game_tick(g, 1.0f / 30.0f);
+    tick_world(*g, 1.0f / 30.0f);
 
     CHECK(g->registry.get<HeroSimulationState>(e).behavior == static_cast<int32_t>(Behavior::GoHome));
     const MoveTarget& mt = g->registry.get<MoveTarget>(e);
@@ -122,13 +123,13 @@ TEST_CASE("C++ town brain sends a tired hero toward home") {
     CHECK(mt.point.x == Catch::Approx(home_door.x));
     CHECK(mt.point.y == Catch::Approx(home_door.y));
 
-    game_destroy(g);
-}
+    }
 
 TEST_CASE("C++ town brain sends a bored hero to the tavern by day") {
-    BadlandsGame* g = game_create(nullptr);
-    uint32_t guild = place(g, GAME_BUILDING_FREE_COMPANY_QUARTERS, -20.0f, 20.0f);
-    uint32_t tavern = place(g, GAME_BUILDING_TAVERN, 20.0f, 20.0f);
+    auto g_owned = make_world(nullptr);
+    BadlandsGame* g = g_owned.get();
+    uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
+    uint32_t tavern = place(g, static_cast<int32_t>(BuildingKind::Tavern), 20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
     REQUIRE(hid != UINT32_MAX);
     entt::entity e = g->slots[hid];
@@ -142,7 +143,7 @@ TEST_CASE("C++ town brain sends a bored hero to the tavern by day") {
     sim.fatigue = 0.0f;
     sim.boredom = 0.9f;
 
-    game_tick(g, 1.0f / 30.0f);
+    tick_world(*g, 1.0f / 30.0f);
 
     CHECK(g->registry.get<HeroSimulationState>(e).behavior ==
           static_cast<int32_t>(Behavior::VisitTavern));
@@ -150,5 +151,4 @@ TEST_CASE("C++ town brain sends a bored hero to the tavern by day") {
     CHECK(mt.point.x == Catch::Approx(tavern_door.x));
     CHECK(mt.point.y == Catch::Approx(tavern_door.y));
 
-    game_destroy(g);
-}
+    }

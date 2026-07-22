@@ -59,15 +59,15 @@ constexpr uint32_t kMaxCommandRows = 24;
 // Where the seeded town goes. Kept clear of the origin Castle that game_create
 // prebuilds (4x4 + margin) and spaced so no footprint+margin overlaps another.
 struct TownBuilding {
-  GameBuildingKind kind;
+  badlands::BuildingKind kind;
   float x, z;
   int32_t rotation_index;
 };
 constexpr TownBuilding kTown[] = {
-    {GAME_BUILDING_FREE_COMPANY_QUARTERS, -14.0f, -8.0f, 0},
-    {GAME_BUILDING_FREE_COMPANY_QUARTERS, -14.0f, 8.0f, 0},
-    {GAME_BUILDING_TAVERN, 14.0f, -8.0f, 0},
-    {GAME_BUILDING_APOTHECARY, 14.0f, 8.0f, 0},
+    {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, -8.0f, 0},
+    {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, 8.0f, 0},
+    {badlands::BuildingKind::Tavern, 14.0f, -8.0f, 0},
+    {badlands::BuildingKind::Apothecary, 14.0f, 8.0f, 0},
 };
 
 // Heroes recruited per guild at seed time. Below kGuildRosterCap so the panel
@@ -89,17 +89,17 @@ const char* behavior_name(int32_t behavior) {
   }
 }
 
-const char* command_name(int32_t kind) {
+const char* command_name(badlands::CommandKindId kind) {
   switch (kind) {
-    case GAME_COMMAND_PLACE_BUILDING: return "PlaceBuilding";
-    case GAME_COMMAND_RECRUIT_HERO: return "RecruitHero";
-    case GAME_COMMAND_DESTROY_BUILDING: return "DestroyBuilding";
-    case GAME_COMMAND_MOVE_TO: return "MoveTo";
-    case GAME_COMMAND_ENTER_BUILDING: return "EnterBuilding";
-    case GAME_COMMAND_ENTER_HOME: return "EnterHome";
-    case GAME_COMMAND_BUY: return "Buy";
-    case GAME_COMMAND_ATTACK: return "Attack";
-    case GAME_COMMAND_SET_BEHAVIOR: return "SetBehavior";
+    case badlands::CommandKindId::PlaceBuilding: return "PlaceBuilding";
+    case badlands::CommandKindId::RecruitHero: return "RecruitHero";
+    case badlands::CommandKindId::DestroyBuilding: return "DestroyBuilding";
+    case badlands::CommandKindId::MoveTo: return "MoveTo";
+    case badlands::CommandKindId::EnterBuilding: return "EnterBuilding";
+    case badlands::CommandKindId::EnterHome: return "EnterHome";
+    case badlands::CommandKindId::Buy: return "Buy";
+    case badlands::CommandKindId::Attack: return "Attack";
+    case badlands::CommandKindId::SetBehavior: return "SetBehavior";
     default: return "?";
   }
 }
@@ -122,13 +122,6 @@ std::string load_brain_script() {
 }
 
 }  // namespace
-
-AiSandboxView::~AiSandboxView() {
-  if (game_) {
-    game_destroy(game_);
-    game_ = nullptr;
-  }
-}
 
 bool AiSandboxView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
@@ -167,25 +160,25 @@ void AiSandboxView::ApplyEnvironment() {
 
 void AiSandboxView::SeedTown() {
   const std::string brain = load_brain_script();
-  game_ = game_create(brain.empty() ? nullptr : brain.c_str());
+  sim_ = badlands::Sim(brain.empty() ? nullptr : brain.c_str());
 
   // Everything goes through game_dispatch, so the seed is itself a logged
   // command sequence -- (initial config, seed, command log) still reproduces
   // this world.
   for (const TownBuilding& b : kTown) {
-    GameAction place{GAME_ACTION_PLACE_BUILDING, 0, b.x, b.z,
+    badlands::Action place{badlands::ActionKind::PlaceBuilding, 0, b.x, b.z,
                      static_cast<int32_t>(b.kind), b.rotation_index};
-    const int64_t id = game_dispatch(game_, &place);
+    const int64_t id = sim_.Dispatch(place);
     if (id < 0) {
       spdlog::warn("AiSandboxView::SeedTown: placing kind {} at ({}, {}) failed",
                    static_cast<int32_t>(b.kind), b.x, b.z);
       continue;
     }
-    if (b.kind != GAME_BUILDING_FREE_COMPANY_QUARTERS) continue;
+    if (b.kind != badlands::BuildingKind::FreeCompanyQuarters) continue;
     for (int i = 0; i < kSeedHeroesPerGuild; ++i) {
-      GameAction recruit{GAME_ACTION_RECRUIT_HERO, static_cast<uint32_t>(id),
+      badlands::Action recruit{badlands::ActionKind::RecruitHero, static_cast<uint32_t>(id),
                          0.0f, 0.0f, 0, 0};
-      if (game_dispatch(game_, &recruit) < 0) {
+      if (sim_.Dispatch(recruit) < 0) {
         spdlog::warn("AiSandboxView::SeedTown: recruit {} from guild {} failed", i,
                      id);
       }
@@ -241,7 +234,7 @@ void AiSandboxView::AddWalls() {
 }
 
 void AiSandboxView::AddBuildings() {
-  if (!game_) return;
+  
 
   // Blockout building parts: the same BuildBuildingParts assembly the detailed
   // path uses (building_scene.cpp), but with the flat debug palette instead of
@@ -251,15 +244,15 @@ void AiSandboxView::AddBuildings() {
   const DeferredMaterial roof_mat =
       matlib_.SolidColor(blockout::kRoof, blockout::kBuildingRoughness);
 
-  const uint32_t total =
-      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
-  const uint32_t count = std::min(total, kMaxBuildingRows);
+  building_rows_ = sim_.Buildings();
+  const uint32_t count =
+      std::min(static_cast<uint32_t>(building_rows_.size()), kMaxBuildingRows);
   int part_index = 0;
   for (uint32_t i = 0; i < count; ++i) {
-    const GameBuildingState& b = building_rows_[i];
-    const BuildingVisual bv = building_visual(static_cast<GameBuildingKind>(b.kind));
-    const GameRenderBox box = game_render_box(b.kind, /*rotation_index=*/0);
-    const GameRenderBox placed = game_render_box(b.kind, b.rotation_index);
+    const badlands::BuildingState& b = building_rows_[i];
+    const BuildingVisual bv = building_visual(static_cast<badlands::BuildingKind>(b.kind));
+    const badlands::RenderBox box = badlands::RenderBoxOf(static_cast<badlands::BuildingKind>(b.kind), 0);
+    const badlands::RenderBox placed = badlands::RenderBoxOf(static_cast<badlands::BuildingKind>(b.kind), b.rotation_index);
 
     const glm::mat4 transform =
         glm::translate(glm::mat4(1.0f), glm::vec3(b.center_x, 0.0f, b.center_z)) *
@@ -296,22 +289,24 @@ void AiSandboxView::CreateUnitCapsules() {
 }
 
 void AiSandboxView::SyncUnits() {
-  if (!game_) return;
+  
 
-  const uint32_t total = game_state(game_, char_rows_.data(), kMaxCharacterRows);
-  const uint32_t count = std::min(total, kMaxCharacterRows);
+  char_rows_ = sim_.Characters();
+  const uint32_t count =
+      std::min(static_cast<uint32_t>(char_rows_.size()), kMaxCharacterRows);
   for (uint32_t i = 0; i < capsule_nodes_.size(); ++i) {
     const bool live = i < count && char_rows_[i].inside_building_id < 0;
     if (!live) {
       scene_.SetScale(capsule_nodes_[i], glm::vec3(0.0f));
       continue;
     }
-    const GameCharacterState& c = char_rows_[i];
+    const badlands::CharacterState& c = char_rows_[i];
     scene_.SetScale(capsule_nodes_[i], glm::vec3(1.0f));
     scene_.SetPosition(capsule_nodes_[i], glm::vec3(c.pos_x, 0.0f, c.pos_z));
   }
 
-  command_log_total_ = game_command_log(game_, cmd_rows_.data(), kMaxCommandRows);
+  cmd_rows_ = sim_.CommandLog();
+  command_log_total_ = static_cast<uint32_t>(cmd_rows_.size());
 }
 
 void AiSandboxView::FrameCamera() {
@@ -365,7 +360,7 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   const unsigned long long tick_target = sim_clock_.TickTarget();
   int budget = kMaxSimTicksPerFrame;
   while (sim_ticks_done_ < tick_target && budget-- > 0) {
-    if (game_) game_tick(game_, static_cast<float>(kTickDt));
+    sim_.Tick(static_cast<float>(kTickDt));
     ++sim_ticks_done_;
   }
 
@@ -405,16 +400,16 @@ void AiSandboxView::DrawUI() {
 
 void AiSandboxView::DrawInspector() {
   ImGui::Begin("Sim");
-  if (!game_) {
+  if (false) {
     ImGui::TextUnformatted("no sim");
     ImGui::End();
     return;
   }
 
-  GameWorldState world{};
-  game_world(game_, &world);
-  GameStats stats{};
-  game_stats(game_, &stats);
+  badlands::WorldState world{};
+  world = sim_.World();
+  badlands::SimStats stats{};
+  stats = stats;
 
   // --- clock -----------------------------------------------------------
   ImGui::Text("Day %u  %02d:%02d  %s", world.day,
@@ -431,8 +426,9 @@ void AiSandboxView::DrawInspector() {
 
   // --- heroes ----------------------------------------------------------
   ImGui::SeparatorText("Heroes");
-  const uint32_t total = game_state(game_, char_rows_.data(), kMaxCharacterRows);
-  const uint32_t count = std::min(total, kMaxCharacterRows);
+  char_rows_ = sim_.Characters();
+  const uint32_t count =
+      std::min(static_cast<uint32_t>(char_rows_.size()), kMaxCharacterRows);
   if (ImGui::BeginTable("heroes", 7, ImGuiTableFlags_SizingStretchProp)) {
     ImGui::TableSetupColumn("name");
     ImGui::TableSetupColumn("behavior");
@@ -443,7 +439,7 @@ void AiSandboxView::DrawInspector() {
     ImGui::TableSetupColumn("inside");
     ImGui::TableHeadersRow();
     for (uint32_t i = 0; i < count; ++i) {
-      const GameCharacterState& c = char_rows_[i];
+      const badlands::CharacterState& c = char_rows_[i];
       if (c.name[0] == '\0') continue;  // not a hero
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
@@ -476,7 +472,7 @@ void AiSandboxView::DrawInspector() {
   const uint32_t shown = std::min(command_log_total_, kMaxCommandRows);
   if (ImGui::BeginChild("cmdlog", ImVec2(0.0f, 160.0f))) {
     for (uint32_t i = 0; i < shown; ++i) {
-      const GameCommandRecord& r = cmd_rows_[i];
+      const badlands::CommandRecord& r = cmd_rows_[i];
       ImGui::Text("%-14s actor=%s (%.1f, %.1f) a=%d", command_name(r.kind),
                   r.actor == UINT32_MAX ? "player" : std::to_string(r.actor).c_str(),
                   r.point_x, r.point_z, r.param_a);

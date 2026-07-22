@@ -1,5 +1,5 @@
-// Internal game state shared between the sim (game.cpp) and the noiser brain
-// integration (brain.cpp). The public surface is game/include/badlands_game.h.
+// Internal game state shared between the sim (sim.cpp) and the noiser brain
+// integration (brain.cpp). The public surface is game/include/badlands_sim.hpp.
 
 #pragma once
 
@@ -31,7 +31,7 @@ struct BadlandsGame {
 
     // Pluggable path-geometry provider (Rust nav service); zero-initialized
     // means "no provider" -> straight-line fallback in the movement pipeline.
-    GamePathfinder pathfinder{};
+    badlands::Pathfinder pathfinder{};
 
     // Event-sourced command layer (see command.h). AI decisions are enqueued
     // during think and drained in one ordered apply pass per tick; every

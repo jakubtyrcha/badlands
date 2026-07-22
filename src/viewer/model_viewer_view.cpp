@@ -78,8 +78,8 @@ void ModelViewerView::BuildCatalog() {
   catalog_.push_back({.label = "Rock C",
                       .category = PrefabCategory::Rock,
                       .rock_kind = GamePloppableKind::RockC});
-  for (int32_t k = 0; k < GAME_BUILDING_KIND_COUNT; ++k) {
-    const auto kind = static_cast<GameBuildingKind>(k);
+  for (int32_t k = 0; k < static_cast<int32_t>(BuildingKind::Count); ++k) {
+    const auto kind = static_cast<BuildingKind>(k);
     catalog_.push_back({.label = building_label(kind),
                         .category = PrefabCategory::Building,
                         .building_kind = kind});
