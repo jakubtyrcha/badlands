@@ -46,6 +46,31 @@ struct RenderShape {
     glm::vec3 color;
 };
 
+// --- Fog-of-war vision ------------------------------------------------------
+
+// Model-space forward axis (XZ) a character faces at zero rotation. Its
+// Transform's rotation is applied to this to get the world look direction; for
+// the sim we track that world direction directly in Facing.
+inline constexpr glm::vec2 kCharacterForward{0.0f, 1.0f};
+
+// A character's world XZ look direction (unit length). Equivalent to the
+// character Transform's rotation applied to kCharacterForward, projected to XZ;
+// a minimal stand-in until characters carry a full Transform, at which point
+// this becomes a derived view of it. The movement pipeline turns it toward the
+// direction of travel; an idle character keeps its last facing.
+struct Facing {
+    glm::vec2 dir{kCharacterForward};
+};
+
+// A character's vision, granted to the player only for team == kPlayerTeam.
+// cone_half_cos = cos(half-angle): a texel at unit direction d from the
+// character is seen when dot(d, Facing.dir) >= cone_half_cos (and within
+// radius). A half-angle >= 180deg yields cone_half_cos = -1 (full circle).
+struct Vision {
+    float radius = 0.0f;
+    float cone_half_cos = -1.0f;
+};
+
 // Transient per-tick output of a brain (script host calls or the mock brain).
 // kind: 0 = idle, 1 = move along dir, 2 = attack nearest enemy.
 struct Intent {

@@ -18,7 +18,7 @@ inline constexpr int kMaxSimTicksPerFrame = 64;
 
 // Fixed presentation dt used for deterministic headless capture (--record):
 // bypasses the wall clock so the sim clock advances a fixed amount per captured
-// frame. 60 fps => a 16 s day is 960 frames.
+// frame. 60 fps => an N-second day/night cycle is N*60 captured frames.
 inline constexpr float kPresentationDt = 1.0f / 60.0f;
 
 }  // namespace badlands
