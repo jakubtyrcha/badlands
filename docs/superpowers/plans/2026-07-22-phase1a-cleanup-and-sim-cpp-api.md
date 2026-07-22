@@ -4,13 +4,14 @@
 
 **Goal:** Delete the vestigial Rust host and replace the game simulation's data-only C ABI with a C++ `badlands::Sim` API over entt, behavior-identical, so later increments can unify the world onto one persistent registry.
 
-**Architecture:** `badlands_game_lib` keeps existing as a static C++ library, but its public interface changes from `extern "C"` functions taking an opaque `BadlandsGame*` (`game/include/badlands_game.h`) to a C++ class `badlands::Sim` (`game/include/badlands_sim.hpp`) that still owns its own `entt::registry` internally. The internal systems (already free functions taking the world by reference) are renamed to take `Sim&`. The only live consumers — the C++ `GameView` and the sim/duel Catch2 tests — are moved onto the C++ API; then the C ABI header and its shims are deleted. No rendering, no world data flow, and no observable behavior changes in this increment: `Sim` still returns POD snapshot vectors exactly like the old ABI. The unification of the render registry and buildings-as-entities are **out of scope** here (later increments).
+**Architecture:** `badlands_game_lib` keeps existing as a static C++ library. Its public interface gains a C++ class `badlands::Sim` (`game/include/badlands_sim.hpp`) that owns the sim world and exposes tick/spawn/dispatch/snapshot as C++ methods. The migration is **strictly additive** at first: the existing internal world struct (`BadlandsGame`, in `game/src/game_state.h`) and the free-function systems over it are **left unchanged**; the shared operations (world construction, tick, the snapshot loops, dispatch, probe) are **extracted into `namespace badlands` free functions over `BadlandsGame&`** that both `Sim` and the existing `game_*` C ABI call. This keeps the C ABI and every existing test compiling and green throughout the risky middle of the refactor. `GameView` then moves onto `Sim` (Task 3); the sim/duel tests move onto `Sim` (Task 4); finally the C ABI is deleted and the remaining internal tests construct the world directly instead of via `game_create` (Task 5). No rendering, no world data flow, and no observable behavior changes: `Sim` returns POD snapshot vectors with the same semantics as the old ABI. Renaming the internal `BadlandsGame` struct, unifying the render registry, and buildings-as-entities are all **out of scope** here (later increments).
 
 **Tech Stack:** C++23, entt (single-include), CMake+Ninja, Catch2. No new dependencies.
 
 ## Global Constraints
 
-- **No `Game`/`game_` prefixes in new code; namespace everything in `badlands`.** The new API is `badlands::Sim` + `badlands::` result structs. (Forward-thinking naming — the project has near-zero legacy baggage.)
+- **No `Game`/`game_` prefixes in new code; namespace everything in `badlands`.** The new API is `badlands::Sim` + `badlands::` result structs. (Forward-thinking naming — the project has near-zero legacy baggage.) The **existing** internal `BadlandsGame` struct is left as-is this increment — it is private to `game/src`, does not leak, and renaming it would break the internal tests mid-flight for no behavior gain. Rename it in a later cosmetic pass.
+- **Additive, test-green-throughout.** Do NOT rename `BadlandsGame`, do NOT move `game_state.h`/`game.cpp`, and do NOT `reinterpret_cast` the C handle to `Sim`. The internal tests reach straight into `game_create(...)->registry` and call the free-function systems directly; those must keep compiling and passing at every task boundary.
 - **Behavior-preserving.** Every existing C++ test that passes before this increment must pass after, and the three apps render identically. The one accepted pre-existing failure is the 3 noiser-compiler ICE asserts in `game/tests/noiser_smoke_tests.cpp` (unrelated; present on merge-base) — that stays red and is not caused by this work.
 - **The sim still owns its own registry in this increment.** Do NOT wire `Sim` onto GameView's render registry yet, and do NOT touch `SceneGraph`/`SyncToRegistry`. Those are the next increment.
 - **Buildings stay in `PlacementState`.** Do not migrate buildings to entt entities here.
@@ -30,19 +31,21 @@
 
 **Created:**
 - `game/include/badlands_sim.hpp` — the public C++ API: `class badlands::Sim`, the `badlands::` POD result structs + enums, handle-less helpers.
+- `game/src/sim.cpp` — `badlands::Sim` method bodies + the extracted shared free functions (`make_world`, `tick_world`, `characters_of`, `buildings_of`, `world_of`, `stats_of`, `probe_of`, `spawn_into`, `dispatch_into`) over `BadlandsGame&`, plus `RenderBoxOf`/`BuildingDefOf`/`MercenaryDesc`/`GoblinDesc`.
+- `game/src/sim_internal.hpp` — declares the extracted free functions (above) so both `sim.cpp`, the C ABI (`game.cpp`), and the Task-5 internal tests can call them. Includes `game_state.h`.
 
-**Renamed / modified:**
-- `game/src/game_state.h` → `game/src/sim_internal.hpp` — full internal state struct (`entt::registry`, `slots`, `brains`, `placement`, counters), now named `SimState`; `Sim`'s pimpl target.
-- `game/src/game.cpp` → `game/src/sim.cpp` — implements `badlands::Sim` methods over `SimState`; keeps the tick order + snapshot logic.
-- `game/src/{placement,movement,heroes,brain}.{h,cpp,hpp}` — systems change signature `BadlandsGame&` → `SimState&` (or `Sim&`; see Interfaces). Behavior unchanged.
-- `src/game/views/game_view.{hpp,cpp}` — consume `badlands::Sim` instead of `game_*`.
-- `game/tests/sim_tests.cpp`, `game/tests/duel_test.cpp`, `game/tests/duel_common.h` — use `badlands::Sim` instead of the C ABI.
-- `game/tests/movement_tests.cpp`, `game/tests/heroes_tests.cpp`, `game/tests/placement_tests.cpp` — include `sim_internal.hpp`; `BadlandsGame`→`Sim`/`SimState` per rename.
-- `src/game/scene/building_composer.cpp`, `src/game/scene/building_scene.cpp`, `src/game/views/model_viewer_view.{hpp,cpp}` — switch the handle-less helpers (`game_render_box`, `game_building_def`, `GameBuildingKind`) to their `badlands::` equivalents.
-- `CMakeLists.txt` — `badlands_game_lib` sources (`game.cpp`→`sim.cpp`), public include stays `game/include`; remove nothing else.
+**Modified (kept, not renamed):**
+- `game/src/game.cpp` — the `game_*` C ABI bodies become thin wrappers that call the extracted free functions and memberwise-copy the `badlands::` result structs into the `Game*` POD out-params. Signatures + behavior unchanged. Still built.
+- `game/src/game_state.h`, `game/src/{placement,movement,heroes,brain}.{h,cpp}` — **unchanged** (`BadlandsGame` stays; systems keep taking `BadlandsGame&`). `RenderBoxOf`/`BuildingDefOf` may reuse the existing `game_render_box`/`game_building_def` bodies in `placement.cpp` (call them, or move the bodies — either way the C ABI keeps working).
+- `src/game/views/game_view.{hpp,cpp}` (Task 3) — consume `badlands::Sim` instead of `game_*`.
+- `src/game/scene/building_composer.{hpp,cpp}` (Task 3) — handle-less helper `game_render_box` → `badlands::RenderBoxOf`; kind param → `badlands::BuildingKind`.
+- `game/tests/sim_tests.cpp`, `game/tests/duel_test.cpp`, `game/tests/duel_common.h` (Task 4) — use `badlands::Sim` instead of the C ABI.
+- `game/tests/movement_tests.cpp`, `heroes_tests.cpp`, `placement_tests.cpp` (Task 5) — replace `game_create(nullptr)` / `game_destroy(game)` with direct construction (`badlands::make_world(nullptr)`), keeping `->registry` and the direct system calls. Only touched once the C ABI is removed.
+- `src/game/views/model_viewer_view.{hpp,cpp}`, `src/game/scene/building_scene.cpp` (Task 5) — residual `GameBuildingKind`/`game_render_box`/`badlands_game.h` → `badlands::` equivalents.
+- `CMakeLists.txt` — add `game/src/sim.cpp` to `badlands_game_lib` sources; public include stays `game/include`.
 
 **Deleted (Task 5 — after consumers migrated):**
-- `game/include/badlands_game.h` (the C ABI).
+- `game/include/badlands_game.h` (the C ABI) and the `game_*` bodies in `game.cpp`.
 
 ---
 
@@ -135,7 +138,7 @@ class Sim {
   const entt::registry& registry() const;
 
  private:
-  std::unique_ptr<struct SimState> state_;
+  std::unique_ptr<struct BadlandsGame> world_;   // the EXISTING internal world, unchanged
 };
 
 // ---- handle-less helpers (were game_*; pure computations) ----------------
@@ -147,8 +150,32 @@ CharacterDesc GoblinDesc(float pos_x, float pos_z);             // was game_desc
 }  // namespace badlands
 ```
 
-- Consumers replace: `game_create(s)` → `badlands::Sim sim(s);`; `game_tick(g,dt)` → `sim.Tick(dt)`; `game_buildings(g,buf,cap)` → `auto v = sim.Buildings();`; `game_world` → `sim.World()`; `game_dispatch(g,&a)` → `sim.Dispatch(a)`; `game_render_box(k,r)` → `badlands::RenderBoxOf(k,r)`; etc.
-- **Internal systems** keep operating on the full state: rename `BadlandsGame` → `SimState` and change signatures `plan_paths(SimState&, float)`, `follow_paths`, `update_melee_locks`, `separate_units`, `place_building`, `process_poppables`, `rebuild_occupancy`, `spawn_entity`, `recruit`, `destroy_building_impl`, `resume_brain`, etc. `SimState` holds `entt::registry registry; std::vector<entt::entity> slots; std::unique_ptr<BrainRuntime> brains; PlacementState placement; uint32_t gold; Pathfinder pathfinder; uint64_t ticks, script_intents; uint32_t noiser_bugs;`. `Sim::state_` points at one `SimState`; `Sim::registry()` returns `state_->registry`.
+`game/src/sim_internal.hpp`, namespace `badlands` — the shared operations, extracted so both `Sim` and the C ABI call one implementation (this is what makes the increment additive):
+
+```cpp
+#pragma once
+#include <memory>
+#include <vector>
+#include "badlands_sim.hpp"
+#include "game_state.h"          // struct BadlandsGame (UNCHANGED)
+namespace badlands {
+std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source);
+void tick_world(BadlandsGame&, float dt);
+uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
+int64_t dispatch_into(BadlandsGame&, const Action&);
+bool reload_script(BadlandsGame&, const std::string&);
+std::vector<CharacterState> characters_of(const BadlandsGame&);
+std::vector<BuildingState>  buildings_of(const BadlandsGame&);
+WorldState world_of(const BadlandsGame&);
+SimStats   stats_of(const BadlandsGame&);
+PlacementProbe probe_of(const BadlandsGame&, const PlacementDesc&, std::vector<GridTriangle>&);
+}  // namespace badlands
+```
+
+- **`Sim` pimpl:** `world_` is a `std::unique_ptr<BadlandsGame>` initialized by `make_world(script)`; `Sim::Tick` → `tick_world(*world_, dt)`; `Sim::Characters` → `characters_of(*world_)`; `Sim::registry()` → `world_->registry`; etc. `Sim`'s destructor is defined out-of-line in `sim.cpp` (where `BadlandsGame` is complete).
+- **The C ABI (`game.cpp`) keeps its own lifecycle:** `game_create(s)` → `return make_world(s).release();` (a real `BadlandsGame*`, so the internal tests' `game_create(...)->registry` and `plan_paths(*game, dt)` keep working); `game_destroy(g)` → `delete g;`; `game_tick(g,dt)` → `tick_world(*g, dt)`; `game_buildings(g,out,cap)` → copy `buildings_of(*g)` into `out` with the same truncation idiom, memberwise-mapping `badlands::BuildingState`→`GameBuildingState` (incl. `BuildingKind`→`int32_t`). Same for `game_state`/`game_world`/`game_stats`/`game_dispatch`/`game_probe_placement`/`game_spawn`/`game_reload_script`.
+- **The internal systems are UNCHANGED** — `plan_paths(BadlandsGame&, float)`, `follow_paths`, `update_melee_locks`, `separate_units`, `place_building`, `process_poppables`, `rebuild_occupancy`, `spawn_entity`, `recruit`, `destroy_building_impl`, `resume_brain`, etc. keep taking `BadlandsGame&`. `make_world`/`tick_world`/the `*_of` snapshots are the bodies moved out of the old `game_create`/`game_tick`/`game_state`/… — a move, not new logic.
+- **Consumers replace:** `game_create(s)` → `badlands::Sim sim(s);`; `game_tick(g,dt)` → `sim.Tick(dt)`; `game_buildings(g,buf,cap)` → `auto v = sim.Buildings();`; `game_world` → `sim.World()`; `game_dispatch(g,&a)` → `sim.Dispatch(a)`; `game_render_box(k,r)` → `badlands::RenderBoxOf(k,r)`.
 
 ---
 
@@ -218,23 +245,23 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 2: Introduce `badlands::Sim`; make the C ABI a thin shim over it
+### Task 2: Introduce `badlands::Sim` over the unchanged world (additive)
 
-Rename the internal world to `SimState`, add the `Sim` class + public header, and reimplement the existing `game_*` C ABI functions as thin wrappers that call `Sim`. This keeps `sim_tests`/`duel_test`/`GameView` compiling and green **unchanged** mid-refactor, so the risky rename is isolated from the consumer migration.
+Add the `Sim` class + public header, extract the shared operations into `namespace badlands` free functions over the **unchanged** `BadlandsGame`, and re-point the `game_*` C ABI bodies at those same functions. Nothing is renamed; the C ABI keeps its exact signatures + behavior. `Sim` and the C ABI both compile; every existing test stays green.
 
 **Files:**
 - Create: `game/include/badlands_sim.hpp` (full content in Interfaces above — fill the elided enum members, Pathfinder signatures, and struct fields verbatim from `game/include/badlands_game.h`).
-- Rename: `game/src/game_state.h` → `game/src/sim_internal.hpp`; struct `BadlandsGame` → `SimState`.
-- Rename: `game/src/game.cpp` → `game/src/sim.cpp`; add `Sim` method bodies (delegating to the existing logic) + the handle-less helpers.
-- Modify: `game/src/{placement,movement,heroes,brain}.{h,cpp}` — signatures `BadlandsGame&` → `SimState&`.
-- Modify: `game/include/badlands_game.h` + a new `game/src/c_abi_shim.cpp` — the `game_*` functions now hold a `Sim` and forward to it (or `reinterpret_cast` the opaque handle to `Sim`). Simplest: `struct BadlandsGame` stays as the opaque C type == `badlands::Sim` via `game_create` returning `reinterpret_cast<BadlandsGame*>(new badlands::Sim(...))`.
-- Modify: `CMakeLists.txt` — replace `game/src/game.cpp` with `game/src/sim.cpp` (+ `game/src/c_abi_shim.cpp`) in `badlands_game_lib` sources (CMakeLists.txt:227-250).
+- Create: `game/src/sim_internal.hpp` (the extracted free-function declarations, in Interfaces above).
+- Create: `game/src/sim.cpp` — `Sim` methods + the extracted free-function bodies + `RenderBoxOf`/`BuildingDefOf`/`MercenaryDesc`/`GoblinDesc`.
+- Modify: `game/src/game.cpp` — `game_*` bodies become thin wrappers over the extracted free functions (see Interfaces). Do NOT rename anything; do NOT `reinterpret_cast`.
+- Leave UNCHANGED: `game/src/game_state.h` (`struct BadlandsGame`), `game/src/{placement,movement,heroes,brain}.{h,cpp}`, `game/include/badlands_game.h`, and all `game/tests/*`.
+- Modify: `CMakeLists.txt` — add `game/src/sim.cpp` to `badlands_game_lib` sources (CMakeLists.txt:227-250). `game.cpp` stays in the target.
 
 **Interfaces:**
-- Consumes: the existing sim implementation (tick order `sim.cpp` ex-`game.cpp:174-262`, snapshot logic ex-`game.cpp:264-306` + `placement.cpp:531-610`).
-- Produces: `badlands::Sim` (see Interfaces block) **and** the unchanged `game_*` C ABI as a shim, both valid simultaneously.
+- Consumes: the existing sim implementation — the bodies of `game_create` (game.cpp:111-162), `game_tick` (game.cpp:174-262), the snapshot loops (game.cpp:264-306, placement.cpp:531-610), `game_dispatch`, `game_spawn`, `game_reload_script`.
+- Produces: `badlands::Sim` + the extracted free functions (Interfaces block) **and** the byte-identical `game_*` C ABI, both valid simultaneously.
 
-- [ ] **Step 1: Establish a behavior baseline before the rename**
+- [ ] **Step 1: Establish a behavior baseline**
 
 Run:
 ```bash
@@ -245,109 +272,68 @@ Expected: records the current pass/fail set of `badlands_game_tests` (green exce
 
 - [ ] **Step 2: Create the public header**
 
-Create `game/include/badlands_sim.hpp` with the full content from the Interfaces section, replacing every `/* … */` ellipsis with the exact fields/members/signatures copied from `game/include/badlands_game.h` (enum members lines 89-101 & 162-167; `Pathfinder` fn-pointer sigs lines 216-222; struct fields per the cited lines). Keep field order identical to the C structs so the snapshot copies stay trivial.
+Create `game/include/badlands_sim.hpp` with the full content from the Interfaces section, replacing every `/* … */` ellipsis with the exact fields/members/signatures copied from `game/include/badlands_game.h` (enum members lines 89-101 & 162-167; `Pathfinder` fn-pointer sigs lines 216-222; struct fields per the cited lines). Keep field order identical to the C structs so the copies stay trivial. Remember: the run-counter struct is `SimStats`, **not** `Stats` (collision with the existing component `badlands::Stats`, `game/src/components.h:24`).
 
-- [ ] **Step 3: Rename the internal world struct**
+- [ ] **Step 3: Extract the shared operations into free functions**
 
-```bash
-cd /Users/jakub/repos/badlands-clone-2
-git mv game/src/game_state.h game/src/sim_internal.hpp
-```
-Then in `sim_internal.hpp`: rename `struct BadlandsGame` → `struct SimState`, change the `GamePathfinder pathfinder{}` member type to `badlands::Pathfinder pathfinder{}`, and `#include "badlands_sim.hpp"` for the `Pathfinder`/enum types. Across `game/src/*.{h,cpp}` replace the type token `BadlandsGame` → `SimState` and includes of `"game_state.h"` → `"sim_internal.hpp"`:
-```bash
-grep -rl "BadlandsGame\|game_state.h" game/src | xargs sed -i '' 's/BadlandsGame/SimState/g; s/game_state\.h/sim_internal.hpp/g'
-```
-(Do NOT touch `game/include/badlands_game.h` yet — the opaque C `typedef struct BadlandsGame BadlandsGame;` there stays as the C handle name.)
+Create `game/src/sim_internal.hpp` (declarations from the Interfaces block). Create `game/src/sim.cpp` and **move** — do not copy — the bodies out of the current `game_*` functions into these free functions over `BadlandsGame&`:
+- `make_world(script)` ← the body of `game_create` (brain-runtime init, origin-Castle prebuild), returning `std::unique_ptr<BadlandsGame>`.
+- `tick_world(g, dt)` ← the body of `game_tick`.
+- `characters_of(g)` ← the `game_state` loop, appending `CharacterState` rows to a returned vector (no cap).
+- `buildings_of(g)` ← the `game_buildings` loop (from placement.cpp) → vector.
+- `world_of` / `stats_of` / `probe_of` / `spawn_into` / `dispatch_into` / `reload_script` ← the respective bodies.
+- `RenderBoxOf`/`BuildingDefOf` ← reuse or move the `game_render_box`/`game_building_def` bodies (placement.cpp:504-529). `MercenaryDesc`/`GoblinDesc` ← the `game_desc_*` bodies.
 
-- [ ] **Step 4: Rename the impl TU and add the `Sim` class + helpers**
+Then define the `Sim` methods, each forwarding to its free function over `*world_` (e.g. `void Sim::Tick(float dt){ tick_world(*world_, dt); }`, `Sim::Sim(const char* s): world_(make_world(s)) {}`, `entt::registry& Sim::registry(){ return world_->registry; }`). `Sim::~Sim()` is defined here (out-of-line) so `BadlandsGame` is complete.
 
-```bash
-git mv game/src/game.cpp game/src/sim.cpp
-```
-In `sim.cpp`: keep all existing free-function logic (now over `SimState&`). Add the pimpl + methods:
+- [ ] **Step 4: Re-point the C ABI bodies at the free functions**
+
+In `game.cpp`, rewrite each `game_*` body as a thin wrapper (signatures unchanged):
 ```cpp
-#include "badlands_sim.hpp"
-#include "sim_internal.hpp"
-namespace badlands {
-struct SimState;  // full def in sim_internal.hpp
-
-Sim::Sim(const char* brain_script_source)
-    : state_(std::make_unique<SimState>()) {
-  // move here the body of the old game_create (game.cpp:111-162): brain runtime
-  // init, origin Castle prebuild, etc., operating on *state_.
-}
-Sim::~Sim() = default;
-Sim::Sim(Sim&&) noexcept = default;
-Sim& Sim::operator=(Sim&&) noexcept = default;
-
-void Sim::Tick(float dt) { /* old game_tick body (game.cpp:174-262) over *state_ */ }
-uint32_t Sim::Spawn(const CharacterDesc& d) { /* old game_spawn over *state_ */ }
-bool Sim::ReloadScript(const std::string& s) { /* old game_reload_script */ }
-int64_t Sim::Dispatch(const Action& a) { /* old game_dispatch */ }
-void Sim::SetPathfinder(const Pathfinder& pf) { state_->pathfinder = pf; }
-std::vector<CharacterState> Sim::Characters() const { /* old game_state loop → vector */ }
-std::vector<BuildingState> Sim::Buildings() const { /* old game_buildings → vector */ }
-WorldState Sim::World() const { /* old game_world */ }
-SimStats Sim::GetStats() const { /* old game_stats */ }
-PlacementProbe Sim::ProbePlacement(const PlacementDesc& d,
-    std::vector<GridTriangle>& out) const { /* old game_probe_placement */ }
-entt::registry& Sim::registry() { return state_->registry; }
-const entt::registry& Sim::registry() const { return state_->registry; }
-
-BuildingDef BuildingDefOf(BuildingKind k) { /* old game_building_def */ }
-RenderBox RenderBoxOf(BuildingKind k, int32_t r) { /* old game_render_box */ }
-CharacterDesc MercenaryDesc(float x, float z) { /* old game_desc_mercenary */ }
-CharacterDesc GoblinDesc(float x, float z) { /* old game_desc_goblin */ }
-}  // namespace badlands
-```
-Note: the old handle-less helpers currently live in `placement.cpp` (`game_render_box`/`game_building_def` at placement.cpp:504-529) — move their bodies into `RenderBoxOf`/`BuildingDefOf` (or have the wrappers call the existing free functions; either is fine as long as the C ABI is not the definition site).
-
-- [ ] **Step 5: Make the C ABI a thin shim (temporary)**
-
-Create `game/src/c_abi_shim.cpp`. Keep `game/include/badlands_game.h` unchanged for now. Implement every `game_*` by treating the opaque handle as a `Sim`:
-```cpp
-#include "badlands_game.h"
-#include "badlands_sim.hpp"
-using badlands::Sim;
-static Sim* S(BadlandsGame* g) { return reinterpret_cast<Sim*>(g); }
-BadlandsGame* game_create(const char* s) { return reinterpret_cast<BadlandsGame*>(new Sim(s)); }
-void game_destroy(BadlandsGame* g) { delete S(g); }
-void game_tick(BadlandsGame* g, float dt) { S(g)->Tick(dt); }
+BadlandsGame* game_create(const char* s) { return badlands::make_world(s).release(); }
+void game_destroy(BadlandsGame* g) { delete g; }
+void game_tick(BadlandsGame* g, float dt) { badlands::tick_world(*g, dt); }
 uint32_t game_buildings(const BadlandsGame* g, GameBuildingState* out, uint32_t cap) {
-  auto v = reinterpret_cast<const Sim*>(g)->Buildings();
-  for (uint32_t i = 0; i < v.size() && i < cap; ++i)
-    out[i] = /* memberwise copy badlands::BuildingState → GameBuildingState */;
+  const auto v = badlands::buildings_of(*g);
+  for (uint32_t i = 0; i < v.size() && i < cap; ++i) {
+    out[i].id = v[i].id;
+    out[i].kind = static_cast<int32_t>(v[i].kind);      // BuildingKind -> int32
+    out[i].center_x = v[i].center_x; out[i].center_z = v[i].center_z;
+    out[i].rotation_index = v[i].rotation_index;
+    out[i].width_tiles = v[i].width_tiles; out[i].depth_tiles = v[i].depth_tiles;
+  }
   return static_cast<uint32_t>(v.size());
 }
-// … one forwarder per remaining game_* function, memberwise-copying the POD structs …
+// … one wrapper per remaining game_* function, memberwise-mapping the POD structs …
 ```
-Remove the old definitions from `sim.cpp`/`placement.cpp` (they now live on `Sim`). Update `CMakeLists.txt:227-250`: swap `game/src/game.cpp` → `game/src/sim.cpp` and add `game/src/c_abi_shim.cpp`.
+`game_create` returns a real `BadlandsGame*`, so the internal tests' `game_create(...)->registry` and `plan_paths(*game, dt)` keep working unchanged. Add `game/src/sim.cpp` to `CMakeLists.txt:227-250`.
 
-- [ ] **Step 6: Build**
+- [ ] **Step 5: Build**
 
 Run: `cmake --build build`
-Expected: compiles clean. Fix any missed `BadlandsGame`→`SimState` token or include.
+Expected: compiles clean. If `badlands::Stats` clashes anywhere, you used `Stats` instead of `SimStats` — fix it.
 
-- [ ] **Step 7: Run tests — verify no regression vs the baseline**
+- [ ] **Step 6: Run tests — verify no regression vs the baseline**
 
 Run: `ctest --test-dir build --output-on-failure -R "game_tests"`
-Expected: identical pass/fail set to `/tmp/sim_baseline.txt` (green except the 3 noiser ICEs). The C ABI still works via the shim, so `sim_tests`/`duel_test` pass unchanged; `movement_tests`/`heroes_tests` pass over `SimState`.
+Expected: identical pass/fail set to `/tmp/sim_baseline.txt` (green except the 3 noiser ICEs). The C ABI is unchanged in behavior, so `sim_tests`/`duel_test`/`movement_tests`/`heroes_tests` all pass exactly as before.
 
-- [ ] **Step 8: Full build + full ctest (apps still link)**
+- [ ] **Step 7: Full build + full ctest (apps still link)**
 
 Run: `cmake --build build && ctest --test-dir build --output-on-failure`
-Expected: all targets link (GameView still uses the C ABI shim), all green except the known ICEs.
+Expected: all targets link (GameView still uses the C ABI), all green except the known ICEs.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add -A
-git commit -m "refactor(sim): add badlands::Sim C++ API; C ABI becomes a thin shim over it
+git commit -m "feat(sim): add badlands::Sim C++ API over the existing world (additive)
 
-Rename the internal world BadlandsGame->SimState; systems now take SimState&.
-New public header game/include/badlands_sim.hpp exposes class badlands::Sim with
-the same snapshot semantics. The game_* C ABI is retained temporarily as a
-forwarding shim so consumers migrate in the next tasks. Behavior identical.
+New public header game/include/badlands_sim.hpp exposes class badlands::Sim; the
+shared operations are extracted into namespace-badlands free functions over the
+unchanged BadlandsGame, and the game_* C ABI now forwards to them. Signatures and
+behavior of the C ABI are unchanged; every existing test stays green. Consumers
+migrate onto Sim in the following tasks.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -455,14 +441,9 @@ Keep every assertion's intent identical; only the access path changes.
 
 In `duel_common.h`/`duel_test.cpp`, replace the `game_*` calls with `badlands::Sim` equivalents (spawn both fighters via `sim.Spawn(...)`, loop `sim.Tick(dt)`, read `sim.Characters()` for HP/positions).
 
-- [ ] **Step 3: Fix internal-test includes**
+- [ ] **Step 3: Leave the internal tests alone**
 
-Run:
-```bash
-cd /Users/jakub/repos/badlands-clone-2
-grep -rl "game_state.h\|BadlandsGame" game/tests | xargs sed -i '' 's/game_state\.h/sim_internal.hpp/g; s/BadlandsGame/SimState/g'
-```
-Then, where a test constructed the world directly, ensure it either builds a `badlands::Sim` and uses `sim.registry()` / `sim_internal.hpp` accessors, or constructs a bare `SimState` for a pure-system unit test — whichever matches the original intent.
+`movement_tests.cpp`, `heroes_tests.cpp`, `placement_tests.cpp` still use `game_create(nullptr)` + `game->registry` + direct system calls, and the C ABI still exists and works — so **do not touch them in this task**. They convert off `game_create` in Task 5, when the C ABI is removed. Only `sim_tests.cpp`, `duel_test.cpp`, and `duel_common.h` change here.
 
 - [ ] **Step 4: Build the test target**
 
@@ -478,7 +459,10 @@ Expected: all sim/duel/movement/heroes/placement cases green; only the 3 noiser 
 
 ```bash
 git add -A
-git commit -m "test(sim): move sim/duel tests onto badlands::Sim; internal tests to sim_internal.hpp
+git commit -m "test(sim): move sim/duel tests onto badlands::Sim
+
+Internal system tests (movement/heroes/placement) still use game_create and are
+untouched here — they convert in Task 5 when the C ABI is removed.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -487,43 +471,56 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ### Task 5: Delete the C ABI
 
-Now that no live code calls `game_*`, remove the header + shim.
+Convert the remaining C-ABI consumers (the internal tests + any straggler geometry callers), then remove the header and the `game_*` bodies.
 
 **Files:**
-- Delete: `game/include/badlands_game.h`, `game/src/c_abi_shim.cpp`.
-- Modify: `CMakeLists.txt` — drop `game/src/c_abi_shim.cpp` from `badlands_game_lib` sources.
-- Modify (if any remain): `src/game/views/model_viewer_view.{hpp,cpp}`, `src/game/scene/building_scene.cpp`, `src/game/main_*.cpp` — any residual `#include "badlands_game.h"` / `GameBuildingKind` / `game_render_box` → `badlands_sim.hpp` / `badlands::BuildingKind` / `badlands::RenderBoxOf`.
+- Delete: `game/include/badlands_game.h`; remove the `game_*` function bodies from `game/src/game.cpp` (delete the file if nothing else lives in it, and drop it from CMake).
+- Modify: `game/tests/movement_tests.cpp`, `heroes_tests.cpp`, `placement_tests.cpp` — replace `game_create(nullptr)`/`game_destroy(game)` with direct construction; keep `->registry` and the direct system calls.
+- Modify (if any remain): `src/game/views/model_viewer_view.{hpp,cpp}`, `src/game/scene/building_scene.cpp`, `src/game/main_*.cpp` — residual `#include "badlands_game.h"` / `GameBuildingKind` / `game_render_box` → `badlands_sim.hpp` / `badlands::BuildingKind` / `badlands::RenderBoxOf`.
 
 **Interfaces:**
-- Consumes: nothing new.
+- Consumes: `badlands::make_world` (Task 2) for the internal tests' construction.
 - Produces: `badlands_game_lib` with a single public header, `badlands_sim.hpp`. No `extern "C"` sim ABI anywhere.
 
-- [ ] **Step 1: Find every remaining reference**
+- [ ] **Step 1: Convert the internal tests off `game_create`**
+
+In `movement_tests.cpp`, `heroes_tests.cpp`, `placement_tests.cpp`: these include `game_state.h` and hold a `BadlandsGame* game`. Replace construction/teardown while keeping every `game->registry.*` access and direct system call (`plan_paths(*game, dt)`, etc.) intact:
+```cpp
+// before: BadlandsGame* game = game_create(nullptr); … game_destroy(game);
+// after:
+auto owned = badlands::make_world(nullptr);   // #include "sim_internal.hpp"
+BadlandsGame* game = owned.get();
+// … body unchanged (game->registry, plan_paths(*game, dt), etc.) …
+// no game_destroy — unique_ptr cleans up at scope exit
+```
+Any `game_dispatch(game, &a)` in `heroes_tests` → `badlands::dispatch_into(*game, a)` (map the `GameAction` fields to `badlands::Action`), or keep calling the internal free functions (`recruit`, `destroy_building_impl`) the test already uses.
+
+- [ ] **Step 2: Find every remaining `game_*` / ABI reference**
 
 Run:
 ```bash
 cd /Users/jakub/repos/badlands-clone-2
-grep -rn "badlands_game\.h\|game_create\|game_tick\|game_state\|game_buildings\|game_dispatch\|game_render_box\|game_building_def\|GameBuildingKind\|GameBuildingState\|GameAction\|game_world\|game_spawn\|game_probe_placement\|game_stats" src game | grep -v "badlands_game_lib\|badlands_game_tests"
+grep -rn "badlands_game\.h\|game_create\|game_tick\|game_state\|game_buildings\|game_dispatch\|game_render_box\|game_building_def\|GameBuildingKind\|GameBuildingState\|GameAction\|game_world\|game_spawn\|game_probe_placement\|game_stats" src game
 ```
-Expected: lists the stragglers (likely model_viewer + building_scene). If empty, skip Step 2.
+Expected: lists the remaining stragglers (likely model_viewer + building_scene). If empty, skip Step 3.
 
-- [ ] **Step 2: Convert the stragglers**
+- [ ] **Step 3: Convert the stragglers**
 
 For each hit: swap the include to `badlands_sim.hpp`, `GameBuildingKind`→`badlands::BuildingKind`, `game_render_box(k,r)`→`badlands::RenderBoxOf(k,r)`, `game_building_def(k)`→`badlands::BuildingDefOf(k)`. (`model_viewer_view.hpp:19` includes the ABI purely for the enum + `GAME_BUILDING_KIND_COUNT` → use `badlands::BuildingKind` + `badlands::BuildingKind::Count`.)
 
-- [ ] **Step 3: Delete the ABI files**
+- [ ] **Step 4: Delete the ABI**
 
 ```bash
-git rm game/include/badlands_game.h game/src/c_abi_shim.cpp
+git rm game/include/badlands_game.h
 ```
-Then remove the `game/src/c_abi_shim.cpp` line from `CMakeLists.txt` (badlands_game_lib sources, ~227-250).
+Remove the `game_*` bodies from `game/src/game.cpp`; if the file is now empty, `git rm` it and drop it from `CMakeLists.txt` (badlands_game_lib sources, ~227-250).
 
-- [ ] **Step 4: Build**
+- [ ] **Step 5: Build**
 
 Run: `cmake -S . -B build -G Ninja && cmake --build build`
 Expected: full build succeeds with the ABI gone.
 
-- [ ] **Step 5: Confirm the ABI is truly gone**
+- [ ] **Step 6: Confirm the ABI is truly gone**
 
 Run:
 ```bash
@@ -531,7 +528,7 @@ grep -rn "badlands_game\.h\|game_create\|game_tick\|game_buildings\|game_dispatc
 ```
 Expected: no hits.
 
-- [ ] **Step 6: Full tests + all three apps smoke-run**
+- [ ] **Step 7: Full tests + all three apps smoke-run**
 
 Run:
 ```bash
@@ -541,14 +538,15 @@ perl -e 'alarm 30; exec @ARGV' ./build/badlands_mapview --seed 2 --resolution 30
 ```
 Expected: tests green except the 3 noiser ICEs; `badlands_game` renders the demo town (compare `/tmp/game_final.png` to `/tmp/game_before.png` from Task 3 — identical scene); mapview unaffected.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add -A
 git commit -m "refactor(sim): delete the game C ABI; badlands::Sim is the only sim interface
 
-No live code calls game_* anymore. game/include/badlands_game.h and the forwarding
-shim are removed. badlands_game_lib now exposes one public header, badlands_sim.hpp.
+No code calls game_* anymore — the internal tests construct the world via
+badlands::make_world. game/include/badlands_game.h and the game_* bodies are
+removed. badlands_game_lib now exposes one public header, badlands_sim.hpp.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -560,10 +558,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Spec coverage (design doc Phase 1 / this increment):**
 - "sim's separate registry + data-only C ABI dissolve → C++ systems over a registry" → Tasks 2-5 (C ABI → `Sim`; note: full registry *unification* with the render side is the next increment, deliberately). ✓
 - "delete the dead Rust host" (user decision) → Task 1. ✓
-- "each app behaves identically" → screenshot parity (Task 3 Step 6, Task 5 Step 6) + test-baseline parity (every task). ✓
-- "sim systems remain unit-testable on a bare registry" → Task 4 keeps movement/heroes/placement tests on `SimState`. ✓
-- Out of scope, deferred to later increments (stated in Global Constraints): buildings-as-entities, `SyncToRegistry` removal, one shared registry, renderer-via-views. ✓
+- "each app behaves identically" → screenshot parity (Task 3 Step 6, Task 5 Step 7) + test-baseline parity (every task). ✓
+- "sim systems remain unit-testable on a bare registry" → the movement/heroes/placement tests keep exercising the systems directly over `BadlandsGame` (via `game_create` through Task 4, via `make_world` from Task 5). ✓
+- Out of scope, deferred to later increments (stated in Global Constraints): buildings-as-entities, `SyncToRegistry` removal, one shared registry, renderer-via-views, and the cosmetic `BadlandsGame`→`SimState` rename. ✓
 
-**Placeholder scan:** the header's `/* … */` are explicit "copy verbatim from badlands_game.h:<lines>" instructions with the exact source cited, not vague TODOs. The method bodies in Task 2 Step 4 say "old <fn> body over *state_" with the exact source line ranges — a mechanical move, not new logic. Acceptable for a behavior-preserving refactor.
+**Placeholder scan:** the header's `/* … */` are explicit "copy verbatim from badlands_game.h:<lines>" instructions with the exact source cited, not vague TODOs. Task 2's free-function bodies say "move the body of `game_<fn>` (game.cpp:<lines>)" — a mechanical relocation, not new logic. Acceptable for a behavior-preserving refactor.
 
-**Type consistency:** `Sim::Characters()`/`Buildings()`/`World()`/`GetStats()`/`ProbePlacement()`/`Dispatch()`/`Spawn()`/`Tick()`/`registry()` are used identically in Tasks 3-4 as declared in the Interfaces header. `badlands::BuildingKind`/`BuildingState`/`Action`/`RenderBoxOf`/`BuildingDefOf` names are consistent across composer, view, and tests. `SimState` is the single internal-world name everywhere after Task 2 Step 3.
+**Type consistency:** `Sim::Characters()`/`Buildings()`/`World()`/`GetStats()`/`ProbePlacement()`/`Dispatch()`/`Spawn()`/`Tick()`/`registry()` are used identically in Tasks 3-4 as declared in the Interfaces header. The extracted free functions (`make_world`/`tick_world`/`characters_of`/`buildings_of`/`world_of`/`stats_of`/`probe_of`/`spawn_into`/`dispatch_into`) are declared once in `sim_internal.hpp` and used by `Sim`, the C ABI, and (Task 5) the internal tests. `badlands::BuildingKind`/`BuildingState`/`Action`/`RenderBoxOf`/`BuildingDefOf` names are consistent across composer, view, and tests. The run-counter struct is `SimStats` (not `Stats`) everywhere.
