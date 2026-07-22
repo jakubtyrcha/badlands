@@ -125,6 +125,18 @@ struct CritterState {
     int32_t behavior = -1;              // last chosen Behavior, for inspection
 };
 
+// Tax collector (townfolk) dynamic state. It makes a round of the buildings
+// owing tax, banking each into `carried_gold`, then returns to a Castle/
+// Watchtower to deposit the carry into the player's gold and despawn. `visited`
+// stops it collecting the same building twice in one round; dying with a carry
+// (e.g. to a rat) loses that gold -- the vulnerability the round creates.
+struct TaxCollectorState {
+    std::vector<uint32_t> visited;  // building ids already collected this round
+    uint32_t carried_gold = 0;
+    int32_t home_building_id = -1;  // the Castle it set out from (deposit fallback)
+    int32_t behavior = -1;          // last chosen Behavior, for inspection
+};
+
 // Present while a hero is hidden inside a building; `timer` counts down to the
 // reappear at the approach tile. Its presence excludes the hero from movement,
 // combat, and enemy targeting (but not from the game_state snapshot).

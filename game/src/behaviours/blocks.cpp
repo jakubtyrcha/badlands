@@ -21,6 +21,10 @@ constexpr float kTierIdle = 1.0f;
 constexpr float kTierFlee = 10.0f;
 constexpr float kTierGraze = 3.0f;
 
+// Townfolk tiers: finish the tax round before returning to bank it.
+constexpr float kTierVisitTax = 5.0f;
+constexpr float kTierDeposit = 4.0f;
+
 // Deterministic per-entity RNG for the roam goal (xorshift64; seed must be
 // non-zero). Identical math to the pre-refactor town_brain so replayed/repeated
 // runs stay bit-exact.
@@ -112,6 +116,23 @@ float score_graze(const WorldView& v, const SimFactors&) {
 }
 BehaviourResult act_graze(const WorldView& v, const SimFactors&) {
     return {Behavior::Graze, v.pos, std::nullopt, false};  // hold and feed
+}
+
+// --- VisitNextTaxable (townfolk) --------------------------------------------
+float score_visit_taxable(const WorldView& v, const SimFactors&) {
+    return v.has_tax_target ? kTierVisitTax : 0.0f;
+}
+BehaviourResult act_visit_taxable(const WorldView& v, const SimFactors&) {
+    Command collect{CommandKind::CollectTax, v.slot, v.tax_target_id};
+    return {Behavior::VisitTax, v.tax_target_door, collect, true};
+}
+
+// --- Deposit (townfolk) -----------------------------------------------------
+float score_deposit(const WorldView& v, const SimFactors&) {
+    return v.has_deposit ? kTierDeposit : 0.0f;
+}
+BehaviourResult act_deposit(const WorldView& v, const SimFactors&) {
+    return {Behavior::Deposit, v.deposit_door, Command{CommandKind::Deposit, v.slot}, true};
 }
 
 }  // namespace badlands

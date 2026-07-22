@@ -63,6 +63,17 @@ BehaviourResult act_idle(const WorldView&, const SimFactors&);
 float score_graze(const WorldView&, const SimFactors&);
 BehaviourResult act_graze(const WorldView&, const SimFactors&);
 
+// --- townfolk (tax collector) blocks ----------------------------------------
+// VisitNextTaxable walks to the next unvisited building owing tax and banks it
+// on arrival (CollectTax). Deposit walks to a Castle/Watchtower and banks the
+// carry into player gold, then despawns (Deposit) -- the round's end. Deposit
+// scores below VisitNextTaxable, so the collector finishes its rounds first.
+float score_visit_taxable(const WorldView&, const SimFactors&);
+BehaviourResult act_visit_taxable(const WorldView&, const SimFactors&);
+
+float score_deposit(const WorldView&, const SimFactors&);
+BehaviourResult act_deposit(const WorldView&, const SimFactors&);
+
 // --- shared perception helper -----------------------------------------------
 // Deterministic wander point: a per-(slot,epoch) offset within `radius` of
 // `anchor`. Used by observe_* to fill WorldView::roam_goal; kept here so the

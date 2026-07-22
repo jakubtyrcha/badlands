@@ -16,6 +16,8 @@
 #include "placement.h"
 
 #include "critter_brain.h"
+#include "economy.h"
+#include "townfolk_brain.h"
 
 #include "game/map/symbolic_map_generator.hpp"
 #include "town_brain.h"
@@ -45,11 +47,16 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     MoveTarget& mt = reg.get<MoveTarget>(self);
     const BrainKind kind = reg.get<Brain>(self).kind;
 
-    // Critters never fight -- they flee. Their brain owns threat handling, so
-    // they skip the combat pre-empt entirely (otherwise a neutral deer would
-    // read any other-team unit as an "enemy" and give chase).
+    // Critters and townfolk never fight -- their brains own their movement, so
+    // they skip the combat pre-empt entirely (otherwise a neutral deer, or a
+    // peaceful tax collector, would read an other-team unit as an "enemy" and
+    // give chase). Guards (a future townfolk) will opt back into combat.
     if (kind == BrainKind::Critter) {
         critter_think(game, slot);
+        return;
+    }
+    if (kind == BrainKind::Townfolk) {
+        townfolk_think(game, slot);
         return;
     }
 
@@ -64,11 +71,11 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
                 town_think(game, slot);
                 break;
             case BrainKind::None:
-            case BrainKind::Townfolk:
             case BrainKind::Monster:
-                mt.kind = MoveTarget::Kind::None;  // brains land in later phases
+                mt.kind = MoveTarget::Kind::None;  // monster brain lands in Phase 5
                 break;
             case BrainKind::Critter:
+            case BrainKind::Townfolk:
                 break;  // handled above
         }
         return;
@@ -148,6 +155,13 @@ void tick_world(BadlandsGame& g, float dt) {
     // Needs system: fatigue/boredom rise for active (non-hidden) heroes, so
     // brains this tick see fresh values.
     advance_needs(g);
+
+    // Town economy + population: midnight tax accrual, then periodic spawning
+    // (tax collectors from the castle). Deterministic clock-driven systems, so
+    // they run identically in live and replay -- before think, so a just-spawned
+    // entity thinks and a just-accrued building is visible the same tick.
+    advance_economy(g);
+    run_spawners(g);
 
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.
@@ -304,6 +318,7 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
         const auto* sim = g.registry.try_get<HeroSimulationState>(e);
         const auto* disp = g.registry.try_get<HeroDisplayState>(e);
         const auto* crit = g.registry.try_get<CritterState>(e);
+        const auto* tax = g.registry.try_get<TaxCollectorState>(e);
         const auto* mt = g.registry.try_get<MoveTarget>(e);
         const auto* path = g.registry.try_get<NavPath>(e);
         // Resolve the goal to a world point so observers need no lookup.
@@ -337,7 +352,8 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
                                       : -1,
             .fatigue = sim ? sim->fatigue : 0.0f,
             .boredom = sim ? sim->boredom : 0.0f,
-            .behavior = sim ? sim->behavior : (crit ? crit->behavior : -1),
+            .behavior = sim ? sim->behavior
+                            : (crit ? crit->behavior : (tax ? tax->behavior : -1)),
             .goal_kind = mt ? static_cast<int32_t>(mt->kind) : 0,
             .goal_x = goal.x,
             .goal_z = goal.y,
@@ -345,9 +361,10 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
                 path ? static_cast<int32_t>(path->waypoints.size() -
                                             std::min<size_t>(path->cursor, path->waypoints.size()))
                      : 0,
-            .archetype = static_cast<int32_t>(
+                        .archetype = static_cast<int32_t>(
                 sim ? Archetype::Hero
-                    : (crit ? Archetype::Critter : Archetype::Monster)),
+                    : (crit ? Archetype::Critter
+                            : (tax ? Archetype::Townfolk : Archetype::Monster))),
         });
         const char* nm = disp ? disp->name.c_str() : "";
         std::size_t n = std::min(std::strlen(nm), sizeof(rows.back().name) - 1);

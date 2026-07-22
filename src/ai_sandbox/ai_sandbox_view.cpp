@@ -70,6 +70,9 @@ constexpr TownBuilding kTown[] = {
     {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, 8.0f, 0},
     {badlands::BuildingKind::Tavern, 14.0f, -8.0f, 0},
     {badlands::BuildingKind::Apothecary, 14.0f, 8.0f, 0},
+    {badlands::BuildingKind::House, 6.0f, 16.0f, 0},   // accrue tax for the collector
+    {badlands::BuildingKind::House, -6.0f, 16.0f, 0},
+    {badlands::BuildingKind::Watchtower, 0.0f, -16.0f, 0},  // second deposit point
 };
 
 // Heroes recruited per guild at seed time. Below kGuildRosterCap so the panel
@@ -88,7 +91,21 @@ const char* behavior_name(int32_t behavior) {
     case 3: return "GoHome";
     case 4: return "VisitTavern";
     case 5: return "Combat";
+    case 6: return "Graze";
+    case 7: return "VisitTax";
+    case 8: return "Deposit";
     default: return "-";
+  }
+}
+
+// Archetype label (badlands::Archetype).
+const char* archetype_name(int32_t a) {
+  switch (a) {
+    case 0: return "hero";
+    case 1: return "townfolk";
+    case 2: return "critter";
+    case 3: return "monster";
+    default: return "?";
   }
 }
 
@@ -103,6 +120,8 @@ const char* command_name(badlands::CommandKindId kind) {
     case badlands::CommandKindId::Buy: return "Buy";
     case badlands::CommandKindId::Attack: return "Attack";
     case badlands::CommandKindId::SetBehavior: return "SetBehavior";
+    case badlands::CommandKindId::CollectTax: return "CollectTax";
+    case badlands::CommandKindId::Deposit: return "Deposit";
     default: return "?";
   }
 }
@@ -459,40 +478,43 @@ void AiSandboxView::DrawInspector() {
               static_cast<unsigned long long>(stats.script_intents));
 
   // --- heroes ----------------------------------------------------------
-  ImGui::SeparatorText("Heroes");
   char_rows_ = sim_.Characters();
+  ImGui::SeparatorText("Entities");
   const uint32_t count =
       std::min(static_cast<uint32_t>(char_rows_.size()), kMaxCharacterRows);
-  if (ImGui::BeginTable("heroes", 7, ImGuiTableFlags_SizingStretchProp)) {
-    ImGui::TableSetupColumn("name");
+  if (ImGui::BeginTable("entities", 6, ImGuiTableFlags_SizingStretchProp)) {
+    ImGui::TableSetupColumn("id/name");
+    ImGui::TableSetupColumn("type");
     ImGui::TableSetupColumn("behavior");
     ImGui::TableSetupColumn("goal");
-    ImGui::TableSetupColumn("fatigue");
-    ImGui::TableSetupColumn("boredom");
-    ImGui::TableSetupColumn("home");
+    ImGui::TableSetupColumn("needs");
     ImGui::TableSetupColumn("inside");
     ImGui::TableHeadersRow();
     for (uint32_t i = 0; i < count; ++i) {
       const badlands::CharacterState& c = char_rows_[i];
-      if (c.name[0] == '\0') continue;  // not a hero
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
-      ImGui::TextUnformatted(c.name);
+      if (c.name[0] != '\0') {
+        ImGui::TextUnformatted(c.name);
+      } else {
+        ImGui::Text("#%u", c.id);
+      }
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(archetype_name(c.archetype));
       ImGui::TableNextColumn();
       ImGui::TextUnformatted(behavior_name(c.behavior));
       ImGui::TableNextColumn();
-      // What it is walking toward right now, and how far along the route.
       if (c.goal_kind == 0) {
         ImGui::TextUnformatted("-");
       } else {
-        ImGui::Text("(%.1f, %.1f) +%d", c.goal_x, c.goal_z, c.path_waypoints);
+        ImGui::Text("(%.0f, %.0f) +%d", c.goal_x, c.goal_z, c.path_waypoints);
       }
       ImGui::TableNextColumn();
-      ImGui::Text("%.2f", c.fatigue);
-      ImGui::TableNextColumn();
-      ImGui::Text("%.2f", c.boredom);
-      ImGui::TableNextColumn();
-      ImGui::Text("%d", c.home_building_id);
+      if (c.archetype == 0) {  // hero: show drives
+        ImGui::Text("f%.2f b%.2f", c.fatigue, c.boredom);
+      } else {
+        ImGui::TextUnformatted("-");
+      }
       ImGui::TableNextColumn();
       ImGui::Text("%d", c.inside_building_id);
     }

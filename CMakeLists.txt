@@ -237,6 +237,8 @@ add_library(badlands_game_lib STATIC
     game/src/behaviours/blocks.cpp
     game/src/behaviours/selectors.cpp
     game/src/critter_brain.cpp
+    game/src/townfolk_brain.cpp
+    game/src/economy.cpp
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
     third_party/noiser/noiser-vm/src/noiser_crash.cpp
@@ -516,6 +518,7 @@ add_executable(badlands_game_tests
     game/tests/archetype_tests.cpp
     game/tests/behaviours_tests.cpp
     game/tests/critter_tests.cpp
+    game/tests/townfolk_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE

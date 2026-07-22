@@ -27,6 +27,9 @@ struct PlacedBuilding {
     int32_t rot;       // 0..3
     int32_t w, d;      // footprint tiles
     bool alive = true; // tombstone: destruction sets false; id is never reused
+    // Uncollected tax owed by this building; a tax collector banks it. Houses
+    // accrue it at midnight (economy.cpp); a collector visit zeroes it.
+    uint32_t taxable_income = 0;
 };
 
 // Home roster capacity (heroes with Home == this building's id).

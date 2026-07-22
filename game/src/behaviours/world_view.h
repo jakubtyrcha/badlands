@@ -55,6 +55,13 @@ struct WorldView {
     // --- nearest perceived threat (Flee); populated from a later phase ------
     glm::vec2 threat_pos{0.0f, 0.0f};       bool has_threat = false;
     float threat_dist = 0.0f;
+
+    // --- townfolk (tax collector) ------------------------------------------
+    // Nearest unvisited building that still owes tax (the next stop on the
+    // round); and the nearest place to bank the carry (Castle/Watchtower).
+    glm::vec2 tax_target_door{0.0f, 0.0f};  bool has_tax_target = false;
+    uint32_t tax_target_id = UINT32_MAX;
+    glm::vec2 deposit_door{0.0f, 0.0f};     bool has_deposit = false;
 };
 
 // One tick's decision: which behaviour, where to walk, and an optional follow-up

@@ -588,6 +588,7 @@ void buildings_of(const BadlandsGame& game, std::vector<BuildingState>& out) {
             .rotation_index = b.rot,
             .width_tiles = b.w,
             .depth_tiles = b.d,
+            .taxable_income = b.taxable_income,
         });
     }
 }

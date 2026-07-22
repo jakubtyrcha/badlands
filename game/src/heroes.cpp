@@ -140,9 +140,13 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             brain_kind = BrainKind::Town;
             break;
         }
-        case Archetype::Townfolk:
+        case Archetype::Townfolk: {
+            TaxCollectorState tc{};
+            tc.home_building_id = home;  // the Castle it set out from
+            reg.emplace<TaxCollectorState>(e, std::move(tc));
             brain_kind = BrainKind::Townfolk;
             break;
+        }
         case Archetype::Critter: {
             CritterState cs{};
             cs.roam_anchor = {desc.pos_x, desc.pos_z};  // wander around the spawn spot

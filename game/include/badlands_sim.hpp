@@ -88,9 +88,18 @@ struct CritterFactors {
     float graze_fraction = 0.4f;   // fraction of each roam cycle spent grazing
 };
 
+// Townfolk (tax collector) tuning + the town economy.
+struct TownfolkFactors {
+    int64_t spawn_interval_millis = 60000;  // a collector leaves the castle this often
+    int32_t max_alive = 2;                  // cap on live collectors
+    float move_speed = 2.2f;                // a plodding taxman
+    uint32_t house_income_per_day = 50;     // each House accrues this each midnight
+};
+
 struct SimFactors {
     HeroFactors hero;
     CritterFactors critter;
+    TownfolkFactors townfolk;
 };
 
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
@@ -190,6 +199,7 @@ struct BuildingState {
     float center_x, center_z;
     int32_t rotation_index;
     int32_t width_tiles, depth_tiles;
+    uint32_t taxable_income;  // uncollected tax owed (Houses accrue at midnight)
 };
 
 // World-level scalars (gold, grid size, sprawl bookkeeping).
@@ -225,6 +235,8 @@ enum class CommandKindId : int32_t {
     Buy,
     Attack,
     SetBehavior,
+    CollectTax,
+    Deposit,
 };
 
 struct CommandRecord {

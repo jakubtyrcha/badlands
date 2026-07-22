@@ -76,6 +76,8 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                     sim->behavior = cmd.param_a;
                 } else if (auto* cs = game.registry.try_get<CritterState>(e)) {
                     cs->behavior = cmd.param_a;
+                } else if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
+                    tc->behavior = cmd.param_a;
                 }
             }
             return 0;
@@ -85,6 +87,38 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             if (e != entt::null) {
                 game.registry.get<Intent>(e) = {.kind = 2, .dir = {0.0f, 0.0f}};
             }
+            return 0;
+        }
+        case CommandKind::CollectTax: {
+            // Bank a building's owed tax into the collector's carry, once. The
+            // brain only emits this on arrival; guard against a stale/dead target.
+            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            if (e == entt::null) {
+                return 0;
+            }
+            auto* tc = game.registry.try_get<TaxCollectorState>(e);
+            const uint32_t bid = cmd.target_id;
+            if (tc == nullptr || bid >= game.placement.buildings.size() ||
+                !game.placement.buildings[bid].alive) {
+                return 0;
+            }
+            PlacedBuilding& b = game.placement.buildings[bid];
+            tc->carried_gold += b.taxable_income;
+            b.taxable_income = 0;
+            tc->visited.push_back(bid);  // do not collect it again this round
+            return 0;
+        }
+        case CommandKind::Deposit: {
+            // Bank the carry into the player's gold and despawn. The brain routes
+            // to a Castle/Watchtower and gates this on arrival.
+            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            if (e == entt::null) {
+                return 0;
+            }
+            if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
+                game.gold += tc->carried_gold;
+            }
+            game.registry.destroy(e);  // round complete; slot stays invalid
             return 0;
         }
     }
@@ -123,6 +157,8 @@ void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior) {
         current = sim->behavior;
     } else if (const auto* cs = game.registry.try_get<CritterState>(e)) {
         current = cs->behavior;
+    } else if (const auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
+        current = tc->behavior;
     } else {
         return;  // nothing to record it on
     }
