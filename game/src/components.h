@@ -178,6 +178,17 @@ struct InsideBuilding {
 // Present while a unit is locked in melee — movement is frozen (combat only).
 struct MeleeLock {};
 
+// Present on BOTH heroes of a conversation. Created only by the Chat command
+// (so the pairing is in the trace and replays) and dissolved by advance_chats
+// as a system rule — expiry, the partner dying or wandering off, or a threat
+// arriving. Chatting decays boredom toward a FLOOR rather than clearing it:
+// company is a weaker entertainment than the tavern, which is what makes the
+// tavern still worth walking to.
+struct ChattingState {
+    uint32_t partner_slot = UINT32_MAX;
+    float remaining = 0.0f;  // seconds left in the conversation
+};
+
 // --- v0.3 movement / pathfinding --------------------------------------------
 
 // A sub-tile capsule agent; radius drives clearance in the navmesh path query.

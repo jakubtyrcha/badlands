@@ -84,7 +84,7 @@ TEST_CASE("the default weights reproduce the canonical hero loop") {
     // change this test -- that is the point of it being a policy test.
     const SimFactors f;
     WorldView v = hero_view();
-    v.fatigue = 1.0f;  // tired    -> GoHome applies
+    v.fatigue = 0.7f;  // tired (but not spent) -> GoHome applies
     v.boredom = 1.0f;  // bored    -> VisitTavern applies
     v.inventory = 0;   // empty    -> Buy applies
 
@@ -103,7 +103,7 @@ TEST_CASE("the default weights reproduce the canonical hero loop") {
 TEST_CASE("a tired hero chooses GoHome, targeting the home door") {
     const SimFactors f;
     WorldView v = hero_view();
-    v.fatigue = 1.0f;
+    v.fatigue = 0.7f;
     const BehaviourResult r =
         select_banded(hero_activities(), mercenary_weights(f), v, f);
     CHECK(r.id == ActivityId::GoHome);
@@ -111,6 +111,30 @@ TEST_CASE("a tired hero chooses GoHome, targeting the home door") {
     CHECK(r.target.y == v.home_door.y);
     REQUIRE(r.follow_up.has_value());
     CHECK(r.follow_up->kind == CommandKind::EnterHome);
+}
+
+TEST_CASE("an exhausted hero rests as a Danger-band matter") {
+    // Same walk home, different activity: past fatigue_urgent, rest stops being
+    // leisure and pre-empts everything -- including a hunt, and including any
+    // errand a weight could otherwise favour.
+    const SimFactors f;
+    WorldView v = hero_view();
+    v.fatigue = 1.0f;
+    v.boredom = 1.0f;
+    v.has_prey = true;  // even with prey right there
+    v.prey_dist = 1.0f;
+
+    const BehaviourResult r =
+        select_banded(hero_activities(), f.hero.weights[HERO_HUNTER], v, f);
+    CHECK(r.id == ActivityId::RestUrgent);
+    CHECK(r.target.x == v.home_door.x);
+    REQUIRE(r.follow_up.has_value());
+    CHECK(r.follow_up->kind == CommandKind::EnterHome);
+
+    // With nowhere to sleep it does not apply -- and the hero carries on.
+    v.has_home = false;
+    CHECK(select_banded(hero_activities(), f.hero.weights[HERO_HUNTER], v, f).id !=
+          ActivityId::RestUrgent);
 }
 
 TEST_CASE("at night the lower fatigue bar sends a mildly-tired hero home") {

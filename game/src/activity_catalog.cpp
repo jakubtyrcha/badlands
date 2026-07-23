@@ -58,9 +58,14 @@ static_assert(catalog_is_dense(), "ActivityCatalog must be indexed by ActivityId
 // these numbers matter) arrives as those scores gain real curves.
 ActivityWeights base_hero_weights() {
     ActivityWeights w;
+    w.set(ActivityId::RestUrgent, 1.0f);  // alone in Danger; survival, not taste
     w.set(ActivityId::GoHome, 5.0f);
     w.set(ActivityId::Buy, 4.0f);
     w.set(ActivityId::VisitTavern, 3.0f);
+    // Below the tavern, above wandering: heroes prefer a proper night out, but
+    // company beats pacing about -- so chatting shows up mostly at night, when
+    // the tavern block scores 0 anyway.
+    w.set(ActivityId::Chat, 2.5f);
     w.set(ActivityId::Roam, 2.0f);
     w.set(ActivityId::Idle, 1.0f);
     w.set(ActivityId::Hunt, 0.0f);  // not a hunter: the activity does not exist
@@ -103,6 +108,14 @@ SimFactors::SimFactors() {
     // still goes home but an idle one hunts before shopping -- and no other
     // class perceives prey at all (weight 0 skips the perception too).
     hero.weights[HERO_HUNTER].set(ActivityId::Hunt, 4.5f);
+
+    // Personality, expressed purely as preference. These are the numbers a
+    // designer is expected to argue about; nothing structural depends on them.
+    // A hunter is happier in its own company; an apprentice is the most social
+    // and the most easily bored into seeking someone out.
+    hero.weights[HERO_HUNTER].set(ActivityId::Chat, 1.0f);
+    hero.weights[HERO_APPRENTICE].set(ActivityId::Chat, 3.5f);
+    hero.weights[HERO_GRAVE_ROBBER].set(ActivityId::Chat, 1.5f);
 
     // Deer: bolt (Danger band) over graze over wander.
     critter.weights.set(ActivityId::Flee, 1.0f);

@@ -161,6 +161,11 @@ void tick_world(BadlandsGame& g, float dt) {
     // Reappear hidden heroes whose stay has elapsed, before they think again.
     advance_inside_timers(g, dt);
 
+    // Run conversations and dissolve the finished ones, before think, so a hero
+    // whose companion just left decides afresh this very tick rather than
+    // standing about for one more.
+    advance_chats(g, dt);
+
     // Needs system: fatigue/boredom rise for active (non-hidden) heroes, so
     // brains this tick see fresh values.
     advance_needs(g);

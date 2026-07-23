@@ -122,7 +122,17 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             !ReadNum(*s, "hero", "fatigue_night", manifest_path, h.fatigue_night) ||
             !ReadNum(*s, "hero", "boredom_tavern", manifest_path, h.boredom_tavern) ||
             !ReadNum(*s, "hero", "roam_radius", manifest_path, h.roam_radius) ||
-            !ReadNum(*s, "hero", "hunt_sight_radius", manifest_path, h.hunt_sight_radius)) {
+            !ReadNum(*s, "hero", "hunt_sight_radius", manifest_path, h.hunt_sight_radius) ||
+            !ReadNum(*s, "hero", "fatigue_urgent", manifest_path, h.fatigue_urgent) ||
+            !ReadNum(*s, "hero", "threat_radius", manifest_path, h.threat_radius) ||
+            !ReadNum(*s, "hero", "think_min_millis", manifest_path, h.think_min_millis) ||
+            !ReadNum(*s, "hero", "think_max_millis", manifest_path, h.think_max_millis) ||
+            !ReadNum(*s, "hero", "chat_boredom", manifest_path, h.chat_boredom) ||
+            !ReadNum(*s, "hero", "chat_sight", manifest_path, h.chat_sight) ||
+            !ReadNum(*s, "hero", "chat_radius", manifest_path, h.chat_radius) ||
+            !ReadNum(*s, "hero", "chat_duration", manifest_path, h.chat_duration) ||
+            !ReadNum(*s, "hero", "chat_boredom_rate", manifest_path, h.chat_boredom_rate) ||
+            !ReadNum(*s, "hero", "chat_boredom_floor", manifest_path, h.chat_boredom_floor)) {
             return false;
         }
         // "weights": { "<Hero class>": { "<Activity>": <number>, ... }, ... }

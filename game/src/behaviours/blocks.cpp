@@ -72,6 +72,38 @@ BehaviourResult act_visit_tavern(const WorldView& v, const SimFactors&) {
     return {Behavior::VisitTavern, v.tavern_door, enter, true};
 }
 
+// --- RestUrgent -------------------------------------------------------------
+float score_rest_urgent(const WorldView& v, const SimFactors& f) {
+    if (!v.has_home) {
+        return kNotApplicable;  // nowhere to collapse; GoHome cannot help either
+    }
+    return v.fatigue >= f.hero.fatigue_urgent ? kApplies : kNotApplicable;
+}
+BehaviourResult act_rest_urgent(const WorldView& v, const SimFactors&) {
+    return {Behavior::RestUrgent, v.home_door, Command{CommandKind::EnterHome, v.slot}, true};
+}
+
+// --- Chat -------------------------------------------------------------------
+float score_chat(const WorldView& v, const SimFactors& f) {
+    if (v.chatting) {
+        return kApplies;  // mid-conversation: see it through
+    }
+    return (v.has_chat_partner && v.boredom >= f.hero.chat_boredom) ? kApplies : kNotApplicable;
+}
+BehaviourResult act_chat(const WorldView& v, const SimFactors& f) {
+    if (v.chatting) {
+        return {Behavior::Chat, v.pos, std::nullopt, false};  // stand and talk
+    }
+    // Walk over, and strike it up once close enough. The handler re-validates
+    // (both present, in range, neither already engaged), so emitting on arrival
+    // keeps the approach itself out of the command log.
+    BehaviourResult r{Behavior::Chat, v.partner_pos, std::nullopt, false};
+    if (v.partner_dist <= f.hero.chat_radius) {
+        r.follow_up = Command{CommandKind::Chat, v.slot, v.partner_slot};
+    }
+    return r;
+}
+
 // --- Hunt (hunter) ----------------------------------------------------------
 float score_hunt(const WorldView& v, const SimFactors&) {
     return v.has_prey ? kApplies : kNotApplicable;

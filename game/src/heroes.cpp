@@ -366,4 +366,52 @@ void advance_inside_timers(BadlandsGame& game, float dt) {
     }
 }
 
+void advance_chats(BadlandsGame& game, float dt) {
+    entt::registry& reg = game.registry;
+    const HeroFactors& hf = game.factors.hero;
+
+    // Collect first, mutate after: dissolving a session touches the partner
+    // too, and removing components mid-view is not safe.
+    std::vector<entt::entity> ending;
+    for (auto [e, chat] : reg.view<ChattingState>().each()) {
+        chat.remaining -= dt;
+        const entt::entity partner =
+            entity_for_slot(game, static_cast<int32_t>(chat.partner_slot));
+
+        bool over = chat.remaining <= 0.0f;
+        // The partner left -- died, went inside, or was never valid.
+        if (!over && (partner == entt::null || reg.all_of<InsideBuilding>(partner) ||
+                      !reg.all_of<ChattingState>(partner))) {
+            over = true;
+        }
+        // They drifted apart. Generous compared to the radius that started it,
+        // so a nudge from unit separation does not end the conversation.
+        if (!over && glm::distance(reg.get<Position>(e).pos, reg.get<Position>(partner).pos) >
+                         hf.chat_radius * 2.0f) {
+            over = true;
+        }
+        // Something hostile turned up: company is the first thing to go.
+        if (!over && nearest_enemy(game, e) != entt::null) {
+            over = true;
+        }
+        if (over) {
+            ending.push_back(e);
+        }
+    }
+
+    for (entt::entity e : ending) {
+        if (!reg.valid(e) || !reg.all_of<ChattingState>(e)) {
+            continue;  // already dissolved as somebody else's partner
+        }
+        const entt::entity partner =
+            entity_for_slot(game, static_cast<int32_t>(reg.get<ChattingState>(e).partner_slot));
+        reg.remove<ChattingState>(e);
+        // Both sides always leave together: a one-sided conversation would let
+        // the abandoned hero stand there talking to nobody.
+        if (partner != entt::null && reg.all_of<ChattingState>(partner)) {
+            reg.remove<ChattingState>(partner);
+        }
+    }
+}
+
 }  // namespace badlands

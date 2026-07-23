@@ -68,4 +68,15 @@ bool hero_buy(BadlandsGame& game, entt::entity e);              // fill inventor
 // approach tile and drop the component.
 void advance_inside_timers(BadlandsGame& game, float dt);
 
+// Tick sub-pass: run conversations and dissolve the ones that are over.
+//
+// A session is created ONLY by the Chat command, but it ends by SYSTEM RULE --
+// expiry, the partner dying or being hidden, the pair drifting apart, or a
+// threat arriving. That asymmetry is deliberate and mirrors MeleeLock: starting
+// a conversation is a decision worth recording, ending one is a consequence of
+// the world, and running it as a rule means a replay dissolves it identically
+// without the log having to carry an event for it. Both sides always leave
+// together, so a half-session cannot exist.
+void advance_chats(BadlandsGame& game, float dt);
+
 }  // namespace badlands

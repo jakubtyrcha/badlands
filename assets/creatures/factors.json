@@ -10,11 +10,24 @@
     "roam_radius": 6.0,
     "hunt_sight_radius": 22.0,
 
+    "fatigue_urgent": 0.95,
+    "threat_radius": 14.0,
+
+    "think_min_millis": 0,
+    "think_max_millis": 833,
+
+    "chat_boredom": 0.5,
+    "chat_sight": 18.0,
+    "chat_radius": 2.0,
+    "chat_duration": 6.0,
+    "chat_boredom_rate": 0.35,
+    "chat_boredom_floor": 0.25,
+
     "weights": {
-      "Mercenary":    { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Hunter":       { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
-      "Grave Robber": { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Apprentice":   { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
+      "Mercenary":    { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
+      "Hunter":       { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
+      "Grave Robber": { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
+      "Apprentice":   { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 3.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
     }
   },
 

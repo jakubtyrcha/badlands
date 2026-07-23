@@ -178,6 +178,35 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             cd.remaining = stats.attack_cooldown;
             return 0;
         }
+        case CommandKind::Chat: {
+            // Start a conversation. Authoritative: the brain gates on distance,
+            // but the handler re-checks everything, because it is the single
+            // point where the session comes into existence. The session lands
+            // on BOTH heroes from this one command -- the partner's own Chat
+            // command (if it emits one) then harmlessly no-ops.
+            entt::entity a = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            entt::entity b = entity_for_slot(game, static_cast<int32_t>(cmd.target_id));
+            if (a == entt::null || b == entt::null || a == b) {
+                return 0;
+            }
+            if (!game.registry.all_of<HeroSimulationState>(a) ||
+                !game.registry.all_of<HeroSimulationState>(b)) {
+                return 0;  // only heroes converse
+            }
+            if (game.registry.any_of<InsideBuilding, ChattingState>(a) ||
+                game.registry.any_of<InsideBuilding, ChattingState>(b)) {
+                return 0;  // hidden, or already talking to someone else
+            }
+            const float d = glm::distance(game.registry.get<Position>(a).pos,
+                                          game.registry.get<Position>(b).pos);
+            if (d > game.factors.hero.chat_radius) {
+                return 0;  // drifted apart before the command applied
+            }
+            const float duration = game.factors.hero.chat_duration;
+            game.registry.emplace<ChattingState>(a, cmd.target_id, duration);
+            game.registry.emplace<ChattingState>(b, cmd.actor, duration);
+            return 0;
+        }
     }
     return -1;
 }
@@ -196,8 +225,16 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target) {
     if (e == entt::null) {
         return;
     }
+    // Re-stating a goal that has not meaningfully moved is not a decision. The
+    // epsilon (not exact equality) matters for hold-position activities: a
+    // character standing still while Idle/Think/Chat is nudged a hair by unit
+    // separation each tick, and exact comparison would put one MoveTo per tick
+    // in the trace for as long as it stood there. Well below plan_paths'
+    // kGoalMovedThreshold, so it never suppresses a real repath.
+    constexpr float kGoalEpsilon = 0.05f;
     const MoveTarget& mt = game.registry.get<MoveTarget>(e);
-    if (mt.kind == MoveTarget::Kind::Point && mt.point == target) {
+    if (mt.kind == MoveTarget::Kind::Point &&
+        glm::distance(mt.point, target) <= kGoalEpsilon) {
         return;  // already walking there — not a new decision
     }
     game.command_queue.push_back({CommandKind::MoveTo, slot, UINT32_MAX, target});

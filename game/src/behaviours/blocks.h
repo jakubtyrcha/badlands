@@ -60,6 +60,23 @@ BehaviourResult act_buy(const WorldView&, const SimFactors&);
 float score_visit_tavern(const WorldView&, const SimFactors&);
 BehaviourResult act_visit_tavern(const WorldView&, const SimFactors&);
 
+// RestUrgent: the same walk home as GoHome, but in the DANGER band, so past
+// fatigue_urgent a hero abandons whatever it was doing -- even a hunt. Authored
+// as its own activity rather than as a promotion rule on GoHome, which keeps
+// the band hierarchy free of escape hatches and gives exhaustion its own bar in
+// the statistics (so "my heroes keep running themselves into the ground" is
+// visible rather than hidden inside the rest count).
+float score_rest_urgent(const WorldView&, const SimFactors&);
+BehaviourResult act_rest_urgent(const WorldView&, const SimFactors&);
+
+// Chat: two bored heroes who meet keep each other company. Walks to the partner
+// and strikes up a conversation on arrival (a Chat command, which is what
+// creates the session on BOTH of them); once talking, holds position until the
+// session ends. Deliberately a weaker entertainment than the tavern -- it
+// decays boredom toward a floor instead of clearing it.
+float score_chat(const WorldView&, const SimFactors&);
+BehaviourResult act_chat(const WorldView&, const SimFactors&);
+
 // --- hunter block -----------------------------------------------------------
 // Hunt chases the nearest perceived prey (a deer) and shoots it once within the
 // hunter's own attack range (a Shoot command targeting the prey slot). Every

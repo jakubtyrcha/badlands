@@ -82,6 +82,15 @@ struct WorldView {
     PerceivedThreat threats[kMaxThreats];
     int32_t threat_count = 0;
 
+    // --- company (Chat) ------------------------------------------------------
+    // The nearest other hero who is also bored enough to want company, and
+    // whether this hero is already in a conversation (a session, held on both
+    // participants, that runs to its own clock rather than being re-decided).
+    glm::vec2 partner_pos{0.0f, 0.0f};  bool has_chat_partner = false;
+    uint32_t partner_slot = UINT32_MAX;
+    float partner_dist = 0.0f;
+    bool chatting = false;
+
     // --- deliberation --------------------------------------------------------
     int64_t now_millis = 0;           // sim clock, for pause bookkeeping
     int64_t think_until_millis = 0;   // a pause in progress ends at this time

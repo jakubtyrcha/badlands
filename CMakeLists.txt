@@ -550,6 +550,7 @@ add_executable(badlands_game_tests
     game/tests/behaviours_tests.cpp
     game/tests/activity_selector_tests.cpp
     game/tests/deliberation_tests.cpp
+    game/tests/chat_tests.cpp
     game/tests/critter_tests.cpp
     game/tests/townfolk_tests.cpp
     game/tests/rat_tests.cpp

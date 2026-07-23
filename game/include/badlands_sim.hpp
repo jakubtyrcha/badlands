@@ -201,6 +201,19 @@ struct HeroFactors {
     float fatigue_go_home = 0.6f;  // tired enough to head home by day
     float fatigue_night = 0.2f;    // lower bar once it is night
     float boredom_tavern = 0.5f;   // bored enough to seek the tavern
+    // Rest stops being leisure and becomes survival here: RestUrgent sits in
+    // the Danger band, so past this bar a hero abandons even a hunt to sleep.
+    float fatigue_urgent = 0.95f;
+    // --- chatting -----------------------------------------------------------
+    // Two bored heroes who meet keep each other company. Weaker than the
+    // tavern by construction: boredom decays toward chat_boredom_floor instead
+    // of clearing, so company takes the edge off but the tavern still pulls.
+    float chat_boredom = 0.5f;        // bored enough to want company
+    float chat_sight = 18.0f;         // how far a hero looks for a companion
+    float chat_radius = 2.0f;         // close enough to actually strike it up
+    float chat_duration = 6.0f;       // seconds a conversation lasts
+    float chat_boredom_rate = 0.35f;  // boredom decay per second while chatting
+    float chat_boredom_floor = 0.25f; // company can never fully satisfy
     float roam_radius = 6.0f;      // world units around the roam anchor
     float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
     // How far a hero notices hostiles. Feeds WorldView's threat list, which
@@ -421,6 +434,7 @@ enum class CommandKindId : int32_t {
     Deposit,
     AttackBuilding,
     Shoot,
+    Chat,
 };
 
 struct CommandRecord {

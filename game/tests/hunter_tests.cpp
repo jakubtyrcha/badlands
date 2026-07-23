@@ -139,8 +139,10 @@ TEST_CASE("a hunter runs down a deer and kills it") {
 }
 
 TEST_CASE("a tired hunter rests instead of hunting") {
-    // Hunt is tiered below GoHome: survival wins. Recruit at a camp so the
-    // hunter has a home to return to.
+    // Rest outranks the job at BOTH bars, by two different mechanisms: merely
+    // tired, GoHome simply outweighs Hunt inside the Filler band; exhausted,
+    // RestUrgent sits in the Danger band and no weight could keep the hunter
+    // out hunting. Recruit at a camp so the hunter has a home to return to.
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
     uint32_t camp = place(g, BuildingKind::HuntersCamp, -20.0f, 20.0f);
@@ -149,11 +151,21 @@ TEST_CASE("a tired hunter rests instead of hunting") {
     uint32_t hid = static_cast<uint32_t>(dispatch_into(g, recruit));
     entt::entity e = g.slots[hid];
 
-    spawn_deer(g, g.registry.get<Position>(e).pos + glm::vec2{5.0f, 0.0f});  // prey right there
-    g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;                    // exhausted
-    g.world_millis = kMillisPerDay / 2;                                       // daytime
+    // Away from the camp door, or the hunter walks straight in on the first
+    // tick and is hidden (and rested) before the second decision happens.
+    g.registry.get<Position>(e).pos = {0.0f, 0.0f};
+    spawn_deer(g, {5.0f, 0.0f});          // prey right there
+    g.world_millis = kMillisPerDay / 2;   // daytime
 
+    // Tired but not spent: rest wins on weight, within the Filler band.
+    g.registry.get<HeroSimulationState>(e).fatigue = 0.7f;
     tick_world(g, 1.0f / 30.0f);
     CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
           static_cast<int32_t>(Behavior::GoHome));
+
+    // Spent: rest becomes a Danger-band matter and pre-empts outright.
+    g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;
+    tick_world(g, 1.0f / 30.0f);
+    CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
+          static_cast<int32_t>(Behavior::RestUrgent));
 }
