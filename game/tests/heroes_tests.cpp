@@ -7,6 +7,7 @@
 #include "heroes.h"
 #include "placement.h"
 #include "sim_internal.hpp"  // make_world / dispatch_into / characters_of / tick_world
+#include "town_brain.h"      // badlands::Behavior (InsideBuilding::purpose)
 
 #include <catch_amalgamated.hpp>
 #include <entt/entt.hpp>
@@ -204,7 +205,7 @@ TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footpr
         uint32_t hid = recruit_at(game, g1);
         entt::entity e = game->slots[hid];
         game->registry.emplace<InsideBuilding>(e, static_cast<int32_t>(g1),
-                                               kInsideDurationSeconds);
+                                               static_cast<int32_t>(Behavior::GoHome));
 
         Footprint fp = make_footprint(static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0,
                                       game->placement.buildings[g1].center);

@@ -33,7 +33,9 @@ WorldView lonely_hero(const SimFactors& f) {
     WorldView v;
     v.slot = 0;
     v.pos = {0.0f, 0.0f};
-    v.boredom = f.hero.chat_boredom + 0.2f;  // bored enough to want company
+    // content is a reserve (1 = satisfied); well below chat_content_seek, so the
+    // hero clearly wants company (its urgency clears the flat pull of wandering).
+    v.content = 0.15f;
     return v;
 }
 
@@ -67,7 +69,7 @@ Town make_town(int count, glm::vec2 where) {
 
 // --- 1. the block -----------------------------------------------------------
 
-TEST_CASE("a bored hero with a bored companion nearby wants to chat") {
+TEST_CASE("an under-entertained hero with a companion nearby wants to chat") {
     const SimFactors f;
     WorldView v = lonely_hero(f);
     CHECK(score_chat(v, f) == 0.0f);  // nobody about
@@ -77,8 +79,8 @@ TEST_CASE("a bored hero with a bored companion nearby wants to chat") {
     v.partner_dist = 10.0f;
     CHECK(score_chat(v, f) > 0.0f);
 
-    // Contented heroes keep to themselves.
-    v.boredom = 0.0f;
+    // Well-entertained heroes keep to themselves.
+    v.content = 1.0f;
     CHECK(score_chat(v, f) == 0.0f);
 }
 
@@ -107,7 +109,7 @@ TEST_CASE("a hero already chatting holds position and sees it through") {
     WorldView v = lonely_hero(f);
     v.pos = {3.0f, 7.0f};
     v.chatting = true;
-    v.boredom = 0.0f;  // even once content, the conversation continues
+    v.content = 1.0f;  // even once entertained, the conversation continues
 
     CHECK(score_chat(v, f) > 0.0f);
     const BehaviourResult r = act_chat(v, f);
@@ -128,10 +130,11 @@ TEST_CASE("chatting loses to the tavern but beats wandering") {
     v.has_tavern = true;
     v.tavern_door = {8.0f, 0.0f};
 
+    v.fatigue = 1.0f;  // rested, so only entertainment is in question
     const ActivityWeights& w = f.hero.weights[HERO_MERCENARY];
     CHECK(select_banded(hero_activities(), w, v, f).id == ActivityId::VisitTavern);
 
-    v.night = true;  // tavern block scores 0 at night
+    v.night = true;  // tavern shut at night
     CHECK(select_banded(hero_activities(), w, v, f).id == ActivityId::Chat);
 
     v.has_chat_partner = false;  // nobody about
@@ -174,7 +177,7 @@ TEST_CASE("the Chat handler is authoritative about distance and availability") {
 
     // A hero hidden inside a building is not available.
     g.registry.get<Position>(b).pos = {0.0f, 0.0f};
-    g.registry.emplace<InsideBuilding>(b, 0, 99.0f);
+    g.registry.emplace<InsideBuilding>(b, 0, static_cast<int32_t>(ActivityId::GoHome));
     apply_command(g, Command{CommandKind::Chat, t.heroes[0], t.heroes[1]});
     CHECK_FALSE(g.registry.all_of<ChattingState>(a));
     g.registry.remove<InsideBuilding>(b);
@@ -259,36 +262,37 @@ TEST_CASE("a threat breaks up a conversation") {
 
 // --- 3. the need ------------------------------------------------------------
 
-TEST_CASE("company decays boredom toward a floor, never clearing it") {
-    // The whole point of chatting being a WEAKER entertainment: if it cleared
-    // boredom the tavern would be pointless.
+TEST_CASE("company refills content toward a ceiling, never the whole way") {
+    // The whole point of chatting being a WEAKER entertainment: if it filled
+    // content completely the tavern would be pointless.
     Town t = make_town(2, {0.0f, 0.0f});
     BadlandsGame& g = t.g();
     const entt::entity a = g.slots[t.heroes[0]];
     apply_command(g, Command{CommandKind::Chat, t.heroes[0], t.heroes[1]});
 
-    g.registry.get<HeroSimulationState>(a).boredom = 1.0f;
-    for (int i = 0; i < 200; ++i) {
+    g.registry.get<HeroSimulationState>(a).content = 0.0f;
+    for (int i = 0; i < 100000; ++i) {
         advance_needs(g);
     }
-    const float settled = g.registry.get<HeroSimulationState>(a).boredom;
-    CHECK(settled == Catch::Approx(g.factors.hero.chat_boredom_floor));
-    CHECK(settled > 0.0f);  // the tavern still has something to offer
+    const float settled = g.registry.get<HeroSimulationState>(a).content;
+    CHECK(settled == Catch::Approx(g.factors.hero.chat_content_ceiling));
+    CHECK(settled < 1.0f);  // the tavern still has something to offer
 }
 
-TEST_CASE("a hero not chatting still grows bored") {
+TEST_CASE("a hero not chatting keeps growing less entertained") {
     Town t = make_town(1, {0.0f, 0.0f});
     BadlandsGame& g = t.g();
     const entt::entity a = g.slots[t.heroes[0]];
-    const float before = g.registry.get<HeroSimulationState>(a).boredom;
+    const float before = g.registry.get<HeroSimulationState>(a).content;
 
     advance_needs(g);
-    CHECK(g.registry.get<HeroSimulationState>(a).boredom > before);
+    CHECK(g.registry.get<HeroSimulationState>(a).content < before);  // content drains
 }
 
 TEST_CASE("chatting is still tiring") {
-    // Company answers boredom, not exhaustion -- so a chatting hero eventually
-    // still has to go home, which is what stops conversations being a trap.
+    // Company answers entertainment, not exhaustion -- so a chatting hero still
+    // runs its fatigue down and must eventually go home, which is what stops
+    // conversations being a trap.
     Town t = make_town(2, {0.0f, 0.0f});
     BadlandsGame& g = t.g();
     const entt::entity a = g.slots[t.heroes[0]];
@@ -296,7 +300,7 @@ TEST_CASE("chatting is still tiring") {
 
     const float before = g.registry.get<HeroSimulationState>(a).fatigue;
     advance_needs(g);
-    CHECK(g.registry.get<HeroSimulationState>(a).fatigue > before);
+    CHECK(g.registry.get<HeroSimulationState>(a).fatigue < before);  // fatigue drains
 }
 
 // --- end to end -------------------------------------------------------------
@@ -307,22 +311,23 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
     const entt::entity a = g.slots[t.heroes[0]];
     const entt::entity b = g.slots[t.heroes[1]];
 
-    // Night, so the tavern is not an option; bored, so they want company.
+    // Night, so the tavern is not an option; starved of diversion, so they want
+    // company. Rested (fatigue 1.0), so rest never takes over.
     g.world_millis = static_cast<int64_t>(kMillisPerDay * 0.9);
     SimFactors f = g.factors;
     f.hero.think_max_millis = 0;  // not a test about deliberation
     set_factors_of(g, f);
     for (entt::entity e : {a, b}) {
         auto& sim = g.registry.get<HeroSimulationState>(e);
-        sim.boredom = 0.9f;
-        sim.fatigue = 0.0f;
+        sim.content = 0.1f;
+        sim.fatigue = 1.0f;
     }
 
     bool talked = false;
     for (int i = 0; i < 120 && !talked; ++i) {
         auto& sa = g.registry.get<HeroSimulationState>(a);
         auto& sb = g.registry.get<HeroSimulationState>(b);
-        sa.fatigue = sb.fatigue = 0.0f;  // keep rest from taking over
+        sa.fatigue = sb.fatigue = 1.0f;  // keep rest from taking over
         tick_world(g, 1.0f / 30.0f);
         talked = g.registry.all_of<ChattingState>(a) && g.registry.all_of<ChattingState>(b);
     }

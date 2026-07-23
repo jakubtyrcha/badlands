@@ -28,7 +28,7 @@ struct TempManifest {
 TEST_CASE("the shipped factors manifest loads") {
     SimFactors f;
     REQUIRE(LoadSimFactors("assets/creatures/factors.json", f));
-    CHECK(f.hero.fatigue_go_home == Catch::Approx(0.6f));
+    CHECK(f.hero.fatigue_seek == Catch::Approx(0.55f));
     CHECK(f.hero.roam_radius == Catch::Approx(6.0f));
 }
 
@@ -36,7 +36,7 @@ TEST_CASE("a missing file fails and leaves the defaults untouched") {
     SimFactors f;
     const SimFactors defaults;
     CHECK_FALSE(LoadSimFactors("assets/creatures/does_not_exist.json", f));
-    CHECK(f.hero.fatigue_go_home == Catch::Approx(defaults.hero.fatigue_go_home));
+    CHECK(f.hero.fatigue_seek == Catch::Approx(defaults.hero.fatigue_seek));
 }
 
 TEST_CASE("a partial manifest tunes only what it mentions") {
@@ -45,7 +45,7 @@ TEST_CASE("a partial manifest tunes only what it mentions") {
     SimFactors f;
     REQUIRE(LoadSimFactors(m.path, f));
     CHECK(f.hero.roam_radius == Catch::Approx(21.5f));
-    CHECK(f.hero.fatigue_go_home == Catch::Approx(defaults.hero.fatigue_go_home));
+    CHECK(f.hero.fatigue_seek == Catch::Approx(defaults.hero.fatigue_seek));
 }
 
 TEST_CASE("a non-numeric value fails loudly rather than being ignored") {
@@ -67,7 +67,7 @@ TEST_CASE("unparseable JSON and a non-object section fail") {
 TEST_CASE("a failed parse leaves the caller's factors untouched") {
     // Half-applied tuning would be worse than none: a bad file must fall back
     // to defaults, not to a mixture.
-    TempManifest m(R"({ "hero": { "roam_radius": 99.0, "fatigue_night": "oops" } })");
+    TempManifest m(R"({ "hero": { "roam_radius": 99.0, "fatigue_seek_night": "oops" } })");
     SimFactors f;
     const SimFactors defaults;
     CHECK_FALSE(LoadSimFactors(m.path, f));
@@ -89,9 +89,9 @@ TEST_CASE("the shipped manifest carries the per-class activity weights") {
     // "tune a class without a rebuild" is a claim rather than a feature.
     SimFactors f;
     REQUIRE(LoadSimFactors("assets/creatures/factors.json", f));
-    CHECK(f.hero.weights[HERO_HUNTER].of(ActivityId::Hunt) == Catch::Approx(4.5f));
+    CHECK(f.hero.weights[HERO_HUNTER].of(ActivityId::Hunt) == Catch::Approx(2.5f));
     CHECK(f.hero.weights[HERO_MERCENARY].of(ActivityId::Hunt) == Catch::Approx(0.0f));
-    CHECK(f.hero.weights[HERO_APPRENTICE].of(ActivityId::GoHome) == Catch::Approx(5.0f));
+    CHECK(f.hero.weights[HERO_APPRENTICE].of(ActivityId::GoHome) == Catch::Approx(3.0f));
     CHECK(f.critter.weights.of(ActivityId::Graze) == Catch::Approx(3.0f));
 }
 

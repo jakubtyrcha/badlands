@@ -160,16 +160,16 @@ TEST_CASE("the search radius bounds how far afield a hero will look") {
 
 // --- 2. the Explore block ---------------------------------------------------
 
-TEST_CASE("Explore outranks every filler activity when it applies") {
-    // It sits in the Productive band, so this is structural rather than a
-    // matter of weights -- which is exactly why its vetoes carry the restraint.
+TEST_CASE("a settled hero with somewhere to explore goes rather than wanders") {
+    // Explore competes on need like everything else. With the reserves full (no
+    // rest or diversion pressing) and a frontier goal in hand, it beats aimless
+    // Roam -- the hero has decided there is somewhere to go.
     const SimFactors f;
-    WorldView v;
+    WorldView v;  // default reserves are full (1.0)
     v.has_explore_goal = true;
     v.explore_goal = {50.0f, 50.0f};
     v.has_home = true;
-    v.boredom = 1.0f;
-    v.has_tavern = true;  // would otherwise be off to the tavern
+    v.has_tavern = true;
 
     const BehaviourResult r =
         select_banded(hero_activities(), f.hero.weights[HERO_MERCENARY], v, f);
@@ -177,19 +177,19 @@ TEST_CASE("Explore outranks every filler activity when it applies") {
     CHECK(r.target.x == 50.0f);
 }
 
-TEST_CASE("Explore stands down rather than being out-prioritized") {
+TEST_CASE("Explore vetoes itself rather than being out-prioritized") {
     const SimFactors f;
-    WorldView v;
+    WorldView v;  // full reserves
     v.has_explore_goal = true;
     v.explore_goal = {50.0f, 50.0f};
     REQUIRE(score_explore(v, f) > 0.0f);
 
-    // Too tired to go wandering off.
-    v.fatigue = f.hero.explore_max_fatigue;
+    // Not enough left in the tank to strike out (fatigue at/below the floor).
+    v.fatigue = f.hero.explore_min_fatigue;
     CHECK(score_explore(v, f) == 0.0f);
-    v.fatigue = 0.0f;
+    v.fatigue = 1.0f;
 
-    // The world already refused this one.
+    // The world already refused this one this window.
     v.move_blocked = true;
     CHECK(score_explore(v, f) == 0.0f);
     v.move_blocked = false;
@@ -205,10 +205,10 @@ TEST_CASE("Explore stands down rather than being out-prioritized") {
 }
 
 TEST_CASE("a tired hero abandons exploring for rest") {
-    // Preemption by a higher need, which is what makes exploration a
+    // Preemption by a rising need, which is what makes exploration a
     // non-critical errand rather than a commitment.
     const SimFactors f;
-    WorldView v;
+    WorldView v;  // full reserves
     v.has_explore_goal = true;
     v.explore_goal = {50.0f, 50.0f};
     v.has_home = true;
@@ -216,18 +216,17 @@ TEST_CASE("a tired hero abandons exploring for rest") {
     CHECK(select_banded(hero_activities(), f.hero.weights[HERO_MERCENARY], v, f).id ==
           ActivityId::Explore);
 
-    v.fatigue = 0.7f;  // past explore_max_fatigue AND past fatigue_go_home
+    // Drained past the explore floor AND well under the rest seek bar: rest's
+    // urgency now overtakes the flat pull of exploring, and Explore has vetoed
+    // itself besides.
+    v.fatigue = 0.3f;
     CHECK(select_banded(hero_activities(), f.hero.weights[HERO_MERCENARY], v, f).id ==
           ActivityId::GoHome);
-
-    v.fatigue = 1.0f;  // and exhaustion pre-empts from the Danger band
-    CHECK(select_banded(hero_activities(), f.hero.weights[HERO_MERCENARY], v, f).id ==
-          ActivityId::RestUrgent);
 }
 
 TEST_CASE("class appetite for exploring is heavily skewed") {
     // "Hunters do it naturally, everyone else rarely" -- a frequency, which a
-    // weight cannot express while Explore is alone in its band.
+    // weight cannot express: a weight only decides who wins when two apply.
     const SimFactors f;
     CHECK(f.hero.explore_chance[HERO_HUNTER] > 0.5f);
     for (int32_t c : {HERO_MERCENARY, HERO_GRAVE_ROBBER, HERO_APPRENTICE}) {
@@ -332,7 +331,7 @@ TEST_CASE("a hunter actually sets off into the unknown, through the sim") {
     bool explored = false;
     glm::vec2 goal{};
     for (int i = 0; i < 600 && !explored; ++i) {
-        g.registry.get<HeroSimulationState>(e).fatigue = 0.0f;  // keep rest out of it
+        g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;  // fully rested: keep rest out of it
         tick_world(g, 1.0f / 30.0f);
         if (g.registry.get<HeroSimulationState>(e).behavior ==
             static_cast<int32_t>(ActivityId::Explore)) {

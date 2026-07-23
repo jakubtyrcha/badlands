@@ -43,9 +43,10 @@ struct WorldView {
     uint32_t slot = UINT32_MAX;
     glm::vec2 pos{0.0f, 0.0f};
 
-    // --- needs (heroes) -----------------------------------------------------
-    float fatigue = 0.0f;
-    float boredom = 0.0f;
+    // --- needs (heroes): RESERVES in [0,1], 1 = satisfied -------------------
+    float fatigue = 1.0f;
+    float content = 1.0f;
+    float health_frac = 1.0f;  // hp / max_hp; a hurt hero wants to lie down
     int32_t inventory = 0;
 
     // --- clock --------------------------------------------------------------

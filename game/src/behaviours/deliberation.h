@@ -51,8 +51,9 @@ struct ThinkDecision {
 // entirely, which is how timing-sensitive tests opt out.
 ThinkDecision deliberate(ActivityId chosen, const WorldView& view, const SimFactors& factors);
 
-// Is `id` a goal worth deliberating over -- i.e. a Productive or Filler one?
-// Out-of-range ids (a character that has not decided anything yet) are not.
+// Is `id` a goal worth deliberating over -- i.e. any Normal-band one, as
+// opposed to a Danger response (you do not mull over fleeing) or the -1 of a
+// character that has not decided anything yet.
 bool is_discretionary(int32_t id);
 
 }  // namespace badlands

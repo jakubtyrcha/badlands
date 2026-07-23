@@ -8,8 +8,9 @@ bool is_discretionary(int32_t id) {
     if (id < 0 || id >= kActivityCount) {
         return false;  // nothing decided yet -- there is no mind to change
     }
-    const ActivityBand band = ActivityInfoOf(id).band;
-    return band == ActivityBand::Productive || band == ActivityBand::Filler;
+    // Anything that is not an immediate-danger response. A hero deliberates
+    // over which errand to run; it does not deliberate over whether to flee.
+    return ActivityInfoOf(id).band != ActivityBand::Danger;
 }
 
 ThinkDecision deliberate(ActivityId chosen, const WorldView& view, const SimFactors& factors) {
@@ -33,6 +34,12 @@ ThinkDecision deliberate(ActivityId chosen, const WorldView& view, const SimFact
     }
     // The pause that just ended must not immediately start another.
     if (view.current_activity == static_cast<int32_t>(ActivityId::Think)) {
+        return {};
+    }
+    // Idle is the ABSENCE of a goal, not a goal: a hero does not stand and think
+    // about starting or stopping doing nothing. Treated like "no decision yet".
+    if (chosen_id == static_cast<int32_t>(ActivityId::Idle) ||
+        view.current_activity == static_cast<int32_t>(ActivityId::Idle)) {
         return {};
     }
     if (!is_discretionary(view.current_activity) || !is_discretionary(chosen_id)) {

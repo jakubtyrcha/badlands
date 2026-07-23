@@ -350,8 +350,8 @@ TEST_CASE("perceive_needs binds and echoes the hero's needs + clock") {
         @fn.intent_move_to:  fn(e: i32, x: f32, z: f32) -> void;
         pub gen fn brain(entity: i32) -> i32 {
             loop {
-                let (fatigue, boredom, tod, night) = @fn.perceive_needs(entity);
-                @fn.intent_move_to(entity, fatigue + boredom, tod + night);
+                let (fatigue, content, tod, night) = @fn.perceive_needs(entity);
+                @fn.intent_move_to(entity, fatigue + content, tod + night);
                 yield 0;
             }
         }
@@ -365,7 +365,7 @@ TEST_CASE("perceive_needs binds and echoes the hero's needs + clock") {
 
     auto& sim = game->registry.get<badlands::HeroSimulationState>(e);
     sim.fatigue = 0.25f;
-    sim.boredom = 0.5f;
+    sim.content = 0.5f;
     game->world_millis = badlands::kMillisPerDay / 2;  // midday -> tod 0.5, night 0
 
     tick_world(*game, 1.0f / 30.0f);
@@ -375,9 +375,12 @@ TEST_CASE("perceive_needs binds and echoes the hero's needs + clock") {
     if (stats.noiser_bugs == 0) {
         const badlands::MoveTarget& mt = game->registry.get<badlands::MoveTarget>(e);
         CHECK(mt.kind == badlands::MoveTarget::Kind::Point);
-        // Needs advanced one tick before the brain observed them.
-        CHECK(mt.point.x == Catch::Approx(0.75f + badlands::kFatiguePerTick +
-                                          badlands::kBoredomPerTick));
+        // Reserves DRAINED one tick before the brain observed them.
+        const float drained_fatigue =
+            0.25f - badlands::reserve_rate_per_tick(game->factors.hero.fatigue_drain_hours);
+        const float drained_content =
+            0.5f - badlands::reserve_rate_per_tick(game->factors.hero.content_drain_hours);
+        CHECK(mt.point.x == Catch::Approx(drained_fatigue + drained_content));
         CHECK(mt.point.y == Catch::Approx(0.5f).margin(0.01f));  // tod 0.5 + night 0
     } else {
         WARN("[noiser-bug] perceive_needs script tripped " << stats.noiser_bugs

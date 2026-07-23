@@ -118,22 +118,27 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
     }
     if (s != nullptr) {
         HeroFactors& h = parsed.hero;
-        if (!ReadNum(*s, "hero", "fatigue_go_home", manifest_path, h.fatigue_go_home) ||
-            !ReadNum(*s, "hero", "fatigue_night", manifest_path, h.fatigue_night) ||
-            !ReadNum(*s, "hero", "boredom_tavern", manifest_path, h.boredom_tavern) ||
+        if (!ReadNum(*s, "hero", "fatigue_drain_hours", manifest_path, h.fatigue_drain_hours) ||
+            !ReadNum(*s, "hero", "content_drain_hours", manifest_path, h.content_drain_hours) ||
+            !ReadNum(*s, "hero", "rest_fill_hours", manifest_path, h.rest_fill_hours) ||
+            !ReadNum(*s, "hero", "tavern_fill_hours", manifest_path, h.tavern_fill_hours) ||
+            !ReadNum(*s, "hero", "fatigue_seek", manifest_path, h.fatigue_seek) ||
+            !ReadNum(*s, "hero", "fatigue_seek_night", manifest_path, h.fatigue_seek_night) ||
+            !ReadNum(*s, "hero", "content_seek", manifest_path, h.content_seek) ||
+            !ReadNum(*s, "hero", "low_health_rest", manifest_path, h.low_health_rest) ||
             !ReadNum(*s, "hero", "roam_radius", manifest_path, h.roam_radius) ||
             !ReadNum(*s, "hero", "hunt_sight_radius", manifest_path, h.hunt_sight_radius) ||
-            !ReadNum(*s, "hero", "fatigue_urgent", manifest_path, h.fatigue_urgent) ||
             !ReadNum(*s, "hero", "threat_radius", manifest_path, h.threat_radius) ||
             !ReadNum(*s, "hero", "think_min_millis", manifest_path, h.think_min_millis) ||
             !ReadNum(*s, "hero", "think_max_millis", manifest_path, h.think_max_millis) ||
-            !ReadNum(*s, "hero", "chat_boredom", manifest_path, h.chat_boredom) ||
+            !ReadNum(*s, "hero", "chat_content_seek", manifest_path, h.chat_content_seek) ||
+            !ReadNum(*s, "hero", "chat_fill_hours", manifest_path, h.chat_fill_hours) ||
+            !ReadNum(*s, "hero", "chat_content_ceiling", manifest_path,
+                     h.chat_content_ceiling) ||
             !ReadNum(*s, "hero", "chat_sight", manifest_path, h.chat_sight) ||
             !ReadNum(*s, "hero", "chat_radius", manifest_path, h.chat_radius) ||
             !ReadNum(*s, "hero", "chat_duration", manifest_path, h.chat_duration) ||
-            !ReadNum(*s, "hero", "chat_boredom_rate", manifest_path, h.chat_boredom_rate) ||
-            !ReadNum(*s, "hero", "chat_boredom_floor", manifest_path, h.chat_boredom_floor) ||
-            !ReadNum(*s, "hero", "explore_max_fatigue", manifest_path, h.explore_max_fatigue) ||
+            !ReadNum(*s, "hero", "explore_min_fatigue", manifest_path, h.explore_min_fatigue) ||
             !ReadNum(*s, "hero", "explore_min_distance", manifest_path, h.explore_min_distance) ||
             !ReadNum(*s, "hero", "explore_max_distance", manifest_path, h.explore_max_distance) ||
             !ReadNum(*s, "hero", "explore_search_radius", manifest_path,

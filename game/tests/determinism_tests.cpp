@@ -84,7 +84,7 @@ void require_same(const Snapshot& a, const Snapshot& b) {
         CHECK(x.pos_z == y.pos_z);
         CHECK(x.hp == y.hp);
         CHECK(x.fatigue == y.fatigue);
-        CHECK(x.boredom == y.boredom);
+        CHECK(x.content == y.content);
         CHECK(x.behavior == y.behavior);
         CHECK(x.inside_building_id == y.inside_building_id);
         CHECK(std::string(x.name) == std::string(y.name));

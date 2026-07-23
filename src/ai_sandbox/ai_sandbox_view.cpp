@@ -96,9 +96,7 @@ const char* behavior_name(int32_t behavior) { return badlands::ActivityName(beha
 const char* band_name(badlands::ActivityBand band) {
   switch (band) {
     case badlands::ActivityBand::Danger: return "danger";
-    case badlands::ActivityBand::Productive: return "productive";
-    case badlands::ActivityBand::Filler: return "filler";
-    case badlands::ActivityBand::Fallback: return "fallback";
+    case badlands::ActivityBand::Normal: return "normal";
     default: return "?";
   }
 }
@@ -534,8 +532,8 @@ void AiSandboxView::DrawInspector() {
         ImGui::Text("(%.0f, %.0f) +%d", c.goal_x, c.goal_z, c.path_waypoints);
       }
       ImGui::TableNextColumn();
-      if (c.archetype == 0) {  // hero: show drives
-        ImGui::Text("f%.2f b%.2f", c.fatigue, c.boredom);
+      if (c.archetype == 0) {  // hero: show need reserves (1 = satisfied)
+        ImGui::Text("f%.2f c%.2f", c.fatigue, c.content);
       } else {
         ImGui::TextUnformatted("-");
       }

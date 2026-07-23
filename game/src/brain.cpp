@@ -180,7 +180,7 @@ int32_t perceive_class(BadlandsGame& game, int32_t slot) {
     return game.registry.get<HeroCharacter>(self).hero_class;
 }
 
-// (fatigue, boredom, time_of_day, is_night) — the hero's dynamic drives plus the
+// (fatigue, content, time_of_day, is_night) — the hero's need reserves plus the
 // world clock, the perception the day/night loop runs on. Flat f32s like every
 // other perception (host fns declared `-> vecN` ICE the compiler); `is_night` is
 // a 0/1 flag rather than a bool for the same all-flat reason.
@@ -196,7 +196,7 @@ glm::vec4 perceive_needs(BadlandsGame& game, int32_t slot) {
         return {0.0f, 0.0f, tod, night};  // non-hero: no drives, but the clock is real
     }
     const auto& sim = game.registry.get<HeroSimulationState>(self);
-    return {sim.fatigue, sim.boredom, tod, night};
+    return {sim.fatigue, sim.content, tod, night};
 }
 
 // Durable walk goal (engine navmesh-paths); replaces intent_move for town heroes.

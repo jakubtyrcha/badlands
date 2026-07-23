@@ -2,6 +2,7 @@
 
 #include "behaviours/rng.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "components.h"  // kInventoryCap
@@ -11,16 +12,26 @@ namespace badlands {
 namespace {
 
 // Scores are CONSIDERATIONS in [0,1] -- "how much does the situation call for
-// this" -- never priorities and never preferences. Priority is the band
-// (ActivityBand) and preference is the weight (ActivityWeights); keeping the
-// three apart is what lets weights be retuned, or this whole file be replaced
-// by a noiser implementation, without disturbing the band guarantees.
+// this right now" -- never priorities and never preferences. There is no
+// worthiness ranking of activities anywhere: within the Normal band a hero
+// rests rather than hunts because it is TIRED, and stops doing so the moment it
+// is not.
 //
-// Today most blocks are binary applicability (kApplies / 0). Real curves --
-// "how tired am I", "how much unexplored ground is near" -- slot in here
-// without any selector or table change, which is the point of the shape.
+// For a need-driven activity the score is the need's URGENCY (see urgency()).
+// For one that is simply available or not, it is kApplies / kNotApplicable, and
+// the per-class weight scales it into the same contest.
 constexpr float kApplies = 1.0f;
 constexpr float kNotApplicable = 0.0f;
+
+// How badly a depleted reserve wants attention: 0 at or above `threshold`,
+// ramping linearly to 1 when the reserve is empty. One shape, used by every
+// need, with the threshold as the per-need dial.
+float urgency(float reserve, float threshold) {
+    if (threshold <= 0.0f || reserve >= threshold) {
+        return kNotApplicable;
+    }
+    return std::clamp((threshold - reserve) / threshold, 0.0f, 1.0f);
+}
 
 // Townfolk still run select_priority (first applicable in list order), so only
 // the sign of their scores matters, not the magnitude.
@@ -29,14 +40,19 @@ constexpr float kTierDeposit = kApplies;
 
 }  // namespace
 
-// --- GoHome -----------------------------------------------------------------
+// --- GoHome (rest) ----------------------------------------------------------
+// Scored on three things, exactly as specified: how spent the hero is, whether
+// it is the sleep window, and whether it is hurt. The night raises the bar at
+// which turning in starts to appeal (a hero will go to bed merely tired-ish
+// after dark, but pushes on through the day); injury urges rest on its own,
+// whatever the reserve says -- hence max() rather than a product, which would
+// let a well-rested hero bleed out on its feet.
 float score_go_home(const WorldView& v, const SimFactors& f) {
     if (!v.has_home) {
-        return 0.0f;
+        return kNotApplicable;
     }
-    const bool tired = v.fatigue >= f.hero.fatigue_go_home ||
-                       (v.night && v.fatigue >= f.hero.fatigue_night);
-    return tired ? kApplies : kNotApplicable;
+    const float bar = v.night ? f.hero.fatigue_seek_night : f.hero.fatigue_seek;
+    return std::max(urgency(v.fatigue, bar), urgency(v.health_frac, f.hero.low_health_rest));
 }
 BehaviourResult act_go_home(const WorldView& v, const SimFactors&) {
     return {Behavior::GoHome, v.home_door, Command{CommandKind::EnterHome, v.slot}, true};
@@ -52,8 +68,10 @@ BehaviourResult act_buy(const WorldView& v, const SimFactors&) {
 
 // --- VisitTavern ------------------------------------------------------------
 float score_visit_tavern(const WorldView& v, const SimFactors& f) {
-    return (v.has_tavern && !v.night && v.boredom >= f.hero.boredom_tavern) ? kApplies
-                                                                            : kNotApplicable;
+    if (!v.has_tavern || v.night) {
+        return kNotApplicable;  // shut after dark
+    }
+    return urgency(v.content, f.hero.content_seek);
 }
 BehaviourResult act_visit_tavern(const WorldView& v, const SimFactors&) {
     Command enter{CommandKind::EnterBuilding, v.slot, UINT32_MAX, {0.0f, 0.0f},
@@ -61,23 +79,15 @@ BehaviourResult act_visit_tavern(const WorldView& v, const SimFactors&) {
     return {Behavior::VisitTavern, v.tavern_door, enter, true};
 }
 
-// --- RestUrgent -------------------------------------------------------------
-float score_rest_urgent(const WorldView& v, const SimFactors& f) {
-    if (!v.has_home) {
-        return kNotApplicable;  // nowhere to collapse; GoHome cannot help either
-    }
-    return v.fatigue >= f.hero.fatigue_urgent ? kApplies : kNotApplicable;
-}
-BehaviourResult act_rest_urgent(const WorldView& v, const SimFactors&) {
-    return {Behavior::RestUrgent, v.home_door, Command{CommandKind::EnterHome, v.slot}, true};
-}
-
 // --- Chat -------------------------------------------------------------------
 float score_chat(const WorldView& v, const SimFactors& f) {
     if (v.chatting) {
         return kApplies;  // mid-conversation: see it through
     }
-    return (v.has_chat_partner && v.boredom >= f.hero.chat_boredom) ? kApplies : kNotApplicable;
+    if (!v.has_chat_partner) {
+        return kNotApplicable;
+    }
+    return urgency(v.content, f.hero.chat_content_seek);
 }
 BehaviourResult act_chat(const WorldView& v, const SimFactors& f) {
     if (v.chatting) {
@@ -101,8 +111,8 @@ float score_explore(const WorldView& v, const SimFactors& f) {
     if (v.move_blocked) {
         return kNotApplicable;  // the world said no; try elsewhere next window
     }
-    if (v.fatigue >= f.hero.explore_max_fatigue) {
-        return kNotApplicable;  // too tired -- rest, an errand, anything nearer
+    if (v.fatigue <= f.hero.explore_min_fatigue) {
+        return kNotApplicable;  // not enough in the tank -- stay near home
     }
     if (v.has_prey) {
         return kNotApplicable;  // something worth stopping for is right here

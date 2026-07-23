@@ -122,31 +122,31 @@ enum class ActivityId : int32_t {
     VisitTax,
     Deposit,
     Hunt,
-    Flee,        // bolting from a threat (was reported as Roam)
-    Think,       // deliberating: an idle pause between discretionary goals
-    Explore,     // walking toward terra incognita
-    Chat,        // socializing with another hero (partial entertainment)
-    RestUrgent,  // rest as survival, not as leisure
+    Flee,     // bolting from a threat (was reported as Roam)
+    Think,    // deliberating: an idle pause between goals
+    Explore,  // walking toward terra incognita
+    Chat,     // socializing with another hero (partial entertainment)
     Count
 };
 inline constexpr int32_t kActivityCount = static_cast<int32_t>(ActivityId::Count);
 
-// Bands are the SHARED priority hierarchy every archetype obeys, and the one
-// thing the weight table can never override: an applicable Danger activity
-// always beats every Productive one, which always beats every Filler one. That
-// is what makes safety structural rather than a tuning problem -- no filler
-// weight, however large, can outbid a threat response.
+// TWO tiers, and deliberately only two.
 //
-// Within a band, `weight x considerations` decides (see ActivityWeights). An
-// activity drops out of contention by scoring 0 (a veto), NOT by being
-// out-prioritized -- which is how e.g. a productive errand yields to rest: it
-// disqualifies itself when the hero is too tired, and the loop falls through to
-// the Filler band. There is no per-band threshold knob: the threshold is 0.
+// Danger is immediate danger -- a threat that pre-empts whatever you were
+// doing. Normal is everything else. There is no "productive vs filler"
+// classification and there must not be one: sorting activities into worthiness
+// categories makes the category, rather than the character's actual state,
+// decide what it does. Rest does not outrank a hunt because resting is a nobler
+// class of act; it outranks it because the hero is tired, and stops outranking
+// it once the hero is not.
+//
+// So within Normal, ordering comes from NEED: `weight x score`, where score is
+// an urgency curve over the character's reserves (see HeroFactors). Danger
+// exists purely so safety is structural -- no weight, however large, can keep a
+// character standing about while something bears down on it.
 enum class ActivityBand : int32_t {
-    Danger = 0,  // threat response + survival: flee, fight, collapse
-    Productive,  // errands, exploration, training
-    Filler,      // rest, entertainment, socializing, wandering
-    Fallback,    // the last resort (Idle); nothing competes for it
+    Danger = 0,  // immediate danger: fight, flee, defend
+    Normal,      // everything else, ordered by need
     Count
 };
 
@@ -198,44 +198,63 @@ struct ActivityWeights {
 // (state = f(seed, initial config, command log, N ticks)): a replay must use
 // the same factors, and the command log does not carry them.
 struct HeroFactors {
-    float fatigue_go_home = 0.6f;  // tired enough to head home by day
-    float fatigue_night = 0.2f;    // lower bar once it is night
-    float boredom_tavern = 0.5f;   // bored enough to seek the tavern
-    // Rest stops being leisure and becomes survival here: RestUrgent sits in
-    // the Danger band, so past this bar a hero abandons even a hunt to sleep.
-    float fatigue_urgent = 0.95f;
+    // --- needs: RESERVES in [0,1], where 1 is satisfied ---------------------
+    // Both drain on their own and are refilled by doing something about it.
+    // NB the sense of `fatigue`: it is a reserve like any other, so 1 means
+    // well rested and 0 means spent -- resting RAISES it. That reads backwards
+    // against the everyday word, but one consistent direction for every need is
+    // worth more than each one reading nicely on its own.
+    //
+    // Rates are in IN-GAME HOURS so the numbers say what they mean; needs.h
+    // converts to a per-tick delta in exactly one place. Every one of these is
+    // live: Sim::SetFactors takes effect on the next tick, mid-run.
+    float fatigue_drain_hours = 24.0f;  // 1 -> 0 with no sleep
+    float content_drain_hours = 12.0f;  // 1 -> 0 with no diversion
+    float rest_fill_hours = 4.0f;       // 0 -> 1 sleeping at home
+    float tavern_fill_hours = 8.0f;     // 0 -> 1 at the tavern
+
+    // Below this reserve a hero starts wanting to do something about it, and
+    // urgency ramps linearly from 0 at the threshold to 1 at empty. That
+    // urgency IS the activity's score, which is what makes what a hero does
+    // next fall out of how depleted it is rather than out of what KIND of
+    // activity it is.
+    float fatigue_seek = 0.55f;        // by day
+    float fatigue_seek_night = 0.90f;  // far readier to turn in after dark
+    float content_seek = 0.60f;
+    // A hurt hero wants to lie down whatever its reserves say.
+    float low_health_rest = 0.5f;  // hp fraction below which rest urges
+
     // --- chatting -----------------------------------------------------------
-    // Two bored heroes who meet keep each other company. Weaker than the
-    // tavern by construction: boredom decays toward chat_boredom_floor instead
-    // of clearing, so company takes the edge off but the tavern still pulls.
-    float chat_boredom = 0.5f;        // bored enough to want company
-    float chat_sight = 18.0f;         // how far a hero looks for a companion
-    float chat_radius = 2.0f;         // close enough to actually strike it up
-    float chat_duration = 6.0f;       // seconds a conversation lasts
-    float chat_boredom_rate = 0.35f;  // boredom decay per second while chatting
-    float chat_boredom_floor = 0.25f; // company can never fully satisfy
+    // Two under-entertained heroes who meet keep each other company. Weaker
+    // than the tavern by construction: slower to fill, and it cannot fill you
+    // past a ceiling -- so company takes the edge off and a night out still
+    // pulls.
+    float chat_content_seek = 0.5f;     // low enough to settle for company
+    float chat_fill_hours = 20.0f;      // slower than a night out
+    float chat_content_ceiling = 0.6f;  // company can never fully satisfy
+    float chat_sight = 18.0f;           // how far a hero looks for a companion
+    float chat_radius = 2.0f;           // close enough to actually strike it up
+    float chat_duration = 6.0f;         // seconds a conversation lasts
     // --- exploration --------------------------------------------------------
-    // Walking into terra incognita. A PRODUCTIVE activity, so it outranks every
-    // filler one -- and therefore has to disqualify itself rather than be
-    // out-prioritized: too tired, already turned back once this window, or
-    // something worth stopping for right in front of it.
-    float explore_max_fatigue = 0.5f;     // too tired to strike out
+    // Walking into terra incognita. Competes on need like everything else; it
+    // stands down when the hero has no reserve to spare, when the world already
+    // refused it once this window, or when there is prey right there.
+    float explore_min_fatigue = 0.5f;     // not enough left in the tank to strike out
     float explore_min_distance = 6.0f;    // how far past the frontier to aim
     float explore_max_distance = 18.0f;
     float explore_search_radius = 90.0f;  // how far afield to look for a frontier
     int64_t explore_lease_millis = 8000;  // how long one target is committed to
     // Per-class appetite, drawn once per lease window: the probability a hero of
-    // that class feels like exploring at all. This is what "hunters do it
-    // naturally, everyone else rarely" means -- a weight could not express it,
-    // because Explore is currently alone in the Productive band and a weight
-    // only ranks rivals WITHIN a band. Filled by SimFactors().
+    // that class feels like exploring at all. A FREQUENCY, which a weight cannot
+    // express -- a weight decides which activity wins when both apply, so a low
+    // one means "always loses", i.e. never, not "rarely". Filled by SimFactors().
     float explore_chance[HERO_CLASS_COUNT];
     float roam_radius = 6.0f;      // world units around the roam anchor
     float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
     // How far a hero notices hostiles. Feeds WorldView's threat list, which
     // gates deliberation (you do not stand and think with a rat closing in).
     float threat_radius = 14.0f;
-    // Deliberation pause between discretionary goal changes, drawn uniformly
+    // Deliberation pause between goal changes, drawn uniformly
     // from this range. The prototype day is 120 s, so an in-game minute is
     // ~83 ms of sim time and the default range is roughly 0-10 in-game minutes.
     // Setting think_max_millis to 0 disables deliberation entirely.
@@ -322,7 +341,9 @@ struct CharacterState {
     int32_t home_building_id;    // recruiting guild; -1 = homeless / not a hero
     int32_t inside_building_id;  // -1 = outside; >=0 => hidden (don't draw; list in panel)
     // Hero simulation/display state, for the inspector. Zeroed for non-heroes.
-    float fatigue, boredom;  // drives, 0..1
+    // Need RESERVES in 0..1, where 1 is satisfied and 0 is spent (see
+    // HeroFactors). Zeroed for non-heroes.
+    float fatigue, content;
     int32_t behavior;        // last decided badlands::Behavior; -1 = none yet
     char name[24];           // NUL-terminated display name; "" for non-heroes
     // Current goal + pathfinding state: what this entity is walking toward now

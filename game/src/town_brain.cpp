@@ -76,7 +76,7 @@ const ActivityWeights& weights_for(const BadlandsGame& game, entt::entity e) {
 // equidistant both pick the lower slot -- which is what makes the pairing
 // agree from both sides without any negotiation.
 bool nearest_companion(const BadlandsGame& game, entt::entity self, glm::vec2 pos,
-                       float boredom_bar, float radius, glm::vec2& out_pos, uint32_t& out_slot,
+                       float content_bar, float radius, glm::vec2& out_pos, uint32_t& out_slot,
                        float& out_dist) {
     bool found = false;
     for (uint32_t slot = 0; slot < game.slots.size(); ++slot) {
@@ -85,7 +85,9 @@ bool nearest_companion(const BadlandsGame& game, entt::entity self, glm::vec2 po
             continue;
         }
         const auto* sim = game.registry.try_get<HeroSimulationState>(e);
-        if (sim == nullptr || sim->boredom < boredom_bar) {
+        // A companion worth approaching is one who ALSO wants company: its
+        // content reserve has dipped below the same bar.
+        if (sim == nullptr || sim->content >= content_bar) {
             continue;
         }
         if (game.registry.any_of<InsideBuilding, ChattingState>(e)) {
@@ -111,7 +113,9 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     v.slot = slot;
     v.pos = game.registry.get<Position>(e).pos;
     v.fatigue = sim.fatigue;
-    v.boredom = sim.boredom;
+    v.content = sim.content;
+    const Health& hp = game.registry.get<Health>(e);
+    v.health_frac = hp.max_hp > 0.0f ? hp.hp / hp.max_hp : 1.0f;
     v.inventory = sim.inventory;
     v.self_attack_range = game.registry.get<Stats>(e).attack_range;
     v.tod = time_of_day(game.world_millis);
@@ -172,9 +176,9 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     // sociable at all).
     v.chatting = game.registry.all_of<ChattingState>(e);
     if (!v.chatting && weights.of(ActivityId::Chat) > 0.0f &&
-        v.boredom >= game.factors.hero.chat_boredom) {
+        v.content < game.factors.hero.chat_content_seek) {
         v.has_chat_partner =
-            nearest_companion(game, e, v.pos, game.factors.hero.chat_boredom,
+            nearest_companion(game, e, v.pos, game.factors.hero.chat_content_seek,
                               game.factors.hero.chat_sight, v.partner_pos, v.partner_slot,
                               v.partner_dist);
     }
@@ -205,16 +209,15 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
 //
 // List order is the tie-break only. Priority is the band; preference is the
 // weight.
-constexpr std::array<ActivityDef, 9> kHeroActivities{{
-    {ActivityId::RestUrgent, ActivityBand::Danger, score_rest_urgent, act_rest_urgent},
-    {ActivityId::Explore, ActivityBand::Productive, score_explore, act_explore},
-    {ActivityId::GoHome, ActivityBand::Filler, score_go_home, act_go_home},
-    {ActivityId::Hunt, ActivityBand::Filler, score_hunt, act_hunt},
-    {ActivityId::Buy, ActivityBand::Filler, score_buy, act_buy},
-    {ActivityId::VisitTavern, ActivityBand::Filler, score_visit_tavern, act_visit_tavern},
-    {ActivityId::Chat, ActivityBand::Filler, score_chat, act_chat},
-    {ActivityId::Roam, ActivityBand::Filler, score_roam, act_roam},
-    {ActivityId::Idle, ActivityBand::Fallback, score_idle, act_idle},
+constexpr std::array<ActivityDef, 8> kHeroActivities{{
+    {ActivityId::Explore, ActivityBand::Normal, score_explore, act_explore},
+    {ActivityId::GoHome, ActivityBand::Normal, score_go_home, act_go_home},
+    {ActivityId::Hunt, ActivityBand::Normal, score_hunt, act_hunt},
+    {ActivityId::Buy, ActivityBand::Normal, score_buy, act_buy},
+    {ActivityId::VisitTavern, ActivityBand::Normal, score_visit_tavern, act_visit_tavern},
+    {ActivityId::Chat, ActivityBand::Normal, score_chat, act_chat},
+    {ActivityId::Roam, ActivityBand::Normal, score_roam, act_roam},
+    {ActivityId::Idle, ActivityBand::Normal, score_idle, act_idle},
 }};
 
 }  // namespace

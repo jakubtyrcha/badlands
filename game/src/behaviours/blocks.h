@@ -47,10 +47,10 @@ struct ActivityDef {
 };
 
 // --- hero blocks ------------------------------------------------------------
-// Each score is applicability in [0,1]. The ORDER these end up in (GoHome
-// before Buy before VisitTavern before Roam) is not encoded here at all -- it
-// comes from the per-class weights in SimFactors::hero.weights, which is what
-// makes it retunable as data and different per class.
+// Each score is a consideration in [0,1] -- for need-driven activities, the
+// URGENCY of the need. No block encodes where it sits relative to any other:
+// ordering emerges from urgency x per-class weight, so a hero rests before it
+// hunts when it is tired and not otherwise, and retuning is a data edit.
 float score_go_home(const WorldView&, const SimFactors&);
 BehaviourResult act_go_home(const WorldView&, const SimFactors&);
 
@@ -60,16 +60,7 @@ BehaviourResult act_buy(const WorldView&, const SimFactors&);
 float score_visit_tavern(const WorldView&, const SimFactors&);
 BehaviourResult act_visit_tavern(const WorldView&, const SimFactors&);
 
-// RestUrgent: the same walk home as GoHome, but in the DANGER band, so past
-// fatigue_urgent a hero abandons whatever it was doing -- even a hunt. Authored
-// as its own activity rather than as a promotion rule on GoHome, which keeps
-// the band hierarchy free of escape hatches and gives exhaustion its own bar in
-// the statistics (so "my heroes keep running themselves into the ground" is
-// visible rather than hidden inside the rest count).
-float score_rest_urgent(const WorldView&, const SimFactors&);
-BehaviourResult act_rest_urgent(const WorldView&, const SimFactors&);
-
-// Chat: two bored heroes who meet keep each other company. Walks to the partner
+// Chat: two under-entertained heroes who meet keep each other company. Walks to the partner
 // and strikes up a conversation on arrival (a Chat command, which is what
 // creates the session on BOTH of them); once talking, holds position until the
 // session ends. Deliberately a weaker entertainment than the tavern -- it

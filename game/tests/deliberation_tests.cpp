@@ -86,9 +86,9 @@ TEST_CASE("contract: a Danger-band goal is never deliberated over") {
     WorldView v = thinking_candidate();
     v.think_until_millis = v.now_millis + 500;  // even mid-pause
 
-    // RestUrgent and Flee are Danger-band; they commit immediately.
-    CHECK_FALSE(deliberate(ActivityId::RestUrgent, v, f).pause);
+    // Flee and Combat are the immediate-danger responses; they commit at once.
     CHECK_FALSE(deliberate(ActivityId::Flee, v, f).pause);
+    CHECK_FALSE(deliberate(ActivityId::Combat, v, f).pause);
 }
 
 TEST_CASE("contract: a pause in progress continues without re-logging") {
@@ -124,16 +124,21 @@ TEST_CASE("contract: a character with no decision yet does not deliberate") {
     CHECK_FALSE(deliberate(ActivityId::Buy, v, f).pause);
 }
 
-TEST_CASE("contract: leaving or entering a non-discretionary goal does not pause") {
+TEST_CASE("contract: leaving or entering a non-goal does not pause") {
     const SimFactors f = with_thinking();
     WorldView v = thinking_candidate();
 
-    // Coming off the Fallback band (Idle): not a change of mind worth a pause.
+    // Coming off Idle: idleness is the absence of a goal, so picking one up is
+    // not a change of mind worth a pause.
     v.current_activity = static_cast<int32_t>(ActivityId::Idle);
     CHECK_FALSE(deliberate(ActivityId::Buy, v, f).pause);
 
-    // Coming off a Danger-band goal: the emergency just ended, get on with it.
-    v.current_activity = static_cast<int32_t>(ActivityId::RestUrgent);
+    // Going TO Idle: you do not stand and think about doing nothing.
+    v.current_activity = static_cast<int32_t>(ActivityId::Roam);
+    CHECK_FALSE(deliberate(ActivityId::Idle, v, f).pause);
+
+    // Coming off a Danger response: the emergency just ended, get on with it.
+    v.current_activity = static_cast<int32_t>(ActivityId::Flee);
     CHECK_FALSE(deliberate(ActivityId::Buy, v, f).pause);
 }
 
@@ -171,13 +176,18 @@ TEST_CASE("contract: pause length is deterministic and varies by actor and time"
     CHECK(distinct > 0);
 }
 
-TEST_CASE("contract: is_discretionary follows the catalog's bands") {
-    CHECK(is_discretionary(static_cast<int32_t>(ActivityId::Roam)));      // Filler
-    CHECK(is_discretionary(static_cast<int32_t>(ActivityId::Explore)));   // Productive
-    CHECK_FALSE(is_discretionary(static_cast<int32_t>(ActivityId::Flee)));       // Danger
-    CHECK_FALSE(is_discretionary(static_cast<int32_t>(ActivityId::Idle)));       // Fallback
-    CHECK_FALSE(is_discretionary(-1));                                           // undecided
-    CHECK_FALSE(is_discretionary(kActivityCount));                               // out of range
+TEST_CASE("contract: is_discretionary means any Normal-band goal") {
+    // A hero deliberates over which errand to run; it does not deliberate over
+    // whether to flee. So everything Normal is discretionary and only the
+    // immediate-danger responses are not.
+    CHECK(is_discretionary(static_cast<int32_t>(ActivityId::Roam)));
+    CHECK(is_discretionary(static_cast<int32_t>(ActivityId::Explore)));
+    CHECK(is_discretionary(static_cast<int32_t>(ActivityId::GoHome)));
+    CHECK(is_discretionary(static_cast<int32_t>(ActivityId::Idle)));
+    CHECK_FALSE(is_discretionary(static_cast<int32_t>(ActivityId::Flee)));    // Danger
+    CHECK_FALSE(is_discretionary(static_cast<int32_t>(ActivityId::Combat)));  // Danger
+    CHECK_FALSE(is_discretionary(-1));                                        // undecided
+    CHECK_FALSE(is_discretionary(kActivityCount));                            // out of range
 }
 
 // --- the threat-proximity API ----------------------------------------------
@@ -260,19 +270,24 @@ TEST_CASE("a hero pauses in the sim, holds position, and resumes") {
     g.registry.get<Position>(e).pos = {0.0f, 0.0f};
     g.world_millis = kMillisPerDay / 2;  // midday: the tavern is an option
 
-    // First decision: tired, so it heads home. Nothing to deliberate over yet
-    // (the hero has not decided anything before).
-    g.registry.get<HeroSimulationState>(e).fatigue = 0.9f;
+    // First decision: spent, so it heads home. Nothing to deliberate over yet
+    // (the hero has not decided anything before). Reserves are 0..1 with 1
+    // satisfied, so low fatigue = tired.
+    {
+        auto& sim = g.registry.get<HeroSimulationState>(e);
+        sim.fatigue = 0.2f;  // below the seek bar -> wants rest
+        sim.content = 1.0f;  // not bored
+    }
     tick_world(g, 1.0f / 30.0f);
     REQUIRE(g.registry.get<HeroSimulationState>(e).behavior ==
             static_cast<int32_t>(ActivityId::GoHome));
 
-    // Now rested but bored: it wants the tavern instead. That IS a change of
-    // mind, so it should stop and think rather than pivot mid-stride.
+    // Now rested but starved of diversion: it wants the tavern instead. That IS
+    // a change of mind, so it should stop and think rather than pivot mid-stride.
     {
         auto& sim = g.registry.get<HeroSimulationState>(e);
-        sim.fatigue = 0.0f;
-        sim.boredom = 0.9f;
+        sim.fatigue = 1.0f;
+        sim.content = 0.1f;
     }
     g.registry.get<Position>(e).pos = {0.0f, 0.0f};
     tick_world(g, 1.0f / 30.0f);
@@ -306,7 +321,11 @@ TEST_CASE("a hero pauses in the sim, holds position, and resumes") {
 
     // Once it elapses, the hero commits to the goal it was mulling over.
     g.world_millis = sim.think_until_millis;
-    g.registry.get<HeroSimulationState>(e).boredom = 0.9f;
+    {
+        auto& s = g.registry.get<HeroSimulationState>(e);
+        s.fatigue = 1.0f;
+        s.content = 0.1f;
+    }
     tick_world(g, 1.0f / 30.0f);
     CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
           static_cast<int32_t>(ActivityId::VisitTavern));

@@ -3,27 +3,34 @@
 
   "_weights_comment": "\"weights\" is the per-class activity preference table. Utility is weight x considerations, compared only WITHIN an activity's band (Danger > Productive > Filler), so a weight tunes personality and can never override the safety hierarchy. 0 removes an activity from that class entirely. Keys are hero class and activity NAMES; an unknown name is an error, not a no-op.",
 
+  "_needs_comment": "fatigue and content are RESERVES in 0..1 where 1 is satisfied. They drain on their own (given in in-game hours to go 1->0) and refill by resting/being entertained (in-game hours to go 0->1). *_seek is the reserve below which the hero starts wanting to act; urgency then ramps to 1 as it empties, and that urgency IS the activity's score. All live at runtime.",
+
   "hero": {
-    "fatigue_go_home": 0.6,
-    "fatigue_night": 0.2,
-    "boredom_tavern": 0.5,
+    "fatigue_drain_hours": 24.0,
+    "content_drain_hours": 12.0,
+    "rest_fill_hours": 4.0,
+    "tavern_fill_hours": 8.0,
+
+    "fatigue_seek": 0.55,
+    "fatigue_seek_night": 0.90,
+    "content_seek": 0.60,
+    "low_health_rest": 0.5,
+
     "roam_radius": 6.0,
     "hunt_sight_radius": 22.0,
-
-    "fatigue_urgent": 0.95,
     "threat_radius": 14.0,
 
     "think_min_millis": 0,
     "think_max_millis": 833,
 
-    "chat_boredom": 0.5,
+    "chat_content_seek": 0.5,
+    "chat_fill_hours": 20.0,
+    "chat_content_ceiling": 0.6,
     "chat_sight": 18.0,
     "chat_radius": 2.0,
     "chat_duration": 6.0,
-    "chat_boredom_rate": 0.35,
-    "chat_boredom_floor": 0.25,
 
-    "explore_max_fatigue": 0.5,
+    "explore_min_fatigue": 0.5,
     "explore_min_distance": 6.0,
     "explore_max_distance": 18.0,
     "explore_search_radius": 90.0,
@@ -34,11 +41,12 @@
       "Mercenary": 0.05, "Hunter": 0.85, "Grave Robber": 0.15, "Apprentice": 0.03
     },
 
+    "_weights_note": "A weight MULTIPLIES an activity's 0..1 score. Need activities (GoHome/VisitTavern/Chat) score their need's urgency, which climbs from 0 as the reserve empties; the flat ones (Roam/Buy/Idle/Hunt/Explore) score 1 when available. So weight x score decides, and ordering emerges from need -- not from any tier.",
     "weights": {
-      "Mercenary":    { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Hunter":       { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 0.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
-      "Grave Robber": { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.2, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Apprentice":   { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.8, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
+      "Mercenary":    { "Explore": 1.0, "GoHome": 3.0, "Buy": 1.5, "VisitTavern": 3.0, "Chat": 2.0, "Roam": 1.0, "Idle": 0.5, "Hunt": 0.0 },
+      "Hunter":       { "Explore": 1.0, "GoHome": 3.0, "Buy": 1.5, "VisitTavern": 3.0, "Chat": 0.0, "Roam": 1.0, "Idle": 0.5, "Hunt": 2.5 },
+      "Grave Robber": { "Explore": 1.0, "GoHome": 3.0, "Buy": 1.5, "VisitTavern": 3.0, "Chat": 2.2, "Roam": 1.0, "Idle": 0.5, "Hunt": 0.0 },
+      "Apprentice":   { "Explore": 1.0, "GoHome": 3.0, "Buy": 1.5, "VisitTavern": 3.0, "Chat": 2.5, "Roam": 1.0, "Idle": 0.5, "Hunt": 0.0 }
     }
   },
 

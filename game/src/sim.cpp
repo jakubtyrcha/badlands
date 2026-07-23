@@ -164,17 +164,18 @@ void tick_world(BadlandsGame& g, float dt) {
         cooldown.remaining = std::max(0.0f, cooldown.remaining - dt);
     }
 
-    // Reappear hidden heroes whose stay has elapsed, before they think again.
-    advance_inside_timers(g, dt);
+    // Needs first: reserves drain (and refill, for anyone inside) before
+    // anything looks at them, so a hero whose sleep just topped out is released
+    // by advance_inside on the same tick rather than one later.
+    advance_needs(g);
+
+    // Release hidden heroes whose reason for being inside is over.
+    advance_inside(g);
 
     // Run conversations and dissolve the finished ones, before think, so a hero
     // whose companion just left decides afresh this very tick rather than
     // standing about for one more.
     advance_chats(g, dt);
-
-    // Needs system: fatigue/boredom rise for active (non-hidden) heroes, so
-    // brains this tick see fresh values.
-    advance_needs(g);
 
     // Town economy + population: midnight tax accrual, then periodic spawning
     // (tax collectors from the castle). Deterministic clock-driven systems, so
@@ -383,7 +384,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
                                       ? g.registry.get<InsideBuilding>(e).building_id
                                       : -1,
             .fatigue = sim ? sim->fatigue : 0.0f,
-            .boredom = sim ? sim->boredom : 0.0f,
+            .content = sim ? sim->content : 0.0f,
             .behavior = sim ? sim->behavior
                             : (crit ? crit->behavior : (tax ? tax->behavior : -1)),
             .goal_kind = mt ? static_cast<int32_t>(mt->kind) : 0,

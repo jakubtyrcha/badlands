@@ -21,22 +21,24 @@ namespace badlands {
 namespace {
 
 // Indexed by ActivityId; the static_assert below pins the two in step.
+// Only immediate danger sits in the Danger band. Everything else is Normal and
+// competes on need -- there is no third category, and adding one would put the
+// KIND of an activity back in charge of what a character does.
 constexpr std::array<ActivityInfo, static_cast<size_t>(kActivityCount)> kCatalog{{
-    {ActivityId::Idle, "Idle", ActivityBand::Fallback},
-    {ActivityId::Roam, "Roam", ActivityBand::Filler},
-    {ActivityId::Buy, "Buy", ActivityBand::Filler},
-    {ActivityId::GoHome, "GoHome", ActivityBand::Filler},
-    {ActivityId::VisitTavern, "VisitTavern", ActivityBand::Filler},
+    {ActivityId::Idle, "Idle", ActivityBand::Normal},
+    {ActivityId::Roam, "Roam", ActivityBand::Normal},
+    {ActivityId::Buy, "Buy", ActivityBand::Normal},
+    {ActivityId::GoHome, "GoHome", ActivityBand::Normal},
+    {ActivityId::VisitTavern, "VisitTavern", ActivityBand::Normal},
     {ActivityId::Combat, "Combat", ActivityBand::Danger},
-    {ActivityId::Graze, "Graze", ActivityBand::Filler},
-    {ActivityId::VisitTax, "VisitTax", ActivityBand::Productive},
-    {ActivityId::Deposit, "Deposit", ActivityBand::Productive},
-    {ActivityId::Hunt, "Hunt", ActivityBand::Filler},
+    {ActivityId::Graze, "Graze", ActivityBand::Normal},
+    {ActivityId::VisitTax, "VisitTax", ActivityBand::Normal},
+    {ActivityId::Deposit, "Deposit", ActivityBand::Normal},
+    {ActivityId::Hunt, "Hunt", ActivityBand::Normal},
     {ActivityId::Flee, "Flee", ActivityBand::Danger},
-    {ActivityId::Think, "Think", ActivityBand::Filler},
-    {ActivityId::Explore, "Explore", ActivityBand::Productive},
-    {ActivityId::Chat, "Chat", ActivityBand::Filler},
-    {ActivityId::RestUrgent, "RestUrgent", ActivityBand::Danger},
+    {ActivityId::Think, "Think", ActivityBand::Normal},
+    {ActivityId::Explore, "Explore", ActivityBand::Normal},
+    {ActivityId::Chat, "Chat", ActivityBand::Normal},
 }};
 
 // The catalog must stay dense and in id order -- every consumer indexes it.
@@ -51,28 +53,28 @@ constexpr bool catalog_is_dense() {
 static_assert(catalog_is_dense(), "ActivityCatalog must be indexed by ActivityId");
 
 // --- default preference tables ---------------------------------------------
-// Phase 1 note: these weights reproduce the pre-band priority chain exactly
-// (GoHome > Hunt > Buy > VisitTavern > Roam > Idle), because every activity
-// currently scores a binary 0/1 applicability -- so `weight x score` collapses
-// to the old tiers. Class personality (and the softer considerations that make
-// these numbers matter) arrives as those scores gain real curves.
+// A weight is a MULTIPLIER on an activity's [0,1] score, and the two kinds of
+// score meet on equal terms here:
+//
+//   need-driven (GoHome, VisitTavern, Chat) score their need's URGENCY, which
+//     starts at 0 and climbs toward 1 as the reserve empties -- so weight x
+//     urgency rises past a flat rival only once the hero is depleted enough.
+//   always-available (Roam, Buy, Idle, Hunt, Explore) score a flat 1, so their
+//     weight is just their standing -- the baseline a need has to climb over.
+//
+// That crossover IS the ordering: a hero wanders (Roam) until fatigue urgency x
+// GoHome-weight overtakes it, then goes home. No tier says rest beats wandering;
+// being tired does. 0 removes an activity entirely.
 ActivityWeights base_hero_weights() {
     ActivityWeights w;
-    w.set(ActivityId::RestUrgent, 1.0f);  // alone in Danger; survival, not taste
-    w.set(ActivityId::GoHome, 5.0f);
-    w.set(ActivityId::Buy, 4.0f);
-    w.set(ActivityId::VisitTavern, 3.0f);
-    // Below the tavern, above wandering: heroes prefer a proper night out, but
-    // company beats pacing about -- so chatting shows up mostly at night, when
-    // the tavern block scores 0 anyway.
-    w.set(ActivityId::Chat, 2.5f);
-    w.set(ActivityId::Roam, 2.0f);
-    w.set(ActivityId::Idle, 1.0f);
-    w.set(ActivityId::Hunt, 0.0f);  // not a hunter: the activity does not exist
-    // Alone in the Productive band, so this weight only says "the class has
-    // it". HOW OFTEN a class explores is HeroFactors::explore_chance, because a
-    // weight ranks rivals within a band and there are none to rank against.
-    w.set(ActivityId::Explore, 1.0f);
+    w.set(ActivityId::GoHome, 3.0f);       // urgency-scaled; wins once genuinely tired
+    w.set(ActivityId::VisitTavern, 3.0f);  // urgency-scaled; a proper night out
+    w.set(ActivityId::Chat, 2.0f);         // urgency-scaled; company, second to the tavern
+    w.set(ActivityId::Buy, 1.5f);          // a flat errand: worth more than wandering
+    w.set(ActivityId::Explore, 1.0f);      // flat, but gated by appetite + a frontier
+    w.set(ActivityId::Roam, 1.0f);         // flat: the wander a hero falls back to
+    w.set(ActivityId::Idle, 0.5f);         // flat: the true last resort
+    w.set(ActivityId::Hunt, 0.0f);         // not a hunter: the activity does not exist
     return w;
 }
 
@@ -108,30 +110,21 @@ SimFactors::SimFactors() {
     for (int32_t c = 0; c < HERO_CLASS_COUNT; ++c) {
         hero.weights[c] = base_hero_weights();
     }
-    // A hunter's job. Weighted between rest and the errands, so a tired hunter
-    // still goes home but an idle one hunts before shopping -- and no other
-    // class perceives prey at all (weight 0 skips the perception too).
-    hero.weights[HERO_HUNTER].set(ActivityId::Hunt, 4.5f);
+    // A hunter's job: a flat activity, weighted above the errands so an
+    // untroubled hunter hunts, but below a full rest/entertainment NEED so a
+    // depleted one still goes home. No other class perceives prey at all (a 0
+    // weight skips the perception too).
+    hero.weights[HERO_HUNTER].set(ActivityId::Hunt, 2.5f);
 
-    // Personality, expressed purely as preference. These are the numbers a
-    // designer is expected to argue about; nothing structural depends on them.
-    // A hunter is happier in its own company; an apprentice is the most social
-    // and the most easily bored into seeking someone out.
-    // Chat weights sit in the narrow band between Roam (2.0) and VisitTavern
-    // (3.0), and the two bounds mean something:
-    //
-    //   below Roam    -> the hero would rather pace about alone: never chats.
-    //                    A 1.5 here reads like "sometimes" and behaves like
-    //                    "never", so a class that should not chat says so with
-    //                    an explicit 0 instead.
-    //   above Tavern  -> a companion is nearly always to hand, so the hero
-    //                    stops going to the tavern altogether (measured: an
-    //                    apprentice at 3.5 had zero tavern visits in 100 days).
-    //
-    // Company fills the hours the tavern is shut; it does not replace it.
-    hero.weights[HERO_HUNTER].set(ActivityId::Chat, 0.0f);  // a loner, explicitly
+    // Personality, expressed purely as preference -- the numbers a designer is
+    // meant to argue about; nothing structural rests on them. Chat is
+    // urgency-scaled like the tavern but weighted below it, so company fills the
+    // hours the tavern is shut rather than replacing a night out. A hunter is a
+    // loner -- an explicit 0, not a low weight, since a low weight would read as
+    // "rarely" and behave as "never".
+    hero.weights[HERO_HUNTER].set(ActivityId::Chat, 0.0f);
     hero.weights[HERO_GRAVE_ROBBER].set(ActivityId::Chat, 2.2f);
-    hero.weights[HERO_APPRENTICE].set(ActivityId::Chat, 2.8f);
+    hero.weights[HERO_APPRENTICE].set(ActivityId::Chat, 2.5f);
 
     // Appetite for the unknown, heavily skewed: a hunter ranges out as a matter
     // of course, a grave robber now and then, and the town-dwellers only rarely.

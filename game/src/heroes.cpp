@@ -4,6 +4,7 @@
 #include "components.h"
 #include "game_state.h"
 #include "placement.h"
+#include "town_brain.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -309,11 +310,14 @@ bool hero_enter(BadlandsGame& game, entt::entity e, int kind) {
     if (!at_building_of_kind(game, e, kind, bid)) {
         return false;
     }
-    game.registry.emplace_or_replace<InsideBuilding>(e, static_cast<int32_t>(bid),
-                                                     kInsideDurationSeconds);
-    if (kind == static_cast<int>(BuildingKind::Tavern)) {
-        game.registry.get<HeroSimulationState>(e).boredom = 0.0f;  // entertained
-    }
+    // Entering satisfies NOTHING on its own -- it starts the hero refilling
+    // (advance_needs) at a rate, and it leaves when full. Zeroing the need at
+    // the door would make an 8-hour evening at the tavern indistinguishable
+    // from touching the doorframe.
+    const int32_t purpose = kind == static_cast<int>(BuildingKind::Tavern)
+                                ? static_cast<int32_t>(Behavior::VisitTavern)
+                                : static_cast<int32_t>(Behavior::GoHome);
+    game.registry.emplace_or_replace<InsideBuilding>(e, static_cast<int32_t>(bid), purpose);
     return true;
 }
 
@@ -329,10 +333,11 @@ bool hero_enter_home(BadlandsGame& game, entt::entity e) {
         glm::distance(p, tile) > kEntranceRadius) {
         return false;
     }
-    game.registry.emplace_or_replace<InsideBuilding>(e, home, kInsideDurationSeconds);
-    auto& sim = game.registry.get<HeroSimulationState>(e);
-    sim.inventory = 0;   // resting empties inventory (closes the loop)
-    sim.fatigue = 0.0f;  // sleeping at home clears fatigue
+    game.registry.emplace_or_replace<InsideBuilding>(
+        e, home, static_cast<int32_t>(Behavior::GoHome));
+    // Sleep refills fatigue over time (advance_needs), it does not clear it at
+    // the door. Emptying the pack is instantaneous and unrelated.
+    game.registry.get<HeroSimulationState>(e).inventory = 0;
     return true;
 }
 
@@ -345,12 +350,34 @@ bool hero_buy(BadlandsGame& game, entt::entity e) {
     return true;
 }
 
-void advance_inside_timers(BadlandsGame& game, float dt) {
+bool should_leave_building(const BadlandsGame& game, entt::entity e,
+                           const InsideBuilding& inside) {
+    const auto* sim = game.registry.try_get<HeroSimulationState>(e);
+    if (sim == nullptr) {
+        return true;  // not a hero: nothing to be in there for
+    }
+    // The building went away underneath them (razed while they slept).
+    const auto& bs = game.placement.buildings;
+    if (inside.building_id < 0 || static_cast<size_t>(inside.building_id) >= bs.size() ||
+        !bs[inside.building_id].alive) {
+        return true;
+    }
+    // Done when the reserve it came for is full. `>= 1` rather than a timer, so
+    // the stay lasts exactly as long as the hero needed it to.
+    //
+    // Everything else that should end a stay goes here: home under attack, a
+    // threat at the door, being summoned, dawn.
+    if (inside.purpose == static_cast<int32_t>(Behavior::VisitTavern)) {
+        return sim->content >= 1.0f;
+    }
+    return sim->fatigue >= 1.0f;
+}
+
+void advance_inside(BadlandsGame& game) {
     entt::registry& reg = game.registry;
     std::vector<entt::entity> exit;
     for (auto [e, ib] : reg.view<InsideBuilding>().each()) {
-        ib.timer -= dt;
-        if (ib.timer <= 0.0f) {
+        if (should_leave_building(game, e, ib)) {
             exit.push_back(e);
         }
     }

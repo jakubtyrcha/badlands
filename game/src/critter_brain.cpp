@@ -75,9 +75,9 @@ WorldView observe_critter(const BadlandsGame& game, uint32_t slot, entt::entity 
 // archetype without a line of new logic.
 constexpr std::array<ActivityDef, 4> kCritterActivities{{
     {ActivityId::Flee, ActivityBand::Danger, score_flee, act_flee},
-    {ActivityId::Graze, ActivityBand::Filler, score_graze, act_graze},
-    {ActivityId::Roam, ActivityBand::Filler, score_roam, act_roam},
-    {ActivityId::Idle, ActivityBand::Fallback, score_idle, act_idle},
+    {ActivityId::Graze, ActivityBand::Normal, score_graze, act_graze},
+    {ActivityId::Roam, ActivityBand::Normal, score_roam, act_roam},
+    {ActivityId::Idle, ActivityBand::Normal, score_idle, act_idle},
 }};
 
 }  // namespace
