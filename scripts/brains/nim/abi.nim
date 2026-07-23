@@ -22,6 +22,12 @@ const
   BL_CMD_BUY* = 2'i32
   BL_CMD_ENTER* = 3'i32       # arg = BuildingKind
   BL_CMD_ENTER_HOME* = 4'i32
+  # Task 5 extensions (game/src/brain_abi.h): act_hunt/act_chat's follow-ups
+  # (CommandKind::Shoot/Chat) have no wire representation among the original
+  # four -- both need a TARGET slot, which BL_CMD_ATTACK/ENTER_HOME/BUY do
+  # not carry. arg = target slot (prey for SHOOT, chat partner for CHAT).
+  BL_CMD_SHOOT* = 5'i32
+  BL_CMD_CHAT* = 6'i32
 
 type
   BlViewSelf* {.packed.} = object

@@ -56,6 +56,13 @@ extern "C" {
 #define BL_CMD_BUY 2
 #define BL_CMD_ENTER 3  // command_arg = BuildingKind
 #define BL_CMD_ENTER_HOME 4
+// Task 5 (wasm hero decision layer): act_hunt/act_chat's follow-ups
+// (CommandKind::Shoot/Chat, game/src/behaviours/blocks.cpp) target a specific
+// OTHER entity, which none of the four kinds above carry -- BL_CMD_ATTACK is
+// actor-only, and ENTER/ENTER_HOME/BUY carry a building kind or nothing.
+// command_arg = target slot.
+#define BL_CMD_SHOOT 5   // command_arg = prey slot (hunter's shot)
+#define BL_CMD_CHAT 6    // command_arg = chat partner slot
 
 // --- BlViewSelf --------------------------------------------------------------
 // This entity's own state: clock, identity, needs, and its own current

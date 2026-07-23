@@ -4,9 +4,14 @@
 # Nim's C backend generates C, which wasi-sdk's clang/wasm-ld turns into a
 # freestanding wasm32 module.
 #
-# Builds two brains, both with the identical flag family (see build_one
+# Builds three brains, all with the identical flag family (see build_one
 # below): scripts/brains/nim/hero.nim -> assets/brains/hero.wasm (the
-# shipping skeleton) and scripts/brains/nim/trap_test.nim ->
+# shipping hero decision layer -- a port of game/src/town_brain.cpp +
+# game/src/behaviours/{blocks,selectors,deliberation}.cpp), scripts/brains/
+# nim/idle_test.nim -> game/tests/fixtures/idle_brain.wasm (a test-only
+# fixture whose bl_tick always decides Idle -- what hero.wasm itself used to
+# be, before Task 5's real decision port; existing tests that assert all-Idle
+# behaviour target this instead), and scripts/brains/nim/trap_test.nim ->
 # game/tests/fixtures/trap_brain.wasm (a test-only fixture whose bl_tick
 # unconditionally traps -- game/tests/wasm_brain_tests.cpp's BhInstance
 # reinstantiation coverage).
@@ -102,6 +107,17 @@ echo "build_brains.sh: $(nim --version | head -1)"
 #       import validation regardless of reachability. Quirky exceptions drop
 #       that check entirely; --panics:on additionally makes a Defect
 #       (out-of-bounds, etc.) an unrecoverable trap rather than a raise.
+#   --checks:off   the SAME "dead code still drags in a disallowed import"
+#       problem as the `exit` one above, hit for real by Task 5's hero
+#       decision layer (which indexes array tables, e.g. activity_catalog.nim's
+#       band lookup): even with --panics:on turning a failed bounds check into
+#       a trap, building the trap's "index X not in Y..Z" message first still
+#       needs int->string (system/dollars.nim -> std/private/digitsutils.nim),
+#       which pulls in system.nim's buffered-file-write path -> the
+#       wasi_snapshot_preview1.fd_write/fd_close/fd_seek/proc_exit IMPORTS --
+#       never reached (every index used here is already guarded), but still
+#       linked. --checks:off (bound/overflow/range/nil/assert) removes the
+#       check -- and its message-formatting call -- entirely.
 #   -mexec-model=reactor   selects wasi-libc's "reactor" C runtime (an
 #       `_initialize` export, no `main`) over the default "command" one
 #       (`_start` calling `main(argc, argv)`), which otherwise imports
@@ -125,7 +141,7 @@ build_one() {
 
     nim c \
         --cpu:wasm32 --os:any --mm:arc -d:useMalloc --threads:off -d:release --nomain \
-        -d:noSignalHandler --panics:on --exceptions:quirky \
+        -d:noSignalHandler --panics:on --exceptions:quirky --checks:off \
         --cc:clang --clang.exe:"$CLANG" --clang.linkerexe:"$CLANG" \
         --passC:"--target=wasm32-wasip1" \
         --passL:"--target=wasm32-wasip1 -mexec-model=reactor -Wl,--no-entry -Wl,--allow-undefined -Wl,--export=bl_abi_version -Wl,--export=bl_init -Wl,--export=bl_spawn -Wl,--export=bl_despawn -Wl,--export=bl_view_buf -Wl,--export=bl_out_buf -Wl,--export=bl_tick" \
@@ -137,5 +153,7 @@ build_one() {
 }
 
 build_one "$SCRIPT_DIR/brains/nim/hero.nim" "$REPO_ROOT/assets/brains/hero.wasm" hero
+build_one "$SCRIPT_DIR/brains/nim/idle_test.nim" \
+    "$REPO_ROOT/game/tests/fixtures/idle_brain.wasm" idle_test
 build_one "$SCRIPT_DIR/brains/nim/trap_test.nim" \
     "$REPO_ROOT/game/tests/fixtures/trap_brain.wasm" trap_test
