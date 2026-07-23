@@ -117,9 +117,21 @@ SimFactors::SimFactors() {
     // designer is expected to argue about; nothing structural depends on them.
     // A hunter is happier in its own company; an apprentice is the most social
     // and the most easily bored into seeking someone out.
-    hero.weights[HERO_HUNTER].set(ActivityId::Chat, 1.0f);
-    hero.weights[HERO_APPRENTICE].set(ActivityId::Chat, 3.5f);
-    hero.weights[HERO_GRAVE_ROBBER].set(ActivityId::Chat, 1.5f);
+    // Chat weights sit in the narrow band between Roam (2.0) and VisitTavern
+    // (3.0), and the two bounds mean something:
+    //
+    //   below Roam    -> the hero would rather pace about alone: never chats.
+    //                    A 1.5 here reads like "sometimes" and behaves like
+    //                    "never", so a class that should not chat says so with
+    //                    an explicit 0 instead.
+    //   above Tavern  -> a companion is nearly always to hand, so the hero
+    //                    stops going to the tavern altogether (measured: an
+    //                    apprentice at 3.5 had zero tavern visits in 100 days).
+    //
+    // Company fills the hours the tavern is shut; it does not replace it.
+    hero.weights[HERO_HUNTER].set(ActivityId::Chat, 0.0f);  // a loner, explicitly
+    hero.weights[HERO_GRAVE_ROBBER].set(ActivityId::Chat, 2.2f);
+    hero.weights[HERO_APPRENTICE].set(ActivityId::Chat, 2.8f);
 
     // Appetite for the unknown, heavily skewed: a hunter ranges out as a matter
     // of course, a grave robber now and then, and the town-dwellers only rarely.

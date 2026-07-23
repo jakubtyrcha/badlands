@@ -331,6 +331,8 @@ struct CharacterState {
     float goal_x, goal_z;    // goal position in world XZ (0,0 when goal_kind == 0)
     int32_t path_waypoints;  // waypoints remaining on the planned route
     int32_t archetype;       // Archetype (Hero/Townfolk/Critter/Monster)
+    int32_t hero_class;      // HeroClassId; -1 for non-heroes. Lets an observer
+                             // attribute behaviour to a class without a lookup.
     // Unit XZ look direction (the character Transform's rotation applied to the
     // model-forward axis, projected to XZ). Drives the vision cone and the
     // render pose. Always normalized (defaults to kCharacterForward).
@@ -347,6 +349,48 @@ struct SimStats {
     uint64_t ticks;
     uint64_t script_intents;  // intents delivered by noiser brains (0 when mocked)
     uint32_t noiser_bugs;     // failures that downgraded an entity to the mock brain
+};
+
+// ---------------------------------------------------------------------------
+// Goal statistics: how many entity-ticks each activity was active for, overall
+// and per hero class. The point is to make a large run legible -- "apprentices
+// never explore", "everybody is asleep by noon", "Flee is 40% of deer ticks" --
+// so that something being off is visible rather than something you have to
+// happen to be watching at the right moment.
+//
+// It is a FOLD OVER SNAPSHOTS, deliberately outside the sim core: neither
+// tick_world nor any brain knows it exists. Two reasons, and both matter:
+//
+//   * A counter threaded through decision code drifts from reality the moment
+//     one path forgets to bump it, and a wrong histogram is worse than none --
+//     you would go looking for a bug in the AI that is really a bug in the
+//     accounting.
+//   * Folding the same rows an observer reads means the histogram cannot
+//     disagree with the inspector next to it, and a reimplementation of the
+//     brains (the planned noiser one) changes nothing here.
+//
+// Accumulate one snapshot per tick. Sim::Tick() does this for you; a caller
+// driving the internal tick_world directly is measuring nothing and gets zeros,
+// which is the honest answer.
+// ---------------------------------------------------------------------------
+class ActivityHistogram {
+   public:
+    // Folds one tick's rows in. Rows whose behavior is -1 ("has not decided
+    // anything yet") are counted as samples but attributed to no activity.
+    void Accumulate(std::span<const CharacterState> rows);
+    void Reset();
+
+    // Entity-ticks of this activity across every entity.
+    uint64_t Total(ActivityId id) const;
+    // Entity-ticks of this activity by heroes of one class.
+    uint64_t ForClass(HeroClassId cls, ActivityId id) const;
+    // Entity-ticks folded in altogether (the denominator for a share).
+    uint64_t Samples() const { return samples_; }
+
+   private:
+    uint64_t total_[kActivityCount] = {};
+    uint64_t per_class_[HERO_CLASS_COUNT][kActivityCount] = {};
+    uint64_t samples_ = 0;
 };
 
 // Static per-kind footprint size (tiles), behavior flags, and recruit set.
@@ -556,6 +600,12 @@ class Sim {
     // than re-deriving the world<->map offset. Out of bounds clamps.
     int32_t BiomeAt(float world_x, float world_z) const;
     SimStats GetStats() const;                        // was game_stats
+    // Goal statistics accumulated across Tick() calls (see ActivityHistogram).
+    // Folded in the wrapper from the same snapshot rows Characters() returns --
+    // the sim core does no counting, so this cannot drift from what the brains
+    // actually did.
+    const ActivityHistogram& ActivityStats() const { return activity_stats_; }
+    void ResetActivityStats() { activity_stats_.Reset(); }
     // Placement preview; returns validity, fills out_triangles (was
     // game_probe_placement).
     PlacementProbe ProbePlacement(const PlacementDesc& desc,
@@ -567,6 +617,9 @@ class Sim {
 
    private:
     std::unique_ptr<::BadlandsGame> world_;  // the EXISTING internal world, unchanged
+    ActivityHistogram activity_stats_;
+    // Reused across ticks so the per-tick fold costs no allocation.
+    std::vector<CharacterState> stats_scratch_;
 };
 
 // ---- handle-less helpers (were game_*; pure computations) ------------------

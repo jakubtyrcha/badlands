@@ -36,9 +36,9 @@
 
     "weights": {
       "Mercenary":    { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Hunter":       { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
-      "Grave Robber": { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Apprentice":   { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 3.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
+      "Hunter":       { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 0.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
+      "Grave Robber": { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.2, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
+      "Apprentice":   { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.8, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
     }
   },
 

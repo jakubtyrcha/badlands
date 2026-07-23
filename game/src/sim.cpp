@@ -340,6 +340,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
         const auto& health = g.registry.get<Health>(e);
         const auto& shape = g.registry.get<RenderShape>(e);
         const auto* sim = g.registry.try_get<HeroSimulationState>(e);
+        const auto* hero = g.registry.try_get<HeroCharacter>(e);
         const auto* disp = g.registry.try_get<HeroDisplayState>(e);
         const auto* crit = g.registry.try_get<CritterState>(e);
         const auto* tax = g.registry.try_get<TaxCollectorState>(e);
@@ -396,6 +397,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
                 sim ? Archetype::Hero
                     : (crit ? Archetype::Critter
                             : (tax ? Archetype::Townfolk : Archetype::Monster))),
+            .hero_class = hero ? hero->hero_class : -1,
             .facing_x = facing.x,
             .facing_z = facing.y,
             .vision_radius = vis_radius,
@@ -498,7 +500,14 @@ Sim::Sim(Sim&&) noexcept = default;
 Sim& Sim::operator=(Sim&&) noexcept = default;
 
 uint32_t Sim::Spawn(const CharacterDesc& desc) { return spawn_into(*world_, desc); }
-void Sim::Tick(float dt) { tick_world(*world_, dt); }
+void Sim::Tick(float dt) {
+    tick_world(*world_, dt);
+    // Goal statistics are folded HERE, in the wrapper, from the very rows an
+    // observer would read -- never inside tick_world. Counting is an
+    // observation of the sim, not a part of it; see ActivityHistogram.
+    characters_of(*world_, stats_scratch_);
+    activity_stats_.Accumulate(stats_scratch_);
+}
 bool Sim::ReloadScript(const std::string& source) { return reload_script(*world_, source); }
 int64_t Sim::Dispatch(const Action& action) { return dispatch_into(*world_, action); }
 

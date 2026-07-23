@@ -22,11 +22,23 @@ inline uint64_t xorshift64(uint64_t& s) {
 }
 
 // Mixes an entity slot and a time (or epoch, or any second axis) into a
-// non-zero seed. Knuth's multiplicative constant spreads adjacent slots apart
-// so neighbouring entities do not draw correlated sequences.
+// non-zero seed.
+//
+// The splitmix64 finalizer is load-bearing, not decoration: xorshift64's FIRST
+// output from a small seed barely moves the high bits, and callers here draw
+// once and throw the state away (one "does this hero feel like exploring"
+// question per lease window). Seeded raw, slots 0-15 against epochs 0-50 --
+// exactly the range a real run uses -- produced visibly skewed answers: classes
+// with a 5% appetite explored nearly as much as one with 85%, and a 3% class
+// never did at all. Avalanche first, then draw.
 inline uint64_t seed_of(uint32_t slot, int64_t when) {
-    uint64_t s = (static_cast<uint64_t>(slot) * 2654435761ull) ^
-                 (static_cast<uint64_t>(when) + 1ull);
+    uint64_t s = static_cast<uint64_t>(slot) * 0x9E3779B97F4A7C15ull;
+    s ^= static_cast<uint64_t>(when) + 0x9E3779B97F4A7C15ull;
+    s ^= s >> 30;
+    s *= 0xBF58476D1CE4E5B9ull;
+    s ^= s >> 27;
+    s *= 0x94D049BB133111EBull;
+    s ^= s >> 31;
     return s == 0 ? 1ull : s;
 }
 

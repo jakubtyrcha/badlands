@@ -1,5 +1,7 @@
 #include "behaviours/blocks.h"
 
+#include "behaviours/rng.h"
+
 #include <cmath>
 
 #include "components.h"  // kInventoryCap
@@ -24,19 +26,6 @@ constexpr float kNotApplicable = 0.0f;
 // the sign of their scores matters, not the magnitude.
 constexpr float kTierVisitTax = kApplies;
 constexpr float kTierDeposit = kApplies;
-
-// Deterministic per-entity RNG for the roam goal (xorshift64; seed must be
-// non-zero). Identical math to the pre-refactor town_brain so replayed/repeated
-// runs stay bit-exact.
-uint64_t xorshift(uint64_t& s) {
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    return s;
-}
-float unit(uint64_t& s) {
-    return static_cast<float>(xorshift(s) >> 40) * (1.0f / 16777216.0f);  // [0,1)
-}
 
 }  // namespace
 
@@ -140,17 +129,14 @@ BehaviourResult act_hunt(const WorldView& v, const SimFactors&) {
 
 // --- Roam (shared) ----------------------------------------------------------
 glm::vec2 roam_point(uint32_t slot, int64_t epoch, glm::vec2 anchor, float radius) {
-    // Seed off the slot and the roam epoch so the goal is stable within a lease
-    // window yet unique per entity -- deterministic (no wall-clock, no unseeded
-    // RNG). Math is unchanged from the pre-library town brain, so repeated and
-    // replayed runs stay bit-exact.
-    uint64_t s = (static_cast<uint64_t>(slot) * 2654435761ull) ^
-                 (static_cast<uint64_t>(epoch) + 1ull);
-    if (s == 0) {
-        s = 1;
-    }
-    const float ang = unit(s) * 6.2831853f;
-    const float rad = unit(s) * radius;
+    // Seeded off the slot and the roam epoch so the goal is stable within a
+    // lease window yet unique per entity -- deterministic, no wall-clock, no
+    // global RNG state. Shares seed_of with every other draw in the sim, so the
+    // same avalanche that fixed the exploration appetite applies here (this
+    // used to keep its own weaker copy of the mix).
+    uint64_t s = seed_of(slot, epoch);
+    const float ang = unit_float(s) * 6.2831853f;
+    const float rad = unit_float(s) * radius;
     return anchor + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
 }
 float score_roam(const WorldView&, const SimFactors&) { return kApplies; }
