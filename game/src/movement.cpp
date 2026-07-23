@@ -1,5 +1,6 @@
 #include "movement.h"
 
+#include "combat.h"  // melee_range, select_target
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"  // biome_at
@@ -207,10 +208,15 @@ void follow_paths(BadlandsGame& game, float dt) {
             // The world gets the last word on where a character can go. A path
             // may cross terrain nobody has surveyed -- the planner routes around
             // buildings only -- so the refusal happens HERE, at the step, and
-            // becomes an event the brain can act on.
-            if (game.terrain_blocking && !is_walkable(biome_at(game, next))) {
+            // becomes an event the brain can act on. The arena's blocked edges
+            // refuse a step the same way the water's edge does.
+            const bool past_arena_edge =
+                (game.arena_half_x > 0.0f && std::abs(next.x) > game.arena_half_x) ||
+                (game.arena_half_z > 0.0f && std::abs(next.y) > game.arena_half_z);
+            if (past_arena_edge ||
+                (game.terrain_blocking && !is_walkable(biome_at(game, next)))) {
                 blocked.emplace_back(e, next);
-                continue;  // stop at the water's edge rather than wade in
+                continue;  // stop at the edge rather than cross it
             }
             pos.pos = next;
             // Fog-of-war: face the direction of travel (idle keeps last facing).
@@ -228,17 +234,20 @@ void follow_paths(BadlandsGame& game, float dt) {
 void update_melee_locks(BadlandsGame& game) {
     entt::registry& reg = game.registry;
     std::vector<entt::entity> to_lock, to_unlock;
-    auto view = reg.view<const Position, const Stats>(entt::exclude<InsideBuilding>);
+    // Melee lock keys off the MELEE attack's reach, not a ranged one: a unit that
+    // only fights at range (melee_range == 0) never locks, so a kiter holding at
+    // bow distance keeps moving instead of freezing.
+    auto view = reg.view<const Position, const Attacks>(entt::exclude<InsideBuilding>);
     for (entt::entity e : view) {
         bool locked = reg.all_of<MeleeLock>(e);
-        entt::entity enemy = nearest_enemy(game, e);
-        if (enemy == entt::null) {
+        entt::entity enemy = select_target(game, e);
+        const float range = melee_range(view.get<const Attacks>(e));
+        if (enemy == entt::null || range <= 0.0f) {
             if (locked) {
                 to_unlock.push_back(e);
             }
             continue;
         }
-        float range = view.get<const Stats>(e).attack_range;
         float dist = glm::distance(view.get<const Position>(e).pos, reg.get<Position>(enemy).pos);
         if (!locked && dist <= range) {
             to_lock.push_back(e);
@@ -333,6 +342,15 @@ void separate_units(BadlandsGame& game) {
             reproject_out_of_footprints(game, pos.pos);
         }
         pos.pos = glm::clamp(pos.pos, glm::vec2(-kWorldBound), glm::vec2(kWorldBound - 1e-3f));
+        // Keep units inside the arena's blocked edges too. follow_paths refuses a
+        // STEP past the edge, but a separation shove is not a step -- so a unit
+        // pushed out would otherwise be stranded (every inward step then refused).
+        if (game.arena_half_x > 0.0f) {
+            pos.pos.x = glm::clamp(pos.pos.x, -game.arena_half_x, game.arena_half_x);
+        }
+        if (game.arena_half_z > 0.0f) {
+            pos.pos.y = glm::clamp(pos.pos.y, -game.arena_half_z, game.arena_half_z);
+        }
     }
 }
 

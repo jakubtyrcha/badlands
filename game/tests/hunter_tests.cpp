@@ -43,23 +43,10 @@ uint32_t spawn_deer(BadlandsGame& g, glm::vec2 pos) {
     return spawn_into(g, d);
 }
 
-// A hunter placed directly on the map (HeroCharacter with the Hunter class), so
-// tests need not stand up a Hunter's Camp + recruit.
+// A hunter placed directly on the map (the catalog Hunter: a bow + a knife,
+// Hunter class set), so tests need not stand up a Hunter's Camp + recruit.
 uint32_t spawn_hunter(BadlandsGame& g, glm::vec2 pos) {
-    CharacterDesc d{};
-    d.archetype = Archetype::Hero;
-    d.pos_x = pos.x;
-    d.pos_z = pos.y;
-    d.team = 0;
-    d.hp = 30.0f;
-    d.move_speed = 4.0f;  // faster than the deer, so the chase closes
-    d.attack_range = 4.0f;  // a bow: shoots from a few tiles away
-    d.attack_damage = 4.0f;
-    d.attack_cooldown = 1.0f;
-    d.size_x = d.size_y = d.size_z = 1.0f;
-    uint32_t slot = spawn_into(g, d);
-    g.registry.get<HeroCharacter>(g.slots[slot]).hero_class = HERO_HUNTER;
-    return slot;
+    return spawn_creature_into(g, CreatureId::Hunter, 0, pos);
 }
 
 }  // namespace
@@ -97,7 +84,7 @@ TEST_CASE("Hunt scores only with prey, and shoots once in range") {
     v.prey_dist = 3.0f;  // within reach -> take the shot
     r = act_hunt(v, f);
     REQUIRE(r.follow_up.has_value());
-    CHECK(r.follow_up->kind == CommandKind::Shoot);
+    CHECK(r.follow_up->kind == CommandKind::Attack);  // unified Attack at the prey slot
     CHECK(r.follow_up->target_id == 7u);
 }
 

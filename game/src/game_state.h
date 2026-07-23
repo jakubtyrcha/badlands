@@ -51,6 +51,12 @@ struct BadlandsGame {
     // coordinates they picked, which is a fragile thing to assert about.
     bool terrain_blocking = true;
 
+    // Arena confinement (the "blocked edges"). >0 on an axis makes the movement
+    // pipeline refuse a step past [-half, +half] there, exactly as terrain refuses
+    // a step into water. 0 = unbounded (the normal world). Initial config.
+    float arena_half_x = 0.0f;
+    float arena_half_z = 0.0f;
+
     // Event-sourced command layer (see command.h). AI decisions are enqueued
     // during think and drained in one ordered apply pass per tick; every
     // applied command (player + AI) is appended to command_log (the trace).
@@ -85,6 +91,11 @@ struct BadlandsGame {
     // Behaviour tuning (see SimFactors). Defaults are compiled in; an app may
     // overwrite them from assets/creatures/factors.json before ticking.
     badlands::SimFactors factors;
+
+    // Named-creature catalog (see CreatureCatalog). Compiled defaults; an app may
+    // override by name from JSON via Sim::SetCreatureCatalog before spawning.
+    // Initial config in the determinism contract.
+    badlands::CreatureCatalog creatures;
 
     uint64_t ticks = 0;
     uint64_t script_intents = 0;

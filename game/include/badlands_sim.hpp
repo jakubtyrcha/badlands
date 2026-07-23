@@ -308,6 +308,45 @@ struct SimFactors {
     MonsterFactors monster;
 };
 
+// ---- combat primitives -----------------------------------------------------
+// Typed attack-skills + tactical stats. resolve_attack (game/src/combat.h) runs
+// the seeded probabilistic pipeline over these; the ECS carries a Combatant plus
+// an Attacks component (game/src/components.h) that wraps Attack. Physical only
+// for now -- Soul / willpower / resolve are reserved for the deferred psychology
+// layer and are not read anywhere yet.
+enum class DamageType : int32_t { Blunt = 0, Piercing, Slashing };  // Soul reserved
+enum class AttackCategory : int32_t { Melee = 0, Ranged };
+enum class CombatStance : int32_t { Melee = 0, Ranged };
+
+// At most this many attacks per entity ("most characters have 1-2").
+inline constexpr int kMaxAttacks = 3;
+
+// One attack-skill. crit_chance is PER-ATTACK (a piercing thrust is authored with
+// a higher crit than a slash), so the damage type's crit affinity lives in the
+// data rather than in a pipeline multiplier.
+struct Attack {
+    AttackCategory category = AttackCategory::Melee;
+    DamageType damage_type = DamageType::Slashing;
+    float base_damage = 0.0f;
+    float range = 0.0f;
+    float cooldown = 0.0f;    // seconds between uses of THIS attack
+    float crit_chance = 0.0f;
+};
+
+// Tactical stats (the resolve_attack inputs) + the class engagement preference.
+// accuracy: the attacker's chance to beat the target's parry/shield (gate 1).
+// evasion:  the defender's chance to dodge an on-target blow (gate 2).
+// defense:  the defender's parry/block (contested by accuracy in gate 1).
+// armour:   flat damage reduction (gate 3).
+struct Combatant {
+    float accuracy = 0.0f;
+    float evasion = 0.0f;
+    float defense = 0.0f;
+    float armour = 0.0f;
+    CombatStance stance = CombatStance::Melee;
+    // reserved (deferred psychology): float willpower, resolve;
+};
+
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
     Archetype archetype = Archetype::Hero;
@@ -327,6 +366,71 @@ struct CharacterDesc {
     float vision_radius = 0.0f;
     float vision_cone_half_angle_deg = 180.0f;
     float facing_x = 0.0f, facing_z = 0.0f;
+    // --- combat loadout (Stage-3) -------------------------------------------
+    // Tactical stats (default = "reduces to the old deterministic melee": full
+    // accuracy, no defense/evasion/armour) plus up to kMaxAttacks attack-skills.
+    // When attack_count == 0 the spawn path derives a single melee attack from
+    // the legacy attack_* fields above, so an un-authored desc still fights.
+    float accuracy = 1.0f;
+    float evasion = 0.0f;
+    float defense = 0.0f;
+    float armour = 0.0f;
+    CombatStance stance = CombatStance::Melee;
+    Attack attacks[kMaxAttacks]{};
+    int32_t attack_count = 0;
+};
+
+// ---- named-creature catalog ------------------------------------------------
+// The creatures the sim knows by name. Append-only: JSON overrides and arena
+// scenarios key by name, and SpawnCreature spawns by id. The first
+// HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight to
+// its creature.
+enum class CreatureId : int32_t {
+    Mercenary = 0,
+    Hunter,
+    GraveRobber,
+    Apprentice,
+    Rat,
+    Goblin,
+    Deer,
+    Count,
+};
+inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);
+
+// A CharacterDesc template per creature (pos/team filled in at spawn). Compiled
+// defaults live in creature_catalog.cpp; an app may override fields by name from
+// JSON and push the result through Sim::SetCreatureCatalog. Held per-Sim, so it is
+// initial config in the determinism contract (a replay must use the same catalog).
+struct CreatureCatalog {
+    CreatureCatalog();  // fills the compiled defaults
+    CharacterDesc defs[kCreatureCount];
+};
+
+// Stable inspection/JSON name for a creature id ("Mercenary"), or "" if invalid.
+const char* CreatureName(CreatureId id);
+// Parse a creature name; returns CreatureId::Count if unknown.
+CreatureId CreatureIdFromName(const char* name);
+
+// The one shared compiled default catalog. MercenaryDesc/GoblinDesc/hero_desc read
+// from this rather than each constructing their own copy of the defaults.
+const CreatureCatalog& DefaultCreatureCatalog();
+
+// How to build the world (initial config). Defaults reproduce the shipping town
+// world; the arena overrides them.
+struct WorldConfig {
+    bool prebuild_colony = true;   // seed the colony Castle (false for the arena)
+    bool terrain_blocking = true;  // false = flat floor (no lake), for the arena
+    // >0 confines movement to [-half, +half] on that axis -- the arena's blocked
+    // edges. The world refuses a step past the edge (exactly like the water's
+    // edge), even though pathfinding does not yet route around it.
+    float arena_half_x = 0.0f;
+    float arena_half_z = 0.0f;
+};
+
+// One in-flight projectile, for the debug-line overlay (Sim::Projectiles()).
+struct ProjectileState {
+    float x, z;                // current position, world XZ
+    float target_x, target_z;  // where it is headed
 };
 
 // Per-living-entity snapshot row: the renderer reads pos/size/color, tests
@@ -514,7 +618,6 @@ enum class CommandKindId : int32_t {
     CollectTax,
     Deposit,
     AttackBuilding,
-    Shoot,
     Chat,
 };
 
@@ -597,6 +700,9 @@ class Sim {
     // nullptr for mock-brains-only. A script that fails to compile is recorded
     // as a noiser bug and the sim falls back to mock brains.
     explicit Sim(const char* brain_script_source = nullptr);
+    // Build a world from an explicit config (the arena uses this: flat, no colony,
+    // confined edges).
+    Sim(const WorldConfig& config, const char* brain_script_source);
     ~Sim();
     Sim(Sim&&) noexcept;
     Sim& operator=(Sim&&) noexcept;
@@ -605,6 +711,13 @@ class Sim {
 
     // Returns the entity id used in CharacterState rows.
     uint32_t Spawn(const CharacterDesc& desc);
+    // Spawns a named creature from the catalog at (pos_x, pos_z) on `team`;
+    // returns its entity id. Hero creatures also get their hero class set.
+    uint32_t SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z);
+    // Replaces the creature catalog (see CreatureCatalog). Call before spawning;
+    // a replay must use the same catalog the recorded run used.
+    void SetCreatureCatalog(const CreatureCatalog& catalog);
+    const CreatureCatalog& Creatures() const;
     void Tick(float dt);
     // Recompiles the brain script; on failure the previous program is kept
     // (returns false). On success all brains restart on the new program.
@@ -646,6 +759,8 @@ class Sim {
     // primitives; the value-returning versions delegate to them.
     void Characters(std::vector<CharacterState>& out) const;
     void Buildings(std::vector<BuildingState>& out) const;
+    // In-flight projectiles, for the debug-line overlay.
+    std::vector<ProjectileState> Projectiles() const;
     WorldState World() const;
     // Replaces the tuning factors (see SimFactors). Call before ticking; a
     // replay must use the same factors the recorded run used.

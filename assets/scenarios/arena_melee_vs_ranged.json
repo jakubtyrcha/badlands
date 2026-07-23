@@ -1,0 +1,11 @@
+{
+  "name": "arena_melee_vs_ranged",
+  "arena": { "half_x": 16, "half_z": 10 },
+  "spawns": [
+    { "creature": "Mercenary", "team": 0, "x": -11, "z": -3 },
+    { "creature": "Hunter", "team": 0, "x": -13, "z": 3 },
+    { "creature": "Goblin", "team": 1, "x": 11, "z": -4 },
+    { "creature": "Goblin", "team": 1, "x": 12, "z": 0 },
+    { "creature": "Rat", "team": 1, "x": 11, "z": 4 }
+  ]
+}

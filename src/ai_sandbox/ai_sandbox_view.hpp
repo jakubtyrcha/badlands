@@ -31,6 +31,7 @@
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "game/arena.h"
+#include "game/scenario.h"
 
 namespace badlands {
 
@@ -66,6 +67,8 @@ class AiSandboxView : public AppView {
   void BuildScene();
   void AddWalls();
   void AddBuildings();
+  // Per-frame: draw a thin box "tracer" for each in-flight projectile.
+  void SyncProjectiles();
   // Per-frame: reads the game_state snapshot and moves/hides the capsule pool.
   // Heroes inside a building are hidden (scaled to zero), matching the sim's
   // "don't draw; list in the panel" contract for inside_building_id >= 0.
@@ -97,6 +100,11 @@ class AiSandboxView : public AppView {
 
   Arena arena_;
 
+  // The loaded scenario (a walled arena + creatures, or empty => the town seed).
+  Scenario scenario_;
+  bool scenario_is_arena_ = false;
+  bool scenario_load_error_ = false;  // a requested scenario failed to parse
+
   // Owns the sim (RAII; no manual destroy). Seeded in SeedTown.
   badlands::Sim sim_{nullptr};
 
@@ -114,6 +122,9 @@ class AiSandboxView : public AppView {
 
   // Fixed pool of hero capsule nodes; index == game_state row index.
   std::vector<NodeHandle> capsule_nodes_;
+  // Per-frame projectile tracer nodes (rebuilt each frame; usually few).
+  std::vector<NodeHandle> projectile_nodes_;
+  std::vector<badlands::ProjectileState> projectile_rows_;
 
   SceneGraph scene_;
   entt::registry registry_;

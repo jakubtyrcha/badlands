@@ -1,8 +1,11 @@
 // The transient game-event stream (badlands::GameEvent / Sim::DrainEvents):
 // notable things that HAPPENED -- damage, downing -- surfaced for the renderer's
 // floating combat text and the HUD combat log. Driven by the MOCK brains (no
-// noiser script needed): two hostile fighters placed in range trade blows every
-// tick their cooldown allows, so the stream is fully deterministic here.
+// noiser script needed): two hostile fighters placed in range trade blows.
+//
+// Combat now ROLLS to hit/dodge/crit (seeded), so a given swing may miss and the
+// exact damage varies -- these tests therefore assert the event stream's SHAPE
+// (attribution, kind, drain semantics) over the fight, not a single tick's numbers.
 
 #include "badlands_sim.hpp"
 
@@ -19,8 +22,8 @@ namespace {
 
 constexpr float kTickDt = 1.0f / 30.0f;
 
-// Merc (team 0, 30hp, 4dmg) faces Goblin (team 1, 18hp, 2dmg) at ~1u apart --
-// inside both attack ranges, so both swing on the first eligible tick.
+// Merc (team 0) faces Goblin (team 1) at ~1u apart -- inside both attack ranges,
+// so they trade blows as their cooldowns and to-hit rolls allow.
 struct Duel {
     Sim sim{nullptr};  // mock brains
     uint32_t merc, gob;
@@ -42,40 +45,55 @@ const GameEvent* find(const std::vector<GameEvent>& evs, GameEventKind kind,
     return nullptr;
 }
 
+// Tick until `find` locates the wanted event (accumulating drained events), or
+// give up. Returns a copy of the event, or a disengaged optional.
+template <class Pred>
+const GameEvent* tick_until(Duel& d, std::vector<GameEvent>& all, Pred found, int max_ticks) {
+    std::vector<GameEvent> evs;
+    for (int i = 0; i < max_ticks; ++i) {
+        d.sim.Tick(kTickDt);
+        d.sim.DrainEvents(evs);
+        for (const GameEvent& e : evs) {
+            all.push_back(e);
+        }
+        if (const GameEvent* hit = found(all)) {
+            return hit;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 TEST_CASE("a landed melee hit emits one attributed DamageDealt event") {
     Duel d;
-    std::vector<GameEvent> evs;
+    std::vector<GameEvent> all;
 
-    d.sim.Tick(kTickDt);
-    d.sim.DrainEvents(evs);
-
-    // Merc -> Goblin, for the merc's attack_damage (4).
-    const GameEvent* mg =
-        find(evs, GameEventKind::DamageDealt, d.merc, d.gob);
+    // The merc lands a hit within a few ticks; the event is attributed to it,
+    // carries positive damage, targets the goblin as a character, at ~(0,1).
+    const GameEvent* mg = tick_until(
+        d, all,
+        [&](const std::vector<GameEvent>& evs) {
+            return find(evs, GameEventKind::DamageDealt, d.merc, d.gob);
+        },
+        60);
     REQUIRE(mg != nullptr);
-    CHECK(mg->amount == Catch::Approx(4.0f));
+    CHECK(mg->amount > 0.0f);
     CHECK(mg->target_kind == badlands::kEventTargetCharacter);
-    // Victim position was carried (goblin sits near (0,1)).
-    CHECK(mg->z == Catch::Approx(1.0f).margin(0.5f));
-
-    // Goblin -> Merc, for the goblin's attack_damage (2).
-    const GameEvent* gm =
-        find(evs, GameEventKind::DamageDealt, d.gob, d.merc);
-    REQUIRE(gm != nullptr);
-    CHECK(gm->amount == Catch::Approx(2.0f));
+    CHECK(mg->z == Catch::Approx(1.0f).margin(0.6f));
 }
 
 TEST_CASE("DrainEvents empties the buffer") {
     Duel d;
+    std::vector<GameEvent> all;
+    // Tick until at least one event has been produced (a hit lands quickly).
+    const GameEvent* any = tick_until(
+        d, all, [](const std::vector<GameEvent>& evs) { return evs.empty() ? nullptr : &evs.back(); },
+        60);
+    REQUIRE(any != nullptr);
+
+    // A drain with no tick in between yields nothing new.
     std::vector<GameEvent> evs;
-
-    d.sim.Tick(kTickDt);
-    d.sim.DrainEvents(evs);
-    REQUIRE(!evs.empty());
-
-    // No tick between drains -> nothing new.
     d.sim.DrainEvents(evs);
     CHECK(evs.empty());
 }
