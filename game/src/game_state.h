@@ -46,6 +46,13 @@ struct BadlandsGame {
     std::vector<badlands::Command> command_queue;
     std::vector<badlands::Command> command_log;
 
+    // Transient game-event stream (see badlands::GameEvent). Notable things that
+    // HAPPENED this tick-batch -- damage, downing, building destruction --
+    // accumulated during tick and drained by the presentation layer each frame
+    // (Sim::DrainEvents). NOT part of the determinism contract (never fed back
+    // into the sim); cleared on drain.
+    std::vector<badlands::GameEvent> events;
+
     // Replay mode. Non-null makes game_tick take this tick's decisions from the
     // log (by at_millis) instead of running the brains -- the determinism
     // contract made executable: (initial config, seed, command log) -> state.
@@ -82,6 +89,24 @@ namespace badlands {
 void report_bug(BadlandsGame& game, const char* stage, const std::string& message);
 
 entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot);
+
+// Reverse of entity_for_slot: the slot an entity occupies, or UINT32_MAX if it
+// is not in the slot table. Linear scan (the slot table is small); used to tag
+// game events with the entity-slot ids observers already speak (CharacterState.id).
+uint32_t slot_for_entity(const BadlandsGame& game, entt::entity e);
+
+// Appends one transient game event (see badlands::GameEvent) to game.events.
+// The single choke point for the presentation-facing event stream.
+void emit_event(BadlandsGame& game, const badlands::GameEvent& ev);
+
+// Emits the event pair for one landed hit: always a DamageDealt, plus a lethal
+// follow-up (HeroDowned / BuildingDestroyed) when `hp_after <= 0`. Callers own
+// the hp mutation, cooldown, and razing; these only shape the events, so the
+// event layout lives in one place. `pos`/`center` is the victim's world XZ.
+void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot,
+                   float amount, float hp_after, glm::vec2 pos);
+void emit_building_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t bid,
+                       float amount, float hp_after, glm::vec2 center);
 
 // Nearest living enemy of `self`, or entt::null.
 entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self);
