@@ -31,7 +31,7 @@ badlands::CharacterDesc dummy(float x, float z, int32_t team) {
 
 TEST_CASE("SetPathfinder back-fills every alive building") {
     badlands::Sim sim(nullptr);
-    // make_world prebuilds the origin Castle, so at least one alive building.
+    // make_world prebuilds the colony Castle (kCastleSpawn), so >=1 alive building.
     REQUIRE(sim.Buildings().size() >= 1);
 
     struct Recorder {

@@ -62,19 +62,22 @@ TEST_CASE("ConfigureVision sizes the field and publishes it") {
 }
 
 TEST_CASE("a building reveals a euclidean disc from its footprint edges") {
-    auto g = make_world(nullptr);  // Castle at origin: 4x4 footprint, radius 20
-    configure(*g);
+    auto g = make_world(nullptr);  // Castle at kCastleSpawn: 4x4 footprint, radius 20
+    // Grid centred on the castle so its whole disc is on-field (the colony seat
+    // is off the map origin now).
+    constexpr float cx = kCastleSpawnX, cz = kCastleSpawnZ;
+    configure_vision(g->vision, cx - 64.0f, cz - 64.0f, 128.0f, 128.0f, 1.0f);
     resolve_vision(*g);
 
     // Inside the footprint, and along an axis within the radius from the edge.
-    CHECK(level_at(*g, 0.0f, 0.0f) == VisionLevel::Visible);
-    CHECK(level_at(*g, 0.0f, 21.0f) == VisionLevel::Visible);   // 19 m past the +Z edge
-    CHECK(level_at(*g, 0.0f, 25.0f) == VisionLevel::Unknown);   // 23 m past the edge
+    CHECK(level_at(*g, cx + 0.0f, cz + 0.0f) == VisionLevel::Visible);
+    CHECK(level_at(*g, cx + 0.0f, cz + 21.0f) == VisionLevel::Visible);   // 19 m past the +Z edge
+    CHECK(level_at(*g, cx + 0.0f, cz + 25.0f) == VisionLevel::Unknown);   // 23 m past the edge
 
     // Euclidean (not L1): a diagonal point just inside vs. just outside radius
     // (texel centers sit at *.5, ~19.1 m and ~21.9 m from the footprint corner).
-    CHECK(level_at(*g, 15.0f, 15.0f) == VisionLevel::Visible);
-    CHECK(level_at(*g, 17.0f, 17.0f) == VisionLevel::Unknown);
+    CHECK(level_at(*g, cx + 15.0f, cz + 15.0f) == VisionLevel::Visible);
+    CHECK(level_at(*g, cx + 17.0f, cz + 17.0f) == VisionLevel::Unknown);
 }
 
 TEST_CASE("character vision is a forward cone") {

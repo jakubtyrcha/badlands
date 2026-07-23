@@ -48,10 +48,13 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 constexpr float kCapsuleRadius = 0.35f;
 constexpr float kCapsuleCylinderHeight = 0.6f;
 
-// The sandbox arena: large enough to show the town (lake-centred) plus the
-// surrounding Plains/Forest ring where the deer roam. Well inside the sim's
-// 256 u placement grid.
-constexpr glm::ivec2 kSandboxArena{90, 90};
+// The sandbox arena: origin-centred greybox. Elongated in z so it also contains
+// the prebuilt colony Castle, which make_world now places on the plains at
+// kCastleSpawn (world z ~ +54) rather than the origin -- the floor/wall ring
+// reach it so nothing floats off the pit. The town + deer still cluster near the
+// origin; the tax collector walks north to the Castle to deposit. Well inside
+// the sim's 256 u placement grid.
+constexpr glm::ivec2 kSandboxArena{90, 130};
 
 // Snapshot buffer caps. The sandbox town is tiny; a truncated snapshot would
 // only mean fewer rows drawn/listed, never a crash.

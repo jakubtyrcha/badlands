@@ -110,7 +110,8 @@ TEST_CASE("midnight accrues tax on Houses only") {
 TEST_CASE("a tax collector rounds up the tax, banks it at the castle, and despawns") {
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
-    // make_world prebuilds the Castle at the origin (id 0).
+    // make_world prebuilds the Castle at kCastleSpawn (id 0); the collector
+    // reads its door dynamically, so this stays position-independent.
     REQUIRE(g.placement.buildings[0].kind == static_cast<int32_t>(BuildingKind::Castle));
 
     // Two houses owing tax.

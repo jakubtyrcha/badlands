@@ -132,11 +132,15 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
             report_bug(*game, "compile", error);
         }
     }
-    // The colony starts with only the castle, prebuilt at the origin. Not a
-    // player placement: it seeds no urban sprawl.
-    place_building(*game,
-                   PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, 0.0f, 0.0f},
-                   /*player=*/false);
+    // The colony starts with only the castle, prebuilt on the plains south of
+    // the central lake (the map origin is water). Not a player placement: it
+    // seeds no urban sprawl. This is the colony seat the game's town forms
+    // around; kCastleSpawn is the single source of truth for it.
+    place_building(
+        *game,
+        PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, kCastleSpawnX,
+                      kCastleSpawnZ},
+        /*player=*/false);
     return game;
 }
 

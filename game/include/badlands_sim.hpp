@@ -53,6 +53,12 @@ inline constexpr int32_t kGridHalfExtentTiles = 128;  // was GAME_GRID_HALF_EXTE
 // their own (future) vision and never reveal the map for the player.
 inline constexpr int32_t kPlayerTeam = 0;
 
+// Where make_world prebuilds the colony's Castle: on the plains south of the
+// central lake (the map origin is water). The single source of truth for the
+// colony seat -- the game's town + camera + fog-of-war centre on it.
+inline constexpr float kCastleSpawnX = 0.0f;
+inline constexpr float kCastleSpawnZ = 54.0f;
+
 // The three fog-of-war knowledge levels (see the design doc). Cumulative:
 // once Visible/Dormant, a texel never returns to Unknown.
 enum class VisionLevel : int32_t {

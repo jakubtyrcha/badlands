@@ -165,7 +165,7 @@ bool GameView::Initialize(const RenderContext& ctx) {
 
   // sim_ is constructed with a nullptr brain_script_source (mock brains only;
   // no noiser script needed for a static-buildings scaffold) -- construction
-  // also prebuilds the Castle at the origin.
+  // also prebuilds the Castle at kCastleSpawn (the plains, at the town centre).
   SeedTown();
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
@@ -198,10 +198,11 @@ bool GameView::Initialize(const RenderContext& ctx) {
   post_passes_.Add(&cone_pass_);
   scene_context_.post_pass = &post_passes_;
 
-  // Frame the living town on the southern plains (where SeedTown placed it), not
-  // the empty origin lake -- close enough that the units read as characters.
-  // Scroll to zoom out to the whole 256 m map; WASD to roam.
-  gamecam_.focus = glm::vec3(0.0f, 0.0f, 52.0f);
+  // Frame the living town on the southern plains, centred on the colony Castle
+  // (kCastleSpawn) rather than the empty origin lake -- close enough that the
+  // units read as characters. Scroll to zoom out to the whole 256 m map; WASD to
+  // roam.
+  gamecam_.focus = glm::vec3(kCastleSpawnX, 0.0f, kCastleSpawnZ);
   gamecam_.pitch_deg = 58.0f;
   gamecam_.height = 70.0f;
   gamecam_.UpdateCamera(camera_);
@@ -250,9 +251,10 @@ void GameView::RebakeSky(const DaylightState& state) {
 
 void GameView::SeedTown() {
   // The town sits on the southern plains band (world z ~ +50), which is land --
-  // so buildings render where the sim places them, no shift. (The prebuilt
-  // origin Castle is out in the central lake; the town's Watchtower is the
-  // on-land deposit point the tax collector actually uses.)
+  // so buildings render where the sim places them, no shift. The prebuilt Castle
+  // (kCastleSpawn, id 0) sits at the town centre and is the colony seat + the
+  // tax collector's deposit point; these buildings ring it. The central lake at
+  // the map origin is now just scenery.
   struct Town {
     BuildingKind kind;
     float x, z;
