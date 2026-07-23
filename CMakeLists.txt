@@ -161,6 +161,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/passes/render_forward.cpp
     src/engine/rendering/passes/render_skybox.cpp
     src/engine/rendering/passes/render_gbuffer_debug.cpp
+    src/engine/rendering/passes/render_projected_decals.cpp
     src/engine/rendering/gbuffer.cpp
     src/engine/rendering/shadow_map.cpp
     src/engine/rendering/gpu_timer.cpp
@@ -330,6 +331,7 @@ set(badlands_app_sources_game
     src/game/visual/scene_composer.cpp
     src/game/visual/vision_overlay_pass.cpp
     src/game/visual/cone_overlay_pass.cpp
+    src/game/visual/selection_decals.cpp
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
@@ -561,6 +563,11 @@ add_executable(badlands_game_tests
     game/tests/game_ui_tests.cpp
     src/game/ui/hud.cpp
     src/game/ui/picking.cpp
+    # Selection highlights: the selection -> ProjectedDecal mapping. Pure
+    # geometry over the sim snapshot rows + the engine's header-only decal
+    # primitive, so it needs no GPU and no engine link.
+    game/tests/selection_decals_tests.cpp
+    src/game/visual/selection_decals.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
@@ -597,6 +604,24 @@ if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_decal_math_tests: Catch2 suite for the projected-decal math
+# (engine/rendering/decal_math.hpp) — the CPU mirror of
+# shaders/passes/decals.wesl. Pure CPU (header-only math + glm), so it runs the
+# SDFs / perimeter parameterisation / dash pattern without a GPU; it is the
+# oracle the shader transcription is checked against.
+add_executable(badlands_decal_math_tests
+    src/engine/tests/decal_math_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_decal_math_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_decal_math_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_decal_math_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_decal_math_tests COMMAND badlands_decal_math_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_daylight_tests: Catch2 suite for the day/night system — the pure-CPU
 # Hosek-Wilkie RGB port (golden values vs the reference), the ComputeDaylight
@@ -810,6 +835,27 @@ if(APPLE)
     target_link_options(badlands_terrain_blend_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_terrain_blend_tests COMMAND badlands_terrain_blend_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_decal_tests: GPU test for the projected-decal pass — renders rings
+# and rounded rects through SceneRenderer into an offscreen R32Float target and
+# reads back the red channel at projected world points. Covers outline-only
+# rendering, the yaw convention, the vertical projector band, steep-surface
+# rejection, and a dash cross-check against the decal_math.hpp CPU mirror (which
+# is what validates the shaders/passes/decals.wesl transcription). Needs a
+# working GPU adapter + the shaders/ dir (WORKING_DIRECTORY = repo root).
+add_executable(badlands_decal_tests
+    src/engine/tests/decal_pass_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_decal_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_decal_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_decal_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_decal_tests COMMAND badlands_decal_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
 # — the SampleHeight/RaycastTerrain queries behind mouse picking. No GPU: only

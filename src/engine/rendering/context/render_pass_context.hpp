@@ -52,6 +52,10 @@ class RenderPassContext {
                    uint32_t first_index = 0, int32_t base_vertex = 0,
                    uint32_t first_instance = 0);
 
+  // Restricts rasterization to a pixel rect (defaults to the whole
+  // attachment). Lets a fullscreen pass shade only the region it can affect.
+  void SetScissorRect(uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+
   // End the render pass
   void End();
 

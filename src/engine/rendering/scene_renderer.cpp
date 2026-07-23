@@ -32,6 +32,7 @@
 #include "engine/rendering/passes/render_debug_lines.hpp"
 #include "engine/rendering/passes/render_forward.hpp"
 #include "engine/rendering/passes/render_gbuffer_debug.hpp"
+#include "engine/rendering/passes/render_projected_decals.hpp"
 #include "engine/rendering/passes/render_skybox.hpp"
 #include "engine/rendering/passes/render_textured_mesh.hpp"
 #include "engine/rendering/scene_post_pass.hpp"
@@ -825,6 +826,24 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
         .color_format = accumulation_format_,
     };
     scene.post_pass->Execute(post);
+  }
+
+  // === Pass 3.87: Projected decals — world-space outline decals (selection
+  // highlights, VFX marks) stamped onto the scene by reconstructing each
+  // pixel's world position from the G-buffer depth, alpha-blended into the HDR
+  // colour. AFTER the post-scene hook so a highlight is not blacked out by the
+  // game's fog-of-war modulation, and before debug lines so dev overlays stay
+  // on top. No-op when the scene carries no decals. ===
+  if (scene.decals != nullptr && scene.decal_count > 0) {
+    RenderProjectedDecals(frame, *pipeline_generator_, accumulation_format_,
+                          hdr_color_view_, gbuffer_.GetDepthView(),
+                          gbuffer_.GetNormalsView(), scene.decals,
+                          scene.decal_count,
+                          camera.GetProj() * camera.GetView(), width_, height_,
+                          // Wall-clock, not the sim-scaled presentation clock:
+                          // a selection highlight is UI, so its dashes keep
+                          // marching while the game is paused.
+                          scene.real_time_seconds, gpu_timer_);
   }
 
   // === Pass 3.6: Debug lines — world-space thick (screen-aligned, AA) lines

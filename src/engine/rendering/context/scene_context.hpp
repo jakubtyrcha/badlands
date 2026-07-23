@@ -28,6 +28,7 @@ namespace badlands {
 
 class DebugLineBuffer;
 class ScenePostPass;
+struct ProjectedDecal;
 
 // SceneContext holds scene-level state written by SceneGraph::SyncToRegistry
 // and read by (future) rendering passes. See the trim note above — this is
@@ -58,6 +59,14 @@ struct SceneContext {
   // Independent of the sim clock; deterministic under headless SeekToTimeOfDay.
   float time_seconds{0.0f};
 
+  // Wall-clock time in seconds, fed by the app each frame. Unlike
+  // `time_seconds` this is NOT scaled by game speed and does NOT stop when the
+  // game is paused -- it is the clock for UI-domain animation (e.g. the
+  // marching-ants scroll on selection decals), which should keep moving while
+  // the world is frozen. Still deterministic in headless capture, where the app
+  // feeds a fixed presentation step rather than real elapsed time.
+  float real_time_seconds{0.0f};
+
   // Optional world-space debug lines, drawn (screen-aligned + antialiased,
   // depth-tested against the G-buffer) after deferred lighting and before
   // tonemap. Null = none. Not owned; must outlive the frame.
@@ -72,6 +81,16 @@ struct SceneContext {
   // --screenshot. See engine/rendering/scene_post_pass.hpp (used by the game's
   // fog-of-war overlay).
   ScenePostPass* post_pass = nullptr;
+
+  // Optional world-space projected decals (selection highlights, VFX marks),
+  // composited into the HDR colour after the post-scene hook and before debug
+  // lines -- so they sit on top of any scene modulation (e.g. fog-of-war) but
+  // under dev overlays. Not owned; must outlive the frame. Null/0 = none.
+  // Carried here rather than as a renderer member for the same reason as
+  // debug_lines/post_pass: the headless --screenshot renderer then draws them
+  // too. See engine/rendering/projected_decal.hpp.
+  const ProjectedDecal* decals = nullptr;
+  uint32_t decal_count = 0;
 };
 
 }  // namespace badlands
