@@ -169,6 +169,10 @@ class GameView : public AppView {
   // Refills building_rows_ from the sim (sized to the LIVE building count so
   // picking never reads a stale tail). Returns the building count.
   uint32_t SnapshotBuildings();
+  // Refills character_rows_ from the sim once per Update, before SyncUnits and
+  // RefreshHud (which both read it) and standing in for picking's snapshot too.
+  // Reuses the buffer (Characters(out) overload). Returns the character count.
+  uint32_t SnapshotCharacters();
   // Rebuilds hud_frame_ from the sim snapshots + selection. Called each Update.
   void RefreshHud();
   // Dispatches the action a HUD button id maps to. Returns true if it ran.

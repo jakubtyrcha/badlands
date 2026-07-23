@@ -398,9 +398,10 @@ class Sim {
     // Snapshot accessors — identical semantics to the old ABI, POD vectors.
     std::vector<CharacterState> Characters() const;  // was game_state
     std::vector<BuildingState> Buildings() const;    // was game_buildings
-    // Out-param overload: reuses the caller's buffer (out.clear() then fill),
-    // avoiding a per-frame allocation on the render path. The primitive; the
-    // value-returning Buildings() delegates here.
+    // Out-param overloads: reuse the caller's buffer (out.clear() then fill),
+    // avoiding a per-frame allocation on the render path. These are the
+    // primitives; the value-returning versions delegate to them.
+    void Characters(std::vector<CharacterState>& out) const;
     void Buildings(std::vector<BuildingState>& out) const;
     WorldState World() const;
     // Replaces the tuning factors (see SimFactors). Call before ticking; a

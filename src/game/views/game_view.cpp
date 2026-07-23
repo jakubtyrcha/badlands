@@ -438,9 +438,9 @@ void GameView::SyncUnits() {
   }
   unit_nodes_.clear();
 
-  // The frame's single character snapshot: SyncUnits() runs before RefreshHud()
-  // in Update(), so RefreshHud + world picking reuse these rows (no re-read).
-  character_rows_ = sim_.Characters();
+  // character_rows_ is the frame's single character snapshot, taken by
+  // SnapshotCharacters() earlier in Update() and shared with RefreshHud +
+  // world picking -- read it, don't re-snapshot.
   int index = 0;
   for (const CharacterState& c : character_rows_) {
     if (c.inside_building_id >= 0) {
@@ -575,14 +575,22 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
         return;
       }
 
-      // World pick: ray against the ground plane, then the drawn footprints.
-      const Ray ray = ScreenPointToRay(camera_, cursor_logical, logical);
-      glm::vec3 hit;
-      if (!IntersectGroundPlane(ray, 0.0f, hit)) return;  // at/above the horizon
-
+      // World pick: ray against the terrain surface, then the drawn footprints.
       // Sim and render coordinates are identical now (the old demo south-shift is
-      // gone), so the ground-plane hit is already in sim space -- pick directly.
-      const glm::vec2 sim_world(hit.x, hit.z);
+      // gone), so the picked XZ is already sim space. GroundPickXZ follows the
+      // terrain height (not the y=0 plane) so a unit seated on elevated terrain
+      // is picked where it appears rather than parallaxed off its footprint.
+      const Ray ray = ScreenPointToRay(camera_, cursor_logical, logical);
+      glm::vec2 sim_world;
+      if (!GroundPickXZ(ray.origin, ray.dir,
+                        [this](glm::vec2 p) {
+                          return map_.empty()
+                                     ? 0.0f
+                                     : map_.HeightAt(p.x + half_x_, p.y + half_z_);
+                        },
+                        sim_world)) {
+        return;  // at/above the horizon
+      }
 
       // Units (small foreground capsules) win over the larger building footprints
       // they may stand on. character_rows_ / building_rows_ are this frame's
@@ -712,6 +720,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   }
 
   gamecam_.UpdateCamera(camera_);
+  SnapshotCharacters();  // one snapshot; SyncUnits + RefreshHud + picking share it
   SyncUnits();  // live AI capsules on the terrain, rebuilt from the snapshot
   scene_.SyncToRegistry(registry_, scene_context_);
 
@@ -727,6 +736,14 @@ uint32_t GameView::SnapshotBuildings() {
   // click land on a dead row (e.g. after a Destroy, before the next refresh).
   sim_.Buildings(building_rows_);
   return static_cast<uint32_t>(building_rows_.size());
+}
+
+uint32_t GameView::SnapshotCharacters() {
+  // Sized to the LIVE character count (same contract as SnapshotBuildings), and
+  // reuses the buffer's capacity via the fill overload. Taken once in Update()
+  // before every consumer, so there is no ordering dependency between them.
+  sim_.Characters(character_rows_);
+  return static_cast<uint32_t>(character_rows_.size());
 }
 
 void GameView::RefreshHud() {
@@ -754,16 +771,17 @@ void GameView::RefreshHud() {
     model.clock_text = buf;
   }
 
-  // A selection that no longer exists (destroyed, or a hero that entered a
-  // building) silently clears rather than describing a stale row.
+  // A selection that no longer exists (destroyed, or a unit that entered a
+  // building) silently clears rather than describing a stale/undrawn row.
+  // SelectedUnit enforces the same "indoors units aren't selectable" rule as
+  // the pick, so a unit that walks inside drops the panel.
   const BuildingState* selected = nullptr;
   for (const BuildingState& b : building_rows_) {
     if (b.id == selected_building_) selected = &b;
   }
-  const CharacterState* hero = nullptr;
-  for (const CharacterState& c : character_rows_) {
-    if (c.id == selected_hero_) hero = &c;
-  }
+  const CharacterState* hero = SelectedUnit(
+      character_rows_.data(), static_cast<uint32_t>(character_rows_.size()),
+      selected_hero_);
   if (!selected) selected_building_ = kNoPick;
   if (!hero) selected_hero_ = kNoPick;
 

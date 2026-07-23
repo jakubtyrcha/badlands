@@ -29,6 +29,32 @@ badlands::CharacterDesc dummy(float x, float z, int32_t team) {
 
 }  // namespace
 
+TEST_CASE("Characters(out) fills identically to Characters() and reuses the buffer") {
+    badlands::Sim sim(nullptr);
+    sim.Spawn(dummy(3.0f, 0.0f, 0));
+    sim.Spawn(dummy(-4.0f, 2.0f, 1));
+
+    const std::vector<badlands::CharacterState> value = sim.Characters();
+    std::vector<badlands::CharacterState> out;
+    sim.Characters(out);
+
+    REQUIRE(out.size() == 2u);
+    REQUIRE(out.size() == value.size());
+    for (size_t i = 0; i < out.size(); ++i) {
+        CHECK(out[i].id == value[i].id);
+        CHECK(out[i].pos_x == value[i].pos_x);
+        CHECK(out[i].pos_z == value[i].pos_z);
+        CHECK(out[i].team == value[i].team);
+    }
+
+    // The fill overload clears + refills (never appends) and keeps its capacity,
+    // so the per-frame render path pays no fresh allocation.
+    const size_t cap = out.capacity();
+    sim.Characters(out);
+    CHECK(out.size() == 2u);
+    CHECK(out.capacity() >= cap);
+}
+
 TEST_CASE("SetPathfinder back-fills every alive building") {
     badlands::Sim sim(nullptr);
     // make_world prebuilds the colony Castle (kCastleSpawn), so >=1 alive building.

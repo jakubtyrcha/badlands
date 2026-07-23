@@ -10,6 +10,7 @@
 // rotated (see RenderBox in badlands_sim.hpp).
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -20,6 +21,29 @@ namespace badlands {
 
 // No building/hero under the cursor.
 inline constexpr uint32_t kNoPick = UINT32_MAX;
+
+// Terrain-aware ground pick. A plain ray/y=0 intersection lands where the cursor
+// crosses sea level, but units and buildings render seated on the terrain
+// surface -- so on any elevation the y=0 point parallaxes away from a unit's
+// small footprint and the click misses where the unit appears. This iterates:
+// intersect y=0, sample terrain there, re-intersect at that height, repeat. It
+// converges to the terrain-surface XZ under the cursor on gently-varying
+// terrain, so a unit standing on that surface is picked where it is drawn.
+//
+// `height_at` maps a world XZ to the terrain height there (world Y). Returns
+// false (leaving out_xz untouched) if the ray does not descend toward the
+// ground -- looking up or along the horizon -- matching IntersectGroundPlane.
+bool GroundPickXZ(glm::vec3 ray_origin, glm::vec3 ray_dir,
+                  const std::function<float(glm::vec2)>& height_at,
+                  glm::vec2& out_xz, int iterations = 3);
+
+// The still-valid selected unit, honouring the same "indoors units are not
+// selectable" rule HeroAtWorld uses when picking: returns the row whose id is
+// `id` only if it exists AND is outside (inside_building_id < 0); nullptr if it
+// was destroyed or walked into a building. Callers clear the selection on
+// nullptr, so the detail panel never describes a unit that is no longer drawn.
+const CharacterState* SelectedUnit(const CharacterState* characters,
+                                   uint32_t count, uint32_t id);
 
 // Point-in-oriented-box in the ground (XZ) plane. `p` and `center` are (x, z);
 // `half` is the box's half-extents; `yaw` is the same angle the renderer feeds

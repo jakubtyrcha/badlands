@@ -318,8 +318,8 @@ bool reload_script(BadlandsGame& g, const std::string& source) {
     return true;
 }
 
-std::vector<CharacterState> characters_of(const BadlandsGame& g) {
-    std::vector<CharacterState> rows;
+void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
+    out.clear();
     for (uint32_t slot = 0; slot < g.slots.size(); ++slot) {
         entt::entity e = g.slots[slot];
         if (!g.registry.valid(e)) {
@@ -353,7 +353,7 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
         const float vis_half_deg =
             vis ? glm::degrees(std::acos(std::clamp(vis->cone_half_cos, -1.0f, 1.0f)))
                 : 180.0f;
-        rows.push_back(CharacterState{
+        out.push_back(CharacterState{
             .id = slot,
             .team = g.registry.get<Team>(e).id,
             .pos_x = pos.pos.x,
@@ -391,10 +391,15 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
             .vision_cone_half_angle_deg = vis_half_deg,
         });
         const char* nm = disp ? disp->name.c_str() : "";
-        std::size_t n = std::min(std::strlen(nm), sizeof(rows.back().name) - 1);
-        std::memcpy(rows.back().name, nm, n);
-        rows.back().name[n] = '\0';
+        std::size_t n = std::min(std::strlen(nm), sizeof(out.back().name) - 1);
+        std::memcpy(out.back().name, nm, n);
+        out.back().name[n] = '\0';
     }
+}
+
+std::vector<CharacterState> characters_of(const BadlandsGame& g) {
+    std::vector<CharacterState> rows;
+    characters_of(g, rows);
     return rows;
 }
 
@@ -516,6 +521,7 @@ VisionLevel Sim::QueryVision(float cx, float cz, float radius) const {
 }
 
 std::vector<CharacterState> Sim::Characters() const { return characters_of(*world_); }
+void Sim::Characters(std::vector<CharacterState>& out) const { characters_of(*world_, out); }
 void Sim::Buildings(std::vector<BuildingState>& out) const { buildings_of(*world_, out); }
 std::vector<BuildingState> Sim::Buildings() const {
     std::vector<BuildingState> rows;

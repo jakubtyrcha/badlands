@@ -21,6 +21,7 @@ uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
 int64_t dispatch_into(BadlandsGame&, const Action&);
 bool reload_script(BadlandsGame&, const std::string&);
 std::vector<CharacterState> characters_of(const BadlandsGame&);
+void characters_of(const BadlandsGame&, std::vector<CharacterState>& out);
 std::vector<BuildingState> buildings_of(const BadlandsGame&);
 void buildings_of(const BadlandsGame&, std::vector<BuildingState>& out);
 WorldState world_of(const BadlandsGame&);
