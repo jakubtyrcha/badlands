@@ -12,9 +12,6 @@ static wgpu::Queue g_Queue;
 static wgpu::RenderPipeline g_Pipeline;
 static wgpu::BindGroupLayout g_BindGroupLayout;
 static wgpu::Sampler g_Sampler;
-static wgpu::Texture g_FontTexture;
-static wgpu::TextureView g_FontTextureView;
-static wgpu::BindGroup g_FontBindGroup;
 static wgpu::Buffer g_VertexBuffer;
 static wgpu::Buffer g_IndexBuffer;
 static wgpu::Buffer g_UniformBuffer;
@@ -27,6 +24,18 @@ static wgpu::TextureFormat g_DepthStencilFormat =
 static uint32_t g_FramebufferWidth = 0;
 static uint32_t g_FramebufferHeight = 0;
 static uint32_t g_OutputIsLinear = 0;
+
+// Per-texture GPU resources for ImGui 1.92's dynamic texture protocol. ImGui
+// owns the ImTextureData (font atlas + any user textures) and drives their
+// lifecycle via Status; the backend stores the GPU handles here on
+// ImTextureData::BackendUserData. The bind group is the persistent owner of its
+// own ref, so the draw loop's transient wgpu::BindGroup wrapper (constructed
+// from GetTexID()) is ref-neutral.
+struct WgpuBackendTexture {
+  wgpu::Texture texture;
+  wgpu::TextureView view;
+  wgpu::BindGroup bind_group;
+};
 
 static const char* g_ShaderCode = R"(
 struct Uniforms {
@@ -91,6 +100,11 @@ bool ImGui_ImplWGPU_Init(ImGui_ImplWGPU_InitInfo* init_info) {
   g_FramebufferHeight = init_info->FramebufferHeight;
   g_OutputIsLinear = init_info->OutputIsLinear ? 1 : 0;
 
+  // ImGui 1.92+: tell the core we honor ImTextureData create/update/destroy
+  // requests each frame (dynamic font atlas). Without this ImGui falls back to
+  // the legacy one-shot atlas path, which this backend no longer implements.
+  ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+
   return ImGui_ImplWGPU_CreateDeviceObjects();
 }
 
@@ -113,6 +127,97 @@ void ImGui_ImplWGPU_SetFramebufferSize(uint32_t width, uint32_t height) {
 void ImGui_ImplWGPU_Shutdown() { ImGui_ImplWGPU_InvalidateDeviceObjects(); }
 
 void ImGui_ImplWGPU_NewFrame() {}
+
+static void ImGui_ImplWGPU_DestroyTexture(ImTextureData* tex) {
+  if (auto* bt = static_cast<WgpuBackendTexture*>(tex->BackendUserData)) {
+    bt->bind_group = nullptr;
+    bt->view = nullptr;
+    if (bt->texture) bt->texture.Destroy();
+    bt->texture = nullptr;
+    delete bt;
+    tex->SetTexID(ImTextureID_Invalid);
+    tex->BackendUserData = nullptr;
+  }
+  tex->SetStatus(ImTextureStatus_Destroyed);
+}
+
+// Service one ImGui 1.92 texture request. WantCreate allocates the GPU texture +
+// its bind group and stores them on the ImTextureData; WantCreate/WantUpdates
+// upload the (sub)region; WantDestroy frees it once ImGui stops referencing it.
+static void ImGui_ImplWGPU_UpdateTexture(ImTextureData* tex) {
+  if (tex->Status == ImTextureStatus_WantCreate) {
+    IM_ASSERT(tex->TexID == ImTextureID_Invalid &&
+              tex->BackendUserData == nullptr);
+    IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
+    auto* bt = new WgpuBackendTexture();
+
+    wgpu::TextureDescriptor tex_desc;
+    tex_desc.size = {static_cast<uint32_t>(tex->Width),
+                     static_cast<uint32_t>(tex->Height), 1};
+    tex_desc.format = wgpu::TextureFormat::RGBA8Unorm;
+    tex_desc.usage =
+        wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+    tex_desc.mipLevelCount = 1;
+    tex_desc.sampleCount = 1;
+    tex_desc.dimension = wgpu::TextureDimension::e2D;
+    bt->texture = g_Device.CreateTexture(&tex_desc);
+    bt->view = bt->texture.CreateView();
+
+    // Same single group-0 layout the pipeline expects: uniform + sampler + this
+    // texture view.
+    wgpu::BindGroupEntry entries[3] = {};
+    entries[0].binding = 0;
+    entries[0].buffer = g_UniformBuffer;
+    entries[0].offset = 0;
+    entries[0].size = 80;
+    entries[1].binding = 1;
+    entries[1].sampler = g_Sampler;
+    entries[2].binding = 2;
+    entries[2].textureView = bt->view;
+    wgpu::BindGroupDescriptor bg_desc;
+    bg_desc.layout = g_BindGroupLayout;
+    bg_desc.entryCount = 3;
+    bg_desc.entries = entries;
+    bt->bind_group = g_Device.CreateBindGroup(&bg_desc);
+
+    tex->BackendUserData = bt;
+    tex->SetTexID((ImTextureID)bt->bind_group.Get());
+    // Fall through to upload the pixels for the freshly created texture.
+  }
+
+  if (tex->Status == ImTextureStatus_WantCreate ||
+      tex->Status == ImTextureStatus_WantUpdates) {
+    auto* bt = static_cast<WgpuBackendTexture*>(tex->BackendUserData);
+    IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
+
+    // Full texture on create; the changed block on update. Rows are always the
+    // full atlas width apart (we upload from GetPixelsAt with the full pitch).
+    const int up_x = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.x;
+    const int up_y = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.y;
+    const int up_w = (tex->Status == ImTextureStatus_WantCreate) ? tex->Width : tex->UpdateRect.w;
+    const int up_h = (tex->Status == ImTextureStatus_WantCreate) ? tex->Height : tex->UpdateRect.h;
+
+    wgpu::TexelCopyTextureInfo dst;
+    dst.texture = bt->texture;
+    dst.mipLevel = 0;
+    dst.origin = {static_cast<uint32_t>(up_x), static_cast<uint32_t>(up_y), 0};
+    dst.aspect = wgpu::TextureAspect::All;
+    wgpu::TexelCopyBufferLayout layout;
+    layout.offset = 0;
+    layout.bytesPerRow = static_cast<uint32_t>(tex->Width * tex->BytesPerPixel);
+    layout.rowsPerImage = static_cast<uint32_t>(up_h);
+    wgpu::Extent3D extent = {static_cast<uint32_t>(up_w),
+                             static_cast<uint32_t>(up_h), 1};
+    g_Queue.WriteTexture(
+        &dst, tex->GetPixelsAt(up_x, up_y),
+        static_cast<size_t>(tex->Width * up_h * tex->BytesPerPixel), &layout,
+        &extent);
+    tex->SetStatus(ImTextureStatus_OK);
+  }
+
+  if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames > 0)
+    ImGui_ImplWGPU_DestroyTexture(tex);
+}
 
 static void SetupRenderState(ImDrawData* draw_data,
                              wgpu::RenderPassEncoder pass) {
@@ -142,6 +247,13 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data,
                                    wgpu::RenderPassEncoder pass) {
   if (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f)
     return;
+
+  // ImGui 1.92: service texture create/update/destroy requests before drawing.
+  // draw_data->Textures usually holds just the font atlas and needs no work
+  // after the first frame.
+  if (draw_data->Textures != nullptr)
+    for (ImTextureData* tex : *draw_data->Textures)
+      if (tex->Status != ImTextureStatus_OK) ImGui_ImplWGPU_UpdateTexture(tex);
 
   // Update vertex and index buffers
   size_t vertex_size = draw_data->TotalVtxCount * sizeof(ImDrawVert);
@@ -190,7 +302,7 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data,
   size_t vtx_remaining = draw_data->TotalVtxCount;
   size_t idx_remaining = draw_data->TotalIdxCount;
 
-  for (int n = 0; n < draw_data->CmdListsCount; n++) {
+  for (int n = 0; n < draw_data->CmdLists.Size; n++) {
     const ImDrawList* cmd_list = draw_data->CmdLists[n];
     size_t vtx_count = static_cast<size_t>(cmd_list->VtxBuffer.Size);
     size_t idx_count = static_cast<size_t>(cmd_list->IdxBuffer.Size);
@@ -220,7 +332,7 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data,
   int global_idx_offset = 0;
   int global_vtx_offset = 0;
 
-  for (int n = 0; n < draw_data->CmdListsCount; n++) {
+  for (int n = 0; n < draw_data->CmdLists.Size; n++) {
     const ImDrawList* cmd_list = draw_data->CmdLists[n];
 
     for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
@@ -287,15 +399,13 @@ void ImGui_ImplWGPU_InvalidateDeviceObjects() {
   if (g_Sampler) {
     g_Sampler = nullptr;
   }
-  if (g_FontTexture) {
-    g_FontTexture.Destroy();
-    g_FontTexture = nullptr;
-  }
-  if (g_FontTextureView) {
-    g_FontTextureView = nullptr;
-  }
-  if (g_FontBindGroup) {
-    g_FontBindGroup = nullptr;
+  // Release every dynamic texture (font atlas + any user textures) we created
+  // for the 1.92 texture protocol. Guarded so it is safe when called before any
+  // context/texture exists.
+  if (ImGui::GetCurrentContext() != nullptr) {
+    for (ImTextureData* tex : ImGui::GetPlatformIO().Textures) {
+      if (tex->BackendUserData != nullptr) ImGui_ImplWGPU_DestroyTexture(tex);
+    }
   }
   if (g_VertexBuffer) {
     g_VertexBuffer.Destroy();
@@ -314,8 +424,6 @@ void ImGui_ImplWGPU_InvalidateDeviceObjects() {
 }
 
 bool ImGui_ImplWGPU_CreateDeviceObjects() {
-  ImGuiIO& io = ImGui::GetIO();
-
   // Create shader module
   WGPUShaderSourceWGSL wgslDesc = {};
   wgslDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
@@ -443,60 +551,8 @@ bool ImGui_ImplWGPU_CreateDeviceObjects() {
 
   g_Pipeline = g_Device.CreateRenderPipeline(&pipelineDesc);
 
-  // Create font texture
-  unsigned char* pixels;
-  int width, height;
-  io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-
-  wgpu::TextureDescriptor texDesc;
-  texDesc.size = {(uint32_t)width, (uint32_t)height, 1};
-  texDesc.format = wgpu::TextureFormat::RGBA8Unorm;
-  texDesc.usage =
-      wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
-  texDesc.mipLevelCount = 1;
-  texDesc.sampleCount = 1;
-  texDesc.dimension = wgpu::TextureDimension::e2D;
-  g_FontTexture = g_Device.CreateTexture(&texDesc);
-
-  g_FontTextureView = g_FontTexture.CreateView();
-
-  // Upload font texture
-  wgpu::TexelCopyTextureInfo dst;
-  dst.texture = g_FontTexture;
-  dst.mipLevel = 0;
-  dst.origin = {0, 0, 0};
-  dst.aspect = wgpu::TextureAspect::All;
-
-  wgpu::TexelCopyBufferLayout layout;
-  layout.offset = 0;
-  layout.bytesPerRow = width * 4;
-  layout.rowsPerImage = height;
-
-  wgpu::Extent3D extent = {(uint32_t)width, (uint32_t)height, 1};
-  g_Queue.WriteTexture(&dst, pixels, width * height * 4, &layout, &extent);
-
-  // Create font bind group
-  wgpu::BindGroupEntry bgEntries[3] = {};
-
-  bgEntries[0].binding = 0;
-  bgEntries[0].buffer = g_UniformBuffer;
-  bgEntries[0].offset = 0;
-  bgEntries[0].size = 80;
-
-  bgEntries[1].binding = 1;
-  bgEntries[1].sampler = g_Sampler;
-
-  bgEntries[2].binding = 2;
-  bgEntries[2].textureView = g_FontTextureView;
-
-  wgpu::BindGroupDescriptor bgDesc;
-  bgDesc.layout = g_BindGroupLayout;
-  bgDesc.entryCount = 3;
-  bgDesc.entries = bgEntries;
-  g_FontBindGroup = g_Device.CreateBindGroup(&bgDesc);
-
-  // Store texture ID
-  io.Fonts->SetTexID((ImTextureID)g_FontBindGroup.Get());
-
+  // The font atlas texture is no longer created here: under the 1.92 texture
+  // protocol ImGui requests it (and any user textures) via ImTextureData, which
+  // ImGui_ImplWGPU_UpdateTexture services from RenderDrawData.
   return true;
 }

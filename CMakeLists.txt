@@ -11,9 +11,13 @@ FetchContent_MakeAvailable(SDL3)
 # Dawn (WebGPU), built from source and pinned — see cmake/FetchDawn.cmake.
 include(cmake/FetchDawn.cmake)
 
-# Dear ImGui (docking branch). Task S2.A1 only compiles it into
-# badlands_engine to de-risk the fetch/build; A2 wires up ImGui calls.
-FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG docking)
+# Dear ImGui (docking branch), PINNED to a commit. Do NOT use a bare branch name
+# (GIT_TAG docking) here: FetchContent then tracks a moving branch, so a cache
+# refresh silently upgrades ImGui and can break the custom Dawn backend against
+# API changes (e.g. 1.92 obsoleted ImDrawData::CmdListsCount and reworked the
+# font-texture protocol). Bump this SHA deliberately and re-test the backend.
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG ca49eff3980443a97c470e09fe55b1740cfb9584)  # 1.92.9 WIP (docking), 2026-07-22
 FetchContent_MakeAvailable(imgui)
 
 # Corrosion for Rust integration (crib from ../sampo/CMakeLists.txt lines ~199-208).

@@ -325,7 +325,10 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
 
       ImGui::Render();
       ImDrawData* dd = ImGui::GetDrawData();
-      if (dd && dd->CmdListsCount > 0) ImGui_ImplWGPU_RenderDrawData(dd, pass);
+      // ImGui 1.92 obsoleted ImDrawData::CmdListsCount (now always 0); the live
+      // list count is CmdLists.Size. Gating on the old field silently dropped
+      // the entire debug overlay.
+      if (dd && dd->CmdLists.Size > 0) ImGui_ImplWGPU_RenderDrawData(dd, pass);
 
       pass.End();
       wgpu::CommandBuffer commands = encoder.Finish();
