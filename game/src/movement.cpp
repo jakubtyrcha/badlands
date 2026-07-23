@@ -33,10 +33,16 @@ constexpr float kWorldBound = static_cast<float>(kGridHalf);
 // says unreachable" (empty) so the caller can raise MoveBlocked only for the
 // latter.
 std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2 goal,
-                                  bool& unreachable) {
+                                  bool& unreachable, const glm::vec2* exempt_min = nullptr,
+                                  const glm::vec2* exempt_max = nullptr) {
     unreachable = false;
     if (!game.navmesh.empty()) {
-        const nav::NavMesh::PathResult r = game.navmesh.FindPath(start, goal);
+        // When entering a building, exempt its footprint's clearance so a door
+        // sealed by the building's own dilation stays reachable (dense towns).
+        const nav::NavMesh::PathResult r =
+            (exempt_min != nullptr && exempt_max != nullptr)
+                ? game.navmesh.FindPath(start, goal, *exempt_min, *exempt_max)
+                : game.navmesh.FindPath(start, goal);
         if (!r.reachable) {
             unreachable = true;
             return {};
@@ -132,6 +138,8 @@ void plan_paths(BadlandsGame& game, float dt) {
 
         glm::vec2 goal{0.0f, 0.0f};
         bool have_goal = true;
+        glm::vec2 exempt_min{0.0f}, exempt_max{0.0f};
+        bool have_exempt = false;
         switch (mt.kind) {
             case MoveTarget::Kind::None:
                 have_goal = false;
@@ -150,9 +158,17 @@ void plan_paths(BadlandsGame& game, float dt) {
                 if (mt.building < game.placement.buildings.size() &&
                     game.placement.buildings[mt.building].alive) {
                     // The target building is an obstacle; its entrance sits on the
-                    // perimeter, so the navmesh recovers the nearest passable cell
-                    // just outside the door and the unit stops there (stop_distance).
-                    goal = building_entrance(game.placement.buildings[mt.building]);
+                    // perimeter. Exempt the building's own footprint bbox so its
+                    // clearance ring never seals off its door.
+                    const PlacedBuilding& b = game.placement.buildings[mt.building];
+                    goal = building_entrance(b);
+                    const std::array<glm::vec2, 4> corners = building_footprint_corners(b);
+                    exempt_min = exempt_max = corners[0];
+                    for (const glm::vec2& c : corners) {
+                        exempt_min = glm::min(exempt_min, c);
+                        exempt_max = glm::max(exempt_max, c);
+                    }
+                    have_exempt = true;
                 } else {
                     have_goal = false;
                 }
@@ -177,7 +193,9 @@ void plan_paths(BadlandsGame& game, float dt) {
                     np.epoch != game.placement.nav_epoch || goal_drifted;
         if (need && np.repath_cooldown <= 0.0f) {
             bool unreachable = false;
-            np.waypoints = query_path(game, pos, goal, unreachable);
+            np.waypoints = query_path(game, pos, goal, unreachable,
+                                      have_exempt ? &exempt_min : nullptr,
+                                      have_exempt ? &exempt_max : nullptr);
             np.cursor = 0;
             np.epoch = game.placement.nav_epoch;
             np.repath_cooldown = kRepathCooldown;

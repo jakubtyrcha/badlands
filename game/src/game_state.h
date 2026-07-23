@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace badlands {
@@ -26,6 +27,11 @@ struct BadlandsGame {
     // Entity id (as seen by the C API and by scripts) -> entity. Slots are
     // never reused; dead entities leave entt::null behind.
     std::vector<entt::entity> slots;
+    // Reverse index: entity -> its slot, filled on spawn (slots never reused, and
+    // entt versions entities so a recycled id is a distinct key), so
+    // slot_for_entity is O(1) instead of a linear scan per combat hit. Stale
+    // entries for dead entities are never queried (only live entities are).
+    std::unordered_map<entt::entity, uint32_t> entity_slot;
     // Compiled brain program + host bindings; null -> mock brains only.
     std::unique_ptr<badlands::BrainRuntime> brains;
 

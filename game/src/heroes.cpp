@@ -104,6 +104,7 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     entt::entity e = reg.create();
     uint32_t slot = static_cast<uint32_t>(game.slots.size());
     game.slots.push_back(e);
+    game.entity_slot[e] = slot;  // reverse index for O(1) slot_for_entity
 
     reg.emplace<Position>(e, glm::vec2{desc.pos_x, desc.pos_z});
     reg.emplace<Team>(e, desc.team);

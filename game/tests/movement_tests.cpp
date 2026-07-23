@@ -15,6 +15,7 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -233,4 +234,58 @@ TEST_CASE("mock duel resolves through the movement pipeline and engages melee lo
     }
     CHECK(survivors == 1);  // the duel resolved
     CHECK(saw_lock);        // the combatants locked at some point
+}
+
+// --- code-review guards (navmesh migration) ---------------------------------
+
+TEST_CASE("a unit reaches a building's approach tile via the navmesh") {
+    // Guards the refuted "units stop one cell short of doors" finding:
+    // building_approach_tile is 2 cells out (past the footprint margin), so it is
+    // reachable through the 1-cell navmesh dilation.
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
+    const uint32_t house = place_building(
+        *game, PlacementDesc{static_cast<int32_t>(BuildingKind::House), 0, -40.0f, 50.0f}, false);
+    REQUIRE(house != std::numeric_limits<uint32_t>::max());
+    rebuild_navmesh_if_stale(*game);
+
+    glm::vec2 tile;
+    REQUIRE(building_approach_tile(game->placement, game->placement.buildings[house], tile));
+
+    const uint32_t id = spawn_unit(game, -52.0f, 50.0f, 0);  // ~west of the house
+    entt::entity e = game->slots[id];
+    MoveTarget& mt = game->registry.get<MoveTarget>(e);
+    mt.kind = MoveTarget::Kind::Point;
+    mt.point = tile;
+    mt.stop_distance = 0.1f;
+
+    for (int i = 0; i < 600 && glm::distance(pos_of(game, id), tile) > kEntranceRadius; ++i) {
+        plan_paths(*game, 1.0f / 30.0f);
+        follow_paths(*game, 1.0f / 30.0f);
+        separate_units(*game);
+    }
+    CHECK(glm::distance(pos_of(game, id), tile) <= kEntranceRadius);
+}
+
+TEST_CASE("footprint reprojection engages only once a navmesh exists") {
+    // The reproject guard (F9) is the SAME signal as query_path: navmesh presence.
+    auto owned = make_world(nullptr);
+    BadlandsGame* game = owned.get();
+    const uint32_t b = place_building(
+        *game, PlacementDesc{static_cast<int32_t>(BuildingKind::House), 0, -40.0f, 50.0f}, false);
+    REQUIRE(b != std::numeric_limits<uint32_t>::max());
+    const glm::vec2 center = game->placement.buildings[b].center;
+
+    const uint32_t id = spawn_unit(game, center.x, center.y, 0);  // inside the footprint
+
+    // No navmesh yet -> reproject skipped -> the lone unit stays put.
+    REQUIRE(game->navmesh.empty());
+    separate_units(*game);
+    CHECK(glm::distance(pos_of(game, id), center) < 1e-3f);
+
+    // Navmesh present -> reproject engages -> the unit is pushed out of the footprint.
+    rebuild_navmesh_if_stale(*game);
+    REQUIRE_FALSE(game->navmesh.empty());
+    separate_units(*game);
+    CHECK(glm::distance(pos_of(game, id), center) > 1e-3f);
 }

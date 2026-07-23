@@ -414,3 +414,24 @@ TEST_CASE("Cost cache is invalidated when the SAME mesh is rebuilt", "[nav]") {
 
     CHECK(walled_cost > open_cost);  // not the stale cached value
 }
+
+TEST_CASE("exempt-building opens a doorway its own clearance sealed", "[nav]") {
+    // A wall on cell x=16 with a 2-cell doorway at z=15,16. With clearance 1 the
+    // wall's own dilation seals that doorway, splitting the map in two.
+    GridSource src(32);
+    for (int z = 0; z < 32; ++z)
+        if (z != 15 && z != 16) src.set_blocked(16, z);
+    NavMesh nm;
+    nm.Build(src, NavParams{0.05f, 0.25f, /*clearance=*/1});
+
+    const glm::vec2 from{5.5f, 15.5f}, to{25.5f, 15.5f};
+    // Without the exemption the sealed doorway makes the goal unreachable.
+    CHECK_FALSE(nm.FindPath(from, to).reachable);
+
+    // Exempting the wall's footprint (world x in [16,17]) lifts its clearance at
+    // the doorway, so the goal becomes reachable.
+    const NavMesh::PathResult r = nm.FindPath(from, to, glm::vec2{16.0f, 0.0f}, glm::vec2{17.0f, 32.0f});
+    CHECK(r.reachable);
+    CHECK(r.waypoints.size() >= 2);
+    CHECK(glm::distance(r.waypoints.back(), to) < 1e-3f);
+}

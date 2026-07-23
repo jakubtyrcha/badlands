@@ -10,6 +10,7 @@ void NavMesh::Build(const NavSource& src, const NavParams& params) {
     cell_size_ = src.cell_size_m();
     origin_ = src.origin_m();
     side_ = src.side();
+    clearance_ = std::max(0, params.clearance_cells);
     qt_.Build(src, params);
     graph_.Build(qt_);
     cost_cache_.clear();  // stale against the old mesh
@@ -28,19 +29,35 @@ glm::vec2 NavMesh::CellCenterWorld(int cx, int cz) const {
     return origin_ + (glm::vec2(static_cast<float>(cx), static_cast<float>(cz)) + 0.5f) * cell_size_;
 }
 
+// Traversable for a query: a real passable leaf, or (when an exempt rect is
+// active) an impassable cell within that rect expanded by the mesh clearance --
+// i.e. the target building's clearance ring, lifted.
+bool NavMesh::CellOk(int cx, int cz, const Exempt& ex) const {
+    const int li = qt_.LeafAt(cx, cz);
+    if (li >= 0 && qt_.leaves()[li].passable) {
+        return true;
+    }
+    if (ex.active) {
+        const glm::vec2 c = CellCenterWorld(cx, cz);
+        const float m = static_cast<float>(clearance_) * cell_size_ + 1e-3f;
+        if (c.x >= ex.min.x - m && c.x <= ex.max.x + m && c.y >= ex.min.y - m &&
+            c.y <= ex.max.y + m) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Amanatides-Woo cell traversal: the segment is clear iff every cell it touches
-// is a passable leaf. Out-of-range cells count as blocked.
-bool NavMesh::SegmentClear(glm::vec2 a, glm::vec2 b) const {
-    auto passable = [&](int cx, int cz) {
-        const int li = qt_.LeafAt(cx, cz);
-        return li >= 0 && qt_.leaves()[li].passable;
-    };
+// is CellOk. Out-of-range cells count as blocked.
+bool NavMesh::SegmentClear(glm::vec2 a, glm::vec2 b, const Exempt& ex) const {
+    auto passable = [&](int cx, int cz) { return CellOk(cx, cz, ex); };
     const glm::vec2 pa = (a - origin_) / cell_size_;
     const glm::vec2 pb = (b - origin_) / cell_size_;
     int cx = static_cast<int>(std::floor(pa.x));
     int cz = static_cast<int>(std::floor(pa.y));
-    const int ex = static_cast<int>(std::floor(pb.x));
-    const int ez = static_cast<int>(std::floor(pb.y));
+    const int gx = static_cast<int>(std::floor(pb.x));
+    const int gz = static_cast<int>(std::floor(pb.y));
     const float dx = pb.x - pa.x;
     const float dz = pb.y - pa.y;
 
@@ -64,7 +81,7 @@ bool NavMesh::SegmentClear(glm::vec2 a, glm::vec2 b) const {
         if (!passable(cx, cz)) {
             return false;
         }
-        if (cx == ex && cz == ez) {
+        if (cx == gx && cz == gz) {
             return true;
         }
         if (t_max_x < t_max_z) {
@@ -75,12 +92,12 @@ bool NavMesh::SegmentClear(glm::vec2 a, glm::vec2 b) const {
             cz += stepz;
         }
         if (t_max_x > 1.0f && t_max_z > 1.0f) {
-            // Past the segment end without landing exactly on (ex,ez); the end
-            // cell is validated on the next check via the clamp below.
-            return passable(ex, ez);
+            // Past the segment end without landing exactly on (gx,gz); validate
+            // the end cell directly.
+            return passable(gx, gz);
         }
     }
-    return passable(ex, ez);
+    return passable(gx, gz);
 }
 
 // Nearest passable cell to (cx,cz), searched ring by ring so the closest wins;
@@ -122,20 +139,80 @@ int NavMesh::NodeAtWorld(glm::vec2 w) const {
 }
 
 NavMesh::PathResult NavMesh::FindPath(glm::vec2 from, glm::vec2 to) const {
+    return FindPathImpl(from, to, Exempt{});
+}
+
+NavMesh::PathResult NavMesh::FindPath(glm::vec2 from, glm::vec2 to, glm::vec2 exempt_min,
+                                      glm::vec2 exempt_max) const {
+    return FindPathImpl(from, to, Exempt{exempt_min, exempt_max, true});
+}
+
+float NavMesh::PolylineCost(const std::vector<glm::vec2>& pts) const {
+    float cost = 0.0f;
+    for (size_t i = 1; i < pts.size(); ++i) {
+        const glm::vec2 mid = 0.5f * (pts[i - 1] + pts[i]);
+        const glm::ivec2 mc = WorldToCell(mid);
+        const int li = qt_.LeafAt(mc.x, mc.y);
+        const float mult = (li >= 0 && qt_.leaves()[li].passable) ? qt_.leaves()[li].cost : 1.0f;
+        cost += glm::distance(pts[i - 1], pts[i]) * std::max(1.0f, mult);
+    }
+    return cost;
+}
+
+NavMesh::PathResult NavMesh::FindPathImpl(glm::vec2 from, glm::vec2 to, const Exempt& ex) const {
     PathResult res;
     if (empty()) {
         return res;
     }
     const int s = NodeAtWorld(from);
-    const int g = NodeAtWorld(to);
-    if (s < 0 || g < 0) {
+    if (s < 0) {
         return res;
     }
 
-    float node_cost = 0.0f;
-    const std::vector<int> nodes = graph_.AStar(s, g, node_cost);
-    if (nodes.empty()) {
-        return res;  // unreachable
+    // Node path start -> goal-side node.
+    std::vector<int> nodes;
+    if (!ex.active) {
+        const int g = NodeAtWorld(to);
+        if (g < 0) {
+            return res;
+        }
+        float node_cost = 0.0f;
+        nodes = graph_.AStar(s, g, node_cost);
+        if (nodes.empty()) {
+            return res;  // unreachable
+        }
+    } else {
+        // Exempt: shortest paths from s, then the cheapest reachable node that
+        // has a clearance-exempt line of sight to the goal (so a door sealed by
+        // the target building's own clearance still connects through it).
+        std::vector<float> dist;
+        std::vector<int> came;
+        graph_.Dijkstra(s, dist, came);
+        const glm::vec2 to_cells = (to - origin_) / cell_size_;
+        int best = -1;
+        float best_metric = std::numeric_limits<float>::infinity();
+        for (int c = 0; c < graph_.node_count(); ++c) {
+            if (!std::isfinite(dist[c])) {
+                continue;
+            }
+            const glm::vec2 cc = graph_.center_cells(c);
+            const glm::vec2 cw = origin_ + cc * cell_size_;
+            if (!SegmentClear(cw, to, ex)) {
+                continue;
+            }
+            const float metric = dist[c] + glm::distance(cc, to_cells);
+            if (metric < best_metric) {
+                best_metric = metric;
+                best = c;
+            }
+        }
+        if (best < 0) {
+            return res;  // unreachable even with the exemption
+        }
+        for (int at = best; at != -1; at = came[at]) {
+            nodes.push_back(at);
+        }
+        std::reverse(nodes.begin(), nodes.end());
     }
 
     // Coarse polyline: the true endpoints with the leaf centres between them.
@@ -156,7 +233,7 @@ NavMesh::PathResult NavMesh::FindPath(glm::vec2 from, glm::vec2 to) const {
     while (anchor < n - 1) {
         int next = anchor + 1;
         for (int j = n - 1; j > anchor + 1; --j) {
-            if (SegmentClear(coarse[anchor], coarse[j])) {
+            if (SegmentClear(coarse[anchor], coarse[j], ex)) {
                 next = j;
                 break;
             }
@@ -165,18 +242,8 @@ NavMesh::PathResult NavMesh::FindPath(glm::vec2 from, glm::vec2 to) const {
         anchor = next;
     }
 
-    // Cost-weighted length of the final polyline (terrain cost at each midpoint).
-    float cost = 0.0f;
-    for (size_t i = 1; i < smooth.size(); ++i) {
-        const glm::vec2 mid = 0.5f * (smooth[i - 1] + smooth[i]);
-        const glm::ivec2 mc = WorldToCell(mid);
-        const int li = qt_.LeafAt(mc.x, mc.y);
-        const float mult = (li >= 0 && qt_.leaves()[li].passable) ? qt_.leaves()[li].cost : 1.0f;
-        cost += glm::distance(smooth[i - 1], smooth[i]) * std::max(1.0f, mult);
-    }
-
     res.waypoints = std::move(smooth);
-    res.cost = cost;
+    res.cost = PolylineCost(res.waypoints);
     res.reachable = true;
     return res;
 }

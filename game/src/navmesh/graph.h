@@ -45,6 +45,12 @@ class NavGraph {
     // if unreachable or either endpoint invalid.
     std::vector<int> AStar(int start, int goal, float& out_cost) const;
 
+    // Single-source shortest paths from `start` over the whole graph. Fills
+    // dist (infinity for unreachable) and came (-1 for start/unreached) sized to
+    // node_count(). Used by the exempt-building goal augmentation, which picks
+    // the cheapest node with clearance-exempt line-of-sight to the goal.
+    void Dijkstra(int start, std::vector<float>& dist, std::vector<int>& came) const;
+
    private:
     const Quadtree* qt_ = nullptr;
     std::vector<int> node_leaf_;   // node -> leaf index

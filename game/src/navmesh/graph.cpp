@@ -138,4 +138,42 @@ std::vector<int> NavGraph::AStar(int start, int goal, float& out_cost) const {
     return path;
 }
 
+void NavGraph::Dijkstra(int start, std::vector<float>& dist, std::vector<int>& came) const {
+    const int n = node_count();
+    dist.assign(n, std::numeric_limits<float>::infinity());
+    came.assign(n, -1);
+    if (start < 0 || start >= n) {
+        return;
+    }
+    struct QN {
+        float d;
+        int node;
+    };
+    struct Cmp {
+        bool operator()(const QN& a, const QN& b) const {
+            return a.d > b.d || (a.d == b.d && a.node > b.node);
+        }
+    };
+    std::priority_queue<QN, std::vector<QN>, Cmp> open;
+    std::vector<char> closed(n, 0);
+    dist[start] = 0.0f;
+    open.push({0.0f, start});
+    while (!open.empty()) {
+        const int u = open.top().node;
+        open.pop();
+        if (closed[u]) {
+            continue;
+        }
+        closed[u] = 1;
+        for (const Edge& e : adj_[u]) {
+            const float nd = dist[u] + e.w;
+            if (nd < dist[e.to]) {
+                dist[e.to] = nd;
+                came[e.to] = u;
+                open.push({nd, e.to});
+            }
+        }
+    }
+}
+
 }  // namespace badlands::nav

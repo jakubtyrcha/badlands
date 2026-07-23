@@ -107,3 +107,12 @@ TEST_CASE("nav_cost with a navmesh is a weighted length >= the straight line", "
     CHECK(c >= Catch::Approx(glm::distance(a, b)).margin(1e-3f));
     CHECK(c == Catch::Approx(game->navmesh.Cost(a, b)));  // same as the mesh query
 }
+
+TEST_CASE("nav clearance covers the largest agent radius", "[navworld]") {
+    // Single-mesh clearance (F3): the baked clearance (metres) must be >= the
+    // largest agent radius the game spawns, or a unit could be routed through a
+    // gap too tight for it. Heroes are the largest at radius 0.5 (0.5 * size 1.0).
+    const nav::NavParams p = sim_nav_params();
+    const float clearance_m = static_cast<float>(p.clearance_cells) * 1.0f;  // 1 m cells
+    CHECK(clearance_m >= 0.5f);
+}
