@@ -1,4 +1,4 @@
-#include "ai_sandbox/ai_sandbox_view.hpp"
+#include "executables/ai_sandbox/ai_sandbox_view.hpp"
 
 #include <algorithm>
 #include <cstdint>

@@ -1,4 +1,4 @@
-#include "viewer/model_viewer_view.hpp"
+#include "executables/viewer/model_viewer_view.hpp"
 
 #include <algorithm>
 #include <cstdint>

@@ -320,8 +320,8 @@ target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 # its building prefabs (S2-reviewfix C6), so the viewer executable compiles it
 # too (its own copy; also compiled into badlands_game below).
 set(badlands_app_sources_viewer
-    src/viewer/main_viewer.cpp
-    src/viewer/model_viewer_view.cpp
+    src/executables/viewer/main_viewer.cpp
+    src/executables/viewer/model_viewer_view.cpp
     src/game/scene/building_scene.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
@@ -330,8 +330,8 @@ set(badlands_app_sources_viewer
 # GameBuildingKind/building_visual), which the final executable link already
 # provides transitively.
 set(badlands_app_sources_game
-    src/game/main_game.cpp
-    src/game/views/game_view.cpp
+    src/executables/game/main_game.cpp
+    src/executables/game/game_view.cpp
     # Visual entity-component layer (SceneComposer) + terrain geometry + the
     # symbolic-map building/biome plumbing, now that the game renders the
     # symbolic map's terrain/water/buildings through the composer.
@@ -353,8 +353,8 @@ set(badlands_app_sources_game
 # capsules, deferred + GameCameraController). Compiled directly into the
 # executable, same rationale as badlands_app_sources_game above.
 set(badlands_app_sources_ai_sandbox
-    src/ai_sandbox/main_ai_sandbox.cpp
-    src/ai_sandbox/ai_sandbox_view.cpp
+    src/executables/ai_sandbox/main_ai_sandbox.cpp
+    src/executables/ai_sandbox/ai_sandbox_view.cpp
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
     src/game/scenario.cpp)          # sandbox scenarios loaded as data
@@ -396,7 +396,7 @@ target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
 # grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
 # window. Scripts are functions of world meters, so a patch is a literal crop of the
 # world (see scripts/mapgen/biomes/README.md).
-add_executable(badlands_patchgen src/mapgen/main_patchgen.cpp)
+add_executable(badlands_patchgen src/executables/patchgen/main_patchgen.cpp)
 target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib)
 target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
@@ -409,8 +409,8 @@ endif()
 # map as indexed kTerrainBlend chunks with the biome-blend material, with a
 # mouse-hover block/section grid.
 add_executable(badlands_mapview
-    src/mapview/main_mapview.cpp
-    src/mapview/map_view_view.cpp
+    src/executables/mapview/main_mapview.cpp
+    src/executables/mapview/map_view_view.cpp
     src/mapview/biome_manifest.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/terrain_clusters.cpp

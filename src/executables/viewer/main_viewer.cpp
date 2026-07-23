@@ -4,7 +4,7 @@
 
 #include "engine/app/sdl_viewer_app.hpp"
 #include "engine/rendering/scene_renderer.hpp"
-#include "viewer/model_viewer_view.hpp"
+#include "executables/viewer/model_viewer_view.hpp"
 
 int main(int argc, char** argv) {
   // Temporary headless-verification aid (Task S2.E): selects the initial
