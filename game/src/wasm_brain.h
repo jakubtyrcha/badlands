@@ -51,8 +51,16 @@ struct WasmBrainRuntime {
     // are stateless, so a slot being reused (a dead hero's slot id is never
     // reassigned -- see BadlandsGame::slots -- but this stays cheap insurance)
     // without a matching bh_despawn is benign: there is no per-slot state on
-    // the guest side worth leaking.
+    // the guest side worth leaking. Cleared to all-false whenever `instance`
+    // is replaced (see tick_wasm_brain's reinstantiation path below), since a
+    // fresh instance has never had bh_spawn called against it for any slot.
     std::vector<bool> spawned;
+    // How many times `instance` has been (re)instantiated from `program`:
+    // 1 after create(), +1 each time tick_wasm_brain drops a trapped/fuel-
+    // exhausted instance and replaces it. Purely observational (tests use it
+    // to prove a reinstantiation actually happened); nothing reads it to make
+    // a decision.
+    uint32_t instantiation_count = 0;
 };
 
 // One tick for `slot`: observe (town_brain.h's observe_hero/weights_for,
@@ -60,16 +68,29 @@ struct WasmBrainRuntime {
 // pack into a BlViewWire (brain_abi.h) -> bh_tick -> on BH_OK, decode the
 // returned BlDecisionWire into a BrainDecision and apply it
 // (town_brain.h's apply_brain_decision, the same seam town_think's tail
-// uses). On ANY failure (bh_spawn or bh_tick returning nonzero, including a
-// trap or fuel exhaustion): report_bug(game, "wasm_tick", ...) with
-// bh_last_error()'s text and no commands this tick -- the entity simply
-// idles (its last decision stands) and the tick is retried next frame.
-// There is no downgrade flag, unlike the noiser path -- see the spec doc's
-// Runtime section.
+// uses). On ANY failure (bh_spawn or bh_tick returning nonzero):
+// report_bug(game, "wasm_spawn" | "wasm_tick", ...) with bh_last_error()'s
+// text and no commands this tick -- the entity simply idles (its last
+// decision stands) and the tick is retried next frame. There is no
+// downgrade flag, unlike the noiser path -- see the spec doc's Runtime
+// section.
+//
+// BH_ERR_TRAP/BH_ERR_FUEL specifically also invalidate `instance` (per
+// brainhost.h: "a BhInstance that has trapped ... is not reused"): this
+// drops it and instantiates a fresh one from the retained `program`,
+// clearing `spawned` so every slot re-registers lazily. If re-instantiation
+// itself fails there is no usable wasm runtime left, so game.wasm_brains is
+// reset to null -- the think loop's dispatch condition then falls back to
+// mock for every hero, rather than every hero wedging into permanent idle
+// forever against a runtime that can never tick again.
+// BH_ERR_SCRIPT/BH_ERR_ARGS/BH_ERR_PANIC do NOT invalidate the instance
+// (only TRAP/FUEL do, per the header) -- those just report and retry next
+// tick against the same instance.
 //
 // Caller contract: game.wasm_brains must be non-null and `slot` must name a
 // live BrainKind::Town entity (the sim.cpp think loop's dispatch already
-// guarantees both before calling this).
+// guarantees both before calling this). game.wasm_brains may be null AFTER
+// this call returns (see above) -- the caller must not assume it survives.
 void tick_wasm_brain(BadlandsGame& game, uint32_t slot);
 
 }  // namespace badlands

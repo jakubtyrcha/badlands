@@ -15,6 +15,7 @@
 #include "game_state.h"
 #include "sim_internal.hpp"
 #include "town_brain.h"
+#include "wasm_brain.h"  // WasmBrainRuntime::instantiation_count (review-fix coverage)
 
 #include <catch_amalgamated.hpp>
 
@@ -31,11 +32,10 @@ using namespace testfix;
 
 namespace {
 
-// Reads the shipping brain artifact (LFS binary; repo-root-relative, like
-// every other asset path in this codebase -- add_test sets WORKING_DIRECTORY
-// to the repo root, see CMakeLists.txt).
-std::vector<uint8_t> read_hero_wasm() {
-    const char* path = "assets/brains/hero.wasm";
+// Reads a binary wasm fixture, repo-root-relative like every other asset
+// path in this codebase (add_test sets WORKING_DIRECTORY to the repo root,
+// see CMakeLists.txt).
+std::vector<uint8_t> read_wasm_file(const char* path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     REQUIRE(file.good());
     const std::streamsize size = file.tellg();
@@ -43,6 +43,16 @@ std::vector<uint8_t> read_hero_wasm() {
     std::vector<uint8_t> bytes(static_cast<size_t>(size));
     REQUIRE(file.read(reinterpret_cast<char*>(bytes.data()), size));
     return bytes;
+}
+
+// The shipping brain artifact (LFS binary; scripts/brains/nim/hero.nim).
+std::vector<uint8_t> read_hero_wasm() { return read_wasm_file("assets/brains/hero.wasm"); }
+
+// Test-only fixture (LFS binary; scripts/brains/nim/trap_test.nim -- same
+// export surface as hero.nim, but bl_tick unconditionally traps): built by
+// scripts/build_brains.sh alongside hero.wasm.
+std::vector<uint8_t> read_trap_wasm() {
+    return read_wasm_file("game/tests/fixtures/trap_brain.wasm");
 }
 
 BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
@@ -162,6 +172,65 @@ TEST_CASE("wasm: garbage bytes report a bug and heroes fall back to mock behavio
     // wasm-load failure that left the entity silently doing nothing would
     // fail this).
     CHECK(rows[0].behavior != static_cast<int32_t>(ActivityId::Idle));
+}
+
+// --- Review fix: a trapped BhInstance is dropped and re-instantiated -------
+// (brainhost.h: "a BhInstance that has trapped (BH_ERR_TRAP/BH_ERR_FUEL) is
+// not reused"). Uses a real trapping module (game/tests/fixtures/
+// trap_brain.wasm, scripts/brains/nim/trap_test.nim) rather than a synthetic
+// error code, so this exercises bh_tick's actual BH_ERR_TRAP return, not an
+// assumption about it.
+
+TEST_CASE("wasm: a trapping module reports a bug every tick and never crashes the sim") {
+    std::vector<uint8_t> bytes = read_trap_wasm();
+    Sim sim(wasm_desc(bytes));
+
+    constexpr int kHeroes = 2;
+    constexpr int kTicks = 10;
+    std::vector<uint32_t> ids;
+    for (int i = 0; i < kHeroes; ++i) {
+        ids.push_back(sim.Spawn(mercenary(static_cast<float>(i) * 6.0f, kDuelGroundZ)));
+    }
+    for (int i = 0; i < kTicks; ++i) {
+        sim.Tick(kTickDt);
+    }
+
+    // No crash, and every spawned hero is still a valid, healthy row --
+    // combat/movement/needs keep running untouched around a permanently
+    // failing brain.
+    auto rows = sim.Characters();
+    REQUIRE(rows.size() == static_cast<size_t>(kHeroes));
+    for (const CharacterState& r : rows) {
+        CHECK(r.hp > 0.0f);
+    }
+
+    // bh_spawn never traps in this fixture (only bl_tick does), so every
+    // tick's bh_tick call is the sole failure per hero: exactly
+    // kHeroes * kTicks accrued bugs -- "one per hero tick" and, since that
+    // count keeps accruing at the full rate through the last tick, proof
+    // that re-instantiation kept succeeding throughout (a wedged/nulled-out
+    // runtime would have silently stopped producing "wasm_tick" bugs and
+    // fallen back to mock instead).
+    CHECK(sim.GetStats().noiser_bugs == static_cast<uint32_t>(kHeroes * kTicks));
+}
+
+TEST_CASE("wasm: each trap gets a freshly instantiated BhInstance, not the trapped one") {
+    std::vector<uint8_t> bytes = read_trap_wasm();
+    auto g = make_world(wasm_desc(bytes));
+    REQUIRE(g->wasm_brains != nullptr);
+    CHECK(g->wasm_brains->instantiation_count == 1);  // create()'s own instantiation
+
+    spawn_into(*g, mercenary(0.0f, kDuelGroundZ));  // Town-kind, no enemy: ticks the wasm brain
+
+    tick_world(*g, 1.0f / 30.0f);
+    REQUIRE(g->wasm_brains != nullptr);  // re-instantiation succeeded, not nulled out
+    const uint32_t after_tick1 = g->wasm_brains->instantiation_count;
+    CHECK(after_tick1 > 1);  // a fresh instance replaced the one that just trapped
+
+    tick_world(*g, 1.0f / 30.0f);
+    REQUIRE(g->wasm_brains != nullptr);
+    const uint32_t after_tick2 = g->wasm_brains->instantiation_count;
+    CHECK(after_tick2 > after_tick1);  // a SECOND, distinct re-instantiation happened
 }
 
 // --- F.4: apply_brain_decision, unit-tested directly (no wasm) -------------

@@ -4,8 +4,12 @@
 # Nim's C backend generates C, which wasi-sdk's clang/wasm-ld turns into a
 # freestanding wasm32 module.
 #
-# Today this builds exactly one brain: scripts/brains/nim/hero.nim ->
-# assets/brains/hero.wasm.
+# Builds two brains, both with the identical flag family (see build_one
+# below): scripts/brains/nim/hero.nim -> assets/brains/hero.wasm (the
+# shipping skeleton) and scripts/brains/nim/trap_test.nim ->
+# game/tests/fixtures/trap_brain.wasm (a test-only fixture whose bl_tick
+# unconditionally traps -- game/tests/wasm_brain_tests.cpp's BhInstance
+# reinstantiation coverage).
 #
 # HARD CONSTRAINT (enforced by brainhost's bh_instantiate, not by this
 # script): the resulting module must import AT MOST env.bl_log -- no WASI
@@ -108,23 +112,30 @@ echo "build_brains.sh: $(nim --version | head -1)"
 #       resolved by the host at instantiation), export exactly the ABI
 #       surface brainhost requires.
 # ---------------------------------------------------------------------------
-NIM_SRC="$SCRIPT_DIR/brains/nim/hero.nim"
-OUT_DIR="$REPO_ROOT/assets/brains"
-OUT_WASM="$OUT_DIR/hero.wasm"
-NIMCACHE_DIR="$TOOLCHAINS_DIR/nimcache/hero"  # under the gitignored toolchains dir, never committed
+# build_one <nim-src> <out-wasm> <nimcache-subdir>: identical flags for every
+# brain, differing only in source/output paths -- so a new brain (like
+# trap_test.nim below) is a one-line addition, not a copy of this whole block.
+build_one() {
+    local nim_src="$1" out_wasm="$2" nimcache_name="$3"
+    local nimcache_dir="$TOOLCHAINS_DIR/nimcache/$nimcache_name"  # gitignored, never committed
 
-mkdir -p "$OUT_DIR"
-rm -rf "$NIMCACHE_DIR"
-mkdir -p "$NIMCACHE_DIR"
+    mkdir -p "$(dirname "$out_wasm")"
+    rm -rf "$nimcache_dir"
+    mkdir -p "$nimcache_dir"
 
-nim c \
-    --cpu:wasm32 --os:any --mm:arc -d:useMalloc --threads:off -d:release --nomain \
-    -d:noSignalHandler --panics:on --exceptions:quirky \
-    --cc:clang --clang.exe:"$CLANG" --clang.linkerexe:"$CLANG" \
-    --passC:"--target=wasm32-wasip1" \
-    --passL:"--target=wasm32-wasip1 -mexec-model=reactor -Wl,--no-entry -Wl,--allow-undefined -Wl,--export=bl_abi_version -Wl,--export=bl_init -Wl,--export=bl_spawn -Wl,--export=bl_despawn -Wl,--export=bl_view_buf -Wl,--export=bl_out_buf -Wl,--export=bl_tick" \
-    --nimcache:"$NIMCACHE_DIR" \
-    -o:"$OUT_WASM" \
-    "$NIM_SRC"
+    nim c \
+        --cpu:wasm32 --os:any --mm:arc -d:useMalloc --threads:off -d:release --nomain \
+        -d:noSignalHandler --panics:on --exceptions:quirky \
+        --cc:clang --clang.exe:"$CLANG" --clang.linkerexe:"$CLANG" \
+        --passC:"--target=wasm32-wasip1" \
+        --passL:"--target=wasm32-wasip1 -mexec-model=reactor -Wl,--no-entry -Wl,--allow-undefined -Wl,--export=bl_abi_version -Wl,--export=bl_init -Wl,--export=bl_spawn -Wl,--export=bl_despawn -Wl,--export=bl_view_buf -Wl,--export=bl_out_buf -Wl,--export=bl_tick" \
+        --nimcache:"$nimcache_dir" \
+        -o:"$out_wasm" \
+        "$nim_src"
 
-echo "build_brains.sh: wrote $OUT_WASM ($(wc -c < "$OUT_WASM") bytes)"
+    echo "build_brains.sh: wrote $out_wasm ($(wc -c < "$out_wasm") bytes)"
+}
+
+build_one "$SCRIPT_DIR/brains/nim/hero.nim" "$REPO_ROOT/assets/brains/hero.wasm" hero
+build_one "$SCRIPT_DIR/brains/nim/trap_test.nim" \
+    "$REPO_ROOT/game/tests/fixtures/trap_brain.wasm" trap_test

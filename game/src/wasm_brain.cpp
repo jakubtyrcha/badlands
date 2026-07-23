@@ -224,6 +224,7 @@ std::unique_ptr<WasmBrainRuntime> WasmBrainRuntime::create(const uint8_t* wasm_b
     auto runtime = std::make_unique<WasmBrainRuntime>();
     runtime->program = program;
     runtime->instance = instance;
+    runtime->instantiation_count = 1;
     return runtime;
 }
 
@@ -231,6 +232,40 @@ WasmBrainRuntime::~WasmBrainRuntime() {
     bh_drop_instance(instance);
     bh_drop_program(program);
 }
+
+namespace {
+
+// brainhost.h: "a BhInstance that has trapped (BH_ERR_TRAP/BH_ERR_FUEL) is
+// not reused -- drop it ... and bh_instantiate a fresh one from the same
+// BhProgram". Called after `rc` has already been report_bug'd by the
+// caller; no-ops for every other error code (BH_ERR_SCRIPT/BH_ERR_ARGS/
+// BH_ERR_PANIC do not invalidate the instance).
+//
+// On success, `runtime.instance`/`spawned` are updated in place. On a
+// re-instantiation failure there is no usable wasm runtime left, so
+// `game.wasm_brains` itself is reset to null -- after this call returns,
+// `runtime` may be a dangling reference to the just-destroyed object, so
+// the caller must not touch it again (tick_wasm_brain always returns
+// immediately after calling this, which is what makes that safe).
+void reinstantiate_if_trapped(BadlandsGame& game, WasmBrainRuntime& runtime, int32_t rc) {
+    if (rc != BH_ERR_TRAP && rc != BH_ERR_FUEL) {
+        return;
+    }
+    bh_drop_instance(runtime.instance);
+    runtime.instance = nullptr;
+    BhInstance* fresh =
+        bh_instantiate(runtime.program, BL_ABI_VERSION, /*world_seed=*/0, &forward_log, nullptr);
+    if (fresh == nullptr) {
+        report_bug(game, "wasm_reinit", std::string("bh_instantiate failed: ") + bh_last_error());
+        game.wasm_brains.reset();  // dead runtime: the think loop falls back to mock
+        return;
+    }
+    runtime.instance = fresh;
+    ++runtime.instantiation_count;
+    std::fill(runtime.spawned.begin(), runtime.spawned.end(), false);
+}
+
+}  // namespace
 
 void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     WasmBrainRuntime& runtime = *game.wasm_brains;
@@ -253,6 +288,7 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
         if (rc != BH_OK) {
             report_bug(game, "wasm_spawn",
                        std::string("bh_spawn failed: ") + bh_last_error());
+            reinstantiate_if_trapped(game, runtime, rc);
             return;  // not marked spawned: retried next tick
         }
         runtime.spawned[slot] = true;
@@ -268,6 +304,7 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
                sizeof(wire), reinterpret_cast<uint8_t*>(&out), sizeof(out));
     if (rc != BH_OK) {
         report_bug(game, "wasm_tick", std::string("bh_tick failed: ") + bh_last_error());
+        reinstantiate_if_trapped(game, runtime, rc);
         return;  // no commands this tick: the hero idles, retried next tick
     }
 

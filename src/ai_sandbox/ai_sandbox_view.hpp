@@ -55,8 +55,10 @@ class AiSandboxView : public AppView {
   // Creates the sim and seeds the town: places the guild/tavern/apothecary and
   // recruits a hero roster, all through game_dispatch -- i.e. as logged player
   // Commands, so the seed shows up in the command log like anything else. The
-  // noiser hero brain is loaded from BADLANDS_BRAIN_SCRIPT (or the default
-  // path) when readable; otherwise the sim runs the C++ town brain.
+  // wasm hero brain is loaded from assets/brains/hero.wasm when readable;
+  // otherwise (or on a load failure) the sim runs the C++ town brain. The
+  // noiser brain stays compiled and test-covered but unused here (see
+  // load_hero_wasm's comment in the .cpp).
   void SeedTown();
   // Clears scene_ and rebuilds the STATIC geometry from the sim: re-mirrors
   // scene_context_'s lighting, then adds the floor, the wall ring, and a box
