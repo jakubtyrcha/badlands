@@ -18,10 +18,16 @@
 
 #include <glm/glm.hpp>
 
-#include "command.h"       // badlands::Command
-#include "town_brain.h"    // badlands::Behavior (shared id space)
+#include "badlands_sim.hpp"  // badlands::ActivityId (the shared id space)
+#include "command.h"         // badlands::Command
 
 namespace badlands {
+
+// The name the sim internals have always used for the shared goal id space.
+// There is exactly ONE such space -- the command log (SetBehavior.param_a), the
+// snapshot (CharacterState.behavior), the statistics histogram, and any future
+// noiser brain all speak it. Names + bands live in ActivityCatalog().
+using Behavior = ActivityId;
 
 struct WorldView {
     uint32_t slot = UINT32_MAX;
@@ -73,7 +79,7 @@ struct WorldView {
 // One tick's decision: which behaviour, where to walk, and an optional follow-up
 // command (enter/buy/attack) the caller gates on arrival.
 struct BehaviourResult {
-    Behavior id = Behavior::Idle;
+    ActivityId id = ActivityId::Idle;
     glm::vec2 target{0.0f, 0.0f};
     std::optional<Command> follow_up;
     // If true, the caller enqueues follow_up only once the entity is within an

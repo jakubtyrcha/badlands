@@ -8,23 +8,22 @@ namespace badlands {
 
 namespace {
 
-// Behaviour tiers. A block scores its tier when applicable, else 0, so a
-// higher-tier applicable block always wins the argmax -- reproducing the old
-// town_brain priority chain (GoHome > Buy > VisitTavern > Roam > Idle).
-constexpr float kTierGoHome = 5.0f;
-constexpr float kTierHunt = 4.5f;  // a hunter's job, below rest, above errands
-constexpr float kTierBuy = 4.0f;
-constexpr float kTierVisitTavern = 3.0f;
-constexpr float kTierRoam = 2.0f;
-constexpr float kTierIdle = 1.0f;
+// Scores are CONSIDERATIONS in [0,1] -- "how much does the situation call for
+// this" -- never priorities and never preferences. Priority is the band
+// (ActivityBand) and preference is the weight (ActivityWeights); keeping the
+// three apart is what lets weights be retuned, or this whole file be replaced
+// by a noiser implementation, without disturbing the band guarantees.
+//
+// Today most blocks are binary applicability (kApplies / 0). Real curves --
+// "how tired am I", "how much unexplored ground is near" -- slot in here
+// without any selector or table change, which is the point of the shape.
+constexpr float kApplies = 1.0f;
+constexpr float kNotApplicable = 0.0f;
 
-// Critter tiers: bolting always beats grazing/roaming.
-constexpr float kTierFlee = 10.0f;
-constexpr float kTierGraze = 3.0f;
-
-// Townfolk tiers: finish the tax round before returning to bank it.
-constexpr float kTierVisitTax = 5.0f;
-constexpr float kTierDeposit = 4.0f;
+// Townfolk still run select_priority (first applicable in list order), so only
+// the sign of their scores matters, not the magnitude.
+constexpr float kTierVisitTax = kApplies;
+constexpr float kTierDeposit = kApplies;
 
 // Deterministic per-entity RNG for the roam goal (xorshift64; seed must be
 // non-zero). Identical math to the pre-refactor town_brain so replayed/repeated
@@ -48,7 +47,7 @@ float score_go_home(const WorldView& v, const SimFactors& f) {
     }
     const bool tired = v.fatigue >= f.hero.fatigue_go_home ||
                        (v.night && v.fatigue >= f.hero.fatigue_night);
-    return tired ? kTierGoHome : 0.0f;
+    return tired ? kApplies : kNotApplicable;
 }
 BehaviourResult act_go_home(const WorldView& v, const SimFactors&) {
     return {Behavior::GoHome, v.home_door, Command{CommandKind::EnterHome, v.slot}, true};
@@ -56,7 +55,7 @@ BehaviourResult act_go_home(const WorldView& v, const SimFactors&) {
 
 // --- Buy --------------------------------------------------------------------
 float score_buy(const WorldView& v, const SimFactors&) {
-    return (v.has_apothecary && v.inventory < kInventoryCap) ? kTierBuy : 0.0f;
+    return (v.has_apothecary && v.inventory < kInventoryCap) ? kApplies : kNotApplicable;
 }
 BehaviourResult act_buy(const WorldView& v, const SimFactors&) {
     return {Behavior::Buy, v.apothecary_door, Command{CommandKind::Buy, v.slot}, true};
@@ -64,9 +63,8 @@ BehaviourResult act_buy(const WorldView& v, const SimFactors&) {
 
 // --- VisitTavern ------------------------------------------------------------
 float score_visit_tavern(const WorldView& v, const SimFactors& f) {
-    return (v.has_tavern && !v.night && v.boredom >= f.hero.boredom_tavern)
-               ? kTierVisitTavern
-               : 0.0f;
+    return (v.has_tavern && !v.night && v.boredom >= f.hero.boredom_tavern) ? kApplies
+                                                                            : kNotApplicable;
 }
 BehaviourResult act_visit_tavern(const WorldView& v, const SimFactors&) {
     Command enter{CommandKind::EnterBuilding, v.slot, UINT32_MAX, {0.0f, 0.0f},
@@ -76,7 +74,7 @@ BehaviourResult act_visit_tavern(const WorldView& v, const SimFactors&) {
 
 // --- Hunt (hunter) ----------------------------------------------------------
 float score_hunt(const WorldView& v, const SimFactors&) {
-    return v.has_prey ? kTierHunt : 0.0f;
+    return v.has_prey ? kApplies : kNotApplicable;
 }
 BehaviourResult act_hunt(const WorldView& v, const SimFactors&) {
     BehaviourResult r{Behavior::Hunt, v.prey_pos, std::nullopt, false};
@@ -103,31 +101,34 @@ glm::vec2 roam_point(uint32_t slot, int64_t epoch, glm::vec2 anchor, float radiu
     const float rad = unit(s) * radius;
     return anchor + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
 }
-float score_roam(const WorldView&, const SimFactors&) { return kTierRoam; }
+float score_roam(const WorldView&, const SimFactors&) { return kApplies; }
 BehaviourResult act_roam(const WorldView& v, const SimFactors&) {
     return {Behavior::Roam, v.roam_goal, std::nullopt, false};
 }
 
 // --- Flee (shared) ----------------------------------------------------------
 float score_flee(const WorldView& v, const SimFactors& f) {
-    return (v.has_threat && v.threat_dist <= f.critter.flee_radius) ? kTierFlee : 0.0f;
+    return (v.has_threat && v.threat_dist <= f.critter.flee_radius) ? kApplies : kNotApplicable;
 }
 BehaviourResult act_flee(const WorldView& v, const SimFactors& f) {
     glm::vec2 away = v.pos - v.threat_pos;
     const float len = glm::length(away);
     away = (len > 1e-4f) ? away / len : glm::vec2{1.0f, 0.0f};  // degenerate: pick a dir
-    return {Behavior::Roam, v.pos + away * f.critter.flee_distance, std::nullopt, false};
+    // Reports its own id rather than masquerading as Roam: a bolt and a wander
+    // are different goals, and the statistics histogram must be able to tell
+    // "the herd is panicking" from "the herd is grazing".
+    return {Behavior::Flee, v.pos + away * f.critter.flee_distance, std::nullopt, false};
 }
 
 // --- Idle -------------------------------------------------------------------
-float score_idle(const WorldView&, const SimFactors&) { return kTierIdle; }
+float score_idle(const WorldView&, const SimFactors&) { return kApplies; }
 BehaviourResult act_idle(const WorldView& v, const SimFactors&) {
     return {Behavior::Idle, v.pos, std::nullopt, false};
 }
 
 // --- Graze (critter) --------------------------------------------------------
 float score_graze(const WorldView& v, const SimFactors&) {
-    return v.grazing ? kTierGraze : 0.0f;
+    return v.grazing ? kApplies : kNotApplicable;
 }
 BehaviourResult act_graze(const WorldView& v, const SimFactors&) {
     return {Behavior::Graze, v.pos, std::nullopt, false};  // hold and feed
@@ -135,7 +136,7 @@ BehaviourResult act_graze(const WorldView& v, const SimFactors&) {
 
 // --- VisitNextTaxable (townfolk) --------------------------------------------
 float score_visit_taxable(const WorldView& v, const SimFactors&) {
-    return v.has_tax_target ? kTierVisitTax : 0.0f;
+    return v.has_tax_target ? kTierVisitTax : kNotApplicable;
 }
 BehaviourResult act_visit_taxable(const WorldView& v, const SimFactors&) {
     Command collect{CommandKind::CollectTax, v.slot, v.tax_target_id};
@@ -144,7 +145,7 @@ BehaviourResult act_visit_taxable(const WorldView& v, const SimFactors&) {
 
 // --- Deposit (townfolk) -----------------------------------------------------
 float score_deposit(const WorldView& v, const SimFactors&) {
-    return v.has_deposit ? kTierDeposit : 0.0f;
+    return v.has_deposit ? kTierDeposit : kNotApplicable;
 }
 BehaviourResult act_deposit(const WorldView& v, const SimFactors&) {
     return {Behavior::Deposit, v.deposit_door, Command{CommandKind::Deposit, v.slot}, true};

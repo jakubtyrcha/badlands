@@ -58,7 +58,16 @@ bool nearest_prey(const BadlandsGame& game, glm::vec2 pos, float radius, glm::ve
     return found;
 }
 
-WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) {
+// The actor's preference table: which class this hero is. Everything
+// class-specific about a hero's decisions flows from here.
+const ActivityWeights& weights_for(const BadlandsGame& game, entt::entity e) {
+    const int32_t cls = game.registry.get<HeroCharacter>(e).hero_class;
+    const int32_t idx = (cls >= 0 && cls < HERO_CLASS_COUNT) ? cls : HERO_MERCENARY;
+    return game.factors.hero.weights[idx];
+}
+
+WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
+                       const ActivityWeights& weights) {
     const auto& sim = game.registry.get<HeroSimulationState>(e);
     WorldView v;
     v.slot = slot;
@@ -71,8 +80,10 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) 
     v.night = is_night(v.tod);
     v.roam_epoch = game.world_millis / kRoamLeaseMillis;
 
-    // Hunters perceive prey; other classes never populate it (Hunt not in list).
-    if (game.registry.get<HeroCharacter>(e).hero_class == HERO_HUNTER) {
+    // Perception follows the weight table: an activity the class does not have
+    // (weight 0) costs nothing to perceive for. Only hunters scan for prey --
+    // and that is now a data consequence, not a hardcoded class check.
+    if (weights.of(ActivityId::Hunt) > 0.0f) {
         v.has_prey = nearest_prey(game, v.pos, game.factors.hero.hunt_sight_radius,
                                   v.prey_pos, v.prey_slot, v.prey_dist);
     }
@@ -96,40 +107,34 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e) 
     return v;
 }
 
-// The baseline hero block list, highest priority first. Argmax over these
-// tiered scores reproduces the old GoHome > Buy > VisitTavern > Roam if-chain.
-constexpr std::array<Candidate, 5> kHeroBlocks{{
-    {score_go_home, act_go_home},
-    {score_buy, act_buy},
-    {score_visit_tavern, act_visit_tavern},
-    {score_roam, act_roam},
-    {score_idle, act_idle},
-}};
-
-// The hunter's list: the baseline plus Hunt (tiered below GoHome, above the
-// errands) -- so a hunter rests when tired but otherwise hunts before shopping.
-constexpr std::array<Candidate, 6> kHunterBlocks{{
-    {score_go_home, act_go_home},
-    {score_hunt, act_hunt},
-    {score_buy, act_buy},
-    {score_visit_tavern, act_visit_tavern},
-    {score_roam, act_roam},
-    {score_idle, act_idle},
+// EVERY hero class runs this one table -- there is no per-class list. What a
+// class does, how eagerly, and whether it has an activity at all is entirely
+// the weight table (SimFactors::hero.weights); a Hunt weight of 0 makes Hunt
+// invisible to that class. Adding an activity is a row here plus a weight.
+//
+// List order is the tie-break only. Priority is the band; preference is the
+// weight.
+constexpr std::array<ActivityDef, 6> kHeroActivities{{
+    {ActivityId::GoHome, ActivityBand::Filler, score_go_home, act_go_home},
+    {ActivityId::Hunt, ActivityBand::Filler, score_hunt, act_hunt},
+    {ActivityId::Buy, ActivityBand::Filler, score_buy, act_buy},
+    {ActivityId::VisitTavern, ActivityBand::Filler, score_visit_tavern, act_visit_tavern},
+    {ActivityId::Roam, ActivityBand::Filler, score_roam, act_roam},
+    {ActivityId::Idle, ActivityBand::Fallback, score_idle, act_idle},
 }};
 
 }  // namespace
+
+std::span<const ActivityDef> hero_activities() { return kHeroActivities; }
 
 void town_think(BadlandsGame& game, uint32_t slot) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
         return;
     }
-    const WorldView view = observe_hero(game, slot, e);
-    // Class picks the block list: same shared blocks, hunters get one more.
-    const BehaviourResult r =
-        (game.registry.get<HeroCharacter>(e).hero_class == HERO_HUNTER)
-            ? select_argmax(kHunterBlocks, view, game.factors)
-            : select_argmax(kHeroBlocks, view, game.factors);
+    const ActivityWeights& weights = weights_for(game, e);
+    const WorldView view = observe_hero(game, slot, e, weights);
+    const BehaviourResult r = select_banded(kHeroActivities, weights, view, game.factors);
 
     // Decisions go out as commands like every other mutation (logged +
     // replayable), never as direct writes. Edge-triggered: re-stating an

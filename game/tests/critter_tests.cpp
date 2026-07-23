@@ -95,7 +95,9 @@ TEST_CASE("Flee gates on the flee radius, and beats graze/roam") {
     v.has_threat = true;
     v.threat_pos = {5.0f, 0.0f};
     v.threat_dist = 5.0f;  // inside flee_radius
-    CHECK(select_priority(deer, v, f).id == Behavior::Roam);  // Flee acts as a bolt (Roam id)
+    // A bolt reports Flee, not Roam: the statistics histogram has to be able to
+    // tell a panicking herd from a grazing one.
+    CHECK(select_priority(deer, v, f).id == Behavior::Flee);
 
     // Threat present but beyond flee_radius -> graze wins instead.
     v.threat_dist = 20.0f;
@@ -123,7 +125,7 @@ TEST_CASE("a deer bolts from an approaching hero, then settles when it leaves") 
     // Deer's goal is further from the threat than the deer currently is.
     const glm::vec2 deer_pos = g.registry.get<Position>(de).pos;
     CHECK(glm::distance(mt.point, threat) > glm::distance(deer_pos, threat));
-    CHECK(g.registry.get<CritterState>(de).behavior == static_cast<int32_t>(Behavior::Roam));
+    CHECK(g.registry.get<CritterState>(de).behavior == static_cast<int32_t>(Behavior::Flee));
 }
 
 // A Forest/Plains cell whose roam ring is mostly good terrain -- a sensible deer

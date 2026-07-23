@@ -1,12 +1,21 @@
 {
   "_comment": "Behaviour tuning for badlands AI. Loaded by src/game/factors_manifest.cpp over the compiled defaults in game/include/badlands_sim.hpp. Every key (and section) is optional: omit one to keep its default. Factors are initial config for the determinism contract -- a replay must use the same values.",
 
+  "_weights_comment": "\"weights\" is the per-class activity preference table. Utility is weight x considerations, compared only WITHIN an activity's band (Danger > Productive > Filler), so a weight tunes personality and can never override the safety hierarchy. 0 removes an activity from that class entirely. Keys are hero class and activity NAMES; an unknown name is an error, not a no-op.",
+
   "hero": {
     "fatigue_go_home": 0.6,
     "fatigue_night": 0.2,
     "boredom_tavern": 0.5,
     "roam_radius": 6.0,
-    "hunt_sight_radius": 22.0
+    "hunt_sight_radius": 22.0,
+
+    "weights": {
+      "Mercenary":    { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
+      "Hunter":       { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
+      "Grave Robber": { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
+      "Apprentice":   { "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
+    }
   },
 
   "critter": {
@@ -14,7 +23,9 @@
     "flee_radius": 8.0,
     "flee_distance": 12.0,
     "roam_radius": 14.0,
-    "graze_fraction": 0.4
+    "graze_fraction": 0.4,
+
+    "weights": { "Flee": 1.0, "Graze": 3.0, "Roam": 2.0, "Idle": 1.0 }
   },
 
   "townfolk": {

@@ -26,6 +26,53 @@ bool ReadNum(const nlohmann::json& section, const char* section_name, const char
     return true;
 }
 
+// Weight tables are keyed by NAME, not by index: "Hunter" / "Explore" rather
+// than 1 / 12. The ids are an append-only wire format the manifest should not
+// have to know about, and a named key is what makes a hand-edited tuning file
+// reviewable.
+int32_t ActivityByName(const std::string& name) {
+    for (const ActivityInfo& a : ActivityCatalog()) {
+        if (name == a.name) {
+            return static_cast<int32_t>(a.id);
+        }
+    }
+    return -1;
+}
+
+int32_t HeroClassByName(const std::string& name) {
+    for (int32_t c = 0; c < HERO_CLASS_COUNT; ++c) {
+        if (name == HeroClassName(static_cast<HeroClassId>(c))) {
+            return c;
+        }
+    }
+    return -1;
+}
+
+// Overlays { "<Activity>": <number>, ... } onto one weight table. Absent
+// activities keep their compiled default; an unknown name is an ERROR, since it
+// is otherwise indistinguishable from a weight that silently does nothing.
+bool ReadWeights(const nlohmann::json& table, const std::string& where, const std::string& path,
+                 ActivityWeights& out) {
+    if (!table.is_object()) {
+        spdlog::error("LoadSimFactors: '{}' -> {} is not an object", path, where);
+        return false;
+    }
+    for (const auto& [key, value] : table.items()) {
+        const int32_t id = ActivityByName(key);
+        if (id < 0) {
+            spdlog::error("LoadSimFactors: '{}' -> {}.{} is not a known activity", path, where,
+                          key);
+            return false;
+        }
+        if (!value.is_number()) {
+            spdlog::error("LoadSimFactors: '{}' -> {}.{} is not a number", path, where, key);
+            return false;
+        }
+        out.w[id] = value.get<float>();
+    }
+    return true;
+}
+
 }  // namespace
 
 bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
@@ -78,6 +125,29 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             !ReadNum(*s, "hero", "hunt_sight_radius", manifest_path, h.hunt_sight_radius)) {
             return false;
         }
+        // "weights": { "<Hero class>": { "<Activity>": <number>, ... }, ... }
+        // The per-class personality dial. Every level is optional.
+        if (s->contains("weights")) {
+            const nlohmann::json& per_class = (*s)["weights"];
+            if (!per_class.is_object()) {
+                spdlog::error("LoadSimFactors: '{}' -> hero.weights is not an object",
+                              manifest_path);
+                return false;
+            }
+            for (const auto& [class_name, table] : per_class.items()) {
+                const int32_t cls = HeroClassByName(class_name);
+                if (cls < 0) {
+                    spdlog::error("LoadSimFactors: '{}' -> hero.weights.{} is not a known hero "
+                                  "class",
+                                  manifest_path, class_name);
+                    return false;
+                }
+                if (!ReadWeights(table, "hero.weights." + class_name, manifest_path,
+                                 h.weights[cls])) {
+                    return false;
+                }
+            }
+        }
     }
     if (!section("critter", s)) {
         return false;
@@ -89,6 +159,12 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             !ReadNum(*s, "critter", "flee_distance", manifest_path, c.flee_distance) ||
             !ReadNum(*s, "critter", "roam_radius", manifest_path, c.roam_radius) ||
             !ReadNum(*s, "critter", "graze_fraction", manifest_path, c.graze_fraction)) {
+            return false;
+        }
+        // Deer have a single weight table (one "class"), same schema minus the
+        // per-class level: { "<Activity>": <number>, ... }.
+        if (s->contains("weights") &&
+            !ReadWeights((*s)["weights"], "critter.weights", manifest_path, c.weights)) {
             return false;
         }
     }

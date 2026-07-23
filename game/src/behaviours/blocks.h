@@ -28,11 +28,29 @@ struct Candidate {
     ActFn act;
 };
 
+// An ACTIVITY is a block plus its identity in the shared goal vocabulary: which
+// ActivityId it reports (so it is inspectable and countable) and which band it
+// competes in. An archetype's brain is then just a table of these plus a
+// weight table -- adding a behaviour is a row, not a new code path.
+//
+// `score` returns a CONSIDERATION PRODUCT in [0,1]: "how much does the
+// situation call for this", with 0 an outright veto. It must NOT encode
+// priority (that is the band) or preference (that is the weight) -- keeping
+// those three concerns in separate places is what lets weights be retuned, or
+// the whole implementation swapped for a noiser one, without disturbing the
+// guarantees the band hierarchy provides.
+struct ActivityDef {
+    ActivityId id;
+    ActivityBand band;
+    ScoreFn score;
+    ActFn act;
+};
+
 // --- hero blocks ------------------------------------------------------------
-// Scores are TIERS, not soft weights: GoHome > Buy > VisitTavern > Roam > Idle
-// when each is applicable. That makes argmax reproduce the old town_brain
-// priority chain exactly (and equals select_priority for this list), so porting
-// changes no behaviour. Soft, class-weighted scoring is a later refinement.
+// Each score is applicability in [0,1]. The ORDER these end up in (GoHome
+// before Buy before VisitTavern before Roam) is not encoded here at all -- it
+// comes from the per-class weights in SimFactors::hero.weights, which is what
+// makes it retunable as data and different per class.
 float score_go_home(const WorldView&, const SimFactors&);
 BehaviourResult act_go_home(const WorldView&, const SimFactors&);
 
@@ -44,9 +62,11 @@ BehaviourResult act_visit_tavern(const WorldView&, const SimFactors&);
 
 // --- hunter block -----------------------------------------------------------
 // Hunt chases the nearest perceived prey (a deer) and shoots it once within the
-// hunter's own attack range (a Shoot command targeting the prey slot). Scores
-// above the errand blocks but below GoHome, so a tired hunter still rests. Only
-// the hunter's block list includes it (town_brain.cpp).
+// hunter's own attack range (a Shoot command targeting the prey slot). Every
+// hero class carries this block; only the Hunter has a non-zero Hunt weight, so
+// for anyone else it is both unselectable AND unperceived (town_brain.cpp skips
+// the prey scan when the weight is 0). Class-unique activities need no
+// class-specific code path.
 float score_hunt(const WorldView&, const SimFactors&);
 BehaviourResult act_hunt(const WorldView&, const SimFactors&);
 

@@ -59,15 +59,10 @@ int32_t guild_hero_class(int kind) {
     return def.recruit_count > 0 ? static_cast<int32_t>(def.recruits[0]) : -1;
 }
 
-const char* HeroClassName(HeroClassId cls) {
-    switch (cls) {
-        case HERO_MERCENARY:    return "Mercenary";
-        case HERO_HUNTER:       return "Hunter";
-        case HERO_GRAVE_ROBBER: return "Grave Robber";
-        case HERO_APPRENTICE:   return "Apprentice";
-        default:                return "";
-    }
-}
+// HeroClassName lives with the other inspection-facing identity tables in
+// activity_catalog.cpp -- it is pure naming data, and keeping it out of this
+// (registry/placement-dependent) TU lets lean consumers like the factors
+// manifest loader use it without pulling in the whole sim.
 
 CharacterDesc hero_desc(int32_t hero_class, float x, float z) {
     // Baseline stats shared by every class; color is the only distinguishing

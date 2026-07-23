@@ -86,12 +86,17 @@ WorldView observe_critter(const BadlandsGame& game, uint32_t slot, entt::entity 
     return v;
 }
 
-// Priority order: bolt first, then graze in place, then wander, else idle.
-constexpr std::array<Candidate, 4> kCritterBlocks{{
-    {score_flee, act_flee},
-    {score_graze, act_graze},
-    {score_roam, act_roam},
-    {score_idle, act_idle},
+// A deer's activity table. Note what is NOT here: no critter-specific selector,
+// no critter-specific scoring rule. It runs the same select_banded over the
+// same shared blocks as a hero -- only this table and CritterFactors::weights
+// differ. Fleeing sits in the Danger band, so no graze/roam weight can ever
+// out-argue a threat, which is the band hierarchy doing its job for a second
+// archetype without a line of new logic.
+constexpr std::array<ActivityDef, 4> kCritterActivities{{
+    {ActivityId::Flee, ActivityBand::Danger, score_flee, act_flee},
+    {ActivityId::Graze, ActivityBand::Filler, score_graze, act_graze},
+    {ActivityId::Roam, ActivityBand::Filler, score_roam, act_roam},
+    {ActivityId::Idle, ActivityBand::Fallback, score_idle, act_idle},
 }};
 
 }  // namespace
@@ -102,7 +107,8 @@ void critter_think(BadlandsGame& game, uint32_t slot) {
         return;
     }
     const WorldView view = observe_critter(game, slot, e);
-    const BehaviourResult r = select_priority(kCritterBlocks, view, game.factors);
+    const BehaviourResult r =
+        select_banded(kCritterActivities, game.factors.critter.weights, view, game.factors);
 
     // Both the chosen behaviour (inspection) and the walk goal (the decision)
     // go through the command layer, edge-triggered, like every other mutation.

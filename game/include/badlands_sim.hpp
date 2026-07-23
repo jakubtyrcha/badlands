@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,92 @@ enum class Archetype : int32_t {
     Monster,    // combat; no needs
 };
 
+// ---- activities: the AI's goal vocabulary ----------------------------------
+//
+// Every decision a brain can take is an ActivityId. One id space, shared by the
+// sim, the command log (SetBehavior.param_a), the snapshot
+// (CharacterState.behavior), the statistics histogram, and any future noiser
+// brain -- so it is APPEND-ONLY: never renumber, never reuse.
+//
+// (game/src/town_brain.h aliases this as `badlands::Behavior`, the name the
+// sim internals have always used.)
+enum class ActivityId : int32_t {
+    Idle = 0,
+    Roam,
+    Buy,
+    GoHome,
+    VisitTavern,
+    Combat,
+    Graze,
+    VisitTax,
+    Deposit,
+    Hunt,
+    Flee,        // bolting from a threat (was reported as Roam)
+    Think,       // deliberating: an idle pause between discretionary goals
+    Explore,     // walking toward terra incognita
+    Chat,        // socializing with another hero (partial entertainment)
+    RestUrgent,  // rest as survival, not as leisure
+    Count
+};
+inline constexpr int32_t kActivityCount = static_cast<int32_t>(ActivityId::Count);
+
+// Bands are the SHARED priority hierarchy every archetype obeys, and the one
+// thing the weight table can never override: an applicable Danger activity
+// always beats every Productive one, which always beats every Filler one. That
+// is what makes safety structural rather than a tuning problem -- no filler
+// weight, however large, can outbid a threat response.
+//
+// Within a band, `weight x considerations` decides (see ActivityWeights). An
+// activity drops out of contention by scoring 0 (a veto), NOT by being
+// out-prioritized -- which is how e.g. a productive errand yields to rest: it
+// disqualifies itself when the hero is too tired, and the loop falls through to
+// the Filler band. There is no per-band threshold knob: the threshold is 0.
+enum class ActivityBand : int32_t {
+    Danger = 0,  // threat response + survival: flee, fight, collapse
+    Productive,  // errands, exploration, training
+    Filler,      // rest, entertainment, socializing, wandering
+    Fallback,    // the last resort (Idle); nothing competes for it
+    Count
+};
+
+// One catalog row: an activity's stable identity, for inspection.
+struct ActivityInfo {
+    ActivityId id;
+    const char* name;  // stable inspection-facing label ("GoHome")
+    ActivityBand band;
+};
+
+// Every activity, indexed by id (ActivityCatalog()[i].id == ActivityId(i)).
+// The single source of truth for names + bands: UIs and statistics read this
+// instead of hardcoding a switch that silently rots when an activity is added.
+std::span<const ActivityInfo> ActivityCatalog();
+// Catalog lookup; out-of-range ids resolve to the Idle row.
+const ActivityInfo& ActivityInfoOf(int32_t id);
+// Convenience name lookup; "-" for an out-of-range id (e.g. a -1 "no decision
+// yet" from a snapshot row).
+const char* ActivityName(int32_t id);
+
+// Per-(class, activity) preference, indexed by ActivityId. Utility is
+// `weight * considerations`, compared only WITHIN a band -- so a weight
+// expresses "hunters explore constantly, apprentices almost never" without ever
+// letting exploration outrank danger. A weight of 0 removes the activity from
+// that class entirely, which is how classes get unique activity sets without
+// separate code paths (perception may skip its cost too).
+struct ActivityWeights {
+    float w[kActivityCount] = {};
+
+    float of(ActivityId id) const {
+        const int32_t i = static_cast<int32_t>(id);
+        return (i >= 0 && i < kActivityCount) ? w[i] : 0.0f;
+    }
+    void set(ActivityId id, float value) {
+        const int32_t i = static_cast<int32_t>(id);
+        if (i >= 0 && i < kActivityCount) {
+            w[i] = value;
+        }
+    }
+};
+
 // ---- tuning factors (data, not code) ---------------------------------------
 // Per-archetype behaviour tuning. The sim ships the defaults below, so it is
 // fully usable -- and unit-testable -- with no file present; an app may load
@@ -116,6 +203,10 @@ struct HeroFactors {
     float boredom_tavern = 0.5f;   // bored enough to seek the tavern
     float roam_radius = 6.0f;      // world units around the roam anchor
     float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
+    // Per-class preference table (see ActivityWeights). Filled with the
+    // compiled defaults by SimFactors' constructor; factors.json may override
+    // any single entry. This is the primary dial for class personality.
+    ActivityWeights weights[HERO_CLASS_COUNT];
 };
 
 // Critter (deer) tuning. Deer graze/roam in Forest/Plains and bolt from any
@@ -126,6 +217,10 @@ struct CritterFactors {
     float flee_distance = 12.0f;   // how far it runs from the threat
     float roam_radius = 14.0f;     // wander range around the home anchor
     float graze_fraction = 0.4f;   // fraction of each roam cycle spent grazing
+    // Deer run the SAME banded selector and the same shared blocks as heroes --
+    // only this table and their activity list differ. That is the shareability
+    // of the core, made executable rather than asserted.
+    ActivityWeights weights;
 };
 
 // Townfolk (tax collector) tuning + the town economy.
@@ -144,6 +239,12 @@ struct MonsterFactors {
 };
 
 struct SimFactors {
+    // Fills the activity weight tables with the compiled per-class defaults
+    // (the scalar members above carry their own in-class defaults). Declared
+    // rather than defaulted because the weight defaults are a table, not a
+    // constant -- see game/src/activity_catalog.cpp.
+    SimFactors();
+
     HeroFactors hero;
     CritterFactors critter;
     TownfolkFactors townfolk;
