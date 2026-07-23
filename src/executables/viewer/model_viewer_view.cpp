@@ -1,37 +1,27 @@
 #include "executables/viewer/model_viewer_view.hpp"
 
 #include <algorithm>
-#include <cstdint>
 #include <utility>
 
-#include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
 #include "engine/app/sdl_input_util.hpp"  // NormalizedWheelY
-#include "engine/rendering/geometry/extrusion_mesh_builder.hpp"
-#include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
-#include "game/building_catalog.h"
-#include "game/scene/building_scene.h"
 
 namespace badlands {
 
 namespace {
 
-// Flat light-gray debug material for the floor + rock (Task T0): rgb is
-// pre-encoded so that, after SolidColor's non-sRGB texture is re-linearized
-// by deferred_lighting.wesl's srgb_to_linear, the surface lands at linear
-// 0.75 reflectance (linear_to_srgb(0.75) ~= 0.881). Roughness is maxed to
-// keep the surface diffuse-looking (minimal specular) so shadows read
-// clearly against it.
-constexpr glm::vec3 kDebugGray{0.881f};
-constexpr float kDebugGrayRoughness = 1.0f;
-
-// Repeat the floor UVs roughly once per 2 world units instead of stretching
-// one copy across the whole floor.
+// Flat light-gray debug floor: rgb pre-encoded so that, after deferred lighting
+// re-linearizes the non-sRGB albedo, the surface lands near linear 0.75
+// reflectance. Roughness maxed to keep it diffuse so shadows read clearly.
+constexpr glm::vec3 kFloorGray{0.881f};
+constexpr float kFloorRoughness = 1.0f;
+constexpr float kFloorSize = 40.0f;
+// One floor-UV repeat per ~2 world units instead of stretching one copy.
 constexpr float kFloorUvRepeatSpacing = 2.0f;
 
 }  // namespace
@@ -42,57 +32,43 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   scene_renderer_ = ctx.scene_renderer;
 
   if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
-    spdlog::error(
-        "ModelViewerView::Initialize: MaterialLibrary init failed");
+    spdlog::error("ModelViewerView::Initialize: MaterialLibrary init failed");
     return false;
   }
 
-  BuildCatalog();
-  if (catalog_.empty()) {
-    spdlog::error("ModelViewerView::Initialize: empty prefab catalog");
+  BuildGenerators();
+  if (generators_.empty()) {
+    spdlog::error("ModelViewerView::Initialize: empty generator registry");
     return false;
   }
-  prefab_index_ =
-      std::clamp(prefab_index_, 0, static_cast<int>(catalog_.size()) - 1);
+  generator_index_ =
+      std::clamp(generator_index_, 0, static_cast<int>(generators_.size()) - 1);
+
+  // UV-checker debug material (two distinct grays) for the generated object, so
+  // its UVs read against the flat gray floor.
+  checker_mat_ = matlib_.CheckerAlbedo(glm::vec3(0.85f), glm::vec3(0.35f));
 
   ApplyEnvironment();
   RebuildScene();
   scene_renderer_->SetShadowDebugMode(initial_shadow_debug_mode_);
 
   if (!matlib_.ok()) {
-    spdlog::error(
-        "ModelViewerView::Initialize: material pack(s) failed to load");
+    spdlog::error("ModelViewerView::Initialize: material load failed");
     return false;
   }
   return true;
 }
 
-void ModelViewerView::BuildCatalog() {
-  catalog_.clear();
-  catalog_.push_back({.label = "Rock A",
-                      .category = PrefabCategory::Rock,
-                      .rock_kind = GamePloppableKind::RockA});
-  catalog_.push_back({.label = "Rock B",
-                      .category = PrefabCategory::Rock,
-                      .rock_kind = GamePloppableKind::RockB});
-  catalog_.push_back({.label = "Rock C",
-                      .category = PrefabCategory::Rock,
-                      .rock_kind = GamePloppableKind::RockC});
-  for (int32_t k = 0; k < static_cast<int32_t>(BuildingKind::Count); ++k) {
-    const auto kind = static_cast<BuildingKind>(k);
-    catalog_.push_back({.label = building_label(kind),
-                        .category = PrefabCategory::Building,
-                        .building_kind = kind});
-  }
+void ModelViewerView::BuildGenerators() {
+  generators_.clear();
+  // The "test" generator: the engine's cube-sphere (cube -> 16x16 per face ->
+  // normalized sphere, EAC UVs). Future foliage/rock generators append here.
+  generators_.push_back(
+      {.name = "Sphere (test)",
+       .generate = [] { return GenerateSphereTexturedMesh(1.0f, 16); }});
 }
 
 void ModelViewerView::ApplyEnvironment() {
-  // Rebuilds the sky cube + SH ambient + sun from env_ into scene_context_
-  // (bumps skybox_generation so SceneRenderer re-prefilters the IBL cube next
-  // frame), then re-mirrors the derived lighting into scene_ so its
-  // per-frame SyncToRegistry (Update) rewrites the SAME sun/ambient values
-  // into scene_context_ instead of clobbering them with SceneGraph defaults
-  // (same pattern as PlaceholderView -- see its Initialize/DrawUI comments).
   ApplyLightEnvironment(env_, device_, queue_, sky_cube_, scene_context_);
   scene_.SetSunDirection(scene_context_.sun_direction);
   scene_.SetSunColor(scene_context_.sun_color);
@@ -100,44 +76,24 @@ void ModelViewerView::ApplyEnvironment() {
 }
 
 void ModelViewerView::RebuildScene() {
-  // Fresh graph: SceneGraph has no "clear all nodes" call, and a moved-from
-  // default-constructed graph is the cheapest way to drop every prior
-  // prefab's entities. Its constructor resets sun/ambient to SceneGraph's own
-  // defaults, so re-mirror scene_context_'s (already-derived-from-env_)
-  // lighting right after, same as ApplyEnvironment does for the live-edit
-  // path.
+  // Fresh graph drops every prior entity; its ctor resets sun/ambient to
+  // SceneGraph defaults, so re-mirror scene_context_'s derived lighting.
   scene_ = SceneGraph();
   scene_.SetSunDirection(scene_context_.sun_direction);
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  constexpr float kFloorSize = 40.0f;
-  AddFloor(scene_, kFloorSize, matlib_.SolidColor(kDebugGray, kDebugGrayRoughness),
+  AddFloor(scene_, kFloorSize, matlib_.SolidColor(kFloorGray, kFloorRoughness),
            kFloorSize / kFloorUvRepeatSpacing);
 
-  const Aabb bounds = AddPrefab(catalog_[prefab_index_]);
+  TexturedMeshResult mesh = generators_[generator_index_].generate();
+  const Aabb bounds = mesh.local_bounds;
+  AddMeshEntity(scene_, "mesh", std::move(mesh), checker_mat_);
+
   const glm::vec3 center = bounds.Center();
   const float radius = glm::length(bounds.max - center);
   orbit_.FrameBounds(center, radius > 0.01f ? radius : 1.0f);
   orbit_.UpdateCamera(camera_);
-}
-
-Aabb ModelViewerView::AddPrefab(const PrefabEntry& entry) {
-  if (entry.category == PrefabCategory::Rock) {
-    std::vector<glm::vec2> ring = ploppable_local_ring(entry.rock_kind, 0);
-    TexturedMeshResult mesh = BuildExtrusionMesh(ring, /*base_y=*/0.0f,
-                                                 /*delta_y=*/0.8f, /*shrink=*/0.3f);
-    const Aabb bounds = mesh.local_bounds;
-
-    const DeferredMaterial mat = matlib_.SolidColor(kDebugGray, kDebugGrayRoughness);
-    AddMeshEntity(scene_, "rock", std::move(mesh), mat);
-    return bounds;
-  }
-
-  // Building: placed at the origin, untransformed, so AddBuildingToScene's
-  // returned LOCAL bounds are its world bounds -- used to frame the orbit.
-  return AddBuildingToScene(scene_, matlib_, entry.building_kind,
-                            glm::vec2(0.0f), /*yaw_radians=*/0.0f);
 }
 
 void ModelViewerView::HandleEvent(const SDL_Event& event, int /*width*/,
@@ -157,8 +113,6 @@ void ModelViewerView::HandleEvent(const SDL_Event& event, int /*width*/,
       }
       break;
     case SDL_EVENT_MOUSE_WHEEL:
-      // Normalized: macOS natural scrolling sets SDL_MOUSEWHEEL_FLIPPED and
-      // negates y, which silently inverts zoom for those users.
       orbit_.HandleMouseWheel(NormalizedWheelY(event.wheel));
       break;
     default:
@@ -173,32 +127,24 @@ void ModelViewerView::Update(float dt, const bool* /*keyboard_state*/) {
 }
 
 void ModelViewerView::DrawUI() {
-  if (!scene_renderer_ || catalog_.empty()) return;
+  if (!scene_renderer_ || generators_.empty()) return;
 
-  int selected = prefab_index_;
-  ImGui::Begin("Prefab");
-  if (ImGui::BeginCombo("Prefab", catalog_[prefab_index_].label.c_str())) {
-    for (int i = 0; i < static_cast<int>(catalog_.size()); ++i) {
-      const bool is_selected = (i == prefab_index_);
-      if (ImGui::Selectable(catalog_[i].label.c_str(), is_selected)) {
-        selected = i;
-      }
-      if (is_selected) ImGui::SetItemDefaultFocus();
+  // Mesh-setup window: single-select generator list.
+  int selected = generator_index_;
+  ImGui::Begin("Mesh");
+  for (int i = 0; i < static_cast<int>(generators_.size()); ++i) {
+    if (ImGui::Selectable(generators_[i].name.c_str(), i == generator_index_)) {
+      selected = i;
     }
-    ImGui::EndCombo();
   }
   ImGui::End();
 
-  if (selected != prefab_index_) {
-    prefab_index_ = selected;
+  if (selected != generator_index_) {
+    generator_index_ = selected;
     RebuildScene();
   }
 
-  // NOTE(lighting): every frame the editor mutates env_, ApplyEnvironment
-  // re-derives the full sky (6 faces x face x face radiance), a 2048-sample SH
-  // projection, and a GPU cube rebuild + IBL re-prefilter next frame -- fine
-  // for occasional edits, but to be debounced / made incremental in the
-  // future lighting commit. No behavior change here.
+  // Visual-setup window: the shared rendering-debug + light editor ("Debug").
   const bool env_changed = EditorUI::DrawDebugPanel(env_, *scene_renderer_, dt_);
   if (env_changed) {
     ApplyEnvironment();

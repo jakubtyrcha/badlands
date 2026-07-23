@@ -312,17 +312,10 @@ target_include_directories(badlands_game_lib PRIVATE
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 
 # Three thin executables, each with its own main, all linking badlands_engine
-# and badlands_game_lib. Stage 2 grows each one's own real AppView --
-# badlands_viewer got its real AppView (ModelViewerView) in Task S2.E,
-# badlands_game got its (GameView) in Task S2.F, badlands_ai_sandbox got its
-# (AiSandboxView) in Task S2.G.
-# building_scene.cpp (S2.F): ModelViewerView now reuses AddBuildingToScene for
-# its building prefabs (S2-reviewfix C6), so the viewer executable compiles it
-# too (its own copy; also compiled into badlands_game below).
+# and badlands_game_lib. Each app grows its own real AppView.
 set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
-    src/executables/viewer/model_viewer_view.cpp
-    src/game/scene/building_scene.cpp)
+    src/executables/viewer/model_viewer_view.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
