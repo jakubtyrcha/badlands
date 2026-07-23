@@ -251,7 +251,9 @@ add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/sim.cpp
     game/src/brain.cpp
+    game/src/combat.cpp
     game/src/command.cpp
+    game/src/creature_catalog.cpp
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
@@ -352,7 +354,9 @@ set(badlands_app_sources_game
 set(badlands_app_sources_ai_sandbox
     src/ai_sandbox/main_ai_sandbox.cpp
     src/ai_sandbox/ai_sandbox_view.cpp
-    src/game/factors_manifest.cpp)  # behaviour tuning loaded as data
+    src/game/factors_manifest.cpp   # behaviour tuning loaded as data
+    src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
+    src/game/scenario.cpp)          # sandbox scenarios loaded as data
 
 foreach(app viewer game ai_sandbox)
     add_executable(badlands_${app} ${badlands_app_sources_${app}})
@@ -544,6 +548,7 @@ endif()
 # see tests/cpp_tests.rs on the legacy Rust reference branch).
 enable_testing()
 add_executable(badlands_game_tests
+    game/tests/combat_tests.cpp
     game/tests/sim_tests.cpp
     game/tests/noiser_smoke_tests.cpp
     game/tests/duel_test.cpp
@@ -993,6 +998,27 @@ target_include_directories(badlands_factors_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_factors_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_factors_manifest_tests COMMAND badlands_factors_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_scenario_tests: the app-layer sandbox loaders (arena scenarios +
+# creature-stat overrides -> sim data). Lean, like factors_manifest_tests:
+# creature_catalog.cpp depends on badlands_sim.hpp alone, so no full-sim link.
+add_executable(badlands_scenario_tests
+    src/game/tests/scenario_tests.cpp
+    src/game/scenario.cpp
+    src/game/creature_manifest.cpp
+    game/src/creature_catalog.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_scenario_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_scenario_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_scenario_tests COMMAND badlands_scenario_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
 # (src/engine/core/ray) and the fixed-angle GameCameraController's zoom that

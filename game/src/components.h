@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "badlands_sim.hpp"  // Attack, Combatant, DamageType, kMaxAttacks (combat primitives)
+
 #include <glm/glm.hpp>
 
 #include <entt/entt.hpp>
@@ -76,10 +78,6 @@ struct Team {
     int32_t id;
 };
 
-struct CooldownTimer {
-    float remaining;
-};
-
 struct RenderShape {
     glm::vec3 size;
     glm::vec3 color;
@@ -119,8 +117,8 @@ struct Intent {
 
 // --- hero state: definition / simulation / display --------------------------
 // Hero-specific data grouped on the static-config / dynamic-state / display
-// axis. Combat + movement stay on the generic components (Health/Stats/
-// CooldownTimer/MoveTarget/NavPath/Intent/Team/InsideBuilding/MeleeLock) shared
+// axis. Combat + movement stay on the generic components (Health/Combatant/
+// Attacks/Stats/MoveTarget/NavPath/Intent/Team/InsideBuilding/MeleeLock) shared
 // by all entities.
 
 // Definition (static): the hero archetype (Mercenary/Hunter/Grave Robber/
@@ -197,6 +195,33 @@ struct InsideBuilding {
 
 // Present while a unit is locked in melee — movement is frozen (combat only).
 struct MeleeLock {};
+
+// A unit's attack-skill loadout with per-attack cooldown state. Fixed small array
+// (kMaxAttacks) keeps it POD; `count` is how many of `defs` are live, and
+// `cooldown_remaining[i]` is the seconds until `defs[i]` can be used again. The
+// spawn path fills this (deriving a single melee attack from the legacy
+// CharacterDesc attack_* fields when none is authored). Combatant (the tactical
+// stats, badlands_sim.hpp) rides alongside it as its own component.
+struct Attacks {
+    Attack defs[kMaxAttacks]{};
+    float cooldown_remaining[kMaxAttacks]{};
+    int32_t count = 0;
+};
+
+// An in-flight ranged shot. Spawned by the ranged branch of the Attack command;
+// flown and resolved by advance_projectiles. It captures the attacker's attack +
+// tactical stats + the resolution seed axes AT FIRE TIME, so the hit lands
+// correctly (and identically on replay) even if the shooter dies mid-flight.
+struct Projectile {
+    uint32_t attacker_slot = UINT32_MAX;
+    uint32_t target_slot = UINT32_MAX;
+    glm::vec2 pos{0.0f, 0.0f};
+    float speed = 0.0f;
+    Attack attack{};
+    Combatant attacker{};
+    int32_t attack_index = 0;
+    int64_t fire_millis = 0;  // the world_millis seed axis, fixed at fire time
+};
 
 // The world refused a step: the character tried to walk into terrain it cannot
 // cross. Written by the movement system (systems may write the registry; brains

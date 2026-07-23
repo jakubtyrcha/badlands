@@ -66,36 +66,16 @@ int32_t guild_hero_class(int kind) {
 // manifest loader use it without pulling in the whole sim.
 
 CharacterDesc hero_desc(int32_t hero_class, float x, float z) {
-    // Baseline stats shared by every class; color is the only distinguishing
-    // field (the panel derives the class name from the home guild's kind).
-    constexpr glm::vec3 kColors[HERO_CLASS_COUNT] = {
-        {0.35f, 0.45f, 0.80f},  // Mercenary    - blue
-        {0.30f, 0.70f, 0.35f},  // Hunter       - green
-        {0.60f, 0.45f, 0.75f},  // Grave Robber - violet
-        {0.45f, 0.78f, 0.85f},  // Apprentice   - cyan
-    };
-    static_assert(sizeof(kColors) / sizeof(kColors[0]) == HERO_CLASS_COUNT, "hero color table");
-    int idx = (hero_class >= 0 && hero_class < HERO_CLASS_COUNT) ? hero_class : HERO_MERCENARY;
-    glm::vec3 c = kColors[idx];
-
-    CharacterDesc d{};
+    // All per-class stats (incl. the Hunter's bow) come from the creature catalog
+    // -- the single source of truth. Creature ids 0..HERO_CLASS_COUNT-1 line up
+    // with HeroClassId. Recruits use the compiled defaults (the per-Sim catalog is
+    // reserved for directly-spawned creatures / arena scenarios).
+    const int idx =
+        (hero_class >= 0 && hero_class < HERO_CLASS_COUNT) ? hero_class : HERO_MERCENARY;
+    CharacterDesc d = DefaultCreatureCatalog().defs[idx];
     d.pos_x = x;
     d.pos_z = z;
     d.team = 0;
-    d.hp = 25.0f;
-    d.move_speed = 2.5f;
-    d.attack_range = 1.3f;
-    d.attack_damage = 3.0f;
-    d.attack_cooldown = 1.0f;
-    d.size_x = 0.9f;
-    d.size_y = 1.8f;  // hero capsule height in meters
-    d.size_z = 0.9f;
-    d.color_r = c.x;
-    d.color_g = c.y;
-    d.color_b = c.z;
-    // Fog-of-war: heroes reveal a forward cone as they patrol.
-    d.vision_radius = 14.0f;
-    d.vision_cone_half_angle_deg = 60.0f;
     return d;
 }
 
@@ -108,9 +88,37 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     reg.emplace<Position>(e, glm::vec2{desc.pos_x, desc.pos_z});
     reg.emplace<Team>(e, desc.team);
     reg.emplace<Health>(e, desc.hp, desc.hp);
-    reg.emplace<Stats>(e, desc.move_speed, desc.attack_range, desc.attack_damage,
-                       desc.attack_cooldown);
-    reg.emplace<CooldownTimer>(e, 0.0f);
+    // Combat loadout: tactical stats + attack-skills. An un-authored desc
+    // (attack_count == 0) with a positive attack_damage gets a single melee attack
+    // derived from the legacy attack_* fields (at the default Combatant this
+    // reduces to the old deterministic melee); attack_damage == 0 means "no
+    // attacks" -- genuinely harmless (deer, inert test dummies).
+    reg.emplace<Combatant>(e, Combatant{desc.accuracy, desc.evasion, desc.defense,
+                                        desc.armour, desc.stance});
+    Attacks atk{};
+    if (desc.attack_count > 0) {
+        atk.count = std::min(desc.attack_count, kMaxAttacks);
+        for (int i = 0; i < atk.count; ++i) {
+            atk.defs[i] = desc.attacks[i];
+        }
+    } else if (desc.attack_damage > 0.0f) {
+        atk.count = 1;
+        atk.defs[0] = Attack{AttackCategory::Melee, DamageType::Slashing,
+                             desc.attack_damage, desc.attack_range,
+                             desc.attack_cooldown, 0.0f};
+    }
+    reg.emplace<Attacks>(e, atk);
+    // Stats.move_speed drives movement; its attack_* fields are a legacy VIEW of
+    // the PRIMARY attack (perception's reach / the attack_range host call). Derive
+    // them from attacks[0] so there is one source of truth rather than a hand-kept
+    // mirror that can silently disagree with the real attack.
+    if (atk.count > 0) {
+        reg.emplace<Stats>(e, desc.move_speed, atk.defs[0].range, atk.defs[0].base_damage,
+                           atk.defs[0].cooldown);
+    } else {
+        reg.emplace<Stats>(e, desc.move_speed, desc.attack_range, desc.attack_damage,
+                           desc.attack_cooldown);
+    }
     reg.emplace<RenderShape>(e, glm::vec3{desc.size_x, desc.size_y, desc.size_z},
                              glm::vec3{desc.color_r, desc.color_g, desc.color_b});
     reg.emplace<Intent>(e, 0, glm::vec2{0.0f, 0.0f});

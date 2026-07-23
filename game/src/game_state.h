@@ -51,6 +51,12 @@ struct BadlandsGame {
     // coordinates they picked, which is a fragile thing to assert about.
     bool terrain_blocking = true;
 
+    // Arena confinement (the "blocked edges"). >0 on an axis makes the movement
+    // pipeline refuse a step past [-half, +half] there, exactly as terrain refuses
+    // a step into water. 0 = unbounded (the normal world). Initial config.
+    float arena_half_x = 0.0f;
+    float arena_half_z = 0.0f;
+
     // Event-sourced command layer (see command.h). AI decisions are enqueued
     // during think and drained in one ordered apply pass per tick; every
     // applied command (player + AI) is appended to command_log (the trace).
@@ -79,6 +85,11 @@ struct BadlandsGame {
     // overwrite them from assets/creatures/factors.json before ticking.
     badlands::SimFactors factors;
 
+    // Named-creature catalog (see CreatureCatalog). Compiled defaults; an app may
+    // override by name from JSON via Sim::SetCreatureCatalog before spawning.
+    // Initial config in the determinism contract.
+    badlands::CreatureCatalog creatures;
+
     uint64_t ticks = 0;
     uint64_t script_intents = 0;
     uint32_t noiser_bugs = 0;
@@ -93,6 +104,11 @@ namespace badlands {
 void report_bug(BadlandsGame& game, const char* stage, const std::string& message);
 
 entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot);
+
+// The public slot id of an entity (inverse of entity_for_slot), or -1. Linear
+// over game.slots -- fine at sim/arena scale, and only hit when a producer left a
+// derived (nearest-enemy) target for the command handler to name.
+int32_t slot_of(const BadlandsGame& game, entt::entity e);
 
 // Nearest living enemy of `self`, or entt::null.
 entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self);

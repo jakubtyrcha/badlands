@@ -30,6 +30,15 @@ entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot) {
     return game.registry.valid(e) ? e : entt::null;
 }
 
+int32_t slot_of(const BadlandsGame& game, entt::entity e) {
+    for (size_t i = 0; i < game.slots.size(); ++i) {
+        if (game.slots[i] == e) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
 entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self) {
     const auto& self_pos = game.registry.get<Position>(self).pos;
     int32_t self_team = game.registry.get<Team>(self).id;
