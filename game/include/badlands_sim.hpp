@@ -681,16 +681,21 @@ struct VisionField {
     const uint8_t* rg = nullptr;
 };
 
-// Injected Rust nav provider (was GamePathfinder) — kept as-is, by value. The
-// engine delegates path *geometry* to this provider; obstacles mutate one
-// building at a time so the provider maintains its graph incrementally.
-struct Pathfinder {
-    void* ctx = nullptr;
-    void (*add_obstacle)(void* ctx, uint32_t building_id, const float* poly_xz,
-                         int32_t n_verts) = nullptr;
-    void (*remove_obstacle)(void* ctx, uint32_t building_id) = nullptr;
-    int32_t (*find_path)(void* ctx, float sx, float sz, float gx, float gz, float radius,
-                         uint32_t exempt_building, float* out_xz, int32_t cap) = nullptr;
+// One navmesh cell for the debug overlay: an axis-aligned world-XZ rectangle, a
+// terrain-cost multiplier, and whether a unit can stand on it. impassable cells
+// (buildings, water, mountain) have passable == false.
+struct NavDebugCell {
+    float min_x = 0.0f, min_z = 0.0f, max_x = 0.0f, max_z = 0.0f;
+    float cost = 0.0f;
+    bool passable = false;
+};
+
+// A debug path query result: waypoints as flat world-XZ pairs (x0,z0,x1,z1,...),
+// the total cost-weighted length, and whether the goal was reachable.
+struct NavPathResult {
+    std::vector<float> waypoints_xz;
+    float cost = 0.0f;
+    bool reachable = false;
 };
 
 // ---- the sim ---------------------------------------------------------------
@@ -725,9 +730,6 @@ class Sim {
     // Executes a player action. Returns >= 0 on success (a new building/hero
     // id, or 0 for id-less actions) and < 0 on error.
     int64_t Dispatch(const Action& action);
-    // Registers the nav provider (copied by value) and back-fills every alive
-    // building. Pass a default-constructed Pathfinder to clear.
-    void SetPathfinder(const Pathfinder& pf);
 
     // --- Fog-of-war (vision) ----------------------------------------------
     // Sizes/anchors the vision grid (SIM frame). Must be called before the
@@ -750,6 +752,14 @@ class Sim {
     // Unknown). Drives per-entity render decisions (e.g. hide units). Returns
     // Unknown when the vision grid is unconfigured or the bounds miss it.
     VisionLevel QueryVision(float cx, float cz, float radius) const;
+
+    // --- Navmesh debug (Dear ImGui overlay) -------------------------------
+    // Both ensure the navmesh reflects the current world (rebuild-if-stale)
+    // regardless of terrain_blocking, so the overlay always shows a live mesh.
+    // One entry per navmesh cell: rectangles + cost + passability.
+    std::vector<NavDebugCell> NavDebugCells();
+    // Shortest cost-respecting path from (sx,sz) to (gx,gz) for the overlay.
+    NavPathResult NavQuery(float sx, float sz, float gx, float gz);
 
     // Snapshot accessors — identical semantics to the old ABI, POD vectors.
     std::vector<CharacterState> Characters() const;  // was game_state

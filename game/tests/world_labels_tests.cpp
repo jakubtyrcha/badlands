@@ -113,6 +113,26 @@ TEST_CASE("WorldLabelPool stacks multiple labels on one anchor vertically") {
     CHECK(out[0].world_pos.y != Catch::Approx(out[1].world_pos.y));
 }
 
+TEST_CASE("WorldLabelPool stack ranks put newer same-anchor labels lowest") {
+    // Guards the O(n) rank refactor: three labels on one anchor + one on another;
+    // within the shared anchor, the newest (last spawned) sits lowest.
+    WorldLabelPool pool;
+    const auto anim = LabelAnimation::RiseFade;
+    pool.Spawn(7, {0, 0, 0}, 0.0f, "a", 0xffffffffu, 2.0f, anim);  // oldest
+    pool.Spawn(9, {0, 0, 0}, 0.0f, "x", 0xffffffffu, 2.0f, anim);  // other anchor
+    pool.Spawn(7, {0, 0, 0}, 0.0f, "b", 0xffffffffu, 2.0f, anim);
+    pool.Spawn(7, {0, 0, 0}, 0.0f, "c", 0xffffffffu, 2.0f, anim);  // newest on 7
+
+    auto live = [](uint32_t) -> std::optional<glm::vec3> { return glm::vec3{0, 0, 0}; };
+    std::vector<ResolvedLabel> out = pool.Resolve(live);
+    REQUIRE(out.size() == 4);
+    // out[0]=a (rank 2, highest), out[2]=b (rank 1), out[3]=c (rank 0, lowest).
+    CHECK(out[0].world_pos.y > out[2].world_pos.y);  // older a above newer b
+    CHECK(out[2].world_pos.y > out[3].world_pos.y);  // b above newest c
+    // The other-anchor label (out[1]) is rank 0 on its own anchor (base height).
+    CHECK(out[1].world_pos.y == Catch::Approx(out[3].world_pos.y));
+}
+
 TEST_CASE("WorldLabelPool follows a live anchor and freezes on a dead one") {
     WorldLabelPool pool;
     pool.Spawn(3, {0, 0, 0}, 2.0f, "9", 0xffffffffu, 2.0f, LabelAnimation::RiseFade);

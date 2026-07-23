@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -34,6 +35,7 @@
 #include "game/visual/world_labels.hpp"
 #include "game/visual/composite_post_pass.hpp"
 #include "game/visual/cone_overlay_pass.hpp"
+#include "game/visual/nav_debug_overlay.hpp"
 #include "game/visual/render_mode.hpp"
 #include "game/visual/selection_decals.hpp"
 #include "game/visual/vision_overlay_pass.hpp"
@@ -156,6 +158,12 @@ class GameView : public AppView {
   ConeOverlayPass cone_pass_;      // vision-cone debug overlay (toggle in DrawUI)
   CompositePostPass post_passes_;  // runs vision then cones behind the one slot
 
+  // Pathfinding debug overlay (shared with the AI sandbox). Draws the navmesh +
+  // a click-two-points path through scene_context_.debug_lines; toggled in the
+  // "Gameplay Debug" panel next to the vision cones. Ground height comes from the
+  // terrain (GroundAt); picks come from the terrain raycast in HandleEvent.
+  NavDebugOverlay nav_debug_;
+
   // Selection highlights: projected decals (a ring under the selected unit, a
   // rounded rect around the selected building), rebuilt every frame and handed
   // to the renderer through scene_context_.decals. Must outlive the frame --
@@ -219,6 +227,11 @@ class GameView : public AppView {
   // dead ids are dropped rather than accumulating forever.
   std::unordered_map<uint32_t, std::string> char_names_;
   std::unordered_map<uint32_t, std::string> char_names_prev_;
+  // Head heights (size_y), double-buffered like the names, so a lethal hit's
+  // floating damage number gets the just-died victim's real height instead of a
+  // hardcoded fallback.
+  std::unordered_map<uint32_t, float> char_sizes_;
+  std::unordered_map<uint32_t, float> char_sizes_prev_;
   std::unordered_map<uint32_t, BuildingKind> building_kinds_;
   std::unordered_map<uint32_t, BuildingKind> building_kinds_prev_;
   // Combat log: a ring buffer of formatted lines (newest last) and how many
@@ -236,6 +249,9 @@ class GameView : public AppView {
   // Display names for a combat-log line, from the caches (last-known if dead).
   std::string EventActorName(uint32_t slot) const;
   std::string EventTargetName(const badlands::GameEvent& e) const;
+  // Head height (size_y) of a character slot from the caches (last-known if the
+  // victim just died); a small default when never seen.
+  float EventActorSize(uint32_t slot) const;
   // Adjusts the combat-log scroll offset by a wheel delta (+ older / - newer).
   void ScrollCombatLog(float wheel_y);
   // Builds the floating world-label quads (names / health bars / damage numbers)

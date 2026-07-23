@@ -84,6 +84,7 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     entt::entity e = reg.create();
     uint32_t slot = static_cast<uint32_t>(game.slots.size());
     game.slots.push_back(e);
+    game.entity_slot[e] = slot;  // reverse index for O(1) slot_for_entity
 
     reg.emplace<Position>(e, glm::vec2{desc.pos_x, desc.pos_z});
     reg.emplace<Team>(e, desc.team);
@@ -249,9 +250,8 @@ int64_t raze_building(BadlandsGame& game, uint32_t building_id) {
     // Tombstone + free the footprint/obstacle before reassigning, so the doomed
     // building is not itself a reassignment candidate.
     bs[building_id].alive = false;
-    ++game.placement.nav_epoch;
+    ++game.placement.nav_epoch;  // -> navmesh rebuilds next tick
     rebuild_occupancy(game.placement);
-    notify_obstacle_removed(game, building_id);
 
     // Reassign residents to the lowest-id alive same-class guild with room, else
     // homeless. Sequential so capacity is honored as homes fill.

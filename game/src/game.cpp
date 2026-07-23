@@ -34,12 +34,8 @@ uint32_t slot_for_entity(const BadlandsGame& game, entt::entity e) {
     if (e == entt::null) {
         return UINT32_MAX;
     }
-    for (uint32_t slot = 0; slot < game.slots.size(); ++slot) {
-        if (game.slots[slot] == e) {
-            return slot;
-        }
-    }
-    return UINT32_MAX;
+    const auto it = game.entity_slot.find(e);
+    return it != game.entity_slot.end() ? it->second : UINT32_MAX;
 }
 
 void emit_event(BadlandsGame& game, const badlands::GameEvent& ev) {

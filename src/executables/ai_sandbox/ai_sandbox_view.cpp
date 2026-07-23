@@ -491,6 +491,13 @@ void AiSandboxView::FrameCamera() {
 
 void AiSandboxView::HandleEvent(const SDL_Event& event, int /*width*/,
                                 int /*height*/) {
+  // Nav debug: a left click in pick mode drops a path endpoint on the ground.
+  if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+      event.button.button == SDL_BUTTON_LEFT) {
+    HandleNavPick(event);
+    return;
+  }
+
   // Fixed-angle camera: only zoom is mouse-driven (wheel + trackpad, which SDL
   // reports as the same event with fractional deltas). Key panning is read
   // directly from Update()'s keyboard_state snapshot instead of per-event.
@@ -517,6 +524,9 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
     sim_.Tick(static_cast<float>(kTickDt));
     ++sim_ticks_done_;
   }
+  // Empty the sim's transient event stream (this view does not render a combat
+  // log; without draining, game.events would grow unbounded during combat).
+  sim_.DrainEvents(events_scratch_);
 
   SyncUnits();
   SyncProjectiles();
@@ -536,6 +546,11 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
 
   gamecam_.UpdateCamera(camera_);
   scene_.SyncToRegistry(registry_, scene_context_);
+
+  // Nav overlay last: it owns scene_context_.debug_lines (SyncToRegistry does
+  // not touch that field), so setting it here survives to the render pass. The
+  // arena floor is flat at y = 0.
+  nav_debug_.Rebuild(sim_, scene_context_, [](float, float) { return 0.0f; });
 }
 
 void AiSandboxView::DrawUI() {
@@ -551,7 +566,23 @@ void AiSandboxView::DrawUI() {
   }
 
   DrawInspector();
+  ImGui::Begin("Nav (debug)");
+  nav_debug_.DrawControls();
+  ImGui::End();
 }
+
+void AiSandboxView::HandleNavPick(const SDL_Event& event) {
+  if (!nav_debug_.pick_mode()) return;
+  if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse) return;
+  glm::vec2 screen;
+  if (!EventWindowLogicalSize(event.button.windowID, screen)) return;
+  const Ray ray = ScreenPointToRay(
+      camera_, glm::vec2(event.button.x, event.button.y), screen);
+  glm::vec3 hit;
+  if (!IntersectGroundPlane(ray, 0.0f, hit)) return;  // cursor on/above the horizon
+  nav_debug_.Pick(glm::vec2(hit.x, hit.z));  // flat arena ground (y = 0)
+}
+
 
 void AiSandboxView::DrawInspector() {
   ImGui::Begin("Sim");

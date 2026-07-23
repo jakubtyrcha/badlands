@@ -748,6 +748,13 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
         return;  // at/above the horizon
       }
 
+      // Nav debug pick mode: two ground clicks become the path endpoints instead
+      // of selecting an entity.
+      if (nav_debug_.pick_mode()) {
+        nav_debug_.Pick(sim_world);
+        return;
+      }
+
       // Units (small foreground capsules) win over the larger building footprints
       // they may stand on. character_rows_ / building_rows_ are this frame's
       // snapshot, so a pick hits exactly what was last drawn; HeroAtWorld skips
@@ -855,6 +862,13 @@ std::string GameView::EventActorName(uint32_t slot) const {
   return pit != char_names_prev_.end() ? pit->second : "?";
 }
 
+float GameView::EventActorSize(uint32_t slot) const {
+  auto it = char_sizes_.find(slot);
+  if (it != char_sizes_.end()) return it->second;
+  auto pit = char_sizes_prev_.find(slot);
+  return pit != char_sizes_prev_.end() ? pit->second : 1.2f;  // never-seen fallback
+}
+
 std::string GameView::EventTargetName(const GameEvent& e) const {
   if (e.target_kind == kEventTargetBuilding) {
     auto it = building_kinds_.find(e.target_id);
@@ -891,14 +905,23 @@ void GameView::ScrollCombatLog(float wheel_y) {
 }
 
 void GameView::PumpGameEvents() {
-  // Double-buffer the name caches: last frame's set moves to _prev_, this frame's
-  // is rebuilt from the live snapshot. An entity downed/destroyed this frame is
-  // gone from the snapshot but still in _prev_ (alive last frame), so its log
-  // line still resolves -- and dead ids drop out instead of accumulating.
+  sim_.DrainEvents(events_scratch_);
+  if (events_scratch_.empty()) {
+    return;  // No events this frame -> skip the name-cache rebuild entirely.
+  }
+
+  // Double-buffer the name/size caches: last frame's set moves to _prev_, this
+  // frame's is rebuilt from the live snapshot. An entity downed/destroyed this
+  // frame is gone from the snapshot but still in _prev_ (alive last event frame),
+  // so its log line + damage number still resolve. Rebuilt only on frames that
+  // actually have events, so quiet frames pay nothing.
   char_names_prev_.swap(char_names_);
   char_names_.clear();
+  char_sizes_prev_.swap(char_sizes_);
+  char_sizes_.clear();
   for (const CharacterState& c : character_rows_) {
     char_names_[c.id] = character_display_name(c, /*concrete=*/true);
+    char_sizes_[c.id] = c.size_y;
   }
   building_kinds_prev_.swap(building_kinds_);
   building_kinds_.clear();
@@ -906,7 +929,6 @@ void GameView::PumpGameEvents() {
     building_kinds_[b.id] = b.kind;
   }
 
-  sim_.DrainEvents(events_scratch_);
   for (const GameEvent& e : events_scratch_) {
     switch (e.kind) {
       case GameEventKind::DamageDealt: {
@@ -921,7 +943,7 @@ void GameView::PumpGameEvents() {
           const glm::vec3 pos =
               v ? glm::vec3(v->pos_x, GroundAt(v->pos_x, v->pos_z), v->pos_z)
                 : glm::vec3(e.x, GroundAt(e.x, e.z), e.z);
-          const float head = (v ? v->size_y : 1.2f) + kDamageLift;
+          const float head = (v ? v->size_y : EventActorSize(e.target_id)) + kDamageLift;
           timed_labels_.Spawn(e.target_id, pos, head,
                               std::to_string(static_cast<int>(e.amount)),
                               kDamageColor, kDamageLifetime,
@@ -1094,6 +1116,11 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // After RefreshHud: that is where a selection pointing at something that no
   // longer exists gets dropped, so the decals follow a validated selection.
   RefreshSelectionDecals();
+
+  // Pathfinding debug overlay (off unless toggled in the Gameplay Debug panel);
+  // rides the terrain height.
+  nav_debug_.Rebuild(sim_, scene_context_,
+                     [this](float x, float z) { return GroundAt(x, z); });
 }
 
 uint32_t GameView::SnapshotBuildings() {
@@ -1382,6 +1409,9 @@ void GameView::DrawUI() {
     ImGui::Checkbox("Vision cones", &cone_pass_.mutable_enabled());
     ImGui::TextUnformatted(
         "translucent sector per unit, above terrain, along facing");
+
+    ImGui::Separator();
+    nav_debug_.DrawControls();
   }
 
   // --- Fog (self-contained collapsing section) ---
