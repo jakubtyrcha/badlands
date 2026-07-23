@@ -15,6 +15,7 @@
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
+#include "vision.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -146,6 +147,69 @@ TEST_CASE("a recorded command log replays into a fresh sim exactly") {
     require_same(snapshot(live), snapshot(replay));
 
         }
+
+TEST_CASE("a run with fog of war and explorers replays exactly") {
+    // Exploration is the most replay-fragile thing the AI does: its decisions
+    // depend on a seeded appetite draw AND on a query over the fog-of-war grid,
+    // which is itself a product of where everyone walked. If either leaked a
+    // dependency on anything outside (initial config, seed, command log), this
+    // is where it would show.
+    //
+    // The vision grid is INITIAL CONFIG, so both worlds configure it the same
+    // way -- exactly as a real replay would have to.
+    auto seed_world = [](BadlandsGame* g) {
+        configure_vision(g->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
+        Action camp{ActionKind::PlaceBuilding, 0, -14.0f, 44.0f,
+                    static_cast<int32_t>(BuildingKind::HuntersCamp), 0};
+        const int64_t id = dispatch_into(*g, camp);
+        REQUIRE(id >= 0);
+        for (int i = 0; i < 3; ++i) {
+            Action hire{ActionKind::RecruitHero, static_cast<uint32_t>(id), 0.0f, 0.0f, 0, 0};
+            REQUIRE(dispatch_into(*g, hire) >= 0);
+        }
+    };
+
+    auto live_owned = make_world(nullptr);
+    BadlandsGame* live = live_owned.get();
+    seed_world(live);
+    for (int i = 0; i < kRunTicks; ++i) {
+        tick_world(*live, 1.0f / 30.0f);
+    }
+    const std::vector<Command> log = live->command_log;
+
+    // The hunters must actually have explored, or this proves nothing.
+    bool explored = false;
+    for (const Command& c : log) {
+        explored = explored || (c.kind == CommandKind::SetBehavior &&
+                                c.param_a == static_cast<int32_t>(ActivityId::Explore));
+    }
+    REQUIRE(explored);
+
+    // Same inputs again -> same trace, bit for bit.
+    auto twin_owned = make_world(nullptr);
+    BadlandsGame* twin = twin_owned.get();
+    seed_world(twin);
+    for (int i = 0; i < kRunTicks; ++i) {
+        tick_world(*twin, 1.0f / 30.0f);
+    }
+    REQUIRE(twin->command_log.size() == log.size());
+    for (size_t i = 0; i < log.size(); ++i) {
+        INFO("command " << i);
+        CHECK(same_command(twin->command_log[i], log[i]));
+    }
+    require_same(snapshot(live), snapshot(twin));
+
+    // And the recorded trace, replayed with the brains off, rebuilds the world.
+    auto replay_owned = make_world(nullptr);
+    BadlandsGame* replay = replay_owned.get();
+    configure_vision(replay->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
+    replay->replay_log = &log;
+    for (int i = 0; i < kRunTicks; ++i) {
+        tick_world(*replay, 1.0f / 30.0f);
+    }
+    CHECK(replay->replay_cursor == log.size());
+    require_same(snapshot(live), snapshot(replay));
+}
 
 TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
     auto live_owned = make_world(nullptr);
