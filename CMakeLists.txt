@@ -576,6 +576,9 @@ add_executable(badlands_game_tests
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
+    # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
+    # sim needed.
+    game/tests/brain_abi_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.

@@ -886,4 +886,78 @@ mod tests {
         assert!(instance.is_null());
         assert!(!last_error().is_empty());
     }
+
+    // 9. acceptance: the real, shipped assets/brains/hero.wasm (built by
+    // scripts/build_brains.sh from scripts/brains/nim/hero.nim) conforms to
+    // the full brain ABI end to end, not just a wat fixture. Size constants
+    // below are duplicated as literals rather than computed, on purpose --
+    // see the comment on each: they must match game/src/brain_abi.h by hand,
+    // the same way scripts/brains/nim/abi.nim does on the Nim side.
+    #[test]
+    fn real_hero_wasm_conforms() {
+        // sizeof(BlViewWire) per game/src/brain_abi.h's static_assert.
+        const VIEW_WIRE_LEN: usize = 1080;
+        // sizeof(BlDecisionWire) per game/src/brain_abi.h's static_assert.
+        const DECISION_WIRE_LEN: usize = 40;
+        // offsetof(BlViewWire, version) is 0; BL_ABI_VERSION is 1 (both in
+        // game/src/brain_abi.h). A zeroed buffer with just the version
+        // stamped is exactly what a host that hasn't populated the rest of
+        // the view yet would send on a first tick.
+        const VERSION_OFFSET: usize = 0;
+
+        let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../assets/brains/hero.wasm");
+        let wasm_bytes = std::fs::read(&wasm_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", wasm_path.display()));
+
+        let program = load_ok(&wasm_bytes);
+
+        static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        extern "C" fn capture_log(_level: i32, msg: *const u8, len: usize, _user: *mut c_void) {
+            let text = unsafe { std::slice::from_raw_parts(msg, len) };
+            LOGGED
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(text).into_owned());
+        }
+        LOGGED.lock().unwrap().clear();
+
+        let instance = unsafe {
+            bh_instantiate(program, ABI_VERSION, 42, Some(capture_log), ptr::null_mut())
+        };
+        assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
+
+        {
+            let logged = LOGGED.lock().unwrap();
+            assert!(
+                logged.iter().any(|l| l.contains("init")),
+                "expected an init log line from bl_init, got: {logged:?}"
+            );
+        }
+
+        assert_eq!(unsafe { bh_spawn(instance, 0, 0, 1) }, BH_OK);
+
+        let mut view = vec![0u8; VIEW_WIRE_LEN];
+        view[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&(ABI_VERSION as u32).to_le_bytes());
+        let mut out = vec![0u8; DECISION_WIRE_LEN];
+        let rc = unsafe {
+            bh_tick(instance, 0, view.as_ptr(), view.len(), out.as_mut_ptr(), out.len())
+        };
+        assert_eq!(rc, BH_OK, "bh_tick failed: {}", last_error());
+
+        // An all-Idle DecisionWire: pause_duration_millis=0 (i64, offset 0),
+        // activity_id=0/goal_kind=0 (offset 8/12), goal_x=goal_z=0.0 (offset
+        // 16/20), command_kind=0/command_arg=0 (offset 24/28),
+        // follow_up_on_arrival=0/pause_kind=0 (offset 32/36) -- i.e. every
+        // byte zero.
+        assert!(
+            out.iter().all(|&b| b == 0),
+            "expected an all-zero (all-Idle) DecisionWire, got: {out:?}"
+        );
+
+        unsafe {
+            bh_drop_instance(instance);
+            bh_drop_program(program);
+        }
+    }
 }
