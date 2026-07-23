@@ -68,13 +68,64 @@ Cross-links: docs/noiser-feedback.md entry, the script-side workaround,
 upstream issues.
 ```
 
-## Status
+## Index (2026-07-22 sweep)
 
-No upstream noiser bugs were hit implementing the v0.3 town host-call surface —
-the perception tuples (including a host fn taking an `i32` kind arg alongside a
-`(f32,f32,f32,f32)` tuple return), the durable `intent_move_to`, and the
-`intent_enter`/`intent_buy` calls all bound and fired cleanly
-(`game/tests/noiser_smoke_tests.cpp`). This folder therefore ships with just
-this README. The known `@fn -> vecN` compiler ICE remains tracked in
-`docs/noiser-feedback.md` and pinned by `noiser_smoke_tests.cpp`; the brain
-works around it with flat `(f32, …)` tuple returns.
+Filed against noiser sha `52174b2c9e517d9daa2ad6f11fb4e264fd5fec0d`. Every claim
+in these reports is backed by an executed run, not by reading the compiler.
+
+### Read this one first
+
+| File | Why it comes first |
+|---|---|
+| `2026-07-22-entry-point-selection-is-nondeterministic.md` | A file with 2+ `gen fn` runs an **arbitrary** one — `generators: HashMap<String, GenDef>` serialized in iteration order, read back as entry `[0]`. Silent, no diagnostic, varies per load and even between two compiles in one process. **It confounds any reproduction involving more than one generator**, and it did confound ours: two revisions of the nested-generator report were wrong because of it. Control for it before reproducing anything else here. |
+
+### Bugs
+
+| File | Label | Summary |
+|---|---|---|
+| `2026-07-22-entry-point-selection-is-nondeterministic.md` | compiler | Entry generator chosen by HashMap order; non-`pub` helpers compete. |
+| `2026-07-22-nested-generator-next-returns-tuple-not-maybe.md` | vm-bytecode | Resuming a sub-generator owned by the entry generator fails deterministically on the **second** resume (`RestoreState: state buffer index 0 >= buffer len 0`). Creating one is harmless. |
+| `2026-07-22-generic-maybe-instantiation-ices-inside-generator-body.md` | compiler | `let`-binding a builtin generic returning `?T` (e.g. `Vec::pop`) inside the entry generator ICEs on `Maybe$f32`. Workaround: hoist into a plain `fn`. |
+| `2026-07-22-generator-passed-to-function-loses-state.md` | vm-bytecode | Generator handles **do** survive `fn` boundaries; the failure returns once an entry generator owns the instance. Refutes its own original premise. |
+| `2026-07-22-host-fn-vecn-return-ices-compiler.md` | compiler | `@fn … -> vec4` ICEs at the call site. Root cause: stdlib registers `Vec4` capitalised but `ivec4` lowercase, so the **documented** lowercase spelling is unregistered and degrades to `Unknown`. Not vector-specific — any unknown type name panics instead of diagnosing. |
+| `2026-07-22-host-fn-vecn-argument-rejected-at-callsite.md` | compiler | Same root cause on the argument side: declaring compiles, every call fails `expected Unknown, got HomogTuple`. `ivecN` args work — the exact mirror image. |
+| `2026-07-22-generic-protocol-bounds-fail-to-parse.md` | compiler | Inline bound on a **user-declared** protocol ignores the user's `impl`; `where` works. Parameterized inline bounds are documented-as-unsupported but diagnosed poorly. |
+
+Both `vecN` reports carry a **"read before closing as duplicate"** block: this
+family was previously falsified upstream by a matrix that only exercised the
+*capitalised* spelling at *top level*. Both axes matter.
+
+### Feature requests
+
+| File | Summary |
+|---|---|
+| `2026-07-22-feature-named-generator-entry-points.md` | Select a `gen fn` by name at `Prepare` time, so one file can hold `deer`/`wolf`/`boar`. Distinct from the bug above: selection must first become *deterministic*, then *selectable*. |
+| `2026-07-22-feature-structured-generator-parameters.md` | Hand a typed data block to a generator at `Prepare` time. Today the only channel is `warp_id`/`warp_size` (two ivec3s), so per-type tuning data costs one host call per field per entity per tick. |
+| `2026-07-22-feature-cpp-embedding-gaps.md` | Six C++ host/build gaps, each tied to a workaround badlands ships today: 24 stubbed JIT symbols, a 64 MiB compile thread, the `detail::SetHostCallProfiling` opt-out, generator snapshot for hot reload, a hand-maintained 54-function FFI header with cbindgen declared but unused, and glm/spdlog in the public header. |
+
+### Fixed / retracted
+
+| File | Status |
+|---|---|
+| `2026-07-13-struct-of-enums-return-from-perception-corrupts.md` | **fixed** — no longer reproduces on `52174b2`; 25/25 identical correct runs, verified against a faithful re-creation of the original repro. badlands' tuple workaround is no longer required. |
+
+### What this sweep corrected in our own records
+
+- struct-of-enums: **fixed**, not a live bug.
+- `vecN` argument: fails at the **call site**, not on declaration.
+- Local multi-file imports: **work** (`FileModuleResolver`), contradicting an
+  earlier note.
+- The nested-generator "silent no-op" and its apparent non-determinism: **the
+  entry lottery**, not sub-generator corruption.
+- "Creating a sub-generator corrupts the parent": **withdrawn** — 8/8 correct
+  once controlled.
+
+### Known hazards when writing repros
+
+- **Dead-code elimination silently drops host calls.** `fn side(k: f32) -> f32
+  { @fn.report(k); k + 1.0 }` never fires `@fn.report` when the argument derives
+  only from params/constants, and a call whose result is unused is removed
+  entirely. This matters because "hoist into a plain `fn`" is the recommended
+  workaround elsewhere in this folder.
+- **`available:` symbol lists in import errors are emitted in HashMap order**
+  and differ between runs — do not diff them.

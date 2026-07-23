@@ -43,4 +43,33 @@ uint32_t HeroAtWorld(const CharacterState* characters, uint32_t count,
   return kNoPick;
 }
 
+bool GroundPickXZ(glm::vec3 ray_origin, glm::vec3 ray_dir,
+                  const std::function<float(glm::vec2)>& height_at,
+                  glm::vec2& out_xz, int iterations) {
+  if (ray_dir.y >= 0.0f) return false;  // not descending toward the ground
+  float plane_y = 0.0f;
+  glm::vec2 xz(0.0f);
+  for (int i = 0; i < iterations; ++i) {
+    const float t = (plane_y - ray_origin.y) / ray_dir.y;
+    if (t <= 0.0f) return false;  // the ground plane is behind the camera
+    xz = glm::vec2(ray_origin.x + t * ray_dir.x, ray_origin.z + t * ray_dir.z);
+    plane_y = height_at(xz);  // refine: next intersect uses the sampled height
+  }
+  out_xz = xz;
+  return true;
+}
+
+const CharacterState* SelectedUnit(const CharacterState* characters,
+                                   uint32_t count, uint32_t id) {
+  if (!characters || id == kNoPick) return nullptr;
+  for (uint32_t i = 0; i < count; ++i) {
+    const CharacterState& ch = characters[i];
+    if (ch.id != id) continue;
+    // Found it, but a unit that walked into a building is no longer drawn or
+    // pickable -- treat it as gone so the caller clears the selection.
+    return ch.inside_building_id >= 0 ? nullptr : &characters[i];
+  }
+  return nullptr;
+}
+
 }  // namespace badlands

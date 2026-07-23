@@ -246,9 +246,18 @@ add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/sim.cpp
     game/src/brain.cpp
+    game/src/command.cpp
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/needs.cpp
+    game/src/town_brain.cpp
+    game/src/behaviours/blocks.cpp
+    game/src/behaviours/selectors.cpp
+    game/src/critter_brain.cpp
+    game/src/townfolk_brain.cpp
+    game/src/monster_brain.cpp
+    game/src/economy.cpp
     game/src/vision.cpp
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
@@ -316,6 +325,7 @@ set(badlands_app_sources_game
     # symbolic map's terrain/water/buildings through the composer.
     src/game/visual/scene_composer.cpp
     src/game/visual/vision_overlay_pass.cpp
+    src/game/visual/cone_overlay_pass.cpp
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
@@ -330,7 +340,8 @@ set(badlands_app_sources_game
 # executable, same rationale as badlands_app_sources_game above.
 set(badlands_app_sources_ai_sandbox
     src/ai_sandbox/main_ai_sandbox.cpp
-    src/ai_sandbox/ai_sandbox_view.cpp)
+    src/ai_sandbox/ai_sandbox_view.cpp
+    src/game/factors_manifest.cpp)  # behaviour tuning loaded as data
 
 foreach(app viewer game ai_sandbox)
     add_executable(badlands_${app} ${badlands_app_sources_${app}})
@@ -528,7 +539,18 @@ add_executable(badlands_game_tests
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
+    game/tests/command_tests.cpp
+    game/tests/clock_tests.cpp
+    game/tests/needs_tests.cpp
+    game/tests/determinism_tests.cpp
+    game/tests/archetype_tests.cpp
+    game/tests/behaviours_tests.cpp
+    game/tests/critter_tests.cpp
+    game/tests/townfolk_tests.cpp
+    game/tests/rat_tests.cpp
+    game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
+    game/tests/facing_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.
@@ -548,6 +570,11 @@ target_include_directories(badlands_game_tests PRIVATE
 target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
 target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib ui)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+# The noiser smoke/duel cases load the SHIPPING brain scripts by path and REQUIRE
+# the env vars (historically exported only by the legacy Rust harness, so a bare
+# `ctest` failed on them). Set here so `ctest --test-dir build` is self-contained.
+set_tests_properties(badlands_game_tests PROPERTIES ENVIRONMENT
+    "BADLANDS_BRAIN_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/hero.noiser;BADLANDS_COMBAT_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/combat_test.noiser")
 
 # badlands_geometry_tests: Catch2 suite for Task S2.C's procedural geometry
 # (primitives/rocks/building parts, src/engine/rendering/geometry) + the
@@ -882,6 +909,25 @@ target_include_directories(badlands_biome_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_factors_manifest_tests: behaviour tuning loaded as data
+# (assets/creatures/factors.json -> badlands::SimFactors). App-layer, so the sim
+# keeps its lean dependency set. Reads the shipped file, so cwd = repo root.
+add_executable(badlands_factors_manifest_tests
+    src/game/tests/factors_manifest_tests.cpp
+    src/game/factors_manifest.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_factors_manifest_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_factors_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_factors_manifest_tests COMMAND badlands_factors_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
 # (src/engine/core/ray) and the fixed-angle GameCameraController's zoom that

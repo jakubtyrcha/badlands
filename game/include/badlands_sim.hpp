@@ -42,7 +42,12 @@ enum class ActionKind : int32_t {
     Count
 };
 
-inline constexpr int32_t kGridHalfExtentTiles = 48;  // was GAME_GRID_HALF_EXTENT_TILES
+// The placement/movement grid spans the WHOLE map: tile == 1 world unit == 1
+// map metre, and the symbolic map is 256 m (64 blocks x 4 m), so the grid is
+// [-128, 128). (It was 48 -- a 96 u window centred on the lake, which left the
+// map's Forest/Plains ring unreachable; sim.cpp static_asserts this stays equal
+// to the map span.)
+inline constexpr int32_t kGridHalfExtentTiles = 128;  // was GAME_GRID_HALF_EXTENT_TILES
 
 // Hero guild classes (the recruitable "class type id"). Unscoped + HERO_*
 // enumerators to match the sim-internal usage this was promoted from (was
@@ -69,6 +74,12 @@ const char* HeroClassName(HeroClassId cls);
 // their own (future) vision and never reveal the map for the player.
 inline constexpr int32_t kPlayerTeam = 0;
 
+// Where make_world prebuilds the colony's Castle: on the plains south of the
+// central lake (the map origin is water). The single source of truth for the
+// colony seat -- the game's town + camera + fog-of-war centre on it.
+inline constexpr float kCastleSpawnX = 0.0f;
+inline constexpr float kCastleSpawnZ = 54.0f;
+
 // The three fog-of-war knowledge levels (see the design doc). Cumulative:
 // once Visible/Dormant, a texel never returns to Unknown.
 enum class VisionLevel : int32_t {
@@ -79,8 +90,69 @@ enum class VisionLevel : int32_t {
 
 // ---- POD result structs (field-for-field from badlands_game.h) -------------
 
+// What KIND of thing is being spawned. Archetype is a spawn recipe: it decides
+// which components and which brain the entity gets, and is not consulted again
+// at think time (perception is relational -- friend/neutral/enemy + threat --
+// never taxonomic).
+enum class Archetype : int32_t {
+    Hero = 0,   // needs, home, inventory, errands; the utility brain
+    Townfolk,   // simple sequential goals (route, commute); no needs
+    Critter,    // reactive: roam/graze, flee non-critters
+    Monster,    // combat; no needs
+};
+
+// ---- tuning factors (data, not code) ---------------------------------------
+// Per-archetype behaviour tuning. The sim ships the defaults below, so it is
+// fully usable -- and unit-testable -- with no file present; an app may load
+// assets/creatures/factors.json over them (src/game/factors_manifest.hpp) so
+// designers can tune without a rebuild.
+//
+// Factors are INITIAL CONFIG in the determinism contract
+// (state = f(seed, initial config, command log, N ticks)): a replay must use
+// the same factors, and the command log does not carry them.
+struct HeroFactors {
+    float fatigue_go_home = 0.6f;  // tired enough to head home by day
+    float fatigue_night = 0.2f;    // lower bar once it is night
+    float boredom_tavern = 0.5f;   // bored enough to seek the tavern
+    float roam_radius = 6.0f;      // world units around the roam anchor
+    float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
+};
+
+// Critter (deer) tuning. Deer graze/roam in Forest/Plains and bolt from any
+// non-critter that comes within sight.
+struct CritterFactors {
+    float sight_radius = 12.0f;    // notices non-critters within this range
+    float flee_radius = 8.0f;      // bolts when one is this close
+    float flee_distance = 12.0f;   // how far it runs from the threat
+    float roam_radius = 14.0f;     // wander range around the home anchor
+    float graze_fraction = 0.4f;   // fraction of each roam cycle spent grazing
+};
+
+// Townfolk (tax collector) tuning + the town economy.
+struct TownfolkFactors {
+    int64_t spawn_interval_millis = 60000;  // a collector leaves the castle this often
+    int32_t max_alive = 2;                  // cap on live collectors
+    float move_speed = 2.2f;                // a plodding taxman
+    uint32_t house_income_per_day = 50;     // each House accrues this each midnight
+};
+
+// Monster (rat) tuning. Rats spawn from the Sewer and attack the nearest hostile
+// unit, falling back to gnawing the nearest targettable building.
+struct MonsterFactors {
+    int64_t spawn_interval_millis = 20000;  // a rat crawls out this often
+    int32_t max_alive = 4;                  // cap on live rats
+};
+
+struct SimFactors {
+    HeroFactors hero;
+    CritterFactors critter;
+    TownfolkFactors townfolk;
+    MonsterFactors monster;
+};
+
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
+    Archetype archetype = Archetype::Hero;
     float pos_x, pos_z;
     int32_t team;
     float hp;
@@ -110,10 +182,24 @@ struct CharacterState {
     float color_r, color_g, color_b;
     int32_t home_building_id;    // recruiting guild; -1 = homeless / not a hero
     int32_t inside_building_id;  // -1 = outside; >=0 => hidden (don't draw; list in panel)
+    // Hero simulation/display state, for the inspector. Zeroed for non-heroes.
+    float fatigue, boredom;  // drives, 0..1
+    int32_t behavior;        // last decided badlands::Behavior; -1 = none yet
+    char name[24];           // NUL-terminated display name; "" for non-heroes
+    // Current goal + pathfinding state: what this entity is walking toward now
+    // and how far along the route it is.
+    int32_t goal_kind;       // MoveTarget::Kind: 0 None, 1 Point, 2 Entity, 3 Building
+    float goal_x, goal_z;    // goal position in world XZ (0,0 when goal_kind == 0)
+    int32_t path_waypoints;  // waypoints remaining on the planned route
+    int32_t archetype;       // Archetype (Hero/Townfolk/Critter/Monster)
     // Unit XZ look direction (the character Transform's rotation applied to the
-    // model-forward axis, projected to XZ). Drives the vision cone and, later,
-    // the render pose. Always normalized (defaults to kCharacterForward).
+    // model-forward axis, projected to XZ). Drives the vision cone and the
+    // render pose. Always normalized (defaults to kCharacterForward).
     float facing_x, facing_z;
+    // Fog-of-war vision this entity grants (0 radius => none). The renderer draws
+    // the cone debug overlay from these + facing.
+    float vision_radius;
+    float vision_cone_half_angle_deg;  // >= 180 => full circle
 };
 
 // Run counters. NB: NOT `Stats` — badlands::Stats already exists (a sim
@@ -184,6 +270,8 @@ struct BuildingState {
     float center_x, center_z;
     int32_t rotation_index;
     int32_t width_tiles, depth_tiles;
+    uint32_t taxable_income;  // uncollected tax owed (Houses accrue at midnight)
+    float hp, max_hp;         // structure health (rats chew it down)
 };
 
 // World-level scalars (gold, grid size, sprawl bookkeeping).
@@ -193,6 +281,45 @@ struct WorldState {
     uint32_t queued_poppables;  // owed but not yet placeable (crowded map)
     uint32_t urban_quarters;    // sprawl accumulator in quarter-units
     uint32_t guild_roster_cap;  // kGuildRosterCap (heroes per guild); UI mirrors it
+    // The sim clock. world_millis is the authoritative integer time (advanced by
+    // a compile-time constant per tick at a fixed 30 Hz); the rest are derived.
+    int64_t world_millis;
+    float time_of_day;  // 0..1 within the current day
+    uint32_t day;       // whole days elapsed
+    int32_t is_night;   // 0/1
+};
+
+// ---------------------------------------------------------------------------
+// Command log (the trace of record)
+//
+// Every mutation of the sim -- player action and AI decision alike -- is a
+// Command applied at a single point, in deterministic order, and appended here.
+// (initial config, seed, command log) reproduces a run exactly, so this is both
+// the replay input and what a debug panel shows.
+// ---------------------------------------------------------------------------
+enum class CommandKindId : int32_t {
+    PlaceBuilding = 0,
+    RecruitHero,
+    DestroyBuilding,
+    MoveTo,
+    EnterBuilding,
+    EnterHome,
+    Buy,
+    Attack,
+    SetBehavior,
+    CollectTax,
+    Deposit,
+    AttackBuilding,
+    Shoot,
+};
+
+struct CommandRecord {
+    CommandKindId kind;
+    uint32_t actor;  // entity id; UINT32_MAX = player/global
+    uint32_t target_id;
+    float point_x, point_z;
+    int32_t param_a, param_b;
+    int64_t at_millis;  // sim time the command took effect
 };
 
 // Read-only snapshot of the published (front) fog-of-war field. The grid lives
@@ -271,11 +398,23 @@ class Sim {
     // Snapshot accessors — identical semantics to the old ABI, POD vectors.
     std::vector<CharacterState> Characters() const;  // was game_state
     std::vector<BuildingState> Buildings() const;    // was game_buildings
-    // Out-param overload: reuses the caller's buffer (out.clear() then fill),
-    // avoiding a per-frame allocation on the render path. The primitive; the
-    // value-returning Buildings() delegates here.
+    // Out-param overloads: reuse the caller's buffer (out.clear() then fill),
+    // avoiding a per-frame allocation on the render path. These are the
+    // primitives; the value-returning versions delegate to them.
+    void Characters(std::vector<CharacterState>& out) const;
     void Buildings(std::vector<BuildingState>& out) const;
-    WorldState World() const;                         // was game_world
+    WorldState World() const;
+    // Replaces the tuning factors (see SimFactors). Call before ticking; a
+    // replay must use the same factors the recorded run used.
+    void SetFactors(const SimFactors& factors);
+    const SimFactors& Factors() const;
+    // The applied-command trace, oldest-first (see CommandRecord).
+    std::vector<CommandRecord> CommandLog() const;                         // was game_world
+    // Dominant biome at a world XZ, as a mapgen::Biome index (0 Lake, 1 Swamp,
+    // 2 Forest, 3 Plains, 4 Hills, 5 Mountain). The sim owns the terrain field;
+    // callers (deer placement, later biome-weighted nav) query it here rather
+    // than re-deriving the world<->map offset. Out of bounds clamps.
+    int32_t BiomeAt(float world_x, float world_z) const;
     SimStats GetStats() const;                        // was game_stats
     // Placement preview; returns validity, fills out_triangles (was
     // game_probe_placement).

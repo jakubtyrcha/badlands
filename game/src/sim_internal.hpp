@@ -21,10 +21,14 @@ uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
 int64_t dispatch_into(BadlandsGame&, const Action&);
 bool reload_script(BadlandsGame&, const std::string&);
 std::vector<CharacterState> characters_of(const BadlandsGame&);
+void characters_of(const BadlandsGame&, std::vector<CharacterState>& out);
 std::vector<BuildingState> buildings_of(const BadlandsGame&);
 void buildings_of(const BadlandsGame&, std::vector<BuildingState>& out);
 WorldState world_of(const BadlandsGame&);
 SimStats stats_of(const BadlandsGame&);
+std::vector<CommandRecord> command_log_of(const BadlandsGame&);
+void set_factors_of(BadlandsGame&, const SimFactors&);
+int32_t biome_at_of(const BadlandsGame&, float world_x, float world_z);
 PlacementProbe probe_of(const BadlandsGame&, const PlacementDesc&, std::vector<GridTriangle>&);
 
 }  // namespace badlands

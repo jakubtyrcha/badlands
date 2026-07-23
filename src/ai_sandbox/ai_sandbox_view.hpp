@@ -1,20 +1,29 @@
 #pragma once
 
-// Task S2.G: badlands_ai_sandbox's real AppView -- a walled arena (reusing
-// the game grid coordinate system via game/arena.h) with a gray floor, a
-// blocked outer wall ring, and 2 static colored capsules, rendered through
-// the shared deferred renderer + LightEnvironment, viewed with the shared
-// fixed-angle GameCameraController (same as badlands_game's GameView).
-// Replaces PlaceholderView for the ai_sandbox executable. No AI/nav movement
-// this stage -- the capsules are placeholder units; AI/nav wiring is a
-// follow-up.
+// badlands_ai_sandbox's AppView: a LIVE view of the headless sim. It owns a
+// BadlandsGame, seeds a small town (guild + tavern + apothecary) and a hero
+// roster through the command layer, ticks the sim at a fixed timestep with a
+// time-acceleration control, and rebuilds blockout geometry from the sim's
+// snapshots -- boxes for buildings, capsules for heroes (the arena floor +
+// wall ring from game/arena.h stay as the greybox ground).
+//
+// This is the inspection surface for the game-systems architecture: the panel
+// shows the sim clock (day/night), every hero's needs + chosen behaviour, and
+// the tail of the command log (the trace of record). Everything it draws comes
+// through the badlands::Sim snapshot API (Characters / Buildings / World /
+// CommandLog) -- the view never reaches into the sim's registry.
+
+#include <cstdint>
+#include <vector>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include "badlands_sim.hpp"  // badlands::Sim + snapshot structs
 #include "engine/app/app_view.hpp"
 #include "engine/app/game_camera_controller.hpp"
+#include "engine/app/sim_clock.hpp"
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
@@ -43,12 +52,27 @@ class AiSandboxView : public AppView {
   // otherwise clobber it with SceneGraph's own defaults) -- same pattern as
   // GameView::ApplyEnvironment.
   void ApplyEnvironment();
-  // Clears scene_ and rebuilds it from arena_: re-mirrors scene_context_'s
-  // lighting, then adds the floor + wall ring + 2 capsules. Called once from
-  // Initialize -- this stage's arena is static.
+  // Creates the sim and seeds the town: places the guild/tavern/apothecary and
+  // recruits a hero roster, all through game_dispatch -- i.e. as logged player
+  // Commands, so the seed shows up in the command log like anything else. The
+  // noiser hero brain is loaded from BADLANDS_BRAIN_SCRIPT (or the default
+  // path) when readable; otherwise the sim runs the C++ town brain.
+  void SeedTown();
+  // Clears scene_ and rebuilds the STATIC geometry from the sim: re-mirrors
+  // scene_context_'s lighting, then adds the floor, the wall ring, and a box
+  // per game_buildings() row. Heroes are NOT rebuilt here -- they get a fixed
+  // node pool (CreateUnitCapsules) that SyncUnits repositions per frame, so a
+  // moving hero costs a transform write rather than a mesh rebuild.
   void BuildScene();
   void AddWalls();
-  void AddCapsules();
+  void AddBuildings();
+  // Per-frame: reads the game_state snapshot and moves/hides the capsule pool.
+  // Heroes inside a building are hidden (scaled to zero), matching the sim's
+  // "don't draw; list in the panel" contract for inside_building_id >= 0.
+  void SyncUnits();
+  // The inspector: sim clock, per-hero needs/behaviour, noiser bug count, and
+  // the tail of the command log.
+  void DrawInspector();
   // Centers the game camera on the arena origin and picks a height (at
   // GameCameraController's fixed pitch) so the whole arena -- including the
   // wall ring -- stays inside the frustum. The framing is aspect-independent
@@ -67,15 +91,29 @@ class AiSandboxView : public AppView {
   LightEnvironment env_;
   CubemapBuilder sky_cube_;
 
-  // Floor + capsule materials are cached solid-color deferred materials from
-  // MaterialLibrary::SolidColor (the library owns their 1x1 textures), so no
-  // per-view texture/sampler handles are needed here anymore.
+  // Floor + building + capsule materials are cached solid-color deferred
+  // materials from MaterialLibrary::SolidColor (the library owns their 1x1
+  // textures), so no per-view texture/sampler handles are needed here.
 
   Arena arena_;
-  // World-space XZ positions of the 2 capsules, recorded by AddCapsules()
-  // for the "Arena" UI window.
-  glm::vec2 capsule_a_pos_{0.0f};
-  glm::vec2 capsule_b_pos_{0.0f};
+
+  // Owns the sim (RAII; no manual destroy). Seeded in SeedTown.
+  badlands::Sim sim_{nullptr};
+
+  // Time model (see sim_clock.hpp): real dt * speed -> sim seconds; the sim
+  // runs fixed game_ticks up to TickTarget(), so the speed control accelerates
+  // the day/night loop without changing the tick rate the sim sees.
+  SimClock sim_clock_;
+  unsigned long long sim_ticks_done_ = 0;
+
+  // Reused snapshot read-back buffers (no per-frame heap churn).
+  std::vector<badlands::CharacterState> char_rows_;
+  std::vector<badlands::BuildingState> building_rows_;
+  std::vector<badlands::CommandRecord> cmd_rows_;
+  uint32_t command_log_total_ = 0;
+
+  // Fixed pool of hero capsule nodes; index == game_state row index.
+  std::vector<NodeHandle> capsule_nodes_;
 
   SceneGraph scene_;
   entt::registry registry_;

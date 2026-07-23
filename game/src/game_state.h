@@ -3,9 +3,12 @@
 
 #pragma once
 
+#include "command.h"
 #include "components.h"
 #include "placement.h"
 #include "vision.h"
+
+#include "game/map/map_data.hpp"
 
 #include <entt/entt.hpp>
 
@@ -36,6 +39,34 @@ struct BadlandsGame {
     // Pluggable path-geometry provider (Rust nav service); zero-initialized
     // means "no provider" -> straight-line fallback in the movement pipeline.
     badlands::Pathfinder pathfinder{};
+
+    // Event-sourced command layer (see command.h). AI decisions are enqueued
+    // during think and drained in one ordered apply pass per tick; every
+    // applied command (player + AI) is appended to command_log (the trace).
+    std::vector<badlands::Command> command_queue;
+    std::vector<badlands::Command> command_log;
+
+    // Replay mode. Non-null makes game_tick take this tick's decisions from the
+    // log (by at_millis) instead of running the brains -- the determinism
+    // contract made executable: (initial config, seed, command log) -> state.
+    // The caller owns the log and must outlive the game.
+    const std::vector<badlands::Command>* replay_log = nullptr;
+    size_t replay_cursor = 0;
+
+    // Day/night clock: integer milliseconds, advanced by kMillisPerTick each
+    // tick (see components.h). Deterministic, no float drift.
+    int64_t world_millis = 0;
+
+    // The terrain/biome field the sim reasons about (deer roam Forest/Plains,
+    // hunters seek Forest). Generated once in make_world; MapData is pure CPU
+    // data with no engine/GPU dependency, so the sim owns it directly. Map-local
+    // coordinates are world + size*0.5 -- use biome_at()/height_at() rather than
+    // querying MapData directly so that offset lives in exactly one place.
+    badlands::MapData map;
+
+    // Behaviour tuning (see SimFactors). Defaults are compiled in; an app may
+    // overwrite them from assets/creatures/factors.json before ticking.
+    badlands::SimFactors factors;
 
     uint64_t ticks = 0;
     uint64_t script_intents = 0;

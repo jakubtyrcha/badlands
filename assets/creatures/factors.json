@@ -1,0 +1,31 @@
+{
+  "_comment": "Behaviour tuning for badlands AI. Loaded by src/game/factors_manifest.cpp over the compiled defaults in game/include/badlands_sim.hpp. Every key (and section) is optional: omit one to keep its default. Factors are initial config for the determinism contract -- a replay must use the same values.",
+
+  "hero": {
+    "fatigue_go_home": 0.6,
+    "fatigue_night": 0.2,
+    "boredom_tavern": 0.5,
+    "roam_radius": 6.0,
+    "hunt_sight_radius": 22.0
+  },
+
+  "critter": {
+    "sight_radius": 12.0,
+    "flee_radius": 8.0,
+    "flee_distance": 12.0,
+    "roam_radius": 14.0,
+    "graze_fraction": 0.4
+  },
+
+  "townfolk": {
+    "spawn_interval_millis": 60000,
+    "max_alive": 2,
+    "move_speed": 2.2,
+    "house_income_per_day": 50
+  },
+
+  "monster": {
+    "spawn_interval_millis": 20000,
+    "max_alive": 4
+  }
+}

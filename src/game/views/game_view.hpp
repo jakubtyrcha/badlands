@@ -25,8 +25,11 @@
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "engine/ui/ui_renderer.hpp"
+#include "game/map/map_data.hpp"
 #include "game/ui/hud.hpp"
 #include "game/ui/picking.hpp"
+#include "game/visual/composite_post_pass.hpp"
+#include "game/visual/cone_overlay_pass.hpp"
 #include "game/visual/render_mode.hpp"
 #include "game/visual/vision_overlay_pass.hpp"
 
@@ -66,7 +69,16 @@ class GameView : public AppView {
   void RebakeSky(const DaylightState& state);
   // Seeds the demo town via sim_.Dispatch(ActionKind::PlaceBuilding) at a
   // few spread-out, non-overlapping tiles around the prebuilt origin Castle.
-  void PlaceDemoBuildings();
+  // Seed a living town on the plains (guilds/tavern/apothecary/houses/sewer/
+  // hunter's camp), recruit heroes, and release a deer herd into nearby forest --
+  // all through Sim::Dispatch/Spawn, so it is a logged command sequence.
+  void SeedTown();
+  // Rebuild the live unit capsules from the sim snapshot each frame, placed on
+  // the terrain surface and coloured per entity. Cheap (a handful of units).
+  void SyncUnits();
+  // Triangle soup (kPolygon: pos.xyz + rgba, 3 verts/tri) for the vision-cone
+  // debug overlay, built from the current snapshot. Empty when nothing has vision.
+  std::vector<float> BuildVisionConeTriangles() const;
   // Clears scene_ and rebuilds it from scratch through the visual SceneComposer:
   // re-mirrors scene_context_'s lighting, generates the symbolic greybox map
   // (SymbolicMapGenerator) and adds its terrain chunks + lake water surfaces,
@@ -124,11 +136,14 @@ class GameView : public AppView {
   // (post_pass) so both the windowed renderer and the headless --screenshot
   // renderer apply it; fed the sim's VisionField each frame.
   VisionOverlayPass vision_pass_;
+  ConeOverlayPass cone_pass_;      // vision-cone debug overlay (toggle in DrawUI)
+  CompositePostPass post_passes_;  // runs vision then cones behind the one slot
 
   // Reused scratch buffer for sim_.Buildings(building_rows_) (BuildScene + HUD
   // + DrawUI), so the per-frame reads don't allocate a fresh vector each call.
   std::vector<badlands::BuildingState> building_rows_;
-  // Same, for sim_.Characters() rows (HUD model + hero picking).
+  // The frame's single character snapshot, taken once by SyncUnits() and reused
+  // by BuildVisionConeTriangles(), RefreshHud() (HUD model), and world picking.
   std::vector<badlands::CharacterState> character_rows_;
 
   // --- Game UI (NOT the ImGui debug UI; see CLAUDE.md) ---
@@ -154,10 +169,25 @@ class GameView : public AppView {
   // Refills building_rows_ from the sim (sized to the LIVE building count so
   // picking never reads a stale tail). Returns the building count.
   uint32_t SnapshotBuildings();
+  // Refills character_rows_ from the sim once per Update, before SyncUnits and
+  // RefreshHud (which both read it) and standing in for picking's snapshot too.
+  // Reuses the buffer (Characters(out) overload). Returns the character count.
+  uint32_t SnapshotCharacters();
   // Rebuilds hud_frame_ from the sim snapshots + selection. Called each Update.
   void RefreshHud();
   // Dispatches the action a HUD button id maps to. Returns true if it ran.
   bool DispatchHudAction(uint32_t hud_id);
+
+  // The biome/height map, generated once in BuildScene and kept so SyncUnits can
+  // seat units on the terrain surface. half_x_/half_z_ convert world XZ (centred
+  // on the origin) to the map's corner-origin local coordinates.
+  MapData map_;
+  float half_x_ = 0.0f;
+  float half_z_ = 0.0f;
+
+  // Live unit capsules, rebuilt from character_rows_ each frame (index-free; the
+  // handles are destroyed and re-added).
+  std::vector<NodeHandle> unit_nodes_;
 
   float dt_ = 0.0f;
 };

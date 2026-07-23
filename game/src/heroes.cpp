@@ -12,9 +12,45 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace badlands {
+
+namespace {
+// Deterministic display name from the spawn slot (a small fixed pool).
+std::string hero_name(uint32_t slot) {
+    static const char* kNames[] = {
+        "Ada",  "Bran", "Cael", "Dara",  "Ell",  "Finn", "Gwen", "Hale",
+        "Isa",  "Joss", "Kira", "Lorne", "Mira", "Nils", "Orin", "Petra",
+    };
+    constexpr uint32_t n = sizeof(kNames) / sizeof(kNames[0]);
+    return kNames[slot % n];
+}
+}  // namespace
+
+namespace {
+// Map-local = world + size*0.5 (MapData spans [0, size]; the world is centred).
+glm::vec2 to_map_local(const MapData& map, glm::vec2 world_xz) {
+    return {world_xz.x + map.size_x_m() * 0.5f, world_xz.y + map.size_z_m() * 0.5f};
+}
+}  // namespace
+
+mapgen::Biome biome_at(const BadlandsGame& game, glm::vec2 world_xz) {
+    if (game.map.empty()) {
+        return mapgen::Biome::Plains;
+    }
+    const glm::vec2 local = to_map_local(game.map, world_xz);
+    return game.map.DominantBiomeAt(local.x, local.y);
+}
+
+float height_at(const BadlandsGame& game, glm::vec2 world_xz) {
+    if (game.map.empty()) {
+        return 0.0f;
+    }
+    const glm::vec2 local = to_map_local(game.map, world_xz);
+    return game.map.HeightAt(local.x, local.y);
+}
 
 int32_t guild_hero_class(int kind) {
     // The recruit set (BuildingDef::recruits) is the single source of truth; a
@@ -102,23 +138,55 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     reg.emplace<MoveTarget>(e);
     reg.emplace<NavPath>(e);
 
-    // Hero state (all entities carry these; a plain spawn has class/home -1).
-    int32_t hero_class = -1;
-    if (home >= 0 && static_cast<size_t>(home) < game.placement.buildings.size()) {
-        hero_class = guild_hero_class(game.placement.buildings[home].kind);
+    // --- archetype recipe: ONLY heroes carry hero state -------------------
+    // This is what stops a goblin owning fatigue/inventory/a home and running
+    // the townsfolk errand loop. Generic combat/movement components above are
+    // archetype-independent and every entity gets them.
+    BrainKind brain_kind = BrainKind::None;
+    switch (desc.archetype) {
+        case Archetype::Hero: {
+            int32_t hero_class = -1;
+            if (home >= 0 && static_cast<size_t>(home) < game.placement.buildings.size()) {
+                hero_class = guild_hero_class(game.placement.buildings[home].kind);
+            }
+            reg.emplace<HeroCharacter>(e, hero_class);
+            HeroSimulationState sim{};
+            sim.inventory = 0;
+            sim.home_building_id = home;
+            reg.emplace<HeroSimulationState>(e, sim);
+            HeroDisplayState disp{};
+            disp.name = hero_name(slot);
+            reg.emplace<HeroDisplayState>(e, disp);
+            brain_kind = BrainKind::Town;
+            break;
+        }
+        case Archetype::Townfolk: {
+            TaxCollectorState tc{};
+            tc.home_building_id = home;  // the Castle it set out from
+            reg.emplace<TaxCollectorState>(e, std::move(tc));
+            brain_kind = BrainKind::Townfolk;
+            break;
+        }
+        case Archetype::Critter: {
+            CritterState cs{};
+            cs.roam_anchor = {desc.pos_x, desc.pos_z};  // wander around the spawn spot
+            reg.emplace<CritterState>(e, cs);
+            brain_kind = BrainKind::Critter;
+            break;
+        }
+        case Archetype::Monster:
+            brain_kind = BrainKind::Monster;
+            break;
     }
-    reg.emplace<HeroClass>(e, hero_class);
-    reg.emplace<Home>(e, home);
-    reg.emplace<Inventory>(e, 0);
 
-    reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr);
+    reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr, brain_kind);
     return slot;
 }
 
 uint32_t roster_count(const BadlandsGame& game, uint32_t building_id) {
     uint32_t n = 0;
-    for (auto [e, home] : game.registry.view<const Home>().each()) {
-        if (home.building_id == static_cast<int32_t>(building_id)) {
+    for (auto [e, hs] : game.registry.view<const HeroSimulationState>().each()) {
+        if (hs.home_building_id == static_cast<int32_t>(building_id)) {
             ++n;
         }
     }
@@ -145,13 +213,14 @@ uint32_t recruit(BadlandsGame& game, uint32_t building_id) {
     return spawn_entity(game, d, static_cast<int32_t>(building_id));
 }
 
-int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
+// The destruction cascade: expel occupants, tombstone + free the grid/nav
+// obstacle, and rehome residents. No policy check -- combat (raze) and the
+// player destroy action (destroy_building_impl) share this; the policy lives in
+// the caller. Returns 0, or -1 for unknown/already-dead.
+int64_t raze_building(BadlandsGame& game, uint32_t building_id) {
     auto& bs = game.placement.buildings;
     if (building_id >= bs.size() || !bs[building_id].alive) {
         return -1;  // unknown or already destroyed
-    }
-    if (!BuildingDefOf(static_cast<BuildingKind>(bs[building_id].kind)).user_destructible) {
-        return -2;  // Castle/House/Sewer are not player-destructible
     }
     entt::registry& reg = game.registry;
 
@@ -183,14 +252,14 @@ int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
     // Reassign residents to the lowest-id alive same-class guild with room, else
     // homeless. Sequential so capacity is honored as homes fill.
     std::vector<entt::entity> residents;
-    for (auto [e, home] : reg.view<Home>().each()) {
-        if (home.building_id == static_cast<int32_t>(building_id)) {
+    for (auto [e, hs] : reg.view<HeroSimulationState>().each()) {
+        if (hs.home_building_id == static_cast<int32_t>(building_id)) {
             residents.push_back(e);
         }
     }
     for (entt::entity e : residents) {
-        int32_t cls = reg.get<HeroClass>(e).value;
-        reg.get<Home>(e).building_id = -1;  // homeless until a slot is found
+        int32_t cls = reg.get<HeroCharacter>(e).hero_class;
+        reg.get<HeroSimulationState>(e).home_building_id = -1;  // homeless until a slot is found
         for (uint32_t i = 0; i < bs.size(); ++i) {
             if (!bs[i].alive || guild_hero_class(bs[i].kind) != cls) {
                 continue;
@@ -198,11 +267,23 @@ int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
             if (roster_count(game, i) >= static_cast<uint32_t>(kGuildRosterCap)) {
                 continue;
             }
-            reg.get<Home>(e).building_id = static_cast<int32_t>(i);
+            reg.get<HeroSimulationState>(e).home_building_id = static_cast<int32_t>(i);
             break;
         }
     }
     return 0;
+}
+
+// Player destroy action: only the 7 user-buildable kinds may be razed this way.
+int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
+    auto& bs = game.placement.buildings;
+    if (building_id >= bs.size() || !bs[building_id].alive) {
+        return -1;
+    }
+    if (!BuildingDefOf(static_cast<BuildingKind>(bs[building_id].kind)).user_destructible) {
+        return -2;  // Castle/House/Sewer are not player-destructible
+    }
+    return raze_building(game, building_id);
 }
 
 namespace {
@@ -235,11 +316,14 @@ bool hero_enter(BadlandsGame& game, entt::entity e, int kind) {
     }
     game.registry.emplace_or_replace<InsideBuilding>(e, static_cast<int32_t>(bid),
                                                      kInsideDurationSeconds);
+    if (kind == static_cast<int>(BuildingKind::Tavern)) {
+        game.registry.get<HeroSimulationState>(e).boredom = 0.0f;  // entertained
+    }
     return true;
 }
 
 bool hero_enter_home(BadlandsGame& game, entt::entity e) {
-    int32_t home = game.registry.get<Home>(e).building_id;
+    int32_t home = game.registry.get<HeroSimulationState>(e).home_building_id;
     auto& bs = game.placement.buildings;
     if (home < 0 || static_cast<size_t>(home) >= bs.size() || !bs[home].alive) {
         return false;
@@ -251,7 +335,9 @@ bool hero_enter_home(BadlandsGame& game, entt::entity e) {
         return false;
     }
     game.registry.emplace_or_replace<InsideBuilding>(e, home, kInsideDurationSeconds);
-    game.registry.get<Inventory>(e).count = 0;  // resting empties inventory (closes the loop)
+    auto& sim = game.registry.get<HeroSimulationState>(e);
+    sim.inventory = 0;   // resting empties inventory (closes the loop)
+    sim.fatigue = 0.0f;  // sleeping at home clears fatigue
     return true;
 }
 
@@ -260,7 +346,7 @@ bool hero_buy(BadlandsGame& game, entt::entity e) {
     if (!at_building_of_kind(game, e, static_cast<int32_t>(BuildingKind::Apothecary), bid)) {
         return false;
     }
-    game.registry.get<Inventory>(e).count = kInventoryCap;
+    game.registry.get<HeroSimulationState>(e).inventory = kInventoryCap;
     return true;
 }
 

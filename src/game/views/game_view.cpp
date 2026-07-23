@@ -1,7 +1,9 @@
 #include "game/views/game_view.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -17,6 +19,7 @@
 #include "core/geometry_type.hpp"
 #include "engine/rendering/fog_sim.hpp"
 #include "engine/rendering/geometry/mesh_builder_utils.hpp"
+#include "engine/rendering/geometry/primitive_mesh_builders.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
@@ -46,6 +49,20 @@ float yaw_from_rotation_index(int32_t rotation_index) {
 // Game-UI text size in LOGICAL pixels. The atlas is baked once at this size, so
 // changing it means a re-bake, not a re-layout.
 constexpr float kHudFontPx = 18.0f;
+
+// Detail-panel title for a picked unit: its display name if it has one (heroes),
+// else the archetype so a picked deer/rat/townfolk is labelled honestly rather
+// than all reading "Hero".
+std::string unit_title(const CharacterState& c) {
+  if (c.name[0] != '\0') return c.name;
+  switch (static_cast<Archetype>(c.archetype)) {
+    case Archetype::Hero: return "Hero";
+    case Archetype::Townfolk: return "Townfolk";
+    case Archetype::Critter: return "Critter";
+    case Archetype::Monster: return "Monster";
+  }
+  return "Unit";
+}
 
 // Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
 // this much REAL time (the directional light + shadows still move every frame).
@@ -81,17 +98,18 @@ constexpr const char* kBiomeManifestPath =
 // lattice density (one X-split quad per cell), so there is no subdiv knob.
 constexpr int kChunkCells = 16;
 
-// The demo buildings (sim-placed around the origin) are shifted onto the
-// southern plains band of the origin-centered symbolic map so they sit on land
-// rather than in the central lake. ~one tile south of center. This is the whole
-// sim->render mapping (rendered_world = sim_pos + (0, this)); the fog-of-war
-// overlay uses it to align the SIM-frame vision grid with the rendered world.
-constexpr float kDemoBuildingsSouthShift = 51.2f;
+// Sim and render coordinates are IDENTICAL: SeedTown places the town on the
+// real plains and BuildScene/SyncUnits render everything at its true sim
+// position (the old +z demo-building shift is gone). So the fog-of-war overlay's
+// sim->render offset is zero.
 
-// Fog-of-war vision grid (SIM frame). Covers the colony's ~96 m playable grid
-// (kGridHalfExtentTiles = 48) plus margin for long building vision, at ~1 m per
-// texel. Terrain outside this maps to terra-incognita (rendered black).
-constexpr float kVisionHalfExtentM = 64.0f;
+// Fog-of-war vision grid (SIM frame). Sized to the WHOLE map so the only hard
+// black edge is the real map boundary -- everything inside is organic FoW
+// (discovered vs not). (It was 64 = half the map, a stale value from when the
+// gameplay grid was 96 m; anything past 64 rendered permanently black, cutting
+// the southern town. See kGridHalfExtentTiles, now the full map.)
+constexpr float kVisionHalfExtentM =
+    static_cast<float>(kGridHalfExtentTiles);  // 128 = map half-extent
 constexpr float kVisionTexelM = 1.0f;
 
 // Flat water surface mesh from the map's block-aligned lake triangles. Same
@@ -179,36 +197,46 @@ bool GameView::Initialize(const RenderContext& ctx) {
 
   // sim_ is constructed with a nullptr brain_script_source (mock brains only;
   // no noiser script needed for a static-buildings scaffold) -- construction
-  // also prebuilds the Castle at the origin.
-  PlaceDemoBuildings();
+  // also prebuilds the Castle at kCastleSpawn (the plains, at the town centre).
+  SeedTown();
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
   if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
 
-  // Fog-of-war overlay. Configure the SIM-frame vision grid, wire the
-  // sim->render offset (so the SIM-frame field aligns with the rendered world),
-  // and register the pass on scene_context_ (picked up by any renderer). Resolve
-  // once now (ResolveVision publishes the field without advancing the sim) so the
-  // first rendered frame -- windowed or headless --screenshot -- has a populated
-  // field.
+  // Fog-of-war overlay. Configure the SIM-frame vision grid, register the pass
+  // on scene_context_ (picked up by any renderer, incl. the headless
+  // --screenshot one), and resolve once now (ResolveVision publishes without
+  // advancing the sim) so the first frame has a populated field. sim == render,
+  // so the sim->render offset is zero.
   if (!vision_pass_.Initialize(device_, queue_, ctx.pipeline_gen)) {
     spdlog::error("GameView::Initialize: vision overlay pass init failed");
     return false;
   }
-  vision_pass_.SetSimToWorldOffset(glm::vec2(0.0f, kDemoBuildingsSouthShift));
+  vision_pass_.SetSimToWorldOffset(glm::vec2(0.0f, 0.0f));
   sim_.ConfigureVision(-kVisionHalfExtentM, -kVisionHalfExtentM,
                        2.0f * kVisionHalfExtentM, 2.0f * kVisionHalfExtentM,
                        kVisionTexelM);
   sim_.ResolveVision();
   vision_pass_.Upload(sim_.GetVisionField());
-  scene_context_.post_pass = &vision_pass_;
 
-  // Fixed-angle overview of the 256 m symbolic map (centered on the origin):
-  // a fairly top-down pitch keeps the whole biome layout + central lake legible;
-  // scroll to zoom in on the demo buildings on the southern plains.
-  gamecam_.focus = glm::vec3(0.0f, 0.0f, 0.0f);
-  gamecam_.pitch_deg = 64.0f;
-  gamecam_.height = 175.0f;
+  // Vision-cone debug overlay (off by default; toggled in the debug panel).
+  // Chained AFTER the fog-of-war overlay so the cones draw on top of the
+  // FoW-modulated scene rather than being blacked out by it.
+  if (!cone_pass_.Initialize(device_, queue_, ctx.pipeline_gen)) {
+    spdlog::error("GameView::Initialize: cone overlay pass init failed");
+    return false;
+  }
+  post_passes_.Add(&vision_pass_);
+  post_passes_.Add(&cone_pass_);
+  scene_context_.post_pass = &post_passes_;
+
+  // Frame the living town on the southern plains, centred on the colony Castle
+  // (kCastleSpawn) rather than the empty origin lake -- close enough that the
+  // units read as characters. Scroll to zoom out to the whole 256 m map; WASD to
+  // roam.
+  gamecam_.focus = glm::vec3(kCastleSpawnX, 0.0f, kCastleSpawnZ);
+  gamecam_.pitch_deg = 58.0f;
+  gamecam_.height = 70.0f;
   gamecam_.UpdateCamera(camera_);
 
   if (!matlib_.ok()) {
@@ -253,37 +281,81 @@ void GameView::RebakeSky(const DaylightState& state) {
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 }
 
-void GameView::PlaceDemoBuildings() {
-  struct Demo {
+void GameView::SeedTown() {
+  // The town sits on the southern plains band (world z ~ +50), which is land --
+  // so buildings render where the sim places them, no shift. The prebuilt Castle
+  // (kCastleSpawn, id 0) sits at the town centre and is the colony seat + the
+  // tax collector's deposit point; these buildings ring it. The central lake at
+  // the map origin is now just scenery.
+  struct Town {
     BuildingKind kind;
     float x, z;
     int32_t rotation_index;
   };
-  // Well clear of the origin Castle's 4x4 footprint + 1-tile margin, and
-  // spaced >= 8 world units apart so no demo building's footprint + margin
-  // can overlap another's regardless of rotation.
-  constexpr Demo kDemo[] = {
-      {BuildingKind::FreeCompanyQuarters, 12.0f, 0.0f, 0},
-      {BuildingKind::Tavern, 12.0f, 10.0f, 2},  // rotated 90deg -- proves yaw wiring
-      {BuildingKind::Watchtower, -12.0f, 0.0f, 0},
-      {BuildingKind::Apothecary, -12.0f, 10.0f, 0},
+  constexpr Town kTown[] = {
+      {BuildingKind::FreeCompanyQuarters, -16.0f, 48.0f, 0},
+      {BuildingKind::HuntersCamp, 16.0f, 48.0f, 0},
+      {BuildingKind::Tavern, -16.0f, 60.0f, 0},
+      {BuildingKind::Apothecary, 16.0f, 60.0f, 0},
+      {BuildingKind::Watchtower, 0.0f, 42.0f, 0},
+      {BuildingKind::House, -6.0f, 68.0f, 0},
+      {BuildingKind::House, 6.0f, 68.0f, 0},
+      {BuildingKind::Sewer, 28.0f, 56.0f, 0},
   };
-  for (const Demo& d : kDemo) {
-    Action action{
-        .kind = ActionKind::PlaceBuilding,
-        .target_id = 0,
-        .world_x = d.x,
-        .world_z = d.z,
-        .param_a = static_cast<int32_t>(d.kind),
-        .param_b = d.rotation_index,
-    };
-    const int64_t id = sim_.Dispatch(action);
+  for (const Town& t : kTown) {
+    Action place{.kind = ActionKind::PlaceBuilding,
+                 .target_id = 0,
+                 .world_x = t.x,
+                 .world_z = t.z,
+                 .param_a = static_cast<int32_t>(t.kind),
+                 .param_b = t.rotation_index};
+    const int64_t id = sim_.Dispatch(place);
     if (id < 0) {
-      spdlog::error(
-          "GameView::PlaceDemoBuildings: placement failed for kind={} at "
-          "({}, {}) rot={}",
-          static_cast<int32_t>(d.kind), d.x, d.z, d.rotation_index);
+      spdlog::warn("GameView::SeedTown: placing kind {} at ({}, {}) failed",
+                   static_cast<int32_t>(t.kind), t.x, t.z);
+      continue;
     }
+    // Recruit a few from each guild (Free Company + Hunter's Camp).
+    if (t.kind == BuildingKind::FreeCompanyQuarters ||
+        t.kind == BuildingKind::HuntersCamp) {
+      for (int i = 0; i < 3; ++i) {
+        Action recruit{.kind = ActionKind::RecruitHero,
+                       .target_id = static_cast<uint32_t>(id),
+                       .world_x = 0.0f,
+                       .world_z = 0.0f,
+                       .param_a = 0,
+                       .param_b = 0};
+        sim_.Dispatch(recruit);
+      }
+    }
+  }
+
+  // A deer herd in the forest near the town, so the hunter has prey in reach.
+  // Golden-angle search outward from the town centre for Forest spots.
+  const glm::vec2 town_center{0.0f, 56.0f};
+  int deer = 0;
+  for (int i = 0; i < 600 && deer < 6; ++i) {
+    const float ang = static_cast<float>(i) * 2.399963f;
+    const float rad = 12.0f + static_cast<float>(i % 30) * 2.0f;
+    const glm::vec2 p = town_center + glm::vec2{std::cos(ang) * rad, std::sin(ang) * rad};
+    if (sim_.BiomeAt(p.x, p.y) != 2 /* mapgen::Biome::Forest */) {
+      continue;
+    }
+    CharacterDesc d{};
+    d.archetype = Archetype::Critter;
+    d.pos_x = p.x;
+    d.pos_z = p.y;
+    d.team = 2;
+    d.hp = 8.0f;
+    d.move_speed = 3.0f;
+    d.attack_cooldown = 1.0f;
+    d.size_x = d.size_z = 0.7f;
+    d.size_y = 1.0f;
+    d.color_r = 0.62f;
+    d.color_g = 0.42f;
+    d.color_b = 0.20f;
+    sim_.Spawn(d);
+    ++deer;
   }
 }
 
@@ -301,11 +373,15 @@ void GameView::BuildScene() {
 
   SceneComposer composer(mode_);
 
-  // Generate the symbolic greybox map and center it on the world origin (map
-  // coordinates are corner-origin, so shift the whole map by -size/2).
-  const MapData map = SymbolicMapGenerator{}.Generate();
+  // Generate the symbolic map once and keep it (SyncUnits seats units on it).
+  // Map coordinates are corner-origin, so center it on the world origin by
+  // shifting the whole map by -size/2. World XZ -> map-local is world + half.
+  map_ = SymbolicMapGenerator{}.Generate();
+  const MapData& map = map_;
   const float half_x = map.size_x_m() * 0.5f;
   const float half_z = map.size_z_m() * 0.5f;
+  half_x_ = half_x;
+  half_z_ = half_z;
   const glm::mat4 center =
       glm::translate(glm::mat4(1.0f), glm::vec3(-half_x, 0.0f, -half_z));
 
@@ -336,19 +412,112 @@ void GameView::BuildScene() {
     composer.AddWater(std::move(lake), water_params, center);
   }
 
-  // Demo buildings from the sim, shifted onto the southern plains band (so they
-  // sit on land, not the central lake) and placed through the composer so they
-  // honor the render mode's materials.
+  // Buildings at their true sim positions (SeedTown placed the town on the
+  // plains, so no render shift is needed) -- sim and render coordinates match,
+  // which is what lets the biome-aware AI and its capsules line up with the
+  // terrain they reason about.
   sim_.Buildings(building_rows_);
   for (const BuildingState& b : building_rows_) {
-    const glm::vec2 world(b.center_x, b.center_z + kDemoBuildingsSouthShift);
-    // Ground height straight from the map's query API (world -> map-local).
+    const glm::vec2 world(b.center_x, b.center_z);
     const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
     AddBuildingToComposer(composer, b.kind, world,
                           yaw_from_rotation_index(b.rotation_index), ground);
   }
 
   composer.ComposeInto(scene_, matlib_, terrain_arrays_, water_factory_.get());
+  unit_nodes_.clear();  // ComposeInto rebuilt scene_; the unit pool is gone with it
+}
+
+void GameView::SyncUnits() {
+  // Rebuild the live unit capsules from the snapshot each frame, coloured per
+  // entity and seated on the terrain surface. A handful of units, so a rebuild
+  // (rather than a recoloured fixed pool) is the simple, correct choice; hidden
+  // (inside-building) units are skipped, matching the sim's snapshot contract.
+  for (NodeHandle n : unit_nodes_) {
+    scene_.DestroyNode(n);
+  }
+  unit_nodes_.clear();
+
+  // character_rows_ is the frame's single character snapshot, taken by
+  // SnapshotCharacters() earlier in Update() and shared with RefreshHud +
+  // world picking -- read it, don't re-snapshot.
+  int index = 0;
+  for (const CharacterState& c : character_rows_) {
+    if (c.inside_building_id >= 0) {
+      continue;  // hidden
+    }
+    const float ground = map_.empty()
+                             ? 0.0f
+                             : map_.HeightAt(c.pos_x + half_x_, c.pos_z + half_z_);
+    const float radius = 0.5f * std::min(c.size_x, c.size_z);
+    const float cyl = std::max(0.1f, c.size_y - 2.0f * radius);
+    const glm::vec3 color(c.color_r, c.color_g, c.color_b);
+    const DeferredMaterial mat = matlib_.SolidColor(color, 0.6f);
+
+    // Face the direction of travel: kCharacterForward is +Z, so yaw = atan2 of
+    // the facing XZ turns +Z onto (facing_x, facing_z). Applied to the body (a
+    // symmetric capsule, so invisible on its own) AND to a small nose that makes
+    // the facing legible.
+    const float yaw = std::atan2(c.facing_x, c.facing_z);
+    const glm::mat4 base =
+        glm::translate(glm::mat4(1.0f), glm::vec3(c.pos_x, ground, c.pos_z)) *
+        glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+
+    auto capsule = GenerateCapsule(radius, cyl, 12);
+    const std::string body = "unit_" + std::to_string(index) + "_body";
+    unit_nodes_.push_back(AddMeshEntity(scene_, body.c_str(), std::move(capsule), mat, base));
+
+    // A small nose nub at the front (local +Z), mid-body height, so which way a
+    // unit faces reads at a glance even though the capsule is round.
+    const float nose = 0.35f * radius;
+    auto nub = GenerateCube(glm::vec3(nose));
+    const glm::mat4 nose_xf =
+        base * glm::translate(glm::mat4(1.0f),
+                              glm::vec3(0.0f, 0.5f * c.size_y, radius + nose));
+    const std::string nose_name = "unit_" + std::to_string(index) + "_nose";
+    unit_nodes_.push_back(
+        AddMeshEntity(scene_, nose_name.c_str(), std::move(nub), mat, nose_xf));
+    ++index;
+  }
+
+  // Vision-cone debug overlay geometry (only when the toggle is on): a flat,
+  // translucent sector per vision-granting unit, floating just above terrain and
+  // oriented by facing. Fed to the cone post-pass; empty clears it.
+  if (cone_pass_.enabled()) {
+    cone_pass_.SetTriangles(BuildVisionConeTriangles());
+  } else {
+    cone_pass_.SetTriangles({});
+  }
+}
+
+std::vector<float> GameView::BuildVisionConeTriangles() const {
+  constexpr float kConeLift = 0.4f;   // metres above terrain, so it clearly floats
+  constexpr float kConeAlpha = 0.28f;  // straight-alpha translucency
+  constexpr float kSegRad = 0.1745f;   // ~10 deg per fan segment
+  std::vector<float> v;
+  for (const CharacterState& c : character_rows_) {
+    if (c.vision_radius <= 0.0f || c.inside_building_id >= 0) {
+      continue;  // no vision, or hidden inside a building
+    }
+    const float ground =
+        map_.empty() ? 0.0f : map_.HeightAt(c.pos_x + half_x_, c.pos_z + half_z_);
+    const float y = ground + kConeLift;
+    const float r = c.vision_radius;
+    const float center = std::atan2(c.facing_x, c.facing_z);  // +Z is 0
+    const float half = glm::radians(std::min(c.vision_cone_half_angle_deg, 180.0f));
+    const int segs = std::max(3, static_cast<int>(std::ceil(2.0f * half / kSegRad)));
+    auto push = [&](float x, float z) {
+      v.insert(v.end(), {x, y, z, c.color_r, c.color_g, c.color_b, kConeAlpha});
+    };
+    for (int i = 0; i < segs; ++i) {
+      const float a0 = center - half + 2.0f * half * static_cast<float>(i) / segs;
+      const float a1 = center - half + 2.0f * half * static_cast<float>(i + 1) / segs;
+      push(c.pos_x, c.pos_z);                                              // apex
+      push(c.pos_x + std::sin(a0) * r, c.pos_z + std::cos(a0) * r);       // arc i
+      push(c.pos_x + std::sin(a1) * r, c.pos_z + std::cos(a1) * r);       // arc i+1
+    }
+  }
+  return v;
 }
 
 void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
@@ -406,26 +575,36 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
         return;
       }
 
-      // World pick: ray against the ground plane, then the drawn footprints.
+      // World pick: ray against the terrain surface, then the drawn footprints.
+      // Sim and render coordinates are identical now (the old demo south-shift is
+      // gone), so the picked XZ is already sim space. GroundPickXZ follows the
+      // terrain height (not the y=0 plane) so a unit seated on elevated terrain
+      // is picked where it appears rather than parallaxed off its footprint.
       const Ray ray = ScreenPointToRay(camera_, cursor_logical, logical);
-      glm::vec3 hit;
-      if (!IntersectGroundPlane(ray, 0.0f, hit)) return;  // at/above the horizon
+      glm::vec2 sim_world;
+      if (!GroundPickXZ(ray.origin, ray.dir,
+                        [this](glm::vec2 p) {
+                          return map_.empty()
+                                     ? 0.0f
+                                     : map_.HeightAt(p.x + half_x_, p.y + half_z_);
+                        },
+                        sim_world)) {
+        return;  // at/above the horizon
+      }
 
-      // BuildScene renders the demo buildings shifted south by
-      // kDemoBuildingsSouthShift, but building_rows_ (and BuildingAtWorld)
-      // are in the sim's UNSHIFTED space. Undo the render shift so the pick
-      // space matches the sim space -- without this every building is
-      // unclickable. Keep this the inverse of the shift applied in BuildScene.
-      const glm::vec2 sim_world(hit.x, hit.z - kDemoBuildingsSouthShift);
-
-      // NOTE: heroes are NOT pickable in this stage. BuildScene composes only
-      // terrain, water, and buildings -- no character/hero geometry is drawn --
-      // so a hero pick would select an entity invisible on screen. HeroAtWorld
-      // and the hero HUD branch are kept, ready to wire up once heroes render.
-      selected_hero_ = kNoPick;
+      // Units (small foreground capsules) win over the larger building footprints
+      // they may stand on. character_rows_ / building_rows_ are this frame's
+      // snapshot, so a pick hits exactly what was last drawn; HeroAtWorld skips
+      // hidden (inside-building) units, which aren't drawn.
+      selected_hero_ = HeroAtWorld(
+          character_rows_.data(),
+          static_cast<uint32_t>(character_rows_.size()), sim_world);
       selected_building_ =
-          BuildingAtWorld(building_rows_.data(),
-                          static_cast<uint32_t>(building_rows_.size()), sim_world);
+          selected_hero_ != kNoPick
+              ? kNoPick
+              : BuildingAtWorld(
+                    building_rows_.data(),
+                    static_cast<uint32_t>(building_rows_.size()), sim_world);
       return;
     }
 
@@ -541,6 +720,8 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   }
 
   gamecam_.UpdateCamera(camera_);
+  SnapshotCharacters();  // one snapshot; SyncUnits + RefreshHud + picking share it
+  SyncUnits();  // live AI capsules on the terrain, rebuilt from the snapshot
   scene_.SyncToRegistry(registry_, scene_context_);
 
   {
@@ -557,13 +738,21 @@ uint32_t GameView::SnapshotBuildings() {
   return static_cast<uint32_t>(building_rows_.size());
 }
 
+uint32_t GameView::SnapshotCharacters() {
+  // Sized to the LIVE character count (same contract as SnapshotBuildings), and
+  // reuses the buffer's capacity via the fill overload. Taken once in Update()
+  // before every consumer, so there is no ordering dependency between them.
+  sim_.Characters(character_rows_);
+  return static_cast<uint32_t>(character_rows_.size());
+}
+
 void GameView::RefreshHud() {
-  // Snapshot the sim into the reused row buffers. These back BOTH the HUD model
-  // and picking, so what the panel describes is exactly what a click can hit.
+  // Snapshot the buildings into the reused buffer; character_rows_ was already
+  // filled by SyncUnits() earlier this frame. Both back the HUD model AND
+  // picking, so what the panel describes is exactly what a click can hit.
   // Update() runs this before DrawUI() the same frame, so DrawUI reuses these
   // rows + the cached scalars below instead of re-reading them from the sim.
   hud_building_total_ = SnapshotBuildings();
-  character_rows_ = sim_.Characters();
 
   const WorldState world = sim_.World();
   roster_cap_ = world.guild_roster_cap;
@@ -582,16 +771,17 @@ void GameView::RefreshHud() {
     model.clock_text = buf;
   }
 
-  // A selection that no longer exists (destroyed, or a hero that entered a
-  // building) silently clears rather than describing a stale row.
+  // A selection that no longer exists (destroyed, or a unit that entered a
+  // building) silently clears rather than describing a stale/undrawn row.
+  // SelectedUnit enforces the same "indoors units aren't selectable" rule as
+  // the pick, so a unit that walks inside drops the panel.
   const BuildingState* selected = nullptr;
   for (const BuildingState& b : building_rows_) {
     if (b.id == selected_building_) selected = &b;
   }
-  const CharacterState* hero = nullptr;
-  for (const CharacterState& c : character_rows_) {
-    if (c.id == selected_hero_) hero = &c;
-  }
+  const CharacterState* hero = SelectedUnit(
+      character_rows_.data(), static_cast<uint32_t>(character_rows_.size()),
+      selected_hero_);
   if (!selected) selected_building_ = kNoPick;
   if (!hero) selected_hero_ = kNoPick;
 
@@ -648,7 +838,7 @@ void GameView::RefreshHud() {
     HudSelection s;
     s.kind = HudSelection::Kind::Hero;
     s.id = hero->id;
-    s.title = "Hero";
+    s.title = unit_title(*hero);
     s.rows.emplace_back("id", "#" + std::to_string(hero->id));
     {
       char hp[48];
@@ -708,6 +898,13 @@ void GameView::DrawUI() {
   if (ImGui::CollapsingHeader("Fog of War", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Checkbox("Enabled##fow", &vision_pass_.mutable_enabled());
     ImGui::TextUnformatted("black = terra-incognita, gray = dormant");
+  }
+
+  // --- Gameplay debug layer ---
+  if (ImGui::CollapsingHeader("Gameplay Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Checkbox("Vision cones", &cone_pass_.mutable_enabled());
+    ImGui::TextUnformatted(
+        "translucent sector per unit, above terrain, along facing");
   }
 
   // --- Fog (self-contained collapsing section) ---

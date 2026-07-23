@@ -8,6 +8,7 @@
 #include <entt/entt.hpp>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace badlands {
@@ -16,6 +17,38 @@ namespace badlands {
 constexpr int kInventoryCap = 2;                 // elixirs a hero can carry
 constexpr float kInsideDurationSeconds = 3.0f;   // time hidden inside a building
 constexpr float kEntranceRadius = 0.6f;          // how close to a door to enter
+
+// --- day/night clock (integer milliseconds, fixed 30 Hz) --------------------
+// Sim time is an int64 millisecond count advanced by a compile-time constant
+// each tick; no float accumulator (deterministic, no drift, no dt coupling).
+constexpr int64_t kSimHz = 30;                        // fixed sim rate
+constexpr int64_t kMillisPerTick = 1000 / kSimHz;     // 33 ms/tick (~30 Hz, ~1% round)
+constexpr int64_t kSecondsPerDay = 120;               // fast day for prototyping
+constexpr int64_t kMillisPerDay = kSecondsPerDay * 1000;  // day length in ms
+constexpr float kNightStart = 0.75f;                  // ~18:00
+constexpr float kNightEnd = 0.25f;                    // ~06:00
+
+// Fraction of the day in [0,1): 0 = midnight, 0.5 = midday.
+inline float time_of_day(int64_t world_millis) {
+    int64_t t = world_millis % kMillisPerDay;
+    if (t < 0) {
+        t += kMillisPerDay;
+    }
+    return static_cast<float>(t) / static_cast<float>(kMillisPerDay);
+}
+inline uint32_t day_count(int64_t world_millis) {
+    return static_cast<uint32_t>(world_millis / kMillisPerDay);
+}
+inline bool is_night(float tod) { return tod >= kNightStart || tod < kNightEnd; }
+
+// --- needs growth (policy placeholders) -------------------------------------
+// Per-tick deltas for fatigue/boredom. Deterministic (not dt-scaled). Defaults
+// sized so an unmet need saturates over roughly one day; boredom rises faster
+// so heroes seek the tavern before nightfall. These are tunable policy, not the
+// architecture.
+constexpr float kFatiguePerTick =
+    static_cast<float>(kMillisPerTick) / static_cast<float>(kMillisPerDay);
+constexpr float kBoredomPerTick = kFatiguePerTick * 2.0f;
 
 struct Position {
     glm::vec2 pos;  // XZ
@@ -78,23 +111,55 @@ struct Intent {
     glm::vec2 dir;
 };
 
-// --- v0.3 hero/town state ---------------------------------------------------
+// --- hero state: definition / simulation / display --------------------------
+// Hero-specific data grouped on the static-config / dynamic-state / display
+// axis. Combat + movement stay on the generic components (Health/Stats/
+// CooldownTimer/MoveTarget/NavPath/Intent/Team/InsideBuilding/MeleeLock) shared
+// by all entities.
 
-// Hero archetype (Mercenary/Hunter/Grave Robber/Apprentice). Decorative in v0.3: it only
-// distinguishes spawn color; the class name is derived renderer-side from the
-// home guild's kind, so this value never crosses the C API.
-struct HeroClass {
-    int32_t value;
+// Definition (static): the hero archetype (Mercenary/Hunter/Grave Robber/
+// Apprentice). The class name is derived renderer-side from the home guild kind,
+// so this value never crosses the C API.
+struct HeroCharacter {
+    int32_t hero_class;
 };
 
-// The hero's dedicated home = its recruiting guild; -1 once homeless.
-struct Home {
-    int32_t building_id;
+// Simulation (dynamic): per-tick hero state.
+//  - fatigue/boredom: day/night needs in [0,1] (0 = satisfied, rising over time)
+//  - behavior: last chosen Behaviour id (inspection only; -1 = unknown)
+//  - inventory: collect-only elixir count in [0, kInventoryCap]
+//  - home_building_id: dedicated home = recruiting guild; -1 once homeless
+struct HeroSimulationState {
+    float fatigue = 0.0f;
+    float boredom = 0.0f;
+    int32_t behavior = -1;
+    int32_t inventory = 0;
+    int32_t home_building_id = -1;
 };
 
-// Collect-only elixir count in [0, kInventoryCap].
-struct Inventory {
-    int32_t count;
+// Display: renderer/panel-facing.
+struct HeroDisplayState {
+    std::string name;
+};
+
+// Critter (deer) dynamic state. Deer wander around a fixed home range and cycle
+// walk -> graze -> walk; the anchor keeps them near where they spawned (their
+// forest) instead of drifting off the map.
+struct CritterState {
+    glm::vec2 roam_anchor{0.0f, 0.0f};  // centre of the wander range (spawn spot)
+    int32_t behavior = -1;              // last chosen Behavior, for inspection
+};
+
+// Tax collector (townfolk) dynamic state. It makes a round of the buildings
+// owing tax, banking each into `carried_gold`, then returns to a Castle/
+// Watchtower to deposit the carry into the player's gold and despawn. `visited`
+// stops it collecting the same building twice in one round; dying with a carry
+// (e.g. to a rat) loses that gold -- the vulnerability the round creates.
+struct TaxCollectorState {
+    std::vector<uint32_t> visited;  // building ids already collected this round
+    uint32_t carried_gold = 0;
+    int32_t home_building_id = -1;  // the Castle it set out from (deposit fallback)
+    int32_t behavior = -1;          // last chosen Behavior, for inspection
 };
 
 // Present while a hero is hidden inside a building; `timer` counts down to the

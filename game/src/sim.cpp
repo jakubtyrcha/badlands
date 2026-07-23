@@ -9,16 +9,28 @@
 
 #include "brain.h"
 #include "components.h"
-#include "heroes.h"
+#include "heroes.h"  // spawn_entity, biome_at
+#include "command.h"
 #include "movement.h"
+#include "needs.h"
 #include "placement.h"
 #include "vision.h"
+
+#include "critter_brain.h"
+#include "economy.h"
+#include "monster_brain.h"
+#include "townfolk_brain.h"
+
+#include "game/map/symbolic_map_generator.hpp"
+#include "town_brain.h"
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -29,15 +41,48 @@ namespace badlands {
 namespace {
 
 // Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain: set a durable MoveTarget on the nearest enemy and
-// swing when in range. The movement pipeline walks the MoveTarget; the combat
-// pass re-validates the attack Intent authoritatively.
-void mock_think(BadlandsGame& game, entt::entity self) {
+// downgraded) script brain. Combat pre-empt: set a durable MoveTarget on the
+// nearest enemy and swing when in range (the movement pipeline walks the
+// MoveTarget; the combat pass re-validates the attack Intent authoritatively).
+// With no enemy, delegate to the C++ town brain (needs/day-night loop).
+void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
     MoveTarget& mt = reg.get<MoveTarget>(self);
+    const BrainKind kind = reg.get<Brain>(self).kind;
+
+    // Critters and townfolk never fight -- their brains own their movement, so
+    // they skip the combat pre-empt entirely (otherwise a neutral deer, or a
+    // peaceful tax collector, would read an other-team unit as an "enemy" and
+    // give chase). Guards (a future townfolk) will opt back into combat.
+    if (kind == BrainKind::Critter) {
+        critter_think(game, slot);
+        return;
+    }
+    if (kind == BrainKind::Townfolk) {
+        townfolk_think(game, slot);
+        return;
+    }
+
+    // Combat pre-empt for the fighting archetypes: chase and swing at the
+    // nearest enemy. The movement pipeline walks the MoveTarget; the combat pass
+    // re-validates the attack Intent authoritatively.
     entt::entity target = nearest_enemy(game, self);
     if (target == entt::null) {
-        mt.kind = MoveTarget::Kind::None;
+        // No enemy: the archetype's own brain decides.
+        switch (kind) {
+            case BrainKind::Town:
+                town_think(game, slot);
+                break;
+            case BrainKind::Monster:
+                monster_think(game, slot);  // no unit enemy -> gnaw a building
+                break;
+            case BrainKind::None:
+                mt.kind = MoveTarget::Kind::None;
+                break;
+            case BrainKind::Critter:
+            case BrainKind::Townfolk:
+                break;  // handled above
+        }
         return;
     }
     const Stats& stats = reg.get<Stats>(self);
@@ -68,6 +113,18 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
                    [] { sampo::noiser::detail::SetHostCallProfiling(false); });
 
     auto game = std::make_unique<BadlandsGame>();
+    // Terrain/biomes the sim reasons about. SymbolicMapGenerator is a pure
+    // function of its compile-time constants, so every world would generate a
+    // byte-identical map -- generate once and copy (the shaping blur passes cost
+    // ~0.7 s, which a test suite creating a world per case cannot pay).
+    // Determinism is unaffected: the copied data is the same either way.
+    // The placement/movement grid must span the whole map (tile == 1 world unit ==
+    // 1 map metre). If the map size changes, kGridHalfExtentTiles must track it.
+    static_assert(2 * kGridHalfExtentTiles ==
+                      static_cast<int>(SymbolicMapGenerator::kMapSizeM),
+                  "gameplay grid must span the full map");
+    static const MapData kSymbolicMap = SymbolicMapGenerator{}.Generate();
+    game->map = kSymbolicMap;
     if (brain_script_source != nullptr) {
         std::string error;
         game->brains = BrainRuntime::create(*game, brain_script_source, error);
@@ -75,16 +132,27 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
             report_bug(*game, "compile", error);
         }
     }
-    // The colony starts with only the castle, prebuilt at the origin. Not a
-    // player placement: it seeds no urban sprawl.
-    place_building(*game,
-                   PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, 0.0f, 0.0f},
-                   /*player=*/false);
+    // The colony starts with only the castle, prebuilt on the plains south of
+    // the central lake (the map origin is water). Not a player placement: it
+    // seeds no urban sprawl. This is the colony seat the game's town forms
+    // around; kCastleSpawn is the single source of truth for it.
+    place_building(
+        *game,
+        PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, kCastleSpawnX,
+                      kCastleSpawnZ},
+        /*player=*/false);
     return game;
 }
 
 void tick_world(BadlandsGame& g, float dt) {
     auto& registry = g.registry;
+
+    // Replay: commands stamped at the CURRENT time were originally applied
+    // before this tick (player dispatches between ticks), so they land first.
+    apply_replay_commands(g);
+
+    // Day/night clock: integer ms, fixed compile-time increment (deterministic).
+    g.world_millis += kMillisPerTick;
 
     for (auto [e, cooldown] : registry.view<CooldownTimer>().each()) {
         cooldown.remaining = std::max(0.0f, cooldown.remaining - dt);
@@ -93,25 +161,46 @@ void tick_world(BadlandsGame& g, float dt) {
     // Reappear hidden heroes whose stay has elapsed, before they think again.
     advance_inside_timers(g, dt);
 
+    // Needs system: fatigue/boredom rise for active (non-hidden) heroes, so
+    // brains this tick see fresh values.
+    advance_needs(g);
+
+    // Town economy + population: midnight tax accrual, then periodic spawning
+    // (tax collectors from the castle). Deterministic clock-driven systems, so
+    // they run identically in live and replay -- before think, so a just-spawned
+    // entity thinks and a just-accrued building is visible the same tick.
+    advance_economy(g);
+    run_spawners(g);
+
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.
     for (auto [e, intent] : registry.view<Intent>().each()) {
         intent = {.kind = 0, .dir = {0.0f, 0.0f}};
     }
-    for (size_t slot = 0; slot < g.slots.size(); ++slot) {
-        entt::entity e = g.slots[slot];
-        if (!registry.valid(e) || registry.all_of<InsideBuilding>(e)) {
-            continue;  // hidden heroes don't think
+    if (g.replay_log != nullptr) {
+        // Replaying: this tick's decisions come from the log, not the brains.
+        apply_replay_commands(g);
+    } else {
+        for (size_t slot = 0; slot < g.slots.size(); ++slot) {
+            entt::entity e = g.slots[slot];
+            if (!registry.valid(e) || registry.all_of<InsideBuilding>(e)) {
+                continue;  // hidden heroes don't think
+            }
+            auto& brain = registry.get<Brain>(e);
+            bool scripted = brain.state && !brain.state->downgraded && g.brains;
+            if (scripted && !resume_brain(g, static_cast<uint32_t>(slot), *brain.state)) {
+                brain.state->downgraded = true;
+                scripted = false;
+            }
+            if (!scripted) {
+                mock_think(g, e, static_cast<uint32_t>(slot));
+            }
         }
-        auto& brain = registry.get<Brain>(e);
-        bool scripted = brain.state && !brain.state->downgraded && g.brains;
-        if (scripted && !resume_brain(g, static_cast<uint32_t>(slot), *brain.state)) {
-            brain.state->downgraded = true;
-            scripted = false;
-        }
-        if (!scripted) {
-            mock_think(g, e);
-        }
+
+        // Drain AI commands enqueued during think, in one ordered pass (FIFO;
+        // producers iterate by slot). This is the single mutation point for AI
+        // decisions and appends each to command_log (the trace).
+        apply_commands(g);
     }
 
     // Legacy direct movement for scripted brains that still push a per-tick
@@ -184,21 +273,29 @@ uint32_t spawn_into(BadlandsGame& g, const CharacterDesc& desc) {
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {
+    // Player actions become Commands applied synchronously through the one
+    // apply_command mutation point (so they land in command_log like AI
+    // decisions); the synchronous result (new id / <0) is preserved.
+    Command cmd{};
     switch (action.kind) {
-        case ActionKind::PlaceBuilding: {
-            PlacementDesc desc{action.param_a, action.param_b, action.world_x, action.world_z};
-            uint32_t id = place_building(g, desc, /*player=*/true);
-            return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
-        }
-        case ActionKind::RecruitHero: {
-            uint32_t id = recruit(g, action.target_id);
-            return (id == std::numeric_limits<uint32_t>::max()) ? -1 : static_cast<int64_t>(id);
-        }
+        case ActionKind::PlaceBuilding:
+            cmd.kind = CommandKind::PlaceBuilding;
+            cmd.point = {action.world_x, action.world_z};
+            cmd.param_a = action.param_a;
+            cmd.param_b = action.param_b;
+            break;
+        case ActionKind::RecruitHero:
+            cmd.kind = CommandKind::RecruitHero;
+            cmd.target_id = action.target_id;
+            break;
         case ActionKind::DestroyBuilding:
-            return destroy_building_impl(g, action.target_id);
+            cmd.kind = CommandKind::DestroyBuilding;
+            cmd.target_id = action.target_id;
+            break;
         default:
             return -1;
     }
+    return apply_command(g, cmd);
 }
 
 bool reload_script(BadlandsGame& g, const std::string& source) {
@@ -221,8 +318,8 @@ bool reload_script(BadlandsGame& g, const std::string& source) {
     return true;
 }
 
-std::vector<CharacterState> characters_of(const BadlandsGame& g) {
-    std::vector<CharacterState> rows;
+void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
+    out.clear();
     for (uint32_t slot = 0; slot < g.slots.size(); ++slot) {
         entt::entity e = g.slots[slot];
         if (!g.registry.valid(e)) {
@@ -231,9 +328,32 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
         const auto& pos = g.registry.get<Position>(e);
         const auto& health = g.registry.get<Health>(e);
         const auto& shape = g.registry.get<RenderShape>(e);
+        const auto* sim = g.registry.try_get<HeroSimulationState>(e);
+        const auto* disp = g.registry.try_get<HeroDisplayState>(e);
+        const auto* crit = g.registry.try_get<CritterState>(e);
+        const auto* tax = g.registry.try_get<TaxCollectorState>(e);
+        const auto* mt = g.registry.try_get<MoveTarget>(e);
+        const auto* path = g.registry.try_get<NavPath>(e);
+        // Resolve the goal to a world point so observers need no lookup.
+        glm::vec2 goal{0.0f, 0.0f};
+        if (mt != nullptr) {
+            if (mt->kind == MoveTarget::Kind::Point) {
+                goal = mt->point;
+            } else if (mt->kind == MoveTarget::Kind::Entity && g.registry.valid(mt->entity)) {
+                goal = g.registry.get<Position>(mt->entity).pos;
+            } else if (mt->kind == MoveTarget::Kind::Building &&
+                       mt->building < g.placement.buildings.size()) {
+                goal = g.placement.buildings[mt->building].center;
+            }
+        }
         const Facing* facing_c = g.registry.try_get<Facing>(e);
         const glm::vec2 facing = facing_c ? facing_c->dir : kCharacterForward;
-        rows.push_back(CharacterState{
+        const Vision* vis = g.registry.try_get<Vision>(e);
+        const float vis_radius = vis ? vis->radius : 0.0f;
+        const float vis_half_deg =
+            vis ? glm::degrees(std::acos(std::clamp(vis->cone_half_cos, -1.0f, 1.0f)))
+                : 180.0f;
+        out.push_back(CharacterState{
             .id = slot,
             .team = g.registry.get<Team>(e).id,
             .pos_x = pos.pos.x,
@@ -246,16 +366,64 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
             .color_r = shape.color.x,
             .color_g = shape.color.y,
             .color_b = shape.color.z,
-            .home_building_id =
-                g.registry.all_of<Home>(e) ? g.registry.get<Home>(e).building_id : -1,
+            .home_building_id = sim ? sim->home_building_id : -1,
             .inside_building_id = g.registry.all_of<InsideBuilding>(e)
                                       ? g.registry.get<InsideBuilding>(e).building_id
                                       : -1,
+            .fatigue = sim ? sim->fatigue : 0.0f,
+            .boredom = sim ? sim->boredom : 0.0f,
+            .behavior = sim ? sim->behavior
+                            : (crit ? crit->behavior : (tax ? tax->behavior : -1)),
+            .goal_kind = mt ? static_cast<int32_t>(mt->kind) : 0,
+            .goal_x = goal.x,
+            .goal_z = goal.y,
+            .path_waypoints =
+                path ? static_cast<int32_t>(path->waypoints.size() -
+                                            std::min<size_t>(path->cursor, path->waypoints.size()))
+                     : 0,
+            .archetype = static_cast<int32_t>(
+                sim ? Archetype::Hero
+                    : (crit ? Archetype::Critter
+                            : (tax ? Archetype::Townfolk : Archetype::Monster))),
             .facing_x = facing.x,
             .facing_z = facing.y,
+            .vision_radius = vis_radius,
+            .vision_cone_half_angle_deg = vis_half_deg,
+        });
+        const char* nm = disp ? disp->name.c_str() : "";
+        std::size_t n = std::min(std::strlen(nm), sizeof(out.back().name) - 1);
+        std::memcpy(out.back().name, nm, n);
+        out.back().name[n] = '\0';
+    }
+}
+
+std::vector<CharacterState> characters_of(const BadlandsGame& g) {
+    std::vector<CharacterState> rows;
+    characters_of(g, rows);
+    return rows;
+}
+
+std::vector<CommandRecord> command_log_of(const BadlandsGame& g) {
+    std::vector<CommandRecord> rows;
+    rows.reserve(g.command_log.size());
+    for (const Command& c : g.command_log) {
+        rows.push_back(CommandRecord{
+            .kind = static_cast<CommandKindId>(c.kind),
+            .actor = c.actor,
+            .target_id = c.target_id,
+            .point_x = c.point.x,
+            .point_z = c.point.y,
+            .param_a = c.param_a,
+            .param_b = c.param_b,
+            .at_millis = c.at_millis,
         });
     }
     return rows;
+}
+
+void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = f; }
+int32_t biome_at_of(const BadlandsGame& g, float x, float z) {
+    return static_cast<int32_t>(biome_at(g, {x, z}));
 }
 
 SimStats stats_of(const BadlandsGame& g) {
@@ -293,6 +461,7 @@ CharacterDesc MercenaryDesc(float pos_x, float pos_z) {
 
 CharacterDesc GoblinDesc(float pos_x, float pos_z) {
     return CharacterDesc{
+        .archetype = Archetype::Monster,
         .pos_x = pos_x,
         .pos_z = pos_z,
         .team = 1,
@@ -352,6 +521,7 @@ VisionLevel Sim::QueryVision(float cx, float cz, float radius) const {
 }
 
 std::vector<CharacterState> Sim::Characters() const { return characters_of(*world_); }
+void Sim::Characters(std::vector<CharacterState>& out) const { characters_of(*world_, out); }
 void Sim::Buildings(std::vector<BuildingState>& out) const { buildings_of(*world_, out); }
 std::vector<BuildingState> Sim::Buildings() const {
     std::vector<BuildingState> rows;
@@ -360,6 +530,10 @@ std::vector<BuildingState> Sim::Buildings() const {
 }
 WorldState Sim::World() const { return world_of(*world_); }
 SimStats Sim::GetStats() const { return stats_of(*world_); }
+std::vector<CommandRecord> Sim::CommandLog() const { return command_log_of(*world_); }
+void Sim::SetFactors(const SimFactors& f) { set_factors_of(*world_, f); }
+const SimFactors& Sim::Factors() const { return world_->factors; }
+int32_t Sim::BiomeAt(float x, float z) const { return biome_at_of(*world_, x, z); }
 
 PlacementProbe Sim::ProbePlacement(const PlacementDesc& desc,
                                    std::vector<GridTriangle>& out_triangles) const {

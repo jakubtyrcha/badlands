@@ -110,7 +110,7 @@ void intent_attack(BadlandsGame& game, int32_t slot) {
         report_bug(game, "intent_attack", "invalid entity slot " + std::to_string(slot));
         return;
     }
-    game.registry.get<Intent>(self) = {.kind = 2, .dir = {0.0f, 0.0f}};
+    game.command_queue.push_back({CommandKind::Attack, static_cast<uint32_t>(slot)});
     ++game.script_intents;
 }
 
@@ -145,7 +145,7 @@ glm::vec4 perceive_home(BadlandsGame& game, int32_t slot) {
         report_bug(game, "perceive_home", "invalid entity slot " + std::to_string(slot));
         return glm::vec4(0.0f);
     }
-    int32_t home = game.registry.get<Home>(self).building_id;
+    int32_t home = game.registry.get<HeroSimulationState>(self).home_building_id;
     auto& bs = game.placement.buildings;
     if (home < 0 || static_cast<size_t>(home) >= bs.size() || !bs[home].alive) {
         return glm::vec4(0.0f);
@@ -163,7 +163,7 @@ float inventory_count(BadlandsGame& game, int32_t slot) {
         report_bug(game, "inventory_count", "invalid entity slot " + std::to_string(slot));
         return 0.0f;
     }
-    return static_cast<float>(game.registry.get<Inventory>(self).count);
+    return static_cast<float>(game.registry.get<HeroSimulationState>(self).inventory);
 }
 
 // The hero's class (HeroClassId), so the brain can pick its per-class behaviour
@@ -174,10 +174,29 @@ int32_t perceive_class(BadlandsGame& game, int32_t slot) {
         report_bug(game, "perceive_class", "invalid entity slot " + std::to_string(slot));
         return -1;
     }
-    if (!game.registry.all_of<HeroClass>(self)) {
+    if (!game.registry.all_of<HeroCharacter>(self)) {
         return -1;
     }
-    return game.registry.get<HeroClass>(self).value;
+    return game.registry.get<HeroCharacter>(self).hero_class;
+}
+
+// (fatigue, boredom, time_of_day, is_night) — the hero's dynamic drives plus the
+// world clock, the perception the day/night loop runs on. Flat f32s like every
+// other perception (host fns declared `-> vecN` ICE the compiler); `is_night` is
+// a 0/1 flag rather than a bool for the same all-flat reason.
+glm::vec4 perceive_needs(BadlandsGame& game, int32_t slot) {
+    const float tod = time_of_day(game.world_millis);
+    const float night = is_night(tod) ? 1.0f : 0.0f;
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "perceive_needs", "invalid entity slot " + std::to_string(slot));
+        return {0.0f, 0.0f, tod, night};
+    }
+    if (!game.registry.all_of<HeroSimulationState>(self)) {
+        return {0.0f, 0.0f, tod, night};  // non-hero: no drives, but the clock is real
+    }
+    const auto& sim = game.registry.get<HeroSimulationState>(self);
+    return {sim.fatigue, sim.boredom, tod, night};
 }
 
 // Durable walk goal (engine navmesh-paths); replaces intent_move for town heroes.
@@ -187,12 +206,7 @@ void intent_move_to(BadlandsGame& game, int32_t slot, float x, float z) {
         report_bug(game, "intent_move_to", "invalid entity slot " + std::to_string(slot));
         return;
     }
-    MoveTarget& mt = game.registry.get<MoveTarget>(self);
-    mt.kind = MoveTarget::Kind::Point;
-    mt.point = {x, z};
-    mt.entity = entt::null;
-    mt.building = UINT32_MAX;
-    mt.stop_distance = 0.0f;
+    enqueue_move_to(game, static_cast<uint32_t>(slot), {x, z});
     ++game.script_intents;
 }
 
@@ -202,7 +216,8 @@ void intent_enter(BadlandsGame& game, int32_t slot, int32_t kind) {
         report_bug(game, "intent_enter", "invalid entity slot " + std::to_string(slot));
         return;
     }
-    hero_enter(game, self, kind);
+    game.command_queue.push_back(
+        {CommandKind::EnterBuilding, static_cast<uint32_t>(slot), UINT32_MAX, {0.0f, 0.0f}, kind});
     ++game.script_intents;
 }
 
@@ -212,8 +227,20 @@ void intent_enter_home(BadlandsGame& game, int32_t slot) {
         report_bug(game, "intent_enter_home", "invalid entity slot " + std::to_string(slot));
         return;
     }
-    hero_enter_home(game, self);
+    game.command_queue.push_back({CommandKind::EnterHome, static_cast<uint32_t>(slot)});
     ++game.script_intents;
+}
+
+// Inspection, not mutation of the sim: the brain names the behaviour it chose so
+// the debug panel (and parity tests) can read it back. Shares the id space with
+// badlands::Behavior (town_brain.h).
+void report_behavior(BadlandsGame& game, int32_t slot, int32_t behavior) {
+    entt::entity self = entity_for_slot(game, slot);
+    if (self == entt::null) {
+        report_bug(game, "report_behavior", "invalid entity slot " + std::to_string(slot));
+        return;
+    }
+    enqueue_set_behavior(game, static_cast<uint32_t>(slot), behavior);
 }
 
 void intent_buy(BadlandsGame& game, int32_t slot) {
@@ -222,7 +249,7 @@ void intent_buy(BadlandsGame& game, int32_t slot) {
         report_bug(game, "intent_buy", "invalid entity slot " + std::to_string(slot));
         return;
     }
-    hero_buy(game, self);
+    game.command_queue.push_back({CommandKind::Buy, static_cast<uint32_t>(slot)});
     ++game.script_intents;
 }
 
@@ -273,6 +300,8 @@ std::unique_ptr<BrainRuntime> BrainRuntime::create(BadlandsGame& game,
     bind("perceive_home", [g](int32_t e) { return perceive_home(*g, e); });
     bind("inventory_count", [g](int32_t e) { return inventory_count(*g, e); });
     bind("perceive_class", [g](int32_t e) { return perceive_class(*g, e); });
+    bind("perceive_needs", [g](int32_t e) { return perceive_needs(*g, e); });
+    bind("report_behavior", [g](int32_t e, int32_t b) { report_behavior(*g, e, b); });
     bind("intent_move", [g](int32_t e, float dx, float dz) { intent_move(*g, e, dx, dz); });
     bind("intent_move_to", [g](int32_t e, float x, float z) { intent_move_to(*g, e, x, z); });
     bind("intent_attack", [g](int32_t e) { intent_attack(*g, e); });

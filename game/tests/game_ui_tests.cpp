@@ -154,6 +154,73 @@ TEST_CASE("HeroAtWorld ignores heroes inside a building", "[game_ui][picking]") 
   REQUIRE(HeroAtWorld(heroes, 2, {8.0f, 8.0f}) == kNoPick);
 }
 
+TEST_CASE("GroundPickXZ hits a unit seated on elevated terrain", "[game_ui][picking]") {
+  // A unit at (0,20) rendered on a 3 m plateau -> world (0,3,20). Camera looks
+  // down-forward through that rendered position.
+  const glm::vec3 cam(0.0f, 40.0f, -10.0f);
+  const glm::vec3 look(0.0f, 3.0f, 20.0f);
+  const glm::vec3 dir = glm::normalize(look - cam);
+  const CharacterState units[] = {MakeHero(1, 0.0f, 20.0f, /*inside=*/-1)};
+
+  // RED: intersecting the y=0 plane lands past the unit's footprint (the bug the
+  // old picker had -- the click misses where the unit is drawn).
+  const float t0 = -cam.y / dir.y;
+  const glm::vec2 flat(cam.x + t0 * dir.x, cam.z + t0 * dir.z);
+  CHECK(HeroAtWorld(units, 1, flat) == kNoPick);
+
+  // GREEN: the terrain-aware pick follows the plateau height onto the unit.
+  glm::vec2 xz;
+  REQUIRE(GroundPickXZ(cam, dir, [](glm::vec2) { return 3.0f; }, xz));
+  CHECK(HeroAtWorld(units, 1, xz) == 1u);
+}
+
+TEST_CASE("GroundPickXZ converges onto a unit standing on a slope",
+          "[game_ui][picking]") {
+  // Terrain ramps up with world z: h(p) = 0.1 * z. A unit at (0,20) is drawn at
+  // height 2; the camera looks through that surface point.
+  const auto ramp = [](glm::vec2 p) { return 0.1f * p.y; };  // p.y == world z
+  const glm::vec3 cam(0.0f, 40.0f, -10.0f);
+  const glm::vec3 look(0.0f, ramp({0.0f, 20.0f}), 20.0f);
+  const glm::vec3 dir = glm::normalize(look - cam);
+  const CharacterState units[] = {MakeHero(2, 0.0f, 20.0f, /*inside=*/-1)};
+
+  glm::vec2 xz;
+  REQUIRE(GroundPickXZ(cam, dir, ramp, xz, /*iterations=*/6));
+  CHECK(HeroAtWorld(units, 1, xz) == 2u);  // iteration converged onto the surface
+}
+
+TEST_CASE("GroundPickXZ reports no hit when the ray does not descend",
+          "[game_ui][picking]") {
+  glm::vec2 xz{-42.0f, -42.0f};
+  // Looking up: never crosses the ground.
+  CHECK_FALSE(GroundPickXZ({0.0f, 5.0f, 0.0f}, glm::normalize(glm::vec3(0, 1, 1)),
+                           [](glm::vec2) { return 0.0f; }, xz));
+  CHECK(xz == glm::vec2(-42.0f, -42.0f));  // out param untouched on a miss
+}
+
+TEST_CASE("SelectedUnit drops a unit that walked into a building",
+          "[game_ui][picking]") {
+  CharacterState rows[] = {MakeHero(7, 5.0f, 5.0f, /*inside=*/-1)};
+  // Selected and still outside -> kept.
+  REQUIRE(SelectedUnit(rows, 1, 7) == &rows[0]);
+
+  // It walks into a building: no longer drawn, so the selection must clear.
+  rows[0].inside_building_id = 3;
+  // RED baseline -- the naive by-id scan RefreshHud used still finds it:
+  const CharacterState* naive = nullptr;
+  for (const auto& c : rows) {
+    if (c.id == 7) naive = &c;
+  }
+  CHECK(naive == &rows[0]);
+  // GREEN -- SelectedUnit honours the same indoors rule as the pick:
+  CHECK(SelectedUnit(rows, 1, 7) == nullptr);
+
+  // Unknown id, empty set, and the no-selection sentinel all resolve to null.
+  CHECK(SelectedUnit(rows, 1, 999) == nullptr);
+  CHECK(SelectedUnit(nullptr, 0, 7) == nullptr);
+  CHECK(SelectedUnit(rows, 1, kNoPick) == nullptr);
+}
+
 TEST_CASE("BuildingDef::recruits marks exactly the guild kinds and classes",
           "[game_ui][picking]") {
   // The HUD gates its Recruit button on recruit_count; it must match the sim's

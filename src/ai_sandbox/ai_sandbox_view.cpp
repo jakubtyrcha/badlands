@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include <SDL3/SDL.h>
@@ -10,13 +13,18 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include "engine/app/fixed_timestep.hpp"          // kTickDt
 #include "engine/app/game_camera_controller.hpp"  // ZoomAtCursor
 #include "engine/app/sdl_input_util.hpp"
+#include "engine/rendering/geometry/building_parts_builder.hpp"
 #include "engine/rendering/geometry/primitive_mesh_builders.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/building_catalog.h"
+#include "game/factors_manifest.hpp"
 #include "game/scene/blockout_materials.hpp"
+#include "mapgen/biomes.hpp"
 
 namespace badlands {
 
@@ -25,7 +33,8 @@ namespace {
 // Debug materials come from the shared blockout palette (game/scene/
 // blockout_materials.hpp) so the game's blockout mode and this arena draw from
 // one source of truth: blockout::kArenaGray/kArenaRoughness for the floor +
-// walls, blockout::kCapsuleRed/kCapsuleBlue/kCapsuleRoughness for the capsules.
+// walls, blockout::kWall/kRoof for the buildings, blockout::kCapsule* for the
+// hero capsules.
 
 // Wall block footprint/height (world units; tile = 1.0 world unit).
 constexpr float kWallHalfFootprint = 0.5f;
@@ -38,6 +47,120 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 // Capsule dimensions (world units).
 constexpr float kCapsuleRadius = 0.35f;
 constexpr float kCapsuleCylinderHeight = 0.6f;
+
+// The sandbox arena: origin-centred greybox. Elongated in z so it also contains
+// the prebuilt colony Castle, which make_world now places on the plains at
+// kCastleSpawn (world z ~ +54) rather than the origin -- the floor/wall ring
+// reach it so nothing floats off the pit. The town + deer still cluster near the
+// origin; the tax collector walks north to the Castle to deposit. Well inside
+// the sim's 256 u placement grid.
+constexpr glm::ivec2 kSandboxArena{90, 130};
+
+// Snapshot buffer caps. The sandbox town is tiny; a truncated snapshot would
+// only mean fewer rows drawn/listed, never a crash.
+constexpr uint32_t kMaxCharacterRows = 64;
+constexpr uint32_t kMaxBuildingRows = 64;
+constexpr uint32_t kMaxCommandRows = 24;
+
+// Where the seeded town goes. Kept clear of the origin Castle that game_create
+// prebuilds (4x4 + margin) and spaced so no footprint+margin overlaps another.
+struct TownBuilding {
+  badlands::BuildingKind kind;
+  float x, z;
+  int32_t rotation_index;
+};
+constexpr TownBuilding kTown[] = {
+    {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, -8.0f, 0},
+    {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, 8.0f, 0},
+    {badlands::BuildingKind::HuntersCamp, -24.0f, 0.0f, 0},  // recruits a hunter
+    {badlands::BuildingKind::Tavern, 14.0f, -8.0f, 0},
+    {badlands::BuildingKind::Apothecary, 14.0f, 8.0f, 0},
+    {badlands::BuildingKind::House, 6.0f, 16.0f, 0},   // accrue tax for the collector
+    {badlands::BuildingKind::House, -6.0f, 16.0f, 0},
+    {badlands::BuildingKind::Watchtower, 0.0f, -16.0f, 0},  // second deposit point
+    {badlands::BuildingKind::Sewer, 18.0f, -14.0f, 0},     // rats crawl out here
+};
+
+// Heroes recruited per guild at seed time. Below kGuildRosterCap so the panel
+// can show a recruit that fails on a full roster if the cap ever shrinks.
+constexpr int kSeedHeroesPerGuild = 3;
+constexpr int kSeedDeer = 6;
+
+// Human-readable badlands::Behavior (game/src/town_brain.h). The sandbox is a
+// consumer of the ABI, so it mirrors the id space rather than including the
+// sim's internal header.
+const char* behavior_name(int32_t behavior) {
+  switch (behavior) {
+    case 0: return "Idle";
+    case 1: return "Roam";
+    case 2: return "Buy";
+    case 3: return "GoHome";
+    case 4: return "VisitTavern";
+    case 5: return "Combat";
+    case 6: return "Graze";
+    case 7: return "VisitTax";
+    case 8: return "Deposit";
+    case 9: return "Hunt";
+    default: return "-";
+  }
+}
+
+// Archetype label (badlands::Archetype).
+const char* archetype_name(int32_t a) {
+  switch (a) {
+    case 0: return "hero";
+    case 1: return "townfolk";
+    case 2: return "critter";
+    case 3: return "monster";
+    default: return "?";
+  }
+}
+
+const char* command_name(badlands::CommandKindId kind) {
+  switch (kind) {
+    case badlands::CommandKindId::PlaceBuilding: return "PlaceBuilding";
+    case badlands::CommandKindId::RecruitHero: return "RecruitHero";
+    case badlands::CommandKindId::DestroyBuilding: return "DestroyBuilding";
+    case badlands::CommandKindId::MoveTo: return "MoveTo";
+    case badlands::CommandKindId::EnterBuilding: return "EnterBuilding";
+    case badlands::CommandKindId::EnterHome: return "EnterHome";
+    case badlands::CommandKindId::Buy: return "Buy";
+    case badlands::CommandKindId::Attack: return "Attack";
+    case badlands::CommandKindId::SetBehavior: return "SetBehavior";
+    case badlands::CommandKindId::CollectTax: return "CollectTax";
+    case badlands::CommandKindId::Deposit: return "Deposit";
+    case badlands::CommandKindId::AttackBuilding: return "AttackBuilding";
+    case badlands::CommandKindId::Shoot: return "Shoot";
+    default: return "?";
+  }
+}
+
+// noiser is PARKED: C++ brains drive every archetype by default.
+//
+// Upstream has seven open bugs (docs/noiser-bugs-upstream/), two of which block
+// composing brains at all -- sub-generators cannot be resumed from the entry
+// generator, and a file with 2+ `gen fn` runs an arbitrary one. The scripts and
+// the whole host-call surface stay in the tree and compiling
+// (game/src/brain.cpp, game/tests/noiser_smoke_tests.cpp keep exercising them),
+// so re-adopting per archetype is a switch flip once those land.
+//
+// Explicitly setting BADLANDS_BRAIN_SCRIPT opts back in for a session; unset
+// (the default) runs the C++ town brain.
+std::string load_brain_script() {
+  const char* env = std::getenv("BADLANDS_BRAIN_SCRIPT");
+  if (env == nullptr) {
+    return {};  // parked
+  }
+  std::ifstream file(env);
+  if (!file.good()) {
+    spdlog::warn("AiSandboxView: BADLANDS_BRAIN_SCRIPT='{}' unreadable -- using the C++ brain",
+                 env);
+    return {};
+  }
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  return buffer.str();
+}
 
 }  // namespace
 
@@ -53,8 +176,15 @@ bool AiSandboxView::Initialize(const RenderContext& ctx) {
 
   ApplyEnvironment();
 
-  arena_ = build_arena();
+  arena_ = build_arena(kSandboxArena);
+  SeedTown();
   BuildScene();
+
+  // No volumetric fog over the greybox arena (it hazes the far edges). The
+  // engine's config fog defaults on; disable it here as GameView does.
+  if (scene_renderer_) {
+    scene_renderer_->MutableFogConfig().enabled = false;
+  }
 
   // Frame the camera once, here (the framing is aspect-independent -- see
   // FrameCamera). OnResize only refreshes camera_.aspect afterwards.
@@ -75,11 +205,84 @@ void AiSandboxView::ApplyEnvironment() {
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 }
 
+void AiSandboxView::SeedTown() {
+  const std::string brain = load_brain_script();
+  sim_ = badlands::Sim(brain.empty() ? nullptr : brain.c_str());
+
+  // Behaviour tuning as data: load over the compiled defaults (a missing file
+  // just keeps them). Must happen before ticking -- factors are initial config.
+  badlands::SimFactors factors = sim_.Factors();
+  if (badlands::LoadSimFactors("assets/creatures/factors.json", factors)) {
+    sim_.SetFactors(factors);
+  }
+
+  // Everything goes through game_dispatch, so the seed is itself a logged
+  // command sequence -- (initial config, seed, command log) still reproduces
+  // this world.
+  for (const TownBuilding& b : kTown) {
+    badlands::Action place{badlands::ActionKind::PlaceBuilding, 0, b.x, b.z,
+                     static_cast<int32_t>(b.kind), b.rotation_index};
+    const int64_t id = sim_.Dispatch(place);
+    if (id < 0) {
+      spdlog::warn("AiSandboxView::SeedTown: placing kind {} at ({}, {}) failed",
+                   static_cast<int32_t>(b.kind), b.x, b.z);
+      continue;
+    }
+    if (b.kind != badlands::BuildingKind::FreeCompanyQuarters &&
+        b.kind != badlands::BuildingKind::HuntersCamp) {
+      continue;
+    }
+    for (int i = 0; i < kSeedHeroesPerGuild; ++i) {
+      badlands::Action recruit{badlands::ActionKind::RecruitHero, static_cast<uint32_t>(id),
+                         0.0f, 0.0f, 0, 0};
+      if (sim_.Dispatch(recruit) < 0) {
+        spdlog::warn("AiSandboxView::SeedTown: recruit {} from guild {} failed", i,
+                     id);
+      }
+    }
+  }
+
+  // A small herd of deer on good terrain NEAR the town, so they are visible
+  // wandering/grazing/fleeing inside the arena. (Forest proper is a ring far
+  // outside this greybox pit; deer roaming real woods is covered by the tests.
+  // The sim reasons about the biome map even though the arena does not draw it.)
+  int deer_placed = 0;
+  for (int i = 0; i < 600 && deer_placed < kSeedDeer; ++i) {
+    const float ang = static_cast<float>(i) * 2.399963f;  // golden-angle spread
+    const float rad = 22.0f + static_cast<float>(i % 20) * 1.0f;  // the good-biome ring
+    const glm::vec2 p{std::cos(ang) * rad, std::sin(ang) * rad};
+    const int32_t b = sim_.BiomeAt(p.x, p.y);
+    if (b != static_cast<int32_t>(mapgen::Biome::Forest) &&
+        b != static_cast<int32_t>(mapgen::Biome::Plains)) {
+      continue;  // keep them off the central Lake
+    }
+    CharacterDesc d{};
+    d.archetype = badlands::Archetype::Critter;
+    d.pos_x = p.x;
+    d.pos_z = p.y;
+    d.team = 2;  // neutral wildlife
+    d.hp = 8.0f;
+    d.move_speed = 3.0f;
+    d.attack_range = 0.0f;
+    d.attack_damage = 0.0f;
+    d.attack_cooldown = 1.0f;
+    d.size_x = d.size_z = 0.7f;
+    d.size_y = 1.0f;
+    d.color_r = 0.62f;  // deer brown, distinct from the heroes' blue capsules
+    d.color_g = 0.42f;
+    d.color_b = 0.20f;
+    sim_.Spawn(d);
+    ++deer_placed;
+  }
+
+  building_rows_.resize(kMaxBuildingRows);
+  cmd_rows_.resize(kMaxCommandRows);
+}
+
 void AiSandboxView::BuildScene() {
   // Fresh graph: re-mirror scene_context_'s (already-derived-from-env_)
   // lighting right after, same as ApplyEnvironment does for the live-edit
   // path (SceneGraph's constructor resets sun/ambient to its own defaults).
-  // (See GameView::BuildScene's NOTE(lighting) on centralizing this mirror.)
   scene_ = SceneGraph();
   scene_.SetSunDirection(scene_context_.sun_direction);
   scene_.SetSunColor(scene_context_.sun_color);
@@ -95,7 +298,7 @@ void AiSandboxView::BuildScene() {
            floor_size / kFloorUvRepeatSpacing);
 
   AddWalls();
-  AddCapsules();
+  AddBuildings();
 }
 
 void AiSandboxView::AddWalls() {
@@ -118,45 +321,70 @@ void AiSandboxView::AddWalls() {
   }
 }
 
-void AiSandboxView::AddCapsules() {
-  if (arena_.floor_tiles.empty()) {
-    spdlog::error(
-        "AiSandboxView::AddCapsules: empty arena (build_arena failed its "
-        "grid-bounds check) -- skipping capsules");
-    return;
+void AiSandboxView::AddBuildings() {
+  
+
+  // Blockout building parts: the same BuildBuildingParts assembly the detailed
+  // path uses (building_scene.cpp), but with the flat debug palette instead of
+  // PBR packs -- the sandbox is a greybox view of the sim, not a beauty shot.
+  const DeferredMaterial wall_mat =
+      matlib_.SolidColor(blockout::kWall, blockout::kBuildingRoughness);
+  const DeferredMaterial roof_mat =
+      matlib_.SolidColor(blockout::kRoof, blockout::kBuildingRoughness);
+
+  building_rows_ = sim_.Buildings();
+  const uint32_t count =
+      std::min(static_cast<uint32_t>(building_rows_.size()), kMaxBuildingRows);
+  int part_index = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    const badlands::BuildingState& b = building_rows_[i];
+    const BuildingVisual bv = building_visual(static_cast<badlands::BuildingKind>(b.kind));
+    const badlands::RenderBox box = badlands::RenderBoxOf(static_cast<badlands::BuildingKind>(b.kind), 0);
+    const badlands::RenderBox placed = badlands::RenderBoxOf(static_cast<badlands::BuildingKind>(b.kind), b.rotation_index);
+
+    const glm::mat4 transform =
+        glm::translate(glm::mat4(1.0f), glm::vec3(b.center_x, 0.0f, b.center_z)) *
+        glm::rotate(glm::mat4(1.0f), placed.yaw_radians, glm::vec3(0.0f, 1.0f, 0.0f));
+
+    for (BuildingPart& part :
+         BuildBuildingParts(box.size_x, box.size_z, bv.height, bv.roof)) {
+      const std::string name = "building_part_" + std::to_string(part_index++);
+      AddMeshEntity(scene_, name.c_str(), std::move(part.mesh),
+                    part.kind == BuildingPartKind::Wall ? wall_mat : roof_mat,
+                    transform);
+    }
+  }
+}
+
+void AiSandboxView::SyncUnits() {
+  // Rebuild the (few) unit capsules each frame from the snapshot, coloured by
+  // each entity's own colour so deer (brown) read distinctly from heroes (blue).
+  // A fixed recoloured pool would be faster, but the sandbox holds a handful of
+  // units and SceneGraph has no cheap per-node material swap -- rebuild is the
+  // simple, correct choice for a debug view. Hidden (inside-building) units are
+  // skipped, matching the sim's "don't draw; list in the panel" contract.
+  for (NodeHandle n : capsule_nodes_) {
+    scene_.DestroyNode(n);
+  }
+  capsule_nodes_.clear();
+
+  char_rows_ = sim_.Characters();
+  int index = 0;
+  for (const badlands::CharacterState& c : char_rows_) {
+    if (c.inside_building_id >= 0) {
+      continue;  // hidden
+    }
+    auto capsule = GenerateCapsule(kCapsuleRadius, kCapsuleCylinderHeight, 16);
+    const DeferredMaterial mat = matlib_.SolidColor(
+        glm::vec3(c.color_r, c.color_g, c.color_b), blockout::kCapsuleRoughness);
+    const glm::mat4 xf = glm::translate(glm::mat4(1.0f), glm::vec3(c.pos_x, 0.0f, c.pos_z));
+    const std::string name = "unit_" + std::to_string(index++);
+    capsule_nodes_.push_back(
+        AddMeshEntity(scene_, name.c_str(), std::move(capsule), mat, xf));
   }
 
-  // Pick two interior tiles on opposite sides along X, one margin tile in
-  // from the wall ring on either side -- derived from arena_.floor_tiles
-  // (not re-deriving build_arena's centering formula) so this stays correct
-  // for any configured arena size.
-  glm::ivec2 min_tile = arena_.floor_tiles.front();
-  glm::ivec2 max_tile = arena_.floor_tiles.front();
-  for (const glm::ivec2& t : arena_.floor_tiles) {
-    min_tile = glm::min(min_tile, t);
-    max_tile = glm::max(max_tile, t);
-  }
-  const glm::ivec2 tile_a(min_tile.x + 1, 0);
-  const glm::ivec2 tile_b(max_tile.x - 1, 0);
-
-  capsule_a_pos_ = arena_tile_center(tile_a);
-  capsule_b_pos_ = arena_tile_center(tile_b);
-
-  const DeferredMaterial red_mat =
-      matlib_.SolidColor(blockout::kCapsuleRed, blockout::kCapsuleRoughness);
-  const DeferredMaterial blue_mat =
-      matlib_.SolidColor(blockout::kCapsuleBlue, blockout::kCapsuleRoughness);
-
-  // GenerateCapsule's base is already at y=0 (see primitive_mesh_builders.hpp).
-  auto capsule_a = GenerateCapsule(kCapsuleRadius, kCapsuleCylinderHeight, 16);
-  const glm::mat4 transform_a = glm::translate(
-      glm::mat4(1.0f), glm::vec3(capsule_a_pos_.x, 0.0f, capsule_a_pos_.y));
-  AddMeshEntity(scene_, "capsule_red", std::move(capsule_a), red_mat, transform_a);
-
-  auto capsule_b = GenerateCapsule(kCapsuleRadius, kCapsuleCylinderHeight, 16);
-  const glm::mat4 transform_b = glm::translate(
-      glm::mat4(1.0f), glm::vec3(capsule_b_pos_.x, 0.0f, capsule_b_pos_.y));
-  AddMeshEntity(scene_, "capsule_blue", std::move(capsule_b), blue_mat, transform_b);
+  cmd_rows_ = sim_.CommandLog();
+  command_log_total_ = static_cast<uint32_t>(cmd_rows_.size());
 }
 
 void AiSandboxView::FrameCamera() {
@@ -201,6 +429,21 @@ void AiSandboxView::HandleEvent(const SDL_Event& event, int /*width*/,
 void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   dt_ = dt;
 
+  // Fixed-interval sim: advance the clock from real dt * speed, then run
+  // game_tick(kTickDt) until we catch up to the tick target. The speed control
+  // therefore accelerates the day/night loop WITHOUT changing the fixed rate
+  // the sim itself sees -- determinism is preserved (the sim never observes a
+  // variable dt), only how fast we feed it changes.
+  sim_clock_.Advance(static_cast<double>(dt));
+  const unsigned long long tick_target = sim_clock_.TickTarget();
+  int budget = kMaxSimTicksPerFrame;
+  while (sim_ticks_done_ < tick_target && budget-- > 0) {
+    sim_.Tick(static_cast<float>(kTickDt));
+    ++sim_ticks_done_;
+  }
+
+  SyncUnits();
+
   // ImGui context guard: Update() runs even in --screenshot mode, where no
   // ImGui context exists (SdlViewerApp only calls InitImGui() for the
   // windowed loop) -- ImGui::GetIO() asserts without a current context.
@@ -224,20 +467,100 @@ void AiSandboxView::DrawUI() {
   // NOTE(lighting): on any frame the editor changes env_, ApplyEnvironment
   // re-derives the full sky (6 faces x face x face radiance), a 2048-sample SH
   // projection, and a GPU cube rebuild + IBL re-prefilter next frame -- to be
-  // debounced / made incremental in the future lighting commit. No behavior
-  // change here.
+  // debounced / made incremental in the future lighting commit.
   const bool env_changed = EditorUI::DrawDebugPanel(env_, *scene_renderer_, dt_);
   if (env_changed) {
     ApplyEnvironment();
   }
 
-  ImGui::Begin("Arena");
-  ImGui::Text("Accessible: %d x %d", arena_.accessible.x, arena_.accessible.y);
-  ImGui::Text("Floor tiles: %zu", arena_.floor_tiles.size());
-  ImGui::Text("Wall tiles: %zu", arena_.wall_tiles.size());
-  ImGui::Separator();
-  ImGui::Text("Capsule (red):  (%.1f, %.1f)", capsule_a_pos_.x, capsule_a_pos_.y);
-  ImGui::Text("Capsule (blue): (%.1f, %.1f)", capsule_b_pos_.x, capsule_b_pos_.y);
+  DrawInspector();
+}
+
+void AiSandboxView::DrawInspector() {
+  ImGui::Begin("Sim");
+  if (false) {
+    ImGui::TextUnformatted("no sim");
+    ImGui::End();
+    return;
+  }
+
+  badlands::WorldState world{};
+  world = sim_.World();
+  badlands::SimStats stats{};
+  stats = stats;
+
+  // --- clock -----------------------------------------------------------
+  ImGui::Text("Day %u  %02d:%02d  %s", world.day,
+              static_cast<int>(world.time_of_day * 24.0f),
+              static_cast<int>(world.time_of_day * 24.0f * 60.0f) % 60,
+              world.is_night ? "(night)" : "(day)");
+  ImGui::Text("t = %lld ms   tick %llu", static_cast<long long>(world.world_millis),
+              static_cast<unsigned long long>(stats.ticks));
+  ImGui::SliderFloat("speed", &sim_clock_.speed, 0.0f, 60.0f, "%.0fx");
+  ImGui::SameLine();
+  if (ImGui::SmallButton("1x")) sim_clock_.speed = 1.0f;
+  ImGui::Text("noiser bugs: %u   script intents: %llu", stats.noiser_bugs,
+              static_cast<unsigned long long>(stats.script_intents));
+
+  // --- heroes ----------------------------------------------------------
+  char_rows_ = sim_.Characters();
+  ImGui::SeparatorText("Entities");
+  const uint32_t count =
+      std::min(static_cast<uint32_t>(char_rows_.size()), kMaxCharacterRows);
+  if (ImGui::BeginTable("entities", 6, ImGuiTableFlags_SizingStretchProp)) {
+    ImGui::TableSetupColumn("id/name");
+    ImGui::TableSetupColumn("type");
+    ImGui::TableSetupColumn("behavior");
+    ImGui::TableSetupColumn("goal");
+    ImGui::TableSetupColumn("needs");
+    ImGui::TableSetupColumn("inside");
+    ImGui::TableHeadersRow();
+    for (uint32_t i = 0; i < count; ++i) {
+      const badlands::CharacterState& c = char_rows_[i];
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      if (c.name[0] != '\0') {
+        ImGui::TextUnformatted(c.name);
+      } else {
+        ImGui::Text("#%u", c.id);
+      }
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(archetype_name(c.archetype));
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(behavior_name(c.behavior));
+      ImGui::TableNextColumn();
+      if (c.goal_kind == 0) {
+        ImGui::TextUnformatted("-");
+      } else {
+        ImGui::Text("(%.0f, %.0f) +%d", c.goal_x, c.goal_z, c.path_waypoints);
+      }
+      ImGui::TableNextColumn();
+      if (c.archetype == 0) {  // hero: show drives
+        ImGui::Text("f%.2f b%.2f", c.fatigue, c.boredom);
+      } else {
+        ImGui::TextUnformatted("-");
+      }
+      ImGui::TableNextColumn();
+      ImGui::Text("%d", c.inside_building_id);
+    }
+    ImGui::EndTable();
+  }
+
+  // --- the trace of record ---------------------------------------------
+  ImGui::SeparatorText("Command log");
+  ImGui::Text("%u applied (showing last %u)", command_log_total_,
+              std::min(command_log_total_, kMaxCommandRows));
+  const uint32_t shown = std::min(command_log_total_, kMaxCommandRows);
+  if (ImGui::BeginChild("cmdlog", ImVec2(0.0f, 160.0f))) {
+    for (uint32_t i = 0; i < shown; ++i) {
+      const badlands::CommandRecord& r = cmd_rows_[i];
+      ImGui::Text("%-14s actor=%s (%.1f, %.1f) a=%d", command_name(r.kind),
+                  r.actor == UINT32_MAX ? "player" : std::to_string(r.actor).c_str(),
+                  r.point_x, r.point_z, r.param_a);
+    }
+  }
+  ImGui::EndChild();
+
   ImGui::End();
 }
 

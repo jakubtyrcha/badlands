@@ -42,6 +42,11 @@ entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self) {
         if (team.id == self_team || health.hp <= 0.0f) {
             continue;
         }
+        // Critters (deer) are NEUTRAL wildlife -- never a team-combat target.
+        // Only a hunter engages them, via the Hunt block's targeted Shoot.
+        if (game.registry.all_of<CritterState>(e)) {
+            continue;
+        }
         float dist = glm::distance(pos.pos, self_pos);
         if (best == entt::null || dist < best_dist) {
             best = e;

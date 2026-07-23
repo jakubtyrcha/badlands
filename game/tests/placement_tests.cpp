@@ -112,8 +112,8 @@ TEST_CASE("a fresh game holds only the castle, with starting gold") {
     auto rows = snapshot(game);
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].kind == BuildingKind::Castle);
-    CHECK(rows[0].center_x == 0.0f);
-    CHECK(rows[0].center_z == 0.0f);
+    CHECK(rows[0].center_x == kCastleSpawnX);
+    CHECK(rows[0].center_z == kCastleSpawnZ);
 
     WorldState world = world_of(*game);
     CHECK(world.gold == 1000);
@@ -126,13 +126,15 @@ TEST_CASE("placement respects the castle footprint and margin") {
     auto owned_game = make_world(nullptr);
     BadlandsGame* game = owned_game.get();
     // Inside the castle -> invalid, state untouched.
-    PlacementDesc on_castle{static_cast<int32_t>(BuildingKind::Watchtower), 0, 0.0f, 0.0f};
+    PlacementDesc on_castle{static_cast<int32_t>(BuildingKind::Watchtower), 0, kCastleSpawnX,
+                            kCastleSpawnZ};
     CHECK(place(game, &on_castle) == UINT32_MAX);
     CHECK(snapshot(game).size() == 1);
 
-    // Castle spans tiles [-2,2); its margin reaches tile x=2, so a tower there
-    // is blocked, but far out is clear.
-    PlacementDesc in_margin{static_cast<int32_t>(BuildingKind::Watchtower), 0, 2.5f, 0.5f};
+    // Castle spans tiles [-2,2) around its centre; its margin reaches tile x=2,
+    // so a tower there is blocked, but far out is clear.
+    PlacementDesc in_margin{static_cast<int32_t>(BuildingKind::Watchtower), 0, kCastleSpawnX + 2.5f,
+                            kCastleSpawnZ + 0.5f};
     CHECK(place(game, &in_margin) == UINT32_MAX);
     PlacementDesc clear{static_cast<int32_t>(BuildingKind::Watchtower), 0, 30.5f, 0.5f};
     CHECK(place(game, &clear) != UINT32_MAX);
@@ -337,7 +339,8 @@ TEST_CASE("probe reports green for a clear spot and red near a building") {
     CHECK(probe.valid);
 
     // On top of the castle -> invalid (rendered pale red).
-    PlacementDesc on_castle{static_cast<int32_t>(BuildingKind::HuntersCamp), 0, 0.0f, 0.0f};
+    PlacementDesc on_castle{static_cast<int32_t>(BuildingKind::HuntersCamp), 0, kCastleSpawnX,
+                            kCastleSpawnZ};
     probe = probe_of(*game, on_castle, tris);
     CHECK(!probe.valid);
 }

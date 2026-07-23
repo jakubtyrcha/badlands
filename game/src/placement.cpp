@@ -594,6 +594,9 @@ void buildings_of(const BadlandsGame& game, std::vector<BuildingState>& out) {
             .rotation_index = b.rot,
             .width_tiles = b.w,
             .depth_tiles = b.d,
+            .taxable_income = b.taxable_income,
+            .hp = b.hp,
+            .max_hp = b.max_hp,
         });
     }
 }
@@ -615,6 +618,10 @@ WorldState world_of(const BadlandsGame& game) {
         .queued_poppables = queued,
         .urban_quarters = st.urban_quarters,
         .guild_roster_cap = static_cast<uint32_t>(kGuildRosterCap),
+        .world_millis = game.world_millis,
+        .time_of_day = time_of_day(game.world_millis),
+        .day = day_count(game.world_millis),
+        .is_night = is_night(time_of_day(game.world_millis)) ? 1 : 0,
     };
 }
 
