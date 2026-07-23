@@ -149,8 +149,11 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                 return 0;  // unarmed, or still recovering from the last swing
             }
             PlacedBuilding& b = game.placement.buildings[bid];
-            b.hp -= attacks->defs[0].base_damage;
+            const glm::vec2 bc = b.center;
+            const float dmg = attacks->defs[0].base_damage;
+            b.hp -= dmg;
             attacks->cooldown_remaining[0] = attacks->defs[0].cooldown;
+            emit_building_hit(game, cmd.actor, bid, dmg, b.hp, bc);
             if (b.hp <= 0.0f) {
                 raze_building(game, bid);
             }

@@ -30,13 +30,64 @@ entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot) {
     return game.registry.valid(e) ? e : entt::null;
 }
 
-int32_t slot_of(const BadlandsGame& game, entt::entity e) {
-    for (size_t i = 0; i < game.slots.size(); ++i) {
-        if (game.slots[i] == e) {
-            return static_cast<int32_t>(i);
+uint32_t slot_for_entity(const BadlandsGame& game, entt::entity e) {
+    if (e == entt::null) {
+        return UINT32_MAX;
+    }
+    for (uint32_t slot = 0; slot < game.slots.size(); ++slot) {
+        if (game.slots[slot] == e) {
+            return slot;
         }
     }
-    return -1;
+    return UINT32_MAX;
+}
+
+void emit_event(BadlandsGame& game, const badlands::GameEvent& ev) {
+    game.events.push_back(ev);
+}
+
+void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot,
+                   float amount, float hp_after, glm::vec2 pos) {
+    emit_event(game, GameEvent{.kind = GameEventKind::DamageDealt,
+                               .actor_id = actor_slot,
+                               .target_id = target_slot,
+                               .target_kind = kEventTargetCharacter,
+                               .amount = amount,
+                               .x = pos.x,
+                               .z = pos.y,
+                               .at_millis = game.world_millis});
+    if (hp_after <= 0.0f) {
+        emit_event(game, GameEvent{.kind = GameEventKind::HeroDowned,
+                                   .actor_id = actor_slot,
+                                   .target_id = target_slot,
+                                   .target_kind = kEventTargetCharacter,
+                                   .amount = 0.0f,
+                                   .x = pos.x,
+                                   .z = pos.y,
+                                   .at_millis = game.world_millis});
+    }
+}
+
+void emit_building_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t bid,
+                       float amount, float hp_after, glm::vec2 center) {
+    emit_event(game, GameEvent{.kind = GameEventKind::DamageDealt,
+                               .actor_id = actor_slot,
+                               .target_id = bid,
+                               .target_kind = kEventTargetBuilding,
+                               .amount = amount,
+                               .x = center.x,
+                               .z = center.y,
+                               .at_millis = game.world_millis});
+    if (hp_after <= 0.0f) {
+        emit_event(game, GameEvent{.kind = GameEventKind::BuildingDestroyed,
+                                   .actor_id = actor_slot,
+                                   .target_id = bid,
+                                   .target_kind = kEventTargetBuilding,
+                                   .amount = 0.0f,
+                                   .x = center.x,
+                                   .z = center.y,
+                                   .at_millis = game.world_millis});
+    }
 }
 
 entt::entity nearest_enemy(const BadlandsGame& game, entt::entity self) {

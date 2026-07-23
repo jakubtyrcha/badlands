@@ -1,7 +1,7 @@
 #include "combat.h"
 
 #include "behaviours/rng.h"  // seed_of / unit_float -- the sim's only randomness
-#include "game_state.h"      // BadlandsGame, entity_for_slot, nearest_enemy, slot_of
+#include "game_state.h"      // BadlandsGame, entity_for_slot, nearest_enemy, slot_for_entity, emit_char_hit
 
 #include <algorithm>
 #include <vector>
@@ -189,9 +189,8 @@ void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slo
     if (idx < 0) {
         return;  // out of range / on cooldown / ranged while melee-locked
     }
-    const uint32_t tslot = (target_slot == UINT32_MAX)
-                               ? static_cast<uint32_t>(slot_of(game, target))
-                               : target_slot;
+    const uint32_t tslot =
+        (target_slot == UINT32_MAX) ? slot_for_entity(game, target) : target_slot;
 
     Attacks& attacks = reg.get<Attacks>(self);
     const Attack a = attacks.defs[idx];
@@ -224,7 +223,10 @@ void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slo
     req.attack_index = idx;
     const CombatResult res = resolve_attack(req);
     if (res.damage > 0.0f) {
-        reg.get<Health>(target).hp -= res.damage;
+        Health& th = reg.get<Health>(target);
+        th.hp -= res.damage;
+        emit_char_hit(game, attacker_slot, tslot, res.damage, th.hp,
+                      reg.get<Position>(target).pos);
     }
 }
 
@@ -251,7 +253,10 @@ void advance_projectiles(BadlandsGame& game, float dt) {
             req.attack_index = proj.attack_index;
             const CombatResult res = resolve_attack(req);
             if (res.damage > 0.0f) {
-                reg.get<Health>(target).hp -= res.damage;
+                Health& th = reg.get<Health>(target);
+                th.hp -= res.damage;
+                emit_char_hit(game, proj.attacker_slot, proj.target_slot, res.damage,
+                              th.hp, reg.get<Position>(target).pos);
             }
             spent.push_back(e);
         } else {

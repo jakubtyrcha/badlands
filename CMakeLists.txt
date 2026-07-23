@@ -339,6 +339,7 @@ set(badlands_app_sources_game
     src/game/visual/vision_overlay_pass.cpp
     src/game/visual/cone_overlay_pass.cpp
     src/game/visual/selection_decals.cpp
+    src/game/visual/world_labels.cpp
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
@@ -572,6 +573,7 @@ add_executable(badlands_game_tests
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
+    game/tests/events_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.
@@ -583,6 +585,11 @@ add_executable(badlands_game_tests
     # primitive, so it needs no GPU and no engine link.
     game/tests/selection_decals_tests.cpp
     src/game/visual/selection_decals.cpp
+    # Floating world labels: screen projection + dampened depth scale + the
+    # generic timed-label pool. Pure CPU math over glm (+ header-only Camera),
+    # so it runs here without a device -- same rationale as the decals above.
+    game/tests/world_labels_tests.cpp
+    src/game/visual/world_labels.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE

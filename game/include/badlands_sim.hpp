@@ -630,6 +630,44 @@ struct CommandRecord {
     int64_t at_millis;  // sim time the command took effect
 };
 
+// ---------------------------------------------------------------------------
+// Game event stream (transient, presentation-facing)
+//
+// A generic, per-tick stream of notable things that HAPPENED (as opposed to
+// CommandRecord, which is what was DECIDED). Damage is one kind; downing and
+// building destruction are others. Consumers (the renderer's floating combat
+// text + the HUD combat log) drain it each frame via Sim::DrainEvents.
+//
+// Unlike the command log, events are NOT part of the determinism contract:
+// they are a pure function of the tick, so a replay reproduces them, but they
+// are transient and never fed back into the sim. The buffer is cleared on drain.
+// ---------------------------------------------------------------------------
+enum class GameEventKind : int32_t {
+    DamageDealt = 0,     // amount = hp removed; actor = attacker, target = victim
+    BuildingDestroyed,   // target = building id; actor = attacker (or NONE)
+    HeroDowned,          // a character's HP reached 0; actor = attacker (or NONE)
+    HeroDied,            // reserved: true removal, distinct from downing. Not emitted yet.
+};
+
+// One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and
+// (for a Character target) `target_id` are entity SLOTS -- the same ids
+// CharacterState.id carries; a Building target's id is its BuildingState.id.
+// `x`/`z` is the victim's world position when the event fired, so a lethal hit
+// still floats a number where the victim died (it is destroyed the same tick).
+struct GameEvent {
+    GameEventKind kind;
+    uint32_t actor_id;    // attacker slot; UINT32_MAX = none/unknown
+    uint32_t target_id;   // victim: character slot OR building id (see target_kind)
+    int32_t target_kind;  // 0 = Character, 1 = Building
+    float amount;         // DamageDealt: hp removed; else 0
+    float x, z;           // victim world position at event time
+    int64_t at_millis;    // sim time the event fired
+};
+
+// The two target_kind values, named for readability at call sites.
+inline constexpr int32_t kEventTargetCharacter = 0;
+inline constexpr int32_t kEventTargetBuilding = 1;
+
 // Read-only snapshot of the published (front) fog-of-war field. The grid lives
 // in the SIM coordinate frame; texel (i,j) covers the world square whose min
 // corner is (world_min_x + i*texel_m, world_min_z + j*texel_m). `rg` is
@@ -730,6 +768,10 @@ class Sim {
     const SimFactors& Factors() const;
     // The applied-command trace, oldest-first (see CommandRecord).
     std::vector<CommandRecord> CommandLog() const;                         // was game_world
+    // Drains this tick-batch's game events into `out` (out.clear() then fill),
+    // emptying the sim's internal buffer -- call once per frame. Reuses the
+    // caller's buffer (no per-frame allocation), mirroring Characters(out).
+    void DrainEvents(std::vector<GameEvent>& out);
     // Dominant biome at a world XZ, as a mapgen::Biome index (0 Lake, 1 Swamp,
     // 2 Forest, 3 Plains, 4 Hills, 5 Mountain). The sim owns the terrain field;
     // callers (deer placement, later biome-weighted nav) query it here rather

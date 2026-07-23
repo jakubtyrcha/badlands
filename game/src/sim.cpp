@@ -261,7 +261,9 @@ void tick_world(BadlandsGame& g, float dt) {
 
     // Ranged shots in flight advance and resolve on arrival (melee already
     // resolved in the Attack command during the think pass). A pure system rule:
-    // deterministic, runs identically live and on replay.
+    // deterministic, runs identically live and on replay. Both damage sites
+    // (fire_attack + advance_projectiles) emit the same DamageDealt/HeroDowned
+    // events the old combat pass did.
     advance_projectiles(g, dt);
 
     // Death.
@@ -576,6 +578,11 @@ std::vector<BuildingState> Sim::Buildings() const {
 WorldState Sim::World() const { return world_of(*world_); }
 SimStats Sim::GetStats() const { return stats_of(*world_); }
 std::vector<CommandRecord> Sim::CommandLog() const { return command_log_of(*world_); }
+
+void Sim::DrainEvents(std::vector<GameEvent>& out) {
+    out.clear();
+    out.swap(world_->events);  // hand the batch out; the freed buffer refills next tick
+}
 void Sim::SetFactors(const SimFactors& f) { set_factors_of(*world_, f); }
 const SimFactors& Sim::Factors() const { return world_->factors; }
 int32_t Sim::BiomeAt(float x, float z) const { return biome_at_of(*world_, x, z); }

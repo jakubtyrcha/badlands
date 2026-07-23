@@ -308,5 +308,70 @@ pub unsafe extern "C" fn ui_build(
     result.unwrap_or(UI_ERR_PANIC)
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_text_run(
+    ctx: *const UiContext,
+    utf8: *const c_char,
+    len: u32,
+    rgba: u32,
+    out: *mut CUiQuad,
+    cap: u32,
+    out_count: *mut u32,
+    out_width_px: *mut f32,
+    out_height_px: *mut f32,
+) -> i32 {
+    if ctx.is_null() || out_count.is_null() || out_width_px.is_null() || out_height_px.is_null() {
+        return UI_ERR_NULL;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let atlas = &unsafe { &*ctx }.atlas;
+
+        // Borrowed for the whole call; must be valid UTF-8. Empty len => empty run.
+        let text: &str = if len == 0 {
+            ""
+        } else if utf8.is_null() {
+            return UI_ERR_NULL;
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(utf8 as *const u8, len as usize) };
+            match std::str::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => return UI_ERR_BAD_TEXT,
+            }
+        };
+
+        let run = draw::text_run(text, rgba, atlas);
+        unsafe {
+            *out_width_px = run.width;
+            *out_height_px = run.height;
+            // Truncation idiom (like ui_build): report the TOTAL, write at most cap.
+            *out_count = run.quads.len() as u32;
+        }
+
+        let n = run.quads.len().min(cap as usize);
+        if n > 0 && !out.is_null() {
+            for (i, q) in run.quads[..n].iter().enumerate() {
+                unsafe {
+                    *out.add(i) = CUiQuad {
+                        x: q.x,
+                        y: q.y,
+                        w: q.w,
+                        h: q.h,
+                        u0: q.u0,
+                        v0: q.v0,
+                        u1: q.u1,
+                        v1: q.v1,
+                        rgba: q.rgba,
+                    };
+                }
+            }
+        }
+        if run.quads.len() > cap as usize {
+            return UI_ERR_CAPACITY;
+        }
+        UI_OK
+    }));
+    result.unwrap_or(UI_ERR_PANIC)
+}
+
 #[cfg(test)]
 mod tests;

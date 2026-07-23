@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <dawn/webgpu_cpp.h>
@@ -29,6 +31,7 @@
 #include "game/map/map_data.hpp"
 #include "game/ui/hud.hpp"
 #include "game/ui/picking.hpp"
+#include "game/visual/world_labels.hpp"
 #include "game/visual/composite_post_pass.hpp"
 #include "game/visual/cone_overlay_pass.hpp"
 #include "game/visual/render_mode.hpp"
@@ -198,6 +201,46 @@ class GameView : public AppView {
   float ui_viewport_w_ = 0.0f;
   float ui_viewport_h_ = 0.0f;
   float ui_scale_ = 1.0f;
+
+  // --- Floating world labels (names / health bars / damage numbers) ---
+  // Drawn to the color buffer over the 3D scene, in the SAME UI pass as the HUD
+  // (world-label quads first so the HUD/panel draws on top). Names & bars are
+  // stateless (rebuilt from the snapshot each frame); damage numbers are timed
+  // labels in the pool, advanced on the real presentation clock.
+  WorldLabelPool timed_labels_;
+  std::vector<badlands::GameEvent> events_scratch_;  // drained each frame
+  std::vector<UiQuad> floating_quads_;  // this frame's world-label quads
+  std::vector<UiQuad> ui_quads_;        // floating + HUD quads, one SetQuads
+  std::vector<UiQuad> label_run_scratch_;  // reused ui_text_run glyph buffer
+  // Display-name caches, double-buffered: `_prev_` holds LAST frame's set so an
+  // entity downed/destroyed THIS frame (already gone from the snapshot, but alive
+  // last frame) can still be named in the combat log. Both are rebuilt from the
+  // live snapshot each frame, so memory stays bounded to ~live-entity count --
+  // dead ids are dropped rather than accumulating forever.
+  std::unordered_map<uint32_t, std::string> char_names_;
+  std::unordered_map<uint32_t, std::string> char_names_prev_;
+  std::unordered_map<uint32_t, BuildingKind> building_kinds_;
+  std::unordered_map<uint32_t, BuildingKind> building_kinds_prev_;
+  // Combat log: a ring buffer of formatted lines (newest last) and how many
+  // lines the user has scrolled up from the tail (0 = following the newest).
+  std::vector<std::string> combat_log_lines_;
+  int combat_log_scroll_ = 0;
+
+  // Drains this frame's sim events: appends combat-log lines and spawns floating
+  // damage numbers on the victims. Runs every frame (even headless) so the sim's
+  // event buffer never grows unbounded.
+  void PumpGameEvents();
+  // Appends one combat-log line, capping the ring buffer and keeping the viewed
+  // window stable when the user has scrolled up.
+  void PushLogLine(std::string line);
+  // Display names for a combat-log line, from the caches (last-known if dead).
+  std::string EventActorName(uint32_t slot) const;
+  std::string EventTargetName(const badlands::GameEvent& e) const;
+  // Adjusts the combat-log scroll offset by a wheel delta (+ older / - newer).
+  void ScrollCombatLog(float wheel_y);
+  // Builds the floating world-label quads (names / health bars / damage numbers)
+  // from the current snapshot + camera into `out` (physical-pixel UiQuads).
+  void BuildFloatingLabels(std::vector<UiQuad>& out);
 
   // Refills building_rows_ from the sim (sized to the LIVE building count so
   // picking never reads a stale tail). Returns the building count.

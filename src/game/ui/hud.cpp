@@ -15,6 +15,14 @@ constexpr float kRowHeight = 22.0f;
 constexpr float kTitleHeight = 28.0f;
 constexpr float kButtonHeight = 30.0f;
 constexpr float kGap = 6.0f;
+// Combat log: a FIXED-height region at the bottom of the right panel (the
+// selection detail above it takes the remaining space). Fixed rather than a
+// grow=1 half so (a) a content-heavy selection can't overflow into it and
+// (b) its line capacity is exact -- the `ui` crate can't clip, so the windowing
+// and the panel must agree on how many lines fit. A heading sits over the lines.
+constexpr float kLogPanelHeight = 300.0f;
+constexpr float kLogHeadingHeight = 22.0f;
+constexpr float kLogRowHeight = 18.0f;
 // Top-bar speed buttons. Pause is wider to fit its word; 1x/2x/4x are compact.
 constexpr float kPauseBtnWidth = 60.0f;
 constexpr float kSpeedBtnWidth = 40.0f;
@@ -23,6 +31,7 @@ constexpr float kSpeedBtnWidth = 40.0f;
 // and night palettes without competing with the scene.
 constexpr uint32_t kBarBg = 0x171512ecu;
 constexpr uint32_t kPanelBg = 0x1a1816ee;
+constexpr uint32_t kLogBg = 0x0f0d0bee;  // slightly darker well for the log
 constexpr uint32_t kButtonBg = 0x3a352cff;
 constexpr uint32_t kButtonActiveBg = 0x6a5a34ff;  // highlighted (active speed)
 constexpr uint32_t kLinkBg = 0x2a2620ff;          // clickable list/link row
@@ -103,11 +112,16 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
     els.push_back(row);
   }
   const int32_t bar_row = static_cast<int32_t>(els.size()) - 1;
-  // Gold on the far left (grows to fill), then the speed cluster, then the clock
-  // on the far right -- the two growing labels balance and push the fixed-width
-  // button cluster to the centre.
+  // Gold on the far left, then a growing spacer, then the speed cluster and the
+  // clock snug together on the far right -- so the time controls sit next to the
+  // clock (upper-right) rather than centred.
   AddLabel(els, blob, bar_row, "Gold  " + std::to_string(model.gold), kGoldFg,
            0.0f);
+  {
+    UiElement sp = Make(UI_ELEM_SPACER, bar_row);
+    sp.grow = 1.0f;
+    els.push_back(sp);
+  }
   {
     // Sim-speed buttons. The one matching model.speed is highlighted; none are
     // ever disabled (setting the speed is always valid).
@@ -136,8 +150,7 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
       els.push_back(b);
     }
   }
-  AddLabel(els, blob, bar_row, model.clock_text, kTextFg, 0.0f,
-           UI_FLAG_ALIGN_RIGHT);
+  AddLabel(els, blob, bar_row, model.clock_text, kTextFg, 0.0f);
 
   // 2: body row -- viewport (empty, just claims space) + right detail panel.
   {
@@ -152,18 +165,29 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
     els.push_back(viewport);
   }
 
+  // Right panel: ALWAYS present now (it hosts the combat log even with nothing
+  // selected). A COL split into the selection detail (top half) over the combat
+  // log (bottom half). The outer panel carries kHudPanelBackground so a click on
+  // its chrome is consumed rather than falling through to the world.
+  UiElement panel = Make(UI_ELEM_PANEL, body);
+  panel.id = kHudPanelBackground;
+  panel.fixed = kPanelWidth;
+  panel.bg_rgba = kPanelBg;
+  panel.pad = kPanelPad;
+  panel.gap = kGap;
+  els.push_back(panel);
+  const int32_t panel_index = static_cast<int32_t>(els.size()) - 1;
+
+  // Top half: selection detail (or a muted placeholder). grow=1 -> upper half.
+  UiElement top = Make(UI_ELEM_COL, panel_index);
+  top.grow = 1.0f;
+  top.gap = kGap;
+  els.push_back(top);
+  const int32_t top_index = static_cast<int32_t>(els.size()) - 1;
+
   if (model.has_selection) {
     const HudSelection& sel = model.selection;
-    UiElement panel = Make(UI_ELEM_PANEL, body);
-    panel.id = kHudPanelBackground;  // consumes clicks on the chrome
-    panel.fixed = kPanelWidth;
-    panel.bg_rgba = kPanelBg;
-    panel.pad = kPanelPad;
-    panel.gap = kGap;
-    els.push_back(panel);
-    const int32_t panel_index = static_cast<int32_t>(els.size()) - 1;
-
-    AddLabel(els, blob, panel_index, sel.title, kTitleFg, kTitleHeight);
+    AddLabel(els, blob, top_index, sel.title, kTitleFg, kTitleHeight);
 
     // A "label   value" line. A non-zero click_id makes it a navigable link:
     // wrap it in a PANEL that paints a subtle background AND carries the id (so
@@ -174,7 +198,7 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
                               uint32_t click_id) {
       int32_t container;
       if (click_id != 0) {
-        UiElement p = Make(UI_ELEM_PANEL, panel_index);
+        UiElement p = Make(UI_ELEM_PANEL, top_index);
         p.id = click_id;
         p.fixed = kRowHeight;
         p.bg_rgba = kLinkBg;
@@ -185,7 +209,7 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
         els.push_back(r);
         container = static_cast<int32_t>(els.size()) - 1;
       } else {
-        UiElement r = Make(UI_ELEM_ROW, panel_index);
+        UiElement r = Make(UI_ELEM_ROW, top_index);
         r.fixed = kRowHeight;
         els.push_back(r);
         container = static_cast<int32_t>(els.size()) - 1;
@@ -202,12 +226,12 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
     // navigable row per entry, then a "+N more" line when the source was capped
     // (the ui crate has no scrolling yet).
     for (const HudList& list : sel.lists) {
-      AddLabel(els, blob, panel_index, list.heading, kMutedFg, kRowHeight);
+      AddLabel(els, blob, top_index, list.heading, kMutedFg, kRowHeight);
       for (const HudRow& e : list.entries) {
         add_detail_row(e.label, e.value, e.click_id);
       }
       if (list.overflow > 0) {
-        AddLabel(els, blob, panel_index,
+        AddLabel(els, blob, top_index,
                  "+" + std::to_string(list.overflow) + " more", kMutedFg,
                  kRowHeight);
       }
@@ -217,7 +241,7 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
     // still emits a hit rect, so the click is consumed instead of falling
     // through and deselecting, and the layout doesn't jump as state changes.
     if (sel.show_recruit) {
-      UiElement b = Make(UI_ELEM_BUTTON, panel_index);
+      UiElement b = Make(UI_ELEM_BUTTON, top_index);
       b.id = kHudBtnRecruit;
       b.fixed = kButtonHeight;
       b.bg_rgba = kButtonBg;
@@ -229,7 +253,7 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
       els.push_back(b);
     }
     if (sel.show_destroy) {
-      UiElement b = Make(UI_ELEM_BUTTON, panel_index);
+      UiElement b = Make(UI_ELEM_BUTTON, top_index);
       b.id = kHudBtnDestroy;
       b.fixed = kButtonHeight;
       b.bg_rgba = kButtonBg;
@@ -240,12 +264,27 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
       if (!sel.can_destroy) b.flags |= UI_FLAG_DISABLED;
       els.push_back(b);
     }
+  } else {
+    AddLabel(els, blob, top_index, "Nothing selected", kMutedFg, kTitleHeight);
+  }
 
-    // Trailing filler so the content sits at the top of the panel rather than
-    // being stretched to fill it.
-    UiElement filler = Make(UI_ELEM_SPACER, panel_index);
-    filler.grow = 1.0f;
-    els.push_back(filler);
+  // Bottom: the combat log, a FIXED-height region (the detail COL above grows to
+  // fill the rest). kHudCombatLog so a wheel over it scrolls the log rather than
+  // zooming the camera. The lines are already windowed by the view to
+  // HudCombatLogCapacity() (the ui crate cannot clip/scroll).
+  {
+    UiElement log = Make(UI_ELEM_PANEL, panel_index);
+    log.id = kHudCombatLog;
+    log.fixed = kLogPanelHeight;
+    log.bg_rgba = kLogBg;
+    log.pad = kGap;
+    els.push_back(log);
+    const int32_t log_index = static_cast<int32_t>(els.size()) - 1;
+
+    AddLabel(els, blob, log_index, "Combat Log", kMutedFg, kLogHeadingHeight);
+    for (const std::string& line : model.combat_log) {
+      AddLabel(els, blob, log_index, line, kTextFg, kLogRowHeight);
+    }
   }
 
   UiBuildInput in{};
@@ -289,6 +328,17 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
   out.quads.clear();
   out.hits.clear();
   return false;
+}
+
+uint32_t HudCombatLogCapacity() {
+  // The log is a FIXED-height panel (kLogPanelHeight) with kGap padding on each
+  // side and a heading over the lines. This mirrors the panel BuildHud lays out
+  // exactly, so windowing and the panel agree. Scale cancels (numerator and
+  // denominator both scale by the display density), so the count is unitless.
+  const float lines_h = kLogPanelHeight - 2.0f * kGap - kLogHeadingHeight;
+  if (lines_h <= 0.0f) return 0;
+  const int rows = static_cast<int>(lines_h / kLogRowHeight);
+  return rows > 0 ? static_cast<uint32_t>(rows) : 0u;
 }
 
 namespace {
