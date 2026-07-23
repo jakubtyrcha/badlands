@@ -14,11 +14,10 @@
 namespace badlands {
 
 Aabb AddBuildingToScene(SceneGraph& scene, MaterialLibrary& matlib,
-                        GameBuildingKind kind, glm::vec2 center_world,
+                        BuildingKind kind, glm::vec2 center_world,
                         float yaw_radians) {
   const BuildingVisual bv = building_visual(kind);
-  const GameRenderBox box =
-      game_render_box(static_cast<int32_t>(kind), /*rotation_index=*/0);
+  const RenderBox box = RenderBoxOf(kind, /*rotation_index=*/0);
   std::vector<BuildingPart> parts =
       BuildBuildingParts(box.size_x, box.size_z, bv.height, bv.roof);
 

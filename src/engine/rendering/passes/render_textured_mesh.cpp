@@ -158,7 +158,18 @@ void RenderTexturedMeshes(RenderPassContext& pass, FrameContext& frame,
     pass.SetVertexBuffer(0, gpu->vertex_buffer);
     if (gpu->index_count > 0) {
       pass.SetIndexBuffer(gpu->index_buffer, wgpu::IndexFormat::Uint32);
-      pass.DrawIndexed(gpu->index_count);
+      // Multi-range submesh: one culled draw per range (each against its own
+      // transformed bounds). Otherwise a single draw over the whole buffer.
+      if (auto* ranges = registry.try_get<MeshDrawRangesComponent>(entity)) {
+        for (const auto& range : ranges->ranges) {
+          if (!frustum.Intersects(range.bounds.TransformedBy(model_transform))) {
+            continue;
+          }
+          pass.DrawIndexed(range.index_count, 1, range.first_index);
+        }
+      } else {
+        pass.DrawIndexed(gpu->index_count);
+      }
     } else {
       pass.Draw(gpu->vertex_count);
     }

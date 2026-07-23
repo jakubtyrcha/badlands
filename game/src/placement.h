@@ -1,11 +1,11 @@
 // Building placement grid: triangle occupancy, footprint/margin rasterization,
-// grid snapping, and the poppable (urban-sprawl) system. The public C surface
-// is game/include/badlands_game.h; these are the internal, unit-tested helpers
-// shared between placement.cpp and game.cpp (castle prebuild).
+// grid snapping, and the poppable (urban-sprawl) system. The public C++ surface
+// is game/include/badlands_sim.hpp; these are the internal, unit-tested helpers
+// shared between placement.cpp and sim.cpp (castle prebuild).
 
 #pragma once
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"  // badlands::PlacementDesc, kGridHalfExtentTiles
 
 #include <glm/glm.hpp>
 
@@ -17,7 +17,7 @@ struct BadlandsGame;
 
 namespace badlands {
 
-constexpr int kGridHalf = GAME_GRID_HALF_EXTENT_TILES;  // 48
+constexpr int kGridHalf = kGridHalfExtentTiles;  // 48
 constexpr int kGridSize = 2 * kGridHalf;                // 96 tiles per axis
 constexpr int kTriangleCount = kGridSize * kGridSize * 4;
 
@@ -100,7 +100,7 @@ bool placement_valid(const PlacementState& st, const Footprint& fp);
 
 // Places a building (snapping desc center). Returns the id, or UINT32_MAX on an
 // invalid footprint. `player` gates the urban-sprawl accumulator + poppables.
-uint32_t place_building(BadlandsGame& game, const GamePlacementDesc& desc, bool player);
+uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool player);
 
 // Inconvenience heuristic: closeness to the castle plus the nearest apothecary.
 float poppable_score(const PlacementState& st, glm::vec2 candidate);
@@ -110,7 +110,7 @@ float poppable_score(const PlacementState& st, glm::vec2 candidate);
 void process_poppables(BadlandsGame& game, glm::vec2 anchor);
 
 // The 4 world-XZ corners of a building's drawn footprint box (the oriented box
-// game_render_box describes), fed to the nav pathfinder as an obstacle polygon.
+// RenderBoxOf describes), fed to the nav pathfinder as an obstacle polygon.
 std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b);
 
 // A door point on the building's perimeter (midpoint of one footprint edge).

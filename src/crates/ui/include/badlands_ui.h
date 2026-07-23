@@ -18,10 +18,10 @@
 // same invariant by convention — src/ui/panel.rs's "rects() triad"; here it is
 // enforced across the ABI.)
 //
-// Buffers are caller-owned throughout, and counts follow the truncation idiom
-// used by game_state/game_buildings in game/include/badlands_game.h: the output
-// count is the TOTAL required; a value > the cap means truncated, so call again
-// with a bigger buffer. Nothing is ever written past a cap.
+// Buffers are caller-owned throughout, and counts follow the count-then-fill
+// truncation idiom: the output count is the TOTAL required; a value > the cap
+// means truncated, so call again with a bigger buffer. Nothing is written past
+// a cap.
 #ifndef BADLANDS_UI_H
 #define BADLANDS_UI_H
 

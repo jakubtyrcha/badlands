@@ -181,8 +181,8 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
   // vectors keep their capacity across frames: a steady HUD lays out in ONE
   // call (the buffers already fit). A frame whose tree grew past last frame's
   // size gets exactly one extra call -- ui_build reports the TOTAL required (a
-  // value > cap means truncated, the game_state/game_buildings idiom), so the
-  // retry is sized exactly and always succeeds. Two attempts suffice.
+  // value > cap means truncated, the count-then-fill idiom), so the retry is
+  // sized exactly and always succeeds. Two attempts suffice.
   for (int attempt = 0; attempt < 2; ++attempt) {
     UiBuildOutput o{};
     o.quads = out.quads.empty() ? nullptr : out.quads.data();

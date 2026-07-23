@@ -11,7 +11,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"
 #include "game/ui/hud.hpp"
 #include "game/ui/picking.hpp"
 
@@ -19,23 +19,23 @@ using namespace badlands;
 
 namespace {
 
-GameBuildingState MakeBuilding(uint32_t id, GameBuildingKind kind, float x,
-                               float z, int32_t rotation_index) {
-  GameBuildingState b{};
+BuildingState MakeBuilding(uint32_t id, BuildingKind kind, float x,
+                           float z, int32_t rotation_index) {
+  BuildingState b{};
   b.id = id;
-  b.kind = static_cast<int32_t>(kind);
+  b.kind = kind;
   b.center_x = x;
   b.center_z = z;
   b.rotation_index = rotation_index;
-  const GameBuildingDef def = game_building_def(b.kind);
+  const BuildingDef def = BuildingDefOf(b.kind);
   b.width_tiles = def.width_tiles;
   b.depth_tiles = def.depth_tiles;
   return b;
 }
 
-GameCharacterState MakeHero(uint32_t id, float x, float z,
-                            int32_t inside_building_id) {
-  GameCharacterState c{};
+CharacterState MakeHero(uint32_t id, float x, float z,
+                        int32_t inside_building_id) {
+  CharacterState c{};
   c.id = id;
   c.pos_x = x;
   c.pos_z = z;
@@ -108,10 +108,10 @@ TEST_CASE("PointInOrientedBox agrees with a 45-degree diamond",
 
 TEST_CASE("BuildingAtWorld round-trips a building's own centre",
           "[game_ui][picking]") {
-  const GameBuildingState buildings[] = {
-      MakeBuilding(7, GAME_BUILDING_FREE_COMPANY_QUARTERS, 12.0f, 0.0f, 0),
-      MakeBuilding(9, GAME_BUILDING_TAVERN, 12.0f, 10.0f, 2),
-      MakeBuilding(11, GAME_BUILDING_WATCHTOWER, -12.0f, 0.0f, 0),
+  const BuildingState buildings[] = {
+      MakeBuilding(7, BuildingKind::FreeCompanyQuarters, 12.0f, 0.0f, 0),
+      MakeBuilding(9, BuildingKind::Tavern, 12.0f, 10.0f, 2),
+      MakeBuilding(11, BuildingKind::Watchtower, -12.0f, 0.0f, 0),
   };
   REQUIRE(BuildingAtWorld(buildings, 3, {12.0f, 0.0f}) == 7u);
   REQUIRE(BuildingAtWorld(buildings, 3, {12.0f, 10.0f}) == 9u);
@@ -119,20 +119,20 @@ TEST_CASE("BuildingAtWorld round-trips a building's own centre",
 }
 
 TEST_CASE("BuildingAtWorld misses empty ground", "[game_ui][picking]") {
-  const GameBuildingState buildings[] = {
-      MakeBuilding(7, GAME_BUILDING_FREE_COMPANY_QUARTERS, 12.0f, 0.0f, 0)};
+  const BuildingState buildings[] = {
+      MakeBuilding(7, BuildingKind::FreeCompanyQuarters, 12.0f, 0.0f, 0)};
   REQUIRE(BuildingAtWorld(buildings, 1, {60.0f, 60.0f}) == kNoPick);
   REQUIRE(BuildingAtWorld(nullptr, 0, {0.0f, 0.0f}) == kNoPick);
 }
 
 TEST_CASE("BuildingAtWorld uses the rendered footprint, not the tile counts",
           "[game_ui][picking]") {
-  // game_render_box is authoritative: for a diagonal placement the spans are
+  // RenderBoxOf is authoritative: for a diagonal placement the spans are
   // NOT (width_tiles, depth_tiles). Pick just outside the tile half-extent but
   // inside the rendered box, and confirm the rendered box wins.
-  const GameBuildingState b =
-      MakeBuilding(3, GAME_BUILDING_FREE_COMPANY_QUARTERS, 0.0f, 0.0f, 1);
-  const GameRenderBox box = game_render_box(b.kind, b.rotation_index);
+  const BuildingState b =
+      MakeBuilding(3, BuildingKind::FreeCompanyQuarters, 0.0f, 0.0f, 1);
+  const RenderBox box = RenderBoxOf(b.kind, b.rotation_index);
 
   // A point just inside the rendered box along its local X axis.
   const float s = std::sin(box.yaw_radians);
@@ -144,9 +144,9 @@ TEST_CASE("BuildingAtWorld uses the rendered footprint, not the tile counts",
 }
 
 TEST_CASE("HeroAtWorld ignores heroes inside a building", "[game_ui][picking]") {
-  // Heroes indoors are not drawn (badlands_game.h), so they must not be
-  // clickable -- otherwise the player picks something invisible.
-  const GameCharacterState heroes[] = {
+  // Heroes indoors are not drawn (CharacterState::inside_building_id >= 0), so
+  // they must not be clickable -- otherwise the player picks something invisible.
+  const CharacterState heroes[] = {
       MakeHero(1, 5.0f, 5.0f, /*inside=*/-1),
       MakeHero(2, 8.0f, 8.0f, /*inside=*/4),
   };
@@ -154,25 +154,32 @@ TEST_CASE("HeroAtWorld ignores heroes inside a building", "[game_ui][picking]") 
   REQUIRE(HeroAtWorld(heroes, 2, {8.0f, 8.0f}) == kNoPick);
 }
 
-TEST_CASE("game_building_def.recruits marks exactly the guild kinds",
+TEST_CASE("BuildingDef::recruits marks exactly the guild kinds and classes",
           "[game_ui][picking]") {
-  // The HUD gates its Recruit button on this flag; it must match the sim's own
-  // guild set (the 4 recruiting kinds) so the button is never shown enabled
-  // for a building game_dispatch(RECRUIT_HERO) would reject.
-  auto recruits = [](GameBuildingKind k) {
-    return game_building_def(static_cast<int32_t>(k)).recruits != 0;
+  // The HUD gates its Recruit button on recruit_count; it must match the sim's
+  // own guild set (the 4 recruiting kinds) so the button is never shown enabled
+  // for a building Dispatch(RecruitHero) would reject.
+  auto recruits = [](BuildingKind k) {
+    return BuildingDefOf(k).recruit_count > 0;
   };
-  REQUIRE(recruits(GAME_BUILDING_FREE_COMPANY_QUARTERS));
-  REQUIRE(recruits(GAME_BUILDING_HUNTERS_CAMP));
-  REQUIRE(recruits(GAME_BUILDING_THIEVES_DEN));
-  REQUIRE(recruits(GAME_BUILDING_SCRIPTORIUM));
+  REQUIRE(recruits(BuildingKind::FreeCompanyQuarters));
+  REQUIRE(recruits(BuildingKind::HuntersCamp));
+  REQUIRE(recruits(BuildingKind::ThievesDen));
+  REQUIRE(recruits(BuildingKind::Scriptorium));
   // Everything else -- Castle, the utility buildings, poppables -- is not.
-  REQUIRE_FALSE(recruits(GAME_BUILDING_CASTLE));
-  REQUIRE_FALSE(recruits(GAME_BUILDING_TAVERN));
-  REQUIRE_FALSE(recruits(GAME_BUILDING_APOTHECARY));
-  REQUIRE_FALSE(recruits(GAME_BUILDING_WATCHTOWER));
-  REQUIRE_FALSE(recruits(GAME_BUILDING_HOUSE));
-  REQUIRE_FALSE(recruits(GAME_BUILDING_SEWER));
+  REQUIRE_FALSE(recruits(BuildingKind::Castle));
+  REQUIRE_FALSE(recruits(BuildingKind::Tavern));
+  REQUIRE_FALSE(recruits(BuildingKind::Apothecary));
+  REQUIRE_FALSE(recruits(BuildingKind::Watchtower));
+  REQUIRE_FALSE(recruits(BuildingKind::House));
+  REQUIRE_FALSE(recruits(BuildingKind::Sewer));
+
+  // Each guild recruits exactly its one class today (the table's source of
+  // truth); guild_hero_class() derives from recruits[0], so keep them in step.
+  REQUIRE(BuildingDefOf(BuildingKind::FreeCompanyQuarters).recruits[0] == HERO_MERCENARY);
+  REQUIRE(BuildingDefOf(BuildingKind::HuntersCamp).recruits[0] == HERO_HUNTER);
+  REQUIRE(BuildingDefOf(BuildingKind::ThievesDen).recruits[0] == HERO_GRAVE_ROBBER);
+  REQUIRE(BuildingDefOf(BuildingKind::Scriptorium).recruits[0] == HERO_APPRENTICE);
 }
 
 // ---------------------------------------------------------------------------

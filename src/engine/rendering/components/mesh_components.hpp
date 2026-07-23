@@ -92,6 +92,22 @@ struct StaticTexturedMeshGpuComponent {
   uint32_t index_count = 0;
 };
 
+// One contiguous index range of a shared index buffer, with its own local-space
+// bounds for per-range frustum culling.
+struct MeshDrawRange {
+  uint32_t first_index = 0;
+  uint32_t index_count = 0;
+  Aabb bounds;
+};
+
+// Splits an indexed mesh into multiple sub-ranges drawn independently. When
+// present on an entity, the mesh pass issues one culled DrawIndexed per range
+// (against the range's own bounds) instead of a single draw over the whole
+// index buffer. Purely a draw-submission detail — no geometry semantics.
+struct MeshDrawRangesComponent {
+  std::vector<MeshDrawRange> ranges;
+};
+
 class MaterialInstance;
 
 // Static cubemap-textured mesh component (CPU-side)

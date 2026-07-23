@@ -36,26 +36,16 @@ namespace badlands {
 
 namespace {
 
-// rotation_index 0..3 -> 0/45/90/135deg world yaw about Y (badlands_game.h's
-// GamePlacementDesc convention) -- see building_scene.h's AddBuildingToScene
+// rotation_index 0..3 -> 0/45/90/135deg world yaw about Y (the PlacementDesc
+// convention in badlands_sim.hpp) -- see building_scene.h's AddBuildingToScene
 // comment for why this is exact for 0/2 and an approximation for 1/3.
 float yaw_from_rotation_index(int32_t rotation_index) {
   return glm::radians(static_cast<float>(rotation_index) * 45.0f);
 }
 
-// Up to this many rows are read from game_buildings/game_state per call --
-// comfortably above this stage's Castle + 4 demo buildings.
-constexpr uint32_t kMaxBuildingRows = 64;
-
 // Game-UI text size in LOGICAL pixels. The atlas is baked once at this size, so
 // changing it means a re-bake, not a re-layout.
 constexpr float kHudFontPx = 18.0f;
-
-// game_state() readback cap for characters. Separate from kMaxBuildingRows
-// because it bounds a different population (heroes/monsters, potentially many
-// more than buildings): the HUD's roster/visitor counts iterate this snapshot,
-// so too small a cap would undercount a busy guild.
-constexpr uint32_t kMaxCharacterRows = 256;
 
 // Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
 // this much REAL time (the directional light + shadows still move every frame).
@@ -113,12 +103,7 @@ TexturedMeshResult BuildLakeMesh(const std::vector<glm::vec3>& tris) {
 
 }  // namespace
 
-GameView::~GameView() {
-  if (game_) {
-    game_destroy(game_);
-    game_ = nullptr;
-  }
-}
+GameView::~GameView() = default;
 
 bool GameView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
@@ -177,10 +162,9 @@ bool GameView::Initialize(const RenderContext& ctx) {
   sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
   SeekToTimeOfDay(kInitialTimeOfDay);
 
-  // nullptr brain_script_source: mock brains only (no noiser script needed
-  // for a static-buildings scaffold) -- game_create also prebuilds the
-  // Castle at the origin.
-  game_ = game_create(nullptr);
+  // sim_ is constructed with a nullptr brain_script_source (mock brains only;
+  // no noiser script needed for a static-buildings scaffold) -- construction
+  // also prebuilds the Castle at the origin.
   PlaceDemoBuildings();
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
@@ -238,7 +222,7 @@ void GameView::RebakeSky(const DaylightState& state) {
 
 void GameView::PlaceDemoBuildings() {
   struct Demo {
-    GameBuildingKind kind;
+    BuildingKind kind;
     float x, z;
     int32_t rotation_index;
   };
@@ -246,21 +230,21 @@ void GameView::PlaceDemoBuildings() {
   // spaced >= 8 world units apart so no demo building's footprint + margin
   // can overlap another's regardless of rotation.
   constexpr Demo kDemo[] = {
-      {GAME_BUILDING_FREE_COMPANY_QUARTERS, 12.0f, 0.0f, 0},
-      {GAME_BUILDING_TAVERN, 12.0f, 10.0f, 2},  // rotated 90deg -- proves yaw wiring
-      {GAME_BUILDING_WATCHTOWER, -12.0f, 0.0f, 0},
-      {GAME_BUILDING_APOTHECARY, -12.0f, 10.0f, 0},
+      {BuildingKind::FreeCompanyQuarters, 12.0f, 0.0f, 0},
+      {BuildingKind::Tavern, 12.0f, 10.0f, 2},  // rotated 90deg -- proves yaw wiring
+      {BuildingKind::Watchtower, -12.0f, 0.0f, 0},
+      {BuildingKind::Apothecary, -12.0f, 10.0f, 0},
   };
   for (const Demo& d : kDemo) {
-    GameAction action{
-        .kind = GAME_ACTION_PLACE_BUILDING,
+    Action action{
+        .kind = ActionKind::PlaceBuilding,
         .target_id = 0,
         .world_x = d.x,
         .world_z = d.z,
         .param_a = static_cast<int32_t>(d.kind),
         .param_b = d.rotation_index,
     };
-    const int64_t id = game_dispatch(game_, &action);
+    const int64_t id = sim_.Dispatch(action);
     if (id < 0) {
       spdlog::error(
           "GameView::PlaceDemoBuildings: placement failed for kind={} at "
@@ -322,17 +306,12 @@ void GameView::BuildScene() {
   // Demo buildings from the sim, shifted onto the southern plains band (so they
   // sit on land, not the central lake) and placed through the composer so they
   // honor the render mode's materials.
-  if (building_rows_.size() < kMaxBuildingRows) {
-    building_rows_.resize(kMaxBuildingRows);
-  }
-  const uint32_t total = SnapshotBuildings();
-  const uint32_t count = static_cast<uint32_t>(building_rows_.size());
-  for (uint32_t i = 0; i < count; ++i) {
-    const GameBuildingState& b = building_rows_[i];
+  sim_.Buildings(building_rows_);
+  for (const BuildingState& b : building_rows_) {
     const glm::vec2 world(b.center_x, b.center_z + kDemoBuildingsSouthShift);
     // Ground height straight from the map's query API (world -> map-local).
     const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
-    AddBuildingToComposer(composer, static_cast<GameBuildingKind>(b.kind), world,
+    AddBuildingToComposer(composer, b.kind, world,
                           yaw_from_rotation_index(b.rotation_index), ground);
   }
 
@@ -431,23 +410,22 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
 }
 
 bool GameView::DispatchHudAction(uint32_t hud_id) {
-  if (!game_) return false;
-  GameAction action{};
+  Action action{};
   switch (hud_id) {
     case kHudBtnRecruit:
       if (selected_building_ == kNoPick) return false;
-      action.kind = GAME_ACTION_RECRUIT_HERO;
+      action.kind = ActionKind::RecruitHero;
       action.target_id = selected_building_;
       break;
     case kHudBtnDestroy:
       if (selected_building_ == kNoPick) return false;
-      action.kind = GAME_ACTION_DESTROY_BUILDING;
+      action.kind = ActionKind::DestroyBuilding;
       action.target_id = selected_building_;
       break;
     default:
       return false;  // panel/bar background: consumed, but not an action
   }
-  const int64_t rc = game_dispatch(game_, &action);
+  const int64_t rc = sim_.Dispatch(action);
   if (rc < 0) {
     spdlog::warn("GameView: action {} on {} rejected ({})", hud_id,
                  selected_building_, rc);
@@ -483,7 +461,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     scene_renderer_->GetFogSimulation().AddTime(static_cast<float>(sim_dt));
   }
 
-  // Fixed-interval game logic: run game_tick(kTickDt) until we've caught up to
+  // Fixed-interval game logic: run sim_.Tick(kTickDt) until we've caught up to
   // the clock's tick target. Bounded (real dt is clamped in Advance); the
   // budget is pure spiral-of-death safety. Ticks scale with sim speed because
   // the target is derived from sim time.
@@ -492,7 +470,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     const unsigned long long tick_target = sim_clock_.TickTarget();
     int budget = kMaxSimTicksPerFrame;
     while (sim_ticks_done_ < tick_target && budget-- > 0) {
-      if (game_) game_tick(game_, static_cast<float>(kTickDt));
+      sim_.Tick(static_cast<float>(kTickDt));
       ++sim_ticks_done_;
     }
   }
@@ -529,39 +507,22 @@ void GameView::Update(float dt, const bool* keyboard_state) {
 }
 
 uint32_t GameView::SnapshotBuildings() {
-  if (!game_) {
-    building_rows_.clear();
-    return 0;
-  }
-  if (building_rows_.size() < kMaxBuildingRows) {
-    building_rows_.resize(kMaxBuildingRows);
-  }
-  const uint32_t total =
-      game_buildings(game_, building_rows_.data(), kMaxBuildingRows);
-  // Size to the LIVE count, never the capacity: picking reads
-  // building_rows_.size(), so a padded tail would let a click land on a stale
-  // row (e.g. after a Destroy, before the next refresh).
-  building_rows_.resize(std::min(total, kMaxBuildingRows));
-  return total;
+  // sim_.Buildings sizes building_rows_ to the LIVE count (never a padded
+  // capacity): picking reads building_rows_.size(), so a stale tail would let a
+  // click land on a dead row (e.g. after a Destroy, before the next refresh).
+  sim_.Buildings(building_rows_);
+  return static_cast<uint32_t>(building_rows_.size());
 }
 
 void GameView::RefreshHud() {
-  if (!game_) return;
-
   // Snapshot the sim into the reused row buffers. These back BOTH the HUD model
   // and picking, so what the panel describes is exactly what a click can hit.
   // Update() runs this before DrawUI() the same frame, so DrawUI reuses these
   // rows + the cached scalars below instead of re-reading them from the sim.
   hud_building_total_ = SnapshotBuildings();
-  if (character_rows_.size() < kMaxCharacterRows) {
-    character_rows_.resize(kMaxCharacterRows);
-  }
-  const uint32_t character_total =
-      game_state(game_, character_rows_.data(), kMaxCharacterRows);
-  character_rows_.resize(std::min(character_total, kMaxCharacterRows));
+  character_rows_ = sim_.Characters();
 
-  GameWorldState world{};
-  game_world(game_, &world);
+  const WorldState world = sim_.World();
   roster_cap_ = world.guild_roster_cap;
   hud_gold_ = world.gold;
 
@@ -580,25 +541,24 @@ void GameView::RefreshHud() {
 
   // A selection that no longer exists (destroyed, or a hero that entered a
   // building) silently clears rather than describing a stale row.
-  const GameBuildingState* selected = nullptr;
-  for (const GameBuildingState& b : building_rows_) {
+  const BuildingState* selected = nullptr;
+  for (const BuildingState& b : building_rows_) {
     if (b.id == selected_building_) selected = &b;
   }
-  const GameCharacterState* hero = nullptr;
-  for (const GameCharacterState& c : character_rows_) {
+  const CharacterState* hero = nullptr;
+  for (const CharacterState& c : character_rows_) {
     if (c.id == selected_hero_) hero = &c;
   }
   if (!selected) selected_building_ = kNoPick;
   if (!hero) selected_hero_ = kNoPick;
 
   if (selected) {
-    const GameBuildingKind kind = static_cast<GameBuildingKind>(selected->kind);
-    const GameBuildingDef def = game_building_def(selected->kind);
+    const BuildingDef def = BuildingDefOf(selected->kind);
 
     // Occupancy: heroes whose home guild is this building.
     uint32_t occupancy = 0;
     uint32_t visitors = 0;
-    for (const GameCharacterState& c : character_rows_) {
+    for (const CharacterState& c : character_rows_) {
       if (c.home_building_id == static_cast<int32_t>(selected->id)) ++occupancy;
       if (c.inside_building_id == static_cast<int32_t>(selected->id)) ++visitors;
     }
@@ -606,7 +566,7 @@ void GameView::RefreshHud() {
     HudSelection s;
     s.kind = HudSelection::Kind::Building;
     s.id = selected->id;
-    s.title = building_label(kind);
+    s.title = building_label(selected->kind);
     s.rows.emplace_back("id", "#" + std::to_string(selected->id));
     {
       char pos[48];
@@ -617,20 +577,26 @@ void GameView::RefreshHud() {
     s.rows.emplace_back("footprint",
                         std::to_string(selected->width_tiles) + " x " +
                             std::to_string(selected->depth_tiles));
-    // A guild is a building that can recruit; only those show a roster row.
-    // Only actual guilds (the 4 recruiting kinds) show a roster + Recruit
-    // button. Gating on def.recruits -- the sim's own classification -- means
-    // the button is never shown enabled for a building game_dispatch would
-    // reject (Castle/Tavern/Watchtower/Apothecary are not guilds).
-    const bool is_guild = def.recruits != 0;
+    // A guild is a building that recruits >= 1 hero class; only those show the
+    // recruited-class row, a roster row, and the Recruit button. Gating on
+    // def.recruit_count -- read straight off BuildingDef::recruits, the sim's
+    // own per-kind recruit table -- means the button is never shown enabled for
+    // a building Dispatch(RecruitHero) would reject.
+    const bool is_guild = def.recruit_count > 0;
     if (is_guild) {
+      std::string classes;
+      for (int32_t i = 0; i < def.recruit_count && i < kMaxRecruitClasses; ++i) {
+        if (i > 0) classes += ", ";
+        classes += HeroClassName(def.recruits[i]);
+      }
+      s.rows.emplace_back("recruits", classes);
       s.rows.emplace_back("roster", std::to_string(occupancy) + " / " +
                                         std::to_string(roster_cap_));
       s.show_recruit = true;
       s.can_recruit = occupancy < roster_cap_;
     }
     if (visitors > 0) s.rows.emplace_back("inside", std::to_string(visitors));
-    s.show_destroy = def.user_destructible != 0;
+    s.show_destroy = def.user_destructible;
     s.can_destroy = s.show_destroy;
 
     model.has_selection = true;
@@ -706,21 +672,16 @@ void GameView::DrawUI() {
   EditorUI::DrawStats(dt_);
   ImGui::End();
 
-  if (!game_) return;
-
   // Reuse this frame's snapshot: Update()->RefreshHud() already read gold and
   // filled building_rows_ (sized to the live count) just before DrawUI runs,
   // so there is no need to round-trip the sim again here.
-  const uint32_t count = static_cast<uint32_t>(building_rows_.size());
-
   ImGui::Begin("World");
   ImGui::Text("Gold: %u", hud_gold_);
   ImGui::Text("Buildings: %u", hud_building_total_);
   ImGui::Separator();
-  for (uint32_t i = 0; i < count; ++i) {
-    const GameBuildingState& b = building_rows_[i];
+  for (const BuildingState& b : building_rows_) {
     ImGui::Text("#%u %-24s (%.1f, %.1f)", b.id,
-               building_label(static_cast<GameBuildingKind>(b.kind)),
+               building_label(b.kind),
                b.center_x, b.center_z);
   }
   ImGui::End();

@@ -4,17 +4,17 @@
 // building or hero under it.
 //
 // Ported from the legacy Rust app's src/game_ffi.rs (commit c7cf8d8). The box
-// extents come from game_render_box(kind, rotation_index) rather than
+// extents come from RenderBoxOf(kind, rotation_index) rather than
 // (width_tiles, depth_tiles): diagonal placements snap to a lattice diamond
 // whose spans differ from w x d, so the footprint is NOT simply the tile size
-// rotated (badlands_game.h:112-121).
+// rotated (see RenderBox in badlands_sim.hpp).
 
 #include <cstdint>
 #include <vector>
 
 #include <glm/glm.hpp>
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"
 
 namespace badlands {
 
@@ -37,13 +37,13 @@ bool PointInOrientedBox(glm::vec2 center, glm::vec2 half, float yaw,
 
 // The topmost building whose footprint contains `world` (x, z), or kNoPick.
 // Later (last-placed) buildings win an overlap, matching draw order.
-uint32_t BuildingAtWorld(const GameBuildingState* buildings, uint32_t count,
+uint32_t BuildingAtWorld(const BuildingState* buildings, uint32_t count,
                          glm::vec2 world);
 
 // The topmost hero whose footprint contains `world` (x, z), or kNoPick.
 // Characters inside a building are skipped -- they are not drawn, so they must
-// not be clickable (badlands_game.h:41).
-uint32_t HeroAtWorld(const GameCharacterState* characters, uint32_t count,
+// not be clickable (see CharacterState::inside_building_id in badlands_sim.hpp).
+uint32_t HeroAtWorld(const CharacterState* characters, uint32_t count,
                      glm::vec2 world);
 
 }  // namespace badlands

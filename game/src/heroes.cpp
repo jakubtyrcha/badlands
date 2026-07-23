@@ -16,21 +16,23 @@
 namespace badlands {
 
 int32_t guild_hero_class(int kind) {
-    switch (kind) {
-        case GAME_BUILDING_FREE_COMPANY_QUARTERS:
-            return HERO_MERCENARY;
-        case GAME_BUILDING_HUNTERS_CAMP:
-            return HERO_HUNTER;
-        case GAME_BUILDING_THIEVES_DEN:
-            return HERO_GRAVE_ROBBER;
-        case GAME_BUILDING_SCRIPTORIUM:
-            return HERO_APPRENTICE;
-        default:
-            return -1;
+    // The recruit set (BuildingDef::recruits) is the single source of truth; a
+    // guild's class is its first recruit slot, -1 for a non-guild building.
+    const BuildingDef def = BuildingDefOf(static_cast<BuildingKind>(kind));
+    return def.recruit_count > 0 ? static_cast<int32_t>(def.recruits[0]) : -1;
+}
+
+const char* HeroClassName(HeroClassId cls) {
+    switch (cls) {
+        case HERO_MERCENARY:    return "Mercenary";
+        case HERO_HUNTER:       return "Hunter";
+        case HERO_GRAVE_ROBBER: return "Grave Robber";
+        case HERO_APPRENTICE:   return "Apprentice";
+        default:                return "";
     }
 }
 
-GameCharacterDesc hero_desc(int32_t hero_class, float x, float z) {
+CharacterDesc hero_desc(int32_t hero_class, float x, float z) {
     // Baseline stats shared by every class; color is the only distinguishing
     // field (the panel derives the class name from the home guild's kind).
     constexpr glm::vec3 kColors[HERO_CLASS_COUNT] = {
@@ -43,7 +45,7 @@ GameCharacterDesc hero_desc(int32_t hero_class, float x, float z) {
     int idx = (hero_class >= 0 && hero_class < HERO_CLASS_COUNT) ? hero_class : HERO_MERCENARY;
     glm::vec3 c = kColors[idx];
 
-    GameCharacterDesc d{};
+    CharacterDesc d{};
     d.pos_x = x;
     d.pos_z = z;
     d.team = 0;
@@ -61,7 +63,7 @@ GameCharacterDesc hero_desc(int32_t hero_class, float x, float z) {
     return d;
 }
 
-uint32_t spawn_entity(BadlandsGame& game, const GameCharacterDesc& desc, int32_t home) {
+uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t home) {
     entt::registry& reg = game.registry;
     entt::entity e = reg.create();
     uint32_t slot = static_cast<uint32_t>(game.slots.size());
@@ -121,7 +123,7 @@ uint32_t recruit(BadlandsGame& game, uint32_t building_id) {
     if (!building_approach_tile(game.placement, bs[building_id], tile)) {
         return std::numeric_limits<uint32_t>::max();  // no free approach tile
     }
-    GameCharacterDesc d = hero_desc(cls, tile.x, tile.y);
+    CharacterDesc d = hero_desc(cls, tile.x, tile.y);
     return spawn_entity(game, d, static_cast<int32_t>(building_id));
 }
 
@@ -130,7 +132,7 @@ int64_t destroy_building_impl(BadlandsGame& game, uint32_t building_id) {
     if (building_id >= bs.size() || !bs[building_id].alive) {
         return -1;  // unknown or already destroyed
     }
-    if (!game_building_def(bs[building_id].kind).user_destructible) {
+    if (!BuildingDefOf(static_cast<BuildingKind>(bs[building_id].kind)).user_destructible) {
         return -2;  // Castle/House/Sewer are not player-destructible
     }
     entt::registry& reg = game.registry;
@@ -237,7 +239,7 @@ bool hero_enter_home(BadlandsGame& game, entt::entity e) {
 
 bool hero_buy(BadlandsGame& game, entt::entity e) {
     uint32_t bid = 0;
-    if (!at_building_of_kind(game, e, GAME_BUILDING_APOTHECARY, bid)) {
+    if (!at_building_of_kind(game, e, static_cast<int32_t>(BuildingKind::Apothecary), bid)) {
         return false;
     }
     game.registry.get<Inventory>(e).count = kInventoryCap;

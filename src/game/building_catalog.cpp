@@ -7,91 +7,91 @@ namespace badlands {
 namespace {
 constexpr MaterialId kSlateRoof = MaterialId::RoofSlates;
 
-// GameBuildingKind -> display label, in enum declaration order
-// (badlands_game.h). Single source of truth for building_label().
+// BuildingKind -> display label, in enum declaration order
+// (badlands_sim.hpp). Single source of truth for building_label().
 struct BuildingLabel {
-  GameBuildingKind kind;
+  BuildingKind kind;
   const char* label;
 };
 constexpr BuildingLabel kBuildingLabels[] = {
-    {GAME_BUILDING_CASTLE, "Castle"},
-    {GAME_BUILDING_FREE_COMPANY_QUARTERS, "Free Company Quarters"},
-    {GAME_BUILDING_HUNTERS_CAMP, "Hunters Camp"},
-    {GAME_BUILDING_THIEVES_DEN, "Thieves Den"},
-    {GAME_BUILDING_SCRIPTORIUM, "Scriptorium"},
-    {GAME_BUILDING_TAVERN, "Tavern"},
-    {GAME_BUILDING_APOTHECARY, "Apothecary"},
-    {GAME_BUILDING_WATCHTOWER, "Watchtower"},
-    {GAME_BUILDING_HOUSE, "House"},
-    {GAME_BUILDING_SEWER, "Sewer"},
+    {BuildingKind::Castle, "Castle"},
+    {BuildingKind::FreeCompanyQuarters, "Free Company Quarters"},
+    {BuildingKind::HuntersCamp, "Hunters Camp"},
+    {BuildingKind::ThievesDen, "Thieves Den"},
+    {BuildingKind::Scriptorium, "Scriptorium"},
+    {BuildingKind::Tavern, "Tavern"},
+    {BuildingKind::Apothecary, "Apothecary"},
+    {BuildingKind::Watchtower, "Watchtower"},
+    {BuildingKind::House, "House"},
+    {BuildingKind::Sewer, "Sewer"},
 };
 static_assert(sizeof(kBuildingLabels) / sizeof(kBuildingLabels[0]) ==
-                  GAME_BUILDING_KIND_COUNT,
-              "kBuildingLabels must cover every GameBuildingKind");
+                  static_cast<size_t>(BuildingKind::Count),
+              "kBuildingLabels must cover every BuildingKind");
 }  // namespace
 
-const char* building_label(GameBuildingKind kind) {
+const char* building_label(BuildingKind kind) {
   for (const BuildingLabel& b : kBuildingLabels) {
     if (b.kind == kind) return b.label;
   }
   return "?";
 }
 
-BuildingVisual building_visual(GameBuildingKind kind) {
+BuildingVisual building_visual(BuildingKind kind) {
   switch (kind) {
-    case GAME_BUILDING_CASTLE:
+    case BuildingKind::Castle:
       return {.height = 5.0f,
              .roof = RoofShape::CornerTowers,
              .wall_material = MaterialId::RockWall,
              .roof_material = MaterialId::RockWall};
-    case GAME_BUILDING_FREE_COMPANY_QUARTERS:
+    case BuildingKind::FreeCompanyQuarters:
       return {.height = 3.0f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::Planks,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_HUNTERS_CAMP:
+    case BuildingKind::HuntersCamp:
       return {.height = 2.6f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::Planks,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_THIEVES_DEN:
+    case BuildingKind::ThievesDen:
       return {.height = 2.6f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::Plaster,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_SCRIPTORIUM:
+    case BuildingKind::Scriptorium:
       return {.height = 3.0f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::Plaster,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_TAVERN:
+    case BuildingKind::Tavern:
       return {.height = 2.2f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::Planks,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_APOTHECARY:
+    case BuildingKind::Apothecary:
       return {.height = 2.2f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::Plaster,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_WATCHTOWER:
+    case BuildingKind::Watchtower:
       return {.height = 4.0f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::RockWall,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_HOUSE:
+    case BuildingKind::House:
       return {.height = 1.8f,
              .roof = RoofShape::Gable,
              .wall_material = MaterialId::Plaster,
              .roof_material = kSlateRoof};
-    case GAME_BUILDING_SEWER:
+    case BuildingKind::Sewer:
       return {.height = 0.4f,
              .roof = RoofShape::None,
              .wall_material = MaterialId::RockWall,
              .roof_material = MaterialId::RockWall};
-    case GAME_BUILDING_KIND_COUNT:
+    case BuildingKind::Count:
     default:
-      // Never expected (mirrors game_building_def's out-of-range fallback,
+      // Never expected (mirrors BuildingDefOf's out-of-range fallback,
       // game/src/placement.cpp's def_of): a 1x1 Watchtower-shaped box.
       return {.height = 4.0f,
              .roof = RoofShape::Gable,

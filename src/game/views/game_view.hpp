@@ -14,7 +14,7 @@
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
 
-#include "badlands_game.h"  // BadlandsGame, GameBuildingKind
+#include "badlands_sim.hpp"  // badlands::Sim, badlands::BuildingState
 #include "engine/app/app_view.hpp"
 #include "engine/app/game_camera_controller.hpp"
 #include "engine/app/sim_clock.hpp"
@@ -63,13 +63,13 @@ class GameView : public AppView {
   // Bakes the HW sky/IBL/ambient/directional-light for `state` into
   // scene_context_ and mirrors ambient into scene_. The expensive path.
   void RebakeSky(const DaylightState& state);
-  // Seeds the demo town via game_dispatch(GAME_ACTION_PLACE_BUILDING) at a
+  // Seeds the demo town via sim_.Dispatch(ActionKind::PlaceBuilding) at a
   // few spread-out, non-overlapping tiles around the prebuilt origin Castle.
   void PlaceDemoBuildings();
   // Clears scene_ and rebuilds it from scratch through the visual SceneComposer:
   // re-mirrors scene_context_'s lighting, generates the symbolic greybox map
   // (SymbolicMapGenerator) and adds its terrain chunks + lake water surfaces,
-  // then adds every game_buildings() row via AddBuildingToComposer. mode_ picks
+  // then adds every sim_.Buildings() row via AddBuildingToComposer. mode_ picks
   // blockout vs detailed materials. Called once from Initialize. NOTE: the sim
   // ticks, but this stage has no dynamic entities, so the scene stays valid;
   // when dynamic entities land, BuildScene (or an incremental update) must be
@@ -116,14 +116,14 @@ class GameView : public AppView {
   Camera camera_;
   GameCameraController gamecam_;
 
-  // Owns the sim; created in Initialize, destroyed in ~GameView.
-  BadlandsGame* game_ = nullptr;
+  // Owns the sim (RAII value member; nullptr script = mock brains).
+  badlands::Sim sim_{nullptr};
 
-  // Reused read-back buffer for game_buildings() (BuildScene + DrawUI), sized
-  // to kMaxBuildingRows once -- avoids a per-frame heap allocation.
-  std::vector<GameBuildingState> building_rows_;
-  // Same, for game_state()'s character rows (HUD model + hero picking).
-  std::vector<GameCharacterState> character_rows_;
+  // Reused scratch buffer for sim_.Buildings(building_rows_) (BuildScene + HUD
+  // + DrawUI), so the per-frame reads don't allocate a fresh vector each call.
+  std::vector<badlands::BuildingState> building_rows_;
+  // Same, for sim_.Characters() rows (HUD model + hero picking).
+  std::vector<badlands::CharacterState> character_rows_;
 
   // --- Game UI (NOT the ImGui debug UI; see CLAUDE.md) ---
   // Owned here rather than by the app so views without a HUD pay nothing; the
@@ -133,7 +133,7 @@ class GameView : public AppView {
   // Which entity the detail panel is describing. kNoPick = nothing selected.
   uint32_t selected_building_ = kNoPick;
   uint32_t selected_hero_ = kNoPick;
-  // Guild roster cap mirrored from GameWorldState, for the occupancy row.
+  // Guild roster cap mirrored from WorldState, for the occupancy row.
   uint32_t roster_cap_ = 0;
   // Cached each RefreshHud() so DrawUI's "World" debug window reuses this
   // frame's snapshot instead of re-reading the sim.
@@ -145,9 +145,8 @@ class GameView : public AppView {
   float ui_viewport_h_ = 0.0f;
   float ui_scale_ = 1.0f;
 
-  // Refills building_rows_ from the sim, sized to the LIVE building count (not
-  // the capacity) so picking never reads a stale tail. Returns the sim's total,
-  // which exceeds building_rows_.size() only if it overflowed kMaxBuildingRows.
+  // Refills building_rows_ from the sim (sized to the LIVE building count so
+  // picking never reads a stale tail). Returns the building count.
   uint32_t SnapshotBuildings();
   // Rebuilds hud_frame_ from the sim snapshots + selection. Called each Update.
   void RefreshHud();

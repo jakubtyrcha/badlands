@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "badlands_game.h"
+#include "badlands_sim.hpp"
 
 #include <catch_amalgamated.hpp>
 
@@ -15,33 +15,25 @@ constexpr float kTickDt = 1.0f / 30.0f;
 constexpr int kMaxTicks = 3000;  // 100 sim-seconds; the duel resolves in ~10
 
 // The Stage-2 duelists — canonical stats live in the engine
-// (game_desc_mercenary/game_desc_goblin), shared with the Rust app.
-inline GameCharacterDesc mercenary(float x, float z) {
-    return game_desc_mercenary(x, z);
+// (badlands::MercenaryDesc/GoblinDesc), shared with the Rust app.
+inline badlands::CharacterDesc mercenary(float x, float z) {
+    return badlands::MercenaryDesc(x, z);
 }
 
-inline GameCharacterDesc goblin(float x, float z) {
-    return game_desc_goblin(x, z);
+inline badlands::CharacterDesc goblin(float x, float z) {
+    return badlands::GoblinDesc(x, z);
 }
 
-inline std::vector<GameCharacterState> snapshot(const BadlandsGame* game) {
-    // game_state returns the total living count; one retry always suffices.
-    std::vector<GameCharacterState> rows(64);
-    uint32_t total = game_state(game, rows.data(), static_cast<uint32_t>(rows.size()));
-    if (total > rows.size()) {
-        rows.resize(total);
-        total = game_state(game, rows.data(), static_cast<uint32_t>(rows.size()));
-    }
-    rows.resize(total);
-    return rows;
+inline std::vector<badlands::CharacterState> snapshot(const badlands::Sim& sim) {
+    return sim.Characters();
 }
 
 // Ticks until exactly one entity is left standing; fails the test on timeout
 // or mutual destruction. Returns the survivor row.
-inline GameCharacterState run_duel(BadlandsGame* game) {
+inline badlands::CharacterState run_duel(badlands::Sim& sim) {
     for (int i = 0; i < kMaxTicks; ++i) {
-        game_tick(game, kTickDt);
-        auto rows = snapshot(game);
+        sim.Tick(kTickDt);
+        auto rows = snapshot(sim);
         REQUIRE(!rows.empty());  // mutual destruction would be a combat bug
         if (rows.size() == 1) {
             return rows[0];
