@@ -88,6 +88,15 @@ corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/nav/Cargo.toml)
 corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 
+# brainhost: wasmtime embedding (src/crates/brainhost) behind a narrow C ABI
+# for loading/ticking game-AI "brain" wasm modules — see
+# include/brainhost.h. Link-only here (not linked into any target yet; a
+# later task wires up a C++ caller). No dependency of this crate shares its
+# own name, so no Corrosion package-ambiguity workaround is needed (as with
+# assets/nav, unlike wesl_ffi).
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/brainhost/Cargo.toml)
+corrosion_set_env_vars(brainhost "RUSTFLAGS=-Cpanic=unwind")
+
 # ui: the GAME UI feature-lib (src/crates/ui) — flexbox layout (`panes`) +
 # glyph rasterization/text layout (`fontdue`) behind a coarse C ABI (one
 # ui_build call per frame). This is the in-world game UI surface, deliberately
