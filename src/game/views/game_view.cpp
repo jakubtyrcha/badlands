@@ -615,6 +615,55 @@ float GameView::GroundAt(float world_x, float world_z) const {
                       : map_.HeightAt(world_x + half_x_, world_z + half_z_);
 }
 
+void GameView::UpdateNavDebug() {
+  nav_lines_.Clear();
+  // Ride the terrain surface (+ a small lift) so the overlay hugs the ground.
+  auto gy = [this](float x, float z, float lift) { return GroundAt(x, z) + lift; };
+
+  if (nav_show_mesh_) {
+    nav_cells_ = sim_.NavDebugCells();
+    constexpr float lift = 0.12f;
+    for (const NavDebugCell& c : nav_cells_) {
+      const glm::vec3 col =
+          !c.passable
+              ? glm::vec3(0.85f, 0.12f, 0.12f)  // obstacle / water / mountain: red
+              // Passable terrain: green (cheap) -> yellow (dear), by cost.
+              : glm::mix(glm::vec3(0.2f, 0.8f, 0.25f), glm::vec3(0.9f, 0.85f, 0.1f),
+                         glm::clamp((c.cost - 1.0f) / 1.5f, 0.0f, 1.0f));
+      const glm::vec3 a(c.min_x, gy(c.min_x, c.min_z, lift), c.min_z);
+      const glm::vec3 b(c.max_x, gy(c.max_x, c.min_z, lift), c.min_z);
+      const glm::vec3 d(c.max_x, gy(c.max_x, c.max_z, lift), c.max_z);
+      const glm::vec3 e(c.min_x, gy(c.min_x, c.max_z, lift), c.max_z);
+      nav_lines_.AddLine(a, b, col);
+      nav_lines_.AddLine(b, d, col);
+      nav_lines_.AddLine(d, e, col);
+      nav_lines_.AddLine(e, a, col);
+    }
+  }
+
+  if (nav_a_ && nav_b_) {
+    nav_path_ = sim_.NavQuery(nav_a_->x, nav_a_->y, nav_b_->x, nav_b_->y);
+    const glm::vec3 col =
+        nav_path_.reachable ? glm::vec3(0.15f, 1.0f, 0.4f) : glm::vec3(1.0f, 0.2f, 0.2f);
+    const std::vector<float>& w = nav_path_.waypoints_xz;
+    for (size_t i = 2; i < w.size(); i += 2) {
+      nav_lines_.AddLine(glm::vec3(w[i - 2], gy(w[i - 2], w[i - 1], 0.25f), w[i - 1]),
+                         glm::vec3(w[i], gy(w[i], w[i + 1], 0.25f), w[i + 1]), col, 3.0f);
+    }
+  }
+
+  auto marker = [&](glm::vec2 p, glm::vec3 col) {
+    const float y = gy(p.x, p.y, 0.3f);
+    constexpr float s = 0.6f;
+    nav_lines_.AddLine(glm::vec3(p.x - s, y, p.y), glm::vec3(p.x + s, y, p.y), col, 3.0f);
+    nav_lines_.AddLine(glm::vec3(p.x, y, p.y - s), glm::vec3(p.x, y, p.y + s), col, 3.0f);
+  };
+  if (nav_a_) marker(*nav_a_, glm::vec3(0.2f, 0.6f, 1.0f));
+  if (nav_b_) marker(*nav_b_, glm::vec3(1.0f, 0.9f, 0.2f));
+
+  scene_context_.debug_lines = nav_lines_.empty() ? nullptr : &nav_lines_;
+}
+
 void GameView::RefreshSelectionDecals() {
   decals_.clear();
 
@@ -746,6 +795,18 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
                         },
                         sim_world)) {
         return;  // at/above the horizon
+      }
+
+      // Nav debug pick mode: two ground clicks become the path endpoints instead
+      // of selecting an entity.
+      if (nav_pick_mode_) {
+        if (!nav_a_ || nav_b_) {  // first click, or restart after a full pair
+          nav_a_ = sim_world;
+          nav_b_.reset();
+        } else {
+          nav_b_ = sim_world;
+        }
+        return;
       }
 
       // Units (small foreground capsules) win over the larger building footprints
@@ -1109,6 +1170,9 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // After RefreshHud: that is where a selection pointing at something that no
   // longer exists gets dropped, so the decals follow a validated selection.
   RefreshSelectionDecals();
+
+  // Pathfinding debug overlay (off unless toggled in the Gameplay Debug panel).
+  UpdateNavDebug();
 }
 
 uint32_t GameView::SnapshotBuildings() {
@@ -1397,6 +1461,26 @@ void GameView::DrawUI() {
     ImGui::Checkbox("Vision cones", &cone_pass_.mutable_enabled());
     ImGui::TextUnformatted(
         "translucent sector per unit, above terrain, along facing");
+
+    ImGui::Separator();
+    ImGui::Checkbox("Nav mesh", &nav_show_mesh_);
+    if (nav_show_mesh_) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(%zu cells; green=cheap, red=blocked)", nav_cells_.size());
+    }
+    ImGui::Checkbox("Nav pick path (click 2 points)", &nav_pick_mode_);
+    if (nav_a_ && nav_b_) {
+      if (nav_path_.reachable) {
+        ImGui::Text("path: cost %.1f  (%zu waypoints)", nav_path_.cost,
+                    nav_path_.waypoints_xz.size() / 2);
+      } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "unreachable");
+      }
+    }
+    if ((nav_a_ || nav_b_) && ImGui::SmallButton("clear path")) {
+      nav_a_.reset();
+      nav_b_.reset();
+    }
   }
 
   // --- Fog (self-contained collapsing section) ---
