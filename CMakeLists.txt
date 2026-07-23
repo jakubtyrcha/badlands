@@ -589,6 +589,10 @@ add_executable(badlands_game_tests
     # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
     # sim needed.
     game/tests/brain_abi_tests.cpp
+    # Task 4 (wasm-brain feature): the wasm hero brain wired into the sim --
+    # see game/src/wasm_brain.h. Loads the real committed
+    # assets/brains/hero.wasm (the all-Idle skeleton).
+    game/tests/wasm_brain_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.

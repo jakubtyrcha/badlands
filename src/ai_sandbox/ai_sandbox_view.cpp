@@ -2,9 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
 #include <fstream>
-#include <sstream>
 #include <string>
 
 #include <SDL3/SDL.h>
@@ -132,31 +130,32 @@ const char* command_name(badlands::CommandKindId kind) {
   }
 }
 
-// noiser is PARKED: C++ brains drive every archetype by default.
+// noiser is PARKED: heroes think via the wasm brain (assets/brains/hero.wasm)
+// when it loads, the C++ town brain otherwise.
 //
-// Upstream has seven open bugs (docs/noiser-bugs-upstream/), two of which block
-// composing brains at all -- sub-generators cannot be resumed from the entry
-// generator, and a file with 2+ `gen fn` runs an arbitrary one. The scripts and
-// the whole host-call surface stay in the tree and compiling
-// (game/src/brain.cpp, game/tests/noiser_smoke_tests.cpp keep exercising them),
-// so re-adopting per archetype is a switch flip once those land.
-//
-// Explicitly setting BADLANDS_BRAIN_SCRIPT opts back in for a session; unset
-// (the default) runs the C++ town brain.
-std::string load_brain_script() {
-  const char* env = std::getenv("BADLANDS_BRAIN_SCRIPT");
-  if (env == nullptr) {
-    return {};  // parked
-  }
-  std::ifstream file(env);
+// Upstream noiser has seven open bugs (docs/noiser-bugs-upstream/), two of
+// which block composing brains at all -- sub-generators cannot be resumed
+// from the entry generator, and a file with 2+ `gen fn` runs an arbitrary
+// one. The scripts and the whole host-call surface stay in the tree and
+// compiling (game/src/brain.cpp, game/tests/noiser_smoke_tests.cpp keep
+// exercising them, dormant), so re-adopting it is a switch flip once those
+// land -- see docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's
+// Scope note (the noiser path stays "unused by the apps").
+std::vector<uint8_t> load_hero_wasm() {
+  constexpr const char* kPath = "assets/brains/hero.wasm";  // cwd-relative, like shaders/assets
+  std::ifstream file(kPath, std::ios::binary | std::ios::ate);
   if (!file.good()) {
-    spdlog::warn("AiSandboxView: BADLANDS_BRAIN_SCRIPT='{}' unreadable -- using the C++ brain",
-                 env);
+    spdlog::warn("AiSandboxView: '{}' unreadable -- heroes fall back to the C++ brain", kPath);
     return {};
   }
-  std::ostringstream buffer;
-  buffer << file.rdbuf();
-  return buffer.str();
+  const std::streamsize size = file.tellg();
+  file.seekg(0, std::ios::beg);
+  std::vector<uint8_t> bytes(static_cast<size_t>(size));
+  if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+    spdlog::warn("AiSandboxView: '{}' failed to read -- heroes fall back to the C++ brain", kPath);
+    return {};
+  }
+  return bytes;
 }
 
 }  // namespace
@@ -203,8 +202,16 @@ void AiSandboxView::ApplyEnvironment() {
 }
 
 void AiSandboxView::SeedTown() {
-  const std::string brain = load_brain_script();
-  sim_ = badlands::Sim(brain.empty() ? nullptr : brain.c_str());
+  // The vector only needs to outlive this constructor call: bh_load compiles
+  // the module synchronously and keeps no reference to the input bytes (see
+  // brainhost's bh_load -- wasmtime::Module::new copies/compiles eagerly).
+  const std::vector<uint8_t> wasm = load_hero_wasm();
+  badlands::BrainDesc brain_desc{};
+  if (!wasm.empty()) {
+    brain_desc.wasm_bytes = wasm.data();
+    brain_desc.wasm_len = wasm.size();
+  }
+  sim_ = badlands::Sim(brain_desc);
 
   // Behaviour tuning as data: load over the compiled defaults (a missing file
   // just keeps them). Must happen before ticking -- factors are initial config.
