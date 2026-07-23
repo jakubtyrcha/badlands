@@ -1,5 +1,7 @@
 #include "game/ui/hud.hpp"
 
+#include <cmath>
+
 #include <spdlog/spdlog.h>
 
 namespace badlands {
@@ -13,16 +15,24 @@ constexpr float kRowHeight = 22.0f;
 constexpr float kTitleHeight = 28.0f;
 constexpr float kButtonHeight = 30.0f;
 constexpr float kGap = 6.0f;
+// Top-bar speed buttons. Pause is wider to fit its word; 1x/2x/4x are compact.
+constexpr float kPauseBtnWidth = 60.0f;
+constexpr float kSpeedBtnWidth = 40.0f;
 
 // 0xRRGGBBAA. Warm near-black chrome so the HUD reads against both the sunlit
 // and night palettes without competing with the scene.
 constexpr uint32_t kBarBg = 0x171512ecu;
 constexpr uint32_t kPanelBg = 0x1a1816ee;
 constexpr uint32_t kButtonBg = 0x3a352cff;
+constexpr uint32_t kButtonActiveBg = 0x6a5a34ff;  // highlighted (active speed)
+constexpr uint32_t kLinkBg = 0x2a2620ff;          // clickable list/link row
 constexpr uint32_t kGoldFg = 0xfad45cff;
 constexpr uint32_t kTextFg = 0xe8e2d4ff;
 constexpr uint32_t kMutedFg = 0x9d9689ff;
 constexpr uint32_t kTitleFg = 0xf2e9d2ff;
+
+// model.speed is set to exactly 0/1/2/4 by the caller, but compare with slack.
+bool SpeedIs(float speed, float target) { return std::fabs(speed - target) < 0.01f; }
 
 // Appends `s` to the blob and returns its (offset, length) for a UiElement.
 struct TextBlob {
@@ -89,11 +99,43 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
   {
     UiElement row = Make(UI_ELEM_ROW, bar_index);
     row.grow = 1.0f;
+    row.gap = 4.0f;  // small spacing between gold / speed buttons / clock
     els.push_back(row);
   }
   const int32_t bar_row = static_cast<int32_t>(els.size()) - 1;
+  // Gold on the far left (grows to fill), then the speed cluster, then the clock
+  // on the far right -- the two growing labels balance and push the fixed-width
+  // button cluster to the centre.
   AddLabel(els, blob, bar_row, "Gold  " + std::to_string(model.gold), kGoldFg,
            0.0f);
+  {
+    // Sim-speed buttons. The one matching model.speed is highlighted; none are
+    // ever disabled (setting the speed is always valid).
+    const struct {
+      uint32_t id;
+      const char* label;
+      float width;
+      float target;
+    } kSpeedBtns[] = {
+        {kHudBtnPause, "Pause", kPauseBtnWidth, 0.0f},
+        {kHudBtnSpeed1, "1x", kSpeedBtnWidth, 1.0f},
+        {kHudBtnSpeed2, "2x", kSpeedBtnWidth, 2.0f},
+        {kHudBtnSpeed4, "4x", kSpeedBtnWidth, 4.0f},
+    };
+    for (const auto& sb : kSpeedBtns) {
+      const bool active = SpeedIs(model.speed, sb.target);
+      UiElement b = Make(UI_ELEM_BUTTON, bar_row);
+      b.id = sb.id;
+      b.fixed = sb.width;
+      b.bg_rgba = active ? kButtonActiveBg : kButtonBg;
+      b.fg_rgba = active ? kTitleFg : kMutedFg;
+      b.flags = UI_FLAG_ALIGN_CENTER;
+      const auto [off, len] = blob.Add(std::string(sb.label));
+      b.text_off = off;
+      b.text_len = len;
+      els.push_back(b);
+    }
+  }
   AddLabel(els, blob, bar_row, model.clock_text, kTextFg, 0.0f,
            UI_FLAG_ALIGN_RIGHT);
 
@@ -122,15 +164,53 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
     const int32_t panel_index = static_cast<int32_t>(els.size()) - 1;
 
     AddLabel(els, blob, panel_index, sel.title, kTitleFg, kTitleHeight);
-    for (const auto& [label, value] : sel.rows) {
-      // One row per line: "label   value", right-aligned value.
-      UiElement row = Make(UI_ELEM_ROW, panel_index);
-      row.fixed = kRowHeight;
-      els.push_back(row);
-      const int32_t row_index = static_cast<int32_t>(els.size()) - 1;
-      AddLabel(els, blob, row_index, label, kMutedFg, 0.0f);
-      AddLabel(els, blob, row_index, value, kTextFg, 0.0f,
-               UI_FLAG_ALIGN_RIGHT);
+
+    // A "label   value" line. A non-zero click_id makes it a navigable link:
+    // wrap it in a PANEL that paints a subtle background AND carries the id (so
+    // the ui crate emits a hit rect for it -- and, being deeper than the panel
+    // chrome, it wins the innermost-first hit test), with the label/value in an
+    // inner ROW. A static row is just the ROW.
+    auto add_detail_row = [&](const std::string& label, const std::string& value,
+                              uint32_t click_id) {
+      int32_t container;
+      if (click_id != 0) {
+        UiElement p = Make(UI_ELEM_PANEL, panel_index);
+        p.id = click_id;
+        p.fixed = kRowHeight;
+        p.bg_rgba = kLinkBg;
+        els.push_back(p);
+        const int32_t p_index = static_cast<int32_t>(els.size()) - 1;
+        UiElement r = Make(UI_ELEM_ROW, p_index);
+        r.grow = 1.0f;
+        els.push_back(r);
+        container = static_cast<int32_t>(els.size()) - 1;
+      } else {
+        UiElement r = Make(UI_ELEM_ROW, panel_index);
+        r.fixed = kRowHeight;
+        els.push_back(r);
+        container = static_cast<int32_t>(els.size()) - 1;
+      }
+      AddLabel(els, blob, container, label, kMutedFg, 0.0f);
+      AddLabel(els, blob, container, value, kTextFg, 0.0f, UI_FLAG_ALIGN_RIGHT);
+    };
+
+    for (const HudRow& r : sel.rows) {
+      add_detail_row(r.label, r.value, r.click_id);
+    }
+
+    // Clickable member lists (residents / visitors): a muted heading, one
+    // navigable row per entry, then a "+N more" line when the source was capped
+    // (the ui crate has no scrolling yet).
+    for (const HudList& list : sel.lists) {
+      AddLabel(els, blob, panel_index, list.heading, kMutedFg, kRowHeight);
+      for (const HudRow& e : list.entries) {
+        add_detail_row(e.label, e.value, e.click_id);
+      }
+      if (list.overflow > 0) {
+        AddLabel(els, blob, panel_index,
+                 "+" + std::to_string(list.overflow) + " more", kMutedFg,
+                 kRowHeight);
+      }
     }
 
     // Actions. A shown-but-unavailable button is DISABLED, not omitted: it

@@ -31,6 +31,39 @@ enum HudId : uint32_t {
   kHudTopBarBackground,
   kHudBtnRecruit,
   kHudBtnDestroy,
+  // Sim-speed buttons in the top bar. Setting the speed is a presentation-clock
+  // op (SimClock::speed), NOT a sim Action -- the caller handles these ids by
+  // writing sim_clock_.speed rather than dispatching to the sim.
+  kHudBtnPause,
+  kHudBtnSpeed1,
+  kHudBtnSpeed2,
+  kHudBtnSpeed4,
+};
+
+// Clickable entity rows (guild residents, building visitors, the hero's home
+// link) carry ids at or above this base -- well clear of the small fixed HudId
+// enum above -- so a HUD hit resolves to a SELECTION change rather than an
+// action. The caller maps (id - kHudSelectBase) into a per-frame target table.
+inline constexpr uint32_t kHudSelectBase = 0x40000000u;
+
+// One label/value line in the detail panel. A non-zero click_id makes the row
+// interactive (it emits a hit rect and reads as a link) -- used for the hero's
+// home-guild link and for entity list entries.
+struct HudRow {
+  std::string label;
+  std::string value;
+  uint32_t click_id = 0;
+  HudRow(std::string l, std::string v, uint32_t id = 0)
+      : label(std::move(l)), value(std::move(v)), click_id(id) {}
+};
+
+// A titled, clickable list (a guild's residents, a building's visitors). Each
+// entry is a HudRow carrying its own click_id; `overflow` renders a trailing
+// "+N more" line when the source was capped (the ui crate has no scrolling yet).
+struct HudList {
+  std::string heading;
+  std::vector<HudRow> entries;
+  uint32_t overflow = 0;
 };
 
 struct HudSelection {
@@ -38,8 +71,11 @@ struct HudSelection {
   Kind kind = Kind::Building;
   uint32_t id = 0;
   std::string title;
-  // Label/value rows, rendered one per line.
-  std::vector<std::pair<std::string, std::string>> rows;
+  // Label/value stat rows, rendered one per line. A row with a click_id is a
+  // navigable link (e.g. a hero's home guild).
+  std::vector<HudRow> rows;
+  // Clickable member lists (residents / visitors), rendered after the stat rows.
+  std::vector<HudList> lists;
   bool can_recruit = false;   // guild with roster space
   bool can_destroy = false;   // user_destructible and alive
   // Shown greyed (still clickable, so the click is consumed) when the action
@@ -51,6 +87,7 @@ struct HudSelection {
 struct HudModel {
   uint32_t gold = 0;
   std::string clock_text;          // e.g. "Day 2  14:20"
+  float speed = 1.0f;              // sim speed (0/1/2/4) -- highlights its button
   bool has_selection = false;
   HudSelection selection;
 };

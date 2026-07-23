@@ -154,6 +154,19 @@ class GameView : public AppView {
   // Which entity the detail panel is describing. kNoPick = nothing selected.
   uint32_t selected_building_ = kNoPick;
   uint32_t selected_hero_ = kNoPick;
+  // A HUD click on a resident/visitor entry or the hero's home link selects an
+  // entity rather than firing an action. Each such element carries an id
+  // >= kHudSelectBase; this table maps (id - kHudSelectBase) back to the target,
+  // rebuilt every RefreshHud (parallel to the elements emitted into the model).
+  struct HudSelectTarget {
+    enum class Kind { Building, Hero } kind;
+    uint32_t id;
+  };
+  std::vector<HudSelectTarget> hud_targets_;
+  // True when selected_hero_ came from a list click (a visiting/indoors unit is
+  // then still inspectable) rather than a world pick (which never selects an
+  // indoors unit). Governs how RefreshHud resolves the selected unit.
+  bool selected_unit_from_list_ = false;
   // Guild roster cap mirrored from WorldState, for the occupancy row.
   uint32_t roster_cap_ = 0;
   // Cached each RefreshHud() so DrawUI's "World" debug window reuses this
@@ -175,8 +188,13 @@ class GameView : public AppView {
   uint32_t SnapshotCharacters();
   // Rebuilds hud_frame_ from the sim snapshots + selection. Called each Update.
   void RefreshHud();
-  // Dispatches the action a HUD button id maps to. Returns true if it ran.
+  // Dispatches the action a HUD button id maps to (sim actions, speed changes,
+  // or a selection change for a clickable entity row). Returns true if handled.
   bool DispatchHudAction(uint32_t hud_id);
+  // Registers a selection target and returns the HUD element id to tag the
+  // clickable row with (>= kHudSelectBase). Called in the same order the rows
+  // are emitted into the model, so the id round-trips back to this target.
+  uint32_t AddSelectTarget(HudSelectTarget::Kind kind, uint32_t id);
 
   // The biome/height map, generated once in BuildScene and kept so SyncUnits can
   // seat units on the terrain surface. half_x_/half_z_ convert world XZ (centred
