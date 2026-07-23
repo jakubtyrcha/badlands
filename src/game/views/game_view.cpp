@@ -50,6 +50,20 @@ float yaw_from_rotation_index(int32_t rotation_index) {
 // changing it means a re-bake, not a re-layout.
 constexpr float kHudFontPx = 18.0f;
 
+// Detail-panel title for a picked unit: its display name if it has one (heroes),
+// else the archetype so a picked deer/rat/townfolk is labelled honestly rather
+// than all reading "Hero".
+std::string unit_title(const CharacterState& c) {
+  if (c.name[0] != '\0') return c.name;
+  switch (static_cast<Archetype>(c.archetype)) {
+    case Archetype::Hero: return "Hero";
+    case Archetype::Townfolk: return "Townfolk";
+    case Archetype::Critter: return "Critter";
+    case Archetype::Monster: return "Monster";
+  }
+  return "Unit";
+}
+
 // Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
 // this much REAL time (the directional light + shadows still move every frame).
 // A real-time throttle bounds the ~per-frame HW cube bake cost independent of
@@ -424,9 +438,11 @@ void GameView::SyncUnits() {
   }
   unit_nodes_.clear();
 
-  char_rows_ = sim_.Characters();
+  // The frame's single character snapshot: SyncUnits() runs before RefreshHud()
+  // in Update(), so RefreshHud + world picking reuse these rows (no re-read).
+  character_rows_ = sim_.Characters();
   int index = 0;
-  for (const CharacterState& c : char_rows_) {
+  for (const CharacterState& c : character_rows_) {
     if (c.inside_building_id >= 0) {
       continue;  // hidden
     }
@@ -479,7 +495,7 @@ std::vector<float> GameView::BuildVisionConeTriangles() const {
   constexpr float kConeAlpha = 0.28f;  // straight-alpha translucency
   constexpr float kSegRad = 0.1745f;   // ~10 deg per fan segment
   std::vector<float> v;
-  for (const CharacterState& c : char_rows_) {
+  for (const CharacterState& c : character_rows_) {
     if (c.vision_radius <= 0.0f || c.inside_building_id >= 0) {
       continue;  // no vision, or hidden inside a building
     }
@@ -568,13 +584,19 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
       // gone), so the ground-plane hit is already in sim space -- pick directly.
       const glm::vec2 sim_world(hit.x, hit.z);
 
-      // NOTE: heroes now render (SyncUnits draws unit capsules), but hero picking
-      // is left unwired here -- selecting a hero is a follow-up (the HUD's hero
-      // detail branch + HeroAtWorld are ready). Building picking is the live path.
-      selected_hero_ = kNoPick;
+      // Units (small foreground capsules) win over the larger building footprints
+      // they may stand on. character_rows_ / building_rows_ are this frame's
+      // snapshot, so a pick hits exactly what was last drawn; HeroAtWorld skips
+      // hidden (inside-building) units, which aren't drawn.
+      selected_hero_ = HeroAtWorld(
+          character_rows_.data(),
+          static_cast<uint32_t>(character_rows_.size()), sim_world);
       selected_building_ =
-          BuildingAtWorld(building_rows_.data(),
-                          static_cast<uint32_t>(building_rows_.size()), sim_world);
+          selected_hero_ != kNoPick
+              ? kNoPick
+              : BuildingAtWorld(
+                    building_rows_.data(),
+                    static_cast<uint32_t>(building_rows_.size()), sim_world);
       return;
     }
 
@@ -708,12 +730,12 @@ uint32_t GameView::SnapshotBuildings() {
 }
 
 void GameView::RefreshHud() {
-  // Snapshot the sim into the reused row buffers. These back BOTH the HUD model
-  // and picking, so what the panel describes is exactly what a click can hit.
+  // Snapshot the buildings into the reused buffer; character_rows_ was already
+  // filled by SyncUnits() earlier this frame. Both back the HUD model AND
+  // picking, so what the panel describes is exactly what a click can hit.
   // Update() runs this before DrawUI() the same frame, so DrawUI reuses these
   // rows + the cached scalars below instead of re-reading them from the sim.
   hud_building_total_ = SnapshotBuildings();
-  character_rows_ = sim_.Characters();
 
   const WorldState world = sim_.World();
   roster_cap_ = world.guild_roster_cap;
@@ -798,7 +820,7 @@ void GameView::RefreshHud() {
     HudSelection s;
     s.kind = HudSelection::Kind::Hero;
     s.id = hero->id;
-    s.title = "Hero";
+    s.title = unit_title(*hero);
     s.rows.emplace_back("id", "#" + std::to_string(hero->id));
     {
       char hp[48];

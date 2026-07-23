@@ -142,7 +142,8 @@ class GameView : public AppView {
   // Reused scratch buffer for sim_.Buildings(building_rows_) (BuildScene + HUD
   // + DrawUI), so the per-frame reads don't allocate a fresh vector each call.
   std::vector<badlands::BuildingState> building_rows_;
-  // Same, for sim_.Characters() rows (HUD model + hero picking).
+  // The frame's single character snapshot, taken once by SyncUnits() and reused
+  // by BuildVisionConeTriangles(), RefreshHud() (HUD model), and world picking.
   std::vector<badlands::CharacterState> character_rows_;
 
   // --- Game UI (NOT the ImGui debug UI; see CLAUDE.md) ---
@@ -180,9 +181,8 @@ class GameView : public AppView {
   float half_x_ = 0.0f;
   float half_z_ = 0.0f;
 
-  // Live unit capsules, rebuilt from the snapshot each frame (index-free; the
-  // handles are destroyed and re-added). Reused snapshot buffer alongside.
-  std::vector<badlands::CharacterState> char_rows_;
+  // Live unit capsules, rebuilt from character_rows_ each frame (index-free; the
+  // handles are destroyed and re-added).
   std::vector<NodeHandle> unit_nodes_;
 
   float dt_ = 0.0f;
