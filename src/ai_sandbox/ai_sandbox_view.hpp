@@ -28,13 +28,13 @@
 #include "engine/core/camera.hpp"
 #include "engine/core/ray.hpp"
 #include "engine/rendering/context/scene_context.hpp"
-#include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "game/arena.h"
 #include "game/scenario.h"
+#include "game/visual/nav_debug_overlay.hpp"
 
 namespace badlands {
 
@@ -79,13 +79,8 @@ class AiSandboxView : public AppView {
   // The inspector: sim clock, per-hero needs/behaviour, noiser bug count, and
   // the tail of the command log.
   void DrawInspector();
-  // Pathfinding debug overlay: rebuilds nav_lines_ from the navmesh (cells
-  // coloured by terrain cost, obstacles distinct) + the picked path, and points
-  // scene_context_.debug_lines at it. Run at the end of Update().
-  void UpdateNavDebug();
-  // The nav debug panel: toggles + the picked path's cost/reachability.
-  void DrawNavPanel();
-  // A ground pick (left click) while pick mode is on: sets endpoint A then B.
+  // A left-click ground pick (flat arena plane, y = 0) while the nav overlay's
+  // pick mode is on: raycasts to the ground and hands the point to nav_debug_.
   void HandleNavPick(const SDL_Event& event);
   // Centers the game camera on the arena origin and picks a height (at
   // GameCameraController's fixed pitch) so the whole arena -- including the
@@ -146,15 +141,9 @@ class AiSandboxView : public AppView {
   Camera camera_;
   GameCameraController gamecam_;
 
-  // Pathfinding debug overlay (game/src/navmesh). Off by default; drawn through
-  // the engine's generic debug-line pass via scene_context_.debug_lines.
-  DebugLineBuffer nav_lines_;
-  std::vector<badlands::NavDebugCell> nav_cells_;  // reused snapshot buffer
-  bool nav_show_mesh_ = false;
-  bool nav_pick_mode_ = false;
-  std::optional<glm::vec2> nav_a_;  // path endpoints (world XZ), picked on ground
-  std::optional<glm::vec2> nav_b_;
-  badlands::NavPathResult nav_path_;  // last query result (cost / reachable)
+  // Pathfinding debug overlay (shared with the game view). Flat arena ground
+  // (y = 0); picks come from HandleNavPick's ground-plane raycast.
+  NavDebugOverlay nav_debug_;
 
   float dt_ = 0.0f;
 };

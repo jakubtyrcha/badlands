@@ -342,6 +342,7 @@ set(badlands_app_sources_game
     src/game/visual/scene_composer.cpp
     src/game/visual/vision_overlay_pass.cpp
     src/game/visual/cone_overlay_pass.cpp
+    src/game/visual/nav_debug_overlay.cpp
     src/game/visual/selection_decals.cpp
     src/game/visual/world_labels.cpp
     src/game/scene/building_composer.cpp
@@ -359,6 +360,7 @@ set(badlands_app_sources_game
 set(badlands_app_sources_ai_sandbox
     src/ai_sandbox/main_ai_sandbox.cpp
     src/ai_sandbox/ai_sandbox_view.cpp
+    src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
     src/game/scenario.cpp)          # sandbox scenarios loaded as data
