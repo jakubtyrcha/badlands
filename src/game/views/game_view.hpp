@@ -24,7 +24,10 @@
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
+#include "engine/ui/ui_renderer.hpp"
 #include "game/map/map_data.hpp"
+#include "game/ui/hud.hpp"
+#include "game/ui/picking.hpp"
 #include "game/visual/composite_post_pass.hpp"
 #include "game/visual/cone_overlay_pass.hpp"
 #include "game/visual/render_mode.hpp"
@@ -43,6 +46,7 @@ class GameView : public AppView {
   // Jump the day/night clock to an absolute time-of-day (headless capture).
   void SeekToTimeOfDay(float t01) override;
   void DrawUI() override;
+  UiRenderer* GetUiRenderer() override { return ui_.get(); }
   void OnResize(int width, int height) override;
 
   Camera& GetCamera() override { return camera_; }
@@ -135,9 +139,39 @@ class GameView : public AppView {
   ConeOverlayPass cone_pass_;      // vision-cone debug overlay (toggle in DrawUI)
   CompositePostPass post_passes_;  // runs vision then cones behind the one slot
 
-  // Reused scratch buffer for sim_.Buildings(building_rows_), so the per-frame
-  // DrawUI/BuildScene reads don't allocate a fresh vector each call.
+  // Reused scratch buffer for sim_.Buildings(building_rows_) (BuildScene + HUD
+  // + DrawUI), so the per-frame reads don't allocate a fresh vector each call.
   std::vector<badlands::BuildingState> building_rows_;
+  // Same, for sim_.Characters() rows (HUD model + hero picking).
+  std::vector<badlands::CharacterState> character_rows_;
+
+  // --- Game UI (NOT the ImGui debug UI; see CLAUDE.md) ---
+  // Owned here rather than by the app so views without a HUD pay nothing; the
+  // app runs the pass via AppView::GetUiRenderer.
+  std::unique_ptr<UiRenderer> ui_;
+  HudFrame hud_frame_;  // this frame's quads + hit rects
+  // Which entity the detail panel is describing. kNoPick = nothing selected.
+  uint32_t selected_building_ = kNoPick;
+  uint32_t selected_hero_ = kNoPick;
+  // Guild roster cap mirrored from WorldState, for the occupancy row.
+  uint32_t roster_cap_ = 0;
+  // Cached each RefreshHud() so DrawUI's "World" debug window reuses this
+  // frame's snapshot instead of re-reading the sim.
+  uint32_t hud_gold_ = 0;
+  uint32_t hud_building_total_ = 0;
+  // Physical-pixel size of the last frame's surface, for HUD layout + hit
+  // testing. Both are physical because ui_build works in physical pixels.
+  float ui_viewport_w_ = 0.0f;
+  float ui_viewport_h_ = 0.0f;
+  float ui_scale_ = 1.0f;
+
+  // Refills building_rows_ from the sim (sized to the LIVE building count so
+  // picking never reads a stale tail). Returns the building count.
+  uint32_t SnapshotBuildings();
+  // Rebuilds hud_frame_ from the sim snapshots + selection. Called each Update.
+  void RefreshHud();
+  // Dispatches the action a HUD button id maps to. Returns true if it ran.
+  bool DispatchHudAction(uint32_t hud_id);
 
   // The biome/height map, generated once in BuildScene and kept so SyncUnits can
   // seat units on the terrain surface. half_x_/half_z_ convert world XZ (centred

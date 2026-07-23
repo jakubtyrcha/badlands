@@ -49,6 +49,27 @@ enum class ActionKind : int32_t {
 // to the map span.)
 inline constexpr int32_t kGridHalfExtentTiles = 128;  // was GAME_GRID_HALF_EXTENT_TILES
 
+// Hero guild classes (the recruitable "class type id"). Unscoped + HERO_*
+// enumerators to match the sim-internal usage this was promoted from (was
+// heroes.h's HeroClassId); the numeric values are load-bearing (color table,
+// registry HeroClass component .value). NB: distinct from the `HeroClass`
+// EnTT *component* (game/src/components.h) -- this is the class enum.
+enum HeroClassId : int32_t {
+    HERO_MERCENARY = 0,
+    HERO_HUNTER,
+    HERO_GRAVE_ROBBER,
+    HERO_APPRENTICE,
+    HERO_CLASS_COUNT
+};
+
+// A building recruits at most this many distinct hero classes (usually 1). The
+// per-kind recruit set lives in BuildingDef::recruits (the placement.cpp kDefs
+// table is its single source of truth).
+inline constexpr int32_t kMaxRecruitClasses = 3;
+
+// Display name of a hero class ("Mercenary", ...). Empty string if out of range.
+const char* HeroClassName(HeroClassId cls);
+
 // Only characters on this team grant the player fog-of-war vision. Enemies run
 // their own (future) vision and never reveal the map for the player.
 inline constexpr int32_t kPlayerTeam = 0;
@@ -189,7 +210,7 @@ struct SimStats {
     uint32_t noiser_bugs;     // failures that downgraded an entity to the mock brain
 };
 
-// Static per-kind footprint size (tiles) and behavior flags.
+// Static per-kind footprint size (tiles), behavior flags, and recruit set.
 struct BuildingDef {
     int32_t width_tiles, depth_tiles;
     bool poppable;            // auto-spawned (House/Sewer), never player-placed
@@ -198,6 +219,11 @@ struct BuildingDef {
     // Fog-of-war vision radius (world units) measured from the footprint EDGES
     // (a euclidean expansion of the footprint). 0 => grants no vision.
     float vision_radius;
+    // Hero classes this kind recruits. recruit_count is 0 for non-guilds and 1
+    // for today's guilds; the array has room for 2-3 (guilds are the only
+    // kinds with recruit_count > 0). Declared per kind in placement.cpp kDefs.
+    int32_t recruit_count;
+    HeroClassId recruits[kMaxRecruitClasses];
 };
 
 // The world-space box a renderer should draw for a building of this kind and

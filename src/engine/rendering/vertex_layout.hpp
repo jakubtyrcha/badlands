@@ -34,6 +34,8 @@ enum class VertexLayout {
   kSplatCapsule,       // pos_ndc(vec2) + local_pos(vec2) + src_uv(vec2) + half_len_radius(vec2) = 32 bytes
   kTextBg,             // pos(vec2) + color(vec4) = 24 bytes
   kPos2d,              // pos(vec2) = 8 bytes (screen-space positions only)
+  kUiVertex,           // pos(vec2) + uv(vec2) + color(vec4) = 32 bytes
+                       // (screen-space game-UI quads; shaders/ui/ui.wesl)
   kPos2dSlot,          // pos(vec2) + slot_index(u32) = 12 bytes
                        // (per-vertex slot indirection; used by the cross-font
                        //  glyph-morph demo to bind each tight quad to a pair

@@ -53,17 +53,19 @@ float height_at(const BadlandsGame& game, glm::vec2 world_xz) {
 }
 
 int32_t guild_hero_class(int kind) {
-    switch (static_cast<BuildingKind>(kind)) {
-        case BuildingKind::FreeCompanyQuarters:
-            return HERO_MERCENARY;
-        case BuildingKind::HuntersCamp:
-            return HERO_HUNTER;
-        case BuildingKind::ThievesDen:
-            return HERO_GRAVE_ROBBER;
-        case BuildingKind::Scriptorium:
-            return HERO_APPRENTICE;
-        default:
-            return -1;
+    // The recruit set (BuildingDef::recruits) is the single source of truth; a
+    // guild's class is its first recruit slot, -1 for a non-guild building.
+    const BuildingDef def = BuildingDefOf(static_cast<BuildingKind>(kind));
+    return def.recruit_count > 0 ? static_cast<int32_t>(def.recruits[0]) : -1;
+}
+
+const char* HeroClassName(HeroClassId cls) {
+    switch (cls) {
+        case HERO_MERCENARY:    return "Mercenary";
+        case HERO_HUNTER:       return "Hunter";
+        case HERO_GRAVE_ROBBER: return "Grave Robber";
+        case HERO_APPRENTICE:   return "Apprentice";
+        default:                return "";
     }
 }
 

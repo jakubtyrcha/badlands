@@ -24,6 +24,7 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/water_material.hpp"
+#include "engine/core/ray.hpp"
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
 #include "game/geometry/terrain_mesh.hpp"
@@ -38,12 +39,16 @@ namespace badlands {
 
 namespace {
 
-// rotation_index 0..3 -> 0/45/90/135deg world yaw about Y (badlands_game.h's
-// GamePlacementDesc convention) -- see building_scene.h's AddBuildingToScene
+// rotation_index 0..3 -> 0/45/90/135deg world yaw about Y (the PlacementDesc
+// convention in badlands_sim.hpp) -- see building_scene.h's AddBuildingToScene
 // comment for why this is exact for 0/2 and an approximation for 1/3.
 float yaw_from_rotation_index(int32_t rotation_index) {
   return glm::radians(static_cast<float>(rotation_index) * 45.0f);
 }
+
+// Game-UI text size in LOGICAL pixels. The atlas is baked once at this size, so
+// changing it means a re-bake, not a re-layout.
+constexpr float kHudFontPx = 18.0f;
 
 // Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
 // this much REAL time (the directional light + shadows still move every frame).
@@ -155,6 +160,19 @@ bool GameView::Initialize(const RenderContext& ctx) {
   if (!matlib_.ok()) {
     spdlog::error("GameView::Initialize: terrain arrays failed to build");
     return false;
+  }
+
+  // Game UI (the in-world HUD, NOT the ImGui debug UI -- see CLAUDE.md). Owned
+  // by the view like the material factories above; the app runs its pass via
+  // GetUiRenderer(). A HUD failure is not fatal: the game is still playable
+  // without it, and DrawUI's debug windows still show the same state.
+  ui_ = std::make_unique<UiRenderer>();
+  if (!ui_->Initialize(ctx.device, ctx.queue, *ctx.pipeline_gen,
+                       ctx.surface_format,
+                       "assets/fonts/CormorantUnicase-Regular.ttf",
+                       kHudFontPx, /*scale_factor=*/1.0f)) {
+    spdlog::warn("GameView::Initialize: game UI disabled (font/pipeline setup failed)");
+    ui_.reset();
   }
 
   // Seed the day/night cycle: set the day length, then jump to the initial
@@ -486,8 +504,7 @@ std::vector<float> GameView::BuildVisionConeTriangles() const {
   return v;
 }
 
-void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
-                           int /*height*/) {
+void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
   // Fixed-angle camera: only zoom is mouse-driven (wheel + trackpad, which SDL
   // reports as the same event with fractional deltas). Key panning is read
   // directly from Update()'s keyboard_state snapshot instead of per-event.
@@ -495,12 +512,113 @@ void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
   // Use the window's LOGICAL size (EventWindowLogicalSize), not HandleEvent's
   // physical-pixel width/height: SDL mouse coords are points, so mixing them
   // with a pixel extent scales the anchor ray off the cursor on HiDPI displays.
-  if (event.type != SDL_EVENT_MOUSE_WHEEL) return;
-  if (ImGui::GetIO().WantCaptureMouse) return;
-  glm::vec2 screen;
-  if (!EventWindowLogicalSize(event.wheel.windowID, screen)) return;
-  ZoomAtCursor(gamecam_, camera_, NormalizedWheelY(event.wheel),
-               glm::vec2(event.wheel.mouse_x, event.wheel.mouse_y), screen);
+  //
+  // ImGui capture is gated PER INPUT KIND: WantCaptureMouse must not swallow
+  // keyboard events (else ESC-to-deselect dies whenever a debug window is under
+  // the cursor) and vice versa.
+  const ImGuiIO& io = ImGui::GetIO();
+
+  switch (event.type) {
+    case SDL_EVENT_MOUSE_WHEEL: {
+      if (io.WantCaptureMouse) return;
+      glm::vec2 screen;
+      if (!EventWindowLogicalSize(event.wheel.windowID, screen)) return;
+      ZoomAtCursor(gamecam_, camera_, NormalizedWheelY(event.wheel),
+                   glm::vec2(event.wheel.mouse_x, event.wheel.mouse_y), screen);
+      return;
+    }
+
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+      if (io.WantCaptureMouse) return;
+      if (event.button.button != SDL_BUTTON_LEFT) return;
+      glm::vec2 logical;
+      if (!EventWindowLogicalSize(event.button.windowID, logical)) return;
+
+      // ONE click, TWO coordinate spaces. SDL reports the cursor in logical
+      // points; the ray math wants points against a point extent, while the
+      // HUD's hit rects came back from ui_build in PHYSICAL pixels. Mixing
+      // them is invisible at 1x and wrong on every HiDPI display -- i.e. on
+      // the dev machine -- so convert explicitly for the HUD test.
+      const glm::vec2 cursor_logical(event.button.x, event.button.y);
+      const glm::vec2 to_physical(
+          logical.x > 0.0f ? static_cast<float>(width) / logical.x : 1.0f,
+          logical.y > 0.0f ? static_cast<float>(height) / logical.y : 1.0f);
+      const glm::vec2 cursor_physical = cursor_logical * to_physical;
+
+      // Input priority: ImGui (handled above) -> game UI -> world -> pan.
+      const uint32_t hud_id =
+          HudHitTest(hud_frame_, cursor_physical.x, cursor_physical.y);
+      if (hud_id != kHudNone) {
+        // Any hit on HUD chrome is CONSUMED, even a disabled button or the
+        // panel background -- otherwise the click falls through and deselects
+        // the very entity the panel is describing.
+        if (!HudHitIsDisabled(hud_frame_, cursor_physical.x,
+                              cursor_physical.y)) {
+          DispatchHudAction(hud_id);
+        }
+        return;
+      }
+
+      // World pick: ray against the ground plane, then the drawn footprints.
+      const Ray ray = ScreenPointToRay(camera_, cursor_logical, logical);
+      glm::vec3 hit;
+      if (!IntersectGroundPlane(ray, 0.0f, hit)) return;  // at/above the horizon
+
+      // Sim and render coordinates are identical now (the old demo south-shift is
+      // gone), so the ground-plane hit is already in sim space -- pick directly.
+      const glm::vec2 sim_world(hit.x, hit.z);
+
+      // NOTE: heroes now render (SyncUnits draws unit capsules), but hero picking
+      // is left unwired here -- selecting a hero is a follow-up (the HUD's hero
+      // detail branch + HeroAtWorld are ready). Building picking is the live path.
+      selected_hero_ = kNoPick;
+      selected_building_ =
+          BuildingAtWorld(building_rows_.data(),
+                          static_cast<uint32_t>(building_rows_.size()), sim_world);
+      return;
+    }
+
+    case SDL_EVENT_KEY_DOWN:
+      if (io.WantCaptureKeyboard) return;
+      if (event.key.key == SDLK_ESCAPE) {
+        selected_building_ = kNoPick;
+        selected_hero_ = kNoPick;
+      }
+      return;
+
+    default:
+      return;
+  }
+}
+
+bool GameView::DispatchHudAction(uint32_t hud_id) {
+  Action action{};
+  switch (hud_id) {
+    case kHudBtnRecruit:
+      if (selected_building_ == kNoPick) return false;
+      action.kind = ActionKind::RecruitHero;
+      action.target_id = selected_building_;
+      break;
+    case kHudBtnDestroy:
+      if (selected_building_ == kNoPick) return false;
+      action.kind = ActionKind::DestroyBuilding;
+      action.target_id = selected_building_;
+      break;
+    default:
+      return false;  // panel/bar background: consumed, but not an action
+  }
+  const int64_t rc = sim_.Dispatch(action);
+  if (rc < 0) {
+    spdlog::warn("GameView: action {} on {} rejected ({})", hud_id,
+                 selected_building_, rc);
+    return false;
+  }
+  if (hud_id == kHudBtnDestroy) {
+    // The building is gone; nothing left for the panel to describe.
+    selected_building_ = kNoPick;
+    BuildScene();  // footprints changed -> the scene must be rebuilt
+  }
+  return true;
 }
 
 void GameView::Update(float dt, const bool* keyboard_state) {
@@ -574,6 +692,136 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   gamecam_.UpdateCamera(camera_);
   SyncUnits();  // live AI capsules on the terrain, rebuilt from the snapshot
   scene_.SyncToRegistry(registry_, scene_context_);
+
+  {
+    PROFILE_SCOPE("hud");
+    RefreshHud();
+  }
+}
+
+uint32_t GameView::SnapshotBuildings() {
+  // sim_.Buildings sizes building_rows_ to the LIVE count (never a padded
+  // capacity): picking reads building_rows_.size(), so a stale tail would let a
+  // click land on a dead row (e.g. after a Destroy, before the next refresh).
+  sim_.Buildings(building_rows_);
+  return static_cast<uint32_t>(building_rows_.size());
+}
+
+void GameView::RefreshHud() {
+  // Snapshot the sim into the reused row buffers. These back BOTH the HUD model
+  // and picking, so what the panel describes is exactly what a click can hit.
+  // Update() runs this before DrawUI() the same frame, so DrawUI reuses these
+  // rows + the cached scalars below instead of re-reading them from the sim.
+  hud_building_total_ = SnapshotBuildings();
+  character_rows_ = sim_.Characters();
+
+  const WorldState world = sim_.World();
+  roster_cap_ = world.guild_roster_cap;
+  hud_gold_ = world.gold;
+
+  HudModel model;
+  model.gold = world.gold;
+  {
+    // Time of day from the presentation clock -- it is NOT in the game C ABI.
+    const float t01 = sim_clock_.TimeOfDay();
+    const int minutes = static_cast<int>(t01 * 24.0f * 60.0f);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "Day %llu   %02d:%02d",
+                  static_cast<unsigned long long>(sim_clock_.DayCounter()) + 1,
+                  (minutes / 60) % 24, minutes % 60);
+    model.clock_text = buf;
+  }
+
+  // A selection that no longer exists (destroyed, or a hero that entered a
+  // building) silently clears rather than describing a stale row.
+  const BuildingState* selected = nullptr;
+  for (const BuildingState& b : building_rows_) {
+    if (b.id == selected_building_) selected = &b;
+  }
+  const CharacterState* hero = nullptr;
+  for (const CharacterState& c : character_rows_) {
+    if (c.id == selected_hero_) hero = &c;
+  }
+  if (!selected) selected_building_ = kNoPick;
+  if (!hero) selected_hero_ = kNoPick;
+
+  if (selected) {
+    const BuildingDef def = BuildingDefOf(selected->kind);
+
+    // Occupancy: heroes whose home guild is this building.
+    uint32_t occupancy = 0;
+    uint32_t visitors = 0;
+    for (const CharacterState& c : character_rows_) {
+      if (c.home_building_id == static_cast<int32_t>(selected->id)) ++occupancy;
+      if (c.inside_building_id == static_cast<int32_t>(selected->id)) ++visitors;
+    }
+
+    HudSelection s;
+    s.kind = HudSelection::Kind::Building;
+    s.id = selected->id;
+    s.title = building_label(selected->kind);
+    s.rows.emplace_back("id", "#" + std::to_string(selected->id));
+    {
+      char pos[48];
+      std::snprintf(pos, sizeof(pos), "%.0f, %.0f", selected->center_x,
+                    selected->center_z);
+      s.rows.emplace_back("position", pos);
+    }
+    s.rows.emplace_back("footprint",
+                        std::to_string(selected->width_tiles) + " x " +
+                            std::to_string(selected->depth_tiles));
+    // A guild is a building that recruits >= 1 hero class; only those show the
+    // recruited-class row, a roster row, and the Recruit button. Gating on
+    // def.recruit_count -- read straight off BuildingDef::recruits, the sim's
+    // own per-kind recruit table -- means the button is never shown enabled for
+    // a building Dispatch(RecruitHero) would reject.
+    const bool is_guild = def.recruit_count > 0;
+    if (is_guild) {
+      std::string classes;
+      for (int32_t i = 0; i < def.recruit_count && i < kMaxRecruitClasses; ++i) {
+        if (i > 0) classes += ", ";
+        classes += HeroClassName(def.recruits[i]);
+      }
+      s.rows.emplace_back("recruits", classes);
+      s.rows.emplace_back("roster", std::to_string(occupancy) + " / " +
+                                        std::to_string(roster_cap_));
+      s.show_recruit = true;
+      s.can_recruit = occupancy < roster_cap_;
+    }
+    if (visitors > 0) s.rows.emplace_back("inside", std::to_string(visitors));
+    s.show_destroy = def.user_destructible;
+    s.can_destroy = s.show_destroy;
+
+    model.has_selection = true;
+    model.selection = std::move(s);
+  } else if (hero) {
+    HudSelection s;
+    s.kind = HudSelection::Kind::Hero;
+    s.id = hero->id;
+    s.title = "Hero";
+    s.rows.emplace_back("id", "#" + std::to_string(hero->id));
+    {
+      char hp[48];
+      std::snprintf(hp, sizeof(hp), "%.0f / %.0f", hero->hp, hero->max_hp);
+      s.rows.emplace_back("health", hp);
+    }
+    {
+      char pos[48];
+      std::snprintf(pos, sizeof(pos), "%.0f, %.0f", hero->pos_x, hero->pos_z);
+      s.rows.emplace_back("position", pos);
+    }
+    if (hero->home_building_id >= 0) {
+      s.rows.emplace_back("guild", "#" + std::to_string(hero->home_building_id));
+    }
+    model.has_selection = true;
+    model.selection = std::move(s);
+  }
+
+  if (!ui_ || ui_viewport_w_ <= 0.0f) return;
+  BuildHud(ui_->context(), model, ui_viewport_w_, ui_viewport_h_, ui_scale_,
+           hud_frame_);
+  ui_->SetQuads(hud_frame_.quads.data(),
+                static_cast<uint32_t>(hud_frame_.quads.size()));
 }
 
 void GameView::SeekToTimeOfDay(float t01) {
@@ -630,12 +878,12 @@ void GameView::DrawUI() {
   EditorUI::DrawStats(dt_);
   ImGui::End();
 
-  const auto world = sim_.World();
-  sim_.Buildings(building_rows_);
-
+  // Reuse this frame's snapshot: Update()->RefreshHud() already read gold and
+  // filled building_rows_ (sized to the live count) just before DrawUI runs,
+  // so there is no need to round-trip the sim again here.
   ImGui::Begin("World");
-  ImGui::Text("Gold: %u", world.gold);
-  ImGui::Text("Buildings: %u", static_cast<uint32_t>(building_rows_.size()));
+  ImGui::Text("Gold: %u", hud_gold_);
+  ImGui::Text("Buildings: %u", hud_building_total_);
   ImGui::Separator();
   for (const BuildingState& b : building_rows_) {
     ImGui::Text("#%u %-24s (%.1f, %.1f)", b.id,
@@ -648,6 +896,23 @@ void GameView::DrawUI() {
 void GameView::OnResize(int width, int height) {
   camera_.aspect =
       height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+
+  // PHYSICAL pixels -- ui_build works in physical pixels throughout, and so do
+  // the hit rects it returns.
+  ui_viewport_w_ = static_cast<float>(width);
+  ui_viewport_h_ = static_cast<float>(height);
+
+  // ui_scale_ (logical->physical for HUD layout) is pinned to 1.0 because the
+  // glyph atlas is baked ONCE at kHudFontPx * 1.0 (Initialize) with no re-bake
+  // path: driving layout at a >1 density while the atlas stays 1x would render
+  // glyphs at half the intended size inside doubled chrome. The window is
+  // created WITHOUT SDL_WINDOW_HIGH_PIXEL_DENSITY, so the drawable is the
+  // logical size (density 1.0) and this is exact. It also keeps the fixed-size
+  // --screenshot capture correct (which would otherwise be laid out at the
+  // live window's density into a 1x-sized target). When true HiDPI lands, the
+  // atlas bake scale and ui_scale_ must move together (bake at the density and
+  // re-bake on change).
+  ui_scale_ = 1.0f;
 }
 
 }  // namespace badlands

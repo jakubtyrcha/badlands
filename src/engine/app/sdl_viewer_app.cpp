@@ -18,6 +18,7 @@
 #include "engine/app/screenshot.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
 #include "engine/ui/imgui_impl_wgpu_custom.hpp"
+#include "engine/ui/ui_renderer.hpp"
 
 namespace badlands {
 
@@ -280,12 +281,30 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
 
     view_->DrawUI();
 
+    // Point the game UI at the window surface before any pass is open --
+    // Prepare may create a pipeline and writes the uniform buffer.
+    if (UiRenderer* ui = view_->GetUiRenderer()) {
+      int w = 0, h = 0;
+      SDL_GetWindowSizeInPixels(window_, &w, &h);
+      ui->Prepare(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                  gpu_.GetSurfaceFormat());
+    }
+
     renderer_.Render(view_->GetCamera(), view_->GetRegistry(),
                      view_->GetSceneContext(), surface);
 
-    // App-owned ImGui composite pass: a SEPARATE render pass on the same
-    // surface view, loading (not clearing) the scene the renderer just
-    // wrote, with no depth attachment (ImGui is a 2D overlay).
+    // App-owned overlay pass: a SEPARATE render pass on the same surface view,
+    // loading (not clearing) the scene the renderer just wrote, with no depth
+    // attachment (both overlays are 2D).
+    //
+    // Two surfaces share this one pass, in order: the view's GAME UI first,
+    // then Dear ImGui DEBUG UI on top. One encoder and one submit for both, and
+    // the ordering is structural rather than a convention someone can break.
+    //
+    // The game UI cannot borrow the renderer's frame uniform buffer here:
+    // SceneRenderer::Render's FrameContext is a stack local whose End() has
+    // already released it (context/frame_context.cpp:217). UiRenderer owns its
+    // own small uniform buffer instead -- see engine/ui/ui_renderer.hpp.
     {
       wgpu::CommandEncoder encoder = gpu_.GetDevice().CreateCommandEncoder();
 
@@ -301,6 +320,8 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
       desc.depthStencilAttachment = nullptr;
 
       wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&desc);
+
+      if (UiRenderer* ui = view_->GetUiRenderer()) ui->Draw(pass);
 
       ImGui::Render();
       ImDrawData* dd = ImGui::GetDrawData();

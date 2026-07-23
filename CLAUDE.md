@@ -46,6 +46,7 @@ Rust feature-lib tests — **use `--lib`** (bare `cargo test` here prints only t
 cargo test --manifest-path src/crates/wesl/Cargo.toml   --lib
 cargo test --manifest-path src/crates/assets/Cargo.toml --lib
 cargo test --manifest-path src/crates/nav/Cargo.toml    --lib
+cargo test --manifest-path src/crates/ui/Cargo.toml     --lib
 #   single test: append its name, e.g. ... --lib write_png_roundtrip
 ```
 - Prereqs: `git-lfs` + initialized submodules (`noiser`, `catch2`, `entt`, `glm`, `spdlog`). See README for clone/LFS setup.
@@ -56,7 +57,7 @@ cargo test --manifest-path src/crates/nav/Cargo.toml    --lib
 - **`src/engine/`** — engine ported from sampo (`sampo::` → `badlands::`): rendering, GPU/pipeline/reflection/frame infra, data-driven material system, scene graph + scene renderer (forward-opaque + tonemap), GPU mip generation, `Camera`. **No game logic or game types.**
 - **`src/game/`** — C++ game render/scene layer: geometry generation, scene construction, per-app `AppView`s (`GameView`, etc.), camera + input *handling*, UI *logic*. The EnTT world sim (placement/movement/brains/combat) lives in **`game/`**, built as `badlands_game_lib` and called by the apps through a C ABI.
 - **`src/core/`** — generic shared C++ (math glue, `GeometryType`, small utils).
-- **`src/crates/`** — Rust feature-libs behind narrow C ABIs, linked via Corrosion: `wesl` (`.wesl`→WGSL + reflection), `assets` (JPEG decode + glTF parse + PNG write), `nav` (`GamePathfinder` pathfinding). `noiser` (scripting) lives under `third_party/`, wired in via `crates/noiser-bundle`.
+- **`src/crates/`** — Rust feature-libs behind narrow C ABIs, linked via Corrosion: `wesl` (`.wesl`→WGSL + reflection), `assets` (JPEG decode + glTF parse + PNG write), `nav` (`GamePathfinder` pathfinding), `ui` (game-UI layout via `panes` + text via `fontdue`). `noiser` (scripting) lives under `third_party/`, wired in via `crates/noiser-bundle`.
 
 Ownership: **C++ owns** window, GPU, render loop, renderer, world, geometry, camera, input, scene construction, GPU mips. **Rust owns** the feature-libs. Each app builds its scene from the world in its own `AppView`.
 

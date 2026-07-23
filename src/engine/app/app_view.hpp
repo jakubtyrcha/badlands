@@ -12,6 +12,8 @@
 
 namespace badlands {
 
+class UiRenderer;
+
 // A single application view. Owns its scene, camera, and UI. Views share the
 // renderer + engine. Game-agnostic base (no game types).
 class AppView {
@@ -43,8 +45,20 @@ class AppView {
   // no-op (views without a time-of-day).
   virtual void SeekToTimeOfDay(float t01) { (void)t01; }
 
-  // Per-frame ImGui windows (no-op until A2).
+  // Per-frame ImGui windows (no-op until A2). This is the DEBUG UI surface.
   virtual void DrawUI() {}
+
+  // The view's GAME UI renderer, or nullptr if it has none. The two UI
+  // surfaces are deliberately separate (see CLAUDE.md): DrawUI() above is Dear
+  // ImGui debug UI; this is the in-world game UI, drawn by the app into a
+  // screen-space overlay pass after the tonemap resolve and BEFORE ImGui, so
+  // debug UI always sits on top.
+  //
+  // The VIEW owns the renderer (like its material factories, built in
+  // Initialize(RenderContext)) because the glyph atlas + pipeline must be owned
+  // together, and views with no game UI should not pay for an atlas. The APP
+  // runs the pass, so no render-pass encoder leaks into view code.
+  virtual UiRenderer* GetUiRenderer() { return nullptr; }
 
   virtual void OnResize(int width, int height) = 0;
   virtual void ResetCamera() {}
