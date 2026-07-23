@@ -84,10 +84,13 @@ constexpr int kChunkCells = 16;
 // position (the old +z demo-building shift is gone). So the fog-of-war overlay's
 // sim->render offset is zero.
 
-// Fog-of-war vision grid (SIM frame). Covers the colony's ~96 m playable grid
-// (kGridHalfExtentTiles = 48) plus margin for long building vision, at ~1 m per
-// texel. Terrain outside this maps to terra-incognita (rendered black).
-constexpr float kVisionHalfExtentM = 64.0f;
+// Fog-of-war vision grid (SIM frame). Sized to the WHOLE map so the only hard
+// black edge is the real map boundary -- everything inside is organic FoW
+// (discovered vs not). (It was 64 = half the map, a stale value from when the
+// gameplay grid was 96 m; anything past 64 rendered permanently black, cutting
+// the southern town. See kGridHalfExtentTiles, now the full map.)
+constexpr float kVisionHalfExtentM =
+    static_cast<float>(kGridHalfExtentTiles);  // 128 = map half-extent
 constexpr float kVisionTexelM = 1.0f;
 
 // Flat water surface mesh from the map's block-aligned lake triangles. Same
