@@ -64,6 +64,49 @@ std::string unit_title(const CharacterState& c) {
   return "Unit";
 }
 
+// The building row with `id`, or nullptr. Linear scan over the handful of town
+// buildings (the same set picking reads).
+const BuildingState* FindBuilding(const std::vector<BuildingState>& rows,
+                                  uint32_t id) {
+  for (const BuildingState& b : rows) {
+    if (b.id == id) return &b;
+  }
+  return nullptr;
+}
+
+// The alive character row with `id`, or nullptr -- including indoors units
+// (unlike SelectedUnit), so a visitor chosen from a building's list stays
+// inspectable even though it isn't drawn.
+const CharacterState* FindCharacter(const std::vector<CharacterState>& rows,
+                                    uint32_t id) {
+  if (id == kNoPick) return nullptr;
+  for (const CharacterState& c : rows) {
+    if (c.id == id) return &c;
+  }
+  return nullptr;
+}
+
+// Display class for a picked unit: a hero's guild class, derived from its home
+// building's kind (the sim's own guild_hero_class rule -- heroes carry no class
+// field), else the archetype so a townfolk/critter/monster reads honestly.
+std::string unit_class(const CharacterState& c,
+                       const std::vector<BuildingState>& buildings) {
+  if (c.home_building_id >= 0) {
+    if (const BuildingState* home =
+            FindBuilding(buildings, static_cast<uint32_t>(c.home_building_id))) {
+      const BuildingDef def = BuildingDefOf(home->kind);
+      if (def.recruit_count > 0) return HeroClassName(def.recruits[0]);
+    }
+  }
+  switch (static_cast<Archetype>(c.archetype)) {
+    case Archetype::Hero: return "Hero";
+    case Archetype::Townfolk: return "Townfolk";
+    case Archetype::Critter: return "Critter";
+    case Archetype::Monster: return "Monster";
+  }
+  return "";
+}
+
 // Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
 // this much REAL time (the directional light + shadows still move every frame).
 // A real-time throttle bounds the ~per-frame HW cube bake cost independent of
@@ -599,6 +642,9 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
       selected_hero_ = HeroAtWorld(
           character_rows_.data(),
           static_cast<uint32_t>(character_rows_.size()), sim_world);
+      // A world pick never selects an indoors unit (HeroAtWorld skips them), so
+      // this selection follows the drawn-only rule.
+      selected_unit_from_list_ = false;
       selected_building_ =
           selected_hero_ != kNoPick
               ? kNoPick
@@ -613,6 +659,7 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
       if (event.key.key == SDLK_ESCAPE) {
         selected_building_ = kNoPick;
         selected_hero_ = kNoPick;
+        selected_unit_from_list_ = false;
       }
       return;
 
@@ -621,7 +668,43 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
   }
 }
 
+uint32_t GameView::AddSelectTarget(HudSelectTarget::Kind kind, uint32_t id) {
+  const uint32_t handle =
+      kHudSelectBase + static_cast<uint32_t>(hud_targets_.size());
+  hud_targets_.push_back({kind, id});
+  return handle;
+}
+
 bool GameView::DispatchHudAction(uint32_t hud_id) {
+  // Sim-speed buttons: a presentation-clock op (SimClock::speed), not a sim
+  // action -- pausing/scaling time changes how many ticks run per frame.
+  switch (hud_id) {
+    case kHudBtnPause: sim_clock_.speed = 0.0f; return true;
+    case kHudBtnSpeed1: sim_clock_.speed = 1.0f; return true;
+    case kHudBtnSpeed2: sim_clock_.speed = 2.0f; return true;
+    case kHudBtnSpeed4: sim_clock_.speed = 4.0f; return true;
+    default: break;
+  }
+
+  // Clickable entity rows (residents / visitors / a hero's home link) change the
+  // selection rather than firing an action. hud_targets_ was rebuilt this frame
+  // by RefreshHud in lockstep with the ids it tagged those rows with.
+  if (hud_id >= kHudSelectBase) {
+    const uint32_t idx = hud_id - kHudSelectBase;
+    if (idx >= hud_targets_.size()) return false;
+    const HudSelectTarget& t = hud_targets_[idx];
+    if (t.kind == HudSelectTarget::Kind::Building) {
+      selected_building_ = t.id;
+      selected_hero_ = kNoPick;
+      selected_unit_from_list_ = false;
+    } else {
+      selected_hero_ = t.id;
+      selected_building_ = kNoPick;
+      selected_unit_from_list_ = true;  // a visitor may be indoors but inspectable
+    }
+    return true;
+  }
+
   Action action{};
   switch (hud_id) {
     case kHudBtnRecruit:
@@ -760,6 +843,7 @@ void GameView::RefreshHud() {
 
   HudModel model;
   model.gold = world.gold;
+  model.speed = sim_clock_.speed;
   {
     // Time of day from the presentation clock -- it is NOT in the game C ABI.
     const float t01 = sim_clock_.TimeOfDay();
@@ -775,26 +859,30 @@ void GameView::RefreshHud() {
   // building) silently clears rather than describing a stale/undrawn row.
   // SelectedUnit enforces the same "indoors units aren't selectable" rule as
   // the pick, so a unit that walks inside drops the panel.
-  const BuildingState* selected = nullptr;
-  for (const BuildingState& b : building_rows_) {
-    if (b.id == selected_building_) selected = &b;
-  }
-  const CharacterState* hero = SelectedUnit(
-      character_rows_.data(), static_cast<uint32_t>(character_rows_.size()),
-      selected_hero_);
+  const BuildingState* selected =
+      FindBuilding(building_rows_, selected_building_);
+  // A world pick never selects an indoors unit, so SelectedUnit's "drop indoors"
+  // rule keeps the panel honest. A list pick (a building's visitor) is meant to
+  // stay inspectable even indoors, so resolve it by id including hidden units.
+  const CharacterState* hero =
+      selected_unit_from_list_
+          ? FindCharacter(character_rows_, selected_hero_)
+          : SelectedUnit(character_rows_.data(),
+                         static_cast<uint32_t>(character_rows_.size()),
+                         selected_hero_);
   if (!selected) selected_building_ = kNoPick;
   if (!hero) selected_hero_ = kNoPick;
 
+  // Nothing to render into without a live UI context. Return BEFORE touching
+  // hud_targets_, so it stays paired with the last hud_frame_ we actually built
+  // -- a click resolves a hit-rect id back through the SAME frame's target
+  // table. (The per-frame work above -- snapshots, cached scalars, selection
+  // validity -- must still run every frame for picking and the debug windows.)
+  if (!ui_ || ui_viewport_w_ <= 0.0f) return;
+  hud_targets_.clear();  // rebuilt below, in lockstep with the clickable rows
+
   if (selected) {
     const BuildingDef def = BuildingDefOf(selected->kind);
-
-    // Occupancy: heroes whose home guild is this building.
-    uint32_t occupancy = 0;
-    uint32_t visitors = 0;
-    for (const CharacterState& c : character_rows_) {
-      if (c.home_building_id == static_cast<int32_t>(selected->id)) ++occupancy;
-      if (c.inside_building_id == static_cast<int32_t>(selected->id)) ++visitors;
-    }
 
     HudSelection s;
     s.kind = HudSelection::Kind::Building;
@@ -810,11 +898,22 @@ void GameView::RefreshHud() {
     s.rows.emplace_back("footprint",
                         std::to_string(selected->width_tiles) + " x " +
                             std::to_string(selected->depth_tiles));
+    if (selected->max_hp > 0.0f) {
+      char hp[48];
+      std::snprintf(hp, sizeof(hp), "%.0f / %.0f", selected->hp,
+                    selected->max_hp);
+      s.rows.emplace_back("health", hp);
+    }
+    // Uncollected tax owed (Houses accrue at midnight; a collector zeroes it).
+    if (selected->taxable_income > 0) {
+      s.rows.emplace_back("taxable",
+                          std::to_string(selected->taxable_income) + " g");
+    }
     // A guild is a building that recruits >= 1 hero class; only those show the
-    // recruited-class row, a roster row, and the Recruit button. Gating on
-    // def.recruit_count -- read straight off BuildingDef::recruits, the sim's
-    // own per-kind recruit table -- means the button is never shown enabled for
-    // a building Dispatch(RecruitHero) would reject.
+    // recruited-class row and the Recruit button. Gating on def.recruit_count --
+    // read straight off BuildingDef::recruits, the sim's own per-kind recruit
+    // table -- means the button is never shown enabled for a building
+    // Dispatch(RecruitHero) would reject.
     const bool is_guild = def.recruit_count > 0;
     if (is_guild) {
       std::string classes;
@@ -823,12 +922,67 @@ void GameView::RefreshHud() {
         classes += HeroClassName(def.recruits[i]);
       }
       s.rows.emplace_back("recruits", classes);
-      s.rows.emplace_back("roster", std::to_string(occupancy) + " / " +
-                                        std::to_string(roster_cap_));
       s.show_recruit = true;
+    }
+
+    // Builds a clickable unit list from the characters matching `match`, capped
+    // at kListCap with a "+N more" overflow tail (the ui crate can't scroll
+    // yet); `value(c)` fills the right-hand column, and each row selects that
+    // unit. Returns the TOTAL matched (may exceed the shown entries) -- for
+    // residents that is the roster occupancy. Roster cap is 4 today, so the cap
+    // only ever bites for visitors in a crowded building.
+    constexpr uint32_t kListCap = 8;
+    auto build_unit_list = [&](auto&& match, auto&& value,
+                               HudList& out) -> uint32_t {
+      uint32_t total = 0;
+      for (const CharacterState& c : character_rows_) {
+        if (!match(c)) continue;
+        ++total;
+        if (out.entries.size() < kListCap) {
+          out.entries.emplace_back(
+              unit_title(c), value(c),
+              AddSelectTarget(HudSelectTarget::Kind::Hero, c.id));
+        }
+      }
+      out.overflow = total - static_cast<uint32_t>(out.entries.size());
+      return total;
+    };
+
+    // Residents: heroes whose home guild is this building. A guild always shows
+    // the roster count -- even at 0, so its capacity is visible before the first
+    // recruit; a non-guild has no roster.
+    HudList residents;
+    const uint32_t occupancy = build_unit_list(
+        [&](const CharacterState& c) {
+          return c.home_building_id == static_cast<int32_t>(selected->id);
+        },
+        [](const CharacterState& c) {
+          char hp[24];
+          std::snprintf(hp, sizeof(hp), "%.0f/%.0f", c.hp, c.max_hp);
+          return std::string(hp);
+        },
+        residents);
+    if (is_guild) {
+      residents.heading = "Residents (" + std::to_string(occupancy) + "/" +
+                          std::to_string(roster_cap_) + ")";
+      s.lists.push_back(std::move(residents));
       s.can_recruit = occupancy < roster_cap_;
     }
-    if (visitors > 0) s.rows.emplace_back("inside", std::to_string(visitors));
+
+    // Visiting: units currently inside this building (hidden, so reachable only
+    // through this list).
+    HudList visiting;
+    const uint32_t visitors = build_unit_list(
+        [&](const CharacterState& c) {
+          return c.inside_building_id == static_cast<int32_t>(selected->id);
+        },
+        [&](const CharacterState& c) { return unit_class(c, building_rows_); },
+        visiting);
+    if (visitors > 0) {
+      visiting.heading = "Visiting (" + std::to_string(visitors) + ")";
+      s.lists.push_back(std::move(visiting));
+    }
+
     s.show_destroy = def.user_destructible;
     s.can_destroy = s.show_destroy;
 
@@ -841,6 +995,12 @@ void GameView::RefreshHud() {
     s.title = unit_title(*hero);
     s.rows.emplace_back("id", "#" + std::to_string(hero->id));
     {
+      // Class: derived from the home guild (heroes carry no class field), else
+      // the archetype so a picked townfolk/critter/monster reads honestly.
+      const std::string cls = unit_class(*hero, building_rows_);
+      if (!cls.empty()) s.rows.emplace_back("class", cls);
+    }
+    {
       char hp[48];
       std::snprintf(hp, sizeof(hp), "%.0f / %.0f", hero->hp, hero->max_hp);
       s.rows.emplace_back("health", hp);
@@ -850,14 +1010,21 @@ void GameView::RefreshHud() {
       std::snprintf(pos, sizeof(pos), "%.0f, %.0f", hero->pos_x, hero->pos_z);
       s.rows.emplace_back("position", pos);
     }
+    // Home guild: a navigable link back to the recruiting building.
     if (hero->home_building_id >= 0) {
-      s.rows.emplace_back("guild", "#" + std::to_string(hero->home_building_id));
+      const BuildingState* home = FindBuilding(
+          building_rows_, static_cast<uint32_t>(hero->home_building_id));
+      const std::string label =
+          home ? building_label(home->kind)
+               : ("#" + std::to_string(hero->home_building_id));
+      const uint32_t click =
+          home ? AddSelectTarget(HudSelectTarget::Kind::Building, home->id) : 0;
+      s.rows.emplace_back("guild", label, click);
     }
     model.has_selection = true;
     model.selection = std::move(s);
   }
 
-  if (!ui_ || ui_viewport_w_ <= 0.0f) return;
   BuildHud(ui_->context(), model, ui_viewport_w_, ui_viewport_h_, ui_scale_,
            hud_frame_);
   ui_->SetQuads(hud_frame_.quads.data(),

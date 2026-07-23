@@ -6,6 +6,9 @@
 // world (which only misbehaves on the click AFTER the one you were looking at).
 
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <vector>
 
 #include <catch_amalgamated.hpp>
 #include <glm/glm.hpp>
@@ -45,6 +48,29 @@ CharacterState MakeHero(uint32_t id, float x, float z,
   c.home_building_id = -1;
   c.inside_building_id = inside_building_id;
   return c;
+}
+
+// Bakes the shipping font into a UiContext (the real atlas path, same as the
+// running app). Returns nullptr if the font is missing/unreadable; callers
+// REQUIRE non-null so a missing asset fails loudly rather than skipping silently.
+UiContext* LoadHudFont() {
+  FILE* f = fopen("assets/fonts/CormorantUnicase-Regular.ttf", "rb");
+  if (!f) return nullptr;
+  fseek(f, 0, SEEK_END);
+  const long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  std::vector<uint8_t> bytes(static_cast<size_t>(size));
+  const size_t got = fread(bytes.data(), 1, bytes.size(), f);
+  fclose(f);
+  if (got != bytes.size()) return nullptr;
+  return ui_create(bytes.data(), static_cast<uint32_t>(bytes.size()), 18.0f);
+}
+
+const UiHitRect* FindHitRect(const HudFrame& frame, uint32_t id) {
+  for (const UiHitRect& r : frame.hits) {
+    if (r.id == id) return &r;
+  }
+  return nullptr;
 }
 
 }  // namespace
@@ -376,6 +402,68 @@ TEST_CASE("BuildHud lays out a selection panel with working buttons",
     REQUIRE(BuildHud(ctx, bare, 1600.0f, 900.0f, 1.0f, bare_frame));
     REQUIRE_FALSE(bare_frame.quads.empty());
     REQUIRE(HudHitTest(bare_frame, 1500.0f, 400.0f) == kHudNone);
+
+    ui_destroy(ctx);
+}
+
+TEST_CASE("BuildHud renders the four speed buttons, each hit-testable",
+          "[game_ui][hud]") {
+    UiContext* ctx = LoadHudFont();
+    REQUIRE(ctx != nullptr);
+
+    HudModel model;
+    model.gold = 100;
+    model.clock_text = "Day 1   09:00";
+    model.speed = 2.0f;  // 2x is the active speed
+
+    HudFrame frame;
+    REQUIRE(BuildHud(ctx, model, 1600.0f, 900.0f, 1.0f, frame));
+
+    // All four buttons emit hit rects, and each solved rect hits its own id --
+    // draw and hit-test come from the same solve, so they cannot drift apart.
+    for (uint32_t id : {static_cast<uint32_t>(kHudBtnPause),
+                        static_cast<uint32_t>(kHudBtnSpeed1),
+                        static_cast<uint32_t>(kHudBtnSpeed2),
+                        static_cast<uint32_t>(kHudBtnSpeed4)}) {
+        const UiHitRect* r = FindHitRect(frame, id);
+        REQUIRE(r != nullptr);
+        REQUIRE(HudHitTest(frame, r->x + 2.0f, r->y + 2.0f) == id);
+    }
+    ui_destroy(ctx);
+}
+
+TEST_CASE("BuildHud makes list entries clickable selection targets",
+          "[game_ui][hud]") {
+    UiContext* ctx = LoadHudFont();
+    REQUIRE(ctx != nullptr);
+
+    // A building panel with a Residents list of two clickable entries. Their ids
+    // are >= kHudSelectBase, which is how the view routes a HUD hit to a
+    // selection change instead of an action.
+    HudModel model;
+    model.gold = 100;
+    model.clock_text = "Day 1   09:00";
+    model.has_selection = true;
+    model.selection.kind = HudSelection::Kind::Building;
+    model.selection.title = "Free Company Quarters";
+    model.selection.rows.emplace_back("id", "#3");
+    HudList residents;
+    residents.heading = "Residents (2/4)";
+    residents.entries.emplace_back("Aldric", "30/30", kHudSelectBase + 0u);
+    residents.entries.emplace_back("Bex", "24/30", kHudSelectBase + 1u);
+    model.selection.lists.push_back(std::move(residents));
+
+    HudFrame frame;
+    REQUIRE(BuildHud(ctx, model, 1600.0f, 900.0f, 1.0f, frame));
+
+    const UiHitRect* a = FindHitRect(frame, kHudSelectBase + 0u);
+    const UiHitRect* b = FindHitRect(frame, kHudSelectBase + 1u);
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    // The clickable row wins the innermost-first hit test over the panel chrome,
+    // so a click on it selects that hero rather than consuming as panel chrome.
+    REQUIRE(HudHitTest(frame, a->x + 2.0f, a->y + 2.0f) == kHudSelectBase + 0u);
+    REQUIRE(HudHitTest(frame, b->x + 2.0f, b->y + 2.0f) == kHudSelectBase + 1u);
 
     ui_destroy(ctx);
 }
