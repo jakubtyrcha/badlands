@@ -119,8 +119,10 @@ TEST_CASE("only a hunter hunts; a mercenary ignores deer") {
 TEST_CASE("a hunter runs down a deer and kills it") {
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
-    uint32_t deer = spawn_deer(g, {6.0f, 0.0f});
-    uint32_t hunter = spawn_hunter(g, {0.0f, 0.0f});
+    // On the plains: the map origin is the central lake, which terrain blocking
+    // makes impassable, so a chase staged there would never close.
+    uint32_t deer = spawn_deer(g, {6.0f, kCastleSpawnZ});
+    uint32_t hunter = spawn_hunter(g, {0.0f, kCastleSpawnZ});
     entt::entity de = g.slots[deer];
 
     tick_world(g, 1.0f / 30.0f);

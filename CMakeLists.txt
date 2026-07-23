@@ -262,6 +262,7 @@ add_library(badlands_game_lib STATIC
     game/src/monster_brain.cpp
     game/src/economy.cpp
     game/src/vision.cpp
+    game/src/exploration.cpp
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
     third_party/noiser/noiser-vm/src/noiser_crash.cpp
@@ -551,6 +552,7 @@ add_executable(badlands_game_tests
     game/tests/activity_selector_tests.cpp
     game/tests/deliberation_tests.cpp
     game/tests/chat_tests.cpp
+    game/tests/exploration_tests.cpp
     game/tests/critter_tests.cpp
     game/tests/townfolk_tests.cpp
     game/tests/rat_tests.cpp

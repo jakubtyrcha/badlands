@@ -132,8 +132,39 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             !ReadNum(*s, "hero", "chat_radius", manifest_path, h.chat_radius) ||
             !ReadNum(*s, "hero", "chat_duration", manifest_path, h.chat_duration) ||
             !ReadNum(*s, "hero", "chat_boredom_rate", manifest_path, h.chat_boredom_rate) ||
-            !ReadNum(*s, "hero", "chat_boredom_floor", manifest_path, h.chat_boredom_floor)) {
+            !ReadNum(*s, "hero", "chat_boredom_floor", manifest_path, h.chat_boredom_floor) ||
+            !ReadNum(*s, "hero", "explore_max_fatigue", manifest_path, h.explore_max_fatigue) ||
+            !ReadNum(*s, "hero", "explore_min_distance", manifest_path, h.explore_min_distance) ||
+            !ReadNum(*s, "hero", "explore_max_distance", manifest_path, h.explore_max_distance) ||
+            !ReadNum(*s, "hero", "explore_search_radius", manifest_path,
+                     h.explore_search_radius) ||
+            !ReadNum(*s, "hero", "explore_lease_millis", manifest_path, h.explore_lease_millis)) {
             return false;
+        }
+        // "explore_chance": { "<Hero class>": <0..1>, ... } -- how often a class
+        // feels like exploring at all. Keyed by name, same policy as weights.
+        if (s->contains("explore_chance")) {
+            const nlohmann::json& per_class = (*s)["explore_chance"];
+            if (!per_class.is_object()) {
+                spdlog::error("LoadSimFactors: '{}' -> hero.explore_chance is not an object",
+                              manifest_path);
+                return false;
+            }
+            for (const auto& [class_name, value] : per_class.items()) {
+                const int32_t cls = HeroClassByName(class_name);
+                if (cls < 0) {
+                    spdlog::error("LoadSimFactors: '{}' -> hero.explore_chance.{} is not a known "
+                                  "hero class",
+                                  manifest_path, class_name);
+                    return false;
+                }
+                if (!value.is_number()) {
+                    spdlog::error("LoadSimFactors: '{}' -> hero.explore_chance.{} is not a number",
+                                  manifest_path, class_name);
+                    return false;
+                }
+                h.explore_chance[cls] = value.get<float>();
+            }
         }
         // "weights": { "<Hero class>": { "<Activity>": <number>, ... }, ... }
         // The per-class personality dial. Every level is optional.

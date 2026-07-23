@@ -82,6 +82,15 @@ struct WorldView {
     PerceivedThreat threats[kMaxThreats];
     int32_t threat_count = 0;
 
+    // --- exploration ---------------------------------------------------------
+    // Somewhere unexplored this hero has settled on for the current lease
+    // window, and whether the world has already refused to let it get there.
+    // has_explore_goal folds in the per-class appetite draw (perception knows
+    // the class; a block does not).
+    glm::vec2 explore_goal{0.0f, 0.0f};  bool has_explore_goal = false;
+    bool move_blocked = false;           // a step was refused, recently enough to matter
+    glm::vec2 blocked_point{0.0f, 0.0f};
+
     // --- company (Chat) ------------------------------------------------------
     // The nearest other hero who is also bored enough to want company, and
     // whether this hero is already in a conversation (a session, held on both

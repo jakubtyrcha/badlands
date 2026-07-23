@@ -178,6 +178,21 @@ struct InsideBuilding {
 // Present while a unit is locked in melee — movement is frozen (combat only).
 struct MeleeLock {};
 
+// The world refused a step: the character tried to walk into terrain it cannot
+// cross. Written by the movement system (systems may write the registry; brains
+// may not), read by perception, and acted on by whichever activity cares.
+//
+// This is the seam that decouples "where the AI decided to go" from "where the
+// character can actually get to". A brain is allowed to want the impossible --
+// it plans through unexplored ground it has no information about — and finding
+// out is an EVENT it reacts to, not a precondition it must check. It is never
+// cleared: `at_millis` says when it happened, and perception decides whether
+// that is still relevant (which keeps a stale blockage from vetoing forever).
+struct MoveBlocked {
+    glm::vec2 point{0.0f, 0.0f};  // where the step was refused
+    int64_t at_millis = 0;
+};
+
 // Present on BOTH heroes of a conversation. Created only by the Chat command
 // (so the pairing is in the trace and replays) and dissolved by advance_chats
 // as a system rule — expiry, the partner dying or wandering off, or a threat

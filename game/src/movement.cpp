@@ -2,6 +2,7 @@
 
 #include "components.h"
 #include "game_state.h"
+#include "heroes.h"  // biome_at
 #include "placement.h"
 
 #include <entt/entt.hpp>
@@ -110,6 +111,14 @@ void reproject_out_of_footprints(BadlandsGame& game, glm::vec2& p) {
 
 }  // namespace
 
+bool is_walkable(mapgen::Biome biome) {
+    // v1: open water is the only thing that stops anyone. Swamp and Mountain
+    // stay passable until real terrain nav can express a cost rather than a
+    // wall. Deliberately the crudest rule that makes the EVENT real, because
+    // the event is what the AI contract is built on.
+    return biome != mapgen::Biome::Lake;
+}
+
 void plan_paths(BadlandsGame& game, float dt) {
     entt::registry& reg = game.registry;
     auto view = reg.view<MoveTarget, NavPath, const Position, const Agent>(entt::exclude<InsideBuilding>);
@@ -173,6 +182,10 @@ void plan_paths(BadlandsGame& game, float dt) {
 }
 
 void follow_paths(BadlandsGame& game, float dt) {
+    // Steps refused this tick. Collected rather than emplaced inline, because
+    // adding a component while iterating a view can invalidate it.
+    std::vector<std::pair<entt::entity, glm::vec2>> blocked;
+
     auto view = game.registry.view<NavPath, Position, const Stats>(
         entt::exclude<InsideBuilding, MeleeLock>);
     for (entt::entity e : view) {
@@ -190,12 +203,25 @@ void follow_paths(BadlandsGame& game, float dt) {
         glm::vec2 d = np.waypoints[np.cursor] - pos.pos;
         float len = glm::length(d);
         if (len > 0.0f) {
-            pos.pos += d / len * std::min(len, speed * dt);
+            const glm::vec2 next = pos.pos + d / len * std::min(len, speed * dt);
+            // The world gets the last word on where a character can go. A path
+            // may cross terrain nobody has surveyed -- the planner routes around
+            // buildings only -- so the refusal happens HERE, at the step, and
+            // becomes an event the brain can act on.
+            if (game.terrain_blocking && !is_walkable(biome_at(game, next))) {
+                blocked.emplace_back(e, next);
+                continue;  // stop at the water's edge rather than wade in
+            }
+            pos.pos = next;
             // Fog-of-war: face the direction of travel (idle keeps last facing).
             if (Facing* f = game.registry.try_get<Facing>(e)) {
                 f->dir = d / len;
             }
         }
+    }
+
+    for (const auto& [e, point] : blocked) {
+        game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
     }
 }
 

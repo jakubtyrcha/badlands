@@ -6,9 +6,23 @@
 
 #pragma once
 
+#include "mapgen/biomes.hpp"  // mapgen::Biome
+
 struct BadlandsGame;
 
 namespace badlands {
+
+// Can a character stand here? A STAND-IN for real terrain navigation: the nav
+// provider (src/crates/nav) is a visibility graph over building footprints and
+// knows nothing about terrain, so until it does, this one predicate is the
+// whole of "the world says no".
+//
+// It exists so the AI's half of the contract can be built and tested now: a
+// character that is told to walk somewhere it cannot reach raises a MoveBlocked
+// event, and the brain reacts by abandoning the goal. Replacing this with a
+// real navmesh changes where the event comes FROM, and nothing about how any
+// brain responds to it.
+bool is_walkable(mapgen::Biome biome);
 
 // Resolve each MoveTarget's goal and (re)plan its NavPath via the pathfinder,
 // throttled by a repath cooldown and invalidated by nav_epoch / goal drift.

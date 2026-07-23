@@ -16,6 +16,15 @@
 namespace badlands {
 
 std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source);
+
+// A world for tests about movement MECHANICS rather than about terrain:
+// identical to make_world(nullptr) but with terrain_blocking off, so a unit
+// dropped at whatever coordinate is convenient can actually walk there.
+//
+// Without it such a test silently asserts something about what the map
+// generator happens to put under those coordinates -- and the map's centre is a
+// lake, so the convenient coordinates are the ones you cannot walk on.
+std::unique_ptr<BadlandsGame> make_flat_world();
 void tick_world(BadlandsGame&, float dt);
 uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
 int64_t dispatch_into(BadlandsGame&, const Action&);

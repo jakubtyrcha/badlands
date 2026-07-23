@@ -104,6 +104,26 @@ BehaviourResult act_chat(const WorldView& v, const SimFactors& f) {
     return r;
 }
 
+// --- Explore ----------------------------------------------------------------
+float score_explore(const WorldView& v, const SimFactors& f) {
+    if (!v.has_explore_goal) {
+        return kNotApplicable;  // nowhere unknown within reach, or not in the mood
+    }
+    if (v.move_blocked) {
+        return kNotApplicable;  // the world said no; try elsewhere next window
+    }
+    if (v.fatigue >= f.hero.explore_max_fatigue) {
+        return kNotApplicable;  // too tired -- rest, an errand, anything nearer
+    }
+    if (v.has_prey) {
+        return kNotApplicable;  // something worth stopping for is right here
+    }
+    return kApplies;
+}
+BehaviourResult act_explore(const WorldView& v, const SimFactors&) {
+    return {Behavior::Explore, v.explore_goal, std::nullopt, false};
+}
+
 // --- Hunt (hunter) ----------------------------------------------------------
 float score_hunt(const WorldView& v, const SimFactors&) {
     return v.has_prey ? kApplies : kNotApplicable;

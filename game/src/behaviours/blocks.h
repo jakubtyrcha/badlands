@@ -87,6 +87,15 @@ BehaviourResult act_chat(const WorldView&, const SimFactors&);
 float score_hunt(const WorldView&, const SimFactors&);
 BehaviourResult act_hunt(const WorldView&, const SimFactors&);
 
+// Explore: walk into terra incognita. The one PRODUCTIVE activity heroes have,
+// so it outranks every filler one whenever it applies -- which makes its vetoes
+// the whole of its restraint. It stands down when the hero is too tired, when
+// the world already refused to let it through this window (MoveBlocked), and
+// when there is prey right there, because an errand that has just turned up
+// something worth doing has served its purpose.
+float score_explore(const WorldView&, const SimFactors&);
+BehaviourResult act_explore(const WorldView&, const SimFactors&);
+
 // --- shared blocks ----------------------------------------------------------
 // Roam walks to view.roam_goal (chosen in perception: hero rng ring, or deer
 // biome-filtered). Shared verbatim by the hero and critter brains.

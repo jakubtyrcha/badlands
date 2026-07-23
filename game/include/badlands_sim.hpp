@@ -214,6 +214,22 @@ struct HeroFactors {
     float chat_duration = 6.0f;       // seconds a conversation lasts
     float chat_boredom_rate = 0.35f;  // boredom decay per second while chatting
     float chat_boredom_floor = 0.25f; // company can never fully satisfy
+    // --- exploration --------------------------------------------------------
+    // Walking into terra incognita. A PRODUCTIVE activity, so it outranks every
+    // filler one -- and therefore has to disqualify itself rather than be
+    // out-prioritized: too tired, already turned back once this window, or
+    // something worth stopping for right in front of it.
+    float explore_max_fatigue = 0.5f;     // too tired to strike out
+    float explore_min_distance = 6.0f;    // how far past the frontier to aim
+    float explore_max_distance = 18.0f;
+    float explore_search_radius = 90.0f;  // how far afield to look for a frontier
+    int64_t explore_lease_millis = 8000;  // how long one target is committed to
+    // Per-class appetite, drawn once per lease window: the probability a hero of
+    // that class feels like exploring at all. This is what "hunters do it
+    // naturally, everyone else rarely" means -- a weight could not express it,
+    // because Explore is currently alone in the Productive band and a weight
+    // only ranks rivals WITHIN a band. Filled by SimFactors().
+    float explore_chance[HERO_CLASS_COUNT];
     float roam_radius = 6.0f;      // world units around the roam anchor
     float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
     // How far a hero notices hostiles. Feeds WorldView's threat list, which

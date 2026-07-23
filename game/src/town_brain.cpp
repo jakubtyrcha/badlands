@@ -4,13 +4,16 @@
 #include "behaviours/blocks.h"
 #include "behaviours/deliberation.h"
 #include "behaviours/perception.h"
+#include "behaviours/rng.h"
 #include "behaviours/selectors.h"
 #include "behaviours/world_view.h"
 #include "command.h"
 #include "components.h"
+#include "exploration.h"
 #include "heroes.h"  // HERO_HUNTER
 #include "game_state.h"
 #include "placement.h"
+#include "vision.h"
 
 #include <array>
 
@@ -135,6 +138,35 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
                                   v.prey_pos, v.prey_slot, v.prey_dist);
     }
 
+    // Exploration. Two draws off the same lease window, so a hero commits to
+    // one errand into the unknown for a while rather than re-deciding each
+    // tick: first whether it feels like going at all (per-class appetite --
+    // this lives in perception because only here is the class known), then
+    // where. The blocked event stays relevant only for the window it happened
+    // in, so a refusal makes the hero try somewhere else next window instead of
+    // giving up on exploring forever.
+    const int32_t cls = game.registry.get<HeroCharacter>(e).hero_class;
+    const int64_t explore_epoch = game.world_millis / game.factors.hero.explore_lease_millis;
+    if (weights.of(ActivityId::Explore) > 0.0f) {
+        uint64_t rng = seed_of(slot, explore_epoch * 2 + 1);
+        const float appetite =
+            game.factors.hero
+                .explore_chance[(cls >= 0 && cls < HERO_CLASS_COUNT) ? cls : HERO_MERCENARY];
+        if (unit_float(rng) < appetite) {
+            if (auto goal = pick_exploration_target(game.vision, v.pos,
+                                                    seed_of(slot, explore_epoch),
+                                                    game.factors.hero)) {
+                v.explore_goal = *goal;
+                v.has_explore_goal = true;
+            }
+        }
+    }
+    if (const auto* blocked = game.registry.try_get<MoveBlocked>(e)) {
+        v.move_blocked =
+            blocked->at_millis / game.factors.hero.explore_lease_millis == explore_epoch;
+        v.blocked_point = blocked->point;
+    }
+
     // Company: an in-progress conversation runs to its own clock, so only look
     // for someone new when not already talking (and only if the class is
     // sociable at all).
@@ -173,8 +205,9 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
 //
 // List order is the tie-break only. Priority is the band; preference is the
 // weight.
-constexpr std::array<ActivityDef, 8> kHeroActivities{{
+constexpr std::array<ActivityDef, 9> kHeroActivities{{
     {ActivityId::RestUrgent, ActivityBand::Danger, score_rest_urgent, act_rest_urgent},
+    {ActivityId::Explore, ActivityBand::Productive, score_explore, act_explore},
     {ActivityId::GoHome, ActivityBand::Filler, score_go_home, act_go_home},
     {ActivityId::Hunt, ActivityBand::Filler, score_hunt, act_hunt},
     {ActivityId::Buy, ActivityBand::Filler, score_buy, act_buy},

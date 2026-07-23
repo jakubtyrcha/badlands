@@ -69,6 +69,10 @@ ActivityWeights base_hero_weights() {
     w.set(ActivityId::Roam, 2.0f);
     w.set(ActivityId::Idle, 1.0f);
     w.set(ActivityId::Hunt, 0.0f);  // not a hunter: the activity does not exist
+    // Alone in the Productive band, so this weight only says "the class has
+    // it". HOW OFTEN a class explores is HeroFactors::explore_chance, because a
+    // weight ranks rivals within a band and there are none to rank against.
+    w.set(ActivityId::Explore, 1.0f);
     return w;
 }
 
@@ -116,6 +120,13 @@ SimFactors::SimFactors() {
     hero.weights[HERO_HUNTER].set(ActivityId::Chat, 1.0f);
     hero.weights[HERO_APPRENTICE].set(ActivityId::Chat, 3.5f);
     hero.weights[HERO_GRAVE_ROBBER].set(ActivityId::Chat, 1.5f);
+
+    // Appetite for the unknown, heavily skewed: a hunter ranges out as a matter
+    // of course, a grave robber now and then, and the town-dwellers only rarely.
+    hero.explore_chance[HERO_MERCENARY] = 0.05f;
+    hero.explore_chance[HERO_HUNTER] = 0.85f;
+    hero.explore_chance[HERO_GRAVE_ROBBER] = 0.15f;
+    hero.explore_chance[HERO_APPRENTICE] = 0.03f;
 
     // Deer: bolt (Danger band) over graze over wander.
     critter.weights.set(ActivityId::Flee, 1.0f);

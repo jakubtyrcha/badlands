@@ -144,6 +144,12 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
     return game;
 }
 
+std::unique_ptr<BadlandsGame> make_flat_world() {
+    auto game = make_world(nullptr);
+    game->terrain_blocking = false;
+    return game;
+}
+
 void tick_world(BadlandsGame& g, float dt) {
     auto& registry = g.registry;
 

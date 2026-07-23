@@ -23,11 +23,22 @@
     "chat_boredom_rate": 0.35,
     "chat_boredom_floor": 0.25,
 
+    "explore_max_fatigue": 0.5,
+    "explore_min_distance": 6.0,
+    "explore_max_distance": 18.0,
+    "explore_search_radius": 90.0,
+    "explore_lease_millis": 8000,
+
+    "_explore_chance_comment": "How often a class feels like exploring at all, drawn once per lease window. This is a FREQUENCY, which a weight cannot express: Explore is alone in the Productive band, and a weight only ranks rivals within a band.",
+    "explore_chance": {
+      "Mercenary": 0.05, "Hunter": 0.85, "Grave Robber": 0.15, "Apprentice": 0.03
+    },
+
     "weights": {
-      "Mercenary":    { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Hunter":       { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
-      "Grave Robber": { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
-      "Apprentice":   { "RestUrgent": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 3.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
+      "Mercenary":    { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 2.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
+      "Hunter":       { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.0, "Roam": 2.0, "Idle": 1.0, "Hunt": 4.5 },
+      "Grave Robber": { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 1.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 },
+      "Apprentice":   { "RestUrgent": 1.0, "Explore": 1.0, "GoHome": 5.0, "Buy": 4.0, "VisitTavern": 3.0, "Chat": 3.5, "Roam": 2.0, "Idle": 1.0, "Hunt": 0.0 }
     }
   },
 

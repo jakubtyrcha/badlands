@@ -40,6 +40,17 @@ struct BadlandsGame {
     // means "no provider" -> straight-line fallback in the movement pipeline.
     badlands::Pathfinder pathfinder{};
 
+    // Does terrain stop anyone? On by default: the shipping game refuses to let
+    // a character walk into water, and that refusal is what raises MoveBlocked.
+    //
+    // Switched off by tests that predate terrain and are about movement
+    // MECHANICS (arrival, separation, facing, tax rounds) rather than about the
+    // map -- the same spirit as the pathfinder's documented "no provider ->
+    // obstacle-oblivious straight lines" fallback. Without it those tests would
+    // silently depend on what the map generator happens to put under whichever
+    // coordinates they picked, which is a fragile thing to assert about.
+    bool terrain_blocking = true;
+
     // Event-sourced command layer (see command.h). AI decisions are enqueued
     // during think and drained in one ordered apply pass per tick; every
     // applied command (player + AI) is appended to command_log (the trace).

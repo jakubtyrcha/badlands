@@ -108,7 +108,7 @@ TEST_CASE("midnight accrues tax on Houses only") {
 }
 
 TEST_CASE("a tax collector rounds up the tax, banks it at the castle, and despawns") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     // make_world prebuilds the Castle at kCastleSpawn (id 0); the collector
     // reads its door dynamically, so this stays position-independent.
@@ -178,7 +178,7 @@ TEST_CASE("the spawner emits a collector at the castle, capped at max_alive") {
 TEST_CASE("dying mid-round loses the carried gold") {
     // The vulnerability the round creates: a collector killed before depositing
     // never banks its carry.
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     uint32_t house = place(g, BuildingKind::House, 12.0f, 6.0f);
     g.placement.buildings[house].taxable_income = 40;
