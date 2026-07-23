@@ -27,6 +27,7 @@
 namespace badlands {
 
 class DebugLineBuffer;
+class ScenePostPass;
 
 // SceneContext holds scene-level state written by SceneGraph::SyncToRegistry
 // and read by (future) rendering passes. See the trim note above — this is
@@ -61,6 +62,16 @@ struct SceneContext {
   // depth-tested against the G-buffer) after deferred lighting and before
   // tonemap. Null = none. Not owned; must outlive the frame.
   const DebugLineBuffer* debug_lines = nullptr;
+
+  // Optional generic post-scene modulation hook (game-agnostic). When set, the
+  // renderer snapshots the lit HDR colour after the transparent pass and invokes
+  // pass->Execute() with the snapshot + HDR target + G-buffer depth, before
+  // debug lines and tonemap, so the modulation affects the whole scene. Not
+  // owned; must outlive the frame. Carried here (rather than as a renderer
+  // member) so it also applies to the throwaway renderer built for headless
+  // --screenshot. See engine/rendering/scene_post_pass.hpp (used by the game's
+  // fog-of-war overlay).
+  ScenePostPass* post_pass = nullptr;
 };
 
 }  // namespace badlands

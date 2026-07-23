@@ -206,6 +206,11 @@ class SceneRenderer {
   // accessor; SceneRenderer advances it each Render() and feeds VolumetricFog.
   FogSimulation& GetFogSimulation() { return fog_sim_; }
 
+  // The generic post-scene modulation hook is carried on SceneContext
+  // (SceneContext::post_pass), not as a renderer member — so it applies to any
+  // renderer instance that renders the view, including the throwaway one built
+  // for headless --screenshot. See scene_post_pass.hpp / scene_context.hpp.
+
   // HDR accumulation target format and reversed-Z depth-buffer format —
   // fixed constants in this trimmed renderer (not configurable via
   // Initialize). Exposed so callers can build MaterialInstanceFactory

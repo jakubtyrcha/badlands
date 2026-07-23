@@ -65,6 +65,18 @@ inline constexpr int32_t kMaxRecruitClasses = 3;
 // Display name of a hero class ("Mercenary", ...). Empty string if out of range.
 const char* HeroClassName(HeroClassId cls);
 
+// Only characters on this team grant the player fog-of-war vision. Enemies run
+// their own (future) vision and never reveal the map for the player.
+inline constexpr int32_t kPlayerTeam = 0;
+
+// The three fog-of-war knowledge levels (see the design doc). Cumulative:
+// once Visible/Dormant, a texel never returns to Unknown.
+enum class VisionLevel : int32_t {
+    Unknown = 0,   // terra-incognita: never discovered (rendered black)
+    Dormant = 1,   // discovered but not currently seen (rendered desaturated)
+    Visible = 2,   // inside a player vision source right now (rendered normally)
+};
+
 // ---- POD result structs (field-for-field from badlands_game.h) -------------
 
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
@@ -78,6 +90,13 @@ struct CharacterDesc {
     float attack_cooldown;  // seconds between swings
     float size_x, size_y, size_z;
     float color_r, color_g, color_b;
+    // Fog-of-war vision (only kPlayerTeam entities grant the player vision).
+    // radius 0 => grants no vision. cone_half_angle_deg is the half-angle of
+    // the forward vision cone (>= 180 => full circle). facing is the initial
+    // XZ look direction; {0,0} => the model-forward default (kCharacterForward).
+    float vision_radius = 0.0f;
+    float vision_cone_half_angle_deg = 180.0f;
+    float facing_x = 0.0f, facing_z = 0.0f;
 };
 
 // Per-living-entity snapshot row: the renderer reads pos/size/color, tests
@@ -91,6 +110,10 @@ struct CharacterState {
     float color_r, color_g, color_b;
     int32_t home_building_id;    // recruiting guild; -1 = homeless / not a hero
     int32_t inside_building_id;  // -1 = outside; >=0 => hidden (don't draw; list in panel)
+    // Unit XZ look direction (the character Transform's rotation applied to the
+    // model-forward axis, projected to XZ). Drives the vision cone and, later,
+    // the render pose. Always normalized (defaults to kCharacterForward).
+    float facing_x, facing_z;
 };
 
 // Run counters. NB: NOT `Stats` — badlands::Stats already exists (a sim
@@ -107,6 +130,9 @@ struct BuildingDef {
     bool poppable;            // auto-spawned (House/Sewer), never player-placed
     bool user_destructible;   // player may DESTROY (the 7 buildable kinds)
     bool enemy_targettable;   // future monster attacks may target (Castle/House)
+    // Fog-of-war vision radius (world units) measured from the footprint EDGES
+    // (a euclidean expansion of the footprint). 0 => grants no vision.
+    float vision_radius;
     // Hero classes this kind recruits. recruit_count is 0 for non-guilds and 1
     // for today's guilds; the array has room for 2-3 (guilds are the only
     // kinds with recruit_count > 0). Declared per kind in placement.cpp kDefs.
@@ -169,6 +195,19 @@ struct WorldState {
     uint32_t guild_roster_cap;  // kGuildRosterCap (heroes per guild); UI mirrors it
 };
 
+// Read-only snapshot of the published (front) fog-of-war field. The grid lives
+// in the SIM coordinate frame; texel (i,j) covers the world square whose min
+// corner is (world_min_x + i*texel_m, world_min_z + j*texel_m). `rg` is
+// nx*nz*2 bytes, interleaved per texel: [2*k+0] = discovered (0 or 255),
+// [2*k+1] = visible (0 or 255), k = j*nx + i. Pointer valid until the next
+// Tick(); empty (rg==nullptr) until ConfigureVision() has been called.
+struct VisionField {
+    int32_t nx = 0, nz = 0;
+    float world_min_x = 0.0f, world_min_z = 0.0f;
+    float texel_m = 1.0f;
+    const uint8_t* rg = nullptr;
+};
+
 // Injected Rust nav provider (was GamePathfinder) — kept as-is, by value. The
 // engine delegates path *geometry* to this provider; obstacles mutate one
 // building at a time so the provider maintains its graph incrementally.
@@ -206,6 +245,28 @@ class Sim {
     // Registers the nav provider (copied by value) and back-fills every alive
     // building. Pass a default-constructed Pathfinder to clear.
     void SetPathfinder(const Pathfinder& pf);
+
+    // --- Fog-of-war (vision) ----------------------------------------------
+    // Sizes/anchors the vision grid (SIM frame). Must be called before the
+    // field is meaningful; Tick() resolves vision only once configured. A
+    // grid of ceil(world_size / texel_m) texels per axis is allocated.
+    // Idempotent for the same params; re-sizing resets the discovered history.
+    void ConfigureVision(float world_min_x, float world_min_z, float world_size_x,
+                         float world_size_z, float texel_m);
+    // Resolve + publish the vision field immediately, WITHOUT advancing the sim
+    // (no brains/movement/combat, no tick-counter bump). Tick() also resolves at
+    // its end; this is for populating the field before the first render when no
+    // Tick has run yet (e.g. a headless single-frame --screenshot). No-op until
+    // ConfigureVision().
+    void ResolveVision();
+    // The published (double-buffered) field. Read by the renderer to upload the
+    // vision texture. Empty until ConfigureVision().
+    VisionField GetVisionField() const;
+    // Object-bounds query: the highest VisionLevel over the grid texels within
+    // `radius` of (cx, cz) in the SIM frame (Visible wins over Dormant over
+    // Unknown). Drives per-entity render decisions (e.g. hide units). Returns
+    // Unknown when the vision grid is unconfigured or the bounds miss it.
+    VisionLevel QueryVision(float cx, float cz, float radius) const;
 
     // Snapshot accessors — identical semantics to the old ABI, POD vectors.
     std::vector<CharacterState> Characters() const;  // was game_state

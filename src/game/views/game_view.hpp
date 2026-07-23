@@ -28,6 +28,7 @@
 #include "game/ui/hud.hpp"
 #include "game/ui/picking.hpp"
 #include "game/visual/render_mode.hpp"
+#include "game/visual/vision_overlay_pass.hpp"
 
 namespace badlands {
 
@@ -118,6 +119,11 @@ class GameView : public AppView {
 
   // Owns the sim (RAII value member; nullptr script = mock brains).
   badlands::Sim sim_{nullptr};
+
+  // Fog-of-war overlay: the game's ScenePostPass. Registered on scene_context_
+  // (post_pass) so both the windowed renderer and the headless --screenshot
+  // renderer apply it; fed the sim's VisionField each frame.
+  VisionOverlayPass vision_pass_;
 
   // Reused scratch buffer for sim_.Buildings(building_rows_) (BuildScene + HUD
   // + DrawUI), so the per-frame reads don't allocate a fresh vector each call.

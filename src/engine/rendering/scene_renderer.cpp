@@ -34,6 +34,7 @@
 #include "engine/rendering/passes/render_gbuffer_debug.hpp"
 #include "engine/rendering/passes/render_skybox.hpp"
 #include "engine/rendering/passes/render_textured_mesh.hpp"
+#include "engine/rendering/scene_post_pass.hpp"
 
 namespace badlands {
 
@@ -798,6 +799,32 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     RenderForwardTransparentMeshes(pass, frame, registry, camera_world_pos,
                                    material_instance_cache_, engine);
     pass.End();
+  }
+
+  // === Pass 3.85: Post-scene modulation hook (generic, game-agnostic). Snapshot
+  // the lit HDR colour, then hand the snapshot + HDR write target + G-buffer
+  // depth to the registered pass (e.g. the game's fog-of-war overlay). Runs
+  // before debug lines + tonemap so it modulates the whole scene, while dev
+  // debug lines stay on top. No-op when no pass is set. ===
+  if (scene.post_pass != nullptr) {
+    wgpu::TexelCopyTextureInfo copy_src{};
+    copy_src.texture = hdr_color_texture_;
+    wgpu::TexelCopyTextureInfo copy_dst{};
+    copy_dst.texture = hdr_color_copy_texture_;
+    wgpu::Extent3D copy_ext = {width_, height_, 1};
+    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+
+    PostSceneContext post{
+        .frame = frame,
+        .camera = camera,
+        .color_source = hdr_color_copy_view_,
+        .color_target = hdr_color_view_,
+        .depth = gbuffer_.GetDepthView(),
+        .width = width_,
+        .height = height_,
+        .color_format = accumulation_format_,
+    };
+    scene.post_pass->Execute(post);
   }
 
   // === Pass 3.6: Debug lines — world-space thick (screen-aligned, AA) lines

@@ -249,6 +249,7 @@ add_library(badlands_game_lib STATIC
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/vision.cpp
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
     third_party/noiser/noiser-vm/src/noiser_crash.cpp
@@ -314,6 +315,7 @@ set(badlands_app_sources_game
     # symbolic-map building/biome plumbing, now that the game renders the
     # symbolic map's terrain/water/buildings through the composer.
     src/game/visual/scene_composer.cpp
+    src/game/visual/vision_overlay_pass.cpp
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
@@ -526,6 +528,7 @@ add_executable(badlands_game_tests
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
+    game/tests/vision_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.
