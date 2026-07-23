@@ -7,6 +7,7 @@
 #include "components.h"
 #include "entity_memory.h"
 #include "game_state.h"
+#include "heroes.h"           // spawn_entity (direct home-having, non-hero spawns)
 #include "sim_internal.hpp"  // make_world / spawn_into / dispatch_into / tick_world
 
 #include <catch_amalgamated.hpp>
@@ -159,8 +160,13 @@ TEST_CASE("a missing or zero-radius Vision means seeing nothing this tick") {
     CHECK(g->registry.get<EntityMemory>(g->slots[a]).char_count == 0);
 }
 
-TEST_CASE("persistence: a teleported target is remembered stale, then forgotten past the TTL") {
+TEST_CASE("persistence: a teleported target is remembered stale, forgotten exactly one tick past "
+         "the TTL boundary") {
     auto g = make_world(nullptr);
+    // Tick-aligned (a multiple of kMillisPerTick) so the "age == ttl" boundary
+    // below lands on an exact tick rather than being straddled by one (the
+    // 10s compiled default, 10000, is not a multiple of the 33ms tick).
+    g->factors.hero.memory_ttl_millis = 10 * kMillisPerTick;
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 20.0f));
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 0.0f));
     tick_world(*g, 1.0f / 30.0f);  // A sees B
@@ -185,11 +191,18 @@ TEST_CASE("persistence: a teleported target is remembered stale, then forgotten 
     CHECK(rec->last_pos == b_seen_pos);       // stale: the OLD position
     CHECK(rec->last_seen_millis == seen_at);  // not refreshed
 
-    // Advance sim time past memory_ttl_millis: the entry is forgotten.
+    // Advance to EXACTLY memory_ttl_millis past the sighting: the rule is
+    // "drop when age > ttl", so age == ttl must still be remembered.
     const int64_t ttl = g->factors.hero.memory_ttl_millis;
-    while (g->world_millis - seen_at <= ttl) {
+    while (g->world_millis - seen_at < ttl) {
         tick_world(*g, 1.0f / 30.0f);
     }
+    REQUIRE(g->world_millis - seen_at == ttl);
+    CHECK(find_char(*g, ae, b) != nullptr);  // still remembered at the exact boundary
+
+    // One tick past the boundary: age > ttl, forgotten.
+    tick_world(*g, 1.0f / 30.0f);
+    REQUIRE(g->world_millis - seen_at > ttl);
     CHECK(find_char(*g, ae, b) == nullptr);
 }
 
@@ -212,6 +225,66 @@ TEST_CASE("capacity: a 17th simultaneous sighting is dropped, not an incumbent")
 
 }
 
+TEST_CASE("capacity: a stale incumbent is evicted for a new sighting (tie -> largest slot)") {
+    auto g = make_world(nullptr);
+    uint32_t obs = spawn_into(*g, scout(0.0f, 0.0f, 100.0f));
+    std::vector<uint32_t> targets;
+    for (int i = 0; i < 16; ++i) {
+        targets.push_back(spawn_into(*g, scout(static_cast<float>(i + 1), 0.0f, 0.0f)));
+    }
+    tick_world(*g, 1.0f / 30.0f);  // tick 1: all 16 seen, memory full
+
+    entt::entity oe = g->slots[obs];
+    entt::entity stale_lo = g->slots[targets[0]];   // slot 1 (smallest)
+    entt::entity stale_hi = g->slots[targets[15]];  // slot 16 (largest)
+
+    // Move the LOWEST- and HIGHEST-slot incumbents out of radius together, so
+    // after the next tick both are stale with an EQUAL, older last_seen_millis
+    // than the 14 that stay in radius and keep refreshing -- a genuine tie.
+    g->registry.get<Position>(stale_lo).pos = glm::vec2(1000.0f, 1000.0f);
+    g->registry.get<Position>(stale_hi).pos = glm::vec2(1000.0f, 1000.0f);
+    tick_world(*g, 1.0f / 30.0f);  // tick 2: targets[0]/targets[15] age; the rest refresh
+
+    const EntityMemory& mem_before = g->registry.get<EntityMemory>(oe);
+    REQUIRE(mem_before.char_count == BL_MAX_CHARS);
+    const MemoryChar* lo = find_char(mem_before, targets[0]);
+    const MemoryChar* hi = find_char(mem_before, targets[15]);
+    REQUIRE(lo != nullptr);
+    REQUIRE(hi != nullptr);
+    CHECK_FALSE(lo->visible_now);
+    CHECK_FALSE(hi->visible_now);
+    REQUIRE(lo->last_seen_millis == hi->last_seen_millis);  // the tie is set up
+
+    // A 17th target comes into radius: the array is full, but the oldest-seen
+    // entry (the tie) is NOT visible_now, so the newcomer is recorded rather
+    // than dropped.
+    uint32_t seventeenth = spawn_into(*g, scout(17.0f, 0.0f, 0.0f));
+    tick_world(*g, 1.0f / 30.0f);  // tick 3
+
+    const EntityMemory& mem = g->registry.get<EntityMemory>(oe);
+    CHECK(mem.char_count == BL_MAX_CHARS);
+
+    // (a) the newcomer is recorded and visible.
+    const MemoryChar* newcomer = find_char(mem, seventeenth);
+    REQUIRE(newcomer != nullptr);
+    CHECK(newcomer->visible_now);
+
+    // (b) the tie is broken toward the LARGEST slot: targets[15] (slot 16) is
+    // evicted, while targets[0] (slot 1), tied but smaller, survives (still
+    // stale -- it was not re-seen this tick either).
+    CHECK(find_char(mem, targets[15]) == nullptr);
+    const MemoryChar* survivor = find_char(mem, targets[0]);
+    REQUIRE(survivor != nullptr);
+    CHECK_FALSE(survivor->visible_now);
+
+    // (c) the 14 currently-visible incumbents all survive, refreshed.
+    for (int i = 1; i < 15; ++i) {
+        const MemoryChar* rec = find_char(mem, targets[i]);
+        REQUIRE(rec != nullptr);
+        CHECK(rec->visible_now);
+    }
+}
+
 TEST_CASE("a recruited hero starts knowing its home and the castle") {
     auto owned = make_world(nullptr);  // prebuilds the Castle (id 0) at kCastleSpawn
     BadlandsGame* g = owned.get();
@@ -230,6 +303,42 @@ TEST_CASE("a recruited hero starts knowing its home and the castle") {
     REQUIRE(castle != nullptr);
     CHECK_FALSE(castle->is_home);
     CHECK(castle->alive);
+}
+
+TEST_CASE("is_home is sticky: a non-hero's home never flips false when re-observed") {
+    auto owned = make_world(nullptr);  // prebuilds the Castle (id 0)
+    BadlandsGame* g = owned.get();
+
+    // A tax collector homed at the Castle (mirrors economy.cpp's
+    // spawn_tax_collector: archetype Townfolk, home = castle id) -- with
+    // Vision added via a direct registry write afterward, since real tax
+    // collectors spawn with vision_radius 0 and so never re-observe anything
+    // on their own; this is what makes the divergent-rule bug observable.
+    CharacterDesc d{};
+    d.archetype = Archetype::Townfolk;
+    d.pos_x = 0.0f;
+    d.pos_z = 54.0f;  // at the Castle (kCastleSpawn)
+    d.team = 0;
+    d.hp = 12.0f;
+    d.size_x = d.size_y = d.size_z = 0.8f;
+    uint32_t tc = spawn_entity(*g, d, /*home=*/0);
+    entt::entity e = g->slots[tc];
+
+    // Seeding already marked the Castle as home.
+    const MemoryBuilding* seeded = find_building(g->registry.get<EntityMemory>(e), 0);
+    REQUIRE(seeded != nullptr);
+    REQUIRE(seeded->is_home);
+
+    // update_entity_memory's hero-rule derivation only reads
+    // HeroSimulationState, so re-observing the Castle recomputes
+    // is_home=false for a TaxCollectorState home every single tick --
+    // is_home must stay true regardless (identity, not a live status).
+    g->registry.get<Vision>(e).radius = 20.0f;
+    tick_world(*g, 1.0f / 30.0f);
+
+    const MemoryBuilding* rec = find_building(g->registry.get<EntityMemory>(e), 0);
+    REQUIRE(rec != nullptr);
+    CHECK(rec->is_home);
 }
 
 TEST_CASE("a homeless spawn starts with an empty EntityMemory") {

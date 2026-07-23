@@ -83,6 +83,16 @@ void upsert_char(EntityMemory& mem, uint32_t slot, int32_t archetype, int32_t te
 // have no visible_now to protect, so a full array simply loses its
 // oldest-seen entry to the newcomer (ties -> largest id). Buildings never
 // TTL-expire, so this is the only way a building entry is ever removed.
+//
+// `is_home` is IDENTITY, not a live re-derived status: the caller's
+// `is_home` is only ever the HeroSimulationState-based derivation (see
+// update_entity_memory), which is silently false for every other archetype
+// (a tax collector's home is TaxCollectorState::home_building_id, which this
+// pass never reads). seed_home_town_memory, by contrast, seeds true for ANY
+// archetype's home. Without the OR below, a non-hero re-observing its own
+// (seeded-true) home would flip it back to false the instant it has vision
+// of it -- so a once-true is_home is sticky: OR the caller's derivation onto
+// whatever is already recorded, never overwrite it down to false.
 void upsert_building(EntityMemory& mem, uint32_t id, int32_t kind, glm::vec2 door, bool alive,
                      bool is_home, int64_t now) {
     for (int32_t i = 0; i < mem.building_count; ++i) {
@@ -91,7 +101,7 @@ void upsert_building(EntityMemory& mem, uint32_t id, int32_t kind, glm::vec2 doo
             b.kind = kind;
             b.door = door;
             b.alive = alive;
-            b.is_home = is_home;
+            b.is_home = b.is_home || is_home;
             b.last_seen_millis = now;
             return;
         }
