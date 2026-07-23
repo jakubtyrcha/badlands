@@ -645,6 +645,22 @@ if(APPLE)
 endif()
 add_test(NAME badlands_decal_math_tests COMMAND badlands_decal_math_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_checker_texture_tests: Catch2 suite for the pure RGBA8 checkerboard
+# fill (engine/rendering/checker_texture.hpp) — the GPU-free core of
+# MaterialLibrary::CheckerAlbedo. Pure CPU, modeled on badlands_decal_math_tests.
+add_executable(badlands_checker_texture_tests
+    src/engine/tests/checker_texture_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_checker_texture_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_checker_texture_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_checker_texture_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_checker_texture_tests COMMAND badlands_checker_texture_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_daylight_tests: Catch2 suite for the day/night system — the pure-CPU
 # Hosek-Wilkie RGB port (golden values vs the reference), the ComputeDaylight
 # sun/moon/handover math, and the fixed-timestep accumulator. Pure CPU (no GPU),
