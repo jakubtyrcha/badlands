@@ -17,6 +17,13 @@ const
   BL_MAX_CHARS* = 16
   BL_MAX_ACTIVITIES* = 14
 
+  # BL_CMD_*: the command kinds a brain's decision can request, ABI version 1
+  # (BL_ABI_VERSION above). This list -- values, meanings, and the
+  # command_arg convention each one carries -- is kept in sync BY HAND across
+  # this file and game/src/brain_abi.h's own "#define BL_CMD_*" block; the
+  # wire STRUCT layout is what's frozen/asserted by sizeof (see the header's
+  # own "LAYOUT RULES" comment), not this enum-like list, which may grow
+  # (never renumber/reuse, same append-only discipline as badlands::ActivityId).
   BL_CMD_NONE* = 0'i32
   BL_CMD_ATTACK* = 1'i32
   BL_CMD_BUY* = 2'i32
@@ -26,6 +33,11 @@ const
   # (CommandKind::Shoot/Chat) have no wire representation among the original
   # four -- both need a TARGET slot, which BL_CMD_ATTACK/ENTER_HOME/BUY do
   # not carry. arg = target slot (prey for SHOOT, chat partner for CHAT).
+  # Accepted by controller adjudication as compatible with "abi.nim unchanged"
+  # (task-5-brief.md): that constraint is about the wire STRUCT layout, not
+  # this command-kind list -- decode_command's extension was explicitly
+  # authorized, and command_arg was already a generic int32 slot, so this is
+  # a new MEANING for an existing field, not a layout change.
   BL_CMD_SHOOT* = 5'i32
   BL_CMD_CHAT* = 6'i32
 

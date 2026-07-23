@@ -107,17 +107,26 @@ echo "build_brains.sh: $(nim --version | head -1)"
 #       import validation regardless of reachability. Quirky exceptions drop
 #       that check entirely; --panics:on additionally makes a Defect
 #       (out-of-bounds, etc.) an unrecoverable trap rather than a raise.
-#   --checks:off   the SAME "dead code still drags in a disallowed import"
-#       problem as the `exit` one above, hit for real by Task 5's hero
-#       decision layer (which indexes array tables, e.g. activity_catalog.nim's
-#       band lookup): even with --panics:on turning a failed bounds check into
-#       a trap, building the trap's "index X not in Y..Z" message first still
-#       needs int->string (system/dollars.nim -> std/private/digitsutils.nim),
-#       which pulls in system.nim's buffered-file-write path -> the
+#   --boundChecks:off --rangeChecks:off --overflowChecks:off   the SAME
+#       "dead code still drags in a disallowed import" problem as the `exit`
+#       one above, hit for real by Task 5's hero decision layer: even with
+#       --panics:on turning a failed runtime check into a trap, the trap's
+#       own message-formatting path (system.nim's fatal-error writer) still
+#       references `fwrite` on a `File` handle -> the disallowed
 #       wasi_snapshot_preview1.fd_write/fd_close/fd_seek/proc_exit IMPORTS --
-#       never reached (every index used here is already guarded), but still
-#       linked. --checks:off (bound/overflow/range/nil/assert) removes the
-#       check -- and its message-formatting call -- entirely.
+#       never reached (every check this module could trip is either already
+#       guarded or, for overflow, mathematically impossible at the sizes in
+#       play), but still linked. Bisected by hand against the real hero.nim
+#       build (not a guess): bound+range checks off ALONE still pulled the
+#       four WASI imports; adding --overflowChecks:off on top of those two is
+#       what actually cleared them (traced to rng.nim's range_i64, whose
+#       `hi - lo` is signed int64 subtraction); --nilChecks:off/
+#       --fieldChecks:off/--assertions:off, tried individually alongside
+#       bound+range, did NOT move the needle, so they are deliberately absent
+#       here -- this is the narrowest --checks:off subset that keeps the
+#       artifact WASI-clean, not the blanket flag. (Assertion/nil/field
+#       checks stay ON, for whatever that is worth in a --panics:on/
+#       --exceptions:quirky build where a Defect traps either way.)
 #   -mexec-model=reactor   selects wasi-libc's "reactor" C runtime (an
 #       `_initialize` export, no `main`) over the default "command" one
 #       (`_start` calling `main(argc, argv)`), which otherwise imports
@@ -141,7 +150,8 @@ build_one() {
 
     nim c \
         --cpu:wasm32 --os:any --mm:arc -d:useMalloc --threads:off -d:release --nomain \
-        -d:noSignalHandler --panics:on --exceptions:quirky --checks:off \
+        -d:noSignalHandler --panics:on --exceptions:quirky \
+        --boundChecks:off --rangeChecks:off --overflowChecks:off \
         --cc:clang --clang.exe:"$CLANG" --clang.linkerexe:"$CLANG" \
         --passC:"--target=wasm32-wasip1" \
         --passL:"--target=wasm32-wasip1 -mexec-model=reactor -Wl,--no-entry -Wl,--allow-undefined -Wl,--export=bl_abi_version -Wl,--export=bl_init -Wl,--export=bl_spawn -Wl,--export=bl_despawn -Wl,--export=bl_view_buf -Wl,--export=bl_out_buf -Wl,--export=bl_tick" \

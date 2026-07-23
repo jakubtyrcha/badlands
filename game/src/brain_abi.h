@@ -50,7 +50,12 @@ extern "C" {
 // Command kinds a brain's decision can request. Deliberately NOT the game's
 // CommandKindId values (badlands_sim.hpp): the host (C++ game side, a later
 // task) maps these onto real Commands, so the wire ABI stays stable even if
-// the game's internal enum reorders or grows.
+// the game's internal enum reorders or grows. ABI version 1 (BL_ABI_VERSION
+// above): this list is kept in sync BY HAND with scripts/brains/nim/abi.nim's
+// own `BL_CMD_*` const block. It is the wire's command-kind VOCABULARY, not
+// its struct layout (that is what sizeof/offsetof below actually pin) -- so
+// it may grow, append-only, same discipline as badlands::ActivityId; never
+// renumber or reuse a value once shipped.
 #define BL_CMD_NONE 0
 #define BL_CMD_ATTACK 1
 #define BL_CMD_BUY 2
@@ -60,7 +65,12 @@ extern "C" {
 // (CommandKind::Shoot/Chat, game/src/behaviours/blocks.cpp) target a specific
 // OTHER entity, which none of the four kinds above carry -- BL_CMD_ATTACK is
 // actor-only, and ENTER/ENTER_HOME/BUY carry a building kind or nothing.
-// command_arg = target slot.
+// command_arg = target slot. Adjudicated as compatible with the brief's
+// "abi.nim unchanged (wire is frozen)": that line is about the wire STRUCT
+// layout (BlViewWire/BlDecisionWire, unchanged here, still exactly
+// sizeof/offsetof-asserted below), not this command-kind list -- and
+// decode_command's matching extension (wasm_brain.cpp) was explicitly
+// authorized by the brief itself.
 #define BL_CMD_SHOOT 5   // command_arg = prey slot (hunter's shot)
 #define BL_CMD_CHAT 6    // command_arg = chat partner slot
 
