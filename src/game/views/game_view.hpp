@@ -23,6 +23,7 @@
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/material_library.hpp"
+#include "engine/rendering/projected_decal.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "engine/ui/ui_renderer.hpp"
 #include "game/map/map_data.hpp"
@@ -31,6 +32,7 @@
 #include "game/visual/composite_post_pass.hpp"
 #include "game/visual/cone_overlay_pass.hpp"
 #include "game/visual/render_mode.hpp"
+#include "game/visual/selection_decals.hpp"
 #include "game/visual/vision_overlay_pass.hpp"
 
 namespace badlands {
@@ -79,6 +81,13 @@ class GameView : public AppView {
   // Triangle soup (kPolygon: pos.xyz + rgba, 3 verts/tri) for the vision-cone
   // debug overlay, built from the current snapshot. Empty when nothing has vision.
   std::vector<float> BuildVisionConeTriangles() const;
+  // Terrain height at a world XZ (0 before the map exists). The map is stored
+  // corner-origin, so world XZ is shifted by the half extents.
+  float GroundAt(float world_x, float world_z) const;
+  // Rebuilds decals_ from the validated selection and republishes it on
+  // scene_context_. Called each Update AFTER RefreshHud, which is what drops a
+  // selection that no longer exists.
+  void RefreshSelectionDecals();
   // Clears scene_ and rebuilds it from scratch through the visual SceneComposer:
   // re-mirrors scene_context_'s lighting, generates the symbolic greybox map
   // (SymbolicMapGenerator) and adds its terrain chunks + lake water surfaces,
@@ -119,6 +128,11 @@ class GameView : public AppView {
   // an immediate re-bake (a DaylightConfig edit in DrawUI).
   DaylightConfig daylight_cfg_;
   SimClock sim_clock_;
+  // Wall-clock seconds since startup, accumulated from the raw presentation dt
+  // (so it ignores game speed AND pause). Feeds SceneContext::real_time_seconds
+  // for UI-domain animation -- currently the selection decals' marching ants.
+  // Deterministic under headless capture, where the app feeds a fixed step.
+  double real_time_seconds_ = 0.0;
   unsigned long long sim_ticks_done_ = 0;
   double rebake_accum_ = 0.0;
   bool force_rebake_ = false;
@@ -138,6 +152,12 @@ class GameView : public AppView {
   VisionOverlayPass vision_pass_;
   ConeOverlayPass cone_pass_;      // vision-cone debug overlay (toggle in DrawUI)
   CompositePostPass post_passes_;  // runs vision then cones behind the one slot
+
+  // Selection highlights: projected decals (a ring under the selected unit, a
+  // rounded rect around the selected building), rebuilt every frame and handed
+  // to the renderer through scene_context_.decals. Must outlive the frame --
+  // hence a member, not a local.
+  std::vector<ProjectedDecal> decals_;
 
   // Reused scratch buffer for sim_.Buildings(building_rows_) (BuildScene + HUD
   // + DrawUI), so the per-frame reads don't allocate a fresh vector each call.

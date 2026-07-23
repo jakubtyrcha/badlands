@@ -39,12 +39,11 @@ namespace badlands {
 
 namespace {
 
-// rotation_index 0..3 -> 0/45/90/135deg world yaw about Y (the PlacementDesc
-// convention in badlands_sim.hpp) -- see building_scene.h's AddBuildingToScene
-// comment for why this is exact for 0/2 and an approximation for 1/3.
-float yaw_from_rotation_index(int32_t rotation_index) {
-  return glm::radians(static_cast<float>(rotation_index) * 45.0f);
-}
+// rotation_index -> world yaw is YawFromRotationIndex (game/visual/
+// selection_decals.hpp). It lives there rather than here so the building mesh
+// and its selection outline cannot drift apart -- see building_scene.h's
+// AddBuildingToScene comment for why the mapping is exact for 0/2 and an
+// approximation for 1/3.
 
 // Game-UI text size in LOGICAL pixels. The atlas is baked once at this size, so
 // changing it means a re-bake, not a re-layout.
@@ -464,7 +463,7 @@ void GameView::BuildScene() {
     const glm::vec2 world(b.center_x, b.center_z);
     const float ground = map.HeightAt(world.x + half_x, world.y + half_z);
     AddBuildingToComposer(composer, b.kind, world,
-                          yaw_from_rotation_index(b.rotation_index), ground);
+                          YawFromRotationIndex(b.rotation_index), ground);
   }
 
   composer.ComposeInto(scene_, matlib_, terrain_arrays_, water_factory_.get());
@@ -489,9 +488,7 @@ void GameView::SyncUnits() {
     if (c.inside_building_id >= 0) {
       continue;  // hidden
     }
-    const float ground = map_.empty()
-                             ? 0.0f
-                             : map_.HeightAt(c.pos_x + half_x_, c.pos_z + half_z_);
+    const float ground = GroundAt(c.pos_x, c.pos_z);
     const float radius = 0.5f * std::min(c.size_x, c.size_z);
     const float cyl = std::max(0.1f, c.size_y - 2.0f * radius);
     const glm::vec3 color(c.color_r, c.color_g, c.color_b);
@@ -533,6 +530,32 @@ void GameView::SyncUnits() {
   }
 }
 
+float GameView::GroundAt(float world_x, float world_z) const {
+  return map_.empty() ? 0.0f
+                      : map_.HeightAt(world_x + half_x_, world_z + half_z_);
+}
+
+void GameView::RefreshSelectionDecals() {
+  decals_.clear();
+
+  // A unit that is inside a building is not drawn, so it gets no highlight even
+  // though the panel can still describe it (a visitor picked from a building's
+  // list) -- a ring on empty ground would be a lie.
+  if (const CharacterState* c = FindCharacter(character_rows_, selected_hero_)) {
+    if (c->inside_building_id < 0) {
+      decals_.push_back(MakeUnitRing(*c, GroundAt(c->pos_x, c->pos_z)));
+    }
+  }
+  if (const BuildingState* b = FindBuilding(building_rows_, selected_building_)) {
+    decals_.push_back(MakeBuildingRect(*b, GroundAt(b->center_x, b->center_z)));
+  }
+
+  // Republished every frame: decals_ may have reallocated, and an empty list
+  // must clear the previous frame's pointer rather than leave it dangling.
+  scene_context_.decals = decals_.empty() ? nullptr : decals_.data();
+  scene_context_.decal_count = static_cast<uint32_t>(decals_.size());
+}
+
 std::vector<float> GameView::BuildVisionConeTriangles() const {
   constexpr float kConeLift = 0.4f;   // metres above terrain, so it clearly floats
   constexpr float kConeAlpha = 0.28f;  // straight-alpha translucency
@@ -542,9 +565,7 @@ std::vector<float> GameView::BuildVisionConeTriangles() const {
     if (c.vision_radius <= 0.0f || c.inside_building_id >= 0) {
       continue;  // no vision, or hidden inside a building
     }
-    const float ground =
-        map_.empty() ? 0.0f : map_.HeightAt(c.pos_x + half_x_, c.pos_z + half_z_);
-    const float y = ground + kConeLift;
+    const float y = GroundAt(c.pos_x, c.pos_z) + kConeLift;
     const float r = c.vision_radius;
     const float center = std::atan2(c.facing_x, c.facing_z);  // +Z is 0
     const float half = glm::radians(std::min(c.vision_cone_half_angle_deg, 180.0f));
@@ -749,6 +770,11 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // deterministically from t01), so screenshots/records are reproducible.
   scene_context_.time_seconds = static_cast<float>(sim_clock_.sim_seconds);
 
+  // The UI-domain clock: raw dt, unscaled by game speed and unaffected by
+  // pause, so selection-decal dashes keep marching on a paused world.
+  real_time_seconds_ += real_dt;
+  scene_context_.real_time_seconds = static_cast<float>(real_time_seconds_);
+
   // The map fog generator is a sim: advance it on sim-time so pause freezes it
   // and game speed scales it. The renderer flushes the accumulated time into
   // fixed steps during Render (which owns the GPU encoder).
@@ -811,6 +837,10 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     PROFILE_SCOPE("hud");
     RefreshHud();
   }
+
+  // After RefreshHud: that is where a selection pointing at something that no
+  // longer exists gets dropped, so the decals follow a validated selection.
+  RefreshSelectionDecals();
 }
 
 uint32_t GameView::SnapshotBuildings() {

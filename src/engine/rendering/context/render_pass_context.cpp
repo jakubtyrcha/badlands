@@ -74,6 +74,13 @@ void RenderPassContext::DrawIndexed(uint32_t index_count,
   }
 }
 
+void RenderPassContext::SetScissorRect(uint32_t x, uint32_t y, uint32_t width,
+                                       uint32_t height) {
+  if (encoder_) {
+    encoder_.SetScissorRect(x, y, width, height);
+  }
+}
+
 void RenderPassContext::End() {
   if (encoder_) {
     encoder_.End();
