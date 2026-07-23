@@ -9,6 +9,7 @@
 
 #include "brain.h"
 #include "components.h"
+#include "entity_memory.h"  // update_entity_memory
 #include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
 #include "movement.h"
@@ -183,6 +184,13 @@ void tick_world(BadlandsGame& g, float dt) {
     // entity thinks and a just-accrued building is visible the same tick.
     advance_economy(g);
     run_spawners(g);
+
+    // EntityMemory: refresh every character's bounded knowledge of who/what
+    // it currently sees before anyone thinks, so a just-spawned entity's
+    // memory (and everyone else's memory of it) is consistent this very
+    // tick. Pure derived state -- reads the world, writes only EntityMemory
+    // components -- so it runs unconditionally, live or replaying alike.
+    update_entity_memory(g);
 
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.

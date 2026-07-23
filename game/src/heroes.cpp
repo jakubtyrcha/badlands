@@ -2,6 +2,7 @@
 
 #include "brain.h"
 #include "components.h"
+#include "entity_memory.h"  // EntityMemory, seed_home_town_memory
 #include "game_state.h"
 #include "placement.h"
 #include "town_brain.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
@@ -176,6 +177,17 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     }
 
     reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr, brain_kind);
+
+    // EntityMemory: every character gets the bounded knowledge sandbox
+    // (game/src/entity_memory.h). A character with a home starts already
+    // knowing it (and the town's other buildings) -- residents know their
+    // town; a homeless spawn (goblins, deer, home == -1) starts empty.
+    EntityMemory mem{};
+    if (home >= 0) {
+        seed_home_town_memory(game, mem, static_cast<uint32_t>(home));
+    }
+    reg.emplace<EntityMemory>(e, mem);
+
     return slot;
 }
 

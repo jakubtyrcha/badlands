@@ -254,6 +254,12 @@ struct HeroFactors {
     // How far a hero notices hostiles. Feeds WorldView's threat list, which
     // gates deliberation (you do not stand and think with a rat closing in).
     float threat_radius = 14.0f;
+    // How long EntityMemory (game/src/entity_memory.h) keeps a character
+    // sighting after it was last actually seen; once world_millis advances
+    // past last_seen_millis by more than this, the entry is forgotten
+    // (evicted) on the next tick's update pass. Buildings never expire this
+    // way, so this only bounds char entries.
+    int64_t memory_ttl_millis = 10000;
     // Deliberation pause between goal changes, drawn uniformly
     // from this range. The prototype day is 120 s, so an in-game minute is
     // ~83 ms of sim time and the default range is roughly 0-10 in-game minutes.

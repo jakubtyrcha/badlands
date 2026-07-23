@@ -264,6 +264,7 @@ add_library(badlands_game_lib STATIC
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/entity_memory.cpp
     game/src/needs.cpp
     game/src/town_brain.cpp
     game/src/activity_catalog.cpp
@@ -559,6 +560,7 @@ add_executable(badlands_game_tests
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
+    game/tests/entity_memory_tests.cpp
     game/tests/command_tests.cpp
     game/tests/clock_tests.cpp
     game/tests/needs_tests.cpp

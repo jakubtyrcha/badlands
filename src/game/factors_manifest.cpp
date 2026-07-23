@@ -129,6 +129,7 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             !ReadNum(*s, "hero", "roam_radius", manifest_path, h.roam_radius) ||
             !ReadNum(*s, "hero", "hunt_sight_radius", manifest_path, h.hunt_sight_radius) ||
             !ReadNum(*s, "hero", "threat_radius", manifest_path, h.threat_radius) ||
+            !ReadNum(*s, "hero", "memory_ttl_millis", manifest_path, h.memory_ttl_millis) ||
             !ReadNum(*s, "hero", "think_min_millis", manifest_path, h.think_min_millis) ||
             !ReadNum(*s, "hero", "think_max_millis", manifest_path, h.think_max_millis) ||
             !ReadNum(*s, "hero", "chat_content_seek", manifest_path, h.chat_content_seek) ||
