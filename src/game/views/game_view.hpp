@@ -25,7 +25,6 @@
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/daylight.hpp"
-#include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/rendering/projected_decal.hpp"
 #include "engine/scene/scene_graph.hpp"
@@ -36,6 +35,7 @@
 #include "game/visual/world_labels.hpp"
 #include "game/visual/composite_post_pass.hpp"
 #include "game/visual/cone_overlay_pass.hpp"
+#include "game/visual/nav_debug_overlay.hpp"
 #include "game/visual/render_mode.hpp"
 #include "game/visual/selection_decals.hpp"
 #include "game/visual/vision_overlay_pass.hpp"
@@ -158,18 +158,11 @@ class GameView : public AppView {
   ConeOverlayPass cone_pass_;      // vision-cone debug overlay (toggle in DrawUI)
   CompositePostPass post_passes_;  // runs vision then cones behind the one slot
 
-  // Pathfinding debug overlay (game/src/navmesh): the cost-coloured navmesh +
-  // a click-two-points routed path, drawn through the engine debug-line pass
-  // (scene_context_.debug_lines). Toggled in the "Gameplay Debug" panel, next to
-  // the vision cones. Off by default.
-  void UpdateNavDebug();  // rebuilds nav_lines_ each Update; points debug_lines
-  DebugLineBuffer nav_lines_;
-  std::vector<badlands::NavDebugCell> nav_cells_;  // reused snapshot buffer
-  bool nav_show_mesh_ = false;
-  bool nav_pick_mode_ = false;
-  std::optional<glm::vec2> nav_a_;  // path endpoints (sim XZ), picked on the terrain
-  std::optional<glm::vec2> nav_b_;
-  badlands::NavPathResult nav_path_;  // last query (cost / reachable)
+  // Pathfinding debug overlay (shared with the AI sandbox). Draws the navmesh +
+  // a click-two-points path through scene_context_.debug_lines; toggled in the
+  // "Gameplay Debug" panel next to the vision cones. Ground height comes from the
+  // terrain (GroundAt); picks come from the terrain raycast in HandleEvent.
+  NavDebugOverlay nav_debug_;
 
   // Selection highlights: projected decals (a ring under the selected unit, a
   // rounded rect around the selected building), rebuilt every frame and handed
