@@ -12,6 +12,7 @@
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
+#include <glm/glm.hpp>
 
 #include "engine/app/app_view.hpp"
 #include "engine/app/orbit_camera_controller.hpp"
@@ -52,17 +53,26 @@ class ModelViewerView : public AppView {
   }
 
  private:
-  // A named procedural-mesh generator: produces one mesh added to the scene.
+  // The output of a generator: a mesh plus the transform that places it. The
+  // generator assumes the floor is at y=0 and returns the resting offset as a
+  // transform -- it does NOT bake the offset into the mesh vertices, so the
+  // mesh stays in its own natural local space.
+  struct GeneratedMesh {
+    TexturedMeshResult mesh;
+    glm::mat4 transform{1.0f};
+  };
+  // A named procedural-mesh generator: produces one GeneratedMesh for the scene.
   struct MeshGenerator {
     std::string name;
-    std::function<TexturedMeshResult()> generate;
+    std::function<GeneratedMesh()> generate;
   };
 
   void BuildGenerators();
   // Re-derives env_'s sky/SH/sun into scene_context_ and mirrors it into scene_.
   void ApplyEnvironment();
-  // Fresh graph: re-mirror lighting, add the gray floor, run the selected
-  // generator, apply checker_mat_, reframe the orbit on the mesh bounds.
+  // Fresh graph: re-mirror lighting, add the gray floor at y=0, run the selected
+  // generator, add its mesh under the generator's transform with checker_mat_,
+  // and reframe the orbit on the mesh's world-space bounds.
   void RebuildScene();
 
   wgpu::Device device_;

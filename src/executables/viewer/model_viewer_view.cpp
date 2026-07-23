@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+#include <glm/gtc/matrix_transform.hpp>  // glm::translate
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
@@ -64,8 +65,14 @@ void ModelViewerView::BuildGenerators() {
   // The "test" generator: the engine's cube-sphere (cube -> 16x16 per face ->
   // normalized sphere, EAC UVs). Future foliage/rock generators append here.
   generators_.push_back(
-      {.name = "Sphere (test)",
-       .generate = [] { return GenerateSphereTexturedMesh(1.0f, 16); }});
+      {.name = "Sphere (test)", .generate = [] {
+         TexturedMeshResult mesh = GenerateSphereTexturedMesh(1.0f, 16);
+         // Floor is at y=0: lift the mesh so its lowest point rests on it. The
+         // offset is a transform, never baked into the vertices.
+         const glm::mat4 transform = glm::translate(
+             glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
+         return GeneratedMesh{std::move(mesh), transform};
+       }});
 }
 
 void ModelViewerView::ApplyEnvironment() {
@@ -86,12 +93,17 @@ void ModelViewerView::RebuildScene() {
   AddFloor(scene_, kFloorSize, matlib_.SolidColor(kFloorGray, kFloorRoughness),
            kFloorSize / kFloorUvRepeatSpacing);
 
-  TexturedMeshResult mesh = generators_[generator_index_].generate();
-  const Aabb bounds = mesh.local_bounds;
-  AddMeshEntity(scene_, "mesh", std::move(mesh), checker_mat_);
+  GeneratedMesh generated = generators_[generator_index_].generate();
+  // Frame on the WORLD-space bounds (mesh local bounds put through the
+  // generator's placement transform) so the orbit centers on the mesh as it
+  // sits on the floor. Compute this before the mesh is moved into the scene.
+  const Aabb world_bounds =
+      generated.mesh.local_bounds.TransformedBy(generated.transform);
+  AddMeshEntity(scene_, "mesh", std::move(generated.mesh), checker_mat_,
+                generated.transform);
 
-  const glm::vec3 center = bounds.Center();
-  const float radius = glm::length(bounds.max - center);
+  const glm::vec3 center = world_bounds.Center();
+  const float radius = glm::length(world_bounds.max - center);
   orbit_.FrameBounds(center, radius > 0.01f ? radius : 1.0f);
   orbit_.UpdateCamera(camera_);
 }
