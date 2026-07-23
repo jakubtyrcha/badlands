@@ -38,6 +38,10 @@ enum HudId : uint32_t {
   kHudBtnSpeed1,
   kHudBtnSpeed2,
   kHudBtnSpeed4,
+  // The combat-log region (bottom half of the right panel). It carries an id so
+  // (a) a click on it is consumed like the rest of the panel chrome and (b) the
+  // view can route a mouse-wheel over it to log scrolling instead of camera zoom.
+  kHudCombatLog,
 };
 
 // Clickable entity rows (guild residents, building visitors, the hero's home
@@ -90,6 +94,11 @@ struct HudModel {
   float speed = 1.0f;              // sim speed (0/1/2/4) -- highlights its button
   bool has_selection = false;
   HudSelection selection;
+  // Combat log (bottom half of the always-on right panel): the already-windowed
+  // lines to show, oldest-first (newest at the bottom). The view owns the ring
+  // buffer + scroll offset and passes only the visible slice; BuildHud just lays
+  // these out (the ui crate has no scrolling, so windowing happens caller-side).
+  std::vector<std::string> combat_log;
 };
 
 // Result of one HUD build: the quads to draw and the rects to hit-test.
@@ -104,6 +113,13 @@ struct HudFrame {
 // left empty, which draws nothing rather than drawing something wrong.
 bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
               float viewport_h_px, float scale, HudFrame& out);
+
+// How many combat-log lines fit the fixed-height bottom panel. The view calls it
+// to window its log ring buffer before filling HudModel.combat_log -- a single
+// source of truth for the layout math, so the windowing and the actual panel can
+// never disagree about capacity. Scale-invariant (the log panel is a fixed
+// logical height), so it takes no arguments.
+uint32_t HudCombatLogCapacity();
 
 // The id of the topmost element containing `p` (PHYSICAL pixels), or kHudNone.
 // Hit rects arrive innermost-first, so the first containing rect is the most

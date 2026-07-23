@@ -253,6 +253,51 @@ fn text_measure_grows_with_length() {
     assert_eq!(atlas.measure(""), 0.0);
 }
 
+// draw::text_run is the positioned single-run shaper behind the ui_text_run C
+// ABI (floating world labels): a run laid from a baseline-left origin (0,0),
+// which the C++ caller then scales + translates to a screen anchor.
+#[test]
+fn text_run_reports_measured_width_and_full_text_height() {
+    let atlas = test_atlas();
+    let run = draw::text_run("AB", 0x1234_56ff, &atlas);
+    // Width is the same advance the layout engine measures with.
+    assert_eq!(run.width, atlas.measure("AB"));
+    // Height is the whole text box: ascent above + descent below the baseline.
+    assert_eq!(run.height, atlas.ascent_px - atlas.descent_px);
+    // One quad per inked glyph (both letters here), carrying the requested color.
+    assert_eq!(run.quads.len(), 2);
+    assert!(run.quads.iter().all(|q| q.rgba == 0x1234_56ff));
+}
+
+#[test]
+fn text_run_is_anchored_baseline_left_at_the_origin() {
+    let atlas = test_atlas();
+    let run = draw::text_run("A", 0xffff_ffff, &atlas);
+    let q = run.quads[0];
+    // The pen starts at x=0; the first glyph sits within a side-bearing of it
+    // (a glyph's ink may extend slightly left of the pen, so not strictly >= 0).
+    assert!(q.x.abs() < atlas.line_height_px, "first glyph is anchored at the left origin");
+    assert!(q.y < 0.0, "the glyph sits ABOVE the baseline at y=0");
+}
+
+#[test]
+fn text_run_skips_glyphs_with_no_ink_but_still_advances() {
+    // A space has advance but no quad, so "A B" measures wider than "AB" yet
+    // still emits only the two inked glyphs.
+    let atlas = test_atlas();
+    let spaced = draw::text_run("A B", 0xffff_ffff, &atlas);
+    assert_eq!(spaced.quads.len(), 2);
+    assert!(spaced.width > draw::text_run("AB", 0xffff_ffff, &atlas).width);
+}
+
+#[test]
+fn text_run_of_empty_string_is_empty() {
+    let atlas = test_atlas();
+    let run = draw::text_run("", 0xffff_ffff, &atlas);
+    assert!(run.quads.is_empty());
+    assert_eq!(run.width, 0.0);
+}
+
 // The real shipping font, so the atlas geometry under test is the one the game
 // actually bakes. Tests run from the crate dir, hence the walk up to the root.
 fn test_atlas() -> font::FontAtlas {

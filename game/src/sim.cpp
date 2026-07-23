@@ -253,10 +253,14 @@ void tick_world(BadlandsGame& g, float dt) {
         if (target == entt::null) {
             continue;
         }
-        float dist = glm::distance(pos.pos, registry.get<Position>(target).pos);
+        const glm::vec2 tp = registry.get<Position>(target).pos;
+        float dist = glm::distance(pos.pos, tp);
         if (dist <= stats.attack_range * 1.05f) {
-            registry.get<Health>(target).hp -= stats.attack_damage;
+            Health& th = registry.get<Health>(target);
+            th.hp -= stats.attack_damage;
             cooldown.remaining = stats.attack_cooldown;
+            emit_char_hit(g, slot_for_entity(g, e), slot_for_entity(g, target),
+                          stats.attack_damage, th.hp, tp);
         }
     }
 
@@ -552,6 +556,11 @@ std::vector<BuildingState> Sim::Buildings() const {
 WorldState Sim::World() const { return world_of(*world_); }
 SimStats Sim::GetStats() const { return stats_of(*world_); }
 std::vector<CommandRecord> Sim::CommandLog() const { return command_log_of(*world_); }
+
+void Sim::DrainEvents(std::vector<GameEvent>& out) {
+    out.clear();
+    out.swap(world_->events);  // hand the batch out; the freed buffer refills next tick
+}
 void Sim::SetFactors(const SimFactors& f) { set_factors_of(*world_, f); }
 const SimFactors& Sim::Factors() const { return world_->factors; }
 int32_t Sim::BiomeAt(float x, float z) const { return biome_at_of(*world_, x, z); }

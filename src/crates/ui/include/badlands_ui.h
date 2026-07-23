@@ -171,6 +171,25 @@ int32_t ui_atlas(const UiContext* ctx, uint8_t* out_r8, uint32_t cap, UiFontInfo
 // visible to the caller, safe to call every frame.
 int32_t ui_build(const UiContext* ctx, const UiBuildInput* in, UiBuildOutput* out);
 
+// Shape ONE UTF-8 text run at the baked font size and emit its glyph quads.
+//
+// This is the positioned-text primitive the flexbox `ui_build` does not cover:
+// used for FLOATING WORLD LABELS (names / damage numbers projected over the 3D
+// scene), where the caller owns placement. The quads come out in run-local
+// pixels from a baseline-left origin (0,0): glyph x >= ~0 and, for the parts
+// above the baseline, y < 0. The caller scales them (dampened depth scaling)
+// and translates them to a projected screen anchor, using *out_width_px /
+// *out_height_px (the run's advance width and full ascent+descent text height)
+// to centre/right-anchor the box. `rgba` colours every glyph; solid bars (e.g.
+// health bars) need no call here -- emit UiQuads over the white texel directly.
+//
+// Buffers are caller-owned; the count-then-fill truncation idiom applies:
+// *out_count is the TOTAL glyph quads required (> cap => truncated, call again
+// with a bigger buffer). `utf8` may be NULL only when `len` is 0 (empty run).
+int32_t ui_text_run(const UiContext* ctx, const char* utf8, uint32_t len,
+                    uint32_t rgba, UiQuad* out, uint32_t cap, uint32_t* out_count,
+                    float* out_width_px, float* out_height_px);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -147,8 +147,10 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             }
             const auto& stats = game.registry.get<Stats>(e);
             PlacedBuilding& b = game.placement.buildings[bid];
+            const glm::vec2 bc = b.center;
             b.hp -= stats.attack_damage;
             cd.remaining = stats.attack_cooldown;
+            emit_building_hit(game, cmd.actor, bid, stats.attack_damage, b.hp, bc);
             if (b.hp <= 0.0f) {
                 raze_building(game, bid);
             }
@@ -174,8 +176,11 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             if (glm::distance(sp, tp) > stats.attack_range) {
                 return 0;  // out of range now
             }
-            game.registry.get<Health>(target).hp -= stats.attack_damage;
+            Health& th = game.registry.get<Health>(target);
+            th.hp -= stats.attack_damage;
             cd.remaining = stats.attack_cooldown;
+            emit_char_hit(game, cmd.actor, cmd.target_id, stats.attack_damage,
+                          th.hp, tp);
             return 0;
         }
         case CommandKind::Chat: {
