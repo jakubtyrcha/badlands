@@ -67,9 +67,7 @@ TEST_CASE("Flee is archetype-agnostic: same block, hero view and deer view") {
     const SimFactors f;
     WorldView deer;
     deer.pos = {0.0f, 0.0f};
-    deer.has_threat = true;
-    deer.threat_pos = {3.0f, 0.0f};  // 3 m east
-    deer.threat_dist = 3.0f;
+    add_threat(deer, {3.0f, 0.0f}, 3.0f);  // 3 m east
 
     WorldView hero = deer;  // identical threat fields, different "archetype"
     hero.has_home = true;   // hero-only field a deer never sets
@@ -92,15 +90,13 @@ TEST_CASE("Flee gates on the flee radius, and beats graze/roam") {
                                    {score_idle, act_idle}}};
     WorldView v;
     v.grazing = true;  // would graze if not threatened
-    v.has_threat = true;
-    v.threat_pos = {5.0f, 0.0f};
-    v.threat_dist = 5.0f;  // inside flee_radius
+    add_threat(v, {5.0f, 0.0f}, 5.0f);  // inside flee_radius
     // A bolt reports Flee, not Roam: the statistics histogram has to be able to
     // tell a panicking herd from a grazing one.
     CHECK(select_priority(deer, v, f).id == Behavior::Flee);
 
     // Threat present but beyond flee_radius -> graze wins instead.
-    v.threat_dist = 20.0f;
+    v.threats[0].dist = 20.0f;
     CHECK(select_priority(deer, v, f).id == Behavior::Graze);
 }
 

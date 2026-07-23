@@ -29,6 +29,16 @@ namespace badlands {
 // noiser brain all speak it. Names + bands live in ActivityCatalog().
 using Behavior = ActivityId;
 
+// One perceived threat. Kept as a small fixed array on the view rather than a
+// single nearest, because "how many are near me" is a different question from
+// "where is the closest one" -- and the first is what tells an entity whether
+// it is safe to stand still and deliberate.
+struct PerceivedThreat {
+    glm::vec2 pos{0.0f, 0.0f};
+    float dist = 0.0f;
+    uint32_t slot = UINT32_MAX;
+};
+
 struct WorldView {
     uint32_t slot = UINT32_MAX;
     glm::vec2 pos{0.0f, 0.0f};
@@ -58,9 +68,24 @@ struct WorldView {
     glm::vec2 apothecary_door{0.0f, 0.0f};  bool has_apothecary = false;
     glm::vec2 tavern_door{0.0f, 0.0f};      bool has_tavern = false;
 
-    // --- nearest perceived threat (Flee); populated from a later phase ------
-    glm::vec2 threat_pos{0.0f, 0.0f};       bool has_threat = false;
-    float threat_dist = 0.0f;
+    // --- threats in close proximity -----------------------------------------
+    // Every threat within the observer's threat radius, NEAREST FIRST, filled
+    // by collect_threats (behaviours/perception.h). What counts as a threat is
+    // RELATIONAL and decided by the observer's policy (another team, or simply
+    // "not one of us"), never taxonomic -- so the same field serves a deer
+    // bolting from a hero and a hero watching for monsters.
+    //
+    // Read it through the has_threat()/nearest_threat_*() helpers below, which
+    // are the only supported accessors; the array is capped, so threat_count is
+    // "how many I can attend to", not a census.
+    static constexpr int32_t kMaxThreats = 8;
+    PerceivedThreat threats[kMaxThreats];
+    int32_t threat_count = 0;
+
+    // --- deliberation --------------------------------------------------------
+    int64_t now_millis = 0;           // sim clock, for pause bookkeeping
+    int64_t think_until_millis = 0;   // a pause in progress ends at this time
+    int32_t current_activity = -1;    // what this entity is doing now; -1 = nothing yet
 
     // --- hunter: nearest prey (a critter within hunt sight) ----------------
     glm::vec2 prey_pos{0.0f, 0.0f};         bool has_prey = false;
@@ -75,6 +100,45 @@ struct WorldView {
     uint32_t tax_target_id = UINT32_MAX;
     glm::vec2 deposit_door{0.0f, 0.0f};     bool has_deposit = false;
 };
+
+// --- threat accessors -------------------------------------------------------
+// Free functions rather than methods so WorldView stays a flat aggregate (it is
+// the struct a noiser brain will mirror). Appending keeps the list sorted
+// nearest-first and silently drops anything past kMaxThreats, which is correct:
+// the far ones are exactly the ones you stop attending to.
+inline bool has_threat(const WorldView& v) { return v.threat_count > 0; }
+
+inline glm::vec2 nearest_threat_pos(const WorldView& v) {
+    return v.threat_count > 0 ? v.threats[0].pos : glm::vec2{0.0f, 0.0f};
+}
+
+inline float nearest_threat_dist(const WorldView& v) {
+    return v.threat_count > 0 ? v.threats[0].dist : 0.0f;
+}
+
+inline void add_threat(WorldView& v, glm::vec2 pos, float dist, uint32_t slot = UINT32_MAX) {
+    // Insertion sort into a list of at most 8: the ordering is part of the
+    // contract (blocks read threats[0] as "the closest"), and ties break by
+    // slot so the result never depends on the order they were offered in.
+    int32_t at = v.threat_count;
+    while (at > 0) {
+        const PerceivedThreat& prev = v.threats[at - 1];
+        const bool later = prev.dist > dist || (prev.dist == dist && prev.slot > slot);
+        if (!later) {
+            break;
+        }
+        if (at < WorldView::kMaxThreats) {
+            v.threats[at] = prev;  // shift the farther one down
+        }
+        --at;
+    }
+    if (at < WorldView::kMaxThreats) {
+        v.threats[at] = PerceivedThreat{pos, dist, slot};
+    }
+    if (v.threat_count < WorldView::kMaxThreats) {
+        ++v.threat_count;
+    }
+}
 
 // One tick's decision: which behaviour, where to walk, and an optional follow-up
 // command (enter/buy/attack) the caller gates on arrival.

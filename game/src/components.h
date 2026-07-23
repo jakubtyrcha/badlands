@@ -135,6 +135,11 @@ struct HeroSimulationState {
     int32_t behavior = -1;
     int32_t inventory = 0;
     int32_t home_building_id = -1;
+    // Deliberation: while world_millis is below this the hero is standing and
+    // thinking. Set by the SetBehavior handler from the command's duration (so
+    // the pause is IN the log and a replay reproduces it), and cleared by
+    // committing to any other activity.
+    int64_t think_until_millis = 0;
 };
 
 // Display: renderer/panel-facing.

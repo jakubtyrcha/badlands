@@ -2,6 +2,7 @@
 
 #include "badlands_sim.hpp"
 #include "behaviours/blocks.h"
+#include "behaviours/perception.h"
 #include "behaviours/selectors.h"
 #include "behaviours/world_view.h"
 #include "brain.h"
@@ -27,28 +28,6 @@ constexpr int kRoamBiomeTries = 6;
 
 bool good_biome(mapgen::Biome b) {
     return b == mapgen::Biome::Forest || b == mapgen::Biome::Plains;
-}
-
-// Nearest non-critter entity within `max_dist` -- what a deer flees. "Critter"
-// is the Brain kind, so deer ignore each other and bolt from heroes / townfolk /
-// monsters alike. Perception only: this reads the registry so blocks never do.
-bool nearest_threat(const BadlandsGame& game, entt::entity self, glm::vec2 pos, float max_dist,
-                    glm::vec2& out_pos, float& out_dist) {
-    float best = max_dist;
-    bool found = false;
-    for (auto [e, p, brain] : game.registry.view<const Position, const Brain>().each()) {
-        if (e == self || brain.kind == BrainKind::Critter) {
-            continue;
-        }
-        const float d = glm::distance(p.pos, pos);
-        if (d <= best) {
-            best = d;
-            out_pos = p.pos;
-            found = true;
-        }
-    }
-    out_dist = found ? best : 0.0f;
-    return found;
 }
 
 // A wander goal biased toward Forest/Plains: draw the deterministic ring point,
@@ -80,8 +59,10 @@ WorldView observe_critter(const BadlandsGame& game, uint32_t slot, entt::entity 
         static_cast<int64_t>((1.0f - cf.graze_fraction) * static_cast<float>(kRoamLeaseMillis));
     v.grazing = phase >= graze_start;
 
-    v.has_threat =
-        nearest_threat(game, e, v.pos, cf.sight_radius, v.threat_pos, v.threat_dist);
+    // Deer bolt from anything that is not another deer -- heroes, tax
+    // collectors and rats alike. Same shared helper a hero uses for hostiles;
+    // only the policy differs.
+    collect_threats(game, e, v.pos, cf.sight_radius, ThreatPolicy::NotMyKind, v);
     v.roam_goal = biome_roam_goal(game, slot, v.roam_epoch, st.roam_anchor, cf.roam_radius);
     return v;
 }

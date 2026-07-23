@@ -163,6 +163,15 @@ TEST_CASE("hero thresholds come from SimFactors, not hardcoded constants") {
     // Defaults are shipped and sane with no file loaded.
     CHECK(g.factors.hero.fatigue_go_home == Catch::Approx(0.6f));
 
+    // This case is about THRESHOLDS, so switch deliberation off: otherwise
+    // retuning a threshold mid-run is a change of mind, and the hero quite
+    // correctly stands and thinks about it for a moment before setting off.
+    {
+        SimFactors no_thinking = g.factors;
+        no_thinking.hero.think_max_millis = 0;
+        set_factors_of(g, no_thinking);
+    }
+
     Action place{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,
                  static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
     uint32_t guild = static_cast<uint32_t>(dispatch_into(g, place));

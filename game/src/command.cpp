@@ -74,6 +74,15 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             if (e != entt::null) {
                 if (auto* sim = game.registry.try_get<HeroSimulationState>(e)) {
                     sim->behavior = cmd.param_a;
+                    // Starting a deliberation pause sets its deadline;
+                    // committing to anything else cancels one in progress. Both
+                    // derive from the command, so replay reproduces the pause
+                    // without re-drawing its length.
+                    sim->think_until_millis =
+                        (cmd.param_a == static_cast<int32_t>(ActivityId::Think) &&
+                         cmd.param_b > 0)
+                            ? game.world_millis + cmd.param_b
+                            : 0;
                 } else if (auto* cs = game.registry.try_get<CritterState>(e)) {
                     cs->behavior = cmd.param_a;
                 } else if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
@@ -194,7 +203,8 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target) {
     game.command_queue.push_back({CommandKind::MoveTo, slot, UINT32_MAX, target});
 }
 
-void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior) {
+void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
+                          int64_t duration_millis) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
         return;
@@ -213,8 +223,12 @@ void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior) {
     if (current == behavior) {
         return;  // unchanged -- not a decision
     }
-    game.command_queue.push_back(
-        {CommandKind::SetBehavior, slot, UINT32_MAX, {0.0f, 0.0f}, behavior});
+    game.command_queue.push_back({CommandKind::SetBehavior,
+                                  slot,
+                                  UINT32_MAX,
+                                  {0.0f, 0.0f},
+                                  behavior,
+                                  static_cast<int32_t>(duration_millis)});
 }
 
 void apply_replay_commands(BadlandsGame& game) {

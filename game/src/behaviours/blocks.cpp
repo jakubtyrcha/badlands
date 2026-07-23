@@ -108,10 +108,11 @@ BehaviourResult act_roam(const WorldView& v, const SimFactors&) {
 
 // --- Flee (shared) ----------------------------------------------------------
 float score_flee(const WorldView& v, const SimFactors& f) {
-    return (v.has_threat && v.threat_dist <= f.critter.flee_radius) ? kApplies : kNotApplicable;
+    return (has_threat(v) && nearest_threat_dist(v) <= f.critter.flee_radius) ? kApplies
+                                                                              : kNotApplicable;
 }
 BehaviourResult act_flee(const WorldView& v, const SimFactors& f) {
-    glm::vec2 away = v.pos - v.threat_pos;
+    glm::vec2 away = v.pos - nearest_threat_pos(v);
     const float len = glm::length(away);
     away = (len > 1e-4f) ? away / len : glm::vec2{1.0f, 0.0f};  // degenerate: pick a dir
     // Reports its own id rather than masquerading as Roam: a bolt and a wander

@@ -96,7 +96,12 @@ void apply_commands(BadlandsGame& game);
 // entity already has. Both read components that replay reproduces exactly, so a
 // live run and its replay emit identical command streams.
 void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target);
-void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior);
+// `duration_millis` rides along on SetBehavior(Think): it is how long the
+// deliberation pause lasts. Putting it IN the command is what makes the pause
+// replayable -- a replay does not re-draw the duration, it reads the one the
+// live run drew. Committing to any other activity clears the pause.
+void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
+                          int64_t duration_millis = 0);
 
 // Replay: enqueues + applies every command in game.replay_log stamped at or
 // before the current game.world_millis, advancing game.replay_cursor. game_tick

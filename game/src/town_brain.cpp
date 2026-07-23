@@ -2,6 +2,8 @@
 
 #include "badlands_sim.hpp"
 #include "behaviours/blocks.h"
+#include "behaviours/deliberation.h"
+#include "behaviours/perception.h"
 #include "behaviours/selectors.h"
 #include "behaviours/world_view.h"
 #include "command.h"
@@ -79,6 +81,18 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     v.tod = time_of_day(game.world_millis);
     v.night = is_night(v.tod);
     v.roam_epoch = game.world_millis / kRoamLeaseMillis;
+    v.now_millis = game.world_millis;
+    v.think_until_millis = sim.think_until_millis;
+    v.current_activity = sim.behavior;
+
+    // Threats in proximity. Today this gates deliberation only -- a hero with a
+    // hostile anywhere on the map never reaches town_think at all, because the
+    // combat pre-empt in mock_think claims it first, so in practice this list
+    // is empty here. It is populated regardless because it is the perception
+    // the Danger band is built on, and it goes live unchanged the moment combat
+    // becomes an activity rather than a pre-empt.
+    collect_threats(game, e, v.pos, game.factors.hero.threat_radius, ThreatPolicy::HostileTeam,
+                    v);
 
     // Perception follows the weight table: an activity the class does not have
     // (weight 0) costs nothing to perceive for. Only hunters scan for prey --
@@ -136,9 +150,26 @@ void town_think(BadlandsGame& game, uint32_t slot) {
     const WorldView view = observe_hero(game, slot, e, weights);
     const BehaviourResult r = select_banded(kHeroActivities, weights, view, game.factors);
 
+    // Changed its mind? Stand and think about it for a moment first.
+    const ThinkDecision think = deliberate(r.id, view, game.factors);
+    if (think.pause) {
+        if (think.duration_millis > 0) {
+            // Starting a pause. Both commands go out exactly once: the hold
+            // position is captured here rather than re-stated each tick, so a
+            // hero nudged by unit separation mid-pause does not spray MoveTo
+            // commands into the trace.
+            enqueue_set_behavior(game, slot, static_cast<int32_t>(ActivityId::Think),
+                                 think.duration_millis);
+            enqueue_move_to(game, slot, view.pos);
+        }
+        return;  // mid-pause: no decision to make, nothing to log
+    }
+
     // Decisions go out as commands like every other mutation (logged +
     // replayable), never as direct writes. Edge-triggered: re-stating an
     // unchanged goal is not a decision and must not enter the trace.
+    // Committing here also clears any pause (the hero was thinking, so the
+    // behaviour differs and the command fires).
     enqueue_set_behavior(game, slot, static_cast<int32_t>(r.id));
     enqueue_move_to(game, slot, r.target);
     if (r.follow_up.has_value() &&

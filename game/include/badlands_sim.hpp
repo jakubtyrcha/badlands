@@ -203,6 +203,15 @@ struct HeroFactors {
     float boredom_tavern = 0.5f;   // bored enough to seek the tavern
     float roam_radius = 6.0f;      // world units around the roam anchor
     float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
+    // How far a hero notices hostiles. Feeds WorldView's threat list, which
+    // gates deliberation (you do not stand and think with a rat closing in).
+    float threat_radius = 14.0f;
+    // Deliberation pause between discretionary goal changes, drawn uniformly
+    // from this range. The prototype day is 120 s, so an in-game minute is
+    // ~83 ms of sim time and the default range is roughly 0-10 in-game minutes.
+    // Setting think_max_millis to 0 disables deliberation entirely.
+    int64_t think_min_millis = 0;
+    int64_t think_max_millis = 833;
     // Per-class preference table (see ActivityWeights). Filled with the
     // compiled defaults by SimFactors' constructor; factors.json may override
     // any single entry. This is the primary dial for class personality.

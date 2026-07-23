@@ -255,6 +255,8 @@ add_library(badlands_game_lib STATIC
     game/src/activity_catalog.cpp
     game/src/behaviours/blocks.cpp
     game/src/behaviours/selectors.cpp
+    game/src/behaviours/perception.cpp
+    game/src/behaviours/deliberation.cpp
     game/src/critter_brain.cpp
     game/src/townfolk_brain.cpp
     game/src/monster_brain.cpp
@@ -547,6 +549,7 @@ add_executable(badlands_game_tests
     game/tests/archetype_tests.cpp
     game/tests/behaviours_tests.cpp
     game/tests/activity_selector_tests.cpp
+    game/tests/deliberation_tests.cpp
     game/tests/critter_tests.cpp
     game/tests/townfolk_tests.cpp
     game/tests/rat_tests.cpp
