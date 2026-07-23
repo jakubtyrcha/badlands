@@ -1,5 +1,10 @@
 # Noiser feedback from the badlands integration
 
+**Status (2026-07-24):** the shipping hero brain is now Nim→WASM (see
+`docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md`). The noiser brain path
+described below is dormant but still compiled, and its tests/bug-pins remain valid. This
+file stays as the upstream-facing noiser integration log.
+
 Collected while embedding noiser (submodule @ `52174b2c9e517d9daa2ad6f11fb4e264fd5fec0d`,
 last re-verified 2026-07-22) as the
 game-AI scripting layer: C++ host (`sampo::noiser` wrapper) driving per-entity

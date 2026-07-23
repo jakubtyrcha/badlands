@@ -1,8 +1,10 @@
 # Badlands
 
 A Majesty-style town-and-heroes prototype: a Rust renderer (winit + wgpu) driving a
-C++/EnTT simulation behind a data-only C API, with per-entity AI "brains" written in
-the [noiser](third_party/noiser) scripting language.
+C++/EnTT simulation behind a data-only C API, with per-entity AI "brains". The hero
+brain runs as Nim compiled to WASM (hosted via wasmtime); the
+[noiser](third_party/noiser) scripting language still drives mapgen/texgen and
+remains available as a dormant brain backend.
 
 ## Getting started
 
@@ -41,6 +43,8 @@ cargo test                                         # Rust unit tests
 cargo test --test cpp_tests                         # build + run the C++ Catch2 suite
 ```
 
-The C++ suite runs the hero brain (`scripts/brains/hero.noiser`) and the duel's
-combat brain (`scripts/brains/combat_test.noiser`); see `docs/noiser-brain-interop.md`
-for the brain framework and `docs/noiser-bugs-upstream/` for filed language bugs.
+The C++ suite covers the hero brain (`scripts/brains/nim/hero.nim`, built to
+`assets/brains/hero.wasm`) and the duel's combat brain (`scripts/brains/combat_test.noiser`,
+still noiser); see `docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md` for the
+wasm brain contract, `docs/noiser-brain-interop.md` for the (dormant) noiser brain framework,
+and `docs/noiser-bugs-upstream/` for filed language bugs.

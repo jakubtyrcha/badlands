@@ -22,6 +22,7 @@ Don't assume. Don't hide confusion. Surface tradeoffs. Before implementing:
 ## Repository state
 badlands runs on **C++/Dawn/SDL3**, with the engine ported from the sibling project `sampo` (`/Users/jakub/repos/sampo`) and Rust feature-libs linked via Corrosion. The migration off the old Rust/winit/wgpu app is **largely complete** and all work lives on `main`; built with CMake.
 - **Not yet ported:** terrain & biomes. `badlands_game` still renders a static demo town; `badlands_ai_sandbox` is the live view of the sim (ticking world, blockout capsules, inspector panel).
+- **Hero brain is Nim→WASM**, run in a wasmtime host (`src/crates/brainhost`) behind the wire contract `game/src/brain_abi.h`; sources in `scripts/brains/nim/`, built to LFS-committed `.wasm` under `assets/brains/`. The noiser brain path stays compiled and dormant behind `BrainDesc` (mapgen/texgen still use noiser).
 - **Game systems are event-sourced** (`game/src/command.h`): every mutation — player action and AI decision alike — is a `Command` applied at one point and appended to `command_log`. `state = f(initial config, command log, N ticks)`, enforced by `game/tests/determinism_tests.cpp` (run-twice + replay-the-log). New mechanic = new `CommandKind` + handler; never a direct registry write from a brain.
 - Design/plan notes live under `docs/` (`docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/brainshitting/`).
 
@@ -51,6 +52,7 @@ cargo test --manifest-path src/crates/ui/Cargo.toml     --lib
 #   single test: append its name, e.g. ... --lib write_png_roundtrip
 ```
 - Prereqs: `git-lfs` + initialized submodules (`noiser`, `catch2`, `entt`, `glm`, `spdlog`). See README for clone/LFS setup.
+- `scripts/build_brains.sh` rebuilds the committed brain `.wasm` artifacts (needs Nim + a pinned wasi-sdk, auto-fetched); the artifacts are LFS-committed, so normal builds don't need the toolchain.
 - Dawn is pinned (SHA in `cmake/FetchDawn.cmake`). Do not bump it without approval.
 - C++ tests are Catch2 targets (`badlands_game_tests`, `badlands_geometry_tests`): run `ctest --test-dir build`, or the binaries directly.
 
