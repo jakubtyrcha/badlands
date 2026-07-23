@@ -12,6 +12,7 @@
 #include "heroes.h"
 #include "movement.h"
 #include "placement.h"
+#include "vision.h"
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -169,6 +170,10 @@ void tick_world(BadlandsGame& g, float dt) {
         registry.destroy(e);
     }
 
+    // Fog-of-war: resolve next visibility from the post-movement world state and
+    // publish it (double-buffered). No-op until ConfigureVision.
+    resolve_vision(g);
+
     ++g.ticks;
 }
 
@@ -226,6 +231,8 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
         const auto& pos = g.registry.get<Position>(e);
         const auto& health = g.registry.get<Health>(e);
         const auto& shape = g.registry.get<RenderShape>(e);
+        const Facing* facing_c = g.registry.try_get<Facing>(e);
+        const glm::vec2 facing = facing_c ? facing_c->dir : kCharacterForward;
         rows.push_back(CharacterState{
             .id = slot,
             .team = g.registry.get<Team>(e).id,
@@ -244,6 +251,8 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
             .inside_building_id = g.registry.all_of<InsideBuilding>(e)
                                       ? g.registry.get<InsideBuilding>(e).building_id
                                       : -1,
+            .facing_x = facing.x,
+            .facing_z = facing.y,
         });
     }
     return rows;
@@ -277,6 +286,8 @@ CharacterDesc MercenaryDesc(float pos_x, float pos_z) {
         .color_r = 0.35f,
         .color_g = 0.45f,
         .color_b = 0.80f,
+        .vision_radius = 14.0f,
+        .vision_cone_half_angle_deg = 60.0f,
     };
 }
 
@@ -327,6 +338,17 @@ void Sim::SetPathfinder(const Pathfinder& pf) {
             notify_obstacle_added(game, id);
         }
     }
+}
+
+void Sim::ConfigureVision(float world_min_x, float world_min_z, float world_size_x,
+                          float world_size_z, float texel_m) {
+    configure_vision(world_->vision, world_min_x, world_min_z, world_size_x, world_size_z,
+                     texel_m);
+}
+void Sim::ResolveVision() { resolve_vision(*world_); }
+VisionField Sim::GetVisionField() const { return vision_field_of(world_->vision); }
+VisionLevel Sim::QueryVision(float cx, float cz, float radius) const {
+    return query_vision(world_->vision, cx, cz, radius);
 }
 
 std::vector<CharacterState> Sim::Characters() const { return characters_of(*world_); }

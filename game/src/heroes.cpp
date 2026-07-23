@@ -9,6 +9,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -58,6 +59,9 @@ CharacterDesc hero_desc(int32_t hero_class, float x, float z) {
     d.color_r = c.x;
     d.color_g = c.y;
     d.color_b = c.z;
+    // Fog-of-war: heroes reveal a forward cone as they patrol.
+    d.vision_radius = 14.0f;
+    d.vision_cone_half_angle_deg = 60.0f;
     return d;
 }
 
@@ -76,6 +80,20 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     reg.emplace<RenderShape>(e, glm::vec3{desc.size_x, desc.size_y, desc.size_z},
                              glm::vec3{desc.color_r, desc.color_g, desc.color_b});
     reg.emplace<Intent>(e, 0, glm::vec2{0.0f, 0.0f});
+
+    // Fog-of-war facing + vision. Facing seeds from the desc (or the model
+    // forward default when unset); the cone half-cosine is cos(half-angle),
+    // clamped so a >=180deg half-angle is a full circle (-1).
+    glm::vec2 facing0{desc.facing_x, desc.facing_z};
+    if (glm::dot(facing0, facing0) < 1e-12f) {
+        facing0 = kCharacterForward;
+    }
+    reg.emplace<Facing>(e, glm::normalize(facing0));
+    const float half_cos =
+        (desc.vision_cone_half_angle_deg >= 180.0f)
+            ? -1.0f
+            : std::cos(glm::radians(desc.vision_cone_half_angle_deg));
+    reg.emplace<Vision>(e, desc.vision_radius, half_cos);
 
     float radius = 0.5f * std::min(desc.size_x, desc.size_z);
     reg.emplace<Agent>(e, radius);
