@@ -84,24 +84,33 @@ void upsert_char(EntityMemory& mem, uint32_t slot, int32_t archetype, int32_t te
 // oldest-seen entry to the newcomer (ties -> largest id). Buildings never
 // TTL-expire, so this is the only way a building entry is ever removed.
 //
-// `is_home` is IDENTITY, not a live re-derived status: the caller's
-// `is_home` is only ever the HeroSimulationState-based derivation (see
-// update_entity_memory), which is silently false for every other archetype
-// (a tax collector's home is TaxCollectorState::home_building_id, which this
-// pass never reads). seed_home_town_memory, by contrast, seeds true for ANY
-// archetype's home. Without the OR below, a non-hero re-observing its own
-// (seeded-true) home would flip it back to false the instant it has vision
-// of it -- so a once-true is_home is sticky: OR the caller's derivation onto
-// whatever is already recorded, never overwrite it down to false.
+// `is_home` has TWO different update rules, chosen by `authoritative`
+// (whether the OBSERVER carries HeroSimulationState -- see
+// update_entity_memory's call site):
+//  - Hero observers (authoritative=true): HeroSimulationState::
+//    home_building_id is a LIVE, correctable signal -- raze_building's
+//    resident-reassignment loop (heroes.cpp) rehomes a hero whose guild was
+//    destroyed, and a razed building stays in placement.buildings
+//    (alive=false) and can still be re-observed. So `is_home` is
+//    OVERWRITTEN with the fresh derivation every sighting, exactly like
+//    every other field here: a hero re-observing the ruins of its OLD home
+//    must see that entry's is_home flip to false once it's no longer home.
+//  - Non-hero observers (authoritative=false: tax collectors etc.): this
+//    pass has no live per-tick home signal for them at all (it only ever
+//    derives `is_home` from HeroSimulationState) -- their only source of
+//    truth is seed_home_town_memory's spawn-time seeding, a ONE-SHOT
+//    identity fact ("this is where I started"), not something re-derivable
+//    here. So their `is_home` is OR'd onto whatever is already recorded,
+//    never overwritten back down to false.
 void upsert_building(EntityMemory& mem, uint32_t id, int32_t kind, glm::vec2 door, bool alive,
-                     bool is_home, int64_t now) {
+                     bool is_home, bool authoritative, int64_t now) {
     for (int32_t i = 0; i < mem.building_count; ++i) {
         if (mem.buildings[i].id == id) {
             MemoryBuilding& b = mem.buildings[i];
             b.kind = kind;
             b.door = door;
             b.alive = alive;
-            b.is_home = b.is_home || is_home;
+            b.is_home = authoritative ? is_home : (b.is_home || is_home);
             b.last_seen_millis = now;
             return;
         }
@@ -205,7 +214,11 @@ void update_entity_memory(BadlandsGame& game) {
         // Buildings: never TTL-expire, so this is purely an upsert pass,
         // gated by the same "sees nothing" radius check as characters above.
         if (radius > 0.0f) {
+            // Only a hero's home signal (HeroSimulationState::home_building_id)
+            // is live/correctable -- see upsert_building's doc comment for why
+            // that gates OVERWRITE vs OR below.
             const auto* home = reg.try_get<HeroSimulationState>(obs);
+            const bool authoritative_home = home != nullptr;
             const int32_t home_id = home != nullptr ? home->home_building_id : -1;
             for (uint32_t bid = 0; bid < buildings.size(); ++bid) {
                 const PlacedBuilding& b = buildings[bid];
@@ -217,7 +230,7 @@ void update_entity_memory(BadlandsGame& game) {
                     continue;  // no approach tile this tick: skip the record
                 }
                 const bool is_home = home_id >= 0 && static_cast<uint32_t>(home_id) == bid;
-                upsert_building(*mem, bid, b.kind, door, b.alive, is_home, now);
+                upsert_building(*mem, bid, b.kind, door, b.alive, is_home, authoritative_home, now);
             }
         }
     }

@@ -341,6 +341,58 @@ TEST_CASE("is_home is sticky: a non-hero's home never flips false when re-observ
     CHECK(rec->is_home);
 }
 
+TEST_CASE("is_home is LIVE for heroes: rehoming flips the old home false, the new home true") {
+    auto owned = make_world(nullptr);
+    BadlandsGame* g = owned.get();
+    uint32_t a = place_at(g, BuildingKind::FreeCompanyQuarters, -30.0f, 30.0f);
+    uint32_t b = place_at(g, BuildingKind::FreeCompanyQuarters, 30.0f, 30.0f);
+    REQUIRE(a != UINT32_MAX);
+    REQUIRE(b != UINT32_MAX);
+
+    uint32_t hid = recruit_at(g, a);
+    REQUIRE(hid != UINT32_MAX);
+    entt::entity e = g->slots[hid];
+
+    // Seeding already marked A as home, and B (alive at spawn time) as a
+    // known-but-not-home building.
+    {
+        const EntityMemory& mem = g->registry.get<EntityMemory>(e);
+        const MemoryBuilding* home = find_building(mem, a);
+        REQUIRE(home != nullptr);
+        REQUIRE(home->is_home);
+        const MemoryBuilding* other = find_building(mem, b);
+        REQUIRE(other != nullptr);
+        REQUIRE_FALSE(other->is_home);
+    }
+
+    // A generous vision radius (direct registry write, a test) so the hero
+    // unambiguously re-observes both A's ruins and B next tick, regardless
+    // of the exact placement geometry.
+    g->registry.get<Vision>(e).radius = 500.0f;
+
+    // Raze A: heroes.cpp's raze_building reassigns residents to the
+    // lowest-id alive same-class guild with room -- B here -- exactly the
+    // reachable path the review flagged (a hero's home is a LIVE signal,
+    // unlike a seeded non-hero's).
+    REQUIRE(destroy_at(g, a) == 0);
+    REQUIRE(g->registry.get<HeroSimulationState>(e).home_building_id ==
+            static_cast<int32_t>(b));
+
+    // Tick so the hero's memory re-observes both the ruins of A and B.
+    tick_world(*g, 1.0f / 30.0f);
+
+    const EntityMemory& mem = g->registry.get<EntityMemory>(e);
+    const MemoryBuilding* old_home = find_building(mem, a);
+    REQUIRE(old_home != nullptr);
+    CHECK_FALSE(old_home->is_home);  // no longer home: the live derivation flipped it
+    CHECK_FALSE(old_home->alive);    // razed
+
+    const MemoryBuilding* new_home = find_building(mem, b);
+    REQUIRE(new_home != nullptr);
+    CHECK(new_home->is_home);
+    CHECK(new_home->alive);
+}
+
 TEST_CASE("a homeless spawn starts with an empty EntityMemory") {
     auto g = make_world(nullptr);
     uint32_t goblin = spawn_into(*g, GoblinDesc(10.0f, 10.0f));
