@@ -12,6 +12,7 @@
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/texture_readback.hpp"
+#include "engine/ui/ui_renderer.hpp"
 
 namespace badlands {
 
@@ -82,8 +83,39 @@ bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
 
   view.SeekToTimeOfDay(time_of_day);  // deterministic time-of-day for the capture
   view.Update(0.0f, SDL_GetKeyboardState(nullptr));
+
+  // Game UI is part of the game's image, so captures include it. (Dear ImGui
+  // debug UI is NOT: this path never initializes ImGui.) Prepare before any
+  // pass is open, and against the OFFSCREEN format -- RGBA8Unorm here vs the
+  // window's BGRA8Unorm, so this builds its own pipeline variant.
+  UiRenderer* ui = view.GetUiRenderer();
+  if (ui) ui->Prepare(width, height, wgpu::TextureFormat::RGBA8Unorm);
+
   renderer.Render(view.GetCamera(), view.GetRegistry(), view.GetSceneContext(),
                   offscreen_view);
+
+  // Overlay pass: mirrors the app's, loading the tonemapped result the renderer
+  // just wrote and adding the UI on top with no depth attachment.
+  if (ui) {
+    wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+
+    wgpu::RenderPassColorAttachment color_attachment;
+    color_attachment.view = offscreen_view;
+    color_attachment.loadOp = wgpu::LoadOp::Load;
+    color_attachment.storeOp = wgpu::StoreOp::Store;
+    color_attachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &color_attachment;
+    desc.depthStencilAttachment = nullptr;
+
+    wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&desc);
+    ui->Draw(pass);
+    pass.End();
+    wgpu::CommandBuffer commands = encoder.Finish();
+    queue.Submit(1, &commands);
+  }
 
   return WriteTextureToPng(gpu.GetInstance(), device, queue, offscreen_texture,
                            width, height, path);

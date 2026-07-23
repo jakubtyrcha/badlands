@@ -14,16 +14,11 @@ struct BadlandsGame;
 
 namespace badlands {
 
-// Guild classes. Decorative in v0.3 (name/color only); one baseline brain.
-enum HeroClassId : int32_t {
-    HERO_MERCENARY = 0,
-    HERO_HUNTER,
-    HERO_GRAVE_ROBBER,
-    HERO_APPRENTICE,
-    HERO_CLASS_COUNT
-};
+// HeroClassId (HERO_MERCENARY ...) is declared in badlands_sim.hpp -- it is the
+// public "class type id" the recruit UI reads off BuildingDef::recruits.
 
-// Guild kind -> class, or -1 for a non-guild building.
+// Guild kind -> class, or -1 for a non-guild building. Derived from the kind's
+// BuildingDef::recruits (the recruit-set table is the single source of truth).
 int32_t guild_hero_class(int kind);
 
 // Shared baseline hero descriptor; color is the only class-distinguishing field.

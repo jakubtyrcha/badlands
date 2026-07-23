@@ -20,23 +20,27 @@ constexpr int32_t kHouse = static_cast<int32_t>(BuildingKind::House);
 constexpr int32_t kSewer = static_cast<int32_t>(BuildingKind::Sewer);
 constexpr int32_t kKindCount = static_cast<int32_t>(BuildingKind::Count);
 
-// Footprint sizes + flags, indexed by BuildingKind.
-// { width, depth, poppable, user_destructible, enemy_targettable, vision_radius }.
+// Footprint sizes + flags + vision + recruit set, indexed by BuildingKind.
+// { width, depth, poppable, user_destructible, enemy_targettable,
+//   vision_radius, recruit_count, {recruits...} }.
 // user_destructible: the 7 player-buildable kinds (guilds + Tavern/Apothecary/
 // Watchtower). enemy_targettable is decoupled (Castle + House); unused in v0.3.
 // vision_radius (world units, from the footprint edge) drives fog-of-war: the
 // Watchtower sees farthest, the Sewer nothing.
+// recruits: this table is the single source of truth for which hero class(es) a
+// building recruits (usually 1; the array has room for 2-3). guild_hero_class()
+// derives from it. Only the four guilds recruit today.
 constexpr BuildingDef kDefs[kKindCount] = {
-    {4, 4, false, false, true, 20.0f},   // Castle
-    {3, 3, false, true, false, 12.0f},   // Free Company Quarters
-    {3, 3, false, true, false, 14.0f},   // Hunter's Camp
-    {3, 3, false, true, false, 10.0f},   // Thieves' Den
-    {3, 3, false, true, false, 10.0f},   // Scriptorium
-    {2, 1, false, true, false, 8.0f},    // Tavern
-    {2, 1, false, true, false, 8.0f},    // Apothecary
-    {1, 1, false, true, false, 40.0f},   // Watchtower
-    {2, 1, true, false, true, 6.0f},     // House (poppable)
-    {1, 1, true, false, false, 0.0f},    // Sewer (poppable)
+    {4, 4, false, false, true, 20.0f, 0, {}},                    // Castle
+    {3, 3, false, true, false, 12.0f, 1, {HERO_MERCENARY}},      // Free Company Quarters
+    {3, 3, false, true, false, 14.0f, 1, {HERO_HUNTER}},         // Hunter's Camp
+    {3, 3, false, true, false, 10.0f, 1, {HERO_GRAVE_ROBBER}},   // Thieves' Den
+    {3, 3, false, true, false, 10.0f, 1, {HERO_APPRENTICE}},     // Scriptorium
+    {2, 1, false, true, false, 8.0f, 0, {}},                     // Tavern
+    {2, 1, false, true, false, 8.0f, 0, {}},                     // Apothecary
+    {1, 1, false, true, false, 40.0f, 0, {}},                    // Watchtower
+    {2, 1, true, false, true, 6.0f, 0, {}},                      // House (poppable)
+    {1, 1, true, false, false, 0.0f, 0, {}},                     // Sewer (poppable)
 };
 
 // Urban-sprawl contribution in quarter-units. Watchtower is a small structure
