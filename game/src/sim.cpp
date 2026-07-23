@@ -14,6 +14,7 @@
 #include "movement.h"
 #include "needs.h"
 #include "placement.h"
+#include "vision.h"
 
 #include "critter_brain.h"
 #include "economy.h"
@@ -253,6 +254,10 @@ void tick_world(BadlandsGame& g, float dt) {
         registry.destroy(e);
     }
 
+    // Fog-of-war: resolve next visibility from the post-movement world state and
+    // publish it (double-buffered). No-op until ConfigureVision.
+    resolve_vision(g);
+
     ++g.ticks;
 }
 
@@ -336,6 +341,8 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
                 goal = g.placement.buildings[mt->building].center;
             }
         }
+        const Facing* facing_c = g.registry.try_get<Facing>(e);
+        const glm::vec2 facing = facing_c ? facing_c->dir : kCharacterForward;
         rows.push_back(CharacterState{
             .id = slot,
             .team = g.registry.get<Team>(e).id,
@@ -364,10 +371,12 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
                 path ? static_cast<int32_t>(path->waypoints.size() -
                                             std::min<size_t>(path->cursor, path->waypoints.size()))
                      : 0,
-                        .archetype = static_cast<int32_t>(
+            .archetype = static_cast<int32_t>(
                 sim ? Archetype::Hero
                     : (crit ? Archetype::Critter
                             : (tax ? Archetype::Townfolk : Archetype::Monster))),
+            .facing_x = facing.x,
+            .facing_z = facing.y,
         });
         const char* nm = disp ? disp->name.c_str() : "";
         std::size_t n = std::min(std::strlen(nm), sizeof(rows.back().name) - 1);
@@ -428,6 +437,8 @@ CharacterDesc MercenaryDesc(float pos_x, float pos_z) {
         .color_r = 0.35f,
         .color_g = 0.45f,
         .color_b = 0.80f,
+        .vision_radius = 14.0f,
+        .vision_cone_half_angle_deg = 60.0f,
     };
 }
 
@@ -479,6 +490,17 @@ void Sim::SetPathfinder(const Pathfinder& pf) {
             notify_obstacle_added(game, id);
         }
     }
+}
+
+void Sim::ConfigureVision(float world_min_x, float world_min_z, float world_size_x,
+                          float world_size_z, float texel_m) {
+    configure_vision(world_->vision, world_min_x, world_min_z, world_size_x, world_size_z,
+                     texel_m);
+}
+void Sim::ResolveVision() { resolve_vision(*world_); }
+VisionField Sim::GetVisionField() const { return vision_field_of(world_->vision); }
+VisionLevel Sim::QueryVision(float cx, float cz, float radius) const {
+    return query_vision(world_->vision, cx, cz, radius);
 }
 
 std::vector<CharacterState> Sim::Characters() const { return characters_of(*world_); }

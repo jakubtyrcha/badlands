@@ -51,9 +51,16 @@ float yaw_from_rotation_index(int32_t rotation_index) {
 // force an immediate re-bake.
 constexpr double kRebakeIntervalSeconds = 1.0 / 20.0;  // ~20 Hz sky/IBL refresh
 
-// Real seconds for one in-game day (overrides SimClock's 5-minute default).
-// Short for now so the whole cycle is quick to see.
-constexpr float kRealSecondsPerDay = 16.0f;
+// Day/night cadence: a full 24 in-game-hour cycle takes this many real-world
+// MINUTES at 1x sim speed. This is the single knob for how fast the sun moves.
+//
+// The day/night calendar and the physics sim run on independent rates off the
+// same clock (SimClock::sim_seconds): the calendar divides by
+// real_seconds_per_day (fast -- 24 h in 3 min), while physics divides by
+// kTickDt so it stays 1 in-game second == 1 real second at 1x (kSimHz ticks per
+// sim-second). Both scale together with sim speed.
+constexpr float kRealMinutesPerGameDay = 3.0f;
+constexpr float kRealSecondsPerDay = kRealMinutesPerGameDay * 60.0f;  // 180 s
 
 // Dynamic sky/IBL source-cube face resolution. 64 keeps the (throttled, now
 // multithreaded) HW bake cheap; the HW sky is smooth so 64 reads fine as the
@@ -71,9 +78,16 @@ constexpr const char* kBiomeManifestPath =
 // lattice density (one X-split quad per cell), so there is no subdiv knob.
 constexpr int kChunkCells = 16;
 
-// The demo buildings (sim-placed around the origin) are shifted onto the
-// southern plains band of the origin-centered symbolic map so they sit on land
-// rather than in the central lake. ~one tile south of center.
+// Sim and render coordinates are IDENTICAL: SeedTown places the town on the
+// real plains and BuildScene/SyncUnits render everything at its true sim
+// position (the old +z demo-building shift is gone). So the fog-of-war overlay's
+// sim->render offset is zero.
+
+// Fog-of-war vision grid (SIM frame). Covers the colony's ~96 m playable grid
+// (kGridHalfExtentTiles = 48) plus margin for long building vision, at ~1 m per
+// texel. Terrain outside this maps to terra-incognita (rendered black).
+constexpr float kVisionHalfExtentM = 64.0f;
+constexpr float kVisionTexelM = 1.0f;
 
 // Flat water surface mesh from the map's block-aligned lake triangles. Same
 // kTexturedMesh layout GenerateLakeSurfaceMesh emits (pos/uv/normal/tangent,
@@ -152,6 +166,23 @@ bool GameView::Initialize(const RenderContext& ctx) {
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
   if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
+
+  // Fog-of-war overlay. Configure the SIM-frame vision grid, register the pass
+  // on scene_context_ (picked up by any renderer, incl. the headless
+  // --screenshot one), and resolve once now (ResolveVision publishes without
+  // advancing the sim) so the first frame has a populated field. sim == render,
+  // so the sim->render offset is zero.
+  if (!vision_pass_.Initialize(device_, queue_, ctx.pipeline_gen)) {
+    spdlog::error("GameView::Initialize: vision overlay pass init failed");
+    return false;
+  }
+  vision_pass_.SetSimToWorldOffset(glm::vec2(0.0f, 0.0f));
+  sim_.ConfigureVision(-kVisionHalfExtentM, -kVisionHalfExtentM,
+                       2.0f * kVisionHalfExtentM, 2.0f * kVisionHalfExtentM,
+                       kVisionTexelM);
+  sim_.ResolveVision();
+  vision_pass_.Upload(sim_.GetVisionField());
+  scene_context_.post_pass = &vision_pass_;
 
   // Frame the living town on the southern plains (where SeedTown placed it), not
   // the empty origin lake -- close enough that the units read as characters.
@@ -423,6 +454,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // the clock's tick target. Bounded (real dt is clamped in Advance); the
   // budget is pure spiral-of-death safety. Ticks scale with sim speed because
   // the target is derived from sim time.
+  bool ticked_this_frame = false;
   {
     PROFILE_SCOPE("game_ticks");
     const unsigned long long tick_target = sim_clock_.TickTarget();
@@ -430,7 +462,16 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     while (sim_ticks_done_ < tick_target && budget-- > 0) {
       sim_.Tick(static_cast<float>(kTickDt));
       ++sim_ticks_done_;
+      ticked_this_frame = true;
     }
+  }
+
+  // Fog-of-war: re-upload the visibility field to the overlay texture only when
+  // a sim tick actually ran this frame (the field is unchanged otherwise, and
+  // render runs faster than the fixed sim tick). The initial field is uploaded
+  // in Initialize.
+  if (ticked_this_frame) {
+    vision_pass_.Upload(sim_.GetVisionField());
   }
 
   // Day/night rendering, driven by the clock's time-of-day. The sky re-bake is
@@ -488,6 +529,12 @@ void GameView::DrawUI() {
   // --- Directional light (daylight) ---
   if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
     if (EditorUI::DrawDaylightEditor(daylight_cfg_)) force_rebake_ = true;
+  }
+
+  // --- Fog-of-war (vision overlay) ---
+  if (ImGui::CollapsingHeader("Fog of War", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Checkbox("Enabled##fow", &vision_pass_.mutable_enabled());
+    ImGui::TextUnformatted("black = terra-incognita, gray = dormant");
   }
 
   // --- Fog (self-contained collapsing section) ---

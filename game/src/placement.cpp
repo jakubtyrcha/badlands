@@ -21,20 +21,22 @@ constexpr int32_t kSewer = static_cast<int32_t>(BuildingKind::Sewer);
 constexpr int32_t kKindCount = static_cast<int32_t>(BuildingKind::Count);
 
 // Footprint sizes + flags, indexed by BuildingKind.
-// { width, depth, poppable, user_destructible, enemy_targettable }.
+// { width, depth, poppable, user_destructible, enemy_targettable, vision_radius }.
 // user_destructible: the 7 player-buildable kinds (guilds + Tavern/Apothecary/
 // Watchtower). enemy_targettable is decoupled (Castle + House); unused in v0.3.
+// vision_radius (world units, from the footprint edge) drives fog-of-war: the
+// Watchtower sees farthest, the Sewer nothing.
 constexpr BuildingDef kDefs[kKindCount] = {
-    {4, 4, false, false, true},   // Castle
-    {3, 3, false, true, false},   // Free Company Quarters
-    {3, 3, false, true, false},   // Hunter's Camp
-    {3, 3, false, true, false},   // Thieves' Den
-    {3, 3, false, true, false},   // Scriptorium
-    {2, 1, false, true, false},   // Tavern
-    {2, 1, false, true, false},   // Apothecary
-    {1, 1, false, true, false},   // Watchtower
-    {2, 1, true, false, true},    // House (poppable)
-    {1, 1, true, false, false},   // Sewer (poppable)
+    {4, 4, false, false, true, 20.0f},   // Castle
+    {3, 3, false, true, false, 12.0f},   // Free Company Quarters
+    {3, 3, false, true, false, 14.0f},   // Hunter's Camp
+    {3, 3, false, true, false, 10.0f},   // Thieves' Den
+    {3, 3, false, true, false, 10.0f},   // Scriptorium
+    {2, 1, false, true, false, 8.0f},    // Tavern
+    {2, 1, false, true, false, 8.0f},    // Apothecary
+    {1, 1, false, true, false, 40.0f},   // Watchtower
+    {2, 1, true, false, true, 6.0f},     // House (poppable)
+    {1, 1, true, false, false, 0.0f},    // Sewer (poppable)
 };
 
 // Urban-sprawl contribution in quarter-units. Watchtower is a small structure

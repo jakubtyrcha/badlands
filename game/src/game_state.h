@@ -6,6 +6,7 @@
 #include "command.h"
 #include "components.h"
 #include "placement.h"
+#include "vision.h"
 
 #include "game/map/map_data.hpp"
 
@@ -30,6 +31,10 @@ struct BadlandsGame {
     // World state (the sim owns gold and the building/placement grid).
     badlands::PlacementState placement;
     uint32_t gold = 1000;
+
+    // Fog-of-war visibility field (double-buffered; resolved each tick from the
+    // player's vision sources). Unconfigured until Sim::ConfigureVision.
+    badlands::VisionGrid vision;
 
     // Pluggable path-geometry provider (Rust nav service); zero-initialized
     // means "no provider" -> straight-line fallback in the movement pipeline.

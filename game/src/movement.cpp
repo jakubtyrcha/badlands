@@ -191,6 +191,10 @@ void follow_paths(BadlandsGame& game, float dt) {
         float len = glm::length(d);
         if (len > 0.0f) {
             pos.pos += d / len * std::min(len, speed * dt);
+            // Fog-of-war: face the direction of travel (idle keeps last facing).
+            if (Facing* f = game.registry.try_get<Facing>(e)) {
+                f->dir = d / len;
+            }
         }
     }
 }

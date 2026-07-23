@@ -240,6 +240,7 @@ add_library(badlands_game_lib STATIC
     game/src/townfolk_brain.cpp
     game/src/monster_brain.cpp
     game/src/economy.cpp
+    game/src/vision.cpp
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
     third_party/noiser/noiser-vm/src/noiser_crash.cpp
@@ -305,6 +306,7 @@ set(badlands_app_sources_game
     # symbolic-map building/biome plumbing, now that the game renders the
     # symbolic map's terrain/water/buildings through the composer.
     src/game/visual/scene_composer.cpp
+    src/game/visual/vision_overlay_pass.cpp
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
@@ -523,6 +525,7 @@ add_executable(badlands_game_tests
     game/tests/townfolk_tests.cpp
     game/tests/rat_tests.cpp
     game/tests/hunter_tests.cpp
+    game/tests/vision_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
