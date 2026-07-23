@@ -1,8 +1,11 @@
 // Task 4 (wasm-brain feature): wiring the wasm brain runtime into the sim.
-// Uses the REAL committed assets/brains/hero.wasm (the all-Idle skeleton --
-// scripts/brains/nim/hero.nim); real decision-making lands in Task 5, so
-// every "wasm loaded" case here is really "wasm PLUMBING loaded", exercised
-// against a module that always decides Idle/no-goal/no-command/no-pause.
+// Most cases here load the REAL, shipping assets/brains/hero.wasm (Task 5's
+// ported decision layer, scripts/brains/nim/hero.nim) -- the twin-brain
+// parity test against the C++ reference lives in hero_brain_parity_tests.cpp;
+// this file is about the wasm PLUMBING (load/spawn/tick/reinstantiate/combat
+// pre-empt), not decision correctness. Cases that need a brain PINNED to
+// all-Idle (so a test can assert on that alone) load
+// game/tests/fixtures/idle_brain.wasm instead (scripts/brains/nim/idle_test.nim).
 //
 // apply_brain_decision (the shared decision-apply seam, town_brain.h) is
 // unit-tested directly against synthetic BrainDecisions, no wasm involved --
@@ -45,8 +48,17 @@ std::vector<uint8_t> read_wasm_file(const char* path) {
     return bytes;
 }
 
-// The shipping brain artifact (LFS binary; scripts/brains/nim/hero.nim).
+// The shipping brain artifact (LFS binary; scripts/brains/nim/hero.nim) --
+// the real, ported decision layer (Task 5).
 std::vector<uint8_t> read_hero_wasm() { return read_wasm_file("assets/brains/hero.wasm"); }
+
+// Test-only fixture (LFS binary; scripts/brains/nim/idle_test.nim -- same
+// export surface as hero.nim, but bl_tick always decides Idle/no-goal/
+// no-command/no-pause, unconditionally): built by scripts/build_brains.sh
+// alongside hero.wasm. What hero.wasm itself used to be before Task 5.
+std::vector<uint8_t> read_idle_wasm() {
+    return read_wasm_file("game/tests/fixtures/idle_brain.wasm");
+}
 
 // Test-only fixture (LFS binary; scripts/brains/nim/trap_test.nim -- same
 // export surface as hero.nim, but bl_tick unconditionally traps): built by
@@ -98,10 +110,10 @@ bool same_command(const Command& a, const Command& b) {
 
 }  // namespace
 
-// --- F.1: the skeleton wasm brain drives every hero, no bugs ---------------
+// --- F.1: the idle-fixture wasm brain drives every hero, no bugs -----------
 
-TEST_CASE("wasm: every hero stays Idle over 30 ticks with the all-Idle skeleton, no bugs") {
-    std::vector<uint8_t> bytes = read_hero_wasm();
+TEST_CASE("wasm: every hero stays Idle over 30 ticks with the idle fixture brain, no bugs") {
+    std::vector<uint8_t> bytes = read_idle_wasm();
     Sim sim(wasm_desc(bytes));
 
     std::vector<uint32_t> ids;
@@ -142,8 +154,8 @@ TEST_CASE("wasm: combat pre-empt still owns enemies") {
 
     // combat_preempt claims the mercenary's tick for as long as the goblin is
     // alive, so tick_wasm_brain is never reached for it during the duel --
-    // the skeleton module (which only ever produces Idle) never gets a
-    // chance to interfere with combat.
+    // whatever the loaded brain would otherwise decide (Idle or the real
+    // hero decision layer) never gets a chance to interfere with combat.
     CHECK(sim.GetStats().noiser_bugs == 0);
 }
 

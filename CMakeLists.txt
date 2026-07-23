@@ -590,9 +590,12 @@ add_executable(badlands_game_tests
     # sim needed.
     game/tests/brain_abi_tests.cpp
     # Task 4 (wasm-brain feature): the wasm hero brain wired into the sim --
-    # see game/src/wasm_brain.h. Loads the real committed
-    # assets/brains/hero.wasm (the all-Idle skeleton).
+    # see game/src/wasm_brain.h.
     game/tests/wasm_brain_tests.cpp
+    # Task 5: the ported hero decision layer (scripts/brains/nim/hero.nim) --
+    # twin-brain parity against the C++ reference (town_brain.cpp) + wasm-side
+    # behavioural smokes.
+    game/tests/hero_brain_parity_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.
