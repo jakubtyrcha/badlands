@@ -41,14 +41,40 @@ namespace badlands {
 
 namespace {
 
+// Combat pre-empt for the fighting archetypes: chase and swing at the nearest
+// enemy. Set a durable MoveTarget on it and swing when in range (the movement
+// pipeline walks the MoveTarget; the combat pass re-validates the attack
+// Intent authoritatively). Returns false (no MoveTarget touched) when there is
+// no enemy, so the caller falls through to that archetype's own brain --
+// shared by mock_think and the wasm hero-think dispatch below, so a
+// wasm-driven hero's combat behaviour is identical to a mock-driven one's.
+bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t /*slot*/) {
+    auto& reg = game.registry;
+    entt::entity target = nearest_enemy(game, self);
+    if (target == entt::null) {
+        return false;
+    }
+    const Stats& stats = reg.get<Stats>(self);
+    MoveTarget& mt = reg.get<MoveTarget>(self);
+    mt.kind = MoveTarget::Kind::Entity;
+    mt.entity = target;
+    mt.building = UINT32_MAX;
+    mt.stop_distance = stats.attack_range;
+
+    glm::vec2 self_pos = reg.get<Position>(self).pos;
+    glm::vec2 target_pos = reg.get<Position>(target).pos;
+    if (glm::distance(self_pos, target_pos) <= stats.attack_range &&
+        reg.get<CooldownTimer>(self).remaining <= 0.0f) {
+        reg.get<Intent>(self).kind = 2;  // swing (Intent was reset to idle this tick)
+    }
+    return true;
+}
+
 // Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain. Combat pre-empt: set a durable MoveTarget on the
-// nearest enemy and swing when in range (the movement pipeline walks the
-// MoveTarget; the combat pass re-validates the attack Intent authoritatively).
-// With no enemy, delegate to the C++ town brain (needs/day-night loop).
+// downgraded) script brain. With no enemy, delegate to the C++ town brain
+// (needs/day-night loop).
 void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
-    MoveTarget& mt = reg.get<MoveTarget>(self);
     const BrainKind kind = reg.get<Brain>(self).kind;
 
     // Critters and townfolk never fight -- their brains own their movement, so
@@ -64,39 +90,23 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
         return;
     }
 
-    // Combat pre-empt for the fighting archetypes: chase and swing at the
-    // nearest enemy. The movement pipeline walks the MoveTarget; the combat pass
-    // re-validates the attack Intent authoritatively.
-    entt::entity target = nearest_enemy(game, self);
-    if (target == entt::null) {
-        // No enemy: the archetype's own brain decides.
-        switch (kind) {
-            case BrainKind::Town:
-                town_think(game, slot);
-                break;
-            case BrainKind::Monster:
-                monster_think(game, slot);  // no unit enemy -> gnaw a building
-                break;
-            case BrainKind::None:
-                mt.kind = MoveTarget::Kind::None;
-                break;
-            case BrainKind::Critter:
-            case BrainKind::Townfolk:
-                break;  // handled above
-        }
+    if (combat_preempt(game, self, slot)) {
         return;
     }
-    const Stats& stats = reg.get<Stats>(self);
-    mt.kind = MoveTarget::Kind::Entity;
-    mt.entity = target;
-    mt.building = UINT32_MAX;
-    mt.stop_distance = stats.attack_range;
-
-    glm::vec2 self_pos = reg.get<Position>(self).pos;
-    glm::vec2 target_pos = reg.get<Position>(target).pos;
-    if (glm::distance(self_pos, target_pos) <= stats.attack_range &&
-        reg.get<CooldownTimer>(self).remaining <= 0.0f) {
-        reg.get<Intent>(self).kind = 2;  // swing (Intent was reset to idle this tick)
+    // No enemy: the archetype's own brain decides.
+    switch (kind) {
+        case BrainKind::Town:
+            town_think(game, slot);
+            break;
+        case BrainKind::Monster:
+            monster_think(game, slot);  // no unit enemy -> gnaw a building
+            break;
+        case BrainKind::None:
+            reg.get<MoveTarget>(self).kind = MoveTarget::Kind::None;
+            break;
+        case BrainKind::Critter:
+        case BrainKind::Townfolk:
+            break;  // handled above
     }
 }
 
