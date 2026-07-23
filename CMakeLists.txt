@@ -267,6 +267,9 @@ add_library(badlands_game_lib STATIC
     game/src/entity_memory.cpp
     game/src/needs.cpp
     game/src/town_brain.cpp
+    # Task 4 (wasm-brain feature): the wasm hero brain runtime (brainhost C
+    # ABI) -- see game/src/wasm_brain.h.
+    game/src/wasm_brain.cpp
     game/src/activity_catalog.cpp
     game/src/activity_histogram.cpp
     game/src/behaviours/blocks.cpp
@@ -310,6 +313,9 @@ target_include_directories(badlands_game_lib PUBLIC
     # For "core/roof_shape.hpp" + "game/material_id.hpp" etc (Task S2.C) —
     # header search path only, no engine/SDL/Dawn dependency added.
     ${CMAKE_SOURCE_DIR}/src
+    # brainhost's C ABI (game/src/wasm_brain.h) -- mirrors how nav's include
+    # dir is added to badlands_engine above.
+    ${CMAKE_SOURCE_DIR}/src/crates/brainhost/include
 )
 # Task S2.G: arena.cpp includes game/src/placement.h directly (kGridHalf/
 # in_bounds_tile grid reuse) -- PRIVATE since it's an implementation detail
@@ -317,7 +323,9 @@ target_include_directories(badlands_game_lib PUBLIC
 target_include_directories(badlands_game_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/game/src
 )
-target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
+# brainhost: wasmtime-backed brain wasm runtime (game/src/wasm_brain.cpp) --
+# mirrors how nav is linked into badlands_engine above.
+target_link_libraries(badlands_game_lib PUBLIC noiser_bundle brainhost)
 
 # Three thin executables, each with its own main, all linking badlands_engine
 # and badlands_game_lib. Stage 2 grows each one's own real AppView --

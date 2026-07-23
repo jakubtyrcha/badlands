@@ -16,6 +16,10 @@
 namespace badlands {
 
 std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source);
+// BrainDesc overload (see badlands_sim.hpp): the wasm-capable path. The
+// const char* overload above forwards here with BrainDesc{.noiser_source =
+// brain_script_source}, so there is a single implementation.
+std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc);
 
 // A world for tests about movement MECHANICS rather than about terrain:
 // identical to make_world(nullptr) but with terrain_blocking off, so a unit

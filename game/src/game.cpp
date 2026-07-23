@@ -6,6 +6,7 @@
 #include "brain.h"  // complete badlands::BrainRuntime for BadlandsGame's unique_ptr dtor
 #include "components.h"
 #include "game_state.h"
+#include "wasm_brain.h"  // complete badlands::WasmBrainRuntime, same reason as brain.h above
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>

@@ -24,6 +24,7 @@
 
 #include "game/map/symbolic_map_generator.hpp"
 #include "town_brain.h"
+#include "wasm_brain.h"
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -115,6 +116,10 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
 // ---- extracted shared operations over Badlands& ----------------------------
 
 std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
+    return make_world(BrainDesc{.noiser_source = brain_script_source});
+}
+
+std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
     // One-time noiser runtime configuration. The profiling switch is
     // thread-local and defaults to ON, and upstream has no public API for it
     // yet (docs/noiser-feedback.md #3) — this is the only detail:: callsite.
@@ -136,11 +141,18 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
                   "gameplay grid must span the full map");
     static const MapData kSymbolicMap = SymbolicMapGenerator{}.Generate();
     game->map = kSymbolicMap;
-    if (brain_script_source != nullptr) {
+    if (desc.noiser_source != nullptr) {
         std::string error;
-        game->brains = BrainRuntime::create(*game, brain_script_source, error);
+        game->brains = BrainRuntime::create(*game, desc.noiser_source, error);
         if (!game->brains) {
             report_bug(*game, "compile", error);
+        }
+    }
+    if (desc.wasm_bytes != nullptr) {
+        std::string error;
+        game->wasm_brains = WasmBrainRuntime::create(desc.wasm_bytes, desc.wasm_len, error);
+        if (!game->wasm_brains) {
+            report_bug(*game, "wasm_load", error);
         }
     }
     // The colony starts with only the castle, prebuilt on the plains south of
@@ -217,6 +229,16 @@ void tick_world(BadlandsGame& g, float dt) {
                 continue;  // hidden heroes don't think
             }
             auto& brain = registry.get<Brain>(e);
+            if (g.wasm_brains && brain.kind == BrainKind::Town) {
+                // The wasm hero brain owns the no-enemy tick outright: combat
+                // still pre-empts it (identical to the mock's own pre-empt),
+                // but mock_think/town_think are never reached for this entity
+                // while a wasm program is loaded -- see wasm_brain.h.
+                if (!combat_preempt(g, e, static_cast<uint32_t>(slot))) {
+                    tick_wasm_brain(g, static_cast<uint32_t>(slot));
+                }
+                continue;
+            }
             bool scripted = brain.state && !brain.state->downgraded && g.brains;
             if (scripted && !resume_brain(g, static_cast<uint32_t>(slot), *brain.state)) {
                 brain.state->downgraded = true;
@@ -514,6 +536,7 @@ CharacterDesc GoblinDesc(float pos_x, float pos_z) {
 // ---- Sim methods -----------------------------------------------------------
 
 Sim::Sim(const char* brain_script_source) : world_(make_world(brain_script_source)) {}
+Sim::Sim(const BrainDesc& brain_desc) : world_(make_world(brain_desc)) {}
 Sim::~Sim() = default;
 Sim::Sim(Sim&&) noexcept = default;
 Sim& Sim::operator=(Sim&&) noexcept = default;

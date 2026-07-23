@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -558,6 +559,21 @@ struct Pathfinder {
                          uint32_t exempt_building, float* out_xz, int32_t cap) = nullptr;
 };
 
+// Which brain(s) drive spawned entities. noiser_source: noiser script source
+// (see the old Sim(const char*) ctor -- kept working, forwarding here with
+// noiser_source set and wasm_bytes null). wasm_bytes/wasm_len: a compiled
+// brain wasm module (game/src/wasm_brain.h), hero-only -- see the think loop's
+// dispatch order in sim.cpp for how the two paths compose (wasm, when
+// loaded, takes the no-enemy tick for BrainKind::Town entities outright;
+// combat is a host pre-empt on both paths; noiser/mock still drive every
+// other archetype). Either field may be null/zero independently; both null
+// means mock brains only.
+struct BrainDesc {
+    const char* noiser_source = nullptr;
+    const uint8_t* wasm_bytes = nullptr;
+    size_t wasm_len = 0;
+};
+
 // ---- the sim ---------------------------------------------------------------
 class Sim {
    public:
@@ -565,6 +581,11 @@ class Sim {
     // nullptr for mock-brains-only. A script that fails to compile is recorded
     // as a noiser bug and the sim falls back to mock brains.
     explicit Sim(const char* brain_script_source = nullptr);
+    // BrainDesc overload: also (or instead) loads a brain wasm module. A
+    // module that fails to compile/instantiate is recorded as a bug (same
+    // counter as a noiser compile failure) and the sim falls back to mock
+    // brains for every hero.
+    explicit Sim(const BrainDesc& brain_desc);
     ~Sim();
     Sim(Sim&&) noexcept;
     Sim& operator=(Sim&&) noexcept;
