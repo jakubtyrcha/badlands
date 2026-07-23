@@ -1,4 +1,4 @@
-#include "game/views/game_view.hpp"
+#include "executables/game/game_view.hpp"
 
 #include <algorithm>
 #include <cmath>

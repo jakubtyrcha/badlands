@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/geometry_type.hpp"
+#include "engine/rendering/checker_texture.hpp"
 #include "engine/rendering/gbuffer.hpp"
 
 namespace badlands {
@@ -108,6 +109,50 @@ DeferredMaterial MaterialLibrary::SolidColor(glm::vec3 rgb, float roughness) {
         .type = TextureType::k2D,
     });
     it = solid_cache_.emplace(key, std::move(params)).first;
+  }
+
+  return DeferredMaterial{.factory = factory_.get(), .params = it->second};
+}
+
+DeferredMaterial MaterialLibrary::CheckerAlbedo(glm::vec3 color_a,
+                                                glm::vec3 color_b, int tiles,
+                                                int texels, float roughness) {
+  auto pack = [](glm::vec3 c) {
+    auto to_byte = [](float v) {
+      return static_cast<uint32_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+    };
+    return (to_byte(c.r) << 16) | (to_byte(c.g) << 8) | to_byte(c.b);
+  };
+  const uint8_t rough = static_cast<uint8_t>(
+      std::lround(std::clamp(roughness, 0.0f, 1.0f) * 255.0f));
+  const auto key =
+      std::make_tuple(pack(color_a), pack(color_b), tiles, texels, rough);
+
+  auto it = checker_cache_.find(key);
+  if (it == checker_cache_.end()) {
+    const std::vector<uint8_t> pixels =
+        BuildCheckerboardRgba8(color_a, color_b, tiles, texels);
+    // The view keeps its texture alive (same contract as CreateSolidColorTexture),
+    // so we keep only the view -- the LoadedTexture wrapper can drop here.
+    const LoadedTexture albedo = UploadTexture2DWithMips(
+        device_, queue_, *pipeline_gen_, static_cast<uint32_t>(texels),
+        static_cast<uint32_t>(texels), pixels.data());
+
+    InstanceParams params;
+    params.texture_overrides.push_back(DefaultTextureView{
+        .param_name = "albedo",
+        .view = albedo.view,
+        .sampler = sampler_,
+        .type = TextureType::k2D,
+    });
+    // 1x1 ARM: R=255 (AO=1), G=roughness*255, B=0 (non-metal) -- as SolidColor.
+    params.texture_overrides.push_back(DefaultTextureView{
+        .param_name = "arm",
+        .view = CreateSolidColorTexture(device_, queue_, 255, rough, 0, 255),
+        .sampler = sampler_,
+        .type = TextureType::k2D,
+    });
+    it = checker_cache_.emplace(key, std::move(params)).first;
   }
 
   return DeferredMaterial{.factory = factory_.get(), .params = it->second};

@@ -316,17 +316,10 @@ target_include_directories(badlands_game_lib PRIVATE
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 
 # Three thin executables, each with its own main, all linking badlands_engine
-# and badlands_game_lib. Stage 2 grows each one's own real AppView --
-# badlands_viewer got its real AppView (ModelViewerView) in Task S2.E,
-# badlands_game got its (GameView) in Task S2.F, badlands_ai_sandbox got its
-# (AiSandboxView) in Task S2.G.
-# building_scene.cpp (S2.F): ModelViewerView now reuses AddBuildingToScene for
-# its building prefabs (S2-reviewfix C6), so the viewer executable compiles it
-# too (its own copy; also compiled into badlands_game below).
+# and badlands_game_lib. Each app grows its own real AppView.
 set(badlands_app_sources_viewer
-    src/viewer/main_viewer.cpp
-    src/viewer/model_viewer_view.cpp
-    src/game/scene/building_scene.cpp)
+    src/executables/viewer/main_viewer.cpp
+    src/executables/viewer/model_viewer_view.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
@@ -334,8 +327,8 @@ set(badlands_app_sources_viewer
 # GameBuildingKind/building_visual), which the final executable link already
 # provides transitively.
 set(badlands_app_sources_game
-    src/game/main_game.cpp
-    src/game/views/game_view.cpp
+    src/executables/game/main_game.cpp
+    src/executables/game/game_view.cpp
     # Visual entity-component layer (SceneComposer) + terrain geometry + the
     # symbolic-map building/biome plumbing, now that the game renders the
     # symbolic map's terrain/water/buildings through the composer.
@@ -358,8 +351,8 @@ set(badlands_app_sources_game
 # capsules, deferred + GameCameraController). Compiled directly into the
 # executable, same rationale as badlands_app_sources_game above.
 set(badlands_app_sources_ai_sandbox
-    src/ai_sandbox/main_ai_sandbox.cpp
-    src/ai_sandbox/ai_sandbox_view.cpp
+    src/executables/ai_sandbox/main_ai_sandbox.cpp
+    src/executables/ai_sandbox/ai_sandbox_view.cpp
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
@@ -402,7 +395,7 @@ target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
 # grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
 # window. Scripts are functions of world meters, so a patch is a literal crop of the
 # world (see scripts/mapgen/biomes/README.md).
-add_executable(badlands_patchgen src/mapgen/main_patchgen.cpp)
+add_executable(badlands_patchgen src/executables/patchgen/main_patchgen.cpp)
 target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib)
 target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
@@ -415,8 +408,8 @@ endif()
 # map as indexed kTerrainBlend chunks with the biome-blend material, with a
 # mouse-hover block/section grid.
 add_executable(badlands_mapview
-    src/mapview/main_mapview.cpp
-    src/mapview/map_view_view.cpp
+    src/executables/mapview/main_mapview.cpp
+    src/executables/mapview/map_view_view.cpp
     src/mapview/biome_manifest.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/terrain_clusters.cpp
@@ -652,6 +645,22 @@ if(APPLE)
     target_link_options(badlands_decal_math_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_decal_math_tests COMMAND badlands_decal_math_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_checker_texture_tests: Catch2 suite for the pure RGBA8 checkerboard
+# fill (engine/rendering/checker_texture.hpp) — the GPU-free core of
+# MaterialLibrary::CheckerAlbedo. Pure CPU, modeled on badlands_decal_math_tests.
+add_executable(badlands_checker_texture_tests
+    src/engine/tests/checker_texture_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_checker_texture_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_checker_texture_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_checker_texture_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_checker_texture_tests COMMAND badlands_checker_texture_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_daylight_tests: Catch2 suite for the day/night system — the pure-CPU
 # Hosek-Wilkie RGB port (golden values vs the reference), the ComputeDaylight

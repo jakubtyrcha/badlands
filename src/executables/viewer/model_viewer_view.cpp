@@ -1,0 +1,171 @@
+#include "executables/viewer/model_viewer_view.hpp"
+
+#include <algorithm>
+#include <utility>
+
+#include <glm/gtc/matrix_transform.hpp>  // glm::translate
+#include <imgui.h>
+#include <spdlog/spdlog.h>
+
+#include "engine/app/sdl_input_util.hpp"  // NormalizedWheelY
+#include "engine/rendering/scene_build.hpp"
+#include "engine/rendering/scene_renderer.hpp"
+#include "engine/ui/editor_ui.hpp"
+
+namespace badlands {
+
+namespace {
+
+// Flat light-gray debug floor: rgb pre-encoded so that, after deferred lighting
+// re-linearizes the non-sRGB albedo, the surface lands near linear 0.75
+// reflectance. Roughness maxed to keep it diffuse so shadows read clearly.
+constexpr glm::vec3 kFloorGray{0.881f};
+constexpr float kFloorRoughness = 1.0f;
+constexpr float kFloorSize = 40.0f;
+// One floor-UV repeat per ~2 world units instead of stretching one copy.
+constexpr float kFloorUvRepeatSpacing = 2.0f;
+
+}  // namespace
+
+bool ModelViewerView::Initialize(const RenderContext& ctx) {
+  device_ = ctx.device;
+  queue_ = ctx.queue;
+  scene_renderer_ = ctx.scene_renderer;
+
+  if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
+    spdlog::error("ModelViewerView::Initialize: MaterialLibrary init failed");
+    return false;
+  }
+
+  BuildGenerators();
+  if (generators_.empty()) {
+    spdlog::error("ModelViewerView::Initialize: empty generator registry");
+    return false;
+  }
+  generator_index_ =
+      std::clamp(generator_index_, 0, static_cast<int>(generators_.size()) - 1);
+
+  // UV-checker debug material (two distinct grays) for the generated object, so
+  // its UVs read against the flat gray floor.
+  checker_mat_ = matlib_.CheckerAlbedo(glm::vec3(0.85f), glm::vec3(0.35f));
+
+  ApplyEnvironment();
+  RebuildScene();
+  scene_renderer_->SetShadowDebugMode(initial_shadow_debug_mode_);
+
+  if (!matlib_.ok()) {
+    spdlog::error("ModelViewerView::Initialize: material load failed");
+    return false;
+  }
+  return true;
+}
+
+void ModelViewerView::BuildGenerators() {
+  generators_.clear();
+  // The "test" generator: the engine's cube-sphere (cube -> 16x16 per face ->
+  // normalized sphere, EAC UVs). Future foliage/rock generators append here.
+  generators_.push_back(
+      {.name = "Sphere (test)", .generate = [] {
+         TexturedMeshResult mesh = GenerateSphereTexturedMesh(1.0f, 16);
+         // Floor is at y=0: lift the mesh so its lowest point rests on it. The
+         // offset is a transform, never baked into the vertices.
+         const glm::mat4 transform = glm::translate(
+             glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
+         return GeneratedMesh{std::move(mesh), transform};
+       }});
+}
+
+void ModelViewerView::ApplyEnvironment() {
+  ApplyLightEnvironment(env_, device_, queue_, sky_cube_, scene_context_);
+  scene_.SetSunDirection(scene_context_.sun_direction);
+  scene_.SetSunColor(scene_context_.sun_color);
+  scene_.SetAmbientSH(scene_context_.ambient_sh);
+}
+
+void ModelViewerView::RebuildScene() {
+  // Fresh graph drops every prior entity; its ctor resets sun/ambient to
+  // SceneGraph defaults, so re-mirror scene_context_'s derived lighting.
+  scene_ = SceneGraph();
+  scene_.SetSunDirection(scene_context_.sun_direction);
+  scene_.SetSunColor(scene_context_.sun_color);
+  scene_.SetAmbientSH(scene_context_.ambient_sh);
+
+  AddFloor(scene_, kFloorSize, matlib_.SolidColor(kFloorGray, kFloorRoughness),
+           kFloorSize / kFloorUvRepeatSpacing);
+
+  GeneratedMesh generated = generators_[generator_index_].generate();
+  // Frame on the WORLD-space bounds (mesh local bounds put through the
+  // generator's placement transform) so the orbit centers on the mesh as it
+  // sits on the floor. Compute this before the mesh is moved into the scene.
+  const Aabb world_bounds =
+      generated.mesh.local_bounds.TransformedBy(generated.transform);
+  AddMeshEntity(scene_, "mesh", std::move(generated.mesh), checker_mat_,
+                generated.transform);
+
+  const glm::vec3 center = world_bounds.Center();
+  const float radius = glm::length(world_bounds.max - center);
+  orbit_.FrameBounds(center, radius > 0.01f ? radius : 1.0f);
+  orbit_.UpdateCamera(camera_);
+}
+
+void ModelViewerView::HandleEvent(const SDL_Event& event, int /*width*/,
+                                  int /*height*/) {
+  if (ImGui::GetIO().WantCaptureMouse) return;
+
+  switch (event.type) {
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      if (event.button.button == SDL_BUTTON_LEFT) left_mouse_down_ = true;
+      break;
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      if (event.button.button == SDL_BUTTON_LEFT) left_mouse_down_ = false;
+      break;
+    case SDL_EVENT_MOUSE_MOTION:
+      if (left_mouse_down_) {
+        orbit_.HandleMouseDrag(event.motion.xrel, event.motion.yrel);
+      }
+      break;
+    case SDL_EVENT_MOUSE_WHEEL:
+      orbit_.HandleMouseWheel(NormalizedWheelY(event.wheel));
+      break;
+    default:
+      break;
+  }
+}
+
+void ModelViewerView::Update(float dt, const bool* /*keyboard_state*/) {
+  dt_ = dt;
+  orbit_.UpdateCamera(camera_);
+  scene_.SyncToRegistry(registry_, scene_context_);
+}
+
+void ModelViewerView::DrawUI() {
+  if (!scene_renderer_ || generators_.empty()) return;
+
+  // Mesh-setup window: single-select generator list.
+  int selected = generator_index_;
+  ImGui::Begin("Mesh");
+  for (int i = 0; i < static_cast<int>(generators_.size()); ++i) {
+    if (ImGui::Selectable(generators_[i].name.c_str(), i == generator_index_)) {
+      selected = i;
+    }
+  }
+  ImGui::End();
+
+  if (selected != generator_index_) {
+    generator_index_ = selected;
+    RebuildScene();
+  }
+
+  // Visual-setup window: the shared rendering-debug + light editor ("Debug").
+  const bool env_changed = EditorUI::DrawDebugPanel(env_, *scene_renderer_, dt_);
+  if (env_changed) {
+    ApplyEnvironment();
+  }
+}
+
+void ModelViewerView::OnResize(int width, int height) {
+  camera_.aspect =
+      height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+}
+
+}  // namespace badlands

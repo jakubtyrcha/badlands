@@ -4,7 +4,7 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/app/sdl_viewer_app.hpp"
-#include "game/views/game_view.hpp"
+#include "executables/game/game_view.hpp"
 #include "game/visual/render_mode.hpp"
 
 namespace {
