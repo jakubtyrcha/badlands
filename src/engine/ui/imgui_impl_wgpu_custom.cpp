@@ -105,6 +105,12 @@ bool ImGui_ImplWGPU_Init(ImGui_ImplWGPU_InitInfo* init_info) {
   // the legacy one-shot atlas path, which this backend no longer implements.
   ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
 
+  // This backend (like the upstream WGPU one) only handles RGBA32 atlases -- the
+  // shader samples a 4-component texture. Pin the desired format so ImGui always
+  // produces RGBA32 rather than an Alpha8 atlas we would upload incorrectly; the
+  // IM_ASSERT in ImGui_ImplWGPU_UpdateTexture is then just a contract tripwire.
+  ImGui::GetIO().Fonts->TexDesiredFormat = ImTextureFormat_RGBA32;
+
   return ImGui_ImplWGPU_CreateDeviceObjects();
 }
 
@@ -134,7 +140,7 @@ static void ImGui_ImplWGPU_DestroyTexture(ImTextureData* tex) {
     bt->view = nullptr;
     if (bt->texture) bt->texture.Destroy();
     bt->texture = nullptr;
-    delete bt;
+    IM_DELETE(bt);
     tex->SetTexID(ImTextureID_Invalid);
     tex->BackendUserData = nullptr;
   }
@@ -149,7 +155,7 @@ static void ImGui_ImplWGPU_UpdateTexture(ImTextureData* tex) {
     IM_ASSERT(tex->TexID == ImTextureID_Invalid &&
               tex->BackendUserData == nullptr);
     IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
-    auto* bt = new WgpuBackendTexture();
+    auto* bt = IM_NEW(WgpuBackendTexture)();
 
     wgpu::TextureDescriptor tex_desc;
     tex_desc.size = {static_cast<uint32_t>(tex->Width),
