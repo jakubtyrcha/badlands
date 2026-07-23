@@ -55,31 +55,6 @@ TEST_CASE("Characters(out) fills identically to Characters() and reuses the buff
     CHECK(out.capacity() >= cap);
 }
 
-TEST_CASE("SetPathfinder back-fills every alive building") {
-    badlands::Sim sim(nullptr);
-    // make_world prebuilds the colony Castle (kCastleSpawn), so >=1 alive building.
-    REQUIRE(sim.Buildings().size() >= 1);
-
-    struct Recorder {
-        int add_obstacle_calls = 0;
-    } recorder;
-
-    badlands::Pathfinder pf{};
-    pf.ctx = &recorder;
-    pf.add_obstacle = [](void* ctx, uint32_t, const float*, int32_t) {
-        static_cast<Recorder*>(ctx)->add_obstacle_calls += 1;
-    };
-    pf.remove_obstacle = [](void*, uint32_t) {};  // non-null no-op
-    pf.find_path = [](void*, float, float, float, float, float, uint32_t, float*,
-                      int32_t) -> int32_t { return 0; };  // non-null no-op
-
-    sim.SetPathfinder(pf);
-
-    // notify_obstacle_added fires exactly once per alive building, and
-    // Buildings() applies the same alive-filter, so the counts must match.
-    REQUIRE(recorder.add_obstacle_calls == static_cast<int>(sim.Buildings().size()));
-}
-
 TEST_CASE("Characters() echoes the spawn descriptor") {
     badlands::Sim sim(nullptr);
     badlands::CharacterDesc desc = mercenary(-8.0f, kDuelGroundZ);
@@ -99,11 +74,13 @@ TEST_CASE("Characters() echoes the spawn descriptor") {
 
 TEST_CASE("movement is clamped to move_speed * dt") {
     badlands::Sim sim(nullptr);
-    // On the plains, not the lake at the origin: with terrain blocking a unit
-    // told to walk across water simply does not move, and this case is about
-    // the speed clamp.
-    badlands::CharacterDesc a = dummy(0.0f, kDuelGroundZ, 0);
-    badlands::CharacterDesc b = dummy(10.0f, kDuelGroundZ, 1);
+    // Clear plains, away from BOTH the central lake AND the prebuilt castle at
+    // kCastleSpawn (0, 54): the navmesh routes around the castle, so a unit told
+    // to walk onto it would detour and deviate off the X axis. z = 30 keeps the
+    // straight X corridor clear, and this case is only about the speed clamp.
+    constexpr float kClearZ = 30.0f;
+    badlands::CharacterDesc a = dummy(0.0f, kClearZ, 0);
+    badlands::CharacterDesc b = dummy(10.0f, kClearZ, 1);
     sim.Spawn(a);
     sim.Spawn(b);
 
@@ -113,7 +90,7 @@ TEST_CASE("movement is clamped to move_speed * dt") {
     REQUIRE(rows.size() == 2);
     float step = a.move_speed * kTickDt;
     CHECK_THAT(rows[0].pos_x, Catch::Matchers::WithinAbs(step, 1e-4f));
-    CHECK(rows[0].pos_z == kDuelGroundZ);  // closes along X only
+    CHECK(rows[0].pos_z == kClearZ);  // closes along X only
     CHECK_THAT(rows[1].pos_x, Catch::Matchers::WithinAbs(10.0f - step, 1e-4f));
 }
 

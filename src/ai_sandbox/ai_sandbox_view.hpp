@@ -14,6 +14,7 @@
 // CommandLog) -- the view never reaches into the sim's registry.
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <dawn/webgpu_cpp.h>
@@ -25,7 +26,9 @@
 #include "engine/app/game_camera_controller.hpp"
 #include "engine/app/sim_clock.hpp"
 #include "engine/core/camera.hpp"
+#include "engine/core/ray.hpp"
 #include "engine/rendering/context/scene_context.hpp"
+#include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
@@ -76,6 +79,14 @@ class AiSandboxView : public AppView {
   // The inspector: sim clock, per-hero needs/behaviour, noiser bug count, and
   // the tail of the command log.
   void DrawInspector();
+  // Pathfinding debug overlay: rebuilds nav_lines_ from the navmesh (cells
+  // coloured by terrain cost, obstacles distinct) + the picked path, and points
+  // scene_context_.debug_lines at it. Run at the end of Update().
+  void UpdateNavDebug();
+  // The nav debug panel: toggles + the picked path's cost/reachability.
+  void DrawNavPanel();
+  // A ground pick (left click) while pick mode is on: sets endpoint A then B.
+  void HandleNavPick(const SDL_Event& event);
   // Centers the game camera on the arena origin and picks a height (at
   // GameCameraController's fixed pitch) so the whole arena -- including the
   // wall ring -- stays inside the frustum. The framing is aspect-independent
@@ -119,6 +130,9 @@ class AiSandboxView : public AppView {
   std::vector<badlands::BuildingState> building_rows_;
   std::vector<badlands::CommandRecord> cmd_rows_;
   uint32_t command_log_total_ = 0;
+  // Drained each tick and discarded: this view has no combat log, but the sim's
+  // transient event stream must still be emptied or it grows without bound.
+  std::vector<badlands::GameEvent> events_scratch_;
 
   // Fixed pool of hero capsule nodes; index == game_state row index.
   std::vector<NodeHandle> capsule_nodes_;
@@ -131,6 +145,16 @@ class AiSandboxView : public AppView {
   SceneContext scene_context_;
   Camera camera_;
   GameCameraController gamecam_;
+
+  // Pathfinding debug overlay (game/src/navmesh). Off by default; drawn through
+  // the engine's generic debug-line pass via scene_context_.debug_lines.
+  DebugLineBuffer nav_lines_;
+  std::vector<badlands::NavDebugCell> nav_cells_;  // reused snapshot buffer
+  bool nav_show_mesh_ = false;
+  bool nav_pick_mode_ = false;
+  std::optional<glm::vec2> nav_a_;  // path endpoints (world XZ), picked on ground
+  std::optional<glm::vec2> nav_b_;
+  badlands::NavPathResult nav_path_;  // last query result (cost / reachable)
 
   float dt_ = 0.0f;
 };

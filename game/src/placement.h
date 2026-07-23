@@ -121,7 +121,7 @@ float poppable_score(const PlacementState& st, glm::vec2 candidate);
 void process_poppables(BadlandsGame& game, glm::vec2 anchor);
 
 // The 4 world-XZ corners of a building's drawn footprint box (the oriented box
-// RenderBoxOf describes), fed to the nav pathfinder as an obstacle polygon.
+// RenderBoxOf describes); used by unit-vs-footprint reprojection in movement.
 std::array<glm::vec2, 4> building_footprint_corners(const PlacedBuilding& b);
 
 // A door point on the building's perimeter (midpoint of one footprint edge).
@@ -138,12 +138,5 @@ uint32_t nearest_building_of(const PlacementState& st, int kind, glm::vec2 p);
 // Clears and restamps footprint/blocked from the ALIVE buildings only (after a
 // destruction frees a footprint).
 void rebuild_occupancy(PlacementState& st);
-
-// Pushes a newly-committed building to the nav pathfinder as an obstacle. No-op
-// when no provider is registered (game.pathfinder is zero-initialized).
-void notify_obstacle_added(BadlandsGame& game, uint32_t building_id);
-
-// Removes a destroyed building from the nav pathfinder. No-op with no provider.
-void notify_obstacle_removed(BadlandsGame& game, uint32_t building_id);
 
 }  // namespace badlands

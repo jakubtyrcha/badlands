@@ -219,6 +219,11 @@ class GameView : public AppView {
   // dead ids are dropped rather than accumulating forever.
   std::unordered_map<uint32_t, std::string> char_names_;
   std::unordered_map<uint32_t, std::string> char_names_prev_;
+  // Head heights (size_y), double-buffered like the names, so a lethal hit's
+  // floating damage number gets the just-died victim's real height instead of a
+  // hardcoded fallback.
+  std::unordered_map<uint32_t, float> char_sizes_;
+  std::unordered_map<uint32_t, float> char_sizes_prev_;
   std::unordered_map<uint32_t, BuildingKind> building_kinds_;
   std::unordered_map<uint32_t, BuildingKind> building_kinds_prev_;
   // Combat log: a ring buffer of formatted lines (newest last) and how many
@@ -236,6 +241,9 @@ class GameView : public AppView {
   // Display names for a combat-log line, from the caches (last-known if dead).
   std::string EventActorName(uint32_t slot) const;
   std::string EventTargetName(const badlands::GameEvent& e) const;
+  // Head height (size_y) of a character slot from the caches (last-known if the
+  // victim just died); a small default when never seen.
+  float EventActorSize(uint32_t slot) const;
   // Adjusts the combat-log scroll offset by a wheel delta (+ older / - newer).
   void ScrollCombatLog(float wheel_y);
   // Builds the floating world-label quads (names / health bars / damage numbers)

@@ -5,6 +5,7 @@
 
 #include "command.h"
 #include "components.h"
+#include "navmesh/navmesh.h"
 #include "placement.h"
 #include "vision.h"
 
@@ -14,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace badlands {
@@ -25,6 +27,11 @@ struct BadlandsGame {
     // Entity id (as seen by the C API and by scripts) -> entity. Slots are
     // never reused; dead entities leave entt::null behind.
     std::vector<entt::entity> slots;
+    // Reverse index: entity -> its slot, filled on spawn (slots never reused, and
+    // entt versions entities so a recycled id is a distinct key), so
+    // slot_for_entity is O(1) instead of a linear scan per combat hit. Stale
+    // entries for dead entities are never queried (only live entities are).
+    std::unordered_map<entt::entity, uint32_t> entity_slot;
     // Compiled brain program + host bindings; null -> mock brains only.
     std::unique_ptr<badlands::BrainRuntime> brains;
 
@@ -36,9 +43,11 @@ struct BadlandsGame {
     // player's vision sources). Unconfigured until Sim::ConfigureVision.
     badlands::VisionGrid vision;
 
-    // Pluggable path-geometry provider (Rust nav service); zero-initialized
-    // means "no provider" -> straight-line fallback in the movement pipeline.
-    badlands::Pathfinder pathfinder{};
+    // The weighted navmesh the movement + AI layers path over (game/src/navmesh).
+    // Rebuilt from map + placement footprints whenever navmesh_epoch falls behind
+    // placement.nav_epoch (see nav_world.h::rebuild_navmesh_if_stale).
+    badlands::nav::NavMesh navmesh;
+    uint32_t navmesh_epoch = 0;
 
     // Does terrain stop anyone? On by default: the shipping game refuses to let
     // a character walk into water, and that refusal is what raises MoveBlocked.
