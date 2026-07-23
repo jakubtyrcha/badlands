@@ -12,6 +12,7 @@
 #include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
 #include "movement.h"
+#include "nav_world.h"
 #include "needs.h"
 #include "placement.h"
 #include "vision.h"
@@ -184,6 +185,15 @@ void tick_world(BadlandsGame& g, float dt) {
     advance_economy(g);
     run_spawners(g);
 
+    // Navmesh current BEFORE brains think: AI goal selection queries nav_cost
+    // (nav_world.h) over it. Gated on terrain_blocking (flat worlds stay
+    // obstacle-oblivious). A building the AI places this tick lands after think,
+    // so the pre-plan_paths rebuild below picks it up (one-tick lag for the
+    // placing brain, which is fine). Cheap no-op when the epoch is unchanged.
+    if (g.terrain_blocking) {
+        rebuild_navmesh_if_stale(g);
+    }
+
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.
     for (auto [e, intent] : registry.view<Intent>().each()) {
@@ -231,6 +241,18 @@ void tick_world(BadlandsGame& g, float dt) {
         if (len > 0.0f) {
             pos.pos += intent.dir / len * stats.move_speed * dt;
         }
+    }
+
+    // Rebuild the navmesh if a building was placed/destroyed this tick (bumps
+    // placement.nav_epoch). Cheap no-op when unchanged; the whole path/cost layer
+    // reads from it, so it must be current before plan_paths.
+    //
+    // Gated on terrain_blocking, which is the world's "does terrain/obstacles stop
+    // anyone" switch: with it off (make_flat_world, movement-mechanics tests that
+    // predate terrain) the navmesh is left unbuilt and movement falls back to
+    // obstacle-oblivious straight lines -- the documented flat-world contract.
+    if (g.terrain_blocking) {
+        rebuild_navmesh_if_stale(g);
     }
 
     // Navmesh movement pipeline: plan/follow durable MoveTargets, maintain melee
@@ -516,22 +538,34 @@ void Sim::Tick(float dt) {
 bool Sim::ReloadScript(const std::string& source) { return reload_script(*world_, source); }
 int64_t Sim::Dispatch(const Action& action) { return dispatch_into(*world_, action); }
 
-void Sim::SetPathfinder(const Pathfinder& pf) {
-    // Store the provider by value, then back-fill it with every alive building
-    // already placed (the prebuilt castle, and any placed before registration)
-    // so its obstacle set matches the world. A default-constructed Pathfinder
-    // (null add_obstacle) clears the provider without back-filling.
-    BadlandsGame& game = *world_;
-    game.pathfinder = pf;
-    if (game.pathfinder.add_obstacle == nullptr) {
-        return;
+std::vector<NavDebugCell> Sim::NavDebugCells() {
+    // Ensure a current mesh even in flat/obstacle-oblivious worlds (debug tool).
+    // Cheap no-op once built and epoch-current, so it is fine to call per frame.
+    rebuild_navmesh_if_stale(*world_);
+    std::vector<nav::NavMesh::DebugCell> cells;
+    world_->navmesh.DebugCells(cells);
+    std::vector<NavDebugCell> out;
+    out.reserve(cells.size());
+    for (const nav::NavMesh::DebugCell& c : cells) {
+        out.push_back({c.min_world.x, c.min_world.y, c.max_world.x, c.max_world.y, c.cost,
+                       c.passable});
     }
-    const auto& buildings = game.placement.buildings;
-    for (uint32_t id = 0; id < buildings.size(); ++id) {
-        if (buildings[id].alive) {
-            notify_obstacle_added(game, id);
-        }
+    return out;
+}
+
+NavPathResult Sim::NavQuery(float sx, float sz, float gx, float gz) {
+    rebuild_navmesh_if_stale(*world_);
+    const nav::NavMesh::PathResult r =
+        world_->navmesh.FindPath({sx, sz}, {gx, gz});
+    NavPathResult out;
+    out.cost = r.cost;
+    out.reachable = r.reachable;
+    out.waypoints_xz.reserve(r.waypoints.size() * 2);
+    for (const glm::vec2& w : r.waypoints) {
+        out.waypoints_xz.push_back(w.x);
+        out.waypoints_xz.push_back(w.y);
     }
+    return out;
 }
 
 void Sim::ConfigureVision(float world_min_x, float world_min_z, float world_size_x,

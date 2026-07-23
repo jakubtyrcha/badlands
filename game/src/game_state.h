@@ -5,6 +5,7 @@
 
 #include "command.h"
 #include "components.h"
+#include "navmesh/navmesh.h"
 #include "placement.h"
 #include "vision.h"
 
@@ -36,9 +37,11 @@ struct BadlandsGame {
     // player's vision sources). Unconfigured until Sim::ConfigureVision.
     badlands::VisionGrid vision;
 
-    // Pluggable path-geometry provider (Rust nav service); zero-initialized
-    // means "no provider" -> straight-line fallback in the movement pipeline.
-    badlands::Pathfinder pathfinder{};
+    // The weighted navmesh the movement + AI layers path over (game/src/navmesh).
+    // Rebuilt from map + placement footprints whenever navmesh_epoch falls behind
+    // placement.nav_epoch (see nav_world.h::rebuild_navmesh_if_stale).
+    badlands::nav::NavMesh navmesh;
+    uint32_t navmesh_epoch = 0;
 
     // Does terrain stop anyone? On by default: the shipping game refuses to let
     // a character walk into water, and that refusal is what raises MoveBlocked.

@@ -241,9 +241,8 @@ int64_t raze_building(BadlandsGame& game, uint32_t building_id) {
     // Tombstone + free the footprint/obstacle before reassigning, so the doomed
     // building is not itself a reassignment candidate.
     bs[building_id].alive = false;
-    ++game.placement.nav_epoch;
+    ++game.placement.nav_epoch;  // -> navmesh rebuilds next tick
     rebuild_occupancy(game.placement);
-    notify_obstacle_removed(game, building_id);
 
     // Reassign residents to the lowest-id alive same-class guild with room, else
     // homeless. Sequential so capacity is honored as homes fill.

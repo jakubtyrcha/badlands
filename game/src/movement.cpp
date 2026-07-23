@@ -22,34 +22,32 @@ namespace {
 
 constexpr float kArriveRadius = 0.25f;     // cursor advances within this of a waypoint
 constexpr float kRepathCooldown = 0.3f;    // seconds between repaths
-constexpr int kMaxWaypoints = 64;          // find_path output buffer
 constexpr float kGoalMovedThreshold = 1.0f;// repath a moving target when it drifts this far
 constexpr float kMeleeHysteresis = 1.15f;  // unlock past attack_range * this
 constexpr float kSepCell = 2.0f;           // separation spatial-hash cell size
 constexpr float kWorldBound = static_cast<float>(kGridHalf);
 
-// Query the injected pathfinder, or a straight-line fallback if none. Returns
-// the waypoint polyline (empty = no path).
-std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2 goal, float radius,
-                                  uint32_t exempt) {
-    const Pathfinder& pf = game.pathfinder;
-    if (pf.find_path != nullptr) {
-        std::array<float, 2 * kMaxWaypoints> buf{};
-        int n = pf.find_path(pf.ctx, start.x, start.y, goal.x, goal.y, radius, exempt, buf.data(),
-                             kMaxWaypoints);
-        n = std::min(n, kMaxWaypoints);
-        std::vector<glm::vec2> wp;
-        wp.reserve(static_cast<size_t>(std::max(0, n)));
-        for (int i = 0; i < n; ++i) {
-            wp.push_back({buf[2 * i], buf[2 * i + 1]});
+// Query the navmesh for a route, or a straight-line fallback when no navmesh has
+// been built. Returns the waypoint polyline (empty = unreachable). The result
+// distinguishes "no navmesh" (fallback, always a 2-point line) from "navmesh
+// says unreachable" (empty) so the caller can raise MoveBlocked only for the
+// latter.
+std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2 goal,
+                                  bool& unreachable) {
+    unreachable = false;
+    if (!game.navmesh.empty()) {
+        const nav::NavMesh::PathResult r = game.navmesh.FindPath(start, goal);
+        if (!r.reachable) {
+            unreachable = true;
+            return {};
         }
-        return wp;
+        return r.waypoints;
     }
-    // No provider registered: straight-line fallback, obstacle-oblivious BY
-    // DESIGN. This path only runs in headless sims / C++ tests that never call
-    // game_set_pathfinder; the app registers a NavContext provider at
-    // construction (before any tick), so shipping units always route around
-    // buildings. (start included so follow_paths advances past it.)
+    // No navmesh built: straight-line fallback, obstacle-oblivious BY DESIGN.
+    // Only headless mechanics tests that never rebuild the navmesh hit this; the
+    // sim rebuilds it every tick (rebuild_navmesh_if_stale in tick_world), so
+    // shipping units always route around buildings + impassable terrain. (start
+    // included so follow_paths advances past it.)
     return {start, goal};
 }
 
@@ -121,15 +119,18 @@ bool is_walkable(mapgen::Biome biome) {
 
 void plan_paths(BadlandsGame& game, float dt) {
     entt::registry& reg = game.registry;
-    auto view = reg.view<MoveTarget, NavPath, const Position, const Agent>(entt::exclude<InsideBuilding>);
+    // Goals the navmesh reported unreachable this pass -> MoveBlocked, applied
+    // after the loop (emplacing a component while iterating a view can invalidate
+    // it, same reason follow_paths defers its blocked list).
+    std::vector<std::pair<entt::entity, glm::vec2>> blocked;
+
+    auto view = reg.view<MoveTarget, NavPath, const Position>(entt::exclude<InsideBuilding>);
     for (entt::entity e : view) {
         MoveTarget& mt = view.get<MoveTarget>(e);
         NavPath& np = view.get<NavPath>(e);
         glm::vec2 pos = view.get<const Position>(e).pos;
-        float radius = view.get<const Agent>(e).radius;
 
         glm::vec2 goal{0.0f, 0.0f};
-        uint32_t exempt = UINT32_MAX;
         bool have_goal = true;
         switch (mt.kind) {
             case MoveTarget::Kind::None:
@@ -148,8 +149,10 @@ void plan_paths(BadlandsGame& game, float dt) {
             case MoveTarget::Kind::Building:
                 if (mt.building < game.placement.buildings.size() &&
                     game.placement.buildings[mt.building].alive) {
+                    // The target building is an obstacle; its entrance sits on the
+                    // perimeter, so the navmesh recovers the nearest passable cell
+                    // just outside the door and the unit stops there (stop_distance).
                     goal = building_entrance(game.placement.buildings[mt.building]);
-                    exempt = mt.building;
                 } else {
                     have_goal = false;
                 }
@@ -173,11 +176,21 @@ void plan_paths(BadlandsGame& game, float dt) {
         bool need = np.waypoints.empty() || np.cursor >= np.waypoints.size() ||
                     np.epoch != game.placement.nav_epoch || goal_drifted;
         if (need && np.repath_cooldown <= 0.0f) {
-            np.waypoints = query_path(game, pos, goal, radius, exempt);
+            bool unreachable = false;
+            np.waypoints = query_path(game, pos, goal, unreachable);
             np.cursor = 0;
             np.epoch = game.placement.nav_epoch;
             np.repath_cooldown = kRepathCooldown;
+            // The world says the goal cannot be reached. Raise the event the
+            // brain reacts to (abandon the goal) instead of stalling silently.
+            if (unreachable) {
+                blocked.emplace_back(e, goal);
+            }
         }
+    }
+
+    for (const auto& [e, point] : blocked) {
+        game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
     }
 }
 
@@ -316,7 +329,12 @@ void separate_units(BadlandsGame& game) {
         }
     }
 
-    bool has_pf = game.pathfinder.find_path != nullptr;
+    // Reproject units out of building footprints exactly when the path layer is
+    // obstacle-aware -- i.e. a navmesh exists. Gating on the same signal as
+    // plan_paths/query_path (navmesh presence, not terrain_blocking) keeps the
+    // two consistent: a flat world with no navmesh skips both routing and
+    // reprojection, and any world with a built mesh gets both.
+    const bool reproject = !game.navmesh.empty();
     for (entt::entity e : view) {
         Position& pos = view.get<Position>(e);
         // Locked units are immovable colliders: they are never *pushed* by
@@ -329,7 +347,7 @@ void separate_units(BadlandsGame& game) {
                 pos.pos += pit->second;
             }
         }
-        if (has_pf) {
+        if (reproject) {
             reproject_out_of_footprints(game, pos.pos);
         }
         pos.pos = glm::clamp(pos.pos, glm::vec2(-kWorldBound), glm::vec2(kWorldBound - 1e-3f));

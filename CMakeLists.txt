@@ -80,13 +80,11 @@ corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo
                        PROFILE release)
 corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 
-# nav: 2D visibility-graph path service (src/crates/nav), Rust staticlib,
-# behind the GamePathfinder C ABI. Game-layer pathfinding — unused in Stage 1
-# (link-only here; wired up by the C++ game layer in Stage 2). No dependency
-# of this crate shares its own name, so no Corrosion package-ambiguity
-# workaround is needed (as with assets, unlike wesl_ffi).
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/nav/Cargo.toml)
-corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
+# NOTE: the Rust `nav` crate (src/crates/nav, a visibility-graph path service)
+# has been RETIRED. Pathfinding is now a C++ weighted quadtree navmesh
+# (game/src/navmesh + game/src/nav_world.cpp) that also handles weighted terrain,
+# which a visibility graph cannot express. The crate source is left dormant in
+# the tree (deletable) but is no longer imported or linked.
 
 # ui: the GAME UI feature-lib (src/crates/ui) — flexbox layout (`panes`) +
 # glyph rasterization/text layout (`fontdue`) behind a coarse C ABI (one
@@ -207,7 +205,7 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets nav ui nlohmann_json::nlohmann_json)
+target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json)
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
 # but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
 # this, glm::perspective() maps the near plane to NDC z=2.0 (outside the
@@ -230,7 +228,6 @@ target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
-    ${CMAKE_SOURCE_DIR}/src/crates/nav/include
     ${CMAKE_SOURCE_DIR}/src/crates/ui/include
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
@@ -286,6 +283,13 @@ add_library(badlands_game_lib STATIC
     # (pure CPU: the mapgen Biome enum + glm, no engine/GPU deps).
     src/game/map/map_data.cpp
     src/game/map/symbolic_map_generator.cpp
+    # Nav core: adaptive quadtree navmesh + HPA* pathfinding (pure CPU over the
+    # injected NavSource; glm only, no engine/GPU/EnTT deps).
+    game/src/navmesh/quadtree.cpp
+    game/src/navmesh/graph.cpp
+    game/src/navmesh/navmesh.cpp
+    # Sim<->nav bridge: SimNavSource adapter + biome cost policy + rebuild.
+    game/src/nav_world.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
 # noiser_common.h intentionally ships [[deprecated]] shims.
@@ -569,6 +573,8 @@ add_executable(badlands_game_tests
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
     game/tests/events_tests.cpp
+    game/tests/navmesh_tests.cpp
+    game/tests/nav_world_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.

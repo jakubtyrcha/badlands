@@ -7,6 +7,7 @@
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
+#include "nav_world.h"  // nav_cost
 #include "placement.h"
 
 #include <array>
@@ -28,9 +29,12 @@ bool is_visited(const TaxCollectorState& tc, uint32_t bid) {
     return false;
 }
 
-// Nearest alive building that still owes tax and has not been collected this
-// round. Ties break by ascending id (we iterate ascending and keep strict-less
-// on distance), so the route is deterministic.
+// Cheapest-to-reach alive building that still owes tax and has not been
+// collected this round -- ranked by TRAVEL cost (nav_cost), so the collector
+// routes around the lake/buildings and prefers easy terrain rather than picking
+// something that is close as the crow flies but a long walk. Unreachable
+// buildings are skipped. Ties break by ascending id (iterate ascending, strict-
+// less on cost), so the route is deterministic.
 bool nearest_taxable(const BadlandsGame& game, const TaxCollectorState& tc, glm::vec2 pos,
                      glm::vec2& out_door, uint32_t& out_id) {
     float best = 0.0f;
@@ -44,7 +48,10 @@ bool nearest_taxable(const BadlandsGame& game, const TaxCollectorState& tc, glm:
         if (!building_approach_tile(game.placement, bs[i], door)) {
             continue;
         }
-        const float d = glm::distance(pos, door);
+        const float d = nav_cost(game, pos, door);
+        if (d >= nav::kImpassable) {
+            continue;  // cannot get there: not a candidate
+        }
         if (!found || d < best) {
             best = d;
             out_door = door;
@@ -72,7 +79,10 @@ bool nearest_deposit(const BadlandsGame& game, glm::vec2 pos, glm::vec2& out_doo
         if (!building_approach_tile(game.placement, bs[i], door)) {
             continue;
         }
-        const float d = glm::distance(pos, door);
+        const float d = nav_cost(game, pos, door);
+        if (d >= nav::kImpassable) {
+            continue;  // unreachable deposit point
+        }
         if (!found || d < best) {
             best = d;
             out_door = door;

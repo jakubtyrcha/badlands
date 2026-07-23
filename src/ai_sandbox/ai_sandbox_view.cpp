@@ -412,6 +412,13 @@ void AiSandboxView::FrameCamera() {
 
 void AiSandboxView::HandleEvent(const SDL_Event& event, int /*width*/,
                                 int /*height*/) {
+  // Nav debug: a left click in pick mode drops a path endpoint on the ground.
+  if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+      event.button.button == SDL_BUTTON_LEFT) {
+    HandleNavPick(event);
+    return;
+  }
+
   // Fixed-angle camera: only zoom is mouse-driven (wheel + trackpad, which SDL
   // reports as the same event with fractional deltas). Key panning is read
   // directly from Update()'s keyboard_state snapshot instead of per-event.
@@ -438,6 +445,9 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
     sim_.Tick(static_cast<float>(kTickDt));
     ++sim_ticks_done_;
   }
+  // Empty the sim's transient event stream (this view does not render a combat
+  // log; without draining, game.events would grow unbounded during combat).
+  sim_.DrainEvents(events_scratch_);
 
   SyncUnits();
 
@@ -456,6 +466,10 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
 
   gamecam_.UpdateCamera(camera_);
   scene_.SyncToRegistry(registry_, scene_context_);
+
+  // Nav overlay last: it owns scene_context_.debug_lines (SyncToRegistry does
+  // not touch that field), so setting it here survives to the render pass.
+  UpdateNavDebug();
 }
 
 void AiSandboxView::DrawUI() {
@@ -471,6 +485,96 @@ void AiSandboxView::DrawUI() {
   }
 
   DrawInspector();
+  DrawNavPanel();
+}
+
+void AiSandboxView::HandleNavPick(const SDL_Event& event) {
+  if (!nav_pick_mode_) return;
+  if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse) return;
+  glm::vec2 screen;
+  if (!EventWindowLogicalSize(event.button.windowID, screen)) return;
+  const Ray ray = ScreenPointToRay(
+      camera_, glm::vec2(event.button.x, event.button.y), screen);
+  glm::vec3 hit;
+  if (!IntersectGroundPlane(ray, 0.0f, hit)) return;  // cursor on/above the horizon
+  const glm::vec2 p(hit.x, hit.z);
+  if (!nav_a_ || nav_b_) {  // (re)start a pair: first click, or after a full pair
+    nav_a_ = p;
+    nav_b_.reset();
+  } else {
+    nav_b_ = p;
+  }
+}
+
+void AiSandboxView::UpdateNavDebug() {
+  nav_lines_.Clear();
+
+  if (nav_show_mesh_) {
+    nav_cells_ = sim_.NavDebugCells();
+    constexpr float y = 0.05f;  // just above the arena floor (y = 0)
+    for (const NavDebugCell& c : nav_cells_) {
+      glm::vec3 col;
+      if (!c.passable) {
+        col = glm::vec3(0.85f, 0.12f, 0.12f);  // obstacle / water / mountain: red
+      } else {
+        // Passable terrain: green (cheap) -> yellow (dear), by cost multiplier.
+        const float t = glm::clamp((c.cost - 1.0f) / 1.5f, 0.0f, 1.0f);
+        col = glm::mix(glm::vec3(0.2f, 0.8f, 0.25f), glm::vec3(0.9f, 0.85f, 0.1f), t);
+      }
+      const glm::vec3 a(c.min_x, y, c.min_z), b(c.max_x, y, c.min_z);
+      const glm::vec3 d(c.max_x, y, c.max_z), e(c.min_x, y, c.max_z);
+      nav_lines_.AddLine(a, b, col);
+      nav_lines_.AddLine(b, d, col);
+      nav_lines_.AddLine(d, e, col);
+      nav_lines_.AddLine(e, a, col);
+    }
+  }
+
+  if (nav_a_ && nav_b_) {
+    nav_path_ = sim_.NavQuery(nav_a_->x, nav_a_->y, nav_b_->x, nav_b_->y);
+    constexpr float y = 0.2f;
+    const glm::vec3 col =
+        nav_path_.reachable ? glm::vec3(0.15f, 1.0f, 0.4f) : glm::vec3(1.0f, 0.2f, 0.2f);
+    const std::vector<float>& w = nav_path_.waypoints_xz;
+    for (size_t i = 2; i < w.size(); i += 2) {
+      nav_lines_.AddLine(glm::vec3(w[i - 2], y, w[i - 1]), glm::vec3(w[i], y, w[i + 1]), col, 3.0f);
+    }
+  }
+
+  auto marker = [&](glm::vec2 p, glm::vec3 col) {
+    constexpr float y = 0.25f, s = 0.6f;
+    nav_lines_.AddLine(glm::vec3(p.x - s, y, p.y), glm::vec3(p.x + s, y, p.y), col, 3.0f);
+    nav_lines_.AddLine(glm::vec3(p.x, y, p.y - s), glm::vec3(p.x, y, p.y + s), col, 3.0f);
+  };
+  if (nav_a_) marker(*nav_a_, glm::vec3(0.2f, 0.6f, 1.0f));
+  if (nav_b_) marker(*nav_b_, glm::vec3(1.0f, 0.9f, 0.2f));
+
+  scene_context_.debug_lines = nav_lines_.empty() ? nullptr : &nav_lines_;
+}
+
+void AiSandboxView::DrawNavPanel() {
+  ImGui::Begin("Nav (debug)");
+  ImGui::Checkbox("show navmesh", &nav_show_mesh_);
+  if (nav_show_mesh_) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%zu cells)", nav_cells_.size());
+  }
+  ImGui::Checkbox("pick path (click 2 points)", &nav_pick_mode_);
+  if (nav_a_) ImGui::Text("A: %.1f, %.1f", nav_a_->x, nav_a_->y);
+  if (nav_a_ && nav_b_) {
+    ImGui::Text("B: %.1f, %.1f", nav_b_->x, nav_b_->y);
+    if (nav_path_.reachable) {
+      ImGui::Text("cost %.1f  (%zu waypoints)", nav_path_.cost,
+                  nav_path_.waypoints_xz.size() / 2);
+    } else {
+      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "unreachable");
+    }
+  }
+  if (ImGui::Button("clear path")) {
+    nav_a_.reset();
+    nav_b_.reset();
+  }
+  ImGui::End();
 }
 
 void AiSandboxView::DrawInspector() {
