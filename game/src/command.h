@@ -33,6 +33,7 @@ enum class CommandKind : int32_t {
     Deposit,     // tax collector banks its carry into player gold, then despawns
     AttackBuilding,  // monster swings at a building (target_id); razes it at 0 hp
     Shoot,           // hunter shoots a specific target entity (target_id = slot)
+    Chat,            // two heroes start a conversation (target_id = partner slot)
 };
 
 // The log is exposed verbatim through Sim::CommandLog(), so the two enums are
@@ -63,6 +64,8 @@ static_assert(static_cast<int32_t>(CommandKind::AttackBuilding) ==
               static_cast<int32_t>(CommandKindId::AttackBuilding));
 static_assert(static_cast<int32_t>(CommandKind::Shoot) ==
               static_cast<int32_t>(CommandKindId::Shoot));
+static_assert(static_cast<int32_t>(CommandKind::Chat) ==
+              static_cast<int32_t>(CommandKindId::Chat));
 
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional
@@ -96,7 +99,12 @@ void apply_commands(BadlandsGame& game);
 // entity already has. Both read components that replay reproduces exactly, so a
 // live run and its replay emit identical command streams.
 void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target);
-void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior);
+// `duration_millis` rides along on SetBehavior(Think): it is how long the
+// deliberation pause lasts. Putting it IN the command is what makes the pause
+// replayable -- a replay does not re-draw the duration, it reads the one the
+// live run drew. Committing to any other activity clears the pause.
+void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
+                          int64_t duration_millis = 0);
 
 // Replay: enqueues + applies every command in game.replay_log stamped at or
 // before the current game.world_millis, advancing game.replay_cursor. game_tick

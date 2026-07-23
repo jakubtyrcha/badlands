@@ -9,6 +9,8 @@
 
 #include "badlands_sim.hpp"  // VisionField, VisionLevel
 
+#include <glm/glm.hpp>
+
 #include <cstdint>
 #include <vector>
 
@@ -28,6 +30,24 @@ struct VisionGrid {
     std::vector<uint8_t> back;
 
     bool configured() const { return nx > 0 && nz > 0; }
+
+    bool in_grid(int i, int j) const { return i >= 0 && i < nx && j >= 0 && j < nz; }
+
+    // Cumulative knowledge: has this texel EVER been seen? Out-of-grid reads as
+    // false -- off the map is not undiscovered territory, and conflating the
+    // two would send explorers over the edge of the world.
+    bool discovered(int i, int j) const {
+        if (!in_grid(i, j)) {
+            return false;
+        }
+        return front[2 * (static_cast<size_t>(j) * static_cast<size_t>(nx) +
+                          static_cast<size_t>(i))] != 0;
+    }
+
+    glm::vec2 texel_center(int i, int j) const {
+        return {world_min_x + (static_cast<float>(i) + 0.5f) * texel_m,
+                world_min_z + (static_cast<float>(j) + 0.5f) * texel_m};
+    }
 };
 
 // (Re)allocate the grid to cover [world_min, world_min+world_size) per axis at

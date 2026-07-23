@@ -74,6 +74,15 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             if (e != entt::null) {
                 if (auto* sim = game.registry.try_get<HeroSimulationState>(e)) {
                     sim->behavior = cmd.param_a;
+                    // Starting a deliberation pause sets its deadline;
+                    // committing to anything else cancels one in progress. Both
+                    // derive from the command, so replay reproduces the pause
+                    // without re-drawing its length.
+                    sim->think_until_millis =
+                        (cmd.param_a == static_cast<int32_t>(ActivityId::Think) &&
+                         cmd.param_b > 0)
+                            ? game.world_millis + cmd.param_b
+                            : 0;
                 } else if (auto* cs = game.registry.try_get<CritterState>(e)) {
                     cs->behavior = cmd.param_a;
                 } else if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
@@ -169,6 +178,35 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             cd.remaining = stats.attack_cooldown;
             return 0;
         }
+        case CommandKind::Chat: {
+            // Start a conversation. Authoritative: the brain gates on distance,
+            // but the handler re-checks everything, because it is the single
+            // point where the session comes into existence. The session lands
+            // on BOTH heroes from this one command -- the partner's own Chat
+            // command (if it emits one) then harmlessly no-ops.
+            entt::entity a = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            entt::entity b = entity_for_slot(game, static_cast<int32_t>(cmd.target_id));
+            if (a == entt::null || b == entt::null || a == b) {
+                return 0;
+            }
+            if (!game.registry.all_of<HeroSimulationState>(a) ||
+                !game.registry.all_of<HeroSimulationState>(b)) {
+                return 0;  // only heroes converse
+            }
+            if (game.registry.any_of<InsideBuilding, ChattingState>(a) ||
+                game.registry.any_of<InsideBuilding, ChattingState>(b)) {
+                return 0;  // hidden, or already talking to someone else
+            }
+            const float d = glm::distance(game.registry.get<Position>(a).pos,
+                                          game.registry.get<Position>(b).pos);
+            if (d > game.factors.hero.chat_radius) {
+                return 0;  // drifted apart before the command applied
+            }
+            const float duration = game.factors.hero.chat_duration;
+            game.registry.emplace<ChattingState>(a, cmd.target_id, duration);
+            game.registry.emplace<ChattingState>(b, cmd.actor, duration);
+            return 0;
+        }
     }
     return -1;
 }
@@ -187,14 +225,23 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target) {
     if (e == entt::null) {
         return;
     }
+    // Re-stating a goal that has not meaningfully moved is not a decision. The
+    // epsilon (not exact equality) matters for hold-position activities: a
+    // character standing still while Idle/Think/Chat is nudged a hair by unit
+    // separation each tick, and exact comparison would put one MoveTo per tick
+    // in the trace for as long as it stood there. Well below plan_paths'
+    // kGoalMovedThreshold, so it never suppresses a real repath.
+    constexpr float kGoalEpsilon = 0.05f;
     const MoveTarget& mt = game.registry.get<MoveTarget>(e);
-    if (mt.kind == MoveTarget::Kind::Point && mt.point == target) {
+    if (mt.kind == MoveTarget::Kind::Point &&
+        glm::distance(mt.point, target) <= kGoalEpsilon) {
         return;  // already walking there — not a new decision
     }
     game.command_queue.push_back({CommandKind::MoveTo, slot, UINT32_MAX, target});
 }
 
-void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior) {
+void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
+                          int64_t duration_millis) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
         return;
@@ -213,8 +260,12 @@ void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior) {
     if (current == behavior) {
         return;  // unchanged -- not a decision
     }
-    game.command_queue.push_back(
-        {CommandKind::SetBehavior, slot, UINT32_MAX, {0.0f, 0.0f}, behavior});
+    game.command_queue.push_back({CommandKind::SetBehavior,
+                                  slot,
+                                  UINT32_MAX,
+                                  {0.0f, 0.0f},
+                                  behavior,
+                                  static_cast<int32_t>(duration_millis)});
 }
 
 void apply_replay_commands(BadlandsGame& game) {

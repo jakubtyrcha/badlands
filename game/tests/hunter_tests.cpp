@@ -119,8 +119,10 @@ TEST_CASE("only a hunter hunts; a mercenary ignores deer") {
 TEST_CASE("a hunter runs down a deer and kills it") {
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
-    uint32_t deer = spawn_deer(g, {6.0f, 0.0f});
-    uint32_t hunter = spawn_hunter(g, {0.0f, 0.0f});
+    // On the plains: the map origin is the central lake, which terrain blocking
+    // makes impassable, so a chase staged there would never close.
+    uint32_t deer = spawn_deer(g, {6.0f, kCastleSpawnZ});
+    uint32_t hunter = spawn_hunter(g, {0.0f, kCastleSpawnZ});
     entt::entity de = g.slots[deer];
 
     tick_world(g, 1.0f / 30.0f);
@@ -138,9 +140,12 @@ TEST_CASE("a hunter runs down a deer and kills it") {
     CHECK(killed);  // chased down and shot dead
 }
 
-TEST_CASE("a tired hunter rests instead of hunting") {
-    // Hunt is tiered below GoHome: survival wins. Recruit at a camp so the
-    // hunter has a home to return to.
+TEST_CASE("a hunter hunts while it can, and rests once spent") {
+    // No tier decides this: a rested hunter with prey in sight hunts; a spent
+    // one goes home even with the deer right there. The crossover is need x
+    // weight -- the hunter keeps at the job until fatigue is low enough that
+    // rest's urgency overtakes Hunt's flat pull. Recruit at a camp so it has a
+    // home to return to.
     auto owned = make_world(nullptr);
     BadlandsGame& g = *owned;
     uint32_t camp = place(g, BuildingKind::HuntersCamp, -20.0f, 20.0f);
@@ -149,10 +154,23 @@ TEST_CASE("a tired hunter rests instead of hunting") {
     uint32_t hid = static_cast<uint32_t>(dispatch_into(g, recruit));
     entt::entity e = g.slots[hid];
 
-    spawn_deer(g, g.registry.get<Position>(e).pos + glm::vec2{5.0f, 0.0f});  // prey right there
-    g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;                    // exhausted
-    g.world_millis = kMillisPerDay / 2;                                       // daytime
+    // Away from the camp door, or the hunter walks straight in on the first
+    // tick and is hidden before the second decision happens.
+    g.registry.get<Position>(e).pos = {0.0f, 0.0f};
+    spawn_deer(g, {5.0f, 0.0f});          // prey right there
+    g.world_millis = kMillisPerDay / 2;   // daytime
+    SimFactors off = g.factors;
+    off.hero.think_max_millis = 0;        // not a test about deliberation
+    set_factors_of(g, off);
 
+    // Rested: it hunts.
+    g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;
+    tick_world(g, 1.0f / 30.0f);
+    CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
+          static_cast<int32_t>(Behavior::Hunt));
+
+    // Spent: rest's urgency now dominates, and it heads home despite the prey.
+    g.registry.get<HeroSimulationState>(e).fatigue = 0.05f;
     tick_world(g, 1.0f / 30.0f);
     CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
           static_cast<int32_t>(Behavior::GoHome));

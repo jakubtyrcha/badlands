@@ -25,11 +25,19 @@ namespace badlands {
 //
 // Expected shape (values shown are the compiled defaults):
 //   { "hero": { "fatigue_go_home": 0.6, "fatigue_night": 0.2,
-//               "boredom_tavern": 0.5, "roam_radius": 6.0 } }
+//               "boredom_tavern": 0.5, "roam_radius": 6.0,
+//               "weights": { "Hunter": { "Hunt": 4.5 } } } }
+//
+// "weights" is the per-class activity preference table (badlands::
+// ActivityWeights), keyed by hero class NAME and activity NAME (see
+// HeroClassName / ActivityCatalog) rather than by their numeric ids. An unknown
+// class or activity name is an error for the same reason a non-numeric value
+// is: it is a typo that would otherwise silently tune nothing.
 //
 // Returns false (after logging) on a missing/unreadable file, unparseable JSON,
-// a non-object section, or a non-numeric value. `out` is left untouched on
-// failure, so a bad file falls back to defaults rather than to garbage.
+// a non-object section, a non-numeric value, or an unknown weight key. `out` is
+// left untouched on failure, so a bad file falls back to defaults rather than
+// to garbage.
 bool LoadSimFactors(const std::string& manifest_path, SimFactors& out);
 
 }  // namespace badlands

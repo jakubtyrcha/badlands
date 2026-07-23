@@ -16,6 +16,11 @@ constexpr int kMaxTicks = 3000;  // 100 sim-seconds; the duel resolves in ~10
 
 // The Stage-2 duelists — canonical stats live in the engine
 // (badlands::MercenaryDesc/GoblinDesc), shared with the Rust app.
+// Duels are fought on the plains by the colony seat. The map ORIGIN is the
+// middle of the central lake, and terrain blocking means nobody can walk there
+// -- a duel staged at (0,0) never closes to melee range.
+inline constexpr float kDuelGroundZ = badlands::kCastleSpawnZ;
+
 inline badlands::CharacterDesc mercenary(float x, float z) {
     return badlands::MercenaryDesc(x, z);
 }

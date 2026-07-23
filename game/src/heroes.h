@@ -17,6 +17,8 @@ struct BadlandsGame;
 
 namespace badlands {
 
+struct InsideBuilding;  // components.h; used only by reference below
+
 // HeroClassId (HERO_MERCENARY ...) is declared in badlands_sim.hpp -- it is the
 // public "class type id" the recruit UI reads off BuildingDef::recruits.
 
@@ -64,8 +66,33 @@ bool hero_enter(BadlandsGame& game, entt::entity e, int kind);  // nearest-of-ki
 bool hero_enter_home(BadlandsGame& game, entt::entity e);       // resting empties inventory
 bool hero_buy(BadlandsGame& game, entt::entity e);              // fill inventory at an apothecary
 
-// Tick sub-pass: decrement InsideBuilding timers; on expiry reappear at the
-// approach tile and drop the component.
-void advance_inside_timers(BadlandsGame& game, float dt);
+// Should this hero stop being inside its building this tick?
+//
+// THE extension point for "what pulls a hero back out". Today the only answer
+// is "the need it went in for is full" -- there is no duration anywhere, so how
+// long a stay lasts falls out of how depleted the hero was and how fast the
+// reserve refills (both HeroFactors, both live).
+//
+// Future reasons belong here and nowhere else: the home under attack, a threat
+// outside the door, being summoned, dawn. It is system-side rather than a brain
+// decision because a hidden hero is excluded from perception and movement, so
+// it cannot see any of that for itself.
+bool should_leave_building(const BadlandsGame& game, entt::entity e,
+                           const InsideBuilding& inside);
+
+// Tick sub-pass: evaluate should_leave_building for everyone inside; those that
+// should reappear at the approach tile and drop the component.
+void advance_inside(BadlandsGame& game);
+
+// Tick sub-pass: run conversations and dissolve the ones that are over.
+//
+// A session is created ONLY by the Chat command, but it ends by SYSTEM RULE --
+// expiry, the partner dying or being hidden, the pair drifting apart, or a
+// threat arriving. That asymmetry is deliberate and mirrors MeleeLock: starting
+// a conversation is a decision worth recording, ending one is a consequence of
+// the world, and running it as a rule means a replay dissolves it identically
+// without the log having to carry an event for it. Both sides always leave
+// together, so a half-session cannot exist.
+void advance_chats(BadlandsGame& game, float dt);
 
 }  // namespace badlands

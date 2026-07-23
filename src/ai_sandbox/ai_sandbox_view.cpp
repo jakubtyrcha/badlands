@@ -86,22 +86,18 @@ constexpr TownBuilding kTown[] = {
 constexpr int kSeedHeroesPerGuild = 3;
 constexpr int kSeedDeer = 6;
 
-// Human-readable badlands::Behavior (game/src/town_brain.h). The sandbox is a
-// consumer of the ABI, so it mirrors the id space rather than including the
-// sim's internal header.
-const char* behavior_name(int32_t behavior) {
-  switch (behavior) {
-    case 0: return "Idle";
-    case 1: return "Roam";
-    case 2: return "Buy";
-    case 3: return "GoHome";
-    case 4: return "VisitTavern";
-    case 5: return "Combat";
-    case 6: return "Graze";
-    case 7: return "VisitTax";
-    case 8: return "Deposit";
-    case 9: return "Hunt";
-    default: return "-";
+// Activity names come from badlands::ActivityCatalog() -- the sim's own single
+// source of truth. This used to be a hand-mirrored switch, which silently
+// returned "-" for every activity added after it was written; the catalog
+// cannot rot that way.
+const char* behavior_name(int32_t behavior) { return badlands::ActivityName(behavior); }
+
+// Band label, for grouping the statistics panel.
+const char* band_name(badlands::ActivityBand band) {
+  switch (band) {
+    case badlands::ActivityBand::Danger: return "danger";
+    case badlands::ActivityBand::Normal: return "normal";
+    default: return "?";
   }
 }
 
@@ -131,6 +127,7 @@ const char* command_name(badlands::CommandKindId kind) {
     case badlands::CommandKindId::Deposit: return "Deposit";
     case badlands::CommandKindId::AttackBuilding: return "AttackBuilding";
     case badlands::CommandKindId::Shoot: return "Shoot";
+    case badlands::CommandKindId::Chat: return "Chat";
     default: return "?";
   }
 }
@@ -535,8 +532,8 @@ void AiSandboxView::DrawInspector() {
         ImGui::Text("(%.0f, %.0f) +%d", c.goal_x, c.goal_z, c.path_waypoints);
       }
       ImGui::TableNextColumn();
-      if (c.archetype == 0) {  // hero: show drives
-        ImGui::Text("f%.2f b%.2f", c.fatigue, c.boredom);
+      if (c.archetype == 0) {  // hero: show need reserves (1 = satisfied)
+        ImGui::Text("f%.2f c%.2f", c.fatigue, c.content);
       } else {
         ImGui::TextUnformatted("-");
       }
@@ -544,6 +541,60 @@ void AiSandboxView::DrawInspector() {
       ImGui::Text("%d", c.inside_building_id);
     }
     ImGui::EndTable();
+  }
+
+  // --- goal statistics --------------------------------------------------
+  // What the sim has SPENT ITS TIME ON, which is the thing a glance at the
+  // entity table cannot tell you. Shares rather than raw counts, so the numbers
+  // stay comparable as a run gets longer.
+  ImGui::SeparatorText("Goal histogram");
+  {
+    const badlands::ActivityHistogram& stats = sim_.ActivityStats();
+    const uint64_t samples = stats.Samples();
+    ImGui::Text("%llu entity-ticks", static_cast<unsigned long long>(samples));
+    ImGui::SameLine();
+    if (ImGui::SmallButton("reset")) {
+      sim_.ResetActivityStats();
+    }
+
+    if (samples > 0 &&
+        ImGui::BeginTable("goals", 3 + badlands::HERO_CLASS_COUNT,
+                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+      ImGui::TableSetupColumn("activity");
+      ImGui::TableSetupColumn("band");
+      ImGui::TableSetupColumn("all");
+      for (int32_t c = 0; c < badlands::HERO_CLASS_COUNT; ++c) {
+        ImGui::TableSetupColumn(
+            badlands::HeroClassName(static_cast<badlands::HeroClassId>(c)));
+      }
+      ImGui::TableHeadersRow();
+
+      for (const badlands::ActivityInfo& info : badlands::ActivityCatalog()) {
+        const uint64_t total = stats.Total(info.id);
+        if (total == 0) {
+          continue;  // never once chosen -- omit rather than pad the table
+        }
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(info.name);
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(band_name(info.band));
+        ImGui::TableNextColumn();
+        ImGui::Text("%5.1f%%", 100.0 * static_cast<double>(total) /
+                                   static_cast<double>(samples));
+        for (int32_t c = 0; c < badlands::HERO_CLASS_COUNT; ++c) {
+          ImGui::TableNextColumn();
+          const uint64_t n =
+              stats.ForClass(static_cast<badlands::HeroClassId>(c), info.id);
+          if (n == 0) {
+            ImGui::TextUnformatted("-");
+          } else {
+            ImGui::Text("%llu", static_cast<unsigned long long>(n));
+          }
+        }
+      }
+      ImGui::EndTable();
+    }
   }
 
   // --- the trace of record ---------------------------------------------

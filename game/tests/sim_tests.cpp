@@ -82,7 +82,7 @@ TEST_CASE("SetPathfinder back-fills every alive building") {
 
 TEST_CASE("Characters() echoes the spawn descriptor") {
     badlands::Sim sim(nullptr);
-    badlands::CharacterDesc desc = mercenary(-8.0f, -12.0f);
+    badlands::CharacterDesc desc = mercenary(-8.0f, kDuelGroundZ);
     uint32_t id = sim.Spawn(desc);
 
     auto rows = sim.Characters();
@@ -99,8 +99,11 @@ TEST_CASE("Characters() echoes the spawn descriptor") {
 
 TEST_CASE("movement is clamped to move_speed * dt") {
     badlands::Sim sim(nullptr);
-    badlands::CharacterDesc a = dummy(0.0f, 0.0f, 0);
-    badlands::CharacterDesc b = dummy(10.0f, 0.0f, 1);
+    // On the plains, not the lake at the origin: with terrain blocking a unit
+    // told to walk across water simply does not move, and this case is about
+    // the speed clamp.
+    badlands::CharacterDesc a = dummy(0.0f, kDuelGroundZ, 0);
+    badlands::CharacterDesc b = dummy(10.0f, kDuelGroundZ, 1);
     sim.Spawn(a);
     sim.Spawn(b);
 
@@ -110,7 +113,7 @@ TEST_CASE("movement is clamped to move_speed * dt") {
     REQUIRE(rows.size() == 2);
     float step = a.move_speed * kTickDt;
     CHECK_THAT(rows[0].pos_x, Catch::Matchers::WithinAbs(step, 1e-4f));
-    CHECK(rows[0].pos_z == 0.0f);
+    CHECK(rows[0].pos_z == kDuelGroundZ);  // closes along X only
     CHECK_THAT(rows[1].pos_x, Catch::Matchers::WithinAbs(10.0f - step, 1e-4f));
 }
 
@@ -167,8 +170,8 @@ TEST_CASE("Characters() reports every spawned entity, no cap") {
 
 TEST_CASE("Stage-2 duel resolves with mock brains") {
     badlands::Sim sim(nullptr);
-    badlands::CharacterDesc merc = mercenary(-8.0f, -12.0f);
-    badlands::CharacterDesc gob = goblin(8.0f, -12.0f);
+    badlands::CharacterDesc merc = mercenary(-8.0f, kDuelGroundZ);
+    badlands::CharacterDesc gob = goblin(8.0f, kDuelGroundZ);
     uint32_t merc_id = sim.Spawn(merc);
     sim.Spawn(gob);
 

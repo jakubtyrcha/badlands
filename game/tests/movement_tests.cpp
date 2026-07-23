@@ -83,7 +83,7 @@ glm::vec2 pos_of(BadlandsGame* game, uint32_t id) {
 }  // namespace
 
 TEST_CASE("plan/follow drive a unit to a clear point") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame* game = owned.get();
     StubNav nav;
     Pathfinder pf = stub_pathfinder(nav);
@@ -105,7 +105,7 @@ TEST_CASE("plan/follow drive a unit to a clear point") {
 }
 
 TEST_CASE("follow_paths tracks a scripted multi-waypoint route without cutting the corner") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame* game = owned.get();
     StubNav nav;
     nav.scripted = {{10.0f, 10.0f}, {10.0f, 16.0f}, {16.0f, 16.0f}};  // L around a wall
@@ -201,7 +201,7 @@ TEST_CASE("plan_paths repaths when nav_epoch bumps") {
 }
 
 TEST_CASE("mock duel resolves through the movement pipeline and engages melee lock") {
-    auto owned = make_world(nullptr);  // mock brains
+    auto owned = make_flat_world();  // mock brains
     BadlandsGame* game = owned.get();
     StubNav nav;
     Pathfinder pf = stub_pathfinder(nav);

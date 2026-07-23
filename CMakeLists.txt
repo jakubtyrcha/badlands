@@ -257,13 +257,18 @@ add_library(badlands_game_lib STATIC
     game/src/heroes.cpp
     game/src/needs.cpp
     game/src/town_brain.cpp
+    game/src/activity_catalog.cpp
+    game/src/activity_histogram.cpp
     game/src/behaviours/blocks.cpp
     game/src/behaviours/selectors.cpp
+    game/src/behaviours/perception.cpp
+    game/src/behaviours/deliberation.cpp
     game/src/critter_brain.cpp
     game/src/townfolk_brain.cpp
     game/src/monster_brain.cpp
     game/src/economy.cpp
     game/src/vision.cpp
+    game/src/exploration.cpp
     game/src/noiser_jit_stubs.cpp
     third_party/noiser/noiser-vm/src/noiser.cpp
     third_party/noiser/noiser-vm/src/noiser_crash.cpp
@@ -551,6 +556,11 @@ add_executable(badlands_game_tests
     game/tests/determinism_tests.cpp
     game/tests/archetype_tests.cpp
     game/tests/behaviours_tests.cpp
+    game/tests/activity_selector_tests.cpp
+    game/tests/deliberation_tests.cpp
+    game/tests/chat_tests.cpp
+    game/tests/exploration_tests.cpp
+    game/tests/activity_stats_tests.cpp
     game/tests/critter_tests.cpp
     game/tests/townfolk_tests.cpp
     game/tests/rat_tests.cpp
@@ -966,6 +976,11 @@ add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_test
 add_executable(badlands_factors_manifest_tests
     src/game/tests/factors_manifest_tests.cpp
     src/game/factors_manifest.cpp
+    # The AI vocabulary tables (activity catalog + default weights + hero class
+    # names). Depends on badlands_sim.hpp alone, so it links here without
+    # dragging in the sim -- which is why this target stays lean.
+    game/src/activity_catalog.cpp
+    game/src/activity_histogram.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_factors_manifest_tests PRIVATE

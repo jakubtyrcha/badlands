@@ -144,6 +144,12 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
     return game;
 }
 
+std::unique_ptr<BadlandsGame> make_flat_world() {
+    auto game = make_world(nullptr);
+    game->terrain_blocking = false;
+    return game;
+}
+
 void tick_world(BadlandsGame& g, float dt) {
     auto& registry = g.registry;
 
@@ -158,12 +164,18 @@ void tick_world(BadlandsGame& g, float dt) {
         cooldown.remaining = std::max(0.0f, cooldown.remaining - dt);
     }
 
-    // Reappear hidden heroes whose stay has elapsed, before they think again.
-    advance_inside_timers(g, dt);
-
-    // Needs system: fatigue/boredom rise for active (non-hidden) heroes, so
-    // brains this tick see fresh values.
+    // Needs first: reserves drain (and refill, for anyone inside) before
+    // anything looks at them, so a hero whose sleep just topped out is released
+    // by advance_inside on the same tick rather than one later.
     advance_needs(g);
+
+    // Release hidden heroes whose reason for being inside is over.
+    advance_inside(g);
+
+    // Run conversations and dissolve the finished ones, before think, so a hero
+    // whose companion just left decides afresh this very tick rather than
+    // standing about for one more.
+    advance_chats(g, dt);
 
     // Town economy + population: midnight tax accrual, then periodic spawning
     // (tax collectors from the castle). Deterministic clock-driven systems, so
@@ -329,6 +341,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
         const auto& health = g.registry.get<Health>(e);
         const auto& shape = g.registry.get<RenderShape>(e);
         const auto* sim = g.registry.try_get<HeroSimulationState>(e);
+        const auto* hero = g.registry.try_get<HeroCharacter>(e);
         const auto* disp = g.registry.try_get<HeroDisplayState>(e);
         const auto* crit = g.registry.try_get<CritterState>(e);
         const auto* tax = g.registry.try_get<TaxCollectorState>(e);
@@ -371,7 +384,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
                                       ? g.registry.get<InsideBuilding>(e).building_id
                                       : -1,
             .fatigue = sim ? sim->fatigue : 0.0f,
-            .boredom = sim ? sim->boredom : 0.0f,
+            .content = sim ? sim->content : 0.0f,
             .behavior = sim ? sim->behavior
                             : (crit ? crit->behavior : (tax ? tax->behavior : -1)),
             .goal_kind = mt ? static_cast<int32_t>(mt->kind) : 0,
@@ -385,6 +398,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
                 sim ? Archetype::Hero
                     : (crit ? Archetype::Critter
                             : (tax ? Archetype::Townfolk : Archetype::Monster))),
+            .hero_class = hero ? hero->hero_class : -1,
             .facing_x = facing.x,
             .facing_z = facing.y,
             .vision_radius = vis_radius,
@@ -487,7 +501,14 @@ Sim::Sim(Sim&&) noexcept = default;
 Sim& Sim::operator=(Sim&&) noexcept = default;
 
 uint32_t Sim::Spawn(const CharacterDesc& desc) { return spawn_into(*world_, desc); }
-void Sim::Tick(float dt) { tick_world(*world_, dt); }
+void Sim::Tick(float dt) {
+    tick_world(*world_, dt);
+    // Goal statistics are folded HERE, in the wrapper, from the very rows an
+    // observer would read -- never inside tick_world. Counting is an
+    // observation of the sim, not a part of it; see ActivityHistogram.
+    characters_of(*world_, stats_scratch_);
+    activity_stats_.Accumulate(stats_scratch_);
+}
 bool Sim::ReloadScript(const std::string& source) { return reload_script(*world_, source); }
 int64_t Sim::Dispatch(const Action& action) { return dispatch_into(*world_, action); }
 

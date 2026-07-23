@@ -10,29 +10,27 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
+
+#include "badlands_sim.hpp"     // badlands::ActivityId (the shared id space)
+#include "behaviours/blocks.h"  // badlands::ActivityDef
 
 struct BadlandsGame;
 
 namespace badlands {
 
-// The chosen behaviour for one tick (also recorded in HeroSimulationState for
-// inspection). Shared id space with the noiser brain's behaviour report.
-enum class Behavior : int32_t {
-    Idle = 0,
-    Roam,
-    Buy,
-    GoHome,
-    VisitTavern,
-    Combat,
-    Graze,
-    VisitTax,
-    Deposit,
-    Hunt,
-};
+// `badlands::Behavior` (the chosen activity for one tick, recorded in
+// HeroSimulationState for inspection) is an alias of the public ActivityId,
+// declared in behaviours/world_view.h so the whole behaviour layer shares it.
 
 // Decide + enqueue commands for the hero in `slot` (no enemy case). Reads its
 // needs/time/world; writes HeroSimulationState.behavior; enqueues a MoveTo plus
 // an optional enter/buy command that the handler gates on arrival.
 void town_think(BadlandsGame& game, uint32_t slot);
+
+// The SHIPPING hero activity table, shared by every class (a class differs only
+// in its weights). Exposed so tests and tools exercise the real table rather
+// than a copy that can silently drift out of step with it.
+std::span<const ActivityDef> hero_activities();
 
 }  // namespace badlands

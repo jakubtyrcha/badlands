@@ -64,14 +64,14 @@ TEST_CASE("snapshots expose the clock and per-hero needs (observation ABI)") {
     CHECK(w.world_millis == g->world_millis);
 
     g->registry.get<badlands::HeroSimulationState>(g->slots[hid]).fatigue = 0.4f;
-    g->registry.get<badlands::HeroSimulationState>(g->slots[hid]).boredom = 0.6f;
+    g->registry.get<badlands::HeroSimulationState>(g->slots[hid]).content = 0.6f;
     g->registry.get<badlands::HeroSimulationState>(g->slots[hid]).behavior =
         static_cast<int32_t>(badlands::Behavior::VisitTavern);
 
     const std::vector<CharacterState> rows = characters_of(*g);
     REQUIRE(rows.size() >= 1);
     CHECK(rows[0].fatigue == Catch::Approx(0.4f));
-    CHECK(rows[0].boredom == Catch::Approx(0.6f));
+    CHECK(rows[0].content == Catch::Approx(0.6f));
     CHECK(rows[0].behavior == static_cast<int32_t>(badlands::Behavior::VisitTavern));
     CHECK(rows[0].name[0] != '\0');  // heroes are named for the panel
 

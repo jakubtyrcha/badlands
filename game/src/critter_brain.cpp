@@ -2,6 +2,7 @@
 
 #include "badlands_sim.hpp"
 #include "behaviours/blocks.h"
+#include "behaviours/perception.h"
 #include "behaviours/selectors.h"
 #include "behaviours/world_view.h"
 #include "brain.h"
@@ -27,28 +28,6 @@ constexpr int kRoamBiomeTries = 6;
 
 bool good_biome(mapgen::Biome b) {
     return b == mapgen::Biome::Forest || b == mapgen::Biome::Plains;
-}
-
-// Nearest non-critter entity within `max_dist` -- what a deer flees. "Critter"
-// is the Brain kind, so deer ignore each other and bolt from heroes / townfolk /
-// monsters alike. Perception only: this reads the registry so blocks never do.
-bool nearest_threat(const BadlandsGame& game, entt::entity self, glm::vec2 pos, float max_dist,
-                    glm::vec2& out_pos, float& out_dist) {
-    float best = max_dist;
-    bool found = false;
-    for (auto [e, p, brain] : game.registry.view<const Position, const Brain>().each()) {
-        if (e == self || brain.kind == BrainKind::Critter) {
-            continue;
-        }
-        const float d = glm::distance(p.pos, pos);
-        if (d <= best) {
-            best = d;
-            out_pos = p.pos;
-            found = true;
-        }
-    }
-    out_dist = found ? best : 0.0f;
-    return found;
 }
 
 // A wander goal biased toward Forest/Plains: draw the deterministic ring point,
@@ -80,18 +59,25 @@ WorldView observe_critter(const BadlandsGame& game, uint32_t slot, entt::entity 
         static_cast<int64_t>((1.0f - cf.graze_fraction) * static_cast<float>(kRoamLeaseMillis));
     v.grazing = phase >= graze_start;
 
-    v.has_threat =
-        nearest_threat(game, e, v.pos, cf.sight_radius, v.threat_pos, v.threat_dist);
+    // Deer bolt from anything that is not another deer -- heroes, tax
+    // collectors and rats alike. Same shared helper a hero uses for hostiles;
+    // only the policy differs.
+    collect_threats(game, e, v.pos, cf.sight_radius, ThreatPolicy::NotMyKind, v);
     v.roam_goal = biome_roam_goal(game, slot, v.roam_epoch, st.roam_anchor, cf.roam_radius);
     return v;
 }
 
-// Priority order: bolt first, then graze in place, then wander, else idle.
-constexpr std::array<Candidate, 4> kCritterBlocks{{
-    {score_flee, act_flee},
-    {score_graze, act_graze},
-    {score_roam, act_roam},
-    {score_idle, act_idle},
+// A deer's activity table. Note what is NOT here: no critter-specific selector,
+// no critter-specific scoring rule. It runs the same select_banded over the
+// same shared blocks as a hero -- only this table and CritterFactors::weights
+// differ. Fleeing sits in the Danger band, so no graze/roam weight can ever
+// out-argue a threat, which is the band hierarchy doing its job for a second
+// archetype without a line of new logic.
+constexpr std::array<ActivityDef, 4> kCritterActivities{{
+    {ActivityId::Flee, ActivityBand::Danger, score_flee, act_flee},
+    {ActivityId::Graze, ActivityBand::Normal, score_graze, act_graze},
+    {ActivityId::Roam, ActivityBand::Normal, score_roam, act_roam},
+    {ActivityId::Idle, ActivityBand::Normal, score_idle, act_idle},
 }};
 
 }  // namespace
@@ -102,7 +88,8 @@ void critter_think(BadlandsGame& game, uint32_t slot) {
         return;
     }
     const WorldView view = observe_critter(game, slot, e);
-    const BehaviourResult r = select_priority(kCritterBlocks, view, game.factors);
+    const BehaviourResult r =
+        select_banded(kCritterActivities, game.factors.critter.weights, view, game.factors);
 
     // Both the chosen behaviour (inspection) and the walk goal (the decision)
     // go through the command layer, edge-triggered, like every other mutation.

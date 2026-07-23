@@ -74,7 +74,7 @@ int discovered_texels(const BadlandsGame& g) {
 }  // namespace
 
 TEST_CASE("facing tracks the direction of travel and is surfaced in the snapshot") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     uint32_t hero = spawn_hero(g, {0.0f, 0.0f});
     entt::entity e = g.slots[hero];
@@ -101,7 +101,7 @@ TEST_CASE("facing tracks the direction of travel and is surfaced in the snapshot
 }
 
 TEST_CASE("facing equals the normalized displacement actually moved") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     uint32_t hero = spawn_hero(g, {5.0f, -5.0f});
     entt::entity e = g.slots[hero];

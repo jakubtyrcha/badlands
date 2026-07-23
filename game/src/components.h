@@ -15,7 +15,6 @@ namespace badlands {
 
 // --- v0.3 town/hero tunables ------------------------------------------------
 constexpr int kInventoryCap = 2;                 // elixirs a hero can carry
-constexpr float kInsideDurationSeconds = 3.0f;   // time hidden inside a building
 constexpr float kEntranceRadius = 0.6f;          // how close to a door to enter
 
 // --- day/night clock (integer milliseconds, fixed 30 Hz) --------------------
@@ -41,14 +40,21 @@ inline uint32_t day_count(int64_t world_millis) {
 }
 inline bool is_night(float tod) { return tod >= kNightStart || tod < kNightEnd; }
 
-// --- needs growth (policy placeholders) -------------------------------------
-// Per-tick deltas for fatigue/boredom. Deterministic (not dt-scaled). Defaults
-// sized so an unmet need saturates over roughly one day; boredom rises faster
-// so heroes seek the tavern before nightfall. These are tunable policy, not the
-// architecture.
-constexpr float kFatiguePerTick =
-    static_cast<float>(kMillisPerTick) / static_cast<float>(kMillisPerDay);
-constexpr float kBoredomPerTick = kFatiguePerTick * 2.0f;
+// One in-game hour of sim time. Need rates are authored in in-game hours (see
+// HeroFactors) and converted through here, so a factor says what it means.
+constexpr int64_t kMillisPerGameHour = kMillisPerDay / 24;
+
+// Per-tick delta that moves a 0..1 reserve the whole way in `hours` in-game
+// hours. Deterministic and not dt-scaled, like the clock itself. Non-positive
+// hours mean "instantly" (the whole reserve in one tick), which is what makes
+// a zero in the manifest behave sensibly rather than dividing by zero.
+inline float reserve_rate_per_tick(float hours) {
+    if (hours <= 0.0f) {
+        return 1.0f;
+    }
+    return static_cast<float>(kMillisPerTick) /
+           (hours * static_cast<float>(kMillisPerGameHour));
+}
 
 struct Position {
     glm::vec2 pos;  // XZ
@@ -125,16 +131,24 @@ struct HeroCharacter {
 };
 
 // Simulation (dynamic): per-tick hero state.
-//  - fatigue/boredom: day/night needs in [0,1] (0 = satisfied, rising over time)
+//  - fatigue/content: need RESERVES in [0,1] -- 1 is satisfied, 0 is spent.
+//    They drain on their own and are refilled by resting/being entertained.
+//    (So `fatigue == 1` means well rested; see HeroFactors for why the sense
+//    is uniform across needs rather than idiomatic per need.)
 //  - behavior: last chosen Behaviour id (inspection only; -1 = unknown)
 //  - inventory: collect-only elixir count in [0, kInventoryCap]
 //  - home_building_id: dedicated home = recruiting guild; -1 once homeless
 struct HeroSimulationState {
-    float fatigue = 0.0f;
-    float boredom = 0.0f;
+    float fatigue = 1.0f;
+    float content = 1.0f;
     int32_t behavior = -1;
     int32_t inventory = 0;
     int32_t home_building_id = -1;
+    // Deliberation: while world_millis is below this the hero is standing and
+    // thinking. Set by the SetBehavior handler from the command's duration (so
+    // the pause is IN the log and a replay reproduces it), and cleared by
+    // committing to any other activity.
+    int64_t think_until_millis = 0;
 };
 
 // Display: renderer/panel-facing.
@@ -162,16 +176,53 @@ struct TaxCollectorState {
     int32_t behavior = -1;          // last chosen Behavior, for inspection
 };
 
-// Present while a hero is hidden inside a building; `timer` counts down to the
-// reappear at the approach tile. Its presence excludes the hero from movement,
-// combat, and enemy targeting (but not from the game_state snapshot).
+// Present while a hero is hidden inside a building. Its presence excludes the
+// hero from movement, combat, and enemy targeting (but not from the snapshot).
+//
+// There is NO duration here, deliberately. How long a hero stays is not a
+// constant to be picked -- it is a consequence of why it went in and how
+// depleted it was: `purpose` names the need being refilled, the fill rate comes
+// from HeroFactors, and the hero leaves when that reserve is full. A hero that
+// crawled home at 0.1 fatigue sleeps most of the night; one that ducked in at
+// 0.8 is out again shortly.
+//
+// `should_leave_building` (heroes.h) owns the leave decision and is the single
+// place future reasons go -- home under attack, a threat outside, dawn. It has
+// to be system-side because a hidden hero is excluded from perception and so
+// cannot see any of that for itself.
 struct InsideBuilding {
     int32_t building_id;
-    float timer;
+    int32_t purpose;  // the ActivityId that sent them in (GoHome / VisitTavern)
 };
 
 // Present while a unit is locked in melee — movement is frozen (combat only).
 struct MeleeLock {};
+
+// The world refused a step: the character tried to walk into terrain it cannot
+// cross. Written by the movement system (systems may write the registry; brains
+// may not), read by perception, and acted on by whichever activity cares.
+//
+// This is the seam that decouples "where the AI decided to go" from "where the
+// character can actually get to". A brain is allowed to want the impossible --
+// it plans through unexplored ground it has no information about — and finding
+// out is an EVENT it reacts to, not a precondition it must check. It is never
+// cleared: `at_millis` says when it happened, and perception decides whether
+// that is still relevant (which keeps a stale blockage from vetoing forever).
+struct MoveBlocked {
+    glm::vec2 point{0.0f, 0.0f};  // where the step was refused
+    int64_t at_millis = 0;
+};
+
+// Present on BOTH heroes of a conversation. Created only by the Chat command
+// (so the pairing is in the trace and replays) and dissolved by advance_chats
+// as a system rule — expiry, the partner dying or wandering off, or a threat
+// arriving. Chatting refills `content` slowly and only up to a CEILING:
+// company is a weaker entertainment than the tavern, which is what makes the
+// tavern still worth walking to.
+struct ChattingState {
+    uint32_t partner_slot = UINT32_MAX;
+    float remaining = 0.0f;  // seconds left in the conversation
+};
 
 // --- v0.3 movement / pathfinding --------------------------------------------
 

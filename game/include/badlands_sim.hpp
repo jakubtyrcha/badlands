@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,92 @@ enum class Archetype : int32_t {
     Monster,    // combat; no needs
 };
 
+// ---- activities: the AI's goal vocabulary ----------------------------------
+//
+// Every decision a brain can take is an ActivityId. One id space, shared by the
+// sim, the command log (SetBehavior.param_a), the snapshot
+// (CharacterState.behavior), the statistics histogram, and any future noiser
+// brain -- so it is APPEND-ONLY: never renumber, never reuse.
+//
+// (game/src/town_brain.h aliases this as `badlands::Behavior`, the name the
+// sim internals have always used.)
+enum class ActivityId : int32_t {
+    Idle = 0,
+    Roam,
+    Buy,
+    GoHome,
+    VisitTavern,
+    Combat,
+    Graze,
+    VisitTax,
+    Deposit,
+    Hunt,
+    Flee,     // bolting from a threat (was reported as Roam)
+    Think,    // deliberating: an idle pause between goals
+    Explore,  // walking toward terra incognita
+    Chat,     // socializing with another hero (partial entertainment)
+    Count
+};
+inline constexpr int32_t kActivityCount = static_cast<int32_t>(ActivityId::Count);
+
+// TWO tiers, and deliberately only two.
+//
+// Danger is immediate danger -- a threat that pre-empts whatever you were
+// doing. Normal is everything else. There is no "productive vs filler"
+// classification and there must not be one: sorting activities into worthiness
+// categories makes the category, rather than the character's actual state,
+// decide what it does. Rest does not outrank a hunt because resting is a nobler
+// class of act; it outranks it because the hero is tired, and stops outranking
+// it once the hero is not.
+//
+// So within Normal, ordering comes from NEED: `weight x score`, where score is
+// an urgency curve over the character's reserves (see HeroFactors). Danger
+// exists purely so safety is structural -- no weight, however large, can keep a
+// character standing about while something bears down on it.
+enum class ActivityBand : int32_t {
+    Danger = 0,  // immediate danger: fight, flee, defend
+    Normal,      // everything else, ordered by need
+    Count
+};
+
+// One catalog row: an activity's stable identity, for inspection.
+struct ActivityInfo {
+    ActivityId id;
+    const char* name;  // stable inspection-facing label ("GoHome")
+    ActivityBand band;
+};
+
+// Every activity, indexed by id (ActivityCatalog()[i].id == ActivityId(i)).
+// The single source of truth for names + bands: UIs and statistics read this
+// instead of hardcoding a switch that silently rots when an activity is added.
+std::span<const ActivityInfo> ActivityCatalog();
+// Catalog lookup; out-of-range ids resolve to the Idle row.
+const ActivityInfo& ActivityInfoOf(int32_t id);
+// Convenience name lookup; "-" for an out-of-range id (e.g. a -1 "no decision
+// yet" from a snapshot row).
+const char* ActivityName(int32_t id);
+
+// Per-(class, activity) preference, indexed by ActivityId. Utility is
+// `weight * considerations`, compared only WITHIN a band -- so a weight
+// expresses "hunters explore constantly, apprentices almost never" without ever
+// letting exploration outrank danger. A weight of 0 removes the activity from
+// that class entirely, which is how classes get unique activity sets without
+// separate code paths (perception may skip its cost too).
+struct ActivityWeights {
+    float w[kActivityCount] = {};
+
+    float of(ActivityId id) const {
+        const int32_t i = static_cast<int32_t>(id);
+        return (i >= 0 && i < kActivityCount) ? w[i] : 0.0f;
+    }
+    void set(ActivityId id, float value) {
+        const int32_t i = static_cast<int32_t>(id);
+        if (i >= 0 && i < kActivityCount) {
+            w[i] = value;
+        }
+    }
+};
+
 // ---- tuning factors (data, not code) ---------------------------------------
 // Per-archetype behaviour tuning. The sim ships the defaults below, so it is
 // fully usable -- and unit-testable -- with no file present; an app may load
@@ -111,11 +198,72 @@ enum class Archetype : int32_t {
 // (state = f(seed, initial config, command log, N ticks)): a replay must use
 // the same factors, and the command log does not carry them.
 struct HeroFactors {
-    float fatigue_go_home = 0.6f;  // tired enough to head home by day
-    float fatigue_night = 0.2f;    // lower bar once it is night
-    float boredom_tavern = 0.5f;   // bored enough to seek the tavern
+    // --- needs: RESERVES in [0,1], where 1 is satisfied ---------------------
+    // Both drain on their own and are refilled by doing something about it.
+    // NB the sense of `fatigue`: it is a reserve like any other, so 1 means
+    // well rested and 0 means spent -- resting RAISES it. That reads backwards
+    // against the everyday word, but one consistent direction for every need is
+    // worth more than each one reading nicely on its own.
+    //
+    // Rates are in IN-GAME HOURS so the numbers say what they mean; needs.h
+    // converts to a per-tick delta in exactly one place. Every one of these is
+    // live: Sim::SetFactors takes effect on the next tick, mid-run.
+    float fatigue_drain_hours = 24.0f;  // 1 -> 0 with no sleep
+    float content_drain_hours = 12.0f;  // 1 -> 0 with no diversion
+    float rest_fill_hours = 4.0f;       // 0 -> 1 sleeping at home
+    float tavern_fill_hours = 8.0f;     // 0 -> 1 at the tavern
+
+    // Below this reserve a hero starts wanting to do something about it, and
+    // urgency ramps linearly from 0 at the threshold to 1 at empty. That
+    // urgency IS the activity's score, which is what makes what a hero does
+    // next fall out of how depleted it is rather than out of what KIND of
+    // activity it is.
+    float fatigue_seek = 0.55f;        // by day
+    float fatigue_seek_night = 0.90f;  // far readier to turn in after dark
+    float content_seek = 0.60f;
+    // A hurt hero wants to lie down whatever its reserves say.
+    float low_health_rest = 0.5f;  // hp fraction below which rest urges
+
+    // --- chatting -----------------------------------------------------------
+    // Two under-entertained heroes who meet keep each other company. Weaker
+    // than the tavern by construction: slower to fill, and it cannot fill you
+    // past a ceiling -- so company takes the edge off and a night out still
+    // pulls.
+    float chat_content_seek = 0.5f;     // low enough to settle for company
+    float chat_fill_hours = 20.0f;      // slower than a night out
+    float chat_content_ceiling = 0.6f;  // company can never fully satisfy
+    float chat_sight = 18.0f;           // how far a hero looks for a companion
+    float chat_radius = 2.0f;           // close enough to actually strike it up
+    float chat_duration = 6.0f;         // seconds a conversation lasts
+    // --- exploration --------------------------------------------------------
+    // Walking into terra incognita. Competes on need like everything else; it
+    // stands down when the hero has no reserve to spare, when the world already
+    // refused it once this window, or when there is prey right there.
+    float explore_min_fatigue = 0.5f;     // not enough left in the tank to strike out
+    float explore_min_distance = 6.0f;    // how far past the frontier to aim
+    float explore_max_distance = 18.0f;
+    float explore_search_radius = 90.0f;  // how far afield to look for a frontier
+    int64_t explore_lease_millis = 8000;  // how long one target is committed to
+    // Per-class appetite, drawn once per lease window: the probability a hero of
+    // that class feels like exploring at all. A FREQUENCY, which a weight cannot
+    // express -- a weight decides which activity wins when both apply, so a low
+    // one means "always loses", i.e. never, not "rarely". Filled by SimFactors().
+    float explore_chance[HERO_CLASS_COUNT];
     float roam_radius = 6.0f;      // world units around the roam anchor
     float hunt_sight_radius = 22.0f;  // how far a Hunter spots prey (deer)
+    // How far a hero notices hostiles. Feeds WorldView's threat list, which
+    // gates deliberation (you do not stand and think with a rat closing in).
+    float threat_radius = 14.0f;
+    // Deliberation pause between goal changes, drawn uniformly
+    // from this range. The prototype day is 120 s, so an in-game minute is
+    // ~83 ms of sim time and the default range is roughly 0-10 in-game minutes.
+    // Setting think_max_millis to 0 disables deliberation entirely.
+    int64_t think_min_millis = 0;
+    int64_t think_max_millis = 833;
+    // Per-class preference table (see ActivityWeights). Filled with the
+    // compiled defaults by SimFactors' constructor; factors.json may override
+    // any single entry. This is the primary dial for class personality.
+    ActivityWeights weights[HERO_CLASS_COUNT];
 };
 
 // Critter (deer) tuning. Deer graze/roam in Forest/Plains and bolt from any
@@ -126,6 +274,10 @@ struct CritterFactors {
     float flee_distance = 12.0f;   // how far it runs from the threat
     float roam_radius = 14.0f;     // wander range around the home anchor
     float graze_fraction = 0.4f;   // fraction of each roam cycle spent grazing
+    // Deer run the SAME banded selector and the same shared blocks as heroes --
+    // only this table and their activity list differ. That is the shareability
+    // of the core, made executable rather than asserted.
+    ActivityWeights weights;
 };
 
 // Townfolk (tax collector) tuning + the town economy.
@@ -144,6 +296,12 @@ struct MonsterFactors {
 };
 
 struct SimFactors {
+    // Fills the activity weight tables with the compiled per-class defaults
+    // (the scalar members above carry their own in-class defaults). Declared
+    // rather than defaulted because the weight defaults are a table, not a
+    // constant -- see game/src/activity_catalog.cpp.
+    SimFactors();
+
     HeroFactors hero;
     CritterFactors critter;
     TownfolkFactors townfolk;
@@ -183,7 +341,9 @@ struct CharacterState {
     int32_t home_building_id;    // recruiting guild; -1 = homeless / not a hero
     int32_t inside_building_id;  // -1 = outside; >=0 => hidden (don't draw; list in panel)
     // Hero simulation/display state, for the inspector. Zeroed for non-heroes.
-    float fatigue, boredom;  // drives, 0..1
+    // Need RESERVES in 0..1, where 1 is satisfied and 0 is spent (see
+    // HeroFactors). Zeroed for non-heroes.
+    float fatigue, content;
     int32_t behavior;        // last decided badlands::Behavior; -1 = none yet
     char name[24];           // NUL-terminated display name; "" for non-heroes
     // Current goal + pathfinding state: what this entity is walking toward now
@@ -192,6 +352,8 @@ struct CharacterState {
     float goal_x, goal_z;    // goal position in world XZ (0,0 when goal_kind == 0)
     int32_t path_waypoints;  // waypoints remaining on the planned route
     int32_t archetype;       // Archetype (Hero/Townfolk/Critter/Monster)
+    int32_t hero_class;      // HeroClassId; -1 for non-heroes. Lets an observer
+                             // attribute behaviour to a class without a lookup.
     // Unit XZ look direction (the character Transform's rotation applied to the
     // model-forward axis, projected to XZ). Drives the vision cone and the
     // render pose. Always normalized (defaults to kCharacterForward).
@@ -208,6 +370,48 @@ struct SimStats {
     uint64_t ticks;
     uint64_t script_intents;  // intents delivered by noiser brains (0 when mocked)
     uint32_t noiser_bugs;     // failures that downgraded an entity to the mock brain
+};
+
+// ---------------------------------------------------------------------------
+// Goal statistics: how many entity-ticks each activity was active for, overall
+// and per hero class. The point is to make a large run legible -- "apprentices
+// never explore", "everybody is asleep by noon", "Flee is 40% of deer ticks" --
+// so that something being off is visible rather than something you have to
+// happen to be watching at the right moment.
+//
+// It is a FOLD OVER SNAPSHOTS, deliberately outside the sim core: neither
+// tick_world nor any brain knows it exists. Two reasons, and both matter:
+//
+//   * A counter threaded through decision code drifts from reality the moment
+//     one path forgets to bump it, and a wrong histogram is worse than none --
+//     you would go looking for a bug in the AI that is really a bug in the
+//     accounting.
+//   * Folding the same rows an observer reads means the histogram cannot
+//     disagree with the inspector next to it, and a reimplementation of the
+//     brains (the planned noiser one) changes nothing here.
+//
+// Accumulate one snapshot per tick. Sim::Tick() does this for you; a caller
+// driving the internal tick_world directly is measuring nothing and gets zeros,
+// which is the honest answer.
+// ---------------------------------------------------------------------------
+class ActivityHistogram {
+   public:
+    // Folds one tick's rows in. Rows whose behavior is -1 ("has not decided
+    // anything yet") are counted as samples but attributed to no activity.
+    void Accumulate(std::span<const CharacterState> rows);
+    void Reset();
+
+    // Entity-ticks of this activity across every entity.
+    uint64_t Total(ActivityId id) const;
+    // Entity-ticks of this activity by heroes of one class.
+    uint64_t ForClass(HeroClassId cls, ActivityId id) const;
+    // Entity-ticks folded in altogether (the denominator for a share).
+    uint64_t Samples() const { return samples_; }
+
+   private:
+    uint64_t total_[kActivityCount] = {};
+    uint64_t per_class_[HERO_CLASS_COUNT][kActivityCount] = {};
+    uint64_t samples_ = 0;
 };
 
 // Static per-kind footprint size (tiles), behavior flags, and recruit set.
@@ -311,6 +515,7 @@ enum class CommandKindId : int32_t {
     Deposit,
     AttackBuilding,
     Shoot,
+    Chat,
 };
 
 struct CommandRecord {
@@ -416,6 +621,12 @@ class Sim {
     // than re-deriving the world<->map offset. Out of bounds clamps.
     int32_t BiomeAt(float world_x, float world_z) const;
     SimStats GetStats() const;                        // was game_stats
+    // Goal statistics accumulated across Tick() calls (see ActivityHistogram).
+    // Folded in the wrapper from the same snapshot rows Characters() returns --
+    // the sim core does no counting, so this cannot drift from what the brains
+    // actually did.
+    const ActivityHistogram& ActivityStats() const { return activity_stats_; }
+    void ResetActivityStats() { activity_stats_.Reset(); }
     // Placement preview; returns validity, fills out_triangles (was
     // game_probe_placement).
     PlacementProbe ProbePlacement(const PlacementDesc& desc,
@@ -427,6 +638,9 @@ class Sim {
 
    private:
     std::unique_ptr<::BadlandsGame> world_;  // the EXISTING internal world, unchanged
+    ActivityHistogram activity_stats_;
+    // Reused across ticks so the per-tick fold costs no allocation.
+    std::vector<CharacterState> stats_scratch_;
 };
 
 // ---- handle-less helpers (were game_*; pure computations) ------------------

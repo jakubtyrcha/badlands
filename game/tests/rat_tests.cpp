@@ -54,7 +54,7 @@ uint32_t alive_rats(const BadlandsGame& g) {
 }  // namespace
 
 TEST_CASE("a rat targets the nearest hostile unit") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     CharacterDesc merc = MercenaryDesc(6.0f, 0.0f);  // team 0
     uint32_t hid = spawn_into(g, merc);
@@ -78,7 +78,7 @@ TEST_CASE("a rat targets the nearest hostile unit") {
 }
 
 TEST_CASE("with no units in reach, a rat gnaws the nearest building down") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     // A House (enemy_targettable) with low health so the raze is quick.
     uint32_t house = place(g, BuildingKind::House, 20.0f, 0.0f);
@@ -104,7 +104,7 @@ TEST_CASE("with no units in reach, a rat gnaws the nearest building down") {
 }
 
 TEST_CASE("a rat prefers a hostile unit over a building") {
-    auto owned = make_world(nullptr);
+    auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     place(g, BuildingKind::House, 20.0f, 0.0f);  // a gnawable building nearby
     spawn_into(g, MercenaryDesc(6.0f, 0.0f));    // but a hero is closer
