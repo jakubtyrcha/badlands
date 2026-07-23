@@ -25,6 +25,8 @@
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "game/map/map_data.hpp"
+#include "game/visual/composite_post_pass.hpp"
+#include "game/visual/cone_overlay_pass.hpp"
 #include "game/visual/render_mode.hpp"
 #include "game/visual/vision_overlay_pass.hpp"
 
@@ -70,6 +72,9 @@ class GameView : public AppView {
   // Rebuild the live unit capsules from the sim snapshot each frame, placed on
   // the terrain surface and coloured per entity. Cheap (a handful of units).
   void SyncUnits();
+  // Triangle soup (kPolygon: pos.xyz + rgba, 3 verts/tri) for the vision-cone
+  // debug overlay, built from the current snapshot. Empty when nothing has vision.
+  std::vector<float> BuildVisionConeTriangles() const;
   // Clears scene_ and rebuilds it from scratch through the visual SceneComposer:
   // re-mirrors scene_context_'s lighting, generates the symbolic greybox map
   // (SymbolicMapGenerator) and adds its terrain chunks + lake water surfaces,
@@ -127,6 +132,8 @@ class GameView : public AppView {
   // (post_pass) so both the windowed renderer and the headless --screenshot
   // renderer apply it; fed the sim's VisionField each frame.
   VisionOverlayPass vision_pass_;
+  ConeOverlayPass cone_pass_;      // vision-cone debug overlay (toggle in DrawUI)
+  CompositePostPass post_passes_;  // runs vision then cones behind the one slot
 
   // Reused scratch buffer for sim_.Buildings(building_rows_), so the per-frame
   // DrawUI/BuildScene reads don't allocate a fresh vector each call.

@@ -307,6 +307,7 @@ set(badlands_app_sources_game
     # symbolic map's terrain/water/buildings through the composer.
     src/game/visual/scene_composer.cpp
     src/game/visual/vision_overlay_pass.cpp
+    src/game/visual/cone_overlay_pass.cpp
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
@@ -526,6 +527,7 @@ add_executable(badlands_game_tests
     game/tests/rat_tests.cpp
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
+    game/tests/facing_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE

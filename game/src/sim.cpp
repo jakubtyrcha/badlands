@@ -28,6 +28,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -343,6 +344,11 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
         }
         const Facing* facing_c = g.registry.try_get<Facing>(e);
         const glm::vec2 facing = facing_c ? facing_c->dir : kCharacterForward;
+        const Vision* vis = g.registry.try_get<Vision>(e);
+        const float vis_radius = vis ? vis->radius : 0.0f;
+        const float vis_half_deg =
+            vis ? glm::degrees(std::acos(std::clamp(vis->cone_half_cos, -1.0f, 1.0f)))
+                : 180.0f;
         rows.push_back(CharacterState{
             .id = slot,
             .team = g.registry.get<Team>(e).id,
@@ -377,6 +383,8 @@ std::vector<CharacterState> characters_of(const BadlandsGame& g) {
                             : (tax ? Archetype::Townfolk : Archetype::Monster))),
             .facing_x = facing.x,
             .facing_z = facing.y,
+            .vision_radius = vis_radius,
+            .vision_cone_half_angle_deg = vis_half_deg,
         });
         const char* nm = disp ? disp->name.c_str() : "";
         std::size_t n = std::min(std::strlen(nm), sizeof(rows.back().name) - 1);

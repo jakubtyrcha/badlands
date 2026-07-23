@@ -169,6 +169,10 @@ struct CharacterState {
     // model-forward axis, projected to XZ). Drives the vision cone and the
     // render pose. Always normalized (defaults to kCharacterForward).
     float facing_x, facing_z;
+    // Fog-of-war vision this entity grants (0 radius => none). The renderer draws
+    // the cone debug overlay from these + facing.
+    float vision_radius;
+    float vision_cone_half_angle_deg;  // >= 180 => full circle
 };
 
 // Run counters. NB: NOT `Stats` — badlands::Stats already exists (a sim

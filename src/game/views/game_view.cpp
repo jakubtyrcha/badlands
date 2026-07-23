@@ -1,6 +1,7 @@
 #include "game/views/game_view.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -182,7 +183,17 @@ bool GameView::Initialize(const RenderContext& ctx) {
                        kVisionTexelM);
   sim_.ResolveVision();
   vision_pass_.Upload(sim_.GetVisionField());
-  scene_context_.post_pass = &vision_pass_;
+
+  // Vision-cone debug overlay (off by default; toggled in the debug panel).
+  // Chained AFTER the fog-of-war overlay so the cones draw on top of the
+  // FoW-modulated scene rather than being blacked out by it.
+  if (!cone_pass_.Initialize(device_, queue_, ctx.pipeline_gen)) {
+    spdlog::error("GameView::Initialize: cone overlay pass init failed");
+    return false;
+  }
+  post_passes_.Add(&vision_pass_);
+  post_passes_.Add(&cone_pass_);
+  scene_context_.post_pass = &post_passes_;
 
   // Frame the living town on the southern plains (where SeedTown placed it), not
   // the empty origin lake -- close enough that the units read as characters.
@@ -401,14 +412,73 @@ void GameView::SyncUnits() {
                              : map_.HeightAt(c.pos_x + half_x_, c.pos_z + half_z_);
     const float radius = 0.5f * std::min(c.size_x, c.size_z);
     const float cyl = std::max(0.1f, c.size_y - 2.0f * radius);
+    const glm::vec3 color(c.color_r, c.color_g, c.color_b);
+    const DeferredMaterial mat = matlib_.SolidColor(color, 0.6f);
+
+    // Face the direction of travel: kCharacterForward is +Z, so yaw = atan2 of
+    // the facing XZ turns +Z onto (facing_x, facing_z). Applied to the body (a
+    // symmetric capsule, so invisible on its own) AND to a small nose that makes
+    // the facing legible.
+    const float yaw = std::atan2(c.facing_x, c.facing_z);
+    const glm::mat4 base =
+        glm::translate(glm::mat4(1.0f), glm::vec3(c.pos_x, ground, c.pos_z)) *
+        glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+
     auto capsule = GenerateCapsule(radius, cyl, 12);
-    const DeferredMaterial mat =
-        matlib_.SolidColor(glm::vec3(c.color_r, c.color_g, c.color_b), 0.6f);
-    const glm::mat4 xf =
-        glm::translate(glm::mat4(1.0f), glm::vec3(c.pos_x, ground, c.pos_z));
-    const std::string name = "unit_" + std::to_string(index++);
-    unit_nodes_.push_back(AddMeshEntity(scene_, name.c_str(), std::move(capsule), mat, xf));
+    const std::string body = "unit_" + std::to_string(index) + "_body";
+    unit_nodes_.push_back(AddMeshEntity(scene_, body.c_str(), std::move(capsule), mat, base));
+
+    // A small nose nub at the front (local +Z), mid-body height, so which way a
+    // unit faces reads at a glance even though the capsule is round.
+    const float nose = 0.35f * radius;
+    auto nub = GenerateCube(glm::vec3(nose));
+    const glm::mat4 nose_xf =
+        base * glm::translate(glm::mat4(1.0f),
+                              glm::vec3(0.0f, 0.5f * c.size_y, radius + nose));
+    const std::string nose_name = "unit_" + std::to_string(index) + "_nose";
+    unit_nodes_.push_back(
+        AddMeshEntity(scene_, nose_name.c_str(), std::move(nub), mat, nose_xf));
+    ++index;
   }
+
+  // Vision-cone debug overlay geometry (only when the toggle is on): a flat,
+  // translucent sector per vision-granting unit, floating just above terrain and
+  // oriented by facing. Fed to the cone post-pass; empty clears it.
+  if (cone_pass_.enabled()) {
+    cone_pass_.SetTriangles(BuildVisionConeTriangles());
+  } else {
+    cone_pass_.SetTriangles({});
+  }
+}
+
+std::vector<float> GameView::BuildVisionConeTriangles() const {
+  constexpr float kConeLift = 0.4f;   // metres above terrain, so it clearly floats
+  constexpr float kConeAlpha = 0.28f;  // straight-alpha translucency
+  constexpr float kSegRad = 0.1745f;   // ~10 deg per fan segment
+  std::vector<float> v;
+  for (const CharacterState& c : char_rows_) {
+    if (c.vision_radius <= 0.0f || c.inside_building_id >= 0) {
+      continue;  // no vision, or hidden inside a building
+    }
+    const float ground =
+        map_.empty() ? 0.0f : map_.HeightAt(c.pos_x + half_x_, c.pos_z + half_z_);
+    const float y = ground + kConeLift;
+    const float r = c.vision_radius;
+    const float center = std::atan2(c.facing_x, c.facing_z);  // +Z is 0
+    const float half = glm::radians(std::min(c.vision_cone_half_angle_deg, 180.0f));
+    const int segs = std::max(3, static_cast<int>(std::ceil(2.0f * half / kSegRad)));
+    auto push = [&](float x, float z) {
+      v.insert(v.end(), {x, y, z, c.color_r, c.color_g, c.color_b, kConeAlpha});
+    };
+    for (int i = 0; i < segs; ++i) {
+      const float a0 = center - half + 2.0f * half * static_cast<float>(i) / segs;
+      const float a1 = center - half + 2.0f * half * static_cast<float>(i + 1) / segs;
+      push(c.pos_x, c.pos_z);                                              // apex
+      push(c.pos_x + std::sin(a0) * r, c.pos_z + std::cos(a0) * r);       // arc i
+      push(c.pos_x + std::sin(a1) * r, c.pos_z + std::cos(a1) * r);       // arc i+1
+    }
+  }
+  return v;
 }
 
 void GameView::HandleEvent(const SDL_Event& event, int /*width*/,
@@ -535,6 +605,13 @@ void GameView::DrawUI() {
   if (ImGui::CollapsingHeader("Fog of War", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Checkbox("Enabled##fow", &vision_pass_.mutable_enabled());
     ImGui::TextUnformatted("black = terra-incognita, gray = dormant");
+  }
+
+  // --- Gameplay debug layer ---
+  if (ImGui::CollapsingHeader("Gameplay Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Checkbox("Vision cones", &cone_pass_.mutable_enabled());
+    ImGui::TextUnformatted(
+        "translucent sector per unit, above terrain, along facing");
   }
 
   // --- Fog (self-contained collapsing section) ---
