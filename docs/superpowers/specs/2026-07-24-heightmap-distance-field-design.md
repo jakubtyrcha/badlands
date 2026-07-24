@@ -19,6 +19,14 @@ d(x,y)    = EDT(biome == Plains), in WORLD METERS (per-axis texel scaling)
 height    = kSlopeMPerM · d
 ```
 
+**Units are world-metric, not texel-metric.** `d` is Euclidean distance in
+world meters (the transform runs on the texel grid but each axis is scaled by
+that axis's texel size in meters), and `kSlopeMPerM` is height meters per
+meter of horizontal WORLD distance. Regenerating the same map at a different
+resolution must not change the terrain's slopes or peak heights beyond
+discretization error — a texel-unit slope would double all heights at half
+resolution, which is exactly the bug class the units-guard test below pins.
+
 - Plains stay flat at exactly 0 m (their distance is 0). 0 m is the water
   datum, per the established convention.
 - The farthest texel from any plains is the highest point; elongated mountain
@@ -83,8 +91,13 @@ Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
 ## Testing
 
 - **EDT oracle:** `distance_to_plains` vs a brute-force O(n²) scan on small
-  synthetic grids (exact equality in squared-texel space; world-meter scaling
-  checked separately).
+  synthetic grids, compared in WORLD METERS, including a non-square-texel
+  case — exact equality (power-of-two texel values make every double
+  operation exact, so both sides reduce to the same float).
+- **Units guard (world-metric slope):** the same world-space plains layout
+  sampled at two resolutions yields distances that agree at coinciding world
+  points within one coarse texel (boundary discretization); a texel-unit
+  implementation would disagree by the resolution ratio and fail loudly.
 - **Analytic cone:** a single plains texel yields the exact radial distance
   field.
 - **Plains pinned to zero:** every Plains texel's height is exactly 0.
