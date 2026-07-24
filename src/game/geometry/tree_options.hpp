@@ -15,11 +15,11 @@ enum class TreeType { Deciduous, Evergreen };
 struct LeafOptions {
   bool  enabled = true;
   int   billboard = 2;        // 1 = single quad, 2 = double (perpendicular cross)
-  int   count = 1;            // leaves per leaf-bearing branch
-  float start = 0.0f;         // fractional start along the branch
+  int   count = 18;           // leaves per leaf-bearing branch (ez-tree oak_medium)
+  float start = 0.16f;        // fractional start along the branch (ez-tree)
   float size = 2.5f;          // leaf card size (native ez-tree units)
   float size_variance = 0.7f;
-  float angle = 10.0f;        // tilt from the branch, degrees
+  float angle = 42.0f;        // tilt from the branch, degrees (ez-tree oak_medium)
   float alpha_cutoff = 0.5f;  // discard threshold (consumed by a later task's material)
   glm::vec3 tint{0.30f, 0.55f, 0.18f};  // green; per-preset overridable
 };
