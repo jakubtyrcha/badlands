@@ -112,6 +112,8 @@ TEST_CASE("generate_map: bedrock is sampled in world meters "
   lo.seed = 5;
   lo.resolution = 64;
   lo.world_size_m = 512.0f;  // 8 m texels
+  lo.erosion.sim_resolution = 64;
+  lo.erosion.iterations = 8;
   MapGenParams hi = lo;
   hi.resolution = 128;  // 4 m texels
   const auto a = generate_map(lo);

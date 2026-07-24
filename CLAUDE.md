@@ -36,10 +36,12 @@ cmake --build build                                   # builds the apps + Rust s
 ./build/badlands_game --record frames/                # headless: render a frame sequence into a dir
 perl -e 'alarm 30; exec @ARGV' ./build/badlands_game  # SIGALRM-bounded headless smoke run
 ```
-`badlands_mapview` is the map tool: it generates a map procedurally (bedrock
-field → quantile-cut biomes) and renders it as biome-colored terrain.
-`--preview-image-only` instead dumps the debug rasters (bedrock/biome/heightmap/hillshade
-PNGs) to `--out` and exits (pure CPU, no window).
+`badlands_mapview` is the map tool: it generates a map procedurally (bedrock field →
+quantile-cut biomes → stream-power erosion + lakes) and renders it as
+biome-colored terrain. `--preview-image-only` instead dumps the debug rasters
+(bedrock/biome/heightmap/hillshade/flow/water/sediment PNGs plus a numbered
+per-stage + per-N-iterations film strip) to `--out` and exits (pure CPU, no
+window).
 ```sh
 ./build/badlands_mapview --seed 2 --resolution 500x500 --size 500x500   # view it
 ./build/badlands_mapview --preview-image-only --out mapgen_out          # dump PNGs
