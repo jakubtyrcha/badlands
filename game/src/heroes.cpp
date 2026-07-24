@@ -111,6 +111,9 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
                              desc.attack_cooldown, 0.0f};
     }
     reg.emplace<Attacks>(e, atk);
+    if (desc.xp_reward > 0) {
+        reg.emplace<XpReward>(e, desc.xp_reward);
+    }
     // Stats.move_speed drives movement; its attack_* fields are a legacy VIEW of
     // the PRIMARY attack (perception's reach / the attack_range host call). Derive
     // them from attacks[0] so there is one source of truth rather than a hand-kept

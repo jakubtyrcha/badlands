@@ -125,6 +125,7 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.0f, 1.0f, 0.05f};
+        d.xp_reward = 10;
     }
     // Goblin: a step up from the rat -- more hp, still light melee.
     {
@@ -138,6 +139,7 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f};
+        d.xp_reward = 25;
     }
 
     // --- critters -----------------------------------------------------------

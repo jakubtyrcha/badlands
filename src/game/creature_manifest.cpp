@@ -23,6 +23,19 @@ bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, f
     return true;
 }
 
+// Same contract as the float overload above, for integer-valued keys.
+bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, int32_t& dst) {
+    if (!obj.contains(key)) {
+        return true;
+    }
+    if (!obj[key].is_number()) {
+        spdlog::warn("LoadCreatureCatalog: {}.{} is not a number", creature, key);
+        return false;
+    }
+    dst = obj[key].get<int32_t>();
+    return true;
+}
+
 }  // namespace
 
 bool LoadCreatureCatalog(const std::string& path, CreatureCatalog& out) {
@@ -69,6 +82,7 @@ bool LoadCreatureCatalog(const std::string& path, CreatureCatalog& out) {
         ok = ok && ReadNum(o, name.c_str(), "evasion", d.evasion);
         ok = ok && ReadNum(o, name.c_str(), "defense", d.defense);
         ok = ok && ReadNum(o, name.c_str(), "armour", d.armour);
+        ok = ok && ReadNum(o, name.c_str(), "xp_reward", d.xp_reward);
         if (d.attack_count > 0) {
             ok = ok && ReadNum(o, name.c_str(), "attack_damage", d.attacks[0].base_damage);
             ok = ok && ReadNum(o, name.c_str(), "attack_cooldown", d.attacks[0].cooldown);

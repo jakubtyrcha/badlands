@@ -221,6 +221,13 @@ struct Skills {
     int32_t count = 0;
 };
 
+// Present only on entities whose death pays XP (CharacterDesc.xp_reward > 0).
+// Read by the death sweep (sim.cpp), which collects the payout before the
+// destroy and spreads it via spread_kill_xp (progression.h).
+struct XpReward {
+    int32_t amount;
+};
+
 // An in-flight ranged shot. Spawned by the ranged branch of the Attack command;
 // flown and resolved by advance_projectiles. It captures the attacker's attack +
 // tactical stats + the resolution seed axes AT FIRE TIME, so the hit lands

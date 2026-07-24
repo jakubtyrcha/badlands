@@ -17,6 +17,7 @@
 #include "nav_world.h"
 #include "needs.h"
 #include "placement.h"
+#include "progression.h"
 #include "vision.h"
 
 #include "critter_brain.h"
@@ -324,16 +325,24 @@ void tick_world(BadlandsGame& g, float dt) {
     // events the old combat pass did.
     advance_projectiles(g, dt);
 
-    // Death.
+    // Death. Collect each dead entity's XP payout BEFORE the destroys
+    // (Position/XpReward die with it), spread AFTER them so a hero that died
+    // this tick neither blocks nor receives a share.
     std::vector<entt::entity> dead;
+    std::vector<PendingKillXp> kill_xp;
     for (auto [e, health] : registry.view<const Health>().each()) {
         if (health.hp <= 0.0f) {
             dead.push_back(e);
+            if (const auto* reward = registry.try_get<XpReward>(e);
+                reward != nullptr && registry.all_of<Position>(e)) {
+                kill_xp.push_back({registry.get<Position>(e).pos, reward->amount});
+            }
         }
     }
     for (entt::entity e : dead) {
         registry.destroy(e);
     }
+    spread_kill_xp(g, kill_xp);
 
     // Fog-of-war: resolve next visibility from the post-movement world state and
     // publish it (double-buffered). No-op until ConfigureVision.

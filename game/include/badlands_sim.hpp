@@ -410,6 +410,9 @@ struct CharacterDesc {
     CombatStance stance = CombatStance::Melee;
     Attack attacks[kMaxAttacks]{};
     int32_t attack_count = 0;
+    // XP paid out on this creature's death, split over nearby heroes (see
+    // ProgressionFactors.kill_xp_radius). 0 = no reward (deer, heroes, dummies).
+    int32_t xp_reward = 0;
 };
 
 // ---- named-creature catalog ------------------------------------------------
