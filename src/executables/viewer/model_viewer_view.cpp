@@ -18,14 +18,18 @@ namespace badlands {
 
 namespace {
 
-// Flat light-gray debug floor: rgb pre-encoded so that, after deferred lighting
-// re-linearizes the non-sRGB albedo, the surface lands near linear 0.75
-// reflectance. Roughness maxed to keep it diffuse so shadows read clearly.
-constexpr glm::vec3 kFloorGray{0.881f};
+// Flat mid-gray debug floor. Kept dark enough that the sun + sky ambient don't
+// clip it to pure white (which washed out thin bark tubes) -- a mid-gray floor
+// silhouettes the generated mesh with contrast. Roughness maxed to keep it
+// diffuse so shadows read clearly.
+constexpr glm::vec3 kFloorGray{0.5f};
 constexpr float kFloorRoughness = 1.0f;
 constexpr float kFloorSize = 40.0f;
 // One floor-UV repeat per ~2 world units instead of stretching one copy.
 constexpr float kFloorUvRepeatSpacing = 2.0f;
+// Preview height the tree generators are display-scaled to (their native ez-tree
+// units are tens-of-meters tall, which frames far away and reads tiny).
+constexpr float kTreePreviewHeight = 8.0f;
 
 }  // namespace
 
@@ -52,6 +56,12 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   generator_index_ =
       std::clamp(generator_index_, 0, static_cast<int>(generators_.size()) - 1);
 
+  // The default sun+sky (intensity 3.0 / 1.0) overexposes the scene and washes
+  // out thin bark tubes. Dial both back so the floor lands mid-gray and the
+  // generated mesh reads with contrast.
+  env_.sun_intensity = 2.0f;
+  env_.sky_intensity = 0.5f;
+
   ApplyEnvironment();
   RebuildScene();
   scene_renderer_->SetShadowDebugMode(initial_shadow_debug_mode_);
@@ -76,16 +86,25 @@ void ModelViewerView::BuildGenerators() {
              glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
          return GeneratedMesh{std::move(mesh), transform};
        }, .material = checker_mat_});
-  generators_.push_back({.name = "Tree (Oak)",
-                         .generate = [] {
-                           return GeneratedMesh{GenerateTreeMesh(OakPreset()), glm::mat4(1.0f)};
-                         },
-                         .material = bark_mat_});
-  generators_.push_back({.name = "Tree (Pine)",
-                         .generate = [] {
-                           return GeneratedMesh{GenerateTreeMesh(PinePreset()), glm::mat4(1.0f)};
-                         },
-                         .material = bark_mat_});
+  // The ez-tree presets are authored in large world units (oak ~34 tall, pine
+  // ~50). At that size the orbit frames from far away and the mesh reads tiny, so
+  // scale each tree down to a consistent preview height (kTreePreviewHeight). This
+  // is a DISPLAY transform only -- the generated mesh (and its tests) stay native.
+  auto tree_entry = [](const char* label, TreeOptions opt, DeferredMaterial mat) {
+    return MeshGenerator{
+        .name = label,
+        .generate =
+            [opt] {
+              TexturedMeshResult mesh = GenerateTreeMesh(opt);
+              const float h = mesh.local_bounds.max.y - mesh.local_bounds.min.y;
+              const float s = kTreePreviewHeight / std::max(h, 0.001f);
+              return GeneratedMesh{std::move(mesh),
+                                   glm::scale(glm::mat4(1.0f), glm::vec3(s))};
+            },
+        .material = mat};
+  };
+  generators_.push_back(tree_entry("Tree (Oak)", OakPreset(), bark_mat_));
+  generators_.push_back(tree_entry("Tree (Pine)", PinePreset(), bark_mat_));
 }
 
 void ModelViewerView::ApplyEnvironment() {
