@@ -795,6 +795,13 @@ TEST_CASE(
   wgpu::Buffer vbuf = UploadQuad(g.device);
   wgpu::Texture albedo =
       test::CreateRgbaTexture(g.device, g.queue, 1, 1, {200, 200, 200, 255});
+  // Dim albedo used ONLY for the front-lit sub-test (assertion 2) below: with
+  // the shared rig (sunColor=3, NdotL~=1 front-lit) the {200,200,200,255}
+  // albedo's reflection term alone saturates every channel to 255, which
+  // would mask an additive transmission leak. A dim surface keeps the
+  // front-lit reflection well under 255 so a leak is visible.
+  wgpu::Texture dim_albedo =
+      test::CreateRgbaTexture(g.device, g.queue, 1, 1, {40, 40, 40, 255});
   wgpu::Sampler albedo_sampler = MakeLinearSampler(g.device);
 
   wgpu::Texture shadow = MakeShadowDepth(g.device);
@@ -812,6 +819,12 @@ TEST_CASE(
 
   auto render = [&](const ForwardShadeParams& p) {
     return RenderStandardForward(g, fac.get(), vbuf, albedo.CreateView(),
+                                 albedo_sampler, shadow_view, shadow_sampler,
+                                 cube_view, ibl_sampler, brdf_view,
+                                 brdf_sampler, p);
+  };
+  auto render_dim = [&](const ForwardShadeParams& p) {
+    return RenderStandardForward(g, fac.get(), vbuf, dim_albedo.CreateView(),
                                  albedo_sampler, shadow_view, shadow_sampler,
                                  cube_view, ibl_sampler, brdf_view,
                                  brdf_sampler, p);
@@ -834,21 +847,32 @@ TEST_CASE(
 
   // (2) Front-lit unchanged: sun_toward_viewer=true (front-lit), shadow=lit,
   // ambient=off. ON vs OFF should be indistinguishable -- no back
-  // transmission when the sun is in front of the leaf.
-  CpuImage::Color frontlit_on = render({.shadow_clear_depth = 1.0f,
-                                        .ambient_on = false,
-                                        .sun_toward_viewer = true,
-                                        .transmission_strength = 0.8f});
-  CpuImage::Color frontlit_off = render({.shadow_clear_depth = 1.0f,
-                                         .ambient_on = false,
-                                         .sun_toward_viewer = true,
-                                         .transmission_strength = 0.0f});
+  // transmission when the sun is in front of the leaf. Rendered against a DIM
+  // albedo (not the shared {200,200,200,255} one) so the front-lit reflection
+  // sits well under 255 -- with the bright albedo the reflection term alone
+  // saturates every channel to 255, making this assertion pass vacuously
+  // regardless of a transmission leak.
+  CpuImage::Color frontlit_on = render_dim({.shadow_clear_depth = 1.0f,
+                                            .ambient_on = false,
+                                            .sun_toward_viewer = true,
+                                            .transmission_strength = 0.8f});
+  CpuImage::Color frontlit_off = render_dim({.shadow_clear_depth = 1.0f,
+                                             .ambient_on = false,
+                                             .sun_toward_viewer = true,
+                                             .transmission_strength = 0.0f});
   INFO("frontlit_on rgb = " << (int)frontlit_on.r << "," << (int)frontlit_on.g
                             << "," << (int)frontlit_on.b);
   INFO("frontlit_off rgb = " << (int)frontlit_off.r << ","
                              << (int)frontlit_off.g << ","
                              << (int)frontlit_off.b);
-  CHECK(std::abs(MaxChannel(frontlit_on) - MaxChannel(frontlit_off)) < 8);
+  // Both sides must be unsaturated -- proves we're in the discriminating
+  // range, not pinned at 255.
+  CHECK(MaxChannel(frontlit_on) < 200);
+  CHECK(MaxChannel(frontlit_off) < 200);
+  // Front-lit transmission is exactly 0, so ON must equal OFF up to
+  // rounding: a real front-lit leak would push frontlit_on's channels above
+  // frontlit_off's here.
+  CHECK(std::abs(MaxChannel(frontlit_on) - MaxChannel(frontlit_off)) <= 2);
 
   // (3) Direct is shadow-gated: back-lit, ambient=off, strength=0.8: shadow
   // lit vs occluded. No ambient => a shadowed back-lit leaf is ~black.
