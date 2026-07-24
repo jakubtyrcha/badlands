@@ -170,9 +170,10 @@ void ModelViewerView::RebuildScene() {
     TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
     if (leaves.mesh.vertex_count > 0) {
       world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
-      DeferredMaterial lm = matlib_.AlphaCutout(
+      DeferredMaterial lm = matlib_.TranslucentFoliage(
           leaf_view_, leaf_sampler_, gen.tree->leaves.alpha_cutoff,
-          gen.tree->leaves.tint);
+          gen.tree->leaves.tint, gen.tree->leaves.transmission_tint,
+          gen.tree->leaves.transmission_strength);
       AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
                                  lm.factory, lm.params, xf);
     }
