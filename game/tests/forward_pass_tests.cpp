@@ -732,3 +732,112 @@ TEST_CASE("standard_forward receives the standard sun + shadow via @group(2)",
   CHECK(MaxChannel(occluded) < 6);              // shadowed -> ~black
   CHECK(MaxChannel(lit_direct) - MaxChannel(occluded) > 30);  // shadow received
 }
+
+namespace {
+
+// Add a ForwardOpaqueRenderable quad backed by a `standard_forward` factory
+// (which DECLARES @group(2)) to the registry, ready for RenderForwardMeshes.
+// Albedo falls back to the factory's default "white" slot texture (group 0),
+// so no texture override is needed to make the draw bind + record.
+entt::entity AddStandardForwardEntity(entt::registry& reg,
+                                      MaterialInstanceFactory* fac) {
+  entt::entity e = reg.create();
+  StaticTexturedMeshComponent mesh;
+  mesh.vertices = Quad().mesh.vertices;
+  mesh.vertex_count = Quad().mesh.vertex_count;
+  mesh.geometry_type = GeometryType::kTexturedMesh;
+  mesh.dirty = true;
+  reg.emplace<StaticTexturedMeshComponent>(e, std::move(mesh));
+
+  MaterialFactoryComponent fmc;
+  fmc.factory = fac;
+  fmc.pass_type = MaterialPassType::kForwardOpaque;
+  fmc.params.uniform_overrides = {
+      {"tint", glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)},
+      {"params", glm::vec4(0.0f, 0.9f, 0.0f, 0.0f)}};  // x=cutoff, y=roughness
+  fmc.config_hash = ComputeFactoryConfigHash(fmc);
+  reg.emplace<MaterialFactoryComponent>(e, std::move(fmc));
+  reg.emplace<ForwardOpaqueRenderable>(e);
+  return e;
+}
+
+}  // namespace
+
+// Robustness (findings #1/#2): a `standard_forward` material REQUIRES @group(2),
+// so RenderForwardMeshes must never issue its draw when the engine forward
+// resources it binds (shadow map + IBL) are absent — a declared-but-unbound
+// group 2 is a Dawn validation error. This drives RenderForwardMeshes with a
+// registry entity that declares @group(2) but an EMPTY ForwardEngineResources{},
+// captured under a validation error scope. Before the fix the opaque gate keyed
+// on scene_depth presence (never bound in the opaque path) and left group 2
+// unbound while the pipeline required it -> validation error (RED). After the
+// fix the entity is skipped when the opaque resources are unavailable -> no
+// invalid draw (GREEN).
+TEST_CASE("RenderForwardMeshes skips a group-2 material when engine resources "
+          "are absent (no unbound draw)",
+          "[forward][gpu][shadow]") {
+  TestGpu& g = GetTestGpu();
+  auto fac = BuildStandardForwardFactory(g, /*casts_shadow=*/true);
+  REQUIRE(fac != nullptr);
+
+  entt::registry reg;
+  AddStandardForwardEntity(reg, fac.get());
+
+  wgpu::Texture color =
+      MakeTarget(g.device, kColorFormat, wgpu::TextureUsage::CopySrc);
+  wgpu::Texture depth =
+      MakeTarget(g.device, kDepthFormat, wgpu::TextureUsage::None);
+  MaterialInstanceCache cache;
+
+  // Capture any validation error the draw provokes rather than letting it hit
+  // the device uncaptured-error callback.
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, TopDownUniforms());
+  {
+    wgpu::RenderPassColorAttachment ca{};
+    ca.view = color.CreateView();
+    ca.loadOp = wgpu::LoadOp::Clear;
+    ca.storeOp = wgpu::StoreOp::Store;
+    ca.clearValue = {0, 0, 0, 1};
+    ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+    wgpu::RenderPassDepthStencilAttachment da{};
+    da.view = depth.CreateView();
+    da.depthLoadOp = wgpu::LoadOp::Clear;
+    da.depthStoreOp = wgpu::StoreOp::Store;
+    da.depthClearValue = 0.0f;
+    wgpu::RenderPassDescriptor desc;
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &ca;
+    desc.depthStencilAttachment = &da;
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    // Empty resources: standard_forward declares @group(2) but the opaque
+    // engine bind (shadow map + IBL) is unavailable this frame.
+    RenderForwardMeshes(pass, frame, reg, glm::vec3(0.0f, 10.0f, 0.0f), cache,
+                        ForwardEngineResources{});
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool scope_done = false;
+  bool validation_error = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView msg) {
+        if (type != wgpu::ErrorType::NoError) {
+          validation_error = true;
+          INFO("captured error: " << (msg.length > 0
+                                           ? std::string(msg.data, msg.length)
+                                           : std::string("(no message)")));
+        }
+        scope_done = true;
+      });
+  while (!scope_done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+
+  CHECK_FALSE(validation_error);  // must not emit a declared-but-unbound draw
+}

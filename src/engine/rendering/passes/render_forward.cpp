@@ -170,11 +170,15 @@ void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
                          MaterialInstanceCache& cache,
                          const ForwardEngineResources& engine) {
   wgpu::Device device = frame.GetDevice();
-  // scene_depth is used here only as a presence proxy for "engine forward
-  // resources are available" (the scene renderer always sets it alongside
-  // the shadow map + IBL) -- the opaque @group(2) bind below never samples
-  // scene_depth itself.
-  const bool have_engine = static_cast<bool>(engine.scene_depth);
+  // Availability of the resources the opaque @group(2) bind actually consumes
+  // (shadow map + IBL — never scene_depth, which is the opaque pass's own
+  // writable depth attachment). A standard_forward material REQUIRES @group(2),
+  // so if these are absent we must skip such an entity rather than leave group
+  // 2 unbound under a pipeline that requires it (a Dawn validation error).
+  const bool opaque_engine_available =
+      static_cast<bool>(engine.shadow_map) &&
+      static_cast<bool>(engine.ibl_prefiltered) &&
+      static_cast<bool>(engine.brdf_lut);
 
   // The @group(2) engine bind group is identical for every draw, so build it
   // once (lazily, from the first material that declares group 2). Mirrors
@@ -191,16 +195,23 @@ void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
     }
     auto* instance =
         ResolveInstance(registry, entity, mesh, fmc, camera_world_pos, cache);
-    if (!instance || !instance->Bind(pass, frame) ||
-        !instance->BindPerObject(pass, frame)) {
+    if (!instance) {
       continue;
     }
 
     // A forward-opaque material declares @group(2) iff it needs the engine
-    // resources. Others skip the bind — binding a non-existent group would
-    // fail Dawn validation.
-    const bool wants_engine = have_engine && instance->DeclaresBindGroup(2);
-    if (wants_engine) {
+    // resources (shadow map + IBL). If it declares the group but those
+    // resources are unavailable this frame, skip the entity — issuing the draw
+    // would leave a required group 2 unbound (a Dawn validation error).
+    // Materials that don't declare group 2 draw unconditionally.
+    const bool declares_g2 = instance->DeclaresBindGroup(2);
+    if (declares_g2 && !opaque_engine_available) {
+      continue;
+    }
+    if (!instance->Bind(pass, frame) || !instance->BindPerObject(pass, frame)) {
+      continue;
+    }
+    if (declares_g2) {
       if (!engine_bg) {
         engine_bg = BuildForwardOpaqueEngineBindGroup(instance, frame, engine);
       }
