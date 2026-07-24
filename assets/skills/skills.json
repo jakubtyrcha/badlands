@@ -1,0 +1,10 @@
+{
+  "_comment": "Skill template overrides; keys are skill names (identity). Absent fields keep compiled defaults.",
+  "Calcify": {
+    "activation": "active",
+    "targeting": "direct",
+    "duration": 0,
+    "cooldown": 20,
+    "effect": "Absorbs the next physical strike, then shatters."
+  }
+}
