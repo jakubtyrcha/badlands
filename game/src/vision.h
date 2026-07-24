@@ -57,9 +57,11 @@ void configure_vision(VisionGrid& g, float world_min_x, float world_min_z,
                       float world_size_x, float world_size_z, float texel_m);
 
 // One vision source's newly-discovered texel count this resolve -- the
-// exploration-XP input. Only heroes are credited; buildings and non-hero
-// characters discover silently. First stamper wins a texel (the resolve's
-// deterministic source order breaks same-tick ties).
+// exploration-XP input. Counts are reported per STAMPING CHARACTER (any
+// player-team character with vision, not just heroes); callers apply the
+// crediting policy (e.g. tick_world's award_xp, which no-ops non-heroes).
+// First stamper wins a texel (the resolve's deterministic source order breaks
+// same-tick ties).
 struct DiscoveryCredit {
     uint32_t slot;
     int32_t texels;
@@ -67,7 +69,7 @@ struct DiscoveryCredit {
 
 // Resolve the next visibility field from the world's player vision sources and
 // publish it (swap). No-op when the grid is unconfigured. Call once per tick.
-// When `credits` is non-null it is filled with per-hero discovery counts.
+// When `credits` is non-null it is filled with per-character discovery counts.
 void resolve_vision(BadlandsGame& game, std::vector<DiscoveryCredit>* credits = nullptr);
 
 // Snapshot of the published (front) buffer.

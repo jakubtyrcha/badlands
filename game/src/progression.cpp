@@ -55,28 +55,40 @@ void award_xp(BadlandsGame& game, uint32_t slot, int64_t amount) {
 void spread_kill_xp(BadlandsGame& game, const std::vector<PendingKillXp>& payouts) {
     const float radius = game.factors.progression.kill_xp_radius;
     const float r2 = radius * radius;
+
+    // Eligible heroes (outside, not hidden inside a building), collected once:
+    // the pool is stable across payouts -- award_xp only touches XP/level/
+    // Skills, never Position/InsideBuilding.
+    struct Eligible {
+        uint32_t slot;
+        glm::vec2 pos;
+    };
+    std::vector<Eligible> eligible;
+    for (auto [e, hs, pos] : game.registry
+                                 .view<const HeroSimulationState, const Position>(
+                                     entt::exclude<InsideBuilding>)
+                                 .each()) {
+        (void)hs;  // membership only: the view's job is filtering, not reading
+        eligible.push_back({slot_for_entity(game, e), pos.pos});
+    }
+
     std::vector<uint32_t> near;
     for (const PendingKillXp& p : payouts) {
         if (p.amount <= 0) {
             continue;
         }
         near.clear();
-        // Slot order, not view order: award (and event) order is stable.
-        for (uint32_t slot = 0; slot < game.slots.size(); ++slot) {
-            entt::entity e = game.slots[slot];
-            if (!game.registry.valid(e) ||
-                !game.registry.all_of<HeroSimulationState, Position>(e) ||
-                game.registry.all_of<InsideBuilding>(e)) {
-                continue;
-            }
-            const glm::vec2 d = game.registry.get<Position>(e).pos - p.pos;
+        for (const Eligible& c : eligible) {
+            const glm::vec2 d = c.pos - p.pos;
             if (glm::dot(d, d) <= r2) {
-                near.push_back(slot);
+                near.push_back(c.slot);
             }
         }
         if (near.empty()) {
             continue;  // nobody close enough: the XP evaporates
         }
+        // Slot order, not view order: award (and event) order is stable.
+        std::sort(near.begin(), near.end());
         const int32_t n = static_cast<int32_t>(near.size());
         const int32_t share = (p.amount + n - 1) / n;  // even split, round UP
         for (uint32_t slot : near) {

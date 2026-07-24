@@ -30,6 +30,20 @@ inline size_t texel_k(const VisionGrid& g, int i, int j) {
     return static_cast<size_t>(j) * static_cast<size_t>(g.nx) + static_cast<size_t>(i);
 }
 
+// Marks texel (i,j) visible for this resolve, and discovered if it wasn't
+// already -- bumping `fresh` exactly when THIS stamp is what discovered it.
+// The one write to the back buffer, shared by every stamp site (the rect
+// loop, the cone loop, and the cone's own-texel tail) so the visible/
+// discovered bookkeeping can't drift between them.
+inline void stamp_texel(VisionGrid& g, int i, int j, int& fresh) {
+    const size_t k2 = 2 * texel_k(g, i, j);
+    g.back[k2 + 1] = 255;
+    if (!g.back[k2]) {
+        g.back[k2] = 255;
+        ++fresh;
+    }
+}
+
 // World-space axis-aligned rect covering a footprint (exact for ortho; the
 // oriented bounding box for diagonal, which slightly over-reveals at corners --
 // acceptable for a vision expansion).
@@ -67,12 +81,7 @@ int stamp_rect_expanded(VisionGrid& g, float x0, float x1, float z0, float z1, f
             const float dx = std::max({x0 - c.x, 0.0f, c.x - x1});
             const float dz = std::max({z0 - c.y, 0.0f, c.y - z1});
             if (dx * dx + dz * dz <= r2) {
-                const size_t k2 = 2 * texel_k(g, i, j);
-                g.back[k2 + 1] = 255;
-                if (!g.back[k2]) {
-                    g.back[k2] = 255;
-                    ++fresh;
-                }
+                stamp_texel(g, i, j, fresh);
             }
         }
     }
@@ -101,12 +110,7 @@ int stamp_cone(VisionGrid& g, glm::vec2 c, glm::vec2 facing, float radius,
             if (d2 > 1e-6f && glm::dot(v * (1.0f / std::sqrt(d2)), f) < cone_half_cos) {
                 continue;
             }
-            const size_t k2 = 2 * texel_k(g, i, j);
-            g.back[k2 + 1] = 255;
-            if (!g.back[k2]) {
-                g.back[k2] = 255;
-                ++fresh;
-            }
+            stamp_texel(g, i, j, fresh);
         }
     }
     // A unit always sees the texel it stands on, regardless of the cone (its
@@ -115,12 +119,7 @@ int stamp_cone(VisionGrid& g, glm::vec2 c, glm::vec2 facing, float radius,
     const int ci = texel_i(g, c.x);
     const int cj = texel_j(g, c.y);
     if (ci >= 0 && ci < g.nx && cj >= 0 && cj < g.nz) {
-        const size_t k2 = 2 * texel_k(g, ci, cj);
-        g.back[k2 + 1] = 255;
-        if (!g.back[k2]) {
-            g.back[k2] = 255;
-            ++fresh;
-        }
+        stamp_texel(g, ci, cj, fresh);
     }
     return fresh;
 }
@@ -183,8 +182,10 @@ void resolve_vision(BadlandsGame& game, std::vector<DiscoveryCredit>* credits) {
              .each()) {
         if (team.id != kPlayerTeam || vis.radius <= 0.0f) continue;
         const int fresh = stamp_cone(g, pos.pos, facing.dir, vis.radius, vis.cone_half_cos);
-        if (credits != nullptr && fresh > 0 &&
-            game.registry.all_of<HeroSimulationState>(e)) {
+        // Every stamper is reported here, hero or not -- the crediting policy
+        // (today: only heroes gain XP) lives with the caller (tick_world's
+        // award_xp, which no-ops non-heroes), not with the resolve.
+        if (credits != nullptr && fresh > 0) {
             credits->push_back({slot_for_entity(game, e), fresh});
         }
     }

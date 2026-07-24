@@ -9,9 +9,11 @@ namespace badlands {
 
 namespace {
 
-// Read an optional numeric key into `dst`. Returns false only on a present-but-
-// non-numeric value (a typo worth failing on); a missing key is fine.
-bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, float& dst) {
+// Read an optional numeric key into `dst` (any arithmetic type). Returns false
+// only on a present-but-non-numeric value (a typo worth failing on); a missing
+// key is fine.
+template <typename T>
+bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, T& dst) {
     if (!obj.contains(key)) {
         return true;
     }
@@ -19,20 +21,7 @@ bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, f
         spdlog::warn("LoadCreatureCatalog: {}.{} is not a number", creature, key);
         return false;
     }
-    dst = obj[key].get<float>();
-    return true;
-}
-
-// Same contract as the float overload above, for integer-valued keys.
-bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, int32_t& dst) {
-    if (!obj.contains(key)) {
-        return true;
-    }
-    if (!obj[key].is_number()) {
-        spdlog::warn("LoadCreatureCatalog: {}.{} is not a number", creature, key);
-        return false;
-    }
-    dst = obj[key].get<int32_t>();
+    dst = obj[key].get<T>();
     return true;
 }
 

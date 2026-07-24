@@ -346,8 +346,11 @@ void tick_world(BadlandsGame& g, float dt) {
     spread_kill_xp(g, kill_xp);
 
     // Fog-of-war: resolve next visibility from the post-movement world state and
-    // publish it. Newly-discovered texels credit the stamping hero with
-    // exploration XP -- a system rule, applied here so it lands in the same tick.
+    // publish it. Newly-discovered texels credit the stamping CHARACTER with
+    // exploration XP -- a system rule, applied here so it lands in the same
+    // tick. resolve_vision reports every player-team stamper, hero or not;
+    // award_xp is what actually applies the "only heroes gain XP" policy (a
+    // no-op for non-heroes), so a townfolk/critter stamp is silently free.
     std::vector<DiscoveryCredit> discoveries;
     resolve_vision(g, &discoveries);
     if (g.factors.progression.xp_per_texel > 0) {
@@ -514,9 +517,10 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
         const Skills* sk = g.registry.try_get<Skills>(e);
         CharacterState& row = out.back();
         row.skill_count = sk ? sk->count : 0;
-        for (int32_t i = 0; i < kMaxSkills; ++i) {
-            row.skills[i] =
-                (sk != nullptr && i < sk->count) ? static_cast<int32_t>(sk->ids[i]) : 0;
+        // Designated init above already zeroed row.skills (kMaxSkills entries),
+        // so only [0, skill_count) needs writing -- the rest stay 0.
+        for (int32_t i = 0; i < row.skill_count; ++i) {
+            row.skills[i] = static_cast<int32_t>(sk->ids[i]);
         }
     }
 }
