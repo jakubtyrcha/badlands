@@ -110,6 +110,35 @@ RenderingMaterialInstance* ResolveInstance(entt::registry& registry,
   return instance;
 }
 
+// Build the @group(2) engine bind group (identical layout/entries for every
+// draw that declares it). Shared by RenderForwardMeshes and
+// RenderForwardTransparentMeshes.
+wgpu::BindGroup BuildForwardEngineBindGroup(RenderingMaterialInstance* instance,
+                                            FrameContext& frame,
+                                            const ForwardEngineResources& engine) {
+  std::array<wgpu::BindGroupEntry, 9> entries{};
+  entries[0].binding = 0;
+  entries[0].textureView = engine.scene_depth;
+  entries[1].binding = 1;
+  entries[1].textureView = engine.scene_color;
+  entries[2].binding = 2;
+  entries[2].sampler = engine.scene_color_sampler;
+  entries[3].binding = 3;
+  entries[3].textureView = engine.ibl_prefiltered;
+  entries[4].binding = 4;
+  entries[4].sampler = engine.ibl_sampler;
+  entries[5].binding = 5;
+  entries[5].textureView = engine.brdf_lut;
+  entries[6].binding = 6;
+  entries[6].sampler = engine.brdf_lut_sampler;
+  entries[7].binding = 7;
+  entries[7].textureView = engine.shadow_map;
+  entries[8].binding = 8;
+  entries[8].sampler = engine.shadow_sampler;
+  return frame.CreateBindGroup(instance->GetPipeline().GetBindGroupLayout(2),
+                                entries);
+}
+
 }  // namespace
 
 void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
@@ -146,27 +175,7 @@ void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
     const bool wants_engine = have_engine && instance->DeclaresBindGroup(2);
     if (wants_engine) {
       if (!engine_bg) {
-        std::array<wgpu::BindGroupEntry, 9> entries{};
-        entries[0].binding = 0;
-        entries[0].textureView = engine.scene_depth;
-        entries[1].binding = 1;
-        entries[1].textureView = engine.scene_color;
-        entries[2].binding = 2;
-        entries[2].sampler = engine.scene_color_sampler;
-        entries[3].binding = 3;
-        entries[3].textureView = engine.ibl_prefiltered;
-        entries[4].binding = 4;
-        entries[4].sampler = engine.ibl_sampler;
-        entries[5].binding = 5;
-        entries[5].textureView = engine.brdf_lut;
-        entries[6].binding = 6;
-        entries[6].sampler = engine.brdf_lut_sampler;
-        entries[7].binding = 7;
-        entries[7].textureView = engine.shadow_map;
-        entries[8].binding = 8;
-        entries[8].sampler = engine.shadow_sampler;
-        engine_bg = frame.CreateBindGroup(
-            instance->GetPipeline().GetBindGroupLayout(2), entries);
+        engine_bg = BuildForwardEngineBindGroup(instance, frame, engine);
       }
       pass.SetBindGroup(2, engine_bg);
     }
@@ -223,27 +232,7 @@ void RenderForwardTransparentMeshes(RenderPassContext& pass, FrameContext& frame
 
     if (wants_engine) {
       if (!engine_bg) {
-        std::array<wgpu::BindGroupEntry, 9> entries{};
-        entries[0].binding = 0;
-        entries[0].textureView = engine.scene_depth;
-        entries[1].binding = 1;
-        entries[1].textureView = engine.scene_color;
-        entries[2].binding = 2;
-        entries[2].sampler = engine.scene_color_sampler;
-        entries[3].binding = 3;
-        entries[3].textureView = engine.ibl_prefiltered;
-        entries[4].binding = 4;
-        entries[4].sampler = engine.ibl_sampler;
-        entries[5].binding = 5;
-        entries[5].textureView = engine.brdf_lut;
-        entries[6].binding = 6;
-        entries[6].sampler = engine.brdf_lut_sampler;
-        entries[7].binding = 7;
-        entries[7].textureView = engine.shadow_map;
-        entries[8].binding = 8;
-        entries[8].sampler = engine.shadow_sampler;
-        engine_bg = frame.CreateBindGroup(
-            instance->GetPipeline().GetBindGroupLayout(2), entries);
+        engine_bg = BuildForwardEngineBindGroup(instance, frame, engine);
       }
       pass.SetBindGroup(2, engine_bg);
     }

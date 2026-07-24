@@ -155,7 +155,8 @@ void ModelViewerView::RebuildScene() {
     // Two-material tree: deferred solid bark + forward-opaque alpha-cutout leaf
     // cards, sharing the tree's local space (and therefore one preview
     // transform, so the leaves stay attached to the branches).
-    TexturedMeshResult bark = GenerateTreeMesh(*gen.tree);
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
+    TexturedMeshResult bark = GenerateTreeMesh(*gen.tree, skeleton);
     const float h = bark.local_bounds.max.y - bark.local_bounds.min.y;
     const float s = kTreePreviewHeight / std::max(h, 0.001f);
     const glm::mat4 xf =
@@ -166,7 +167,7 @@ void ModelViewerView::RebuildScene() {
     world_bounds = bark.local_bounds.TransformedBy(xf);
     AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
 
-    TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree);
+    TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
     if (leaves.mesh.vertex_count > 0) {
       world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
       DeferredMaterial lm = matlib_.AlphaCutout(

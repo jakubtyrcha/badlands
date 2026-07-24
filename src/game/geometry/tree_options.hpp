@@ -20,7 +20,7 @@ struct LeafOptions {
   float size = 2.5f;          // leaf card size (native ez-tree units)
   float size_variance = 0.7f;
   float angle = 42.0f;        // tilt from the branch, degrees (ez-tree oak_medium)
-  float alpha_cutoff = 0.5f;  // discard threshold (consumed by a later task's material)
+  float alpha_cutoff = 0.5f;  // discard threshold for the leaf cutout material (MaterialLibrary::AlphaCutout)
   glm::vec3 tint{0.30f, 0.55f, 0.18f};  // green; per-preset overridable
   bool tip_leaf = true;       // ez-tree deciduous terminal-tip leaf: one extra leaf at each
                               // leaf-bearing branch's endpoint (set false for evergreens)

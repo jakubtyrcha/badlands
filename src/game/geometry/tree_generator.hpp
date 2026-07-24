@@ -26,4 +26,11 @@ TexturedMeshResult GenerateTreeMesh(const TreeOptions& options);
 // uses a SEPARATE RNG stream so the branch skeleton is byte-identical to SP1.
 TexturedMeshResult GenerateLeafMesh(const TreeOptions& options);
 
+// Variants that reuse a prebuilt skeleton (must be BuildTreeSkeleton(options) for the same
+// options) so a caller needing both bark and leaf meshes builds the skeleton once.
+TexturedMeshResult GenerateTreeMesh(const TreeOptions& options,
+                                    const std::vector<SkeletonBranch>& skeleton);
+TexturedMeshResult GenerateLeafMesh(const TreeOptions& options,
+                                    const std::vector<SkeletonBranch>& skeleton);
+
 }  // namespace badlands

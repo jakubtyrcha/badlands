@@ -165,8 +165,11 @@ std::vector<SkeletonBranch> BuildTreeSkeleton(const TreeOptions& o) {
 }
 
 TexturedMeshResult GenerateTreeMesh(const TreeOptions& o) {
-  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(o);
+  return GenerateTreeMesh(o, BuildTreeSkeleton(o));
+}
 
+TexturedMeshResult GenerateTreeMesh(const TreeOptions& o,
+                                    const std::vector<SkeletonBranch>& skeleton) {
   StaticTexturedMeshComponent mesh;
 
   for (const SkeletonBranch& br : skeleton) {
@@ -215,7 +218,11 @@ TexturedMeshResult GenerateTreeMesh(const TreeOptions& o) {
 }
 
 TexturedMeshResult GenerateLeafMesh(const TreeOptions& o) {
-  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(o);
+  return GenerateLeafMesh(o, BuildTreeSkeleton(o));
+}
+
+TexturedMeshResult GenerateLeafMesh(const TreeOptions& o,
+                                    const std::vector<SkeletonBranch>& skeleton) {
   const LeafOptions& lf = o.leaves;
   StaticTexturedMeshComponent mesh;
 
