@@ -5,6 +5,7 @@
 #include "entity_memory.h"  // EntityMemory, seed_home_town_memory
 #include "game_state.h"
 #include "placement.h"
+#include "skills.h"  // Skills, grant_skills_for_level
 #include "town_brain.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
 
 #include <entt/entt.hpp>
@@ -178,6 +179,13 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
                 seed_home_town_memory(game, mem, static_cast<uint32_t>(home));
             }
             reg.emplace<EntityMemory>(e, mem);
+
+            // Learned-skill loadout: starts with the class's level-1 grants
+            // (none authored yet); the level-up hook (progression.cpp) adds
+            // the rest.
+            Skills sk{};
+            grant_skills_for_level(sk, hero_class, 1);
+            reg.emplace<Skills>(e, sk);
             break;
         }
         case Archetype::Townfolk: {

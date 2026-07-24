@@ -208,6 +208,16 @@ struct Attacks {
     int32_t count = 0;
 };
 
+// A hero's learned skills + per-skill cooldown state (POD fixed array, like
+// Attacks). Granted by the level-up hook (progression.cpp) from
+// SkillGrantTable; cooldowns start ready. INERT this slice: effects, cooldown
+// ticking, and the UseSkill decision arrive with brain-owned combat (slice 2).
+struct Skills {
+    SkillId ids[kMaxSkills]{};
+    float cooldown_remaining[kMaxSkills]{};
+    int32_t count = 0;
+};
+
 // An in-flight ranged shot. Spawned by the ranged branch of the Attack command;
 // flown and resolved by advance_projectiles. It captures the attacker's attack +
 // tactical stats + the resolution seed axes AT FIRE TIME, so the hit lands

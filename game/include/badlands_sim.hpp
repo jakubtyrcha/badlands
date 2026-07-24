@@ -189,6 +189,18 @@ struct ActivityWeights {
     }
 };
 
+// ---- skills (identity only; defs/triggers live in game/src/skills.h) -------
+// Append-only id space, same discipline as ActivityId.
+enum class SkillId : int32_t {
+    Calcify = 0,  // Apprentice: absorb the next physical strike (effect in slice 2)
+    Count,
+};
+inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
+// Fixed component/snapshot capacity (kMaxAttacks precedent).
+inline constexpr int32_t kMaxSkills = 8;
+// Stable inspection name ("Calcify"); "-" for an out-of-range id.
+const char* SkillName(int32_t id);
+
 // ---- tuning factors (data, not code) ---------------------------------------
 // Per-archetype behaviour tuning. The sim ships the defaults below, so it is
 // fully usable -- and unit-testable -- with no file present; an app may load

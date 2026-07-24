@@ -273,6 +273,7 @@ add_library(badlands_game_lib STATIC
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/skills.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
     game/src/town_brain.cpp
@@ -632,6 +633,8 @@ add_executable(badlands_game_tests
     # so it runs here without a device -- same rationale as the decals above.
     game/tests/world_labels_tests.cpp
     src/game/visual/world_labels.cpp
+    # Skill vocabulary: catalog, grant table, Skills component (game/src/skills.h).
+    game/tests/skills_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
