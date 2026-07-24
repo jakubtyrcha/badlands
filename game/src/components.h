@@ -138,10 +138,18 @@ struct HeroSimulationState {
     int32_t home_building_id = -1;
     int32_t level = 1;
     int32_t xp = 0;
-    // Deliberation: while world_millis is below this the hero is standing and
-    // thinking. Set by the SetBehavior handler from the command's duration (so
-    // the pause is IN the log and a replay reproduces it), and cleared by
-    // committing to any other activity.
+    // Vestigial: was the C++ hero decision layer's own deliberation pause
+    // ("while world_millis is below this the hero is standing and
+    // thinking"), set by the SetBehavior handler from the command's
+    // duration. That layer is gone -- the intention contract
+    // (game/src/intention.h) replaced it -- and nothing emits
+    // SetBehavior(Think, ...) anymore (command.cpp's SetBehavior handler),
+    // so this is unconditionally 0 now. Kept only because
+    // hero_perception.cpp still copies it into WorldView::think_until_millis,
+    // which wasm_brain.cpp packs into BlViewSelf::think_until_millis for 1:1
+    // wire-shape parity (brain_abi.h) -- removing it outright is an
+    // ABI-layout change (sizeof/offsetof are static-asserted on all three
+    // structs), deferred rather than done here.
     int64_t think_until_millis = 0;
 };
 

@@ -606,7 +606,7 @@ void AiSandboxView::DrawInspector() {
   badlands::WorldState world{};
   world = sim_.World();
   badlands::SimStats stats{};
-  stats = stats;
+  stats = sim_.GetStats();
 
   // --- clock -----------------------------------------------------------
   ImGui::Text("Day %u  %02d:%02d  %s", world.day,

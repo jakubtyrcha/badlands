@@ -196,13 +196,13 @@ typedef struct BlViewFactors {
     // Per-class activity preference (ActivityWeights), for THIS entity's class
     // only -- selection still happens the same way a C++ brain would do it.
     float weights[BL_MAX_ACTIVITIES];
-    float fatigue_seek;            // read by score_go_home (day bar)
-    float fatigue_seek_night;      // read by score_go_home (night bar)
-    float low_health_rest;         // read by score_go_home (injury override)
-    float content_seek;            // read by score_visit_tavern
-    float chat_content_seek;       // read by score_chat
-    float chat_radius;             // read by act_chat (strike-up-conversation range)
-    float explore_min_fatigue;     // read by score_explore
+    float fatigue_seek;            // read by scoreGoHome (day bar)
+    float fatigue_seek_night;      // read by scoreGoHome (night bar)
+    float low_health_rest;         // read by scoreGoHome (injury override)
+    float content_seek;            // read by scoreVisitTavern
+    float chat_content_seek;       // read by scoreChat
+    float chat_radius;             // read by actChat (strike-up-conversation range)
+    float explore_min_fatigue;     // read by scoreExplore
     // Explicit: 14 weights (56B) + 7 scalars (28B) = 84B, not a multiple of
     // 8 -- and BlStatus[] (embedded right after `factors` in BlViewWire)
     // starts with an int64_t and needs 8-byte alignment, so this struct's

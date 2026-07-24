@@ -53,9 +53,9 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 }  // namespace
 
 // --- self-review finding: explore_lease_millis is ALSO a divisor -----------
-// (town_brain.cpp's observe_hero: `world_millis / explore_lease_millis`, run
-// UNCONDITIONALLY for every hero every tick, with no <=0 guard of its own --
-// unlike the needs.cpp hours-rate fields, which reserve_rate_per_tick itself
+// (hero_perception.cpp's observe_hero: `world_millis / explore_lease_millis`,
+// run UNCONDITIONALLY for every hero every tick, with no <=0 guard of its own
+// -- unlike the needs.cpp hours-rate fields, which reserve_rate_per_tick itself
 // guards). Caught auditing sanitize_factors' sweep against every division
 // site in game/src, not just needs.cpp's. Not one of the brief's three
 // repros, and not demonstrated live: an int64 divide-by-zero here is
@@ -63,7 +63,7 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 // rather than trapping, so it would not reproduce as a visible abort here
 // the way (b) does) -- pinned as a unit-level non-zero check instead.
 
-TEST_CASE("sanitize_factors: explore_lease_millis (a divisor in town_brain.cpp) "
+TEST_CASE("sanitize_factors: explore_lease_millis (a divisor in hero_perception.cpp) "
          "never comes back <= 0") {
     Sim sim{BrainDesc{}};
 
@@ -126,9 +126,12 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair comes back min <= max"
 // merely re-validated more leniently -- so this exact hazard class is now
 // STRUCTURALLY unreachable for a wasm-driven hero: there is no wire field
 // left for an inverted pair to corrupt. (a) above still pins the min<=max
-// invariant itself, which remains meaningful for the C++ mock hero path
-// (town_brain.cpp's own deliberate(), untouched this task). This case is
-// replaced with a narrower regression: a wasm-driven run with the SAME
+// invariant itself -- sanitize_factors' own contract on HeroFactors, kept
+// even though the C++ hero decision layer that used to consume
+// think_min/think_max_millis (town_brain.cpp's deliberate()) is gone too
+// (a later task in this same slice): the fields are still sanitized, just
+// vestigial -- nothing reads them for behavior on any hero path anymore.
+// This case is replaced with a narrower regression: a wasm-driven run with the SAME
 // inverted pair configured simply ticks along fine (the factor is read by
 // nothing on that path anymore).
 

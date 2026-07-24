@@ -75,29 +75,34 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             if (e != entt::null) {
                 if (auto* sim = game.registry.try_get<HeroSimulationState>(e)) {
                     sim->behavior = cmd.param_a;
-                    // Starting a deliberation pause sets its deadline;
-                    // committing to anything else cancels one in progress. Both
-                    // derive from the command, so replay reproduces the pause
-                    // without re-drawing its length.
-                    sim->think_until_millis =
-                        (cmd.param_a == static_cast<int32_t>(ActivityId::Think) &&
-                         cmd.param_b > 0)
-                            ? game.world_millis + cmd.param_b
-                            : 0;
+                    // Always 0: this was the C++ hero decision layer's own
+                    // deliberation pause (SetBehavior(Think, duration)), and
+                    // that layer is gone entirely (the intention contract,
+                    // game/src/intention.h) -- no producer ever emits
+                    // ActivityId::Think anymore, so the branch that used to
+                    // set this non-zero is dead and was removed. The field
+                    // itself stays: hero_perception.cpp's observe_hero still
+                    // copies it into WorldView::think_until_millis, which
+                    // wasm_brain.cpp still packs into BlViewSelf::
+                    // think_until_millis on the wire (kept there only for 1:1
+                    // parity with WorldView -- see that field's own comment,
+                    // brain_abi.h) -- so it is not dead by the grep, just
+                    // permanently 0.
+                    sim->think_until_millis = 0;
                 } else if (auto* cs = game.registry.try_get<CritterState>(e)) {
                     cs->behavior = cmd.param_a;
                 } else if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
                     tc->behavior = cmd.param_a;
                 }
                 // Intention contract (game/src/intention.h): the wake
-                // schedule rides the SAME duration field the C++ mock's own
-                // deliberation pause always has, above -- deriving it HERE
-                // (not in apply_intention) is what makes it replay-derivable:
-                // any tick that applies this exact command, live or
-                // replayed, reconstructs the same wake_at_millis. Harmless
-                // for a hero not on the intention contract (mock heroes:
-                // CurrentIntention.kind stays None regardless, so nothing
-                // ever reads this field for them).
+                // schedule rides on cmd.param_b (SetBehavior's duration_millis)
+                // -- deriving wake_at_millis HERE (not in apply_intention) is
+                // what makes it replay-derivable: any tick that applies this
+                // exact command, live or replayed, reconstructs the same
+                // wake_at_millis. Harmless for critters/townfolk: only heroes
+                // get a CurrentIntention (heroes.cpp emplaces it for every
+                // hero, wasm-brained or not), so try_get above is a no-op for
+                // them.
                 if (auto* ci = game.registry.try_get<CurrentIntention>(e)) {
                     ci->wake_at_millis = cmd.param_b > 0 ? game.world_millis + cmd.param_b : 0;
                 }

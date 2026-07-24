@@ -273,7 +273,7 @@
 
 <h3>BlViewWire (in) — block order</h3>
 <div class="diagram-wrap">
-<svg viewBox="0 0 660 528" role="img" aria-label="BlViewWire top-level block order: header, self, statuses, suggest, factors, events, chars.">
+<svg viewBox="0 0 660 528" role="img" aria-label="BlViewWire top-level block order: header, self, suggest, factors, statuses, events, chars.">
   <rect class="box" x="20" y="10" width="620" height="30" rx="5"></rect>
   <text class="lbl2" x="30" y="30">version : uint32   +   _pad0 : uint32  (8 B)</text>
 
@@ -281,20 +281,20 @@
   <text class="lbl" x="30" y="68">self : BlViewSelf</text>
   <text class="lbl2" x="30" y="86">needs, hp_frac, clock, position, current-intention summary</text>
 
-  <rect class="box" x="20" y="106" width="620" height="30" rx="5"></rect>
-  <text class="lbl2" x="30" y="126">status_count : int32   +   _pad1 : uint32  (8 B)</text>
+  <rect class="box" x="20" y="106" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="128">suggest : BlViewSuggest</text>
+  <text class="lbl2" x="30" y="146">threats, roam/explore goals, home/tavern/apothecary, chat partner, prey (unchanged from v1)</text>
 
-  <rect class="box" x="20" y="142" width="620" height="54" rx="5"></rect>
-  <text class="lbl" x="30" y="164">statuses : BlStatus[ ]</text>
-  <text class="lbl2" x="30" y="182">bounded, append-only kinds — { kind, remaining_millis }</text>
+  <rect class="box" x="20" y="166" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="188">factors : BlViewFactors</text>
+  <text class="lbl2" x="30" y="206">hero-scoring tuning scalars (unchanged from v1)</text>
 
-  <rect class="box" x="20" y="202" width="620" height="54" rx="5"></rect>
-  <text class="lbl" x="30" y="224">suggest : BlViewSuggest</text>
-  <text class="lbl2" x="30" y="242">threats, roam/explore goals, home/tavern/apothecary, chat partner, prey (unchanged from v1)</text>
+  <rect class="box" x="20" y="226" width="620" height="30" rx="5"></rect>
+  <text class="lbl2" x="30" y="246">status_count : int32   +   _pad1 : uint32  (8 B)</text>
 
   <rect class="box" x="20" y="262" width="620" height="54" rx="5"></rect>
-  <text class="lbl" x="30" y="284">factors : BlViewFactors</text>
-  <text class="lbl2" x="30" y="302">hero-scoring tuning scalars (unchanged from v1)</text>
+  <text class="lbl" x="30" y="284">statuses : BlStatus[ ]</text>
+  <text class="lbl2" x="30" y="302">bounded, append-only kinds — { kind, remaining_millis }</text>
 
   <rect class="box" x="20" y="322" width="620" height="30" rx="5"></rect>
   <text class="lbl2" x="30" y="342">event_count : int32   +   _pad2 : uint32  (8 B)</text>
@@ -310,7 +310,7 @@
   <text class="lbl" x="30" y="476">chars : BlViewChar[ ]</text>
   <text class="lbl2" x="30" y="494">known characters, as today (unchanged from v1)</text>
 </svg>
-<p class="diagram-cap">Block <em>order</em> and <em>names</em> are binding (<code>self</code> / <code>statuses</code> / <code>suggest</code> / <code>factors</code> / <code>events</code> / <code>chars</code>). Exact per-field byte offsets inside <code>self</code>/<code>suggest</code>/<code>factors</code>/<code>chars</code> are finalized in the implementing task — this shows the shape and the layout discipline, not final offsets.</p>
+<p class="diagram-cap">Block <em>order</em> and <em>names</em> are binding (<code>self</code> / <code>suggest</code> / <code>factors</code> / <code>statuses</code> / <code>events</code> / <code>chars</code>). Exact per-field byte offsets inside <code>self</code>/<code>suggest</code>/<code>factors</code>/<code>chars</code> are finalized in the implementing task — this shows the shape and the layout discipline, not final offsets.</p>
 </div>
 
 <h3>Byte-exact blocks (new structs)</h3>

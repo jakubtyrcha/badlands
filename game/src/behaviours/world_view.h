@@ -101,9 +101,17 @@ struct WorldView {
     float partner_dist = 0.0f;
     bool chatting = false;
 
-    // --- deliberation --------------------------------------------------------
-    int64_t now_millis = 0;           // sim clock, for pause bookkeeping
-    int64_t think_until_millis = 0;   // a pause in progress ends at this time
+    // --- self summary (feeds BlViewSelf on the wire) -------------------------
+    int64_t now_millis = 0;           // sim clock (-> BlViewSelf::world_millis)
+    // Vestigial: was the C++ hero decision layer's own deliberation-pause
+    // deadline ("a pause in progress ends at this time"). That layer is gone
+    // -- the intention contract (game/src/intention.h) replaced it -- and
+    // nothing sets this above 0 anymore (command.cpp's SetBehavior handler
+    // never sees ActivityId::Think). Kept only because wasm_brain.cpp packs
+    // it into BlViewSelf::think_until_millis for 1:1 wire-shape parity
+    // (brain_abi.h) -- removing it outright is an ABI-layout change,
+    // deferred rather than done here.
+    int64_t think_until_millis = 0;
     int32_t current_activity = -1;    // what this entity is doing now; -1 = nothing yet
 
     // --- hunter: nearest prey (a critter within hunt sight) ----------------
