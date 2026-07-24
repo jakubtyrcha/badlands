@@ -52,4 +52,40 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
   return s;
 }
 
+Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
+                      const FlowRouting& r, const Field2D<float>& area,
+                      const ErosionParams& p, float texel_m) {
+  Field2D<float> eroded(r.width, r.height, 0.0f);
+  const float diag = texel_m * std::sqrt(2.0f);
+  for (const int i : r.order) {
+    const int32_t rcv = r.receiver[i];
+    if (rcv < 0 || r.in_lake[i]) continue;  // base level / lake floor: skip
+    const float h_old = B.data[i] + S.data[i];
+    // effective receiver level: erode toward the water surface over lakes
+    const float z_rcv = std::max(B.data[rcv] + S.data[rcv], r.water_level[rcv]);
+    if (h_old <= z_rcv) continue;
+    const int dx = std::abs(i % r.width - rcv % r.width);
+    const int dy = std::abs(i / r.width - rcv / r.width);
+    const float d = (dx + dy == 2) ? diag : texel_m;
+    const float K = S.data[i] > 0.0f ? p.k_sediment : p.k_bedrock;
+    if (K <= 0.0f) continue;
+    const float F = K * std::pow(area.data[i], p.m) * p.dt / d;
+    const float h_new = (h_old + F * z_rcv) / (1.0f + F);
+    float delta = h_old - h_new;
+    if (delta <= 0.0f) continue;
+    if (delta <= S.data[i]) {
+      S.data[i] -= delta;
+    } else {
+      // layer transition: the sediment fraction goes at k_sediment's rate,
+      // the remainder is rescaled to bedrock's slower rate
+      const float into_rock = (delta - S.data[i]) * (p.k_bedrock / p.k_sediment);
+      delta = S.data[i] + into_rock;
+      S.data[i] = 0.0f;
+      B.data[i] -= into_rock;
+    }
+    eroded.data[i] = delta;
+  }
+  return eroded;
+}
+
 }  // namespace badlands::mapgen
