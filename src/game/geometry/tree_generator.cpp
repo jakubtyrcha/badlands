@@ -165,8 +165,11 @@ std::vector<SkeletonBranch> BuildTreeSkeleton(const TreeOptions& o) {
 }
 
 TexturedMeshResult GenerateTreeMesh(const TreeOptions& o) {
-  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(o);
+  return GenerateTreeMesh(o, BuildTreeSkeleton(o));
+}
 
+TexturedMeshResult GenerateTreeMesh(const TreeOptions& o,
+                                    const std::vector<SkeletonBranch>& skeleton) {
   StaticTexturedMeshComponent mesh;
 
   for (const SkeletonBranch& br : skeleton) {
@@ -214,6 +217,94 @@ TexturedMeshResult GenerateTreeMesh(const TreeOptions& o) {
   return {.mesh = std::move(mesh), .local_bounds = bounds};
 }
 
+TexturedMeshResult GenerateLeafMesh(const TreeOptions& o) {
+  return GenerateLeafMesh(o, BuildTreeSkeleton(o));
+}
+
+TexturedMeshResult GenerateLeafMesh(const TreeOptions& o,
+                                    const std::vector<SkeletonBranch>& skeleton) {
+  const LeafOptions& lf = o.leaves;
+  StaticTexturedMeshComponent mesh;
+
+  if (lf.enabled && lf.count > 0) {
+    TreeRng rng(o.seed ^ 0x9E3779B9u);
+    const int quads_per_leaf = (lf.billboard >= 2) ? 2 : 1;
+
+    // One leaf (1 or 2 crossed quads) at a placement frame. Consumes one rng draw
+    // (size variance). Shared by distributed leaves and the terminal-tip leaf.
+    auto emit_leaf = [&](const glm::vec3& origin, const glm::quat& orient) {
+      const float leaf_size = lf.size * (1.0f - lf.size_variance * rng.unit());
+      glm::vec3 rnormal(origin.x, 0.0f, origin.z);
+      rnormal = (glm::length(rnormal) > 1e-5f) ? glm::normalize(rnormal)
+                                               : glm::vec3(0, 0, 1);
+      for (int q = 0; q < quads_per_leaf; ++q) {
+        const glm::quat rot =
+            orient *
+            glm::angleAxis((q == 1) ? glm::half_pi<float>() : 0.0f, glm::vec3(0, 1, 0));
+        const glm::vec3 local[4] = {{-leaf_size * 0.5f, leaf_size, 0.0f},
+                                    {-leaf_size * 0.5f, 0.0f, 0.0f},
+                                    { leaf_size * 0.5f, 0.0f, 0.0f},
+                                    { leaf_size * 0.5f, leaf_size, 0.0f}};
+        const glm::vec2 uv[4] = {{0, 1}, {0, 0}, {1, 0}, {1, 1}};
+        const glm::vec3 tangent = glm::normalize(rot * glm::vec3(1, 0, 0));
+        const uint32_t base = mesh.vertex_count;
+        for (int c = 0; c < 4; ++c) {
+          PushVertex(mesh.vertices, origin + rot * local[c], uv[c], rnormal, tangent);
+        }
+        mesh.vertex_count =
+            static_cast<uint32_t>(mesh.vertices.size() / kTexturedMeshFloatsPerVertex);
+        mesh.indices.insert(mesh.indices.end(),
+                            {base + 0u, base + 1u, base + 2u, base + 0u, base + 2u, base + 3u});
+      }
+    };
+
+    for (const SkeletonBranch& br : skeleton) {
+      if (br.level != o.levels) continue;
+      const int last = static_cast<int>(br.sections.size()) - 1;
+      if (last < 1) continue;
+
+      const float radial_offset = rng.unit();
+      const float start_min = lf.start;
+      const float height_step = (1.0f - start_min) / static_cast<float>(lf.count);
+      const std::vector<int> slots = ShuffledIndices(lf.count, rng);
+
+      for (int i = 0; i < lf.count; ++i) {
+        const float leaf_start =
+            start_min + (static_cast<float>(i) + rng.unit()) * height_step;
+        int si = static_cast<int>(std::floor(leaf_start * static_cast<float>(last)));
+        si = std::clamp(si, 0, last);
+        const BranchSection& a = br.sections[static_cast<size_t>(si)];
+        const BranchSection& b =
+            (si == last) ? a : br.sections[static_cast<size_t>(si + 1)];
+        float alpha = (leaf_start - static_cast<float>(si) / static_cast<float>(last)) /
+                      (1.0f / static_cast<float>(last));
+        alpha = std::clamp(alpha, 0.0f, 1.0f);
+
+        const glm::vec3 origin = glm::mix(a.origin, b.origin, alpha);
+        const glm::quat parent = glm::slerp(b.orientation, a.orientation, alpha);
+        const float radial_angle =
+            glm::two_pi<float>() *
+            (radial_offset + (static_cast<float>(slots[static_cast<size_t>(i)]) +
+                              rng.range(-0.5f, 0.5f)) / static_cast<float>(lf.count));
+        const glm::quat leaf_orient =
+            parent * glm::angleAxis(radial_angle, glm::vec3(0, 1, 0)) *
+            glm::angleAxis(glm::radians(lf.angle), glm::vec3(1, 0, 0));
+        emit_leaf(origin, leaf_orient);
+      }
+
+      // ez-tree deciduous terminal-tip leaf: one extra leaf at the branch endpoint.
+      if (lf.tip_leaf) {
+        const BranchSection& tip = br.sections[static_cast<size_t>(last)];
+        emit_leaf(tip.origin, tip.orientation);
+      }
+    }
+  }
+
+  mesh.dirty = true;
+  const Aabb bounds = ComputeLocalAabb(mesh);
+  return {.mesh = std::move(mesh), .local_bounds = bounds};
+}
+
 std::vector<NamedTreeOptions> TreeCatalog() {
   // ez-tree presets, one struct per src/lib/presets/<name>.json. Designated
   // initializers name every field, so this stays auditable against the source
@@ -228,7 +319,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {28.08f, 4.55f, 9.78f, 7.16f}, .radius = {1.0f, 1.02f, 0.69f, 1.19f},
       .sections = {16, 9, 8, 1}, .segments = {7, 5, 3, 3},
       .start = {0, 0.49f, 0.06f, 0.12f}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
-      .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.01f}});
+      .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.01f,
+      .leaves = {.count=14, .start=0.16f, .size=1.38f, .size_variance=0.7f, .angle=42.0f, .tint={0.32f,0.52f,0.18f}}}});
   catalog.push_back({"Oak (medium)", OakPreset()});
   catalog.push_back({"Oak (large)", {
       .seed = 23399, .type = T::Deciduous, .levels = 3,
@@ -237,7 +329,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {47.7f, 29.39f, 17.62f, 7.16f}, .radius = {3.0f, 0.69f, 0.69f, 1.19f},
       .sections = {16, 9, 8, 3}, .segments = {12, 5, 3, 3},
       .start = {0, 0.35f, 0.1f, 0}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
-      .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.02f}});
+      .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.02f,
+      .leaves = {.count=10, .start=0.16f, .size=4.5f, .size_variance=0.7f, .angle=36.0f, .tint={0.32f,0.52f,0.18f}}}});
   catalog.push_back({"Pine (small)", {
       .seed = 11744, .type = T::Evergreen, .levels = 1,
       .angle = {0, 117, 60, 60}, .children = {91, 7, 5, 0},
@@ -245,7 +338,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {39.55f, 12.12f, 10.0f, 1.0f}, .radius = {0.55f, 0.41f, 0.7f, 0.7f},
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.16f, 0.3f, 0.3f}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
-      .twist = {0, 0, 0, 0}, .force_strength = 0.0f}});
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0f,
+      .leaves = {.count=21, .start=0.0f, .size=0.965f, .size_variance=0.7f, .angle=10.0f, .tint={0.16f,0.40f,0.24f}, .tip_leaf=false}}});
   catalog.push_back({"Pine (medium)", PinePreset()});
   catalog.push_back({"Pine (large)", {
       .seed = 44166, .type = T::Evergreen, .levels = 1,
@@ -254,7 +348,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {65.25f, 34.85f, 27.25f, 1.0f}, .radius = {1.27f, 0.37f, 0.7f, 0.7f},
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.29f, 0.14f, 0.3f}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
-      .twist = {0, 0, 0, 0}, .force_strength = 0.009f}});
+      .twist = {0, 0, 0, 0}, .force_strength = 0.009f,
+      .leaves = {.count=18, .start=0.076f, .size=2.609f, .size_variance=0.201f, .angle=17.0f, .tint={0.16f,0.40f,0.24f}, .tip_leaf=false}}});
   catalog.push_back({"Ash (small)", {
       .seed = 26867, .type = T::Deciduous, .levels = 2,
       .angle = {0, 48, 75, 60}, .children = {10, 3, 3, 0},
@@ -262,7 +357,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {23.87f, 18.0f, 5.59f, 4.6f}, .radius = {0.81f, 0.56f, 0.76f, 0.7f},
       .sections = {12, 10, 10, 10}, .segments = {8, 6, 4, 3},
       .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
-      .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.01f}});
+      .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.01f,
+      .leaves = {.count=30, .start=0.0f, .size=2.05f, .size_variance=0.717f, .angle=55.0f, .tint={0.34f,0.56f,0.20f}}}});
   catalog.push_back({"Ash (medium)", {
       .seed = 36330, .type = T::Deciduous, .levels = 3,
       .angle = {0, 48, 75, 60}, .children = {7, 4, 3, 0},
@@ -270,7 +366,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {43.47f, 27.14f, 9.51f, 4.6f}, .radius = {2.0f, 0.63f, 0.76f, 0.7f},
       .sections = {12, 8, 6, 4}, .segments = {12, 6, 4, 3},
       .start = {0, 0.23f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
-      .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f}});
+      .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f,
+      .leaves = {.count=16, .start=0.0f, .size=2.67f, .size_variance=0.72f, .angle=55.0f, .tint={0.34f,0.56f,0.20f}}}});
   catalog.push_back({"Ash (large)", {
       .seed = 29919, .type = T::Deciduous, .levels = 3,
       .angle = {0, 39, 39, 51}, .children = {10, 4, 3, 0},
@@ -278,7 +375,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {45.0f, 29.42f, 15.3f, 4.6f}, .radius = {3.03f, 0.53f, 0.79f, 1.11f},
       .sections = {12, 8, 6, 4}, .segments = {8, 6, 4, 3},
       .start = {0, 0.32f, 0.34f, 0}, .taper = {0.7f, 0.62f, 0.76f, 0},
-      .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f}});
+      .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f,
+      .leaves = {.count=10, .start=0.01f, .size=4.62f, .size_variance=0.72f, .angle=30.0f, .tint={0.34f,0.56f,0.20f}}}});
   catalog.push_back({"Aspen (small)", {
       .seed = 36330, .type = T::Deciduous, .levels = 2,
       .angle = {0, 70, 35, 7}, .children = {4, 3, 3, 0},
@@ -286,7 +384,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {23.99f, 3.36f, 7.7f, 1.0f}, .radius = {0.37f, 0.41f, 0.7f, 0.7f},
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.45f, 0.33f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
-      .twist = {0, 0, 0, 0}, .force_strength = 0.0109f}});
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0109f,
+      .leaves = {.count=13, .start=0.2f, .size=2.5f, .size_variance=0.7f, .angle=30.0f, .tint={0.52f,0.66f,0.22f}}}});
   catalog.push_back({"Aspen (medium)", {
       .seed = 18020, .type = T::Deciduous, .levels = 2,
       .angle = {0, 75, 32, 7}, .children = {10, 3, 3, 0},
@@ -294,7 +393,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {50.0f, 6.07f, 11.19f, 1.0f}, .radius = {0.72f, 0.41f, 0.7f, 0.7f},
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.59f, 0.35f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
-      .twist = {0, 0, 0, 0}, .force_strength = 0.0148f}});
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0148f,
+      .leaves = {.count=11, .start=0.124f, .size=2.5f, .size_variance=0.7f, .angle=30.0f, .tint={0.52f,0.66f,0.22f}}}});
   catalog.push_back({"Aspen (large)", {
       .seed = 30631, .type = T::Deciduous, .levels = 2,
       .angle = {0, 47, 63, 7}, .children = {10, 6, 0, 0},
@@ -302,7 +402,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {69.6f, 18.56f, 11.19f, 1.0f}, .radius = {1.11f, 0.58f, 0.7f, 0.7f},
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.62f, 0.05f, 0}, .taper = {0.7f, 0.13f, 0.7f, 0.7f},
-      .twist = {0, 0, 0, 0}, .force_strength = 0.0217f}});
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0217f,
+      .leaves = {.count=20, .start=0.152f, .size=3.478f, .size_variance=0.7f, .angle=36.0f, .tint={0.52f,0.66f,0.22f}}}});
   catalog.push_back({"Bush 1", {
       .seed = 45590, .type = T::Deciduous, .levels = 3,
       .angle = {0, 21.52f, 62.61f, 60}, .children = {7, 3, 2, 0},
@@ -310,7 +411,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {0.1f, 15.3f, 5.59f, 4.6f}, .radius = {0.58f, 0.95f, 0.76f, 0.7f},
       .sections = {6, 6, 10, 10}, .segments = {4, 4, 4, 3},
       .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
-      .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.0f}});
+      .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.0f,
+      .leaves = {.count=12, .start=0.0f, .size=2.446f, .size_variance=0.717f, .angle=55.0f, .tint={0.40f,0.62f,0.20f}}}});
   catalog.push_back({"Bush 2", {
       .seed = 45590, .type = T::Deciduous, .levels = 2,
       .angle = {0, 19.57f, 27.39f, 60}, .children = {10, 3, 2, 0},
@@ -318,7 +420,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {0.1f, 19.65f, 7.7f, 4.6f}, .radius = {0.58f, 0.95f, 0.76f, 0.7f},
       .sections = {3, 4, 10, 10}, .segments = {4, 4, 4, 3},
       .start = {0, 0.64f, 0.71f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
-      .twist = {0.36f, -0.04f, 0, 0}, .force_strength = 0.0f}});
+      .twist = {0.36f, -0.04f, 0, 0}, .force_strength = 0.0f,
+      .leaves = {.count=7, .start=0.0f, .size=2.446f, .size_variance=0.717f, .angle=55.0f, .tint={0.40f,0.62f,0.20f}}}});
   catalog.push_back({"Bush 3", {
       .seed = 31343, .type = T::Evergreen, .levels = 3,
       .angle = {0, 66.52f, 52.83f, 0}, .children = {13, 4, 4, 0},
@@ -326,7 +429,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .length = {10.96f, 21.82f, 13.13f, 5.53f}, .radius = {0.58f, 0.95f, 0.69f, 0.74f},
       .sections = {4, 3, 3, 10}, .segments = {3, 3, 3, 3},
       .start = {0, 0.14f, 0.29f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
-      .twist = {0.3f, -0.03f, 0, 0}, .force_strength = 0.0f}});
+      .twist = {0.3f, -0.03f, 0, 0}, .force_strength = 0.0f,
+      .leaves = {.count=3, .start=0.152f, .size=3.043f, .size_variance=0.457f, .angle=54.0f, .tint={0.20f,0.46f,0.32f}, .tip_leaf=false}}});
   return catalog;
 }
 

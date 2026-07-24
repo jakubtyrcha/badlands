@@ -12,6 +12,7 @@
 #include "core/geometry_type.hpp"
 #include "engine/rendering/checker_texture.hpp"
 #include "engine/rendering/gbuffer.hpp"
+#include "engine/rendering/scene_renderer.hpp"  // kAccumulationFormat / kDepthFormat
 
 namespace badlands {
 
@@ -156,6 +157,52 @@ DeferredMaterial MaterialLibrary::CheckerAlbedo(glm::vec3 color_a,
   }
 
   return DeferredMaterial{.factory = factory_.get(), .params = it->second};
+}
+
+DeferredMaterial MaterialLibrary::AlphaCutout(wgpu::TextureView albedo,
+                                              wgpu::Sampler sampler,
+                                              float cutoff, glm::vec3 tint) {
+  // Build the shared forward-opaque "leaf" factory once. Its color target is
+  // the HDR accumulation format (the forward-opaque pass renders into
+  // hdr_color_view_) and its depth is the reversed-Z scene depth; cull None
+  // (double-sided foliage) and depth_write true so leaf cards occlude each
+  // other. The kForwardOpaque variant compiles both the forward and the
+  // (alpha-tested, depth-only) shadow pipeline.
+  if (!alpha_cutout_factory_) {
+    FactoryDescriptor desc;
+    desc.shader_name = "leaf";
+    desc.shader_path = "material/leaf.wesl";
+    desc.supported_pass_types = {MaterialPassType::kForwardOpaque};
+    desc.supported_geometry_types = {GeometryType::kTexturedMesh};
+    desc.color_formats = {SceneRenderer::kAccumulationFormat};  // HDR
+    desc.depth_format = SceneRenderer::kDepthFormat;
+    desc.depth_write = true;
+    desc.cull_mode = wgpu::CullMode::None;  // double-sided
+    alpha_cutout_factory_ = BuildMaterialInstanceFactory(
+        desc, device_, queue_, pipeline_gen_, /*script_provider=*/nullptr);
+    if (!alpha_cutout_factory_) {
+      spdlog::error(
+          "MaterialLibrary::AlphaCutout: failed to build leaf material factory");
+      load_failed_ = true;
+      return DeferredMaterial{};
+    }
+  }
+
+  InstanceParams params;
+  params.texture_overrides.push_back(DefaultTextureView{
+      .param_name = "albedo",
+      .view = albedo,
+      .sampler = sampler,
+      .type = TextureType::k2D,
+  });
+  // tintCutoff: xyz = tint (RGB multiplier), w = alpha discard threshold. Names
+  // the group-1 LeafUniforms field the render_forward pass applies per-object.
+  params.uniform_overrides = {
+      {"tintCutoff", glm::vec4(tint, cutoff)},
+  };
+
+  return DeferredMaterial{.factory = alpha_cutout_factory_.get(),
+                          .params = std::move(params)};
 }
 
 MaterialLibrary::TerrainArrays MaterialLibrary::LoadTerrainArrays(

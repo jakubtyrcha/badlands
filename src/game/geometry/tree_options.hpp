@@ -9,6 +9,23 @@ namespace badlands {
 
 enum class TreeType { Deciduous, Evergreen };
 
+// Leaf-card generation parameters (ported from ez-tree TreeOptions.leaves).
+// Consumed by GenerateLeafMesh (tree_generator.hpp); leaf placement uses a
+// separate RNG stream so it never perturbs the branch skeleton.
+struct LeafOptions {
+  bool  enabled = true;
+  int   billboard = 2;        // 1 = single quad, 2 = double (perpendicular cross)
+  int   count = 18;           // leaves per leaf-bearing branch (ez-tree oak_medium)
+  float start = 0.16f;        // fractional start along the branch (ez-tree)
+  float size = 2.5f;          // leaf card size (native ez-tree units)
+  float size_variance = 0.7f;
+  float angle = 42.0f;        // tilt from the branch, degrees (ez-tree oak_medium)
+  float alpha_cutoff = 0.5f;  // discard threshold for the leaf cutout material (MaterialLibrary::AlphaCutout)
+  glm::vec3 tint{0.30f, 0.55f, 0.18f};  // green; per-preset overridable
+  bool tip_leaf = true;       // ez-tree deciduous terminal-tip leaf: one extra leaf at each
+                              // leaf-bearing branch's endpoint (set false for evergreens)
+};
+
 // Per-level branch parameters (index = branch level, 0 = trunk). Ported from
 // ez-tree TreeOptions.branch (github.com/dgreenheck/ez-tree). Angles in degrees.
 struct TreeOptions {
@@ -31,6 +48,8 @@ struct TreeOptions {
   float force_strength = 0.0f;
   float bark_uv_scale_x = 1.0f;                // wraps = round(base_radius * this)
   float bark_uv_scale_y = 1.0f;                // V = cumulative_length / this
+
+  LeafOptions leaves;
 };
 
 // ez-tree presets/oak_medium.json (deciduous).
@@ -49,6 +68,7 @@ inline TreeOptions OakPreset() {
   o.twist      = {-0.23f, 0.42f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = 0.02f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 10.0f;
+  o.leaves = {.count=18, .start=0.16f, .size=2.5f, .size_variance=0.7f, .angle=42.0f, .tint={0.32f,0.52f,0.18f}};
   return o;
 }
 
@@ -68,6 +88,7 @@ inline TreeOptions PinePreset() {
   o.twist      = {0.0f, 0.0f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = -0.003f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 1.0f;
+  o.leaves = {.count=30, .start=0.09f, .size=1.435f, .size_variance=0.201f, .angle=39.0f, .tint={0.16f,0.40f,0.24f}, .tip_leaf=false};
   return o;
 }
 

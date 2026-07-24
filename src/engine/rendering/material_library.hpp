@@ -91,6 +91,21 @@ class MaterialLibrary {
                                  int tiles = 8, int texels = 512,
                                  float roughness = 1.0f);
 
+  // Returns a forward-opaque, alpha-tested (cutout), double-sided, lit
+  // material bound to the given `albedo` view + `sampler` (the caller owns and
+  // keeps them alive). `cutoff` is the alpha discard threshold; `tint`
+  // multiplies the sampled RGB (e.g. white leaf texture * green tint). The
+  // material declares no @group(2): it lights itself with sun + SH ambient
+  // only (no IBL, does not receive shadows), but still casts leaf-shaped
+  // shadows via its own alpha-tested shadow-pass variant. General
+  // alpha-cutout material -- no foliage-specific logic. The underlying
+  // forward-opaque factory (shader "leaf") is built once, lazily, and shared by
+  // every call: only the per-instance albedo/tint/cutoff vary. Meshes drawn
+  // with it must be GeometryType::kTexturedMesh and added via
+  // AddForwardOpaqueMeshEntity. Valid after Initialize().
+  DeferredMaterial AlphaCutout(wgpu::TextureView albedo, wgpu::Sampler sampler,
+                               float cutoff, glm::vec3 tint);
+
   // A terrain layer set: one texture_2d_array per PBR channel, layer i built
   // from the i'th pack passed to LoadTerrainArrays. Holds the textures (not
   // just views) so the caller keeps them alive by keeping this.
@@ -173,6 +188,10 @@ class MaterialLibrary {
 
   std::unique_ptr<MaterialInstanceFactory> factory_;
   std::unique_ptr<MaterialInstanceFactory> terrain_factory_;
+  // Forward-opaque "leaf" alpha-cutout factory. Built lazily on the first
+  // AlphaCutout() call (its HDR color / reversed-Z depth targets match the
+  // forward-opaque pass) and shared by every subsequent call.
+  std::unique_ptr<MaterialInstanceFactory> alpha_cutout_factory_;
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: dir

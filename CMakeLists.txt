@@ -348,7 +348,8 @@ target_link_libraries(badlands_game_lib PUBLIC noiser_bundle brainhost)
 set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
     src/executables/viewer/model_viewer_view.cpp
-    src/game/geometry/tree_generator.cpp)
+    src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
@@ -642,6 +643,7 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
     src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_tests PRIVATE

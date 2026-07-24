@@ -490,7 +490,8 @@ std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
         std::make_unique<MeshRenderingMaterial>(
             shader_context, std::move(name), desc.shader_path, desc.vs_entry,
             desc.fs_entry, variant.extra_features, variant.blend_enabled,
-            variant.premultiplied_alpha, std::move(pass_targets)));
+            variant.premultiplied_alpha, std::move(pass_targets),
+            desc.cull_mode));
   }
 
   // Split recipes into default views and unresolved scripts

@@ -289,6 +289,7 @@ void SceneGraph::ProcessAttachment(const SceneAttachment& attachment,
           // Create mesh component from pre-resolved mesh
           auto& mesh = registry.emplace<StaticTexturedMeshComponent>(entity);
           mesh.vertices = att.mesh.vertices;
+          mesh.indices = att.mesh.indices;
           mesh.vertex_count = att.mesh.vertex_count;
           mesh.dirty = true;
           mesh.geometry_type = att.mesh.geometry_type;

@@ -22,15 +22,15 @@ class RenderPassContext;
 class FrameContext;
 class MaterialInstanceCache;
 
-// Engine-owned resources bound at @group(2) for forward-transparent materials
-// that declare them (e.g. the water surface): scene depth (read-only), a copy
-// of the HDR scene color (for normal-driven distortion/refraction), and the IBL
-// prefiltered environment + BRDF LUT (for reflections). Built once and reused
-// for every transparent draw. A transparent material whose pipeline has no
-// group-2 layout must leave `scene_depth` null so the pass skips the group-2
-// bind. `time_seconds` is injected into the material's per-object `time`
-// parameter (group 1) so wave animation is engine-driven; screen size comes
-// from the frame UBO.
+// Engine-owned resources bound at @group(2) for forward (opaque or
+// transparent) materials that declare them (e.g. the water surface): scene
+// depth (read-only), a copy of the HDR scene color (for normal-driven
+// distortion/refraction), and the IBL prefiltered environment + BRDF LUT (for
+// reflections). Built once and reused for every draw in a pass. A material
+// whose pipeline has no group-2 layout must leave `scene_depth` null so the
+// pass skips the group-2 bind. `time_seconds` is injected into the material's
+// per-object `time` parameter (group 1) so wave animation is engine-driven;
+// screen size comes from the frame UBO.
 struct ForwardEngineResources {
   wgpu::TextureView scene_depth;
   wgpu::TextureView scene_color;
@@ -44,11 +44,14 @@ struct ForwardEngineResources {
   float time_seconds{0.0f};
 };
 
-// Draw ForwardOpaqueRenderable textured meshes (no engine group-2 resources).
+// Draw ForwardOpaqueRenderable textured meshes. When `engine.scene_depth` is
+// set, the engine resources are bound at @group(2) for each draw whose
+// material declares group 2 (same gating as the transparent variant below).
 void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
                          entt::registry& registry,
                          const glm::vec3& camera_world_pos,
-                         MaterialInstanceCache& cache);
+                         MaterialInstanceCache& cache,
+                         const ForwardEngineResources& engine);
 
 // Draw ForwardTransparentRenderable textured meshes. When `engine.scene_depth`
 // is set, the engine resources are bound at @group(2) for each draw.
