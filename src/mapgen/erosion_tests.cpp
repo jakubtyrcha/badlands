@@ -346,7 +346,6 @@ TEST_CASE("diffuse: smooths a spike, conserves interior mass, respects layers") 
   REQUIRE(std::isfinite(S.at(4, 4)));  // sub-stepping kept it stable
   double mass_after = 0.0;
   for (size_t i = 0; i < S.data.size(); ++i) mass_after += B.data[i] + S.data[i];
-  // border is pinned, and the spike's spread stays interior on one step
   // some diffusion toward boundary is expected; allow 0.2% relative tolerance
   REQUIRE(mass_after == Catch::Approx(mass_before).epsilon(0.002));
   // bedrock at the spike was never touched (only its sediment moved)

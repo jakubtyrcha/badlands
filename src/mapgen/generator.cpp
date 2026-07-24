@@ -89,7 +89,7 @@ Field2D<uint8_t> classify_biomes(const Field2D<float>& bedrock,
 
 MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   const int w = params.resolution;
-  if (w <= 0) {
+  if (w <= 0 || params.erosion.sim_resolution <= 0) {
     MapArtifacts a;
     return a;
   }

@@ -32,6 +32,14 @@ TEST_CASE("gully_detail_delta: bounded, carve-only, deterministic") {
   REQUIRE(any_nonzero);  // steep slope MUST get gullies
 }
 
+TEST_CASE("gully_detail_delta: zero wavelength is a no-op guard, not a NaN") {
+  const auto base = slope_field(64, 1.0f);  // steep slope, would otherwise carve
+  ErosionParams p;
+  p.detail_wavelength_m = 0.0f;
+  const auto d = gully_detail_delta(base, Field2D<float>(64, 64, 0.0f), 1.0f, 9, p);
+  for (float v : d.data) REQUIRE(v == 0.0f);
+}
+
 TEST_CASE("gully_detail_delta: flat base gets nothing; water gets nothing") {
   const Field2D<float> flat(64, 64, 5.0f);
   Field2D<float> water(64, 64, 0.0f);

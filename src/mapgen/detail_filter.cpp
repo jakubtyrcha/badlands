@@ -49,7 +49,9 @@ Field2D<float> gully_detail_delta(const Field2D<float>& base,
                                   const ErosionParams& p) {
   const int n = base.width;
   Field2D<float> delta(n, base.height, 0.0f);
-  if (p.detail_octaves <= 0 || p.detail_amplitude_m <= 0.0f) return delta;
+  if (p.detail_octaves <= 0 || p.detail_amplitude_m <= 0.0f ||
+      p.detail_wavelength_m <= 0.0f)
+    return delta;
 
   // Distance to standing water, for the shore fade.
   Field2D<uint8_t> wet(n, base.height, 0);

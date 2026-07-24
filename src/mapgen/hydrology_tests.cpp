@@ -72,7 +72,9 @@ TEST_CASE("accumulate_drainage: tilted plane conserves total rain, drains toward
   // the 340 that exits via y=0) — expected given the required tie-break, not
   // a routing bug. So this checks the invariants that DO hold unconditionally:
   // mass conservation, and a downhill bias (low-x edge collects more than
-  // the uphill high-x edge), plus per-row monotonicity near the outlet.
+  // the uphill high-x edge). The extra check below (one interior row is
+  // monotonically non-decreasing downstream) is a spot-check on this
+  // specific tilted plane, not a general/unconditional property.
   const auto h = tilted_plane(16, 8, 1.0f);
   const auto r = route_flow(h, 1.0f, 1e-4f);
   const auto a = accumulate_drainage(r, 4.0f);  // 2 m texels

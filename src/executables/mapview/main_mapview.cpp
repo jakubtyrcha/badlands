@@ -41,6 +41,9 @@ namespace {
 
 using badlands::mapgen::MapGenParams;
 
+constexpr const char* kNonSquareMapError =
+    "mapview: non-square maps are not supported\n";
+
 // "WxH" -> the two values via `conv` (stoi for texels, stof for meters).
 template <typename T, typename Conv>
 std::optional<std::pair<T, T>> parse_wxh(const std::string& s, Conv conv) {
@@ -141,7 +144,7 @@ int main(int argc, char** argv) {
         return 2;
       }
       if (r->first != r->second) {
-        std::fprintf(stderr, "mapview: non-square maps are not supported\n");
+        std::fprintf(stderr, "%s", kNonSquareMapError);
         return 2;
       }
       params.resolution = r->first;
@@ -155,7 +158,7 @@ int main(int argc, char** argv) {
         return 2;
       }
       if (r->first != r->second) {
-        std::fprintf(stderr, "mapview: non-square maps are not supported\n");
+        std::fprintf(stderr, "%s", kNonSquareMapError);
         return 2;
       }
       params.world_size_m = r->first;

@@ -142,6 +142,48 @@ TEST_CASE("generate_map: degenerate resolution yields empty artifacts, no throw"
   REQUIRE(a.sediment.size() == 0);
 }
 
+TEST_CASE("generate_map: degenerate sim_resolution yields empty artifacts, no throw") {
+  MapGenParams p;
+  p.erosion.sim_resolution = 0;
+  const auto a = generate_map(p);
+  REQUIRE(a.bedrock.size() == 0);
+  REQUIRE(a.biome.size() == 0);
+  REQUIRE(a.heightmap.size() == 0);
+  REQUIRE(a.water_depth.size() == 0);
+  REQUIRE(a.flow.size() == 0);
+  REQUIRE(a.sediment.size() == 0);
+}
+
+TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)") {
+  MapGenParams p;
+  p.resolution = 64;
+  p.world_size_m = 256.0f;
+  p.erosion.sim_resolution = 32;
+  p.erosion.iterations = 8;
+  const auto a = generate_map(p);
+
+  REQUIRE(a.bedrock.width == 64);
+  REQUIRE(a.bedrock.height == 64);
+  REQUIRE(a.biome.width == 64);
+  REQUIRE(a.biome.height == 64);
+  REQUIRE(a.heightmap.width == 64);
+  REQUIRE(a.heightmap.height == 64);
+  REQUIRE(a.water_depth.width == 64);
+  REQUIRE(a.water_depth.height == 64);
+  REQUIRE(a.flow.width == 64);
+  REQUIRE(a.flow.height == 64);
+  REQUIRE(a.sediment.width == 64);
+  REQUIRE(a.sediment.height == 64);
+
+  for (float v : a.heightmap.data) REQUIRE(std::isfinite(v));
+  for (float v : a.flow.data) REQUIRE(v > 0.0f);
+  for (float v : a.sediment.data) REQUIRE(v >= 0.0f);
+  for (size_t i = 0; i < a.biome.data.size(); ++i) {
+    const bool is_lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
+    REQUIRE(is_lake == (a.water_depth.data[i] > 0.0f));
+  }
+}
+
 namespace {
 // Brute-force oracle: the definition — min over all plains texels of the
 // world-space Euclidean distance, double precision, O(n^2).
