@@ -175,3 +175,20 @@ TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card") {
   const size_t c = (static_cast<size_t>(n / 2) * n + static_cast<size_t>(n / 2)) * 4;
   REQUIRE(px[c + 1] > px[c + 0]);
 }
+
+TEST_CASE("GenerateLeafMesh: terminal-tip leaf adds one leaf per leaf-bearing branch") {
+  auto count_terminal = [](const TreeOptions& o) {
+    int n = 0;
+    for (const SkeletonBranch& b : BuildTreeSkeleton(o))
+      if (b.level == o.levels && static_cast<int>(b.sections.size()) - 1 >= 1) ++n;
+    return n;
+  };
+  TreeOptions on = OakPreset();  on.leaves.tip_leaf = true;
+  TreeOptions off = OakPreset(); off.leaves.tip_leaf = false;
+  const uint32_t vn = GenerateLeafMesh(on).mesh.vertex_count;
+  const uint32_t vf = GenerateLeafMesh(off).mesh.vertex_count;
+  const int quads = (OakPreset().leaves.billboard >= 2) ? 2 : 1;
+  REQUIRE(vn > vf);
+  // Each tip leaf = quads * 4 verts; one per leaf-bearing terminal branch.
+  REQUIRE(vn - vf == static_cast<uint32_t>(count_terminal(OakPreset()) * quads * 4));
+}
