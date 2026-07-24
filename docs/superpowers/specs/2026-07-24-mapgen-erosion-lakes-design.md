@@ -109,10 +109,12 @@ bedrock latent → quantile biomes → cone relief B0        [existing math, sim
                incision); outlet sills incise with the full lake catchment's A —
                lakes can slowly breach (headroom controlled by lake_depth_m).
     4 deposit  G-term (Yuan et al. 2019): ∂h/∂t += (G/A)·q_s, q_s = upstream
-               net-erosion flux; 2–3 Gauss–Seidel sweeps (downstream flux pass +
-               update pass). Flux entering an in_lake cell deposits up to the
-               local water level (deltas), overflow continues to the outlet.
-               Border flux exits the map (mass deliberately not conserved).
+               net-erosion flux; one explicit downstream flux pass per sim
+               iteration (donors-before-receivers); the outer iteration loop
+               provides the relaxation. Flux entering an in_lake cell deposits
+               up to the local water level (deltas), overflow continues to
+               the outlet. Border flux exits the map (mass deliberately not
+               conserved).
     5 diffuse  ∂h/∂t = D·∇²h, explicit, sub-stepped to D·dt_sub/Δx² ≤ 0.25.
                Removals draw S before B; additions credit S.
 → finalize   final flood → per-lake spill level; W = level − h inside; prune
@@ -144,8 +146,11 @@ difference gradient of the base; add N octaves of oriented gully noise.
   slope-masked amplitude with the ease-out curve `1 − (1 − slope)²`.
 - **Skipped in v1** (addable later without interface change): drainage-streak
   map, analytic output derivatives, straight-gully sign trick.
-- Amplitude fades to zero below and within `kShoreFadeM` (2 m) above the
-  local water surface — clean shorelines.
+- **Shipped deviation:** amplitude fades to zero within `kShoreFadeDistM`
+  (3 m) of standing water, measured as HORIZONTAL distance-to-water (via the
+  mask EDT) — not, as originally spec'd, by elevation above the local water
+  surface. An elevation-aware clamp is a recorded follow-up: until it lands,
+  steep banks near shore can carve below the adjacent lake surface.
 - Pure function of (world position, seed, base gradient): deterministic,
   tile-parallel, world-metric wavelengths.
 
@@ -156,8 +161,10 @@ difference gradient of the base; add N octaves of oriented gully noise.
 ```cpp
 struct MapDebugSink {
   // stage: e.g. "bedrock", "cone", "cavities", "sediment-init",
-  //        "loop-hillshade", "loop-flow", "loop-sediment", "loop-lakes",
+  //        "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
   //        "water", "detail-delta", "final-hillshade", "biome"
+  // (the PNG sink renders hillshade for *-height stages; the generator
+  // itself dumps raw fields — rendering choices live in outputs.cpp)
   virtual void dump(std::string_view stage, int sequence,
                     const Field2D<float>& field) = 0;
   virtual void dump(std::string_view stage, int sequence,
@@ -195,7 +202,9 @@ struct ErosionParams {
   int dump_every = 10;               // loop dump cadence (0 = off)
   int detail_octaves = 4;
   float detail_wavelength_m = 60.0f; // largest octave
-  float detail_amplitude_m = 2.0f;   // max carve depth (sum-bounded)
+  float detail_amplitude_m = 2.0f;   // first-octave amplitude; worst-case
+                                      // total carve ≈ 1.875x with 4 octaves
+                                      // at 0.5 persistence
 };
 ```
 
