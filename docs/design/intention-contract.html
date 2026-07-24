@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Intention Contract — brain⇄engine wire v2</title>
+<style>
+  :root {
+    --bg:#f6f4ec; --fg:#20241f; --mut:#5b6259; --panel:#fffdf7; --line:#d9d2bd;
+    --accent:#146c2e; --accent-2:#8a4b08;
+    --box-bg:#eef1e6; --box-line:#33402f;
+    --brain-bg:#e3edf7; --brain-line:#1c4a73;
+    --i64-bg:#dbe7f5; --i32-bg:#f1f4ee;
+    --pad-bg:#efe6d0; --pad-line:#b8a778;
+    --code-bg:#eef1e6; --table-stripe:#efece0;
+    --shadow: 0 1px 2px rgba(0,0,0,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#12140f; --fg:#e7e6dd; --mut:#9aa393; --panel:#181b14; --line:#33392a;
+      --accent:#59d67f; --accent-2:#e0a850;
+      --box-bg:#1b2016; --box-line:#4a5a3f;
+      --brain-bg:#152233; --brain-line:#3f78ad;
+      --i64-bg:#1d2c3d; --i32-bg:#1a1e15;
+      --pad-bg:#2a2717; --pad-line:#6b5c33;
+      --code-bg:#1b2016; --table-stripe:#1a1d14;
+      --shadow:none;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { max-width: 100%; overflow-x: hidden; }
+  body {
+    margin: 0 auto; padding: 1.6rem 1.4rem 4rem; max-width: 1080px;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 .2rem; }
+  h2 { font-size: 1.15rem; margin: 2.4rem 0 .3rem; border-bottom: 1px solid var(--line); padding-bottom: .3rem; }
+  h2 .num { color: var(--accent); margin-right: .5rem; }
+  h3 { font-size: .95rem; margin: 1.2rem 0 .3rem; color: var(--mut); }
+  p { margin: .5rem 0; }
+  .subtitle { color: var(--mut); margin: 0 0 .3rem; }
+  .byline { color: var(--mut); font-size: .85rem; margin: 0 0 1.2rem; }
+  a { color: var(--accent); }
+  code { background: var(--code-bg); border: 1px solid var(--line); border-radius: 3px; padding: 0 .3rem; font-size: .92em; }
+  .callout {
+    border-left: 4px solid var(--accent); background: var(--box-bg);
+    padding: .8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0;
+  }
+  .callout h3 { margin-top: 0; color: var(--fg); }
+  .callout dl { margin: 0; }
+  .callout dt { color: var(--accent); font-weight: bold; }
+  .callout dd { margin: 0 0 .6rem 0; color: var(--fg); }
+  .note { color: var(--mut); font-size: .92em; font-style: italic; }
+  .skill-note { color: var(--accent-2); }
+  toc, .toc { }
+  .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1.2rem; }
+  .toc ol { margin: .3rem 0; padding-left: 1.3rem; }
+  .toc a { text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .diagram-wrap {
+    overflow-x: auto; border: 1px solid var(--line); background: var(--panel);
+    border-radius: 8px; padding: .7rem .5rem; margin: 1rem 0; box-shadow: var(--shadow);
+  }
+  .diagram-wrap svg { display: block; min-width: 480px; }
+  .diagram-cap { color: var(--mut); font-size: .85rem; text-align: center; margin: .2rem 0 0; }
+  svg text { fill: var(--fg); font-family: inherit; }
+  svg .lbl { font-size: 12.5px; }
+  svg .lbl2 { font-size: 10px; fill: var(--mut); }
+  svg .edge-lbl { font-size: 10.5px; fill: var(--mut); }
+  svg .offset { font-size: 9px; fill: var(--mut); }
+  svg .box { fill: var(--box-bg); stroke: var(--box-line); stroke-width: 1.5; }
+  svg .box-brain { fill: var(--brain-bg); stroke: var(--brain-line); stroke-width: 1.5; }
+  svg .box-dashed { fill: none; stroke: var(--mut); stroke-width: 1.3; stroke-dasharray: 4 3; }
+  svg .diamond { fill: var(--box-bg); stroke: var(--box-line); stroke-width: 1.5; }
+  svg .edge { stroke: var(--fg); stroke-width: 1.6; fill: none; }
+  svg .edge-return { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+  svg .edge-dash { stroke: var(--mut); stroke-width: 1.3; fill: none; stroke-dasharray: 4 3; }
+  svg .cell-i64 { fill: var(--i64-bg); stroke: var(--box-line); stroke-width: 1.3; }
+  svg .cell-i32 { fill: var(--i32-bg); stroke: var(--box-line); stroke-width: 1.3; }
+  svg .cell-pad { fill: var(--pad-bg); stroke: var(--pad-line); stroke-width: 1.3; stroke-dasharray: 3 2; }
+  svg .axis { stroke: var(--mut); stroke-width: 1.4; }
+  svg .tick { stroke: var(--mut); stroke-width: 1; }
+  svg .band { fill: var(--i64-bg); stroke: var(--box-line); stroke-width: 1.3; }
+  .legend { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin: .6rem 0 1rem; font-size: .85rem; color: var(--mut); }
+  .legend .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 2px; vertical-align: -2px; margin-right: .4rem; border: 1px solid var(--box-line); }
+  .sw-i64 { background: var(--i64-bg); }
+  .sw-i32 { background: var(--i32-bg); }
+  .sw-pad { background: var(--pad-bg); border-color: var(--pad-line); background-image: repeating-linear-gradient(45deg, var(--pad-line) 0 2px, transparent 2px 6px); }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .92em; }
+  caption { text-align: left; color: var(--mut); font-size: .85em; caption-side: bottom; padding-top: .4rem; }
+  th, td { border: 1px solid var(--line); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  thead th { background: var(--box-bg); }
+  tbody tr:nth-child(even) { background: var(--table-stripe); }
+  .reserved td { color: var(--mut); font-style: italic; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--mut); font-size: .85rem; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--fg)"></path>
+    </marker>
+    <marker id="arrow-mut" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--mut)"></path>
+    </marker>
+    <marker id="arrow-return" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent)"></path>
+    </marker>
+  </defs>
+</svg>
+
+<h1>The Intention Contract</h1>
+<p class="subtitle">brain ⇄ engine wire v2 — canonical design doc, Slice B (<code>feat/intention-contract</code>)</p>
+<p class="byline">Diagram-rich successor to <code>docs/superpowers/specs/2026-07-24-intention-contract-design.md</code> (the prose spec). Where they overlap, the two must agree on every name and rule; this page exists to make the shape of the contract legible at a glance, not to replace the spec's reasoning.</p>
+
+<p>A hero has exactly one brain call per wake. The brain reads a snapshot of the world (<b>state</b>) plus whatever happened since it last looked (<b>events</b>), and returns exactly one <b>suggestion</b>: an intention, an activity label, and an idleness hint. The engine — never the brain — decides whether to execute it, executes it by turning it into a logged <code>Command</code>, and the world moves on. The brain finds out how things went later, if at all, the same way it finds out anything: via state and events on its next wake.</p>
+
+<div class="callout">
+  <h3>Names this contract pins (later tasks implement these verbatim)</h3>
+  <dl>
+    <dt>CurrentIntention</dt>
+    <dd>Durable per-hero engine state: the intention being executed right now (if any), since when, and how it maps onto the command/movement machinery. Outlives a single tick; read by <code>should_wake</code>, written by <code>apply_intention</code>.</dd>
+    <dt>EventInbox</dt>
+    <dd>Durable per-hero engine state: a bounded, sticky ring of timed events written by engine systems (combat, movement, the intention executor). Survives across sleep; entries expire on their own TTL, not on being read.</dd>
+    <dt>apply_intention</dt>
+    <dd>Engine function: commits a <em>validated</em> suggestion onto the command/movement machinery. The accepted intention <em>is</em> the logged <code>Command</code> — event-sourced, same as every other mutation in this codebase.</dd>
+    <dt>should_wake</dt>
+    <dd>Engine function: a per-tick, per-hero predicate. Returns whether <code>react()</code> runs for this hero this tick. Reads only durable, replayable state — never the brain.</dd>
+  </dl>
+</div>
+
+<nav class="toc" aria-label="table of contents">
+  <b>Contents</b>
+  <ol>
+    <li><a href="#loop">The loop</a></li>
+    <li><a href="#wakeup">Wakeup state machine</a></li>
+    <li><a href="#wire">Wire layout (v2)</a></li>
+    <li><a href="#inbox">Event-inbox lifecycle</a></li>
+    <li><a href="#vocab">Vocabularies</a></li>
+    <li><a href="#determinism">Determinism</a></li>
+  </ol>
+</nav>
+
+<!-- =================================================================== -->
+<h2 id="loop"><span class="num">1</span>The loop</h2>
+<p>One brain wake is one trip around this ring. The brain owns exactly one box (<code>react()</code>); the engine owns the rest.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 920 400" role="img" aria-label="The brain-engine loop: state and events feed react, which returns a suggestion, which the engine validates and executes, mutating the world, which produces the next state and events. The return edge is annotated results deferred by design.">
+  <!-- top row -->
+  <rect class="box" x="30" y="30" width="190" height="76" rx="7"></rect>
+  <text class="lbl" x="125" y="62" text-anchor="middle">state + events</text>
+  <text class="lbl2" x="125" y="80" text-anchor="middle">(BlViewWire)</text>
+
+  <rect class="box-brain" x="365" y="30" width="190" height="76" rx="7"></rect>
+  <text class="lbl" x="460" y="62" text-anchor="middle">react()</text>
+  <text class="lbl2" x="460" y="80" text-anchor="middle">[brain · wasm]</text>
+
+  <rect class="box" x="700" y="30" width="190" height="76" rx="7"></rect>
+  <text class="lbl" x="795" y="62" text-anchor="middle">suggestion</text>
+  <text class="lbl2" x="795" y="80" text-anchor="middle">(BlSuggestionWire)</text>
+
+  <!-- bottom row -->
+  <rect class="box" x="700" y="270" width="190" height="76" rx="7"></rect>
+  <text class="lbl" x="795" y="302" text-anchor="middle">validate</text>
+  <text class="lbl2" x="795" y="320" text-anchor="middle">[engine]</text>
+  <text class="lbl2" x="795" y="362" text-anchor="middle" style="fill:var(--mut)">invalid → warn + ignore</text>
+  <text class="lbl2" x="795" y="375" text-anchor="middle" style="fill:var(--mut)">(CurrentIntention unchanged)</text>
+
+  <rect class="box" x="365" y="270" width="190" height="76" rx="7"></rect>
+  <text class="lbl" x="460" y="302" text-anchor="middle">execute</text>
+  <text class="lbl2" x="460" y="320" text-anchor="middle">apply_intention</text>
+
+  <rect class="box" x="30" y="270" width="190" height="76" rx="7"></rect>
+  <text class="lbl" x="125" y="302" text-anchor="middle">world mutates</text>
+  <text class="lbl2" x="125" y="320" text-anchor="middle">combat / movement / needs</text>
+
+  <!-- top edges -->
+  <line class="edge" x1="220" y1="68" x2="365" y2="68" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="292" y="58" text-anchor="middle">view built each wake</text>
+
+  <line class="edge" x1="555" y1="68" x2="700" y2="68" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="627" y="58" text-anchor="middle">one wake, one suggestion</text>
+
+  <!-- right column -->
+  <line class="edge" x1="795" y1="106" x2="795" y2="270" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="805" y="192">feasibility checked</text>
+
+  <!-- bottom edges (right to left) -->
+  <line class="edge" x1="700" y1="308" x2="555" y2="308" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="627" y="298" text-anchor="middle">accepted → Command logged</text>
+
+  <line class="edge" x1="365" y1="308" x2="220" y2="308" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="292" y="298" text-anchor="middle">systems run this tick</text>
+
+  <!-- left column: the return edge -->
+  <line class="edge-return" x1="125" y1="270" x2="125" y2="106" marker-end="url(#arrow-return)"></line>
+  <text class="edge-lbl" x="60" y="150" transform="rotate(-90 60 150)" text-anchor="middle" style="fill:var(--accent); font-weight:bold;">results deferred by design</text>
+</svg>
+<p class="diagram-cap">react() never learns the outcome of its own suggestion in the same call — only later, via the next wake's state + events (e.g. an INTENTION_ENDED event, a changed health_frac).</p>
+</div>
+
+<p>Validation is the engine's alone: an accepted suggestion is feasible right now (e.g. its <code>target_slot</code> still names a real, reachable entity). An infeasible one is logged and dropped — the hero's <code>CurrentIntention</code> is untouched, so it either keeps doing what it was already doing or falls back to idling. The brain is advisory; it is never authoritative over what actually happens.</p>
+
+<!-- =================================================================== -->
+<h2 id="wakeup"><span class="num">2</span>Wakeup state machine</h2>
+<p>The brain is consulted sparsely — that sparseness is the point of the interface (it's what makes the boundary swappable for an LLM or a neural net later: you do not call one of those 30×/second). Every tick, <code>should_wake</code> decides, per hero, whether <code>react()</code> runs at all.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 760 600" role="img" aria-label="Wakeup flow: sleeping, gated by a bypass-status check and a should_wake check, leading to react and apply_intention, which returns to sleeping.">
+  <rect class="box" x="280" y="20" width="220" height="66" rx="8"></rect>
+  <text class="lbl" x="390" y="48" text-anchor="middle">Sleeping</text>
+  <text class="lbl2" x="390" y="66" text-anchor="middle">intention running / idle-hint counting down</text>
+
+  <line class="edge" x1="390" y1="86" x2="390" y2="122" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="400" y="108">tick</text>
+  <text class="edge-lbl" x="420" y="98" style="fill:var(--accent)">spurious wakeup ok — any tick</text>
+
+  <!-- diamond 1: bypass -->
+  <polygon class="diamond" points="390,122 500,167 390,212 280,167"></polygon>
+  <text class="lbl2" x="390" y="162" text-anchor="middle">bypass status</text>
+  <text class="lbl2" x="390" y="176" text-anchor="middle">active?</text>
+
+  <path class="edge-dash" d="M 280 167 C 150 167, 150 60, 280 45" marker-end="url(#arrow-mut)"></path>
+  <text class="edge-lbl" x="120" y="115" text-anchor="middle">yes: skip think entirely</text>
+
+  <line class="edge" x1="390" y1="212" x2="390" y2="248" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="405" y="234">no</text>
+
+  <!-- diamond 2: should_wake -->
+  <polygon class="diamond" points="390,248 510,298 390,348 270,298"></polygon>
+  <text class="lbl2" x="390" y="293" text-anchor="middle">should_wake()?</text>
+
+  <path class="edge-dash" d="M 270 298 C 140 298, 140 80, 280 55" marker-end="url(#arrow-mut)"></path>
+  <text class="edge-lbl" x="105" y="200" text-anchor="middle">no: stay asleep</text>
+
+  <!-- reasons annotation -->
+  <rect class="box-dashed" x="560" y="240" width="180" height="150" rx="6"></rect>
+  <text class="lbl2" x="570" y="256">should_wake() == true:</text>
+  <text class="lbl2" x="575" y="272">• no CurrentIntention</text>
+  <text class="lbl2" x="575" y="286">• INTENTION_ENDED event</text>
+  <text class="lbl2" x="575" y="300">• DAMAGE_TAKEN event</text>
+  <text class="lbl2" x="575" y="314">• THREAT_SIGHTED event</text>
+  <text class="lbl2" x="575" y="328">• MOVE_BLOCKED event</text>
+  <text class="lbl2" x="575" y="342">• idle hint expired</text>
+  <line class="edge-dash" x1="510" y1="298" x2="560" y2="315" ></line>
+
+  <line class="edge" x1="390" y1="348" x2="390" y2="384" marker-end="url(#arrow)"></line>
+  <text class="edge-lbl" x="405" y="370">yes</text>
+
+  <rect class="box-brain" x="280" y="384" width="220" height="60" rx="7"></rect>
+  <text class="lbl" x="390" y="412" text-anchor="middle">Awake — react()</text>
+  <text class="lbl2" x="390" y="430" text-anchor="middle">one suggestion out</text>
+
+  <line class="edge" x1="390" y1="444" x2="390" y2="480" marker-end="url(#arrow)"></line>
+
+  <rect class="box" x="255" y="480" width="270" height="66" rx="7"></rect>
+  <text class="lbl" x="390" y="508" text-anchor="middle">apply_intention</text>
+  <text class="lbl2" x="390" y="526" text-anchor="middle">new CurrentIntention + idle-hint timer armed</text>
+
+  <path class="edge-return" d="M 525 505 C 660 505, 660 30, 500 30" marker-end="url(#arrow-return)"></path>
+  <text class="edge-lbl" x="650" y="270" transform="rotate(-90 650 270)" text-anchor="middle" style="fill:var(--accent); font-weight:bold;">back to Sleeping</text>
+</svg>
+<p class="diagram-cap">Spurious wakeups are allowed at any tick — a brain woken for no listed reason must still re-decide idempotently (re-suggesting the same intention is a valid answer). Bypass statuses skip the think entirely: the mechanism exists from v1, but no v1 status (<code>BL_ST_CHATTING</code>/<code>MELEE_LOCKED</code>/<code>INSIDE_BUILDING</code>) actually sets it — all three are advisory only this slice. The first status that bypasses thinking is an implementation detail of a future slice.</p>
+</div>
+
+<!-- =================================================================== -->
+<h2 id="wire"><span class="num">3</span>Wire layout — <code>BL_ABI_VERSION 2</code></h2>
+<p>Wholesale redesign of <code>game/src/brain_abi.h</code> / <code>scripts/brains/nim/abi.nim</code>. Every <code>BL_CMD_*</code> becomes <code>BL_INT_*</code> — the brain suggests an <b>intention</b> now, not a command — and the view gains two blocks: <b>statuses</b> and <b>events</b>. Same layout discipline as v1: every struct lists its <code>int64_t</code> fields first, every alignment pad is explicit (never left to the compiler), and buffer addresses are queried once at instantiation and fixed for the instance's lifetime.</p>
+
+<h3>BlViewWire (in) — block order</h3>
+<div class="diagram-wrap">
+<svg viewBox="0 0 660 528" role="img" aria-label="BlViewWire top-level block order: header, self, statuses, suggest, factors, events, chars.">
+  <rect class="box" x="20" y="10" width="620" height="30" rx="5"></rect>
+  <text class="lbl2" x="30" y="30">version : uint32   +   _pad0 : uint32  (8 B)</text>
+
+  <rect class="box" x="20" y="46" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="68">self : BlViewSelf</text>
+  <text class="lbl2" x="30" y="86">needs, hp_frac, clock, position, current-intention summary</text>
+
+  <rect class="box" x="20" y="106" width="620" height="30" rx="5"></rect>
+  <text class="lbl2" x="30" y="126">status_count : int32   +   _pad1 : uint32  (8 B)</text>
+
+  <rect class="box" x="20" y="142" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="164">statuses : BlStatus[ ]</text>
+  <text class="lbl2" x="30" y="182">bounded, append-only kinds — { kind, remaining_millis }</text>
+
+  <rect class="box" x="20" y="202" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="224">suggest : BlViewSuggest</text>
+  <text class="lbl2" x="30" y="242">threats, roam/explore goals, home/tavern/apothecary, chat partner, prey (unchanged from v1)</text>
+
+  <rect class="box" x="20" y="262" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="284">factors : BlViewFactors</text>
+  <text class="lbl2" x="30" y="302">hero-scoring tuning scalars (unchanged from v1)</text>
+
+  <rect class="box" x="20" y="322" width="620" height="30" rx="5"></rect>
+  <text class="lbl2" x="30" y="342">event_count : int32   +   _pad2 : uint32  (8 B)</text>
+
+  <rect class="box" x="20" y="358" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="380">events : BlEvent[ ]</text>
+  <text class="lbl2" x="30" y="398">bounded ring — { kind, source_slot, param, ttl_millis }</text>
+
+  <rect class="box" x="20" y="418" width="620" height="30" rx="5"></rect>
+  <text class="lbl2" x="30" y="438">char_count : int32   +   _pad3 : uint32  (8 B)</text>
+
+  <rect class="box" x="20" y="454" width="620" height="54" rx="5"></rect>
+  <text class="lbl" x="30" y="476">chars : BlViewChar[ ]</text>
+  <text class="lbl2" x="30" y="494">known characters, as today (unchanged from v1)</text>
+</svg>
+<p class="diagram-cap">Block <em>order</em> and <em>names</em> are binding (<code>self</code> / <code>statuses</code> / <code>suggest</code> / <code>factors</code> / <code>events</code> / <code>chars</code>). Exact per-field byte offsets inside <code>self</code>/<code>suggest</code>/<code>factors</code>/<code>chars</code> are finalized in the implementing task — this shows the shape and the layout discipline, not final offsets.</p>
+</div>
+
+<h3>Byte-exact blocks (new structs)</h3>
+<p class="legend">
+  <span><span class="swatch sw-i64"></span>int64_t field (8 B)</span>
+  <span><span class="swatch sw-i32"></span>int32_t / uint32_t / float field (4 B)</span>
+  <span><span class="swatch sw-pad"></span>explicit pad</span>
+</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 420 130" role="img" aria-label="BlStatus byte layout: remaining_millis int64, kind int32, explicit pad, 16 bytes total.">
+  <rect class="cell-i64" x="20" y="20" width="180" height="60"></rect>
+  <text class="lbl2" x="110" y="46" text-anchor="middle">remaining_millis</text>
+  <text class="lbl2" x="110" y="62" text-anchor="middle">int64_t</text>
+  <rect class="cell-i32" x="200" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="245" y="46" text-anchor="middle">kind</text>
+  <text class="lbl2" x="245" y="62" text-anchor="middle">int32_t</text>
+  <rect class="cell-pad" x="290" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="335" y="46" text-anchor="middle">_pad</text>
+  <text class="lbl2" x="335" y="62" text-anchor="middle">uint32_t</text>
+  <text class="offset" x="20" y="94">0</text>
+  <text class="offset" x="200" y="94">8</text>
+  <text class="offset" x="290" y="94">12</text>
+  <text class="offset" x="380" y="94">16</text>
+  <text class="lbl2" x="20" y="112" style="fill:var(--mut)">BlStatus — 16 B. kind ∈ BL_ST_*.</text>
+</svg>
+</div>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 600 130" role="img" aria-label="BlEvent byte layout: ttl_millis int64, kind int32, source_slot uint32, param int32, explicit pad, 24 bytes total.">
+  <rect class="cell-i64" x="20" y="20" width="180" height="60"></rect>
+  <text class="lbl2" x="110" y="46" text-anchor="middle">ttl_millis</text>
+  <text class="lbl2" x="110" y="62" text-anchor="middle">int64_t</text>
+  <rect class="cell-i32" x="200" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="245" y="46" text-anchor="middle">kind</text>
+  <text class="lbl2" x="245" y="62" text-anchor="middle">int32_t</text>
+  <rect class="cell-i32" x="290" y="20" width="100" height="60"></rect>
+  <text class="lbl2" x="340" y="46" text-anchor="middle">source_slot</text>
+  <text class="lbl2" x="340" y="62" text-anchor="middle">uint32_t</text>
+  <rect class="cell-i32" x="390" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="435" y="46" text-anchor="middle">param</text>
+  <text class="lbl2" x="435" y="62" text-anchor="middle">int32_t</text>
+  <rect class="cell-pad" x="480" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="525" y="46" text-anchor="middle">_pad</text>
+  <text class="lbl2" x="525" y="62" text-anchor="middle">uint32_t</text>
+  <text class="offset" x="20" y="94">0</text>
+  <text class="offset" x="200" y="94">8</text>
+  <text class="offset" x="290" y="94">12</text>
+  <text class="offset" x="390" y="94">16</text>
+  <text class="offset" x="480" y="94">20</text>
+  <text class="offset" x="570" y="94">24</text>
+  <text class="lbl2" x="20" y="112" style="fill:var(--mut)">BlEvent — 24 B. kind ∈ BL_EV_*. param carries e.g. INTENTION_ENDED's completed(1)/aborted(0).</text>
+</svg>
+</div>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 960 150" role="img" aria-label="BlSuggestionWire byte layout: duration_millis int64, idle_hint_millis int64, kind int32, point_x float, point_z float, target_slot uint32, arg int32, activity_id int32, 40 bytes total.">
+  <rect class="cell-i64" x="20" y="20" width="170" height="60"></rect>
+  <text class="lbl2" x="105" y="46" text-anchor="middle">duration_millis</text>
+  <text class="lbl2" x="105" y="62" text-anchor="middle">int64_t</text>
+  <rect class="cell-i64" x="190" y="20" width="170" height="60"></rect>
+  <text class="lbl2" x="275" y="46" text-anchor="middle">idle_hint_millis</text>
+  <text class="lbl2" x="275" y="62" text-anchor="middle">int64_t</text>
+  <rect class="cell-i32" x="360" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="405" y="46" text-anchor="middle">kind</text>
+  <text class="lbl2" x="405" y="62" text-anchor="middle">int32_t</text>
+  <rect class="cell-i32" x="450" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="495" y="46" text-anchor="middle">point_x</text>
+  <text class="lbl2" x="495" y="62" text-anchor="middle">float</text>
+  <rect class="cell-i32" x="540" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="585" y="46" text-anchor="middle">point_z</text>
+  <text class="lbl2" x="585" y="62" text-anchor="middle">float</text>
+  <rect class="cell-i32" x="630" y="20" width="100" height="60"></rect>
+  <text class="lbl2" x="680" y="46" text-anchor="middle">target_slot</text>
+  <text class="lbl2" x="680" y="62" text-anchor="middle">uint32_t</text>
+  <rect class="cell-i32" x="730" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="775" y="46" text-anchor="middle">arg</text>
+  <text class="lbl2" x="775" y="62" text-anchor="middle">int32_t</text>
+  <rect class="cell-i32" x="820" y="20" width="100" height="60"></rect>
+  <text class="lbl2" x="870" y="46" text-anchor="middle">activity_id</text>
+  <text class="lbl2" x="870" y="62" text-anchor="middle">int32_t</text>
+
+  <text class="offset" x="20" y="94">0</text>
+  <text class="offset" x="190" y="94">8</text>
+  <text class="offset" x="360" y="94">16</text>
+  <text class="offset" x="450" y="94">20</text>
+  <text class="offset" x="540" y="94">24</text>
+  <text class="offset" x="630" y="94">28</text>
+  <text class="offset" x="730" y="94">32</text>
+  <text class="offset" x="820" y="94">36</text>
+  <text class="offset" x="910" y="94">40</text>
+
+  <text class="lbl2" x="20" y="112" style="fill:var(--mut)">BlSuggestionWire — 40 B. kind ∈ BL_INT_*. One of these per wake, never more.</text>
+  <text class="lbl2" x="20" y="128" style="fill:var(--mut)">activity_id: inspection/histogram label only — carries no semantics.</text>
+  <text class="lbl2" x="20" y="144" style="fill:var(--mut)">idle_hint_millis: scheduling advice ("you don't need me for X ms"), not a promise in either direction.</text>
+</svg>
+</div>
+
+<!-- =================================================================== -->
+<h2 id="inbox"><span class="num">4</span>Event-inbox lifecycle</h2>
+<p><code>EventInbox</code> is engine-written, bounded, and <b>sticky</b>: a sleeping hero does not miss what happened while it slept. An entry survives until it is read at some wake, or until its own TTL runs out first — whichever comes first isn't actually a choice the entry makes; expiry is purely time-based, so a hero that never wakes before the TTL elapses loses the entry unread.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 860 230" role="img" aria-label="Event inbox timeline: an event is written, stays sticky while its TTL decrements, is visible on any wake in that window, and drops when the TTL reaches zero.">
+  <line class="axis" x1="40" y1="160" x2="820" y2="160" marker-end="url(#arrow-mut)"></line>
+  <text class="edge-lbl" x="800" y="180">time (ticks) →</text>
+  <g class="tick">
+    <line x1="100" y1="157" x2="100" y2="163"></line>
+    <line x1="160" y1="157" x2="160" y2="163"></line>
+    <line x1="220" y1="157" x2="220" y2="163"></line>
+    <line x1="280" y1="157" x2="280" y2="163"></line>
+    <line x1="340" y1="157" x2="340" y2="163"></line>
+    <line x1="400" y1="157" x2="400" y2="163"></line>
+    <line x1="460" y1="157" x2="460" y2="163"></line>
+    <line x1="520" y1="157" x2="520" y2="163"></line>
+    <line x1="580" y1="157" x2="580" y2="163"></line>
+    <line x1="620" y1="157" x2="620" y2="163"></line>
+  </g>
+
+  <line class="edge" x1="100" y1="160" x2="100" y2="60" marker-end="url(#arrow)"></line>
+  <rect class="box" x="20" y="20" width="220" height="42" rx="6"></rect>
+  <text class="lbl2" x="30" y="36">write: BL_EV_DAMAGE_TAKEN</text>
+  <text class="lbl2" x="30" y="52">kind, source_slot, ttl_millis = T</text>
+
+  <rect class="band" x="100" y="100" width="520" height="20"></rect>
+  <text class="lbl2" x="360" y="94" text-anchor="middle">sticky — ttl_millis decrements every tick</text>
+
+  <circle cx="280" cy="110" r="4.5" style="fill:var(--accent)"></circle>
+  <line class="edge-dash" x1="280" y1="114" x2="280" y2="157"></line>
+  <text class="edge-lbl" x="280" y="150" text-anchor="middle" style="fill:var(--accent)">wake</text>
+
+  <circle cx="460" cy="110" r="4.5" style="fill:var(--accent)"></circle>
+  <line class="edge-dash" x1="460" y1="114" x2="460" y2="157"></line>
+  <text class="edge-lbl" x="460" y="150" text-anchor="middle" style="fill:var(--accent)">wake</text>
+
+  <text class="lbl2" x="360" y="196" text-anchor="middle">read on any wake while ttl_millis &gt; 0 — same entry may be seen more than once</text>
+
+  <line class="edge-dash" x1="620" y1="100" x2="620" y2="160"></line>
+  <rect class="box" x="530" y="20" width="200" height="42" rx="6"></rect>
+  <text class="lbl2" x="540" y="36">ttl_millis reaches 0</text>
+  <text class="lbl2" x="540" y="52">entry dropped — read or not</text>
+  <line class="edge" x1="630" y1="62" x2="620" y2="98" marker-end="url(#arrow)"></line>
+</svg>
+<p class="diagram-cap">v1 kinds: <code>BL_EV_DAMAGE_TAKEN</code>, <code>BL_EV_THREAT_SIGHTED</code>, <code>BL_EV_MOVE_BLOCKED</code>, <code>BL_EV_INTENTION_ENDED</code>. All four are guaranteed-wake events (§2).</p>
+</div>
+
+<!-- =================================================================== -->
+<h2 id="vocab"><span class="num">5</span>Vocabularies</h2>
+<p>All three tables are <b>append-only</b>: a shipped value is never renumbered or reused, same discipline as <code>ActivityId</code> and the current <code>BL_CMD_*</code> list. Grow by adding a new name at the end.</p>
+
+<h3><code>BL_INT_*</code> — intention kinds (the suggestion's <code>kind</code>)</h3>
+<table>
+  <caption>Today's command vocabulary, renamed intention and given an explicit Idle-for-X. Exactly one intention per wake.</caption>
+  <thead>
+    <tr><th>Kind</th><th>Fields used</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>BL_INT_NONE</code></td><td>—</td><td>No suggestion this wake.</td></tr>
+    <tr><td><code>BL_INT_MOVE_TO</code></td><td><code>point</code></td><td>Walk to a world point.</td></tr>
+    <tr><td><code>BL_INT_ATTACK</code></td><td>actor-only</td><td>Melee whatever this hero is already engaged with.</td></tr>
+    <tr><td><code>BL_INT_SHOOT</code></td><td><code>target_slot</code></td><td>Ranged attack on a named entity (a hunter's shot).</td></tr>
+    <tr><td><code>BL_INT_ENTER</code></td><td><code>arg</code> = BuildingKind</td><td>Enter a building of this kind.</td></tr>
+    <tr><td><code>BL_INT_ENTER_HOME</code></td><td>—</td><td>Enter this hero's own home.</td></tr>
+    <tr><td><code>BL_INT_BUY</code></td><td>—</td><td>Transact at a shop.</td></tr>
+    <tr><td><code>BL_INT_CHAT</code></td><td><code>target_slot</code></td><td>Strike up or continue a conversation with a partner.</td></tr>
+    <tr><td><code>BL_INT_IDLE</code></td><td><code>duration_millis</code></td><td>Explicit idle-for-X.</td></tr>
+    <tr class="reserved"><td><code>BL_INT_USE_SKILL</code> (reserved)</td><td>—</td><td>Reserved in the enum; skill execution is an implementation detail of a future slice.</td></tr>
+  </tbody>
+</table>
+
+<h3><code>BL_EV_*</code> — event-inbox kinds</h3>
+<table>
+  <caption>Written by engine systems; every kind below is also a guaranteed-wake reason (§2).</caption>
+  <thead>
+    <tr><th>Kind</th><th>Payload</th><th>Written when</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>BL_EV_DAMAGE_TAKEN</code></td><td><code>source_slot</code> = attacker, if known</td><td>This hero took damage.</td></tr>
+    <tr><td><code>BL_EV_THREAT_SIGHTED</code></td><td><code>source_slot</code> = the threat</td><td>A new hostile entered perception.</td></tr>
+    <tr><td><code>BL_EV_MOVE_BLOCKED</code></td><td><code>param</code> encodes the refused step</td><td>A movement step was refused.</td></tr>
+    <tr><td><code>BL_EV_INTENTION_ENDED</code></td><td><code>param</code> = completed(1) / aborted(0)</td><td>The running <code>CurrentIntention</code> finished, either way.</td></tr>
+  </tbody>
+</table>
+
+<h3><code>BL_ST_*</code> — status kinds (<code>{kind, remaining_millis}</code>)</h3>
+<table>
+  <caption>All three are advisory in this slice — the brain may inspect or ignore them; none bypasses thinking (§2). Curses/shields and any status that does bypass thinking arrive in later slices.</caption>
+  <thead>
+    <tr><th>Kind</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>BL_ST_CHATTING</code></td><td>Already mid-conversation.</td></tr>
+    <tr><td><code>BL_ST_MELEE_LOCKED</code></td><td>Currently engaged in melee.</td></tr>
+    <tr><td><code>BL_ST_INSIDE_BUILDING</code></td><td>Sheltered indoors.</td></tr>
+  </tbody>
+</table>
+
+<!-- =================================================================== -->
+<h2 id="determinism"><span class="num">6</span>Determinism</h2>
+<p><code>state = f(initial config, command log, N ticks)</code> must hold exactly as it does today. Nothing about replay changes — only which systems produce the log changes.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 780 260" role="img" aria-label="Live run calls should_wake, react, and apply_intention, logging a Command. Replay reads the same Command from the log and calls apply_intention without ever calling react, reaching the same world state either way.">
+  <text class="lbl2" x="20" y="24" style="fill:var(--mut)">live</text>
+  <rect class="box" x="20" y="34" width="90" height="50" rx="6"></rect>
+  <text class="lbl2" x="65" y="63" text-anchor="middle">tick</text>
+  <line class="edge" x1="110" y1="59" x2="140" y2="59" marker-end="url(#arrow)"></line>
+
+  <rect class="box" x="140" y="34" width="120" height="50" rx="6"></rect>
+  <text class="lbl2" x="200" y="63" text-anchor="middle">should_wake()</text>
+  <line class="edge" x1="260" y1="59" x2="290" y2="59" marker-end="url(#arrow)"></line>
+
+  <rect class="box-brain" x="290" y="34" width="120" height="50" rx="6"></rect>
+  <text class="lbl2" x="350" y="63" text-anchor="middle">react() [brain]</text>
+  <line class="edge" x1="410" y1="59" x2="440" y2="59" marker-end="url(#arrow)"></line>
+
+  <rect class="box" x="440" y="34" width="130" height="50" rx="6"></rect>
+  <text class="lbl2" x="505" y="63" text-anchor="middle">apply_intention</text>
+  <line class="edge" x1="570" y1="59" x2="600" y2="59" marker-end="url(#arrow)"></line>
+
+  <rect class="box" x="600" y="34" width="150" height="50" rx="6"></rect>
+  <text class="lbl2" x="675" y="55" text-anchor="middle">Command logged</text>
+  <text class="lbl2" x="675" y="70" text-anchor="middle" style="fill:var(--mut)">carries idle_hint_millis</text>
+
+  <text class="lbl2" x="20" y="134" style="fill:var(--mut)">replay</text>
+  <rect class="box" x="20" y="144" width="90" height="50" rx="6"></rect>
+  <text class="lbl2" x="65" y="173" text-anchor="middle">tick</text>
+  <line class="edge" x1="110" y1="169" x2="140" y2="169" marker-end="url(#arrow)"></line>
+
+  <rect class="box" x="140" y="144" width="150" height="50" rx="6"></rect>
+  <text class="lbl2" x="215" y="173" text-anchor="middle">Command (from log)</text>
+  <line class="edge" x1="290" y1="169" x2="320" y2="169" marker-end="url(#arrow)"></line>
+
+  <rect class="box" x="320" y="144" width="130" height="50" rx="6"></rect>
+  <text class="lbl2" x="385" y="173" text-anchor="middle">apply_intention</text>
+
+  <rect class="box-dashed" x="290" y="204" width="180" height="40" rx="6"></rect>
+  <text class="lbl2" x="380" y="228" text-anchor="middle">react() — never called</text>
+  <line class="edge-dash" x1="215" y1="194" x2="330" y2="204"></line>
+</svg>
+<p class="diagram-cap">The idle hint rides <em>inside</em> the logged Command's payload — the same place today's deliberation-pause duration already lives. It is recorded once, at decision time, never recomputed. Replay re-applies the logged Command and lets the same deterministic engine systems run; it never calls <code>react()</code>, so <code>should_wake</code>'s outcome need not even be re-evaluated as a wasm call — the wake schedule is already baked into the log.</p>
+</div>
+
+<footer>
+  Slice B — <code>feat/intention-contract</code>. Prose spec: <code>docs/superpowers/specs/2026-07-24-intention-contract-design.md</code>. This page is the canonical, diagram-rich description of the contract; keep it in sync with the spec on every name and rule.
+</footer>
+
+</body>
+</html>
