@@ -269,6 +269,72 @@ struct ChattingState {
     float remaining = 0.0f;  // seconds left in the conversation
 };
 
+// --- intention contract: engine-side state ----------------------------------
+// Native mirrors of the wire vocabularies BL_EV_*/BL_INT_* (see
+// docs/design/intention-contract.html), same append-only discipline as
+// ActivityId/CommandKind: never renumber, never reuse a value. INERT this
+// slice -- see game/src/intention.h for the engine functions that read/write
+// these; nothing consumes should_wake/apply_intention outside tests yet.
+
+// Something an engine system wants the brain to know about on its next wake.
+enum class InboxEventKind : int32_t { None = 0, DamageTaken, ThreatSighted, MoveBlocked, IntentionEnded };
+
+// Default TTL for a freshly pushed inbox event. A compile-time constant, not a
+// ProgressionFactors scalar -- constants until a knob is asked for (CLAUDE.md).
+inline constexpr int64_t kInboxTtlMillis = 3000;
+
+// One timed inbox entry. `param` is kind-specific: damage amount
+// (DamageTaken), 1/0 completed-vs-aborted (IntentionEnded); unused (0) for
+// ThreatSighted/MoveBlocked today -- their source_slot / the sibling
+// MoveBlocked component already carry what a consumer needs.
+struct InboxEvent {
+    int64_t at_millis = 0;
+    int64_t ttl_millis = 0;      // decremented per tick; <= 0 -> dropped
+    InboxEventKind kind = InboxEventKind::None;
+    uint32_t source_slot = UINT32_MAX;
+    float param = 0.0f;
+};
+
+inline constexpr int32_t kInboxCapacity = 8;
+
+// A hero's durable, sticky event ring (docs/design/intention-contract.html
+// §4): a sleeping hero does not miss what happened while it slept. Newest
+// evicts oldest when full (game/src/intention.h's push_inbox_event); an entry
+// expires on its own ttl_millis, never on being read. Heroes only.
+struct EventInbox {
+    InboxEvent events[kInboxCapacity]{};
+    int32_t count = 0;
+    // Edge-detector for the ThreatSighted writer (sim.cpp's tick_world): true
+    // when a threat was present as of the LAST tick's check, so the writer
+    // fires only on the empty -> nonempty transition instead of once per tick
+    // a threat remains in view. Lives on the component (not file-local
+    // scratch state) so a replay reproduces the same edges, the same reason
+    // MoveBlocked keeps its at_millis on the component rather than elsewhere.
+    bool threat_was_present = false;
+};
+
+// Native mirror of BL_INT_* -- the suggestion's kind. UseSkill is reserved for
+// the skills slice (see intention-contract.html's vocab table).
+enum class IntentionKind : int32_t { None = 0, MoveTo, Attack, Shoot, Enter, EnterHome, Buy, Chat, Idle };
+
+// What the engine is currently executing for a hero -- durable across ticks,
+// outlives a single wake. Read by should_wake, written by apply_intention
+// (game/src/intention.h). Present only on heroes, spawned alongside
+// EventInbox (heroes.cpp's hero branch).
+struct CurrentIntention {
+    IntentionKind kind = IntentionKind::None;
+    glm::vec2 point{0.0f, 0.0f};
+    uint32_t target_slot = UINT32_MAX;
+    int32_t arg = 0;
+    int64_t started_at_millis = 0;
+    // The Idle-duration deadline (kind == Idle) OR the idle-hint deadline for
+    // any other kind -- 0 = none. Both are "the next scheduled wake time";
+    // only the Idle case doubles as a completion criterion
+    // (advance_intentions) -- for every other kind reaching this deadline is
+    // just a spurious-wake reminder, not a reason to end the intention.
+    int64_t wake_at_millis = 0;
+};
+
 // --- v0.3 movement / pathfinding --------------------------------------------
 
 // A sub-tile capsule agent; radius drives clearance in the navmesh path query.

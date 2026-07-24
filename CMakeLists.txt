@@ -277,6 +277,11 @@ add_library(badlands_game_lib STATIC
     game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
+    # Intention contract engine groundwork (inbox, wake rule, apply seam) --
+    # see docs/design/intention-contract.html and game/src/intention.h. Inert
+    # this slice: the wire flip (next task) is what actually wires a brain
+    # suggestion through apply_intention/should_wake.
+    game/src/intention.cpp
     game/src/town_brain.cpp
     # Task 4 (wasm-brain feature): the wasm hero brain runtime (brainhost C
     # ABI) -- see game/src/wasm_brain.h.
@@ -640,6 +645,9 @@ add_executable(badlands_game_tests
     game/tests/skills_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
+    # Intention contract engine groundwork: inbox, wake rule, apply seam
+    # (game/src/intention.h). Inert this slice.
+    game/tests/intention_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE

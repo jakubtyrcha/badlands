@@ -3,7 +3,8 @@
 #include "combat.h"  // melee_range, select_target
 #include "components.h"
 #include "game_state.h"
-#include "heroes.h"  // biome_at
+#include "heroes.h"     // biome_at
+#include "intention.h"  // InboxEvent, push_inbox_event -- the MoveBlocked mirror
 #include "placement.h"
 
 #include <entt/entt.hpp>
@@ -21,7 +22,7 @@ namespace badlands {
 
 namespace {
 
-constexpr float kArriveRadius = 0.25f;     // cursor advances within this of a waypoint
+// kArriveRadius now lives in movement.h (shared with intention.cpp).
 constexpr float kRepathCooldown = 0.3f;    // seconds between repaths
 constexpr float kGoalMovedThreshold = 1.0f;// repath a moving target when it drifts this far
 constexpr float kMeleeHysteresis = 1.15f;  // unlock past attack_range * this
@@ -210,6 +211,12 @@ void plan_paths(BadlandsGame& game, float dt) {
 
     for (const auto& [e, point] : blocked) {
         game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
+        // Intention contract (inert this slice): mirror the refusal into the
+        // inbox at the same site MoveBlocked itself is written, so the two
+        // never drift apart. No-ops for non-heroes (no EventInbox).
+        InboxEvent ev;
+        ev.kind = InboxEventKind::MoveBlocked;
+        push_inbox_event(game, e, ev);
     }
 }
 
@@ -259,6 +266,12 @@ void follow_paths(BadlandsGame& game, float dt) {
 
     for (const auto& [e, point] : blocked) {
         game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
+        // Intention contract (inert this slice): mirror the refusal into the
+        // inbox at the same site MoveBlocked itself is written, so the two
+        // never drift apart. No-ops for non-heroes (no EventInbox).
+        InboxEvent ev;
+        ev.kind = InboxEventKind::MoveBlocked;
+        push_inbox_event(game, e, ev);
     }
 }
 

@@ -194,6 +194,12 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             Skills sk{};
             grant_skills_for_level(sk, hero_class, 1);
             reg.emplace<Skills>(e, sk);
+
+            // Intention contract (game/src/intention.h): heroes only, spawned
+            // empty -- INERT this slice, nothing writes/reads them via a
+            // think path yet.
+            reg.emplace<EventInbox>(e);
+            reg.emplace<CurrentIntention>(e);
             break;
         }
         case Archetype::Townfolk: {

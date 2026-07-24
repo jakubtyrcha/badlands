@@ -6,6 +6,7 @@
 #include "brain.h"  // complete badlands::BrainRuntime for BadlandsGame's unique_ptr dtor
 #include "components.h"
 #include "game_state.h"
+#include "intention.h"   // InboxEvent, push_inbox_event -- the DamageTaken writer
 #include "wasm_brain.h"  // complete badlands::WasmBrainRuntime, same reason as brain.h above
 
 #include <entt/entt.hpp>
@@ -62,6 +63,22 @@ void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot
                                    .x = pos.x,
                                    .z = pos.y,
                                    .at_millis = game.world_millis});
+    }
+
+    // Intention contract (inert this slice): mirror the hit into the
+    // victim's inbox. This is the single choke point both damage sites
+    // (fire_attack's melee branch, advance_projectiles' ranged resolution)
+    // route through, so it is the one place a DamageTaken event needs
+    // writing. push_inbox_event no-ops for a non-hero victim (no EventInbox),
+    // which is what makes "an inbox only if hero" automatic rather than a
+    // check here.
+    entt::entity victim = entity_for_slot(game, static_cast<int32_t>(target_slot));
+    if (victim != entt::null) {
+        InboxEvent ev;
+        ev.kind = InboxEventKind::DamageTaken;
+        ev.source_slot = actor_slot;
+        ev.param = amount;
+        push_inbox_event(game, victim, ev);
     }
 }
 

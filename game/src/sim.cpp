@@ -13,6 +13,7 @@
 #include "entity_memory.h"  // update_entity_memory
 #include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
+#include "intention.h"  // advance_intentions, push_inbox_event -- the ThreatSighted writer
 #include "movement.h"
 #include "nav_world.h"
 #include "needs.h"
@@ -241,6 +242,36 @@ void tick_world(BadlandsGame& g, float dt) {
     // components -- so it runs unconditionally, live or replaying alike.
     update_entity_memory(g);
 
+    // Intention contract: ThreatSighted inbox writer (inert this slice --
+    // nothing consumes the inbox from a think path yet). Fires on the
+    // empty -> nonempty edge of "is there a hostile within threat_radius",
+    // not every tick a threat remains in view -- a guaranteed-wake event is a
+    // notification, not a per-tick spam channel. Reuses nearest_enemy +
+    // factors.hero.threat_radius (game_state.h) rather than
+    // collect_threats/observe_hero (behaviours/perception.cpp,
+    // town_brain.cpp): those live INSIDE the per-hero think path and only run
+    // for a hero that reaches town_think, but this pass must see every hero
+    // every tick regardless of whether it thinks this tick. threat_was_present
+    // lives on EventInbox itself (not scratch state here), the same reason
+    // MoveBlocked keeps its at_millis on the component, so a replay
+    // reproduces the same edges. Hidden heroes are excluded, same as
+    // perception excludes them elsewhere.
+    for (auto [e, inbox] :
+         registry.view<EventInbox>(entt::exclude<InsideBuilding>).each()) {
+        entt::entity threat = nearest_enemy(g, e);
+        const bool present = threat != entt::null &&
+                             glm::distance(registry.get<Position>(e).pos,
+                                           registry.get<Position>(threat).pos) <=
+                                 g.factors.hero.threat_radius;
+        if (present && !inbox.threat_was_present) {
+            InboxEvent ev;
+            ev.kind = InboxEventKind::ThreatSighted;
+            ev.source_slot = slot_for_entity(g, threat);
+            push_inbox_event(g, e, ev);
+        }
+        inbox.threat_was_present = present;
+    }
+
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.
     for (auto [e, intent] : registry.view<Intent>().each()) {
@@ -325,6 +356,18 @@ void tick_world(BadlandsGame& g, float dt) {
     // (fire_attack + advance_projectiles) emit the same DamageDealt/HeroDowned
     // events the old combat pass did.
     advance_projectiles(g, dt);
+
+    // Intention contract: inbox TTL housekeeping + CurrentIntention
+    // completion/abort detection (inert this slice -- see intention.h).
+    // Placed AFTER movement/combat so arrival (MoveTo) and a
+    // just-landed-lethal-hit target (the dead-target abort) both see this
+    // tick's final positions/hp, and BEFORE the death sweep below so a
+    // target that died this very tick is still readable as "dead" via
+    // Health<=0 rather than already destroyed -- entity_for_slot would
+    // report it gone in the NEXT tick's advance_intentions regardless, but
+    // checking hp here rather than validity is what lets the abort fire on
+    // the same tick the kill happens.
+    advance_intentions(g);
 
     // Death. Collect each dead entity's XP payout BEFORE the destroys
     // (Position/XpReward die with it), spread AFTER them so a hero that died
