@@ -11,6 +11,8 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/geometry/tree_generator.hpp"
+#include "game/geometry/tree_options.hpp"
 
 namespace badlands {
 
@@ -37,6 +39,11 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
+  // UV-checker debug material (two distinct grays) for the generated object, so
+  // its UVs read against the flat gray floor.
+  checker_mat_ = matlib_.CheckerAlbedo(glm::vec3(0.85f), glm::vec3(0.35f));
+  bark_mat_ = matlib_.SolidColor(glm::vec3(0.30f, 0.19f, 0.10f), 0.9f);
+
   BuildGenerators();
   if (generators_.empty()) {
     spdlog::error("ModelViewerView::Initialize: empty generator registry");
@@ -44,10 +51,6 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   }
   generator_index_ =
       std::clamp(generator_index_, 0, static_cast<int>(generators_.size()) - 1);
-
-  // UV-checker debug material (two distinct grays) for the generated object, so
-  // its UVs read against the flat gray floor.
-  checker_mat_ = matlib_.CheckerAlbedo(glm::vec3(0.85f), glm::vec3(0.35f));
 
   ApplyEnvironment();
   RebuildScene();
@@ -72,7 +75,17 @@ void ModelViewerView::BuildGenerators() {
          const glm::mat4 transform = glm::translate(
              glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
          return GeneratedMesh{std::move(mesh), transform};
-       }});
+       }, .material = checker_mat_});
+  generators_.push_back({.name = "Tree (Oak)",
+                         .generate = [] {
+                           return GeneratedMesh{GenerateTreeMesh(OakPreset()), glm::mat4(1.0f)};
+                         },
+                         .material = bark_mat_});
+  generators_.push_back({.name = "Tree (Pine)",
+                         .generate = [] {
+                           return GeneratedMesh{GenerateTreeMesh(PinePreset()), glm::mat4(1.0f)};
+                         },
+                         .material = bark_mat_});
 }
 
 void ModelViewerView::ApplyEnvironment() {
@@ -99,8 +112,8 @@ void ModelViewerView::RebuildScene() {
   // sits on the floor. Compute this before the mesh is moved into the scene.
   const Aabb world_bounds =
       generated.mesh.local_bounds.TransformedBy(generated.transform);
-  AddMeshEntity(scene_, "mesh", std::move(generated.mesh), checker_mat_,
-                generated.transform);
+  AddMeshEntity(scene_, "mesh", std::move(generated.mesh),
+                generators_[generator_index_].material, generated.transform);
 
   const glm::vec3 center = world_bounds.Center();
   const float radius = glm::length(world_bounds.max - center);

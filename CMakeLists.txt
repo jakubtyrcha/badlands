@@ -319,7 +319,8 @@ target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 # and badlands_game_lib. Each app grows its own real AppView.
 set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
-    src/executables/viewer/model_viewer_view.cpp)
+    src/executables/viewer/model_viewer_view.cpp
+    src/game/geometry/tree_generator.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --

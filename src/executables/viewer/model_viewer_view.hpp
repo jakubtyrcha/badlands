@@ -65,6 +65,7 @@ class ModelViewerView : public AppView {
   struct MeshGenerator {
     std::string name;
     std::function<GeneratedMesh()> generate;
+    DeferredMaterial material;  // material this generator's mesh renders with
   };
 
   void BuildGenerators();
@@ -92,6 +93,7 @@ class ModelViewerView : public AppView {
   std::vector<MeshGenerator> generators_;
   int generator_index_ = 0;
   DeferredMaterial checker_mat_;  // UV-checker debug material for the object
+  DeferredMaterial bark_mat_;  // brown bark for the tree generators
 
   ShadowDebugMode initial_shadow_debug_mode_ = ShadowDebugMode::Off;
 
