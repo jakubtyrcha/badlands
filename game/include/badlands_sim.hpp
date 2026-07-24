@@ -501,6 +501,12 @@ struct CharacterState {
     // the cone debug overlay from these + facing.
     float vision_radius;
     float vision_cone_half_angle_deg;  // >= 180 => full circle
+    // --- hero progression (zeroed for non-heroes; level >= 1 marks a hero) --
+    int32_t level;
+    int32_t xp;          // progress toward the next level
+    int32_t xp_next;     // cost of the next level at current factors
+    int32_t skill_count;
+    int32_t skills[kMaxSkills];  // SkillId values; only [0, skill_count) valid
 };
 
 // Run counters. NB: NOT `Stats` — badlands::Stats already exists (a sim

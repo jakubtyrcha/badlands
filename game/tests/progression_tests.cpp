@@ -178,3 +178,32 @@ TEST_CASE("overlapping discoveries are credited exactly once (union, no double)"
     CHECK(xp_of(g, a) > 0);
     CHECK(xp_of(g, b) > 0);
 }
+
+TEST_CASE("the snapshot carries level/xp/skills; zeroed for non-heroes") {
+    auto owned = badlands::make_world(badlands::BrainDesc{});
+    BadlandsGame& g = *owned;
+    const uint32_t h = badlands::spawn_into(g, badlands::MercenaryDesc(0.0f, 20.0f));
+    entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(h));
+    g.registry.get<badlands::HeroCharacter>(e).hero_class = badlands::HERO_APPRENTICE;
+    badlands::award_xp(g, h, 2000);  // past level 5: Calcify granted
+    const uint32_t rat =
+        badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {5.0f, 0.0f});
+
+    const auto rows = badlands::characters_of(g);
+    const badlands::CharacterState* hero_row = nullptr;
+    const badlands::CharacterState* rat_row = nullptr;
+    for (const auto& r : rows) {
+        if (r.id == h) hero_row = &r;
+        if (r.id == rat) rat_row = &r;
+    }
+    REQUIRE(hero_row != nullptr);
+    REQUIRE(rat_row != nullptr);
+    CHECK(hero_row->level == 5);
+    CHECK(hero_row->xp == 100);  // 2000 - 1900 (100+303+579+918)
+    CHECK(hero_row->xp_next ==
+          badlands::xp_to_next(g.factors.progression, hero_row->level));
+    REQUIRE(hero_row->skill_count == 1);
+    CHECK(hero_row->skills[0] == static_cast<int32_t>(SkillId::Calcify));
+    CHECK(rat_row->level == 0);
+    CHECK(rat_row->skill_count == 0);
+}

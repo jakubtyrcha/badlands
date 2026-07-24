@@ -18,6 +18,7 @@
 #include "needs.h"
 #include "placement.h"
 #include "progression.h"
+#include "skills.h"
 #include "vision.h"
 
 #include "critter_brain.h"
@@ -500,11 +501,22 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
             .facing_z = facing.y,
             .vision_radius = vis_radius,
             .vision_cone_half_angle_deg = vis_half_deg,
+            .level = sim ? sim->level : 0,
+            .xp = sim ? sim->xp : 0,
+            .xp_next = sim ? xp_to_next(g.factors.progression, sim->level) : 0,
         });
         const char* nm = disp ? disp->name.c_str() : "";
         std::size_t n = std::min(std::strlen(nm), sizeof(out.back().name) - 1);
         std::memcpy(out.back().name, nm, n);
         out.back().name[n] = '\0';
+
+        const Skills* sk = g.registry.try_get<Skills>(e);
+        CharacterState& row = out.back();
+        row.skill_count = sk ? sk->count : 0;
+        for (int32_t i = 0; i < kMaxSkills; ++i) {
+            row.skills[i] =
+                (sk != nullptr && i < sk->count) ? static_cast<int32_t>(sk->ids[i]) : 0;
+        }
     }
 }
 

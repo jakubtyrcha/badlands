@@ -720,7 +720,12 @@ void AiSandboxView::DrawInspector() {
       }
       ImGui::TableNextColumn();
       if (c.archetype == 0) {  // hero: show need reserves (1 = satisfied)
-        ImGui::Text("f%.2f c%.2f", c.fatigue, c.content);
+        ImGui::Text("L%d %d/%d  f%.2f c%.2f", c.level, c.xp, c.xp_next,
+                    c.fatigue, c.content);
+        for (int32_t i = 0; i < c.skill_count; ++i) {
+          ImGui::SameLine();
+          ImGui::TextUnformatted(badlands::SkillName(c.skills[i]));
+        }
       } else {
         ImGui::TextUnformatted("-");
       }
