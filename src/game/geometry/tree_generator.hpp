@@ -13,6 +13,7 @@ struct SkeletonBranch {
   std::vector<BranchSection> sections;
   int segment_count = 0;
   float base_radius = 0.0f;
+  int level = 0;  // recursion depth (0 = trunk); used for debug-graph coloring
 };
 
 // Phase A: seeded recursive branch skeleton (quaternion growth, child spawning).

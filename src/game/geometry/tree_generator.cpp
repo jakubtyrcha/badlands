@@ -147,7 +147,7 @@ std::vector<SkeletonBranch> BuildTreeSkeleton(const TreeOptions& o) {
       }
     }
 
-    skeleton.push_back({sections, br.segment_count, br.radius});
+    skeleton.push_back({sections, br.segment_count, br.radius, br.level});
     const BranchSection& last = sections.back();
 
     // Deciduous stem continuation (inherits parent section/segment counts).
