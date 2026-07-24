@@ -8,13 +8,12 @@
 // cut. Entities are created directly in the registry (no SceneGraph -- the
 // terrain is a raw indexed mesh, not a MeshAttachment).
 //
-// Beyond the terrain the view carries main's map-tool features: biome-derived +
-// map-border fog emitters (with an editor), a shared SimClock driving the sun +
-// fog animation, cursor-anchored zoom. Hovering the mouse over the terrain
-// shows its world position + dominant biome.
+// Beyond the terrain the view carries a shared SimClock driving the sun and
+// cursor-anchored zoom. Hovering the mouse over the terrain shows its world
+// position + dominant biome. (The old fog-emitter system was removed pending
+// a rewrite.)
 
 #include <cstdint>
-#include <vector>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
@@ -27,11 +26,8 @@
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/daylight.hpp"
-#include "engine/rendering/debug_line_buffer.hpp"
-#include "engine/rendering/fog_sim.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
-#include "mapgen/fog_generator.hpp"  // BorderFogParams
 #include "mapgen/generator.hpp"
 
 namespace badlands {
@@ -76,8 +72,8 @@ class MapViewView : public AppView {
   CubemapBuilder sky_cube_;
 
   // Daylight (Hosek-Wilkie sky + directional sun), same system the game uses,
-  // driven by the shared SimClock (play/pause/speed + scrub). The clock also
-  // advances the fog animation. Seeded to noon; starts paused (an inspector).
+  // driven by the shared SimClock (play/pause/speed + scrub). Seeded to noon;
+  // starts paused (an inspector).
   DaylightConfig daylight_cfg_;
   SimClock sim_clock_;
   void ApplyDaylight();  // re-bakes sky + IBL; not cheap, call on change only
@@ -99,26 +95,6 @@ class MapViewView : public AppView {
   // material factory, the terrain entity, the per-frame LOD cut, and the Terrain
   // debug UI. Built with an identity model (mapview vertices are absolute world).
   ClusterTerrain cluster_terrain_;
-
-  // Biome-derived fog emitters (see mapgen::GenerateBiomeFog). Retained so they
-  // can be picked/edited; pushed to the fog sim via SetFogSources.
-  std::vector<fog::Emitter> fog_emitters_;
-  int selected_emitter_ = -1;  // index into fog_emitters_, or -1 (none)
-
-  // Border fog: a WORLD-STATIC milk-white fog wall around the map perimeter
-  // (mapgen::BuildBorderFog from the map bounds -- fixed in world space, does NOT
-  // move with the camera). Max-combined with the biome fog.
-  bool border_fog_enabled_ = true;
-  mapgen::BorderFogParams border_fog_;
-
-  // Uploads fog_emitters_ + the map-border wall to the renderer's fog sim.
-  void SetFogSources();
-  // Emitter whose footprint contains world XZ (nearest centre), or -1.
-  int PickEmitter(const glm::vec3& world) const;
-  void DrawFogEmitterEditor();  // the "Fog Emitters" ImGui window
-
-  // Debug-line overlay: just the selected fog emitter's OBB (see Update).
-  DebugLineBuffer overlay_;
 
   // Where the mouse ray last hit the terrain. `hover_valid_` is false when the
   // cursor is off the terrain (sky / past the map edge) -- the hover UI hides.
