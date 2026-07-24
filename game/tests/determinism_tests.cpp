@@ -17,6 +17,8 @@
 #include "game_state.h"
 #include "vision.h"
 
+#include "fixtures/wasm_hero.h"
+
 #include <catch_amalgamated.hpp>
 
 #include <string>
@@ -155,10 +157,20 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     // depend on a seeded appetite draw AND on a query over the fog-of-war grid,
     // which is itself a product of where everyone walked. If either leaked a
     // dependency on anything outside (initial config, seed, command log), this
-    // is where it would show.
+    // is where it would show. Needs a REAL Explore decision, so the two live
+    // worlds are wasm-driven -- the C++ reference this used to also exercise
+    // is gone; this is the contract's replay gate now.
     //
     // The vision grid is INITIAL CONFIG, so both worlds configure it the same
     // way -- exactly as a real replay would have to.
+    //
+    // Its own tick budget (not the file's shared kRunTicks): think-on-wake
+    // means a hero re-considers exploring only once per wake (idle_hint_millis,
+    // 0.5-2s) and only once per explore_lease_millis window (8s = 240 ticks)
+    // at that, so this needs several lease windows' worth of room, not just
+    // kRunTicks' 400.
+    constexpr int kExploreTicks = 1500;
+
     auto seed_world = [](BadlandsGame* g) {
         configure_vision(g->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
         Action camp{ActionKind::PlaceBuilding, 0, -14.0f, 44.0f,
@@ -171,10 +183,10 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
         }
     };
 
-    auto live_owned = make_world(BrainDesc{});
+    auto live_owned = testfix::make_wasm_world();
     BadlandsGame* live = live_owned.get();
     seed_world(live);
-    for (int i = 0; i < kRunTicks; ++i) {
+    for (int i = 0; i < kExploreTicks; ++i) {
         tick_world(*live, 1.0f / 30.0f);
     }
     const std::vector<Command> log = live->command_log;
@@ -188,10 +200,10 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     REQUIRE(explored);
 
     // Same inputs again -> same trace, bit for bit.
-    auto twin_owned = make_world(BrainDesc{});
+    auto twin_owned = testfix::make_wasm_world();
     BadlandsGame* twin = twin_owned.get();
     seed_world(twin);
-    for (int i = 0; i < kRunTicks; ++i) {
+    for (int i = 0; i < kExploreTicks; ++i) {
         tick_world(*twin, 1.0f / 30.0f);
     }
     REQUIRE(twin->command_log.size() == log.size());
@@ -201,12 +213,15 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     }
     require_same(snapshot(live), snapshot(twin));
 
-    // And the recorded trace, replayed with the brains off, rebuilds the world.
+    // And the recorded trace, replayed with the brains off, rebuilds the
+    // world -- no wasm brain needed here at all: replay takes every decision
+    // from the log (tick_world's replay_log branch never reaches a brain,
+    // wasm or mock).
     auto replay_owned = make_world(BrainDesc{});
     BadlandsGame* replay = replay_owned.get();
     configure_vision(replay->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
     replay->replay_log = &log;
-    for (int i = 0; i < kRunTicks; ++i) {
+    for (int i = 0; i < kExploreTicks; ++i) {
         tick_world(*replay, 1.0f / 30.0f);
     }
     CHECK(replay->replay_cursor == log.size());

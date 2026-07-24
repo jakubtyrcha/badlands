@@ -36,9 +36,10 @@ struct BadlandsGame {
     // Compiled brain program + host bindings; null -> mock brains only.
     std::unique_ptr<badlands::BrainRuntime> brains;
     // Compiled + instantiated brain wasm module (game/src/wasm_brain.h);
-    // null -> heroes think via town_think (mock) instead. Hero-only (see the
-    // think loop's dispatch order, sim.cpp): loaded independently of `brains`
-    // above, and takes priority over it for BrainKind::Town entities.
+    // null -> heroes simply idle (there is no C++ decision layer left to fall
+    // back to, sim.cpp's mock_think). Hero-only (see the think loop's
+    // dispatch order, sim.cpp): loaded independently of `brains` above, and
+    // takes priority over it for BrainKind::Town entities.
     std::unique_ptr<badlands::WasmBrainRuntime> wasm_brains;
 
     // World state (the sim owns gold and the building/placement grid).

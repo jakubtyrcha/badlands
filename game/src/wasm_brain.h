@@ -3,9 +3,10 @@
 // Wasm hero brain (v2, the intention contract): loads/ticks one compiled
 // brain wasm module (via the brainhost C ABI, src/crates/brainhost/include/
 // brainhost.h) and drives every BrainKind::Town entity's no-enemy,
-// should_wake-gated tick through it, in place of town_think
-// (game/src/town_brain.h) -- see docs/design/intention-contract.html for the
-// full contract this implements.
+// should_wake-gated tick through it -- the SOLE hero decision layer; the C++
+// reference (town_think) it replaced is gone entirely (a hero with no wasm
+// brain loaded simply idles, sim.cpp's mock_think) -- see
+// docs/design/intention-contract.html for the full contract this implements.
 //
 // One instance drives every hero slot (per-slot state lives in the guest's
 // own bl_spawn bookkeeping, not a per-entity coroutine like the noiser
@@ -18,14 +19,14 @@
 // file-local `brain_fatal` helper (spdlog critical + std::abort) is the
 // single place that enforces this -- see WasmBrainRuntime::create's and
 // tick_wasm_brain's doc comments below for exactly which failures route
-// through it. `BrainDesc{}`/no wasm bytes provided is unaffected: the C++
-// mock (town_think) drives every hero, as configured, UNCHANGED this task.
+// through it. `BrainDesc{}`/no wasm bytes provided means every hero simply
+// idles (no C++ decision layer left to fall back to, sim.cpp's mock_think).
 
 #include <brainhost.h>
 
-#include "brain_abi.h"  // BlSuggestionWire, BlViewWire
-#include "intention.h"  // Intention
-#include "town_brain.h"  // WorldView, ActivityWeights
+#include "brain_abi.h"        // BlSuggestionWire, BlViewWire
+#include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights
+#include "intention.h"        // Intention
 
 #include <entt/entt.hpp>
 
@@ -68,9 +69,9 @@ struct WasmBrainRuntime {
     std::vector<bool> spawned;
 };
 
-// Packs one hero's BlViewWire from an already-observed WorldView (town_brain.
-// h's observe_hero, reused verbatim -- perception stays entirely host-side)
-// plus its class weights row: self/suggest/factors 1:1 with WorldView/
+// Packs one hero's BlViewWire from an already-observed WorldView
+// (hero_perception.h's observe_hero, reused verbatim -- perception stays
+// entirely host-side) plus its class weights row: self/suggest/factors 1:1 with WorldView/
 // ActivityWeights (see wasm_brain.cpp's field-by-field doc comment),
 // statuses assembled from whichever of ChattingState/MeleeLock/InsideBuilding
 // `e` currently carries (advisory only this slice -- brain_abi.h's BL_ST_*
@@ -109,8 +110,7 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
 
 // One WAKE for `slot` (caller contract: sim.cpp's think loop already gated
 // this call on should_wake -- tick_wasm_brain does not re-check it): observe
-// (town_brain.h's observe_hero/weights_for, reused verbatim so perception is
-// identical to the C++ reference path) -> pack into a BlViewWire
+// (hero_perception.h's observe_hero/weights_for) -> pack into a BlViewWire
 // (brain_abi.h; statuses from Chatting/MeleeLock/InsideBuilding, events
 // copied from EventInbox) -> bh_tick -> on BH_OK, decode_suggestion the
 // returned BlSuggestionWire (above) and, if it passes the wire trust

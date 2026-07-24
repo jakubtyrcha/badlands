@@ -1,6 +1,7 @@
 // The C++ critter brain: a deer's reactive daily loop, expressed WorldView-in /
-// Commands-out like the town brain. Deer graze and wander around their spawn
-// range in Forest/Plains and bolt from any non-critter that comes within sight.
+// Commands-out (the same shape a hero decision takes, wasm or otherwise).
+// Deer graze and wander around their spawn range in Forest/Plains and bolt
+// from any non-critter that comes within sight.
 //
 // Combat is not their concern; critter_think runs from the mock-brain dispatch
 // (sim.cpp) for entities spawned with Archetype::Critter. Thresholds are policy

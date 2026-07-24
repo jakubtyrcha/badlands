@@ -184,8 +184,10 @@ typedef struct BlViewSuggest {
 
 // --- BlViewFactors -------------------------------------------------------------
 // EXACTLY the factors.hero.* tuning scalars read by the hero decision layer:
-// every score_*/act_* implementation used by town_brain.cpp's kHeroActivities
-// (game/src/behaviours/blocks.cpp). Unlike v1, this does NOT carry
+// every score_*/act_* implementation used by the hero decision table
+// (scripts/brains/nim/hero.nim's kHeroActivities -- the sole implementation
+// now; game/src/behaviours/blocks.cpp keeps only the shared/non-hero blocks).
+// Unlike v1, this does NOT carry
 // think_min_millis/think_max_millis -- deliberation is gone; the idle hint
 // (BlSuggestionWire::idle_hint_millis, drawn guest-side against a compiled
 // constant) replaces it. Perception-only factors (radii used by observe_hero,

@@ -248,7 +248,7 @@ void intent_enter_home(BadlandsGame& game, int32_t slot) {
 
 // Inspection, not mutation of the sim: the brain names the behaviour it chose so
 // the debug panel (and parity tests) can read it back. Shares the id space with
-// badlands::Behavior (town_brain.h).
+// badlands::Behavior (behaviours/world_view.h).
 void report_behavior(BadlandsGame& game, int32_t slot, int32_t behavior) {
     entt::entity self = entity_for_slot(game, slot);
     if (self == entt::null) {

@@ -2,15 +2,14 @@
 //
 // The contract has three parts, and they are tested separately because they can
 // break independently:
-//   1. the BLOCK  -- when a hero wants company and where it walks (pure view).
+//   1. the DECISION -- when a hero wants company and where it walks. That
+//      logic (score_chat/act_chat) died with the C++ hero decision layer and
+//      now lives only in the Nim brain -- proven here end to end, through the
+//      real wasm brain, not as a block-level unit test.
 //   2. the SESSION -- created only by the Chat command, dissolved only by
 //      system rules, always symmetric.
 //   3. the NEED   -- company decays boredom toward a floor rather than clearing
 //      it, which is what keeps the tavern worth the walk.
-
-#include "behaviours/blocks.h"
-#include "behaviours/selectors.h"
-#include "behaviours/world_view.h"
 
 #include "command.h"
 #include "components.h"
@@ -19,7 +18,8 @@
 #include "needs.h"
 #include "placement.h"
 #include "sim_internal.hpp"
-#include "town_brain.h"
+
+#include "fixtures/wasm_hero.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -29,18 +29,11 @@ using namespace badlands;
 
 namespace {
 
-WorldView lonely_hero(const SimFactors& f) {
-    WorldView v;
-    v.slot = 0;
-    v.pos = {0.0f, 0.0f};
-    // content is a reserve (1 = satisfied); well below chat_content_seek, so the
-    // hero clearly wants company (its urgency clears the flat pull of wandering).
-    v.content = 0.15f;
-    return v;
-}
-
 // Places a guild, hires `count` heroes, and drops them all at `where` so they
-// are within conversation range of each other.
+// are within conversation range of each other. `wasm=true` builds the world
+// on the shipping hero brain (only the end-to-end decision case below needs
+// it -- the session/need mechanics tests drive Commands/systems directly and
+// need no brain at all, mock or wasm).
 struct Town {
     std::unique_ptr<BadlandsGame> owned;
     uint32_t guild = UINT32_MAX;
@@ -49,9 +42,9 @@ struct Town {
     BadlandsGame& g() { return *owned; }
 };
 
-Town make_town(int count, glm::vec2 where) {
+Town make_town(int count, glm::vec2 where, bool wasm = false) {
     Town t;
-    t.owned = make_world(BrainDesc{});
+    t.owned = wasm ? testfix::make_wasm_world() : make_world(BrainDesc{});
     Action place{ActionKind::PlaceBuilding, 0, -40.0f, 40.0f,
                  static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
     t.guild = static_cast<uint32_t>(dispatch_into(*t.owned, place));
@@ -68,78 +61,12 @@ Town make_town(int count, glm::vec2 where) {
 }  // namespace
 
 // --- 1. the block -----------------------------------------------------------
-
-TEST_CASE("an under-entertained hero with a companion nearby wants to chat") {
-    const SimFactors f;
-    WorldView v = lonely_hero(f);
-    CHECK(score_chat(v, f) == 0.0f);  // nobody about
-
-    v.has_chat_partner = true;
-    v.partner_pos = {10.0f, 0.0f};
-    v.partner_dist = 10.0f;
-    CHECK(score_chat(v, f) > 0.0f);
-
-    // Well-entertained heroes keep to themselves.
-    v.content = 1.0f;
-    CHECK(score_chat(v, f) == 0.0f);
-}
-
-TEST_CASE("act_chat walks over, then strikes it up only once in range") {
-    const SimFactors f;
-    WorldView v = lonely_hero(f);
-    v.has_chat_partner = true;
-    v.partner_slot = 4;
-    v.partner_pos = {10.0f, 0.0f};
-    v.partner_dist = 10.0f;
-
-    BehaviourResult r = act_chat(v, f);
-    CHECK(r.id == ActivityId::Chat);
-    CHECK(r.target.x == 10.0f);
-    CHECK_FALSE(r.follow_up.has_value());  // too far to talk yet
-
-    v.partner_dist = f.hero.chat_radius * 0.5f;
-    r = act_chat(v, f);
-    REQUIRE(r.follow_up.has_value());
-    CHECK(r.follow_up->kind == CommandKind::Chat);
-    CHECK(r.follow_up->target_id == 4u);
-}
-
-TEST_CASE("a hero already chatting holds position and sees it through") {
-    const SimFactors f;
-    WorldView v = lonely_hero(f);
-    v.pos = {3.0f, 7.0f};
-    v.chatting = true;
-    v.content = 1.0f;  // even once entertained, the conversation continues
-
-    CHECK(score_chat(v, f) > 0.0f);
-    const BehaviourResult r = act_chat(v, f);
-    CHECK(r.id == ActivityId::Chat);
-    CHECK(r.target.x == 3.0f);
-    CHECK(r.target.y == 7.0f);
-    CHECK_FALSE(r.follow_up.has_value());  // no second Chat command
-}
-
-TEST_CASE("chatting loses to the tavern but beats wandering") {
-    // The intended shape of the trade-off: a proper night out first, company
-    // when the tavern is shut, pacing about only when alone.
-    const SimFactors f;
-    WorldView v = lonely_hero(f);
-    v.has_chat_partner = true;
-    v.partner_pos = {4.0f, 0.0f};
-    v.partner_dist = 4.0f;
-    v.has_tavern = true;
-    v.tavern_door = {8.0f, 0.0f};
-
-    v.fatigue = 1.0f;  // rested, so only entertainment is in question
-    const ActivityWeights& w = f.hero.weights[HERO_MERCENARY];
-    CHECK(select_banded(hero_activities(), w, v, f).id == ActivityId::VisitTavern);
-
-    v.night = true;  // tavern shut at night
-    CHECK(select_banded(hero_activities(), w, v, f).id == ActivityId::Chat);
-
-    v.has_chat_partner = false;  // nobody about
-    CHECK(select_banded(hero_activities(), w, v, f).id == ActivityId::Roam);
-}
+// (The score_chat/act_chat block-level cases, and the hero_activities()
+// trade-off case, died with the C++ hero decision layer -- that logic now
+// lives only in the Nim brain, scripts/brains/nim/blocks.nim, unreachable
+// from a plain WorldView. The end-to-end case below -- two heroes actually
+// finding each other and talking, through the real wasm brain -- is what
+// proves the SAME trade-off still holds.)
 
 TEST_CASE("class weights change how sociable a hero is") {
     // Personality as pure data: same situation, same table, different weights.
@@ -306,7 +233,7 @@ TEST_CASE("chatting is still tiring") {
 // --- end to end -------------------------------------------------------------
 
 TEST_CASE("two bored heroes find each other and talk, through the sim") {
-    Town t = make_town(2, {0.0f, 0.0f});
+    Town t = make_town(2, {0.0f, 0.0f}, /*wasm=*/true);
     BadlandsGame& g = t.g();
     const entt::entity a = g.slots[t.heroes[0]];
     const entt::entity b = g.slots[t.heroes[1]];
@@ -314,9 +241,6 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
     // Night, so the tavern is not an option; starved of diversion, so they want
     // company. Rested (fatigue 1.0), so rest never takes over.
     g.world_millis = static_cast<int64_t>(kMillisPerDay * 0.9);
-    SimFactors f = g.factors;
-    f.hero.think_max_millis = 0;  // not a test about deliberation
-    set_factors_of(g, f);
     for (entt::entity e : {a, b}) {
         auto& sim = g.registry.get<HeroSimulationState>(e);
         sim.content = 0.1f;

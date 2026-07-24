@@ -37,7 +37,8 @@ struct BrainState {
 // Hero" at think time.
 enum class BrainKind : int32_t {
     None = 0,   // no autonomous decisions (combat pre-empt only)
-    Town,       // hero errand/needs loop (town_brain.cpp)
+    Town,       // hero: the wasm brain decides (game/src/wasm_brain.h); no
+                // wasm and no working script -> idles, same as None
     Critter,    // reactive roam/graze/flee
     Townfolk,   // sequential routes
     Monster,    // seek and engage

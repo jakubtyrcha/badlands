@@ -7,8 +7,9 @@
 // Wired in (the contract flip, task-3-brief.md): sim.cpp's think loop gates
 // every wasm hero's tick_wasm_brain on should_wake, and wasm_brain.cpp
 // decodes each wake's BlSuggestionWire into an Intention and adopts it via
-// apply_intention. The C++ mock hero path (town_think) is untouched --
-// should_wake/apply_intention are wasm-only this slice.
+// apply_intention. should_wake/apply_intention are wasm-only: the C++ hero
+// decision layer they used to run alongside (town_think) is gone entirely
+// (Task 4) -- a hero with no wasm brain loaded simply idles.
 
 #pragma once
 
@@ -39,12 +40,11 @@ struct Intention {
 // Validates + adopts a suggestion for the hero at `slot`: feasibility-checks
 // it (known target, enterable building, sane point), maps it onto the
 // existing command producers (enqueue_move_to / enqueue_set_behavior /
-// direct command_queue pushes -- see town_brain.cpp's apply_brain_decision,
-// the same pattern), stamps CurrentIntention, and logs the wake schedule via
-// the SetBehavior duration (the same field the deliberation pause already
-// rides on, so the schedule is replayable rather than recomputed). Invalid ->
-// spdlog::warn + no execution + CurrentIntention left untouched. Returns
-// whether the suggestion was adopted.
+// direct command_queue pushes), stamps CurrentIntention, and logs the wake
+// schedule via the SetBehavior duration, so the schedule is replayable
+// rather than recomputed. Invalid -> spdlog::warn + no execution +
+// CurrentIntention left untouched. Returns whether the suggestion was
+// adopted.
 bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent);
 
 // Push one event into a hero's inbox (newest evicts oldest when full);

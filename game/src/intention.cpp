@@ -141,10 +141,9 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // Adopted. Idle's own duration IS its wake_at (and its completion
     // criterion, advance_intentions); every other kind gets the idle-hint as
     // a spurious-wake reminder only. Logged via enqueue_set_behavior's
-    // duration field -- the same vehicle the C++ mock's own deliberation
-    // pause already rides on (town_brain.cpp's apply_brain_decision) -- so
-    // the wake schedule is IN the command log (the SetBehavior handler,
-    // command.cpp, derives CurrentIntention::wake_at_millis from it too, so
+    // duration field, so the wake schedule is IN the command log (the
+    // SetBehavior handler, command.cpp, derives CurrentIntention::
+    // wake_at_millis from it too, so
     // a replay reconstructs the schedule from the log alone -- finding 2,
     // task-3-brief.md). `force=true`: every ADOPTED intention is a real
     // decision (a wake, gated sparsely by should_wake) and must reach the

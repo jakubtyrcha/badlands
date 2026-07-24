@@ -4,7 +4,7 @@
 #include "components.h"
 #include "entity_memory.h"
 #include "game_state.h"
-#include "town_brain.h"  // observe_hero/weights_for/WorldView/ActivityWeights/kActivityCount
+#include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights/kActivityCount
 
 #include <spdlog/spdlog.h>
 

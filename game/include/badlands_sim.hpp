@@ -110,8 +110,8 @@ enum class Archetype : int32_t {
 // (CharacterState.behavior), the statistics histogram, and any future noiser
 // brain -- so it is APPEND-ONLY: never renumber, never reuse.
 //
-// (game/src/town_brain.h aliases this as `badlands::Behavior`, the name the
-// sim internals have always used.)
+// (game/src/behaviours/world_view.h aliases this as `badlands::Behavior`, the
+// name the sim internals have always used.)
 enum class ActivityId : int32_t {
     Idle = 0,
     Roam,

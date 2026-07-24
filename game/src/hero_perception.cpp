@@ -1,21 +1,16 @@
-#include "town_brain.h"
+#include "hero_perception.h"
 
 #include "badlands_sim.hpp"
 #include "behaviours/blocks.h"
-#include "behaviours/deliberation.h"
 #include "behaviours/perception.h"
 #include "behaviours/rng.h"
-#include "behaviours/selectors.h"
 #include "behaviours/world_view.h"
 #include "command.h"
 #include "components.h"
 #include "exploration.h"
-#include "heroes.h"  // HERO_HUNTER
 #include "game_state.h"
 #include "placement.h"
 #include "vision.h"
-
-#include <array>
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -37,8 +32,6 @@ bool door_of_kind(const BadlandsGame& game, int kind, glm::vec2 pos, glm::vec2& 
     return building_approach_tile(game.placement, game.placement.buildings[bid], out);
 }
 
-// Build the hero's perception. This is the ONLY place town_think reads the
-// registry/placement; blocks see only the returned WorldView.
 // Nearest deer (critter) within `radius` of `pos`, by slot: what a hunter hunts.
 // Perception only -- reads the registry so the Hunt block never does.
 bool nearest_prey(const BadlandsGame& game, glm::vec2 pos, float radius, glm::vec2& out_pos,
@@ -102,20 +95,19 @@ bool nearest_companion(const BadlandsGame& game, entt::entity self, glm::vec2 po
 
 // The actor's preference table: which class this hero is. Everything
 // class-specific about a hero's decisions flows from here. Exposed (see
-// town_brain.h) so the wasm path packs the same weights row it sends over the
-// wire from the identical lookup, rather than a copy that could drift.
+// hero_perception.h) so the wasm path packs the same weights row it sends
+// over the wire from the identical lookup, rather than a copy that could
+// drift.
 const ActivityWeights& weights_for(const BadlandsGame& game, entt::entity e) {
     const int32_t cls = game.registry.get<HeroCharacter>(e).hero_class;
     const int32_t idx = (cls >= 0 && cls < HERO_CLASS_COUNT) ? cls : HERO_MERCENARY;
     return game.factors.hero.weights[idx];
 }
 
-// Build the hero's perception. This is the ONLY place a hero brain (this file
-// or the wasm one) reads the registry/placement; blocks -- and a wasm module,
-// via the wire -- see only the returned WorldView. Exposed (see town_brain.h)
-// so wasm_brain.cpp reuses it verbatim: perception must be identical on both
-// paths, or a hero would decide differently for a reason that has nothing to
-// do with its decision logic.
+// Build the hero's perception. This is the ONLY place a hero brain (the wasm
+// one, via the wire) reads the registry/placement; a wasm module sees only
+// the returned WorldView. Exposed (see hero_perception.h) so wasm_brain.cpp
+// reuses it verbatim.
 WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
                        const ActivityWeights& weights) {
     const auto& sim = game.registry.get<HeroSimulationState>(e);
@@ -135,12 +127,11 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     v.think_until_millis = sim.think_until_millis;
     v.current_activity = sim.behavior;
 
-    // Threats in proximity. Today this gates deliberation only -- a hero with a
-    // hostile anywhere on the map never reaches town_think at all, because the
-    // combat pre-empt in mock_think claims it first, so in practice this list
-    // is empty here. It is populated regardless because it is the perception
-    // the Danger band is built on, and it goes live unchanged the moment combat
-    // becomes an activity rather than a pre-empt.
+    // Threats in proximity: the perception the Danger band (and, on the wasm
+    // path, a guaranteed-defend suggestion) is built on. Excludes critters
+    // (CritterState) the same way nearest_enemy already does (game.cpp) --
+    // deer are neutral wildlife, never a team-combat threat, so only a
+    // hunter engages them, via has_prey/the Hunt activity below.
     collect_threats(game, e, v.pos, game.factors.hero.threat_radius, ThreatPolicy::HostileTeam,
                     v);
 
@@ -210,90 +201,6 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     const glm::vec2 anchor = v.has_home ? v.home_door : glm::vec2{0.0f, 0.0f};
     v.roam_goal = roam_point(slot, v.roam_epoch, anchor, game.factors.hero.roam_radius);
     return v;
-}
-
-namespace {
-
-// EVERY hero class runs this one table -- there is no per-class list. What a
-// class does, how eagerly, and whether it has an activity at all is entirely
-// the weight table (SimFactors::hero.weights); a Hunt weight of 0 makes Hunt
-// invisible to that class. Adding an activity is a row here plus a weight.
-//
-// List order is the tie-break only. Priority is the band; preference is the
-// weight.
-constexpr std::array<ActivityDef, 8> kHeroActivities{{
-    {ActivityId::Explore, ActivityBand::Normal, score_explore, act_explore},
-    {ActivityId::GoHome, ActivityBand::Normal, score_go_home, act_go_home},
-    {ActivityId::Hunt, ActivityBand::Normal, score_hunt, act_hunt},
-    {ActivityId::Buy, ActivityBand::Normal, score_buy, act_buy},
-    {ActivityId::VisitTavern, ActivityBand::Normal, score_visit_tavern, act_visit_tavern},
-    {ActivityId::Chat, ActivityBand::Normal, score_chat, act_chat},
-    {ActivityId::Roam, ActivityBand::Normal, score_roam, act_roam},
-    {ActivityId::Idle, ActivityBand::Normal, score_idle, act_idle},
-}};
-
-}  // namespace
-
-std::span<const ActivityDef> hero_activities() { return kHeroActivities; }
-
-// The shared decision-apply seam (see town_brain.h's BrainDecision doc):
-// commits a decision to Commands via the same edge-triggered producers every
-// brain uses, or -- if the decision is a pause -- starts/continues one. This
-// is byte-for-byte town_think's former tail, generalized to take its inputs
-// as a BrainDecision instead of reading (BehaviourResult, ThinkDecision)
-// directly, so the wasm path (which has no BehaviourResult/ThinkDecision of
-// its own -- only a decoded BlDecisionWire) can drive it too.
-bool apply_brain_decision(BadlandsGame& game, uint32_t slot, glm::vec2 self_pos,
-                          const BrainDecision& decision) {
-    if (decision.pause) {
-        if (decision.pause_duration_millis > 0) {
-            // Starting a pause. Both commands go out exactly once: the hold
-            // position is captured here rather than re-stated each tick, so a
-            // hero nudged by unit separation mid-pause does not spray MoveTo
-            // commands into the trace.
-            enqueue_set_behavior(game, slot, static_cast<int32_t>(ActivityId::Think),
-                                 decision.pause_duration_millis);
-            enqueue_move_to(game, slot, self_pos);
-            return true;  // pause-START: a real decision, worth counting/logging
-        }
-        return false;  // mid-pause: no decision to make, nothing to log
-    }
-
-    // Decisions go out as commands like every other mutation (logged +
-    // replayable), never as direct writes. Edge-triggered: re-stating an
-    // unchanged goal is not a decision and must not enter the trace.
-    // Committing here also clears any pause (the hero was thinking, so the
-    // behaviour differs and the command fires).
-    enqueue_set_behavior(game, slot, static_cast<int32_t>(decision.activity));
-    enqueue_move_to(game, slot, decision.goal);
-    if (decision.follow_up.has_value() &&
-        (!decision.follow_up_on_arrival ||
-         glm::distance(self_pos, decision.goal) <= kEntranceRadius)) {
-        game.command_queue.push_back(*decision.follow_up);
-    }
-    return true;
-}
-
-void town_think(BadlandsGame& game, uint32_t slot) {
-    entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
-    if (e == entt::null) {
-        return;
-    }
-    const ActivityWeights& weights = weights_for(game, e);
-    const WorldView view = observe_hero(game, slot, e, weights);
-    const BehaviourResult r = select_banded(kHeroActivities, weights, view, game.factors);
-
-    // Changed its mind? Stand and think about it for a moment first.
-    const ThinkDecision think = deliberate(r.id, view, game.factors);
-
-    BrainDecision decision;
-    decision.activity = r.id;
-    decision.goal = r.target;
-    decision.follow_up = r.follow_up;
-    decision.follow_up_on_arrival = r.follow_up_on_arrival;
-    decision.pause = think.pause;
-    decision.pause_duration_millis = think.duration_millis;
-    apply_brain_decision(game, slot, view.pos, decision);
 }
 
 }  // namespace badlands

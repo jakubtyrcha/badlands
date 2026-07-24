@@ -28,7 +28,6 @@
 #include "townfolk_brain.h"
 
 #include "game/map/symbolic_map_generator.hpp"
-#include "town_brain.h"
 #include "wasm_brain.h"
 
 #include <entt/entt.hpp>
@@ -80,8 +79,11 @@ bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
 }
 
 // Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain. With no enemy, delegate to the C++ town brain
-// (needs/day-night loop).
+// downgraded) script brain. With no enemy, the archetype's own brain decides
+// -- except BrainKind::Town, which has no C++ decision layer left at all
+// (see hero_perception.h's file comment): the wasm brain is the sole hero
+// decision-maker now, and a Town-kind entity with neither a wasm brain nor a
+// working noiser script simply idles, same as BrainKind::None.
 void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
     const BrainKind kind = reg.get<Brain>(self).kind;
@@ -102,14 +104,13 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     if (combat_preempt(game, self, slot)) {
         return;
     }
-    // No enemy: the archetype's own brain decides.
+    // No enemy: the archetype's own brain decides, or -- Town/None alike --
+    // there is none, so it holds position.
     switch (kind) {
-        case BrainKind::Town:
-            town_think(game, slot);
-            break;
         case BrainKind::Monster:
             monster_think(game, slot);  // no unit enemy -> gnaw a building
             break;
+        case BrainKind::Town:
         case BrainKind::None:
             reg.get<MoveTarget>(self).kind = MoveTarget::Kind::None;
             break;
@@ -242,16 +243,15 @@ void tick_world(BadlandsGame& g, float dt) {
     // components -- so it runs unconditionally, live or replaying alike.
     update_entity_memory(g);
 
-    // Intention contract: ThreatSighted inbox writer (inert this slice --
-    // nothing consumes the inbox from a think path yet). Fires on the
+    // Intention contract: ThreatSighted inbox writer. Fires on the
     // empty -> nonempty edge of "is there a hostile within threat_radius",
     // not every tick a threat remains in view -- a guaranteed-wake event is a
     // notification, not a per-tick spam channel. Reuses nearest_enemy +
     // factors.hero.threat_radius (game_state.h) rather than
     // collect_threats/observe_hero (behaviours/perception.cpp,
-    // town_brain.cpp): those live INSIDE the per-hero think path and only run
-    // for a hero that reaches town_think, but this pass must see every hero
-    // every tick regardless of whether it thinks this tick. threat_was_present
+    // hero_perception.cpp): those live INSIDE the per-hero think path and
+    // only run on an actual wake (should_wake-gated), but this pass must see
+    // every hero every tick regardless of whether it wakes this tick. threat_was_present
     // lives on EventInbox itself (not scratch state here), the same reason
     // MoveBlocked keeps its at_millis on the component, so a replay
     // reproduces the same edges. Hidden heroes are excluded, same as
@@ -290,9 +290,11 @@ void tick_world(BadlandsGame& g, float dt) {
             if (g.wasm_brains && brain.kind == BrainKind::Town) {
                 // The wasm hero brain owns the no-enemy tick outright: combat
                 // still pre-empts it (identical to the mock's own pre-empt),
-                // but mock_think/town_think are never reached for this entity
-                // while a wasm program is loaded -- see wasm_brain.h. Absent
-                // a target, the intention contract's wake rule gates the
+                // but mock_think is never reached for this entity while a
+                // wasm program is loaded -- see wasm_brain.h (and mock_think
+                // no longer has a hero decision layer to reach even when it
+                // is). Absent a target, the intention contract's wake rule
+                // gates the
                 // think itself (docs/design/intention-contract.html §2): a
                 // hero with a running intention and nothing new in its inbox
                 // simply keeps doing what it was already doing (the always-
@@ -627,7 +629,7 @@ namespace {
 //    small positive epsilon rather than 0, so the field itself stays
 //    strictly positive instead of leaning on reserve_rate_per_tick's own
 //    <=0 "instantly" guard to stay finite.
-//  - hero.explore_lease_millis: also a DIVISOR (town_brain.cpp's
+//  - hero.explore_lease_millis: also a DIVISOR (hero_perception.cpp's
 //    observe_hero computes `world_millis / explore_lease_millis`
 //    UNCONDITIONALLY, for every hero, every tick, with no <=0 guard of its
 //    own -- unlike the hours-rate fields above) -- floored at a small
@@ -683,7 +685,7 @@ void floor_positive_hours(const char* field, float& value) {
     }
 }
 
-// `value` is an integer-millis DIVISOR downstream (town_brain.cpp's
+// `value` is an integer-millis DIVISOR downstream (hero_perception.cpp's
 // observe_hero: world_millis / explore_lease_millis): floor at the smallest
 // positive millisecond instead of 0.
 void floor_positive_millis(const char* field, int64_t& value) {

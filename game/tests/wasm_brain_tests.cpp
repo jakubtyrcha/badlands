@@ -18,9 +18,9 @@
 #include "components.h"
 #include "duel_common.h"
 #include "game_state.h"
+#include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights
 #include "intention.h"
 #include "sim_internal.hpp"
-#include "town_brain.h"  // observe_hero/weights_for/WorldView/ActivityWeights
 #include "wasm_brain.h"
 
 #include <catch_amalgamated.hpp>

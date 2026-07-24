@@ -1,12 +1,12 @@
 #include "heroes.h"
 
+#include "behaviours/world_view.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
 #include "brain.h"
 #include "components.h"
 #include "entity_memory.h"  // EntityMemory, seed_home_town_memory
 #include "game_state.h"
 #include "placement.h"
 #include "skills.h"  // Skills, grant_skills_for_level
-#include "town_brain.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>

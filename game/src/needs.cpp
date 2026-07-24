@@ -1,8 +1,8 @@
 #include "needs.h"
 
+#include "behaviours/world_view.h"  // badlands::Behavior
 #include "components.h"
 #include "game_state.h"
-#include "town_brain.h"  // badlands::Behavior
 
 #include <algorithm>
 

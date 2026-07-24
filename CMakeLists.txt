@@ -277,21 +277,21 @@ add_library(badlands_game_lib STATIC
     game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
-    # Intention contract engine groundwork (inbox, wake rule, apply seam) --
-    # see docs/design/intention-contract.html and game/src/intention.h. Inert
-    # this slice: the wire flip (next task) is what actually wires a brain
-    # suggestion through apply_intention/should_wake.
+    # Intention contract engine (inbox, wake rule, apply seam) the wasm hero
+    # brain runs on -- see docs/design/intention-contract.html and
+    # game/src/intention.h.
     game/src/intention.cpp
-    game/src/town_brain.cpp
-    # Task 4 (wasm-brain feature): the wasm hero brain runtime (brainhost C
-    # ABI) -- see game/src/wasm_brain.h.
+    # Hero perception (observe_hero/weights_for) -- all that remains of the
+    # deleted C++ hero decision layer (town_brain.cpp); its sole consumer now
+    # is the wasm hero brain (wasm_brain.cpp), the sole hero decision-maker.
+    game/src/hero_perception.cpp
+    # The wasm hero brain runtime (brainhost C ABI) -- see game/src/wasm_brain.h.
     game/src/wasm_brain.cpp
     game/src/activity_catalog.cpp
     game/src/activity_histogram.cpp
     game/src/behaviours/blocks.cpp
     game/src/behaviours/selectors.cpp
     game/src/behaviours/perception.cpp
-    game/src/behaviours/deliberation.cpp
     game/src/critter_brain.cpp
     game/src/townfolk_brain.cpp
     game/src/monster_brain.cpp
@@ -598,9 +598,7 @@ add_executable(badlands_game_tests
     game/tests/needs_tests.cpp
     game/tests/determinism_tests.cpp
     game/tests/archetype_tests.cpp
-    game/tests/behaviours_tests.cpp
     game/tests/activity_selector_tests.cpp
-    game/tests/deliberation_tests.cpp
     game/tests/chat_tests.cpp
     game/tests/exploration_tests.cpp
     game/tests/activity_stats_tests.cpp
@@ -610,6 +608,11 @@ add_executable(badlands_game_tests
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
+    # Hero behavior, wasm-driven (Task 4: the C++ decision layer is gone --
+    # the shipping brain is the sole hero decision-maker). Histogram-in-spirit
+    # outcomes over a run, plus two smokes salvaged from the deleted
+    # hero_brain_parity_tests.cpp.
+    game/tests/hero_behavior_tests.cpp
     # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
     # sim needed.
     game/tests/brain_abi_tests.cpp

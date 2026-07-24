@@ -12,6 +12,13 @@ bool counts_as_threat(const BadlandsGame& game, entt::entity self, entt::entity 
                       ThreatPolicy policy) {
     switch (policy) {
         case ThreatPolicy::HostileTeam:
+            // Critters (deer) are NEUTRAL wildlife -- never a team-combat
+            // threat, the same invariant nearest_enemy already enforces
+            // (game.cpp): only a hunter engages them, via has_prey/the Hunt
+            // activity, never this threat-detection path.
+            if (game.registry.all_of<CritterState>(other)) {
+                return false;
+            }
             return game.registry.get<Team>(other).id != game.registry.get<Team>(self).id;
         case ThreatPolicy::NotMyKind: {
             const auto* mine = game.registry.try_get<Brain>(self);
