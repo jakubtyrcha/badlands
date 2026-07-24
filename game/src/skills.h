@@ -8,6 +8,7 @@
 
 #include "badlands_sim.hpp"
 #include "components.h"  // Skills
+#include "behaviours/world_view.h"  // PerceivedThreat
 
 #include <span>
 
@@ -44,5 +45,26 @@ std::span<const SkillGrant> SkillGrantTable();
 bool learn_skill(Skills& s, SkillId id);
 // Applies every grant row matching (hero_class, level) exactly.
 void grant_skills_for_level(Skills& s, int32_t hero_class, int32_t level);
+
+// What the host tells a brain about each learned skill: `ready` = off
+// cooldown, `recommended` = the skill's trigger condition currently holds.
+// ADVICE, not a command -- slice 2 copies this into the wasm view and the
+// brain makes the final call. Pure over its inputs (unit-testable; identical
+// live and on replay).
+struct SkillContext {
+    float health_frac = 1.0f;
+    const PerceivedThreat* threats = nullptr;  // nearest-first (WorldView contract)
+    int32_t threat_count = 0;
+};
+
+struct SkillRecommendation {
+    SkillId id;
+    bool ready;
+    bool recommended;
+};
+
+// Fills out[0 .. Skills.count); returns Skills.count.
+int32_t evaluate_skill_triggers(const Skills& s, const SkillContext& ctx,
+                                SkillRecommendation out[kMaxSkills]);
 
 }  // namespace badlands

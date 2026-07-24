@@ -69,4 +69,24 @@ void grant_skills_for_level(Skills& s, int32_t hero_class, int32_t level) {
     }
 }
 
+int32_t evaluate_skill_triggers(const Skills& s, const SkillContext& ctx,
+                                SkillRecommendation out[kMaxSkills]) {
+    for (int32_t i = 0; i < s.count; ++i) {
+        const SkillDef& def = SkillDefOf(s.ids[i]);
+        bool recommended = false;
+        switch (def.trigger) {
+            case SkillTriggerKind::MeleeThreatClose:
+                // threats are nearest-first, so [0] decides "anything close?".
+                recommended = ctx.threat_count > 0 && ctx.threats != nullptr &&
+                              ctx.threats[0].dist <= def.trigger_param;
+                break;
+            case SkillTriggerKind::LowHealth:
+                recommended = ctx.health_frac <= def.trigger_param;
+                break;
+        }
+        out[i] = {s.ids[i], s.cooldown_remaining[i] <= 0.0f, recommended};
+    }
+    return s.count;
+}
+
 }  // namespace badlands

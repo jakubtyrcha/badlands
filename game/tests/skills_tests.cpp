@@ -1,5 +1,6 @@
 #include "components.h"
 #include "skills.h"
+#include "behaviours/world_view.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -33,4 +34,31 @@ TEST_CASE("the grant table teaches the Apprentice Calcify at level 5") {
     Skills merc{};
     badlands::grant_skills_for_level(merc, badlands::HERO_MERCENARY, 5);
     CHECK(merc.count == 0);
+}
+
+TEST_CASE("Calcify recommends on a close melee threat, gated by cooldown") {
+    Skills s{};
+    badlands::learn_skill(s, SkillId::Calcify);
+    badlands::PerceivedThreat threats[1] = {{{1.0f, 0.0f}, 2.5f, 7u}};
+    badlands::SkillContext ctx{1.0f, threats, 1};
+    badlands::SkillRecommendation rec[badlands::kMaxSkills];
+
+    REQUIRE(badlands::evaluate_skill_triggers(s, ctx, rec) == 1);
+    CHECK(rec[0].id == SkillId::Calcify);
+    CHECK(rec[0].ready);
+    CHECK(rec[0].recommended);  // threat at 2.5 <= trigger_param 3.0
+
+    threats[0].dist = 5.0f;  // nearest threat too far
+    badlands::evaluate_skill_triggers(s, ctx, rec);
+    CHECK_FALSE(rec[0].recommended);
+
+    threats[0].dist = 2.5f;
+    s.cooldown_remaining[0] = 5.0f;  // on cooldown: still recommended, not ready
+    badlands::evaluate_skill_triggers(s, ctx, rec);
+    CHECK(rec[0].recommended);
+    CHECK_FALSE(rec[0].ready);
+
+    badlands::SkillContext no_threats{1.0f, nullptr, 0};
+    badlands::evaluate_skill_triggers(s, no_threats, rec);
+    CHECK_FALSE(rec[0].recommended);
 }
