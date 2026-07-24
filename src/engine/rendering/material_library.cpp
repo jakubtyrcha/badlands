@@ -162,16 +162,23 @@ DeferredMaterial MaterialLibrary::CheckerAlbedo(glm::vec3 color_a,
 DeferredMaterial MaterialLibrary::AlphaCutout(wgpu::TextureView albedo,
                                               wgpu::Sampler sampler,
                                               float cutoff, glm::vec3 tint) {
-  // Build the shared forward-opaque "leaf" factory once. Its color target is
-  // the HDR accumulation format (the forward-opaque pass renders into
+  // Matte roughness for foliage: the standard BRDF's specular lobe stays broad
+  // and dim so leaves read as diffuse, not glossy.
+  constexpr float kFoliageRoughness = 0.9f;
+
+  // Build the shared forward-opaque standard-lit factory once. Its color target
+  // is the HDR accumulation format (the forward-opaque pass renders into
   // hdr_color_view_) and its depth is the reversed-Z scene depth; cull None
   // (double-sided foliage) and depth_write true so leaf cards occlude each
   // other. The kForwardOpaque variant compiles both the forward and the
-  // (alpha-tested, depth-only) shadow pipeline.
+  // (alpha-tested, depth-only) shadow pipeline. The shader declares @group(2),
+  // so the forward-opaque pass binds the engine shadow-map + IBL resources and
+  // foliage receives the sun's standard BRDF + shadow + IBL (it follows the
+  // G-buffer via the shared shadeStandard).
   if (!alpha_cutout_factory_) {
     FactoryDescriptor desc;
-    desc.shader_name = "leaf";
-    desc.shader_path = "material/leaf.wesl";
+    desc.shader_name = "standard_forward";
+    desc.shader_path = "material/standard_forward.wesl";
     desc.supported_pass_types = {MaterialPassType::kForwardOpaque};
     desc.supported_geometry_types = {GeometryType::kTexturedMesh};
     desc.color_formats = {SceneRenderer::kAccumulationFormat};  // HDR
@@ -182,7 +189,8 @@ DeferredMaterial MaterialLibrary::AlphaCutout(wgpu::TextureView albedo,
         desc, device_, queue_, pipeline_gen_, /*script_provider=*/nullptr);
     if (!alpha_cutout_factory_) {
       spdlog::error(
-          "MaterialLibrary::AlphaCutout: failed to build leaf material factory");
+          "MaterialLibrary::AlphaCutout: failed to build standard_forward "
+          "material factory");
       load_failed_ = true;
       return DeferredMaterial{};
     }
@@ -195,10 +203,12 @@ DeferredMaterial MaterialLibrary::AlphaCutout(wgpu::TextureView albedo,
       .sampler = sampler,
       .type = TextureType::k2D,
   });
-  // tintCutoff: xyz = tint (RGB multiplier), w = alpha discard threshold. Names
-  // the group-1 LeafUniforms field the render_forward pass applies per-object.
+  // Group-1 StandardForwardUniforms fields the render_forward pass applies
+  // per-object: tint (rgb albedo multiplier) and params (x = alpha discard
+  // threshold, y = roughness).
   params.uniform_overrides = {
-      {"tintCutoff", glm::vec4(tint, cutoff)},
+      {"tint", glm::vec4(tint, 1.0f)},
+      {"params", glm::vec4(cutoff, kFoliageRoughness, 0.0f, 0.0f)},
   };
 
   return DeferredMaterial{.factory = alpha_cutout_factory_.get(),

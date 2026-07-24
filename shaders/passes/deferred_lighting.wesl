@@ -21,11 +21,8 @@
 // layout is always satisfiable.
 import package::common::frame::{frame, getFullscreenTriangleVertex, reconstructLinearZ, reconstructViewSpacePosition, viewSpaceToWorldOffsetedSpacePosition, decodeOctahedron};
 import package::common::color::srgb_to_linear;
-import package::common::sh_lighting::evaluateAmbientSHL2;
-import package::common::brdf::{evaluateEonRetroBrdf, evaluateSpecularGgxBrdf, evaluateLagardeFresnel};
 import package::common::shadow_sampling::sampleShadowMapPCF;
-
-const F0_DIELECTRIC: vec3<f32> = vec3<f32>(0.04);
+import package::common::standard_lighting::{shadeStandard, computeSpecularOcclusion, F0_DIELECTRIC};
 
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
@@ -52,14 +49,6 @@ fn vs_main(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
     output.Position = fullscreen.clipPosition;
     output.screenUV = fullscreen.screenUV;
     return output;
-}
-
-// Computes Specular Occlusion (ported from sampo's deferred_lighting.wesl).
-// Prevents ambient specular 'glow' from leaking into deep cracks (AO areas):
-// scales the AO influence by roughness and the viewing angle so sharp
-// reflections (low roughness) are occluded more strictly.
-fn computeSpecularOcclusion(NdotV: f32, ao: f32, roughness: f32) -> f32 {
-    return clamp(pow(NdotV + ao, roughness) - 1.0 + ao, 0.0, 1.0);
 }
 
 @fragment
@@ -117,14 +106,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 5. Lighting calculation
     let albedoLinear = srgb_to_linear(textureLoad(albedo_texture, texCoord, 0).rgb);
 
-    // Direct lighting (sun): EON diffuse (includes NdotL internally) + GGX spec
-    let diffuseTerm = evaluateEonRetroBrdf(normal, lightDir, viewDir, roughness);
-    let specularTerm = evaluateSpecularGgxBrdf(normal, viewDir, lightDir, roughness, F0_DIELECTRIC);
-    let directLighting = (diffuseTerm * albedoLinear + specularTerm) * shadow * NdotL * frame.sunColor.xyz;
-
-    // Ambient lighting: SH L2 diffuse + IBL split-sum specular.
-    let ambientDiffuse = evaluateAmbientSHL2(normal, frame.ambientSH) * ao;
-
     // Ambient specular (IBL). Sample the prefiltered environment cube along the
     // reflection vector at a roughness-selected mip, then apply the split-sum
     // BRDF LUT (indexed by NdotV, roughness) — specular = F0 * lut.r + lut.g.
@@ -140,14 +121,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let specOcclusion = computeSpecularOcclusion(NdotV, ao, roughness);
     let ambientSpecular = prefilteredColor * specularScale * specOcclusion;
 
-    // Roughness-aware indirect Fresnel to keep energy in check: the diffuse
-    // term is dimmed where the specular term picks up (Lagarde approximation).
-    let indirectFresnel = evaluateLagardeFresnel(NdotV, roughness, F0_DIELECTRIC);
-    let diffuseWeight = 1.0 - indirectFresnel;
-
-    let indirectLighting = (ambientDiffuse * albedoLinear * diffuseWeight) + ambientSpecular;
-
-    let finalColorLinear = directLighting + indirectLighting;
+    let finalColorLinear = shadeStandard(albedoLinear, normal, viewDir, roughness, ao, shadow, ambientSpecular);
 
     // Directional-shadow debug visualization (T1 plumbing, wired up by T3;
     // see ShadowDebugMode in scene_renderer.hpp). Uniform branch
