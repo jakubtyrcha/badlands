@@ -390,6 +390,7 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/config.cpp
     src/mapgen/fog_generator.cpp
     src/mapgen/fields.cpp
+    src/mapgen/generator.cpp
     src/mapgen/hillshade.cpp
     src/mapgen/outputs.cpp
     src/mapgen/pipeline.cpp
@@ -400,6 +401,8 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/sections.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine badlands_game_lib)
 target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
+target_include_directories(badlands_mapgen_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 
 # badlands_patchgen: renders ONE noiser terrain script over a world patch to a
 # grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
@@ -532,6 +535,24 @@ target_include_directories(badlands_fog_generator_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_generator_tests: the bedrock+quantile map generator — determinism,
+# structural area fractions, cutoff/classification logic, and
+# resolution-independent world-meter sampling. Pure CPU (FastNoiseLite is
+# header-only), pattern of badlands_fog_generator_tests.
+add_executable(badlands_generator_tests
+    src/mapgen/generator_tests.cpp
+    src/mapgen/generator.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_generator_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_generator_tests COMMAND badlands_generator_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
 # it over a windowed 2D domain into a texture (8x8 patches across the shared
