@@ -381,18 +381,12 @@ endforeach()
 
 # badlands_mapgen_lib: the map generator (bedrock+quantile biomes) + fog
 # generator + PNG outputs, as a static lib. Links badlands_engine for CpuImage
-# (PNG write via the `assets` crate) and badlands_game_lib for the sampo::noiser
-# C++ VM wrapper -- still needed by script_eval.cpp (patchgen's terrain-script
-# evaluator; moves out to patchgen in a later task). -Wno-deprecated-declarations
-# matches badlands_game_lib (the noiser headers ship [[deprecated]] shims).
+# (PNG write via the `assets` crate).
 add_library(badlands_mapgen_lib STATIC
     src/mapgen/fog_generator.cpp
     src/mapgen/generator.cpp
-    src/mapgen/hillshade.cpp
-    src/mapgen/outputs.cpp
-    src/mapgen/script_eval.cpp)
-target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine badlands_game_lib)
-target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
+    src/mapgen/outputs.cpp)
+target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
 target_include_directories(badlands_mapgen_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 
@@ -400,8 +394,11 @@ target_include_directories(badlands_mapgen_lib PRIVATE
 # grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
 # window. Scripts are functions of world meters, so a patch is a literal crop of the
 # world (see scripts/mapgen/biomes/README.md).
-add_executable(badlands_patchgen src/executables/patchgen/main_patchgen.cpp)
-target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib)
+add_executable(badlands_patchgen
+    src/executables/patchgen/main_patchgen.cpp
+    src/executables/patchgen/script_eval.cpp
+    src/executables/patchgen/hillshade.cpp)
+target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib badlands_game_lib)
 target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
     target_link_options(badlands_patchgen PRIVATE "-Wl,-ld_new")
@@ -457,8 +454,8 @@ add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_te
 # carries no engine/SDL/Dawn dependency) -- NOT badlands_mapgen_lib, which would
 # drag in the renderer for nothing.
 add_executable(badlands_patch_eval_tests
-    src/mapgen/patch_eval_tests.cpp
-    src/mapgen/script_eval.cpp
+    src/executables/patchgen/patch_eval_tests.cpp
+    src/executables/patchgen/script_eval.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_link_libraries(badlands_patch_eval_tests PRIVATE badlands_game_lib)

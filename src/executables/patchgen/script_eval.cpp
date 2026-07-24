@@ -1,11 +1,11 @@
-#include "mapgen/script_eval.hpp"
+#include "executables/patchgen/script_eval.hpp"
 
 #include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
 
-#include "mapgen/noiser_util.hpp"
+#include "executables/patchgen/noiser_util.hpp"
 #include "mapgen/parallel.hpp"
 
 namespace badlands::mapgen {

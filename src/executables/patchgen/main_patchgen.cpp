@@ -33,9 +33,9 @@
 #include <vector>
 
 #include "mapgen/field2d.hpp"
-#include "mapgen/hillshade.hpp"
+#include "executables/patchgen/hillshade.hpp"
 #include "mapgen/outputs.hpp"
-#include "mapgen/script_eval.hpp"
+#include "executables/patchgen/script_eval.hpp"
 
 namespace {
 
