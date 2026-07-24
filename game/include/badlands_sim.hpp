@@ -382,6 +382,12 @@ struct Combatant {
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
     Archetype archetype = Archetype::Hero;
+    // Explicit HeroClassId for hero descs; -1 = derive from the recruiting
+    // guild at spawn (heroes.cpp's spawn_entity). The hero creature-catalog
+    // defs (creature_catalog.cpp) author this so a directly-spawned/recruited
+    // hero and a catalog-spawned one agree on class before spawn-time grants
+    // (e.g. grant_skills_for_level) run.
+    int32_t hero_class = -1;
     float pos_x, pos_z;
     int32_t team;
     float hp;

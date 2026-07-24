@@ -351,8 +351,12 @@ void tick_world(BadlandsGame& g, float dt) {
     std::vector<DiscoveryCredit> discoveries;
     resolve_vision(g, &discoveries);
     if (g.factors.progression.xp_per_texel > 0) {
+        const int32_t per_texel = g.factors.progression.xp_per_texel;
         for (const DiscoveryCredit& d : discoveries) {
-            award_xp(g, d.slot, d.texels * g.factors.progression.xp_per_texel);
+            // Widen to int64 before multiplying: texels * xp_per_texel can
+            // exceed int32 range (a wide reveal at a large per-texel reward);
+            // award_xp saturates the accumulation from here.
+            award_xp(g, d.slot, static_cast<int64_t>(d.texels) * per_texel);
         }
     }
 
@@ -374,15 +378,12 @@ uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::
     desc.pos_x = pos.x;
     desc.pos_z = pos.y;
     desc.team = team;
-    const uint32_t slot = spawn_entity(g, desc, -1);
-    // Hero creatures (ids 0..HERO_CLASS_COUNT-1 == HeroClassId) carry their class,
-    // which spawn_entity otherwise only derives from a home guild.
-    if (i < HERO_CLASS_COUNT) {
-        if (auto* hc = g.registry.try_get<HeroCharacter>(g.slots[slot])) {
-            hc->hero_class = static_cast<int32_t>(i);
-        }
-    }
-    return slot;
+    // Hero creatures (ids 0..HERO_CLASS_COUNT-1 == HeroClassId) carry their
+    // class via desc.hero_class (the catalog defs author it), so spawn_entity
+    // stamps HeroCharacter with the FINAL class at spawn time -- no post-spawn
+    // patch needed (nor safe: spawn-time grants would have already run
+    // against the stale value).
+    return spawn_entity(g, desc, -1);
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {

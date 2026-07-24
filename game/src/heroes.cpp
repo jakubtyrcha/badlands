@@ -155,8 +155,13 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     BrainKind brain_kind = BrainKind::None;
     switch (desc.archetype) {
         case Archetype::Hero: {
-            int32_t hero_class = -1;
-            if (home >= 0 && static_cast<size_t>(home) < game.placement.buildings.size()) {
+            // desc.hero_class is authoritative when the desc sets one (the
+            // creature catalog's hero defs do); only a homeless, class-less
+            // desc (-1) falls back to deriving the class from the recruiting
+            // guild, so the grant call below always sees the FINAL class.
+            int32_t hero_class = desc.hero_class;
+            if (hero_class < 0 && home >= 0 &&
+                static_cast<size_t>(home) < game.placement.buildings.size()) {
                 hero_class = guild_hero_class(game.placement.buildings[home].kind);
             }
             reg.emplace<HeroCharacter>(e, hero_class);

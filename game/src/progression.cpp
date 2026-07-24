@@ -19,7 +19,7 @@ int32_t xp_to_next(const ProgressionFactors& p, int32_t level) {
     return std::max(1, static_cast<int32_t>(cost));
 }
 
-void award_xp(BadlandsGame& game, uint32_t slot, int32_t amount) {
+void award_xp(BadlandsGame& game, uint32_t slot, int64_t amount) {
     if (amount <= 0) {
         return;
     }
@@ -28,7 +28,10 @@ void award_xp(BadlandsGame& game, uint32_t slot, int32_t amount) {
         return;
     }
     auto& sim = game.registry.get<HeroSimulationState>(e);
-    sim.xp += amount;
+    // Saturate, never wrap: xp_to_next already saturates the cost side, so
+    // the level-up loop below stays finite for any non-negative config.
+    sim.xp = static_cast<int32_t>(
+        std::min<int64_t>(static_cast<int64_t>(sim.xp) + amount, INT32_MAX));
     while (sim.xp >= xp_to_next(game.factors.progression, sim.level)) {
         sim.xp -= xp_to_next(game.factors.progression, sim.level);
         ++sim.level;

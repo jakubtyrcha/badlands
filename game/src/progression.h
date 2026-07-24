@@ -23,8 +23,11 @@ int32_t xp_to_next(const ProgressionFactors& p, int32_t level);
 
 // Adds XP to a hero (no-op for invalid slots, non-heroes, amount <= 0),
 // looping level-ups: each crossing subtracts the cost, bumps level, grants
-// that level's class skills (SkillGrantTable) and emits HeroLeveledUp.
-void award_xp(BadlandsGame& game, uint32_t slot, int32_t amount);
+// that level's class skills (SkillGrantTable) and emits HeroLeveledUp. amount
+// is int64 so a caller (e.g. texels * xp_per_texel) can widen its product
+// before it overflows int32; the accumulation into HeroSimulationState::xp
+// (an int32) saturates at INT32_MAX rather than wrapping.
+void award_xp(BadlandsGame& game, uint32_t slot, int64_t amount);
 
 // One dead entity's XP payout, collected by the death sweep BEFORE the
 // destroys (Position and XpReward die with the entity).

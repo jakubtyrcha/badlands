@@ -57,6 +57,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::Mercenary);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_MERCENARY;
         d.hp = 30.0f;
         d.move_speed = 2.5f;
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
@@ -71,6 +72,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::Hunter);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_HUNTER;
         d.hp = 22.0f;
         d.move_speed = 3.2f;  // a touch faster than the deer it hunts
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
@@ -86,6 +88,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::GraveRobber);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_GRAVE_ROBBER;
         d.hp = 24.0f;
         d.move_speed = 2.6f;
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
@@ -101,6 +104,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::Apprentice);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_APPRENTICE;
         d.hp = 16.0f;
         d.move_speed = 2.4f;
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;

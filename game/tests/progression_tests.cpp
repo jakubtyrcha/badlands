@@ -3,6 +3,7 @@
 #include "game_state.h"
 #include "progression.h"
 #include "sim_internal.hpp"
+#include "skills.h"
 #include "vision.h"
 
 #include <catch_amalgamated.hpp>
@@ -66,6 +67,50 @@ TEST_CASE("award_xp is a no-op for non-heroes and non-positive amounts") {
     badlands::award_xp(g, h, -5);
     entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(h));
     CHECK(g.registry.get<badlands::HeroSimulationState>(e).xp == 0);
+}
+
+TEST_CASE("spawn_creature_into stamps the catalog class before spawn-time grants") {
+    // The catalog defs are the single source of truth for a hero creature's
+    // class (Fix 1a) -- assert that FIRST, since it is what spawn_entity's
+    // spawn-time grant_skills_for_level call now reads.
+    const auto& catalog = badlands::DefaultCreatureCatalog();
+    CHECK(catalog.defs[static_cast<int>(badlands::CreatureId::Mercenary)].hero_class ==
+          badlands::HERO_MERCENARY);
+    CHECK(catalog.defs[static_cast<int>(badlands::CreatureId::Hunter)].hero_class ==
+          badlands::HERO_HUNTER);
+    CHECK(catalog.defs[static_cast<int>(badlands::CreatureId::GraveRobber)].hero_class ==
+          badlands::HERO_GRAVE_ROBBER);
+    CHECK(catalog.defs[static_cast<int>(badlands::CreatureId::Apprentice)].hero_class ==
+          badlands::HERO_APPRENTICE);
+
+    struct Row {
+        badlands::CreatureId id;
+        int32_t hero_class;
+    };
+    const Row rows[] = {
+        {badlands::CreatureId::Mercenary, badlands::HERO_MERCENARY},
+        {badlands::CreatureId::Hunter, badlands::HERO_HUNTER},
+        {badlands::CreatureId::GraveRobber, badlands::HERO_GRAVE_ROBBER},
+        {badlands::CreatureId::Apprentice, badlands::HERO_APPRENTICE},
+    };
+    auto owned = badlands::make_world(BrainDesc{});
+    BadlandsGame& g = *owned;
+    for (const Row& row : rows) {
+        const uint32_t slot =
+            badlands::spawn_creature_into(g, row.id, badlands::kPlayerTeam, {0.0f, 0.0f});
+        entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
+        CHECK(g.registry.get<badlands::HeroCharacter>(e).hero_class == row.hero_class);
+
+        // The spawn-time grant (heroes.cpp) must have run against the FINAL
+        // class, not a stale -1 patched in after the fact.
+        badlands::Skills expected{};
+        badlands::grant_skills_for_level(expected, row.hero_class, 1);
+        const auto& sk = g.registry.get<badlands::Skills>(e);
+        REQUIRE(sk.count == expected.count);
+        for (int32_t i = 0; i < expected.count; ++i) {
+            CHECK(sk.ids[i] == expected.ids[i]);
+        }
+    }
 }
 
 namespace {
@@ -177,6 +222,54 @@ TEST_CASE("overlapping discoveries are credited exactly once (union, no double)"
     CHECK(xp_of(g, a) + xp_of(g, b) == discovered_texels(g.vision));
     CHECK(xp_of(g, a) > 0);
     CHECK(xp_of(g, b) > 0);
+}
+
+TEST_CASE("oversized exploration awards saturate instead of wrapping") {
+    auto owned = badlands::make_world(
+        badlands::BrainDesc{},
+        badlands::WorldConfig{.prebuild_colony = false, .terrain_blocking = false});
+    BadlandsGame& g = *owned;
+    // A per-texel reward this large times a radius-6 circle's ~113 texels
+    // overflows int32 (Fix 1b) -- award_xp must saturate the sum in int64
+    // rather than wrap.
+    g.factors.progression.xp_per_texel = 20'000'000;
+    g.factors.progression.level_base_xp = 1'000'000'000;
+    badlands::configure_vision(g.vision, -32.0f, -32.0f, 64.0f, 64.0f, 1.0f);
+
+    badlands::CharacterDesc d = badlands::MercenaryDesc(0.0f, 0.0f);
+    d.vision_radius = 6.0f;
+    d.vision_cone_half_angle_deg = 180.0f;  // full circle
+    const uint32_t slot = badlands::spawn_into(g, d);
+
+    badlands::tick_world(g, kTickDt);
+
+    // cost(1) = level_base_xp = 1e9, consumed on the way to level 2; cost(2)
+    // (~3.03e9) saturates to INT32_MAX, so the level-up loop stops there.
+    CHECK(xp_of(g, slot) == INT32_MAX - 1'000'000'000);
+    entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
+    CHECK(g.registry.get<badlands::HeroSimulationState>(e).level == 2);
+}
+
+TEST_CASE("xp accumulation saturates at INT32_MAX") {
+    auto owned = badlands::make_world(BrainDesc{});
+    BadlandsGame& g = *owned;
+    g.factors.progression.level_base_xp = 1'000'000'000;
+
+    const uint32_t slot = badlands::spawn_into(g, badlands::MercenaryDesc(0.0f, 20.0f));
+    entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
+    auto& sim = g.registry.get<badlands::HeroSimulationState>(e);
+    sim.level = 2;
+    sim.xp = INT32_MAX - 10;
+
+    badlands::award_xp(g, slot, 100);  // would wrap negative pre-fix
+
+    // The sum saturates to exactly INT32_MAX -- and so does cost(2) (~3.03e9,
+    // over xp_to_next's own 2e9 saturation threshold): both sides hit the same
+    // sentinel, so the level-up loop's `>=` (deliberately inclusive elsewhere,
+    // e.g. an exact-cost crossing) fires once more and drains xp to 0. The
+    // property this test guards is still upheld: no wraparound, ever.
+    CHECK(sim.xp == 0);
+    CHECK(sim.level == 3);
 }
 
 TEST_CASE("the snapshot carries level/xp/skills; zeroed for non-heroes") {
