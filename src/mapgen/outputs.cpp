@@ -1,8 +1,12 @@
 #include "mapgen/outputs.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
+#include <string_view>
+#include <utility>
 
 #include "core/util/cpu_image.hpp"
 #include "mapgen/biomes.hpp"
@@ -10,12 +14,26 @@
 
 namespace badlands::mapgen {
 
+namespace {
+// log2(1 + max(0, v)) per texel: drainage area spans orders of magnitude, so
+// a linear gray scale is dominated by a handful of bright river-mouth pixels.
+Field2D<float> log2_scaled(const Field2D<float>& f) {
+  Field2D<float> out(f.width, f.height, 0.0f);
+  for (size_t i = 0; i < f.data.size(); ++i)
+    out.data[i] = std::log2(1.0f + std::max(0.0f, f.data[i]));
+  return out;
+}
+}  // namespace
+
 void write_preview_images(const std::string& out_dir, const MapArtifacts& a,
                           float texel_m) {
   write_gray_png(a.bedrock, out_dir + "/bedrock.png");
   write_biome_png(a.biome, out_dir + "/biome.png");
   write_gray_png(a.heightmap, out_dir + "/heightmap.png");
   write_hillshade_png(a.heightmap, out_dir + "/hillshade.png", texel_m);
+  write_gray_png(a.water_depth, out_dir + "/water_depth.png");
+  write_gray_png(log2_scaled(a.flow), out_dir + "/flow.png");
+  write_gray_png(a.sediment, out_dir + "/sediment.png");
 }
 
 void write_gray_png(const Field2D<float>& field, const std::string& path,
@@ -78,6 +96,47 @@ void write_biome_png(const Field2D<uint8_t>& biome, const std::string& path) {
     }
   }
   img.WritePng(path);
+}
+
+PngDebugSink::PngDebugSink(std::string out_dir, float texel_m)
+    : out_dir_(std::move(out_dir)), texel_m_(texel_m) {}
+
+namespace {
+// "<NN>-<stage>.png" for init/output stages (NN = running sequence);
+// "loop-<IIII>-<stage minus its "loop-" prefix>.png" for loop stages
+// (IIII = the loop ITERATION the caller passed as `seq`).
+std::string dump_path(const std::string& dir, std::string_view stage, int seq) {
+  char buf[32];
+  if (stage.rfind("loop-", 0) == 0) {
+    std::snprintf(buf, sizeof buf, "loop-%04d-", seq);
+    return dir + "/" + buf + std::string(stage.substr(5)) + ".png";
+  }
+  std::snprintf(buf, sizeof buf, "%02d-", seq);
+  return dir + "/" + buf + std::string(stage) + ".png";
+}
+}  // namespace
+
+void PngDebugSink::dump(std::string_view stage, int seq,
+                        const Field2D<float>& field) {
+  const std::string path = dump_path(out_dir_, stage, seq);
+  const bool relief = stage == "cone" || stage == "loop-height" ||
+                      stage == "final-height";
+  const bool flow = stage == "loop-flow" || stage == "flow";
+  if (relief) write_hillshade_png(field, path, texel_m_);
+  else if (flow) write_gray_png(log2_scaled(field), path);
+  else write_gray_png(field, path);
+}
+
+void PngDebugSink::dump(std::string_view stage, int seq,
+                        const Field2D<uint8_t>& mask) {
+  const std::string path = dump_path(out_dir_, stage, seq);
+  if (stage == "biome" || stage == "biome-sim") {
+    write_biome_png(mask, path);
+    return;
+  }
+  Field2D<float> f(mask.width, mask.height, 0.0f);
+  for (size_t i = 0; i < f.data.size(); ++i) f.data[i] = mask.data[i] ? 1.0f : 0.0f;
+  write_gray_png(f, path, /*normalize=*/false);
 }
 
 }  // namespace badlands::mapgen

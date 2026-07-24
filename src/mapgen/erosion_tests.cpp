@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 #include <cmath>
 #include "mapgen/erosion.hpp"
+#include "mapgen/generator.hpp"
 #include "mapgen/hydrology.hpp"
 #include "mapgen/resample.hpp"
 
@@ -443,4 +444,30 @@ TEST_CASE("resample_bilinear: identity when grids coincide, linear in between") 
   // origin shift: src texel 0 sits at world -2 -> world 0 is src coord 2
   const auto shifted = resample_bilinear(src, 1.0f, -2.0f, 8, 1.0f);
   REQUIRE(shifted.at(0, 0) == Catch::Approx(2.0f));
+}
+
+TEST_CASE("generate_map: debug sink sees the full stage sequence") {
+  struct Recorder : MapDebugSink {
+    std::vector<std::string> stages;
+    void dump(std::string_view s, int, const Field2D<float>&) override {
+      stages.emplace_back(s);
+    }
+    void dump(std::string_view s, int, const Field2D<uint8_t>&) override {
+      stages.emplace_back(s);
+    }
+  };
+  MapGenParams p;
+  p.resolution = 48;
+  p.world_size_m = 192.0f;
+  p.erosion.sim_resolution = 48;
+  p.erosion.iterations = 2;
+  p.erosion.dump_every = 1;
+  Recorder rec;
+  generate_map(p, &rec);
+  const std::vector<std::string> expected = {
+      "bedrock", "biome-sim", "cone", "cavities", "sediment-init",
+      "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
+      "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
+      "water", "detail-delta", "final-height", "biome"};
+  REQUIRE(rec.stages == expected);
 }

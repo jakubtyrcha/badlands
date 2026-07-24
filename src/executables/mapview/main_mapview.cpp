@@ -1,8 +1,8 @@
 // badlands_mapview: the map tool. Two modes, one generator.
 //
-//   --preview-image-only   run the generator and dump the debug rasters
-//                          (bedrock/biome/heightmap PNGs) into --out, then
-//                          exit. Pure CPU: no window, no GPU.
+//   --preview-image-only   run the generator and dump a numbered PNG per
+//                          pipeline stage plus the legacy preview rasters
+//                          into --out, then exit. Pure CPU: no window, no GPU.
 //   (default)              generate the map and render it as the in-game
 //                          terrain (cluster-LOD, biome-colored) with a
 //                          fixed-angle camera.
@@ -72,8 +72,11 @@ int RunPreviewOnly(const MapGenParams& params, const std::string& out_dir) {
                  out_dir.c_str(), ec.message().c_str());
     return 1;
   }
+  const float texel_m =
+      params.world_size_m / static_cast<float>(params.erosion.sim_resolution);
+  badlands::mapgen::PngDebugSink sink(out_dir, texel_m);
   const badlands::mapgen::MapArtifacts artifacts =
-      badlands::mapgen::generate_map(params);
+      badlands::mapgen::generate_map(params, &sink);
   std::printf("mapview: %dx%d texels, %.0fx%.0f m, seed=%u -> %s\n",
               params.resolution, params.resolution, params.world_size_m,
               params.world_size_m, params.seed, out_dir.c_str());
