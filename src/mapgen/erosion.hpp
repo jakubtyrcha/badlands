@@ -52,9 +52,13 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
 // the whole eroded depth cuts B at the bedrock rate directly; starting on
 // sediment and running out mid-step consumes S first, then re-costs the
 // excess at k_bedrock/k_sediment before cutting B.
-// in_lake cells are skipped (no floor incision). Receiver height is the
-// EFFECTIVE level max(B+S, water_level) so cells erode toward the water
-// surface, not a lake floor. Returns eroded thickness (m) per cell.
+// in_lake cells are skipped (no floor incision). For a FLOODED receiver
+// (in_lake), receiver height is the EFFECTIVE level max(B+S, water_level) so
+// donors erode toward the water surface, not the lake floor. For a dry
+// receiver, receiver height is just B+S — its in-sweep-updated (already
+// eroded) value, since incise() walks r.order and the receiver is processed
+// first (Braun–Willett implicit solve). Returns eroded thickness (m) per
+// cell.
 Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
                       const FlowRouting& r, const Field2D<float>& area,
                       const ErosionParams& p, float texel_m);

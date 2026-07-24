@@ -152,18 +152,19 @@ TEST_CASE("incise: bare-bedrock erodes at k_bedrock rate (no double rescale)") {
   p.dt = 1.0f;
 
   // Independent reference in double precision: the implicit update at the
-  // bedrock rate, mirroring incise()'s effective-receiver-level formula
-  // z_rcv = max(h_rcv, water_level[rcv]) exactly (not just h_rcv chained) —
-  // since water_level here is a static per-call snapshot of the ORIGINAL
-  // ground and erosion only ever lowers ground, this pins z_rcv to the
-  // receiver's pre-call height rather than its in-sweep-updated one.
+  // bedrock rate, CHAINED through the already-updated (in this sweep)
+  // receiver height — the water-level clamp applies only to flooded
+  // (in_lake) receivers, so on dry ground z_rcv is simply the receiver's
+  // current height, which upstream cells (processed earlier in r.order)
+  // have already eroded this same call. Mirrors the Braun–Willett scheme:
+  // walk r.order so the receiver is already updated.
   std::vector<double> href(n);
   for (int i = 0; i < n; ++i) href[i] = B.at(i, 0);
   for (int i = 1; i < n; ++i) {
     const double F = static_cast<double>(p.k_bedrock) *
                       std::sqrt(static_cast<double>(area.at(i, 0))) *
                       static_cast<double>(p.dt) / 1.0;
-    const double z_rcv = std::max(href[i - 1], static_cast<double>(r.water_level[i - 1]));
+    const double z_rcv = href[i - 1];  // dry: chain through the updated receiver
     href[i] = (href[i] + F * z_rcv) / (1.0 + F);
   }
 

@@ -61,8 +61,13 @@ Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
     const int32_t rcv = r.receiver[i];
     if (rcv < 0 || r.in_lake[i]) continue;  // base level / lake floor: skip
     const float h_old = B.data[i] + S.data[i];
-    // effective receiver level: erode toward the water surface over lakes
-    const float z_rcv = std::max(B.data[rcv] + S.data[rcv], r.water_level[rcv]);
+    // effective receiver level: erode toward the water SURFACE over flooded
+    // receivers (in_lake); chain through the in-sweep-updated ground
+    // everywhere else (Braun–Willett: walk r.order so the receiver is
+    // already updated).
+    const float z_rcv = r.in_lake[rcv]
+                             ? std::max(B.data[rcv] + S.data[rcv], r.water_level[rcv])
+                             : B.data[rcv] + S.data[rcv];
     if (h_old <= z_rcv) continue;
     const int dx = std::abs(i % r.width - rcv % r.width);
     const int dy = std::abs(i / r.width - rcv / r.width);
