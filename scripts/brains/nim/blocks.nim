@@ -11,11 +11,11 @@
 # combined walk+gate for ENTER/ENTER_HOME/BUY -- each intention kind is
 # either a walk (MoveTo) or a bare action, never both. So the three
 # door-activities (GoHome/Buy/VisitTavern) now do that arrival check
-# THEMSELVES, against kEntranceRadius (mirrors game/src/components.h's
-# compile-time constant of the same name): far -> suggest MoveTo toward the
-# door; close enough -> suggest the actual action. Chat/Hunt already carried
-# their own precise gate in v1 (chat_radius/self_attack_range, both still on
-# the wire) and are unchanged in spirit.
+# THEMSELVES, against BlViewFactors.entrance_radius (mirrors game/src/
+# components.h's kEntranceRadius): far -> suggest MoveTo toward the door;
+# close enough -> suggest the actual action. Chat/Hunt already carried their
+# own precise gate in v1 (chat_radius/self_attack_range, both still on the
+# wire) and are unchanged in spirit.
 
 import abi
 import activity_catalog
@@ -34,17 +34,18 @@ const
   # HuntersCamp=2, ThievesDen=3, Scriptorium=4, Tavern=5.
   kBuildingKindTavern: int32 = 5
 
-  # Mirrors game/src/components.h's kEntranceRadius (0.6f): how close to a
-  # door an act_* block below must be before firing the actual action
-  # (Enter/EnterHome/Buy) instead of just walking toward it. v1 had this
-  # check done GENERICALLY, host-side, by apply_brain_decision's
-  # follow_up_on_arrival gate; v2's apply_intention has no such combined
-  # gate (see this file's top comment), so it moves here. Compared as a
-  # squared distance (kEntranceRadiusSq) to avoid pulling in sqrt/libm at
-  # all -- one fewer thing for scripts/build_brains.sh's WASI-import bisect
-  # to worry about.
-  kEntranceRadius: float32 = 0.6'f32
-  kEntranceRadiusSq: float32 = kEntranceRadius * kEntranceRadius
+# How close to a door an act_* block below must be before firing the actual
+# action (Enter/EnterHome/Buy) instead of just walking toward it -- read from
+# the wire's own BlViewFactors.entrance_radius (mirrors game/src/components.h's
+# kEntranceRadius; was a hand-copied constant here, now the wire is the single
+# source of truth -- see brain_abi.h's BlViewFactors comment). v1 had this
+# check done GENERICALLY, host-side, by apply_brain_decision's
+# follow_up_on_arrival gate; v2's apply_intention has no such combined gate
+# (see this file's top comment), so it moves here. Compared as a squared
+# distance to avoid pulling in sqrt/libm at all -- one fewer thing for
+# scripts/build_brains.sh's WASI-import bisect to worry about.
+proc entranceRadiusSq(f: BlViewFactors): float32 =
+  f.entrance_radius * f.entrance_radius
 
 # How badly a depleted reserve wants attention: 0 at/above `threshold`, ramping
 # linearly to 1 when empty. One shape, used by every need (blocks.cpp: urgency).
@@ -80,7 +81,7 @@ proc scoreGoHome*(v: HeroView, f: BlViewFactors): float32 =
   result = max(urgency(v.fatigue, bar), urgency(v.healthFrac, f.low_health_rest))
 
 proc actGoHome*(v: HeroView, f: BlViewFactors): Suggestion =
-  if distSq(v.pos, v.homeDoor) <= kEntranceRadiusSq:
+  if distSq(v.pos, v.homeDoor) <= entranceRadiusSq(f):
     return Suggestion(kind: BL_INT_ENTER_HOME, activityLabel: ActGoHome)
   result = moveTo(ActGoHome, v.homeDoor)
 
@@ -89,7 +90,7 @@ proc scoreBuy*(v: HeroView, f: BlViewFactors): float32 =
   result = if v.hasApothecary and v.inventory < kInventoryCap: kApplies else: kNotApplicable
 
 proc actBuy*(v: HeroView, f: BlViewFactors): Suggestion =
-  if distSq(v.pos, v.apothecaryDoor) <= kEntranceRadiusSq:
+  if distSq(v.pos, v.apothecaryDoor) <= entranceRadiusSq(f):
     return Suggestion(kind: BL_INT_BUY, activityLabel: ActBuy)
   result = moveTo(ActBuy, v.apothecaryDoor)
 
@@ -100,7 +101,7 @@ proc scoreVisitTavern*(v: HeroView, f: BlViewFactors): float32 =
   result = urgency(v.content, f.content_seek)
 
 proc actVisitTavern*(v: HeroView, f: BlViewFactors): Suggestion =
-  if distSq(v.pos, v.tavernDoor) <= kEntranceRadiusSq:
+  if distSq(v.pos, v.tavernDoor) <= entranceRadiusSq(f):
     return Suggestion(kind: BL_INT_ENTER, activityLabel: ActVisitTavern, arg: kBuildingKindTavern)
   result = moveTo(ActVisitTavern, v.tavernDoor)
 

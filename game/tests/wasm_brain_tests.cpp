@@ -253,6 +253,22 @@ TEST_CASE("pack_view_wire: self carries the CurrentIntention summary", "[wasm_br
     CHECK(wire.self.intention_wake_at == 4321);
 }
 
+// --- Cleanup: BlViewFactors.entrance_radius replaces blocks.nim's
+// hand-copied kEntranceRadius constant -- the wire is now the single source
+// of truth for it.
+
+TEST_CASE("pack_view_wire: factors carries kEntranceRadius on the wire", "[wasm_brain]") {
+    auto g = make_world(BrainDesc{});
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    entt::entity e = g->slots[slot];
+
+    const ActivityWeights& weights = weights_for(*g, e);
+    const WorldView view = observe_hero(*g, slot, e, weights);
+    const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+    CHECK(wire.factors.entrance_radius == Catch::Approx(kEntranceRadius));
+}
+
 // --- decode_suggestion: the suggestion side of the wire trust boundary ------
 
 TEST_CASE("decode_suggestion: each BL_INT_* kind maps onto the matching IntentionKind",

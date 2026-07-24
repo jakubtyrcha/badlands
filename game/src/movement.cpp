@@ -115,6 +115,20 @@ void reproject_out_of_footprints(BadlandsGame& game, glm::vec2& p) {
     }
 }
 
+// Refused-step bookkeeping shared by plan_paths (goal unreachable) and
+// follow_paths (a live step blocked): stamps MoveBlocked and mirrors the
+// refusal into the inbox at this one site, so the two never drift apart
+// (a guaranteed-wake event feeding should_wake, docs/design/
+// intention-contract.html §2). No-ops for non-heroes (no EventInbox).
+// Collapses what used to be two independent hand-copies of the same three
+// lines, one per caller.
+void note_move_blocked(BadlandsGame& game, entt::entity e, glm::vec2 point) {
+    game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
+    InboxEvent ev;
+    ev.kind = InboxEventKind::MoveBlocked;
+    push_inbox_event(game, e, ev);
+}
+
 }  // namespace
 
 bool is_walkable(mapgen::Biome biome) {
@@ -216,14 +230,7 @@ void plan_paths(BadlandsGame& game, float dt) {
     }
 
     for (const auto& [e, point] : blocked) {
-        game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
-        // Intention contract: mirror the refusal into the inbox at the same
-        // site MoveBlocked itself is written -- a guaranteed-wake event that
-        // feeds should_wake (docs/design/intention-contract.html §2) -- so
-        // the two never drift apart. No-ops for non-heroes (no EventInbox).
-        InboxEvent ev;
-        ev.kind = InboxEventKind::MoveBlocked;
-        push_inbox_event(game, e, ev);
+        note_move_blocked(game, e, point);
     }
 }
 
@@ -276,14 +283,7 @@ void follow_paths(BadlandsGame& game, float dt) {
     }
 
     for (const auto& [e, point] : blocked) {
-        game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
-        // Intention contract: mirror the refusal into the inbox at the same
-        // site MoveBlocked itself is written -- a guaranteed-wake event that
-        // feeds should_wake (docs/design/intention-contract.html §2) -- so
-        // the two never drift apart. No-ops for non-heroes (no EventInbox).
-        InboxEvent ev;
-        ev.kind = InboxEventKind::MoveBlocked;
-        push_inbox_event(game, e, ev);
+        note_move_blocked(game, e, point);
     }
 }
 

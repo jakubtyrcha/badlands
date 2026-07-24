@@ -169,6 +169,7 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     f.chat_content_seek = hf.chat_content_seek;
     f.chat_radius = hf.chat_radius;
     f.explore_min_fatigue = hf.explore_min_fatigue;
+    f.entrance_radius = kEntranceRadius;  // components.h -- see BlViewFactors' own comment
     // Deliberately excluded (see brain_abi.h's BlViewFactors doc comment):
     // perception-only factors (radii, drain/fill rates, lease windows) --
     // those stay host-side, read by observe_hero above, not the brain. Also

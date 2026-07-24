@@ -24,6 +24,7 @@
 #include <catch_amalgamated.hpp>
 
 #include <entt/entt.hpp>
+#include <glm/glm.hpp>
 
 using namespace badlands;
 
@@ -263,4 +264,25 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
         logged = logged || c.kind == CommandKind::Chat;
     }
     CHECK(logged);
+
+    // Review fix (Fix 3): the session must not dissolve early via drift. A
+    // hero mid-walk toward its partner at the exact moment Chat lands would,
+    // under a movement pipeline that did not exclude ChattingState, keep
+    // walking -- drifting the pair beyond chat_radius*2 and breaking
+    // advance_chats' own drift check within a handful of ticks, well short
+    // of chat_duration (6s / 180 ticks at 30Hz). Hold both positions frozen
+    // and the session alive for a further stretch comfortably inside
+    // chat_duration to pin that it does not.
+    const glm::vec2 a_pos = g.registry.get<Position>(a).pos;
+    const glm::vec2 b_pos = g.registry.get<Position>(b).pos;
+    for (int i = 0; i < 60; ++i) {
+        auto& sa = g.registry.get<HeroSimulationState>(a);
+        auto& sb = g.registry.get<HeroSimulationState>(b);
+        sa.fatigue = sb.fatigue = 1.0f;  // keep rest from taking over
+        tick_world(g, 1.0f / 30.0f);
+        REQUIRE(g.registry.all_of<ChattingState>(a));  // not dissolved early
+        REQUIRE(g.registry.all_of<ChattingState>(b));
+        CHECK(glm::distance(g.registry.get<Position>(a).pos, a_pos) < 0.5f);
+        CHECK(glm::distance(g.registry.get<Position>(b).pos, b_pos) < 0.5f);
+    }
 }

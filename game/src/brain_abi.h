@@ -203,12 +203,15 @@ typedef struct BlViewFactors {
     float chat_content_seek;       // read by scoreChat
     float chat_radius;             // read by actChat (strike-up-conversation range)
     float explore_min_fatigue;     // read by scoreExplore
-    // Explicit: 14 weights (56B) + 7 scalars (28B) = 84B, not a multiple of
-    // 8 -- and BlStatus[] (embedded right after `factors` in BlViewWire)
-    // starts with an int64_t and needs 8-byte alignment, so this struct's
-    // OWN sizeof must be rounded to a multiple of 8 too, via this explicit
-    // pad, even though BlViewFactors itself has no int64_t member (alignof 4).
-    uint32_t _pad;
+    // Cleanup (was the trailing pad below -- same size/offset, so this is a
+    // same-size field swap, not a layout change): mirrors game/src/
+    // components.h's kEntranceRadius, the "close enough to the door to fire
+    // the actual action instead of just walking toward it" threshold the
+    // door-activities (GoHome/Buy/VisitTavern, scripts/brains/nim/blocks.nim)
+    // gate their act_* arrival check on. Was a hand-copied guest-side
+    // constant kept in sync by comment only; this field is its single
+    // source of truth now.
+    float entrance_radius;
 } BlViewFactors;
 
 // --- BlViewChar ----------------------------------------------------------------

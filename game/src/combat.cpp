@@ -153,6 +153,24 @@ constexpr float kProjectileHitRadius = 0.35f;  // contact epsilon on arrival
 }  // namespace
 
 entt::entity select_target(const BadlandsGame& game, entt::entity self) {
+    // Deliberately ALWAYS a live scan, even though sim.cpp's ThreatSighted
+    // pass computes a same-tick nearest_enemy for every hero moments
+    // earlier (BadlandsGame::nearest_enemy_scratch, game_state.h): this
+    // function has THREE call sites, and only one of them (sim.cpp's
+    // combat_preempt, called from the think loop before apply_commands
+    // resolves anything) is provably exact-equivalent to that pass'
+    // result -- see combat_preempt's own comment, which consults the
+    // cache directly instead of going through here. The other two are NOT
+    // equivalent: fire_attack's UINT32_MAX re-pick (command.cpp's Attack
+    // handler) runs during apply_commands, AFTER earlier commands in the
+    // same drain may have already dropped a shared target to hp<=0 (a
+    // stale cache entry would have a later hero in a scrum swing at a
+    // corpse instead of retargeting); update_melee_locks (movement.cpp)
+    // runs after the whole movement pipeline, where position -- and so
+    // engagement range -- may have changed since the pass ran. Keeping the
+    // cache consult local to the one safe caller, rather than hiding it in
+    // here, is what makes each of the three call sites' correctness
+    // independently obvious.
     return nearest_enemy(game, self);  // Threat-Score drops in here later
 }
 

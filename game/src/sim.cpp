@@ -54,7 +54,23 @@ namespace {
 // identical to a mock-driven one's.
 bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
-    entt::entity target = select_target(game, self);
+    // Cleanup: the ONE select_target consumer proven exact-equivalent to
+    // this tick's ThreatSighted pass (game_state.h's nearest_enemy_scratch
+    // comment) -- nothing moves or dies between that pass (before think)
+    // and this call (still inside the same tick's think phase, before
+    // apply_commands resolves anything), so it consults the cache
+    // directly here instead of paying for another live scan via
+    // select_target (combat.cpp's own comment on select_target explains
+    // why its OTHER two callers do NOT get this shortcut). Guarded on
+    // EventInbox (hero-only, same predicate the pass itself iterates):
+    // a monster/critter/townfolk calling this was never written to the
+    // scratch by the pass, so trusting a bare slot-bounds check alone
+    // could misread a never-populated slot as "no threat". The caller
+    // (this function's own callers, sim.cpp's think loop) also already
+    // excludes InsideBuilding heroes before ever reaching here, so a
+    // hidden hero's un-written/stale scratch entry is never read either.
+    const bool cached = reg.all_of<EventInbox>(self) && slot < game.nearest_enemy_scratch.size();
+    entt::entity target = cached ? game.nearest_enemy_scratch[slot] : select_target(game, self);
     if (target == entt::null) {
         return false;
     }
@@ -246,12 +262,29 @@ void tick_world(BadlandsGame& g, float dt) {
     // hidden hero sees nothing, so its edge is force-reset to false and it
     // writes no event; any threat present once it exits reads as a fresh
     // sighting, correctly.
+    //
+    // Cleanup: also fills nearest_enemy_scratch (game_state.h), a one-tick
+    // per-hero cache -- combat_preempt (below) consults it directly instead
+    // of re-scanning, since this same nearest_enemy result is what it needs
+    // moments later in THIS same tick's think pass (nothing moves or dies
+    // between here and there). Hidden heroes are SKIPPED (not written) by
+    // the `continue` above -- fine because their one safe consumer,
+    // combat_preempt, is never even called for them either: the think
+    // loop's own per-slot dispatch already excludes InsideBuilding heroes
+    // before combat_preempt is reached, so a stale/never-written entry is
+    // never read.
     for (auto [e, inbox] : registry.view<EventInbox>().each()) {
         if (registry.all_of<InsideBuilding>(e)) {
             inbox.threat_was_present = false;
             continue;
         }
         entt::entity threat = nearest_enemy(g, e);
+        if (const uint32_t slot = slot_for_entity(g, e); slot != UINT32_MAX) {
+            if (g.nearest_enemy_scratch.size() <= slot) {
+                g.nearest_enemy_scratch.resize(slot + 1, entt::null);
+            }
+            g.nearest_enemy_scratch[slot] = threat;
+        }
         const bool present = threat != entt::null &&
                              glm::distance(registry.get<Position>(e).pos,
                                            registry.get<Position>(threat).pos) <=

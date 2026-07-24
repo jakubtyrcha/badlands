@@ -125,7 +125,8 @@ type
     chat_content_seek*: float32     # read by score_chat
     chat_radius*: float32           # read by act_chat
     explore_min_fatigue*: float32   # read by score_explore
-    pad0*: uint32  # see brain_abi.h: rounds the struct to a multiple of 8
+    entrance_radius*: float32       # mirrors components.h's kEntranceRadius;
+                                     # see brain_abi.h's BlViewFactors comment
 
   BlViewChar* {.packed.} = object
     last_seen_millis*: int64

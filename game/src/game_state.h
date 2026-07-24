@@ -115,6 +115,31 @@ struct BadlandsGame {
 
     uint64_t ticks = 0;
 
+    // One-tick nearest-enemy cache, indexed by slot (Cleanup: sim.cpp's
+    // tick_world, the ThreatSighted pass -- BEFORE think -- populates one
+    // entry per visible (non-hidden) hero, so sim.cpp's combat_preempt can
+    // consult it directly instead of re-scanning; a nearest-enemy scan used
+    // to run twice per hero per tick, once there and again moments later
+    // from combat_preempt's own call inside the SAME think pass).
+    // entt::null = no threat in range. Grows lazily (only up to the
+    // highest hero slot seen so far) and is NOT reset between ticks.
+    //
+    // NOT every slot gets a fresh write every tick: a hidden
+    // (InsideBuilding) hero is skipped by the pass entirely (its threat
+    // edge is reset, but nothing is written here for it -- sim.cpp's own
+    // comment on that pass), so a hidden hero's entry can be stale or
+    // never-written. That is safe ONLY because the one consumer allowed to
+    // read this cache (combat_preempt) is itself never called for a hidden
+    // hero either -- the think loop's per-slot dispatch excludes
+    // InsideBuilding heroes before combat_preempt is ever reached. This
+    // cache is intentionally NOT consulted by combat.cpp's select_target
+    // (its other two call sites -- fire_attack's re-pick, update_melee_locks
+    // -- run after apply_commands/movement has had a chance to invalidate
+    // it; see select_target's own comment) or by any other system -- treat
+    // "is this read site combat_preempt, unconditionally" as the actual
+    // safety invariant, not merely "was this slot in range".
+    std::vector<entt::entity> nearest_enemy_scratch;
+
     ~BadlandsGame();
 };
 
