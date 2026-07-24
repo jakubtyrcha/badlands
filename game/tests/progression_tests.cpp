@@ -3,6 +3,7 @@
 #include "game_state.h"
 #include "progression.h"
 #include "sim_internal.hpp"
+#include "vision.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -115,4 +116,65 @@ TEST_CASE("heroes hidden inside buildings get no kill XP; alone gets it all") {
 
     CHECK(xp_of(g, outside) == 10);  // whole reward: the only eligible hero
     CHECK(xp_of(g, hidden) == 0);
+}
+
+namespace {
+int discovered_texels(const badlands::VisionGrid& vg) {
+    int n = 0;
+    for (int k = 0; k < vg.nx * vg.nz; ++k) {
+        n += vg.front[2 * k] ? 1 : 0;
+    }
+    return n;
+}
+}  // namespace
+
+TEST_CASE("newly discovered texels award xp_per_texel to the discovering hero") {
+    // Empty flat world: no colony, so every discovered texel is hero-stamped.
+    auto owned = badlands::make_world(
+        badlands::BrainDesc{},
+        badlands::WorldConfig{.prebuild_colony = false, .terrain_blocking = false});
+    BadlandsGame& g = *owned;
+    // A radius-6 full circle discovers ~113 texels, over the default level-1
+    // cost (100) -- decouple this test from Task 3's (separately-tested)
+    // level-up rollover so it only exercises discovery crediting.
+    g.factors.progression.level_base_xp = 1'000'000;
+    badlands::configure_vision(g.vision, -32.0f, -32.0f, 64.0f, 64.0f, 1.0f);
+
+    badlands::CharacterDesc d = badlands::MercenaryDesc(0.0f, 0.0f);
+    d.vision_radius = 6.0f;
+    d.vision_cone_half_angle_deg = 180.0f;  // full circle
+    const uint32_t slot = badlands::spawn_into(g, d);
+
+    badlands::tick_world(g, kTickDt);
+    const int total = discovered_texels(g.vision);
+    REQUIRE(total > 0);
+    CHECK(xp_of(g, slot) == total * g.factors.progression.xp_per_texel);
+
+    // The invariant holds tick over tick (the hero may roam and reveal more):
+    badlands::tick_world(g, kTickDt);
+    CHECK(xp_of(g, slot) ==
+          discovered_texels(g.vision) * g.factors.progression.xp_per_texel);
+}
+
+TEST_CASE("overlapping discoveries are credited exactly once (union, no double)") {
+    auto owned = badlands::make_world(
+        badlands::BrainDesc{},
+        badlands::WorldConfig{.prebuild_colony = false, .terrain_blocking = false});
+    BadlandsGame& g = *owned;
+    // See the level-up decoupling note above: the first hero's circle alone
+    // exceeds the level-1 cost.
+    g.factors.progression.level_base_xp = 1'000'000;
+    badlands::configure_vision(g.vision, -32.0f, -32.0f, 64.0f, 64.0f, 1.0f);
+
+    badlands::CharacterDesc d = badlands::MercenaryDesc(0.0f, 0.0f);
+    d.vision_radius = 6.0f;
+    d.vision_cone_half_angle_deg = 180.0f;
+    const uint32_t a = badlands::spawn_into(g, d);
+    d.pos_x = 4.0f;  // overlapping circles
+    const uint32_t b = badlands::spawn_into(g, d);
+
+    badlands::tick_world(g, kTickDt);
+    CHECK(xp_of(g, a) + xp_of(g, b) == discovered_texels(g.vision));
+    CHECK(xp_of(g, a) > 0);
+    CHECK(xp_of(g, b) > 0);
 }

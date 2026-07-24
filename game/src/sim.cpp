@@ -345,8 +345,15 @@ void tick_world(BadlandsGame& g, float dt) {
     spread_kill_xp(g, kill_xp);
 
     // Fog-of-war: resolve next visibility from the post-movement world state and
-    // publish it (double-buffered). No-op until ConfigureVision.
-    resolve_vision(g);
+    // publish it. Newly-discovered texels credit the stamping hero with
+    // exploration XP -- a system rule, applied here so it lands in the same tick.
+    std::vector<DiscoveryCredit> discoveries;
+    resolve_vision(g, &discoveries);
+    if (g.factors.progression.xp_per_texel > 0) {
+        for (const DiscoveryCredit& d : discoveries) {
+            award_xp(g, d.slot, d.texels * g.factors.progression.xp_per_texel);
+        }
+    }
 
     ++g.ticks;
 }

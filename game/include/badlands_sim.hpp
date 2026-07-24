@@ -798,6 +798,8 @@ class Sim {
     // its end; this is for populating the field before the first render when no
     // Tick has run yet (e.g. a headless single-frame --screenshot). No-op until
     // ConfigureVision().
+    // NB: priming discovers texels CREDITLESSLY (no exploration XP) -- it is a
+    // presentation affordance outside the tick/determinism contract.
     void ResolveVision();
     // The published (double-buffered) field. Read by the renderer to upload the
     // vision texture. Empty until ConfigureVision().
