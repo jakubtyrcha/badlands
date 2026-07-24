@@ -116,10 +116,12 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
               float viewport_h_px, float scale, HudFrame& out);
 
 // Appends a hero's progression detail to a selection: `level` and `xp` rows,
-// then a "Skills" list with two entries per learned skill -- a summary line
-// composed from the skill's template ("active, direct, instant, cd 20s") and
-// its effect text. Pure model-building (no layout, no GPU), so tests cover
-// the composition; no-op for non-hero rows (level <= 0).
+// then a "Skills" list with, per learned skill, a name row, a label-less
+// summary row ("active, direct, instant, cd 20s"), and its effect text
+// word-wrapped onto further label-less rows -- the panel is a fixed width and
+// the ui crate cannot clip, so long text is pre-wrapped here rather than
+// overflowing. Pure model-building (no layout, no GPU), so tests cover the
+// composition; no-op for non-hero rows (level <= 0).
 void AppendHeroProgressionRows(HudSelection& sel, const CharacterState& hero,
                                const SkillCatalog& skills);
 

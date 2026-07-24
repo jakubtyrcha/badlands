@@ -610,7 +610,7 @@ constexpr int64_t kMinPositiveMillis = 1;
 
 template <typename T>
 void warn_adjusted(const char* field, T old_value, T new_value) {
-    spdlog::warn("sanitize_factors: {} adjusted from {} to {}", field, old_value, new_value);
+    spdlog::warn("sanitize: {} adjusted from {} to {}", field, old_value, new_value);
 }
 
 // Sign-invalid scalar (radius/distance/duration/cap -- 0 always meaningful,

@@ -462,61 +462,109 @@ TEST_CASE("BuildHud renders the four speed buttons, each hit-testable",
     ui_destroy(ctx);
 }
 
-TEST_CASE("hero progression rows: level, xp, and the skills list") {
-  CharacterState hero{};
-  hero.level = 5;
-  hero.xp = 137;
-  hero.xp_next = 918;
-  hero.skill_count = 1;
-  hero.skills[0] = static_cast<int32_t>(SkillId::Calcify);
-  SkillCatalog cat;  // compiled defaults
-  HudSelection sel;
-  AppendHeroProgressionRows(sel, hero, cat);
-  REQUIRE(sel.rows.size() == 2);
-  CHECK(sel.rows[0].label == "level");
-  CHECK(sel.rows[0].value == "5");
-  CHECK(sel.rows[1].label == "xp");
-  CHECK(sel.rows[1].value == "137 / 918");
-  REQUIRE(sel.lists.size() == 1);
-  CHECK(sel.lists[0].heading == "Skills");
-  REQUIRE(sel.lists[0].entries.size() == 2);
-  CHECK(sel.lists[0].entries[0].label == "Calcify");
-  CHECK(sel.lists[0].entries[0].value == "active, direct, instant, cd 20s");
-  CHECK(sel.lists[0].entries[1].label == "");
-  CHECK(sel.lists[0].entries[1].value ==
-        "Absorbs the next physical strike, then shatters.");
+TEST_CASE("hero progression rows: level, xp, and the skills list",
+          "[game_ui][hud]") {
+    CharacterState hero{};
+    hero.level = 5;
+    hero.xp = 137;
+    hero.xp_next = 918;
+    hero.skill_count = 1;
+    hero.skills[0] = static_cast<int32_t>(SkillId::Calcify);
+    SkillCatalog cat;  // compiled defaults
+    HudSelection sel;
+    AppendHeroProgressionRows(sel, hero, cat);
+    REQUIRE(sel.rows.size() == 2);
+    CHECK(sel.rows[0].label == "level");
+    CHECK(sel.rows[0].value == "5");
+    CHECK(sel.rows[1].label == "xp");
+    CHECK(sel.rows[1].value == "137 / 918");
+    REQUIRE(sel.lists.size() == 1);
+    CHECK(sel.lists[0].heading == "Skills");
+    // name row, summary row, then the effect greedily word-wrapped at 30
+    // chars: "Absorbs the next physical" / "strike, then shatters."
+    REQUIRE(sel.lists[0].entries.size() == 4);
+    CHECK(sel.lists[0].entries[0].label == "Calcify");
+    CHECK(sel.lists[0].entries[0].value == "");
+    CHECK(sel.lists[0].entries[1].label == "");
+    CHECK(sel.lists[0].entries[1].value == "active, direct, instant, cd 20s");
+    CHECK(sel.lists[0].entries[2].label == "");
+    CHECK(sel.lists[0].entries[2].value == "Absorbs the next physical");
+    CHECK(sel.lists[0].entries[3].label == "");
+    CHECK(sel.lists[0].entries[3].value == "strike, then shatters.");
 }
 
-TEST_CASE("progression rows: non-heroes add nothing; skill-less heroes skip the list") {
-  SkillCatalog cat;
-  HudSelection sel;
-  CharacterState rat{};  // level 0 marks a non-hero row
-  AppendHeroProgressionRows(sel, rat, cat);
-  CHECK(sel.rows.empty());
-  CHECK(sel.lists.empty());
-  CharacterState hero{};
-  hero.level = 1;
-  hero.xp_next = 100;
-  AppendHeroProgressionRows(sel, hero, cat);
-  REQUIRE(sel.rows.size() == 2);
-  CHECK(sel.rows[1].value == "0 / 100");
-  CHECK(sel.lists.empty());
+TEST_CASE("progression rows: non-heroes add nothing; skill-less heroes skip the list",
+          "[game_ui][hud]") {
+    SkillCatalog cat;
+    HudSelection sel;
+    CharacterState rat{};  // level 0 marks a non-hero row
+    AppendHeroProgressionRows(sel, rat, cat);
+    CHECK(sel.rows.empty());
+    CHECK(sel.lists.empty());
+    CharacterState hero{};
+    hero.level = 1;
+    hero.xp_next = 100;
+    AppendHeroProgressionRows(sel, hero, cat);
+    REQUIRE(sel.rows.size() == 2);
+    CHECK(sel.rows[1].value == "0 / 100");
+    CHECK(sel.lists.empty());
 }
 
-TEST_CASE("skill summary omits cd when none and shows duration seconds") {
-  SkillCatalog cat;
-  cat.specs[0].activation = SkillActivation::Passive;
-  cat.specs[0].targeting = SkillTargeting::Aoe;
-  cat.specs[0].duration_seconds = 6.0f;
-  cat.specs[0].cooldown_seconds = 0.0f;
-  CharacterState hero{};
-  hero.level = 1;
-  hero.skill_count = 1;
-  hero.skills[0] = 0;
-  HudSelection sel;
-  AppendHeroProgressionRows(sel, hero, cat);
-  REQUIRE(sel.lists.size() == 1);
-  CHECK(sel.lists[0].entries[0].value == "passive, aoe, 6s");
+TEST_CASE("skill summary omits cd when none and shows duration seconds",
+          "[game_ui][hud]") {
+    SkillCatalog cat;
+    cat.specs[0].activation = SkillActivation::Passive;
+    cat.specs[0].targeting = SkillTargeting::Aoe;
+    cat.specs[0].duration_seconds = 6.0f;
+    cat.specs[0].cooldown_seconds = 0.0f;
+    CharacterState hero{};
+    hero.level = 1;
+    hero.skill_count = 1;
+    hero.skills[0] = 0;
+    HudSelection sel;
+    AppendHeroProgressionRows(sel, hero, cat);
+    REQUIRE(sel.lists.size() == 1);
+    // name row, summary row, then the (untouched, compiled-default) effect
+    // text wrapped onto two more rows -- see the wrap test below for the split.
+    REQUIRE(sel.lists[0].entries.size() == 4);
+    CHECK(sel.lists[0].entries[1].value == "passive, aoe, 6s");
+}
+
+TEST_CASE("skill effect text wraps at word boundaries within the panel width",
+          "[game_ui][hud]") {
+    SkillCatalog cat;
+    const std::string long_word(40, 'x');  // exceeds the 30-char wrap budget
+    cat.specs[0].effect = "Deals modest damage then " + long_word +
+                          " lingers for a short while longer.";
+    CharacterState hero{};
+    hero.level = 1;
+    hero.skill_count = 1;
+    hero.skills[0] = 0;
+    HudSelection sel;
+    AppendHeroProgressionRows(sel, hero, cat);
+    REQUIRE(sel.lists.size() == 1);
+    const std::vector<HudRow>& entries = sel.lists[0].entries;
+    // entries[0] = name, entries[1] = summary, entries[2..] = wrapped effect.
+    REQUIRE(entries.size() > 3);
+
+    std::string reconstructed;
+    bool saw_long_word = false;
+    for (size_t i = 2; i < entries.size(); ++i) {
+        CHECK(entries[i].label == "");
+        const std::string& line = entries[i].value;
+        if (line == long_word) {
+            saw_long_word = true;
+        } else {
+            CHECK(line.size() <= 30);
+        }
+        if (!reconstructed.empty()) reconstructed += ' ';
+        reconstructed += line;
+    }
+    // Wrapping only ever replaces a space with a row break -- no word is
+    // split or truncated -- so rejoining the rows with spaces recovers the
+    // original effect text exactly.
+    CHECK(reconstructed == cat.specs[0].effect);
+    CHECK(saw_long_word);
 }
 
 TEST_CASE("BuildHud makes list entries clickable selection targets",

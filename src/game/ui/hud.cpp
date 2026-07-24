@@ -78,11 +78,13 @@ int32_t AddLabel(std::vector<UiElement>& els, TextBlob& blob, int32_t parent,
 
 // "active, direct, instant, cd 20s" -- duration shows as seconds when timed,
 // "instant" otherwise; the cd fragment is omitted when the skill has none.
-std::string SkillSummary(const badlands::SkillSpec& s) {
+std::string SkillSummary(const SkillSpec& s) {
   std::string out =
-      s.activation == badlands::SkillActivation::Passive ? "passive" : "active";
-  out += s.targeting == badlands::SkillTargeting::Aoe ? ", aoe" : ", direct";
-  if (s.duration_seconds > 0.0f) {
+      s.activation == SkillActivation::Passive ? "passive" : "active";
+  out += s.targeting == SkillTargeting::Aoe ? ", aoe" : ", direct";
+  // >= 0.5f so a sub-half-second duration rounds to "0s" under %.0f and reads
+  // as "instant" instead of the misleading ", 0s".
+  if (s.duration_seconds >= 0.5f) {
     char buf[24];
     std::snprintf(buf, sizeof(buf), ", %.0fs", s.duration_seconds);
     out += buf;
@@ -96,6 +98,38 @@ std::string SkillSummary(const badlands::SkillSpec& s) {
   }
   return out;
 }
+
+// The right panel is kPanelWidth (240px) wide; the ui crate cannot clip, so
+// text that would overflow it has to be pre-wrapped here. Greedily packs
+// whitespace-separated words onto label-less rows of at most `budget` chars;
+// a word longer than `budget` rides alone on its own row, untruncated.
+void AppendWrapped(HudList& list, const std::string& text, size_t budget) {
+  size_t pos = 0;
+  std::string line;
+  while (pos < text.size()) {
+    const size_t space = text.find(' ', pos);
+    const size_t word_end = space == std::string::npos ? text.size() : space;
+    const std::string word = text.substr(pos, word_end - pos);
+    if (line.empty()) {
+      line = word;
+    } else if (line.size() + 1 + word.size() <= budget) {
+      line += ' ';
+      line += word;
+    } else {
+      list.entries.emplace_back("", line);
+      line = word;
+    }
+    pos = space == std::string::npos ? text.size() : space + 1;
+  }
+  if (!line.empty()) {
+    list.entries.emplace_back("", line);
+  }
+}
+
+// Row-wrap budget for the skills list (name/summary/effect rows all share the
+// panel's content width): picked to fit the shipped font/panel (see the
+// finding this answers -- 216px content width, ~6.7-7px/char).
+constexpr size_t kSkillTextWrapChars = 30;
 
 }  // namespace
 
@@ -368,10 +402,16 @@ void AppendHeroProgressionRows(HudSelection& sel, const CharacterState& hero,
   for (int32_t i = 0; i < hero.skill_count && i < kMaxSkills; ++i) {
     const int32_t id = hero.skills[i];
     const bool known = id >= 0 && id < kSkillCount;
-    list.entries.emplace_back(SkillName(id),
-                              known ? SkillSummary(skills.specs[id]) : "");
-    if (known && !skills.specs[id].effect.empty()) {
-      list.entries.emplace_back("", skills.specs[id].effect);
+    // The name gets its own row (a label alongside a ~31-char summary would
+    // collide in the panel); the summary is a label-less value-only row below
+    // it, and the effect text -- which can run well past the panel width --
+    // is greedily word-wrapped onto further label-less rows.
+    list.entries.emplace_back(SkillName(id), "");
+    if (known) {
+      list.entries.emplace_back("", SkillSummary(skills.specs[id]));
+      if (!skills.specs[id].effect.empty()) {
+        AppendWrapped(list, skills.specs[id].effect, kSkillTextWrapChars);
+      }
     }
   }
   sel.lists.push_back(std::move(list));
