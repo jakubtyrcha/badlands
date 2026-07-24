@@ -98,8 +98,11 @@ void write_biome_png(const Field2D<uint8_t>& biome, const std::string& path) {
   img.WritePng(path);
 }
 
-PngDebugSink::PngDebugSink(std::string out_dir, float texel_m)
-    : out_dir_(std::move(out_dir)), texel_m_(texel_m) {}
+PngDebugSink::PngDebugSink(std::string out_dir, float sim_texel_m,
+                           float out_texel_m)
+    : out_dir_(std::move(out_dir)),
+      sim_texel_m_(sim_texel_m),
+      out_texel_m_(out_texel_m) {}
 
 namespace {
 // "<NN>-<stage>.png" for init/output stages (NN = running sequence);
@@ -119,10 +122,11 @@ std::string dump_path(const std::string& dir, std::string_view stage, int seq) {
 void PngDebugSink::dump(std::string_view stage, int seq,
                         const Field2D<float>& field) {
   const std::string path = dump_path(out_dir_, stage, seq);
-  const bool relief = stage == "cone" || stage == "loop-height" ||
-                      stage == "final-height";
+  const bool sim_relief = stage == "cone" || stage == "loop-height";
+  const bool out_relief = stage == "final-height";
   const bool flow = stage == "loop-flow" || stage == "flow";
-  if (relief) write_hillshade_png(field, path, texel_m_);
+  if (sim_relief) write_hillshade_png(field, path, sim_texel_m_);
+  else if (out_relief) write_hillshade_png(field, path, out_texel_m_);
   else if (flow) write_gray_png(log2_scaled(field), path);
   else write_gray_png(field, path);
 }

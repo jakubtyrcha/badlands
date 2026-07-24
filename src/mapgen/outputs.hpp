@@ -48,9 +48,16 @@ void write_biome_png(const Field2D<uint8_t>& biome, const std::string& path);
 // Float fields named *-height / "cone" render as hillshade; "loop-flow"/"flow"
 // render log2-scaled; other floats normalized gray. uint8 fields with stage
 // "biome"/"biome-sim" use the biome palette; other masks render 0/255 gray.
+//
+// Hillshade stages are rendered at two different sample spacings, matching
+// the grid each stage is actually sampled on: "cone" and "loop-height" are
+// SIM-grid fields (spacing `sim_texel_m`), while "final-height" is the
+// OUTPUT-resolution heightmap (spacing `out_texel_m`). These differ whenever
+// `resolution != erosion.sim_resolution` — using the wrong one silently
+// flattens/steepens the hillshade's rendered slope.
 class PngDebugSink final : public MapDebugSink {
  public:
-  PngDebugSink(std::string out_dir, float texel_m);
+  PngDebugSink(std::string out_dir, float sim_texel_m, float out_texel_m);
   void dump(std::string_view stage, int sequence,
            const Field2D<float>& field) override;
   void dump(std::string_view stage, int sequence,
@@ -58,7 +65,8 @@ class PngDebugSink final : public MapDebugSink {
 
  private:
   std::string out_dir_;
-  float texel_m_;
+  float sim_texel_m_;
+  float out_texel_m_;
 };
 
 }  // namespace badlands::mapgen

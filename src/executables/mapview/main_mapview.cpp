@@ -72,9 +72,11 @@ int RunPreviewOnly(const MapGenParams& params, const std::string& out_dir) {
                  out_dir.c_str(), ec.message().c_str());
     return 1;
   }
-  const float texel_m =
+  const float sim_texel_m =
       params.world_size_m / static_cast<float>(params.erosion.sim_resolution);
-  badlands::mapgen::PngDebugSink sink(out_dir, texel_m);
+  const float out_texel_m =
+      params.world_size_m / static_cast<float>(params.resolution);
+  badlands::mapgen::PngDebugSink sink(out_dir, sim_texel_m, out_texel_m);
   const badlands::mapgen::MapArtifacts artifacts =
       badlands::mapgen::generate_map(params, &sink);
   std::printf("mapview: %dx%d texels, %.0fx%.0f m, seed=%u -> %s\n",
