@@ -610,6 +610,9 @@ add_executable(badlands_game_tests
     # twin-brain parity against the C++ reference (town_brain.cpp) + wasm-side
     # behavioural smokes.
     game/tests/hero_brain_parity_tests.cpp
+    # Task 9: the set_factors_of validation boundary (sanitize_factors,
+    # sim.cpp) -- adversarial-config red/green repros.
+    game/tests/factors_sanitize_tests.cpp
     game/tests/events_tests.cpp
     game/tests/navmesh_tests.cpp
     game/tests/nav_world_tests.cpp

@@ -30,6 +30,7 @@
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cmath>
@@ -524,7 +525,125 @@ std::vector<CommandRecord> command_log_of(const BadlandsGame& g) {
     return rows;
 }
 
-void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = f; }
+namespace {
+
+// sanitize_factors: the single validation boundary for tunable factors.
+// set_factors_of (below) is the one choke point every SimFactors write goes
+// through -- Sim::SetFactors, and critically the factors.json load path
+// (src/game/factors_manifest.cpp's LoadSimFactors is itself deliberately
+// unvalidated: it type-checks the JSON shape but not the resulting numbers,
+// see its own comments) -- so this is where a hand-edited manifest's mistakes
+// get caught before they reach the sim. Compiled defaults (SimFactors'
+// constructor) are already sane and pass through unchanged. Not declared in
+// sim_internal.hpp: tests exercise it only through Sim::SetFactors/Factors.
+//
+// Rules:
+//  - hero.think_max_millis/think_min_millis: restores the invariant
+//    decode_decision (wasm_brain.cpp) assumes of think_max_millis (>= 0) and
+//    of the pair (min <= max) -- an inverted pair draws a pause outside
+//    [0, think_max_millis] (behaviours/rng.h's range_i64 returns `lo` when
+//    hi <= lo), which decode_decision rejects as a wire violation and
+//    brain_fatal()s (std::abort). Do not touch decode_decision's check
+//    itself; this is what keeps its assumption true instead.
+//  - hero.memory_ttl_millis: 0 means "remember only the tick you saw them"
+//    (see the eviction comment in entity_memory.cpp) -- negative would evict
+//    a just-seen entry (age 0) the same tick it was recorded.
+//  - hours-rate fields that feed a DIVISION downstream (needs.cpp's
+//    advance_needs -> reserve_rate_per_tick, components.h): floored at a
+//    small positive epsilon rather than 0, so the field itself stays
+//    strictly positive instead of leaning on reserve_rate_per_tick's own
+//    <=0 "instantly" guard to stay finite.
+//  - every remaining HeroFactors/CritterFactors/TownfolkFactors numeric field
+//    (radii, distances, durations, caps): negative is never meaningful,
+//    clamped to 0. hero.weights[]/critter.weights and hero.explore_chance[]
+//    are deliberately EXCLUDED -- 0 is a meaningful veto/"never" value for
+//    both, not a sign error. MonsterFactors and TownfolkFactors::
+//    house_income_per_day (unsigned: no sign to sanitize) are untouched.
+//
+// A field is only warned about (old value -> new value) when sanitize
+// actually moves it.
+constexpr float kMinPositiveHours = 1e-3f;
+
+template <typename T>
+void warn_adjusted(const char* field, T old_value, T new_value) {
+    spdlog::warn("sanitize_factors: {} adjusted from {} to {}", field, old_value, new_value);
+}
+
+// Sign-invalid scalar (radius/distance/duration/cap -- 0 always meaningful,
+// negative never is): clamp to 0.
+template <typename T>
+void clamp_nonneg(const char* field, T& value) {
+    if (value < T{0}) {
+        warn_adjusted(field, value, T{0});
+        value = T{0};
+    }
+}
+
+// `value` is a DIVISOR downstream (needs.cpp's advance_needs ->
+// reserve_rate_per_tick, components.h): floor at a small positive epsilon
+// instead of 0.
+void floor_positive_hours(const char* field, float& value) {
+    if (value <= 0.0f) {
+        warn_adjusted(field, value, kMinPositiveHours);
+        value = kMinPositiveHours;
+    }
+}
+
+SimFactors sanitize_factors(SimFactors f) {
+    HeroFactors& h = f.hero;
+
+    clamp_nonneg("hero.think_max_millis", h.think_max_millis);
+    if (h.think_min_millis < 0 || h.think_min_millis > h.think_max_millis) {
+        const int64_t clamped = std::clamp<int64_t>(h.think_min_millis, 0, h.think_max_millis);
+        warn_adjusted("hero.think_min_millis", h.think_min_millis, clamped);
+        h.think_min_millis = clamped;
+    }
+
+    clamp_nonneg("hero.memory_ttl_millis", h.memory_ttl_millis);
+
+    floor_positive_hours("hero.fatigue_drain_hours", h.fatigue_drain_hours);
+    floor_positive_hours("hero.content_drain_hours", h.content_drain_hours);
+    floor_positive_hours("hero.rest_fill_hours", h.rest_fill_hours);
+    floor_positive_hours("hero.tavern_fill_hours", h.tavern_fill_hours);
+    floor_positive_hours("hero.chat_fill_hours", h.chat_fill_hours);
+
+    clamp_nonneg("hero.fatigue_seek", h.fatigue_seek);
+    clamp_nonneg("hero.fatigue_seek_night", h.fatigue_seek_night);
+    clamp_nonneg("hero.content_seek", h.content_seek);
+    clamp_nonneg("hero.low_health_rest", h.low_health_rest);
+    clamp_nonneg("hero.chat_content_seek", h.chat_content_seek);
+    clamp_nonneg("hero.chat_content_ceiling", h.chat_content_ceiling);
+    clamp_nonneg("hero.chat_sight", h.chat_sight);
+    clamp_nonneg("hero.chat_radius", h.chat_radius);
+    clamp_nonneg("hero.chat_duration", h.chat_duration);
+    clamp_nonneg("hero.explore_min_fatigue", h.explore_min_fatigue);
+    clamp_nonneg("hero.explore_min_distance", h.explore_min_distance);
+    clamp_nonneg("hero.explore_max_distance", h.explore_max_distance);
+    clamp_nonneg("hero.explore_search_radius", h.explore_search_radius);
+    clamp_nonneg("hero.explore_lease_millis", h.explore_lease_millis);
+    clamp_nonneg("hero.roam_radius", h.roam_radius);
+    clamp_nonneg("hero.hunt_sight_radius", h.hunt_sight_radius);
+    clamp_nonneg("hero.threat_radius", h.threat_radius);
+
+    CritterFactors& c = f.critter;
+    clamp_nonneg("critter.sight_radius", c.sight_radius);
+    clamp_nonneg("critter.flee_radius", c.flee_radius);
+    clamp_nonneg("critter.flee_distance", c.flee_distance);
+    clamp_nonneg("critter.roam_radius", c.roam_radius);
+    clamp_nonneg("critter.graze_fraction", c.graze_fraction);
+
+    TownfolkFactors& t = f.townfolk;
+    clamp_nonneg("townfolk.spawn_interval_millis", t.spawn_interval_millis);
+    clamp_nonneg("townfolk.max_alive", t.max_alive);
+    clamp_nonneg("townfolk.move_speed", t.move_speed);
+    // house_income_per_day is unsigned -- no sign to sanitize.
+
+    return f;
+}
+
+}  // namespace
+
+void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = sanitize_factors(f); }
 int32_t biome_at_of(const BadlandsGame& g, float x, float z) {
     return static_cast<int32_t>(biome_at(g, {x, z}));
 }
