@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "badlands_sim.hpp"  // Archetype
+
 #include <glm/glm.hpp>
 
 #include <entt/entt.hpp>
@@ -248,5 +250,26 @@ struct NavPath {
     uint32_t epoch = 0;            // nav_epoch the path was planned against
     float repath_cooldown = 0.0f;
 };
+
+// What KIND of thing `e` is, derived from which archetype-defining state
+// component it carries -- the single source of truth every consumer that
+// needs to tell archetypes apart (sim.cpp's characters_of snapshot,
+// entity_memory.cpp's perception scan) shares, so the mapping is defined
+// exactly once: HeroSimulationState -> Hero, else CritterState -> Critter,
+// else TaxCollectorState -> Townfolk, else Monster. Mirrors spawn_entity's
+// own archetype switch (heroes.cpp) -- these components are what THAT recipe
+// writes, so reading them back is exact, not a guess.
+inline Archetype archetype_of(const entt::registry& reg, entt::entity e) {
+    if (reg.all_of<HeroSimulationState>(e)) {
+        return Archetype::Hero;
+    }
+    if (reg.all_of<CritterState>(e)) {
+        return Archetype::Critter;
+    }
+    if (reg.all_of<TaxCollectorState>(e)) {
+        return Archetype::Townfolk;
+    }
+    return Archetype::Monster;
+}
 
 }  // namespace badlands

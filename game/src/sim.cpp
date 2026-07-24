@@ -434,10 +434,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
                 path ? static_cast<int32_t>(path->waypoints.size() -
                                             std::min<size_t>(path->cursor, path->waypoints.size()))
                      : 0,
-            .archetype = static_cast<int32_t>(
-                sim ? Archetype::Hero
-                    : (crit ? Archetype::Critter
-                            : (tax ? Archetype::Townfolk : Archetype::Monster))),
+            .archetype = static_cast<int32_t>(archetype_of(g.registry, e)),
             .hero_class = hero ? hero->hero_class : -1,
             .facing_x = facing.x,
             .facing_z = facing.y,

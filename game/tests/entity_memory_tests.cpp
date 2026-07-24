@@ -39,6 +39,20 @@ CharacterDesc scout(float x, float z, float vision_radius) {
     return d;
 }
 
+// Test-only opt-in: production spawn_entity (heroes.cpp) now emplaces
+// EntityMemory ONLY for Hero-archetype spawns (consumers opt in; the sole
+// consumer today is the wasm hero brain -- see entity_memory.h). This suite
+// exercises update_entity_memory's MECHANICS (visibility/TTL/eviction/
+// building sighting) against a plain scout independent of archetype, so it
+// promotes a spawned entity into an "observer" by emplacing an empty
+// EntityMemory directly via the registry -- exactly the fixture-level opt-in
+// a future critter/townfolk consumer would perform for real. Bypasses
+// spawn_entity's gate deliberately; see the is_home stickiness test below for
+// the same technique applied to a SEEDED (not empty) townfolk observer.
+void make_observer(BadlandsGame& g, uint32_t slot) {
+    g.registry.emplace<EntityMemory>(g.slots[slot]);
+}
+
 uint32_t place_at(BadlandsGame* g, BuildingKind kind, float x, float z) {
     Action a{ActionKind::PlaceBuilding, 0, x, z, static_cast<int32_t>(kind), 0};
     int64_t r = dispatch_into(*g, a);
@@ -125,6 +139,8 @@ TEST_CASE("two characters within vision radius remember each other after one tic
     auto g = make_world(nullptr);
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 14.0f));
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 14.0f));
+    make_observer(*g, a);
+    make_observer(*g, b);
     tick_world(*g, 1.0f / 30.0f);
 
     const MemoryChar* a_sees_b = find_char(*g, g->slots[a], b);
@@ -145,6 +161,7 @@ TEST_CASE("two characters within vision radius remember each other after one tic
 TEST_CASE("characters outside vision radius are not remembered") {
     auto g = make_world(nullptr);
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 10.0f));
+    make_observer(*g, a);
     spawn_into(*g, scout(100.0f, 100.0f, 10.0f));
     tick_world(*g, 1.0f / 30.0f);
 
@@ -155,6 +172,7 @@ TEST_CASE("characters outside vision radius are not remembered") {
 TEST_CASE("a missing or zero-radius Vision means seeing nothing this tick") {
     auto g = make_world(nullptr);
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 0.0f));  // radius 0
+    make_observer(*g, a);
     spawn_into(*g, scout(1.0f, 0.0f, 14.0f));
     tick_world(*g, 1.0f / 30.0f);
     CHECK(g->registry.get<EntityMemory>(g->slots[a]).char_count == 0);
@@ -168,6 +186,7 @@ TEST_CASE("persistence: a teleported target is remembered stale, forgotten exact
     // 10s compiled default, 10000, is not a multiple of the 33ms tick).
     g->factors.hero.memory_ttl_millis = 10 * kMillisPerTick;
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 20.0f));
+    make_observer(*g, a);
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 0.0f));
     tick_world(*g, 1.0f / 30.0f);  // A sees B
 
@@ -209,6 +228,7 @@ TEST_CASE("persistence: a teleported target is remembered stale, forgotten exact
 TEST_CASE("capacity: a 17th simultaneous sighting is dropped, not an incumbent") {
     auto g = make_world(nullptr);
     uint32_t obs = spawn_into(*g, scout(0.0f, 0.0f, 100.0f));
+    make_observer(*g, obs);
     std::vector<uint32_t> targets;
     for (int i = 0; i < 17; ++i) {
         targets.push_back(spawn_into(*g, scout(static_cast<float>(i + 1), 0.0f, 0.0f)));
@@ -228,6 +248,7 @@ TEST_CASE("capacity: a 17th simultaneous sighting is dropped, not an incumbent")
 TEST_CASE("capacity: a stale incumbent is evicted for a new sighting (tie -> largest slot)") {
     auto g = make_world(nullptr);
     uint32_t obs = spawn_into(*g, scout(0.0f, 0.0f, 100.0f));
+    make_observer(*g, obs);
     std::vector<uint32_t> targets;
     for (int i = 0; i < 16; ++i) {
         targets.push_back(spawn_into(*g, scout(static_cast<float>(i + 1), 0.0f, 0.0f)));
@@ -324,6 +345,17 @@ TEST_CASE("is_home is sticky: a non-hero's home never flips false when re-observ
     uint32_t tc = spawn_entity(*g, d, /*home=*/0);
     entt::entity e = g->slots[tc];
 
+    // Test-only opt-in: production spawn_entity's Townfolk case no longer
+    // carries EntityMemory at all (consumers opt in; heroes.cpp), so this
+    // test seeds + emplaces it directly, by hand, the same way spawn_entity's
+    // Hero case does -- this is the ONLY way left to pin the is_home
+    // STICKINESS contract (OR, never overwritten back to false, for a
+    // non-hero observer -- see upsert_building's doc comment) for whenever a
+    // future townfolk consumer opts in for real.
+    EntityMemory mem{};
+    seed_home_town_memory(*g, mem, /*home_building_id=*/0);
+    g->registry.emplace<EntityMemory>(e, mem);
+
     // Seeding already marked the Castle as home.
     const MemoryBuilding* seeded = find_building(g->registry.get<EntityMemory>(e), 0);
     REQUIRE(seeded != nullptr);
@@ -393,18 +425,33 @@ TEST_CASE("is_home is LIVE for heroes: rehoming flips the old home false, the ne
     CHECK(new_home->alive);
 }
 
-TEST_CASE("a homeless spawn starts with an empty EntityMemory") {
+TEST_CASE("a spawned critter and a spawned monster have no EntityMemory component") {
+    // Consumers opt in (heroes.cpp's spawn_entity): the sole consumer today
+    // is the wasm hero brain, so only Hero-archetype spawns carry
+    // EntityMemory at all -- update_entity_memory's observer loop is O(heroes
+    // x N) rather than O(N^2) as a result. A critter or monster gets no
+    // component whatsoever, not merely an empty one.
     auto g = make_world(nullptr);
+
+    CharacterDesc deer{};
+    deer.archetype = Archetype::Critter;
+    deer.pos_x = 20.0f;
+    deer.pos_z = 20.0f;
+    deer.team = 2;
+    deer.hp = 8.0f;
+    deer.size_x = deer.size_y = deer.size_z = 0.8f;
+    uint32_t critter = spawn_into(*g, deer);
     uint32_t goblin = spawn_into(*g, GoblinDesc(10.0f, 10.0f));
-    const EntityMemory& mem = g->registry.get<EntityMemory>(g->slots[goblin]);
-    CHECK(mem.char_count == 0);
-    CHECK(mem.building_count == 0);
+
+    CHECK(g->registry.try_get<EntityMemory>(g->slots[critter]) == nullptr);
+    CHECK(g->registry.try_get<EntityMemory>(g->slots[goblin]) == nullptr);
 }
 
 TEST_CASE("building sighting: recorded when seen, alive flips false when destroyed in sight") {
     auto owned = make_world(nullptr);
     BadlandsGame* g = owned.get();
     uint32_t obs = spawn_into(*g, scout(-40.0f, -40.0f, 12.0f));  // far from the castle (0,54)
+    make_observer(*g, obs);
     uint32_t bid = place_at(g, BuildingKind::Tavern, -40.0f, -35.0f);  // ~5 units away
     REQUIRE(bid != UINT32_MAX);
 
@@ -426,6 +473,7 @@ TEST_CASE("building sighting: destroyed out of sight keeps the memory's stale al
     auto owned = make_world(nullptr);
     BadlandsGame* g = owned.get();
     uint32_t obs = spawn_into(*g, scout(-40.0f, -40.0f, 12.0f));
+    make_observer(*g, obs);
     uint32_t bid = place_at(g, BuildingKind::Tavern, -40.0f, -35.0f);
     REQUIRE(bid != UINT32_MAX);
     tick_world(*g, 1.0f / 30.0f);
@@ -504,6 +552,7 @@ TEST_CASE("a smaller memory_ttl_millis factor forgets a stale sighting sooner") 
     // Sim wrapper).
     g->factors.hero.memory_ttl_millis = 200;  // ~6 ticks, instead of the 10s default
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 20.0f));
+    make_observer(*g, a);
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 0.0f));
     tick_world(*g, 1.0f / 30.0f);  // A sees B
 

@@ -1,33 +1,19 @@
 #include "entity_memory.h"
 
 #include "badlands_sim.hpp"  // Archetype
-#include "components.h"
+#include "components.h"      // archetype_of
 #include "game_state.h"
 #include "placement.h"
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include <optional>
+#include <vector>
+
 namespace badlands {
 
 namespace {
-
-// Mirrors sim.cpp's characters_of() archetype derivation exactly (the
-// presence of these archetype-defining components is the single source of
-// truth for what an entity IS): HeroSimulationState -> Hero, else
-// CritterState -> Critter, else TaxCollectorState -> Townfolk, else Monster.
-int32_t character_archetype(const entt::registry& reg, entt::entity e) {
-    if (reg.all_of<HeroSimulationState>(e)) {
-        return static_cast<int32_t>(Archetype::Hero);
-    }
-    if (reg.all_of<CritterState>(e)) {
-        return static_cast<int32_t>(Archetype::Critter);
-    }
-    if (reg.all_of<TaxCollectorState>(e)) {
-        return static_cast<int32_t>(Archetype::Townfolk);
-    }
-    return static_cast<int32_t>(Archetype::Monster);
-}
 
 // Refreshes (or inserts) `slot`'s entry as seen right now. On a full array,
 // evicts the oldest-seen entry (ties -> largest slot) -- EXCEPT: a visible
@@ -140,6 +126,41 @@ void upsert_building(EntityMemory& mem, uint32_t id, int32_t kind, glm::vec2 doo
     mem.buildings[oldest] = fresh;
 }
 
+// Per-call memo of building_approach_tile results, indexed by building id:
+// every observer in a single update_entity_memory call sweeps the SAME
+// buildings list, so without this a town with H heroes and B buildings pays
+// building_approach_tile's nav-grid probe up to H*B times a tick instead of
+// B. Lazily computed on first request and reused for the rest of this call
+// only -- no cross-tick caching (YAGNI: placement changes mid-run would need
+// explicit invalidation this pass doesn't do, and update_entity_memory is
+// re-entered fresh every tick anyway). A lookup that failed (no approach
+// tile found) is deliberately NOT distinguished from "not yet looked up" --
+// both read as nullopt, so a failing building is simply re-probed by the
+// next observer that asks; that miss path is not what this memo targets
+// (buildings without a free approach tile are the rare case).
+class ApproachTileMemo {
+public:
+    explicit ApproachTileMemo(const PlacementState& placement) : placement_(placement) {}
+
+    std::optional<glm::vec2> get(uint32_t building_id, const PlacedBuilding& b) {
+        if (building_id >= cache_.size()) {
+            cache_.resize(building_id + 1);
+        }
+        std::optional<glm::vec2>& slot = cache_[building_id];
+        if (!slot.has_value()) {
+            glm::vec2 door;
+            if (building_approach_tile(placement_, b, door)) {
+                slot = door;
+            }
+        }
+        return slot;
+    }
+
+private:
+    const PlacementState& placement_;
+    std::vector<std::optional<glm::vec2>> cache_;
+};
+
 }  // namespace
 
 void update_entity_memory(BadlandsGame& game) {
@@ -147,6 +168,7 @@ void update_entity_memory(BadlandsGame& game) {
     const int64_t now = game.world_millis;
     const int64_t ttl = game.factors.hero.memory_ttl_millis;
     const auto& buildings = game.placement.buildings;
+    ApproachTileMemo approach_tile(game.placement);
 
     // Observers by slot index ascending: slots are never reused (game_state.h),
     // so this order is stable across identical runs.
@@ -194,7 +216,7 @@ void update_entity_memory(BadlandsGame& game) {
                 if (tpos == nullptr || glm::distance(obs_pos->pos, tpos->pos) > radius) {
                     continue;
                 }
-                upsert_char(*mem, t_slot, character_archetype(reg, target),
+                upsert_char(*mem, t_slot, static_cast<int32_t>(archetype_of(reg, target)),
                            reg.get<Team>(target).id, tpos->pos, reg.get<Health>(target).hp, now);
             }
         }
@@ -225,12 +247,12 @@ void update_entity_memory(BadlandsGame& game) {
                 if (glm::distance(obs_pos->pos, b.center) > radius) {
                     continue;
                 }
-                glm::vec2 door;
-                if (!building_approach_tile(game.placement, b, door)) {
+                const std::optional<glm::vec2> door = approach_tile.get(bid, b);
+                if (!door.has_value()) {
                     continue;  // no approach tile this tick: skip the record
                 }
                 const bool is_home = home_id >= 0 && static_cast<uint32_t>(home_id) == bid;
-                upsert_building(*mem, bid, b.kind, door, b.alive, is_home, authoritative_home, now);
+                upsert_building(*mem, bid, b.kind, *door, b.alive, is_home, authoritative_home, now);
             }
         }
     }

@@ -5,11 +5,13 @@
 // but this is not a mutation of the simulated world, just an observation of
 // it, same spirit as ActivityHistogram -- see sim.cpp's Sim::Tick comment).
 //
-// Nothing consumes this component yet: it packs into the wasm-brain wire
-// format in a later task (see brain_abi.h's BlViewChar, which MemoryChar
-// semantically mirrors -- native types here, wire packing is that task's
-// job). This header is deliberately free of any wire-format dependency
-// beyond the BL_MAX_CHARS capacity constant.
+// The sole consumer today is the wasm hero brain (BrainKind::Town,
+// wasm_brain.cpp's pack_view_wire packs it into brain_abi.h's BlViewChar,
+// which MemoryChar semantically mirrors -- native types here, wire packing
+// is that TU's job); only heroes carry this component as a result (see
+// heroes.cpp's spawn_entity: consumers opt in). This header is deliberately
+// free of any wire-format dependency beyond the BL_MAX_CHARS capacity
+// constant.
 
 #pragma once
 
@@ -75,9 +77,11 @@ void update_entity_memory(BadlandsGame& game);
 // Spawn-time seeding ("residents know their town"): pre-fills `mem.buildings`
 // with `home_building_id` (is_home = true) followed by every other
 // currently-alive building, oldest-first by id, capped at
-// kMemoryMaxBuildings. Called by heroes.cpp's spawn_entity for any character
-// spawned with a home (home_building_id >= 0); homeless spawns (goblins,
-// deer) never call this and start with an empty EntityMemory.
+// kMemoryMaxBuildings. Called by heroes.cpp's spawn_entity for a HERO spawned
+// with a home (home_building_id >= 0); a homeless hero (home == -1) skips
+// this and starts with an empty EntityMemory. Non-hero archetypes never carry
+// EntityMemory at all -- see spawn_entity's Archetype::Hero case: consumers
+// opt in, and the sole consumer today (the wasm hero brain) is hero-only.
 void seed_home_town_memory(BadlandsGame& game, EntityMemory& mem, uint32_t home_building_id);
 
 }  // namespace badlands

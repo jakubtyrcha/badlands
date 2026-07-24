@@ -155,6 +155,20 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             disp.name = hero_name(slot);
             reg.emplace<HeroDisplayState>(e, disp);
             brain_kind = BrainKind::Town;
+
+            // EntityMemory: consumers opt in -- the sole reader today is the
+            // wasm hero brain (BrainKind::Town, wasm_brain.cpp's
+            // pack_view_wire), so only heroes carry the bounded knowledge
+            // sandbox (game/src/entity_memory.h). Deer/goblins/tax collectors
+            // get none: update_entity_memory's observer loop is O(heroes x N)
+            // rather than O(N^2) as a result. A hero with a home starts
+            // already knowing it (and the town's other buildings) --
+            // residents know their town.
+            EntityMemory mem{};
+            if (home >= 0) {
+                seed_home_town_memory(game, mem, static_cast<uint32_t>(home));
+            }
+            reg.emplace<EntityMemory>(e, mem);
             break;
         }
         case Archetype::Townfolk: {
@@ -177,16 +191,6 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     }
 
     reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr, brain_kind);
-
-    // EntityMemory: every character gets the bounded knowledge sandbox
-    // (game/src/entity_memory.h). A character with a home starts already
-    // knowing it (and the town's other buildings) -- residents know their
-    // town; a homeless spawn (goblins, deer, home == -1) starts empty.
-    EntityMemory mem{};
-    if (home >= 0) {
-        seed_home_town_memory(game, mem, static_cast<uint32_t>(home));
-    }
-    reg.emplace<EntityMemory>(e, mem);
 
     return slot;
 }
