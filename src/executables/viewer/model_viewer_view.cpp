@@ -11,6 +11,7 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/geometry/mesh_lod.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
 
@@ -30,6 +31,11 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 // Preview height the tree generators are display-scaled to (their native ez-tree
 // units are tens-of-meters tall, which frames far away and reads tiny).
 constexpr float kTreePreviewHeight = 8.0f;
+
+// Manual LOD ratios for the viewer's LOD 0/1/2 radio switch, passed to
+// SimplifyMesh as target_ratio. LOD 0 is identity (ratio >= 1.0 short-circuits
+// in SimplifyMesh).
+static constexpr float kLodRatios[3] = {1.0f, 0.5f, 0.2f};
 
 }  // namespace
 
@@ -165,11 +171,41 @@ void ModelViewerView::RebuildScene() {
         glm::scale(glm::mat4(1.0f), glm::vec3(s));
 
     world_bounds = bark.local_bounds.TransformedBy(xf);
-    AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
 
     TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
     if (leaves.mesh.vertex_count > 0) {
       world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
+    }
+
+    // Manual LOD switch: simplify bark/leaf meshes in place before they're
+    // moved into the scene. local_bounds is left as-is (simplification stays
+    // within the mesh extent, so orbit framing above is unaffected).
+    if (lod_level_ > 0) {
+      SimplifiedMesh s = SimplifyMesh(bark.mesh.vertices,
+                                     kTexturedMeshFloatsPerVertex,
+                                     bark.mesh.indices, kLodRatios[lod_level_]);
+      bark.mesh.vertices = std::move(s.vertices);
+      bark.mesh.indices = std::move(s.indices);
+      bark.mesh.vertex_count = s.vertex_count;
+      bark.mesh.dirty = true;
+
+      if (leaves.mesh.vertex_count > 0) {
+        SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
+                                        kTexturedMeshFloatsPerVertex,
+                                        leaves.mesh.indices,
+                                        kLodRatios[lod_level_]);
+        leaves.mesh.vertices = std::move(ls.vertices);
+        leaves.mesh.indices = std::move(ls.indices);
+        leaves.mesh.vertex_count = ls.vertex_count;
+        leaves.mesh.dirty = true;
+      }
+    }
+    bark_tris_ = static_cast<int>(bark.mesh.indices.size() / 3);
+    leaf_tris_ = static_cast<int>(leaves.mesh.indices.size() / 3);
+
+    AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
+
+    if (leaves.mesh.vertex_count > 0) {
       DeferredMaterial lm = matlib_.TranslucentFoliage(
           leaf_view_, leaf_sampler_, gen.tree->leaves.alpha_cutoff,
           gen.tree->leaves.tint, gen.tree->leaves.transmission_tint,
@@ -236,6 +272,7 @@ void ModelViewerView::DrawUI() {
   // a few entries) would otherwise clip the list. The constraint clamps any
   // stale/tiny persisted size up every frame; the list scrolls if it overflows.
   int selected = generator_index_;
+  int lod = lod_level_;
   ImGui::SetNextWindowSize(ImVec2(240.0f, 460.0f), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSizeConstraints(ImVec2(200.0f, 240.0f),
                                       ImVec2(4096.0f, 4096.0f));
@@ -245,10 +282,23 @@ void ModelViewerView::DrawUI() {
       selected = i;
     }
   }
+  if (generators_[generator_index_].tree.has_value()) {
+    ImGui::Separator();
+    ImGui::TextUnformatted("LOD");
+    ImGui::RadioButton("0", &lod, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("1", &lod, 1);
+    ImGui::SameLine();
+    ImGui::RadioButton("2", &lod, 2);
+    ImGui::Text("bark: %d tris   leaves: %d tris", bark_tris_, leaf_tris_);
+  }
   ImGui::End();
 
   if (selected != generator_index_) {
     generator_index_ = selected;
+    RebuildScene();
+  } else if (lod != lod_level_) {
+    lod_level_ = lod;
     RebuildScene();
   }
 

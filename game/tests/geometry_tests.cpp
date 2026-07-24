@@ -15,6 +15,7 @@
 #include "engine/rendering/geometry/primitive_mesh_builders.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "game/building_catalog.h"
+#include "game/geometry/mesh_lod.hpp"
 #include "game/geometry/ploppable_rings.h"
 #include "game/material_id.hpp"
 
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -517,4 +519,42 @@ TEST_CASE("GenerateLakeSurfaceMesh fills a thin concave arm (no holes)",
   };
   CHECK(covers(glm::vec2(6.5f, 0.75f)));  // middle of the horizontal arm
   CHECK(covers(glm::vec2(0.75f, 6.5f)));  // middle of the vertical arm
+}
+
+// Task 1 (tree-LOD feature): SimplifyMesh, the general meshoptimizer-based
+// mesh-simplification helper (src/game/geometry/mesh_lod.hpp). High-poly
+// 11-float input from GenerateSphereTexturedMesh; that generator emits a
+// flattened non-indexed triangle soup (StaticTexturedMeshComponent::indices
+// is left empty), so we synthesize the trivial identity index buffer
+// (0,1,2,...) -- an exact re-expression of the same triangle list as an
+// indexed mesh, letting SimplifyMesh's own weld step re-merge the
+// byte-identical duplicate rows at shared cube-sphere vertices.
+TEST_CASE("SimplifyMesh: identity at ratio>=1, real reduction at 0.5, valid indices",
+          "[mesh_lod]") {
+  auto sphere = GenerateSphereTexturedMesh(1.0f, 64);
+  const auto& vertices = sphere.mesh.vertices;
+  REQUIRE(sphere.mesh.vertex_count > 0);
+
+  std::vector<uint32_t> indices(sphere.mesh.vertex_count);
+  std::iota(indices.begin(), indices.end(), 0u);
+
+  SECTION("ratio >= 1.0 returns the mesh unchanged") {
+    auto result =
+        SimplifyMesh(vertices, kTexturedMeshFloatsPerVertex, indices, 1.0f);
+    CHECK(result.indices.size() == indices.size());
+  }
+
+  SECTION("ratio 0.5 strictly reduces the triangle count") {
+    auto result =
+        SimplifyMesh(vertices, kTexturedMeshFloatsPerVertex, indices, 0.5f);
+    INFO("input indices: " << indices.size()
+                            << ", simplified indices: " << result.indices.size());
+    CHECK(result.indices.size() % 3 == 0);
+    CHECK(result.indices.size() > 0);
+    CHECK(result.indices.size() < indices.size());
+
+    for (uint32_t idx : result.indices) {
+      CHECK(idx < result.vertex_count);
+    }
+  }
 }
