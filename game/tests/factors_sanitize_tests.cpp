@@ -164,7 +164,10 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair has no effect on a was
         sim.Tick(1.0f / 30.0f);
     }
 
-    CHECK(sim.GetStats().noiser_bugs == 0);
+    // The point: this ticks along fine (a wasm-brain bug would abort the
+    // process under the fail-fast policy, wasm_brain.cpp) -- reaching here
+    // with every tick counted is the assertion.
+    CHECK(sim.GetStats().ticks == 30);
 }
 
 // --- (c) TTL: a negative memory_ttl_millis must not evict a same-tick sighting

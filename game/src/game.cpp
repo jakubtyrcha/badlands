@@ -1,28 +1,19 @@
 // Core sim-world helpers that are not part of the badlands::Sim public surface:
 // the BadlandsGame destructor plus the shared perception/bookkeeping free
-// functions (report_bug / entity_for_slot / nearest_enemy) declared in
-// game_state.h and used by the systems (brain / movement / heroes / sim).
+// functions (entity_for_slot / nearest_enemy) declared in game_state.h and
+// used by the systems (movement / heroes / sim).
 
-#include "brain.h"  // complete badlands::BrainRuntime for BadlandsGame's unique_ptr dtor
 #include "components.h"
 #include "game_state.h"
 #include "intention.h"   // InboxEvent, push_inbox_event -- the DamageTaken writer
-#include "wasm_brain.h"  // complete badlands::WasmBrainRuntime, same reason as brain.h above
+#include "wasm_brain.h"  // complete badlands::WasmBrainRuntime, for BadlandsGame's unique_ptr dtor
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
-#include <cstdio>
-#include <string>
-
 BadlandsGame::~BadlandsGame() = default;
 
 namespace badlands {
-
-void report_bug(BadlandsGame& game, const char* stage, const std::string& message) {
-    std::fprintf(stderr, "[noiser-bug] %s: %s\n", stage, message.c_str());
-    ++game.noiser_bugs;
-}
 
 entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot) {
     if (slot < 0 || static_cast<size_t>(slot) >= game.slots.size()) {

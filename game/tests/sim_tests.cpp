@@ -1,6 +1,5 @@
-// Pure-simulation tests: mock brains only, no noiser involvement. These must
-// stay green regardless of the scripting language's health — they are the
-// spec of the Stage-2 combat mechanics.
+// Pure-simulation tests: mock brains only (BrainDesc{}), no wasm brain
+// involved. The spec of the Stage-2 combat mechanics.
 
 #include "badlands_sim.hpp"
 #include "duel_common.h"
@@ -160,6 +159,4 @@ TEST_CASE("Stage-2 duel resolves with mock brains") {
 
     badlands::SimStats stats = sim.GetStats();
     CHECK(stats.ticks > 30);  // spawned 16 units apart: they must walk first
-    CHECK(stats.script_intents == 0);
-    CHECK(stats.noiser_bugs == 0);
 }

@@ -115,8 +115,7 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
 // copied from EventInbox) -> bh_tick -> on BH_OK, decode_suggestion the
 // returned BlSuggestionWire (above) and, if it passes the wire trust
 // boundary, apply_intention (intention.h) -- the same seam a test driving
-// apply_intention directly uses. script_intents is bumped only when
-// apply_intention reports the suggestion was actually adopted.
+// apply_intention directly uses.
 //
 // Fail-fast (see the policy note atop this header): bh_spawn/bh_tick
 // returning nonzero, or decode_suggestion rejecting the wire, all route

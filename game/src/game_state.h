@@ -1,5 +1,5 @@
-// Internal game state shared between the sim (sim.cpp) and the noiser brain
-// integration (brain.cpp). The public surface is game/include/badlands_sim.hpp.
+// Internal game state shared between the sim (sim.cpp) and the systems that
+// mutate it. The public surface is game/include/badlands_sim.hpp.
 
 #pragma once
 
@@ -19,7 +19,6 @@
 #include <vector>
 
 namespace badlands {
-struct BrainRuntime;
 struct WasmBrainRuntime;
 }
 
@@ -33,13 +32,10 @@ struct BadlandsGame {
     // slot_for_entity is O(1) instead of a linear scan per combat hit. Stale
     // entries for dead entities are never queried (only live entities are).
     std::unordered_map<entt::entity, uint32_t> entity_slot;
-    // Compiled brain program + host bindings; null -> mock brains only.
-    std::unique_ptr<badlands::BrainRuntime> brains;
     // Compiled + instantiated brain wasm module (game/src/wasm_brain.h);
     // null -> heroes simply idle (there is no C++ decision layer left to fall
-    // back to, sim.cpp's mock_think). Hero-only (see the think loop's
-    // dispatch order, sim.cpp): loaded independently of `brains` above, and
-    // takes priority over it for BrainKind::Town entities.
+    // back to, sim.cpp's mock_think). Hero-only: the sole hero decision
+    // layer (see the think loop's dispatch order, sim.cpp).
     std::unique_ptr<badlands::WasmBrainRuntime> wasm_brains;
 
     // World state (the sim owns gold and the building/placement grid).
@@ -118,17 +114,11 @@ struct BadlandsGame {
     badlands::SkillCatalog skills;
 
     uint64_t ticks = 0;
-    uint64_t script_intents = 0;
-    uint32_t noiser_bugs = 0;
 
     ~BadlandsGame();
 };
 
 namespace badlands {
-
-// Loud, grep-able failure record; every call permanently costs the entity its
-// script brain (the caller downgrades) and bumps the counter tests assert on.
-void report_bug(BadlandsGame& game, const char* stage, const std::string& message);
 
 entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot);
 

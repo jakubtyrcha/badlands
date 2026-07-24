@@ -108,17 +108,10 @@ struct Vision {
     float cone_half_cos = -1.0f;
 };
 
-// Transient per-tick output of a brain (script host calls or the mock brain).
-// kind: 0 = idle, 1 = move along dir, 2 = attack nearest enemy.
-struct Intent {
-    int kind;
-    glm::vec2 dir;
-};
-
 // --- hero state: definition / simulation / display --------------------------
 // Hero-specific data grouped on the static-config / dynamic-state / display
 // axis. Combat + movement stay on the generic components (Health/Combatant/
-// Attacks/Stats/MoveTarget/NavPath/Intent/Team/InsideBuilding/MeleeLock) shared
+// Attacks/Stats/MoveTarget/NavPath/Team/InsideBuilding/MeleeLock) shared
 // by all entities.
 
 // Definition (static): the hero archetype (Mercenary/Hunter/Grave Robber/
@@ -352,8 +345,8 @@ struct Agent {
     float radius;
 };
 
-// Durable movement goal (set by host calls / mock brains). Distinct from the
-// transient per-tick Intent: MoveTarget is "where to walk", Intent is "act now".
+// Durable movement goal (set by intention application / mock brains):
+// "where to walk".
 struct MoveTarget {
     enum class Kind { None, Point, Entity, Building } kind = Kind::None;
     glm::vec2 point{};

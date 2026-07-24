@@ -8,7 +8,7 @@
 // so any enemy with no target walked to the player's apothecary and bought
 // elixirs; a one-line guard in sim.cpp's mock_think held it back.
 
-#include "brain.h"
+#include "brain_kind.h"
 #include "command.h"
 #include "components.h"
 #include "game_state.h"

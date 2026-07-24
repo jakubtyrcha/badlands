@@ -1,13 +1,13 @@
 // badlands::Sim method bodies + the extracted shared free functions
-// (make_world / tick_world / *_of snapshots / spawn_into / dispatch_into /
-// reload_script) over the UNCHANGED internal world (struct BadlandsGame), plus
-// the handle-less helpers (RenderBoxOf / BuildingDefOf / MercenaryDesc /
-// GoblinDesc). badlands::Sim and the internal system tests call these free
-// functions directly, so there is a single implementation of every operation.
+// (make_world / tick_world / *_of snapshots / spawn_into / dispatch_into) over
+// the UNCHANGED internal world (struct BadlandsGame), plus the handle-less
+// helpers (RenderBoxOf / BuildingDefOf / MercenaryDesc / GoblinDesc).
+// badlands::Sim and the internal system tests call these free functions
+// directly, so there is a single implementation of every operation.
 
 #include "sim_internal.hpp"
 
-#include "brain.h"
+#include "brain_kind.h"
 #include "combat.h"
 #include "components.h"
 #include "entity_memory.h"  // update_entity_memory
@@ -36,11 +36,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <limits>
-#include <mutex>
-#include <string>
 #include <vector>
 
 namespace badlands {
@@ -78,12 +75,12 @@ bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
     return true;
 }
 
-// Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain. With no enemy, the archetype's own brain decides
+// Reference behavior for every non-hero archetype (and the Town fallback when
+// no wasm brain is loaded). With no enemy, the archetype's own brain decides
 // -- except BrainKind::Town, which has no C++ decision layer left at all
 // (see hero_perception.h's file comment): the wasm brain is the sole hero
-// decision-maker now, and a Town-kind entity with neither a wasm brain nor a
-// working noiser script simply idles, same as BrainKind::None.
+// decision-maker now, and a Town-kind entity with no wasm brain loaded simply
+// idles, same as BrainKind::None.
 void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
     const BrainKind kind = reg.get<Brain>(self).kind;
@@ -125,14 +122,6 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
 // ---- extracted shared operations over Badlands& ----------------------------
 
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfig& config) {
-    // One-time noiser runtime configuration. The profiling switch is
-    // thread-local and defaults to ON, and upstream has no public API for it
-    // yet (docs/noiser-feedback.md #3) — this is the only detail:: callsite.
-    // All make_world/tick_world calls happen on the same (main) thread.
-    static std::once_flag noiser_configured;
-    std::call_once(noiser_configured,
-                   [] { sampo::noiser::detail::SetHostCallProfiling(false); });
-
     auto game = std::make_unique<BadlandsGame>();
     // Terrain/biomes the sim reasons about. SymbolicMapGenerator is a pure
     // function of its compile-time constants, so every world would generate a
@@ -149,13 +138,6 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
     game->terrain_blocking = config.terrain_blocking;
     game->arena_half_x = config.arena_half_x;
     game->arena_half_z = config.arena_half_z;
-    if (desc.noiser_source != nullptr) {
-        std::string error;
-        game->brains = BrainRuntime::create(*game, desc.noiser_source, error);
-        if (!game->brains) {
-            report_bug(*game, "compile", error);
-        }
-    }
     if (desc.wasm_bytes != nullptr) {
         // Wasm bytes were explicitly provided, so a bh_load/bh_instantiate
         // failure here is a brain bug, not a config error to fall back from
@@ -272,11 +254,8 @@ void tick_world(BadlandsGame& g, float dt) {
         inbox.threat_was_present = present;
     }
 
-    // Brains: each living entity's coroutine resumes once; intents arrive via
-    // host calls. Any failure permanently downgrades that entity to the mock.
-    for (auto [e, intent] : registry.view<Intent>().each()) {
-        intent = {.kind = 0, .dir = {0.0f, 0.0f}};
-    }
+    // Brains: each living entity thinks once (the wasm hero brain on a real
+    // wake, everyone else via the mock's per-archetype logic below).
     if (g.replay_log != nullptr) {
         // Replaying: this tick's decisions come from the log, not the brains.
         apply_replay_commands(g);
@@ -306,38 +285,13 @@ void tick_world(BadlandsGame& g, float dt) {
                 }
                 continue;
             }
-            bool scripted = brain.state && !brain.state->downgraded && g.brains;
-            if (scripted && !resume_brain(g, static_cast<uint32_t>(slot), *brain.state)) {
-                brain.state->downgraded = true;
-                scripted = false;
-            }
-            if (!scripted) {
-                mock_think(g, e, static_cast<uint32_t>(slot));
-            }
+            mock_think(g, e, static_cast<uint32_t>(slot));
         }
 
         // Drain AI commands enqueued during think, in one ordered pass (FIFO;
         // producers iterate by slot). This is the single mutation point for AI
         // decisions and appends each to command_log (the trace).
         apply_commands(g);
-    }
-
-    // Legacy direct movement for scripted brains that still push a per-tick
-    // move Intent (intent_move). The shipping brains (hero.noiser,
-    // combat_test.noiser) and the mock brain all move via MoveTarget +
-    // intent_move_to, so this loop is inert today; it is kept for any brain that
-    // still drives a kind-1 move Intent (and for the intent_move host binding the
-    // downgrade fixtures may exercise).
-    for (auto [e, intent, pos, stats] :
-         registry.view<const Intent, Position, const Stats>(entt::exclude<MeleeLock, InsideBuilding>)
-             .each()) {
-        if (intent.kind != 1) {
-            continue;
-        }
-        float len = glm::length(intent.dir);
-        if (len > 0.0f) {
-            pos.pos += intent.dir / len * stats.move_speed * dt;
-        }
     }
 
     // Rebuild the navmesh if a building was placed/destroyed this tick (bumps
@@ -465,26 +419,6 @@ int64_t dispatch_into(BadlandsGame& g, const Action& action) {
             return -1;
     }
     return apply_command(g, cmd);
-}
-
-bool reload_script(BadlandsGame& g, const std::string& source) {
-    std::string error;
-    auto fresh = BrainRuntime::create(g, source, error);
-    if (!fresh) {
-        // Keep-last-good: the running program stays in place.
-        std::fprintf(stderr, "[noiser] reload failed, keeping last-good: %s\n", error.c_str());
-        return false;
-    }
-    g.brains = std::move(fresh);
-    g.noiser_bugs = 0;
-    g.script_intents = 0;
-    for (uint32_t slot = 0; slot < g.slots.size(); ++slot) {
-        entt::entity e = g.slots[slot];
-        if (g.registry.valid(e)) {
-            g.registry.get<Brain>(e).state = spawn_brain(*g.brains, slot);
-        }
-    }
-    return true;
 }
 
 void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
@@ -786,8 +720,6 @@ int32_t biome_at_of(const BadlandsGame& g, float x, float z) {
 SimStats stats_of(const BadlandsGame& g) {
     return SimStats{
         .ticks = g.ticks,
-        .script_intents = g.script_intents,
-        .noiser_bugs = g.noiser_bugs,
     };
 }
 
@@ -841,7 +773,6 @@ void Sim::Tick(float dt) {
     characters_of(*world_, stats_scratch_);
     activity_stats_.Accumulate(stats_scratch_);
 }
-bool Sim::ReloadScript(const std::string& source) { return reload_script(*world_, source); }
 int64_t Sim::Dispatch(const Action& action) { return dispatch_into(*world_, action); }
 
 std::vector<NavDebugCell> Sim::NavDebugCells() {

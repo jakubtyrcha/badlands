@@ -2,9 +2,9 @@
 
 A Majesty-style town-and-heroes prototype: a C++/Dawn (WebGPU)/SDL3 engine driving a
 C++/EnTT simulation, with per-entity AI "brains". The hero brain runs as Nim
-compiled to WASM (hosted via wasmtime); the [noiser](third_party/noiser) scripting
-language still drives mapgen/texgen and remains available as a dormant brain
-backend.
+compiled to WASM (hosted via wasmtime), the sole hero decision layer. The
+[noiser](third_party/noiser) scripting language is a separate subsystem, driving
+mapgen/texgen only.
 
 ## Getting started
 
@@ -46,7 +46,6 @@ ctest --test-dir build           # C++ Catch2 test suites
 ```
 
 The C++ suite covers the hero brain (`scripts/brains/nim/hero.nim`, built to
-`assets/brains/hero.wasm`) and the duel's combat brain (`scripts/brains/combat_test.noiser`,
-still noiser); see `docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md` for the
-wasm brain contract, `docs/noiser-brain-interop.md` for the (dormant) noiser brain framework,
-and `docs/noiser-bugs-upstream/` for filed language bugs.
+`assets/brains/hero.wasm`); see `docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md`
+for the wasm brain contract, `docs/noiser-brain-interop.md` for the deleted noiser brain
+framework's design record, and `docs/noiser-bugs-upstream/` for filed language bugs.

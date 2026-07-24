@@ -1,7 +1,7 @@
 #include "heroes.h"
 
 #include "behaviours/world_view.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
-#include "brain.h"
+#include "brain_kind.h"
 #include "components.h"
 #include "entity_memory.h"  // EntityMemory, seed_home_town_memory
 #include "game_state.h"
@@ -127,7 +127,6 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     }
     reg.emplace<RenderShape>(e, glm::vec3{desc.size_x, desc.size_y, desc.size_z},
                              glm::vec3{desc.color_r, desc.color_g, desc.color_b});
-    reg.emplace<Intent>(e, 0, glm::vec2{0.0f, 0.0f});
 
     // Fog-of-war facing + vision. Facing seeds from the desc (or the model
     // forward default when unset); the cone half-cosine is cos(half-angle),
@@ -221,7 +220,7 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             break;
     }
 
-    reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr, brain_kind);
+    reg.emplace<Brain>(e, brain_kind);
 
     return slot;
 }
@@ -367,9 +366,9 @@ bool hero_enter(BadlandsGame& game, entt::entity e, int kind) {
     return true;
 }
 
-// Reachable from CommandKind::EnterHome, which any noiser script can enqueue
-// against any archetype (intent_enter_home has no archetype guard of its own
-// -- see brain.cpp) -- so `e` is not guaranteed to be a hero here either.
+// Reachable from CommandKind::EnterHome, which apply_intention (intention.cpp)
+// enqueues with no archetype guard of its own -- so `e` is not guaranteed to
+// be a hero here either.
 bool hero_enter_home(BadlandsGame& game, entt::entity e) {
     const auto* sim = game.registry.try_get<HeroSimulationState>(e);
     if (sim == nullptr) {

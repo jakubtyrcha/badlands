@@ -318,9 +318,9 @@ bool GameView::Initialize(const RenderContext& ctx) {
   sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
   SeekToTimeOfDay(kInitialTimeOfDay);
 
-  // sim_ is constructed with a nullptr brain_script_source (mock brains only;
-  // no noiser script needed for a static-buildings scaffold) -- construction
-  // also prebuilds the Castle at kCastleSpawn (the plains, at the town centre).
+  // sim_ is constructed with an empty BrainDesc (mock brains only; no wasm
+  // brain needed for a static-buildings scaffold) -- construction also
+  // prebuilds the Castle at kCastleSpawn (the plains, at the town centre).
   SeedTown();
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).

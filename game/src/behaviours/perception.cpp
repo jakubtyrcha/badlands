@@ -1,6 +1,6 @@
 #include "behaviours/perception.h"
 
-#include "brain.h"  // BrainKind (what "my kind" means for NotMyKind)
+#include "brain_kind.h"  // BrainKind (what "my kind" means for NotMyKind)
 #include "components.h"
 #include "game_state.h"
 

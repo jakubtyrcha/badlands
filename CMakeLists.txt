@@ -253,12 +253,13 @@ target_include_directories(badlands_engine PUBLIC
     ${taskflow_SOURCE_DIR}
 )
 
-# badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog + the
-# noiser-scripted brains), pure C++ with no engine/SDL/Dawn deps — geometry
-# that needs engine types comes in a later task (S2.C). Includes the
-# sampo::noiser C++ VM wrapper (pure delegation over the noiser Rust VM's C
-# ABI); badlands uses the VM only, so noiser_jit_stubs.cpp stubs the JIT
-# (Cranelift) C ABI.
+# badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog), pure C++
+# with no engine/SDL/Dawn deps — geometry that needs engine types comes in a
+# later task (S2.C). The hero brain is wasm-only now (game/src/wasm_brain.h);
+# this lib also carries the sampo::noiser C++ VM wrapper (pure delegation
+# over the noiser Rust VM's C ABI) purely so badlands_mapgen_lib (below) can
+# link it for mapgen/texgen noiser scripts -- badlands uses the VM only, so
+# noiser_jit_stubs.cpp stubs the JIT (Cranelift) C ABI.
 #
 # Named badlands_game_lib, not badlands_game: the "game" app executable below
 # is already named badlands_game (from S2.A1/A3), and CMake target names must
@@ -266,7 +267,6 @@ target_include_directories(badlands_engine PUBLIC
 add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/sim.cpp
-    game/src/brain.cpp
     game/src/combat.cpp
     game/src/command.cpp
     game/src/creature_catalog.cpp
@@ -587,8 +587,6 @@ enable_testing()
 add_executable(badlands_game_tests
     game/tests/combat_tests.cpp
     game/tests/sim_tests.cpp
-    game/tests/noiser_smoke_tests.cpp
-    game/tests/duel_test.cpp
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
@@ -664,11 +662,6 @@ target_include_directories(badlands_game_tests PRIVATE
 target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
 target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib ui)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-# The noiser smoke/duel cases load the SHIPPING brain scripts by path and REQUIRE
-# the env vars (historically exported only by the legacy Rust harness, so a bare
-# `ctest` failed on them). Set here so `ctest --test-dir build` is self-contained.
-set_tests_properties(badlands_game_tests PROPERTIES ENVIRONMENT
-    "BADLANDS_BRAIN_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/hero.noiser;BADLANDS_COMBAT_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/combat_test.noiser")
 
 # badlands_geometry_tests: Catch2 suite for Task S2.C's procedural geometry
 # (primitives/rocks/building parts, src/engine/rendering/geometry) + the

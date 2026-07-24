@@ -1,7 +1,7 @@
 #include "economy.h"
 
 #include "badlands_sim.hpp"
-#include "brain.h"  // BrainKind
+#include "brain_kind.h"  // BrainKind
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"  // spawn_entity

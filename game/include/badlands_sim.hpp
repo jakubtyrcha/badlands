@@ -1,4 +1,4 @@
-// C++ API of the badlands game simulation (C++/EnTT + noiser brains).
+// C++ API of the badlands game simulation (C++/EnTT + a wasm hero brain).
 //
 // Data in, data out: scenarios are composed by spawning CharacterDesc rows;
 // observers (renderer, tests) inspect CharacterState snapshots and SimStats.
@@ -547,8 +547,6 @@ struct CharacterState {
 // component, game/src/components.h:24). Use SimStats for the run counters.
 struct SimStats {
     uint64_t ticks;
-    uint64_t script_intents;  // intents delivered by noiser brains (0 when mocked)
-    uint32_t noiser_bugs;     // failures that downgraded an entity to the mock brain
 };
 
 // ---------------------------------------------------------------------------
@@ -774,18 +772,13 @@ struct NavPathResult {
     bool reachable = false;
 };
 
-// Which brain(s) drive spawned entities. noiser_source: noiser script source,
-// or nullptr for mock-brains-only. A script that fails to compile is
-// recorded as a noiser bug and the sim falls back to mock brains.
-// wasm_bytes/wasm_len: a compiled brain wasm module (game/src/wasm_brain.h),
-// hero-only -- see the think loop's
-// dispatch order in sim.cpp for how the two paths compose (wasm, when
-// loaded, takes the no-enemy tick for BrainKind::Town entities outright;
-// combat is a host pre-empt on both paths; noiser/mock still drive every
-// other archetype). Either field may be null/zero independently; both null
-// means mock brains only.
+// Which brain drives spawned heroes. wasm_bytes/wasm_len: a compiled brain
+// wasm module (game/src/wasm_brain.h), hero-only -- see the think loop's
+// dispatch order in sim.cpp: when loaded, it takes the no-enemy tick for
+// BrainKind::Town entities outright (combat is a host pre-empt); every other
+// archetype is always mock-driven. wasm_bytes == nullptr means every hero
+// simply idles absent an enemy (no C++ decision layer to fall back to).
 struct BrainDesc {
-    const char* noiser_source = nullptr;
     const uint8_t* wasm_bytes = nullptr;
     size_t wasm_len = 0;
 };
@@ -793,11 +786,11 @@ struct BrainDesc {
 // ---- the sim ---------------------------------------------------------------
 class Sim {
    public:
-    // BrainDesc: which brain(s) drive spawned entities (see BrainDesc above).
+    // BrainDesc: which brain drives spawned heroes (see BrainDesc above).
     // wasm_bytes provided but failing to compile/instantiate is FATAL (crash-
     // and-error, not a fallback -- see WasmBrainRuntime::create's doc comment,
-    // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (mock
-    // drives every hero, same as noiser_source == nullptr).
+    // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (every
+    // hero simply idles absent an enemy).
     explicit Sim(const BrainDesc& brain_desc);
     // The composing form: an explicit world config (the arena uses this:
     // flat, no colony, confined edges) x which brain. The other ctor forwards
@@ -824,9 +817,6 @@ class Sim {
     void SetSkillCatalog(const SkillCatalog& catalog);
     const SkillCatalog& Skills() const;
     void Tick(float dt);
-    // Recompiles the brain script; on failure the previous program is kept
-    // (returns false). On success all brains restart on the new program.
-    bool ReloadScript(const std::string& source);
     // Executes a player action. Returns >= 0 on success (a new building/hero
     // id, or 0 for id-less actions) and < 0 on error.
     int64_t Dispatch(const Action& action);

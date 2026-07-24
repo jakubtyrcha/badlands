@@ -2,7 +2,7 @@
 // falls back to gnawing the nearest targettable building (Castle/House) when no
 // unit is in reach. Building health + the raze cascade are exercised here.
 
-#include "brain.h"  // BrainKind
+#include "brain_kind.h"  // BrainKind
 #include "components.h"
 #include "economy.h"
 #include "game_state.h"

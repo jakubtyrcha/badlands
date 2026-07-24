@@ -92,7 +92,6 @@ TEST_CASE("hero_behavior: a hunter accrues Hunt entity-ticks over a few in-game 
     // A real threshold, not just ">0": a single fluke tick would pass a bare
     // nonzero check without proving the hunter actually spent the run hunting.
     CHECK(hist.ForClass(HERO_HUNTER, ActivityId::Hunt) > static_cast<uint64_t>(kTicks) / 4);
-    CHECK(stats_of(g).noiser_bugs == 0);
 }
 
 // --- (2) night raises a mildly-tired hero's GoHome share --------------------
@@ -239,7 +238,6 @@ TEST_CASE("hero_behavior: wasm hero: an exhausted, homed hero decides GoHome") {
         }
     }
     CHECK(went_home);
-    CHECK(stats_of(g).noiser_bugs == 0);
 }
 
 TEST_CASE("hero_behavior: wasm hero: a hero with an apothecary in town decides Buy") {
@@ -264,5 +262,4 @@ TEST_CASE("hero_behavior: wasm hero: a hero with an apothecary in town decides B
         }
     }
     CHECK(decided_buy);
-    CHECK(stats_of(g).noiser_bugs == 0);
 }

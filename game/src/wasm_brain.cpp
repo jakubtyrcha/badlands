@@ -350,12 +350,11 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
                     "decode_suggestion rejected the wire (invalid kind/point/duration/activity)");
     }
 
-    // script_intents counts intents actually DELIVERED to the sim this wake
-    // (mirrors what it counted for the noiser path and v1's wasm path):
-    // apply_intention returns whether the suggestion was validated + adopted.
-    if (apply_intention(game, slot, *intent)) {
-        ++game.script_intents;
-    }
+    // apply_intention returns whether the suggestion was validated + adopted;
+    // an adopted intention always logs a SetBehavior command (see its own doc
+    // comment), so the command log is the observable "a decision landed"
+    // signal now.
+    apply_intention(game, slot, *intent);
 }
 
 }  // namespace badlands
