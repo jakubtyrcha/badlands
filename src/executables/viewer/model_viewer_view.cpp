@@ -46,6 +46,8 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   // UV-checker debug material (two distinct grays) for the sphere test object, so
   // its UVs read against the flat gray floor.
   checker_mat_ = matlib_.CheckerAlbedo(glm::vec3(0.85f), glm::vec3(0.35f));
+  // Solid dark-brown bark color for the catalog tree meshes.
+  bark_mat_ = matlib_.SolidColor(glm::vec3(0.30f, 0.19f, 0.10f), 0.9f);
 
   BuildGenerators();
   if (generators_.empty()) {
@@ -89,10 +91,24 @@ void ModelViewerView::BuildGenerators() {
              glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
          return GeneratedMesh{std::move(mesh), transform};
        }, .material = checker_mat_});
-  // One entry per predefined tree setup (the full ez-tree preset catalog). Each
-  // is drawn as its skeleton graph (see RebuildScene), not a tube mesh.
+  // One entry per predefined tree setup (the full ez-tree preset catalog),
+  // rendered as its real solid bark mesh, display-scaled to a consistent
+  // preview height and rested on the floor.
   for (const NamedTreeOptions& setup : TreeCatalog()) {
-    generators_.push_back({.name = setup.name, .tree = setup.options});
+    generators_.push_back(
+        {.name = setup.name,
+         .generate =
+             [opts = setup.options] {
+               TexturedMeshResult r = GenerateTreeMesh(opts);
+               const float h = r.local_bounds.max.y - r.local_bounds.min.y;
+               const float s = kTreePreviewHeight / std::max(h, 0.001f);
+               const glm::mat4 xf =
+                   glm::translate(glm::mat4(1.0f),
+                                  glm::vec3(0.0f, -r.local_bounds.min.y * s, 0.0f)) *
+                   glm::scale(glm::mat4(1.0f), glm::vec3(s));
+               return GeneratedMesh{std::move(r), xf};
+             },
+         .material = bark_mat_});
   }
 }
 
@@ -114,24 +130,21 @@ void ModelViewerView::RebuildScene() {
   AddFloor(scene_, kFloorSize, matlib_.SolidColor(kFloorGray, kFloorRoughness),
            kFloorSize / kFloorUvRepeatSpacing);
 
-  tree_lines_.Clear();
   const MeshGenerator& gen = generators_[generator_index_];
 
   // Frame on the WORLD-space bounds so the orbit centers on the object as it sits
   // on the floor.
   Aabb world_bounds = Aabb::Empty();
-  if (gen.tree.has_value()) {
-    BuildTreeGraph(*gen.tree, world_bounds);
-  } else if (gen.generate) {
+  if (gen.generate) {
     GeneratedMesh generated = gen.generate();
     world_bounds = generated.mesh.local_bounds.TransformedBy(generated.transform);
     AddMeshEntity(scene_, "mesh", std::move(generated.mesh), gen.material,
                   generated.transform);
   } else {
-    // A MeshGenerator must set exactly one mode (mesh lambda or tree). Guard the
-    // invariant so a malformed entry logs instead of throwing bad_function_call.
-    spdlog::error("ModelViewerView::RebuildScene: generator '{}' has neither a "
-                  "mesh nor a tree; showing floor only",
+    // A MeshGenerator must set its mesh lambda. Guard the invariant so a
+    // malformed entry logs instead of throwing bad_function_call.
+    spdlog::error("ModelViewerView::RebuildScene: generator '{}' has no mesh "
+                  "generator; showing floor only",
                   gen.name);
     return;  // floor-only scene; leave the orbit framing unchanged
   }
@@ -140,44 +153,6 @@ void ModelViewerView::RebuildScene() {
   const float radius = glm::length(world_bounds.max - center);
   orbit_.FrameBounds(center, radius > 0.01f ? radius : 1.0f);
   orbit_.UpdateCamera(camera_);
-}
-
-void ModelViewerView::BuildTreeGraph(const TreeOptions& options,
-                                     Aabb& out_world_bounds) {
-  // Per-level line colors (trunk -> twig) and pixel thickness. The bare tube mesh
-  // reads poorly at this scale, so the preview shows the branch GRAPH instead.
-  static const glm::vec3 kLevelColor[4] = {
-      {0.40f, 0.26f, 0.13f},  // trunk
-      {0.55f, 0.36f, 0.16f},  // level 1
-      {0.45f, 0.55f, 0.22f},  // level 2
-      {0.60f, 0.70f, 0.32f},  // level 3
-  };
-
-  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(options);
-
-  // Native bounds from the section origins, then a display scale to a consistent
-  // preview height (ez-tree presets are tens of metres tall).
-  Aabb native = Aabb::Empty();
-  for (const SkeletonBranch& br : skeleton)
-    for (const BranchSection& s : br.sections) {
-      native.min = glm::min(native.min, s.origin);
-      native.max = glm::max(native.max, s.origin);
-    }
-  const float height = native.max.y - native.min.y;
-  const float scale = kTreePreviewHeight / std::max(height, 0.001f);
-  const glm::mat4 xf = glm::scale(glm::mat4(1.0f), glm::vec3(scale));
-
-  for (const SkeletonBranch& br : skeleton) {
-    const glm::vec3 color = kLevelColor[std::clamp(br.level, 0, 3)];
-    const float thickness = std::max(1.0f, 5.0f - static_cast<float>(br.level) * 1.2f);
-    for (size_t k = 1; k < br.sections.size(); ++k) {
-      const glm::vec3 a = glm::vec3(xf * glm::vec4(br.sections[k - 1].origin, 1.0f));
-      const glm::vec3 b = glm::vec3(xf * glm::vec4(br.sections[k].origin, 1.0f));
-      tree_lines_.AddLine(a, b, color, thickness);
-    }
-  }
-
-  out_world_bounds = native.TransformedBy(xf);
 }
 
 void ModelViewerView::HandleEvent(const SDL_Event& event, int /*width*/,
@@ -208,8 +183,6 @@ void ModelViewerView::Update(float dt, const bool* /*keyboard_state*/) {
   dt_ = dt;
   orbit_.UpdateCamera(camera_);
   scene_.SyncToRegistry(registry_, scene_context_);
-  // Point the renderer's debug-line pass at the current tree graph (if any).
-  scene_context_.debug_lines = tree_lines_.empty() ? nullptr : &tree_lines_;
 }
 
 void ModelViewerView::DrawUI() {

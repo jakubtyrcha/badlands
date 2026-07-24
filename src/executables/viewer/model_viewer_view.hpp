@@ -7,7 +7,6 @@
 // slot in. Lives in src/executables/viewer/ (an app, not the engine).
 
 #include <functional>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,14 +19,12 @@
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
-#include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/geometry/aabb.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // TexturedMeshResult
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/rendering/scene_renderer.hpp"  // ShadowDebugMode
 #include "engine/scene/scene_graph.hpp"
-#include "game/geometry/tree_options.hpp"  // TreeOptions
 
 namespace badlands {
 
@@ -64,28 +61,20 @@ class ModelViewerView : public AppView {
     TexturedMeshResult mesh;
     glm::mat4 transform{1.0f};
   };
-  // A named entry in the viewer's list. Exactly one mode is set:
-  //  - `generate` produces a mesh entity (the sphere test object), OR
-  //  - `tree` holds a tree setup, drawn as its skeleton GRAPH via debug lines
-  //    (the branch tubes read poorly bare/thin, so the preview shows structure).
+  // A named entry in the viewer's list: `generate` produces a mesh entity
+  // (the sphere test object, or a catalog tree's solid bark mesh).
   struct MeshGenerator {
     std::string name;
-    std::function<GeneratedMesh()> generate;  // mesh mode (empty for tree setups)
-    std::optional<TreeOptions> tree;          // tree mode (debug-drawn skeleton)
-    DeferredMaterial material;                 // used by mesh mode only
+    std::function<GeneratedMesh()> generate;
+    DeferredMaterial material;
   };
 
   void BuildGenerators();
   // Re-derives env_'s sky/SH/sun into scene_context_ and mirrors it into scene_.
   void ApplyEnvironment();
-  // Fresh graph: re-mirror lighting, add the gray floor at y=0, then either add
-  // the selected mesh generator's entity, or populate tree_lines_ with the
-  // selected tree setup's skeleton graph. Reframes the orbit either way.
+  // Fresh graph: re-mirror lighting, add the gray floor at y=0, then add the
+  // selected mesh generator's entity. Reframes the orbit.
   void RebuildScene();
-  // Builds the skeleton for `options`, fills tree_lines_ with its branch
-  // centerlines (display-scaled, colored/thick by level), and returns the
-  // scaled world-space bounds for framing.
-  void BuildTreeGraph(const TreeOptions& options, Aabb& out_world_bounds);
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -104,9 +93,7 @@ class ModelViewerView : public AppView {
   std::vector<MeshGenerator> generators_;
   int generator_index_ = 0;
   DeferredMaterial checker_mat_;  // UV-checker debug material for the sphere
-  // Skeleton-graph lines for the selected tree setup (pointed at by
-  // scene_context_.debug_lines each frame).
-  DebugLineBuffer tree_lines_;
+  DeferredMaterial bark_mat_;     // Solid bark color for catalog tree meshes
 
   ShadowDebugMode initial_shadow_debug_mode_ = ShadowDebugMode::Off;
 
