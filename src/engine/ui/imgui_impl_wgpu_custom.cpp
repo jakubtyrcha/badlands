@@ -24,6 +24,7 @@ static wgpu::TextureFormat g_DepthStencilFormat =
 static uint32_t g_FramebufferWidth = 0;
 static uint32_t g_FramebufferHeight = 0;
 static uint32_t g_OutputIsLinear = 0;
+static uint32_t g_OutputIsP3 = 0;
 
 // Per-texture GPU resources for ImGui 1.92's dynamic texture protocol. ImGui
 // owns the ImTextureData (font atlas + any user textures) and drives their
@@ -41,6 +42,7 @@ static const char* g_ShaderCode = R"(
 struct Uniforms {
     mvp: mat4x4<f32>,
     outputIsLinear: u32,
+    outputIsP3: u32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -74,11 +76,46 @@ fn srgb_to_linear_component(c: f32) -> f32 {
     return pow((c + 0.055) / 1.055, 2.4);
 }
 
+fn linear_to_srgb_component(c: f32) -> f32 {
+    if (c <= 0.0031308) { return c * 12.92; }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+// Linear sRGB -> linear Display-P3 primaries. Keep in sync with
+// shaders/common/colorspace.wesl's SRGB_TO_P3 (this inline WGSL string
+// cannot import WESL modules).
+const SRGB_TO_P3 = mat3x3<f32>(
+    vec3<f32>( 0.8224619688, 0.0331941989, 0.0170826307),
+    vec3<f32>( 0.1775380312, 0.9668058012, 0.0723974406),
+    vec3<f32>( 0.0000000000, 0.0000000000, 0.9105199285),
+);
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(texTexture, texSampler, in.uv);
     var result = in.color * tex_color;
-    if (uniforms.outputIsLinear == 1u) {
+    if (uniforms.outputIsP3 == 1u) {
+        // sRGB-authored colors onto a Display-P3-tagged surface: decode,
+        // convert primaries, then match the surface transfer (linear on the
+        // float/EDR surface; sRGB-curve-encoded on the 8-bit SDR-P3 surface).
+        let lin = vec3<f32>(
+            srgb_to_linear_component(result.r),
+            srgb_to_linear_component(result.g),
+            srgb_to_linear_component(result.b)
+        );
+        var p3 = SRGB_TO_P3 * lin;
+        if (uniforms.outputIsLinear == 1u) {
+            p3 = max(p3, vec3<f32>(0.0));
+        } else {
+            let c = clamp(p3, vec3<f32>(0.0), vec3<f32>(1.0));
+            p3 = vec3<f32>(
+                linear_to_srgb_component(c.r),
+                linear_to_srgb_component(c.g),
+                linear_to_srgb_component(c.b)
+            );
+        }
+        result = vec4<f32>(p3, result.a);
+    } else if (uniforms.outputIsLinear == 1u) {
         // ImGui colors are sRGB — convert to linear for RGBA16Float surface
         result = vec4<f32>(
             srgb_to_linear_component(result.r),
@@ -99,6 +136,7 @@ bool ImGui_ImplWGPU_Init(ImGui_ImplWGPU_InitInfo* init_info) {
   g_FramebufferWidth = init_info->FramebufferWidth;
   g_FramebufferHeight = init_info->FramebufferHeight;
   g_OutputIsLinear = init_info->OutputIsLinear ? 1 : 0;
+  g_OutputIsP3 = init_info->OutputIsP3 ? 1 : 0;
 
   // ImGui 1.92+: tell the core we honor ImTextureData create/update/destroy
   // requests each frame (dynamic font atlas). Without this ImGui falls back to
@@ -242,6 +280,8 @@ static void SetupRenderState(ImDrawData* draw_data,
   g_Queue.WriteBuffer(g_UniformBuffer, 0, mvp, sizeof(mvp));
   g_Queue.WriteBuffer(g_UniformBuffer, 64, &g_OutputIsLinear,
                       sizeof(g_OutputIsLinear));
+  g_Queue.WriteBuffer(g_UniformBuffer, 68, &g_OutputIsP3,
+                      sizeof(g_OutputIsP3));
 
   pass.SetPipeline(g_Pipeline);
   pass.SetVertexBuffer(0, g_VertexBuffer, 0, g_VertexBufferSize);

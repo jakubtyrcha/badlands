@@ -8,6 +8,10 @@
 
 #include <spdlog/spdlog.h>
 
+#if defined(SDL_PLATFORM_MACOS)
+#include "engine/rendering/metal_layer_color.hpp"
+#endif
+
 namespace badlands {
 
 bool g_gpu_error_flag = false;
@@ -26,7 +30,8 @@ GpuContext& GpuContext::operator=(GpuContext&&) noexcept = default;
 // ---------------------------------------------------------------------------
 
 wgpu::Surface GpuContext::CreateSurface(wgpu::Instance instance,
-                                        SDL_Window* window) {
+                                        SDL_Window* window,
+                                        void** out_metal_layer) {
 #if defined(SDL_PLATFORM_MACOS)
   SDL_MetalView view = SDL_Metal_CreateView(window);
   if (!view) {
@@ -39,6 +44,9 @@ wgpu::Surface GpuContext::CreateSurface(wgpu::Instance instance,
     std::fprintf(stderr, "Failed to get Metal layer: %s\n", SDL_GetError());
     return nullptr;
   }
+  // Expose the layer so Configure() can tag its colorspace/EDR properties
+  // (the pinned Dawn never touches them — see metal_layer_color.hpp).
+  if (out_metal_layer) *out_metal_layer = layer;
 
   WGPUSurfaceSourceMetalLayer metalDesc = {};
   metalDesc.chain.sType = WGPUSType_SurfaceSourceMetalLayer;
@@ -117,10 +125,24 @@ bool GpuContext::Initialize(SDL_Window* window) {
     return false;
   }
 
-  surface_ = CreateSurface(instance_, window);
+  surface_ = CreateSurface(instance_, window, &metal_layer_);
   if (!surface_) {
     std::fprintf(stderr, "Could not create surface!\n");
     return false;
+  }
+
+  // HDR capability, decided once at startup (SDL_EVENT_WINDOW_HDR_STATE_CHANGED
+  // is deliberately not handled — ImGui's render-target format is fixed at
+  // init). Drives GetPreferredFormat()'s float-surface preference and the
+  // EDR-vs-SDR CAMetalLayer tagging in Configure().
+  {
+    const SDL_PropertiesID props = SDL_GetWindowProperties(window);
+    is_hdr_ = SDL_GetBooleanProperty(
+        props, SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false);
+    const float headroom = SDL_GetFloatProperty(
+        props, SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 1.0f);
+    spdlog::info("GpuContext: window HDR = {} (headroom {:.2f})", is_hdr_,
+                 headroom);
   }
 
   wgpu::RequestAdapterOptions adapter_opts;
@@ -199,6 +221,13 @@ bool GpuContext::Initialize(SDL_Window* window) {
   SDL_GetWindowSizeInPixels(window, &w, &h);
   Configure(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
 
+  spdlog::info(
+      "GpuContext: surface color space = {}",
+      output_is_p3_ ? (surface_format_ == wgpu::TextureFormat::RGBA16Float
+                           ? "extended linear Display P3 (EDR)"
+                           : "Display P3 (SDR)")
+                    : "untagged (sRGB fallback)");
+
   return true;
 }
 
@@ -218,6 +247,17 @@ wgpu::TextureFormat GpuContext::GetPreferredFormat() {
   wgpu::SurfaceCapabilities capabilities;
   surface_.GetCapabilities(adapter_, &capabilities);
 
+  // On an HDR display, prefer the float surface when offered: with the layer
+  // tagged extended-linear-Display-P3 (Configure()), values >1.0 reach the
+  // EDR compositor instead of clipping at SDR white.
+  if (is_hdr_) {
+    for (size_t i = 0; i < capabilities.formatCount; ++i) {
+      if (capabilities.formats[i] == wgpu::TextureFormat::RGBA16Float) {
+        return wgpu::TextureFormat::RGBA16Float;
+      }
+    }
+  }
+
   if (capabilities.formatCount > 0) {
     return static_cast<wgpu::TextureFormat>(capabilities.formats[0]);
   }
@@ -234,6 +274,20 @@ void GpuContext::Configure(uint32_t width, uint32_t height) {
   config.presentMode = present_mode_;
   config.alphaMode = wgpu::CompositeAlphaMode::Opaque;
   surface_.Configure(&config);
+
+#if defined(SDL_PLATFORM_MACOS)
+  // Tag the CAMetalLayer for Display-P3 output (extended-linear + EDR on an
+  // HDR display with a float surface; sRGB-encoded P3 otherwise). Done here —
+  // not via wgpu::SurfaceColorManagement, which the pinned Dawn rejects — and
+  // re-applied on every Configure (resize) defensively; Dawn's swapchain
+  // never resets it. On failure output_is_p3_ stays false and the resolve
+  // keeps today's plain-sRGB path.
+  if (metal_layer_) {
+    const bool hdr_extended =
+        is_hdr_ && surface_format_ == wgpu::TextureFormat::RGBA16Float;
+    output_is_p3_ = ConfigureMetalLayerColorSpace(metal_layer_, hdr_extended);
+  }
+#endif
 }
 
 wgpu::TextureView GpuContext::AcquireSurfaceTexture() {

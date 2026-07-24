@@ -206,6 +206,15 @@ class SceneRenderer {
   // accessor; SceneRenderer advances it each Render() and feeds VolumetricFog.
   FogSimulation& GetFogSimulation() { return fog_sim_; }
 
+  // Display-P3 output (Task: P3/HDR output). When set (from GpuContext::IsP3()),
+  // the tonemap resolve runs in mode 2: convert the linear-sRGB working buffer
+  // to Display-P3 primaries, then either pass linear through (float surface =
+  // EDR compositor path) or clamp + sRGB-curve encode (8-bit SDR-P3 surface).
+  // Off by default — the headless capture renderer must stay plain sRGB so
+  // profile-less PNGs read correctly. Takes effect on the next Render() call.
+  void SetOutputIsP3(bool p3) { output_is_p3_ = p3; }
+  bool GetOutputIsP3() const { return output_is_p3_; }
+
   // The generic post-scene modulation hook is carried on SceneContext
   // (SceneContext::post_pass), not as a renderer member — so it applies to any
   // renderer instance that renders the view, including the throwaway one built
@@ -234,6 +243,7 @@ class SceneRenderer {
 
   wgpu::TextureFormat surface_format_ = wgpu::TextureFormat::BGRA8Unorm;
   wgpu::TextureFormat accumulation_format_ = kAccumulationFormat;
+  bool output_is_p3_ = false;  // see SetOutputIsP3
 
   uint32_t width_ = 0;
   uint32_t height_ = 0;

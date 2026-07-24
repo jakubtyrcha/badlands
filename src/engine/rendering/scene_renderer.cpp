@@ -359,8 +359,12 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   frame_uniforms.screen_size =
       glm::vec2(static_cast<float>(width_), static_cast<float>(height_));
   frame_uniforms.enable_gtao = gtao_will_run ? 1u : 0u;
-  frame_uniforms.tonemap_mode = 0;     // kClamp (TonemapMode not ported;
-                                       // shaders/common/frame.wesl: 0 = kClamp)
+  // 0 = kClamp (plain sRGB clamp+gamma; also the headless-capture path so
+  // profile-less PNGs stay sRGB-referred); 2 = Display-P3 output (convert the
+  // linear-sRGB working buffer to P3 primaries at resolve; outputIsLinear then
+  // selects EDR passthrough vs SDR clamp+encode). 1 = luminance debug viz
+  // (unused here). See shaders/passes/tonemapping.wesl.
+  frame_uniforms.tonemap_mode = output_is_p3_ ? 2u : 0u;
   frame_uniforms.output_is_linear =
       (surface_format_ == wgpu::TextureFormat::RGBA16Float ||
        surface_format_ == wgpu::TextureFormat::R32Float)

@@ -11,12 +11,13 @@
 // `import package::common::frame::{frame}`: UiRenderer owns this buffer and
 // rewrites it on resize, leaving the pass independent of whether the scene
 // renderer ran at all.
-import package::common::color::{srgb_to_linear};
+import package::common::color::{srgb_to_linear, linear_to_srgb};
+import package::common::colorspace::{linear_srgb_to_linear_p3};
 
 struct UiFrame {
     screen_size: vec2<f32>,   // physical pixels
     output_is_linear: u32,    // 1 when the surface is linear (RGBA16Float)
-    _pad: u32,
+    output_is_p3: u32,        // 1 when the surface is tagged Display-P3
 }
 
 @group(0) @binding(0) var<uniform> ui_frame: UiFrame;
@@ -52,7 +53,18 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let coverage = textureSample(ui_atlas, ui_sampler, input.uv).r;
     var rgb = input.color.rgb;
-    if (ui_frame.output_is_linear == 1u) {
+    if (ui_frame.output_is_p3 == 1u) {
+        // sRGB-authored colors onto a Display-P3-tagged surface: decode,
+        // convert primaries, then match the surface transfer (linear on the
+        // float/EDR surface; sRGB-curve-encoded on the 8-bit SDR-P3 surface).
+        // sRGB is inside the P3 gamut, so the clamps are pure safety.
+        let lin_p3 = linear_srgb_to_linear_p3(srgb_to_linear(rgb));
+        if (ui_frame.output_is_linear == 1u) {
+            rgb = max(lin_p3, vec3<f32>(0.0));
+        } else {
+            rgb = linear_to_srgb(clamp(lin_p3, vec3<f32>(0.0), vec3<f32>(1.0)));
+        }
+    } else if (ui_frame.output_is_linear == 1u) {
         rgb = srgb_to_linear(rgb);
     }
     return vec4<f32>(rgb, input.color.a * coverage);

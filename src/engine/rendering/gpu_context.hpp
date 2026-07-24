@@ -67,9 +67,23 @@ class GpuContext {
   // GpuTimer). Enabled opportunistically in Initialize(); never required.
   bool HasTimestampQuery() const { return has_timestamp_query_; }
 
+  // True when the window's display reported HDR support at Initialize()
+  // (SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN). Decided once at startup; the
+  // SDL_EVENT_WINDOW_HDR_STATE_CHANGED event is deliberately not handled
+  // (ImGui's render-target format is fixed at init).
+  bool IsHdr() const { return is_hdr_; }
+
+  // True when the surface's CAMetalLayer was successfully tagged for
+  // Display-P3 output (linear-EDR P3 on HDR displays, sRGB-encoded P3 on
+  // SDR). The renderer keys its P3 resolve mode and the UI overlays key
+  // their primary conversion on this. False = untagged layer = today's
+  // sRGB behavior.
+  bool IsP3() const { return output_is_p3_; }
+
  private:
   static wgpu::Surface CreateSurface(wgpu::Instance instance,
-                                     SDL_Window* window);
+                                     SDL_Window* window,
+                                     void** out_metal_layer);
   static wgpu::Adapter RequestAdapter(wgpu::Instance instance,
                                       wgpu::RequestAdapterOptions const* opts);
   static wgpu::Device RequestDevice(wgpu::Instance instance,
@@ -86,6 +100,12 @@ class GpuContext {
   wgpu::PresentMode present_mode_ = wgpu::PresentMode::Fifo;
   bool has_r8unorm_storage_ = false;
   bool has_timestamp_query_ = false;
+  // The CAMetalLayer backing the surface (created in CreateSurface, macOS
+  // only) — the app tags its colorspace/EDR properties directly because the
+  // pinned Dawn rejects SurfaceColorManagement (see metal_layer_color.hpp).
+  void* metal_layer_ = nullptr;
+  bool is_hdr_ = false;        // display reported HDR at startup
+  bool output_is_p3_ = false;  // layer successfully tagged Display-P3
 };
 
 /// Flag set by the uncaptured WebGPU error callback. Callers may poll and

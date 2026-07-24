@@ -206,6 +206,15 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
 target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json)
+if(APPLE)
+    # CAMetalLayer color-space tagging (Display-P3 / EDR): the pinned Dawn
+    # rejects wgpu::SurfaceColorManagement, so GpuContext sets the layer
+    # properties directly — see src/engine/rendering/metal_layer_color.mm.
+    target_sources(badlands_engine PRIVATE src/engine/rendering/metal_layer_color.mm)
+    # QuartzCore: CAMetalLayer; CoreGraphics: the kCGColorSpace* name constants.
+    target_link_libraries(badlands_engine PUBLIC
+        "-framework QuartzCore" "-framework CoreGraphics")
+endif()
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
 # but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
 # this, glm::perspective() maps the near plane to NDC z=2.0 (outside the

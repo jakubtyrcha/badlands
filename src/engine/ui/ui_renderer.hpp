@@ -69,8 +69,14 @@ class UiRenderer {
   // the BGRA8Unorm window surface and the RGBA8Unorm offscreen screenshot
   // texture. A pipeline is baked against its colour format, so each needs its
   // own; `variants_` caches them.
+  //
+  // output_is_p3: true when the target surface's CAMetalLayer is tagged
+  // Display-P3 (GpuContext::IsP3()) -- the shader then converts its
+  // sRGB-authored colors to P3 primaries. A per-target property, not a
+  // per-format one: the window surface is P3-tagged, the offscreen
+  // screenshot texture is not (captures stay sRGB-referred).
   void Prepare(uint32_t width_px, uint32_t height_px,
-               wgpu::TextureFormat target_format);
+               wgpu::TextureFormat target_format, bool output_is_p3 = false);
 
   // Records the UI draw into an ALREADY-OPEN render pass on the target last
   // passed to Prepare (the app shares ImGui's LoadOp::Load pass, so game UI
@@ -111,6 +117,7 @@ class UiRenderer {
   uint32_t viewport_w_ = 0;
   uint32_t viewport_h_ = 0;
   uint32_t uploaded_is_linear_ = 0xffffffffu;  // force the first write
+  uint32_t uploaded_is_p3_ = 0xffffffffu;      // force the first write
 };
 
 }  // namespace badlands

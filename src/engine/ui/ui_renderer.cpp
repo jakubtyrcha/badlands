@@ -14,7 +14,7 @@ namespace {
 struct UiFrameUniform {
   float screen_size[2];
   uint32_t output_is_linear;
-  uint32_t pad;
+  uint32_t output_is_p3;
 };
 static_assert(sizeof(UiFrameUniform) == 16, "UiFrame must match ui.wesl");
 
@@ -178,20 +178,25 @@ UiRenderer::Variant* UiRenderer::EnsureVariant(
 }
 
 void UiRenderer::Prepare(uint32_t width_px, uint32_t height_px,
-                         wgpu::TextureFormat target_format) {
+                         wgpu::TextureFormat target_format,
+                         bool output_is_p3) {
   active_ = EnsureVariant(target_format);
   if (!active_ || !frame_ubo_) return;
+  const uint32_t is_p3 = output_is_p3 ? 1u : 0u;
   if (width_px == viewport_w_ && height_px == viewport_h_ &&
-      active_->output_is_linear == uploaded_is_linear_) {
+      active_->output_is_linear == uploaded_is_linear_ &&
+      is_p3 == uploaded_is_p3_) {
     return;
   }
   viewport_w_ = width_px;
   viewport_h_ = height_px;
   uploaded_is_linear_ = active_->output_is_linear;
+  uploaded_is_p3_ = is_p3;
   UiFrameUniform u{};
   u.screen_size[0] = static_cast<float>(width_px);
   u.screen_size[1] = static_cast<float>(height_px);
   u.output_is_linear = active_->output_is_linear;
+  u.output_is_p3 = is_p3;
   queue_.WriteBuffer(frame_ubo_, 0, &u, sizeof(u));
 }
 

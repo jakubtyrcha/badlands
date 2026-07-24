@@ -61,6 +61,8 @@ void SdlViewerApp::InitImGui(int width, int height) {
   info.FramebufferHeight = static_cast<uint32_t>(height);
   info.OutputIsLinear =
       (gpu_.GetSurfaceFormat() == wgpu::TextureFormat::RGBA16Float);  // false for BGRA8
+  info.OutputIsP3 = gpu_.IsP3();  // Display-P3-tagged surface: the backend
+                                  // converts ImGui's sRGB colors to P3
   ImGui_ImplWGPU_Init(&info);
 
   spdlog::info("SdlViewerApp: ImGui initialized");
@@ -129,6 +131,10 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
   renderer_.Initialize(gpu_.GetDevice(), gpu_.GetQueue(), pipeline_gen_.get(),
                        gpu_.GetSurfaceFormat(), static_cast<uint32_t>(width),
                        static_cast<uint32_t>(height), gpu_.HasR8UnormStorage());
+  // Display-P3 resolve (tonemap mode 2) when the surface's CAMetalLayer was
+  // tagged P3. NOT set on the headless capture path (SaveScreenshot builds its
+  // own renderer) — profile-less PNGs must stay sRGB-referred.
+  renderer_.SetOutputIsP3(gpu_.IsP3());
 #ifdef BADLANDS_PROFILING
   // Per-pass GPU timing in the live window (prints alongside the CPU profile).
   // Only when BADLANDS_PROFILE is set -- otherwise skip the timestamp-query
@@ -287,7 +293,7 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
       int w = 0, h = 0;
       SDL_GetWindowSizeInPixels(window_, &w, &h);
       ui->Prepare(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                  gpu_.GetSurfaceFormat());
+                  gpu_.GetSurfaceFormat(), gpu_.IsP3());
     }
 
     renderer_.Render(view_->GetCamera(), view_->GetRegistry(),
