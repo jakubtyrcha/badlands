@@ -299,6 +299,9 @@ add_library(badlands_game_lib STATIC
     # src/game/geometry/ploppable_rings.{h,cpp}).
     src/game/building_catalog.cpp
     src/game/geometry/ploppable_rings.cpp
+    # Task 1 (tree-LOD feature): general meshoptimizer-based mesh
+    # simplification helper (pure geometry math, no engine/tree types).
+    src/game/geometry/mesh_lod.cpp
     # Task S2.D: MaterialId -> PBR pack mapping (src/game/material_pack.h).
     src/game/material_pack.cpp
     # Task S2.G: walled AI-sandbox arena (src/game/arena.h), reusing
@@ -342,6 +345,10 @@ target_include_directories(badlands_game_lib PRIVATE
 # brainhost: wasmtime-backed brain wasm runtime (game/src/wasm_brain.cpp) --
 # mirrors how nav is linked into badlands_engine above.
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle brainhost)
+# meshoptimizer: backs src/game/geometry/mesh_lod.cpp's SimplifyMesh (Task 1,
+# tree-LOD feature). PRIVATE -- an implementation detail of mesh_lod.cpp, not
+# part of badlands_game_lib's public header surface.
+target_link_libraries(badlands_game_lib PRIVATE meshoptimizer)
 
 # Three thin executables, each with its own main, all linking badlands_engine
 # and badlands_game_lib. Each app grows its own real AppView.
