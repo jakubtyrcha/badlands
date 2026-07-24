@@ -34,6 +34,11 @@ constexpr float kRidgeSharpness = 3.5f;
 // non-dominant across seeds 1-3.
 constexpr float kBeltLo = 0.47f;
 constexpr float kBeltHi = 0.59f;
+// High-level relief slope: height meters per meter of horizontal WORLD
+// distance to the nearest plains (NOT per texel — regenerating at another
+// resolution must not change slopes; the units-guard test pins this).
+// Plains sit at the 0 m water datum; the farthest texel is the highest.
+constexpr float kSlopeMPerM = 0.15f;
 
 FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
                          FastNoiseLite::FractalType fractal) {
@@ -131,6 +136,14 @@ MapArtifacts generate_map(const MapGenParams& params) {
       });
 
   a.biome = classify_biomes(a.bedrock, compute_cutoffs(a.bedrock));
+
+  // First-pass relief: a cone field over the distance to the nearest plains.
+  // Ridge crests emerge along the mountain belts' medial axes; detail,
+  // erosion and water come later (see the heightmap spec).
+  const Field2D<float> dist = distance_to_plains(a.biome, texel);
+  for (size_t i = 0; i < dist.data.size(); ++i)
+    a.heightmap.data[i] = kSlopeMPerM * dist.data[i];
+
   return a;
 }
 

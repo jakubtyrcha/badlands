@@ -29,7 +29,22 @@ TEST_CASE("generate_map: same params -> byte-identical artifacts") {
   const auto b = generate_map(p);
   REQUIRE(a.bedrock.data == b.bedrock.data);
   REQUIRE(a.biome.data == b.biome.data);
-  REQUIRE(a.heightmap.data == std::vector<float>(64 * 64, 0.0f));
+  REQUIRE(a.heightmap.data == b.heightmap.data);
+}
+
+TEST_CASE("generate_map: plains sit at exactly 0 m, everything else above") {
+  MapGenParams p;
+  p.seed = 2;
+  p.resolution = {96, 96};
+  p.size_m = {384.0f, 384.0f};
+  const auto a = generate_map(p);
+  for (size_t i = 0; i < a.biome.data.size(); ++i) {
+    if (a.biome.data[i] == static_cast<uint8_t>(Biome::Plains)) {
+      REQUIRE(a.heightmap.data[i] == 0.0f);
+    } else {
+      REQUIRE(a.heightmap.data[i] > 0.0f);
+    }
+  }
 }
 
 TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
