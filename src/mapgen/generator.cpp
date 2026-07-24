@@ -18,14 +18,22 @@ namespace {
 // Wavelengths are world METERS — generation is resolution-independent.
 constexpr float kBaseWavelengthM = 250.0f;    // rolling continental base
 constexpr int kBaseOctaves = 4;
-constexpr float kRidgedWavelengthM = 120.0f;  // elongated crest lines
-constexpr int kRidgedOctaves = 3;
-constexpr float kRidgeWeight = 0.9f;  // how far crests rise above the base
+constexpr float kRidgedWavelengthM = 230.0f;  // elongated crest lines
+constexpr int kRidgedOctaves = 4;
+constexpr float kRidgeWeight = 2.5f;  // how far crests rise above the base
+// Sharpens the ridged term before it's weighted in, concentrating the top
+// quantile onto crest lines instead of the whole ridged-field envelope.
+constexpr float kRidgeSharpness = 3.5f;
 // The belt mask gates where ridges may appear (a few mountain belts per map,
-// not everywhere). Its wavelength is the map's own extent; the smoothstep
-// window admits roughly the top third of the belt field.
-constexpr float kBeltLo = 0.55f;
-constexpr float kBeltHi = 0.75f;
+// not everywhere). Its wavelength is the map's own extent, so this is a
+// single sample of ~1 noise period per map: the field's realized range
+// varies a lot by seed (observed raw max from 0.63 to 0.82 across 10 seeds
+// at these params) rather than reliably spanning [-1,1]. kBeltLo/kBeltHi are
+// an absolute threshold, not a quantile, so coverage is seed-dependent by
+// construction; these values were picked to keep coverage non-zero but
+// non-dominant across seeds 1-3.
+constexpr float kBeltLo = 0.47f;
+constexpr float kBeltHi = 0.59f;
 
 FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
                          FastNoiseLite::FractalType fractal) {
@@ -112,7 +120,8 @@ MapArtifacts generate_map(const MapGenParams& params) {
                                           to01(belt.GetNoise(wx, wy)));
             a.bedrock.at(x, y) =
                 to01(base.GetNoise(wx, wy)) +
-                kRidgeWeight * mask * to01(ridged.GetNoise(wx, wy));
+                kRidgeWeight * mask *
+                    std::pow(to01(ridged.GetNoise(wx, wy)), kRidgeSharpness);
           }
         }
       });
