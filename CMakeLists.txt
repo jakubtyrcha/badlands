@@ -405,6 +405,7 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/fog_generator.cpp
     src/mapgen/generator.cpp
     src/mapgen/hillshade.cpp
+    src/mapgen/hydrology.cpp
     src/mapgen/outputs.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
 target_include_directories(badlands_mapgen_lib PRIVATE
@@ -519,6 +520,23 @@ target_include_directories(badlands_generator_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_generator_tests COMMAND badlands_generator_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_erosion_tests: hydrology + erosion sim + detail filter — structural
+# invariants on synthetic terrains (routing, spill levels, solver bounds,
+# layer bookkeeping). Pure CPU, pattern of badlands_generator_tests.
+add_executable(badlands_erosion_tests
+    src/mapgen/hydrology_tests.cpp
+    src/mapgen/hydrology.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_erosion_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_erosion_tests COMMAND badlands_erosion_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
