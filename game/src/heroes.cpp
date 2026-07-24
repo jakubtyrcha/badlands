@@ -195,8 +195,11 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             reg.emplace<Skills>(e, sk);
 
             // Intention contract (game/src/intention.h): heroes only, spawned
-            // empty -- INERT this slice, nothing writes/reads them via a
-            // think path yet.
+            // empty. Live: EventInbox is written by the engine's guaranteed-
+            // wake events (DamageTaken/ThreatSighted/MoveBlocked/
+            // IntentionEnded) and CurrentIntention by apply_intention; both
+            // feed should_wake and are read every wake by apply_intention
+            // (wasm_brain.cpp), which packs them into the wire.
             reg.emplace<EventInbox>(e);
             reg.emplace<CurrentIntention>(e);
             break;

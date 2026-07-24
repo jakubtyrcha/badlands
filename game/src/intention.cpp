@@ -44,12 +44,13 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     entt::registry& reg = game.registry;
     const glm::vec2 self_pos = reg.get<Position>(e).pos;
 
-    // Finding 1 (task-3-brief.md): mark the think UNCONDITIONALLY, before any
-    // validation/adoption below -- even a rejected suggestion or an explicit
-    // IntentionKind::None means the brain just looked at this hero's inbox,
-    // so should_wake must not treat those same, already-considered events as
-    // a fresh reason to wake it again next tick (see should_wake's own
-    // comment). Fetched once here and reused by the tail below.
+    // Mark the think UNCONDITIONALLY, before any validation/adoption below --
+    // even a rejected suggestion or an explicit IntentionKind::None means the
+    // brain just looked at this hero's inbox, so should_wake (docs/design/
+    // intention-contract.html §2) must not treat those same,
+    // already-considered events as a fresh reason to wake it again next tick
+    // (see should_wake's own comment). Fetched once here and reused by the
+    // tail below.
     CurrentIntention& ci = reg.get<CurrentIntention>(e);
     ci.last_think_millis = game.world_millis;
 
@@ -143,9 +144,9 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // a spurious-wake reminder only. Logged via enqueue_set_behavior's
     // duration field, so the wake schedule is IN the command log (the
     // SetBehavior handler, command.cpp, derives CurrentIntention::
-    // wake_at_millis from it too, so
-    // a replay reconstructs the schedule from the log alone -- finding 2,
-    // task-3-brief.md). `force=true`: every ADOPTED intention is a real
+    // wake_at_millis from it too, so a replay reconstructs the schedule from
+    // the log alone -- see docs/design/intention-contract.html §6.
+    // `force=true`: every ADOPTED intention is a real
     // decision (a wake, gated sparsely by should_wake) and must reach the
     // log even when activity_label happens to repeat the previous wake's --
     // enqueue_set_behavior's ordinary edge-trigger exists to dedupe a
@@ -200,17 +201,20 @@ void advance_intentions(BadlandsGame& game) {
         inbox.count = kept;
     }
 
-    // Completion/abort detection, v1: MoveTo completes on arrival, Idle
-    // completes when its deadline passes -- Attack/Buy stay "running" until
-    // the flip task gives them real lifecycles (own guaranteed-wake events
-    // land with that work, not here). Shoot/Chat abort when their named
-    // target dies or is gone; Enter/EnterHome abort when the building they
-    // named is no longer there. Dispatches on ci.kind EXPLICITLY (a switch,
-    // not "does ci.target_slot happen to be UINT32_MAX") -- apply_intention
-    // stamps target_slot/arg/point only for the kinds that use them
-    // (zeroed for everyone else), so kind is the one honest signal for which
-    // check applies; inferring it from a field's value would silently
-    // reclassify a kind whose field was populated for an unrelated reason.
+    // Completion/abort detection, v2: MoveTo completes on arrival, Idle
+    // completes when its deadline passes. Attack/Buy have no completion
+    // criterion of their own -- they simply run until a fresh wake (idle-hint
+    // expiry, an inbox event) replaces them with the next adopted suggestion;
+    // a real per-intention lifecycle (its own guaranteed-wake completion
+    // event) is queued for the skills slice, not this one. Shoot/Chat abort
+    // when their named target dies or is gone; Enter/EnterHome abort when
+    // the building they named is no longer there. Dispatches on ci.kind
+    // EXPLICITLY (a switch, not "does ci.target_slot happen to be
+    // UINT32_MAX") -- apply_intention stamps target_slot/arg/point only for
+    // the kinds that use them (zeroed for everyone else), so kind is the one
+    // honest signal for which check applies; inferring it from a field's
+    // value would silently reclassify a kind whose field was populated for
+    // an unrelated reason.
     for (auto [e, ci] : reg.view<CurrentIntention>().each()) {
         if (ci.kind == IntentionKind::None) {
             continue;
@@ -264,7 +268,8 @@ void advance_intentions(BadlandsGame& game) {
             case IntentionKind::Attack:
             case IntentionKind::Buy:
             case IntentionKind::None:
-                break;  // running until the flip task (None already `continue`d above)
+                break;  // no completion criterion of their own -- superseded by
+                        // the next adopted suggestion (None already `continue`d above)
         }
 
         if (ended) {
@@ -295,10 +300,10 @@ bool should_wake(const BadlandsGame& game, entt::entity e) {
     if (const auto* inbox = game.registry.try_get<EventInbox>(e)) {
         for (int32_t i = 0; i < inbox->count; ++i) {
             // Strictly AFTER the last think, not `started_at_millis`/`>=`
-            // (finding 1, task-3-brief.md): events are written BEFORE the
-            // think-dispatch loop within the SAME tick (sim.cpp's tick_world),
-            // so an event that arrived the same tick a wake already
-            // considered it would otherwise satisfy `>=` forever after
+            // (docs/design/intention-contract.html §2): events are written
+            // BEFORE the think-dispatch loop within the SAME tick (sim.cpp's
+            // tick_world), so an event that arrived the same tick a wake
+            // already considered it would otherwise satisfy `>=` forever after
             // (`ci->last_think_millis` never advances again once the hero
             // goes back to sleep) -- an immediate, spurious re-wake next
             // tick for no NEW reason. last_think_millis is stamped on EVERY

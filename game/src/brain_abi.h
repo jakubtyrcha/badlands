@@ -255,10 +255,10 @@ typedef struct BlEvent {
 } BlEvent;
 
 // --- BlViewWire ------------------------------------------------------------
-// The whole per-tick view buffer: bl_view_buf() points at one of these.
+// The whole per-wake view buffer: bl_view_buf() points at one of these.
 // Buffer addresses are fixed for the instance's lifetime (src/crates/
 // brainhost/include/brainhost.h): the host queries bl_view_buf() ONCE, at
-// instantiation, and reuses that address for every later tick -- so this
+// instantiation, and reuses that address for every later wake -- so this
 // struct must live at a fixed address for as long as the instance does (an
 // ordinary global variable, as every shipping brain in scripts/brains/nim
 // does, satisfies this trivially).
@@ -283,7 +283,7 @@ typedef struct BlViewWire {
 } BlViewWire;
 
 // --- BlSuggestionWire --------------------------------------------------------
-// The whole per-tick suggestion buffer: bl_out_buf() points at one of these.
+// The whole per-wake suggestion buffer: bl_out_buf() points at one of these.
 // Same "queried once, at instantiation" contract as BlViewWire above -- this
 // struct must live at a fixed address for the instance's whole lifetime too.
 //

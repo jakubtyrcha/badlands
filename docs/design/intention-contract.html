@@ -52,8 +52,6 @@
   .callout dt { color: var(--accent); font-weight: bold; }
   .callout dd { margin: 0 0 .6rem 0; color: var(--fg); }
   .note { color: var(--mut); font-size: .92em; font-style: italic; }
-  .skill-note { color: var(--accent-2); }
-  toc, .toc { }
   .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1.2rem; }
   .toc ol { margin: .3rem 0; padding-left: 1.3rem; }
   .toc a { text-decoration: none; }
@@ -239,7 +237,7 @@
 
   <!-- reasons annotation -->
   <rect class="box-dashed" x="560" y="240" width="180" height="150" rx="6"></rect>
-  <text class="lbl2" x="570" y="256">should_wake() == true:</text>
+  <text class="lbl2" x="570" y="256">guaranteed to wake on:</text>
   <text class="lbl2" x="575" y="272">• no CurrentIntention</text>
   <text class="lbl2" x="575" y="286">• INTENTION_ENDED event</text>
   <text class="lbl2" x="575" y="300">• DAMAGE_TAKEN event</text>
@@ -264,7 +262,7 @@
   <path class="edge-return" d="M 525 505 C 660 505, 660 30, 500 30" marker-end="url(#arrow-return)"></path>
   <text class="edge-lbl" x="650" y="270" transform="rotate(-90 650 270)" text-anchor="middle" style="fill:var(--accent); font-weight:bold;">back to Sleeping</text>
 </svg>
-<p class="diagram-cap">Spurious wakeups are allowed at any tick — a brain woken for no listed reason must still re-decide idempotently (re-suggesting the same intention is a valid answer). Bypass statuses skip the think entirely: the mechanism exists from v1, but no v1 status (<code>BL_ST_CHATTING</code>/<code>MELEE_LOCKED</code>/<code>INSIDE_BUILDING</code>) actually sets it — all three are advisory only this slice. The first status that bypasses thinking is an implementation detail of a future slice.</p>
+<p class="diagram-cap">Spurious wakeups are allowed at any tick — a brain woken for no listed reason must still re-decide idempotently (re-suggesting the same intention is a valid answer). Bypass statuses skip the think entirely: the mechanism drawn above exists from v1, but no v1 status (<code>BL_ST_CHATTING</code>/<code>MELEE_LOCKED</code>/<code>INSIDE_BUILDING</code>) actually sets it — all three are advisory only this slice. The first status that bypasses thinking is an implementation detail of a future slice. Separately, an <code>InsideBuilding</code> hero is skipped by the per-hero brain loop outright (a component-exclusion in the loop itself, before <code>should_wake</code> is ever consulted) — a bypass by exclusion, not the status-bypass mechanism this diagram draws.</p>
 </div>
 
 <!-- =================================================================== -->
@@ -340,71 +338,75 @@
 </div>
 
 <div class="diagram-wrap">
-<svg viewBox="0 0 600 130" role="img" aria-label="BlEvent byte layout: ttl_millis int64, kind int32, source_slot uint32, param int32, explicit pad, 24 bytes total.">
-  <rect class="cell-i64" x="20" y="20" width="180" height="60"></rect>
-  <text class="lbl2" x="110" y="46" text-anchor="middle">ttl_millis</text>
-  <text class="lbl2" x="110" y="62" text-anchor="middle">int64_t</text>
-  <rect class="cell-i32" x="200" y="20" width="90" height="60"></rect>
-  <text class="lbl2" x="245" y="46" text-anchor="middle">kind</text>
-  <text class="lbl2" x="245" y="62" text-anchor="middle">int32_t</text>
-  <rect class="cell-i32" x="290" y="20" width="100" height="60"></rect>
-  <text class="lbl2" x="340" y="46" text-anchor="middle">source_slot</text>
-  <text class="lbl2" x="340" y="62" text-anchor="middle">uint32_t</text>
-  <rect class="cell-i32" x="390" y="20" width="90" height="60"></rect>
-  <text class="lbl2" x="435" y="46" text-anchor="middle">param</text>
-  <text class="lbl2" x="435" y="62" text-anchor="middle">int32_t</text>
-  <rect class="cell-pad" x="480" y="20" width="90" height="60"></rect>
-  <text class="lbl2" x="525" y="46" text-anchor="middle">_pad</text>
-  <text class="lbl2" x="525" y="62" text-anchor="middle">uint32_t</text>
+<svg viewBox="0 0 740 130" role="img" aria-label="BlEvent byte layout: at_millis int64, ttl_millis int64, kind uint32, source_slot uint32, param float, explicit pad, 32 bytes total.">
+  <rect class="cell-i64" x="20" y="20" width="160" height="60"></rect>
+  <text class="lbl2" x="100" y="46" text-anchor="middle">at_millis</text>
+  <text class="lbl2" x="100" y="62" text-anchor="middle">int64_t</text>
+  <rect class="cell-i64" x="180" y="20" width="160" height="60"></rect>
+  <text class="lbl2" x="260" y="46" text-anchor="middle">ttl_millis</text>
+  <text class="lbl2" x="260" y="62" text-anchor="middle">int64_t</text>
+  <rect class="cell-i32" x="340" y="20" width="80" height="60"></rect>
+  <text class="lbl2" x="380" y="46" text-anchor="middle">kind</text>
+  <text class="lbl2" x="380" y="62" text-anchor="middle">uint32_t</text>
+  <rect class="cell-i32" x="420" y="20" width="110" height="60"></rect>
+  <text class="lbl2" x="475" y="46" text-anchor="middle">source_slot</text>
+  <text class="lbl2" x="475" y="62" text-anchor="middle">uint32_t</text>
+  <rect class="cell-i32" x="530" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="575" y="46" text-anchor="middle">param</text>
+  <text class="lbl2" x="575" y="62" text-anchor="middle">float</text>
+  <rect class="cell-pad" x="620" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="665" y="46" text-anchor="middle">_pad</text>
+  <text class="lbl2" x="665" y="62" text-anchor="middle">uint32_t</text>
   <text class="offset" x="20" y="94">0</text>
-  <text class="offset" x="200" y="94">8</text>
-  <text class="offset" x="290" y="94">12</text>
-  <text class="offset" x="390" y="94">16</text>
-  <text class="offset" x="480" y="94">20</text>
-  <text class="offset" x="570" y="94">24</text>
-  <text class="lbl2" x="20" y="112" style="fill:var(--mut)">BlEvent — 24 B. kind ∈ BL_EV_*. param carries e.g. INTENTION_ENDED's completed(1)/aborted(0).</text>
+  <text class="offset" x="180" y="94">8</text>
+  <text class="offset" x="340" y="94">16</text>
+  <text class="offset" x="420" y="94">20</text>
+  <text class="offset" x="530" y="94">24</text>
+  <text class="offset" x="620" y="94">28</text>
+  <text class="offset" x="710" y="94">32</text>
+  <text class="lbl2" x="20" y="112" style="fill:var(--mut)">BlEvent — 32 B. kind ∈ BL_EV_*. param carries e.g. INTENTION_ENDED's completed(1)/aborted(0); unused (0) for THREAT_SIGHTED/MOVE_BLOCKED.</text>
 </svg>
 </div>
 
 <div class="diagram-wrap">
-<svg viewBox="0 0 960 150" role="img" aria-label="BlSuggestionWire byte layout: duration_millis int64, idle_hint_millis int64, kind int32, point_x float, point_z float, target_slot uint32, arg int32, activity_id int32, 40 bytes total.">
+<svg viewBox="0 0 960 150" role="img" aria-label="BlSuggestionWire byte layout: idle_hint_millis int64, duration_millis int64, intention_kind int32, activity_label int32, point_x float, point_z float, target_slot uint32, arg int32, 40 bytes total.">
   <rect class="cell-i64" x="20" y="20" width="170" height="60"></rect>
-  <text class="lbl2" x="105" y="46" text-anchor="middle">duration_millis</text>
+  <text class="lbl2" x="105" y="46" text-anchor="middle">idle_hint_millis</text>
   <text class="lbl2" x="105" y="62" text-anchor="middle">int64_t</text>
   <rect class="cell-i64" x="190" y="20" width="170" height="60"></rect>
-  <text class="lbl2" x="275" y="46" text-anchor="middle">idle_hint_millis</text>
+  <text class="lbl2" x="275" y="46" text-anchor="middle">duration_millis</text>
   <text class="lbl2" x="275" y="62" text-anchor="middle">int64_t</text>
   <rect class="cell-i32" x="360" y="20" width="90" height="60"></rect>
   <text class="lbl2" x="405" y="46" text-anchor="middle">kind</text>
   <text class="lbl2" x="405" y="62" text-anchor="middle">int32_t</text>
-  <rect class="cell-i32" x="450" y="20" width="90" height="60"></rect>
-  <text class="lbl2" x="495" y="46" text-anchor="middle">point_x</text>
-  <text class="lbl2" x="495" y="62" text-anchor="middle">float</text>
-  <rect class="cell-i32" x="540" y="20" width="90" height="60"></rect>
-  <text class="lbl2" x="585" y="46" text-anchor="middle">point_z</text>
-  <text class="lbl2" x="585" y="62" text-anchor="middle">float</text>
-  <rect class="cell-i32" x="630" y="20" width="100" height="60"></rect>
-  <text class="lbl2" x="680" y="46" text-anchor="middle">target_slot</text>
-  <text class="lbl2" x="680" y="62" text-anchor="middle">uint32_t</text>
-  <rect class="cell-i32" x="730" y="20" width="90" height="60"></rect>
-  <text class="lbl2" x="775" y="46" text-anchor="middle">arg</text>
-  <text class="lbl2" x="775" y="62" text-anchor="middle">int32_t</text>
-  <rect class="cell-i32" x="820" y="20" width="100" height="60"></rect>
-  <text class="lbl2" x="870" y="46" text-anchor="middle">activity_id</text>
-  <text class="lbl2" x="870" y="62" text-anchor="middle">int32_t</text>
+  <rect class="cell-i32" x="450" y="20" width="110" height="60"></rect>
+  <text class="lbl2" x="505" y="46" text-anchor="middle">activity_label</text>
+  <text class="lbl2" x="505" y="62" text-anchor="middle">int32_t</text>
+  <rect class="cell-i32" x="560" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="605" y="46" text-anchor="middle">point_x</text>
+  <text class="lbl2" x="605" y="62" text-anchor="middle">float</text>
+  <rect class="cell-i32" x="650" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="695" y="46" text-anchor="middle">point_z</text>
+  <text class="lbl2" x="695" y="62" text-anchor="middle">float</text>
+  <rect class="cell-i32" x="740" y="20" width="100" height="60"></rect>
+  <text class="lbl2" x="790" y="46" text-anchor="middle">target_slot</text>
+  <text class="lbl2" x="790" y="62" text-anchor="middle">uint32_t</text>
+  <rect class="cell-i32" x="840" y="20" width="90" height="60"></rect>
+  <text class="lbl2" x="885" y="46" text-anchor="middle">arg</text>
+  <text class="lbl2" x="885" y="62" text-anchor="middle">int32_t</text>
 
   <text class="offset" x="20" y="94">0</text>
   <text class="offset" x="190" y="94">8</text>
   <text class="offset" x="360" y="94">16</text>
   <text class="offset" x="450" y="94">20</text>
-  <text class="offset" x="540" y="94">24</text>
-  <text class="offset" x="630" y="94">28</text>
-  <text class="offset" x="730" y="94">32</text>
-  <text class="offset" x="820" y="94">36</text>
-  <text class="offset" x="910" y="94">40</text>
+  <text class="offset" x="560" y="94">24</text>
+  <text class="offset" x="650" y="94">28</text>
+  <text class="offset" x="740" y="94">32</text>
+  <text class="offset" x="840" y="94">36</text>
+  <text class="offset" x="930" y="94">40</text>
 
   <text class="lbl2" x="20" y="112" style="fill:var(--mut)">BlSuggestionWire — 40 B. kind ∈ BL_INT_*. One of these per wake, never more.</text>
-  <text class="lbl2" x="20" y="128" style="fill:var(--mut)">activity_id: inspection/histogram label only — carries no semantics.</text>
+  <text class="lbl2" x="20" y="128" style="fill:var(--mut)">activity_label: inspection/histogram label only — carries no semantics.</text>
   <text class="lbl2" x="20" y="144" style="fill:var(--mut)">idle_hint_millis: scheduling advice ("you don't need me for X ms"), not a promise in either direction.</text>
 </svg>
 </div>
@@ -490,14 +492,14 @@
   <tbody>
     <tr><td><code>BL_EV_DAMAGE_TAKEN</code></td><td><code>source_slot</code> = attacker, if known</td><td>This hero took damage.</td></tr>
     <tr><td><code>BL_EV_THREAT_SIGHTED</code></td><td><code>source_slot</code> = the threat</td><td>A new hostile entered perception.</td></tr>
-    <tr><td><code>BL_EV_MOVE_BLOCKED</code></td><td><code>param</code> encodes the refused step</td><td>A movement step was refused.</td></tr>
+    <tr><td><code>BL_EV_MOVE_BLOCKED</code></td><td><code>param</code> unused (0) — the refused point lives on the sibling <code>MoveBlocked</code> component, not this event</td><td>A movement step was refused.</td></tr>
     <tr><td><code>BL_EV_INTENTION_ENDED</code></td><td><code>param</code> = completed(1) / aborted(0)</td><td>The running <code>CurrentIntention</code> finished, either way.</td></tr>
   </tbody>
 </table>
 
 <h3><code>BL_ST_*</code> — status kinds (<code>{kind, remaining_millis}</code>)</h3>
 <table>
-  <caption>All three are advisory in this slice — the brain may inspect or ignore them; none bypasses thinking (§2). Curses/shields and any status that does bypass thinking arrive in later slices.</caption>
+  <caption>All three are advisory in this slice — the brain may inspect or ignore them; none bypasses thinking via the status-bypass mechanism (§2). Curses/shields and any status that does bypass thinking that way arrive in later slices. <code>BL_ST_INSIDE_BUILDING</code> is the one exception in effect, not mechanism: an <code>InsideBuilding</code> hero never reaches <code>should_wake</code> at all, skipped by the per-hero brain loop itself (§2).</caption>
   <thead>
     <tr><th>Kind</th><th>Meaning</th></tr>
   </thead>
@@ -513,7 +515,7 @@
 <p><code>state = f(initial config, command log, N ticks)</code> must hold exactly as it does today. Nothing about replay changes — only which systems produce the log changes.</p>
 
 <div class="diagram-wrap">
-<svg viewBox="0 0 780 260" role="img" aria-label="Live run calls should_wake, react, and apply_intention, logging a Command. Replay reads the same Command from the log and calls apply_intention without ever calling react, reaching the same world state either way.">
+<svg viewBox="0 0 780 300" role="img" aria-label="Live run calls should_wake, react, and apply_intention, logging a Command. Replay reads the same Command from the log and calls apply_command, not apply_intention -- react is never called and CurrentIntention.kind stays None -- yet reaches the same observable world state either way.">
   <text class="lbl2" x="20" y="24" style="fill:var(--mut)">live</text>
   <rect class="box" x="20" y="34" width="90" height="50" rx="6"></rect>
   <text class="lbl2" x="65" y="63" text-anchor="middle">tick</text>
@@ -544,14 +546,16 @@
   <text class="lbl2" x="215" y="173" text-anchor="middle">Command (from log)</text>
   <line class="edge" x1="290" y1="169" x2="320" y2="169" marker-end="url(#arrow)"></line>
 
-  <rect class="box" x="320" y="144" width="130" height="50" rx="6"></rect>
-  <text class="lbl2" x="385" y="173" text-anchor="middle">apply_intention</text>
+  <rect class="box" x="320" y="144" width="150" height="50" rx="6"></rect>
+  <text class="lbl2" x="395" y="166" text-anchor="middle">apply_command</text>
+  <text class="lbl2" x="395" y="182" text-anchor="middle" style="fill:var(--mut)">SetBehavior → wake_at only</text>
 
-  <rect class="box-dashed" x="290" y="204" width="180" height="40" rx="6"></rect>
-  <text class="lbl2" x="380" y="228" text-anchor="middle">react() — never called</text>
-  <line class="edge-dash" x1="215" y1="194" x2="330" y2="204"></line>
+  <rect class="box-dashed" x="290" y="214" width="210" height="56" rx="6"></rect>
+  <text class="lbl2" x="395" y="234" text-anchor="middle">react() — never called</text>
+  <text class="lbl2" x="395" y="250" text-anchor="middle">CurrentIntention.kind: stays None</text>
+  <line class="edge-dash" x1="215" y1="194" x2="360" y2="214"></line>
 </svg>
-<p class="diagram-cap">The idle hint rides <em>inside</em> the logged Command's payload — the same place today's deliberation-pause duration already lives. It is recorded once, at decision time, never recomputed. Replay re-applies the logged Command and lets the same deterministic engine systems run; it never calls <code>react()</code>, so <code>should_wake</code>'s outcome need not even be re-evaluated as a wasm call — the wake schedule is already baked into the log.</p>
+<p class="diagram-cap">The idle hint rides <em>inside</em> the logged Command's payload — the same place today's deliberation-pause duration already lives. It is recorded once, at decision time, never recomputed. Replay never calls <code>apply_intention</code> — only <code>react()</code>'s live caller does that. It re-applies each logged <code>Command</code> through the ordinary <code>apply_command</code> mutation point instead (the <code>SetBehavior</code> handler derives <code>wake_at_millis</code> from the command's payload, and every per-kind command — <code>MoveTo</code>, <code>Attack</code>, <code>EnterBuilding</code>, ... — replays its own world mutation the same way any other command does). <code>CurrentIntention.kind</code>/<code>point</code>/<code>target_slot</code>/<code>arg</code> are stamped only inside <code>apply_intention</code> itself, so they stay <code>None</code>/default on a replayed world; the replayed command stream still reproduces the same observable positions, hp, and building occupancy, since those come from the per-kind commands, not from <code>CurrentIntention</code>. <code>should_wake</code>'s outcome need not be re-evaluated as a wasm call either way — the wake schedule is already baked into the log.</p>
 </div>
 
 <footer>

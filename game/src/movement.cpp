@@ -185,7 +185,7 @@ void plan_paths(BadlandsGame& game, float dt) {
 
         np.repath_cooldown = std::max(0.0f, np.repath_cooldown - dt);
         // Repath when the resolved goal has drifted from the planned route's end.
-        // Applies to Kind::Point too: scripted pursuit re-issues intent_move_to
+        // Applies to Kind::Point too: scripted pursuit re-issues enqueue_move_to
         // (a Point) at the target's fresh position every tick, so a moving Point
         // must re-plan or the pursuer trails one route-length behind. A static
         // Point (a committed move order) has back()==goal, so it never repaths.
@@ -211,9 +211,10 @@ void plan_paths(BadlandsGame& game, float dt) {
 
     for (const auto& [e, point] : blocked) {
         game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
-        // Intention contract (inert this slice): mirror the refusal into the
-        // inbox at the same site MoveBlocked itself is written, so the two
-        // never drift apart. No-ops for non-heroes (no EventInbox).
+        // Intention contract: mirror the refusal into the inbox at the same
+        // site MoveBlocked itself is written -- a guaranteed-wake event that
+        // feeds should_wake (docs/design/intention-contract.html §2) -- so
+        // the two never drift apart. No-ops for non-heroes (no EventInbox).
         InboxEvent ev;
         ev.kind = InboxEventKind::MoveBlocked;
         push_inbox_event(game, e, ev);
@@ -266,9 +267,10 @@ void follow_paths(BadlandsGame& game, float dt) {
 
     for (const auto& [e, point] : blocked) {
         game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
-        // Intention contract (inert this slice): mirror the refusal into the
-        // inbox at the same site MoveBlocked itself is written, so the two
-        // never drift apart. No-ops for non-heroes (no EventInbox).
+        // Intention contract: mirror the refusal into the inbox at the same
+        // site MoveBlocked itself is written -- a guaranteed-wake event that
+        // feeds should_wake (docs/design/intention-contract.html §2) -- so
+        // the two never drift apart. No-ops for non-heroes (no EventInbox).
         InboxEvent ev;
         ev.kind = InboxEventKind::MoveBlocked;
         push_inbox_event(game, e, ev);

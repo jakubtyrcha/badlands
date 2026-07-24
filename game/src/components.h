@@ -273,9 +273,10 @@ struct ChattingState {
 // --- intention contract: engine-side state ----------------------------------
 // Native mirrors of the wire vocabularies BL_EV_*/BL_INT_* (see
 // docs/design/intention-contract.html), same append-only discipline as
-// ActivityId/CommandKind: never renumber, never reuse a value. INERT this
-// slice -- see game/src/intention.h for the engine functions that read/write
-// these; nothing consumes should_wake/apply_intention outside tests yet.
+// ActivityId/CommandKind: never renumber, never reuse a value. Live: sim.cpp's
+// think loop gates every wasm hero's wake on should_wake and adopts each
+// wake's suggestion via apply_intention -- see game/src/intention.h for the
+// engine functions that read/write these.
 
 // Something an engine system wants the brain to know about on its next wake.
 enum class InboxEventKind : int32_t { None = 0, DamageTaken, ThreatSighted, MoveBlocked, IntentionEnded };

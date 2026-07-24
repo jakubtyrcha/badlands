@@ -56,10 +56,11 @@ void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot
                                    .at_millis = game.world_millis});
     }
 
-    // Intention contract (inert this slice): mirror the hit into the
-    // victim's inbox. This is the single choke point both damage sites
-    // (fire_attack's melee branch, advance_projectiles' ranged resolution)
-    // route through, so it is the one place a DamageTaken event needs
+    // Intention contract: mirror the hit into the victim's inbox -- a
+    // guaranteed-wake event that feeds should_wake (docs/design/
+    // intention-contract.html §2). This is the single choke point both
+    // damage sites (fire_attack's melee branch, advance_projectiles' ranged
+    // resolution) route through, so it is the one place a DamageTaken event needs
     // writing. push_inbox_event no-ops for a non-hero victim (no EventInbox),
     // which is what makes "an inbox only if hero" automatic rather than a
     // check here.

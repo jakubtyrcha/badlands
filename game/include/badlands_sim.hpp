@@ -301,10 +301,16 @@ struct HeroFactors {
     // (evicted) on the next tick's update pass. Buildings never expire this
     // way, so this only bounds char entries.
     int64_t memory_ttl_millis = 10000;
-    // Deliberation pause between goal changes, drawn uniformly
-    // from this range. The prototype day is 120 s, so an in-game minute is
-    // ~83 ms of sim time and the default range is roughly 0-10 in-game minutes.
-    // Setting think_max_millis to 0 disables deliberation entirely.
+    // Vestigial: was the deliberation pause between goal changes, drawn
+    // uniformly from this range (the prototype day is 120 s, so an in-game
+    // minute was ~83 ms of sim time and the default range was roughly 0-10
+    // in-game minutes). Deliberation itself is deleted -- the intention
+    // contract (game/src/intention.h) replaced it, and no consumer downstream
+    // of factors reads either field anymore (sim.cpp's sanitize_factors is
+    // the sole remaining touch, keeping the min<=max pair-invariant rather
+    // than acting on the values). Kept only pending a wire/factors
+    // retirement decision -- removing the fields outright would ripple into
+    // the JSON manifest schema, not just this struct.
     int64_t think_min_millis = 0;
     int64_t think_max_millis = 833;
     // Per-class preference table (see ActivityWeights). Filled with the

@@ -321,8 +321,8 @@ void tick_world(BadlandsGame& g, float dt) {
     advance_projectiles(g, dt);
 
     // Intention contract: inbox TTL housekeeping + CurrentIntention
-    // completion/abort detection (inert this slice -- see intention.h).
-    // Placed AFTER movement/combat so arrival (MoveTo) and a
+    // completion/abort detection (see intention.h). Placed AFTER
+    // movement/combat so arrival (MoveTo) and a
     // just-landed-lethal-hit target (the dead-target abort) both see this
     // tick's final positions/hp, and BEFORE the death sweep below so a
     // target that died this very tick is still readable as "dead" via
@@ -548,13 +548,14 @@ namespace {
 // sim_internal.hpp: tests exercise it only through Sim::SetFactors/Factors.
 //
 // Rules:
-//  - hero.think_max_millis/think_min_millis: restores the invariant
-//    decode_decision (wasm_brain.cpp) assumes of think_max_millis (>= 0) and
-//    of the pair (min <= max) -- an inverted pair draws a pause outside
-//    [0, think_max_millis] (behaviours/rng.h's range_i64 returns `lo` when
-//    hi <= lo), which decode_decision rejects as a wire violation and
-//    brain_fatal()s (std::abort). Do not touch decode_decision's check
-//    itself; this is what keeps its assumption true instead.
+//  - hero.think_max_millis/think_min_millis: vestigial (badlands_sim.hpp's
+//    own comment on the fields has the full account -- the deliberation pause
+//    they used to size is deleted, replaced by the intention contract) and
+//    unread by decode_suggestion (wasm_brain.cpp), which has no think_max/
+//    think_min check of any kind in v2. Clamped here purely to keep the pair
+//    internally sane (max >= 0, min in [0, max]) for as long as the fields
+//    stay in the manifest schema -- not because anything downstream still
+//    relies on the invariant.
 //  - hero.memory_ttl_millis: 0 means "remember only the tick you saw them"
 //    (see the eviction comment in entity_memory.cpp) -- negative would evict
 //    a just-seen entry (age 0) the same tick it was recorded.

@@ -42,10 +42,11 @@ import rng
 
 include brain_scaffold
 
-# EVERY hero class runs this one table (town_brain.cpp's own comment: "there
-# is no per-class list" -- what a class does, how eagerly, and whether it has
-# an activity at all is entirely the weight table). List order matches
-# kHeroActivities (town_brain.cpp) exactly -- it is the tie-break.
+# EVERY hero class runs this one table (the now-deleted town_brain.cpp's own
+# comment: "there is no per-class list" -- what a class does, how eagerly,
+# and whether it has an activity at all is entirely the weight table). List
+# order matched town_brain.cpp's kHeroActivities exactly when this table was
+# ported from it -- it is the tie-break.
 const kHeroActivities = [
   ActivityEntry(id: ActExplore, band: bNormal, score: scoreExplore, act: actExplore),
   ActivityEntry(id: ActGoHome, band: bNormal, score: scoreGoHome, act: actGoHome),

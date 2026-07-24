@@ -646,8 +646,7 @@ add_executable(badlands_game_tests
     game/tests/skills_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
-    # Intention contract engine groundwork: inbox, wake rule, apply seam
-    # (game/src/intention.h). Inert this slice.
+    # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
     game/tests/intention_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )

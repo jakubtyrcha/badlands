@@ -1,11 +1,11 @@
 // Intention contract engine groundwork (game/src/intention.h): the inbox
-// ring, the two engine-side writers wired this task (DamageTaken via
-// emit_char_hit, MoveBlocked via movement.cpp), the edge-triggered
-// ThreatSighted pass (sim.cpp's tick_world), the pure should_wake predicate,
-// and apply_intention's validate-then-adopt seam. INERT this slice: nothing
-// outside these tests calls apply_intention/should_wake yet, and the
-// existing mock/wasm brain paths are untouched -- see docs/design/
-// intention-contract.html for the contract these mirror.
+// ring, the engine-side writers (DamageTaken via emit_char_hit, MoveBlocked
+// via movement.cpp, the edge-triggered ThreatSighted pass in sim.cpp's
+// tick_world), the pure should_wake predicate, and apply_intention's
+// validate-then-adopt seam. The contract is live: sim.cpp's think loop gates
+// every wasm hero's tick on should_wake and adopts each wake's suggestion via
+// apply_intention (wasm_brain.cpp) -- see docs/design/intention-contract.html
+// for the contract these mirror.
 
 #include "command.h"
 #include "components.h"
@@ -430,8 +430,9 @@ TEST_CASE("advance_intentions dispatches on ci.kind, not a stray target_slot", "
     CHECK_FALSE(found_aborted);  // NOT aborted by the stray target's death
 }
 
-// --- Finding 1 (task-3-brief.md): should_wake's inbox check must not treat
-// an event that already informed the last think as a fresh reason to wake.
+// --- should_wake's inbox check (docs/design/intention-contract.html §2)
+// must not treat an event that already informed the last think as a fresh
+// reason to wake.
 
 TEST_CASE(
     "should_wake: an inbox event that informed the last think does not immediately re-wake "
@@ -485,8 +486,8 @@ TEST_CASE(
     CHECK(should_wake(g, e));
 }
 
-// --- Finding 2 (task-3-brief.md): the wake schedule must be replay-derivable
-// even when the activity label repeats across wakes.
+// --- The wake schedule (docs/design/intention-contract.html §6) must be
+// replay-derivable even when the activity label repeats across wakes.
 
 TEST_CASE(
     "the wake schedule replays: a repeated activity label still logs each wake's own duration",
@@ -506,7 +507,7 @@ TEST_CASE(
     CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 1300);
 
     // A SECOND wake, same activity_label (Idle) as `first` -- exactly the
-    // edge-trigger case finding 2 is about: enqueue_set_behavior's ordinary
+    // edge-trigger case this test is about: enqueue_set_behavior's ordinary
     // dedup would otherwise swallow this SetBehavior entirely, and the
     // second wake's own schedule would never reach the log at all.
     Intention second;

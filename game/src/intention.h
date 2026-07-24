@@ -4,8 +4,8 @@
 // CurrentIntention to completion/abort, maintains the event inbox, and
 // decides when a hero is worth waking.
 //
-// Wired in (the contract flip, task-3-brief.md): sim.cpp's think loop gates
-// every wasm hero's tick_wasm_brain on should_wake, and wasm_brain.cpp
+// Wired in: sim.cpp's think loop gates every wasm hero's tick_wasm_brain
+// on should_wake, and wasm_brain.cpp
 // decodes each wake's BlSuggestionWire into an Intention and adopts it via
 // apply_intention. should_wake/apply_intention are wasm-only: the C++ hero
 // decision layer they used to run alongside (town_think) is gone entirely
