@@ -112,3 +112,48 @@ TEST_CASE("TreeCatalog: every predefined setup generates a well-formed mesh") {
     REQUIRE(height > 0.0f);
   }
 }
+
+TEST_CASE("GenerateLeafMesh: deterministic") {
+  const TexturedMeshResult a = GenerateLeafMesh(OakPreset());
+  const TexturedMeshResult b = GenerateLeafMesh(OakPreset());
+  REQUIRE(a.mesh.vertices == b.mesh.vertices);
+  REQUIRE(a.mesh.indices == b.mesh.indices);
+}
+
+TEST_CASE("GenerateLeafMesh: well-formed indexed mesh (Oak, Pine)") {
+  for (const TreeOptions& o : {OakPreset(), PinePreset()}) {
+    const TexturedMeshResult r = GenerateLeafMesh(o);
+    const auto& m = r.mesh;
+    REQUIRE(m.vertex_count > 0u);
+    REQUIRE(m.vertices.size() == m.vertex_count * kTexturedMeshFloatsPerVertex);
+    REQUIRE(m.indices.size() % 3 == 0);
+    for (uint32_t idx : m.indices) REQUIRE(idx < m.vertex_count);
+    for (float f : m.vertices) REQUIRE(std::isfinite(f));
+  }
+}
+
+TEST_CASE("GenerateLeafMesh: billboard=2 is exactly 2x billboard=1") {
+  TreeOptions single = OakPreset();
+  single.leaves.billboard = 1;
+  TreeOptions cross = OakPreset();
+  cross.leaves.billboard = 2;
+
+  const TexturedMeshResult r1 = GenerateLeafMesh(single);
+  const TexturedMeshResult r2 = GenerateLeafMesh(cross);
+
+  REQUIRE(r1.mesh.vertex_count > 0u);
+  REQUIRE(r2.mesh.vertex_count == r1.mesh.vertex_count * 2u);
+  REQUIRE(r2.mesh.indices.size() == r1.mesh.indices.size() * 2u);
+
+  // Each quad = 4 verts + 6 indices.
+  REQUIRE(r1.mesh.indices.size() == r1.mesh.vertex_count / 4u * 6u);
+  REQUIRE(r2.mesh.indices.size() == r2.mesh.vertex_count / 4u * 6u);
+}
+
+TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
+  TreeOptions o = OakPreset();
+  o.leaves.enabled = false;
+  const TexturedMeshResult r = GenerateLeafMesh(o);
+  REQUIRE(r.mesh.vertex_count == 0u);
+  REQUIRE(r.mesh.indices.empty());
+}

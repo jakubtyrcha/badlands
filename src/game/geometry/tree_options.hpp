@@ -9,6 +9,21 @@ namespace badlands {
 
 enum class TreeType { Deciduous, Evergreen };
 
+// Leaf-card generation parameters (ported from ez-tree TreeOptions.leaves).
+// Consumed by GenerateLeafMesh (tree_generator.hpp); leaf placement uses a
+// separate RNG stream so it never perturbs the branch skeleton.
+struct LeafOptions {
+  bool  enabled = true;
+  int   billboard = 2;        // 1 = single quad, 2 = double (perpendicular cross)
+  int   count = 1;            // leaves per leaf-bearing branch
+  float start = 0.0f;         // fractional start along the branch
+  float size = 2.5f;          // leaf card size (native ez-tree units)
+  float size_variance = 0.7f;
+  float angle = 10.0f;        // tilt from the branch, degrees
+  float alpha_cutoff = 0.5f;  // discard threshold (consumed by a later task's material)
+  glm::vec3 tint{0.30f, 0.55f, 0.18f};  // green; per-preset overridable
+};
+
 // Per-level branch parameters (index = branch level, 0 = trunk). Ported from
 // ez-tree TreeOptions.branch (github.com/dgreenheck/ez-tree). Angles in degrees.
 struct TreeOptions {
@@ -31,6 +46,8 @@ struct TreeOptions {
   float force_strength = 0.0f;
   float bark_uv_scale_x = 1.0f;                // wraps = round(base_radius * this)
   float bark_uv_scale_y = 1.0f;                // V = cumulative_length / this
+
+  LeafOptions leaves;
 };
 
 // ez-tree presets/oak_medium.json (deciduous).
@@ -68,6 +85,7 @@ inline TreeOptions PinePreset() {
   o.twist      = {0.0f, 0.0f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = -0.003f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 1.0f;
+  o.leaves.tint = {0.16f, 0.40f, 0.24f};  // darker blue-green (evergreen)
   return o;
 }
 
