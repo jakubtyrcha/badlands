@@ -6,6 +6,7 @@
 // sun. generators_ is the extension point where future foliage/rock generators
 // slot in. Lives in src/executables/viewer/ (an app, not the engine).
 
+#include <algorithm>
 #include <functional>
 #include <optional>
 #include <string>
@@ -55,6 +56,11 @@ class ModelViewerView : public AppView {
     initial_shadow_debug_mode_ = mode;
   }
 
+  // Selects the initial LOD level (headless `--lod <n>`, 0..2). Call before
+  // Initialize() -- RebuildScene() reads lod_level_ when generating tree
+  // meshes.
+  void SetInitialLod(int lod) { lod_level_ = std::clamp(lod, 0, 2); }
+
  private:
   // The output of a generator: a mesh plus the transform that places it. The
   // generator assumes the floor is at y=0 and returns the resting offset as a
@@ -98,6 +104,14 @@ class ModelViewerView : public AppView {
 
   std::vector<MeshGenerator> generators_;
   int generator_index_ = 0;
+
+  // Manual LOD switch (tree generators only): 0=full detail, 1/2=meshopt
+  // simplified per kLodRatios. bark_tris_/leaf_tris_ are the resulting
+  // triangle counts, recomputed in RebuildScene for the ImGui readout.
+  int lod_level_ = 0;
+  int bark_tris_ = 0;
+  int leaf_tris_ = 0;
+
   DeferredMaterial checker_mat_;  // UV-checker debug material for the sphere
   DeferredMaterial bark_mat_;     // Solid bark color for catalog tree meshes
 
