@@ -14,9 +14,9 @@ namespace badlands::mapgen {
 //
 // `make_local()` is invoked ONCE per worker thread and its result is passed by
 // reference to every tile that worker processes — this is how a per-thread
-// noiser ExecutionContext is created once and reused across a thread's tiles
-// (VM contexts are not shareable across threads). For passes with no per-thread
-// state, return a trivial Local (e.g. std::monostate{}).
+// evaluation context (one that cannot be shared across threads) is created once
+// and reused across a thread's tiles. For passes with no per-thread state, return
+// a trivial Local (e.g. std::monostate{}).
 //
 // `body(local, x0, y0, x1, y1)` processes the half-open tile [x0,x1) x [y0,y1).
 // Tiles are disjoint, so bodies may write their pixels without synchronization.
