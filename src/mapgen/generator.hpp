@@ -18,8 +18,8 @@ namespace badlands::mapgen {
 
 struct MapGenParams {
   uint32_t seed = 1;
-  glm::ivec2 resolution{512, 512};   // texels
-  glm::vec2 size_m{512.0f, 512.0f};  // world meters
+  int resolution = 512;         // output grid (texels, square)
+  float world_size_m = 512.0f;  // world extent (meters, square)
 };
 
 // Everything one generation produces. `bedrock` is the latent field the biomes

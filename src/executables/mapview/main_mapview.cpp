@@ -13,9 +13,9 @@
 //                         [--preview-image-only]
 //                         [--screenshot out.png] [--record dir/]
 //
-//   --resolution WxH  map texels (default 512x512)
-//   --size WxH        map extent in world METERS (default 512x512). Texels must
-//                     come out square: size.x/res.x == size.y/res.y.
+//   --resolution WxH  map texels, square only: W must equal H (default 512x512)
+//   --size WxH        map extent in world METERS, square only: W must equal H
+//                     (default 512x512)
 //   --camera-height H starting camera height in metres (headless framing: a
 //                     small H for a near shot, a large one for a far shot).
 //   --lod-tint N      debug tint mode for cluster terrain: 0 shaded (default),
@@ -24,7 +24,6 @@
 //                     The output DAG is bit-identical either way; this is the
 //                     perf A/B baseline (build time shows in the stats log).
 
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -76,11 +75,11 @@ int RunPreviewOnly(const MapGenParams& params, const std::string& out_dir) {
   const badlands::mapgen::MapArtifacts artifacts =
       badlands::mapgen::generate_map(params);
   std::printf("mapview: %dx%d texels, %.0fx%.0f m, seed=%u -> %s\n",
-              params.resolution.x, params.resolution.y, params.size_m.x,
-              params.size_m.y, params.seed, out_dir.c_str());
+              params.resolution, params.resolution, params.world_size_m,
+              params.world_size_m, params.seed, out_dir.c_str());
   badlands::mapgen::write_preview_images(
       out_dir, artifacts,
-      params.size_m.x / static_cast<float>(params.resolution.x));
+      params.world_size_m / static_cast<float>(params.resolution));
   std::printf("mapview: done (%s)\n", out_dir.c_str());
   return 0;
 }
@@ -136,7 +135,11 @@ int main(int argc, char** argv) {
                      v->c_str());
         return 2;
       }
-      params.resolution = {r->first, r->second};
+      if (r->first != r->second) {
+        std::fprintf(stderr, "mapview: non-square maps are not supported\n");
+        return 2;
+      }
+      params.resolution = r->first;
     } else if (a == "--size") {
       auto v = next("--size");
       if (!v) return 2;
@@ -146,7 +149,11 @@ int main(int argc, char** argv) {
                      v->c_str());
         return 2;
       }
-      params.size_m = {r->first, r->second};
+      if (r->first != r->second) {
+        std::fprintf(stderr, "mapview: non-square maps are not supported\n");
+        return 2;
+      }
+      params.world_size_m = r->first;
     } else if (a == "--out") {
       if (auto v = next("--out")) out_dir = *v; else return 2;
     } else if (a == "--camera-height") {
@@ -170,18 +177,6 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "mapview: unknown arg '%s'\n", a.c_str());
       return 2;
     }
-  }
-
-  // The frozen MapData lattice has ONE spacing scalar, so texels must be
-  // square. Reject the contradiction instead of silently distorting the map.
-  const float tx = params.size_m.x / static_cast<float>(params.resolution.x);
-  const float ty = params.size_m.y / static_cast<float>(params.resolution.y);
-  if (std::abs(tx - ty) > 1e-4f * std::max(tx, ty)) {
-    std::fprintf(stderr,
-                 "mapview: non-square texels (%.4f x %.4f m) — pick "
-                 "--resolution/--size with matching aspect\n",
-                 tx, ty);
-    return 2;
   }
 
   if (preview_only) return RunPreviewOnly(params, out_dir);

@@ -23,8 +23,8 @@ using badlands::mapgen::MapGenParams;
 TEST_CASE("generate_map: same params -> byte-identical artifacts") {
   MapGenParams p;
   p.seed = 7;
-  p.resolution = {64, 64};
-  p.size_m = {256.0f, 256.0f};
+  p.resolution = 64;
+  p.world_size_m = 256.0f;
   const auto a = generate_map(p);
   const auto b = generate_map(p);
   REQUIRE(a.bedrock.data == b.bedrock.data);
@@ -35,8 +35,8 @@ TEST_CASE("generate_map: same params -> byte-identical artifacts") {
 TEST_CASE("generate_map: plains sit at exactly 0 m, everything else above") {
   MapGenParams p;
   p.seed = 2;
-  p.resolution = {96, 96};
-  p.size_m = {384.0f, 384.0f};
+  p.resolution = 96;
+  p.world_size_m = 384.0f;
   const auto a = generate_map(p);
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
     if (a.biome.data[i] == static_cast<uint8_t>(Biome::Plains)) {
@@ -51,8 +51,8 @@ TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
   for (uint32_t seed : {1u, 2u, 3u}) {
     MapGenParams p;
     p.seed = seed;
-    p.resolution = {128, 128};
-    p.size_m = {512.0f, 512.0f};
+    p.resolution = 128;
+    p.world_size_m = 512.0f;
     const auto a = generate_map(p);
     const double n = static_cast<double>(a.biome.data.size());
     double plains = 0.0, mountain = 0.0;
@@ -91,10 +91,10 @@ TEST_CASE("generate_map: bedrock is sampled in world meters "
           "(resolution-independent)") {
   MapGenParams lo;
   lo.seed = 5;
-  lo.resolution = {64, 64};
-  lo.size_m = {512.0f, 512.0f};  // 8 m texels
+  lo.resolution = 64;
+  lo.world_size_m = 512.0f;  // 8 m texels
   MapGenParams hi = lo;
-  hi.resolution = {128, 128};  // 4 m texels
+  hi.resolution = 128;  // 4 m texels
   const auto a = generate_map(lo);
   const auto b = generate_map(hi);
   // Texel (x, y) of the coarse map sits at the same world point as (2x, 2y) of
@@ -109,9 +109,9 @@ TEST_CASE("generate_map: bedrock is sampled in world meters "
 
 TEST_CASE("generate_map: degenerate resolution yields empty artifacts, no throw") {
   MapGenParams p;
-  p.resolution = {0, 64};
+  p.resolution = 0;
   REQUIRE(generate_map(p).bedrock.size() == 0);
-  p.resolution = {-1, 64};
+  p.resolution = -1;
   const auto a = generate_map(p);
   REQUIRE(a.bedrock.size() == 0);
   REQUIRE(a.biome.size() == 0);
