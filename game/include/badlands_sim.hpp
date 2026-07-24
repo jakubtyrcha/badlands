@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -254,6 +255,12 @@ struct HeroFactors {
     // How far a hero notices hostiles. Feeds WorldView's threat list, which
     // gates deliberation (you do not stand and think with a rat closing in).
     float threat_radius = 14.0f;
+    // How long EntityMemory (game/src/entity_memory.h) keeps a character
+    // sighting after it was last actually seen; once world_millis advances
+    // past last_seen_millis by more than this, the entry is forgotten
+    // (evicted) on the next tick's update pass. Buildings never expire this
+    // way, so this only bounds char entries.
+    int64_t memory_ttl_millis = 10000;
     // Deliberation pause between goal changes, drawn uniformly
     // from this range. The prototype day is 120 s, so an in-game minute is
     // ~83 ms of sim time and the default range is roughly 0-10 in-game minutes.
@@ -698,16 +705,35 @@ struct NavPathResult {
     bool reachable = false;
 };
 
+// Which brain(s) drive spawned entities. noiser_source: noiser script source,
+// or nullptr for mock-brains-only. A script that fails to compile is
+// recorded as a noiser bug and the sim falls back to mock brains.
+// wasm_bytes/wasm_len: a compiled brain wasm module (game/src/wasm_brain.h),
+// hero-only -- see the think loop's
+// dispatch order in sim.cpp for how the two paths compose (wasm, when
+// loaded, takes the no-enemy tick for BrainKind::Town entities outright;
+// combat is a host pre-empt on both paths; noiser/mock still drive every
+// other archetype). Either field may be null/zero independently; both null
+// means mock brains only.
+struct BrainDesc {
+    const char* noiser_source = nullptr;
+    const uint8_t* wasm_bytes = nullptr;
+    size_t wasm_len = 0;
+};
+
 // ---- the sim ---------------------------------------------------------------
 class Sim {
    public:
-    // brain_script_source: noiser source driving spawned entities' brains, or
-    // nullptr for mock-brains-only. A script that fails to compile is recorded
-    // as a noiser bug and the sim falls back to mock brains.
-    explicit Sim(const char* brain_script_source = nullptr);
-    // Build a world from an explicit config (the arena uses this: flat, no colony,
-    // confined edges).
-    Sim(const WorldConfig& config, const char* brain_script_source);
+    // BrainDesc: which brain(s) drive spawned entities (see BrainDesc above).
+    // wasm_bytes provided but failing to compile/instantiate is FATAL (crash-
+    // and-error, not a fallback -- see WasmBrainRuntime::create's doc comment,
+    // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (mock
+    // drives every hero, same as noiser_source == nullptr).
+    explicit Sim(const BrainDesc& brain_desc);
+    // The composing form: an explicit world config (the arena uses this:
+    // flat, no colony, confined edges) x which brain. The other ctor forwards
+    // here conceptually (single make_world implementation, sim.cpp).
+    Sim(const WorldConfig& config, const BrainDesc& brain_desc);
     ~Sim();
     Sim(Sim&&) noexcept;
     Sim& operator=(Sim&&) noexcept;

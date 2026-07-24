@@ -2,6 +2,7 @@
 
 #include "brain.h"
 #include "components.h"
+#include "entity_memory.h"  // EntityMemory, seed_home_town_memory
 #include "game_state.h"
 #include "placement.h"
 #include "town_brain.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
@@ -163,6 +164,20 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             disp.name = hero_name(slot);
             reg.emplace<HeroDisplayState>(e, disp);
             brain_kind = BrainKind::Town;
+
+            // EntityMemory: consumers opt in -- the sole reader today is the
+            // wasm hero brain (BrainKind::Town, wasm_brain.cpp's
+            // pack_view_wire), so only heroes carry the bounded knowledge
+            // sandbox (game/src/entity_memory.h). Deer/goblins/tax collectors
+            // get none: update_entity_memory's observer loop is O(heroes x N)
+            // rather than O(N^2) as a result. A hero with a home starts
+            // already knowing it (and the town's other buildings) --
+            // residents know their town.
+            EntityMemory mem{};
+            if (home >= 0) {
+                seed_home_town_memory(game, mem, static_cast<uint32_t>(home));
+            }
+            reg.emplace<EntityMemory>(e, mem);
             break;
         }
         case Archetype::Townfolk: {
@@ -185,6 +200,7 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     }
 
     reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr, brain_kind);
+
     return slot;
 }
 
@@ -329,8 +345,15 @@ bool hero_enter(BadlandsGame& game, entt::entity e, int kind) {
     return true;
 }
 
+// Reachable from CommandKind::EnterHome, which any noiser script can enqueue
+// against any archetype (intent_enter_home has no archetype guard of its own
+// -- see brain.cpp) -- so `e` is not guaranteed to be a hero here either.
 bool hero_enter_home(BadlandsGame& game, entt::entity e) {
-    int32_t home = game.registry.get<HeroSimulationState>(e).home_building_id;
+    const auto* sim = game.registry.try_get<HeroSimulationState>(e);
+    if (sim == nullptr) {
+        return false;  // non-hero: no home to enter
+    }
+    int32_t home = sim->home_building_id;
     auto& bs = game.placement.buildings;
     if (home < 0 || static_cast<size_t>(home) >= bs.size() || !bs[home].alive) {
         return false;
@@ -349,7 +372,11 @@ bool hero_enter_home(BadlandsGame& game, entt::entity e) {
     return true;
 }
 
+// Same non-hero-reachability note as hero_enter_home above (CommandKind::Buy).
 bool hero_buy(BadlandsGame& game, entt::entity e) {
+    if (!game.registry.all_of<HeroSimulationState>(e)) {
+        return false;  // non-hero: nothing to buy for
+    }
     uint32_t bid = 0;
     if (!at_building_of_kind(game, e, static_cast<int32_t>(BuildingKind::Apothecary), bid)) {
         return false;

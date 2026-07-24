@@ -143,7 +143,7 @@ TEST_CASE("Sim::Tick folds statistics, and the totals reconcile") {
     // The reconciliation is the real assertion: samples must equal the number
     // of (entity, tick) pairs that actually happened. If counting ever drifted
     // from the snapshot, this is what would catch it.
-    Sim sim(nullptr);
+    Sim sim(BrainDesc{});
     sim.Spawn(MercenaryDesc(0.0f, kCastleSpawnZ));
     sim.Spawn(MercenaryDesc(4.0f, kCastleSpawnZ));
 
@@ -167,7 +167,7 @@ TEST_CASE("Sim::Tick folds statistics, and the totals reconcile") {
 }
 
 TEST_CASE("statistics survive a reset and keep accumulating") {
-    Sim sim(nullptr);
+    Sim sim(BrainDesc{});
     sim.Spawn(MercenaryDesc(0.0f, kCastleSpawnZ));
     for (int i = 0; i < 10; ++i) {
         sim.Tick(1.0f / 30.0f);
@@ -182,7 +182,7 @@ TEST_CASE("statistics survive a reset and keep accumulating") {
 }
 
 TEST_CASE("the snapshot carries the hero class the histogram attributes by") {
-    Sim sim(nullptr);
+    Sim sim(BrainDesc{});
     sim.Spawn(MercenaryDesc(0.0f, kCastleSpawnZ));
     sim.Tick(1.0f / 30.0f);
 
@@ -195,7 +195,7 @@ TEST_CASE("the snapshot carries the hero class the histogram attributes by") {
 }
 
 TEST_CASE("a recruited hero reports its guild's class") {
-    Sim sim(nullptr);
+    Sim sim(BrainDesc{});
     Action place{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,
                  static_cast<int32_t>(BuildingKind::HuntersCamp), 0};
     const int64_t camp = sim.Dispatch(place);

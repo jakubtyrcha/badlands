@@ -1,6 +1,11 @@
 # Noiser brain interop — ideal contract & language improvements
 
-The badlands hero brain is a **composable behaviour framework**: perception-in, goals-and-commands-out,
+**Status (2026-07-24):** this documents the noiser-based hero brain design, which is now
+dormant — the shipping hero brain is Nim→WASM (see
+`docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md`). Retained as the design
+record for the noiser brain path and the upstream language-improvement asks below.
+
+The badlands hero brain **was** a **composable behaviour framework**: perception-in, goals-and-commands-out,
 a shared core parameterized by per-class factors. This note specifies the **ideal** noiser↔engine
 interop for it, records **what today's compiler already supports** (empirically verified), states
 **what we ship now** (pragmatic scaffolding), and lists the concrete **language / host improvements**

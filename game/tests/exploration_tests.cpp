@@ -267,7 +267,7 @@ void walk_toward(BadlandsGame& g, entt::entity e, glm::vec2 goal, int ticks) {
 TEST_CASE("a character told to walk into water stops and raises the event") {
     // The contract the AI is built on: the decision is allowed to be
     // impossible, and finding out is an EVENT rather than a precondition.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     g.world_millis = 5000;  // so the event's stamp is distinguishable from zero
 
@@ -307,7 +307,7 @@ TEST_CASE("a hunter actually sets off into the unknown, through the sim") {
     // reveals a patch around itself, that patch acquires an outline, and the
     // hunter picks a point beyond it and walks. Nothing here is stubbed --
     // perception, the appetite draw, the picker, and the band all participate.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     configure_vision(g.vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
 
@@ -351,7 +351,7 @@ TEST_CASE("a blocked hero abandons exploring, then tries elsewhere next window")
     // refusal vetoes exploring for the window it happened in -- so the hero
     // does something else -- and stops mattering in the next one, so it strikes
     // out somewhere new rather than giving up on exploring for good.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     const int64_t lease = g.factors.hero.explore_lease_millis;
 

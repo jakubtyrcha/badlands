@@ -134,17 +134,50 @@ const char* command_name(badlands::CommandKindId kind) {
   }
 }
 
-// noiser is PARKED: C++ brains drive every archetype by default.
+// noiser is PARKED by default: heroes think via the wasm brain
+// (assets/brains/hero.wasm) when it loads, the C++ town brain otherwise.
+// Explicitly setting BADLANDS_BRAIN_SCRIPT (see load_brain_script below)
+// opts back into the noiser path for a session -- dev tooling, not a shipped
+// path.
 //
-// Upstream has seven open bugs (docs/noiser-bugs-upstream/), two of which block
-// composing brains at all -- sub-generators cannot be resumed from the entry
-// generator, and a file with 2+ `gen fn` runs an arbitrary one. The scripts and
-// the whole host-call surface stay in the tree and compiling
-// (game/src/brain.cpp, game/tests/noiser_smoke_tests.cpp keep exercising them),
-// so re-adopting per archetype is a switch flip once those land.
+// Upstream noiser has seven open bugs (docs/noiser-bugs-upstream/), two of
+// which block composing brains at all -- sub-generators cannot be resumed
+// from the entry generator, and a file with 2+ `gen fn` runs an arbitrary
+// one. The scripts and the whole host-call surface stay in the tree and
+// compiling (game/src/brain.cpp, game/tests/noiser_smoke_tests.cpp keep
+// exercising them, dormant), so re-adopting it is a switch flip once those
+// land -- see docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's
+// Scope note (the noiser path stays "unused by the apps").
 //
-// Explicitly setting BADLANDS_BRAIN_SCRIPT opts back in for a session; unset
-// (the default) runs the C++ town brain.
+// Missing/unreadable file here is packaging, not a brain bug (the file
+// simply was not built/shipped) -- log and fall back to mock (via an empty
+// BrainDesc), the same as no wasm bytes provided at all. A wasm module that
+// DOES load but fails to compile/instantiate is a different case entirely --
+// fatal, per WasmBrainRuntime::create's policy (wasm_brain.h) -- because
+// bytes were actually handed to bh_load/bh_instantiate.
+std::vector<uint8_t> load_hero_wasm() {
+  constexpr const char* kPath = "assets/brains/hero.wasm";  // cwd-relative, like shaders/assets
+  std::ifstream file(kPath, std::ios::binary | std::ios::ate);
+  if (!file.good()) {
+    spdlog::warn("AiSandboxView: '{}' unreadable -- heroes fall back to the C++ brain", kPath);
+    return {};
+  }
+  const std::streamsize size = file.tellg();
+  file.seekg(0, std::ios::beg);
+  std::vector<uint8_t> bytes(static_cast<size_t>(size));
+  if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+    spdlog::warn("AiSandboxView: '{}' failed to read -- heroes fall back to the C++ brain", kPath);
+    return {};
+  }
+  return bytes;
+}
+
+// Explicitly setting BADLANDS_BRAIN_SCRIPT opts back in to the noiser brain
+// for a session; unset (the default) drives every hero via the wasm brain
+// (or the C++ town brain, if that fails to load -- see load_hero_wasm). A
+// read failure here is a config error at the app level, not fatal (this is
+// opt-in dev tooling mirroring the old pre-wasm behaviour, not a shipped
+// path) -- log and fall back to the wasm path.
 std::string load_brain_script() {
   const char* env = std::getenv("BADLANDS_BRAIN_SCRIPT");
   if (env == nullptr) {
@@ -152,7 +185,7 @@ std::string load_brain_script() {
   }
   std::ifstream file(env);
   if (!file.good()) {
-    spdlog::warn("AiSandboxView: BADLANDS_BRAIN_SCRIPT='{}' unreadable -- using the C++ brain",
+    spdlog::warn("AiSandboxView: BADLANDS_BRAIN_SCRIPT='{}' unreadable -- using the wasm hero brain",
                  env);
     return {};
   }
@@ -204,7 +237,31 @@ void AiSandboxView::ApplyEnvironment() {
 }
 
 void AiSandboxView::SeedTown() {
-  const std::string brain = load_brain_script();
+  badlands::BrainDesc brain_desc{};
+
+  // brain_script/wasm's backing storage only needs to outlive the Sim()
+  // construction below: BrainRuntime::create copies the noiser source into
+  // the compiled program, and bh_load compiles the wasm module synchronously
+  // and keeps no reference to the input bytes (see brainhost's bh_load --
+  // wasmtime::Module::new copies/compiles eagerly) -- so both are declared at
+  // this scope, alongside the Sim() calls that consume whichever one applies.
+  const std::string brain_script = load_brain_script();
+  std::vector<uint8_t> wasm;
+  if (!brain_script.empty()) {
+    brain_desc.noiser_source = brain_script.c_str();
+    spdlog::info("AiSandboxView: BADLANDS_BRAIN_SCRIPT loaded ({} bytes) -- heroes think via the "
+                 "noiser brain",
+                 brain_script.size());
+  } else {
+    wasm = load_hero_wasm();
+    if (!wasm.empty()) {
+      brain_desc.wasm_bytes = wasm.data();
+      brain_desc.wasm_len = wasm.size();
+      spdlog::info("AiSandboxView: assets/brains/hero.wasm loaded ({} bytes) -- heroes think via "
+                   "the wasm brain",
+                   wasm.size());
+    }
+  }
 
   // Load the scenario (default: a walled arena duel; override via BADLANDS_SCENARIO).
   const char* scen_env = std::getenv("BADLANDS_SCENARIO");
@@ -226,8 +283,7 @@ void AiSandboxView::SeedTown() {
     // Greybox arena sized to the scenario's interior (accessible tiles = 2*half).
     arena_ = build_arena(glm::ivec2(static_cast<int>(scenario_.arena_half_x * 2.0f),
                                     static_cast<int>(scenario_.arena_half_z * 2.0f)));
-    sim_ = badlands::Sim(scenario_.world_config(),
-                         brain.empty() ? nullptr : brain.c_str());
+    sim_ = badlands::Sim(scenario_.world_config(), brain_desc);
     // Creature-stat overrides (optional file; a missing one keeps the defaults).
     badlands::CreatureCatalog catalog = sim_.Creatures();
     if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
@@ -243,7 +299,7 @@ void AiSandboxView::SeedTown() {
 
   // --- fallback: the original town seed -----------------------------------
   arena_ = build_arena(kSandboxArena);
-  sim_ = badlands::Sim(brain.empty() ? nullptr : brain.c_str());
+  sim_ = badlands::Sim(brain_desc);
 
   // Behaviour tuning as data: load over the compiled defaults (a missing file
   // just keeps them). Must happen before ticking -- factors are initial config.

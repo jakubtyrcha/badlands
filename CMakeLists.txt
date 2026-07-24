@@ -86,6 +86,15 @@ corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 # which a visibility graph cannot express. The crate source is left dormant in
 # the tree (deletable) but is no longer imported or linked.
 
+# brainhost: wasmtime embedding (src/crates/brainhost) behind a narrow C ABI
+# for loading/ticking game-AI "brain" wasm modules — see
+# include/brainhost.h. Linked into badlands_game_lib below; the C++ caller is
+# game/src/wasm_brain.cpp. No dependency of this crate shares its own name,
+# so no Corrosion package-ambiguity workaround is needed (as with assets/nav,
+# unlike wesl_ffi).
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/brainhost/Cargo.toml)
+corrosion_set_env_vars(brainhost "RUSTFLAGS=-Cpanic=unwind")
+
 # ui: the GAME UI feature-lib (src/crates/ui) — flexbox layout (`panes`) +
 # glyph rasterization/text layout (`fontdue`) behind a coarse C ABI (one
 # ui_build call per frame). This is the in-world game UI surface, deliberately
@@ -264,8 +273,12 @@ add_library(badlands_game_lib STATIC
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/entity_memory.cpp
     game/src/needs.cpp
     game/src/town_brain.cpp
+    # Task 4 (wasm-brain feature): the wasm hero brain runtime (brainhost C
+    # ABI) -- see game/src/wasm_brain.h.
+    game/src/wasm_brain.cpp
     game/src/activity_catalog.cpp
     game/src/activity_histogram.cpp
     game/src/behaviours/blocks.cpp
@@ -316,6 +329,9 @@ target_include_directories(badlands_game_lib PUBLIC
     # For "core/roof_shape.hpp" + "game/material_id.hpp" etc (Task S2.C) —
     # header search path only, no engine/SDL/Dawn dependency added.
     ${CMAKE_SOURCE_DIR}/src
+    # brainhost's C ABI (game/src/wasm_brain.h) -- mirrors how nav's include
+    # dir is added to badlands_engine above.
+    ${CMAKE_SOURCE_DIR}/src/crates/brainhost/include
 )
 # Task S2.G: arena.cpp includes game/src/placement.h directly (kGridHalf/
 # in_bounds_tile grid reuse) -- PRIVATE since it's an implementation detail
@@ -323,7 +339,9 @@ target_include_directories(badlands_game_lib PUBLIC
 target_include_directories(badlands_game_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/game/src
 )
-target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
+# brainhost: wasmtime-backed brain wasm runtime (game/src/wasm_brain.cpp) --
+# mirrors how nav is linked into badlands_engine above.
+target_link_libraries(badlands_game_lib PUBLIC noiser_bundle brainhost)
 
 # Three thin executables, each with its own main, all linking badlands_engine
 # and badlands_game_lib. Each app grows its own real AppView.
@@ -566,6 +584,7 @@ add_executable(badlands_game_tests
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
+    game/tests/entity_memory_tests.cpp
     game/tests/command_tests.cpp
     game/tests/clock_tests.cpp
     game/tests/needs_tests.cpp
@@ -583,6 +602,18 @@ add_executable(badlands_game_tests
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
+    # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
+    # sim needed.
+    game/tests/brain_abi_tests.cpp
+    # The wasm hero brain wired into the sim -- see game/src/wasm_brain.h.
+    game/tests/wasm_brain_tests.cpp
+    # The ported hero decision layer (scripts/brains/nim/hero.nim) --
+    # twin-brain parity against the C++ reference (town_brain.cpp) + wasm-side
+    # behavioural smokes.
+    game/tests/hero_brain_parity_tests.cpp
+    # Task 9: the set_factors_of validation boundary (sanitize_factors,
+    # sim.cpp) -- adversarial-config red/green repros.
+    game/tests/factors_sanitize_tests.cpp
     game/tests/events_tests.cpp
     game/tests/navmesh_tests.cpp
     game/tests/nav_world_tests.cpp

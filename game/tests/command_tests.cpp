@@ -14,7 +14,7 @@
 using namespace badlands;
 
 TEST_CASE("apply_command MoveTo sets the actor's MoveTarget and logs it") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
     uint32_t slot = spawn_into(*g, d);
@@ -35,7 +35,7 @@ TEST_CASE("apply_command MoveTo sets the actor's MoveTarget and logs it") {
     }
 
 TEST_CASE("game_dispatch applies player commands synchronously and logs them") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
 
     Action a{ActionKind::PlaceBuilding, 0, 24.0f, 24.0f, static_cast<int32_t>(BuildingKind::Tavern), 0};
@@ -49,7 +49,7 @@ TEST_CASE("game_dispatch applies player commands synchronously and logs them") {
     }
 
 TEST_CASE("apply_commands drains the queue in FIFO order and logs each") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
     uint32_t slot = spawn_into(*g, d);
@@ -68,7 +68,7 @@ TEST_CASE("apply_commands drains the queue in FIFO order and logs each") {
     }
 
 TEST_CASE("game_tick drains queued AI commands (apply + log) during the tick") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
     uint32_t slot = spawn_into(*g, d);

@@ -20,6 +20,7 @@
 
 namespace badlands {
 struct BrainRuntime;
+struct WasmBrainRuntime;
 }
 
 struct BadlandsGame {
@@ -34,6 +35,11 @@ struct BadlandsGame {
     std::unordered_map<entt::entity, uint32_t> entity_slot;
     // Compiled brain program + host bindings; null -> mock brains only.
     std::unique_ptr<badlands::BrainRuntime> brains;
+    // Compiled + instantiated brain wasm module (game/src/wasm_brain.h);
+    // null -> heroes think via town_think (mock) instead. Hero-only (see the
+    // think loop's dispatch order, sim.cpp): loaded independently of `brains`
+    // above, and takes priority over it for BrainKind::Town entities.
+    std::unique_ptr<badlands::WasmBrainRuntime> wasm_brains;
 
     // World state (the sim owns gold and the building/placement grid).
     badlands::PlacementState placement;

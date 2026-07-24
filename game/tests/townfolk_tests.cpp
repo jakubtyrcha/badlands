@@ -91,7 +91,7 @@ TEST_CASE("townfolk blocks: collect the round before depositing") {
 }
 
 TEST_CASE("midnight accrues tax on Houses only") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     uint32_t house = place(g, BuildingKind::House, 10.0f, 10.0f);
     uint32_t tavern = place(g, BuildingKind::Tavern, -10.0f, 10.0f);
@@ -146,7 +146,7 @@ TEST_CASE("a tax collector rounds up the tax, banks it at the castle, and despaw
 }
 
 TEST_CASE("the spawner emits a collector at the castle, capped at max_alive") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     SimFactors f = g.factors;
     f.townfolk.spawn_interval_millis = 1000;  // spawn quickly for the test

@@ -33,7 +33,7 @@ std::string load_brain_script() {
 
 TEST_CASE("Stage-2 duel with noiser brains") {
     std::string script = load_brain_script();
-    badlands::Sim sim(script.c_str());
+    badlands::Sim sim(badlands::BrainDesc{.noiser_source = script.c_str()});
 
     badlands::CharacterDesc merc = mercenary(-8.0f, kDuelGroundZ);
     badlands::CharacterDesc gob = goblin(8.0f, kDuelGroundZ);
@@ -64,7 +64,7 @@ TEST_CASE("Stage-2 duel with noiser brains") {
 
 TEST_CASE("script reload keeps last-good on failure and swaps on success") {
     std::string script = load_brain_script();
-    badlands::Sim sim(script.c_str());
+    badlands::Sim sim(badlands::BrainDesc{.noiser_source = script.c_str()});
     badlands::CharacterDesc merc = mercenary(-8.0f, kDuelGroundZ);
     badlands::CharacterDesc gob = goblin(8.0f, kDuelGroundZ);
     sim.Spawn(merc);
@@ -125,7 +125,7 @@ TEST_CASE("a failing brain downgrades to the mock and the duel still resolves") 
         }
         0.0
     )";
-    badlands::Sim sim(script);
+    badlands::Sim sim(badlands::BrainDesc{.noiser_source = script});
 
     badlands::CharacterDesc merc = mercenary(-8.0f, kDuelGroundZ);
     badlands::CharacterDesc gob = goblin(8.0f, kDuelGroundZ);

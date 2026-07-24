@@ -30,7 +30,7 @@ badlands::CharacterDesc dummy(float x, float z, int32_t team) {
 }  // namespace
 
 TEST_CASE("Characters(out) fills identically to Characters() and reuses the buffer") {
-    badlands::Sim sim(nullptr);
+    badlands::Sim sim(badlands::BrainDesc{});
     sim.Spawn(dummy(3.0f, 0.0f, 0));
     sim.Spawn(dummy(-4.0f, 2.0f, 1));
 
@@ -56,7 +56,7 @@ TEST_CASE("Characters(out) fills identically to Characters() and reuses the buff
 }
 
 TEST_CASE("Characters() echoes the spawn descriptor") {
-    badlands::Sim sim(nullptr);
+    badlands::Sim sim(badlands::BrainDesc{});
     badlands::CharacterDesc desc = mercenary(-8.0f, kDuelGroundZ);
     uint32_t id = sim.Spawn(desc);
 
@@ -73,7 +73,7 @@ TEST_CASE("Characters() echoes the spawn descriptor") {
 }
 
 TEST_CASE("movement is clamped to move_speed * dt") {
-    badlands::Sim sim(nullptr);
+    badlands::Sim sim(badlands::BrainDesc{});
     // Clear plains, away from BOTH the central lake AND the prebuilt castle at
     // kCastleSpawn (0, 54): the navmesh routes around the castle, so a unit told
     // to walk onto it would detour and deviate off the X axis. z = 30 keeps the
@@ -95,7 +95,7 @@ TEST_CASE("movement is clamped to move_speed * dt") {
 }
 
 TEST_CASE("attacks respect the cooldown") {
-    badlands::Sim sim(nullptr);
+    badlands::Sim sim(badlands::BrainDesc{});
     badlands::CharacterDesc attacker = dummy(0.0f, 0.0f, 0);
     attacker.attack_damage = 3.0f;
     attacker.attack_cooldown = 1.0f;
@@ -120,7 +120,7 @@ TEST_CASE("attacks respect the cooldown") {
 }
 
 TEST_CASE("dead entities leave the state snapshot") {
-    badlands::Sim sim(nullptr);
+    badlands::Sim sim(badlands::BrainDesc{});
     badlands::CharacterDesc killer = dummy(0.0f, 0.0f, 0);
     killer.attack_damage = 100.0f;
     badlands::CharacterDesc victim = dummy(0.5f, 0.0f, 1);
@@ -136,7 +136,7 @@ TEST_CASE("dead entities leave the state snapshot") {
 }
 
 TEST_CASE("Characters() reports every spawned entity, no cap") {
-    badlands::Sim sim(nullptr);
+    badlands::Sim sim(badlands::BrainDesc{});
     badlands::CharacterDesc desc = dummy(0.0f, 0.0f, 0);  // one team: nobody fights
     for (int i = 0; i < 300; ++i) {
         sim.Spawn(desc);
@@ -146,7 +146,7 @@ TEST_CASE("Characters() reports every spawned entity, no cap") {
 }
 
 TEST_CASE("Stage-2 duel resolves with mock brains") {
-    badlands::Sim sim(nullptr);
+    badlands::Sim sim(badlands::BrainDesc{});
     badlands::CharacterDesc merc = mercenary(-8.0f, kDuelGroundZ);
     badlands::CharacterDesc gob = goblin(8.0f, kDuelGroundZ);
     uint32_t merc_id = sim.Spawn(merc);

@@ -152,7 +152,7 @@ TEST_CASE("plan_paths raises MoveBlocked for an unreachable goal") {
 }
 
 TEST_CASE("separate_units pushes two coincident units to r_i + r_j") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
 
     uint32_t a = spawn_unit(game, 20.0f, 20.0f, 0);
@@ -165,7 +165,7 @@ TEST_CASE("separate_units pushes two coincident units to r_i + r_j") {
 }
 
 TEST_CASE("melee lock freezes the locked unit's follow movement") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
 
     // Two enemies 0.5 apart (well within attack_range 1.0) far from the castle.
@@ -189,7 +189,7 @@ TEST_CASE("melee lock freezes the locked unit's follow movement") {
 }
 
 TEST_CASE("plan_paths repaths when nav_epoch bumps") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     rebuild_navmesh_if_stale(*game);  // real navmesh from the map + castle
 
@@ -242,7 +242,7 @@ TEST_CASE("a unit reaches a building's approach tile via the navmesh") {
     // Guards the refuted "units stop one cell short of doors" finding:
     // building_approach_tile is 2 cells out (past the footprint margin), so it is
     // reachable through the 1-cell navmesh dilation.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     const uint32_t house = place_building(
         *game, PlacementDesc{static_cast<int32_t>(BuildingKind::House), 0, -40.0f, 50.0f}, false);
@@ -269,7 +269,7 @@ TEST_CASE("a unit reaches a building's approach tile via the navmesh") {
 
 TEST_CASE("footprint reprojection engages only once a navmesh exists") {
     // The reproject guard (F9) is the SAME signal as query_path: navmesh presence.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     const uint32_t b = place_building(
         *game, PlacementDesc{static_cast<int32_t>(BuildingKind::House), 0, -40.0f, 50.0f}, false);

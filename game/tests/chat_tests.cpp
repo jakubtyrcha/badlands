@@ -51,7 +51,7 @@ struct Town {
 
 Town make_town(int count, glm::vec2 where) {
     Town t;
-    t.owned = make_world(nullptr);
+    t.owned = make_world(BrainDesc{});
     Action place{ActionKind::PlaceBuilding, 0, -40.0f, 40.0f,
                  static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
     t.guild = static_cast<uint32_t>(dispatch_into(*t.owned, place));

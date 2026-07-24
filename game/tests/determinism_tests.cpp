@@ -100,9 +100,9 @@ bool same_command(const Command& a, const Command& b) {
 }  // namespace
 
 TEST_CASE("the same inputs produce the same state and the same command log") {
-    auto a_owned = make_world(nullptr);
+    auto a_owned = make_world(BrainDesc{});
     BadlandsGame* a = a_owned.get();
-    auto b_owned = make_world(nullptr);
+    auto b_owned = make_world(BrainDesc{});
     BadlandsGame* b = b_owned.get();
     seed_town(a);
     seed_town(b);
@@ -124,7 +124,7 @@ TEST_CASE("the same inputs produce the same state and the same command log") {
         }
 
 TEST_CASE("a recorded command log replays into a fresh sim exactly") {
-    auto live_owned = make_world(nullptr);
+    auto live_owned = make_world(BrainDesc{});
     BadlandsGame* live = live_owned.get();
     seed_town(live);
     for (int i = 0; i < kRunTicks; ++i) {
@@ -136,7 +136,7 @@ TEST_CASE("a recorded command log replays into a fresh sim exactly") {
     // Fresh sim, brains OFF: every decision comes from the log. Note there is no
     // seed_town call -- the seed is IN the log, so the world is rebuilt from the
     // trace alone.
-    auto replay_owned = make_world(nullptr);
+    auto replay_owned = make_world(BrainDesc{});
     BadlandsGame* replay = replay_owned.get();
     replay->replay_log = &log;
     for (int i = 0; i < kRunTicks; ++i) {
@@ -169,7 +169,7 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
         }
     };
 
-    auto live_owned = make_world(nullptr);
+    auto live_owned = make_world(BrainDesc{});
     BadlandsGame* live = live_owned.get();
     seed_world(live);
     for (int i = 0; i < kRunTicks; ++i) {
@@ -186,7 +186,7 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     REQUIRE(explored);
 
     // Same inputs again -> same trace, bit for bit.
-    auto twin_owned = make_world(nullptr);
+    auto twin_owned = make_world(BrainDesc{});
     BadlandsGame* twin = twin_owned.get();
     seed_world(twin);
     for (int i = 0; i < kRunTicks; ++i) {
@@ -200,7 +200,7 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     require_same(snapshot(live), snapshot(twin));
 
     // And the recorded trace, replayed with the brains off, rebuilds the world.
-    auto replay_owned = make_world(nullptr);
+    auto replay_owned = make_world(BrainDesc{});
     BadlandsGame* replay = replay_owned.get();
     configure_vision(replay->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
     replay->replay_log = &log;
@@ -212,7 +212,7 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
 }
 
 TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
-    auto live_owned = make_world(nullptr);
+    auto live_owned = make_world(BrainDesc{});
     BadlandsGame* live = live_owned.get();
     seed_town(live);
     for (int i = 0; i < 120; ++i) {
@@ -220,7 +220,7 @@ TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
     }
     const std::vector<Command> log = live->command_log;
 
-    auto replay_owned = make_world(nullptr);
+    auto replay_owned = make_world(BrainDesc{});
     BadlandsGame* replay = replay_owned.get();
     replay->replay_log = &log;
     for (int i = 0; i < 120; ++i) {

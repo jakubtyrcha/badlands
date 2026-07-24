@@ -24,7 +24,7 @@ TEST_CASE("biome_move_cost: water/mountain impassable, land scales from plains",
 }
 
 TEST_CASE("SimNavSource geometry matches the placement grid", "[navworld]") {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     SimNavSource src(*game);
     CHECK(src.side() == kGridSize);
     CHECK(src.cell_size_m() == Catch::Approx(1.0f));
@@ -33,7 +33,7 @@ TEST_CASE("SimNavSource geometry matches the placement grid", "[navworld]") {
 }
 
 TEST_CASE("SimNavSource cost mirrors biome_move_cost o biome_at", "[navworld]") {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     SimNavSource src(*game);
     // Sample a spread of cells; the adapter must equal the biome policy at the
     // cell centre (this is the whole contract -- no map geography hardcoded).
@@ -52,7 +52,7 @@ TEST_CASE("SimNavSource cost mirrors biome_move_cost o biome_at", "[navworld]") 
 }
 
 TEST_CASE("SimNavSource marks the prebuilt castle footprint blocked", "[navworld]") {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     SimNavSource src(*game);
     REQUIRE(!game->placement.buildings.empty());  // the castle
 
@@ -76,7 +76,7 @@ TEST_CASE("SimNavSource marks the prebuilt castle footprint blocked", "[navworld
 }
 
 TEST_CASE("rebuild_navmesh_if_stale builds once and tracks the nav epoch", "[navworld]") {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     REQUIRE(game->navmesh.empty());
     rebuild_navmesh_if_stale(*game);
     CHECK_FALSE(game->navmesh.empty());
@@ -89,14 +89,14 @@ TEST_CASE("rebuild_navmesh_if_stale builds once and tracks the nav epoch", "[nav
 }
 
 TEST_CASE("nav_cost falls back to straight-line distance with no navmesh", "[navworld]") {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     REQUIRE(game->navmesh.empty());  // not built until a tick / explicit rebuild
     const glm::vec2 a{-40.0f, 50.0f}, b{-20.0f, 50.0f};
     CHECK(nav_cost(*game, a, b) == Catch::Approx(glm::distance(a, b)));
 }
 
 TEST_CASE("nav_cost with a navmesh is a weighted length >= the straight line", "[navworld]") {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     rebuild_navmesh_if_stale(*game);
     REQUIRE_FALSE(game->navmesh.empty());
     // Two clear plains points west of the castle: reachable, and the terrain-cost

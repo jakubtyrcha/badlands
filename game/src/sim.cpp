@@ -10,6 +10,7 @@
 #include "brain.h"
 #include "combat.h"
 #include "components.h"
+#include "entity_memory.h"  // update_entity_memory
 #include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
 #include "movement.h"
@@ -25,9 +26,11 @@
 
 #include "game/map/symbolic_map_generator.hpp"
 #include "town_brain.h"
+#include "wasm_brain.h"
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cmath>
@@ -42,14 +45,42 @@ namespace badlands {
 
 namespace {
 
+// Combat pre-empt for the fighting archetypes: engage the nearest enemy. Set a
+// durable MoveTarget at the stance's engagement distance (a melee unit closes
+// to melee reach, a ranged unit holds at bow distance); the movement pipeline
+// walks it, and the Attack command resolves the hit authoritatively. Returns
+// false (no MoveTarget touched) when there is no enemy, so the caller falls
+// through to that archetype's own brain -- shared by mock_think and the wasm
+// hero-think dispatch below, so a wasm-driven hero's combat behaviour is
+// identical to a mock-driven one's.
+bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
+    auto& reg = game.registry;
+    entt::entity target = select_target(game, self);
+    if (target == entt::null) {
+        return false;
+    }
+    const Combatant& cb = reg.get<Combatant>(self);
+    const Attacks& atk = reg.get<Attacks>(self);
+    MoveTarget& mt = reg.get<MoveTarget>(self);
+    mt.kind = MoveTarget::Kind::Entity;
+    mt.entity = target;
+    mt.building = UINT32_MAX;
+    mt.stop_distance = engagement_range(cb, atk);
+
+    // If an attack is usable right now, emit an Attack command. Target UINT32_MAX
+    // => the handler re-picks the nearest enemy. Off-cooldown gating keeps this to
+    // ~one command per swing rather than one per tick.
+    if (select_attack(game, self, target) >= 0) {
+        game.command_queue.push_back({CommandKind::Attack, slot});
+    }
+    return true;
+}
+
 // Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain. Combat pre-empt: set a durable MoveTarget on the
-// nearest enemy and swing when in range (the movement pipeline walks the
-// MoveTarget; the combat pass re-validates the attack Intent authoritatively).
-// With no enemy, delegate to the C++ town brain (needs/day-night loop).
+// downgraded) script brain. With no enemy, delegate to the C++ town brain
+// (needs/day-night loop).
 void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
-    MoveTarget& mt = reg.get<MoveTarget>(self);
     const BrainKind kind = reg.get<Brain>(self).kind;
 
     // Critters and townfolk never fight -- their brains own their movement, so
@@ -65,42 +96,23 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
         return;
     }
 
-    // Combat pre-empt for the fighting archetypes: engage the nearest enemy. The
-    // movement pipeline walks the MoveTarget; the Attack command resolves the
-    // hit authoritatively.
-    entt::entity target = select_target(game, self);
-    if (target == entt::null) {
-        // No enemy: the archetype's own brain decides.
-        switch (kind) {
-            case BrainKind::Town:
-                town_think(game, slot);
-                break;
-            case BrainKind::Monster:
-                monster_think(game, slot);  // no unit enemy -> gnaw a building
-                break;
-            case BrainKind::None:
-                mt.kind = MoveTarget::Kind::None;
-                break;
-            case BrainKind::Critter:
-            case BrainKind::Townfolk:
-                break;  // handled above
-        }
+    if (combat_preempt(game, self, slot)) {
         return;
     }
-    // Close to the stance's engagement distance -- a melee unit closes to melee
-    // reach, a ranged unit holds at bow distance.
-    const Combatant& cb = reg.get<Combatant>(self);
-    const Attacks& atk = reg.get<Attacks>(self);
-    mt.kind = MoveTarget::Kind::Entity;
-    mt.entity = target;
-    mt.building = UINT32_MAX;
-    mt.stop_distance = engagement_range(cb, atk);
-
-    // If an attack is usable right now, emit an Attack command. Target UINT32_MAX
-    // => the handler re-picks the nearest enemy. Off-cooldown gating keeps this to
-    // ~one command per swing rather than one per tick.
-    if (select_attack(game, self, target) >= 0) {
-        game.command_queue.push_back({CommandKind::Attack, slot});
+    // No enemy: the archetype's own brain decides.
+    switch (kind) {
+        case BrainKind::Town:
+            town_think(game, slot);
+            break;
+        case BrainKind::Monster:
+            monster_think(game, slot);  // no unit enemy -> gnaw a building
+            break;
+        case BrainKind::None:
+            reg.get<MoveTarget>(self).kind = MoveTarget::Kind::None;
+            break;
+        case BrainKind::Critter:
+        case BrainKind::Townfolk:
+            break;  // handled above
     }
 }
 
@@ -108,8 +120,7 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
 
 // ---- extracted shared operations over Badlands& ----------------------------
 
-std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source,
-                                         const WorldConfig& config) {
+std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfig& config) {
     // One-time noiser runtime configuration. The profiling switch is
     // thread-local and defaults to ON, and upstream has no public API for it
     // yet (docs/noiser-feedback.md #3) — this is the only detail:: callsite.
@@ -134,12 +145,19 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source,
     game->terrain_blocking = config.terrain_blocking;
     game->arena_half_x = config.arena_half_x;
     game->arena_half_z = config.arena_half_z;
-    if (brain_script_source != nullptr) {
+    if (desc.noiser_source != nullptr) {
         std::string error;
-        game->brains = BrainRuntime::create(*game, brain_script_source, error);
+        game->brains = BrainRuntime::create(*game, desc.noiser_source, error);
         if (!game->brains) {
             report_bug(*game, "compile", error);
         }
+    }
+    if (desc.wasm_bytes != nullptr) {
+        // Wasm bytes were explicitly provided, so a bh_load/bh_instantiate
+        // failure here is a brain bug, not a config error to fall back from
+        // -- WasmBrainRuntime::create is fatal on failure (brain_fatal,
+        // wasm_brain.cpp) and never returns null.
+        game->wasm_brains = WasmBrainRuntime::create(desc.wasm_bytes, desc.wasm_len);
     }
     if (config.prebuild_colony) {
         // The colony starts with only the castle, prebuilt on the plains south of
@@ -156,12 +174,13 @@ std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source,
     return game;
 }
 
-std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
-    return make_world(brain_script_source, WorldConfig{});
+// Thin forwarder onto the (BrainDesc, WorldConfig) implementation above.
+std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
+    return make_world(desc, WorldConfig{});
 }
 
 std::unique_ptr<BadlandsGame> make_flat_world() {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     game->terrain_blocking = false;
     return game;
 }
@@ -213,6 +232,13 @@ void tick_world(BadlandsGame& g, float dt) {
         rebuild_navmesh_if_stale(g);
     }
 
+    // EntityMemory: refresh every character's bounded knowledge of who/what
+    // it currently sees before anyone thinks, so a just-spawned entity's
+    // memory (and everyone else's memory of it) is consistent this very
+    // tick. Pure derived state -- reads the world, writes only EntityMemory
+    // components -- so it runs unconditionally, live or replaying alike.
+    update_entity_memory(g);
+
     // Brains: each living entity's coroutine resumes once; intents arrive via
     // host calls. Any failure permanently downgrades that entity to the mock.
     for (auto [e, intent] : registry.view<Intent>().each()) {
@@ -228,6 +254,16 @@ void tick_world(BadlandsGame& g, float dt) {
                 continue;  // hidden heroes don't think
             }
             auto& brain = registry.get<Brain>(e);
+            if (g.wasm_brains && brain.kind == BrainKind::Town) {
+                // The wasm hero brain owns the no-enemy tick outright: combat
+                // still pre-empts it (identical to the mock's own pre-empt),
+                // but mock_think/town_think are never reached for this entity
+                // while a wasm program is loaded -- see wasm_brain.h.
+                if (!combat_preempt(g, e, static_cast<uint32_t>(slot))) {
+                    tick_wasm_brain(g, static_cast<uint32_t>(slot));
+                }
+                continue;
+            }
             bool scripted = brain.state && !brain.state->downgraded && g.brains;
             if (scripted && !resume_brain(g, static_cast<uint32_t>(slot), *brain.state)) {
                 brain.state->downgraded = true;
@@ -442,10 +478,7 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
                 path ? static_cast<int32_t>(path->waypoints.size() -
                                             std::min<size_t>(path->cursor, path->waypoints.size()))
                      : 0,
-            .archetype = static_cast<int32_t>(
-                sim ? Archetype::Hero
-                    : (crit ? Archetype::Critter
-                            : (tax ? Archetype::Townfolk : Archetype::Monster))),
+            .archetype = static_cast<int32_t>(archetype_of(g.registry, e)),
             .hero_class = hero ? hero->hero_class : -1,
             .facing_x = facing.x,
             .facing_z = facing.y,
@@ -483,7 +516,155 @@ std::vector<CommandRecord> command_log_of(const BadlandsGame& g) {
     return rows;
 }
 
-void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = f; }
+namespace {
+
+// sanitize_factors: the single validation boundary for tunable factors.
+// set_factors_of (below) is the one choke point every SimFactors write goes
+// through -- Sim::SetFactors, and critically the factors.json load path
+// (src/game/factors_manifest.cpp's LoadSimFactors is itself deliberately
+// unvalidated: it type-checks the JSON shape but not the resulting numbers,
+// see its own comments) -- so this is where a hand-edited manifest's mistakes
+// get caught before they reach the sim. Compiled defaults (SimFactors'
+// constructor) are already sane and pass through unchanged. Not declared in
+// sim_internal.hpp: tests exercise it only through Sim::SetFactors/Factors.
+//
+// Rules:
+//  - hero.think_max_millis/think_min_millis: restores the invariant
+//    decode_decision (wasm_brain.cpp) assumes of think_max_millis (>= 0) and
+//    of the pair (min <= max) -- an inverted pair draws a pause outside
+//    [0, think_max_millis] (behaviours/rng.h's range_i64 returns `lo` when
+//    hi <= lo), which decode_decision rejects as a wire violation and
+//    brain_fatal()s (std::abort). Do not touch decode_decision's check
+//    itself; this is what keeps its assumption true instead.
+//  - hero.memory_ttl_millis: 0 means "remember only the tick you saw them"
+//    (see the eviction comment in entity_memory.cpp) -- negative would evict
+//    a just-seen entry (age 0) the same tick it was recorded.
+//  - hours-rate fields that feed a DIVISION downstream (needs.cpp's
+//    advance_needs -> reserve_rate_per_tick, components.h): floored at a
+//    small positive epsilon rather than 0, so the field itself stays
+//    strictly positive instead of leaning on reserve_rate_per_tick's own
+//    <=0 "instantly" guard to stay finite.
+//  - hero.explore_lease_millis: also a DIVISOR (town_brain.cpp's
+//    observe_hero computes `world_millis / explore_lease_millis`
+//    UNCONDITIONALLY, for every hero, every tick, with no <=0 guard of its
+//    own -- unlike the hours-rate fields above) -- floored at a small
+//    positive integer rather than 0 for the same reason: 0 is a genuine
+//    int64 divide-by-zero (UB/crash), not merely a degenerate rate.
+//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors
+//    numeric field (radii, distances, durations, caps): negative is never
+//    meaningful, clamped to 0 -- this includes MonsterFactors::max_alive,
+//    where a negative cap underflows through economy.cpp's
+//    `live >= static_cast<uint32_t>(cap)` into a huge unsigned value and
+//    silently DISABLES the spawn cap instead of capping at 0.
+//    hero.weights[]/critter.weights and hero.explore_chance[] are
+//    deliberately EXCLUDED from the clamp-to-0 sweep -- 0 is a meaningful
+//    veto/"never" value for both, not a sign error (MonsterFactors has no
+//    such field, so it carries no such exclusion).
+//    TownfolkFactors::house_income_per_day (unsigned: no sign to sanitize)
+//    is the one field left untouched.
+//
+// A field is only warned about (old value -> new value) when sanitize
+// actually moves it.
+constexpr float kMinPositiveHours = 1e-3f;
+constexpr int64_t kMinPositiveMillis = 1;
+
+template <typename T>
+void warn_adjusted(const char* field, T old_value, T new_value) {
+    spdlog::warn("sanitize_factors: {} adjusted from {} to {}", field, old_value, new_value);
+}
+
+// Sign-invalid scalar (radius/distance/duration/cap -- 0 always meaningful,
+// negative never is): clamp to 0.
+template <typename T>
+void clamp_nonneg(const char* field, T& value) {
+    if (value < T{0}) {
+        warn_adjusted(field, value, T{0});
+        value = T{0};
+    }
+}
+
+// `value` is a DIVISOR downstream (needs.cpp's advance_needs ->
+// reserve_rate_per_tick, components.h): floor at a small positive epsilon
+// instead of 0.
+void floor_positive_hours(const char* field, float& value) {
+    if (value <= 0.0f) {
+        warn_adjusted(field, value, kMinPositiveHours);
+        value = kMinPositiveHours;
+    }
+}
+
+// `value` is an integer-millis DIVISOR downstream (town_brain.cpp's
+// observe_hero: world_millis / explore_lease_millis): floor at the smallest
+// positive millisecond instead of 0.
+void floor_positive_millis(const char* field, int64_t& value) {
+    if (value <= 0) {
+        warn_adjusted(field, value, kMinPositiveMillis);
+        value = kMinPositiveMillis;
+    }
+}
+
+SimFactors sanitize_factors(SimFactors f) {
+    HeroFactors& h = f.hero;
+
+    clamp_nonneg("hero.think_max_millis", h.think_max_millis);
+    if (h.think_min_millis < 0 || h.think_min_millis > h.think_max_millis) {
+        const int64_t clamped = std::clamp<int64_t>(h.think_min_millis, 0, h.think_max_millis);
+        warn_adjusted("hero.think_min_millis", h.think_min_millis, clamped);
+        h.think_min_millis = clamped;
+    }
+
+    clamp_nonneg("hero.memory_ttl_millis", h.memory_ttl_millis);
+
+    floor_positive_hours("hero.fatigue_drain_hours", h.fatigue_drain_hours);
+    floor_positive_hours("hero.content_drain_hours", h.content_drain_hours);
+    floor_positive_hours("hero.rest_fill_hours", h.rest_fill_hours);
+    floor_positive_hours("hero.tavern_fill_hours", h.tavern_fill_hours);
+    floor_positive_hours("hero.chat_fill_hours", h.chat_fill_hours);
+
+    clamp_nonneg("hero.fatigue_seek", h.fatigue_seek);
+    clamp_nonneg("hero.fatigue_seek_night", h.fatigue_seek_night);
+    clamp_nonneg("hero.content_seek", h.content_seek);
+    clamp_nonneg("hero.low_health_rest", h.low_health_rest);
+    clamp_nonneg("hero.chat_content_seek", h.chat_content_seek);
+    clamp_nonneg("hero.chat_content_ceiling", h.chat_content_ceiling);
+    clamp_nonneg("hero.chat_sight", h.chat_sight);
+    clamp_nonneg("hero.chat_radius", h.chat_radius);
+    clamp_nonneg("hero.chat_duration", h.chat_duration);
+    clamp_nonneg("hero.explore_min_fatigue", h.explore_min_fatigue);
+    clamp_nonneg("hero.explore_min_distance", h.explore_min_distance);
+    clamp_nonneg("hero.explore_max_distance", h.explore_max_distance);
+    clamp_nonneg("hero.explore_search_radius", h.explore_search_radius);
+    floor_positive_millis("hero.explore_lease_millis", h.explore_lease_millis);
+    clamp_nonneg("hero.roam_radius", h.roam_radius);
+    clamp_nonneg("hero.hunt_sight_radius", h.hunt_sight_radius);
+    clamp_nonneg("hero.threat_radius", h.threat_radius);
+
+    CritterFactors& c = f.critter;
+    clamp_nonneg("critter.sight_radius", c.sight_radius);
+    clamp_nonneg("critter.flee_radius", c.flee_radius);
+    clamp_nonneg("critter.flee_distance", c.flee_distance);
+    clamp_nonneg("critter.roam_radius", c.roam_radius);
+    clamp_nonneg("critter.graze_fraction", c.graze_fraction);
+
+    TownfolkFactors& t = f.townfolk;
+    clamp_nonneg("townfolk.spawn_interval_millis", t.spawn_interval_millis);
+    clamp_nonneg("townfolk.max_alive", t.max_alive);
+    clamp_nonneg("townfolk.move_speed", t.move_speed);
+    // house_income_per_day is unsigned -- no sign to sanitize.
+
+    MonsterFactors& m = f.monster;
+    clamp_nonneg("monster.spawn_interval_millis", m.spawn_interval_millis);
+    // max_alive: see this function's doc comment -- a negative cap underflows
+    // through economy.cpp's `live >= static_cast<uint32_t>(cap)` and silently
+    // disables the spawn cap instead of capping at 0.
+    clamp_nonneg("monster.max_alive", m.max_alive);
+
+    return f;
+}
+
+}  // namespace
+
+void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = sanitize_factors(f); }
 int32_t biome_at_of(const BadlandsGame& g, float x, float z) {
     return static_cast<int32_t>(biome_at(g, {x, z}));
 }
@@ -521,9 +702,9 @@ CharacterDesc GoblinDesc(float pos_x, float pos_z) {
 
 // ---- Sim methods -----------------------------------------------------------
 
-Sim::Sim(const char* brain_script_source) : world_(make_world(brain_script_source)) {}
-Sim::Sim(const WorldConfig& config, const char* brain_script_source)
-    : world_(make_world(brain_script_source, config)) {}
+Sim::Sim(const BrainDesc& brain_desc) : world_(make_world(brain_desc)) {}
+Sim::Sim(const WorldConfig& config, const BrainDesc& brain_desc)
+    : world_(make_world(brain_desc, config)) {}
 Sim::~Sim() = default;
 Sim::Sim(Sim&&) noexcept = default;
 Sim& Sim::operator=(Sim&&) noexcept = default;

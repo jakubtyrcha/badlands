@@ -41,7 +41,7 @@ CharacterDesc player_char(float x, float z, float radius, float cone_half_deg) {
 }  // namespace
 
 TEST_CASE("unconfigured vision field is empty and queries Unknown") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     VisionField f = vision_field_of(g->vision);
     CHECK(f.rg == nullptr);
     CHECK(f.nx == 0);
@@ -50,7 +50,7 @@ TEST_CASE("unconfigured vision field is empty and queries Unknown") {
 }
 
 TEST_CASE("ConfigureVision sizes the field and publishes it") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     configure(*g);
     resolve_vision(*g);
     VisionField f = vision_field_of(g->vision);
@@ -62,7 +62,7 @@ TEST_CASE("ConfigureVision sizes the field and publishes it") {
 }
 
 TEST_CASE("a building reveals a euclidean disc from its footprint edges") {
-    auto g = make_world(nullptr);  // Castle at kCastleSpawn: 4x4 footprint, radius 20
+    auto g = make_world(BrainDesc{});  // Castle at kCastleSpawn: 4x4 footprint, radius 20
     // Grid centred on the castle so its whole disc is on-field (the colony seat
     // is off the map origin now).
     constexpr float cx = kCastleSpawnX, cz = kCastleSpawnZ;
@@ -81,7 +81,7 @@ TEST_CASE("a building reveals a euclidean disc from its footprint edges") {
 }
 
 TEST_CASE("character vision is a forward cone") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     configure(*g);
     // Player scout at (30,0), far from the castle disc, facing +Z, 45deg cone.
     spawn_into(*g, player_char(30.0f, 0.0f, 10.0f, 45.0f));
@@ -95,7 +95,7 @@ TEST_CASE("character vision is a forward cone") {
 }
 
 TEST_CASE("a unit always sees the texel it stands on, even with a narrow cone") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     configure(*g);
     // Narrow 30deg cone facing +Z: the unit's own texel center sits off-axis and
     // would fall outside the cone, but the unit must still see its own tile.
@@ -105,7 +105,7 @@ TEST_CASE("a unit always sees the texel it stands on, even with a narrow cone") 
 }
 
 TEST_CASE("QueryVision outside the grid is Unknown even next to a revealed edge") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     configure(*g);  // grid spans [-64, 64]
     // Scout near the +X edge reveals the border column; a query well outside the
     // grid must not sample that border texel (bounds miss => Unknown).
@@ -116,7 +116,7 @@ TEST_CASE("QueryVision outside the grid is Unknown even next to a revealed edge"
 }
 
 TEST_CASE("enemy characters grant the player no vision") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     configure(*g);
     CharacterDesc enemy = player_char(30.0f, 0.0f, 10.0f, 180.0f);
     enemy.team = kPlayerTeam + 1;  // not the player team
@@ -126,7 +126,7 @@ TEST_CASE("enemy characters grant the player no vision") {
 }
 
 TEST_CASE("discovery is cumulative: a departed source leaves dormant terrain") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     configure(*g);
     uint32_t slot = spawn_into(*g, player_char(30.0f, 0.0f, 10.0f, 180.0f));  // full circle
     resolve_vision(*g);
@@ -143,7 +143,7 @@ TEST_CASE("discovery is cumulative: a departed source leaves dormant terrain") {
 }
 
 TEST_CASE("QueryVision returns the highest level over the bounds radius") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     configure(*g);
     uint32_t slot = spawn_into(*g, player_char(30.0f, 0.0f, 10.0f, 180.0f));
     resolve_vision(*g);
