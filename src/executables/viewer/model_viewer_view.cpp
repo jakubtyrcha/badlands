@@ -179,8 +179,15 @@ void ModelViewerView::Update(float dt, const bool* /*keyboard_state*/) {
 void ModelViewerView::DrawUI() {
   if (!scene_renderer_ || generators_.empty()) return;
 
-  // Mesh-setup window: single-select generator list.
+  // Mesh-setup window: single-select generator list. Give it a sensible default
+  // size and a minimum-size floor -- the list now holds the sphere + the full
+  // tree catalog, and a previously-persisted tiny window (from when it held only
+  // a few entries) would otherwise clip the list. The constraint clamps any
+  // stale/tiny persisted size up every frame; the list scrolls if it overflows.
   int selected = generator_index_;
+  ImGui::SetNextWindowSize(ImVec2(240.0f, 460.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(200.0f, 240.0f),
+                                      ImVec2(4096.0f, 4096.0f));
   ImGui::Begin("Mesh");
   for (int i = 0; i < static_cast<int>(generators_.size()); ++i) {
     if (ImGui::Selectable(generators_[i].name.c_str(), i == generator_index_)) {
