@@ -122,11 +122,18 @@ void ModelViewerView::RebuildScene() {
   Aabb world_bounds = Aabb::Empty();
   if (gen.tree.has_value()) {
     BuildTreeGraph(*gen.tree, world_bounds);
-  } else {
+  } else if (gen.generate) {
     GeneratedMesh generated = gen.generate();
     world_bounds = generated.mesh.local_bounds.TransformedBy(generated.transform);
     AddMeshEntity(scene_, "mesh", std::move(generated.mesh), gen.material,
                   generated.transform);
+  } else {
+    // A MeshGenerator must set exactly one mode (mesh lambda or tree). Guard the
+    // invariant so a malformed entry logs instead of throwing bad_function_call.
+    spdlog::error("ModelViewerView::RebuildScene: generator '{}' has neither a "
+                  "mesh nor a tree; showing floor only",
+                  gen.name);
+    return;  // floor-only scene; leave the orbit framing unchanged
   }
 
   const glm::vec3 center = world_bounds.Center();

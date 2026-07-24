@@ -215,94 +215,118 @@ TexturedMeshResult GenerateTreeMesh(const TreeOptions& o) {
 }
 
 std::vector<NamedTreeOptions> TreeCatalog() {
-  // Build a TreeOptions from ez-tree preset values. Parameter order matches the
-  // per-level arrays below: angle, children, gnarliness, length, radius,
-  // sections, segments, start, taper, twist. force_dir is (0,1,0) for every
-  // ez-tree preset; bark_uv_scale is left at the 1/1 default (untextured here).
-  auto make = [](uint32_t seed, TreeType type, int levels,
-                 std::array<float, 4> angle, std::array<int, 4> children,
-                 std::array<float, 4> gnarliness, std::array<float, 4> length,
-                 std::array<float, 4> radius, std::array<int, 4> sections,
-                 std::array<int, 4> segments, std::array<float, 4> start,
-                 std::array<float, 4> taper, std::array<float, 4> twist,
-                 float force_strength) {
-    TreeOptions o;
-    o.seed = seed; o.type = type; o.levels = levels;
-    o.angle = angle; o.children = children; o.gnarliness = gnarliness;
-    o.length = length; o.radius = radius; o.sections = sections;
-    o.segments = segments; o.start = start; o.taper = taper; o.twist = twist;
-    o.force_strength = force_strength;
-    return o;
-  };
-
+  // ez-tree presets, one struct per src/lib/presets/<name>.json. Designated
+  // initializers name every field, so this stays auditable against the source
+  // and a mis-ordered value can't compile silently. Fields left out
+  // (force_dir = (0,1,0), bark_uv_scale = 1/1) keep their TreeOptions defaults.
+  using T = TreeType;
   std::vector<NamedTreeOptions> catalog;
-  catalog.push_back({"Oak (small)", make(30895, TreeType::Deciduous, 3,
-      {0, 54, 58, 32}, {4, 2, 3, 0}, {0.07f, -0.08f, 0.11f, 0.09f},
-      {28.08f, 4.55f, 9.78f, 7.16f}, {1.0f, 1.02f, 0.69f, 1.19f}, {16, 9, 8, 1},
-      {7, 5, 3, 3}, {0, 0.49f, 0.06f, 0.12f}, {0.73f, 0.42f, 0.69f, 0.75f},
-      {-0.23f, 0.42f, 0, 0}, 0.01f)});
+  catalog.push_back({"Oak (small)", {
+      .seed = 30895, .type = T::Deciduous, .levels = 3,
+      .angle = {0, 54, 58, 32}, .children = {4, 2, 3, 0},
+      .gnarliness = {0.07f, -0.08f, 0.11f, 0.09f},
+      .length = {28.08f, 4.55f, 9.78f, 7.16f}, .radius = {1.0f, 1.02f, 0.69f, 1.19f},
+      .sections = {16, 9, 8, 1}, .segments = {7, 5, 3, 3},
+      .start = {0, 0.49f, 0.06f, 0.12f}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
+      .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.01f}});
   catalog.push_back({"Oak (medium)", OakPreset()});
-  catalog.push_back({"Oak (large)", make(23399, TreeType::Deciduous, 3,
-      {0, 54, 43, 32}, {9, 5, 3, 0}, {-0.04f, 0.16f, -0.06f, 0.09f},
-      {47.7f, 29.39f, 17.62f, 7.16f}, {3.0f, 0.69f, 0.69f, 1.19f}, {16, 9, 8, 3},
-      {12, 5, 3, 3}, {0, 0.35f, 0.1f, 0}, {0.73f, 0.42f, 0.69f, 0.75f},
-      {-0.23f, 0.42f, 0, 0}, 0.02f)});
-  catalog.push_back({"Pine (small)", make(11744, TreeType::Evergreen, 1,
-      {0, 117, 60, 60}, {91, 7, 5, 0}, {0.05f, 0.08f, 0, 0},
-      {39.55f, 12.12f, 10.0f, 1.0f}, {0.55f, 0.41f, 0.7f, 0.7f}, {12, 10, 8, 6},
-      {8, 6, 4, 3}, {0, 0.16f, 0.3f, 0.3f}, {0.7f, 0.7f, 0.7f, 0.7f},
-      {0, 0, 0, 0}, 0.0f)});
+  catalog.push_back({"Oak (large)", {
+      .seed = 23399, .type = T::Deciduous, .levels = 3,
+      .angle = {0, 54, 43, 32}, .children = {9, 5, 3, 0},
+      .gnarliness = {-0.04f, 0.16f, -0.06f, 0.09f},
+      .length = {47.7f, 29.39f, 17.62f, 7.16f}, .radius = {3.0f, 0.69f, 0.69f, 1.19f},
+      .sections = {16, 9, 8, 3}, .segments = {12, 5, 3, 3},
+      .start = {0, 0.35f, 0.1f, 0}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
+      .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.02f}});
+  catalog.push_back({"Pine (small)", {
+      .seed = 11744, .type = T::Evergreen, .levels = 1,
+      .angle = {0, 117, 60, 60}, .children = {91, 7, 5, 0},
+      .gnarliness = {0.05f, 0.08f, 0, 0},
+      .length = {39.55f, 12.12f, 10.0f, 1.0f}, .radius = {0.55f, 0.41f, 0.7f, 0.7f},
+      .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
+      .start = {0, 0.16f, 0.3f, 0.3f}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0f}});
   catalog.push_back({"Pine (medium)", PinePreset()});
-  catalog.push_back({"Pine (large)", make(44166, TreeType::Evergreen, 1,
-      {0, 129.13f, 16, 60}, {100, 3, 0, 0}, {0.05f, 0.08f, 0, 0},
-      {65.25f, 34.85f, 27.25f, 1.0f}, {1.27f, 0.37f, 0.7f, 0.7f}, {12, 10, 8, 6},
-      {8, 6, 4, 3}, {0, 0.29f, 0.14f, 0.3f}, {0.7f, 0.7f, 0.7f, 0.7f},
-      {0, 0, 0, 0}, 0.009f)});
-  catalog.push_back({"Ash (small)", make(26867, TreeType::Deciduous, 2,
-      {0, 48, 75, 60}, {10, 3, 3, 0}, {0.11f, 0.09f, 0.05f, 0.09f},
-      {23.87f, 18.0f, 5.59f, 4.6f}, {0.81f, 0.56f, 0.76f, 0.7f}, {12, 10, 10, 10},
-      {8, 6, 4, 3}, {0, 0.53f, 0.33f, 0}, {0.7f, 0.7f, 0.7f, 0.7f},
-      {0.3f, -0.07f, 0, 0}, 0.01f)});
-  catalog.push_back({"Ash (medium)", make(36330, TreeType::Deciduous, 3,
-      {0, 48, 75, 60}, {7, 4, 3, 0}, {0.03f, 0.25f, 0.2f, 0.09f},
-      {43.47f, 27.14f, 9.51f, 4.6f}, {2.0f, 0.63f, 0.76f, 0.7f}, {12, 8, 6, 4},
-      {12, 6, 4, 3}, {0, 0.23f, 0.33f, 0}, {0.7f, 0.7f, 0.7f, 0.7f},
-      {0.09f, -0.07f, 0, 0}, 0.01f)});
-  catalog.push_back({"Ash (large)", make(29919, TreeType::Deciduous, 3,
-      {0, 39, 39, 51}, {10, 4, 3, 0}, {-0.05f, 0.2f, 0.16f, 0.05f},
-      {45.0f, 29.42f, 15.3f, 4.6f}, {3.03f, 0.53f, 0.79f, 1.11f}, {12, 8, 6, 4},
-      {8, 6, 4, 3}, {0, 0.32f, 0.34f, 0}, {0.7f, 0.62f, 0.76f, 0},
-      {0.09f, -0.07f, 0, 0}, 0.01f)});
-  catalog.push_back({"Aspen (small)", make(36330, TreeType::Deciduous, 2,
-      {0, 70, 35, 7}, {4, 3, 3, 0}, {0.04f, -0.01f, 0.12f, 0.02f},
-      {23.99f, 3.36f, 7.7f, 1.0f}, {0.37f, 0.41f, 0.7f, 0.7f}, {12, 10, 8, 6},
-      {8, 6, 4, 3}, {0, 0.45f, 0.33f, 0}, {0.37f, 0.13f, 0.7f, 0.7f},
-      {0, 0, 0, 0}, 0.0109f)});
-  catalog.push_back({"Aspen (medium)", make(18020, TreeType::Deciduous, 2,
-      {0, 75, 32, 7}, {10, 3, 3, 0}, {0.05f, 0.12f, 0.12f, 0.02f},
-      {50.0f, 6.07f, 11.19f, 1.0f}, {0.72f, 0.41f, 0.7f, 0.7f}, {12, 10, 8, 6},
-      {8, 6, 4, 3}, {0, 0.59f, 0.35f, 0}, {0.37f, 0.13f, 0.7f, 0.7f},
-      {0, 0, 0, 0}, 0.0148f)});
-  catalog.push_back({"Aspen (large)", make(30631, TreeType::Deciduous, 2,
-      {0, 47, 63, 7}, {10, 6, 0, 0}, {0.05f, -0.03f, 0.12f, 0.02f},
-      {69.6f, 18.56f, 11.19f, 1.0f}, {1.11f, 0.58f, 0.7f, 0.7f}, {12, 10, 8, 6},
-      {8, 6, 4, 3}, {0, 0.62f, 0.05f, 0}, {0.7f, 0.13f, 0.7f, 0.7f},
-      {0, 0, 0, 0}, 0.0217f)});
-  catalog.push_back({"Bush 1", make(45590, TreeType::Deciduous, 3,
-      {0, 21.52f, 62.61f, 60}, {7, 3, 2, 0}, {0.11f, 0.09f, 0.05f, 0.09f},
-      {0.1f, 15.3f, 5.59f, 4.6f}, {0.58f, 0.95f, 0.76f, 0.7f}, {6, 6, 10, 10},
-      {4, 4, 4, 3}, {0, 0.53f, 0.33f, 0}, {0.7f, 0.7f, 0.7f, 0.7f},
-      {0.3f, -0.07f, 0, 0}, 0.0f)});
-  catalog.push_back({"Bush 2", make(45590, TreeType::Deciduous, 2,
-      {0, 19.57f, 27.39f, 60}, {10, 3, 2, 0}, {0.02f, 0.11f, 0.05f, 0.09f},
-      {0.1f, 19.65f, 7.7f, 4.6f}, {0.58f, 0.95f, 0.76f, 0.7f}, {3, 4, 10, 10},
-      {4, 4, 4, 3}, {0, 0.64f, 0.71f, 0}, {0.7f, 0.7f, 0.7f, 0.7f},
-      {0.36f, -0.04f, 0, 0}, 0.0f)});
-  catalog.push_back({"Bush 3", make(31343, TreeType::Evergreen, 3,
-      {0, 66.52f, 52.83f, 0}, {13, 4, 4, 0}, {0.05f, 0.07f, 0.05f, 0.09f},
-      {10.96f, 21.82f, 13.13f, 5.53f}, {0.58f, 0.95f, 0.69f, 0.74f}, {4, 3, 3, 10},
-      {3, 3, 3, 3}, {0, 0.14f, 0.29f, 0}, {0.7f, 0.7f, 0.7f, 0.7f},
-      {0.3f, -0.03f, 0, 0}, 0.0f)});
+  catalog.push_back({"Pine (large)", {
+      .seed = 44166, .type = T::Evergreen, .levels = 1,
+      .angle = {0, 129.13f, 16, 60}, .children = {100, 3, 0, 0},
+      .gnarliness = {0.05f, 0.08f, 0, 0},
+      .length = {65.25f, 34.85f, 27.25f, 1.0f}, .radius = {1.27f, 0.37f, 0.7f, 0.7f},
+      .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
+      .start = {0, 0.29f, 0.14f, 0.3f}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
+      .twist = {0, 0, 0, 0}, .force_strength = 0.009f}});
+  catalog.push_back({"Ash (small)", {
+      .seed = 26867, .type = T::Deciduous, .levels = 2,
+      .angle = {0, 48, 75, 60}, .children = {10, 3, 3, 0},
+      .gnarliness = {0.11f, 0.09f, 0.05f, 0.09f},
+      .length = {23.87f, 18.0f, 5.59f, 4.6f}, .radius = {0.81f, 0.56f, 0.76f, 0.7f},
+      .sections = {12, 10, 10, 10}, .segments = {8, 6, 4, 3},
+      .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
+      .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.01f}});
+  catalog.push_back({"Ash (medium)", {
+      .seed = 36330, .type = T::Deciduous, .levels = 3,
+      .angle = {0, 48, 75, 60}, .children = {7, 4, 3, 0},
+      .gnarliness = {0.03f, 0.25f, 0.2f, 0.09f},
+      .length = {43.47f, 27.14f, 9.51f, 4.6f}, .radius = {2.0f, 0.63f, 0.76f, 0.7f},
+      .sections = {12, 8, 6, 4}, .segments = {12, 6, 4, 3},
+      .start = {0, 0.23f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
+      .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f}});
+  catalog.push_back({"Ash (large)", {
+      .seed = 29919, .type = T::Deciduous, .levels = 3,
+      .angle = {0, 39, 39, 51}, .children = {10, 4, 3, 0},
+      .gnarliness = {-0.05f, 0.2f, 0.16f, 0.05f},
+      .length = {45.0f, 29.42f, 15.3f, 4.6f}, .radius = {3.03f, 0.53f, 0.79f, 1.11f},
+      .sections = {12, 8, 6, 4}, .segments = {8, 6, 4, 3},
+      .start = {0, 0.32f, 0.34f, 0}, .taper = {0.7f, 0.62f, 0.76f, 0},
+      .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f}});
+  catalog.push_back({"Aspen (small)", {
+      .seed = 36330, .type = T::Deciduous, .levels = 2,
+      .angle = {0, 70, 35, 7}, .children = {4, 3, 3, 0},
+      .gnarliness = {0.04f, -0.01f, 0.12f, 0.02f},
+      .length = {23.99f, 3.36f, 7.7f, 1.0f}, .radius = {0.37f, 0.41f, 0.7f, 0.7f},
+      .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
+      .start = {0, 0.45f, 0.33f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0109f}});
+  catalog.push_back({"Aspen (medium)", {
+      .seed = 18020, .type = T::Deciduous, .levels = 2,
+      .angle = {0, 75, 32, 7}, .children = {10, 3, 3, 0},
+      .gnarliness = {0.05f, 0.12f, 0.12f, 0.02f},
+      .length = {50.0f, 6.07f, 11.19f, 1.0f}, .radius = {0.72f, 0.41f, 0.7f, 0.7f},
+      .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
+      .start = {0, 0.59f, 0.35f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0148f}});
+  catalog.push_back({"Aspen (large)", {
+      .seed = 30631, .type = T::Deciduous, .levels = 2,
+      .angle = {0, 47, 63, 7}, .children = {10, 6, 0, 0},
+      .gnarliness = {0.05f, -0.03f, 0.12f, 0.02f},
+      .length = {69.6f, 18.56f, 11.19f, 1.0f}, .radius = {1.11f, 0.58f, 0.7f, 0.7f},
+      .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
+      .start = {0, 0.62f, 0.05f, 0}, .taper = {0.7f, 0.13f, 0.7f, 0.7f},
+      .twist = {0, 0, 0, 0}, .force_strength = 0.0217f}});
+  catalog.push_back({"Bush 1", {
+      .seed = 45590, .type = T::Deciduous, .levels = 3,
+      .angle = {0, 21.52f, 62.61f, 60}, .children = {7, 3, 2, 0},
+      .gnarliness = {0.11f, 0.09f, 0.05f, 0.09f},
+      .length = {0.1f, 15.3f, 5.59f, 4.6f}, .radius = {0.58f, 0.95f, 0.76f, 0.7f},
+      .sections = {6, 6, 10, 10}, .segments = {4, 4, 4, 3},
+      .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
+      .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.0f}});
+  catalog.push_back({"Bush 2", {
+      .seed = 45590, .type = T::Deciduous, .levels = 2,
+      .angle = {0, 19.57f, 27.39f, 60}, .children = {10, 3, 2, 0},
+      .gnarliness = {0.02f, 0.11f, 0.05f, 0.09f},
+      .length = {0.1f, 19.65f, 7.7f, 4.6f}, .radius = {0.58f, 0.95f, 0.76f, 0.7f},
+      .sections = {3, 4, 10, 10}, .segments = {4, 4, 4, 3},
+      .start = {0, 0.64f, 0.71f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
+      .twist = {0.36f, -0.04f, 0, 0}, .force_strength = 0.0f}});
+  catalog.push_back({"Bush 3", {
+      .seed = 31343, .type = T::Evergreen, .levels = 3,
+      .angle = {0, 66.52f, 52.83f, 0}, .children = {13, 4, 4, 0},
+      .gnarliness = {0.05f, 0.07f, 0.05f, 0.09f},
+      .length = {10.96f, 21.82f, 13.13f, 5.53f}, .radius = {0.58f, 0.95f, 0.69f, 0.74f},
+      .sections = {4, 3, 3, 10}, .segments = {3, 3, 3, 3},
+      .start = {0, 0.14f, 0.29f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
+      .twist = {0.3f, -0.03f, 0, 0}, .force_strength = 0.0f}});
   return catalog;
 }
 
