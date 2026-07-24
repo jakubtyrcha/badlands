@@ -406,7 +406,8 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/generator.cpp
     src/mapgen/hillshade.cpp
     src/mapgen/hydrology.cpp
-    src/mapgen/outputs.cpp)
+    src/mapgen/outputs.cpp
+    src/mapgen/erosion.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
 target_include_directories(badlands_mapgen_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
@@ -528,6 +529,8 @@ add_test(NAME badlands_generator_tests COMMAND badlands_generator_tests
 add_executable(badlands_erosion_tests
     src/mapgen/hydrology_tests.cpp
     src/mapgen/hydrology.cpp
+    src/mapgen/erosion_tests.cpp
+    src/mapgen/erosion.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_erosion_tests PRIVATE
