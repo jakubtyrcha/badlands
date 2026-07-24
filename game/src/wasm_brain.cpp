@@ -234,19 +234,35 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 }
 
 // The wire trust boundary: see wasm_brain.h's doc comment on this function
-// for the full policy (malformed -> nullopt/FATAL; BL_INT_USE_SKILL ->
-// warn+None; everything else -> apply_intention's own warn+ignore, one layer
-// up). A non-finite point coordinate would otherwise propagate into
-// MoveTo/distance math (apply_intention, intention.cpp); an out-of-range
-// activity_label would be cast to ActivityId and could reach an
-// ActivityWeights::w/ActivityHistogram::total_ index; an out-of-range
-// duration_millis/idle_hint_millis narrows losslessly into a Command's
-// int32_t param_b ONLY because this check bounds it to [0, INT32_MAX] first
-// (command.cpp's enqueue_set_behavior).
+// for the full policy. Two different kinds of "wrong" get two different
+// responses (Fix 5 -- the trust boundary distinguishes them explicitly now):
+//
+//  - MALFORMED (corruption-shaped, FATAL -> nullopt, escalated by the
+//    caller): a non-finite point coordinate (would propagate into
+//    MoveTo/distance math, apply_intention/intention.cpp) or a duration_millis/
+//    idle_hint_millis outside [0, INT32_MAX] (narrows losslessly into a
+//    Command's int32_t param_b ONLY because this check bounds it first,
+//    command.cpp's enqueue_set_behavior). These shapes cannot come from a
+//    well-formed guest of ANY version -- they indicate a buggy/adversarial
+//    module, not a vocabulary mismatch.
+//  - UNKNOWN VOCABULARY (forward-compat, warn once + decode as the
+//    "nothing new" value, NOT rejected): an intention_kind outside
+//    [BL_INT_NONE, BL_INT_USE_SKILL], or an activity_label outside
+//    [-1, kActivityCount) (-1 is activity_label's OWN "none" sentinel --
+//    see Intention's doc comment -- so it is a valid value, not clamped).
+//    Both are exactly the shape a newer guest talking to an OLDER host
+//    would produce (a kind/label this build has not learned about yet)
+//    -- treating that as fatal would make every host upgrade a breaking
+//    change for every brain built against a newer vocabulary. An unknown
+//    kind decodes to IntentionKind::None (apply_intention's own
+//    warn+ignore, one layer up, is what a REJECTED-but-recognized kind --
+//    e.g. Shoot at an unknown target -- goes through instead); an
+//    out-of-range activity_label clamps to -1 (inspection-only field, no
+//    downstream index risk once clamped).
+//
+// BL_INT_USE_SKILL is a THIRD case: known and in-range, but reserved --
+// same warn+None outcome as an unknown kind, with its own message.
 std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t slot) {
-    if (out.intention_kind < BL_INT_NONE || out.intention_kind > BL_INT_USE_SKILL) {
-        return std::nullopt;
-    }
     if (!std::isfinite(out.point_x) || !std::isfinite(out.point_z)) {
         return std::nullopt;
     }
@@ -258,23 +274,33 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
         out.idle_hint_millis > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
         return std::nullopt;
     }
-    if (out.activity_label < 0 || out.activity_label >= kActivityCount) {
-        return std::nullopt;
-    }
-
-    if (out.intention_kind == BL_INT_USE_SKILL) {
-        spdlog::warn("[wasm-brain] slot {}: BL_INT_USE_SKILL is reserved, ignored", slot);
-        return Intention{};  // kind = IntentionKind::None -- nothing to adopt
-    }
 
     Intention intent;
-    intent.kind = static_cast<IntentionKind>(out.intention_kind);
     intent.point = {out.point_x, out.point_z};
     intent.target_slot = out.target_slot;
     intent.arg = out.arg;
     intent.duration_millis = out.duration_millis;
-    intent.activity_label = out.activity_label;
     intent.idle_hint_millis = out.idle_hint_millis;
+
+    if (out.intention_kind == BL_INT_USE_SKILL) {
+        spdlog::warn("[wasm-brain] slot {}: BL_INT_USE_SKILL is reserved, ignored", slot);
+        intent.kind = IntentionKind::None;
+    } else if (out.intention_kind < BL_INT_NONE || out.intention_kind > BL_INT_USE_SKILL) {
+        spdlog::warn("[wasm-brain] slot {}: unrecognized intention_kind {}, ignored (forward-compat)",
+                    slot, out.intention_kind);
+        intent.kind = IntentionKind::None;
+    } else {
+        intent.kind = static_cast<IntentionKind>(out.intention_kind);
+    }
+
+    if (out.activity_label < -1 || out.activity_label >= kActivityCount) {
+        spdlog::warn("[wasm-brain] slot {}: activity_label {} out of range, clamped to -1", slot,
+                    out.activity_label);
+        intent.activity_label = -1;
+    } else {
+        intent.activity_label = out.activity_label;
+    }
+
     return intent;
 }
 
@@ -353,8 +379,12 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // apply_intention returns whether the suggestion was validated + adopted;
     // an adopted intention always logs a SetBehavior command (see its own doc
     // comment), so the command log is the observable "a decision landed"
-    // signal now.
-    apply_intention(game, slot, *intent);
+    // signal now. note_think_outcome (Fix 1, intention.h) is the wake
+    // bookkeeping apply_intention itself no longer performs -- called
+    // unconditionally, once per think, regardless of what was decided; see
+    // its own doc comment for why the two are split.
+    const bool adopted = apply_intention(game, slot, *intent);
+    note_think_outcome(game, slot, adopted);
 }
 
 }  // namespace badlands

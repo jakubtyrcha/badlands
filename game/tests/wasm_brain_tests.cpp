@@ -304,16 +304,9 @@ TEST_CASE("decode_suggestion: BL_INT_USE_SKILL is reserved -- decodes to Intenti
 }
 
 TEST_CASE("decode_suggestion: malformed wires are rejected", "[wasm_brain]") {
-    SECTION("intention_kind above BL_INT_USE_SKILL") {
-        BlSuggestionWire wire{};
-        wire.intention_kind = BL_INT_USE_SKILL + 1;
-        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
-    }
-    SECTION("negative intention_kind") {
-        BlSuggestionWire wire{};
-        wire.intention_kind = -1;
-        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
-    }
+    // intention_kind out of range and activity_label out of range are NOT
+    // here (Fix 5): they are unknown VOCABULARY, not malformed -- see the
+    // "forward-compatible vocabulary decode" cases below.
     SECTION("non-finite point_x") {
         BlSuggestionWire wire{};
         wire.point_x = std::numeric_limits<float>::quiet_NaN();
@@ -345,10 +338,61 @@ TEST_CASE("decode_suggestion: malformed wires are rejected", "[wasm_brain]") {
         wire.idle_hint_millis = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
         CHECK_FALSE(decode_suggestion(wire, 0).has_value());
     }
-    SECTION("activity_label out of range") {
+}
+
+// --- Fix 5: forward-compatible vocabulary decode ----------------------------
+// An intention_kind/activity_label this build doesn't recognize is UNKNOWN
+// VOCABULARY (e.g. a newer guest talking to an older host), not corruption --
+// decode as None/-1 with a warning, never reject. Only corruption-shaped
+// wires (non-finite point floats, negative/overflowing duration/hint) stay
+// FATAL, pinned by the "malformed wires are rejected" test above.
+
+TEST_CASE("decode_suggestion: an unrecognized intention_kind decodes as None, not rejected",
+          "[wasm_brain]") {
+    BlSuggestionWire wire{};
+    wire.intention_kind = 99;  // outside [BL_INT_NONE, BL_INT_USE_SKILL]
+    wire.point_x = 1.0f;
+    wire.point_z = 2.0f;
+    wire.target_slot = 5;
+    const std::optional<Intention> intent = decode_suggestion(wire, 0);
+    REQUIRE(intent.has_value());  // well-formed -- not the malformed/FATAL path
+    CHECK(intent->kind == IntentionKind::None);
+    // The rest of the wire still decodes normally -- only the kind is unknown.
+    CHECK(intent->point.x == Catch::Approx(1.0f));
+    CHECK(intent->target_slot == 5);
+}
+
+TEST_CASE("decode_suggestion: a negative intention_kind decodes as None, not rejected",
+          "[wasm_brain]") {
+    BlSuggestionWire wire{};
+    wire.intention_kind = -1;
+    const std::optional<Intention> intent = decode_suggestion(wire, 0);
+    REQUIRE(intent.has_value());
+    CHECK(intent->kind == IntentionKind::None);
+}
+
+TEST_CASE("decode_suggestion: an out-of-range activity_label clamps to -1, not rejected",
+          "[wasm_brain]") {
+    SECTION("too high") {
         BlSuggestionWire wire{};
         wire.activity_label = kActivityCount;
-        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+        const std::optional<Intention> intent = decode_suggestion(wire, 0);
+        REQUIRE(intent.has_value());
+        CHECK(intent->activity_label == -1);
+    }
+    SECTION("below -1") {
+        BlSuggestionWire wire{};
+        wire.activity_label = -2;
+        const std::optional<Intention> intent = decode_suggestion(wire, 0);
+        REQUIRE(intent.has_value());
+        CHECK(intent->activity_label == -1);
+    }
+    SECTION("-1 itself is the valid inspection-only sentinel, not clamped/warned") {
+        BlSuggestionWire wire{};
+        wire.activity_label = -1;
+        const std::optional<Intention> intent = decode_suggestion(wire, 0);
+        REQUIRE(intent.has_value());
+        CHECK(intent->activity_label == -1);
     }
 }
 

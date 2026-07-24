@@ -84,24 +84,32 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 // The wire trust boundary: `out` came back through bh_tick from
 // guest-controlled memory, so its fields are untrusted input even though the
 // guest is host-compiled -- a buggy or adversarial module can write anything
-// to bl_out_buf(). Rejects (returns std::nullopt -- MALFORMED, escalated to
-// FATAL by the caller, tick_wasm_brain) an intention_kind outside
-// [BL_INT_NONE, BL_INT_USE_SKILL], a non-finite point_x/point_z, an
-// activity_label outside [0, kActivityCount), or a duration_millis/
-// idle_hint_millis outside [0, INT32_MAX] (both narrow into a Command's
-// int32_t param_b downstream -- command.cpp's enqueue_set_behavior -- so a
-// value beyond that range would corrupt silently rather than merely being
-// policy-noncompliant).
+// to bl_out_buf(). The boundary distinguishes two different kinds of "wrong"
+// (Fix 5 of the review's fix wave; see wasm_brain.cpp's own doc comment on
+// this function for the full reasoning):
 //
-// BL_INT_USE_SKILL is well-formed but reserved (docs/design/
-// intention-contract.html's vocab table): this is the ONE case decode logs a
-// warning of its own (not a game-state side effect, so the function stays
-// safely callable from tests without spdlog noise mattering) and decodes to
-// IntentionKind::None ("nothing to adopt") rather than nullopt -- a
-// malformed-wire FATAL would be the wrong response to a brain naming a
-// reserved-but-recognized kind. Every other well-formed-but-infeasible
-// suggestion (e.g. an unknown target_slot) is NOT rejected here at all --
-// that is apply_intention's own warn+ignore validation, one layer up.
+//  - MALFORMED, corruption-shaped -> rejected (returns std::nullopt,
+//    escalated to FATAL by the caller, tick_wasm_brain): a non-finite
+//    point_x/point_z, or a duration_millis/idle_hint_millis outside
+//    [0, INT32_MAX] (both narrow into a Command's int32_t param_b downstream
+//    -- command.cpp's enqueue_set_behavior -- so a value beyond that range
+//    would corrupt silently rather than merely being policy-noncompliant).
+//    These shapes cannot come from a well-formed guest of any wire version.
+//  - UNKNOWN VOCABULARY, forward-compat -> NOT rejected: an intention_kind
+//    outside [BL_INT_NONE, BL_INT_USE_SKILL] decodes to IntentionKind::None
+//    (warn once); an activity_label outside [-1, kActivityCount) clamps to
+//    -1 (activity_label's own "none" sentinel -- warn once). Both are
+//    exactly the shape a newer guest talking to an OLDER host produces (a
+//    value this build has not learned about yet), so treating them as fatal
+//    would make every host upgrade a breaking change for brains built
+//    against a newer vocabulary.
+//
+// BL_INT_USE_SKILL is a third case: well-formed but reserved (docs/design/
+// intention-contract.html's vocab table) -- decodes to IntentionKind::None
+// with its own warning, same outcome as an unknown kind. Every other
+// well-formed-but-infeasible suggestion (e.g. an unknown target_slot) is NOT
+// rejected here at all -- that is apply_intention's own warn+ignore
+// validation, one layer up.
 //
 // Kept out of the anonymous namespace so tests can drive it directly with a
 // synthetic BlSuggestionWire (see wasm_brain_tests.cpp), the same way

@@ -285,6 +285,15 @@ enum class InboxEventKind : int32_t { None = 0, DamageTaken, ThreatSighted, Move
 // ProgressionFactors scalar -- constants until a knob is asked for (CLAUDE.md).
 inline constexpr int64_t kInboxTtlMillis = 3000;
 
+// How long note_think_outcome (game/src/intention.h) backs off should_wake
+// after a rejected or no-op (BL_INT_NONE) suggestion, so a brain that keeps
+// declining is re-consulted at a bounded rate instead of every tick (30 Hz):
+// without this, a hero with no CurrentIntention running -- exactly what a
+// rejected/no-op decision leaves behind -- satisfies should_wake's "nothing
+// running" clause unconditionally, forever. A compile-time constant, not a
+// ProgressionFactors scalar, same reasoning as kInboxTtlMillis above.
+inline constexpr int64_t kRejectedSuggestionBackoffMillis = 500;
+
 // One timed inbox entry. `param` is kind-specific: damage amount
 // (DamageTaken), 1/0 completed-vs-aborted (IntentionEnded); unused (0) for
 // ThreatSighted/MoveBlocked today -- their source_slot / the sibling
@@ -313,6 +322,25 @@ struct EventInbox {
     // scratch state) so a replay reproduces the same edges, the same reason
     // MoveBlocked keeps its at_millis on the component rather than elsewhere.
     bool threat_was_present = false;
+    // Wake bookkeeping (Fix 1, docs/design/intention-contract.html §2):
+    // should_wake's event clause is "something was pushed since the hero
+    // last thought" -- TIMESTAMP-free, deliberately. A timestamp comparison
+    // (the pre-fix implementation) cannot distinguish a push that landed
+    // BEFORE a think this tick from one that landed AFTER it: every event
+    // pushed in the same tick shares one world_millis stamp
+    // (push_inbox_event), so a post-think push (e.g. movement's MoveBlocked
+    // mirror, which runs after the think-dispatch loop) is
+    // timestamp-indistinguishable from a pre-think one the brain already
+    // saw. A monotonic counter has no such collision: `last_pushed_seq`
+    // bumps on every push_inbox_event call regardless of world_millis, and
+    // `last_seen_seq` is stamped to the CURRENT last_pushed_seq by
+    // note_think_outcome (game/src/intention.h) at think time -- so a push
+    // strictly AFTER that stamp always reads as new, same tick or not.
+    // Both live on the inbox itself (not CurrentIntention), because this is
+    // fundamentally the inbox's own read/unread bookkeeping, not a property
+    // of whatever intention happens to be running.
+    uint64_t last_pushed_seq = 0;  // bumped by every push_inbox_event call
+    uint64_t last_seen_seq = 0;    // last_pushed_seq as of the last think
 };
 
 // Native mirror of BL_INT_* -- the suggestion's kind. UseSkill is reserved for

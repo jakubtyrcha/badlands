@@ -24,6 +24,11 @@ void push_inbox_event(BadlandsGame& game, entt::entity e, InboxEvent ev) {
     }
     ev.at_millis = game.world_millis;
     ev.ttl_millis = kInboxTtlMillis;
+    // Wake bookkeeping (Fix 1, EventInbox's own comment): bump the
+    // timestamp-free sequence counter on EVERY push, regardless of eviction
+    // below -- should_wake's event clause only cares whether something
+    // landed since the last think, not which slot it ended up in.
+    ++inbox->last_pushed_seq;
     if (inbox->count < kInboxCapacity) {
         inbox->events[inbox->count++] = ev;
         return;
@@ -44,15 +49,12 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     entt::registry& reg = game.registry;
     const glm::vec2 self_pos = reg.get<Position>(e).pos;
 
-    // Mark the think UNCONDITIONALLY, before any validation/adoption below --
-    // even a rejected suggestion or an explicit IntentionKind::None means the
-    // brain just looked at this hero's inbox, so should_wake (docs/design/
-    // intention-contract.html §2) must not treat those same,
-    // already-considered events as a fresh reason to wake it again next tick
-    // (see should_wake's own comment). Fetched once here and reused by the
-    // tail below.
+    // Fetched once here, reused by the tail below. The wake-bookkeeping
+    // stamps that USED to live here unconditionally (last_think_millis,
+    // the rejection backoff) moved to note_think_outcome (intention.h) --
+    // this function is purely validate-and-adopt now; see both doc
+    // comments for why they are split.
     CurrentIntention& ci = reg.get<CurrentIntention>(e);
-    ci.last_think_millis = game.world_millis;
 
     switch (intent.kind) {
         case IntentionKind::None:
@@ -136,7 +138,17 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
                 spdlog::warn("[intention] slot {}: Idle with a negative duration, ignored", slot);
                 return false;
             }
-            break;  // no command producer of its own -- the SetBehavior below carries it
+            // Review fix: adopting Idle must HALT movement, not merely stop
+            // issuing new orders -- MoveTarget/NavPath are durable state
+            // nothing else clears, so a hero mid-MoveTo that gets told to
+            // idle would otherwise keep walking toward the OLD goal
+            // forever. v1's act_idle held position the same way; mirror it
+            // here via the ordinary MoveTo producer (self position), so the
+            // hold is itself a logged, replayable Command like every other
+            // adopted intention, not a side effect apply_intention performs
+            // outside the command log.
+            enqueue_move_to(game, slot, self_pos);
+            break;  // the SetBehavior below carries duration/wake scheduling
     }
 
     // Adopted. Idle's own duration IS its wake_at (and its completion
@@ -237,12 +249,36 @@ void advance_intentions(BadlandsGame& game) {
                 }
                 break;
 
-            case IntentionKind::Shoot:
-            case IntentionKind::Chat: {
+            case IntentionKind::Shoot: {
                 entt::entity target = entity_for_slot(game, static_cast<int32_t>(ci.target_slot));
                 const Health* hp = (target != entt::null) ? reg.try_get<Health>(target) : nullptr;
                 if (target == entt::null || (hp != nullptr && hp->hp <= 0.0f)) {
                     ended = true;  // completed stays false -> aborted
+                }
+                break;
+            }
+
+            case IntentionKind::Chat: {
+                // Review fix: Chat's lifecycle is driven by ChattingState
+                // (heroes.cpp), not target liveness -- a dead/gone target_slot
+                // would never even fire here for a session that never
+                // started (command.cpp's Chat handler declines and calls
+                // abort_intention itself in that case, below `ended` never
+                // needing to catch it). ci.arg is the started marker
+                // (unused by Chat otherwise, per apply_intention's own
+                // comment): flips to 1 once ChattingState actually appears
+                // on this hero, so a subsequent tick where it is GONE again
+                // means the session ran its course -- expiry, drift, a
+                // threat, or the partner leaving, all decided by
+                // advance_chats, never by this function. Before arg reaches
+                // 1 (still walking over, or the session hasn't landed yet
+                // this tick), neither branch fires and the intention simply
+                // keeps running, same as Attack/Buy.
+                if (reg.all_of<ChattingState>(e)) {
+                    ci.arg = 1;
+                } else if (ci.arg == 1) {
+                    ended = true;
+                    completed = true;
                 }
                 break;
             }
@@ -291,33 +327,70 @@ bool should_wake(const BadlandsGame& game, entt::entity e) {
         return false;
     }
     const auto* ci = game.registry.try_get<CurrentIntention>(e);
-    if (ci == nullptr || ci->kind == IntentionKind::None) {
-        return true;  // nothing running -- always worth a wake
+    // "Nothing running" is worth a wake only when NO backoff is armed
+    // either (see this function's doc comment): note_think_outcome can set
+    // wake_at_millis while leaving kind == None (a rejected/no-op
+    // suggestion), and that hero must sleep out the backoff, not busy-wake
+    // every tick -- so this can no longer be an unconditional short-circuit
+    // the way it was before Fix 1.
+    if (ci == nullptr || (ci->kind == IntentionKind::None && ci->wake_at_millis == 0)) {
+        return true;  // fresh/never-consulted -- always worth a wake
     }
     if (ci->wake_at_millis > 0 && game.world_millis >= ci->wake_at_millis) {
-        return true;  // idle-hint / Idle deadline passed
+        return true;  // Idle/idle-hint deadline, or a rejection backoff, elapsed
     }
     if (const auto* inbox = game.registry.try_get<EventInbox>(e)) {
-        for (int32_t i = 0; i < inbox->count; ++i) {
-            // Strictly AFTER the last think, not `started_at_millis`/`>=`
-            // (docs/design/intention-contract.html §2): events are written
-            // BEFORE the think-dispatch loop within the SAME tick (sim.cpp's
-            // tick_world), so an event that arrived the same tick a wake
-            // already considered it would otherwise satisfy `>=` forever after
-            // (`ci->last_think_millis` never advances again once the hero
-            // goes back to sleep) -- an immediate, spurious re-wake next
-            // tick for no NEW reason. last_think_millis is stamped on EVERY
-            // apply_intention call, even a rejected suggestion or an
-            // explicit "nothing new" (IntentionKind::None), so it always
-            // reflects the last time this hero's inbox was actually looked
-            // at, unlike started_at_millis (which only advances when an
-            // intention is adopted).
-            if (inbox->events[i].at_millis > ci->last_think_millis) {
-                return true;  // something happened since the hero last thought
-            }
+        if (inbox->last_pushed_seq > inbox->last_seen_seq) {
+            return true;  // something was pushed since the hero last thought
         }
     }
     return false;
+}
+
+void note_think_outcome(BadlandsGame& game, uint32_t slot, bool adopted) {
+    entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
+    if (e == entt::null) {
+        return;
+    }
+    auto* ci = game.registry.try_get<CurrentIntention>(e);
+    if (ci == nullptr) {
+        return;
+    }
+    // Inspection only now -- should_wake reads the sequence counter below,
+    // not this timestamp (see EventInbox's own comment on why).
+    ci->last_think_millis = game.world_millis;
+    if (auto* inbox = game.registry.try_get<EventInbox>(e)) {
+        inbox->last_seen_seq = inbox->last_pushed_seq;
+    }
+    if (!adopted) {
+        // Rejected or explicit "nothing new" (BL_INT_NONE): re-arm the
+        // schedule so should_wake's deadline clause, not its "nothing
+        // running" clause, governs the next wake -- see should_wake's own
+        // comment for why the latter can no longer fire unconditionally.
+        ci->wake_at_millis = game.world_millis + kRejectedSuggestionBackoffMillis;
+    }
+}
+
+void abort_intention(BadlandsGame& game, uint32_t slot, IntentionKind expected) {
+    entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
+    if (e == entt::null) {
+        return;
+    }
+    auto* ci = game.registry.try_get<CurrentIntention>(e);
+    if (ci == nullptr || ci->kind != expected) {
+        return;  // nothing to abort -- including a replayed world, where
+                 // CurrentIntention.kind is always None (apply_intention
+                 // never runs there)
+    }
+    ci->kind = IntentionKind::None;
+    ci->target_slot = UINT32_MAX;
+    ci->arg = 0;
+    ci->wake_at_millis = 0;
+
+    InboxEvent ev;
+    ev.kind = InboxEventKind::IntentionEnded;
+    ev.param = 0.0f;  // aborted
+    push_inbox_event(game, e, ev);
 }
 
 }  // namespace badlands

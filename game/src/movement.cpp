@@ -132,7 +132,13 @@ void plan_paths(BadlandsGame& game, float dt) {
     // it, same reason follow_paths defers its blocked list).
     std::vector<std::pair<entt::entity, glm::vec2>> blocked;
 
-    auto view = reg.view<MoveTarget, NavPath, const Position>(entt::exclude<InsideBuilding>);
+    // ChattingState excluded alongside InsideBuilding -- the MeleeLock
+    // precedent (below, follow_paths): a conversation holds both
+    // participants in place, the same way a melee lock holds fighters,
+    // rather than just refusing to plan a route toward wherever they were
+    // headed before the chat started.
+    auto view =
+        reg.view<MoveTarget, NavPath, const Position>(entt::exclude<InsideBuilding, ChattingState>);
     for (entt::entity e : view) {
         MoveTarget& mt = view.get<MoveTarget>(e);
         NavPath& np = view.get<NavPath>(e);
@@ -226,8 +232,12 @@ void follow_paths(BadlandsGame& game, float dt) {
     // adding a component while iterating a view can invalidate it.
     std::vector<std::pair<entt::entity, glm::vec2>> blocked;
 
+    // ChattingState excluded alongside InsideBuilding/MeleeLock: a
+    // conversation holds both participants in place, like a melee lock
+    // holds fighters -- a hero mid-chat must not keep walking toward
+    // whatever MoveTarget it had queued up before the chat started.
     auto view = game.registry.view<NavPath, Position, const Stats>(
-        entt::exclude<InsideBuilding, MeleeLock>);
+        entt::exclude<InsideBuilding, MeleeLock, ChattingState>);
     for (entt::entity e : view) {
         NavPath& np = view.get<NavPath>(e);
         Position& pos = view.get<Position>(e);

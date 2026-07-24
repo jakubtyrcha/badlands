@@ -174,10 +174,22 @@ TEST_CASE("hero_behavior: a spawned rat flips idle heroes into engaging it") {
         tick_world(g, 1.0f / 30.0f);
         all_idle = true;
         for (entt::entity e : heroes) {
+            // Review fix (intention-contract fix wave): adopting Idle now
+            // actively HOLDS position (a logged MoveTo to self, so a hero
+            // mid-walk actually stops -- game/src/intention.cpp's Idle
+            // branch), rather than leaving MoveTarget untouched. A holding
+            // Idle hero therefore reads as Kind::Point AT its own position,
+            // not Kind::None -- "not walking anywhere" is what this test
+            // actually cares about, so accept either shape.
+            const MoveTarget& mt = g.registry.get<MoveTarget>(e);
+            const bool holding =
+                mt.kind == MoveTarget::Kind::None ||
+                (mt.kind == MoveTarget::Kind::Point &&
+                 glm::distance(mt.point, g.registry.get<Position>(e).pos) < 0.5f);
             all_idle = all_idle &&
                       g.registry.get<HeroSimulationState>(e).behavior ==
                           static_cast<int32_t>(ActivityId::Idle) &&
-                      g.registry.get<MoveTarget>(e).kind == MoveTarget::Kind::None;
+                      holding;
         }
     }
     REQUIRE(all_idle);  // the premise: they really are idle before the rat shows up

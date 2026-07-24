@@ -10,6 +10,7 @@
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
+#include "heroes.h"           // advance_chats
 #include "intention.h"
 #include "movement.h"        // plan_paths, follow_paths -- drive the MoveBlocked mirror
 #include "sim_internal.hpp"  // make_flat_world / spawn_into / tick_world
@@ -175,41 +176,106 @@ TEST_CASE("tick_world writes ThreatSighted once on the empty->nonempty edge", "[
     CHECK(sightings == 1);
 }
 
+// --- Fix 4: a hidden hero must not carry a stale sighting edge -------------
+// (finding: the pass EXCLUDED InsideBuilding heroes outright, so
+// threat_was_present was left at whatever it was before the hero hid --
+// stale `true` then silently suppresses the next real sighting after it
+// re-emerges, since the edge-detector never sees the empty->nonempty
+// transition).
+
+TEST_CASE(
+    "a hidden hero's sighting edge resets: the threat at exit reads as a "
+    "fresh sighting",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+
+    CharacterDesc hero_d{};
+    hero_d.hp = 20.0f;
+    hero_d.team = 0;
+    hero_d.size_x = hero_d.size_y = hero_d.size_z = 1.0f;
+    entt::entity hero = g.slots[spawn_into(g, hero_d)];
+
+    CharacterDesc monster_d{};
+    monster_d.archetype = Archetype::Monster;
+    monster_d.hp = 20.0f;
+    monster_d.team = 1;
+    monster_d.pos_x = 5.0f;  // within the default threat_radius (14)
+    monster_d.size_x = monster_d.size_y = monster_d.size_z = 1.0f;
+    entt::entity monster1 = g.slots[spawn_into(g, monster_d)];
+
+    // Establish the edge: flag goes true, event written.
+    tick_world(g, 1.0f / 30.0f);
+    REQUIRE(g.registry.get<EventInbox>(hero).threat_was_present);
+
+    // Hero hides. Fatigue floored first: should_leave_building (heroes.cpp)
+    // releases a hero the instant its reserve reads full, and it starts
+    // full (HeroSimulationState's spawn default) -- without this the hero
+    // would pop back out on the very next advance_inside, before it ever
+    // stayed hidden.
+    g.registry.get<HeroSimulationState>(hero).fatigue = 0.0f;
+    g.registry.emplace<InsideBuilding>(hero, /*building_id=*/0,
+                                       static_cast<int32_t>(ActivityId::GoHome));
+    tick_world(g, 1.0f / 30.0f);
+    REQUIRE(g.registry.all_of<InsideBuilding>(hero));  // still hidden
+
+    // The old threat dies and is destroyed while the hero is hidden.
+    g.registry.get<Health>(monster1).hp = 0.0f;
+    tick_world(g, 1.0f / 30.0f);
+    REQUIRE(g.registry.all_of<InsideBuilding>(hero));  // still hidden
+
+    // A new threat spawns while the hero is still hidden.
+    CharacterDesc monster2_d = monster_d;
+    monster2_d.pos_x = 6.0f;
+    uint32_t monster2_slot = spawn_into(g, monster2_d);
+
+    // Hero re-emerges.
+    g.registry.remove<InsideBuilding>(hero);
+    tick_world(g, 1.0f / 30.0f);
+
+    const EventInbox& inbox = g.registry.get<EventInbox>(hero);
+    bool found = false;
+    for (int32_t i = 0; i < inbox.count; ++i) {
+        if (inbox.events[i].kind == InboxEventKind::ThreatSighted &&
+            inbox.events[i].source_slot == monster2_slot) {
+            found = true;
+        }
+    }
+    CHECK(found);
+}
+
 // --- should_wake: the pure wake-rule truth table ----------------------------
 
 TEST_CASE("should_wake: no intention, new event, deadline", "[intention]") {
     auto owned = make_flat_world();
     BadlandsGame& g = *owned;
-    entt::entity e = g.slots[spawn_into(g, MercenaryDesc(0.0f, 0.0f))];
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
 
     // No CurrentIntention running (kind == None, the spawn default) -> always
     // worth a wake.
     CHECK(should_wake(g, e));
 
     // A running intention with an empty inbox and no deadline -> asleep.
-    // last_think_millis mirrors what apply_intention actually stamps at
-    // adoption time (both to the SAME instant) -- see finding 1's fix.
+    // note_think_outcome is the seq-contract equivalent of what
+    // apply_intention used to stamp at adoption time (Fix 1: the two are
+    // now split -- see both functions' doc comments).
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::MoveTo;
     ci.started_at_millis = g.world_millis;
-    ci.last_think_millis = g.world_millis;
-    ci.wake_at_millis = 0;
+    note_think_outcome(g, slot, /*adopted=*/true);
     CHECK_FALSE(should_wake(g, e));
 
-    // An inbox event that arrives strictly AFTER the last think -> wake
-    // (finding 1: the comparison is strict, not `>=`, so an event stamped at
-    // the SAME instant as the last think -- one that already informed it --
-    // must not by itself count as new; advance the clock first to test a
-    // genuinely later event).
+    // An inbox event pushed AFTER the last think -> wake (Fix 1: compared by
+    // sequence number, not timestamp, so this holds even within the SAME
+    // tick -- see EventInbox's own comment on why a timestamp comparison
+    // cannot distinguish a pre-think push from a post-think one).
     g.world_millis += kMillisPerTick;
-    EventInbox& inbox = g.registry.get<EventInbox>(e);
     InboxEvent ev;
     ev.kind = InboxEventKind::DamageTaken;
-    ev.at_millis = g.world_millis;
-    inbox.events[0] = ev;
-    inbox.count = 1;
+    push_inbox_event(g, e, ev);
     CHECK(should_wake(g, e));
-    inbox.count = 0;  // back to asleep for the next case
+    note_think_outcome(g, slot, /*adopted=*/true);  // the hero looked -> asleep again
     CHECK_FALSE(should_wake(g, e));
 
     // wake_at deadline passed -> wake, even with an empty inbox. Advance the
@@ -218,6 +284,76 @@ TEST_CASE("should_wake: no intention, new event, deadline", "[intention]") {
     g.world_millis += 1000;
     ci.wake_at_millis = 500;  // already behind the clock
     CHECK(should_wake(g, e));
+}
+
+// --- Fix 1 RED A: a same-tick, POST-think inbox push must still count as
+// "new" (finding: should_wake's event clause used strict `>` on
+// TIMESTAMPS -- at_millis vs last_think_millis -- and every event pushed
+// within the SAME tick shares one world_millis stamp, so a push that lands
+// AFTER a think that already happened this tick is timestamp-indistinguishable
+// from one that landed BEFORE it and already informed that think). Written
+// against TODAY's fields (ci.last_think_millis, poked directly -- mirrors
+// what apply_intention currently stamps) so it fails for the documented
+// reason before the seq-based fix lands; see the fix's later revision of
+// this same case once note_think_outcome exists.
+
+TEST_CASE(
+    "should_wake: an inbox event pushed AFTER a same-tick think still counts as new",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    // A running intention that just thought THIS tick (last_think_millis ==
+    // world_millis, exactly what apply_intention stamps at adoption time).
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    ci.kind = IntentionKind::Idle;
+    ci.wake_at_millis = 0;  // no deadline -- isolate the inbox-event path
+    ci.last_think_millis = g.world_millis;
+
+    // Something pushes an event to this hero's inbox LATER in the SAME
+    // tick (e.g. movement's MoveBlocked mirror, which runs after the
+    // think-dispatch loop) -- push_inbox_event stamps at_millis from the
+    // CURRENT world_millis, which has not advanced, so at_millis ==
+    // last_think_millis even though this push is genuinely new information
+    // the hero has not yet seen.
+    InboxEvent ev;
+    ev.kind = InboxEventKind::MoveBlocked;
+    push_inbox_event(g, e, ev);
+
+    CHECK(should_wake(g, e));
+}
+
+// --- Fix 1 RED B: a rejected/no-op suggestion must back off, not busy-wake
+// every tick (finding: with no CurrentIntention running, should_wake's
+// "nothing running -- always worth a wake" branch fires unconditionally,
+// so a brain that keeps declining gets re-consulted at the full 30 Hz tick
+// rate instead of settling into a bounded re-check window).
+
+TEST_CASE(
+    "note_think_outcome re-arms a backoff on a rejected/no-op suggestion, "
+    "so should_wake does not busy-wake every tick",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    // A hero whose deadline is already behind the clock -- the shape a
+    // just-expired Idle/idle-hint wake looks like right before the brain is
+    // consulted and declines to suggest anything new.
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    ci.kind = IntentionKind::Idle;
+    ci.wake_at_millis = g.world_millis;  // already due
+
+    note_think_outcome(g, slot, /*adopted=*/false);
+
+    // Re-armed into the future, not left at/behind "now" -- a rejected
+    // suggestion must not refire the deadline every single tick.
+    CHECK(ci.wake_at_millis > g.world_millis);
+    CHECK(ci.wake_at_millis == g.world_millis + kRejectedSuggestionBackoffMillis);
+    CHECK_FALSE(should_wake(g, e));
 }
 
 // --- apply_intention: validate + adopt --------------------------------------
@@ -309,6 +445,46 @@ TEST_CASE("apply_intention Idle stamps wake_at from the duration", "[intention]"
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     CHECK(ci.kind == IntentionKind::Idle);
     CHECK(ci.wake_at_millis == g.world_millis + 2000);
+}
+
+// --- Fix 2: adopting Idle must halt movement, not just stop issuing new
+// orders (finding: MoveTarget/NavPath are durable and nothing else clears
+// them, so a hero mid-MoveTo told to idle used to keep walking toward the
+// OLD goal forever).
+
+TEST_CASE("apply_intention Idle halts a hero that was mid-MoveTo", "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
+    d.move_speed = 6.0f;
+    uint32_t slot = spawn_into(g, d);
+    entt::entity e = g.slots[slot];
+
+    Intention move;
+    move.kind = IntentionKind::MoveTo;
+    move.point = {100.0f, 0.0f};  // far away, so it never arrives mid-test
+    CHECK(apply_intention(g, slot, move));
+    apply_commands(g);
+
+    // A few ticks of real movement so the hero is genuinely underway.
+    for (int i = 0; i < 5; ++i) {
+        plan_paths(g, 1.0f / 30.0f);
+        follow_paths(g, 1.0f / 30.0f);
+    }
+    const glm::vec2 moving_pos = g.registry.get<Position>(e).pos;
+    CHECK(moving_pos.x > 0.0f);  // it did advance toward {100, 0}
+
+    Intention idle;
+    idle.kind = IntentionKind::Idle;
+    idle.duration_millis = 60'000;  // long -- irrelevant to this check
+    CHECK(apply_intention(g, slot, idle));
+    apply_commands(g);
+
+    // One more tick: position must NOT keep advancing toward the old goal.
+    plan_paths(g, 1.0f / 30.0f);
+    follow_paths(g, 1.0f / 30.0f);
+    const glm::vec2 after_idle = g.registry.get<Position>(e).pos;
+    CHECK(glm::distance(moving_pos, after_idle) < 0.01f);
 }
 
 TEST_CASE("Idle duration 0 is \"idle until woken\": never self-completes, should_wake stays quiet",
@@ -430,6 +606,129 @@ TEST_CASE("advance_intentions dispatches on ci.kind, not a stray target_slot", "
     CHECK_FALSE(found_aborted);  // NOT aborted by the stray target's death
 }
 
+// --- Fix 3: Chat lifecycle closed (a dangling no-op'd Chat when the session
+// never starts; the participants not halted while chatting; completion never
+// detected) ------------------------------------------------------------------
+
+TEST_CASE(
+    "Chat lifecycle (a): a never-started session (partner already occupied) "
+    "aborts the actor's intention",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t a_slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t b_slot = spawn_into(g, MercenaryDesc(1.0f, 0.0f));  // within chat_radius
+    uint32_t c_slot = spawn_into(g, MercenaryDesc(5.0f, 0.0f));
+    entt::entity a = g.slots[a_slot];
+    entt::entity b = g.slots[b_slot];
+
+    // B is already mid-conversation with C (emplaced directly -- isolates
+    // the scenario from needing a full live session to set it up).
+    g.registry.emplace<ChattingState>(b, c_slot, 30.0f);
+
+    Intention intent;
+    intent.kind = IntentionKind::Chat;
+    intent.target_slot = b_slot;
+    CHECK(apply_intention(g, a_slot, intent));
+    CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::Chat);
+
+    apply_commands(g);  // drains the Chat command -- declines: B already chatting
+
+    CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::None);
+    const EventInbox& inbox = g.registry.get<EventInbox>(a);
+    bool found_aborted = false;
+    for (int32_t i = 0; i < inbox.count; ++i) {
+        if (inbox.events[i].kind == InboxEventKind::IntentionEnded && inbox.events[i].param == 0.0f) {
+            found_aborted = true;
+        }
+    }
+    CHECK(found_aborted);
+}
+
+TEST_CASE("Chat lifecycle (b): movement halts for both participants while ChattingState is present",
+          "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t a_slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    CharacterDesc bd = MercenaryDesc(1.0f, 0.0f);
+    bd.move_speed = 6.0f;
+    uint32_t b_slot = spawn_into(g, bd);
+    entt::entity a = g.slots[a_slot];
+    entt::entity b = g.slots[b_slot];
+
+    // B was mid-MoveTo toward a distant point when the chat started.
+    MoveTarget& mt = g.registry.get<MoveTarget>(b);
+    mt.kind = MoveTarget::Kind::Point;
+    mt.point = {50.0f, 0.0f};
+
+    const float duration = g.factors.hero.chat_duration;
+    g.registry.emplace<ChattingState>(a, b_slot, duration);
+    g.registry.emplace<ChattingState>(b, a_slot, duration);
+
+    const glm::vec2 start = g.registry.get<Position>(b).pos;
+    const float dt = 1.0f / 30.0f;
+    // Stop a few ticks short of the session's own natural expiry -- driving
+    // plan_paths/follow_paths/advance_chats directly (not tick_world) so
+    // this pins the movement-exclusion fix in isolation, not entangled with
+    // a brain re-issuing MoveTo.
+    const int ticks = static_cast<int>(duration / dt) - 5;
+    for (int i = 0; i < ticks; ++i) {
+        advance_chats(g, dt);
+        plan_paths(g, dt);
+        follow_paths(g, dt);
+        REQUIRE(g.registry.all_of<ChattingState>(b));  // hasn't dissolved early via drift
+    }
+    CHECK(glm::distance(g.registry.get<Position>(b).pos, start) < 0.01f);
+
+    // Let it run to its natural end and confirm it still dissolves normally.
+    for (int i = 0; i < 10; ++i) {
+        advance_chats(g, dt);
+    }
+    CHECK_FALSE(g.registry.all_of<ChattingState>(b));
+}
+
+TEST_CASE("Chat lifecycle (c): a full session completes normally -- IntentionEnded(completed)",
+          "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t a_slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t b_slot = spawn_into(g, MercenaryDesc(1.0f, 0.0f));
+    entt::entity a = g.slots[a_slot];
+    entt::entity b = g.slots[b_slot];
+
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(a);
+    ci.kind = IntentionKind::Chat;
+    ci.target_slot = b_slot;
+    ci.started_at_millis = g.world_millis;
+
+    const float duration = g.factors.hero.chat_duration;
+    g.registry.emplace<ChattingState>(a, b_slot, duration);
+    g.registry.emplace<ChattingState>(b, a_slot, duration);
+
+    const float dt = 1.0f / 30.0f;
+    // One pass with ChattingState present -> the started marker (ci.arg) is set.
+    advance_intentions(g);
+    CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::Chat);
+
+    // Run the session out via the real dissolve path (advance_chats) plus
+    // advance_intentions, same order tick_world uses.
+    const int ticks = static_cast<int>(duration / dt) + 5;
+    for (int i = 0; i < ticks; ++i) {
+        advance_chats(g, dt);
+        advance_intentions(g);
+    }
+
+    CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::None);
+    const EventInbox& inbox = g.registry.get<EventInbox>(a);
+    bool found_completed = false;
+    for (int32_t i = 0; i < inbox.count; ++i) {
+        if (inbox.events[i].kind == InboxEventKind::IntentionEnded && inbox.events[i].param == 1.0f) {
+            found_completed = true;
+        }
+    }
+    CHECK(found_completed);
+}
+
 // --- should_wake's inbox check (docs/design/intention-contract.html §2)
 // must not treat an event that already informed the last think as a fresh
 // reason to wake.
@@ -445,44 +744,45 @@ TEST_CASE(
 
     // A running intention that already thought once, so should_wake's
     // "nothing running" early return does not mask the inbox-event logic
-    // under test, and last_think_millis has a genuine (non-default) baseline
-    // to compare against.
+    // under test, and note_think_outcome has a genuine baseline think to
+    // compare new pushes against.
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::Idle;
     ci.wake_at_millis = 0;  // no deadline -- isolate the inbox-event path
-    ci.last_think_millis = g.world_millis;
+    note_think_outcome(g, slot, /*adopted=*/true);
 
     // An event arrives on a LATER tick (mirrors sim.cpp's tick_world: the
     // ThreatSighted/DamageTaken/MoveBlocked writers run BEFORE the
     // think-dispatch loop, in the SAME tick a hero might wake and decide --
     // this is that later tick's event, strictly after the think above).
     g.world_millis += kMillisPerTick;
-    EventInbox& inbox = g.registry.get<EventInbox>(e);
     InboxEvent ev;
     ev.kind = InboxEventKind::ThreatSighted;
-    ev.at_millis = g.world_millis;
-    inbox.events[0] = ev;
-    inbox.count = 1;
+    push_inbox_event(g, e, ev);
     CHECK(should_wake(g, e));  // the event is new -> worth a wake
 
     // The brain wakes THIS tick, having seen the event, and decides there is
     // nothing new to suggest (IntentionKind::None) -- still a real think:
-    // last_think_millis advances to now regardless of what was decided.
+    // apply_intention returns false (nothing adopted), and the caller
+    // (tick_wasm_brain) calls note_think_outcome regardless of that outcome,
+    // which is what this line simulates.
     Intention nothing;  // kind defaults to IntentionKind::None
     CHECK_FALSE(apply_intention(g, slot, nothing));
+    note_think_outcome(g, slot, /*adopted=*/false);
 
     // Next tick: the clock advances again; the SAME event is still sitting
     // in the (sticky, TTL-based) inbox -- but it already informed the
-    // decision above. Without finding 1's fix (last_think_millis, compared
-    // strictly), this would immediately re-wake the brain for no NEW reason.
+    // decision above. Without Fix 1 (last_pushed_seq vs last_seen_seq), this
+    // would immediately re-wake the brain for no NEW reason. (The rejection
+    // backoff note_think_outcome just armed does not interfere here either:
+    // it is 500ms out, well past this one-tick advance.)
     g.world_millis += kMillisPerTick;
     CHECK_FALSE(should_wake(g, e));
 
     // A genuinely new event (after the think above) still wakes it.
     InboxEvent ev2;
     ev2.kind = InboxEventKind::DamageTaken;
-    ev2.at_millis = g.world_millis;
-    inbox.events[inbox.count++] = ev2;
+    push_inbox_event(g, e, ev2);
     CHECK(should_wake(g, e));
 }
 

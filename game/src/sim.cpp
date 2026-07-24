@@ -236,10 +236,21 @@ void tick_world(BadlandsGame& g, float dt) {
     // every hero every tick regardless of whether it wakes this tick. threat_was_present
     // lives on EventInbox itself (not scratch state here), the same reason
     // MoveBlocked keeps its at_millis on the component, so a replay
-    // reproduces the same edges. Hidden heroes are excluded, same as
-    // perception excludes them elsewhere.
-    for (auto [e, inbox] :
-         registry.view<EventInbox>(entt::exclude<InsideBuilding>).each()) {
+    // reproduces the same edges.
+    //
+    // Iterates EVERY hero, hidden ones included (review fix: excluding them
+    // from the view left threat_was_present frozen at whatever it was
+    // before they hid, so a stale `true` silently suppressed the real
+    // sighting waiting at the door when they re-emerged -- the
+    // empty->nonempty edge never fired because the edge was never reset). A
+    // hidden hero sees nothing, so its edge is force-reset to false and it
+    // writes no event; any threat present once it exits reads as a fresh
+    // sighting, correctly.
+    for (auto [e, inbox] : registry.view<EventInbox>().each()) {
+        if (registry.all_of<InsideBuilding>(e)) {
+            inbox.threat_was_present = false;
+            continue;
+        }
         entt::entity threat = nearest_enemy(g, e);
         const bool present = threat != entt::null &&
                              glm::distance(registry.get<Position>(e).pos,

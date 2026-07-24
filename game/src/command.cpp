@@ -4,6 +4,7 @@
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
+#include "intention.h"  // abort_intention -- the Chat handler's never-started decline
 #include "placement.h"
 
 #include <entt/entt.hpp>
@@ -193,11 +194,22 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             }
             if (game.registry.any_of<InsideBuilding, ChattingState>(a) ||
                 game.registry.any_of<InsideBuilding, ChattingState>(b)) {
+                // Never-started abort (Fix 3): the actor's own suggestion
+                // already stamped CurrentIntention::kind = Chat
+                // (apply_intention) before this command even reached the
+                // handler -- if the session never actually begins, that
+                // intention must not dangle forever with nothing left to
+                // end it (ChattingState never appears, so advance_intentions'
+                // Chat branch has no started marker to react to). No-op on
+                // a replayed world (CurrentIntention.kind is always None
+                // there).
+                abort_intention(game, cmd.actor, IntentionKind::Chat);
                 return 0;  // hidden, or already talking to someone else
             }
             const float d = glm::distance(game.registry.get<Position>(a).pos,
                                           game.registry.get<Position>(b).pos);
             if (d > game.factors.hero.chat_radius) {
+                abort_intention(game, cmd.actor, IntentionKind::Chat);  // Fix 3, see above
                 return 0;  // drifted apart before the command applied
             }
             const float duration = game.factors.hero.chat_duration;
