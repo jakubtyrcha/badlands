@@ -74,6 +74,13 @@ void RenderPassContext::DrawIndexed(uint32_t index_count,
   }
 }
 
+void RenderPassContext::DrawIndexedIndirect(wgpu::Buffer indirect_buffer,
+                                            uint64_t indirect_offset) {
+  if (encoder_ && indirect_buffer) {
+    encoder_.DrawIndexedIndirect(indirect_buffer, indirect_offset);
+  }
+}
+
 void RenderPassContext::SetScissorRect(uint32_t x, uint32_t y, uint32_t width,
                                        uint32_t height) {
   if (encoder_) {

@@ -51,6 +51,13 @@ class RenderPassContext {
   void DrawIndexed(uint32_t index_count, uint32_t instance_count = 1,
                    uint32_t first_index = 0, int32_t base_vertex = 0,
                    uint32_t first_instance = 0);
+  // Indirect indexed draw: index/instance counts and offsets come from a GPU
+  // buffer (`{u32 indexCount, u32 instanceCount, u32 firstIndex, i32
+  // baseVertex, u32 firstInstance}`, 20 bytes at `indirect_offset`) rather
+  // than CPU-supplied arguments — the primitive GPU-driven culling/LOD builds
+  // on. `indirect_buffer`'s usage must include `wgpu::BufferUsage::Indirect`.
+  void DrawIndexedIndirect(wgpu::Buffer indirect_buffer,
+                           uint64_t indirect_offset);
 
   // Restricts rasterization to a pixel rect (defaults to the whole
   // attachment). Lets a fullscreen pass shade only the region it can affect.
