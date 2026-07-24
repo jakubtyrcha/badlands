@@ -350,3 +350,81 @@ TEST_CASE("diffuse: smooths a spike, conserves interior mass, respects layers") 
   // bedrock at the spike was never touched (only its sediment moved)
   REQUIRE(B.at(4, 4) == 10.0f);
 }
+
+namespace {
+// Hill world: 33x33 cone sloping DOWN to the border (the drain), with a deep
+// pocket punched into the summit. The pocket floods to its own rim and spills
+// downhill — a genuine cavity lake. (A raised rim at the border would instead
+// flood the whole map: the border is base level.)
+struct BowlWorld {
+  Field2D<float> B, S;
+};
+BowlWorld make_bowl() {
+  BowlWorld t{Field2D<float>(33, 33), Field2D<float>(33, 33, 0.0f)};
+  for (int y = 0; y < 33; ++y)
+    for (int x = 0; x < 33; ++x) {
+      const float dx = x - 16.0f, dy = y - 16.0f;
+      const float rad = std::sqrt(dx * dx + dy * dy);
+      t.B.at(x, y) = 30.0f - rad;               // hill: high center, low border
+      if (rad < 4.0f) t.B.at(x, y) = -10.0f;    // deep summit pocket
+    }
+  return t;
+}
+}  // namespace
+
+TEST_CASE("erode: cavity floods, per-lake level uniform, W >= 0") {
+  auto t = make_bowl();
+  ErosionParams p;
+  p.iterations = 10;
+  p.dump_every = 0;
+  p.min_lake_area_m2 = 4.0f;
+  p.min_lake_depth_m = 0.1f;
+  const auto out = erode(t.B, t.S, p, 1.0f, nullptr);
+  float level_min = 1e30f, level_max = -1e30f;
+  int wet = 0;
+  for (int y = 0; y < 33; ++y)
+    for (int x = 0; x < 33; ++x) {
+      const float w = out.water_depth.at(x, y);
+      REQUIRE(w >= 0.0f);
+      if (w > 0.0f) {
+        ++wet;
+        const float lvl = t.B.at(x, y) + t.S.at(x, y) + w;
+        level_min = std::min(level_min, lvl);
+        level_max = std::max(level_max, lvl);
+      }
+    }
+  REQUIRE(wet > 10);                                  // the cavity holds a lake
+  REQUIRE(level_max - level_min < 0.05f);             // one flat surface
+}
+
+TEST_CASE("erode: pruning removes puddles") {
+  auto t = make_bowl();
+  ErosionParams p;
+  p.iterations = 10;
+  p.dump_every = 0;
+  p.min_lake_area_m2 = 1e6f;  // nothing can qualify
+  const auto out = erode(t.B, t.S, p, 1.0f, nullptr);
+  for (float w : out.water_depth.data) REQUIRE(w == 0.0f);
+}
+
+TEST_CASE("erode: deterministic, and the sink sees the loop film strip") {
+  struct CountingSink : MapDebugSink {
+    int floats = 0, masks = 0;
+    void dump(std::string_view, int, const Field2D<float>&) override { ++floats; }
+    void dump(std::string_view, int, const Field2D<uint8_t>&) override { ++masks; }
+  };
+  auto t1 = make_bowl();
+  auto t2 = make_bowl();
+  ErosionParams p;
+  p.iterations = 4;
+  p.dump_every = 2;  // dumps after iterations 2 and 4
+  CountingSink sink;
+  const auto o1 = erode(t1.B, t1.S, p, 1.0f, &sink);
+  const auto o2 = erode(t2.B, t2.S, p, 1.0f, nullptr);
+  REQUIRE(o1.water_depth.data == o2.water_depth.data);
+  REQUIRE(o1.flow.data == o2.flow.data);
+  REQUIRE(t1.B.data == t2.B.data);
+  REQUIRE(t1.S.data == t2.S.data);
+  REQUIRE(sink.floats == 2 * 3);  // height+flow+sediment × 2 dumps
+  REQUIRE(sink.masks == 2 * 1);   // lakes mask × 2 dumps
+}

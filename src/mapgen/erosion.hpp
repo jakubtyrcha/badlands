@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 #include <vector>
 #include "mapgen/field2d.hpp"
 #include "mapgen/hydrology.hpp"
@@ -79,5 +80,28 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
 // positive dh credits S (diffused material is loose).
 void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
              float texel_m);
+
+// Debug/preview sink for the erosion sim: dumps named raster stages as the
+// loop runs. stages: "loop-height", "loop-flow", "loop-sediment" (float);
+// "loop-lakes" (uint8). Later tasks add init/output stages.
+struct MapDebugSink {
+  virtual ~MapDebugSink() = default;
+  virtual void dump(std::string_view stage, int sequence,
+                    const Field2D<float>& field) = 0;
+  virtual void dump(std::string_view stage, int sequence,
+                    const Field2D<uint8_t>& mask) = 0;
+};
+
+struct ErosionOutputs {
+  Field2D<float> water_depth;  // m of standing water after pruning
+  Field2D<float> flow;         // final drainage area (m²)
+};
+
+// The full sim: iterations × (route → drain → incise → deposit → diffuse),
+// then a final route to flood lakes, measure spill levels, and prune lakes
+// under min area/depth. Mutates B and S. sink may be null.
+ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
+                     const ErosionParams& p, float texel_m,
+                     MapDebugSink* sink);
 
 }  // namespace badlands::mapgen

@@ -154,4 +154,84 @@ void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
   }
 }
 
+namespace {
+
+// Flood the CURRENT surface and turn flooded cells into water depths, then
+// prune lakes (4-connected components) below the area/depth thresholds.
+Field2D<float> finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
+                              const FlowRouting& r, const ErosionParams& p,
+                              float texel_m) {
+  const int w = r.width, ht = r.height;
+  Field2D<float> depth(w, ht, 0.0f);
+  for (int i = 0; i < w * ht; ++i)
+    if (r.in_lake[i])
+      depth.data[i] = r.water_level[i] - (B.data[i] + S.data[i]);
+  // component label + prune
+  const float texel_area = texel_m * texel_m;
+  std::vector<uint8_t> seen(depth.size(), 0);
+  std::vector<int> stack, member;
+  for (int start = 0; start < w * ht; ++start) {
+    if (seen[start] || depth.data[start] <= 0.0f) continue;
+    stack.assign(1, start);
+    member.clear();
+    seen[start] = 1;
+    float max_depth = 0.0f;
+    while (!stack.empty()) {
+      const int i = stack.back();
+      stack.pop_back();
+      member.push_back(i);
+      max_depth = std::max(max_depth, depth.data[i]);
+      const int x = i % w, y = i / w;
+      const int nb[4] = {i - 1, i + 1, i - w, i + w};
+      const bool ok[4] = {x > 0, x < w - 1, y > 0, y < ht - 1};
+      for (int k = 0; k < 4; ++k)
+        if (ok[k] && !seen[nb[k]] && depth.data[nb[k]] > 0.0f) {
+          seen[nb[k]] = 1;
+          stack.push_back(nb[k]);
+        }
+    }
+    const float area = static_cast<float>(member.size()) * texel_area;
+    if (area < p.min_lake_area_m2 || max_depth < p.min_lake_depth_m)
+      for (const int i : member) depth.data[i] = 0.0f;
+  }
+  return depth;
+}
+
+}  // namespace
+
+ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
+                     const ErosionParams& p, float texel_m,
+                     MapDebugSink* sink) {
+  const float texel_area = texel_m * texel_m;
+  Field2D<float> h(B.width, B.height);
+  auto ground = [&] {
+    for (size_t i = 0; i < h.data.size(); ++i) h.data[i] = B.data[i] + S.data[i];
+  };
+  FlowRouting r;
+  Field2D<float> area;
+  for (int it = 1; it <= p.iterations; ++it) {
+    ground();
+    r = route_flow(h, texel_m, kEpsilonM);
+    area = accumulate_drainage(r, texel_area);
+    const auto eroded = incise(B, S, r, area, p, texel_m);
+    deposit(B, S, eroded, r, area, p, texel_area);
+    diffuse(B, S, p, texel_m);
+    if (sink && p.dump_every > 0 && it % p.dump_every == 0) {
+      ground();
+      sink->dump("loop-height", it, h);
+      sink->dump("loop-flow", it, area);
+      sink->dump("loop-sediment", it, S);
+      Field2D<uint8_t> lakes(r.width, r.height, 0);
+      for (size_t i = 0; i < lakes.data.size(); ++i) lakes.data[i] = r.in_lake[i];
+      sink->dump("loop-lakes", it, lakes);
+    }
+  }
+  ground();
+  r = route_flow(h, texel_m, kEpsilonM);
+  ErosionOutputs out;
+  out.flow = accumulate_drainage(r, texel_area);
+  out.water_depth = finalize_lakes(B, S, r, p, texel_m);
+  return out;
+}
+
 }  // namespace badlands::mapgen
