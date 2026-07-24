@@ -8,12 +8,17 @@
 namespace badlands {
 namespace {
 
-// One seeded PRNG stream per generate call. range() is [lo, hi).
+// One seeded PRNG stream per generate call. range() draws uniformly from the
+// [min(lo,hi), max(lo,hi)] interval -- callers pass symmetric bounds like
+// range(-g, g) where g can be negative (negative gnarliness), so the arguments
+// are NOT guaranteed ordered; std::uniform_real_distribution requires a <= b, so
+// normalise here (this mirrors ez-tree's order-agnostic (max-min)*r+min).
 class TreeRng {
  public:
   explicit TreeRng(uint32_t seed) : gen_(seed) {}
   float range(float lo, float hi) {
-    return std::uniform_real_distribution<float>(lo, hi)(gen_);
+    return std::uniform_real_distribution<float>(std::min(lo, hi),
+                                                 std::max(lo, hi))(gen_);
   }
   float unit() { return range(0.0f, 1.0f); }
   int index(int n) { return std::uniform_int_distribution<int>(0, n - 1)(gen_); }
