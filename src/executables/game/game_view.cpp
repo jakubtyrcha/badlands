@@ -324,6 +324,12 @@ bool GameView::Initialize(const RenderContext& ctx) {
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
   if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
+  // The game's stylized look: Oklab color grading on (defaults from
+  // ColorGradingConfig — crushed blacks + desaturated midtones). Dev tools
+  // (viewer/ai_sandbox) leave it off; tune live in the Color Grading panel.
+  if (scene_renderer_) {
+    scene_renderer_->MutableColorGradingConfig().enabled = true;
+  }
 
   // Fog-of-war overlay. Configure the SIM-frame vision grid, register the pass
   // on scene_context_ (picked up by any renderer, incl. the headless
@@ -1416,6 +1422,7 @@ void GameView::DrawUI() {
 
   // --- Fog (self-contained collapsing section) ---
   EditorUI::DrawFogEditor(*scene_renderer_);
+  EditorUI::DrawColorGradingEditor(*scene_renderer_);
 
   // --- Debug views ---
   if (ImGui::CollapsingHeader("Debug Views")) {

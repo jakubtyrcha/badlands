@@ -165,6 +165,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/gpu_timer.cpp
     src/engine/rendering/volumetric_fog.cpp
     src/engine/rendering/fog_simulation.cpp
+    src/engine/rendering/color_grading.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
@@ -206,6 +207,15 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
 target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json)
+if(APPLE)
+    # CAMetalLayer color-space tagging (Display-P3 / EDR): the pinned Dawn
+    # rejects wgpu::SurfaceColorManagement, so GpuContext sets the layer
+    # properties directly — see src/engine/rendering/metal_layer_color.mm.
+    target_sources(badlands_engine PRIVATE src/engine/rendering/metal_layer_color.mm)
+    # QuartzCore: CAMetalLayer; CoreGraphics: the kCGColorSpace* name constants.
+    target_link_libraries(badlands_engine PUBLIC
+        "-framework QuartzCore" "-framework CoreGraphics")
+endif()
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
 # but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
 # this, glm::perspective() maps the near plane to NDC z=2.0 (outside the
@@ -895,6 +905,24 @@ if(APPLE)
     target_link_options(badlands_decal_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_decal_tests COMMAND badlands_decal_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_resolve_composite_tests: GPU test for the resolve pass's UI-overlay
+# composite (tonemapping.wesl + SceneContext::ui_overlay) — pins the
+# gamma-space blend and the P3/EDR paths against a CPU mirror. Same harness
+# shape as badlands_decal_tests (R32Float readback; needs a GPU + shaders/).
+add_executable(badlands_resolve_composite_tests
+    src/engine/tests/resolve_composite_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_resolve_composite_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_resolve_composite_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_resolve_composite_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_resolve_composite_tests COMMAND badlands_resolve_composite_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
 # — the SampleHeight/RaycastTerrain queries behind mouse picking. No GPU: only
