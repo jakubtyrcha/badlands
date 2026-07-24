@@ -1,18 +1,17 @@
 #pragma once
 
-// badlands_mapview's AppView: generates a map in-process (the mapgen pipeline),
-// wraps it in the frozen MapData contract, and renders it as Nanite-style
-// cluster-LOD terrain (the shared ClusterTerrain module) with the fixed-angle
-// GameCameraController. Terrain is one entity holding the shared cluster mesh; a
-// MeshDrawRangesComponent carries the per-frame LOD cut. Entities are created
-// directly in the registry (no SceneGraph -- the terrain is a raw indexed mesh,
-// not a MeshAttachment).
+// badlands_mapview's AppView: generates a map in-process via
+// mapgen::generate_map, wraps it in the frozen MapData contract, and renders
+// it as Nanite-style cluster-LOD terrain (the shared ClusterTerrain module)
+// with the fixed-angle GameCameraController. Terrain is one entity holding the
+// shared cluster mesh; a MeshDrawRangesComponent carries the per-frame LOD
+// cut. Entities are created directly in the registry (no SceneGraph -- the
+// terrain is a raw indexed mesh, not a MeshAttachment).
 //
 // Beyond the terrain the view carries main's map-tool features: biome-derived +
 // map-border fog emitters (with an editor), a shared SimClock driving the sun +
-// fog animation, cursor-anchored zoom, and the authored-map load path. Hovering
-// the mouse over the terrain draws a block/section debug grid around the hit
-// point (see RebuildVisibleGrid).
+// fog animation, cursor-anchored zoom. Hovering the mouse over the terrain
+// shows its world position + dominant biome.
 
 #include <cstdint>
 #include <vector>
@@ -32,9 +31,8 @@
 #include "engine/rendering/fog_sim.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
-#include "mapgen/config.hpp"
 #include "mapgen/fog_generator.hpp"  // BorderFogParams
-#include "mapgen/pipeline.hpp"
+#include "mapgen/generator.hpp"
 
 namespace badlands {
 
@@ -42,17 +40,17 @@ class SceneRenderer;
 
 class MapViewView : public AppView {
  public:
-  // `cfg` is the full generator config (seed/size/thresholds/terracing/...), so
-  // everything --config exposes reaches the viewer. `camera_height` overrides the
-  // starting camera height (0 = keep the default ground-level framing);
-  // `lod_tint` seeds the cluster debug tint (0 shaded / 1 triangle hash / 2 LOD
-  // level). `serial_build` forces the single-threaded DAG build (the perf A/B
+  // `params` is the generator params (seed/resolution/size), so everything the
+  // CLI exposes reaches the viewer. `camera_height` overrides the starting
+  // camera height (0 = keep the default ground-level framing); `lod_tint`
+  // seeds the cluster debug tint (0 shaded / 1 triangle hash / 2 LOD level).
+  // `serial_build` forces the single-threaded DAG build (the perf A/B
   // baseline; default is the parallel build). The overrides exist mainly so
   // headless --screenshot runs can frame near/far and set the tint without
   // touching the interactive defaults.
-  explicit MapViewView(mapgen::MapgenConfig cfg, float camera_height = 0.0f,
+  explicit MapViewView(mapgen::MapGenParams params, float camera_height = 0.0f,
                        int lod_tint = 0, bool serial_build = false)
-      : cfg_(std::move(cfg)),
+      : params_(params),
         camera_height_override_(camera_height),
         initial_tint_(lod_tint),
         serial_build_(serial_build) {}
@@ -68,7 +66,7 @@ class MapViewView : public AppView {
   SceneContext& GetSceneContext() override { return scene_context_; }
 
  private:
-  mapgen::MapgenConfig cfg_;
+  mapgen::MapGenParams params_;
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -89,13 +87,12 @@ class MapViewView : public AppView {
   Camera camera_;
   GameCameraController gamecam_;
 
-  // The generated map. `heightmap` is kept for mouse picking and `graph` for
-  // per-section heights -- both outlive Initialize.
+  // The generated map. `heightmap` is kept for mouse picking, `bedrock` for
+  // previews/erosion later -- both outlive Initialize.
   mapgen::MapArtifacts map_;
-  // The pipeline output wrapped in the frozen MapData contract (one-hot biome
-  // slices at the mesh's own lattice spacing) -- what the cluster terrain builder
-  // and mouse picking read. Deliberately NOT blended: mapview keeps its existing
-  // hard-edged voronoi borders.
+  // The generator output wrapped in the frozen MapData contract (one-hot biome
+  // slices at the raster's own texel spacing) -- what the cluster terrain
+  // builder and mouse picking read.
   MapData terrain_map_;
 
   // The shared cluster-LOD terrain module: owns the DAG, its vertex-color
@@ -120,15 +117,11 @@ class MapViewView : public AppView {
   int PickEmitter(const glm::vec3& world) const;
   void DrawFogEmitterEditor();  // the "Fog Emitters" ImGui window
 
-  DebugLineBuffer grid_;  // block + section lines, only around the hover point
-  bool grid_visible_ = true;
-  // Half-extent (in blocks, kBlockSizeM each) of the grid window around the hover
-  // point. Runtime, not compile-time: it's a debug-view knob (ImGui slider), not
-  // a structural property of the map.
-  int grid_radius_blocks_ = 8;
+  // Debug-line overlay: just the selected fog emitter's OBB (see Update).
+  DebugLineBuffer overlay_;
 
   // Where the mouse ray last hit the terrain. `hover_valid_` is false when the
-  // cursor is off the terrain (sky / past the map edge) -- the grid hides.
+  // cursor is off the terrain (sky / past the map edge) -- the hover UI hides.
   glm::vec3 hover_point_{0.0f};
   bool hover_valid_ = false;
 
@@ -146,17 +139,6 @@ class MapViewView : public AppView {
   // metric's numerator. Seeded so the first Update (before any resize) still has
   // a sane value in headless paths.
   float screen_h_px_ = 1080.0f;
-
-  // Rebuilds grid_ with block-boundary lines + highlighted section boundaries,
-  // limited to a grid_radius_blocks_ window around hover_point_ (so cost is
-  // independent of map size). Every line sits at its block's SECTION height, so
-  // each terrace reads as one flat plane rather than stair-stepping per block.
-  void RebuildVisibleGrid();
-
-  // World height of the terrace `b` belongs to (+0 lift). Sections are the
-  // flat-ish regions the grid visualizes; nodes[i].id == i, so this is a direct
-  // index (see mapgen::MapArtifacts::graph).
-  float SectionHeight(const mapgen::Block& b) const;
 };
 
 }  // namespace badlands

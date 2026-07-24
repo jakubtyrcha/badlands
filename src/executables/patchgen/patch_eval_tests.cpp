@@ -22,7 +22,7 @@
 #include <vector>
 
 #include "mapgen/field2d.hpp"
-#include "mapgen/script_eval.hpp"
+#include "executables/patchgen/script_eval.hpp"
 
 using badlands::mapgen::evaluate_patch_script;
 using badlands::mapgen::Field2D;

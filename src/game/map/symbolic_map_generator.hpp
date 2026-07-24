@@ -29,7 +29,6 @@
 //     W W W W W
 
 #include "game/map/map_data.hpp"
-#include "mapgen/mapgen_constants.hpp"
 
 namespace badlands {
 
@@ -41,7 +40,7 @@ class SymbolicMapGenerator : public MapGenerator {
   // The gameplay block grid, and the block-EDGE lattice generation runs on.
   static constexpr int kBlocksPerSide = 64;
   static constexpr int kNodesPerSide = kBlocksPerSide + 1;  // block corners
-  static constexpr float kSpacingM = static_cast<float>(mapgen::kBlockSizeM);
+  static constexpr float kSpacingM = 4.0f;  // block-edge lattice spacing
   static constexpr float kMapSizeM = kBlocksPerSide * kSpacingM;   // 256 m
   static constexpr float kTileSizeM = kMapSizeM / kTilesPerSide;   // 51.2 m
 

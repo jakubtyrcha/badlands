@@ -7,10 +7,9 @@
 //
 // The VIEW is decoupled from the map's grid: --extent picks how much world to look at,
 // --res how many samples to look with, and meters_per_sample = extent/res follows. The
-// map's own density (mapgen_constants.hpp kMetersPerSample) is a different thing and is
-// deliberately NOT borrowed here — a preview is a view into a world-fixed signal, so it
-// chooses its own sampling rate. Widening --extent shows more world at the same terrain,
-// never different terrain.
+// map's own sampling density is a different thing and deliberately NOT borrowed here —
+// a preview is a view into a world-fixed signal, so it chooses its own sampling rate.
+// Widening --extent shows more world at the same terrain, never different terrain.
 //
 // Two standard views:
 //   structure  --extent 2000 --res 512   (mps ~3.9 m) — large-scale organisation
@@ -33,9 +32,9 @@
 #include <vector>
 
 #include "mapgen/field2d.hpp"
-#include "mapgen/hillshade.hpp"
+#include "executables/patchgen/hillshade.hpp"
 #include "mapgen/outputs.hpp"
-#include "mapgen/script_eval.hpp"
+#include "executables/patchgen/script_eval.hpp"
 
 namespace {
 

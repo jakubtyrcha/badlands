@@ -36,9 +36,10 @@
 namespace badlands {
 
 // Compile-time partition/budget constants — no bare partition literals live in
-// the build code (it reads TerrainClusterParams, which defaults to these). Same
-// pattern as mapgen_constants.hpp. Changing kTileQuads / kGroupDim reshapes the
-// whole build consistently because every derived value is computed from them.
+// the build code (it reads TerrainClusterParams, which defaults to these). Kept
+// COMPILE-TIME by design: they define the cluster grid structure and never vary
+// per run. Changing kTileQuads / kGroupDim reshapes the whole build consistently
+// because every derived value is computed from them.
 inline constexpr int kTileQuads = 8;      // leaf tile edge, in 1 m quads
 inline constexpr int kGroupDim = 2;       // group = kGroupDim x kGroupDim children
 inline constexpr int kClusterTriBudget =  // 2 tris/quad over a kTileQuads^2 tile

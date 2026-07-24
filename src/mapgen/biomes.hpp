@@ -7,8 +7,8 @@
 namespace badlands::mapgen {
 
 // The map biomes. Ordered low-elevation -> high-elevation, which the
-// Whittaker-style assignment (biome_assign.cpp) and the debug palette rely on.
-// Mountain is authored-map only: classify_biome never emits it.
+// quantile-cut classification and the debug palette rely on.
+// The procedural generator (classify_biomes) currently emits only Plains/Hills/Mountain.
 enum class Biome : uint8_t {
   Lake = 0,
   Swamp,

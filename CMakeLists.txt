@@ -398,44 +398,35 @@ foreach(app viewer game ai_sandbox)
     endif()
 endforeach()
 
-# badlands_mapgen_lib: the map generation pipeline (config/fields/voronoi/biomes/
-# height/sections + PNG/JSON outputs) as a static lib. Links badlands_engine for
-# CpuImage (PNG write via the `assets` crate) and badlands_game_lib for the
-# sampo::noiser C++ VM wrapper (parallel noise-field evaluation).
-# -Wno-deprecated-declarations matches badlands_game_lib (the noiser headers ship
-# [[deprecated]] shims).
+# badlands_mapgen_lib: the map generator (bedrock+quantile biomes) + fog
+# generator + PNG outputs, as a static lib. Links badlands_engine for CpuImage
+# (PNG write via the `assets` crate).
 add_library(badlands_mapgen_lib STATIC
-    src/mapgen/authored_map.cpp
-    src/mapgen/config.cpp
     src/mapgen/fog_generator.cpp
-    src/mapgen/fields.cpp
-    src/mapgen/hillshade.cpp
-    src/mapgen/outputs.cpp
-    src/mapgen/pipeline.cpp
-    src/mapgen/script_eval.cpp
-    src/mapgen/voronoi.cpp
-    src/mapgen/biome_assign.cpp
-    src/mapgen/heightmap.cpp
-    src/mapgen/sections.cpp)
-target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine badlands_game_lib)
-target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
+    src/mapgen/generator.cpp
+    src/mapgen/outputs.cpp)
+target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
+target_include_directories(badlands_mapgen_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 
 # badlands_patchgen: renders ONE noiser terrain script over a world patch to a
 # grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
 # window. Scripts are functions of world meters, so a patch is a literal crop of the
 # world (see scripts/mapgen/biomes/README.md).
-add_executable(badlands_patchgen src/executables/patchgen/main_patchgen.cpp)
-target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib)
+add_executable(badlands_patchgen
+    src/executables/patchgen/main_patchgen.cpp
+    src/executables/patchgen/script_eval.cpp
+    src/executables/patchgen/hillshade.cpp)
+target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib badlands_game_lib)
 target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
     target_link_options(badlands_patchgen PRIVATE "-Wl,-ld_new")
 endif()
 
 # badlands_mapview: THE map tool. `--preview-image-only` runs the generator and
-# dumps the debug rasters + section graph (pure CPU, no window — this replaces
-# the old standalone badlands_mapgen binary); otherwise it renders the generated
-# map as indexed kTerrainBlend chunks with the biome-blend material, with a
-# mouse-hover block/section grid.
+# dumps the debug rasters (pure CPU, no window); otherwise it renders the
+# generated map as Nanite-style cluster-LOD terrain with the biome-blend
+# material.
 add_executable(badlands_mapview
     src/executables/mapview/main_mapview.cpp
     src/executables/mapview/map_view_view.cpp
@@ -452,30 +443,12 @@ if(APPLE)
     target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
 endif()
 
-# badlands_mapgen_tests: Catch2 unit tests for the deterministic mapgen analysis
-# (block reduction, section flood-fill + graph, biome classification, height
-# composition). Pure CPU — compiles just those TUs (no noiser/Dawn/CpuImage),
-# so it links nothing but Catch2. Runs on tiny synthetic patches.
-add_executable(badlands_mapgen_tests
-    src/mapgen/mapgen_tests.cpp
-    src/mapgen/sections.cpp
-    src/mapgen/biome_assign.cpp
-    src/mapgen/heightmap.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_include_directories(badlands_mapgen_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-)
-add_test(NAME badlands_mapgen_tests COMMAND badlands_mapgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
 # badlands_terrain_cluster_tests: Catch2 invariants for the terrain cluster-LOD
 # DAG build (error monotonicity, sphere nesting, crack-free seams, grid
 # arithmetic). Pure CPU on synthetic MapData heightfields — compiles just the
 # build TU + its deps (map_data for the frozen contract it samples, the
 # header-only Aabb) and links meshoptimizer; no noiser/Dawn/GPU. Pattern of
-# badlands_mapgen_tests.
+# badlands_generator_tests.
 add_executable(badlands_terrain_cluster_tests
     src/game/geometry/terrain_clusters_tests.cpp
     src/game/geometry/terrain_clusters.cpp
@@ -500,8 +473,8 @@ add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_te
 # carries no engine/SDL/Dawn dependency) -- NOT badlands_mapgen_lib, which would
 # drag in the renderer for nothing.
 add_executable(badlands_patch_eval_tests
-    src/mapgen/patch_eval_tests.cpp
-    src/mapgen/script_eval.cpp
+    src/executables/patchgen/patch_eval_tests.cpp
+    src/executables/patchgen/script_eval.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_link_libraries(badlands_patch_eval_tests PRIVATE badlands_game_lib)
@@ -514,28 +487,6 @@ if(APPLE)
     target_link_options(badlands_patch_eval_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_patch_eval_tests COMMAND badlands_patch_eval_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-# badlands_authored_map_tests: the authored-map loader -- map_meta.json validation
-# (dims, block-multiple, height range, meters_per_sample, and the biome-order
-# label->enum contract) plus the two image decodes. Compiles authored_map.cpp
-# directly and links the `assets` crate for the PNG decode/encode C ABI + nlohmann
-# for the manifest parse; deliberately no engine/SDL/Dawn.
-add_executable(badlands_authored_map_tests
-    src/mapgen/authored_map_tests.cpp
-    src/mapgen/authored_map.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_link_libraries(badlands_authored_map_tests PRIVATE assets nlohmann_json::nlohmann_json)
-target_include_directories(badlands_authored_map_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
-    ${CMAKE_SOURCE_DIR}/third_party/glm
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-)
-if(APPLE)
-    target_link_options(badlands_authored_map_tests PRIVATE "-Wl,-ld_new")
-endif()
-add_test(NAME badlands_authored_map_tests COMMAND badlands_authored_map_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_fog_generator_tests: the biome -> fog-emitter generator. Pure CPU
 # (fog_sim.hpp is header-only glm; biomes/field2d are headers), so it compiles
@@ -551,6 +502,24 @@ target_include_directories(badlands_fog_generator_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_generator_tests: the bedrock+quantile map generator — determinism,
+# structural area fractions, cutoff/classification logic, and
+# resolution-independent world-meter sampling. Pure CPU (FastNoiseLite is
+# header-only), pattern of badlands_fog_generator_tests.
+add_executable(badlands_generator_tests
+    src/mapgen/generator_tests.cpp
+    src/mapgen/generator.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_generator_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_generator_tests COMMAND badlands_generator_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
 # it over a windowed 2D domain into a texture (8x8 patches across the shared

@@ -6,8 +6,8 @@
 
 namespace badlands::mapgen {
 
-// A dense row-major 2D grid of T. Used for the heightmap (float), the biome
-// map (Biome), the voronoi cell-id map (int), and the block grid (Block).
+// A dense row-major 2D grid of T. Used for the bedrock/heightmap (float) and
+// the biome map (Biome).
 // Deliberately minimal — the mapgen passes read/write disjoint regions in
 // parallel, so there is no synchronization here.
 template <typename T>
