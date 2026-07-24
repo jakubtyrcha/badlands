@@ -72,7 +72,7 @@ class ModelViewerView : public AppView {
   // Re-derives env_'s sky/SH/sun into scene_context_ and mirrors it into scene_.
   void ApplyEnvironment();
   // Fresh graph: re-mirror lighting, add the gray floor at y=0, run the selected
-  // generator, add its mesh under the generator's transform with checker_mat_,
+  // generator, add its mesh under the generator's transform with its material,
   // and reframe the orbit on the mesh's world-space bounds.
   void RebuildScene();
 
