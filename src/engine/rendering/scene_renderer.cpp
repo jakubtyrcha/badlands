@@ -288,6 +288,15 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
   contact_shadow_view_ = contact_shadow_texture_.CreateView();
 }
 
+void SceneRenderer::SnapshotHdrColor(FrameContext& frame) {
+  wgpu::TexelCopyTextureInfo copy_src{};
+  copy_src.texture = hdr_color_texture_;
+  wgpu::TexelCopyTextureInfo copy_dst{};
+  copy_dst.texture = hdr_color_copy_texture_;
+  wgpu::Extent3D copy_ext = {width_, height_, 1};
+  frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+}
+
 void SceneRenderer::Resize(uint32_t width, uint32_t height) {
   if (width == 0 || height == 0 ||
       (width == width_ && height == height_)) {
@@ -788,12 +797,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // depth bound read-only (test against opaque geometry, never write depth).
   // Skipped when nothing transparent exists (no snapshot cost). ===
   if (registry.view<ForwardTransparentRenderable>().size() > 0) {
-    wgpu::TexelCopyTextureInfo copy_src{};
-    copy_src.texture = hdr_color_texture_;
-    wgpu::TexelCopyTextureInfo copy_dst{};
-    copy_dst.texture = hdr_color_copy_texture_;
-    wgpu::Extent3D copy_ext = {width_, height_, 1};
-    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+    SnapshotHdrColor(frame);
 
     wgpu::RenderPassColorAttachment color_attachment;
     color_attachment.view = hdr_color_view_;
@@ -839,12 +843,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // before debug lines + tonemap so it modulates the whole scene, while dev
   // debug lines stay on top. No-op when no pass is set. ===
   if (scene.post_pass != nullptr) {
-    wgpu::TexelCopyTextureInfo copy_src{};
-    copy_src.texture = hdr_color_texture_;
-    wgpu::TexelCopyTextureInfo copy_dst{};
-    copy_dst.texture = hdr_color_copy_texture_;
-    wgpu::Extent3D copy_ext = {width_, height_, 1};
-    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+    SnapshotHdrColor(frame);
 
     PostSceneContext post{
         .frame = frame,
@@ -886,13 +885,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // conversion (grading is pure stylization; the P3 step lives in the
   // resolve). ===
   if (color_grading_.GetConfig().enabled) {
-    wgpu::TexelCopyTextureInfo copy_src{};
-    copy_src.texture = hdr_color_texture_;
-    wgpu::TexelCopyTextureInfo copy_dst{};
-    copy_dst.texture = hdr_color_copy_texture_;
-    wgpu::Extent3D copy_ext = {width_, height_, 1};
-    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
-
+    SnapshotHdrColor(frame);
     color_grading_.Render(frame, gpu_timer_, hdr_color_copy_view_,
                           hdr_color_view_);
   }

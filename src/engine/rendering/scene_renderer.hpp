@@ -44,6 +44,8 @@
 
 namespace badlands {
 
+class FrameContext;
+
 struct SceneContext;
 
 // G-buffer debug visualization modes (Task S2.B4). When the SceneRenderer's
@@ -229,7 +231,6 @@ class SceneRenderer {
   // Off by default — the headless capture renderer must stay plain sRGB so
   // profile-less PNGs read correctly. Takes effect on the next Render() call.
   void SetOutputIsP3(bool p3) { output_is_p3_ = p3; }
-  bool GetOutputIsP3() const { return output_is_p3_; }
 
   // The generic post-scene modulation hook is carried on SceneContext
   // (SceneContext::post_pass), not as a renderer member — so it applies to any
@@ -252,6 +253,11 @@ class SceneRenderer {
   // Lazily (re)builds prefiltered_ from scene.skybox_cubemap when the source
   // view or generation changes. No-op when unchanged.
   void UpdateIbl(const SceneContext& scene);
+  // Copies the HDR colour into hdr_color_copy_texture_ on the frame's
+  // encoder, so a pass can SAMPLE the scene it is about to write over (a
+  // target can't be read while bound). Shared by the forward-transparent
+  // (water refraction), post-scene-hook, and color-grading passes.
+  void SnapshotHdrColor(FrameContext& frame);
 
   wgpu::Device device_;
   wgpu::Queue queue_;
