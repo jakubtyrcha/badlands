@@ -52,6 +52,32 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 
 }  // namespace
 
+// --- self-review finding: explore_lease_millis is ALSO a divisor -----------
+// (town_brain.cpp's observe_hero: `world_millis / explore_lease_millis`, run
+// UNCONDITIONALLY for every hero every tick, with no <=0 guard of its own --
+// unlike the needs.cpp hours-rate fields, which reserve_rate_per_tick itself
+// guards). Caught auditing sanitize_factors' sweep against every division
+// site in game/src, not just needs.cpp's. Not one of the brief's three
+// repros, and not demonstrated live: an int64 divide-by-zero here is
+// platform-dependent UB (this dev machine's arm64 SDIV silently yields 0
+// rather than trapping, so it would not reproduce as a visible abort here
+// the way (b) does) -- pinned as a unit-level non-zero check instead.
+
+TEST_CASE("sanitize_factors: explore_lease_millis (a divisor in town_brain.cpp) "
+         "never comes back <= 0") {
+    Sim sim{BrainDesc{}};
+
+    SimFactors f = sim.Factors();
+    f.hero.explore_lease_millis = -1;
+    sim.SetFactors(f);
+    CHECK(sim.Factors().hero.explore_lease_millis > 0);
+
+    f = sim.Factors();
+    f.hero.explore_lease_millis = 0;
+    sim.SetFactors(f);
+    CHECK(sim.Factors().hero.explore_lease_millis > 0);
+}
+
 // --- (a) unit: think_min/think_max pairing ----------------------------------
 
 TEST_CASE("sanitize_factors: an inverted think-pause pair comes back min <= max") {

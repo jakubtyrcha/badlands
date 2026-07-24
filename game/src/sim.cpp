@@ -544,6 +544,12 @@ namespace {
 //    small positive epsilon rather than 0, so the field itself stays
 //    strictly positive instead of leaning on reserve_rate_per_tick's own
 //    <=0 "instantly" guard to stay finite.
+//  - hero.explore_lease_millis: also a DIVISOR (town_brain.cpp's
+//    observe_hero computes `world_millis / explore_lease_millis`
+//    UNCONDITIONALLY, for every hero, every tick, with no <=0 guard of its
+//    own -- unlike the hours-rate fields above) -- floored at a small
+//    positive integer rather than 0 for the same reason: 0 is a genuine
+//    int64 divide-by-zero (UB/crash), not merely a degenerate rate.
 //  - every remaining HeroFactors/CritterFactors/TownfolkFactors numeric field
 //    (radii, distances, durations, caps): negative is never meaningful,
 //    clamped to 0. hero.weights[]/critter.weights and hero.explore_chance[]
@@ -554,6 +560,7 @@ namespace {
 // A field is only warned about (old value -> new value) when sanitize
 // actually moves it.
 constexpr float kMinPositiveHours = 1e-3f;
+constexpr int64_t kMinPositiveMillis = 1;
 
 template <typename T>
 void warn_adjusted(const char* field, T old_value, T new_value) {
@@ -577,6 +584,16 @@ void floor_positive_hours(const char* field, float& value) {
     if (value <= 0.0f) {
         warn_adjusted(field, value, kMinPositiveHours);
         value = kMinPositiveHours;
+    }
+}
+
+// `value` is an integer-millis DIVISOR downstream (town_brain.cpp's
+// observe_hero: world_millis / explore_lease_millis): floor at the smallest
+// positive millisecond instead of 0.
+void floor_positive_millis(const char* field, int64_t& value) {
+    if (value <= 0) {
+        warn_adjusted(field, value, kMinPositiveMillis);
+        value = kMinPositiveMillis;
     }
 }
 
@@ -611,7 +628,7 @@ SimFactors sanitize_factors(SimFactors f) {
     clamp_nonneg("hero.explore_min_distance", h.explore_min_distance);
     clamp_nonneg("hero.explore_max_distance", h.explore_max_distance);
     clamp_nonneg("hero.explore_search_radius", h.explore_search_radius);
-    clamp_nonneg("hero.explore_lease_millis", h.explore_lease_millis);
+    floor_positive_millis("hero.explore_lease_millis", h.explore_lease_millis);
     clamp_nonneg("hero.roam_radius", h.roam_radius);
     clamp_nonneg("hero.hunt_sight_radius", h.hunt_sight_radius);
     clamp_nonneg("hero.threat_radius", h.threat_radius);
