@@ -67,18 +67,28 @@ class GpuContext {
   // GpuTimer). Enabled opportunistically in Initialize(); never required.
   bool HasTimestampQuery() const { return has_timestamp_query_; }
 
-  // True when the window's display reported HDR support at Initialize()
-  // (SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN). Decided once at startup; the
-  // SDL_EVENT_WINDOW_HDR_STATE_CHANGED event is deliberately not handled
-  // (ImGui's render-target format is fixed at init).
-  bool IsHdr() const { return is_hdr_; }
-
   // True when the surface's CAMetalLayer was successfully tagged for
   // Display-P3 output (linear-EDR P3 on HDR displays, sRGB-encoded P3 on
-  // SDR). The renderer keys its P3 resolve mode and the UI overlays key
-  // their primary conversion on this. False = untagged layer = today's
-  // sRGB behavior.
+  // SDR). The renderer keys its P3 resolve mode (tonemap mode 2) on this.
+  // False = untagged 8-bit layer = the pre-P3 sRGB behavior (Configure
+  // guarantees a float surface never stays untagged — see
+  // ResolveSurfaceFormatAfterTagging).
   bool IsP3() const { return output_is_p3_; }
+
+  // Pure post-tagging surface-format decision (unit-tested in
+  // resolve_composite_tests): an untagged (nil-colorspace) float CAMetalLayer
+  // has no defined transfer — the resolve would emit linear values into a
+  // layer nothing reasons about — so a float surface whose P3 tagging failed
+  // falls back to BGRA8Unorm (the known-good untagged path). 8-bit formats
+  // pass through regardless of tagging, which also terminates Configure's
+  // single fallback retry.
+  static wgpu::TextureFormat ResolveSurfaceFormatAfterTagging(
+      wgpu::TextureFormat chosen, bool tag_ok) {
+    if (chosen == wgpu::TextureFormat::RGBA16Float && !tag_ok) {
+      return wgpu::TextureFormat::BGRA8Unorm;
+    }
+    return chosen;
+  }
 
  private:
   static wgpu::Surface CreateSurface(wgpu::Instance instance,

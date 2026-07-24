@@ -286,6 +286,21 @@ void GpuContext::Configure(uint32_t width, uint32_t height) {
     const bool hdr_extended =
         is_hdr_ && surface_format_ == wgpu::TextureFormat::RGBA16Float;
     output_is_p3_ = ConfigureMetalLayerColorSpace(metal_layer_, hdr_extended);
+
+    // A float surface must not stay untagged (linear values into a
+    // nil-colorspace layer have no defined transfer): drop to BGRA8Unorm and
+    // reconfigure once. Terminates because 8-bit formats pass through
+    // ResolveSurfaceFormatAfterTagging regardless of tagging success.
+    const wgpu::TextureFormat resolved =
+        ResolveSurfaceFormatAfterTagging(surface_format_, output_is_p3_);
+    if (resolved != surface_format_) {
+      spdlog::warn(
+          "GpuContext: P3 tagging failed on the float surface; falling back "
+          "to BGRA8Unorm");
+      surface_format_ = resolved;
+      Configure(width, height);
+      return;
+    }
   }
 #endif
 }

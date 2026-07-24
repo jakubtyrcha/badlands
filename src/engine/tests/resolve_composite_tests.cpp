@@ -29,6 +29,7 @@
 #include "engine/core/camera.hpp"
 #include "engine/rendering/color_render_target.hpp"
 #include "engine/rendering/context/scene_context.hpp"
+#include "engine/rendering/gpu_context.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/texture_readback.hpp"
@@ -183,6 +184,33 @@ float CenterRed(const CpuImage& image) {
 constexpr float kTolerance = 2e-3f;  // 8-bit overlay quantization + f16 HDR
 
 }  // namespace
+
+TEST_CASE("Surface mode: float format falls back to 8-bit when P3 tagging fails") {
+  // An untagged (nil-colorspace) float CAMetalLayer has no defined transfer —
+  // the resolve would emit linear values into a layer nothing reasons about.
+  // The post-tagging decision must therefore drop a float surface whose P3
+  // tagging failed back to BGRA8Unorm (today's known-good untagged path).
+  using wgpu::TextureFormat;
+
+  // The failure case that motivates the function.
+  CHECK(GpuContext::ResolveSurfaceFormatAfterTagging(
+            TextureFormat::RGBA16Float, /*tag_ok=*/false) ==
+        TextureFormat::BGRA8Unorm);
+
+  // Tagging succeeded: the float (EDR) surface stands.
+  CHECK(GpuContext::ResolveSurfaceFormatAfterTagging(
+            TextureFormat::RGBA16Float, /*tag_ok=*/true) ==
+        TextureFormat::RGBA16Float);
+
+  // 8-bit surfaces are safe untagged (they ARE the pre-P3 path): no change
+  // either way — in particular no fallback loop.
+  CHECK(GpuContext::ResolveSurfaceFormatAfterTagging(
+            TextureFormat::BGRA8Unorm, /*tag_ok=*/false) ==
+        TextureFormat::BGRA8Unorm);
+  CHECK(GpuContext::ResolveSurfaceFormatAfterTagging(
+            TextureFormat::BGRA8Unorm, /*tag_ok=*/true) ==
+        TextureFormat::BGRA8Unorm);
+}
 
 TEST_CASE("Resolve composite: null overlay leaves the scene untouched") {
   // Baseline both resolve modes against a bare scene value: mode 0/linear is
