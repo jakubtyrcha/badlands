@@ -67,21 +67,24 @@ Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
     const int dx = std::abs(i % r.width - rcv % r.width);
     const int dy = std::abs(i / r.width - rcv / r.width);
     const float d = (dx + dy == 2) ? diag : texel_m;
-    const float K = S.data[i] > 0.0f ? p.k_sediment : p.k_bedrock;
+    const bool on_sediment = S.data[i] > 0.0f;
+    const float K = on_sediment ? p.k_sediment : p.k_bedrock;
     if (K <= 0.0f) continue;
     const float F = K * std::pow(area.data[i], p.m) * p.dt / d;
     const float h_new = (h_old + F * z_rcv) / (1.0f + F);
     float delta = h_old - h_new;
     if (delta <= 0.0f) continue;
-    if (delta <= S.data[i]) {
+    if (!on_sediment) {
+      B.data[i] -= delta;  // pure bedrock step: delta is already at bedrock rate
+    } else if (delta <= S.data[i]) {
       S.data[i] -= delta;
     } else {
-      // layer transition: the sediment fraction goes at k_sediment's rate,
-      // the remainder is rescaled to bedrock's slower rate
+      // mid-step transition: the sediment fraction went at k_sediment's rate,
+      // the remainder is re-costed at bedrock's slower rate
       const float into_rock = (delta - S.data[i]) * (p.k_bedrock / p.k_sediment);
       delta = S.data[i] + into_rock;
-      S.data[i] = 0.0f;
       B.data[i] -= into_rock;
+      S.data[i] = 0.0f;
     }
     eroded.data[i] = delta;
   }

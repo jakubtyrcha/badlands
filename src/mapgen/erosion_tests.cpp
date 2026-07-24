@@ -126,6 +126,137 @@ TEST_CASE("incise: matches an explicit-Euler reference on a hand-built chain") {
   REQUIRE(B.at(0, 0) == 0.0f);  // base level pinned
 }
 
+TEST_CASE("incise: bare-bedrock erodes at k_bedrock rate (no double rescale)") {
+  // 8-cell hand-built chain: receiver i-1, base level at 0. S=0 everywhere
+  // (bare bedrock throughout), dry (water_level == ground). k_bedrock and
+  // k_sediment are set far apart so an errant k_bedrock/k_sediment rescale
+  // on a bare-bedrock cell is loudly wrong (~10x too slow).
+  const int n = 8;
+  FlowRouting r;
+  r.width = n; r.height = 1;
+  r.receiver.assign(n, -1);
+  r.in_lake.assign(n, 0);
+  r.water_level.assign(n, 0.0f);
+  for (int i = 1; i < n; ++i) r.receiver[i] = i - 1;
+  for (int i = 0; i < n; ++i) r.order.push_back(i);
+  Field2D<float> B(n, 1), S(n, 1, 0.0f);
+  Field2D<float> area(n, 1);
+  for (int i = 0; i < n; ++i) {
+    B.at(i, 0) = static_cast<float>(i);
+    r.water_level[i] = static_cast<float>(i);  // dry: level = ground
+    area.at(i, 0) = static_cast<float>(n - i);
+  }
+  ErosionParams p;
+  p.k_bedrock = 0.05f;
+  p.k_sediment = 0.5f;
+  p.dt = 1.0f;
+
+  // Independent reference in double precision: the implicit update at the
+  // bedrock rate, mirroring incise()'s effective-receiver-level formula
+  // z_rcv = max(h_rcv, water_level[rcv]) exactly (not just h_rcv chained) —
+  // since water_level here is a static per-call snapshot of the ORIGINAL
+  // ground and erosion only ever lowers ground, this pins z_rcv to the
+  // receiver's pre-call height rather than its in-sweep-updated one.
+  std::vector<double> href(n);
+  for (int i = 0; i < n; ++i) href[i] = B.at(i, 0);
+  for (int i = 1; i < n; ++i) {
+    const double F = static_cast<double>(p.k_bedrock) *
+                      std::sqrt(static_cast<double>(area.at(i, 0))) *
+                      static_cast<double>(p.dt) / 1.0;
+    const double z_rcv = std::max(href[i - 1], static_cast<double>(r.water_level[i - 1]));
+    href[i] = (href[i] + F * z_rcv) / (1.0 + F);
+  }
+
+  incise(B, S, r, area, p, 1.0f);
+  for (int i = 0; i < n; ++i) {
+    const double rel = std::abs(static_cast<double>(B.at(i, 0)) - href[i]) /
+                        std::max(1.0, std::abs(href[i]));
+    REQUIRE(rel < 1e-5);
+  }
+}
+
+TEST_CASE("incise: erodes toward the effective lake water level, not the lake floor") {
+  // 3-cell hand-built chain: 2 (donor) -> 1 (in_lake, ground=2, water_level=6)
+  // -> 0 (base). Cell 1 must be skipped entirely (in_lake); cell 2 must
+  // erode toward the water surface (6), never below it, and never all the
+  // way down to the (unmodified) lake-floor ground level (2).
+  FlowRouting r;
+  r.width = 3; r.height = 1;
+  r.receiver = {-1, 0, 1};
+  r.in_lake = {0, 1, 0};
+  r.water_level = {0.0f, 6.0f, 0.0f};
+  r.order = {0, 1, 2};
+  Field2D<float> B(3, 1), S(3, 1, 0.0f);
+  B.at(0, 0) = 0.0f;
+  B.at(1, 0) = 2.0f;   // lake floor, well below its own water_level (6)
+  B.at(2, 0) = 10.0f;  // donor, high above the lake surface
+  Field2D<float> area(3, 1, 1.0f);
+  ErosionParams p;
+  p.k_bedrock = 5.0f;  // strong: push hard toward the effective receiver level
+  p.k_sediment = 5.0f;
+  p.dt = 1.0f;
+
+  const auto eroded = incise(B, S, r, area, p, 1.0f);
+
+  REQUIRE(eroded.at(1, 0) == 0.0f);          // in_lake: skipped entirely
+  REQUIRE(B.at(1, 0) == 2.0f);               // lake floor untouched
+  REQUIRE(S.at(1, 0) == 0.0f);
+  REQUIRE(B.at(2, 0) + S.at(2, 0) >= 6.0f);  // never eroded below the water surface
+  REQUIRE(B.at(2, 0) < 10.0f);               // but it did erode
+}
+
+TEST_CASE("incise: diagonal receiver uses d = texel_m * sqrt(2)") {
+  ErosionParams p;
+  p.k_bedrock = 0.02f;
+  p.k_sediment = 0.02f;
+  p.dt = 1.0f;
+  const float texel_m = 2.0f;  // non-trivial value so cardinal/diagonal differ clearly
+  const float area_val = 9.0f;
+  const float h_donor = 10.0f;
+
+  // Cardinal: 2 cells in a row, donor -> base (dx=1, dy=0).
+  {
+    FlowRouting r;
+    r.width = 2; r.height = 1;
+    r.receiver = {-1, 0};
+    r.in_lake = {0, 0};
+    r.water_level = {0.0f, 0.0f};
+    r.order = {0, 1};
+    Field2D<float> B(2, 1), S(2, 1, 0.0f);
+    B.at(1, 0) = h_donor;
+    Field2D<float> area(2, 1, area_val);
+    const auto eroded = incise(B, S, r, area, p, texel_m);
+
+    const double d = texel_m;
+    const double F = static_cast<double>(p.k_bedrock) * std::pow(static_cast<double>(area_val), static_cast<double>(p.m)) *
+                      static_cast<double>(p.dt) / d;
+    const double h_new = (h_donor + F * 0.0) / (1.0 + F);
+    const double expected = h_donor - h_new;
+    REQUIRE(static_cast<double>(eroded.at(1, 0)) == Catch::Approx(expected).epsilon(1e-5));
+  }
+
+  // Diagonal: 2x2 grid, donor (index 3, i.e. (1,1)) -> base (index 0): dx=1, dy=1.
+  {
+    FlowRouting r;
+    r.width = 2; r.height = 2;
+    r.receiver = {-1, -1, -1, 0};
+    r.in_lake = {0, 0, 0, 0};
+    r.water_level = {0.0f, 0.0f, 0.0f, 0.0f};
+    r.order = {0, 1, 2, 3};
+    Field2D<float> B(2, 2), S(2, 2, 0.0f);
+    B.at(1, 1) = h_donor;
+    Field2D<float> area(2, 2, area_val);
+    const auto eroded = incise(B, S, r, area, p, texel_m);
+
+    const double d = texel_m * std::sqrt(2.0);
+    const double F = static_cast<double>(p.k_bedrock) * std::pow(static_cast<double>(area_val), static_cast<double>(p.m)) *
+                      static_cast<double>(p.dt) / d;
+    const double h_new = (h_donor + F * 0.0) / (1.0 + F);
+    const double expected = h_donor - h_new;
+    REQUIRE(static_cast<double>(eroded.at(1, 1)) == Catch::Approx(expected).epsilon(1e-5));
+  }
+}
+
 TEST_CASE("incise: never erodes a cell below its receiver") {
   auto t = make_ramp(32, 1.0f);
   ErosionParams p;

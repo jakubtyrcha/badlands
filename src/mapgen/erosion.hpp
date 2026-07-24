@@ -48,8 +48,10 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
                              float origin_m, uint32_t seed);
 
 // One implicit Braun–Willett pass in routing order over ground h = B + S.
-// K per cell: k_sediment while S > 0 else k_bedrock; eroded depth consumes S
-// first, the excess rescaled by k_bedrock/k_sediment before cutting B.
+// K per cell: k_sediment while S > 0 else k_bedrock. On bare bedrock (S == 0)
+// the whole eroded depth cuts B at the bedrock rate directly; starting on
+// sediment and running out mid-step consumes S first, then re-costs the
+// excess at k_bedrock/k_sediment before cutting B.
 // in_lake cells are skipped (no floor incision). Receiver height is the
 // EFFECTIVE level max(B+S, water_level) so cells erode toward the water
 // surface, not a lake floor. Returns eroded thickness (m) per cell.
