@@ -5,6 +5,7 @@
 #include <noiser.hpp>
 
 #include "sim_internal.hpp"  // make_world / spawn_into / tick_world / stats_of
+#include "brain.h"  // Brain, BrainKind (Critter-never-scripted regression)
 #include "components.h"
 #include "game_state.h"
 #include "placement.h"
@@ -287,6 +288,63 @@ TEST_CASE("real hero.noiser behaviour framework loads and runs clean") {
     badlands::spawn_into(*game, d);
 
     for (int i = 0; i < 5; ++i) {
+        badlands::tick_world(*game, 1.0f / 30.0f);
+    }
+
+    badlands::SimStats stats = badlands::stats_of(*game);
+    CHECK(stats.noiser_bugs == 0);
+}
+
+// Regression: ANY archetype can be noiser-scripted (heroes.cpp attaches a
+// BrainState whenever game.brains is loaded, regardless of BrainKind -- by
+// design: combat_test.noiser drives BOTH duelists in duel_test.cpp, the
+// Monster-archetype goblin included, not just BrainKind::Town). But
+// hero-specific host calls (perceive_home, inventory_count -- brain.cpp) used
+// to presume HeroSimulationState unconditionally, so a Critter (e.g. the deer
+// herd badlands_ai_sandbox seeds alongside heroes) resumed against hero.noiser
+// tripped an EnTT "Set does not contain entity" assert and aborted the
+// process outright -- exactly the crash BADLANDS_BRAIN_SCRIPT hit in
+// badlands_ai_sandbox. perceive_home/inventory_count (and the two command
+// handlers they feed, heroes.cpp's hero_enter_home/hero_buy) now check
+// all_of<HeroSimulationState> first and report "nothing here" for a non-hero
+// slot, the same convention perceive_class/perceive_needs/should_leave_building
+// already used -- so a Critter can safely run the FULL hero.noiser errand
+// loop (not just the generic subset combat_test.noiser happens to use) and
+// simply gets empty/no-op perception throughout, no crash.
+TEST_CASE("noiser: a Critter safely runs hero.noiser (no crash, no bug)") {
+    const char* path = std::getenv("BADLANDS_BRAIN_SCRIPT");
+    REQUIRE(path != nullptr);  // exported by tests/cpp_tests.rs
+    std::ifstream file(path);
+    REQUIRE(file.good());
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string source = buffer.str();
+
+    auto owned = badlands::make_world(source.c_str());
+    BadlandsGame* game = owned.get();
+
+    badlands::CharacterDesc d{};
+    d.archetype = badlands::Archetype::Critter;
+    d.pos_x = 3.0f;
+    d.pos_z = 3.0f;
+    d.team = 2;  // neutral wildlife
+    d.hp = 8.0f;
+    d.move_speed = 3.5f;
+    d.attack_range = 0.0f;
+    d.attack_damage = 0.0f;
+    d.attack_cooldown = 1.0f;
+    d.size_x = d.size_y = d.size_z = 0.8f;
+    uint32_t slot = badlands::spawn_into(*game, d);
+
+    // Scripted, same as any other archetype when game.brains is loaded --
+    // this is the pre-existing, load-bearing mechanism combat_test.noiser
+    // relies on, not something this fix changes.
+    entt::entity e = game->slots[slot];
+    CHECK(game->registry.get<badlands::Brain>(e).state != nullptr);
+
+    // Ticking used to assert/abort here; now every hero-specific host call
+    // the script makes against this Critter safely no-ops instead.
+    for (int i = 0; i < 10; ++i) {
         badlands::tick_world(*game, 1.0f / 30.0f);
     }
 

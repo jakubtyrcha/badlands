@@ -333,8 +333,15 @@ bool hero_enter(BadlandsGame& game, entt::entity e, int kind) {
     return true;
 }
 
+// Reachable from CommandKind::EnterHome, which any noiser script can enqueue
+// against any archetype (intent_enter_home has no archetype guard of its own
+// -- see brain.cpp) -- so `e` is not guaranteed to be a hero here either.
 bool hero_enter_home(BadlandsGame& game, entt::entity e) {
-    int32_t home = game.registry.get<HeroSimulationState>(e).home_building_id;
+    const auto* sim = game.registry.try_get<HeroSimulationState>(e);
+    if (sim == nullptr) {
+        return false;  // non-hero: no home to enter
+    }
+    int32_t home = sim->home_building_id;
     auto& bs = game.placement.buildings;
     if (home < 0 || static_cast<size_t>(home) >= bs.size() || !bs[home].alive) {
         return false;
@@ -353,7 +360,11 @@ bool hero_enter_home(BadlandsGame& game, entt::entity e) {
     return true;
 }
 
+// Same non-hero-reachability note as hero_enter_home above (CommandKind::Buy).
 bool hero_buy(BadlandsGame& game, entt::entity e) {
+    if (!game.registry.all_of<HeroSimulationState>(e)) {
+        return false;  // non-hero: nothing to buy for
+    }
     uint32_t bid = 0;
     if (!at_building_of_kind(game, e, static_cast<int32_t>(BuildingKind::Apothecary), bid)) {
         return false;

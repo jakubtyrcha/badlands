@@ -138,12 +138,20 @@ glm::vec4 perceive_building(BadlandsGame& game, int32_t slot, int32_t kind) {
     return {tile.x, tile.y, 1.0f, 0.0f};
 }
 
-// (door_x, door_z, exists, _) for the hero's home guild.
+// (door_x, door_z, exists, _) for the hero's home guild. A non-hero entity
+// (any noiser script may be bound to any archetype -- see combat_test.noiser
+// driving BOTH duelists in duel_test.cpp, not just BrainKind::Town) has no
+// HeroSimulationState to read; report "no home" the same way perceive_class/
+// perceive_needs below already treat a non-hero slot, rather than reading a
+// component the entity does not have.
 glm::vec4 perceive_home(BadlandsGame& game, int32_t slot) {
     entt::entity self = entity_for_slot(game, slot);
     if (self == entt::null) {
         report_bug(game, "perceive_home", "invalid entity slot " + std::to_string(slot));
         return glm::vec4(0.0f);
+    }
+    if (!game.registry.all_of<HeroSimulationState>(self)) {
+        return glm::vec4(0.0f);  // non-hero: no home
     }
     int32_t home = game.registry.get<HeroSimulationState>(self).home_building_id;
     auto& bs = game.placement.buildings;
@@ -157,10 +165,14 @@ glm::vec4 perceive_home(BadlandsGame& game, int32_t slot) {
     return {tile.x, tile.y, 1.0f, 0.0f};
 }
 
+// Non-hero: no inventory to report (same convention as perceive_home above).
 float inventory_count(BadlandsGame& game, int32_t slot) {
     entt::entity self = entity_for_slot(game, slot);
     if (self == entt::null) {
         report_bug(game, "inventory_count", "invalid entity slot " + std::to_string(slot));
+        return 0.0f;
+    }
+    if (!game.registry.all_of<HeroSimulationState>(self)) {
         return 0.0f;
     }
     return static_cast<float>(game.registry.get<HeroSimulationState>(self).inventory);
