@@ -149,11 +149,11 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
         }
     }
     if (desc.wasm_bytes != nullptr) {
-        std::string error;
-        game->wasm_brains = WasmBrainRuntime::create(desc.wasm_bytes, desc.wasm_len, error);
-        if (!game->wasm_brains) {
-            report_bug(*game, "wasm_load", error);
-        }
+        // Wasm bytes were explicitly provided, so a bh_load/bh_instantiate
+        // failure here is a brain bug, not a config error to fall back from
+        // -- WasmBrainRuntime::create is fatal on failure (brain_fatal,
+        // wasm_brain.cpp) and never returns null.
+        game->wasm_brains = WasmBrainRuntime::create(desc.wasm_bytes, desc.wasm_len);
     }
     // The colony starts with only the castle, prebuilt on the plains south of
     // the central lake (the map origin is water). Not a player placement: it

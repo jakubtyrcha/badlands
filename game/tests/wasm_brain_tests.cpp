@@ -1,11 +1,20 @@
-// Task 4 (wasm-brain feature): wiring the wasm brain runtime into the sim.
-// Most cases here load the REAL, shipping assets/brains/hero.wasm (Task 5's
-// ported decision layer, scripts/brains/nim/hero.nim) -- the twin-brain
-// parity test against the C++ reference lives in hero_brain_parity_tests.cpp;
-// this file is about the wasm PLUMBING (load/spawn/tick/reinstantiate/combat
-// pre-empt), not decision correctness. Cases that need a brain PINNED to
-// all-Idle (so a test can assert on that alone) load
-// game/tests/fixtures/idle_brain.wasm instead (scripts/brains/nim/idle_test.nim).
+// Task 4 (wasm-brain feature), amended by Task 7 (fail-fast policy): wiring
+// the wasm brain runtime into the sim. Most cases here load the REAL,
+// shipping assets/brains/hero.wasm (Task 5's ported decision layer,
+// scripts/brains/nim/hero.nim) -- the twin-brain parity test against the
+// C++ reference lives in hero_brain_parity_tests.cpp; this file is about the
+// wasm PLUMBING (load/spawn/tick/combat pre-empt), not decision correctness.
+// Cases that need a brain PINNED to all-Idle (so a test can assert on that
+// alone) load game/tests/fixtures/idle_brain.wasm instead
+// (scripts/brains/nim/idle_test.nim).
+//
+// A wasm-brain failure is FATAL under this project's policy (wasm_brain.h's
+// policy note; docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's
+// Runtime section), so there is nothing left to test at the sim level about a
+// trap or a load failure surviving gracefully -- that coverage moved to the
+// brainhost crate's real_trap_wasm_traps test (src/crates/brainhost/src/
+// lib.rs), which pins the Nim-panic -> wasm-trap -> BH_ERR_TRAP chain the
+// trap_brain.wasm fixture exists for; this file no longer reads that fixture.
 //
 // apply_brain_decision (the shared decision-apply seam, town_brain.h) and
 // decode_decision (the wire trust boundary, wasm_brain.h) are unit-tested
@@ -20,7 +29,7 @@
 #include "game_state.h"
 #include "sim_internal.hpp"
 #include "town_brain.h"
-#include "wasm_brain.h"  // WasmBrainRuntime::instantiation_count, decode_decision (review-fix coverage)
+#include "wasm_brain.h"  // decode_decision (review-fix coverage)
 
 #include <catch_amalgamated.hpp>
 
@@ -61,13 +70,6 @@ std::vector<uint8_t> read_hero_wasm() { return read_wasm_file("assets/brains/her
 // alongside hero.wasm. What hero.wasm itself used to be before Task 5.
 std::vector<uint8_t> read_idle_wasm() {
     return read_wasm_file("game/tests/fixtures/idle_brain.wasm");
-}
-
-// Test-only fixture (LFS binary; scripts/brains/nim/trap_test.nim -- same
-// export surface as hero.nim, but bl_tick unconditionally traps): built by
-// scripts/build_brains.sh alongside hero.wasm.
-std::vector<uint8_t> read_trap_wasm() {
-    return read_wasm_file("game/tests/fixtures/trap_brain.wasm");
 }
 
 BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
@@ -162,92 +164,6 @@ TEST_CASE("wasm: combat pre-empt still owns enemies") {
     CHECK(sim.GetStats().noiser_bugs == 0);
 }
 
-// --- F.3: a garbage module reports a bug and heroes fall back to mock ------
-
-TEST_CASE("wasm: garbage bytes report a bug and heroes fall back to mock behaviour") {
-    // Not a wasm module at all (no \0asm magic) -- bh_load must fail to
-    // compile it.
-    const uint8_t garbage[] = {0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0x10, 0x20};
-    Sim sim(BrainDesc{.wasm_bytes = garbage, .wasm_len = sizeof(garbage)});
-
-    CHECK(sim.GetStats().noiser_bugs > 0);  // the load failure was recorded
-
-    uint32_t id = sim.Spawn(bare_hero(0.0f, kDuelGroundZ));
-    for (int i = 0; i < 5; ++i) {
-        sim.Tick(kTickDt);
-    }
-
-    auto rows = sim.Characters();
-    REQUIRE(rows.size() == 1);
-    CHECK(rows[0].id == id);
-    // The cheapest observable that mock town_think is genuinely driving
-    // (not stalled): with the compiled default weights, Roam (weight 1.0,
-    // always available) outscores Idle (0.5) from the very first tick, so a
-    // freshly spawned, mock-driven hero leaves Idle almost immediately (a
-    // wasm-load failure that left the entity silently doing nothing would
-    // fail this).
-    CHECK(rows[0].behavior != static_cast<int32_t>(ActivityId::Idle));
-}
-
-// --- Review fix: a trapped BhInstance is dropped and re-instantiated -------
-// (brainhost.h: "a BhInstance that has trapped (BH_ERR_TRAP/BH_ERR_FUEL) is
-// not reused"). Uses a real trapping module (game/tests/fixtures/
-// trap_brain.wasm, scripts/brains/nim/trap_test.nim) rather than a synthetic
-// error code, so this exercises bh_tick's actual BH_ERR_TRAP return, not an
-// assumption about it.
-
-TEST_CASE("wasm: a trapping module reports a bug every tick and never crashes the sim") {
-    std::vector<uint8_t> bytes = read_trap_wasm();
-    Sim sim(wasm_desc(bytes));
-
-    constexpr int kHeroes = 2;
-    constexpr int kTicks = 10;
-    std::vector<uint32_t> ids;
-    for (int i = 0; i < kHeroes; ++i) {
-        ids.push_back(sim.Spawn(mercenary(static_cast<float>(i) * 6.0f, kDuelGroundZ)));
-    }
-    for (int i = 0; i < kTicks; ++i) {
-        sim.Tick(kTickDt);
-    }
-
-    // No crash, and every spawned hero is still a valid, healthy row --
-    // combat/movement/needs keep running untouched around a permanently
-    // failing brain.
-    auto rows = sim.Characters();
-    REQUIRE(rows.size() == static_cast<size_t>(kHeroes));
-    for (const CharacterState& r : rows) {
-        CHECK(r.hp > 0.0f);
-    }
-
-    // bh_spawn never traps in this fixture (only bl_tick does), so every
-    // tick's bh_tick call is the sole failure per hero: exactly
-    // kHeroes * kTicks accrued bugs -- "one per hero tick" and, since that
-    // count keeps accruing at the full rate through the last tick, proof
-    // that re-instantiation kept succeeding throughout (a wedged/nulled-out
-    // runtime would have silently stopped producing "wasm_tick" bugs and
-    // fallen back to mock instead).
-    CHECK(sim.GetStats().noiser_bugs == static_cast<uint32_t>(kHeroes * kTicks));
-}
-
-TEST_CASE("wasm: each trap gets a freshly instantiated BhInstance, not the trapped one") {
-    std::vector<uint8_t> bytes = read_trap_wasm();
-    auto g = make_world(wasm_desc(bytes));
-    REQUIRE(g->wasm_brains != nullptr);
-    CHECK(g->wasm_brains->instantiation_count == 1);  // create()'s own instantiation
-
-    spawn_into(*g, mercenary(0.0f, kDuelGroundZ));  // Town-kind, no enemy: ticks the wasm brain
-
-    tick_world(*g, 1.0f / 30.0f);
-    REQUIRE(g->wasm_brains != nullptr);  // re-instantiation succeeded, not nulled out
-    const uint32_t after_tick1 = g->wasm_brains->instantiation_count;
-    CHECK(after_tick1 > 1);  // a fresh instance replaced the one that just trapped
-
-    tick_world(*g, 1.0f / 30.0f);
-    REQUIRE(g->wasm_brains != nullptr);
-    const uint32_t after_tick2 = g->wasm_brains->instantiation_count;
-    CHECK(after_tick2 > after_tick1);  // a SECOND, distinct re-instantiation happened
-}
-
 // --- F.4: apply_brain_decision, unit-tested directly (no wasm) -------------
 
 TEST_CASE("apply_brain_decision: commit writes SetBehavior + MoveTo to the log") {
@@ -258,7 +174,7 @@ TEST_CASE("apply_brain_decision: commit writes SetBehavior + MoveTo to the log")
     BrainDecision d;
     d.activity = ActivityId::Roam;
     d.goal = self_pos + glm::vec2{5.0f, 0.0f};
-    apply_brain_decision(*g, slot, self_pos, d);
+    CHECK(apply_brain_decision(*g, slot, self_pos, d));  // commit: applied
     apply_commands(*g);
 
     REQUIRE(g->command_log.size() == 2);
@@ -276,7 +192,7 @@ TEST_CASE("apply_brain_decision: pause-start writes Think + a single hold MoveTo
     BrainDecision d;
     d.pause = true;
     d.pause_duration_millis = 500;
-    apply_brain_decision(*g, slot, self_pos, d);
+    CHECK(apply_brain_decision(*g, slot, self_pos, d));  // pause-START: applied
     apply_commands(*g);
 
     REQUIRE(g->command_log.size() == 2);
@@ -295,7 +211,7 @@ TEST_CASE("apply_brain_decision: pause-continue enqueues nothing") {
     BrainDecision d;
     d.pause = true;
     d.pause_duration_millis = 0;
-    apply_brain_decision(*g, slot, self_pos, d);
+    CHECK_FALSE(apply_brain_decision(*g, slot, self_pos, d));  // pause-CONTINUE: not applied
     CHECK(g->command_queue.empty());
     apply_commands(*g);
     CHECK(g->command_log.empty());
@@ -355,10 +271,14 @@ TEST_CASE("apply_brain_decision: follow_up_on_arrival gates on distance to the g
     }
 }
 
-// --- Review fix: decode_decision rejects a non-finite goal (the wire trust
+// --- Review fix: decode_decision rejects malformed wires (the wire trust
 // boundary) -----------------------------------------------------------------
-// A synthetic BlDecisionWire, no wasm module involved -- exercises the same
+// Synthetic BlDecisionWires, no wasm module involved -- exercise the same
 // seam a real (buggy/adversarial) guest's bl_out_buf write would hit.
+// decode_decision is a pure function (no report_bug/game-state side effect --
+// under the fail-fast policy it is the CALLER, tick_wasm_brain, that
+// escalates a nullopt to brain_fatal), so these assert only on the return
+// value.
 
 TEST_CASE("decode_decision: a non-finite goal is rejected, not decoded") {
     auto g = make_world(nullptr);
@@ -371,16 +291,71 @@ TEST_CASE("decode_decision: a non-finite goal is rejected, not decoded") {
     wire.goal_x = std::numeric_limits<float>::quiet_NaN();
     wire.goal_z = 0.0f;
 
-    REQUIRE(g->noiser_bugs == 0);
     const std::optional<BrainDecision> decision = decode_decision(*g, wire, slot, self_pos);
     CHECK(!decision.has_value());
-    CHECK(g->noiser_bugs == 1);  // report_bug'd once
     CHECK(g->command_queue.empty());  // no follow-up MoveTo enqueued
 
     apply_commands(*g);
     for (const Command& c : g->command_log) {
         CHECK(c.kind != CommandKind::MoveTo);
     }
+}
+
+// Task 7 review finding: pause_kind/pause_duration_millis were unvalidated --
+// four cases, each isolating exactly one violation against an otherwise
+// zero-initialized (so trivially valid: activity_id=0/Idle, goal_kind=0/none)
+// wire.
+
+TEST_CASE("decode_decision: pause_kind outside {0,1,2} is rejected") {
+    auto g = make_world(nullptr);
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+
+    BlDecisionWire wire{};
+    wire.pause_kind = 3;
+
+    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
+}
+
+TEST_CASE("decode_decision: pause_kind==1 (start) with duration <= 0 is rejected") {
+    auto g = make_world(nullptr);
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+
+    BlDecisionWire wire{};
+    wire.pause_kind = 1;
+    wire.pause_duration_millis = 0;
+
+    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
+}
+
+TEST_CASE("decode_decision: pause_kind==1 (start) with duration beyond think_max_millis is "
+         "rejected") {
+    auto g = make_world(nullptr);
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+
+    BlDecisionWire wire{};
+    wire.pause_kind = 1;
+    wire.pause_duration_millis = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    // This also bounds the int32_t truncation enqueue_set_behavior applies
+    // (command.cpp) -- confirm the case under test actually exceeds the
+    // policy bound, not just INT32_MAX in the abstract.
+    REQUIRE(wire.pause_duration_millis > g->factors.hero.think_max_millis);
+
+    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
+}
+
+TEST_CASE("decode_decision: pause_kind==2 (continue) with nonzero duration is rejected") {
+    auto g = make_world(nullptr);
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+
+    BlDecisionWire wire{};
+    wire.pause_kind = 2;
+    wire.pause_duration_millis = 17;
+
+    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
 }
 
 // --- F.5: determinism with wasm loaded --------------------------------------

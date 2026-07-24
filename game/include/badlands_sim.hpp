@@ -581,10 +581,11 @@ class Sim {
     // nullptr for mock-brains-only. A script that fails to compile is recorded
     // as a noiser bug and the sim falls back to mock brains.
     explicit Sim(const char* brain_script_source = nullptr);
-    // BrainDesc overload: also (or instead) loads a brain wasm module. A
-    // module that fails to compile/instantiate is recorded as a bug (same
-    // counter as a noiser compile failure) and the sim falls back to mock
-    // brains for every hero.
+    // BrainDesc overload: also (or instead) loads a brain wasm module.
+    // wasm_bytes provided but failing to compile/instantiate is FATAL (crash-
+    // and-error, not a fallback -- see WasmBrainRuntime::create's doc comment,
+    // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (mock
+    // drives every hero, same as brain_script_source == nullptr above).
     explicit Sim(const BrainDesc& brain_desc);
     ~Sim();
     Sim(Sim&&) noexcept;

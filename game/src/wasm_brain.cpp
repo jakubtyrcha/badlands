@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -51,6 +53,27 @@ void forward_log(int32_t level, const uint8_t* msg, size_t len, void* /*user*/) 
             spdlog::warn("[brain] (level {}) {}", level, text);
             break;
     }
+}
+
+// The single fail-fast enforcement point (see wasm_brain.h's policy note):
+// every wasm-brain failure this file can detect -- a bh_load/bh_instantiate
+// failure on provided wasm bytes, a nonzero bh_spawn/bh_tick, or
+// decode_decision rejecting a wire -- routes through here. Logs `stage`
+// ("load"/"instantiate"/"spawn"/"tick"/"decode"), `slot` when the failure is
+// per-entity (std::nullopt for the load-time failures, which happen before
+// any slot exists), and `detail` (typically bh_last_error()'s text), then
+// aborts. There is deliberately no return path: a wasm brain crash is a
+// crash-and-error scenario, not a downgrade -- the graceful containment this
+// replaces was a workaround for noiser-era bugs and does not apply to the
+// wasm host.
+[[noreturn]] void brain_fatal(const char* stage, std::optional<uint32_t> slot,
+                              const std::string& detail) {
+    if (slot.has_value()) {
+        spdlog::critical("[wasm-brain] FATAL stage={} slot={}: {}", stage, *slot, detail);
+    } else {
+        spdlog::critical("[wasm-brain] FATAL stage={}: {}", stage, detail);
+    }
+    std::abort();
 }
 
 // Packs BlViewWire from (a) the WorldView observe_hero returned, field for
@@ -206,26 +229,45 @@ std::optional<Command> decode_command(const BlDecisionWire& out, uint32_t slot) 
 // Wire trust boundary: `out` came back through bh_tick from the guest's own
 // linear memory, so its fields are untrusted input regardless of how well
 // wasm_brain.cpp trusts the rest of the pipeline -- a buggy or adversarial
-// module can write anything to bl_out_buf(). Two fields feed straight into
-// downstream math/indexing without further validation, so they are checked
-// here, before anything else touches them: a non-finite goal coordinate
-// would otherwise propagate into MoveTo/distance math (apply_brain_decision,
-// town_brain.cpp), and an out-of-range activity_id would be cast to
-// ActivityId and used to index ActivityWeights::w /
-// ActivityHistogram::total_ (kActivityCount-sized arrays) with no bounds
-// check of their own. Both reject the same way a script/trap error does:
-// report_bug once, no decoded decision (the caller applies no commands this
-// tick; the entity idles and the wire is re-read fresh next tick).
+// module can write anything to bl_out_buf(). Every field that feeds
+// downstream math/indexing without further validation is checked here,
+// before anything else touches it:
+//  - a non-finite goal coordinate would otherwise propagate into
+//    MoveTo/distance math (apply_brain_decision, town_brain.cpp);
+//  - an out-of-range activity_id would be cast to ActivityId and used to
+//    index ActivityWeights::w / ActivityHistogram::total_ (kActivityCount-
+//    sized arrays) with no bounds check of their own;
+//  - an out-of-range pause_kind, or a pause_duration_millis that violates
+//    its kind's contract (kind==1: 0 < duration <= factors.hero.
+//    think_max_millis; kind==2: duration == 0), would otherwise reach
+//    command.cpp's enqueue_set_behavior, whose int64_t duration_millis
+//    parameter narrows into Command::param_b (int32_t) via
+//    static_cast<int32_t> -- the upper bound against think_max_millis
+//    (currently 833, always far under INT32_MAX) is what keeps that
+//    narrowing lossless, not merely policy-compliant.
+//
+// A pure function: a violation returns std::nullopt with no side effect of
+// its own (no report_bug -- that went away with the graceful-containment
+// machinery). Under the fail-fast policy (wasm_brain.h's policy note;
+// docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's Runtime
+// section) a rejected wire is a brain bug, and it is the CALLER
+// (tick_wasm_brain) that escalates a std::nullopt to brain_fatal.
 std::optional<BrainDecision> decode_decision(BadlandsGame& game, const BlDecisionWire& out,
                                               uint32_t slot, glm::vec2 self_pos) {
     if (!std::isfinite(out.goal_x) || !std::isfinite(out.goal_z)) {
-        report_bug(game, "wasm_decode", "non-finite goal_x/goal_z in wasm decision wire");
         return std::nullopt;
     }
     if (out.activity_id < 0 || out.activity_id >= kActivityCount) {
-        report_bug(game, "wasm_decode",
-                   "activity_id " + std::to_string(out.activity_id) +
-                       " out of range in wasm decision wire");
+        return std::nullopt;
+    }
+    if (out.pause_kind != 0 && out.pause_kind != 1 && out.pause_kind != 2) {
+        return std::nullopt;
+    }
+    if (out.pause_kind == 1 && (out.pause_duration_millis <= 0 ||
+                                out.pause_duration_millis > game.factors.hero.think_max_millis)) {
+        return std::nullopt;
+    }
+    if (out.pause_kind == 2 && out.pause_duration_millis != 0) {
         return std::nullopt;
     }
 
@@ -239,12 +281,12 @@ std::optional<BrainDecision> decode_decision(BadlandsGame& game, const BlDecisio
     return d;
 }
 
-std::unique_ptr<WasmBrainRuntime> WasmBrainRuntime::create(const uint8_t* wasm_bytes, size_t len,
-                                                            std::string& out_error) {
+std::unique_ptr<WasmBrainRuntime> WasmBrainRuntime::create(const uint8_t* wasm_bytes, size_t len) {
     BhProgram* program = bh_load(wasm_bytes, len);
     if (program == nullptr) {
-        out_error = bh_last_error();
-        return nullptr;
+        brain_fatal("load", std::nullopt,
+                    std::string("bh_load failed: ") + bh_last_error() +
+                        " (truncated or invalid wasm -- is git-lfs initialized?)");
     }
     // world_seed 0: world gen is currently seedless/static
     // (SymbolicMapGenerator is a pure function of its compile-time constants
@@ -252,14 +294,12 @@ std::unique_ptr<WasmBrainRuntime> WasmBrainRuntime::create(const uint8_t* wasm_b
     BhInstance* instance =
         bh_instantiate(program, BL_ABI_VERSION, /*world_seed=*/0, &forward_log, nullptr);
     if (instance == nullptr) {
-        out_error = bh_last_error();
-        bh_drop_program(program);
-        return nullptr;
+        brain_fatal("instantiate", std::nullopt,
+                    std::string("bh_instantiate failed: ") + bh_last_error());
     }
     auto runtime = std::make_unique<WasmBrainRuntime>();
     runtime->program = program;
     runtime->instance = instance;
-    runtime->instantiation_count = 1;
     return runtime;
 }
 
@@ -267,40 +307,6 @@ WasmBrainRuntime::~WasmBrainRuntime() {
     bh_drop_instance(instance);
     bh_drop_program(program);
 }
-
-namespace {
-
-// brainhost.h: "a BhInstance that has trapped (BH_ERR_TRAP/BH_ERR_FUEL) is
-// not reused -- drop it ... and bh_instantiate a fresh one from the same
-// BhProgram". Called after `rc` has already been report_bug'd by the
-// caller; no-ops for every other error code (BH_ERR_SCRIPT/BH_ERR_ARGS/
-// BH_ERR_PANIC do not invalidate the instance).
-//
-// On success, `runtime.instance`/`spawned` are updated in place. On a
-// re-instantiation failure there is no usable wasm runtime left, so
-// `game.wasm_brains` itself is reset to null -- after this call returns,
-// `runtime` may be a dangling reference to the just-destroyed object, so
-// the caller must not touch it again (tick_wasm_brain always returns
-// immediately after calling this, which is what makes that safe).
-void reinstantiate_if_trapped(BadlandsGame& game, WasmBrainRuntime& runtime, int32_t rc) {
-    if (rc != BH_ERR_TRAP && rc != BH_ERR_FUEL) {
-        return;
-    }
-    bh_drop_instance(runtime.instance);
-    runtime.instance = nullptr;
-    BhInstance* fresh =
-        bh_instantiate(runtime.program, BL_ABI_VERSION, /*world_seed=*/0, &forward_log, nullptr);
-    if (fresh == nullptr) {
-        report_bug(game, "wasm_reinit", std::string("bh_instantiate failed: ") + bh_last_error());
-        game.wasm_brains.reset();  // dead runtime: the think loop falls back to mock
-        return;
-    }
-    runtime.instance = fresh;
-    ++runtime.instantiation_count;
-    std::fill(runtime.spawned.begin(), runtime.spawned.end(), false);
-}
-
-}  // namespace
 
 void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     WasmBrainRuntime& runtime = *game.wasm_brains;
@@ -321,10 +327,7 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
         const int32_t rc = bh_spawn(runtime.instance, static_cast<int32_t>(slot), cls,
                                     static_cast<int32_t>(slot) + 1);
         if (rc != BH_OK) {
-            report_bug(game, "wasm_spawn",
-                       std::string("bh_spawn failed: ") + bh_last_error());
-            reinstantiate_if_trapped(game, runtime, rc);
-            return;  // not marked spawned: retried next tick
+            brain_fatal("spawn", slot, std::string("bh_spawn failed: ") + bh_last_error());
         }
         runtime.spawned[slot] = true;
     }
@@ -338,25 +341,25 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
         bh_tick(runtime.instance, static_cast<int32_t>(slot), reinterpret_cast<const uint8_t*>(&wire),
                sizeof(wire), reinterpret_cast<uint8_t*>(&out), sizeof(out));
     if (rc != BH_OK) {
-        report_bug(game, "wasm_tick", std::string("bh_tick failed: ") + bh_last_error());
-        reinstantiate_if_trapped(game, runtime, rc);
-        return;  // no commands this tick: the hero idles, retried next tick
+        brain_fatal("tick", slot, std::string("bh_tick failed: ") + bh_last_error());
     }
 
-    // decode_decision report_bug's ("wasm_decode") and returns nullopt itself
-    // on a wire trust-boundary violation (non-finite goal, out-of-range
-    // activity_id) -- same containment as the bh_spawn/bh_tick failures
-    // above: no commands this tick, retried next tick against a fresh wire.
+    // decode_decision is pure (no side effect of its own -- see its doc
+    // comment); a std::nullopt here is a brain bug under the fail-fast
+    // policy, so this is the escalation point.
     const std::optional<BrainDecision> decision = decode_decision(game, out, slot, view.pos);
     if (!decision.has_value()) {
-        return;
+        brain_fatal("decode", slot,
+                    "decode_decision rejected the wire (invalid goal/activity/pause fields)");
     }
 
-    // One applied decision, successful or not a no-op (mirrors what
-    // script_intents counted for the noiser path: an intent actually
-    // delivered to the sim this tick).
-    ++game.script_intents;
-    apply_brain_decision(game, slot, view.pos, *decision);
+    // script_intents counts intents actually DELIVERED to the sim this tick
+    // (mirrors what it counted for the noiser path): apply_brain_decision
+    // returns false for a pause-CONTINUE (enqueues nothing), true for a
+    // commit or a pause-START.
+    if (apply_brain_decision(game, slot, view.pos, *decision)) {
+        ++game.script_intents;
+    }
 }
 
 }  // namespace badlands

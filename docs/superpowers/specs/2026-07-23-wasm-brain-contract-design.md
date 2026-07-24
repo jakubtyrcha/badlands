@@ -1,7 +1,8 @@
 # WASM brain contract — design
 
 Replace the noiser hero brain with a Nim→WASM brain running in a wasmtime host. Co-designed
-2026-07-23; amended the same day after PR #18 (banded-activity-ai) landed on main.
+2026-07-23; amended the same day after PR #18 (banded-activity-ai) landed on main; amended
+2026-07-24 (Task 7) to make a wasm-brain failure fatal instead of gracefully contained.
 
 ## Why
 
@@ -63,8 +64,18 @@ arrival-gated follow-up command.
 
 wasmtime embedded via a new `src/crates/brainhost` Rust staticlib behind a narrow, data-only C ABI
 (the `nav` crate pattern). NaN canonicalization on; fuel reset per `bl_tick` with a fixed budget
-(exhaustion is a deterministic trap); no WASI; threads/relaxed-simd off. Trap / nonzero return /
-fuel-out ⇒ `report_bug` + the entity idles that tick and retries next tick — no downgrade path.
+(exhaustion is a deterministic trap); no WASI; threads/relaxed-simd off.
+
+**Failure policy (Task 7, user decision): a wasm-brain failure is FATAL, not gracefully
+contained.** `bh_load`/`bh_instantiate` failing on provided wasm bytes, `bh_spawn`/`bh_tick`
+returning nonzero, and a wire-contract violation from `decode_decision` (game/src/wasm_brain.cpp)
+all `spdlog::critical` (stage, slot where applicable, `bh_last_error()`) then `std::abort()` — a
+crash-and-error scenario, not a downgrade. The graceful per-tick containment this replaced
+(retry-next-tick on trap/script-error, reinstantiate a trapped `BhInstance`, null out the runtime
+and fall back to mock on a re-instantiation failure) was a workaround for noiser-era bugs and does
+not apply to the wasm host. `BrainDesc{}`/no wasm bytes provided is unaffected: mock drives, as
+configured; an app may still log-and-continue with mock for a missing artifact **file** (packaging,
+not a brain bug — see `ai_sandbox_view.cpp`'s `load_hero_wasm`).
 
 One instance drives all brains (per-slot state, if a brain ever needs it, lives in module tables).
 Reload = fresh instantiation (brains restart; accepted). Hot reload of the Nim source is deferred;
@@ -84,7 +95,8 @@ wasm_bytes }`) — compiled, test-covered, unused by the apps.
 
 ## Verification
 
-brainhost crate tests (`.wat` fixtures: trap, fuel, version, imports); `EntityMemory` unit tests;
-integration tests (decision→command_log, trap containment, run-twice determinism with wasm on);
-**twin-brain parity** — same world/seeds, C++ `town_think` vs wasm brain, identical command logs;
-visual check in `badlands_ai_sandbox`.
+brainhost crate tests (`.wat` fixtures: trap, fuel, version, imports; plus `real_trap_wasm_traps`,
+which pins the real `trap_brain.wasm` fixture's Nim-panic → wasm-trap → `BH_ERR_TRAP` chain);
+`EntityMemory` unit tests; integration tests (decision→command_log, run-twice determinism with wasm
+on); **twin-brain parity** — same world/seeds, C++ `town_think` vs wasm brain, identical command
+logs; visual check in `badlands_ai_sandbox`.

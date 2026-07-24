@@ -965,4 +965,52 @@ mod tests {
             bh_drop_program(program);
         }
     }
+
+    // 10. fail-fast fixture: game/tests/fixtures/trap_brain.wasm
+    // (scripts/brains/nim/trap_test.nim) unconditionally traps bl_tick with a
+    // real `unreachable` (__builtin_trap()) -- pins the Nim -> wasm-trap ->
+    // BH_ERR_TRAP chain end to end against the actual compiled artifact, not
+    // a wat fixture. This coverage used to live at the sim level
+    // (game/tests/wasm_brain_tests.cpp's BhInstance reinstantiation tests,
+    // pre-Task-7); the C++ game now treats ANY wasm-brain failure as fatal
+    // (brain_fatal, game/src/wasm_brain.cpp) rather than reinstantiating, so
+    // there is nothing left to exercise about trapping at that layer -- this
+    // crate's own error-code contract is unchanged by that policy (fatality
+    // is game policy, not a brainhost concern), so trapping still belongs
+    // here.
+    #[test]
+    fn real_trap_wasm_traps() {
+        // trap_test.nim shares hero.nim's BlViewWire/BlDecisionWire var
+        // buffers (see scripts/brains/nim/trap_test.nim), so the same
+        // static_assert'd sizes from game/src/brain_abi.h apply as
+        // real_hero_wasm_conforms uses above.
+        const VIEW_WIRE_LEN: usize = 1080;
+        const DECISION_WIRE_LEN: usize = 40;
+
+        let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../game/tests/fixtures/trap_brain.wasm");
+        let wasm_bytes = std::fs::read(&wasm_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", wasm_path.display()));
+
+        let program = load_ok(&wasm_bytes);
+        let instance =
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+        assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
+
+        // bl_spawn never traps in this fixture (only bl_tick does).
+        assert_eq!(unsafe { bh_spawn(instance, 0, 0, 1) }, BH_OK);
+
+        let view = vec![0u8; VIEW_WIRE_LEN];
+        let mut out = vec![0u8; DECISION_WIRE_LEN];
+        let rc = unsafe {
+            bh_tick(instance, 0, view.as_ptr(), view.len(), out.as_mut_ptr(), out.len())
+        };
+        assert_eq!(rc, BH_ERR_TRAP, "expected BH_ERR_TRAP, got {rc}");
+        assert!(!last_error().is_empty());
+
+        unsafe {
+            bh_drop_instance(instance);
+            bh_drop_program(program);
+        }
+    }
 }

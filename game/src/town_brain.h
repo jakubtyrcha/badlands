@@ -2,7 +2,9 @@
 // expressed as WorldView-in / Commands-out (it enqueues Commands, never mutates
 // the registry directly). It is the parity reference for the Nim/WASM hero
 // brain (scripts/brains/nim/, see game/src/wasm_brain.h) and the fallback when
-// no wasm brain is loaded or it fails; the noiser hero brain path
+// no wasm brain is loaded at all (BrainDesc::wasm_bytes null). A wasm brain
+// that IS loaded but fails is fatal, not a fallback to here -- see
+// wasm_brain.h's policy note; the noiser hero brain path
 // (scripts/brains/hero.noiser) is dormant.
 //
 // Combat is a separate pre-empt handled by the C++ mock (game.cpp); town_think
@@ -78,7 +80,14 @@ struct BrainDecision {
 // passed separately rather than folded into BrainDecision because it is also
 // needed for the follow_up_on_arrival distance gate and the pause hold-point,
 // neither of which the brain itself decides.
-void apply_brain_decision(BadlandsGame& game, uint32_t slot, glm::vec2 self_pos,
+//
+// Returns whether the decision was actually applied/delivered this tick: true
+// for a commit or a pause-START (both enqueue at least a SetBehavior); false
+// for a pause-CONTINUE, which enqueues nothing (an already-running pause is
+// not a new decision). wasm_brain.cpp's tick_wasm_brain uses this to keep
+// script_intents counting only intents actually delivered to the sim;
+// town_think ignores it (this call is its own tail).
+bool apply_brain_decision(BadlandsGame& game, uint32_t slot, glm::vec2 self_pos,
                           const BrainDecision& decision);
 
 }  // namespace badlands

@@ -243,7 +243,7 @@ std::span<const ActivityDef> hero_activities() { return kHeroActivities; }
 // as a BrainDecision instead of reading (BehaviourResult, ThinkDecision)
 // directly, so the wasm path (which has no BehaviourResult/ThinkDecision of
 // its own -- only a decoded BlDecisionWire) can drive it too.
-void apply_brain_decision(BadlandsGame& game, uint32_t slot, glm::vec2 self_pos,
+bool apply_brain_decision(BadlandsGame& game, uint32_t slot, glm::vec2 self_pos,
                           const BrainDecision& decision) {
     if (decision.pause) {
         if (decision.pause_duration_millis > 0) {
@@ -254,8 +254,9 @@ void apply_brain_decision(BadlandsGame& game, uint32_t slot, glm::vec2 self_pos,
             enqueue_set_behavior(game, slot, static_cast<int32_t>(ActivityId::Think),
                                  decision.pause_duration_millis);
             enqueue_move_to(game, slot, self_pos);
+            return true;  // pause-START: a real decision, worth counting/logging
         }
-        return;  // mid-pause: no decision to make, nothing to log
+        return false;  // mid-pause: no decision to make, nothing to log
     }
 
     // Decisions go out as commands like every other mutation (logged +
@@ -270,6 +271,7 @@ void apply_brain_decision(BadlandsGame& game, uint32_t slot, glm::vec2 self_pos,
          glm::distance(self_pos, decision.goal) <= kEntranceRadius)) {
         game.command_queue.push_back(*decision.follow_up);
     }
+    return true;
 }
 
 void town_think(BadlandsGame& game, uint32_t slot) {
