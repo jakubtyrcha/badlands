@@ -112,6 +112,10 @@ struct BadlandsGame {
     // Initial config in the determinism contract.
     badlands::CreatureCatalog creatures;
 
+    // Skill template catalog (see SkillCatalog). Compiled defaults; an app may
+    // override by name from JSON via Sim::SetSkillCatalog. Initial config.
+    badlands::SkillCatalog skills;
+
     uint64_t ticks = 0;
     uint64_t script_intents = 0;
     uint32_t noiser_bugs = 0;

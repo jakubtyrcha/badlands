@@ -201,6 +201,34 @@ inline constexpr int32_t kMaxSkills = 8;
 // Stable inspection name ("Calcify"); "-" for an out-of-range id.
 const char* SkillName(int32_t id);
 
+// ---- skill templates --------------------------------------------------------
+// Designer-authored per-skill data (presentation + mechanics). The AI
+// vocabulary (triggers, grants) stays internal in game/src/skills.h.
+enum class SkillActivation : int32_t { Active = 0, Passive };
+enum class SkillTargeting : int32_t { Direct = 0, Aoe };
+
+// One skill's template. Initial config in the determinism contract (the
+// execution slice reads cooldown/duration from here); display-only today.
+struct SkillSpec {
+    SkillActivation activation = SkillActivation::Active;
+    SkillTargeting targeting = SkillTargeting::Direct;
+    float duration_seconds = 0.0f;  // <= 0 => instant
+    float cooldown_seconds = 0.0f;  // <= 0 => none
+    std::string effect;             // brief descriptive string
+};
+
+// A SkillSpec per skill (specs[i] belongs to SkillId(i)). Compiled defaults
+// live in skills.cpp; an app may override fields by NAME from
+// assets/skills/skills.json and push the result through Sim::SetSkillCatalog.
+// Held per-Sim, so it is initial config (a replay must use the same catalog).
+struct SkillCatalog {
+    SkillCatalog();  // fills the compiled defaults
+    SkillSpec specs[kSkillCount];
+};
+
+// Parse a skill name ("Calcify"); returns SkillId::Count if unknown.
+SkillId SkillIdFromName(const char* name);
+
 // ---- tuning factors (data, not code) ---------------------------------------
 // Per-archetype behaviour tuning. The sim ships the defaults below, so it is
 // fully usable -- and unit-testable -- with no file present; an app may load
@@ -790,6 +818,11 @@ class Sim {
     // a replay must use the same catalog the recorded run used.
     void SetCreatureCatalog(const CreatureCatalog& catalog);
     const CreatureCatalog& Creatures() const;
+    // Replaces the skill template catalog (see SkillCatalog). Durations and
+    // cooldowns are clamped non-negative at this boundary. Initial config:
+    // call before ticking; a replay must use the same catalog.
+    void SetSkillCatalog(const SkillCatalog& catalog);
+    const SkillCatalog& Skills() const;
     void Tick(float dt);
     // Recompiles the brain script; on failure the previous program is kept
     // (returns false). On success all brains restart on the new program.

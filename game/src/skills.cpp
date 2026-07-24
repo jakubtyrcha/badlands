@@ -1,6 +1,7 @@
 #include "skills.h"
 
 #include <array>
+#include <cstring>
 
 namespace badlands {
 
@@ -8,7 +9,7 @@ namespace {
 
 constexpr std::array<SkillDef, static_cast<size_t>(kSkillCount)> kSkills{{
     {SkillId::Calcify, "Calcify", SkillTriggerKind::MeleeThreatClose,
-     /*trigger_param=*/3.0f, /*cooldown=*/20.0f},
+     /*trigger_param=*/3.0f},
 }};
 
 constexpr bool skills_dense() {
@@ -27,7 +28,7 @@ constexpr std::array<SkillGrant, 1> kGrants{{
 
 }  // namespace
 
-std::span<const SkillDef> SkillCatalog() { return kSkills; }
+std::span<const SkillDef> SkillDefs() { return kSkills; }
 
 const SkillDef& SkillDefOf(SkillId id) {
     const int32_t i = static_cast<int32_t>(id);
@@ -42,6 +43,24 @@ const char* SkillName(int32_t id) {
         return "-";
     }
     return kSkills[static_cast<size_t>(id)].name;
+}
+
+SkillCatalog::SkillCatalog() {
+    SkillSpec& calcify = specs[static_cast<size_t>(SkillId::Calcify)];
+    calcify.activation = SkillActivation::Active;
+    calcify.targeting = SkillTargeting::Direct;
+    calcify.duration_seconds = 0.0f;  // instant to apply; the shield persists until consumed
+    calcify.cooldown_seconds = 20.0f;
+    calcify.effect = "Absorbs the next physical strike, then shatters.";
+}
+
+SkillId SkillIdFromName(const char* name) {
+    for (int32_t i = 0; i < kSkillCount; ++i) {
+        if (std::strcmp(name, kSkills[static_cast<size_t>(i)].name) == 0) {
+            return static_cast<SkillId>(i);
+        }
+    }
+    return SkillId::Count;
 }
 
 std::span<const SkillGrant> SkillGrantTable() { return kGrants; }

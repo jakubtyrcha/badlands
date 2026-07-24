@@ -713,6 +713,17 @@ SimFactors sanitize_factors(SimFactors f) {
     return f;
 }
 
+// The SetSkillCatalog validation boundary, sanitize_factors' sibling: the
+// execution slice divides/waits on these, so negatives are clamped here.
+SkillCatalog sanitize_skill_catalog(SkillCatalog c) {
+    for (int32_t i = 0; i < kSkillCount; ++i) {
+        SkillSpec& s = c.specs[i];
+        clamp_nonneg("skill.duration_seconds", s.duration_seconds);
+        clamp_nonneg("skill.cooldown_seconds", s.cooldown_seconds);
+    }
+    return c;
+}
+
 }  // namespace
 
 void set_factors_of(BadlandsGame& g, const SimFactors& f) { g.factors = sanitize_factors(f); }
@@ -766,6 +777,10 @@ uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_
 }
 void Sim::SetCreatureCatalog(const CreatureCatalog& catalog) { world_->creatures = catalog; }
 const CreatureCatalog& Sim::Creatures() const { return world_->creatures; }
+void Sim::SetSkillCatalog(const SkillCatalog& catalog) {
+    world_->skills = sanitize_skill_catalog(catalog);
+}
+const SkillCatalog& Sim::Skills() const { return world_->skills; }
 void Sim::Tick(float dt) {
     tick_world(*world_, dt);
     // Goal statistics are folded HERE, in the wrapper, from the very rows an

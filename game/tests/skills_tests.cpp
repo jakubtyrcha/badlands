@@ -1,3 +1,4 @@
+#include "badlands_sim.hpp"
 #include "components.h"
 #include "skills.h"
 #include "behaviours/world_view.h"
@@ -8,8 +9,8 @@ using badlands::SkillId;
 using badlands::Skills;
 
 TEST_CASE("skill catalog is dense and named") {
-    REQUIRE(badlands::SkillCatalog().size() == static_cast<size_t>(badlands::kSkillCount));
-    CHECK(badlands::SkillCatalog()[0].id == SkillId::Calcify);
+    REQUIRE(badlands::SkillDefs().size() == static_cast<size_t>(badlands::kSkillCount));
+    CHECK(badlands::SkillDefs()[0].id == SkillId::Calcify);
     CHECK(std::string(badlands::SkillName(0)) == "Calcify");
     CHECK(std::string(badlands::SkillName(-1)) == "-");
     CHECK(std::string(badlands::SkillName(badlands::kSkillCount)) == "-");
@@ -61,4 +62,30 @@ TEST_CASE("Calcify recommends on a close melee threat, gated by cooldown") {
     badlands::SkillContext no_threats{1.0f, nullptr, 0};
     badlands::evaluate_skill_triggers(s, no_threats, rec);
     CHECK_FALSE(rec[0].recommended);
+}
+
+TEST_CASE("skill template catalog carries the compiled Calcify defaults") {
+    badlands::SkillCatalog cat;
+    const badlands::SkillSpec& c =
+        cat.specs[static_cast<size_t>(SkillId::Calcify)];
+    CHECK(c.activation == badlands::SkillActivation::Active);
+    CHECK(c.targeting == badlands::SkillTargeting::Direct);
+    CHECK(c.duration_seconds == 0.0f);
+    CHECK(c.cooldown_seconds == 20.0f);
+    CHECK(c.effect == "Absorbs the next physical strike, then shatters.");
+}
+
+TEST_CASE("SkillIdFromName round-trips catalog names") {
+    CHECK(badlands::SkillIdFromName("Calcify") == SkillId::Calcify);
+    CHECK(badlands::SkillIdFromName("NotASkill") == badlands::SkillId::Count);
+}
+
+TEST_CASE("SetSkillCatalog clamps negative durations and cooldowns") {
+    badlands::Sim sim{badlands::BrainDesc{}};
+    badlands::SkillCatalog cat;
+    cat.specs[0].duration_seconds = -3.0f;
+    cat.specs[0].cooldown_seconds = -20.0f;
+    sim.SetSkillCatalog(cat);
+    CHECK(sim.Skills().specs[0].duration_seconds == 0.0f);
+    CHECK(sim.Skills().specs[0].cooldown_seconds == 0.0f);
 }

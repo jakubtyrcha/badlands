@@ -25,11 +25,10 @@ struct SkillDef {
     const char* name;
     SkillTriggerKind trigger;
     float trigger_param;
-    float cooldown;  // seconds between uses (ticked in slice 2)
 };
 
 // Dense, indexed by SkillId (static_assert-pinned).
-std::span<const SkillDef> SkillCatalog();
+std::span<const SkillDef> SkillDefs();
 // Out-of-range ids resolve to the Calcify row (id 0), mirroring ActivityInfoOf.
 const SkillDef& SkillDefOf(SkillId id);
 
