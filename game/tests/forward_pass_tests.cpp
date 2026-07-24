@@ -585,10 +585,16 @@ UniformData StandardForwardUniforms(bool ambient_on, bool sun_toward_viewer) {
   return u;
 }
 
+// Transmission tint for the translucency uniform override: deliberately
+// green-dominant so the transmitted channel is unambiguous against the
+// grey/white reflection terms.
+constexpr glm::vec3 kTransTint{0.2f, 1.0f, 0.2f};
+
 struct ForwardShadeParams {
   float shadow_clear_depth;  // 1.0 = lit texel, 0.0 = occluding texel
   bool ambient_on;
   bool sun_toward_viewer;
+  float transmission_strength = 0.0f;
 };
 
 // Render one standard_forward quad through the REAL forward-opaque path:
@@ -623,7 +629,12 @@ CpuImage::Color RenderStandardForward(TestGpu& g, MaterialInstanceFactory* fac,
           .uniform_overrides = {
               {"tint", glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)},
               // params.x = alpha cutoff (0 = opaque), params.y = roughness.
-              {"params", glm::vec4(0.0f, 0.9f, 0.0f, 0.0f)}}});
+              {"params", glm::vec4(0.0f, 0.9f, 0.0f, 0.0f)},
+              // rgb = transmission tint, a = translucency strength (0 = off;
+              // the non-translucency opaque factory's shader ignores this
+              // regardless, so existing callers passing the default 0 are
+              // unaffected).
+              {"transmission", glm::vec4(kTransTint, p.transmission_strength)}}});
   REQUIRE(instance != nullptr);
   REQUIRE(instance->DeclaresBindGroup(2));  // the real 6-entry @group(2) path
   instance->SetParameterByName(
@@ -761,6 +772,113 @@ TEST_CASE("standard_forward receives the standard sun + shadow via @group(2)",
   CHECK(MaxChannel(lit_direct) > 40);           // direct sun reaches the surface
   CHECK(MaxChannel(occluded) < 6);              // shadowed -> ~black
   CHECK(MaxChannel(lit_direct) - MaxChannel(occluded) > 30);  // shadow received
+}
+
+// Test C: standard_forward's translucency term (Task 1's evaluateTranslucency,
+// wired through the "transmission" uniform: rgb=tint, a=strength). Model under
+// test: Lo += strength * T * (direct + ambient), direct = shadow * sunColor *
+// backLit * (1+flare) with backLit = max(-dot(N,L),0) (only nonzero when the
+// sun is BEHIND the leaf), ambient = ao * evaluateAmbientSHL2(-N, ambientSH).
+// So: transmission needs back-lighting; `direct` is shadow-gated; `ambient`
+// (the AO/IBL "glare") is only ao-gated, not shadow-gated. Differential
+// (ON @ strength 0.8 vs OFF @ strength 0) assertions are self-validating: a
+// no-op transmission collapses ON==OFF and fails every check below.
+TEST_CASE(
+    "standard_forward translucency: back-lit transmission (shadow-gated "
+    "direct + AO/IBL glare)",
+    "[forward][gpu][shadow]") {
+  TestGpu& g = GetTestGpu();
+  auto fac = BuildStandardForwardFactory(g, /*casts_shadow=*/true,
+                                         /*extra_features=*/{"translucency"});
+  REQUIRE(fac != nullptr);
+
+  wgpu::Buffer vbuf = UploadQuad(g.device);
+  wgpu::Texture albedo =
+      test::CreateRgbaTexture(g.device, g.queue, 1, 1, {200, 200, 200, 255});
+  wgpu::Sampler albedo_sampler = MakeLinearSampler(g.device);
+
+  wgpu::Texture shadow = MakeShadowDepth(g.device);
+  wgpu::TextureView shadow_view = shadow.CreateView();
+  wgpu::Sampler shadow_sampler = MakeComparisonSampler(g.device);
+
+  wgpu::Texture cube = MakeBlackCube(g.device, g.queue);
+  wgpu::TextureView cube_view = CubeView(cube);
+  wgpu::Sampler ibl_sampler = MakeLinearSampler(g.device);
+
+  wgpu::Texture brdf =
+      test::CreateRgbaTexture(g.device, g.queue, 1, 1, {0, 0, 0, 255});
+  wgpu::TextureView brdf_view = brdf.CreateView();
+  wgpu::Sampler brdf_sampler = MakeLinearSampler(g.device);
+
+  auto render = [&](const ForwardShadeParams& p) {
+    return RenderStandardForward(g, fac.get(), vbuf, albedo.CreateView(),
+                                 albedo_sampler, shadow_view, shadow_sampler,
+                                 cube_view, ibl_sampler, brdf_view,
+                                 brdf_sampler, p);
+  };
+
+  // (1) Back-lit glow: back-lit, shadow=lit, ambient=off. ON(0.8) vs OFF(0).
+  CpuImage::Color backlit_on = render({.shadow_clear_depth = 1.0f,
+                                       .ambient_on = false,
+                                       .sun_toward_viewer = false,
+                                       .transmission_strength = 0.8f});
+  CpuImage::Color backlit_off = render({.shadow_clear_depth = 1.0f,
+                                        .ambient_on = false,
+                                        .sun_toward_viewer = false,
+                                        .transmission_strength = 0.0f});
+  INFO("backlit_on rgb = " << (int)backlit_on.r << "," << (int)backlit_on.g
+                           << "," << (int)backlit_on.b);
+  INFO("backlit_off rgb = " << (int)backlit_off.r << "," << (int)backlit_off.g
+                            << "," << (int)backlit_off.b);
+  CHECK(MaxChannel(backlit_on) - MaxChannel(backlit_off) > 20);
+
+  // (2) Front-lit unchanged: sun_toward_viewer=true (front-lit), shadow=lit,
+  // ambient=off. ON vs OFF should be indistinguishable -- no back
+  // transmission when the sun is in front of the leaf.
+  CpuImage::Color frontlit_on = render({.shadow_clear_depth = 1.0f,
+                                        .ambient_on = false,
+                                        .sun_toward_viewer = true,
+                                        .transmission_strength = 0.8f});
+  CpuImage::Color frontlit_off = render({.shadow_clear_depth = 1.0f,
+                                         .ambient_on = false,
+                                         .sun_toward_viewer = true,
+                                         .transmission_strength = 0.0f});
+  INFO("frontlit_on rgb = " << (int)frontlit_on.r << "," << (int)frontlit_on.g
+                            << "," << (int)frontlit_on.b);
+  INFO("frontlit_off rgb = " << (int)frontlit_off.r << ","
+                             << (int)frontlit_off.g << ","
+                             << (int)frontlit_off.b);
+  CHECK(std::abs(MaxChannel(frontlit_on) - MaxChannel(frontlit_off)) < 8);
+
+  // (3) Direct is shadow-gated: back-lit, ambient=off, strength=0.8: shadow
+  // lit vs occluded. No ambient => a shadowed back-lit leaf is ~black.
+  CpuImage::Color backlit_occluded = render({.shadow_clear_depth = 0.0f,
+                                             .ambient_on = false,
+                                             .sun_toward_viewer = false,
+                                             .transmission_strength = 0.8f});
+  INFO("backlit_occluded rgb = " << (int)backlit_occluded.r << ","
+                                 << (int)backlit_occluded.g << ","
+                                 << (int)backlit_occluded.b);
+  CHECK(MaxChannel(backlit_on) - MaxChannel(backlit_occluded) > 20);
+  CHECK(MaxChannel(backlit_occluded) < 6);
+
+  // (4) Glare survives shadow: back-lit, ambient=on, OCCLUDED (shadow=0),
+  // ON(0.8) vs OFF(0). Isolates the SH(-N) transmission glare: it's
+  // ao-gated, not shadow-gated, while the reflection-side ambient term is
+  // identical for ON/OFF and cancels out of the differential.
+  CpuImage::Color glare_on = render({.shadow_clear_depth = 0.0f,
+                                     .ambient_on = true,
+                                     .sun_toward_viewer = false,
+                                     .transmission_strength = 0.8f});
+  CpuImage::Color glare_off = render({.shadow_clear_depth = 0.0f,
+                                      .ambient_on = true,
+                                      .sun_toward_viewer = false,
+                                      .transmission_strength = 0.0f});
+  INFO("glare_on rgb = " << (int)glare_on.r << "," << (int)glare_on.g << ","
+                         << (int)glare_on.b);
+  INFO("glare_off rgb = " << (int)glare_off.r << "," << (int)glare_off.g
+                          << "," << (int)glare_off.b);
+  CHECK((int)glare_on.g - (int)glare_off.g > 10);
 }
 
 namespace {
