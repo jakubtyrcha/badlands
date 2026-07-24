@@ -215,6 +215,60 @@ DeferredMaterial MaterialLibrary::AlphaCutout(wgpu::TextureView albedo,
                           .params = std::move(params)};
 }
 
+DeferredMaterial MaterialLibrary::TranslucentFoliage(
+    wgpu::TextureView albedo, wgpu::Sampler sampler, float cutoff,
+    glm::vec3 tint, glm::vec3 transmission_tint,
+    float transmission_strength) {
+  // Same matte-roughness rationale as AlphaCutout.
+  constexpr float kFoliageRoughness = 0.9f;
+
+  // Same descriptor as AlphaCutout's factory, EXCEPT extra_features enables
+  // the shader's "translucency" @if block: the forward-opaque pass then also
+  // evaluates a transmitted term (sun + sky through the back face) alongside
+  // the standard front-face BRDF. Cached separately from
+  // alpha_cutout_factory_ because it compiles a distinct pipeline variant.
+  if (!translucent_foliage_factory_) {
+    FactoryDescriptor desc;
+    desc.shader_name = "standard_forward";
+    desc.shader_path = "material/standard_forward.wesl";
+    desc.supported_pass_types = {MaterialPassType::kForwardOpaque};
+    desc.supported_geometry_types = {GeometryType::kTexturedMesh};
+    desc.color_formats = {SceneRenderer::kAccumulationFormat};  // HDR
+    desc.depth_format = SceneRenderer::kDepthFormat;
+    desc.depth_write = true;
+    desc.cull_mode = wgpu::CullMode::None;  // double-sided
+    desc.extra_features = {"translucency"};
+    translucent_foliage_factory_ = BuildMaterialInstanceFactory(
+        desc, device_, queue_, pipeline_gen_, /*script_provider=*/nullptr);
+    if (!translucent_foliage_factory_) {
+      spdlog::error(
+          "MaterialLibrary::TranslucentFoliage: failed to build "
+          "standard_forward (translucency) material factory");
+      load_failed_ = true;
+      return DeferredMaterial{};
+    }
+  }
+
+  InstanceParams params;
+  params.texture_overrides.push_back(DefaultTextureView{
+      .param_name = "albedo",
+      .view = albedo,
+      .sampler = sampler,
+      .type = TextureType::k2D,
+  });
+  // Same tint/params fields as AlphaCutout, plus the transmission uniform the
+  // shader's translucency block reads: rgb = transmission_tint, w = strength.
+  params.uniform_overrides = {
+      {"tint", glm::vec4(tint, 1.0f)},
+      {"params", glm::vec4(cutoff, kFoliageRoughness, 0.0f, 0.0f)},
+      {"transmission",
+       glm::vec4(transmission_tint, transmission_strength)},
+  };
+
+  return DeferredMaterial{.factory = translucent_foliage_factory_.get(),
+                          .params = std::move(params)};
+}
+
 MaterialLibrary::TerrainArrays MaterialLibrary::LoadTerrainArrays(
     const std::vector<std::string>& pack_dirs) {
   TerrainArrays result;
