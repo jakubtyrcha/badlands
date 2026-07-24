@@ -25,25 +25,32 @@ TEST_CASE("generate_map: same params -> byte-identical artifacts") {
   p.seed = 7;
   p.resolution = 64;
   p.world_size_m = 256.0f;
+  p.erosion.sim_resolution = 64;
+  p.erosion.iterations = 8;   // keep the test fast
   const auto a = generate_map(p);
   const auto b = generate_map(p);
   REQUIRE(a.bedrock.data == b.bedrock.data);
   REQUIRE(a.biome.data == b.biome.data);
   REQUIRE(a.heightmap.data == b.heightmap.data);
+  REQUIRE(a.water_depth.data == b.water_depth.data);
+  REQUIRE(a.flow.data == b.flow.data);
+  REQUIRE(a.sediment.data == b.sediment.data);
 }
 
-TEST_CASE("generate_map: plains sit at exactly 0 m, everything else above") {
+TEST_CASE("generate_map: lakes are consistent — Lake biome iff standing water") {
   MapGenParams p;
   p.seed = 2;
   p.resolution = 96;
   p.world_size_m = 384.0f;
+  p.erosion.sim_resolution = 96;
+  p.erosion.iterations = 8;
   const auto a = generate_map(p);
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
-    if (a.biome.data[i] == static_cast<uint8_t>(Biome::Plains)) {
-      REQUIRE(a.heightmap.data[i] == 0.0f);
-    } else {
-      REQUIRE(a.heightmap.data[i] > 0.0f);
-    }
+    const bool lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
+    REQUIRE(lake == (a.water_depth.data[i] > 0.0f));
+    REQUIRE(a.water_depth.data[i] >= 0.0f);
+    REQUIRE(a.flow.data[i] > 0.0f);       // every texel drains something
+    REQUIRE(a.sediment.data[i] >= 0.0f);
   }
 }
 
@@ -53,6 +60,10 @@ TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
     p.seed = seed;
     p.resolution = 128;
     p.world_size_m = 512.0f;
+    // Match the sim grid to the output resolution (default sim_resolution=512
+    // would run a much bigger erosion sim per call for no benefit here);
+    // iterations stays at its production default (80).
+    p.erosion.sim_resolution = 128;
     const auto a = generate_map(p);
     const double n = static_cast<double>(a.biome.data.size());
     double plains = 0.0, mountain = 0.0;
@@ -62,8 +73,16 @@ TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
     }
     // Order statistics are exact up to ties (none in float noise), so a tight
     // margin holds for ANY seed — that is the whole point of quantile cutoffs.
+    // Plains gets a much wider margin: erosion is a fixed-iteration "young
+    // terrain" sim, not run to drainage equilibrium, so at iterations=80 a
+    // seed-dependent amount of transiently undrained low ground is still
+    // flooded (measured up to ~10 points of plains fraction across seeds
+    // 1-3, well beyond the ~3% carve_cavities seed fraction alone) and gets
+    // stamped Lake. Mountain is never touched: cavities only ever carve the
+    // BOTTOM lake_frac quantile of bedrock, disjoint from the top-quantile
+    // Mountain cutoff.
     REQUIRE(plains / n ==
-            Catch::Approx(badlands::mapgen::kPlainsFrac).margin(0.02));
+            Catch::Approx(badlands::mapgen::kPlainsFrac).margin(0.15));
     REQUIRE(mountain / n ==
             Catch::Approx(badlands::mapgen::kMountainFrac).margin(0.02));
   }
@@ -116,6 +135,9 @@ TEST_CASE("generate_map: degenerate resolution yields empty artifacts, no throw"
   REQUIRE(a.bedrock.size() == 0);
   REQUIRE(a.biome.size() == 0);
   REQUIRE(a.heightmap.size() == 0);
+  REQUIRE(a.water_depth.size() == 0);
+  REQUIRE(a.flow.size() == 0);
+  REQUIRE(a.sediment.size() == 0);
 }
 
 namespace {

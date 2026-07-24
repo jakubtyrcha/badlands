@@ -508,11 +508,15 @@ add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests 
 
 # badlands_generator_tests: the bedrock+quantile map generator — determinism,
 # structural area fractions, cutoff/classification logic, and
-# resolution-independent world-meter sampling. Pure CPU (FastNoiseLite is
-# header-only), pattern of badlands_fog_generator_tests.
+# resolution-independent world-meter sampling. generate_map now orchestrates
+# the erosion+lakes pipeline, so this target compiles those TUs too. Pure CPU
+# (FastNoiseLite is header-only), pattern of badlands_fog_generator_tests.
 add_executable(badlands_generator_tests
     src/mapgen/generator_tests.cpp
     src/mapgen/generator.cpp
+    src/mapgen/hydrology.cpp
+    src/mapgen/erosion.cpp
+    src/mapgen/detail_filter.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_generator_tests PRIVATE

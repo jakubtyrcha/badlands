@@ -12,6 +12,7 @@
 
 #include <glm/glm.hpp>
 
+#include "mapgen/erosion.hpp"
 #include "mapgen/field2d.hpp"
 
 namespace badlands::mapgen {
@@ -20,17 +21,23 @@ struct MapGenParams {
   uint32_t seed = 1;
   int resolution = 512;         // output grid (texels, square)
   float world_size_m = 512.0f;  // world extent (meters, square)
+  ErosionParams erosion;        // hydraulic erosion + lakes sim (own sim grid)
 };
 
 // Everything one generation produces. `bedrock` is the latent field the biomes
 // were cut from — kept because previews dump it and erosion will consume it.
 struct MapArtifacts {
-  Field2D<float> bedrock;    // latent field (raw; roughly [0, 3.5])
-  Field2D<uint8_t> biome;    // Biome enum values (Plains/Hills/Mountain now)
-  Field2D<float> heightmap;  // world meters — distance-to-plains relief (plains = 0 m datum)
+  Field2D<float> bedrock;      // latent field (raw; roughly [0, 3.5])
+  Field2D<uint8_t> biome;      // Biome enum values, incl. Lake post-erosion
+  Field2D<float> heightmap;    // world meters — eroded + detailed ground surface
+  Field2D<float> water_depth;  // world meters — standing water; surface = heightmap + water_depth
+  Field2D<float> flow;         // drainage area (m^2)
+  Field2D<float> sediment;     // sediment thickness (m)
 };
 
-MapArtifacts generate_map(const MapGenParams& params);
+// sink, if non-null, receives named debug rasters as generation proceeds (see
+// generator.cpp for the exact stage list and emission order).
+MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink = nullptr);
 
 // --- exposed for unit tests (threshold logic without the noise) ---
 
