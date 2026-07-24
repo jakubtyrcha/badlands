@@ -81,3 +81,34 @@ TEST_CASE("GenerateTreeMesh: exact counts for the (continuation-free) Pine") {
   REQUIRE(p.mesh.vertex_count == 6431u);
   REQUIRE(p.mesh.indices.size() == 30096u);
 }
+
+TEST_CASE("TreeCatalog: every predefined setup generates a well-formed mesh") {
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  REQUIRE(catalog.size() == 15u);  // oak/pine/ash/aspen x3 sizes + 3 bushes
+
+  for (const NamedTreeOptions& setup : catalog) {
+    INFO("setup: " << setup.name);
+    REQUIRE_FALSE(setup.name.empty());
+
+    const TexturedMeshResult r = GenerateTreeMesh(setup.options);
+    const auto& m = r.mesh;
+    REQUIRE(m.vertex_count > 0u);
+    REQUIRE(m.vertices.size() == m.vertex_count * kTexturedMeshFloatsPerVertex);
+    REQUIRE_FALSE(m.indices.empty());
+    REQUIRE(m.indices.size() % 3 == 0);
+
+    bool indices_in_range = true;
+    for (uint32_t idx : m.indices)
+      if (idx >= m.vertex_count) indices_in_range = false;
+    REQUIRE(indices_in_range);
+
+    bool all_finite = true;
+    for (float f : m.vertices)
+      if (!std::isfinite(f)) all_finite = false;
+    REQUIRE(all_finite);
+
+    const float height = r.local_bounds.max.y - r.local_bounds.min.y;
+    REQUIRE(std::isfinite(height));
+    REQUIRE(height > 0.0f);
+  }
+}

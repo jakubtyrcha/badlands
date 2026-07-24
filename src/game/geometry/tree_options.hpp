@@ -1,6 +1,8 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <string>
+#include <vector>
 #include <glm/glm.hpp>
 
 namespace badlands {
@@ -68,5 +70,15 @@ inline TreeOptions PinePreset() {
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 1.0f;
   return o;
 }
+
+// A named tree setup for the model-viewer's predefined-tree list.
+struct NamedTreeOptions {
+  std::string name;
+  TreeOptions options;
+};
+
+// The full ez-tree preset catalog (oak/pine/ash/aspen sizes + bushes), ported as
+// TreeOptions. Order is the viewer's list order. Defined in tree_generator.cpp.
+std::vector<NamedTreeOptions> TreeCatalog();
 
 }  // namespace badlands

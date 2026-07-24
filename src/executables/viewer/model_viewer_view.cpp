@@ -56,6 +56,10 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   generator_index_ =
       std::clamp(generator_index_, 0, static_cast<int>(generators_.size()) - 1);
 
+  // No volumetric fog in the model viewer -- it renders soft media blobs behind
+  // the mesh that only make sense in the game world.
+  scene_renderer_->MutableFogConfig().enabled = false;
+
   // The default sun+sky (intensity 3.0 / 1.0) overexposes the scene and washes
   // out thin bark tubes. Dial both back so the floor lands mid-gray and the
   // generated mesh reads with contrast.
@@ -103,8 +107,10 @@ void ModelViewerView::BuildGenerators() {
             },
         .material = mat};
   };
-  generators_.push_back(tree_entry("Tree (Oak)", OakPreset(), bark_mat_));
-  generators_.push_back(tree_entry("Tree (Pine)", PinePreset(), bark_mat_));
+  // One entry per predefined tree setup (the full ez-tree preset catalog).
+  for (const NamedTreeOptions& setup : TreeCatalog()) {
+    generators_.push_back(tree_entry(setup.name.c_str(), setup.options, bark_mat_));
+  }
 }
 
 void ModelViewerView::ApplyEnvironment() {
