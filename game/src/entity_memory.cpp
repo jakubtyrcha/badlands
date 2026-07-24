@@ -15,6 +15,27 @@ namespace badlands {
 
 namespace {
 
+// The shared eviction-candidate scan both upsert_char and upsert_building run
+// when their array is full: the oldest-last_seen_millis entry, ties broken
+// toward the LARGEST key (`key(entry)` -- a slot for chars, an id for
+// buildings). Every POLICY difference in what happens once the candidate is
+// found (chars: drop the newcomer instead if the candidate is visible_now;
+// buildings: no such guard, always evict) stays at the call site below, not
+// here -- this is only the "which index" scan the two share.
+template <typename E, typename KeyFn>
+int32_t find_oldest_index(const E* entries, int32_t count, KeyFn key) {
+    int32_t oldest = 0;
+    for (int32_t i = 1; i < count; ++i) {
+        const E& c = entries[i];
+        const E& best = entries[oldest];
+        if (c.last_seen_millis < best.last_seen_millis ||
+            (c.last_seen_millis == best.last_seen_millis && key(c) > key(best))) {
+            oldest = i;
+        }
+    }
+    return oldest;
+}
+
 // Refreshes (or inserts) `slot`'s entry as seen right now. On a full array,
 // evicts the oldest-seen entry (ties -> largest slot) -- EXCEPT: a visible
 // entry's last_seen_millis == `now`, the maximum possible value this tick, so
@@ -50,15 +71,8 @@ void upsert_char(EntityMemory& mem, uint32_t slot, int32_t archetype, int32_t te
         mem.chars[mem.char_count++] = fresh;
         return;
     }
-    int32_t oldest = 0;
-    for (int32_t i = 1; i < mem.char_count; ++i) {
-        const MemoryChar& c = mem.chars[i];
-        const MemoryChar& best = mem.chars[oldest];
-        if (c.last_seen_millis < best.last_seen_millis ||
-            (c.last_seen_millis == best.last_seen_millis && c.slot > best.slot)) {
-            oldest = i;
-        }
-    }
+    const int32_t oldest = find_oldest_index(mem.chars, mem.char_count,
+                                             [](const MemoryChar& c) { return c.slot; });
     if (mem.chars[oldest].visible_now) {
         return;  // every slot is watching someone right now; drop the newcomer
     }
@@ -114,15 +128,8 @@ void upsert_building(EntityMemory& mem, uint32_t id, int32_t kind, glm::vec2 doo
         mem.buildings[mem.building_count++] = fresh;
         return;
     }
-    int32_t oldest = 0;
-    for (int32_t i = 1; i < mem.building_count; ++i) {
-        const MemoryBuilding& c = mem.buildings[i];
-        const MemoryBuilding& best = mem.buildings[oldest];
-        if (c.last_seen_millis < best.last_seen_millis ||
-            (c.last_seen_millis == best.last_seen_millis && c.id > best.id)) {
-            oldest = i;
-        }
-    }
+    const int32_t oldest = find_oldest_index(mem.buildings, mem.building_count,
+                                             [](const MemoryBuilding& b) { return b.id; });
     mem.buildings[oldest] = fresh;
 }
 
