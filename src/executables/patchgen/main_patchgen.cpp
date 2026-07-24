@@ -32,7 +32,7 @@
 #include <vector>
 
 #include "mapgen/field2d.hpp"
-#include "executables/patchgen/hillshade.hpp"
+#include "mapgen/hillshade.hpp"
 #include "mapgen/outputs.hpp"
 #include "executables/patchgen/script_eval.hpp"
 

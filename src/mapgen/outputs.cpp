@@ -6,13 +6,16 @@
 
 #include "core/util/cpu_image.hpp"
 #include "mapgen/biomes.hpp"
+#include "mapgen/hillshade.hpp"
 
 namespace badlands::mapgen {
 
-void write_preview_images(const std::string& out_dir, const MapArtifacts& a) {
+void write_preview_images(const std::string& out_dir, const MapArtifacts& a,
+                          float texel_m) {
   write_gray_png(a.bedrock, out_dir + "/bedrock.png");
   write_biome_png(a.biome, out_dir + "/biome.png");
   write_gray_png(a.heightmap, out_dir + "/heightmap.png");
+  write_hillshade_png(a.heightmap, out_dir + "/hillshade.png", texel_m);
 }
 
 void write_gray_png(const Field2D<float>& field, const std::string& path,

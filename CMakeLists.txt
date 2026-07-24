@@ -399,11 +399,12 @@ foreach(app viewer game ai_sandbox)
 endforeach()
 
 # badlands_mapgen_lib: the map generator (bedrock+quantile biomes) + fog
-# generator + PNG outputs, as a static lib. Links badlands_engine for CpuImage
-# (PNG write via the `assets` crate).
+# generator + hillshade relief preview + PNG outputs, as a static lib. Links
+# badlands_engine for CpuImage (PNG write via the `assets` crate).
 add_library(badlands_mapgen_lib STATIC
     src/mapgen/fog_generator.cpp
     src/mapgen/generator.cpp
+    src/mapgen/hillshade.cpp
     src/mapgen/outputs.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
 target_include_directories(badlands_mapgen_lib PRIVATE
@@ -415,8 +416,7 @@ target_include_directories(badlands_mapgen_lib PRIVATE
 # world (see scripts/mapgen/biomes/README.md).
 add_executable(badlands_patchgen
     src/executables/patchgen/main_patchgen.cpp
-    src/executables/patchgen/script_eval.cpp
-    src/executables/patchgen/hillshade.cpp)
+    src/executables/patchgen/script_eval.cpp)
 target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib badlands_game_lib)
 target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
 if(APPLE)

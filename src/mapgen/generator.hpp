@@ -27,7 +27,7 @@ struct MapGenParams {
 struct MapArtifacts {
   Field2D<float> bedrock;    // latent field (raw; roughly [0, 3.5])
   Field2D<uint8_t> biome;    // Biome enum values (Plains/Hills/Mountain now)
-  Field2D<float> heightmap;  // world meters — all zeros this phase
+  Field2D<float> heightmap;  // world meters — distance-to-plains relief (plains = 0 m datum)
 };
 
 MapArtifacts generate_map(const MapGenParams& params);
