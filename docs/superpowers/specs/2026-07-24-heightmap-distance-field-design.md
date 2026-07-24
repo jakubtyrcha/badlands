@@ -65,9 +65,9 @@ Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
 ```
 
 `generate_map` calls it after `classify_biomes` and writes
-`heightmap = kSlopeMPerM * d`. `kSlopeMPerM` is a fixed constexpr, tuned by
-eye within 0.10–0.25 (shipped: 0.25 — a texel 200 m inside a mountain complex
-peaks at ~50 m).
+`heightmap = kSlopeMPerM * d`. `kSlopeMPerM` is a fixed constexpr (shipped:
+0.75 per user direction — a texel 200 m inside a mountain complex peaks at
+~150 m; dramatic first-pass relief, to be resculpted by erosion).
 
 ## Integration
 

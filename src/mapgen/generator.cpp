@@ -38,7 +38,7 @@ constexpr float kBeltHi = 0.59f;
 // distance to the nearest plains (NOT per texel — regenerating at another
 // resolution must not change slopes; the units-guard test pins this).
 // Plains sit at the 0 m water datum; the farthest texel is the highest.
-constexpr float kSlopeMPerM = 0.25f;
+constexpr float kSlopeMPerM = 0.75f;
 
 FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
                          FastNoiseLite::FractalType fractal) {
