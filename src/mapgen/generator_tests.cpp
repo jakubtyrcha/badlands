@@ -20,6 +20,7 @@ using badlands::mapgen::compute_cutoffs;
 using badlands::mapgen::distance_to_plains;
 using badlands::mapgen::Field2D;
 using badlands::mapgen::generate_map;
+using badlands::mapgen::kLakeStampMinDepthM;
 using badlands::mapgen::kPadTexels;
 using badlands::mapgen::MapDebugSink;
 using badlands::mapgen::MapGenParams;
@@ -51,10 +52,24 @@ TEST_CASE("generate_map: lakes are consistent — Lake biome iff standing water"
   const auto a = generate_map(p);
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
     const bool lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
-    REQUIRE(lake == (a.water_depth.data[i] > 0.0f));
+    const bool has_water = a.water_depth.data[i] >= kLakeStampMinDepthM;
+    // Lake iff water_depth >= threshold
+    REQUIRE(lake == has_water);
     REQUIRE(a.water_depth.data[i] >= 0.0f);
     REQUIRE(a.flow.data[i] > 0.0f);       // every texel drains something
     REQUIRE(a.sediment.data[i] >= 0.0f);
+  }
+
+  // Explicit boundary checks: no Lake texel has insufficient depth, no non-Lake has excess
+  for (size_t i = 0; i < a.biome.data.size(); ++i) {
+    const bool lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
+    if (lake) {
+      // Every Lake texel must have water_depth >= threshold
+      REQUIRE(a.water_depth.data[i] >= kLakeStampMinDepthM);
+    } else {
+      // Every non-Lake texel must have water_depth < threshold
+      REQUIRE(a.water_depth.data[i] < kLakeStampMinDepthM);
+    }
   }
 }
 
@@ -320,7 +335,7 @@ TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)
   for (float v : a.sediment.data) REQUIRE(v >= 0.0f);
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
     const bool is_lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
-    REQUIRE(is_lake == (a.water_depth.data[i] > 0.0f));
+    REQUIRE(is_lake == (a.water_depth.data[i] >= kLakeStampMinDepthM));
   }
 }
 

@@ -244,7 +244,7 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   if (sink) sink->dump("detail-delta", seq++, delta);
   for (size_t i = 0; i < delta.data.size(); ++i) a.heightmap.data[i] += delta.data[i];
   for (size_t i = 0; i < a.biome.data.size(); ++i)
-    if (a.water_depth.data[i] > 0.0f)
+    if (a.water_depth.data[i] >= kLakeStampMinDepthM)
       a.biome.data[i] = static_cast<uint8_t>(Biome::Lake);
   if (sink) {
     sink->dump("final-height", seq++, a.heightmap);

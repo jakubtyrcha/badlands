@@ -46,6 +46,10 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink = nullp
 inline constexpr float kPlainsFrac = 0.55f;
 inline constexpr float kMountainFrac = 0.12f;
 
+// Lake biome stamping threshold (meters of standing water). Shallow fringes and
+// enclosed wet flats keep their water_depth data but don't read as Lake.
+inline constexpr float kLakeStampMinDepthM = 0.3f;
+
 // Quantile cutoffs over the ACTUAL bedrock raster: t_hills at kPlainsFrac,
 // t_mountain at 1 - kMountainFrac (exact order statistics).
 struct BiomeCutoffs {
