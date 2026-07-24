@@ -330,6 +330,134 @@ TEST_CASE("deposit: G=0 exports everything") {
   REQUIRE(exported == Catch::Approx(16 * 3 * 0.2).epsilon(0.01));
 }
 
+namespace {
+// 4-cell hand-built chain: idx0 dry base <- idx1 (shallow, depth 1) <- idx2
+// (mid, depth 2) <- idx3 (deep, depth 3), all sharing water_level 10. Inflow
+// is injected as idx3's own eroded volume (own eroded volume is bucketed
+// exactly like q_in per the contract) so the whole component's capacity
+// (3+2+1 = 6 m over the 1 m^2 texel) is known up front.
+struct LadderLake {
+  Field2D<float> B, S, area, eroded;
+  FlowRouting r;
+};
+LadderLake make_ladder_lake(float inflow) {
+  LadderLake t{Field2D<float>(4, 1), Field2D<float>(4, 1, 0.0f),
+              Field2D<float>(4, 1, 1.0f), Field2D<float>(4, 1, 0.0f), {}};
+  t.B.at(0, 0) = 0.0f;
+  t.B.at(1, 0) = 9.0f;  // shallow: depth 1
+  t.B.at(2, 0) = 8.0f;  // mid: depth 2
+  t.B.at(3, 0) = 7.0f;  // deep: depth 3
+  t.eroded.at(3, 0) = inflow;
+  t.r.width = 4; t.r.height = 1;
+  t.r.receiver = {-1, 0, 1, 2};
+  t.r.in_lake = {0, 1, 1, 1};
+  t.r.water_level = {0.0f, 10.0f, 10.0f, 10.0f};
+  t.r.order = {0, 1, 2, 3};
+  return t;
+}
+}  // namespace
+
+TEST_CASE("deposit: lake pour is bottom-up — small inflow only reaches the deepest cell") {
+  auto t = make_ladder_lake(0.3f);  // << the 1 m needed to raise deep to mid's level
+  ErosionParams p;
+  const float exported = deposit(t.B, t.S, t.eroded, t.r, t.area, p, 1.0f);
+  REQUIRE(t.S.at(3, 0) == Catch::Approx(0.3f).margin(1e-5));  // deepest gains it all
+  REQUIRE(t.S.at(2, 0) == 0.0f);                              // mid untouched
+  REQUIRE(t.S.at(1, 0) == 0.0f);                              // shallow untouched
+  REQUIRE(exported == Catch::Approx(0.0f).margin(1e-5));      // fully absorbed
+}
+
+TEST_CASE("deposit: lake pour is bottom-up — larger inflow equalizes the two deepest before the shallow gets any") {
+  auto t = make_ladder_lake(2.5f);  // 1 m to reach mid's level, then 2 m more (2 members) to reach 8.75
+  ErosionParams p;
+  const float exported = deposit(t.B, t.S, t.eroded, t.r, t.area, p, 1.0f);
+  REQUIRE(t.S.at(3, 0) == Catch::Approx(1.75f).margin(1e-5));  // deep: 7 -> 8.75
+  REQUIRE(t.S.at(2, 0) == Catch::Approx(0.75f).margin(1e-5));  // mid:  8 -> 8.75
+  REQUIRE(t.S.at(1, 0) == 0.0f);                                // shallow: untouched
+  REQUIRE(exported == Catch::Approx(0.0f).margin(1e-5));
+}
+
+TEST_CASE("deposit: equal-depth lake spreads inflow evenly across members, not concentrated at the entry") {
+  // 5-cell chain: idx0 dry base <- idx1 <- idx2 <- idx3 <- idx4, all four
+  // lake members at the SAME ground height (5) and water_level (10).
+  // Old entry-cell deposition piles sediment up near idx4 (the "entry" the
+  // flux enters the sweep from); the pour must spread it flat instead.
+  Field2D<float> B(5, 1), S(5, 1, 0.0f), area(5, 1, 1.0f), eroded(5, 1, 0.0f);
+  B.at(0, 0) = 0.0f;
+  for (int i = 1; i <= 4; ++i) B.at(i, 0) = 5.0f;
+  eroded.at(4, 0) = 6.0f;  // well under the component's full capacity (4 * 5 = 20)
+  FlowRouting r;
+  r.width = 5; r.height = 1;
+  r.receiver = {-1, 0, 1, 2, 3};
+  r.in_lake = {0, 1, 1, 1, 1};
+  r.water_level = {0.0f, 10.0f, 10.0f, 10.0f, 10.0f};
+  r.order = {0, 1, 2, 3, 4};
+  ErosionParams p;
+  const float exported = deposit(B, S, eroded, r, area, p, 1.0f);
+  float lo = 1e30f, hi = -1e30f;
+  for (int i = 1; i <= 4; ++i) {
+    lo = std::min(lo, S.at(i, 0));
+    hi = std::max(hi, S.at(i, 0));
+  }
+  REQUIRE(hi - lo <= 1e-4f);                            // evenly spread
+  REQUIRE(lo == Catch::Approx(1.5f).margin(1e-4));       // 6 m / 4 members
+  REQUIRE(exported == Catch::Approx(0.0f).margin(1e-4));
+}
+
+namespace {
+// Two 1-cell lake components chained by a dry connector: idx3 (lake A, deep,
+// upstream) -> idx2 (dry connector) -> idx1 (lake B, downstream) -> idx0
+// (dry base). G=0 so no dry cell ever deposits anything itself — isolates
+// the cascade/merge bookkeeping from the ordinary dry rule's arithmetic.
+struct CascadeLakes {
+  Field2D<float> B, S, area, eroded;
+  FlowRouting r;
+};
+CascadeLakes make_cascade() {
+  CascadeLakes t{Field2D<float>(4, 1), Field2D<float>(4, 1, 0.0f),
+                Field2D<float>(4, 1, 1.0f), Field2D<float>(4, 1, 0.0f), {}};
+  t.B.at(0, 0) = 0.0f;    // dry base
+  t.B.at(1, 0) = 7.0f;    // lake B floor (cap to 10 = 3 m)
+  t.B.at(2, 0) = 50.0f;   // dry connector (height irrelevant with G=0)
+  t.B.at(3, 0) = 13.0f;   // lake A floor (cap to 15 = 2 m)
+  t.eroded.at(3, 0) = 10.0f;
+  t.r.width = 4; t.r.height = 1;
+  t.r.receiver = {-1, 0, 1, 2};
+  t.r.in_lake = {0, 1, 0, 1};
+  t.r.water_level = {0.0f, 10.0f, 50.0f, 15.0f};
+  t.r.order = {0, 1, 2, 3};
+  return t;
+}
+}  // namespace
+
+TEST_CASE("deposit: an upstream lake's overflow cascades into a downstream lake before exporting") {
+  auto t = make_cascade();
+  ErosionParams p;
+  p.deposition_g = 0.0f;
+  const float exported = deposit(t.B, t.S, t.eroded, t.r, t.area, p, 1.0f);
+  REQUIRE(t.S.at(3, 0) == Catch::Approx(2.0f).margin(1e-4));  // A: 13 -> 15 (cap)
+  REQUIRE(t.S.at(1, 0) == Catch::Approx(3.0f).margin(1e-4));  // B: 7 -> 10 (cap)
+  REQUIRE(t.S.at(2, 0) == 0.0f);                              // dry pass-through, G=0
+  REQUIRE(t.S.at(0, 0) == 0.0f);
+  REQUIRE(exported == Catch::Approx(5.0f).margin(1e-4));      // 10 - 2 - 3
+  // conservation
+  double dep_total = 0.0;
+  for (float s : t.S.data) dep_total += s;
+  REQUIRE(dep_total + exported == Catch::Approx(10.0).epsilon(1e-6));
+}
+
+TEST_CASE("deposit: lake pour is deterministic across repeated runs") {
+  auto t1 = make_cascade();
+  auto t2 = make_cascade();
+  ErosionParams p;
+  p.deposition_g = 0.0f;
+  const float e1 = deposit(t1.B, t1.S, t1.eroded, t1.r, t1.area, p, 1.0f);
+  const float e2 = deposit(t2.B, t2.S, t2.eroded, t2.r, t2.area, p, 1.0f);
+  REQUIRE(e1 == e2);
+  REQUIRE(t1.S.data == t2.S.data);
+  REQUIRE(t1.B.data == t2.B.data);
+}
+
 TEST_CASE("diffuse: smooths a spike, conserves interior mass, respects layers") {
   Field2D<float> B(9, 9, 10.0f);
   Field2D<float> S(9, 9, 0.0f);

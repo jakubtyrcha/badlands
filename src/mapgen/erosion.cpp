@@ -52,6 +52,41 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
   return s;
 }
 
+namespace {
+
+// 4-connected components of cells for which `flag[i]` is truthy. Components
+// are returned in the order their first (lowest-index) member is discovered
+// by the scan — deterministic. Shared by micro_fill and deposit's lake pour.
+std::vector<std::vector<int>> label_lake_components(int w, int ht,
+                                                     const std::vector<uint8_t>& flag) {
+  std::vector<std::vector<int>> components;
+  std::vector<uint8_t> seen(flag.size(), 0);
+  std::vector<int> stack;
+  for (int start = 0; start < w * ht; ++start) {
+    if (seen[start] || !flag[start]) continue;
+    stack.assign(1, start);
+    seen[start] = 1;
+    std::vector<int> member;
+    while (!stack.empty()) {
+      const int i = stack.back();
+      stack.pop_back();
+      member.push_back(i);
+      const int x = i % w, y = i / w;
+      const int nb[4] = {i - 1, i + 1, i - w, i + w};
+      const bool ok[4] = {x > 0, x < w - 1, y > 0, y < ht - 1};
+      for (int k = 0; k < 4; ++k)
+        if (ok[k] && !seen[nb[k]] && flag[nb[k]]) {
+          seen[nb[k]] = 1;
+          stack.push_back(nb[k]);
+        }
+    }
+    components.push_back(std::move(member));
+  }
+  return components;
+}
+
+}  // namespace
+
 float micro_fill(Field2D<float>& B, Field2D<float>& S,
                  const Field2D<uint8_t>& basin_mask, float texel_m) {
   const int w = B.width, ht = B.height;
@@ -61,29 +96,12 @@ float micro_fill(Field2D<float>& B, Field2D<float>& S,
   const float texel_area = texel_m * texel_m;
 
   double total_filled = 0.0;
-  std::vector<uint8_t> seen(h.size(), 0);
-  std::vector<int> stack, member;
-  for (int start = 0; start < w * ht; ++start) {
-    if (seen[start] || !r.in_lake[start]) continue;
-    stack.assign(1, start);
-    member.clear();
-    seen[start] = 1;
+  for (const auto& member : label_lake_components(w, ht, r.in_lake)) {
     float max_depth = 0.0f;
     bool touches_basin = false;
-    while (!stack.empty()) {
-      const int i = stack.back();
-      stack.pop_back();
-      member.push_back(i);
+    for (const int i : member) {
       max_depth = std::max(max_depth, r.water_level[i] - h.data[i]);
       if (basin_mask.data[i]) touches_basin = true;
-      const int x = i % w, y = i / w;
-      const int nb[4] = {i - 1, i + 1, i - w, i + w};
-      const bool ok[4] = {x > 0, x < w - 1, y > 0, y < ht - 1};
-      for (int k = 0; k < 4; ++k)
-        if (ok[k] && !seen[nb[k]] && r.in_lake[nb[k]]) {
-          seen[nb[k]] = 1;
-          stack.push_back(nb[k]);
-        }
     }
     if (max_depth > kMicroFillCapM || touches_basin) continue;
     for (const int i : member) {
@@ -139,33 +157,177 @@ Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
   return eroded;
 }
 
+namespace {
+
+// Normal dry-cell deposition rule, applied to a volume `vol` (m³) arriving
+// at `i`. Returns the volume actually deposited (m³); `vol` is left with
+// whatever remains to forward.
+double dry_deposit(int i, double vol, Field2D<float>& S, const Field2D<float>& area,
+                   const ErosionParams& p, float texel_area_m2) {
+  if (vol <= 0.0) return 0.0;
+  const double avail_depth = vol / texel_area_m2;
+  const double dep_depth =
+      std::min(avail_depth, static_cast<double>(p.deposition_g) * vol /
+                                 std::max(area.data[i], texel_area_m2));
+  S.data[i] += static_cast<float>(dep_depth);
+  return dep_depth * texel_area_m2;
+}
+
+}  // namespace
+
 float deposit(Field2D<float>& B, Field2D<float>& S,
               const Field2D<float>& eroded_m, const FlowRouting& r,
               const Field2D<float>& area, const ErosionParams& p,
               float texel_area_m2) {
-  std::vector<double> q_in(eroded_m.size(), 0.0);  // m³ arriving from donors
+  const int w = r.width, ht = r.height;
+  const size_t n = eroded_m.size();
+
+  const auto components = label_lake_components(w, ht, r.in_lake);
+  std::vector<int32_t> comp_of(n, -1);
+  for (size_t c = 0; c < components.size(); ++c)
+    for (const int i : components[c]) comp_of[i] = static_cast<int32_t>(c);
+
+  // Position of each cell within r.order (its "pop order"); used both to
+  // find the deepest — last-flooded — member of a component and to sort
+  // components into a deterministic upstream-before-downstream processing
+  // order (see kernel loop below).
+  std::vector<int32_t> pop_index(n, -1);
+  for (size_t k = 0; k < r.order.size(); ++k)
+    pop_index[static_cast<size_t>(r.order[k])] = static_cast<int32_t>(k);
+
+  // Follows a member's receiver chain until it leaves ITS OWN component
+  // (a cell already outside `own_component` is returned immediately, be it
+  // dry or a different lake — the caller's poured/unpoured check decides
+  // what happens next; component labeling is 4-connected but the receiver
+  // graph is 8-connected, so a component's escaping edge could in principle
+  // land diagonally in a different lake rather than on dry ground). Every
+  // component has exactly one such exit: priority-flood claims each
+  // interior cell from exactly one already-visited neighbor, so a
+  // component's internal receiver edges form a tree rooted at its single
+  // spill point.
+  auto find_exit = [&](int start, int32_t own_component) {
+    int i = start;
+    while (comp_of[i] == own_component) {
+      const int32_t rcv = r.receiver[i];
+      if (rcv < 0) break;  // guard: should not happen for a real lake member
+      i = rcv;
+    }
+    return i;
+  };
+
+  std::vector<double> bucket(components.size(), 0.0);
+  std::vector<uint8_t> poured(components.size(), 0);
+
+  std::vector<double> q_in(n, 0.0);  // m³ arriving from donors
   double exported = 0.0;
   for (size_t k = r.order.size(); k-- > 0;) {  // donors before receivers
     const int i = r.order[k];
-    double dep_depth = 0.0;
-    if (q_in[i] > 0.0) {
-      const double avail_depth = q_in[i] / texel_area_m2;
-      if (r.in_lake[i]) {
-        const double headroom = r.water_level[i] - (B.data[i] + S.data[i]);
-        dep_depth = std::clamp(avail_depth, 0.0, std::max(0.0, headroom));
-      } else {
-        dep_depth = std::min(avail_depth,
-                             static_cast<double>(p.deposition_g) * q_in[i] /
-                                 std::max(area.data[i], texel_area_m2));
-      }
-      S.data[i] += static_cast<float>(dep_depth);
+    const int32_t c = comp_of[i];
+    if (c >= 0) {
+      // In_lake: no local deposit, no forwarding along the internal chain —
+      // the flux is bucketed for this cell's component and resolved by the
+      // pour below.
+      bucket[static_cast<size_t>(c)] +=
+          q_in[static_cast<size_t>(i)] + static_cast<double>(eroded_m.data[i]) * texel_area_m2;
+      continue;
     }
+    const double dep = dry_deposit(i, q_in[static_cast<size_t>(i)], S, area, p, texel_area_m2);
     const double q_out =
-        q_in[i] - dep_depth * texel_area_m2 + eroded_m.data[i] * texel_area_m2;
+        q_in[static_cast<size_t>(i)] - dep + eroded_m.data[i] * texel_area_m2;
     const int32_t rcv = r.receiver[i];
-    if (rcv >= 0) q_in[rcv] += q_out;
+    if (rcv >= 0) q_in[static_cast<size_t>(rcv)] += q_out;
     else exported += q_out;
   }
+
+  // Deterministic processing order: descending pop-order of each
+  // component's deepest (last-flooded) member. Flooding proceeds
+  // border-inward, so a downstream lake's members are — generically —
+  // claimed earlier than an upstream lake's; processing the higher
+  // pop-order (upstream) component first guarantees its overflow finds the
+  // downstream component still unpoured when it cascades into it.
+  std::vector<int> proc_order(components.size());
+  for (size_t c = 0; c < components.size(); ++c) proc_order[c] = static_cast<int>(c);
+  std::sort(proc_order.begin(), proc_order.end(), [&](int a, int b) {
+    int32_t deepest_a = components[static_cast<size_t>(a)][0];
+    for (const int i : components[static_cast<size_t>(a)])
+      if (pop_index[i] > pop_index[deepest_a]) deepest_a = i;
+    int32_t deepest_b = components[static_cast<size_t>(b)][0];
+    for (const int i : components[static_cast<size_t>(b)])
+      if (pop_index[i] > pop_index[deepest_b]) deepest_b = i;
+    return pop_index[deepest_a] > pop_index[deepest_b];
+  });
+
+  for (const int c : proc_order) {
+    const auto& member = components[static_cast<size_t>(c)];
+    // Sort bottom-up: lowest ground first, ties by linear index.
+    std::vector<int> sorted_members = member;
+    std::sort(sorted_members.begin(), sorted_members.end(), [&](int a, int b) {
+      const float ha = B.data[a] + S.data[a];
+      const float hb = B.data[b] + S.data[b];
+      if (ha != hb) return ha < hb;
+      return a < b;
+    });
+    double wl_cap = static_cast<double>(r.water_level[sorted_members[0]]);
+    for (const int i : sorted_members)
+      wl_cap = std::min(wl_cap, static_cast<double>(r.water_level[i]));
+
+    double vol = bucket[static_cast<size_t>(c)];
+    double level = static_cast<double>(B.data[sorted_members[0]] + S.data[sorted_members[0]]);
+    size_t pool = 1;
+    for (size_t k = 1; k <= sorted_members.size(); ++k) {
+      const double next_boundary =
+          (k < sorted_members.size())
+              ? std::min(wl_cap, static_cast<double>(B.data[sorted_members[k]] +
+                                                      S.data[sorted_members[k]]))
+              : wl_cap;
+      if (next_boundary > level) {
+        const double need = (next_boundary - level) * static_cast<double>(pool) * texel_area_m2;
+        if (vol >= need) {
+          level = next_boundary;
+          vol -= need;
+        } else {
+          level += vol / (static_cast<double>(pool) * texel_area_m2);
+          vol = 0.0;
+          break;
+        }
+      }
+      if (level >= wl_cap - 1e-9 || vol <= 0.0) break;
+      ++pool;
+    }
+    for (size_t m = 0; m < pool; ++m) {
+      const int i = sorted_members[m];
+      const float ground = B.data[i] + S.data[i];
+      const float add = std::max(0.0f, static_cast<float>(level) - ground);
+      S.data[i] += add;
+    }
+    poured[static_cast<size_t>(c)] = 1;
+
+    double leftover = vol;
+    if (leftover <= 0.0) continue;
+    int cell = find_exit(member[0], static_cast<int32_t>(c));
+    while (leftover > 0.0) {
+      const int32_t cc = comp_of[cell];
+      if (cc >= 0) {
+        if (!poured[static_cast<size_t>(cc)]) {
+          bucket[static_cast<size_t>(cc)] += leftover;
+          leftover = 0.0;
+          break;
+        }
+        cell = find_exit(cell, cc);  // already poured: pass through to its exit
+        continue;
+      }
+      const double dep = dry_deposit(cell, leftover, S, area, p, texel_area_m2);
+      leftover -= dep;
+      const int32_t rcv = r.receiver[cell];
+      if (rcv < 0) {
+        exported += leftover;
+        leftover = 0.0;
+        break;
+      }
+      cell = rcv;
+    }
+  }
+
   return static_cast<float>(exported);
 }
 

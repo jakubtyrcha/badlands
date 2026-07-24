@@ -78,11 +78,26 @@ Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
                       const ErosionParams& p, float texel_m);
 
 // Route this pass's eroded volume downstream (reverse routing order = donors
-// before receivers): each cell receives flux q_in from its donors, deposits
-// dep = min(q_in/texel_area, G * q_in / A)   — dry cells
-// dep = min(q_in/texel_area, water_level - h) — flooded cells (delta fill)
-// into S, then forwards the remainder plus its own erosion. Flux reaching
-// base-level cells (receiver -1) leaves the map. Returns exported volume m³.
+// before receivers).
+// DRY cells: deposit dep = min(q_in/texel_area, G * q_in / A) into S, then
+// forward the remainder plus this cell's own erosion to its receiver. Flux
+// reaching base-level cells (receiver -1) leaves the map.
+// LAKE cells (in_lake): no local deposit and no forwarding during the sweep
+// — instead every in_lake cell's (q_in + own eroded volume) is added to its
+// 4-connected lake component's bucket. After the sweep, components are
+// poured in deterministic order (descending pop-order of each component's
+// deepest — last-flooded — member, so an upstream lake resolves before a
+// downstream lake it may cascade into): each bucket fills bottom-up (lowest
+// ground first, ties by linear index; a shared pool level rises, capped at
+// the component's water level). This replaces per-cell entry deposition,
+// which produced visible delta stripes along D8 chains. Volume left over
+// once the whole component reaches water level walks the component's single
+// outlet down the receiver chain under the normal dry rule; if that walk
+// re-enters an unpoured lake component it merges into that component's
+// bucket (resolved on its own turn), and if it enters an already-poured
+// component it passes through untouched to that component's own outlet.
+// Whatever reaches base level exports. Conservation (deposited + exported ==
+// eroded) holds exactly as before. Returns exported volume m³.
 float deposit(Field2D<float>& B, Field2D<float>& S,
               const Field2D<float>& eroded_m, const FlowRouting& r,
               const Field2D<float>& area, const ErosionParams& p,
