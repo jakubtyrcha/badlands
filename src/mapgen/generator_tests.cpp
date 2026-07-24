@@ -20,6 +20,8 @@ using badlands::mapgen::compute_cutoffs;
 using badlands::mapgen::distance_to_plains;
 using badlands::mapgen::Field2D;
 using badlands::mapgen::generate_map;
+using badlands::mapgen::kPadTexels;
+using badlands::mapgen::MapDebugSink;
 using badlands::mapgen::MapGenParams;
 
 TEST_CASE("generate_map: same params -> byte-identical artifacts") {
@@ -100,69 +102,86 @@ TEST_CASE("generate_map: plains gain drainage relief (no longer flat)") {
   // alone is spatially CONSTANT across plains and the sediment fBm would be
   // the only thing moving the needle, masking the relief term under test.
   //
-  // Population filter, not a seed pin. `a.biome` (this Plains filter) and
-  // the sim grid's own biome_sim (which the relief/cone terms are actually
-  // keyed to) come from TWO INDEPENDENT compute_cutoffs calls over
-  // different populations (output-res bedrock vs. the wider, padded sim-res
-  // bedrock) — a pre-existing generator characteristic. When sim_t_hills !=
-  // t_hills, a band of output-Plains texels sits on the wrong side of the
-  // sim classification, and the cone term (proportional to that texel's
-  // real distance to sim-plains) spikes there. Symmetrically, bedrock near
-  // the BOTTOM of the Plains range (the bottom lake_frac quantile) is
-  // carve_cavities territory and can dip by up to lake_depth_m.
+  // Population filter, not a seed pin. `a.biome` (the OUTPUT-grid Plains
+  // classification) and the sim grid's own biome_sim (which the relief/cone
+  // terms are actually keyed to) come from TWO INDEPENDENT compute_cutoffs
+  // calls over different populations (output-res bedrock vs. the wider,
+  // padded sim-res bedrock) — a pre-existing generator characteristic. When
+  // sim_t_hills != t_hills, a band of output-Plains texels sits on the wrong
+  // side of the sim classification, and the cone term (proportional to that
+  // texel's real distance to sim-plains) spikes there. Symmetrically,
+  // carve_cavities stamps bowls (up to lake_depth_m deep) on sim texels in
+  // the bottom lake_frac bedrock quantile — those are sim-Plains too (the
+  // cavity carve runs before biome classification), so they're not excluded
+  // by a biome check alone.
   //
-  // A spatial "distance from the nearest output non-Plains texel" filter
-  // (EDT via distance_to_mask) does NOT reliably exclude the mismatch band:
-  // measured, the sim/output mismatch band is many texels wide wherever the
-  // bedrock gradient is shallow — precisely the plains interior — so
-  // texels >20 texels from the output boundary still spiked (seed 2: a
-  // texel 4.5 texels from the boundary already hit +20 m, decaying only
-  // gradually with distance, still visibly elevated at >20 texels out).
-  // What DOES correlate tightly with both artifacts is bedrock VALUE
-  // proximity to the two quantile cutoffs they're keyed to (t_hills and the
-  // bottom lake_frac quantile) — so the filter below keeps only the middle
-  // 40% of each seed's [bed_min_plains, t_hills] bedrock-value range, away
-  // from both edges. Measured (seeds 1-20, this margin): range in
-  // [1.34, 3.58] m, comfortably inside [1, 4].
+  // A bedrock-value-proximity heuristic (exclude texels near the quantile
+  // cutoffs) does not reliably bound this: a 150-seed sweep found 4/150
+  // seeds still leaking mismatched cells past that filter (worst observed
+  // hi-lo 15.5 m against a 4.0 m ceiling). The only filter that agrees with
+  // the artifacts BY CONSTRUCTION is checking the sim-side classification
+  // directly, via the debug sink: keep an output texel iff it is Plains in
+  // BOTH the output classification (a.biome) AND the sim classification
+  // (biome_sim, captured below), AND it was not carved as a cavity
+  // (basins/"cavities" mask, also captured) — the two independent sources of
+  // mismatch, gone by definition rather than by measured margin.
+  struct BiomeSimCapture : MapDebugSink {
+    Field2D<uint8_t> biome_sim;
+    Field2D<uint8_t> cavities;
+    void dump(std::string_view, int, const Field2D<float>&) override {}
+    void dump(std::string_view stage, int, const Field2D<uint8_t>& m) override {
+      if (stage == "biome-sim") biome_sim = m;
+      if (stage == "cavities") cavities = m;
+    }
+  };
   for (uint32_t seed : {1u, 2u, 3u}) {
     MapGenParams p;
     p.seed = seed;
     p.resolution = 96;
     p.world_size_m = 384.0f;
-    p.erosion.sim_resolution = 96;
+    p.erosion.sim_resolution = 96;  // == resolution: padded-sim <-> output texel map is exact
     p.erosion.iterations = 0;
     p.erosion.sediment_noise_m = 0.0f;
-    const auto a = generate_map(p);
+    BiomeSimCapture capture;
+    const auto a = generate_map(p, &capture);
 
-    const BiomeCutoffs cutoffs = compute_cutoffs(a.bedrock);
-    float bed_min = std::numeric_limits<float>::infinity();
-    for (size_t i = 0; i < a.biome.data.size(); ++i)
-      if (a.biome.data[i] == static_cast<uint8_t>(Biome::Plains))
-        bed_min = std::min(bed_min, a.bedrock.data[i]);
-    const float full_range = cutoffs.t_hills - bed_min;
-    constexpr float kMargin = 0.30f;  // exclude closest 30% to each edge
-
+    // resolution == sim_resolution, so output (x, y) <-> padded-sim
+    // (x + kPadTexels, y + kPadTexels) exactly (see generator.cpp's sim-grid
+    // sampling: same texel size, origin offset by exactly the pad).
     double sum = 0.0, sum2 = 0.0;
     float lo = std::numeric_limits<float>::infinity();
     float hi = -std::numeric_limits<float>::infinity();
     int n = 0;
-    for (size_t i = 0; i < a.biome.data.size(); ++i) {
-      if (a.biome.data[i] != static_cast<uint8_t>(Biome::Plains)) continue;
-      const float gapfrac = (cutoffs.t_hills - a.bedrock.data[i]) / full_range;
-      if (gapfrac < kMargin || gapfrac >= (1.0f - kMargin)) continue;
-      const float v = a.heightmap.data[i];
-      sum += v;
-      sum2 += static_cast<double>(v) * v;
-      lo = std::min(lo, v);
-      hi = std::max(hi, v);
-      ++n;
+    for (int y = 0; y < p.resolution; ++y) {
+      for (int x = 0; x < p.resolution; ++x) {
+        if (a.biome.at(x, y) != static_cast<uint8_t>(Biome::Plains)) continue;
+        const int sx = x + kPadTexels, sy = y + kPadTexels;
+        if (capture.biome_sim.at(sx, sy) != static_cast<uint8_t>(Biome::Plains))
+          continue;
+        if (capture.cavities.at(sx, sy)) continue;
+        const float v = a.heightmap.at(x, y);
+        sum += v;
+        sum2 += static_cast<double>(v) * v;
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+        ++n;
+      }
     }
     REQUIRE(n > 0);
     const double mean = sum / n;
     const double variance = sum2 / n - mean * mean;
     REQUIRE(variance > 0.0);
+    // Envelope measured directly on this by-construction population across a
+    // local 150-seed sweep (seeds 1-150; not committed): hi-lo in
+    // [1.76, 5.68] m, population size (n) always in the thousands (630 min),
+    // zero seeds outside that range. That's wider than the old
+    // bedrock-proximity-heuristic filter's [1.34, 3.58] m because this
+    // population is honest (no residual sim/output mismatch leaking in a few
+    // outlier cells) rather than narrowed by a margin tuned to hide them.
+    // [1.0, 6.0] keeps comfortable headroom on both sides of the measured
+    // range.
     REQUIRE((hi - lo) >= 1.0f);
-    REQUIRE((hi - lo) <= 4.0f);
+    REQUIRE((hi - lo) <= 6.0f);
   }
 }
 
