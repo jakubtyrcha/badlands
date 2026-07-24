@@ -329,7 +329,8 @@ target_link_libraries(badlands_game_lib PUBLIC noiser_bundle)
 # and badlands_game_lib. Each app grows its own real AppView.
 set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
-    src/executables/viewer/model_viewer_view.cpp)
+    src/executables/viewer/model_viewer_view.cpp
+    src/game/geometry/tree_generator.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
@@ -637,6 +638,20 @@ if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(badlands_tree_tests
+    game/tests/tree_generator_tests.cpp
+    src/game/geometry/tree_generator.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_tree_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_tree_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_tree_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of
