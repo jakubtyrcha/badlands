@@ -274,6 +274,7 @@ add_library(badlands_game_lib STATIC
     game/src/movement.cpp
     game/src/heroes.cpp
     game/src/skills.cpp
+    game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
     game/src/town_brain.cpp
@@ -635,6 +636,8 @@ add_executable(badlands_game_tests
     src/game/visual/world_labels.cpp
     # Skill vocabulary: catalog, grant table, Skills component (game/src/skills.h).
     game/tests/skills_tests.cpp
+    # Hero progression: leveling curve + XP accrual (game/src/progression.h).
+    game/tests/progression_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE

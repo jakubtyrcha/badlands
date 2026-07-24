@@ -136,12 +136,15 @@ struct HeroCharacter {
 //  - behavior: last chosen Behaviour id (inspection only; -1 = unknown)
 //  - inventory: collect-only elixir count in [0, kInventoryCap]
 //  - home_building_id: dedicated home = recruiting guild; -1 once homeless
+//  - level/xp: hero progression; xp counts toward the NEXT level
 struct HeroSimulationState {
     float fatigue = 1.0f;
     float content = 1.0f;
     int32_t behavior = -1;
     int32_t inventory = 0;
     int32_t home_building_id = -1;
+    int32_t level = 1;
+    int32_t xp = 0;
     // Deliberation: while world_millis is below this the hero is standing and
     // thinking. Set by the SetBehavior handler from the command's duration (so
     // the pause is IN the log and a replay reproduces it), and cleared by
