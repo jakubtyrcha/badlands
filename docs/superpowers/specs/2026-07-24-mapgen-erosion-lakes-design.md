@@ -162,7 +162,7 @@ difference gradient of the base; add N octaves of oriented gully noise.
 struct MapDebugSink {
   // stage: e.g. "bedrock", "cone", "cavities", "sediment-init",
   //        "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
-  //        "water", "detail-delta", "final-hillshade", "biome"
+  //        "water", "detail-delta", "final-height", "biome"
   // (the PNG sink renders hillshade for *-height stages; the generator
   // itself dumps raw fields — rendering choices live in outputs.cpp)
   virtual void dump(std::string_view stage, int sequence,
