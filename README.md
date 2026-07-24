@@ -28,8 +28,8 @@ git lfs pull                           # fetch the ~35 MB of LFS binaries
 ## Git LFS
 
 Binary assets live in git LFS. `.gitattributes` tracks `*.bin`, `*.jpg`, `*.jpeg`,
-`*.png`, and `*.ttf` — the fonts under `assets/fonts/` and the PBR material packs
-under `assets/materials/`. New binaries of those types are tracked automatically; a
+`*.png`, `*.ttf`, and `*.wasm` — the fonts under `assets/fonts/`, the PBR material
+packs under `assets/materials/`, and the brain modules under `assets/brains/`. New binaries of those types are tracked automatically; a
 plain `git add` on them stores an LFS pointer, not the blob. Keep large binaries in
 one of those extensions (or add the extension to `.gitattributes`) so the repo stays
 lean.
