@@ -250,7 +250,12 @@ void RenderForwardTransparentMeshes(RenderPassContext& pass, FrameContext& frame
 
     auto& gpu = registry.get<StaticTexturedMeshGpuComponent>(entity);
     pass.SetVertexBuffer(0, gpu.vertex_buffer);
-    pass.Draw(gpu.vertex_count);
+    if (gpu.index_count > 0) {
+      pass.SetIndexBuffer(gpu.index_buffer, wgpu::IndexFormat::Uint32);
+      pass.DrawIndexed(gpu.index_count);
+    } else {
+      pass.Draw(gpu.vertex_count);
+    }
   }
 }
 
