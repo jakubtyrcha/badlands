@@ -192,12 +192,22 @@ struct HostState {
 pub struct BhInstance {
     store: Store<HostState>,
     memory: Memory,
-    // bl_init is intentionally NOT kept here: bh_instantiate calls it once
-    // (as a local TypedFunc) and the ABI never calls it again afterward.
+    // bl_init/bl_view_buf/bl_out_buf are intentionally NOT kept as TypedFuncs
+    // here: bh_instantiate calls each exactly once (bl_init as a local
+    // TypedFunc; bl_view_buf/bl_out_buf likewise, immediately turned into the
+    // cached addresses below) and the ABI never calls any of the three again
+    // afterward -- see view_ptr/out_ptr's own comment for why that is safe.
     bl_spawn: TypedFunc<(i32, i32, i32), ()>,
     bl_despawn: TypedFunc<i32, ()>,
-    bl_view_buf: TypedFunc<(), i32>,
-    bl_out_buf: TypedFunc<(), i32>,
+    // Buffer addresses, resolved ONCE at instantiation (see include/
+    // brainhost.h's contract note): a conforming brain's view/out buffers are
+    // ordinary global variables, so their address is fixed for the whole
+    // instance lifetime and re-querying it every tick is two wasted fueled
+    // guest calls. bh_tick still bounds-checks these against the instance's
+    // CURRENT linear memory size every call -- memory can grow even though an
+    // address baked into a global can't move.
+    view_ptr: i32,
+    out_ptr: i32,
     bl_tick: TypedFunc<i32, i32>,
 }
 
@@ -397,13 +407,26 @@ fn instantiate_inner(
         return ptr::null_mut();
     }
 
+    // Cache the buffer addresses NOW, once, rather than on every bh_tick (see
+    // BhInstance::view_ptr/out_ptr's doc comment for the contract this
+    // relies on: a conforming brain's buffers live at a fixed address for its
+    // whole lifetime, e.g. ordinary global variables).
+    let view_ptr = match call_fueled(&mut store, &bl_view_buf, (), "bl_view_buf") {
+        Ok(p) => p,
+        Err(_) => return ptr::null_mut(),
+    };
+    let out_ptr = match call_fueled(&mut store, &bl_out_buf, (), "bl_out_buf") {
+        Ok(p) => p,
+        Err(_) => return ptr::null_mut(),
+    };
+
     Box::into_raw(Box::new(BhInstance {
         store,
         memory,
         bl_spawn,
         bl_despawn,
-        bl_view_buf,
-        bl_out_buf,
+        view_ptr,
+        out_ptr,
         bl_tick,
     }))
 }
@@ -529,18 +552,14 @@ fn tick_inner(
         return BH_ERR_ARGS;
     }
 
-    let bl_view_buf = inst.bl_view_buf.clone();
-    let bl_out_buf = inst.bl_out_buf.clone();
     let bl_tick = inst.bl_tick.clone();
 
-    let view_ptr = match call_fueled(&mut inst.store, &bl_view_buf, (), "bl_view_buf") {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
-    let out_ptr = match call_fueled(&mut inst.store, &bl_out_buf, (), "bl_out_buf") {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
+    // Cached at bh_instantiate time (BhInstance::view_ptr/out_ptr's doc
+    // comment) -- no bl_view_buf/bl_out_buf guest call here anymore. The
+    // bounds check right below still runs fresh every tick against the
+    // instance's CURRENT memory size, since memory can grow.
+    let view_ptr = inst.view_ptr;
+    let out_ptr = inst.out_ptr;
 
     let mem_len = inst.memory.data(&inst.store).len();
     let Some(view_range) = checked_range(view_ptr, view_len, mem_len) else {
@@ -1007,6 +1026,85 @@ mod tests {
         };
         assert_eq!(rc, BH_ERR_TRAP, "expected BH_ERR_TRAP, got {rc}");
         assert!(!last_error().is_empty());
+
+        unsafe {
+            bh_drop_instance(instance);
+            bh_drop_program(program);
+        }
+    }
+
+    // 11. buffer-address caching (Task 8, finding C): a module whose
+    // bl_view_buf() returns X (a mutable global counter's initial reading) on
+    // the FIRST call and Y on every call after. bh_instantiate resolves
+    // bl_view_buf/bl_out_buf exactly ONCE and bh_tick reuses that cached
+    // address on every subsequent tick (include/brainhost.h's "buffer
+    // addresses are fixed for the instance's lifetime" contract) -- so this
+    // module's ONE honest answer (X) is what bh_instantiate consumes, and
+    // bh_tick never asks again. bl_tick here always reads its view from the
+    // real, fixed address X, exactly like a conforming brain's own
+    // global-variable buffer would; before the caching fix, a second bh_tick
+    // would re-invoke bl_view_buf(), honor the lying Y address for the WRITE,
+    // and this fixed-address READ would see stale bytes instead of the
+    // freshly-copied view.
+    #[test]
+    fn bh_tick_uses_the_buffer_address_cached_at_instantiate_not_a_later_call() {
+        const REAL_ADDR: i32 = 1024; // X: where the "real" buffer lives
+        const LYING_ADDR: i32 = 4096; // Y: what a re-queried bl_view_buf would claim later
+        const OUT_ADDR: i32 = 2048;
+
+        let text = format!(
+            r#"
+            (module
+                (import "env" "bl_log" (func $bl_log (param i32 i32 i32)))
+                (memory (export "memory") 1)
+                (global $calls (mut i32) (i32.const 0))
+                (func (export "bl_abi_version") (result i32) i32.const {ABI_VERSION})
+                (func (export "bl_init") (param i32))
+                (func (export "bl_spawn") (param i32 i32 i32))
+                (func (export "bl_despawn") (param i32))
+                (func (export "bl_view_buf") (result i32)
+                    (local $addr i32)
+                    (local.set $addr
+                        (if (result i32) (i32.eqz (global.get $calls))
+                            (then (i32.const {REAL_ADDR}))
+                            (else (i32.const {LYING_ADDR}))))
+                    (global.set $calls (i32.add (global.get $calls) (i32.const 1)))
+                    (local.get $addr))
+                (func (export "bl_out_buf") (result i32) i32.const {OUT_ADDR})
+                (func (export "bl_tick") (param i32) (result i32)
+                    ;; ALWAYS reads from the real, fixed address -- exactly what a
+                    ;; conforming brain's own global-variable buffer would do;
+                    ;; only this fixture's bl_view_buf itself lies about a
+                    ;; changing address, to prove the host doesn't re-ask it.
+                    (i64.store (i32.const {OUT_ADDR}) (i64.load (i32.const {REAL_ADDR})))
+                    i32.const 0)
+            )
+            "#
+        );
+        let wasm = wat::parse_str(&text).expect("valid wat fixture");
+        let program = load_ok(&wasm);
+
+        // bh_instantiate consumes the module's ONE honest (X) answer here.
+        let instance =
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+        assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
+
+        assert_eq!(unsafe { bh_spawn(instance, 0, 0, 1) }, BH_OK);
+
+        // Several ticks, distinct payloads each time: if bh_tick ever
+        // re-queried bl_view_buf, every tick from the SECOND on would write
+        // its view bytes to the lying Y address instead, and bl_tick's
+        // fixed-address (X) read would keep echoing back tick 1's stale
+        // bytes rather than the current tick's.
+        for view_byte in [0xAAu8, 0xBBu8, 0xCCu8] {
+            let view = [view_byte; 8];
+            let mut out = [0u8; 8];
+            let rc = unsafe {
+                bh_tick(instance, 0, view.as_ptr(), view.len(), out.as_mut_ptr(), out.len())
+            };
+            assert_eq!(rc, BH_OK, "bh_tick failed: {}", last_error());
+            assert_eq!(out, view, "view bytes did not land at the cached address X");
+        }
 
         unsafe {
             bh_drop_instance(instance);

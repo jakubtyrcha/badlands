@@ -17,6 +17,17 @@
 // import makes bh_instantiate fail (the no-WASI guarantee: brains cannot
 // touch the filesystem, clock, env, or network).
 //
+// Buffer addresses are fixed for the instance's lifetime: bh_instantiate
+// queries bl_view_buf()/bl_out_buf() exactly ONCE, right after bl_init, and
+// every bh_tick call reuses those cached addresses instead of re-invoking the
+// two accessors (see bh_tick's doc comment below). A conforming brain must
+// therefore keep its view/out buffers at a fixed address for as long as the
+// instance lives — an ordinary global variable satisfies this trivially;
+// nothing that could relocate (e.g. a fresh heap allocation per tick) does.
+// bh_tick still bounds-checks the cached addresses against the instance's
+// CURRENT linear memory size on every call, since memory itself can grow
+// even though these addresses cannot.
+//
 // Determinism contract enforced by this crate for every instantiated module
 // (see src/crates/brainhost/src/lib.rs for the wasmtime Config that
 // implements it): Cranelift NaN canonicalization on, fuel-metered execution
@@ -96,11 +107,14 @@ BhProgram* bh_load(const uint8_t* wasm_bytes, size_t len);
 // import is rejected — the no-WASI guarantee), resolves+typechecks the
 // required exports (memory + the bl_* functions above), calls
 // bl_abi_version() and rejects a mismatch against `expected_abi_version`,
-// then calls bl_init(world_seed) with a fresh fuel budget. `log_fn` may be
-// NULL to discard bl_log calls; `log_user` is passed through unexamined.
-// Returns NULL on any failure (bh_last_error() carries the detail); the
-// program `p` is left unaffected either way and may be instantiated again.
-// Free the result with bh_drop_instance.
+// then calls bl_init(world_seed) with a fresh fuel budget, then calls
+// bl_view_buf()/bl_out_buf() once each and CACHES the resulting addresses for
+// bh_tick to reuse for the rest of this instance's life (see this header's
+// top comment: buffer addresses are fixed for the instance's lifetime).
+// `log_fn` may be NULL to discard bl_log calls; `log_user` is passed through
+// unexamined. Returns NULL on any failure (bh_last_error() carries the
+// detail); the program `p` is left unaffected either way and may be
+// instantiated again. Free the result with bh_drop_instance.
 BhInstance* bh_instantiate(const BhProgram* p, int32_t expected_abi_version, int32_t world_seed,
                            BhLogFn log_fn, void* log_user);
 
@@ -113,10 +127,13 @@ int32_t bh_spawn(BhInstance* instance, int32_t slot, int32_t cls, int32_t seed);
 int32_t bh_despawn(BhInstance* instance, int32_t slot);
 
 // One sim tick for `slot`: copies `view_len` bytes from `view` into the
-// instance's linear memory starting at bl_view_buf() (both bounds-checked
-// per BH_MAX_BUF_LEN above — see the rule above), calls bl_tick(slot) with a
-// fresh fuel budget, then copies `out_len` bytes back from bl_out_buf() into
-// `out`. `view`/`out` may be NULL only if the matching `_len` is 0. Returns:
+// instance's linear memory starting at the view-buffer address CACHED at
+// bh_instantiate time (both bounds-checked per BH_MAX_BUF_LEN above — see the
+// rule above — against the instance's CURRENT memory size; bl_view_buf() is
+// NOT called again here), calls bl_tick(slot) with a fresh fuel budget, then
+// copies `out_len` bytes back from the cached out-buffer address into `out`
+// (bl_out_buf() likewise not called again). `view`/`out` may be NULL only if
+// the matching `_len` is 0. Returns:
 //   BH_OK           bl_tick returned 0; `out` holds the copied bytes
 //   BH_ERR_TRAP      the guest trapped (not fuel)
 //   BH_ERR_FUEL      fuel exhausted mid-tick
