@@ -116,7 +116,7 @@ TEST_CASE("a rat prefers a hostile unit over a building") {
 }
 
 TEST_CASE("the spawner emits rats from a Sewer, capped at max_alive") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     // Place a Sewer directly (poppable, but PlaceBuilding accepts the kind).
     uint32_t sewer = place(g, BuildingKind::Sewer, 30.0f, 30.0f);

@@ -64,7 +64,7 @@ TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
         {BuildingKind::Scriptorium, HERO_APPRENTICE},
     };
     for (const Guild& gd : guilds) {
-        auto owned = make_world(nullptr);
+        auto owned = make_world(BrainDesc{});
         BadlandsGame* game = owned.get();
         uint32_t bid = place_at(game, gd.kind, -30.0f, 30.0f);
         REQUIRE(bid != UINT32_MAX);
@@ -93,7 +93,7 @@ TEST_CASE("recruit spawns a class-tinted hero on a free tile at each guild") {
 }
 
 TEST_CASE("recruit rejects non-guilds, missing buildings, and a full roster") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     uint32_t tavern = place_at(game, BuildingKind::Tavern, -30.0f, 30.0f);
     REQUIRE(tavern != UINT32_MAX);
@@ -111,7 +111,7 @@ TEST_CASE("recruit rejects non-guilds, missing buildings, and a full roster") {
 }
 
 TEST_CASE("a hero enters a building, hides from Characters()'s drawable set, then reappears") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     uint32_t guild = place_at(game, BuildingKind::Scriptorium, -30.0f, 30.0f);
     uint32_t apo = place_at(game, BuildingKind::Apothecary, 30.0f, 30.0f);
@@ -149,7 +149,7 @@ TEST_CASE("a hero enters a building, hides from Characters()'s drawable set, the
 }
 
 TEST_CASE("buying at an apothecary fills the hero's inventory") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     uint32_t guild = place_at(game, BuildingKind::HuntersCamp, -30.0f, 30.0f);
     uint32_t apo = place_at(game, BuildingKind::Apothecary, 30.0f, 30.0f);
@@ -169,7 +169,7 @@ TEST_CASE("buying at an apothecary fills the hero's inventory") {
 }
 
 TEST_CASE("DESTROY_BUILDING cascades: expel, reassign or orphan, free the footprint") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     uint32_t g1 = place_at(game, BuildingKind::FreeCompanyQuarters, -20.0f, 20.0f);
     REQUIRE(g1 != UINT32_MAX);

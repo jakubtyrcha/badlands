@@ -15,17 +15,14 @@
 
 namespace badlands {
 
-std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source);
 // The single implementation: which brain (BrainDesc, see badlands_sim.hpp)
-// x which world (WorldConfig). Every other overload is a thin forwarder.
+// x which world (WorldConfig). The other overload is a thin forwarder.
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfig& config);
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc);
-std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source,
-                                         const WorldConfig& config);
 
 // A world for tests about movement MECHANICS rather than about terrain:
-// identical to make_world(nullptr) but with terrain_blocking off, so a unit
-// dropped at whatever coordinate is convenient can actually walk there.
+// identical to make_world(BrainDesc{}) but with terrain_blocking off, so a
+// unit dropped at whatever coordinate is convenient can actually walk there.
 //
 // Without it such a test silently asserts something about what the map
 // generator happens to put under those coordinates -- and the map's centre is a

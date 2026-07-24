@@ -101,7 +101,7 @@ TEST_CASE("Flee gates on the flee radius, and beats graze/roam") {
 }
 
 TEST_CASE("a deer bolts from an approaching hero, then settles when it leaves") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     glm::vec2 woods;
     REQUIRE(find_biome(g, mapgen::Biome::Forest, woods));
@@ -159,7 +159,7 @@ bool find_good_home(const BadlandsGame& g, float radius, glm::vec2& out) {
 }
 
 TEST_CASE("a deer wanders within its home range and keeps to good biome") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     glm::vec2 meadow;
     REQUIRE(find_good_home(g, g.factors.critter.roam_radius, meadow));
@@ -194,7 +194,7 @@ TEST_CASE("a deer wanders within its home range and keeps to good biome") {
 }
 
 TEST_CASE("a deer carries no hero components and reports no name") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     glm::vec2 woods;
     REQUIRE(find_biome(g, mapgen::Biome::Forest, woods));

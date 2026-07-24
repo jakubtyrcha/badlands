@@ -107,7 +107,7 @@ TEST_CASE("parity snapping picks the tile-center vs corner lattice") {
 }
 
 TEST_CASE("a fresh game holds only the castle, with starting gold") {
-    auto owned_game = make_world(nullptr);
+    auto owned_game = make_world(BrainDesc{});
     BadlandsGame* game = owned_game.get();
     auto rows = snapshot(game);
     REQUIRE(rows.size() == 1);
@@ -123,7 +123,7 @@ TEST_CASE("a fresh game holds only the castle, with starting gold") {
 }
 
 TEST_CASE("placement respects the castle footprint and margin") {
-    auto owned_game = make_world(nullptr);
+    auto owned_game = make_world(BrainDesc{});
     BadlandsGame* game = owned_game.get();
     // Inside the castle -> invalid, state untouched.
     PlacementDesc on_castle{static_cast<int32_t>(BuildingKind::Watchtower), 0, kCastleSpawnX,
@@ -144,13 +144,13 @@ TEST_CASE("blocking is symmetric regardless of placement order") {
     PlacementDesc a{static_cast<int32_t>(BuildingKind::Watchtower), 0, 20.5f, 20.5f};
     PlacementDesc b{static_cast<int32_t>(BuildingKind::Watchtower), 0, 21.5f, 20.5f};  // adjacent tile
 
-    auto owned_g1 = make_world(nullptr);
+    auto owned_g1 = make_world(BrainDesc{});
 
     BadlandsGame* g1 = owned_g1.get();
     CHECK(place(g1, &a) != UINT32_MAX);
     CHECK(place(g1, &b) == UINT32_MAX);
 
-    auto owned_g2 = make_world(nullptr);
+    auto owned_g2 = make_world(BrainDesc{});
 
     BadlandsGame* g2 = owned_g2.get();
     CHECK(place(g2, &b) != UINT32_MAX);
@@ -243,7 +243,7 @@ TEST_CASE("a diagonal 2x1 overlapping the castle is always rejected") {
         for (int zi = -12; zi <= 12; ++zi) {
             for (int xi = -12; xi <= 12; ++xi) {
                 glm::vec2 cb = snap_center(static_cast<int32_t>(BuildingKind::Tavern), rot, {xi * 0.5f, zi * 0.5f});
-                auto owned_g = make_world(nullptr);  // castle at origin
+                auto owned_g = make_world(BrainDesc{});  // castle at origin
                 BadlandsGame* g = owned_g.get();
                 Footprint fp = make_footprint(static_cast<int32_t>(BuildingKind::Tavern), rot, cb);
                 std::vector<TriRef> foot;
@@ -275,7 +275,7 @@ TEST_CASE("a candidate whose margin covers an existing footprint is rejected") {
                 // footprint, B must be invalid.
                 glm::vec2 cb = snap_center(static_cast<int32_t>(BuildingKind::Watchtower), rot,
                                            {24.0f + xi * 0.5f, 24.0f + zi * 0.5f});
-                auto owned_game = make_world(nullptr);
+                auto owned_game = make_world(BrainDesc{});
                 BadlandsGame* game = owned_game.get();
                 place_building(*game, {static_cast<int32_t>(BuildingKind::Scriptorium), 0, 24.0f, 24.0f}, false);
                 Footprint fp = make_footprint(static_cast<int32_t>(BuildingKind::Watchtower), rot, cb);
@@ -310,13 +310,13 @@ TEST_CASE("blocking is bidirectional: placement order never matters") {
                 PlacementDesc b{static_cast<int32_t>(BuildingKind::Watchtower), rot, 24.0f + xi * 0.5f,
                                     24.0f + zi * 0.5f};
 
-                auto owned_g1 = make_world(nullptr);
+                auto owned_g1 = make_world(BrainDesc{});
 
                 BadlandsGame* g1 = owned_g1.get();
                 place_building(*g1, a, /*player=*/false);
                 bool b_after_a = place_building(*g1, b, false) != UINT32_MAX;
 
-                auto owned_g2 = make_world(nullptr);
+                auto owned_g2 = make_world(BrainDesc{});
 
                 BadlandsGame* g2 = owned_g2.get();
                 place_building(*g2, b, false);
@@ -329,7 +329,7 @@ TEST_CASE("blocking is bidirectional: placement order never matters") {
 }
 
 TEST_CASE("probe reports green for a clear spot and red near a building") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();
     std::vector<GridTriangle> tris;
 
@@ -346,7 +346,7 @@ TEST_CASE("probe reports green for a clear spot and red near a building") {
 }
 
 TEST_CASE("footprints flush to the grid edge are valid; crossing it is not") {
-    auto owned_game = make_world(nullptr);
+    auto owned_game = make_world(BrainDesc{});
     BadlandsGame* game = owned_game.get();
     PlacementDesc flush{static_cast<int32_t>(BuildingKind::Watchtower), 0, 47.5f, 0.5f};  // tile (47,0), x1=48
     CHECK(place(game, &flush) != UINT32_MAX);
@@ -355,7 +355,7 @@ TEST_CASE("footprints flush to the grid edge are valid; crossing it is not") {
 }
 
 TEST_CASE("a normal placement spawns one nearby house") {
-    auto owned_game = make_world(nullptr);
+    auto owned_game = make_world(BrainDesc{});
     BadlandsGame* game = owned_game.get();
     PlacementDesc tavern{static_cast<int32_t>(BuildingKind::Tavern), 0, 12.0f, 0.0f};
     REQUIRE(place(game, &tavern) != UINT32_MAX);
@@ -379,7 +379,7 @@ TEST_CASE("a normal placement spawns one nearby house") {
 }
 
 TEST_CASE("the second normal placement adds a sewer before the house") {
-    auto owned_game = make_world(nullptr);
+    auto owned_game = make_world(BrainDesc{});
     BadlandsGame* game = owned_game.get();
     PlacementDesc t1{static_cast<int32_t>(BuildingKind::Tavern), 0, 12.0f, 0.0f};
     PlacementDesc t2{static_cast<int32_t>(BuildingKind::Apothecary), 0, 12.0f, 12.0f};
@@ -402,7 +402,7 @@ TEST_CASE("the second normal placement adds a sewer before the house") {
 
 TEST_CASE("the urban score drives poppables; watchtowers contribute less") {
     // 4 watchtowers = 12 quarters = 3 houses + 1 sewer.
-    auto owned_towers = make_world(nullptr);
+    auto owned_towers = make_world(BrainDesc{});
     BadlandsGame* towers = owned_towers.get();
     PlacementDesc wt[4] = {
         {static_cast<int32_t>(BuildingKind::Watchtower), 0, -30.5f, -30.5f},
@@ -418,7 +418,7 @@ TEST_CASE("the urban score drives poppables; watchtowers contribute less") {
     CHECK(tw.urban_quarters == 12);
 
     // 4 full-weight buildings = 16 quarters = 4 houses + 2 sewers.
-    auto owned_halls = make_world(nullptr);
+    auto owned_halls = make_world(BrainDesc{});
     BadlandsGame* halls = owned_halls.get();
     PlacementDesc fc[4] = {
         {static_cast<int32_t>(BuildingKind::Scriptorium), 0, -30.0f, -30.0f},
@@ -433,7 +433,7 @@ TEST_CASE("the urban score drives poppables; watchtowers contribute less") {
 }
 
 TEST_CASE("owed poppables stay queued when crowded and drain when space opens") {
-    auto owned_game = make_world(nullptr);
+    auto owned_game = make_world(BrainDesc{});
     BadlandsGame* game = owned_game.get();
     // White-box: owe a house but leave no room anywhere.
     std::fill(game->placement.blocked.begin(), game->placement.blocked.end(), 1);
@@ -451,7 +451,7 @@ TEST_CASE("owed poppables stay queued when crowded and drain when space opens") 
 
 TEST_CASE("identical placement sequences are deterministic") {
     auto run = []() {
-        auto owned_game = make_world(nullptr);
+        auto owned_game = make_world(BrainDesc{});
         BadlandsGame* game = owned_game.get();
         PlacementDesc seq[3] = {
             {static_cast<int32_t>(BuildingKind::Tavern), 0, 14.0f, 0.0f},
@@ -474,7 +474,7 @@ TEST_CASE("identical placement sequences are deterministic") {
 }
 
 TEST_CASE("v0.3 placement helpers: approach tile, nearest-of-kind, occupancy rebuild") {
-    auto owned_game = make_world(nullptr);  // castle id 0 at origin
+    auto owned_game = make_world(BrainDesc{});  // castle id 0 at origin
     BadlandsGame* game = owned_game.get();
     PlacementState& st = game->placement;
 
@@ -535,7 +535,7 @@ TEST_CASE("v0.3 placement helpers: approach tile, nearest-of-kind, occupancy reb
 }
 
 TEST_CASE("Dispatch is the generic action trigger") {
-    auto owned = make_world(nullptr);  // castle id 0
+    auto owned = make_world(BrainDesc{});  // castle id 0
     BadlandsGame* game = owned.get();
 
     SECTION("PLACE_BUILDING round-trips and rejects overlap") {

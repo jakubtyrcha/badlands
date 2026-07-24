@@ -223,7 +223,7 @@ TEST_CASE("v0.3 town host-call surface binds and fires through the resilient bra
         }
         0.0
     )";
-    auto owned = badlands::make_world(script);
+    auto owned = badlands::make_world(BrainDesc{.noiser_source = script});
     BadlandsGame* game = owned.get();
     badlands::CharacterDesc d{};
     d.pos_x = 20.0f;
@@ -269,7 +269,7 @@ TEST_CASE("real hero.noiser behaviour framework loads and runs clean") {
     buffer << file.rdbuf();
     std::string source = buffer.str();
 
-    auto owned = badlands::make_world(source.c_str());
+    auto owned = badlands::make_world(BrainDesc{.noiser_source = source.c_str()});
 
     BadlandsGame* game = owned.get();
     // A lone home-less hero with no enemy and no town buildings exercises the
@@ -320,7 +320,7 @@ TEST_CASE("noiser: a Critter safely runs hero.noiser (no crash, no bug)") {
     buffer << file.rdbuf();
     std::string source = buffer.str();
 
-    auto owned = badlands::make_world(source.c_str());
+    auto owned = badlands::make_world(BrainDesc{.noiser_source = source.c_str()});
     BadlandsGame* game = owned.get();
 
     badlands::CharacterDesc d{};
@@ -368,7 +368,7 @@ TEST_CASE("perceive_class binds and echoes the hero class") {
         }
         0.0
     )";
-    auto owned = badlands::make_world(script);
+    auto owned = badlands::make_world(BrainDesc{.noiser_source = script});
     BadlandsGame* game = owned.get();
     badlands::CharacterDesc d{};
     d.pos_x = 4.0f;
@@ -415,7 +415,7 @@ TEST_CASE("perceive_needs binds and echoes the hero's needs + clock") {
         }
         0.0
     )";
-    auto game_owned = make_world(script);
+    auto game_owned = make_world(BrainDesc{.noiser_source = script});
     BadlandsGame* game = game_owned.get();
     CharacterDesc d = MercenaryDesc(4.0f, 4.0f);
     uint32_t hid = spawn_into(*game, d);
@@ -460,7 +460,7 @@ TEST_CASE("hero.noiser sends a tired hero home (parity with the C++ town brain)"
     buffer << file.rdbuf();
     std::string source = buffer.str();
 
-    auto game_owned = make_world(source.c_str());
+    auto game_owned = make_world(BrainDesc{.noiser_source = source.c_str()});
     BadlandsGame* game = game_owned.get();
     Action place{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,
                      static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};

@@ -705,10 +705,11 @@ struct NavPathResult {
     bool reachable = false;
 };
 
-// Which brain(s) drive spawned entities. noiser_source: noiser script source
-// (see the old Sim(const char*) ctor -- kept working, forwarding here with
-// noiser_source set and wasm_bytes null). wasm_bytes/wasm_len: a compiled
-// brain wasm module (game/src/wasm_brain.h), hero-only -- see the think loop's
+// Which brain(s) drive spawned entities. noiser_source: noiser script source,
+// or nullptr for mock-brains-only. A script that fails to compile is
+// recorded as a noiser bug and the sim falls back to mock brains.
+// wasm_bytes/wasm_len: a compiled brain wasm module (game/src/wasm_brain.h),
+// hero-only -- see the think loop's
 // dispatch order in sim.cpp for how the two paths compose (wasm, when
 // loaded, takes the no-enemy tick for BrainKind::Town entities outright;
 // combat is a host pre-empt on both paths; noiser/mock still drive every
@@ -723,20 +724,14 @@ struct BrainDesc {
 // ---- the sim ---------------------------------------------------------------
 class Sim {
    public:
-    // brain_script_source: noiser source driving spawned entities' brains, or
-    // nullptr for mock-brains-only. A script that fails to compile is recorded
-    // as a noiser bug and the sim falls back to mock brains.
-    explicit Sim(const char* brain_script_source = nullptr);
-    // BrainDesc overload: also (or instead) loads a brain wasm module.
+    // BrainDesc: which brain(s) drive spawned entities (see BrainDesc above).
     // wasm_bytes provided but failing to compile/instantiate is FATAL (crash-
     // and-error, not a fallback -- see WasmBrainRuntime::create's doc comment,
     // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (mock
-    // drives every hero, same as brain_script_source == nullptr above).
+    // drives every hero, same as noiser_source == nullptr).
     explicit Sim(const BrainDesc& brain_desc);
-    // Build a world from an explicit config (the arena uses this: flat, no colony,
-    // confined edges).
-    Sim(const WorldConfig& config, const char* brain_script_source);
-    // The composing form: which world x which brain. The other ctors forward
+    // The composing form: an explicit world config (the arena uses this:
+    // flat, no colony, confined edges) x which brain. The other ctor forwards
     // here conceptually (single make_world implementation, sim.cpp).
     Sim(const WorldConfig& config, const BrainDesc& brain_desc);
     ~Sim();

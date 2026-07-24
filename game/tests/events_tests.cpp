@@ -13,6 +13,7 @@
 
 #include <vector>
 
+using badlands::BrainDesc;
 using badlands::CharacterDesc;
 using badlands::GameEvent;
 using badlands::GameEventKind;
@@ -25,7 +26,7 @@ constexpr float kTickDt = 1.0f / 30.0f;
 // Merc (team 0) faces Goblin (team 1) at ~1u apart -- inside both attack ranges,
 // so they trade blows as their cooldowns and to-hit rolls allow.
 struct Duel {
-    Sim sim{nullptr};  // mock brains
+    Sim sim{BrainDesc{}};  // mock brains
     uint32_t merc, gob;
     Duel() {
         CharacterDesc m = badlands::MercenaryDesc(0.0f, 0.0f);

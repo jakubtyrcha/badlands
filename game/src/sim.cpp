@@ -174,22 +174,13 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
     return game;
 }
 
-// Thin forwarders onto the (BrainDesc, WorldConfig) implementation above.
+// Thin forwarder onto the (BrainDesc, WorldConfig) implementation above.
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
     return make_world(desc, WorldConfig{});
 }
 
-std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
-    return make_world(BrainDesc{.noiser_source = brain_script_source}, WorldConfig{});
-}
-
-std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source,
-                                         const WorldConfig& config) {
-    return make_world(BrainDesc{.noiser_source = brain_script_source}, config);
-}
-
 std::unique_ptr<BadlandsGame> make_flat_world() {
-    auto game = make_world(nullptr);
+    auto game = make_world(BrainDesc{});
     game->terrain_blocking = false;
     return game;
 }
@@ -681,10 +672,7 @@ CharacterDesc GoblinDesc(float pos_x, float pos_z) {
 
 // ---- Sim methods -----------------------------------------------------------
 
-Sim::Sim(const char* brain_script_source) : world_(make_world(brain_script_source)) {}
 Sim::Sim(const BrainDesc& brain_desc) : world_(make_world(brain_desc)) {}
-Sim::Sim(const WorldConfig& config, const char* brain_script_source)
-    : world_(make_world(brain_script_source, config)) {}
 Sim::Sim(const WorldConfig& config, const BrainDesc& brain_desc)
     : world_(make_world(brain_desc, config)) {}
 Sim::~Sim() = default;

@@ -46,7 +46,7 @@ bool log_has(const BadlandsGame& g, CommandKind kind) {
 }  // namespace
 
 TEST_CASE("a monster spawn carries no hero components") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     CharacterDesc goblin = GoblinDesc(5.0f, 5.0f);
     uint32_t slot = spawn_into(g, goblin);
@@ -63,7 +63,7 @@ TEST_CASE("a monster spawn carries no hero components") {
 }
 
 TEST_CASE("a hero spawn carries the full hero recipe") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     CharacterDesc merc = MercenaryDesc(-5.0f, -5.0f);
     uint32_t slot = spawn_into(g, merc);
@@ -81,7 +81,7 @@ TEST_CASE("an enemy never runs the townsfolk errand loop") {
     // (A monster DOES seek a building to attack -- that is its own brain, tested
     // in rat_tests -- so the invariant here is specifically "no shopping", not
     // "no movement".)
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     REQUIRE(place(g, BuildingKind::Apothecary, 14.0f, 8.0f) != UINT32_MAX);
     REQUIRE(place(g, BuildingKind::Tavern, 14.0f, -8.0f) != UINT32_MAX);
@@ -100,7 +100,7 @@ TEST_CASE("an enemy never runs the townsfolk errand loop") {
 
 TEST_CASE("recruited heroes still run the town loop") {
     // The other side of the guard: the recipe must not silence actual townsfolk.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     uint32_t guild = place(g, BuildingKind::FreeCompanyQuarters, -14.0f, -8.0f);
     REQUIRE(guild != UINT32_MAX);
@@ -119,7 +119,7 @@ TEST_CASE("recruited heroes still run the town loop") {
 TEST_CASE("non-heroes report an empty name through the snapshot") {
     // badlands_sim.hpp documents name as "" for non-heroes; under the old recipe
     // every entity was named, so that contract was unachievable.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     CharacterDesc goblin = GoblinDesc(3.0f, 3.0f);
     spawn_into(g, goblin);
@@ -136,7 +136,7 @@ TEST_CASE("the sim owns a biome map and queries it in world coordinates") {
     // Deer roam Forest/Plains and hunters seek Forest, so the sim -- not just
     // the renderer -- needs the biome field. The world<->map offset lives only
     // in biome_at/height_at.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     REQUIRE_FALSE(g.map.empty());
 

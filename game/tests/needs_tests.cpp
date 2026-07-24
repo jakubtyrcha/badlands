@@ -32,7 +32,7 @@ uint32_t recruit_at(BadlandsGame* g, uint32_t bid) {
 }  // namespace
 
 TEST_CASE("reserves drain each tick and clamp at 0") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
     uint32_t slot = spawn_into(*g, d);
@@ -58,7 +58,7 @@ TEST_CASE("reserves drain each tick and clamp at 0") {
 }
 
 TEST_CASE("the drain rate is expressed in in-game hours and is live") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     uint32_t slot = spawn_into(*g, MercenaryDesc(0.0f, 0.0f));
     auto& sim = g->registry.get<HeroSimulationState>(g->slots[slot]);
@@ -85,7 +85,7 @@ TEST_CASE("the drain rate is expressed in in-game hours and is live") {
 }
 
 TEST_CASE("resting at home refills fatigue over time, not instantly") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
@@ -110,7 +110,7 @@ TEST_CASE("resting at home refills fatigue over time, not instantly") {
 }
 
 TEST_CASE("a hero leaves home exactly when rested, not on a timer") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
@@ -137,7 +137,7 @@ TEST_CASE("a hero leaves home exactly when rested, not on a timer") {
 }
 
 TEST_CASE("the tavern refills content over time and releases when full") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t tavern = place(g, static_cast<int32_t>(BuildingKind::Tavern), 20.0f, 20.0f);
@@ -165,7 +165,7 @@ TEST_CASE("the tavern refills content over time and releases when full") {
 }
 
 TEST_CASE("a hidden hero refills only the reserve it went in for") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
     uint32_t slot = spawn_into(*g, d);
@@ -183,7 +183,7 @@ TEST_CASE("a hidden hero refills only the reserve it went in for") {
 }
 
 TEST_CASE("a rested hero heads home once fatigue falls past the seek bar") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();  // C++ brain (no noiser)
     uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
@@ -213,7 +213,7 @@ TEST_CASE("a rested hero heads home once fatigue falls past the seek bar") {
 }
 
 TEST_CASE("an under-entertained hero heads to the tavern by day") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t tavern = place(g, static_cast<int32_t>(BuildingKind::Tavern), 20.0f, 20.0f);
@@ -245,7 +245,7 @@ TEST_CASE("the seek threshold is data, and urgency (not a tier) decides") {
     // Policy is data: the same reserve produces a different decision when the
     // threshold moves. This is what makes assets/creatures/factors.json
     // meaningful.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     CHECK(g.factors.hero.fatigue_seek == Catch::Approx(0.55f));
 

@@ -125,7 +125,7 @@ TEST_CASE("facing equals the normalized displacement actually moved") {
 }
 
 TEST_CASE("an idle (arrived) unit keeps its last facing") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     uint32_t hero = spawn_hero(g, {0.0f, 0.0f});
     entt::entity e = g.slots[hero];
@@ -141,7 +141,7 @@ TEST_CASE("an idle (arrived) unit keeps its last facing") {
 }
 
 TEST_CASE("the snapshot exposes the hero's vision cone") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     uint32_t hero = spawn_hero(g, {0.0f, 0.0f});
     const CharacterState r = row_for(characters_of(g), hero);
@@ -150,7 +150,7 @@ TEST_CASE("the snapshot exposes the hero's vision cone") {
 }
 
 TEST_CASE("moving a vision source reveals fresh terrain (fog-of-war follows movement)") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     configure(g);
 

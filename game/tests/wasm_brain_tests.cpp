@@ -167,7 +167,7 @@ TEST_CASE("wasm: combat pre-empt still owns enemies") {
 // --- F.4: apply_brain_decision, unit-tested directly (no wasm) -------------
 
 TEST_CASE("apply_brain_decision: commit writes SetBehavior + MoveTo to the log") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -185,7 +185,7 @@ TEST_CASE("apply_brain_decision: commit writes SetBehavior + MoveTo to the log")
 }
 
 TEST_CASE("apply_brain_decision: pause-start writes Think + a single hold MoveTo") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -204,7 +204,7 @@ TEST_CASE("apply_brain_decision: pause-start writes Think + a single hold MoveTo
 }
 
 TEST_CASE("apply_brain_decision: pause-continue enqueues nothing") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -218,7 +218,7 @@ TEST_CASE("apply_brain_decision: pause-continue enqueues nothing") {
 }
 
 TEST_CASE("apply_brain_decision: follow_up_on_arrival gates on distance to the goal") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -281,7 +281,7 @@ TEST_CASE("apply_brain_decision: follow_up_on_arrival gates on distance to the g
 // value.
 
 TEST_CASE("decode_decision: a non-finite goal is rejected, not decoded") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -307,7 +307,7 @@ TEST_CASE("decode_decision: a non-finite goal is rejected, not decoded") {
 // wire.
 
 TEST_CASE("decode_decision: pause_kind outside {0,1,2} is rejected") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -318,7 +318,7 @@ TEST_CASE("decode_decision: pause_kind outside {0,1,2} is rejected") {
 }
 
 TEST_CASE("decode_decision: pause_kind==1 (start) with duration <= 0 is rejected") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -331,7 +331,7 @@ TEST_CASE("decode_decision: pause_kind==1 (start) with duration <= 0 is rejected
 
 TEST_CASE("decode_decision: pause_kind==1 (start) with duration beyond think_max_millis is "
          "rejected") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 
@@ -347,7 +347,7 @@ TEST_CASE("decode_decision: pause_kind==1 (start) with duration beyond think_max
 }
 
 TEST_CASE("decode_decision: pause_kind==2 (continue) with nonzero duration is rejected") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
 

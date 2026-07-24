@@ -252,7 +252,7 @@ TEST_CASE("contract: equal-distance threats break ties by slot, not arrival") {
 // reproduce it), and that a thinking hero really does stand still.
 
 TEST_CASE("a hero pauses in the sim, holds position, and resumes") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
 
     Action place_guild{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,

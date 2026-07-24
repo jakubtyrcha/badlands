@@ -114,7 +114,7 @@ class AiSandboxView : public AppView {
   bool scenario_load_error_ = false;  // a requested scenario failed to parse
 
   // Owns the sim (RAII; no manual destroy). Seeded in SeedTown.
-  badlands::Sim sim_{nullptr};
+  badlands::Sim sim_{badlands::BrainDesc{}};
 
   // Time model (see sim_clock.hpp): real dt * speed -> sim seconds; the sim
   // runs fixed game_ticks up to TickTarget(), so the speed control accelerates

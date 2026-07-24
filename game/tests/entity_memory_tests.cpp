@@ -136,7 +136,7 @@ std::vector<MemoryBuilding> sorted_buildings(const EntityMemory& mem) {
 }  // namespace
 
 TEST_CASE("two characters within vision radius remember each other after one tick") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 14.0f));
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 14.0f));
     make_observer(*g, a);
@@ -159,7 +159,7 @@ TEST_CASE("two characters within vision radius remember each other after one tic
 }
 
 TEST_CASE("characters outside vision radius are not remembered") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 10.0f));
     make_observer(*g, a);
     spawn_into(*g, scout(100.0f, 100.0f, 10.0f));
@@ -170,7 +170,7 @@ TEST_CASE("characters outside vision radius are not remembered") {
 }
 
 TEST_CASE("a missing or zero-radius Vision means seeing nothing this tick") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 0.0f));  // radius 0
     make_observer(*g, a);
     spawn_into(*g, scout(1.0f, 0.0f, 14.0f));
@@ -180,7 +180,7 @@ TEST_CASE("a missing or zero-radius Vision means seeing nothing this tick") {
 
 TEST_CASE("persistence: a teleported target is remembered stale, forgotten exactly one tick past "
          "the TTL boundary") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     // Tick-aligned (a multiple of kMillisPerTick) so the "age == ttl" boundary
     // below lands on an exact tick rather than being straddled by one (the
     // 10s compiled default, 10000, is not a multiple of the 33ms tick).
@@ -226,7 +226,7 @@ TEST_CASE("persistence: a teleported target is remembered stale, forgotten exact
 }
 
 TEST_CASE("capacity: a 17th simultaneous sighting is dropped, not an incumbent") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t obs = spawn_into(*g, scout(0.0f, 0.0f, 100.0f));
     make_observer(*g, obs);
     std::vector<uint32_t> targets;
@@ -246,7 +246,7 @@ TEST_CASE("capacity: a 17th simultaneous sighting is dropped, not an incumbent")
 }
 
 TEST_CASE("capacity: a stale incumbent is evicted for a new sighting (tie -> largest slot)") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     uint32_t obs = spawn_into(*g, scout(0.0f, 0.0f, 100.0f));
     make_observer(*g, obs);
     std::vector<uint32_t> targets;
@@ -307,7 +307,7 @@ TEST_CASE("capacity: a stale incumbent is evicted for a new sighting (tie -> lar
 }
 
 TEST_CASE("a recruited hero starts knowing its home and the castle") {
-    auto owned = make_world(nullptr);  // prebuilds the Castle (id 0) at kCastleSpawn
+    auto owned = make_world(BrainDesc{});  // prebuilds the Castle (id 0) at kCastleSpawn
     BadlandsGame* g = owned.get();
     uint32_t guild = place_at(g, BuildingKind::FreeCompanyQuarters, -30.0f, 30.0f);
     REQUIRE(guild != UINT32_MAX);
@@ -327,7 +327,7 @@ TEST_CASE("a recruited hero starts knowing its home and the castle") {
 }
 
 TEST_CASE("is_home is sticky: a non-hero's home never flips false when re-observed") {
-    auto owned = make_world(nullptr);  // prebuilds the Castle (id 0)
+    auto owned = make_world(BrainDesc{});  // prebuilds the Castle (id 0)
     BadlandsGame* g = owned.get();
 
     // A tax collector homed at the Castle (mirrors economy.cpp's
@@ -374,7 +374,7 @@ TEST_CASE("is_home is sticky: a non-hero's home never flips false when re-observ
 }
 
 TEST_CASE("is_home is LIVE for heroes: rehoming flips the old home false, the new home true") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* g = owned.get();
     uint32_t a = place_at(g, BuildingKind::FreeCompanyQuarters, -30.0f, 30.0f);
     uint32_t b = place_at(g, BuildingKind::FreeCompanyQuarters, 30.0f, 30.0f);
@@ -431,7 +431,7 @@ TEST_CASE("a spawned critter and a spawned monster have no EntityMemory componen
     // EntityMemory at all -- update_entity_memory's observer loop is O(heroes
     // x N) rather than O(N^2) as a result. A critter or monster gets no
     // component whatsoever, not merely an empty one.
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
 
     CharacterDesc deer{};
     deer.archetype = Archetype::Critter;
@@ -448,7 +448,7 @@ TEST_CASE("a spawned critter and a spawned monster have no EntityMemory componen
 }
 
 TEST_CASE("building sighting: recorded when seen, alive flips false when destroyed in sight") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* g = owned.get();
     uint32_t obs = spawn_into(*g, scout(-40.0f, -40.0f, 12.0f));  // far from the castle (0,54)
     make_observer(*g, obs);
@@ -470,7 +470,7 @@ TEST_CASE("building sighting: recorded when seen, alive flips false when destroy
 }
 
 TEST_CASE("building sighting: destroyed out of sight keeps the memory's stale alive=true") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame* g = owned.get();
     uint32_t obs = spawn_into(*g, scout(-40.0f, -40.0f, 12.0f));
     make_observer(*g, obs);
@@ -493,8 +493,8 @@ TEST_CASE("building sighting: destroyed out of sight keeps the memory's stale al
 }
 
 TEST_CASE("EntityMemory is deterministic: two identical runs match after sorting") {
-    auto a_owned = make_world(nullptr);
-    auto b_owned = make_world(nullptr);
+    auto a_owned = make_world(BrainDesc{});
+    auto b_owned = make_world(BrainDesc{});
     BadlandsGame* a = a_owned.get();
     BadlandsGame* b = b_owned.get();
     seed_town(a);
@@ -545,7 +545,7 @@ TEST_CASE("EntityMemory is deterministic: two identical runs match after sorting
 }
 
 TEST_CASE("a smaller memory_ttl_millis factor forgets a stale sighting sooner") {
-    auto g = make_world(nullptr);
+    auto g = make_world(BrainDesc{});
     // Sim::SetFactors (sim.cpp) is exactly `game.factors = f`; mutating the
     // field directly here is the same operation, consistent with this
     // suite's BadlandsGame*-fixture style (make_world/tick_world, not the

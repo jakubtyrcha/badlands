@@ -52,7 +52,7 @@ uint32_t spawn_hunter(BadlandsGame& g, glm::vec2 pos) {
 }  // namespace
 
 TEST_CASE("recruiting at a Hunter's Camp yields a Hunter") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     uint32_t camp = place(g, BuildingKind::HuntersCamp, -20.0f, 20.0f);
     REQUIRE(camp != UINT32_MAX);
@@ -89,7 +89,7 @@ TEST_CASE("Hunt scores only with prey, and shoots once in range") {
 }
 
 TEST_CASE("only a hunter hunts; a mercenary ignores deer") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     uint32_t deer = spawn_deer(g, {8.0f, 0.0f});
     entt::entity de = g.slots[deer];
@@ -104,7 +104,7 @@ TEST_CASE("only a hunter hunts; a mercenary ignores deer") {
 }
 
 TEST_CASE("a hunter runs down a deer and kills it") {
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     // On the plains: the map origin is the central lake, which terrain blocking
     // makes impassable, so a chase staged there would never close.
@@ -133,7 +133,7 @@ TEST_CASE("a hunter hunts while it can, and rests once spent") {
     // weight -- the hunter keeps at the job until fatigue is low enough that
     // rest's urgency overtakes Hunt's flat pull. Recruit at a camp so it has a
     // home to return to.
-    auto owned = make_world(nullptr);
+    auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     uint32_t camp = place(g, BuildingKind::HuntersCamp, -20.0f, 20.0f);
     REQUIRE(camp != UINT32_MAX);

@@ -200,7 +200,7 @@ void setup_variety_fixture(BadlandsGame& g) {
 TEST_CASE("twin brain: wasm hero decisions match the C++ reference command-for-command") {
     std::vector<uint8_t> bytes = read_hero_wasm();
 
-    auto mock_owned = make_world(nullptr);  // BrainDesc{}: heroes run town_think
+    auto mock_owned = make_world(BrainDesc{});  // BrainDesc{}: heroes run town_think
     auto wasm_owned = make_world(wasm_desc(bytes));
     BadlandsGame* mock = mock_owned.get();
     BadlandsGame* wasm = wasm_owned.get();

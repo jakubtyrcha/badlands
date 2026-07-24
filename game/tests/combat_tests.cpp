@@ -342,7 +342,7 @@ TEST_CASE("the arena's blocked edges refuse a step past the wall", "[combat]") {
     cfg.prebuild_colony = false;
     cfg.arena_half_x = 10.0f;
     cfg.arena_half_z = 6.0f;
-    auto owned = make_world(nullptr, cfg);
+    auto owned = make_world(BrainDesc{}, cfg);
     BadlandsGame& g = *owned;
 
     CharacterDesc d{};
@@ -369,7 +369,7 @@ TEST_CASE("separation cannot shove a unit past the arena wall", "[combat]") {
     cfg.prebuild_colony = false;
     cfg.arena_half_x = 10.0f;
     cfg.arena_half_z = 6.0f;
-    auto owned = make_world(nullptr, cfg);
+    auto owned = make_world(BrainDesc{}, cfg);
     BadlandsGame& g = *owned;
     // Two units piled on the exact same spot hard against the east wall: the
     // push-apart shoves one outward, and without an arena clamp it lands outside

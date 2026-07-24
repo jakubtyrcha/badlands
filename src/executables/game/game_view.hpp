@@ -148,8 +148,8 @@ class GameView : public AppView {
   Camera camera_;
   GameCameraController gamecam_;
 
-  // Owns the sim (RAII value member; nullptr script = mock brains).
-  badlands::Sim sim_{nullptr};
+  // Owns the sim (RAII value member; an empty BrainDesc = mock brains).
+  badlands::Sim sim_{badlands::BrainDesc{}};
 
   // Fog-of-war overlay: the game's ScenePostPass. Registered on scene_context_
   // (post_pass) so both the windowed renderer and the headless --screenshot

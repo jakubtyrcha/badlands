@@ -29,7 +29,7 @@ TEST_CASE("time helpers derive day/night from integer ms") {
 }
 
 TEST_CASE("tick_world advances the clock by kMillisPerTick") {
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     CHECK(g->world_millis == 0);
 
@@ -46,7 +46,7 @@ TEST_CASE("tick_world advances the clock by kMillisPerTick") {
 TEST_CASE("snapshots expose the clock and per-hero needs (observation ABI)") {
     // Inspection is part of the architecture: everything a debug panel needs is
     // readable through the snapshot API, never by reaching into the registry.
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     Action place{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,
                      static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
@@ -80,7 +80,7 @@ TEST_CASE("snapshots expose the clock and per-hero needs (observation ABI)") {
 TEST_CASE("command_log_of exposes the applied trace") {
     // The command log IS the trace of record: everything that mutated the sim,
     // in apply order, readable through the snapshot API.
-    auto g_owned = make_world(nullptr);
+    auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
     Action place{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,
                      static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
