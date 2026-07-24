@@ -89,3 +89,14 @@ TEST_CASE("generate_map: bedrock is sampled in world meters "
     }
   }
 }
+
+TEST_CASE("generate_map: degenerate resolution yields empty artifacts, no throw") {
+  MapGenParams p;
+  p.resolution = {0, 64};
+  REQUIRE(generate_map(p).bedrock.size() == 0);
+  p.resolution = {-1, 64};
+  const auto a = generate_map(p);
+  REQUIRE(a.bedrock.size() == 0);
+  REQUIRE(a.biome.size() == 0);
+  REQUIRE(a.heightmap.size() == 0);
+}

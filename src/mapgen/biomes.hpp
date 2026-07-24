@@ -8,7 +8,7 @@ namespace badlands::mapgen {
 
 // The map biomes. Ordered low-elevation -> high-elevation, which the
 // quantile-cut classification and the debug palette rely on.
-// All biomes are procedurally assigned via classify_biomes() based on bedrock.
+// The procedural generator (classify_biomes) currently emits only Plains/Hills/Mountain.
 enum class Biome : uint8_t {
   Lake = 0,
   Swamp,

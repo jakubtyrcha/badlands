@@ -85,11 +85,13 @@ Field2D<uint8_t> classify_biomes(const Field2D<float>& bedrock,
 
 MapArtifacts generate_map(const MapGenParams& params) {
   const int w = params.resolution.x, h = params.resolution.y;
+  if (w <= 0 || h <= 0) {
+    MapArtifacts a;
+    return a;
+  }
   MapArtifacts a;
   a.bedrock = Field2D<float>(w, h);
   a.heightmap = Field2D<float>(w, h, 0.0f);
-  a.biome = Field2D<uint8_t>(w, h);
-  if (w <= 0 || h <= 0) return a;
 
   // Sample at world = x * texel_m (node convention): coinciding world points
   // across two resolutions of the same map get identical float inputs.
@@ -97,14 +99,16 @@ MapArtifacts generate_map(const MapGenParams& params) {
                         params.size_m.y / static_cast<float>(h));
 
   // Distinct derived seeds per layer, all from params.seed.
-  const int s = static_cast<int>(params.seed);
-  const FastNoiseLite base = make_noise(s, kBaseWavelengthM, kBaseOctaves,
-                                        FastNoiseLite::FractalType_FBm);
+  // Use unsigned arithmetic to avoid signed overflow for edge-case seeds.
+  const FastNoiseLite base =
+      make_noise(static_cast<int>(params.seed), kBaseWavelengthM, kBaseOctaves,
+                 FastNoiseLite::FractalType_FBm);
   const FastNoiseLite ridged =
-      make_noise(s + 1, kRidgedWavelengthM, kRidgedOctaves,
-                 FastNoiseLite::FractalType_Ridged);
+      make_noise(static_cast<int>(params.seed + 1u), kRidgedWavelengthM,
+                 kRidgedOctaves, FastNoiseLite::FractalType_Ridged);
   const FastNoiseLite belt =
-      make_noise(s + 2, std::max(params.size_m.x, params.size_m.y), 1,
+      make_noise(static_cast<int>(params.seed + 2u),
+                 std::max(params.size_m.x, params.size_m.y), 1,
                  FastNoiseLite::FractalType_FBm);
 
   // GetNoise is const and stateless per call, so the three sources are shared

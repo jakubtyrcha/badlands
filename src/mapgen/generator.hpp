@@ -25,7 +25,7 @@ struct MapGenParams {
 // Everything one generation produces. `bedrock` is the latent field the biomes
 // were cut from — kept because previews dump it and erosion will consume it.
 struct MapArtifacts {
-  Field2D<float> bedrock;    // latent field (raw; roughly [0, 1.9])
+  Field2D<float> bedrock;    // latent field (raw; roughly [0, 3.5])
   Field2D<uint8_t> biome;    // Biome enum values (Plains/Hills/Mountain now)
   Field2D<float> heightmap;  // world meters — all zeros this phase
 };
