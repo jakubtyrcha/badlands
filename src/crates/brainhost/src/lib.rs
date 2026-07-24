@@ -203,9 +203,12 @@ pub struct BhInstance {
 
 /// The env.bl_log host function: reads `len` bytes at `ptr` from the calling
 /// instance's own memory and forwards them to the registered `BhLogFn`. A
-/// request that doesn't fit in memory is replaced with a short marker
-/// instead of trapping the guest — a script logging a bad pointer shouldn't
-/// crash the tick.
+/// request whose [ptr, ptr+len) range is not FULLY within the instance's
+/// memory (negative ptr/len, or the range starting or ending outside it) is
+/// replaced with a short marker instead of trapping the guest or silently
+/// truncating to whatever fits — a script logging a bad pointer shouldn't
+/// crash the tick, and a partially-out-of-range request should be visibly
+/// flagged rather than quietly clipped.
 fn host_bl_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32) {
     let (log_fn, log_user) = {
         let state = caller.data();
@@ -223,16 +226,18 @@ fn host_bl_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32
 
     const OOB_MARKER: &[u8] = b"<bl_log: out-of-bounds ptr/len>";
     let data = memory.data(&caller);
+    // Full-range check, not a clamp-and-take: a range that starts in bounds
+    // but runs past the end must be marked, not silently truncated (the
+    // marker is the only signal the host log ever gets that the guest's
+    // ptr/len disagreed with its own memory).
     let bytes: &[u8] = if ptr < 0 || len < 0 {
         OOB_MARKER
     } else {
         let p = ptr as usize;
-        if p > data.len() {
-            OOB_MARKER
-        } else {
-            let available = data.len() - p;
-            let take = (len as usize).min(available);
-            &data[p..p + take]
+        let l = len as usize;
+        match p.checked_add(l) {
+            Some(end) if end <= data.len() => &data[p..end],
+            _ => OOB_MARKER,
         }
     };
     log_fn(level, bytes.as_ptr(), bytes.len(), log_user);

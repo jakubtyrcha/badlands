@@ -7,10 +7,12 @@
 // all-Idle (so a test can assert on that alone) load
 // game/tests/fixtures/idle_brain.wasm instead (scripts/brains/nim/idle_test.nim).
 //
-// apply_brain_decision (the shared decision-apply seam, town_brain.h) is
-// unit-tested directly against synthetic BrainDecisions, no wasm involved --
-// it is exactly town_think's former tail, generalized; the rest of this file
-// exercises the wasm plumbing end to end through badlands::Sim.
+// apply_brain_decision (the shared decision-apply seam, town_brain.h) and
+// decode_decision (the wire trust boundary, wasm_brain.h) are unit-tested
+// directly against synthetic BrainDecisions/BlDecisionWires, no wasm involved
+// -- they are exactly town_think's former tail plus the wire-decode step,
+// generalized; the rest of this file exercises the wasm plumbing end to end
+// through badlands::Sim.
 
 #include "badlands_sim.hpp"
 #include "command.h"
@@ -18,7 +20,7 @@
 #include "game_state.h"
 #include "sim_internal.hpp"
 #include "town_brain.h"
-#include "wasm_brain.h"  // WasmBrainRuntime::instantiation_count (review-fix coverage)
+#include "wasm_brain.h"  // WasmBrainRuntime::instantiation_count, decode_decision (review-fix coverage)
 
 #include <catch_amalgamated.hpp>
 
@@ -27,6 +29,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -349,6 +352,34 @@ TEST_CASE("apply_brain_decision: follow_up_on_arrival gates on distance to the g
             found = found || (c.kind == CommandKind::Shoot && c.actor == slot);
         }
         CHECK(found);
+    }
+}
+
+// --- Review fix: decode_decision rejects a non-finite goal (the wire trust
+// boundary) -----------------------------------------------------------------
+// A synthetic BlDecisionWire, no wasm module involved -- exercises the same
+// seam a real (buggy/adversarial) guest's bl_out_buf write would hit.
+
+TEST_CASE("decode_decision: a non-finite goal is rejected, not decoded") {
+    auto g = make_world(nullptr);
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+
+    BlDecisionWire wire{};
+    wire.activity_id = static_cast<int32_t>(ActivityId::Roam);
+    wire.goal_kind = 1;
+    wire.goal_x = std::numeric_limits<float>::quiet_NaN();
+    wire.goal_z = 0.0f;
+
+    REQUIRE(g->noiser_bugs == 0);
+    const std::optional<BrainDecision> decision = decode_decision(*g, wire, slot, self_pos);
+    CHECK(!decision.has_value());
+    CHECK(g->noiser_bugs == 1);  // report_bug'd once
+    CHECK(g->command_queue.empty());  // no follow-up MoveTo enqueued
+
+    apply_commands(*g);
+    for (const Command& c : g->command_log) {
+        CHECK(c.kind != CommandKind::MoveTo);
     }
 }
 

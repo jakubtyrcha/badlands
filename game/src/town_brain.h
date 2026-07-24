@@ -1,8 +1,9 @@
 // The C++ reference town brain: the decision logic for a hero's daily loop,
 // expressed as WorldView-in / Commands-out (it enqueues Commands, never mutates
-// the registry directly). It is the deterministic reference + fallback partner
-// of the noiser hero brain (scripts/brains/hero.noiser) — a noiser failure just
-// means that entity's commands come from here instead.
+// the registry directly). It is the parity reference for the Nim/WASM hero
+// brain (scripts/brains/nim/, see game/src/wasm_brain.h) and the fallback when
+// no wasm brain is loaded or it fails; the noiser hero brain path
+// (scripts/brains/hero.noiser) is dormant.
 //
 // Combat is a separate pre-empt handled by the C++ mock (game.cpp); town_think
 // runs when there is no enemy. Thresholds/weights are policy placeholders.

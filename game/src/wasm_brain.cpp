@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -195,11 +196,39 @@ std::optional<Command> decode_command(const BlDecisionWire& out, uint32_t slot) 
     }
 }
 
+}  // namespace
+
 // BlDecisionWire -> BrainDecision (town_brain.h). goal_kind == 0 ("none")
 // decodes to holding the hero's current position -- the same target Idle
 // commits to on the C++ path (behaviours/blocks.cpp's act_idle) -- since
 // apply_brain_decision's commit branch always states an explicit goal.
-BrainDecision decode_decision(const BlDecisionWire& out, uint32_t slot, glm::vec2 self_pos) {
+//
+// Wire trust boundary: `out` came back through bh_tick from the guest's own
+// linear memory, so its fields are untrusted input regardless of how well
+// wasm_brain.cpp trusts the rest of the pipeline -- a buggy or adversarial
+// module can write anything to bl_out_buf(). Two fields feed straight into
+// downstream math/indexing without further validation, so they are checked
+// here, before anything else touches them: a non-finite goal coordinate
+// would otherwise propagate into MoveTo/distance math (apply_brain_decision,
+// town_brain.cpp), and an out-of-range activity_id would be cast to
+// ActivityId and used to index ActivityWeights::w /
+// ActivityHistogram::total_ (kActivityCount-sized arrays) with no bounds
+// check of their own. Both reject the same way a script/trap error does:
+// report_bug once, no decoded decision (the caller applies no commands this
+// tick; the entity idles and the wire is re-read fresh next tick).
+std::optional<BrainDecision> decode_decision(BadlandsGame& game, const BlDecisionWire& out,
+                                              uint32_t slot, glm::vec2 self_pos) {
+    if (!std::isfinite(out.goal_x) || !std::isfinite(out.goal_z)) {
+        report_bug(game, "wasm_decode", "non-finite goal_x/goal_z in wasm decision wire");
+        return std::nullopt;
+    }
+    if (out.activity_id < 0 || out.activity_id >= kActivityCount) {
+        report_bug(game, "wasm_decode",
+                   "activity_id " + std::to_string(out.activity_id) +
+                       " out of range in wasm decision wire");
+        return std::nullopt;
+    }
+
     BrainDecision d;
     d.activity = static_cast<ActivityId>(out.activity_id);
     d.goal = (out.goal_kind == 1) ? glm::vec2{out.goal_x, out.goal_z} : self_pos;
@@ -209,8 +238,6 @@ BrainDecision decode_decision(const BlDecisionWire& out, uint32_t slot, glm::vec
     d.pause_duration_millis = (out.pause_kind == 1) ? out.pause_duration_millis : 0;
     return d;
 }
-
-}  // namespace
 
 std::unique_ptr<WasmBrainRuntime> WasmBrainRuntime::create(const uint8_t* wasm_bytes, size_t len,
                                                             std::string& out_error) {
@@ -316,12 +343,20 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
         return;  // no commands this tick: the hero idles, retried next tick
     }
 
+    // decode_decision report_bug's ("wasm_decode") and returns nullopt itself
+    // on a wire trust-boundary violation (non-finite goal, out-of-range
+    // activity_id) -- same containment as the bh_spawn/bh_tick failures
+    // above: no commands this tick, retried next tick against a fresh wire.
+    const std::optional<BrainDecision> decision = decode_decision(game, out, slot, view.pos);
+    if (!decision.has_value()) {
+        return;
+    }
+
     // One applied decision, successful or not a no-op (mirrors what
     // script_intents counted for the noiser path: an intent actually
     // delivered to the sim this tick).
     ++game.script_intents;
-    const BrainDecision decision = decode_decision(out, slot, view.pos);
-    apply_brain_decision(game, slot, view.pos, decision);
+    apply_brain_decision(game, slot, view.pos, *decision);
 }
 
 }  // namespace badlands

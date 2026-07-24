@@ -90,10 +90,10 @@ corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
 
 # brainhost: wasmtime embedding (src/crates/brainhost) behind a narrow C ABI
 # for loading/ticking game-AI "brain" wasm modules — see
-# include/brainhost.h. Link-only here (not linked into any target yet; a
-# later task wires up a C++ caller). No dependency of this crate shares its
-# own name, so no Corrosion package-ambiguity workaround is needed (as with
-# assets/nav, unlike wesl_ffi).
+# include/brainhost.h. Linked into badlands_game_lib below; the C++ caller is
+# game/src/wasm_brain.cpp. No dependency of this crate shares its own name,
+# so no Corrosion package-ambiguity workaround is needed (as with assets/nav,
+# unlike wesl_ffi).
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/brainhost/Cargo.toml)
 corrosion_set_env_vars(brainhost "RUSTFLAGS=-Cpanic=unwind")
 

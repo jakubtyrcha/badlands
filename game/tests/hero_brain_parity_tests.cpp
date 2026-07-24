@@ -92,17 +92,22 @@ uint32_t spawn_deer(BadlandsGame& g, glm::vec2 pos) {
 // single place both worlds' setup goes through rather than two independent
 // call sites that could drift apart.
 //
-// What each piece is FOR (closing a review finding on the first version of
-// this fixture: it claimed variety -- Explore/Buy/Roam/GoHome/Chat/
-// VisitTavern/Hunt -- it did not structurally deliver; Hunt was unreachable
-// with no critter ever spawned, and GoHome/Chat/Explore were merely
-// "eventually reachable" at the shipped need-drain rates, which the run's
-// tick budget never actually reached). The base town (castle, auto + two
+// What each piece is FOR (closing review findings across two rounds on this
+// fixture: it claimed variety -- Explore/Buy/Roam/GoHome/Chat/VisitTavern/
+// Hunt -- it did not structurally deliver; Hunt was unreachable with no
+// critter ever spawned, GoHome/Chat/Explore were merely "eventually
+// reachable" at the shipped need-drain rates which the run's tick budget
+// never actually reached, and Roam -- despite being a flat, always-available
+// score -- never won a single tick because Buy (weighted higher) always beat
+// it at spawn and the cranked need drains below always beat it by the time
+// Buy's own walk to the apothecary let go). The base town (castle, auto + two
 // guilds of distinct hero classes + tavern + apothecary, on the Plains south
 // of the lake -- NOT determinism_tests.cpp's own seed_town coordinates,
 // which sit in the lake biome and leave every hero stuck at spawn) gets
-// Buy/Roam/Idle/Think for free from tick 1 (flat scores, no setup needed).
-// The rest needs an explicit push:
+// Buy/Idle/Think for free from tick 1 (flat scores, no setup needed). The
+// rest needs an explicit push:
+//   - Roam: pre-filling one merc's inventory so Buy is inapplicable to it
+//     from tick 1 (see the poke right after the merc recruit loop below).
 //   - Hunt, and its Shoot follow-up (the new BL_CMD_SHOOT wire path): a deer
 //     spawned within a recruited Hunter's sight (HeroFactors::
 //     hunt_sight_radius = 22) and flee-trigger range (CritterFactors::
@@ -147,9 +152,25 @@ void setup_variety_fixture(BadlandsGame& g) {
 
     const uint32_t fcq = place(g, BuildingKind::FreeCompanyQuarters, -20.0f, 40.0f);
     REQUIRE(fcq != UINT32_MAX);
+    uint32_t last_merc = UINT32_MAX;
     for (int i = 0; i < 3; ++i) {
-        REQUIRE(recruit_at(g, fcq) != UINT32_MAX);
+        last_merc = recruit_at(g, fcq);
+        REQUIRE(last_merc != UINT32_MAX);
     }
+    // Roam (base_hero_weights, activity_catalog.cpp) is a flat 1.0 fallback
+    // that only wins a tick where nothing costlier applies -- and structurally
+    // it never gets one here: Buy (1.5, flat) always outscores it at spawn
+    // (every recruit starts with inventory 0 < kInventoryCap), and by the time
+    // that first Buy trip would free it up again, the cranked need drains
+    // above have already pushed GoHome/VisitTavern/Chat's weighted urgency
+    // past it too. Pre-filling one merc's pack takes Buy out of contention for
+    // it from tick 1 while fatigue/content are still full (zero urgency), so
+    // Roam -- the only other flat activity a Mercenary reliably has (Explore's
+    // appetite is a mere 5%, activity_catalog.cpp) -- wins outright. Not a
+    // Command (like configure_vision/set_factors_of above): part of the
+    // initial config both worlds' setup_variety_fixture call applies
+    // identically, not the replayed log.
+    g.registry.get<HeroSimulationState>(g.slots[last_merc]).inventory = kInventoryCap;
 
     const uint32_t camp = place(g, BuildingKind::HuntersCamp, 20.0f, 40.0f);
     REQUIRE(camp != UINT32_MAX);
@@ -237,13 +258,18 @@ TEST_CASE("twin brain: wasm hero decisions match the C++ reference command-for-c
     // Sanity guard, strengthened per review: a vacuous all-flat parity pass
     // (Roam/Buy/VisitTavern/Think, none of which needed the fixture above --
     // exactly what the first version of this test actually proved) must
-    // fail this. >= 3 distinct non-Idle activities, AND each of the three
-    // the fixture was specifically built to force.
+    // fail this. >= 3 distinct non-Idle activities, AND each of the seven
+    // non-Idle activities in kHeroActivities individually -- the fixture's
+    // claimed all-8 coverage (see setup_variety_fixture's comment), asserted
+    // one by one so fixture drift can't silently shrink it back down.
     CHECK(non_idle_activities.size() >= 3);
     CHECK(non_idle_activities.count(static_cast<int32_t>(ActivityId::Hunt)) == 1);
     CHECK(non_idle_activities.count(static_cast<int32_t>(ActivityId::Chat)) == 1);
     CHECK(non_idle_activities.count(static_cast<int32_t>(ActivityId::GoHome)) == 1);
     CHECK(non_idle_activities.count(static_cast<int32_t>(ActivityId::Explore)) == 1);
+    CHECK(non_idle_activities.count(static_cast<int32_t>(ActivityId::Buy)) == 1);
+    CHECK(non_idle_activities.count(static_cast<int32_t>(ActivityId::VisitTavern)) == 1);
+    CHECK(non_idle_activities.count(static_cast<int32_t>(ActivityId::Roam)) == 1);
 
     // The two new wire extensions (BL_CMD_SHOOT/BL_CMD_CHAT, decode_command)
     // are unverified if only the SetBehavior(Hunt)/SetBehavior(Chat)

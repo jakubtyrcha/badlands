@@ -2,8 +2,8 @@
 // embedding that loads a "brain" wasm module (authored in Nim, later possibly
 // other languages) and ticks it with opaque byte buffers. This crate knows
 // NOTHING about game types or the ViewWire layout — it moves bytes. Linked
-// into the badlands C++ game via Corrosion (import-only for now; a later
-// task wires a caller through CMake).
+// into badlands_game_lib via Corrosion (CMakeLists.txt); the C++ caller is
+// game/src/wasm_brain.cpp.
 //
 // A conforming brain module exports `memory` plus:
 //   bl_abi_version() -> i32
@@ -46,8 +46,10 @@ typedef struct BhInstance BhInstance;
 // Host log sink registered at bh_instantiate time, called synchronously from
 // inside a brainhost call whenever the guest invokes env.bl_log. `msg` points
 // at a copy of the guest's bytes living in host memory (bounds-checked
-// against the module's linear memory; a request that doesn't fit is replaced
-// with a short marker instead of trapping the guest) and is valid only for
+// against the module's linear memory: a request whose [ptr, ptr+len) range
+// is not FULLY within it -- negative ptr/len, or the range starting or
+// ending outside it -- is replaced with a short marker instead of trapping
+// the guest or silently truncating to whatever fits) and is valid only for
 // the duration of this call — copy it if you need it afterward.
 typedef void (*BhLogFn)(int32_t level, const uint8_t* msg, size_t len, void* user);
 

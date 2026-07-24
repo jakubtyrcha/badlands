@@ -1,10 +1,10 @@
 # Badlands
 
-A Majesty-style town-and-heroes prototype: a Rust renderer (winit + wgpu) driving a
-C++/EnTT simulation behind a data-only C API, with per-entity AI "brains". The hero
-brain runs as Nim compiled to WASM (hosted via wasmtime); the
-[noiser](third_party/noiser) scripting language still drives mapgen/texgen and
-remains available as a dormant brain backend.
+A Majesty-style town-and-heroes prototype: a C++/Dawn (WebGPU)/SDL3 engine driving a
+C++/EnTT simulation, with per-entity AI "brains". The hero brain runs as Nim
+compiled to WASM (hosted via wasmtime); the [noiser](third_party/noiser) scripting
+language still drives mapgen/texgen and remains available as a dormant brain
+backend.
 
 ## Getting started
 
@@ -36,11 +36,13 @@ lean.
 
 ## Build & run
 
+Run from the repo root (`shaders/` + `assets/` resolve relative to cwd).
+
 ```sh
-cargo run                                          # launch the app
-cargo run -- --frames 60 --screenshot out.png      # headless render to a PNG
-cargo test                                         # Rust unit tests
-cargo test --test cpp_tests                         # build + run the C++ Catch2 suite
+cmake -S . -B build -G Ninja    # configure (first Dawn-from-source build is long, then cached)
+cmake --build build              # build the apps + Rust staticlibs
+./build/badlands_game            # run (opens an SDL3 window)
+ctest --test-dir build           # C++ Catch2 test suites
 ```
 
 The C++ suite covers the hero brain (`scripts/brains/nim/hero.nim`, built to

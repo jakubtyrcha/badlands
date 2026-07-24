@@ -16,9 +16,15 @@
 
 #include <brainhost.h>
 
+#include "brain_abi.h"  // BlDecisionWire
+#include "town_brain.h" // BrainDecision
+
+#include <glm/glm.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,17 +69,31 @@ struct WasmBrainRuntime {
     uint32_t instantiation_count = 0;
 };
 
+// The wire trust boundary: BlDecisionWire came back through bh_tick from
+// guest-controlled memory, so its fields are untrusted input even though the
+// guest is host-compiled -- a buggy or adversarial module can write anything
+// to bl_out_buf(). Rejects (report_bug(game, "wasm_decode", ...), returns
+// std::nullopt) a non-finite goal_x/goal_z or an activity_id outside
+// [0, kActivityCount); same containment as a script/trap error -- no
+// commands this tick, retried next tick against a fresh wire. Otherwise
+// decodes `out` into a BrainDecision (self_pos stands in for goal_kind ==
+// "none"). Not anonymous-namespace-local so tests can drive it directly with
+// a synthetic BlDecisionWire (see wasm_brain_tests.cpp), the same way
+// apply_brain_decision (town_brain.h) is unit-tested.
+std::optional<BrainDecision> decode_decision(BadlandsGame& game, const BlDecisionWire& out,
+                                              uint32_t slot, glm::vec2 self_pos);
+
 // One tick for `slot`: observe (town_brain.h's observe_hero/weights_for,
 // reused verbatim so perception is identical to the C++ reference path) ->
-// pack into a BlViewWire (brain_abi.h) -> bh_tick -> on BH_OK, decode the
-// returned BlDecisionWire into a BrainDecision and apply it
-// (town_brain.h's apply_brain_decision, the same seam town_think's tail
-// uses). On ANY failure (bh_spawn or bh_tick returning nonzero):
-// report_bug(game, "wasm_spawn" | "wasm_tick", ...) with bh_last_error()'s
-// text and no commands this tick -- the entity simply idles (its last
-// decision stands) and the tick is retried next frame. There is no
-// downgrade flag, unlike the noiser path -- see the spec doc's Runtime
-// section.
+// pack into a BlViewWire (brain_abi.h) -> bh_tick -> on BH_OK, decode_decision
+// the returned BlDecisionWire (above) and, if it passes the wire trust
+// boundary, apply it (town_brain.h's apply_brain_decision, the same seam
+// town_think's tail uses). On ANY failure (bh_spawn or bh_tick returning
+// nonzero, or decode_decision rejecting the wire): report_bug(game,
+// "wasm_spawn" | "wasm_tick" | "wasm_decode", ...) and no commands this tick
+// -- the entity simply idles (its last decision stands) and the tick is
+// retried next frame. There is no downgrade flag, unlike the noiser path --
+// see the spec doc's Runtime section.
 //
 // BH_ERR_TRAP/BH_ERR_FUEL specifically also invalidate `instance` (per
 // brainhost.h: "a BhInstance that has trapped ... is not reused"): this
