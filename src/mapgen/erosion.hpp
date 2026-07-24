@@ -19,7 +19,9 @@ struct ErosionParams {
   float diffusion = 0.02f;    // D (m²/dt)
   float initial_sediment_m = 4.0f;
   float sediment_taper_m = 60.0f;
-  float sediment_noise_m = 1.0f;
+  // v1.1: texture role only — plains drainage now comes from the base-height
+  // relief term in generator.cpp, not from S's noise (was 1.0f).
+  float sediment_noise_m = 0.3f;
   float sediment_noise_wavelength_m = 40.0f;
   float lake_frac = 0.03f;
   float lake_depth_m = 12.0f;

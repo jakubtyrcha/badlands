@@ -44,6 +44,14 @@ constexpr float kBeltHi = 0.59f;
 // Plains sit at the 0 m water datum; the farthest texel is the highest.
 constexpr float kSlopeMPerM = 0.75f;
 
+// v1.1: plains drainage relief. Cavities carve at bedrock minima, so the
+// bedrock field is a ready-made potential whose valleys already lead to the
+// lakes — this term nudges the plains gradient to point at them instead of
+// sitting dead flat, without a seam at any biome cutoff (see the v1.1
+// addendum, "Plains drainage relief", in
+// docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md).
+constexpr float kPlainsReliefM = 2.0f;
+
 FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
                          FastNoiseLite::FractalType fractal) {
   FastNoiseLite n(seed);
@@ -55,6 +63,20 @@ FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
 }
 
 float to01(float v) { return 0.5f * (v + 1.0f); }  // FastNoiseLite is ~[-1,1]
+
+// Exact k-th order statistic (nth_element-on-copy) — the same pattern as
+// compute_cutoffs, mirroring carve_cavities' internal t_lake formula exactly
+// (same frac clamp, same rank index) so this recovers the identical cutoff
+// carve_cavities uses, without refactoring carve_cavities to expose it.
+float bedrock_quantile(const Field2D<float>& bedrock, float frac) {
+  const size_t n = bedrock.data.size();
+  if (n == 0) return 0.0f;
+  std::vector<float> v = bedrock.data;
+  const float f = std::min(frac, 1.0f);
+  const size_t i = static_cast<size_t>(f * static_cast<float>(n - 1));
+  std::nth_element(v.begin(), v.begin() + i, v.end());
+  return v[i];
+}
 
 }  // namespace
 
@@ -154,7 +176,8 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   Field2D<float> bedrock_sim = sample_bedrock(sim_n, texel_sim, origin_sim);
   int seq = 0;
   if (sink) sink->dump("bedrock", seq++, bedrock_sim);
-  const auto biome_sim = classify_biomes(bedrock_sim, compute_cutoffs(bedrock_sim));
+  const auto cutoffs_sim = compute_cutoffs(bedrock_sim);
+  const auto biome_sim = classify_biomes(bedrock_sim, cutoffs_sim);
   if (sink) sink->dump("biome-sim", seq++, biome_sim);
 
   // First-pass relief: a cone field over the distance to the nearest plains,
@@ -163,6 +186,17 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   const Field2D<float> dist = distance_to_plains(biome_sim, {texel_sim, texel_sim});
   Field2D<float> B(sim_n, sim_n);
   for (size_t i = 0; i < B.data.size(); ++i) B.data[i] = kSlopeMPerM * dist.data[i];
+
+  // v1.1: plains drainage relief, applied EVERYWHERE (continuity — no seam at
+  // a biome cutoff). t_lake is carve_cavities' own cutoff, recovered here so
+  // the relief term's zero and the cavity carve's zero line up exactly:
+  // smoothstep is 0 at/below t_lake (where carve_cavities takes over) and
+  // saturates to kPlainsReliefM at/above t_hills, with zero slope at both
+  // ends, so hills/mountains gain a flat +2 m with no discontinuity.
+  const float t_lake = bedrock_quantile(bedrock_sim, ep.lake_frac);
+  for (size_t i = 0; i < B.data.size(); ++i)
+    B.data[i] += kPlainsReliefM *
+                 glm::smoothstep(t_lake, cutoffs_sim.t_hills, bedrock_sim.data[i]);
   if (sink) sink->dump("cone", seq++, B);
 
   const auto basins = carve_cavities(B, bedrock_sim, ep.lake_frac, ep.lake_depth_m);

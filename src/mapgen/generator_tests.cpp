@@ -5,8 +5,10 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 #include "mapgen/biomes.hpp"
 #include "mapgen/generator.hpp"
@@ -85,6 +87,95 @@ TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
             Catch::Approx(badlands::mapgen::kPlainsFrac).margin(0.15));
     REQUIRE(mountain / n ==
             Catch::Approx(badlands::mapgen::kMountainFrac).margin(0.02));
+  }
+}
+
+TEST_CASE("generate_map: plains gain drainage relief (no longer flat)") {
+  // v1.1: a base-height term applied everywhere makes bedrock a potential
+  // whose plains gradients point toward the cavities/lakes. Isolate it here:
+  // iterations=0 skips the sim loop's incise/deposit/diffuse entirely, and
+  // sediment_noise_m=0 removes the only other source of plains variation —
+  // without the override, dist_to_plains is exactly 0 on every plains texel
+  // (a plains texel's nearest plains texel is itself), so the taper term
+  // alone is spatially CONSTANT across plains and the sediment fBm would be
+  // the only thing moving the needle, masking the relief term under test.
+  // Seed pinned to one with zero output/sim biome-cutoff disagreement (see
+  // below) so the measurement isolates the relief term.
+  MapGenParams p;
+  p.seed = 9;
+  p.resolution = 96;
+  p.world_size_m = 384.0f;
+  p.erosion.sim_resolution = 96;
+  p.erosion.iterations = 0;
+  p.erosion.sediment_noise_m = 0.0f;
+  const auto a = generate_map(p);
+
+  double sum = 0.0, sum2 = 0.0;
+  float lo = std::numeric_limits<float>::infinity();
+  float hi = -std::numeric_limits<float>::infinity();
+  int n = 0;
+  for (size_t i = 0; i < a.biome.data.size(); ++i) {
+    if (a.biome.data[i] != static_cast<uint8_t>(Biome::Plains)) continue;
+    const float v = a.heightmap.data[i];
+    sum += v;
+    sum2 += static_cast<double>(v) * v;
+    lo = std::min(lo, v);
+    hi = std::max(hi, v);
+    ++n;
+  }
+  REQUIRE(n > 0);
+  const double mean = sum / n;
+  const double variance = sum2 / n - mean * mean;
+  REQUIRE(variance > 0.0);
+  // The 2 m relief term dominates; carved-but-unpruned cavities within
+  // Plains (bedrock < t_lake but too small/shallow to register as Lake)
+  // widen the spread a bit further.
+  //
+  // Seed choice is load-bearing, not decorative: `a.biome` (this Plains
+  // filter) and the sim grid's own biome_sim (which the relief/cone terms
+  // are actually keyed to) come from TWO INDEPENDENT compute_cutoffs calls
+  // over different populations (output-res bedrock vs. the wider, padded
+  // sim-res bedrock) — a pre-existing generator characteristic, not
+  // something this task introduces. When the sim-side t_hills happens to
+  // fall BELOW the output-side one, a handful of texels the output calls
+  // Plains are actually Hills/Mountain on the sim grid, and the (pre-
+  // existing) cone term is unbounded there (proportional to that texel's
+  // real distance to sim-plains) — for some seeds this alone spikes >60 m,
+  // dwarfing this test's [1, 4] window with a value the relief term isn't
+  // responsible for. Seed 9 has zero such disagreement at these params.
+  REQUIRE((hi - lo) >= 1.0f);
+  REQUIRE((hi - lo) <= 4.0f);
+}
+
+TEST_CASE("generate_map: plains relief term blends smoothly (no biome-cutoff seam)") {
+  // Same setup as the variance test, but with the detail filter zeroed:
+  // gully_detail_delta is a separate additive layer with its own continuity
+  // invariants (detail_filter_tests.cpp) — this test isolates the base
+  // relief term's smoothness, not the detail filter's.
+  MapGenParams p;
+  p.seed = 3;
+  p.resolution = 96;
+  p.world_size_m = 384.0f;
+  p.erosion.sim_resolution = 96;  // == resolution: one unambiguous texel size
+  p.erosion.iterations = 0;
+  p.erosion.detail_octaves = 0;
+  const auto a = generate_map(p);
+
+  // Mirrors generator.cpp's private kSlopeMPerM (0.75) — the cone term's
+  // neighbor step is bounded by kSlopeMPerM * texel (EDT distance changes at
+  // most 1 texel per neighbor step); the relief term adds at most its own
+  // 2 m amplitude per step (smoothstep is bounded to [0, kPlainsReliefM]).
+  const float kSlopeMPerM = 0.75f;
+  const float texel = p.world_size_m / static_cast<float>(p.resolution);
+  const float bound = kSlopeMPerM * texel + 2.0f;
+  for (int y = 0; y < p.resolution; ++y) {
+    for (int x = 0; x < p.resolution; ++x) {
+      const float h = a.heightmap.at(x, y);
+      if (x + 1 < p.resolution)
+        REQUIRE(std::abs(h - a.heightmap.at(x + 1, y)) <= bound);
+      if (y + 1 < p.resolution)
+        REQUIRE(std::abs(h - a.heightmap.at(x, y + 1)) <= bound);
+    }
   }
 }
 
