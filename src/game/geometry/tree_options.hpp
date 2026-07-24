@@ -22,6 +22,8 @@ struct LeafOptions {
   float angle = 42.0f;        // tilt from the branch, degrees (ez-tree oak_medium)
   float alpha_cutoff = 0.5f;  // discard threshold for the leaf cutout material (MaterialLibrary::AlphaCutout)
   glm::vec3 tint{0.30f, 0.55f, 0.18f};  // green; per-preset overridable
+  glm::vec3 transmission_tint{0.35f, 0.6f, 0.15f};  // transmitted (back-lit) colour
+  float transmission_strength{0.6f};
   bool tip_leaf = true;       // ez-tree deciduous terminal-tip leaf: one extra leaf at each
                               // leaf-bearing branch's endpoint (set false for evergreens)
 };
@@ -68,7 +70,8 @@ inline TreeOptions OakPreset() {
   o.twist      = {-0.23f, 0.42f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = 0.02f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 10.0f;
-  o.leaves = {.count=18, .start=0.16f, .size=2.5f, .size_variance=0.7f, .angle=42.0f, .tint={0.32f,0.52f,0.18f}};
+  o.leaves = {.count=18, .start=0.16f, .size=2.5f, .size_variance=0.7f, .angle=42.0f, .tint={0.32f,0.52f,0.18f},
+              .transmission_tint={0.55f,0.62f,0.10f}, .transmission_strength=0.65f};
   return o;
 }
 
@@ -88,7 +91,8 @@ inline TreeOptions PinePreset() {
   o.twist      = {0.0f, 0.0f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = -0.003f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 1.0f;
-  o.leaves = {.count=30, .start=0.09f, .size=1.435f, .size_variance=0.201f, .angle=39.0f, .tint={0.16f,0.40f,0.24f}, .tip_leaf=false};
+  o.leaves = {.count=30, .start=0.09f, .size=1.435f, .size_variance=0.201f, .angle=39.0f, .tint={0.16f,0.40f,0.24f},
+              .transmission_tint={0.32f,0.46f,0.12f}, .transmission_strength=0.28f, .tip_leaf=false};
   return o;
 }
 

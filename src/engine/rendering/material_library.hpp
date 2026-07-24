@@ -103,6 +103,21 @@ class MaterialLibrary {
   DeferredMaterial AlphaCutout(wgpu::TextureView albedo, wgpu::Sampler sampler,
                                float cutoff, glm::vec3 tint);
 
+  // Like AlphaCutout (forward-opaque, alpha-tested, double-sided,
+  // shadow-casting) but built with the "translucency" shader feature: the
+  // surface also TRANSMITS the sun + sky through its back face (a thin-slab
+  // subsurface approximation), in addition to the standard front-face BRDF.
+  // `transmission_tint` (rgb) and `transmission_strength` (0..1) drive the
+  // transmitted term; everything else (albedo/sampler/cutoff/tint) behaves
+  // exactly as in AlphaCutout. Built once, lazily, on a separate cached
+  // factory (its own kForwardOpaque pipeline variant compiled with the extra
+  // feature) and shared by every call. Valid after Initialize().
+  DeferredMaterial TranslucentFoliage(wgpu::TextureView albedo,
+                                      wgpu::Sampler sampler, float cutoff,
+                                      glm::vec3 tint,
+                                      glm::vec3 transmission_tint,
+                                      float transmission_strength);
+
   // A terrain layer set: one texture_2d_array per PBR channel, layer i built
   // from the i'th pack passed to LoadTerrainArrays. Holds the textures (not
   // just views) so the caller keeps them alive by keeping this.
@@ -189,6 +204,11 @@ class MaterialLibrary {
   // first AlphaCutout() call (its HDR color / reversed-Z depth targets match the
   // forward-opaque pass) and shared by every subsequent call.
   std::unique_ptr<MaterialInstanceFactory> alpha_cutout_factory_;
+  // Forward-opaque "standard_forward" factory built with the "translucency"
+  // shader feature. Built lazily on the first TranslucentFoliage() call;
+  // kept separate from alpha_cutout_factory_ because it compiles a different
+  // shader variant (extra_features = {"translucency"}).
+  std::unique_ptr<MaterialInstanceFactory> translucent_foliage_factory_;
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: dir

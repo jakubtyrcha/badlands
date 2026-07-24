@@ -107,6 +107,12 @@ struct FactoryDescriptor {
   // for this material's variants, so the shadow pass — which resolves the
   // kShadow pipeline and skips when it's absent — never draws it.
   bool casts_shadow = true;
+
+  // Extra WESL @if feature flags enabled for ALL of this factory's pipeline
+  // variants (appended to each variant's built-in features like "transparent").
+  // Lets a material opt into a shader feature (e.g. a "translucency" transmission
+  // path) without a new MaterialPassType. Default empty = unchanged behavior.
+  std::vector<std::string> extra_features;
 };
 
 // Build factory from descriptor. script_provider required when

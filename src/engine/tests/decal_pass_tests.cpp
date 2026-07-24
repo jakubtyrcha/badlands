@@ -18,6 +18,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <catch_amalgamated.hpp>
@@ -39,6 +40,7 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
+#include "engine/rendering/texture_loader.hpp"
 #include "engine/rendering/texture_readback.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
 #include "engine/scene/scene_graph.hpp"
@@ -462,4 +464,50 @@ TEST_CASE("Decal pass: dashes match the CPU mirror (shader transcription)") {
   CHECK(checked > 30);
   CHECK(saw_a > 5);
   CHECK(saw_b > 5);
+}
+
+TEST_CASE(
+    "MaterialLibrary::TranslucentFoliage builds a transmitting "
+    "forward-opaque material") {
+  // Reuses this file's TestGpu harness (its matlib is already initialized
+  // via MaterialLibrary::Initialize) rather than standing up a second GPU
+  // context just for this material builder.
+  TestGpu& g = GetTestGpu();
+
+  wgpu::TextureView albedo_view =
+      CreateSolidColorTexture(g.device, g.queue, 255, 255, 255, 255);
+  wgpu::SamplerDescriptor sampler_desc{};
+  sampler_desc.minFilter = wgpu::FilterMode::Linear;
+  sampler_desc.magFilter = wgpu::FilterMode::Linear;
+  wgpu::Sampler sampler = g.device.CreateSampler(&sampler_desc);
+
+  const glm::vec3 tint(0.2f, 0.6f, 0.1f);
+  const glm::vec3 transmission_tint(0.3f, 0.8f, 0.15f);
+  const float transmission_strength = 0.6f;
+
+  DeferredMaterial result = g.matlib.TranslucentFoliage(
+      albedo_view, sampler, /*cutoff=*/0.5f, tint, transmission_tint,
+      transmission_strength);
+
+  REQUIRE(result.factory != nullptr);
+
+  REQUIRE(result.params.uniform_overrides.count("transmission") == 1u);
+  REQUIRE(result.params.uniform_overrides.count("tint") == 1u);
+  REQUIRE(result.params.uniform_overrides.count("params") == 1u);
+
+  const auto& transmission_value =
+      result.params.uniform_overrides.at("transmission");
+  REQUIRE(std::holds_alternative<glm::vec4>(transmission_value));
+  const glm::vec4 expected_transmission(transmission_tint,
+                                        transmission_strength);
+  CHECK(std::get<glm::vec4>(transmission_value) == expected_transmission);
+
+  bool found_albedo = false;
+  for (const auto& tex : result.params.texture_overrides) {
+    if (tex.param_name == "albedo") {
+      found_albedo = true;
+      CHECK(tex.view.Get() == albedo_view.Get());
+    }
+  }
+  CHECK(found_albedo);
 }
