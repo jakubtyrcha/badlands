@@ -1,6 +1,7 @@
 #include "game/ui/hud.hpp"
 
 #include <cmath>
+#include <cstdio>
 
 #include <spdlog/spdlog.h>
 
@@ -73,6 +74,27 @@ int32_t AddLabel(std::vector<UiElement>& els, TextBlob& blob, int32_t parent,
   e.flags = flags;
   els.push_back(e);
   return static_cast<int32_t>(els.size()) - 1;
+}
+
+// "active, direct, instant, cd 20s" -- duration shows as seconds when timed,
+// "instant" otherwise; the cd fragment is omitted when the skill has none.
+std::string SkillSummary(const badlands::SkillSpec& s) {
+  std::string out =
+      s.activation == badlands::SkillActivation::Passive ? "passive" : "active";
+  out += s.targeting == badlands::SkillTargeting::Aoe ? ", aoe" : ", direct";
+  if (s.duration_seconds > 0.0f) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), ", %.0fs", s.duration_seconds);
+    out += buf;
+  } else {
+    out += ", instant";
+  }
+  if (s.cooldown_seconds > 0.0f) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), ", cd %.0fs", s.cooldown_seconds);
+    out += buf;
+  }
+  return out;
 }
 
 }  // namespace
@@ -328,6 +350,31 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
   out.quads.clear();
   out.hits.clear();
   return false;
+}
+
+void AppendHeroProgressionRows(HudSelection& sel, const CharacterState& hero,
+                               const SkillCatalog& skills) {
+  if (hero.level <= 0) {
+    return;  // level >= 1 marks a hero row (snapshot contract)
+  }
+  sel.rows.emplace_back("level", std::to_string(hero.level));
+  sel.rows.emplace_back("xp", std::to_string(hero.xp) + " / " +
+                                  std::to_string(hero.xp_next));
+  if (hero.skill_count <= 0) {
+    return;
+  }
+  HudList list;
+  list.heading = "Skills";
+  for (int32_t i = 0; i < hero.skill_count && i < kMaxSkills; ++i) {
+    const int32_t id = hero.skills[i];
+    const bool known = id >= 0 && id < kSkillCount;
+    list.entries.emplace_back(SkillName(id),
+                              known ? SkillSummary(skills.specs[id]) : "");
+    if (known && !skills.specs[id].effect.empty()) {
+      list.entries.emplace_back("", skills.specs[id].effect);
+    }
+  }
+  sel.lists.push_back(std::move(list));
 }
 
 uint32_t HudCombatLogCapacity() {

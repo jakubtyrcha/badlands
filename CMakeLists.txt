@@ -371,6 +371,7 @@ set(badlands_app_sources_game
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
+    src/game/skill_manifest.cpp     # skill template overrides loaded as data
     # Game UI (the in-world HUD + world picking), distinct from the ImGui debug
     # UI. Game-specific, so it lives here rather than in badlands_engine --
     # only the game-agnostic UiRenderer does.

@@ -462,6 +462,63 @@ TEST_CASE("BuildHud renders the four speed buttons, each hit-testable",
     ui_destroy(ctx);
 }
 
+TEST_CASE("hero progression rows: level, xp, and the skills list") {
+  CharacterState hero{};
+  hero.level = 5;
+  hero.xp = 137;
+  hero.xp_next = 918;
+  hero.skill_count = 1;
+  hero.skills[0] = static_cast<int32_t>(SkillId::Calcify);
+  SkillCatalog cat;  // compiled defaults
+  HudSelection sel;
+  AppendHeroProgressionRows(sel, hero, cat);
+  REQUIRE(sel.rows.size() == 2);
+  CHECK(sel.rows[0].label == "level");
+  CHECK(sel.rows[0].value == "5");
+  CHECK(sel.rows[1].label == "xp");
+  CHECK(sel.rows[1].value == "137 / 918");
+  REQUIRE(sel.lists.size() == 1);
+  CHECK(sel.lists[0].heading == "Skills");
+  REQUIRE(sel.lists[0].entries.size() == 2);
+  CHECK(sel.lists[0].entries[0].label == "Calcify");
+  CHECK(sel.lists[0].entries[0].value == "active, direct, instant, cd 20s");
+  CHECK(sel.lists[0].entries[1].label == "");
+  CHECK(sel.lists[0].entries[1].value ==
+        "Absorbs the next physical strike, then shatters.");
+}
+
+TEST_CASE("progression rows: non-heroes add nothing; skill-less heroes skip the list") {
+  SkillCatalog cat;
+  HudSelection sel;
+  CharacterState rat{};  // level 0 marks a non-hero row
+  AppendHeroProgressionRows(sel, rat, cat);
+  CHECK(sel.rows.empty());
+  CHECK(sel.lists.empty());
+  CharacterState hero{};
+  hero.level = 1;
+  hero.xp_next = 100;
+  AppendHeroProgressionRows(sel, hero, cat);
+  REQUIRE(sel.rows.size() == 2);
+  CHECK(sel.rows[1].value == "0 / 100");
+  CHECK(sel.lists.empty());
+}
+
+TEST_CASE("skill summary omits cd when none and shows duration seconds") {
+  SkillCatalog cat;
+  cat.specs[0].activation = SkillActivation::Passive;
+  cat.specs[0].targeting = SkillTargeting::Aoe;
+  cat.specs[0].duration_seconds = 6.0f;
+  cat.specs[0].cooldown_seconds = 0.0f;
+  CharacterState hero{};
+  hero.level = 1;
+  hero.skill_count = 1;
+  hero.skills[0] = 0;
+  HudSelection sel;
+  AppendHeroProgressionRows(sel, hero, cat);
+  REQUIRE(sel.lists.size() == 1);
+  CHECK(sel.lists[0].entries[0].value == "passive, aoe, 6s");
+}
+
 TEST_CASE("BuildHud makes list entries clickable selection targets",
           "[game_ui][hud]") {
     UiContext* ctx = LoadHudFont();
