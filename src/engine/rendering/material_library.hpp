@@ -91,19 +91,14 @@ class MaterialLibrary {
                                  int tiles = 8, int texels = 512,
                                  float roughness = 1.0f);
 
-  // Returns a forward-opaque, alpha-tested (cutout), double-sided, lit
-  // material bound to the given `albedo` view + `sampler` (the caller owns and
-  // keeps them alive). `cutoff` is the alpha discard threshold; `tint`
-  // multiplies the sampled RGB (e.g. white leaf texture * green tint). The
-  // material declares @group(2), so the forward-opaque pass binds the engine
-  // shadow-map + IBL resources: it RECEIVES the sun's standard BRDF (the same
-  // shared shadeStandard the deferred pass uses) + shadow-map PCF + IBL, and
-  // still casts leaf-shaped shadows via its own alpha-tested shadow-pass
-  // variant. General alpha-cutout material -- no foliage-specific logic. The
-  // underlying forward-opaque factory (shader "standard_forward") is built once,
-  // lazily, and shared by every call: only the per-instance albedo/tint/cutoff
-  // vary. Meshes drawn
-  // with it must be GeometryType::kTexturedMesh and added via
+  // Builds (and caches) a forward-opaque, alpha-tested, double-sided
+  // (cull None), standard-lit material (shader "standard_forward") bound to
+  // the given `albedo` view + `sampler` (the caller owns and keeps them
+  // alive). `cutoff` is the alpha discard threshold; `tint` multiplies the
+  // sampled RGB (e.g. white leaf texture * green tint). The underlying
+  // factory is built once, lazily, and shared by every call: only the
+  // per-instance albedo/tint/cutoff vary, via params. Meshes drawn with it
+  // must be GeometryType::kTexturedMesh and added via
   // AddForwardOpaqueMeshEntity. Valid after Initialize().
   DeferredMaterial AlphaCutout(wgpu::TextureView albedo, wgpu::Sampler sampler,
                                float cutoff, glm::vec3 tint);

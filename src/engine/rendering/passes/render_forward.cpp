@@ -170,6 +170,10 @@ void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
                          MaterialInstanceCache& cache,
                          const ForwardEngineResources& engine) {
   wgpu::Device device = frame.GetDevice();
+  // scene_depth is used here only as a presence proxy for "engine forward
+  // resources are available" (the scene renderer always sets it alongside
+  // the shadow map + IBL) -- the opaque @group(2) bind below never samples
+  // scene_depth itself.
   const bool have_engine = static_cast<bool>(engine.scene_depth);
 
   // The @group(2) engine bind group is identical for every draw, so build it
