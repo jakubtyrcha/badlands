@@ -78,6 +78,22 @@ TEST_CASE("sanitize_factors: explore_lease_millis (a divisor in town_brain.cpp) 
     CHECK(sim.Factors().hero.explore_lease_millis > 0);
 }
 
+// --- review fast-follow: MonsterFactors was entirely unswept ---------------
+// economy.cpp's spawn_from_buildings gates on `live >= static_cast<uint32_t>(cap)`
+// -- a negative cap underflows to a huge unsigned value, which silently
+// DISABLES the spawn cap (never true) instead of capping at 0. Same hazard
+// TownfolkFactors::max_alive is already protected against; MonsterFactors::
+// max_alive was not, because sanitize_factors never touched MonsterFactors
+// at all.
+
+TEST_CASE("sanitize_factors: a negative monster max_alive comes back 0, not underflowed") {
+    Sim sim{BrainDesc{}};
+    SimFactors f = sim.Factors();
+    f.monster.max_alive = -1;
+    sim.SetFactors(f);
+    CHECK(sim.Factors().monster.max_alive == 0);
+}
+
 // --- (a) unit: think_min/think_max pairing ----------------------------------
 
 TEST_CASE("sanitize_factors: an inverted think-pause pair comes back min <= max") {

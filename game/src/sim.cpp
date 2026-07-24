@@ -550,12 +550,18 @@ namespace {
 //    own -- unlike the hours-rate fields above) -- floored at a small
 //    positive integer rather than 0 for the same reason: 0 is a genuine
 //    int64 divide-by-zero (UB/crash), not merely a degenerate rate.
-//  - every remaining HeroFactors/CritterFactors/TownfolkFactors numeric field
-//    (radii, distances, durations, caps): negative is never meaningful,
-//    clamped to 0. hero.weights[]/critter.weights and hero.explore_chance[]
-//    are deliberately EXCLUDED -- 0 is a meaningful veto/"never" value for
-//    both, not a sign error. MonsterFactors and TownfolkFactors::
-//    house_income_per_day (unsigned: no sign to sanitize) are untouched.
+//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors
+//    numeric field (radii, distances, durations, caps): negative is never
+//    meaningful, clamped to 0 -- this includes MonsterFactors::max_alive,
+//    where a negative cap underflows through economy.cpp's
+//    `live >= static_cast<uint32_t>(cap)` into a huge unsigned value and
+//    silently DISABLES the spawn cap instead of capping at 0.
+//    hero.weights[]/critter.weights and hero.explore_chance[] are
+//    deliberately EXCLUDED from the clamp-to-0 sweep -- 0 is a meaningful
+//    veto/"never" value for both, not a sign error (MonsterFactors has no
+//    such field, so it carries no such exclusion).
+//    TownfolkFactors::house_income_per_day (unsigned: no sign to sanitize)
+//    is the one field left untouched.
 //
 // A field is only warned about (old value -> new value) when sanitize
 // actually moves it.
@@ -645,6 +651,13 @@ SimFactors sanitize_factors(SimFactors f) {
     clamp_nonneg("townfolk.max_alive", t.max_alive);
     clamp_nonneg("townfolk.move_speed", t.move_speed);
     // house_income_per_day is unsigned -- no sign to sanitize.
+
+    MonsterFactors& m = f.monster;
+    clamp_nonneg("monster.spawn_interval_millis", m.spawn_interval_millis);
+    // max_alive: see this function's doc comment -- a negative cap underflows
+    // through economy.cpp's `live >= static_cast<uint32_t>(cap)` and silently
+    // disables the spawn cap instead of capping at 0.
+    clamp_nonneg("monster.max_alive", m.max_alive);
 
     return f;
 }

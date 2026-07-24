@@ -546,10 +546,11 @@ TEST_CASE("EntityMemory is deterministic: two identical runs match after sorting
 
 TEST_CASE("a smaller memory_ttl_millis factor forgets a stale sighting sooner") {
     auto g = make_world(BrainDesc{});
-    // Sim::SetFactors (sim.cpp) is exactly `game.factors = f`; mutating the
-    // field directly here is the same operation, consistent with this
-    // suite's BadlandsGame*-fixture style (make_world/tick_world, not the
-    // Sim wrapper).
+    // Direct field write, not Sim::SetFactors -- consistent with this suite's
+    // BadlandsGame*-fixture style (make_world/tick_world, not the Sim
+    // wrapper). This deliberately bypasses set_factors_of's sanitize_factors
+    // boundary (sim.cpp); the value used (200, positive) is sanitize-clean
+    // regardless, so the bypass changes nothing observable here.
     g->factors.hero.memory_ttl_millis = 200;  // ~6 ticks, instead of the 10s default
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 20.0f));
     make_observer(*g, a);
