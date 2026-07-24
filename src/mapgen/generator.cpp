@@ -134,6 +134,8 @@ MapArtifacts generate_map(const MapGenParams& params) {
   return a;
 }
 
+namespace {
+
 // One 1D pass of the Felzenszwalb–Huttenlocher squared-distance transform:
 // given f[i] = best squared WORLD distance already achieved at sample i
 // (kBigD = "no seed"), writes d[i] = min_j(f[j] + (step*(i-j))^2) via the
@@ -176,11 +178,13 @@ void dt1d(const std::vector<double>& f, std::vector<double>& d,
   }
 }
 
+}  // namespace
+
 Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
                                   glm::vec2 texel_m) {
   const int w = biome.width, h = biome.height;
+  if (w <= 0 || h <= 0) return Field2D<float>{};
   Field2D<float> out(w, h, 0.0f);
-  if (w <= 0 || h <= 0) return out;
 
   const auto kPlains = static_cast<uint8_t>(Biome::Plains);
   bool any_plains = false;
