@@ -8,6 +8,12 @@
 # decode_decision / apply_brain_decision) -- this module only ever sees a
 # BlViewWire and only ever produces a BlDecisionWire.
 #
+# ABI boilerplate (buffers, bl_abi_version/bl_spawn/bl_despawn/bl_view_buf/
+# bl_out_buf/bl_tick, NimMain/bl_log imports) lives in brain_scaffold.nim --
+# see its CONTRACT comment. This file is just imports + the two hooks:
+# brainInit (the init log line) and brainTick (this brain's ENTIRE decision
+# logic).
+#
 # Compiled to wasm32-wasi via scripts/build_brains.sh; must import at most
 # env.bl_log (enforced by src/crates/brainhost's bh_instantiate) -- so no
 # echo/io/os module usage anywhere in this file or its imports.
@@ -19,19 +25,7 @@ import blocks
 import selectors
 import deliberation
 
-# Nim's own entry point, normally called by a generated C main() -- our build
-# is --nomain (no host to call it for us), so bl_init calls it once, exactly
-# as a normal Nim program's startup would, before any other exported proc
-# runs.
-proc NimMain() {.importc, cdecl.}
-
-# The one host import a brain may make (env.bl_log; the "env" module name is
-# wasm-ld's default for an undefined symbol with --allow-undefined and no
-# explicit import-module attribute -- see brainhost.h's contract).
-proc bl_log(level: int32, msg_ptr: int32, len: int32) {.importc, cdecl.}
-
-var g_view_buf: BlViewWire
-var g_out_buf: BlDecisionWire
+include brain_scaffold
 
 # EVERY hero class runs this one table (town_brain.cpp's own comment: "there
 # is no per-class list" -- what a class does, how eagerly, and whether it has
@@ -48,27 +42,11 @@ const kHeroActivities = [
   ActivityEntry(id: ActIdle, band: bNormal, score: scoreIdle, act: actIdle),
 ]
 
-proc bl_abi_version*(): int32 {.exportc, cdecl.} =
-  BL_ABI_VERSION
-
-proc bl_init*(world_seed: int32) {.exportc, cdecl.} =
-  NimMain()
+proc brainInit() =
   const msg: cstring = "hero brain v1 init"
   bl_log(0'i32, cast[int32](msg), len(msg).int32)
 
-proc bl_spawn*(slot: int32, cls: int32, seed: int32) {.exportc, cdecl.} =
-  discard  # no per-hero state: every decision is a pure function of the view
-
-proc bl_despawn*(slot: int32) {.exportc, cdecl.} =
-  discard
-
-proc bl_view_buf*(): int32 {.exportc, cdecl.} =
-  cast[int32](g_view_buf.addr)
-
-proc bl_out_buf*(): int32 {.exportc, cdecl.} =
-  cast[int32](g_out_buf.addr)
-
-proc bl_tick*(slot: int32): int32 {.exportc, cdecl.} =
+proc brainTick(slot: int32): int32 =
   if g_view_buf.version != BL_ABI_VERSION.uint32:
     return 1
 
