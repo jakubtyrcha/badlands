@@ -16,6 +16,7 @@ NodeHandle AddMeshEntity(SceneGraph& scene, const char* name,
 
   ResolvedMesh resolved{
       .vertices = std::move(mesh.mesh.vertices),
+      .indices = std::move(mesh.mesh.indices),
       .vertex_count = mesh.mesh.vertex_count,
       .geometry_type = mesh.mesh.geometry_type,
       .local_bounds = mesh.local_bounds,
@@ -41,6 +42,7 @@ NodeHandle AddTransparentMeshEntity(SceneGraph& scene, const char* name,
 
   ResolvedMesh resolved{
       .vertices = std::move(mesh.mesh.vertices),
+      .indices = std::move(mesh.mesh.indices),
       .vertex_count = mesh.mesh.vertex_count,
       .geometry_type = mesh.mesh.geometry_type,
       .local_bounds = mesh.local_bounds,
