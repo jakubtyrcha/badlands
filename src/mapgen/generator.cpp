@@ -201,8 +201,15 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
 
   const auto basins = carve_cavities(B, bedrock_sim, ep.lake_frac, ep.lake_depth_m);
   if (sink) sink->dump("cavities", seq++, basins);
+  if (sink) sink->dump("cavities-height", seq++, B);
   auto S = init_sediment(dist, basins, ep, texel_sim, origin_sim, params.seed);
   if (sink) sink->dump("sediment-init", seq++, S);
+
+  // v1.1: capped micro-fill — kills noise-scale puddles at the source
+  // (shallow closed depressions in the init surface) while leaving real
+  // basins (deeper than kMicroFillCapM, or seeded cavities) untouched.
+  micro_fill(B, S, basins, texel_sim);
+  if (sink) sink->dump("micro-fill", seq++, S);
 
   const auto sim_out = erode(B, S, ep, texel_sim, sink);
 

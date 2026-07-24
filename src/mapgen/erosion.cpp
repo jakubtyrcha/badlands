@@ -52,6 +52,49 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
   return s;
 }
 
+float micro_fill(Field2D<float>& B, Field2D<float>& S,
+                 const Field2D<uint8_t>& basin_mask, float texel_m) {
+  const int w = B.width, ht = B.height;
+  Field2D<float> h(w, ht);
+  for (size_t i = 0; i < h.data.size(); ++i) h.data[i] = B.data[i] + S.data[i];
+  const FlowRouting r = route_flow(h, texel_m, kEpsilonM);
+  const float texel_area = texel_m * texel_m;
+
+  double total_filled = 0.0;
+  std::vector<uint8_t> seen(h.size(), 0);
+  std::vector<int> stack, member;
+  for (int start = 0; start < w * ht; ++start) {
+    if (seen[start] || !r.in_lake[start]) continue;
+    stack.assign(1, start);
+    member.clear();
+    seen[start] = 1;
+    float max_depth = 0.0f;
+    bool touches_basin = false;
+    while (!stack.empty()) {
+      const int i = stack.back();
+      stack.pop_back();
+      member.push_back(i);
+      max_depth = std::max(max_depth, r.water_level[i] - h.data[i]);
+      if (basin_mask.data[i]) touches_basin = true;
+      const int x = i % w, y = i / w;
+      const int nb[4] = {i - 1, i + 1, i - w, i + w};
+      const bool ok[4] = {x > 0, x < w - 1, y > 0, y < ht - 1};
+      for (int k = 0; k < 4; ++k)
+        if (ok[k] && !seen[nb[k]] && r.in_lake[nb[k]]) {
+          seen[nb[k]] = 1;
+          stack.push_back(nb[k]);
+        }
+    }
+    if (max_depth > kMicroFillCapM || touches_basin) continue;
+    for (const int i : member) {
+      const float fill = r.water_level[i] - h.data[i];
+      S.data[i] += fill;
+      total_filled += static_cast<double>(fill) * texel_area;
+    }
+  }
+  return static_cast<float>(total_filled);
+}
+
 Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
                       const FlowRouting& r, const Field2D<float>& area,
                       const ErosionParams& p, float texel_m) {

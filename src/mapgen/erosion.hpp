@@ -35,6 +35,7 @@ struct ErosionParams {
 
 inline constexpr int kPadTexels = 16;      // sim-grid margin, cropped on output
 inline constexpr float kEpsilonM = 1e-4f;  // flood epsilon per step
+inline constexpr float kMicroFillCapM = 0.75f;  // deepest depression micro_fill may raise
 
 // Subtract smooth cavity bowls where sim-grid bedrock is in its bottom
 // lake_frac quantile. Depth grows quadratically from the quantile rim to
@@ -49,6 +50,16 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
                              const Field2D<uint8_t>& basin_mask,
                              const ErosionParams& p, float texel_m,
                              float origin_m, uint32_t seed);
+
+// Routes h = B + S once, then raises every closed-depression component of
+// `in_lake` cells (4-connected) whose max fill depth (water_level - h) is <=
+// kMicroFillCapM AND which contains no basin_mask cell, crediting the fill
+// depth to S per member (water_level keeps route_flow's epsilon tilt, so
+// filled areas still drain). Deeper depressions and any component touching a
+// seeded cavity are left untouched. Deterministic. Returns filled volume
+// (m^3).
+float micro_fill(Field2D<float>& B, Field2D<float>& S,
+                 const Field2D<uint8_t>& basin_mask, float texel_m);
 
 // One implicit Braun–Willett pass in routing order over ground h = B + S.
 // K per cell: k_sediment while S > 0 else k_bedrock. On bare bedrock (S == 0)

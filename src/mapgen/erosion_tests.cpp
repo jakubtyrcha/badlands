@@ -430,6 +430,86 @@ TEST_CASE("erode: deterministic, and the sink sees the loop film strip") {
   REQUIRE(sink.masks == 2 * 1);   // lakes mask × 2 dumps
 }
 
+namespace {
+// 1D ramp world (like make_ramp: one interior row, y=1, borders y=0/y=2 —
+// avoids spurious flats from a y-invariant field, which route_flow also
+// flags in_lake per its documented flat-leveling behavior) with a
+// flat-bottomed pit whose floor sits `depth_m` below the pit's lowest
+// boundary (the west rim, since the ramp rises with x): a genuine,
+// uniformly-deep closed depression, independent of route_flow's own
+// semantics so the expected fill volume (width * depth_m) is knowable up
+// front.
+struct PitWorld {
+  Field2D<float> B, S;
+  int x0, x1;  // pit footprint [x0,x1) on row y=1, interior to the grid
+};
+PitWorld make_pit(float depth_m) {
+  PitWorld t{Field2D<float>(25, 3), Field2D<float>(25, 3, 0.0f), 10, 15};
+  for (int y = 0; y < 3; ++y)
+    for (int x = 0; x < 25; ++x) t.B.at(x, y) = 0.05f * static_cast<float>(x);
+  const float west_rim = 0.05f * static_cast<float>(t.x0 - 1);
+  for (int x = t.x0; x < t.x1; ++x) t.B.at(x, 1) = west_rim - depth_m;
+  return t;
+}
+}  // namespace
+
+TEST_CASE("micro_fill: shallow bowl fills fully, no residual in_lake, volume ~= bowl volume") {
+  auto t = make_pit(0.5f);
+  Field2D<uint8_t> basins(25, 3, 0);
+  const float expected_volume = static_cast<float>(t.x1 - t.x0) * 0.5f;
+
+  const float filled = micro_fill(t.B, t.S, basins, 1.0f);
+  REQUIRE(filled == Catch::Approx(expected_volume).epsilon(0.02));
+
+  Field2D<float> h(25, 3);
+  for (size_t i = 0; i < h.data.size(); ++i) h.data[i] = t.B.data[i] + t.S.data[i];
+  const auto r = route_flow(h, 1.0f, 1e-4f);
+  // fully drained: any surviving in_lake flag is float-rounding noise (the
+  // fill matches route_flow's own epsilon-cascaded water_level to a ULP),
+  // not a real residual depression, so bound the depth, not the flag.
+  float max_residual_depth = 0.0f;
+  for (size_t i = 0; i < r.in_lake.size(); ++i)
+    if (r.in_lake[i])
+      max_residual_depth = std::max(max_residual_depth, r.water_level[i] - h.data[i]);
+  REQUIRE(max_residual_depth < 1e-5f);
+}
+
+TEST_CASE("micro_fill: deep pocket left untouched") {
+  auto t = make_pit(5.0f);
+  Field2D<uint8_t> basins(25, 3, 0);
+  const auto S_before = t.S.data;
+
+  const float filled = micro_fill(t.B, t.S, basins, 1.0f);
+
+  REQUIRE(filled == Catch::Approx(0.0f).margin(1e-4));
+  REQUIRE(t.S.data == S_before);
+}
+
+TEST_CASE("micro_fill: component touching basin_mask untouched even when shallow") {
+  auto t = make_pit(0.5f);
+  Field2D<uint8_t> basins(25, 3, 0);
+  basins.at(t.x0, 1) = 1;  // one pit member seeded as a cavity
+  const auto S_before = t.S.data;
+
+  const float filled = micro_fill(t.B, t.S, basins, 1.0f);
+
+  REQUIRE(filled == Catch::Approx(0.0f).margin(1e-4));
+  REQUIRE(t.S.data == S_before);
+}
+
+TEST_CASE("micro_fill: deterministic") {
+  auto t1 = make_pit(0.5f);
+  auto t2 = make_pit(0.5f);
+  Field2D<uint8_t> basins(25, 3, 0);
+
+  const float f1 = micro_fill(t1.B, t1.S, basins, 1.0f);
+  const float f2 = micro_fill(t2.B, t2.S, basins, 1.0f);
+
+  REQUIRE(f1 == f2);
+  REQUIRE(t1.S.data == t2.S.data);
+  REQUIRE(t1.B.data == t2.B.data);
+}
+
 TEST_CASE("resample_bilinear: identity when grids coincide, linear in between") {
   Field2D<float> src(8, 8);
   for (int y = 0; y < 8; ++y)
@@ -464,7 +544,8 @@ TEST_CASE("generate_map: debug sink sees the full stage sequence") {
   Recorder rec;
   generate_map(p, &rec);
   const std::vector<std::string> expected = {
-      "bedrock", "biome-sim", "cone", "cavities", "sediment-init",
+      "bedrock", "biome-sim", "cone", "cavities", "cavities-height",
+      "sediment-init", "micro-fill",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
       "water", "detail-delta", "final-height", "biome"};
