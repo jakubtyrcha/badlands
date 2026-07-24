@@ -2,6 +2,7 @@
 #include <cmath>
 #include "game/geometry/tree_options.hpp"
 #include "game/geometry/tree_generator.hpp"
+#include "game/geometry/leaf_texture.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 
 using namespace badlands;
@@ -156,4 +157,21 @@ TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
   const TexturedMeshResult r = GenerateLeafMesh(o);
   REQUIRE(r.mesh.vertex_count == 0u);
   REQUIRE(r.mesh.indices.empty());
+}
+
+TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card") {
+  const int n = 64;
+  const std::vector<uint8_t> px = BuildLeafRgba8(n, glm::vec3(0.30f, 0.55f, 0.18f));
+  REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
+  auto alpha = [&](int x, int y) {
+    return px[(static_cast<size_t>(y) * n + static_cast<size_t>(x)) * 4 + 3];
+  };
+  REQUIRE(alpha(n / 2, n / 2) == 255);   // center is inside the leaf
+  REQUIRE(alpha(0, 0) == 0);             // corners are outside
+  REQUIRE(alpha(n - 1, 0) == 0);
+  REQUIRE(alpha(0, n - 1) == 0);
+  REQUIRE(alpha(n - 1, n - 1) == 0);
+  // RGB carries the leaf color (green > red at the center texel).
+  const size_t c = (static_cast<size_t>(n / 2) * n + static_cast<size_t>(n / 2)) * 4;
+  REQUIRE(px[c + 1] > px[c + 0]);
 }

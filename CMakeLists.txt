@@ -673,6 +673,7 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
     src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_tests PRIVATE
