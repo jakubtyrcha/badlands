@@ -628,6 +628,20 @@ if(APPLE)
 endif()
 add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+add_executable(badlands_tree_tests
+    game/tests/tree_generator_tests.cpp
+    src/game/geometry/tree_generator.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_tree_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_tree_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_tree_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of
 # shaders/passes/decals.wesl. Pure CPU (header-only math + glm), so it runs the
