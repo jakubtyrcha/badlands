@@ -319,7 +319,8 @@ CpuImage RenderRegistry(TestGpu& g, entt::registry& reg, bool transparent,
       RenderForwardTransparentMeshes(pass, frame, reg,
                                      glm::vec3(0.0f, 10.0f, 0.0f), cache, engine);
     } else {
-      RenderForwardMeshes(pass, frame, reg, glm::vec3(0.0f, 10.0f, 0.0f), cache);
+      RenderForwardMeshes(pass, frame, reg, glm::vec3(0.0f, 10.0f, 0.0f), cache,
+                          engine);
     }
     pass.End();
   }

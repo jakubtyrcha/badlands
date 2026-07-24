@@ -59,6 +59,33 @@ NodeHandle AddTransparentMeshEntity(SceneGraph& scene, const char* name,
   return node;
 }
 
+NodeHandle AddForwardOpaqueMeshEntity(SceneGraph& scene, const char* name,
+                                      TexturedMeshResult&& mesh,
+                                      MaterialInstanceFactory* factory,
+                                      const InstanceParams& params,
+                                      const glm::mat4& transform) {
+  NodeHandle node = scene.CreateNode(name);
+  scene.SetLocalTransform(node, Trs::FromMatrix(transform));
+
+  ResolvedMesh resolved{
+      .vertices = std::move(mesh.mesh.vertices),
+      .indices = std::move(mesh.mesh.indices),
+      .vertex_count = mesh.mesh.vertex_count,
+      .geometry_type = mesh.mesh.geometry_type,
+      .local_bounds = mesh.local_bounds,
+  };
+
+  scene.AddAttachment(node,
+                      MeshAttachment{
+                          .mesh = std::move(resolved),
+                          .factory = factory,
+                          .pass_type = MaterialPassType::kForwardOpaque,
+                          .params = params,
+                      });
+
+  return node;
+}
+
 namespace {
 
 // Shared quad/transform construction for both AddFloor overloads below --

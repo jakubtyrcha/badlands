@@ -96,6 +96,11 @@ struct FactoryDescriptor {
   // depth-writing pipeline is invalid against). The shadow pass always writes
   // depth regardless (it is depth-only); every other pass honors this flag.
   bool depth_write = true;
+
+  // Cull mode for this material's pipelines. Defaults to Back (unchanged
+  // behavior for every existing material); a material that wants no culling
+  // (e.g. double-sided foliage) can set None.
+  wgpu::CullMode cull_mode = wgpu::CullMode::Back;
 };
 
 // Build factory from descriptor. script_provider required when

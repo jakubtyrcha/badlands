@@ -761,6 +761,30 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
                          gbuffer_.GetDepthView(), shadow_map_.GetDepthView(),
                          shadow_comparison_sampler_, width_, height_);
 
+  // Engine resources shared by both forward passes' @group(2) bind (see
+  // ForwardEngineResources). Built once and passed to both RenderForwardMeshes
+  // and RenderForwardTransparentMeshes below. `scene_color` holds
+  // hdr_color_copy_view_, a view onto a persistent copy texture (created once
+  // in CreateTargets) whose *contents* SnapshotHdrColor() refreshes in place
+  // (GPU copy) just before the transparent pass -- the view handle itself
+  // never changes, so no re-assignment is needed there. At forward-opaque
+  // time the copy still holds last frame's contents (unused today: no
+  // forward-opaque material samples scene_color).
+  const bool use_pref = has_prefiltered_ && prefiltered_.IsValid();
+  ForwardEngineResources engine;
+  engine.scene_depth = gbuffer_.GetDepthView();
+  engine.scene_color = hdr_color_copy_view_;
+  engine.scene_color_sampler = linear_clamp_sampler_;
+  engine.ibl_prefiltered =
+      use_pref ? prefiltered_.GetView() : fallback_cube_view_;
+  engine.ibl_sampler =
+      use_pref ? prefiltered_.GetSampler() : fallback_cube_sampler_;
+  engine.brdf_lut = brdf_lut_.GetView();
+  engine.brdf_lut_sampler = brdf_lut_.GetSampler();
+  engine.shadow_map = shadow_map_.GetDepthView();
+  engine.shadow_sampler = shadow_comparison_sampler_;
+  engine.time_seconds = scene.time_seconds;
+
   // === Pass 3.7: Forward-opaque. Draws ForwardOpaqueRenderable meshes (which
   // bypass the G-buffer and light themselves) into the HDR target with the
   // G-buffer depth Load + write, so they occlude / are occluded by opaque
@@ -787,7 +811,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
 
     RenderPassContext pass = frame.BeginRenderPass(desc);
     RenderForwardMeshes(pass, frame, registry, camera_world_pos,
-                        material_instance_cache_);
+                        material_instance_cache_, engine);
     pass.End();
   }
 
@@ -818,20 +842,10 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.depthStencilAttachment = &depth_attachment;
 
     RenderPassContext pass = frame.BeginRenderPass(desc);
-    const bool use_pref = has_prefiltered_ && prefiltered_.IsValid();
-    ForwardEngineResources engine;
-    engine.scene_depth = gbuffer_.GetDepthView();
-    engine.scene_color = hdr_color_copy_view_;
-    engine.scene_color_sampler = linear_clamp_sampler_;
-    engine.ibl_prefiltered =
-        use_pref ? prefiltered_.GetView() : fallback_cube_view_;
-    engine.ibl_sampler =
-        use_pref ? prefiltered_.GetSampler() : fallback_cube_sampler_;
-    engine.brdf_lut = brdf_lut_.GetView();
-    engine.brdf_lut_sampler = brdf_lut_.GetSampler();
-    engine.shadow_map = shadow_map_.GetDepthView();
-    engine.shadow_sampler = shadow_comparison_sampler_;
-    engine.time_seconds = scene.time_seconds;
+    // `engine` (built above, shared with the forward-opaque pass) already
+    // holds hdr_color_copy_view_ in scene_color; SnapshotHdrColor() just
+    // refreshed that view's underlying texture contents in place (same
+    // texture, same view handle), so no re-assignment is needed here.
     RenderForwardTransparentMeshes(pass, frame, registry, camera_world_pos,
                                    material_instance_cache_, engine);
     pass.End();
