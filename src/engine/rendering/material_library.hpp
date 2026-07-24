@@ -95,8 +95,9 @@ class MaterialLibrary {
   // material bound to the given `albedo` view + `sampler` (the caller owns and
   // keeps them alive). `cutoff` is the alpha discard threshold; `tint`
   // multiplies the sampled RGB (e.g. white leaf texture * green tint). The
-  // material lights itself (sun + SH ambient + subtle IBL) and receives/casts
-  // sun shadows via the engine's forward @group(2) resources. General
+  // material declares no @group(2): it lights itself with sun + SH ambient
+  // only (no IBL, does not receive shadows), but still casts leaf-shaped
+  // shadows via its own alpha-tested shadow-pass variant. General
   // alpha-cutout material -- no foliage-specific logic. The underlying
   // forward-opaque factory (shader "leaf") is built once, lazily, and shared by
   // every call: only the per-instance albedo/tint/cutoff vary. Meshes drawn

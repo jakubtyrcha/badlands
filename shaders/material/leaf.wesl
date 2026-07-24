@@ -41,9 +41,8 @@ struct VertexInput {
 @if(!shadow_pass)
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) worldOffsetPos: vec3<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) worldNormal: vec3<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) worldNormal: vec3<f32>,
 }
 @if(shadow_pass)
 struct VertexOutputShadow {
@@ -57,7 +56,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     let world = (object.modelMatrix * vec4<f32>(input.pos, 1.0)).xyz;
     output.position = worldCameraOffsetedSpaceToClipSpace(world);
-    output.worldOffsetPos = world;
     output.uv = input.uv;
     output.worldNormal = (object.modelMatrix * vec4<f32>(input.normal, 0.0)).xyz;
     return output;
