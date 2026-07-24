@@ -19,7 +19,7 @@ The merged biome generator (`src/mapgen/generator.{hpp,cpp}`) fills `MapArtifact
 - Tunables are fixed `constexpr` (`kSlopeMPerM = 0.15f` starting value) — no knobs/config.
 - EDT oracle tests use power-of-two texel values (1.0, 2.0, 0.5) so all double arithmetic is exact and `REQUIRE(a == b)` on floats is legitimate, not flaky.
 - `parallel_tiles` lives in `src/mapgen/parallel.hpp`; `Field2D` in `src/mapgen/field2d.hpp` (reuse, don't reinvent).
-- Run everything from the repo root; build `cmake --build build`; tests `ctest --test-dir build` (31 targets throughout — the new tests join the existing `badlands_generator_tests`).
+- Run everything from the repo root; build `cmake --build build`; tests `ctest --test-dir build` (32 targets throughout (the new tests join the existing `badlands_generator_tests`).
 - Commits end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 - NOTE: the working tree carries an UNCOMMITTED edit to the spec's Method section (the world-units clarification) — Task 1 commits it; do not discard it.
 
@@ -365,7 +365,7 @@ and in `generate_map`, after the `classify_biomes` line:
     a.heightmap.data[i] = kSlopeMPerM * dist.data[i];
 ```
 
-- [ ] **Step 4: Run → all 10 cases PASS**; full `cmake --build build && ctest --test-dir build` (31/31).
+- [ ] **Step 4: Run → all 10 cases PASS**; full `cmake --build build && ctest --test-dir build` (32/32).
 
 - [ ] **Step 5: Commit**
 
@@ -446,7 +446,7 @@ git commit -m "feat(mapview): hillshade preview; tune relief slope (kSlopeMPerM=
 - [ ] **Step 2: Verification battery**
 
 ```bash
-cmake --build build && ctest --test-dir build          # 31/31
+cmake --build build && ctest --test-dir build          # 32/32
 ./build/badlands_mapview --preview-image-only --seed 2 --out <scratch>/final && ls <scratch>/final   # 4 PNGs incl. hillshade.png
 ./build/badlands_mapview --resolution 256x256 --size 512x512 --preview-image-only --seed 2 --out <scratch>/final_coarse   # same map coarser; hillshade slopes comparable (units guard, by eye)
 ./build/badlands_game --screenshot <scratch>/game.png  # game app unaffected
