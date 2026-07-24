@@ -550,18 +550,25 @@ namespace {
 //    own -- unlike the hours-rate fields above) -- floored at a small
 //    positive integer rather than 0 for the same reason: 0 is a genuine
 //    int64 divide-by-zero (UB/crash), not merely a degenerate rate.
-//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors
-//    numeric field (radii, distances, durations, caps): negative is never
-//    meaningful, clamped to 0 -- this includes MonsterFactors::max_alive,
-//    where a negative cap underflows through economy.cpp's
-//    `live >= static_cast<uint32_t>(cap)` into a huge unsigned value and
-//    silently DISABLES the spawn cap instead of capping at 0.
+//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors/
+//    ProgressionFactors numeric field (radii, distances, durations, caps;
+//    ProgressionFactors::xp_per_texel/kill_xp_radius/level_exponent):
+//    negative is never meaningful, clamped to 0 -- this includes
+//    MonsterFactors::max_alive, where a negative cap underflows through
+//    economy.cpp's `live >= static_cast<uint32_t>(cap)` into a huge unsigned
+//    value and silently DISABLES the spawn cap instead of capping at 0.
 //    hero.weights[]/critter.weights and hero.explore_chance[] are
 //    deliberately EXCLUDED from the clamp-to-0 sweep -- 0 is a meaningful
 //    veto/"never" value for both, not a sign error (MonsterFactors has no
 //    such field, so it carries no such exclusion).
 //    TownfolkFactors::house_income_per_day (unsigned: no sign to sanitize)
 //    is the one field left untouched.
+//  - progression.level_base_xp: floored like the DIVISOR fields above, but
+//    at 1 rather than a divisor's epsilon/1ms -- it scales xp_to_next's
+//    leveling-curve threshold (floor(level_base_xp * L^level_exponent)), and
+//    a base below 1 collapses every threshold to (near) 0 rather than merely
+//    degenerating one rate, so it gets its own floor instead of joining the
+//    clamp-to-0 sweep.
 //
 // A field is only warned about (old value -> new value) when sanitize
 // actually moves it.
@@ -658,6 +665,17 @@ SimFactors sanitize_factors(SimFactors f) {
     // through economy.cpp's `live >= static_cast<uint32_t>(cap)` and silently
     // disables the spawn cap instead of capping at 0.
     clamp_nonneg("monster.max_alive", m.max_alive);
+
+    ProgressionFactors& p = f.progression;
+    clamp_nonneg("progression.xp_per_texel", p.xp_per_texel);
+    clamp_nonneg("progression.kill_xp_radius", p.kill_xp_radius);
+    clamp_nonneg("progression.level_exponent", p.level_exponent);
+    // The curve's scale: xp_to_next floors its result at 1 anyway, but a base
+    // below 1 collapses every threshold and the warn is the designer's signal.
+    if (p.level_base_xp < 1) {
+        warn_adjusted("progression.level_base_xp", p.level_base_xp, 1);
+        p.level_base_xp = 1;
+    }
 
     return f;
 }

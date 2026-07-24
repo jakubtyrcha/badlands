@@ -302,6 +302,18 @@ struct MonsterFactors {
     int32_t max_alive = 4;                  // cap on live rats
 };
 
+// Hero progression: XP accrual + the leveling curve. XP amounts are INTEGERS.
+struct ProgressionFactors {
+    // XP per newly-discovered fog texel, credited to the discovering hero.
+    int32_t xp_per_texel = 1;
+    // A killed creature's xp_reward splits evenly (round up) over heroes
+    // within this radius of the corpse (euclidean; obstacles ignored).
+    float kill_xp_radius = 10.0f;
+    // Cost to advance FROM level L: floor(level_base_xp * L^level_exponent).
+    int32_t level_base_xp = 100;
+    float level_exponent = 1.6f;
+};
+
 struct SimFactors {
     // Fills the activity weight tables with the compiled per-class defaults
     // (the scalar members above carry their own in-class defaults). Declared
@@ -313,6 +325,7 @@ struct SimFactors {
     CritterFactors critter;
     TownfolkFactors townfolk;
     MonsterFactors monster;
+    ProgressionFactors progression;
 };
 
 // ---- combat primitives -----------------------------------------------------
