@@ -175,7 +175,8 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
     view_->OnResize(config_.width, config_.height);
     bool ok = SaveScreenshot(gpu_, *pipeline_gen_, *view_, shot_w, shot_h,
                              screenshot_path, renderer_.GetDebugMode(),
-                             renderer_.GetShadowDebugMode(), screenshot_time);
+                             renderer_.GetShadowDebugMode(), screenshot_time,
+                             renderer_.GetColorGradingConfig());
     return ok ? 0 : 1;
   }
 
@@ -352,7 +353,8 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
       recorder_.CaptureFrame(gpu_, *pipeline_gen_, *view_,
                              static_cast<uint32_t>(config_.width),
                              static_cast<uint32_t>(config_.height),
-                             renderer_.GetDebugMode());
+                             renderer_.GetDebugMode(),
+                             renderer_.GetColorGradingConfig());
       view_->OnResize(width, height);
     }
 

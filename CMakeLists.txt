@@ -165,6 +165,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/gpu_timer.cpp
     src/engine/rendering/volumetric_fog.cpp
     src/engine/rendering/fog_simulation.cpp
+    src/engine/rendering/color_grading.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp

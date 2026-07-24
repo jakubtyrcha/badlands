@@ -70,12 +70,14 @@ bool ScreenshotRecorder::EnsureTarget(GpuContext& gpu,
 void ScreenshotRecorder::CaptureFrame(GpuContext& gpu,
                                       GpuPipelineGenerator& pipeline_gen,
                                       AppView& view, uint32_t w, uint32_t h,
-                                      GBufferDebugMode debug_mode) {
+                                      GBufferDebugMode debug_mode,
+                                      const ColorGradingConfig& grading) {
   if (!active_) return;
 
   if (!EnsureTarget(gpu, pipeline_gen, w, h)) return;
 
   offscreen_renderer_.SetDebugMode(debug_mode);
+  offscreen_renderer_.SetColorGradingConfig(grading);
   view.Update(0.0f, SDL_GetKeyboardState(nullptr));
   offscreen_renderer_.Render(view.GetCamera(), view.GetRegistry(),
                              view.GetSceneContext(), offscreen_view_);

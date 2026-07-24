@@ -38,6 +38,7 @@
 #include "engine/rendering/prefiltered_cubemap.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/shadow_map.hpp"
+#include "engine/rendering/color_grading.hpp"
 #include "engine/rendering/volumetric_fog.hpp"
 #include "engine/rendering/fog_simulation.hpp"
 
@@ -206,6 +207,21 @@ class SceneRenderer {
   // accessor; SceneRenderer advances it each Render() and feeds VolumetricFog.
   FogSimulation& GetFogSimulation() { return fog_sim_; }
 
+  // Color grading (Task: P3/HDR color grading). Takes effect on the next
+  // Render() call. The grade pass runs after projected decals and before
+  // debug lines, remapping the HDR working buffer in Oklab (crush blacks +
+  // desaturate midtones). Disabled by default; MutableColorGradingConfig()
+  // is for the ImGui editor (EditorUI::DrawColorGradingEditor).
+  void SetColorGradingConfig(const ColorGradingConfig& config) {
+    color_grading_.SetConfig(config);
+  }
+  const ColorGradingConfig& GetColorGradingConfig() const {
+    return color_grading_.GetConfig();
+  }
+  ColorGradingConfig& MutableColorGradingConfig() {
+    return color_grading_.MutableConfig();
+  }
+
   // Display-P3 output (Task: P3/HDR output). When set (from GpuContext::IsP3()),
   // the tonemap resolve runs in mode 2: convert the linear-sRGB working buffer
   // to Display-P3 primaries, then either pass linear through (float surface =
@@ -323,6 +339,7 @@ class SceneRenderer {
   // Volumetric terrain fog (Task: fog rendering). Owns the media cascade 3D
   // texture + pipelines; driven between deferred lighting and tonemap.
   VolumetricFog volumetric_fog_;
+  ColorGrading color_grading_;
   FogSimulation fog_sim_;
 
   // Contact-shadow term (T2 creates it; T5's SSCS fullscreen render pass

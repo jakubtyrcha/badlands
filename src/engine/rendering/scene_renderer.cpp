@@ -140,6 +140,10 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
   // Map fog generator: produces the sim density field VolumetricFog reconstructs
   // the media from. Sources (emitters) are supplied by the game.
   fog_sim_.Initialize(device_, queue_);
+
+  // Color grading (Task: P3/HDR color grading): Oklab stylization pass between
+  // decals and debug lines; disabled by default (ColorGradingConfig.enabled).
+  color_grading_.Initialize(pipeline_generator_, accumulation_format_);
 }
 
 void SceneRenderer::UpdateIbl(const SceneContext& scene) {
@@ -848,6 +852,26 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
                           // a selection highlight is UI, so its dashes keep
                           // marching while the game is paused.
                           scene.real_time_seconds, gpu_timer_);
+  }
+
+  // === Pass 3.9: Color grading (Task: P3/HDR color grading) — Oklab
+  // stylization (crush blacks + desaturate midtones) remapping the whole lit
+  // scene, AFTER decals (so highlights are graded with the scene) and BEFORE
+  // debug lines (dev overlays stay true-colored). Same snapshot-copy pattern
+  // as the post-scene hook: the HDR colour can't be sampled while bound as
+  // the target. Skipped entirely when disabled — the buffer needs no
+  // conversion (grading is pure stylization; the P3 step lives in the
+  // resolve). ===
+  if (color_grading_.GetConfig().enabled) {
+    wgpu::TexelCopyTextureInfo copy_src{};
+    copy_src.texture = hdr_color_texture_;
+    wgpu::TexelCopyTextureInfo copy_dst{};
+    copy_dst.texture = hdr_color_copy_texture_;
+    wgpu::Extent3D copy_ext = {width_, height_, 1};
+    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+
+    color_grading_.Render(frame, gpu_timer_, hdr_color_copy_view_,
+                          hdr_color_view_);
   }
 
   // === Pass 3.6: Debug lines — world-space thick (screen-aligned, AA) lines
