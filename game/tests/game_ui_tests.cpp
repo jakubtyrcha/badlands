@@ -54,7 +54,7 @@ CharacterState MakeHero(uint32_t id, float x, float z,
 // running app). Returns nullptr if the font is missing/unreadable; callers
 // REQUIRE non-null so a missing asset fails loudly rather than skipping silently.
 UiContext* LoadHudFont() {
-  FILE* f = fopen("assets/fonts/CormorantUnicase-Regular.ttf", "rb");
+  FILE* f = fopen("assets/fonts/IM_Fell_DW_Pica/IMFellDWPica-Regular.ttf", "rb");
   if (!f) return nullptr;
   fseek(f, 0, SEEK_END);
   const long size = ftell(f);
@@ -342,7 +342,7 @@ TEST_CASE("BuildHud lays out a selection panel with working buttons",
     UiContext* ctx = nullptr;
     {
         // Real shipping font, so this covers the actual atlas bake path.
-        FILE* f = fopen("assets/fonts/CormorantUnicase-Regular.ttf", "rb");
+        FILE* f = fopen("assets/fonts/IM_Fell_DW_Pica/IMFellDWPica-Regular.ttf", "rb");
         REQUIRE(f != nullptr);
         fseek(f, 0, SEEK_END);
         const long size = ftell(f);

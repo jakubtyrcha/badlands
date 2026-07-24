@@ -305,7 +305,7 @@ bool GameView::Initialize(const RenderContext& ctx) {
   ui_ = std::make_unique<UiRenderer>();
   if (!ui_->Initialize(ctx.device, ctx.queue, *ctx.pipeline_gen,
                        ctx.surface_format,
-                       "assets/fonts/CormorantUnicase-Regular.ttf",
+                       "assets/fonts/IM_Fell_DW_Pica/IMFellDWPica-Regular.ttf",
                        kHudFontPx, /*scale_factor=*/1.0f)) {
     spdlog::warn("GameView::Initialize: game UI disabled (font/pipeline setup failed)");
     ui_.reset();

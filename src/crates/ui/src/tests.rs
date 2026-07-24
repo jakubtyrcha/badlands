@@ -303,7 +303,7 @@ fn text_run_of_empty_string_is_empty() {
 fn test_atlas() -> font::FontAtlas {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../assets/fonts/CormorantUnicase-Regular.ttf"
+        "/../../../assets/fonts/IM_Fell_DW_Pica/IMFellDWPica-Regular.ttf"
     );
     let bytes = std::fs::read(path).expect("shipping font is present (git-lfs checked out)");
     font::FontAtlas::bake(&bytes, 20.0).expect("atlas bakes")
