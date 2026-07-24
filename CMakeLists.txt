@@ -613,12 +613,12 @@ add_executable(badlands_game_tests
     # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
     # sim needed.
     game/tests/brain_abi_tests.cpp
-    # The wasm hero brain wired into the sim -- see game/src/wasm_brain.h.
+    # The wasm hero brain (v2, the intention contract) wired into the sim --
+    # see game/src/wasm_brain.h. No twin-brain parity anymore (the C++
+    # reference/mock-hero-fallback comparison died with v1's wire; the
+    # ported Nim brain -- scripts/brains/nim/hero.nim -- is the sole hero
+    # decision layer for a wasm-loaded world).
     game/tests/wasm_brain_tests.cpp
-    # The ported hero decision layer (scripts/brains/nim/hero.nim) --
-    # twin-brain parity against the C++ reference (town_brain.cpp) + wasm-side
-    # behavioural smokes.
-    game/tests/hero_brain_parity_tests.cpp
     # Task 9: the set_factors_of validation boundary (sanitize_factors,
     # sim.cpp) -- adversarial-config red/green repros.
     game/tests/factors_sanitize_tests.cpp

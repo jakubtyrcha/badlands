@@ -111,9 +111,29 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair comes back min <= max"
     CHECK(out.hero.think_min_millis == 1000);
 }
 
-// --- (b) the crash repro: a real wasm-brained Think pause -------------------
+// --- (b) the crash repro, superseded by the wire v2 flip --------------------
+// Pre-flip, this pinned: a wasm-brained Think pause whose duration draw
+// (behaviours/rng.h's range_i64 returns `lo` unconditionally when hi <= lo,
+// so an inverted think_min/think_max pair drew think_min_millis) exceeded
+// think_max_millis, which decode_decision (wasm_brain.cpp) validated against
+// and rejected -- escalating to brain_fatal() (spdlog::critical +
+// std::abort()). See git history for the captured abort output this test
+// used to guard against.
+//
+// The intention contract's wire v2 (brain_abi.h) removes think_min_millis/
+// think_max_millis from BlViewFactors entirely -- deliberation (and its
+// pause-duration bound check) is gone from the wasm hero path outright, not
+// merely re-validated more leniently -- so this exact hazard class is now
+// STRUCTURALLY unreachable for a wasm-driven hero: there is no wire field
+// left for an inverted pair to corrupt. (a) above still pins the min<=max
+// invariant itself, which remains meaningful for the C++ mock hero path
+// (town_brain.cpp's own deliberate(), untouched this task). This case is
+// replaced with a narrower regression: a wasm-driven run with the SAME
+// inverted pair configured simply ticks along fine (the factor is read by
+// nothing on that path anymore).
 
-TEST_CASE("sanitize_factors: an inverted think-pause pair no longer aborts a wasm Think") {
+TEST_CASE("sanitize_factors: an inverted think-pause pair has no effect on a wasm-driven hero "
+         "(the field left the wire)") {
     std::vector<uint8_t> bytes = read_hero_wasm();
     Sim sim{wasm_desc(bytes)};
 
@@ -130,16 +150,6 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair no longer aborts a was
     const int64_t hero_id = sim.Dispatch(recruit);
     REQUIRE(hero_id >= 0);
 
-    // Tick 1: the hero's FIRST-EVER decision (current_activity starts at -1,
-    // "none yet") never deliberates, whatever it picks (behaviours/
-    // deliberation.cpp's is_discretionary(-1) == false) -- it lands on Roam,
-    // the flat always-available fallback, with nothing else applicable yet.
-    sim.Tick(1.0f / 30.0f);
-
-    // Force a GENUINE activity change: crash the hero's fatigue so GoHome
-    // outscores Roam starting next tick. A second, discretionary, non-Idle
-    // switch is exactly what deliberate() requires to draw a pause -- see the
-    // task brief's "a genuine activity change must fire".
     entt::registry& reg = sim.registry();
     entt::entity hero_entity = entt::null;
     for (auto [e, hero] : reg.view<HeroSimulationState>().each()) {
@@ -148,24 +158,12 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair no longer aborts a was
     }
     const bool found_hero = (hero_entity != entt::null);
     REQUIRE(found_hero);
-    reg.get<HeroSimulationState>(hero_entity).fatigue = 0.05f;
+    reg.get<HeroSimulationState>(hero_entity).fatigue = 0.05f;  // force a genuine activity change
 
-    // TODAY (pre-fix): decode_decision (wasm_brain.cpp) sees a
-    // pause_duration_millis of 5000 (behaviours/rng.h's range_i64 returns
-    // `lo` unconditionally when hi <= lo) against a think_max_millis of
-    // 1000, rejects the wire, and tick_wasm_brain escalates that to
-    // brain_fatal() -- spdlog::critical + std::abort(). See the task report
-    // for the captured output of that abort.
-    bool saw_think = false;
-    for (int i = 0; i < 30 && !saw_think; ++i) {
+    for (int i = 0; i < 30; ++i) {
         sim.Tick(1.0f / 30.0f);
-        for (const CommandRecord& c : sim.CommandLog()) {
-            saw_think = saw_think || (c.kind == CommandKindId::SetBehavior &&
-                                      c.param_a == static_cast<int32_t>(ActivityId::Think));
-        }
     }
 
-    CHECK(saw_think);
     CHECK(sim.GetStats().noiser_bugs == 0);
 }
 

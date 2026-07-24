@@ -13,7 +13,7 @@
 #include "entity_memory.h"  // update_entity_memory
 #include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
-#include "intention.h"  // advance_intentions, push_inbox_event -- the ThreatSighted writer
+#include "intention.h"  // advance_intentions, push_inbox_event, should_wake
 #include "movement.h"
 #include "nav_world.h"
 #include "needs.h"
@@ -291,8 +291,15 @@ void tick_world(BadlandsGame& g, float dt) {
                 // The wasm hero brain owns the no-enemy tick outright: combat
                 // still pre-empts it (identical to the mock's own pre-empt),
                 // but mock_think/town_think are never reached for this entity
-                // while a wasm program is loaded -- see wasm_brain.h.
-                if (!combat_preempt(g, e, static_cast<uint32_t>(slot))) {
+                // while a wasm program is loaded -- see wasm_brain.h. Absent
+                // a target, the intention contract's wake rule gates the
+                // think itself (docs/design/intention-contract.html §2): a
+                // hero with a running intention and nothing new in its inbox
+                // simply keeps doing what it was already doing (the always-
+                // running movement/needs/combat systems, not the brain, carry
+                // it forward) -- the brain is consulted only on a real wake.
+                if (!combat_preempt(g, e, static_cast<uint32_t>(slot)) &&
+                    should_wake(g, e)) {
                     tick_wasm_brain(g, static_cast<uint32_t>(slot));
                 }
                 continue;

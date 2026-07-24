@@ -333,6 +333,16 @@ struct CurrentIntention {
     // (advance_intentions) -- for every other kind reaching this deadline is
     // just a spurious-wake reminder, not a reason to end the intention.
     int64_t wake_at_millis = 0;
+    // The last time the brain was actually consulted (apply_intention was
+    // called), regardless of what it decided -- including a BL_INT_NONE
+    // "nothing new to suggest" wake. Distinct from started_at_millis (when
+    // the CURRENTLY adopted intention began): a None decision leaves kind/
+    // started_at_millis untouched but still means the inbox events present
+    // at that moment already informed a real think. should_wake compares new
+    // inbox events against this, STRICTLY, so an event that informed the
+    // last think does not by itself force an immediate re-wake next tick
+    // (game/src/intention.h's should_wake).
+    int64_t last_think_millis = 0;
 };
 
 // --- v0.3 movement / pathfinding --------------------------------------------

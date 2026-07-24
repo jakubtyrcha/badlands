@@ -637,7 +637,14 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    const ABI_VERSION: i32 = 1;
+    // v2 (the intention contract, game/src/brain_abi.h): bumped in lockstep
+    // with BL_ABI_VERSION whenever the wire layout changes. Every synthetic
+    // WAT fixture below builds its OWN `bl_abi_version` export from this same
+    // constant via `build_wasm`, so the bump stays self-consistent across the
+    // whole suite; `abi_version_mismatch_rejected` deliberately uses an
+    // independent literal (999) for its mismatching module, so it is
+    // unaffected by this value either way.
+    const ABI_VERSION: i32 = 2;
 
     /// A conforming brain module's fixed layout: view/out buffers at 1024 /
     /// 2048 in a single 64 KiB memory page, so tests can reason about exact
@@ -919,11 +926,13 @@ mod tests {
     // the same way scripts/brains/nim/abi.nim does on the Nim side.
     #[test]
     fn real_hero_wasm_conforms() {
-        // sizeof(BlViewWire) per game/src/brain_abi.h's static_assert.
-        const VIEW_WIRE_LEN: usize = 1080;
-        // sizeof(BlDecisionWire) per game/src/brain_abi.h's static_assert.
+        // sizeof(BlViewWire) per game/src/brain_abi.h's static_assert (v2:
+        // 1480 -- the statuses/events blocks the intention contract added).
+        const VIEW_WIRE_LEN: usize = 1480;
+        // sizeof(BlSuggestionWire) per game/src/brain_abi.h's static_assert
+        // (v2's replacement for BlDecisionWire -- still 40 bytes, coincidentally).
         const DECISION_WIRE_LEN: usize = 40;
-        // offsetof(BlViewWire, version) is 0; BL_ABI_VERSION is 1 (both in
+        // offsetof(BlViewWire, version) is 0; BL_ABI_VERSION is 2 (both in
         // game/src/brain_abi.h). A zeroed buffer with just the version
         // stamped is exactly what a host that hasn't populated the rest of
         // the view yet would send on a first tick.
@@ -969,14 +978,17 @@ mod tests {
         };
         assert_eq!(rc, BH_OK, "bh_tick failed: {}", last_error());
 
-        // An all-Idle DecisionWire: pause_duration_millis=0 (i64, offset 0),
-        // activity_id=0/goal_kind=0 (offset 8/12), goal_x=goal_z=0.0 (offset
-        // 16/20), command_kind=0/command_arg=0 (offset 24/28),
-        // follow_up_on_arrival=0/pause_kind=0 (offset 32/36) -- i.e. every
-        // byte zero.
+        // An all-zeroed view (every weight 0, including Idle's -- a
+        // synthetic edge case no real hero ever presents, since Idle's
+        // weight is always > 0) drives hero.nim's selector to its own
+        // vacuous fallback: BL_INT_NONE ("nothing suggested this wake"),
+        // activity_label=0/point=0/target_slot=0/arg=0, and -- since a
+        // BL_INT_NONE suggestion carries no schedule apply_intention would
+        // ever read -- idle_hint_millis=duration_millis=0 too. I.e. every
+        // byte of the SuggestionWire zero.
         assert!(
             out.iter().all(|&b| b == 0),
-            "expected an all-zero (all-Idle) DecisionWire, got: {out:?}"
+            "expected an all-zero (BL_INT_NONE) SuggestionWire, got: {out:?}"
         );
 
         unsafe {
@@ -999,11 +1011,11 @@ mod tests {
     // here.
     #[test]
     fn real_trap_wasm_traps() {
-        // trap_test.nim shares hero.nim's BlViewWire/BlDecisionWire var
+        // trap_test.nim shares hero.nim's BlViewWire/BlSuggestionWire var
         // buffers (see scripts/brains/nim/trap_test.nim), so the same
         // static_assert'd sizes from game/src/brain_abi.h apply as
         // real_hero_wasm_conforms uses above.
-        const VIEW_WIRE_LEN: usize = 1080;
+        const VIEW_WIRE_LEN: usize = 1480;
         const DECISION_WIRE_LEN: usize = 40;
 
         let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

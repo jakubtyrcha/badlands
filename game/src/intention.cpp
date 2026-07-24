@@ -44,6 +44,15 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     entt::registry& reg = game.registry;
     const glm::vec2 self_pos = reg.get<Position>(e).pos;
 
+    // Finding 1 (task-3-brief.md): mark the think UNCONDITIONALLY, before any
+    // validation/adoption below -- even a rejected suggestion or an explicit
+    // IntentionKind::None means the brain just looked at this hero's inbox,
+    // so should_wake must not treat those same, already-considered events as
+    // a fresh reason to wake it again next tick (see should_wake's own
+    // comment). Fetched once here and reused by the tail below.
+    CurrentIntention& ci = reg.get<CurrentIntention>(e);
+    ci.last_think_millis = game.world_millis;
+
     switch (intent.kind) {
         case IntentionKind::None:
             return false;  // nothing suggested this wake
@@ -132,9 +141,17 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // Adopted. Idle's own duration IS its wake_at (and its completion
     // criterion, advance_intentions); every other kind gets the idle-hint as
     // a spurious-wake reminder only. Logged via enqueue_set_behavior's
-    // duration field -- the same vehicle the deliberation pause already rides
-    // on (town_brain.cpp's apply_brain_decision) -- so the wake schedule is
-    // IN the command log and a replay reproduces it rather than redrawing it.
+    // duration field -- the same vehicle the C++ mock's own deliberation
+    // pause already rides on (town_brain.cpp's apply_brain_decision) -- so
+    // the wake schedule is IN the command log (the SetBehavior handler,
+    // command.cpp, derives CurrentIntention::wake_at_millis from it too, so
+    // a replay reconstructs the schedule from the log alone -- finding 2,
+    // task-3-brief.md). `force=true`: every ADOPTED intention is a real
+    // decision (a wake, gated sparsely by should_wake) and must reach the
+    // log even when activity_label happens to repeat the previous wake's --
+    // enqueue_set_behavior's ordinary edge-trigger exists to dedupe a
+    // PER-TICK re-decision (the mock brain's own use), which does not apply
+    // here.
     //
     // Idle duration_millis == 0 is an EXPLICIT choice, not an oversight:
     // wake_at_millis == 0 is the "no deadline" sentinel (see
@@ -145,9 +162,8 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // and why Idle rejects only a NEGATIVE duration below, not a zero one.
     const int64_t deadline =
         (intent.kind == IntentionKind::Idle) ? intent.duration_millis : intent.idle_hint_millis;
-    enqueue_set_behavior(game, slot, intent.activity_label, deadline);
+    enqueue_set_behavior(game, slot, intent.activity_label, deadline, /*force=*/true);
 
-    CurrentIntention& ci = reg.get<CurrentIntention>(e);
     ci.kind = intent.kind;
     // Stamp only the field(s) this KIND actually uses (docs/design/
     // intention-contract.html's vocab table) and zero the rest, so
@@ -279,8 +295,21 @@ bool should_wake(const BadlandsGame& game, entt::entity e) {
     }
     if (const auto* inbox = game.registry.try_get<EventInbox>(e)) {
         for (int32_t i = 0; i < inbox->count; ++i) {
-            if (inbox->events[i].at_millis >= ci->started_at_millis) {
-                return true;  // something happened since the hero last decided
+            // Strictly AFTER the last think, not `started_at_millis`/`>=`
+            // (finding 1, task-3-brief.md): events are written BEFORE the
+            // think-dispatch loop within the SAME tick (sim.cpp's tick_world),
+            // so an event that arrived the same tick a wake already
+            // considered it would otherwise satisfy `>=` forever after
+            // (`ci->last_think_millis` never advances again once the hero
+            // goes back to sleep) -- an immediate, spurious re-wake next
+            // tick for no NEW reason. last_think_millis is stamped on EVERY
+            // apply_intention call, even a rejected suggestion or an
+            // explicit "nothing new" (IntentionKind::None), so it always
+            // reflects the last time this hero's inbox was actually looked
+            // at, unlike started_at_millis (which only advances when an
+            // intention is adopted).
+            if (inbox->events[i].at_millis > ci->last_think_millis) {
+                return true;  // something happened since the hero last thought
             }
         }
     }

@@ -89,6 +89,18 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                 } else if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
                     tc->behavior = cmd.param_a;
                 }
+                // Intention contract (game/src/intention.h): the wake
+                // schedule rides the SAME duration field the C++ mock's own
+                // deliberation pause always has, above -- deriving it HERE
+                // (not in apply_intention) is what makes it replay-derivable:
+                // any tick that applies this exact command, live or
+                // replayed, reconstructs the same wake_at_millis. Harmless
+                // for a hero not on the intention contract (mock heroes:
+                // CurrentIntention.kind stays None regardless, so nothing
+                // ever reads this field for them).
+                if (auto* ci = game.registry.try_get<CurrentIntention>(e)) {
+                    ci->wake_at_millis = cmd.param_b > 0 ? game.world_millis + cmd.param_b : 0;
+                }
             }
             return 0;
         }
@@ -222,7 +234,7 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target) {
 }
 
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
-                          int64_t duration_millis) {
+                          int64_t duration_millis, bool force) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
         return;
@@ -238,7 +250,7 @@ void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
     } else {
         return;  // nothing to record it on
     }
-    if (current == behavior) {
+    if (current == behavior && !force) {
         return;  // unchanged -- not a decision
     }
     game.command_queue.push_back({CommandKind::SetBehavior,

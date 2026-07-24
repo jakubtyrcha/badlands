@@ -1,35 +1,27 @@
-// Task 4 (wasm-brain feature), amended by Task 7 (fail-fast policy): wiring
-// the wasm brain runtime into the sim. Most cases here load the REAL,
-// shipping assets/brains/hero.wasm (Task 5's ported decision layer,
-// scripts/brains/nim/hero.nim) -- the twin-brain parity test against the
-// C++ reference lives in hero_brain_parity_tests.cpp; this file is about the
-// wasm PLUMBING (load/spawn/tick/combat pre-empt), not decision correctness.
-// Cases that need a brain PINNED to all-Idle (so a test can assert on that
-// alone) load game/tests/fixtures/idle_brain.wasm instead
-// (scripts/brains/nim/idle_test.nim).
-//
-// A wasm-brain failure is FATAL under this project's policy (wasm_brain.h's
-// policy note; docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's
-// Runtime section), so there is nothing left to test at the sim level about a
-// trap or a load failure surviving gracefully -- that coverage moved to the
-// brainhost crate's real_trap_wasm_traps test (src/crates/brainhost/src/
-// lib.rs), which pins the Nim-panic -> wasm-trap -> BH_ERR_TRAP chain the
-// trap_brain.wasm fixture exists for; this file no longer reads that fixture.
-//
-// apply_brain_decision (the shared decision-apply seam, town_brain.h) and
-// decode_decision (the wire trust boundary, wasm_brain.h) are unit-tested
-// directly against synthetic BrainDecisions/BlDecisionWires, no wasm involved
-// -- they are exactly town_think's former tail plus the wire-decode step,
-// generalized; the rest of this file exercises the wasm plumbing end to end
-// through badlands::Sim.
+// Wasm hero brain wire v2 (the intention contract, docs/design/
+// intention-contract.html): a brain suggests ONE intention per wake, the
+// engine (game/src/intention.h) validates/executes/tracks it and decides
+// when to wake the brain again. This file exercises the WASM PLUMBING --
+// pack_view_wire (statuses/events/self land in the wire correctly),
+// decode_suggestion (the wire trust boundary: each BL_INT_* maps, malformed
+// wires are rejected, BL_INT_USE_SKILL warns+ignores), and tick_wasm_brain
+// end to end through badlands::Sim/tick_world (spawn/tick, combat pre-empt,
+// the wake gate, determinism). Decision CORRECTNESS is not a parity target
+// (no C++ reference brain exists anymore -- "behavior-in-spirit" is the bar,
+// see the design doc's §3); cases that need a brain pinned to a fixed
+// decision load game/tests/fixtures/idle_brain.wasm
+// (scripts/brains/nim/idle_test.nim) instead of the real, shipping
+// assets/brains/hero.wasm.
 
 #include "badlands_sim.hpp"
 #include "command.h"
+#include "components.h"
 #include "duel_common.h"
 #include "game_state.h"
+#include "intention.h"
 #include "sim_internal.hpp"
-#include "town_brain.h"
-#include "wasm_brain.h"  // decode_decision (review-fix coverage)
+#include "town_brain.h"  // observe_hero/weights_for/WorldView/ActivityWeights
+#include "wasm_brain.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -39,6 +31,7 @@
 #include <cstdint>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -61,13 +54,13 @@ std::vector<uint8_t> read_wasm_file(const char* path) {
 }
 
 // The shipping brain artifact (LFS binary; scripts/brains/nim/hero.nim) --
-// the real, ported decision layer (Task 5).
+// the real, ported hero decision layer.
 std::vector<uint8_t> read_hero_wasm() { return read_wasm_file("assets/brains/hero.wasm"); }
 
 // Test-only fixture (LFS binary; scripts/brains/nim/idle_test.nim -- same
-// export surface as hero.nim, but bl_tick always decides Idle/no-goal/
-// no-command/no-pause, unconditionally): built by scripts/build_brains.sh
-// alongside hero.wasm. What hero.wasm itself used to be before Task 5.
+// export surface as hero.nim, but bl_tick always suggests BL_INT_IDLE/
+// ActivityId::Idle, unconditionally): built by scripts/build_brains.sh
+// alongside hero.wasm.
 std::vector<uint8_t> read_idle_wasm() {
     return read_wasm_file("game/tests/fixtures/idle_brain.wasm");
 }
@@ -77,8 +70,8 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 }
 
 // A minimal home-less hero (Archetype defaults to Hero), for the
-// apply_brain_decision unit tests -- only Position/MoveTarget/
-// HeroSimulationState matter there, so the rest of CharacterDesc is left at
+// pack_view_wire/decode_suggestion fixtures -- only the components those
+// functions actually read matter, so the rest of CharacterDesc is left at
 // its zero default.
 CharacterDesc bare_hero(float x, float z) {
     CharacterDesc d{};
@@ -95,8 +88,6 @@ CharacterDesc bare_hero(float x, float z) {
 // fixture-independence convention) -- so the seed itself is part of the
 // recorded/replayed log.
 void seed_heroes(BadlandsGame* g, int n) {
-    // Same coordinates determinism_tests.cpp's seed_town uses -- building
-    // placement does not care about terrain, only unit movement does.
     Action place{ActionKind::PlaceBuilding, 0, -14.0f, -8.0f,
                 static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
     const int64_t guild = dispatch_into(*g, place);
@@ -115,7 +106,7 @@ bool same_command(const Command& a, const Command& b) {
 
 }  // namespace
 
-// --- F.1: the idle-fixture wasm brain drives every hero, no bugs -----------
+// --- wasm plumbing smokes (fixed-decision brains) ---------------------------
 
 TEST_CASE("wasm: every hero stays Idle over 30 ticks with the idle fixture brain, no bugs") {
     std::vector<uint8_t> bytes = read_idle_wasm();
@@ -140,8 +131,6 @@ TEST_CASE("wasm: every hero stays Idle over 30 ticks with the idle fixture brain
     CHECK(stats.script_intents > 0);   // decisions were actually applied
 }
 
-// --- F.2: combat pre-empt still owns enemies, even with wasm loaded --------
-
 TEST_CASE("wasm: combat pre-empt still owns enemies") {
     std::vector<uint8_t> bytes = read_hero_wasm();
     Sim sim(wasm_desc(bytes));
@@ -158,207 +147,291 @@ TEST_CASE("wasm: combat pre-empt still owns enemies") {
     CHECK(survivor.hp < survivor.max_hp);  // the goblin got its licks in
 
     // combat_preempt claims the mercenary's tick for as long as the goblin is
-    // alive, so tick_wasm_brain is never reached for it during the duel --
-    // whatever the loaded brain would otherwise decide (Idle or the real
-    // hero decision layer) never gets a chance to interfere with combat.
+    // alive, so should_wake/tick_wasm_brain are never reached for it during
+    // the duel -- whatever the loaded brain would otherwise suggest never
+    // gets a chance to interfere with combat.
     CHECK(sim.GetStats().noiser_bugs == 0);
 }
 
-// --- F.4: apply_brain_decision, unit-tested directly (no wasm) -------------
+// --- pack_view_wire: the view side of the wire trust boundary --------------
 
-TEST_CASE("apply_brain_decision: commit writes SetBehavior + MoveTo to the log") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+TEST_CASE("pack_view_wire: statuses assemble from Chatting/MeleeLock/InsideBuilding",
+          "[wasm_brain]") {
+    auto g = make_world(BrainDesc{});  // host-only: no wasm module needed
 
-    BrainDecision d;
-    d.activity = ActivityId::Roam;
-    d.goal = self_pos + glm::vec2{5.0f, 0.0f};
-    CHECK(apply_brain_decision(*g, slot, self_pos, d));  // commit: applied
-    apply_commands(*g);
+    SECTION("Chatting") {
+        uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+        entt::entity e = g->slots[slot];
+        g->registry.emplace<ChattingState>(e, /*partner_slot=*/7u, /*remaining=*/2.5f);
 
-    REQUIRE(g->command_log.size() == 2);
-    CHECK(g->command_log[0].kind == CommandKind::SetBehavior);
-    CHECK(g->command_log[0].param_a == static_cast<int32_t>(ActivityId::Roam));
-    CHECK(g->command_log[1].kind == CommandKind::MoveTo);
-    CHECK(g->command_log[1].point == d.goal);
-}
+        const ActivityWeights& weights = weights_for(*g, e);
+        const WorldView view = observe_hero(*g, slot, e, weights);
+        const BlViewWire wire = pack_view_wire(*g, e, view, weights);
 
-TEST_CASE("apply_brain_decision: pause-start writes Think + a single hold MoveTo") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
-
-    BrainDecision d;
-    d.pause = true;
-    d.pause_duration_millis = 500;
-    CHECK(apply_brain_decision(*g, slot, self_pos, d));  // pause-START: applied
-    apply_commands(*g);
-
-    REQUIRE(g->command_log.size() == 2);
-    CHECK(g->command_log[0].kind == CommandKind::SetBehavior);
-    CHECK(g->command_log[0].param_a == static_cast<int32_t>(ActivityId::Think));
-    CHECK(g->command_log[0].param_b == 500);
-    CHECK(g->command_log[1].kind == CommandKind::MoveTo);
-    CHECK(g->command_log[1].point == self_pos);
-}
-
-TEST_CASE("apply_brain_decision: pause-continue enqueues nothing") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
-
-    BrainDecision d;
-    d.pause = true;
-    d.pause_duration_millis = 0;
-    CHECK_FALSE(apply_brain_decision(*g, slot, self_pos, d));  // pause-CONTINUE: not applied
-    CHECK(g->command_queue.empty());
-    apply_commands(*g);
-    CHECK(g->command_log.empty());
-}
-
-TEST_CASE("apply_brain_decision: follow_up_on_arrival gates on distance to the goal") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
-
-    // Far target, gated: the follow-up must NOT appear yet.
-    {
-        BrainDecision d;
-        d.activity = ActivityId::VisitTavern;
-        d.goal = self_pos + glm::vec2{20.0f, 0.0f};  // well past kEntranceRadius
-        d.follow_up = Command{CommandKind::EnterBuilding, slot};
-        d.follow_up_on_arrival = true;
-        apply_brain_decision(*g, slot, self_pos, d);
-        apply_commands(*g);
-        for (const Command& c : g->command_log) {
-            CHECK(c.kind != CommandKind::EnterBuilding);
-        }
+        REQUIRE(wire.status_count == 1);
+        CHECK(wire.statuses[0].kind == BL_ST_CHATTING);
+        CHECK(wire.statuses[0].remaining_millis == 2500);
     }
 
-    // Near target, gated: the follow-up fires.
-    {
-        BrainDecision d;
-        d.activity = ActivityId::VisitTavern;
-        d.goal = self_pos;  // distance 0 <= kEntranceRadius
-        d.follow_up = Command{CommandKind::EnterBuilding, slot};
-        d.follow_up_on_arrival = true;
-        apply_brain_decision(*g, slot, self_pos, d);
-        apply_commands(*g);
-        bool found = false;
-        for (const Command& c : g->command_log) {
-            found = found || (c.kind == CommandKind::EnterBuilding && c.actor == slot);
-        }
-        CHECK(found);
+    SECTION("MeleeLock") {
+        uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+        entt::entity e = g->slots[slot];
+        g->registry.emplace<MeleeLock>(e);
+
+        const ActivityWeights& weights = weights_for(*g, e);
+        const WorldView view = observe_hero(*g, slot, e, weights);
+        const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+        REQUIRE(wire.status_count == 1);
+        CHECK(wire.statuses[0].kind == BL_ST_MELEE_LOCKED);
+        CHECK(wire.statuses[0].remaining_millis == 0);  // indefinite
     }
 
-    // Far target, UNgated (follow_up_on_arrival = false): fires regardless of
-    // distance -- act_chat/act_hunt's semantics (a shot/greeting emitted the
-    // instant it becomes valid, not on arrival at the walk target).
-    {
-        BrainDecision d;
-        d.activity = ActivityId::Hunt;
-        d.goal = self_pos + glm::vec2{20.0f, 0.0f};
-        d.follow_up = Command{CommandKind::Attack, slot, 0};  // targeted attack (the hunt shot)
-        d.follow_up_on_arrival = false;
-        apply_brain_decision(*g, slot, self_pos, d);
-        apply_commands(*g);
-        bool found = false;
-        for (const Command& c : g->command_log) {
-            found = found || (c.kind == CommandKind::Attack && c.actor == slot && c.target_id == 0);
-        }
-        CHECK(found);
+    SECTION("InsideBuilding") {
+        uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+        entt::entity e = g->slots[slot];
+        g->registry.emplace<InsideBuilding>(e, /*building_id=*/0, /*purpose=*/0);
+
+        const ActivityWeights& weights = weights_for(*g, e);
+        const WorldView view = observe_hero(*g, slot, e, weights);
+        const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+        REQUIRE(wire.status_count == 1);
+        CHECK(wire.statuses[0].kind == BL_ST_INSIDE_BUILDING);
+        CHECK(wire.statuses[0].remaining_millis == 0);  // indefinite
+    }
+
+    SECTION("none of the three -> status_count 0") {
+        uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+        entt::entity e = g->slots[slot];
+
+        const ActivityWeights& weights = weights_for(*g, e);
+        const WorldView view = observe_hero(*g, slot, e, weights);
+        const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+        CHECK(wire.status_count == 0);
     }
 }
 
-// --- Review fix: decode_decision rejects malformed wires (the wire trust
-// boundary) -----------------------------------------------------------------
-// Synthetic BlDecisionWires, no wasm module involved -- exercise the same
-// seam a real (buggy/adversarial) guest's bl_out_buf write would hit.
-// decode_decision is a pure function (no report_bug/game-state side effect --
-// under the fail-fast policy it is the CALLER, tick_wasm_brain, that
-// escalates a nullopt to brain_fatal), so these assert only on the return
-// value.
-
-TEST_CASE("decode_decision: a non-finite goal is rejected, not decoded") {
+TEST_CASE("pack_view_wire: events copy 1:1 from the EventInbox", "[wasm_brain]") {
     auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+    entt::entity e = g->slots[slot];
 
-    BlDecisionWire wire{};
-    wire.activity_id = static_cast<int32_t>(ActivityId::Roam);
-    wire.goal_kind = 1;
-    wire.goal_x = std::numeric_limits<float>::quiet_NaN();
-    wire.goal_z = 0.0f;
+    InboxEvent ev;
+    ev.kind = InboxEventKind::DamageTaken;
+    ev.source_slot = 3;
+    ev.param = 5.0f;
+    push_inbox_event(*g, e, ev);  // stamps at_millis/ttl_millis from game state
 
-    const std::optional<BrainDecision> decision = decode_decision(*g, wire, slot, self_pos);
-    CHECK(!decision.has_value());
-    CHECK(g->command_queue.empty());  // no follow-up MoveTo enqueued
+    const ActivityWeights& weights = weights_for(*g, e);
+    const WorldView view = observe_hero(*g, slot, e, weights);
+    const BlViewWire wire = pack_view_wire(*g, e, view, weights);
 
-    apply_commands(*g);
+    REQUIRE(wire.event_count == 1);
+    CHECK(wire.events[0].kind == BL_EV_DAMAGE_TAKEN);
+    CHECK(wire.events[0].source_slot == 3);
+    CHECK(wire.events[0].param == Catch::Approx(5.0f));
+    CHECK(wire.events[0].at_millis == g->world_millis);
+    CHECK(wire.events[0].ttl_millis == kInboxTtlMillis);
+}
+
+TEST_CASE("pack_view_wire: self carries the CurrentIntention summary", "[wasm_brain]") {
+    auto g = make_world(BrainDesc{});
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    entt::entity e = g->slots[slot];
+
+    CurrentIntention& ci = g->registry.get<CurrentIntention>(e);
+    ci.kind = IntentionKind::Idle;
+    ci.wake_at_millis = 4321;
+
+    const ActivityWeights& weights = weights_for(*g, e);
+    const WorldView view = observe_hero(*g, slot, e, weights);
+    const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+    CHECK(wire.self.intention_kind == BL_INT_IDLE);
+    CHECK(wire.self.intention_wake_at == 4321);
+}
+
+// --- decode_suggestion: the suggestion side of the wire trust boundary ------
+
+TEST_CASE("decode_suggestion: each BL_INT_* kind maps onto the matching IntentionKind",
+          "[wasm_brain]") {
+    struct Case {
+        int32_t wire_kind;
+        IntentionKind expect;
+    };
+    const Case cases[] = {
+        {BL_INT_NONE, IntentionKind::None},           {BL_INT_MOVE_TO, IntentionKind::MoveTo},
+        {BL_INT_ATTACK, IntentionKind::Attack},        {BL_INT_SHOOT, IntentionKind::Shoot},
+        {BL_INT_ENTER, IntentionKind::Enter},          {BL_INT_ENTER_HOME, IntentionKind::EnterHome},
+        {BL_INT_BUY, IntentionKind::Buy},              {BL_INT_CHAT, IntentionKind::Chat},
+        {BL_INT_IDLE, IntentionKind::Idle},
+    };
+    for (const Case& c : cases) {
+        INFO("wire_kind " << c.wire_kind);
+        BlSuggestionWire wire{};
+        wire.intention_kind = c.wire_kind;
+        wire.target_slot = 5;
+        wire.arg = 2;
+        wire.duration_millis = 100;
+        wire.idle_hint_millis = 200;
+        wire.point_x = 1.0f;
+        wire.point_z = 2.0f;
+        wire.activity_label = static_cast<int32_t>(ActivityId::Roam);
+
+        const std::optional<Intention> intent = decode_suggestion(wire, /*slot=*/0);
+        REQUIRE(intent.has_value());
+        CHECK(intent->kind == c.expect);
+        CHECK(intent->target_slot == 5);
+        CHECK(intent->arg == 2);
+        CHECK(intent->duration_millis == 100);
+        CHECK(intent->idle_hint_millis == 200);
+        CHECK(intent->point.x == Catch::Approx(1.0f));
+        CHECK(intent->point.y == Catch::Approx(2.0f));
+        CHECK(intent->activity_label == static_cast<int32_t>(ActivityId::Roam));
+    }
+}
+
+TEST_CASE("decode_suggestion: BL_INT_USE_SKILL is reserved -- decodes to IntentionKind::None, "
+         "not rejected",
+          "[wasm_brain]") {
+    BlSuggestionWire wire{};
+    wire.intention_kind = BL_INT_USE_SKILL;
+    const std::optional<Intention> intent = decode_suggestion(wire, 0);
+    REQUIRE(intent.has_value());  // well-formed -- not the malformed/FATAL path
+    CHECK(intent->kind == IntentionKind::None);
+}
+
+TEST_CASE("decode_suggestion: malformed wires are rejected", "[wasm_brain]") {
+    SECTION("intention_kind above BL_INT_USE_SKILL") {
+        BlSuggestionWire wire{};
+        wire.intention_kind = BL_INT_USE_SKILL + 1;
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("negative intention_kind") {
+        BlSuggestionWire wire{};
+        wire.intention_kind = -1;
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("non-finite point_x") {
+        BlSuggestionWire wire{};
+        wire.point_x = std::numeric_limits<float>::quiet_NaN();
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("non-finite point_z") {
+        BlSuggestionWire wire{};
+        wire.point_z = std::numeric_limits<float>::infinity();
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("negative duration_millis") {
+        BlSuggestionWire wire{};
+        wire.duration_millis = -1;
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("duration_millis beyond INT32_MAX (would truncate through Command::param_b)") {
+        BlSuggestionWire wire{};
+        wire.intention_kind = BL_INT_IDLE;
+        wire.duration_millis = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("negative idle_hint_millis") {
+        BlSuggestionWire wire{};
+        wire.idle_hint_millis = -1;
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("idle_hint_millis beyond INT32_MAX") {
+        BlSuggestionWire wire{};
+        wire.idle_hint_millis = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+    SECTION("activity_label out of range") {
+        BlSuggestionWire wire{};
+        wire.activity_label = kActivityCount;
+        CHECK_FALSE(decode_suggestion(wire, 0).has_value());
+    }
+}
+
+TEST_CASE("decode_suggestion + apply_intention: the idle hint plumbs through to "
+         "CurrentIntention.wake_at_millis",
+          "[wasm_brain]") {
+    auto g = make_world(BrainDesc{});
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    entt::entity e = g->slots[slot];
+    g->world_millis = 1000;
+
+    BlSuggestionWire wire{};
+    wire.intention_kind = BL_INT_ATTACK;  // any non-Idle kind: idle_hint_millis (not
+                                          // duration_millis) carries the schedule
+    wire.idle_hint_millis = 750;
+
+    const std::optional<Intention> intent = decode_suggestion(wire, slot);
+    REQUIRE(intent.has_value());
+    CHECK(apply_intention(*g, slot, *intent));
+    CHECK(g->registry.get<CurrentIntention>(e).wake_at_millis == 1750);
+}
+
+// --- integration: a real, shipping wasm brain driving a live sim -----------
+
+TEST_CASE("wasm: a town world ticks, heroes act (MoveTo/SetBehavior reach the log)") {
+    std::vector<uint8_t> bytes = read_hero_wasm();
+    auto g = make_world(wasm_desc(bytes));
+    REQUIRE(g->wasm_brains != nullptr);
+
+    seed_heroes(g.get(), 3);
+    for (int i = 0; i < 150; ++i) {
+        tick_world(*g, 1.0f / 30.0f);
+    }
+
+    bool saw_move = false;
+    bool saw_set_behavior = false;
     for (const Command& c : g->command_log) {
-        CHECK(c.kind != CommandKind::MoveTo);
+        saw_move = saw_move || c.kind == CommandKind::MoveTo;
+        saw_set_behavior = saw_set_behavior || c.kind == CommandKind::SetBehavior;
     }
+    CHECK(saw_move);
+    CHECK(saw_set_behavior);
+    CHECK(stats_of(*g).noiser_bugs == 0);
+    CHECK(stats_of(*g).script_intents > 0);
 }
 
-// Task 7 review finding: pause_kind/pause_duration_millis were unvalidated --
-// four cases, each isolating exactly one violation against an otherwise
-// zero-initialized (so trivially valid: activity_id=0/Idle, goal_kind=0/none)
-// wire.
+TEST_CASE("wasm: a sleeping hero (long hint) is woken by damage and re-decides within a tick") {
+    std::vector<uint8_t> bytes = read_hero_wasm();
+    auto g = make_world(wasm_desc(bytes));
+    REQUIRE(g->wasm_brains != nullptr);
 
-TEST_CASE("decode_decision: pause_kind outside {0,1,2} is rejected") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
+    uint32_t slot = spawn_into(*g, MercenaryDesc(0.0f, kCastleSpawnZ));
+    entt::entity e = g->slots[slot];
 
-    BlDecisionWire wire{};
-    wire.pause_kind = 3;
+    // One real wake: let the hero actually think (bh_spawn + a genuine
+    // suggestion) so CurrentIntention reflects what react() produced.
+    tick_world(*g, 1.0f / 30.0f);
+    REQUIRE(g->registry.get<CurrentIntention>(e).last_think_millis == g->world_millis);
 
-    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
+    // Force it deep asleep: an artificially far wake_at_millis, well beyond
+    // any idle hint hero.nim could actually draw -- deterministic,
+    // independent of the hint's real (randomized, bounded) value.
+    CurrentIntention& ci = g->registry.get<CurrentIntention>(e);
+    ci.wake_at_millis = g->world_millis + 60'000;
+    REQUIRE_FALSE(should_wake(*g, e));
+
+    const int64_t last_think_before = ci.last_think_millis;
+    for (int i = 0; i < 5; ++i) {
+        tick_world(*g, 1.0f / 30.0f);  // asleep: no re-think while nothing happens
+    }
+    CHECK(g->registry.get<CurrentIntention>(e).last_think_millis == last_think_before);
+
+    // Inject a hit -- the same DamageTaken choke point real combat uses
+    // (emit_char_hit, game_state.h) -- a guaranteed-wake event
+    // (docs/design/intention-contract.html §2).
+    emit_char_hit(*g, /*actor_slot=*/UINT32_MAX, slot, 3.0f,
+                 g->registry.get<Health>(e).hp - 3.0f, g->registry.get<Position>(e).pos);
+    CHECK(should_wake(*g, e));
+
+    tick_world(*g, 1.0f / 30.0f);
+    CHECK(g->registry.get<CurrentIntention>(e).last_think_millis == g->world_millis);
+    CHECK(stats_of(*g).noiser_bugs == 0);
 }
-
-TEST_CASE("decode_decision: pause_kind==1 (start) with duration <= 0 is rejected") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
-
-    BlDecisionWire wire{};
-    wire.pause_kind = 1;
-    wire.pause_duration_millis = 0;
-
-    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
-}
-
-TEST_CASE("decode_decision: pause_kind==1 (start) with duration beyond think_max_millis is "
-         "rejected") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
-
-    BlDecisionWire wire{};
-    wire.pause_kind = 1;
-    wire.pause_duration_millis = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
-    // This also bounds the int32_t truncation enqueue_set_behavior applies
-    // (command.cpp) -- confirm the case under test actually exceeds the
-    // policy bound, not just INT32_MAX in the abstract.
-    REQUIRE(wire.pause_duration_millis > g->factors.hero.think_max_millis);
-
-    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
-}
-
-TEST_CASE("decode_decision: pause_kind==2 (continue) with nonzero duration is rejected") {
-    auto g = make_world(BrainDesc{});
-    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
-    const glm::vec2 self_pos = g->registry.get<Position>(g->slots[slot]).pos;
-
-    BlDecisionWire wire{};
-    wire.pause_kind = 2;
-    wire.pause_duration_millis = 17;
-
-    CHECK(!decode_decision(*g, wire, slot, self_pos).has_value());
-}
-
-// --- F.5: determinism with wasm loaded --------------------------------------
 
 TEST_CASE("wasm: two identical runs produce identical command logs and character snapshots") {
     std::vector<uint8_t> bytes = read_hero_wasm();

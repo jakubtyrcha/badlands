@@ -187,13 +187,21 @@ TEST_CASE("should_wake: no intention, new event, deadline", "[intention]") {
     CHECK(should_wake(g, e));
 
     // A running intention with an empty inbox and no deadline -> asleep.
+    // last_think_millis mirrors what apply_intention actually stamps at
+    // adoption time (both to the SAME instant) -- see finding 1's fix.
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::MoveTo;
     ci.started_at_millis = g.world_millis;
+    ci.last_think_millis = g.world_millis;
     ci.wake_at_millis = 0;
     CHECK_FALSE(should_wake(g, e));
 
-    // An inbox event that arrived after the intention started -> wake.
+    // An inbox event that arrives strictly AFTER the last think -> wake
+    // (finding 1: the comparison is strict, not `>=`, so an event stamped at
+    // the SAME instant as the last think -- one that already informed it --
+    // must not by itself count as new; advance the clock first to test a
+    // genuinely later event).
+    g.world_millis += kMillisPerTick;
     EventInbox& inbox = g.registry.get<EventInbox>(e);
     InboxEvent ev;
     ev.kind = InboxEventKind::DamageTaken;
@@ -420,4 +428,121 @@ TEST_CASE("advance_intentions dispatches on ci.kind, not a stray target_slot", "
     }
     CHECK(found_completed);      // arrival -> completed
     CHECK_FALSE(found_aborted);  // NOT aborted by the stray target's death
+}
+
+// --- Finding 1 (task-3-brief.md): should_wake's inbox check must not treat
+// an event that already informed the last think as a fresh reason to wake.
+
+TEST_CASE(
+    "should_wake: an inbox event that informed the last think does not immediately re-wake "
+    "next tick",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    // A running intention that already thought once, so should_wake's
+    // "nothing running" early return does not mask the inbox-event logic
+    // under test, and last_think_millis has a genuine (non-default) baseline
+    // to compare against.
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    ci.kind = IntentionKind::Idle;
+    ci.wake_at_millis = 0;  // no deadline -- isolate the inbox-event path
+    ci.last_think_millis = g.world_millis;
+
+    // An event arrives on a LATER tick (mirrors sim.cpp's tick_world: the
+    // ThreatSighted/DamageTaken/MoveBlocked writers run BEFORE the
+    // think-dispatch loop, in the SAME tick a hero might wake and decide --
+    // this is that later tick's event, strictly after the think above).
+    g.world_millis += kMillisPerTick;
+    EventInbox& inbox = g.registry.get<EventInbox>(e);
+    InboxEvent ev;
+    ev.kind = InboxEventKind::ThreatSighted;
+    ev.at_millis = g.world_millis;
+    inbox.events[0] = ev;
+    inbox.count = 1;
+    CHECK(should_wake(g, e));  // the event is new -> worth a wake
+
+    // The brain wakes THIS tick, having seen the event, and decides there is
+    // nothing new to suggest (IntentionKind::None) -- still a real think:
+    // last_think_millis advances to now regardless of what was decided.
+    Intention nothing;  // kind defaults to IntentionKind::None
+    CHECK_FALSE(apply_intention(g, slot, nothing));
+
+    // Next tick: the clock advances again; the SAME event is still sitting
+    // in the (sticky, TTL-based) inbox -- but it already informed the
+    // decision above. Without finding 1's fix (last_think_millis, compared
+    // strictly), this would immediately re-wake the brain for no NEW reason.
+    g.world_millis += kMillisPerTick;
+    CHECK_FALSE(should_wake(g, e));
+
+    // A genuinely new event (after the think above) still wakes it.
+    InboxEvent ev2;
+    ev2.kind = InboxEventKind::DamageTaken;
+    ev2.at_millis = g.world_millis;
+    inbox.events[inbox.count++] = ev2;
+    CHECK(should_wake(g, e));
+}
+
+// --- Finding 2 (task-3-brief.md): the wake schedule must be replay-derivable
+// even when the activity label repeats across wakes.
+
+TEST_CASE(
+    "the wake schedule replays: a repeated activity label still logs each wake's own duration",
+    "[intention]") {
+    auto live_owned = make_flat_world();
+    BadlandsGame& live = *live_owned;
+    uint32_t slot = spawn_into(live, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = live.slots[slot];
+
+    Intention first;
+    first.kind = IntentionKind::Idle;
+    first.activity_label = static_cast<int32_t>(ActivityId::Idle);
+    first.duration_millis = 300;
+    live.world_millis = 1000;
+    CHECK(apply_intention(live, slot, first));
+    apply_commands(live);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 1300);
+
+    // A SECOND wake, same activity_label (Idle) as `first` -- exactly the
+    // edge-trigger case finding 2 is about: enqueue_set_behavior's ordinary
+    // dedup would otherwise swallow this SetBehavior entirely, and the
+    // second wake's own schedule would never reach the log at all.
+    Intention second;
+    second.kind = IntentionKind::Idle;
+    second.activity_label = static_cast<int32_t>(ActivityId::Idle);
+    second.duration_millis = 900;
+    live.world_millis = 2000;
+    CHECK(apply_intention(live, slot, second));
+    apply_commands(live);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 2900);
+
+    int32_t set_behavior_count = 0;
+    for (const Command& c : live.command_log) {
+        if (c.kind == CommandKind::SetBehavior && c.actor == slot) {
+            ++set_behavior_count;
+        }
+    }
+    REQUIRE(set_behavior_count == 2);
+
+    // Replay: a fresh world, given an equivalent hero but NEVER calling
+    // apply_intention/react() at all (sim.cpp's tick_world replay branch
+    // never calls tick_wasm_brain/apply_intention -- see its own comment),
+    // reconstructs the SAME wake_at_millis from the logged SetBehavior
+    // commands alone, via apply_command's SetBehavior handler (command.cpp).
+    auto replay_owned = make_flat_world();
+    BadlandsGame& replay = *replay_owned;
+    uint32_t replay_slot = spawn_into(replay, MercenaryDesc(0.0f, 0.0f));
+    REQUIRE(replay_slot == slot);
+    entt::entity re = replay.slots[replay_slot];
+
+    replay.replay_log = &live.command_log;
+    replay.world_millis = 1000;
+    apply_replay_commands(replay);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 1300);
+
+    replay.world_millis = 2000;
+    apply_replay_commands(replay);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 2900);
 }

@@ -1,18 +1,33 @@
-# The shipping hero brain: a faithful port of the C++ reference decision layer
-# (game/src/town_brain.cpp's town_think, game/src/behaviours/{blocks,selectors,
-# deliberation}.cpp) to Nim/wasm. This file wires the ported pieces together
-# exactly the way town_think does: unpack the view, select_banded over the
-# hero activity table, deliberate on the choice, write the decision. The
-# per-tick view/decision plumbing (perception, and applying what comes back)
-# stays entirely host-side (game/src/wasm_brain.cpp's pack_view_wire /
-# decode_decision / apply_brain_decision) -- this module only ever sees a
-# BlViewWire and only ever produces a BlDecisionWire.
+# The shipping hero brain (v2, the intention contract): react-on-wake. This
+# module is called ONLY on a real wake (should_wake gates it, host-side,
+# game/src/sim.cpp) -- never per-tick -- and returns exactly one suggestion:
+# an intention, an activity label (inspection only), and an idle hint.
+#
+# Keeps the SAME scoring/selection this brain always had (blocks.nim/
+# selectors.nim, byte-for-byte the same considerations/thresholds as the C++
+# reference town_brain.cpp once was) -- what changed is the OUTPUT shape
+# (BlSuggestionWire's BL_INT_* vocabulary replaces v1's BL_CMD_*/goal_kind
+# pair) and that deliberation.nim (the old "stand and think it over" pause)
+# is gone outright: the idle hint IS that pause now, drawn unconditionally
+# every wake rather than only on a discretionary activity change.
+#
+# New this wake, versus v1: threats in view -> BL_INT_ATTACK (structurally
+# unreachable today -- sim.cpp's combat_preempt claims the tick first
+# whenever a hostile exists; kept so the wire matches its documented
+# capability for whenever that scope narrows); a recent DamageTaken/
+# ThreatSighted event in the inbox biases toward retreating home over the
+# normal selection. MoveBlocked needs no NEW handling here: scoreExplore's
+# existing veto (BlViewSuggest.move_blocked, unchanged from v1) already
+# covers "avoid re-suggesting a blocked point" -- the inbox event's own role
+# is purely to be a guaranteed-wake trigger (see InboxEvent's own doc
+# comment, game/src/components.h: the sibling component already carries the
+# position). Every OTHER wake, including a spurious one where nothing
+# changed, simply re-runs selectBanded -- re-suggesting the same intention is
+# a valid, idempotent answer (docs/design/intention-contract.html §2).
 #
 # ABI boilerplate (buffers, bl_abi_version/bl_spawn/bl_despawn/bl_view_buf/
 # bl_out_buf/bl_tick, NimMain/bl_log imports) lives in brain_scaffold.nim --
-# see its CONTRACT comment. This file is just imports + the two hooks:
-# brainInit (the init log line) and brainTick (this brain's ENTIRE decision
-# logic).
+# see its CONTRACT comment.
 #
 # Compiled to wasm32-wasi via scripts/build_brains.sh; must import at most
 # env.bl_log (enforced by src/crates/brainhost's bh_instantiate) -- so no
@@ -23,14 +38,14 @@ import activity_catalog
 import hero_view
 import blocks
 import selectors
-import deliberation
+import rng
 
 include brain_scaffold
 
 # EVERY hero class runs this one table (town_brain.cpp's own comment: "there
 # is no per-class list" -- what a class does, how eagerly, and whether it has
 # an activity at all is entirely the weight table). List order matches
-# kHeroActivities (town_brain.cpp:224-233) exactly -- it is the tie-break.
+# kHeroActivities (town_brain.cpp) exactly -- it is the tie-break.
 const kHeroActivities = [
   ActivityEntry(id: ActExplore, band: bNormal, score: scoreExplore, act: actExplore),
   ActivityEntry(id: ActGoHome, band: bNormal, score: scoreGoHome, act: actGoHome),
@@ -42,33 +57,73 @@ const kHeroActivities = [
   ActivityEntry(id: ActIdle, band: bNormal, score: scoreIdle, act: actIdle),
 ]
 
+# The idle hint's bounds (ms): replaces the wire's v1 think_min_millis/
+# think_max_millis (BlViewFactors) -- deliberation is gone, so this is a
+# compiled constant now, not a tunable factor (CLAUDE.md: fixed constants
+# until a knob is asked for). Same order of magnitude as the shipped v1
+# defaults (0..833ms). Scheduling advice only ("you don't need me for X
+# ms"), never a promise -- a spurious wake is always tolerated.
+const
+  kIdleHintMinMillis: int64 = 500
+  kIdleHintMaxMillis: int64 = 2000
+
 proc brainInit() =
-  const msg: cstring = "hero brain v1 init"
+  const msg: cstring = "hero brain v2 init"
   bl_log(0'i32, cast[int32](msg), len(msg).int32)
+
+# True if the wire's inbox carries a guaranteed-wake danger signal
+# (DamageTaken or ThreatSighted), checked regardless of age/TTL -- the inbox
+# is sticky by design (a hero waking late still sees what it missed).
+proc hasDangerEvent(w: BlViewWire): bool =
+  for i in 0 ..< w.event_count:
+    let kind = w.events[i].kind
+    if kind == BL_EV_DAMAGE_TAKEN.uint32 or kind == BL_EV_THREAT_SIGHTED.uint32:
+      return true
+  false
 
 proc brainTick(slot: int32): int32 =
   if g_view_buf.version != BL_ABI_VERSION.uint32:
     return 1
 
   let v = viewFromWire(g_view_buf)
-  let chosen = selectBanded(kHeroActivities, g_view_buf.factors.weights, v, g_view_buf.factors)
-  let think = deliberate(chosen.activityId, v, g_view_buf.factors)
 
-  # Mirrors town_think's tail: the commit fields (activity/goal/command) are
-  # always filled from the selection, exactly as BrainDecision always carries
-  # decision.activity = r.id regardless of think.pause; apply_brain_decision
-  # (host side) only reads them when pause_kind == 0, so overlaying the pause
-  # fields on top is equivalent to C++'s separate `decision.pause = think.pause`
-  # assignment.
-  g_out_buf = BlDecisionWire(
-    pause_duration_millis: think.durationMillis,
-    activity_id: chosen.activityId,
-    goal_kind: chosen.goalKind,
-    goal_x: chosen.goalX,
-    goal_z: chosen.goalZ,
-    command_kind: chosen.commandKind,
-    command_arg: chosen.commandArg,
-    follow_up_on_arrival: (if chosen.followUpOnArrival: 1'u32 else: 0'u32),
-    pause_kind: (if not think.pause: 0'u32 elif think.durationMillis > 0: 1'u32 else: 2'u32),
+  # Threats in view -> defend (actor-only: melee whatever this hero is
+  # already engaged with). See this file's top comment on why this is
+  # structurally unreachable today, and kept anyway.
+  let chosen =
+    if v.hasThreat:
+      Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat)
+    elif hasDangerEvent(g_view_buf) and v.hasHome:
+      # A recent hit or sighting biases toward retreating home over the
+      # normal selection -- but only when there IS a home to retreat to;
+      # otherwise fall through to the table below, which still gives
+      # GoHome/etc. a fair shot on their own merits.
+      actGoHome(v, g_view_buf.factors)
+    else:
+      selectBanded(kHeroActivities, g_view_buf.factors.weights, v, g_view_buf.factors)
+
+  # The idle hint: "you don't need me for X ms" -- the SAME draw doubles as
+  # BL_INT_IDLE's own duration_millis (the pause IS the idle hint now) and as
+  # idle_hint_millis for every other kind. BL_INT_NONE gets neither: it is
+  # apply_intention's own "nothing suggested this wake" no-op (discarded
+  # wholesale, CurrentIntention untouched) -- reachable today only via
+  # selectBanded's vacuous all-weights-zero fallback (src/crates/brainhost's
+  # real_hero_wasm_conforms test), which also asserts an all-zero-bytes
+  # SuggestionWire back, so a hint here would break that acceptance test for
+  # no behavioural gain (apply_intention never reads it for None anyway).
+  var s = seedOf(v.slot, v.nowMillis)
+  let hint = rangeI64(s, kIdleHintMinMillis, kIdleHintMaxMillis)
+  let isIdle = chosen.kind == BL_INT_IDLE
+  let isNone = chosen.kind == BL_INT_NONE
+
+  g_out_buf = BlSuggestionWire(
+    idle_hint_millis: (if isIdle or isNone: 0'i64 else: hint),
+    duration_millis: (if isIdle: hint else: 0'i64),
+    intention_kind: chosen.kind,
+    activity_label: chosen.activityLabel,
+    point_x: chosen.pointX,
+    point_z: chosen.pointZ,
+    target_slot: chosen.targetSlot,
+    arg: chosen.arg,
   )
   0

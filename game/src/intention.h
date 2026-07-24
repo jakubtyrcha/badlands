@@ -4,12 +4,11 @@
 // CurrentIntention to completion/abort, maintains the event inbox, and
 // decides when a hero is worth waking.
 //
-// INERT this slice: nothing calls apply_intention/should_wake outside tests
-// yet (the wire flip -- the next task -- wires a real brain suggestion into
-// apply_intention and should_wake into the think-dispatch loop). The existing
-// mock/wasm brain paths are untouched; advance_intentions is the only piece
-// of this file wired into tick_world so far (inbox TTL housekeeping + the
-// completion/abort detection it enables).
+// Wired in (the contract flip, task-3-brief.md): sim.cpp's think loop gates
+// every wasm hero's tick_wasm_brain on should_wake, and wasm_brain.cpp
+// decodes each wake's BlSuggestionWire into an Intention and adopts it via
+// apply_intention. The C++ mock hero path (town_think) is untouched --
+// should_wake/apply_intention are wasm-only this slice.
 
 #pragma once
 
@@ -63,9 +62,10 @@ void advance_intentions(BadlandsGame& game);
 
 // The wake rule (pure over the components,
 // docs/design/intention-contract.html §2): true when the hero has no active
-// intention, an inbox event arrived since it last decided, or its wake_at
-// deadline has passed. INERT this slice -- nothing calls it from the
-// think-dispatch loop yet.
+// intention, an inbox event arrived since it last THOUGHT (CurrentIntention::
+// last_think_millis, stamped by every apply_intention call -- not
+// started_at_millis, which only advances on an adopted intention; see
+// apply_intention's own comment), or its wake_at deadline has passed.
 bool should_wake(const BadlandsGame& game, entt::entity e);
 
 }  // namespace badlands

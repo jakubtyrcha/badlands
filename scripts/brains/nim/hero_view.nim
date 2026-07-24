@@ -1,13 +1,17 @@
-# The wasm-side WorldView (game/src/behaviours/world_view.h): the subset of
-# fields the hero blocks/selector/deliberation actually read, unpacked from
-# BlViewWire once per tick. Field-for-field the inverse of wasm_brain.cpp's
-# pack_view_wire -- read that function alongside this one when reviewing.
+# The wasm-side view (game/src/behaviours/world_view.h's WorldView, plus the
+# v2 current-intention summary): the subset of fields the hero blocks/
+# selector actually read, unpacked from BlViewWire once per wake. Field-for-
+# field the inverse of wasm_brain.cpp's pack_view_wire -- read that function
+# alongside this one when reviewing.
 #
 # Two things a C++ WorldView carries that this deliberately drops: the
 # townfolk/critter-only fields (tax target, deposit, grazing) never appear on
 # the wire (a hero brain never perceives them, brain_abi.h says so), and the
-# full 8-deep threat list collapses to the one bit hero blocks/deliberate
-# actually consult -- "is anything a threat" (has_threat(view) in C++).
+# full 8-deep threat list collapses to the one bit blocks/react actually
+# consult -- "is anything a threat" (has_threat(view) in C++). Also dropped
+# versus v1: thinkUntilMillis (HeroSimulationState's own deliberation pause --
+# unrelated to the intention contract, and nothing on this path reads it
+# anymore now that deliberation.nim is gone).
 
 import abi
 
@@ -24,6 +28,7 @@ type
     inventory*: int32
 
     # clock
+    nowMillis*: int64
     night*: bool
 
     # wander goal (drawn host-side; the block just walks to it)
@@ -37,7 +42,7 @@ type
     hasTavern*: bool
     tavernDoor*: Vec2
 
-    # threats: collapsed to the one bit deliberate() needs
+    # threats: collapsed to the one bit react() needs
     hasThreat*: bool
 
     # exploration
@@ -59,9 +64,12 @@ type
     preyDist*: float32
     selfAttackRange*: float32
 
-    # deliberation
-    nowMillis*, thinkUntilMillis*: int64
-    currentActivity*: int32
+    # current-intention summary (v2): what the engine is executing for this
+    # hero right now, if anything -- read by react() to know whether it is
+    # already mid-MoveTo/etc. on a spurious wake.
+    currentActivity*: int32       # ActivityId this entity is doing now; -1 = none yet
+    intentionKind*: int32         # BL_INT_*; BL_INT_NONE = nothing running
+    intentionWakeAt*: int64       # CurrentIntention.wake_at_millis; 0 = no deadline
 
 proc viewFromWire*(w: BlViewWire): HeroView =
   result.slot = w.self.slot
@@ -72,8 +80,9 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   result.inventory = w.self.inventory
   result.night = w.self.night != 0'u32
   result.nowMillis = w.self.world_millis
-  result.thinkUntilMillis = w.self.think_until_millis
   result.currentActivity = w.self.current_activity
+  result.intentionKind = w.self.intention_kind
+  result.intentionWakeAt = w.self.intention_wake_at
   result.selfAttackRange = w.self.attack_range
 
   result.roamGoal = Vec2(x: w.suggest.roam_goal_x, z: w.suggest.roam_goal_z)

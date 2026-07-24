@@ -1,42 +1,38 @@
 #pragma once
 
-// Wasm hero brain (Task 4 of the wasm-brain feature): loads/ticks one
-// compiled brain wasm module (via the brainhost C ABI,
-// src/crates/brainhost/include/brainhost.h) and drives every
-// BrainKind::Town entity's no-enemy tick through it, in place of town_think
-// (game/src/town_brain.h) -- see
-// docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's Scope
-// for why this is hero-only (critters/townfolk/monsters stay on the C++
-// brains).
+// Wasm hero brain (v2, the intention contract): loads/ticks one compiled
+// brain wasm module (via the brainhost C ABI, src/crates/brainhost/include/
+// brainhost.h) and drives every BrainKind::Town entity's no-enemy,
+// should_wake-gated tick through it, in place of town_think
+// (game/src/town_brain.h) -- see docs/design/intention-contract.html for the
+// full contract this implements.
 //
 // One instance drives every hero slot (per-slot state lives in the guest's
 // own bl_spawn bookkeeping, not a per-entity coroutine like the noiser
 // BrainState) -- so a BadlandsGame owns exactly one WasmBrainRuntime
 // (game_state.h's `wasm_brains`), not one per entity.
 //
-// Failure policy (Task 7, user decision): ANY wasm-brain failure is FATAL --
-// a wasm brain crash is a crash-and-error scenario, not something to paper
-// over with a downgrade/retry path (the graceful containment this replaces
-// was a workaround for noiser-era bugs and does not apply here; see
-// docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's Runtime
-// section). wasm_brain.cpp's file-local `brain_fatal` helper (spdlog
-// critical + std::abort) is the single place that enforces this -- see
-// WasmBrainRuntime::create's and tick_wasm_brain's doc comments below for
-// exactly which failures route through it. `BrainDesc{}`/no wasm bytes
-// provided is unaffected: mock drives every hero, as configured.
+// Failure policy (unchanged from v1, Task 7's decision): ANY wasm-brain
+// failure is FATAL -- a wasm brain crash is a crash-and-error scenario, not
+// something to paper over with a downgrade/retry path. wasm_brain.cpp's
+// file-local `brain_fatal` helper (spdlog critical + std::abort) is the
+// single place that enforces this -- see WasmBrainRuntime::create's and
+// tick_wasm_brain's doc comments below for exactly which failures route
+// through it. `BrainDesc{}`/no wasm bytes provided is unaffected: the C++
+// mock (town_think) drives every hero, as configured, UNCHANGED this task.
 
 #include <brainhost.h>
 
-#include "brain_abi.h"  // BlDecisionWire
-#include "town_brain.h" // BrainDecision
+#include "brain_abi.h"  // BlSuggestionWire, BlViewWire
+#include "intention.h"  // Intention
+#include "town_brain.h"  // WorldView, ActivityWeights
 
-#include <glm/glm.hpp>
+#include <entt/entt.hpp>
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <string>
 #include <vector>
 
 struct BadlandsGame;
@@ -64,45 +60,66 @@ struct WasmBrainRuntime {
     BhProgram* program = nullptr;
     BhInstance* instance = nullptr;
     // Slots bh_spawn has already been called for, by slot index (lazy: a
-    // slot's first tick calls bh_spawn before its first bh_tick). v1 brains
-    // are stateless, so a slot being reused (a dead hero's slot id is never
-    // reassigned -- see BadlandsGame::slots -- but this stays cheap insurance)
-    // without a matching bh_despawn is benign: there is no per-slot state on
-    // the guest side worth leaking.
+    // slot's first WAKE calls bh_spawn before its first bh_tick -- a hero
+    // that never wakes before dying never spawns a guest at all, which is
+    // fine: v2 brains are stateless the same way v1's were). A dead hero's
+    // slot id is never reassigned (BadlandsGame::slots), but this stays
+    // cheap insurance regardless.
     std::vector<bool> spawned;
 };
 
-// The wire trust boundary: BlDecisionWire came back through bh_tick from
+// Packs one hero's BlViewWire from an already-observed WorldView (town_brain.
+// h's observe_hero, reused verbatim -- perception stays entirely host-side)
+// plus its class weights row: self/suggest/factors 1:1 with WorldView/
+// ActivityWeights (see wasm_brain.cpp's field-by-field doc comment),
+// statuses assembled from whichever of ChattingState/MeleeLock/InsideBuilding
+// `e` currently carries (advisory only this slice -- brain_abi.h's BL_ST_*
+// doc), events copied 1:1 from `e`'s EventInbox, chars from EntityMemory
+// (slot-ascending, for determinism). Exposed (like decode_suggestion below)
+// so tests can inspect the packed wire directly without a live wasm module.
+BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldView& view,
+                          const ActivityWeights& weights);
+
+// The wire trust boundary: `out` came back through bh_tick from
 // guest-controlled memory, so its fields are untrusted input even though the
 // guest is host-compiled -- a buggy or adversarial module can write anything
-// to bl_out_buf(). Rejects (returns std::nullopt) a non-finite goal_x/
-// goal_z, an activity_id outside [0, kActivityCount), a pause_kind outside
-// {0, 1, 2}, or a pause_duration_millis that violates its pause_kind's
-// contract (kind==1: 0 < duration <= factors.hero.think_max_millis; kind==2:
-// duration == 0). Otherwise decodes `out` into a BrainDecision (self_pos
-// stands in for goal_kind == "none").
+// to bl_out_buf(). Rejects (returns std::nullopt -- MALFORMED, escalated to
+// FATAL by the caller, tick_wasm_brain) an intention_kind outside
+// [BL_INT_NONE, BL_INT_USE_SKILL], a non-finite point_x/point_z, an
+// activity_label outside [0, kActivityCount), or a duration_millis/
+// idle_hint_millis outside [0, INT32_MAX] (both narrow into a Command's
+// int32_t param_b downstream -- command.cpp's enqueue_set_behavior -- so a
+// value beyond that range would corrupt silently rather than merely being
+// policy-noncompliant).
 //
-// A pure function -- no report_bug/logging side effect of its own, unlike
-// the pre-Task-7 version. Under the fail-fast policy above a rejected wire
-// is a brain bug, not something this function contains: it is the CALLER
-// (tick_wasm_brain) that escalates a std::nullopt to brain_fatal. Kept out
-// of the anonymous namespace so tests can drive it directly with a synthetic
-// BlDecisionWire (see wasm_brain_tests.cpp), the same way apply_brain_decision
-// (town_brain.h) is unit-tested.
-std::optional<BrainDecision> decode_decision(BadlandsGame& game, const BlDecisionWire& out,
-                                              uint32_t slot, glm::vec2 self_pos);
+// BL_INT_USE_SKILL is well-formed but reserved (docs/design/
+// intention-contract.html's vocab table): this is the ONE case decode logs a
+// warning of its own (not a game-state side effect, so the function stays
+// safely callable from tests without spdlog noise mattering) and decodes to
+// IntentionKind::None ("nothing to adopt") rather than nullopt -- a
+// malformed-wire FATAL would be the wrong response to a brain naming a
+// reserved-but-recognized kind. Every other well-formed-but-infeasible
+// suggestion (e.g. an unknown target_slot) is NOT rejected here at all --
+// that is apply_intention's own warn+ignore validation, one layer up.
+//
+// Kept out of the anonymous namespace so tests can drive it directly with a
+// synthetic BlSuggestionWire (see wasm_brain_tests.cpp), the same way
+// apply_intention (intention.h) is unit-tested.
+std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t slot);
 
-// One tick for `slot`: observe (town_brain.h's observe_hero/weights_for,
-// reused verbatim so perception is identical to the C++ reference path) ->
-// pack into a BlViewWire (brain_abi.h) -> bh_tick -> on BH_OK, decode_decision
-// the returned BlDecisionWire (above) and, if it passes the wire trust
-// boundary, apply it (town_brain.h's apply_brain_decision, the same seam
-// town_think's tail uses). script_intents is bumped only when
-// apply_brain_decision reports the decision was actually applied (a commit or
-// a pause-START; a pause-CONTINUE enqueues nothing and is not counted).
+// One WAKE for `slot` (caller contract: sim.cpp's think loop already gated
+// this call on should_wake -- tick_wasm_brain does not re-check it): observe
+// (town_brain.h's observe_hero/weights_for, reused verbatim so perception is
+// identical to the C++ reference path) -> pack into a BlViewWire
+// (brain_abi.h; statuses from Chatting/MeleeLock/InsideBuilding, events
+// copied from EventInbox) -> bh_tick -> on BH_OK, decode_suggestion the
+// returned BlSuggestionWire (above) and, if it passes the wire trust
+// boundary, apply_intention (intention.h) -- the same seam a test driving
+// apply_intention directly uses. script_intents is bumped only when
+// apply_intention reports the suggestion was actually adopted.
 //
 // Fail-fast (see the policy note atop this header): bh_spawn/bh_tick
-// returning nonzero, or decode_decision rejecting the wire, all route
+// returning nonzero, or decode_suggestion rejecting the wire, all route
 // through wasm_brain.cpp's file-local brain_fatal (spdlog::critical with the
 // stage/slot/bh_last_error() text, then std::abort()) -- there is no
 // downgrade, retry-next-tick, or reinstantiation path left; a wasm brain

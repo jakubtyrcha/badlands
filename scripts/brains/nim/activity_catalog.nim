@@ -10,7 +10,7 @@
 # BL_MAX_ACTIVITIES (abi.nim) already pins the id space's size.
 
 # ActivityId values, as plain int32 (not a Nim enum) so they compare directly
-# against BlViewWire/BlDecisionWire's int32 fields with no conversion.
+# against BlViewWire/BlSuggestionWire's int32 fields with no conversion.
 const
   ActIdle*: int32 = 0
   ActRoam*: int32 = 1

@@ -96,12 +96,26 @@ void apply_commands(BadlandsGame& game);
 // entity already has. Both read components that replay reproduces exactly, so a
 // live run and its replay emit identical command streams.
 void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target);
-// `duration_millis` rides along on SetBehavior(Think): it is how long the
-// deliberation pause lasts. Putting it IN the command is what makes the pause
-// replayable -- a replay does not re-draw the duration, it reads the one the
-// live run drew. Committing to any other activity clears the pause.
+// `duration_millis` rides along on SetBehavior: for the C++ mock brain's own
+// deliberation pause (SetBehavior(Think, duration)) it is how long the pause
+// lasts; for the intention contract (game/src/intention.h's apply_intention)
+// it is the wake schedule (Idle's own duration, or the idle hint for any
+// other kind). Putting it IN the command is what makes either replayable --
+// a replay does not re-draw/re-derive it, it reads the one the live run
+// logged (the SetBehavior command handler, command.cpp, derives
+// CurrentIntention::wake_at_millis from it too, so a replay reconstructs the
+// schedule from the log alone). Committing to any other activity clears the
+// C++ mock's own pause.
+//
+// `force`: skip the edge-trigger (re-stating an unchanged `behavior` is
+// normally not a decision, so no command is enqueued) -- set true when a
+// wake's schedule must reach the log even though the activity label happens
+// to repeat (apply_intention's call: every ADOPTED intention is a real
+// decision, sparse by construction via should_wake, so there is no per-tick
+// log-bloat concern to trade against here the way there is for the mock
+// brain's own per-tick re-decisions).
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
-                          int64_t duration_millis = 0);
+                          int64_t duration_millis = 0, bool force = false);
 
 // Replay: enqueues + applies every command in game.replay_log stamped at or
 // before the current game.world_millis, advancing game.replay_cursor. game_tick
