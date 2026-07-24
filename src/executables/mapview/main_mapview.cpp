@@ -78,7 +78,9 @@ int RunPreviewOnly(const MapGenParams& params, const std::string& out_dir) {
   std::printf("mapview: %dx%d texels, %.0fx%.0f m, seed=%u -> %s\n",
               params.resolution.x, params.resolution.y, params.size_m.x,
               params.size_m.y, params.seed, out_dir.c_str());
-  badlands::mapgen::write_preview_images(out_dir, artifacts);
+  badlands::mapgen::write_preview_images(
+      out_dir, artifacts,
+      params.size_m.x / static_cast<float>(params.resolution.x));
   std::printf("mapview: done (%s)\n", out_dir.c_str());
   return 0;
 }

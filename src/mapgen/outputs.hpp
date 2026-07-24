@@ -8,12 +8,16 @@
 namespace badlands::mapgen {
 
 // Dumps the debug rasters for one generated map into out_dir: bedrock.png
-// (normalized gray), biome.png (palette), heightmap.png.
+// (normalized gray), biome.png (palette), heightmap.png, and hillshade.png
+// (relief-shaded heights — grayscale heightmaps are nearly unreadable for
+// judging ridge structure by eye). `texel_m` is the horizontal sample
+// spacing feeding the hillshade's slope computation.
 //
 // The caller is responsible for creating out_dir first (see
 // std::filesystem::create_directories); a missing directory surfaces as
 // per-file write failures.
-void write_preview_images(const std::string& out_dir, const MapArtifacts& a);
+void write_preview_images(const std::string& out_dir, const MapArtifacts& a,
+                          float texel_m);
 
 // Write a float field as an 8-bit grayscale PNG. If `normalize`, the field's
 // [min,max] is stretched to [0,255]; otherwise values are clamped to [0,1].

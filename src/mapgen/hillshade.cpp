@@ -1,4 +1,4 @@
-#include "executables/patchgen/hillshade.hpp"
+#include "mapgen/hillshade.hpp"
 
 #include <algorithm>
 #include <cmath>

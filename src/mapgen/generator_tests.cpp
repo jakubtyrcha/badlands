@@ -5,6 +5,7 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <cmath>
 #include <cstdint>
 
 #include "mapgen/biomes.hpp"
@@ -14,6 +15,7 @@ using badlands::mapgen::Biome;
 using badlands::mapgen::BiomeCutoffs;
 using badlands::mapgen::classify_biomes;
 using badlands::mapgen::compute_cutoffs;
+using badlands::mapgen::distance_to_plains;
 using badlands::mapgen::Field2D;
 using badlands::mapgen::generate_map;
 using badlands::mapgen::MapGenParams;
@@ -27,7 +29,22 @@ TEST_CASE("generate_map: same params -> byte-identical artifacts") {
   const auto b = generate_map(p);
   REQUIRE(a.bedrock.data == b.bedrock.data);
   REQUIRE(a.biome.data == b.biome.data);
-  REQUIRE(a.heightmap.data == std::vector<float>(64 * 64, 0.0f));
+  REQUIRE(a.heightmap.data == b.heightmap.data);
+}
+
+TEST_CASE("generate_map: plains sit at exactly 0 m, everything else above") {
+  MapGenParams p;
+  p.seed = 2;
+  p.resolution = {96, 96};
+  p.size_m = {384.0f, 384.0f};
+  const auto a = generate_map(p);
+  for (size_t i = 0; i < a.biome.data.size(); ++i) {
+    if (a.biome.data[i] == static_cast<uint8_t>(Biome::Plains)) {
+      REQUIRE(a.heightmap.data[i] == 0.0f);
+    } else {
+      REQUIRE(a.heightmap.data[i] > 0.0f);
+    }
+  }
 }
 
 TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
@@ -99,4 +116,82 @@ TEST_CASE("generate_map: degenerate resolution yields empty artifacts, no throw"
   REQUIRE(a.bedrock.size() == 0);
   REQUIRE(a.biome.size() == 0);
   REQUIRE(a.heightmap.size() == 0);
+}
+
+namespace {
+// Brute-force oracle: the definition — min over all plains texels of the
+// world-space Euclidean distance, double precision, O(n^2).
+Field2D<float> brute_distance(const Field2D<uint8_t>& biome, glm::vec2 texel) {
+  Field2D<float> out(biome.width, biome.height, 0.0f);
+  for (int y = 0; y < biome.height; ++y) {
+    for (int x = 0; x < biome.width; ++x) {
+      double best = 1e30;
+      for (int py = 0; py < biome.height; ++py) {
+        for (int px = 0; px < biome.width; ++px) {
+          if (biome.at(px, py) != static_cast<uint8_t>(Biome::Plains)) continue;
+          const double dx = (x - px) * static_cast<double>(texel.x);
+          const double dy = (y - py) * static_cast<double>(texel.y);
+          best = std::min(best, dx * dx + dy * dy);
+        }
+      }
+      out.at(x, y) = best < 1e30 ? static_cast<float>(std::sqrt(best)) : 0.0f;
+    }
+  }
+  return out;
+}
+}  // namespace
+
+TEST_CASE(
+    "distance_to_plains: matches the brute-force oracle (incl. anisotropic "
+    "texels)") {
+  // Deterministic scattered plains pattern on a 17x11 grid.
+  Field2D<uint8_t> biome(17, 11, static_cast<uint8_t>(Biome::Hills));
+  for (int y = 0; y < 11; ++y)
+    for (int x = 0; x < 17; ++x)
+      if ((x * 7 + y * 13) % 9 == 0)
+        biome.at(x, y) = static_cast<uint8_t>(Biome::Plains);
+  for (glm::vec2 texel : {glm::vec2(1.0f, 1.0f), glm::vec2(2.0f, 0.5f)}) {
+    const auto edt = distance_to_plains(biome, texel);
+    const auto ref = brute_distance(biome, texel);
+    // Power-of-two texels: every double op is exact, so exact float equality.
+    REQUIRE(edt.data == ref.data);
+  }
+}
+
+TEST_CASE("distance_to_plains: single plains texel gives the radial cone") {
+  Field2D<uint8_t> biome(7, 7, static_cast<uint8_t>(Biome::Mountain));
+  biome.at(3, 3) = static_cast<uint8_t>(Biome::Plains);
+  const auto d = distance_to_plains(biome, {2.0f, 2.0f});
+  for (int y = 0; y < 7; ++y) {
+    for (int x = 0; x < 7; ++x) {
+      const double dx = 2.0 * (x - 3), dy = 2.0 * (y - 3);
+      REQUIRE(d.at(x, y) == static_cast<float>(std::sqrt(dx * dx + dy * dy)));
+    }
+  }
+}
+
+TEST_CASE("distance_to_plains: world-metric across resolutions (units guard)") {
+  // Same world layout — plains where world_x < 128 m — sampled at 4 m and
+  // 2 m texels. Distances at coinciding world points agree within one COARSE
+  // texel (plains-boundary discretization); a texel-unit implementation would
+  // be off by 2x and fail loudly.
+  auto make = [](int w, int h, float texel) {
+    Field2D<uint8_t> b(w, h, static_cast<uint8_t>(Biome::Hills));
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x)
+        if (static_cast<float>(x) * texel < 128.0f)
+          b.at(x, y) = static_cast<uint8_t>(Biome::Plains);
+    return b;
+  };
+  const auto lo = distance_to_plains(make(64, 16, 4.0f), {4.0f, 4.0f});
+  const auto hi = distance_to_plains(make(128, 32, 2.0f), {2.0f, 2.0f});
+  for (int x = 40; x < 64; ++x) {  // well inside the non-plains half
+    REQUIRE(lo.at(x, 8) == Catch::Approx(hi.at(2 * x, 16)).margin(4.0));
+  }
+}
+
+TEST_CASE("distance_to_plains: no plains at all -> all zeros") {
+  Field2D<uint8_t> biome(5, 4, static_cast<uint8_t>(Biome::Mountain));
+  const auto d = distance_to_plains(biome, {1.0f, 1.0f});
+  REQUIRE(d.data == std::vector<float>(20, 0.0f));
 }

@@ -38,7 +38,7 @@ perl -e 'alarm 30; exec @ARGV' ./build/badlands_game  # SIGALRM-bounded headless
 ```
 `badlands_mapview` is the map tool: it generates a map procedurally (bedrock
 field → quantile-cut biomes) and renders it as biome-colored terrain.
-`--preview-image-only` instead dumps the debug rasters (bedrock/biome/heightmap
+`--preview-image-only` instead dumps the debug rasters (bedrock/biome/heightmap/hillshade
 PNGs) to `--out` and exits (pure CPU, no window).
 ```sh
 ./build/badlands_mapview --seed 2 --resolution 500x500 --size 500x500   # view it
