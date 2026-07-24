@@ -688,7 +688,7 @@ enum class GameEventKind : int32_t {
     BuildingDestroyed,   // target = building id; actor = attacker (or NONE)
     HeroDowned,          // a character's HP reached 0; actor = attacker (or NONE)
     HeroDied,            // reserved: true removal, distinct from downing. Not emitted yet.
-    HeroLeveledUp,  // a hero crossed a level threshold; actor = hero slot, amount = new level
+    HeroLeveledUp,       // a hero crossed a level threshold; actor = hero slot, amount = new level
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and

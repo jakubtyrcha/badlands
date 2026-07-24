@@ -965,6 +965,10 @@ void GameView::PumpGameEvents() {
         break;
       case GameEventKind::HeroDied:
         break;  // reserved: not emitted yet
+      case GameEventKind::HeroLeveledUp:
+        PushLogLine(EventActorName(e.actor_id) + " reached level " +
+                    std::to_string(static_cast<int>(e.amount)));
+        break;
     }
   }
 }
