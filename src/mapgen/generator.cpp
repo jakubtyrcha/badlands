@@ -192,21 +192,20 @@ void dt1d(const std::vector<double>& f, std::vector<double>& d,
 
 }  // namespace
 
-Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
-                                  glm::vec2 texel_m) {
-  const int w = biome.width, h = biome.height;
+Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask,
+                                glm::vec2 texel_m) {
+  const int w = mask.width, h = mask.height;
   if (w <= 0 || h <= 0) return Field2D<float>{};
   Field2D<float> out(w, h, 0.0f);
 
-  const auto kPlains = static_cast<uint8_t>(Biome::Plains);
-  bool any_plains = false;
-  for (uint8_t b : biome.data) {
-    if (b == kPlains) {
-      any_plains = true;
+  bool any_seed = false;
+  for (uint8_t m : mask.data) {
+    if (m != 0) {
+      any_seed = true;
       break;
     }
   }
-  if (!any_plains) return out;  // documented degenerate: all zeros
+  if (!any_seed) return out;  // documented degenerate: all zeros
 
   // Squared world distances between the two passes.
   std::vector<double> g(static_cast<size_t>(w) * h);
@@ -231,7 +230,7 @@ Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
                  [&](Scratch& s, int x0, int, int x1, int) {
                    for (int x = x0; x < x1; ++x) {
                      for (int y = 0; y < h; ++y)
-                       s.f[y] = biome.at(x, y) == kPlains ? 0.0 : kBigD;
+                       s.f[y] = mask.at(x, y) != 0 ? 0.0 : kBigD;
                      dt1d(s.f, s.d, s.v, s.z, h, texel_m.y);
                      for (int y = 0; y < h; ++y)
                        g[static_cast<size_t>(y) * w + x] = s.d[y];
@@ -251,6 +250,15 @@ Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
                  });
 
   return out;
+}
+
+Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
+                                  glm::vec2 texel_m) {
+  Field2D<uint8_t> mask(biome.width, biome.height, 0);
+  const auto kPlains = static_cast<uint8_t>(Biome::Plains);
+  for (size_t i = 0; i < mask.data.size(); ++i)
+    mask.data[i] = biome.data[i] == kPlains ? 1 : 0;
+  return distance_to_mask(mask, texel_m);
 }
 
 }  // namespace badlands::mapgen

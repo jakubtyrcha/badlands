@@ -195,3 +195,16 @@ TEST_CASE("distance_to_plains: no plains at all -> all zeros") {
   const auto d = distance_to_plains(biome, {1.0f, 1.0f});
   REQUIRE(d.data == std::vector<float>(20, 0.0f));
 }
+
+TEST_CASE("distance_to_mask: matches distance_to_plains on a plains mask") {
+  Field2D<uint8_t> biome(17, 11, static_cast<uint8_t>(Biome::Hills));
+  Field2D<uint8_t> mask(17, 11, 0);
+  for (int y = 0; y < 11; ++y)
+    for (int x = 0; x < 17; ++x)
+      if ((x * 7 + y * 13) % 9 == 0) {
+        biome.at(x, y) = static_cast<uint8_t>(Biome::Plains);
+        mask.at(x, y) = 1;
+      }
+  REQUIRE(badlands::mapgen::distance_to_mask(mask, {1.0f, 1.0f}).data ==
+          distance_to_plains(biome, {1.0f, 1.0f}).data);
+}

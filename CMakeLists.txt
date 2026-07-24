@@ -531,6 +531,7 @@ add_executable(badlands_erosion_tests
     src/mapgen/hydrology.cpp
     src/mapgen/erosion_tests.cpp
     src/mapgen/erosion.cpp
+    src/mapgen/generator.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_erosion_tests PRIVATE

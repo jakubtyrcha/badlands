@@ -2,6 +2,7 @@
 #include <cmath>
 #include "mapgen/erosion.hpp"
 #include "mapgen/hydrology.hpp"
+#include "mapgen/resample.hpp"
 
 using namespace badlands::mapgen;
 
@@ -427,4 +428,19 @@ TEST_CASE("erode: deterministic, and the sink sees the loop film strip") {
   REQUIRE(t1.S.data == t2.S.data);
   REQUIRE(sink.floats == 2 * 3);  // height+flow+sediment × 2 dumps
   REQUIRE(sink.masks == 2 * 1);   // lakes mask × 2 dumps
+}
+
+TEST_CASE("resample_bilinear: identity when grids coincide, linear in between") {
+  Field2D<float> src(8, 8);
+  for (int y = 0; y < 8; ++y)
+    for (int x = 0; x < 8; ++x) src.at(x, y) = static_cast<float>(x);  // ramp
+  // same grid: identity
+  const auto same = resample_bilinear(src, 1.0f, 0.0f, 8, 1.0f);
+  REQUIRE(same.data == src.data);
+  // 2x finer: midpoints are averages of the ramp -> still linear in world x
+  const auto fine = resample_bilinear(src, 1.0f, 0.0f, 16, 0.5f);
+  REQUIRE(fine.at(3, 4) == Catch::Approx(1.5f));  // world x = 1.5
+  // origin shift: src texel 0 sits at world -2 -> world 0 is src coord 2
+  const auto shifted = resample_bilinear(src, 1.0f, -2.0f, 8, 1.0f);
+  REQUIRE(shifted.at(0, 0) == Catch::Approx(2.0f));
 }

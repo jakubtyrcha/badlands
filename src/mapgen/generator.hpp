@@ -52,11 +52,20 @@ Field2D<uint8_t> classify_biomes(const Field2D<float>& bedrock,
                                  const BiomeCutoffs& cutoffs);
 
 // Exact Euclidean distance (WORLD METERS) from each texel to the nearest
+// nonzero mask texel, with texel (x, y) at world (x*texel_m.x, y*texel_m.y).
+// Felzenszwalb–Huttenlocher two-pass EDT — exact, not a chamfer
+// approximation. An all-zero mask returns all zeros. Generic over the seed
+// set (distance_to_plains wraps this with a Plains mask; the detail filter
+// needs distance-to-water).
+Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask,
+                                glm::vec2 texel_m);
+
+// Exact Euclidean distance (WORLD METERS) from each texel to the nearest
 // texel classified Plains, with texel (x, y) at world (x*texel_m.x,
-// y*texel_m.y). Felzenszwalb–Huttenlocher two-pass EDT — exact, not a
-// chamfer approximation. A map with no plains at all returns all zeros
-// (unreachable via generate_map: the quantile cutoffs guarantee a plains
-// share). Exposed for unit testing (pattern of compute_cutoffs).
+// y*texel_m.y). A map with no plains at all returns all zeros (unreachable
+// via generate_map: the quantile cutoffs guarantee a plains share). Thin
+// wrapper over distance_to_mask. Exposed for unit testing (pattern of
+// compute_cutoffs).
 Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
                                   glm::vec2 texel_m);
 
