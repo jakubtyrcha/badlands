@@ -301,7 +301,7 @@ TEST_CASE("deposit: lake cells fill at most to water level; conservation holds")
   const auto area = accumulate_drainage(r, 1.0f);
   REQUIRE(r.in_lake[1 * 16 + 4] == 1);  // sanity: the pit is flooded
 
-  Field2D<float> eroded(16, 3, 2.0f);  // increased artificial erosion to bind the cap
+  Field2D<float> eroded(16, 3, 5.0f);  // increased artificial erosion to bind the cap
   ErosionParams p;
   p.deposition_g = 1.0f;
   const float S_before = 0.0f;
