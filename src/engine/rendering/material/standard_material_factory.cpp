@@ -460,6 +460,13 @@ std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
 
     std::map<RenderPassType, MeshRenderingMaterial::TargetConfig> pass_targets;
     for (RenderPassType pass : variant.render_passes) {
+      // A material that opts out of shadow casting builds no kShadow
+      // pipeline for this variant; the shadow pass resolves the kShadow
+      // pipeline and skips drawing when it's absent, so no pass-side
+      // filtering is needed.
+      if (pass == RenderPassType::kShadow && !desc.casts_shadow) {
+        continue;
+      }
       MeshRenderingMaterial::TargetConfig target;
       // Shadow passes are depth-only (no color attachments); see the
       // deviation note at the top of this file re: FactoryDescriptor

@@ -101,6 +101,12 @@ struct FactoryDescriptor {
   // behavior for every existing material); a material that wants no culling
   // (e.g. double-sided foliage) can set None.
   wgpu::CullMode cull_mode = wgpu::CullMode::Back;
+
+  // Whether this material casts shadows. Defaults to true (unchanged behavior
+  // for every existing material). When false, no kShadow pipeline is built
+  // for this material's variants, so the shadow pass — which resolves the
+  // kShadow pipeline and skips when it's absent — never draws it.
+  bool casts_shadow = true;
 };
 
 // Build factory from descriptor. script_provider required when

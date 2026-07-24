@@ -2,7 +2,11 @@
 // render_textured_mesh.cpp (Dawn buffers are ref-counted; overwriting the GPU
 // component releases the old buffer). Both variants additionally bind
 // engine-owned resources at @group(2) when the material declares it (see
-// ForwardEngineResources).
+// ForwardEngineResources): the opaque pass binds a purpose-fit 6-entry group
+// (shadow map + IBL only — no scene depth/color, since scene_depth is also
+// the opaque pass's writable depth attachment and scene_color is stale at
+// opaque time), while the transparent pass binds the full 9-entry group
+// (adds scene depth/color, which water genuinely needs).
 #include "engine/rendering/passes/render_forward.hpp"
 
 #include <array>
@@ -139,6 +143,25 @@ wgpu::BindGroup BuildForwardEngineBindGroup(RenderingMaterialInstance* instance,
                                 entries);
 }
 
+// Build the @group(2) engine bind group for the forward-OPAQUE pass: shadow
+// map + IBL only (no scene_depth/scene_color — scene_depth is also the
+// opaque pass's writable depth attachment, a Dawn read-write aliasing hazard,
+// and scene_color is stale at opaque time). Used by RenderForwardMeshes only;
+// RenderForwardTransparentMeshes keeps the full 9-entry
+// BuildForwardEngineBindGroup above (water genuinely needs scene depth/color).
+wgpu::BindGroup BuildForwardOpaqueEngineBindGroup(RenderingMaterialInstance* instance,
+                                                  FrameContext& frame,
+                                                  const ForwardEngineResources& engine) {
+  std::array<wgpu::BindGroupEntry, 6> entries{};
+  entries[0].binding = 0; entries[0].textureView = engine.shadow_map;
+  entries[1].binding = 1; entries[1].sampler     = engine.shadow_sampler;
+  entries[2].binding = 2; entries[2].textureView = engine.ibl_prefiltered;
+  entries[3].binding = 3; entries[3].sampler     = engine.ibl_sampler;
+  entries[4].binding = 4; entries[4].textureView = engine.brdf_lut;
+  entries[5].binding = 5; entries[5].sampler     = engine.brdf_lut_sampler;
+  return frame.CreateBindGroup(instance->GetPipeline().GetBindGroupLayout(2), entries);
+}
+
 }  // namespace
 
 void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
@@ -175,7 +198,7 @@ void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
     const bool wants_engine = have_engine && instance->DeclaresBindGroup(2);
     if (wants_engine) {
       if (!engine_bg) {
-        engine_bg = BuildForwardEngineBindGroup(instance, frame, engine);
+        engine_bg = BuildForwardOpaqueEngineBindGroup(instance, frame, engine);
       }
       pass.SetBindGroup(2, engine_bg);
     }
