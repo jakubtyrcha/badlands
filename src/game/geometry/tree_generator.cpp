@@ -4,6 +4,7 @@
 #include <cmath>
 #include <deque>
 #include <glm/gtc/constants.hpp>   // two_pi
+#include "engine/rendering/geometry/mesh_builder_utils.hpp"  // PushVertex
 namespace badlands {
 namespace {
 
@@ -158,6 +159,54 @@ std::vector<SkeletonBranch> BuildTreeSkeleton(const TreeOptions& o) {
   return skeleton;
 }
 
-TexturedMeshResult GenerateTreeMesh(const TreeOptions&) { return {}; }
+TexturedMeshResult GenerateTreeMesh(const TreeOptions& o) {
+  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(o);
+
+  StaticTexturedMeshComponent mesh;
+
+  for (const SkeletonBranch& br : skeleton) {
+    const int segments = std::max(3, br.segment_count);
+    const int wraps = std::max(1, static_cast<int>(std::lround(br.base_radius * o.bark_uv_scale_x)));
+    const int n = segments + 1;  // ring verts incl. duplicated seam
+    const uint32_t index_offset = mesh.vertex_count;
+
+    float cum_len = 0.0f;
+    for (size_t k = 0; k < br.sections.size(); ++k) {
+      const BranchSection& sec = br.sections[k];
+      if (k > 0) cum_len += glm::length(sec.origin - br.sections[k - 1].origin);
+      const float v = cum_len / o.bark_uv_scale_y;  // arc-length V (SP1 improvement)
+
+      for (int j = 0; j <= segments; ++j) {
+        const int jj = (j == segments) ? 0 : j;  // wrap position; U still reaches `wraps`
+        const float angle = glm::two_pi<float>() * static_cast<float>(jj) /
+                            static_cast<float>(segments);
+        const glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
+        const glm::vec3 tan_dir(-std::sin(angle), 0.0f, std::cos(angle));
+        const glm::vec3 pos = sec.origin + sec.orientation * (dir * sec.radius);
+        const glm::vec3 nrm = glm::normalize(sec.orientation * dir);
+        const glm::vec3 tng = glm::normalize(sec.orientation * tan_dir);
+        const float u = (static_cast<float>(j) / static_cast<float>(segments)) *
+                        static_cast<float>(wraps);
+        PushVertex(mesh.vertices, pos, glm::vec2(u, v), nrm, tng);
+      }
+    }
+    mesh.vertex_count = static_cast<uint32_t>(mesh.vertices.size() / kTexturedMeshFloatsPerVertex);
+
+    const int rings = static_cast<int>(br.sections.size());
+    for (int i = 0; i < rings - 1; ++i) {
+      for (int j = 0; j < segments; ++j) {
+        const uint32_t v1 = index_offset + static_cast<uint32_t>(i * n + j);
+        const uint32_t v2 = index_offset + static_cast<uint32_t>(i * n + j + 1);
+        const uint32_t v3 = v1 + static_cast<uint32_t>(n);
+        const uint32_t v4 = v2 + static_cast<uint32_t>(n);
+        mesh.indices.insert(mesh.indices.end(), {v1, v3, v2, v2, v3, v4});
+      }
+    }
+  }
+
+  mesh.dirty = true;
+  const Aabb bounds = ComputeLocalAabb(mesh);
+  return {.mesh = std::move(mesh), .local_bounds = bounds};
+}
 
 }  // namespace badlands

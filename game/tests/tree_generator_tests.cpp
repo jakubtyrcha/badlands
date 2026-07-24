@@ -1,6 +1,8 @@
 #include <catch_amalgamated.hpp>
+#include <cmath>
 #include "game/geometry/tree_options.hpp"
 #include "game/geometry/tree_generator.hpp"
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"
 
 using namespace badlands;
 
@@ -43,4 +45,39 @@ TEST_CASE("BuildTreeSkeleton: trunk rooted at origin, tapers, deterministic") {
   REQUIRE(a[10].sections.front().origin.x == Catch::Approx(b[10].sections.front().origin.x));
   REQUIRE(a[10].sections.front().origin.y == Catch::Approx(b[10].sections.front().origin.y));
   REQUIRE(a[10].sections.front().origin.z == Catch::Approx(b[10].sections.front().origin.z));
+}
+
+TEST_CASE("GenerateTreeMesh: well-formed indexed mesh") {
+  const TexturedMeshResult r = GenerateTreeMesh(OakPreset());
+  const auto& m = r.mesh;
+  REQUIRE(m.vertex_count > 0u);
+  REQUIRE(m.vertices.size() == m.vertex_count * kTexturedMeshFloatsPerVertex);
+  REQUIRE_FALSE(m.indices.empty());
+  REQUIRE(m.indices.size() % 3 == 0);
+  for (uint32_t idx : m.indices) REQUIRE(idx < m.vertex_count);
+  for (float f : m.vertices) REQUIRE(std::isfinite(f));
+  // Base on floor, grows up.
+  REQUIRE(r.local_bounds.min.y == Catch::Approx(0.0f).margin(0.05f));
+  REQUIRE(r.local_bounds.max.y > 1.0f);
+}
+
+TEST_CASE("GenerateTreeMesh: deterministic, seed-sensitive") {
+  const TexturedMeshResult a = GenerateTreeMesh(OakPreset());
+  const TexturedMeshResult b = GenerateTreeMesh(OakPreset());
+  REQUIRE(a.mesh.vertices == b.mesh.vertices);
+  REQUIRE(a.mesh.indices == b.mesh.indices);
+
+  TreeOptions other = OakPreset();
+  other.seed = 999u;
+  const TexturedMeshResult c = GenerateTreeMesh(other);
+  REQUIRE(c.mesh.vertices != a.mesh.vertices);  // different tree
+}
+
+TEST_CASE("GenerateTreeMesh: exact counts for the (continuation-free) Pine") {
+  // Pine is evergreen -> no stem continuation -> clean per-level counts.
+  // Trunk: 13 rings * (8+1) = 117 verts; 82 branches * (11 rings * (6+1)) = 6314.
+  // Indices: 12*8*6 + 82*(10*6*6) = 576 + 29520 = 30096.
+  const TexturedMeshResult p = GenerateTreeMesh(PinePreset());
+  REQUIRE(p.mesh.vertex_count == 6431u);
+  REQUIRE(p.mesh.indices.size() == 30096u);
 }
