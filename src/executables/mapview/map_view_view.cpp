@@ -1,6 +1,7 @@
 #include "executables/mapview/map_view_view.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -29,12 +30,19 @@ namespace {
 // WeightsAtNode(i,j).Dominant() == the single biome and the cluster terrain's
 // per-vertex color is the crisp per-texel biome. Blended slices are the game's
 // symbolic generator's business.
-MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, float texel_m) {
+MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, glm::vec2 size_m) {
   const int sw = art.bedrock.width, sh = art.bedrock.height;
-  if (sw <= 0 || sh <= 0 || texel_m <= 0.0f) return {};
-  // One more node than texels per axis: node i sits at i * texel_m, so the
+  if (sw <= 0 || sh <= 0) return {};
+  const float tx = size_m.x / static_cast<float>(sw);
+  const float ty = size_m.y / static_cast<float>(sh);
+  if (tx <= 0.0f) return {};
+  // The frozen MapData lattice has ONE spacing scalar; this wrap is the code
+  // that depends on square texels, so the invariant is asserted here (the CLI
+  // check in main_mapview is the user-facing error for the same contradiction).
+  assert(std::abs(tx - ty) <= 1e-4f * std::max(tx, ty));
+  // One more node than texels per axis: node i sits at i * tx, so the
   // lattice spans exactly the map's size_m; edge nodes clamp to the last texel.
-  MapData map(sw + 1, sh + 1, texel_m);
+  MapData map(sw + 1, sh + 1, tx);
   for (int j = 0; j <= sh; ++j) {
     for (int i = 0; i <= sw; ++i) {
       const int sx = std::min(i, sw - 1), sz = std::min(j, sh - 1);
@@ -91,8 +99,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // lattice is the finest source data (one node per texel), not a coarser mesh
   // density; LOD selection manages the triangle cost.
   t = clock::now();
-  terrain_map_ = MakeOneHotMapData(
-      map_, params_.size_m.x / static_cast<float>(params_.resolution.x));
+  terrain_map_ = MakeOneHotMapData(map_, params_.size_m);
   log_step("map->MapData", since(t));
 
   // Frame the camera BEFORE building the terrain, so the cluster path's initial

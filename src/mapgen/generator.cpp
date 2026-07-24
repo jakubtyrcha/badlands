@@ -47,11 +47,6 @@ FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
 
 float to01(float v) { return 0.5f * (v + 1.0f); }  // FastNoiseLite is ~[-1,1]
 
-float smoothstep(float lo, float hi, float x) {
-  const float t = std::clamp((x - lo) / (hi - lo), 0.0f, 1.0f);
-  return t * t * (3.0f - 2.0f * t);
-}
-
 }  // namespace
 
 BiomeCutoffs compute_cutoffs(const Field2D<float>& bedrock) {
@@ -120,12 +115,17 @@ MapArtifacts generate_map(const MapGenParams& params) {
           for (int x = x0; x < x1; ++x) {
             const float wx = static_cast<float>(x) * texel.x;
             const float wy = static_cast<float>(y) * texel.y;
-            const float mask = smoothstep(kBeltLo, kBeltHi,
-                                          to01(belt.GetNoise(wx, wy)));
-            a.bedrock.at(x, y) =
-                to01(base.GetNoise(wx, wy)) +
-                kRidgeWeight * mask *
-                    std::pow(to01(ridged.GetNoise(wx, wy)), kRidgeSharpness);
+            const float mask = glm::smoothstep(kBeltLo, kBeltHi,
+                                               to01(belt.GetNoise(wx, wy)));
+            float b = to01(base.GetNoise(wx, wy));
+            // mask is exactly 0 below kBeltLo (the smoothstep clamps), so
+            // skipping the ridged term outside the belt is bit-identical,
+            // not an approximation.
+            if (mask > 0.0f) {
+              b += kRidgeWeight * mask *
+                   std::pow(to01(ridged.GetNoise(wx, wy)), kRidgeSharpness);
+            }
+            a.bedrock.at(x, y) = b;
           }
         }
       });

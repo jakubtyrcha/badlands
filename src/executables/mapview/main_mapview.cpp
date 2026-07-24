@@ -100,20 +100,31 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "mapview: %s needs an argument\n", flag);
       return std::nullopt;
     };
+    // Parse one numeric flag value with `conv` (stoul/stof/stoi), reporting
+    // `want` on a bad value. Returns false (caller returns 2) on missing/bad.
+    auto parse_num = [&](const char* flag, const char* want, auto conv,
+                         auto& out) -> bool {
+      auto v = next(flag);
+      if (!v) return false;
+      try {
+        out = conv(*v);
+        return true;
+      } catch (const std::exception&) {
+        std::fprintf(stderr, "mapview: bad %s '%s' (want %s)\n", flag, v->c_str(),
+                     want);
+        return false;
+      }
+    };
     if (a == "--preview-image-only") {
       preview_only = true;
     } else if (a == "--serial-build") {
       serial_build = true;
     } else if (a == "--seed") {
-      auto v = next("--seed");
-      if (!v) return 2;
-      try {
-        params.seed = static_cast<uint32_t>(std::stoul(*v));
-      } catch (const std::exception&) {
-        std::fprintf(stderr, "mapview: bad --seed '%s' (want a number)\n",
-                     v->c_str());
+      if (!parse_num(
+              "--seed", "a number",
+              [](const std::string& s) { return static_cast<uint32_t>(std::stoul(s)); },
+              params.seed))
         return 2;
-      }
     } else if (a == "--resolution") {
       auto v = next("--resolution");
       if (!v) return 2;
@@ -137,25 +148,18 @@ int main(int argc, char** argv) {
     } else if (a == "--out") {
       if (auto v = next("--out")) out_dir = *v; else return 2;
     } else if (a == "--camera-height") {
-      auto v = next("--camera-height");
-      if (!v) return 2;
-      try {
-        camera_height = std::stof(*v);
-      } catch (const std::exception&) {
-        std::fprintf(stderr, "mapview: bad --camera-height '%s' (want metres)\n",
-                     v->c_str());
+      if (!parse_num(
+              "--camera-height", "metres",
+              [](const std::string& s) { return std::stof(s); }, camera_height))
         return 2;
-      }
     } else if (a == "--lod-tint") {
-      auto v = next("--lod-tint");
-      if (!v) return 2;
-      try {
-        lod_tint = std::stoi(*v);
-      } catch (const std::exception&) {
-        lod_tint = -1;
-      }
+      if (!parse_num(
+              "--lod-tint", "0, 1, or 2",
+              [](const std::string& s) { return std::stoi(s); }, lod_tint))
+        return 2;
       if (lod_tint < 0 || lod_tint > 2) {
-        std::fprintf(stderr, "mapview: bad --lod-tint (want 0, 1, or 2)\n");
+        std::fprintf(stderr, "mapview: --lod-tint %d out of range (want 0..2)\n",
+                     lod_tint);
         return 2;
       }
     } else if (is_app_flag_with_value(a)) {
