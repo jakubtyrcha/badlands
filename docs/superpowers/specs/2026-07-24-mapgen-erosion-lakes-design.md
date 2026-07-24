@@ -1,0 +1,240 @@
+# Mapgen step 2: erosion + lakes
+
+**Date:** 2026-07-24
+**Status:** approved
+
+## Goal
+
+Resculpt the cone-field heightmap into eroded terrain and prove the
+cavity→lake pipeline end to end: a two-layer (bedrock + sediment) stream-power
+erosion sim, pre-seeded lake basins that flood to **per-lake water levels**,
+and a runevision-style analytic gully filter for fine detail. Produces the
+hydrology artifacts (`flow`, `sediment`, `water_depth`) that the next step
+uses to place Swamp/Forest/streams.
+
+Reference: "Fast and Gorgeous Erosion Filter" (runevision, 2026-03) — used as
+the **detail** tier only; it is a stateless directional-noise filter and
+produces no hydrology, so mass movement and water need the sim tier.
+
+## Decisions taken with the user
+
+- **Scope:** erosion + lakes now (Lake stamped into the biome map); swamp/
+  forest/streams next step, consuming this step's artifacts.
+- **Budget:** a few seconds at 512² sim, CPU-only (`--preview-image-only`
+  stays pure CPU). Serial-correct first; parallelize only if the budget is
+  actually threatened.
+- **Grids:** ONE sim resolution and ONE output resolution, both square with a
+  single world-scale factor, decoupled from each other and from world size.
+  A future game map can raise `sim_resolution` for finer landforms (accepted:
+  changing sim res changes landforms).
+- **Customization surface:** an `ErosionParams` struct with tuned defaults, on
+  `MapGenParams`. No UI, no CLI flags. Sub-knobs stay `constexpr`.
+- **Lake seeding:** bottom `lake_frac` quantile of the bedrock latent field
+  marks basin regions (mirrors the mountain quantile machinery); cavities
+  carve there.
+- **Erosion model:** implicit stream power on the drainage tree
+  (Braun–Willett) + G-term deposition (Yuan et al.) — chosen over droplet
+  particles (no hydrology outputs, weak control) and shallow-water pipes
+  (CFL-limited, tuning-fragile; revisit for the hydraulics follow-up).
+- **Inspectability:** every pipeline step dumps a visual (debug sink below).
+- **No global water level.** Each lake has its own spill elevation. Height 0
+  is merely the plains' starting datum. This **retires** the "0 m is the
+  water datum" wording of the 2026-07-24 heightmap spec.
+
+## Interface changes
+
+`MapGenParams` collapses to square/scalar (breaking; mapview CLI keeps
+`WxH` parsing but rejects non-square for now):
+
+```cpp
+struct MapGenParams {
+  uint32_t seed = 1;
+  int resolution = 512;        // output grid (texels, square)
+  float world_size_m = 512.0f; // world extent (square)
+  ErosionParams erosion;
+};
+```
+
+`MapArtifacts` (all fields on the output grid):
+
+```cpp
+struct MapArtifacts {
+  Field2D<float> bedrock;     // latent field (unchanged)
+  Field2D<uint8_t> biome;     // now includes Lake
+  Field2D<float> heightmap;   // eroded + detailed ground surface (m)
+  Field2D<float> water_depth; // standing water (m), 0 = dry; surface = heightmap + water_depth
+  Field2D<float> flow;        // drainage area (m²) — moisture/stream input for the next step
+  Field2D<float> sediment;    // sediment thickness (m) — future swamp/soil signal
+};
+```
+
+`generate_map(params, MapDebugSink* sink = nullptr)` — see Debug sink.
+
+New files: `hydrology.{hpp,cpp}` (priority-flood, receivers, accumulation —
+reused by the hydraulics follow-up), `erosion.{hpp,cpp}` (sim loop, layers,
+cavities), `detail_filter.{hpp,cpp}` (gully filter). `generator.cpp`
+orchestrates; `outputs.cpp` implements the PNG sink.
+
+## Model
+
+State per sim cell: bedrock surface `B` (m), sediment thickness `S ≥ 0` (m),
+ground `h = B + S`. Water is never state — re-derived from `h` each iteration.
+
+**Grid & boundary.** Sim grid covers the world rect expanded by `kPadTexels`
+(16); bedrock noise is defined everywhere in world space, and the padded EDT
+also un-clamps cone heights near map edges. Border cells are pinned base
+level (never erode, all flow exits there); the pad is cropped at resample so
+the pinned ring never reaches the output.
+
+**Pipeline (sim grid):**
+
+```
+bedrock latent → quantile biomes → cone relief B0        [existing math, sim-grid sampling]
+→ carve cavities   bottom lake_frac quantile → smooth bowls into B (≤ lake_depth_m)
+→ sediment init    S0 = initial_sediment_m · taper(dist-to-plains, sediment_taper_m)
+                      + fBm(sediment_noise_m, sediment_noise_wavelength_m); 0 in cavities
+→ SIM LOOP × iterations:
+    1 route    priority-flood from borders over h (Barnes 2014): D8 receiver per
+               cell, pop order = topological order, ε-gradient across flats and
+               flooded interiors, in_lake flags + local water level.
+               Ties break on (elevation, linear index) — deterministic.
+    2 drain    reverse pop order, uniform rain → drainage area A (m²)
+    3 incise   implicit stream power (Braun–Willett), slope exponent n fixed at 1
+               (closed form; n≠1 needs a per-cell Newton iteration — deferred), per cell
+               in pop order:  F = K·A^m·dt/d,  h' = (h + F·h_rcv')/(1+F)
+               K = k_sediment while S>0 else k_bedrock; eroded depth consumes S
+               first, excess rescaled by k_bedrock/k_sediment before cutting B.
+               Unconditionally stable; h' is a weighted average → a cell never
+               erodes below its receiver. in_lake cells see slope ≈ ε (no floor
+               incision); outlet sills incise with the full lake catchment's A —
+               lakes can slowly breach (headroom controlled by lake_depth_m).
+    4 deposit  G-term (Yuan et al. 2019): ∂h/∂t += (G/A)·q_s, q_s = upstream
+               net-erosion flux; 2–3 Gauss–Seidel sweeps (downstream flux pass +
+               update pass). Flux entering an in_lake cell deposits up to the
+               local water level (deltas), overflow continues to the outlet.
+               Border flux exits the map (mass deliberately not conserved).
+    5 diffuse  ∂h/∂t = D·∇²h, explicit, sub-stepped to D·dt_sub/Δx² ≤ 0.25.
+               Removals draw S before B; additions credit S.
+→ finalize   final flood → per-lake spill level; W = level − h inside; prune
+             lakes with area < min_lake_area_m2 or max depth < min_lake_depth_m
+```
+
+**Output (output grid, pad cropped):** bilinear-resample `h`, add the gully
+detail filter, resample `W`/`A`/`S`; classify biomes from output-res bedrock
+as today, then stamp Lake where `W > 0` (recomputed against the detailed
+heightmap so shorelines stay consistent).
+
+**Why plains gain relief:** deposition builds fans where mountain streams
+debouch; large through-flowing rivers gently incise the sediment blanket;
+sediment noise + diffusion add micro-relief; the detail filter textures
+slopes. Plains stay plains-like — gently sculpted.
+
+**Time.** `dt` is a nominal unit; only K·dt, D·dt, G matter. iterations/dt =
+terrain age; k_* = how carved; G = valley-fill vs canyon export; D = soft vs
+crisp.
+
+## Detail filter (runevision adaptation)
+
+Per output texel: base = bilinear sim `h`; downhill direction from finite-
+difference gradient of the base; add N octaves of oriented gully noise.
+
+- **v1 core:** cell-rotated stripe patterns aligned to the local gradient
+  (Worley-style pivot grid), octave stacking with stacked fading (small
+  gullies fade on ridges/creases of larger ones), normalized gully magnitudes,
+  slope-masked amplitude with the ease-out curve `1 − (1 − slope)²`.
+- **Skipped in v1** (addable later without interface change): drainage-streak
+  map, analytic output derivatives, straight-gully sign trick.
+- Amplitude fades to zero below and within `kShoreFadeM` (2 m) above the
+  local water surface — clean shorelines.
+- Pure function of (world position, seed, base gradient): deterministic,
+  tile-parallel, world-metric wavelengths.
+
+## Debug sink — every step inspectable
+
+`generate_map` takes an optional observer; the generator itself does no I/O:
+
+```cpp
+struct MapDebugSink {
+  // stage: e.g. "bedrock", "cone", "cavities", "sediment-init",
+  //        "loop-hillshade", "loop-flow", "loop-sediment", "loop-lakes",
+  //        "water", "detail-delta", "final-hillshade", "biome"
+  virtual void dump(std::string_view stage, int sequence,
+                    const Field2D<float>& field) = 0;
+  virtual void dump(std::string_view stage, int sequence,
+                    const Field2D<uint8_t>& mask) = 0;  // biome / lake masks
+};
+```
+
+`outputs.cpp` implements it to write numbered PNGs (`00-bedrock.png` …,
+loop frames `loop-0010-flow.png` …); `--preview-image-only` wires it up
+always-on. Loop frames every `dump_every` iterations (hillshade(h), log₂ A,
+S, lake mask) — the sim is watchable as a film strip. The detail stage dumps
+its **delta raster** (final − resampled base) so the filter's contribution is
+visible in isolation. Null sink = zero overhead.
+
+## ErosionParams (defaults are starting points; tuned via the preview loop)
+
+```cpp
+struct ErosionParams {
+  int sim_resolution = 512;          // sim grid (texels, square, excl. pad)
+  int iterations = 80;
+  float dt = 1.0f;                   // nominal time unit
+  float m = 0.5f;                    // stream-power area exponent (n is fixed at 1)
+  float k_sediment = 5e-3f;          // erodibility, sediment
+  float k_bedrock = 5e-4f;           // erodibility, bedrock
+  float deposition_g = 1.0f;         // 0 = export all, ↑ = refill valleys
+  float diffusion = 0.02f;           // D (m²/dt)
+  float initial_sediment_m = 4.0f;
+  float sediment_taper_m = 60.0f;    // taper distance over dist-to-plains
+  float sediment_noise_m = 1.0f;     // fBm amplitude on S0
+  float sediment_noise_wavelength_m = 40.0f;
+  float lake_frac = 0.03f;           // bottom bedrock quantile → basins
+  float lake_depth_m = 12.0f;        // max cavity depth
+  float min_lake_area_m2 = 400.0f;   // prune smaller
+  float min_lake_depth_m = 0.5f;     // prune shallower
+  int dump_every = 10;               // loop dump cadence (0 = off)
+  int detail_octaves = 4;
+  float detail_wavelength_m = 60.0f; // largest octave
+  float detail_amplitude_m = 2.0f;   // max carve depth (sum-bounded)
+};
+```
+
+Sub-knobs (pad, shore fade, ε, gully weight, lacunarity, tie-break order)
+stay `constexpr`.
+
+## Performance
+
+Per iteration: priority-flood O(n log n), everything else O(n). 512² × 80
+iterations ≈ low seconds single-threaded — within budget. `parallel_tiles`
+only where free (per-cell passes, detail filter tiles).
+
+## Testing
+
+Structural invariants only (no seed/order-dependent pinning), Catch2 next to
+`generator_tests.cpp`:
+
+- **Determinism:** `generate_map` twice → byte-identical artifacts (extends
+  the existing test).
+- **Routing:** tilted plane → receivers strictly downhill, column drainage
+  area = texel count; flat plate → ε-drainage reaches border everywhere;
+  synthetic bowl → correct spill level, per-lake water level uniform
+  (max − min < ε).
+- **Incision:** 1D chain vs tiny-timestep explicit reference (tolerance);
+  property: no cell erodes below its receiver.
+- **Layers:** sediment strips before bedrock; closed case: Σ Δ(B+S) +
+  exported border flux ≈ 0.
+- **Deposition:** flux into a flooded cell raises S at most to water level.
+- **Cavities:** mask coverage ≈ lake_frac; depth ≤ lake_depth_m.
+- **Lakes:** pruning respects min area/depth; W ≥ 0; every Lake biome texel
+  has W > 0.
+- **Detail filter:** |delta| ≤ octave amplitude sum; exactly 0 under water;
+  deterministic.
+- **Deliberately not pinned:** cross-resolution sim equality, lake counts per
+  seed, perf timings (logged, not asserted).
+
+## Deferred
+
+- Swamp/Forest/stream placement from `flow`/`sediment`/`water_depth`.
+- Hydraulics (shallow-water tier for local water effects).
+- Detail-filter refinements: straight gullies, drainage streaks.
+- Non-square maps/grids; GPU port; sim-grid parallelism beyond per-cell passes.
