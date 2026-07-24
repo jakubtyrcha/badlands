@@ -9,9 +9,11 @@ namespace badlands {
 
 namespace {
 
-// Read an optional numeric key into `dst`. Returns false only on a present-but-
-// non-numeric value (a typo worth failing on); a missing key is fine.
-bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, float& dst) {
+// Read an optional numeric key into `dst` (any arithmetic type). Returns false
+// only on a present-but-non-numeric value (a typo worth failing on); a missing
+// key is fine.
+template <typename T>
+bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, T& dst) {
     if (!obj.contains(key)) {
         return true;
     }
@@ -19,7 +21,7 @@ bool ReadNum(const nlohmann::json& obj, const char* creature, const char* key, f
         spdlog::warn("LoadCreatureCatalog: {}.{} is not a number", creature, key);
         return false;
     }
-    dst = obj[key].get<float>();
+    dst = obj[key].get<T>();
     return true;
 }
 
@@ -69,6 +71,7 @@ bool LoadCreatureCatalog(const std::string& path, CreatureCatalog& out) {
         ok = ok && ReadNum(o, name.c_str(), "evasion", d.evasion);
         ok = ok && ReadNum(o, name.c_str(), "defense", d.defense);
         ok = ok && ReadNum(o, name.c_str(), "armour", d.armour);
+        ok = ok && ReadNum(o, name.c_str(), "xp_reward", d.xp_reward);
         if (d.attack_count > 0) {
             ok = ok && ReadNum(o, name.c_str(), "attack_damage", d.attacks[0].base_damage);
             ok = ok && ReadNum(o, name.c_str(), "attack_cooldown", d.attacks[0].cooldown);

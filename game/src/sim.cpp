@@ -17,6 +17,8 @@
 #include "nav_world.h"
 #include "needs.h"
 #include "placement.h"
+#include "progression.h"
+#include "skills.h"
 #include "vision.h"
 
 #include "critter_brain.h"
@@ -324,20 +326,42 @@ void tick_world(BadlandsGame& g, float dt) {
     // events the old combat pass did.
     advance_projectiles(g, dt);
 
-    // Death.
+    // Death. Collect each dead entity's XP payout BEFORE the destroys
+    // (Position/XpReward die with it), spread AFTER them so a hero that died
+    // this tick neither blocks nor receives a share.
     std::vector<entt::entity> dead;
+    std::vector<PendingKillXp> kill_xp;
     for (auto [e, health] : registry.view<const Health>().each()) {
         if (health.hp <= 0.0f) {
             dead.push_back(e);
+            if (const auto* reward = registry.try_get<XpReward>(e);
+                reward != nullptr && registry.all_of<Position>(e)) {
+                kill_xp.push_back({registry.get<Position>(e).pos, reward->amount});
+            }
         }
     }
     for (entt::entity e : dead) {
         registry.destroy(e);
     }
+    spread_kill_xp(g, kill_xp);
 
     // Fog-of-war: resolve next visibility from the post-movement world state and
-    // publish it (double-buffered). No-op until ConfigureVision.
-    resolve_vision(g);
+    // publish it. Newly-discovered texels credit the stamping CHARACTER with
+    // exploration XP -- a system rule, applied here so it lands in the same
+    // tick. resolve_vision reports every player-team stamper, hero or not;
+    // award_xp is what actually applies the "only heroes gain XP" policy (a
+    // no-op for non-heroes), so a townfolk/critter stamp is silently free.
+    std::vector<DiscoveryCredit> discoveries;
+    resolve_vision(g, &discoveries);
+    if (g.factors.progression.xp_per_texel > 0) {
+        const int32_t per_texel = g.factors.progression.xp_per_texel;
+        for (const DiscoveryCredit& d : discoveries) {
+            // Widen to int64 before multiplying: texels * xp_per_texel can
+            // exceed int32 range (a wide reveal at a large per-texel reward);
+            // award_xp saturates the accumulation from here.
+            award_xp(g, d.slot, static_cast<int64_t>(d.texels) * per_texel);
+        }
+    }
 
     ++g.ticks;
 }
@@ -357,15 +381,12 @@ uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::
     desc.pos_x = pos.x;
     desc.pos_z = pos.y;
     desc.team = team;
-    const uint32_t slot = spawn_entity(g, desc, -1);
-    // Hero creatures (ids 0..HERO_CLASS_COUNT-1 == HeroClassId) carry their class,
-    // which spawn_entity otherwise only derives from a home guild.
-    if (i < HERO_CLASS_COUNT) {
-        if (auto* hc = g.registry.try_get<HeroCharacter>(g.slots[slot])) {
-            hc->hero_class = static_cast<int32_t>(i);
-        }
-    }
-    return slot;
+    // Hero creatures (ids 0..HERO_CLASS_COUNT-1 == HeroClassId) carry their
+    // class via desc.hero_class (the catalog defs author it), so spawn_entity
+    // stamps HeroCharacter with the FINAL class at spawn time -- no post-spawn
+    // patch needed (nor safe: spawn-time grants would have already run
+    // against the stale value).
+    return spawn_entity(g, desc, -1);
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {
@@ -484,11 +505,23 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
             .facing_z = facing.y,
             .vision_radius = vis_radius,
             .vision_cone_half_angle_deg = vis_half_deg,
+            .level = sim ? sim->level : 0,
+            .xp = sim ? sim->xp : 0,
+            .xp_next = sim ? xp_to_next(g.factors.progression, sim->level) : 0,
         });
         const char* nm = disp ? disp->name.c_str() : "";
         std::size_t n = std::min(std::strlen(nm), sizeof(out.back().name) - 1);
         std::memcpy(out.back().name, nm, n);
         out.back().name[n] = '\0';
+
+        const Skills* sk = g.registry.try_get<Skills>(e);
+        CharacterState& row = out.back();
+        row.skill_count = sk ? sk->count : 0;
+        // Designated init above already zeroed row.skills (kMaxSkills entries),
+        // so only [0, skill_count) needs writing -- the rest stay 0.
+        for (int32_t i = 0; i < row.skill_count; ++i) {
+            row.skills[i] = static_cast<int32_t>(sk->ids[i]);
+        }
     }
 }
 
@@ -550,18 +583,25 @@ namespace {
 //    own -- unlike the hours-rate fields above) -- floored at a small
 //    positive integer rather than 0 for the same reason: 0 is a genuine
 //    int64 divide-by-zero (UB/crash), not merely a degenerate rate.
-//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors
-//    numeric field (radii, distances, durations, caps): negative is never
-//    meaningful, clamped to 0 -- this includes MonsterFactors::max_alive,
-//    where a negative cap underflows through economy.cpp's
-//    `live >= static_cast<uint32_t>(cap)` into a huge unsigned value and
-//    silently DISABLES the spawn cap instead of capping at 0.
+//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors/
+//    ProgressionFactors numeric field (radii, distances, durations, caps;
+//    ProgressionFactors::xp_per_texel/kill_xp_radius/level_exponent):
+//    negative is never meaningful, clamped to 0 -- this includes
+//    MonsterFactors::max_alive, where a negative cap underflows through
+//    economy.cpp's `live >= static_cast<uint32_t>(cap)` into a huge unsigned
+//    value and silently DISABLES the spawn cap instead of capping at 0.
 //    hero.weights[]/critter.weights and hero.explore_chance[] are
 //    deliberately EXCLUDED from the clamp-to-0 sweep -- 0 is a meaningful
 //    veto/"never" value for both, not a sign error (MonsterFactors has no
 //    such field, so it carries no such exclusion).
 //    TownfolkFactors::house_income_per_day (unsigned: no sign to sanitize)
 //    is the one field left untouched.
+//  - progression.level_base_xp: floored like the DIVISOR fields above, but
+//    at 1 rather than a divisor's epsilon/1ms -- it scales xp_to_next's
+//    leveling-curve threshold (floor(level_base_xp * L^level_exponent)), and
+//    a base below 1 collapses every threshold to (near) 0 rather than merely
+//    degenerating one rate, so it gets its own floor instead of joining the
+//    clamp-to-0 sweep.
 //
 // A field is only warned about (old value -> new value) when sanitize
 // actually moves it.
@@ -570,7 +610,7 @@ constexpr int64_t kMinPositiveMillis = 1;
 
 template <typename T>
 void warn_adjusted(const char* field, T old_value, T new_value) {
-    spdlog::warn("sanitize_factors: {} adjusted from {} to {}", field, old_value, new_value);
+    spdlog::warn("sanitize: {} adjusted from {} to {}", field, old_value, new_value);
 }
 
 // Sign-invalid scalar (radius/distance/duration/cap -- 0 always meaningful,
@@ -659,7 +699,29 @@ SimFactors sanitize_factors(SimFactors f) {
     // disables the spawn cap instead of capping at 0.
     clamp_nonneg("monster.max_alive", m.max_alive);
 
+    ProgressionFactors& p = f.progression;
+    clamp_nonneg("progression.xp_per_texel", p.xp_per_texel);
+    clamp_nonneg("progression.kill_xp_radius", p.kill_xp_radius);
+    clamp_nonneg("progression.level_exponent", p.level_exponent);
+    // The curve's scale: xp_to_next floors its result at 1 anyway, but a base
+    // below 1 collapses every threshold and the warn is the designer's signal.
+    if (p.level_base_xp < 1) {
+        warn_adjusted("progression.level_base_xp", p.level_base_xp, 1);
+        p.level_base_xp = 1;
+    }
+
     return f;
+}
+
+// The SetSkillCatalog validation boundary, sanitize_factors' sibling: the
+// execution slice divides/waits on these, so negatives are clamped here.
+SkillCatalog sanitize_skill_catalog(SkillCatalog c) {
+    for (int32_t i = 0; i < kSkillCount; ++i) {
+        SkillSpec& s = c.specs[i];
+        clamp_nonneg("skill.duration_seconds", s.duration_seconds);
+        clamp_nonneg("skill.cooldown_seconds", s.cooldown_seconds);
+    }
+    return c;
 }
 
 }  // namespace
@@ -715,6 +777,10 @@ uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_
 }
 void Sim::SetCreatureCatalog(const CreatureCatalog& catalog) { world_->creatures = catalog; }
 const CreatureCatalog& Sim::Creatures() const { return world_->creatures; }
+void Sim::SetSkillCatalog(const SkillCatalog& catalog) {
+    world_->skills = sanitize_skill_catalog(catalog);
+}
+const SkillCatalog& Sim::Skills() const { return world_->skills; }
 void Sim::Tick(float dt) {
     tick_world(*world_, dt);
     // Goal statistics are folded HERE, in the wrapper, from the very rows an

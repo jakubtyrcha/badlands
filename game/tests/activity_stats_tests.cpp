@@ -188,9 +188,11 @@ TEST_CASE("the snapshot carries the hero class the histogram attributes by") {
 
     const std::vector<CharacterState> rows = sim.Characters();
     REQUIRE(rows.size() == 1);
-    // A plain spawn has no recruiting guild, hence no class -- and the row says
-    // so rather than pretending to be a Mercenary (class 0).
-    CHECK(rows[0].hero_class == -1);
+    // MercenaryDesc's class comes from the creature catalog (the single
+    // source of truth, badlands_sim.hpp's CharacterDesc::hero_class) even
+    // though this spawn is homeless -- a directly-spawned Mercenary IS a
+    // Mercenary regardless of guild membership.
+    CHECK(rows[0].hero_class == HERO_MERCENARY);
     CHECK(rows[0].archetype == static_cast<int32_t>(Archetype::Hero));
 }
 

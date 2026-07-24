@@ -32,6 +32,7 @@
 #include "game/map/symbolic_map_generator.hpp"
 #include "game/scene/blockout_materials.hpp"
 #include "game/scene/building_composer.hpp"
+#include "game/skill_manifest.hpp"
 #include "game/visual/scene_composer.hpp"
 #include "mapview/biome_manifest.hpp"
 
@@ -341,6 +342,16 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
   vision_pass_.SetSimToWorldOffset(glm::vec2(0.0f, 0.0f));
+
+  // Skill templates as data: load over the compiled defaults (a missing file
+  // keeps them). Initial config -- must happen before ticking.
+  {
+    badlands::SkillCatalog skills = sim_.Skills();
+    if (badlands::LoadSkillCatalog("assets/skills/skills.json", skills)) {
+      sim_.SetSkillCatalog(skills);
+    }
+  }
+
   sim_.ConfigureVision(-kVisionHalfExtentM, -kVisionHalfExtentM,
                        2.0f * kVisionHalfExtentM, 2.0f * kVisionHalfExtentM,
                        kVisionTexelM);
@@ -965,6 +976,10 @@ void GameView::PumpGameEvents() {
         break;
       case GameEventKind::HeroDied:
         break;  // reserved: not emitted yet
+      case GameEventKind::HeroLeveledUp:
+        PushLogLine(EventActorName(e.actor_id) + " reached level " +
+                    std::to_string(static_cast<int>(e.amount)));
+        break;
     }
   }
 }
@@ -1342,6 +1357,7 @@ void GameView::RefreshHud() {
           home ? AddSelectTarget(HudSelectTarget::Kind::Building, home->id) : 0;
       s.rows.emplace_back("guild", label, click);
     }
+    AppendHeroProgressionRows(s, *hero, sim_.Skills());
     model.has_selection = true;
     model.selection = std::move(s);
   }

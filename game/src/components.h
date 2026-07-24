@@ -136,12 +136,15 @@ struct HeroCharacter {
 //  - behavior: last chosen Behaviour id (inspection only; -1 = unknown)
 //  - inventory: collect-only elixir count in [0, kInventoryCap]
 //  - home_building_id: dedicated home = recruiting guild; -1 once homeless
+//  - level/xp: hero progression; xp counts toward the NEXT level
 struct HeroSimulationState {
     float fatigue = 1.0f;
     float content = 1.0f;
     int32_t behavior = -1;
     int32_t inventory = 0;
     int32_t home_building_id = -1;
+    int32_t level = 1;
+    int32_t xp = 0;
     // Deliberation: while world_millis is below this the hero is standing and
     // thinking. Set by the SetBehavior handler from the command's duration (so
     // the pause is IN the log and a replay reproduces it), and cleared by
@@ -206,6 +209,23 @@ struct Attacks {
     Attack defs[kMaxAttacks]{};
     float cooldown_remaining[kMaxAttacks]{};
     int32_t count = 0;
+};
+
+// A hero's learned skills + per-skill cooldown state (POD fixed array, like
+// Attacks). Granted by the level-up hook (progression.cpp) from
+// SkillGrantTable; cooldowns start ready. INERT this slice: effects, cooldown
+// ticking, and the UseSkill decision arrive with brain-owned combat (slice 2).
+struct Skills {
+    SkillId ids[kMaxSkills]{};
+    float cooldown_remaining[kMaxSkills]{};
+    int32_t count = 0;
+};
+
+// Present only on entities whose death pays XP (CharacterDesc.xp_reward > 0).
+// Read by the death sweep (sim.cpp), which collects the payout before the
+// destroy and spreads it via spread_kill_xp (progression.h).
+struct XpReward {
+    int32_t amount;
 };
 
 // An in-flight ranged shot. Spawned by the ranged branch of the Attack command;

@@ -273,6 +273,8 @@ add_library(badlands_game_lib STATIC
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/skills.cpp
+    game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
     game/src/town_brain.cpp
@@ -369,6 +371,7 @@ set(badlands_app_sources_game
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
+    src/game/skill_manifest.cpp     # skill template overrides loaded as data
     # Game UI (the in-world HUD + world picking), distinct from the ImGui debug
     # UI. Game-specific, so it lives here rather than in badlands_engine --
     # only the game-agnostic UiRenderer does.
@@ -384,6 +387,7 @@ set(badlands_app_sources_ai_sandbox
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
+    src/game/skill_manifest.cpp     # skill template overrides loaded as data
     src/game/scenario.cpp)          # sandbox scenarios loaded as data
 
 foreach(app viewer game ai_sandbox)
@@ -632,6 +636,10 @@ add_executable(badlands_game_tests
     # so it runs here without a device -- same rationale as the decals above.
     game/tests/world_labels_tests.cpp
     src/game/visual/world_labels.cpp
+    # Skill vocabulary: catalog, grant table, Skills component (game/src/skills.h).
+    game/tests/skills_tests.cpp
+    # Hero progression: leveling curve + XP accrual (game/src/progression.h).
+    game/tests/progression_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
@@ -1081,6 +1089,32 @@ target_include_directories(badlands_factors_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_factors_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_factors_manifest_tests COMMAND badlands_factors_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_skill_manifest_tests: skill template overrides loaded as data
+# (assets/skills/skills.json -> badlands::SkillCatalog). App-layer, so the sim
+# keeps its lean dependency set. Reads the shipped file, so cwd = repo root.
+add_executable(badlands_skill_manifest_tests
+    src/game/tests/skill_manifest_tests.cpp
+    src/game/skill_manifest.cpp
+    # The skill vocabulary table (compiled SkillCatalog defaults + name
+    # lookup). Depends on badlands_sim.hpp plus the game-side component/view
+    # headers it declares alongside, so this target also needs game/src on
+    # its include path (see below) -- entt and command.h are header-only, so
+    # no extra sources are dragged in.
+    game/src/skills.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_skill_manifest_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_skill_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_skill_manifest_tests COMMAND badlands_skill_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_scenario_tests: the app-layer sandbox loaders (arena scenarios +
 # creature-stat overrides -> sim data). Lean, like factors_manifest_tests:

@@ -199,3 +199,20 @@ TEST_CASE("sanitize_factors: a negative memory TTL still lets two mercenaries re
     }
     REQUIRE(observers_checked == 2);
 }
+
+// --- ProgressionFactors: negative fields clamp, a sub-1 xp curve base floors
+
+TEST_CASE("progression factors sanitize at the set_factors_of boundary") {
+    badlands::Sim sim{badlands::BrainDesc{}};
+    badlands::SimFactors f;
+    f.progression.xp_per_texel = -3;
+    f.progression.kill_xp_radius = -1.0f;
+    f.progression.level_base_xp = 0;
+    f.progression.level_exponent = -2.0f;
+    sim.SetFactors(f);
+    const badlands::ProgressionFactors& p = sim.Factors().progression;
+    CHECK(p.xp_per_texel == 0);
+    CHECK(p.kill_xp_radius == 0.0f);
+    CHECK(p.level_base_xp == 1);
+    CHECK(p.level_exponent == 0.0f);
+}

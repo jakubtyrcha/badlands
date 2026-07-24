@@ -30,6 +30,20 @@ inline size_t texel_k(const VisionGrid& g, int i, int j) {
     return static_cast<size_t>(j) * static_cast<size_t>(g.nx) + static_cast<size_t>(i);
 }
 
+// Marks texel (i,j) visible for this resolve, and discovered if it wasn't
+// already -- bumping `fresh` exactly when THIS stamp is what discovered it.
+// The one write to the back buffer, shared by every stamp site (the rect
+// loop, the cone loop, and the cone's own-texel tail) so the visible/
+// discovered bookkeeping can't drift between them.
+inline void stamp_texel(VisionGrid& g, int i, int j, int& fresh) {
+    const size_t k2 = 2 * texel_k(g, i, j);
+    g.back[k2 + 1] = 255;
+    if (!g.back[k2]) {
+        g.back[k2] = 255;
+        ++fresh;
+    }
+}
+
 // World-space axis-aligned rect covering a footprint (exact for ortho; the
 // oriented bounding box for diagonal, which slightly over-reveals at corners --
 // acceptable for a vision expansion).
@@ -50,29 +64,36 @@ void footprint_world_aabb(const Footprint& fp, float& x0, float& x1, float& z0, 
 }
 
 // Stamp `visible` where the euclidean distance from a texel center to the rect
-// [x0,x1]x[z0,z1] is <= radius (i.e. the rect grown by `radius`).
-void stamp_rect_expanded(VisionGrid& g, float x0, float x1, float z0, float z1, float radius) {
+// [x0,x1]x[z0,z1] is <= radius (i.e. the rect grown by `radius`), also setting
+// `discovered` for any texel newly discovered by this stamp. Returns the count
+// of texels whose discovered bit THIS stamp set (0 if already discovered by an
+// earlier source this resolve).
+int stamp_rect_expanded(VisionGrid& g, float x0, float x1, float z0, float z1, float radius) {
     const int i0 = clampi(texel_i(g, x0 - radius), 0, g.nx - 1);
     const int i1 = clampi(texel_i(g, x1 + radius), 0, g.nx - 1);
     const int j0 = clampi(texel_j(g, z0 - radius), 0, g.nz - 1);
     const int j1 = clampi(texel_j(g, z1 + radius), 0, g.nz - 1);
     const float r2 = radius * radius;
+    int fresh = 0;
     for (int j = j0; j <= j1; ++j) {
         for (int i = i0; i <= i1; ++i) {
             const glm::vec2 c = texel_center(g, i, j);
             const float dx = std::max({x0 - c.x, 0.0f, c.x - x1});
             const float dz = std::max({z0 - c.y, 0.0f, c.y - z1});
             if (dx * dx + dz * dz <= r2) {
-                g.back[2 * texel_k(g, i, j) + 1] = 255;
+                stamp_texel(g, i, j, fresh);
             }
         }
     }
+    return fresh;
 }
 
 // Stamp `visible` inside a forward cone: within `radius` and, for texels beyond
 // the character's own cell, whose direction lies within the cone half-angle.
-void stamp_cone(VisionGrid& g, glm::vec2 c, glm::vec2 facing, float radius,
-                float cone_half_cos) {
+// Also sets `discovered` alongside, returning the count of texels whose
+// discovered bit THIS stamp set.
+int stamp_cone(VisionGrid& g, glm::vec2 c, glm::vec2 facing, float radius,
+               float cone_half_cos) {
     const int i0 = clampi(texel_i(g, c.x - radius), 0, g.nx - 1);
     const int i1 = clampi(texel_i(g, c.x + radius), 0, g.nx - 1);
     const int j0 = clampi(texel_j(g, c.y - radius), 0, g.nz - 1);
@@ -80,6 +101,7 @@ void stamp_cone(VisionGrid& g, glm::vec2 c, glm::vec2 facing, float radius,
     const float flen = glm::length(facing);
     const glm::vec2 f = (flen > 1e-6f) ? facing / flen : kCharacterForward;
     const float r2 = radius * radius;
+    int fresh = 0;
     for (int j = j0; j <= j1; ++j) {
         for (int i = i0; i <= i1; ++i) {
             const glm::vec2 v = texel_center(g, i, j) - c;
@@ -88,7 +110,7 @@ void stamp_cone(VisionGrid& g, glm::vec2 c, glm::vec2 facing, float radius,
             if (d2 > 1e-6f && glm::dot(v * (1.0f / std::sqrt(d2)), f) < cone_half_cos) {
                 continue;
             }
-            g.back[2 * texel_k(g, i, j) + 1] = 255;
+            stamp_texel(g, i, j, fresh);
         }
     }
     // A unit always sees the texel it stands on, regardless of the cone (its
@@ -97,8 +119,9 @@ void stamp_cone(VisionGrid& g, glm::vec2 c, glm::vec2 facing, float radius,
     const int ci = texel_i(g, c.x);
     const int cj = texel_j(g, c.y);
     if (ci >= 0 && ci < g.nx && cj >= 0 && cj < g.nz) {
-        g.back[2 * texel_k(g, ci, cj) + 1] = 255;
+        stamp_texel(g, ci, cj, fresh);
     }
+    return fresh;
 }
 
 }  // namespace
@@ -128,7 +151,7 @@ void configure_vision(VisionGrid& g, float world_min_x, float world_min_z,
     g.back.assign(bytes, 0);
 }
 
-void resolve_vision(BadlandsGame& game) {
+void resolve_vision(BadlandsGame& game, std::vector<DiscoveryCredit>* credits) {
     VisionGrid& g = game.vision;
     if (!g.configured()) return;
 
@@ -158,14 +181,16 @@ void resolve_vision(BadlandsGame& game) {
                  entt::exclude<InsideBuilding>)
              .each()) {
         if (team.id != kPlayerTeam || vis.radius <= 0.0f) continue;
-        stamp_cone(g, pos.pos, facing.dir, vis.radius, vis.cone_half_cos);
+        const int fresh = stamp_cone(g, pos.pos, facing.dir, vis.radius, vis.cone_half_cos);
+        // Every stamper is reported here, hero or not -- the crediting policy
+        // (today: only heroes gain XP) lives with the caller (tick_world's
+        // award_xp, which no-ops non-heroes), not with the resolve.
+        if (credits != nullptr && fresh > 0) {
+            credits->push_back({slot_for_entity(game, e), fresh});
+        }
     }
 
-    // Discovered is cumulative: anything visible this tick is now discovered.
-    for (size_t k = 0; k < n; ++k) {
-        if (g.back[2 * k + 1]) g.back[2 * k] = 255;
-    }
-
+    // Invariant: visible ⊆ discovered, maintained by the stamps above.
     std::swap(g.front, g.back);
 }
 
