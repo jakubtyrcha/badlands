@@ -22,6 +22,15 @@
 
 namespace badlands {
 
+namespace {
+// UI-overlay texture format: 8-bit, sRGB-encoded bytes as the UI shaders
+// author them (same convention as the RGBA8 screenshot target). The overlay
+// is premultiplied by construction: both UI pipelines blend with
+// (srcAlpha, 1-srcAlpha) color / (one, 1-srcAlpha) alpha into the cleared-
+// transparent target, which accumulates a premultiplied image.
+constexpr wgpu::TextureFormat kUiOverlayFormat = wgpu::TextureFormat::RGBA8Unorm;
+}  // namespace
+
 SdlViewerApp::SdlViewerApp(SdlViewerConfig config) : config_(std::move(config)) {}
 
 SdlViewerApp::~SdlViewerApp() {
@@ -55,17 +64,34 @@ void SdlViewerApp::InitImGui(int width, int height) {
   ImGui_ImplWGPU_InitInfo info = {};
   info.Device = gpu_.GetDevice();
   info.NumFramesInFlight = 3;
-  info.RenderTargetFormat = gpu_.GetSurfaceFormat();
+  // ImGui draws into the RGBA8 UI-overlay texture (not the surface), in plain
+  // sRGB with gamma-space blending — the resolve pass composites the overlay
+  // over the scene and owns all P3/EDR conversion. The target format is
+  // therefore a constant, independent of the surface.
+  info.RenderTargetFormat = kUiOverlayFormat;
   info.DepthStencilFormat = wgpu::TextureFormat::Undefined;  // 2D overlay, no depth
   info.FramebufferWidth = static_cast<uint32_t>(width);
   info.FramebufferHeight = static_cast<uint32_t>(height);
-  info.OutputIsLinear =
-      (gpu_.GetSurfaceFormat() == wgpu::TextureFormat::RGBA16Float);  // false for BGRA8
-  info.OutputIsP3 = gpu_.IsP3();  // Display-P3-tagged surface: the backend
-                                  // converts ImGui's sRGB colors to P3
+  info.OutputIsLinear = false;  // 8-bit overlay: bytes as authored
   ImGui_ImplWGPU_Init(&info);
 
   spdlog::info("SdlViewerApp: ImGui initialized");
+}
+
+void SdlViewerApp::EnsureUiOverlay(uint32_t width, uint32_t height) {
+  if (ui_overlay_view_ && ui_overlay_w_ == width && ui_overlay_h_ == height) {
+    return;
+  }
+  ui_overlay_w_ = width;
+  ui_overlay_h_ = height;
+
+  wgpu::TextureDescriptor desc;
+  desc.size = {width, height, 1};
+  desc.format = kUiOverlayFormat;
+  desc.usage =
+      wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+  ui_overlay_texture_ = gpu_.GetDevice().CreateTexture(&desc);
+  ui_overlay_view_ = ui_overlay_texture_.CreateView();
 }
 
 namespace {
@@ -288,37 +314,41 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
 
     view_->DrawUI();
 
-    // Point the game UI at the window surface before any pass is open --
-    // Prepare may create a pipeline and writes the uniform buffer.
-    if (UiRenderer* ui = view_->GetUiRenderer()) {
-      int w = 0, h = 0;
-      SDL_GetWindowSizeInPixels(window_, &w, &h);
-      ui->Prepare(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                  gpu_.GetSurfaceFormat(), gpu_.IsP3());
-    }
-
-    renderer_.Render(view_->GetCamera(), view_->GetRegistry(),
-                     view_->GetSceneContext(), surface);
-
-    // App-owned overlay pass: a SEPARATE render pass on the same surface view,
-    // loading (not clearing) the scene the renderer just wrote, with no depth
-    // attachment (both overlays are 2D).
+    // === UI overlay pass — BEFORE the scene render. Game UI + ImGui draw
+    // into the RGBA8 overlay texture in plain sRGB with gamma-space blending
+    // (the space the UI is authored for); the resolve pass then composites
+    // the overlay over the scene in encoded space and owns all P3/EDR output
+    // conversion (see SceneContext::ui_overlay). Drawing UI directly onto a
+    // float/linear surface would hardware-blend in LINEAR space, visibly
+    // brightening translucent panels and AA'd glyph edges.
     //
     // Two surfaces share this one pass, in order: the view's GAME UI first,
-    // then Dear ImGui DEBUG UI on top. One encoder and one submit for both, and
-    // the ordering is structural rather than a convention someone can break.
+    // then Dear ImGui DEBUG UI on top. One encoder and one submit for both,
+    // and the ordering is structural rather than a convention someone can
+    // break.
     //
     // The game UI cannot borrow the renderer's frame uniform buffer here:
-    // SceneRenderer::Render's FrameContext is a stack local whose End() has
-    // already released it (context/frame_context.cpp:217). UiRenderer owns its
-    // own small uniform buffer instead -- see engine/ui/ui_renderer.hpp.
+    // it draws outside SceneRenderer::Render's FrameContext. UiRenderer owns
+    // its own small uniform buffer instead -- see engine/ui/ui_renderer.hpp.
     {
+      int w = 0, h = 0;
+      SDL_GetWindowSizeInPixels(window_, &w, &h);
+      EnsureUiOverlay(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+
+      // Point the game UI at the overlay before any pass is open -- Prepare
+      // may create a pipeline and writes the uniform buffer.
+      if (UiRenderer* ui = view_->GetUiRenderer()) {
+        ui->Prepare(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                    kUiOverlayFormat);
+      }
+
       wgpu::CommandEncoder encoder = gpu_.GetDevice().CreateCommandEncoder();
 
       wgpu::RenderPassColorAttachment color_attachment;
-      color_attachment.view = surface;
-      color_attachment.loadOp = wgpu::LoadOp::Load;
+      color_attachment.view = ui_overlay_view_;
+      color_attachment.loadOp = wgpu::LoadOp::Clear;
       color_attachment.storeOp = wgpu::StoreOp::Store;
+      color_attachment.clearValue = {0.0, 0.0, 0.0, 0.0};  // transparent
       color_attachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
 
       wgpu::RenderPassDescriptor desc;
@@ -340,6 +370,16 @@ int SdlViewerApp::Run(int argc, char** argv, const ViewFactory& factory) {
       pass.End();
       wgpu::CommandBuffer commands = encoder.Finish();
       gpu_.GetQueue().Submit(1, &commands);
+    }
+
+    // Scene render + resolve (which composites the overlay). The overlay view
+    // rides on a per-frame copy of the view's SceneContext -- the overlay is
+    // app-owned presentation state, not scene state.
+    {
+      SceneContext scene = view_->GetSceneContext();
+      scene.ui_overlay = ui_overlay_view_;
+      renderer_.Render(view_->GetCamera(), view_->GetRegistry(), scene,
+                       surface);
     }
 
     gpu_.Present();

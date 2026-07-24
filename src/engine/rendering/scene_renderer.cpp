@@ -144,6 +144,29 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
   // Color grading (Task: P3/HDR color grading): Oklab stylization pass between
   // decals and debug lines; disabled by default (ColorGradingConfig.enabled).
   color_grading_.Initialize(pipeline_generator_, accumulation_format_);
+
+  // 1x1 transparent fallback for SceneContext::ui_overlay — the resolve (and
+  // the G-buffer debug view) always bind an overlay; when the frame carries
+  // none, this texel makes the composite a no-op (a == 0 -> scene untouched).
+  {
+    wgpu::TextureDescriptor desc;
+    desc.size = {1, 1, 1};
+    desc.format = wgpu::TextureFormat::RGBA8Unorm;
+    desc.usage =
+        wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+    fallback_ui_overlay_texture_ = device_.CreateTexture(&desc);
+
+    const uint32_t transparent = 0;  // premultiplied (0,0,0,0)
+    wgpu::TexelCopyTextureInfo dst{};
+    dst.texture = fallback_ui_overlay_texture_;
+    wgpu::TexelCopyBufferLayout layout;
+    layout.bytesPerRow = 4;
+    layout.rowsPerImage = 1;
+    wgpu::Extent3D extent = {1, 1, 1};
+    queue_.WriteTexture(&dst, &transparent, sizeof(transparent), &layout,
+                        &extent);
+    fallback_ui_overlay_view_ = fallback_ui_overlay_texture_.CreateView();
+  }
 }
 
 void SceneRenderer::UpdateIbl(const SceneContext& scene) {
@@ -949,11 +972,18 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.timestampWrites = gpu_timer_.BeginPass("tonemap");
     RenderPassContext pass = frame.BeginRenderPass(desc);
 
+    // The frame's UI overlay (premultiplied, sRGB-encoded; composited by the
+    // resolve/debug shader in encoded space) — the transparent fallback when
+    // the scene carries none, so the bind-group layout is static.
+    wgpu::TextureView ui_overlay_view =
+        scene.ui_overlay ? scene.ui_overlay : fallback_ui_overlay_view_;
+
     if (debug_mode_ != GBufferDebugMode::None) {
       RenderGBufferDebug(pass, frame, *pipeline_generator_, surface_format_,
                          gbuffer_.GetDepthView(), gbuffer_.GetNormalsView(),
                          gbuffer_.GetAlbedoView(), gbuffer_.GetMaterialView(),
-                         hdr_color_view_, ao_view_, debug_mode_);
+                         hdr_color_view_, ao_view_, ui_overlay_view,
+                         debug_mode_);
     } else {
       RenderPipelineDeclaration decl;
       decl.shader_path = "passes/tonemapping";
@@ -968,13 +998,15 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
         spdlog::error(
             "SceneRenderer::Render: failed to compile tonemap pipeline");
       } else {
-        std::array<wgpu::BindGroupEntry, 2> entries{};
+        std::array<wgpu::BindGroupEntry, 3> entries{};
         entries[0].binding = 0;
         entries[0].buffer = frame.GetFrameUniformBuffer();
         entries[0].offset = 0;
         entries[0].size = sizeof(UniformData);
         entries[1].binding = 1;
         entries[1].textureView = hdr_color_view_;
+        entries[2].binding = 2;
+        entries[2].textureView = ui_overlay_view;
 
         wgpu::BindGroup bind_group =
             frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);

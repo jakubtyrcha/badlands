@@ -340,6 +340,11 @@ class SceneRenderer {
   // texture + pipelines; driven between deferred lighting and tonemap.
   VolumetricFog volumetric_fog_;
   ColorGrading color_grading_;
+
+  // 1x1 transparent RGBA8 texel bound as the UI overlay when
+  // SceneContext::ui_overlay is null (see Initialize).
+  wgpu::Texture fallback_ui_overlay_texture_;
+  wgpu::TextureView fallback_ui_overlay_view_;
   FogSimulation fog_sim_;
 
   // Contact-shadow term (T2 creates it; T5's SSCS fullscreen render pass

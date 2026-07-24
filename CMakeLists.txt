@@ -906,6 +906,24 @@ if(APPLE)
 endif()
 add_test(NAME badlands_decal_tests COMMAND badlands_decal_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_resolve_composite_tests: GPU test for the resolve pass's UI-overlay
+# composite (tonemapping.wesl + SceneContext::ui_overlay) — pins the
+# gamma-space blend and the P3/EDR paths against a CPU mirror. Same harness
+# shape as badlands_decal_tests (R32Float readback; needs a GPU + shaders/).
+add_executable(badlands_resolve_composite_tests
+    src/engine/tests/resolve_composite_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_resolve_composite_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_resolve_composite_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_resolve_composite_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_resolve_composite_tests COMMAND badlands_resolve_composite_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
 # — the SampleHeight/RaycastTerrain queries behind mouse picking. No GPU: only
 # glm + the header-only mapgen Field2D/Biome types and the header-only Ray struct.

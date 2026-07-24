@@ -18,9 +18,6 @@ struct ImGui_ImplWGPU_InitInfo {
   uint32_t FramebufferWidth = 0;
   uint32_t FramebufferHeight = 0;
   bool OutputIsLinear = false;  // true when rendering to RGBA16Float surface
-  bool OutputIsP3 = false;      // true when the surface is tagged Display-P3
-                                // (GpuContext::IsP3()) — the shader then
-                                // converts its sRGB colors to P3 primaries
 };
 
 bool ImGui_ImplWGPU_Init(ImGui_ImplWGPU_InitInfo* init_info);
