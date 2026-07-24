@@ -492,11 +492,15 @@ std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
       pass_targets.emplace(pass, std::move(target));
     }
 
+    std::vector<std::string> features = variant.extra_features;
+    features.insert(features.end(), desc.extra_features.begin(),
+                     desc.extra_features.end());
+
     materials.emplace(
         variant.pass_type,
         std::make_unique<MeshRenderingMaterial>(
             shader_context, std::move(name), desc.shader_path, desc.vs_entry,
-            desc.fs_entry, variant.extra_features, variant.blend_enabled,
+            desc.fs_entry, std::move(features), variant.blend_enabled,
             variant.premultiplied_alpha, std::move(pass_targets),
             desc.cull_mode));
   }

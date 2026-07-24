@@ -394,7 +394,8 @@ namespace {
 // only casts_shadow. Rendered here against BGRA8Unorm + Depth32Float (the test
 // harness targets) rather than the HDR/reversed-Z scene targets.
 std::unique_ptr<MaterialInstanceFactory> BuildStandardForwardFactory(
-    TestGpu& g, bool casts_shadow) {
+    TestGpu& g, bool casts_shadow,
+    std::vector<std::string> extra_features = {}) {
   FactoryDescriptor desc;
   desc.shader_name = "standard_forward";
   desc.shader_path = "material/standard_forward.wesl";
@@ -405,6 +406,7 @@ std::unique_ptr<MaterialInstanceFactory> BuildStandardForwardFactory(
   desc.depth_write = true;
   desc.cull_mode = wgpu::CullMode::None;
   desc.casts_shadow = casts_shadow;
+  desc.extra_features = std::move(extra_features);
   return BuildMaterialInstanceFactory(desc, g.device, g.queue, g.gen.get());
 }
 
@@ -450,6 +452,34 @@ TEST_CASE("standard_forward casts_shadow gates the kShadow pipeline",
   REQUIRE(shadow_caster != nullptr);
   CHECK(shadow_caster->IsValid());
   CHECK(shadow_noncaster == nullptr);  // no kShadow pipeline was built
+}
+
+// FactoryDescriptor::extra_features (first real exercise of Task 1's
+// @if(translucency) shader path): a standard_forward factory built with
+// extra_features={"translucency"} still compiles a valid kForwardOpaque
+// instance with the real 6-entry @group(2) layout, and casts_shadow still
+// yields a creatable kShadow pipeline (the feature flag doesn't disturb it).
+TEST_CASE("standard_forward translucency feature compiles the group-2 variant",
+          "[forward][gpu][shadow]") {
+  TestGpu& g = GetTestGpu();
+  auto fac = BuildStandardForwardFactory(g, /*casts_shadow=*/true,
+                                         /*extra_features=*/{"translucency"});
+  REQUIRE(fac != nullptr);
+
+  auto instance =
+      fac->CreateInstance(GeometryType::kTexturedMesh,
+                          MaterialPassType::kForwardOpaque,
+                          RenderPassType::kForward);
+  REQUIRE(instance != nullptr);
+  CHECK(instance->IsValid());
+  CHECK(instance->DeclaresBindGroup(2));
+
+  auto shadow_instance =
+      fac->CreateInstance(GeometryType::kTexturedMesh,
+                          MaterialPassType::kForwardOpaque,
+                          RenderPassType::kShadow);
+  REQUIRE(shadow_instance != nullptr);
+  CHECK(shadow_instance->IsValid());
 }
 
 namespace {
