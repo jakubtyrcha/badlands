@@ -287,3 +287,42 @@ TEST_CASE("incise: sediment strips before bedrock; border cells never erode") {
   // border cells are base level (receiver -1): untouched entirely
   REQUIRE(t.S.at(0, 0) == 0.5f);
 }
+
+TEST_CASE("deposit: lake cells fill at most to water level; conservation holds") {
+  // 1D ramp with a flooded pocket: reuse the bowl idea in a row
+  Field2D<float> B(16, 3);
+  for (int y = 0; y < 3; ++y)
+    for (int x = 0; x < 16; ++x) B.at(x, y) = static_cast<float>(x);
+  B.at(4, 1) = 1.0f;  // pit below its neighbors (floods to ~5 via the rim at x=5)
+  Field2D<float> S(16, 3, 0.0f);
+  Field2D<float> h(16, 3);
+  for (size_t i = 0; i < h.data.size(); ++i) h.data[i] = B.data[i] + S.data[i];
+  const auto r = route_flow(h, 1.0f, 1e-4f);
+  const auto area = accumulate_drainage(r, 1.0f);
+  REQUIRE(r.in_lake[1 * 16 + 4] == 1);  // sanity: the pit is flooded
+
+  Field2D<float> eroded(16, 3, 0.1f);  // uniform artificial erosion this pass
+  ErosionParams p;
+  p.deposition_g = 1.0f;
+  const float S_before = 0.0f;
+  const float exported = deposit(B, S, eroded, r, area, p, 1.0f);
+  const int pit = 1 * 16 + 4;
+  REQUIRE(S.data[pit] >= S_before);  // pit received sediment
+  REQUIRE(B.data[pit] + S.data[pit] <= r.water_level[pit] + 1e-4f);  // never above water
+  // conservation: total eroded volume = total deposited + exported
+  double dep_total = 0.0, ero_total = 0.0;
+  for (size_t i = 0; i < S.data.size(); ++i) dep_total += S.data[i];
+  for (float e : eroded.data) ero_total += e;
+  REQUIRE(dep_total + exported == Catch::Approx(ero_total).epsilon(0.01));
+}
+
+TEST_CASE("deposit: G=0 exports everything") {
+  auto t = make_ramp(16, 0.0f);
+  Field2D<float> eroded(16, 3, 0.2f);
+  ErosionParams p;
+  p.deposition_g = 0.0f;
+  const auto S_before = t.S.data;
+  const float exported = deposit(t.B, t.S, eroded, t.r, t.area, p, 1.0f);
+  REQUIRE(t.S.data == S_before);  // nothing deposited anywhere (no flooded cells)
+  REQUIRE(exported == Catch::Approx(16 * 3 * 0.2).epsilon(0.01));
+}

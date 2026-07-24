@@ -63,4 +63,15 @@ Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
                       const FlowRouting& r, const Field2D<float>& area,
                       const ErosionParams& p, float texel_m);
 
+// Route this pass's eroded volume downstream (reverse routing order = donors
+// before receivers): each cell receives flux q_in from its donors, deposits
+// dep = min(q_in/texel_area, G * q_in / A)   — dry cells
+// dep = min(q_in/texel_area, water_level - h) — flooded cells (delta fill)
+// into S, then forwards the remainder plus its own erosion. Flux reaching
+// base-level cells (receiver -1) leaves the map. Returns exported volume m³.
+float deposit(Field2D<float>& B, Field2D<float>& S,
+              const Field2D<float>& eroded_m, const FlowRouting& r,
+              const Field2D<float>& area, const ErosionParams& p,
+              float texel_area_m2);
+
 }  // namespace badlands::mapgen

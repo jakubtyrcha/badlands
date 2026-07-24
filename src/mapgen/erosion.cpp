@@ -96,4 +96,34 @@ Field2D<float> incise(Field2D<float>& B, Field2D<float>& S,
   return eroded;
 }
 
+float deposit(Field2D<float>& B, Field2D<float>& S,
+              const Field2D<float>& eroded_m, const FlowRouting& r,
+              const Field2D<float>& area, const ErosionParams& p,
+              float texel_area_m2) {
+  std::vector<double> q_in(eroded_m.size(), 0.0);  // m³ arriving from donors
+  double exported = 0.0;
+  for (size_t k = r.order.size(); k-- > 0;) {  // donors before receivers
+    const int i = r.order[k];
+    double dep_depth = 0.0;
+    if (q_in[i] > 0.0) {
+      const double avail_depth = q_in[i] / texel_area_m2;
+      if (r.in_lake[i]) {
+        const double headroom = r.water_level[i] - (B.data[i] + S.data[i]);
+        dep_depth = std::clamp(avail_depth, 0.0, std::max(0.0, headroom));
+      } else {
+        dep_depth = std::min(avail_depth,
+                             static_cast<double>(p.deposition_g) * q_in[i] /
+                                 std::max(area.data[i], texel_area_m2));
+      }
+      S.data[i] += static_cast<float>(dep_depth);
+    }
+    const double q_out =
+        q_in[i] - dep_depth * texel_area_m2 + eroded_m.data[i] * texel_area_m2;
+    const int32_t rcv = r.receiver[i];
+    if (rcv >= 0) q_in[rcv] += q_out;
+    else exported += q_out;
+  }
+  return static_cast<float>(exported);
+}
+
 }  // namespace badlands::mapgen
