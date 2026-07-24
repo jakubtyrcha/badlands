@@ -140,6 +140,33 @@ void SceneRenderer::Initialize(wgpu::Device device, wgpu::Queue queue,
   // Map fog generator: produces the sim density field VolumetricFog reconstructs
   // the media from. Sources (emitters) are supplied by the game.
   fog_sim_.Initialize(device_, queue_);
+
+  // Color grading (Task: P3/HDR color grading): Oklab stylization pass between
+  // decals and debug lines; disabled by default (ColorGradingConfig.enabled).
+  color_grading_.Initialize(pipeline_generator_, accumulation_format_);
+
+  // 1x1 transparent fallback for SceneContext::ui_overlay — the resolve (and
+  // the G-buffer debug view) always bind an overlay; when the frame carries
+  // none, this texel makes the composite a no-op (a == 0 -> scene untouched).
+  {
+    wgpu::TextureDescriptor desc;
+    desc.size = {1, 1, 1};
+    desc.format = wgpu::TextureFormat::RGBA8Unorm;
+    desc.usage =
+        wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+    fallback_ui_overlay_texture_ = device_.CreateTexture(&desc);
+
+    const uint32_t transparent = 0;  // premultiplied (0,0,0,0)
+    wgpu::TexelCopyTextureInfo dst{};
+    dst.texture = fallback_ui_overlay_texture_;
+    wgpu::TexelCopyBufferLayout layout;
+    layout.bytesPerRow = 4;
+    layout.rowsPerImage = 1;
+    wgpu::Extent3D extent = {1, 1, 1};
+    queue_.WriteTexture(&dst, &transparent, sizeof(transparent), &layout,
+                        &extent);
+    fallback_ui_overlay_view_ = fallback_ui_overlay_texture_.CreateView();
+  }
 }
 
 void SceneRenderer::UpdateIbl(const SceneContext& scene) {
@@ -261,6 +288,15 @@ void SceneRenderer::CreateTargets(uint32_t width, uint32_t height) {
   contact_shadow_view_ = contact_shadow_texture_.CreateView();
 }
 
+void SceneRenderer::SnapshotHdrColor(FrameContext& frame) {
+  wgpu::TexelCopyTextureInfo copy_src{};
+  copy_src.texture = hdr_color_texture_;
+  wgpu::TexelCopyTextureInfo copy_dst{};
+  copy_dst.texture = hdr_color_copy_texture_;
+  wgpu::Extent3D copy_ext = {width_, height_, 1};
+  frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+}
+
 void SceneRenderer::Resize(uint32_t width, uint32_t height) {
   if (width == 0 || height == 0 ||
       (width == width_ && height == height_)) {
@@ -359,8 +395,12 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   frame_uniforms.screen_size =
       glm::vec2(static_cast<float>(width_), static_cast<float>(height_));
   frame_uniforms.enable_gtao = gtao_will_run ? 1u : 0u;
-  frame_uniforms.tonemap_mode = 0;     // kClamp (TonemapMode not ported;
-                                       // shaders/common/frame.wesl: 0 = kClamp)
+  // 0 = kClamp (plain sRGB clamp+gamma; also the headless-capture path so
+  // profile-less PNGs stay sRGB-referred); 2 = Display-P3 output (convert the
+  // linear-sRGB working buffer to P3 primaries at resolve; outputIsLinear then
+  // selects EDR passthrough vs SDR clamp+encode). 1 = luminance debug viz
+  // (unused here). See shaders/passes/tonemapping.wesl.
+  frame_uniforms.tonemap_mode = output_is_p3_ ? 2u : 0u;
   frame_uniforms.output_is_linear =
       (surface_format_ == wgpu::TextureFormat::RGBA16Float ||
        surface_format_ == wgpu::TextureFormat::R32Float)
@@ -757,12 +797,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // depth bound read-only (test against opaque geometry, never write depth).
   // Skipped when nothing transparent exists (no snapshot cost). ===
   if (registry.view<ForwardTransparentRenderable>().size() > 0) {
-    wgpu::TexelCopyTextureInfo copy_src{};
-    copy_src.texture = hdr_color_texture_;
-    wgpu::TexelCopyTextureInfo copy_dst{};
-    copy_dst.texture = hdr_color_copy_texture_;
-    wgpu::Extent3D copy_ext = {width_, height_, 1};
-    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+    SnapshotHdrColor(frame);
 
     wgpu::RenderPassColorAttachment color_attachment;
     color_attachment.view = hdr_color_view_;
@@ -808,12 +843,7 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // before debug lines + tonemap so it modulates the whole scene, while dev
   // debug lines stay on top. No-op when no pass is set. ===
   if (scene.post_pass != nullptr) {
-    wgpu::TexelCopyTextureInfo copy_src{};
-    copy_src.texture = hdr_color_texture_;
-    wgpu::TexelCopyTextureInfo copy_dst{};
-    copy_dst.texture = hdr_color_copy_texture_;
-    wgpu::Extent3D copy_ext = {width_, height_, 1};
-    frame.GetEncoder().CopyTextureToTexture(&copy_src, &copy_dst, &copy_ext);
+    SnapshotHdrColor(frame);
 
     PostSceneContext post{
         .frame = frame,
@@ -844,6 +874,20 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
                           // a selection highlight is UI, so its dashes keep
                           // marching while the game is paused.
                           scene.real_time_seconds, gpu_timer_);
+  }
+
+  // === Pass 3.9: Color grading (Task: P3/HDR color grading) — Oklab
+  // stylization (crush blacks + desaturate midtones) remapping the whole lit
+  // scene, AFTER decals (so highlights are graded with the scene) and BEFORE
+  // debug lines (dev overlays stay true-colored). Same snapshot-copy pattern
+  // as the post-scene hook: the HDR colour can't be sampled while bound as
+  // the target. Skipped entirely when disabled — the buffer needs no
+  // conversion (grading is pure stylization; the P3 step lives in the
+  // resolve). ===
+  if (color_grading_.GetConfig().enabled) {
+    SnapshotHdrColor(frame);
+    color_grading_.Render(frame, gpu_timer_, hdr_color_copy_view_,
+                          hdr_color_view_);
   }
 
   // === Pass 3.6: Debug lines — world-space thick (screen-aligned, AA) lines
@@ -921,11 +965,18 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     desc.timestampWrites = gpu_timer_.BeginPass("tonemap");
     RenderPassContext pass = frame.BeginRenderPass(desc);
 
+    // The frame's UI overlay (premultiplied, sRGB-encoded; composited by the
+    // resolve/debug shader in encoded space) — the transparent fallback when
+    // the scene carries none, so the bind-group layout is static.
+    wgpu::TextureView ui_overlay_view =
+        scene.ui_overlay ? scene.ui_overlay : fallback_ui_overlay_view_;
+
     if (debug_mode_ != GBufferDebugMode::None) {
       RenderGBufferDebug(pass, frame, *pipeline_generator_, surface_format_,
                          gbuffer_.GetDepthView(), gbuffer_.GetNormalsView(),
                          gbuffer_.GetAlbedoView(), gbuffer_.GetMaterialView(),
-                         hdr_color_view_, ao_view_, debug_mode_);
+                         hdr_color_view_, ao_view_, ui_overlay_view,
+                         debug_mode_);
     } else {
       RenderPipelineDeclaration decl;
       decl.shader_path = "passes/tonemapping";
@@ -940,13 +991,15 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
         spdlog::error(
             "SceneRenderer::Render: failed to compile tonemap pipeline");
       } else {
-        std::array<wgpu::BindGroupEntry, 2> entries{};
+        std::array<wgpu::BindGroupEntry, 3> entries{};
         entries[0].binding = 0;
         entries[0].buffer = frame.GetFrameUniformBuffer();
         entries[0].offset = 0;
         entries[0].size = sizeof(UniformData);
         entries[1].binding = 1;
         entries[1].textureView = hdr_color_view_;
+        entries[2].binding = 2;
+        entries[2].textureView = ui_overlay_view;
 
         wgpu::BindGroup bind_group =
             frame.CreateBindGroup(compiled->bind_group_layouts[0], entries);

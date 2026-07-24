@@ -470,9 +470,21 @@ CpuImage RenderFogScene(const FogScene& cfg) {
     RenderPipelineDeclaration d; d.shader_path = "passes/tonemapping";
     auto pipe = gen.GetPipeline(d, {wgpu::TextureFormat::RGBA8Unorm});
     REQUIRE(pipe); REQUIRE(pipe->pipeline);
-    std::array<wgpu::BindGroupEntry, 2> e{};
+    // The resolve composites a UI overlay at @2 — bind a 1x1 transparent
+    // texel (no UI in this test; a == 0 leaves the scene untouched).
+    wgpu::TextureDescriptor od; od.size = {1, 1, 1};
+    od.format = wgpu::TextureFormat::RGBA8Unorm;
+    od.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+    wgpu::Texture overlay = device.CreateTexture(&od);
+    const uint32_t transparent = 0;
+    wgpu::TexelCopyTextureInfo od_dst{}; od_dst.texture = overlay;
+    wgpu::TexelCopyBufferLayout od_layout; od_layout.bytesPerRow = 4; od_layout.rowsPerImage = 1;
+    wgpu::Extent3D od_ext = {1, 1, 1};
+    queue.WriteTexture(&od_dst, &transparent, sizeof(transparent), &od_layout, &od_ext);
+    std::array<wgpu::BindGroupEntry, 3> e{};
     e[0].binding = 0; e[0].buffer = frame_ubo; e[0].size = sizeof(fu);
     e[1].binding = 1; e[1].textureView = hdr_view;
+    e[2].binding = 2; e[2].textureView = overlay.CreateView();
     wgpu::BindGroup bg = CreateBindGroup(device, *pipe, 0, e);
     wgpu::RenderPassColorAttachment ca; ca.view = beauty.CreateView();
     ca.loadOp = wgpu::LoadOp::Clear; ca.storeOp = wgpu::StoreOp::Store;

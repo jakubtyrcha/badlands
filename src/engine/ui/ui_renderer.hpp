@@ -66,9 +66,10 @@ class UiRenderer {
   // buffer. Both are no-ops when nothing changed.
   //
   // Target-format-aware because the same UI is drawn to two different targets:
-  // the BGRA8Unorm window surface and the RGBA8Unorm offscreen screenshot
-  // texture. A pipeline is baked against its colour format, so each needs its
-  // own; `variants_` caches them.
+  // the RGBA8Unorm windowed UI-overlay texture (composited over the scene by
+  // the resolve pass — see SceneContext::ui_overlay) and the RGBA8Unorm
+  // offscreen screenshot texture. A pipeline is baked against its colour
+  // format, so each needs its own; `variants_` caches them.
   void Prepare(uint32_t width_px, uint32_t height_px,
                wgpu::TextureFormat target_format);
 

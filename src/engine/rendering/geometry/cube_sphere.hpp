@@ -23,8 +23,12 @@ struct CubeSphereMeshResult {
 
 // Generates a sphere mesh from 6 cube faces, each tessellated to resolution x
 // resolution. Uses EAC (Equi-Angular Cubemap) mapping for uniform vertex
-// distribution. Total vertices: 6 * resolution * resolution Total triangles: 6
-// * 2 * (resolution-1) * (resolution-1)
+// distribution. The per-face grid is edge-aligned (samples span u,v in [0,1]
+// inclusive), so adjacent faces share the exact cube-edge line -- the 6 faces
+// tile the surface watertight with no gap and need no stitching/corner
+// triangles. Per-face UVs each cover [0,1] (a normal texture seam at edges).
+// Total vertices: 6 * resolution * resolution
+// Total triangles: 6 * 2 * (resolution-1) * (resolution-1)
 CubeSphereMeshResult GenerateCubeSphereMesh(int resolution);
 
 struct TessellatedQuadResult {

@@ -1,0 +1,8 @@
+{
+  "name": "arena_duel",
+  "arena": { "half_x": 12, "half_z": 8 },
+  "spawns": [
+    { "creature": "Mercenary", "team": 0, "x": -8, "z": 0 },
+    { "creature": "Goblin", "team": 1, "x": 8, "z": 0 }
+  ]
+}

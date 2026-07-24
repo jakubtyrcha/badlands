@@ -315,6 +315,45 @@ struct SimFactors {
     MonsterFactors monster;
 };
 
+// ---- combat primitives -----------------------------------------------------
+// Typed attack-skills + tactical stats. resolve_attack (game/src/combat.h) runs
+// the seeded probabilistic pipeline over these; the ECS carries a Combatant plus
+// an Attacks component (game/src/components.h) that wraps Attack. Physical only
+// for now -- Soul / willpower / resolve are reserved for the deferred psychology
+// layer and are not read anywhere yet.
+enum class DamageType : int32_t { Blunt = 0, Piercing, Slashing };  // Soul reserved
+enum class AttackCategory : int32_t { Melee = 0, Ranged };
+enum class CombatStance : int32_t { Melee = 0, Ranged };
+
+// At most this many attacks per entity ("most characters have 1-2").
+inline constexpr int kMaxAttacks = 3;
+
+// One attack-skill. crit_chance is PER-ATTACK (a piercing thrust is authored with
+// a higher crit than a slash), so the damage type's crit affinity lives in the
+// data rather than in a pipeline multiplier.
+struct Attack {
+    AttackCategory category = AttackCategory::Melee;
+    DamageType damage_type = DamageType::Slashing;
+    float base_damage = 0.0f;
+    float range = 0.0f;
+    float cooldown = 0.0f;    // seconds between uses of THIS attack
+    float crit_chance = 0.0f;
+};
+
+// Tactical stats (the resolve_attack inputs) + the class engagement preference.
+// accuracy: the attacker's chance to beat the target's parry/shield (gate 1).
+// evasion:  the defender's chance to dodge an on-target blow (gate 2).
+// defense:  the defender's parry/block (contested by accuracy in gate 1).
+// armour:   flat damage reduction (gate 3).
+struct Combatant {
+    float accuracy = 0.0f;
+    float evasion = 0.0f;
+    float defense = 0.0f;
+    float armour = 0.0f;
+    CombatStance stance = CombatStance::Melee;
+    // reserved (deferred psychology): float willpower, resolve;
+};
+
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
     Archetype archetype = Archetype::Hero;
@@ -334,6 +373,71 @@ struct CharacterDesc {
     float vision_radius = 0.0f;
     float vision_cone_half_angle_deg = 180.0f;
     float facing_x = 0.0f, facing_z = 0.0f;
+    // --- combat loadout (Stage-3) -------------------------------------------
+    // Tactical stats (default = "reduces to the old deterministic melee": full
+    // accuracy, no defense/evasion/armour) plus up to kMaxAttacks attack-skills.
+    // When attack_count == 0 the spawn path derives a single melee attack from
+    // the legacy attack_* fields above, so an un-authored desc still fights.
+    float accuracy = 1.0f;
+    float evasion = 0.0f;
+    float defense = 0.0f;
+    float armour = 0.0f;
+    CombatStance stance = CombatStance::Melee;
+    Attack attacks[kMaxAttacks]{};
+    int32_t attack_count = 0;
+};
+
+// ---- named-creature catalog ------------------------------------------------
+// The creatures the sim knows by name. Append-only: JSON overrides and arena
+// scenarios key by name, and SpawnCreature spawns by id. The first
+// HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight to
+// its creature.
+enum class CreatureId : int32_t {
+    Mercenary = 0,
+    Hunter,
+    GraveRobber,
+    Apprentice,
+    Rat,
+    Goblin,
+    Deer,
+    Count,
+};
+inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);
+
+// A CharacterDesc template per creature (pos/team filled in at spawn). Compiled
+// defaults live in creature_catalog.cpp; an app may override fields by name from
+// JSON and push the result through Sim::SetCreatureCatalog. Held per-Sim, so it is
+// initial config in the determinism contract (a replay must use the same catalog).
+struct CreatureCatalog {
+    CreatureCatalog();  // fills the compiled defaults
+    CharacterDesc defs[kCreatureCount];
+};
+
+// Stable inspection/JSON name for a creature id ("Mercenary"), or "" if invalid.
+const char* CreatureName(CreatureId id);
+// Parse a creature name; returns CreatureId::Count if unknown.
+CreatureId CreatureIdFromName(const char* name);
+
+// The one shared compiled default catalog. MercenaryDesc/GoblinDesc/hero_desc read
+// from this rather than each constructing their own copy of the defaults.
+const CreatureCatalog& DefaultCreatureCatalog();
+
+// How to build the world (initial config). Defaults reproduce the shipping town
+// world; the arena overrides them.
+struct WorldConfig {
+    bool prebuild_colony = true;   // seed the colony Castle (false for the arena)
+    bool terrain_blocking = true;  // false = flat floor (no lake), for the arena
+    // >0 confines movement to [-half, +half] on that axis -- the arena's blocked
+    // edges. The world refuses a step past the edge (exactly like the water's
+    // edge), even though pathfinding does not yet route around it.
+    float arena_half_x = 0.0f;
+    float arena_half_z = 0.0f;
+};
+
+// One in-flight projectile, for the debug-line overlay (Sim::Projectiles()).
+struct ProjectileState {
+    float x, z;                // current position, world XZ
+    float target_x, target_z;  // where it is headed
 };
 
 // Per-living-entity snapshot row: the renderer reads pos/size/color, tests
@@ -521,7 +625,6 @@ enum class CommandKindId : int32_t {
     CollectTax,
     Deposit,
     AttackBuilding,
-    Shoot,
     Chat,
 };
 
@@ -533,6 +636,44 @@ struct CommandRecord {
     int32_t param_a, param_b;
     int64_t at_millis;  // sim time the command took effect
 };
+
+// ---------------------------------------------------------------------------
+// Game event stream (transient, presentation-facing)
+//
+// A generic, per-tick stream of notable things that HAPPENED (as opposed to
+// CommandRecord, which is what was DECIDED). Damage is one kind; downing and
+// building destruction are others. Consumers (the renderer's floating combat
+// text + the HUD combat log) drain it each frame via Sim::DrainEvents.
+//
+// Unlike the command log, events are NOT part of the determinism contract:
+// they are a pure function of the tick, so a replay reproduces them, but they
+// are transient and never fed back into the sim. The buffer is cleared on drain.
+// ---------------------------------------------------------------------------
+enum class GameEventKind : int32_t {
+    DamageDealt = 0,     // amount = hp removed; actor = attacker, target = victim
+    BuildingDestroyed,   // target = building id; actor = attacker (or NONE)
+    HeroDowned,          // a character's HP reached 0; actor = attacker (or NONE)
+    HeroDied,            // reserved: true removal, distinct from downing. Not emitted yet.
+};
+
+// One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and
+// (for a Character target) `target_id` are entity SLOTS -- the same ids
+// CharacterState.id carries; a Building target's id is its BuildingState.id.
+// `x`/`z` is the victim's world position when the event fired, so a lethal hit
+// still floats a number where the victim died (it is destroyed the same tick).
+struct GameEvent {
+    GameEventKind kind;
+    uint32_t actor_id;    // attacker slot; UINT32_MAX = none/unknown
+    uint32_t target_id;   // victim: character slot OR building id (see target_kind)
+    int32_t target_kind;  // 0 = Character, 1 = Building
+    float amount;         // DamageDealt: hp removed; else 0
+    float x, z;           // victim world position at event time
+    int64_t at_millis;    // sim time the event fired
+};
+
+// The two target_kind values, named for readability at call sites.
+inline constexpr int32_t kEventTargetCharacter = 0;
+inline constexpr int32_t kEventTargetBuilding = 1;
 
 // Read-only snapshot of the published (front) fog-of-war field. The grid lives
 // in the SIM coordinate frame; texel (i,j) covers the world square whose min
@@ -547,16 +688,21 @@ struct VisionField {
     const uint8_t* rg = nullptr;
 };
 
-// Injected Rust nav provider (was GamePathfinder) — kept as-is, by value. The
-// engine delegates path *geometry* to this provider; obstacles mutate one
-// building at a time so the provider maintains its graph incrementally.
-struct Pathfinder {
-    void* ctx = nullptr;
-    void (*add_obstacle)(void* ctx, uint32_t building_id, const float* poly_xz,
-                         int32_t n_verts) = nullptr;
-    void (*remove_obstacle)(void* ctx, uint32_t building_id) = nullptr;
-    int32_t (*find_path)(void* ctx, float sx, float sz, float gx, float gz, float radius,
-                         uint32_t exempt_building, float* out_xz, int32_t cap) = nullptr;
+// One navmesh cell for the debug overlay: an axis-aligned world-XZ rectangle, a
+// terrain-cost multiplier, and whether a unit can stand on it. impassable cells
+// (buildings, water, mountain) have passable == false.
+struct NavDebugCell {
+    float min_x = 0.0f, min_z = 0.0f, max_x = 0.0f, max_z = 0.0f;
+    float cost = 0.0f;
+    bool passable = false;
+};
+
+// A debug path query result: waypoints as flat world-XZ pairs (x0,z0,x1,z1,...),
+// the total cost-weighted length, and whether the goal was reachable.
+struct NavPathResult {
+    std::vector<float> waypoints_xz;
+    float cost = 0.0f;
+    bool reachable = false;
 };
 
 // Which brain(s) drive spawned entities. noiser_source: noiser script source
@@ -587,6 +733,12 @@ class Sim {
     // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (mock
     // drives every hero, same as brain_script_source == nullptr above).
     explicit Sim(const BrainDesc& brain_desc);
+    // Build a world from an explicit config (the arena uses this: flat, no colony,
+    // confined edges).
+    Sim(const WorldConfig& config, const char* brain_script_source);
+    // The composing form: which world x which brain. The other ctors forward
+    // here conceptually (single make_world implementation, sim.cpp).
+    Sim(const WorldConfig& config, const BrainDesc& brain_desc);
     ~Sim();
     Sim(Sim&&) noexcept;
     Sim& operator=(Sim&&) noexcept;
@@ -595,6 +747,13 @@ class Sim {
 
     // Returns the entity id used in CharacterState rows.
     uint32_t Spawn(const CharacterDesc& desc);
+    // Spawns a named creature from the catalog at (pos_x, pos_z) on `team`;
+    // returns its entity id. Hero creatures also get their hero class set.
+    uint32_t SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z);
+    // Replaces the creature catalog (see CreatureCatalog). Call before spawning;
+    // a replay must use the same catalog the recorded run used.
+    void SetCreatureCatalog(const CreatureCatalog& catalog);
+    const CreatureCatalog& Creatures() const;
     void Tick(float dt);
     // Recompiles the brain script; on failure the previous program is kept
     // (returns false). On success all brains restart on the new program.
@@ -602,9 +761,6 @@ class Sim {
     // Executes a player action. Returns >= 0 on success (a new building/hero
     // id, or 0 for id-less actions) and < 0 on error.
     int64_t Dispatch(const Action& action);
-    // Registers the nav provider (copied by value) and back-fills every alive
-    // building. Pass a default-constructed Pathfinder to clear.
-    void SetPathfinder(const Pathfinder& pf);
 
     // --- Fog-of-war (vision) ----------------------------------------------
     // Sizes/anchors the vision grid (SIM frame). Must be called before the
@@ -628,6 +784,14 @@ class Sim {
     // Unknown when the vision grid is unconfigured or the bounds miss it.
     VisionLevel QueryVision(float cx, float cz, float radius) const;
 
+    // --- Navmesh debug (Dear ImGui overlay) -------------------------------
+    // Both ensure the navmesh reflects the current world (rebuild-if-stale)
+    // regardless of terrain_blocking, so the overlay always shows a live mesh.
+    // One entry per navmesh cell: rectangles + cost + passability.
+    std::vector<NavDebugCell> NavDebugCells();
+    // Shortest cost-respecting path from (sx,sz) to (gx,gz) for the overlay.
+    NavPathResult NavQuery(float sx, float sz, float gx, float gz);
+
     // Snapshot accessors — identical semantics to the old ABI, POD vectors.
     std::vector<CharacterState> Characters() const;  // was game_state
     std::vector<BuildingState> Buildings() const;    // was game_buildings
@@ -636,6 +800,8 @@ class Sim {
     // primitives; the value-returning versions delegate to them.
     void Characters(std::vector<CharacterState>& out) const;
     void Buildings(std::vector<BuildingState>& out) const;
+    // In-flight projectiles, for the debug-line overlay.
+    std::vector<ProjectileState> Projectiles() const;
     WorldState World() const;
     // Replaces the tuning factors (see SimFactors). Call before ticking; a
     // replay must use the same factors the recorded run used.
@@ -643,6 +809,10 @@ class Sim {
     const SimFactors& Factors() const;
     // The applied-command trace, oldest-first (see CommandRecord).
     std::vector<CommandRecord> CommandLog() const;                         // was game_world
+    // Drains this tick-batch's game events into `out` (out.clear() then fill),
+    // emptying the sim's internal buffer -- call once per frame. Reuses the
+    // caller's buffer (no per-frame allocation), mirroring Characters(out).
+    void DrainEvents(std::vector<GameEvent>& out);
     // Dominant biome at a world XZ, as a mapgen::Biome index (0 Lake, 1 Swamp,
     // 2 Forest, 3 Plains, 4 Hills, 5 Mountain). The sim owns the terrain field;
     // callers (deer placement, later biome-weighted nav) query it here rather

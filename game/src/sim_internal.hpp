@@ -16,10 +16,12 @@
 namespace badlands {
 
 std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source);
-// BrainDesc overload (see badlands_sim.hpp): the wasm-capable path. The
-// const char* overload above forwards here with BrainDesc{.noiser_source =
-// brain_script_source}, so there is a single implementation.
+// The single implementation: which brain (BrainDesc, see badlands_sim.hpp)
+// x which world (WorldConfig). Every other overload is a thin forwarder.
+std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfig& config);
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc);
+std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source,
+                                         const WorldConfig& config);
 
 // A world for tests about movement MECHANICS rather than about terrain:
 // identical to make_world(nullptr) but with terrain_blocking off, so a unit
@@ -31,6 +33,9 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc);
 std::unique_ptr<BadlandsGame> make_flat_world();
 void tick_world(BadlandsGame&, float dt);
 uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
+// Spawn a named creature from the world's catalog at `pos` on `team`; sets the
+// hero class for hero creatures. Returns the public slot id.
+uint32_t spawn_creature_into(BadlandsGame&, CreatureId id, int32_t team, glm::vec2 pos);
 int64_t dispatch_into(BadlandsGame&, const Action&);
 bool reload_script(BadlandsGame&, const std::string&);
 std::vector<CharacterState> characters_of(const BadlandsGame&);

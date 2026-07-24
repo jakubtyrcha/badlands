@@ -209,9 +209,11 @@ std::optional<Command> decode_command(const BlDecisionWire& out, uint32_t slot) 
         case BL_CMD_ENTER_HOME:
             return Command{CommandKind::EnterHome, slot};
         case BL_CMD_SHOOT:
-            // act_hunt's follow-up (Command{CommandKind::Shoot, v.slot, v.prey_slot}):
-            // target_id = command_arg (the prey slot).
-            return Command{CommandKind::Shoot, slot, static_cast<uint32_t>(out.command_arg)};
+            // act_hunt's follow-up (Command{CommandKind::Attack, v.slot, v.prey_slot}):
+            // a TARGETED attack -- target_id = command_arg (the prey slot). The wire
+            // name predates the Shoot->Attack unification; the vocabulary is frozen,
+            // only this host-side mapping tracks the C++ command space.
+            return Command{CommandKind::Attack, slot, static_cast<uint32_t>(out.command_arg)};
         case BL_CMD_CHAT:
             // act_chat's follow-up (Command{CommandKind::Chat, v.slot, v.partner_slot}):
             // target_id = command_arg (the chat partner's slot).

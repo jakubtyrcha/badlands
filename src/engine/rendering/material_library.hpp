@@ -7,8 +7,10 @@
 // purely by pack directory -- no game::MaterialId here (see
 // src/game/material_pack.h for the game-side MaterialId -> pack mapping).
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -76,6 +78,18 @@ class MaterialLibrary {
   // textures. DRYs the hand-rolled solid-color floor + capsule materials the
   // views used to build inline.
   DeferredMaterial SolidColor(glm::vec3 rgb, float roughness);
+
+  // Returns a cached deferred `normalmapped` material whose albedo is a
+  // procedurally-generated checkerboard (`tiles` tiles/side of `color_a` /
+  // `color_b`, `texels` px/side), with a flat-normal default and a matte 1x1
+  // ARM at `roughness`. The checkerboard (BuildCheckerboardRgba8) is uploaded
+  // with a full mip chain via UploadTexture2DWithMips and sampled through the
+  // shared trilinear+aniso sampler. Caches by (color_a, color_b, tiles, texels,
+  // roughness). Colors are raw sRGB (same convention as SolidColor). A UV-debug
+  // material — no new shader/factory, just a non-1x1 albedo.
+  DeferredMaterial CheckerAlbedo(glm::vec3 color_a, glm::vec3 color_b,
+                                 int tiles = 8, int texels = 512,
+                                 float roughness = 1.0f);
 
   // A terrain layer set: one texture_2d_array per PBR channel, layer i built
   // from the i'th pack passed to LoadTerrainArrays. Holds the textures (not
@@ -170,6 +184,13 @@ class MaterialLibrary {
   // InstanceParams own the 1x1 texture views (which keep their textures
   // alive) for SolidColor's whole lifetime.
   std::unordered_map<uint32_t, InstanceParams> solid_cache_;
+
+  // key: (packed sRGB color_a, packed sRGB color_b, tiles, texels, roughness*255).
+  // Stored InstanceParams own the albedo/ARM texture views (which keep their
+  // textures alive) for the material's lifetime -- same ownership model as
+  // solid_cache_.
+  std::map<std::tuple<uint32_t, uint32_t, int, int, uint8_t>, InstanceParams>
+      checker_cache_;
 
   mutable bool load_failed_ = false;
 };

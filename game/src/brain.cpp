@@ -66,8 +66,11 @@ glm::vec4 perceive_self(BadlandsGame& game, int32_t slot) {
     }
     const auto& pos = game.registry.get<Position>(self);
     const auto& health = game.registry.get<Health>(self);
-    const auto& cooldown = game.registry.get<CooldownTimer>(self);
-    return {pos.pos.x, pos.pos.y, health.hp, cooldown.remaining};
+    // "Cooldown" reported to a brain is the primary attack's remaining recovery.
+    const auto* attacks = game.registry.try_get<Attacks>(self);
+    const float cooldown =
+        (attacks != nullptr && attacks->count > 0) ? attacks->cooldown_remaining[0] : 0.0f;
+    return {pos.pos.x, pos.pos.y, health.hp, cooldown};
 }
 
 glm::vec4 perceive_target(BadlandsGame& game, int32_t slot) {

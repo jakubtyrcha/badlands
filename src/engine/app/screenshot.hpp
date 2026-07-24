@@ -31,11 +31,16 @@ enum class GBufferDebugMode;
 // Builds a throwaway SceneRenderer (one-shot use); the F2 recorder uses
 // ScreenshotRecorder's persistent renderer instead. Blocks until the GPU work
 // + readback complete. Returns false (after logging) on failure.
+// `grading` forwards the live renderer's color-grading config into the
+// throwaway capture renderer (same pattern as debug_mode /
+// shadow_debug_mode) — grading is part of the game's image. Defaults to a
+// default-constructed config (grading disabled).
 bool SaveScreenshot(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
                     AppView& view, uint32_t width, uint32_t height,
                     const std::string& path, GBufferDebugMode debug_mode,
                     ShadowDebugMode shadow_debug_mode = ShadowDebugMode::Off,
-                    float time_of_day = 0.5f);
+                    float time_of_day = 0.5f,
+                    const ColorGradingConfig& grading = {});
 
 // Creates the offscreen capture target: a `width`x`height` RGBA8Unorm texture
 // with RenderAttachment|CopySrc usage. RGBA8Unorm (non-sRGB) matches the

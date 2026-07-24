@@ -1,5 +1,6 @@
 #include "movement.h"
 
+#include "combat.h"  // melee_range, select_target
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"  // biome_at
@@ -22,34 +23,38 @@ namespace {
 
 constexpr float kArriveRadius = 0.25f;     // cursor advances within this of a waypoint
 constexpr float kRepathCooldown = 0.3f;    // seconds between repaths
-constexpr int kMaxWaypoints = 64;          // find_path output buffer
 constexpr float kGoalMovedThreshold = 1.0f;// repath a moving target when it drifts this far
 constexpr float kMeleeHysteresis = 1.15f;  // unlock past attack_range * this
 constexpr float kSepCell = 2.0f;           // separation spatial-hash cell size
 constexpr float kWorldBound = static_cast<float>(kGridHalf);
 
-// Query the injected pathfinder, or a straight-line fallback if none. Returns
-// the waypoint polyline (empty = no path).
-std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2 goal, float radius,
-                                  uint32_t exempt) {
-    const Pathfinder& pf = game.pathfinder;
-    if (pf.find_path != nullptr) {
-        std::array<float, 2 * kMaxWaypoints> buf{};
-        int n = pf.find_path(pf.ctx, start.x, start.y, goal.x, goal.y, radius, exempt, buf.data(),
-                             kMaxWaypoints);
-        n = std::min(n, kMaxWaypoints);
-        std::vector<glm::vec2> wp;
-        wp.reserve(static_cast<size_t>(std::max(0, n)));
-        for (int i = 0; i < n; ++i) {
-            wp.push_back({buf[2 * i], buf[2 * i + 1]});
+// Query the navmesh for a route, or a straight-line fallback when no navmesh has
+// been built. Returns the waypoint polyline (empty = unreachable). The result
+// distinguishes "no navmesh" (fallback, always a 2-point line) from "navmesh
+// says unreachable" (empty) so the caller can raise MoveBlocked only for the
+// latter.
+std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2 goal,
+                                  bool& unreachable, const glm::vec2* exempt_min = nullptr,
+                                  const glm::vec2* exempt_max = nullptr) {
+    unreachable = false;
+    if (!game.navmesh.empty()) {
+        // When entering a building, exempt its footprint's clearance so a door
+        // sealed by the building's own dilation stays reachable (dense towns).
+        const nav::NavMesh::PathResult r =
+            (exempt_min != nullptr && exempt_max != nullptr)
+                ? game.navmesh.FindPath(start, goal, *exempt_min, *exempt_max)
+                : game.navmesh.FindPath(start, goal);
+        if (!r.reachable) {
+            unreachable = true;
+            return {};
         }
-        return wp;
+        return r.waypoints;
     }
-    // No provider registered: straight-line fallback, obstacle-oblivious BY
-    // DESIGN. This path only runs in headless sims / C++ tests that never call
-    // game_set_pathfinder; the app registers a NavContext provider at
-    // construction (before any tick), so shipping units always route around
-    // buildings. (start included so follow_paths advances past it.)
+    // No navmesh built: straight-line fallback, obstacle-oblivious BY DESIGN.
+    // Only headless mechanics tests that never rebuild the navmesh hit this; the
+    // sim rebuilds it every tick (rebuild_navmesh_if_stale in tick_world), so
+    // shipping units always route around buildings + impassable terrain. (start
+    // included so follow_paths advances past it.)
     return {start, goal};
 }
 
@@ -121,16 +126,21 @@ bool is_walkable(mapgen::Biome biome) {
 
 void plan_paths(BadlandsGame& game, float dt) {
     entt::registry& reg = game.registry;
-    auto view = reg.view<MoveTarget, NavPath, const Position, const Agent>(entt::exclude<InsideBuilding>);
+    // Goals the navmesh reported unreachable this pass -> MoveBlocked, applied
+    // after the loop (emplacing a component while iterating a view can invalidate
+    // it, same reason follow_paths defers its blocked list).
+    std::vector<std::pair<entt::entity, glm::vec2>> blocked;
+
+    auto view = reg.view<MoveTarget, NavPath, const Position>(entt::exclude<InsideBuilding>);
     for (entt::entity e : view) {
         MoveTarget& mt = view.get<MoveTarget>(e);
         NavPath& np = view.get<NavPath>(e);
         glm::vec2 pos = view.get<const Position>(e).pos;
-        float radius = view.get<const Agent>(e).radius;
 
         glm::vec2 goal{0.0f, 0.0f};
-        uint32_t exempt = UINT32_MAX;
         bool have_goal = true;
+        glm::vec2 exempt_min{0.0f}, exempt_max{0.0f};
+        bool have_exempt = false;
         switch (mt.kind) {
             case MoveTarget::Kind::None:
                 have_goal = false;
@@ -148,8 +158,18 @@ void plan_paths(BadlandsGame& game, float dt) {
             case MoveTarget::Kind::Building:
                 if (mt.building < game.placement.buildings.size() &&
                     game.placement.buildings[mt.building].alive) {
-                    goal = building_entrance(game.placement.buildings[mt.building]);
-                    exempt = mt.building;
+                    // The target building is an obstacle; its entrance sits on the
+                    // perimeter. Exempt the building's own footprint bbox so its
+                    // clearance ring never seals off its door.
+                    const PlacedBuilding& b = game.placement.buildings[mt.building];
+                    goal = building_entrance(b);
+                    const std::array<glm::vec2, 4> corners = building_footprint_corners(b);
+                    exempt_min = exempt_max = corners[0];
+                    for (const glm::vec2& c : corners) {
+                        exempt_min = glm::min(exempt_min, c);
+                        exempt_max = glm::max(exempt_max, c);
+                    }
+                    have_exempt = true;
                 } else {
                     have_goal = false;
                 }
@@ -173,11 +193,23 @@ void plan_paths(BadlandsGame& game, float dt) {
         bool need = np.waypoints.empty() || np.cursor >= np.waypoints.size() ||
                     np.epoch != game.placement.nav_epoch || goal_drifted;
         if (need && np.repath_cooldown <= 0.0f) {
-            np.waypoints = query_path(game, pos, goal, radius, exempt);
+            bool unreachable = false;
+            np.waypoints = query_path(game, pos, goal, unreachable,
+                                      have_exempt ? &exempt_min : nullptr,
+                                      have_exempt ? &exempt_max : nullptr);
             np.cursor = 0;
             np.epoch = game.placement.nav_epoch;
             np.repath_cooldown = kRepathCooldown;
+            // The world says the goal cannot be reached. Raise the event the
+            // brain reacts to (abandon the goal) instead of stalling silently.
+            if (unreachable) {
+                blocked.emplace_back(e, goal);
+            }
         }
+    }
+
+    for (const auto& [e, point] : blocked) {
+        game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
     }
 }
 
@@ -207,10 +239,15 @@ void follow_paths(BadlandsGame& game, float dt) {
             // The world gets the last word on where a character can go. A path
             // may cross terrain nobody has surveyed -- the planner routes around
             // buildings only -- so the refusal happens HERE, at the step, and
-            // becomes an event the brain can act on.
-            if (game.terrain_blocking && !is_walkable(biome_at(game, next))) {
+            // becomes an event the brain can act on. The arena's blocked edges
+            // refuse a step the same way the water's edge does.
+            const bool past_arena_edge =
+                (game.arena_half_x > 0.0f && std::abs(next.x) > game.arena_half_x) ||
+                (game.arena_half_z > 0.0f && std::abs(next.y) > game.arena_half_z);
+            if (past_arena_edge ||
+                (game.terrain_blocking && !is_walkable(biome_at(game, next)))) {
                 blocked.emplace_back(e, next);
-                continue;  // stop at the water's edge rather than wade in
+                continue;  // stop at the edge rather than cross it
             }
             pos.pos = next;
             // Fog-of-war: face the direction of travel (idle keeps last facing).
@@ -228,17 +265,20 @@ void follow_paths(BadlandsGame& game, float dt) {
 void update_melee_locks(BadlandsGame& game) {
     entt::registry& reg = game.registry;
     std::vector<entt::entity> to_lock, to_unlock;
-    auto view = reg.view<const Position, const Stats>(entt::exclude<InsideBuilding>);
+    // Melee lock keys off the MELEE attack's reach, not a ranged one: a unit that
+    // only fights at range (melee_range == 0) never locks, so a kiter holding at
+    // bow distance keeps moving instead of freezing.
+    auto view = reg.view<const Position, const Attacks>(entt::exclude<InsideBuilding>);
     for (entt::entity e : view) {
         bool locked = reg.all_of<MeleeLock>(e);
-        entt::entity enemy = nearest_enemy(game, e);
-        if (enemy == entt::null) {
+        entt::entity enemy = select_target(game, e);
+        const float range = melee_range(view.get<const Attacks>(e));
+        if (enemy == entt::null || range <= 0.0f) {
             if (locked) {
                 to_unlock.push_back(e);
             }
             continue;
         }
-        float range = view.get<const Stats>(e).attack_range;
         float dist = glm::distance(view.get<const Position>(e).pos, reg.get<Position>(enemy).pos);
         if (!locked && dist <= range) {
             to_lock.push_back(e);
@@ -316,7 +356,12 @@ void separate_units(BadlandsGame& game) {
         }
     }
 
-    bool has_pf = game.pathfinder.find_path != nullptr;
+    // Reproject units out of building footprints exactly when the path layer is
+    // obstacle-aware -- i.e. a navmesh exists. Gating on the same signal as
+    // plan_paths/query_path (navmesh presence, not terrain_blocking) keeps the
+    // two consistent: a flat world with no navmesh skips both routing and
+    // reprojection, and any world with a built mesh gets both.
+    const bool reproject = !game.navmesh.empty();
     for (entt::entity e : view) {
         Position& pos = view.get<Position>(e);
         // Locked units are immovable colliders: they are never *pushed* by
@@ -329,10 +374,19 @@ void separate_units(BadlandsGame& game) {
                 pos.pos += pit->second;
             }
         }
-        if (has_pf) {
+        if (reproject) {
             reproject_out_of_footprints(game, pos.pos);
         }
         pos.pos = glm::clamp(pos.pos, glm::vec2(-kWorldBound), glm::vec2(kWorldBound - 1e-3f));
+        // Keep units inside the arena's blocked edges too. follow_paths refuses a
+        // STEP past the edge, but a separation shove is not a step -- so a unit
+        // pushed out would otherwise be stranded (every inward step then refused).
+        if (game.arena_half_x > 0.0f) {
+            pos.pos.x = glm::clamp(pos.pos.x, -game.arena_half_x, game.arena_half_x);
+        }
+        if (game.arena_half_z > 0.0f) {
+            pos.pos.y = glm::clamp(pos.pos.y, -game.arena_half_z, game.arena_half_z);
+        }
     }
 }
 

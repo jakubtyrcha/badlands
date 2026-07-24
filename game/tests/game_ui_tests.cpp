@@ -54,7 +54,7 @@ CharacterState MakeHero(uint32_t id, float x, float z,
 // running app). Returns nullptr if the font is missing/unreadable; callers
 // REQUIRE non-null so a missing asset fails loudly rather than skipping silently.
 UiContext* LoadHudFont() {
-  FILE* f = fopen("assets/fonts/CormorantUnicase-Regular.ttf", "rb");
+  FILE* f = fopen("assets/fonts/IM_Fell_DW_Pica/IMFellDWPica-Regular.ttf", "rb");
   if (!f) return nullptr;
   fseek(f, 0, SEEK_END);
   const long size = ftell(f);
@@ -342,7 +342,7 @@ TEST_CASE("BuildHud lays out a selection panel with working buttons",
     UiContext* ctx = nullptr;
     {
         // Real shipping font, so this covers the actual atlas bake path.
-        FILE* f = fopen("assets/fonts/CormorantUnicase-Regular.ttf", "rb");
+        FILE* f = fopen("assets/fonts/IM_Fell_DW_Pica/IMFellDWPica-Regular.ttf", "rb");
         REQUIRE(f != nullptr);
         fseek(f, 0, SEEK_END);
         const long size = ftell(f);
@@ -393,15 +393,45 @@ TEST_CASE("BuildHud lays out a selection panel with working buttons",
     REQUIRE(HudHitTest(frame, recruit->x + 4.0f, recruit->y + 4.0f) ==
             kHudBtnRecruit);
 
-    // With nothing selected the panel disappears entirely, but the top bar
-    // (gold + clock) still draws.
+    // With nothing selected the right panel is STILL present (it now always
+    // hosts the combat log), so a click on it is consumed rather than falling
+    // through to the world -- but the viewport to its left still hits nothing.
     HudModel bare;
     bare.gold = 5;
     bare.clock_text = "Day 1   00:00";
     HudFrame bare_frame;
     REQUIRE(BuildHud(ctx, bare, 1600.0f, 900.0f, 1.0f, bare_frame));
     REQUIRE_FALSE(bare_frame.quads.empty());
-    REQUIRE(HudHitTest(bare_frame, 1500.0f, 400.0f) == kHudNone);
+    REQUIRE(HudHitTest(bare_frame, 1500.0f, 400.0f) != kHudNone);  // panel present
+    REQUIRE(HudHitTest(bare_frame, 400.0f, 400.0f) == kHudNone);   // viewport clear
+
+    ui_destroy(ctx);
+}
+
+TEST_CASE("BuildHud hosts an always-on combat log in the bottom panel",
+          "[game_ui][hud]") {
+    UiContext* ctx = LoadHudFont();
+    REQUIRE(ctx != nullptr);
+
+    HudModel model;
+    model.gold = 42;
+    model.clock_text = "Day 1   12:00";
+    // No selection, but combat has happened: the log fills the bottom panel.
+    model.combat_log = {"Merc -> Rat  4", "Rat -> Merc  2", "Rat downed"};
+
+    HudFrame frame;
+    REQUIRE(BuildHud(ctx, model, 1600.0f, 900.0f, 1.0f, frame));
+
+    // The log region is hit-testable (so wheel-scroll can target it), on the
+    // right-hand panel and in its lower half.
+    const UiHitRect* log = FindHitRect(frame, kHudCombatLog);
+    REQUIRE(log != nullptr);
+    REQUIRE(log->x > 900.0f);             // right-hand side
+    REQUIRE(log->y > 900.0f * 0.5f);      // lower half of the 900px viewport
+    REQUIRE(HudHitTest(frame, log->x + 4.0f, log->y + 4.0f) == kHudCombatLog);
+
+    // Capacity is positive and consistent with the panel it just laid out.
+    REQUIRE(HudCombatLogCapacity() > 0u);
 
     ui_destroy(ctx);
 }

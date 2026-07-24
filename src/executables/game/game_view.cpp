@@ -1,4 +1,4 @@
-#include "game/views/game_view.hpp"
+#include "executables/game/game_view.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -49,16 +49,17 @@ namespace {
 // changing it means a re-bake, not a re-layout.
 constexpr float kHudFontPx = 18.0f;
 
-// Detail-panel title for a picked unit: its display name if it has one (heroes),
-// else the archetype so a picked deer/rat/townfolk is labelled honestly rather
-// than all reading "Hero".
-std::string unit_title(const CharacterState& c) {
+// Display name for a character: its own name if it has one (heroes), else an
+// archetype word. `concrete` picks the flavour: the floating WORLD LABELS want
+// the concrete creatures the sim ships ("Rat"/"Deer"), while the detail panel
+// reads the generic archetype ("Monster"/"Critter"). One switch, two callers.
+std::string character_display_name(const CharacterState& c, bool concrete) {
   if (c.name[0] != '\0') return c.name;
   switch (static_cast<Archetype>(c.archetype)) {
     case Archetype::Hero: return "Hero";
     case Archetype::Townfolk: return "Townfolk";
-    case Archetype::Critter: return "Critter";
-    case Archetype::Monster: return "Monster";
+    case Archetype::Critter: return concrete ? "Deer" : "Critter";
+    case Archetype::Monster: return concrete ? "Rat" : "Monster";
   }
   return "Unit";
 }
@@ -104,6 +105,85 @@ std::string unit_class(const CharacterState& c,
     case Archetype::Monster: return "Monster";
   }
   return "";
+}
+
+// --- floating world-label styling (fixed constants; no runtime knobs) -------
+constexpr uint32_t kNameColor = 0xEDE6D4FFu;    // warm off-white
+constexpr uint32_t kDamageColor = 0xFF5A4BFFu;  // red-orange damage numbers
+constexpr uint32_t kHealthBgColor = 0x5A1512E6u;  // dark red (missing health)
+constexpr uint32_t kHealthFgColor = 0x53C24CFFu;  // green (current health)
+constexpr float kNameLift = 0.6f;          // world units above a unit's head
+constexpr float kBuildingNameLift = 4.0f;  // world units above a building base
+constexpr float kBarDrop = 0.3f;           // world units below the feet/base
+constexpr float kDamageLift = 0.4f;        // world units above the head
+constexpr float kDamageLifetime = 1.2f;    // seconds a damage number lives
+constexpr float kBarWidth = 34.0f;         // health-bar size at scale 1 (px)
+constexpr float kBarHeight = 5.0f;
+
+// Folds an animation opacity into a base 0xRRGGBBAA color's alpha.
+uint32_t WithOpacity(uint32_t rgba, float opacity) {
+  const float a = static_cast<float>(rgba & 0xffu) * std::clamp(opacity, 0.0f, 1.0f);
+  return (rgba & 0xffffff00u) | (static_cast<uint32_t>(a) & 0xffu);
+}
+
+// Shapes `text` at a projected anchor and appends its (scaled, centered) glyph
+// quads to `out`. `scratch` is a reused ui_text_run buffer. The run comes back
+// baseline-left at (0,0); we scale by the anchor's depth scale, center it
+// horizontally over the anchor, and put the baseline at the anchor point.
+void EmitText(std::vector<UiQuad>& out, std::vector<UiQuad>& scratch,
+              UiContext* ctx, const LabelProjection& p, const std::string& text,
+              uint32_t color) {
+  if (text.empty()) return;
+  // Inked glyph quads <= chars <= bytes, so text.size() is a safe upper bound on
+  // the count: shape ONCE into a buffer that big (never truncated, count <= cap
+  // => UI_OK) rather than a measure pass followed by a fill pass.
+  scratch.resize(text.size());
+  uint32_t count = 0;
+  float w = 0.0f, h = 0.0f;
+  if (ui_text_run(ctx, text.data(), static_cast<uint32_t>(text.size()), color,
+                  scratch.data(), static_cast<uint32_t>(scratch.size()), &count,
+                  &w, &h) != UI_OK) {
+    return;
+  }
+  const float s = p.scale;
+  const float ox = p.x - w * s * 0.5f;  // center horizontally over the anchor
+  const float oy = p.y;                 // baseline sits at the projected anchor
+  for (uint32_t i = 0; i < count; ++i) {  // scratch is oversized; only [0,count)
+    UiQuad q = scratch[i];
+    q.x = ox + q.x * s;
+    q.y = oy + q.y * s;
+    q.w *= s;
+    q.h *= s;
+    out.push_back(q);
+  }
+}
+
+// Appends a two-quad health bar (red background + green fill) centered at the
+// projected anchor, sized by the anchor's depth scale.
+void EmitBar(std::vector<UiQuad>& out, const UiFontInfo& font,
+             const LabelProjection& p, float frac) {
+  frac = std::clamp(frac, 0.0f, 1.0f);
+  const float s = p.scale;
+  const float bw = kBarWidth * s;
+  const float bh = kBarHeight * s;
+  const float x = p.x - bw * 0.5f;
+  const float y = p.y;
+  auto solid = [&](float qx, float qy, float qw, float qh, uint32_t rgba) {
+    if (qw <= 0.0f) return;
+    UiQuad q{};
+    q.x = qx;
+    q.y = qy;
+    q.w = qw;
+    q.h = qh;
+    q.u0 = font.white_u;
+    q.v0 = font.white_v;
+    q.u1 = font.white_u;
+    q.v1 = font.white_v;
+    q.rgba = rgba;
+    out.push_back(q);
+  };
+  solid(x, y, bw, bh, kHealthBgColor);         // full-width red backing
+  solid(x, y, bw * frac, bh, kHealthFgColor);  // green current-health fill
 }
 
 // Day/night: the sky cube + SH + IBL prefilter are re-baked at most once per
@@ -225,7 +305,7 @@ bool GameView::Initialize(const RenderContext& ctx) {
   ui_ = std::make_unique<UiRenderer>();
   if (!ui_->Initialize(ctx.device, ctx.queue, *ctx.pipeline_gen,
                        ctx.surface_format,
-                       "assets/fonts/CormorantUnicase-Regular.ttf",
+                       "assets/fonts/IM_Fell_DW_Pica/IMFellDWPica-Regular.ttf",
                        kHudFontPx, /*scale_factor=*/1.0f)) {
     spdlog::warn("GameView::Initialize: game UI disabled (font/pipeline setup failed)");
     ui_.reset();
@@ -244,6 +324,12 @@ bool GameView::Initialize(const RenderContext& ctx) {
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
   if (scene_renderer_) scene_renderer_->MutableFogConfig().enabled = false;
+  // The game's stylized look: Oklab color grading on (defaults from
+  // ColorGradingConfig — crushed blacks + desaturated midtones). Dev tools
+  // (viewer/ai_sandbox) leave it off; tune live in the Color Grading panel.
+  if (scene_renderer_) {
+    scene_renderer_->MutableColorGradingConfig().enabled = true;
+  }
 
   // Fog-of-war overlay. Configure the SIM-frame vision grid, register the pass
   // on scene_context_ (picked up by any renderer, incl. the headless
@@ -603,6 +689,18 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
       if (io.WantCaptureMouse) return;
       glm::vec2 screen;
       if (!EventWindowLogicalSize(event.wheel.windowID, screen)) return;
+      // Over the combat log? Scroll it rather than zooming the camera. The HUD
+      // hit rects are physical pixels, so convert the logical cursor first (same
+      // conversion the click path uses).
+      const glm::vec2 to_physical(
+          screen.x > 0.0f ? static_cast<float>(width) / screen.x : 1.0f,
+          screen.y > 0.0f ? static_cast<float>(height) / screen.y : 1.0f);
+      const glm::vec2 cur_physical(event.wheel.mouse_x * to_physical.x,
+                                   event.wheel.mouse_y * to_physical.y);
+      if (HudHitTest(hud_frame_, cur_physical.x, cur_physical.y) == kHudCombatLog) {
+        ScrollCombatLog(NormalizedWheelY(event.wheel));
+        return;
+      }
       ZoomAtCursor(gamecam_, camera_, NormalizedWheelY(event.wheel),
                    glm::vec2(event.wheel.mouse_x, event.wheel.mouse_y), screen);
       return;
@@ -654,6 +752,13 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
                         },
                         sim_world)) {
         return;  // at/above the horizon
+      }
+
+      // Nav debug pick mode: two ground clicks become the path endpoints instead
+      // of selecting an entity.
+      if (nav_debug_.pick_mode()) {
+        nav_debug_.Pick(sim_world);
+        return;
       }
 
       // Units (small foreground capsules) win over the larger building footprints
@@ -755,6 +860,176 @@ bool GameView::DispatchHudAction(uint32_t hud_id) {
   return true;
 }
 
+std::string GameView::EventActorName(uint32_t slot) const {
+  // Current frame's names first, then last frame's (a just-dead entity), else "?".
+  auto it = char_names_.find(slot);
+  if (it != char_names_.end()) return it->second;
+  auto pit = char_names_prev_.find(slot);
+  return pit != char_names_prev_.end() ? pit->second : "?";
+}
+
+float GameView::EventActorSize(uint32_t slot) const {
+  auto it = char_sizes_.find(slot);
+  if (it != char_sizes_.end()) return it->second;
+  auto pit = char_sizes_prev_.find(slot);
+  return pit != char_sizes_prev_.end() ? pit->second : 1.2f;  // never-seen fallback
+}
+
+std::string GameView::EventTargetName(const GameEvent& e) const {
+  if (e.target_kind == kEventTargetBuilding) {
+    auto it = building_kinds_.find(e.target_id);
+    if (it != building_kinds_.end()) return building_label(it->second);
+    auto pit = building_kinds_prev_.find(e.target_id);
+    return pit != building_kinds_prev_.end()
+               ? std::string(building_label(pit->second))
+               : "Building";
+  }
+  return EventActorName(e.target_id);  // same two-buffer character-name lookup
+}
+
+void GameView::PushLogLine(std::string line) {
+  constexpr size_t kLogCap = 200;
+  combat_log_lines_.push_back(std::move(line));
+  if (combat_log_lines_.size() > kLogCap) {
+    combat_log_lines_.erase(
+        combat_log_lines_.begin(),
+        combat_log_lines_.begin() +
+            static_cast<long>(combat_log_lines_.size() - kLogCap));
+  }
+  // If the user is reading older lines, keep their window on the same content as
+  // new lines arrive (RefreshHud clamps the offset to the current total).
+  if (combat_log_scroll_ > 0) ++combat_log_scroll_;
+}
+
+void GameView::ScrollCombatLog(float wheel_y) {
+  // Wheel up (positive) scrolls back into older lines; down returns to newest.
+  if (wheel_y > 0.0f) {
+    ++combat_log_scroll_;
+  } else if (wheel_y < 0.0f && combat_log_scroll_ > 0) {
+    --combat_log_scroll_;
+  }
+}
+
+void GameView::PumpGameEvents() {
+  sim_.DrainEvents(events_scratch_);
+  if (events_scratch_.empty()) {
+    return;  // No events this frame -> skip the name-cache rebuild entirely.
+  }
+
+  // Double-buffer the name/size caches: last frame's set moves to _prev_, this
+  // frame's is rebuilt from the live snapshot. An entity downed/destroyed this
+  // frame is gone from the snapshot but still in _prev_ (alive last event frame),
+  // so its log line + damage number still resolve. Rebuilt only on frames that
+  // actually have events, so quiet frames pay nothing.
+  char_names_prev_.swap(char_names_);
+  char_names_.clear();
+  char_sizes_prev_.swap(char_sizes_);
+  char_sizes_.clear();
+  for (const CharacterState& c : character_rows_) {
+    char_names_[c.id] = character_display_name(c, /*concrete=*/true);
+    char_sizes_[c.id] = c.size_y;
+  }
+  building_kinds_prev_.swap(building_kinds_);
+  building_kinds_.clear();
+  for (const BuildingState& b : building_rows_) {
+    building_kinds_[b.id] = b.kind;
+  }
+
+  for (const GameEvent& e : events_scratch_) {
+    switch (e.kind) {
+      case GameEventKind::DamageDealt: {
+        PushLogLine(EventActorName(e.actor_id) + " -> " + EventTargetName(e) +
+                    "  " + std::to_string(static_cast<int>(e.amount)));
+        // Floating damage numbers are for CHARACTERS (per the design); building
+        // damage goes to the log only. Anchor to the live victim when it still
+        // exists (the number follows a moving unit), else the event position
+        // (a lethal hit's number floats where the victim died).
+        if (e.target_kind == kEventTargetCharacter) {
+          const CharacterState* v = FindCharacter(character_rows_, e.target_id);
+          const glm::vec3 pos =
+              v ? glm::vec3(v->pos_x, GroundAt(v->pos_x, v->pos_z), v->pos_z)
+                : glm::vec3(e.x, GroundAt(e.x, e.z), e.z);
+          const float head = (v ? v->size_y : EventActorSize(e.target_id)) + kDamageLift;
+          timed_labels_.Spawn(e.target_id, pos, head,
+                              std::to_string(static_cast<int>(e.amount)),
+                              kDamageColor, kDamageLifetime,
+                              LabelAnimation::RiseFade);
+        }
+        break;
+      }
+      case GameEventKind::HeroDowned:
+        PushLogLine(EventTargetName(e) + " downed");
+        break;
+      case GameEventKind::BuildingDestroyed:
+        PushLogLine(EventTargetName(e) + " destroyed");
+        break;
+      case GameEventKind::HeroDied:
+        break;  // reserved: not emitted yet
+    }
+  }
+}
+
+void GameView::BuildFloatingLabels(std::vector<UiQuad>& out) {
+  out.clear();
+  // Only the baked font context is needed to SHAPE quads (ui_text_run + the
+  // white texel); the pipeline/variant is ensured later by Prepare/Draw. Gating
+  // on the context (not full ready()) keeps labels from dropping the first frame.
+  if (!ui_ || ui_->context() == nullptr || ui_viewport_w_ <= 0.0f) return;
+  UiContext* ctx = ui_->context();
+  const UiFontInfo& font = ui_->font_info();
+  const glm::mat4 vp = camera_.GetProj() * camera_.GetView();
+
+  // Character names (above the head) + health bars (below the feet).
+  for (const CharacterState& c : character_rows_) {
+    if (c.inside_building_id >= 0) continue;  // hidden indoors -> no label
+    const float ground = GroundAt(c.pos_x, c.pos_z);
+    const LabelProjection np = ProjectLabel(
+        vp, {c.pos_x, ground + c.size_y + kNameLift, c.pos_z}, ui_viewport_w_,
+        ui_viewport_h_);
+    if (np.visible) {
+      EmitText(out, label_run_scratch_, ctx, np,
+               character_display_name(c, /*concrete=*/true), kNameColor);
+    }
+    if (c.max_hp > 0.0f) {
+      const LabelProjection bp = ProjectLabel(
+          vp, {c.pos_x, ground - kBarDrop, c.pos_z}, ui_viewport_w_, ui_viewport_h_);
+      if (bp.visible) EmitBar(out, font, bp, c.hp / c.max_hp);
+    }
+  }
+
+  // Building names (above the base) + health bars (below the base).
+  for (const BuildingState& b : building_rows_) {
+    const float ground = GroundAt(b.center_x, b.center_z);
+    const LabelProjection np = ProjectLabel(
+        vp, {b.center_x, ground + kBuildingNameLift, b.center_z}, ui_viewport_w_,
+        ui_viewport_h_);
+    if (np.visible) {
+      EmitText(out, label_run_scratch_, ctx, np, building_label(b.kind), kNameColor);
+    }
+    if (b.max_hp > 0.0f) {
+      const LabelProjection bp = ProjectLabel(
+          vp, {b.center_x, ground - kBarDrop, b.center_z}, ui_viewport_w_,
+          ui_viewport_h_);
+      if (bp.visible) EmitBar(out, font, bp, b.hp / b.max_hp);
+    }
+  }
+
+  // Floating damage numbers: resolve the timed pool, following live victims.
+  const AnchorLookup live = [this](uint32_t slot) -> std::optional<glm::vec3> {
+    const CharacterState* c = FindCharacter(character_rows_, slot);
+    if (!c) return std::nullopt;
+    return glm::vec3(c->pos_x, GroundAt(c->pos_x, c->pos_z), c->pos_z);
+  };
+  for (const ResolvedLabel& l : timed_labels_.Resolve(live)) {
+    const LabelProjection p =
+        ProjectLabel(vp, l.world_pos, ui_viewport_w_, ui_viewport_h_);
+    if (p.visible) {
+      EmitText(out, label_run_scratch_, ctx, p, l.text,
+               WithOpacity(l.color, l.opacity));
+    }
+  }
+}
+
 void GameView::Update(float dt, const bool* keyboard_state) {
   PROFILE_SCOPE("GameView::Update");
   dt_ = dt;
@@ -797,6 +1072,12 @@ void GameView::Update(float dt, const bool* keyboard_state) {
       ticked_this_frame = true;
     }
   }
+
+  // Age the floating damage numbers on the REAL clock (independent of sim
+  // speed/pause), so they fade smoothly regardless of tick rate. New numbers are
+  // spawned in RefreshHud (PumpGameEvents) at full lifetime, after this ages the
+  // existing ones.
+  timed_labels_.Advance(static_cast<float>(real_dt));
 
   // Fog-of-war: re-upload the visibility field to the overlay texture only when
   // a sim tick actually ran this frame (the field is unchanged otherwise, and
@@ -841,6 +1122,11 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // After RefreshHud: that is where a selection pointing at something that no
   // longer exists gets dropped, so the decals follow a validated selection.
   RefreshSelectionDecals();
+
+  // Pathfinding debug overlay (off unless toggled in the Gameplay Debug panel);
+  // rides the terrain height.
+  nav_debug_.Rebuild(sim_, scene_context_,
+                     [this](float x, float z) { return GroundAt(x, z); });
 }
 
 uint32_t GameView::SnapshotBuildings() {
@@ -866,6 +1152,11 @@ void GameView::RefreshHud() {
   // Update() runs this before DrawUI() the same frame, so DrawUI reuses these
   // rows + the cached scalars below instead of re-reading them from the sim.
   hud_building_total_ = SnapshotBuildings();
+
+  // Drain this frame's sim events (both snapshots are now current): appends
+  // combat-log lines and spawns floating damage numbers. Runs before the early
+  // return below so the event buffer drains even without a UI context.
+  PumpGameEvents();
 
   const WorldState world = sim_.World();
   roster_cap_ = world.guild_roster_cap;
@@ -970,7 +1261,7 @@ void GameView::RefreshHud() {
         ++total;
         if (out.entries.size() < kListCap) {
           out.entries.emplace_back(
-              unit_title(c), value(c),
+              character_display_name(c, /*concrete=*/false), value(c),
               AddSelectTarget(HudSelectTarget::Kind::Hero, c.id));
         }
       }
@@ -1022,7 +1313,7 @@ void GameView::RefreshHud() {
     HudSelection s;
     s.kind = HudSelection::Kind::Hero;
     s.id = hero->id;
-    s.title = unit_title(*hero);
+    s.title = character_display_name(*hero, /*concrete=*/false);
     s.rows.emplace_back("id", "#" + std::to_string(hero->id));
     {
       // Class: derived from the home guild (heroes carry no class field), else
@@ -1055,10 +1346,32 @@ void GameView::RefreshHud() {
     model.selection = std::move(s);
   }
 
+  // Combat log: window the ring buffer to what fits the bottom panel, honouring
+  // the scroll offset (0 = following the newest lines at the bottom). Same
+  // capacity math the panel lays out with, so they never disagree.
+  {
+    const uint32_t cap = HudCombatLogCapacity();
+    const int total = static_cast<int>(combat_log_lines_.size());
+    const int max_scroll = std::max(0, total - static_cast<int>(cap));
+    combat_log_scroll_ = std::clamp(combat_log_scroll_, 0, max_scroll);
+    const int end = total - combat_log_scroll_;
+    const int begin = std::max(0, end - static_cast<int>(cap));
+    for (int i = begin; i < end; ++i) {
+      model.combat_log.push_back(combat_log_lines_[static_cast<size_t>(i)]);
+    }
+  }
+
   BuildHud(ui_->context(), model, ui_viewport_w_, ui_viewport_h_, ui_scale_,
            hud_frame_);
-  ui_->SetQuads(hud_frame_.quads.data(),
-                static_cast<uint32_t>(hud_frame_.quads.size()));
+
+  // Floating world labels draw UNDER the HUD (the HUD/panel must stay on top),
+  // so concatenate the world-label quads FIRST, then the HUD quads, into one
+  // SetQuads (the UI pass paints in list order).
+  BuildFloatingLabels(floating_quads_);
+  ui_quads_.clear();
+  ui_quads_.insert(ui_quads_.end(), floating_quads_.begin(), floating_quads_.end());
+  ui_quads_.insert(ui_quads_.end(), hud_frame_.quads.begin(), hud_frame_.quads.end());
+  ui_->SetQuads(ui_quads_.data(), static_cast<uint32_t>(ui_quads_.size()));
 }
 
 void GameView::SeekToTimeOfDay(float t01) {
@@ -1102,10 +1415,14 @@ void GameView::DrawUI() {
     ImGui::Checkbox("Vision cones", &cone_pass_.mutable_enabled());
     ImGui::TextUnformatted(
         "translucent sector per unit, above terrain, along facing");
+
+    ImGui::Separator();
+    nav_debug_.DrawControls();
   }
 
   // --- Fog (self-contained collapsing section) ---
   EditorUI::DrawFogEditor(*scene_renderer_);
+  EditorUI::DrawColorGradingEditor(*scene_renderer_);
 
   // --- Debug views ---
   if (ImGui::CollapsingHeader("Debug Views")) {

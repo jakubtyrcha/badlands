@@ -8,11 +8,13 @@
 #include "sim_internal.hpp"
 
 #include "brain.h"
+#include "combat.h"
 #include "components.h"
 #include "entity_memory.h"  // update_entity_memory
 #include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
 #include "movement.h"
+#include "nav_world.h"
 #include "needs.h"
 #include "placement.h"
 #include "vision.h"
@@ -42,31 +44,33 @@ namespace badlands {
 
 namespace {
 
-// Combat pre-empt for the fighting archetypes: chase and swing at the nearest
-// enemy. Set a durable MoveTarget on it and swing when in range (the movement
-// pipeline walks the MoveTarget; the combat pass re-validates the attack
-// Intent authoritatively). Returns false (no MoveTarget touched) when there is
-// no enemy, so the caller falls through to that archetype's own brain --
-// shared by mock_think and the wasm hero-think dispatch below, so a
-// wasm-driven hero's combat behaviour is identical to a mock-driven one's.
-bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t /*slot*/) {
+// Combat pre-empt for the fighting archetypes: engage the nearest enemy. Set a
+// durable MoveTarget at the stance's engagement distance (a melee unit closes
+// to melee reach, a ranged unit holds at bow distance); the movement pipeline
+// walks it, and the Attack command resolves the hit authoritatively. Returns
+// false (no MoveTarget touched) when there is no enemy, so the caller falls
+// through to that archetype's own brain -- shared by mock_think and the wasm
+// hero-think dispatch below, so a wasm-driven hero's combat behaviour is
+// identical to a mock-driven one's.
+bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
-    entt::entity target = nearest_enemy(game, self);
+    entt::entity target = select_target(game, self);
     if (target == entt::null) {
         return false;
     }
-    const Stats& stats = reg.get<Stats>(self);
+    const Combatant& cb = reg.get<Combatant>(self);
+    const Attacks& atk = reg.get<Attacks>(self);
     MoveTarget& mt = reg.get<MoveTarget>(self);
     mt.kind = MoveTarget::Kind::Entity;
     mt.entity = target;
     mt.building = UINT32_MAX;
-    mt.stop_distance = stats.attack_range;
+    mt.stop_distance = engagement_range(cb, atk);
 
-    glm::vec2 self_pos = reg.get<Position>(self).pos;
-    glm::vec2 target_pos = reg.get<Position>(target).pos;
-    if (glm::distance(self_pos, target_pos) <= stats.attack_range &&
-        reg.get<CooldownTimer>(self).remaining <= 0.0f) {
-        reg.get<Intent>(self).kind = 2;  // swing (Intent was reset to idle this tick)
+    // If an attack is usable right now, emit an Attack command. Target UINT32_MAX
+    // => the handler re-picks the nearest enemy. Off-cooldown gating keeps this to
+    // ~one command per swing rather than one per tick.
+    if (select_attack(game, self, target) >= 0) {
+        game.command_queue.push_back({CommandKind::Attack, slot});
     }
     return true;
 }
@@ -115,11 +119,7 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
 
 // ---- extracted shared operations over Badlands& ----------------------------
 
-std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
-    return make_world(BrainDesc{.noiser_source = brain_script_source});
-}
-
-std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
+std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfig& config) {
     // One-time noiser runtime configuration. The profiling switch is
     // thread-local and defaults to ON, and upstream has no public API for it
     // yet (docs/noiser-feedback.md #3) — this is the only detail:: callsite.
@@ -141,6 +141,9 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
                   "gameplay grid must span the full map");
     static const MapData kSymbolicMap = SymbolicMapGenerator{}.Generate();
     game->map = kSymbolicMap;
+    game->terrain_blocking = config.terrain_blocking;
+    game->arena_half_x = config.arena_half_x;
+    game->arena_half_z = config.arena_half_z;
     if (desc.noiser_source != nullptr) {
         std::string error;
         game->brains = BrainRuntime::create(*game, desc.noiser_source, error);
@@ -155,16 +158,33 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
         // wasm_brain.cpp) and never returns null.
         game->wasm_brains = WasmBrainRuntime::create(desc.wasm_bytes, desc.wasm_len);
     }
-    // The colony starts with only the castle, prebuilt on the plains south of
-    // the central lake (the map origin is water). Not a player placement: it
-    // seeds no urban sprawl. This is the colony seat the game's town forms
-    // around; kCastleSpawn is the single source of truth for it.
-    place_building(
-        *game,
-        PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, kCastleSpawnX,
-                      kCastleSpawnZ},
-        /*player=*/false);
+    if (config.prebuild_colony) {
+        // The colony starts with only the castle, prebuilt on the plains south of
+        // the central lake (the map origin is water). Not a player placement: it
+        // seeds no urban sprawl. This is the colony seat the game's town forms
+        // around; kCastleSpawn is the single source of truth for it. The arena
+        // turns this off.
+        place_building(
+            *game,
+            PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, kCastleSpawnX,
+                          kCastleSpawnZ},
+            /*player=*/false);
+    }
     return game;
+}
+
+// Thin forwarders onto the (BrainDesc, WorldConfig) implementation above.
+std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
+    return make_world(desc, WorldConfig{});
+}
+
+std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source) {
+    return make_world(BrainDesc{.noiser_source = brain_script_source}, WorldConfig{});
+}
+
+std::unique_ptr<BadlandsGame> make_world(const char* brain_script_source,
+                                         const WorldConfig& config) {
+    return make_world(BrainDesc{.noiser_source = brain_script_source}, config);
 }
 
 std::unique_ptr<BadlandsGame> make_flat_world() {
@@ -183,8 +203,12 @@ void tick_world(BadlandsGame& g, float dt) {
     // Day/night clock: integer ms, fixed compile-time increment (deterministic).
     g.world_millis += kMillisPerTick;
 
-    for (auto [e, cooldown] : registry.view<CooldownTimer>().each()) {
-        cooldown.remaining = std::max(0.0f, cooldown.remaining - dt);
+    // Per-attack cooldowns tick down (one timer per attack-skill).
+    for (auto [e, attacks] : registry.view<Attacks>().each()) {
+        for (int i = 0; i < attacks.count && i < kMaxAttacks; ++i) {
+            attacks.cooldown_remaining[i] =
+                std::max(0.0f, attacks.cooldown_remaining[i] - dt);
+        }
     }
 
     // Needs first: reserves drain (and refill, for anyone inside) before
@@ -206,6 +230,15 @@ void tick_world(BadlandsGame& g, float dt) {
     // entity thinks and a just-accrued building is visible the same tick.
     advance_economy(g);
     run_spawners(g);
+
+    // Navmesh current BEFORE brains think: AI goal selection queries nav_cost
+    // (nav_world.h) over it. Gated on terrain_blocking (flat worlds stay
+    // obstacle-oblivious). A building the AI places this tick lands after think,
+    // so the pre-plan_paths rebuild below picks it up (one-tick lag for the
+    // placing brain, which is fine). Cheap no-op when the epoch is unchanged.
+    if (g.terrain_blocking) {
+        rebuild_navmesh_if_stale(g);
+    }
 
     // EntityMemory: refresh every character's bounded knowledge of who/what
     // it currently sees before anyone thinks, so a just-spawned entity's
@@ -273,6 +306,18 @@ void tick_world(BadlandsGame& g, float dt) {
         }
     }
 
+    // Rebuild the navmesh if a building was placed/destroyed this tick (bumps
+    // placement.nav_epoch). Cheap no-op when unchanged; the whole path/cost layer
+    // reads from it, so it must be current before plan_paths.
+    //
+    // Gated on terrain_blocking, which is the world's "does terrain/obstacles stop
+    // anyone" switch: with it off (make_flat_world, movement-mechanics tests that
+    // predate terrain) the navmesh is left unbuilt and movement falls back to
+    // obstacle-oblivious straight lines -- the documented flat-world contract.
+    if (g.terrain_blocking) {
+        rebuild_navmesh_if_stale(g);
+    }
+
     // Navmesh movement pipeline: plan/follow durable MoveTargets, maintain melee
     // locks, and resolve unit-unit collisions. All exclude hidden (inside) heroes.
     plan_paths(g, dt);
@@ -280,25 +325,12 @@ void tick_world(BadlandsGame& g, float dt) {
     update_melee_locks(g);
     separate_units(g);
 
-    // Combat: the engine is authoritative — an attack intent only lands when
-    // the nearest enemy is in range and the cooldown has elapsed.
-    for (auto [e, intent, pos, stats, cooldown] :
-         registry.view<const Intent, const Position, const Stats, CooldownTimer>(
-                     entt::exclude<InsideBuilding>)
-             .each()) {
-        if (intent.kind != 2 || cooldown.remaining > 0.0f) {
-            continue;
-        }
-        entt::entity target = nearest_enemy(g, e);
-        if (target == entt::null) {
-            continue;
-        }
-        float dist = glm::distance(pos.pos, registry.get<Position>(target).pos);
-        if (dist <= stats.attack_range * 1.05f) {
-            registry.get<Health>(target).hp -= stats.attack_damage;
-            cooldown.remaining = stats.attack_cooldown;
-        }
-    }
+    // Ranged shots in flight advance and resolve on arrival (melee already
+    // resolved in the Attack command during the think pass). A pure system rule:
+    // deterministic, runs identically live and on replay. Both damage sites
+    // (fire_attack + advance_projectiles) emit the same DamageDealt/HeroDowned
+    // events the old combat pass did.
+    advance_projectiles(g, dt);
 
     // Death.
     std::vector<entt::entity> dead;
@@ -322,6 +354,26 @@ uint32_t spawn_into(BadlandsGame& g, const CharacterDesc& desc) {
     // Plain (home-less) spawn; heroes::spawn_entity emplaces the full component
     // set shared with recruit.
     return spawn_entity(g, desc, -1);
+}
+
+uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::vec2 pos) {
+    const int i = static_cast<int>(id);
+    if (i < 0 || i >= kCreatureCount) {
+        return UINT32_MAX;
+    }
+    CharacterDesc desc = g.creatures.defs[i];
+    desc.pos_x = pos.x;
+    desc.pos_z = pos.y;
+    desc.team = team;
+    const uint32_t slot = spawn_entity(g, desc, -1);
+    // Hero creatures (ids 0..HERO_CLASS_COUNT-1 == HeroClassId) carry their class,
+    // which spawn_entity otherwise only derives from a home guild.
+    if (i < HERO_CLASS_COUNT) {
+        if (auto* hc = g.registry.try_get<HeroCharacter>(g.slots[slot])) {
+            hc->hero_class = static_cast<int32_t>(i);
+        }
+    }
+    return slot;
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {
@@ -489,56 +541,43 @@ SimStats stats_of(const BadlandsGame& g) {
 // BuildingDefOf / RenderBoxOf / buildings_of / world_of / probe_of own their
 // logic directly in placement.cpp now (no C-ABI forwarding).
 
+// The Stage-2 duelists now come straight from the creature catalog (the single
+// source of truth), with only position/team stamped on. Kept as named helpers
+// because the tests and the Rust app reference them by name.
 CharacterDesc MercenaryDesc(float pos_x, float pos_z) {
-    return CharacterDesc{
-        .pos_x = pos_x,
-        .pos_z = pos_z,
-        .team = 0,
-        .hp = 30.0f,
-        .move_speed = 2.5f,
-        .attack_range = 1.5f,
-        .attack_damage = 4.0f,
-        .attack_cooldown = 1.0f,
-        .size_x = 1.0f,
-        .size_y = 1.8f,
-        .size_z = 1.0f,
-        .color_r = 0.35f,
-        .color_g = 0.45f,
-        .color_b = 0.80f,
-        .vision_radius = 14.0f,
-        .vision_cone_half_angle_deg = 60.0f,
-    };
+    CharacterDesc d = DefaultCreatureCatalog().defs[static_cast<int>(CreatureId::Mercenary)];
+    d.pos_x = pos_x;
+    d.pos_z = pos_z;
+    d.team = 0;
+    return d;
 }
 
 CharacterDesc GoblinDesc(float pos_x, float pos_z) {
-    return CharacterDesc{
-        .archetype = Archetype::Monster,
-        .pos_x = pos_x,
-        .pos_z = pos_z,
-        .team = 1,
-        .hp = 18.0f,
-        .move_speed = 3.0f,
-        .attack_range = 1.2f,
-        .attack_damage = 2.0f,
-        .attack_cooldown = 0.8f,
-        .size_x = 0.8f,
-        .size_y = 1.2f,
-        .size_z = 0.8f,
-        .color_r = 0.30f,
-        .color_g = 0.75f,
-        .color_b = 0.35f,
-    };
+    CharacterDesc d = DefaultCreatureCatalog().defs[static_cast<int>(CreatureId::Goblin)];
+    d.pos_x = pos_x;
+    d.pos_z = pos_z;
+    d.team = 1;
+    return d;
 }
 
 // ---- Sim methods -----------------------------------------------------------
 
 Sim::Sim(const char* brain_script_source) : world_(make_world(brain_script_source)) {}
 Sim::Sim(const BrainDesc& brain_desc) : world_(make_world(brain_desc)) {}
+Sim::Sim(const WorldConfig& config, const char* brain_script_source)
+    : world_(make_world(brain_script_source, config)) {}
+Sim::Sim(const WorldConfig& config, const BrainDesc& brain_desc)
+    : world_(make_world(brain_desc, config)) {}
 Sim::~Sim() = default;
 Sim::Sim(Sim&&) noexcept = default;
 Sim& Sim::operator=(Sim&&) noexcept = default;
 
 uint32_t Sim::Spawn(const CharacterDesc& desc) { return spawn_into(*world_, desc); }
+uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z) {
+    return spawn_creature_into(*world_, id, team, {pos_x, pos_z});
+}
+void Sim::SetCreatureCatalog(const CreatureCatalog& catalog) { world_->creatures = catalog; }
+const CreatureCatalog& Sim::Creatures() const { return world_->creatures; }
 void Sim::Tick(float dt) {
     tick_world(*world_, dt);
     // Goal statistics are folded HERE, in the wrapper, from the very rows an
@@ -550,22 +589,34 @@ void Sim::Tick(float dt) {
 bool Sim::ReloadScript(const std::string& source) { return reload_script(*world_, source); }
 int64_t Sim::Dispatch(const Action& action) { return dispatch_into(*world_, action); }
 
-void Sim::SetPathfinder(const Pathfinder& pf) {
-    // Store the provider by value, then back-fill it with every alive building
-    // already placed (the prebuilt castle, and any placed before registration)
-    // so its obstacle set matches the world. A default-constructed Pathfinder
-    // (null add_obstacle) clears the provider without back-filling.
-    BadlandsGame& game = *world_;
-    game.pathfinder = pf;
-    if (game.pathfinder.add_obstacle == nullptr) {
-        return;
+std::vector<NavDebugCell> Sim::NavDebugCells() {
+    // Ensure a current mesh even in flat/obstacle-oblivious worlds (debug tool).
+    // Cheap no-op once built and epoch-current, so it is fine to call per frame.
+    rebuild_navmesh_if_stale(*world_);
+    std::vector<nav::NavMesh::DebugCell> cells;
+    world_->navmesh.DebugCells(cells);
+    std::vector<NavDebugCell> out;
+    out.reserve(cells.size());
+    for (const nav::NavMesh::DebugCell& c : cells) {
+        out.push_back({c.min_world.x, c.min_world.y, c.max_world.x, c.max_world.y, c.cost,
+                       c.passable});
     }
-    const auto& buildings = game.placement.buildings;
-    for (uint32_t id = 0; id < buildings.size(); ++id) {
-        if (buildings[id].alive) {
-            notify_obstacle_added(game, id);
-        }
+    return out;
+}
+
+NavPathResult Sim::NavQuery(float sx, float sz, float gx, float gz) {
+    rebuild_navmesh_if_stale(*world_);
+    const nav::NavMesh::PathResult r =
+        world_->navmesh.FindPath({sx, sz}, {gx, gz});
+    NavPathResult out;
+    out.cost = r.cost;
+    out.reachable = r.reachable;
+    out.waypoints_xz.reserve(r.waypoints.size() * 2);
+    for (const glm::vec2& w : r.waypoints) {
+        out.waypoints_xz.push_back(w.x);
+        out.waypoints_xz.push_back(w.y);
     }
+    return out;
 }
 
 void Sim::ConfigureVision(float world_min_x, float world_min_z, float world_size_x,
@@ -579,6 +630,21 @@ VisionLevel Sim::QueryVision(float cx, float cz, float radius) const {
     return query_vision(world_->vision, cx, cz, radius);
 }
 
+std::vector<ProjectileState> Sim::Projectiles() const {
+    std::vector<ProjectileState> rows;
+    const auto& reg = world_->registry;
+    for (auto [e, proj] : reg.view<const Projectile>().each()) {
+        glm::vec2 tp = proj.pos;
+        const entt::entity target =
+            entity_for_slot(*world_, static_cast<int32_t>(proj.target_slot));
+        if (target != entt::null && reg.all_of<Position>(target)) {
+            tp = reg.get<Position>(target).pos;
+        }
+        rows.push_back({proj.pos.x, proj.pos.y, tp.x, tp.y});
+    }
+    return rows;
+}
+
 std::vector<CharacterState> Sim::Characters() const { return characters_of(*world_); }
 void Sim::Characters(std::vector<CharacterState>& out) const { characters_of(*world_, out); }
 void Sim::Buildings(std::vector<BuildingState>& out) const { buildings_of(*world_, out); }
@@ -590,6 +656,11 @@ std::vector<BuildingState> Sim::Buildings() const {
 WorldState Sim::World() const { return world_of(*world_); }
 SimStats Sim::GetStats() const { return stats_of(*world_); }
 std::vector<CommandRecord> Sim::CommandLog() const { return command_log_of(*world_); }
+
+void Sim::DrainEvents(std::vector<GameEvent>& out) {
+    out.clear();
+    out.swap(world_->events);  // hand the batch out; the freed buffer refills next tick
+}
 void Sim::SetFactors(const SimFactors& f) { set_factors_of(*world_, f); }
 const SimFactors& Sim::Factors() const { return world_->factors; }
 int32_t Sim::BiomeAt(float x, float z) const { return biome_at_of(*world_, x, z); }

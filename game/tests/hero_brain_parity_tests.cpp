@@ -251,7 +251,11 @@ TEST_CASE("twin brain: wasm hero decisions match the C++ reference command-for-c
             a[i].param_a != static_cast<int32_t>(ActivityId::Idle)) {
             non_idle_activities.insert(a[i].param_a);
         }
-        saw_shoot_command = saw_shoot_command || (a[i].kind == CommandKind::Shoot);
+        // The hunt shot is a TARGETED Attack (target_id = prey slot); combat's
+        // untargeted re-pick form carries UINT32_MAX, and this fixture has no
+        // hostiles anyway, so this cleanly identifies the hunter's shot.
+        saw_shoot_command = saw_shoot_command ||
+                            (a[i].kind == CommandKind::Attack && a[i].target_id != UINT32_MAX);
         saw_chat_command = saw_chat_command || (a[i].kind == CommandKind::Chat);
     }
 

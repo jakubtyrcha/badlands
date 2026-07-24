@@ -1,6 +1,7 @@
 // Shared EditorUI helpers (Task S2.B4). See editor_ui.hpp.
 #include "engine/ui/editor_ui.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include <glm/glm.hpp>
@@ -169,6 +170,38 @@ void DrawFogEditor(SceneRenderer& renderer) {
   ImGui::Checkbox("Half-res", &cfg.half_res);
 }
 
+void DrawColorGradingEditor(SceneRenderer& renderer) {
+  if (!ImGui::CollapsingHeader("Color Grading")) {
+    return;
+  }
+  ColorGradingConfig& cfg = renderer.MutableColorGradingConfig();
+
+  ImGui::Checkbox("Enabled##grading", &cfg.enabled);
+
+  ImGui::SeparatorText("Black crush");
+  // Floor at 0.01: the shader divides by this threshold (it re-guards with
+  // max(t, 0.01), but keeping the slider in range means what you see is what
+  // runs).
+  ImGui::SliderFloat("Crush Threshold", &cfg.black_crush_threshold, 0.01f,
+                     0.5f, "%.3f");
+  ImGui::SliderFloat("Crush Strength", &cfg.black_crush_strength, 1.0f, 4.0f,
+                     "%.2f");
+
+  ImGui::SeparatorText("Midtone desaturation");
+  ImGui::SliderFloat("Midtone Start", &cfg.midtone_luminance_start, 0.0f,
+                     1.0f, "%.2f");
+  ImGui::SliderFloat("Midtone End", &cfg.midtone_luminance_end, 0.0f, 1.0f,
+                     "%.2f");
+  // Keep the band ordered — a crossed band isn't unsafe in the shader, it
+  // just silently masks nothing, which reads as a broken slider.
+  cfg.midtone_luminance_end =
+      std::max(cfg.midtone_luminance_end, cfg.midtone_luminance_start);
+  ImGui::SliderFloat("Desat Strength", &cfg.midtone_desat_strength, 0.0f,
+                     1.0f, "%.2f");
+  ImGui::SliderFloat("Saturation Guard", &cfg.saturation_preservation_mask,
+                     0.01f, 0.5f, "%.3f");
+}
+
 bool DrawSimClockControls(SimClock& clock) {
   // Speed (0 = paused, 1/2/4x). Drives the day/night cycle (and, in the game, the
   // sim tick) via the shared clock.
@@ -220,7 +253,8 @@ bool DrawDebugPanel(LightEnvironment& env, SceneRenderer& renderer,
   if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
     changed = DrawLightEnvironmentEditor(env);
   }
-  DrawFogEditor(renderer);  // self-contained collapsing section
+  DrawFogEditor(renderer);           // self-contained collapsing section
+  DrawColorGradingEditor(renderer);  // self-contained collapsing section
   if (ImGui::CollapsingHeader("Debug Views")) {
     DrawGBufferDebugSelector(renderer);
     ImGui::Separator();

@@ -1,5 +1,6 @@
 #include "command.h"
 
+#include "combat.h"
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
@@ -92,10 +93,11 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             return 0;
         }
         case CommandKind::Attack: {
-            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
-            if (e != entt::null) {
-                game.registry.get<Intent>(e) = {.kind = 2, .dir = {0.0f, 0.0f}};
-            }
+            // Resolve one attack against the commanded target (UINT32_MAX => the
+            // engine picks the nearest enemy). fire_attack is authoritative: it
+            // re-validates range/cooldown/lock and chooses the attack. Melee lands
+            // now; a ranged attack spawns a projectile that resolves on arrival.
+            fire_attack(game, cmd.actor, cmd.target_id);
             return 0;
         }
         case CommandKind::CollectTax: {
@@ -131,51 +133,30 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             return 0;
         }
         case CommandKind::AttackBuilding: {
-            // A monster swings at a building. Authoritative: re-check the target
-            // is alive and the swing is off cooldown (the brain gates on range +
-            // cooldown, but the handler is the single mutation point). At 0 hp
-            // the building is razed through the full cascade.
+            // A monster swings at a building with its primary (index-0) attack.
+            // Authoritative: re-check the target is alive and that attack is off
+            // cooldown (the brain gates too, but the handler is the single
+            // mutation point). At 0 hp the building is razed through the cascade.
             entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
             const uint32_t bid = cmd.target_id;
             if (e == entt::null || bid >= game.placement.buildings.size() ||
                 !game.placement.buildings[bid].alive) {
                 return 0;
             }
-            auto& cd = game.registry.get<CooldownTimer>(e);
-            if (cd.remaining > 0.0f) {
-                return 0;  // still recovering from the last swing
+            auto* attacks = game.registry.try_get<Attacks>(e);
+            if (attacks == nullptr || attacks->count == 0 ||
+                attacks->cooldown_remaining[0] > 0.0f) {
+                return 0;  // unarmed, or still recovering from the last swing
             }
-            const auto& stats = game.registry.get<Stats>(e);
             PlacedBuilding& b = game.placement.buildings[bid];
-            b.hp -= stats.attack_damage;
-            cd.remaining = stats.attack_cooldown;
+            const glm::vec2 bc = b.center;
+            const float dmg = attacks->defs[0].base_damage;
+            b.hp -= dmg;
+            attacks->cooldown_remaining[0] = attacks->defs[0].cooldown;
+            emit_building_hit(game, cmd.actor, bid, dmg, b.hp, bc);
             if (b.hp <= 0.0f) {
                 raze_building(game, bid);
             }
-            return 0;
-        }
-        case CommandKind::Shoot: {
-            // A hunter shoots a specific target (target_id = its slot) -- deer are
-            // neutral, so this bypasses the team-based combat pass. Authoritative:
-            // re-check both entities, range, and cooldown. The death pass reaps a
-            // target dropped to 0 hp.
-            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
-            entt::entity target = entity_for_slot(game, static_cast<int32_t>(cmd.target_id));
-            if (e == entt::null || target == entt::null) {
-                return 0;
-            }
-            auto& cd = game.registry.get<CooldownTimer>(e);
-            if (cd.remaining > 0.0f) {
-                return 0;
-            }
-            const auto& stats = game.registry.get<Stats>(e);
-            const glm::vec2 sp = game.registry.get<Position>(e).pos;
-            const glm::vec2 tp = game.registry.get<Position>(target).pos;
-            if (glm::distance(sp, tp) > stats.attack_range) {
-                return 0;  // out of range now
-            }
-            game.registry.get<Health>(target).hp -= stats.attack_damage;
-            cd.remaining = stats.attack_cooldown;
             return 0;
         }
         case CommandKind::Chat: {

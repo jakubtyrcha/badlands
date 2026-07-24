@@ -80,13 +80,11 @@ corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/assets/Cargo
                        PROFILE release)
 corrosion_set_env_vars(assets "RUSTFLAGS=-Cpanic=unwind")
 
-# nav: 2D visibility-graph path service (src/crates/nav), Rust staticlib,
-# behind the GamePathfinder C ABI. Game-layer pathfinding — unused in Stage 1
-# (link-only here; wired up by the C++ game layer in Stage 2). No dependency
-# of this crate shares its own name, so no Corrosion package-ambiguity
-# workaround is needed (as with assets, unlike wesl_ffi).
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/nav/Cargo.toml)
-corrosion_set_env_vars(nav "RUSTFLAGS=-Cpanic=unwind")
+# NOTE: the Rust `nav` crate (src/crates/nav, a visibility-graph path service)
+# has been RETIRED. Pathfinding is now a C++ weighted quadtree navmesh
+# (game/src/navmesh + game/src/nav_world.cpp) that also handles weighted terrain,
+# which a visibility graph cannot express. The crate source is left dormant in
+# the tree (deletable) but is no longer imported or linked.
 
 # brainhost: wasmtime embedding (src/crates/brainhost) behind a narrow C ABI
 # for loading/ticking game-AI "brain" wasm modules — see
@@ -176,6 +174,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/gpu_timer.cpp
     src/engine/rendering/volumetric_fog.cpp
     src/engine/rendering/fog_simulation.cpp
+    src/engine/rendering/color_grading.cpp
     src/engine/rendering/scene_renderer.cpp
     src/engine/rendering/texture_loader.cpp
     src/engine/rendering/material_library.cpp
@@ -216,7 +215,16 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets nav ui nlohmann_json::nlohmann_json)
+target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json)
+if(APPLE)
+    # CAMetalLayer color-space tagging (Display-P3 / EDR): the pinned Dawn
+    # rejects wgpu::SurfaceColorManagement, so GpuContext sets the layer
+    # properties directly — see src/engine/rendering/metal_layer_color.mm.
+    target_sources(badlands_engine PRIVATE src/engine/rendering/metal_layer_color.mm)
+    # QuartzCore: CAMetalLayer; CoreGraphics: the kCGColorSpace* name constants.
+    target_link_libraries(badlands_engine PUBLIC
+        "-framework QuartzCore" "-framework CoreGraphics")
+endif()
 # WebGPU/Dawn expects clip-space NDC z in [0,1] (D3D/Metal/Vulkan convention),
 # but GLM defaults to OpenGL's [-1,1] NDC z unless told otherwise. Without
 # this, glm::perspective() maps the near plane to NDC z=2.0 (outside the
@@ -239,7 +247,6 @@ target_include_directories(badlands_engine PUBLIC
     ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
     ${CMAKE_SOURCE_DIR}/src/crates/wesl/include
     ${CMAKE_SOURCE_DIR}/src/crates/assets/include
-    ${CMAKE_SOURCE_DIR}/src/crates/nav/include
     ${CMAKE_SOURCE_DIR}/src/crates/ui/include
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
@@ -260,7 +267,9 @@ add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/sim.cpp
     game/src/brain.cpp
+    game/src/combat.cpp
     game/src/command.cpp
+    game/src/creature_catalog.cpp
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
@@ -299,6 +308,13 @@ add_library(badlands_game_lib STATIC
     # (pure CPU: the mapgen Biome enum + glm, no engine/GPU deps).
     src/game/map/map_data.cpp
     src/game/map/symbolic_map_generator.cpp
+    # Nav core: adaptive quadtree navmesh + HPA* pathfinding (pure CPU over the
+    # injected NavSource; glm only, no engine/GPU/EnTT deps).
+    game/src/navmesh/quadtree.cpp
+    game/src/navmesh/graph.cpp
+    game/src/navmesh/navmesh.cpp
+    # Sim<->nav bridge: SimNavSource adapter + biome cost policy + rebuild.
+    game/src/nav_world.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
 # noiser_common.h intentionally ships [[deprecated]] shims.
@@ -328,17 +344,10 @@ target_include_directories(badlands_game_lib PRIVATE
 target_link_libraries(badlands_game_lib PUBLIC noiser_bundle brainhost)
 
 # Three thin executables, each with its own main, all linking badlands_engine
-# and badlands_game_lib. Stage 2 grows each one's own real AppView --
-# badlands_viewer got its real AppView (ModelViewerView) in Task S2.E,
-# badlands_game got its (GameView) in Task S2.F, badlands_ai_sandbox got its
-# (AiSandboxView) in Task S2.G.
-# building_scene.cpp (S2.F): ModelViewerView now reuses AddBuildingToScene for
-# its building prefabs (S2-reviewfix C6), so the viewer executable compiles it
-# too (its own copy; also compiled into badlands_game below).
+# and badlands_game_lib. Each app grows its own real AppView.
 set(badlands_app_sources_viewer
-    src/viewer/main_viewer.cpp
-    src/viewer/model_viewer_view.cpp
-    src/game/scene/building_scene.cpp)
+    src/executables/viewer/main_viewer.cpp
+    src/executables/viewer/model_viewer_view.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
@@ -346,15 +355,17 @@ set(badlands_app_sources_viewer
 # GameBuildingKind/building_visual), which the final executable link already
 # provides transitively.
 set(badlands_app_sources_game
-    src/game/main_game.cpp
-    src/game/views/game_view.cpp
+    src/executables/game/main_game.cpp
+    src/executables/game/game_view.cpp
     # Visual entity-component layer (SceneComposer) + terrain geometry + the
     # symbolic-map building/biome plumbing, now that the game renders the
     # symbolic map's terrain/water/buildings through the composer.
     src/game/visual/scene_composer.cpp
     src/game/visual/vision_overlay_pass.cpp
     src/game/visual/cone_overlay_pass.cpp
+    src/game/visual/nav_debug_overlay.cpp
     src/game/visual/selection_decals.cpp
+    src/game/visual/world_labels.cpp
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
@@ -368,9 +379,12 @@ set(badlands_app_sources_game
 # capsules, deferred + GameCameraController). Compiled directly into the
 # executable, same rationale as badlands_app_sources_game above.
 set(badlands_app_sources_ai_sandbox
-    src/ai_sandbox/main_ai_sandbox.cpp
-    src/ai_sandbox/ai_sandbox_view.cpp
-    src/game/factors_manifest.cpp)  # behaviour tuning loaded as data
+    src/executables/ai_sandbox/main_ai_sandbox.cpp
+    src/executables/ai_sandbox/ai_sandbox_view.cpp
+    src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
+    src/game/factors_manifest.cpp   # behaviour tuning loaded as data
+    src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
+    src/game/scenario.cpp)          # sandbox scenarios loaded as data
 
 foreach(app viewer game ai_sandbox)
     add_executable(badlands_${app} ${badlands_app_sources_${app}})
@@ -409,7 +423,7 @@ target_compile_options(badlands_mapgen_lib PRIVATE -Wno-deprecated-declarations)
 # grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
 # window. Scripts are functions of world meters, so a patch is a literal crop of the
 # world (see scripts/mapgen/biomes/README.md).
-add_executable(badlands_patchgen src/mapgen/main_patchgen.cpp)
+add_executable(badlands_patchgen src/executables/patchgen/main_patchgen.cpp)
 target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib)
 target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
@@ -422,8 +436,8 @@ endif()
 # map as indexed kTerrainBlend chunks with the biome-blend material, with a
 # mouse-hover block/section grid.
 add_executable(badlands_mapview
-    src/mapview/main_mapview.cpp
-    src/mapview/map_view_view.cpp
+    src/executables/mapview/main_mapview.cpp
+    src/executables/mapview/map_view_view.cpp
     src/mapview/biome_manifest.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/terrain_clusters.cpp
@@ -562,6 +576,7 @@ endif()
 # see tests/cpp_tests.rs on the legacy Rust reference branch).
 enable_testing()
 add_executable(badlands_game_tests
+    game/tests/combat_tests.cpp
     game/tests/sim_tests.cpp
     game/tests/noiser_smoke_tests.cpp
     game/tests/duel_test.cpp
@@ -589,13 +604,15 @@ add_executable(badlands_game_tests
     # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
     # sim needed.
     game/tests/brain_abi_tests.cpp
-    # Task 4 (wasm-brain feature): the wasm hero brain wired into the sim --
-    # see game/src/wasm_brain.h.
+    # The wasm hero brain wired into the sim -- see game/src/wasm_brain.h.
     game/tests/wasm_brain_tests.cpp
-    # Task 5: the ported hero decision layer (scripts/brains/nim/hero.nim) --
+    # The ported hero decision layer (scripts/brains/nim/hero.nim) --
     # twin-brain parity against the C++ reference (town_brain.cpp) + wasm-side
     # behavioural smokes.
     game/tests/hero_brain_parity_tests.cpp
+    game/tests/events_tests.cpp
+    game/tests/navmesh_tests.cpp
+    game/tests/nav_world_tests.cpp
     # Game UI: world picking + HUD hit-testing. Pure CPU -- the HUD build goes
     # through the `ui` Rust crate (layout + font), never the GPU, so it runs
     # here rather than needing a device.
@@ -607,6 +624,11 @@ add_executable(badlands_game_tests
     # primitive, so it needs no GPU and no engine link.
     game/tests/selection_decals_tests.cpp
     src/game/visual/selection_decals.cpp
+    # Floating world labels: screen projection + dampened depth scale + the
+    # generic timed-label pool. Pure CPU math over glm (+ header-only Camera),
+    # so it runs here without a device -- same rationale as the decals above.
+    game/tests/world_labels_tests.cpp
+    src/game/visual/world_labels.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
@@ -661,6 +683,22 @@ if(APPLE)
     target_link_options(badlands_decal_math_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_decal_math_tests COMMAND badlands_decal_math_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_checker_texture_tests: Catch2 suite for the pure RGBA8 checkerboard
+# fill (engine/rendering/checker_texture.hpp) — the GPU-free core of
+# MaterialLibrary::CheckerAlbedo. Pure CPU, modeled on badlands_decal_math_tests.
+add_executable(badlands_checker_texture_tests
+    src/engine/tests/checker_texture_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_checker_texture_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_checker_texture_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_checker_texture_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_checker_texture_tests COMMAND badlands_checker_texture_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_daylight_tests: Catch2 suite for the day/night system — the pure-CPU
 # Hosek-Wilkie RGB port (golden values vs the reference), the ComputeDaylight
@@ -896,6 +934,24 @@ if(APPLE)
 endif()
 add_test(NAME badlands_decal_tests COMMAND badlands_decal_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_resolve_composite_tests: GPU test for the resolve pass's UI-overlay
+# composite (tonemapping.wesl + SceneContext::ui_overlay) — pins the
+# gamma-space blend and the P3/EDR paths against a CPU mirror. Same harness
+# shape as badlands_decal_tests (R32Float readback; needs a GPU + shaders/).
+add_executable(badlands_resolve_composite_tests
+    src/engine/tests/resolve_composite_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_resolve_composite_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_resolve_composite_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_resolve_composite_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_resolve_composite_tests COMMAND badlands_resolve_composite_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
 # — the SampleHeight/RaycastTerrain queries behind mouse picking. No GPU: only
 # glm + the header-only mapgen Field2D/Biome types and the header-only Ray struct.
@@ -1022,6 +1078,27 @@ target_include_directories(badlands_factors_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_factors_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_factors_manifest_tests COMMAND badlands_factors_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_scenario_tests: the app-layer sandbox loaders (arena scenarios +
+# creature-stat overrides -> sim data). Lean, like factors_manifest_tests:
+# creature_catalog.cpp depends on badlands_sim.hpp alone, so no full-sim link.
+add_executable(badlands_scenario_tests
+    src/game/tests/scenario_tests.cpp
+    src/game/scenario.cpp
+    src/game/creature_manifest.cpp
+    game/src/creature_catalog.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_scenario_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_scenario_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_scenario_tests COMMAND badlands_scenario_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
 # (src/engine/core/ray) and the fixed-angle GameCameraController's zoom that

@@ -14,6 +14,7 @@
 // CommandLog) -- the view never reaches into the sim's registry.
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <dawn/webgpu_cpp.h>
@@ -25,12 +26,15 @@
 #include "engine/app/game_camera_controller.hpp"
 #include "engine/app/sim_clock.hpp"
 #include "engine/core/camera.hpp"
+#include "engine/core/ray.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "game/arena.h"
+#include "game/scenario.h"
+#include "game/visual/nav_debug_overlay.hpp"
 
 namespace badlands {
 
@@ -68,6 +72,8 @@ class AiSandboxView : public AppView {
   void BuildScene();
   void AddWalls();
   void AddBuildings();
+  // Per-frame: draw a thin box "tracer" for each in-flight projectile.
+  void SyncProjectiles();
   // Per-frame: reads the game_state snapshot and moves/hides the capsule pool.
   // Heroes inside a building are hidden (scaled to zero), matching the sim's
   // "don't draw; list in the panel" contract for inside_building_id >= 0.
@@ -75,6 +81,9 @@ class AiSandboxView : public AppView {
   // The inspector: sim clock, per-hero needs/behaviour, noiser bug count, and
   // the tail of the command log.
   void DrawInspector();
+  // A left-click ground pick (flat arena plane, y = 0) while the nav overlay's
+  // pick mode is on: raycasts to the ground and hands the point to nav_debug_.
+  void HandleNavPick(const SDL_Event& event);
   // Centers the game camera on the arena origin and picks a height (at
   // GameCameraController's fixed pitch) so the whole arena -- including the
   // wall ring -- stays inside the frustum. The framing is aspect-independent
@@ -99,6 +108,11 @@ class AiSandboxView : public AppView {
 
   Arena arena_;
 
+  // The loaded scenario (a walled arena + creatures, or empty => the town seed).
+  Scenario scenario_;
+  bool scenario_is_arena_ = false;
+  bool scenario_load_error_ = false;  // a requested scenario failed to parse
+
   // Owns the sim (RAII; no manual destroy). Seeded in SeedTown.
   badlands::Sim sim_{nullptr};
 
@@ -113,15 +127,25 @@ class AiSandboxView : public AppView {
   std::vector<badlands::BuildingState> building_rows_;
   std::vector<badlands::CommandRecord> cmd_rows_;
   uint32_t command_log_total_ = 0;
+  // Drained each tick and discarded: this view has no combat log, but the sim's
+  // transient event stream must still be emptied or it grows without bound.
+  std::vector<badlands::GameEvent> events_scratch_;
 
   // Fixed pool of hero capsule nodes; index == game_state row index.
   std::vector<NodeHandle> capsule_nodes_;
+  // Per-frame projectile tracer nodes (rebuilt each frame; usually few).
+  std::vector<NodeHandle> projectile_nodes_;
+  std::vector<badlands::ProjectileState> projectile_rows_;
 
   SceneGraph scene_;
   entt::registry registry_;
   SceneContext scene_context_;
   Camera camera_;
   GameCameraController gamecam_;
+
+  // Pathfinding debug overlay (shared with the game view). Flat arena ground
+  // (y = 0); picks come from HandleNavPick's ground-plane raycast.
+  NavDebugOverlay nav_debug_;
 
   float dt_ = 0.0f;
 };

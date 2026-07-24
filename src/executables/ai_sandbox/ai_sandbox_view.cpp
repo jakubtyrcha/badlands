@@ -1,4 +1,4 @@
-#include "ai_sandbox/ai_sandbox_view.hpp"
+#include "executables/ai_sandbox/ai_sandbox_view.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -10,6 +10,7 @@
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
@@ -22,7 +23,9 @@
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
 #include "game/building_catalog.h"
+#include "game/creature_manifest.h"
 #include "game/factors_manifest.hpp"
+#include "game/scenario.h"
 #include "game/scene/blockout_materials.hpp"
 #include "mapgen/biomes.hpp"
 
@@ -126,7 +129,6 @@ const char* command_name(badlands::CommandKindId kind) {
     case badlands::CommandKindId::CollectTax: return "CollectTax";
     case badlands::CommandKindId::Deposit: return "Deposit";
     case badlands::CommandKindId::AttackBuilding: return "AttackBuilding";
-    case badlands::CommandKindId::Shoot: return "Shoot";
     case badlands::CommandKindId::Chat: return "Chat";
     default: return "?";
   }
@@ -206,8 +208,7 @@ bool AiSandboxView::Initialize(const RenderContext& ctx) {
 
   ApplyEnvironment();
 
-  arena_ = build_arena(kSandboxArena);
-  SeedTown();
+  SeedTown();  // loads the scenario, sizes arena_, creates + seeds the sim
   BuildScene();
 
   // No volumetric fog over the greybox arena (it hazes the far edges). The
@@ -238,13 +239,12 @@ void AiSandboxView::ApplyEnvironment() {
 void AiSandboxView::SeedTown() {
   badlands::BrainDesc brain_desc{};
 
-  // brain_script/wasm's backing storage only needs to outlive the
-  // Sim(brain_desc) construction below: BrainRuntime::create copies the
-  // noiser source into the compiled program, and bh_load compiles the wasm
-  // module synchronously and keeps no reference to the input bytes (see
-  // brainhost's bh_load -- wasmtime::Module::new copies/compiles eagerly) --
-  // so both are declared at this scope, alongside the single Sim() call that
-  // consumes whichever one applies.
+  // brain_script/wasm's backing storage only needs to outlive the Sim()
+  // construction below: BrainRuntime::create copies the noiser source into
+  // the compiled program, and bh_load compiles the wasm module synchronously
+  // and keeps no reference to the input bytes (see brainhost's bh_load --
+  // wasmtime::Module::new copies/compiles eagerly) -- so both are declared at
+  // this scope, alongside the Sim() calls that consume whichever one applies.
   const std::string brain_script = load_brain_script();
   std::vector<uint8_t> wasm;
   if (!brain_script.empty()) {
@@ -262,6 +262,43 @@ void AiSandboxView::SeedTown() {
                    wasm.size());
     }
   }
+
+  // Load the scenario (default: a walled arena duel; override via BADLANDS_SCENARIO).
+  const char* scen_env = std::getenv("BADLANDS_SCENARIO");
+  const std::string scen_path =
+      scen_env ? scen_env : "assets/scenarios/arena_duel.json";
+  scenario_ = badlands::Scenario{};
+  const bool loaded = badlands::LoadScenario(scen_path, scenario_);
+  scenario_load_error_ = !loaded;
+  if (!loaded) {
+    // Loudly, not silently: a mistyped creature name or bad JSON otherwise drops
+    // the user into the demo town with no idea their scenario was rejected.
+    spdlog::error(
+        "AiSandboxView: scenario '{}' failed to load -- falling back to the town seed",
+        scen_path);
+  }
+  scenario_is_arena_ = loaded && scenario_.is_arena();
+
+  if (scenario_is_arena_) {
+    // Greybox arena sized to the scenario's interior (accessible tiles = 2*half).
+    arena_ = build_arena(glm::ivec2(static_cast<int>(scenario_.arena_half_x * 2.0f),
+                                    static_cast<int>(scenario_.arena_half_z * 2.0f)));
+    sim_ = badlands::Sim(scenario_.world_config(), brain_desc);
+    // Creature-stat overrides (optional file; a missing one keeps the defaults).
+    badlands::CreatureCatalog catalog = sim_.Creatures();
+    if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
+      sim_.SetCreatureCatalog(catalog);
+    }
+    for (const badlands::ScenarioSpawn& s : scenario_.spawns) {
+      sim_.SpawnCreature(s.creature, s.team, s.x, s.z);
+    }
+    building_rows_.resize(kMaxBuildingRows);
+    cmd_rows_.resize(kMaxCommandRows);
+    return;
+  }
+
+  // --- fallback: the original town seed -----------------------------------
+  arena_ = build_arena(kSandboxArena);
   sim_ = badlands::Sim(brain_desc);
 
   // Behaviour tuning as data: load over the compiled defaults (a missing file
@@ -442,6 +479,46 @@ void AiSandboxView::SyncUnits() {
   command_log_total_ = static_cast<uint32_t>(cmd_rows_.size());
 }
 
+void AiSandboxView::SyncProjectiles() {
+  // Debug-line tracers: a thin yellow box per in-flight shot. Pooled and updated
+  // IN PLACE -- the geometry never changes shape, only its transform, so a fixed
+  // set of reusable nodes avoids the per-frame mesh upload + node churn. Grow the
+  // pool on demand; park unused entries at zero scale rather than destroying them.
+  projectile_rows_ = sim_.Projectiles();
+  const DeferredMaterial mat =
+      matlib_.SolidColor(glm::vec3(1.0f, 0.9f, 0.3f), blockout::kCapsuleRoughness);
+  while (projectile_nodes_.size() < projectile_rows_.size()) {
+    auto box = GenerateCube(glm::vec3(0.06f, 0.06f, 0.5f));  // unit-length base tracer
+    const std::string name = "proj_" + std::to_string(projectile_nodes_.size());
+    projectile_nodes_.push_back(
+        AddMeshEntity(scene_, name.c_str(), std::move(box), mat, glm::mat4(1.0f)));
+  }
+  for (size_t i = 0; i < projectile_nodes_.size(); ++i) {
+    if (i >= projectile_rows_.size()) {
+      scene_.SetScale(projectile_nodes_[i], glm::vec3(0.0f));  // park the unused
+      continue;
+    }
+    const badlands::ProjectileState& p = projectile_rows_[i];
+    const glm::vec2 from{p.x, p.z};
+    const glm::vec2 to{p.target_x, p.target_z};
+    const glm::vec2 d = to - from;
+    const float len = glm::length(d);
+    if (len < 1e-3f) {
+      scene_.SetScale(projectile_nodes_[i], glm::vec3(0.0f));
+      continue;
+    }
+    const glm::vec2 dir = d / len;
+    const float half_seg = 0.5f * std::min(len, 0.8f);  // a short tracer, not the whole path
+    const glm::vec2 mid = from + dir * half_seg;
+    const float yaw = std::atan2(dir.x, dir.y);  // XZ heading
+    scene_.SetLocalTransform(
+        projectile_nodes_[i],
+        Trs{.position = glm::vec3(mid.x, 0.6f, mid.y),
+            .rotation = glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f)),
+            .scale = glm::vec3(1.0f, 1.0f, half_seg / 0.5f)});
+  }
+}
+
 void AiSandboxView::FrameCamera() {
   gamecam_.focus = glm::vec3(0.0f);
   gamecam_.pitch_deg = 55.0f;
@@ -470,6 +547,13 @@ void AiSandboxView::FrameCamera() {
 
 void AiSandboxView::HandleEvent(const SDL_Event& event, int /*width*/,
                                 int /*height*/) {
+  // Nav debug: a left click in pick mode drops a path endpoint on the ground.
+  if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+      event.button.button == SDL_BUTTON_LEFT) {
+    HandleNavPick(event);
+    return;
+  }
+
   // Fixed-angle camera: only zoom is mouse-driven (wheel + trackpad, which SDL
   // reports as the same event with fractional deltas). Key panning is read
   // directly from Update()'s keyboard_state snapshot instead of per-event.
@@ -496,8 +580,12 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
     sim_.Tick(static_cast<float>(kTickDt));
     ++sim_ticks_done_;
   }
+  // Empty the sim's transient event stream (this view does not render a combat
+  // log; without draining, game.events would grow unbounded during combat).
+  sim_.DrainEvents(events_scratch_);
 
   SyncUnits();
+  SyncProjectiles();
 
   // ImGui context guard: Update() runs even in --screenshot mode, where no
   // ImGui context exists (SdlViewerApp only calls InitImGui() for the
@@ -514,6 +602,11 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
 
   gamecam_.UpdateCamera(camera_);
   scene_.SyncToRegistry(registry_, scene_context_);
+
+  // Nav overlay last: it owns scene_context_.debug_lines (SyncToRegistry does
+  // not touch that field), so setting it here survives to the render pass. The
+  // arena floor is flat at y = 0.
+  nav_debug_.Rebuild(sim_, scene_context_, [](float, float) { return 0.0f; });
 }
 
 void AiSandboxView::DrawUI() {
@@ -529,7 +622,23 @@ void AiSandboxView::DrawUI() {
   }
 
   DrawInspector();
+  ImGui::Begin("Nav (debug)");
+  nav_debug_.DrawControls();
+  ImGui::End();
 }
+
+void AiSandboxView::HandleNavPick(const SDL_Event& event) {
+  if (!nav_debug_.pick_mode()) return;
+  if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse) return;
+  glm::vec2 screen;
+  if (!EventWindowLogicalSize(event.button.windowID, screen)) return;
+  const Ray ray = ScreenPointToRay(
+      camera_, glm::vec2(event.button.x, event.button.y), screen);
+  glm::vec3 hit;
+  if (!IntersectGroundPlane(ray, 0.0f, hit)) return;  // cursor on/above the horizon
+  nav_debug_.Pick(glm::vec2(hit.x, hit.z));  // flat arena ground (y = 0)
+}
+
 
 void AiSandboxView::DrawInspector() {
   ImGui::Begin("Sim");
@@ -556,9 +665,29 @@ void AiSandboxView::DrawInspector() {
   if (ImGui::SmallButton("1x")) sim_clock_.speed = 1.0f;
   ImGui::Text("noiser bugs: %u   script intents: %llu", stats.noiser_bugs,
               static_cast<unsigned long long>(stats.script_intents));
+  if (scenario_load_error_) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                       "scenario failed to load -- showing the town seed (see log)");
+  }
+
+  char_rows_ = sim_.Characters();
+
+  // --- arena: who is winning -------------------------------------------
+  // Neutrality is by archetype (Critter), not a hardcoded team, so a scenario may
+  // put fighters on any team. tally_arena is unit-tested (scenario_tests.cpp).
+  if (scenario_is_arena_) {
+    ImGui::SeparatorText("Arena");
+    const badlands::ArenaTally tally = badlands::tally_arena(char_rows_);
+    for (const auto& [team, count] : tally.teams) {
+      ImGui::Text("team %d: %d alive", team, count);
+    }
+    if (tally.teams.size() <= 1) {
+      ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                         tally.winner >= 0 ? "Team %d wins!" : "no combatants", tally.winner);
+    }
+  }
 
   // --- heroes ----------------------------------------------------------
-  char_rows_ = sim_.Characters();
   ImGui::SeparatorText("Entities");
   const uint32_t count =
       std::min(static_cast<uint32_t>(char_rows_.size()), kMaxCharacterRows);

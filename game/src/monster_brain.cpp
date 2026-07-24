@@ -66,8 +66,10 @@ void monster_think(BadlandsGame& game, uint32_t slot) {
     // is logged/replayable). Gated on arrival + cooldown, so the log gets one
     // entry per actual hit, not one per tick of the approach.
     const auto& stats = game.registry.get<Stats>(e);
+    const auto& attacks = game.registry.get<Attacks>(e);
     const bool at_door = glm::distance(pos, door) <= stats.attack_range + kEntranceRadius;
-    if (at_door && game.registry.get<CooldownTimer>(e).remaining <= 0.0f) {
+    const bool ready = attacks.count > 0 && attacks.cooldown_remaining[0] <= 0.0f;
+    if (at_door && ready) {
         game.command_queue.push_back({CommandKind::AttackBuilding, slot, bid});
     }
 }

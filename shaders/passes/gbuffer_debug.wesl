@@ -12,6 +12,7 @@
 // one pass covers the whole debug selector).
 import package::common::frame::{frame, getFullscreenTriangleVertex, reconstructLinearZ, decodeOctahedron};
 import package::common::color::linear_to_srgb;
+import package::common::ui_composite::{loadUiOverlay, compositeUiOverEncoded};
 
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
@@ -20,6 +21,7 @@ import package::common::color::linear_to_srgb;
 @group(0) @binding(5) var hdr_texture: texture_2d<f32>;       // lit HDR accumulation
 @group(0) @binding(6) var<uniform> debug_mode: u32;           // 1=Depth 2=Normals 3=Albedo 4=Roughness 5=Hdr 6=Ao
 @group(0) @binding(7) var ao_texture: texture_2d<f32>;        // GTAO screen-space AO (R8)
+@group(0) @binding(8) var ui_overlay: texture_2d<f32>;        // premultiplied encoded UI (1x1 transparent when absent)
 
 struct VertexOutput {
     @builtin(position) Position: vec4<f32>,
@@ -33,10 +35,8 @@ fn vs_main(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
     return output;
 }
 
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let texCoord = vec2<i32>(input.Position.xy);
-
+// The selected channel's display color (the pre-overlay output).
+fn debugColor(texCoord: vec2<i32>) -> vec4<f32> {
     switch (debug_mode) {
         case 1u: {
             // Depth: linearize the reversed-Z buffer, then a log scale (the
@@ -85,4 +85,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     return vec4<f32>(0.0);
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let texCoord = vec2<i32>(input.Position.xy);
+    let color = debugColor(texCoord);
+    // Keep the UI visible over debug views (the debug-mode selector lives in
+    // it). Debug outputs are display-space values, so the encoded-space UI
+    // composite matches how the UI used to hardware-blend over them.
+    let ui = loadUiOverlay(ui_overlay, texCoord);
+    return vec4<f32>(compositeUiOverEncoded(color.rgb, ui), color.a);
 }

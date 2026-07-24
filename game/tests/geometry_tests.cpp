@@ -9,6 +9,7 @@
 #include "badlands_sim.hpp"  // badlands::BuildingKind
 #include "core/roof_shape.hpp"
 #include "engine/rendering/geometry/building_parts_builder.hpp"
+#include "engine/rendering/geometry/cube_sphere.hpp"
 #include "engine/rendering/geometry/extrusion_mesh_builder.hpp"
 #include "engine/rendering/geometry/lake_surface_builder.hpp"
 #include "engine/rendering/geometry/primitive_mesh_builders.hpp"
@@ -118,6 +119,59 @@ TEST_CASE("GenerateCube: well-formed, 24 unique face-corners, sane bounds") {
 
   CHECK(result.local_bounds.min == glm::vec3(-1.0f, -2.0f, -3.0f));
   CHECK(result.local_bounds.max == glm::vec3(1.0f, 2.0f, 3.0f));
+}
+
+TEST_CASE("GenerateCubeSphereMesh: edge-aligned grid, faces meet, no stitching") {
+  const int res = 16;
+  auto s = GenerateCubeSphereMesh(res);
+
+  // 6 faces x res*res grid vertices (unchanged).
+  CHECK(s.positions.size() == static_cast<size_t>(6 * res * res));
+  CHECK(s.uvs.size() == s.positions.size());
+
+  // Per-face triangles ONLY: 6 faces x 2 x (res-1)^2. The old mesh added 12
+  // edge-stitching strips + 8 corner triangles to close the half-texel gap;
+  // an edge-aligned grid makes faces share the cube-edge line directly, so
+  // those hacks are gone.
+  CHECK(s.indices.size() ==
+        static_cast<size_t>(6 * 2 * (res - 1) * (res - 1) * 3));
+
+  // Grid reaches the cube-face edges: UVs span the full [0,1] (u,v hit exactly
+  // 0 and 1), so adjacent faces share the exact cube-edge line -- no
+  // half-texel gap, no UV-smearing stitch band. (The old texel-center grid
+  // inset every face to [0.5/res, 1-0.5/res].)
+  float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;
+  for (const auto& uv : s.uvs) {
+    umin = std::min(umin, uv.x);
+    umax = std::max(umax, uv.x);
+    vmin = std::min(vmin, uv.y);
+    vmax = std::max(vmax, uv.y);
+  }
+  CHECK(umin == Catch::Approx(0.0f).margin(1e-5));
+  CHECK(umax == Catch::Approx(1.0f).margin(1e-5));
+  CHECK(vmin == Catch::Approx(0.0f).margin(1e-5));
+  CHECK(vmax == Catch::Approx(1.0f).margin(1e-5));
+
+  // Every position sits on the unit sphere.
+  for (const auto& p : s.positions) {
+    CHECK(glm::length(p) == Catch::Approx(1.0f).margin(1e-4));
+  }
+
+  // Watertight-by-construction: adjacent faces' shared-edge (and 3-face corner)
+  // vertices coincide in position, so the distinct-position count is strictly
+  // less than the raw 6*res*res. With the old inset grid every boundary vertex
+  // was unique (faces held apart), so distinct == total there.
+  auto q = [](float f) { return static_cast<int>(std::lround(f * 4096.0f)); };
+  std::set<std::tuple<int, int, int>> distinct;
+  for (const auto& p : s.positions) distinct.insert({q(p.x), q(p.y), q(p.z)});
+  CHECK(distinct.size() < s.positions.size());
+}
+
+TEST_CASE("GenerateSphereTexturedMesh: well-formed winding, on unit sphere") {
+  auto result = GenerateSphereTexturedMesh(1.0f, 16);
+  check_well_formed(result, "sphere");  // outward winding vs radial normals
+  CHECK(result.local_bounds.min == glm::vec3(-1.0f));
+  CHECK(result.local_bounds.max == glm::vec3(1.0f));
 }
 
 TEST_CASE("GenerateCylinder: well-formed, has top+bottom caps, sane bounds") {

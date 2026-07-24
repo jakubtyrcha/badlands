@@ -64,6 +64,13 @@ void DrawShadowDebugSelector(SceneRenderer& renderer);
 // the renderer's fog config in place (takes effect next Render(); no re-bake).
 void DrawFogEditor(SceneRenderer& renderer);
 
+// Sliders/toggle for the Oklab color-grading pass (ColorGradingConfig on
+// `renderer`). Mutates the renderer's grading config in place (takes effect
+// next Render()). Guards: the black-crush threshold slider floors at 0.01
+// (division guard, mirrored in the shader) and the midtone band is kept
+// ordered (end >= start).
+void DrawColorGradingEditor(SceneRenderer& renderer);
+
 // FPS + frame-time text line (e.g. "60.0 FPS (16.67 ms)").
 void DrawStats(float dt_seconds);
 

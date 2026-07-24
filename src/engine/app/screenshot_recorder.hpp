@@ -31,13 +31,15 @@ class ScreenshotRecorder {
   bool active() const { return active_; }
 
   // Call once per windowed frame while active: renders `view` offscreen at
-  // (w,h) with the given G-buffer `debug_mode` and writes the next numbered
-  // PNG. The offscreen SceneRenderer + RGBA8Unorm target are created lazily on
-  // the first call and reused; they are recreated only if (w,h) changes.
-  // No-op if inactive.
+  // (w,h) with the given G-buffer `debug_mode` and the live renderer's
+  // color-grading config (grading is part of the game's image), and writes
+  // the next numbered PNG. The offscreen SceneRenderer + RGBA8Unorm target
+  // are created lazily on the first call and reused; they are recreated only
+  // if (w,h) changes. No-op if inactive.
   void CaptureFrame(GpuContext& gpu, GpuPipelineGenerator& pipeline_gen,
                     AppView& view, uint32_t w, uint32_t h,
-                    GBufferDebugMode debug_mode);
+                    GBufferDebugMode debug_mode,
+                    const ColorGradingConfig& grading = {});
 
  private:
   // Ensures offscreen_renderer_ + offscreen_texture_/view_ exist and are sized

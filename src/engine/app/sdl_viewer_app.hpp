@@ -54,6 +54,12 @@ class SdlViewerApp {
   // uninitialized (and the destructor's shutdown is guarded accordingly).
   void InitImGui(int width, int height);
 
+  // (Re)creates the window-sized RGBA8 UI-overlay texture (game UI + ImGui
+  // draw into it in plain sRGB with gamma-space blending; the resolve pass
+  // composites it over the scene — see SceneContext::ui_overlay). Called at
+  // startup and on pixel-size changes; no-op when the size is unchanged.
+  void EnsureUiOverlay(uint32_t width, uint32_t height);
+
   SdlViewerConfig config_;
 
   SDL_Window* window_ = nullptr;
@@ -62,6 +68,12 @@ class SdlViewerApp {
   SceneRenderer renderer_;
   std::unique_ptr<AppView> view_;
   ScreenshotRecorder recorder_;
+
+  // Windowed-path UI overlay target (see EnsureUiOverlay).
+  wgpu::Texture ui_overlay_texture_;
+  wgpu::TextureView ui_overlay_view_;
+  uint32_t ui_overlay_w_ = 0;
+  uint32_t ui_overlay_h_ = 0;
 };
 
 }  // namespace badlands

@@ -37,7 +37,7 @@
 #include "mapgen/mapgen_constants.hpp"
 #include "mapgen/outputs.hpp"
 #include "mapgen/pipeline.hpp"
-#include "mapview/map_view_view.hpp"
+#include "executables/mapview/map_view_view.hpp"
 
 namespace {
 

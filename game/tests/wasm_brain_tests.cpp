@@ -259,13 +259,13 @@ TEST_CASE("apply_brain_decision: follow_up_on_arrival gates on distance to the g
         BrainDecision d;
         d.activity = ActivityId::Hunt;
         d.goal = self_pos + glm::vec2{20.0f, 0.0f};
-        d.follow_up = Command{CommandKind::Shoot, slot, 0};
+        d.follow_up = Command{CommandKind::Attack, slot, 0};  // targeted attack (the hunt shot)
         d.follow_up_on_arrival = false;
         apply_brain_decision(*g, slot, self_pos, d);
         apply_commands(*g);
         bool found = false;
         for (const Command& c : g->command_log) {
-            found = found || (c.kind == CommandKind::Shoot && c.actor == slot);
+            found = found || (c.kind == CommandKind::Attack && c.actor == slot && c.target_id == 0);
         }
         CHECK(found);
     }

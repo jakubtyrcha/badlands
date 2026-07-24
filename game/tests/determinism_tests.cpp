@@ -234,3 +234,40 @@ TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
     }
 
         }
+
+TEST_CASE("a fight runs to the same state twice (seeded combat is deterministic)") {
+    // Combat now rolls to hit/dodge/crit, all seeded off replay-reproducible
+    // identity axes. This is the guard that the seeded rolls (and projectile
+    // flight) are a pure function of the inputs -- two runs of the same fight must
+    // land on bit-identical state, or the seeding leaked a dependency on something
+    // outside (address order, draw count, wall-clock).
+    auto run = []() {
+        auto owned = make_flat_world();
+        BadlandsGame* g = owned.get();
+        spawn_into(*g, MercenaryDesc(-4.0f, 0.0f));
+        spawn_into(*g, GoblinDesc(4.0f, 0.0f));
+        for (int i = 0; i < 300; ++i) {
+            tick_world(*g, 1.0f / 30.0f);
+        }
+        return characters_of(*g);
+    };
+
+    const std::vector<CharacterState> a = run();
+    const std::vector<CharacterState> b = run();
+
+    REQUIRE(a.size() == b.size());
+    // The fight must actually have been fought, or this proves nothing.
+    bool combat_happened = a.size() < 2;
+    for (const CharacterState& c : a) {
+        combat_happened = combat_happened || c.hp < c.max_hp;
+    }
+    CHECK(combat_happened);
+
+    for (size_t i = 0; i < a.size(); ++i) {
+        INFO("row " << i);
+        CHECK(a[i].id == b[i].id);
+        CHECK(a[i].hp == b[i].hp);      // bit-exact: no tolerance on determinism
+        CHECK(a[i].pos_x == b[i].pos_x);
+        CHECK(a[i].pos_z == b[i].pos_z);
+    }
+}

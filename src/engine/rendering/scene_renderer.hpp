@@ -38,10 +38,13 @@
 #include "engine/rendering/prefiltered_cubemap.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/shadow_map.hpp"
+#include "engine/rendering/color_grading.hpp"
 #include "engine/rendering/volumetric_fog.hpp"
 #include "engine/rendering/fog_simulation.hpp"
 
 namespace badlands {
+
+class FrameContext;
 
 struct SceneContext;
 
@@ -206,6 +209,29 @@ class SceneRenderer {
   // accessor; SceneRenderer advances it each Render() and feeds VolumetricFog.
   FogSimulation& GetFogSimulation() { return fog_sim_; }
 
+  // Color grading (Task: P3/HDR color grading). Takes effect on the next
+  // Render() call. The grade pass runs after projected decals and before
+  // debug lines, remapping the HDR working buffer in Oklab (crush blacks +
+  // desaturate midtones). Disabled by default; MutableColorGradingConfig()
+  // is for the ImGui editor (EditorUI::DrawColorGradingEditor).
+  void SetColorGradingConfig(const ColorGradingConfig& config) {
+    color_grading_.SetConfig(config);
+  }
+  const ColorGradingConfig& GetColorGradingConfig() const {
+    return color_grading_.GetConfig();
+  }
+  ColorGradingConfig& MutableColorGradingConfig() {
+    return color_grading_.MutableConfig();
+  }
+
+  // Display-P3 output (Task: P3/HDR output). When set (from GpuContext::IsP3()),
+  // the tonemap resolve runs in mode 2: convert the linear-sRGB working buffer
+  // to Display-P3 primaries, then either pass linear through (float surface =
+  // EDR compositor path) or clamp + sRGB-curve encode (8-bit SDR-P3 surface).
+  // Off by default — the headless capture renderer must stay plain sRGB so
+  // profile-less PNGs read correctly. Takes effect on the next Render() call.
+  void SetOutputIsP3(bool p3) { output_is_p3_ = p3; }
+
   // The generic post-scene modulation hook is carried on SceneContext
   // (SceneContext::post_pass), not as a renderer member — so it applies to any
   // renderer instance that renders the view, including the throwaway one built
@@ -227,6 +253,11 @@ class SceneRenderer {
   // Lazily (re)builds prefiltered_ from scene.skybox_cubemap when the source
   // view or generation changes. No-op when unchanged.
   void UpdateIbl(const SceneContext& scene);
+  // Copies the HDR colour into hdr_color_copy_texture_ on the frame's
+  // encoder, so a pass can SAMPLE the scene it is about to write over (a
+  // target can't be read while bound). Shared by the forward-transparent
+  // (water refraction), post-scene-hook, and color-grading passes.
+  void SnapshotHdrColor(FrameContext& frame);
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -234,6 +265,7 @@ class SceneRenderer {
 
   wgpu::TextureFormat surface_format_ = wgpu::TextureFormat::BGRA8Unorm;
   wgpu::TextureFormat accumulation_format_ = kAccumulationFormat;
+  bool output_is_p3_ = false;  // see SetOutputIsP3
 
   uint32_t width_ = 0;
   uint32_t height_ = 0;
@@ -313,6 +345,12 @@ class SceneRenderer {
   // Volumetric terrain fog (Task: fog rendering). Owns the media cascade 3D
   // texture + pipelines; driven between deferred lighting and tonemap.
   VolumetricFog volumetric_fog_;
+  ColorGrading color_grading_;
+
+  // 1x1 transparent RGBA8 texel bound as the UI overlay when
+  // SceneContext::ui_overlay is null (see Initialize).
+  wgpu::Texture fallback_ui_overlay_texture_;
+  wgpu::TextureView fallback_ui_overlay_view_;
   FogSimulation fog_sim_;
 
   // Contact-shadow term (T2 creates it; T5's SSCS fullscreen render pass

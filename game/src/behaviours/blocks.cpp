@@ -132,7 +132,7 @@ BehaviourResult act_hunt(const WorldView& v, const SimFactors&) {
     // Chase to prey_pos; once within the hunter's own reach, take the shot (the
     // handler re-checks range + cooldown, so the log gets one entry per shot).
     if (v.prey_dist <= v.self_attack_range) {
-        r.follow_up = Command{CommandKind::Shoot, v.slot, v.prey_slot};
+        r.follow_up = Command{CommandKind::Attack, v.slot, v.prey_slot};
     }
     return r;
 }

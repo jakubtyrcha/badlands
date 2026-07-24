@@ -82,6 +82,17 @@ struct SceneContext {
   // fog-of-war overlay).
   ScenePostPass* post_pass = nullptr;
 
+  // Optional UI overlay: an RGBA8 texture holding this frame's 2D UI (game UI
+  // + debug UI), PREMULTIPLIED and sRGB-ENCODED, drawn by the app with plain
+  // gamma-space blending (the space UI is authored for). The resolve pass
+  // composites it over the scene in encoded space — before any P3/EDR output
+  // conversion — so translucent panels and AA'd glyphs look identical on the
+  // 8-bit and float/linear surfaces. Null = no overlay (the renderer binds a
+  // 1x1 transparent fallback); the headless capture path draws UI directly
+  // onto its 8-bit target instead and leaves this null. Not owned; must
+  // outlive the frame.
+  wgpu::TextureView ui_overlay;
+
   // Optional world-space projected decals (selection highlights, VFX marks),
   // composited into the HDR colour after the post-scene hook and before debug
   // lines -- so they sit on top of any scene modulation (e.g. fog-of-war) but

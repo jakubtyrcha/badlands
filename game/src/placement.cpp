@@ -360,7 +360,7 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor) {
         if (!best_poppable(st, kSewer, anchor, center, rot)) {
             break;
         }
-        notify_obstacle_added(game, commit(st, kSewer, rot, center));
+        commit(st, kSewer, rot, center);  // bumps nav_epoch -> navmesh rebuilds
         ++st.sewers_made;
     }
     while (st.houses_made < houses_owed) {
@@ -369,7 +369,7 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor) {
         if (!best_poppable(st, kHouse, anchor, center, rot)) {
             break;
         }
-        notify_obstacle_added(game, commit(st, kHouse, rot, center));
+        commit(st, kHouse, rot, center);  // bumps nav_epoch -> navmesh rebuilds
         ++st.houses_made;
     }
 }
@@ -472,27 +472,6 @@ void rebuild_occupancy(PlacementState& st) {
     }
 }
 
-void notify_obstacle_added(BadlandsGame& game, uint32_t building_id) {
-    const Pathfinder& pf = game.pathfinder;
-    if (pf.add_obstacle == nullptr || building_id >= game.placement.buildings.size()) {
-        return;
-    }
-    std::array<glm::vec2, 4> corners = building_footprint_corners(game.placement.buildings[building_id]);
-    float flat[8];
-    for (int i = 0; i < 4; ++i) {
-        flat[i * 2] = corners[i].x;
-        flat[i * 2 + 1] = corners[i].y;
-    }
-    pf.add_obstacle(pf.ctx, building_id, flat, 4);
-}
-
-void notify_obstacle_removed(BadlandsGame& game, uint32_t building_id) {
-    const Pathfinder& pf = game.pathfinder;
-    if (pf.remove_obstacle != nullptr) {
-        pf.remove_obstacle(pf.ctx, building_id);
-    }
-}
-
 uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool player) {
     PlacementState& st = game.placement;
     int rot = ((desc.rotation_index % 4) + 4) % 4;
@@ -501,8 +480,7 @@ uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool play
     if (!placement_valid(st, fp)) {
         return std::numeric_limits<uint32_t>::max();
     }
-    uint32_t id = commit(st, desc.kind, rot, center);
-    notify_obstacle_added(game, id);
+    uint32_t id = commit(st, desc.kind, rot, center);  // bumps nav_epoch
     if (player) {
         st.urban_quarters += urban_contribution(desc.kind);
         process_poppables(game, center);

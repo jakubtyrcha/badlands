@@ -133,6 +133,20 @@ fn push_text(
     let text_height = atlas.ascent_px - atlas.descent_px;
     let baseline_y = r.y + (r.h - text_height) * 0.5 + atlas.ascent_px;
 
+    emit_glyphs(quads, text, pen_x, baseline_y, rgba, atlas);
+}
+
+// Lays `text`'s glyphs from a pen at `pen_x` on the baseline `baseline_y`,
+// appending one quad per inked glyph. The shared core of both HUD text layout
+// (push_text) and the positioned single-run shaper (text_run).
+pub fn emit_glyphs(
+    quads: &mut Vec<Quad>,
+    text: &str,
+    pen_x: f32,
+    baseline_y: f32,
+    rgba: u32,
+    atlas: &FontAtlas,
+) {
     let mut pen = pen_x;
     for ch in text.chars() {
         let Some(g) = atlas.glyphs.get(&ch) else {
@@ -154,5 +168,26 @@ fn push_text(
             });
         }
         pen += g.advance;
+    }
+}
+
+// One shaped text run, laid from a baseline-left origin (0,0): glyph quads sit
+// at x >= 0 and (for the parts above the baseline) y < 0. Backs the ui_text_run
+// C ABI for floating world labels -- the caller scales + translates these quads
+// to a projected screen anchor, using `width`/`height` to anchor (centre/right)
+// the box. `height` is the full text box (ascent above + descent below).
+pub struct TextRun {
+    pub quads: Vec<Quad>,
+    pub width: f32,
+    pub height: f32,
+}
+
+pub fn text_run(text: &str, rgba: u32, atlas: &FontAtlas) -> TextRun {
+    let mut quads = Vec::new();
+    emit_glyphs(&mut quads, text, 0.0, 0.0, rgba, atlas);
+    TextRun {
+        quads,
+        width: atlas.measure(text),
+        height: atlas.ascent_px - atlas.descent_px,
     }
 }
