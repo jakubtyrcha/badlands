@@ -78,21 +78,23 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
                .default_texture = "white"},
           }});
 
-  // leaf.wesl - alpha-cutout foliage material. One group-0 texture: the leaf
-  // silhouette (RGB tint * alpha shape) at binding 1, sampler at binding 2 --
-  // same slot layout as normalmapped's albedo. Registering it here (rather than
-  // letting DeriveRequirementsFromReflection name the slot "tex_1") lets callers
-  // supply the leaf texture as a "albedo" override. Same reqs for both geometry
-  // modes (only kTexturedMesh is used in practice).
-  MaterialRequirements leaf_reqs{
-      .shader_name = "leaf",
+  // standard_forward.wesl - general forward-opaque, standard-lit material (the
+  // foliage/alpha-cutout material). One group-0 texture: the albedo silhouette
+  // (RGB tint * alpha shape) at binding 1, sampler at binding 2 -- same slot
+  // layout as normalmapped's albedo. Registering it here (rather than letting
+  // DeriveRequirementsFromReflection name the slot "tex_1") lets callers supply
+  // the leaf texture as an "albedo" override. Same reqs for both geometry modes
+  // (only kTexturedMesh is used in practice).
+  MaterialRequirements standard_forward_reqs{
+      .shader_name = "standard_forward",
       .textures = {
           {.slot_name = "albedo",
            .texture_binding = 1,
            .sampler_binding = 2,
            .default_texture = "white"},
       }};
-  RegisterMaterial("leaf", leaf_reqs, leaf_reqs);
+  RegisterMaterial("standard_forward", standard_forward_reqs,
+                   standard_forward_reqs);
 
   // terrain_blend.wesl - three texture_2d_arrays (albedo / normal / ARM) whose
   // layers are blended per-vertex. All three share one sampler binding (2), the
