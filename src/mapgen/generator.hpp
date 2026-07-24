@@ -51,4 +51,13 @@ BiomeCutoffs compute_cutoffs(const Field2D<float>& bedrock);
 Field2D<uint8_t> classify_biomes(const Field2D<float>& bedrock,
                                  const BiomeCutoffs& cutoffs);
 
+// Exact Euclidean distance (WORLD METERS) from each texel to the nearest
+// texel classified Plains, with texel (x, y) at world (x*texel_m.x,
+// y*texel_m.y). Felzenszwalb–Huttenlocher two-pass EDT — exact, not a
+// chamfer approximation. A map with no plains at all returns all zeros
+// (unreachable via generate_map: the quantile cutoffs guarantee a plains
+// share). Exposed for unit testing (pattern of compute_cutoffs).
+Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
+                                  glm::vec2 texel_m);
+
 }  // namespace badlands::mapgen
