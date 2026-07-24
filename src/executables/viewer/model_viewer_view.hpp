@@ -7,6 +7,7 @@
 // slot in. Lives in src/executables/viewer/ (an app, not the engine).
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,8 @@
 #include "engine/rendering/material_library.hpp"
 #include "engine/rendering/scene_renderer.hpp"  // ShadowDebugMode
 #include "engine/scene/scene_graph.hpp"
+#include "game/geometry/leaf_texture.hpp"
+#include "game/geometry/tree_options.hpp"  // TreeOptions
 
 namespace badlands {
 
@@ -61,12 +64,15 @@ class ModelViewerView : public AppView {
     TexturedMeshResult mesh;
     glm::mat4 transform{1.0f};
   };
-  // A named entry in the viewer's list: `generate` produces a mesh entity
-  // (the sphere test object, or a catalog tree's solid bark mesh).
+  // A named entry in the viewer's list. Exactly one path is set:
+  //   - `generate`: a single-material mesh entity (the sphere test object).
+  //   - `tree`: a catalog tree, built in RebuildScene as TWO materials --
+  //     deferred solid bark + forward-opaque alpha-cutout leaf cards.
   struct MeshGenerator {
     std::string name;
     std::function<GeneratedMesh()> generate;
     DeferredMaterial material;
+    std::optional<TreeOptions> tree;
   };
 
   void BuildGenerators();
@@ -94,6 +100,14 @@ class ModelViewerView : public AppView {
   int generator_index_ = 0;
   DeferredMaterial checker_mat_;  // UV-checker debug material for the sphere
   DeferredMaterial bark_mat_;     // Solid bark color for catalog tree meshes
+
+  // Leaf-card texture: a white RGB silhouette (alpha = leaf shape), built once
+  // in Initialize and coloured per-tree via the AlphaCutout material tint. The
+  // texture keeps itself alive via leaf_view_; leaf_sampler_ is a trilinear +
+  // repeat sampler (mip-using) so the alpha mip chain is sampled.
+  wgpu::Texture leaf_texture_;
+  wgpu::TextureView leaf_view_;
+  wgpu::Sampler leaf_sampler_;
 
   ShadowDebugMode initial_shadow_debug_mode_ = ShadowDebugMode::Off;
 

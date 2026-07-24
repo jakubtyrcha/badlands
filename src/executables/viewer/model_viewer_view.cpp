@@ -49,6 +49,34 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   // Solid dark-brown bark color for the catalog tree meshes.
   bark_mat_ = matlib_.SolidColor(glm::vec3(0.30f, 0.19f, 0.10f), 0.9f);
 
+  // Leaf-card silhouette texture, built once and shared by every tree. White
+  // RGB (so the AlphaCutout material's per-tree tint colours it), alpha = leaf
+  // shape. Uploaded with a full mip chain so distant cards antialias.
+  {
+    constexpr int kLeafTexSize = 64;
+    std::vector<uint8_t> px = BuildLeafRgba8(kLeafTexSize, glm::vec3(1.0f));
+    LoadedTexture leaf = UploadTexture2DWithMips(
+        device_, queue_, *ctx.pipeline_gen, kLeafTexSize, kLeafTexSize,
+        px.data());
+    leaf_texture_ = leaf.texture;
+    leaf_view_ = leaf.view;
+    if (!leaf_view_) {
+      spdlog::error("ModelViewerView::Initialize: leaf texture upload failed");
+      return false;
+    }
+    // Trilinear + repeat sampler: the alpha mip chain must be sampled through a
+    // Linear mipmapFilter (the material factory's default is Nearest, which
+    // would defeat the mips and leave the edges aliased).
+    wgpu::SamplerDescriptor samp = {};
+    samp.minFilter = wgpu::FilterMode::Linear;
+    samp.magFilter = wgpu::FilterMode::Linear;
+    samp.mipmapFilter = wgpu::MipmapFilterMode::Linear;
+    samp.addressModeU = wgpu::AddressMode::Repeat;
+    samp.addressModeV = wgpu::AddressMode::Repeat;
+    samp.maxAnisotropy = 16;
+    leaf_sampler_ = device_.CreateSampler(&samp);
+  }
+
   BuildGenerators();
   if (generators_.empty()) {
     spdlog::error("ModelViewerView::Initialize: empty generator registry");
@@ -91,24 +119,12 @@ void ModelViewerView::BuildGenerators() {
              glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
          return GeneratedMesh{std::move(mesh), transform};
        }, .material = checker_mat_});
-  // One entry per predefined tree setup (the full ez-tree preset catalog),
-  // rendered as its real solid bark mesh, display-scaled to a consistent
-  // preview height and rested on the floor.
+  // One entry per predefined tree setup (the full ez-tree preset catalog).
+  // Trees go through the two-material path in RebuildScene (deferred bark +
+  // forward-opaque alpha-cutout leaves), so they carry `tree` options rather
+  // than a single-mesh `generate` lambda.
   for (const NamedTreeOptions& setup : TreeCatalog()) {
-    generators_.push_back(
-        {.name = setup.name,
-         .generate =
-             [opts = setup.options] {
-               TexturedMeshResult r = GenerateTreeMesh(opts);
-               const float h = r.local_bounds.max.y - r.local_bounds.min.y;
-               const float s = kTreePreviewHeight / std::max(h, 0.001f);
-               const glm::mat4 xf =
-                   glm::translate(glm::mat4(1.0f),
-                                  glm::vec3(0.0f, -r.local_bounds.min.y * s, 0.0f)) *
-                   glm::scale(glm::mat4(1.0f), glm::vec3(s));
-               return GeneratedMesh{std::move(r), xf};
-             },
-         .material = bark_mat_});
+    generators_.push_back({.name = setup.name, .tree = setup.options});
   }
 }
 
@@ -135,14 +151,38 @@ void ModelViewerView::RebuildScene() {
   // Frame on the WORLD-space bounds so the orbit centers on the object as it sits
   // on the floor.
   Aabb world_bounds = Aabb::Empty();
-  if (gen.generate) {
+  if (gen.tree) {
+    // Two-material tree: deferred solid bark + forward-opaque alpha-cutout leaf
+    // cards, sharing the tree's local space (and therefore one preview
+    // transform, so the leaves stay attached to the branches).
+    TexturedMeshResult bark = GenerateTreeMesh(*gen.tree);
+    const float h = bark.local_bounds.max.y - bark.local_bounds.min.y;
+    const float s = kTreePreviewHeight / std::max(h, 0.001f);
+    const glm::mat4 xf =
+        glm::translate(glm::mat4(1.0f),
+                       glm::vec3(0.0f, -bark.local_bounds.min.y * s, 0.0f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(s));
+
+    world_bounds = bark.local_bounds.TransformedBy(xf);
+    AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
+
+    TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree);
+    if (leaves.mesh.vertex_count > 0) {
+      world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
+      DeferredMaterial lm = matlib_.AlphaCutout(
+          leaf_view_, leaf_sampler_, gen.tree->leaves.alpha_cutoff,
+          gen.tree->leaves.tint);
+      AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
+                                 lm.factory, lm.params, xf);
+    }
+  } else if (gen.generate) {
     GeneratedMesh generated = gen.generate();
     world_bounds = generated.mesh.local_bounds.TransformedBy(generated.transform);
     AddMeshEntity(scene_, "mesh", std::move(generated.mesh), gen.material,
                   generated.transform);
   } else {
-    // A MeshGenerator must set its mesh lambda. Guard the invariant so a
-    // malformed entry logs instead of throwing bad_function_call.
+    // A MeshGenerator must set exactly one of `tree`/`generate`. Guard the
+    // invariant so a malformed entry logs instead of throwing / rendering empty.
     spdlog::error("ModelViewerView::RebuildScene: generator '{}' has no mesh "
                   "generator; showing floor only",
                   gen.name);
