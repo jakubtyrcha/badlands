@@ -27,6 +27,26 @@ TEST_CASE("carve_cavities: coverage ~= lake_frac, depth bounded, only lowers") {
   REQUIRE(max_cut == Catch::Approx(12.0f).margin(0.5));  // minimum gets full depth
 }
 
+TEST_CASE("carve_cavities: lake_frac > 1 clamped to 1, no crash") {
+  // bedrock ramp 0..1 over 50x50; lake_frac = 2.0f should clamp to 1.0f
+  Field2D<float> bedrock(50, 50);
+  for (int y = 0; y < 50; ++y)
+    for (int x = 0; x < 50; ++x)
+      bedrock.at(x, y) = (y * 50 + x) / 2499.0f;
+  Field2D<float> B(50, 50, 100.0f);
+  const auto B_before = B.data;
+  const auto mask = carve_cavities(B, bedrock, 2.0f, 8.0f);  // lake_frac > 1
+  double carved = 0.0;
+  for (size_t i = 0; i < mask.data.size(); ++i) {
+    if (mask.data[i]) carved += 1.0;
+    const float cut = B_before[i] - B.data[i];
+    REQUIRE(cut >= 0.0f);            // only lowers
+    REQUIRE(cut <= 8.0f + 1e-4f);    // bounded by lake_depth_m
+  }
+  const double coverage = carved / mask.data.size();
+  REQUIRE(coverage > 0.9);  // clamped to 1.0: nearly everything carved (all but max)
+}
+
 TEST_CASE("init_sediment: tapers off plains, zero in basins, never negative") {
   Field2D<float> dist(64, 64);
   for (int y = 0; y < 64; ++y)

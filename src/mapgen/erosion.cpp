@@ -11,8 +11,9 @@ Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock
   Field2D<uint8_t> mask(bedrock.width, bedrock.height, 0);
   const size_t n = bedrock.size();
   if (n == 0 || lake_frac <= 0.0f) return mask;
+  const float frac = std::min(lake_frac, 1.0f);
   std::vector<float> v = bedrock.data;
-  const size_t i_lake = static_cast<size_t>(lake_frac * (n - 1));
+  const size_t i_lake = static_cast<size_t>(frac * (n - 1));
   std::nth_element(v.begin(), v.begin() + i_lake, v.end());
   const float t_lake = v[i_lake];
   const float b_min = *std::min_element(bedrock.data.begin(), bedrock.data.end());
