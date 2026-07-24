@@ -59,18 +59,6 @@ TEST_CASE("generate_map: lakes are consistent — Lake biome iff standing water"
     REQUIRE(a.flow.data[i] > 0.0f);       // every texel drains something
     REQUIRE(a.sediment.data[i] >= 0.0f);
   }
-
-  // Explicit boundary checks: no Lake texel has insufficient depth, no non-Lake has excess
-  for (size_t i = 0; i < a.biome.data.size(); ++i) {
-    const bool lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
-    if (lake) {
-      // Every Lake texel must have water_depth >= threshold
-      REQUIRE(a.water_depth.data[i] >= kLakeStampMinDepthM);
-    } else {
-      // Every non-Lake texel must have water_depth < threshold
-      REQUIRE(a.water_depth.data[i] < kLakeStampMinDepthM);
-    }
-  }
 }
 
 TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
@@ -336,6 +324,19 @@ TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
     const bool is_lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
     REQUIRE(is_lake == (a.water_depth.data[i] >= kLakeStampMinDepthM));
+  }
+
+  // Explicit boundary checks: mismatched-resolution resample produces fractional
+  // shallow depths, so the threshold discriminates here where grid-aligned fixtures do not.
+  for (size_t i = 0; i < a.biome.data.size(); ++i) {
+    const bool lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
+    if (lake) {
+      // Every Lake texel must have water_depth >= threshold
+      REQUIRE(a.water_depth.data[i] >= kLakeStampMinDepthM);
+    } else {
+      // Every non-Lake texel must have water_depth < threshold
+      REQUIRE(a.water_depth.data[i] < kLakeStampMinDepthM);
+    }
   }
 }
 
