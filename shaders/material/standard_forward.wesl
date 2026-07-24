@@ -14,7 +14,7 @@ import package::common::color::srgb_to_linear;
 @if(!shadow_pass)
 import package::common::shadow_sampling::sampleShadowMapPCF;
 @if(!shadow_pass)
-import package::common::standard_lighting::{shadeStandard, computeSpecularOcclusion, F0_DIELECTRIC};
+import package::common::standard_lighting::{shadeStandard, computeSpecularOcclusion, F0_DIELECTRIC, evaluateTranslucency};
 
 @group(0) @binding(1) var albedo_texture: texture_2d<f32>;
 @group(0) @binding(2) var material_sampler: sampler;
@@ -23,6 +23,7 @@ struct StandardForwardUniforms {
     modelMatrix: mat4x4<f32>,
     tint: vec4<f32>,     // rgb = albedo tint
     params: vec4<f32>,   // x = alpha cutoff (0 = opaque), y = roughness
+    transmission: vec4<f32>,   // rgb = transmission tint, a = translucency strength
 }
 @group(1) @binding(0) var<uniform> object: StandardForwardUniforms;
 
@@ -73,6 +74,17 @@ fn vs_main(input: VertexInput) -> VertexOutputShadow {
     return output;
 }
 
+@if(!shadow_pass && translucency)
+fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, shadow: f32) -> vec3<f32> {
+    let L = normalize(frame.sunDirection.xyz);
+    return evaluateTranslucency(N, V, L, shadow, ao,
+                                object.transmission.rgb, object.transmission.a);
+}
+@if(!shadow_pass && !translucency)
+fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, shadow: f32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+
 @if(!shadow_pass)
 @fragment
 fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
@@ -105,7 +117,8 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location
     let ambientSpecular = prefilteredColor * specularScale * computeSpecularOcclusion(NdotV, ao, roughness);
 
     let color = shadeStandard(albedoLinear, N, V, roughness, ao, shadow, ambientSpecular);
-    return vec4<f32>(color, 1.0);
+    let transmission = transmissionContribution(N, V, ao, shadow);
+    return vec4<f32>(color + transmission, 1.0);
 }
 
 @if(shadow_pass)

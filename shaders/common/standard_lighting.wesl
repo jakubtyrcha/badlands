@@ -36,3 +36,23 @@ fn shadeStandard(albedoLinear: vec3<f32>, N: vec3<f32>, V: vec3<f32>,
 
     return directLighting + indirectLighting;
 }
+
+const kPhasePower: f32 = 4.0;  // forward-scatter lobe sharpness (flare)
+
+// Thin-slab diffuse transmission (foliage subsurface look): light entering the
+// far side of a thin translucent surface and exiting toward the viewer. Split
+// like shadeStandard's reflection — a DIRECT sun term (caller gates it with the
+// shadow map: "shadow is for the directional light") plus an AMBIENT term from
+// the environment on the BACK hemisphere (caller gates it with ao: "AO/IBL for
+// the glare"). transmissionColor (T) and strength (s) are the material's
+// transmittance; reflectance and transmittance are independent leaf properties,
+// so this is ADDED to the reflected color with no energy rebalancing.
+fn evaluateTranslucency(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>,
+                        shadow: f32, ao: f32,
+                        transmissionColor: vec3<f32>, strength: f32) -> vec3<f32> {
+    let backLit = max(-dot(N, L), 0.0);                       // sun behind the leaf
+    let flare = pow(max(dot(V, -L), 0.0), kPhasePower);       // forward-scatter peak
+    let direct = shadow * frame.sunColor.xyz * backLit * (1.0 + flare);
+    let ambient = ao * evaluateAmbientSHL2(-N, frame.ambientSH);
+    return strength * transmissionColor * (direct + ambient);
+}
