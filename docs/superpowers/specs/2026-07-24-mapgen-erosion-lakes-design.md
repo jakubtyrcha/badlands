@@ -247,3 +247,59 @@ Structural invariants only (no seed/order-dependent pinning), Catch2 next to
 - Hydraulics (shallow-water tier for local water effects).
 - Detail-filter refinements: straight gullies, drainage streaks.
 - Non-square maps/grids; GPU port; sim-grid parallelism beyond per-cell passes.
+
+## v1.1 addendum (2026-07-24, post-preview review with the user)
+
+Preview judging surfaced two lake defects (random puddle blobs; diagonal
+hatched shallow lakes) and one design gap (dead-flat plains give drainage no
+opinion). Decisions taken with the user:
+
+### Plains drainage relief (replaces "plains sit flat at 0")
+
+New base-height term applied EVERYWHERE (continuity — no seam at biome
+boundaries):
+
+```
+relief += kPlainsReliefM · smoothstep(t_lake, t_hills, bedrock)   // 2 m
+```
+
+`t_lake` = the cavity quantile cutoff, `t_hills` = the plains/hills cutoff
+(both on the sim grid). Rationale: cavities are carved at bedrock minima, so
+the bedrock field is a ready-made potential whose valleys lead to the lakes —
+plains gradients now point organically toward the cavities, and rivers + the
+gully detail filter follow. Smoothstep has zero slope at both cutoffs (smooth
+blend); above `t_hills` it saturates (+2 m constant), so hills/mountains
+shift without a seam. Sediment fBm drops to a texture role
+(`sediment_noise_m` 1.0 → 0.3).
+
+### Capped micro-fill (init conditioning)
+
+After sediment init, route the init surface once; every closed-depression
+component with max fill depth ≤ `kMicroFillCapM` (0.75 m) that does not touch
+the cavity mask is raised to its spill level (ε-tilted), credited to `S`.
+Deeper depressions (real basins) and all seeded cavities stay untouched.
+Kills noise-scale puddles at the source while preserving intentional lakes.
+
+### Lake deposition spreading (fixes the diagonal hatching)
+
+`deposit()` no longer drops flux at the lake entry cell (which built
+1-texel delta stripes along D8 receiver chains). Per flooded component:
+inflow is collected, then poured bottom-up (deepest cells first, level-set
+fill) up to the water level; leftover volume continues from the component's
+outlet down the receiver chain under the normal dry deposition rule.
+Conservation (deposited + exported = eroded) is preserved.
+
+### Lake stamp threshold
+
+Biome Lake is stamped where `water_depth ≥ kLakeStampMinDepthM` (0.3 m), was
+`> 0`. Artifacts keep full fidelity; the consistency invariant becomes
+`Lake ⇔ W ≥ threshold`.
+
+### Iterations / perf (user question, recorded)
+
+Loop cost is linear in `iterations` (~21 ms/iter at -O2, ~190 ms/iter in the
+Debug build, 512² sim). `iterations × dt` is the age product; the implicit
+solver is unconditionally stable, so 40 × dt=2 ≈ 80 × dt=1 in total erosion
+with coarser routing adaptation. Tuning previews compare both; the default
+stays 80 × 1 pending user judging. Release-build/parallelism work: parked by
+user decision.
