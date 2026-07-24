@@ -74,4 +74,10 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
               const Field2D<float>& area, const ErosionParams& p,
               float texel_area_m2);
 
+// Explicit 5-point diffusion of h = B + S on interior cells (border pinned),
+// sub-stepped so D*dt_sub/texel² <= 0.25. Negative dh draws S before B;
+// positive dh credits S (diffused material is loose).
+void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
+             float texel_m);
+
 }  // namespace badlands::mapgen

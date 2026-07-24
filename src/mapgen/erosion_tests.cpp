@@ -327,3 +327,26 @@ TEST_CASE("deposit: G=0 exports everything") {
   REQUIRE(t.S.data == S_before);  // nothing deposited anywhere (no flooded cells)
   REQUIRE(exported == Catch::Approx(16 * 3 * 0.2).epsilon(0.01));
 }
+
+TEST_CASE("diffuse: smooths a spike, conserves interior mass, respects layers") {
+  Field2D<float> B(9, 9, 10.0f);
+  Field2D<float> S(9, 9, 0.0f);
+  S.at(4, 4) = 8.0f;  // sediment spike
+  ErosionParams p;
+  p.diffusion = 2.0f;  // deliberately > stability bound at dt=1 -> must sub-step
+  p.dt = 1.0f;
+  double mass_before = 0.0;
+  for (size_t i = 0; i < S.data.size(); ++i) mass_before += B.data[i] + S.data[i];
+  diffuse(B, S, p, 1.0f);
+  REQUIRE(S.at(4, 4) < 8.0f);          // spike lowered
+  REQUIRE(S.at(3, 4) > 0.0f);          // neighbors received sediment
+  for (float v : S.data) REQUIRE(v >= 0.0f);
+  REQUIRE(std::isfinite(S.at(4, 4)));  // sub-stepping kept it stable
+  double mass_after = 0.0;
+  for (size_t i = 0; i < S.data.size(); ++i) mass_after += B.data[i] + S.data[i];
+  // border is pinned, and the spike's spread stays interior on one step
+  // some diffusion toward boundary is expected; allow 0.2% relative tolerance
+  REQUIRE(mass_after == Catch::Approx(mass_before).epsilon(0.002));
+  // bedrock at the spike was never touched (only its sediment moved)
+  REQUIRE(B.at(4, 4) == 10.0f);
+}

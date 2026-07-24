@@ -126,4 +126,32 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
   return static_cast<float>(exported);
 }
 
+void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
+             float texel_m) {
+  if (p.diffusion <= 0.0f) return;
+  const int w = B.width, ht = B.height;
+  const float tex2 = texel_m * texel_m;
+  const int n_sub = std::max(
+      1, static_cast<int>(std::ceil(p.diffusion * p.dt / (0.24f * tex2))));
+  const float dt_sub = p.dt / static_cast<float>(n_sub);
+  Field2D<float> h(w, ht);
+  for (int step = 0; step < n_sub; ++step) {
+    for (size_t i = 0; i < h.data.size(); ++i) h.data[i] = B.data[i] + S.data[i];
+    for (int y = 1; y < ht - 1; ++y) {
+      for (int x = 1; x < w - 1; ++x) {
+        const float lap = h.at(x + 1, y) + h.at(x - 1, y) + h.at(x, y + 1) +
+                          h.at(x, y - 1) - 4.0f * h.at(x, y);
+        const float dh = p.diffusion * dt_sub * lap / tex2;
+        if (dh >= 0.0f) {
+          S.at(x, y) += dh;
+        } else {
+          const float from_s = std::min(S.at(x, y), -dh);
+          S.at(x, y) -= from_s;
+          B.at(x, y) -= (-dh - from_s);
+        }
+      }
+    }
+  }
+}
+
 }  // namespace badlands::mapgen
