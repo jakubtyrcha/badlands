@@ -58,11 +58,12 @@ TEST_CASE("gully_detail_delta: flat base gets nothing; water gets nothing") {
 // The four cases below cover the v1.2 "height-above-water" shore fade that
 // replaces the old kShoreFadeDistM distance band. Shared fixture for (a)/(b):
 // a straight pond edge (wet x < pond_w, all rows) on a base sloped 0.05 m/m
-// (dz=0.25 per texel at texel_m=5, matching real map texel spacing rather
-// than the 1m used by the other tests here) -- a straight wall maximizes the
-// chance that some row hits a near-worst-case octave alignment right at the
-// shoreline, which is what the old code's RED violation needs to show up
-// reliably.
+// (dz=0.25 per texel at texel_m=5 -- an exaggerated regime that isolates the
+// fixed-distance-band-vs-grid mechanism; at the production 1 m/texel the pre-fix
+// step was ~0.19 m -- same defect, below this test's 0.5 threshold) -- a
+// straight wall maximizes the chance that some row hits a near-worst-case
+// octave alignment right at the shoreline, which is what the old code's RED
+// violation needs to show up reliably.
 namespace {
 struct ShoreFixture {
   int n = 128;
@@ -89,7 +90,7 @@ TEST_CASE("gully_detail_delta: shore fade has no band-edge jump (ring regression
   // VERY FIRST dry texel. So the fade ramp collapses entirely: the
   // force-zeroed wet cell sits directly next to a full-strength carved dry
   // cell. Measured against the pre-fix implementation on this fixture: max
-  // adjacent-texel delta jump = 0.5811 at the shoreline itself, which is
+  // adjacent-texel delta jump = 0.541222 at the shoreline itself, which is
   // this test's RED evidence (see task-2-report.md). The new height-based
   // fade (kShoreFadeHeightM=2m) needs a full 2m of relief to ramp, which at
   // this gentle slope spans ~40 texels -- so it stays smooth through the
