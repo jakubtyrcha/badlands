@@ -82,6 +82,26 @@ bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
     mt.building = UINT32_MAX;
     mt.stop_distance = engagement_range(cb, atk);
 
+    // TRANSITIONAL (V4 of docs/superpowers/specs/2026-07-25-contract-v3-
+    // alignment-design.md; deleted in the single-gateway task V5, which
+    // deletes combat_preempt outright): a wasm hero's own wake now runs
+    // BEFORE this call for the SAME slot (sim.cpp's think dispatch, below)
+    // and may already have fired its own swing this tick via
+    // bl_enqueue_action -> resolve_action (game/src/intention.h) --
+    // WasmBrainRuntime::attack_action_resolved_this_wake (wasm_brain.h)
+    // records that. Consumed (read then reset) unconditionally here, not
+    // just for wasm heroes: safe for every OTHER caller too (mock_think's
+    // Monster/Town-without-a-brain dispatch), since the flag can only be
+    // true in the narrow window between a wasm hero's OWN tick_wasm_brain
+    // call and its OWN combat_preempt call, both back-to-back in the same
+    // per-slot loop iteration -- no other entity's combat_preempt call can
+    // ever observe it still set.
+    bool swing_already_resolved = false;
+    if (game.wasm_brains != nullptr) {
+        swing_already_resolved = game.wasm_brains->attack_action_resolved_this_wake;
+        game.wasm_brains->attack_action_resolved_this_wake = false;
+    }
+
     // If an attack is usable right now, emit an Attack command. Target UINT32_MAX
     // => the handler re-picks the nearest enemy. Off-cooldown gating keeps this to
     // ~one command per swing rather than one per tick. param_a = -1, EXPLICIT:
@@ -90,8 +110,9 @@ bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
     // of the explicit-index Attack plumbing (game/src/intention.h's
     // resolve_action) means "exactly attack index 0", so leaving this implicit
     // would silently pin every combat_preempt swing to attack 0 instead of
-    // auto-picking.
-    if (select_attack(game, self, target) >= 0) {
+    // auto-picking. Suppressed by swing_already_resolved above -- never the
+    // engagement MoveTarget just set, only this legacy auto-swing tail.
+    if (select_attack(game, self, target) >= 0 && !swing_already_resolved) {
         game.command_queue.push_back({CommandKind::Attack, slot, UINT32_MAX, {0.0f, 0.0f}, -1});
     }
     return true;
@@ -317,22 +338,30 @@ void tick_world(BadlandsGame& g, float dt) {
             }
             auto& brain = registry.get<Brain>(e);
             if (g.wasm_brains && brain.kind == BrainKind::Town) {
-                // The wasm hero brain owns the no-enemy tick outright: combat
-                // still pre-empts it (identical to the mock's own pre-empt),
-                // but mock_think is never reached for this entity while a
-                // wasm program is loaded -- see wasm_brain.h (and mock_think
-                // no longer has a hero decision layer to reach even when it
-                // is). Absent a target, the intention contract's wake rule
-                // gates the
-                // think itself (docs/design/intention-contract.html §2): a
-                // hero with a running intention and nothing new in its inbox
-                // simply keeps doing what it was already doing (the always-
-                // running movement/needs/combat systems, not the brain, carry
-                // it forward) -- the brain is consulted only on a real wake.
-                if (!combat_preempt(g, e, static_cast<uint32_t>(slot)) &&
-                    should_wake(g, e)) {
+                // mock_think is never reached for this entity while a wasm
+                // program is loaded -- see wasm_brain.h. Absent a target, the
+                // intention contract's wake rule gates the think itself
+                // (docs/design/intention-contract.html §2): a hero with a
+                // running intention and nothing new in its inbox simply keeps
+                // doing what it was already doing (the always-running
+                // movement/needs/combat systems, not the brain, carry it
+                // forward) -- the brain is consulted only on a real wake.
+                //
+                // TRANSITIONAL (V4): should_wake's own high-stakes clause
+                // (threat_was_present/MeleeLock, intention.h) already means
+                // "consult every tick a fight is on", so tick_wasm_brain now
+                // runs BEFORE combat_preempt -- not only in its absence, the
+                // v2 order -- so a valid swing hero.nim resolves this wake
+                // (bl_enqueue_action) can suppress combat_preempt's own
+                // legacy auto-swing right after (see that function's own
+                // comment). combat_preempt still runs unconditionally, right
+                // after, for the engagement half (moving to/holding at
+                // range) -- deleted in the single-gateway task (V5), which
+                // removes combat_preempt outright and this ordering with it.
+                if (should_wake(g, e)) {
                     tick_wasm_brain(g, static_cast<uint32_t>(slot));
                 }
+                combat_preempt(g, e, static_cast<uint32_t>(slot));
                 continue;
             }
             mock_think(g, e, static_cast<uint32_t>(slot));

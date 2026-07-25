@@ -408,9 +408,12 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // appends into it during the call below) -- never a stale carry-over from
     // a previous slot's wake or a previous tick's. Drained below, after the
     // suggestion is decoded/adopted (the action-resolver loop, this
-    // function's tail) -- v3 behavior-neutral in practice this slice, since
-    // hero.nim never calls bl_enqueue_action yet.
+    // function's tail).
     runtime.pending_actions.clear();
+    // Reset alongside pending_actions -- see WasmBrainRuntime's own doc
+    // comment (wasm_brain.h) on why a single shared bool is safe here. Set
+    // true below only if this wake's drain actually resolves a BL_ACT_ATTACK.
+    runtime.attack_action_resolved_this_wake = false;
 
     BlSuggestionWire out{};
     const int32_t rc =
@@ -445,11 +448,17 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // not enforced here: multiple actions are allowed per wake, and an
     // invalid one warns + drops without touching the suggestion just
     // adopted above (resolve_action never touches CurrentIntention) or the
-    // rest of this batch. Inert in practice this slice: hero.nim declares
-    // but never calls bl_enqueue_action (Task 1 neutrality), so
-    // pending_actions is always empty here for now.
+    // rest of this batch.
     for (const PendingAction& action : runtime.pending_actions) {
-        resolve_action(game, slot, AgentAction{action.kind, action.target_slot, action.arg});
+        const bool resolved =
+            resolve_action(game, slot, AgentAction{action.kind, action.target_slot, action.arg});
+        // TRANSITIONAL (V4; see WasmBrainRuntime::attack_action_resolved_this_wake's
+        // own doc comment, wasm_brain.h): records "this wake already swung"
+        // for sim.cpp's combat_preempt to consume right after this call
+        // returns, so its own legacy auto-swing doesn't double up.
+        if (resolved && action.kind == BL_ACT_ATTACK) {
+            runtime.attack_action_resolved_this_wake = true;
+        }
     }
 }
 

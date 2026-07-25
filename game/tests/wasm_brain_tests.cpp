@@ -28,8 +28,10 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -104,6 +106,25 @@ bool same_command(const Command& a, const Command& b) {
           a.at_millis == b.at_millis;
 }
 
+// A rat durable enough that a duel against it spans several attack-cooldown
+// windows (the stock catalog rat, 6 hp, dies to a single mercenary swing --
+// too short to pin "no double-swing" or "prefers the higher-damage ready
+// attack" across more than one window). Spawned a couple of units off (not
+// already in melee reach) so the FIRST combat wake -- while still
+// approaching -- is a genuine no-op for both the legacy auto-pick
+// apply_intention's Attack-case still fires (game/src/intention.cpp;
+// unguarded by this task, see wasm_brain.h's own comment on why that stays
+// out of scope) and hero.nim's own pick (out of range either way), rather
+// than colliding with it.
+CharacterDesc durable_rat(float x, float z) {
+    CharacterDesc d = DefaultCreatureCatalog().defs[static_cast<int>(CreatureId::Rat)];
+    d.pos_x = x;
+    d.pos_z = z;
+    d.team = 1;
+    d.hp = 500.0f;
+    return d;
+}
+
 }  // namespace
 
 // --- wasm plumbing smokes (fixed-decision brains) ---------------------------
@@ -132,7 +153,7 @@ TEST_CASE("wasm: every hero stays Idle over 30 ticks with the idle fixture brain
     CHECK_FALSE(sim.CommandLog().empty());
 }
 
-TEST_CASE("wasm: combat pre-empt still owns enemies") {
+TEST_CASE("wasm: combat pre-empt still owns engagement") {
     std::vector<uint8_t> bytes = read_hero_wasm();
     Sim sim(wasm_desc(bytes));
 
@@ -147,10 +168,197 @@ TEST_CASE("wasm: combat pre-empt still owns enemies") {
     CHECK(survivor.team == 0);
     CHECK(survivor.hp < survivor.max_hp);  // the goblin got its licks in
 
-    // combat_preempt claims the mercenary's tick for as long as the goblin is
-    // alive, so should_wake/tick_wasm_brain are never reached for it during
-    // the duel -- whatever the loaded brain would otherwise suggest never
-    // gets a chance to interfere with combat.
+    // v4 (contract-v3-alignment): combat_preempt still owns the engagement
+    // MoveTarget unconditionally, same as before -- but should_wake's own
+    // high-stakes clause (threats/MeleeLock, intention.h) now means
+    // tick_wasm_brain ALSO runs for the mercenary throughout the duel (sim.cpp's
+    // think dispatch), not just in the goblin's absence the way v2/v3 had it.
+    // See the two cases below for the brain's own contribution to the log.
+}
+
+TEST_CASE("wasm: hero vs rat -- the brain's own swings land, no double-swing per tick") {
+    std::vector<uint8_t> bytes = read_hero_wasm();
+    Sim sim(wasm_desc(bytes));
+
+    CharacterDesc merc = mercenary(-8.0f, kDuelGroundZ);
+    uint32_t merc_id = sim.Spawn(merc);
+    sim.Spawn(durable_rat(-6.0f, kDuelGroundZ));
+
+    for (int i = 0; i < 600; ++i) {  // 20 sim-seconds: several attack-cooldown windows
+        sim.Tick(kTickDt);
+    }
+
+    std::vector<CommandRecord> merc_attacks;
+    for (const CommandRecord& c : sim.CommandLog()) {
+        if (c.kind == CommandKindId::Attack && c.actor == merc_id) {
+            merc_attacks.push_back(c);
+        }
+    }
+    // Several ready-windows' worth of swings, not just one -- otherwise the
+    // "no double-swing" pin below would be checking an empty/trivial set.
+    REQUIRE(merc_attacks.size() >= 4);
+
+    // The brain's own picks (bl_enqueue_action -> resolve_action,
+    // game/src/intention.h) carry an explicit attack index -- param_a >= 0 --
+    // never the legacy auto-pick sentinel (-1). At most ONE param_a == -1
+    // entry is expected in the whole log: apply_intention's own Attack-case
+    // producer (game/src/intention.cpp) fires unconditionally on the FIRST
+    // wake a hero transitions into Attack (restate-resume skips it on every
+    // later wake, since Attack has no distinguishing field) -- here that
+    // happens to be a same-tick no-op (spawned 2 units apart, out of the
+    // mercenary's 1.5-unit reach), left unguarded by this task's scope (see
+    // wasm_brain.h's own comment on the flag). Every OTHER attack in the log
+    // is the guard's own territory and must be brain-picked.
+    int brain_picked = 0;
+    int legacy_auto_pick = 0;
+    for (const CommandRecord& c : merc_attacks) {
+        if (c.param_a >= 0) {
+            ++brain_picked;
+        } else {
+            ++legacy_auto_pick;
+        }
+    }
+    CHECK(brain_picked >= 4);
+    CHECK(legacy_auto_pick <= 1);
+
+    // The transitional guard's own pin: never two Attack commands from the
+    // SAME actor landing in the SAME tick (combat_preempt's legacy tail would
+    // otherwise double up on every ready window once the brain resolves its
+    // own swing there too -- sim.cpp's combat_preempt).
+    std::vector<int64_t> at_millis_seen;
+    for (const CommandRecord& c : merc_attacks) {
+        at_millis_seen.push_back(c.at_millis);
+    }
+    std::sort(at_millis_seen.begin(), at_millis_seen.end());
+    CHECK(std::adjacent_find(at_millis_seen.begin(), at_millis_seen.end()) ==
+          at_millis_seen.end());
+
+    // Steady-state restate produces no log churn: should_wake's high-stakes
+    // clause means this hero is re-consulted EVERY tick for the whole duel
+    // (600 wakes), and apply_intention's restate-resume path (intention.cpp)
+    // logs a SetBehavior on every single one of them BY DESIGN (the wake
+    // schedule refresh is itself a replayable decision, force=true
+    // unconditionally) -- so a large SetBehavior count here is expected, not
+    // itself churn. What restate-resume must still guarantee is that it is a
+    // RESUME, not a re-decision: every one of those SetBehavior entries
+    // should carry the SAME activity_label (param_a) -- hero.nim restating
+    // the identical BL_INT_ATTACK/ActCombat suggestion wake after wake, never
+    // bouncing to a different activity in between. A brain or engine bug that
+    // churned through fresh (re-)decisions instead of resuming would show up
+    // here as a varying param_a across entries.
+    std::vector<int32_t> merc_behaviors;
+    for (const CommandRecord& c : sim.CommandLog()) {
+        if (c.kind == CommandKindId::SetBehavior && c.actor == merc_id) {
+            merc_behaviors.push_back(c.param_a);
+        }
+    }
+    REQUIRE(merc_behaviors.size() > 4);  // many restates, not a trivial/empty set
+    CHECK(std::adjacent_find(merc_behaviors.begin(), merc_behaviors.end(),
+                             std::not_equal_to<int32_t>()) == merc_behaviors.end());
+}
+
+TEST_CASE("wasm: a two-attack hero's brain-picked swings prefer the higher-damage ready attack") {
+    std::vector<uint8_t> bytes = read_hero_wasm();
+
+    // Two melee attacks, same range, DIFFERENT base_damage -- pick_attack's own
+    // legacy preference (combat.h: ranged-if-free, else first usable) would pick
+    // index 0 here (neither is ranged); hero.nim's own rule (highest base_damage
+    // among ready/legal/in-range) should consistently pick index 1 instead.
+    //
+    // Index 0's cooldown is deliberately NOT equal to index 1's (30s vs 1s), and
+    // that asymmetry is load-bearing, not cosmetic -- empirically root-caused
+    // (temporary bl_log instrumentation) rather than assumed, since with EQUAL
+    // cooldowns this scenario measured 20 index-1 picks vs. 19 index-0 picks over
+    // this test's 600 ticks, not the "always 1" this test's name promises. Two
+    // compounding, independently-real causes, neither a hero.nim preference bug:
+    //  1. apply_intention's own Attack-case producer (intention.cpp) fires ONE
+    //     unconditional legacy auto-swing (param_a=-1, pick_attack's own auto-pick,
+    //     NOT hero.nim's choice) on the FIRST wake a hero transitions into Attack
+    //     -- restate-resume skips it every wake after (Attack has no
+    //     distinguishing field, so every later wake is an identical restate). The
+    //     "hero vs rat" test above notes this same producer as a same-tick NO-OP
+    //     in ITS scenario (spawned out of range) -- here, both attacks share
+    //     index 1's 2.0 range and the merc/rat spawn exactly 2.0 apart, so it is
+    //     NOT a no-op: pick_attack's first-usable tie-break (neither attack is
+    //     Ranged, so its ranged-preference never overrides) lands on index 0 and
+    //     consumes ITS cooldown for real, one tick before hero.nim's own
+    //     bl_enqueue_action(index 1) is even applied. This alone is harmless to
+    //     the assertions below (it logs param_a=-1, not 0, so it can never
+    //     register as a brain-picked "other" swing) -- it just arms index 0's
+    //     cooldown as a side effect.
+    //  2. should_wake's v3 high-stakes clause (intention.h) means tick_wasm_brain
+    //     -- and so pickBestAttack -- runs again literally every following tick
+    //     of this duel. With EQUAL cooldowns, index 0 (armed by #1) and index 1
+    //     (armed by hero.nim's own first pick) come off cooldown one tick apart
+    //     and stay perpetually offset: whichever is ready and the other is not is
+    //     "the best ready attack" that wake, by the brief's own per-wake-snapshot
+    //     rule ("highest base_damage among ready", not "wait for the best
+    //     overall") -- so hero.nim itself, correctly following that rule, picks
+    //     index 0 every time only it is ready. That is the source of the other 18
+    //     (of 19) index-0 picks, all logged with an explicit param_a=0.
+    // Arming index 0 with a cooldown longer than this whole test window means
+    // cause #1's one real consumption is never followed by a second ready window
+    // within the run, so cause #2 never gets a chance to manifest either -- every
+    // brain-picked (param_a >= 0) swing is deterministically index 1, which is
+    // what "prefer the higher-damage ready attack" is actually testing.
+    // The scenario runs TWICE, with the damage assignment mirrored across the
+    // two indices, and asserts the brain follows the DAMAGE both times: this
+    // is what rules out "picks a fixed index that happens to be right" -- a
+    // regression to index-order (or ignoring base_damage entirely) fails one
+    // of the two mirrors loudly. In each mirror the low-damage attack carries
+    // the 30s cooldown (the load-bearing asymmetry explained above) and the
+    // preferred attack the 1s one, so every brain-picked swing is the
+    // preference in action. The FIRST brain-picked swing is asserted
+    // separately and is the genuinely contested decision: at the first combat
+    // wake BOTH attacks are ready (nothing has fired yet), so that pick alone
+    // proves the two-candidate comparison; the later picks pin that the
+    // preference holds across every subsequent ready-window.
+    auto run_mirror = [&](float dmg0, float cd0, float dmg1, float cd1,
+                          int32_t preferred) {
+        Sim mirror_sim(wasm_desc(bytes));
+        CharacterDesc m = mercenary(-8.0f, kDuelGroundZ);
+        m.attack_count = 2;
+        m.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, dmg0, 2.0f, cd0, 0.1f};
+        m.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, dmg1, 2.0f, cd1, 0.1f};
+        uint32_t id = mirror_sim.Spawn(m);
+        mirror_sim.Spawn(durable_rat(-6.0f, kDuelGroundZ));
+        for (int i = 0; i < 600; ++i) {  // 20 sim-seconds, inside the 30s cooldown
+            mirror_sim.Tick(kTickDt);
+        }
+        int picked_preferred = 0;
+        int picked_other = 0;
+        int32_t first_pick = -1;
+        for (const CommandRecord& c : mirror_sim.CommandLog()) {
+            if (c.kind == CommandKindId::Attack && c.actor == id && c.param_a >= 0) {
+                if (first_pick < 0) {
+                    first_pick = c.param_a;
+                }
+                if (c.param_a == preferred) {
+                    ++picked_preferred;
+                } else {
+                    ++picked_other;
+                }
+            }
+        }
+        // The contested decision: both attacks ready, higher damage must win.
+        CHECK(first_pick == preferred);
+        CHECK(picked_preferred >= 4);
+        // At most ONE other-index pick, and that one is CORRECT greedy
+        // behavior, not slack in the assertion: while the preferred attack is
+        // on its 1s cooldown the low-damage attack is legitimately "the best
+        // ready attack" for exactly one wake, after which its own 30s cooldown
+        // removes it for the rest of the run. (Which mirror actually shows
+        // that single pick depends on the known legacy adoption auto-swing --
+        // see the report -- consuming one index up front; both are <= 1.)
+        // A real regression (hero.nim ignoring base_damage, or picking by
+        // index position) fails first_pick above AND pushes this well past 1.
+        CHECK(picked_other <= 1);
+    };
+    // Mirror A: index 1 carries the damage -> every brain pick is index 1.
+    run_mirror(/*dmg0=*/4.0f, /*cd0=*/30.0f, /*dmg1=*/9.0f, /*cd1=*/1.0f, /*preferred=*/1);
+    // Mirror B: damages swapped -> the SAME brain now picks index 0, proving
+    // the choice follows base_damage, not index position.
+    run_mirror(/*dmg0=*/9.0f, /*cd0=*/1.0f, /*dmg1=*/4.0f, /*cd1=*/30.0f, /*preferred=*/0);
 }
 
 // --- pack_view_wire: the view side of the wire trust boundary --------------

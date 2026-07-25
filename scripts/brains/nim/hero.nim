@@ -11,19 +11,54 @@
 # is gone outright: the idle hint IS that pause now, drawn unconditionally
 # every wake rather than only on a discretionary activity change.
 #
-# New this wake, versus v1: threats in view -> BL_INT_ATTACK (structurally
-# unreachable today -- sim.cpp's combat_preempt claims the tick first
-# whenever a hostile exists; kept so the wire matches its documented
-# capability for whenever that scope narrows); a recent DamageTaken/
-# ThreatSighted event in the inbox biases toward retreating home over the
-# normal selection. MoveBlocked needs no NEW handling here: scoreExplore's
-# existing veto (BlViewSuggest.move_blocked, unchanged from v1) already
-# covers "avoid re-suggesting a blocked point" -- the inbox event's own role
-# is purely to be a guaranteed-wake trigger (see InboxEvent's own doc
-# comment, game/src/components.h: the sibling component already carries the
-# position). Every OTHER wake, including a spurious one where nothing
-# changed, simply re-runs selectBanded -- re-suggesting the same intention is
-# a valid, idempotent answer (docs/design/intention-contract.html §2).
+# New this wake, versus v1: threats in view -> BL_INT_ATTACK; a recent
+# DamageTaken/ThreatSighted event in the inbox biases toward retreating home
+# over the normal selection. MoveBlocked needs no NEW handling here:
+# scoreExplore's existing veto (BlViewSuggest.move_blocked, unchanged from
+# v1) already covers "avoid re-suggesting a blocked point" -- the inbox
+# event's own role is purely to be a guaranteed-wake trigger (see InboxEvent's
+# own doc comment, game/src/components.h: the sibling component already
+# carries the position). Every OTHER wake, including a spurious one where
+# nothing changed, simply re-runs selectBanded -- re-suggesting the same
+# intention is a valid, idempotent answer (docs/design/intention-contract.html
+# §2): apply_intention's v3 restate-resume (game/src/intention.cpp) diffs it
+# against what's already running and, for an identical restatement, adopts it
+# as a no-op refresh (only the wake schedule moves) rather than re-running the
+# producer -- so this brain always restates, unconditionally, and leaves the
+# dedup to the engine.
+#
+# v3 (contract-v3-alignment, docs/superpowers/specs/2026-07-25-contract-v3-
+# alignment-design.md): the threat branch below is LIVE now (sim.cpp's think
+# dispatch consults this brain during combat too, not just in an enemy's
+# absence -- should_wake's own high-stakes clause already demands it every
+# tick); it also fires one bl_enqueue_action(BL_ACT_ATTACK, ...) per wake when
+# an attack is ready (pickBestAttack, below). combat_preempt (sim.cpp) still
+# runs right after, transitionally, for engagement movement + its own legacy
+# auto-swing -- guarded off when this wake already resolved one, so the two
+# paths never double-swing; see that function's own comment (deleted in the
+# single-gateway task, V5).
+#
+# WIRE-STABILITY (restate-resume is EXACT field equality, intention.cpp's
+# is_identical_restatement -- no epsilon): every point this file echoes back
+# on a MoveTo suggestion is read STRAIGHT off the wire (roamGoal/exploreGoal,
+# hero_view.nim), never recomputed here, so restating is naturally safe AS
+# LONG AS the host hands back the identical float it did last wake for an
+# unchanged goal. That holds for roamGoal (hero_perception.cpp's roam_point is
+# a pure function of (slot, roam_epoch, anchor, radius) -- no dependence on
+# this hero's current, possibly-mid-walk position) but NOT for exploreGoal
+# (pick_exploration_target, exploration.cpp, filters candidate frontier
+# texels by distance from the hero's CURRENT position -- which drifts every
+# wake while walking toward a still-open goal within the same explore_epoch,
+# so a later wake's reservoir sample can legitimately land on a different
+# texel even with the epoch-derived seed unchanged). This file has no fix
+# available within its own scope (it cannot recompute what it never computed,
+# and the host recomputation lives in hero_perception.cpp/exploration.cpp,
+# outside this task's file list) -- flagged here, and in the task report, per
+# the brief's instruction to note rather than silently patch the engine's
+# comparison to an epsilon. In practice Explore's restate can occasionally
+# fail to dedupe (one extra MoveTo where a truly-identical goal would have
+# resumed) -- never a correctness bug (the new goal is still valid), just
+# occasional avoidable log/replay churn.
 #
 # ABI boilerplate (buffers, bl_abi_version/bl_spawn/bl_despawn/bl_view_buf/
 # bl_out_buf/bl_tick, NimMain/bl_log imports) lives in brain_scaffold.nim --
@@ -46,12 +81,43 @@ include brain_scaffold
 # brain_abi.h's BL_ACT_* vocabulary). Same "env" import-module convention as
 # brain_scaffold's bl_log. Declared here (not brain_scaffold.nim) because only
 # the hero brain will ever call it -- idle_test.nim/trap_test.nim stay fixed-
-# decision fixtures with no reason to. NOT CALLED YET this slice (behavior-
-# neutral Task 1 of docs/superpowers/specs/
-# 2026-07-25-contract-v3-alignment-design.md; a declared-but-uncalled extern
-# proc emits no call site, so it does not appear in hero.wasm's import table
-# either -- Task 4 wires up the actual calls).
+# decision fixtures with no reason to. Called from a combat wake below
+# (pickBestAttack + brainTick): at most ONCE per wake (the soft one-action
+# convention resolve_action, game/src/intention.h, documents but does not
+# itself enforce).
 proc bl_enqueue_action(kind: int32; target: uint32; arg: int32) {.importc, cdecl.}
+
+# badlands::AttackCategory (game/include/badlands_sim.hpp): Melee=0, Ranged=1.
+# Not part of the wire vocabulary proper -- brain_abi.h deliberately excludes
+# badlands_sim.hpp (its own file comment explains why) -- so mirrored here,
+# locally, the one value this file's picker needs, the same discipline abi.nim
+# uses for the wire structs themselves: keep in sync by hand, comment says so.
+const kAttackCategoryRanged: int32 = 1
+
+# BL_ACT_ATTACK picker (docs/superpowers/specs/2026-07-25-contract-v3-
+# alignment-design.md §4): highest base_damage among this hero's attacks that
+# are off cooldown, legal under the current melee lock (no Ranged while
+# locked), and -- when the caller knows a distance to gate on -- within reach
+# of it. Returns -1 if none qualifies (the caller enqueues nothing that wake).
+# `hasDist=false` (melee-locked with no threat actually in view, an edge case
+# BL_ST_MELEE_LOCKED alone can produce) skips the range gate rather than
+# guessing: resolve_action (game/src/intention.h) re-validates range against
+# the live, authoritatively-resolved target anyway, so a locally-unknown
+# distance is never a reason to refuse trying.
+proc pickBestAttack(v: HeroView, hasDist: bool, dist: float32): int32 =
+  result = -1
+  var bestDamage = -1.0'f32
+  for i in 0 ..< v.attackCount:
+    let a = v.attacks[i]
+    if a.cooldown_remaining > 0.0'f32:
+      continue
+    if v.meleeLocked and a.category == kAttackCategoryRanged:
+      continue
+    if hasDist and a.range < dist:
+      continue
+    if a.base_damage > bestDamage:
+      bestDamage = a.base_damage
+      result = i.int32
 
 # EVERY hero class runs this one table (the now-deleted town_brain.cpp's own
 # comment: "there is no per-class list" -- what a class does, how eagerly,
@@ -99,12 +165,28 @@ proc brainTick(slot: int32): int32 =
 
   let v = viewFromWire(g_view_buf)
 
-  # Threats in view -> defend (actor-only: melee whatever this hero is
-  # already engaged with). See this file's top comment on why this is
-  # structurally unreachable today, and kept anyway.
+  # Combat wake: a threat in view OR an active melee lock (BL_ST_MELEE_LOCKED
+  # -- the lock can outlast the attacker briefly stepping out of view). Keep/
+  # restate BL_INT_ATTACK (actor-only: melee whatever this hero is already
+  # engaged with, apply_intention's own doc comment, game/src/intention.cpp)
+  # and fire at most ONE BL_ACT_ATTACK this wake via pickBestAttack (above) --
+  # the soft one-action convention: exactly one bl_enqueue_action call when an
+  # attack qualifies, none when it doesn't (resolve_action, game/src/
+  # intention.h, tolerates more per wake but nothing here ever sends more).
+  let inCombat = v.hasThreat or v.meleeLocked
   let chosen =
-    if v.hasThreat:
-      Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat)
+    if inCombat:
+      # target_slot on the SUGGESTION itself is inspection-only for Attack --
+      # apply_intention discards it (no distinguishing field,
+      # is_identical_restatement, game/src/intention.cpp) -- so UINT32_MAX
+      # when there is no directly-visible threat to name (locked-only wake)
+      # is fine; it mirrors bl_enqueue_action's own "let the engine infer it"
+      # sentinel below.
+      let targetSlot = if v.hasThreat: v.threatSlot else: high(uint32)
+      let best = pickBestAttack(v, v.hasThreat, v.threatDist)
+      if best >= 0:
+        bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best)
+      Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat, targetSlot: targetSlot)
     elif hasDangerEvent(g_view_buf) and v.hasHome:
       # A recent hit or sighting biases toward retreating home over the
       # normal selection -- but only when there IS a home to retreat to;
