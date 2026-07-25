@@ -14,8 +14,10 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #include <catch_amalgamated.hpp>
@@ -300,11 +302,12 @@ TEST_CASE("DrawIndexedIndirect honors the GPU-read instanceCount",
 
 // ===========================================================================
 // Phase B: instanced materials, resolved through MaterialInstanceCache. Two
-// materials (an instanced G-buffer "bark" + an instanced forward "leaf") each
-// read their per-object transform from a group-1 storage array indexed by
-// @builtin(instance_index), with material constants in a group-0 UBO. Both are
-// rendered with a plain instanced DrawIndexed(indexCount, instanceCount=N) and
-// verified by GPU readback: N instances land at N distinct screen positions.
+// materials (an instanced G-buffer material + an instanced forward material)
+// each read their per-object transform from a group-1 storage array indexed
+// by @builtin(instance_index), with material constants in a group-0 UBO. Both
+// are rendered with a plain instanced DrawIndexed(indexCount, instanceCount=N)
+// and verified by GPU readback: N instances land at N distinct screen
+// positions.
 // ===========================================================================
 namespace {
 
@@ -417,20 +420,29 @@ wgpu::TextureView SolidCube1x1(wgpu::Device device, wgpu::Queue queue,
   return tex.CreateView(&vd);
 }
 
-// Build the instanced factory for one MaterialPassType. `depth_format` stays
-// Undefined (no depth attachment) and `casts_shadow` false (no kShadow variant)
-// so the tests stand up only the pass they render.
+// Build the instanced factory for one MaterialPassType. `depth_format`
+// defaults to Undefined (no depth attachment) for the render tests below,
+// which stand up only the color-only pass they draw. `casts_shadow` defaults
+// to false (no kShadow variant); the shadow-compile tests further down pass
+// casts_shadow=true + depth_format=Depth32Float (matching the real
+// GBuffer::kDepthFormat / SceneRenderer::kDepthFormat / shadow_map.cpp depth
+// format the engine actually uses) so the kShadow variant's pipeline gets a
+// real depth-stencil attachment instead of the zero-attachment descriptor
+// Dawn rejects — see standard_material_factory.cpp's kVariants gating of
+// RenderPassType::kShadow on FactoryDescriptor::casts_shadow.
 std::unique_ptr<MaterialInstanceFactory> MakeInstancedFactory(
     TestGpu& g, const std::string& shader_name, MaterialPassType pass,
-    RenderTargetFormats color_formats, std::vector<std::string> extra_features) {
+    RenderTargetFormats color_formats, std::vector<std::string> extra_features,
+    bool casts_shadow = false,
+    wgpu::TextureFormat depth_format = wgpu::TextureFormat::Undefined) {
   FactoryDescriptor desc;
   desc.shader_name = shader_name;
   desc.shader_path = "material/" + shader_name;
   desc.supported_geometry_types = {GeometryType::kInstancedMesh};
   desc.supported_pass_types = {pass};
   desc.color_formats = std::move(color_formats);
-  desc.depth_format = wgpu::TextureFormat::Undefined;
-  desc.casts_shadow = false;
+  desc.depth_format = depth_format;
+  desc.casts_shadow = casts_shadow;
   desc.cull_mode = wgpu::CullMode::None;  // double-sided; winding-independent
   desc.extra_features = std::move(extra_features);
   return BuildMaterialInstanceFactory(desc, g.device, g.queue, g.gen.get());
@@ -676,4 +688,119 @@ TEST_CASE("instanced G-buffer material renders N instances at N screen positions
   CHECK(center.r < 40);
   CHECK(center.g < 40);
   CHECK(center.b < 40);
+}
+
+// ===========================================================================
+// Phase B, shadow-compile proof: the render tests above build their factories
+// with casts_shadow=false, so the kShadow variant of instanced_forward.wesl /
+// instanced_gbuffer.wesl is never compiled by them — a WGSL error in either
+// shader's `@if(shadow_pass)` VS (e.g. still reading a removed per-object
+// uniform instead of `instances[instance_index]`) would ship undetected.
+// These two tests build the factory with casts_shadow=true and resolve a
+// RenderPassType::kShadow instance through MaterialInstanceCache.
+//
+// A non-null/IsValid() handle alone does NOT prove this: on this Dawn build,
+// a WGSL validation failure (confirmed by deliberately breaking the shadow VS
+// during development of this test) still yields a non-null wgpu::ShaderModule
+// / wgpu::RenderPipeline — Dawn's synchronous Create* calls return an
+// internally-invalid "error object" rather than null, surfacing the failure
+// only via the device's error-reporting channel — so
+// GpuPipelineGenerator::GetPipeline's `if (!shader_module)` / `if (!pipeline)`
+// null checks don't catch it, and CreateInstance/GetOrCreate happily hand
+// back a "valid" instance wrapping a broken pipeline. The real proof is a
+// pushed Dawn validation error scope around the compile: NoError observed
+// means the shadow pipeline genuinely compiled + reflected.
+// ===========================================================================
+
+namespace {
+
+struct CapturedError {
+  wgpu::ErrorType type = wgpu::ErrorType::NoError;
+  std::string message;
+};
+
+// Runs `fn` (expected to trigger lazy pipeline compilation) inside a Dawn
+// validation-error scope and returns what it observed. See the file comment
+// above for why this — not a non-null/IsValid() check alone — is what
+// actually proves shader compilation succeeded.
+CapturedError RunCapturingValidationErrors(TestGpu& g,
+                                           const std::function<void()>& fn) {
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+  fn();
+
+  CapturedError result;
+  bool done = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type,
+          wgpu::StringView message) {
+        if (status == wgpu::PopErrorScopeStatus::Success) {
+          result.type = type;
+          result.message = message.length > 0
+                                ? std::string(message.data, message.length)
+                                : std::string();
+        }
+        done = true;
+      });
+  while (!done) {
+    g.instance.ProcessEvents();
+  }
+  return result;
+}
+
+}  // namespace
+
+TEST_CASE("instanced forward material's shadow-pass variant compiles",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory = MakeInstancedFactory(g, "instanced_forward",
+                                      MaterialPassType::kForwardOpaque,
+                                      {wgpu::TextureFormat::BGRA8Unorm}, {},
+                                      /*casts_shadow=*/true,
+                                      wgpu::TextureFormat::Depth32Float);
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"instanced_forward_shadow"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
+
+  entt::resource<RenderingMaterialInstance> handle;
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                              MaterialPassType::kForwardOpaque,
+                              RenderPassType::kShadow, InstanceParams{});
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
+}
+
+TEST_CASE("instanced G-buffer material's shadow-pass variant compiles",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {}, /*casts_shadow=*/true, wgpu::TextureFormat::Depth32Float);
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"instanced_gbuffer_shadow"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
+
+  entt::resource<RenderingMaterialInstance> handle;
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                              MaterialPassType::kDeferred,
+                              RenderPassType::kShadow, InstanceParams{});
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
 }

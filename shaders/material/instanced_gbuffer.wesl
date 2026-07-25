@@ -65,7 +65,7 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
     let world = (m * vec4<f32>(input.pos, 1.0)).xyz;
     output.position = worldSpaceToClipSpace(world);
 
-    // Uniform-scale assumption (fine for instanced foliage): use m directly for
+    // Uniform-scale assumption (fine for instanced meshes): use m directly for
     // normal/tangent rather than the inverse-transpose.
     output.worldNormal = normalize((m * vec4<f32>(input.normal, 0.0)).xyz);
     output.worldTangent = normalize((m * vec4<f32>(input.tangent, 0.0)).xyz);
