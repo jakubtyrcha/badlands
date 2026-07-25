@@ -55,6 +55,18 @@ class RenderingMaterialInstance {
   // SetParameter.
   virtual bool BindPerObject(RenderPassContext& pass, FrameContext& frame) = 0;
 
+  // Bind a per-instance transform storage array at group 1 for an instanced
+  // draw (@builtin(instance_index) indexes it in the vertex stage). `instances`
+  // must be a `wgpu::BufferUsage::Storage` buffer of tightly-packed mat4x4<f32>
+  // world transforms; `byteOffset` is the (256-aligned) base of the sub-range
+  // to bind. Called INSTEAD of BindPerObject for instanced materials (the model
+  // matrix is per-instance, not a per-object UBO). Default no-op returning
+  // false for non-instanced materials, which use BindPerObject instead.
+  virtual bool BindInstanceData(RenderPassContext& pass, FrameContext& frame,
+                                wgpu::Buffer instances, uint64_t byteOffset) {
+    return false;
+  }
+
   // Parameter API
   virtual MaterialParameterId GetParameterId(
       const std::string& name) const = 0;

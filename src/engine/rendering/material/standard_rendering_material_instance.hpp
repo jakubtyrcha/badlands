@@ -24,6 +24,8 @@ class StandardRenderingMaterialInstance : public RenderingMaterialInstance {
 
   bool Bind(RenderPassContext& pass, FrameContext& frame) override;
   bool BindPerObject(RenderPassContext& pass, FrameContext& frame) override;
+  bool BindInstanceData(RenderPassContext& pass, FrameContext& frame,
+                        wgpu::Buffer instances, uint64_t byteOffset) override;
 
   MaterialParameterId GetParameterId(
       const std::string& name) const override;

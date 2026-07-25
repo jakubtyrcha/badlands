@@ -20,10 +20,20 @@
 
 #include <catch_amalgamated.hpp>
 #include <dawn/webgpu_cpp.h>
+#include <entt/entt.hpp>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
+#include "core/geometry_type.hpp"
 #include "core/util/cpu_image.hpp"
+#include "engine/core/camera.hpp"
 #include "engine/rendering/color_render_target.hpp"
+#include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
+#include "engine/rendering/gbuffer.hpp"
+#include "engine/rendering/material/material_instance_cache.hpp"
+#include "engine/rendering/material/material_instance_factory.hpp"
+#include "engine/rendering/material/rendering_material_instance.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/texture_readback.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
@@ -286,4 +296,384 @@ TEST_CASE("DrawIndexedIndirect honors the GPU-read instanceCount",
   CHECK(not_drawn.r < 5);
   CHECK(not_drawn.g < 5);
   CHECK(not_drawn.b < 5);
+}
+
+// ===========================================================================
+// Phase B: instanced materials, resolved through MaterialInstanceCache. Two
+// materials (an instanced G-buffer "bark" + an instanced forward "leaf") each
+// read their per-object transform from a group-1 storage array indexed by
+// @builtin(instance_index), with material constants in a group-0 UBO. Both are
+// rendered with a plain instanced DrawIndexed(indexCount, instanceCount=N) and
+// verified by GPU readback: N instances land at N distinct screen positions.
+// ===========================================================================
+namespace {
+
+constexpr uint32_t kInstTarget = 64;
+constexpr uint32_t kInstCount = 4;
+
+// A trivial orthographic frame: clip.x = 0.5*worldX, clip.y = 0.5*worldY,
+// clip.z = 0.5 (const, never Z-clipped; the renders use no depth attachment),
+// with camera at the origin (view = identity, cameraWorldPos = 0), so a world
+// XY of +/-2 maps to the full [-1,1] clip range. Ambient SH L0 is set bright so
+// the forward material shades to a clearly non-clear color regardless of the
+// sun/shadow/view angle.
+UniformData MakeOrthoFrame() {
+  UniformData u{};
+  glm::mat4 proj(0.0f);
+  proj[0][0] = 0.5f;
+  proj[1][1] = 0.5f;
+  proj[3][2] = 0.5f;  // clip.z = 0.5 for every vertex
+  proj[3][3] = 1.0f;
+  u.view = glm::mat4(1.0f);
+  u.proj = proj;
+  u.view_prev = glm::mat4(1.0f);
+  u.proj_prev = proj;
+  u.light_view_proj = glm::mat4(1.0f);
+  u.camera_world_pos = glm::vec4(0.0f);
+  u.sunDir = glm::vec4(glm::normalize(glm::vec3(0.3f, 0.8f, 0.5f)), 0.0f);
+  u.sunColor = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+  u.ambient_sh[0] = glm::vec4(30.0f, 30.0f, 30.0f, 0.0f);
+  u.near_plane = 0.1f;
+  u.far_plane = 100.0f;
+  u.screen_size = glm::vec2(float(kInstTarget), float(kInstTarget));
+  u.output_is_linear = 1u;
+  return u;
+}
+
+// N instance world transforms at the 4 quadrant centers, each a 0.35-scaled
+// quad pushed to z=-8 (so the forward material's view vector aligns with the
+// +Z quad normal). Clip centers land at (+/-0.5, +/-0.5) -> the 4 quadrants.
+std::vector<glm::mat4> MakeInstanceTransforms() {
+  const glm::vec2 centers[kInstCount] = {
+      {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+  std::vector<glm::mat4> out;
+  for (const auto& c : centers) {
+    out.push_back(glm::translate(glm::mat4(1.0f), glm::vec3(c.x, c.y, -8.0f)) *
+                  glm::scale(glm::mat4(1.0f), glm::vec3(0.35f)));
+  }
+  return out;
+}
+
+// Expected framebuffer center of each instance's quad (WebGPU y-down):
+//   fb = ((clip.xy * 0.5) + 0.5) * size, with the y axis flipped.
+std::array<std::pair<uint32_t, uint32_t>, kInstCount> ExpectedPixels() {
+  const glm::vec2 centers[kInstCount] = {
+      {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+  std::array<std::pair<uint32_t, uint32_t>, kInstCount> px{};
+  for (uint32_t i = 0; i < kInstCount; ++i) {
+    float clip_x = 0.5f * centers[i].x;
+    float clip_y = 0.5f * centers[i].y;
+    px[i].first = uint32_t((clip_x * 0.5f + 0.5f) * float(kInstTarget));
+    px[i].second = uint32_t((1.0f - (clip_y * 0.5f + 0.5f)) * float(kInstTarget));
+  }
+  return px;
+}
+
+// One kTexturedMesh quad (pos3+uv2+normal3+tangent3), z=0, +Z normal.
+std::vector<float> QuadVertices() {
+  return {
+      -1, -1, 0, 0, 0, 0, 0, 1, 1, 0, 0,  //
+      1,  -1, 0, 1, 0, 0, 0, 1, 1, 0, 0,  //
+      1,  1,  0, 1, 1, 0, 0, 1, 1, 0, 0,  //
+      -1, 1,  0, 0, 1, 0, 0, 1, 1, 0, 0,  //
+  };
+}
+
+wgpu::Buffer UploadBuffer(wgpu::Device device, const void* data, uint64_t size,
+                          wgpu::BufferUsage usage) {
+  wgpu::BufferDescriptor bd{};
+  bd.size = size;
+  bd.usage = usage | wgpu::BufferUsage::CopyDst;
+  bd.mappedAtCreation = true;
+  wgpu::Buffer buf = device.CreateBuffer(&bd);
+  std::memcpy(buf.GetMappedRange(0, size), data, size);
+  buf.Unmap();
+  return buf;
+}
+
+wgpu::TextureView SolidCube1x1(wgpu::Device device, wgpu::Queue queue,
+                               uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+  wgpu::TextureDescriptor desc{};
+  desc.size = {1, 1, 6};
+  desc.format = wgpu::TextureFormat::RGBA8Unorm;
+  desc.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+  desc.dimension = wgpu::TextureDimension::e2D;
+  wgpu::Texture tex = device.CreateTexture(&desc);
+  uint8_t px[] = {r, g, b, a};
+  for (uint32_t face = 0; face < 6; ++face) {
+    wgpu::TexelCopyBufferLayout layout{};
+    layout.bytesPerRow = 4;
+    layout.rowsPerImage = 1;
+    wgpu::TexelCopyTextureInfo dst{};
+    dst.texture = tex;
+    dst.origin = {0, 0, face};
+    wgpu::Extent3D extent = {1, 1, 1};
+    queue.WriteTexture(&dst, px, sizeof(px), &layout, &extent);
+  }
+  wgpu::TextureViewDescriptor vd{};
+  vd.dimension = wgpu::TextureViewDimension::Cube;
+  vd.arrayLayerCount = 6;
+  vd.format = wgpu::TextureFormat::RGBA8Unorm;
+  return tex.CreateView(&vd);
+}
+
+// Build the instanced factory for one MaterialPassType. `depth_format` stays
+// Undefined (no depth attachment) and `casts_shadow` false (no kShadow variant)
+// so the tests stand up only the pass they render.
+std::unique_ptr<MaterialInstanceFactory> MakeInstancedFactory(
+    TestGpu& g, const std::string& shader_name, MaterialPassType pass,
+    RenderTargetFormats color_formats, std::vector<std::string> extra_features) {
+  FactoryDescriptor desc;
+  desc.shader_name = shader_name;
+  desc.shader_path = "material/" + shader_name;
+  desc.supported_geometry_types = {GeometryType::kInstancedMesh};
+  desc.supported_pass_types = {pass};
+  desc.color_formats = std::move(color_formats);
+  desc.depth_format = wgpu::TextureFormat::Undefined;
+  desc.casts_shadow = false;
+  desc.cull_mode = wgpu::CullMode::None;  // double-sided; winding-independent
+  desc.extra_features = std::move(extra_features);
+  return BuildMaterialInstanceFactory(desc, g.device, g.queue, g.gen.get());
+}
+
+wgpu::RenderPassColorAttachment ClearAttachment(wgpu::TextureView view) {
+  wgpu::RenderPassColorAttachment ca{};
+  ca.view = view;
+  ca.loadOp = wgpu::LoadOp::Clear;
+  ca.storeOp = wgpu::StoreOp::Store;
+  ca.clearValue = {0.0, 0.0, 0.0, 1.0};
+  ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+  return ca;
+}
+
+}  // namespace
+
+TEST_CASE("instanced forward material renders N instances at N screen positions",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory = MakeInstancedFactory(g, "instanced_forward",
+                                      MaterialPassType::kForwardOpaque,
+                                      {wgpu::TextureFormat::BGRA8Unorm},
+                                      {"translucency"});
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  InstanceParams params;
+  params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  params.uniform_overrides["params"] =
+      MaterialParameterValue(glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));  // cutoff/rough
+  params.uniform_overrides["transmission"] =
+      MaterialParameterValue(glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
+
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"instanced_forward"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kForward, 0);
+  auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                                  MaterialPassType::kForwardOpaque,
+                                  RenderPassType::kForward, params);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
+  auto* inst = handle.operator->();
+
+  // Material-instance integration: instanced geometry, a group-1 storage
+  // binding, the group-2 engine set, and a settable group-0 params UBO.
+  CHECK(inst->GetGeometryType() == GeometryType::kInstancedMesh);
+  CHECK(inst->DeclaresBindGroup(1));
+  CHECK(inst->DeclaresBindGroup(2));
+  CHECK(inst->GetParameterId("tint").IsValid());
+
+  // Mesh + per-instance storage.
+  std::vector<float> verts = QuadVertices();
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  std::vector<glm::mat4> xforms = MakeInstanceTransforms();
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  wgpu::Buffer instbuf =
+      UploadBuffer(g.device, xforms.data(), xforms.size() * sizeof(glm::mat4),
+                   wgpu::BufferUsage::Storage);
+
+  // Trivial group-2 engine resources (shadow map + IBL).
+  wgpu::TextureDescriptor sd{};
+  sd.size = {1, 1, 1};
+  sd.format = wgpu::TextureFormat::Depth32Float;
+  sd.usage = wgpu::TextureUsage::TextureBinding;
+  wgpu::Texture shadow_tex = g.device.CreateTexture(&sd);
+  wgpu::TextureViewDescriptor shadow_vd{};
+  shadow_vd.aspect = wgpu::TextureAspect::DepthOnly;
+  wgpu::TextureView shadow_view = shadow_tex.CreateView(&shadow_vd);
+  wgpu::SamplerDescriptor cmp{};
+  cmp.compare = wgpu::CompareFunction::LessEqual;
+  wgpu::Sampler shadow_sampler = g.device.CreateSampler(&cmp);
+  wgpu::TextureView ibl_cube = SolidCube1x1(g.device, g.queue, 255, 255, 255, 255);
+  wgpu::Sampler linear_sampler = g.device.CreateSampler(nullptr);
+  wgpu::TextureView brdf_lut =
+      test::CreateRgbaTexture(g.device, g.queue, 1, 1, {255, 255, 0, 255})
+          .CreateView();
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+
+  ColorRenderTarget target(g.device, kInstTarget, kInstTarget,
+                           wgpu::TextureFormat::BGRA8Unorm);
+  REQUIRE(target.IsValid());
+
+  {
+    wgpu::RenderPassColorAttachment ca = ClearAttachment(target.GetView());
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &ca;
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+
+    REQUIRE(inst->Bind(pass, frame));
+
+    std::array<wgpu::BindGroupEntry, 6> g2{};
+    g2[0].binding = 0; g2[0].textureView = shadow_view;
+    g2[1].binding = 1; g2[1].sampler = shadow_sampler;
+    g2[2].binding = 2; g2[2].textureView = ibl_cube;
+    g2[3].binding = 3; g2[3].sampler = linear_sampler;
+    g2[4].binding = 4; g2[4].textureView = brdf_lut;
+    g2[5].binding = 5; g2[5].sampler = linear_sampler;
+    wgpu::BindGroup g2bg =
+        frame.CreateBindGroup(inst->GetPipeline().GetBindGroupLayout(2), g2);
+    pass.SetBindGroup(2, g2bg);
+
+    REQUIRE(inst->BindInstanceData(pass, frame, instbuf, 0));
+
+    pass.SetVertexBuffer(0, vbuf);
+    pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
+    pass.DrawIndexed(6, kInstCount);
+    pass.End();
+  }
+
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage img = rb.ReadTextureSync(target.GetTexture(), kInstTarget,
+                                    kInstTarget, wgpu::TextureFormat::BGRA8Unorm);
+
+  auto expected = ExpectedPixels();
+  for (uint32_t i = 0; i < kInstCount; ++i) {
+    CpuImage::Color c = img.GetPixel(expected[i].first, expected[i].second);
+    INFO("instance " << i << " at (" << expected[i].first << ","
+                     << expected[i].second << ") rgb = " << (int)c.r << ","
+                     << (int)c.g << "," << (int)c.b);
+    CHECK(c.r > 180);
+    CHECK(c.g > 180);
+    CHECK(c.b > 180);
+  }
+  // The gap between the four quadrant quads stays the clear color.
+  CpuImage::Color center = img.GetPixel(kInstTarget / 2, kInstTarget / 2);
+  INFO("center rgb = " << (int)center.r << "," << (int)center.g << ","
+                       << (int)center.b);
+  CHECK(center.r < 40);
+  CHECK(center.g < 40);
+  CHECK(center.b < 40);
+}
+
+TEST_CASE("instanced G-buffer material renders N instances at N screen positions",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {});
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  InstanceParams params;
+  params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"instanced_gbuffer"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kGBuffer, 0);
+  auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                                  MaterialPassType::kDeferred,
+                                  RenderPassType::kGBuffer, params);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
+  auto* inst = handle.operator->();
+
+  CHECK(inst->GetGeometryType() == GeometryType::kInstancedMesh);
+  CHECK(inst->DeclaresBindGroup(1));       // per-instance storage array
+  CHECK_FALSE(inst->DeclaresBindGroup(2));  // deferred variant has no group 2
+  CHECK(inst->GetParameterId("tint").IsValid());
+
+  std::vector<float> verts = QuadVertices();
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  std::vector<glm::mat4> xforms = MakeInstanceTransforms();
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  wgpu::Buffer instbuf =
+      UploadBuffer(g.device, xforms.data(), xforms.size() * sizeof(glm::mat4),
+                   wgpu::BufferUsage::Storage);
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+
+  // G-buffer targets. Only the albedo target (BGRA8) is read back; its value is
+  // deterministic (albedo texture * tint, no lighting).
+  ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kInstTarget, kInstTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kInstTarget, kInstTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(albedo_t.IsValid());
+
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        ClearAttachment(normals_t.GetView()),
+        ClearAttachment(albedo_t.GetView()),
+        ClearAttachment(material_t.GetView())};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+
+    REQUIRE(inst->Bind(pass, frame));
+    REQUIRE(inst->BindInstanceData(pass, frame, instbuf, 0));
+    pass.SetVertexBuffer(0, vbuf);
+    pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
+    pass.DrawIndexed(6, kInstCount);
+    pass.End();
+  }
+
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage img = rb.ReadTextureSync(albedo_t.GetTexture(), kInstTarget,
+                                    kInstTarget, GBuffer::kAlbedoFormat);
+
+  auto expected = ExpectedPixels();
+  for (uint32_t i = 0; i < kInstCount; ++i) {
+    CpuImage::Color c = img.GetPixel(expected[i].first, expected[i].second);
+    INFO("instance " << i << " at (" << expected[i].first << ","
+                     << expected[i].second << ") rgb = " << (int)c.r << ","
+                     << (int)c.g << "," << (int)c.b);
+    CHECK(c.r > 180);
+    CHECK(c.g > 180);
+    CHECK(c.b > 180);
+  }
+  CpuImage::Color center = img.GetPixel(kInstTarget / 2, kInstTarget / 2);
+  INFO("center rgb = " << (int)center.r << "," << (int)center.g << ","
+                       << (int)center.b);
+  CHECK(center.r < 40);
+  CHECK(center.g < 40);
+  CHECK(center.b < 40);
 }
