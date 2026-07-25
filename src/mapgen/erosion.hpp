@@ -11,11 +11,12 @@ namespace badlands::mapgen {
 
 struct ErosionParams {
   int sim_resolution = 512;   // sim grid texels (square, excl. pad)
-  // v1.2: measured A/B vs the old 80x1 sim on seeds 1-3 @ res/sim 512 —
-  // max heightmap delta 28/255, water mask differs by 1 texel, 2x faster.
-  // See spec v1.2 addendum.
-  int iterations = 40;
-  float dt = 2.0f;            // nominal time unit
+  // v1.2: iterations x dt is the age product; the implicit solve is stable at
+  // large dt, so fewer/bigger steps trade only drainage re-adaptation. 80x1 ->
+  // 40x2 measured near-identical (heightmap delta <= 28/255, water mask 1
+  // texel); user judged the 10x8 ladder rung by preview and picked it.
+  int iterations = 10;
+  float dt = 8.0f;            // nominal time unit
   float m = 0.5f;             // stream-power area exponent (slope exponent n fixed at 1)
   float k_sediment = 5e-3f;
   float k_bedrock = 5e-4f;
