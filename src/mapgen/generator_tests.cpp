@@ -69,7 +69,7 @@ TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
     p.world_size_m = 512.0f;
     // Match the sim grid to the output resolution (default sim_resolution=512
     // would run a much bigger erosion sim per call for no benefit here);
-    // iterations stays at its production default (80).
+    // iterations stays at its production default (40x dt2, v1.2).
     p.erosion.sim_resolution = 128;
     const auto a = generate_map(p);
     const double n = static_cast<double>(a.biome.data.size());
@@ -81,13 +81,13 @@ TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
     // Order statistics are exact up to ties (none in float noise), so a tight
     // margin holds for ANY seed — that is the whole point of quantile cutoffs.
     // Plains gets a much wider margin: erosion is a fixed-iteration "young
-    // terrain" sim, not run to drainage equilibrium, so at iterations=80 a
-    // seed-dependent amount of transiently undrained low ground is still
-    // flooded (measured up to ~10 points of plains fraction across seeds
-    // 1-3, well beyond the ~3% carve_cavities seed fraction alone) and gets
-    // stamped Lake. Mountain is never touched: cavities only ever carve the
-    // BOTTOM lake_frac quantile of bedrock, disjoint from the top-quantile
-    // Mountain cutoff.
+    // terrain" sim, not run to drainage equilibrium, so at the production
+    // default a seed-dependent amount of transiently undrained low ground is
+    // still flooded (measured up to ~10 points of plains fraction across
+    // seeds 1-3, well beyond the ~3% carve_cavities seed fraction alone) and
+    // gets stamped Lake. Mountain is never touched: cavities only ever carve
+    // the BOTTOM lake_frac quantile of bedrock, disjoint from the
+    // top-quantile Mountain cutoff.
     REQUIRE(plains / n ==
             Catch::Approx(badlands::mapgen::kPlainsFrac).margin(0.15));
     REQUIRE(mountain / n ==
