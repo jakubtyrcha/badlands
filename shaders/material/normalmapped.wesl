@@ -29,7 +29,7 @@ import package::common::frame::{frame, worldCameraOffsetedSpaceToClipSpace};
 @if(shadow_pass)
 import package::common::frame::{frame, worldCameraOffsetedSpaceToLightClipSpace};
 @if(!shadow_pass)
-import package::common::gbuffer_encode::{GBufferOutput, encodeOctahedron};
+import package::common::gbuffer_encode::{GBufferOutput, encodeOctahedron, packNormalMappedGBuffer};
 
 // Sphere mode imports
 @if(sphere_mode)
@@ -168,32 +168,12 @@ fn vs_main(input: VertexInput) -> VertexOutputShadow {
 @if(!shadow_pass && !sphere_mode)
 @fragment
 fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
-    var output: GBufferOutput;
-
-    // Reconstruct TBN matrix from interpolated vectors
-    let N = normalize(input.worldNormal);
-    let T = normalize(input.worldTangent - N * dot(input.worldTangent, N)); // Gram-Schmidt
-    let B = cross(N, T);
-    let TBN = mat3x3<f32>(T, B, N);
-
     // Sample textures
     let albedo = textureSample(albedo_texture, material_sampler, input.uv).rgb;
     let normalMap = textureSample(normal_texture, material_sampler, input.uv).rgb;
     let arm = textureSample(arm_texture, material_sampler, input.uv);
-    let roughness = arm.g;
-    let ao = arm.r;
 
-    // Unpack normal from [0,1] to [-1,1] range. Arrives GL-convention from
-    // the loader (see the file-level Textures comment) -- no flip needed.
-    let tangentNormal = normalMap * 2.0 - 1.0;
-    let worldNormal = normalize(TBN * tangentNormal);
-
-    output.normals = encodeOctahedron(worldNormal);
-    output.albedo = vec4<f32>(albedo, 1.0);
-    // Material: R=roughness, G=shadow (1.0 = no shadow), B=baked AO, A=reserved
-    output.material = vec4<f32>(roughness, 1.0, ao, 0.0);
-
-    return output;
+    return packNormalMappedGBuffer(input.worldNormal, input.worldTangent, albedo, normalMap, arm);
 }
 
 // Sphere mode: GBuffer pass fragment shader

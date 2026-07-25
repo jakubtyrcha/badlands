@@ -37,6 +37,18 @@
 
 namespace badlands {
 
+// Select the material-constants UBO from a shader's reflected uniform buffers.
+//
+// Non-instanced materials keep their material constants in the group-1
+// per-object UBO (alongside the model matrix). Instanced materials move the
+// per-object transform to a group-1 storage array, so their material constants
+// live in a group-0 UBO instead — the reflected group-0 buffer that is NOT the
+// imported `frame` UBO (which is always group 0, binding 0). Returns nullptr if
+// the shader declares no such buffer.
+const ReflectedUniformBuffer* SelectMaterialParamsBuffer(
+    const std::vector<ReflectedUniformBuffer>& buffers,
+    GeometryType geometry_type);
+
 // A texture+sampler binding pair at explicit slots
 struct TextureBinding {
   uint32_t group;

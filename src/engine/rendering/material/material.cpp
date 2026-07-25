@@ -43,6 +43,11 @@ RenderPipelineDeclaration MeshRenderingMaterial::BuildDeclaration(
       decl.vertex_layout = VertexLayout::kTerrainCluster;
       break;
     case GeometryType::kTexturedMesh:
+    case GeometryType::kInstancedMesh:
+      // kInstancedMesh's MESH vertex buffer is the normal 11-float textured
+      // layout — instances are NOT a vertex stream; the per-instance
+      // transform is read from a group-1 storage array in the vertex stage
+      // (gated by the "instanced" feature pushed below).
       decl.vertex_layout = VertexLayout::kTexturedMesh;
       break;
     default:
@@ -66,6 +71,9 @@ RenderPipelineDeclaration MeshRenderingMaterial::BuildDeclaration(
   decl.features = base_features_;
   if (geometry_type == GeometryType::kSphericalMesh) {
     decl.features.push_back("sphere_mode");
+  }
+  if (geometry_type == GeometryType::kInstancedMesh) {
+    decl.features.push_back("instanced");
   }
   if (pass_type == RenderPassType::kShadow) {
     decl.features.push_back("shadow_pass");

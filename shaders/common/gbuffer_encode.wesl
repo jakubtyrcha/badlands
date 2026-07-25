@@ -22,3 +22,34 @@ fn encodeOctahedron(n: vec3<f32>) -> vec2<f32> {
     }
     return oct;
 }
+
+// Shared tangent-space-normal-mapped GBuffer assembly: Gram-Schmidt TBN
+// reconstruction + tangent-space normal unpack + octahedron encode + GBuffer
+// packing. `albedo` and `normalMap`/`arm` are the caller's own texture
+// samples (2D, cubemap, and/or tint-multiplied — sampling differs by caller;
+// the assembly below does not), so this is shared by normalmapped.wesl's 2D
+// fs_main and instanced_gbuffer.wesl's fs_main.
+fn packNormalMappedGBuffer(worldNormal: vec3<f32>, worldTangent: vec3<f32>,
+                           albedo: vec3<f32>, normalMap: vec3<f32>, arm: vec4<f32>) -> GBufferOutput {
+    // Reconstruct TBN matrix from interpolated vectors
+    let N = normalize(worldNormal);
+    let T = normalize(worldTangent - N * dot(worldTangent, N)); // Gram-Schmidt
+    let B = cross(N, T);
+    let TBN = mat3x3<f32>(T, B, N);
+
+    let roughness = arm.g;
+    let ao = arm.r;
+
+    // Unpack normal from [0,1] to [-1,1] range. Arrives GL-convention from
+    // the loader (see normalmapped.wesl's file-level Textures comment) -- no
+    // flip needed.
+    let tangentNormal = normalMap * 2.0 - 1.0;
+    let outNormal = normalize(TBN * tangentNormal);
+
+    var output: GBufferOutput;
+    output.normals = encodeOctahedron(outNormal);
+    output.albedo = vec4<f32>(albedo, 1.0);
+    // Material: R=roughness, G=shadow (1.0 = no shadow), B=baked AO, A=reserved
+    output.material = vec4<f32>(roughness, 1.0, ao, 0.0);
+    return output;
+}

@@ -55,6 +55,22 @@ class RenderingMaterialInstance {
   // SetParameter.
   virtual bool BindPerObject(RenderPassContext& pass, FrameContext& frame) = 0;
 
+  // Bind the group-1 instanced-draw resources: the WHOLE compacted transform
+  // buffer (@0) + the GPU-computed per-bucket base offsets (@1). The vertex
+  // stage reads `compacted[bucketBase[bucketId] + instance_index]`, where
+  // `bucketId` is a group-0 material param set per bucket draw — so the CPU
+  // never needs the (prefix-summed) base and binds both buffers WHOLE, at
+  // offset 0. Both must be `wgpu::BufferUsage::Storage`: `compacted` a densely
+  // packed mat4x4<f32> array, `bucket_base` a u32 array (one base per bucket).
+  // The single-bucket case is `bucket_base = [0]`, `bucketId = 0`. Called
+  // INSTEAD of BindPerObject for instanced materials. Default no-op returning
+  // false for non-instanced materials, which use BindPerObject instead.
+  virtual bool BindInstanceData(RenderPassContext& pass, FrameContext& frame,
+                                wgpu::Buffer compacted,
+                                wgpu::Buffer bucket_base) {
+    return false;
+  }
+
   // Parameter API
   virtual MaterialParameterId GetParameterId(
       const std::string& name) const = 0;

@@ -149,6 +149,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/material/material_instance_cache.cpp
     src/engine/rendering/material/standard_material_factory.cpp
     src/engine/rendering/material/standard_rendering_material_instance.cpp
+    src/engine/rendering/gpu_instance_renderer.cpp
     src/engine/rendering/geometry/aabb.cpp
     src/engine/rendering/geometry/cube_sphere.cpp
     src/engine/rendering/geometry/textured_mesh_builders.cpp
@@ -947,6 +948,30 @@ if(APPLE)
     target_link_options(badlands_resolve_composite_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_resolve_composite_tests COMMAND badlands_resolve_composite_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_gpu_instance_tests: GPU-driven instanced-rendering feature, Phase A
+# (primitives spike) — de-risks atomics in a compute shader
+# (shaders/tests/atomic_append_test.wesl, the first shader in this repo to use
+# atomic<u32>), DrawIndexedIndirect (RenderPassContext::DrawIndexedIndirect +
+# shaders/tests/indirect_draw_test.wesl), and the reusable BufferReadback test
+# helper (src/engine/tests/buffer_readback.*) that both of the above need.
+# Later phases (GPU cull/LOD/compaction) extend this same target. Needs a
+# working GPU adapter (Metal on macOS) + the shaders/ dir (WORKING_DIRECTORY =
+# repo root).
+add_executable(badlands_gpu_instance_tests
+    src/engine/tests/gpu_instance_tests.cpp
+    src/engine/tests/buffer_readback.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_gpu_instance_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_gpu_instance_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_gpu_instance_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_gpu_instance_tests COMMAND badlands_gpu_instance_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
 # — the SampleHeight/RaycastTerrain queries behind mouse picking. No GPU: only
