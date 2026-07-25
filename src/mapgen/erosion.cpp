@@ -26,6 +26,24 @@ Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock
   const float t_lake = v[i_lake];
   for (size_t i = 0; i < n; ++i) mask.data[i] = bedrock.data[i] < t_lake ? 1 : 0;
 
+  // v1.3.1: clear a kBasinBorderMarginTexels ring at the sim-grid edge from
+  // the mask before carving. route_flow's priority-flood seeds every border
+  // cell at its own height, so a basin mask that reaches the border would
+  // "spill" through it at bowl-floor height instead of holding water. The
+  // uncarved ring keeps original terrain height and dams the basin; the EDT
+  // cone below shallows naturally toward it. See
+  // docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md,
+  // "Basin border rim (v1.3.1)".
+  const int w = mask.width, ht = mask.height;
+  for (int y = 0; y < ht; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const bool in_margin = x < kBasinBorderMarginTexels || y < kBasinBorderMarginTexels ||
+                              x >= w - kBasinBorderMarginTexels ||
+                              y >= ht - kBasinBorderMarginTexels;
+      if (in_margin) mask.at(x, y) = 0;
+    }
+  }
+
   // Invert: seeds are non-basin texels, so distance_to_mask gives each basin
   // texel its exact EDT distance to the nearest rim/dry cell (0 outside the
   // basin, since every non-basin cell is its own seed).

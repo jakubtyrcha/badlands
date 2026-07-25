@@ -49,6 +49,16 @@ struct ErosionParams {
 inline constexpr int kPadTexels = 16;      // sim-grid margin, cropped on output
 inline constexpr float kEpsilonM = 1e-4f;  // flood epsilon per step
 inline constexpr float kMicroFillCapM = 0.75f;  // deepest depression micro_fill may raise
+// v1.3.1: basins touching the sim-grid border are breached by construction —
+// border cells seed route_flow's priority-flood at their own (possibly
+// carved-to-basin-floor) height, so a basin whose mask reaches the border
+// "spills" through the border at bowl-floor height instead of holding water.
+// carve_cavities excludes this many texels of ring at the sim-grid edge from
+// the basin mask before carving, so the ring keeps its original terrain
+// height and acts as a dam; the EDT cone then shallows naturally toward it.
+// See docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md,
+// "Basin border rim (v1.3.1)".
+inline constexpr int kBasinBorderMarginTexels = 3;
 
 // Carve the bottom lake_frac quantile of bedrock into inverted-cone basins:
 // depth = slope_m_per_m * (exact EDT world-meter distance to the nearest

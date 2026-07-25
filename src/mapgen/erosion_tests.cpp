@@ -1,6 +1,8 @@
 #include <catch_amalgamated.hpp>
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 #include "mapgen/erosion.hpp"
 #include "mapgen/generator.hpp"
 #include "mapgen/hydrology.hpp"
@@ -50,7 +52,14 @@ TEST_CASE("carve_cavities: coverage ~= lake_frac, depth == slope * EDT-to-rim, o
     const float d = brute_force_dist_to_non_mask(mask, xi, yi, texel_m);
     REQUIRE(cut == Catch::Approx(slope * d).margin(1e-3f));
   }
-  REQUIRE(carved / mask.data.size() == Catch::Approx(0.05).margin(0.005));
+  // v1.3.1: this fixture's bedrock is just the flattened linear index
+  // (monotonic in y*100+x), so the raw 5% quantile is exactly rows y=0..4
+  // (500 cells) -- and the bedrock minimum sits at corner (0,0), the
+  // deliberately adversarial case for the border-margin rim. The
+  // kBasinBorderMarginTexels=3 ring clips: rows y<3 are dropped entirely
+  // (0.05 -> the top 2 surviving rows), and within those 2 rows, x<3 and
+  // x>=97 are also dropped -- 2 rows * 94 cols = 188 cells / 10000.
+  REQUIRE(carved / mask.data.size() == Catch::Approx(0.0188).margin(1e-4));
 }
 
 TEST_CASE("carve_cavities: single circular basin center depth ~= slope * radius") {
@@ -106,7 +115,100 @@ TEST_CASE("carve_cavities: lake_frac > 1 clamped to 1, no crash") {
     REQUIRE(cut >= 0.0f);  // only lowers
   }
   const double coverage = carved / mask.data.size();
-  REQUIRE(coverage > 0.9);  // clamped to 1.0: nearly everything carved (all but max)
+  // v1.3.1: the kBasinBorderMarginTexels rim is excluded from the mask
+  // regardless of quantile, so full coverage now tops out at (interior area -
+  // 1) / total, not ~1.0. Interior is (50 - 2*margin)^2.
+  const int interior = (50 - 2 * kBasinBorderMarginTexels) * (50 - 2 * kBasinBorderMarginTexels);
+  const double expected_max = (interior - 1) / 2500.0;
+  REQUIRE(coverage == Catch::Approx(expected_max).margin(0.01));
+}
+
+TEST_CASE("carve_cavities: v1.3.1 — mask never touches the border margin ring") {
+  // Same adversarial ramp fixture as the coverage/EDT-oracle test above: the
+  // bedrock minimum sits exactly at corner (0,0), so pre-fix the bottom-5%
+  // quantile mask includes border cells there. RED pre-fix: mask.at(0,0) (and
+  // its neighborhood) is 1.
+  Field2D<float> bedrock(100, 100);
+  for (int y = 0; y < 100; ++y)
+    for (int x = 0; x < 100; ++x)
+      bedrock.at(x, y) = (y * 100 + x) / 9999.0f;
+  Field2D<float> B(100, 100, 50.0f);
+  const auto mask = carve_cavities(B, bedrock, 0.05f, 0.25f, {1.0f, 1.0f});
+
+  int carved = 0;
+  for (int y = 0; y < 100; ++y) {
+    for (int x = 0; x < 100; ++x) {
+      const bool in_margin = x < kBasinBorderMarginTexels || y < kBasinBorderMarginTexels ||
+                              x >= 100 - kBasinBorderMarginTexels ||
+                              y >= 100 - kBasinBorderMarginTexels;
+      if (in_margin) {
+        REQUIRE(mask.at(x, y) == 0);
+      } else if (mask.at(x, y)) {
+        ++carved;
+      }
+    }
+  }
+  REQUIRE(carved > 0);  // interior basin still carved
+}
+
+TEST_CASE("carve_cavities: v1.3.1 — boundary basin holds water instead of "
+          "draining through the border") {
+  // bedrock = distance from the middle of the LEFT edge -> the bottom
+  // quantile is a basin centered ON x=0, touching the grid border by
+  // construction. Pre-fix, the basin's deepest point (its geometric center,
+  // (0, 20)) IS a border cell, so the priority-flood seeds the flood at the
+  // bowl floor and the whole bowl drains dry through it. Post-fix, the
+  // uncarved kBasinBorderMarginTexels rim (including the x=0 column) keeps
+  // its original (uncarved) height, forming a dam the flood can't breach.
+  constexpr int n = 40;
+  Field2D<float> bedrock(n, n);
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const float dx = static_cast<float>(x), dy = static_cast<float>(y) - 20.0f;
+      bedrock.at(x, y) = std::sqrt(dx * dx + dy * dy);
+    }
+  Field2D<float> B(n, n, 0.0f);  // flat plate: any carve is a genuine local low
+  const float slope = 0.5f;
+  const float texel = 1.0f;
+  const auto mask = carve_cavities(B, bedrock, 0.1f, slope, {texel, texel});
+
+  // Sanity: the RAW quantile (pre-margin-clip) does reach the border --
+  // otherwise this fixture wouldn't exercise the regression at all. Recompute
+  // the same quantile threshold carve_cavities uses internally, independent
+  // of its (now margin-clipped) returned mask.
+  {
+    std::vector<float> v = bedrock.data;
+    const size_t n2 = v.size();
+    const size_t i_lake = static_cast<size_t>(0.1f * (n2 - 1));
+    std::nth_element(v.begin(), v.begin() + i_lake, v.end());
+    REQUIRE(bedrock.at(0, 20) < v[i_lake]);  // basin center is in the raw quantile
+  }
+
+  const auto routing = route_flow(B, texel, kEpsilonM);
+  int deep_wet = 0;
+  for (int i = 0; i < n * n; ++i) {
+    if (!mask.data[i]) continue;
+    if (!routing.in_lake[i]) continue;
+    const float fill = routing.water_level[i] - B.data[i];
+    if (fill > 0.5f) ++deep_wet;
+  }
+  REQUIRE(deep_wet > 0);  // the rim holds water where pre-fix the flood drained it
+}
+
+TEST_CASE("carve_cavities: v1.3.1 — rim exclusion is deterministic") {
+  constexpr int n = 40;
+  Field2D<float> bedrock(n, n);
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const float dx = static_cast<float>(x), dy = static_cast<float>(y) - 20.0f;
+      bedrock.at(x, y) = std::sqrt(dx * dx + dy * dy);
+    }
+  Field2D<float> B1(n, n, 0.0f);
+  Field2D<float> B2(n, n, 0.0f);
+  const auto mask1 = carve_cavities(B1, bedrock, 0.1f, 0.5f, {1.0f, 1.0f});
+  const auto mask2 = carve_cavities(B2, bedrock, 0.1f, 0.5f, {1.0f, 1.0f});
+  REQUIRE(mask1.data == mask2.data);
+  REQUIRE(B1.data == B2.data);
 }
 
 TEST_CASE("init_sediment: tapers off plains, zero in basins, never negative") {
