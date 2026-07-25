@@ -60,10 +60,11 @@ void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot
     // guaranteed-wake event that feeds should_wake (docs/design/
     // intention-contract.html §2). This is the single choke point both
     // damage sites (fire_attack's melee branch, advance_projectiles' ranged
-    // resolution) route through, so it is the one place a DamageTaken event needs
-    // writing. push_inbox_event no-ops for a non-hero victim (no EventInbox),
-    // which is what makes "an inbox only if hero" automatic rather than a
-    // check here.
+    // resolution) route through, so it is the one place a DamageTaken event
+    // needs writing. push_inbox_event no-ops for an EventInbox-less victim
+    // (critters/townfolk); heroes AND, since the single-gateway cutover,
+    // monsters too (heroes.cpp's spawn recipe) carry one, so this is
+    // automatic rather than a check here.
     entt::entity victim = entity_for_slot(game, static_cast<int32_t>(target_slot));
     if (victim != entt::null) {
         InboxEvent ev;

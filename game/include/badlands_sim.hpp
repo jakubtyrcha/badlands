@@ -698,6 +698,7 @@ enum class CommandKindId : int32_t {
     Deposit,
     AttackBuilding,
     Chat,
+    Engage,  // hold at range of a live entity target (single-gateway combat's engagement executor)
 };
 
 struct CommandRecord {

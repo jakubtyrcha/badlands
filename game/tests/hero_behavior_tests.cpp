@@ -196,19 +196,25 @@ TEST_CASE("hero_behavior: a spawned rat flips idle heroes into engaging it") {
 
     spawn_creature_into(g, CreatureId::Rat, /*team=*/1, {1.5f, kCastleSpawnZ - 5.0f});
 
-    // Combat is a host-level pre-empt, not a brain decision (sim.cpp's think
-    // dispatch: combat_preempt is checked BEFORE should_wake/tick_wasm_brain,
-    // and claims the tick outright whenever nearest_enemy finds a target --
-    // no SetBehavior involved at all). So HeroSimulationState.behavior is not
-    // the signal to watch here -- what visibly changes is that a hero stops
-    // holding position and moves to engage: MoveTarget flips from "none" to
-    // "chase this entity" the very tick an enemy exists, well within a
-    // handful of ticks, and an actual Attack follows once it closes the gap.
+    // Single-gateway combat (docs/superpowers/specs/2026-07-25-contract-v3-
+    // alignment-design.md): engagement is now a BRAIN decision, not a
+    // host-level pre-empt (combat_preempt is deleted) -- should_wake's own
+    // high-stakes clause (threat_was_present/MeleeLock, intention.h) means
+    // the wasm brain is consulted every tick a fight is on, restates
+    // BL_INT_ATTACK, and the engine's engagement executor (apply_intention's
+    // Attack case, intention.cpp) is what actually moves the hero (via
+    // enqueue_engage, command.h). What visibly changes: CurrentIntention
+    // flips to Attack, and MoveTarget stops holding position and starts
+    // tracking the rat (Kind::Entity, not "none") -- both within a handful
+    // of ticks of the rat coming into view, and an actual Attack command
+    // follows once it closes the gap.
     bool engaged = false;
     for (int i = 0; i < 10 && !engaged; ++i) {
         tick_world(g, 1.0f / 30.0f);
         for (entt::entity e : heroes) {
-            engaged = engaged || g.registry.get<MoveTarget>(e).kind == MoveTarget::Kind::Entity;
+            const bool attacking = g.registry.get<CurrentIntention>(e).kind == IntentionKind::Attack;
+            const bool tracking = g.registry.get<MoveTarget>(e).kind == MoveTarget::Kind::Entity;
+            engaged = engaged || (attacking && tracking);
         }
     }
     CHECK(engaged);

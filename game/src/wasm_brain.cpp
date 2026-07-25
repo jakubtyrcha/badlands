@@ -410,10 +410,6 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // suggestion is decoded/adopted (the action-resolver loop, this
     // function's tail).
     runtime.pending_actions.clear();
-    // Reset alongside pending_actions -- see WasmBrainRuntime's own doc
-    // comment (wasm_brain.h) on why a single shared bool is safe here. Set
-    // true below only if this wake's drain actually resolves a BL_ACT_ATTACK.
-    runtime.attack_action_resolved_this_wake = false;
 
     BlSuggestionWire out{};
     const int32_t rc =
@@ -443,22 +439,15 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     note_think_outcome(game, slot, adopted);
 
     // v3 action channel: drain THIS wake's bl_enqueue_action calls, in call
-    // order, through resolve_action (game/src/intention.h) -- the same
-    // gateway a future simple/engine-side brain would call. Soft convention,
+    // order, through resolve_action (game/src/intention.h) -- the single
+    // gateway every swing goes through (the simple monster brain,
+    // monster_brain.cpp, calls the exact same function). Soft convention,
     // not enforced here: multiple actions are allowed per wake, and an
     // invalid one warns + drops without touching the suggestion just
     // adopted above (resolve_action never touches CurrentIntention) or the
     // rest of this batch.
     for (const PendingAction& action : runtime.pending_actions) {
-        const bool resolved =
-            resolve_action(game, slot, AgentAction{action.kind, action.target_slot, action.arg});
-        // TRANSITIONAL (V4; see WasmBrainRuntime::attack_action_resolved_this_wake's
-        // own doc comment, wasm_brain.h): records "this wake already swung"
-        // for sim.cpp's combat_preempt to consume right after this call
-        // returns, so its own legacy auto-swing doesn't double up.
-        if (resolved && action.kind == BL_ACT_ATTACK) {
-            runtime.attack_action_resolved_this_wake = true;
-        }
+        resolve_action(game, slot, AgentAction{action.kind, action.target_slot, action.arg});
     }
 }
 

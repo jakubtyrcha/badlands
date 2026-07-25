@@ -2,7 +2,7 @@
 
 #include "badlands_sim.hpp"  // BuildingKind
 #include "brain_abi.h"       // BL_ACT_*
-#include "combat.h"          // attack_usable, select_target
+#include "combat.h"          // attack_usable, select_target, engagement_range
 #include "command.h"         // CommandKind, Command, enqueue_move_to, enqueue_set_behavior
 #include "components.h"
 #include "game_state.h"      // BadlandsGame, entity_for_slot, slot_for_entity
@@ -103,6 +103,49 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // comments for why they are split.
     CurrentIntention& ci = reg.get<CurrentIntention>(e);
 
+    // Single-gateway combat's engagement executor (docs/superpowers/specs/
+    // 2026-07-25-contract-v3-alignment-design.md §2): "fight whatever's
+    // nearest" has no distinguishing field (is_identical_restatement, below,
+    // always resumes an Attack restatement) so its chase-the-target half
+    // cannot live inside the one-shot adopt path in the switch below -- it
+    // has to refresh on EVERY call this wake suggests Attack, restate
+    // included, which is why it runs here, ahead of the restate-resume
+    // short-circuit. A LIVE select_target scan, not the per-tick
+    // nearest_enemy_scratch cache (game_state.h): this runs inside the same
+    // think pass the cache was built for (before apply_commands resolves
+    // anything this tick), the same guarantee the deleted combat_preempt's
+    // own cache read relied on, but paying for one extra live scan here
+    // (only on an actual combat wake, should_wake-gated) is simpler than
+    // threading the cache's hero-only-shaped guard through this seam too.
+    // enqueue_engage (command.h) is a LOGGED Kind::Entity hold, not a
+    // one-shot Kind::Point walk to a precomputed offset -- it tracks the
+    // target's live position every plan_paths pass and stops at exactly
+    // engagement_range, with no arrival-radius slop (see its own doc
+    // comment for why that distinction matters).
+    //
+    // No swing here, ever: adoption/restatement is engagement-only. (V5
+    // mandate: this case used to also push a same-tick auto-pick swing --
+    // param_a = -1, bypassing resolve_action -- a live double-swing bug
+    // whenever the target was already in range at the moment Attack was
+    // first adopted. Deleted outright; swings come exclusively from
+    // BL_ACT_ATTACK actions through resolve_action, below.) The
+    // wake-INDEPENDENT abort (no living enemy anywhere) is
+    // advance_intentions' job, below -- a hero/monster's next wake is not
+    // guaranteed the instant its opponent dies (should_wake's high-stakes
+    // clause dies with the same tick the ThreatSighted pass stops finding
+    // one), so the engine must be able to notice and end the intention
+    // without waiting for this function to run again.
+    if (intent.kind == IntentionKind::Attack) {
+        if (const entt::entity target = select_target(game, e); target != entt::null) {
+            const Combatant& cb = reg.get<Combatant>(e);
+            const Attacks& atk = reg.get<Attacks>(e);
+            enqueue_engage(game, slot, slot_for_entity(game, target), engagement_range(cb, atk));
+        }
+        // target == null: nothing to chase this call -- advance_intentions'
+        // Attack case will catch it (no living enemy -> IntentionEnded)
+        // without this function needing to do anything more here.
+    }
+
     // v3 restate-resume: an incoming suggestion identical to what's already
     // running is a fresh yield with a fresh hint, not a new decision (the
     // engine diffs) -- resume WITHOUT re-running the kind's producer or
@@ -136,14 +179,9 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
             break;
 
         case IntentionKind::Attack:
-            // Actor-only: melee whatever this hero is already engaged with.
-            // UINT32_MAX -> fire_attack picks the nearest enemy, same as
-            // every other producer that names none. param_a = -1 (explicit,
-            // not Command::param_a's own 0 default): this is the legacy
-            // auto-pick path (fire_attack, combat.h), not a choice of a
-            // specific attack index -- resolve_action (above) is the only
-            // producer that ever names one.
-            game.command_queue.push_back({CommandKind::Attack, slot, UINT32_MAX, {0.0f, 0.0f}, -1});
+            // Engagement handled unconditionally above (it must run on a
+            // restate too, so it cannot live only here). Adoption itself is
+            // a pure CurrentIntention stamp -- no command of its own.
             break;
 
         case IntentionKind::Shoot: {
@@ -305,6 +343,20 @@ bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action
     entt::entity target = entt::null;
     uint32_t resolved_target_slot = UINT32_MAX;
     if (action.target_slot != UINT32_MAX) {
+        // No adoption re-check on this path (mandate carried from V4's
+        // review): a named target_slot is accepted without confirming the
+        // actor's CurrentIntention.kind is actually Attack right now. Inert
+        // today, not unguarded by oversight -- every LIVE producer of a
+        // named-target BL_ACT_ATTACK (hero.nim's bl_enqueue_action, this
+        // brain's own monster_think) calls apply_intention(Attack) in the
+        // SAME wake, before draining pending_actions/calling resolve_action,
+        // and Attack currently has zero rejection paths (apply_intention's
+        // Attack case always adopts) -- so by construction, ci->kind is
+        // already Attack for the actor by the time either producer's named
+        // action reaches here. If a future intention kind gains a rejection
+        // path that a producer could race against its own action call, this
+        // needs a real gate (mirroring the UINT32_MAX branch's own check,
+        // below) -- flagging rather than adding an unreachable check now.
         target = entity_for_slot(game, static_cast<int32_t>(action.target_slot));
         resolved_target_slot = action.target_slot;
     } else {
@@ -443,6 +495,26 @@ void advance_intentions(BadlandsGame& game) {
                 break;
 
             case IntentionKind::Attack:
+                // Wake-INDEPENDENT abort: Attack is untargeted (actor-only,
+                // "fight whatever's nearest" -- apply_intention's own
+                // comment above), so there is no single named target to
+                // check for death/goneness the way Shoot does above; the
+                // equivalent condition is "no living enemy exists anywhere
+                // for this actor to fight" (select_target/nearest_enemy
+                // returns null). Runs every tick regardless of whether a
+                // wake happened this tick -- the engagement executor
+                // (apply_intention's Attack case) only refreshes on an
+                // actual wake, so a hero/monster whose last enemy died
+                // between wakes would otherwise stay stuck reporting Attack
+                // indefinitely. A live scan (select_target), for the same
+                // post-movement-staleness reason apply_intention's own
+                // Attack case gives (combat.cpp's select_target doc has the
+                // fuller account of why every call site here needs one).
+                if (select_target(game, e) == entt::null) {
+                    ended = true;  // completed stays false -> aborted
+                }
+                break;
+
             case IntentionKind::Buy:
             case IntentionKind::None:
                 break;  // no completion criterion of their own -- superseded by

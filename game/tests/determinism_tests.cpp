@@ -288,3 +288,71 @@ TEST_CASE("a fight runs to the same state twice (seeded combat is deterministic)
         CHECK(a[i].pos_z == b[i].pos_z);
     }
 }
+
+TEST_CASE("a fight replays bit-identically from the log alone (no brain, no resolver)") {
+    // Closes the pre-existing "no suite replays a fight" hole the ledger
+    // flagged (docs/superpowers/sdd/progress.md): combat_preempt used to
+    // write the engagement MoveTarget directly, unlogged, so no replay ever
+    // actually reproduced a real engagement -- a gap that outlived several
+    // slices because nothing exercised it. Single-gateway combat closes it:
+    // engagement is now the logged Engage command (enqueue_engage,
+    // command.h, driven by apply_intention's Attack case) and every swing is
+    // the logged Attack command (resolve_action) -- so a replay with NO
+    // brain and NO combat decision-making of any kind (monster_think never
+    // runs; apply_replay_commands is the only thing tick_world calls) must
+    // still fight the fight and land on the identical final state.
+    auto live_owned = make_flat_world();
+    BadlandsGame* live = live_owned.get();
+    spawn_into(*live, MercenaryDesc(-4.0f, 0.0f));
+    spawn_into(*live, GoblinDesc(4.0f, 0.0f));
+    for (int i = 0; i < 300; ++i) {
+        tick_world(*live, 1.0f / 30.0f);
+    }
+    const std::vector<Command> log = live->command_log;
+    REQUIRE(!log.empty());
+
+    // The fight must actually have happened -- an Engage AND an Attack
+    // command in the log, and real damage landed -- or replay proves
+    // nothing.
+    bool engaged = false, attacked = false;
+    for (const Command& c : log) {
+        engaged = engaged || c.kind == CommandKind::Engage;
+        attacked = attacked || c.kind == CommandKind::Attack;
+    }
+    REQUIRE(engaged);
+    REQUIRE(attacked);
+    const std::vector<CharacterState> live_rows = characters_of(*live);
+    bool damage_landed = false;
+    for (const CharacterState& c : live_rows) {
+        damage_landed = damage_landed || c.hp < c.max_hp;
+    }
+    REQUIRE(damage_landed);
+
+    // Fresh sim, brains OFF: every DECISION -- engagement AND swings alike
+    // -- comes from the log. The initial spawns themselves are INITIAL
+    // CONFIG, not logged decisions (spawn_into is a direct call, same as
+    // every other replay fixture in this file that reaches for it -- e.g.
+    // seed_town's PlaceBuilding/RecruitHero go through the command path and
+    // so need no mirroring, but a direct spawn_into never does), so they are
+    // repeated here identically, exactly like this file's other replay
+    // cases repeat their own seeding.
+    auto replay_owned = make_flat_world();
+    BadlandsGame* replay = replay_owned.get();
+    spawn_into(*replay, MercenaryDesc(-4.0f, 0.0f));
+    spawn_into(*replay, GoblinDesc(4.0f, 0.0f));
+    replay->replay_log = &log;
+    for (int i = 0; i < 300; ++i) {
+        tick_world(*replay, 1.0f / 30.0f);
+    }
+    CHECK(replay->replay_cursor == log.size());  // the whole trace was consumed
+
+    const std::vector<CharacterState> replay_rows = characters_of(*replay);
+    REQUIRE(replay_rows.size() == live_rows.size());
+    for (size_t i = 0; i < live_rows.size(); ++i) {
+        INFO("row " << i);
+        CHECK(replay_rows[i].id == live_rows[i].id);
+        CHECK(replay_rows[i].hp == live_rows[i].hp);  // bit-exact: no tolerance
+        CHECK(replay_rows[i].pos_x == live_rows[i].pos_x);
+        CHECK(replay_rows[i].pos_z == live_rows[i].pos_z);
+    }
+}

@@ -33,6 +33,7 @@ enum class CommandKind : int32_t {
     Deposit,     // tax collector banks its carry into player gold, then despawns
     AttackBuilding,  // monster swings at a building (target_id); razes it at 0 hp
     Chat,            // two heroes start a conversation (target_id = partner slot)
+    Engage,      // hold at range of a live entity target (target_id; point.x = stop_distance)
 };
 
 // The log is exposed verbatim through Sim::CommandLog(), so the two enums are
@@ -63,6 +64,8 @@ static_assert(static_cast<int32_t>(CommandKind::AttackBuilding) ==
               static_cast<int32_t>(CommandKindId::AttackBuilding));
 static_assert(static_cast<int32_t>(CommandKind::Chat) ==
               static_cast<int32_t>(CommandKindId::Chat));
+static_assert(static_cast<int32_t>(CommandKind::Engage) ==
+              static_cast<int32_t>(CommandKindId::Engage));
 
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional
@@ -122,6 +125,23 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target);
 // re-decision).
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
                           int64_t duration_millis = 0, bool force = false);
+
+// Sets/maintains MoveTarget as Kind::Entity toward `target_slot`, holding at
+// `stop_distance` (the caller's engagement_range) -- unlike enqueue_move_to's
+// Kind::Point, this tracks the target's LIVE position every plan_paths pass
+// (movement.cpp) rather than a one-shot snapshot, and plan_paths' own
+// `distance(pos, live_target_pos) <= stop_distance` gate stops the approach
+// AT that live distance -- no arrival-radius slop the way walking onto a
+// precomputed offset point would carry (kArriveRadius, movement.h). This is
+// the single-gateway combat engagement executor's mutation point
+// (apply_intention's Attack case, game/src/intention.h) -- a LOGGED,
+// replay-safe successor to the deleted combat_preempt's direct MoveTarget
+// write (docs/superpowers/specs/2026-07-25-contract-v3-alignment-design.md
+// §2). No-op if `slot` or `target_slot` names no live entity. Edge-triggered
+// like enqueue_move_to above: re-stating the same target at the same range
+// is not a new decision.
+void enqueue_engage(BadlandsGame& game, uint32_t slot, uint32_t target_slot,
+                    float stop_distance);
 
 // Replay: enqueues + applies every command in game.replay_log stamped at or
 // before the current game.world_millis, advancing game.replay_cursor. game_tick

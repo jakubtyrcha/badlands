@@ -364,9 +364,10 @@ TEST_CASE("fire_attack: -1 still auto-picks (prefers ranged); an explicit index 
     g.registry.get<Attacks>(se) = blade_then_bow();
     const uint32_t t = spawn_dummy(g, 1.0f, 1);  // within range of both attacks
 
-    // -1 (the legacy/compat path, e.g. combat_preempt's own producer):
-    // auto-picks via select_attack, which prefers ranged (index 1) when
-    // unlocked -- a projectile spawns, index 0's cooldown is untouched.
+    // -1 (the legacy/compat path, e.g. apply_intention's Shoot-case producer,
+    // intention.cpp): auto-picks via select_attack, which prefers ranged
+    // (index 1) when unlocked -- a projectile spawns, index 0's cooldown is
+    // untouched.
     fire_attack(g, s, t, -1);
     CHECK(g.registry.view<Projectile>().size() == 1);
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] > 0.0f);

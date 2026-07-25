@@ -54,6 +54,12 @@ struct Intention {
 // the kind's producer or re-stamping started_at_millis, refreshing only the
 // wake schedule (still force-logged, so the refresh is replay-derivable).
 // The idle-hint default described below applies to a restate's hint too.
+// ONE exception: Attack's engagement executor (enqueue_engage, command.h)
+// runs on every call this kind is suggested, restate included -- unlike
+// every other kind's producer, it re-aims at a LIVE, possibly-moving target
+// every time, so it cannot be a one-shot adopt-only side effect (see
+// apply_intention's own Attack-case comment, intention.cpp, for the full
+// account).
 //
 // v3 hint default (docs/design/intention-contract.html §2, "Tiered wake
 // guarantees"): a non-positive idle_hint_millis (or, for Idle, a

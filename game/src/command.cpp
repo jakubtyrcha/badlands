@@ -10,6 +10,7 @@
 #include <entt/entt.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace badlands {
@@ -235,6 +236,25 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             game.registry.emplace<ChattingState>(b, cmd.actor, duration);
             return 0;
         }
+        case CommandKind::Engage: {
+            // Single-gateway combat's engagement executor (game/src/
+            // intention.h's enqueue_engage doc comment has the full
+            // account): hold at cmd.point.x (the caller's engagement_range)
+            // of a LIVE entity target -- Kind::Entity, not Kind::Point, so
+            // plan_paths re-derives the goal from the target's CURRENT
+            // position every pass rather than a one-shot snapshot.
+            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            entt::entity target = entity_for_slot(game, static_cast<int32_t>(cmd.target_id));
+            if (e == entt::null || target == entt::null) {
+                return 0;
+            }
+            MoveTarget& mt = game.registry.get<MoveTarget>(e);
+            mt.kind = MoveTarget::Kind::Entity;
+            mt.entity = target;
+            mt.building = UINT32_MAX;
+            mt.stop_distance = cmd.point.x;
+            return 0;
+        }
     }
     return -1;
 }
@@ -266,6 +286,30 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target) {
         return;  // already walking there — not a new decision
     }
     game.command_queue.push_back({CommandKind::MoveTo, slot, UINT32_MAX, target});
+}
+
+void enqueue_engage(BadlandsGame& game, uint32_t slot, uint32_t target_slot,
+                    float stop_distance) {
+    entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
+    entt::entity target = entity_for_slot(game, static_cast<int32_t>(target_slot));
+    if (e == entt::null || target == entt::null) {
+        return;
+    }
+    // Same edge-trigger discipline as enqueue_move_to above: re-stating the
+    // identical target at the identical range is not a new decision. Once
+    // set, Kind::Entity needs no further re-issuance at all to keep tracking
+    // (plan_paths re-derives the goal from the target's live position every
+    // pass on its own) -- this dedup is what keeps a whole multi-second
+    // fight's worth of per-tick engagement calls (apply_intention's Attack
+    // case) from bloating the log with one Engage command per tick.
+    constexpr float kStopDistanceEpsilon = 0.05f;
+    const MoveTarget& mt = game.registry.get<MoveTarget>(e);
+    if (mt.kind == MoveTarget::Kind::Entity && mt.entity == target &&
+        std::abs(mt.stop_distance - stop_distance) <= kStopDistanceEpsilon) {
+        return;  // already engaging this target at this range -- not a new decision
+    }
+    game.command_queue.push_back(
+        {CommandKind::Engage, slot, target_slot, {stop_distance, 0.0f}, 0, 0});
 }
 
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,

@@ -98,15 +98,28 @@ entt::entity select_target(const BadlandsGame& game, entt::entity self);
 // authoritative re-check, same discipline as the target itself). -1 is the
 // legacy auto-pick: select_attack chooses for the caller, preserved for
 // command-log compatibility with producers that still say only "attack"
-// (combat_preempt, apply_intention's Attack/Shoot cases -- explicit -1, not
+// (apply_intention's Shoot case, intention.cpp -- explicit -1, not
 // Command::param_a's own 0 default, which as of the explicit-index plumbing
-// means "exactly attack 0"). No producer emits -1 for a wasm-driven agent's
-// OWN swings once resolve_action is wired in (a later slice).
+// means "exactly attack 0"). Single-gateway combat (docs/superpowers/specs/
+// 2026-07-25-contract-v3-alignment-design.md): no producer emits -1 for an
+// AGENT's own swings anymore (resolve_action always names an explicit
+// index, wasm hero or simple monster brain alike) -- Shoot (the hunter's
+// prey-hunting) is the one surviving -1 producer, out of this slice's scope.
 void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slot,
                  int32_t attack_index = -1);
 
 // Attack index (into the actor's Attacks) to use against `target` right now, or
-// -1. Wraps pick_attack with the live distance + melee-lock state.
+// -1. Wraps pick_attack with the live distance + melee-lock state. Single-
+// gateway combat (docs/superpowers/specs/2026-07-25-contract-v3-alignment-
+// design.md): host picking on an AGENT's behalf is retired -- this
+// function's one remaining caller is fire_attack's own -1 legacy-auto-pick
+// path (Shoot's producer, out of this slice's scope). pick_attack itself,
+// above, is a POLICY HELPER a brain may call directly now, guest-side or
+// host-side: hero.nim reimplements the same preference itself (pickBestAttack,
+// scripts/brains/nim/hero.nim), and the simple monster brain calls pick_attack
+// directly, host-side (monster_brain.cpp) -- neither goes through this
+// wrapper, since a brain already knows its own live distance/lock state from
+// its own tick.
 int select_attack(const BadlandsGame& game, entt::entity self, entt::entity target);
 
 // Fly every in-flight projectile toward its target and resolve it on arrival

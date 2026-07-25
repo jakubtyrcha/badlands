@@ -52,13 +52,17 @@ TEST_CASE("push_inbox_event appends, evicts oldest when full, no-ops without an 
     CHECK(inbox.events[0].param == 1.0f);  // param 0 evicted
     CHECK(inbox.events[kInboxCapacity - 1].param == 99.0f);
 
-    // A non-hero (no EventInbox) silently ignores the push.
-    CharacterDesc monster{};
-    monster.archetype = Archetype::Monster;
-    monster.hp = 10.0f;
-    monster.pos_x = 20.0f;
-    monster.size_x = monster.size_y = monster.size_z = 1.0f;
-    entt::entity me = g.slots[spawn_into(g, monster)];
+    // An EventInbox-less entity silently ignores the push. Critter, not
+    // Monster: since the single-gateway cutover, Monster carries an
+    // EventInbox too (heroes.cpp's spawn recipe -- the simple monster brain
+    // runs through the same seams a wasm hero does), so it is no longer a
+    // "no inbox" example.
+    CharacterDesc critter{};
+    critter.archetype = Archetype::Critter;
+    critter.hp = 10.0f;
+    critter.pos_x = 20.0f;
+    critter.size_x = critter.size_y = critter.size_z = 1.0f;
+    entt::entity me = g.slots[spawn_into(g, critter)];
     REQUIRE_FALSE(g.registry.all_of<EventInbox>(me));
     push_inbox_event(g, me, overflow);  // must not crash
     CHECK_FALSE(g.registry.all_of<EventInbox>(me));
@@ -105,8 +109,10 @@ TEST_CASE("emit_char_hit writes DamageTaken into the victim hero's inbox", "[int
     CHECK(inbox.events[0].source_slot == attacker_slot);
     CHECK(inbox.events[0].param == Catch::Approx(6.0f));
 
-    // The attacker (a Goblin, Archetype::Monster) carries no inbox at all.
-    CHECK_FALSE(g.registry.all_of<EventInbox>(attacker));
+    // The attacker (a Goblin, Archetype::Monster) carries an inbox too,
+    // since the single-gateway cutover (heroes.cpp's spawn recipe) -- it is
+    // just never the WRITE target of this particular call.
+    CHECK(g.registry.all_of<EventInbox>(attacker));
 }
 
 // --- MoveBlocked mirror ------------------------------------------------------
@@ -1113,7 +1119,12 @@ TEST_CASE(
             ++attack_count;
         }
     }
-    CHECK(attack_count == 1);  // the second wake did not re-fire the Attack command
+    // Single-gateway combat: apply_intention's Attack case never pushes an
+    // Attack command itself (adoption/restatement is engagement-only, V5
+    // mandate) -- zero here, adopt or restate alike, not just "the restate
+    // didn't re-fire it". Swings come exclusively from resolve_action,
+    // which this test never calls.
+    CHECK(attack_count == 0);
 }
 
 TEST_CASE("apply_intention: a MoveTo to a DIFFERENT point is a new decision, not a restate",
@@ -1211,7 +1222,10 @@ TEST_CASE("v3: a restate's refreshed wake schedule reaches the log and replays c
             ++set_behavior_count;
         }
     }
-    CHECK(attack_count == 1);        // the restate did not re-fire the producer
+    // Single-gateway combat: apply_intention's Attack case never pushes an
+    // Attack command of its own (V5 mandate) -- zero regardless of adopt vs.
+    // restate; only resolve_action (untouched by this test) ever does.
+    CHECK(attack_count == 0);
     REQUIRE(set_behavior_count == 2);  // but both wakes' schedules are in the log
 
     auto replay_owned = make_flat_world();
@@ -1231,8 +1245,9 @@ TEST_CASE("v3: a restate's refreshed wake schedule reaches the log and replays c
 }
 
 // --- action resolver: resolve_action / BL_ACT_ATTACK (v3, contract-v3-
-// alignment) -- inert this slice: nothing but these tests and
-// tick_wasm_brain's own (empty in practice) drain loop calls it.
+// alignment) -- the single gateway every swing goes through now: the wasm
+// hero brain's bl_enqueue_action drain (tick_wasm_brain, wasm_brain.cpp) and
+// the simple monster brain (monster_brain.cpp) both call it directly.
 // docs/superpowers/specs/2026-07-25-contract-v3-alignment-design.md.
 
 namespace {
@@ -1242,10 +1257,9 @@ namespace {
 // bow_and_blade() (ranged first there): pick_attack/select_attack's own
 // auto-pick tie-break prefers ranged when unlocked, so a test that confuses
 // "index 0" with "whatever auto-pick would have chosen" notices here --
-// exactly the seam risk this task's producers (sim.cpp's combat_preempt,
-// this file's own IntentionKind::Attack/Shoot cases) had to be fixed for
-// (Command::param_a's 0 default is now a load-bearing "use exactly attack
-// 0" unless a producer says -1 explicitly).
+// exactly the seam risk the explicit-index Attack plumbing (V2) had to be
+// fixed for (Command::param_a's 0 default is now a load-bearing "use
+// exactly attack 0" unless a producer says -1 explicitly).
 Attacks blade_and_bow() {
     Attacks a{};
     a.count = 2;

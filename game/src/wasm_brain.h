@@ -95,20 +95,6 @@ struct WasmBrainRuntime {
     // exactly (only) that wake's enqueues, and drains it through
     // resolve_action (game/src/intention.h) right after, in the same order.
     std::vector<PendingAction> pending_actions;
-
-    // TRANSITIONAL (V4 of docs/superpowers/specs/2026-07-25-contract-v3-
-    // alignment-design.md; deleted in the single-gateway task V5, which
-    // deletes combat_preempt outright): true once THIS wake's pending_actions
-    // drain has resolved at least one valid BL_ACT_ATTACK. sim.cpp's
-    // combat_preempt reads and consumes (resets to false on read) this flag
-    // to suppress its own legacy auto-swing for the SAME tick -- safe as one
-    // shared bool, not per-slot: the sim.cpp think loop is strictly
-    // sequential per hero, one wasm wake at a time, and combat_preempt runs
-    // immediately after tick_wasm_brain for that SAME slot before any other
-    // entity's think/combat_preempt call could observe it, so it is always
-    // false again by the time it might otherwise be misread as some OTHER
-    // entity's swing.
-    bool attack_action_resolved_this_wake = false;
 };
 
 // Packs one hero's BlViewWire from an already-observed WorldView

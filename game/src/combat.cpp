@@ -164,23 +164,33 @@ constexpr float kProjectileHitRadius = 0.35f;  // contact epsilon on arrival
 
 entt::entity select_target(const BadlandsGame& game, entt::entity self) {
     // Deliberately ALWAYS a live scan, even though sim.cpp's ThreatSighted
-    // pass computes a same-tick nearest_enemy for every hero moments
-    // earlier (BadlandsGame::nearest_enemy_scratch, game_state.h): this
-    // function has THREE call sites, and only one of them (sim.cpp's
-    // combat_preempt, called from the think loop before apply_commands
-    // resolves anything) is provably exact-equivalent to that pass'
-    // result -- see combat_preempt's own comment, which consults the
-    // cache directly instead of going through here. The other two are NOT
-    // equivalent: fire_attack's UINT32_MAX re-pick (command.cpp's Attack
-    // handler) runs during apply_commands, AFTER earlier commands in the
-    // same drain may have already dropped a shared target to hp<=0 (a
+    // pass computes a same-tick nearest_enemy for every EventInbox-bearing
+    // entity moments earlier (BadlandsGame::nearest_enemy_scratch,
+    // game_state.h). Single-gateway combat (docs/superpowers/specs/2026-07-
+    // 25-contract-v3-alignment-design.md) deleted the one call site that
+    // used to be provably exact-equivalent to that pass' result
+    // (sim.cpp's combat_preempt, called from the think loop before
+    // apply_commands resolved anything) -- its cache-reading shortcut moved
+    // to monster_think (monster_brain.cpp), the new same-tick-as-the-pass
+    // caller, which consults the cache directly instead of coming through
+    // here (see that function's own comment). This function's remaining
+    // FOUR call sites are all NOT equivalent to the pass' result, each for
+    // its own reason: fire_attack's UINT32_MAX re-pick (command.cpp's
+    // Attack handler) runs during apply_commands, AFTER earlier commands in
+    // the same drain may have already dropped a shared target to hp<=0 (a
     // stale cache entry would have a later hero in a scrum swing at a
     // corpse instead of retargeting); update_melee_locks (movement.cpp)
     // runs after the whole movement pipeline, where position -- and so
-    // engagement range -- may have changed since the pass ran. Keeping the
-    // cache consult local to the one safe caller, rather than hiding it in
-    // here, is what makes each of the three call sites' correctness
-    // independently obvious.
+    // engagement range -- may have changed since the pass ran;
+    // resolve_action's target-inference branch (game/src/intention.h) can
+    // be called from a context the cache was never populated for (a direct
+    // test, or any future caller outside sim.cpp's think loop); and
+    // apply_intention's Attack-engagement executor + advance_intentions'
+    // Attack-abort check (both intention.cpp) run during/after a wake that
+    // is not guaranteed to be the same moment the pass ran (a wasm hero's
+    // wake, or a call driven directly by a test). Keeping every cache
+    // consult local to its one safe caller, rather than hiding one in here,
+    // is what makes each call site's correctness independently obvious.
     return nearest_enemy(game, self);  // Threat-Score drops in here later
 }
 

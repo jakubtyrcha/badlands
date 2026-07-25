@@ -220,6 +220,18 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
         }
         case Archetype::Monster:
             brain_kind = BrainKind::Monster;
+            // Intention contract (game/src/intention.h): the simple monster
+            // brain (monster_brain.cpp) runs through the SAME seams a wasm
+            // hero does -- apply_intention needs a live CurrentIntention to
+            // adopt anything into (its own early-return guard), and
+            // EventInbox is what makes this entity visible to sim.cpp's
+            // ThreatSighted pass (the nearest_enemy_scratch cache
+            // monster_think consults). Single-gateway combat (docs/
+            // superpowers/specs/2026-07-25-contract-v3-alignment-design.md):
+            // the tier split is where a brain runs, never which door it
+            // uses.
+            reg.emplace<EventInbox>(e);
+            reg.emplace<CurrentIntention>(e);
             break;
     }
 
