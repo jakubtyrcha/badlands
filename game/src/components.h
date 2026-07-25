@@ -294,6 +294,18 @@ inline constexpr int64_t kInboxTtlMillis = 3000;
 // ProgressionFactors scalar, same reasoning as kInboxTtlMillis above.
 inline constexpr int64_t kRejectedSuggestionBackoffMillis = 500;
 
+// v3 "no preference" default wake cadence (docs/design/intention-contract.html
+// §2, "Tiered wake guarantees"): an idle_hint_millis of 0 -- or, since Idle's
+// own duration IS its wake deadline (apply_intention's adopt tail,
+// game/src/intention.cpp), a duration_millis of 0 -- used to mean "no
+// deadline at all" (v2). In v3 it means "no cadence preference," and arms
+// this default instead, so a hero that yields no preference is still
+// guaranteed a consult once per second rather than sleeping forever
+// (the class of stuck-forever-with-hint-0 defect the amendment calls out). A
+// compile-time constant, not a ProgressionFactors scalar, same reasoning as
+// kInboxTtlMillis/kRejectedSuggestionBackoffMillis above.
+inline constexpr int64_t kDefaultWakeCadenceMillis = 1000;
+
 // One timed inbox entry. `param` is kind-specific: damage amount
 // (DamageTaken), 1/0 completed-vs-aborted (IntentionEnded); unused (0) for
 // ThreatSighted/MoveBlocked today -- their source_slot / the sibling
@@ -358,10 +370,15 @@ struct CurrentIntention {
     int32_t arg = 0;
     int64_t started_at_millis = 0;
     // The Idle-duration deadline (kind == Idle) OR the idle-hint deadline for
-    // any other kind -- 0 = none. Both are "the next scheduled wake time";
-    // only the Idle case doubles as a completion criterion
-    // (advance_intentions) -- for every other kind reaching this deadline is
-    // just a spurious-wake reminder, not a reason to end the intention.
+    // any other kind -- both are "the next scheduled wake time"; only the
+    // Idle case doubles as a completion criterion (advance_intentions) -- for
+    // every other kind reaching this deadline is just a spurious-wake
+    // reminder, not a reason to end the intention. 0 means "never adopted/
+    // restated yet" (the spawn default) ONLY -- as of v3, apply_intention's
+    // deadline calculation always substitutes kDefaultWakeCadenceMillis for a
+    // non-positive duration/hint (see that constant's own comment), so a
+    // hero that has been through apply_intention at least once always carries
+    // a genuine future timestamp here, never 0.
     int64_t wake_at_millis = 0;
     // The last time the brain was actually consulted (apply_intention was
     // called), regardless of what it decided -- including a BL_INT_NONE

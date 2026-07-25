@@ -147,7 +147,11 @@ typedef struct BlViewSelf {
                                    // Think anymore; kept only because BlViewSelf
                                    // otherwise stays 1:1 with WorldView.
     int64_t roam_epoch;           // world_millis / roam lease window (stable roam goal)
-    int64_t intention_wake_at;    // CurrentIntention.wake_at_millis; 0 = no deadline
+    int64_t intention_wake_at;    // CurrentIntention.wake_at_millis; 0 only for a
+                                   // hero that has never been adopted/restated
+                                   // yet -- v3's default wake cadence
+                                   // (intention-contract.html §2) means an
+                                   // adopted hero's deadline is never 0
     uint32_t slot;                // this entity's slot index
     int32_t class_id;             // HeroClassId
     float tod;                    // time of day in [0,1)
@@ -361,7 +365,9 @@ typedef struct BlViewWire {
 // not a promise in either direction). activity_label is inspection/histogram
 // only; it carries no semantics the engine reads.
 typedef struct BlSuggestionWire {
-    int64_t idle_hint_millis;    // 0 = none
+    int64_t idle_hint_millis;    // 0 = no preference (v3: the engine defaults this
+                                  // to a ~1s cadence rather than "forever" --
+                                  // intention-contract.html §2)
     int64_t duration_millis;     // BL_INT_IDLE only
     int32_t intention_kind;      // BL_INT_*
     int32_t activity_label;      // ActivityId, inspection only

@@ -357,6 +357,64 @@ TEST_CASE(
     CHECK_FALSE(should_wake(g, e));
 }
 
+// --- v3 high-stakes clause: threat_was_present / MeleeLock win over
+// everything else, every tick (docs/design/intention-contract.html §2,
+// "Tiered wake guarantees") -------------------------------------------------
+
+TEST_CASE(
+    "should_wake: a threat present this tick wakes every tick, even mid-Idle with a long "
+    "unexpired hint",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    // A long-running Idle whose deadline is nowhere near due, and a think
+    // already accounted for (no fresh inbox event) -- every OTHER clause
+    // should_wake checks says "stay asleep."
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    ci.kind = IntentionKind::Idle;
+    ci.wake_at_millis = g.world_millis + 4 * 3600 * 1000;  // 4 hours out
+    note_think_outcome(g, slot, /*adopted=*/true);
+    CHECK_FALSE(should_wake(g, e));  // sanity: the long hint alone stays quiet
+
+    EventInbox& inbox = g.registry.get<EventInbox>(e);
+    for (int i = 0; i < 5; ++i) {
+        inbox.threat_was_present = true;  // this tick's value, per sim.cpp's writer
+        CHECK(should_wake(g, e));
+        g.world_millis += kMillisPerTick;
+    }
+
+    // The offer withdraws the instant the flag clears (mirrors the writer
+    // resetting it false once the threat leaves view/the hero hides).
+    inbox.threat_was_present = false;
+    CHECK_FALSE(should_wake(g, e));
+}
+
+TEST_CASE("should_wake: an active MeleeLock wakes every tick, same as a present threat",
+          "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    ci.kind = IntentionKind::Attack;
+    ci.wake_at_millis = g.world_millis + 4 * 3600 * 1000;
+    note_think_outcome(g, slot, /*adopted=*/true);
+    CHECK_FALSE(should_wake(g, e));  // sanity: not locked yet -> the long hint holds
+
+    g.registry.emplace<MeleeLock>(e);
+    for (int i = 0; i < 5; ++i) {
+        CHECK(should_wake(g, e));
+        g.world_millis += kMillisPerTick;
+    }
+
+    g.registry.erase<MeleeLock>(e);
+    CHECK_FALSE(should_wake(g, e));
+}
+
 // --- apply_intention: validate + adopt --------------------------------------
 
 TEST_CASE("apply_intention adopts a valid MoveTo, logs it, and carries the wake hint",
@@ -406,6 +464,99 @@ TEST_CASE("apply_intention adopts a valid MoveTo, logs it, and carries the wake 
     CHECK(found_move);
     CHECK(found_setbehavior);
     CHECK(g.registry.get<MoveTarget>(e).point.x == Catch::Approx(5.0f));
+}
+
+// --- v3 hint default: a hint of 0 (or unset) arms kDefaultWakeCadenceMillis
+// exactly; a genuine long hint is still honored verbatim (docs/design/
+// intention-contract.html §2, "Tiered wake guarantees") -----------------------
+
+TEST_CASE("apply_intention: idle_hint_millis == 0 arms the default cadence, exactly +1000ms",
+          "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    Intention intent;
+    intent.kind = IntentionKind::MoveTo;
+    intent.point = {3.0f, 4.0f};
+    intent.idle_hint_millis = 0;  // "no preference" -- NOT the v2 "no deadline"
+
+    CHECK(apply_intention(g, slot, intent));
+    const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    CHECK(ci.wake_at_millis == g.world_millis + kDefaultWakeCadenceMillis);
+
+    apply_commands(g);
+    bool found_setbehavior = false;
+    for (const Command& c : g.command_log) {
+        if (c.kind == CommandKind::SetBehavior && c.actor == slot) {
+            found_setbehavior = true;
+            CHECK(c.param_b == kDefaultWakeCadenceMillis);  // logged, not 0
+        }
+    }
+    CHECK(found_setbehavior);
+}
+
+TEST_CASE(
+    "apply_intention: a multi-hour idle_hint_millis is honored verbatim, and a guaranteed "
+    "event still pre-empts it",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    constexpr int64_t kFourHours = 4 * 3600 * 1000;
+    Intention intent;
+    intent.kind = IntentionKind::MoveTo;
+    intent.point = {3.0f, 4.0f};
+    intent.idle_hint_millis = kFourHours;
+
+    CHECK(apply_intention(g, slot, intent));
+    const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    CHECK(ci.wake_at_millis == g.world_millis + kFourHours);  // honored, not defaulted
+    note_think_outcome(g, slot, /*adopted=*/true);
+    CHECK_FALSE(should_wake(g, e));  // nowhere near due, no event -> stays asleep
+
+    // A guaranteed-wake event (§2's list) still pre-empts the long hint --
+    // the hint is scheduling advice, never a promise the engine won't wake
+    // the hero early for a real reason.
+    InboxEvent ev;
+    ev.kind = InboxEventKind::DamageTaken;
+    push_inbox_event(g, e, ev);
+    CHECK(should_wake(g, e));
+}
+
+// --- v3 invariant defended at the SetBehavior HANDLER too, not just at
+// apply_intention: every producer today guarantees param_b > 0 (apply_
+// intention substitutes kDefaultWakeCadenceMillis before logging), but that
+// is an unenforced cross-file invariant -- a future producer that logged a
+// non-positive duration must not silently resurrect the v2 "wake_at 0 =
+// forever" sentinel for a hero with kind != None. Drives the handler
+// (command.cpp's SetBehavior case) directly via a raw apply_command, NOT
+// through apply_intention, so this pins the handler's own defense in depth,
+// independent of whatever apply_intention itself already guarantees.
+TEST_CASE(
+    "command.cpp's SetBehavior handler defends the wake-cadence invariant: a logged "
+    "param_b <= 0 still falls back to the default cadence, never to wake_at 0",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    // A hero with a running intention (kind != None) -- the exact shape a
+    // wake_at_millis == 0 regression would misread as "idle until woken
+    // forever" rather than "never adopted."
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    ci.kind = IntentionKind::MoveTo;
+    ci.started_at_millis = g.world_millis;
+
+    Command cmd{CommandKind::SetBehavior, slot, UINT32_MAX, {0.0f, 0.0f},
+                static_cast<int32_t>(ActivityId::Explore), /*param_b=*/0};
+    apply_command(g, cmd);
+
+    CHECK(ci.wake_at_millis == g.world_millis + kDefaultWakeCadenceMillis);  // NOT 0
 }
 
 TEST_CASE("apply_intention rejects Shoot at an unknown target and adopts nothing",
@@ -488,13 +639,18 @@ TEST_CASE("apply_intention Idle halts a hero that was mid-MoveTo", "[intention]"
     CHECK(glm::distance(moving_pos, after_idle) < 0.01f);
 }
 
-TEST_CASE("Idle duration 0 is \"idle until woken\": never self-completes, should_wake stays quiet",
-          "[intention]") {
-    // Rider fix: duration_millis == 0 collides with wake_at_millis == 0's
-    // "no deadline" sentinel. The explicit choice is "idle until woken" (no
-    // deadline at all), not "already expired" -- pin that both ways: the
-    // intention itself never self-completes, and should_wake never fires on
-    // a deadline it doesn't have.
+TEST_CASE(
+    "v3: Idle duration 0 means \"no cadence preference\", not \"idle until woken\" -- "
+    "self-completes at the default +1000ms",
+    "[intention]") {
+    // v2 read duration_millis == 0 as colliding with wake_at_millis == 0's
+    // "no deadline" sentinel and treated it as "idle until woken, forever."
+    // v3 (docs/design/intention-contract.html §2, "Tiered wake guarantees")
+    // supersedes that: 0 means "no preference," so it arms
+    // kDefaultWakeCadenceMillis instead -- and because Idle's wake_at_millis
+    // doubles as its OWN completion criterion (advance_intentions), a
+    // duration-0 Idle now runs for exactly the default cadence and then
+    // completes on its own, rather than running forever.
     auto owned = make_flat_world();
     BadlandsGame& g = *owned;
     uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
@@ -507,14 +663,33 @@ TEST_CASE("Idle duration 0 is \"idle until woken\": never self-completes, should
 
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     CHECK(ci.kind == IntentionKind::Idle);
-    CHECK(ci.wake_at_millis == 0);  // not "already expired" -- "no deadline"
+    CHECK(ci.wake_at_millis == g.world_millis + kDefaultWakeCadenceMillis);  // exact +1000, not 0
 
-    for (int i = 0; i < 200; ++i) {
+    // Just shy of the deadline: still running, should_wake still quiet (no
+    // event, no threat/melee-lock -- isolates the deadline clause).
+    while (g.world_millis + kMillisPerTick < ci.wake_at_millis) {
         g.world_millis += kMillisPerTick;
         advance_intentions(g);
-        CHECK_FALSE(should_wake(g, e));  // no deadline, no event -> stays asleep
+        CHECK(ci.kind == IntentionKind::Idle);
+        CHECK_FALSE(should_wake(g, e));
     }
-    CHECK(ci.kind == IntentionKind::Idle);  // still running 200 ticks later
+
+    // The tick the deadline elapses: should_wake fires and advance_intentions
+    // completes the Idle (IntentionEnded(completed)), same as any other
+    // Idle deadline -- this one is just defaulted rather than authored.
+    g.world_millis += kMillisPerTick;
+    advance_intentions(g);
+    CHECK(ci.kind == IntentionKind::None);  // self-completed, not stuck forever
+    CHECK(should_wake(g, e));                // nothing running now -> worth a wake
+
+    const EventInbox& inbox = g.registry.get<EventInbox>(e);
+    bool found_completed = false;
+    for (int32_t i = 0; i < inbox.count; ++i) {
+        if (inbox.events[i].kind == InboxEventKind::IntentionEnded && inbox.events[i].param == 1.0f) {
+            found_completed = true;
+        }
+    }
+    CHECK(found_completed);
 }
 
 // --- advance_intentions: completion detection -------------------------------
@@ -847,6 +1022,212 @@ TEST_CASE(
     replay.world_millis = 2000;
     apply_replay_commands(replay);
     CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 2900);
+}
+
+// --- v3 restate-resume (docs/design/intention-contract.html §2, "Resume-by-
+// default"): an incoming suggestion identical to the running CurrentIntention
+// is a resume, not a new decision -- no re-run producer, no re-stamped
+// started_at_millis, only a refreshed wake schedule (which must still reach
+// the log, so a replay reconstructs it) -----------------------------------
+
+TEST_CASE(
+    "apply_intention: an identical MoveTo restatement resumes -- no duplicate MoveTo command, "
+    "started_at unchanged, wake_at refreshed from the new hint",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    Intention first;
+    first.kind = IntentionKind::MoveTo;
+    first.point = {9.0f, -2.0f};
+    first.idle_hint_millis = 500;
+    g.world_millis = 1000;
+    CHECK(apply_intention(g, slot, first));
+    apply_commands(g);
+    const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_millis;
+    CHECK(started_at == 1000);
+    CHECK(g.registry.get<CurrentIntention>(e).wake_at_millis == 1500);
+
+    // Restate: SAME point, a DIFFERENT hint -- proves the refresh reads the
+    // NEW hint, not a cached one.
+    Intention restate;
+    restate.kind = IntentionKind::MoveTo;
+    restate.point = {9.0f, -2.0f};
+    restate.idle_hint_millis = 800;
+    g.world_millis = 1200;
+    CHECK(apply_intention(g, slot, restate));
+    apply_commands(g);
+
+    const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    CHECK(ci.started_at_millis == started_at);  // NOT re-stamped
+    CHECK(ci.wake_at_millis == 1200 + 800);      // refreshed from the restate's hint
+    CHECK(ci.point.x == Catch::Approx(9.0f));
+    CHECK(ci.point.y == Catch::Approx(-2.0f));
+
+    int32_t move_count = 0, set_behavior_count = 0;
+    for (const Command& c : g.command_log) {
+        if (c.kind == CommandKind::MoveTo && c.actor == slot) {
+            ++move_count;
+        }
+        if (c.kind == CommandKind::SetBehavior && c.actor == slot) {
+            ++set_behavior_count;
+        }
+    }
+    CHECK(move_count == 1);          // the producer did NOT re-run on restate
+    CHECK(set_behavior_count == 2);  // but the refreshed schedule DID reach the log
+}
+
+TEST_CASE(
+    "apply_intention: an identical Attack restatement resumes (Attack carries no "
+    "distinguishing field, so kind alone is enough)",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    Intention first;
+    first.kind = IntentionKind::Attack;
+    first.idle_hint_millis = 300;
+    g.world_millis = 1000;
+    CHECK(apply_intention(g, slot, first));
+    apply_commands(g);
+    const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_millis;
+
+    // A combat-tick wake (e.g. forced by the high-stakes MeleeLock clause)
+    // restates the SAME Attack -- the worked example in the design doc.
+    Intention restate;
+    restate.kind = IntentionKind::Attack;
+    restate.idle_hint_millis = 300;
+    g.world_millis += kMillisPerTick;
+    CHECK(apply_intention(g, slot, restate));
+    apply_commands(g);
+
+    CHECK(g.registry.get<CurrentIntention>(e).started_at_millis == started_at);
+
+    int32_t attack_count = 0;
+    for (const Command& c : g.command_log) {
+        if (c.kind == CommandKind::Attack && c.actor == slot) {
+            ++attack_count;
+        }
+    }
+    CHECK(attack_count == 1);  // the second wake did not re-fire the Attack command
+}
+
+TEST_CASE("apply_intention: a MoveTo to a DIFFERENT point is a new decision, not a restate",
+          "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    Intention first;
+    first.kind = IntentionKind::MoveTo;
+    first.point = {9.0f, -2.0f};
+    g.world_millis = 1000;
+    CHECK(apply_intention(g, slot, first));
+
+    Intention different;
+    different.kind = IntentionKind::MoveTo;
+    different.point = {1.0f, 1.0f};  // a genuinely new goal
+    g.world_millis = 1200;
+    CHECK(apply_intention(g, slot, different));
+    apply_commands(g);
+
+    const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    CHECK(ci.started_at_millis == 1200);  // DID re-stamp -- this is a real new decision
+    CHECK(ci.point.x == Catch::Approx(1.0f));
+
+    int32_t move_count = 0;
+    for (const Command& c : g.command_log) {
+        if (c.kind == CommandKind::MoveTo && c.actor == slot) {
+            ++move_count;
+        }
+    }
+    CHECK(move_count == 2);  // both goals produced a real MoveTo command
+}
+
+TEST_CASE(
+    "apply_intention: Idle is never treated as a restate, even with an unchanged duration "
+    "(its duration isn't tracked on CurrentIntention to compare against)",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    Intention first;
+    first.kind = IntentionKind::Idle;
+    first.duration_millis = 300;
+    g.world_millis = 1000;
+    CHECK(apply_intention(g, slot, first));
+
+    Intention second;
+    second.kind = IntentionKind::Idle;
+    second.duration_millis = 300;  // textually identical
+    g.world_millis = 1200;
+    CHECK(apply_intention(g, slot, second));
+
+    // A real restate would have left started_at_millis at 1000 -- Idle must
+    // always take the full-adopt path instead.
+    CHECK(g.registry.get<CurrentIntention>(e).started_at_millis == 1200);
+    CHECK(g.registry.get<CurrentIntention>(e).wake_at_millis == 1200 + 300);
+}
+
+TEST_CASE("v3: a restate's refreshed wake schedule reaches the log and replays correctly",
+          "[intention]") {
+    auto live_owned = make_flat_world();
+    BadlandsGame& live = *live_owned;
+    uint32_t slot = spawn_into(live, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = live.slots[slot];
+
+    Intention first;
+    first.kind = IntentionKind::Attack;
+    first.idle_hint_millis = 300;
+    live.world_millis = 1000;
+    CHECK(apply_intention(live, slot, first));
+    apply_commands(live);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 1300);
+
+    // A pure restate this time (identical Attack, a fresh hint) -- must
+    // still reach the log via the SAME force-log mechanism a full adopt
+    // uses, or a replay could never reconstruct the refreshed deadline.
+    Intention restate;
+    restate.kind = IntentionKind::Attack;
+    restate.idle_hint_millis = 900;
+    live.world_millis = 2000;
+    CHECK(apply_intention(live, slot, restate));
+    apply_commands(live);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 2900);
+
+    int32_t attack_count = 0, set_behavior_count = 0;
+    for (const Command& c : live.command_log) {
+        if (c.kind == CommandKind::Attack && c.actor == slot) {
+            ++attack_count;
+        }
+        if (c.kind == CommandKind::SetBehavior && c.actor == slot) {
+            ++set_behavior_count;
+        }
+    }
+    CHECK(attack_count == 1);        // the restate did not re-fire the producer
+    REQUIRE(set_behavior_count == 2);  // but both wakes' schedules are in the log
+
+    auto replay_owned = make_flat_world();
+    BadlandsGame& replay = *replay_owned;
+    uint32_t replay_slot = spawn_into(replay, MercenaryDesc(0.0f, 0.0f));
+    REQUIRE(replay_slot == slot);
+    entt::entity re = replay.slots[replay_slot];
+
+    replay.replay_log = &live.command_log;
+    replay.world_millis = 1000;
+    apply_replay_commands(replay);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 1300);
+
+    replay.world_millis = 2000;
+    apply_replay_commands(replay);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 2900);  // the restate's refresh
 }
 
 // --- action resolver: resolve_action / BL_ACT_ATTACK (v3, contract-v3-

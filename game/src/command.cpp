@@ -105,7 +105,22 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                 // hero, wasm-brained or not), so try_get above is a no-op for
                 // them.
                 if (auto* ci = game.registry.try_get<CurrentIntention>(e)) {
-                    ci->wake_at_millis = cmd.param_b > 0 ? game.world_millis + cmd.param_b : 0;
+                    // v3 invariant (docs/design/intention-contract.html §2,
+                    // intention.cpp's apply_intention): wake_at_millis == 0
+                    // means "never adopted/restated yet" ONLY -- every
+                    // producer today guarantees cmd.param_b > 0 (apply_
+                    // intention substitutes kDefaultWakeCadenceMillis for a
+                    // non-positive duration/hint before logging), but that is
+                    // an unenforced cross-file invariant a future producer
+                    // could violate. Defend it HERE too, not just at the
+                    // producer: a non-positive logged duration falls back to
+                    // the same default cadence, never to the v2 "forever"
+                    // sentinel -- otherwise a future producer's bug would
+                    // resurrect exactly the stuck-forever-with-hint-0 defect
+                    // class v3 was meant to delete.
+                    const int64_t duration =
+                        cmd.param_b > 0 ? cmd.param_b : kDefaultWakeCadenceMillis;
+                    ci->wake_at_millis = game.world_millis + duration;
                 }
             }
             return 0;

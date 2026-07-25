@@ -46,6 +46,22 @@ struct Intention {
 // CurrentIntention left untouched. Returns whether the suggestion was
 // adopted.
 //
+// v3 restate-resume (docs/design/intention-contract.html §2, "Resume-by-
+// default"): FIRST compares `intent` against the running CurrentIntention
+// (same kind + the kind's own live field -- point/target_slot/arg, per the
+// vocab table; Idle is excluded, see is_identical_restatement's own comment,
+// intention.cpp) and, if identical, resumes -- returns true WITHOUT running
+// the kind's producer or re-stamping started_at_millis, refreshing only the
+// wake schedule (still force-logged, so the refresh is replay-derivable).
+// The idle-hint default described below applies to a restate's hint too.
+//
+// v3 hint default (docs/design/intention-contract.html §2, "Tiered wake
+// guarantees"): a non-positive idle_hint_millis (or, for Idle, a
+// non-positive duration_millis) no longer means "no deadline" -- it arms
+// kDefaultWakeCadenceMillis (components.h) instead, so a suggestion with no
+// cadence preference still gets a consult roughly once a second rather than
+// sleeping forever.
+//
 // Purely validate-and-adopt: it does NOT touch the wake-bookkeeping fields
 // (EventInbox::last_seen_seq, CurrentIntention::last_think_millis/wake_at_
 // millis-on-rejection) -- that is note_think_outcome's job (below), a
@@ -171,19 +187,31 @@ void push_inbox_event(BadlandsGame& game, entt::entity e, InboxEvent ev);
 void advance_intentions(BadlandsGame& game);
 
 // The wake rule (pure over the components,
-// docs/design/intention-contract.html §2): true when the hero has no active
-// intention AND no backoff is armed (CurrentIntention::kind == None and
-// wake_at_millis == 0 -- a fresh/never-consulted hero), its wake_at deadline
-// has passed (an Idle/idle-hint deadline OR a rejection backoff, both ride
-// the same field), or an inbox event was pushed since it last thought
-// (EventInbox::last_pushed_seq > last_seen_seq, timestamp-free -- see that
-// component's own comment on why a sequence counter, not `at_millis` vs
-// CurrentIntention::last_think_millis, is the comparison). Sequenced this
-// way deliberately: "no CurrentIntention" is NOT an unconditional
-// short-circuit on its own, because note_think_outcome (above) can arm a
-// backoff deadline while kind stays None (a rejected/no-op suggestion) --
-// that hero must still wake early on a genuinely new event, so the event
-// check has to run even during a None-kind backoff window.
+// docs/design/intention-contract.html §2). Checked in order:
+//
+//   1. v3 high-stakes clause (FIRST, ahead of everything below): a threat in
+//      view this tick (EventInbox::threat_was_present, maintained by
+//      sim.cpp's ThreatSighted pass BEFORE the think loop every tick) or an
+//      active MeleeLock -> true, unconditionally, every tick -- wins even
+//      over a long idle-hint deadline that has not elapsed yet. An engine
+//      OFFER of per-tick consultation, not a guarantee every offered wake
+//      produces a new command (see apply_intention's restate-resume above).
+//   2. No active intention AND no backoff armed (CurrentIntention::kind ==
+//      None and wake_at_millis == 0 -- a fresh/never-consulted hero) -> true.
+//   3. Its wake_at deadline has passed (an Idle/idle-hint deadline OR a
+//      rejection backoff, both ride the same field) -> true.
+//   4. An inbox event was pushed since it last thought
+//      (EventInbox::last_pushed_seq > last_seen_seq, timestamp-free -- see
+//      that component's own comment on why a sequence counter, not
+//      `at_millis` vs CurrentIntention::last_think_millis, is the
+//      comparison) -> true.
+//   Else -> false.
+//
+// Clauses 2-4 are sequenced deliberately: "no CurrentIntention" is NOT an
+// unconditional short-circuit on its own, because note_think_outcome (above)
+// can arm a backoff deadline while kind stays None (a rejected/no-op
+// suggestion) -- that hero must still wake early on a genuinely new event,
+// so the event check has to run even during a None-kind backoff window.
 bool should_wake(const BadlandsGame& game, entt::entity e);
 
 }  // namespace badlands

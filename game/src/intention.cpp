@@ -19,6 +19,51 @@
 
 namespace badlands {
 
+namespace {
+
+// v3 restate-resume (docs/design/intention-contract.html §2, "Resume-by-
+// default"): is `intent` indistinguishable from the intention already
+// running in `ci`? Mirrors EXACTLY the per-kind field discipline
+// apply_intention's own zeroing establishes below (point for MoveTo,
+// target_slot for Shoot/Chat, arg for Enter) -- Attack/EnterHome/Buy carry no
+// distinguishing field at all (the vocab table, docs/design/intention-
+// contract.html §5, lists them actor-only/untargeted), so two suggestions of
+// the same one of those kinds are always identical.
+//
+// Idle is DELIBERATELY excluded, always returning false: Idle's own "field"
+// (duration_millis) is never stored on CurrentIntention -- only the deadline
+// it produces (wake_at_millis) is, and that is a moving target (it is
+// `now + duration`, so it differs across two calls even for the textually
+// same duration). Treating "kind == Idle" alone as identical would silently
+// swallow a genuinely new duration (e.g. a second Idle(900ms) landing on top
+// of a still-running Idle(300ms)) as a no-op resume instead of the fresh
+// decision it is -- exactly the case the wake-schedule replay test (§6)
+// pins by using two different Idle durations back to back.
+bool is_identical_restatement(const CurrentIntention& ci, const Intention& intent) {
+    if (ci.kind != intent.kind) {
+        return false;
+    }
+    switch (intent.kind) {
+        case IntentionKind::MoveTo:
+            return ci.point == intent.point;
+        case IntentionKind::Shoot:
+        case IntentionKind::Chat:
+            return ci.target_slot == intent.target_slot;
+        case IntentionKind::Enter:
+            return ci.arg == intent.arg;
+        case IntentionKind::Attack:
+        case IntentionKind::EnterHome:
+        case IntentionKind::Buy:
+            return true;  // no distinguishing field -- actor-only/untargeted
+        case IntentionKind::Idle:
+        case IntentionKind::None:
+        default:
+            return false;  // never a restate -- see this function's own comment
+    }
+}
+
+}  // namespace
+
 void push_inbox_event(BadlandsGame& game, entt::entity e, InboxEvent ev) {
     auto* inbox = game.registry.try_get<EventInbox>(e);
     if (inbox == nullptr) {
@@ -57,6 +102,26 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // this function is purely validate-and-adopt now; see both doc
     // comments for why they are split.
     CurrentIntention& ci = reg.get<CurrentIntention>(e);
+
+    // v3 restate-resume: an incoming suggestion identical to what's already
+    // running is a fresh yield with a fresh hint, not a new decision (the
+    // engine diffs) -- resume WITHOUT re-running the kind's producer or
+    // re-stamping started_at_millis, refreshing only the wake schedule. The
+    // wake schedule refresh still goes through enqueue_set_behavior's
+    // force=true path below, same as a full adopt and for the same reason
+    // (see the adopt tail's own comment) -- a restate that only changed
+    // wake_at_millis is a real scheduling decision too, and must reach the
+    // command log for replay to reconstruct it, exactly like a fresh adopt's
+    // schedule does. Idle can never land here (is_identical_restatement
+    // excludes it), so `intent.idle_hint_millis` is always the right field to
+    // read, never `intent.duration_millis`.
+    if (is_identical_restatement(ci, intent)) {
+        const int64_t hint =
+            intent.idle_hint_millis > 0 ? intent.idle_hint_millis : kDefaultWakeCadenceMillis;
+        enqueue_set_behavior(game, slot, intent.activity_label, hint, /*force=*/true);
+        ci.wake_at_millis = game.world_millis + hint;
+        return true;
+    }
 
     switch (intent.kind) {
         case IntentionKind::None:
@@ -173,15 +238,18 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // PER-TICK re-decision (the mock brain's own use), which does not apply
     // here.
     //
-    // Idle duration_millis == 0 is an EXPLICIT choice, not an oversight:
-    // wake_at_millis == 0 is the "no deadline" sentinel (see
-    // CurrentIntention's doc comment), so an Idle stamped with duration 0
-    // reads as "idle until woken" -- it never self-completes and never
-    // spuriously wakes on a deadline -- rather than "already expired." That
-    // is why every deadline check in this file tests `> 0`, never `>= 0`,
-    // and why Idle rejects only a NEGATIVE duration below, not a zero one.
-    const int64_t deadline =
+    // v3 supersedes the v2 rule that used to live in this comment (Idle
+    // duration_millis == 0 reading as "idle until woken," wake_at_millis == 0
+    // being the "no deadline" sentinel): docs/design/intention-contract.html
+    // §2 now reads 0 as "no cadence preference," not "no deadline," for BOTH
+    // fields -- kDefaultWakeCadenceMillis (components.h) is substituted for a
+    // non-positive requested duration/hint either way, so `deadline` below is
+    // now ALWAYS a genuine positive duration, never a sentinel. Idle still
+    // rejects only a NEGATIVE duration above, not a zero one -- zero is valid
+    // input, just no longer meaning "forever."
+    const int64_t requested =
         (intent.kind == IntentionKind::Idle) ? intent.duration_millis : intent.idle_hint_millis;
+    const int64_t deadline = requested > 0 ? requested : kDefaultWakeCadenceMillis;
     enqueue_set_behavior(game, slot, intent.activity_label, deadline, /*force=*/true);
 
     ci.kind = intent.kind;
@@ -199,7 +267,7 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
                          : UINT32_MAX;
     ci.arg = (intent.kind == IntentionKind::Enter) ? intent.arg : 0;
     ci.started_at_millis = game.world_millis;
-    ci.wake_at_millis = deadline > 0 ? game.world_millis + deadline : 0;
+    ci.wake_at_millis = game.world_millis + deadline;  // deadline is always > 0 now (see above)
     return true;
 }
 
@@ -399,6 +467,33 @@ bool should_wake(const BadlandsGame& game, entt::entity e) {
     if (!game.registry.valid(e)) {
         return false;
     }
+    // v3 high-stakes clause (docs/design/intention-contract.html §2, "Tiered
+    // wake guarantees") -- checked FIRST, ahead of every other clause below,
+    // so it wins even over a long idle-hint deadline that has not elapsed
+    // yet: a hero told "sleep 4 hours" must still notice a monster that
+    // walks up, and a hero locked in melee stays consultable every tick.
+    // This is an ENGINE OFFER of per-tick consultation, not a promise that
+    // every offered wake produces a new command -- a brain re-consulted
+    // every tick while a threat lingers is expected to often just restate
+    // what it was already doing, which apply_intention's restate-resume path
+    // resumes without logging anything beyond the refreshed wake schedule.
+    //
+    // threat_was_present reads THIS TICK's value, not an edge -- sim.cpp's
+    // ThreatSighted pass (tick_world) runs BEFORE the think loop every tick
+    // and maintains it there (force-resetting it false for a hidden hero, so
+    // a hero currently hidden never reads true here), so by the time
+    // should_wake is consulted this tick's perception has already landed;
+    // "this tick's value" and "as of the last completed perception pass" are
+    // the same read.
+    if (const auto* inbox = game.registry.try_get<EventInbox>(e)) {
+        if (inbox->threat_was_present) {
+            return true;
+        }
+    }
+    if (game.registry.all_of<MeleeLock>(e)) {
+        return true;
+    }
+
     const auto* ci = game.registry.try_get<CurrentIntention>(e);
     // "Nothing running" is worth a wake only when NO backoff is armed
     // either (see this function's doc comment): note_think_outcome can set
