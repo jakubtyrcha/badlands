@@ -362,3 +362,15 @@ flows. Built on the SIM grid from final drainage area A:
   rivers overlaid in water blue) — the judging image.
 - Rivers connect by construction (receiver chains reach a lake or the
   border), unlike gradient-aligned streak tricks.
+
+### Basin border rim (v1.3.1, user-reported)
+
+Preview finding (seed 1, upper-left): basins whose bowls touch the sim-grid
+border are breached by construction — border cells seed the flood at base
+level, so the basin's "spill" is the border at bowl-floor height and rivers
+flow through the dry bowl off the map. Fix: `carve_cavities` excludes a
+`kBasinBorderMarginTexels` (3) ring at the sim-grid edge from the basin mask
+before carving. The uncarved ring keeps original terrain height and acts as
+the rim; the EDT cone then shallows naturally toward it. Lakes at the world
+edge hold water (they may still be visually cropped by the world rect);
+non-lake drainage still exits the border unchanged.
