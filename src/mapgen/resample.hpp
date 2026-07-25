@@ -72,6 +72,15 @@ inline Field2D<float> resample_max_pool(const Field2D<float>& src,
   std::vector<std::pair<int, int>> ys(static_cast<size_t>(dst_res));
   for (int x = 0; x < dst_res; ++x) xs[static_cast<size_t>(x)] = span_for(x, src.width);
   for (int y = 0; y < dst_res; ++y) ys[static_cast<size_t>(y)] = span_for(y, src.height);
+  // Terminal texels absorb the residual source bands: node-centered windows
+  // otherwise never pool source content beyond the last node's half-span, so
+  // a sparse feature (a river line) in that band would silently vanish when
+  // downsampling. (The production 1:1 sim->output ratio is unaffected — the
+  // pad absorbs the edges — this matters when output res < sim res.)
+  xs.front().first = 0;
+  ys.front().first = 0;
+  xs.back().second = src.width - 1;
+  ys.back().second = src.height - 1;
   for (int y = 0; y < dst_res; ++y) {
     const auto [sy0, sy1] = ys[static_cast<size_t>(y)];
     for (int x = 0; x < dst_res; ++x) {

@@ -807,6 +807,56 @@ TEST_CASE("resample_bilinear: identity when grids coincide, linear in between") 
   REQUIRE(shifted.at(0, 0) == Catch::Approx(2.0f));
 }
 
+TEST_CASE("resample_max_pool: node windows + edge band coverage") {
+  // Node-centered windows (dst node i at world i*dst_texel, span +-half) —
+  // consistent with resample_bilinear's node convention. The terminal texels
+  // are edge-extended: without that, source content beyond the last node's
+  // half-window is never pooled and a sparse river line silently vanishes in
+  // a sub-texel band at the map's far edges when output res < sim res.
+  auto hot_at = [](int hx, int hy) {
+    Field2D<float> f(8, 8, 0.0f);
+    f.at(hx, hy) = 1.0f;
+    return f;
+  };
+
+  // (a) node-convention pin: src(5,5) is nearest dst node 3 (world 6, window
+  // [5,6]) when pooling 8 -> 4 at dst_texel 2 — NOT cell-coverage's dst 2.
+  {
+    const auto out = resample_max_pool(hot_at(5, 5), 1.0f, 0.0f, 4, 2.0f);
+    REQUIRE(out.at(3, 3) == 1.0f);
+    float total = 0.0f;
+    for (float v : out.data) total += v;
+    REQUIRE(total == 1.0f);  // exactly one hot dst texel
+  }
+  // (b) identity when grids coincide.
+  {
+    const auto src = hot_at(5, 5);
+    REQUIRE(resample_max_pool(src, 1.0f, 0.0f, 8, 1.0f).data == src.data);
+  }
+  // (c) THE edge-band regression: last source band must not be dropped when
+  // the ratio is non-integer (was: all zeros).
+  {
+    const auto out = resample_max_pool(hot_at(7, 7), 1.0f, 0.0f, 3, 8.0f / 3.0f);
+    REQUIRE(out.at(2, 2) == 1.0f);
+  }
+  // (d) symmetric first-band coverage.
+  {
+    const auto out = resample_max_pool(hot_at(0, 0), 1.0f, 0.0f, 3, 8.0f / 3.0f);
+    REQUIRE(out.at(0, 0) == 1.0f);
+  }
+  // (e) upsample: hot src node (world 5) shows on the dst nodes whose
+  // windows/rounding reach it — pins the current lround tie behavior so any
+  // future drift is visible.
+  {
+    const auto out = resample_max_pool(hot_at(5, 5), 1.0f, 0.0f, 16, 0.5f);
+    for (int y = 0; y < 16; ++y)
+      for (int x = 0; x < 16; ++x) {
+        const bool hot = (x == 9 || x == 10) && (y == 9 || y == 10);
+        REQUIRE(out.at(x, y) == (hot ? 1.0f : 0.0f));
+      }
+  }
+}
+
 TEST_CASE("generate_map: debug sink sees the full stage sequence") {
   struct Recorder : MapDebugSink {
     std::vector<std::string> stages;
