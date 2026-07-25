@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -510,6 +511,11 @@ TEST_CASE("instanced forward material renders N instances at N screen positions"
   wgpu::Buffer instbuf =
       UploadBuffer(g.device, xforms.data(), xforms.size() * sizeof(glm::mat4),
                    wgpu::BufferUsage::Storage);
+  // Unified layout, single-bucket case: bucketBase = [0], bucketId = 0 (unset ->
+  // zero) makes the vertex shader read instances[0 + instance_index].
+  std::array<uint32_t, 1> base0 = {0u};
+  wgpu::Buffer basebuf = UploadBuffer(g.device, base0.data(), sizeof(base0),
+                                      wgpu::BufferUsage::Storage);
 
   // Trivial group-2 engine resources (shadow map + IBL).
   wgpu::TextureDescriptor sd{};
@@ -557,7 +563,7 @@ TEST_CASE("instanced forward material renders N instances at N screen positions"
         frame.CreateBindGroup(inst->GetPipeline().GetBindGroupLayout(2), g2);
     pass.SetBindGroup(2, g2bg);
 
-    REQUIRE(inst->BindInstanceData(pass, frame, instbuf, 0));
+    REQUIRE(inst->BindInstanceData(pass, frame, instbuf, basebuf));
 
     pass.SetVertexBuffer(0, vbuf);
     pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
@@ -633,6 +639,9 @@ TEST_CASE("instanced G-buffer material renders N instances at N screen positions
   wgpu::Buffer instbuf =
       UploadBuffer(g.device, xforms.data(), xforms.size() * sizeof(glm::mat4),
                    wgpu::BufferUsage::Storage);
+  std::array<uint32_t, 1> base0 = {0u};
+  wgpu::Buffer basebuf = UploadBuffer(g.device, base0.data(), sizeof(base0),
+                                      wgpu::BufferUsage::Storage);
 
   UniformData frame_uniforms = MakeOrthoFrame();
   FrameContext frame;
@@ -659,7 +668,7 @@ TEST_CASE("instanced G-buffer material renders N instances at N screen positions
     RenderPassContext pass = frame.BeginRenderPass(desc);
 
     REQUIRE(inst->Bind(pass, frame));
-    REQUIRE(inst->BindInstanceData(pass, frame, instbuf, 0));
+    REQUIRE(inst->BindInstanceData(pass, frame, instbuf, basebuf));
     pass.SetVertexBuffer(0, vbuf);
     pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
     pass.DrawIndexed(6, kInstCount);
@@ -808,89 +817,108 @@ TEST_CASE("instanced G-buffer material's shadow-pass variant compiles",
 }
 
 // ===========================================================================
-// Phase C: compute frustum-cull + compaction feeding one indirect instanced
-// draw (GpuInstanceRenderer, shaders/compute/instance_cull.wesl). Building on
-// Phase A's atomics/indirect-draw/BufferReadback primitives and Phase B's
-// instanced materials: a compute pass tests each instance's world-space
-// bounding sphere against the camera frustum, atomically compacts survivors'
-// transforms, and one DrawIndexedIndirect renders exactly those survivors
-// with the Phase-B instanced_gbuffer material.
+// Phase C/D: GPU-driven multi-bucket cull + LOD classification + prefix-sum
+// compaction feeding one indirect draw PER (model,lod) bucket
+// (GpuInstanceRenderer + shaders/compute/instance_{classify,scan,scatter}.wesl).
+// Builds on Phase A's atomics/indirect-draw/BufferReadback primitives and Phase
+// B's unified instanced materials: a 3-pass compute frustum-culls each
+// instance, routes survivors into `bucket = modelId*kMaxLods + lod(distance)`,
+// prefix-sums the per-bucket counts into disjoint slices of one global compacted
+// buffer, and one DrawIndexedIndirect per bucket renders each bucket's survivors
+// — the draw's vertex shader reads the GPU-computed base as
+// compacted[bucketBase[bucketId] + instance_index] (no per-frame readback).
 //
-// Test 1 (gate): does compute/instance_cull compile and reflect the expected
-// group-0 uniform + group-1 storage bindings (read-only instances, writable
-// compacted + args)?
-// Test 2: cull correctness via buffer readback -- the compacted transforms +
-// count exactly match an independently-computed (CPU) in-frustum set,
-// including a sphere straddling a plane.
-// Test 3-5: end-to-end + edge cases via framebuffer readback -- only
-// surviving instances actually draw.
+// Test 1 (gate): the three compute shaders compile + reflect their bindings.
+// Test 2: single-bucket cull correctness (Phase C carried forward as the
+//         trivial 1-bucket case) via buffer readback.
+// Test 3: LOD boundary — instances straddling the thresholds land in the
+//         correct lod bucket (bucketCount readback, incl. a boundary value).
+// Test 4: multi-bucket compaction — prefix-sum bases are monotonic + 4-aligned +
+//         non-overlapping, and each slice holds exactly its bucket's transforms.
+// Test 5: end-to-end per-LOD render — each lod drawn with its own mesh + color
+//         at its position (framebuffer readback).
+// Test 6-7: edges — all culled (empty buckets, no draw/crash); all-in-one-bucket.
 // ===========================================================================
 
-TEST_CASE("compute/instance_cull compiles and reflects the expected bindings",
-          "[gpu_instance][gpu]") {
+TEST_CASE(
+    "compute/instance_{classify,scan,scatter} compile and reflect their bindings",
+    "[gpu_instance][gpu]") {
   TestGpu& g = GetTestGpu();
 
-  // A private pipeline generator (NOT the shared TestGpu::gen) so this
-  // compile is guaranteed to be a genuine first-time compile under the Dawn
-  // validation-error scope below, regardless of what other tests in this
-  // binary already cached against the shared generator (Catch2's default
-  // test order is lexicographic by name, not declaration order, so another
-  // test's GpuInstanceRenderer may otherwise have compiled + cached this
-  // pipeline first, unwrapped). A non-null/IsValid() check alone does NOT
-  // prove a WGSL compile succeeded on this Dawn build -- see
-  // RunCapturingValidationErrors' comment above (established in Phase B).
+  // A private generator so each compile is a genuine first-time compile under
+  // the Dawn validation-error scope (see RunCapturingValidationErrors' comment
+  // — a non-null/IsValid() check alone does NOT prove a WGSL compile succeeded
+  // on this Dawn build).
   GpuPipelineGenerator fresh_gen(g.device, FindShaderDirectory());
 
-  std::shared_ptr<const CompiledComputePipeline> pipeline;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
-    pipeline = fresh_gen.GetComputePipeline("compute/instance_cull");
-  });
-  INFO("Dawn validation error: " << err.message);
-  CHECK(err.type == wgpu::ErrorType::NoError);
-  REQUIRE(pipeline != nullptr);
-  REQUIRE(pipeline->pipeline != nullptr);
-  CHECK(pipeline->workgroup_size[0] == 64);
-  REQUIRE(pipeline->bind_group_layouts.size() == 2);
-
-  auto find_binding = [&](uint32_t group,
-                          uint32_t binding) -> const ReflectedBinding* {
-    for (const auto& b : pipeline->reflected_bindings) {
+  auto find_binding = [](const CompiledComputePipeline& p, uint32_t group,
+                         uint32_t binding) -> const ReflectedBinding* {
+    for (const auto& b : p.reflected_bindings) {
       if (b.group == group && b.binding == binding) return &b;
     }
     return nullptr;
   };
-  const ReflectedBinding* frustum_b = find_binding(0, 0);
-  const ReflectedBinding* instances_b = find_binding(1, 0);
-  const ReflectedBinding* compacted_b = find_binding(1, 1);
-  const ReflectedBinding* args_b = find_binding(1, 2);
-  REQUIRE(frustum_b != nullptr);
-  REQUIRE(instances_b != nullptr);
-  REQUIRE(compacted_b != nullptr);
-  REQUIRE(args_b != nullptr);
 
-  CHECK(frustum_b->name == "frustum");
-  CHECK(frustum_b->buffer_type == wgpu::BufferBindingType::Uniform);
-  CHECK(instances_b->name == "instances");
-  CHECK(instances_b->buffer_type == wgpu::BufferBindingType::ReadOnlyStorage);
-  CHECK(compacted_b->name == "compacted");
-  CHECK(compacted_b->buffer_type == wgpu::BufferBindingType::Storage);
-  CHECK(args_b->name == "args");
-  CHECK(args_b->buffer_type == wgpu::BufferBindingType::Storage);
+  std::shared_ptr<const CompiledComputePipeline> classify, scan, scatter;
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    classify = fresh_gen.GetComputePipeline("compute/instance_classify");
+    scan = fresh_gen.GetComputePipeline("compute/instance_scan");
+    scatter = fresh_gen.GetComputePipeline("compute/instance_scatter");
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  REQUIRE(classify != nullptr);
+  REQUIRE(scan != nullptr);
+  REQUIRE(scatter != nullptr);
+  REQUIRE(classify->pipeline != nullptr);
+  REQUIRE(scan->pipeline != nullptr);
+  REQUIRE(scatter->pipeline != nullptr);
+  CHECK(classify->workgroup_size[0] == 64);
+  CHECK(scan->workgroup_size[0] == 1);
+  CHECK(scatter->workgroup_size[0] == 64);
+
+  // Classify: config (uniform) + instances (read-only) + perInstanceBucket +
+  // bucketCount (both writable storage).
+  const ReflectedBinding* c_config = find_binding(*classify, 0, 0);
+  const ReflectedBinding* c_instances = find_binding(*classify, 0, 1);
+  const ReflectedBinding* c_bucketcount = find_binding(*classify, 0, 3);
+  REQUIRE(c_config != nullptr);
+  REQUIRE(c_instances != nullptr);
+  REQUIRE(c_bucketcount != nullptr);
+  CHECK(c_config->name == "config");
+  CHECK(c_config->buffer_type == wgpu::BufferBindingType::Uniform);
+  CHECK(c_instances->name == "instances");
+  CHECK(c_instances->buffer_type == wgpu::BufferBindingType::ReadOnlyStorage);
+  CHECK(c_bucketcount->name == "bucketCount");
+  CHECK(c_bucketcount->buffer_type == wgpu::BufferBindingType::Storage);
+
+  // Scan: writes bucketBase + indirectArgs.
+  const ReflectedBinding* s_base = find_binding(*scan, 0, 2);
+  const ReflectedBinding* s_args = find_binding(*scan, 0, 4);
+  REQUIRE(s_base != nullptr);
+  REQUIRE(s_args != nullptr);
+  CHECK(s_base->name == "bucketBase");
+  CHECK(s_base->buffer_type == wgpu::BufferBindingType::Storage);
+  CHECK(s_args->name == "indirectArgs");
+
+  // Scatter: reads bucketBase (read-only), writes compacted.
+  const ReflectedBinding* x_base = find_binding(*scatter, 0, 3);
+  const ReflectedBinding* x_compacted = find_binding(*scatter, 0, 5);
+  REQUIRE(x_base != nullptr);
+  REQUIRE(x_compacted != nullptr);
+  CHECK(x_base->name == "bucketBase");
+  CHECK(x_base->buffer_type == wgpu::BufferBindingType::ReadOnlyStorage);
+  CHECK(x_compacted->name == "compacted");
+  CHECK(x_compacted->buffer_type == wgpu::BufferBindingType::Storage);
 }
 
 namespace {
 
-// Sphere-vs-frustum test mirroring instance_cull.wesl's `sphereCulled`
-// EXACTLY (see the phase-C report for the derivation from
-// Frustum::Intersects' AABB "positive vertex" test): a sphere is culled iff
-// it is fully outside any single plane's half-space,
-// dot(plane.xyz, center) + plane.w < -radius. Used to compute the expected
-// in/out set independently of the GPU.
+// Sphere-vs-frustum test mirroring the classify shader's `sphereCulled` EXACTLY
+// (culled iff fully outside any plane: dot(plane.xyz, center)+plane.w < -radius).
 bool ExpectedCulled(const Frustum& f, glm::vec3 center, float radius) {
   for (const glm::vec4& p : f.planes) {
-    if (glm::dot(glm::vec3(p), center) + p.w < -radius) {
-      return true;
-    }
+    if (glm::dot(glm::vec3(p), center) + p.w < -radius) return true;
   }
   return false;
 }
@@ -899,23 +927,61 @@ bool Mat4Equal(const glm::mat4& a, const glm::mat4& b) {
   return std::memcmp(&a, &b, sizeof(glm::mat4)) == 0;
 }
 
-}  // namespace
-
-TEST_CASE(
-    "GPU cull correctness: compacted buffer + count match the in-frustum set",
-    "[gpu_instance][gpu]") {
-  TestGpu& g = GetTestGpu();
-
-  // Camera at the origin looking down -Z (fov 90, aspect 1, near 0.5, far
-  // 100) -- the same setup frustum_tests.cpp's CPU-only test uses, so the
-  // expected in/out set below can be cross-checked against that known-good
-  // CPU behavior.
+// Camera at the origin looking down -Z. `aspect` controls the horizontal
+// half-width (fov 90 -> tan(fovy/2)=1); the LOD tests use aspect=1 (wide, so
+// nothing is side-culled) and rely on distance for the LOD band.
+Camera MakeCullCamera(float aspect = 1.0f) {
   Camera camera;
   camera.position = glm::vec3(0.0f);
   camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
   camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
   camera.fov = 90.0f;
-  camera.aspect = 1.0f;
+  camera.aspect = aspect;
+  camera.near_plane = 0.1f;
+  camera.far_plane = 1000.0f;
+  return camera;
+}
+
+// The bucket an instance is expected to land in (CPU mirror of the classify
+// pass: frustum cull -> distance LOD -> modelId*kMaxLods + lod). nullopt =
+// culled / out of range.
+std::optional<uint32_t> ExpectedBucket(const Frustum& f, glm::vec3 cam_pos,
+                                       glm::vec2 thresholds, glm::vec3 center,
+                                       float radius, uint32_t model_id,
+                                       uint32_t num_buckets) {
+  if (ExpectedCulled(f, center, radius)) return std::nullopt;
+  const float d = glm::length(center - cam_pos);
+  const uint32_t lod = d < thresholds.x ? 0u : (d < thresholds.y ? 1u : 2u);
+  const uint32_t b = model_id * GpuInstanceRenderer::kMaxLods + lod;
+  if (b >= num_buckets) return std::nullopt;
+  return b;
+}
+
+// An instance whose bounds center is at `center`, model id `model`, radius
+// small. Transform = translate(center) (so the stored transform is unique per
+// unique center and matchable via memcmp).
+GpuInstanceRenderer::InstanceInput MakeInstance(glm::vec3 center, uint32_t model,
+                                                float radius = 0.25f) {
+  GpuInstanceRenderer::InstanceInput in;
+  in.transform = glm::translate(glm::mat4(1.0f), center);
+  in.bounds_sphere = glm::vec4(center, radius);
+  in.model_info = glm::uvec4(model, 0u, 0u, 0u);
+  return in;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Test 2: single-bucket cull correctness (Phase C, as the trivial 1-bucket
+// case). Thresholds pushed to +inf so every survivor lands in lod0 (bucket 0);
+// the compacted buffer + bucket-0 count must match the independently-computed
+// in-frustum set, including a sphere straddling a plane.
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU cull single-bucket: compacted + count match the in-frustum set",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  Camera camera = MakeCullCamera(1.0f);
   camera.near_plane = 0.5f;
   camera.far_plane = 100.0f;
   const Frustum frustum =
@@ -935,31 +1001,25 @@ TEST_CASE(
       {{0.0f, 5.0f, -20.0f}, 2.0f, "up and ahead"},
       {{-11.0f, 0.0f, -10.0f}, 2.0f, "straddling the left plane"},
   };
-
-  // Sanity-check the straddling case actually straddles: a bare point there
-  // (radius 0) is outside, but the sphere's radius reaches back into the
-  // frustum -- exercising the "< -radius", not "< 0", comparison.
+  // The straddling case really straddles: a bare point is out, the sphere reaches
+  // back in (exercises "< -radius", not "< 0").
   REQUIRE(ExpectedCulled(frustum, cases[6].center, 0.0f));
   REQUIRE_FALSE(ExpectedCulled(frustum, cases[6].center, cases[6].radius));
 
-  std::vector<glm::mat4> expected_visible_transforms;
+  std::vector<glm::mat4> expected_visible;
   std::vector<GpuInstanceRenderer::InstanceInput> inputs;
-  uint32_t expected_count = 0;
   for (const Case& c : cases) {
-    GpuInstanceRenderer::InstanceInput in;
-    in.transform = glm::translate(glm::mat4(1.0f), c.center);
-    in.bounds_sphere = glm::vec4(c.center, c.radius);
+    GpuInstanceRenderer::InstanceInput in = MakeInstance(c.center, 0, c.radius);
     inputs.push_back(in);
-    const bool culled = ExpectedCulled(frustum, c.center, c.radius);
-    INFO("case '" << c.label << "' culled=" << culled);
-    if (!culled) {
-      expected_visible_transforms.push_back(in.transform);
-      ++expected_count;
+    if (!ExpectedCulled(frustum, c.center, c.radius)) {
+      expected_visible.push_back(in.transform);
     }
   }
 
+  // thresholds = {1e30, 1e30} -> every survivor is lod0 -> bucket 0.
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
-                              static_cast<uint32_t>(cases.size()));
+                               static_cast<uint32_t>(cases.size()),
+                               /*num_models=*/1, {1e30f, 1e30f});
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
 
@@ -970,23 +1030,30 @@ TEST_CASE(
   g.queue.Submit(1, &cmd);
   test::WaitForGpu(g.instance, g.device, g.queue);
 
-  std::vector<uint32_t> gpu_count = test::ReadBufferSync<uint32_t>(
-      g.instance, g.device, g.queue, renderer.GetArgsBuffer(),
-      GpuInstanceRenderer::kArgsInstanceCountOffset, 1);
-  REQUIRE(gpu_count.size() == 1);
-  INFO("expected count = " << expected_count << ", GPU count = " << gpu_count[0]);
-  CHECK(gpu_count[0] == expected_count);
+  std::vector<uint32_t> counts = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
+      renderer.GetNumBuckets());
+  REQUIRE(counts.size() == renderer.GetNumBuckets());
+  INFO("expected count = " << expected_visible.size()
+                           << ", bucket0 = " << counts[0]);
+  CHECK(counts[0] == expected_visible.size());
+  CHECK(counts[1] == 0);  // no survivor should reach lod1/lod2
+  CHECK(counts[2] == 0);
+
+  std::vector<uint32_t> bases = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketBaseBuffer(), 0,
+      renderer.GetNumBuckets());
+  REQUIRE(bases.size() == renderer.GetNumBuckets());
+  CHECK(bases[0] == 0);
 
   std::vector<glm::mat4> compacted = test::ReadBufferSync<glm::mat4>(
       g.instance, g.device, g.queue, renderer.GetCompactedBuffer(), 0,
-      gpu_count[0]);
-  REQUIRE(compacted.size() == gpu_count[0]);
+      counts[0]);
+  REQUIRE(compacted.size() == counts[0]);
 
-  // Order-independent set match: every expected survivor's transform appears
-  // exactly once among the compacted transforms (atomic append order isn't
-  // fixed across dispatches).
+  // Order-independent set match (atomic append order isn't fixed).
   std::vector<bool> matched(compacted.size(), false);
-  for (const glm::mat4& expected : expected_visible_transforms) {
+  for (const glm::mat4& expected : expected_visible) {
     bool found = false;
     for (size_t i = 0; i < compacted.size(); ++i) {
       if (!matched[i] && Mat4Equal(compacted[i], expected)) {
@@ -1000,113 +1067,207 @@ TEST_CASE(
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end (framebuffer readback) + edge cases: render the culled/compacted
-// survivors via GpuInstanceRenderer::Draw with the Phase-B instanced_gbuffer
-// material, and read back the albedo target.
+// Test 3: LOD boundary. Instances on the view axis at distances straddling the
+// thresholds land in the correct lod bucket. Includes a value EXACTLY at a
+// boundary (dist == t0), which must fall to the coarser side (strict `<`).
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU LOD selection: distance thresholds route into the right bucket",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  const glm::vec2 thresholds(10.0f, 20.0f);
+  Camera camera = MakeCullCamera(1.0f);
+
+  // dist -> expected lod: 5->0, 10->1 (boundary, coarser side), 15->1, 20->2
+  // (boundary), 25->2. All on -Z axis, tiny radius, well inside the frustum.
+  const std::array<float, 5> dists = {5.0f, 10.0f, 15.0f, 20.0f, 25.0f};
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  for (float d : dists) {
+    inputs.push_back(MakeInstance(glm::vec3(0.0f, 0.0f, -d), 0, 0.1f));
+  }
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
+                               static_cast<uint32_t>(inputs.size()),
+                               /*num_models=*/1,
+                               {thresholds.x, thresholds.y});
+  REQUIRE(renderer.IsValid());
+  renderer.UploadInstances(inputs);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.Cull(frame, camera);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  std::vector<uint32_t> counts = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
+      renderer.GetNumBuckets());
+  REQUIRE(counts.size() == 3);
+  INFO("lod counts: " << counts[0] << "," << counts[1] << "," << counts[2]);
+  CHECK(counts[0] == 1);  // {5}
+  CHECK(counts[1] == 2);  // {10 (boundary), 15}
+  CHECK(counts[2] == 2);  // {20 (boundary), 25}
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: multi-bucket compaction (prefix-sum). Several instances across 2
+// models x lods -> the compacted slices are non-overlapping, 4-aligned, bases
+// monotonic, and each bucket's [base, base+count) slice holds exactly that
+// bucket's transforms (order-independent).
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU multi-bucket compaction: prefix-sum slices are disjoint + exact",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  const glm::vec2 thresholds(10.0f, 20.0f);
+  Camera camera = MakeCullCamera(1.0f);
+  const Frustum frustum =
+      Frustum::FromViewProj(camera.GetProj() * camera.GetView());
+
+  // model 0: two lod0 (dist~5) + one lod1 (dist~15)
+  // model 1: one lod0 (dist~5) + two lod1 (dist~15) + one lod2 (dist~25)
+  // -> buckets 0:2, 1:1, 2:0(empty), 3:1, 4:2, 5:1. Unique x-offset per instance
+  // keeps each transform distinct without changing the LOD band.
+  struct Spec {
+    float dist;
+    uint32_t model;
+  };
+  const std::vector<Spec> specs = {
+      {5.0f, 0}, {5.0f, 0}, {15.0f, 0},          // model 0
+      {5.0f, 1}, {15.0f, 1}, {15.0f, 1}, {25.0f, 1}};  // model 1
+
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  float tag = 0.0f;
+  for (const Spec& s : specs) {
+    tag += 1.0f;
+    glm::vec3 center(tag * 0.001f, 0.0f, -s.dist);  // unique center
+    inputs.push_back(MakeInstance(center, s.model, 0.1f));
+  }
+
+  const uint32_t num_models = 2;
+  const uint32_t num_buckets = num_models * GpuInstanceRenderer::kMaxLods;
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
+                               static_cast<uint32_t>(inputs.size()), num_models,
+                               {thresholds.x, thresholds.y});
+  REQUIRE(renderer.IsValid());
+  REQUIRE(renderer.GetNumBuckets() == num_buckets);
+  renderer.UploadInstances(inputs);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.Cull(frame, camera);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  // Expected per-bucket membership (CPU mirror).
+  std::vector<std::vector<glm::mat4>> expected(num_buckets);
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    auto b = ExpectedBucket(frustum, camera.GetPosition(), thresholds,
+                            glm::vec3(inputs[i].bounds_sphere),
+                            inputs[i].bounds_sphere.w, specs[i].model,
+                            num_buckets);
+    REQUIRE(b.has_value());
+    expected[*b].push_back(inputs[i].transform);
+  }
+
+  std::vector<uint32_t> counts = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
+      num_buckets);
+  std::vector<uint32_t> bases = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketBaseBuffer(), 0,
+      num_buckets);
+  std::vector<glm::mat4> compacted = test::ReadBufferSync<glm::mat4>(
+      g.instance, g.device, g.queue, renderer.GetCompactedBuffer(), 0,
+      renderer.GetCompactedCapacity());
+  REQUIRE(counts.size() == num_buckets);
+  REQUIRE(bases.size() == num_buckets);
+  REQUIRE(compacted.size() == renderer.GetCompactedCapacity());
+
+  // Counts match, bases are 4-aligned + monotonic + non-overlapping.
+  uint32_t prev_end = 0;
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    INFO("bucket " << b << " count=" << counts[b] << " base=" << bases[b]);
+    CHECK(counts[b] == expected[b].size());
+    CHECK(bases[b] % 4u == 0u);            // 4-slot (256-byte) aligned
+    CHECK(bases[b] >= prev_end);           // monotonic + non-overlapping
+    prev_end = bases[b] + counts[b];
+  }
+
+  // Each bucket's slice holds exactly its expected transforms (order-independent).
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    std::vector<bool> matched(counts[b], false);
+    for (const glm::mat4& want : expected[b]) {
+      bool found = false;
+      for (uint32_t s = 0; s < counts[b]; ++s) {
+        if (!matched[s] &&
+            Mat4Equal(compacted[bases[b] + s], want)) {
+          matched[s] = true;
+          found = true;
+          break;
+        }
+      }
+      CHECK(found);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end render helpers (framebuffer readback): cull + one indirect draw
+// per bucket with per-bucket distinct-color instanced_gbuffer materials.
 // ---------------------------------------------------------------------------
 namespace {
 
-constexpr uint32_t kCullQuadCount = 4;
-// World-space quad centers along X at a fixed depth, all comfortably within
-// the ortho test frame's on-screen range (|x| <= 2 -- see MakeOrthoFrame
-// above) so any missing from the rendered image were genuinely removed by
-// the cull compute, not simply off-screen.
-const std::array<glm::vec2, kCullQuadCount> kCullQuadCenters = {
-    glm::vec2{-1.5f, 0.0f}, glm::vec2{-0.5f, 0.0f}, glm::vec2{0.5f, 0.0f},
-    glm::vec2{1.5f, 0.0f}};
-constexpr float kCullQuadZ = -10.0f;
-constexpr float kCullQuadScale = 0.2f;
-constexpr float kCullQuadRadius = 0.3f;
-
-// A camera at the origin looking down -Z; `aspect` alone controls the
-// visible half-width at kCullQuadZ (= |z| * aspect * tan(fovy/2), and
-// fovy=90 here makes tan(fovy/2)=1) so each test picks a single aspect to
-// get a mixed / all-in / all-out cull outcome against kCullQuadCenters.
-Camera MakeCullTestCamera(float aspect) {
-  Camera camera;
-  camera.position = glm::vec3(0.0f);
-  camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
-  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
-  camera.fov = 90.0f;
-  camera.aspect = aspect;
-  camera.near_plane = 0.1f;
-  camera.far_plane = 100.0f;
-  return camera;
-}
-
-// Expected framebuffer center for a world XY under MakeOrthoFrame's trivial
-// projection (clip = 0.5*world), WebGPU y-down -- same formula as Phase B's
-// ExpectedPixels above, generalized to an arbitrary world XY.
-std::pair<uint32_t, uint32_t> ExpectedPixelForWorldXY(glm::vec2 xy) {
-  const float clip_x = 0.5f * xy.x;
-  const float clip_y = 0.5f * xy.y;
-  const uint32_t px = uint32_t((clip_x * 0.5f + 0.5f) * float(kInstTarget));
-  const uint32_t py =
-      uint32_t((1.0f - (clip_y * 0.5f + 0.5f)) * float(kInstTarget));
-  return {px, py};
-}
-
-struct CullRenderResult {
-  uint32_t survivor_count = 0;
-  CpuImage albedo;
+// One distinct-color instanced_gbuffer material per bucket, with `bucketId`
+// baked to the bucket index (so the vertex shader reads the right slice). Kept
+// alive by the returned handles vector.
+struct BucketMaterials {
+  std::unique_ptr<MaterialInstanceFactory> factory;
+  MaterialInstanceCache cache;
+  std::vector<entt::resource<RenderingMaterialInstance>> handles;
+  std::vector<RenderingMaterialInstance*> ptrs;  // size num_buckets, may be null
 };
 
-// Builds kCullQuadCount instances (one quad per kCullQuadCenters entry),
-// culls them against `cull_camera` via GpuInstanceRenderer, and renders the
-// survivors with the instanced_gbuffer material (Phase B) fed by the
-// renderer's compacted buffer + indirect args. Returns the GPU-read survivor
-// count and the albedo target for pixel assertions.
-CullRenderResult RunCullAndRender(TestGpu& g, const Camera& cull_camera) {
-  auto factory = MakeInstancedFactory(
+std::unique_ptr<BucketMaterials> MakeBucketMaterials(
+    TestGpu& g, uint32_t num_buckets, const std::vector<glm::vec4>& tints) {
+  auto bm = std::make_unique<BucketMaterials>();
+  bm->factory = MakeInstancedFactory(
       g, "instanced_gbuffer", MaterialPassType::kDeferred,
       {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
       {});
-  REQUIRE(factory != nullptr);
-
-  MaterialInstanceCache cache;
-  InstanceParams params;
-  params.uniform_overrides["tint"] =
-      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-  entt::id_type key = ComposeMaterialCacheKey(
-      entt::hashed_string{"instanced_gbuffer_cull"}.value(),
-      GeometryType::kInstancedMesh, RenderPassType::kGBuffer, 0);
-  auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
-                                  MaterialPassType::kDeferred,
-                                  RenderPassType::kGBuffer, params);
-  REQUIRE(handle);
-  REQUIRE(handle->IsValid());
-  auto* inst = handle.operator->();
-
-  std::vector<float> verts = QuadVertices();
-  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
-  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
-                                   verts.size() * sizeof(float),
-                                   wgpu::BufferUsage::Vertex);
-  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
-                                   wgpu::BufferUsage::Index);
-
-  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, kCullQuadCount);
-  REQUIRE(renderer.IsValid());
-  renderer.SetMesh(vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
-
-  std::vector<GpuInstanceRenderer::InstanceInput> instances;
-  for (glm::vec2 c : kCullQuadCenters) {
-    GpuInstanceRenderer::InstanceInput in;
-    in.transform =
-        glm::translate(glm::mat4(1.0f), glm::vec3(c.x, c.y, kCullQuadZ)) *
-        glm::scale(glm::mat4(1.0f), glm::vec3(kCullQuadScale));
-    in.bounds_sphere = glm::vec4(c.x, c.y, kCullQuadZ, kCullQuadRadius);
-    instances.push_back(in);
+  REQUIRE(bm->factory != nullptr);
+  bm->ptrs.assign(num_buckets, nullptr);
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    InstanceParams params;
+    params.uniform_overrides["tint"] = MaterialParameterValue(tints[b]);
+    params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(b));
+    entt::id_type key = ComposeMaterialCacheKey(
+        entt::hashed_string{"instanced_gbuffer_bucket"}.value(),
+        GeometryType::kInstancedMesh, RenderPassType::kGBuffer, b);
+    auto handle = bm->cache.GetOrCreate(
+        key, *bm->factory, GeometryType::kInstancedMesh,
+        MaterialPassType::kDeferred, RenderPassType::kGBuffer, params);
+    REQUIRE(handle);
+    REQUIRE(handle->IsValid());
+    bm->handles.push_back(handle);
+    bm->ptrs[b] = handle.operator->();
   }
-  renderer.UploadInstances(instances);
+  return bm;
+}
 
+// Runs Cull() then one indirect draw per bucket into a G-buffer and returns the
+// albedo target. `mats[b]` is bucket b's material (already carries bucketId=b);
+// the Draw callback just Bind()s it (group 0) — the renderer binds group 1 +
+// mesh + issues the indirect draw.
+CpuImage CullAndRenderBuckets(TestGpu& g, GpuInstanceRenderer& renderer,
+                              const Camera& cull_camera,
+                              const std::vector<RenderingMaterialInstance*>& mats) {
   UniformData frame_uniforms = MakeOrthoFrame();
   FrameContext frame;
   frame.Begin(g.device, g.queue, frame_uniforms);
 
-  // Cull() dispatches a compute pass -- must run before BeginRenderPass on
-  // this same encoder (a render pass can't be active while a compute pass
-  // runs, and vice versa).
   renderer.Cull(frame, cull_camera);
 
   ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget,
@@ -1127,8 +1288,13 @@ CullRenderResult RunCullAndRender(TestGpu& g, const Camera& cull_camera) {
     desc.colorAttachments = ca.data();
     RenderPassContext pass = frame.BeginRenderPass(desc);
 
-    REQUIRE(inst->Bind(pass, frame));
-    REQUIRE(renderer.Draw(pass, frame, *inst));
+    renderer.Draw(pass, frame,
+                  [&](uint32_t bucket) -> RenderingMaterialInstance* {
+                    RenderingMaterialInstance* m = mats[bucket];
+                    if (!m) return nullptr;
+                    if (!m->Bind(pass, frame)) return nullptr;
+                    return m;
+                  });
     pass.End();
   }
 
@@ -1136,94 +1302,252 @@ CullRenderResult RunCullAndRender(TestGpu& g, const Camera& cull_camera) {
   g.queue.Submit(1, &cmd);
   test::WaitForGpu(g.instance, g.device, g.queue);
 
-  CullRenderResult result;
-  std::vector<uint32_t> count = test::ReadBufferSync<uint32_t>(
-      g.instance, g.device, g.queue, renderer.GetArgsBuffer(),
-      GpuInstanceRenderer::kArgsInstanceCountOffset, 1);
-  REQUIRE(count.size() == 1);
-  result.survivor_count = count[0];
-
   TextureReadback rb(g.instance, g.device, g.queue);
-  result.albedo = rb.ReadTextureSync(albedo_t.GetTexture(), kInstTarget,
-                                     kInstTarget, GBuffer::kAlbedoFormat);
-  return result;
+  return rb.ReadTextureSync(albedo_t.GetTexture(), kInstTarget, kInstTarget,
+                            GBuffer::kAlbedoFormat);
+}
+
+// Framebuffer center for a world XY under MakeOrthoFrame (clip = 0.5*world),
+// WebGPU y-down.
+std::pair<uint32_t, uint32_t> WorldXyToPixel(glm::vec2 xy) {
+  const float clip_x = 0.5f * xy.x;
+  const float clip_y = 0.5f * xy.y;
+  return {uint32_t((clip_x * 0.5f + 0.5f) * float(kInstTarget)),
+          uint32_t((1.0f - (clip_y * 0.5f + 0.5f)) * float(kInstTarget))};
+}
+
+// A quad (pos3+uv2+normal3+tangent3, +Z normal) of the given half-extent.
+std::vector<float> QuadVerticesSized(float h) {
+  return {
+      -h, -h, 0, 0, 0, 0, 0, 1, 1, 0, 0,  //
+      h,  -h, 0, 1, 0, 0, 0, 1, 1, 0, 0,  //
+      h,  h,  0, 1, 1, 0, 0, 1, 1, 0, 0,  //
+      -h, h,  0, 0, 1, 0, 0, 1, 1, 0, 0,  //
+  };
 }
 
 }  // namespace
 
-TEST_CASE(
-    "GPU cull end-to-end: indirect draw shows only in-frustum instances",
-    "[gpu_instance][gpu]") {
+// ---------------------------------------------------------------------------
+// Test 5: end-to-end per-LOD render. Three instances at distinct distances (one
+// per lod) and distinct screen positions; each lod bucket gets a DISTINCT mesh
+// (quad size) + color. The framebuffer must show each instance drawn with its
+// own-lod color at its own position — which only holds if bucketId + the
+// GPU-computed base route each bucket's draw to its own compacted slice.
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU per-LOD render: each lod drawn with its own mesh/color/position",
+          "[gpu_instance][gpu]") {
   TestGpu& g = GetTestGpu();
 
-  // aspect=0.1 -> visible half-width at kCullQuadZ is 1.0: the inner two
-  // quad centers (|x|=0.5) survive, the outer two (|x|=1.5) are culled.
-  CullRenderResult result = RunCullAndRender(g, MakeCullTestCamera(0.1f));
-  CHECK(result.survivor_count == 2);
+  const glm::vec2 thresholds(10.0f, 20.0f);
+  Camera cull_camera = MakeCullCamera(1.0f);
 
-  auto px_outer_left = ExpectedPixelForWorldXY(kCullQuadCenters[0]);   // culled
-  auto px_inner_left = ExpectedPixelForWorldXY(kCullQuadCenters[1]);   // visible
-  auto px_inner_right = ExpectedPixelForWorldXY(kCullQuadCenters[2]);  // visible
-  auto px_outer_right = ExpectedPixelForWorldXY(kCullQuadCenters[3]);  // culled
+  // One instance per lod: screen X from world x (-1,0,1), LOD from distance
+  // (z = -5/-15/-25). All comfortably inside the frustum.
+  struct Inst {
+    glm::vec2 screen_xy;
+    float z;
+    uint32_t expected_bucket;  // 1 model -> bucket == lod
+  };
+  const std::array<Inst, 3> insts = {{
+      {{-1.0f, 0.0f}, -5.0f, 0},   // lod0
+      {{0.0f, 0.0f}, -15.0f, 1},   // lod1
+      {{1.0f, 0.0f}, -25.0f, 2},   // lod2
+  }};
 
-  CpuImage::Color outer_left =
-      result.albedo.GetPixel(px_outer_left.first, px_outer_left.second);
-  CpuImage::Color inner_left =
-      result.albedo.GetPixel(px_inner_left.first, px_inner_left.second);
-  CpuImage::Color inner_right =
-      result.albedo.GetPixel(px_inner_right.first, px_inner_right.second);
-  CpuImage::Color outer_right =
-      result.albedo.GetPixel(px_outer_right.first, px_outer_right.second);
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  for (const Inst& it : insts) {
+    glm::vec3 center(it.screen_xy.x, it.screen_xy.y, it.z);
+    GpuInstanceRenderer::InstanceInput in = MakeInstance(center, 0, 0.25f);
+    // Small on-screen quad: scale the unit-quad mesh down at the instance level.
+    in.transform = glm::translate(glm::mat4(1.0f), center) *
+                   glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+    inputs.push_back(in);
+  }
 
-  INFO("outer_left rgb = " << (int)outer_left.r << "," << (int)outer_left.g
-                           << "," << (int)outer_left.b);
-  CHECK(outer_left.r < 40);
-  INFO("inner_left rgb = " << (int)inner_left.r << "," << (int)inner_left.g
-                           << "," << (int)inner_left.b);
-  CHECK(inner_left.r > 180);
-  INFO("inner_right rgb = " << (int)inner_right.r << "," << (int)inner_right.g
-                            << "," << (int)inner_right.b);
-  CHECK(inner_right.r > 180);
-  INFO("outer_right rgb = " << (int)outer_right.r << "," << (int)outer_right.g
-                            << "," << (int)outer_right.b);
-  CHECK(outer_right.r < 40);
+  const uint32_t num_buckets = 1 * GpuInstanceRenderer::kMaxLods;  // 3
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 3, /*num_models=*/1,
+                               {thresholds.x, thresholds.y});
+  REQUIRE(renderer.IsValid());
+  renderer.UploadInstances(inputs);
+
+  // Distinct mesh (half-extent) + distinct color per lod bucket.
+  const std::array<float, 3> half_extents = {1.0f, 0.7f, 0.4f};
+  const std::vector<glm::vec4> tints = {
+      {1.0f, 0.0f, 0.0f, 1.0f},   // lod0 red
+      {0.0f, 1.0f, 0.0f, 1.0f},   // lod1 green
+      {0.0f, 0.0f, 1.0f, 1.0f}};  // lod2 blue
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  std::vector<wgpu::Buffer> vbufs;
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    std::vector<float> verts = QuadVerticesSized(half_extents[b]);
+    wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                     verts.size() * sizeof(float),
+                                     wgpu::BufferUsage::Vertex);
+    vbufs.push_back(vbuf);
+    renderer.SetBucketMesh(b, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+  }
+
+  auto mats = MakeBucketMaterials(g, num_buckets, tints);
+  CpuImage albedo =
+      CullAndRenderBuckets(g, renderer, cull_camera, mats->ptrs);
+
+  // Each instance appears with its own-lod color at its own screen position.
+  const std::array<glm::vec3, 3> want_rgb = {
+      glm::vec3(255, 0, 0), glm::vec3(0, 255, 0), glm::vec3(0, 0, 255)};
+  for (size_t i = 0; i < insts.size(); ++i) {
+    auto px = WorldXyToPixel(insts[i].screen_xy);
+    CpuImage::Color c = albedo.GetPixel(px.first, px.second);
+    INFO("instance " << i << " (bucket " << insts[i].expected_bucket << ") at ("
+                     << px.first << "," << px.second << ") rgb = " << (int)c.r
+                     << "," << (int)c.g << "," << (int)c.b);
+    CHECK(std::abs(int(c.r) - int(want_rgb[i].r)) < 60);
+    CHECK(std::abs(int(c.g) - int(want_rgb[i].g)) < 60);
+    CHECK(std::abs(int(c.b) - int(want_rgb[i].b)) < 60);
+  }
+  // A gap between the three quads stays the clear color.
+  CpuImage::Color gap = albedo.GetPixel(uint32_t(0.25f * kInstTarget),
+                                        uint32_t(0.75f * kInstTarget));
+  CHECK(gap.r < 40);
+  CHECK(gap.g < 40);
+  CHECK(gap.b < 40);
 }
 
-TEST_CASE(
-    "GPU cull edge case: all instances culled -> indirect draw renders "
-    "nothing",
-    "[gpu_instance][gpu]") {
+// ---------------------------------------------------------------------------
+// Test 6: edge — every instance culled. All buckets have count 0, so every
+// per-bucket indirect draw renders nothing (instanceCount == 0). No crash, and
+// the framebuffer stays the clear color.
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU edge: all instances culled -> empty buckets draw nothing",
+          "[gpu_instance][gpu]") {
   TestGpu& g = GetTestGpu();
 
-  // aspect=0.001 -> visible half-width at kCullQuadZ is 0.01, well inside
-  // even the closest quad center (|x|=0.5): every instance is culled.
-  CullRenderResult result = RunCullAndRender(g, MakeCullTestCamera(0.001f));
-  CHECK(result.survivor_count == 0);
+  // Cull camera far plane = 1000; placing every instance at z = -2000 puts all
+  // of them beyond the far plane -> all culled, independent of screen X (an
+  // on-axis instance would survive a narrow frustum, so distance-cull instead).
+  Camera cull_camera = MakeCullCamera(1.0f);
+  constexpr float kFarBeyond = -2000.0f;
 
-  for (glm::vec2 c : kCullQuadCenters) {
-    auto px = ExpectedPixelForWorldXY(c);
-    CpuImage::Color color = result.albedo.GetPixel(px.first, px.second);
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  const std::array<glm::vec2, 3> xy = {glm::vec2{-1.0f, 0.0f},
+                                       glm::vec2{0.0f, 0.0f},
+                                       glm::vec2{1.0f, 0.0f}};
+  for (glm::vec2 c : xy) {
+    GpuInstanceRenderer::InstanceInput in =
+        MakeInstance(glm::vec3(c.x, c.y, kFarBeyond), 0, 0.2f);
+    // The ortho render frame ignores z, so were these NOT culled they'd draw at
+    // WorldXyToPixel(c); since they are (beyond the far plane), pixels stay clear.
+    in.transform = glm::translate(glm::mat4(1.0f), glm::vec3(c.x, c.y, -10.0f)) *
+                   glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+    inputs.push_back(in);
+  }
+
+  const uint32_t num_buckets = GpuInstanceRenderer::kMaxLods;
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 3, 1, {10.0f, 20.0f});
+  REQUIRE(renderer.IsValid());
+  renderer.UploadInstances(inputs);
+
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  std::vector<float> verts = QuadVerticesSized(1.0f);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    renderer.SetBucketMesh(b, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+  }
+
+  const std::vector<glm::vec4> tints(num_buckets,
+                                     glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  auto mats = MakeBucketMaterials(g, num_buckets, tints);
+  CpuImage albedo =
+      CullAndRenderBuckets(g, renderer, cull_camera, mats->ptrs);
+
+  for (glm::vec2 c : xy) {
+    auto px = WorldXyToPixel(c);
+    CpuImage::Color color = albedo.GetPixel(px.first, px.second);
     INFO("world (" << c.x << "," << c.y << ") rgb = " << (int)color.r << ","
                    << (int)color.g << "," << (int)color.b);
     CHECK(color.r < 40);
+    CHECK(color.g < 40);
+    CHECK(color.b < 40);
   }
 }
 
-TEST_CASE(
-    "GPU cull edge case: all instances visible -> indirect draw renders all N",
-    "[gpu_instance][gpu]") {
+// ---------------------------------------------------------------------------
+// Test 7: edge — all instances in ONE bucket. Every instance is model 0 at the
+// same lod (all dist < t0), so bucket 0 holds all N and buckets 1/2 are empty.
+// The one non-empty bucket's draw renders all N at their positions; the empty
+// buckets' draws render nothing.
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU edge: all instances in one bucket render together",
+          "[gpu_instance][gpu]") {
   TestGpu& g = GetTestGpu();
 
-  // aspect=1.0 -> visible half-width at kCullQuadZ is 10.0, comfortably past
-  // even the farthest quad center (|x|=1.5): every instance survives.
-  CullRenderResult result = RunCullAndRender(g, MakeCullTestCamera(1.0f));
-  CHECK(result.survivor_count == kCullQuadCount);
+  const glm::vec2 thresholds(100.0f, 200.0f);  // everything is lod0
+  Camera cull_camera = MakeCullCamera(1.0f);
 
-  for (glm::vec2 c : kCullQuadCenters) {
-    auto px = ExpectedPixelForWorldXY(c);
-    CpuImage::Color color = result.albedo.GetPixel(px.first, px.second);
+  // Four quads spread across screen X, all at the same (small) distance -> lod0.
+  const std::array<glm::vec2, 4> centers = {
+      glm::vec2{-1.5f, 0.0f}, glm::vec2{-0.5f, 0.0f}, glm::vec2{0.5f, 0.0f},
+      glm::vec2{1.5f, 0.0f}};
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  for (glm::vec2 c : centers) {
+    glm::vec3 center(c.x, c.y, -5.0f);
+    GpuInstanceRenderer::InstanceInput in = MakeInstance(center, 0, 0.3f);
+    in.transform = glm::translate(glm::mat4(1.0f), center) *
+                   glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+    inputs.push_back(in);
+  }
+
+  const uint32_t num_buckets = GpuInstanceRenderer::kMaxLods;
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 4, 1,
+                               {thresholds.x, thresholds.y});
+  REQUIRE(renderer.IsValid());
+  renderer.UploadInstances(inputs);
+
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  std::vector<float> verts = QuadVerticesSized(1.0f);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    renderer.SetBucketMesh(b, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+  }
+
+  const std::vector<glm::vec4> tints(num_buckets,
+                                     glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  auto mats = MakeBucketMaterials(g, num_buckets, tints);
+
+  // Verify the single-bucket routing via count readback first.
+  {
+    FrameContext frame;
+    frame.Begin(g.device, g.queue, UniformData{});
+    renderer.Cull(frame, cull_camera);
+    wgpu::CommandBuffer cmd = frame.End();
+    g.queue.Submit(1, &cmd);
+    test::WaitForGpu(g.instance, g.device, g.queue);
+    std::vector<uint32_t> counts = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
+        num_buckets);
+    REQUIRE(counts.size() == num_buckets);
+    CHECK(counts[0] == 4);
+    CHECK(counts[1] == 0);
+    CHECK(counts[2] == 0);
+  }
+
+  CpuImage albedo =
+      CullAndRenderBuckets(g, renderer, cull_camera, mats->ptrs);
+  for (glm::vec2 c : centers) {
+    auto px = WorldXyToPixel(c);
+    CpuImage::Color color = albedo.GetPixel(px.first, px.second);
     INFO("world (" << c.x << "," << c.y << ") rgb = " << (int)color.r << ","
                    << (int)color.g << "," << (int)color.b);
-    CHECK(color.r > 180);
+    CHECK(color.r > 180);  // white tint drawn
   }
 }

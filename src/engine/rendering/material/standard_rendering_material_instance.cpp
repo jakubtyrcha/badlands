@@ -8,6 +8,7 @@
 // material_instance.hpp.
 #include "engine/rendering/material/standard_rendering_material_instance.hpp"
 
+#include <array>
 #include <set>
 
 #include <spdlog/spdlog.h>
@@ -182,13 +183,13 @@ bool StandardRenderingMaterialInstance::BindPerObject(RenderPassContext& pass,
 }
 
 bool StandardRenderingMaterialInstance::BindInstanceData(
-    RenderPassContext& pass, FrameContext& frame, wgpu::Buffer instances,
-    uint64_t byteOffset) {
-  // Only instanced materials declare a group-1 storage array of transforms;
-  // everything else uses BindPerObject. Refuse (default no-op contract) rather
-  // than mis-bind a per-object-UBO layout with a storage buffer.
+    RenderPassContext& pass, FrameContext& frame, wgpu::Buffer compacted,
+    wgpu::Buffer bucket_base) {
+  // Only instanced materials declare the group-1 storage bindings (compacted
+  // transforms + per-bucket bases); everything else uses BindPerObject. Refuse
+  // (default no-op contract) rather than mis-bind a per-object-UBO layout.
   if (!IsValid() || geometry_type_ != GeometryType::kInstancedMesh ||
-      !instances) {
+      !compacted || !bucket_base) {
     return false;
   }
 
@@ -198,20 +199,25 @@ bool StandardRenderingMaterialInstance::BindInstanceData(
     return false;
   }
 
-  // The group-1 layout is a read-only storage binding (reflection only enables
-  // dynamic offsets for group-1 UNIFORM buffers), so bind at a fixed base by
-  // baking byteOffset into the entry offset — no dynamic-offset array. Mirrors
-  // BindPerObject's group-1 SetBindGroup, minus the dynamic offset.
-  wgpu::BindGroupEntry entry{};
-  entry.binding = 0;
-  entry.buffer = instances;
-  entry.offset = byteOffset;  // 256-aligned (minStorageBufferOffsetAlignment)
-  entry.size = WGPU_WHOLE_SIZE;
+  // Both group-1 bindings are read-only storage (reflection enables dynamic
+  // offsets only for group-1 UNIFORM buffers), so bind both WHOLE at offset 0 —
+  // no dynamic offsets. The vertex shader applies the per-bucket base itself as
+  // compacted[bucketBase[bucketId] + instance_index], so there is no baked
+  // byteOffset here (that was Phase C's single-bucket scheme).
+  std::array<wgpu::BindGroupEntry, 2> entries{};
+  entries[0].binding = 0;  // compacted: array<mat4x4<f32>>
+  entries[0].buffer = compacted;
+  entries[0].offset = 0;
+  entries[0].size = WGPU_WHOLE_SIZE;
+  entries[1].binding = 1;  // bucketBase: array<u32>
+  entries[1].buffer = bucket_base;
+  entries[1].offset = 0;
+  entries[1].size = WGPU_WHOLE_SIZE;
 
   wgpu::BindGroupDescriptor bg_desc{};
   bg_desc.layout = layout;
-  bg_desc.entryCount = 1;
-  bg_desc.entries = &entry;
+  bg_desc.entryCount = entries.size();
+  bg_desc.entries = entries.data();
 
   auto bind_group = frame.GetDevice().CreateBindGroup(&bg_desc);
   pass.SetBindGroup(1, bind_group);

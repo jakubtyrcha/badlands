@@ -55,15 +55,19 @@ class RenderingMaterialInstance {
   // SetParameter.
   virtual bool BindPerObject(RenderPassContext& pass, FrameContext& frame) = 0;
 
-  // Bind a per-instance transform storage array at group 1 for an instanced
-  // draw (@builtin(instance_index) indexes it in the vertex stage). `instances`
-  // must be a `wgpu::BufferUsage::Storage` buffer of tightly-packed mat4x4<f32>
-  // world transforms; `byteOffset` is the (256-aligned) base of the sub-range
-  // to bind. Called INSTEAD of BindPerObject for instanced materials (the model
-  // matrix is per-instance, not a per-object UBO). Default no-op returning
+  // Bind the group-1 instanced-draw resources: the WHOLE compacted transform
+  // buffer (@0) + the GPU-computed per-bucket base offsets (@1). The vertex
+  // stage reads `compacted[bucketBase[bucketId] + instance_index]`, where
+  // `bucketId` is a group-0 material param set per bucket draw — so the CPU
+  // never needs the (prefix-summed) base and binds both buffers WHOLE, at
+  // offset 0. Both must be `wgpu::BufferUsage::Storage`: `compacted` a densely
+  // packed mat4x4<f32> array, `bucket_base` a u32 array (one base per bucket).
+  // The single-bucket case is `bucket_base = [0]`, `bucketId = 0`. Called
+  // INSTEAD of BindPerObject for instanced materials. Default no-op returning
   // false for non-instanced materials, which use BindPerObject instead.
   virtual bool BindInstanceData(RenderPassContext& pass, FrameContext& frame,
-                                wgpu::Buffer instances, uint64_t byteOffset) {
+                                wgpu::Buffer compacted,
+                                wgpu::Buffer bucket_base) {
     return false;
   }
 

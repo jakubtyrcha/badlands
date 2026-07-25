@@ -28,11 +28,18 @@ import package::common::gbuffer_encode::{GBufferOutput, encodeOctahedron};
 
 struct MaterialParams {
     tint: vec4<f32>,   // rgb = albedo tint, a unused
+    bucketId: u32,     // which (model,lod) bucket THIS draw renders (Phase D)
 }
 @group(0) @binding(5) var<uniform> mat_params: MaterialParams;
 
-// Group 1: per-instance world transforms, indexed by @builtin(instance_index).
+// Group 1: the WHOLE compacted per-(model,lod) transform buffer (@0) plus the
+// GPU-computed per-bucket base offsets (@1). The vertex stage recovers this
+// draw's transforms as `instances[bucketBase[mat_params.bucketId] +
+// instance_index]` — the CPU knows bucketId per draw but NOT the prefix-summed
+// base, so the base is read on the GPU (no per-frame offset readback). Phase C's
+// single-bucket path is the trivial case: bucketBase = [0], bucketId = 0.
 @group(1) @binding(0) var<storage, read> instances: array<mat4x4<f32>>;
+@group(1) @binding(1) var<storage, read> bucketBase: array<u32>;
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
@@ -59,7 +66,8 @@ struct VertexOutputShadow {
 fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutputGBuffer {
     var output: VertexOutputGBuffer;
 
-    let m = instances[instance_index];
+    let base = bucketBase[mat_params.bucketId];
+    let m = instances[base + instance_index];
     // Instance matrices hold FULL world transforms; worldSpaceToClipSpace
     // applies the camera-offset internally (proj * view * (world - cameraPos)).
     let world = (m * vec4<f32>(input.pos, 1.0)).xyz;
@@ -78,7 +86,8 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
 @vertex
 fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutputShadow {
     var output: VertexOutputShadow;
-    let m = instances[instance_index];
+    let base = bucketBase[mat_params.bucketId];
+    let m = instances[base + instance_index];
     let world = (m * vec4<f32>(input.pos, 1.0)).xyz;
     output.position = worldCameraOffsetedSpaceToLightClipSpace(
         worldSpaceToWorldCameraOffsetedSpace(world));
