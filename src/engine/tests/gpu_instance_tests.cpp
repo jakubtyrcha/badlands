@@ -32,7 +32,9 @@
 #include "engine/rendering/color_render_target.hpp"
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
+#include "engine/rendering/frustum.hpp"
 #include "engine/rendering/gbuffer.hpp"
+#include "engine/rendering/gpu_instance_renderer.hpp"
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material/rendering_material_instance.hpp"
@@ -803,4 +805,425 @@ TEST_CASE("instanced G-buffer material's shadow-pass variant compiles",
   CHECK(err.type == wgpu::ErrorType::NoError);
   REQUIRE(handle);
   REQUIRE(handle->IsValid());
+}
+
+// ===========================================================================
+// Phase C: compute frustum-cull + compaction feeding one indirect instanced
+// draw (GpuInstanceRenderer, shaders/compute/instance_cull.wesl). Building on
+// Phase A's atomics/indirect-draw/BufferReadback primitives and Phase B's
+// instanced materials: a compute pass tests each instance's world-space
+// bounding sphere against the camera frustum, atomically compacts survivors'
+// transforms, and one DrawIndexedIndirect renders exactly those survivors
+// with the Phase-B instanced_gbuffer material.
+//
+// Test 1 (gate): does compute/instance_cull compile and reflect the expected
+// group-0 uniform + group-1 storage bindings (read-only instances, writable
+// compacted + args)?
+// Test 2: cull correctness via buffer readback -- the compacted transforms +
+// count exactly match an independently-computed (CPU) in-frustum set,
+// including a sphere straddling a plane.
+// Test 3-5: end-to-end + edge cases via framebuffer readback -- only
+// surviving instances actually draw.
+// ===========================================================================
+
+TEST_CASE("compute/instance_cull compiles and reflects the expected bindings",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // A private pipeline generator (NOT the shared TestGpu::gen) so this
+  // compile is guaranteed to be a genuine first-time compile under the Dawn
+  // validation-error scope below, regardless of what other tests in this
+  // binary already cached against the shared generator (Catch2's default
+  // test order is lexicographic by name, not declaration order, so another
+  // test's GpuInstanceRenderer may otherwise have compiled + cached this
+  // pipeline first, unwrapped). A non-null/IsValid() check alone does NOT
+  // prove a WGSL compile succeeded on this Dawn build -- see
+  // RunCapturingValidationErrors' comment above (established in Phase B).
+  GpuPipelineGenerator fresh_gen(g.device, FindShaderDirectory());
+
+  std::shared_ptr<const CompiledComputePipeline> pipeline;
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    pipeline = fresh_gen.GetComputePipeline("compute/instance_cull");
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  REQUIRE(pipeline != nullptr);
+  REQUIRE(pipeline->pipeline != nullptr);
+  CHECK(pipeline->workgroup_size[0] == 64);
+  REQUIRE(pipeline->bind_group_layouts.size() == 2);
+
+  auto find_binding = [&](uint32_t group,
+                          uint32_t binding) -> const ReflectedBinding* {
+    for (const auto& b : pipeline->reflected_bindings) {
+      if (b.group == group && b.binding == binding) return &b;
+    }
+    return nullptr;
+  };
+  const ReflectedBinding* frustum_b = find_binding(0, 0);
+  const ReflectedBinding* instances_b = find_binding(1, 0);
+  const ReflectedBinding* compacted_b = find_binding(1, 1);
+  const ReflectedBinding* args_b = find_binding(1, 2);
+  REQUIRE(frustum_b != nullptr);
+  REQUIRE(instances_b != nullptr);
+  REQUIRE(compacted_b != nullptr);
+  REQUIRE(args_b != nullptr);
+
+  CHECK(frustum_b->name == "frustum");
+  CHECK(frustum_b->buffer_type == wgpu::BufferBindingType::Uniform);
+  CHECK(instances_b->name == "instances");
+  CHECK(instances_b->buffer_type == wgpu::BufferBindingType::ReadOnlyStorage);
+  CHECK(compacted_b->name == "compacted");
+  CHECK(compacted_b->buffer_type == wgpu::BufferBindingType::Storage);
+  CHECK(args_b->name == "args");
+  CHECK(args_b->buffer_type == wgpu::BufferBindingType::Storage);
+}
+
+namespace {
+
+// Sphere-vs-frustum test mirroring instance_cull.wesl's `sphereCulled`
+// EXACTLY (see the phase-C report for the derivation from
+// Frustum::Intersects' AABB "positive vertex" test): a sphere is culled iff
+// it is fully outside any single plane's half-space,
+// dot(plane.xyz, center) + plane.w < -radius. Used to compute the expected
+// in/out set independently of the GPU.
+bool ExpectedCulled(const Frustum& f, glm::vec3 center, float radius) {
+  for (const glm::vec4& p : f.planes) {
+    if (glm::dot(glm::vec3(p), center) + p.w < -radius) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Mat4Equal(const glm::mat4& a, const glm::mat4& b) {
+  return std::memcmp(&a, &b, sizeof(glm::mat4)) == 0;
+}
+
+}  // namespace
+
+TEST_CASE(
+    "GPU cull correctness: compacted buffer + count match the in-frustum set",
+    "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // Camera at the origin looking down -Z (fov 90, aspect 1, near 0.5, far
+  // 100) -- the same setup frustum_tests.cpp's CPU-only test uses, so the
+  // expected in/out set below can be cross-checked against that known-good
+  // CPU behavior.
+  Camera camera;
+  camera.position = glm::vec3(0.0f);
+  camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 90.0f;
+  camera.aspect = 1.0f;
+  camera.near_plane = 0.5f;
+  camera.far_plane = 100.0f;
+  const Frustum frustum =
+      Frustum::FromViewProj(camera.GetProj() * camera.GetView());
+
+  struct Case {
+    glm::vec3 center;
+    float radius;
+    const char* label;
+  };
+  const std::vector<Case> cases = {
+      {{0.0f, 0.0f, -10.0f}, 1.0f, "straight ahead"},
+      {{-100.0f, 0.0f, -10.0f}, 1.0f, "far to the left"},
+      {{100.0f, 0.0f, -10.0f}, 1.0f, "far to the right"},
+      {{0.0f, 0.0f, 10.0f}, 1.0f, "behind the camera"},
+      {{0.0f, 0.0f, -1000.0f}, 1.0f, "beyond the far plane"},
+      {{0.0f, 5.0f, -20.0f}, 2.0f, "up and ahead"},
+      {{-11.0f, 0.0f, -10.0f}, 2.0f, "straddling the left plane"},
+  };
+
+  // Sanity-check the straddling case actually straddles: a bare point there
+  // (radius 0) is outside, but the sphere's radius reaches back into the
+  // frustum -- exercising the "< -radius", not "< 0", comparison.
+  REQUIRE(ExpectedCulled(frustum, cases[6].center, 0.0f));
+  REQUIRE_FALSE(ExpectedCulled(frustum, cases[6].center, cases[6].radius));
+
+  std::vector<glm::mat4> expected_visible_transforms;
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  uint32_t expected_count = 0;
+  for (const Case& c : cases) {
+    GpuInstanceRenderer::InstanceInput in;
+    in.transform = glm::translate(glm::mat4(1.0f), c.center);
+    in.bounds_sphere = glm::vec4(c.center, c.radius);
+    inputs.push_back(in);
+    const bool culled = ExpectedCulled(frustum, c.center, c.radius);
+    INFO("case '" << c.label << "' culled=" << culled);
+    if (!culled) {
+      expected_visible_transforms.push_back(in.transform);
+      ++expected_count;
+    }
+  }
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
+                              static_cast<uint32_t>(cases.size()));
+  REQUIRE(renderer.IsValid());
+  renderer.UploadInstances(inputs);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.Cull(frame, camera);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  std::vector<uint32_t> gpu_count = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetArgsBuffer(),
+      GpuInstanceRenderer::kArgsInstanceCountOffset, 1);
+  REQUIRE(gpu_count.size() == 1);
+  INFO("expected count = " << expected_count << ", GPU count = " << gpu_count[0]);
+  CHECK(gpu_count[0] == expected_count);
+
+  std::vector<glm::mat4> compacted = test::ReadBufferSync<glm::mat4>(
+      g.instance, g.device, g.queue, renderer.GetCompactedBuffer(), 0,
+      gpu_count[0]);
+  REQUIRE(compacted.size() == gpu_count[0]);
+
+  // Order-independent set match: every expected survivor's transform appears
+  // exactly once among the compacted transforms (atomic append order isn't
+  // fixed across dispatches).
+  std::vector<bool> matched(compacted.size(), false);
+  for (const glm::mat4& expected : expected_visible_transforms) {
+    bool found = false;
+    for (size_t i = 0; i < compacted.size(); ++i) {
+      if (!matched[i] && Mat4Equal(compacted[i], expected)) {
+        matched[i] = true;
+        found = true;
+        break;
+      }
+    }
+    CHECK(found);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end (framebuffer readback) + edge cases: render the culled/compacted
+// survivors via GpuInstanceRenderer::Draw with the Phase-B instanced_gbuffer
+// material, and read back the albedo target.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr uint32_t kCullQuadCount = 4;
+// World-space quad centers along X at a fixed depth, all comfortably within
+// the ortho test frame's on-screen range (|x| <= 2 -- see MakeOrthoFrame
+// above) so any missing from the rendered image were genuinely removed by
+// the cull compute, not simply off-screen.
+const std::array<glm::vec2, kCullQuadCount> kCullQuadCenters = {
+    glm::vec2{-1.5f, 0.0f}, glm::vec2{-0.5f, 0.0f}, glm::vec2{0.5f, 0.0f},
+    glm::vec2{1.5f, 0.0f}};
+constexpr float kCullQuadZ = -10.0f;
+constexpr float kCullQuadScale = 0.2f;
+constexpr float kCullQuadRadius = 0.3f;
+
+// A camera at the origin looking down -Z; `aspect` alone controls the
+// visible half-width at kCullQuadZ (= |z| * aspect * tan(fovy/2), and
+// fovy=90 here makes tan(fovy/2)=1) so each test picks a single aspect to
+// get a mixed / all-in / all-out cull outcome against kCullQuadCenters.
+Camera MakeCullTestCamera(float aspect) {
+  Camera camera;
+  camera.position = glm::vec3(0.0f);
+  camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 90.0f;
+  camera.aspect = aspect;
+  camera.near_plane = 0.1f;
+  camera.far_plane = 100.0f;
+  return camera;
+}
+
+// Expected framebuffer center for a world XY under MakeOrthoFrame's trivial
+// projection (clip = 0.5*world), WebGPU y-down -- same formula as Phase B's
+// ExpectedPixels above, generalized to an arbitrary world XY.
+std::pair<uint32_t, uint32_t> ExpectedPixelForWorldXY(glm::vec2 xy) {
+  const float clip_x = 0.5f * xy.x;
+  const float clip_y = 0.5f * xy.y;
+  const uint32_t px = uint32_t((clip_x * 0.5f + 0.5f) * float(kInstTarget));
+  const uint32_t py =
+      uint32_t((1.0f - (clip_y * 0.5f + 0.5f)) * float(kInstTarget));
+  return {px, py};
+}
+
+struct CullRenderResult {
+  uint32_t survivor_count = 0;
+  CpuImage albedo;
+};
+
+// Builds kCullQuadCount instances (one quad per kCullQuadCenters entry),
+// culls them against `cull_camera` via GpuInstanceRenderer, and renders the
+// survivors with the instanced_gbuffer material (Phase B) fed by the
+// renderer's compacted buffer + indirect args. Returns the GPU-read survivor
+// count and the albedo target for pixel assertions.
+CullRenderResult RunCullAndRender(TestGpu& g, const Camera& cull_camera) {
+  auto factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {});
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  InstanceParams params;
+  params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"instanced_gbuffer_cull"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kGBuffer, 0);
+  auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                                  MaterialPassType::kDeferred,
+                                  RenderPassType::kGBuffer, params);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
+  auto* inst = handle.operator->();
+
+  std::vector<float> verts = QuadVertices();
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, kCullQuadCount);
+  REQUIRE(renderer.IsValid());
+  renderer.SetMesh(vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+
+  std::vector<GpuInstanceRenderer::InstanceInput> instances;
+  for (glm::vec2 c : kCullQuadCenters) {
+    GpuInstanceRenderer::InstanceInput in;
+    in.transform =
+        glm::translate(glm::mat4(1.0f), glm::vec3(c.x, c.y, kCullQuadZ)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(kCullQuadScale));
+    in.bounds_sphere = glm::vec4(c.x, c.y, kCullQuadZ, kCullQuadRadius);
+    instances.push_back(in);
+  }
+  renderer.UploadInstances(instances);
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+
+  // Cull() dispatches a compute pass -- must run before BeginRenderPass on
+  // this same encoder (a render pass can't be active while a compute pass
+  // runs, and vice versa).
+  renderer.Cull(frame, cull_camera);
+
+  ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kInstTarget, kInstTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kInstTarget, kInstTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(albedo_t.IsValid());
+
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        ClearAttachment(normals_t.GetView()),
+        ClearAttachment(albedo_t.GetView()),
+        ClearAttachment(material_t.GetView())};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+
+    REQUIRE(inst->Bind(pass, frame));
+    REQUIRE(renderer.Draw(pass, frame, *inst));
+    pass.End();
+  }
+
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  CullRenderResult result;
+  std::vector<uint32_t> count = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetArgsBuffer(),
+      GpuInstanceRenderer::kArgsInstanceCountOffset, 1);
+  REQUIRE(count.size() == 1);
+  result.survivor_count = count[0];
+
+  TextureReadback rb(g.instance, g.device, g.queue);
+  result.albedo = rb.ReadTextureSync(albedo_t.GetTexture(), kInstTarget,
+                                     kInstTarget, GBuffer::kAlbedoFormat);
+  return result;
+}
+
+}  // namespace
+
+TEST_CASE(
+    "GPU cull end-to-end: indirect draw shows only in-frustum instances",
+    "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // aspect=0.1 -> visible half-width at kCullQuadZ is 1.0: the inner two
+  // quad centers (|x|=0.5) survive, the outer two (|x|=1.5) are culled.
+  CullRenderResult result = RunCullAndRender(g, MakeCullTestCamera(0.1f));
+  CHECK(result.survivor_count == 2);
+
+  auto px_outer_left = ExpectedPixelForWorldXY(kCullQuadCenters[0]);   // culled
+  auto px_inner_left = ExpectedPixelForWorldXY(kCullQuadCenters[1]);   // visible
+  auto px_inner_right = ExpectedPixelForWorldXY(kCullQuadCenters[2]);  // visible
+  auto px_outer_right = ExpectedPixelForWorldXY(kCullQuadCenters[3]);  // culled
+
+  CpuImage::Color outer_left =
+      result.albedo.GetPixel(px_outer_left.first, px_outer_left.second);
+  CpuImage::Color inner_left =
+      result.albedo.GetPixel(px_inner_left.first, px_inner_left.second);
+  CpuImage::Color inner_right =
+      result.albedo.GetPixel(px_inner_right.first, px_inner_right.second);
+  CpuImage::Color outer_right =
+      result.albedo.GetPixel(px_outer_right.first, px_outer_right.second);
+
+  INFO("outer_left rgb = " << (int)outer_left.r << "," << (int)outer_left.g
+                           << "," << (int)outer_left.b);
+  CHECK(outer_left.r < 40);
+  INFO("inner_left rgb = " << (int)inner_left.r << "," << (int)inner_left.g
+                           << "," << (int)inner_left.b);
+  CHECK(inner_left.r > 180);
+  INFO("inner_right rgb = " << (int)inner_right.r << "," << (int)inner_right.g
+                            << "," << (int)inner_right.b);
+  CHECK(inner_right.r > 180);
+  INFO("outer_right rgb = " << (int)outer_right.r << "," << (int)outer_right.g
+                            << "," << (int)outer_right.b);
+  CHECK(outer_right.r < 40);
+}
+
+TEST_CASE(
+    "GPU cull edge case: all instances culled -> indirect draw renders "
+    "nothing",
+    "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // aspect=0.001 -> visible half-width at kCullQuadZ is 0.01, well inside
+  // even the closest quad center (|x|=0.5): every instance is culled.
+  CullRenderResult result = RunCullAndRender(g, MakeCullTestCamera(0.001f));
+  CHECK(result.survivor_count == 0);
+
+  for (glm::vec2 c : kCullQuadCenters) {
+    auto px = ExpectedPixelForWorldXY(c);
+    CpuImage::Color color = result.albedo.GetPixel(px.first, px.second);
+    INFO("world (" << c.x << "," << c.y << ") rgb = " << (int)color.r << ","
+                   << (int)color.g << "," << (int)color.b);
+    CHECK(color.r < 40);
+  }
+}
+
+TEST_CASE(
+    "GPU cull edge case: all instances visible -> indirect draw renders all N",
+    "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // aspect=1.0 -> visible half-width at kCullQuadZ is 10.0, comfortably past
+  // even the farthest quad center (|x|=1.5): every instance survives.
+  CullRenderResult result = RunCullAndRender(g, MakeCullTestCamera(1.0f));
+  CHECK(result.survivor_count == kCullQuadCount);
+
+  for (glm::vec2 c : kCullQuadCenters) {
+    auto px = ExpectedPixelForWorldXY(c);
+    CpuImage::Color color = result.albedo.GetPixel(px.first, px.second);
+    INFO("world (" << c.x << "," << c.y << ") rgb = " << (int)color.r << ","
+                   << (int)color.g << "," << (int)color.b);
+    CHECK(color.r > 180);
+  }
 }
