@@ -1,5 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include <cmath>
+#include <limits>
 #include "mapgen/erosion.hpp"
 #include "mapgen/generator.hpp"
 #include "mapgen/hydrology.hpp"
@@ -7,7 +8,24 @@
 
 using namespace badlands::mapgen;
 
-TEST_CASE("carve_cavities: coverage ~= lake_frac, depth bounded, only lowers") {
+// Brute-force nearest-non-mask-cell Euclidean world distance from (xi, yi),
+// scanning every cell — an independent oracle for distance_to_mask's exact
+// F-H EDT, used to cross-check carve_cavities' conical depth formula.
+float brute_force_dist_to_non_mask(const Field2D<uint8_t>& mask, int xi, int yi,
+                                   glm::vec2 texel_m) {
+  float best = std::numeric_limits<float>::infinity();
+  for (int y = 0; y < mask.height; ++y) {
+    for (int x = 0; x < mask.width; ++x) {
+      if (mask.at(x, y)) continue;
+      const float dx = static_cast<float>(x - xi) * texel_m.x;
+      const float dy = static_cast<float>(y - yi) * texel_m.y;
+      best = std::min(best, std::sqrt(dx * dx + dy * dy));
+    }
+  }
+  return best;
+}
+
+TEST_CASE("carve_cavities: coverage ~= lake_frac, depth == slope * EDT-to-rim, only lowers") {
   // bedrock ramp 0..1 over 100x100 -> bottom 5% is a crisp quantile
   Field2D<float> bedrock(100, 100);
   for (int y = 0; y < 100; ++y)
@@ -15,19 +33,61 @@ TEST_CASE("carve_cavities: coverage ~= lake_frac, depth bounded, only lowers") {
       bedrock.at(x, y) = (y * 100 + x) / 9999.0f;
   Field2D<float> B(100, 100, 50.0f);
   const auto B_before = B.data;
-  const auto mask = carve_cavities(B, bedrock, 0.05f, 12.0f);
+  const float slope = 0.25f;
+  const glm::vec2 texel_m{1.0f, 1.0f};
+  const auto mask = carve_cavities(B, bedrock, 0.05f, slope, texel_m);
   double carved = 0.0;
-  float max_cut = 0.0f;
   for (size_t i = 0; i < mask.data.size(); ++i) {
-    if (mask.data[i]) carved += 1.0;
+    const int xi = static_cast<int>(i % 100);
+    const int yi = static_cast<int>(i / 100);
     const float cut = B_before[i] - B.data[i];
-    REQUIRE(cut >= 0.0f);            // carving only lowers
-    REQUIRE(cut <= 12.0f + 1e-4f);   // bounded by lake_depth_m
-    if (!mask.data[i]) REQUIRE(cut == 0.0f);
-    max_cut = std::max(max_cut, cut);
+    if (!mask.data[i]) {
+      REQUIRE(cut == 0.0f);  // non-mask cells untouched
+      continue;
+    }
+    carved += 1.0;
+    REQUIRE(cut >= 0.0f);  // carving only lowers
+    const float d = brute_force_dist_to_non_mask(mask, xi, yi, texel_m);
+    REQUIRE(cut == Catch::Approx(slope * d).margin(1e-3f));
   }
   REQUIRE(carved / mask.data.size() == Catch::Approx(0.05).margin(0.005));
-  REQUIRE(max_cut == Catch::Approx(12.0f).margin(0.5));  // minimum gets full depth
+}
+
+TEST_CASE("carve_cavities: single circular basin center depth ~= slope * radius") {
+  // bedrock = radial distance (in texels) from grid center -> the bottom
+  // quantile is a disk. frac = 193/1680 puts t_lake at EXACTLY 8.0 texels
+  // (four axis-aligned cells at (0,+-8),(+-8,0) sit exactly on that radius,
+  // calibrated offline against this fixture: 41x41 grid, center (20,20)), so
+  // the mask is precisely {r < 8} and the nearest non-mask cell to the
+  // center is exactly 8 texels away.
+  constexpr int n = 41, cx = 20, cy = 20;
+  constexpr float texel = 2.0f;
+  Field2D<float> bedrock(n, n);
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const float dx = static_cast<float>(x - cx), dy = static_cast<float>(y - cy);
+      bedrock.at(x, y) = std::sqrt(dx * dx + dy * dy);
+    }
+  Field2D<float> B(n, n, 0.0f);
+  const float slope = 0.25f;
+  const auto mask = carve_cavities(B, bedrock, 0.115f, slope, {texel, texel});
+  REQUIRE(mask.at(cx, cy) == 1);
+  const float expected = slope * 8.0f * texel;
+  const float margin = slope * texel;  // one texel of radial uncertainty
+  REQUIRE(-B.at(cx, cy) == Catch::Approx(expected).margin(margin));
+}
+
+TEST_CASE("carve_cavities: deterministic across repeated calls") {
+  Field2D<float> bedrock(60, 60);
+  for (int y = 0; y < 60; ++y)
+    for (int x = 0; x < 60; ++x)
+      bedrock.at(x, y) = (y * 60 + x) / 3599.0f;
+  Field2D<float> B1(60, 60, 20.0f);
+  Field2D<float> B2(60, 60, 20.0f);
+  const auto mask1 = carve_cavities(B1, bedrock, 0.05f, 0.25f, {1.5f, 1.5f});
+  const auto mask2 = carve_cavities(B2, bedrock, 0.05f, 0.25f, {1.5f, 1.5f});
+  REQUIRE(mask1.data == mask2.data);
+  REQUIRE(B1.data == B2.data);
 }
 
 TEST_CASE("carve_cavities: lake_frac > 1 clamped to 1, no crash") {
@@ -38,13 +98,12 @@ TEST_CASE("carve_cavities: lake_frac > 1 clamped to 1, no crash") {
       bedrock.at(x, y) = (y * 50 + x) / 2499.0f;
   Field2D<float> B(50, 50, 100.0f);
   const auto B_before = B.data;
-  const auto mask = carve_cavities(B, bedrock, 2.0f, 8.0f);  // lake_frac > 1
+  const auto mask = carve_cavities(B, bedrock, 2.0f, 0.25f, {1.0f, 1.0f});  // lake_frac > 1
   double carved = 0.0;
   for (size_t i = 0; i < mask.data.size(); ++i) {
     if (mask.data[i]) carved += 1.0;
     const float cut = B_before[i] - B.data[i];
-    REQUIRE(cut >= 0.0f);            // only lowers
-    REQUIRE(cut <= 8.0f + 1e-4f);    // bounded by lake_depth_m
+    REQUIRE(cut >= 0.0f);  // only lowers
   }
   const double coverage = carved / mask.data.size();
   REQUIRE(coverage > 0.9);  // clamped to 1.0: nearly everything carved (all but max)

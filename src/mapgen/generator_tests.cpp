@@ -113,10 +113,10 @@ TEST_CASE("generate_map: plains gain drainage relief (no longer flat)") {
   // sim_t_hills != t_hills, a band of output-Plains texels sits on the wrong
   // side of the sim classification, and the cone term (proportional to that
   // texel's real distance to sim-plains) spikes there. Symmetrically,
-  // carve_cavities stamps bowls (up to lake_depth_m deep) on sim texels in
-  // the bottom lake_frac bedrock quantile — those are sim-Plains too (the
-  // cavity carve runs before biome classification), so they're not excluded
-  // by a biome check alone.
+  // carve_cavities stamps conical basins (uncapped depth, scaling with basin
+  // size) on sim texels in the bottom lake_frac bedrock quantile — those are
+  // sim-Plains too (the cavity carve runs before biome classification), so
+  // they're not excluded by a biome check alone.
   //
   // A bedrock-value-proximity heuristic (exclude texels near the quantile
   // cutoffs) does not reliably bound this: a 150-seed sweep found 4/150
@@ -194,11 +194,11 @@ TEST_CASE("generate_map: plains relief term blends smoothly (no biome-cutoff sea
   // invariants (detail_filter_tests.cpp) — this test isolates the base
   // relief term's smoothness, not the detail filter's.
   //
-  // lake_frac=0 disables carve_cavities: its bowl subtraction (up to
-  // lake_depth_m=12m, over just a few texels near the bottom bedrock
-  // quantile) is a separate, much steeper feature not covered by the
-  // Lipschitz argument below, so leaving cavities on makes this bound false
-  // in general (measured: ~40% of seeds violate it at the production
+  // lake_frac=0 disables carve_cavities: its conical subtraction (uncapped
+  // depth, over just a few texels near the bottom bedrock quantile) is a
+  // separate, much steeper feature not covered by the Lipschitz argument
+  // below, so leaving cavities on makes this bound false in general
+  // (measured: ~40% of seeds violate it at the production
   // lake_frac=0.03). With cavities off, the bound genuinely isolates the
   // relief term + cone contribution the comment describes.
   for (uint32_t seed : {1u, 2u, 3u}) {

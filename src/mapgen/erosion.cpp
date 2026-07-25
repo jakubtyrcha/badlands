@@ -6,8 +6,16 @@
 
 namespace badlands::mapgen {
 
+// Forward-declared rather than including mapgen/generator.hpp: generator.hpp
+// includes erosion.hpp, so the reverse include would cycle. distance_to_mask
+// is defined in generator.cpp, which every target linking erosion.cpp also
+// compiles (badlands_mapgen_lib, badlands_generator_tests,
+// badlands_erosion_tests), so this resolves at link time.
+Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask, glm::vec2 texel_m);
+
 Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock,
-                                float lake_frac, float lake_depth_m) {
+                                float lake_frac, float slope_m_per_m,
+                                glm::vec2 texel_m) {
   Field2D<uint8_t> mask(bedrock.width, bedrock.height, 0);
   const size_t n = bedrock.size();
   if (n == 0 || lake_frac <= 0.0f) return mask;
@@ -16,15 +24,17 @@ Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock
   const size_t i_lake = static_cast<size_t>(frac * (n - 1));
   std::nth_element(v.begin(), v.begin() + i_lake, v.end());
   const float t_lake = v[i_lake];
-  const float b_min = *std::min_element(bedrock.data.begin(), bedrock.data.end());
-  const float span = std::max(t_lake - b_min, 1e-6f);
-  for (size_t i = 0; i < n; ++i) {
-    const float b = bedrock.data[i];
-    if (b >= t_lake) continue;
-    mask.data[i] = 1;
-    const float u = (t_lake - b) / span;  // 0 at rim, 1 at the minimum
-    B.data[i] -= lake_depth_m * u * u;    // smooth bowl: flat rim, deep center
-  }
+  for (size_t i = 0; i < n; ++i) mask.data[i] = bedrock.data[i] < t_lake ? 1 : 0;
+
+  // Invert: seeds are non-basin texels, so distance_to_mask gives each basin
+  // texel its exact EDT distance to the nearest rim/dry cell (0 outside the
+  // basin, since every non-basin cell is its own seed).
+  Field2D<uint8_t> inverted(mask.width, mask.height);
+  for (size_t i = 0; i < n; ++i) inverted.data[i] = mask.data[i] ? 0 : 1;
+  const Field2D<float> dist = distance_to_mask(inverted, texel_m);
+
+  for (size_t i = 0; i < n; ++i)
+    if (mask.data[i]) B.data[i] -= slope_m_per_m * dist.data[i];
   return mask;
 }
 
