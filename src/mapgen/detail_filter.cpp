@@ -2,19 +2,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <variant>
+#include <vector>
 
 #include <glm/glm.hpp>
 
-#include "mapgen/generator.hpp"  // distance_to_mask
 #include "mapgen/parallel.hpp"
 
 namespace badlands::mapgen {
 
 namespace {
 
-constexpr float kSlopeRef = 0.6f;       // slope (m/m) mapping to full gully strength
-constexpr float kShoreFadeDistM = 3.0f; // detail fades in over this distance from water
+constexpr float kSlopeRef = 0.6f;  // slope (m/m) mapping to full gully strength
+constexpr int kShoreBfsTexels = 16;        // multi-source BFS radius (rings) from wet cells
+constexpr float kShoreFadeHeightM = 2.0f;  // detail fades in over this height above local water
 constexpr float kCellPerWavelength = 2.0f;
 constexpr float kPersistence = 0.5f;
 constexpr float kTwoPi = 6.28318530718f;
@@ -41,6 +43,78 @@ glm::vec2 grad_at(const Field2D<float>& f, int x, int y, float texel_m) {
           (f.at(x, y1) - f.at(x, y0)) / (texel_m * (y1 - y0))};
 }
 
+// Classic Hermite smoothstep, edge0 <= edge1: 0 at/below edge0, 1 at/above
+// edge1, C1-continuous in between.
+float smoothstep01(float edge0, float edge1, float x) {
+  const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+// Multi-source BFS from wet cells (`wet`), 4-connected, bounded to
+// kShoreBfsTexels rings, carrying each source's water SURFACE (base +
+// water_depth at the wet seed) unchanged as it propagates outward. Processed
+// ring by ring: a dry cell first reached in a given ring takes the MAX
+// surface among all contributors that reach it in that same ring -- max is
+// commutative and order-free, so the result is deterministic regardless of
+// frontier iteration order (unlike a plain FIFO queue, whose result would
+// depend on push order when multiple sources tie on distance). Cells beyond
+// the BFS radius (or when there are no wet cells at all) keep -infinity,
+// the "unreached" sentinel.
+Field2D<float> near_water_surface(const Field2D<float>& base,
+                                  const Field2D<uint8_t>& wet,
+                                  const Field2D<float>& water_depth) {
+  const int n = base.width, h = base.height;
+  Field2D<float> near_surface(n, h, -std::numeric_limits<float>::infinity());
+
+  Field2D<uint8_t> visited(n, h, 0);
+  std::vector<int> frontier;
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < n; ++x)
+      if (wet.at(x, y)) {
+        const int i = y * n + x;
+        near_surface.data[i] = base.data[i] + water_depth.data[i];
+        visited.data[i] = 1;
+        frontier.push_back(i);
+      }
+  if (frontier.empty()) return near_surface;
+
+  static constexpr int kDx[4] = {1, -1, 0, 0};
+  static constexpr int kDy[4] = {0, 0, 1, -1};
+  // Per-ring scratch: cand_ring stamps the ring a candidate cell was last
+  // touched in, so a stale value from an earlier ring is distinguishable
+  // from a same-ring max-accumulation without clearing the whole grid on
+  // every ring.
+  Field2D<float> cand_surface(n, h, 0.0f);
+  Field2D<int> cand_ring(n, h, -1);
+
+  for (int ring = 0; ring < kShoreBfsTexels && !frontier.empty(); ++ring) {
+    std::vector<int> next_frontier;
+    for (int idx : frontier) {
+      const int x = idx % n, y = idx / n;
+      const float surf = near_surface.data[idx];
+      for (int d = 0; d < 4; ++d) {
+        const int nx = x + kDx[d], ny = y + kDy[d];
+        if (nx < 0 || nx >= n || ny < 0 || ny >= h) continue;
+        const int ni = ny * n + nx;
+        if (visited.data[ni]) continue;
+        if (cand_ring.data[ni] != ring) {
+          cand_ring.data[ni] = ring;
+          cand_surface.data[ni] = surf;
+          next_frontier.push_back(ni);
+        } else {
+          cand_surface.data[ni] = std::max(cand_surface.data[ni], surf);
+        }
+      }
+    }
+    for (int ni : next_frontier) {
+      near_surface.data[ni] = cand_surface.data[ni];
+      visited.data[ni] = 1;
+    }
+    frontier = std::move(next_frontier);
+  }
+  return near_surface;
+}
+
 }  // namespace
 
 Field2D<float> gully_detail_delta(const Field2D<float>& base,
@@ -53,15 +127,13 @@ Field2D<float> gully_detail_delta(const Field2D<float>& base,
       p.detail_wavelength_m <= 0.0f)
     return delta;
 
-  // Distance to standing water, for the shore fade.
   Field2D<uint8_t> wet(n, base.height, 0);
-  bool any_wet = false;
-  for (size_t i = 0; i < wet.data.size(); ++i) {
+  for (size_t i = 0; i < wet.data.size(); ++i)
     wet.data[i] = water_depth.data[i] > 0.0f ? 1 : 0;
-    any_wet |= wet.data[i] != 0;
-  }
-  const Field2D<float> water_dist =
-      any_wet ? distance_to_mask(wet, {texel_m, texel_m}) : Field2D<float>{};
+
+  // Serial pre-pass (before the parallel per-texel loop below): nearest
+  // water surface height, for the height-above-water shore fade.
+  const Field2D<float> near_surface = near_water_surface(base, wet, water_depth);
 
   parallel_tiles(
       n, base.height, 64, [] { return std::monostate{}; },
@@ -69,10 +141,11 @@ Field2D<float> gully_detail_delta(const Field2D<float>& base,
         for (int y = ty0; y < ty1; ++y) {
           for (int x = tx0; x < tx1; ++x) {
             if (wet.at(x, y)) continue;
-            float shore = 1.0f;
-            if (any_wet)
-              shore = std::clamp(water_dist.at(x, y) / kShoreFadeDistM, 0.0f, 1.0f);
-            if (shore <= 0.0f) continue;
+            const float ns = near_surface.at(x, y);
+            const float fade = std::isfinite(ns)
+                ? smoothstep01(0.0f, kShoreFadeHeightM, base.at(x, y) - ns)
+                : 1.0f;  // beyond BFS reach (or no water at all): full strength
+            if (fade <= 0.0f) continue;
 
             const glm::vec2 g = grad_at(base, x, y, texel_m);
             const float slope = glm::length(g);
@@ -117,7 +190,7 @@ Field2D<float> gully_detail_delta(const Field2D<float>& base,
               lambda *= 0.5f;
               amp *= kPersistence;
             }
-            delta.at(x, y) = carve * shore;
+            delta.at(x, y) = carve * fade;
           }
         }
       });
