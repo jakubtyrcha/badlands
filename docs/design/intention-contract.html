@@ -91,6 +91,17 @@
   thead th { background: var(--box-bg); }
   tbody tr:nth-child(even) { background: var(--table-stripe); }
   .reserved td { color: var(--mut); font-style: italic; }
+  .v3-badge {
+    display: inline-block; font-size: .66em; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--panel); background: var(--accent-2);
+    border-radius: 999px; padding: .1em .55em .15em; margin: 0 .35em 0 0; vertical-align: .16em;
+  }
+  h2 .v3-badge, h3 .v3-badge { vertical-align: .2em; }
+  .callout.v3 { border-left-color: var(--accent-2); }
+  .callout.v3 dt { color: var(--accent-2); }
+  p.note .v3-badge, dd .v3-badge, caption .v3-badge { margin-left: 0; }
+  svg .v3-lbl { font-size: 10.5px; fill: var(--accent-2); font-weight: bold; }
+  svg .edge-v3 { stroke: var(--accent-2); stroke-width: 1.5; fill: none; stroke-dasharray: 5 3; }
   footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--mut); font-size: .85rem; }
 </style>
 </head>
@@ -107,26 +118,34 @@
     <marker id="arrow-return" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent)"></path>
     </marker>
+    <marker id="arrow-v3" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent-2)"></path>
+    </marker>
   </defs>
 </svg>
 
 <h1>The Intention Contract</h1>
 <p class="subtitle">brain ⇄ engine wire v2 — canonical design doc, Slice B (<code>feat/intention-contract</code>)</p>
 <p class="byline">Diagram-rich successor to <code>docs/superpowers/specs/2026-07-24-intention-contract-design.md</code> (the prose spec). Where they overlap, the two must agree on every name and rule; this page exists to make the shape of the contract legible at a glance, not to replace the spec's reasoning.</p>
+<p class="byline">Amended 2026-07-25: everything tagged <span class="v3-badge">v3</span> below is adopted design for the next ABI bump (the skills slice) and is <b>not yet live</b> — the running binary is still <code>BL_ABI_VERSION 2</code>; unmarked text describes that shipped v2 behavior exactly.</p>
 
-<p>A hero has exactly one brain call per wake. The brain reads a snapshot of the world (<b>state</b>) plus whatever happened since it last looked (<b>events</b>), and returns exactly one <b>suggestion</b>: an intention, an activity label, and an idleness hint. The engine — never the brain — decides whether to execute it, executes it by turning it into a logged <code>Command</code>, and the world moves on. The brain finds out how things went later, if at all, the same way it finds out anything: via state and events on its next wake.</p>
+<p>An agent has exactly one brain call per wake. The brain reads a snapshot of the world (<b>state</b>) plus whatever happened since it last looked (<b>events</b>), and returns exactly one <b>suggestion</b>: an intention, an activity label, and an idleness hint. The engine — never the brain — decides whether to execute it, executes it by turning it into a logged <code>Command</code>, and the world moves on. The brain finds out how things went later, if at all, the same way it finds out anything: via state and events on its next wake.</p>
+
+<h3 id="tiering">Who this contract governs</h3>
+<p>This contract governs <b>agents</b>: AI complex enough to hold goals, react to events, and reconsider. The tier test: <i>does it need memory, goals, or reconsideration?</i> No → simple tier, plain engine code by design, no brain call at all — tax collectors and peasants are dumb enough not to flee; deer are pure reaction, no goals. Heroes are the first contract-driven agents; most enemies — a goblin warband holding a goal, say — are the intended next tier to join.</p>
+<p>The view splits conceptually into a common envelope every agent kind shares (vitals, statuses, the event inbox, a current-intention summary) plus a per-agent-kind perception profile layered on top — today that's the hero <code>suggest</code> block (§3). A monster profile arrives with the first non-hero agent kind: out of scope for this amendment, expected alongside or after v3.</p>
 
 <div class="callout">
   <h3>Names this contract pins (later tasks implement these verbatim)</h3>
   <dl>
     <dt>CurrentIntention</dt>
-    <dd>Durable per-hero engine state: the intention being executed right now (if any), since when, and how it maps onto the command/movement machinery. Outlives a single tick; read by <code>should_wake</code>, written by <code>apply_intention</code>.</dd>
+    <dd>Durable per-agent engine state: the intention being executed right now (if any), since when, and how it maps onto the command/movement machinery. Outlives a single tick; read by <code>should_wake</code>, written by <code>apply_intention</code>.</dd>
     <dt>EventInbox</dt>
-    <dd>Durable per-hero engine state: a bounded, sticky ring of timed events written by engine systems (combat, movement, the intention executor). Survives across sleep; entries expire on their own TTL, not on being read.</dd>
+    <dd>Durable per-agent engine state: a bounded, sticky ring of timed events written by engine systems (combat, movement, the intention executor). Survives across sleep; entries expire on their own TTL, not on being read.</dd>
     <dt>apply_intention</dt>
     <dd>Engine function: commits a <em>validated</em> suggestion onto the command/movement machinery. The accepted intention <em>is</em> the logged <code>Command</code> — event-sourced, same as every other mutation in this codebase.</dd>
     <dt>should_wake</dt>
-    <dd>Engine function: a per-tick, per-hero predicate. Returns whether <code>react()</code> runs for this hero this tick. Reads only durable, replayable state — never the brain.</dd>
+    <dd>Engine function: a per-tick, per-agent predicate. Returns whether <code>react()</code> runs for this agent this tick. Reads only durable, replayable state — never the brain.</dd>
   </dl>
 </div>
 
@@ -146,8 +165,20 @@
 <h2 id="loop"><span class="num">1</span>The loop</h2>
 <p>One brain wake is one trip around this ring. The brain owns exactly one box (<code>react()</code>); the engine owns the rest.</p>
 
+<div class="callout v3">
+  <h3><span class="v3-badge">v3</span> Two kinds of output</h3>
+  <p>The next ABI bump reshapes one wake's inside from a single return into a small loop body: <b>wake</b> → optionally enqueue any number of actions via a new write-only host import, <code>bl_enqueue_action(kind, target, arg)</code> (instant, non-blocking — appended straight to the engine's resolve list for this tick) → <b>always</b> yield exactly one suggestion, same shape as today.</p>
+  <dl>
+    <dt>INTENTION</dt>
+    <dd>A long-lasting goal — go there, fight that. Owns <code>CurrentIntention</code>, has a lifecycle, ends with an <code>IntentionEnded</code> event. Unchanged shape from v2.</dd>
+    <dt>ACTION</dt>
+    <dd>An instant spike — use a skill, drink a potion, a concrete attack pick. Fire-and-forget: enqueued via <code>bl_enqueue_action</code>, resolved this tick, never touches <code>CurrentIntention</code>.</dd>
+  </dl>
+  <p>The agent restates its current intention on <em>every</em> wake, whether or not anything should change — the engine diffs the restatement against <code>CurrentIntention</code>: identical = resume (edge-triggered, nothing new logged), changed = validated and adopted, same acceptance rule as today.</p>
+</div>
+
 <div class="diagram-wrap">
-<svg viewBox="0 0 920 400" role="img" aria-label="The brain-engine loop: state and events feed react, which returns a suggestion, which the engine validates and executes, mutating the world, which produces the next state and events. The return edge is annotated results deferred by design.">
+<svg viewBox="0 0 920 400" role="img" aria-label="The brain-engine loop: state and events feed react, which returns a suggestion, which the engine validates and executes, mutating the world, which produces the next state and events. The return edge is annotated results deferred by design. A v3 side-channel arrow runs from react() into the engine's validate stage, labeled bl_enqueue_action, validated per action in order.">
   <!-- top row -->
   <rect class="box" x="30" y="30" width="190" height="76" rx="7"></rect>
   <text class="lbl" x="125" y="62" text-anchor="middle">state + events</text>
@@ -156,6 +187,13 @@
   <rect class="box-brain" x="365" y="30" width="190" height="76" rx="7"></rect>
   <text class="lbl" x="460" y="62" text-anchor="middle">react()</text>
   <text class="lbl2" x="460" y="80" text-anchor="middle">[brain · wasm]</text>
+
+  <!-- v3: instant-action side channel — routed through VALIDATE like every
+       suggestion (resolve-time, per action); it must never bypass the engine's
+       feasibility gate (cooldowns, dead targets, missing resources). -->
+  <polyline class="edge-v3" points="460,106 460,150 845,150 845,270" fill="none" marker-end="url(#arrow-v3)"></polyline>
+  <text class="v3-lbl" x="650" y="142" text-anchor="middle">actions: bl_enqueue_action (v3)</text>
+  <text class="v3-lbl" x="650" y="166" text-anchor="middle">validated per action, in order</text>
 
   <rect class="box" x="700" y="30" width="190" height="76" rx="7"></rect>
   <text class="lbl" x="795" y="62" text-anchor="middle">suggestion</text>
@@ -198,14 +236,19 @@
   <line class="edge-return" x1="125" y1="270" x2="125" y2="106" marker-end="url(#arrow-return)"></line>
   <text class="edge-lbl" x="60" y="150" transform="rotate(-90 60 150)" text-anchor="middle" style="fill:var(--accent); font-weight:bold;">results deferred by design</text>
 </svg>
-<p class="diagram-cap">react() never learns the outcome of its own suggestion in the same call — only later, via the next wake's state + events (e.g. an INTENTION_ENDED event, a changed health_frac).</p>
+<p class="diagram-cap">react() never learns the outcome of its own suggestion in the same call — only later, via the next wake's state + events (e.g. an INTENTION_ENDED event, a changed health_frac). <span class="v3-badge">v3</span> Same story for enqueued actions: their outcome isn't visible in the call that enqueued them either — only later, via state/events on a subsequent wake.</p>
 </div>
 
-<p>Validation is the engine's alone: an accepted suggestion is feasible right now (e.g. its <code>target_slot</code> still names a real, reachable entity). An infeasible one is logged and dropped — the hero's <code>CurrentIntention</code> is untouched, so it either keeps doing what it was already doing or falls back to idling. The brain is advisory; it is never authoritative over what actually happens.</p>
+<p>Validation is the engine's alone: an accepted suggestion is feasible right now (e.g. its <code>target_slot</code> still names a real, reachable entity). An infeasible one is logged and dropped — the agent's <code>CurrentIntention</code> is untouched, so it either keeps doing what it was already doing or falls back to idling. The brain is advisory; it is never authoritative over what actually happens. <span class="v3-badge">v3</span> Enqueued actions get the same validate-or-drop treatment, and it happens <b>at resolve time, per action</b> — not at enqueue. <code>bl_enqueue_action</code> is write-only and always "succeeds" from the agent's side; the engine validates each action against the world as it stands when that action resolves. An action on cooldown, naming a dead target, or spending a resource the agent no longer has is warned and dropped — and because actions resolve in enqueue order, an earlier action in the same wake can invalidate a later one (the first <code>USE_SKILL</code> starts the cooldown that rejects a duplicate second). Each action is judged independently: one drop never cancels the rest of the batch or the yielded intention. The agent learns the outcome the same way it learns everything — from state and events on a later wake — never from a return value. Actions never touch <code>CurrentIntention</code> either way; only an adopted intention does that.</p>
+
+<h3><span class="v3-badge">v3</span> Action resolution</h3>
+<p>Actions resolve in enqueue order, within the wake's own tick. When a single wake both enqueues actions and changes its intention, the apply order is fixed by convention: <b>actions first, then the intention diff</b> — the spike belongs to the moment, the intention to the future.</p>
+<p class="note">Soft convention, not an API rule: most agents should enqueue at most one action and then yield immediately. The API permits more per wake (a boss with several readied abilities, say) — nothing stops it, but restraint is the expectation.</p>
+<p class="note">Rejected for the record: generator-style multi-yield — re-invoking <code>think()</code> repeatedly within a wake until it signals "done." Rejected for costing multiple host↔guest calls per wake, guest-side reentry state to track between them, and being the worst fit of the options considered for a boundary meant to stay swappable — an LLM standing in for <code>react()</code> cannot be resumed mid-turn the way a plain function can.</p>
 
 <!-- =================================================================== -->
 <h2 id="wakeup"><span class="num">2</span>Wakeup state machine</h2>
-<p>The brain is consulted sparsely — that sparseness is the point of the interface (it's what makes the boundary swappable for an LLM or a neural net later: you do not call one of those 30×/second). Every tick, <code>should_wake</code> decides, per hero, whether <code>react()</code> runs at all.</p>
+<p>The brain is consulted sparsely — that sparseness is the point of the interface (it's what makes the boundary swappable for an LLM or a neural net later: you do not call one of those 30×/second). Every tick, <code>should_wake</code> decides, per agent, whether <code>react()</code> runs at all.</p>
 
 <div class="diagram-wrap">
 <svg viewBox="0 0 760 600" role="img" aria-label="Wakeup flow: sleeping, gated by a bypass-status check and a should_wake check, leading to react and apply_intention, which returns to sleeping.">
@@ -262,8 +305,18 @@
   <path class="edge-return" d="M 525 505 C 660 505, 660 30, 500 30" marker-end="url(#arrow-return)"></path>
   <text class="edge-lbl" x="650" y="270" transform="rotate(-90 650 270)" text-anchor="middle" style="fill:var(--accent); font-weight:bold;">back to Sleeping</text>
 </svg>
-<p class="diagram-cap">Spurious wakeups are allowed at any tick — a brain woken for no listed reason must still re-decide idempotently (re-suggesting the same intention is a valid answer). Bypass statuses skip the think entirely: the mechanism drawn above exists from v1, but no v1 status (<code>BL_ST_CHATTING</code>/<code>MELEE_LOCKED</code>/<code>INSIDE_BUILDING</code>) actually sets it — all three are advisory only this slice. The first status that bypasses thinking is an implementation detail of a future slice. Separately, an <code>InsideBuilding</code> hero is skipped by the per-hero brain loop outright (a component-exclusion in the loop itself, before <code>should_wake</code> is ever consulted) — a bypass by exclusion, not the status-bypass mechanism this diagram draws. "No <code>CurrentIntention</code>" (top of the reasons box) is not an unconditional wake, either: a rejected or no-op (<code>BL_INT_NONE</code>) suggestion arms a short backoff on the same <code>wake_at_millis</code> field an idle hint uses, so a hero whose brain keeps declining is re-consulted at a bounded rate instead of every tick — the bullet means "no intention running <em>and</em> no such backoff pending."</p>
+<p class="diagram-cap">Spurious wakeups are allowed at any tick — a brain woken for no listed reason must still re-decide idempotently (re-suggesting the same intention is a valid answer). Bypass statuses skip the think entirely: the mechanism drawn above exists from v1, but no v1 status (<code>BL_ST_CHATTING</code>/<code>MELEE_LOCKED</code>/<code>INSIDE_BUILDING</code>) actually sets it — all three are advisory only this slice. The first status that bypasses thinking is an implementation detail of a future slice. Separately, an <code>InsideBuilding</code> agent is skipped by the per-agent brain loop outright (a component-exclusion in the loop itself, before <code>should_wake</code> is ever consulted) — a bypass by exclusion, not the status-bypass mechanism this diagram draws. "No <code>CurrentIntention</code>" (top of the reasons box) is not an unconditional wake, either: a rejected or no-op (<code>BL_INT_NONE</code>) suggestion arms a short backoff on the same <code>wake_at_millis</code> field an idle hint uses, so an agent whose brain keeps declining is re-consulted at a bounded rate instead of every tick — the bullet means "no intention running <em>and</em> no such backoff pending."</p>
 </div>
+
+<h3><span class="v3-badge">v3</span> Tiered wake guarantees</h3>
+<p><b>High-stakes</b> (a threat in view, or in combat): the engine <em>offers</em> a consult every tick while the threat is present — the agent may assume per-tick cadence, but this is an engine offer, not an agent obligation. A slow implementation (an LLM, say) may answer less often; the engine stays authoritative over what actually executes either way, same as always (§1).</p>
+<p><b>Normal</b> (everything else): guaranteed at least once per second of 1x sim time. No hint, or a short one, defaults the next wake to <code>last_think_millis + 1s</code>. An explicit longer yield — "sleep 4 hours" — is honored, unless a guaranteed-wake event fires first (the list above is unchanged).</p>
+<p>Semantics change <span class="v3-badge">v3</span>: today, shipped in v2, <code>idle_hint_millis == 0</code> means <em>idle-until-woken</em> — no default cadence exists to fall back on. In v3, <code>0</code> means "no preference," and the 1s default cadence applies instead. Rationale: the review found a class of stuck-forever-with-hint-0 defects; a structural default cadence deletes that class rather than relying on every producer to remember to set a hint.</p>
+
+<h3>Resume-by-default</h3>
+<p>Agents operate on a <b>resume</b> assumption: unless events or state actively warrant a change, an agent keeps doing what it was already doing. A wake — spurious or not — never cancels a running <code>CurrentIntention</code> on its own; a spurious wakeup that re-suggests the same thing loses nothing. Events are inputs to reconsideration, not resets.</p>
+<p class="note">This already holds in spirit today: the spurious-wakeup note above — re-suggesting the same intention is always a valid, free answer — is the same property. What's new in <span class="v3-badge">v3</span> is the mechanics: the engine recognizing an identical restatement as an edge-triggered resume that doesn't re-log a Command (§1), and the action channel (§1) that lets a resumed intention still do something new this tick.</p>
+<p class="note">Worked example <span class="v3-badge">v3</span>: a hero mid-<code>Attack(monster)</code> gets a combat-tick wake. It yields the <em>same</em> intention — <code>Attack(monster)</code>, a resume — and enqueues <code>BL_ACT_USE_SKILL(Calcify)</code>. The skill fires without disturbing the engagement: the intention keeps running exactly as it was, the action is a one-off spike layered on top.</p>
 
 <!-- =================================================================== -->
 <h2 id="wire"><span class="num">3</span>Wire layout — <code>BL_ABI_VERSION 2</code></h2>
@@ -413,7 +466,7 @@
 
 <!-- =================================================================== -->
 <h2 id="inbox"><span class="num">4</span>Event-inbox lifecycle</h2>
-<p><code>EventInbox</code> is engine-written, bounded, and <b>sticky</b>: a sleeping hero does not miss what happened while it slept. An entry survives until it is read at some wake, or until its own TTL runs out first — whichever comes first isn't actually a choice the entry makes; expiry is purely time-based, so a hero that never wakes before the TTL elapses loses the entry unread.</p>
+<p><code>EventInbox</code> is engine-written, bounded, and <b>sticky</b>: a sleeping agent does not miss what happened while it slept. An entry survives until it is read at some wake, or until its own TTL runs out first — whichever comes first isn't actually a choice the entry makes; expiry is purely time-based, so an agent that never wakes before the TTL elapses loses the entry unread.</p>
 
 <div class="diagram-wrap">
 <svg viewBox="0 0 860 230" role="img" aria-label="Event inbox timeline: an event is written, stays sticky while its TTL decrements, is visible on any wake in that window, and drops when the TTL reaches zero.">
@@ -472,14 +525,28 @@
   <tbody>
     <tr><td><code>BL_INT_NONE</code></td><td>—</td><td>No suggestion this wake.</td></tr>
     <tr><td><code>BL_INT_MOVE_TO</code></td><td><code>point</code></td><td>Walk to a world point.</td></tr>
-    <tr><td><code>BL_INT_ATTACK</code></td><td>actor-only</td><td>Melee whatever this hero is already engaged with.</td></tr>
+    <tr><td><code>BL_INT_ATTACK</code></td><td>actor-only</td><td>Melee whatever this agent is already engaged with.</td></tr>
     <tr><td><code>BL_INT_SHOOT</code></td><td><code>target_slot</code></td><td>Ranged attack on a named entity (a hunter's shot).</td></tr>
     <tr><td><code>BL_INT_ENTER</code></td><td><code>arg</code> = BuildingKind</td><td>Enter a building of this kind.</td></tr>
-    <tr><td><code>BL_INT_ENTER_HOME</code></td><td>—</td><td>Enter this hero's own home.</td></tr>
+    <tr><td><code>BL_INT_ENTER_HOME</code></td><td>—</td><td>Enter this agent's own home.</td></tr>
     <tr><td><code>BL_INT_BUY</code></td><td>—</td><td>Transact at a shop.</td></tr>
     <tr><td><code>BL_INT_CHAT</code></td><td><code>target_slot</code></td><td>Strike up or continue a conversation with a partner.</td></tr>
     <tr><td><code>BL_INT_IDLE</code></td><td><code>duration_millis</code></td><td>Explicit idle-for-X.</td></tr>
-    <tr class="reserved"><td><code>BL_INT_USE_SKILL</code> (reserved)</td><td>—</td><td>Reserved in the enum; skill execution is an implementation detail of a future slice.</td></tr>
+    <tr class="reserved"><td><code>BL_INT_USE_SKILL</code> (reserved)</td><td>—</td><td>Reserved in v2; superseded by <code>BL_ACT_USE_SKILL</code> <span class="v3-badge">v3</span>; never shipped as an intention.</td></tr>
+  </tbody>
+</table>
+
+<h3><code>BL_ACT_*</code> — action kinds (the enqueue's <code>kind</code>) <span class="v3-badge">v3</span></h3>
+<table>
+  <caption><span class="v3-badge">v3</span> Not yet shipped — reserved for the skills slice / next ABI bump, via the new <code>bl_enqueue_action(kind, target, arg)</code> host import (§1). Append-only, same discipline as every other vocabulary here. Fire-and-forget: an action never touches <code>CurrentIntention</code>; its outcome is observable only via state/events on a later wake. Every action is validated by the engine at resolve time (cooldown running, invalid target, missing resource → warn + drop, per action, without cancelling the rest of the batch) — enqueueing is not permission.</caption>
+  <thead>
+    <tr><th>Kind</th><th>Fields used</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr class="reserved"><td><code>BL_ACT_NONE</code></td><td>—</td><td>No action enqueued.</td></tr>
+    <tr class="reserved"><td><code>BL_ACT_USE_SKILL</code></td><td><code>target</code>, <code>arg</code></td><td>Fire a skill at a target (e.g. Calcify).</td></tr>
+    <tr class="reserved"><td><code>BL_ACT_USE_POTION</code></td><td><code>arg</code></td><td>Consume an inventory potion.</td></tr>
+    <tr class="reserved"><td><code>BL_ACT_ATTACK</code></td><td><code>target</code></td><td>A concrete attack pick (vs. <code>BL_INT_ATTACK</code>'s "whatever I'm already engaged with").</td></tr>
   </tbody>
 </table>
 
@@ -490,7 +557,7 @@
     <tr><th>Kind</th><th>Payload</th><th>Written when</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>BL_EV_DAMAGE_TAKEN</code></td><td><code>source_slot</code> = attacker, if known</td><td>This hero took damage.</td></tr>
+    <tr><td><code>BL_EV_DAMAGE_TAKEN</code></td><td><code>source_slot</code> = attacker, if known</td><td>This agent took damage.</td></tr>
     <tr><td><code>BL_EV_THREAT_SIGHTED</code></td><td><code>source_slot</code> = the threat</td><td>A new hostile entered perception.</td></tr>
     <tr><td><code>BL_EV_MOVE_BLOCKED</code></td><td><code>param</code> unused (0) — the refused point lives on the sibling <code>MoveBlocked</code> component, not this event</td><td>A movement step was refused.</td></tr>
     <tr><td><code>BL_EV_INTENTION_ENDED</code></td><td><code>param</code> = completed(1) / aborted(0)</td><td>The running <code>CurrentIntention</code> finished, either way.</td></tr>
@@ -499,7 +566,7 @@
 
 <h3><code>BL_ST_*</code> — status kinds (<code>{kind, remaining_millis}</code>)</h3>
 <table>
-  <caption>All three are advisory in this slice — the brain may inspect or ignore them; none bypasses thinking via the status-bypass mechanism (§2). Curses/shields and any status that does bypass thinking that way arrive in later slices. <code>BL_ST_INSIDE_BUILDING</code> is the one exception in effect, not mechanism: an <code>InsideBuilding</code> hero never reaches <code>should_wake</code> at all, skipped by the per-hero brain loop itself (§2).</caption>
+  <caption>All three are advisory in this slice — the brain may inspect or ignore them; none bypasses thinking via the status-bypass mechanism (§2). Curses/shields and any status that does bypass thinking that way arrive in later slices. <code>BL_ST_INSIDE_BUILDING</code> is the one exception in effect, not mechanism: an <code>InsideBuilding</code> agent never reaches <code>should_wake</code> at all, skipped by the per-agent brain loop itself (§2).</caption>
   <thead>
     <tr><th>Kind</th><th>Meaning</th></tr>
   </thead>
