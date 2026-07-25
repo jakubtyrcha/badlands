@@ -303,3 +303,33 @@ solver is unconditionally stable, so 40 × dt=2 ≈ 80 × dt=1 in total erosion
 with coarser routing adaptation. Tuning previews compare both; the default
 stays 80 × 1 pending user judging. Release-build/parallelism work: parked by
 user decision.
+
+## v1.2 addendum (2026-07-25, second preview review with the user)
+
+### Conical lake bottoms (user-directed)
+
+Cavity carve depth becomes an inverted cone mirroring the mountain relief at
+one third its slope: `depth = (kSlopeMPerM / 3) · EDT(distance to nearest
+non-basin texel)`, replacing the bedrock-value bowl `lake_depth_m · u²`.
+`lake_depth_m` is retired (depth now scales with basin size, uncapped — the
+same constant-slope philosophy as the mountains). Deeper centers also buy
+silt headroom (v1.1 pour was filling shallow bowls to extinction: seed 1 lost
+4 of 6 lakes, seed 3 all of them).
+
+### Height-above-water detail fade (fixes the shoreline rim)
+
+Preview transect evidence: the distance-based shore band (kShoreFadeDistM)
+left a zero-carve shelf 0.03–0.27 m proud of carved surroundings — a visible
+ring in hillshade around every lake. The fade becomes elevation-based, per
+the originally-recorded follow-up: `fade = smoothstep(0, kShoreFadeHeightM
+(2 m), ground − nearest_water_surface)`, with nearest_water_surface from a
+bounded multi-source BFS (radius kShoreBfsTexels = 16) seeded at wet cells
+carrying their surface elevation; beyond the radius fade = 1. Smooth, no
+ring, grades detail to local base level, and cannot carve below an adjacent
+lake surface. Distance-EDT shore fade is removed.
+
+### Iteration default (user-approved)
+
+`iterations` 80 → 40, `dt` 1.0 → 2.0 (same age product; A/B measured
+visually indistinguishable: max heightmap delta 28/255, water mask 1 texel).
+A 40/20/10 ladder (dt 2/4/8) is generated for judging whether to go lower.
