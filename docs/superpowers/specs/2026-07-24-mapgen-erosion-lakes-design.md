@@ -333,3 +333,32 @@ lake surface. Distance-EDT shore fade is removed.
 `iterations` 80 → 40, `dt` 1.0 → 2.0 (same age product; A/B measured
 visually indistinguishable: max heightmap delta 28/255, water mask 1 texel).
 A 40/20/10 ladder (dt 2/4/8) is generated for judging whether to go lower.
+
+## v1.3 addendum (2026-07-25, river texture + lake tuning)
+
+### Lake tuning (user-directed)
+- Cavity cone slope doubled: `kSlopeMPerM/3` → `kSlopeMPerM · 2/3` (0.25 → 0.5 m/m).
+- `lake_frac` 0.03 → 0.08 (user: "increase lake noise threshold by 5%", read
+  as +5 percentage points of basin coverage; trivially revisable if the
+  intent was relative).
+- The quantile-fraction test's flat plains margin (0.15, calibrated at 3%
+  seeding) must be re-measured against the new coverage and adjusted with
+  cited sweep numbers if needed.
+
+### River/stream flow texture
+New artifact `Field2D<float> river` (output res, 0..1): where the water
+flows. Built on the SIM grid from final drainage area A:
+- intensity = 0 below `stream_min_area_m2` (default 1500), else
+  `smoothstep(log2(stream_min), log2(river_area_m2 = 15000), log2(A))` —
+  streams faint, rivers saturate at 1.
+- in_lake cells excluded (the lake is the water); chains resume at outlets.
+- width: dilated by intensity (rivers ~2-3 texels, streams 1) so it reads as
+  a texture, not hairlines (chosen default; hairline variant is a constant).
+- resample sim → output by MAX-POOL over covering sim texels (crisp — no
+  bilinear smear; retires the recorded flow-resample follow-up for this
+  artifact; the `flow` artifact itself stays bilinear/diagnostic).
+- Two new `ErosionParams` fields: `stream_min_area_m2`, `river_area_m2`.
+- Previews: `rivers.png` (gray) + `map.png` composite (biome palette, lakes,
+  rivers overlaid in water blue) — the judging image.
+- Rivers connect by construction (receiver chains reach a lake or the
+  border), unlike gradient-aligned streak tricks.
