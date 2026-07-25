@@ -45,10 +45,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let slot = atomicAdd(&writeCursor[b], 1u);
     let dst = bucketBase[b] + slot;
-    // Global capacity clamp: never write past the compacted buffer (which is
-    // sized to the instance capacity + per-bucket alignment padding). In-capacity
-    // uploads never trip this; it only guards a mis-sized / over-subscribed run,
-    // and clamping (dropping the overflow write) protects neighboring slices.
+    // Global capacity clamp: never write past the compacted buffer (sized to
+    // the instance capacity, tightly packed — see instance_scan.wesl).
+    // In-capacity uploads never trip this; it only guards a mis-sized /
+    // over-subscribed run, and clamping (dropping the overflow write) protects
+    // neighboring slices.
     if (dst < config.counts.z) {
         compacted[dst] = instances[i].transform;
     }

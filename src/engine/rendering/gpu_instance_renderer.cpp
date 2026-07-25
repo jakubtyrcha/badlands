@@ -81,10 +81,11 @@ GpuInstanceRenderer::GpuInstanceRenderer(
     return;
   }
 
-  // Worst-case compacted size: every instance survives (capacity slots) plus the
-  // scan's per-bucket alignment padding (≤ kMaxLods-slots slack per bucket; use
-  // 4 per bucket for headroom). The scatter clamps writes to this capacity.
-  compacted_capacity_ = capacity_ + 4u * num_buckets_;
+  // Worst-case compacted size: every instance survives (capacity slots). The
+  // scan packs bucket bases with a tight exclusive prefix-sum (no padding —
+  // see instance_scan.wesl), so no extra headroom is needed. The scatter
+  // clamps writes to this capacity regardless.
+  compacted_capacity_ = capacity_;
 
   config_buffer_ = MakeBuffer(device_, sizeof(CullConfigData),
                               wgpu::BufferUsage::Uniform |

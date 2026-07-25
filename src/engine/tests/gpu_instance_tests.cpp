@@ -702,6 +702,132 @@ TEST_CASE("instanced G-buffer material renders N instances at N screen positions
 }
 
 // ===========================================================================
+// Review fix #1 (correctness hardening) RED/GREEN: BindPerObject must REFUSE
+// (return false) for instanced materials, not silently succeed with group 1
+// left unbound. The standard render passes gate every draw on
+// `if (!Bind() || !BindPerObject()) continue;` (render_forward.cpp,
+// render_textured_mesh.cpp) -- if BindPerObject wrongly returned true for
+// kInstancedMesh (as it did before this fix), an instanced material routed
+// through those passes would pass the gate and DrawIndexed with the required
+// group-1 storage binding never set: a Dawn validation error.
+//
+// This replicates that exact gate under a validation-error scope, using the
+// instanced_gbuffer material (no @group(2) -- see the DeclaresBindGroup(2)
+// check below -- so any validation error here can only be about the missing
+// group-1 binding, not some unrelated unbound group).
+//
+// RED (recorded before the fix, BindPerObject returning `true` for
+// kInstancedMesh): ok == true, the draw WAS issued, and Dawn raised a
+// validation error for the unset group-1 bind group -- both CHECK_FALSE(ok)
+// and CHECK_FALSE(validation_error) failed, plus the direct contract
+// assertion CHECK(...BindPerObject(...) == false) failed. GREEN (after the
+// fix): ok == false, the draw is skipped entirely, and no validation error
+// fires.
+// ===========================================================================
+TEST_CASE("BindPerObject refuses an instanced material (no unbound group-1 draw)",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {});
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  InstanceParams params;
+  params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"instanced_gbuffer_bindperobject"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kGBuffer, 0);
+  auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                                  MaterialPassType::kDeferred,
+                                  RenderPassType::kGBuffer, params);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
+  auto* inst = handle.operator->();
+  REQUIRE(inst->GetGeometryType() == GeometryType::kInstancedMesh);
+  REQUIRE_FALSE(inst->DeclaresBindGroup(2));  // isolate: no group-2 confound
+
+  std::vector<float> verts = QuadVertices();
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kInstTarget, kInstTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kInstTarget, kInstTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(albedo_t.IsValid());
+
+  bool ok = false;
+  // Capture any validation error the draw provokes rather than letting it hit
+  // the device uncaptured-error callback (mirrors
+  // game/tests/forward_pass_tests.cpp's validation-scope pattern).
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        ClearAttachment(normals_t.GetView()),
+        ClearAttachment(albedo_t.GetView()),
+        ClearAttachment(material_t.GetView())};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+
+    // Exactly the standard passes' gate (render_forward.cpp /
+    // render_textured_mesh.cpp): `if (!Bind() || !BindPerObject()) continue;`
+    ok = inst->Bind(pass, frame) && inst->BindPerObject(pass, frame);
+    if (ok) {
+      pass.SetVertexBuffer(0, vbuf);
+      pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
+      pass.DrawIndexed(6);
+    }
+
+    // Direct contract assertion, independent of the gate replay above: an
+    // instanced material's BindPerObject must always refuse.
+    CHECK(inst->BindPerObject(pass, frame) == false);
+
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool scope_done = false;
+  bool validation_error = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+          wgpu::StringView msg) {
+        if (type != wgpu::ErrorType::NoError) {
+          validation_error = true;
+          INFO("captured error: "
+               << (msg.length > 0 ? std::string(msg.data, msg.length)
+                                  : std::string("(no message)")));
+        }
+        scope_done = true;
+      });
+  while (!scope_done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+
+  CHECK_FALSE(ok);                // the gate must refuse an instanced material
+  CHECK_FALSE(validation_error);  // ...so no unbound-group-1 draw is ever issued
+}
+
+// ===========================================================================
 // Phase B, shadow-compile proof: the render tests above build their factories
 // with casts_shadow=false, so the kShadow variant of instanced_forward.wesl /
 // instanced_gbuffer.wesl is never compiled by them — a WGSL error in either
@@ -833,8 +959,9 @@ TEST_CASE("instanced G-buffer material's shadow-pass variant compiles",
 //         trivial 1-bucket case) via buffer readback.
 // Test 3: LOD boundary — instances straddling the thresholds land in the
 //         correct lod bucket (bucketCount readback, incl. a boundary value).
-// Test 4: multi-bucket compaction — prefix-sum bases are monotonic + 4-aligned +
-//         non-overlapping, and each slice holds exactly its bucket's transforms.
+// Test 4: multi-bucket compaction — prefix-sum bases are exactly tightly
+//         packed (non-overlapping, no padding), and each slice holds exactly
+//         its bucket's transforms.
 // Test 5: end-to-end per-LOD render — each lod drawn with its own mesh + color
 //         at its position (framebuffer readback).
 // Test 6-7: edges — all culled (empty buckets, no draw/crash); all-in-one-bucket.
@@ -1112,9 +1239,10 @@ TEST_CASE("GPU LOD selection: distance thresholds route into the right bucket",
 
 // ---------------------------------------------------------------------------
 // Test 4: multi-bucket compaction (prefix-sum). Several instances across 2
-// models x lods -> the compacted slices are non-overlapping, 4-aligned, bases
-// monotonic, and each bucket's [base, base+count) slice holds exactly that
-// bucket's transforms (order-independent).
+// models x lods -> the compacted slices are non-overlapping and EXACTLY
+// tightly packed (no padding — each bucket's base is exactly the end of the
+// previous bucket's slice), and each bucket's [base, base+count) slice holds
+// exactly that bucket's transforms (order-independent).
 // ---------------------------------------------------------------------------
 TEST_CASE("GPU multi-bucket compaction: prefix-sum slices are disjoint + exact",
           "[gpu_instance][gpu]") {
@@ -1186,13 +1314,14 @@ TEST_CASE("GPU multi-bucket compaction: prefix-sum slices are disjoint + exact",
   REQUIRE(bases.size() == num_buckets);
   REQUIRE(compacted.size() == renderer.GetCompactedCapacity());
 
-  // Counts match, bases are 4-aligned + monotonic + non-overlapping.
+  // Counts match; bases are EXACTLY tightly packed (no padding) — each
+  // bucket's base is exactly the end of the previous bucket's slice, which
+  // proves non-overlap too (a strictly weaker `>=` wouldn't catch padding).
   uint32_t prev_end = 0;
   for (uint32_t b = 0; b < num_buckets; ++b) {
     INFO("bucket " << b << " count=" << counts[b] << " base=" << bases[b]);
     CHECK(counts[b] == expected[b].size());
-    CHECK(bases[b] % 4u == 0u);            // 4-slot (256-byte) aligned
-    CHECK(bases[b] >= prev_end);           // monotonic + non-overlapping
+    CHECK(bases[b] == prev_end);  // exact tight packing: non-overlapping, no padding
     prev_end = bases[b] + counts[b];
   }
 

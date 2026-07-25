@@ -43,13 +43,11 @@ RenderPipelineDeclaration MeshRenderingMaterial::BuildDeclaration(
       decl.vertex_layout = VertexLayout::kTerrainCluster;
       break;
     case GeometryType::kTexturedMesh:
-      decl.vertex_layout = VertexLayout::kTexturedMesh;
-      break;
     case GeometryType::kInstancedMesh:
-      // The MESH vertex buffer is the normal 11-float textured layout —
-      // instances are NOT a vertex stream; the per-instance transform is read
-      // from a group-1 storage array in the vertex stage (gated by the
-      // "instanced" feature pushed below).
+      // kInstancedMesh's MESH vertex buffer is the normal 11-float textured
+      // layout — instances are NOT a vertex stream; the per-instance
+      // transform is read from a group-1 storage array in the vertex stage
+      // (gated by the "instanced" feature pushed below).
       decl.vertex_layout = VertexLayout::kTexturedMesh;
       break;
     default:

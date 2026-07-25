@@ -93,10 +93,11 @@ class GpuInstanceRenderer {
   void UploadInstances(std::span<const InstanceInput> instances);
 
   // Configure a bucket's geometry (the mesh drawn per surviving instance in that
-  // bucket) and pre-fill its indirect-args indexCount/firstIndex/baseVertex. The
-  // vertex layout must match whatever instanced material `Draw()` later resolves
-  // for the bucket. Buckets left unconfigured (index_count 0) are skipped by
-  // Draw(). `bucket` must be < GetNumBuckets().
+  // bucket) and pre-fill its indirect-args indexCount (firstIndex/baseVertex
+  // stay 0 -- each bucket binds its own index buffer, so no shared-buffer
+  // offset is needed). The vertex layout must match whatever instanced
+  // material `Draw()` later resolves for the bucket. Buckets left unconfigured
+  // (index_count 0) are skipped by Draw(). `bucket` must be < GetNumBuckets().
   void SetBucketMesh(uint32_t bucket, wgpu::Buffer vertex_buffer,
                      wgpu::Buffer index_buffer, wgpu::IndexFormat index_format,
                      uint32_t index_count);
@@ -143,7 +144,7 @@ class GpuInstanceRenderer {
   uint32_t capacity_ = 0;
   uint32_t num_models_ = 0;
   uint32_t num_buckets_ = 0;
-  uint32_t compacted_capacity_ = 0;  // slots in compacted_buffer_ (incl. padding)
+  uint32_t compacted_capacity_ = 0;  // slots in compacted_buffer_ (== capacity_; tight packing, no padding)
   uint32_t instance_count_ = 0;
   std::array<float, kMaxLods - 1> lod_thresholds_{};
 

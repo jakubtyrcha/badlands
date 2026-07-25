@@ -139,12 +139,19 @@ bool StandardRenderingMaterialInstance::BindPerObject(RenderPassContext& pass,
     return false;
   }
 
-  // Instanced materials read the per-object transform from the group-1 instance
-  // storage array (bound via BindInstanceData), not a per-object UBO. Their
-  // group-1 layout is a storage binding, not the dynamic-offset UBO this method
-  // builds, so it must not run for them -- the model matrix is per-instance now.
+  // Instanced materials are not drawable via the per-object path: they read
+  // the per-object transform from the group-1 instance storage array (bound
+  // separately via BindInstanceData in GpuInstanceRenderer::Draw), not a
+  // per-object UBO. Their group-1 layout is a storage binding, not the
+  // dynamic-offset UBO this method builds, so returning true here without
+  // binding group 1 would let the standard passes' gate
+  // (`if (!Bind() || !BindPerObject()) continue;` in render_forward.cpp /
+  // render_textured_mesh.cpp) issue a draw with the required group-1 binding
+  // unset -- a Dawn validation error. Refuse instead, so those passes skip
+  // instanced materials entirely. GpuInstanceRenderer::Draw never calls
+  // BindPerObject (it calls BindInstanceData), so it is unaffected.
   if (geometry_type_ == GeometryType::kInstancedMesh) {
-    return true;
+    return false;
   }
 
   auto device = frame.GetDevice();
@@ -193,6 +200,18 @@ bool StandardRenderingMaterialInstance::BindInstanceData(
     return false;
   }
 
+  // Reuse the cached group-1 bind group when it was built from these SAME two
+  // buffer objects — GpuInstanceRenderer owns both `compacted` and
+  // `bucket_base` for its whole lifetime and passes the same handles every
+  // Draw(), so this is the common case; only the first call (or a call with a
+  // different renderer's buffers) rebuilds.
+  if (cached_instance_bind_group_ &&
+      cached_instance_compacted_.Get() == compacted.Get() &&
+      cached_instance_bucket_base_.Get() == bucket_base.Get()) {
+    pass.SetBindGroup(1, cached_instance_bind_group_);
+    return true;
+  }
+
   auto layout = material_->GetBindGroupLayout(geometry_type_, pass_type_, 1);
   if (!layout) {
     // Shader declares no group-1 binding — nothing to bind.
@@ -221,6 +240,10 @@ bool StandardRenderingMaterialInstance::BindInstanceData(
 
   auto bind_group = frame.GetDevice().CreateBindGroup(&bg_desc);
   pass.SetBindGroup(1, bind_group);
+
+  cached_instance_bind_group_ = bind_group;
+  cached_instance_compacted_ = compacted;
+  cached_instance_bucket_base_ = bucket_base;
   return true;
 }
 

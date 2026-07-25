@@ -3,9 +3,11 @@
 // classify pass has final per-bucket counts in `bucketCount`. A single serial
 // thread (bucket count = numModels*kMaxLods is tiny) sweeps buckets in order
 // computing an exclusive prefix-sum of the counts into `bucketBase`, so each
-// bucket owns the contiguous compacted slice [bucketBase[b], +count[b]). Each
-// base is padded up to a multiple of 4 mat4-slots (256 bytes), keeping the
-// slices aligned. It also resets each bucket's scatter cursor and publishes the
+// bucket owns the contiguous, tightly-packed compacted slice
+// [bucketBase[b], +count[b]) — no inter-bucket padding: BindInstanceData binds
+// `compacted`/`bucketBase` WHOLE at offset 0 and the vertex shader indexes by
+// ELEMENT, never a byte offset, so alignment padding here would buy nothing.
+// It also resets each bucket's scatter cursor and publishes the
 // per-bucket indirect draw's instanceCount. This is the crux of the fully
 // GPU-driven design: the CPU never reads these offsets back — the draw's vertex
 // shader indexes compacted[bucketBase[bucketId] + instance_index] instead.
@@ -37,18 +39,17 @@ struct IndirectArgs {
 @group(0) @binding(3) var<storage, read_write> writeCursor: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> indirectArgs: array<IndirectArgs>;
 
-// Round up to a multiple of 4 (mat4 = 64B, so 4 slots = 256B, meeting
-// minStorageBufferOffsetAlignment even if a slice is ever bound at an offset).
-fn alignUp4(x: u32) -> u32 {
-    return (x + 3u) & ~3u;
-}
-
 @compute @workgroup_size(1)
 fn main() {
     let numBuckets = config.counts.y;
     var running: u32 = 0u;
     for (var b = 0u; b < numBuckets; b = b + 1u) {
-        let base = alignUp4(running);
+        // Tight exclusive prefix-sum: each bucket's base is the running total
+        // of all prior buckets' counts, no padding. BindInstanceData binds
+        // `compacted`/`bucketBase` WHOLE at offset 0 and the vertex shader
+        // indexes compacted[bucketBase[bucketId] + instance_index] by ELEMENT
+        // (never a byte offset), so alignment here was never load-bearing.
+        let base = running;
         bucketBase[b] = base;
         let cnt = atomicLoad(&bucketCount[b]);
         running = base + cnt;
