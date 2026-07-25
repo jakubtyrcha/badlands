@@ -28,7 +28,11 @@ struct ErosionParams {
   // relief term in generator.cpp, not from S's noise (was 1.0f).
   float sediment_noise_m = 0.3f;
   float sediment_noise_wavelength_m = 40.0f;
-  float lake_frac = 0.03f;
+  // v1.3: 0.03 -> 0.08, user-directed ("increase lake noise threshold by 5%",
+  // read as +5 percentage points of basin coverage) — see the v1.3 addendum,
+  // "Lake tuning", in
+  // docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md.
+  float lake_frac = 0.08f;
   float min_lake_area_m2 = 400.0f;
   float min_lake_depth_m = 0.5f;
   int dump_every = 10;        // loop dump cadence (0 = off)

@@ -83,13 +83,24 @@ TEST_CASE("generate_map: quantile cutoffs pin the biome area fractions") {
     // Plains gets a much wider margin: erosion is a fixed-iteration "young
     // terrain" sim, not run to drainage equilibrium, so at the production
     // default a seed-dependent amount of transiently undrained low ground is
-    // still flooded (measured up to ~10 points of plains fraction across
-    // seeds 1-3, well beyond the ~3% carve_cavities seed fraction alone) and
-    // gets stamped Lake. Mountain is never touched: cavities only ever carve
-    // the BOTTOM lake_frac quantile of bedrock, disjoint from the
-    // top-quantile Mountain cutoff.
+    // still flooded and gets stamped Lake. Mountain is never touched:
+    // cavities only ever carve the BOTTOM lake_frac quantile of bedrock,
+    // disjoint from the top-quantile Mountain cutoff.
+    //
+    // v1.3: lake_frac 0.03 -> 0.08 and the cavity cone slope doubled (deeper
+    // basins) both grow Lake coverage, so this margin was re-measured with a
+    // local (not committed) sweep at this test's exact params (resolution
+    // 128, world_size_m 512, sim_resolution 128, production erosion
+    // defaults): seeds 1-20, worst deficit 0.2113 (seed 7); seeds 1-150,
+    // worst deficit 0.3077 (seed 94, a fat-tailed outlier — p90 0.159, p95
+    // 0.207, p99 0.281 over the same 150). 0.15 no longer holds even at
+    // seeds 1-3 reliably as a general claim (it happens to pass them: 0.0661,
+    // 0.1021, 0.0154). 0.35 clears the worst 150-seed outlier with headroom;
+    // plains fraction is one-sided here (erosion only ever REMOVES plains to
+    // Lake, never adds beyond the quantile cutoff — kPlainsFrac + 0.35 is
+    // never approached, observed max delta ~0.0001 at the cutoff).
     REQUIRE(plains / n ==
-            Catch::Approx(badlands::mapgen::kPlainsFrac).margin(0.15));
+            Catch::Approx(badlands::mapgen::kPlainsFrac).margin(0.35));
     REQUIRE(mountain / n ==
             Catch::Approx(badlands::mapgen::kMountainFrac).margin(0.02));
   }

@@ -202,8 +202,10 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   // v1.2: conical basins at 1/3 the mountain cone's slope (user-directed),
   // replacing the old lake_depth_m-capped bowl — see "Conical lake bottoms"
   // in docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md.
+  // v1.3: slope doubled again (1/3 -> 2/3, user-directed) — see the v1.3
+  // addendum, "Lake tuning".
   const auto basins = carve_cavities(B, bedrock_sim, ep.lake_frac,
-                                     kSlopeMPerM / 3.0f, {texel_sim, texel_sim});
+                                     kSlopeMPerM * (2.0f / 3.0f), {texel_sim, texel_sim});
   if (sink) sink->dump("cavities", seq++, basins);
   if (sink) sink->dump("cavities-height", seq++, B);
   auto S = init_sediment(dist, basins, ep, texel_sim, origin_sim, params.seed);
