@@ -15,14 +15,31 @@
 # BL_INT_*/BlSuggestionWire; BlViewWire gains statuses/events blocks and
 # BlViewSelf gains a current-intention summary; BlViewFactors drops
 # think_min_millis/think_max_millis (deliberation is gone).
+#
+# v3 (contract-v3-alignment): BlViewWire gains the attack-loadout block
+# (BlViewAttack, after statuses) -- a brain cannot pick an attack it cannot
+# see -- and a new write-only host import, bl_enqueue_action, for firing
+# instant actions (BL_ACT_*) independently of the one suggestion a wake still
+# returns.
 
 const
-  BL_ABI_VERSION* = 2'i32
+  BL_ABI_VERSION* = 3'i32
   BL_MAX_THREATS* = 8
   BL_MAX_CHARS* = 16
   BL_MAX_EVENTS* = 8
   BL_MAX_STATUSES* = 8
   BL_MAX_ACTIVITIES* = 14
+  BL_MAX_ATTACKS* = 3
+
+  # BL_ACT_*: action kinds (append-only) -- bl_enqueue_action's `kind`
+  # argument. Fire-and-forget: no return, validated by the engine at resolve
+  # time, independently of the wake's own suggestion. Only BL_ACT_ATTACK is
+  # live this slice.
+  BL_ACT_NONE* = 0'i32
+  BL_ACT_USE_SKILL* = 1'i32   # reserved
+  BL_ACT_USE_POTION* = 2'i32  # reserved
+  BL_ACT_ATTACK* = 3'i32      # arg = attack index, target = victim slot
+                               # (UINT32_MAX = the current Attack intention's target)
 
   # BL_INT_*: intention kinds (append-only) -- the suggestion's `kind`.
   # Mirrors badlands::IntentionKind (game/src/components.h) 1:1 for 0..8;
@@ -144,6 +161,14 @@ type
     kind*: uint32
     pad0*: uint32
 
+  BlViewAttack* {.packed.} = object
+    category*: int32       # badlands::AttackCategory
+    damage_type*: int32    # badlands::DamageType
+    base_damage*: float32
+    range*: float32
+    cooldown_remaining*: float32  # seconds; 0 = ready
+    pad0*: uint32
+
   BlEvent* {.packed.} = object
     at_millis*: int64
     ttl_millis*: int64
@@ -161,6 +186,9 @@ type
     status_count*: int32
     pad1*: uint32
     statuses*: array[BL_MAX_STATUSES, BlStatus]
+    attack_count*: int32
+    pad4*: uint32
+    attacks*: array[BL_MAX_ATTACKS, BlViewAttack]
     event_count*: int32
     pad2*: uint32
     events*: array[BL_MAX_EVENTS, BlEvent]
@@ -183,6 +211,7 @@ static: doAssert sizeof(BlViewSuggest) == 248
 static: doAssert sizeof(BlViewFactors) == 88
 static: doAssert sizeof(BlViewChar) == 40
 static: doAssert sizeof(BlStatus) == 16
+static: doAssert sizeof(BlViewAttack) == 24
 static: doAssert sizeof(BlEvent) == 32
-static: doAssert sizeof(BlViewWire) == 1480
+static: doAssert sizeof(BlViewWire) == 1560
 static: doAssert sizeof(BlSuggestionWire) == 40

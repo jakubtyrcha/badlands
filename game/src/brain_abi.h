@@ -14,6 +14,19 @@
 // for the full rationale. This is a breaking wire bump (BL_ABI_VERSION 1 ->
 // 2) -- a v1 guest cannot run against this host and vice versa.
 //
+// v3 (contract-v3-alignment, docs/superpowers/specs/
+// 2026-07-25-contract-v3-alignment-design.md): adds a second, write-only
+// channel alongside the one suggestion a wake still returns -- a brain may
+// now call the new bl_enqueue_action(kind, target_slot, arg) host import
+// (src/crates/brainhost/include/brainhost.h) any number of times per wake to
+// fire instant actions (BL_ACT_*; only BL_ACT_ATTACK is live this slice),
+// each validated by the engine independently at resolve time, in enqueue
+// order. This is a breaking wire bump (BL_ABI_VERSION 2 -> 3): BlViewWire
+// gains the attack-loadout block below (a brain cannot pick an attack it
+// cannot see) and the import allowlist grows by one entry. Behavior-neutral
+// this slice: nothing yet calls bl_enqueue_action or drains what it
+// receives -- see wasm_brain.cpp's WasmBrainRuntime::pending_actions.
+//
 // Plain C, includable from both C++ (game/) and generated bindings. There is
 // a hand-mirrored copy of every struct below in scripts/brains/nim/abi.nim --
 // keep the two in sync; both sides static-assert their sizes so a mismatch is
@@ -49,7 +62,7 @@ extern "C" {
 
 // Wire format version. Bumped on any incompatible layout change; the host
 // (bh_instantiate) rejects a module whose bl_abi_version() disagrees.
-#define BL_ABI_VERSION 2
+#define BL_ABI_VERSION 3
 
 // Capacities baked into the wire structs below (fixed-size arrays -- no
 // dynamic length on the wasm side of this boundary).
@@ -61,6 +74,28 @@ extern "C" {
 // Checked at test time (brain_abi_tests.cpp), not compile time, because this
 // header deliberately does not include badlands_sim.hpp.
 #define BL_MAX_ACTIVITIES 14
+// Must equal badlands::kMaxAttacks (game/include/badlands_sim.hpp). Checked
+// at compile time in wasm_brain.cpp (which already includes badlands_sim.hpp
+// via components.h), same reasoning as BL_MAX_ACTIVITIES above.
+#define BL_MAX_ATTACKS 3
+
+// Action kinds (append-only): the vocabulary for bl_enqueue_action's `kind`
+// argument (src/crates/brainhost/include/brainhost.h's BhActionFn). Unlike
+// BL_INT_* (one suggestion per wake, validated/tracked by apply_intention),
+// an action is fire-and-forget -- write-only, no return, resolved by the
+// engine's action resolver at THIS tick's resolve point, independently of
+// the wake's suggestion. Calling bl_enqueue_action is not permission: an
+// invalid action (bad index, on cooldown, wrong category for the current
+// lock, out of range) is warned and dropped without affecting the rest of
+// the batch or the yielded suggestion. Same discipline as every other
+// append-only vocabulary here: never renumber or reuse a shipped value.
+#define BL_ACT_NONE 0
+#define BL_ACT_USE_SKILL 1   // reserved
+#define BL_ACT_USE_POTION 2  // reserved
+// live: arg = index into BlViewWire.attacks (BL_ACT_ATTACK's attack index),
+// target_slot = victim slot (UINT32_MAX = the current Attack-intention's
+// target -- BL_INT_ATTACK's own target_slot).
+#define BL_ACT_ATTACK 3
 
 // Intention kinds (append-only): the suggestion's `kind`. 0 = no suggestion
 // this wake. Mirrors badlands::IntentionKind (game/src/components.h) 1:1 for
@@ -244,6 +279,26 @@ typedef struct BlStatus {
     uint32_t _pad;
 } BlStatus;
 
+// --- BlViewAttack ------------------------------------------------------------
+// One entry of this entity's own attack loadout (mirrors badlands::Attack +
+// the matching slot of Attacks::cooldown_remaining, game/src/components.h,
+// 1:1) -- new in v3: a brain cannot pick an attack it cannot see. `category`/
+// `damage_type` are badlands::AttackCategory/DamageType; `cooldown_remaining`
+// is seconds until this attack is usable again (0 = ready now). No int64_t
+// member, so alignof is only 4 -- the explicit trailing `_pad` is the same
+// discipline as BlViewFactors' own trailing pad (brain_abi.h's LAYOUT RULES
+// comment): it keeps sizeof(BlViewAttack) a documented multiple of 8 so the
+// fixed-size array embedded after it in BlViewWire needs no compiler-
+// inserted gap either.
+typedef struct BlViewAttack {
+    int32_t category;      // badlands::AttackCategory
+    int32_t damage_type;   // badlands::DamageType
+    float base_damage;
+    float range;
+    float cooldown_remaining;  // seconds; 0 = ready
+    uint32_t _pad;
+} BlViewAttack;
+
 // --- BlEvent -----------------------------------------------------------------
 // One timed inbox entry (mirrors badlands::InboxEvent, game/src/components.h
 // 1:1): {kind, source_slot, param}, plus the two clocks a sticky, TTL-expiring
@@ -266,8 +321,8 @@ typedef struct BlEvent {
 // ordinary global variable, as every shipping brain in scripts/brains/nim
 // does, satisfies this trivially).
 //
-// Block order is binding: self / suggest / factors / statuses / events /
-// chars.
+// Block order is binding: self / suggest / factors / statuses / attacks /
+// events / chars. `attacks` (v3) sits right after `statuses`.
 typedef struct BlViewWire {
     uint32_t version;    // must equal BL_ABI_VERSION
     uint32_t _pad;       // explicit: keeps `self` (starts with int64_t) 8-aligned
@@ -277,11 +332,19 @@ typedef struct BlViewWire {
     int32_t status_count;  // number of valid entries in `statuses` (0..BL_MAX_STATUSES)
     uint32_t _pad2;         // explicit: keeps `statuses` (BlStatus starts with int64_t) 8-aligned
     BlStatus statuses[BL_MAX_STATUSES];
+    int32_t attack_count;  // number of valid entries in `attacks` (0..BL_MAX_ATTACKS)
+    uint32_t _pad3;         // explicit: pairs with attack_count the same way every other
+                            // count field in this struct pairs with its own pad; BlViewAttack
+                            // has no int64_t member (alignof 4) so this one isn't load-bearing
+                            // for alignment the way _pad2/_pad4/_pad5 are, but it's kept for
+                            // the same "every gap is explicit" discipline (see BlViewAttack's
+                            // own doc comment, which mirrors BlViewFactors' identical case).
+    BlViewAttack attacks[BL_MAX_ATTACKS];
     int32_t event_count;   // number of valid entries in `events` (0..BL_MAX_EVENTS)
-    uint32_t _pad3;         // explicit: keeps `events` (BlEvent starts with int64_t) 8-aligned
+    uint32_t _pad4;         // explicit: keeps `events` (BlEvent starts with int64_t) 8-aligned
     BlEvent events[BL_MAX_EVENTS];
     int32_t char_count;    // number of valid entries in `chars` (0..BL_MAX_CHARS)
-    uint32_t _pad4;         // explicit: keeps `chars` (BlViewChar starts with int64_t) 8-aligned
+    uint32_t _pad5;         // explicit: keeps `chars` (BlViewChar starts with int64_t) 8-aligned
     BlViewChar chars[BL_MAX_CHARS];
 } BlViewWire;
 
@@ -321,7 +384,8 @@ static_assert(sizeof(BlViewSuggest) == 248, "BlViewSuggest size drifted");
 static_assert(sizeof(BlViewFactors) == 88, "BlViewFactors size drifted");
 static_assert(sizeof(BlViewChar) == 40, "BlViewChar size drifted");
 static_assert(sizeof(BlStatus) == 16, "BlStatus size drifted");
+static_assert(sizeof(BlViewAttack) == 24, "BlViewAttack size drifted");
 static_assert(sizeof(BlEvent) == 32, "BlEvent size drifted");
-static_assert(sizeof(BlViewWire) == 1480, "BlViewWire size drifted");
+static_assert(sizeof(BlViewWire) == 1560, "BlViewWire size drifted");
 static_assert(sizeof(BlSuggestionWire) == 40, "BlSuggestionWire size drifted");
 #endif

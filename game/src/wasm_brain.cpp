@@ -34,6 +34,9 @@ static_assert(BL_MAX_ACTIVITIES == kActivityCount,
 static_assert(BL_MAX_EVENTS == kInboxCapacity,
              "BlEvent[] and EventInbox must share one capacity -- events are copied 1:1, no cap "
              "re-check per element below");
+static_assert(BL_MAX_ATTACKS == kMaxAttacks,
+             "BlViewAttack[] and Attacks::defs/cooldown_remaining must share one capacity -- "
+             "attacks are copied 1:1, no cap re-check per element below");
 
 // bl_log's host sink: forwards to spdlog with a "[brain]" prefix so wasm
 // brain diagnostics land in the same log a human already watches. Level is
@@ -56,6 +59,19 @@ void forward_log(int32_t level, const uint8_t* msg, size_t len, void* /*user*/) 
             spdlog::warn("[brain] (level {}) {}", level, text);
             break;
     }
+}
+
+// bl_enqueue_action's host sink (brainhost.h's BhActionFn): appends to the
+// owning WasmBrainRuntime's pending_actions, in call order. `user` is the
+// WasmBrainRuntime* fixed at bh_instantiate time (see WasmBrainRuntime::create
+// below) -- stable for the instance's whole lifetime, so this cast is safe
+// regardless of which wake's bh_tick call is currently in progress.
+// Behavior-neutral this slice (Task 1): hero.nim declares but never calls
+// bl_enqueue_action, so this never actually runs against the shipping brain
+// yet; nothing drains pending_actions either (Task 2's action resolver).
+void forward_action(int32_t kind, uint32_t target_slot, int32_t arg, void* user) {
+    auto* runtime = static_cast<WasmBrainRuntime*>(user);
+    runtime->pending_actions.push_back(PendingAction{kind, target_slot, arg});
 }
 
 // The single fail-fast enforcement point (see wasm_brain.h's policy note):
@@ -87,10 +103,11 @@ void forward_log(int32_t level, const uint8_t* msg, size_t len, void* /*user*/) 
 // think_min/think_max -- deliberation is gone); (c) statuses, assembled from
 // the components a hero MIGHT carry right now (ChattingState/MeleeLock/
 // InsideBuilding) -- advisory only this slice, per brain_abi.h's BL_ST_* doc;
-// (d) the entity's EventInbox, copied 1:1 into events[]; (e) the entity's
-// EntityMemory chars into BlViewChars, slot-ascending (determinism:
-// EntityMemory's own array order is not part of ITS contract, so packing
-// must impose one).
+// (d) the entity's Attacks component, copied 1:1 into attacks[] (v3 -- a
+// brain cannot pick an attack it cannot see); (e) the entity's EventInbox,
+// copied 1:1 into events[]; (f) the entity's EntityMemory chars into
+// BlViewChars, slot-ascending (determinism: EntityMemory's own array order is
+// not part of ITS contract, so packing must impose one).
 BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldView& view,
                           const ActivityWeights& weights) {
     BlViewWire wire{};
@@ -194,6 +211,26 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
         push_status(BL_ST_INSIDE_BUILDING, 0);  // indefinite -- ends when the need is filled
     }
     wire.status_count = status_count;
+
+    // --- attacks: this hero's attack loadout (the Attacks component -- every
+    // spawned entity, hero or otherwise, carries one; see heroes.cpp's
+    // spawn_character) -- a brain cannot pick an attack it cannot see
+    // (brain_abi.h's BlViewAttack doc). category/damage_type/base_damage/
+    // range come from Attacks::defs[i]; cooldown_remaining is the PER-
+    // INSTANCE remaining time (Attacks::cooldown_remaining[i]), not
+    // Attack::cooldown (that's the base duration, not carried on the wire --
+    // a brain only needs to know "is it ready", not how long it takes).
+    const Attacks& atk = game.registry.get<Attacks>(e);
+    wire.attack_count = atk.count;
+    for (int32_t i = 0; i < atk.count; ++i) {
+        const Attack& def = atk.defs[i];
+        wire.attacks[i] = BlViewAttack{static_cast<int32_t>(def.category),
+                                       static_cast<int32_t>(def.damage_type),
+                                       def.base_damage,
+                                       def.range,
+                                       atk.cooldown_remaining[i],
+                                       /*_pad=*/0u};
+    }
 
     // --- events: EventInbox, copied 1:1 (BL_MAX_EVENTS == kInboxCapacity) ------
     const EventInbox& inbox = game.registry.get<EventInbox>(e);
@@ -312,17 +349,22 @@ std::unique_ptr<WasmBrainRuntime> WasmBrainRuntime::create(const uint8_t* wasm_b
                     std::string("bh_load failed: ") + bh_last_error() +
                         " (truncated or invalid wasm -- is git-lfs initialized?)");
     }
+    // Allocated before bh_instantiate (rather than after, like `program`
+    // above) so `runtime.get()` -- a stable heap address for the rest of this
+    // object's life, unique_ptr moves notwithstanding -- can be handed to
+    // bh_instantiate as the action callback's `user` pointer; forward_action
+    // casts it straight back to WasmBrainRuntime* on every call.
+    auto runtime = std::make_unique<WasmBrainRuntime>();
+    runtime->program = program;
     // world_seed 0: world gen is currently seedless/static
     // (SymbolicMapGenerator is a pure function of its compile-time constants
     // -- see sim.cpp's make_world), so there is no seed to thread through yet.
-    BhInstance* instance =
-        bh_instantiate(program, BL_ABI_VERSION, /*world_seed=*/0, &forward_log, nullptr);
+    BhInstance* instance = bh_instantiate(program, BL_ABI_VERSION, /*world_seed=*/0, &forward_log,
+                                          nullptr, &forward_action, runtime.get());
     if (instance == nullptr) {
         brain_fatal("instantiate", std::nullopt,
                     std::string("bh_instantiate failed: ") + bh_last_error());
     }
-    auto runtime = std::make_unique<WasmBrainRuntime>();
-    runtime->program = program;
     runtime->instance = instance;
     return runtime;
 }
@@ -359,6 +401,13 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     const ActivityWeights& weights = weights_for(game, e);
     const WorldView view = observe_hero(game, slot, e, weights);
     const BlViewWire wire = pack_view_wire(game, e, view, weights);
+
+    // Cleared before every bh_tick so, by the time it returns, pending_actions
+    // holds exactly this wake's bl_enqueue_action calls (forward_action
+    // appends into it during the call below) -- never a stale carry-over from
+    // a previous slot's wake or a previous tick's. Nothing reads/drains this
+    // yet (Task 2's action resolver); v3 behavior-neutral this slice.
+    runtime.pending_actions.clear();
 
     BlSuggestionWire out{};
     const int32_t rc =

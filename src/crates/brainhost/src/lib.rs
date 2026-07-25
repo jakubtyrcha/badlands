@@ -182,11 +182,19 @@ pub unsafe extern "C" fn bh_drop_program(program: *mut BhProgram) {
 /// nullable function pointer the same ABI shape).
 type BhLogFn = extern "C" fn(i32, *const u8, usize, *mut c_void);
 
-/// Per-Store data: just the registered log sink. Deliberately data-only —
-/// see CLAUDE.md's "FFI is data-only and mockable".
+/// C function-pointer type matching `BhActionFn` in include/brainhost.h.
+/// Same `Option<...>` reasoning as `BhLogFn` above. `target_slot` is `u32`
+/// here (matching the C typedef) even though the wasm import itself passes
+/// it as a plain i32 — see `host_bl_enqueue_action`'s cast.
+type BhActionFn = extern "C" fn(i32, u32, i32, *mut c_void);
+
+/// Per-Store data: just the two registered callbacks. Deliberately data-only
+/// — see CLAUDE.md's "FFI is data-only and mockable".
 struct HostState {
     log_fn: Option<BhLogFn>,
     log_user: *mut c_void,
+    action_fn: Option<BhActionFn>,
+    action_user: *mut c_void,
 }
 
 pub struct BhInstance {
@@ -253,6 +261,25 @@ fn host_bl_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32
     log_fn(level, bytes.as_ptr(), bytes.len(), log_user);
 }
 
+/// The env.bl_enqueue_action host function: forwards {kind, target_slot, arg}
+/// to the registered `BhActionFn`, synchronously, once per call — no bytes/
+/// memory involved (unlike host_bl_log above), so there is nothing here to
+/// bounds-check. `target_slot` arrives from wasm as a plain i32 (wasm has no
+/// unsigned integer types) and is reinterpreted bit-for-bit as u32 — the same
+/// convention brain_abi.h's own wire structs use for slot indices, and it
+/// round-trips UINT32_MAX (the "current Attack-intention target" sentinel)
+/// exactly, unlike a saturating or checked conversion would.
+fn host_bl_enqueue_action(caller: Caller<'_, HostState>, kind: i32, target_slot: i32, arg: i32) {
+    let (action_fn, action_user) = {
+        let state = caller.data();
+        (state.action_fn, state.action_user)
+    };
+    let Some(action_fn) = action_fn else {
+        return;
+    };
+    action_fn(kind, target_slot as u32, arg, action_user);
+}
+
 /// Resolve+typecheck one required export. A missing export or a signature
 /// mismatch both surface here as one clear error (wasmtime's own message
 /// distinguishes the two).
@@ -309,6 +336,8 @@ fn instantiate_inner(
     world_seed: i32,
     log_fn: Option<BhLogFn>,
     log_user: *mut c_void,
+    action_fn: Option<BhActionFn>,
+    action_user: *mut c_void,
 ) -> *mut BhInstance {
     if program.is_null() {
         set_last_error("bh_instantiate: program is NULL");
@@ -319,10 +348,15 @@ fn instantiate_inner(
     let program = unsafe { &*program };
 
     // ---- import validation: the no-WASI guarantee -------------------------
+    // A module may import neither, either, or both of env.bl_log/
+    // env.bl_enqueue_action — this loop only rejects anything ELSE; it never
+    // requires either one to be present (see include/brainhost.h's own note).
     for import in program.module.imports() {
-        if import.module() != "env" || import.name() != "bl_log" {
+        let allowed = import.module() == "env"
+            && (import.name() == "bl_log" || import.name() == "bl_enqueue_action");
+        if !allowed {
             set_last_error(format!(
-                "bh_instantiate: unexpected import `{}.{}` (a brain module may import at most env.bl_log)",
+                "bh_instantiate: unexpected import `{}.{}` (a brain module may import at most env.bl_log and env.bl_enqueue_action)",
                 import.module(),
                 import.name()
             ));
@@ -340,7 +374,15 @@ fn instantiate_inner(
         return ptr::null_mut();
     }
 
-    let mut store = Store::new(&program.engine, HostState { log_fn, log_user });
+    let mut store = Store::new(
+        &program.engine,
+        HostState {
+            log_fn,
+            log_user,
+            action_fn,
+            action_user,
+        },
+    );
     // Instantiation itself runs guest-declared constant expressions (data/
     // element segment offsets, global initializers) through the same
     // fuel-metered execution path as any other guest call, so — same as
@@ -354,6 +396,12 @@ fn instantiate_inner(
     let mut linker: Linker<HostState> = Linker::new(&program.engine);
     if let Err(e) = linker.func_wrap("env", "bl_log", host_bl_log) {
         set_last_error(format!("bh_instantiate: failed to define env.bl_log: {e:#}"));
+        return ptr::null_mut();
+    }
+    if let Err(e) = linker.func_wrap("env", "bl_enqueue_action", host_bl_enqueue_action) {
+        set_last_error(format!(
+            "bh_instantiate: failed to define env.bl_enqueue_action: {e:#}"
+        ));
         return ptr::null_mut();
     }
 
@@ -442,9 +490,19 @@ pub unsafe extern "C" fn bh_instantiate(
     world_seed: i32,
     log_fn: Option<BhLogFn>,
     log_user: *mut c_void,
+    action_fn: Option<BhActionFn>,
+    action_user: *mut c_void,
 ) -> *mut BhInstance {
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        instantiate_inner(p, expected_abi_version, world_seed, log_fn, log_user)
+        instantiate_inner(
+            p,
+            expected_abi_version,
+            world_seed,
+            log_fn,
+            log_user,
+            action_fn,
+            action_user,
+        )
     }));
     result.unwrap_or_else(|_| {
         set_last_error("bh_instantiate: internal panic");
@@ -637,14 +695,14 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // v2 (the intention contract, game/src/brain_abi.h): bumped in lockstep
+    // v3 (contract-v3-alignment, game/src/brain_abi.h): bumped in lockstep
     // with BL_ABI_VERSION whenever the wire layout changes. Every synthetic
     // WAT fixture below builds its OWN `bl_abi_version` export from this same
     // constant via `build_wasm`, so the bump stays self-consistent across the
     // whole suite; `abi_version_mismatch_rejected` deliberately uses an
     // independent literal (999) for its mismatching module, so it is
     // unaffected by this value either way.
-    const ABI_VERSION: i32 = 2;
+    const ABI_VERSION: i32 = 3;
 
     /// A conforming brain module's fixed layout: view/out buffers at 1024 /
     /// 2048 in a single 64 KiB memory page, so tests can reason about exact
@@ -713,7 +771,7 @@ mod tests {
         let program = load_ok(&wasm);
 
         let instance = unsafe {
-            bh_instantiate(program, ABI_VERSION, 42, Some(noop_log), ptr::null_mut())
+            bh_instantiate(program, ABI_VERSION, 42, Some(noop_log), ptr::null_mut(), None, ptr::null_mut())
         };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
@@ -745,7 +803,7 @@ mod tests {
         let wasm = build_wasm(ABI_VERSION, "", "", tick_body);
         let program = load_ok(&wasm);
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
         let view = [0u8; 8];
@@ -761,7 +819,7 @@ mod tests {
         // the same (still-valid) BhProgram for the next attempt.
         unsafe { bh_drop_instance(instance) };
         let instance2 =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(!instance2.is_null(), "re-instantiate failed: {}", last_error());
 
         // A real tick (slot=1, no trap) on the fresh instance succeeds,
@@ -788,7 +846,7 @@ mod tests {
         let wasm = build_wasm(ABI_VERSION, "", "", "(loop $l (result i32) (br $l))");
         let program = load_ok(&wasm);
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
         let view = [0u8; 8];
@@ -812,7 +870,7 @@ mod tests {
         let wasm = build_wasm(999, "", "", COPY_8_BYTES);
         let program = load_ok(&wasm);
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(instance.is_null());
         let err = last_error();
         assert!(err.contains("999"), "error should mention module version: {err}");
@@ -836,7 +894,7 @@ mod tests {
         );
         let program = load_ok(&wasm);
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(instance.is_null());
         let err = last_error();
         assert!(err.contains("evil"), "error should name the bad import: {err}");
@@ -865,7 +923,7 @@ mod tests {
         );
         let program = load_ok(&wasm);
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(capture), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(capture), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
         let captured = CAPTURED.lock().unwrap();
@@ -880,14 +938,72 @@ mod tests {
         }
     }
 
-    // 7. bounds: view_len larger than the module's declared buffer region
+    // 7. bl_enqueue_action: a module that imports env.bl_enqueue_action (in
+    // addition to the mandatory env.bl_log every build_wasm fixture already
+    // imports -- see build_wasm's own doc comment; the allowlist extending to
+    // a SECOND importable name is exactly what's under test here) calls it
+    // twice from bl_tick with distinct payloads => the registered BhActionFn
+    // callback receives both calls, in that order, with the exact
+    // kind/target_slot/arg it was given.
+    #[test]
+    fn bl_enqueue_action_forwards_calls_in_order() {
+        static CAPTURED: Mutex<Vec<(i32, u32, i32)>> = Mutex::new(Vec::new());
+        extern "C" fn capture_action(kind: i32, target_slot: u32, arg: i32, _user: *mut c_void) {
+            CAPTURED.lock().unwrap().push((kind, target_slot, arg));
+        }
+        CAPTURED.lock().unwrap().clear();
+
+        let tick_body = "\
+            i32.const 3 i32.const 5 i32.const 42 call $bl_enqueue_action \
+            i32.const 3 i32.const 6 i32.const 43 call $bl_enqueue_action \
+            i32.const 0";
+        let wasm = build_wasm(
+            ABI_VERSION,
+            r#"(import "env" "bl_enqueue_action" (func $bl_enqueue_action (param i32 i32 i32)))"#,
+            "",
+            tick_body,
+        );
+        let program = load_ok(&wasm);
+        let instance = unsafe {
+            bh_instantiate(
+                program,
+                ABI_VERSION,
+                0,
+                Some(noop_log),
+                ptr::null_mut(),
+                Some(capture_action),
+                ptr::null_mut(),
+            )
+        };
+        assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
+
+        assert_eq!(unsafe { bh_spawn(instance, 0, 0, 1) }, BH_OK);
+
+        let view = [0u8; 8];
+        let mut out = [0u8; 8];
+        let rc = unsafe {
+            bh_tick(instance, 0, view.as_ptr(), view.len(), out.as_mut_ptr(), out.len())
+        };
+        assert_eq!(rc, BH_OK, "bh_tick failed: {}", last_error());
+
+        let captured = CAPTURED.lock().unwrap();
+        assert_eq!(*captured, vec![(3, 5, 42), (3, 6, 43)]);
+        drop(captured);
+
+        unsafe {
+            bh_drop_instance(instance);
+            bh_drop_program(program);
+        }
+    }
+
+    // 8. bounds: view_len larger than the module's declared buffer region
     // => BH_ERR_ARGS.
     #[test]
     fn view_len_beyond_memory_is_bh_err_args() {
         let wasm = conforming_wasm();
         let program = load_ok(&wasm);
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
         // Memory is 1 page = 65536 bytes; view buf starts at 1024, so
@@ -907,18 +1023,18 @@ mod tests {
         }
     }
 
-    // 8. catch_unwind: passing NULL program to bh_instantiate returns NULL,
+    // 9. catch_unwind: passing NULL program to bh_instantiate returns NULL,
     // no abort.
     #[test]
     fn null_program_returns_null_not_abort() {
         let instance = unsafe {
-            bh_instantiate(ptr::null(), ABI_VERSION, 0, Some(noop_log), ptr::null_mut())
+            bh_instantiate(ptr::null(), ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut())
         };
         assert!(instance.is_null());
         assert!(!last_error().is_empty());
     }
 
-    // 9. acceptance: the real, shipped assets/brains/hero.wasm (built by
+    // 10. acceptance: the real, shipped assets/brains/hero.wasm (built by
     // scripts/build_brains.sh from scripts/brains/nim/hero.nim) conforms to
     // the full brain ABI end to end, not just a wat fixture. Size constants
     // below are duplicated as literals rather than computed, on purpose --
@@ -926,13 +1042,15 @@ mod tests {
     // the same way scripts/brains/nim/abi.nim does on the Nim side.
     #[test]
     fn real_hero_wasm_conforms() {
-        // sizeof(BlViewWire) per game/src/brain_abi.h's static_assert (v2:
-        // 1480 -- the statuses/events blocks the intention contract added).
-        const VIEW_WIRE_LEN: usize = 1480;
+        // sizeof(BlViewWire) per game/src/brain_abi.h's static_assert (v3:
+        // 1560 -- the attack-loadout block contract-v3-alignment added, on
+        // top of v2's statuses/events blocks).
+        const VIEW_WIRE_LEN: usize = 1560;
         // sizeof(BlSuggestionWire) per game/src/brain_abi.h's static_assert
-        // (v2's replacement for BlDecisionWire -- still 40 bytes, coincidentally).
+        // (v2's replacement for BlDecisionWire -- still 40 bytes, coincidentally;
+        // unchanged by v3, which adds no fields to BlSuggestionWire).
         const DECISION_WIRE_LEN: usize = 40;
-        // offsetof(BlViewWire, version) is 0; BL_ABI_VERSION is 2 (both in
+        // offsetof(BlViewWire, version) is 0; BL_ABI_VERSION is 3 (both in
         // game/src/brain_abi.h). A zeroed buffer with just the version
         // stamped is exactly what a host that hasn't populated the rest of
         // the view yet would send on a first tick.
@@ -956,7 +1074,7 @@ mod tests {
         LOGGED.lock().unwrap().clear();
 
         let instance = unsafe {
-            bh_instantiate(program, ABI_VERSION, 42, Some(capture_log), ptr::null_mut())
+            bh_instantiate(program, ABI_VERSION, 42, Some(capture_log), ptr::null_mut(), None, ptr::null_mut())
         };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
@@ -997,7 +1115,7 @@ mod tests {
         }
     }
 
-    // 10. fail-fast fixture: game/tests/fixtures/trap_brain.wasm
+    // 11. fail-fast fixture: game/tests/fixtures/trap_brain.wasm
     // (scripts/brains/nim/trap_test.nim) unconditionally traps bl_tick with a
     // real `unreachable` (__builtin_trap()) -- pins the Nim -> wasm-trap ->
     // BH_ERR_TRAP chain end to end against the actual compiled artifact, not
@@ -1015,7 +1133,7 @@ mod tests {
         // buffers (see scripts/brains/nim/trap_test.nim), so the same
         // static_assert'd sizes from game/src/brain_abi.h apply as
         // real_hero_wasm_conforms uses above.
-        const VIEW_WIRE_LEN: usize = 1480;
+        const VIEW_WIRE_LEN: usize = 1560;
         const DECISION_WIRE_LEN: usize = 40;
 
         let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1025,7 +1143,7 @@ mod tests {
 
         let program = load_ok(&wasm_bytes);
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
         // bl_spawn never traps in this fixture (only bl_tick does).
@@ -1045,7 +1163,7 @@ mod tests {
         }
     }
 
-    // 11. buffer-address caching (Task 8, finding C): a module whose
+    // 12. buffer-address caching (Task 8, finding C): a module whose
     // bl_view_buf() returns X (a mutable global counter's initial reading) on
     // the FIRST call and Y on every call after. bh_instantiate resolves
     // bl_view_buf/bl_out_buf exactly ONCE and bh_tick reuses that cached
@@ -1098,7 +1216,7 @@ mod tests {
 
         // bh_instantiate consumes the module's ONE honest (X) answer here.
         let instance =
-            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut()) };
+            unsafe { bh_instantiate(program, ABI_VERSION, 0, Some(noop_log), ptr::null_mut(), None, ptr::null_mut()) };
         assert!(!instance.is_null(), "bh_instantiate failed: {}", last_error());
 
         assert_eq!(unsafe { bh_spawn(instance, 0, 0, 1) }, BH_OK);

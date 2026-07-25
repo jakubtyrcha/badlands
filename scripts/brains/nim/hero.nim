@@ -42,6 +42,17 @@ import rng
 
 include brain_scaffold
 
+# bl_enqueue_action: the v3 action channel (brainhost.h's BhActionFn side;
+# brain_abi.h's BL_ACT_* vocabulary). Same "env" import-module convention as
+# brain_scaffold's bl_log. Declared here (not brain_scaffold.nim) because only
+# the hero brain will ever call it -- idle_test.nim/trap_test.nim stay fixed-
+# decision fixtures with no reason to. NOT CALLED YET this slice (behavior-
+# neutral Task 1 of docs/superpowers/specs/
+# 2026-07-25-contract-v3-alignment-design.md; a declared-but-uncalled extern
+# proc emits no call site, so it does not appear in hero.wasm's import table
+# either -- Task 4 wires up the actual calls).
+proc bl_enqueue_action(kind: int32; target: uint32; arg: int32) {.importc, cdecl.}
+
 # EVERY hero class runs this one table (the now-deleted town_brain.cpp's own
 # comment: "there is no per-class list" -- what a class does, how eagerly,
 # and whether it has an activity at all is entirely the weight table). List

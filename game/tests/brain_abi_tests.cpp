@@ -24,17 +24,26 @@ TEST_CASE("BL_MAX_ACTIVITIES matches ActivityId::Count", "[brain_abi]") {
     REQUIRE(BL_MAX_ACTIVITIES == static_cast<int32_t>(ActivityId::Count));
 }
 
-TEST_CASE("BL_ABI_VERSION is 2", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 2); }
+TEST_CASE("BL_ABI_VERSION is 3", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 3); }
+
+TEST_CASE("BL_MAX_ATTACKS matches badlands::kMaxAttacks", "[brain_abi]") {
+    REQUIRE(BL_MAX_ATTACKS == kMaxAttacks);
+}
 
 TEST_CASE("BlViewWire is the documented size", "[brain_abi]") {
-    REQUIRE(sizeof(BlViewWire) == 1480);
+    REQUIRE(sizeof(BlViewWire) == 1560);
+}
+
+TEST_CASE("BlViewAttack is the documented size", "[brain_abi]") {
+    REQUIRE(sizeof(BlViewAttack) == 24);
 }
 
 TEST_CASE("BlSuggestionWire is the documented size", "[brain_abi]") {
     REQUIRE(sizeof(BlSuggestionWire) == 40);
 }
 
-TEST_CASE("BlViewWire block order: self / suggest / factors / statuses / events / chars",
+TEST_CASE("BlViewWire block order: self / suggest / factors / statuses / attacks / events / "
+          "chars",
           "[brain_abi]") {
     // version(4) + _pad(4) precede `self`, which starts with an int64_t and so
     // must land on an 8-byte boundary.
@@ -53,15 +62,19 @@ TEST_CASE("BlViewWire block order: self / suggest / factors / statuses / events 
     // int64_t) 8-aligned.
     REQUIRE(offsetof(BlViewWire, statuses) == 440);
     // statuses[8] * 16B = 128B.
-    REQUIRE(offsetof(BlViewWire, event_count) == 568);
-    // event_count(4) + _pad3(4) keep `events` (BlEvent starts with an
+    REQUIRE(offsetof(BlViewWire, attack_count) == 568);
+    // attack_count(4) + _pad3(4) precede the BlViewAttack array (v3).
+    REQUIRE(offsetof(BlViewWire, attacks) == 576);
+    // attacks[3] * 24B = 72B.
+    REQUIRE(offsetof(BlViewWire, event_count) == 648);
+    // event_count(4) + _pad4(4) keep `events` (BlEvent starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, events) == 576);
+    REQUIRE(offsetof(BlViewWire, events) == 656);
     // events[8] * 32B = 256B.
-    REQUIRE(offsetof(BlViewWire, char_count) == 832);
-    // char_count(4) + _pad4(4) keep `chars` (BlViewChar starts with an
+    REQUIRE(offsetof(BlViewWire, char_count) == 912);
+    // char_count(4) + _pad5(4) keep `chars` (BlViewChar starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, chars) == 840);
+    REQUIRE(offsetof(BlViewWire, chars) == 920);
 }
 
 TEST_CASE("BlViewSuggest / BlViewFactors internal padding lands where documented",

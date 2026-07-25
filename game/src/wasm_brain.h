@@ -40,17 +40,32 @@ struct BadlandsGame;
 
 namespace badlands {
 
+// One bl_enqueue_action call (brain_abi.h's BL_ACT_* vocabulary), captured in
+// the order the guest made it -- {kind, target_slot, arg} 1:1 with the
+// BhActionFn callback's own parameters (src/crates/brainhost/include/
+// brainhost.h). v3, behavior-neutral this slice: hero.nim declares but never
+// calls bl_enqueue_action, so `pending_actions` below is always empty in
+// practice for now; nothing drains it yet (Task 2's action resolver).
+struct PendingAction {
+    int32_t kind;
+    uint32_t target_slot;
+    int32_t arg;
+};
+
 // RAII owner of one loaded + instantiated brain wasm module.
 struct WasmBrainRuntime {
     // Compiles + instantiates `wasm_bytes` against BL_ABI_VERSION
     // (brain_abi.h) with world_seed = 0 (world gen is currently
     // seedless/static -- see make_world). Registers a log callback that
     // forwards the guest's bl_log calls to spdlog with a "[brain]" prefix
-    // (level 0/1/2 -> info/warn/error; anything else -> warn). A bh_load/
-    // bh_instantiate failure is FATAL (routes through brain_fatal, stage
-    // "load"/"instantiate") -- this never returns null; a caller (sim.cpp's
-    // make_world) only reaches the next line with a live runtime, or the
-    // process has already aborted.
+    // (level 0/1/2 -> info/warn/error; anything else -> warn), plus an action
+    // callback (forward_action, wasm_brain.cpp) that appends every
+    // bl_enqueue_action call into this runtime's own pending_actions, in call
+    // order (v3; nothing drains it yet this slice -- Task 2's action
+    // resolver). A bh_load/bh_instantiate failure is FATAL (routes through
+    // brain_fatal, stage "load"/"instantiate") -- this never returns null; a
+    // caller (sim.cpp's make_world) only reaches the next line with a live
+    // runtime, or the process has already aborted.
     static std::unique_ptr<WasmBrainRuntime> create(const uint8_t* wasm_bytes, size_t len);
 
     WasmBrainRuntime() = default;
@@ -67,6 +82,16 @@ struct WasmBrainRuntime {
     // slot id is never reassigned (BadlandsGame::slots), but this stays
     // cheap insurance regardless.
     std::vector<bool> spawned;
+
+    // This wake's bl_enqueue_action calls, in call order -- the sink the
+    // BhActionFn callback registered at bh_instantiate appends into. The
+    // callback's `user` pointer is fixed for the instance's whole lifetime
+    // (bh_instantiate's own contract), so it points at this runtime rather
+    // than at any one wake's stack frame; tick_wasm_brain clears this vector
+    // before every bh_tick call, so by the time bh_tick returns it holds
+    // exactly (only) that wake's enqueues. Task 2's action resolver is the
+    // first reader; nothing drains it yet this slice.
+    std::vector<PendingAction> pending_actions;
 };
 
 // Packs one hero's BlViewWire from an already-observed WorldView
