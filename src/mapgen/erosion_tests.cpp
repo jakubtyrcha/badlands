@@ -585,6 +585,101 @@ TEST_CASE("erode: cavity floods, per-lake level uniform, W >= 0") {
   REQUIRE(level_max - level_min < 0.05f);             // one flat surface
 }
 
+TEST_CASE("river_intensity: 0 below stream threshold, saturates at/above "
+          "river threshold, monotone in A") {
+  // river_intensity is a pointwise function of (area, in_lake) — no receiver
+  // graph needed, so a bare FlowRouting (dims + in_lake only) suffices.
+  const int n = 10;
+  FlowRouting r;
+  r.width = n;
+  r.height = 1;
+  r.in_lake.assign(n, 0);
+  // area[i] = 100 * 2^i: log2 spacing of exactly 1 per step, so with
+  // stream_min=100 (log2=6.643...) and river_area=1600=100*16 (log2=+4), the
+  // threshold band spans indices [0, 4] exactly (area[0]==stream_min,
+  // area[4]==river_area).
+  Field2D<float> area(n, 1);
+  for (int i = 0; i < n; ++i)
+    area.at(i, 0) = 100.0f * std::pow(2.0f, static_cast<float>(i));
+  ErosionParams p;
+  p.stream_min_area_m2 = 100.0f;
+  p.river_area_m2 = 1600.0f;
+
+  const auto intensity = river_intensity(r, area, p);
+  REQUIRE(intensity.at(0, 0) == 0.0f);  // exactly at the stream floor
+  for (int i = 4; i < n; ++i)
+    REQUIRE(intensity.at(i, 0) == Catch::Approx(1.0f));  // at/above river_area: saturated
+  for (int i = 0; i + 1 < 4; ++i)
+    REQUIRE(intensity.at(i, 0) < intensity.at(i + 1, 0));  // strictly increasing in between
+  for (float v : intensity.data) {
+    REQUIRE(v >= 0.0f);
+    REQUIRE(v <= 1.0f);
+  }
+
+  // Below the stream floor entirely: 0.
+  FlowRouting r1;
+  r1.width = 1;
+  r1.height = 1;
+  r1.in_lake.assign(1, 0);
+  Field2D<float> area_below(1, 1, 50.0f);
+  REQUIRE(river_intensity(r1, area_below, p).at(0, 0) == 0.0f);
+
+  // Deterministic.
+  REQUIRE(river_intensity(r, area, p).data == intensity.data);
+}
+
+TEST_CASE("river_intensity: exactly 0 where in_lake, regardless of area") {
+  const int n = 6;
+  FlowRouting r;
+  r.width = n;
+  r.height = 1;
+  r.in_lake.assign(n, 0);
+  r.in_lake[2] = 1;
+  r.in_lake[3] = 1;
+  Field2D<float> area(n, 1, 1.0e6f);  // trivially saturated everywhere by area alone
+  ErosionParams p;  // production defaults: stream_min=1500, river_area=15000
+
+  const auto intensity = river_intensity(r, area, p);
+  for (int i = 0; i < n; ++i) {
+    if (r.in_lake[i]) {
+      REQUIRE(intensity.at(i, 0) == 0.0f);
+    } else {
+      REQUIRE(intensity.at(i, 0) == Catch::Approx(1.0f));
+    }
+  }
+}
+
+TEST_CASE("erode: river output — sim-grid dims, in [0,1], zero inside the "
+          "lake even after width dilation") {
+  auto t = make_bowl();
+  ErosionParams p;
+  p.iterations = 10;
+  p.dump_every = 0;
+  p.min_lake_area_m2 = 4.0f;
+  p.min_lake_depth_m = 0.1f;
+  // This synthetic world is 33x33 texels at 1 m spacing (total area <=
+  // 1089 m^2), well under the production stream_min_area_m2 (1500) — lower
+  // the thresholds so the sim actually produces some nonzero intensity here.
+  p.stream_min_area_m2 = 5.0f;
+  p.river_area_m2 = 200.0f;
+  const auto out = erode(t.B, t.S, p, 1.0f, nullptr);
+
+  REQUIRE(out.river.width == 33);
+  REQUIRE(out.river.height == 33);
+  bool any_positive = false;
+  for (int y = 0; y < 33; ++y) {
+    for (int x = 0; x < 33; ++x) {
+      const float v = out.river.at(x, y);
+      REQUIRE(v >= 0.0f);
+      REQUIRE(v <= 1.0f);
+      if (v > 0.0f) any_positive = true;
+      // the lake IS the water: dilation must not paint river onto it
+      if (out.water_depth.at(x, y) > 0.0f) REQUIRE(v == 0.0f);
+    }
+  }
+  REQUIRE(any_positive);
+}
+
 TEST_CASE("erode: pruning removes puddles") {
   auto t = make_bowl();
   ErosionParams p;
@@ -735,6 +830,6 @@ TEST_CASE("generate_map: debug sink sees the full stage sequence") {
       "sediment-init", "micro-fill",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
-      "water", "detail-delta", "final-height", "biome"};
+      "water", "detail-delta", "river", "final-height", "biome"};
   REQUIRE(rec.stages == expected);
 }

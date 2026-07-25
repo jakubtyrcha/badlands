@@ -39,6 +39,11 @@ struct ErosionParams {
   int detail_octaves = 4;
   float detail_wavelength_m = 60.0f;
   float detail_amplitude_m = 2.0f;
+  // v1.3: river/stream flow texture thresholds (drainage area, m^2) — see
+  // river_intensity() below and the v1.3 addendum, "River/stream flow
+  // texture", in docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md.
+  float stream_min_area_m2 = 1500.0f;  // below this: no stream (intensity 0)
+  float river_area_m2 = 15000.0f;      // at/above this: full river (intensity 1)
 };
 
 inline constexpr int kPadTexels = 16;      // sim-grid margin, cropped on output
@@ -119,6 +124,16 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
 void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
              float texel_m);
 
+// Per-cell river/stream intensity (0..1) from final drainage area: 0 below
+// stream_min_area_m2; else smoothstep(log2(stream_min_area_m2),
+// log2(river_area_m2), log2(A)) — faint streams, saturating rivers.
+// Monotone non-decreasing in A. Exactly 0 for in_lake cells (the lake IS the
+// water; chains resume at the outlet). This is the PRE-dilation, pre-max-pool
+// per-sim-cell value (see erode()'s finalize for the width-dilated field
+// that becomes ErosionOutputs::river).
+Field2D<float> river_intensity(const FlowRouting& r, const Field2D<float>& area,
+                               const ErosionParams& p);
+
 // Debug/preview sink for the erosion sim: dumps named raster stages as the
 // loop runs. stages: "loop-height", "loop-flow", "loop-sediment" (float);
 // "loop-lakes" (uint8). Later tasks add init/output stages.
@@ -133,11 +148,17 @@ struct MapDebugSink {
 struct ErosionOutputs {
   Field2D<float> water_depth;  // m of standing water after pruning
   Field2D<float> flow;         // final drainage area (m²)
+  // v1.3: river/stream intensity (0..1), width-dilated by its own intensity
+  // (streams stay 1 sim texel, rivers widen — see erode()), forced back to 0
+  // on in_lake cells so dilation never bleeds onto the lake surface. Sim
+  // grid, pre-max-pool (generator.cpp max-pools this to MapArtifacts::river).
+  Field2D<float> river;
 };
 
 // The full sim: iterations × (route → drain → incise → deposit → diffuse),
 // then a final route to flood lakes, measure spill levels, and prune lakes
-// under min area/depth. Mutates B and S. sink may be null.
+// under min area/depth, and build the river intensity field. Mutates B and
+// S. sink may be null.
 ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
                      const ErosionParams& p, float texel_m,
                      MapDebugSink* sink);

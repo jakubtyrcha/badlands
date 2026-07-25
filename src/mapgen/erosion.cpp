@@ -369,6 +369,54 @@ void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
   }
 }
 
+Field2D<float> river_intensity(const FlowRouting& r, const Field2D<float>& area,
+                               const ErosionParams& p) {
+  Field2D<float> out(r.width, r.height, 0.0f);
+  const float lo = std::log2(std::max(p.stream_min_area_m2, 1e-6f));
+  const float hi = std::log2(std::max(p.river_area_m2, p.stream_min_area_m2 + 1e-6f));
+  for (size_t i = 0; i < out.data.size(); ++i) {
+    if (r.in_lake[i]) continue;  // the lake IS the water: stays 0
+    const float a = area.data[i];
+    if (a < p.stream_min_area_m2) continue;  // stays 0
+    out.data[i] = glm::smoothstep(lo, hi, std::log2(a));
+  }
+  return out;
+}
+
+namespace {
+
+// Splat each cell's own river intensity onto a square neighborhood whose
+// radius grows with that intensity — 0 (a single texel: a faint stream) up
+// to kRiverMaxDilationRadius (a river reads as a few-texel-wide band), so the
+// artifact looks like a texture rather than a hairline (v1.3 addendum;
+// hairline-only would be this constant set to 0). Cells keep at least their
+// own raw value; a neighbor's splat only ever raises (max), never lowers.
+constexpr int kRiverMaxDilationRadius = 1;  // sim texels
+
+Field2D<float> dilate_river(const Field2D<float>& intensity) {
+  const int w = intensity.width, h = intensity.height;
+  Field2D<float> out = intensity;
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const float t = intensity.at(x, y);
+      if (t <= 0.0f) continue;
+      const int radius =
+          static_cast<int>(std::lround(t * static_cast<float>(kRiverMaxDilationRadius)));
+      if (radius <= 0) continue;
+      const int x0 = std::max(0, x - radius), x1 = std::min(w - 1, x + radius);
+      const int y0 = std::max(0, y - radius), y1 = std::min(h - 1, y + radius);
+      for (int ny = y0; ny <= y1; ++ny)
+        for (int nx = x0; nx <= x1; ++nx) {
+          float& o = out.at(nx, ny);
+          o = std::max(o, t);
+        }
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
 namespace {
 
 // Flood the CURRENT surface and turn flooded cells into water depths, then
@@ -446,6 +494,12 @@ ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
   ErosionOutputs out;
   out.flow = accumulate_drainage(r, texel_area);
   out.water_depth = finalize_lakes(B, S, r, p, texel_m);
+  out.river = dilate_river(river_intensity(r, out.flow, p));
+  // Dilation splats from non-lake neighbors and can reach into an in_lake
+  // cell; river_intensity() already zeroed lake cells pre-dilation, so
+  // re-zero here to keep the invariant after the splat too.
+  for (size_t i = 0; i < out.river.data.size(); ++i)
+    if (r.in_lake[i]) out.river.data[i] = 0.0f;
   return out;
 }
 

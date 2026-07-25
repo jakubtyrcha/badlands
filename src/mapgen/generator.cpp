@@ -229,6 +229,9 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   a.heightmap = resample(ground);
   a.sediment = resample(S);
   a.flow = resample(sim_out.flow);
+  // v1.3: MAX-POOL, not bilinear — a thin saturated river line must survive
+  // downsampling, not smear toward 0 (see resample_max_pool's doc comment).
+  a.river = resample_max_pool(sim_out.river, texel_sim, origin_sim, w, texel_out);
 
   // water: resample the SURFACE (level where wet, ground where dry) and the
   // depth mask; recompute depth against the output ground so shorelines match
@@ -253,6 +256,7 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
     if (a.water_depth.data[i] >= kLakeStampMinDepthM)
       a.biome.data[i] = static_cast<uint8_t>(Biome::Lake);
   if (sink) {
+    sink->dump("river", seq++, a.river);
     sink->dump("final-height", seq++, a.heightmap);
     sink->dump("biome", seq++, a.biome);
   }

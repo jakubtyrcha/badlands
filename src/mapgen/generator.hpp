@@ -33,6 +33,11 @@ struct MapArtifacts {
   Field2D<float> water_depth;  // world meters — standing water; surface = heightmap + water_depth
   Field2D<float> flow;         // drainage area (m^2)
   Field2D<float> sediment;     // sediment thickness (m)
+  // v1.3: river/stream intensity, 0..1 (0 = no flow signal, 1 = saturated
+  // river); 0 inside lakes. Output res, max-pooled (not bilinear — see
+  // resample_max_pool) from the sim grid's ErosionOutputs::river so a
+  // saturated line survives downsampling instead of smearing.
+  Field2D<float> river;
 };
 
 // sink, if non-null, receives named debug rasters as generation proceeds (see

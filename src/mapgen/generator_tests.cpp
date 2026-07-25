@@ -40,6 +40,7 @@ TEST_CASE("generate_map: same params -> byte-identical artifacts") {
   REQUIRE(a.water_depth.data == b.water_depth.data);
   REQUIRE(a.flow.data == b.flow.data);
   REQUIRE(a.sediment.data == b.sediment.data);
+  REQUIRE(a.river.data == b.river.data);
 }
 
 TEST_CASE("generate_map: lakes are consistent — Lake biome iff standing water") {
@@ -294,6 +295,7 @@ TEST_CASE("generate_map: degenerate resolution yields empty artifacts, no throw"
   REQUIRE(a.water_depth.size() == 0);
   REQUIRE(a.flow.size() == 0);
   REQUIRE(a.sediment.size() == 0);
+  REQUIRE(a.river.size() == 0);
 }
 
 TEST_CASE("generate_map: degenerate sim_resolution yields empty artifacts, no throw") {
@@ -306,6 +308,7 @@ TEST_CASE("generate_map: degenerate sim_resolution yields empty artifacts, no th
   REQUIRE(a.water_depth.size() == 0);
   REQUIRE(a.flow.size() == 0);
   REQUIRE(a.sediment.size() == 0);
+  REQUIRE(a.river.size() == 0);
 }
 
 TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)") {
@@ -328,10 +331,16 @@ TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)
   REQUIRE(a.flow.height == 64);
   REQUIRE(a.sediment.width == 64);
   REQUIRE(a.sediment.height == 64);
+  REQUIRE(a.river.width == 64);
+  REQUIRE(a.river.height == 64);
 
   for (float v : a.heightmap.data) REQUIRE(std::isfinite(v));
   for (float v : a.flow.data) REQUIRE(v > 0.0f);
   for (float v : a.sediment.data) REQUIRE(v >= 0.0f);
+  for (float v : a.river.data) {
+    REQUIRE(v >= 0.0f);
+    REQUIRE(v <= 1.0f);
+  }
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
     const bool is_lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
     REQUIRE(is_lake == (a.water_depth.data[i] >= kLakeStampMinDepthM));
@@ -349,6 +358,61 @@ TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)
       REQUIRE(a.water_depth.data[i] < kLakeStampMinDepthM);
     }
   }
+}
+
+TEST_CASE("generate_map: river artifact — output-res dims, some signal, "
+          "values in [0,1]") {
+  for (uint32_t seed : {1u, 2u}) {
+    MapGenParams p;
+    p.seed = seed;
+    p.resolution = 128;
+    p.world_size_m = 512.0f;
+    p.erosion.sim_resolution = 128;
+    // production erosion defaults otherwise (thresholds, iterations)
+    const auto a = generate_map(p);
+    REQUIRE(a.river.width == p.resolution);
+    REQUIRE(a.river.height == p.resolution);
+    bool any_positive = false;
+    for (float v : a.river.data) {
+      REQUIRE(v >= 0.0f);
+      REQUIRE(v <= 1.0f);
+      if (v > 0.0f) any_positive = true;
+    }
+    REQUIRE(any_positive);
+  }
+}
+
+TEST_CASE("generate_map: river artifact — max-pool preserves saturation "
+          "across sim-vs-output resolution mismatch (crispness)") {
+  // Same seed/world/sim_resolution/erosion params in both calls — the sim
+  // itself (and its river field) is IDENTICAL regardless of the output
+  // `resolution` (only the resample target changes), so this isolates the
+  // max-pool resample step. Tiny thresholds guarantee saturation deterministically
+  // (independent of terrain-specific luck), per the v1.3 addendum's
+  // "MAX-POOL... crisp, no bilinear smear" claim.
+  MapGenParams p;
+  p.seed = 3;
+  p.world_size_m = 256.0f;
+  p.erosion.sim_resolution = 64;
+  p.erosion.iterations = 8;
+  p.erosion.stream_min_area_m2 = 20.0f;
+  p.erosion.river_area_m2 = 80.0f;
+
+  MapGenParams matched = p;
+  matched.resolution = 64;  // == sim_resolution: pool ~ identity, ground truth
+  const auto ground_truth = generate_map(matched);
+  float max_gt = 0.0f;
+  for (float v : ground_truth.river.data) max_gt = std::max(max_gt, v);
+  REQUIRE(max_gt > 0.9f);  // this scenario does saturate somewhere
+
+  MapGenParams coarse = p;
+  coarse.resolution = 16;  // much coarser output: heavy pooling
+  const auto pooled = generate_map(coarse);
+  float max_pooled = 0.0f;
+  for (float v : pooled.river.data) max_pooled = std::max(max_pooled, v);
+  // Bilinear would have diluted a thin saturated line toward its neighbors'
+  // (mostly non-saturated) values; max-pool must not.
+  REQUIRE(max_pooled > 0.9f);
 }
 
 namespace {

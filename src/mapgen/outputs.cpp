@@ -23,6 +23,38 @@ Field2D<float> log2_scaled(const Field2D<float>& f) {
     out.data[i] = std::log2(1.0f + std::max(0.0f, f.data[i]));
   return out;
 }
+
+// The judging composite: biome palette base, standing water recolored Lake
+// blue, and river/stream intensity blended toward the same blue where dry
+// (v1.3 addendum: "biome palette, lakes, rivers overlaid in water blue").
+void write_map_composite_png(const MapArtifacts& a, const std::string& path) {
+  constexpr float kRiverBlendMinIntensity = 0.05f;
+  constexpr Rgb kWaterColor = biome_color(Biome::Lake);
+  badlands::CpuImage img(static_cast<uint32_t>(a.biome.width),
+                         static_cast<uint32_t>(a.biome.height),
+                         wgpu::TextureFormat::RGBA8Unorm);
+  for (int y = 0; y < a.biome.height; ++y) {
+    for (int x = 0; x < a.biome.width; ++x) {
+      Rgb c = biome_color(static_cast<Biome>(a.biome.at(x, y)));
+      const float water = a.water_depth.at(x, y);
+      const float river = a.river.at(x, y);
+      if (water > 0.0f) {
+        c = kWaterColor;
+      } else if (river > kRiverBlendMinIntensity) {
+        const float alpha = 0.35f + 0.65f * river;
+        c.r = static_cast<uint8_t>(std::lround(
+            static_cast<float>(c.r) + (static_cast<float>(kWaterColor.r) - c.r) * alpha));
+        c.g = static_cast<uint8_t>(std::lround(
+            static_cast<float>(c.g) + (static_cast<float>(kWaterColor.g) - c.g) * alpha));
+        c.b = static_cast<uint8_t>(std::lround(
+            static_cast<float>(c.b) + (static_cast<float>(kWaterColor.b) - c.b) * alpha));
+      }
+      img.SetPixel(static_cast<uint32_t>(x), static_cast<uint32_t>(y),
+                   {c.r, c.g, c.b, 255});
+    }
+  }
+  img.WritePng(path);
+}
 }  // namespace
 
 void write_preview_images(const std::string& out_dir, const MapArtifacts& a,
@@ -34,6 +66,8 @@ void write_preview_images(const std::string& out_dir, const MapArtifacts& a,
   write_gray_png(a.water_depth, out_dir + "/water_depth.png");
   write_gray_png(log2_scaled(a.flow), out_dir + "/flow.png");
   write_gray_png(a.sediment, out_dir + "/sediment.png");
+  write_gray_png(a.river, out_dir + "/rivers.png", /*normalize=*/false);
+  write_map_composite_png(a, out_dir + "/map.png");
 }
 
 void write_gray_png(const Field2D<float>& field, const std::string& path,
@@ -129,6 +163,10 @@ void PngDebugSink::dump(std::string_view stage, int seq,
   if (sim_relief) write_hillshade_png(field, path, sim_texel_m_);
   else if (out_relief) write_hillshade_png(field, path, out_texel_m_);
   else if (flow) write_gray_png(log2_scaled(field), path);
+  // river is already 0..1 (an intensity, not an unbounded quantity) —
+  // per-image autoscale would make a faint stream read as bright as a
+  // saturated river, so plain gray with normalize=false like the mask branch.
+  else if (stage == "river") write_gray_png(field, path, /*normalize=*/false);
   else write_gray_png(field, path);
 }
 
