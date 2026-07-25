@@ -1,7 +1,8 @@
 // Instanced forward-opaque, standard-lit material. Forked from
 // standard_forward.wesl for the GPU-driven instanced-rendering feature: the
-// fragment stage (shadeStandard + shadow-map PCF + IBL + the @if(translucency)
-// transmission path) is copied verbatim; only the vertex stage + group layout
+// fragment stage (shadow-map PCF + IBL + shadeStandard assembly via the shared
+// shadeStandardForward helper + the @if(translucency) transmission path)
+// matches standard_forward.wesl's; only the vertex stage + group layout
 // change. The per-object model matrix is read per-instance from a group-1
 // storage array indexed by @builtin(instance_index); material constants (tint,
 // params, transmission) live in a group-0 UBO.
@@ -17,7 +18,7 @@ import package::common::color::srgb_to_linear;
 @if(!shadow_pass)
 import package::common::shadow_sampling::sampleShadowMapPCF;
 @if(!shadow_pass)
-import package::common::standard_lighting::{shadeStandard, computeSpecularOcclusion, F0_DIELECTRIC, evaluateTranslucency};
+import package::common::standard_lighting::{shadeStandardForward, evaluateTranslucency};
 
 // Group 0: frame UBO (@0, imported) + albedo texture + sampler + material
 // constants UBO (@3). The model matrix is NOT here — it is per-instance.
@@ -131,16 +132,8 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location
     let roughness = mat_params.params.y;
     let ao = 1.0;
 
-    // IBL split-sum ambient specular (explicit-LOD -> no derivatives).
-    let R = reflect(-V, N);
-    let NdotV = max(dot(N, V), 0.0);
-    let maxMip = f32(textureNumLevels(prefiltered_env) - 1u);
-    let prefilteredColor = textureSampleLevel(prefiltered_env, prefiltered_sampler, R, roughness * maxMip).rgb;
-    let brdfLutSample = textureSampleLevel(brdf_lut, brdf_lut_sampler, vec2<f32>(NdotV, roughness), 0.0).rg;
-    let specularScale = F0_DIELECTRIC * brdfLutSample.r + brdfLutSample.g;
-    let ambientSpecular = prefilteredColor * specularScale * computeSpecularOcclusion(NdotV, ao, roughness);
-
-    let color = shadeStandard(albedoLinear, N, V, roughness, ao, shadow, ambientSpecular);
+    let color = shadeStandardForward(albedoLinear, N, V, roughness, ao, shadow,
+        prefiltered_env, prefiltered_sampler, brdf_lut, brdf_lut_sampler);
     let transmission = transmissionContribution(N, V, ao, shadow);
     return vec4<f32>(color + transmission, 1.0);
 }

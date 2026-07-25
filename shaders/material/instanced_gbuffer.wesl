@@ -1,8 +1,9 @@
 // Instanced deferred (G-buffer) PBR material. Forked from normalmapped.wesl
-// (2D mode) for the GPU-driven instanced-rendering feature: the fragment stage
-// is copied verbatim (TBN + octahedron-encoded normals -> GBufferOutput), and
-// only the vertex stage + group layout change. The per-object model matrix is
-// read per-instance from a group-1 storage array indexed by
+// (2D mode) for the GPU-driven instanced-rendering feature: the fragment
+// stage's GBuffer assembly (TBN + octahedron-encoded normals -> GBufferOutput)
+// is shared with normalmapped.wesl via the common packNormalMappedGBuffer
+// helper; only the vertex stage + group layout change. The per-object model
+// matrix is read per-instance from a group-1 storage array indexed by
 // @builtin(instance_index); material constants (a tint) live in a group-0 UBO.
 //
 // Feature: `instanced` (pushed by MeshRenderingMaterial::BuildDeclaration for
@@ -17,7 +18,7 @@ import package::common::frame::{frame, worldSpaceToClipSpace};
 @if(shadow_pass)
 import package::common::frame::{frame, worldSpaceToWorldCameraOffsetedSpace, worldCameraOffsetedSpaceToLightClipSpace};
 @if(!shadow_pass)
-import package::common::gbuffer_encode::{GBufferOutput, encodeOctahedron};
+import package::common::gbuffer_encode::{GBufferOutput, packNormalMappedGBuffer};
 
 // Group 0: frame UBO (@0, imported) + material textures/sampler + material
 // constants UBO (@5). The model matrix is NOT here — it is per-instance.
@@ -97,30 +98,12 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
 @if(!shadow_pass)
 @fragment
 fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
-    var output: GBufferOutput;
-
-    // Reconstruct TBN matrix from interpolated vectors
-    let N = normalize(input.worldNormal);
-    let T = normalize(input.worldTangent - N * dot(input.worldTangent, N)); // Gram-Schmidt
-    let B = cross(N, T);
-    let TBN = mat3x3<f32>(T, B, N);
-
     // Sample textures
     let albedo = textureSample(albedo_texture, material_sampler, input.uv).rgb * mat_params.tint.rgb;
     let normalMap = textureSample(normal_texture, material_sampler, input.uv).rgb;
     let arm = textureSample(arm_texture, material_sampler, input.uv);
-    let roughness = arm.g;
-    let ao = arm.r;
 
-    let tangentNormal = normalMap * 2.0 - 1.0;
-    let worldNormal = normalize(TBN * tangentNormal);
-
-    output.normals = encodeOctahedron(worldNormal);
-    output.albedo = vec4<f32>(albedo, 1.0);
-    // Material: R=roughness, G=shadow (1.0 = no shadow), B=baked AO, A=reserved
-    output.material = vec4<f32>(roughness, 1.0, ao, 0.0);
-
-    return output;
+    return packNormalMappedGBuffer(input.worldNormal, input.worldTangent, albedo, normalMap, arm);
 }
 
 @if(shadow_pass)

@@ -37,6 +37,25 @@ fn shadeStandard(albedoLinear: vec3<f32>, N: vec3<f32>, V: vec3<f32>,
     return directLighting + indirectLighting;
 }
 
+// Forward-opaque materials' full lighting assembly: IBL split-sum ambient
+// specular (explicit-LOD, no implicit derivatives -> safe after a non-uniform
+// discard) followed by shadeStandard. Shared by standard_forward.wesl and
+// instanced_forward.wesl, which sample identical prefiltered-env + BRDF-LUT
+// textures from their own (differently-laid-out) bind groups and pass them in.
+fn shadeStandardForward(albedoLinear: vec3<f32>, N: vec3<f32>, V: vec3<f32>,
+                        roughness: f32, ao: f32, shadow: f32,
+                        prefiltered_env: texture_cube<f32>, prefiltered_sampler: sampler,
+                        brdf_lut: texture_2d<f32>, brdf_lut_sampler: sampler) -> vec3<f32> {
+    let R = reflect(-V, N);
+    let NdotV = max(dot(N, V), 0.0);
+    let maxMip = f32(textureNumLevels(prefiltered_env) - 1u);
+    let prefilteredColor = textureSampleLevel(prefiltered_env, prefiltered_sampler, R, roughness * maxMip).rgb;
+    let brdfLutSample = textureSampleLevel(brdf_lut, brdf_lut_sampler, vec2<f32>(NdotV, roughness), 0.0).rg;
+    let specularScale = F0_DIELECTRIC * brdfLutSample.r + brdfLutSample.g;
+    let ambientSpecular = prefilteredColor * specularScale * computeSpecularOcclusion(NdotV, ao, roughness);
+    return shadeStandard(albedoLinear, N, V, roughness, ao, shadow, ambientSpecular);
+}
+
 const kPhasePower: f32 = 4.0;  // forward-scatter lobe sharpness (flare)
 
 // Thin-slab diffuse transmission (subsurface look): light entering the far side

@@ -14,7 +14,7 @@ import package::common::color::srgb_to_linear;
 @if(!shadow_pass)
 import package::common::shadow_sampling::sampleShadowMapPCF;
 @if(!shadow_pass)
-import package::common::standard_lighting::{shadeStandard, computeSpecularOcclusion, F0_DIELECTRIC, evaluateTranslucency};
+import package::common::standard_lighting::{shadeStandardForward, evaluateTranslucency};
 
 @group(0) @binding(1) var albedo_texture: texture_2d<f32>;
 @group(0) @binding(2) var material_sampler: sampler;
@@ -107,16 +107,8 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location
     let roughness = object.params.y;
     let ao = 1.0;
 
-    // IBL split-sum ambient specular (explicit-LOD -> no derivatives).
-    let R = reflect(-V, N);
-    let NdotV = max(dot(N, V), 0.0);
-    let maxMip = f32(textureNumLevels(prefiltered_env) - 1u);
-    let prefilteredColor = textureSampleLevel(prefiltered_env, prefiltered_sampler, R, roughness * maxMip).rgb;
-    let brdfLutSample = textureSampleLevel(brdf_lut, brdf_lut_sampler, vec2<f32>(NdotV, roughness), 0.0).rg;
-    let specularScale = F0_DIELECTRIC * brdfLutSample.r + brdfLutSample.g;
-    let ambientSpecular = prefilteredColor * specularScale * computeSpecularOcclusion(NdotV, ao, roughness);
-
-    let color = shadeStandard(albedoLinear, N, V, roughness, ao, shadow, ambientSpecular);
+    let color = shadeStandardForward(albedoLinear, N, V, roughness, ao, shadow,
+        prefiltered_env, prefiltered_sampler, brdf_lut, brdf_lut_sampler);
     let transmission = transmissionContribution(N, V, ao, shadow);
     return vec4<f32>(color + transmission, 1.0);
 }
