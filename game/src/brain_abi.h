@@ -24,8 +24,10 @@
 // order. This is a breaking wire bump (BL_ABI_VERSION 2 -> 3): BlViewWire
 // gains the attack-loadout block below (a brain cannot pick an attack it
 // cannot see) and the import allowlist grows by one entry. Behavior-neutral
-// this slice: nothing yet calls bl_enqueue_action or drains what it
-// receives -- see wasm_brain.cpp's WasmBrainRuntime::pending_actions.
+// in practice: tick_wasm_brain drains every wake's calls through
+// resolve_action (game/src/intention.h -- wasm_brain.cpp's
+// WasmBrainRuntime::pending_actions is the sink), but nothing calls
+// bl_enqueue_action yet -- hero.nim declares the import and never uses it.
 //
 // Plain C, includable from both C++ (game/) and generated bindings. There is
 // a hand-mirrored copy of every struct below in scripts/brains/nim/abi.nim --

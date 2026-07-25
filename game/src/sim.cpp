@@ -84,9 +84,15 @@ bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
 
     // If an attack is usable right now, emit an Attack command. Target UINT32_MAX
     // => the handler re-picks the nearest enemy. Off-cooldown gating keeps this to
-    // ~one command per swing rather than one per tick.
+    // ~one command per swing rather than one per tick. param_a = -1, EXPLICIT:
+    // this is the legacy auto-pick path (fire_attack re-picks via select_attack
+    // at apply time, combat.h) -- Command::param_a's own default is 0, which as
+    // of the explicit-index Attack plumbing (game/src/intention.h's
+    // resolve_action) means "exactly attack index 0", so leaving this implicit
+    // would silently pin every combat_preempt swing to attack 0 instead of
+    // auto-picking.
     if (select_attack(game, self, target) >= 0) {
-        game.command_queue.push_back({CommandKind::Attack, slot});
+        game.command_queue.push_back({CommandKind::Attack, slot, UINT32_MAX, {0.0f, 0.0f}, -1});
     }
     return true;
 }

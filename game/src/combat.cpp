@@ -117,18 +117,28 @@ float engagement_range(const Combatant& stats, const Attacks& atk) {
     return m > 0.0f ? m : rg;  // close to melee (bow reach if no melee)
 }
 
+bool attack_usable(const Attacks& atk, int idx, float dist, bool melee_locked) {
+    if (idx < 0 || idx >= atk.count || idx >= kMaxAttacks) {
+        return false;  // out of bounds -- covers a stale/adversarial index too
+    }
+    const Attack& a = atk.defs[idx];
+    if (atk.cooldown_remaining[idx] > 0.0f) {
+        return false;  // still recovering
+    }
+    if (dist > a.range) {
+        return false;  // out of reach
+    }
+    if (melee_locked && a.category == AttackCategory::Ranged) {
+        return false;  // no ranged attacks while locked in melee
+    }
+    return true;
+}
+
 int pick_attack(const Attacks& atk, float dist, bool melee_locked) {
     int best = -1;
     for (int i = 0; i < atk.count && i < kMaxAttacks; ++i) {
-        const Attack& a = atk.defs[i];
-        if (atk.cooldown_remaining[i] > 0.0f) {
-            continue;  // still recovering
-        }
-        if (dist > a.range) {
-            continue;  // out of reach
-        }
-        if (melee_locked && a.category == AttackCategory::Ranged) {
-            continue;  // no ranged attacks while locked in melee
+        if (!attack_usable(atk, i, dist, melee_locked)) {
+            continue;
         }
         if (best == -1) {
             best = i;
@@ -136,7 +146,7 @@ int pick_attack(const Attacks& atk, float dist, bool melee_locked) {
         }
         // Prefer a ranged attack when free to take it (a melee-stance unit still
         // opens with a shot while closing); otherwise keep the first usable.
-        const bool cur_ranged = a.category == AttackCategory::Ranged;
+        const bool cur_ranged = atk.defs[i].category == AttackCategory::Ranged;
         const bool best_ranged = atk.defs[best].category == AttackCategory::Ranged;
         if (cur_ranged && !best_ranged) {
             best = i;
@@ -185,7 +195,8 @@ int select_attack(const BadlandsGame& game, entt::entity self, entt::entity targ
     return pick_attack(atk, dist, reg.all_of<MeleeLock>(self));
 }
 
-void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slot) {
+void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slot,
+                 int32_t attack_index) {
     entt::registry& reg = game.registry;
     entt::entity self = entity_for_slot(game, static_cast<int32_t>(attacker_slot));
     if (self == entt::null) {
@@ -203,7 +214,26 @@ void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slo
         !reg.all_of<Health, Combatant, Position>(target)) {
         return;
     }
-    const int idx = select_attack(game, self, target);
+    int idx;
+    if (attack_index < 0) {
+        idx = select_attack(game, self, target);  // legacy auto-pick
+    } else {
+        // Explicit pick: the authoritative re-check (this function's own doc
+        // comment) -- re-validate exactly this index against the world AS IT
+        // STANDS NOW, via the same per-index check pick_attack's scan uses
+        // (attack_usable, combat.h), rather than trusting whoever chose it a
+        // moment earlier (resolve_action, game/src/intention.h). This is what
+        // makes in-batch self-invalidation work: a second queued Attack
+        // command naming the same index this tick finds it already on
+        // cooldown here and silently no-ops, exactly like an unusable
+        // auto-pick would.
+        const float dist =
+            glm::distance(reg.get<Position>(self).pos, reg.get<Position>(target).pos);
+        const Attacks& loadout = reg.get<Attacks>(self);
+        idx = attack_usable(loadout, attack_index, dist, reg.all_of<MeleeLock>(self))
+                  ? attack_index
+                  : -1;
+    }
     if (idx < 0) {
         return;  // out of range / on cooldown / ranged while melee-locked
     }

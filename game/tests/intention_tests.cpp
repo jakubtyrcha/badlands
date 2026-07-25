@@ -7,6 +7,7 @@
 // apply_intention (wasm_brain.cpp) -- see docs/design/intention-contract.html
 // for the contract these mirror.
 
+#include "brain_abi.h"        // BL_ACT_*
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
@@ -846,4 +847,214 @@ TEST_CASE(
     replay.world_millis = 2000;
     apply_replay_commands(replay);
     CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 2900);
+}
+
+// --- action resolver: resolve_action / BL_ACT_ATTACK (v3, contract-v3-
+// alignment) -- inert this slice: nothing but these tests and
+// tick_wasm_brain's own (empty in practice) drain loop calls it.
+// docs/superpowers/specs/2026-07-25-contract-v3-alignment-design.md.
+
+namespace {
+
+// A melee(0)/ranged(1) loadout, both off cooldown and in range of a target at
+// distance 1.0. Deliberately the OPPOSITE index order from combat_tests.cpp's
+// bow_and_blade() (ranged first there): pick_attack/select_attack's own
+// auto-pick tie-break prefers ranged when unlocked, so a test that confuses
+// "index 0" with "whatever auto-pick would have chosen" notices here --
+// exactly the seam risk this task's producers (sim.cpp's combat_preempt,
+// this file's own IntentionKind::Attack/Shoot cases) had to be fixed for
+// (Command::param_a's 0 default is now a load-bearing "use exactly attack
+// 0" unless a producer says -1 explicitly).
+Attacks blade_and_bow() {
+    Attacks a{};
+    a.count = 2;
+    a.defs[0] = Attack{AttackCategory::Melee, DamageType::Slashing, 4.0f, 1.5f, 1.0f, 0.0f};
+    a.defs[1] = Attack{AttackCategory::Ranged, DamageType::Piercing, 5.0f, 6.0f, 1.0f, 0.0f};
+    return a;
+}
+
+}  // namespace
+
+TEST_CASE("resolve_action drops reserved and unrecognized action kinds", "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));
+
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_NONE, t, 0}));
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_USE_SKILL, t, 0}));
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_USE_POTION, t, 0}));
+    CHECK_FALSE(resolve_action(g, s, AgentAction{999, t, 0}));  // unrecognized -- forward-compat
+    CHECK(g.command_queue.empty());
+}
+
+TEST_CASE("resolve_action drops an on-cooldown attack: warn, false, no command queued",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));  // within the Mercenary's 1.5 melee range
+    entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se).cooldown_remaining[0] = 0.5f;  // still recovering
+
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/0}));
+    CHECK(g.command_queue.empty());
+}
+
+TEST_CASE("resolve_action drops an attack index outside [0, Attacks.count)",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));  // exactly one attack: index 0
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));
+
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/1}));   // no index 1
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/-1}));  // negative
+    CHECK(g.command_queue.empty());
+}
+
+TEST_CASE("resolve_action drops a Ranged attack while the actor is melee-locked",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = blade_and_bow();
+    g.registry.emplace<MeleeLock>(se);
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));  // within both attacks' range
+
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/1}));  // ranged: locked out
+    CHECK(g.command_queue.empty());
+
+    // The melee attack (index 0) is still legal under the same lock.
+    CHECK(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/0}));
+}
+
+TEST_CASE("resolve_action drops a named target_slot that names no live entity",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, /*target_slot=*/999, /*arg=*/0}));
+    CHECK(g.command_queue.empty());
+}
+
+TEST_CASE("resolve_action drops an out-of-range target", "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t t = spawn_into(g, GoblinDesc(10.0f, 0.0f));  // past the Mercenary's 1.5 melee range
+
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/0}));
+    CHECK(g.command_queue.empty());
+}
+
+TEST_CASE("resolve_action: UINT32_MAX target resolves via the actor's running Attack intention",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));
+    entt::entity se = g.slots[s];
+    g.registry.get<CurrentIntention>(se).kind = IntentionKind::Attack;
+
+    CHECK(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, UINT32_MAX, /*arg=*/0}));
+    REQUIRE(g.command_queue.size() == 1);
+    const Command& c = g.command_queue.back();
+    CHECK(c.kind == CommandKind::Attack);
+    CHECK(c.actor == s);
+    CHECK(c.target_id == t);  // resolved to the live enemy, never left as UINT32_MAX
+    CHECK(c.param_a == 0);
+}
+
+TEST_CASE("resolve_action drops a UINT32_MAX target when no Attack intention is running",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    spawn_into(g, GoblinDesc(1.0f, 0.0f));  // a live enemy exists -- but nothing to infer it from
+
+    // CurrentIntention.kind defaults to None (the spawn default).
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, UINT32_MAX, /*arg=*/0}));
+    CHECK(g.command_queue.empty());
+}
+
+TEST_CASE("resolve_action's pushed command carries the EXPLICIT index, not the auto-preferred one",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = blade_and_bow();  // unlocked: auto-pick would prefer index 1
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));  // in range of both
+
+    CHECK(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/0}));  // explicit: the melee one
+    REQUIRE(g.command_queue.size() == 1);
+    CHECK(g.command_queue.back().param_a == 0);
+
+    apply_commands(g);
+    // Melee fired immediately (no projectile); the ranged attack's own
+    // cooldown is untouched -- proof fire_attack used exactly index 0, not
+    // whichever attack auto-pick would have preferred.
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] > 0.0f);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] == 0.0f);
+    CHECK(g.registry.view<Projectile>().size() == 0);
+}
+
+TEST_CASE("resolve_action: two ATTACK actions in one wake -- the second no-ops once the first's "
+          "cooldown lands",
+          "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));
+    entt::entity se = g.slots[s];
+    entt::entity te = g.slots[t];
+
+    // Force the hit gates open so the ONLY thing under test is the cooldown
+    // re-check, not whether a probabilistic roll happened to land.
+    g.registry.get<Combatant>(se).accuracy = 1.0f;
+    Combatant& tc = g.registry.get<Combatant>(te);
+    tc.evasion = 0.0f;
+    tc.defense = 0.0f;
+    tc.armour = 0.0f;
+    g.registry.get<Attacks>(se).defs[0].crit_chance = 0.0f;
+    const float hp0 = g.registry.get<Health>(te).hp;
+    const float base_damage = g.registry.get<Attacks>(se).defs[0].base_damage;
+
+    AgentAction action{BL_ACT_ATTACK, t, /*arg=*/0};
+    // Both resolve successfully at resolve time: resolve_action only enqueues
+    // (its own doc comment) -- the registry is unchanged between the two
+    // calls, so both see the SAME pre-batch "ready" state.
+    CHECK(resolve_action(g, s, action));
+    CHECK(resolve_action(g, s, action));
+    REQUIRE(g.command_queue.size() == 2);
+
+    apply_commands(g);  // fire_attack is the authoritative re-check, FIFO order
+
+    // Exactly one hit landed -- the second command's explicit-index
+    // re-validation (fire_attack, combat.h) found the cooldown the first one
+    // set and silently dropped, rather than firing twice.
+    CHECK(g.registry.get<Health>(te).hp == Catch::Approx(hp0 - base_damage));
+}
+
+TEST_CASE("resolve_action never touches CurrentIntention, valid or invalid", "[intention][action]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t s = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));
+    entt::entity se = g.slots[s];
+
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(se);
+    ci.kind = IntentionKind::Idle;
+    ci.wake_at_millis = 42424242;
+
+    CHECK(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/0}));  // valid -> fires
+    CHECK(ci.kind == IntentionKind::Idle);
+    CHECK(ci.wake_at_millis == 42424242);
+
+    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_USE_SKILL, t, /*arg=*/0}));  // invalid -> drops
+    CHECK(ci.kind == IntentionKind::Idle);
+    CHECK(ci.wake_at_millis == 42424242);
 }

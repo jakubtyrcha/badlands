@@ -66,9 +66,10 @@ void forward_log(int32_t level, const uint8_t* msg, size_t len, void* /*user*/) 
 // WasmBrainRuntime* fixed at bh_instantiate time (see WasmBrainRuntime::create
 // below) -- stable for the instance's whole lifetime, so this cast is safe
 // regardless of which wake's bh_tick call is currently in progress.
-// Behavior-neutral this slice (Task 1): hero.nim declares but never calls
+// Behavior-neutral in practice: hero.nim declares but never calls
 // bl_enqueue_action, so this never actually runs against the shipping brain
-// yet; nothing drains pending_actions either (Task 2's action resolver).
+// yet -- tick_wasm_brain drains pending_actions through resolve_action
+// (Task 2's action resolver, game/src/intention.h) once it does.
 void forward_action(int32_t kind, uint32_t target_slot, int32_t arg, void* user) {
     auto* runtime = static_cast<WasmBrainRuntime*>(user);
     runtime->pending_actions.push_back(PendingAction{kind, target_slot, arg});
@@ -405,8 +406,10 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // Cleared before every bh_tick so, by the time it returns, pending_actions
     // holds exactly this wake's bl_enqueue_action calls (forward_action
     // appends into it during the call below) -- never a stale carry-over from
-    // a previous slot's wake or a previous tick's. Nothing reads/drains this
-    // yet (Task 2's action resolver); v3 behavior-neutral this slice.
+    // a previous slot's wake or a previous tick's. Drained below, after the
+    // suggestion is decoded/adopted (the action-resolver loop, this
+    // function's tail) -- v3 behavior-neutral in practice this slice, since
+    // hero.nim never calls bl_enqueue_action yet.
     runtime.pending_actions.clear();
 
     BlSuggestionWire out{};
@@ -435,6 +438,19 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // its own doc comment for why the two are split.
     const bool adopted = apply_intention(game, slot, *intent);
     note_think_outcome(game, slot, adopted);
+
+    // v3 action channel: drain THIS wake's bl_enqueue_action calls, in call
+    // order, through resolve_action (game/src/intention.h) -- the same
+    // gateway a future simple/engine-side brain would call. Soft convention,
+    // not enforced here: multiple actions are allowed per wake, and an
+    // invalid one warns + drops without touching the suggestion just
+    // adopted above (resolve_action never touches CurrentIntention) or the
+    // rest of this batch. Inert in practice this slice: hero.nim declares
+    // but never calls bl_enqueue_action (Task 1 neutrality), so
+    // pending_actions is always empty here for now.
+    for (const PendingAction& action : runtime.pending_actions) {
+        resolve_action(game, slot, AgentAction{action.kind, action.target_slot, action.arg});
+    }
 }
 
 }  // namespace badlands

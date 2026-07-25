@@ -1,9 +1,11 @@
 #include "intention.h"
 
 #include "badlands_sim.hpp"  // BuildingKind
+#include "brain_abi.h"       // BL_ACT_*
+#include "combat.h"          // attack_usable, select_target
 #include "command.h"         // CommandKind, Command, enqueue_move_to, enqueue_set_behavior
 #include "components.h"
-#include "game_state.h"      // BadlandsGame, entity_for_slot
+#include "game_state.h"      // BadlandsGame, entity_for_slot, slot_for_entity
 #include "movement.h"        // kArriveRadius
 #include "placement.h"       // nearest_building_of, PlacementState
 
@@ -71,8 +73,12 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
         case IntentionKind::Attack:
             // Actor-only: melee whatever this hero is already engaged with.
             // UINT32_MAX -> fire_attack picks the nearest enemy, same as
-            // every other producer that names none.
-            game.command_queue.push_back({CommandKind::Attack, slot, UINT32_MAX});
+            // every other producer that names none. param_a = -1 (explicit,
+            // not Command::param_a's own 0 default): this is the legacy
+            // auto-pick path (fire_attack, combat.h), not a choice of a
+            // specific attack index -- resolve_action (above) is the only
+            // producer that ever names one.
+            game.command_queue.push_back({CommandKind::Attack, slot, UINT32_MAX, {0.0f, 0.0f}, -1});
             break;
 
         case IntentionKind::Shoot: {
@@ -81,7 +87,9 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
                              intent.target_slot);
                 return false;
             }
-            game.command_queue.push_back({CommandKind::Attack, slot, intent.target_slot});
+            // param_a = -1: same auto-pick reasoning as the Attack case above.
+            game.command_queue.push_back(
+                {CommandKind::Attack, slot, intent.target_slot, {0.0f, 0.0f}, -1});
             break;
         }
 
@@ -192,6 +200,71 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     ci.arg = (intent.kind == IntentionKind::Enter) ? intent.arg : 0;
     ci.started_at_millis = game.world_millis;
     ci.wake_at_millis = deadline > 0 ? game.world_millis + deadline : 0;
+    return true;
+}
+
+bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action) {
+    if (action.kind != BL_ACT_ATTACK) {
+        // BL_ACT_NONE, the reserved USE_SKILL/USE_POTION, and anything
+        // unrecognized all land here -- forward-compat posture, same as
+        // decode_suggestion's unknown-intention-kind case (wasm_brain.cpp).
+        spdlog::warn("[action] slot {}: kind {} is reserved or unrecognized, dropped", slot,
+                     action.kind);
+        return false;
+    }
+
+    entt::registry& reg = game.registry;
+    entt::entity actor = entity_for_slot(game, static_cast<int32_t>(slot));
+    const Attacks* atk = (actor != entt::null) ? reg.try_get<Attacks>(actor) : nullptr;
+    if (atk == nullptr || !reg.all_of<Position>(actor)) {
+        spdlog::warn("[action] slot {}: BL_ACT_ATTACK from a slot with no live/armed actor, "
+                     "dropped", slot);
+        return false;
+    }
+    if (action.arg < 0 || action.arg >= atk->count) {
+        spdlog::warn("[action] slot {}: BL_ACT_ATTACK index {} out of range (count {}), dropped",
+                     slot, action.arg, atk->count);
+        return false;
+    }
+
+    // Target resolution: a named slot must be a live entity; UINT32_MAX only
+    // resolves while the actor is ALREADY mid-Attack (melee whatever it's
+    // engaged with -- the same actor-only contract apply_intention's own
+    // Attack case documents, above). A live select_target scan, not the
+    // per-tick nearest_enemy_scratch cache (game_state.h) -- this can be
+    // called from a context that cache was never populated for (a direct
+    // test, or a future simple brain outside sim.cpp's think loop).
+    entt::entity target = entt::null;
+    uint32_t resolved_target_slot = UINT32_MAX;
+    if (action.target_slot != UINT32_MAX) {
+        target = entity_for_slot(game, static_cast<int32_t>(action.target_slot));
+        resolved_target_slot = action.target_slot;
+    } else {
+        const auto* ci = reg.try_get<CurrentIntention>(actor);
+        if (ci == nullptr || ci->kind != IntentionKind::Attack) {
+            spdlog::warn("[action] slot {}: BL_ACT_ATTACK names no target and has no running "
+                         "Attack intention to infer one from, dropped", slot);
+            return false;
+        }
+        target = select_target(game, actor);
+        resolved_target_slot = slot_for_entity(game, target);
+    }
+    if (target == entt::null) {
+        spdlog::warn("[action] slot {}: BL_ACT_ATTACK target_slot {} names no live entity, "
+                     "dropped", slot, action.target_slot);
+        return false;
+    }
+
+    const float dist =
+        glm::distance(reg.get<Position>(actor).pos, reg.get<Position>(target).pos);
+    if (!attack_usable(*atk, action.arg, dist, reg.all_of<MeleeLock>(actor))) {
+        spdlog::warn("[action] slot {}: attack {} not usable right now (cooldown/range/lock), "
+                     "dropped", slot, action.arg);
+        return false;
+    }
+
+    game.command_queue.push_back(
+        {CommandKind::Attack, slot, resolved_target_slot, {0.0f, 0.0f}, action.arg});
     return true;
 }
 

@@ -67,7 +67,11 @@ static_assert(static_cast<int32_t>(CommandKind::Chat) ==
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional
 // commands; `param_a`/`param_b` carry kind-specific scalars (e.g. building kind
-// + rotation for PlaceBuilding, building kind for EnterBuilding).
+// + rotation for PlaceBuilding, building kind for EnterBuilding; for Attack,
+// param_a is the attack index -- -1 = the legacy auto-pick every producer but
+// resolve_action (game/src/intention.h) still uses; NOTE param_a's own default
+// is 0, a VALID index, so an Attack producer that wants auto-pick must say -1
+// explicitly, never leave this at its default).
 struct Command {
     CommandKind kind;
     uint32_t actor = UINT32_MAX;

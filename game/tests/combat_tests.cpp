@@ -336,6 +336,70 @@ TEST_CASE("a projectile fizzles when its target dies mid-flight", "[combat]") {
     CHECK(g.registry.view<Projectile>().size() == 0);  // despawned, no crash
 }
 
+namespace {
+
+// A melee(0)/ranged(1) loadout -- the OPPOSITE index order from
+// bow_and_blade() above, deliberately: pick_attack/select_attack's auto-pick
+// prefers ranged when unlocked, so this is the loadout that actually
+// distinguishes "index 0" from "whatever the auto-pick chose" (the seam
+// game/src/intention.h's resolve_action and this task's producer fixes
+// depend on -- Command::param_a's own 0 default is a VALID index).
+Attacks blade_then_bow() {
+    Attacks a{};
+    a.count = 2;
+    a.defs[0] = Attack{AttackCategory::Melee, DamageType::Slashing, 4.0f, 1.5f, 1.0f, 0.0f};
+    a.defs[1] = Attack{AttackCategory::Ranged, DamageType::Piercing, 5.0f, 6.0f, 1.0f, 0.0f};
+    return a;
+}
+
+}  // namespace
+
+TEST_CASE("fire_attack: -1 still auto-picks (prefers ranged); an explicit index fires exactly "
+          "that attack",
+          "[combat]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t s = spawn_shooter(g);  // accuracy 1.0, one ranged attack by default
+    const entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = blade_then_bow();
+    const uint32_t t = spawn_dummy(g, 1.0f, 1);  // within range of both attacks
+
+    // -1 (the legacy/compat path, e.g. combat_preempt's own producer):
+    // auto-picks via select_attack, which prefers ranged (index 1) when
+    // unlocked -- a projectile spawns, index 0's cooldown is untouched.
+    fire_attack(g, s, t, -1);
+    CHECK(g.registry.view<Projectile>().size() == 1);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] > 0.0f);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] == 0.0f);
+    g.registry.destroy(*g.registry.view<Projectile>().begin());
+    g.registry.get<Attacks>(se).cooldown_remaining[1] = 0.0f;  // reset for the next call
+
+    // Explicit index 0: fires the melee attack exactly, even though ranged
+    // (index 1) is what auto-pick would have preferred.
+    fire_attack(g, s, t, 0);
+    CHECK(g.registry.view<Projectile>().size() == 0);  // melee resolves immediately, no projectile
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] > 0.0f);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] == 0.0f);  // ranged untouched
+}
+
+TEST_CASE("fire_attack: an explicit index re-validates range/cooldown/lock and no-ops if unusable",
+          "[combat]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t s = spawn_shooter(g);
+    const entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = blade_then_bow();
+    g.registry.emplace<MeleeLock>(se);  // locked: index 1 (Ranged) becomes illegal
+    const uint32_t t = spawn_dummy(g, 1.0f, 1);
+    const entt::entity te = g.slots[t];
+    const float hp0 = g.registry.get<Health>(te).hp;
+
+    fire_attack(g, s, t, /*attack_index=*/1);  // explicit, but Ranged-while-locked
+    CHECK(g.registry.view<Projectile>().size() == 0);  // no-op: never fired
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] == 0.0f);  // untouched
+    CHECK(g.registry.get<Health>(te).hp == hp0);
+}
+
 TEST_CASE("the arena's blocked edges refuse a step past the wall", "[combat]") {
     WorldConfig cfg;
     cfg.terrain_blocking = false;

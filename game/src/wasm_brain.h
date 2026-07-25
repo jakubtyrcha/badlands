@@ -43,9 +43,11 @@ namespace badlands {
 // One bl_enqueue_action call (brain_abi.h's BL_ACT_* vocabulary), captured in
 // the order the guest made it -- {kind, target_slot, arg} 1:1 with the
 // BhActionFn callback's own parameters (src/crates/brainhost/include/
-// brainhost.h). v3, behavior-neutral this slice: hero.nim declares but never
-// calls bl_enqueue_action, so `pending_actions` below is always empty in
-// practice for now; nothing drains it yet (Task 2's action resolver).
+// brainhost.h), and 1:1 with intention.h's AgentAction (tick_wasm_brain
+// converts one to the other before calling resolve_action). Behavior-neutral
+// in practice: hero.nim declares but never calls bl_enqueue_action, so
+// `pending_actions` below is always empty for now, even though
+// tick_wasm_brain drains it every wake (Task 2's action resolver).
 struct PendingAction {
     int32_t kind;
     uint32_t target_slot;
@@ -61,8 +63,9 @@ struct WasmBrainRuntime {
     // (level 0/1/2 -> info/warn/error; anything else -> warn), plus an action
     // callback (forward_action, wasm_brain.cpp) that appends every
     // bl_enqueue_action call into this runtime's own pending_actions, in call
-    // order (v3; nothing drains it yet this slice -- Task 2's action
-    // resolver). A bh_load/bh_instantiate failure is FATAL (routes through
+    // order (drained every wake by tick_wasm_brain through resolve_action,
+    // game/src/intention.h -- Task 2's action resolver). A bh_load/
+    // bh_instantiate failure is FATAL (routes through
     // brain_fatal, stage "load"/"instantiate") -- this never returns null; a
     // caller (sim.cpp's make_world) only reaches the next line with a live
     // runtime, or the process has already aborted.
@@ -89,8 +92,8 @@ struct WasmBrainRuntime {
     // (bh_instantiate's own contract), so it points at this runtime rather
     // than at any one wake's stack frame; tick_wasm_brain clears this vector
     // before every bh_tick call, so by the time bh_tick returns it holds
-    // exactly (only) that wake's enqueues. Task 2's action resolver is the
-    // first reader; nothing drains it yet this slice.
+    // exactly (only) that wake's enqueues, and drains it through
+    // resolve_action (game/src/intention.h) right after, in the same order.
     std::vector<PendingAction> pending_actions;
 };
 
@@ -148,7 +151,9 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
 // copied from EventInbox) -> bh_tick -> on BH_OK, decode_suggestion the
 // returned BlSuggestionWire (above) and, if it passes the wire trust
 // boundary, apply_intention (intention.h) -- the same seam a test driving
-// apply_intention directly uses.
+// apply_intention directly uses -- then note_think_outcome, then drain this
+// wake's pending_actions (the callback-filled vector, above) through
+// resolve_action (intention.h), in call order.
 //
 // Fail-fast (see the policy note atop this header): bh_spawn/bh_tick
 // returning nonzero, or decode_suggestion rejecting the wire, all route

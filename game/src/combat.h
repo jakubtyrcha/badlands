@@ -62,11 +62,21 @@ float ranged_range(const Attacks& atk);
 // category's reach when the preferred one is absent.
 float engagement_range(const Combatant& stats, const Attacks& atk);
 
+// PURE single-attack usability check: can atk.defs[idx] be used right now
+// against a target at `dist`? In bounds, off cooldown, in range, and legal
+// under a melee lock (no Ranged attack while locked). The one definition of
+// "can I use attack i right now" -- pick_attack's scan (below) calls it per
+// candidate, and so does anything that already knows WHICH index it wants
+// and only needs to re-validate that one (fire_attack's explicit-index path,
+// resolve_action's resolve-time validation, game/src/intention.h) rather
+// than re-deriving the same four checks independently.
+bool attack_usable(const Attacks& atk, int idx, float dist, bool melee_locked);
+
 // PURE attack chooser: index into atk.defs of the attack to use against a target
 // at `dist`, or -1 if none is usable. Considers only off-cooldown attacks whose
 // range covers the target; excludes ranged attacks while melee-locked; prefers a
 // ranged attack when not locked (a melee-stance unit still fires a ranged opener
-// while closing).
+// while closing). Built on attack_usable, above, one candidate at a time.
 int pick_attack(const Attacks& atk, float dist, bool melee_locked);
 
 // The "pick the enemy" contract -- returns nearest_enemy today, the one place a
@@ -75,12 +85,25 @@ entt::entity select_target(const BadlandsGame& game, entt::entity self);
 
 // Resolve one attack by `attacker_slot` against `target_slot` right now: the
 // single entry point the Attack command handler calls. Authoritative -- it
-// re-picks the attack (select_attack), re-validates, sets the attack's cooldown,
-// and either applies melee damage immediately or spawns a projectile. A
-// target_slot of UINT32_MAX means "engine picks the nearest enemy" (select_target),
-// so mock/scripted brains can say only "attack" while the hunter names its prey.
-// No-op if nothing is usable.
-void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slot);
+// picks the attack, re-validates, sets the attack's cooldown, and either
+// applies melee damage immediately or spawns a projectile. A target_slot of
+// UINT32_MAX means "engine picks the nearest enemy" (select_target), so
+// mock/scripted brains can say only "attack" while the hunter names its
+// prey. No-op if nothing is usable.
+//
+// `attack_index` picks WHICH attack: >= 0 fires exactly that index, re-
+// validated here (attack_usable, above -- range/cooldown/lock) rather than
+// trusted from whoever chose it (resolve_action, game/src/intention.h,
+// validated it too, but the world may have moved on since -- this is the
+// authoritative re-check, same discipline as the target itself). -1 is the
+// legacy auto-pick: select_attack chooses for the caller, preserved for
+// command-log compatibility with producers that still say only "attack"
+// (combat_preempt, apply_intention's Attack/Shoot cases -- explicit -1, not
+// Command::param_a's own 0 default, which as of the explicit-index plumbing
+// means "exactly attack 0"). No producer emits -1 for a wasm-driven agent's
+// OWN swings once resolve_action is wired in (a later slice).
+void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slot,
+                 int32_t attack_index = -1);
 
 // Attack index (into the actor's Attacks) to use against `target` right now, or
 // -1. Wraps pick_attack with the live distance + melee-lock state.

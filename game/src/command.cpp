@@ -113,9 +113,12 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
         case CommandKind::Attack: {
             // Resolve one attack against the commanded target (UINT32_MAX => the
             // engine picks the nearest enemy). fire_attack is authoritative: it
-            // re-validates range/cooldown/lock and chooses the attack. Melee lands
-            // now; a ranged attack spawns a projectile that resolves on arrival.
-            fire_attack(game, cmd.actor, cmd.target_id);
+            // re-validates range/cooldown/lock and chooses the attack -- explicitly
+            // via cmd.param_a when a producer named one (resolve_action, game/src/
+            // intention.h; -1 = the legacy auto-pick every other producer still
+            // uses). Melee lands now; a ranged attack spawns a projectile that
+            // resolves on arrival.
+            fire_attack(game, cmd.actor, cmd.target_id, cmd.param_a);
             return 0;
         }
         case CommandKind::CollectTax: {
