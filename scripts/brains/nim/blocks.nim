@@ -115,20 +115,30 @@ proc scoreChat*(v: HeroView, f: BlViewFactors): float32 =
 
 proc actChat*(v: HeroView, f: BlViewFactors): Suggestion =
   if v.chatting:
-    # Nothing NEW to decide: the conversation runs to its own clock
-    # (ChattingState + advance_chats, engine-side), and observe_hero never
-    # populates partner_slot while already chatting (v.chatting excludes the
-    # nearest_companion scan), so there is no valid target to re-suggest Chat
-    # with even if we wanted to. BL_INT_IDLE here (not BL_INT_NONE) is
-    # deliberate, not a mistake: apply_intention's BL_INT_NONE path leaves
-    # CurrentIntention untouched entirely, including its wake_at_millis --
-    # which would leave a chatting hero's wake schedule stuck at whatever it
-    # was BEFORE the conversation started, so once that deadline passed it
-    # would re-wake the brain every single tick for as long as the chat
-    # continues. Idle's own duration_millis (the idle hint) keeps a fresh,
-    # bounded re-check window instead -- activityLabel still reports Chat for
-    # inspection, so the histogram/HeroSimulationState.behavior are unaffected.
-    return Suggestion(kind: BL_INT_IDLE, activityLabel: ActChat)
+    # Finding B (V6, mid-chat wake fix): restate BL_INT_CHAT at the live
+    # partner -- nothing NEW to decide (the conversation runs to its own
+    # clock, ChattingState + advance_chats, engine-side), but this is still
+    # what the contract's own always-restate discipline calls for. v.partnerSlot
+    # IS a valid target here now: hero_perception.cpp's observe_hero reads it
+    # straight off ChattingState while chatting (previously left at its
+    # WorldView default, since the nearest_companion scan that normally
+    # populates it is -- correctly -- skipped once already chatting; a fresh
+    # scan would find nobody, everyone already chatting is excluded as a
+    # candidate). It matches CurrentIntention::target_slot from adoption, so
+    # apply_intention's is_identical_restatement (intention.cpp, Chat: target_
+    # slot match) resumes this cleanly rather than re-adopting.
+    #
+    # This used to yield BL_INT_IDLE instead (deliberately, per this
+    # function's old comment, to avoid apply_intention's BL_INT_NONE path
+    # leaving a stale wake schedule behind) -- but BL_INT_IDLE is never an
+    # identical restatement either (is_identical_restatement always returns
+    # false for Idle), so that adoption overwrote CurrentIntention.kind (and
+    # its started marker) with Idle on every mid-chat wake, which is exactly
+    # what broke advance_intentions' Chat completion tracking (Finding B).
+    # Restating Chat gets the same fresh-wake-schedule benefit Idle was
+    # chosen for (the restate-resume path still refreshes wake_at_millis from
+    # this suggestion's idle hint, intention.cpp) without any of that cost.
+    return Suggestion(kind: BL_INT_CHAT, activityLabel: ActChat, targetSlot: v.partnerSlot)
   # Walk over, and strike it up once close enough -- the engine still gates
   # on chat_radius itself (command.cpp's Chat handler), this just avoids
   # suggesting Chat before it could possibly be valid.

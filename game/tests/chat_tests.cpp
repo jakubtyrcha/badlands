@@ -286,3 +286,86 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
         CHECK(glm::distance(g.registry.get<Position>(b).pos, b_pos) < 0.5f);
     }
 }
+
+// Finding B: while a chat session runs, hero.nim's chat wake used to yield
+// BL_INT_IDLE (actChat's "nothing new to decide" branch, blocks.nim) --
+// Idle is NEVER treated as an identical restatement
+// (is_identical_restatement, intention.cpp), so that adoption overwrote
+// CurrentIntention.kind with Idle (and reset its started marker) the moment
+// the hero was re-consulted mid-conversation. advance_intentions' Chat
+// branch -- the one that watches ChattingState for the session's real end --
+// then never ran again for the rest of the conversation: the completion it
+// eventually produced (if any) came from the Idle branch instead, timed
+// against an unrelated deadline, not against ChattingState actually ending.
+TEST_CASE("a chatting hero's CurrentIntention stays Chat across a mid-chat wake, and its "
+         "own completion fires when the session truly ends") {
+    Town t = make_town(2, {0.0f, 0.0f}, /*wasm=*/true);
+    BadlandsGame& g = t.g();
+    const entt::entity a = g.slots[t.heroes[0]];
+    const entt::entity b = g.slots[t.heroes[1]];
+
+    // Same setup as "two bored heroes find each other and talk" above: night
+    // (no tavern), starved of diversion, rested (so rest never takes over).
+    g.world_millis = static_cast<int64_t>(kMillisPerDay * 0.9);
+    for (entt::entity e : {a, b}) {
+        auto& sim = g.registry.get<HeroSimulationState>(e);
+        sim.content = 0.1f;
+        sim.fatigue = 1.0f;
+    }
+
+    bool talked = false;
+    for (int i = 0; i < 120 && !talked; ++i) {
+        auto& sa = g.registry.get<HeroSimulationState>(a);
+        auto& sb = g.registry.get<HeroSimulationState>(b);
+        sa.fatigue = sb.fatigue = 1.0f;
+        tick_world(g, 1.0f / 30.0f);
+        talked = g.registry.all_of<ChattingState>(a) && g.registry.all_of<ChattingState>(b);
+    }
+    REQUIRE(talked);
+
+    // Ride the session out to its natural expiry (chat_duration == 6s ==
+    // 180 ticks) plus margin, holding position (same drift guard as above)
+    // so nothing but the bug itself can end it early. The load-bearing
+    // check: CurrentIntention.kind must stay Chat on EVERY tick the session
+    // is still live -- in particular across the first idle-hint wake after
+    // adoption (500-2000ms, well inside this window), which is exactly
+    // where the pre-fix brain swapped in Idle.
+    const glm::vec2 a_pos = g.registry.get<Position>(a).pos;
+    const glm::vec2 b_pos = g.registry.get<Position>(b).pos;
+    bool session_ended = false;
+    for (int i = 0; i < 220 && !session_ended; ++i) {
+        auto& sa = g.registry.get<HeroSimulationState>(a);
+        auto& sb = g.registry.get<HeroSimulationState>(b);
+        sa.fatigue = sb.fatigue = 1.0f;
+        g.registry.get<Position>(a).pos = a_pos;
+        g.registry.get<Position>(b).pos = b_pos;
+        tick_world(g, 1.0f / 30.0f);
+        if (g.registry.all_of<ChattingState>(a)) {
+            CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::Chat);
+        } else {
+            session_ended = true;
+        }
+    }
+    REQUIRE(session_ended);  // it must actually run its course within the budget
+
+    // InboxEvent (components.h) carries only {kind, source_slot, param} --
+    // no field records WHICH intention kind ended, so "the ended kind is
+    // Chat, not Idle" cannot be read directly off the event itself. What IS
+    // checkable, and equivalent given the loop above already pins
+    // CurrentIntention.kind == Chat on every tick up to and including the
+    // one right before ChattingState vanished: a completion (param == 1.0)
+    // landing at all can only have come from advance_intentions' Chat
+    // branch (ci.arg == 1, ChattingState gone) in that case, never its Idle
+    // branch -- which the fix never lets CurrentIntention become while
+    // chatting in the first place. That, combined with the loop's own
+    // CHECKs above, is what stands in for "the ended kind is Chat".
+    const EventInbox& inbox = g.registry.get<EventInbox>(a);
+    bool found_completed = false;
+    for (int i = 0; i < inbox.count; ++i) {
+        if (inbox.events[i].kind == InboxEventKind::IntentionEnded &&
+            inbox.events[i].param == 1.0f) {
+            found_completed = true;
+        }
+    }
+    CHECK(found_completed);
+}

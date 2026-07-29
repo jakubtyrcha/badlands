@@ -176,8 +176,22 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     // for someone new when not already talking (and only if the class is
     // sociable at all).
     v.chatting = game.registry.all_of<ChattingState>(e);
-    if (!v.chatting && weights.of(ActivityId::Chat) > 0.0f &&
-        v.content < game.factors.hero.chat_content_seek) {
+    if (v.chatting) {
+        // Finding B (V6): expose the ACTUAL partner while mid-conversation,
+        // not a fresh nearest_companion scan -- that would find nobody
+        // (an entity already chatting is excluded as a candidate, see
+        // nearest_companion's own ChattingState exclusion above), which is
+        // exactly why this used to be skipped outright whenever v.chatting
+        // was true. Reading it straight off ChattingState instead is what
+        // lets the brain restate BL_INT_CHAT at the right target_slot on a
+        // mid-chat wake instead of losing track of the session (see
+        // actChat's own comment, scripts/brains/nim/blocks.nim, and
+        // is_identical_restatement, intention.cpp, which is what actually
+        // makes that restatement a clean resume: this value now matches
+        // CurrentIntention::target_slot stamped at adoption).
+        v.partner_slot = game.registry.get<ChattingState>(e).partner_slot;
+    } else if (weights.of(ActivityId::Chat) > 0.0f &&
+               v.content < game.factors.hero.chat_content_seek) {
         v.has_chat_partner =
             nearest_companion(game, e, v.pos, game.factors.hero.chat_content_seek,
                               game.factors.hero.chat_sight, v.partner_pos, v.partner_slot,

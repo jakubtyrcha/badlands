@@ -44,7 +44,12 @@
 # apply_intention's Shoot case (intention.cpp) stopped pushing its own
 # one-shot swing at adoption, so a prey that survived the opening arrow
 # needs this brain to keep firing at it every wake it restates Shoot,
-# exactly like the combat branch already does for Attack.
+# exactly like the combat branch already does for Attack. Separately (mid-
+# chat wake fix): actChat (blocks.nim) now restates BL_INT_CHAT at the live
+# partner while a session is running, instead of substituting BL_INT_IDLE --
+# Idle is never an identical restatement (is_identical_restatement,
+# intention.cpp), so it used to overwrite CurrentIntention mid-conversation
+# and lose the session's completion tracking.
 #
 # WIRE-STABILITY (restate-resume is EXACT field equality, intention.cpp's
 # is_identical_restatement -- no epsilon): every point this file echoes back
@@ -176,7 +181,7 @@ const
   kIdleHintMaxMillis: int64 = 2000
 
 proc brainInit() =
-  const msg: cstring = "hero brain v2 init"
+  const msg: cstring = "hero brain v3 init"
   bl_log(0'i32, cast[int32](msg), len(msg).int32)
 
 # True if the wire's inbox carries a guaranteed-wake danger signal
