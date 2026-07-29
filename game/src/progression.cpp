@@ -28,11 +28,16 @@ void award_xp(BadlandsGame& game, uint32_t slot, int64_t amount) {
         return;
     }
     auto& sim = game.registry.get<HeroSimulationState>(e);
-    // Saturate, never wrap: xp_to_next already saturates the cost side, so
-    // the level-up loop below stays finite for any non-negative config.
+    // Saturate, never wrap: the accumulation itself stays finite for any
+    // amount int64 can hold. The level-up loop below is separately bounded
+    // by kMaxHeroLevel (progression.h) -- xp_to_next's cost-side saturation
+    // alone is not enough: a degenerate config (level_base_xp=1,
+    // level_exponent=0) makes every cost 1, so the loop would otherwise run
+    // once per XP point, up to ~2^31 times for a large saturated award.
     sim.xp = static_cast<int32_t>(
         std::min<int64_t>(static_cast<int64_t>(sim.xp) + amount, INT32_MAX));
-    while (sim.xp >= xp_to_next(game.factors.progression, sim.level)) {
+    while (sim.level < kMaxHeroLevel &&
+           sim.xp >= xp_to_next(game.factors.progression, sim.level)) {
         sim.xp -= xp_to_next(game.factors.progression, sim.level);
         ++sim.level;
         if (const auto* hero = game.registry.try_get<HeroCharacter>(e);

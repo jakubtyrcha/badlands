@@ -272,6 +272,27 @@ TEST_CASE("xp accumulation saturates at INT32_MAX") {
     CHECK(sim.level == 3);
 }
 
+TEST_CASE("award_xp is bounded by kMaxHeroLevel even under a degenerate zero-cost curve") {
+    // Finding 3: level_base_xp=1, level_exponent=0 is a legal (if silly)
+    // config -- xp_to_next(level) = floor(1 * level^0) = 1 for every level,
+    // forever. Without a cap, one big saturated award loops the level-up
+    // while() roughly 2^31 times. The cap must stop the loop long before
+    // that, and xp is left saturating (not consumed further) once capped.
+    auto owned = badlands::make_world(BrainDesc{});
+    BadlandsGame& g = *owned;
+    g.factors.progression.level_base_xp = 1;
+    g.factors.progression.level_exponent = 0.0f;
+
+    const uint32_t slot = badlands::spawn_into(g, badlands::MercenaryDesc(0.0f, 20.0f));
+    entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
+    auto& sim = g.registry.get<badlands::HeroSimulationState>(e);
+    REQUIRE(sim.level == 1);
+
+    badlands::award_xp(g, slot, 100'000);
+
+    CHECK(sim.level == badlands::kMaxHeroLevel);
+}
+
 TEST_CASE("the snapshot carries level/xp/skills; zeroed for non-heroes") {
     auto owned = badlands::make_world(badlands::BrainDesc{});
     BadlandsGame& g = *owned;
