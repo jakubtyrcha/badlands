@@ -20,6 +20,11 @@ public:
     void setViewportSize(float widthPts, float heightPts, float backingScale);
     void render(void* caMetalDrawable);
 
+    // camera tool (deltas in view points; delta semantics match CameraController)
+    void cameraOrbit(float dxPts, float dyPts);
+    void cameraZoom(float delta);
+    void cameraPan(float dxPts, float dyPts);
+
 private:
     Editor();
     struct Impl;

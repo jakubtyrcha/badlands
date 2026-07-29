@@ -1,12 +1,15 @@
 import SwiftUI
-import ShapeshifterCore
 
 struct ContentView: View {
-    let editor = sq.Editor.create()!
+    @State private var vm = EditorViewModel()
 
     var body: some View {
-        MetalViewport(editor: editor)
-            .ignoresSafeArea()
-            .frame(minWidth: 800, minHeight: 600)
+        ZStack(alignment: .topLeading) {
+            MetalViewport(vm: vm)
+                .ignoresSafeArea()
+            ModeBar(vm: vm)
+                .padding(12)
+        }
+        .frame(minWidth: 800, minHeight: 600)
     }
 }

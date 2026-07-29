@@ -17,6 +17,16 @@ final class ViewportNSView: NSView {
     var onSizeChange: ((CGFloat, CGFloat, CGFloat) -> Void)?
     var onWindowChange: ((Bool) -> Void)?
 
+    // Raw-input forwarding, wired up by MetalViewport to the EditorViewModel.
+    var onMouseDown: ((CGPoint) -> Void)?
+    var onMouseDragged: ((CGPoint, CGSize) -> Void)?
+    var onMouseUp: ((CGPoint) -> Void)?
+    /// (dx, dy, shiftHeld)
+    var onScroll: ((CGFloat, CGFloat, Bool) -> Void)?
+    var onMagnify: ((CGFloat) -> Void)?
+    /// Returns true if the key was consumed.
+    var onKeyDown: ((String) -> Bool)?
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -47,6 +57,39 @@ final class ViewportNSView: NSView {
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
         onWindowChange?(newWindow != nil)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self) // so keys work immediately, no click needed
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        onMouseDragged?(point, CGSize(width: event.deltaX, height: event.deltaY))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        onMouseUp?(convert(event.locationInWindow, from: nil))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        onScroll?(event.scrollingDeltaX, event.scrollingDeltaY, event.modifierFlags.contains(.shift))
+    }
+
+    override func magnify(with event: NSEvent) {
+        onMagnify?(event.magnification)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let consumed = onKeyDown?(event.charactersIgnoringModifiers ?? "") ?? false
+        if !consumed {
+            super.keyDown(with: event)
+        }
     }
 }
 
@@ -81,10 +124,11 @@ final class DisplayLinkDriver: NSObject, CAMetalDisplayLinkDelegate {
     }
 }
 
-/// Hosts the Metal viewport `NSView` in SwiftUI and wires up size/window
-/// notifications to `core` and the display-link driver.
+/// Hosts the Metal viewport `NSView` in SwiftUI, wires up size/window
+/// notifications to `core` and the display-link driver, and routes raw
+/// input events to the `EditorViewModel`.
 struct MetalViewport: NSViewRepresentable {
-    let editor: sq.Editor
+    let vm: EditorViewModel
 
     final class Coordinator {
         var driver: DisplayLinkDriver?
@@ -94,6 +138,7 @@ struct MetalViewport: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ViewportNSView {
         let view = ViewportNSView()
+        let editor = vm.editor
         editor.attachLayer(Unmanaged.passUnretained(view.metalLayer).toOpaque())
 
         view.onSizeChange = { w, h, scale in
@@ -106,6 +151,13 @@ struct MetalViewport: NSViewRepresentable {
         view.onWindowChange = { inWindow in
             driver.isPaused = !inWindow
         }
+
+        view.onMouseDown = { [vm] p in vm.handleMouseDown(p) }
+        view.onMouseDragged = { [vm] p, delta in vm.handleMouseDragged(p, delta: delta) }
+        view.onMouseUp = { [vm] p in vm.handleMouseUp(p) }
+        view.onScroll = { [vm] dx, dy, shiftHeld in vm.handleScroll(dx: dx, dy: dy, shiftHeld: shiftHeld) }
+        view.onMagnify = { [vm] delta in vm.handleMagnify(delta) }
+        view.onKeyDown = { [vm] characters in vm.handleKeyDown(characters) }
 
         return view
     }
