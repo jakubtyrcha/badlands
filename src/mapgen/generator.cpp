@@ -8,6 +8,7 @@
 #include <FastNoiseLite.h>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/canal_carve.hpp"
 #include "mapgen/detail_filter.hpp"
 #include "mapgen/erosion.hpp"
 #include "mapgen/hydrology.hpp"
@@ -210,6 +211,17 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
                                      ep.notch_depth_m);
   if (sink) sink->dump("cavities", seq++, basins);
   if (sink) sink->dump("cavities-height", seq++, B);
+
+  // Canal pre-carve: cut a drainage skeleton across the plains BEFORE the sim,
+  // so the hydrology has real gradients to follow rather than having to invent
+  // them. Runs after cavities (basins are attractors and terminals) and before
+  // sediment (cuts bedrock, no layer bookkeeping to respect).
+  // See docs/superpowers/specs/2026-07-29-mapgen-canal-precarve-design.md.
+  const auto canals = carve_canals(B, basins, dist, ep, texel_sim, params.seed);
+  if (sink) {
+    sink->dump("canals", seq++, B);
+    sink->dump("canal-flow", seq++, canals.trail_discharge_m3_s);
+  }
   auto S = init_sediment(dist, basins, ep, texel_sim, origin_sim, params.seed);
   if (sink) sink->dump("sediment-init", seq++, S);
 

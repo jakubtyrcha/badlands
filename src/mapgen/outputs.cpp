@@ -198,8 +198,8 @@ std::string dump_path(const std::string& dir, std::string_view stage, int seq) {
 void PngDebugSink::dump(std::string_view stage, int seq,
                         const Field2D<float>& field) {
   const std::string path = dump_path(out_dir_, stage, seq);
-  const bool sim_relief =
-      stage == "cone" || stage == "loop-height" || stage == "cavities-height";
+  const bool sim_relief = stage == "cone" || stage == "loop-height" ||
+                          stage == "cavities-height" || stage == "canals";
   const bool out_relief = stage == "final-height";
   const bool flow = stage == "loop-flow" || stage == "flow";
   if (sim_relief) write_hillshade_png(field, path, sim_texel_m_);

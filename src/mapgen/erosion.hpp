@@ -67,6 +67,51 @@ struct ErosionParams {
   // lattice artifact and so scales with the grid, not the world.
   float simplify_tolerance_texels = 0.9f;
   float resample_spacing_texels = 3.0f;
+  // --- canal pre-carve (see canal_carve.hpp) ---
+  // Drainage area a highland-edge cell needs before it seeds a canal agent.
+  //
+  // DISABLED (0) by default. The mechanism is correct — fixtures pass, zero
+  // uphill carves, zero braids, max carve 2.9 m — but it does not move the
+  // production numbers it exists to move. Measured on seed 2 at 256^2:
+  //
+  //   threshold   agents   boxed-in   flood-parent routed   (baseline 40.9%)
+  //      5000        14      14/14           41.5%
+  //      1500        27      27/27           41.8%
+  //       400       132     104/132          44.6%
+  //       100       590     467/590          45.8%
+  //
+  // More agents makes it WORSE, so this is not a threshold to tune. The
+  // dominant failure is that 79-100% of agents strand themselves, with
+  // climb-blocking at zero throughout: strict self-avoidance over a
+  // three-candidate turn cone means an agent that curls alongside its own
+  // trail finds all three forward cells already its own and dies. That is
+  // structural, and self-avoidance is what the loop and descent guarantees
+  // rest on, so it cannot simply be relaxed. See the spec's "Premature
+  // termination" risk, which anticipated the failure but not its scale.
+  float canal_seed_area_m2 = 0.0f;
+  // Descent forced per metre travelled. Incision is canal_slope x PATH LENGTH,
+  // so a winding canal cuts proportionally deeper than a straight one between
+  // the same endpoints — tune against the LONGEST canal, not the mean. 0.002
+  // gives ~1 m across a 500 m map, comparable to the plains relief it fixes.
+  float canal_slope = 0.002f;
+  float canal_sense_distance_texels = 6.0f;
+  // 45 deg. On an 8-neighbour lattice this yields three candidates per step;
+  // anything under 45 deg would forbid turning altogether.
+  float canal_max_turn_angle_rad = 0.79f;
+  float canal_wander_chance = 0.10f;
+  // Veto against tunnelling a mountain, NOT against climbing: stepping uphill
+  // is allowed and the carve makes it downhill. canal_w_dig prices the
+  // ordinary case rather than prohibiting it.
+  float canal_max_climb_m = 3.0f;
+  float canal_water_falloff_m = 2.0f;
+  // Scoring weights. Every term the score combines is in METRES, so these read
+  // as exchange rates rather than opaque gains.
+  float canal_w_flow = 1.0f;   // per metre of descent gained
+  float canal_w_dig = 3.0f;    // per metre of rock removed; MUST exceed w_flow
+  float canal_w_turn = 0.5f;   // per radian turned, scaled by sqrt(Q/q_ref)
+  float canal_w_water_m = 3.0f;  // a lower channel is worth this much drop
+  int canal_max_steps = 4096;  // backstop only; self-avoidance already bounds it
+
   // Lake freeboard: the output water level sits below the spill point so a dry
   // bank of already-carved bowl is exposed and the Lake biome covers only
   // water. Applied at finalize only, so the sim loop is unaffected. The
