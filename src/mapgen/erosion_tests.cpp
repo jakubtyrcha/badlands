@@ -54,11 +54,11 @@ TEST_CASE("carve_cavities: coverage ~= lake_frac, depth == slope * EDT-to-rim, o
   }
   // v1.3.1: this fixture's bedrock is just the flattened linear index
   // (monotonic in y*100+x), so the raw 5% quantile is exactly rows y=0..4
-  // (500 cells) -- and the bedrock minimum sits at corner (0,0), the
-  // deliberately adversarial case for the border-margin rim. The
-  // kBasinBorderMarginTexels=3 ring clips: rows y<3 are dropped entirely
-  // (0.05 -> the top 2 surviving rows), and within those 2 rows, x<3 and
-  // x>=97 are also dropped -- 2 rows * 94 cols = 188 cells / 10000.
+  // (499 cells: strict < excludes index 499 at (99,4)) -- and the bedrock minimum
+  // sits at corner (0,0), the deliberately adversarial case for the border-margin
+  // rim. The kBasinBorderMarginTexels=3 ring clips: rows y<3 are dropped entirely
+  // (0.05 -> the top 2 surviving rows), and within those 2 rows, x<3 and x>=97
+  // are also dropped -- 2 rows * 94 cols = 188 cells / 10000.
   REQUIRE(carved / mask.data.size() == Catch::Approx(0.0188).margin(1e-4));
 }
 
@@ -116,11 +116,12 @@ TEST_CASE("carve_cavities: lake_frac > 1 clamped to 1, no crash") {
   }
   const double coverage = carved / mask.data.size();
   // v1.3.1: the kBasinBorderMarginTexels rim is excluded from the mask
-  // regardless of quantile, so full coverage now tops out at (interior area -
-  // 1) / total, not ~1.0. Interior is (50 - 2*margin)^2.
+  // regardless of quantile, so full coverage now tops out at interior / total,
+  // not ~1.0. Interior is (50 - 2*margin)^2; the global max cell at (49,49) sits
+  // in the border ring so there's no extra exclusion beyond the margin.
   const int interior = (50 - 2 * kBasinBorderMarginTexels) * (50 - 2 * kBasinBorderMarginTexels);
-  const double expected_max = (interior - 1) / 2500.0;
-  REQUIRE(coverage == Catch::Approx(expected_max).margin(0.01));
+  const double expected_max = interior / 2500.0;
+  REQUIRE(coverage == Catch::Approx(expected_max).margin(1e-4));
 }
 
 TEST_CASE("carve_cavities: v1.3.1 — mask never touches the border margin ring") {
