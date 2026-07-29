@@ -1033,8 +1033,9 @@ TEST_CASE(
 // --- v3 restate-resume (docs/design/intention-contract.html §2, "Resume-by-
 // default"): an incoming suggestion identical to the running CurrentIntention
 // is a resume, not a new decision -- no re-run producer, no re-stamped
-// started_at_millis, only a refreshed wake schedule (which must still reach
-// the log, so a replay reconstructs it) -----------------------------------
+// started_at_millis, only a LIVE-refreshed wake schedule, which deliberately
+// does NOT reach the log (restate-log dedup: sameness is implied by logging
+// nothing; the tests below pin both halves) -------------------------------
 
 TEST_CASE(
     "apply_intention: an identical MoveTo restatement resumes and logs NOTHING -- no duplicate "
@@ -1278,15 +1279,15 @@ TEST_CASE(
     // reproduces here (positions/hp/building occupancy, all logged Commands
     // this test never touches). It only matters if a LIVE run later resumes
     // from this replayed state: that continuation would then consult the
-    // brain at 1300 instead of the original live run's 2900 -- STRICTLY
-    // EARLIER, never later (every restate's hint is a fresh floor no lower
-    // than what the log's last real decision already scheduled, in this
-    // contract's usage). An early wake is a spurious wake, and this contract
-    // already treats those as free: an OFFER of consultation, not a promise
-    // of a new command (should_wake's own doc comment) -- and in combat
-    // specifically, the high-stakes clause forces a per-tick consult
-    // regardless of any deadline, so the "wrong" schedule is moot exactly
-    // when it would matter most.
+    // brain at 1300 instead of the original live run's 2900 -- the EARLY
+    // direction, which is free (a spurious wake is an OFFER of consultation,
+    // not a promise of a new command, should_wake's own doc comment). Note
+    // the general never-LATE guarantee does NOT come from hint monotonicity
+    // -- restate hints are not monotone; an event-triggered restate can
+    // shorten the live deadline below the logged one -- but from
+    // should_wake's event/high-stakes clauses surviving replay: see
+    // apply_intention's safety-argument comment (intention.cpp), stated
+    // once there.
     CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 1300);
 }
 

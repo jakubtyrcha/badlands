@@ -165,18 +165,24 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     //      never influence anything replay actually reproduces (positions,
     //      hp, building occupancy -- all logged Commands). It is read-only
     //      input to should_wake, and should_wake only runs on a LIVE tick.
-    //   2. A live run that continues from a replayed state can therefore only
-    //      wake EARLY relative to what the original live run did: the log's
-    //      last real schedule (the adoption, or the last CHANGED intention)
-    //      is a floor every later identical restate's hint only pushes
-    //      later, never earlier, so a replay stuck on that floor wakes no
-    //      later than the original run would have. An early wake is a
-    //      spurious wake, and this contract already treats those as free (an
-    //      OFFER of consultation, not a promise of a new command,
-    //      should_wake's own doc comment) -- and in combat specifically, the
-    //      high-stakes clause forces a per-tick consult regardless of any
-    //      deadline, so the "wrong" schedule is moot exactly when it would
-    //      matter most.
+    //   2. A live run that continues from a replayed state never sleeps
+    //      through a wake the original run had -- NOT because restate hints
+    //      are monotone (they are not: an event-triggered restate can
+    //      legally shorten the live deadline below the logged one, e.g.
+    //      adopt with hint 2000, DamageTaken wakes at +500, restate with a
+    //      fresh hint 500), but because any pre-deadline wake in the
+    //      original run was caused by a guaranteed-wake source -- an inbox
+    //      event, threats in view, or MeleeLock (should_wake's event +
+    //      high-stakes clauses) -- and each of those still fires on the
+    //      continuation: note_think_outcome never runs on replay, so
+    //      last_seen_seq stays 0 and any event the replayed world's inbox
+    //      ever received wakes the continuation on its FIRST live tick,
+    //      while threats/lock force per-tick consults regardless of any
+    //      deadline. Deadline-driven wakes can at worst come EARLY (the
+    //      logged adoption deadline vs a later live-only refresh), and an
+    //      early wake is a spurious wake, which this contract already
+    //      treats as free (an OFFER of consultation, not a promise of a
+    //      new command, should_wake's own doc comment).
     //   3. That makes this refresh LIVE-ONLY engine scheduling state (when to
     //      bother calling the brain again), never read back into anything the
     //      command log or replay observes -- the identical class
