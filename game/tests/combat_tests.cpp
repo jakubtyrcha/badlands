@@ -305,6 +305,9 @@ TEST_CASE("a ranged attack spawns a projectile that damages on arrival", "[comba
     const float hp0 = g.registry.get<Health>(te).hp;
 
     // Fire at the named target; a projectile appears, no damage yet.
+    // param_a left at its 0 default = EXPLICIT attack index 0, deliberately:
+    // the shooter's only attack, so index-0 and auto-pick (-1) are equivalent
+    // here -- but say so, since Command::param_a's 0-default is a known footgun.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
     CHECK(g.registry.view<Projectile>().size() == 1);
@@ -327,6 +330,9 @@ TEST_CASE("a projectile fizzles when its target dies mid-flight", "[combat]") {
     const uint32_t s = spawn_shooter(g);
     const uint32_t t = spawn_dummy(g, 20.0f, 1);  // far, so it won't arrive at once
 
+    // param_a left at its 0 default = EXPLICIT attack index 0, deliberately:
+    // the shooter's only attack, so index-0 and auto-pick (-1) are equivalent
+    // here -- but say so, since Command::param_a's 0-default is a known footgun.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
     REQUIRE(g.registry.view<Projectile>().size() == 1);

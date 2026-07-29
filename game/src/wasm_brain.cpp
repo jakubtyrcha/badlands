@@ -66,10 +66,9 @@ void forward_log(int32_t level, const uint8_t* msg, size_t len, void* /*user*/) 
 // WasmBrainRuntime* fixed at bh_instantiate time (see WasmBrainRuntime::create
 // below) -- stable for the instance's whole lifetime, so this cast is safe
 // regardless of which wake's bh_tick call is currently in progress.
-// Behavior-neutral in practice: hero.nim declares but never calls
-// bl_enqueue_action, so this never actually runs against the shipping brain
-// yet -- tick_wasm_brain drains pending_actions through resolve_action
-// (Task 2's action resolver, game/src/intention.h) once it does.
+// LIVE against the shipping brain: hero.nim enqueues one BL_ACT_ATTACK per
+// combat wake, and tick_wasm_brain drains pending_actions through
+// resolve_action (game/src/intention.h) right after the intention applies.
 void forward_action(int32_t kind, uint32_t target_slot, int32_t arg, void* user) {
     auto* runtime = static_cast<WasmBrainRuntime*>(user);
     runtime->pending_actions.push_back(PendingAction{kind, target_slot, arg});

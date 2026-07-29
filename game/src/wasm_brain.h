@@ -44,10 +44,10 @@ namespace badlands {
 // the order the guest made it -- {kind, target_slot, arg} 1:1 with the
 // BhActionFn callback's own parameters (src/crates/brainhost/include/
 // brainhost.h), and 1:1 with intention.h's AgentAction (tick_wasm_brain
-// converts one to the other before calling resolve_action). Behavior-neutral
-// in practice: hero.nim declares but never calls bl_enqueue_action, so
-// `pending_actions` below is always empty for now, even though
-// tick_wasm_brain drains it every wake (Task 2's action resolver).
+// converts one to the other before calling resolve_action). LIVE: hero.nim
+// enqueues one BL_ACT_ATTACK per combat wake (its highest-damage ready,
+// lock-legal, in-range pick), and tick_wasm_brain drains `pending_actions`
+// through resolve_action every wake.
 struct PendingAction {
     int32_t kind;
     uint32_t target_slot;
