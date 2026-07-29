@@ -29,6 +29,7 @@
 #include "engine/rendering/components/forward_component.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/frustum.hpp"
+#include "engine/rendering/instanced_mesh_field.hpp"
 #include "engine/rendering/passes/render_debug_lines.hpp"
 #include "engine/rendering/passes/render_forward.hpp"
 #include "engine/rendering/passes/render_gbuffer_debug.hpp"
@@ -428,6 +429,21 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   FrameContext frame;
   frame.Begin(device_, queue_, frame_uniforms, min_uniform_offset_alignment_);
 
+  // Instanced mesh fields (engine, game-agnostic): dispatch each field's GPU
+  // cull/LOD/compaction compute passes BEFORE any render pass opens on this
+  // encoder (GpuInstanceRenderer::Cull's sequencing contract — see
+  // InstancedMeshField::Cull). Carried on SceneContext (not a renderer member)
+  // so headless --screenshot renders them too. No-op when the scene carries
+  // none.
+  if (scene.instanced_field_count > 0 && scene.instanced_fields != nullptr) {
+    for (uint32_t i = 0; i < scene.instanced_field_count; ++i) {
+      InstancedMeshField* field = scene.instanced_fields[i];
+      if (field != nullptr) {
+        field->Cull(frame, camera);
+      }
+    }
+  }
+
   // === Pass 0: Shadow depth (T2) — depth-only render of casters from the
   // sun's point of view into shadow_map_'s Depth32Float target (conventional
   // Z: cleared to 1.0 = far, kShadow pipeline compares Less -- see
@@ -515,6 +531,15 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
                          RenderPassType::kGBuffer, material_instance_cache_,
                          frustum);
+    // Instanced mesh fields' deferred submeshes, into the same G-buffer pass.
+    if (scene.instanced_field_count > 0 && scene.instanced_fields != nullptr) {
+      for (uint32_t i = 0; i < scene.instanced_field_count; ++i) {
+        InstancedMeshField* field = scene.instanced_fields[i];
+        if (field != nullptr) {
+          field->Draw(pass, frame, InstancedMeshField::PassKind::kDeferred);
+        }
+      }
+    }
     pass.End();
   }
 
@@ -789,9 +814,21 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // bypass the G-buffer and light themselves) into the HDR target with the
   // G-buffer depth Load + write, so they occlude / are occluded by opaque
   // geometry and depth-test the later transparent pass. Skipped when none exist
-  // (no such entities in the current scenes; wired so kForwardOpaque is not a
-  // silent no-op). ===
-  if (registry.view<ForwardOpaqueRenderable>().size() > 0) {
+  // (no such entities in the current scene AND no instanced field has a
+  // forward-opaque submesh; wired so kForwardOpaque is not a silent no-op). ===
+  bool any_field_forward_opaque = false;
+  if (scene.instanced_field_count > 0 && scene.instanced_fields != nullptr) {
+    for (uint32_t i = 0; i < scene.instanced_field_count; ++i) {
+      InstancedMeshField* field = scene.instanced_fields[i];
+      if (field != nullptr &&
+          field->HasPass(InstancedMeshField::PassKind::kForwardOpaque)) {
+        any_field_forward_opaque = true;
+        break;
+      }
+    }
+  }
+  if (registry.view<ForwardOpaqueRenderable>().size() > 0 ||
+      any_field_forward_opaque) {
     wgpu::RenderPassColorAttachment color_attachment;
     color_attachment.view = hdr_color_view_;
     color_attachment.loadOp = wgpu::LoadOp::Load;
@@ -812,6 +849,17 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
     RenderPassContext pass = frame.BeginRenderPass(desc);
     RenderForwardMeshes(pass, frame, registry, camera_world_pos,
                         material_instance_cache_, engine);
+    // Instanced mesh fields' forward-opaque submeshes, into the same pass —
+    // shares the real `engine` resources (shadow map + IBL) built above.
+    if (scene.instanced_field_count > 0 && scene.instanced_fields != nullptr) {
+      for (uint32_t i = 0; i < scene.instanced_field_count; ++i) {
+        InstancedMeshField* field = scene.instanced_fields[i];
+        if (field != nullptr) {
+          field->Draw(pass, frame, InstancedMeshField::PassKind::kForwardOpaque,
+                      &engine);
+        }
+      }
+    }
     pass.End();
   }
 

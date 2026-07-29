@@ -217,8 +217,12 @@ class InstancedMeshField {
     render pass — see the renderer's sequencing contract).
   - Inside Pass 1 (G-buffer), after `RenderTexturedMeshes`: `for each field:
     field->Draw(gbuffer_pass, frame, kDeferred)`.
-  - Inside Pass 3.7 (forward-opaque), after `RenderForwardMeshes`: `for each
-    field: field->Draw(forward_pass, frame, kForwardOpaque)`.
+  - Pass 3.7's gate is extended from `registry.view<ForwardOpaqueRenderable>()
+    .size() > 0` to `... || <any field HasPass(kForwardOpaque)>`, so the pass
+    still opens when the registry has zero `ForwardOpaqueRenderable` entities
+    but a field has a forward-opaque submesh. Inside, after
+    `RenderForwardMeshes`: `for each field: field->Draw(forward_pass, frame,
+    kForwardOpaque, &engine)`.
   - When empty, every pass is byte-identical to today.
 
 ---

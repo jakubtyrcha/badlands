@@ -33,6 +33,7 @@
 #include "engine/rendering/color_render_target.hpp"
 #include "engine/rendering/context/frame_context.hpp"
 #include "engine/rendering/context/render_pass_context.hpp"
+#include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/frustum.hpp"
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/gpu_instance_renderer.hpp"
@@ -2248,13 +2249,22 @@ struct DeferredForwardFieldFixture {
   std::unique_ptr<InstancedMeshField> field;
 };
 
-std::unique_ptr<DeferredForwardFieldFixture> BuildDeferredForwardField(TestGpu& g) {
+// `depth_format` defaults to Undefined (no depth-stencil state), matching the
+// isolated Draw() tests below, which render into depth-less custom targets.
+// The Task-3 SceneRenderer-integration test passes GBuffer::kDepthFormat
+// instead: SceneRenderer's real G-buffer/forward-opaque passes DO carry a
+// depth attachment, and deferred_lighting.wesl discards any pixel whose depth
+// still reads as the far-plane clear value -- so the deferred submesh must
+// actually write real depth for the lit result to show it at all.
+std::unique_ptr<DeferredForwardFieldFixture> BuildDeferredForwardField(
+    TestGpu& g,
+    wgpu::TextureFormat depth_format = wgpu::TextureFormat::Undefined) {
   auto fx = std::make_unique<DeferredForwardFieldFixture>();
 
   fx->gbuffer_factory = MakeInstancedFactory(
       g, "instanced_gbuffer", MaterialPassType::kDeferred,
       {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
-      {});
+      {}, /*casts_shadow=*/false, depth_format);
   REQUIRE(fx->gbuffer_factory != nullptr);
   // Forward factory built against the REAL accumulation format (not a
   // standalone BGRA8Unorm test target) -- this is the format
@@ -2262,7 +2272,8 @@ std::unique_ptr<DeferredForwardFieldFixture> BuildDeferredForwardField(TestGpu& 
   // SceneRenderer drives this field (Task 3).
   fx->forward_factory = MakeInstancedFactory(
       g, "instanced_forward", MaterialPassType::kForwardOpaque,
-      {SceneRenderer::kAccumulationFormat}, {"translucency"});
+      {SceneRenderer::kAccumulationFormat}, {"translucency"},
+      /*casts_shadow=*/false, depth_format);
   REQUIRE(fx->forward_factory != nullptr);
 
   InstanceParams gbuffer_params;
@@ -2648,4 +2659,167 @@ TEST_CASE("InstancedMeshField: Draw(kForwardOpaque, nullptr) skips the "
   CHECK(forward_c.r < 0.05f);
   CHECK(forward_c.g < 0.05f);
   CHECK(forward_c.b < 0.05f);
+}
+
+// ===========================================================================
+// Task 3: SceneRenderer drives SceneContext::instanced_fields. Task 3 wired
+// SceneRenderer::Render to: Cull() every field BEFORE Pass 0 (frame.Begin,
+// before any render pass opens on the encoder); Draw(kDeferred) each field
+// inside Pass 1 (G-buffer), right after RenderTexturedMeshes; and extended
+// Pass 3.7's gate to open on `registry.view<ForwardOpaqueRenderable>().size()
+// > 0 || <any field HasPass(kForwardOpaque)>`, Draw(kForwardOpaque, &engine)
+// each field right after RenderForwardMeshes.
+//
+// Renders a real SceneRenderer frame with an EMPTY registry (so
+// ForwardOpaqueRenderable count is exactly ZERO -- the scenario the gate
+// extension exists for) and one field (this file's Deferred+Forward fixture,
+// with depth wired to GBuffer::kDepthFormat -- see BuildDeferredForwardField's
+// comment: deferred_lighting.wesl discards any pixel whose depth still reads
+// the far-plane clear value, so the deferred submesh must actually write real
+// depth for the fully-lit result to show it). Framebuffer readback proves:
+//   * Cull() ran pre-pass (an un-culled field draws nothing),
+//   * the deferred submesh's G-buffer write reached deferred lighting (a
+//     visible, LIT pixel, not just a raw unlit G-buffer value),
+//   * the forward-opaque gate opened and drew with zero
+//     ForwardOpaqueRenderable entities in the registry.
+// A second render with instanced_field_count = 0 confirms the no-field path
+// is unaffected (no instances visible; same as the baseline).
+// ===========================================================================
+namespace {
+
+constexpr uint32_t kSceneWidth = 256;
+constexpr uint32_t kSceneHeight = 256;
+
+// Real perspective camera at the origin looking down -Z -- the SAME
+// convention as MakeCullCamera above, so the frustum InstancedMeshField::Cull
+// classifies against is exactly the one SceneRenderer::Render's deferred/
+// forward passes then render with (a single Camera drives both).
+Camera MakeSceneCamera() {
+  Camera camera;
+  camera.position = glm::vec3(0.0f);
+  camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 60.0f;
+  camera.aspect =
+      static_cast<float>(kSceneWidth) / static_cast<float>(kSceneHeight);
+  camera.near_plane = 0.1f;
+  camera.far_plane = 1000.0f;
+  return camera;
+}
+
+// World -> pixel through the engine's own matrices -- mirrors
+// decal_pass_tests.cpp's ProjectToPixel, so nothing about the projection is
+// re-derived here.
+glm::ivec2 SceneProjectToPixel(const Camera& camera, glm::vec3 world) {
+  const glm::vec4 clip =
+      camera.GetProj() * camera.GetView() * glm::vec4(world, 1.0f);
+  REQUIRE(clip.w > 0.0f);  // in front of the camera
+  const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+  return glm::ivec2(
+      static_cast<int>((ndc.x * 0.5f + 0.5f) * static_cast<float>(kSceneWidth)),
+      static_cast<int>((1.0f - (ndc.y * 0.5f + 0.5f)) *
+                       static_cast<float>(kSceneHeight)));
+}
+
+// Red channel at the pixel a world point projects to (R32Float target --
+// GetDepth, not GetPixelF32, is the raw-float accessor; see
+// decal_pass_tests.cpp's RedAt for why).
+float SceneRedAt(const CpuImage& image, const Camera& camera, glm::vec3 world) {
+  const glm::ivec2 p = SceneProjectToPixel(camera, world);
+  REQUIRE(p.x >= 0);
+  REQUIRE(p.y >= 0);
+  REQUIRE(p.x < static_cast<int>(kSceneWidth));
+  REQUIRE(p.y < static_cast<int>(kSceneHeight));
+  return image.GetDepth(static_cast<uint32_t>(p.x), static_cast<uint32_t>(p.y));
+}
+
+// Renders one SceneRenderer frame with `fields` (may be empty) over an EMPTY
+// registry, under a Dawn validation-error scope -- asserts NoError (an
+// IsValid()/null check alone does not catch validation errors on this Dawn
+// build; see RunCapturingValidationErrors' file comment above) -- and returns
+// the readback.
+CpuImage RenderSceneWithFields(TestGpu& g, const Camera& camera,
+                               std::span<InstancedMeshField* const> fields) {
+  entt::registry registry;  // deliberately empty: zero ForwardOpaqueRenderable
+  SceneContext scene_context;
+  scene_context.registry = &registry;
+  scene_context.sun_direction = glm::normalize(glm::vec3(0.3f, 0.8f, 0.5f));
+  scene_context.sun_color = glm::vec3(1.0f);
+  scene_context.ambient_sh[0] = glm::vec3(1.5f);  // flat ambient (SH L0/DC)
+  scene_context.clear_color = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+  scene_context.instanced_fields = fields.data();
+  scene_context.instanced_field_count = static_cast<uint32_t>(fields.size());
+
+  ColorRenderTarget rt(g.device, kSceneWidth, kSceneHeight,
+                       wgpu::TextureFormat::R32Float);
+  REQUIRE(rt.IsValid());
+
+  SceneRenderer renderer;
+  renderer.Initialize(g.device, g.queue, g.gen.get(),
+                      wgpu::TextureFormat::R32Float, kSceneWidth, kSceneHeight,
+                      g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
+  renderer.MutableFogConfig().enabled = false;  // would haze the readback
+
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    renderer.Render(camera, registry, scene_context, rt.GetView());
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback readback(g.instance, g.device, g.queue);
+  return readback.ReadTextureSync(rt.GetTexture(), kSceneWidth, kSceneHeight,
+                                  wgpu::TextureFormat::R32Float);
+}
+
+}  // namespace
+
+TEST_CASE("SceneRenderer draws SceneContext::instanced_fields (empty registry, "
+          "zero ForwardOpaqueRenderable)",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildDeferredForwardField(g, GBuffer::kDepthFormat);
+  const Camera camera = MakeSceneCamera();
+
+  const glm::vec3 deferred_world(kFieldInstanceCenter.x - kFieldSubmeshOffset,
+                                 kFieldInstanceCenter.y, -5.0f);
+  const glm::vec3 forward_world(kFieldInstanceCenter.x + kFieldSubmeshOffset,
+                                kFieldInstanceCenter.y, -5.0f);
+  // Well clear of either submesh's quad but still comfortably inside the
+  // frustum (fov=60/aspect=1 at z=-5 gives a +/-2.887 half-extent) -- must
+  // stay background in every render below; the discriminator for "was
+  // anything drawn here".
+  const glm::vec3 background_world(2.0f, 2.0f, -5.0f);
+
+  std::array<InstancedMeshField*, 1> fields = {fx->field.get()};
+
+  SECTION("with the field: both submeshes are visible") {
+    const CpuImage image = RenderSceneWithFields(g, camera, std::span(fields));
+
+    const float deferred_red = SceneRedAt(image, camera, deferred_world);
+    const float forward_red = SceneRedAt(image, camera, forward_world);
+    const float background_red = SceneRedAt(image, camera, background_world);
+    INFO("deferred = " << deferred_red << " forward = " << forward_red
+                       << " background = " << background_red);
+
+    // Presence at the expected screen regions, not exact equality with raw
+    // G-buffer/material values (this is the fully-lit, tonemapped result of
+    // the real deferred + forward-opaque pipeline) -- see the task brief.
+    CHECK(deferred_red > background_red + 0.05f);
+    CHECK(forward_red > background_red + 0.05f);
+  }
+
+  SECTION("instanced_field_count = 0: the no-field path is unaffected") {
+    const CpuImage image = RenderSceneWithFields(
+        g, camera, std::span<InstancedMeshField* const>());
+
+    const float deferred_red = SceneRedAt(image, camera, deferred_world);
+    const float forward_red = SceneRedAt(image, camera, forward_world);
+    const float background_red = SceneRedAt(image, camera, background_world);
+    INFO("deferred = " << deferred_red << " forward = " << forward_red
+                       << " background = " << background_red);
+
+    CHECK(std::abs(deferred_red - background_red) < 0.05f);
+    CHECK(std::abs(forward_red - background_red) < 0.05f);
+  }
 }

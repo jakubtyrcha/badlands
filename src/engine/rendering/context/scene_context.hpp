@@ -29,6 +29,7 @@ namespace badlands {
 class DebugLineBuffer;
 class ScenePostPass;
 struct ProjectedDecal;
+class InstancedMeshField;
 
 // SceneContext holds scene-level state written by SceneGraph::SyncToRegistry
 // and read by (future) rendering passes. See the trim note above — this is
@@ -102,6 +103,13 @@ struct SceneContext {
   // too. See engine/rendering/projected_decal.hpp.
   const ProjectedDecal* decals = nullptr;
   uint32_t decal_count = 0;
+
+  // Optional GPU-culled instanced mesh fields: culled (compute) before Pass 0,
+  // drawn into the deferred G-buffer + forward-opaque passes. Not owned; must
+  // outlive the frame. Null/0 = none. Carried here (not a renderer member) so
+  // headless --screenshot renders them too.
+  InstancedMeshField* const* instanced_fields = nullptr;
+  uint32_t instanced_field_count = 0;
 };
 
 }  // namespace badlands
