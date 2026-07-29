@@ -121,23 +121,46 @@ Three things this buys:
 One new constant, `evaporation_m_per_s`. Per the numbers in "Why", most lakes
 will land in the exorheic branch; the branch that matters is the dry one.
 
-## Part 4 — Narrow the routing exclusion
+## Part 4 — Tag lake cells, and make the tag an INPUT to routing
 
-Exclude from steepest descent only cells belonging to a **component whose
-maximum ponded depth exceeds `kPondedMinDepthM`** — not every cell with
-`water_level > h`.
+Exclude from steepest descent exactly the cells carrying a **lake tag**, instead
+of every cell with `water_level > h`.
 
-**Component-level, not cell-level, and that is load-bearing.** A per-cell
-threshold would let a real lake's shallow margin route by steepest descent while
-its interior did not, reintroducing invented rim exits exactly at the margin.
-Testing the component keeps genuine lakes wholly excluded and lets ε-shallow
-flats route by gradient in their entirety.
+```cpp
+FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m,
+                       const Field2D<uint8_t>* lake_tag = nullptr);
+```
 
-`micro_fill` already uses a 0.75 m cap (`kMicroFillCapM`) for this same class of
-"not really a lake" depression; `kPondedMinDepthM` should start there.
+**Per-cell tagging, not a per-cell depth test.** The two are not the same, and
+only one is safe. A depth test (`water_level - h > threshold`) leaves a real
+lake's shallow margin untagged; inside a lake `hf` is nearly flat at the spill
+level, so a margin cell's steepest descent can find a dry neighbour below its
+ε-inflated `hf` — and a dry rim cell is only ever guaranteed to sit above the
+level of *whichever cell claimed it*, which may have popped much earlier and
+lower. That is the invented-exit failure from Stage 1, reappearing at the
+shoreline. A tag meaning "belongs to a resolved lake" has no such hole: the
+margin is in the lake, so it stays excluded with the rest of its component.
+
+**Taking the tag as an input, rather than deriving it inside `route_flow`,
+resolves an ordering circularity.** The tag depends on Part 3's water balance →
+which needs catchment area → which needs the receiver graph → which needs the
+exclusion. Derived internally, that forces a two-pass routing solve. Supplied
+externally, it does not arise, and `carve_cavities` **already returns a per-cell
+mask**, so seeded lakes need no analysis at all.
+
+Pass 1 still floods: spurious pits still need filling and `water_level` is still
+wanted. Only pass 2's exclusion changes.
+
+**Where the tag comes from inside the loop.** Emergent lakes are not known until
+they have been resolved, so iteration *N* is fed the tag resolved at *N−1*, and
+iteration 1 uses the seeded mask alone. That is a relaxation rather than an
+approximation error — the terrain is changing underneath it regardless — but it
+does mean an emergent lake is routed as ordinary terrain for one iteration
+before it is recognised. `erode()` therefore needs the basin mask threaded in,
+which it does not currently take.
 
 Expected effect: the 33–45% of channel texels currently flood-parent routed
-drops toward zero, since ε-flats pond only micrometres.
+drops toward zero, since ε-flats pond only micrometres and never earn a tag.
 
 ## Interface changes
 
@@ -150,7 +173,11 @@ drops toward zero, since ε-flats pond only micrometres.
 - `RiverNode`: add `LakeKind` alongside the existing `lake_id`.
 - `carve_cavities` gains the notch pass, so it needs the component labelling it
   does not currently do.
-- New `kPondedMinDepthM` in `erosion.hpp`.
+- `route_flow` takes an optional `const Field2D<uint8_t>* lake_tag`. Passing
+  null keeps today's behaviour (exclude every `in_lake` cell), so existing
+  callers and tests are unaffected.
+- `erode()` takes the basin mask, which it does not currently receive; it owns
+  the per-iteration tag and hands it to `route_flow`.
 
 ## Testing
 
@@ -166,7 +193,7 @@ Artificial heightmaps as in the river-graph work — the two builders
 | Pit with large catchment | fills to spill, kind == Emergent, exorheic |
 | Depression with intermediate catchment | endorheic: level strictly below spill, `A_lake(level) == A_bal` to tolerance |
 | Broad ε-flat, no real ponding | every cell routes by steepest descent; 0% flood-parent routed |
-| Real lake with a shallow margin | the WHOLE component stays excluded; component exit count does not grow vs today |
+| Real lake with a shallow margin | the WHOLE component stays tagged and excluded; component exit count does not grow vs today. This is the case a per-cell DEPTH test fails and a per-cell TAG passes — worth testing both ways once, to pin why the tag exists |
 | Valley → notched lake → outlet | the graph has LakeInlet, LakeOutlet and a river resuming below the notch |
 
 Plus the production measurement as an explicit check, not just eyeballing:
@@ -183,7 +210,11 @@ Plus the production measurement as an explicit check, not just eyeballing:
   tests (`erosion_tests.cpp:481`, `:608`) must be re-checked.
 - **The multi-exit issue is untouched.** Components can still have several
   exits (pre-existing, 4-connected labels vs 8-connected receivers). Part 4
-  must not make it worse — hence the component-level test above.
+  must not make it worse — hence tagging whole lakes rather than deep cells.
+- **One-iteration lag.** An emergent lake routes as ordinary terrain for the
+  iteration before it is recognised. Measure whether that visibly changes where
+  emergent lakes settle; if it does, seed the tag from a cheap ponding test on
+  iteration 1 instead of from the seeded mask alone.
 
 ## Deferred
 
