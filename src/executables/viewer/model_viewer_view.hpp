@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,6 +30,7 @@
 #include "engine/scene/scene_graph.hpp"
 #include "game/geometry/leaf_texture.hpp"
 #include "game/geometry/tree_options.hpp"  // TreeOptions
+#include "game/visual/tree_field.hpp"       // TreeField, BuildTreeField
 
 namespace badlands {
 
@@ -56,10 +58,11 @@ class ModelViewerView : public AppView {
     initial_shadow_debug_mode_ = mode;
   }
 
-  // Selects the initial LOD level (headless `--lod <n>`, 0..2). Call before
-  // Initialize() -- RebuildScene() reads lod_level_ when generating tree
-  // meshes.
-  void SetInitialLod(int lod) { lod_level_ = std::clamp(lod, 0, 2); }
+  // Selects the initial LOD level (headless `--lod <n>`, 0..3; 3 = "Multi",
+  // a 16x16 instanced grid of the selected tree with dynamic GPU LOD). Call
+  // before Initialize() -- RebuildScene() reads lod_level_ when generating
+  // tree meshes.
+  void SetInitialLod(int lod) { lod_level_ = std::clamp(lod, 0, 3); }
 
  private:
   // The output of a generator: a mesh plus the transform that places it. The
@@ -106,8 +109,10 @@ class ModelViewerView : public AppView {
   int generator_index_ = 0;
 
   // Manual LOD switch (tree generators only): 0=full detail, 1/2=meshopt
-  // simplified per kLodRatios. bark_tris_/leaf_tris_ are the resulting
-  // triangle counts, recomputed in RebuildScene for the ImGui readout.
+  // simplified per kLodRatios, 3="Multi" (a 16x16 instanced grid via
+  // tree_field_, dynamic GPU LOD -- see RebuildScene). bark_tris_/leaf_tris_
+  // are the single-tree (0/1/2) triangle counts, recomputed in RebuildScene
+  // for the ImGui readout; not meaningful in Multi mode.
   int lod_level_ = 0;
   int bark_tris_ = 0;
   int leaf_tris_ = 0;
@@ -122,6 +127,20 @@ class ModelViewerView : public AppView {
   wgpu::Texture leaf_texture_;
   wgpu::TextureView leaf_view_;
   wgpu::Sampler leaf_sampler_;
+
+  // GPU pipeline generator, stashed from Initialize()'s RenderContext --
+  // BuildTreeField (called from RebuildScene, not Initialize, since it needs
+  // the currently-selected TreeOptions) needs it to build the instanced
+  // material factories. Not owned; outlives this view (see render_context.hpp).
+  GpuPipelineGenerator* pipeline_gen_ = nullptr;
+
+  // Multi-mode instanced tree grid. Built in RebuildScene when lod_level_==3,
+  // reset (and scene_context_.instanced_field_count cleared) otherwise.
+  // field_ptr_ is the stable single-element array scene_context_.
+  // instanced_fields points at (SceneContext::instanced_fields is
+  // InstancedMeshField* const*, an array of field pointers).
+  std::unique_ptr<TreeField> tree_field_;
+  InstancedMeshField* field_ptr_ = nullptr;
 
   ShadowDebugMode initial_shadow_debug_mode_ = ShadowDebugMode::Off;
 

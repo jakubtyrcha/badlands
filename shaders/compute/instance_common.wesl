@@ -10,7 +10,7 @@ struct CullConfig {
     planes: array<vec4<f32>, 6>,   // 6 inward-facing frustum planes (a,b,c,d)
     cameraWorldPos: vec4<f32>,     // xyz = camera world position, w unused
     lodThresholds: vec4<f32>,      // x=t0, y=t1 (kMaxLods-1 thresholds); z,w unused
-    counts: vec4<u32>,             // x=instanceCount, y=numBuckets, z=compactedCapacity, w unused
+    counts: vec4<u32>,             // x=instanceCount, y=numBuckets, z=compactedCapacity, w = numSubmeshes
 }
 
 // Static per-instance input. Mirrors GpuInstanceRenderer::InstanceInput

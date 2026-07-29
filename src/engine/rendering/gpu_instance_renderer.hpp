@@ -17,9 +17,18 @@
 // CPU-known per-draw constant. No per-frame readback of the offsets. Phase C's
 // single bucket is the trivial 1-model/1-lod case (`bucketBase=[0]`).
 //
+// Submesh dimension: a bucket's ONE compacted transform slice can drive
+// SEVERAL draws — e.g. distinct geometry/materials in different render
+// passes — by adding a `submesh` index orthogonal to `bucket`. Indirect-args
+// and mesh bindings are addressed per SLOT (`bucket*GetNumSubmeshes()+submesh`);
+// the scan still computes exactly one survivor count per bucket and publishes
+// it into every one of that bucket's submesh slots, so all submeshes of a
+// bucket draw the SAME survivors. `num_submeshes=1` (the default) is the
+// original single-draw-per-bucket behavior.
+//
 // The caller resolves and binds whatever RenderingMaterialInstance it wants per
-// bucket (e.g. via MaterialInstanceCache — see the tests) and hands them to
-// `Draw()` through a per-bucket callback; this class never reaches into a
+// (bucket, submesh) (e.g. via MaterialInstanceCache — see the tests) and hands
+// them to `Draw()` through a callback; this class never reaches into a
 // material cache, scene, or ECS itself.
 //
 // Sequencing: `Cull()` dispatches THREE compute passes on `frame`'s encoder and
@@ -67,12 +76,15 @@ class GpuInstanceRenderer {
   // `capacity` upper-bounds the instance-input set. `num_models` is the number
   // of distinct model ids (buckets = num_models*kMaxLods). `lod_thresholds` are
   // the kMaxLods-1 ascending distance cutoffs (LOD0 for dist < [0], LOD1 for
-  // dist < [1], … coarsest otherwise). Compiles the three compute pipelines
-  // immediately; IsValid() reports whether that succeeded.
+  // dist < [1], … coarsest otherwise). `num_submeshes` (clamped >= 1) is the
+  // number of draw slots per bucket — see the class comment's submesh section;
+  // 1 (the default) is a single draw per bucket. Compiles the three compute
+  // pipelines immediately; IsValid() reports whether that succeeded.
   GpuInstanceRenderer(wgpu::Device device, wgpu::Queue queue,
                       GpuPipelineGenerator& pipeline_generator,
                       uint32_t capacity, uint32_t num_models,
-                      std::array<float, kMaxLods - 1> lod_thresholds);
+                      std::array<float, kMaxLods - 1> lod_thresholds,
+                      uint32_t num_submeshes = 1);
 
   bool IsValid() const {
     return classify_pipeline_ != nullptr && scan_pipeline_ != nullptr &&
@@ -82,6 +94,7 @@ class GpuInstanceRenderer {
   uint32_t GetCapacity() const { return capacity_; }
   uint32_t GetNumModels() const { return num_models_; }
   uint32_t GetNumBuckets() const { return num_buckets_; }
+  uint32_t GetNumSubmeshes() const { return num_submeshes_; }
   // The bucket id a given (model, lod) routes to — the CPU-known per-draw
   // constant the vertex shader uses to look up its base offset.
   static uint32_t BucketId(uint32_t model_id, uint32_t lod) {
@@ -92,15 +105,17 @@ class GpuInstanceRenderer {
   // <= capacity (larger inputs are truncated, logged as an error).
   void UploadInstances(std::span<const InstanceInput> instances);
 
-  // Configure a bucket's geometry (the mesh drawn per surviving instance in that
-  // bucket) and pre-fill its indirect-args indexCount (firstIndex/baseVertex
-  // stay 0 -- each bucket binds its own index buffer, so no shared-buffer
-  // offset is needed). The vertex layout must match whatever instanced
-  // material `Draw()` later resolves for the bucket. Buckets left unconfigured
-  // (index_count 0) are skipped by Draw(). `bucket` must be < GetNumBuckets().
-  void SetBucketMesh(uint32_t bucket, wgpu::Buffer vertex_buffer,
-                     wgpu::Buffer index_buffer, wgpu::IndexFormat index_format,
-                     uint32_t index_count);
+  // Configure one (bucket, submesh) slot's geometry (the mesh drawn per
+  // surviving instance of `bucket` for this submesh) and pre-fill its
+  // indirect-args indexCount (firstIndex/baseVertex stay 0 -- each slot binds
+  // its own index buffer, so no shared-buffer offset is needed). The vertex
+  // layout must match whatever instanced material `Draw()` later resolves for
+  // the slot. Slot = bucket*GetNumSubmeshes()+submesh; slots left unconfigured
+  // (index_count 0) are skipped by Draw(). `bucket` must be < GetNumBuckets(),
+  // `submesh` must be < GetNumSubmeshes().
+  void SetBucketSubmesh(uint32_t bucket, uint32_t submesh,
+                        wgpu::Buffer vertex_buffer, wgpu::Buffer index_buffer,
+                        wgpu::IndexFormat index_format, uint32_t index_count);
 
   // Clears the per-bucket counts, derives the world-space frustum + camera
   // position from `camera`, uploads the cull config (frustum + thresholds +
@@ -109,22 +124,24 @@ class GpuInstanceRenderer {
   // (must precede BeginRenderPass).
   void Cull(FrameContext& frame, const Camera& camera);
 
-  // Per-bucket material resolver: given a bucket id, return the material
-  // instance to render that bucket with — already bound (pipeline + group 0 with
-  // its `bucketId` param == this bucket + any pass-specific group-2 engine
-  // resources) — or nullptr to skip the bucket. Draw() then binds group 1
-  // (compacted + bucketBase) on it, sets the bucket's mesh, and issues the
-  // bucket's DrawIndexedIndirect.
-  using BucketMaterialFn =
-      std::function<RenderingMaterialInstance*(uint32_t bucket)>;
+  // Per-(bucket,submesh) material resolver: given a bucket id and submesh
+  // index, return the material instance to render that slot with — already
+  // bound (pipeline + group 0 with its `bucketId` param == this bucket + any
+  // pass-specific group-2 engine resources) — or nullptr to skip the slot.
+  // Draw() then binds group 1 (compacted + bucketBase) on it, sets the slot's
+  // mesh, and issues the slot's DrawIndexedIndirect. All submeshes of a bucket
+  // share the SAME bucketBase entry, so they draw the same compacted slice.
+  using BucketSubmeshMaterialFn = std::function<RenderingMaterialInstance*(
+      uint32_t bucket, uint32_t submesh)>;
 
-  // Issues one DrawIndexedIndirect per configured bucket, indexing the
-  // GPU-computed per-bucket offsets via the vertex shader (see the class
-  // comment). Buckets with a GPU survivor count of 0 draw nothing automatically
-  // (indirect instanceCount == 0) — no CPU readback of the counts is needed.
-  // Called inside an active render pass, after Cull() on the same encoder.
+  // Issues one DrawIndexedIndirect per configured (bucket, submesh) slot,
+  // indexing the GPU-computed per-bucket offsets via the vertex shader (see
+  // the class comment). Slots with a GPU survivor count of 0 draw nothing
+  // automatically (indirect instanceCount == 0) — no CPU readback of the
+  // counts is needed. Called inside an active render pass, after Cull() on the
+  // same encoder.
   void Draw(RenderPassContext& pass, FrameContext& frame,
-            const BucketMaterialFn& material_for_bucket) const;
+            const BucketSubmeshMaterialFn& material_for_bucket_submesh) const;
 
   // Test/debug readback accessors (all created with CopySrc). The compacted
   // transforms, the per-bucket counts, the per-bucket bases (prefix-sum output),
@@ -143,6 +160,7 @@ class GpuInstanceRenderer {
   wgpu::Queue queue_;
   uint32_t capacity_ = 0;
   uint32_t num_models_ = 0;
+  uint32_t num_submeshes_ = 1;
   uint32_t num_buckets_ = 0;
   uint32_t compacted_capacity_ = 0;  // slots in compacted_buffer_ (== capacity_; tight packing, no padding)
   uint32_t instance_count_ = 0;
@@ -159,19 +177,19 @@ class GpuInstanceRenderer {
   wgpu::Buffer bucket_base_buffer_;          // u32[numBuckets] (scan output)
   wgpu::Buffer write_cursor_buffer_;         // atomic<u32>[numBuckets]
   wgpu::Buffer compacted_buffer_;            // mat4x4<f32>[compacted_capacity_]
-  wgpu::Buffer args_buffer_;                 // IndirectArgs[numBuckets]
+  wgpu::Buffer args_buffer_;  // IndirectArgs[numBuckets*numSubmeshes], slot = bucket*numSubmeshes+submesh
 
   wgpu::BindGroup classify_bind_group_;
   wgpu::BindGroup scan_bind_group_;
   wgpu::BindGroup scatter_bind_group_;
 
-  struct BucketMesh {
+  struct SubmeshMesh {
     wgpu::Buffer vertex_buffer;
     wgpu::Buffer index_buffer;
     wgpu::IndexFormat index_format = wgpu::IndexFormat::Uint32;
     uint32_t index_count = 0;
   };
-  std::vector<BucketMesh> bucket_meshes_;  // size num_buckets_
+  std::vector<SubmeshMesh> submesh_meshes_;  // size num_buckets_ * num_submeshes_
 };
 
 }  // namespace badlands

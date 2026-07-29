@@ -22,7 +22,7 @@ struct CullConfigData {
   std::array<glm::vec4, 6> planes{};
   glm::vec4 camera_world_pos{0.0f};
   glm::vec4 lod_thresholds{0.0f};  // x=t0, y=t1 (kMaxLods-1); z,w unused
-  glm::uvec4 counts{0u};  // x=instanceCount, y=numBuckets, z=compactedCapacity
+  glm::uvec4 counts{0u};  // x=instanceCount, y=numBuckets, z=compactedCapacity, w=numSubmeshes
 };
 static_assert(sizeof(CullConfigData) == 144);
 
@@ -58,11 +58,13 @@ wgpu::BindGroupEntry StorageEntry(uint32_t binding, wgpu::Buffer buffer) {
 GpuInstanceRenderer::GpuInstanceRenderer(
     wgpu::Device device, wgpu::Queue queue,
     GpuPipelineGenerator& pipeline_generator, uint32_t capacity,
-    uint32_t num_models, std::array<float, kMaxLods - 1> lod_thresholds)
+    uint32_t num_models, std::array<float, kMaxLods - 1> lod_thresholds,
+    uint32_t num_submeshes)
     : device_(device),
       queue_(queue),
       capacity_(capacity),
       num_models_(std::max(1u, num_models)),
+      num_submeshes_(std::max(1u, num_submeshes)),
       lod_thresholds_(lod_thresholds) {
   num_buckets_ = num_models_ * kMaxLods;
 
@@ -107,18 +109,21 @@ GpuInstanceRenderer::GpuInstanceRenderer(
   compacted_buffer_ =
       MakeBuffer(device_, uint64_t{compacted_capacity_} * sizeof(glm::mat4),
                  wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+  const uint32_t num_slots = num_buckets_ * num_submeshes_;
   args_buffer_ =
-      MakeBuffer(device_, uint64_t{num_buckets_} * sizeof(IndirectArgsData),
+      MakeBuffer(device_, uint64_t{num_slots} * sizeof(IndirectArgsData),
                  wgpu::BufferUsage::Indirect | wgpu::BufferUsage::Storage |
                      wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc);
 
-  // Zero the indirect args (index/instance/first/base all 0). SetBucketMesh
-  // fills in each configured bucket's indexCount; the scan fills instanceCount.
-  std::vector<IndirectArgsData> zero_args(num_buckets_);
+  // Zero the indirect args (index/instance/first/base all 0), one slot per
+  // (bucket, submesh). SetBucketSubmesh fills in each configured slot's
+  // indexCount; the scan fills instanceCount (the same count, broadcast to
+  // every submesh slot of a bucket).
+  std::vector<IndirectArgsData> zero_args(num_slots);
   queue_.WriteBuffer(args_buffer_, 0, zero_args.data(),
                      zero_args.size() * sizeof(IndirectArgsData));
 
-  bucket_meshes_.resize(num_buckets_);
+  submesh_meshes_.resize(num_slots);
 
   // Bind groups reference stable buffer OBJECTS (contents overwritten in place),
   // so build them once. All three passes bind only group 0. Each pass declares
@@ -171,30 +176,34 @@ void GpuInstanceRenderer::UploadInstances(
   }
 }
 
-void GpuInstanceRenderer::SetBucketMesh(uint32_t bucket,
-                                        wgpu::Buffer vertex_buffer,
-                                        wgpu::Buffer index_buffer,
-                                        wgpu::IndexFormat index_format,
-                                        uint32_t index_count) {
-  if (!IsValid() || bucket >= num_buckets_) {
-    spdlog::error("GpuInstanceRenderer::SetBucketMesh: bucket {} out of range {}",
-                  bucket, num_buckets_);
+void GpuInstanceRenderer::SetBucketSubmesh(uint32_t bucket, uint32_t submesh,
+                                           wgpu::Buffer vertex_buffer,
+                                           wgpu::Buffer index_buffer,
+                                           wgpu::IndexFormat index_format,
+                                           uint32_t index_count) {
+  if (!IsValid() || bucket >= num_buckets_ || submesh >= num_submeshes_) {
+    spdlog::error(
+        "GpuInstanceRenderer::SetBucketSubmesh: (bucket {}, submesh {}) out of "
+        "range ({}, {})",
+        bucket, submesh, num_buckets_, num_submeshes_);
     return;
   }
-  bucket_meshes_[bucket] = {vertex_buffer, index_buffer, index_format,
-                            index_count};
+  const uint32_t slot = bucket * num_submeshes_ + submesh;
+  submesh_meshes_[slot] = {vertex_buffer, index_buffer, index_format,
+                           index_count};
 
-  // Pre-fill this bucket's indirect-args GEOMETRY fields only, WITHOUT touching
-  // instanceCount@4: the scan publishes that every Cull(), and SetBucketMesh may
-  // be called AFTER Cull() (e.g. to swap a bucket's mesh) -- writing the whole
-  // 20-byte struct here would zero the bucket's GPU-published survivor count.
-  // Two targeted writes straddle the instanceCount slot (struct layout:
-  // indexCount@0, instanceCount@4, firstIndex@8, baseVertex@12, firstInstance@16):
+  // Pre-fill this slot's indirect-args GEOMETRY fields only, WITHOUT touching
+  // instanceCount@4: the scan publishes that every Cull() (broadcast to every
+  // submesh slot of the bucket), and SetBucketSubmesh may be called AFTER
+  // Cull() (e.g. to swap a slot's mesh) -- writing the whole 20-byte struct
+  // here would zero the slot's GPU-published survivor count. Two targeted
+  // writes straddle the instanceCount slot (struct layout: indexCount@0,
+  // instanceCount@4, firstIndex@8, baseVertex@12, firstInstance@16):
   //   [0..4)   indexCount
   //   [8..20)  firstIndex + baseVertex + firstInstance (all 0)
   IndirectArgsData args{};
   args.index_count = index_count;
-  const uint64_t base = uint64_t{bucket} * sizeof(IndirectArgsData);
+  const uint64_t base = uint64_t{slot} * sizeof(IndirectArgsData);
   queue_.WriteBuffer(args_buffer_, base, &args.index_count, sizeof(uint32_t));
   queue_.WriteBuffer(args_buffer_, base + 8, &args.first_index,
                      3 * sizeof(uint32_t));
@@ -216,8 +225,8 @@ void GpuInstanceRenderer::Cull(FrameContext& frame, const Camera& camera) {
   for (uint32_t i = 0; i < kMaxLods - 1; ++i) {
     config.lod_thresholds[static_cast<int>(i)] = lod_thresholds_[i];
   }
-  config.counts =
-      glm::uvec4(instance_count_, num_buckets_, compacted_capacity_, 0u);
+  config.counts = glm::uvec4(instance_count_, num_buckets_, compacted_capacity_,
+                             num_submeshes_);
   queue_.WriteBuffer(config_buffer_, 0, &config, sizeof(config));
 
   // Clear the per-bucket counts before classify atomicAdds into them. The scan
@@ -263,28 +272,32 @@ void GpuInstanceRenderer::Cull(FrameContext& frame, const Camera& camera) {
 
 void GpuInstanceRenderer::Draw(
     RenderPassContext& pass, FrameContext& frame,
-    const BucketMaterialFn& material_for_bucket) const {
+    const BucketSubmeshMaterialFn& material_for_bucket_submesh) const {
   if (!IsValid()) {
     return;
   }
   for (uint32_t bucket = 0; bucket < num_buckets_; ++bucket) {
-    const BucketMesh& mesh = bucket_meshes_[bucket];
-    if (!mesh.vertex_buffer || !mesh.index_buffer || mesh.index_count == 0) {
-      continue;  // bucket has no geometry configured
+    for (uint32_t submesh = 0; submesh < num_submeshes_; ++submesh) {
+      const uint32_t slot = bucket * num_submeshes_ + submesh;
+      const SubmeshMesh& mesh = submesh_meshes_[slot];
+      if (!mesh.vertex_buffer || !mesh.index_buffer || mesh.index_count == 0) {
+        continue;  // slot has no geometry configured
+      }
+      RenderingMaterialInstance* material =
+          material_for_bucket_submesh(bucket, submesh);
+      if (!material) {
+        continue;  // caller opted out of this slot
+      }
+      if (!material->BindInstanceData(pass, frame, compacted_buffer_,
+                                      bucket_base_buffer_)) {
+        continue;  // not an instanced material
+      }
+      pass.SetVertexBuffer(0, mesh.vertex_buffer);
+      pass.SetIndexBuffer(mesh.index_buffer, mesh.index_format);
+      // Slots with 0 survivors draw nothing (indirect instanceCount == 0).
+      pass.DrawIndexedIndirect(args_buffer_,
+                               uint64_t{slot} * sizeof(IndirectArgsData));
     }
-    RenderingMaterialInstance* material = material_for_bucket(bucket);
-    if (!material) {
-      continue;  // caller opted out of this bucket
-    }
-    if (!material->BindInstanceData(pass, frame, compacted_buffer_,
-                                    bucket_base_buffer_)) {
-      continue;  // not an instanced material
-    }
-    pass.SetVertexBuffer(0, mesh.vertex_buffer);
-    pass.SetIndexBuffer(mesh.index_buffer, mesh.index_format);
-    // Buckets with 0 survivors draw nothing (indirect instanceCount == 0).
-    pass.DrawIndexedIndirect(args_buffer_,
-                             uint64_t{bucket} * sizeof(IndirectArgsData));
   }
 }
 

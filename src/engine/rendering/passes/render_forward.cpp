@@ -143,10 +143,14 @@ wgpu::BindGroup BuildForwardEngineBindGroup(RenderingMaterialInstance* instance,
                                 entries);
 }
 
-// Build the @group(2) engine bind group for the forward-OPAQUE pass: shadow
-// map + IBL only (no scene_depth/scene_color — scene_depth is also the
-// opaque pass's writable depth attachment, a Dawn read-write aliasing hazard,
-// and scene_color is stale at opaque time). Used by RenderForwardMeshes only;
+}  // namespace
+
+// Definition of the hoisted declaration in render_forward.hpp: shadow map +
+// IBL only (no scene_depth/scene_color — scene_depth is also the opaque
+// pass's writable depth attachment, a Dawn read-write aliasing hazard, and
+// scene_color is stale at opaque time). Used by RenderForwardMeshes below and
+// by InstancedMeshField (instanced_mesh_field.cpp), which shares this exact
+// 6-entry layout for its forward-opaque group-2 submeshes.
 // RenderForwardTransparentMeshes keeps the full 9-entry
 // BuildForwardEngineBindGroup above (water genuinely needs scene depth/color).
 wgpu::BindGroup BuildForwardOpaqueEngineBindGroup(RenderingMaterialInstance* instance,
@@ -162,7 +166,17 @@ wgpu::BindGroup BuildForwardOpaqueEngineBindGroup(RenderingMaterialInstance* ins
   return frame.CreateBindGroup(instance->GetPipeline().GetBindGroupLayout(2), entries);
 }
 
-}  // namespace
+// Definition of the hoisted declaration in render_forward.hpp: the
+// availability gate for the forward-opaque @group(2) bind (shadow map + IBL
+// — never scene_depth, which is the opaque pass's own writable depth
+// attachment). Shared by RenderForwardMeshes below and InstancedMeshField
+// (instanced_mesh_field.cpp), which drives the identical gate for its
+// forward-opaque submeshes.
+bool ForwardOpaqueEngineAvailable(const ForwardEngineResources& engine) {
+  return static_cast<bool>(engine.shadow_map) &&
+        static_cast<bool>(engine.ibl_prefiltered) &&
+        static_cast<bool>(engine.brdf_lut);
+}
 
 void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
                          entt::registry& registry,
@@ -175,10 +189,7 @@ void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
   // writable depth attachment). A standard_forward material REQUIRES @group(2),
   // so if these are absent we must skip such an entity rather than leave group
   // 2 unbound under a pipeline that requires it (a Dawn validation error).
-  const bool opaque_engine_available =
-      static_cast<bool>(engine.shadow_map) &&
-      static_cast<bool>(engine.ibl_prefiltered) &&
-      static_cast<bool>(engine.brdf_lut);
+  const bool opaque_engine_available = ForwardOpaqueEngineAvailable(engine);
 
   // The @group(2) engine bind group is identical for every draw, so build it
   // once (lazily, from the first material that declares group 2). Mirrors

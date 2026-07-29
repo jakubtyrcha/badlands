@@ -150,6 +150,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/material/standard_material_factory.cpp
     src/engine/rendering/material/standard_rendering_material_instance.cpp
     src/engine/rendering/gpu_instance_renderer.cpp
+    src/engine/rendering/instanced_mesh_field.cpp
     src/engine/rendering/geometry/aabb.cpp
     src/engine/rendering/geometry/cube_sphere.cpp
     src/engine/rendering/geometry/textured_mesh_builders.cpp
@@ -364,7 +365,10 @@ set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
     src/executables/viewer/model_viewer_view.cpp
     src/game/geometry/tree_generator.cpp
-    src/game/geometry/leaf_texture.cpp)
+    src/game/geometry/leaf_texture.cpp
+    # Multi-mode instanced tree grid (Task 4): builds an InstancedMeshField
+    # from a catalog TreeOptions -- see game/visual/tree_field.hpp.
+    src/game/visual/tree_field.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
