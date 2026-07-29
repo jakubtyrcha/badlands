@@ -51,7 +51,11 @@ const float kYawIncrement = glm::radians(137.508f);
 // Larger than the single-tree kFloorSize -- the 16x16 grid at kGridSpacing
 // spans 60 world units; 80 gives it a visible margin.
 constexpr float kMultiFloorSize = 80.0f;
-constexpr std::array<float, 2> kMultiLodThresholds = {25.0f, 50.0f};
+// GPU LOD thresholds (near/mid boundaries) sized to the default orbit framing
+// of the 16x16, 4.0-spacing grid. Measured instance distances range ~65–139,
+// so these thresholds partition the grid into near/mid/far rows with visible
+// geometric detail contrast between LOD bands.
+constexpr std::array<float, 2> kMultiLodThresholds = {80.0f, 105.0f};
 
 }  // namespace
 
