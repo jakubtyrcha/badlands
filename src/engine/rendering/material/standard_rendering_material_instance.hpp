@@ -44,6 +44,12 @@ class StandardRenderingMaterialInstance : public RenderingMaterialInstance {
  private:
   void BuildParameterMap() const;
 
+  // Lazily create + cache a zero-filled group-0 params UBO of `size` bytes, for
+  // an instanced material bound with NO SetParameter: MaterialInstance builds no
+  // constants buffer then, but the shader still declares the group-0 UBO and
+  // Dawn requires every layout binding present at draw. Returns null if size==0.
+  wgpu::Buffer GetOrCreateZeroedParamsBuffer(wgpu::Device device, uint32_t size);
+
   const MeshRenderingMaterial* material_;
   std::unique_ptr<MaterialInstance> instance_;
   GeometryType geometry_type_;
@@ -63,6 +69,10 @@ class StandardRenderingMaterialInstance : public RenderingMaterialInstance {
   wgpu::BindGroup cached_instance_bind_group_;
   wgpu::Buffer cached_instance_compacted_;
   wgpu::Buffer cached_instance_bucket_base_;
+
+  // Zero-filled stand-in for the group-0 params UBO when an instanced material
+  // is bound without any SetParameter (see GetOrCreateZeroedParamsBuffer).
+  wgpu::Buffer zeroed_params_buffer_;
 };
 
 }  // namespace badlands

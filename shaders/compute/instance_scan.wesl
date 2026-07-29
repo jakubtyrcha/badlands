@@ -12,13 +12,9 @@
 // GPU-driven design: the CPU never reads these offsets back — the draw's vertex
 // shader indexes compacted[bucketBase[bucketId] + instance_index] instead.
 
-// Mirrors GpuInstanceRenderer's CullConfigData byte-for-byte (144 bytes).
-struct CullConfig {
-    planes: array<vec4<f32>, 6>,
-    cameraWorldPos: vec4<f32>,
-    lodThresholds: vec4<f32>,
-    counts: vec4<u32>,             // x=instanceCount, y=numBuckets, z=compactedCapacity, w unused
-}
+// CullConfig (144B) is shared with the classify + scatter passes — see
+// shaders/compute/instance_common.wesl.
+import package::compute::instance_common::{CullConfig};
 
 // Standard 20-byte DrawIndexedIndirect args (one per bucket). indexCount /
 // firstIndex / baseVertex are CPU-prefilled per bucket geometry; the scan

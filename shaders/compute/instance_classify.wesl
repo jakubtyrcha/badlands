@@ -10,29 +10,14 @@
 // perInstanceBucket + bucketCount are consumed by the scan (pass 2) and scatter
 // (pass 3). Single input set, group-0 bindings, no dynamic offsets.
 
-// Mirrors GpuInstanceRenderer's CullConfigData byte-for-byte (144 bytes).
-struct CullConfig {
-    planes: array<vec4<f32>, 6>,   // 6 inward-facing frustum planes (a,b,c,d)
-    cameraWorldPos: vec4<f32>,     // xyz = camera world position, w unused
-    lodThresholds: vec4<f32>,      // x=t0, y=t1 (kMaxLods-1 thresholds); z,w unused
-    counts: vec4<u32>,             // x=instanceCount, y=numBuckets, z=compactedCapacity, w unused
-}
-
-// Static per-instance input. Mirrors GpuInstanceRenderer::InstanceInput
-// byte-for-byte (96 bytes).
-struct InstanceData {
-    transform: mat4x4<f32>,    // world transform
-    boundsSphere: vec4<f32>,   // xyz = world center, w = radius
-    modelInfo: vec4<u32>,      // x = model id (selects the bucket group)
-}
+// CullConfig (144B), InstanceData (96B), and SENTINEL are shared with the scan +
+// scatter passes — see shaders/compute/instance_common.wesl.
+import package::compute::instance_common::{CullConfig, InstanceData, SENTINEL};
 
 // Compile-time LOD count. `bucket = modelId*kMaxLods + lod`, so this must match
 // GpuInstanceRenderer::kMaxLods (the C++ side sizes bucket buffers as
 // numModels*kMaxLods). kMaxLods-1 distance thresholds live in lodThresholds.
 const kMaxLods: u32 = 3u;
-// Marks a culled (or out-of-range) instance in perInstanceBucket; the scatter
-// pass skips these. Distinct from any real bucket id (buckets are < numBuckets).
-const SENTINEL: u32 = 0xFFFFFFFFu;
 
 @group(0) @binding(0) var<uniform> config: CullConfig;
 @group(0) @binding(1) var<storage, read> instances: array<InstanceData>;
@@ -75,6 +60,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let dist = distance(inst.boundsSphere.xyz, config.cameraWorldPos.xyz);
     let lod = selectLod(dist);
+    // Guard the modelId BEFORE the `modelId*kMaxLods` multiply. A garbage
+    // modelId large enough that modelId*kMaxLods overflows u32 would WRAP to a
+    // small in-range value and defeat the post-multiply `bucket >= numBuckets`
+    // guard (e.g. 0x55555556*3 truncates to 2). numBuckets = numModels*kMaxLods,
+    // so numModels = numBuckets/kMaxLods; a modelId < numModels keeps
+    // modelId*kMaxLods + lod < numBuckets — the multiply can't overflow.
+    let numModels = config.counts.y / kMaxLods;
+    if (inst.modelInfo.x >= numModels) {
+        perInstanceBucket[i] = SENTINEL;
+        return;
+    }
     let bucket = inst.modelInfo.x * kMaxLods + lod;
     // Defensive: a modelId >= numModels would index a bucket past the buffers.
     if (bucket >= config.counts.y) {
