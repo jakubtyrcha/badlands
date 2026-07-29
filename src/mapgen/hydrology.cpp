@@ -7,7 +7,8 @@
 
 namespace badlands::mapgen {
 
-FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m) {
+FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m,
+                       const Field2D<uint8_t>* lake_tag) {
   const int w = h.width, ht = h.height;
   FlowRouting r;
   r.width = w; r.height = ht;
@@ -73,7 +74,7 @@ FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m) 
   //   - `order` is ascending in hf, so a receiver still pops before its
   //     donors and `order` remains topological — which incise, deposit and
   //     accumulate_drainage all depend on.
-  // FLOODED cells keep their pass-1 claim parent, and that exclusion is
+  // LAKE cells keep their pass-1 claim parent, and that exclusion is
   // load-bearing rather than an optimization. A lake surface is flat; the
   // epsilon tilt across it is bookkeeping to keep the graph acyclic, not a
   // physical slope. Running steepest descent on it invents downhill routes out
@@ -86,18 +87,33 @@ FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m) 
   // along the flood tree toward its sill, which is the structure deposit's
   // lake pour was written against.
   //
+  // WHICH cells count as lake is the caller's decision when `lake_tag` is
+  // supplied, and that matters a great deal. Falling back on `in_lake` treats
+  // every FLAT as a lake too — on level ground the flood front always arrives
+  // above the cell's own height — which measured 33-45% of channel texels
+  // routed by flood order rather than gradient. A caller-supplied tag marks
+  // only resolved lakes, so flats route by gradient like any dry cell.
+  //
+  // The tag must mark WHOLE lakes, never merely the deep cells of one. Inside
+  // a lake hf is nearly flat, so an untagged shallow margin can find a dry
+  // neighbour below its epsilon-inflated level and reinstate exactly the
+  // invented exits described above, at the shoreline.
+  //
   // This exclusion removes the tilt-induced exits; it does NOT make components
   // single-exit, and they never were. 4-connected component labels against an
   // 8-connected receiver graph already produced multi-exit components under
   // the old routing (33 of 82 on seed 2). See find_exit in erosion.cpp for
-  // what that costs and why fixing it belongs with the river graph.
+  // what that costs.
   //
   // Both rules strictly decrease water_level, so acyclicity and the
   // topological `order` hold either way.
   const float diag_m = texel_m * std::sqrt(2.0f);
+  const bool tagged = lake_tag != nullptr && lake_tag->data.size() == n;
   for (int i = 0; i < static_cast<int>(n); ++i) {
     if (r.receiver[i] < 0) continue;  // border: base level, keeps receiver -1
-    if (r.in_lake[i]) continue;       // flooded: keep the flood tree, see above
+    const bool is_lake = tagged ? lake_tag->data[static_cast<size_t>(i)] != 0
+                                : r.in_lake[i] != 0;
+    if (is_lake) continue;  // lake: keep the flood tree, see above
     const int cx = i % w, cy = i / w;
     const float hf_i = r.water_level[i];
     int32_t best = r.receiver[i];  // defensive fallback: the pass-1 parent

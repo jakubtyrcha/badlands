@@ -35,6 +35,15 @@ struct ErosionParams {
   float lake_frac = 0.08f;
   float min_lake_area_m2 = 400.0f;
   float min_lake_depth_m = 0.5f;
+  // Outlet notch depth for SEEDED basins. DISABLED (0) by default: the
+  // mechanism is exact on synthetic bowls but inert on production terrain,
+  // because seeded basins sit at bedrock minima out in the plains, where total
+  // relief is only kPlainsReliefM (2 m) and there is no lower ground for a
+  // channel to reach. Measured on seed 2: 100% of notch channels hit
+  // kMaxNotchSteps without ever meeting ground below them, so every one ends
+  // in a pit that floods with the bowl and leaves the level unmoved (9492 vs
+  // 9540 wet texels with and without). See carve_outlet_notches.
+  float notch_depth_m = 0.0f;
   int dump_every = 10;        // loop dump cadence (0 = off)
   int detail_octaves = 4;
   float detail_wavelength_m = 60.0f;
@@ -80,6 +89,14 @@ inline constexpr float kMicroFillCapM = 0.75f;  // deepest depression micro_fill
 // "Basin border rim (v1.3.1)".
 inline constexpr int kBasinBorderMarginTexels = 3;
 
+// Outlet-notch channel limits. The notch must run until it meets ground
+// already below it — lowering only the sill would leave a pit, which floods
+// together with the bowl and restores the original spill height. The cap
+// bounds how far a channel may trench when the downstream slope is very
+// gentle; hitting it means the notch only partially lowered the lake.
+inline constexpr int kMaxNotchSteps = 24;
+inline constexpr float kNotchStepDropM = 0.02f;
+
 // 4-connected components of the cells for which `flag[i]` is truthy, returned
 // in the order their lowest-index member is discovered — deterministic.
 // Used for lake components by micro_fill, deposit's lake pour, and the river
@@ -93,7 +110,26 @@ std::vector<std::vector<int>> label_lake_components(int w, int ht,
 // mountain cone at the caller's slope. Returns the basin mask.
 Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock,
                                 float lake_frac, float slope_m_per_m,
-                                glm::vec2 texel_m);
+                                glm::vec2 texel_m, float notch_depth_m = 0.0f);
+
+// Cut an outlet notch for each basin component: find the lowest cell just
+// outside it (where it would spill anyway) and lower that cell, plus a
+// one-texel neighbourhood, by notch_depth_m.
+//
+// This is what gives a seeded lake a COAST. A bowl fills to its lowest rim
+// point, and carve_cavities zeroes the cone exactly at the mask boundary, so
+// the rim is the surrounding terrain and water reaches it everywhere — no bank
+// exists by construction. Lowering the water instead would be unphysical (a
+// real balance says these lakes fill to the brim); lowering one rim point is
+// what a real lake with an outlet river actually looks like. Routing needs no
+// change: priority-flood still finds the true spill, it is simply lower.
+//
+//     bank_width_m = notch_depth_m / basin_cone_slope
+//
+// so at the production cone slope (0.5 m/m) a 1 m notch yields a 2 m bank.
+// Judge the depth by the coast width wanted, not by the depth alone.
+void carve_outlet_notches(Field2D<float>& B, const Field2D<uint8_t>& mask,
+                          float notch_depth_m);
 
 // S0 = initial_sediment_m * clamp(1 - d/taper, 0, 1) + fBm noise, clamped >= 0;
 // zero inside basins. Noise is sampled at world meters (x * texel_m + origin_m)

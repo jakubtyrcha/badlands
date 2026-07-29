@@ -15,7 +15,7 @@ Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask, glm::vec2 texel_m)
 
 Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock,
                                 float lake_frac, float slope_m_per_m,
-                                glm::vec2 texel_m) {
+                                glm::vec2 texel_m, float notch_depth_m) {
   Field2D<uint8_t> mask(bedrock.width, bedrock.height, 0);
   const size_t n = bedrock.size();
   if (n == 0 || lake_frac <= 0.0f) return mask;
@@ -53,7 +53,124 @@ Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock
 
   for (size_t i = 0; i < n; ++i)
     if (mask.data[i]) B.data[i] -= slope_m_per_m * dist.data[i];
+
+  carve_outlet_notches(B, mask, notch_depth_m);
   return mask;
+}
+
+// NOTE: correct and exact on a bowl with somewhere to drain, but currently
+// INERT on production terrain — see ErosionParams::notch_depth_m for the
+// measurement. Kept because the mechanism is sound and the failure is about
+// where basins sit, not about how the notch is cut; raising kMaxNotchSteps far
+// enough would trench a channel across the plain to wherever ground is finally
+// lower, which is a different design decision.
+void carve_outlet_notches(Field2D<float>& B, const Field2D<uint8_t>& mask,
+                          float notch_depth_m) {
+  if (notch_depth_m <= 0.0f) return;
+  const int w = mask.width, ht = mask.height;
+  std::vector<uint8_t> flag(mask.data.begin(), mask.data.end());
+  // Route the channel down the ORIGINAL ground, cutting into the live B. Using
+  // the live surface instead would make the walk chase the cells it just
+  // lowered, which are by construction the lowest thing around.
+  const Field2D<float> B0 = B;
+  static constexpr int dx4[4] = {1, -1, 0, 0};
+  static constexpr int dy4[4] = {0, 0, 1, -1};
+
+  for (const auto& member : label_lake_components(w, ht, flag)) {
+    // The basin's spill point: the lowest cell just OUTSIDE it. That is where
+    // water would leave anyway, so notching it deepens no arbitrary channel.
+    int sill = -1;
+    for (const int i : member) {
+      const int x = i % w, y = i / w;
+      for (int k = 0; k < 4; ++k) {
+        const int nx = x + dx4[k], ny = y + dy4[k];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+        const int j = ny * w + nx;
+        if (mask.data[static_cast<size_t>(j)]) continue;  // still inside
+        if (sill < 0 || B0.data[static_cast<size_t>(j)] < B0.data[static_cast<size_t>(sill)])
+          sill = j;
+      }
+    }
+    if (sill < 0) continue;  // fully enclosed by the border margin
+
+    // Two failure modes had to be designed around here, both found by
+    // measurement rather than reasoning:
+    //
+    //  1. Lowering only the sill digs a PIT. The bowl and the pit then flood
+    //     together and spill at the original rim height, so the lake level
+    //     does not move at all. The cut must run as a channel until it meets
+    //     ground already below it.
+    //  2. Cutting only OUTSIDE the mask leaves the bowl's own outer ring as
+    //     the barrier. carve_cavities tapers the cone to zero at the mask
+    //     boundary, so that ring sits at rim height and the water still spills
+    //     over it rather than through the channel. The notch has to breach the
+    //     rim, which means cutting inward through mask cells too.
+    static constexpr int kDx8[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+    static constexpr int kDy8[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    const float notch_level = B0.data[static_cast<size_t>(sill)] - notch_depth_m;
+
+    // Breach INWARD: cut through the bowl's rim until the cone has already
+    // dropped below the notch. At a cone slope s that is notch_depth / s cells.
+    {
+      int cur_in = sill;
+      std::vector<uint8_t> seen_in(B.data.size(), 0);
+      for (int step = 0; step < kMaxNotchSteps; ++step) {
+        if (B0.data[static_cast<size_t>(cur_in)] <= notch_level) break;
+        seen_in[static_cast<size_t>(cur_in)] = 1;
+        const int ix = cur_in % w, iy = cur_in / w;
+        for (int ny = std::max(0, iy - 1); ny <= std::min(ht - 1, iy + 1); ++ny)
+          for (int nx = std::max(0, ix - 1); nx <= std::min(w - 1, ix + 1); ++nx) {
+            float& b = B.at(nx, ny);
+            b = std::min(b, notch_level);
+          }
+        int next_in = -1;  // steepest descent INTO the basin
+        for (int k = 0; k < 8; ++k) {
+          const int nx = ix + kDx8[k], ny = iy + kDy8[k];
+          if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+          const int j = ny * w + nx;
+          if (!mask.data[static_cast<size_t>(j)] || seen_in[static_cast<size_t>(j)]) continue;
+          if (next_in < 0 ||
+              B0.data[static_cast<size_t>(j)] < B0.data[static_cast<size_t>(next_in)])
+            next_in = j;
+        }
+        if (next_in < 0) break;
+        cur_in = next_in;
+      }
+    }
+
+    float level = notch_level;
+    int cur = sill;
+    // Axis cells only — NOT the widened neighbourhood. Marking the whole 3x3
+    // visited leaves the walk with no unvisited neighbour at all, so it stops
+    // after one step and the "channel" is a one-cell pit that floods together
+    // with the bowl, restoring the original spill height.
+    std::vector<uint8_t> on_axis(B.data.size(), 0);
+    for (int step = 0; step < kMaxNotchSteps; ++step) {
+      if (B0.data[static_cast<size_t>(cur)] <= level) break;  // ground already low enough
+      on_axis[static_cast<size_t>(cur)] = 1;
+      const int cx2 = cur % w, cy2 = cur / w;
+      for (int ny = std::max(0, cy2 - 1); ny <= std::min(ht - 1, cy2 + 1); ++ny)
+        for (int nx = std::max(0, cx2 - 1); nx <= std::min(w - 1, cx2 + 1); ++nx) {
+          if (mask.at(nx, ny)) continue;  // never cut into the bowl itself
+          float& b = B.at(nx, ny);
+          b = std::min(b, level);
+        }
+      // Steepest descent on the ORIGINAL ground, skipping the basin and the
+      // axis already walked.
+      int next = -1;
+      for (int k = 0; k < 8; ++k) {
+        const int nx = cx2 + kDx8[k], ny = cy2 + kDy8[k];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+        const int j = ny * w + nx;
+        if (mask.data[static_cast<size_t>(j)] || on_axis[static_cast<size_t>(j)]) continue;
+        if (next < 0 || B0.data[static_cast<size_t>(j)] < B0.data[static_cast<size_t>(next)])
+          next = j;
+      }
+      if (next < 0) break;
+      cur = next;
+      level -= kNotchStepDropM;
+    }
+  }
 }
 
 Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,

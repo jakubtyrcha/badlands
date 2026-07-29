@@ -238,3 +238,67 @@ TEST_CASE("route_flow + accumulate_drainage: deterministic") {
   REQUIRE(r1.order == r2.order);
   REQUIRE(accumulate_drainage(r1, 1.0f).data == accumulate_drainage(r2, 1.0f).data);
 }
+
+TEST_CASE("route_flow: a lake tag replaces the in_lake exclusion") {
+  // A broad flat basin. Without a tag, every ponded cell — and on level
+  // ground that means every FLAT cell too, since the flood front always
+  // arrives above a flat cell's own height — keeps its flood-tree parent. With
+  // a tag naming only the real lake, the flat routes by gradient instead.
+  // A FLAT plate, which is the case that matters: on level ground every
+  // interior cell is pushed at parent_level + epsilon, so `in_lake` flags the
+  // entire plate even though none of it is a lake. A sloped fixture would not
+  // exercise this at all — nothing outside the pond gets flooded.
+  const int n = 24;
+  Field2D<float> h(n, n, 0.0f);
+  for (int y = 8; y <= 15; ++y)  // a genuine pond, 1 m deep
+    for (int x = 8; x <= 15; ++x) h.at(x, y) = -1.0f;
+
+  const auto untagged = route_flow(h, 1.0f, 1e-4f);
+  Field2D<uint8_t> tag(n, n, 0);
+  for (int y = 8; y <= 15; ++y)
+    for (int x = 8; x <= 15; ++x) tag.at(x, y) = 1;
+  const auto tagged = route_flow(h, 1.0f, 1e-4f, &tag);
+
+  // The flood itself is unchanged — only the direction pass sees the tag.
+  REQUIRE(tagged.order == untagged.order);
+  REQUIRE(tagged.water_level == untagged.water_level);
+  REQUIRE(tagged.in_lake == untagged.in_lake);
+
+  // Tagged cells keep exactly the receivers the untagged run gave them.
+  for (int y = 8; y <= 15; ++y)
+    for (int x = 8; x <= 15; ++x) {
+      const int i = y * n + x;
+      REQUIRE(tagged.receiver[i] == untagged.receiver[i]);
+    }
+
+  // Cells the flood flagged but the tag did not are now steepest-descent
+  // routed, so at least some of them must have changed receiver — that is the
+  // whole point of the tag.
+  int flooded_untagged = 0, changed = 0;
+  for (int i = 0; i < n * n; ++i) {
+    if (!untagged.in_lake[i] || tag.data[static_cast<size_t>(i)]) continue;
+    ++flooded_untagged;
+    if (tagged.receiver[i] != untagged.receiver[i]) ++changed;
+  }
+  REQUIRE(flooded_untagged > 0);
+  REQUIRE(changed > 0);
+
+  // And the invariants that make `order` usable still hold under the tag.
+  for (size_t i = 0; i < tagged.receiver.size(); ++i) {
+    const int32_t rcv = tagged.receiver[i];
+    if (rcv < 0) continue;
+    REQUIRE(tagged.water_level[static_cast<size_t>(rcv)] < tagged.water_level[i]);
+  }
+}
+
+TEST_CASE("route_flow: a null tag is bit-identical to the in_lake fallback") {
+  Field2D<float> h(20, 20, 0.0f);
+  for (int y = 0; y < 20; ++y)
+    for (int x = 0; x < 20; ++x)
+      h.at(x, y) = 0.03f * static_cast<float>(x) + ((x > 6 && x < 13 && y > 6 && y < 13) ? -2.0f : 0.0f);
+  const auto a = route_flow(h, 1.0f, 1e-4f);
+  const auto b = route_flow(h, 1.0f, 1e-4f, nullptr);
+  REQUIRE(a.receiver == b.receiver);
+  REQUIRE(a.order == b.order);
+  REQUIRE(a.in_lake == b.in_lake);
+}

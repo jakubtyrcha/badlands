@@ -886,3 +886,103 @@ TEST_CASE("finalize_lakes: freeboard leaves a dry bank inside the carved bowl") 
   REQUIRE(banked.deepest < brim.deepest);
   REQUIRE(banked.deepest > 0.5f * brim.deepest);
 }
+
+namespace {
+// A conical bowl set into ground that slopes gently toward +x, so water can
+// LEAVE. Getting this wrong is easy: if the surroundings rise away from the
+// bowl the whole map is one depression, the flood level is set by the map
+// border rather than the bowl's rim, and the notch has nothing to lower
+// relative to.
+struct NotchWorld {
+  Field2D<float> B;
+  Field2D<uint8_t> mask;
+};
+// `drain_slope` is squeezed from both sides, and both bounds bite:
+//   - too GENTLE and the notch channel cannot reach naturally lower ground
+//     within kMaxNotchSteps (at 0.02 m/m a 1 m notch needs a 50-texel trench);
+//   - too STEEP and the bowl is not a closed depression at all, because the
+//     base drops more across its diameter than the cone is deep. That needs
+//     drain_slope < cone_slope / 2, i.e. under 0.25 here — at 0.3 the "bowl"
+//     simply drained through and the notch had nothing to lower.
+// 0.15 sits in the window: 7 m of cone against 4.2 m of base drop, and a 2 m
+// notch completes in ~13 steps.
+NotchWorld make_bowl_with_drain(int n, float radius, float cone_slope,
+                                float drain_slope = 0.15f) {
+  NotchWorld t{Field2D<float>(n, n, 0.0f), Field2D<uint8_t>(n, n, 0)};
+  const float cx = n * 0.5f, cy = n * 0.5f;
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      t.B.at(x, y) = -drain_slope * static_cast<float>(x);  // drains toward +x
+      const float dx = x - cx, dy = y - cy;
+      const float rad = std::sqrt(dx * dx + dy * dy);
+      if (rad < radius) {
+        t.mask.at(x, y) = 1;
+        t.B.at(x, y) -= cone_slope * (radius - rad);
+      }
+    }
+  return t;
+}
+}  // namespace
+
+TEST_CASE("carve_outlet_notches: the spill drops by the notch, exposing a bank") {
+  // A bowl fills to its lowest rim point, so carve_cavities' cone — zero
+  // exactly at the mask boundary — leaves no bank at all. The notch lowers one
+  // rim cell so the water stops below the rim, and the band above it is coast.
+  auto build = [](float notch_depth) {
+    auto t = make_bowl_with_drain(31, 8.0f, 0.5f);
+    if (notch_depth > 0.0f) carve_outlet_notches(t.B, t.mask, notch_depth);
+    const auto r = route_flow(t.B, 1.0f, kEpsilonM);
+    float level = 1e30f;
+    int wet = 0;
+    for (size_t i = 0; i < t.B.data.size(); ++i)
+      if (r.in_lake[i] && t.mask.data[i]) {
+        level = std::min(level, r.water_level[i]);
+        ++wet;
+      }
+    struct R { float level; int wet; };
+    return R{level, wet};
+  };
+
+  const auto brim = build(0.0f);
+  const auto notched = build(1.0f);
+
+  REQUIRE(brim.wet > 0);
+  REQUIRE(notched.wet > 0);
+  // The spill level drops by the notch depth: the epsilon tilt and the
+  // one-texel neighbourhood shift it by a fraction of a texel at most.
+  REQUIRE(notched.level == Catch::Approx(brim.level - 1.0f).margin(0.05));
+  // and that leaves a dry band — fewer basin cells hold water than before
+  REQUIRE(notched.wet < brim.wet);
+}
+
+TEST_CASE("carve_outlet_notches: the level drops by exactly the notch depth") {
+  // The crisp invariant. Bank AREA is not the thing to pin: the dry region is
+  // an annulus bounded by the basin itself (616 cells here), so it saturates —
+  // measured 280 / 394 / 483 / 540 for notches of 0 / 1 / 2 / 3 m. The level
+  // relationship stays exact at any depth, and the bank follows from it via
+  // the cone slope.
+  auto measure = [](float notch_depth) {
+    auto t = make_bowl_with_drain(41, 14.0f, 0.5f);
+    if (notch_depth > 0.0f) carve_outlet_notches(t.B, t.mask, notch_depth);
+    const auto r = route_flow(t.B, 1.0f, kEpsilonM);
+    float level = 1e30f;
+    int dry = 0;
+    for (size_t i = 0; i < t.B.data.size(); ++i)
+      if (t.mask.data[i]) {
+        if (r.in_lake[i]) level = std::min(level, r.water_level[i]);
+        else ++dry;
+      }
+    struct R { float level; int dry; };
+    return R{level, dry};
+  };
+
+  const auto base = measure(0.0f);
+  int prev_dry = base.dry;
+  for (const float d : {1.0f, 2.0f, 3.0f}) {
+    const auto m = measure(d);
+    INFO("notch " << d << " m");
+    REQUIRE(m.level == Catch::Approx(base.level - d).margin(0.02));
+    REQUIRE(m.dry > prev_dry);  // strictly more bank each time, though sublinear
+    prev_dry = m.dry;
+  }
+}

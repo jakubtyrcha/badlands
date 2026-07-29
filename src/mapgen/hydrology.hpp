@@ -50,7 +50,19 @@ struct FlowRouting {
 // filled surface. Receivers strictly descend that surface, so the graph is
 // acyclic and `order` stays topological. `texel_m` sets the orthogonal vs
 // diagonal step distance in the descent ranking.
-FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m);
+//
+// `lake_tag` (optional, sim-grid sized) marks cells belonging to a RESOLVED
+// lake; those keep the flood tree instead of taking a steepest-descent
+// receiver. Pass null to fall back on `in_lake`, which also treats every flat
+// as a lake and so routes a large share of channels by flood order rather than
+// gradient. The tag must mark whole lakes, not merely their deep cells — see
+// route_flow's definition for why a shallow untagged margin is unsafe.
+//
+// Taking the tag as an INPUT rather than deriving it here is deliberate:
+// resolving lakes needs catchment area, which needs the receiver graph, which
+// needs this exclusion. Supplying it externally breaks that cycle.
+FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m,
+                       const Field2D<uint8_t>* lake_tag = nullptr);
 
 // Per-cell contributing drainage area (m^2): every cell starts with
 // `texel_area_m2` of its own rain and accumulates from all cells that name

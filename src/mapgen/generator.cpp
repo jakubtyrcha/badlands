@@ -206,7 +206,8 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   // v1.3: slope doubled again (1/3 -> 2/3, user-directed) — see the v1.3
   // addendum, "Lake tuning".
   const auto basins = carve_cavities(B, bedrock_sim, ep.lake_frac,
-                                     kSlopeMPerM * (2.0f / 3.0f), {texel_sim, texel_sim});
+                                     kSlopeMPerM * (2.0f / 3.0f), {texel_sim, texel_sim},
+                                     ep.notch_depth_m);
   if (sink) sink->dump("cavities", seq++, basins);
   if (sink) sink->dump("cavities-height", seq++, B);
   auto S = init_sediment(dist, basins, ep, texel_sim, origin_sim, params.seed);
