@@ -305,9 +305,10 @@ TEST_CASE("a ranged attack spawns a projectile that damages on arrival", "[comba
     const float hp0 = g.registry.get<Health>(te).hp;
 
     // Fire at the named target; a projectile appears, no damage yet.
-    // param_a left at its 0 default = EXPLICIT attack index 0, deliberately:
-    // the shooter's only attack, so index-0 and auto-pick (-1) are equivalent
-    // here -- but say so, since Command::param_a's 0-default is a known footgun.
+    // param_a left unnamed = its -1 default = auto-pick (Finding 2026-07-29
+    // review fix): the shooter has only one attack, so auto-pick and an
+    // explicit index 0 are equivalent here -- but say so, since which one
+    // this is has flipped meaning across that fix.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
     CHECK(g.registry.view<Projectile>().size() == 1);
@@ -330,9 +331,10 @@ TEST_CASE("a projectile fizzles when its target dies mid-flight", "[combat]") {
     const uint32_t s = spawn_shooter(g);
     const uint32_t t = spawn_dummy(g, 20.0f, 1);  // far, so it won't arrive at once
 
-    // param_a left at its 0 default = EXPLICIT attack index 0, deliberately:
-    // the shooter's only attack, so index-0 and auto-pick (-1) are equivalent
-    // here -- but say so, since Command::param_a's 0-default is a known footgun.
+    // param_a left unnamed = its -1 default = auto-pick (Finding 2026-07-29
+    // review fix): the shooter has only one attack, so auto-pick and an
+    // explicit index 0 are equivalent here -- but say so, since which one
+    // this is has flipped meaning across that fix.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
     REQUIRE(g.registry.view<Projectile>().size() == 1);
@@ -348,8 +350,10 @@ namespace {
 // bow_and_blade() above, deliberately: pick_attack/select_attack's auto-pick
 // prefers ranged when unlocked, so this is the loadout that actually
 // distinguishes "index 0" from "whatever the auto-pick chose" (the seam
-// game/src/intention.h's resolve_action and this task's producer fixes
-// depend on -- Command::param_a's own 0 default is a VALID index).
+// game/src/intention.h's resolve_action, and an explicit-index Attack
+// command generally, depend on -- Command::param_a's default is -1/auto-pick
+// since Finding 2026-07-29, so naming index 0 here is a deliberate choice,
+// not what a bare command would do on its own).
 Attacks blade_then_bow() {
     Attacks a{};
     a.count = 2;
@@ -456,6 +460,34 @@ TEST_CASE(
 
     // The second attacker's cooldown is untouched -- its swing never fired.
     CHECK(g.registry.get<Attacks>(a2e).cooldown_remaining[0] == 0.0f);
+}
+
+TEST_CASE(
+    "a raw Attack command with no param_a auto-picks a usable attack under MeleeLock",
+    "[combat]") {
+    // Finding 5: Command::param_a defaults to -1 (auto-pick), not 0 (an
+    // explicit, and here illegal, index) -- a producer that pushes a bare
+    // Attack command (no param_a named) must get the same auto-pick
+    // resolve_action's own -1 path gets, not a forced index 0.
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t s = spawn_shooter(g);  // accuracy 1.0
+    const entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = bow_and_blade();  // ranged (0) + melee (1)
+    g.registry.emplace<MeleeLock>(se);              // ranged (index 0) is now illegal
+    const uint32_t t = spawn_dummy(g, 1.0f, 1);      // within melee range
+    const entt::entity te = g.slots[t];
+    const float hp0 = g.registry.get<Health>(te).hp;
+
+    g.command_queue.push_back({CommandKind::Attack, s, t});  // param_a left unnamed
+    apply_commands(g);
+
+    // Auto-pick chooses the usable melee attack (index 1): no projectile,
+    // melee's cooldown spent, damage lands immediately.
+    CHECK(g.registry.view<Projectile>().size() == 0);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] > 0.0f);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] == 0.0f);  // ranged untouched
+    CHECK(g.registry.get<Health>(te).hp < hp0);
 }
 
 TEST_CASE("the arena's blocked edges refuse a step past the wall", "[combat]") {

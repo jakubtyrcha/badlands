@@ -1421,8 +1421,10 @@ namespace {
 // auto-pick tie-break prefers ranged when unlocked, so a test that confuses
 // "index 0" with "whatever auto-pick would have chosen" notices here --
 // exactly the seam risk the explicit-index Attack plumbing (V2) had to be
-// fixed for (Command::param_a's 0 default is now a load-bearing "use
-// exactly attack 0" unless a producer says -1 explicitly).
+// fixed for. resolve_action's own arg is always an explicit, validated index
+// (never -1, game/src/intention.cpp), so it is unaffected by Command::
+// param_a's default; that default itself is -1/auto-pick (Finding
+// 2026-07-29) for producers that push a bare Attack command instead.
 Attacks blade_and_bow() {
     Attacks a{};
     a.count = 2;

@@ -71,16 +71,20 @@ static_assert(static_cast<int32_t>(CommandKind::Engage) ==
 // `target_id` is a building/entity id; `point` is world XZ for positional
 // commands; `param_a`/`param_b` carry kind-specific scalars (e.g. building kind
 // + rotation for PlaceBuilding, building kind for EnterBuilding; for Attack,
-// param_a is the attack index -- -1 = the legacy auto-pick every producer but
-// resolve_action (game/src/intention.h) still uses; NOTE param_a's own default
-// is 0, a VALID index, so an Attack producer that wants auto-pick must say -1
-// explicitly, never leave this at its default).
+// param_a is the attack index -- -1 = auto-pick (select_attack's usual
+// tie-break), any other value names that index exactly, re-validated
+// authoritatively by fire_attack). param_a's own default is -1 (Finding 2026-
+// 07-29 review fix): a bare `{CommandKind::Attack, actor, target}` with no
+// param_a named therefore auto-picks, the same as an explicit -1 -- restoring
+// the pre-command-log raw idiom's meaning. Kinds that do not read param_a at
+// all (MoveTo, EnterHome, Buy, Chat, CollectTax, Deposit, AttackBuilding,
+// Engage) are unaffected either way.
 struct Command {
     CommandKind kind;
     uint32_t actor = UINT32_MAX;
     uint32_t target_id = UINT32_MAX;
     glm::vec2 point{0.0f, 0.0f};
-    int32_t param_a = 0;
+    int32_t param_a = -1;
     int32_t param_b = 0;
     // Stamped by apply_command from game.world_millis. Producers leave it 0; it
     // is what makes the log self-describing (and replayable at tick boundaries).
