@@ -60,6 +60,16 @@ cargo test --manifest-path src/crates/brainhost/Cargo.toml --lib
 - Dawn is pinned (SHA in `cmake/FetchDawn.cmake`). Do not bump it without approval.
 - C++ tests are Catch2 targets (`badlands_game_tests`, `badlands_geometry_tests`): run `ctest --test-dir build`, or the binaries directly.
 
+## Commands (prefer these over ad-hoc pipelines — compact output)
+- `scripts/build.sh [target …]` — configure (first run) + build; errors only + `BUILD OK/FAILED`.
+- `scripts/test.sh` — full ctest summary. `scripts/test.sh <regex>` — one suite via `ctest -R`,
+  failures+totals only. `scripts/test.sh <test-binary> "<catch2-filter>"` — direct filtered run
+  (e.g. `scripts/test.sh badlands_game_tests "[combat]"`).
+- `scripts/screenshot.sh <app> <out.png> [args…]` — SIGALRM-bounded headless screenshot
+  (e.g. `scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 3`).
+- `scripts/gitstate.sh` — branch + HEAD + short status + commits ahead of origin/main.
+- `scripts/noiser_guard.sh [BASE]` — assert `third_party/noiser` isn't staged (nor in `BASE..HEAD`).
+
 ## Architecture — the layer boundary is deliberate
 - **`src/engine/`** — engine ported from sampo (`sampo::` → `badlands::`): rendering, GPU/pipeline/reflection/frame infra, data-driven material system, scene graph + scene renderer (forward-opaque + tonemap), GPU mip generation, `Camera`. **No game logic or game types.**
 - **`src/game/`** — C++ game render/scene layer: geometry generation, scene construction, per-app `AppView`s (`GameView`, etc.), camera + input *handling*, UI *logic*. The EnTT world sim (placement/movement/brains/combat) lives in **`game/`**, built as `badlands_game_lib` and called by the apps through a C ABI.

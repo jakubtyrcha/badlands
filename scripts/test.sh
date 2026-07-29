@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# scripts/test.sh                       — full ctest suite, compact summary
+# scripts/test.sh <regex>               — ctest -R <regex>, failures + totals only
+# scripts/test.sh <binary> "<filter>"   — ./build/<binary> "<filter>" (Catch2), filtered
+cd "$(dirname "$0")/.." || exit 1
+if [ $# -ge 2 ]; then
+  ./build/"$1" "$2" 2>&1 | grep -E \
+    "FAILED|with expansion|test cases:|assertions:|All tests passed" | tail -20
+  exit "${PIPESTATUS[0]}"
+elif [ $# -eq 1 ]; then
+  ctest --test-dir build -R "$1" --output-on-failure 2>&1 | grep -E \
+    "FAILED|with expansion|test cases:|assertions:|tests passed|Errors while running" | tail -30
+  exit "${PIPESTATUS[0]}"
+else
+  ctest --test-dir build 2>&1 | tail -6
+  exit "${PIPESTATUS[0]}"
+fi
