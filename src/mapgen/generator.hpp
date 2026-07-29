@@ -13,6 +13,7 @@
 #include <glm/glm.hpp>
 
 #include "mapgen/erosion.hpp"
+#include "mapgen/river_graph.hpp"
 #include "mapgen/field2d.hpp"
 
 namespace badlands::mapgen {
@@ -33,11 +34,20 @@ struct MapArtifacts {
   Field2D<float> water_depth;  // world meters — standing water; surface = heightmap + water_depth
   Field2D<float> flow;         // drainage area (m^2)
   Field2D<float> sediment;     // sediment thickness (m)
-  // v1.3: river/stream intensity, 0..1 (0 = no flow signal, 1 = saturated
-  // river); 0 inside lakes. Output res, max-pooled (not bilinear — see
-  // resample_max_pool) from the sim grid's ErosionOutputs::river so a
-  // saturated line survives downsampling instead of smearing.
-  Field2D<float> river;
+  // v2 river network. Rasterized conservatively from `river_graph` at output
+  // resolution rather than resampled from a sim-grid raster, so a thin channel
+  // stays connected instead of smearing or fragmenting.
+  //
+  // Hierarchy is carried by `river_class`, not by width: at honest runoff a
+  // 512 m map's largest outlet is ~0.0025 m^3/s, giving a 0.25 m channel —
+  // sub-texel. Width is not lost, it lives on the graph and is recoverable
+  // anywhere as channel_width_coeff * sqrt(discharge).
+  Field2D<float> river_discharge_m3_s;  // reach discharge splatted onto its texels
+  Field2D<uint8_t> river_class;         // RiverClass; 0 doubles as the channel mask
+  Field2D<float> river_depth_m;
+  Field2D<float> river_speed_m_s;
+  Field2D<glm::vec2> river_flow_dir;    // unit; (0,0) off-channel
+  RiverGraph river_graph;               // width_m, strahler_order, shreve_magnitude
 };
 
 // sink, if non-null, receives named debug rasters as generation proceeds (see
@@ -50,10 +60,6 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink = nullp
 // every seed, not on average.
 inline constexpr float kPlainsFrac = 0.55f;
 inline constexpr float kMountainFrac = 0.12f;
-
-// Lake biome stamping threshold (meters of standing water). Shallow fringes and
-// enclosed wet flats keep their water_depth data but don't read as Lake.
-inline constexpr float kLakeStampMinDepthM = 0.3f;
 
 // Quantile cutoffs over the ACTUAL bedrock raster: t_hills at kPlainsFrac,
 // t_mountain at 1 - kMountainFrac (exact order statistics).

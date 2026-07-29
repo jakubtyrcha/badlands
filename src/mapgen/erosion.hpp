@@ -39,11 +39,31 @@ struct ErosionParams {
   int detail_octaves = 4;
   float detail_wavelength_m = 60.0f;
   float detail_amplitude_m = 2.0f;
-  // v1.3: river/stream flow texture thresholds (drainage area, m^2) — see
-  // river_intensity() below and the v1.3 addendum, "River/stream flow
-  // texture", in docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md.
-  float stream_min_area_m2 = 1500.0f;  // below this: no stream (intensity 0)
-  float river_area_m2 = 15000.0f;      // at/above this: full river (intensity 1)
+  // --- river network (v2: graph, not intensity raster) ---
+  // See docs/superpowers/specs/2026-07-29-mapgen-river-network-design.md.
+  // Drainage area at which a cell counts as a channel and enters the graph.
+  float min_channel_area_m2 = 1500.0f;
+  // Runoff depth per second. ~1 m/year of runoff for a temperate basin, kept
+  // PHYSICALLY HONEST rather than inflated to make rivers look bigger: at this
+  // world scale a 512 m map drains at most ~0.0025 m^3/s, so these are creeks,
+  // and the renderer conveys size by class rather than by width. Inflating it
+  // would make every derived unit fictional.
+  float runoff_m_per_s = 3.17e-8f;
+  // Regime width closure w = channel_width_coeff * sqrt(Q); mid-range for
+  // natural channels.
+  float channel_width_coeff = 5.0f;
+  float manning_n = 0.035f;  // natural channel with some bed roughness
+  // Polyline de-latticing: Douglas-Peucker tolerance and resample spacing, in
+  // TEXELS (scaled by texel_m at use), since the staircase they remove is a
+  // lattice artifact and so scales with the grid, not the world.
+  float simplify_tolerance_texels = 0.9f;
+  float resample_spacing_texels = 3.0f;
+  // Lake freeboard: the output water level sits below the spill point so a dry
+  // bank of already-carved bowl is exposed and the Lake biome covers only
+  // water. Applied at finalize only, so the sim loop is unaffected. The
+  // fractional cap stops shallow ponds from vanishing outright.
+  float lake_freeboard_m = 0.4f;
+  float lake_freeboard_frac = 0.25f;
 };
 
 inline constexpr int kPadTexels = 16;      // sim-grid margin, cropped on output
@@ -59,6 +79,13 @@ inline constexpr float kMicroFillCapM = 0.75f;  // deepest depression micro_fill
 // See docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md,
 // "Basin border rim (v1.3.1)".
 inline constexpr int kBasinBorderMarginTexels = 3;
+
+// 4-connected components of the cells for which `flag[i]` is truthy, returned
+// in the order their lowest-index member is discovered — deterministic.
+// Used for lake components by micro_fill, deposit's lake pour, and the river
+// graph's lake nodes.
+std::vector<std::vector<int>> label_lake_components(int w, int ht,
+                                                    const std::vector<uint8_t>& flag);
 
 // Carve the bottom lake_frac quantile of bedrock into inverted-cone basins:
 // depth = slope_m_per_m * (exact EDT world-meter distance to the nearest
@@ -134,16 +161,6 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
 void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
              float texel_m);
 
-// Per-cell river/stream intensity (0..1) from final drainage area: 0 below
-// stream_min_area_m2; else smoothstep(log2(stream_min_area_m2),
-// log2(river_area_m2), log2(A)) — faint streams, saturating rivers.
-// Monotone non-decreasing in A. Exactly 0 for in_lake cells (the lake IS the
-// water; chains resume at the outlet). This is the PRE-dilation, pre-max-pool
-// per-sim-cell value (see erode()'s finalize for the width-dilated field
-// that becomes ErosionOutputs::river).
-Field2D<float> river_intensity(const FlowRouting& r, const Field2D<float>& area,
-                               const ErosionParams& p);
-
 // Debug/preview sink for the erosion sim: dumps named raster stages as the
 // loop runs. stages: "loop-height", "loop-flow", "loop-sediment" (float);
 // "loop-lakes" (uint8). Later tasks add init/output stages.
@@ -158,16 +175,16 @@ struct MapDebugSink {
 struct ErosionOutputs {
   Field2D<float> water_depth;  // m of standing water after pruning
   Field2D<float> flow;         // final drainage area (m²)
-  // v1.3: river/stream intensity (0..1), width-dilated by its own intensity
-  // (streams stay 1 sim texel, rivers widen — see erode()), forced back to 0
-  // on in_lake cells so dilation never bleeds onto the lake surface. Sim
-  // grid, pre-max-pool (generator.cpp max-pools this to MapArtifacts::river).
-  Field2D<float> river;
+  // The FINAL routing, kept so the river graph can be extracted from exactly
+  // the network the outputs above were measured on. Re-routing downstream
+  // would risk a subtly different graph for no benefit.
+  FlowRouting routing;
 };
 
 // The full sim: iterations × (route → drain → incise → deposit → diffuse),
 // then a final route to flood lakes, measure spill levels, and prune lakes
-// under min area/depth, and build the river intensity field. Mutates B and
+// under min area/depth. The river NETWORK is no longer built here — see
+// river_graph.hpp, which extracts it from the final routing. Mutates B and
 // S. sink may be null.
 ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
                      const ErosionParams& p, float texel_m,

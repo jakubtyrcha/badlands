@@ -13,6 +13,7 @@
 #include "mapgen/hydrology.hpp"
 #include "mapgen/parallel.hpp"
 #include "mapgen/resample.hpp"
+#include "mapgen/river_graph.hpp"
 
 namespace badlands::mapgen {
 
@@ -229,9 +230,6 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   a.heightmap = resample(ground);
   a.sediment = resample(S);
   a.flow = resample(sim_out.flow);
-  // v1.3: MAX-POOL, not bilinear — a thin saturated river line must survive
-  // downsampling, not smear toward 0 (see resample_max_pool's doc comment).
-  a.river = resample_max_pool(sim_out.river, texel_sim, origin_sim, w, texel_out);
 
   // water: resample the SURFACE (level where wet, ground where dry) and the
   // depth mask; recompute depth against the output ground so shorelines match
@@ -252,11 +250,32 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
       gully_detail_delta(a.heightmap, a.water_depth, texel_out, params.seed, ep);
   if (sink) sink->dump("detail-delta", seq++, delta);
   for (size_t i = 0; i < delta.data.size(); ++i) a.heightmap.data[i] += delta.data[i];
+
+  // --- river network ---
+  // Extracted on the SIM grid (that is where the routing lives) but rasterized
+  // straight to the output grid from world-space geometry, so resolution
+  // independence needs no resampling step.
+  Field2D<float> sim_ground(sim_n, sim_n);
+  for (size_t i = 0; i < sim_ground.data.size(); ++i)
+    sim_ground.data[i] = B.data[i] + S.data[i];
+  a.river_graph = extract_river_graph(sim_out.routing, sim_out.flow,
+                                      sim_out.water_depth, sim_ground, ep,
+                                      texel_sim, origin_sim);
+  auto rasters = rasterize_rivers(a.river_graph, w, texel_out);
+  a.river_discharge_m3_s = std::move(rasters.discharge_m3_s);
+  a.river_class = std::move(rasters.cls);
+  a.river_depth_m = std::move(rasters.depth_m);
+  a.river_speed_m_s = std::move(rasters.speed_m_s);
+  a.river_flow_dir = std::move(rasters.flow_dir);
+
+  // Lake covers exactly the water. The freeboard in finalize_lakes leaves a
+  // band of carved bowl dry, and that band keeps whatever classify_biomes gave
+  // it — Plains, at bedrock minima — so a coast exists.
   for (size_t i = 0; i < a.biome.data.size(); ++i)
-    if (a.water_depth.data[i] >= kLakeStampMinDepthM)
+    if (a.water_depth.data[i] > 0.0f)
       a.biome.data[i] = static_cast<uint8_t>(Biome::Lake);
   if (sink) {
-    sink->dump("river", seq++, a.river);
+    sink->dump("river", seq++, a.river_class);
     sink->dump("final-height", seq++, a.heightmap);
     sink->dump("biome", seq++, a.biome);
   }

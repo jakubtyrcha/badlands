@@ -80,11 +80,10 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
   return s;
 }
 
-namespace {
-
 // 4-connected components of cells for which `flag[i]` is truthy. Components
 // are returned in the order their first (lowest-index) member is discovered
-// by the scan — deterministic. Shared by micro_fill and deposit's lake pour.
+// by the scan — deterministic. Shared by micro_fill, deposit's lake pour, and
+// the river graph's lake nodes.
 std::vector<std::vector<int>> label_lake_components(int w, int ht,
                                                      const std::vector<uint8_t>& flag) {
   std::vector<std::vector<int>> components;
@@ -112,8 +111,6 @@ std::vector<std::vector<int>> label_lake_components(int w, int ht,
   }
   return components;
 }
-
-}  // namespace
 
 float micro_fill(Field2D<float>& B, Field2D<float>& S,
                  const Field2D<uint8_t>& basin_mask, float texel_m) {
@@ -398,54 +395,6 @@ void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
   }
 }
 
-Field2D<float> river_intensity(const FlowRouting& r, const Field2D<float>& area,
-                               const ErosionParams& p) {
-  Field2D<float> out(r.width, r.height, 0.0f);
-  const float lo = std::log2(std::max(p.stream_min_area_m2, 1e-6f));
-  const float hi = std::log2(std::max(p.river_area_m2, p.stream_min_area_m2 + 1e-6f));
-  for (size_t i = 0; i < out.data.size(); ++i) {
-    if (r.in_lake[i]) continue;  // the lake IS the water: stays 0
-    const float a = area.data[i];
-    if (a < p.stream_min_area_m2) continue;  // stays 0
-    out.data[i] = glm::smoothstep(lo, hi, std::log2(a));
-  }
-  return out;
-}
-
-namespace {
-
-// Splat each cell's own river intensity onto a square neighborhood whose
-// radius grows with that intensity — 0 (a single texel: a faint stream) up
-// to kRiverMaxDilationRadius (a river reads as a few-texel-wide band), so the
-// artifact looks like a texture rather than a hairline (v1.3 addendum;
-// hairline-only would be this constant set to 0). Cells keep at least their
-// own raw value; a neighbor's splat only ever raises (max), never lowers.
-constexpr int kRiverMaxDilationRadius = 1;  // sim texels
-
-Field2D<float> dilate_river(const Field2D<float>& intensity) {
-  const int w = intensity.width, h = intensity.height;
-  Field2D<float> out = intensity;
-  for (int y = 0; y < h; ++y) {
-    for (int x = 0; x < w; ++x) {
-      const float t = intensity.at(x, y);
-      if (t <= 0.0f) continue;
-      const int radius =
-          static_cast<int>(std::lround(t * static_cast<float>(kRiverMaxDilationRadius)));
-      if (radius <= 0) continue;
-      const int x0 = std::max(0, x - radius), x1 = std::min(w - 1, x + radius);
-      const int y0 = std::max(0, y - radius), y1 = std::min(h - 1, y + radius);
-      for (int ny = y0; ny <= y1; ++ny)
-        for (int nx = x0; nx <= x1; ++nx) {
-          float& o = out.at(nx, ny);
-          o = std::max(o, t);
-        }
-    }
-  }
-  return out;
-}
-
-}  // namespace
-
 namespace {
 
 // Flood the CURRENT surface and turn flooded cells into water depths, then
@@ -455,9 +404,33 @@ Field2D<float> finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
                               float texel_m) {
   const int w = r.width, ht = r.height;
   Field2D<float> depth(w, ht, 0.0f);
-  for (int i = 0; i < w * ht; ++i)
-    if (r.in_lake[i])
-      depth.data[i] = r.water_level[i] - (B.data[i] + S.data[i]);
+
+  // Fill each lake to its spill level MINUS a freeboard, so a band of already
+  // carved bowl stays dry and the Lake biome can cover only water. Filling to
+  // the brim leaves no bank at all: carve_cavities makes the cone zero exactly
+  // at the basin boundary, and priority-flood then floods right up to it.
+  //
+  // Applied here at finalize only, never inside the sim loop, so erosion
+  // behaviour is unchanged — the loop still deposits against the true spill
+  // level, and sediment left above the lowered surface simply becomes dry land
+  // (which reads as a beach or delta). The fractional cap stops shallow ponds
+  // from being drained away entirely.
+  //
+  // The component's level is the MINIMUM water_level over its members: the
+  // epsilon tilt raises interior cells above the sill, so the minimum is the
+  // real spill height. Same convention as deposit's wl_cap.
+  for (const auto& member : label_lake_components(w, ht, r.in_lake)) {
+    float level = r.water_level[static_cast<size_t>(member[0])];
+    for (const int i : member) level = std::min(level, r.water_level[static_cast<size_t>(i)]);
+    float deepest = 0.0f;
+    for (const int i : member)
+      deepest = std::max(deepest, level - (B.data[i] + S.data[i]));
+    if (deepest <= 0.0f) continue;
+    level -= std::min(p.lake_freeboard_m, p.lake_freeboard_frac * deepest);
+    for (const int i : member)
+      depth.data[i] = std::max(0.0f, level - (B.data[i] + S.data[i]));
+  }
+
   // component label + prune
   const float texel_area = texel_m * texel_m;
   std::vector<uint8_t> seen(depth.size(), 0);
@@ -523,12 +496,7 @@ ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
   ErosionOutputs out;
   out.flow = accumulate_drainage(r, texel_area);
   out.water_depth = finalize_lakes(B, S, r, p, texel_m);
-  out.river = dilate_river(river_intensity(r, out.flow, p));
-  // Dilation splats from non-lake neighbors and can reach into an in_lake
-  // cell; river_intensity() already zeroed lake cells pre-dilation, so
-  // re-zero here to keep the invariant after the splat too.
-  for (size_t i = 0; i < out.river.data.size(); ++i)
-    if (r.in_lake[i]) out.river.data[i] = 0.0f;
+  out.routing = std::move(r);
   return out;
 }
 
