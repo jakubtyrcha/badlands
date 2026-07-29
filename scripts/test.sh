@@ -8,8 +8,8 @@ if [ $# -ge 2 ]; then
     "FAILED|with expansion|test cases:|assertions:|All tests passed" | tail -20
   exit "${PIPESTATUS[0]}"
 elif [ $# -eq 1 ]; then
-  ctest --test-dir build -R "$1" --output-on-failure 2>&1 | grep -E \
-    "FAILED|with expansion|test cases:|assertions:|tests passed|Errors while running" | tail -30
+  ctest --test-dir build -R "$1" --output-on-failure --no-tests=error 2>&1 | grep -E \
+    "FAILED|with expansion|test cases:|assertions:|tests passed|Errors while running|No tests were found" | tail -30
   exit "${PIPESTATUS[0]}"
 else
   ctest --test-dir build 2>&1 | tail -6

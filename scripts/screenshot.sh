@@ -7,7 +7,7 @@ rm -f "$out"
 perl -e 'alarm 60; exec @ARGV' "./build/$app" --screenshot "$out" "$@" \
   > /tmp/badlands_shot.log 2>&1
 code=$?
-if [ -s "$out" ]; then
+if [ "$code" -eq 0 ] && [ -s "$out" ]; then
   echo "SCREENSHOT OK: $out ($(stat -f%z "$out") bytes)"
 else
   tail -20 /tmp/badlands_shot.log
