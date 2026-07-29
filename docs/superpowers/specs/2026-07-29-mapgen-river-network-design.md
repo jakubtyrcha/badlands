@@ -327,3 +327,124 @@ the stamp after the depth recompute, and this change alters its threshold to
 - Per-texel discharge as a convenience channel.
 - Sub-threshold tributaries as graph edges (they remain drainage area only).
 - Lake level from a water balance rather than spill-minus-freeboard.
+
+---
+
+## v1.1 addendum (2026-07-29, post-Stage-1 review with the user)
+
+Stage 1 (Part 1) shipped as `6e09fad`. These changes were agreed after the
+original spec was written and supersede it where they conflict.
+
+### Stage 1 outcome — what the spec got wrong
+
+- **No re-baselining was needed.** The spec predicted every erosion expectation
+  would shift. In fact the existing `erosion_tests.cpp` / `generator_tests.cpp`
+  cases are structural (conservation, bounds, monotonicity) rather than
+  magnitude-pinned, and all passed unchanged.
+- **Flooded cells must be EXCLUDED from steepest descent.** The spec assumed
+  one rule everywhere. A lake surface is flat and the ε tilt across it is
+  bookkeeping, not slope; ranking it by steepest descent invents downhill exits
+  through the rim (42 of 113 components grew extra exits, worst 18). Lake cells
+  keep the pass-1 flood tree.
+- **The single-exit-per-lake claim was already false**, independent of routing.
+  4-connected component labels against an 8-connected receiver graph gave 33 of
+  82 components multiple exits under the *old* code. `deposit`'s `find_exit`
+  therefore sheds leftover overflow at whichever exit `member[0]`'s chain
+  reaches, not the true sill. Deterministic and volume-conserving, but
+  physically imprecise. **Part 2's LakeOutlet node must locate the true sill
+  (the boundary member with the lowest `water_level`) rather than reuse
+  `find_exit` as-is.**
+- Measured after: dry receivers 51.7% diagonal (unbiased D8 ≈ 50%), 99.2%
+  agreeing with steepest descent.
+
+### Known Stage 2 input: ε-flats (deferred by the user)
+
+16.8% of sim cells are flagged `in_lake` and keep flood-tree routing (96.2%
+diagonal). Most are shallow ε-flats that `finalize_lakes` **prunes to dry
+land**, so Part 2's channel set will include them while their paths follow
+flood-expansion order rather than any gradient. De-latticing cannot repair this
+— it would smooth a wrong path into a smooth wrong path.
+
+Two candidates, to be decided before extraction lands: rank those cells by true
+ground `h` instead of ε-tilted `hf`, or exclude pruned depressions from the
+`in_lake` routing exclusion so they get steepest descent like any dry cell. The
+second is likely right — a depression pruned to dry land arguably should not
+have routed as a lake.
+
+### De-latticing is mandatory (new)
+
+Part 2 step 6 ("appending cell centres") destroys the information needed for
+soft turns: D8 offers only 8 headings, so any other heading becomes a
+staircase. Quantization is bounded — with `f` the diagonal fraction, sinuosity
+is `[(1−f) + f√2] / √(1+f²)`, peaking at exactly 22.5° (`f = 0.414`) at
+**1.0824** — but a ~2-texel wobble is not a meander, and rendering cannot
+recover the heading afterwards.
+
+The heading is not actually lost: the E:NE step *ratio* encodes it exactly. So
+after chain-walking, add:
+
+- **Douglas–Peucker** simplify at ≈0.75–1 texel tolerance.
+- **Uniform arc-length resample** (~2–4 texels).
+
+### Hierarchy: Strahler + Shreve (new)
+
+Each `RiverEdge` carries `strahler_order` (leaves 1; equal child orders `i`
+give `i+1`, else the max) and `shreve_magnitude` (sum of children; equals the
+upstream source count). One pass over the forest in reverse topological order.
+
+### Outputs: physical quantities, hierarchy by colour (supersedes Part 4)
+
+The original spec excluded per-texel discharge as a "category error" while
+rasterizing depth and speed — which are equally reach-averaged attributes. The
+distinction was arbitrary and is **dropped**.
+
+Width cannot carry hierarchy at this world scale: at ~1 m/yr runoff a 512 m map
+drains at most ≈0.0025 m³/s at its largest outlet, so `w = k_w·√Q` ≈ **0.25 m**
+— sub-texel. A 5 m river needs ~31 km² of catchment (~10 km map). Runoff stays
+physically honest and the rasterized band stays ≈1 texel; width remains on the
+graph and is recomputable anywhere as `k_w·√Q`.
+
+```cpp
+Field2D<float>     river_discharge_m3_s;  // reach discharge; drives colour
+Field2D<uint8_t>   river_class;           // calibrated tier; 0 = no channel
+Field2D<float>     river_depth_m;
+Field2D<float>     river_speed_m_s;
+Field2D<glm::vec2> river_flow_dir;
+RiverGraph         river_graph;           // width_m, strahler, shreve
+```
+
+`river_class` uses absolute log decades, so a class means the same flow on any
+map size and a larger map promotes reaches naturally:
+
+| class | name | Q (m³/s) |
+|---|---|---|
+| 0 | Rill | < 1e-4 |
+| 1 | Brook | 1e-4 – 1e-3 |
+| 2 | Stream | 1e-3 – 1e-2 |
+| 3 | Creek | 1e-2 – 1e-1 |
+| 4 | River | 1e-1 – 1e0 |
+| 5 | Major | ≥ 1e0 |
+
+At 512 m the network spans ≈5e-5 to 2.5e-3 m³/s, so only classes **0–2** are
+used. If three tiers read as too coarse in the preview, half-decade steps
+double them within the same absolute scheme.
+
+`rivers.png` renders `river_class` through a per-class palette (following
+`write_biome_png`), not autoscaled grey — that image is the check that
+hierarchy is legible.
+
+### Followup redefined: meander cannot ship alone
+
+The original followup named only the carve. A free lateral offset would put the
+visual river on a valley wall while `flow`, `water_depth` and the heightmap all
+still say the water runs down the thalweg, and carving it would cut a second
+disconnected low path. The coherent unit is three parts, shipped together:
+
+1. **Floodplain-constrained offset** — scan perpendicular to flow until height
+   exceeds thalweg + Δ and clamp the offset to that half-width. In a narrow
+   bedrock gorge the half-width goes to zero, so mountain streams correctly
+   stop meandering.
+2. **Carve**, drawing from `S` before `B`, mirroring `incise`
+   (`erosion.cpp:171-182`) and `diffuse` (`erosion.cpp:376-385`).
+3. **Re-route** on the carved heightmap so flow and geometry agree by
+   construction.
