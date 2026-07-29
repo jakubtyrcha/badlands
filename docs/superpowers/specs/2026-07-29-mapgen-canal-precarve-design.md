@@ -79,11 +79,18 @@ struct CanalAgent {
 `+sense_angle` from the heading. The attractant at a point is
 
 ```
-attract = -height  +  trail_weight * trail(point)  +  lake_weight * is_lake(point)
+water(pt)   = trail(pt) > 0 or is_lake(pt)
+drop(pt)    = agent_level - water_surface(pt)          // + when the water is BELOW us
+attract(pt) = -height(pt)
+            + water_weight * water(pt) * clamp(drop(pt) / water_falloff_m, -1, +1)
 ```
 
-so an agent prefers downhill, prefers an existing channel over open ground, and
-prefers a lake over either.
+**Water below attracts; water above repels.** A plain `+trail_weight` bonus
+would steer an agent toward a channel sitting *higher* than it, and the descent
+rule in Part 3 would then obediently cut a trench through rising ground to
+reach it. The signed term makes a tributary join a trunk from above, which is
+the only direction real ones join from, and makes a higher channel push the
+agent away rather than draw it in.
 
 **Steer.** Rotate `dir` toward the strongest sensor by `turn_angle`. With
 probability `wander_chance`, apply an additional random turn — this is the only
@@ -93,20 +100,40 @@ source of meander, and it is what stops canals being straight lines.
 must converge — tributaries merge going downstream and never split. Without
 trail attraction, Physarum steering braids and loops, which is wrong for water.
 
-**Move** one texel along `dir`.
+**Move** one texel along `dir`, subject to two hard rules.
 
-**Merge.** On entering a cell that already carries a trail, add this agent's
-discharge to it and continue. Downstream cells are then re-carved at the summed
-discharge, so the channel widens and deepens below a confluence exactly as it
-should. `channel_hydraulics` (already built and tested for the river graph)
-turns the summed `Q` into width, depth and speed from Manning plus a regime
-width closure, with continuity `Q = w·d·v` holding identically — so a merge
-speeds the flow up by `v ∝ Q^0.2` rather than by an invented rule. **The same
-hydraulics on both sides of the pipeline, one set of constants.**
+**Rule 1 — strict self-avoidance. An agent may never re-enter a cell it has
+already carved.** This is the loop guarantee, and it is load-bearing for far
+more than tidiness (see Part 3). If every candidate step is self-visited, the
+agent is boxed in and terminates.
+
+**Rule 2 — no climbing.** An agent will not step onto ground more than
+`max_climb_m` above its current `ref_level`. It still cuts through the small
+sills that would otherwise trap water — that is the whole point of Part 3 — but
+it will not tunnel through a hill to do it. If every candidate exceeds the
+limit, the agent terminates.
+
+**Merge — another agent's trail only.** On entering a cell carrying ANOTHER
+agent's trail, add this agent's discharge to it and adopt the trail's stored
+flow direction, then continue along it. Downstream cells are re-carved at the
+summed discharge, so the channel widens and deepens below a confluence exactly
+as it should. `channel_hydraulics` (already built and tested for the river
+graph) turns the summed `Q` into width, depth and speed from Manning plus a
+regime width closure, with continuity `Q = w·d·v` holding identically — so a
+merge speeds the flow up by `v ∝ Q^0.2` rather than by an invented rule. **The
+same hydraulics on both sides of the pipeline, one set of constants.**
+
+Self-intersection is NOT a merge. Adding an agent's discharge to its own trail
+would create water from nothing, and doubling again on each lap. Rule 1 makes
+the case unreachable; the merge path must still assert it rather than trust it.
+Each trail cell therefore records which agent laid it, alongside discharge and
+direction.
 
 **Terminate** when the agent leaves the map (dies), enters a lake (absorbed),
-or exceeds `max_steps`. The step cap is a loop backstop, not a design
-parameter; hitting it should be logged.
+is boxed in by Rule 1 or Rule 2, or exceeds `max_steps`. The step cap is now a
+pure backstop — Rule 1 already makes non-termination impossible, since the
+visited set only grows and the grid is finite. A nonzero cap count means
+something is wrong, not merely slow.
 
 ## Part 3 — Carving, with guaranteed descent
 
@@ -117,10 +144,25 @@ ref_level -= canal_slope * step_length      // every step, unconditionally
 B(cell)    = min(B(cell), ref_level)        // cut only where terrain is higher
 ```
 
-Because `ref_level` is monotone, **a canal cannot contain a pit**, so any agent
-that reaches the edge or a lake leaves behind a path water can follow all the
-way. That is the property the whole change exists for, and it is structural
-rather than emergent.
+**Monotone `ref_level` alone is a guarantee in TIME, not in SPACE**, and only
+the spatial one is worth anything here. If an agent could revisit a cell, it
+would arrive at a lower `ref_level` and cut deeper — so the channel profile
+would descend, then jump UP at the loop closure. That is water flowing uphill,
+which is exactly what must not happen.
+
+Rule 1 closes the gap. **Each cell is entered at most once, and `ref_level`
+falls every step, so the profile along the channel is monotone decreasing by
+construction.** A canal cannot contain a pit and cannot contain an uphill step,
+so any agent reaching the edge or a lake leaves behind a path water can follow
+the whole way. That is the property the whole change exists for, and it is
+structural rather than emergent — but it rests on self-avoidance, not on the
+descent rule by itself.
+
+The descent must stay **gradual**. `canal_slope` is what lets a long winding
+river stay a shallow channel instead of deepening into a canyon: incision is
+`canal_slope × path length`, so a meandering path 3x longer than the direct
+line cuts 3x deeper for the same endpoints. Tune against the longest canals,
+not the average.
 
 Where the terrain already descends faster than `canal_slope`, `min` leaves it
 untouched — the canal only cuts where the ground is flat or rising, which is
@@ -153,7 +195,8 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
 
 New `ErosionParams` fields: `canal_seed_area_m2`, `canal_slope`,
 `canal_sense_distance_texels`, `canal_sense_angle_rad`, `canal_turn_angle_rad`,
-`canal_wander_chance`, `canal_trail_weight`, `canal_lake_weight`.
+`canal_wander_chance`, `canal_water_weight`, `canal_water_falloff_m`,
+`canal_max_climb_m`.
 
 One new debug stage, `"canals"`, dumped between `"cavities-height"` and
 `"sediment-init"`.
@@ -173,7 +216,11 @@ Artificial heightmaps, reusing the two builders already in the test suite.
 | Two seeds converging | discharge below the junction is the sum; the channel is deeper and wider there than above it |
 | Terrain already descending faster than `canal_slope` | `B` is untouched — `min` must not raise or gratuitously cut |
 | Same seed twice | identical `B` and identical trail field |
-| Any fixture | no agent exceeds `max_steps`; `hit_step_cap == 0` |
+| **Every fixture, every agent** | the carved profile along a canal is monotone decreasing at EVERY step — the spatial guarantee, checked directly rather than inferred from the descent rule |
+| **Every fixture, every agent** | no cell appears twice in an agent's path |
+| Trail placed ABOVE the agent | the agent steers away from it, and no trench is cut toward it |
+| Agent steered into a hill | it terminates rather than tunnelling; `max_climb_m` is respected |
+| Any fixture | `hit_step_cap == 0` — Rule 1 already forbids non-termination, so any hit is a bug |
 
 **The headline production measurements**, all of which are the point of the
 change and none of which are currently satisfied:
@@ -185,9 +232,14 @@ change and none of which are currently satisfied:
 
 ## Risks
 
-- **Braiding.** If trail attraction is too weak relative to wander, canals
+- **Braiding.** If water attraction is too weak relative to wander, canals
   split instead of merging and the network stops being dendritic. Measure the
   merge count; if it is near zero, the weights are wrong.
+- **Premature termination.** Rules 1 and 2 both terminate rather than
+  backtrack, so over-tight parameters could strand agents a few steps in.
+  Report the terminal-reason histogram (edge / lake / merged-out / boxed-in /
+  climb-blocked); a large boxed-in share means the wander or sense geometry is
+  wrong, not that the rules are.
 - **Over-incision.** `canal_slope` too steep trenches the plains into a visible
   grid of ditches. Judge from the hillshade, not from the parameter.
 - **Seed explosion.** Threshold-only seeding means terrain decides the agent
