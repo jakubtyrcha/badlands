@@ -157,12 +157,16 @@ bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action
 // own comment) and EventInbox::last_seen_seq to the inbox's current
 // last_pushed_seq (components.h), so should_wake's event clause reflects
 // "nothing new since this look." When `adopted` is false (the suggestion
-// was rejected or explicitly BL_INT_NONE), also re-arms
+// was rejected or explicitly BL_INT_NONE) AND the current deadline is not
+// doing useful work of its own (already due, and not Idle -- Finding 2, see
+// this function's definition for the full rationale), also re-arms
 // CurrentIntention::wake_at_millis to `now + kRejectedSuggestionBackoffMillis`
 // (components.h) -- otherwise a hero with no CurrentIntention running (which
 // is exactly what a rejected/no-op decision leaves behind) satisfies
-// should_wake's "nothing running" clause every single tick, forever. No-op
-// if `slot` names no hero.
+// should_wake's "nothing running" clause every single tick, forever. A
+// running intention's own still-future deadline, or a running Idle's
+// completion deadline, is left untouched instead. No-op if `slot` names no
+// hero.
 //
 // Determinism: this is live-only engine scheduling state (when to bother
 // calling the brain again), never read back into anything the command log

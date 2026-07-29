@@ -636,7 +636,28 @@ void note_think_outcome(BadlandsGame& game, uint32_t slot, bool adopted) {
     if (auto* inbox = game.registry.try_get<EventInbox>(e)) {
         inbox->last_seen_seq = inbox->last_pushed_seq;
     }
-    if (!adopted) {
+    // Finding 2: re-arm ONLY when the current deadline is not doing useful
+    // work of its own -- already due, and not Idle. wake_at_millis doubles
+    // as more than "when to next busy-wake":
+    //   - kind None always has wake_at_millis == 0 (never adopted anything),
+    //     which is always "due" -- the anti-spin backoff below still applies
+    //     there, same as before.
+    //   - A rejected EARLY wake (should_wake's event/high-stakes clauses
+    //     firing ahead of a still-future deadline) must leave that deadline
+    //     untouched: the running intention's own schedule stands -- no spin
+    //     results (the event's seq was already consumed above, so should_wake
+    //     will not re-fire for the SAME event), and re-arming here would
+    //     needlessly shorten a long yield (e.g. a multi-hour Idle) down to
+    //     kRejectedSuggestionBackoffMillis.
+    //   - A running Idle AT OR PAST its own deadline is excluded even though
+    //     it is "due": wake_at_millis IS Idle's completion time
+    //     (advance_intentions, below in this file), and advance_intentions
+    //     retires it (kind -> None) this same tick, after this function runs
+    //     (sim.cpp's tick order: think, then advance_intentions). Re-arming
+    //     here would extend the logged idle past its own SetBehavior
+    //     duration instead of letting it complete on schedule.
+    if (!adopted && ci->wake_at_millis <= game.world_millis &&
+        ci->kind != IntentionKind::Idle) {
         // Rejected or explicit "nothing new" (BL_INT_NONE): re-arm the
         // schedule so should_wake's deadline clause, not its "nothing
         // running" clause, governs the next wake -- see should_wake's own

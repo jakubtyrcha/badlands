@@ -348,10 +348,15 @@ TEST_CASE(
     entt::entity e = g.slots[slot];
 
     // A hero whose deadline is already behind the clock -- the shape a
-    // just-expired Idle/idle-hint wake looks like right before the brain is
-    // consulted and declines to suggest anything new.
+    // just-expired idle-hint wake looks like right before the brain is
+    // consulted and declines to suggest anything new. Attack, not Idle: an
+    // Idle at/past its own deadline is a completion, not a plain re-check
+    // (Finding 2 below) -- advance_intentions retires it the same tick, so
+    // note_think_outcome must leave its deadline alone. Attack has no
+    // completion criterion tied to wake_at_millis at all, so it is the
+    // clean case for "deadline already due, rejected -> back off."
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
-    ci.kind = IntentionKind::Idle;
+    ci.kind = IntentionKind::Attack;
     ci.wake_at_millis = g.world_millis;  // already due
 
     note_think_outcome(g, slot, /*adopted=*/false);
@@ -361,6 +366,74 @@ TEST_CASE(
     CHECK(ci.wake_at_millis > g.world_millis);
     CHECK(ci.wake_at_millis == g.world_millis + kRejectedSuggestionBackoffMillis);
     CHECK_FALSE(should_wake(g, e));
+}
+
+// --- Finding 2: the rejection backoff must not clobber a RUNNING
+// intention's own deadline -- wake_at_millis doubles as Idle's completion
+// time, and as any kind's still-future idle-hint reminder. A rejected
+// suggestion may only re-arm when the current deadline is not doing useful
+// work: already due AND not Idle (an Idle at/past its deadline completes via
+// advance_intentions this same tick; re-arming would extend the logged idle
+// past its own SetBehavior duration). A future deadline stands untouched
+// (this was a rejected EARLY/event-driven wake -- the running intention's
+// own schedule is still the right one), and kind None (wake_at_millis always
+// 0, so always "due") keeps the anti-spin backoff.
+
+TEST_CASE(
+    "note_think_outcome does not shorten a running Idle's completion deadline on rejection",
+    "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    Intention idle;
+    idle.kind = IntentionKind::Idle;
+    idle.duration_millis = 2000;
+    g.world_millis = 1000;
+    CHECK(apply_intention(g, slot, idle));
+    apply_commands(g);
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    REQUIRE(ci.wake_at_millis == 3000);
+
+    // A rejected/no-op think mid-yield (an early, event-driven wake) must
+    // not touch the Idle's own completion deadline.
+    g.world_millis = 1500;
+    note_think_outcome(g, slot, /*adopted=*/false);
+    CHECK(ci.wake_at_millis == 3000);  // unchanged -- was 2000 before the fix
+    CHECK(ci.kind == IntentionKind::Idle);  // still running, not aborted
+
+    // Advancing to the real deadline still completes it normally.
+    g.world_millis = 3000;
+    advance_intentions(g);
+    CHECK(ci.kind == IntentionKind::None);
+    const EventInbox& inbox = g.registry.get<EventInbox>(e);
+    bool found_completed = false;
+    for (int32_t i = 0; i < inbox.count; ++i) {
+        if (inbox.events[i].kind == InboxEventKind::IntentionEnded &&
+            inbox.events[i].param == 1.0f) {
+            found_completed = true;
+        }
+    }
+    CHECK(found_completed);
+}
+
+TEST_CASE("note_think_outcome still re-arms the anti-spin backoff for kind None",
+          "[intention]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    entt::entity e = g.slots[slot];
+
+    // Never adopted anything: kind stays None, wake_at_millis stays its
+    // default 0 -- always "due" by should_wake's own reading.
+    CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
+    REQUIRE(ci.kind == IntentionKind::None);
+    REQUIRE(ci.wake_at_millis == 0);
+
+    g.world_millis = 5000;
+    note_think_outcome(g, slot, /*adopted=*/false);
+    CHECK(ci.wake_at_millis == 5000 + kRejectedSuggestionBackoffMillis);
 }
 
 // --- v3 high-stakes clause: threat_was_present / MeleeLock win over
