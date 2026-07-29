@@ -1418,7 +1418,8 @@ CpuImage CullAndRenderBuckets(TestGpu& g, GpuInstanceRenderer& renderer,
     RenderPassContext pass = frame.BeginRenderPass(desc);
 
     renderer.Draw(pass, frame,
-                  [&](uint32_t bucket) -> RenderingMaterialInstance* {
+                  [&](uint32_t bucket, uint32_t /*submesh*/)
+                      -> RenderingMaterialInstance* {
                     RenderingMaterialInstance* m = mats[bucket];
                     if (!m) return nullptr;
                     if (!m->Bind(pass, frame)) return nullptr;
@@ -1452,6 +1453,20 @@ std::vector<float> QuadVerticesSized(float h) {
       h,  -h, 0, 1, 0, 0, 0, 1, 1, 0, 0,  //
       h,  h,  0, 1, 1, 0, 0, 1, 1, 0, 0,  //
       -h, h,  0, 0, 1, 0, 0, 1, 1, 0, 0,  //
+  };
+}
+
+// A quad of the given half-extent, centered at `offset` IN MESH-LOCAL space
+// (baked into the vertex positions, not the per-instance transform). Two
+// submeshes of the same bucket using different offsets render as distinct
+// on-screen shapes per instance while still reading the exact same
+// per-instance world transform.
+std::vector<float> QuadVerticesOffset(float h, glm::vec2 offset) {
+  return {
+      offset.x - h, offset.y - h, 0, 0, 0, 0, 0, 1, 1, 0, 0,  //
+      offset.x + h, offset.y - h, 0, 1, 0, 0, 0, 1, 1, 0, 0,  //
+      offset.x + h, offset.y + h, 0, 1, 1, 0, 0, 1, 1, 0, 0,  //
+      offset.x - h, offset.y + h, 0, 0, 1, 0, 0, 1, 1, 0, 0,  //
   };
 }
 
@@ -1516,7 +1531,7 @@ TEST_CASE("GPU per-LOD render: each lod drawn with its own mesh/color/position",
                                      verts.size() * sizeof(float),
                                      wgpu::BufferUsage::Vertex);
     vbufs.push_back(vbuf);
-    renderer.SetBucketMesh(b, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+    renderer.SetBucketSubmesh(b, 0, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
   }
 
   auto mats = MakeBucketMaterials(g, num_buckets, tints);
@@ -1586,7 +1601,7 @@ TEST_CASE("GPU edge: all instances culled -> empty buckets draw nothing",
                                    verts.size() * sizeof(float),
                                    wgpu::BufferUsage::Vertex);
   for (uint32_t b = 0; b < num_buckets; ++b) {
-    renderer.SetBucketMesh(b, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+    renderer.SetBucketSubmesh(b, 0, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
   }
 
   const std::vector<glm::vec4> tints(num_buckets,
@@ -1646,7 +1661,7 @@ TEST_CASE("GPU edge: all instances in one bucket render together",
                                    verts.size() * sizeof(float),
                                    wgpu::BufferUsage::Vertex);
   for (uint32_t b = 0; b < num_buckets; ++b) {
-    renderer.SetBucketMesh(b, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+    renderer.SetBucketSubmesh(b, 0, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
   }
 
   const std::vector<glm::vec4> tints(num_buckets,
@@ -1863,18 +1878,19 @@ TEST_CASE("instanced material with no params still binds its group-0 UBO",
 }
 
 // ---------------------------------------------------------------------------
-// Finding #3 (correctness): SetBucketMesh must NOT clobber the GPU-published
-// per-bucket instanceCount. The scan pass writes each bucket's survivor count
-// into its indirect-args instanceCount@4 every Cull(); SetBucketMesh only
-// configures a bucket's geometry, so calling it after Cull (e.g. to swap a
-// bucket's mesh) must leave instanceCount intact.
+// Finding #3 (correctness): SetBucketSubmesh must NOT clobber the
+// GPU-published per-bucket instanceCount. The scan pass writes each bucket's
+// survivor count into its indirect-args instanceCount@4 every Cull();
+// SetBucketSubmesh only configures a slot's geometry, so calling it after
+// Cull (e.g. to swap a slot's mesh) must leave instanceCount intact.
 //
-// RED (pre-fix, SetBucketMesh WriteBuffer'd the full 20-byte struct with
+// RED (pre-fix, SetBucketSubmesh WriteBuffer'd the full 20-byte struct with
 // instanceCount = 0): the post-Cull instanceCount is overwritten with 0. GREEN
-// (SetBucketMesh writes only indexCount@0 + firstIndex/baseVertex/firstInstance
-// @8, skipping instanceCount@4): the count survives.
+// (SetBucketSubmesh writes only indexCount@0 +
+// firstIndex/baseVertex/firstInstance @8, skipping instanceCount@4): the
+// count survives.
 // ---------------------------------------------------------------------------
-TEST_CASE("SetBucketMesh preserves the GPU-published instanceCount",
+TEST_CASE("SetBucketSubmesh preserves the GPU-published instanceCount",
           "[gpu_instance][gpu]") {
   TestGpu& g = GetTestGpu();
 
@@ -1902,7 +1918,7 @@ TEST_CASE("SetBucketMesh preserves the GPU-published instanceCount",
   test::WaitForGpu(g.instance, g.device, g.queue);
 
   // Sanity: the scan published instanceCount = 4 for bucket 0 (holds in both RED
-  // and GREEN -- this read is BEFORE SetBucketMesh). instanceCount @ offset 4
+  // and GREEN -- this read is BEFORE SetBucketSubmesh). instanceCount @ offset 4
   // bytes == index 1 of the 5-u32 indirect-args struct.
   auto read_bucket0_instance_count = [&]() -> uint32_t {
     std::vector<uint32_t> args = test::ReadBufferSync<uint32_t>(
@@ -1920,12 +1936,278 @@ TEST_CASE("SetBucketMesh preserves the GPU-published instanceCount",
   wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
                                    verts.size() * sizeof(float),
                                    wgpu::BufferUsage::Vertex);
-  renderer.SetBucketMesh(0, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+  renderer.SetBucketSubmesh(0, 0, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
 
   // The published survivor count must be preserved...
   CHECK(read_bucket0_instance_count() == kExpectedCount);
-  // ...and the geometry field SetBucketMesh DID write must have landed.
+  // ...and the geometry field SetBucketSubmesh DID write must have landed.
   std::vector<uint32_t> args = test::ReadBufferSync<uint32_t>(
       g.instance, g.device, g.queue, renderer.GetArgsBuffer(), 0, 5);
-  CHECK(args[0] == 6);  // indexCount written by SetBucketMesh
+  CHECK(args[0] == 6);  // indexCount written by SetBucketSubmesh
+}
+
+// ===========================================================================
+// Task 1 (submesh dimension): GpuInstanceRenderer::SetBucketSubmesh /
+// GetNumSubmeshes / Draw's (bucket, submesh) callback. One (model,lod)
+// bucket's ONE compacted transform slice can now drive several draws
+// (different geometry/materials in different render passes), addressed by
+// slot = bucket*numSubmeshes+submesh.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// RED/GREEN: every submesh slot of a bucket must carry that bucket's OWN
+// survivor instanceCount (the scan broadcasts one count per bucket to all its
+// submesh slots), and each slot's own indexCount (set via SetBucketSubmesh)
+// must land untouched at its own slot, independent of its sibling slots.
+//
+// Ground truth is bucket_count_buffer_ (unaffected by the submesh dimension —
+// still one atomic<u32> per bucket), read back and compared against every
+// submesh slot of that bucket in the (now numBuckets*numSubmeshes-sized)
+// indirect-args buffer.
+//
+// RED (pre-fix instance_scan.wesl -- serial loop over buckets only, no inner
+// submesh loop): the scan writes indirectArgs[b].instanceCount = cnt for b in
+// [0, numBuckets) -- i.e. only the FIRST numBuckets physical slots of the now
+// (numBuckets*numSubmeshes)-sized buffer. For numSubmeshes=2 those physical
+// indices land on (bucket0,submesh0), (bucket0,submesh1) [== old "bucket
+// 1"'s count], (bucket1,submesh0) [== old "bucket 2"'s count] -- everything
+// from (bucket1,submesh1) onward is never written at all (stays the
+// zero-init). So most submesh-1 (and every bucket-2) slot fails to match its
+// OWN bucket's count. GREEN (scan loops submeshes inside the bucket loop,
+// writing slot = b*numSubmeshes+s for every s): every submesh slot of every
+// bucket gets that bucket's own count.
+// ---------------------------------------------------------------------------
+TEST_CASE("SetBucketSubmesh: every submesh slot of a bucket carries the "
+          "bucket's own survivor instanceCount",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  const glm::vec2 thresholds(10.0f, 20.0f);
+  Camera camera = MakeCullCamera(1.0f);
+
+  // Same distance spread as the LOD-selection test: bucket0=1, bucket1=2,
+  // bucket2=2 survivors -- all three buckets non-empty and non-uniform, so a
+  // slot reading the WRONG bucket's count can't coincidentally match.
+  const std::array<float, 5> dists = {5.0f, 10.0f, 15.0f, 20.0f, 25.0f};
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  for (float d : dists) {
+    inputs.push_back(MakeInstance(glm::vec3(0.0f, 0.0f, -d), 0, 0.1f));
+  }
+  constexpr uint32_t kNumSubmeshes = 2;
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
+                               static_cast<uint32_t>(inputs.size()),
+                               /*num_models=*/1, {thresholds.x, thresholds.y},
+                               kNumSubmeshes);
+  REQUIRE(renderer.IsValid());
+  REQUIRE(renderer.GetNumSubmeshes() == kNumSubmeshes);
+  const uint32_t num_buckets = renderer.GetNumBuckets();
+  REQUIRE(num_buckets == 3);
+  renderer.UploadInstances(inputs);
+
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  std::vector<float> verts = QuadVerticesSized(1.0f);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+
+  // Distinct indexCount per (bucket, submesh) slot -- proves SetBucketSubmesh
+  // targets its own slot without disturbing a sibling slot's geometry.
+  auto slot_index_count = [](uint32_t b, uint32_t s) -> uint32_t {
+    return 6 + s * 100 + b;
+  };
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    for (uint32_t s = 0; s < kNumSubmeshes; ++s) {
+      renderer.SetBucketSubmesh(b, s, vbuf, ibuf, wgpu::IndexFormat::Uint32,
+                                slot_index_count(b, s));
+    }
+  }
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.Cull(frame, camera);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  std::vector<uint32_t> bucket_counts = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
+      num_buckets);
+  REQUIRE(bucket_counts.size() == num_buckets);
+  INFO("bucket counts: " << bucket_counts[0] << "," << bucket_counts[1] << ","
+                        << bucket_counts[2]);
+  REQUIRE(bucket_counts[0] == 1);
+  REQUIRE(bucket_counts[1] == 2);
+  REQUIRE(bucket_counts[2] == 2);
+
+  // args buffer laid out [bucket*numSubmeshes+submesh], 5 u32s (20 bytes) per
+  // slot: indexCount, instanceCount, firstIndex, baseVertex, firstInstance.
+  const size_t num_slots = size_t{num_buckets} * kNumSubmeshes;
+  std::vector<uint32_t> args = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetArgsBuffer(), 0,
+      num_slots * 5);
+  REQUIRE(args.size() == num_slots * 5);
+
+  for (uint32_t b = 0; b < num_buckets; ++b) {
+    for (uint32_t s = 0; s < kNumSubmeshes; ++s) {
+      const uint32_t slot = b * kNumSubmeshes + s;
+      const uint32_t index_count = args[slot * 5 + 0];
+      const uint32_t instance_count = args[slot * 5 + 1];
+      INFO("bucket " << b << " submesh " << s << " slot " << slot
+                     << ": indexCount=" << index_count
+                     << " instanceCount=" << instance_count);
+      CHECK(index_count == slot_index_count(b, s));
+      // Every submesh slot of a bucket must carry THAT bucket's own survivor
+      // count -- one compacted slice drives all its submesh draws.
+      CHECK(instance_count == bucket_counts[b]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared-slice render: one bucket, two submeshes with DISTINCT geometry
+// (mesh-local-offset quads) and DISTINCT materials (distinct tints), both
+// baked with the SAME bucketId (0) -- proves both submeshes' draws read the
+// SAME compacted transform slice: the vertex shader's
+// compacted[bucketBase[bucketId] + instance_index] depends only on
+// bucketId, which both materials share, so per instance BOTH submeshes must
+// appear at that ONE instance's world transform (offset only by their own
+// mesh-local geometry), never at some other/independently-culled position.
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU shared-slice render: a bucket's submeshes draw the SAME "
+          "instance transforms",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  const glm::vec2 thresholds(100.0f, 200.0f);  // everything is lod0 -> bucket 0
+  Camera cull_camera = MakeCullCamera(1.0f);
+
+  // Two instances (translate-only transforms -- MakeInstance's default).
+  const std::array<glm::vec2, 2> centers = {glm::vec2{-1.3f, 0.0f},
+                                            glm::vec2{1.3f, 0.0f}};
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  for (glm::vec2 c : centers) {
+    inputs.push_back(MakeInstance(glm::vec3(c.x, c.y, -5.0f), 0, 0.3f));
+  }
+
+  constexpr uint32_t kNumSubmeshes = 2;
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
+                               static_cast<uint32_t>(inputs.size()),
+                               /*num_models=*/1, {thresholds.x, thresholds.y},
+                               kNumSubmeshes);
+  REQUIRE(renderer.IsValid());
+  renderer.UploadInstances(inputs);
+
+  // Submesh 0: a small quad offset -0.3 in mesh-local X. Submesh 1: +0.3.
+  // Baked into the mesh, NOT the per-instance transform.
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  std::vector<float> verts0 = QuadVerticesOffset(0.15f, {-0.3f, 0.0f});
+  std::vector<float> verts1 = QuadVerticesOffset(0.15f, {0.3f, 0.0f});
+  wgpu::Buffer vbuf0 = UploadBuffer(g.device, verts0.data(),
+                                    verts0.size() * sizeof(float),
+                                    wgpu::BufferUsage::Vertex);
+  wgpu::Buffer vbuf1 = UploadBuffer(g.device, verts1.data(),
+                                    verts1.size() * sizeof(float),
+                                    wgpu::BufferUsage::Vertex);
+  renderer.SetBucketSubmesh(0, 0, vbuf0, ibuf, wgpu::IndexFormat::Uint32, 6);
+  renderer.SetBucketSubmesh(0, 1, vbuf1, ibuf, wgpu::IndexFormat::Uint32, 6);
+
+  // Two materials, BOTH bucketId=0 (the shared bucket), distinct tints.
+  auto factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {});
+  REQUIRE(factory != nullptr);
+  MaterialInstanceCache cache;
+  auto make_mat = [&](const char* name, glm::vec4 tint) {
+    InstanceParams params;
+    params.uniform_overrides["tint"] = MaterialParameterValue(tint);
+    params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+    entt::id_type key = ComposeMaterialCacheKey(
+        entt::hashed_string{name}.value(), GeometryType::kInstancedMesh,
+        RenderPassType::kGBuffer, 0);
+    auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                                    MaterialPassType::kDeferred,
+                                    RenderPassType::kGBuffer, params);
+    REQUIRE(handle);
+    REQUIRE(handle->IsValid());
+    return handle;
+  };
+  auto mat0 = make_mat("shared_slice_submesh0", glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+  auto mat1 = make_mat("shared_slice_submesh1", glm::vec4(0.0f, 1.0f, 0.0f, 1.0f));
+  RenderingMaterialInstance* mat0_ptr = mat0.operator->();
+  RenderingMaterialInstance* mat1_ptr = mat1.operator->();
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  renderer.Cull(frame, cull_camera);
+
+  ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kInstTarget, kInstTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kInstTarget, kInstTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(albedo_t.IsValid());
+
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        ClearAttachment(normals_t.GetView()),
+        ClearAttachment(albedo_t.GetView()),
+        ClearAttachment(material_t.GetView())};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+
+    renderer.Draw(pass, frame,
+                  [&](uint32_t bucket, uint32_t submesh)
+                      -> RenderingMaterialInstance* {
+                    if (bucket != 0) return nullptr;  // only bucket 0 has meshes
+                    RenderingMaterialInstance* m =
+                        submesh == 0 ? mat0_ptr : mat1_ptr;
+                    if (!m->Bind(pass, frame)) return nullptr;
+                    return m;
+                  });
+    pass.End();
+  }
+
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage albedo = rb.ReadTextureSync(albedo_t.GetTexture(), kInstTarget,
+                                       kInstTarget, GBuffer::kAlbedoFormat);
+
+  for (glm::vec2 c : centers) {
+    auto px0 = WorldXyToPixel({c.x - 0.3f, c.y});
+    auto px1 = WorldXyToPixel({c.x + 0.3f, c.y});
+    CpuImage::Color c0 = albedo.GetPixel(px0.first, px0.second);
+    CpuImage::Color c1 = albedo.GetPixel(px1.first, px1.second);
+    INFO("instance (" << c.x << "," << c.y << ") submesh0 @ (" << px0.first
+                      << "," << px0.second << ") rgb=" << (int)c0.r << ","
+                      << (int)c0.g << "," << (int)c0.b);
+    CHECK(c0.r > 180);
+    CHECK(c0.g < 60);
+    CHECK(c0.b < 60);
+    INFO("instance (" << c.x << "," << c.y << ") submesh1 @ (" << px1.first
+                      << "," << px1.second << ") rgb=" << (int)c1.r << ","
+                      << (int)c1.g << "," << (int)c1.b);
+    CHECK(c1.r < 60);
+    CHECK(c1.g > 180);
+    CHECK(c1.b < 60);
+  }
+  // The gap between the two submeshes' quads (and between the two instances)
+  // stays the clear color.
+  auto gap_px = WorldXyToPixel({0.0f, 0.0f});
+  CpuImage::Color gap = albedo.GetPixel(gap_px.first, gap_px.second);
+  CHECK(gap.r < 40);
+  CHECK(gap.g < 40);
+  CHECK(gap.b < 40);
 }
