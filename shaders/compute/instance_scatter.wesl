@@ -9,22 +9,9 @@
 // count[b] (exactly count[b] instances map to it), a bucket never spills into a
 // neighbor — the only guard needed is a global capacity clamp.
 
-// Mirrors GpuInstanceRenderer's CullConfigData byte-for-byte (144 bytes).
-struct CullConfig {
-    planes: array<vec4<f32>, 6>,
-    cameraWorldPos: vec4<f32>,
-    lodThresholds: vec4<f32>,
-    counts: vec4<u32>,             // x=instanceCount, y=numBuckets, z=compactedCapacity, w unused
-}
-
-// Mirrors GpuInstanceRenderer::InstanceInput byte-for-byte (96 bytes).
-struct InstanceData {
-    transform: mat4x4<f32>,
-    boundsSphere: vec4<f32>,
-    modelInfo: vec4<u32>,
-}
-
-const SENTINEL: u32 = 0xFFFFFFFFu;
+// CullConfig (144B), InstanceData (96B), and SENTINEL are shared with the
+// classify + scan passes — see shaders/compute/instance_common.wesl.
+import package::compute::instance_common::{CullConfig, InstanceData, SENTINEL};
 
 @group(0) @binding(0) var<uniform> config: CullConfig;
 @group(0) @binding(1) var<storage, read> instances: array<InstanceData>;

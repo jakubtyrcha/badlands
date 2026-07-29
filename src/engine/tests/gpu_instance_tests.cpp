@@ -1680,3 +1680,252 @@ TEST_CASE("GPU edge: all instances in one bucket render together",
     CHECK(color.r > 180);  // white tint drawn
   }
 }
+
+// ===========================================================================
+// Review round 2 RED/GREEN correctness fixes (#1, #2, #3).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Finding #1 (correctness): the classify pass must guard a garbage modelId
+// BEFORE the `bucket = modelId*kMaxLods + lod` multiply. A modelId large enough
+// that modelId*kMaxLods overflows u32 and WRAPS to a small in-range value
+// defeats the post-multiply `bucket >= numBuckets` guard, corrupting a valid
+// bucket with a garbage instance's transform.
+//
+// modelId = 0x55555556u, kMaxLods = 3: 0x55555556*3 = 0x100000002, truncated to
+// u32 = 2 -> the garbage instance wraps into bucket 2. With num_models = 1
+// (num_buckets = 3) bucket 2 is a legitimate bucket (model 0, lod 2); a real
+// model-0 lod2 instance also lands there.
+//
+// RED (pre-fix, no pre-multiply guard): the wrapped bucket 2 is < numBuckets,
+// so the garbage instance is appended -> counts[2] == 2 and bucket 2's compacted
+// slice contains the garbage transform. GREEN (numModels = numBuckets/kMaxLods =
+// 1; modelId 0x55555556 >= 1 -> SENTINEL): counts[2] == 1 and the slice holds
+// ONLY the legitimate transform.
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU classify: overflowing garbage modelId can't corrupt a valid bucket",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  const glm::vec2 thresholds(10.0f, 20.0f);
+  Camera camera = MakeCullCamera(1.0f);
+
+  // Legit: model 0 at dist 25 (lod2) -> bucket 2. Garbage: modelId 0x55555556 at
+  // dist 5 (lod0) -> bucket = 0x55555556*3 wraps to 2. Both on-axis, in-frustum.
+  constexpr uint32_t kGarbageModel = 0x55555556u;
+  GpuInstanceRenderer::InstanceInput legit =
+      MakeInstance(glm::vec3(0.0f, 0.0f, -25.0f), 0u, 0.1f);
+  GpuInstanceRenderer::InstanceInput garbage =
+      MakeInstance(glm::vec3(0.0f, 0.0f, -5.0f), kGarbageModel, 0.1f);
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs = {legit, garbage};
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 2, /*num_models=*/1,
+                               {thresholds.x, thresholds.y});
+  REQUIRE(renderer.IsValid());
+  REQUIRE(renderer.GetNumBuckets() == 3);
+  renderer.UploadInstances(inputs);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.Cull(frame, camera);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  std::vector<uint32_t> counts = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
+      renderer.GetNumBuckets());
+  std::vector<uint32_t> bases = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketBaseBuffer(), 0,
+      renderer.GetNumBuckets());
+  std::vector<glm::mat4> compacted = test::ReadBufferSync<glm::mat4>(
+      g.instance, g.device, g.queue, renderer.GetCompactedBuffer(), 0,
+      renderer.GetCompactedCapacity());
+  REQUIRE(counts.size() == 3);
+  REQUIRE(bases.size() == 3);
+
+  INFO("counts = " << counts[0] << "," << counts[1] << "," << counts[2]);
+  // Bucket 2 must contain ONLY the legitimate instance; the garbage instance
+  // (whose modelId overflows into bucket 2) must be culled.
+  CHECK(counts[2] == 1);
+  REQUIRE(compacted.size() >= bases[2] + 1);
+  CHECK(Mat4Equal(compacted[bases[2]], legit.transform));
+  CHECK_FALSE(Mat4Equal(compacted[bases[2]], garbage.transform));
+}
+
+// ---------------------------------------------------------------------------
+// Finding #2 (correctness): an instanced material drawn with NO parameters set
+// must still bind its group-0 material-constants UBO. instanced_gbuffer declares
+// mat_params @group(0) @binding(5); Dawn requires every layout binding present
+// at draw. Before the fix, Bind() appended the params UBO only when
+// GetOrCreateUniformBuffer() was non-null (>= 1 SetParameter), so a no-param
+// instanced material omitted the binding.
+//
+// RED (pre-fix): the group-0 bind group is built without binding 5 -> Dawn
+// raises a validation error (captured by the pushed scope). A null/IsValid check
+// does NOT catch this. GREEN (a zero-filled UBO of the reflected size is always
+// created + bound): NoError.
+// ---------------------------------------------------------------------------
+TEST_CASE("instanced material with no params still binds its group-0 UBO",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {});
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  // No uniform_overrides at all: the material is resolved WITHOUT any
+  // SetParameter, so MaterialInstance builds no constants buffer.
+  InstanceParams params;
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"instanced_gbuffer_noparams"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kGBuffer, 0);
+  auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                                  MaterialPassType::kDeferred,
+                                  RenderPassType::kGBuffer, params);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
+  auto* inst = handle.operator->();
+  REQUIRE(inst->GetGeometryType() == GeometryType::kInstancedMesh);
+
+  std::vector<float> verts = QuadVertices();
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  std::vector<glm::mat4> xforms = MakeInstanceTransforms();
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  wgpu::Buffer instbuf =
+      UploadBuffer(g.device, xforms.data(), xforms.size() * sizeof(glm::mat4),
+                   wgpu::BufferUsage::Storage);
+  std::array<uint32_t, 1> base0 = {0u};
+  wgpu::Buffer basebuf = UploadBuffer(g.device, base0.data(), sizeof(base0),
+                                      wgpu::BufferUsage::Storage);
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kInstTarget, kInstTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kInstTarget, kInstTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(albedo_t.IsValid());
+
+  // Capture any validation error the bind/draw provokes (mirrors the
+  // BindPerObject test + forward_pass_tests.cpp's validation-scope pattern).
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        ClearAttachment(normals_t.GetView()),
+        ClearAttachment(albedo_t.GetView()),
+        ClearAttachment(material_t.GetView())};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+
+    REQUIRE(inst->Bind(pass, frame));
+    REQUIRE(inst->BindInstanceData(pass, frame, instbuf, basebuf));
+    pass.SetVertexBuffer(0, vbuf);
+    pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
+    pass.DrawIndexed(6, kInstCount);
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool scope_done = false;
+  bool validation_error = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView msg) {
+        if (type != wgpu::ErrorType::NoError) {
+          validation_error = true;
+          INFO("captured error: "
+               << (msg.length > 0 ? std::string(msg.data, msg.length)
+                                  : std::string("(no message)")));
+        }
+        scope_done = true;
+      });
+  while (!scope_done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+
+  CHECK_FALSE(validation_error);
+}
+
+// ---------------------------------------------------------------------------
+// Finding #3 (correctness): SetBucketMesh must NOT clobber the GPU-published
+// per-bucket instanceCount. The scan pass writes each bucket's survivor count
+// into its indirect-args instanceCount@4 every Cull(); SetBucketMesh only
+// configures a bucket's geometry, so calling it after Cull (e.g. to swap a
+// bucket's mesh) must leave instanceCount intact.
+//
+// RED (pre-fix, SetBucketMesh WriteBuffer'd the full 20-byte struct with
+// instanceCount = 0): the post-Cull instanceCount is overwritten with 0. GREEN
+// (SetBucketMesh writes only indexCount@0 + firstIndex/baseVertex/firstInstance
+// @8, skipping instanceCount@4): the count survives.
+// ---------------------------------------------------------------------------
+TEST_CASE("SetBucketMesh preserves the GPU-published instanceCount",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  const glm::vec2 thresholds(100.0f, 200.0f);  // everything is lod0 -> bucket 0
+  Camera camera = MakeCullCamera(1.0f);
+
+  // Four in-frustum instances, all model 0, all lod0 -> bucket 0 count = 4.
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  for (int i = 0; i < 4; ++i) {
+    inputs.push_back(
+        MakeInstance(glm::vec3(0.0f, float(i) * 0.5f, -5.0f), 0u, 0.1f));
+  }
+  constexpr uint32_t kExpectedCount = 4;
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 4, /*num_models=*/1,
+                               {thresholds.x, thresholds.y});
+  REQUIRE(renderer.IsValid());
+  renderer.UploadInstances(inputs);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.Cull(frame, camera);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  // Sanity: the scan published instanceCount = 4 for bucket 0 (holds in both RED
+  // and GREEN -- this read is BEFORE SetBucketMesh). instanceCount @ offset 4
+  // bytes == index 1 of the 5-u32 indirect-args struct.
+  auto read_bucket0_instance_count = [&]() -> uint32_t {
+    std::vector<uint32_t> args = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetArgsBuffer(), 0, 5);
+    REQUIRE(args.size() == 5);
+    return args[1];
+  };
+  REQUIRE(read_bucket0_instance_count() == kExpectedCount);
+
+  // Configure bucket 0's mesh AFTER Cull. This must not wipe instanceCount.
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  std::vector<float> verts = QuadVerticesSized(1.0f);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx),
+                                   wgpu::BufferUsage::Index);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  renderer.SetBucketMesh(0, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6);
+
+  // The published survivor count must be preserved...
+  CHECK(read_bucket0_instance_count() == kExpectedCount);
+  // ...and the geometry field SetBucketMesh DID write must have landed.
+  std::vector<uint32_t> args = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetArgsBuffer(), 0, 5);
+  CHECK(args[0] == 6);  // indexCount written by SetBucketMesh
+}

@@ -184,13 +184,20 @@ void GpuInstanceRenderer::SetBucketMesh(uint32_t bucket,
   bucket_meshes_[bucket] = {vertex_buffer, index_buffer, index_format,
                             index_count};
 
-  // Pre-fill this bucket's indirect args' geometry fields. instanceCount is left
-  // 0 here (the scan repopulates it every Cull()); firstInstance stays 0 (the
-  // per-bucket base is applied in the vertex shader, not via firstInstance).
+  // Pre-fill this bucket's indirect-args GEOMETRY fields only, WITHOUT touching
+  // instanceCount@4: the scan publishes that every Cull(), and SetBucketMesh may
+  // be called AFTER Cull() (e.g. to swap a bucket's mesh) -- writing the whole
+  // 20-byte struct here would zero the bucket's GPU-published survivor count.
+  // Two targeted writes straddle the instanceCount slot (struct layout:
+  // indexCount@0, instanceCount@4, firstIndex@8, baseVertex@12, firstInstance@16):
+  //   [0..4)   indexCount
+  //   [8..20)  firstIndex + baseVertex + firstInstance (all 0)
   IndirectArgsData args{};
   args.index_count = index_count;
-  queue_.WriteBuffer(args_buffer_, uint64_t{bucket} * sizeof(IndirectArgsData),
-                     &args, sizeof(args));
+  const uint64_t base = uint64_t{bucket} * sizeof(IndirectArgsData);
+  queue_.WriteBuffer(args_buffer_, base, &args.index_count, sizeof(uint32_t));
+  queue_.WriteBuffer(args_buffer_, base + 8, &args.first_index,
+                     3 * sizeof(uint32_t));
 }
 
 void GpuInstanceRenderer::Cull(FrameContext& frame, const Camera& camera) {
