@@ -3,6 +3,7 @@
 # screenshot, e.g. scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 3
 cd "$(dirname "$0")/.." || exit 1
 app="$1"; out="$2"; shift 2
+rm -f "$out"
 perl -e 'alarm 60; exec @ARGV' "./build/$app" --screenshot "$out" "$@" \
   > /tmp/badlands_shot.log 2>&1
 code=$?

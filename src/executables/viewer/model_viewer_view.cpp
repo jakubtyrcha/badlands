@@ -174,9 +174,10 @@ void ModelViewerView::RebuildScene() {
   // repopulates it. Clearing unconditionally (rather than only in the
   // non-Multi branches) also releases the previous Multi-mode field's GPU
   // resources the moment a rebuild switches away from it (generator change
-  // or LOD 3 -> 0/1/2), rather than leaving field_ptr_ dangling.
+  // or LOD 3 -> 0/1/2). field_ptr_ is also nulled for hygiene/safety.
   scene_context_.instanced_field_count = 0;
   tree_field_.reset();
+  field_ptr_ = nullptr;
 
   const MeshGenerator& gen = generators_[generator_index_];
   const bool multi = gen.tree.has_value() && lod_level_ == 3;
