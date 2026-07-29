@@ -63,8 +63,13 @@ targets:
       - sdk: CoreGraphics.framework
       - sdk: Foundation.framework
     settings:
-      HEADER_SEARCH_PATHS:
+      # core/src is deliberately only a *quote* search path (USER_HEADER_SEARCH_PATHS,
+      # -iquote): core/src/math.h shadows the C library's <math.h> if it's also on the
+      # angle-bracket path, which breaks any TU that pulls in <cmath> (e.g. doctest.h).
+      # Test files include local core/src headers with quotes ("camera.h", not <camera.h>).
+      USER_HEADER_SEARCH_PATHS:
         - "$(SRCROOT)/core/src"
+      HEADER_SEARCH_PATHS:
         - "$(SRCROOT)/core/include"
         - "$(SRCROOT)/shaders"
         - "$(SRCROOT)/tests/vendor"
