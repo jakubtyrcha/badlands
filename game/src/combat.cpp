@@ -174,7 +174,7 @@ entt::entity select_target(const BadlandsGame& game, entt::entity self) {
     // to monster_think (monster_brain.cpp), the new same-tick-as-the-pass
     // caller, which consults the cache directly instead of coming through
     // here (see that function's own comment). This function's remaining
-    // FOUR call sites are all NOT equivalent to the pass' result, each for
+    // call sites are all NOT equivalent to the pass' result, each for
     // its own reason: fire_attack's UINT32_MAX re-pick (command.cpp's
     // Attack handler) runs during apply_commands, AFTER earlier commands in
     // the same drain may have already dropped a shared target to hp<=0 (a

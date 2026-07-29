@@ -17,17 +17,21 @@
 // v3 (contract-v3-alignment, docs/superpowers/specs/
 // 2026-07-25-contract-v3-alignment-design.md): adds a second, write-only
 // channel alongside the one suggestion a wake still returns -- a brain may
-// now call the new bl_enqueue_action(kind, target_slot, arg) host import
+// call the new bl_enqueue_action(kind, target_slot, arg) host import
 // (src/crates/brainhost/include/brainhost.h) any number of times per wake to
-// fire instant actions (BL_ACT_*; only BL_ACT_ATTACK is live this slice),
-// each validated by the engine independently at resolve time, in enqueue
-// order. This is a breaking wire bump (BL_ABI_VERSION 2 -> 3): BlViewWire
-// gains the attack-loadout block below (a brain cannot pick an attack it
-// cannot see) and the import allowlist grows by one entry. Behavior-neutral
-// in practice: tick_wasm_brain drains every wake's calls through
+// fire instant actions (BL_ACT_*; only BL_ACT_ATTACK is live), each
+// validated by the engine independently at resolve time, in enqueue order.
+// This is a breaking wire bump (BL_ABI_VERSION 2 -> 3): BlViewWire gains the
+// attack-loadout block below (a brain cannot pick an attack it cannot see)
+// and the import allowlist grows by one entry. Shipped, not neutral: single-
+// gateway combat (the same slice) deleted the old host-level combat_preempt
+// pass outright, so tick_wasm_brain draining every wake's calls through
 // resolve_action (game/src/intention.h -- wasm_brain.cpp's
-// WasmBrainRuntime::pending_actions is the sink), but nothing calls
-// bl_enqueue_action yet -- hero.nim declares the import and never uses it.
+// WasmBrainRuntime::pending_actions is the sink) is now THE way a wasm
+// hero's every swing happens -- hero.nim calls bl_enqueue_action(BL_ACT_
+// ATTACK, ...) once per combat wake (scripts/brains/nim/hero.nim); the
+// simple monster brain (monster_brain.cpp) reaches the exact same
+// resolve_action entry point host-side, never a privileged path.
 //
 // Plain C, includable from both C++ (game/) and generated bindings. There is
 // a hand-mirrored copy of every struct below in scripts/brains/nim/abi.nim --

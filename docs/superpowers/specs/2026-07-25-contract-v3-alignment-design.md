@@ -47,14 +47,39 @@ decided in review of the design.
 
 - **`combat_preempt` is deleted** (both halves: auto-engagement and
   auto-swing). Its logic is redistributed:
-  - Engagement movement becomes execution of the durable `Attack(target)`
-    intention: the intention executor (`advance_intentions` /
-    `apply_intention`) maintains the approach `MoveTarget` at the stance's
-    engagement range while the intention runs, aborts on dead/gone target
-    (`IntentionEnded`), exactly like MoveTo executes a movement goal.
+  - Engagement movement becomes execution of the durable `Attack` intention —
+    actor-only, no target field ("fight whatever's nearest," matching the
+    canonical doc's `BL_INT_ATTACK` row; this corrects an earlier draft of
+    this section, which assumed an `Attack(target)` shape the shipped
+    intention does not have). `apply_intention`'s Attack case re-resolves the
+    nearest living enemy via `select_target`/`nearest_enemy` on every call —
+    adopt and restate alike — and maintains the approach `MoveTarget` toward
+    whichever enemy that live scan finds, via the new `CommandKind::Engage`
+    (below). `advance_intentions`' Attack case ends the intention
+    (`IntentionEnded`, aborted) when NO living enemy remains anywhere for the
+    actor to fight (`select_target` returns null) — not when one specific
+    named target dies or goes, the way `Shoot` aborts: losing the CURRENT
+    engagement target just re-targets on the next call, as long as another
+    enemy is alive.
   - Target picking + swing timing move into brains: the wasm hero brain and
     the simple monster brain both emit `Attack` intentions and per-swing
-    `BL_ACT_ATTACK` actions.
+    `BL_ACT_ATTACK` actions — the ACTION is what names the victim
+    (`target_slot`; `UINT32_MAX` infers it from the actor's own running
+    Attack intention), never the intention.
+- **`CommandKind::Engage`** (new; `command.h`/`command.cpp`): a logged,
+  replay-safe successor to `combat_preempt`'s old direct, unlogged
+  `MoveTarget` write. Holds `MoveTarget` at `Kind::Entity` toward a live
+  target slot at a given stop distance (the caller's `engagement_range`) —
+  tracks the target's LIVE position every `plan_paths` pass, unlike
+  `MoveTo`'s one-shot `Kind::Point`. Edge-triggered (re-stating the same
+  target/range is not a new decision), so a whole fight costs one `Engage`
+  command in the log, not one per tick. Why it exists: `combat_preempt` used
+  to move the engaging unit by writing `MoveTarget` directly, off the command
+  log — no replay ever reproduced a real engagement, a gap that outlived
+  several slices unexercised. Logging it is the replay payoff: a fight now
+  replays bit-identically from the log alone, no brain and no action
+  resolver running (`determinism_tests.cpp`'s new fight-replay case, §6, is
+  the load-bearing gate for this).
 - **Action resolver** (engine): resolves the wake's actions in enqueue order,
   during the same tick, each validated AT RESOLVE TIME: attack index in
   range, off cooldown, category legal under MeleeLock (no ranged while
@@ -71,10 +96,11 @@ decided in review of the design.
   by the simple brain, not by an executor).
 - **Simple brains (tier doctrine made concrete):** `monster_think` becomes an
   intention/action producer: pick target (nearest living enemy — reusing
-  `nearest_enemy`), emit/restate `Attack(target)` intention via
-  `apply_intention`, emit `BL_ACT_ATTACK` through the SAME action-resolver
-  entry point (a host-side `enqueue_action(game, slot, action)` function —
-  the same function the wasm callback feeds). Consulted every tick (engine
+  `nearest_enemy`), emit/restate the actor-only `Attack` intention via
+  `apply_intention`, emit `BL_ACT_ATTACK` (naming that enemy's slot) through
+  the SAME action-resolver entry point (a host-side
+  `resolve_action(game, slot, action)` function — the same function the
+  wasm callback feeds). Consulted every tick (engine
   code is cheap); same validation, same logs. Rat building-gnawing
   (`AttackBuilding`) keeps its current command path this slice.
   Deer and tax collectors (non-combat) migrate to the intention layer in a
@@ -95,8 +121,9 @@ decided in review of the design.
 ## 4. Nim hero brain
 
 - Restates its intention every wake. In combat (threats visible / locked):
-  emits/keeps `Attack(target)` and enqueues one `BL_ACT_ATTACK` per wake when
-  an attack is ready — policy: highest `base_damage` among ready,
+  emits/keeps the actor-only `Attack` intention and enqueues one
+  `BL_ACT_ATTACK` (naming the threat's slot) per wake when an attack is
+  ready — policy: highest `base_damage` among ready,
   lock-legal, in-range attacks (the old host `pick_attack` preference now
   lives guest-side, informed by the view's attacks block + statuses:
   "I can't shoot, I'm in melee" is readable from `BL_ST_MELEE_LOCKED`).

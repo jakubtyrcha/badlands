@@ -28,15 +28,16 @@
 # dedup to the engine.
 #
 # v3 (contract-v3-alignment, docs/superpowers/specs/2026-07-25-contract-v3-
-# alignment-design.md): the threat branch below is LIVE now (sim.cpp's think
+# alignment-design.md): the threat branch below is LIVE (sim.cpp's think
 # dispatch consults this brain during combat too, not just in an enemy's
 # absence -- should_wake's own high-stakes clause already demands it every
 # tick); it also fires one bl_enqueue_action(BL_ACT_ATTACK, ...) per wake when
-# an attack is ready (pickBestAttack, below). combat_preempt (sim.cpp) still
-# runs right after, transitionally, for engagement movement + its own legacy
-# auto-swing -- guarded off when this wake already resolved one, so the two
-# paths never double-swing; see that function's own comment (deleted in the
-# single-gateway task, V5).
+# an attack is ready (pickBestAttack, below). Single-gateway combat (V5):
+# combat_preempt is GONE outright -- engagement (the Attack intention's
+# approach) and the swing (this brain's own BL_ACT_ATTACK) both arrive
+# through the exact same apply_intention/resolve_action seams a monster's
+# simple brain uses (monster_brain.cpp); there is no second, host-level
+# combat path running alongside this one anymore.
 #
 # WIRE-STABILITY (restate-resume is EXACT field equality, intention.cpp's
 # is_identical_restatement -- no epsilon): every point this file echoes back

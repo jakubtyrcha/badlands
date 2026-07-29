@@ -139,13 +139,22 @@ struct BadlandsGame {
     // InsideBuilding heroes before mock_think is ever reached (and a
     // Monster is never hidden to begin with, but the guard holds regardless
     // of archetype). This cache is intentionally NOT consulted by
-    // combat.cpp's select_target (its call sites -- fire_attack's re-pick,
-    // update_melee_locks, resolve_action's target inference, and
-    // apply_intention/advance_intentions' Attack-intention executor -- all
-    // run after apply_commands/movement has had a chance to invalidate it;
-    // see select_target's own comment) or by any other system -- treat "is
-    // this read site monster_think, unconditionally" as the actual safety
-    // invariant, not merely "was this slot in range".
+    // combat.cpp's select_target. Most of its call sites run late enough
+    // that the cache genuinely could be stale by then -- fire_attack's
+    // re-pick and resolve_action's target inference (both during
+    // apply_commands, after earlier commands in the same drain may have
+    // already invalidated a shared target), update_melee_locks (after the
+    // whole movement pipeline), and advance_intentions' Attack-abort check
+    // (after movement/projectiles) -- see select_target's own comment for
+    // the per-site detail. apply_intention's own Attack-engagement executor
+    // is the one exception: it runs INSIDE the same think pass this cache
+    // was built for, before apply_commands resolves anything, so the cache
+    // is exactly as valid there as it is for monster_think's own read below
+    // -- it pays for a live scan anyway purely for simplicity
+    // (intention.cpp's own comment on that call site has the reasoning), not
+    // because the cache would be wrong. Treat "is this read site
+    // monster_think, unconditionally" as the actual safety invariant, not
+    // merely "was this slot in range".
     std::vector<entt::entity> nearest_enemy_scratch;
 
     ~BadlandsGame();
