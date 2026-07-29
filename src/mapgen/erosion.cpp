@@ -226,13 +226,24 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
   // Follows a member's receiver chain until it leaves ITS OWN component
   // (a cell already outside `own_component` is returned immediately, be it
   // dry or a different lake — the caller's poured/unpoured check decides
-  // what happens next; component labeling is 4-connected but the receiver
-  // graph is 8-connected, so a component's escaping edge could in principle
-  // land diagonally in a different lake rather than on dry ground). Every
-  // component has exactly one such exit: priority-flood claims each
-  // interior cell from exactly one already-visited neighbor, so a
-  // component's internal receiver edges form a tree rooted at its single
-  // spill point.
+  // what happens next).
+  //
+  // A component does NOT generally have exactly one exit — this comment used
+  // to claim it did, and the claim was already false before steepest-descent
+  // routing landed. Component labeling is 4-connected while the receiver graph
+  // is 8-connected, so a diagonal edge can leave a 4-component at several
+  // places. Measured on seed 2: 33 of 82 components had more than one exit
+  // under the old flood-parent routing (worst 5), and 41 of 133 under
+  // steepest descent (worst 13).
+  //
+  // What that costs: this walk starts from member[0] (the lowest-index
+  // member), so it finds whichever exit that member's chain happens to reach
+  // rather than the component's true sill. The result is deterministic and
+  // conserves volume — leftover overflow still deposits or exports downstream
+  // — but it can shed that overflow at the wrong rim point. Physically
+  // imprecise, not a leak. Picking the true sill (the boundary member with the
+  // lowest water_level) is deferred; the river graph's LakeOutlet node will
+  // need it, so it belongs with that work rather than here.
   auto find_exit = [&](int start, int32_t own_component) {
     int i = start;
     while (comp_of[i] == own_component) {
