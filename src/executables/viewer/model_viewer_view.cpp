@@ -44,18 +44,17 @@ static constexpr float kLodRatios[3] = {1.0f, 0.5f, 0.2f};
 // manual kLodRatios switch above, which only applies to the single-tree 0/1/2
 // paths).
 constexpr int kGridN = 16;
-constexpr float kGridSpacing = 4.0f;
+constexpr float kGridSpacing = 8.0f;
 // Golden angle: a constant per-instance yaw increment that avoids any
 // repeating row/column alignment across the grid.
 const float kYawIncrement = glm::radians(137.508f);
 // Larger than the single-tree kFloorSize -- the 16x16 grid at kGridSpacing
-// spans 60 world units; 80 gives it a visible margin.
-constexpr float kMultiFloorSize = 80.0f;
+// spans 120 world units; 160 gives it a visible margin.
+constexpr float kMultiFloorSize = 160.0f;
 // GPU LOD thresholds (near/mid boundaries) sized to the default orbit framing
-// of the 16x16, 4.0-spacing grid. Measured instance distances range ~65–139,
-// so these thresholds partition the grid into near/mid/far rows with visible
-// geometric detail contrast between LOD bands.
-constexpr std::array<float, 2> kMultiLodThresholds = {80.0f, 105.0f};
+// of the 16x16, 8.0-spacing grid, so the near/mid/far rows land in different
+// LOD bands with visible geometric detail contrast.
+constexpr std::array<float, 2> kMultiLodThresholds = {95.0f, 135.0f};
 
 }  // namespace
 
