@@ -8,7 +8,11 @@
 #include <FastNoiseLite.h>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/detail_filter.hpp"
+#include "mapgen/erosion.hpp"
+#include "mapgen/hydrology.hpp"
 #include "mapgen/parallel.hpp"
+#include "mapgen/resample.hpp"
 
 namespace badlands::mapgen {
 
@@ -40,6 +44,14 @@ constexpr float kBeltHi = 0.59f;
 // Plains sit at the 0 m water datum; the farthest texel is the highest.
 constexpr float kSlopeMPerM = 0.75f;
 
+// v1.1: plains drainage relief. Cavities carve at bedrock minima, so the
+// bedrock field is a ready-made potential whose valleys already lead to the
+// lakes — this term nudges the plains gradient to point at them instead of
+// sitting dead flat, without a seam at any biome cutoff (see the v1.1
+// addendum, "Plains drainage relief", in
+// docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md).
+constexpr float kPlainsReliefM = 2.0f;
+
 FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
                          FastNoiseLite::FractalType fractal) {
   FastNoiseLite n(seed);
@@ -51,6 +63,20 @@ FastNoiseLite make_noise(int seed, float wavelength_m, int octaves,
 }
 
 float to01(float v) { return 0.5f * (v + 1.0f); }  // FastNoiseLite is ~[-1,1]
+
+// Exact k-th order statistic (nth_element-on-copy) — the same pattern as
+// compute_cutoffs, mirroring carve_cavities' internal t_lake formula exactly
+// (same frac clamp, same rank index) so this recovers the identical cutoff
+// carve_cavities uses, without refactoring carve_cavities to expose it.
+float bedrock_quantile(const Field2D<float>& bedrock, float frac) {
+  const size_t n = bedrock.data.size();
+  if (n == 0) return 0.0f;
+  std::vector<float> v = bedrock.data;
+  const float f = std::min(frac, 1.0f);
+  const size_t i = static_cast<size_t>(f * static_cast<float>(n - 1));
+  std::nth_element(v.begin(), v.begin() + i, v.end());
+  return v[i];
+}
 
 }  // namespace
 
@@ -83,23 +109,20 @@ Field2D<uint8_t> classify_biomes(const Field2D<float>& bedrock,
   return biome;
 }
 
-MapArtifacts generate_map(const MapGenParams& params) {
-  const int w = params.resolution.x, h = params.resolution.y;
-  if (w <= 0 || h <= 0) {
+MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
+  const int w = params.resolution;
+  if (w <= 0 || params.erosion.sim_resolution <= 0) {
     MapArtifacts a;
     return a;
   }
   MapArtifacts a;
-  a.bedrock = Field2D<float>(w, h);
-  a.heightmap = Field2D<float>(w, h, 0.0f);
+  const float texel_out = params.world_size_m / static_cast<float>(w);
 
-  // Sample at world = x * texel_m (node convention): coinciding world points
-  // across two resolutions of the same map get identical float inputs.
-  const glm::vec2 texel(params.size_m.x / static_cast<float>(w),
-                        params.size_m.y / static_cast<float>(h));
-
-  // Distinct derived seeds per layer, all from params.seed.
-  // Use unsigned arithmetic to avoid signed overflow for edge-case seeds.
+  // Distinct derived seeds per layer, all from params.seed. Use unsigned
+  // arithmetic to avoid signed overflow for edge-case seeds. GetNoise is
+  // const and stateless per call, so these three sources are constructed
+  // once and shared read-only across both sampling passes below (and across
+  // parallel_tiles workers within each).
   const FastNoiseLite base =
       make_noise(static_cast<int>(params.seed), kBaseWavelengthM, kBaseOctaves,
                  FastNoiseLite::FractalType_FBm);
@@ -107,43 +130,136 @@ MapArtifacts generate_map(const MapGenParams& params) {
       make_noise(static_cast<int>(params.seed + 1u), kRidgedWavelengthM,
                  kRidgedOctaves, FastNoiseLite::FractalType_Ridged);
   const FastNoiseLite belt =
-      make_noise(static_cast<int>(params.seed + 2u),
-                 std::max(params.size_m.x, params.size_m.y), 1,
+      make_noise(static_cast<int>(params.seed + 2u), params.world_size_m, 1,
                  FastNoiseLite::FractalType_FBm);
 
-  // GetNoise is const and stateless per call, so the three sources are shared
-  // read-only across the workers; tiles write disjoint pixels.
-  parallel_tiles(
-      w, h, 64, [] { return std::monostate{}; },
-      [&](std::monostate&, int x0, int y0, int x1, int y1) {
-        for (int y = y0; y < y1; ++y) {
-          for (int x = x0; x < x1; ++x) {
-            const float wx = static_cast<float>(x) * texel.x;
-            const float wy = static_cast<float>(y) * texel.y;
-            const float mask = glm::smoothstep(kBeltLo, kBeltHi,
-                                               to01(belt.GetNoise(wx, wy)));
-            float b = to01(base.GetNoise(wx, wy));
-            // mask is exactly 0 below kBeltLo (the smoothstep clamps), so
-            // skipping the ridged term outside the belt is bit-identical,
-            // not an approximation.
-            if (mask > 0.0f) {
-              b += kRidgeWeight * mask *
-                   std::pow(to01(ridged.GetNoise(wx, wy)), kRidgeSharpness);
+  // Sample the three-noise bedrock field at world = x * texel + origin (node
+  // convention): coinciding world points across two grids get identical
+  // float inputs. Used once for the output grid (origin 0) and once for the
+  // padded sim grid (origin = -kPadTexels * texel_sim), so the two stay in
+  // exact world-space agreement.
+  auto sample_bedrock = [&](int n, float texel, float origin) {
+    Field2D<float> out(n, n);
+    parallel_tiles(
+        n, n, 64, [] { return std::monostate{}; },
+        [&](std::monostate&, int x0, int y0, int x1, int y1) {
+          for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+              const float wx = static_cast<float>(x) * texel + origin;
+              const float wy = static_cast<float>(y) * texel + origin;
+              const float mask = glm::smoothstep(kBeltLo, kBeltHi,
+                                                 to01(belt.GetNoise(wx, wy)));
+              float b = to01(base.GetNoise(wx, wy));
+              // mask is exactly 0 below kBeltLo (the smoothstep clamps), so
+              // skipping the ridged term outside the belt is bit-identical,
+              // not an approximation.
+              if (mask > 0.0f) {
+                b += kRidgeWeight * mask *
+                     std::pow(to01(ridged.GetNoise(wx, wy)), kRidgeSharpness);
+              }
+              out.at(x, y) = b;
             }
-            a.bedrock.at(x, y) = b;
           }
-        }
-      });
+        });
+    return out;
+  };
 
+  // --- output-res bedrock + biome classification (existing behavior) ---
+  a.bedrock = sample_bedrock(w, texel_out, 0.0f);
   a.biome = classify_biomes(a.bedrock, compute_cutoffs(a.bedrock));
 
-  // First-pass relief: a cone field over the distance to the nearest plains.
-  // Ridge crests emerge along the mountain belts' medial axes; detail,
-  // erosion and water come later (see the heightmap spec).
-  const Field2D<float> dist = distance_to_plains(a.biome, texel);
-  for (size_t i = 0; i < dist.data.size(); ++i)
-    a.heightmap.data[i] = kSlopeMPerM * dist.data[i];
+  // --- sim grid: sim_resolution + 2*kPadTexels, world-aligned with pad ---
+  const ErosionParams& ep = params.erosion;
+  const int sim_n = ep.sim_resolution + 2 * kPadTexels;
+  const float texel_sim = params.world_size_m / static_cast<float>(ep.sim_resolution);
+  const float origin_sim = -kPadTexels * texel_sim;  // world x of sim texel 0
+  Field2D<float> bedrock_sim = sample_bedrock(sim_n, texel_sim, origin_sim);
+  int seq = 0;
+  if (sink) sink->dump("bedrock", seq++, bedrock_sim);
+  const auto cutoffs_sim = compute_cutoffs(bedrock_sim);
+  const auto biome_sim = classify_biomes(bedrock_sim, cutoffs_sim);
+  if (sink) sink->dump("biome-sim", seq++, biome_sim);
 
+  // First-pass relief: a cone field over the distance to the nearest plains,
+  // built on the SIM biome/grid. Ridge crests emerge along the mountain
+  // belts' medial axes; erosion + water carve the rest.
+  const Field2D<float> dist = distance_to_plains(biome_sim, {texel_sim, texel_sim});
+  Field2D<float> B(sim_n, sim_n);
+  for (size_t i = 0; i < B.data.size(); ++i) B.data[i] = kSlopeMPerM * dist.data[i];
+
+  // v1.1: plains drainage relief, applied EVERYWHERE (continuity — no seam at
+  // a biome cutoff). t_lake is carve_cavities' own cutoff, recovered here so
+  // the relief term's zero and the cavity carve's zero line up exactly:
+  // smoothstep is 0 at/below t_lake (where carve_cavities takes over) and
+  // saturates to kPlainsReliefM at/above t_hills, with zero slope at both
+  // ends, so hills/mountains gain a flat +2 m with no discontinuity.
+  const float t_lake = bedrock_quantile(bedrock_sim, ep.lake_frac);
+  for (size_t i = 0; i < B.data.size(); ++i)
+    B.data[i] += kPlainsReliefM *
+                 glm::smoothstep(t_lake, cutoffs_sim.t_hills, bedrock_sim.data[i]);
+  if (sink) sink->dump("cone", seq++, B);
+
+  // v1.2: conical basins at 1/3 the mountain cone's slope (user-directed),
+  // replacing the old lake_depth_m-capped bowl — see "Conical lake bottoms"
+  // in docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md.
+  // v1.3: slope doubled again (1/3 -> 2/3, user-directed) — see the v1.3
+  // addendum, "Lake tuning".
+  const auto basins = carve_cavities(B, bedrock_sim, ep.lake_frac,
+                                     kSlopeMPerM * (2.0f / 3.0f), {texel_sim, texel_sim});
+  if (sink) sink->dump("cavities", seq++, basins);
+  if (sink) sink->dump("cavities-height", seq++, B);
+  auto S = init_sediment(dist, basins, ep, texel_sim, origin_sim, params.seed);
+  if (sink) sink->dump("sediment-init", seq++, S);
+
+  // v1.1: capped micro-fill — kills noise-scale puddles at the source
+  // (shallow closed depressions in the init surface) while leaving real
+  // basins (deeper than kMicroFillCapM, or seeded cavities) untouched.
+  micro_fill(B, S, basins, texel_sim);
+  if (sink) sink->dump("micro-fill", seq++, S);
+
+  const auto sim_out = erode(B, S, ep, texel_sim, sink);
+
+  // --- resample to the output grid (crop = the origin offset) ---
+  auto resample = [&](const Field2D<float>& f) {
+    return resample_bilinear(f, texel_sim, origin_sim, w, texel_out);
+  };
+  Field2D<float> ground(sim_n, sim_n);
+  for (size_t i = 0; i < ground.data.size(); ++i)
+    ground.data[i] = B.data[i] + S.data[i];
+  a.heightmap = resample(ground);
+  a.sediment = resample(S);
+  a.flow = resample(sim_out.flow);
+  // v1.3: MAX-POOL, not bilinear — a thin saturated river line must survive
+  // downsampling, not smear toward 0 (see resample_max_pool's doc comment).
+  a.river = resample_max_pool(sim_out.river, texel_sim, origin_sim, w, texel_out);
+
+  // water: resample the SURFACE (level where wet, ground where dry) and the
+  // depth mask; recompute depth against the output ground so shorelines match
+  Field2D<float> surface(sim_n, sim_n);
+  for (size_t i = 0; i < surface.data.size(); ++i)
+    surface.data[i] = ground.data[i] + sim_out.water_depth.data[i];
+  const auto surface_out = resample(surface);
+  const auto depth_hint = resample(sim_out.water_depth);
+  a.water_depth = Field2D<float>(w, w, 0.0f);
+  for (size_t i = 0; i < a.water_depth.data.size(); ++i)
+    if (depth_hint.data[i] > 0.01f)
+      a.water_depth.data[i] =
+          std::max(0.0f, surface_out.data[i] - a.heightmap.data[i]);
+  if (sink) sink->dump("water", seq++, a.water_depth);
+
+  // --- detail + biome stamp ---
+  const auto delta =
+      gully_detail_delta(a.heightmap, a.water_depth, texel_out, params.seed, ep);
+  if (sink) sink->dump("detail-delta", seq++, delta);
+  for (size_t i = 0; i < delta.data.size(); ++i) a.heightmap.data[i] += delta.data[i];
+  for (size_t i = 0; i < a.biome.data.size(); ++i)
+    if (a.water_depth.data[i] >= kLakeStampMinDepthM)
+      a.biome.data[i] = static_cast<uint8_t>(Biome::Lake);
+  if (sink) {
+    sink->dump("river", seq++, a.river);
+    sink->dump("final-height", seq++, a.heightmap);
+    sink->dump("biome", seq++, a.biome);
+  }
   return a;
 }
 
@@ -193,21 +309,20 @@ void dt1d(const std::vector<double>& f, std::vector<double>& d,
 
 }  // namespace
 
-Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
-                                  glm::vec2 texel_m) {
-  const int w = biome.width, h = biome.height;
+Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask,
+                                glm::vec2 texel_m) {
+  const int w = mask.width, h = mask.height;
   if (w <= 0 || h <= 0) return Field2D<float>{};
   Field2D<float> out(w, h, 0.0f);
 
-  const auto kPlains = static_cast<uint8_t>(Biome::Plains);
-  bool any_plains = false;
-  for (uint8_t b : biome.data) {
-    if (b == kPlains) {
-      any_plains = true;
+  bool any_seed = false;
+  for (uint8_t m : mask.data) {
+    if (m != 0) {
+      any_seed = true;
       break;
     }
   }
-  if (!any_plains) return out;  // documented degenerate: all zeros
+  if (!any_seed) return out;  // documented degenerate: all zeros
 
   // Squared world distances between the two passes.
   std::vector<double> g(static_cast<size_t>(w) * h);
@@ -232,7 +347,7 @@ Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
                  [&](Scratch& s, int x0, int, int x1, int) {
                    for (int x = x0; x < x1; ++x) {
                      for (int y = 0; y < h; ++y)
-                       s.f[y] = biome.at(x, y) == kPlains ? 0.0 : kBigD;
+                       s.f[y] = mask.at(x, y) != 0 ? 0.0 : kBigD;
                      dt1d(s.f, s.d, s.v, s.z, h, texel_m.y);
                      for (int y = 0; y < h; ++y)
                        g[static_cast<size_t>(y) * w + x] = s.d[y];
@@ -252,6 +367,15 @@ Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
                  });
 
   return out;
+}
+
+Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
+                                  glm::vec2 texel_m) {
+  Field2D<uint8_t> mask(biome.width, biome.height, 0);
+  const auto kPlains = static_cast<uint8_t>(Biome::Plains);
+  for (size_t i = 0; i < mask.data.size(); ++i)
+    mask.data[i] = biome.data[i] == kPlains ? 1 : 0;
+  return distance_to_mask(mask, texel_m);
 }
 
 }  // namespace badlands::mapgen

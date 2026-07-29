@@ -414,7 +414,10 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/fog_generator.cpp
     src/mapgen/generator.cpp
     src/mapgen/hillshade.cpp
-    src/mapgen/outputs.cpp)
+    src/mapgen/hydrology.cpp
+    src/mapgen/outputs.cpp
+    src/mapgen/erosion.cpp
+    src/mapgen/detail_filter.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
 target_include_directories(badlands_mapgen_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
@@ -514,11 +517,15 @@ add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests 
 
 # badlands_generator_tests: the bedrock+quantile map generator — determinism,
 # structural area fractions, cutoff/classification logic, and
-# resolution-independent world-meter sampling. Pure CPU (FastNoiseLite is
-# header-only), pattern of badlands_fog_generator_tests.
+# resolution-independent world-meter sampling. generate_map now orchestrates
+# the erosion+lakes pipeline, so this target compiles those TUs too. Pure CPU
+# (FastNoiseLite is header-only), pattern of badlands_fog_generator_tests.
 add_executable(badlands_generator_tests
     src/mapgen/generator_tests.cpp
     src/mapgen/generator.cpp
+    src/mapgen/hydrology.cpp
+    src/mapgen/erosion.cpp
+    src/mapgen/detail_filter.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_generator_tests PRIVATE
@@ -528,6 +535,28 @@ target_include_directories(badlands_generator_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_generator_tests COMMAND badlands_generator_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_erosion_tests: hydrology + erosion sim + detail filter — structural
+# invariants on synthetic terrains (routing, spill levels, solver bounds,
+# layer bookkeeping). Pure CPU, pattern of badlands_generator_tests.
+add_executable(badlands_erosion_tests
+    src/mapgen/hydrology_tests.cpp
+    src/mapgen/hydrology.cpp
+    src/mapgen/erosion_tests.cpp
+    src/mapgen/erosion.cpp
+    src/mapgen/generator.cpp
+    src/mapgen/detail_filter_tests.cpp
+    src/mapgen/detail_filter.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_erosion_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_erosion_tests COMMAND badlands_erosion_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate

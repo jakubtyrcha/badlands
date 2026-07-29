@@ -73,7 +73,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     spdlog::info("  {:<14} {:>8.1f} ms   (cum {:>8.1f} ms)", name, ms, cum_ms);
   };
   spdlog::info("map load profile (seed {}, {}x{} texels):", params_.seed,
-               params_.resolution.x, params_.resolution.y);
+               params_.resolution, params_.resolution);
 
   auto t = clock::now();
   // Start at noon, paused (an inspector holds still until you play/scrub).
@@ -88,7 +88,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   t = clock::now();
   map_ = mapgen::generate_map(params_);
   log_step("mg:generate", since(t));
-  map_size_m_ = params_.size_m.x;
+  map_size_m_ = params_.world_size_m;
 
   // Wrap the generator output in the frozen MapData contract (one-hot biomes) at
   // the raster's own texel spacing -- the input to the cluster terrain and
@@ -96,7 +96,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // lattice is the finest source data (one node per texel), not a coarser mesh
   // density; LOD selection manages the triangle cost.
   t = clock::now();
-  terrain_map_ = MakeOneHotMapData(map_, params_.size_m);
+  terrain_map_ = MakeOneHotMapData(map_, glm::vec2(params_.world_size_m));
   log_step("map->MapData", since(t));
 
   // Frame the camera BEFORE building the terrain, so the cluster path's initial
@@ -105,7 +105,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // own camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye
   // view. Scroll to zoom out; max_height reaches far enough to take in the whole
   // map.
-  const float map_depth_m = params_.size_m.y;
+  const float map_depth_m = params_.world_size_m;
   gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_depth_m * 0.5f);
   gamecam_.pitch_deg = 50.0f;
   gamecam_.height = 42.0f;
@@ -139,7 +139,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   log_step("cluster terrain", since(t));
 
   spdlog::info("map load: {:.1f} ms total  ({}x{} texels)", since(t_load),
-               params_.resolution.x, params_.resolution.y);
+               params_.resolution, params_.resolution);
 
   return true;
 }
@@ -216,8 +216,8 @@ void MapViewView::DrawUI() {
   if (ImGui::GetCurrentContext() == nullptr) return;
   ImGui::Begin("Map");
   ImGui::Text("seed %u  %dx%d texels  %.0fx%.0f m", params_.seed,
-              params_.resolution.x, params_.resolution.y, params_.size_m.x,
-              params_.size_m.y);
+              params_.resolution, params_.resolution, params_.world_size_m,
+              params_.world_size_m);
   cluster_terrain_.DrawDebugUI();
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {

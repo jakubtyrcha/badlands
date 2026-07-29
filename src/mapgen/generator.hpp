@@ -12,25 +12,37 @@
 
 #include <glm/glm.hpp>
 
+#include "mapgen/erosion.hpp"
 #include "mapgen/field2d.hpp"
 
 namespace badlands::mapgen {
 
 struct MapGenParams {
   uint32_t seed = 1;
-  glm::ivec2 resolution{512, 512};   // texels
-  glm::vec2 size_m{512.0f, 512.0f};  // world meters
+  int resolution = 512;         // output grid (texels, square)
+  float world_size_m = 512.0f;  // world extent (meters, square)
+  ErosionParams erosion;        // hydraulic erosion + lakes sim (own sim grid)
 };
 
 // Everything one generation produces. `bedrock` is the latent field the biomes
 // were cut from — kept because previews dump it and erosion will consume it.
 struct MapArtifacts {
-  Field2D<float> bedrock;    // latent field (raw; roughly [0, 3.5])
-  Field2D<uint8_t> biome;    // Biome enum values (Plains/Hills/Mountain now)
-  Field2D<float> heightmap;  // world meters — distance-to-plains relief (plains = 0 m datum)
+  Field2D<float> bedrock;      // latent field (raw; roughly [0, 3.5])
+  Field2D<uint8_t> biome;      // Biome enum values, incl. Lake post-erosion
+  Field2D<float> heightmap;    // world meters — eroded + detailed ground surface
+  Field2D<float> water_depth;  // world meters — standing water; surface = heightmap + water_depth
+  Field2D<float> flow;         // drainage area (m^2)
+  Field2D<float> sediment;     // sediment thickness (m)
+  // v1.3: river/stream intensity, 0..1 (0 = no flow signal, 1 = saturated
+  // river); 0 inside lakes. Output res, max-pooled (not bilinear — see
+  // resample_max_pool) from the sim grid's ErosionOutputs::river so a
+  // saturated line survives downsampling instead of smearing.
+  Field2D<float> river;
 };
 
-MapArtifacts generate_map(const MapGenParams& params);
+// sink, if non-null, receives named debug rasters as generation proceeds (see
+// generator.cpp for the exact stage list and emission order).
+MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink = nullptr);
 
 // --- exposed for unit tests (threshold logic without the noise) ---
 
@@ -38,6 +50,10 @@ MapArtifacts generate_map(const MapGenParams& params);
 // every seed, not on average.
 inline constexpr float kPlainsFrac = 0.55f;
 inline constexpr float kMountainFrac = 0.12f;
+
+// Lake biome stamping threshold (meters of standing water). Shallow fringes and
+// enclosed wet flats keep their water_depth data but don't read as Lake.
+inline constexpr float kLakeStampMinDepthM = 0.3f;
 
 // Quantile cutoffs over the ACTUAL bedrock raster: t_hills at kPlainsFrac,
 // t_mountain at 1 - kMountainFrac (exact order statistics).
@@ -52,11 +68,20 @@ Field2D<uint8_t> classify_biomes(const Field2D<float>& bedrock,
                                  const BiomeCutoffs& cutoffs);
 
 // Exact Euclidean distance (WORLD METERS) from each texel to the nearest
+// nonzero mask texel, with texel (x, y) at world (x*texel_m.x, y*texel_m.y).
+// Felzenszwalb–Huttenlocher two-pass EDT — exact, not a chamfer
+// approximation. An all-zero mask returns all zeros. Generic over the seed
+// set (distance_to_plains wraps this with a Plains mask; the detail filter
+// needs distance-to-water).
+Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask,
+                                glm::vec2 texel_m);
+
+// Exact Euclidean distance (WORLD METERS) from each texel to the nearest
 // texel classified Plains, with texel (x, y) at world (x*texel_m.x,
-// y*texel_m.y). Felzenszwalb–Huttenlocher two-pass EDT — exact, not a
-// chamfer approximation. A map with no plains at all returns all zeros
-// (unreachable via generate_map: the quantile cutoffs guarantee a plains
-// share). Exposed for unit testing (pattern of compute_cutoffs).
+// y*texel_m.y). A map with no plains at all returns all zeros (unreachable
+// via generate_map: the quantile cutoffs guarantee a plains share). Thin
+// wrapper over distance_to_mask. Exposed for unit testing (pattern of
+// compute_cutoffs).
 Field2D<float> distance_to_plains(const Field2D<uint8_t>& biome,
                                   glm::vec2 texel_m);
 
