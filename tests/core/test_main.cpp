@@ -1,0 +1,12 @@
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <doctest.h>
+
+#include <shared_types.h>
+
+static_assert(sizeof(LineVertex) == 32, "LineVertex must be 32 bytes");
+static_assert(sizeof(LineUniforms) == 64, "LineUniforms must be 64 bytes");
+
+TEST_CASE("shared GPU struct layout") {
+    CHECK(sizeof(LineVertex) == 32);
+    CHECK(sizeof(LineUniforms) == 64);
+}

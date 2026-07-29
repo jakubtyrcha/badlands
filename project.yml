@@ -1,0 +1,85 @@
+name: Shapeshifter
+options:
+  bundleIdPrefix: com.jakubtyrcha
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    CLANG_CXX_LANGUAGE_STANDARD: c++20
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+
+targets:
+  ShapeshifterCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - core/src
+      - path: core/include
+        buildPhase: none
+      - path: shaders/shared_types.h
+        buildPhase: none
+    settings:
+      HEADER_SEARCH_PATHS:
+        - "$(SRCROOT)/vendor/metal-cpp"
+        - "$(SRCROOT)/core/include"
+        - "$(SRCROOT)/shaders"
+
+  Shapeshifter:
+    type: application
+    platform: macOS
+    sources:
+      - app/Sources
+      - path: shaders
+        includes: ["*.metal"]
+    dependencies:
+      - target: ShapeshifterCore
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+    info:
+      path: app/Info.plist
+      properties:
+        NSHighResolutionCapable: true
+    settings:
+      SWIFT_VERSION: "6.0"
+      SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+      SWIFT_OBJC_INTEROP_MODE: objcxx
+      SWIFT_INCLUDE_PATHS: "$(SRCROOT)/core/include"
+      OTHER_SWIFT_FLAGS: "-Xcc -std=gnu++20"
+      HEADER_SEARCH_PATHS:
+        - "$(SRCROOT)/core/include"
+      MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE
+
+  CoreTests:
+    type: tool
+    platform: macOS
+    sources: [tests/core]
+    dependencies:
+      - target: ShapeshifterCore
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Foundation.framework
+    settings:
+      HEADER_SEARCH_PATHS:
+        - "$(SRCROOT)/core/src"
+        - "$(SRCROOT)/core/include"
+        - "$(SRCROOT)/shaders"
+        - "$(SRCROOT)/tests/vendor"
+        - "$(SRCROOT)/vendor/metal-cpp"
+
+schemes:
+  Shapeshifter:
+    build:
+      targets:
+        Shapeshifter: all
+    run:
+      config: Debug
+  CoreTests:
+    build:
+      targets:
+        CoreTests: all
+    run:
+      config: Debug
