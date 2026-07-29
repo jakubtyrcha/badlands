@@ -143,10 +143,14 @@ wgpu::BindGroup BuildForwardEngineBindGroup(RenderingMaterialInstance* instance,
                                 entries);
 }
 
-// Build the @group(2) engine bind group for the forward-OPAQUE pass: shadow
-// map + IBL only (no scene_depth/scene_color — scene_depth is also the
-// opaque pass's writable depth attachment, a Dawn read-write aliasing hazard,
-// and scene_color is stale at opaque time). Used by RenderForwardMeshes only;
+}  // namespace
+
+// Definition of the hoisted declaration in render_forward.hpp: shadow map +
+// IBL only (no scene_depth/scene_color — scene_depth is also the opaque
+// pass's writable depth attachment, a Dawn read-write aliasing hazard, and
+// scene_color is stale at opaque time). Used by RenderForwardMeshes below and
+// by InstancedMeshField (instanced_mesh_field.cpp), which shares this exact
+// 6-entry layout for its forward-opaque group-2 submeshes.
 // RenderForwardTransparentMeshes keeps the full 9-entry
 // BuildForwardEngineBindGroup above (water genuinely needs scene depth/color).
 wgpu::BindGroup BuildForwardOpaqueEngineBindGroup(RenderingMaterialInstance* instance,
@@ -161,8 +165,6 @@ wgpu::BindGroup BuildForwardOpaqueEngineBindGroup(RenderingMaterialInstance* ins
   entries[5].binding = 5; entries[5].sampler     = engine.brdf_lut_sampler;
   return frame.CreateBindGroup(instance->GetPipeline().GetBindGroupLayout(2), entries);
 }
-
-}  // namespace
 
 void RenderForwardMeshes(RenderPassContext& pass, FrameContext& frame,
                          entt::registry& registry,

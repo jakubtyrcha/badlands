@@ -21,6 +21,7 @@ namespace badlands {
 class RenderPassContext;
 class FrameContext;
 class MaterialInstanceCache;
+class RenderingMaterialInstance;
 
 // Engine-owned resources for forward (opaque or transparent) materials that
 // declare @group(2). The two passes bind different subsets:
@@ -46,6 +47,21 @@ struct ForwardEngineResources {
   wgpu::Sampler shadow_sampler;      // comparison sampler (LessEqual)
   float time_seconds{0.0f};
 };
+
+// Build the @group(2) engine bind group for the forward-OPAQUE pass: shadow
+// map + IBL only (6 entries: shadow_map@0/shadow_sampler@1 +
+// ibl_prefiltered@2/ibl_sampler@3 + brdf_lut@4/brdf_lut_sampler@5). No
+// scene_depth/scene_color (scene_depth is also the opaque pass's writable
+// depth attachment; scene_color is stale at opaque time) — see
+// RenderForwardMeshes below. Hoisted here (definition stays in
+// render_forward.cpp) so InstancedMeshField (instanced_mesh_field.cpp) can
+// build the identical group for its forward-opaque submeshes without
+// duplicating the entry layout. Caller must have already checked
+// `instance->DeclaresBindGroup(2)` and the same availability gate
+// RenderForwardMeshes uses (shadow_map && ibl_prefiltered && brdf_lut).
+wgpu::BindGroup BuildForwardOpaqueEngineBindGroup(RenderingMaterialInstance* instance,
+                                                  FrameContext& frame,
+                                                  const ForwardEngineResources& engine);
 
 // Draw ForwardOpaqueRenderable textured meshes. For each draw whose material
 // declares @group(2), binds a purpose-fit 6-entry group (shadow map + IBL

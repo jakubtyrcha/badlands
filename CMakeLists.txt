@@ -150,6 +150,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/material/standard_material_factory.cpp
     src/engine/rendering/material/standard_rendering_material_instance.cpp
     src/engine/rendering/gpu_instance_renderer.cpp
+    src/engine/rendering/instanced_mesh_field.cpp
     src/engine/rendering/geometry/aabb.cpp
     src/engine/rendering/geometry/cube_sphere.cpp
     src/engine/rendering/geometry/textured_mesh_builders.cpp

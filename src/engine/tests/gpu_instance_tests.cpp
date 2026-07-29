@@ -36,9 +36,12 @@
 #include "engine/rendering/frustum.hpp"
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/gpu_instance_renderer.hpp"
+#include "engine/rendering/instanced_mesh_field.hpp"
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material/rendering_material_instance.hpp"
+#include "engine/rendering/passes/render_forward.hpp"
+#include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/texture_readback.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
@@ -2210,4 +2213,439 @@ TEST_CASE("GPU shared-slice render: a bucket's submeshes draw the SAME "
   CHECK(gap.r < 40);
   CHECK(gap.g < 40);
   CHECK(gap.b < 40);
+}
+
+// ===========================================================================
+// Task 2: InstancedMeshField — the reusable engine component bundling a
+// GpuInstanceRenderer with a per-(bucket,submesh) {PassKind, material}
+// mapping. Fixture: one model, one lod (thresholds pushed to +inf so a single
+// instance always lands in bucket 0), two submeshes on that ONE bucket — a
+// deferred (instanced_gbuffer, no @group(2)) submesh and a forward-opaque
+// (instanced_forward, @group(2)-declaring) submesh — each with its own
+// mesh-local offset (distinct on-screen position) AND distinct color, so a
+// pass-filter bug (Draw(kind) drawing the wrong submesh) is caught by a pixel
+// assertion rather than relying on a pipeline/target-format mismatch to fail
+// first.
+// ===========================================================================
+namespace {
+
+constexpr glm::vec2 kFieldInstanceCenter{0.0f, 0.0f};
+constexpr float kFieldSubmeshOffset = 0.35f;    // deferred at -offset, forward at +offset
+constexpr float kFieldSubmeshHalfExtent = 0.15f;
+
+// Owns everything the fixture's field references (factories/cache/handles
+// keep the resolved RenderingMaterialInstances alive; the field only holds
+// non-owning pointers to them, per SetSubmesh's contract).
+struct DeferredForwardFieldFixture {
+  std::unique_ptr<MaterialInstanceFactory> gbuffer_factory;
+  std::unique_ptr<MaterialInstanceFactory> forward_factory;
+  MaterialInstanceCache cache;
+  entt::resource<RenderingMaterialInstance> gbuffer_handle;
+  entt::resource<RenderingMaterialInstance> forward_handle;
+  wgpu::Buffer ibuf;
+  wgpu::Buffer vbuf_deferred;
+  wgpu::Buffer vbuf_forward;
+  std::unique_ptr<InstancedMeshField> field;
+};
+
+std::unique_ptr<DeferredForwardFieldFixture> BuildDeferredForwardField(TestGpu& g) {
+  auto fx = std::make_unique<DeferredForwardFieldFixture>();
+
+  fx->gbuffer_factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {});
+  REQUIRE(fx->gbuffer_factory != nullptr);
+  // Forward factory built against the REAL accumulation format (not a
+  // standalone BGRA8Unorm test target) -- this is the format
+  // InstancedMeshField's forward-opaque draws actually target once
+  // SceneRenderer drives this field (Task 3).
+  fx->forward_factory = MakeInstancedFactory(
+      g, "instanced_forward", MaterialPassType::kForwardOpaque,
+      {SceneRenderer::kAccumulationFormat}, {"translucency"});
+  REQUIRE(fx->forward_factory != nullptr);
+
+  InstanceParams gbuffer_params;
+  gbuffer_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));  // red, unlit albedo
+  gbuffer_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type gbuffer_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"field_gbuffer"}.value(), GeometryType::kInstancedMesh,
+      RenderPassType::kGBuffer, 0);
+  fx->gbuffer_handle = fx->cache.GetOrCreate(
+      gbuffer_key, *fx->gbuffer_factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kDeferred, RenderPassType::kGBuffer, gbuffer_params);
+  REQUIRE(fx->gbuffer_handle);
+  REQUIRE(fx->gbuffer_handle->IsValid());
+  REQUIRE_FALSE(fx->gbuffer_handle->DeclaresBindGroup(2));
+
+  InstanceParams forward_params;
+  forward_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  forward_params.uniform_overrides["params"] =
+      MaterialParameterValue(glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));  // cutoff/rough
+  forward_params.uniform_overrides["transmission"] =
+      MaterialParameterValue(glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
+  forward_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type forward_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"field_forward"}.value(), GeometryType::kInstancedMesh,
+      RenderPassType::kForward, 0);
+  fx->forward_handle = fx->cache.GetOrCreate(
+      forward_key, *fx->forward_factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kForwardOpaque, RenderPassType::kForward, forward_params);
+  REQUIRE(fx->forward_handle);
+  REQUIRE(fx->forward_handle->IsValid());
+  REQUIRE(fx->forward_handle->DeclaresBindGroup(2));
+
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  fx->ibuf = UploadBuffer(g.device, idx.data(), sizeof(idx), wgpu::BufferUsage::Index);
+  std::vector<float> deferred_verts =
+      QuadVerticesOffset(kFieldSubmeshHalfExtent, {-kFieldSubmeshOffset, 0.0f});
+  std::vector<float> forward_verts =
+      QuadVerticesOffset(kFieldSubmeshHalfExtent, {kFieldSubmeshOffset, 0.0f});
+  fx->vbuf_deferred = UploadBuffer(g.device, deferred_verts.data(),
+                                   deferred_verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  fx->vbuf_forward = UploadBuffer(g.device, forward_verts.data(),
+                                  forward_verts.size() * sizeof(float),
+                                  wgpu::BufferUsage::Vertex);
+
+  // thresholds = {1e30, 1e30}: the one instance below always lands lod0 ->
+  // bucket 0 (1 model). 2 submeshes on that bucket: 0 = deferred, 1 = forward.
+  fx->field = std::make_unique<InstancedMeshField>(
+      g.device, g.queue, *g.gen, /*capacity=*/1, /*num_models=*/1,
+      /*num_submeshes=*/2, std::array<float, 2>{1e30f, 1e30f});
+  REQUIRE(fx->field->IsValid());
+
+  GpuInstanceRenderer::InstanceInput instance = MakeInstance(
+      glm::vec3(kFieldInstanceCenter, -5.0f), /*model=*/0u, /*radius=*/0.5f);
+  fx->field->UploadInstances(
+      std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
+
+  fx->field->SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, fx->vbuf_deferred,
+                        fx->ibuf, wgpu::IndexFormat::Uint32, 6,
+                        InstancedMeshField::PassKind::kDeferred,
+                        fx->gbuffer_handle.operator->());
+  fx->field->SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/1, fx->vbuf_forward,
+                        fx->ibuf, wgpu::IndexFormat::Uint32, 6,
+                        InstancedMeshField::PassKind::kForwardOpaque,
+                        fx->forward_handle.operator->());
+
+  REQUIRE(fx->field->HasPass(InstancedMeshField::PassKind::kDeferred));
+  REQUIRE(fx->field->HasPass(InstancedMeshField::PassKind::kForwardOpaque));
+
+  return fx;
+}
+
+// Trivial group-2 engine resources (shadow map + IBL), identical setup to the
+// "instanced forward material renders N instances" test above.
+ForwardEngineResources MakeDummyForwardEngineResources(TestGpu& g) {
+  ForwardEngineResources engine{};
+
+  wgpu::TextureDescriptor sd{};
+  sd.size = {1, 1, 1};
+  sd.format = wgpu::TextureFormat::Depth32Float;
+  sd.usage = wgpu::TextureUsage::TextureBinding;
+  wgpu::Texture shadow_tex = g.device.CreateTexture(&sd);
+  wgpu::TextureViewDescriptor shadow_vd{};
+  shadow_vd.aspect = wgpu::TextureAspect::DepthOnly;
+  engine.shadow_map = shadow_tex.CreateView(&shadow_vd);
+
+  wgpu::SamplerDescriptor cmp{};
+  cmp.compare = wgpu::CompareFunction::LessEqual;
+  engine.shadow_sampler = g.device.CreateSampler(&cmp);
+
+  engine.ibl_prefiltered = SolidCube1x1(g.device, g.queue, 255, 255, 255, 255);
+  engine.ibl_sampler = g.device.CreateSampler(nullptr);
+  engine.brdf_lut =
+      test::CreateRgbaTexture(g.device, g.queue, 1, 1, {255, 255, 0, 255})
+          .CreateView();
+  engine.brdf_lut_sampler = g.device.CreateSampler(nullptr);
+  return engine;
+}
+
+// IEEE-754 binary16 -> float32. TextureReadback/CpuImage don't support
+// RGBA16Float (SceneRenderer::kAccumulationFormat) -- see
+// resolve_composite_tests.cpp's file comment -- so reading the forward
+// target below hand-rolls the decode, mirroring
+// game/tests/water_gpu_tests.cpp's HalfToFloat.
+float HalfToFloat(uint16_t h) {
+  uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+  uint32_t exp = (h >> 10) & 0x1Fu;
+  uint32_t mant = h & 0x3FFu;
+  uint32_t f;
+  if (exp == 0u) {
+    if (mant == 0u) {
+      f = sign;
+    } else {
+      exp = 127u - 15u + 1u;
+      while ((mant & 0x400u) == 0u) {
+        mant <<= 1;
+        exp--;
+      }
+      mant &= 0x3FFu;
+      f = sign | (exp << 23) | (mant << 13);
+    }
+  } else if (exp == 0x1Fu) {
+    f = sign | 0x7F800000u | (mant << 13);
+  } else {
+    f = sign | ((exp - 15u + 127u) << 23) | (mant << 13);
+  }
+  float out;
+  std::memcpy(&out, &f, sizeof(out));
+  return out;
+}
+
+// Reads one RGBA16Float pixel out of `texture` (must be CopySrc) via a manual
+// CopyTextureToBuffer + MapRead (ColorRenderTarget's color texture already
+// carries CopySrc -- see color_render_target.cpp).
+glm::vec4 ReadRgba16FloatPixel(TestGpu& g, wgpu::Texture texture, uint32_t width,
+                               uint32_t height, uint32_t x, uint32_t y) {
+  constexpr uint32_t kBytesPerPixel = 8;  // RGBA16Float
+  const uint32_t bytes_per_row =
+      ((width * kBytesPerPixel + 255u) / 256u) * 256u;
+  const uint64_t buffer_size = uint64_t{bytes_per_row} * height;
+
+  wgpu::BufferDescriptor bd{};
+  bd.size = buffer_size;
+  bd.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+  wgpu::Buffer readback = g.device.CreateBuffer(&bd);
+
+  {
+    wgpu::CommandEncoder enc = g.device.CreateCommandEncoder();
+    wgpu::TexelCopyTextureInfo src{};
+    src.texture = texture;
+    wgpu::TexelCopyBufferInfo dst{};
+    dst.buffer = readback;
+    dst.layout.bytesPerRow = bytes_per_row;
+    dst.layout.rowsPerImage = height;
+    wgpu::Extent3D extent = {width, height, 1};
+    enc.CopyTextureToBuffer(&src, &dst, &extent);
+    wgpu::CommandBuffer cmd = enc.Finish();
+    g.queue.Submit(1, &cmd);
+  }
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  bool mapped = false;
+  bool ok = false;
+  readback.MapAsync(
+      wgpu::MapMode::Read, 0, buffer_size, wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::MapAsyncStatus status, wgpu::StringView) {
+        ok = (status == wgpu::MapAsyncStatus::Success);
+        mapped = true;
+      });
+  while (!mapped) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+  REQUIRE(ok);
+
+  const uint8_t* base =
+      static_cast<const uint8_t*>(readback.GetConstMappedRange(0, buffer_size));
+  REQUIRE(base != nullptr);
+  const uint8_t* pixel =
+      base + uint64_t{y} * bytes_per_row + uint64_t{x} * kBytesPerPixel;
+  std::array<uint16_t, 4> half{};
+  std::memcpy(half.data(), pixel, sizeof(half));
+  glm::vec4 result(HalfToFloat(half[0]), HalfToFloat(half[1]),
+                   HalfToFloat(half[2]), HalfToFloat(half[3]));
+  readback.Unmap();
+  return result;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Draw(kDeferred) must render only the deferred submesh: the deferred slot's
+// color lands at its own screen position, and the forward slot's position
+// (which would show its color if the pass filter leaked) stays clear.
+// ---------------------------------------------------------------------------
+TEST_CASE("InstancedMeshField: Draw(kDeferred) renders only the deferred submesh",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildDeferredForwardField(g);
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+
+  Camera cull_camera = MakeCullCamera(1.0f);
+  fx->field->Cull(frame, cull_camera);
+
+  ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget, GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kInstTarget, kInstTarget, GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kInstTarget, kInstTarget, GBuffer::kMaterialFormat);
+  REQUIRE(albedo_t.IsValid());
+
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        ClearAttachment(normals_t.GetView()), ClearAttachment(albedo_t.GetView()),
+        ClearAttachment(material_t.GetView())};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    fx->field->Draw(pass, frame, InstancedMeshField::PassKind::kDeferred);
+    pass.End();
+  }
+
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage albedo = rb.ReadTextureSync(albedo_t.GetTexture(), kInstTarget,
+                                       kInstTarget, GBuffer::kAlbedoFormat);
+
+  auto deferred_px = WorldXyToPixel(
+      {kFieldInstanceCenter.x - kFieldSubmeshOffset, kFieldInstanceCenter.y});
+  auto forward_px = WorldXyToPixel(
+      {kFieldInstanceCenter.x + kFieldSubmeshOffset, kFieldInstanceCenter.y});
+
+  CpuImage::Color deferred_c = albedo.GetPixel(deferred_px.first, deferred_px.second);
+  INFO("deferred-slot pixel rgb = " << (int)deferred_c.r << "," << (int)deferred_c.g
+                                    << "," << (int)deferred_c.b);
+  CHECK(deferred_c.r > 180);
+  CHECK(deferred_c.g < 60);
+  CHECK(deferred_c.b < 60);
+
+  // The forward submesh must NOT have drawn into this pass.
+  CpuImage::Color forward_c = albedo.GetPixel(forward_px.first, forward_px.second);
+  INFO("forward-slot pixel (should stay clear) rgb = " << (int)forward_c.r << ","
+                                                        << (int)forward_c.g << ","
+                                                        << (int)forward_c.b);
+  CHECK(forward_c.r < 40);
+  CHECK(forward_c.g < 40);
+  CHECK(forward_c.b < 40);
+}
+
+// ---------------------------------------------------------------------------
+// Draw(kForwardOpaque, &engine) must render only the forward submesh: the
+// forward slot's color lands at its own position (into a real
+// kAccumulationFormat target, with the group-2 engine resources actually
+// bound), and the deferred slot's position stays clear.
+// ---------------------------------------------------------------------------
+TEST_CASE("InstancedMeshField: Draw(kForwardOpaque, engine) renders only the "
+          "forward submesh",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildDeferredForwardField(g);
+  ForwardEngineResources engine = MakeDummyForwardEngineResources(g);
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+
+  Camera cull_camera = MakeCullCamera(1.0f);
+  fx->field->Cull(frame, cull_camera);
+
+  ColorRenderTarget accum_t(g.device, kInstTarget, kInstTarget,
+                            SceneRenderer::kAccumulationFormat);
+  REQUIRE(accum_t.IsValid());
+
+  {
+    wgpu::RenderPassColorAttachment ca = ClearAttachment(accum_t.GetView());
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &ca;
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    fx->field->Draw(pass, frame, InstancedMeshField::PassKind::kForwardOpaque,
+                    &engine);
+    pass.End();
+  }
+
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  auto deferred_px = WorldXyToPixel(
+      {kFieldInstanceCenter.x - kFieldSubmeshOffset, kFieldInstanceCenter.y});
+  auto forward_px = WorldXyToPixel(
+      {kFieldInstanceCenter.x + kFieldSubmeshOffset, kFieldInstanceCenter.y});
+
+  glm::vec4 forward_c = ReadRgba16FloatPixel(g, accum_t.GetTexture(), kInstTarget,
+                                             kInstTarget, forward_px.first,
+                                             forward_px.second);
+  INFO("forward-slot pixel rgb = " << forward_c.r << "," << forward_c.g << ","
+                                   << forward_c.b);
+  CHECK(forward_c.r > 1.0f);
+  CHECK(forward_c.g > 1.0f);
+  CHECK(forward_c.b > 1.0f);
+
+  // The deferred submesh must NOT have drawn into this pass.
+  glm::vec4 deferred_c = ReadRgba16FloatPixel(g, accum_t.GetTexture(), kInstTarget,
+                                              kInstTarget, deferred_px.first,
+                                              deferred_px.second);
+  INFO("deferred-slot pixel (should stay clear) rgb = "
+       << deferred_c.r << "," << deferred_c.g << "," << deferred_c.b);
+  CHECK(deferred_c.r < 0.05f);
+  CHECK(deferred_c.g < 0.05f);
+  CHECK(deferred_c.b < 0.05f);
+}
+
+// ---------------------------------------------------------------------------
+// Draw(kForwardOpaque, nullptr): the group-2 gate must SKIP the forward
+// submesh (engine unavailable) rather than draw with group 2 left unbound --
+// NoError under a validation scope, and nothing drawn.
+// ---------------------------------------------------------------------------
+TEST_CASE("InstancedMeshField: Draw(kForwardOpaque, nullptr) skips the "
+          "group-2 submesh without a validation error",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildDeferredForwardField(g);
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  ColorRenderTarget accum_t(g.device, kInstTarget, kInstTarget,
+                            SceneRenderer::kAccumulationFormat);
+  REQUIRE(accum_t.IsValid());
+
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  Camera cull_camera = MakeCullCamera(1.0f);
+  fx->field->Cull(frame, cull_camera);
+  {
+    wgpu::RenderPassColorAttachment ca = ClearAttachment(accum_t.GetView());
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &ca;
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    fx->field->Draw(pass, frame, InstancedMeshField::PassKind::kForwardOpaque,
+                    /*engine=*/nullptr);
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool scope_done = false;
+  bool validation_error = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView msg) {
+        if (type != wgpu::ErrorType::NoError) {
+          validation_error = true;
+          INFO("captured error: "
+               << (msg.length > 0 ? std::string(msg.data, msg.length)
+                                  : std::string("(no message)")));
+        }
+        scope_done = true;
+      });
+  while (!scope_done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+  CHECK_FALSE(validation_error);
+
+  test::WaitForGpu(g.instance, g.device, g.queue);
+  auto forward_px = WorldXyToPixel(
+      {kFieldInstanceCenter.x + kFieldSubmeshOffset, kFieldInstanceCenter.y});
+  glm::vec4 forward_c = ReadRgba16FloatPixel(g, accum_t.GetTexture(), kInstTarget,
+                                             kInstTarget, forward_px.first,
+                                             forward_px.second);
+  INFO("forward-slot pixel (should stay clear -- gated/skipped) rgb = "
+       << forward_c.r << "," << forward_c.g << "," << forward_c.b);
+  CHECK(forward_c.r < 0.05f);
+  CHECK(forward_c.g < 0.05f);
+  CHECK(forward_c.b < 0.05f);
 }

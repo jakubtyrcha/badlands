@@ -175,7 +175,14 @@ class InstancedMeshField {
                   PassKind, RenderingMaterialInstance* material);
 
   void Cull(FrameContext&, const Camera&);                 // -> renderer.Cull
-  void Draw(RenderPassContext&, FrameContext&, PassKind);  // -> renderer.Draw, filtered
+  bool HasPass(PassKind) const;  // any configured submesh with this kind
+  // `engine`: required by forward-opaque submeshes whose material declares
+  // @group(2) (shadow+IBL) — built lazily from `ForwardEngineResources` via
+  // the hoisted `BuildForwardOpaqueEngineBindGroup` (see render_forward.hpp);
+  // such a submesh is skipped when it's null or its
+  // shadow_map/ibl_prefiltered/brdf_lut are unavailable. Ignored for kDeferred.
+  void Draw(RenderPassContext&, FrameContext&, PassKind,
+            const ForwardEngineResources* engine = nullptr);
 };
 ```
 
