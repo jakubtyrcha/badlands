@@ -146,22 +146,49 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
         // without this function needing to do anything more here.
     }
 
-    // v3 restate-resume: an incoming suggestion identical to what's already
-    // running is a fresh yield with a fresh hint, not a new decision (the
-    // engine diffs) -- resume WITHOUT re-running the kind's producer or
-    // re-stamping started_at_millis, refreshing only the wake schedule. The
-    // wake schedule refresh still goes through enqueue_set_behavior's
-    // force=true path below, same as a full adopt and for the same reason
-    // (see the adopt tail's own comment) -- a restate that only changed
-    // wake_at_millis is a real scheduling decision too, and must reach the
-    // command log for replay to reconstruct it, exactly like a fresh adopt's
-    // schedule does. Idle can never land here (is_identical_restatement
+    // v3 restate-resume + restate-log dedup: an incoming suggestion identical
+    // to what's already running is a fresh yield with a fresh hint, not a new
+    // decision (the engine diffs) -- resume WITHOUT re-running the kind's
+    // producer, without re-stamping started_at_millis, and WITHOUT logging
+    // anything at all. Only the live `ci.wake_at_millis` refreshes from the
+    // (defaulted) hint. This is command.h's own doctrine applied literally:
+    // "re-stating an unchanged decision is not a decision" -- sameness is
+    // implied by the ABSENCE of a log entry, exactly like every other
+    // producer's ordinary edge-trigger (enqueue_move_to/enqueue_set_behavior)
+    // already works. Idle can never land here (is_identical_restatement
     // excludes it), so `intent.idle_hint_millis` is always the right field to
     // read, never `intent.duration_millis`.
+    //
+    // Safety argument for dropping the force-log this path used to do:
+    //   1. Replay never THINKS -- it never calls apply_intention at all
+    //      (docs/design/intention-contract.html §6), so wake_at_millis can
+    //      never influence anything replay actually reproduces (positions,
+    //      hp, building occupancy -- all logged Commands). It is read-only
+    //      input to should_wake, and should_wake only runs on a LIVE tick.
+    //   2. A live run that continues from a replayed state can therefore only
+    //      wake EARLY relative to what the original live run did: the log's
+    //      last real schedule (the adoption, or the last CHANGED intention)
+    //      is a floor every later identical restate's hint only pushes
+    //      later, never earlier, so a replay stuck on that floor wakes no
+    //      later than the original run would have. An early wake is a
+    //      spurious wake, and this contract already treats those as free (an
+    //      OFFER of consultation, not a promise of a new command,
+    //      should_wake's own doc comment) -- and in combat specifically, the
+    //      high-stakes clause forces a per-tick consult regardless of any
+    //      deadline, so the "wrong" schedule is moot exactly when it would
+    //      matter most.
+    //   3. That makes this refresh LIVE-ONLY engine scheduling state (when to
+    //      bother calling the brain again), never read back into anything the
+    //      command log or replay observes -- the identical class
+    //      note_think_outcome's own rejection-backoff already is (see that
+    //      function's doc comment, intention.h, for the same determinism
+    //      rationale stated once, not duplicated here).
+    // Adoption (and any CHANGED intention, the tail below) still force-logs
+    // its SetBehavior with the hint in param_b -- changes are logged,
+    // sameness is implied by logging nothing.
     if (is_identical_restatement(ci, intent)) {
         const int64_t hint =
             intent.idle_hint_millis > 0 ? intent.idle_hint_millis : kDefaultWakeCadenceMillis;
-        enqueue_set_behavior(game, slot, intent.activity_label, hint, /*force=*/true);
         ci.wake_at_millis = game.world_millis + hint;
         return true;
     }
@@ -548,7 +575,8 @@ bool should_wake(const BadlandsGame& game, entt::entity e) {
     // every offered wake produces a new command -- a brain re-consulted
     // every tick while a threat lingers is expected to often just restate
     // what it was already doing, which apply_intention's restate-resume path
-    // resumes without logging anything beyond the refreshed wake schedule.
+    // resumes without logging anything at all (restate-log dedup: the wake
+    // schedule refresh is live-only now, see that path's own comment).
     //
     // threat_was_present reads THIS TICK's value, not an edge -- sim.cpp's
     // ThreatSighted pass (tick_world) runs BEFORE the think loop every tick

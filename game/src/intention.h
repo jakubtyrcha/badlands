@@ -46,14 +46,20 @@ struct Intention {
 // CurrentIntention left untouched. Returns whether the suggestion was
 // adopted.
 //
-// v3 restate-resume (docs/design/intention-contract.html §2, "Resume-by-
-// default"): FIRST compares `intent` against the running CurrentIntention
-// (same kind + the kind's own live field -- point/target_slot/arg, per the
-// vocab table; Idle is excluded, see is_identical_restatement's own comment,
-// intention.cpp) and, if identical, resumes -- returns true WITHOUT running
-// the kind's producer or re-stamping started_at_millis, refreshing only the
-// wake schedule (still force-logged, so the refresh is replay-derivable).
-// The idle-hint default described below applies to a restate's hint too.
+// v3 restate-resume + restate-log dedup (docs/design/intention-contract.html
+// §2, "Resume-by-default"): FIRST compares `intent` against the running
+// CurrentIntention (same kind + the kind's own live field -- point/
+// target_slot/arg, per the vocab table; Idle is excluded, see
+// is_identical_restatement's own comment, intention.cpp) and, if identical,
+// resumes -- returns true WITHOUT running the kind's producer, without
+// re-stamping started_at_millis, and WITHOUT logging anything: only the live
+// wake schedule (CurrentIntention::wake_at_millis) refreshes, off-log --
+// sameness is implied by the absence of a Command, exactly like every other
+// producer's own edge-trigger (command.h's doctrine: "re-stating an
+// unchanged decision is not a decision"). See apply_intention's own comment
+// (intention.cpp) for the full safety argument on why skipping the log entry
+// here is still replay-safe. The idle-hint default described below applies to
+// a restate's hint too.
 // ONE exception: Attack's engagement executor (enqueue_engage, command.h)
 // runs on every call this kind is suggested, restate included -- unlike
 // every other kind's producer, it re-aims at a LIVE, possibly-moving target

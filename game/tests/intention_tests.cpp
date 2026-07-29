@@ -1037,8 +1037,8 @@ TEST_CASE(
 // the log, so a replay reconstructs it) -----------------------------------
 
 TEST_CASE(
-    "apply_intention: an identical MoveTo restatement resumes -- no duplicate MoveTo command, "
-    "started_at unchanged, wake_at refreshed from the new hint",
+    "apply_intention: an identical MoveTo restatement resumes and logs NOTHING -- no duplicate "
+    "MoveTo, no SetBehavior, started_at unchanged, wake_at still refreshed live from the new hint",
     "[intention]") {
     auto owned = make_flat_world();
     BadlandsGame& g = *owned;
@@ -1055,9 +1055,10 @@ TEST_CASE(
     const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_millis;
     CHECK(started_at == 1000);
     CHECK(g.registry.get<CurrentIntention>(e).wake_at_millis == 1500);
+    const size_t log_size_after_adopt = g.command_log.size();
 
-    // Restate: SAME point, a DIFFERENT hint -- proves the refresh reads the
-    // NEW hint, not a cached one.
+    // Restate: SAME point, a DIFFERENT hint -- proves the LIVE refresh reads
+    // the NEW hint, not a cached one, even though nothing reaches the log.
     Intention restate;
     restate.kind = IntentionKind::MoveTo;
     restate.point = {9.0f, -2.0f};
@@ -1068,9 +1069,15 @@ TEST_CASE(
 
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     CHECK(ci.started_at_millis == started_at);  // NOT re-stamped
-    CHECK(ci.wake_at_millis == 1200 + 800);      // refreshed from the restate's hint
+    CHECK(ci.wake_at_millis == 1200 + 800);      // refreshed LIVE from the restate's hint
     CHECK(ci.point.x == Catch::Approx(9.0f));
     CHECK(ci.point.y == Catch::Approx(-2.0f));
+
+    // restate-log dedup: an identical restatement logs NOTHING -- zero log
+    // delta, not just "no duplicate MoveTo." Sameness is implied by the
+    // absence of a log entry (command.h's own doctrine: "re-stating an
+    // unchanged decision is not a decision").
+    CHECK(g.command_log.size() == log_size_after_adopt);
 
     int32_t move_count = 0, set_behavior_count = 0;
     for (const Command& c : g.command_log) {
@@ -1082,12 +1089,12 @@ TEST_CASE(
         }
     }
     CHECK(move_count == 1);          // the producer did NOT re-run on restate
-    CHECK(set_behavior_count == 2);  // but the refreshed schedule DID reach the log
+    CHECK(set_behavior_count == 1);  // the restate's refreshed schedule did NOT reach the log
 }
 
 TEST_CASE(
-    "apply_intention: an identical Attack restatement resumes (Attack carries no "
-    "distinguishing field, so kind alone is enough)",
+    "apply_intention: an identical Attack restatement resumes and logs NOTHING (Attack carries "
+    "no distinguishing field, so kind alone is enough)",
     "[intention]") {
     auto owned = make_flat_world();
     BadlandsGame& g = *owned;
@@ -1101,6 +1108,7 @@ TEST_CASE(
     CHECK(apply_intention(g, slot, first));
     apply_commands(g);
     const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_millis;
+    const size_t log_size_after_adopt = g.command_log.size();
 
     // A combat-tick wake (e.g. forced by the high-stakes MeleeLock clause)
     // restates the SAME Attack -- the worked example in the design doc.
@@ -1112,6 +1120,14 @@ TEST_CASE(
     apply_commands(g);
 
     CHECK(g.registry.get<CurrentIntention>(e).started_at_millis == started_at);
+
+    // restate-log dedup: zero log delta -- an identical restatement (Attack's
+    // engagement executor re-running to re-aim at a live target notwithstanding,
+    // see apply_intention's own Attack-case comment) adds NO command of any
+    // kind here, since the target never moved (enqueue_engage is itself
+    // edge-triggered, command.h) and the restate itself no longer force-logs
+    // a SetBehavior.
+    CHECK(g.command_log.size() == log_size_after_adopt);
 
     int32_t attack_count = 0;
     for (const Command& c : g.command_log) {
@@ -1187,8 +1203,10 @@ TEST_CASE(
     CHECK(g.registry.get<CurrentIntention>(e).wake_at_millis == 1200 + 300);
 }
 
-TEST_CASE("v3: a restate's refreshed wake schedule reaches the log and replays correctly",
-          "[intention]") {
+TEST_CASE(
+    "v3: a restate's refreshed wake schedule is LIVE-ONLY -- replay reproduces the ADOPTION-time "
+    "deadline, not the live refresh, and the resulting divergence is safe by construction",
+    "[intention]") {
     auto live_owned = make_flat_world();
     BadlandsGame& live = *live_owned;
     uint32_t slot = spawn_into(live, MercenaryDesc(0.0f, 0.0f));
@@ -1201,17 +1219,22 @@ TEST_CASE("v3: a restate's refreshed wake schedule reaches the log and replays c
     CHECK(apply_intention(live, slot, first));
     apply_commands(live);
     CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 1300);
+    const size_t log_size_after_adopt = live.command_log.size();
 
-    // A pure restate this time (identical Attack, a fresh hint) -- must
-    // still reach the log via the SAME force-log mechanism a full adopt
-    // uses, or a replay could never reconstruct the refreshed deadline.
+    // A pure restate this time (identical Attack, a FRESH hint). restate-log
+    // dedup (apply_intention, intention.cpp) means this logs NOTHING -- the
+    // live wake_at_millis still refreshes (it is live-only engine scheduling
+    // state, the same class note_think_outcome's rejection backoff already
+    // is, per that function's own determinism comment, intention.h), but no
+    // SetBehavior reaches the command log for it.
     Intention restate;
     restate.kind = IntentionKind::Attack;
     restate.idle_hint_millis = 900;
     live.world_millis = 2000;
     CHECK(apply_intention(live, slot, restate));
     apply_commands(live);
-    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 2900);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 2900);  // LIVE refresh
+    CHECK(live.command_log.size() == log_size_after_adopt);  // NOTHING logged for the restate
 
     int32_t attack_count = 0, set_behavior_count = 0;
     for (const Command& c : live.command_log) {
@@ -1226,8 +1249,12 @@ TEST_CASE("v3: a restate's refreshed wake schedule reaches the log and replays c
     // Attack command of its own (V5 mandate) -- zero regardless of adopt vs.
     // restate; only resolve_action (untouched by this test) ever does.
     CHECK(attack_count == 0);
-    REQUIRE(set_behavior_count == 2);  // but both wakes' schedules are in the log
+    REQUIRE(set_behavior_count == 1);  // only the ADOPTION's schedule is in the log
 
+    // Replay: a fresh world, given an equivalent hero but NEVER calling
+    // apply_intention/react() at all, reconstructs wake_at_millis from the
+    // log alone -- and the log only ever carried the ADOPTION-time deadline
+    // (1300), never the restate's live-only refresh (2900).
     auto replay_owned = make_flat_world();
     BadlandsGame& replay = *replay_owned;
     uint32_t replay_slot = spawn_into(replay, MercenaryDesc(0.0f, 0.0f));
@@ -1241,7 +1268,26 @@ TEST_CASE("v3: a restate's refreshed wake schedule reaches the log and replays c
 
     replay.world_millis = 2000;
     apply_replay_commands(replay);
-    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 2900);  // the restate's refresh
+    // Still 1300, NOT 2900 -- the restate logged nothing to replay here,
+    // which is the entire point of restate-log dedup.
+    //
+    // Why this divergence is acceptable (the safety argument, mirrored from
+    // apply_intention's own comment): replay never THINKS -- it never calls
+    // apply_intention/should_wake at all (docs/design/intention-contract.html
+    // §6), so wake_at_millis never influences anything replay actually
+    // reproduces here (positions/hp/building occupancy, all logged Commands
+    // this test never touches). It only matters if a LIVE run later resumes
+    // from this replayed state: that continuation would then consult the
+    // brain at 1300 instead of the original live run's 2900 -- STRICTLY
+    // EARLIER, never later (every restate's hint is a fresh floor no lower
+    // than what the log's last real decision already scheduled, in this
+    // contract's usage). An early wake is a spurious wake, and this contract
+    // already treats those as free: an OFFER of consultation, not a promise
+    // of a new command (should_wake's own doc comment) -- and in combat
+    // specifically, the high-stakes clause forces a per-tick consult
+    // regardless of any deadline, so the "wrong" schedule is moot exactly
+    // when it would matter most.
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 1300);
 }
 
 // --- action resolver: resolve_action / BL_ACT_ATTACK (v3, contract-v3-

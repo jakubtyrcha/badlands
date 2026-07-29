@@ -427,13 +427,16 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
                     "decode_suggestion rejected the wire (invalid kind/point/duration/activity)");
     }
 
-    // apply_intention returns whether the suggestion was validated + adopted;
-    // an adopted intention always logs a SetBehavior command (see its own doc
-    // comment), so the command log is the observable "a decision landed"
-    // signal now. note_think_outcome (Fix 1, intention.h) is the wake
-    // bookkeeping apply_intention itself no longer performs -- called
-    // unconditionally, once per think, regardless of what was decided; see
-    // its own doc comment for why the two are split.
+    // apply_intention returns whether the suggestion was validated + adopted
+    // -- true both for a genuine adopt/change (which logs a SetBehavior
+    // command) AND for an identical restate-resume (which, per restate-log
+    // dedup, logs nothing at all -- see apply_intention's own doc comment,
+    // intention.cpp, for the safety argument). So `adopted` here is not a
+    // "did a Command land this wake" signal; it only means the suggestion was
+    // accepted, resumed or not. note_think_outcome (Fix 1, intention.h) is
+    // the wake bookkeeping apply_intention itself no longer performs --
+    // called unconditionally, once per think, regardless of what was
+    // decided; see its own doc comment for why the two are split.
     const bool adopted = apply_intention(game, slot, *intent);
     note_think_outcome(game, slot, adopted);
 

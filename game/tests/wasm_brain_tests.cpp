@@ -184,9 +184,49 @@ TEST_CASE("wasm: hero vs rat -- the brain's own swings land, no double-swing per
     uint32_t merc_id = sim.Spawn(merc);
     sim.Spawn(durable_rat(-6.0f, kDuelGroundZ));
 
-    for (int i = 0; i < 600; ++i) {  // 20 sim-seconds: several attack-cooldown windows
+    auto count_merc_set_behavior = [&]() {
+        int32_t n = 0;
+        for (const CommandRecord& c : sim.CommandLog()) {
+            if (c.kind == CommandKindId::SetBehavior && c.actor == merc_id) {
+                ++n;
+            }
+        }
+        return n;
+    };
+
+    // Warm up to combat steady state first (gap closed, Attack intention
+    // adopted, several swings already landed) before taking the flat-log
+    // checkpoint below -- a checkpoint taken mid-adoption would still
+    // legitimately see growth, and that is not what this test is about.
+    constexpr int kWarmupTicks = 100;  // ~3.3 sim-seconds: plenty to close the 2-unit gap and swing
+    for (int i = 0; i < kWarmupTicks; ++i) {
         sim.Tick(kTickDt);
     }
+    const int32_t set_behavior_at_checkpoint = count_merc_set_behavior();
+    REQUIRE(set_behavior_at_checkpoint >= 1);  // the initial Attack adoption landed
+
+    for (int i = kWarmupTicks; i < 600; ++i) {  // 20 sim-seconds total: several cooldown windows
+        sim.Tick(kTickDt);
+    }
+
+    // restate-log dedup (docs/design/intention-contract.html §2/§6, "Resume-
+    // by-default"): should_wake's high-stakes clause re-consults this hero
+    // EVERY tick for the rest of the duel (~500 more wakes -- a threat in
+    // view / MeleeLock), and hero.nim restates the identical Attack/ActCombat
+    // suggestion wake after wake -- an unchanged decision now logs NOTHING
+    // (apply_intention's restate-resume path, intention.cpp, no longer
+    // force-logs a SetBehavior on every restate; only the live
+    // wake_at_millis refreshes, off-log). So the SetBehavior count for this
+    // actor must be EXACTLY what it was at the warmup checkpoint, even after
+    // ~500 more ticks of unchanged engagement -- the STRONG invariant this
+    // test pins now: zero NEW commands of any kind from continued identical
+    // restates, not merely "same activity_label throughout" (a design that
+    // force-logged every restate would also have satisfied that weaker
+    // claim). The Attack/Engage commands the fight itself legitimately keeps
+    // producing below (swings, re-aiming at the live target) are untouched by
+    // this assertion -- it is scoped to SetBehavior specifically, the one
+    // command kind restate-log dedup changes.
+    CHECK(count_merc_set_behavior() == set_behavior_at_checkpoint);
 
     std::vector<CommandRecord> merc_attacks;
     for (const CommandRecord& c : sim.CommandLog()) {
@@ -229,29 +269,6 @@ TEST_CASE("wasm: hero vs rat -- the brain's own swings land, no double-swing per
     std::sort(at_millis_seen.begin(), at_millis_seen.end());
     CHECK(std::adjacent_find(at_millis_seen.begin(), at_millis_seen.end()) ==
           at_millis_seen.end());
-
-    // Steady-state restate produces no log churn: should_wake's high-stakes
-    // clause means this hero is re-consulted EVERY tick for the whole duel
-    // (600 wakes), and apply_intention's restate-resume path (intention.cpp)
-    // logs a SetBehavior on every single one of them BY DESIGN (the wake
-    // schedule refresh is itself a replayable decision, force=true
-    // unconditionally) -- so a large SetBehavior count here is expected, not
-    // itself churn. What restate-resume must still guarantee is that it is a
-    // RESUME, not a re-decision: every one of those SetBehavior entries
-    // should carry the SAME activity_label (param_a) -- hero.nim restating
-    // the identical BL_INT_ATTACK/ActCombat suggestion wake after wake, never
-    // bouncing to a different activity in between. A brain or engine bug that
-    // churned through fresh (re-)decisions instead of resuming would show up
-    // here as a varying param_a across entries.
-    std::vector<int32_t> merc_behaviors;
-    for (const CommandRecord& c : sim.CommandLog()) {
-        if (c.kind == CommandKindId::SetBehavior && c.actor == merc_id) {
-            merc_behaviors.push_back(c.param_a);
-        }
-    }
-    REQUIRE(merc_behaviors.size() > 4);  // many restates, not a trivial/empty set
-    CHECK(std::adjacent_find(merc_behaviors.begin(), merc_behaviors.end(),
-                             std::not_equal_to<int32_t>()) == merc_behaviors.end());
 }
 
 TEST_CASE("wasm: a two-attack hero's brain-picked swings prefer the higher-damage ready attack") {
