@@ -136,7 +136,31 @@ score(c) = w_flow  * drop(c)
   above repels — a flat bonus would steer toward a channel *higher* than the
   agent, and Part 3 would then trench through rising ground to reach it.
   Different source attracts (a real confluence); same source repels (the
-  network folding back on itself). Union by smaller root, path-compressed.
+  network folding back on itself).
+
+### Source aliasing is a disjoint-set union, and the ids go STALE
+
+Trail cells are **never rewritten on merge**. Rewriting a whole network's cells
+on every union would be O(n) per merge, so each cell keeps the id it was laid
+with and that id goes stale the moment its network merges into another.
+
+**Therefore every same-source test must resolve through `find()`, never compare
+raw ids.** This is the one place the design can silently regress into exactly
+the braiding it exists to prevent:
+
+```
+same_source(cell, agent)  =  find(cell.source) == find(agent.source)   // correct
+                          !=  cell.source == agent.source              // WRONG, and passes naive tests
+```
+
+A raw comparison looks right on cells written *after* a merge, because those
+carry the merged id already. It fails only on cells laid *before* the merge —
+which are most of the network. Those would read as a different source, so the
+combined flow would be **attracted back into its own trunk** and braid.
+
+Union by **smaller root**, path-compressed. Smaller-root (rather than by rank
+or size) makes the resulting root independent of merge order, so the assignment
+is reproducible without depending on the seed processing order for correctness.
 
 ### Hard rules
 
@@ -175,6 +199,7 @@ work turned out not to hold on real terrain, and were only found by measuring.
 | Channel profile jumps uphill at a loop closure | Rule 1: each cell entered once + falling `ref_level` ⇒ monotone in space | Assert the carved profile is non-increasing at every step of every agent |
 | Agent adds discharge to its own trail, creating water | Merge requires differing union-find roots | Assert on merge; total outflow ≤ total seeded discharge |
 | Two branches of one network attract and braid | Same-root repulsion | Count merges whose roots were already equal — must be zero |
+| **Stale source ids compared raw instead of through `find()`** | Every same-source test resolves roots first | Dedicated aliasing test below — a raw comparison passes every other test in the suite |
 | Agent trenches through a hill to reach water | `w_dig` prices the excavation; `max_climb_m` vetoes the extreme | Histogram of per-step excavation; a long tail means `w_dig` is too low |
 | Agent steered toward water that is *above* it | `water_pull` signed by relative level | Fixture: trail placed above must repel |
 | Agent shoved off a trunk it just joined | Steering off while `on_trail` | Fixture: A merges into B, then follows B to B's terminal |
@@ -275,7 +300,11 @@ Artificial heightmaps, reusing the two builders already in the test suite.
 | Trail of the agent's OWN source alongside it | repelled, not attracted — no braiding back into itself |
 | Trail of a DIFFERENT source alongside it | attracted, and the two merge |
 | A merges into B, then B's trunk continues | A follows the trunk and is NOT pushed off it by same-source repulsion |
-| Union aliasing | after A merges into B and C merges into A, all three resolve to one root, so C and B repel rather than attract |
+| **Aliasing, unit level** | `union(A, B)`, then a cell still carrying the literal id `A` must read as same-source to an agent carrying `B`. Constructed so a raw `cell.source == agent.source` comparison FAILS: the ids genuinely differ and only the roots agree |
+| **Aliasing, in situ** | A lays a trunk; B merges into it; the combined flow is then routed near a segment of A's trail laid BEFORE the merge. It must be repelled. Under a raw comparison it would be attracted and braid, so this fixture is the one that proves the unit behaviour matters where it is used |
+| Transitive aliasing | after A merges into B and C merges into A, all three resolve to one root, so C and B repel rather than attract |
+| Root determinism | union by smaller root gives the same root regardless of the order the unions are applied |
+| Network is a forest | walking flow directions from any trail cell terminates; no cycle exists anywhere in the network |
 | Agent steps onto higher ground | permitted, and the carved cell ends up BELOW the previous one — descent comes from the cut |
 | Agent steered into a mountain | it terminates rather than tunnelling; `max_climb_m` is respected |
 | Any fixture | `hit_step_cap == 0` — Rule 1 already forbids non-termination, so any hit is a bug |
