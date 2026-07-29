@@ -76,29 +76,51 @@ struct CanalAgent {
 ```
 
 **Sense.** Three samples at `sense_distance_m`, at `-sense_angle`, `0`,
-`+sense_angle` from the heading. The attractant at a point is
+`+sense_angle` from the heading.
+
+**Both terms are in METRES, and that is how the balance is set.** A
+dimensionless weight against a height difference would be opaque to tune; in
+metres the weight reads directly as *how much drop a nearby channel is worth*.
 
 ```
-water(pt)   = trail(pt) > 0 or is_lake(pt)
-drop(pt)    = agent_level - water_surface(pt)          // + when the water is BELOW us
-attract(pt) = -height(pt)
-            + water_weight * water(pt) * clamp(drop(pt) / water_falloff_m, -1, +1)
+drop(pt)      = agent_level - height(pt)                  // + is downhill
+water_pull(pt)= 0 if no water, else
+                same_source(pt) ? -water_weight_m
+                                : water_weight_m * clamp(water_drop(pt) / falloff_m, -1, +1)
+attract(pt)   = drop(pt) + water_pull(pt)                 // metres, comparable
 ```
 
-**Water below attracts; water above repels.** A plain `+trail_weight` bonus
-would steer an agent toward a channel sitting *higher* than it, and the descent
-rule in Part 3 would then obediently cut a trench through rising ground to
-reach it. The signed term makes a tributary join a trunk from above, which is
-the only direction real ones join from, and makes a higher channel push the
-agent away rather than draw it in.
+So `water_weight_m = 3` means a lower channel of a different source pulls as
+hard as three metres of extra descent, and `water_drop` scaling keeps that pull
+signed: **water below attracts, water above repels.** A flat bonus would steer
+an agent toward a channel sitting *higher* than it, and Part 3's carve would
+then dutifully trench through rising ground to reach it.
+
+**Source ownership, with merge aliases.** Every trail cell records a source id.
+Ids are held in a union-find; a merge unions the two, so an agent and
+everything upstream of it share one root. Then:
+
+- **Different source attracts** — a genuine confluence, two catchments meeting.
+- **Same source repels** — that is not a confluence, it is the agent's own
+  network folding back on itself.
+
+This generalises self-avoidance, and catches a case bare self-avoidance misses:
+two branches of one network running parallel would otherwise attract each other
+and braid. Union by smaller root, path-compressed, so it stays deterministic.
+
+**Steering is OFF while on a trail.** Once an agent has merged it is travelling
+along same-source cells, and same-source repulsion would immediately shove it
+back off the trunk it just joined. On a trail the agent follows the stored
+direction; sensors and attractants apply only off-trail. You have joined the
+river, you go where it goes.
 
 **Steer.** Rotate `dir` toward the strongest sensor by `turn_angle`. With
 probability `wander_chance`, apply an additional random turn — this is the only
 source of meander, and it is what stops canals being straight lines.
 
-**Trail attraction is what makes the network dendritic.** A drainage network
-must converge — tributaries merge going downstream and never split. Without
-trail attraction, Physarum steering braids and loops, which is wrong for water.
+**Different-source attraction is what makes the network dendritic.** A drainage
+network must converge — tributaries merge going downstream and never split.
+Without it, Physarum steering braids and loops, which is wrong for water.
 
 **Move** one texel along `dir`, subject to two hard rules.
 
@@ -107,11 +129,17 @@ already carved.** This is the loop guarantee, and it is load-bearing for far
 more than tidiness (see Part 3). If every candidate step is self-visited, the
 agent is boxed in and terminates.
 
-**Rule 2 — no climbing.** An agent will not step onto ground more than
-`max_climb_m` above its current `ref_level`. It still cuts through the small
-sills that would otherwise trap water — that is the whole point of Part 3 — but
-it will not tunnel through a hill to do it. If every candidate exceeds the
-limit, the agent terminates.
+**Rule 2 — stepping uphill is ALLOWED; the carve makes it downhill.** An agent
+may step onto higher ground, and Part 3 then cuts that cell below the previous
+one. Descent is enforced by the cut, not by the step choice — which is what
+removes the conflict between "always go downhill" and "turn toward water". A
+hard no-climb rule would make those two goals fight whenever the water an agent
+should reach sits up-slope.
+
+The height term in the attractant already discourages climbing in metres, so
+this should rarely bind, but `max_climb_m` remains a hard veto against
+tunnelling straight through a mountain. If every candidate exceeds it, the
+agent terminates.
 
 **Merge — another agent's trail only.** On entering a cell carrying ANOTHER
 agent's trail, add this agent's discharge to it and adopt the trail's stored
@@ -123,11 +151,11 @@ regime width closure, with continuity `Q = w·d·v` holding identically — so a
 merge speeds the flow up by `v ∝ Q^0.2` rather than by an invented rule. **The
 same hydraulics on both sides of the pipeline, one set of constants.**
 
-Self-intersection is NOT a merge. Adding an agent's discharge to its own trail
-would create water from nothing, and doubling again on each lap. Rule 1 makes
-the case unreachable; the merge path must still assert it rather than trust it.
-Each trail cell therefore records which agent laid it, alongside discharge and
-direction.
+Self-intersection is NOT a merge. Adding discharge to same-source water would
+create water from nothing, and double again on each lap. Rule 1 makes the case
+unreachable for an agent's own cells, and the union-find root check catches the
+wider same-source case; the merge path must assert both rather than trust them.
+Each trail cell records source id, discharge and flow direction.
 
 **Terminate** when the agent leaves the map (dies), enters a lake (absorbed),
 is boxed in by Rule 1 or Rule 2, or exceeds `max_steps`. The step cap is now a
@@ -195,8 +223,8 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
 
 New `ErosionParams` fields: `canal_seed_area_m2`, `canal_slope`,
 `canal_sense_distance_texels`, `canal_sense_angle_rad`, `canal_turn_angle_rad`,
-`canal_wander_chance`, `canal_water_weight`, `canal_water_falloff_m`,
-`canal_max_climb_m`.
+`canal_wander_chance`, `canal_water_weight_m` (in METRES — see Part 2),
+`canal_water_falloff_m`, `canal_max_climb_m`.
 
 One new debug stage, `"canals"`, dumped between `"cavities-height"` and
 `"sediment-init"`.
@@ -219,7 +247,12 @@ Artificial heightmaps, reusing the two builders already in the test suite.
 | **Every fixture, every agent** | the carved profile along a canal is monotone decreasing at EVERY step — the spatial guarantee, checked directly rather than inferred from the descent rule |
 | **Every fixture, every agent** | no cell appears twice in an agent's path |
 | Trail placed ABOVE the agent | the agent steers away from it, and no trench is cut toward it |
-| Agent steered into a hill | it terminates rather than tunnelling; `max_climb_m` is respected |
+| Trail of the agent's OWN source alongside it | repelled, not attracted — no braiding back into itself |
+| Trail of a DIFFERENT source alongside it | attracted, and the two merge |
+| A merges into B, then B's trunk continues | A follows the trunk and is NOT pushed off it by same-source repulsion |
+| Union aliasing | after A merges into B and C merges into A, all three resolve to one root, so C and B repel rather than attract |
+| Agent steps onto higher ground | permitted, and the carved cell ends up BELOW the previous one — descent comes from the cut |
+| Agent steered into a mountain | it terminates rather than tunnelling; `max_climb_m` is respected |
 | Any fixture | `hit_step_cap == 0` — Rule 1 already forbids non-termination, so any hit is a bug |
 
 **The headline production measurements**, all of which are the point of the
