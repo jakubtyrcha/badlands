@@ -13,6 +13,14 @@ struct BadlandsGame;
 
 namespace badlands {
 
+// Waypoint-arrival epsilon: follow_paths advances its cursor once a step lands
+// within this of the current waypoint, so a mover "arrives" without needing to
+// land exactly on the point. Exposed here (not file-local to movement.cpp)
+// because intention.cpp's advance_intentions reuses the same epsilon to
+// detect a MoveTo intention's arrival -- the mover and the intention layer
+// must agree on what "arrived" means.
+inline constexpr float kArriveRadius = 0.25f;
+
 // Can a character stand here? A STAND-IN for real terrain navigation: the nav
 // provider (src/crates/nav) is a visibility graph over building footprints and
 // knows nothing about terrain, so until it does, this one predicate is the

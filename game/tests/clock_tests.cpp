@@ -2,9 +2,9 @@
 // advanced deterministically by tick_world.
 
 #include "sim_internal.hpp"
+#include "behaviours/world_view.h"
 #include "components.h"
 #include "game_state.h"
-#include "town_brain.h"
 
 #include <catch_amalgamated.hpp>
 

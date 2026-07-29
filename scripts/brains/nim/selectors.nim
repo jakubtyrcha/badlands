@@ -3,7 +3,7 @@
 # never a hero, so they are not ported). Band loop first (Danger, then
 # Normal), then per-band argmax over weight*score with a strict `>` so ties
 # keep the earliest list entry -- verbatim, including the early-continue/skip
-# order.
+# order. v2: returns a Suggestion (blocks.nim) instead of v1's Decision.
 
 import abi
 import activity_catalog
@@ -12,7 +12,7 @@ import blocks
 
 type
   ScoreFn* = proc(v: HeroView, f: BlViewFactors): float32 {.nimcall.}
-  ActFn* = proc(v: HeroView, f: BlViewFactors): Decision {.nimcall.}
+  ActFn* = proc(v: HeroView, f: BlViewFactors): Suggestion {.nimcall.}
 
   # Mirrors ActivityDef (behaviours/blocks.h): one row of the activity table.
   ActivityEntry* = object
@@ -22,7 +22,7 @@ type
     act*: ActFn
 
 proc selectBanded*(activities: openArray[ActivityEntry], weights: array[BL_MAX_ACTIVITIES, float32],
-                   v: HeroView, f: BlViewFactors): Decision =
+                   v: HeroView, f: BlViewFactors): Suggestion =
   # Bands are tried strictly in order (Danger=0, Normal=1) -- the hierarchy is
   # enforced by control flow, not by the numbers.
   for bandIdx in 0 ..< 2:
@@ -44,18 +44,14 @@ proc selectBanded*(activities: openArray[ActivityEntry], weights: array[BL_MAX_A
         bestIdx = i
     if bestIdx >= 0:
       return activities[bestIdx].act(v, f)
-  # Nothing applicable anywhere -> Idle in place. Matches C++'s default
-  # BehaviourResult{} (id=Idle, no follow-up) with TWO deliberate wire-only
-  # differences, neither of which is observable host-side (no follow_up means
-  # apply_brain_decision never reads goal_kind's self-position choice nor
-  # follow_up_on_arrival at all -- see decode_decision/apply_brain_decision):
-  # goalKind=0 ("no goal", host holds current position) rather than an
-  # explicit (0,0) point, and followUpOnArrival=false rather than C++'s
-  # struct-default true. This branch is unreachable for a hero with real
-  # factors (Idle's weight is always > 0, so the Normal band always finds at
-  # least Idle) -- it fires only when every weight on the wire is exactly 0,
-  # which is what src/crates/brainhost's real_hero_wasm_conforms test feeds
-  # (an all-zeroed view) and asserts an all-zero-bytes DecisionWire back, so
-  # every field here must be the wire's zero value to keep that acceptance
-  # test green.
-  result = Decision(activityId: ActIdle, goalKind: 0, followUpOnArrival: false)
+  # Nothing applicable anywhere -> suggest nothing (BL_INT_NONE), the v2
+  # vocabulary's own first-class "no opinion" answer -- a cleaner fit than
+  # v1's forced fallback to Idle-in-place ever was. This branch is
+  # unreachable for a hero with real factors (Idle's weight is always > 0,
+  # so the Normal band always finds at least Idle) -- it fires only when
+  # every weight on the wire is exactly 0, which is what src/crates/
+  # brainhost's real_hero_wasm_conforms test feeds (an all-zeroed view) and
+  # asserts an all-zero-bytes SuggestionWire back (BL_INT_NONE == 0 == the
+  # struct's own default), so `result` staying the zero-initialized
+  # Suggestion{} is exactly what keeps that acceptance test green.
+  discard  # result already default-initialized to Suggestion{} (all zero)

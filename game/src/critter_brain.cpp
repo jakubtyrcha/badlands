@@ -5,7 +5,7 @@
 #include "behaviours/perception.h"
 #include "behaviours/selectors.h"
 #include "behaviours/world_view.h"
-#include "brain.h"
+#include "brain_kind.h"
 #include "command.h"
 #include "components.h"
 #include "game_state.h"

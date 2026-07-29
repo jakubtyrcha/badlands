@@ -4,11 +4,13 @@
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
+#include "intention.h"  // abort_intention -- the Chat handler's never-started decline
 #include "placement.h"
 
 #include <entt/entt.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace badlands {
@@ -75,19 +77,51 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             if (e != entt::null) {
                 if (auto* sim = game.registry.try_get<HeroSimulationState>(e)) {
                     sim->behavior = cmd.param_a;
-                    // Starting a deliberation pause sets its deadline;
-                    // committing to anything else cancels one in progress. Both
-                    // derive from the command, so replay reproduces the pause
-                    // without re-drawing its length.
-                    sim->think_until_millis =
-                        (cmd.param_a == static_cast<int32_t>(ActivityId::Think) &&
-                         cmd.param_b > 0)
-                            ? game.world_millis + cmd.param_b
-                            : 0;
+                    // Always 0: this was the C++ hero decision layer's own
+                    // deliberation pause (SetBehavior(Think, duration)), and
+                    // that layer is gone entirely (the intention contract,
+                    // game/src/intention.h) -- no producer ever emits
+                    // ActivityId::Think anymore, so the branch that used to
+                    // set this non-zero is dead and was removed. The field
+                    // itself stays: hero_perception.cpp's observe_hero still
+                    // copies it into WorldView::think_until_millis, which
+                    // wasm_brain.cpp still packs into BlViewSelf::
+                    // think_until_millis on the wire (kept there only for 1:1
+                    // parity with WorldView -- see that field's own comment,
+                    // brain_abi.h) -- so it is not dead by the grep, just
+                    // permanently 0.
+                    sim->think_until_millis = 0;
                 } else if (auto* cs = game.registry.try_get<CritterState>(e)) {
                     cs->behavior = cmd.param_a;
                 } else if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
                     tc->behavior = cmd.param_a;
+                }
+                // Intention contract (game/src/intention.h): the wake
+                // schedule rides on cmd.param_b (SetBehavior's duration_millis)
+                // -- deriving wake_at_millis HERE (not in apply_intention) is
+                // what makes it replay-derivable: any tick that applies this
+                // exact command, live or replayed, reconstructs the same
+                // wake_at_millis. Harmless for critters/townfolk: only heroes
+                // get a CurrentIntention (heroes.cpp emplaces it for every
+                // hero, wasm-brained or not), so try_get above is a no-op for
+                // them.
+                if (auto* ci = game.registry.try_get<CurrentIntention>(e)) {
+                    // v3 invariant (docs/design/intention-contract.html §2,
+                    // intention.cpp's apply_intention): wake_at_millis == 0
+                    // means "never adopted/restated yet" ONLY -- every
+                    // producer today guarantees cmd.param_b > 0 (apply_
+                    // intention substitutes kDefaultWakeCadenceMillis for a
+                    // non-positive duration/hint before logging), but that is
+                    // an unenforced cross-file invariant a future producer
+                    // could violate. Defend it HERE too, not just at the
+                    // producer: a non-positive logged duration falls back to
+                    // the same default cadence, never to the v2 "forever"
+                    // sentinel -- otherwise a future producer's bug would
+                    // resurrect exactly the stuck-forever-with-hint-0 defect
+                    // class v3 was meant to delete.
+                    const int64_t duration =
+                        cmd.param_b > 0 ? cmd.param_b : kDefaultWakeCadenceMillis;
+                    ci->wake_at_millis = game.world_millis + duration;
                 }
             }
             return 0;
@@ -95,9 +129,12 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
         case CommandKind::Attack: {
             // Resolve one attack against the commanded target (UINT32_MAX => the
             // engine picks the nearest enemy). fire_attack is authoritative: it
-            // re-validates range/cooldown/lock and chooses the attack. Melee lands
-            // now; a ranged attack spawns a projectile that resolves on arrival.
-            fire_attack(game, cmd.actor, cmd.target_id);
+            // re-validates range/cooldown/lock and chooses the attack -- explicitly
+            // via cmd.param_a when a producer named one (resolve_action, game/src/
+            // intention.h; -1 = the legacy auto-pick every other producer still
+            // uses). Melee lands now; a ranged attack spawns a projectile that
+            // resolves on arrival.
+            fire_attack(game, cmd.actor, cmd.target_id, cmd.param_a);
             return 0;
         }
         case CommandKind::CollectTax: {
@@ -174,18 +211,68 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                 !game.registry.all_of<HeroSimulationState>(b)) {
                 return 0;  // only heroes converse
             }
+            // Mirrored-pair fast path (Fix 1): two heroes that mutually named
+            // each other in the same batch (nearest_companion pairs mutually)
+            // each enqueue a Chat command. The FIRST command to drain already
+            // emplaced ChattingState on BOTH sides (below); when the SECOND
+            // (reverse-direction) command reaches here, the any_of<...
+            // ChattingState> guard below would see its own actor already
+            // chatting and treat that as a decline against a third party.
+            // Detect the already-established session -- actor already
+            // chatting with exactly this target, and that target already
+            // chatting with exactly this actor -- and no-op success instead:
+            // the session this command asked for already exists. A hero
+            // chatting with someone ELSE still falls through to the abort
+            // below.
+            if (const auto* acs = game.registry.try_get<ChattingState>(a);
+                acs != nullptr && acs->partner_slot == cmd.target_id) {
+                if (const auto* bcs = game.registry.try_get<ChattingState>(b);
+                    bcs != nullptr && bcs->partner_slot == cmd.actor) {
+                    return 0;  // session already established by the mirrored command
+                }
+            }
             if (game.registry.any_of<InsideBuilding, ChattingState>(a) ||
                 game.registry.any_of<InsideBuilding, ChattingState>(b)) {
+                // Never-started abort (Fix 3): the actor's own suggestion
+                // already stamped CurrentIntention::kind = Chat
+                // (apply_intention) before this command even reached the
+                // handler -- if the session never actually begins, that
+                // intention must not dangle forever with nothing left to
+                // end it (ChattingState never appears, so advance_intentions'
+                // Chat branch has no started marker to react to). No-op on
+                // a replayed world (CurrentIntention.kind is always None
+                // there).
+                abort_intention(game, cmd.actor, IntentionKind::Chat);
                 return 0;  // hidden, or already talking to someone else
             }
             const float d = glm::distance(game.registry.get<Position>(a).pos,
                                           game.registry.get<Position>(b).pos);
             if (d > game.factors.hero.chat_radius) {
+                abort_intention(game, cmd.actor, IntentionKind::Chat);  // Fix 3, see above
                 return 0;  // drifted apart before the command applied
             }
             const float duration = game.factors.hero.chat_duration;
             game.registry.emplace<ChattingState>(a, cmd.target_id, duration);
             game.registry.emplace<ChattingState>(b, cmd.actor, duration);
+            return 0;
+        }
+        case CommandKind::Engage: {
+            // Single-gateway combat's engagement executor (game/src/
+            // intention.h's enqueue_engage doc comment has the full
+            // account): hold at cmd.point.x (the caller's engagement_range)
+            // of a LIVE entity target -- Kind::Entity, not Kind::Point, so
+            // plan_paths re-derives the goal from the target's CURRENT
+            // position every pass rather than a one-shot snapshot.
+            entt::entity e = entity_for_slot(game, static_cast<int32_t>(cmd.actor));
+            entt::entity target = entity_for_slot(game, static_cast<int32_t>(cmd.target_id));
+            if (e == entt::null || target == entt::null) {
+                return 0;
+            }
+            MoveTarget& mt = game.registry.get<MoveTarget>(e);
+            mt.kind = MoveTarget::Kind::Entity;
+            mt.entity = target;
+            mt.building = UINT32_MAX;
+            mt.stop_distance = cmd.point.x;
             return 0;
         }
     }
@@ -221,8 +308,32 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target) {
     game.command_queue.push_back({CommandKind::MoveTo, slot, UINT32_MAX, target});
 }
 
+void enqueue_engage(BadlandsGame& game, uint32_t slot, uint32_t target_slot,
+                    float stop_distance) {
+    entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
+    entt::entity target = entity_for_slot(game, static_cast<int32_t>(target_slot));
+    if (e == entt::null || target == entt::null) {
+        return;
+    }
+    // Same edge-trigger discipline as enqueue_move_to above: re-stating the
+    // identical target at the identical range is not a new decision. Once
+    // set, Kind::Entity needs no further re-issuance at all to keep tracking
+    // (plan_paths re-derives the goal from the target's live position every
+    // pass on its own) -- this dedup is what keeps a whole multi-second
+    // fight's worth of per-tick engagement calls (apply_intention's Attack
+    // case) from bloating the log with one Engage command per tick.
+    constexpr float kStopDistanceEpsilon = 0.05f;
+    const MoveTarget& mt = game.registry.get<MoveTarget>(e);
+    if (mt.kind == MoveTarget::Kind::Entity && mt.entity == target &&
+        std::abs(mt.stop_distance - stop_distance) <= kStopDistanceEpsilon) {
+        return;  // already engaging this target at this range -- not a new decision
+    }
+    game.command_queue.push_back(
+        {CommandKind::Engage, slot, target_slot, {stop_distance, 0.0f}, 0, 0});
+}
+
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
-                          int64_t duration_millis) {
+                          int64_t duration_millis, bool force) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
         return;
@@ -238,7 +349,7 @@ void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
     } else {
         return;  // nothing to record it on
     }
-    if (current == behavior) {
+    if (current == behavior && !force) {
         return;  // unchanged -- not a decision
     }
     game.command_queue.push_back({CommandKind::SetBehavior,

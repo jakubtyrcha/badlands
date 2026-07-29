@@ -254,12 +254,13 @@ target_include_directories(badlands_engine PUBLIC
     ${taskflow_SOURCE_DIR}
 )
 
-# badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog + the
-# noiser-scripted brains), pure C++ with no engine/SDL/Dawn deps — geometry
-# that needs engine types comes in a later task (S2.C). Includes the
-# sampo::noiser C++ VM wrapper (pure delegation over the noiser Rust VM's C
-# ABI); badlands uses the VM only, so noiser_jit_stubs.cpp stubs the JIT
-# (Cranelift) C ABI.
+# badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog), pure C++
+# with no engine/SDL/Dawn deps — geometry that needs engine types comes in a
+# later task (S2.C). The hero brain is wasm-only now (game/src/wasm_brain.h);
+# this lib also carries the sampo::noiser C++ VM wrapper (pure delegation
+# over the noiser Rust VM's C ABI) purely so badlands_mapgen_lib (below) can
+# link it for mapgen/texgen noiser scripts -- badlands uses the VM only, so
+# noiser_jit_stubs.cpp stubs the JIT (Cranelift) C ABI.
 #
 # Named badlands_game_lib, not badlands_game: the "game" app executable below
 # is already named badlands_game (from S2.A1/A3), and CMake target names must
@@ -267,25 +268,31 @@ target_include_directories(badlands_engine PUBLIC
 add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/sim.cpp
-    game/src/brain.cpp
     game/src/combat.cpp
     game/src/command.cpp
     game/src/creature_catalog.cpp
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/skills.cpp
+    game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
-    game/src/town_brain.cpp
-    # Task 4 (wasm-brain feature): the wasm hero brain runtime (brainhost C
-    # ABI) -- see game/src/wasm_brain.h.
+    # Intention contract engine (inbox, wake rule, apply seam) the wasm hero
+    # brain runs on -- see docs/design/intention-contract.html and
+    # game/src/intention.h.
+    game/src/intention.cpp
+    # Hero perception (observe_hero/weights_for) -- all that remains of the
+    # deleted C++ hero decision layer (town_brain.cpp); its sole consumer now
+    # is the wasm hero brain (wasm_brain.cpp), the sole hero decision-maker.
+    game/src/hero_perception.cpp
+    # The wasm hero brain runtime (brainhost C ABI) -- see game/src/wasm_brain.h.
     game/src/wasm_brain.cpp
     game/src/activity_catalog.cpp
     game/src/activity_histogram.cpp
     game/src/behaviours/blocks.cpp
     game/src/behaviours/selectors.cpp
     game/src/behaviours/perception.cpp
-    game/src/behaviours/deliberation.cpp
     game/src/critter_brain.cpp
     game/src/townfolk_brain.cpp
     game/src/monster_brain.cpp
@@ -379,6 +386,7 @@ set(badlands_app_sources_game
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
+    src/game/skill_manifest.cpp     # skill template overrides loaded as data
     # Game UI (the in-world HUD + world picking), distinct from the ImGui debug
     # UI. Game-specific, so it lives here rather than in badlands_engine --
     # only the game-agnostic UiRenderer does.
@@ -394,6 +402,7 @@ set(badlands_app_sources_ai_sandbox
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
+    src/game/skill_manifest.cpp     # skill template overrides loaded as data
     src/game/scenario.cpp)          # sandbox scenarios loaded as data
 
 foreach(app viewer game ai_sandbox)
@@ -586,8 +595,6 @@ enable_testing()
 add_executable(badlands_game_tests
     game/tests/combat_tests.cpp
     game/tests/sim_tests.cpp
-    game/tests/noiser_smoke_tests.cpp
-    game/tests/duel_test.cpp
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
@@ -597,9 +604,7 @@ add_executable(badlands_game_tests
     game/tests/needs_tests.cpp
     game/tests/determinism_tests.cpp
     game/tests/archetype_tests.cpp
-    game/tests/behaviours_tests.cpp
     game/tests/activity_selector_tests.cpp
-    game/tests/deliberation_tests.cpp
     game/tests/chat_tests.cpp
     game/tests/exploration_tests.cpp
     game/tests/activity_stats_tests.cpp
@@ -609,15 +614,20 @@ add_executable(badlands_game_tests
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
+    # Hero behavior, wasm-driven (Task 4: the C++ decision layer is gone --
+    # the shipping brain is the sole hero decision-maker). Histogram-in-spirit
+    # outcomes over a run, plus two smokes salvaged from the deleted
+    # hero_brain_parity_tests.cpp.
+    game/tests/hero_behavior_tests.cpp
     # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
     # sim needed.
     game/tests/brain_abi_tests.cpp
-    # The wasm hero brain wired into the sim -- see game/src/wasm_brain.h.
+    # The wasm hero brain (v2, the intention contract) wired into the sim --
+    # see game/src/wasm_brain.h. No twin-brain parity anymore (the C++
+    # reference/mock-hero-fallback comparison died with v1's wire; the
+    # ported Nim brain -- scripts/brains/nim/hero.nim -- is the sole hero
+    # decision layer for a wasm-loaded world).
     game/tests/wasm_brain_tests.cpp
-    # The ported hero decision layer (scripts/brains/nim/hero.nim) --
-    # twin-brain parity against the C++ reference (town_brain.cpp) + wasm-side
-    # behavioural smokes.
-    game/tests/hero_brain_parity_tests.cpp
     # Task 9: the set_factors_of validation boundary (sanitize_factors,
     # sim.cpp) -- adversarial-config red/green repros.
     game/tests/factors_sanitize_tests.cpp
@@ -640,6 +650,12 @@ add_executable(badlands_game_tests
     # so it runs here without a device -- same rationale as the decals above.
     game/tests/world_labels_tests.cpp
     src/game/visual/world_labels.cpp
+    # Skill vocabulary: catalog, grant table, Skills component (game/src/skills.h).
+    game/tests/skills_tests.cpp
+    # Hero progression: leveling curve + XP accrual (game/src/progression.h).
+    game/tests/progression_tests.cpp
+    # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
+    game/tests/intention_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
@@ -653,11 +669,6 @@ target_include_directories(badlands_game_tests PRIVATE
 target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
 target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib ui)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-# The noiser smoke/duel cases load the SHIPPING brain scripts by path and REQUIRE
-# the env vars (historically exported only by the legacy Rust harness, so a bare
-# `ctest` failed on them). Set here so `ctest --test-dir build` is self-contained.
-set_tests_properties(badlands_game_tests PROPERTIES ENVIRONMENT
-    "BADLANDS_BRAIN_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/hero.noiser;BADLANDS_COMBAT_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/combat_test.noiser")
 
 # badlands_geometry_tests: Catch2 suite for Task S2.C's procedural geometry
 # (primitives/rocks/building parts, src/engine/rendering/geometry) + the
@@ -1128,6 +1139,32 @@ target_include_directories(badlands_factors_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_factors_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_factors_manifest_tests COMMAND badlands_factors_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_skill_manifest_tests: skill template overrides loaded as data
+# (assets/skills/skills.json -> badlands::SkillCatalog). App-layer, so the sim
+# keeps its lean dependency set. Reads the shipped file, so cwd = repo root.
+add_executable(badlands_skill_manifest_tests
+    src/game/tests/skill_manifest_tests.cpp
+    src/game/skill_manifest.cpp
+    # The skill vocabulary table (compiled SkillCatalog defaults + name
+    # lookup). Depends on badlands_sim.hpp plus the game-side component/view
+    # headers it declares alongside, so this target also needs game/src on
+    # its include path (see below) -- entt and command.h are header-only, so
+    # no extra sources are dragged in.
+    game/src/skills.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_skill_manifest_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_skill_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_skill_manifest_tests COMMAND badlands_skill_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_scenario_tests: the app-layer sandbox loaders (arena scenarios +
 # creature-stat overrides -> sim data). Lean, like factors_manifest_tests:

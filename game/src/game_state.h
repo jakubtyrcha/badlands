@@ -1,5 +1,5 @@
-// Internal game state shared between the sim (sim.cpp) and the noiser brain
-// integration (brain.cpp). The public surface is game/include/badlands_sim.hpp.
+// Internal game state shared between the sim (sim.cpp) and the systems that
+// mutate it. The public surface is game/include/badlands_sim.hpp.
 
 #pragma once
 
@@ -19,7 +19,6 @@
 #include <vector>
 
 namespace badlands {
-struct BrainRuntime;
 struct WasmBrainRuntime;
 }
 
@@ -33,12 +32,10 @@ struct BadlandsGame {
     // slot_for_entity is O(1) instead of a linear scan per combat hit. Stale
     // entries for dead entities are never queried (only live entities are).
     std::unordered_map<entt::entity, uint32_t> entity_slot;
-    // Compiled brain program + host bindings; null -> mock brains only.
-    std::unique_ptr<badlands::BrainRuntime> brains;
     // Compiled + instantiated brain wasm module (game/src/wasm_brain.h);
-    // null -> heroes think via town_think (mock) instead. Hero-only (see the
-    // think loop's dispatch order, sim.cpp): loaded independently of `brains`
-    // above, and takes priority over it for BrainKind::Town entities.
+    // null -> heroes simply idle (there is no C++ decision layer left to fall
+    // back to, sim.cpp's mock_think). Hero-only: the sole hero decision
+    // layer (see the think loop's dispatch order, sim.cpp).
     std::unique_ptr<badlands::WasmBrainRuntime> wasm_brains;
 
     // World state (the sim owns gold and the building/placement grid).
@@ -112,18 +109,58 @@ struct BadlandsGame {
     // Initial config in the determinism contract.
     badlands::CreatureCatalog creatures;
 
+    // Skill template catalog (see SkillCatalog). Compiled defaults; an app may
+    // override by name from JSON via Sim::SetSkillCatalog. Initial config.
+    badlands::SkillCatalog skills;
+
     uint64_t ticks = 0;
-    uint64_t script_intents = 0;
-    uint32_t noiser_bugs = 0;
+
+    // One-tick nearest-enemy cache, indexed by slot (Cleanup: sim.cpp's
+    // tick_world, the ThreatSighted pass -- BEFORE think -- populates one
+    // entry per visible (non-hidden) EventInbox-bearing entity: heroes AND,
+    // since the single-gateway cutover, monsters too (heroes.cpp's spawn
+    // recipe emplaces EventInbox for Archetype::Monster). monster_think
+    // (monster_brain.cpp) consults it directly instead of re-scanning,
+    // since this same nearest_enemy result is what it needs moments later
+    // in THIS same tick's think pass -- a nearest-enemy scan would
+    // otherwise run twice per entity per tick, once there and again moments
+    // later from monster_think's own call inside the SAME think pass (the
+    // shortcut the deleted combat_preempt's own cache read used to take).
+    // entt::null = no threat in range. Grows lazily (only up to the
+    // highest slot seen so far) and is NOT reset between ticks.
+    //
+    // NOT every slot gets a fresh write every tick: a hidden
+    // (InsideBuilding) hero is skipped by the pass entirely (its threat
+    // edge is reset, but nothing is written here for it -- sim.cpp's own
+    // comment on that pass), so a hidden hero's entry can be stale or
+    // never-written. That is safe ONLY because the one consumer allowed to
+    // read this cache (monster_think) is itself never called for a hidden
+    // hero either -- the think loop's per-slot dispatch excludes
+    // InsideBuilding heroes before mock_think is ever reached (and a
+    // Monster is never hidden to begin with, but the guard holds regardless
+    // of archetype). This cache is intentionally NOT consulted by
+    // combat.cpp's select_target. Most of its call sites run late enough
+    // that the cache genuinely could be stale by then -- fire_attack's
+    // re-pick and resolve_action's target inference (both during
+    // apply_commands, after earlier commands in the same drain may have
+    // already invalidated a shared target), update_melee_locks (after the
+    // whole movement pipeline), and advance_intentions' Attack-abort check
+    // (after movement/projectiles) -- see select_target's own comment for
+    // the per-site detail. apply_intention's own Attack-engagement executor
+    // is the one exception: it runs INSIDE the same think pass this cache
+    // was built for, before apply_commands resolves anything, so the cache
+    // is exactly as valid there as it is for monster_think's own read below
+    // -- it pays for a live scan anyway purely for simplicity
+    // (intention.cpp's own comment on that call site has the reasoning), not
+    // because the cache would be wrong. Treat "is this read site
+    // monster_think, unconditionally" as the actual safety invariant, not
+    // merely "was this slot in range".
+    std::vector<entt::entity> nearest_enemy_scratch;
 
     ~BadlandsGame();
 };
 
 namespace badlands {
-
-// Loud, grep-able failure record; every call permanently costs the entity its
-// script brain (the caller downgrades) and bumps the counter tests assert on.
-void report_bug(BadlandsGame& game, const char* stage, const std::string& message);
 
 entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot);
 

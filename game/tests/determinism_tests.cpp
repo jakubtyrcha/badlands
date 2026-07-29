@@ -17,6 +17,8 @@
 #include "game_state.h"
 #include "vision.h"
 
+#include "fixtures/wasm_hero.h"
+
 #include <catch_amalgamated.hpp>
 
 #include <string>
@@ -88,6 +90,8 @@ void require_same(const Snapshot& a, const Snapshot& b) {
         CHECK(x.behavior == y.behavior);
         CHECK(x.inside_building_id == y.inside_building_id);
         CHECK(std::string(x.name) == std::string(y.name));
+        CHECK(x.level == y.level);
+        CHECK(x.xp == y.xp);
     }
 }
 
@@ -153,10 +157,20 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     // depend on a seeded appetite draw AND on a query over the fog-of-war grid,
     // which is itself a product of where everyone walked. If either leaked a
     // dependency on anything outside (initial config, seed, command log), this
-    // is where it would show.
+    // is where it would show. Needs a REAL Explore decision, so the two live
+    // worlds are wasm-driven -- the C++ reference this used to also exercise
+    // is gone; this is the contract's replay gate now.
     //
     // The vision grid is INITIAL CONFIG, so both worlds configure it the same
     // way -- exactly as a real replay would have to.
+    //
+    // Its own tick budget (not the file's shared kRunTicks): think-on-wake
+    // means a hero re-considers exploring only once per wake (idle_hint_millis,
+    // 0.5-2s) and only once per explore_lease_millis window (8s = 240 ticks)
+    // at that, so this needs several lease windows' worth of room, not just
+    // kRunTicks' 400.
+    constexpr int kExploreTicks = 1500;
+
     auto seed_world = [](BadlandsGame* g) {
         configure_vision(g->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
         Action camp{ActionKind::PlaceBuilding, 0, -14.0f, 44.0f,
@@ -169,10 +183,10 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
         }
     };
 
-    auto live_owned = make_world(BrainDesc{});
+    auto live_owned = testfix::make_wasm_world();
     BadlandsGame* live = live_owned.get();
     seed_world(live);
-    for (int i = 0; i < kRunTicks; ++i) {
+    for (int i = 0; i < kExploreTicks; ++i) {
         tick_world(*live, 1.0f / 30.0f);
     }
     const std::vector<Command> log = live->command_log;
@@ -186,10 +200,10 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     REQUIRE(explored);
 
     // Same inputs again -> same trace, bit for bit.
-    auto twin_owned = make_world(BrainDesc{});
+    auto twin_owned = testfix::make_wasm_world();
     BadlandsGame* twin = twin_owned.get();
     seed_world(twin);
-    for (int i = 0; i < kRunTicks; ++i) {
+    for (int i = 0; i < kExploreTicks; ++i) {
         tick_world(*twin, 1.0f / 30.0f);
     }
     REQUIRE(twin->command_log.size() == log.size());
@@ -199,12 +213,15 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     }
     require_same(snapshot(live), snapshot(twin));
 
-    // And the recorded trace, replayed with the brains off, rebuilds the world.
+    // And the recorded trace, replayed with the brains off, rebuilds the
+    // world -- no wasm brain needed here at all: replay takes every decision
+    // from the log (tick_world's replay_log branch never reaches a brain,
+    // wasm or mock).
     auto replay_owned = make_world(BrainDesc{});
     BadlandsGame* replay = replay_owned.get();
     configure_vision(replay->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
     replay->replay_log = &log;
-    for (int i = 0; i < kRunTicks; ++i) {
+    for (int i = 0; i < kExploreTicks; ++i) {
         tick_world(*replay, 1.0f / 30.0f);
     }
     CHECK(replay->replay_cursor == log.size());
@@ -269,5 +286,73 @@ TEST_CASE("a fight runs to the same state twice (seeded combat is deterministic)
         CHECK(a[i].hp == b[i].hp);      // bit-exact: no tolerance on determinism
         CHECK(a[i].pos_x == b[i].pos_x);
         CHECK(a[i].pos_z == b[i].pos_z);
+    }
+}
+
+TEST_CASE("a fight replays bit-identically from the log alone (no brain, no resolver)") {
+    // Closes the pre-existing "no suite replays a fight" hole the ledger
+    // flagged (docs/superpowers/sdd/progress.md): combat_preempt used to
+    // write the engagement MoveTarget directly, unlogged, so no replay ever
+    // actually reproduced a real engagement -- a gap that outlived several
+    // slices because nothing exercised it. Single-gateway combat closes it:
+    // engagement is now the logged Engage command (enqueue_engage,
+    // command.h, driven by apply_intention's Attack case) and every swing is
+    // the logged Attack command (resolve_action) -- so a replay with NO
+    // brain and NO combat decision-making of any kind (monster_think never
+    // runs; apply_replay_commands is the only thing tick_world calls) must
+    // still fight the fight and land on the identical final state.
+    auto live_owned = make_flat_world();
+    BadlandsGame* live = live_owned.get();
+    spawn_into(*live, MercenaryDesc(-4.0f, 0.0f));
+    spawn_into(*live, GoblinDesc(4.0f, 0.0f));
+    for (int i = 0; i < 300; ++i) {
+        tick_world(*live, 1.0f / 30.0f);
+    }
+    const std::vector<Command> log = live->command_log;
+    REQUIRE(!log.empty());
+
+    // The fight must actually have happened -- an Engage AND an Attack
+    // command in the log, and real damage landed -- or replay proves
+    // nothing.
+    bool engaged = false, attacked = false;
+    for (const Command& c : log) {
+        engaged = engaged || c.kind == CommandKind::Engage;
+        attacked = attacked || c.kind == CommandKind::Attack;
+    }
+    REQUIRE(engaged);
+    REQUIRE(attacked);
+    const std::vector<CharacterState> live_rows = characters_of(*live);
+    bool damage_landed = false;
+    for (const CharacterState& c : live_rows) {
+        damage_landed = damage_landed || c.hp < c.max_hp;
+    }
+    REQUIRE(damage_landed);
+
+    // Fresh sim, brains OFF: every DECISION -- engagement AND swings alike
+    // -- comes from the log. The initial spawns themselves are INITIAL
+    // CONFIG, not logged decisions (spawn_into is a direct call, same as
+    // every other replay fixture in this file that reaches for it -- e.g.
+    // seed_town's PlaceBuilding/RecruitHero go through the command path and
+    // so need no mirroring, but a direct spawn_into never does), so they are
+    // repeated here identically, exactly like this file's other replay
+    // cases repeat their own seeding.
+    auto replay_owned = make_flat_world();
+    BadlandsGame* replay = replay_owned.get();
+    spawn_into(*replay, MercenaryDesc(-4.0f, 0.0f));
+    spawn_into(*replay, GoblinDesc(4.0f, 0.0f));
+    replay->replay_log = &log;
+    for (int i = 0; i < 300; ++i) {
+        tick_world(*replay, 1.0f / 30.0f);
+    }
+    CHECK(replay->replay_cursor == log.size());  // the whole trace was consumed
+
+    const std::vector<CharacterState> replay_rows = characters_of(*replay);
+    REQUIRE(replay_rows.size() == live_rows.size());
+    for (size_t i = 0; i < live_rows.size(); ++i) {
+        INFO("row " << i);
+        CHECK(replay_rows[i].id == live_rows[i].id);
+        CHECK(replay_rows[i].hp == live_rows[i].hp);  // bit-exact: no tolerance
+        CHECK(replay_rows[i].pos_x == live_rows[i].pos_x);
+        CHECK(replay_rows[i].pos_z == live_rows[i].pos_z);
     }
 }

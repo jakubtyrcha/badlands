@@ -21,7 +21,7 @@ import abi
 include brain_scaffold
 
 proc brainInit() =
-  const msg: cstring = "trap brain v1 init"
+  const msg: cstring = "trap brain v2 init"
   bl_log(0'i32, cast[int32](msg), len(msg).int32)
 
 proc brainTick(slot: int32): int32 =

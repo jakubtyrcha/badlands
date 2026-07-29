@@ -1,4 +1,4 @@
-// C++ API of the badlands game simulation (C++/EnTT + noiser brains).
+// C++ API of the badlands game simulation (C++/EnTT + a wasm hero brain).
 //
 // Data in, data out: scenarios are composed by spawning CharacterDesc rows;
 // observers (renderer, tests) inspect CharacterState snapshots and SimStats.
@@ -110,8 +110,8 @@ enum class Archetype : int32_t {
 // (CharacterState.behavior), the statistics histogram, and any future noiser
 // brain -- so it is APPEND-ONLY: never renumber, never reuse.
 //
-// (game/src/town_brain.h aliases this as `badlands::Behavior`, the name the
-// sim internals have always used.)
+// (game/src/behaviours/world_view.h aliases this as `badlands::Behavior`, the
+// name the sim internals have always used.)
 enum class ActivityId : int32_t {
     Idle = 0,
     Roam,
@@ -189,6 +189,46 @@ struct ActivityWeights {
     }
 };
 
+// ---- skills (identity only; defs/triggers live in game/src/skills.h) -------
+// Append-only id space, same discipline as ActivityId.
+enum class SkillId : int32_t {
+    Calcify = 0,  // Apprentice: absorb the next physical strike (effect in slice 2)
+    Count,
+};
+inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
+// Fixed component/snapshot capacity (kMaxAttacks precedent).
+inline constexpr int32_t kMaxSkills = 8;
+// Stable inspection name ("Calcify"); "-" for an out-of-range id.
+const char* SkillName(int32_t id);
+
+// ---- skill templates --------------------------------------------------------
+// Designer-authored per-skill data (presentation + mechanics). The AI
+// vocabulary (triggers, grants) stays internal in game/src/skills.h.
+enum class SkillActivation : int32_t { Active = 0, Passive };
+enum class SkillTargeting : int32_t { Direct = 0, Aoe };
+
+// One skill's template. Initial config in the determinism contract (the
+// execution slice reads cooldown/duration from here); display-only today.
+struct SkillSpec {
+    SkillActivation activation = SkillActivation::Active;
+    SkillTargeting targeting = SkillTargeting::Direct;
+    float duration_seconds = 0.0f;  // <= 0 => instant
+    float cooldown_seconds = 0.0f;  // <= 0 => none
+    std::string effect;             // brief descriptive string
+};
+
+// A SkillSpec per skill (specs[i] belongs to SkillId(i)). Compiled defaults
+// live in skills.cpp; an app may override fields by NAME from
+// assets/skills/skills.json and push the result through Sim::SetSkillCatalog.
+// Held per-Sim, so it is initial config (a replay must use the same catalog).
+struct SkillCatalog {
+    SkillCatalog();  // fills the compiled defaults
+    SkillSpec specs[kSkillCount];
+};
+
+// Parse a skill name ("Calcify"); returns SkillId::Count if unknown.
+SkillId SkillIdFromName(const char* name);
+
 // ---- tuning factors (data, not code) ---------------------------------------
 // Per-archetype behaviour tuning. The sim ships the defaults below, so it is
 // fully usable -- and unit-testable -- with no file present; an app may load
@@ -261,10 +301,16 @@ struct HeroFactors {
     // (evicted) on the next tick's update pass. Buildings never expire this
     // way, so this only bounds char entries.
     int64_t memory_ttl_millis = 10000;
-    // Deliberation pause between goal changes, drawn uniformly
-    // from this range. The prototype day is 120 s, so an in-game minute is
-    // ~83 ms of sim time and the default range is roughly 0-10 in-game minutes.
-    // Setting think_max_millis to 0 disables deliberation entirely.
+    // Vestigial: was the deliberation pause between goal changes, drawn
+    // uniformly from this range (the prototype day is 120 s, so an in-game
+    // minute was ~83 ms of sim time and the default range was roughly 0-10
+    // in-game minutes). Deliberation itself is deleted -- the intention
+    // contract (game/src/intention.h) replaced it, and no consumer downstream
+    // of factors reads either field anymore (sim.cpp's sanitize_factors is
+    // the sole remaining touch, keeping the min<=max pair-invariant rather
+    // than acting on the values). Kept only pending a wire/factors
+    // retirement decision -- removing the fields outright would ripple into
+    // the JSON manifest schema, not just this struct.
     int64_t think_min_millis = 0;
     int64_t think_max_millis = 833;
     // Per-class preference table (see ActivityWeights). Filled with the
@@ -302,6 +348,18 @@ struct MonsterFactors {
     int32_t max_alive = 4;                  // cap on live rats
 };
 
+// Hero progression: XP accrual + the leveling curve. XP amounts are INTEGERS.
+struct ProgressionFactors {
+    // XP per newly-discovered fog texel, credited to the discovering hero.
+    int32_t xp_per_texel = 1;
+    // A killed creature's xp_reward splits evenly (round up) over heroes
+    // within this radius of the corpse (euclidean; obstacles ignored).
+    float kill_xp_radius = 10.0f;
+    // Cost to advance FROM level L: floor(level_base_xp * L^level_exponent).
+    int32_t level_base_xp = 100;
+    float level_exponent = 1.6f;
+};
+
 struct SimFactors {
     // Fills the activity weight tables with the compiled per-class defaults
     // (the scalar members above carry their own in-class defaults). Declared
@@ -313,6 +371,7 @@ struct SimFactors {
     CritterFactors critter;
     TownfolkFactors townfolk;
     MonsterFactors monster;
+    ProgressionFactors progression;
 };
 
 // ---- combat primitives -----------------------------------------------------
@@ -357,6 +416,12 @@ struct Combatant {
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
     Archetype archetype = Archetype::Hero;
+    // Explicit HeroClassId for hero descs; -1 = derive from the recruiting
+    // guild at spawn (heroes.cpp's spawn_entity). The hero creature-catalog
+    // defs (creature_catalog.cpp) author this so a directly-spawned/recruited
+    // hero and a catalog-spawned one agree on class before spawn-time grants
+    // (e.g. grant_skills_for_level) run.
+    int32_t hero_class = -1;
     float pos_x, pos_z;
     int32_t team;
     float hp;
@@ -385,6 +450,9 @@ struct CharacterDesc {
     CombatStance stance = CombatStance::Melee;
     Attack attacks[kMaxAttacks]{};
     int32_t attack_count = 0;
+    // XP paid out on this creature's death, split over nearby heroes (see
+    // ProgressionFactors.kill_xp_radius). 0 = no reward (deer, heroes, dummies).
+    int32_t xp_reward = 0;
 };
 
 // ---- named-creature catalog ------------------------------------------------
@@ -473,14 +541,18 @@ struct CharacterState {
     // the cone debug overlay from these + facing.
     float vision_radius;
     float vision_cone_half_angle_deg;  // >= 180 => full circle
+    // --- hero progression (zeroed for non-heroes; level >= 1 marks a hero) --
+    int32_t level;
+    int32_t xp;          // progress toward the next level
+    int32_t xp_next;     // cost of the next level at current factors
+    int32_t skill_count;
+    int32_t skills[kMaxSkills];  // SkillId values; only [0, skill_count) valid
 };
 
 // Run counters. NB: NOT `Stats` — badlands::Stats already exists (a sim
 // component, game/src/components.h:24). Use SimStats for the run counters.
 struct SimStats {
     uint64_t ticks;
-    uint64_t script_intents;  // intents delivered by noiser brains (0 when mocked)
-    uint32_t noiser_bugs;     // failures that downgraded an entity to the mock brain
 };
 
 // ---------------------------------------------------------------------------
@@ -626,6 +698,7 @@ enum class CommandKindId : int32_t {
     Deposit,
     AttackBuilding,
     Chat,
+    Engage,  // hold at range of a live entity target (single-gateway combat's engagement executor)
 };
 
 struct CommandRecord {
@@ -654,6 +727,7 @@ enum class GameEventKind : int32_t {
     BuildingDestroyed,   // target = building id; actor = attacker (or NONE)
     HeroDowned,          // a character's HP reached 0; actor = attacker (or NONE)
     HeroDied,            // reserved: true removal, distinct from downing. Not emitted yet.
+    HeroLeveledUp,       // a hero crossed a level threshold; actor = hero slot, amount = new level
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and
@@ -705,18 +779,13 @@ struct NavPathResult {
     bool reachable = false;
 };
 
-// Which brain(s) drive spawned entities. noiser_source: noiser script source,
-// or nullptr for mock-brains-only. A script that fails to compile is
-// recorded as a noiser bug and the sim falls back to mock brains.
-// wasm_bytes/wasm_len: a compiled brain wasm module (game/src/wasm_brain.h),
-// hero-only -- see the think loop's
-// dispatch order in sim.cpp for how the two paths compose (wasm, when
-// loaded, takes the no-enemy tick for BrainKind::Town entities outright;
-// combat is a host pre-empt on both paths; noiser/mock still drive every
-// other archetype). Either field may be null/zero independently; both null
-// means mock brains only.
+// Which brain drives spawned heroes. wasm_bytes/wasm_len: a compiled brain
+// wasm module (game/src/wasm_brain.h), hero-only -- see the think loop's
+// dispatch order in sim.cpp: when loaded, it takes the no-enemy tick for
+// BrainKind::Town entities outright (combat is a host pre-empt); every other
+// archetype is always mock-driven. wasm_bytes == nullptr means every hero
+// simply idles absent an enemy (no C++ decision layer to fall back to).
 struct BrainDesc {
-    const char* noiser_source = nullptr;
     const uint8_t* wasm_bytes = nullptr;
     size_t wasm_len = 0;
 };
@@ -724,11 +793,11 @@ struct BrainDesc {
 // ---- the sim ---------------------------------------------------------------
 class Sim {
    public:
-    // BrainDesc: which brain(s) drive spawned entities (see BrainDesc above).
+    // BrainDesc: which brain drives spawned heroes (see BrainDesc above).
     // wasm_bytes provided but failing to compile/instantiate is FATAL (crash-
     // and-error, not a fallback -- see WasmBrainRuntime::create's doc comment,
-    // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (mock
-    // drives every hero, same as noiser_source == nullptr).
+    // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (every
+    // hero simply idles absent an enemy).
     explicit Sim(const BrainDesc& brain_desc);
     // The composing form: an explicit world config (the arena uses this:
     // flat, no colony, confined edges) x which brain. The other ctor forwards
@@ -749,10 +818,12 @@ class Sim {
     // a replay must use the same catalog the recorded run used.
     void SetCreatureCatalog(const CreatureCatalog& catalog);
     const CreatureCatalog& Creatures() const;
+    // Replaces the skill template catalog (see SkillCatalog). Durations and
+    // cooldowns are clamped non-negative at this boundary. Initial config:
+    // call before ticking; a replay must use the same catalog.
+    void SetSkillCatalog(const SkillCatalog& catalog);
+    const SkillCatalog& Skills() const;
     void Tick(float dt);
-    // Recompiles the brain script; on failure the previous program is kept
-    // (returns false). On success all brains restart on the new program.
-    bool ReloadScript(const std::string& source);
     // Executes a player action. Returns >= 0 on success (a new building/hero
     // id, or 0 for id-less actions) and < 0 on error.
     int64_t Dispatch(const Action& action);
@@ -769,6 +840,8 @@ class Sim {
     // its end; this is for populating the field before the first render when no
     // Tick has run yet (e.g. a headless single-frame --screenshot). No-op until
     // ConfigureVision().
+    // NB: priming discovers texels CREDITLESSLY (no exploration XP) -- it is a
+    // presentation affordance outside the tick/determinism contract.
     void ResolveVision();
     // The published (double-buffered) field. Read by the renderer to upload the
     // vision texture. Empty until ConfigureVision().

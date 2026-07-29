@@ -60,9 +60,8 @@ class AiSandboxView : public AppView {
   // recruits a hero roster, all through game_dispatch -- i.e. as logged player
   // Commands, so the seed shows up in the command log like anything else. The
   // wasm hero brain is loaded from assets/brains/hero.wasm when readable;
-  // otherwise (or on a load failure) the sim runs the C++ town brain. The
-  // noiser brain stays compiled and test-covered but unused here (see
-  // load_hero_wasm's comment in the .cpp).
+  // otherwise (or on a load failure) heroes simply idle (no C++ decision
+  // layer left to fall back to -- see load_hero_wasm's comment in the .cpp).
   void SeedTown();
   // Clears scene_ and rebuilds the STATIC geometry from the sim: re-mirrors
   // scene_context_'s lighting, then adds the floor, the wall ring, and a box
@@ -78,8 +77,8 @@ class AiSandboxView : public AppView {
   // Heroes inside a building are hidden (scaled to zero), matching the sim's
   // "don't draw; list in the panel" contract for inside_building_id >= 0.
   void SyncUnits();
-  // The inspector: sim clock, per-hero needs/behaviour, noiser bug count, and
-  // the tail of the command log.
+  // The inspector: sim clock, per-hero needs/behaviour, and the tail of the
+  // command log.
   void DrawInspector();
   // A left-click ground pick (flat arena plane, y = 0) while the nav overlay's
   // pick mode is on: raycasts to the ground and hands the point to nav_debug_.

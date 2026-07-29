@@ -1,9 +1,12 @@
 # Noiser feedback from the badlands integration
 
 **Status (2026-07-24):** the shipping hero brain is now Nim→WASM (see
-`docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md`). The noiser brain path
-described below is dormant but still compiled, and its tests/bug-pins remain valid. This
-file stays as the upstream-facing noiser integration log.
+`docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md`). The noiser-based hero
+brain path this feedback was collected against has since been deleted from the tree,
+along with its tests/bug-pins (`game/tests/noiser_smoke_tests.cpp`, `duel_test.cpp`).
+Noiser itself remains compiled and in use for mapgen/texgen (`third_party/noiser`, a
+different subsystem the brain deletion left untouched), so the compiler-level bugs below
+may still apply there. This file stays as the upstream-facing noiser integration log.
 
 Collected while embedding noiser (submodule @ `52174b2c9e517d9daa2ad6f11fb4e264fd5fec0d`,
 last re-verified 2026-07-22) as the

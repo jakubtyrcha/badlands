@@ -10,42 +10,75 @@
 # rules disagreeing with C's. Field order and sizes below must match
 # brain_abi.h exactly, field for field; see that header's "LAYOUT RULES"
 # comment for the reasoning behind each `_pad*`.
+#
+# v2 (the intention contract): BL_CMD_*/BlDecisionWire are gone, replaced by
+# BL_INT_*/BlSuggestionWire; BlViewWire gains statuses/events blocks and
+# BlViewSelf gains a current-intention summary; BlViewFactors drops
+# think_min_millis/think_max_millis (deliberation is gone).
+#
+# v3 (contract-v3-alignment): BlViewWire gains the attack-loadout block
+# (BlViewAttack, after statuses) -- a brain cannot pick an attack it cannot
+# see -- and a new write-only host import, bl_enqueue_action, for firing
+# instant actions (BL_ACT_*) independently of the one suggestion a wake still
+# returns.
 
 const
-  BL_ABI_VERSION* = 1'i32
+  BL_ABI_VERSION* = 3'i32
   BL_MAX_THREATS* = 8
   BL_MAX_CHARS* = 16
+  BL_MAX_EVENTS* = 8
+  BL_MAX_STATUSES* = 8
   BL_MAX_ACTIVITIES* = 14
+  BL_MAX_ATTACKS* = 3
 
-  # BL_CMD_*: the command kinds a brain's decision can request, ABI version 1
-  # (BL_ABI_VERSION above). This list -- values, meanings, and the
-  # command_arg convention each one carries -- is kept in sync BY HAND across
-  # this file and game/src/brain_abi.h's own "#define BL_CMD_*" block; the
-  # wire STRUCT layout is what's frozen/asserted by sizeof (see the header's
-  # own "LAYOUT RULES" comment), not this enum-like list, which may grow
-  # (never renumber/reuse, same append-only discipline as badlands::ActivityId).
-  BL_CMD_NONE* = 0'i32
-  BL_CMD_ATTACK* = 1'i32
-  BL_CMD_BUY* = 2'i32
-  BL_CMD_ENTER* = 3'i32       # arg = BuildingKind
-  BL_CMD_ENTER_HOME* = 4'i32
-  # Task 5 extensions (game/src/brain_abi.h): act_hunt/act_chat's follow-ups
-  # (CommandKind::Shoot/Chat) have no wire representation among the original
-  # four -- both need a TARGET slot, which BL_CMD_ATTACK/ENTER_HOME/BUY do
-  # not carry. arg = target slot (prey for SHOOT, chat partner for CHAT).
-  # Accepted by controller adjudication as compatible with "abi.nim unchanged"
-  # (task-5-brief.md): that constraint is about the wire STRUCT layout, not
-  # this command-kind list -- decode_command's extension was explicitly
-  # authorized, and command_arg was already a generic int32 slot, so this is
-  # a new MEANING for an existing field, not a layout change.
-  BL_CMD_SHOOT* = 5'i32
-  BL_CMD_CHAT* = 6'i32
+  # BL_ACT_*: action kinds (append-only) -- bl_enqueue_action's `kind`
+  # argument. Fire-and-forget: no return, validated by the engine at resolve
+  # time, independently of the wake's own suggestion. Only BL_ACT_ATTACK is
+  # live this slice.
+  BL_ACT_NONE* = 0'i32
+  BL_ACT_USE_SKILL* = 1'i32   # reserved
+  BL_ACT_USE_POTION* = 2'i32  # reserved
+  BL_ACT_ATTACK* = 3'i32      # arg = attack index, target = victim slot
+                               # (UINT32_MAX = the current Attack intention's target)
+
+  # BL_INT_*: intention kinds (append-only) -- the suggestion's `kind`.
+  # Mirrors badlands::IntentionKind (game/src/components.h) 1:1 for 0..8;
+  # BL_INT_USE_SKILL(9) has no IntentionKind counterpart yet (reserved,
+  # rejected warn+ignore by the host until the skills slice). Never
+  # renumber/reuse a shipped value.
+  BL_INT_NONE* = 0'i32
+  BL_INT_MOVE_TO* = 1'i32
+  BL_INT_ATTACK* = 2'i32
+  BL_INT_SHOOT* = 3'i32
+  BL_INT_ENTER* = 4'i32       # arg = BuildingKind
+  BL_INT_ENTER_HOME* = 5'i32
+  BL_INT_BUY* = 6'i32
+  BL_INT_CHAT* = 7'i32        # target_slot = chat partner slot
+  BL_INT_IDLE* = 8'i32        # duration_millis = explicit idle-for-X
+  BL_INT_USE_SKILL* = 9'i32   # reserved
+
+  # BL_EV_*: event-inbox kinds (append-only), mirroring
+  # badlands::InboxEventKind (game/src/components.h) 1:1. Every kind is also
+  # a guaranteed-wake reason (docs/design/intention-contract.html §2).
+  BL_EV_NONE* = 0'i32
+  BL_EV_DAMAGE_TAKEN* = 1'i32
+  BL_EV_THREAT_SIGHTED* = 2'i32
+  BL_EV_MOVE_BLOCKED* = 3'i32
+  BL_EV_INTENTION_ENDED* = 4'i32
+
+  # BL_ST_*: status kinds (append-only). All three are advisory only this
+  # slice -- none bypasses the think.
+  BL_ST_NONE* = 0'i32
+  BL_ST_CHATTING* = 1'i32
+  BL_ST_MELEE_LOCKED* = 2'i32
+  BL_ST_INSIDE_BUILDING* = 3'i32
 
 type
   BlViewSelf* {.packed.} = object
     world_millis*: int64
     think_until_millis*: int64
     roam_epoch*: int64
+    intention_wake_at*: int64
     slot*: uint32
     class_id*: int32
     tod*: float32
@@ -58,6 +91,8 @@ type
     inventory*: int32
     attack_range*: float32
     current_activity*: int32
+    intention_kind*: int32
+    pad2*: uint32
 
   BlThreat* {.packed.} = object
     pos_x*: float32
@@ -99,8 +134,6 @@ type
     threats*: array[BL_MAX_THREATS, BlThreat]
 
   BlViewFactors* {.packed.} = object
-    think_min_millis*: int64   # read by deliberate
-    think_max_millis*: int64   # read by deliberate
     weights*: array[BL_MAX_ACTIVITIES, float32]
     fatigue_seek*: float32          # read by score_go_home
     fatigue_seek_night*: float32    # read by score_go_home
@@ -109,7 +142,8 @@ type
     chat_content_seek*: float32     # read by score_chat
     chat_radius*: float32           # read by act_chat
     explore_min_fatigue*: float32   # read by score_explore
-    pad0*: uint32  # see brain_abi.h: rounds the struct to a multiple of 8
+    entrance_radius*: float32       # mirrors components.h's kEntranceRadius;
+                                     # see brain_abi.h's BlViewFactors comment
 
   BlViewChar* {.packed.} = object
     last_seen_millis*: int64
@@ -122,31 +156,62 @@ type
     visible_now*: uint32
     pad0*: uint32
 
+  BlStatus* {.packed.} = object
+    remaining_millis*: int64   # 0 = indefinite
+    kind*: uint32
+    pad0*: uint32
+
+  BlViewAttack* {.packed.} = object
+    category*: int32       # badlands::AttackCategory
+    damage_type*: int32    # badlands::DamageType
+    base_damage*: float32
+    range*: float32
+    cooldown_remaining*: float32  # seconds; 0 = ready
+    pad0*: uint32
+
+  BlEvent* {.packed.} = object
+    at_millis*: int64
+    ttl_millis*: int64
+    kind*: uint32
+    source_slot*: uint32
+    param*: float32
+    pad0*: uint32
+
   BlViewWire* {.packed.} = object
     version*: uint32
     pad0*: uint32
     self*: BlViewSelf
     suggest*: BlViewSuggest
     factors*: BlViewFactors
-    char_count*: int32
+    status_count*: int32
     pad1*: uint32
+    statuses*: array[BL_MAX_STATUSES, BlStatus]
+    attack_count*: int32
+    pad4*: uint32
+    attacks*: array[BL_MAX_ATTACKS, BlViewAttack]
+    event_count*: int32
+    pad2*: uint32
+    events*: array[BL_MAX_EVENTS, BlEvent]
+    char_count*: int32
+    pad3*: uint32
     chars*: array[BL_MAX_CHARS, BlViewChar]
 
-  BlDecisionWire* {.packed.} = object
-    pause_duration_millis*: int64
-    activity_id*: int32
-    goal_kind*: int32   # 0 none, 1 point
-    goal_x*: float32
-    goal_z*: float32
-    command_kind*: int32
-    command_arg*: int32
-    follow_up_on_arrival*: uint32
-    pause_kind*: uint32  # 0 none, 1 start, 2 continue
+  BlSuggestionWire* {.packed.} = object
+    idle_hint_millis*: int64    # 0 = none
+    duration_millis*: int64     # BL_INT_IDLE only
+    intention_kind*: int32      # BL_INT_*
+    activity_label*: int32      # ActivityId, inspection only
+    point_x*, point_z*: float32
+    target_slot*: uint32
+    arg*: int32                 # building kind for ENTER, etc.
 
-static: doAssert sizeof(BlViewSelf) == 72
+static: doAssert sizeof(BlViewSelf) == 88
 static: doAssert sizeof(BlThreat) == 16
 static: doAssert sizeof(BlViewSuggest) == 248
-static: doAssert sizeof(BlViewFactors) == 104
+static: doAssert sizeof(BlViewFactors) == 88
 static: doAssert sizeof(BlViewChar) == 40
-static: doAssert sizeof(BlViewWire) == 1080
-static: doAssert sizeof(BlDecisionWire) == 40
+static: doAssert sizeof(BlStatus) == 16
+static: doAssert sizeof(BlViewAttack) == 24
+static: doAssert sizeof(BlEvent) == 32
+static: doAssert sizeof(BlViewWire) == 1560
+static: doAssert sizeof(BlSuggestionWire) == 40

@@ -53,9 +53,9 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 }  // namespace
 
 // --- self-review finding: explore_lease_millis is ALSO a divisor -----------
-// (town_brain.cpp's observe_hero: `world_millis / explore_lease_millis`, run
-// UNCONDITIONALLY for every hero every tick, with no <=0 guard of its own --
-// unlike the needs.cpp hours-rate fields, which reserve_rate_per_tick itself
+// (hero_perception.cpp's observe_hero: `world_millis / explore_lease_millis`,
+// run UNCONDITIONALLY for every hero every tick, with no <=0 guard of its own
+// -- unlike the needs.cpp hours-rate fields, which reserve_rate_per_tick itself
 // guards). Caught auditing sanitize_factors' sweep against every division
 // site in game/src, not just needs.cpp's. Not one of the brief's three
 // repros, and not demonstrated live: an int64 divide-by-zero here is
@@ -63,7 +63,7 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 // rather than trapping, so it would not reproduce as a visible abort here
 // the way (b) does) -- pinned as a unit-level non-zero check instead.
 
-TEST_CASE("sanitize_factors: explore_lease_millis (a divisor in town_brain.cpp) "
+TEST_CASE("sanitize_factors: explore_lease_millis (a divisor in hero_perception.cpp) "
          "never comes back <= 0") {
     Sim sim{BrainDesc{}};
 
@@ -111,9 +111,32 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair comes back min <= max"
     CHECK(out.hero.think_min_millis == 1000);
 }
 
-// --- (b) the crash repro: a real wasm-brained Think pause -------------------
+// --- (b) the crash repro, superseded by the wire v2 flip --------------------
+// Pre-flip, this pinned: a wasm-brained Think pause whose duration draw
+// (behaviours/rng.h's range_i64 returns `lo` unconditionally when hi <= lo,
+// so an inverted think_min/think_max pair drew think_min_millis) exceeded
+// think_max_millis, which decode_decision (wasm_brain.cpp) validated against
+// and rejected -- escalating to brain_fatal() (spdlog::critical +
+// std::abort()). See git history for the captured abort output this test
+// used to guard against.
+//
+// The intention contract's wire v2 (brain_abi.h) removes think_min_millis/
+// think_max_millis from BlViewFactors entirely -- deliberation (and its
+// pause-duration bound check) is gone from the wasm hero path outright, not
+// merely re-validated more leniently -- so this exact hazard class is now
+// STRUCTURALLY unreachable for a wasm-driven hero: there is no wire field
+// left for an inverted pair to corrupt. (a) above still pins the min<=max
+// invariant itself -- sanitize_factors' own contract on HeroFactors, kept
+// even though the C++ hero decision layer that used to consume
+// think_min/think_max_millis (town_brain.cpp's deliberate()) is gone too
+// (a later task in this same slice): the fields are still sanitized, just
+// vestigial -- nothing reads them for behavior on any hero path anymore.
+// This case is replaced with a narrower regression: a wasm-driven run with the SAME
+// inverted pair configured simply ticks along fine (the factor is read by
+// nothing on that path anymore).
 
-TEST_CASE("sanitize_factors: an inverted think-pause pair no longer aborts a wasm Think") {
+TEST_CASE("sanitize_factors: an inverted think-pause pair has no effect on a wasm-driven hero "
+         "(the field left the wire)") {
     std::vector<uint8_t> bytes = read_hero_wasm();
     Sim sim{wasm_desc(bytes)};
 
@@ -130,16 +153,6 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair no longer aborts a was
     const int64_t hero_id = sim.Dispatch(recruit);
     REQUIRE(hero_id >= 0);
 
-    // Tick 1: the hero's FIRST-EVER decision (current_activity starts at -1,
-    // "none yet") never deliberates, whatever it picks (behaviours/
-    // deliberation.cpp's is_discretionary(-1) == false) -- it lands on Roam,
-    // the flat always-available fallback, with nothing else applicable yet.
-    sim.Tick(1.0f / 30.0f);
-
-    // Force a GENUINE activity change: crash the hero's fatigue so GoHome
-    // outscores Roam starting next tick. A second, discretionary, non-Idle
-    // switch is exactly what deliberate() requires to draw a pause -- see the
-    // task brief's "a genuine activity change must fire".
     entt::registry& reg = sim.registry();
     entt::entity hero_entity = entt::null;
     for (auto [e, hero] : reg.view<HeroSimulationState>().each()) {
@@ -148,25 +161,16 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair no longer aborts a was
     }
     const bool found_hero = (hero_entity != entt::null);
     REQUIRE(found_hero);
-    reg.get<HeroSimulationState>(hero_entity).fatigue = 0.05f;
+    reg.get<HeroSimulationState>(hero_entity).fatigue = 0.05f;  // force a genuine activity change
 
-    // TODAY (pre-fix): decode_decision (wasm_brain.cpp) sees a
-    // pause_duration_millis of 5000 (behaviours/rng.h's range_i64 returns
-    // `lo` unconditionally when hi <= lo) against a think_max_millis of
-    // 1000, rejects the wire, and tick_wasm_brain escalates that to
-    // brain_fatal() -- spdlog::critical + std::abort(). See the task report
-    // for the captured output of that abort.
-    bool saw_think = false;
-    for (int i = 0; i < 30 && !saw_think; ++i) {
+    for (int i = 0; i < 30; ++i) {
         sim.Tick(1.0f / 30.0f);
-        for (const CommandRecord& c : sim.CommandLog()) {
-            saw_think = saw_think || (c.kind == CommandKindId::SetBehavior &&
-                                      c.param_a == static_cast<int32_t>(ActivityId::Think));
-        }
     }
 
-    CHECK(saw_think);
-    CHECK(sim.GetStats().noiser_bugs == 0);
+    // The point: this ticks along fine (a wasm-brain bug would abort the
+    // process under the fail-fast policy, wasm_brain.cpp) -- reaching here
+    // with every tick counted is the assertion.
+    CHECK(sim.GetStats().ticks == 30);
 }
 
 // --- (c) TTL: a negative memory_ttl_millis must not evict a same-tick sighting
@@ -198,4 +202,21 @@ TEST_CASE("sanitize_factors: a negative memory TTL still lets two mercenaries re
         ++observers_checked;
     }
     REQUIRE(observers_checked == 2);
+}
+
+// --- ProgressionFactors: negative fields clamp, a sub-1 xp curve base floors
+
+TEST_CASE("progression factors sanitize at the set_factors_of boundary") {
+    badlands::Sim sim{badlands::BrainDesc{}};
+    badlands::SimFactors f;
+    f.progression.xp_per_texel = -3;
+    f.progression.kill_xp_radius = -1.0f;
+    f.progression.level_base_xp = 0;
+    f.progression.level_exponent = -2.0f;
+    sim.SetFactors(f);
+    const badlands::ProgressionFactors& p = sim.Factors().progression;
+    CHECK(p.xp_per_texel == 0);
+    CHECK(p.kill_xp_radius == 0.0f);
+    CHECK(p.level_base_xp == 1);
+    CHECK(p.level_exponent == 0.0f);
 }

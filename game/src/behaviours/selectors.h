@@ -17,10 +17,10 @@
 
 namespace badlands {
 
-// Highest score wins; ties go to the earliest candidate. For the hero list,
-// whose scores are strictly-ordered tiers, this equals select_priority -- so
-// the town brain's decision is independent of which selector drives it, and
-// porting from the old if-chain changes no behaviour.
+// Highest score wins; ties go to the earliest candidate. For a table whose
+// scores are strictly-ordered tiers (the old hero activity table was one),
+// this equals select_priority -- so a brain's decision is independent of
+// which selector drives it.
 BehaviourResult select_argmax(std::span<const Candidate> candidates, const WorldView& view,
                               const SimFactors& factors);
 

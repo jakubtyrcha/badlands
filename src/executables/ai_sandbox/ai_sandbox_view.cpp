@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
-#include <sstream>
 #include <string>
 
 #include <SDL3/SDL.h>
@@ -27,6 +26,7 @@
 #include "game/factors_manifest.hpp"
 #include "game/scenario.h"
 #include "game/scene/blockout_materials.hpp"
+#include "game/skill_manifest.hpp"
 #include "mapgen/biomes.hpp"
 
 namespace badlands {
@@ -134,64 +134,30 @@ const char* command_name(badlands::CommandKindId kind) {
   }
 }
 
-// noiser is PARKED by default: heroes think via the wasm brain
-// (assets/brains/hero.wasm) when it loads, the C++ town brain otherwise.
-// Explicitly setting BADLANDS_BRAIN_SCRIPT (see load_brain_script below)
-// opts back into the noiser path for a session -- dev tooling, not a shipped
-// path.
-//
-// Upstream noiser has seven open bugs (docs/noiser-bugs-upstream/), two of
-// which block composing brains at all -- sub-generators cannot be resumed
-// from the entry generator, and a file with 2+ `gen fn` runs an arbitrary
-// one. The scripts and the whole host-call surface stay in the tree and
-// compiling (game/src/brain.cpp, game/tests/noiser_smoke_tests.cpp keep
-// exercising them, dormant), so re-adopting it is a switch flip once those
-// land -- see docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md's
-// Scope note (the noiser path stays "unused by the apps").
-//
-// Missing/unreadable file here is packaging, not a brain bug (the file
-// simply was not built/shipped) -- log and fall back to mock (via an empty
-// BrainDesc), the same as no wasm bytes provided at all. A wasm module that
-// DOES load but fails to compile/instantiate is a different case entirely --
-// fatal, per WasmBrainRuntime::create's policy (wasm_brain.h) -- because
-// bytes were actually handed to bh_load/bh_instantiate.
+// Heroes think via the wasm brain (assets/brains/hero.wasm) when it loads;
+// there is no C++ decision layer left to fall back to (sim.cpp's mock_think
+// idles a Town-kind entity absent one). Missing/unreadable file here is
+// packaging, not a brain bug (the file simply was not built/shipped) -- log
+// and fall back to idling (via an empty BrainDesc), same as no wasm bytes
+// provided at all. A wasm module that DOES load but fails to compile/
+// instantiate is a different case entirely -- fatal, per
+// WasmBrainRuntime::create's policy (wasm_brain.h) -- because bytes were
+// actually handed to bh_load/bh_instantiate.
 std::vector<uint8_t> load_hero_wasm() {
   constexpr const char* kPath = "assets/brains/hero.wasm";  // cwd-relative, like shaders/assets
   std::ifstream file(kPath, std::ios::binary | std::ios::ate);
   if (!file.good()) {
-    spdlog::warn("AiSandboxView: '{}' unreadable -- heroes fall back to the C++ brain", kPath);
+    spdlog::warn("AiSandboxView: '{}' unreadable -- heroes will idle (no brain loaded)", kPath);
     return {};
   }
   const std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
   std::vector<uint8_t> bytes(static_cast<size_t>(size));
   if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
-    spdlog::warn("AiSandboxView: '{}' failed to read -- heroes fall back to the C++ brain", kPath);
+    spdlog::warn("AiSandboxView: '{}' failed to read -- heroes will idle (no brain loaded)", kPath);
     return {};
   }
   return bytes;
-}
-
-// Explicitly setting BADLANDS_BRAIN_SCRIPT opts back in to the noiser brain
-// for a session; unset (the default) drives every hero via the wasm brain
-// (or the C++ town brain, if that fails to load -- see load_hero_wasm). A
-// read failure here is a config error at the app level, not fatal (this is
-// opt-in dev tooling mirroring the old pre-wasm behaviour, not a shipped
-// path) -- log and fall back to the wasm path.
-std::string load_brain_script() {
-  const char* env = std::getenv("BADLANDS_BRAIN_SCRIPT");
-  if (env == nullptr) {
-    return {};  // parked
-  }
-  std::ifstream file(env);
-  if (!file.good()) {
-    spdlog::warn("AiSandboxView: BADLANDS_BRAIN_SCRIPT='{}' unreadable -- using the wasm hero brain",
-                 env);
-    return {};
-  }
-  std::ostringstream buffer;
-  buffer << file.rdbuf();
-  return buffer.str();
 }
 
 }  // namespace
@@ -239,28 +205,18 @@ void AiSandboxView::ApplyEnvironment() {
 void AiSandboxView::SeedTown() {
   badlands::BrainDesc brain_desc{};
 
-  // brain_script/wasm's backing storage only needs to outlive the Sim()
-  // construction below: BrainRuntime::create copies the noiser source into
-  // the compiled program, and bh_load compiles the wasm module synchronously
-  // and keeps no reference to the input bytes (see brainhost's bh_load --
-  // wasmtime::Module::new copies/compiles eagerly) -- so both are declared at
-  // this scope, alongside the Sim() calls that consume whichever one applies.
-  const std::string brain_script = load_brain_script();
-  std::vector<uint8_t> wasm;
-  if (!brain_script.empty()) {
-    brain_desc.noiser_source = brain_script.c_str();
-    spdlog::info("AiSandboxView: BADLANDS_BRAIN_SCRIPT loaded ({} bytes) -- heroes think via the "
-                 "noiser brain",
-                 brain_script.size());
-  } else {
-    wasm = load_hero_wasm();
-    if (!wasm.empty()) {
-      brain_desc.wasm_bytes = wasm.data();
-      brain_desc.wasm_len = wasm.size();
-      spdlog::info("AiSandboxView: assets/brains/hero.wasm loaded ({} bytes) -- heroes think via "
-                   "the wasm brain",
-                   wasm.size());
-    }
+  // wasm's backing storage only needs to outlive the Sim() construction below:
+  // bh_load compiles the wasm module synchronously and keeps no reference to
+  // the input bytes (see brainhost's bh_load -- wasmtime::Module::new copies/
+  // compiles eagerly) -- so it is declared at this scope, alongside the Sim()
+  // call that consumes it.
+  std::vector<uint8_t> wasm = load_hero_wasm();
+  if (!wasm.empty()) {
+    brain_desc.wasm_bytes = wasm.data();
+    brain_desc.wasm_len = wasm.size();
+    spdlog::info("AiSandboxView: assets/brains/hero.wasm loaded ({} bytes) -- heroes think via "
+                 "the wasm brain",
+                 wasm.size());
   }
 
   // Load the scenario (default: a walled arena duel; override via BADLANDS_SCENARIO).
@@ -289,6 +245,12 @@ void AiSandboxView::SeedTown() {
     if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
       sim_.SetCreatureCatalog(catalog);
     }
+    // Skill templates as data, same as game_view.cpp -- both apps must agree
+    // on skill specs (a missing file keeps the compiled defaults).
+    badlands::SkillCatalog arena_skills = sim_.Skills();
+    if (badlands::LoadSkillCatalog("assets/skills/skills.json", arena_skills)) {
+      sim_.SetSkillCatalog(arena_skills);
+    }
     for (const badlands::ScenarioSpawn& s : scenario_.spawns) {
       sim_.SpawnCreature(s.creature, s.team, s.x, s.z);
     }
@@ -306,6 +268,14 @@ void AiSandboxView::SeedTown() {
   badlands::SimFactors factors = sim_.Factors();
   if (badlands::LoadSimFactors("assets/creatures/factors.json", factors)) {
     sim_.SetFactors(factors);
+  }
+
+  // Skill templates as data, same as game_view.cpp -- both apps must agree
+  // on skill specs (a missing file keeps the compiled defaults). Must happen
+  // before ticking -- initial config, like the factors load just above.
+  badlands::SkillCatalog skills = sim_.Skills();
+  if (badlands::LoadSkillCatalog("assets/skills/skills.json", skills)) {
+    sim_.SetSkillCatalog(skills);
   }
 
   // Everything goes through game_dispatch, so the seed is itself a logged
@@ -651,7 +621,7 @@ void AiSandboxView::DrawInspector() {
   badlands::WorldState world{};
   world = sim_.World();
   badlands::SimStats stats{};
-  stats = stats;
+  stats = sim_.GetStats();
 
   // --- clock -----------------------------------------------------------
   ImGui::Text("Day %u  %02d:%02d  %s", world.day,
@@ -663,8 +633,6 @@ void AiSandboxView::DrawInspector() {
   ImGui::SliderFloat("speed", &sim_clock_.speed, 0.0f, 60.0f, "%.0fx");
   ImGui::SameLine();
   if (ImGui::SmallButton("1x")) sim_clock_.speed = 1.0f;
-  ImGui::Text("noiser bugs: %u   script intents: %llu", stats.noiser_bugs,
-              static_cast<unsigned long long>(stats.script_intents));
   if (scenario_load_error_) {
     ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
                        "scenario failed to load -- showing the town seed (see log)");
@@ -720,7 +688,12 @@ void AiSandboxView::DrawInspector() {
       }
       ImGui::TableNextColumn();
       if (c.archetype == 0) {  // hero: show need reserves (1 = satisfied)
-        ImGui::Text("f%.2f c%.2f", c.fatigue, c.content);
+        ImGui::Text("L%d %d/%d  f%.2f c%.2f", c.level, c.xp, c.xp_next,
+                    c.fatigue, c.content);
+        for (int32_t i = 0; i < c.skill_count; ++i) {
+          ImGui::SameLine();
+          ImGui::TextUnformatted(badlands::SkillName(c.skills[i]));
+        }
       } else {
         ImGui::TextUnformatted("-");
       }

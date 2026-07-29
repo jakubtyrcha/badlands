@@ -1,7 +1,7 @@
 # Noiser brain interop — ideal contract & language improvements
 
-**Status (2026-07-24):** this documents the noiser-based hero brain design, which is now
-dormant — the shipping hero brain is Nim→WASM (see
+**Status (2026-07-24):** this documents the noiser-based hero brain design, which has since
+been deleted from the tree — the shipping hero brain is Nim→WASM (see
 `docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md`). Retained as the design
 record for the noiser brain path and the upstream language-improvement asks below.
 

@@ -1,7 +1,14 @@
 // The transient game-event stream (badlands::GameEvent / Sim::DrainEvents):
 // notable things that HAPPENED -- damage, downing -- surfaced for the renderer's
 // floating combat text and the HUD combat log. Driven by the MOCK brains (no
-// noiser script needed): two hostile fighters placed in range trade blows.
+// wasm brain needed): a goblin (Monster, its simple brain, monster_brain.cpp)
+// faces a brainless mercenary placed in range.
+//
+// Single-gateway combat (docs/superpowers/specs/2026-07-25-contract-v3-
+// alignment-design.md): attacking is an ACTION, so the brainless merc issues
+// none and never swings -- only the goblin, which has a (simple) brain,
+// deals damage. The fight is deliberately ONE-DIRECTIONAL now; see each
+// case's own comment for what that means for its assertions.
 //
 // Combat now ROLLS to hit/dodge/crit (seeded), so a given swing may miss and the
 // exact damage varies -- these tests therefore assert the event stream's SHAPE
@@ -70,18 +77,19 @@ TEST_CASE("a landed melee hit emits one attributed DamageDealt event") {
     Duel d;
     std::vector<GameEvent> all;
 
-    // The merc lands a hit within a few ticks; the event is attributed to it,
-    // carries positive damage, targets the goblin as a character, at ~(0,1).
+    // The goblin (the one side with a brain) lands a hit within a few ticks;
+    // the event is attributed to it, carries positive damage, targets the
+    // merc as a character, at ~(0,0).
     const GameEvent* mg = tick_until(
         d, all,
         [&](const std::vector<GameEvent>& evs) {
-            return find(evs, GameEventKind::DamageDealt, d.merc, d.gob);
+            return find(evs, GameEventKind::DamageDealt, d.gob, d.merc);
         },
         60);
     REQUIRE(mg != nullptr);
     CHECK(mg->amount > 0.0f);
     CHECK(mg->target_kind == badlands::kEventTargetCharacter);
-    CHECK(mg->z == Catch::Approx(1.0f).margin(0.6f));
+    CHECK(mg->z == Catch::Approx(0.0f).margin(0.6f));
 }
 
 TEST_CASE("DrainEvents empties the buffer") {
@@ -104,28 +112,42 @@ TEST_CASE("a lethal blow emits DamageDealt plus HeroDowned for the loser") {
     std::vector<GameEvent> all;
     std::vector<GameEvent> evs;
 
-    bool goblin_downed = false;
+    // Single-gateway combat: the brainless merc never swings, so this is a
+    // one-directional attrition, not a duel either side could win -- the
+    // merc is the loser by construction. Downed within 3000 ticks (100s) is
+    // generous: the goblin's ~0.8s cooldown and the merc's real
+    // accuracy/evasion/armour easily clear 30 hp well inside that window.
     bool merc_downed = false;
+    bool goblin_downed = false;
     for (int i = 0; i < 3000; ++i) {
         d.sim.Tick(kTickDt);
         d.sim.DrainEvents(evs);
         for (const GameEvent& e : evs) {
             if (e.kind == GameEventKind::HeroDowned) {
-                if (e.target_id == d.gob) goblin_downed = true;
                 if (e.target_id == d.merc) merc_downed = true;
+                if (e.target_id == d.gob) goblin_downed = true;
             }
             all.push_back(e);
         }
-        if (goblin_downed) break;
+        if (merc_downed) break;
     }
 
-    // The merc wins: the goblin is downed, the merc is not.
-    CHECK(goblin_downed);
-    CHECK_FALSE(merc_downed);
+    // The goblin wins: the merc is downed, the goblin never even takes a hit.
+    CHECK(merc_downed);
+    CHECK_FALSE(goblin_downed);
 
-    // The downing is attributed to the merc and co-occurs with a DamageDealt.
+    // The downing is attributed to the goblin and co-occurs with a DamageDealt.
     const GameEvent* down =
-        find(all, GameEventKind::HeroDowned, d.merc, d.gob);
+        find(all, GameEventKind::HeroDowned, d.gob, d.merc);
     REQUIRE(down != nullptr);
-    CHECK(find(all, GameEventKind::DamageDealt, d.merc, d.gob) != nullptr);
+    CHECK(find(all, GameEventKind::DamageDealt, d.gob, d.merc) != nullptr);
+
+    // The asymmetry, explicit: the brainless merc never once appears as the
+    // ATTACKER of a DamageDealt event, over the whole fight.
+    bool merc_ever_attacked = false;
+    for (const GameEvent& e : all) {
+        merc_ever_attacked =
+            merc_ever_attacked || (e.kind == GameEventKind::DamageDealt && e.actor_id == d.merc);
+    }
+    CHECK_FALSE(merc_ever_attacked);
 }

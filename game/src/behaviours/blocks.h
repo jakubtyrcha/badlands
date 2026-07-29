@@ -46,48 +46,10 @@ struct ActivityDef {
     ActFn act;
 };
 
-// --- hero blocks ------------------------------------------------------------
-// Each score is a consideration in [0,1] -- for need-driven activities, the
-// URGENCY of the need. No block encodes where it sits relative to any other:
-// ordering emerges from urgency x per-class weight, so a hero rests before it
-// hunts when it is tired and not otherwise, and retuning is a data edit.
-float score_go_home(const WorldView&, const SimFactors&);
-BehaviourResult act_go_home(const WorldView&, const SimFactors&);
-
-float score_buy(const WorldView&, const SimFactors&);
-BehaviourResult act_buy(const WorldView&, const SimFactors&);
-
-float score_visit_tavern(const WorldView&, const SimFactors&);
-BehaviourResult act_visit_tavern(const WorldView&, const SimFactors&);
-
-// Chat: two under-entertained heroes who meet keep each other company. Walks to the partner
-// and strikes up a conversation on arrival (a Chat command, which is what
-// creates the session on BOTH of them); once talking, holds position until the
-// session ends. Deliberately a weaker entertainment than the tavern -- it
-// decays boredom toward a floor instead of clearing it.
-float score_chat(const WorldView&, const SimFactors&);
-BehaviourResult act_chat(const WorldView&, const SimFactors&);
-
-// --- hunter block -----------------------------------------------------------
-// Hunt chases the nearest perceived prey (a deer) and shoots it once within the
-// hunter's own attack range (a Shoot command targeting the prey slot). Every
-// hero class carries this block; only the Hunter has a non-zero Hunt weight, so
-// for anyone else it is both unselectable AND unperceived (town_brain.cpp skips
-// the prey scan when the weight is 0). Class-unique activities need no
-// class-specific code path.
-float score_hunt(const WorldView&, const SimFactors&);
-BehaviourResult act_hunt(const WorldView&, const SimFactors&);
-
-// Explore: walk into terra incognita. The one PRODUCTIVE activity heroes have,
-// so it outranks every filler one whenever it applies -- which makes its vetoes
-// the whole of its restraint. It stands down when the hero is too tired, when
-// the world already refused to let it through this window (MoveBlocked), and
-// when there is prey right there, because an errand that has just turned up
-// something worth doing has served its purpose.
-float score_explore(const WorldView&, const SimFactors&);
-BehaviourResult act_explore(const WorldView&, const SimFactors&);
-
 // --- shared blocks ----------------------------------------------------------
+// (The hero-only blocks that used to live here -- GoHome, Buy, VisitTavern,
+// Chat, Hunt, Explore -- died with the C++ hero decision layer; the Nim/wasm
+// brain is the sole implementation now, scripts/brains/nim/blocks.nim.)
 // Roam walks to view.roam_goal (chosen in perception: hero rng ring, or deer
 // biome-filtered). Shared verbatim by the hero and critter brains.
 float score_roam(const WorldView&, const SimFactors&);

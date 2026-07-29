@@ -3,7 +3,8 @@
 #include "combat.h"  // melee_range, select_target
 #include "components.h"
 #include "game_state.h"
-#include "heroes.h"  // biome_at
+#include "heroes.h"     // biome_at
+#include "intention.h"  // InboxEvent, push_inbox_event -- the MoveBlocked mirror
 #include "placement.h"
 
 #include <entt/entt.hpp>
@@ -21,7 +22,7 @@ namespace badlands {
 
 namespace {
 
-constexpr float kArriveRadius = 0.25f;     // cursor advances within this of a waypoint
+// kArriveRadius now lives in movement.h (shared with intention.cpp).
 constexpr float kRepathCooldown = 0.3f;    // seconds between repaths
 constexpr float kGoalMovedThreshold = 1.0f;// repath a moving target when it drifts this far
 constexpr float kMeleeHysteresis = 1.15f;  // unlock past attack_range * this
@@ -114,6 +115,20 @@ void reproject_out_of_footprints(BadlandsGame& game, glm::vec2& p) {
     }
 }
 
+// Refused-step bookkeeping shared by plan_paths (goal unreachable) and
+// follow_paths (a live step blocked): stamps MoveBlocked and mirrors the
+// refusal into the inbox at this one site, so the two never drift apart
+// (a guaranteed-wake event feeding should_wake, docs/design/
+// intention-contract.html §2). No-ops for non-heroes (no EventInbox).
+// Collapses what used to be two independent hand-copies of the same three
+// lines, one per caller.
+void note_move_blocked(BadlandsGame& game, entt::entity e, glm::vec2 point) {
+    game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
+    InboxEvent ev;
+    ev.kind = InboxEventKind::MoveBlocked;
+    push_inbox_event(game, e, ev);
+}
+
 }  // namespace
 
 bool is_walkable(mapgen::Biome biome) {
@@ -131,7 +146,13 @@ void plan_paths(BadlandsGame& game, float dt) {
     // it, same reason follow_paths defers its blocked list).
     std::vector<std::pair<entt::entity, glm::vec2>> blocked;
 
-    auto view = reg.view<MoveTarget, NavPath, const Position>(entt::exclude<InsideBuilding>);
+    // ChattingState excluded alongside InsideBuilding -- the MeleeLock
+    // precedent (below, follow_paths): a conversation holds both
+    // participants in place, the same way a melee lock holds fighters,
+    // rather than just refusing to plan a route toward wherever they were
+    // headed before the chat started.
+    auto view =
+        reg.view<MoveTarget, NavPath, const Position>(entt::exclude<InsideBuilding, ChattingState>);
     for (entt::entity e : view) {
         MoveTarget& mt = view.get<MoveTarget>(e);
         NavPath& np = view.get<NavPath>(e);
@@ -184,7 +205,7 @@ void plan_paths(BadlandsGame& game, float dt) {
 
         np.repath_cooldown = std::max(0.0f, np.repath_cooldown - dt);
         // Repath when the resolved goal has drifted from the planned route's end.
-        // Applies to Kind::Point too: scripted pursuit re-issues intent_move_to
+        // Applies to Kind::Point too: scripted pursuit re-issues enqueue_move_to
         // (a Point) at the target's fresh position every tick, so a moving Point
         // must re-plan or the pursuer trails one route-length behind. A static
         // Point (a committed move order) has back()==goal, so it never repaths.
@@ -209,7 +230,7 @@ void plan_paths(BadlandsGame& game, float dt) {
     }
 
     for (const auto& [e, point] : blocked) {
-        game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
+        note_move_blocked(game, e, point);
     }
 }
 
@@ -218,8 +239,12 @@ void follow_paths(BadlandsGame& game, float dt) {
     // adding a component while iterating a view can invalidate it.
     std::vector<std::pair<entt::entity, glm::vec2>> blocked;
 
+    // ChattingState excluded alongside InsideBuilding/MeleeLock: a
+    // conversation holds both participants in place, like a melee lock
+    // holds fighters -- a hero mid-chat must not keep walking toward
+    // whatever MoveTarget it had queued up before the chat started.
     auto view = game.registry.view<NavPath, Position, const Stats>(
-        entt::exclude<InsideBuilding, MeleeLock>);
+        entt::exclude<InsideBuilding, MeleeLock, ChattingState>);
     for (entt::entity e : view) {
         NavPath& np = view.get<NavPath>(e);
         Position& pos = view.get<Position>(e);
@@ -258,7 +283,7 @@ void follow_paths(BadlandsGame& game, float dt) {
     }
 
     for (const auto& [e, point] : blocked) {
-        game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
+        note_move_blocked(game, e, point);
     }
 }
 

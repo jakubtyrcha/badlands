@@ -1,11 +1,12 @@
 #include "heroes.h"
 
-#include "brain.h"
+#include "behaviours/world_view.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
+#include "brain_kind.h"
 #include "components.h"
 #include "entity_memory.h"  // EntityMemory, seed_home_town_memory
 #include "game_state.h"
 #include "placement.h"
-#include "town_brain.h"  // badlands::Behavior (the InsideBuilding::purpose id space)
+#include "skills.h"  // Skills, grant_skills_for_level
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -110,6 +111,9 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
                              desc.attack_cooldown, 0.0f};
     }
     reg.emplace<Attacks>(e, atk);
+    if (desc.xp_reward > 0) {
+        reg.emplace<XpReward>(e, desc.xp_reward);
+    }
     // Stats.move_speed drives movement; its attack_* fields are a legacy VIEW of
     // the PRIMARY attack (perception's reach / the attack_range host call). Derive
     // them from attacks[0] so there is one source of truth rather than a hand-kept
@@ -123,7 +127,6 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     }
     reg.emplace<RenderShape>(e, glm::vec3{desc.size_x, desc.size_y, desc.size_z},
                              glm::vec3{desc.color_r, desc.color_g, desc.color_b});
-    reg.emplace<Intent>(e, 0, glm::vec2{0.0f, 0.0f});
 
     // Fog-of-war facing + vision. Facing seeds from the desc (or the model
     // forward default when unset); the cone half-cosine is cos(half-angle),
@@ -151,8 +154,13 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     BrainKind brain_kind = BrainKind::None;
     switch (desc.archetype) {
         case Archetype::Hero: {
-            int32_t hero_class = -1;
-            if (home >= 0 && static_cast<size_t>(home) < game.placement.buildings.size()) {
+            // desc.hero_class is authoritative when the desc sets one (the
+            // creature catalog's hero defs do); only a homeless, class-less
+            // desc (-1) falls back to deriving the class from the recruiting
+            // guild, so the grant call below always sees the FINAL class.
+            int32_t hero_class = desc.hero_class;
+            if (hero_class < 0 && home >= 0 &&
+                static_cast<size_t>(home) < game.placement.buildings.size()) {
                 hero_class = guild_hero_class(game.placement.buildings[home].kind);
             }
             reg.emplace<HeroCharacter>(e, hero_class);
@@ -178,6 +186,22 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
                 seed_home_town_memory(game, mem, static_cast<uint32_t>(home));
             }
             reg.emplace<EntityMemory>(e, mem);
+
+            // Learned-skill loadout: starts with the class's level-1 grants
+            // (none authored yet); the level-up hook (progression.cpp) adds
+            // the rest.
+            Skills sk{};
+            grant_skills_for_level(sk, hero_class, 1);
+            reg.emplace<Skills>(e, sk);
+
+            // Intention contract (game/src/intention.h): heroes only, spawned
+            // empty. Live: EventInbox is written by the engine's guaranteed-
+            // wake events (DamageTaken/ThreatSighted/MoveBlocked/
+            // IntentionEnded) and CurrentIntention by apply_intention; both
+            // feed should_wake and are read every wake by apply_intention
+            // (wasm_brain.cpp), which packs them into the wire.
+            reg.emplace<EventInbox>(e);
+            reg.emplace<CurrentIntention>(e);
             break;
         }
         case Archetype::Townfolk: {
@@ -196,10 +220,22 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
         }
         case Archetype::Monster:
             brain_kind = BrainKind::Monster;
+            // Intention contract (game/src/intention.h): the simple monster
+            // brain (monster_brain.cpp) runs through the SAME seams a wasm
+            // hero does -- apply_intention needs a live CurrentIntention to
+            // adopt anything into (its own early-return guard), and
+            // EventInbox is what makes this entity visible to sim.cpp's
+            // ThreatSighted pass (the nearest_enemy_scratch cache
+            // monster_think consults). Single-gateway combat (docs/
+            // superpowers/specs/2026-07-25-contract-v3-alignment-design.md):
+            // the tier split is where a brain runs, never which door it
+            // uses.
+            reg.emplace<EventInbox>(e);
+            reg.emplace<CurrentIntention>(e);
             break;
     }
 
-    reg.emplace<Brain>(e, game.brains ? spawn_brain(*game.brains, slot) : nullptr, brain_kind);
+    reg.emplace<Brain>(e, brain_kind);
 
     return slot;
 }
@@ -345,9 +381,9 @@ bool hero_enter(BadlandsGame& game, entt::entity e, int kind) {
     return true;
 }
 
-// Reachable from CommandKind::EnterHome, which any noiser script can enqueue
-// against any archetype (intent_enter_home has no archetype guard of its own
-// -- see brain.cpp) -- so `e` is not guaranteed to be a hero here either.
+// Reachable from CommandKind::EnterHome, which apply_intention (intention.cpp)
+// enqueues with no archetype guard of its own -- so `e` is not guaranteed to
+// be a hero here either.
 bool hero_enter_home(BadlandsGame& game, entt::entity e) {
     const auto* sim = game.registry.try_get<HeroSimulationState>(e);
     if (sim == nullptr) {

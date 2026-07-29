@@ -1,27 +1,19 @@
 // Core sim-world helpers that are not part of the badlands::Sim public surface:
 // the BadlandsGame destructor plus the shared perception/bookkeeping free
-// functions (report_bug / entity_for_slot / nearest_enemy) declared in
-// game_state.h and used by the systems (brain / movement / heroes / sim).
+// functions (entity_for_slot / nearest_enemy) declared in game_state.h and
+// used by the systems (movement / heroes / sim).
 
-#include "brain.h"  // complete badlands::BrainRuntime for BadlandsGame's unique_ptr dtor
 #include "components.h"
 #include "game_state.h"
-#include "wasm_brain.h"  // complete badlands::WasmBrainRuntime, same reason as brain.h above
+#include "intention.h"   // InboxEvent, push_inbox_event -- the DamageTaken writer
+#include "wasm_brain.h"  // complete badlands::WasmBrainRuntime, for BadlandsGame's unique_ptr dtor
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
-#include <cstdio>
-#include <string>
-
 BadlandsGame::~BadlandsGame() = default;
 
 namespace badlands {
-
-void report_bug(BadlandsGame& game, const char* stage, const std::string& message) {
-    std::fprintf(stderr, "[noiser-bug] %s: %s\n", stage, message.c_str());
-    ++game.noiser_bugs;
-}
 
 entt::entity entity_for_slot(const BadlandsGame& game, int32_t slot) {
     if (slot < 0 || static_cast<size_t>(slot) >= game.slots.size()) {
@@ -62,6 +54,24 @@ void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot
                                    .x = pos.x,
                                    .z = pos.y,
                                    .at_millis = game.world_millis});
+    }
+
+    // Intention contract: mirror the hit into the victim's inbox -- a
+    // guaranteed-wake event that feeds should_wake (docs/design/
+    // intention-contract.html §2). This is the single choke point both
+    // damage sites (fire_attack's melee branch, advance_projectiles' ranged
+    // resolution) route through, so it is the one place a DamageTaken event
+    // needs writing. push_inbox_event no-ops for an EventInbox-less victim
+    // (critters/townfolk); heroes AND, since the single-gateway cutover,
+    // monsters too (heroes.cpp's spawn recipe) carry one, so this is
+    // automatic rather than a check here.
+    entt::entity victim = entity_for_slot(game, static_cast<int32_t>(target_slot));
+    if (victim != entt::null) {
+        InboxEvent ev;
+        ev.kind = InboxEventKind::DamageTaken;
+        ev.source_slot = actor_slot;
+        ev.param = amount;
+        push_inbox_event(game, victim, ev);
     }
 }
 

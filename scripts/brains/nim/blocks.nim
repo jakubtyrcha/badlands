@@ -1,17 +1,21 @@
-# Bit-exact port of the hero score_*/act_* pairs (game/src/behaviours/blocks.cpp)
-# actually reachable through kHeroActivities (game/src/town_brain.cpp:224-233):
-# Explore, GoHome, Hunt, Buy, VisitTavern, Chat, Roam, Idle. Every threshold and
-# comparison mirrors the C++ verbatim -- float32 throughout, C++ operation order.
+# Port of the hero score_*/act_* pairs (game/src/behaviours/blocks.cpp)
+# actually reachable through kHeroActivities (game/src/town_brain.cpp), now
+# emitting a v2 Suggestion (BL_INT_*) instead of v1's Decision
+# (activityId/goalKind/BL_CMD_*).
 #
-# A `score_*` returns a CONSIDERATION in [0,1] (0 = veto); an `act_*` returns a
-# `Decision`, this module's stand-in for BehaviourResult -- the non-pause half
-# of BlDecisionWire (activity/goal/command), which the selector/hero.nim then
-# either commits as-is or replaces with a Think pause. `goalKind` follows the
-# wire's own convention: 0 = "no explicit goal" (the host holds the entity's
-# current position, same as C++ decode_decision's self_pos fallback), 1 = an
-# explicit (goalX, goalZ) point -- used here exactly where the C++ act_* target
-# IS the entity's own current position (act_idle, act_chat while already
-# chatting), so no value is round-tripped for nothing.
+# A `score_*` returns a CONSIDERATION in [0,1] (0 = veto) -- UNCHANGED from
+# v1, byte-for-byte the same comparisons/thresholds. `act_*` differs from v1
+# in shape, not spirit: v1's engine (apply_brain_decision) gated a
+# "walk-then-fire-follow-up-on-arrival" itself, generically, for every
+# activity; the v2 engine (apply_intention, game/src/intention.h) has no such
+# combined walk+gate for ENTER/ENTER_HOME/BUY -- each intention kind is
+# either a walk (MoveTo) or a bare action, never both. So the three
+# door-activities (GoHome/Buy/VisitTavern) now do that arrival check
+# THEMSELVES, against BlViewFactors.entrance_radius (mirrors game/src/
+# components.h's kEntranceRadius): far -> suggest MoveTo toward the door;
+# close enough -> suggest the actual action. Chat/Hunt already carried their
+# own precise gate in v1 (chat_radius/self_attack_range, both still on the
+# wire) and are unchanged in spirit.
 
 import abi
 import activity_catalog
@@ -30,6 +34,19 @@ const
   # HuntersCamp=2, ThievesDen=3, Scriptorium=4, Tavern=5.
   kBuildingKindTavern: int32 = 5
 
+# How close to a door an act_* block below must be before firing the actual
+# action (Enter/EnterHome/Buy) instead of just walking toward it -- read from
+# the wire's own BlViewFactors.entrance_radius (mirrors game/src/components.h's
+# kEntranceRadius; was a hand-copied constant here, now the wire is the single
+# source of truth -- see brain_abi.h's BlViewFactors comment). v1 had this
+# check done GENERICALLY, host-side, by apply_brain_decision's
+# follow_up_on_arrival gate; v2's apply_intention has no such combined gate
+# (see this file's top comment), so it moves here. Compared as a squared
+# distance to avoid pulling in sqrt/libm at all -- one fewer thing for
+# scripts/build_brains.sh's WASI-import bisect to worry about.
+proc entranceRadiusSq(f: BlViewFactors): float32 =
+  f.entrance_radius * f.entrance_radius
+
 # How badly a depleted reserve wants attention: 0 at/above `threshold`, ramping
 # linearly to 1 when empty. One shape, used by every need (blocks.cpp: urgency).
 proc urgency(reserve, threshold: float32): float32 =
@@ -38,15 +55,23 @@ proc urgency(reserve, threshold: float32): float32 =
   let x = (threshold - reserve) / threshold
   result = if x < 0.0'f32: 0.0'f32 elif x > 1.0'f32: 1.0'f32 else: x
 
-# The non-pause half of one tick's decision: mirrors BehaviourResult
-# (activity id, goal, optional follow-up command, follow_up_on_arrival).
-type Decision* = object
-  activityId*: int32
-  goalKind*: int32          # 0 none (self pos), 1 point
-  goalX*, goalZ*: float32
-  commandKind*: int32       # BL_CMD_*
-  commandArg*: int32
-  followUpOnArrival*: bool
+proc distSq(a, b: Vec2): float32 =
+  let dx = a.x - b.x
+  let dz = a.z - b.z
+  result = dx * dx + dz * dz
+
+# One activity's suggestion: BL_INT_* + the fields it uses (mirrors
+# BlSuggestionWire's own shape, minus duration_millis/idle_hint_millis,
+# which hero.nim's top-level react() fills in once, not per-activity).
+type Suggestion* = object
+  kind*: int32              # BL_INT_*
+  activityLabel*: int32     # ActivityId, inspection only
+  pointX*, pointZ*: float32
+  targetSlot*: uint32
+  arg*: int32
+
+proc moveTo(activityLabel: int32, goal: Vec2): Suggestion =
+  Suggestion(kind: BL_INT_MOVE_TO, activityLabel: activityLabel, pointX: goal.x, pointZ: goal.z)
 
 # --- GoHome (rest) -----------------------------------------------------------
 proc scoreGoHome*(v: HeroView, f: BlViewFactors): float32 =
@@ -55,17 +80,19 @@ proc scoreGoHome*(v: HeroView, f: BlViewFactors): float32 =
   let bar = if v.night: f.fatigue_seek_night else: f.fatigue_seek
   result = max(urgency(v.fatigue, bar), urgency(v.healthFrac, f.low_health_rest))
 
-proc actGoHome*(v: HeroView, f: BlViewFactors): Decision =
-  Decision(activityId: ActGoHome, goalKind: 1, goalX: v.homeDoor.x, goalZ: v.homeDoor.z,
-           commandKind: BL_CMD_ENTER_HOME, commandArg: 0, followUpOnArrival: true)
+proc actGoHome*(v: HeroView, f: BlViewFactors): Suggestion =
+  if distSq(v.pos, v.homeDoor) <= entranceRadiusSq(f):
+    return Suggestion(kind: BL_INT_ENTER_HOME, activityLabel: ActGoHome)
+  result = moveTo(ActGoHome, v.homeDoor)
 
 # --- Buy ----------------------------------------------------------------------
 proc scoreBuy*(v: HeroView, f: BlViewFactors): float32 =
   result = if v.hasApothecary and v.inventory < kInventoryCap: kApplies else: kNotApplicable
 
-proc actBuy*(v: HeroView, f: BlViewFactors): Decision =
-  Decision(activityId: ActBuy, goalKind: 1, goalX: v.apothecaryDoor.x, goalZ: v.apothecaryDoor.z,
-           commandKind: BL_CMD_BUY, commandArg: 0, followUpOnArrival: true)
+proc actBuy*(v: HeroView, f: BlViewFactors): Suggestion =
+  if distSq(v.pos, v.apothecaryDoor) <= entranceRadiusSq(f):
+    return Suggestion(kind: BL_INT_BUY, activityLabel: ActBuy)
+  result = moveTo(ActBuy, v.apothecaryDoor)
 
 # --- VisitTavern ---------------------------------------------------------------
 proc scoreVisitTavern*(v: HeroView, f: BlViewFactors): float32 =
@@ -73,9 +100,10 @@ proc scoreVisitTavern*(v: HeroView, f: BlViewFactors): float32 =
     return kNotApplicable  # shut after dark
   result = urgency(v.content, f.content_seek)
 
-proc actVisitTavern*(v: HeroView, f: BlViewFactors): Decision =
-  Decision(activityId: ActVisitTavern, goalKind: 1, goalX: v.tavernDoor.x, goalZ: v.tavernDoor.z,
-           commandKind: BL_CMD_ENTER, commandArg: kBuildingKindTavern, followUpOnArrival: true)
+proc actVisitTavern*(v: HeroView, f: BlViewFactors): Suggestion =
+  if distSq(v.pos, v.tavernDoor) <= entranceRadiusSq(f):
+    return Suggestion(kind: BL_INT_ENTER, activityLabel: ActVisitTavern, arg: kBuildingKindTavern)
+  result = moveTo(ActVisitTavern, v.tavernDoor)
 
 # --- Chat -----------------------------------------------------------------------
 proc scoreChat*(v: HeroView, f: BlViewFactors): float32 =
@@ -85,16 +113,38 @@ proc scoreChat*(v: HeroView, f: BlViewFactors): float32 =
     return kNotApplicable
   result = urgency(v.content, f.chat_content_seek)
 
-proc actChat*(v: HeroView, f: BlViewFactors): Decision =
+proc actChat*(v: HeroView, f: BlViewFactors): Suggestion =
   if v.chatting:
-    return Decision(activityId: ActChat, goalKind: 0, followUpOnArrival: false)  # stand and talk
-  # Walk over, and strike it up once close enough -- emitting on arrival keeps
-  # the approach itself out of the command log (mirrors act_chat's comment).
-  result = Decision(activityId: ActChat, goalKind: 1, goalX: v.partnerPos.x, goalZ: v.partnerPos.z,
-                     followUpOnArrival: false)
+    # Finding B (V6, mid-chat wake fix): restate BL_INT_CHAT at the live
+    # partner -- nothing NEW to decide (the conversation runs to its own
+    # clock, ChattingState + advance_chats, engine-side), but this is still
+    # what the contract's own always-restate discipline calls for. v.partnerSlot
+    # IS a valid target here now: hero_perception.cpp's observe_hero reads it
+    # straight off ChattingState while chatting (previously left at its
+    # WorldView default, since the nearest_companion scan that normally
+    # populates it is -- correctly -- skipped once already chatting; a fresh
+    # scan would find nobody, everyone already chatting is excluded as a
+    # candidate). It matches CurrentIntention::target_slot from adoption, so
+    # apply_intention's is_identical_restatement (intention.cpp, Chat: target_
+    # slot match) resumes this cleanly rather than re-adopting.
+    #
+    # This used to yield BL_INT_IDLE instead (deliberately, per this
+    # function's old comment, to avoid apply_intention's BL_INT_NONE path
+    # leaving a stale wake schedule behind) -- but BL_INT_IDLE is never an
+    # identical restatement either (is_identical_restatement always returns
+    # false for Idle), so that adoption overwrote CurrentIntention.kind (and
+    # its started marker) with Idle on every mid-chat wake, which is exactly
+    # what broke advance_intentions' Chat completion tracking (Finding B).
+    # Restating Chat gets the same fresh-wake-schedule benefit Idle was
+    # chosen for (the restate-resume path still refreshes wake_at_millis from
+    # this suggestion's idle hint, intention.cpp) without any of that cost.
+    return Suggestion(kind: BL_INT_CHAT, activityLabel: ActChat, targetSlot: v.partnerSlot)
+  # Walk over, and strike it up once close enough -- the engine still gates
+  # on chat_radius itself (command.cpp's Chat handler), this just avoids
+  # suggesting Chat before it could possibly be valid.
   if v.partnerDist <= f.chat_radius:
-    result.commandKind = BL_CMD_CHAT
-    result.commandArg = int32(v.partnerSlot)
+    return Suggestion(kind: BL_INT_CHAT, activityLabel: ActChat, targetSlot: v.partnerSlot)
+  result = moveTo(ActChat, v.partnerPos)
 
 # --- Explore ---------------------------------------------------------------------
 proc scoreExplore*(v: HeroView, f: BlViewFactors): float32 =
@@ -108,36 +158,32 @@ proc scoreExplore*(v: HeroView, f: BlViewFactors): float32 =
     return kNotApplicable  # something worth stopping for is right here
   result = kApplies
 
-proc actExplore*(v: HeroView, f: BlViewFactors): Decision =
-  Decision(activityId: ActExplore, goalKind: 1, goalX: v.exploreGoal.x, goalZ: v.exploreGoal.z,
-           followUpOnArrival: false)
+proc actExplore*(v: HeroView, f: BlViewFactors): Suggestion =
+  result = moveTo(ActExplore, v.exploreGoal)
 
 # --- Hunt (hunter) -----------------------------------------------------------------
 proc scoreHunt*(v: HeroView, f: BlViewFactors): float32 =
   result = if v.hasPrey: kApplies else: kNotApplicable
 
-proc actHunt*(v: HeroView, f: BlViewFactors): Decision =
+proc actHunt*(v: HeroView, f: BlViewFactors): Suggestion =
   # Chase to prey_pos; once within the hunter's own reach, take the shot (the
   # handler re-checks range + cooldown, so the log gets one entry per shot).
-  result = Decision(activityId: ActHunt, goalKind: 1, goalX: v.preyPos.x, goalZ: v.preyPos.z,
-                     followUpOnArrival: false)
   if v.preyDist <= v.selfAttackRange:
-    result.commandKind = BL_CMD_SHOOT
-    result.commandArg = int32(v.preySlot)
+    return Suggestion(kind: BL_INT_SHOOT, activityLabel: ActHunt, targetSlot: v.preySlot)
+  result = moveTo(ActHunt, v.preyPos)
 
 # --- Roam (shared) -------------------------------------------------------------------
 # Unlike blocks.cpp, this does NOT re-derive the wander point: observe_hero
-# already drew it host-side (roam_point) and shipped it as suggest.roam_goal_*
-# -- act_roam on the C++ side simply reads v.roam_goal too, so there is nothing
-# left for this block to compute.
+# already drew it host-side (roam_point) and shipped it as suggest.roam_goal_*.
 proc scoreRoam*(v: HeroView, f: BlViewFactors): float32 = kApplies
 
-proc actRoam*(v: HeroView, f: BlViewFactors): Decision =
-  Decision(activityId: ActRoam, goalKind: 1, goalX: v.roamGoal.x, goalZ: v.roamGoal.z,
-           followUpOnArrival: false)
+proc actRoam*(v: HeroView, f: BlViewFactors): Suggestion =
+  result = moveTo(ActRoam, v.roamGoal)
 
 # --- Idle -----------------------------------------------------------------------------
 proc scoreIdle*(v: HeroView, f: BlViewFactors): float32 = kApplies
 
-proc actIdle*(v: HeroView, f: BlViewFactors): Decision =
-  Decision(activityId: ActIdle, goalKind: 0, followUpOnArrival: false)  # hold position
+proc actIdle*(v: HeroView, f: BlViewFactors): Suggestion =
+  # duration_millis is filled in by hero.nim's top-level react() (the idle
+  # hint IS the duration now -- see its own comment).
+  Suggestion(kind: BL_INT_IDLE, activityLabel: ActIdle)
