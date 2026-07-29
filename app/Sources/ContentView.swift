@@ -5,7 +5,8 @@ struct ContentView: View {
     let editor = sq.Editor.create()!
 
     var body: some View {
-        Text("shapeshifter — core ping: \(editor.ping())")
+        MetalViewport(editor: editor)
+            .ignoresSafeArea()
             .frame(minWidth: 800, minHeight: 600)
     }
 }

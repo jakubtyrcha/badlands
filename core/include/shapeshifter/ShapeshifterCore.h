@@ -13,7 +13,17 @@ namespace sq {
 class SWIFT_IMMORTAL_REFERENCE Editor {
 public:
     static Editor* create();
-    int32_t ping() const;   // M0 interop smoke test; replaced by real API in later milestones
+
+    // Renderer lifecycle. Pointers are Obj-C objects passed as opaque void*,
+    // borrowed — core never releases them.
+    void attachLayer(void* caMetalLayer);
+    void setViewportSize(float widthPts, float heightPts, float backingScale);
+    void render(void* caMetalDrawable);
+
+private:
+    Editor();
+    struct Impl;
+    Impl* impl_;
 };
 
 } // namespace sq
