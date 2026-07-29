@@ -9,6 +9,7 @@
 #include "engine/rendering/material/standard_rendering_material_instance.hpp"
 
 #include <array>
+#include <cstring>
 #include <set>
 
 #include <spdlog/spdlog.h>
@@ -84,21 +85,34 @@ bool StandardRenderingMaterialInstance::Bind(RenderPassContext& pass,
   // Instanced materials carry their material constants in a group-0 UBO (the
   // per-object model matrix moved to the group-1 per-instance storage array,
   // bound separately via BindInstanceData). Non-instanced materials keep their
-  // constants in the group-1 per-object UBO built by BindPerObject, so their
-  // params buffer is NOT group 0 and this branch is skipped -- leaving their
-  // group-0 bind group byte-identical to before.
-  if (const ReflectedUniformBuffer* params = SelectMaterialParamsBuffer(
-          material_->GetUniformBuffers(geometry_type_, pass_type_),
-          geometry_type_);
-      params && params->group == 0) {
-    if (wgpu::Buffer params_ubo =
-            instance_->GetOrCreateUniformBuffer(frame.GetDevice())) {
-      wgpu::BindGroupEntry params_entry{};
-      params_entry.binding = params->binding;
-      params_entry.buffer = params_ubo;
-      params_entry.offset = 0;
-      params_entry.size = WGPU_WHOLE_SIZE;
-      entries.push_back(params_entry);
+  // constants in the group-1 per-object UBO built by BindPerObject, so this
+  // whole block is gated on kInstancedMesh first -- a cheap enum compare that
+  // skips the pipeline-cache lookup (GetUniformBuffers) + SelectMaterialParams
+  // scan for non-instanced draws, leaving their group-0 bind group
+  // byte-identical to before.
+  if (geometry_type_ == GeometryType::kInstancedMesh) {
+    if (const ReflectedUniformBuffer* params = SelectMaterialParamsBuffer(
+            material_->GetUniformBuffers(geometry_type_, pass_type_),
+            geometry_type_);
+        params && params->group == 0) {
+      wgpu::Buffer params_ubo =
+          instance_->GetOrCreateUniformBuffer(frame.GetDevice());
+      if (!params_ubo) {
+        // No SetParameter was called, so MaterialInstance built no constants
+        // buffer -- but the shader still declares this group-0 UBO and Dawn
+        // requires every layout binding present at draw. Bind a cached
+        // zero-filled UBO of the reflected size so the binding is never missing.
+        params_ubo = GetOrCreateZeroedParamsBuffer(frame.GetDevice(),
+                                                   params->total_size);
+      }
+      if (params_ubo) {
+        wgpu::BindGroupEntry params_entry{};
+        params_entry.binding = params->binding;
+        params_entry.buffer = params_ubo;
+        params_entry.offset = 0;
+        params_entry.size = WGPU_WHOLE_SIZE;
+        entries.push_back(params_entry);
+      }
     }
   }
 
@@ -131,6 +145,24 @@ bool StandardRenderingMaterialInstance::Bind(RenderPassContext& pass,
   pass.SetBindGroup(0, bind_group);
 
   return true;
+}
+
+wgpu::Buffer StandardRenderingMaterialInstance::GetOrCreateZeroedParamsBuffer(
+    wgpu::Device device, uint32_t size) {
+  if (zeroed_params_buffer_) {
+    return zeroed_params_buffer_;
+  }
+  if (size == 0) {
+    return nullptr;
+  }
+  wgpu::BufferDescriptor desc{};
+  desc.size = size;
+  desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+  desc.mappedAtCreation = true;
+  zeroed_params_buffer_ = wgpu::Buffer(device.CreateBuffer(&desc));
+  std::memset(zeroed_params_buffer_.GetMappedRange(0, size), 0, size);
+  zeroed_params_buffer_.Unmap();
+  return zeroed_params_buffer_;
 }
 
 bool StandardRenderingMaterialInstance::BindPerObject(RenderPassContext& pass,

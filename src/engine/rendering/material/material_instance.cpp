@@ -23,6 +23,13 @@ const ReflectedUniformBuffer* SelectMaterialParamsBuffer(
   // material keeps its constants in the group-1 per-object UBO.
   const uint32_t params_group =
       geometry_type == GeometryType::kInstancedMesh ? 0u : 1u;
+  // Contract: a material declares exactly ONE material-params UBO in
+  // `params_group` (the non-frame one). Callers (Bind / BuildUniformBuffer /
+  // GetUniformBufferSize) bind + fill precisely this buffer, so a SECOND
+  // candidate would be silently ignored and its members would go unwritten /
+  // unbound. No shader declares two today; scan the whole list and fail loudly
+  // if one ever does rather than quietly pick the first.
+  const ReflectedUniformBuffer* found = nullptr;
   for (const auto& buffer : buffers) {
     if (buffer.group != params_group) {
       continue;
@@ -32,9 +39,17 @@ const ReflectedUniformBuffer* SelectMaterialParamsBuffer(
     if (buffer.group == 0 && buffer.binding == 0) {
       continue;
     }
-    return &buffer;
+    if (found != nullptr) {
+      spdlog::error(
+          "SelectMaterialParamsBuffer: multiple material-params UBOs in group "
+          "{} (bindings {} and {}); the single-params-UBO contract is violated "
+          "-- binding only the first",
+          params_group, found->binding, buffer.binding);
+      break;
+    }
+    found = &buffer;
   }
-  return nullptr;
+  return found;
 }
 
 MaterialInstance::MaterialInstance(const MeshRenderingMaterial* base_material,
