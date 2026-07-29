@@ -15,6 +15,11 @@ final class EditorViewModel {
     let editor = sq.Editor.create()!
     var mode: EditorMode = .select
 
+    /// Read-only mirrors of core's selection state (core owns the truth;
+    /// these exist so SwiftUI views have something `@Observable` to read).
+    var selectedNodeID: Int32? = nil
+    var selectedNodeName: String? = nil
+
     /// Single entry point for every mode change (buttons, keys, future
     /// shortcuts) — keep it that way so later milestones have one place to
     /// hook mode-transition side effects (e.g. resetting spawn/gizmo state).
@@ -25,7 +30,10 @@ final class EditorViewModel {
     // MARK: - Raw input, called by the viewport.
 
     func handleMouseDown(_ p: CGPoint) {
-        // Selection lands in M4.
+        guard mode == .select else { return }
+        let r = editor.pick(Float(p.x), Float(p.y))
+        editor.select(r.node_id) // miss returns kInvalidNode (-1) -> clears
+        refreshSelectionMirrors()
     }
 
     func handleMouseDragged(_ p: CGPoint, delta: CGSize) {
@@ -33,7 +41,8 @@ final class EditorViewModel {
     }
 
     func handleMouseUp(_ p: CGPoint) {
-        // Selection lands in M4.
+        // Selection is click-driven (handleMouseDown); drag/gizmo interaction
+        // land in later milestones.
     }
 
     func handleScroll(dx: CGFloat, dy: CGFloat, shiftHeld: Bool) {
@@ -60,5 +69,24 @@ final class EditorViewModel {
         case "4": setMode(.camera); return true
         default: return false
         }
+    }
+
+    // MARK: - Selection mirrors
+
+    private func refreshSelectionMirrors() {
+        let id = editor.selectedNode()
+        guard id != -1 else { // kInvalidNode
+            selectedNodeID = nil
+            selectedNodeName = nil
+            return
+        }
+        var buf = [CChar](repeating: 0, count: 64)
+        editor.nodeName(id, &buf, 64)
+        selectedNodeID = id
+        // Deviation from the brief's `String(cString: buf)`: that overload
+        // (String from a value-type [CChar] array) is deprecated on this
+        // toolchain. Going through the buffer pointer instead calls the
+        // non-deprecated `String(cString: UnsafePointer<CChar>)` overload.
+        selectedNodeName = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
     }
 }

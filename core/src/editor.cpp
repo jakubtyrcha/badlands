@@ -1,7 +1,11 @@
 #include <shapeshifter/ShapeshifterCore.h>
 
+#include <algorithm>
+#include <cstring>
+
 #include "camera.h"
 #include "camera_controller.h"
+#include "picking.h"
 #include "renderer.h"
 #include "scene.h"
 
@@ -11,7 +15,8 @@ struct Editor::Impl {
     Renderer renderer;
     SceneDocument scene;
     CameraController controller;
-    float viewportHeightPts = 0.0f; // for CameraController::pan_view
+    float viewportWidthPts = 0.0f;  // for pick()'s ray_through_view_point
+    float viewportHeightPts = 0.0f; // for CameraController::pan_view and pick()
     int32_t selected = kInvalidNode;
 };
 
@@ -25,6 +30,7 @@ Editor* Editor::create() {
     cube.id = 1;
     cube.shape = Shape::Cube;
     cube.op = Op::Add;
+    cube.name = "Cube 1";
     cube.position = {-0.9f, 0.5f, 0.0f};
     cube.scale = {1.0f, 1.0f, 1.0f};
     impl.scene.add(cube);
@@ -33,6 +39,7 @@ Editor* Editor::create() {
     sphere.id = 2;
     sphere.shape = Shape::Sphere;
     sphere.op = Op::Subtract;
+    sphere.name = "Sphere 1";
     sphere.position = {0.9f, 0.5f, 0.0f};
     sphere.scale = {1.0f, 1.0f, 1.0f};
     impl.scene.add(sphere);
@@ -56,6 +63,7 @@ void Editor::setViewportSize(float widthPts, float heightPts, float backingScale
     impl_->renderer.set_viewport_size(widthPts, heightPts, backingScale);
     if (heightPts > 0.0f) {
         impl_->controller.set_aspect(widthPts / heightPts);
+        impl_->viewportWidthPts = widthPts;
         impl_->viewportHeightPts = heightPts;
     }
 }
@@ -77,6 +85,50 @@ void Editor::cameraPan(float dxPts, float dyPts) {
     if (impl_->viewportHeightPts > 0.0f) {
         impl_->controller.pan_view(dxPts, dyPts, impl_->viewportHeightPts);
     }
+}
+
+PickResult Editor::pick(float x, float y) const {
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
+        return PickResult{kInvalidNode, {}, {}};
+    }
+
+    const Ray ray = impl_->controller.to_camera().ray_through_view_point(
+        x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
+    const std::optional<PickHit> hit = raycast_scene(impl_->scene, ray);
+    if (!hit) {
+        return PickResult{kInvalidNode, {}, {}};
+    }
+
+    return PickResult{
+        hit->node_id,
+        Vec3f{hit->hit.point.x, hit->hit.point.y, hit->hit.point.z},
+        Vec3f{hit->hit.normal.x, hit->hit.normal.y, hit->hit.normal.z},
+    };
+}
+
+void Editor::select(int32_t nodeId) {
+    impl_->selected = nodeId;
+    impl_->renderer.set_scene_lines_dirty(); // selection changes vertex colors
+}
+
+int32_t Editor::selectedNode() const {
+    return impl_->selected;
+}
+
+void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
+    if (buf == nullptr || bufLen <= 0) {
+        return;
+    }
+    static const std::string kEmpty;
+    const Node* node = impl_->scene.find(nodeId);
+    const std::string& name = node ? node->name : kEmpty;
+
+    const int32_t maxCopy = bufLen - 1;
+    const int32_t n = std::min<int32_t>(maxCopy, static_cast<int32_t>(name.size()));
+    if (n > 0) {
+        std::memcpy(buf, name.data(), static_cast<size_t>(n));
+    }
+    buf[n] = '\0';
 }
 
 } // namespace sq

@@ -10,6 +10,10 @@ struct ContentView: View {
             ModeBar(vm: vm)
                 .padding(12)
         }
+        .overlay(alignment: .topTrailing) {
+            InfoPanel(vm: vm)
+                .padding(12)
+        }
         .frame(minWidth: 800, minHeight: 600)
     }
 }
