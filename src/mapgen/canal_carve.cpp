@@ -121,6 +121,9 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
   // One shared stamp array rather than a per-agent visited set: agents run
   // sequentially, so holding the agent id gives O(1) lookup and no per-agent
   // allocation.
+  // Pre-canal terrain: "local ground" for the depth target. Using the live B
+  // would let one canal's trench become the next one's idea of ground level.
+  const Field2D<float> B0 = B;
   std::vector<int32_t> visit_stamp(n, -1);
   // 0xFF = "no onward direction". A trail's LAST cell never gets an outgoing
   // direction — the laying agent stamps it on the cell it leaves, then
@@ -145,7 +148,7 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
 
     int cell = seed_cell;
     float q = p.runoff_m_per_s * area.data[static_cast<size_t>(seed_cell)];
-    float ref = B.data[static_cast<size_t>(cell)];
+    float bed = B.data[static_cast<size_t>(cell)];  // the channel bed, absolute
     bool on_trail = false;
     // Did this agent enter `cell` as virgin ground? Only then does it own the
     // cell's outgoing direction. Stamping unconditionally lets an agent that
@@ -179,7 +182,7 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
         // ref — measured as a 37 m trench on seed 1 before this check.
         const int tnx = cx + kDx[chosen], tny = cy + kDy[chosen];
         if (tnx >= 0 && tny >= 0 && tnx < w && tny < ht &&
-            B.data[static_cast<size_t>(tny) * w + tnx] > ref + p.canal_max_climb_m) {
+            B.data[static_cast<size_t>(tny) * w + tnx] > bed + p.canal_max_climb_m) {
           end = CanalEnd::TrunkEnd;
           break;
         }
@@ -216,10 +219,12 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
           // 30 m wall costs 30 * w_dig against a flat neighbour's ~0, so it
           // only ever wins when there is genuinely nothing else. max_climb_m
           // survives as a cap on the absurd, not as the primary mechanism.
-          if (B.data[j] > ref + p.canal_max_climb_m) continue;
+          if (B.data[j] > bed + p.canal_max_climb_m) continue;
           survivors.push_back(d);
 
-          const float ref_next = ref - p.canal_slope * step_len_of(d, texel_m);
+          const float ref_next =
+              std::min(B0.data[j] - p.canal_depth_m,
+                       bed - p.canal_slope * step_len_of(d, texel_m));
           const float drop = B.data[static_cast<size_t>(cell)] - B.data[j];
           const float excavate = std::max(0.0f, B.data[j] - ref_next);
 
@@ -288,25 +293,33 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
       if (owns_cell || on_trail)
         trail_dir.data[static_cast<size_t>(cell)] = static_cast<uint8_t>(chosen);
 
-      // Descend unconditionally, then cut. `ref` only ever falls and Rule 1
-      // means each cell is entered at most once, so the profile ALONG the
-      // channel is monotone decreasing by construction — the guarantee is
-      // spatial, not merely temporal.
-      ref -= p.canal_slope * step_len_of(chosen, texel_m);
-      const float before = B.data[next];
-      if (before > ref) {
-        B.data[next] = ref;
-        out.stats.total_excavated_m += before - ref;
-        out.stats.max_carve_m = std::max(out.stats.max_carve_m, before - ref);
+      // The bed is RELATIVE to local ground, not an absolute reference that
+      // only falls. `want` re-anchors to the pre-canal terrain every step, so
+      // a descending path keeps the same incision instead of accumulating an
+      // arithmetic series of decrements; `flow` supplies just enough drop to
+      // keep water moving where the ground would otherwise rise.
+      const float step_len = step_len_of(chosen, texel_m);
+      const float want = B0.data[next] - p.canal_depth_m;
+      const float flow = bed - p.canal_slope * step_len;
+      float next_bed = std::min(want, flow);
+      // Never trench deeper than the cap below local ground. A canal that
+      // follows a valley down and then climbs out would otherwise cut the far
+      // wall all the way to the valley-floor reference — 15-19 m, measured.
+      const float floor_bed = B0.data[next] - p.canal_max_depth_m;
+      if (next_bed < floor_bed) {
+        next_bed = floor_bed;
+        if (next_bed >= bed) {  // cannot descend without exceeding the cap
+          end = CanalEnd::DepthCapped;
+          break;
+        }
       }
-      // `ref` FOLLOWS the ground down; it must not float above it. Without
-      // this the descent guarantee only binds where the canal actually cuts:
-      // over ground already below the reference nothing is carved, so the
-      // canal simply follows the terrain — and the terrain can rise, putting
-      // an uphill step in the channel. Clamping here makes the next step's
-      // reference strictly below THIS cell's real height, so the profile is
-      // monotone whether or not a cut happens.
-      ref = std::min(ref, B.data[next]);
+      const float before = B.data[next];
+      if (before > next_bed) {
+        B.data[next] = next_bed;
+        out.stats.total_excavated_m += before - next_bed;
+        out.stats.max_carve_m = std::max(out.stats.max_carve_m, before - next_bed);
+      }
+      bed = std::min(next_bed, B.data[next]);
       if (B.data[next] > B.data[static_cast<size_t>(cell)] + 1e-6f)
         ++out.stats.uphill_carve_steps;  // the descent guarantee, at carve time
 

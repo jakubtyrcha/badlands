@@ -60,14 +60,14 @@ class SourceSets {
 // agent that follows its trunk to the trunk's terminus is behaving correctly,
 // and folding it into BoxedIn hides how often agents genuinely strand. On seed
 // 2, 18 of 27 "box-ins" turned out to be this.
-enum class CanalEnd : uint8_t { LeftMap, Lake, BoxedIn, TrunkEnd, StepCap };
-inline constexpr int kCanalEndCount = 5;
+enum class CanalEnd : uint8_t { LeftMap, Lake, BoxedIn, TrunkEnd, DepthCapped, StepCap };
+inline constexpr int kCanalEndCount = 6;
 
 struct CanalStats {
   int agents = 0;
   int merges = 0;
   int merges_same_root = 0;  // must be 0 — that would be a braid
-  int ends[kCanalEndCount] = {0, 0, 0, 0, 0};
+  int ends[kCanalEndCount] = {0, 0, 0, 0, 0, 0};
   int climb_fallbacks = 0;  // steps taken onto ground above max_climb_m
   float max_carve_m = 0.0f;   // tune against the LONGEST canal, not the mean
   float total_excavated_m = 0.0f;

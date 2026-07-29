@@ -95,11 +95,19 @@ struct ErosionParams {
   // were merged agents correctly following a trunk to its end but mislabelled
   // as boxed-in.
   float canal_seed_area_m2 = 0.0f;
-  // Descent forced per metre travelled. Incision is canal_slope x PATH LENGTH,
-  // so a winding canal cuts proportionally deeper than a straight one between
-  // the same endpoints — tune against the LONGEST canal, not the mean. 0.002
-  // gives ~1 m across a 500 m map, comparable to the plains relief it fixes.
+  // Just enough descent per metre to keep water moving. NOT the depth control
+  // — the bed is re-anchored to local ground every step (see canal_depth_m),
+  // so this no longer accumulates into an arithmetic series down the path.
   float canal_slope = 0.002f;
+  // The channel's target depth BELOW LOCAL GROUND. This is the relative level
+  // a canal exists to create; where the ground descends, the bed descends with
+  // it at this same offset rather than digging ever deeper.
+  float canal_depth_m = 0.5f;
+  // Hard cap on incision below local ground. An agent that would have to
+  // trench deeper than this just to keep descending terminates instead.
+  // Without it a canal that follows a valley down and then climbs out cuts the
+  // far wall to the valley-floor reference — measured at 15-19 m.
+  float canal_max_depth_m = 2.0f;
   float canal_sense_distance_texels = 6.0f;
   // 45 deg. On an 8-neighbour lattice this yields three candidates per step;
   // anything under 45 deg would forbid turning altogether.
