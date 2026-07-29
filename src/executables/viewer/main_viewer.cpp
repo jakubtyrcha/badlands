@@ -15,8 +15,9 @@ int main(int argc, char** argv) {
   // `--screenshot` run can capture the shadow-map/contact-shadow debug masks
   // (0=Off, 1=Combined, 2=ShadowMapOnly, 3=ContactOnly) headlessly.
   auto shadow_debug_mode = badlands::ShadowDebugMode::Off;
-  // Manual LOD switch (Task 2): selects the initial tree LOD level (0..2) so
-  // a `--screenshot` run can capture a specific LOD headlessly.
+  // Manual LOD switch (Task 2): selects the initial tree LOD level (0..3;
+  // 3 = "Multi", an instanced grid with dynamic GPU LOD -- Task 4) so a
+  // `--screenshot` run can capture a specific LOD headlessly.
   int lod = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--generator") == 0 && i + 1 < argc) {
@@ -25,7 +26,7 @@ int main(int argc, char** argv) {
       shadow_debug_mode =
           static_cast<badlands::ShadowDebugMode>(std::atoi(argv[++i]));
     } else if (std::strcmp(argv[i], "--lod") == 0 && i + 1 < argc) {
-      lod = std::clamp(std::atoi(argv[++i]), 0, 2);
+      lod = std::clamp(std::atoi(argv[++i]), 0, 3);
     }
   }
 

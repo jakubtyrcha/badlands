@@ -1,13 +1,15 @@
 #include "executables/viewer/model_viewer_view.hpp"
 
 #include <algorithm>
+#include <array>
 #include <utility>
 
-#include <glm/gtc/matrix_transform.hpp>  // glm::translate
+#include <glm/gtc/matrix_transform.hpp>  // glm::translate, glm::rotate, glm::scale
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
 #include "engine/app/sdl_input_util.hpp"  // NormalizedWheelY
+#include "engine/rendering/gpu_instance_renderer.hpp"  // GpuInstanceRenderer::InstanceInput
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
@@ -37,12 +39,27 @@ constexpr float kTreePreviewHeight = 8.0f;
 // in SimplifyMesh).
 static constexpr float kLodRatios[3] = {1.0f, 0.5f, 0.2f};
 
+// Multi mode ("LOD 3"): a grid of one instanced tree model with dynamic GPU
+// LOD (distance-based, chosen live by InstancedMeshField::Cull -- NOT the
+// manual kLodRatios switch above, which only applies to the single-tree 0/1/2
+// paths).
+constexpr int kGridN = 16;
+constexpr float kGridSpacing = 4.0f;
+// Golden angle: a constant per-instance yaw increment that avoids any
+// repeating row/column alignment across the grid.
+const float kYawIncrement = glm::radians(137.508f);
+// Larger than the single-tree kFloorSize -- the 16x16 grid at kGridSpacing
+// spans 60 world units; 80 gives it a visible margin.
+constexpr float kMultiFloorSize = 80.0f;
+constexpr std::array<float, 2> kMultiLodThresholds = {25.0f, 50.0f};
+
 }  // namespace
 
 bool ModelViewerView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
   queue_ = ctx.queue;
   scene_renderer_ = ctx.scene_renderer;
+  pipeline_gen_ = ctx.pipeline_gen;
 
   if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
     spdlog::error("ModelViewerView::Initialize: MaterialLibrary init failed");
@@ -149,15 +166,97 @@ void ModelViewerView::RebuildScene() {
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  AddFloor(scene_, kFloorSize, matlib_.SolidColor(kFloorGray, kFloorRoughness),
-           kFloorSize / kFloorUvRepeatSpacing);
+  // Every rebuild starts with no instanced field; the Multi branch below
+  // repopulates it. Clearing unconditionally (rather than only in the
+  // non-Multi branches) also releases the previous Multi-mode field's GPU
+  // resources the moment a rebuild switches away from it (generator change
+  // or LOD 3 -> 0/1/2), rather than leaving field_ptr_ dangling.
+  scene_context_.instanced_field_count = 0;
+  tree_field_.reset();
 
   const MeshGenerator& gen = generators_[generator_index_];
+  const bool multi = gen.tree.has_value() && lod_level_ == 3;
+
+  const float floor_size = multi ? kMultiFloorSize : kFloorSize;
+  AddFloor(scene_, floor_size, matlib_.SolidColor(kFloorGray, kFloorRoughness),
+           floor_size / kFloorUvRepeatSpacing);
 
   // Frame on the WORLD-space bounds so the orbit centers on the object as it sits
   // on the floor.
   Aabb world_bounds = Aabb::Empty();
-  if (gen.tree) {
+  if (multi) {
+    // Multi mode: a kGridN x kGridN instanced grid of the selected tree,
+    // GPU-culled with dynamic distance LOD (InstancedMeshField::Cull) --
+    // NOT the manual kLodRatios switch the single-tree 0/1/2 paths use
+    // below. Skips the single-tree bark/leaf entities entirely.
+    const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
+    std::unique_ptr<TreeField> field =
+        BuildTreeField(device_, queue_, *pipeline_gen_, *gen.tree, leaf_view_,
+                      leaf_sampler_, capacity, kMultiLodThresholds);
+    if (!field) {
+      // Mirrors the malformed-generator branch further down: log and bail
+      // with a floor-only scene, leaving the orbit framing unchanged (an
+      // empty world_bounds here would otherwise frame on a degenerate
+      // Aabb::Empty()).
+      spdlog::error(
+          "ModelViewerView::RebuildScene: BuildTreeField failed; Multi mode "
+          "shows floor only");
+      return;
+    }
+
+    // Same scale + rest-on-floor transform the single-tree path derives
+    // from bark.local_bounds (the `else` branch below), so a Multi-mode
+    // grid cell at the origin matches the single-tree preview exactly.
+    const float h =
+        field->bark_local_bounds.max.y - field->bark_local_bounds.min.y;
+    const float s = kTreePreviewHeight / std::max(h, 0.001f);
+    const glm::mat4 xf =
+        glm::translate(glm::mat4(1.0f),
+                      glm::vec3(0.0f, -field->bark_local_bounds.min.y * s,
+                                0.0f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(s));
+
+    Aabb combined_local_bounds = field->bark_local_bounds;
+    if (field->has_leaves) {
+      combined_local_bounds =
+          combined_local_bounds.Union(field->leaf_local_bounds);
+    }
+
+    std::vector<GpuInstanceRenderer::InstanceInput> instances;
+    instances.reserve(capacity);
+    const float half_extent = (kGridN - 1) * kGridSpacing * 0.5f;
+    for (int gz = 0; gz < kGridN; ++gz) {
+      for (int gx = 0; gx < kGridN; ++gx) {
+        const int i = gz * kGridN + gx;
+        const glm::vec3 world_xz(gx * kGridSpacing - half_extent, 0.0f,
+                                 gz * kGridSpacing - half_extent);
+        const glm::mat4 transform =
+            glm::translate(glm::mat4(1.0f), world_xz) *
+            glm::rotate(glm::mat4(1.0f), i * kYawIncrement,
+                       glm::vec3(0.0f, 1.0f, 0.0f)) *
+            xf;
+
+        const Aabb instance_bounds =
+            combined_local_bounds.TransformedBy(transform);
+        world_bounds = world_bounds.Union(instance_bounds);
+        const glm::vec3 instance_center = instance_bounds.Center();
+        const float instance_radius =
+            glm::length(instance_bounds.max - instance_center);
+
+        GpuInstanceRenderer::InstanceInput input;
+        input.transform = transform;
+        input.bounds_sphere = glm::vec4(instance_center, instance_radius);
+        input.model_info = glm::uvec4(0u);
+        instances.push_back(input);
+      }
+    }
+    field->field->UploadInstances(instances);
+
+    tree_field_ = std::move(field);
+    field_ptr_ = tree_field_->field.get();
+    scene_context_.instanced_fields = &field_ptr_;
+    scene_context_.instanced_field_count = 1;
+  } else if (gen.tree) {
     // Two-material tree: deferred solid bark + forward-opaque alpha-cutout leaf
     // cards, sharing the tree's local space (and therefore one preview
     // transform, so the leaves stay attached to the branches).
@@ -290,7 +389,11 @@ void ModelViewerView::DrawUI() {
     ImGui::RadioButton("1", &lod, 1);
     ImGui::SameLine();
     ImGui::RadioButton("2", &lod, 2);
-    ImGui::Text("bark: %d tris   leaves: %d tris", bark_tris_, leaf_tris_);
+    ImGui::SameLine();
+    ImGui::RadioButton("Multi", &lod, 3);
+    if (lod != 3) {
+      ImGui::Text("bark: %d tris   leaves: %d tris", bark_tris_, leaf_tris_);
+    }
   }
   ImGui::End();
 
