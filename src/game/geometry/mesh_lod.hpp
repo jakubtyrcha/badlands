@@ -6,11 +6,18 @@
 // the meshopt call sequence (weld via the canonical indexer, then
 // meshopt_simplify on positions only).
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace badlands {
+
+// Default per-level simplification ratios, passed to SimplifyMesh as
+// target_ratio; level 0 = identity (no simplification -- SimplifyMesh's
+// ratio >= 1.0 short-circuit below). Shared by every caller that wants a
+// plain 3-level LOD chain rather than a bespoke ratio schedule.
+inline constexpr std::array<float, 3> kDefaultLodRatios{1.0f, 0.5f, 0.2f};
 
 struct SimplifiedMesh {
   std::vector<float> vertices;    // same layout as input (floats_per_vertex each)

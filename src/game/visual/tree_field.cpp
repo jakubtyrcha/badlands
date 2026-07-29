@@ -19,21 +19,24 @@ namespace badlands {
 
 namespace {
 
-// Mirrors the viewer's manual-LOD ratios (model_viewer_view.cpp's
-// kLodRatios): LOD0 is identity (SimplifyMesh short-circuits ratio >= 1.0).
-constexpr float kLodRatios[GpuInstanceRenderer::kMaxLods] = {1.0f, 0.5f, 0.2f};
+// mesh_lod.hpp's kDefaultLodRatios sized to GpuInstanceRenderer::kMaxLods:
+// one ratio per LOD bucket this field builds below.
+static_assert(kDefaultLodRatios.size() == GpuInstanceRenderer::kMaxLods);
 
 // Matte roughness for the bark ARM texture -- same rationale/value as
 // model_viewer_view.cpp's single-tree bark_mat_ (SolidColor(..., 0.9f)).
 constexpr float kBarkRoughness = 0.9f;
 
-wgpu::Buffer UploadBuffer(wgpu::Device device, wgpu::Queue queue,
-                          const void* data, uint64_t size,
+// Write-once buffer: contents are fully supplied via mappedAtCreation, so no
+// CopyDst (the buffer is never subsequently queue.WriteBuffer'd) and no
+// wgpu::Queue parameter (the memcpy-into-mapped-range upload never touches
+// the queue).
+wgpu::Buffer UploadBuffer(wgpu::Device device, const void* data, uint64_t size,
                           wgpu::BufferUsage usage) {
   if (size == 0) return nullptr;
   wgpu::BufferDescriptor desc{};
   desc.size = size;
-  desc.usage = usage | wgpu::BufferUsage::CopyDst;
+  desc.usage = usage;
   desc.mappedAtCreation = true;
   wgpu::Buffer buffer = device.CreateBuffer(&desc);
   if (!buffer) return nullptr;
@@ -42,23 +45,23 @@ wgpu::Buffer UploadBuffer(wgpu::Device device, wgpu::Queue queue,
   return buffer;
 }
 
-wgpu::Buffer UploadVertexBuffer(wgpu::Device device, wgpu::Queue queue,
+wgpu::Buffer UploadVertexBuffer(wgpu::Device device,
                                 const std::vector<float>& vertices) {
-  return UploadBuffer(device, queue, vertices.data(),
-                      vertices.size() * sizeof(float),
+  return UploadBuffer(device, vertices.data(), vertices.size() * sizeof(float),
                       wgpu::BufferUsage::Vertex);
 }
 
-wgpu::Buffer UploadIndexBuffer(wgpu::Device device, wgpu::Queue queue,
+wgpu::Buffer UploadIndexBuffer(wgpu::Device device,
                                const std::vector<uint32_t>& indices) {
-  return UploadBuffer(device, queue, indices.data(),
+  return UploadBuffer(device, indices.data(),
                       indices.size() * sizeof(uint32_t),
                       wgpu::BufferUsage::Index);
 }
 
-// Simplifies `mesh` in place to kLodRatios[lod] (a no-op call for lod==0,
-// since SimplifyMesh short-circuits ratio >= 1.0 -- kept unconditional so the
-// LOD0 mesh is guaranteed byte-identical to a freshly generated one).
+// Simplifies `mesh` in place to `ratio` (a no-op for ratio >= 1.0, since
+// SimplifyMesh short-circuits that case -- so calling this with
+// kDefaultLodRatios[0] == 1.0 would still leave the LOD0 mesh byte-identical
+// to a freshly generated one).
 void SimplifyInPlace(StaticTexturedMeshComponent& mesh, float ratio) {
   SimplifiedMesh simplified = SimplifyMesh(
       mesh.vertices, kTexturedMeshFloatsPerVertex, mesh.indices, ratio);
@@ -146,25 +149,31 @@ std::unique_ptr<TreeField> BuildTreeField(
 
   const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(options);
 
+  // Generate the bark/leaf mesh ONCE at LOD0 -- generation is deterministic,
+  // so a fresh GenerateTreeMesh/GenerateLeafMesh call per lod (as this used
+  // to do) would reproduce byte-identical vertices/indices at 3x the cost.
+  // LOD1/2 below simplify a COPY of this LOD0 data at the shared ratio
+  // (kDefaultLodRatios), the single-tree path's exact pattern
+  // (model_viewer_view.cpp).
+  TexturedMeshResult bark_lod0 = GenerateTreeMesh(options, skeleton);
+  TexturedMeshResult leaves_lod0 = GenerateLeafMesh(options, skeleton);
+  const bool has_leaves = leaves_lod0.mesh.vertex_count > 0;
+  tf->bark_local_bounds = bark_lod0.local_bounds;
+  tf->leaf_local_bounds = leaves_lod0.local_bounds;
+  tf->has_leaves = has_leaves;
+
   for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
-    TexturedMeshResult bark = GenerateTreeMesh(options, skeleton);
-    TexturedMeshResult leaves = GenerateLeafMesh(options, skeleton);
-    const bool has_leaves = leaves.mesh.vertex_count > 0;
+    StaticTexturedMeshComponent bark_mesh = bark_lod0.mesh;
+    StaticTexturedMeshComponent leaves_mesh = leaves_lod0.mesh;
 
-    if (lod == 0) {
-      tf->bark_local_bounds = bark.local_bounds;
-      tf->leaf_local_bounds = leaves.local_bounds;
-      tf->has_leaves = has_leaves;
-    }
-
-    if (kLodRatios[lod] < 1.0f) {
-      SimplifyInPlace(bark.mesh, kLodRatios[lod]);
+    if (kDefaultLodRatios[lod] < 1.0f) {
+      SimplifyInPlace(bark_mesh, kDefaultLodRatios[lod]);
       if (has_leaves) {
-        SimplifyInPlace(leaves.mesh, kLodRatios[lod]);
+        SimplifyInPlace(leaves_mesh, kDefaultLodRatios[lod]);
       }
     }
 
-    if (bark.mesh.indices.empty()) {
+    if (bark_mesh.indices.empty()) {
       spdlog::error("BuildTreeField: empty bark mesh at lod {}", lod);
       return nullptr;
     }
@@ -173,12 +182,10 @@ std::unique_ptr<TreeField> BuildTreeField(
     TreeField::LodBuffers& buffers = tf->lod_buffers[lod];
 
     // --- Bark submesh (0, kDeferred). ---
-    buffers.bark_vertex_buffer =
-        UploadVertexBuffer(device, queue, bark.mesh.vertices);
-    buffers.bark_index_buffer =
-        UploadIndexBuffer(device, queue, bark.mesh.indices);
+    buffers.bark_vertex_buffer = UploadVertexBuffer(device, bark_mesh.vertices);
+    buffers.bark_index_buffer = UploadIndexBuffer(device, bark_mesh.indices);
     const uint32_t bark_index_count =
-        static_cast<uint32_t>(bark.mesh.indices.size());
+        static_cast<uint32_t>(bark_mesh.indices.size());
 
     InstanceParams bark_params;
     // instanced_gbuffer's group-0 texture bindings (albedo@1, normal@3,
@@ -225,11 +232,10 @@ std::unique_ptr<TreeField> BuildTreeField(
     // --- Leaf submesh (1, kForwardOpaque), only if the tree has leaves. ---
     if (has_leaves) {
       buffers.leaf_vertex_buffer =
-          UploadVertexBuffer(device, queue, leaves.mesh.vertices);
-      buffers.leaf_index_buffer =
-          UploadIndexBuffer(device, queue, leaves.mesh.indices);
+          UploadVertexBuffer(device, leaves_mesh.vertices);
+      buffers.leaf_index_buffer = UploadIndexBuffer(device, leaves_mesh.indices);
       const uint32_t leaf_index_count =
-          static_cast<uint32_t>(leaves.mesh.indices.size());
+          static_cast<uint32_t>(leaves_mesh.indices.size());
 
       InstanceParams leaf_params;
       // instanced_forward's single group-0 texture (albedo@1 -- see

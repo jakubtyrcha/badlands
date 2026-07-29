@@ -34,15 +34,10 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 // units are tens-of-meters tall, which frames far away and reads tiny).
 constexpr float kTreePreviewHeight = 8.0f;
 
-// Manual LOD ratios for the viewer's LOD 0/1/2 radio switch, passed to
-// SimplifyMesh as target_ratio. LOD 0 is identity (ratio >= 1.0 short-circuits
-// in SimplifyMesh).
-static constexpr float kLodRatios[3] = {1.0f, 0.5f, 0.2f};
-
 // Multi mode ("LOD 3"): a grid of one instanced tree model with dynamic GPU
 // LOD (distance-based, chosen live by InstancedMeshField::Cull -- NOT the
-// manual kLodRatios switch above, which only applies to the single-tree 0/1/2
-// paths).
+// manual kDefaultLodRatios switch below (mesh_lod.hpp), which only applies to
+// the single-tree 0/1/2 paths).
 constexpr int kGridN = 16;
 constexpr float kGridSpacing = 8.0f;
 // Golden angle: a constant per-instance yaw increment that avoids any
@@ -191,7 +186,7 @@ void ModelViewerView::RebuildScene() {
   if (multi) {
     // Multi mode: a kGridN x kGridN instanced grid of the selected tree,
     // GPU-culled with dynamic distance LOD (InstancedMeshField::Cull) --
-    // NOT the manual kLodRatios switch the single-tree 0/1/2 paths use
+    // NOT the manual kDefaultLodRatios switch the single-tree 0/1/2 paths use
     // below. Skips the single-tree bark/leaf entities entirely.
     const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
     std::unique_ptr<TreeField> field =
@@ -286,7 +281,7 @@ void ModelViewerView::RebuildScene() {
     if (lod_level_ > 0) {
       SimplifiedMesh s = SimplifyMesh(bark.mesh.vertices,
                                      kTexturedMeshFloatsPerVertex,
-                                     bark.mesh.indices, kLodRatios[lod_level_]);
+                                     bark.mesh.indices, kDefaultLodRatios[lod_level_]);
       bark.mesh.vertices = std::move(s.vertices);
       bark.mesh.indices = std::move(s.indices);
       bark.mesh.vertex_count = s.vertex_count;
@@ -296,7 +291,7 @@ void ModelViewerView::RebuildScene() {
         SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
                                         kTexturedMeshFloatsPerVertex,
                                         leaves.mesh.indices,
-                                        kLodRatios[lod_level_]);
+                                        kDefaultLodRatios[lod_level_]);
         leaves.mesh.vertices = std::move(ls.vertices);
         leaves.mesh.indices = std::move(ls.indices);
         leaves.mesh.vertex_count = ls.vertex_count;
