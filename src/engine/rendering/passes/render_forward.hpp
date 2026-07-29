@@ -63,6 +63,15 @@ wgpu::BindGroup BuildForwardOpaqueEngineBindGroup(RenderingMaterialInstance* ins
                                                   FrameContext& frame,
                                                   const ForwardEngineResources& engine);
 
+// True iff `engine` carries every resource the forward-opaque @group(2) bind
+// actually consumes (shadow_map && ibl_prefiltered && brdf_lut — never
+// scene_depth/scene_color, see BuildForwardOpaqueEngineBindGroup above).
+// Shared gate: RenderForwardMeshes below and InstancedMeshField::Draw
+// (instanced_mesh_field.cpp, for its forward-opaque submeshes) both use this
+// exact check before binding group 2, so a group-2-declaring material is
+// never drawn with a required group 2 left unbound in either path.
+bool ForwardOpaqueEngineAvailable(const ForwardEngineResources& engine);
+
 // Draw ForwardOpaqueRenderable textured meshes. For each draw whose material
 // declares @group(2), binds a purpose-fit 6-entry group (shadow map + IBL
 // prefiltered env + BRDF LUT) built from `engine`. Availability is gated on

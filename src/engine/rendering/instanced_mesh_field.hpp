@@ -94,6 +94,21 @@ class InstancedMeshField {
   // shadow_map/ibl_prefiltered/brdf_lut are unavailable — never drawn with a
   // required group 2 left unbound. `engine` is unused (no gate) for slots
   // whose material doesn't declare group 2.
+  //
+  // CONTRACT: all group-2-declaring materials drawn by ONE field's Draw()
+  // call must use the standard 6-entry engine group-2 layout (shadow map +
+  // IBL, see BuildForwardOpaqueEngineBindGroup) — the same assumption the
+  // forward passes (render_forward.cpp's RenderForwardMeshes) make for every
+  // ForwardOpaqueRenderable entity. The shared bind group above is built once,
+  // from the FIRST such slot drawn this call, then reused verbatim for every
+  // other group-2 slot — including slots resolved through a DIFFERENT
+  // MaterialInstanceFactory / pipeline than the first slot's, as long as
+  // that pipeline declares a structurally identical (group-equivalent)
+  // group-2 layout; WebGPU only requires layout equivalence at SetBindGroup,
+  // not the same pipeline or the same layout object. A slot whose material
+  // declares group 2 with a DIFFERENT layout would fail Dawn validation when
+  // this shared bind group is bound against its pipeline — such a mix is not
+  // supported by one field and is the caller's responsibility to avoid.
   void Draw(RenderPassContext& pass, FrameContext& frame, PassKind pass_kind,
             const ForwardEngineResources* engine = nullptr);
 

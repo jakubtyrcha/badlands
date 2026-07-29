@@ -2661,6 +2661,333 @@ TEST_CASE("InstancedMeshField: Draw(kForwardOpaque, nullptr) skips the "
   CHECK(forward_c.b < 0.05f);
 }
 
+// ---------------------------------------------------------------------------
+// F4A contract test: the shared @group(2) bind group InstancedMeshField::Draw
+// builds (lazily, from the first group-2-declaring slot drawn this call) is
+// reused for every other group-2 slot in the SAME call -- including slots
+// resolved through a DIFFERENT MaterialInstanceFactory / pipeline than the
+// first slot's, as long as that pipeline declares the same 6-entry engine
+// group-2 layout (see the CONTRACT paragraph on Draw()'s declaration in
+// instanced_mesh_field.hpp). Two `instanced_forward` factories built with
+// different extra_features ({"translucency"} vs none) compile to genuinely
+// DIFFERENT pipelines (a different WGSL variant -- see
+// instanced_forward.wesl's @if(translucency) transmissionContribution
+// overload), yet both declare the identical group-2 layout: the
+// `translucency` feature only swaps that fragment-stage helper's body, never
+// touching group 2. One field, one bucket, two forward-opaque submeshes --
+// submesh 0 resolved through the translucency pipeline, submesh 1 through the
+// plain pipeline -- each with a distinct tint and mesh-local offset (the
+// shared-slice test's geometry pattern, QuadVerticesOffset). Cull + Draw
+// under a Dawn validation-error scope: NoError (proves the shared bind group
+// binds validly against BOTH pipelines, not just the one it was built from)
+// AND both submeshes' colors land at their expected pixels (proves both
+// actually drew, not merely that nothing errored).
+// ---------------------------------------------------------------------------
+TEST_CASE("InstancedMeshField: shared group-2 bind group is valid across two "
+          "distinct pipelines with the same layout",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory_translucent = MakeInstancedFactory(
+      g, "instanced_forward", MaterialPassType::kForwardOpaque,
+      {wgpu::TextureFormat::BGRA8Unorm}, {"translucency"});
+  REQUIRE(factory_translucent != nullptr);
+  auto factory_plain = MakeInstancedFactory(g, "instanced_forward",
+                                            MaterialPassType::kForwardOpaque,
+                                            {wgpu::TextureFormat::BGRA8Unorm}, {});
+  REQUIRE(factory_plain != nullptr);
+
+  MaterialInstanceCache cache;
+  auto make_mat = [&](const char* name, MaterialInstanceFactory& factory,
+                      glm::vec4 tint) {
+    InstanceParams params;
+    params.uniform_overrides["tint"] = MaterialParameterValue(tint);
+    params.uniform_overrides["params"] =
+        MaterialParameterValue(glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));
+    params.uniform_overrides["transmission"] =
+        MaterialParameterValue(glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
+    params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+    entt::id_type key = ComposeMaterialCacheKey(
+        entt::hashed_string{name}.value(), GeometryType::kInstancedMesh,
+        RenderPassType::kForward, 0);
+    auto handle = cache.GetOrCreate(key, factory, GeometryType::kInstancedMesh,
+                                    MaterialPassType::kForwardOpaque,
+                                    RenderPassType::kForward, params);
+    REQUIRE(handle);
+    REQUIRE(handle->IsValid());
+    REQUIRE(handle->DeclaresBindGroup(2));
+    return handle;
+  };
+  auto mat_translucent = make_mat("g2_contract_translucent", *factory_translucent,
+                                  glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));  // red
+  auto mat_plain = make_mat("g2_contract_plain", *factory_plain,
+                            glm::vec4(0.0f, 0.0f, 1.0f, 1.0f));  // blue
+  RenderingMaterialInstance* mat_translucent_ptr = mat_translucent.operator->();
+  RenderingMaterialInstance* mat_plain_ptr = mat_plain.operator->();
+  // Sanity: these really are two distinct pipeline objects, not the cache
+  // coincidentally handing back the same one -- otherwise this test would
+  // not exercise the "different pipelines" half of the contract.
+  REQUIRE(mat_translucent_ptr->GetPipeline().Get() !=
+         mat_plain_ptr->GetPipeline().Get());
+
+  constexpr float kOffset = 0.35f;
+  constexpr float kHalfExtent = 0.15f;
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer ibuf =
+      UploadBuffer(g.device, idx.data(), sizeof(idx), wgpu::BufferUsage::Index);
+  std::vector<float> verts_translucent =
+      QuadVerticesOffset(kHalfExtent, {-kOffset, 0.0f});
+  std::vector<float> verts_plain = QuadVerticesOffset(kHalfExtent, {kOffset, 0.0f});
+  wgpu::Buffer vbuf_translucent =
+      UploadBuffer(g.device, verts_translucent.data(),
+                  verts_translucent.size() * sizeof(float),
+                  wgpu::BufferUsage::Vertex);
+  wgpu::Buffer vbuf_plain =
+      UploadBuffer(g.device, verts_plain.data(),
+                  verts_plain.size() * sizeof(float), wgpu::BufferUsage::Vertex);
+
+  // thresholds pushed to +inf: the one instance always lands lod0 -> bucket 0.
+  InstancedMeshField field(g.device, g.queue, *g.gen, /*capacity=*/1,
+                           /*num_models=*/1, /*num_submeshes=*/2,
+                           std::array<float, 2>{1e30f, 1e30f});
+  REQUIRE(field.IsValid());
+
+  GpuInstanceRenderer::InstanceInput instance =
+      MakeInstance(glm::vec3(0.0f, 0.0f, -5.0f), /*model=*/0u, /*radius=*/0.5f);
+  field.UploadInstances(
+      std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
+
+  field.SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, vbuf_translucent, ibuf,
+                   wgpu::IndexFormat::Uint32, 6,
+                   InstancedMeshField::PassKind::kForwardOpaque,
+                   mat_translucent_ptr);
+  field.SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/1, vbuf_plain, ibuf,
+                   wgpu::IndexFormat::Uint32, 6,
+                   InstancedMeshField::PassKind::kForwardOpaque, mat_plain_ptr);
+  REQUIRE(field.HasPass(InstancedMeshField::PassKind::kForwardOpaque));
+
+  ForwardEngineResources engine = MakeDummyForwardEngineResources(g);
+  // MakeDummyForwardEngineResources' brdf_lut is (255,255,0,255) -- deliberately
+  // pushing the OTHER forward-material test's ambient-specular term
+  // (prefilteredColor * (F0*brdfR+brdfG)) past 1.0 so it shades non-clear
+  // regardless of view/sun/albedo. That achromatic (albedo-independent)
+  // specular term would swamp both submeshes to white here, washing out this
+  // test's tint distinction, so this test zeroes it (brdf_lut = (0,0,0,1))
+  // -- same 6-entry group-2 layout, just a dimmer value -- leaving ambient
+  // DIFFUSE (which IS scaled by each submesh's own albedo/tint) as the only
+  // light source.
+  engine.brdf_lut =
+      test::CreateRgbaTexture(g.device, g.queue, 1, 1, {0, 0, 0, 255}).CreateView();
+
+  // MakeOrthoFrame's ambient is deliberately blinding (SH L0 = 30); boosted
+  // further here (still moderate, not saturating) so each submesh's
+  // albedo-scaled ambient diffuse term reads back clearly per-channel.
+  UniformData frame_uniforms = MakeOrthoFrame();
+  frame_uniforms.ambient_sh[0] = glm::vec4(3.0f, 3.0f, 3.0f, 0.0f);
+  ColorRenderTarget target(g.device, kInstTarget, kInstTarget,
+                           wgpu::TextureFormat::BGRA8Unorm);
+  REQUIRE(target.IsValid());
+
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  Camera cull_camera = MakeCullCamera(1.0f);
+  field.Cull(frame, cull_camera);
+  {
+    wgpu::RenderPassColorAttachment ca = ClearAttachment(target.GetView());
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = 1;
+    desc.colorAttachments = &ca;
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    field.Draw(pass, frame, InstancedMeshField::PassKind::kForwardOpaque, &engine);
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool scope_done = false;
+  bool validation_error = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView msg) {
+        if (type != wgpu::ErrorType::NoError) {
+          validation_error = true;
+          INFO("captured error: "
+               << (msg.length > 0 ? std::string(msg.data, msg.length)
+                                  : std::string("(no message)")));
+        }
+        scope_done = true;
+      });
+  while (!scope_done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+  CHECK_FALSE(validation_error);
+
+  test::WaitForGpu(g.instance, g.device, g.queue);
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage img = rb.ReadTextureSync(target.GetTexture(), kInstTarget, kInstTarget,
+                                    wgpu::TextureFormat::BGRA8Unorm);
+
+  auto px_translucent = WorldXyToPixel({-kOffset, 0.0f});
+  auto px_plain = WorldXyToPixel({kOffset, 0.0f});
+  CpuImage::Color c_translucent =
+      img.GetPixel(px_translucent.first, px_translucent.second);
+  CpuImage::Color c_plain = img.GetPixel(px_plain.first, px_plain.second);
+  INFO("submesh0 (translucency pipeline, red) @ (" << px_translucent.first << ","
+                    << px_translucent.second << ") rgb=" << (int)c_translucent.r
+                    << "," << (int)c_translucent.g << "," << (int)c_translucent.b);
+  CHECK(c_translucent.r > 180);
+  CHECK(c_translucent.g < 60);
+  CHECK(c_translucent.b < 60);
+  INFO("submesh1 (plain pipeline, blue) @ (" << px_plain.first << ","
+                    << px_plain.second << ") rgb=" << (int)c_plain.r << ","
+                    << (int)c_plain.g << "," << (int)c_plain.b);
+  CHECK(c_plain.r < 60);
+  CHECK(c_plain.g < 60);
+  CHECK(c_plain.b > 180);
+}
+
+// ---------------------------------------------------------------------------
+// F9 guard test: SetSubmesh must reject an out-of-range (bucket, submesh)
+// cleanly -- no crash, HasPass reflecting only the slots actually configured
+// (a rejected call must not fabricate a phantom pass), and a subsequent
+// Cull+Draw under a Dawn validation-error scope is NoError with nothing
+// extra drawn (only the one valid slot's color appears).
+// ---------------------------------------------------------------------------
+TEST_CASE("InstancedMeshField::SetSubmesh rejects out-of-range lod/submesh cleanly",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {});
+  REQUIRE(factory != nullptr);
+
+  MaterialInstanceCache cache;
+  InstanceParams params;
+  params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+  params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type key = ComposeMaterialCacheKey(
+      entt::hashed_string{"setsubmesh_guard_valid"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kGBuffer, 0);
+  auto handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
+                                  MaterialPassType::kDeferred,
+                                  RenderPassType::kGBuffer, params);
+  REQUIRE(handle);
+  REQUIRE(handle->IsValid());
+
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer ibuf =
+      UploadBuffer(g.device, idx.data(), sizeof(idx), wgpu::BufferUsage::Index);
+  std::vector<float> verts = QuadVerticesSized(0.15f);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+
+  // num_models=1 -> num_buckets = kMaxLods (3); num_submeshes=1 -> submesh 0
+  // is the field's only valid submesh slot.
+  InstancedMeshField field(g.device, g.queue, *g.gen, /*capacity=*/1,
+                           /*num_models=*/1, /*num_submeshes=*/1,
+                           std::array<float, 2>{1e30f, 1e30f});
+  REQUIRE(field.IsValid());
+
+  GpuInstanceRenderer::InstanceInput instance =
+      MakeInstance(glm::vec3(0.0f, 0.0f, -5.0f), /*model=*/0u, /*radius=*/0.5f);
+  field.UploadInstances(
+      std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
+
+  // The one valid slot.
+  field.SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, vbuf, ibuf,
+                   wgpu::IndexFormat::Uint32, 6,
+                   InstancedMeshField::PassKind::kDeferred, handle.operator->());
+  REQUIRE(field.HasPass(InstancedMeshField::PassKind::kDeferred));
+  REQUIRE_FALSE(field.HasPass(InstancedMeshField::PassKind::kForwardOpaque));
+
+  // Out-of-range lod: BucketId(0, kMaxLods) == num_buckets (3) -- one past
+  // the end. Tagged kForwardOpaque (a DIFFERENT pass than the valid slot's)
+  // so a leaked write would flip HasPass(kForwardOpaque) below.
+  field.SetSubmesh(/*model=*/0, /*lod=*/GpuInstanceRenderer::kMaxLods,
+                   /*submesh=*/0, vbuf, ibuf, wgpu::IndexFormat::Uint32, 6,
+                   InstancedMeshField::PassKind::kForwardOpaque,
+                   handle.operator->());
+  // Out-of-range submesh (num_submeshes == 1, so submesh 1 is out of range).
+  field.SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/1, vbuf, ibuf,
+                   wgpu::IndexFormat::Uint32, 6,
+                   InstancedMeshField::PassKind::kForwardOpaque,
+                   handle.operator->());
+
+  // Neither rejected call disturbed the valid slot or fabricated a new pass.
+  CHECK(field.HasPass(InstancedMeshField::PassKind::kDeferred));
+  CHECK_FALSE(field.HasPass(InstancedMeshField::PassKind::kForwardOpaque));
+
+  UniformData frame_uniforms = MakeOrthoFrame();
+  ColorRenderTarget normals_t(g.device, kInstTarget, kInstTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kInstTarget, kInstTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kInstTarget, kInstTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(albedo_t.IsValid());
+
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  Camera cull_camera = MakeCullCamera(1.0f);
+  field.Cull(frame, cull_camera);
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        ClearAttachment(normals_t.GetView()), ClearAttachment(albedo_t.GetView()),
+        ClearAttachment(material_t.GetView())};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    field.Draw(pass, frame, InstancedMeshField::PassKind::kDeferred);
+    // Nothing is configured for kForwardOpaque (both attempts above were
+    // rejected) -- Draw() must be a safe no-op here, never crash.
+    field.Draw(pass, frame, InstancedMeshField::PassKind::kForwardOpaque);
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool scope_done = false;
+  bool validation_error = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView msg) {
+        if (type != wgpu::ErrorType::NoError) {
+          validation_error = true;
+          INFO("captured error: "
+               << (msg.length > 0 ? std::string(msg.data, msg.length)
+                                  : std::string("(no message)")));
+        }
+        scope_done = true;
+      });
+  while (!scope_done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+  CHECK_FALSE(validation_error);
+
+  test::WaitForGpu(g.instance, g.device, g.queue);
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage albedo = rb.ReadTextureSync(albedo_t.GetTexture(), kInstTarget,
+                                       kInstTarget, GBuffer::kAlbedoFormat);
+
+  auto center_px = WorldXyToPixel({0.0f, 0.0f});
+  CpuImage::Color c = albedo.GetPixel(center_px.first, center_px.second);
+  INFO("valid slot pixel rgb = " << (int)c.r << "," << (int)c.g << "," << (int)c.b);
+  CHECK(c.r > 180);
+  CHECK(c.g < 60);
+  CHECK(c.b < 60);
+}
+
 // ===========================================================================
 // Task 3: SceneRenderer drives SceneContext::instanced_fields. Task 3 wired
 // SceneRenderer::Render to: Cull() every field BEFORE Pass 0 (frame.Begin,
