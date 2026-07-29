@@ -26,6 +26,7 @@
 #include "game/factors_manifest.hpp"
 #include "game/scenario.h"
 #include "game/scene/blockout_materials.hpp"
+#include "game/skill_manifest.hpp"
 #include "mapgen/biomes.hpp"
 
 namespace badlands {
@@ -244,6 +245,12 @@ void AiSandboxView::SeedTown() {
     if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
       sim_.SetCreatureCatalog(catalog);
     }
+    // Skill templates as data, same as game_view.cpp -- both apps must agree
+    // on skill specs (a missing file keeps the compiled defaults).
+    badlands::SkillCatalog arena_skills = sim_.Skills();
+    if (badlands::LoadSkillCatalog("assets/skills/skills.json", arena_skills)) {
+      sim_.SetSkillCatalog(arena_skills);
+    }
     for (const badlands::ScenarioSpawn& s : scenario_.spawns) {
       sim_.SpawnCreature(s.creature, s.team, s.x, s.z);
     }
@@ -261,6 +268,14 @@ void AiSandboxView::SeedTown() {
   badlands::SimFactors factors = sim_.Factors();
   if (badlands::LoadSimFactors("assets/creatures/factors.json", factors)) {
     sim_.SetFactors(factors);
+  }
+
+  // Skill templates as data, same as game_view.cpp -- both apps must agree
+  // on skill specs (a missing file keeps the compiled defaults). Must happen
+  // before ticking -- initial config, like the factors load just above.
+  badlands::SkillCatalog skills = sim_.Skills();
+  if (badlands::LoadSkillCatalog("assets/skills/skills.json", skills)) {
+    sim_.SetSkillCatalog(skills);
   }
 
   // Everything goes through game_dispatch, so the seed is itself a logged

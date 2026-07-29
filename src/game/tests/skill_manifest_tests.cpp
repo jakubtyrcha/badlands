@@ -1,6 +1,8 @@
 // Skill template manifest: designer-authored skill data as JSON. Mirrors
-// factors_manifest_tests -- pure CPU, reads the shipped file, so
-// WORKING_DIRECTORY is the repo root.
+// factors_manifest_tests -- pure CPU, all cases load a test-local inline
+// fixture (never the shipped assets/skills/skills.json -- tests do not
+// assert on shipped data files), except "missing file", whose path is
+// relative, so WORKING_DIRECTORY is still the repo root (CMakeLists.txt).
 
 #include "game/skill_manifest.hpp"
 
@@ -76,9 +78,16 @@ TEST_CASE("missing file returns false and leaves the catalog untouched") {
     CHECK(cat.specs[0].cooldown_seconds == 20.0f);
 }
 
-TEST_CASE("the shipped skill manifest loads") {
+TEST_CASE("a full record (cooldown + effect text together) parses correctly") {
+    // Finding 6 review fix: tests never assert on shipped data files (this
+    // case used to load the real assets/skills/skills.json and pin its
+    // content) -- an inline fixture exercises the same "cooldown and effect
+    // set together" shape without coupling the test to designer-authored
+    // data.
+    TempManifest m(
+        R"({"Calcify": {"cooldown": 20, "effect": "Absorbs the next physical strike, then shatters."}})");
     SkillCatalog cat;
-    REQUIRE(badlands::LoadSkillCatalog("assets/skills/skills.json", cat));
+    REQUIRE(badlands::LoadSkillCatalog(m.path, cat));
     const auto& c = cat.specs[static_cast<size_t>(SkillId::Calcify)];
     CHECK(c.cooldown_seconds == 20.0f);
     CHECK(c.effect == "Absorbs the next physical strike, then shatters.");
