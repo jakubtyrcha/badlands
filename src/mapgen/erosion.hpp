@@ -70,24 +70,30 @@ struct ErosionParams {
   // --- canal pre-carve (see canal_carve.hpp) ---
   // Drainage area a highland-edge cell needs before it seeds a canal agent.
   //
-  // DISABLED (0) by default. The mechanism is correct — fixtures pass, zero
-  // uphill carves, zero braids, max carve 2.9 m — but it does not move the
-  // production numbers it exists to move. Measured on seed 2 at 256^2:
+  // DISABLED (0) by default. The mechanism is sound — fixtures pass, zero
+  // uphill carves at carve time, zero braids, deterministic — but it does not
+  // move the number it exists to move, across every climb policy tried.
   //
-  //   threshold   agents   boxed-in   flood-parent routed   (baseline 40.9%)
-  //      5000        14      14/14           41.5%
-  //      1500        27      27/27           41.8%
-  //       400       132     104/132          44.6%
-  //       100       590     467/590          45.8%
+  // Seed 2 at 256^2, flood-parent routed against a 40.9% baseline:
+  //   hard 3 m veto        14 agents -> 41.5%   (stranded 7 of 9 non-merged)
+  //   veto + fallback      27 agents -> 40.6%   (max carve back to 31 m)
+  //   priced by w_dig      27 agents -> 43.8%   132 agents -> 47.5%
+  // Consistently flat to WORSE, and worse with more agents.
   //
-  // More agents makes it WORSE, so this is not a threshold to tune. The
-  // dominant failure is that 79-100% of agents strand themselves, with
-  // climb-blocking at zero throughout: strict self-avoidance over a
-  // three-candidate turn cone means an agent that curls alongside its own
-  // trail finds all three forward cells already its own and dies. That is
-  // structural, and self-avoidance is what the loop and descent guarantees
-  // rest on, so it cannot simply be relaxed. See the spec's "Premature
-  // termination" risk, which anticipated the failure but not its scale.
+  // The reason is structural and NOT the agents: the metric counts channel
+  // texels whose receiver came from the flood wavefront, and route_flow
+  // excludes every in_lake cell from steepest descent when no lake tag is
+  // supplied. Canals cut one-texel channels; the plain either side stays flat
+  // and still epsilon-floods, so in_lake barely moves (18.0% -> 17.6%) and the
+  // exclusion still covers the same channels. Until the lake tag is threaded
+  // through erode() (L5 in the two-kind-lakes spec), no amount of canal
+  // carving can move this.
+  //
+  // An earlier note here blamed self-avoidance. That was wrong: separating the
+  // termination causes showed only 2 of 27 agents genuinely self-avoided into
+  // a corner, 7 were stopped by the then-hard climb veto, and the other 18
+  // were merged agents correctly following a trunk to its end but mislabelled
+  // as boxed-in.
   float canal_seed_area_m2 = 0.0f;
   // Descent forced per metre travelled. Incision is canal_slope x PATH LENGTH,
   // so a winding canal cuts proportionally deeper than a straight one between
@@ -99,10 +105,11 @@ struct ErosionParams {
   // anything under 45 deg would forbid turning altogether.
   float canal_max_turn_angle_rad = 0.79f;
   float canal_wander_chance = 0.10f;
-  // Veto against tunnelling a mountain, NOT against climbing: stepping uphill
-  // is allowed and the carve makes it downhill. canal_w_dig prices the
-  // ordinary case rather than prohibiting it.
-  float canal_max_climb_m = 3.0f;
+  // A cap on the ABSURD, not the primary mechanism: canal_w_dig prices rising
+  // ground so a wall only ever wins when nothing else is available. At 3 m
+  // this bound was doing the steering itself and stranded most agents against
+  // the 0.75 m/m mountain cone; generous enough now that it rarely binds.
+  float canal_max_climb_m = 20.0f;
   float canal_water_falloff_m = 2.0f;
   // Scoring weights. Every term the score combines is in METRES, so these read
   // as exchange rates rather than opaque gains.

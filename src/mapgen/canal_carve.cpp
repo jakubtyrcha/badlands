@@ -171,7 +171,7 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
           // The trunk ends here — it left the map or was absorbed. Follow it
           // no further; stepping on would be a blind move onto whatever
           // happens to lie ahead.
-          end = CanalEnd::BoxedIn;
+          end = CanalEnd::TrunkEnd;
           break;
         }
         // Rule 2 applies on this path TOO. Skipping it let a trunk lead an
@@ -180,7 +180,7 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
         const int tnx = cx + kDx[chosen], tny = cy + kDy[chosen];
         if (tnx >= 0 && tny >= 0 && tnx < w && tny < ht &&
             B.data[static_cast<size_t>(tny) * w + tnx] > ref + p.canal_max_climb_m) {
-          end = CanalEnd::ClimbBlocked;
+          end = CanalEnd::TrunkEnd;
           break;
         }
       } else {
@@ -201,8 +201,22 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
             continue;
           }
           const size_t j = static_cast<size_t>(ny) * w + nx;
-          if (visit_stamp[j] == agent) continue;                        // Rule 1
-          if (B.data[j] > ref + p.canal_max_climb_m) continue;          // Rule 2
+          if (visit_stamp[j] == agent) continue;  // Rule 1: hard, it is the loop guarantee
+          // Rising ground is PRICED, not filtered. Two earlier shapes of this
+          // both failed, and the measurements are why:
+          //   - as a hard veto at 3 m it stranded 7 of the 9 non-merged agents
+          //     on seed 2, because an agent seeded on the highland edge faces
+          //     the 0.75 m/m cone and a three-candidate turn cone cannot swing
+          //     away in time;
+          //   - filtering it out and falling back to the least-bad option when
+          //     nothing else survived fixed the stranding but let cornered
+          //     agents tunnel mountains: max carve went back to 31 m, because
+          //     a filtered candidate never reaches w_dig to be charged for.
+          // Scoring every candidate lets w_dig do the work it exists for: a
+          // 30 m wall costs 30 * w_dig against a flat neighbour's ~0, so it
+          // only ever wins when there is genuinely nothing else. max_climb_m
+          // survives as a cap on the absurd, not as the primary mechanism.
+          if (B.data[j] > ref + p.canal_max_climb_m) continue;
           survivors.push_back(d);
 
           const float ref_next = ref - p.canal_slope * step_len_of(d, texel_m);
@@ -244,12 +258,15 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
           if (offmap_dir >= 0) {
             trail_dir.data[static_cast<size_t>(cell)] = static_cast<uint8_t>(offmap_dir);
             end = CanalEnd::LeftMap;
-          } else {
-            end = CanalEnd::BoxedIn;
+            break;
           }
+          end = CanalEnd::BoxedIn;
           break;
         }
-        if (rng.unit() < p.canal_wander_chance)
+        // `survivors` is EMPTY whenever the climb fallback fired — every
+        // in-bounds candidate was too tall — so the emptiness guard is load
+        // bearing, not defensive: `% survivors.size()` is a modulo by zero.
+        if (!survivors.empty() && rng.unit() < p.canal_wander_chance)
           chosen = survivors[rng.next() % survivors.size()];
       }
 
