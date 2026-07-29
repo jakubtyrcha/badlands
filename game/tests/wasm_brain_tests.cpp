@@ -122,6 +122,23 @@ CharacterDesc durable_rat(float x, float z) {
     return d;
 }
 
+// A deer built with LOTS of hp (Finding A's own framing) -- durable enough
+// that it survives many bow volleys inside this test's window, so "does the
+// hunter keep firing" is what the test measures, never "did it just die
+// after one shot" (which the pre-fix one-shot-at-adoption bug would also
+// pass trivially against a normal 8-hp deer).
+uint32_t spawn_durable_deer(BadlandsGame& g, glm::vec2 pos) {
+    CharacterDesc d{};
+    d.archetype = Archetype::Critter;
+    d.pos_x = pos.x;
+    d.pos_z = pos.y;
+    d.team = 2;
+    d.hp = 100000.0f;
+    d.move_speed = 3.0f;
+    d.size_x = d.size_y = d.size_z = 0.7f;
+    return spawn_into(g, d);
+}
+
 }  // namespace
 
 // --- wasm plumbing smokes (fixed-decision brains) ---------------------------
@@ -355,6 +372,50 @@ TEST_CASE("wasm: a two-attack hero's brain-picked swings prefer the higher-damag
     // Mirror B: damages swapped -> the SAME brain now picks index 0, proving
     // the choice follows base_damage, not index position.
     run_mirror(/*dmg0=*/9.0f, /*cd0=*/1.0f, /*dmg1=*/4.0f, /*cd1=*/30.0f, /*preferred=*/0);
+}
+
+TEST_CASE("wasm: a hunter keeps shooting a wounded deer that survives the first arrow "
+         "(Shoot-restate livelock)") {
+    // Finding A: the Attack command for a Shoot intention used to be pushed
+    // ONLY in apply_intention's one-shot Shoot-adoption case (intention.cpp)
+    // -- an identical restatement (same target_slot) resumes without
+    // re-running that case, and advance_intentions only ends Shoot when the
+    // target dies. A prey durable enough to survive the opening arrow was
+    // therefore never shot again. Follows "a hunter runs down a deer and
+    // kills it" (hunter_tests.cpp) for the world setup, but pins the deer
+    // well inside bow range from the start (no chase needed) and with LOTS
+    // of hp (spawn_durable_deer, above) so many volleys are needed, not one.
+    std::vector<uint8_t> bytes = read_hero_wasm();
+    auto g = make_world(wasm_desc(bytes));
+    REQUIRE(g->wasm_brains != nullptr);
+
+    const glm::vec2 hunter_pos{0.0f, kCastleSpawnZ};
+    const glm::vec2 prey_pin{4.0f, kCastleSpawnZ};  // inside the Hunter's 8-unit bow range
+    uint32_t hunter = spawn_creature_into(*g, CreatureId::Hunter, 0, hunter_pos);
+    uint32_t deer = spawn_durable_deer(*g, prey_pin);
+    entt::entity de = g->slots[deer];
+
+    for (int i = 0; i < 900; ++i) {  // 30 sim-seconds: many 1.2s bow-cooldown windows
+        tick_world(*g, 1.0f / 30.0f);
+        REQUIRE(g->registry.valid(de));  // durable -- never actually dies here
+        g->registry.get<Position>(de).pos = prey_pin;  // pinned: never drifts out of range
+    }
+
+    int32_t shots_at_prey = 0;
+    for (const Command& c : g->command_log) {
+        if (c.kind == CommandKind::Attack && c.actor == hunter && c.target_id == deer) {
+            ++shots_at_prey;
+        }
+    }
+    CHECK(shots_at_prey >= 2);
+
+    int32_t damage_events = 0;
+    for (const GameEvent& ev : g->events) {
+        if (ev.kind == GameEventKind::DamageDealt && ev.target_id == deer) {
+            ++damage_events;
+        }
+    }
+    CHECK(damage_events >= 2);  // the swings are real, not just logged
 }
 
 // --- pack_view_wire: the view side of the wire trust boundary --------------

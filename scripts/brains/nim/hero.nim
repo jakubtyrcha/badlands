@@ -39,6 +39,13 @@
 # simple brain uses (monster_brain.cpp); there is no second, host-level
 # combat path running alongside this one anymore.
 #
+# V6 (Shoot-restate livelock fix): the SAME bl_enqueue_action channel also
+# fires from a hunt wake now (actHunt's BL_INT_SHOOT suggestion, below) --
+# apply_intention's Shoot case (intention.cpp) stopped pushing its own
+# one-shot swing at adoption, so a prey that survived the opening arrow
+# needs this brain to keep firing at it every wake it restates Shoot,
+# exactly like the combat branch already does for Attack.
+#
 # WIRE-STABILITY (restate-resume is EXACT field equality, intention.cpp's
 # is_identical_restatement -- no epsilon): every point this file echoes back
 # on a MoveTo suggestion is read STRAIGHT off the wire (roamGoal/exploreGoal,
@@ -120,6 +127,28 @@ proc pickBestAttack(v: HeroView, hasDist: bool, dist: float32): int32 =
       bestDamage = a.base_damage
       result = i.int32
 
+# Floor for the re-fire hint below: never ask for a re-consult sooner than
+# this, even if an attack's own cooldown_remaining is shorter (a wake still
+# costs a host round-trip).
+const kMinShootRefireMillis: int64 = 100
+
+# Smallest cooldown_remaining (ms) among this hero's attacks that are LEGAL
+# under the current melee lock (the same category gate pickBestAttack uses
+# above) -- how soon a hunt-wake retry could actually land a shot, floored at
+# kMinShootRefireMillis. -1 when no attack qualifies (nothing legal to wait
+# on; the caller falls back to the ordinary idle hint instead).
+proc minLegalCooldownMillis(v: HeroView): int64 =
+  result = -1'i64
+  for i in 0 ..< v.attackCount:
+    let a = v.attacks[i]
+    if v.meleeLocked and a.category == kAttackCategoryRanged:
+      continue
+    let ms = (a.cooldown_remaining * 1000.0'f32).int64
+    if result < 0 or ms < result:
+      result = ms
+  if result >= 0 and result < kMinShootRefireMillis:
+    result = kMinShootRefireMillis
+
 # EVERY hero class runs this one table (the now-deleted town_brain.cpp's own
 # comment: "there is no per-class list" -- what a class does, how eagerly,
 # and whether it has an activity at all is entirely the weight table). List
@@ -197,6 +226,26 @@ proc brainTick(slot: int32): int32 =
     else:
       selectBanded(kHeroActivities, g_view_buf.factors.weights, v, g_view_buf.factors)
 
+  # Hunt wake (Finding A: the Shoot-restate livelock fix, V6):
+  # apply_intention's Shoot case (intention.cpp) went engagement/tracking-
+  # only, so a Shoot suggestion no longer carries a swing of its own -- fire
+  # at most ONE BL_ACT_ATTACK here, every wake this brain suggests Shoot,
+  # mirroring the combat branch's own picker above. hasDist=true
+  # unconditionally: actHunt (blocks.nim) only ever suggests Shoot once
+  # preyDist is already within selfAttackRange, so the distance is always
+  # known and meaningful here. When nothing qualifies (every legal attack
+  # still cooling down), no action fires this wake, and refireHintMillis
+  # asks for a re-consult closer to the actual cooldown (floored at
+  # kMinShootRefireMillis) instead of the ordinary 0.5-2s idle hint below --
+  # so the next shot does not wait out the full window.
+  var refireHintMillis = -1'i64  # -1 = no override; the ordinary hint stands
+  if chosen.kind == BL_INT_SHOOT:
+    let best = pickBestAttack(v, true, v.preyDist)
+    if best >= 0:
+      bl_enqueue_action(BL_ACT_ATTACK, v.preySlot, best)
+    else:
+      refireHintMillis = minLegalCooldownMillis(v)
+
   # The idle hint: "you don't need me for X ms" -- the SAME draw doubles as
   # BL_INT_IDLE's own duration_millis (the pause IS the idle hint now) and as
   # idle_hint_millis for every other kind. BL_INT_NONE gets neither: it is
@@ -207,7 +256,8 @@ proc brainTick(slot: int32): int32 =
   # SuggestionWire back, so a hint here would break that acceptance test for
   # no behavioural gain (apply_intention never reads it for None anyway).
   var s = seedOf(v.slot, v.nowMillis)
-  let hint = rangeI64(s, kIdleHintMinMillis, kIdleHintMaxMillis)
+  let drawnHint = rangeI64(s, kIdleHintMinMillis, kIdleHintMaxMillis)
+  let hint = if refireHintMillis >= 0: refireHintMillis else: drawnHint
   let isIdle = chosen.kind == BL_INT_IDLE
   let isNone = chosen.kind == BL_INT_NONE
 

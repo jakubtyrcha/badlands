@@ -223,9 +223,20 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
                              intent.target_slot);
                 return false;
             }
-            // param_a = -1: same auto-pick reasoning as the Attack case above.
-            game.command_queue.push_back(
-                {CommandKind::Attack, slot, intent.target_slot, {0.0f, 0.0f}, -1});
+            // No swing here, ever -- same discipline as the Attack case
+            // above (V6: the Shoot-restate livelock fix). Adopting/
+            // restating Shoot is a pure CurrentIntention stamp (it tracks
+            // the named prey so advance_intentions' Shoot case, below,
+            // knows when to end it) and nothing else. Used to also push a
+            // one-shot auto-pick Attack command here (param_a = -1); an
+            // identical restatement (same target_slot,
+            // is_identical_restatement above) resumes without re-running
+            // this case, so a prey that survived the opening arrow was
+            // never shot again. The swing comes exclusively from a
+            // BL_ACT_ATTACK action now (hero.nim's hunt-wake path, fired
+            // fresh every wake it restates Shoot), through resolve_action --
+            // the same single-gateway discipline the Attack case's own
+            // comment documents.
             break;
         }
 
@@ -376,20 +387,24 @@ bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action
     entt::entity target = entt::null;
     uint32_t resolved_target_slot = UINT32_MAX;
     if (action.target_slot != UINT32_MAX) {
-        // No adoption re-check on this path (mandate carried from V4's
-        // review): a named target_slot is accepted without confirming the
-        // actor's CurrentIntention.kind is actually Attack right now. Inert
-        // today, not unguarded by oversight -- every LIVE producer of a
-        // named-target BL_ACT_ATTACK (hero.nim's bl_enqueue_action, this
-        // brain's own monster_think) calls apply_intention(Attack) in the
-        // SAME wake, before draining pending_actions/calling resolve_action,
-        // and Attack currently has zero rejection paths (apply_intention's
-        // Attack case always adopts) -- so by construction, ci->kind is
-        // already Attack for the actor by the time either producer's named
-        // action reaches here. If a future intention kind gains a rejection
-        // path that a producer could race against its own action call, this
-        // needs a real gate (mirroring the UINT32_MAX branch's own check,
-        // below) -- flagging rather than adding an unreachable check now.
+        // No adoption re-check on this path, deliberately: a named
+        // target_slot is accepted without confirming the actor's
+        // CurrentIntention.kind is actually Attack right now. Originally
+        // (V4) this was inert by construction, not merely unguarded: every
+        // LIVE producer of a named-target BL_ACT_ATTACK (hero.nim's
+        // bl_enqueue_action, the simple monster brain's monster_think)
+        // called apply_intention(Attack) in the SAME wake before draining
+        // pending_actions, and Attack has zero rejection paths of its own
+        // (apply_intention's Attack case always adopts) -- so ci->kind was
+        // always Attack here by the time either producer's named action
+        // reached this point. V6 (the Shoot-restate livelock fix) adds a
+        // second, legitimate producer that is NOT mid-Attack: hero.nim's
+        // hunt-wake path enqueues a named-target BL_ACT_ATTACK against its
+        // prey while CurrentIntention.kind is Shoot. So this path has no
+        // intention-kind gate for either producer now, on purpose --
+        // attack_usable's own range/cooldown/lock re-check below is what
+        // keeps a stale or adversarial action harmless regardless of which
+        // intention (if any) is actually running.
         target = entity_for_slot(game, static_cast<int32_t>(action.target_slot));
         resolved_target_slot = action.target_slot;
     } else {
