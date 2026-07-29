@@ -407,6 +407,57 @@ TEST_CASE("fire_attack: an explicit index re-validates range/cooldown/lock and n
     CHECK(g.registry.get<Health>(te).hp == hp0);
 }
 
+TEST_CASE(
+    "fire_attack: an in-batch kill leaves a second explicit-index Attack against the same "
+    "target as a no-op",
+    "[combat]") {
+    // Finding 4: the explicit-index path re-validates the index (attack_usable)
+    // but never re-checked the target was still alive. Two attackers each name
+    // the same victim's slot explicitly in the same command batch; the first
+    // command to drain kills it, and the second must find a corpse, exactly
+    // like select_target's auto-pick path (nearest_enemy's hp filter) already
+    // refuses one.
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+
+    CharacterDesc victim_d{};
+    victim_d.team = 1;
+    victim_d.hp = 1.0f;  // dies to a single swing
+    victim_d.size_x = victim_d.size_y = victim_d.size_z = 1.0f;
+    const uint32_t v = spawn_into(g, victim_d);
+    entt::entity ve = g.slots[v];
+
+    CharacterDesc attacker_d{};
+    attacker_d.team = 0;
+    attacker_d.hp = 20.0f;
+    attacker_d.size_x = attacker_d.size_y = attacker_d.size_z = 1.0f;
+    attacker_d.accuracy = 1.0f;
+    attacker_d.attack_count = 1;
+    attacker_d.attacks[0] = Attack{AttackCategory::Melee, DamageType::Blunt, 10.0f, 1.5f, 1.0f, 0.0f};
+    const uint32_t a1 = spawn_into(g, attacker_d);
+    const uint32_t a2 = spawn_into(g, attacker_d);
+    entt::entity a2e = g.slots[a2];
+
+    // Both name the victim's slot explicitly (param_a = 0, this loadout's
+    // only attack) in the same batch.
+    g.command_queue.push_back({CommandKind::Attack, a1, v, {0.0f, 0.0f}, /*param_a=*/0});
+    g.command_queue.push_back({CommandKind::Attack, a2, v, {0.0f, 0.0f}, /*param_a=*/0});
+    apply_commands(g);
+
+    CHECK(g.registry.get<Health>(ve).hp <= 0.0f);
+
+    int32_t hits_on_victim = 0;
+    for (const GameEvent& ev : g.events) {
+        if (ev.kind == GameEventKind::DamageDealt && ev.target_id == v) {
+            ++hits_on_victim;
+        }
+    }
+    CHECK(hits_on_victim == 1);  // the second attacker's swing must not land
+
+    // The second attacker's cooldown is untouched -- its swing never fired.
+    CHECK(g.registry.get<Attacks>(a2e).cooldown_remaining[0] == 0.0f);
+}
+
 TEST_CASE("the arena's blocked edges refuse a step past the wall", "[combat]") {
     WorldConfig cfg;
     cfg.terrain_blocking = false;

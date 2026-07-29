@@ -224,6 +224,17 @@ void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slo
         !reg.all_of<Health, Combatant, Position>(target)) {
         return;
     }
+    // Finding 4: a corpse is never a valid target, explicit index or not --
+    // mirrors select_target's auto-pick path (nearest_enemy's hp<=0.0f
+    // filter, game.cpp), which already refuses one. Without this, an
+    // in-batch kill (a first Attack command dropping the target to hp<=0
+    // earlier in this same apply_commands drain) would still let a second
+    // queued Attack command naming that target's slot explicitly land a hit
+    // on the corpse. Checked before ANY cooldown is spent, so a corpse-swing
+    // no-ops exactly like an out-of-range/on-cooldown one.
+    if (reg.get<Health>(target).hp <= 0.0f) {
+        return;
+    }
     int idx;
     if (attack_index < 0) {
         idx = select_attack(game, self, target);  // legacy auto-pick
