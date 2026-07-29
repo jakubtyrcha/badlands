@@ -211,6 +211,26 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                 !game.registry.all_of<HeroSimulationState>(b)) {
                 return 0;  // only heroes converse
             }
+            // Mirrored-pair fast path (Fix 1): two heroes that mutually named
+            // each other in the same batch (nearest_companion pairs mutually)
+            // each enqueue a Chat command. The FIRST command to drain already
+            // emplaced ChattingState on BOTH sides (below); when the SECOND
+            // (reverse-direction) command reaches here, the any_of<...
+            // ChattingState> guard below would see its own actor already
+            // chatting and treat that as a decline against a third party.
+            // Detect the already-established session -- actor already
+            // chatting with exactly this target, and that target already
+            // chatting with exactly this actor -- and no-op success instead:
+            // the session this command asked for already exists. A hero
+            // chatting with someone ELSE still falls through to the abort
+            // below.
+            if (const auto* acs = game.registry.try_get<ChattingState>(a);
+                acs != nullptr && acs->partner_slot == cmd.target_id) {
+                if (const auto* bcs = game.registry.try_get<ChattingState>(b);
+                    bcs != nullptr && bcs->partner_slot == cmd.actor) {
+                    return 0;  // session already established by the mirrored command
+                }
+            }
             if (game.registry.any_of<InsideBuilding, ChattingState>(a) ||
                 game.registry.any_of<InsideBuilding, ChattingState>(b)) {
                 // Never-started abort (Fix 3): the actor's own suggestion

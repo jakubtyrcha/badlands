@@ -911,6 +911,49 @@ TEST_CASE("Chat lifecycle (c): a full session completes normally -- IntentionEnd
     CHECK(found_completed);
 }
 
+TEST_CASE(
+    "Chat lifecycle (d): a mutually-named pair (nearest_companion picks each other) "
+    "does not abort either side",
+    "[intention]") {
+    // Finding 1: two heroes each name the OTHER as their Chat partner in the
+    // same batch (nearest_companion pairing mutually is the real producer).
+    // The first command to drain establishes ChattingState on BOTH sides;
+    // the second command's actor then already carries ChattingState when its
+    // handler runs. That must read as "the session I asked for already
+    // exists" (a no-op success), not as a decline against a third party.
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    uint32_t a_slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
+    uint32_t b_slot = spawn_into(g, MercenaryDesc(1.0f, 0.0f));  // within chat_radius
+    entt::entity a = g.slots[a_slot];
+    entt::entity b = g.slots[b_slot];
+
+    Intention intent_a;
+    intent_a.kind = IntentionKind::Chat;
+    intent_a.target_slot = b_slot;
+    CHECK(apply_intention(g, a_slot, intent_a));
+
+    Intention intent_b;
+    intent_b.kind = IntentionKind::Chat;
+    intent_b.target_slot = a_slot;
+    CHECK(apply_intention(g, b_slot, intent_b));
+
+    apply_commands(g);  // drains Chat(a->b) then Chat(b->a) in that order
+
+    CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::Chat);
+    CHECK(g.registry.get<CurrentIntention>(b).kind == IntentionKind::Chat);
+    CHECK(g.registry.all_of<ChattingState>(a));
+    CHECK(g.registry.all_of<ChattingState>(b));
+
+    for (entt::entity who : {a, b}) {
+        const EventInbox& inbox = g.registry.get<EventInbox>(who);
+        for (int32_t i = 0; i < inbox.count; ++i) {
+            CHECK_FALSE((inbox.events[i].kind == InboxEventKind::IntentionEnded &&
+                         inbox.events[i].param == 0.0f));
+        }
+    }
+}
+
 // --- should_wake's inbox check (docs/design/intention-contract.html §2)
 // must not treat an event that already informed the last think as a fresh
 // reason to wake.
