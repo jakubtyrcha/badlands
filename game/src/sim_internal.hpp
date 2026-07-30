@@ -7,7 +7,6 @@
 #pragma once
 
 #include <memory>
-#include <string>
 #include <vector>
 
 #include "badlands_sim.hpp"
@@ -34,7 +33,6 @@ uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
 // hero class for hero creatures. Returns the public slot id.
 uint32_t spawn_creature_into(BadlandsGame&, CreatureId id, int32_t team, glm::vec2 pos);
 int64_t dispatch_into(BadlandsGame&, const Action&);
-bool reload_script(BadlandsGame&, const std::string&);
 std::vector<CharacterState> characters_of(const BadlandsGame&);
 void characters_of(const BadlandsGame&, std::vector<CharacterState>& out);
 std::vector<BuildingState> buildings_of(const BadlandsGame&);

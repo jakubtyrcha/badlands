@@ -2,7 +2,7 @@
 // falls back to gnawing the nearest targettable building (Castle/House) when no
 // unit is in reach. Building health + the raze cascade are exercised here.
 
-#include "brain.h"  // BrainKind
+#include "brain_kind.h"  // BrainKind
 #include "components.h"
 #include "economy.h"
 #include "game_state.h"
@@ -66,15 +66,36 @@ TEST_CASE("a rat targets the nearest hostile unit") {
 
     tick_world(g, 1.0f / 30.0f);
 
-    // The rat chases the hero (a unit), not a building.
+    // The rat chases the hero (a unit), not a building -- now via its simple
+    // brain's Attack intention (monster_brain.cpp: apply_intention adopts
+    // Attack, then the engagement executor's enqueue_engage, command.h,
+    // sets the Entity-kind MoveTarget), not a raw MoveTarget write.
+    CHECK(g.registry.get<CurrentIntention>(rat).kind == IntentionKind::Attack);
     CHECK(g.registry.get<MoveTarget>(rat).kind == MoveTarget::Kind::Entity);
 
     for (int i = 0; i < 60; ++i) {
         tick_world(g, 1.0f / 30.0f);
     }
-    // Combat happened -- someone lost health (hero hit the rat and/or vice versa).
+    // Combat happened -- the brainless merc rolls only passive defense
+    // (single-gateway combat: no swing without a brain), so any health lost
+    // is the rat's doing; the rat is never actually killed here (the merc
+    // never attacks back), but the assertion stays permissive in case that
+    // ever changes.
     const bool rat_dead = (entity_for_slot(g, static_cast<int32_t>(rid)) == entt::null);
     CHECK((g.registry.get<Health>(hero).hp < hero_hp0 || rat_dead));
+
+    // The rat's own swings carry an explicit attack index (resolve_action,
+    // game/src/intention.h), never the legacy auto-pick sentinel (-1) --
+    // monster_think picks via pick_attack itself now, guest-side reasoning
+    // done host-side.
+    bool rat_attacked_with_explicit_index = false;
+    for (const Command& c : g.command_log) {
+        if (c.kind == CommandKind::Attack && c.actor == rid) {
+            CHECK(c.param_a >= 0);
+            rat_attacked_with_explicit_index = true;
+        }
+    }
+    CHECK(rat_attacked_with_explicit_index);
 }
 
 TEST_CASE("with no units in reach, a rat gnaws the nearest building down") {
@@ -111,7 +132,10 @@ TEST_CASE("a rat prefers a hostile unit over a building") {
     uint32_t rid = spawn_rat(g, {8.0f, 0.0f});
 
     tick_world(g, 1.0f / 30.0f);
-    // Unit takes priority: the rat chases the hero (Entity), not the House door.
+    // Unit takes priority: the rat's simple brain adopts Attack (the unit
+    // branch of monster_think, monster_brain.cpp), not the building-gnaw
+    // fallback -- so it chases the hero (Entity), not the House door.
+    CHECK(g.registry.get<CurrentIntention>(g.slots[rid]).kind == IntentionKind::Attack);
     CHECK(g.registry.get<MoveTarget>(g.slots[rid]).kind == MoveTarget::Kind::Entity);
 }
 

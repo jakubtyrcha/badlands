@@ -2,12 +2,12 @@
 // cascade. Driven through dispatch_into (recruit/destroy) and the internal
 // errand mechanics (enter/exit/buy) -- no UI, no brain.
 
+#include "behaviours/world_view.h"  // badlands::Behavior (InsideBuilding::purpose)
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
 #include "placement.h"
 #include "sim_internal.hpp"  // make_world / dispatch_into / characters_of / tick_world
-#include "town_brain.h"      // badlands::Behavior (InsideBuilding::purpose)
 
 #include <catch_amalgamated.hpp>
 #include <entt/entt.hpp>

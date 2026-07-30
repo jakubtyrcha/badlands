@@ -240,6 +240,18 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             return false;
         }
     }
+    if (!section("progression", s)) {
+        return false;
+    }
+    if (s != nullptr) {
+        ProgressionFactors& p = parsed.progression;
+        if (!ReadNum(*s, "progression", "xp_per_texel", manifest_path, p.xp_per_texel) ||
+            !ReadNum(*s, "progression", "kill_xp_radius", manifest_path, p.kill_xp_radius) ||
+            !ReadNum(*s, "progression", "level_base_xp", manifest_path, p.level_base_xp) ||
+            !ReadNum(*s, "progression", "level_exponent", manifest_path, p.level_exponent)) {
+            return false;
+        }
+    }
 
     out = parsed;
     return true;

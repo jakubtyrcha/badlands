@@ -136,3 +136,13 @@ TEST_CASE("a non-numeric value in any section fails loudly") {
         std::remove(p.c_str());
     }
 }
+
+TEST_CASE("progression section parses; absent keys keep defaults") {
+    TempManifest m(R"({"progression": {"xp_per_texel": 2, "level_base_xp": 50}})");
+    SimFactors f;
+    REQUIRE(LoadSimFactors(m.path, f));
+    CHECK(f.progression.xp_per_texel == 2);
+    CHECK(f.progression.level_base_xp == 50);
+    CHECK(f.progression.kill_xp_radius == 10.0f);   // untouched default
+    CHECK(f.progression.level_exponent == 1.6f);
+}

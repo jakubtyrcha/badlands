@@ -6,7 +6,7 @@
 # modules) -- with zero chance of the boilerplate drifting between them.
 #
 # CONTRACT (read this before editing a brain file):
-#   1. `import abi` (this scaffold uses BlViewWire/BlDecisionWire/
+#   1. `import abi` (this scaffold uses BlViewWire/BlSuggestionWire/
 #      BL_ABI_VERSION and assumes the including file already has them).
 #   2. `include brain_scaffold` -- this is what declares g_view_buf/
 #      g_out_buf and every bl_* export below, PLUS forward declarations for
@@ -48,7 +48,7 @@ proc bl_log(level: int32, msg_ptr: int32, len: int32) {.importc, cdecl.}
 # addresses for every later tick -- ordinary global variables, exactly like
 # this, satisfy that contract trivially.
 var g_view_buf: BlViewWire
-var g_out_buf: BlDecisionWire
+var g_out_buf: BlSuggestionWire
 
 proc brainInit()  # forward decl: the including file defines this, below its
                    # own `include brain_scaffold` line (see the CONTRACT above)

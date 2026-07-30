@@ -5,12 +5,14 @@
 // policy (HeroFactors); the architecture is what this fixes in place.
 
 #include "sim_internal.hpp"
+#include "behaviours/world_view.h"  // badlands::Behavior
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
 #include "needs.h"
 #include "placement.h"
-#include "town_brain.h"
+
+#include "fixtures/wasm_hero.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -65,7 +67,7 @@ TEST_CASE("the drain rate is expressed in in-game hours and is live") {
 
     // fatigue_drain_hours ticks should take a full reserve to roughly empty.
     const int64_t ticks = g->factors.hero.fatigue_drain_hours *
-                          static_cast<float>(kMillisPerGameHour) / kMillisPerTick;
+                          static_cast<float>(millis_per_hour(g->millis_per_day)) / kMillisPerTick;
     sim.fatigue = 1.0f;
     for (int64_t i = 0; i < ticks; ++i) {
         advance_needs(*g);
@@ -183,8 +185,8 @@ TEST_CASE("a hidden hero refills only the reserve it went in for") {
 }
 
 TEST_CASE("a rested hero heads home once fatigue falls past the seek bar") {
-    auto g_owned = make_world(BrainDesc{});
-    BadlandsGame* g = g_owned.get();  // C++ brain (no noiser)
+    auto g_owned = testfix::make_wasm_world();
+    BadlandsGame* g = g_owned.get();
     uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t hid = recruit_at(g, guild);
     REQUIRE(hid != UINT32_MAX);
@@ -194,14 +196,13 @@ TEST_CASE("a rested hero heads home once fatigue falls past the seek bar") {
     REQUIRE(building_approach_tile(g->placement, g->placement.buildings[guild], home_door));
 
     g->registry.get<Position>(e).pos = {40.0f, 40.0f};  // far from home
-    g->world_millis = kMillisPerDay / 2;                 // midday, so the night bar doesn't apply
+    g->world_millis = g->millis_per_day / 2;                 // midday, so the night bar doesn't apply
     // Well below the daytime seek bar -> the hero wants to rest.
     g->registry.get<HeroSimulationState>(e).fatigue = 0.2f;
-    // Deliberation off: this case is about the need, not the pause.
-    SimFactors f = g->factors;
-    f.hero.think_max_millis = 0;
-    set_factors_of(*g, f);
 
+    // A freshly recruited hero has never thought yet (CurrentIntention::kind
+    // == None), so its very first tick is a guaranteed wake -- one tick is
+    // enough, same as the deleted C++ reference asserted.
     tick_world(*g, 1.0f / 30.0f);
 
     CHECK(g->registry.get<HeroSimulationState>(e).behavior ==
@@ -213,7 +214,7 @@ TEST_CASE("a rested hero heads home once fatigue falls past the seek bar") {
 }
 
 TEST_CASE("an under-entertained hero heads to the tavern by day") {
-    auto g_owned = make_world(BrainDesc{});
+    auto g_owned = testfix::make_wasm_world();
     BadlandsGame* g = g_owned.get();
     uint32_t guild = place(g, static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), -20.0f, 20.0f);
     uint32_t tavern = place(g, static_cast<int32_t>(BuildingKind::Tavern), 20.0f, 20.0f);
@@ -224,13 +225,10 @@ TEST_CASE("an under-entertained hero heads to the tavern by day") {
     REQUIRE(building_approach_tile(g->placement, g->placement.buildings[tavern], tavern_door));
 
     g->registry.get<Position>(e).pos = {0.0f, 0.0f};
-    g->world_millis = kMillisPerDay / 2;  // midday
+    g->world_millis = g->millis_per_day / 2;  // midday
     auto& sim = g->registry.get<HeroSimulationState>(e);
     sim.fatigue = 1.0f;   // fully rested, so rest does not compete
     sim.content = 0.1f;   // starved of diversion
-    SimFactors f = g->factors;
-    f.hero.think_max_millis = 0;
-    set_factors_of(*g, f);
 
     tick_world(*g, 1.0f / 30.0f);
 
@@ -245,7 +243,7 @@ TEST_CASE("the seek threshold is data, and urgency (not a tier) decides") {
     // Policy is data: the same reserve produces a different decision when the
     // threshold moves. This is what makes assets/creatures/factors.json
     // meaningful.
-    auto owned = make_world(BrainDesc{});
+    auto owned = testfix::make_wasm_world();
     BadlandsGame& g = *owned;
     CHECK(g.factors.hero.fatigue_seek == Catch::Approx(0.55f));
 
@@ -253,10 +251,7 @@ TEST_CASE("the seek threshold is data, and urgency (not a tier) decides") {
     uint32_t hid = recruit_at(&g, guild);
     entt::entity e = g.slots[hid];
     g.registry.get<Position>(e).pos = {40.0f, 40.0f};
-    g.world_millis = kMillisPerDay / 2;  // midday
-    SimFactors off = g.factors;
-    off.hero.think_max_millis = 0;
-    set_factors_of(g, off);
+    g.world_millis = g.millis_per_day / 2;  // midday
 
     // fatigue 0.5 near the 0.55 seek bar -> the urge is too mild to beat the
     // fallback wander, so the hero does not head home.
@@ -266,11 +261,20 @@ TEST_CASE("the seek threshold is data, and urgency (not a tier) decides") {
     CHECK(g.registry.get<HeroSimulationState>(e).behavior !=
           static_cast<int32_t>(Behavior::GoHome));
 
-    // Raise the bar well past the reserve -> the urgency climbs enough to win.
+    // Raise the bar well past the reserve -> the urgency climbs enough to win,
+    // once the hero next wakes to notice: think-on-wake means the live
+    // SetFactors edit is not seen until then, not next tick necessarily --
+    // every wake schedules a guaranteed re-wake within idle_hint_millis
+    // (0.5-2s, scripts/brains/nim/hero.nim), so a bounded few dozen ticks is
+    // the honest bound here, not exactly one.
     SimFactors f = g.factors;
     f.hero.fatigue_seek = 0.9f;
     set_factors_of(g, f);
-    tick_world(g, 1.0f / 30.0f);
-    CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
-          static_cast<int32_t>(Behavior::GoHome));
+    bool went_home = false;
+    for (int i = 0; i < 90 && !went_home; ++i) {
+        tick_world(g, 1.0f / 30.0f);
+        went_home = g.registry.get<HeroSimulationState>(e).behavior ==
+                   static_cast<int32_t>(Behavior::GoHome);
+    }
+    CHECK(went_home);
 }

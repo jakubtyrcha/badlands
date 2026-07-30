@@ -57,6 +57,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::Mercenary);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_MERCENARY;
         d.hp = 30.0f;
         d.move_speed = 2.5f;
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
@@ -71,6 +72,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::Hunter);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_HUNTER;
         d.hp = 22.0f;
         d.move_speed = 3.2f;  // a touch faster than the deer it hunts
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
@@ -86,6 +88,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::GraveRobber);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_GRAVE_ROBBER;
         d.hp = 24.0f;
         d.move_speed = 2.6f;
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
@@ -101,6 +104,7 @@ CreatureCatalog::CreatureCatalog() {
     {
         CharacterDesc& d = at(CreatureId::Apprentice);
         d.archetype = Archetype::Hero;
+        d.hero_class = HERO_APPRENTICE;
         d.hp = 16.0f;
         d.move_speed = 2.4f;
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
@@ -125,6 +129,7 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.0f, 1.0f, 0.05f};
+        d.xp_reward = 10;
     }
     // Goblin: a step up from the rat -- more hp, still light melee.
     {
@@ -138,6 +143,7 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f};
+        d.xp_reward = 25;
     }
 
     // --- critters -----------------------------------------------------------

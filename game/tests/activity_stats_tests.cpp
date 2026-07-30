@@ -11,6 +11,8 @@
 #include "placement.h"
 #include "sim_internal.hpp"
 
+#include "fixtures/wasm_hero.h"
+
 #include <catch_amalgamated.hpp>
 
 #include <entt/entt.hpp>
@@ -142,8 +144,12 @@ TEST_CASE("every activity in the catalog is countable") {
 TEST_CASE("Sim::Tick folds statistics, and the totals reconcile") {
     // The reconciliation is the real assertion: samples must equal the number
     // of (entity, tick) pairs that actually happened. If counting ever drifted
-    // from the snapshot, this is what would catch it.
-    Sim sim(BrainDesc{});
+    // from the snapshot, this is what would catch it. Wasm-driven: with no
+    // decision layer at all (BrainDesc{}, post Task 4) heroes never decide
+    // anything, so `attributed > 0` below would be vacuously false -- the
+    // counts stay meaningful only when something is actually deciding.
+    const std::vector<uint8_t> bytes = testfix::load_hero_wasm();
+    Sim sim(BrainDesc{.wasm_bytes = bytes.data(), .wasm_len = bytes.size()});
     sim.Spawn(MercenaryDesc(0.0f, kCastleSpawnZ));
     sim.Spawn(MercenaryDesc(4.0f, kCastleSpawnZ));
 
@@ -188,9 +194,11 @@ TEST_CASE("the snapshot carries the hero class the histogram attributes by") {
 
     const std::vector<CharacterState> rows = sim.Characters();
     REQUIRE(rows.size() == 1);
-    // A plain spawn has no recruiting guild, hence no class -- and the row says
-    // so rather than pretending to be a Mercenary (class 0).
-    CHECK(rows[0].hero_class == -1);
+    // MercenaryDesc's class comes from the creature catalog (the single
+    // source of truth, badlands_sim.hpp's CharacterDesc::hero_class) even
+    // though this spawn is homeless -- a directly-spawned Mercenary IS a
+    // Mercenary regardless of guild membership.
+    CHECK(rows[0].hero_class == HERO_MERCENARY);
     CHECK(rows[0].archetype == static_cast<int32_t>(Archetype::Hero));
 }
 

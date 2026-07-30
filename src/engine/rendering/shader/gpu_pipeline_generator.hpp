@@ -14,7 +14,7 @@
 // rendering/state/render_target.hpp) and a taskflow-based async compile
 // executor — none of which exist in badlands yet (no material/ECS system has
 // been ported in Stage 1 up to this task), and taskflow isn't vendored here
-// (third_party/ has spdlog/glm/entt/catch2/noiser only). The sync API is
+// (third_party/ has spdlog/glm/entt/catch2 only). The sync API is
 // self-contained (only needs vertex_layout.hpp + shader_reflection.hpp) and
 // is exactly what a lower-level "compile this shader into a pipeline, give
 // me back reflected bind group layouts" API needs; the async registration

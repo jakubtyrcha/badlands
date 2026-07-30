@@ -13,9 +13,19 @@
 //   bl_view_buf() -> i32          (pointer into the module's own memory)
 //   bl_out_buf()  -> i32          (pointer into the module's own memory)
 //   bl_tick(i32 slot) -> i32      (0 == ok, nonzero == script-reported error)
-// and imports AT MOST `env.bl_log(i32 level, i32 ptr, i32 len)` — any other
+// and imports AT MOST `env.bl_log(i32 level, i32 ptr, i32 len)` and
+// `env.bl_enqueue_action(i32 kind, i32 target_slot, i32 arg)` — any other
 // import makes bh_instantiate fail (the no-WASI guarantee: brains cannot
-// touch the filesystem, clock, env, or network).
+// touch the filesystem, clock, env, or network). A module may import
+// neither, either, or both of the two — bh_instantiate does not require
+// either to be present, only that nothing ELSE is imported.
+//
+// bl_enqueue_action is write-only and fire-and-forget: it takes no host-side
+// action itself beyond forwarding {kind, target_slot, arg} to the registered
+// BhActionFn callback, synchronously, in the order the guest called it. This
+// crate has no opinion on `kind`/`target_slot`/`arg`'s meaning — same as
+// bl_log's `level`, that vocabulary belongs to the caller (game/src/
+// brain_abi.h's BL_ACT_*).
 //
 // Buffer addresses are fixed for the instance's lifetime: bh_instantiate
 // queries bl_view_buf()/bl_out_buf() exactly ONCE, right after bl_init, and
@@ -64,6 +74,19 @@ typedef struct BhInstance BhInstance;
 // the duration of this call — copy it if you need it afterward.
 typedef void (*BhLogFn)(int32_t level, const uint8_t* msg, size_t len, void* user);
 
+// Host action sink registered at bh_instantiate time, called synchronously
+// from inside a bh_tick call whenever the guest invokes env.bl_enqueue_action
+// — once per call, in the order the guest made them (no batching, no
+// deduplication; a guest calling it three times in one bl_tick fires this
+// three times, in that order, before bh_tick returns). `user` is the
+// `action_user` pointer bh_instantiate was given, passed through unexamined,
+// same convention as BhLogFn's `user`/`log_user`. Unlike BhLogFn there is no
+// bytes-plus-length pair to bounds-check — kind/target_slot/arg are plain
+// wasm i32 values, not a guest-memory range, so there is nothing here for
+// this crate to validate; it is pure pass-through (see this header's top
+// comment).
+typedef void (*BhActionFn)(int32_t kind, uint32_t target_slot, int32_t arg, void* user);
+
 // Return codes shared by every brainhost entry point below that reports
 // success/failure as an int32_t. 0 is the only success value.
 #define BH_OK 0
@@ -103,20 +126,24 @@ typedef void (*BhLogFn)(int32_t level, const uint8_t* msg, size_t len, void* use
 // input; bh_last_error() carries the detail. Free with bh_drop_program.
 BhProgram* bh_load(const uint8_t* wasm_bytes, size_t len);
 
-// Instantiate `p`: checks the module imports at most env.bl_log (any other
-// import is rejected — the no-WASI guarantee), resolves+typechecks the
-// required exports (memory + the bl_* functions above), calls
+// Instantiate `p`: checks the module imports at most env.bl_log and
+// env.bl_enqueue_action (any other import is rejected — the no-WASI
+// guarantee; a module importing neither still instantiates), resolves+
+// typechecks the required exports (memory + the bl_* functions above), calls
 // bl_abi_version() and rejects a mismatch against `expected_abi_version`,
 // then calls bl_init(world_seed) with a fresh fuel budget, then calls
 // bl_view_buf()/bl_out_buf() once each and CACHES the resulting addresses for
 // bh_tick to reuse for the rest of this instance's life (see this header's
 // top comment: buffer addresses are fixed for the instance's lifetime).
-// `log_fn` may be NULL to discard bl_log calls; `log_user` is passed through
-// unexamined. Returns NULL on any failure (bh_last_error() carries the
-// detail); the program `p` is left unaffected either way and may be
-// instantiated again. Free the result with bh_drop_instance.
+// `log_fn` may be NULL to discard bl_log calls; `action_fn` may likewise be
+// NULL to discard bl_enqueue_action calls. `log_user`/`action_user` are each
+// passed through unexamined to their respective callback. Returns NULL on
+// any failure (bh_last_error() carries the detail); the program `p` is left
+// unaffected either way and may be instantiated again. Free the result with
+// bh_drop_instance.
 BhInstance* bh_instantiate(const BhProgram* p, int32_t expected_abi_version, int32_t world_seed,
-                           BhLogFn log_fn, void* log_user);
+                           BhLogFn log_fn, void* log_user, BhActionFn action_fn,
+                           void* action_user);
 
 // Calls bl_spawn(slot, cls, seed) with a fresh fuel budget. Returns BH_OK,
 // or BH_ERR_TRAP/BH_ERR_FUEL/BH_ERR_ARGS (NULL instance)/BH_ERR_PANIC.

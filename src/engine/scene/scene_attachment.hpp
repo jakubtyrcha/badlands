@@ -32,6 +32,7 @@ namespace badlands {
 // Resolved mesh data for scene graph attachments
 struct ResolvedMesh {
   std::vector<float> vertices;
+  std::vector<uint32_t> indices;
   uint32_t vertex_count{0};
   GeometryType geometry_type{GeometryType::kTexturedMesh};
   Aabb local_bounds;  // Pre-computed local-space AABB

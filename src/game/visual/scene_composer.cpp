@@ -39,10 +39,12 @@ struct WaterInstance {
 };
 
 // De-index a TerrainMesh into a flat kTerrainBlend vertex buffer and attach it
-// as a deferred SceneGraph node. MeshAttachment/ResolvedMesh carry no index
-// buffer, and GameView rebuilds the render registry from the SceneGraph every
-// frame (SyncToRegistry clears it), so the game's terrain must live in the
-// SceneGraph -- mapview's direct indexed-registry path can't be reused here.
+// as a deferred SceneGraph node. ResolvedMesh can carry an index buffer, but
+// this path intentionally de-indexes into a flat vertex stream and leaves
+// indices empty. GameView rebuilds the render registry from the SceneGraph
+// every frame (SyncToRegistry clears it), so the game's terrain must live in
+// the SceneGraph -- mapview's direct indexed-registry path can't be reused
+// here.
 NodeHandle AddTerrainToScene(SceneGraph& scene, const char* name,
                              const TerrainMesh& mesh, const DeferredMaterial& mat,
                              const glm::mat4& transform) {

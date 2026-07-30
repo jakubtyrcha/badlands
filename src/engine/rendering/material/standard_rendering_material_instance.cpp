@@ -8,6 +8,8 @@
 // material_instance.hpp.
 #include "engine/rendering/material/standard_rendering_material_instance.hpp"
 
+#include <array>
+#include <cstring>
 #include <set>
 
 #include <spdlog/spdlog.h>
@@ -80,6 +82,40 @@ bool StandardRenderingMaterialInstance::Bind(RenderPassContext& pass,
     }
   }
 
+  // Instanced materials carry their material constants in a group-0 UBO (the
+  // per-object model matrix moved to the group-1 per-instance storage array,
+  // bound separately via BindInstanceData). Non-instanced materials keep their
+  // constants in the group-1 per-object UBO built by BindPerObject, so this
+  // whole block is gated on kInstancedMesh first -- a cheap enum compare that
+  // skips the pipeline-cache lookup (GetUniformBuffers) + SelectMaterialParams
+  // scan for non-instanced draws, leaving their group-0 bind group
+  // byte-identical to before.
+  if (geometry_type_ == GeometryType::kInstancedMesh) {
+    if (const ReflectedUniformBuffer* params = SelectMaterialParamsBuffer(
+            material_->GetUniformBuffers(geometry_type_, pass_type_),
+            geometry_type_);
+        params && params->group == 0) {
+      wgpu::Buffer params_ubo =
+          instance_->GetOrCreateUniformBuffer(frame.GetDevice());
+      if (!params_ubo) {
+        // No SetParameter was called, so MaterialInstance built no constants
+        // buffer -- but the shader still declares this group-0 UBO and Dawn
+        // requires every layout binding present at draw. Bind a cached
+        // zero-filled UBO of the reflected size so the binding is never missing.
+        params_ubo = GetOrCreateZeroedParamsBuffer(frame.GetDevice(),
+                                                   params->total_size);
+      }
+      if (params_ubo) {
+        wgpu::BindGroupEntry params_entry{};
+        params_entry.binding = params->binding;
+        params_entry.buffer = params_ubo;
+        params_entry.offset = 0;
+        params_entry.size = WGPU_WHOLE_SIZE;
+        entries.push_back(params_entry);
+      }
+    }
+  }
+
   // 3. Create + set bind group 0 using material's reflection-filtered creation
   auto layout =
       material_->GetBindGroupLayout(geometry_type_, pass_type_, 0);
@@ -111,9 +147,42 @@ bool StandardRenderingMaterialInstance::Bind(RenderPassContext& pass,
   return true;
 }
 
+wgpu::Buffer StandardRenderingMaterialInstance::GetOrCreateZeroedParamsBuffer(
+    wgpu::Device device, uint32_t size) {
+  if (zeroed_params_buffer_) {
+    return zeroed_params_buffer_;
+  }
+  if (size == 0) {
+    return nullptr;
+  }
+  wgpu::BufferDescriptor desc{};
+  desc.size = size;
+  desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+  desc.mappedAtCreation = true;
+  zeroed_params_buffer_ = wgpu::Buffer(device.CreateBuffer(&desc));
+  std::memset(zeroed_params_buffer_.GetMappedRange(0, size), 0, size);
+  zeroed_params_buffer_.Unmap();
+  return zeroed_params_buffer_;
+}
+
 bool StandardRenderingMaterialInstance::BindPerObject(RenderPassContext& pass,
                                                       FrameContext& frame) {
   if (!IsValid()) {
+    return false;
+  }
+
+  // Instanced materials are not drawable via the per-object path: they read
+  // the per-object transform from the group-1 instance storage array (bound
+  // separately via BindInstanceData in GpuInstanceRenderer::Draw), not a
+  // per-object UBO. Their group-1 layout is a storage binding, not the
+  // dynamic-offset UBO this method builds, so returning true here without
+  // binding group 1 would let the standard passes' gate
+  // (`if (!Bind() || !BindPerObject()) continue;` in render_forward.cpp /
+  // render_textured_mesh.cpp) issue a draw with the required group-1 binding
+  // unset -- a Dawn validation error. Refuse instead, so those passes skip
+  // instanced materials entirely. GpuInstanceRenderer::Draw never calls
+  // BindPerObject (it calls BindInstanceData), so it is unaffected.
+  if (geometry_type_ == GeometryType::kInstancedMesh) {
     return false;
   }
 
@@ -149,6 +218,64 @@ bool StandardRenderingMaterialInstance::BindPerObject(RenderPassContext& pass,
   uint32_t dynamic_offset = 0;
   pass.SetBindGroup(1, bind_group, 1, &dynamic_offset);
 
+  return true;
+}
+
+bool StandardRenderingMaterialInstance::BindInstanceData(
+    RenderPassContext& pass, FrameContext& frame, wgpu::Buffer compacted,
+    wgpu::Buffer bucket_base) {
+  // Only instanced materials declare the group-1 storage bindings (compacted
+  // transforms + per-bucket bases); everything else uses BindPerObject. Refuse
+  // (default no-op contract) rather than mis-bind a per-object-UBO layout.
+  if (!IsValid() || geometry_type_ != GeometryType::kInstancedMesh ||
+      !compacted || !bucket_base) {
+    return false;
+  }
+
+  // Reuse the cached group-1 bind group when it was built from these SAME two
+  // buffer objects — GpuInstanceRenderer owns both `compacted` and
+  // `bucket_base` for its whole lifetime and passes the same handles every
+  // Draw(), so this is the common case; only the first call (or a call with a
+  // different renderer's buffers) rebuilds.
+  if (cached_instance_bind_group_ &&
+      cached_instance_compacted_.Get() == compacted.Get() &&
+      cached_instance_bucket_base_.Get() == bucket_base.Get()) {
+    pass.SetBindGroup(1, cached_instance_bind_group_);
+    return true;
+  }
+
+  auto layout = material_->GetBindGroupLayout(geometry_type_, pass_type_, 1);
+  if (!layout) {
+    // Shader declares no group-1 binding — nothing to bind.
+    return false;
+  }
+
+  // Both group-1 bindings are read-only storage (reflection enables dynamic
+  // offsets only for group-1 UNIFORM buffers), so bind both WHOLE at offset 0 —
+  // no dynamic offsets. The vertex shader applies the per-bucket base itself as
+  // compacted[bucketBase[bucketId] + instance_index], so there is no baked
+  // byteOffset here (that was Phase C's single-bucket scheme).
+  std::array<wgpu::BindGroupEntry, 2> entries{};
+  entries[0].binding = 0;  // compacted: array<mat4x4<f32>>
+  entries[0].buffer = compacted;
+  entries[0].offset = 0;
+  entries[0].size = WGPU_WHOLE_SIZE;
+  entries[1].binding = 1;  // bucketBase: array<u32>
+  entries[1].buffer = bucket_base;
+  entries[1].offset = 0;
+  entries[1].size = WGPU_WHOLE_SIZE;
+
+  wgpu::BindGroupDescriptor bg_desc{};
+  bg_desc.layout = layout;
+  bg_desc.entryCount = entries.size();
+  bg_desc.entries = entries.data();
+
+  auto bind_group = frame.GetDevice().CreateBindGroup(&bg_desc);
+  pass.SetBindGroup(1, bind_group);
+
+  cached_instance_bind_group_ = bind_group;
+  cached_instance_compacted_ = compacted;
+  cached_instance_bucket_base_ = bucket_base;
   return true;
 }
 
@@ -262,18 +389,16 @@ void StandardRenderingMaterialInstance::BuildParameterMap() const {
     return;
   }
 
-  const auto& uniform_buffers = material_->GetUniformBuffers(geometry_type_, pass_type_);
-  uint32_t next_handle = 1;
-  for (const auto& buffer : uniform_buffers) {
-    // Only the per-object (group 1) buffer's members are per-instance
-    // material parameters. Group 0 is the imported `frame` UBO, whose
-    // members are managed by FrameContext, not per-instance -- and whose
-    // offsets don't correspond to the group-1 buffer that BuildUniformBuffer
-    // actually writes.
-    if (buffer.group != 1) {
-      continue;
-    }
-    for (const auto& member : buffer.members) {
+  // Only the material-constants UBO's members are settable parameters. The
+  // imported `frame` UBO (group 0, binding 0) is managed by FrameContext, not
+  // per-instance. SelectMaterialParamsBuffer picks the group-1 per-object UBO
+  // for normal materials and the group-0 (non-frame) UBO for instanced ones --
+  // matching the buffer BuildUniformBuffer actually writes.
+  const ReflectedUniformBuffer* params = SelectMaterialParamsBuffer(
+      material_->GetUniformBuffers(geometry_type_, pass_type_), geometry_type_);
+  if (params) {
+    uint32_t next_handle = 1;
+    for (const auto& member : params->members) {
       MaterialParameterId pid;
       pid.handle = next_handle++;
       switch (member.type) {

@@ -6,8 +6,11 @@
 #
 # Builds three brains, all with the identical flag family (see build_one
 # below): scripts/brains/nim/hero.nim -> assets/brains/hero.wasm (the
-# shipping hero decision layer -- a port of game/src/town_brain.cpp +
-# game/src/behaviours/{blocks,selectors,deliberation}.cpp), scripts/brains/
+# shipping hero decision layer -- originally ported from the since-deleted
+# game/src/town_brain.cpp + game/src/behaviours/{blocks,selectors}.cpp
+# (deliberation.cpp, the third source it drew from, is also deleted along
+# with the deliberation pause itself -- see docs/design/
+# intention-contract.html)), scripts/brains/
 # nim/idle_test.nim -> game/tests/fixtures/idle_brain.wasm (a test-only
 # fixture whose bl_tick always decides Idle -- what hero.wasm itself used to
 # be, before Task 5's real decision port; existing tests that assert all-Idle

@@ -8,13 +8,15 @@
 // so any enemy with no target walked to the player's apothecary and bought
 // elixirs; a one-line guard in sim.cpp's mock_think held it back.
 
-#include "brain.h"
+#include "brain_kind.h"
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"
 #include "placement.h"
 #include "sim_internal.hpp"
+
+#include "fixtures/wasm_hero.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -100,7 +102,9 @@ TEST_CASE("an enemy never runs the townsfolk errand loop") {
 
 TEST_CASE("recruited heroes still run the town loop") {
     // The other side of the guard: the recipe must not silence actual townsfolk.
-    auto owned = make_world(BrainDesc{});
+    // Wasm-driven -- the C++ hero decision layer this used to exercise is
+    // gone; the wasm brain is the only thing left that could run this loop.
+    auto owned = testfix::make_wasm_world();
     BadlandsGame& g = *owned;
     uint32_t guild = place(g, BuildingKind::FreeCompanyQuarters, -14.0f, -8.0f);
     REQUIRE(guild != UINT32_MAX);

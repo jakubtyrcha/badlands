@@ -1,7 +1,7 @@
 #include "economy.h"
 
 #include "badlands_sim.hpp"
-#include "brain.h"  // BrainKind
+#include "brain_kind.h"  // BrainKind
 #include "components.h"
 #include "game_state.h"
 #include "heroes.h"  // spawn_entity
@@ -85,7 +85,7 @@ void spawn_tax_collector(BadlandsGame& game, uint32_t castle_id, glm::vec2 door)
 }  // namespace
 
 void advance_economy(BadlandsGame& game) {
-    if (!crossed(game.world_millis, kMillisPerDay)) {
+    if (!crossed(game.world_millis, game.millis_per_day)) {
         return;  // not midnight
     }
     const uint32_t income = game.factors.townfolk.house_income_per_day;

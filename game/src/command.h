@@ -33,6 +33,7 @@ enum class CommandKind : int32_t {
     Deposit,     // tax collector banks its carry into player gold, then despawns
     AttackBuilding,  // monster swings at a building (target_id); razes it at 0 hp
     Chat,            // two heroes start a conversation (target_id = partner slot)
+    Engage,      // hold at range of a live entity target (target_id; point.x = stop_distance)
 };
 
 // The log is exposed verbatim through Sim::CommandLog(), so the two enums are
@@ -63,17 +64,27 @@ static_assert(static_cast<int32_t>(CommandKind::AttackBuilding) ==
               static_cast<int32_t>(CommandKindId::AttackBuilding));
 static_assert(static_cast<int32_t>(CommandKind::Chat) ==
               static_cast<int32_t>(CommandKindId::Chat));
+static_assert(static_cast<int32_t>(CommandKind::Engage) ==
+              static_cast<int32_t>(CommandKindId::Engage));
 
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional
 // commands; `param_a`/`param_b` carry kind-specific scalars (e.g. building kind
-// + rotation for PlaceBuilding, building kind for EnterBuilding).
+// + rotation for PlaceBuilding, building kind for EnterBuilding; for Attack,
+// param_a is the attack index -- -1 = auto-pick (select_attack's usual
+// tie-break), any other value names that index exactly, re-validated
+// authoritatively by fire_attack). param_a's own default is -1 (Finding 2026-
+// 07-29 review fix): a bare `{CommandKind::Attack, actor, target}` with no
+// param_a named therefore auto-picks, the same as an explicit -1 -- restoring
+// the pre-command-log raw idiom's meaning. Kinds that do not read param_a at
+// all (MoveTo, EnterHome, Buy, Chat, CollectTax, Deposit, AttackBuilding,
+// Engage) are unaffected either way.
 struct Command {
     CommandKind kind;
     uint32_t actor = UINT32_MAX;
     uint32_t target_id = UINT32_MAX;
     glm::vec2 point{0.0f, 0.0f};
-    int32_t param_a = 0;
+    int32_t param_a = -1;
     int32_t param_b = 0;
     // Stamped by apply_command from game.world_millis. Producers leave it 0; it
     // is what makes the log self-describing (and replayable at tick boundaries).
@@ -89,19 +100,52 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd);
 // Drains game.command_queue in FIFO order through apply_command (the AI pass).
 void apply_commands(BadlandsGame& game);
 
-// --- edge-triggered producers (shared by the C++ and noiser brain paths) ----
+// --- edge-triggered producers ----
 // Brains re-decide every tick, but re-stating an unchanged decision is not a
 // decision: it bloats the log (the debug trace of what was DECIDED) without
 // changing state. These enqueue only when the request differs from what the
 // entity already has. Both read components that replay reproduces exactly, so a
 // live run and its replay emit identical command streams.
 void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target);
-// `duration_millis` rides along on SetBehavior(Think): it is how long the
-// deliberation pause lasts. Putting it IN the command is what makes the pause
-// replayable -- a replay does not re-draw the duration, it reads the one the
-// live run drew. Committing to any other activity clears the pause.
+// `duration_millis` rides along on SetBehavior: for the intention contract
+// (game/src/intention.h's apply_intention) it is the wake schedule (Idle's
+// own duration, or the idle hint for any other kind). Putting it IN the
+// command is what makes it replayable -- a replay does not re-draw/re-derive
+// it, it reads the one the live run logged (the SetBehavior command handler,
+// command.cpp, derives CurrentIntention::wake_at_millis from it too, so a
+// replay reconstructs the schedule from the log alone). Unused (0) for
+// critter/townfolk callers below, which never carry a CurrentIntention to
+// schedule a wake for; formerly also carried the C++ hero decision layer's
+// own deliberation pause (SetBehavior(Think, duration)), but that layer --
+// and every producer of ActivityId::Think -- is gone (command.cpp's
+// SetBehavior handler has the full account).
+//
+// `force`: skip the edge-trigger (re-stating an unchanged `behavior` is
+// normally not a decision, so no command is enqueued) -- set true when a
+// wake's schedule must reach the log even though the activity label happens
+// to repeat (apply_intention's call: every ADOPTED intention is a real
+// decision, sparse by construction via should_wake, so there is no per-tick
+// log-bloat concern to trade against here the way there is for a per-tick
+// re-decision).
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
-                          int64_t duration_millis = 0);
+                          int64_t duration_millis = 0, bool force = false);
+
+// Sets/maintains MoveTarget as Kind::Entity toward `target_slot`, holding at
+// `stop_distance` (the caller's engagement_range) -- unlike enqueue_move_to's
+// Kind::Point, this tracks the target's LIVE position every plan_paths pass
+// (movement.cpp) rather than a one-shot snapshot, and plan_paths' own
+// `distance(pos, live_target_pos) <= stop_distance` gate stops the approach
+// AT that live distance -- no arrival-radius slop the way walking onto a
+// precomputed offset point would carry (kArriveRadius, movement.h). This is
+// the single-gateway combat engagement executor's mutation point
+// (apply_intention's Attack case, game/src/intention.h) -- a LOGGED,
+// replay-safe successor to the deleted combat_preempt's direct MoveTarget
+// write (docs/superpowers/specs/2026-07-25-contract-v3-alignment-design.md
+// §2). No-op if `slot` or `target_slot` names no live entity. Edge-triggered
+// like enqueue_move_to above: re-stating the same target at the same range
+// is not a new decision.
+void enqueue_engage(BadlandsGame& game, uint32_t slot, uint32_t target_slot,
+                    float stop_distance);
 
 // Replay: enqueues + applies every command in game.replay_log stamped at or
 // before the current game.world_millis, advancing game.replay_cursor. game_tick

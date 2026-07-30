@@ -1,9 +1,12 @@
 #include "monster_brain.h"
 
 #include "badlands_sim.hpp"
+#include "brain_abi.h"  // BL_ACT_ATTACK
+#include "combat.h"     // pick_attack
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
+#include "intention.h"  // apply_intention, resolve_action, note_think_outcome
 #include "placement.h"
 
 #include <cmath>
@@ -45,17 +48,68 @@ bool nearest_targettable(const BadlandsGame& game, glm::vec2 pos, uint32_t& out_
 
 }  // namespace
 
+// The simple brain (docs/superpowers/specs/2026-07-25-contract-v3-alignment-
+// design.md §2, "Simple brains"): the tier split is where a brain runs (wasm
+// contract module vs. engine code), never which door it uses -- this brain
+// issues its intention/action through the EXACT SAME seams a wasm hero uses
+// (apply_intention / resolve_action, game/src/intention.h), not a privileged
+// combat path. Consulted every tick (engine code is cheap, unlike a wasm
+// hop), never should_wake-gated.
 void monster_think(BadlandsGame& game, uint32_t slot) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
         return;
     }
-    const glm::vec2 pos = game.registry.get<Position>(e).pos;
+    entt::registry& reg = game.registry;
+    const glm::vec2 pos = reg.get<Position>(e).pos;
 
+    // Same-tick cache shortcut (game_state.h's nearest_enemy_scratch doc
+    // comment has the full account): this call runs inside the SAME think
+    // pass sim.cpp's ThreatSighted pass populated the cache in, before
+    // apply_commands resolves anything, so nothing has moved or died in
+    // between -- the exact guarantee the deleted combat_preempt's own cache
+    // read relied on. Guarded on EventInbox + bounds the same way that
+    // read was; heroes.cpp's spawn recipe now emplaces EventInbox for
+    // Archetype::Monster too, so this entity was always written by the
+    // pass (never a never-populated slot).
+    const bool cached = reg.all_of<EventInbox>(e) && slot < game.nearest_enemy_scratch.size();
+    const entt::entity target =
+        cached ? game.nearest_enemy_scratch[slot] : nearest_enemy(game, e);
+
+    if (target != entt::null) {
+        // Fight: restate the Attack intention -- apply_intention's own
+        // Attack case (intention.cpp) is engagement-only (it maintains the
+        // approach MoveTarget toward whichever enemy select_target/
+        // nearest_enemy finds live; no swing there) -- then swing through
+        // the SAME action gateway a wasm brain's bl_enqueue_action drains
+        // into (resolve_action, game/src/intention.h), validated there at
+        // resolve time exactly like a wasm hero's own pick. pick_attack is
+        // this brain's OWN policy helper now (combat.h's own doc comment on
+        // select_attack/pick_attack), not a host auto-pick on this actor's
+        // behalf -- the same function hero.nim's pickBestAttack reimplements
+        // guest-side, just called host-side here since this brain IS host
+        // code.
+        const bool adopted = apply_intention(
+            game, slot,
+            Intention{.kind = IntentionKind::Attack,
+                      .activity_label = static_cast<int32_t>(ActivityId::Combat)});
+        note_think_outcome(game, slot, adopted);
+
+        const Attacks& atk = reg.get<Attacks>(e);
+        const float dist = glm::distance(pos, reg.get<Position>(target).pos);
+        const int pick = pick_attack(atk, dist, reg.all_of<MeleeLock>(e));
+        if (pick >= 0) {
+            resolve_action(game, slot,
+                           AgentAction{BL_ACT_ATTACK, slot_for_entity(game, target), pick});
+        }
+        return;
+    }
+
+    // No unit target: the existing building-gnaw path, unchanged.
     uint32_t bid = UINT32_MAX;
     glm::vec2 door{};
     if (!nearest_targettable(game, pos, bid, door)) {
-        game.registry.get<MoveTarget>(e).kind = MoveTarget::Kind::None;
+        reg.get<MoveTarget>(e).kind = MoveTarget::Kind::None;
         return;  // nothing to gnaw
     }
 
@@ -65,8 +119,8 @@ void monster_think(BadlandsGame& game, uint32_t slot) {
     // At the door and off cooldown -> swing (command-sourced, so building combat
     // is logged/replayable). Gated on arrival + cooldown, so the log gets one
     // entry per actual hit, not one per tick of the approach.
-    const auto& stats = game.registry.get<Stats>(e);
-    const auto& attacks = game.registry.get<Attacks>(e);
+    const auto& stats = reg.get<Stats>(e);
+    const auto& attacks = reg.get<Attacks>(e);
     const bool at_door = glm::distance(pos, door) <= stats.attack_range + kEntranceRadius;
     const bool ready = attacks.count > 0 && attacks.cooldown_remaining[0] <= 0.0f;
     if (at_door && ready) {

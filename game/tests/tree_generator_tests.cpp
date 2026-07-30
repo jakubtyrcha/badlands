@@ -2,6 +2,7 @@
 #include <cmath>
 #include "game/geometry/tree_options.hpp"
 #include "game/geometry/tree_generator.hpp"
+#include "game/geometry/leaf_texture.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 
 using namespace badlands;
@@ -111,4 +112,83 @@ TEST_CASE("TreeCatalog: every predefined setup generates a well-formed mesh") {
     REQUIRE(std::isfinite(height));
     REQUIRE(height > 0.0f);
   }
+}
+
+TEST_CASE("GenerateLeafMesh: deterministic") {
+  const TexturedMeshResult a = GenerateLeafMesh(OakPreset());
+  const TexturedMeshResult b = GenerateLeafMesh(OakPreset());
+  REQUIRE(a.mesh.vertices == b.mesh.vertices);
+  REQUIRE(a.mesh.indices == b.mesh.indices);
+}
+
+TEST_CASE("GenerateLeafMesh: well-formed indexed mesh (Oak, Pine)") {
+  for (const TreeOptions& o : {OakPreset(), PinePreset()}) {
+    const TexturedMeshResult r = GenerateLeafMesh(o);
+    const auto& m = r.mesh;
+    REQUIRE(m.vertex_count > 0u);
+    REQUIRE(m.vertices.size() == m.vertex_count * kTexturedMeshFloatsPerVertex);
+    REQUIRE(m.indices.size() % 3 == 0);
+    for (uint32_t idx : m.indices) REQUIRE(idx < m.vertex_count);
+    for (float f : m.vertices) REQUIRE(std::isfinite(f));
+  }
+}
+
+TEST_CASE("GenerateLeafMesh: billboard=2 is exactly 2x billboard=1") {
+  TreeOptions single = OakPreset();
+  single.leaves.billboard = 1;
+  TreeOptions cross = OakPreset();
+  cross.leaves.billboard = 2;
+
+  const TexturedMeshResult r1 = GenerateLeafMesh(single);
+  const TexturedMeshResult r2 = GenerateLeafMesh(cross);
+
+  REQUIRE(r1.mesh.vertex_count > 0u);
+  REQUIRE(r2.mesh.vertex_count == r1.mesh.vertex_count * 2u);
+  REQUIRE(r2.mesh.indices.size() == r1.mesh.indices.size() * 2u);
+
+  // Each quad = 4 verts + 6 indices.
+  REQUIRE(r1.mesh.indices.size() == r1.mesh.vertex_count / 4u * 6u);
+  REQUIRE(r2.mesh.indices.size() == r2.mesh.vertex_count / 4u * 6u);
+}
+
+TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
+  TreeOptions o = OakPreset();
+  o.leaves.enabled = false;
+  const TexturedMeshResult r = GenerateLeafMesh(o);
+  REQUIRE(r.mesh.vertex_count == 0u);
+  REQUIRE(r.mesh.indices.empty());
+}
+
+TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card") {
+  const int n = 64;
+  const std::vector<uint8_t> px = BuildLeafRgba8(n, glm::vec3(0.30f, 0.55f, 0.18f));
+  REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
+  auto alpha = [&](int x, int y) {
+    return px[(static_cast<size_t>(y) * n + static_cast<size_t>(x)) * 4 + 3];
+  };
+  REQUIRE(alpha(n / 2, n / 2) == 255);   // center is inside the leaf
+  REQUIRE(alpha(0, 0) == 0);             // corners are outside
+  REQUIRE(alpha(n - 1, 0) == 0);
+  REQUIRE(alpha(0, n - 1) == 0);
+  REQUIRE(alpha(n - 1, n - 1) == 0);
+  // RGB carries the leaf color (green > red at the center texel).
+  const size_t c = (static_cast<size_t>(n / 2) * n + static_cast<size_t>(n / 2)) * 4;
+  REQUIRE(px[c + 1] > px[c + 0]);
+}
+
+TEST_CASE("GenerateLeafMesh: terminal-tip leaf adds one leaf per leaf-bearing branch") {
+  auto count_terminal = [](const TreeOptions& o) {
+    int n = 0;
+    for (const SkeletonBranch& b : BuildTreeSkeleton(o))
+      if (b.level == o.levels && static_cast<int>(b.sections.size()) - 1 >= 1) ++n;
+    return n;
+  };
+  TreeOptions on = OakPreset();  on.leaves.tip_leaf = true;
+  TreeOptions off = OakPreset(); off.leaves.tip_leaf = false;
+  const uint32_t vn = GenerateLeafMesh(on).mesh.vertex_count;
+  const uint32_t vf = GenerateLeafMesh(off).mesh.vertex_count;
+  const int quads = (OakPreset().leaves.billboard >= 2) ? 2 : 1;
+  REQUIRE(vn > vf);
+  // Each tip leaf = quads * 4 verts; one per leaf-bearing terminal branch.
+  REQUIRE(vn - vf == static_cast<uint32_t>(count_terminal(OakPreset()) * quads * 4));
 }

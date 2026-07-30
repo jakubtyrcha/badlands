@@ -1,22 +1,25 @@
 // badlands::Sim method bodies + the extracted shared free functions
-// (make_world / tick_world / *_of snapshots / spawn_into / dispatch_into /
-// reload_script) over the UNCHANGED internal world (struct BadlandsGame), plus
-// the handle-less helpers (RenderBoxOf / BuildingDefOf / MercenaryDesc /
-// GoblinDesc). badlands::Sim and the internal system tests call these free
-// functions directly, so there is a single implementation of every operation.
+// (make_world / tick_world / *_of snapshots / spawn_into / dispatch_into) over
+// the UNCHANGED internal world (struct BadlandsGame), plus the handle-less
+// helpers (RenderBoxOf / BuildingDefOf / MercenaryDesc / GoblinDesc).
+// badlands::Sim and the internal system tests call these free functions
+// directly, so there is a single implementation of every operation.
 
 #include "sim_internal.hpp"
 
-#include "brain.h"
+#include "brain_kind.h"
 #include "combat.h"
 #include "components.h"
 #include "entity_memory.h"  // update_entity_memory
 #include "heroes.h"  // spawn_entity, biome_at
 #include "command.h"
+#include "intention.h"  // advance_intentions, push_inbox_event, should_wake
 #include "movement.h"
 #include "nav_world.h"
 #include "needs.h"
 #include "placement.h"
+#include "progression.h"
+#include "skills.h"
 #include "vision.h"
 
 #include "critter_brain.h"
@@ -25,7 +28,6 @@
 #include "townfolk_brain.h"
 
 #include "game/map/symbolic_map_generator.hpp"
-#include "town_brain.h"
 #include "wasm_brain.h"
 
 #include <entt/entt.hpp>
@@ -34,85 +36,48 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <limits>
-#include <mutex>
-#include <string>
 #include <vector>
 
 namespace badlands {
 
 namespace {
 
-// Combat pre-empt for the fighting archetypes: engage the nearest enemy. Set a
-// durable MoveTarget at the stance's engagement distance (a melee unit closes
-// to melee reach, a ranged unit holds at bow distance); the movement pipeline
-// walks it, and the Attack command resolves the hit authoritatively. Returns
-// false (no MoveTarget touched) when there is no enemy, so the caller falls
-// through to that archetype's own brain -- shared by mock_think and the wasm
-// hero-think dispatch below, so a wasm-driven hero's combat behaviour is
-// identical to a mock-driven one's.
-bool combat_preempt(BadlandsGame& game, entt::entity self, uint32_t slot) {
-    auto& reg = game.registry;
-    entt::entity target = select_target(game, self);
-    if (target == entt::null) {
-        return false;
-    }
-    const Combatant& cb = reg.get<Combatant>(self);
-    const Attacks& atk = reg.get<Attacks>(self);
-    MoveTarget& mt = reg.get<MoveTarget>(self);
-    mt.kind = MoveTarget::Kind::Entity;
-    mt.entity = target;
-    mt.building = UINT32_MAX;
-    mt.stop_distance = engagement_range(cb, atk);
-
-    // If an attack is usable right now, emit an Attack command. Target UINT32_MAX
-    // => the handler re-picks the nearest enemy. Off-cooldown gating keeps this to
-    // ~one command per swing rather than one per tick.
-    if (select_attack(game, self, target) >= 0) {
-        game.command_queue.push_back({CommandKind::Attack, slot});
-    }
-    return true;
-}
-
-// Reference behavior, and the fallback whenever an entity has no (or a
-// downgraded) script brain. With no enemy, delegate to the C++ town brain
-// (needs/day-night loop).
+// Reference behavior for every non-hero archetype (and the Town fallback when
+// no wasm brain is loaded). Single-gateway combat (docs/superpowers/specs/
+// 2026-07-25-contract-v3-alignment-design.md): there is no host-level combat
+// pre-empt anymore -- every swing is a brain action, issued through the same
+// intention/action seams a wasm hero uses (game/src/intention.h). Monster is
+// the one archetype here with a fighting brain (monster_think, below); a
+// brainless Town/None hero issues no intentions/actions at all and simply
+// holds position, defending only passively (resolve_attack's defender gates,
+// combat.cpp) -- a Town-kind entity with no wasm brain loaded is exactly that
+// case (the wasm brain is the sole hero decision-maker now; see
+// hero_perception.h's file comment).
 void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
     auto& reg = game.registry;
     const BrainKind kind = reg.get<Brain>(self).kind;
 
-    // Critters and townfolk never fight -- their brains own their movement, so
-    // they skip the combat pre-empt entirely (otherwise a neutral deer, or a
-    // peaceful tax collector, would read an other-team unit as an "enemy" and
-    // give chase). Guards (a future townfolk) will opt back into combat.
-    if (kind == BrainKind::Critter) {
-        critter_think(game, slot);
-        return;
-    }
-    if (kind == BrainKind::Townfolk) {
-        townfolk_think(game, slot);
-        return;
-    }
-
-    if (combat_preempt(game, self, slot)) {
-        return;
-    }
-    // No enemy: the archetype's own brain decides.
+    // Critters and townfolk never fight -- their brains own their movement
+    // and never call into combat at all (otherwise a neutral deer, or a
+    // peaceful tax collector, would read an other-team unit as an "enemy"
+    // and give chase). Guards (a future townfolk) will opt back into combat.
     switch (kind) {
-        case BrainKind::Town:
-            town_think(game, slot);
-            break;
-        case BrainKind::Monster:
-            monster_think(game, slot);  // no unit enemy -> gnaw a building
-            break;
-        case BrainKind::None:
-            reg.get<MoveTarget>(self).kind = MoveTarget::Kind::None;
-            break;
         case BrainKind::Critter:
+            critter_think(game, slot);
+            return;
         case BrainKind::Townfolk:
-            break;  // handled above
+            townfolk_think(game, slot);
+            return;
+        case BrainKind::Monster:
+            monster_think(game, slot);  // fights a unit target, or gnaws a building
+            return;
+        case BrainKind::Town:
+        case BrainKind::None:
+            // Brainless: no intentions, no actions, passive defense only.
+            reg.get<MoveTarget>(self).kind = MoveTarget::Kind::None;
+            return;
     }
 }
 
@@ -121,14 +86,6 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
 // ---- extracted shared operations over Badlands& ----------------------------
 
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfig& config) {
-    // One-time noiser runtime configuration. The profiling switch is
-    // thread-local and defaults to ON, and upstream has no public API for it
-    // yet (docs/noiser-feedback.md #3) — this is the only detail:: callsite.
-    // All make_world/tick_world calls happen on the same (main) thread.
-    static std::once_flag noiser_configured;
-    std::call_once(noiser_configured,
-                   [] { sampo::noiser::detail::SetHostCallProfiling(false); });
-
     auto game = std::make_unique<BadlandsGame>();
     // Terrain/biomes the sim reasons about. SymbolicMapGenerator is a pure
     // function of its compile-time constants, so every world would generate a
@@ -145,12 +102,15 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
     game->terrain_blocking = config.terrain_blocking;
     game->arena_half_x = config.arena_half_x;
     game->arena_half_z = config.arena_half_z;
-    if (desc.noiser_source != nullptr) {
-        std::string error;
-        game->brains = BrainRuntime::create(*game, desc.noiser_source, error);
-        if (!game->brains) {
-            report_bug(*game, "compile", error);
-        }
+    // The clock helpers divide by this, so a zero/negative period would be a
+    // division by zero rather than merely a strange world -- clamp at the
+    // boundary and say so, the same shape as sanitize_factors' adjustments.
+    if (config.millis_per_day < 1) {
+        spdlog::warn("make_world: millis_per_day {} is not a valid day length -- using {}",
+                     config.millis_per_day, kDefaultMillisPerDay);
+        game->millis_per_day = kDefaultMillisPerDay;
+    } else {
+        game->millis_per_day = config.millis_per_day;
     }
     if (desc.wasm_bytes != nullptr) {
         // Wasm bytes were explicitly provided, so a bh_load/bh_instantiate
@@ -177,6 +137,26 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
 // Thin forwarder onto the (BrainDesc, WorldConfig) implementation above.
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
     return make_world(desc, WorldConfig{});
+}
+
+// See the doc comment in badlands_sim.hpp for WHY this goes through ticks
+// rather than sim_seconds * 1000. kSimHz/kMillisPerTick are sim internals
+// (components.h), which is exactly why this conversion lives here instead of
+// being open-coded by every app.
+int64_t MillisPerDayForSimSeconds(float sim_seconds) {
+    // Not `<= 0` -- this form also rejects NaN, which would otherwise survive
+    // the clamp below and land as an arbitrary integer.
+    if (!(sim_seconds > 0.0f)) {
+        spdlog::warn("MillisPerDayForSimSeconds: {} is not a valid day length -- using {} ms",
+                     sim_seconds, kDefaultMillisPerDay);
+        return kDefaultMillisPerDay;
+    }
+    // A day of ~31 years, far past anything useful, but it keeps the double ->
+    // int64 conversion in range for any finite input (including +inf).
+    constexpr double kMaxMillisPerDay = 1e12;
+    const double millis = static_cast<double>(sim_seconds) *
+                          static_cast<double>(kSimHz) * static_cast<double>(kMillisPerTick);
+    return static_cast<int64_t>(std::llround(std::clamp(millis, 1.0, kMaxMillisPerDay)));
 }
 
 std::unique_ptr<BadlandsGame> make_flat_world() {
@@ -239,11 +219,72 @@ void tick_world(BadlandsGame& g, float dt) {
     // components -- so it runs unconditionally, live or replaying alike.
     update_entity_memory(g);
 
-    // Brains: each living entity's coroutine resumes once; intents arrive via
-    // host calls. Any failure permanently downgrades that entity to the mock.
-    for (auto [e, intent] : registry.view<Intent>().each()) {
-        intent = {.kind = 0, .dir = {0.0f, 0.0f}};
+    // Intention contract: ThreatSighted inbox writer. Fires on the
+    // empty -> nonempty edge of "is there a hostile within threat_radius",
+    // not every tick a threat remains in view -- a guaranteed-wake event is a
+    // notification, not a per-tick spam channel. Reuses nearest_enemy +
+    // factors.hero.threat_radius (game_state.h) rather than
+    // collect_threats/observe_hero (behaviours/perception.cpp,
+    // hero_perception.cpp): those live INSIDE the per-hero think path and
+    // only run on an actual wake (should_wake-gated), but this pass must see
+    // every hero every tick regardless of whether it wakes this tick. threat_was_present
+    // lives on EventInbox itself (not scratch state here), the same reason
+    // MoveBlocked keeps its at_millis on the component, so a replay
+    // reproduces the same edges.
+    //
+    // Iterates EVERY hero, hidden ones included (review fix: excluding them
+    // from the view left threat_was_present frozen at whatever it was
+    // before they hid, so a stale `true` silently suppressed the real
+    // sighting waiting at the door when they re-emerged -- the
+    // empty->nonempty edge never fired because the edge was never reset). A
+    // hidden hero sees nothing, so its edge is force-reset to false and it
+    // writes no event; any threat present once it exits reads as a fresh
+    // sighting, correctly.
+    //
+    // Cleanup: also fills nearest_enemy_scratch (game_state.h), a one-tick
+    // cache indexed by slot for every EventInbox-bearing entity (heroes AND,
+    // since the single-gateway cutover, monsters too -- heroes.cpp's spawn
+    // recipe). monster_think (monster_brain.cpp) consults it directly
+    // instead of re-scanning, since this same nearest_enemy result is what
+    // it needs moments later in THIS same tick's think pass (nothing moves
+    // or dies between here and there) -- the same shortcut the deleted
+    // combat_preempt's own cache read relied on. Hidden heroes are SKIPPED
+    // (not written) by the `continue` above -- fine because the cache's one
+    // safe consumer is never even called for them either: the think loop's
+    // own per-slot dispatch already excludes InsideBuilding heroes before
+    // mock_think is reached, so a stale/never-written entry is never read.
+    // (apply_intention's own Attack-engagement executor and advance_
+    // intentions' Attack-abort check, intention.cpp, do NOT read this cache
+    // -- they run later in (or after) the tick, once movement/combat may
+    // have invalidated it, so they pay for a live select_target scan
+    // instead; see that function's own doc comment, combat.cpp.)
+    for (auto [e, inbox] : registry.view<EventInbox>().each()) {
+        if (registry.all_of<InsideBuilding>(e)) {
+            inbox.threat_was_present = false;
+            continue;
+        }
+        entt::entity threat = nearest_enemy(g, e);
+        if (const uint32_t slot = slot_for_entity(g, e); slot != UINT32_MAX) {
+            if (g.nearest_enemy_scratch.size() <= slot) {
+                g.nearest_enemy_scratch.resize(slot + 1, entt::null);
+            }
+            g.nearest_enemy_scratch[slot] = threat;
+        }
+        const bool present = threat != entt::null &&
+                             glm::distance(registry.get<Position>(e).pos,
+                                           registry.get<Position>(threat).pos) <=
+                                 g.factors.hero.threat_radius;
+        if (present && !inbox.threat_was_present) {
+            InboxEvent ev;
+            ev.kind = InboxEventKind::ThreatSighted;
+            ev.source_slot = slot_for_entity(g, threat);
+            push_inbox_event(g, e, ev);
+        }
+        inbox.threat_was_present = present;
     }
+
+    // Brains: each living entity thinks once (the wasm hero brain on a real
+    // wake, everyone else via the mock's per-archetype logic below).
     if (g.replay_log != nullptr) {
         // Replaying: this tick's decisions come from the log, not the brains.
         apply_replay_commands(g);
@@ -255,47 +296,35 @@ void tick_world(BadlandsGame& g, float dt) {
             }
             auto& brain = registry.get<Brain>(e);
             if (g.wasm_brains && brain.kind == BrainKind::Town) {
-                // The wasm hero brain owns the no-enemy tick outright: combat
-                // still pre-empts it (identical to the mock's own pre-empt),
-                // but mock_think/town_think are never reached for this entity
-                // while a wasm program is loaded -- see wasm_brain.h.
-                if (!combat_preempt(g, e, static_cast<uint32_t>(slot))) {
+                // mock_think is never reached for this entity while a wasm
+                // program is loaded -- see wasm_brain.h. The intention
+                // contract's wake rule gates the think itself (docs/design/
+                // intention-contract.html §2): a hero with a running
+                // intention and nothing new in its inbox simply keeps doing
+                // what it was already doing (the always-running movement/
+                // needs/combat systems, not the brain, carry it forward) --
+                // the brain is consulted only on a real wake. Single-gateway
+                // combat (docs/superpowers/specs/2026-07-25-contract-v3-
+                // alignment-design.md): there is no separate combat path to
+                // sequence against anymore -- should_wake's own high-stakes
+                // clause (threat_was_present/MeleeLock, intention.h) already
+                // means "consult every tick a fight is on", so engagement
+                // (apply_intention's Attack case, intention.cpp) and swings
+                // (BL_ACT_ATTACK -> resolve_action) both arrive through this
+                // SAME wake, at the SAME cadence a dedicated pre-empt pass
+                // used to run at.
+                if (should_wake(g, e)) {
                     tick_wasm_brain(g, static_cast<uint32_t>(slot));
                 }
                 continue;
             }
-            bool scripted = brain.state && !brain.state->downgraded && g.brains;
-            if (scripted && !resume_brain(g, static_cast<uint32_t>(slot), *brain.state)) {
-                brain.state->downgraded = true;
-                scripted = false;
-            }
-            if (!scripted) {
-                mock_think(g, e, static_cast<uint32_t>(slot));
-            }
+            mock_think(g, e, static_cast<uint32_t>(slot));
         }
 
         // Drain AI commands enqueued during think, in one ordered pass (FIFO;
         // producers iterate by slot). This is the single mutation point for AI
         // decisions and appends each to command_log (the trace).
         apply_commands(g);
-    }
-
-    // Legacy direct movement for scripted brains that still push a per-tick
-    // move Intent (intent_move). The shipping brains (hero.noiser,
-    // combat_test.noiser) and the mock brain all move via MoveTarget +
-    // intent_move_to, so this loop is inert today; it is kept for any brain that
-    // still drives a kind-1 move Intent (and for the intent_move host binding the
-    // downgrade fixtures may exercise).
-    for (auto [e, intent, pos, stats] :
-         registry.view<const Intent, Position, const Stats>(entt::exclude<MeleeLock, InsideBuilding>)
-             .each()) {
-        if (intent.kind != 1) {
-            continue;
-        }
-        float len = glm::length(intent.dir);
-        if (len > 0.0f) {
-            pos.pos += intent.dir / len * stats.move_speed * dt;
-        }
     }
 
     // Rebuild the navmesh if a building was placed/destroyed this tick (bumps
@@ -324,20 +353,54 @@ void tick_world(BadlandsGame& g, float dt) {
     // events the old combat pass did.
     advance_projectiles(g, dt);
 
-    // Death.
+    // Intention contract: inbox TTL housekeeping + CurrentIntention
+    // completion/abort detection (see intention.h). Placed AFTER
+    // movement/combat so arrival (MoveTo) and a
+    // just-landed-lethal-hit target (the dead-target abort) both see this
+    // tick's final positions/hp, and BEFORE the death sweep below so a
+    // target that died this very tick is still readable as "dead" via
+    // Health<=0 rather than already destroyed -- entity_for_slot would
+    // report it gone in the NEXT tick's advance_intentions regardless, but
+    // checking hp here rather than validity is what lets the abort fire on
+    // the same tick the kill happens.
+    advance_intentions(g);
+
+    // Death. Collect each dead entity's XP payout BEFORE the destroys
+    // (Position/XpReward die with it), spread AFTER them so a hero that died
+    // this tick neither blocks nor receives a share.
     std::vector<entt::entity> dead;
+    std::vector<PendingKillXp> kill_xp;
     for (auto [e, health] : registry.view<const Health>().each()) {
         if (health.hp <= 0.0f) {
             dead.push_back(e);
+            if (const auto* reward = registry.try_get<XpReward>(e);
+                reward != nullptr && registry.all_of<Position>(e)) {
+                kill_xp.push_back({registry.get<Position>(e).pos, reward->amount});
+            }
         }
     }
     for (entt::entity e : dead) {
         registry.destroy(e);
     }
+    spread_kill_xp(g, kill_xp);
 
     // Fog-of-war: resolve next visibility from the post-movement world state and
-    // publish it (double-buffered). No-op until ConfigureVision.
-    resolve_vision(g);
+    // publish it. Newly-discovered texels credit the stamping CHARACTER with
+    // exploration XP -- a system rule, applied here so it lands in the same
+    // tick. resolve_vision reports every player-team stamper, hero or not;
+    // award_xp is what actually applies the "only heroes gain XP" policy (a
+    // no-op for non-heroes), so a townfolk/critter stamp is silently free.
+    std::vector<DiscoveryCredit> discoveries;
+    resolve_vision(g, &discoveries);
+    if (g.factors.progression.xp_per_texel > 0) {
+        const int32_t per_texel = g.factors.progression.xp_per_texel;
+        for (const DiscoveryCredit& d : discoveries) {
+            // Widen to int64 before multiplying: texels * xp_per_texel can
+            // exceed int32 range (a wide reveal at a large per-texel reward);
+            // award_xp saturates the accumulation from here.
+            award_xp(g, d.slot, static_cast<int64_t>(d.texels) * per_texel);
+        }
+    }
 
     ++g.ticks;
 }
@@ -357,15 +420,12 @@ uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::
     desc.pos_x = pos.x;
     desc.pos_z = pos.y;
     desc.team = team;
-    const uint32_t slot = spawn_entity(g, desc, -1);
-    // Hero creatures (ids 0..HERO_CLASS_COUNT-1 == HeroClassId) carry their class,
-    // which spawn_entity otherwise only derives from a home guild.
-    if (i < HERO_CLASS_COUNT) {
-        if (auto* hc = g.registry.try_get<HeroCharacter>(g.slots[slot])) {
-            hc->hero_class = static_cast<int32_t>(i);
-        }
-    }
-    return slot;
+    // Hero creatures (ids 0..HERO_CLASS_COUNT-1 == HeroClassId) carry their
+    // class via desc.hero_class (the catalog defs author it), so spawn_entity
+    // stamps HeroCharacter with the FINAL class at spawn time -- no post-spawn
+    // patch needed (nor safe: spawn-time grants would have already run
+    // against the stale value).
+    return spawn_entity(g, desc, -1);
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {
@@ -392,26 +452,6 @@ int64_t dispatch_into(BadlandsGame& g, const Action& action) {
             return -1;
     }
     return apply_command(g, cmd);
-}
-
-bool reload_script(BadlandsGame& g, const std::string& source) {
-    std::string error;
-    auto fresh = BrainRuntime::create(g, source, error);
-    if (!fresh) {
-        // Keep-last-good: the running program stays in place.
-        std::fprintf(stderr, "[noiser] reload failed, keeping last-good: %s\n", error.c_str());
-        return false;
-    }
-    g.brains = std::move(fresh);
-    g.noiser_bugs = 0;
-    g.script_intents = 0;
-    for (uint32_t slot = 0; slot < g.slots.size(); ++slot) {
-        entt::entity e = g.slots[slot];
-        if (g.registry.valid(e)) {
-            g.registry.get<Brain>(e).state = spawn_brain(*g.brains, slot);
-        }
-    }
-    return true;
 }
 
 void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
@@ -484,11 +524,23 @@ void characters_of(const BadlandsGame& g, std::vector<CharacterState>& out) {
             .facing_z = facing.y,
             .vision_radius = vis_radius,
             .vision_cone_half_angle_deg = vis_half_deg,
+            .level = sim ? sim->level : 0,
+            .xp = sim ? sim->xp : 0,
+            .xp_next = sim ? xp_to_next(g.factors.progression, sim->level) : 0,
         });
         const char* nm = disp ? disp->name.c_str() : "";
         std::size_t n = std::min(std::strlen(nm), sizeof(out.back().name) - 1);
         std::memcpy(out.back().name, nm, n);
         out.back().name[n] = '\0';
+
+        const Skills* sk = g.registry.try_get<Skills>(e);
+        CharacterState& row = out.back();
+        row.skill_count = sk ? sk->count : 0;
+        // Designated init above already zeroed row.skills (kMaxSkills entries),
+        // so only [0, skill_count) needs writing -- the rest stay 0.
+        for (int32_t i = 0; i < row.skill_count; ++i) {
+            row.skills[i] = static_cast<int32_t>(sk->ids[i]);
+        }
     }
 }
 
@@ -529,13 +581,14 @@ namespace {
 // sim_internal.hpp: tests exercise it only through Sim::SetFactors/Factors.
 //
 // Rules:
-//  - hero.think_max_millis/think_min_millis: restores the invariant
-//    decode_decision (wasm_brain.cpp) assumes of think_max_millis (>= 0) and
-//    of the pair (min <= max) -- an inverted pair draws a pause outside
-//    [0, think_max_millis] (behaviours/rng.h's range_i64 returns `lo` when
-//    hi <= lo), which decode_decision rejects as a wire violation and
-//    brain_fatal()s (std::abort). Do not touch decode_decision's check
-//    itself; this is what keeps its assumption true instead.
+//  - hero.think_max_millis/think_min_millis: vestigial (badlands_sim.hpp's
+//    own comment on the fields has the full account -- the deliberation pause
+//    they used to size is deleted, replaced by the intention contract) and
+//    unread by decode_suggestion (wasm_brain.cpp), which has no think_max/
+//    think_min check of any kind in v2. Clamped here purely to keep the pair
+//    internally sane (max >= 0, min in [0, max]) for as long as the fields
+//    stay in the manifest schema -- not because anything downstream still
+//    relies on the invariant.
 //  - hero.memory_ttl_millis: 0 means "remember only the tick you saw them"
 //    (see the eviction comment in entity_memory.cpp) -- negative would evict
 //    a just-seen entry (age 0) the same tick it was recorded.
@@ -544,24 +597,31 @@ namespace {
 //    small positive epsilon rather than 0, so the field itself stays
 //    strictly positive instead of leaning on reserve_rate_per_tick's own
 //    <=0 "instantly" guard to stay finite.
-//  - hero.explore_lease_millis: also a DIVISOR (town_brain.cpp's
+//  - hero.explore_lease_millis: also a DIVISOR (hero_perception.cpp's
 //    observe_hero computes `world_millis / explore_lease_millis`
 //    UNCONDITIONALLY, for every hero, every tick, with no <=0 guard of its
 //    own -- unlike the hours-rate fields above) -- floored at a small
 //    positive integer rather than 0 for the same reason: 0 is a genuine
 //    int64 divide-by-zero (UB/crash), not merely a degenerate rate.
-//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors
-//    numeric field (radii, distances, durations, caps): negative is never
-//    meaningful, clamped to 0 -- this includes MonsterFactors::max_alive,
-//    where a negative cap underflows through economy.cpp's
-//    `live >= static_cast<uint32_t>(cap)` into a huge unsigned value and
-//    silently DISABLES the spawn cap instead of capping at 0.
+//  - every remaining HeroFactors/CritterFactors/TownfolkFactors/MonsterFactors/
+//    ProgressionFactors numeric field (radii, distances, durations, caps;
+//    ProgressionFactors::xp_per_texel/kill_xp_radius/level_exponent):
+//    negative is never meaningful, clamped to 0 -- this includes
+//    MonsterFactors::max_alive, where a negative cap underflows through
+//    economy.cpp's `live >= static_cast<uint32_t>(cap)` into a huge unsigned
+//    value and silently DISABLES the spawn cap instead of capping at 0.
 //    hero.weights[]/critter.weights and hero.explore_chance[] are
 //    deliberately EXCLUDED from the clamp-to-0 sweep -- 0 is a meaningful
 //    veto/"never" value for both, not a sign error (MonsterFactors has no
 //    such field, so it carries no such exclusion).
 //    TownfolkFactors::house_income_per_day (unsigned: no sign to sanitize)
 //    is the one field left untouched.
+//  - progression.level_base_xp: floored like the DIVISOR fields above, but
+//    at 1 rather than a divisor's epsilon/1ms -- it scales xp_to_next's
+//    leveling-curve threshold (floor(level_base_xp * L^level_exponent)), and
+//    a base below 1 collapses every threshold to (near) 0 rather than merely
+//    degenerating one rate, so it gets its own floor instead of joining the
+//    clamp-to-0 sweep.
 //
 // A field is only warned about (old value -> new value) when sanitize
 // actually moves it.
@@ -570,7 +630,7 @@ constexpr int64_t kMinPositiveMillis = 1;
 
 template <typename T>
 void warn_adjusted(const char* field, T old_value, T new_value) {
-    spdlog::warn("sanitize_factors: {} adjusted from {} to {}", field, old_value, new_value);
+    spdlog::warn("sanitize: {} adjusted from {} to {}", field, old_value, new_value);
 }
 
 // Sign-invalid scalar (radius/distance/duration/cap -- 0 always meaningful,
@@ -593,7 +653,7 @@ void floor_positive_hours(const char* field, float& value) {
     }
 }
 
-// `value` is an integer-millis DIVISOR downstream (town_brain.cpp's
+// `value` is an integer-millis DIVISOR downstream (hero_perception.cpp's
 // observe_hero: world_millis / explore_lease_millis): floor at the smallest
 // positive millisecond instead of 0.
 void floor_positive_millis(const char* field, int64_t& value) {
@@ -659,7 +719,29 @@ SimFactors sanitize_factors(SimFactors f) {
     // disables the spawn cap instead of capping at 0.
     clamp_nonneg("monster.max_alive", m.max_alive);
 
+    ProgressionFactors& p = f.progression;
+    clamp_nonneg("progression.xp_per_texel", p.xp_per_texel);
+    clamp_nonneg("progression.kill_xp_radius", p.kill_xp_radius);
+    clamp_nonneg("progression.level_exponent", p.level_exponent);
+    // The curve's scale: xp_to_next floors its result at 1 anyway, but a base
+    // below 1 collapses every threshold and the warn is the designer's signal.
+    if (p.level_base_xp < 1) {
+        warn_adjusted("progression.level_base_xp", p.level_base_xp, 1);
+        p.level_base_xp = 1;
+    }
+
     return f;
+}
+
+// The SetSkillCatalog validation boundary, sanitize_factors' sibling: the
+// execution slice divides/waits on these, so negatives are clamped here.
+SkillCatalog sanitize_skill_catalog(SkillCatalog c) {
+    for (int32_t i = 0; i < kSkillCount; ++i) {
+        SkillSpec& s = c.specs[i];
+        clamp_nonneg("skill.duration_seconds", s.duration_seconds);
+        clamp_nonneg("skill.cooldown_seconds", s.cooldown_seconds);
+    }
+    return c;
 }
 
 }  // namespace
@@ -672,8 +754,6 @@ int32_t biome_at_of(const BadlandsGame& g, float x, float z) {
 SimStats stats_of(const BadlandsGame& g) {
     return SimStats{
         .ticks = g.ticks,
-        .script_intents = g.script_intents,
-        .noiser_bugs = g.noiser_bugs,
     };
 }
 
@@ -715,6 +795,10 @@ uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_
 }
 void Sim::SetCreatureCatalog(const CreatureCatalog& catalog) { world_->creatures = catalog; }
 const CreatureCatalog& Sim::Creatures() const { return world_->creatures; }
+void Sim::SetSkillCatalog(const SkillCatalog& catalog) {
+    world_->skills = sanitize_skill_catalog(catalog);
+}
+const SkillCatalog& Sim::Skills() const { return world_->skills; }
 void Sim::Tick(float dt) {
     tick_world(*world_, dt);
     // Goal statistics are folded HERE, in the wrapper, from the very rows an
@@ -723,7 +807,6 @@ void Sim::Tick(float dt) {
     characters_of(*world_, stats_scratch_);
     activity_stats_.Accumulate(stats_scratch_);
 }
-bool Sim::ReloadScript(const std::string& source) { return reload_script(*world_, source); }
 int64_t Sim::Dispatch(const Action& action) { return dispatch_into(*world_, action); }
 
 std::vector<NavDebugCell> Sim::NavDebugCells() {

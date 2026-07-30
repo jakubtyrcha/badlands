@@ -11,10 +11,6 @@
 //      and it must keep working unchanged when a real terrain navmesh replaces
 //      the stand-in walkability rule.
 
-#include "behaviours/blocks.h"
-#include "behaviours/selectors.h"
-#include "behaviours/world_view.h"
-
 #include "command.h"
 #include "components.h"
 #include "exploration.h"
@@ -23,8 +19,9 @@
 #include "movement.h"
 #include "placement.h"
 #include "sim_internal.hpp"
-#include "town_brain.h"
 #include "vision.h"
+
+#include "fixtures/wasm_hero.h"
 
 #include <catch_amalgamated.hpp>
 
@@ -158,71 +155,12 @@ TEST_CASE("the search radius bounds how far afield a hero will look") {
     CHECK(pick_exploration_target(g, {90.0f, 90.0f}, 1, f).has_value());
 }
 
-// --- 2. the Explore block ---------------------------------------------------
-
-TEST_CASE("a settled hero with somewhere to explore goes rather than wanders") {
-    // Explore competes on need like everything else. With the reserves full (no
-    // rest or diversion pressing) and a frontier goal in hand, it beats aimless
-    // Roam -- the hero has decided there is somewhere to go.
-    const SimFactors f;
-    WorldView v;  // default reserves are full (1.0)
-    v.has_explore_goal = true;
-    v.explore_goal = {50.0f, 50.0f};
-    v.has_home = true;
-    v.has_tavern = true;
-
-    const BehaviourResult r =
-        select_banded(hero_activities(), f.hero.weights[HERO_MERCENARY], v, f);
-    CHECK(r.id == ActivityId::Explore);
-    CHECK(r.target.x == 50.0f);
-}
-
-TEST_CASE("Explore vetoes itself rather than being out-prioritized") {
-    const SimFactors f;
-    WorldView v;  // full reserves
-    v.has_explore_goal = true;
-    v.explore_goal = {50.0f, 50.0f};
-    REQUIRE(score_explore(v, f) > 0.0f);
-
-    // Not enough left in the tank to strike out (fatigue at/below the floor).
-    v.fatigue = f.hero.explore_min_fatigue;
-    CHECK(score_explore(v, f) == 0.0f);
-    v.fatigue = 1.0f;
-
-    // The world already refused this one this window.
-    v.move_blocked = true;
-    CHECK(score_explore(v, f) == 0.0f);
-    v.move_blocked = false;
-
-    // Something worth stopping for is right here.
-    v.has_prey = true;
-    CHECK(score_explore(v, f) == 0.0f);
-    v.has_prey = false;
-
-    // Nowhere unknown within reach (or simply not in the mood this window).
-    v.has_explore_goal = false;
-    CHECK(score_explore(v, f) == 0.0f);
-}
-
-TEST_CASE("a tired hero abandons exploring for rest") {
-    // Preemption by a rising need, which is what makes exploration a
-    // non-critical errand rather than a commitment.
-    const SimFactors f;
-    WorldView v;  // full reserves
-    v.has_explore_goal = true;
-    v.explore_goal = {50.0f, 50.0f};
-    v.has_home = true;
-
-    CHECK(select_banded(hero_activities(), f.hero.weights[HERO_MERCENARY], v, f).id ==
-          ActivityId::Explore);
-
-    // Drained past the explore floor AND well under the rest seek bar: rest's
-    // urgency now overtakes the flat pull of exploring, and Explore has vetoed
-    // itself besides.
-    v.fatigue = 0.3f;
-    CHECK(select_banded(hero_activities(), f.hero.weights[HERO_MERCENARY], v, f).id ==
-          ActivityId::GoHome);
-}
+// --- 2. the Explore decision --------------------------------------------------
+// (score_explore/act_explore, and the hero_activities() trade-offs against
+// them, died with the C++ hero decision layer -- that logic now lives only
+// in the Nim brain, scripts/brains/nim/blocks.nim. "a hunter actually sets
+// off into the unknown, through the sim" below is what proves Explore still
+// fires end to end, through the real wasm brain.)
 
 TEST_CASE("class appetite for exploring is heavily skewed") {
     // "Hunters do it naturally, everyone else rarely" -- a frequency, which a
@@ -249,7 +187,7 @@ namespace {
 
 // Walks a unit toward `goal` through the movement pipeline alone. Driving
 // plan/follow directly (as movement_tests does) keeps the brain out of it --
-// otherwise the town brain re-decides a goal of its own every tick and the test
+// otherwise a hero's own brain re-decides a goal of its own and the test
 // would be about arbitration rather than about walkability.
 void walk_toward(BadlandsGame& g, entt::entity e, glm::vec2 goal, int ticks) {
     MoveTarget& mt = g.registry.get<MoveTarget>(e);
@@ -306,8 +244,9 @@ TEST_CASE("a hunter actually sets off into the unknown, through the sim") {
     // End to end: fog of war configured, so there IS an unknown; the hunter
     // reveals a patch around itself, that patch acquires an outline, and the
     // hunter picks a point beyond it and walks. Nothing here is stubbed --
-    // perception, the appetite draw, the picker, and the band all participate.
-    auto owned = make_world(BrainDesc{});
+    // perception, the appetite draw, the picker, and the band (now the real
+    // wasm brain's selectBanded) all participate.
+    auto owned = testfix::make_wasm_world();
     BadlandsGame& g = *owned;
     configure_vision(g.vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
 
@@ -328,9 +267,13 @@ TEST_CASE("a hunter actually sets off into the unknown, through the sim") {
     const entt::entity e = g.slots[slot];
     g.registry.get<HeroCharacter>(e).hero_class = HERO_HUNTER;
 
+    // ~40 in-game seconds: generous room for the wasm brain's own wake
+    // cadence (idle_hint_millis, 0.5-2s, scripts/brains/nim/hero.nim) to land
+    // on a wake where the appetite draw hits and the picker finds a target,
+    // not just the first tick.
     bool explored = false;
     glm::vec2 goal{};
-    for (int i = 0; i < 600 && !explored; ++i) {
+    for (int i = 0; i < 1200 && !explored; ++i) {
         g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;  // fully rested: keep rest out of it
         tick_world(g, 1.0f / 30.0f);
         if (g.registry.get<HeroSimulationState>(e).behavior ==
@@ -346,27 +289,9 @@ TEST_CASE("a hunter actually sets off into the unknown, through the sim") {
     CHECK(level == VisionLevel::Unknown);
 }
 
-TEST_CASE("a blocked hero abandons exploring, then tries elsewhere next window") {
-    // The full loop the user asked for: unreachable is not a dead end. The
-    // refusal vetoes exploring for the window it happened in -- so the hero
-    // does something else -- and stops mattering in the next one, so it strikes
-    // out somewhere new rather than giving up on exploring for good.
-    auto owned = make_world(BrainDesc{});
-    BadlandsGame& g = *owned;
-    const int64_t lease = g.factors.hero.explore_lease_millis;
-
-    const uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, kCastleSpawnZ));
-    const entt::entity e = g.slots[slot];
-    g.world_millis = lease * 3;
-    g.registry.emplace<MoveBlocked>(e, glm::vec2{0.0f, 0.0f}, g.world_millis);
-
-    // A view built in the same window sees the blockage...
-    WorldView v;
-    v.has_explore_goal = true;
-    v.move_blocked = true;
-    CHECK(score_explore(v, g.factors) == 0.0f);
-
-    // ...and one built a window later does not.
-    v.move_blocked = false;
-    CHECK(score_explore(v, g.factors) > 0.0f);
-}
+// The MoveBlocked-veto contract ("a step refused this window doesn't get
+// re-suggested until the next one") used to have a dedicated unit test here
+// against score_explore directly; that block died with the C++ hero decision
+// layer (see this file's "2. the Explore decision" note above), and the
+// contract is not re-proven at the sim level here -- an accepted coverage
+// narrowing, not a silent drop (see task-4-report.md).

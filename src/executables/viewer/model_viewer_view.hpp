@@ -6,7 +6,9 @@
 // sun. generators_ is the extension point where future foliage/rock generators
 // slot in. Lives in src/executables/viewer/ (an app, not the engine).
 
+#include <algorithm>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -20,14 +22,15 @@
 #include "engine/core/camera.hpp"
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
-#include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rendering/geometry/aabb.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // TexturedMeshResult
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/rendering/scene_renderer.hpp"  // ShadowDebugMode
 #include "engine/scene/scene_graph.hpp"
+#include "game/geometry/leaf_texture.hpp"
 #include "game/geometry/tree_options.hpp"  // TreeOptions
+#include "game/visual/tree_field.hpp"       // TreeField, BuildTreeField
 
 namespace badlands {
 
@@ -55,6 +58,12 @@ class ModelViewerView : public AppView {
     initial_shadow_debug_mode_ = mode;
   }
 
+  // Selects the initial LOD level (headless `--lod <n>`, 0..3; 3 = "Multi",
+  // a 16x16 instanced grid of the selected tree with dynamic GPU LOD). Call
+  // before Initialize() -- RebuildScene() reads lod_level_ when generating
+  // tree meshes.
+  void SetInitialLod(int lod) { lod_level_ = std::clamp(lod, 0, 3); }
+
  private:
   // The output of a generator: a mesh plus the transform that places it. The
   // generator assumes the floor is at y=0 and returns the resting offset as a
@@ -64,28 +73,23 @@ class ModelViewerView : public AppView {
     TexturedMeshResult mesh;
     glm::mat4 transform{1.0f};
   };
-  // A named entry in the viewer's list. Exactly one mode is set:
-  //  - `generate` produces a mesh entity (the sphere test object), OR
-  //  - `tree` holds a tree setup, drawn as its skeleton GRAPH via debug lines
-  //    (the branch tubes read poorly bare/thin, so the preview shows structure).
+  // A named entry in the viewer's list. Exactly one path is set:
+  //   - `generate`: a single-material mesh entity (the sphere test object).
+  //   - `tree`: a catalog tree, built in RebuildScene as TWO materials --
+  //     deferred solid bark + forward-opaque alpha-cutout leaf cards.
   struct MeshGenerator {
     std::string name;
-    std::function<GeneratedMesh()> generate;  // mesh mode (empty for tree setups)
-    std::optional<TreeOptions> tree;          // tree mode (debug-drawn skeleton)
-    DeferredMaterial material;                 // used by mesh mode only
+    std::function<GeneratedMesh()> generate;
+    DeferredMaterial material;
+    std::optional<TreeOptions> tree;
   };
 
   void BuildGenerators();
   // Re-derives env_'s sky/SH/sun into scene_context_ and mirrors it into scene_.
   void ApplyEnvironment();
-  // Fresh graph: re-mirror lighting, add the gray floor at y=0, then either add
-  // the selected mesh generator's entity, or populate tree_lines_ with the
-  // selected tree setup's skeleton graph. Reframes the orbit either way.
+  // Fresh graph: re-mirror lighting, add the gray floor at y=0, then add the
+  // selected mesh generator's entity. Reframes the orbit.
   void RebuildScene();
-  // Builds the skeleton for `options`, fills tree_lines_ with its branch
-  // centerlines (display-scaled, colored/thick by level), and returns the
-  // scaled world-space bounds for framing.
-  void BuildTreeGraph(const TreeOptions& options, Aabb& out_world_bounds);
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -103,10 +107,40 @@ class ModelViewerView : public AppView {
 
   std::vector<MeshGenerator> generators_;
   int generator_index_ = 0;
+
+  // Manual LOD switch (tree generators only): 0=full detail, 1/2=meshopt
+  // simplified per kLodRatios, 3="Multi" (a 16x16 instanced grid via
+  // tree_field_, dynamic GPU LOD -- see RebuildScene). bark_tris_/leaf_tris_
+  // are the single-tree (0/1/2) triangle counts, recomputed in RebuildScene
+  // for the ImGui readout; not meaningful in Multi mode.
+  int lod_level_ = 0;
+  int bark_tris_ = 0;
+  int leaf_tris_ = 0;
+
   DeferredMaterial checker_mat_;  // UV-checker debug material for the sphere
-  // Skeleton-graph lines for the selected tree setup (pointed at by
-  // scene_context_.debug_lines each frame).
-  DebugLineBuffer tree_lines_;
+  DeferredMaterial bark_mat_;     // Solid bark color for catalog tree meshes
+
+  // Leaf-card texture: a white RGB silhouette (alpha = leaf shape), built once
+  // in Initialize and coloured per-tree via the AlphaCutout material tint. The
+  // texture keeps itself alive via leaf_view_; leaf_sampler_ is a trilinear +
+  // repeat sampler (mip-using) so the alpha mip chain is sampled.
+  wgpu::Texture leaf_texture_;
+  wgpu::TextureView leaf_view_;
+  wgpu::Sampler leaf_sampler_;
+
+  // GPU pipeline generator, stashed from Initialize()'s RenderContext --
+  // BuildTreeField (called from RebuildScene, not Initialize, since it needs
+  // the currently-selected TreeOptions) needs it to build the instanced
+  // material factories. Not owned; outlives this view (see render_context.hpp).
+  GpuPipelineGenerator* pipeline_gen_ = nullptr;
+
+  // Multi-mode instanced tree grid. Built in RebuildScene when lod_level_==3,
+  // reset (and scene_context_.instanced_field_count cleared) otherwise.
+  // field_ptr_ is the stable single-element array scene_context_.
+  // instanced_fields points at (SceneContext::instanced_fields is
+  // InstancedMeshField* const*, an array of field pointers).
+  std::unique_ptr<TreeField> tree_field_;
+  InstancedMeshField* field_ptr_ = nullptr;
 
   ShadowDebugMode initial_shadow_debug_mode_ = ShadowDebugMode::Off;
 

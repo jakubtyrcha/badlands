@@ -305,6 +305,10 @@ TEST_CASE("a ranged attack spawns a projectile that damages on arrival", "[comba
     const float hp0 = g.registry.get<Health>(te).hp;
 
     // Fire at the named target; a projectile appears, no damage yet.
+    // param_a left unnamed = its -1 default = auto-pick (Finding 2026-07-29
+    // review fix): the shooter has only one attack, so auto-pick and an
+    // explicit index 0 are equivalent here -- but say so, since which one
+    // this is has flipped meaning across that fix.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
     CHECK(g.registry.view<Projectile>().size() == 1);
@@ -327,6 +331,10 @@ TEST_CASE("a projectile fizzles when its target dies mid-flight", "[combat]") {
     const uint32_t s = spawn_shooter(g);
     const uint32_t t = spawn_dummy(g, 20.0f, 1);  // far, so it won't arrive at once
 
+    // param_a left unnamed = its -1 default = auto-pick (Finding 2026-07-29
+    // review fix): the shooter has only one attack, so auto-pick and an
+    // explicit index 0 are equivalent here -- but say so, since which one
+    // this is has flipped meaning across that fix.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
     REQUIRE(g.registry.view<Projectile>().size() == 1);
@@ -334,6 +342,152 @@ TEST_CASE("a projectile fizzles when its target dies mid-flight", "[combat]") {
     g.registry.destroy(g.slots[t]);  // target gone before the shot lands
     advance_projectiles(g, 1.0f / 30.0f);
     CHECK(g.registry.view<Projectile>().size() == 0);  // despawned, no crash
+}
+
+namespace {
+
+// A melee(0)/ranged(1) loadout -- the OPPOSITE index order from
+// bow_and_blade() above, deliberately: pick_attack/select_attack's auto-pick
+// prefers ranged when unlocked, so this is the loadout that actually
+// distinguishes "index 0" from "whatever the auto-pick chose" (the seam
+// game/src/intention.h's resolve_action, and an explicit-index Attack
+// command generally, depend on -- Command::param_a's default is -1/auto-pick
+// since Finding 2026-07-29, so naming index 0 here is a deliberate choice,
+// not what a bare command would do on its own).
+Attacks blade_then_bow() {
+    Attacks a{};
+    a.count = 2;
+    a.defs[0] = Attack{AttackCategory::Melee, DamageType::Slashing, 4.0f, 1.5f, 1.0f, 0.0f};
+    a.defs[1] = Attack{AttackCategory::Ranged, DamageType::Piercing, 5.0f, 6.0f, 1.0f, 0.0f};
+    return a;
+}
+
+}  // namespace
+
+TEST_CASE("fire_attack: -1 still auto-picks (prefers ranged); an explicit index fires exactly "
+          "that attack",
+          "[combat]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t s = spawn_shooter(g);  // accuracy 1.0, one ranged attack by default
+    const entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = blade_then_bow();
+    const uint32_t t = spawn_dummy(g, 1.0f, 1);  // within range of both attacks
+
+    // -1 (the legacy/compat path, e.g. apply_intention's Shoot-case producer,
+    // intention.cpp): auto-picks via select_attack, which prefers ranged
+    // (index 1) when unlocked -- a projectile spawns, index 0's cooldown is
+    // untouched.
+    fire_attack(g, s, t, -1);
+    CHECK(g.registry.view<Projectile>().size() == 1);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] > 0.0f);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] == 0.0f);
+    g.registry.destroy(*g.registry.view<Projectile>().begin());
+    g.registry.get<Attacks>(se).cooldown_remaining[1] = 0.0f;  // reset for the next call
+
+    // Explicit index 0: fires the melee attack exactly, even though ranged
+    // (index 1) is what auto-pick would have preferred.
+    fire_attack(g, s, t, 0);
+    CHECK(g.registry.view<Projectile>().size() == 0);  // melee resolves immediately, no projectile
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] > 0.0f);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] == 0.0f);  // ranged untouched
+}
+
+TEST_CASE("fire_attack: an explicit index re-validates range/cooldown/lock and no-ops if unusable",
+          "[combat]") {
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t s = spawn_shooter(g);
+    const entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = blade_then_bow();
+    g.registry.emplace<MeleeLock>(se);  // locked: index 1 (Ranged) becomes illegal
+    const uint32_t t = spawn_dummy(g, 1.0f, 1);
+    const entt::entity te = g.slots[t];
+    const float hp0 = g.registry.get<Health>(te).hp;
+
+    fire_attack(g, s, t, /*attack_index=*/1);  // explicit, but Ranged-while-locked
+    CHECK(g.registry.view<Projectile>().size() == 0);  // no-op: never fired
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] == 0.0f);  // untouched
+    CHECK(g.registry.get<Health>(te).hp == hp0);
+}
+
+TEST_CASE(
+    "fire_attack: an in-batch kill leaves a second explicit-index Attack against the same "
+    "target as a no-op",
+    "[combat]") {
+    // Finding 4: the explicit-index path re-validates the index (attack_usable)
+    // but never re-checked the target was still alive. Two attackers each name
+    // the same victim's slot explicitly in the same command batch; the first
+    // command to drain kills it, and the second must find a corpse, exactly
+    // like select_target's auto-pick path (nearest_enemy's hp filter) already
+    // refuses one.
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+
+    CharacterDesc victim_d{};
+    victim_d.team = 1;
+    victim_d.hp = 1.0f;  // dies to a single swing
+    victim_d.size_x = victim_d.size_y = victim_d.size_z = 1.0f;
+    const uint32_t v = spawn_into(g, victim_d);
+    entt::entity ve = g.slots[v];
+
+    CharacterDesc attacker_d{};
+    attacker_d.team = 0;
+    attacker_d.hp = 20.0f;
+    attacker_d.size_x = attacker_d.size_y = attacker_d.size_z = 1.0f;
+    attacker_d.accuracy = 1.0f;
+    attacker_d.attack_count = 1;
+    attacker_d.attacks[0] = Attack{AttackCategory::Melee, DamageType::Blunt, 10.0f, 1.5f, 1.0f, 0.0f};
+    const uint32_t a1 = spawn_into(g, attacker_d);
+    const uint32_t a2 = spawn_into(g, attacker_d);
+    entt::entity a2e = g.slots[a2];
+
+    // Both name the victim's slot explicitly (param_a = 0, this loadout's
+    // only attack) in the same batch.
+    g.command_queue.push_back({CommandKind::Attack, a1, v, {0.0f, 0.0f}, /*param_a=*/0});
+    g.command_queue.push_back({CommandKind::Attack, a2, v, {0.0f, 0.0f}, /*param_a=*/0});
+    apply_commands(g);
+
+    CHECK(g.registry.get<Health>(ve).hp <= 0.0f);
+
+    int32_t hits_on_victim = 0;
+    for (const GameEvent& ev : g.events) {
+        if (ev.kind == GameEventKind::DamageDealt && ev.target_id == v) {
+            ++hits_on_victim;
+        }
+    }
+    CHECK(hits_on_victim == 1);  // the second attacker's swing must not land
+
+    // The second attacker's cooldown is untouched -- its swing never fired.
+    CHECK(g.registry.get<Attacks>(a2e).cooldown_remaining[0] == 0.0f);
+}
+
+TEST_CASE(
+    "a raw Attack command with no param_a auto-picks a usable attack under MeleeLock",
+    "[combat]") {
+    // Finding 5: Command::param_a defaults to -1 (auto-pick), not 0 (an
+    // explicit, and here illegal, index) -- a producer that pushes a bare
+    // Attack command (no param_a named) must get the same auto-pick
+    // resolve_action's own -1 path gets, not a forced index 0.
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t s = spawn_shooter(g);  // accuracy 1.0
+    const entt::entity se = g.slots[s];
+    g.registry.get<Attacks>(se) = bow_and_blade();  // ranged (0) + melee (1)
+    g.registry.emplace<MeleeLock>(se);              // ranged (index 0) is now illegal
+    const uint32_t t = spawn_dummy(g, 1.0f, 1);      // within melee range
+    const entt::entity te = g.slots[t];
+    const float hp0 = g.registry.get<Health>(te).hp;
+
+    g.command_queue.push_back({CommandKind::Attack, s, t});  // param_a left unnamed
+    apply_commands(g);
+
+    // Auto-pick chooses the usable melee attack (index 1): no projectile,
+    // melee's cooldown spent, damage lands immediately.
+    CHECK(g.registry.view<Projectile>().size() == 0);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] > 0.0f);
+    CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] == 0.0f);  // ranged untouched
+    CHECK(g.registry.get<Health>(te).hp < hp0);
 }
 
 TEST_CASE("the arena's blocked edges refuse a step past the wall", "[combat]") {

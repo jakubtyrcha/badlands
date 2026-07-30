@@ -68,8 +68,8 @@ corrosion_set_env_vars(wesl_ffi "RUSTFLAGS=-Cpanic=unwind")
 # Rust staticlib. Unlike wesl_ffi, no dependency of this crate shares its
 # own name, so no Corrosion package-ambiguity workaround is needed here.
 #
-# PROFILE release — ALWAYS, even in a Debug C++ build (same reasoning as
-# noiser-bundle below). This crate is the image decoder, and terrain startup
+# PROFILE release — ALWAYS, even in a Debug C++ build. This crate is the
+# image decoder, and terrain startup
 # decodes 18 material textures (1024^2 each) through it. Built with cargo's dev
 # profile (opt-level 0, what CMAKE_BUILD_TYPE=Debug otherwise selects) a single
 # 1024^2 JPEG/PNG decode costs ~130-200 ms instead of ~20 ms, so the six-pack
@@ -111,28 +111,6 @@ corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/ui/Cargo.tom
                        PROFILE release)
 corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
 
-# noiser-bundle: aggregates noiser-compiler + noiser-vm (third_party/noiser)
-# into ONE Rust staticlib (crates/noiser-bundle) so the noiser C++ VM wrapper
-# (third_party/noiser/noiser-vm/src, compiled into badlands_game_lib below)
-# links libstd exactly once. It is a member of the root workspace (which also
-# contains the legacy Rust app); Corrosion invokes `cargo build -p
-# noiser-bundle`, which only resolves noiser-bundle + its two path deps, not
-# the legacy app's wgpu/winit/naga deps. The package name has a dash, and
-# Corrosion's imported CMake target always replaces dashes with underscores
-# (CorrosionGenerator.cmake), so the target is `noiser_bundle`, not
-# `noiser-bundle`.
-#
-# PROFILE release — ALWAYS, even in a Debug C++ build. The noiser VM is an
-# interpreter sitting on mapgen's hot path: the field script evaluates ~16
-# Perlin octaves per sample, so a 2000x2000 map is ~64M octave evaluations
-# through it. Built with cargo's dev profile (opt-level 0, which is what
-# CMAKE_BUILD_TYPE=Debug otherwise selects) that alone costs ~39s of a ~40s
-# generation. Nothing here is C++-debuggable anyway — it's a prebuilt staticlib
-# behind a C ABI — so there is no debuggability to trade away.
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/crates/noiser-bundle/Cargo.toml
-                       PROFILE release)
-corrosion_set_env_vars(noiser_bundle "RUSTFLAGS=-Cpanic=unwind")
-
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
 # types/logic live here — see src/engine/app/app_view.hpp.
@@ -149,6 +127,8 @@ add_library(badlands_engine STATIC
     src/engine/rendering/material/material_instance_cache.cpp
     src/engine/rendering/material/standard_material_factory.cpp
     src/engine/rendering/material/standard_rendering_material_instance.cpp
+    src/engine/rendering/gpu_instance_renderer.cpp
+    src/engine/rendering/instanced_mesh_field.cpp
     src/engine/rendering/geometry/aabb.cpp
     src/engine/rendering/geometry/cube_sphere.cpp
     src/engine/rendering/geometry/textured_mesh_builders.cpp
@@ -253,12 +233,9 @@ target_include_directories(badlands_engine PUBLIC
     ${taskflow_SOURCE_DIR}
 )
 
-# badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog + the
-# noiser-scripted brains), pure C++ with no engine/SDL/Dawn deps — geometry
-# that needs engine types comes in a later task (S2.C). Includes the
-# sampo::noiser C++ VM wrapper (pure delegation over the noiser Rust VM's C
-# ABI); badlands uses the VM only, so noiser_jit_stubs.cpp stubs the JIT
-# (Cranelift) C ABI.
+# badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog), pure C++
+# with no engine/SDL/Dawn deps — geometry that needs engine types comes in a
+# later task (S2.C). The hero brain is wasm-only now (game/src/wasm_brain.h).
 #
 # Named badlands_game_lib, not badlands_game: the "game" app executable below
 # is already named badlands_game (from S2.A1/A3), and CMake target names must
@@ -266,39 +243,45 @@ target_include_directories(badlands_engine PUBLIC
 add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/sim.cpp
-    game/src/brain.cpp
     game/src/combat.cpp
     game/src/command.cpp
     game/src/creature_catalog.cpp
     game/src/placement.cpp
     game/src/movement.cpp
     game/src/heroes.cpp
+    game/src/skills.cpp
+    game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
-    game/src/town_brain.cpp
-    # Task 4 (wasm-brain feature): the wasm hero brain runtime (brainhost C
-    # ABI) -- see game/src/wasm_brain.h.
+    # Intention contract engine (inbox, wake rule, apply seam) the wasm hero
+    # brain runs on -- see docs/design/intention-contract.html and
+    # game/src/intention.h.
+    game/src/intention.cpp
+    # Hero perception (observe_hero/weights_for) -- all that remains of the
+    # deleted C++ hero decision layer (town_brain.cpp); its sole consumer now
+    # is the wasm hero brain (wasm_brain.cpp), the sole hero decision-maker.
+    game/src/hero_perception.cpp
+    # The wasm hero brain runtime (brainhost C ABI) -- see game/src/wasm_brain.h.
     game/src/wasm_brain.cpp
     game/src/activity_catalog.cpp
     game/src/activity_histogram.cpp
     game/src/behaviours/blocks.cpp
     game/src/behaviours/selectors.cpp
     game/src/behaviours/perception.cpp
-    game/src/behaviours/deliberation.cpp
     game/src/critter_brain.cpp
     game/src/townfolk_brain.cpp
     game/src/monster_brain.cpp
     game/src/economy.cpp
     game/src/vision.cpp
     game/src/exploration.cpp
-    game/src/noiser_jit_stubs.cpp
-    third_party/noiser/noiser-vm/src/noiser.cpp
-    third_party/noiser/noiser-vm/src/noiser_crash.cpp
     # Task S2.C: procedural-geometry game data (no engine/SDL/Dawn deps — see
     # the file-level comments in src/game/building_catalog.{h,cpp} and
     # src/game/geometry/ploppable_rings.{h,cpp}).
     src/game/building_catalog.cpp
     src/game/geometry/ploppable_rings.cpp
+    # Task 1 (tree-LOD feature): general meshoptimizer-based mesh
+    # simplification helper (pure geometry math, no engine/tree types).
+    src/game/geometry/mesh_lod.cpp
     # Task S2.D: MaterialId -> PBR pack mapping (src/game/material_pack.h).
     src/game/material_pack.cpp
     # Task S2.G: walled AI-sandbox arena (src/game/arena.h), reusing
@@ -317,12 +300,8 @@ add_library(badlands_game_lib STATIC
     game/src/nav_world.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
-# noiser_common.h intentionally ships [[deprecated]] shims.
-target_compile_options(badlands_game_lib PRIVATE -Wno-deprecated-declarations)
 target_include_directories(badlands_game_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/game/include
-    ${CMAKE_SOURCE_DIR}/third_party/noiser/noiser-vm/src
-    ${CMAKE_SOURCE_DIR}/third_party/noiser
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
@@ -341,14 +320,22 @@ target_include_directories(badlands_game_lib PRIVATE
 )
 # brainhost: wasmtime-backed brain wasm runtime (game/src/wasm_brain.cpp) --
 # mirrors how nav is linked into badlands_engine above.
-target_link_libraries(badlands_game_lib PUBLIC noiser_bundle brainhost)
+target_link_libraries(badlands_game_lib PUBLIC brainhost)
+# meshoptimizer: backs src/game/geometry/mesh_lod.cpp's SimplifyMesh (Task 1,
+# tree-LOD feature). PRIVATE -- an implementation detail of mesh_lod.cpp, not
+# part of badlands_game_lib's public header surface.
+target_link_libraries(badlands_game_lib PRIVATE meshoptimizer)
 
 # Three thin executables, each with its own main, all linking badlands_engine
 # and badlands_game_lib. Each app grows its own real AppView.
 set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
     src/executables/viewer/model_viewer_view.cpp
-    src/game/geometry/tree_generator.cpp)
+    src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
+    # Multi-mode instanced tree grid (Task 4): builds an InstancedMeshField
+    # from a catalog TreeOptions -- see game/visual/tree_field.hpp.
+    src/game/visual/tree_field.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
@@ -370,6 +357,10 @@ set(badlands_app_sources_game
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
+    src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
+    src/game/factors_manifest.cpp   # behaviour tuning loaded as data
+    src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
+    src/game/skill_manifest.cpp     # skill template overrides loaded as data
     # Game UI (the in-world HUD + world picking), distinct from the ImGui debug
     # UI. Game-specific, so it lives here rather than in badlands_engine --
     # only the game-agnostic UiRenderer does.
@@ -383,8 +374,10 @@ set(badlands_app_sources_ai_sandbox
     src/executables/ai_sandbox/main_ai_sandbox.cpp
     src/executables/ai_sandbox/ai_sandbox_view.cpp
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
+    src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
+    src/game/skill_manifest.cpp     # skill template overrides loaded as data
     src/game/scenario.cpp)          # sandbox scenarios loaded as data
 
 foreach(app viewer game ai_sandbox)
@@ -416,19 +409,6 @@ target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
 target_include_directories(badlands_mapgen_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 
-# badlands_patchgen: renders ONE noiser terrain script over a world patch to a
-# grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
-# window. Scripts are functions of world meters, so a patch is a literal crop of the
-# world (see scripts/mapgen/biomes/README.md).
-add_executable(badlands_patchgen
-    src/executables/patchgen/main_patchgen.cpp
-    src/executables/patchgen/script_eval.cpp)
-target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib badlands_game_lib)
-target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_patchgen PRIVATE "-Wl,-ld_new")
-endif()
-
 # badlands_mapview: THE map tool. `--preview-image-only` runs the generator and
 # dumps the debug rasters (pure CPU, no window); otherwise it renders the
 # generated map as Nanite-style cluster-LOD terrain with the biome-blend
@@ -444,7 +424,6 @@ add_executable(badlands_mapview
     # cut, and the Terrain debug UI.
     src/game/map/cluster_terrain.cpp)
 target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib meshoptimizer)
-target_compile_options(badlands_mapview PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
     target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
 endif()
@@ -453,7 +432,7 @@ endif()
 # DAG build (error monotonicity, sphere nesting, crack-free seams, grid
 # arithmetic). Pure CPU on synthetic MapData heightfields — compiles just the
 # build TU + its deps (map_data for the frozen contract it samples, the
-# header-only Aabb) and links meshoptimizer; no noiser/Dawn/GPU. Pattern of
+# header-only Aabb) and links meshoptimizer; no Dawn/GPU. Pattern of
 # badlands_generator_tests.
 add_executable(badlands_terrain_cluster_tests
     src/game/geometry/terrain_clusters_tests.cpp
@@ -472,27 +451,6 @@ target_include_directories(badlands_terrain_cluster_tests PRIVATE
 )
 target_link_libraries(badlands_terrain_cluster_tests PRIVATE meshoptimizer)
 add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-# badlands_patch_eval_tests: the patch evaluator's world mapping (world =
-# origin + (i+0.5)*extent/res), pinned with analytic ramp scripts. Needs the
-# noiser VM, so it links badlands_game_lib (which PUBLIC-links noiser_bundle and
-# carries no engine/SDL/Dawn dependency) -- NOT badlands_mapgen_lib, which would
-# drag in the renderer for nothing.
-add_executable(badlands_patch_eval_tests
-    src/executables/patchgen/patch_eval_tests.cpp
-    src/executables/patchgen/script_eval.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_link_libraries(badlands_patch_eval_tests PRIVATE badlands_game_lib)
-target_include_directories(badlands_patch_eval_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-)
-target_compile_options(badlands_patch_eval_tests PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_patch_eval_tests PRIVATE "-Wl,-ld_new")
-endif()
-add_test(NAME badlands_patch_eval_tests COMMAND badlands_patch_eval_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_fog_generator_tests: the biome -> fog-emitter generator. Pure CPU
 # (fog_sim.hpp is header-only glm; biomes/field2d are headers), so it compiles
@@ -562,26 +520,6 @@ target_include_directories(badlands_erosion_tests PRIVATE
 add_test(NAME badlands_erosion_tests COMMAND badlands_erosion_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
-# it over a windowed 2D domain into a texture (8x8 patches across the shared
-# thread pool), and write a PNG. Links badlands_game_lib for the noiser C++ VM
-# and `assets` for PNG write; compiles src/core/parallel.cpp for ParallelFor.
-# No engine/SDL/Dawn — a fast, standalone tool. See src/tools/noise_texgen/.
-add_executable(badlands_noise_texgen
-    src/tools/noise_texgen/noise_texgen.cpp
-    src/tools/noise_texgen/texgen_core.cpp
-    src/core/parallel.cpp
-)
-target_link_libraries(badlands_noise_texgen PRIVATE badlands_game_lib assets)
-target_include_directories(badlands_noise_texgen PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
-    ${taskflow_SOURCE_DIR}
-)
-target_compile_options(badlands_noise_texgen PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_noise_texgen PRIVATE "-Wl,-ld_new")
-endif()
-
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
 # see tests/cpp_tests.rs on the legacy Rust reference branch).
@@ -589,8 +527,6 @@ enable_testing()
 add_executable(badlands_game_tests
     game/tests/combat_tests.cpp
     game/tests/sim_tests.cpp
-    game/tests/noiser_smoke_tests.cpp
-    game/tests/duel_test.cpp
     game/tests/placement_tests.cpp
     game/tests/movement_tests.cpp
     game/tests/heroes_tests.cpp
@@ -600,9 +536,7 @@ add_executable(badlands_game_tests
     game/tests/needs_tests.cpp
     game/tests/determinism_tests.cpp
     game/tests/archetype_tests.cpp
-    game/tests/behaviours_tests.cpp
     game/tests/activity_selector_tests.cpp
-    game/tests/deliberation_tests.cpp
     game/tests/chat_tests.cpp
     game/tests/exploration_tests.cpp
     game/tests/activity_stats_tests.cpp
@@ -612,15 +546,20 @@ add_executable(badlands_game_tests
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
+    # Hero behavior, wasm-driven (Task 4: the C++ decision layer is gone --
+    # the shipping brain is the sole hero decision-maker). Histogram-in-spirit
+    # outcomes over a run, plus two smokes salvaged from the deleted
+    # hero_brain_parity_tests.cpp.
+    game/tests/hero_behavior_tests.cpp
     # Brain wire format (game/src/brain_abi.h): pure struct-layout checks, no
     # sim needed.
     game/tests/brain_abi_tests.cpp
-    # The wasm hero brain wired into the sim -- see game/src/wasm_brain.h.
+    # The wasm hero brain (v2, the intention contract) wired into the sim --
+    # see game/src/wasm_brain.h. No twin-brain parity anymore (the C++
+    # reference/mock-hero-fallback comparison died with v1's wire; the
+    # ported Nim brain -- scripts/brains/nim/hero.nim -- is the sole hero
+    # decision layer for a wasm-loaded world).
     game/tests/wasm_brain_tests.cpp
-    # The ported hero decision layer (scripts/brains/nim/hero.nim) --
-    # twin-brain parity against the C++ reference (town_brain.cpp) + wasm-side
-    # behavioural smokes.
-    game/tests/hero_brain_parity_tests.cpp
     # Task 9: the set_factors_of validation boundary (sanitize_factors,
     # sim.cpp) -- adversarial-config red/green repros.
     game/tests/factors_sanitize_tests.cpp
@@ -643,6 +582,12 @@ add_executable(badlands_game_tests
     # so it runs here without a device -- same rationale as the decals above.
     game/tests/world_labels_tests.cpp
     src/game/visual/world_labels.cpp
+    # Skill vocabulary: catalog, grant table, Skills component (game/src/skills.h).
+    game/tests/skills_tests.cpp
+    # Hero progression: leveling curve + XP accrual (game/src/progression.h).
+    game/tests/progression_tests.cpp
+    # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
+    game/tests/intention_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_game_tests PRIVATE
@@ -653,14 +598,8 @@ target_include_directories(badlands_game_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
 )
-target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
 target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib ui)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-# The noiser smoke/duel cases load the SHIPPING brain scripts by path and REQUIRE
-# the env vars (historically exported only by the legacy Rust harness, so a bare
-# `ctest` failed on them). Set here so `ctest --test-dir build` is self-contained.
-set_tests_properties(badlands_game_tests PROPERTIES ENVIRONMENT
-    "BADLANDS_BRAIN_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/hero.noiser;BADLANDS_COMBAT_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/brains/combat_test.noiser")
 
 # badlands_geometry_tests: Catch2 suite for Task S2.C's procedural geometry
 # (primitives/rocks/building parts, src/engine/rendering/geometry) + the
@@ -683,6 +622,7 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
     src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_tests PRIVATE
@@ -980,6 +920,30 @@ if(APPLE)
 endif()
 add_test(NAME badlands_resolve_composite_tests COMMAND badlands_resolve_composite_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_gpu_instance_tests: GPU-driven instanced-rendering feature, Phase A
+# (primitives spike) — de-risks atomics in a compute shader
+# (shaders/tests/atomic_append_test.wesl, the first shader in this repo to use
+# atomic<u32>), DrawIndexedIndirect (RenderPassContext::DrawIndexedIndirect +
+# shaders/tests/indirect_draw_test.wesl), and the reusable BufferReadback test
+# helper (src/engine/tests/buffer_readback.*) that both of the above need.
+# Later phases (GPU cull/LOD/compaction) extend this same target. Needs a
+# working GPU adapter (Metal on macOS) + the shaders/ dir (WORKING_DIRECTORY =
+# repo root).
+add_executable(badlands_gpu_instance_tests
+    src/engine/tests/gpu_instance_tests.cpp
+    src/engine/tests/buffer_readback.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_gpu_instance_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_gpu_instance_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_gpu_instance_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_gpu_instance_tests COMMAND badlands_gpu_instance_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_terrain_mesh_tests: pure-CPU tests for src/game/geometry/terrain_mesh
 # — the SampleHeight/RaycastTerrain queries behind mouse picking. No GPU: only
 # glm + the header-only mapgen Field2D/Biome types and the header-only Ray struct.
@@ -1107,6 +1071,32 @@ target_include_directories(badlands_factors_manifest_tests PRIVATE
 target_link_libraries(badlands_factors_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_factors_manifest_tests COMMAND badlands_factors_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_skill_manifest_tests: skill template overrides loaded as data
+# (assets/skills/skills.json -> badlands::SkillCatalog). App-layer, so the sim
+# keeps its lean dependency set. Reads the shipped file, so cwd = repo root.
+add_executable(badlands_skill_manifest_tests
+    src/game/tests/skill_manifest_tests.cpp
+    src/game/skill_manifest.cpp
+    # The skill vocabulary table (compiled SkillCatalog defaults + name
+    # lookup). Depends on badlands_sim.hpp plus the game-side component/view
+    # headers it declares alongside, so this target also needs game/src on
+    # its include path (see below) -- entt and command.h are header-only, so
+    # no extra sources are dragged in.
+    game/src/skills.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_skill_manifest_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_skill_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME badlands_skill_manifest_tests COMMAND badlands_skill_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_scenario_tests: the app-layer sandbox loaders (arena scenarios +
 # creature-stat overrides -> sim data). Lean, like factors_manifest_tests:
 # creature_catalog.cpp depends on badlands_sim.hpp alone, so no full-sim link.
@@ -1148,25 +1138,3 @@ target_include_directories(badlands_ray_tests PRIVATE
 target_compile_definitions(badlands_ray_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 add_test(NAME badlands_ray_tests COMMAND badlands_ray_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_texgen_tests: Catch2 suite for the noise-texgen core
-# (src/tools/noise_texgen) — determinism, 8x8-patch tiling completeness, window
-# binding, mode/return-type validation, and linear-grayscale vs sRGB-color
-# encoding. Pure CPU; must run from the repo root so assets/noiser/texgen/*.noiser
-# resolve.
-add_executable(badlands_texgen_tests
-    src/tools/noise_texgen/texgen_tests.cpp
-    src/tools/noise_texgen/texgen_core.cpp
-    src/core/parallel.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_include_directories(badlands_texgen_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
-    ${taskflow_SOURCE_DIR}
-)
-target_link_libraries(badlands_texgen_tests PRIVATE badlands_game_lib assets)
-target_compile_options(badlands_texgen_tests PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_texgen_tests PRIVATE "-Wl,-ld_new")
-endif()
-add_test(NAME badlands_texgen_tests COMMAND badlands_texgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

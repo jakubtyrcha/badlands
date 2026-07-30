@@ -9,25 +9,48 @@
 
 namespace badlands {
 
-namespace {
-
 // The reflected uniform buffers for a shader include both the imported
-// `frame` UBO (group 0) and the per-object UBO (group 1). Which one lands at
+// `frame` UBO (group 0) and the material-constants UBO. Which one lands at
 // index [0] depends on declaration order in the shader source (not
 // consistent across shaders — e.g. `textured_mesh` happens to emit `object`
-// before `frame`, but `ground`/`overlay` don't). Select the per-object
-// buffer explicitly by group instead of assuming position.
-const ReflectedUniformBuffer* FindPerObjectBuffer(
-    const std::vector<ReflectedUniformBuffer>& uniform_buffers) {
-  for (const auto& buffer : uniform_buffers) {
-    if (buffer.group == 1) {
-      return &buffer;
+// before `frame`, but `ground`/`overlay` don't). Select the constants buffer
+// explicitly (by group, skipping the frame UBO) instead of assuming position.
+const ReflectedUniformBuffer* SelectMaterialParamsBuffer(
+    const std::vector<ReflectedUniformBuffer>& buffers,
+    GeometryType geometry_type) {
+  // Instanced materials keep the per-object model matrix in a group-1 storage
+  // array, so their material constants live in a group-0 UBO. Every other
+  // material keeps its constants in the group-1 per-object UBO.
+  const uint32_t params_group =
+      geometry_type == GeometryType::kInstancedMesh ? 0u : 1u;
+  // Contract: a material declares exactly ONE material-params UBO in
+  // `params_group` (the non-frame one). Callers (Bind / BuildUniformBuffer /
+  // GetUniformBufferSize) bind + fill precisely this buffer, so a SECOND
+  // candidate would be silently ignored and its members would go unwritten /
+  // unbound. No shader declares two today; scan the whole list and fail loudly
+  // if one ever does rather than quietly pick the first.
+  const ReflectedUniformBuffer* found = nullptr;
+  for (const auto& buffer : buffers) {
+    if (buffer.group != params_group) {
+      continue;
     }
+    // Skip the imported `frame` UBO (always group 0, binding 0), which shares
+    // group 0 with the instanced material-params UBO.
+    if (buffer.group == 0 && buffer.binding == 0) {
+      continue;
+    }
+    if (found != nullptr) {
+      spdlog::error(
+          "SelectMaterialParamsBuffer: multiple material-params UBOs in group "
+          "{} (bindings {} and {}); the single-params-UBO contract is violated "
+          "-- binding only the first",
+          params_group, found->binding, buffer.binding);
+      break;
+    }
+    found = &buffer;
   }
-  return nullptr;
+  return found;
 }
-
-}  // namespace
 
 MaterialInstance::MaterialInstance(const MeshRenderingMaterial* base_material,
                                    GeometryType geometry_type,
@@ -286,11 +309,12 @@ uint32_t MaterialInstance::GetUniformBufferSize() const {
     return 0;
   }
   const auto& uniform_buffers = base_material_->GetUniformBuffers(geometry_type_, pass_type_);
-  const ReflectedUniformBuffer* per_object = FindPerObjectBuffer(uniform_buffers);
-  if (!per_object) {
+  const ReflectedUniformBuffer* params =
+      SelectMaterialParamsBuffer(uniform_buffers, geometry_type_);
+  if (!params) {
     return 0;
   }
-  return per_object->total_size;
+  return params->total_size;
 }
 
 wgpu::Buffer MaterialInstance::GetOrCreateUniformBuffer(wgpu::Device device) {
@@ -320,11 +344,13 @@ void MaterialInstance::BuildUniformBuffer(wgpu::Device device) {
     return;
   }
 
-  // Select the per-object (group 1) uniform buffer explicitly -- see
-  // FindPerObjectBuffer for why positional [0] is unsafe.
-  const ReflectedUniformBuffer* buffer_info_ptr = FindPerObjectBuffer(uniform_buffers);
+  // Select the material-constants UBO explicitly -- see
+  // SelectMaterialParamsBuffer for why positional [0] is unsafe (and how the
+  // instanced group-0 params UBO is distinguished from the frame UBO).
+  const ReflectedUniformBuffer* buffer_info_ptr =
+      SelectMaterialParamsBuffer(uniform_buffers, geometry_type_);
   if (!buffer_info_ptr) {
-    // Shader has no per-object (group 1) uniform buffer -- nothing to build.
+    // Shader has no material-constants UBO -- nothing to build.
     return;
   }
   const ReflectedUniformBuffer& buffer_info = *buffer_info_ptr;

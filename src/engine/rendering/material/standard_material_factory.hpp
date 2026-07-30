@@ -25,32 +25,19 @@
 namespace badlands {
 
 class MeshRenderingMaterial;
-class ScriptTextureProvider;
-
-// Resolved texture from recipe (either DefaultTextureView or script execution)
-struct ResolvedRecipeTexture {
-  std::string param_name;
-  wgpu::TextureView view;
-  wgpu::Sampler sampler;
-};
 
 // StandardMaterialFactory is the ownership and caching layer for material resources:
 // - Compiled shader pipelines (via MeshRenderingMaterial → GpuPipelineGenerator)
 // - Default textures and samplers (1x1 fallback textures, nearest sampler)
-// - Resolved script textures (lazily cached per geometry type in CreateInstance)
 // - Recipe data: DefaultTextureView items (geometry-specific via TextureType)
-//   and NoiserMaterialScript items (geometry-independent; resolved on demand)
 //
 // Geometry type determines texture format: kSphericalMesh → cubemap, kTexturedMesh → 2D.
-// Scripts are geometry-agnostic in definition but produce geometry-specific textures.
 class StandardMaterialFactory : public MaterialInstanceFactory {
  public:
   StandardMaterialFactory(
       std::string requirements_name,
       std::map<MaterialPassType, std::unique_ptr<MeshRenderingMaterial>> materials,
       std::vector<DefaultTextureView> default_view_recipes,
-      std::vector<NoiserMaterialScript> script_recipes,
-      ScriptTextureProvider* script_provider,
       wgpu::Device device, wgpu::Queue queue,
       const MaterialRequirementsRegistry& requirements_registry,
       std::vector<GeometryType> supported_geometry_types = {});
@@ -64,13 +51,10 @@ class StandardMaterialFactory : public MaterialInstanceFactory {
   std::string requirements_name_;
   std::map<MaterialPassType, std::unique_ptr<MeshRenderingMaterial>> materials_;
   std::vector<DefaultTextureView> default_view_recipes_;
-  std::vector<NoiserMaterialScript> script_recipes_;
-  ScriptTextureProvider* script_provider_;
   wgpu::Device device_;
   wgpu::Queue queue_;
   const MaterialRequirementsRegistry& requirements_registry_;
   std::vector<GeometryType> supported_geometry_types_;
-  mutable std::map<GeometryType, std::vector<ResolvedRecipeTexture>> resolved_script_cache_;
 
   // Default samplers (Nearest for 1x1 fallback textures)
   wgpu::Sampler default_nearest_sampler_;
@@ -99,8 +83,6 @@ class StandardMaterialFactory : public MaterialInstanceFactory {
   DefaultTextures& GetDefaultTextures();
   wgpu::TextureView GetDefaultTextureForSlot(const std::string& default_name,
                                               TextureType type);
-  const std::vector<ResolvedRecipeTexture>& GetResolvedScripts(
-      GeometryType geometry_type) const;
 };
 
 }  // namespace badlands
