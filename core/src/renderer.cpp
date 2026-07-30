@@ -24,14 +24,23 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
     CGColorSpaceRelease(cs); // the layer retains it
 
     library_ = NS::TransferPtr(device_->newDefaultLibrary());
-    assert(library_ && "failed to load default Metal library");
+    if (!library_) {
+        fprintf(stderr, "failed to load default Metal library\n");
+        assert(false && "failed to load default Metal library");
+    }
 
     NS::SharedPtr<MTL::Function> vertex_fn = NS::TransferPtr(
         library_->newFunction(NS::String::string("debug_line_vertex", NS::UTF8StringEncoding)));
     NS::SharedPtr<MTL::Function> fragment_fn = NS::TransferPtr(
         library_->newFunction(NS::String::string("debug_line_fragment", NS::UTF8StringEncoding)));
-    assert(vertex_fn && "debug_line_vertex missing from default.metallib");
-    assert(fragment_fn && "debug_line_fragment missing from default.metallib");
+    if (!vertex_fn) {
+        fprintf(stderr, "failed to create debug_line_vertex: missing from default.metallib\n");
+        assert(false && "debug_line_vertex missing from default.metallib");
+    }
+    if (!fragment_fn) {
+        fprintf(stderr, "failed to create debug_line_fragment: missing from default.metallib\n");
+        assert(false && "debug_line_fragment missing from default.metallib");
+    }
 
     NS::SharedPtr<MTL::RenderPipelineDescriptor> pipelineDesc =
         NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());

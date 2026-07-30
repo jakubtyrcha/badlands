@@ -62,7 +62,7 @@ void Editor::attachLayer(void* caMetalLayer) {
 
 void Editor::setViewportSize(float widthPts, float heightPts, float backingScale) {
     impl_->renderer.set_viewport_size(widthPts, heightPts, backingScale);
-    if (heightPts > 0.0f) {
+    if (widthPts > 0.0f && heightPts > 0.0f) {
         impl_->controller.set_aspect(widthPts / heightPts);
         impl_->viewportWidthPts = widthPts;
         impl_->viewportHeightPts = heightPts;

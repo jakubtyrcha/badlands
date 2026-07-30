@@ -31,10 +31,6 @@ final class EditorViewModel {
     var selectedNodeID: Int32? = nil
     var selectedNodeName: String? = nil
 
-    /// True while in `.modify` with nothing selected: modify mode falls back
-    /// to select-mode-like picking until something is clicked (see
-    /// `handleMouseDown`'s `.modify` case).
-    var modifyAwaitingSelection = false
     /// True between a `.modify`-mode mouse-down that started a drag
     /// (`editor.beginDrag`/`editor.beginScale`) and the matching mouse-up.
     var isDragging = false
@@ -87,10 +83,6 @@ final class EditorViewModel {
             isDragging = false
         }
         mode = m
-        // Stateless derivation rather than tracking the previous mode:
-        // true only while .modify has no selection, false the instant either
-        // condition stops holding (including leaving .modify entirely).
-        modifyAwaitingSelection = (mode == .modify && selectedNodeID == nil)
         syncGizmo()
     }
 
@@ -125,9 +117,6 @@ final class EditorViewModel {
                 let r = editor.pick(Float(p.x), Float(p.y))
                 editor.select(r.node_id)
                 refreshSelectionMirrors()
-                if r.node_id != sq.kInvalidNode {
-                    modifyAwaitingSelection = false
-                }
                 syncGizmo()
             } else {
                 switch activeRadialTool {
@@ -144,7 +133,7 @@ final class EditorViewModel {
         }
     }
 
-    func handleMouseDragged(_ p: CGPoint, delta: CGSize) {
+    func handleMouseDragged(_ p: CGPoint) {
         guard mode == .modify, isDragging else { return }
         switch activeRadialTool {
         case .move:

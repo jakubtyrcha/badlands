@@ -15,8 +15,8 @@ camera interaction model is in place.
 ## Build & run
 
 ```sh
-xcodegen generate                          # regenerate Shapeshifter.xcodeproj from project.yml
-xcodebuild -scheme Shapeshifter build      # build the app
+xcodegen generate                                             # regenerate Shapeshifter.xcodeproj from project.yml
+xcodebuild -scheme Shapeshifter build -derivedDataPath build  # build the app
 open build/Build/Products/Debug/Shapeshifter.app
 ```
 
@@ -29,7 +29,7 @@ the generated `.xcodeproj`; re-run `xcodegen generate` after changing it.
 To build and run the core test suite:
 
 ```sh
-xcodebuild -scheme CoreTests build
+xcodebuild -scheme CoreTests build -derivedDataPath build
 ./build/Build/Products/Debug/CoreTests
 ```
 
@@ -38,7 +38,7 @@ xcodebuild -scheme CoreTests build
 Four modes, selected via the icon bar top-left or keys **1–4**:
 
 1. **Select (1)** — click a shape to inspect it; the name appears in the
-   right-edge info panel. Click empty space to deselect.
+   top-right info panel. Click empty space to deselect.
 2. **Spawn (2)** — a second row of options appears below the mode bar to
    choose the shape (cube/sphere) and operation (additive/subtract) for the
    next spawn. Click in the viewport to place it: clicking on an existing
@@ -79,3 +79,6 @@ See `CLAUDE.md` for interop and coding conventions.
 - No save/load.
 - No undo.
 - Single window.
+- Camera mode is trackpad-oriented: a mouse wheel only supplies vertical
+  scroll deltas (no horizontal component), and a mouse has no pinch gesture,
+  so zoom is unavailable.

@@ -19,7 +19,7 @@ final class ViewportNSView: NSView {
 
     // Raw-input forwarding, wired up by MetalViewport to the EditorViewModel.
     var onMouseDown: ((CGPoint) -> Void)?
-    var onMouseDragged: ((CGPoint, CGSize) -> Void)?
+    var onMouseDragged: ((CGPoint) -> Void)?
     var onMouseUp: ((CGPoint) -> Void)?
     /// (dx, dy, shiftHeld)
     var onScroll: ((CGFloat, CGFloat, Bool) -> Void)?
@@ -69,8 +69,7 @@ final class ViewportNSView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        onMouseDragged?(point, CGSize(width: event.deltaX, height: event.deltaY))
+        onMouseDragged?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -154,7 +153,7 @@ struct MetalViewport: NSViewRepresentable {
         }
 
         view.onMouseDown = { [vm] p in vm.handleMouseDown(p) }
-        view.onMouseDragged = { [vm] p, delta in vm.handleMouseDragged(p, delta: delta) }
+        view.onMouseDragged = { [vm] p in vm.handleMouseDragged(p) }
         view.onMouseUp = { [vm] p in vm.handleMouseUp(p) }
         view.onScroll = { [vm] dx, dy, shiftHeld in vm.handleScroll(dx: dx, dy: dy, shiftHeld: shiftHeld) }
         view.onMagnify = { [vm] delta in vm.handleMagnify(delta) }

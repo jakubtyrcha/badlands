@@ -24,6 +24,14 @@ struct ContentView: View {
             // RadialMenu's own button shapes (no full-screen contentShape),
             // so the rest of this overlay stays click-through to the
             // viewport underneath.
+            //
+            // `radialAnchor` is computed by core against the viewport's own
+            // (ignoresSafeArea) bounds, while this overlay positions it in
+            // the enclosing ZStack's safe-area coordinate space. Those two
+            // spaces coincide today only because this is a titled window
+            // with zero safe-area insets; if window chrome ever changes that
+            // (e.g. a toolbar), this anchor would need reconciling against
+            // the viewport's actual frame instead of assuming they match.
             if vm.mode == .modify, let anchor = vm.radialAnchor, vm.selectedNodeID != nil, !vm.isDragging {
                 RadialMenu(vm: vm)
                     .position(anchor)
