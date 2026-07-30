@@ -94,8 +94,8 @@ inline TreeOptions OakPreset() {
   o.twist      = {-0.23f, 0.42f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = 0.02f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 10.0f;
-  o.leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.75f,
-              .count=135, .start=0.16f, .size=0.759f, .size_variance=0.7f, .angle=42.0f,
+  o.leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+              .count=30, .start=0.16f, .size=2.32f, .size_variance=0.7f, .angle=42.0f,
               .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
               .transmission_strength=0.65f, .silhouette=LeafSilhouette::Oak};
   return o;

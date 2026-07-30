@@ -91,7 +91,7 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
     samp.maxAnisotropy = 16;
     leaf_sampler_ = device_.CreateSampler(&samp);
 
-    constexpr uint32_t kLeafTexSize = 128;
+    constexpr uint32_t kLeafTexSize = 512;
     constexpr std::array<LeafSilhouette, kLeafSilhouetteCount> kSilhouettes = {
         LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
         LeafSilhouette::Bush, LeafSilhouette::PineSprig};

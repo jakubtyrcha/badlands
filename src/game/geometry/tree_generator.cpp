@@ -366,8 +366,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {16, 9, 8, 1}, .segments = {7, 5, 3, 3},
       .start = {0, 0.49f, 0.06f, 0.12f}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
       .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.75f,
-                 .count=105, .start=0.16f, .size=0.546f, .size_variance=0.7f, .angle=42.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=24, .start=0.16f, .size=1.46f, .size_variance=0.7f, .angle=42.0f,
                  .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
                  .transmission_strength=0.65f, .silhouette=LeafSilhouette::Oak}}});
   catalog.push_back({"Oak (medium)", OakPreset()});
@@ -379,8 +379,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {16, 9, 8, 3}, .segments = {12, 5, 3, 3},
       .start = {0, 0.35f, 0.1f, 0}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
       .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.02f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.75f,
-                 .count=75, .start=0.16f, .size=1.144f, .size_variance=0.7f, .angle=36.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=17, .start=0.16f, .size=3.94f, .size_variance=0.7f, .angle=36.0f,
                  .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
                  .transmission_strength=0.65f, .silhouette=LeafSilhouette::Oak}}});
   catalog.push_back({"Pine (small)", {
@@ -416,8 +416,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 10, 10}, .segments = {8, 6, 4, 3},
       .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.5f,
-                 .count=225, .start=0.0f, .size=1.055f, .size_variance=0.717f, .angle=55.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=45, .start=0.0f, .size=2.93f, .size_variance=0.717f, .angle=55.0f,
                  .tint={0.34f,0.56f,0.20f}, .transmission_tint={0.58f,0.64f,0.12f},
                  .transmission_strength=0.62f, .silhouette=LeafSilhouette::Ash}}});
   catalog.push_back({"Ash (medium)", {
@@ -428,8 +428,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 8, 6, 4}, .segments = {12, 6, 4, 3},
       .start = {0, 0.23f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.5f,
-                 .count=120, .start=0.0f, .size=0.816f, .size_variance=0.72f, .angle=55.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=24, .start=0.0f, .size=2.49f, .size_variance=0.72f, .angle=55.0f,
                  .tint={0.34f,0.56f,0.20f}, .transmission_tint={0.58f,0.64f,0.12f},
                  .transmission_strength=0.62f, .silhouette=LeafSilhouette::Ash}}});
   catalog.push_back({"Ash (large)", {
@@ -440,8 +440,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 8, 6, 4}, .segments = {8, 6, 4, 3},
       .start = {0, 0.32f, 0.34f, 0}, .taper = {0.7f, 0.62f, 0.76f, 0},
       .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.5f,
-                 .count=75, .start=0.01f, .size=1.020f, .size_variance=0.72f, .angle=30.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=15, .start=0.01f, .size=3.51f, .size_variance=0.72f, .angle=30.0f,
                  .tint={0.34f,0.56f,0.20f}, .transmission_tint={0.58f,0.64f,0.12f},
                  .transmission_strength=0.62f, .silhouette=LeafSilhouette::Ash}}});
   catalog.push_back({"Aspen (small)", {
@@ -452,8 +452,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.45f, 0.33f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.0109f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.9f,
-                 .count=65, .start=0.2f, .size=0.778f, .size_variance=0.7f, .angle=30.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=13, .start=0.2f, .size=2.07f, .size_variance=0.7f, .angle=30.0f,
                  .tint={0.52f,0.66f,0.22f}, .transmission_tint={0.75f,0.78f,0.14f},
                  .transmission_strength=0.78f, .silhouette=LeafSilhouette::Aspen}}});
   catalog.push_back({"Aspen (medium)", {
@@ -464,8 +464,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.59f, 0.35f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.0148f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.9f,
-                 .count=55, .start=0.124f, .size=1.499f, .size_variance=0.7f, .angle=30.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=11, .start=0.124f, .size=4.58f, .size_variance=0.7f, .angle=30.0f,
                  .tint={0.52f,0.66f,0.22f}, .transmission_tint={0.75f,0.78f,0.14f},
                  .transmission_strength=0.78f, .silhouette=LeafSilhouette::Aspen}}});
   catalog.push_back({"Aspen (large)", {
@@ -476,8 +476,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.62f, 0.05f, 0}, .taper = {0.7f, 0.13f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.0217f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.9f,
-                 .count=100, .start=0.152f, .size=2.231f, .size_variance=0.7f, .angle=36.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=20, .start=0.152f, .size=7.68f, .size_variance=0.7f, .angle=36.0f,
                  .tint={0.52f,0.66f,0.22f}, .transmission_tint={0.75f,0.78f,0.14f},
                  .transmission_strength=0.78f, .silhouette=LeafSilhouette::Aspen}}});
   catalog.push_back({"Bush 1", {
@@ -488,8 +488,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {6, 6, 10, 10}, .segments = {4, 4, 4, 3},
       .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.0f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.8f,
-                 .count=120, .start=0.0f, .size=0.280f, .size_variance=0.717f, .angle=55.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=27, .start=0.0f, .size=0.62f, .size_variance=0.717f, .angle=55.0f,
                  .tint={0.40f,0.62f,0.20f}, .transmission_tint={0.62f,0.68f,0.14f},
                  .transmission_strength=0.60f, .silhouette=LeafSilhouette::Bush}}});
   catalog.push_back({"Bush 2", {
@@ -500,8 +500,8 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {3, 4, 10, 10}, .segments = {4, 4, 4, 3},
       .start = {0, 0.64f, 0.71f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.36f, -0.04f, 0, 0}, .force_strength = 0.0f,
-      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.8f,
-                 .count=70, .start=0.0f, .size=0.596f, .size_variance=0.717f, .angle=55.0f,
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=16, .start=0.0f, .size=1.49f, .size_variance=0.717f, .angle=55.0f,
                  .tint={0.40f,0.62f,0.20f}, .transmission_tint={0.62f,0.68f,0.14f},
                  .transmission_strength=0.60f, .silhouette=LeafSilhouette::Bush}}});
   catalog.push_back({"Bush 3", {

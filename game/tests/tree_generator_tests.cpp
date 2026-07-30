@@ -159,16 +159,18 @@ TEST_CASE("TreeCatalog: leaf world-size bands") {
                      << " count=" << lf.count
                      << " quads_per_site=" << quads_per_site);
 
-    // Band keyed off silhouette: PineSprig is a small sprig cluster (bigger
-    // card, coarser texture), Bush is a fine fat-oval leaf, everything else
-    // (Oak/Ash/Aspen) is a deciduous single-leaflet card.
+    // Band keyed off silhouette: PineSprig is a small evergreen sprig cluster
+    // (unchanged), Bush is a compact deciduous sprig, Oak/Ash/Aspen are the
+    // bigger cluster-card deciduous sprigs (each card now depicts a whole
+    // photographed branch, not one leaf, so it needs to read at 5-8% of tree
+    // height -- ~0.45-0.65m at the 8m preview -- to show that content).
     float lo, hi;
     if (lf.silhouette == LeafSilhouette::PineSprig) {
       lo = 0.15f; hi = 0.35f;
     } else if (lf.silhouette == LeafSilhouette::Bush) {
-      lo = 0.08f; hi = 0.20f;
+      lo = 0.25f; hi = 0.6f;
     } else {
-      lo = 0.10f; hi = 0.25f;
+      lo = 0.35f; hi = 0.8f;
     }
     CHECK(world_leaf_m >= lo);
     CHECK(world_leaf_m <= hi);
@@ -255,11 +257,13 @@ TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card for every silhouette") {
     REQUIRE(alpha(0, n - 1) == 0);
     REQUIRE(alpha(n - 1, n - 1) == 0);
 
-    // On-shape probe: center works for the sinusoidal-envelope shapes; the
-    // needle strokes of PineSprig don't reliably cross the exact center, so
-    // probe the always-present stem column near the base instead.
+    // On-shape probe: every silhouette is now a sprig (Oak/Ash/Aspen/Bush) or
+    // the needle-stripe sprig (PineSprig) built around a main stem pinned to
+    // u=0 near the card's base -- probe that always-present stem column
+    // rather than the exact center, which for a sprig may land in a gap
+    // between leaf stamps.
     const int probe_x = n / 2;
-    const int probe_y = (shape == LeafSilhouette::PineSprig) ? n / 16 : n / 2;
+    const int probe_y = n / 16;
     REQUIRE(alpha(probe_x, probe_y) == 255);
 
     // RGB carries the passed color (green > red at the probe texel).
@@ -284,37 +288,34 @@ TEST_CASE("BuildLeafRgba8: opaque-texel counts are pairwise distinct across silh
       REQUIRE(counts[i] != counts[j]);
 }
 
-TEST_CASE("BuildLeafRgba8: Bush matches the pre-species oval") {
-  const int n = 64;
+TEST_CASE("BuildLeafRgba8: deciduous sprigs land in the ez-tree-like coverage band") {
+  // Each deciduous silhouette is now a full branch sprig (main stem + twigs +
+  // 20-40 leaf stamps), not one leaf filling the card -- assert overall alpha
+  // coverage at the production size/cutoff lands in the target density band
+  // (ez-tree's photographed sprigs read roughly 30-50% covered).
+  const int n = 512;
   const glm::vec3 color(0.30f, 0.55f, 0.18f);
-  const std::vector<uint8_t> px = BuildLeafRgba8(n, color, LeafSilhouette::Bush);
-  REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
-  auto alpha = [&](int x, int y) {
-    return px[(static_cast<size_t>(y) * n + static_cast<size_t>(x)) * 4 + 3];
-  };
-  REQUIRE(alpha(n / 2, n / 2) == 255);   // center is inside the leaf
-  REQUIRE(alpha(0, 0) == 0);             // corners are outside
-  REQUIRE(alpha(n - 1, 0) == 0);
-  REQUIRE(alpha(0, n - 1) == 0);
-  REQUIRE(alpha(n - 1, n - 1) == 0);
-  // RGB carries the leaf color (green > red at the center texel).
-  const size_t c = (static_cast<size_t>(n / 2) * n + static_cast<size_t>(n / 2)) * 4;
-  REQUIRE(px[c + 1] > px[c + 0]);
-
-  // Analytic half-width W*sin(pi*t) at two known rows: 3 texels inside the
-  // computed edge is opaque, 3 texels outside is transparent.
-  const float W = 0.60f;
-  const float texel_u = 2.0f / static_cast<float>(n);
-  auto x_for_u = [&](float u) {
-    return static_cast<int>(std::lround((u + 1.0f) * 0.5f * n - 0.5f));
-  };
-  for (int y : {n / 4, 3 * n / 4}) {
-    const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(n) * 2.0f - 1.0f;
-    const float t = (v + 1.0f) * 0.5f;
-    const float half_w = W * std::sin(glm::pi<float>() * t);
-    REQUIRE(alpha(x_for_u(half_w - 3.0f * texel_u), y) == 255);
-    REQUIRE(alpha(x_for_u(half_w + 3.0f * texel_u), y) == 0);
+  constexpr LeafSilhouette kDeciduous[] = {LeafSilhouette::Oak, LeafSilhouette::Ash,
+                                           LeafSilhouette::Aspen, LeafSilhouette::Bush};
+  for (LeafSilhouette shape : kDeciduous) {
+    INFO("silhouette index " << static_cast<int>(shape));
+    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, shape);
+    const size_t total = static_cast<size_t>(n) * static_cast<size_t>(n);
+    size_t covered = 0;
+    for (size_t i = 0; i < total; ++i)
+      if (px[i * 4 + 3] >= 128) ++covered;  // cutoff 0.5
+    const float coverage = static_cast<float>(covered) / static_cast<float>(total);
+    INFO("coverage=" << coverage);
+    CHECK(coverage >= 0.25f);
+    CHECK(coverage <= 0.55f);
   }
+}
+
+TEST_CASE("BuildLeafRgba8: deterministic (no RNG state, byte-identical run-to-run)") {
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  const std::vector<uint8_t> a = BuildLeafRgba8(512, color, LeafSilhouette::Oak);
+  const std::vector<uint8_t> b = BuildLeafRgba8(512, color, LeafSilhouette::Oak);
+  REQUIRE(a == b);
 }
 
 TEST_CASE("BuildLeafMipChainRgba8: coverage-preserving mip chain") {
