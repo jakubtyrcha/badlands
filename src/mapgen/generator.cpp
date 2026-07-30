@@ -8,11 +8,14 @@
 #include <FastNoiseLite.h>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/canal_carve.hpp"
 #include "mapgen/detail_filter.hpp"
 #include "mapgen/erosion.hpp"
 #include "mapgen/hydrology.hpp"
 #include "mapgen/parallel.hpp"
 #include "mapgen/resample.hpp"
+#include "mapgen/river_graph.hpp"
+#include "mapgen/smooth.hpp"
 
 namespace badlands::mapgen {
 
@@ -205,9 +208,20 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   // v1.3: slope doubled again (1/3 -> 2/3, user-directed) — see the v1.3
   // addendum, "Lake tuning".
   const auto basins = carve_cavities(B, bedrock_sim, ep.lake_frac,
-                                     kSlopeMPerM * (2.0f / 3.0f), {texel_sim, texel_sim});
+                                     kSlopeMPerM * (2.0f / 3.0f), {texel_sim, texel_sim},
+                                     ep.notch_depth_m);
   if (sink) sink->dump("cavities", seq++, basins);
   if (sink) sink->dump("cavities-height", seq++, B);
+
+  // Canal pre-carve: cut a drainage skeleton across the plains BEFORE the sim,
+  // so the hydrology has real gradients to follow rather than having to invent
+  // them. Runs after cavities (basins are attractors and terminals) and before
+  // sediment (cuts bedrock, no layer bookkeeping to respect).
+  // See docs/superpowers/specs/2026-07-29-mapgen-canal-precarve-design.md.
+  const auto canals = carve_canals(B, basins, dist, ep, texel_sim, params.seed);
+  if (sink) {
+    sink->dump("canals", seq++, B);
+  }
   auto S = init_sediment(dist, basins, ep, texel_sim, origin_sim, params.seed);
   if (sink) sink->dump("sediment-init", seq++, S);
 
@@ -217,7 +231,7 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   micro_fill(B, S, basins, texel_sim);
   if (sink) sink->dump("micro-fill", seq++, S);
 
-  const auto sim_out = erode(B, S, ep, texel_sim, sink);
+  const auto sim_out = erode(B, S, ep, texel_sim, sink, &basins);
 
   // --- resample to the output grid (crop = the origin offset) ---
   auto resample = [&](const Field2D<float>& f) {
@@ -229,9 +243,24 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   a.heightmap = resample(ground);
   a.sediment = resample(S);
   a.flow = resample(sim_out.flow);
-  // v1.3: MAX-POOL, not bilinear — a thin saturated river line must survive
-  // downsampling, not smear toward 0 (see resample_max_pool's doc comment).
-  a.river = resample_max_pool(sim_out.river, texel_sim, origin_sim, w, texel_out);
+
+  // Lake identity: nearest-sample, never bilinear — an id is a label, and
+  // averaging two lake indices would name a third lake. Reconciled against
+  // water_depth further down: the two are derived by DIFFERENT rules (this one
+  // nearest, water_depth from a bilinear depth_hint recomputed against the
+  // output ground), so at resolution != sim_resolution they can disagree.
+  a.lakes = sim_out.lakes;
+  a.lake_id = Field2D<int32_t>(w, w, -1);
+  for (int y = 0; y < w; ++y)
+    for (int x = 0; x < w; ++x) {
+      const int sx = std::clamp(
+          static_cast<int>(std::lround((x * texel_out - origin_sim) / texel_sim)),
+          0, sim_n - 1);
+      const int sy = std::clamp(
+          static_cast<int>(std::lround((y * texel_out - origin_sim) / texel_sim)),
+          0, sim_n - 1);
+      a.lake_id.at(x, y) = sim_out.lake_id.at(sx, sy);
+    }
 
   // water: resample the SURFACE (level where wet, ground where dry) and the
   // depth mask; recompute depth against the output ground so shorelines match
@@ -247,16 +276,98 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
           std::max(0.0f, surface_out.data[i] - a.heightmap.data[i]);
   if (sink) sink->dump("water", seq++, a.water_depth);
 
+  // Reconcile lake_id with water_depth, UNCONDITIONALLY — not inside the
+  // smoothing branch, and in both directions. The two fields come from
+  // different resampling rules (nearest vs a bilinear depth_hint recomputed
+  // against the output ground), so wherever resolution != sim_resolution a
+  // texel could carry an id with no water, or water with no id. The first
+  // makes `lakes[lake_id]` describe a dry cell; the second makes a lake cell
+  // unattributable.
+  auto reconcile_lake_ids = [&] {
+    for (size_t i = 0; i < a.lake_id.data.size(); ++i)
+      if (a.water_depth.data[i] <= 0.0f) a.lake_id.data[i] = -1;
+    // Wet but unlabelled: adopt a wet neighbour's id. Two passes reach any
+    // texel within two of a labelled one, which covers a resample seam;
+    // anything further stays -1 rather than being guessed at.
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int y = 0; y < w; ++y)
+        for (int x = 0; x < w; ++x) {
+          if (a.water_depth.at(x, y) <= 0.0f || a.lake_id.at(x, y) >= 0) continue;
+          for (int dy = -1; dy <= 1 && a.lake_id.at(x, y) < 0; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+              const int nx = x + dx, ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= w || ny >= w) continue;
+              if (a.water_depth.at(nx, ny) > 0.0f && a.lake_id.at(nx, ny) >= 0) {
+                a.lake_id.at(x, y) = a.lake_id.at(nx, ny);
+                break;
+              }
+            }
+        }
+    }
+  };
+  reconcile_lake_ids();
+
   // --- detail + biome stamp ---
   const auto delta =
       gully_detail_delta(a.heightmap, a.water_depth, texel_out, params.seed, ep);
   if (sink) sink->dump("detail-delta", seq++, delta);
   for (size_t i = 0; i < delta.data.size(); ++i) a.heightmap.data[i] += delta.data[i];
+
+  // --- output-res smoothing ---
+  // Capture the water SURFACE first. The renderer derives it as
+  // heightmap + water_depth, and gully_detail_delta already returns zero on wet
+  // cells, so lake surfaces are flat going in. Blurring the ground under a lake
+  // without re-deriving depth would make every lake surface wrinkled — a
+  // visible bug. `surface` is constant across a lake by construction, so
+  // recomputing depth against it keeps each lake exactly as flat as it was.
+  if (params.post.smooth_sigma_m > 0.0f && params.post.smooth_strength > 0.0f) {
+    if (sink) sink->dump("pre-smooth-height", seq++, a.heightmap);
+    Field2D<float> water_surface(w, w, 0.0f);
+    for (size_t i = 0; i < water_surface.data.size(); ++i)
+      water_surface.data[i] = a.heightmap.data[i] + a.water_depth.data[i];
+    const auto wet_before = a.water_depth;
+
+    a.heightmap = smooth_heightmap(a.heightmap, texel_out,
+                                   params.post.smooth_sigma_m,
+                                   params.post.smooth_strength);
+
+    // Only previously-wet cells get a depth; dry ones stay dry. Accepted
+    // consequence: shorelines recede slightly and shallow lakes get shallower,
+    // because blurring rounds a concave bowl floor upward.
+    for (size_t i = 0; i < a.water_depth.data.size(); ++i)
+      a.water_depth.data[i] =
+          wet_before.data[i] > 0.0f
+              ? std::max(0.0f, water_surface.data[i] - a.heightmap.data[i])
+              : 0.0f;
+    reconcile_lake_ids();  // smoothing dries out shoreline cells
+  }
+
+  // --- river network ---
+  // Extracted on the SIM grid (that is where the routing lives) but rasterized
+  // straight to the output grid from world-space geometry, so resolution
+  // independence needs no resampling step.
+  Field2D<float> sim_ground(sim_n, sim_n);
+  for (size_t i = 0; i < sim_ground.data.size(); ++i)
+    sim_ground.data[i] = B.data[i] + S.data[i];
+  a.river_graph = extract_river_graph(sim_out.routing, sim_out.flow,
+                                      sim_out.water_depth, sim_ground, ep,
+                                      texel_sim, origin_sim, &sim_out.lake_id,
+                                      &sim_out.lakes);
+  auto rasters = rasterize_rivers(a.river_graph, w, texel_out);
+  a.river_discharge_m3_s = std::move(rasters.discharge_m3_s);
+  a.river_class = std::move(rasters.cls);
+  a.river_depth_m = std::move(rasters.depth_m);
+  a.river_speed_m_s = std::move(rasters.speed_m_s);
+  a.river_flow_dir = std::move(rasters.flow_dir);
+
+  // Lake covers exactly the water. The freeboard in finalize_lakes leaves a
+  // band of carved bowl dry, and that band keeps whatever classify_biomes gave
+  // it — Plains, at bedrock minima — so a coast exists.
   for (size_t i = 0; i < a.biome.data.size(); ++i)
-    if (a.water_depth.data[i] >= kLakeStampMinDepthM)
+    if (a.water_depth.data[i] > 0.0f)
       a.biome.data[i] = static_cast<uint8_t>(Biome::Lake);
   if (sink) {
-    sink->dump("river", seq++, a.river);
+    sink->dump("river", seq++, a.river_class);
     sink->dump("final-height", seq++, a.heightmap);
     sink->dump("biome", seq++, a.biome);
   }

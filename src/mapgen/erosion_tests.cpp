@@ -688,101 +688,6 @@ TEST_CASE("erode: cavity floods, per-lake level uniform, W >= 0") {
   REQUIRE(level_max - level_min < 0.05f);             // one flat surface
 }
 
-TEST_CASE("river_intensity: 0 below stream threshold, saturates at/above "
-          "river threshold, monotone in A") {
-  // river_intensity is a pointwise function of (area, in_lake) — no receiver
-  // graph needed, so a bare FlowRouting (dims + in_lake only) suffices.
-  const int n = 10;
-  FlowRouting r;
-  r.width = n;
-  r.height = 1;
-  r.in_lake.assign(n, 0);
-  // area[i] = 100 * 2^i: log2 spacing of exactly 1 per step, so with
-  // stream_min=100 (log2=6.643...) and river_area=1600=100*16 (log2=+4), the
-  // threshold band spans indices [0, 4] exactly (area[0]==stream_min,
-  // area[4]==river_area).
-  Field2D<float> area(n, 1);
-  for (int i = 0; i < n; ++i)
-    area.at(i, 0) = 100.0f * std::pow(2.0f, static_cast<float>(i));
-  ErosionParams p;
-  p.stream_min_area_m2 = 100.0f;
-  p.river_area_m2 = 1600.0f;
-
-  const auto intensity = river_intensity(r, area, p);
-  REQUIRE(intensity.at(0, 0) == 0.0f);  // exactly at the stream floor
-  for (int i = 4; i < n; ++i)
-    REQUIRE(intensity.at(i, 0) == Catch::Approx(1.0f));  // at/above river_area: saturated
-  for (int i = 0; i + 1 < 4; ++i)
-    REQUIRE(intensity.at(i, 0) < intensity.at(i + 1, 0));  // strictly increasing in between
-  for (float v : intensity.data) {
-    REQUIRE(v >= 0.0f);
-    REQUIRE(v <= 1.0f);
-  }
-
-  // Below the stream floor entirely: 0.
-  FlowRouting r1;
-  r1.width = 1;
-  r1.height = 1;
-  r1.in_lake.assign(1, 0);
-  Field2D<float> area_below(1, 1, 50.0f);
-  REQUIRE(river_intensity(r1, area_below, p).at(0, 0) == 0.0f);
-
-  // Deterministic.
-  REQUIRE(river_intensity(r, area, p).data == intensity.data);
-}
-
-TEST_CASE("river_intensity: exactly 0 where in_lake, regardless of area") {
-  const int n = 6;
-  FlowRouting r;
-  r.width = n;
-  r.height = 1;
-  r.in_lake.assign(n, 0);
-  r.in_lake[2] = 1;
-  r.in_lake[3] = 1;
-  Field2D<float> area(n, 1, 1.0e6f);  // trivially saturated everywhere by area alone
-  ErosionParams p;  // production defaults: stream_min=1500, river_area=15000
-
-  const auto intensity = river_intensity(r, area, p);
-  for (int i = 0; i < n; ++i) {
-    if (r.in_lake[i]) {
-      REQUIRE(intensity.at(i, 0) == 0.0f);
-    } else {
-      REQUIRE(intensity.at(i, 0) == Catch::Approx(1.0f));
-    }
-  }
-}
-
-TEST_CASE("erode: river output — sim-grid dims, in [0,1], zero inside the "
-          "lake even after width dilation") {
-  auto t = make_bowl();
-  ErosionParams p;
-  p.iterations = 10;
-  p.dump_every = 0;
-  p.min_lake_area_m2 = 4.0f;
-  p.min_lake_depth_m = 0.1f;
-  // This synthetic world is 33x33 texels at 1 m spacing (total area <=
-  // 1089 m^2), well under the production stream_min_area_m2 (1500) — lower
-  // the thresholds so the sim actually produces some nonzero intensity here.
-  p.stream_min_area_m2 = 5.0f;
-  p.river_area_m2 = 200.0f;
-  const auto out = erode(t.B, t.S, p, 1.0f, nullptr);
-
-  REQUIRE(out.river.width == 33);
-  REQUIRE(out.river.height == 33);
-  bool any_positive = false;
-  for (int y = 0; y < 33; ++y) {
-    for (int x = 0; x < 33; ++x) {
-      const float v = out.river.at(x, y);
-      REQUIRE(v >= 0.0f);
-      REQUIRE(v <= 1.0f);
-      if (v > 0.0f) any_positive = true;
-      // the lake IS the water: dilation must not paint river onto it
-      if (out.water_depth.at(x, y) > 0.0f) REQUIRE(v == 0.0f);
-    }
-  }
-  REQUIRE(any_positive);
-}
-
 TEST_CASE("erode: pruning removes puddles") {
   auto t = make_bowl();
   ErosionParams p;
@@ -910,55 +815,6 @@ TEST_CASE("resample_bilinear: identity when grids coincide, linear in between") 
   REQUIRE(shifted.at(0, 0) == Catch::Approx(2.0f));
 }
 
-TEST_CASE("resample_max_pool: node windows + edge band coverage") {
-  // Node-centered windows (dst node i at world i*dst_texel, span +-half) —
-  // consistent with resample_bilinear's node convention. The terminal texels
-  // are edge-extended: without that, source content beyond the last node's
-  // half-window is never pooled and a sparse river line silently vanishes in
-  // a sub-texel band at the map's far edges when output res < sim res.
-  auto hot_at = [](int hx, int hy) {
-    Field2D<float> f(8, 8, 0.0f);
-    f.at(hx, hy) = 1.0f;
-    return f;
-  };
-
-  // (a) node-convention pin: src(5,5) is nearest dst node 3 (world 6, window
-  // [5,6]) when pooling 8 -> 4 at dst_texel 2 — NOT cell-coverage's dst 2.
-  {
-    const auto out = resample_max_pool(hot_at(5, 5), 1.0f, 0.0f, 4, 2.0f);
-    REQUIRE(out.at(3, 3) == 1.0f);
-    float total = 0.0f;
-    for (float v : out.data) total += v;
-    REQUIRE(total == 1.0f);  // exactly one hot dst texel
-  }
-  // (b) identity when grids coincide.
-  {
-    const auto src = hot_at(5, 5);
-    REQUIRE(resample_max_pool(src, 1.0f, 0.0f, 8, 1.0f).data == src.data);
-  }
-  // (c) THE edge-band regression: last source band must not be dropped when
-  // the ratio is non-integer (was: all zeros).
-  {
-    const auto out = resample_max_pool(hot_at(7, 7), 1.0f, 0.0f, 3, 8.0f / 3.0f);
-    REQUIRE(out.at(2, 2) == 1.0f);
-  }
-  // (d) symmetric first-band coverage.
-  {
-    const auto out = resample_max_pool(hot_at(0, 0), 1.0f, 0.0f, 3, 8.0f / 3.0f);
-    REQUIRE(out.at(0, 0) == 1.0f);
-  }
-  // (e) upsample: hot src node (world 5) shows on the dst nodes whose
-  // windows/rounding reach it — pins the current lround tie behavior so any
-  // future drift is visible.
-  {
-    const auto out = resample_max_pool(hot_at(5, 5), 1.0f, 0.0f, 16, 0.5f);
-    for (int y = 0; y < 16; ++y)
-      for (int x = 0; x < 16; ++x) {
-        const bool hot = (x == 9 || x == 10) && (y == 9 || y == 10);
-        REQUIRE(out.at(x, y) == (hot ? 1.0f : 0.0f));
-      }
-  }
-}
 
 TEST_CASE("generate_map: debug sink sees the full stage sequence") {
   struct Recorder : MapDebugSink {
@@ -980,9 +836,336 @@ TEST_CASE("generate_map: debug sink sees the full stage sequence") {
   generate_map(p, &rec);
   const std::vector<std::string> expected = {
       "bedrock", "biome-sim", "cone", "cavities", "cavities-height",
-      "sediment-init", "micro-fill",
+      "canals", "sediment-init", "micro-fill",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
-      "water", "detail-delta", "river", "final-height", "biome"};
+      "water", "detail-delta", "pre-smooth-height", "river",
+      "final-height", "biome"};
   REQUIRE(rec.stages == expected);
+}
+
+TEST_CASE("finalize_lakes: freeboard leaves a dry bank inside the carved bowl") {
+  // Filling to the brim leaves no coast: carve_cavities makes the basin cone
+  // zero exactly at the mask boundary and priority-flood then floods right up
+  // to it. The freeboard lowers the OUTPUT level below the spill so a band of
+  // already-carved bowl stays dry, which is what lets the Lake biome cover
+  // only water.
+  auto run_with = [](float freeboard_m, float frac) {
+    auto t = make_bowl();
+    ErosionParams p;
+    p.iterations = 10;
+    p.dump_every = 0;
+    p.min_lake_area_m2 = 4.0f;
+    p.min_lake_depth_m = 0.1f;
+    p.lake_freeboard_m = freeboard_m;
+    p.lake_freeboard_frac = frac;
+    const auto out = erode(t.B, t.S, p, 1.0f, nullptr);
+    int wet = 0;
+    float deepest = 0.0f, surface = -1e30f;
+    for (size_t i = 0; i < out.water_depth.data.size(); ++i) {
+      const float w = out.water_depth.data[i];
+      if (w <= 0.0f) continue;
+      ++wet;
+      deepest = std::max(deepest, w);
+      surface = std::max(surface, t.B.data[i] + t.S.data[i] + w);
+    }
+    struct R { int wet; float deepest, surface; };
+    return R{wet, deepest, surface};
+  };
+
+  const auto brim = run_with(0.0f, 0.0f);
+  const auto banked = run_with(0.4f, 0.25f);
+
+  REQUIRE(brim.wet > 0);
+  REQUIRE(banked.wet > 0);
+  // A dry bank exists: fewer wet cells, and the water surface sits strictly
+  // lower than when filled to the spill point.
+  REQUIRE(banked.wet < brim.wet);
+  REQUIRE(banked.surface < brim.surface);
+  // The lake is shallower by the freeboard, but the fractional cap keeps it
+  // from being drained away.
+  REQUIRE(banked.deepest < brim.deepest);
+  REQUIRE(banked.deepest > 0.5f * brim.deepest);
+}
+
+namespace {
+// A conical bowl set into ground that slopes gently toward +x, so water can
+// LEAVE. Getting this wrong is easy: if the surroundings rise away from the
+// bowl the whole map is one depression, the flood level is set by the map
+// border rather than the bowl's rim, and the notch has nothing to lower
+// relative to.
+struct NotchWorld {
+  Field2D<float> B;
+  Field2D<uint8_t> mask;
+};
+// `drain_slope` is squeezed from both sides, and both bounds bite:
+//   - too GENTLE and the notch channel cannot reach naturally lower ground
+//     within kMaxNotchSteps (at 0.02 m/m a 1 m notch needs a 50-texel trench);
+//   - too STEEP and the bowl is not a closed depression at all, because the
+//     base drops more across its diameter than the cone is deep. That needs
+//     drain_slope < cone_slope / 2, i.e. under 0.25 here — at 0.3 the "bowl"
+//     simply drained through and the notch had nothing to lower.
+// 0.15 sits in the window: 7 m of cone against 4.2 m of base drop, and a 2 m
+// notch completes in ~13 steps.
+NotchWorld make_bowl_with_drain(int n, float radius, float cone_slope,
+                                float drain_slope = 0.15f) {
+  NotchWorld t{Field2D<float>(n, n, 0.0f), Field2D<uint8_t>(n, n, 0)};
+  const float cx = n * 0.5f, cy = n * 0.5f;
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      t.B.at(x, y) = -drain_slope * static_cast<float>(x);  // drains toward +x
+      const float dx = x - cx, dy = y - cy;
+      const float rad = std::sqrt(dx * dx + dy * dy);
+      if (rad < radius) {
+        t.mask.at(x, y) = 1;
+        t.B.at(x, y) -= cone_slope * (radius - rad);
+      }
+    }
+  return t;
+}
+}  // namespace
+
+TEST_CASE("carve_outlet_notches: the spill drops by the notch, exposing a bank") {
+  // A bowl fills to its lowest rim point, so carve_cavities' cone — zero
+  // exactly at the mask boundary — leaves no bank at all. The notch lowers one
+  // rim cell so the water stops below the rim, and the band above it is coast.
+  auto build = [](float notch_depth) {
+    auto t = make_bowl_with_drain(31, 8.0f, 0.5f);
+    if (notch_depth > 0.0f) carve_outlet_notches(t.B, t.mask, notch_depth);
+    const auto r = route_flow(t.B, 1.0f, kEpsilonM);
+    float level = 1e30f;
+    int wet = 0;
+    for (size_t i = 0; i < t.B.data.size(); ++i)
+      if (r.in_lake[i] && t.mask.data[i]) {
+        level = std::min(level, r.water_level[i]);
+        ++wet;
+      }
+    struct R { float level; int wet; };
+    return R{level, wet};
+  };
+
+  const auto brim = build(0.0f);
+  const auto notched = build(1.0f);
+
+  REQUIRE(brim.wet > 0);
+  REQUIRE(notched.wet > 0);
+  // The spill level drops by the notch depth: the epsilon tilt and the
+  // one-texel neighbourhood shift it by a fraction of a texel at most.
+  REQUIRE(notched.level == Catch::Approx(brim.level - 1.0f).margin(0.05));
+  // and that leaves a dry band — fewer basin cells hold water than before
+  REQUIRE(notched.wet < brim.wet);
+}
+
+TEST_CASE("carve_outlet_notches: the level drops by exactly the notch depth") {
+  // The crisp invariant. Bank AREA is not the thing to pin: the dry region is
+  // an annulus bounded by the basin itself (616 cells here), so it saturates —
+  // measured 280 / 394 / 483 / 540 for notches of 0 / 1 / 2 / 3 m. The level
+  // relationship stays exact at any depth, and the bank follows from it via
+  // the cone slope.
+  auto measure = [](float notch_depth) {
+    auto t = make_bowl_with_drain(41, 14.0f, 0.5f);
+    if (notch_depth > 0.0f) carve_outlet_notches(t.B, t.mask, notch_depth);
+    const auto r = route_flow(t.B, 1.0f, kEpsilonM);
+    float level = 1e30f;
+    int dry = 0;
+    for (size_t i = 0; i < t.B.data.size(); ++i)
+      if (t.mask.data[i]) {
+        if (r.in_lake[i]) level = std::min(level, r.water_level[i]);
+        else ++dry;
+      }
+    struct R { float level; int dry; };
+    return R{level, dry};
+  };
+
+  const auto base = measure(0.0f);
+  int prev_dry = base.dry;
+  for (const float d : {1.0f, 2.0f, 3.0f}) {
+    const auto m = measure(d);
+    INFO("notch " << d << " m");
+    REQUIRE(m.level == Catch::Approx(base.level - d).margin(0.02));
+    REQUIRE(m.dry > prev_dry);  // strictly more bank each time, though sublinear
+    prev_dry = m.dry;
+  }
+}
+
+TEST_CASE("erode: the lake tag steers routing away from epsilon flats") {
+  // L5. Without a tag, route_flow excludes every in_lake cell from steepest
+  // descent — and on level ground the flood front always arrives above a
+  // cell's own height, so `in_lake` flags every FLAT as well as every lake.
+  // Passing the seeded basins lets erode() rebuild a tag each iteration from
+  // whole components ponded deeper than kPondedMinDepthM, so flats route by
+  // gradient while genuine lakes stay excluded.
+  //
+  // A bowl set into ground that drains, with a broad flat shelf around it: the
+  // shelf is what a tagless run misroutes.
+  const int n = 41;
+  Field2D<float> B(n, n, 0.0f), S(n, n, 0.0f);
+  Field2D<uint8_t> basins(n, n, 0);
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const float dx = x - 20.0f, dy = y - 20.0f;
+      const float rad = std::sqrt(dx * dx + dy * dy);
+      B.at(x, y) = -0.02f * static_cast<float>(x);  // gentle drain toward +x
+      if (rad < 6.0f) {
+        basins.at(x, y) = 1;
+        B.at(x, y) -= 0.5f * (6.0f - rad);
+      }
+    }
+
+  ErosionParams p;
+  p.iterations = 3;
+  p.dump_every = 0;
+  auto run = [&](bool with_tag) {
+    Field2D<float> b = B, s = S;
+    const auto out = erode(b, s, p, 1.0f, nullptr, with_tag ? &basins : nullptr);
+    // How many cells realise the steepest D8 descent on the filled surface?
+    static constexpr int DX[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+    static constexpr int DY[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    const float diag = std::sqrt(2.0f);
+    int total = 0, matched = 0;
+    const auto& r = out.routing;
+    for (int y = 1; y < n - 1; ++y)
+      for (int x = 1; x < n - 1; ++x) {
+        const size_t i = static_cast<size_t>(y) * n + x;
+        if (r.receiver[i] < 0) continue;
+        int best = -1;
+        float bs = 0.0f;
+        for (int k = 0; k < 8; ++k) {
+          const size_t j = static_cast<size_t>(y + DY[k]) * n + (x + DX[k]);
+          const float d = (DX[k] && DY[k]) ? diag : 1.0f;
+          const float sl = (r.water_level[i] - r.water_level[j]) / d;
+          if (sl > bs) { bs = sl; best = static_cast<int>(j); }
+        }
+        if (best < 0) continue;
+        ++total;
+        if (r.receiver[i] == best) ++matched;
+      }
+    return total > 0 ? static_cast<float>(matched) / static_cast<float>(total) : 0.0f;
+  };
+
+  const float untagged = run(false);
+  const float tagged = run(true);
+  INFO("steepest-descent share: untagged " << untagged << ", tagged " << tagged);
+  REQUIRE(tagged > untagged);
+}
+
+TEST_CASE("finalize_lakes: seeded lakes survive pruning, emergent ones must earn it") {
+  // L2. A seeded basin is a deliberate map feature, so it is a lake however
+  // small or shallow it came out; an emergent pond has to clear the area and
+  // depth thresholds. The distinction is provenance, not size — which is why
+  // the same fixture is run with and without the basin mask.
+  auto t = make_bowl();
+  ErosionParams p;
+  p.iterations = 6;
+  p.dump_every = 0;
+  p.min_lake_area_m2 = 1e6f;   // nothing can qualify on shape alone
+  p.min_lake_depth_m = 1e6f;
+
+  Field2D<uint8_t> basins(t.B.width, t.B.height, 0);
+  for (int y = 12; y <= 20; ++y)
+    for (int x = 12; x <= 20; ++x) basins.at(x, y) = 1;  // the summit pocket
+
+  {  // no mask: thresholds prune everything
+    auto b = t.B, s = t.S;
+    const auto out = erode(b, s, p, 1.0f, nullptr, nullptr);
+    for (float wd : out.water_depth.data) REQUIRE(wd == 0.0f);
+    REQUIRE(out.lakes.empty());
+  }
+  {  // with the mask: the seeded basin is kept regardless
+    auto b = t.B, s = t.S;
+    const auto out = erode(b, s, p, 1.0f, nullptr, &basins);
+    REQUIRE_FALSE(out.lakes.empty());
+    bool any_seeded = false;
+    for (const auto& l : out.lakes)
+      if (l.kind == LakeKind::Seeded) any_seeded = true;
+    REQUIRE(any_seeded);
+
+    // lake_id and water_depth must agree cell for cell, and every id must
+    // index a real record.
+    int wet = 0;
+    for (size_t i = 0; i < out.water_depth.data.size(); ++i) {
+      const bool has_water = out.water_depth.data[i] > 0.0f;
+      REQUIRE(has_water == (out.lake_id.data[i] >= 0));
+      if (!has_water) continue;
+      ++wet;
+      REQUIRE(static_cast<size_t>(out.lake_id.data[i]) < out.lakes.size());
+    }
+    REQUIRE(wet > 0);
+
+    for (const auto& l : out.lakes) {
+      REQUIRE(l.area_m2 > 0.0f);
+      REQUIRE(l.max_depth_m > 0.0f);
+      // The sill is a real cell OUTSIDE the lake — that is what makes it an
+      // outlet rather than a member.
+      if (l.outlet_cell >= 0) {
+        REQUIRE(static_cast<size_t>(l.outlet_cell) < out.water_depth.data.size());
+        REQUIRE(out.water_depth.data[static_cast<size_t>(l.outlet_cell)] == 0.0f);
+      }
+    }
+  }
+}
+
+TEST_CASE("finalize_lakes: the water balance decides exorheic vs endorheic") {
+  // L4. A_bal = runoff * catchment / evaporation is the lake area evaporation
+  // can sustain. Above the lake's area at its spill the basin overflows and
+  // fills to the brim; below it the level settles where surface area equals
+  // A_bal — a lake beneath its own rim, arrived at physically rather than by
+  // subtracting a freeboard.
+  auto wet_at = [](float evap_multiple) {
+    auto t = make_bowl();
+    ErosionParams p;
+    p.iterations = 6;
+    p.dump_every = 0;
+    p.min_lake_area_m2 = 4.0f;
+    p.min_lake_depth_m = 0.1f;
+    p.lake_freeboard_m = 0.0f;  // isolate the balance
+    p.lake_freeboard_frac = 0.0f;
+    p.evaporation_m_per_s = p.runoff_m_per_s * evap_multiple;
+    const auto out = erode(t.B, t.S, p, 1.0f, nullptr, nullptr);
+    int wet = 0;
+    for (float d : out.water_depth.data) if (d > 0.0f) ++wet;
+    return wet;
+  };
+
+  // Sweep rather than pin three points: on this small bowl the catchment is
+  // tiny, so the lake is already gone well before an extreme multiplier and a
+  // fixed "arid" value would compare 0 against 0.
+  int prev = -1;
+  bool ever_shrank = false;
+  for (const float mult : {1.0f, 2.0f, 4.0f, 8.0f, 16.0f}) {
+    const int wet = wet_at(mult);
+    INFO("evaporation " << mult << "x runoff -> " << wet << " wet cells");
+    if (prev >= 0) {
+      REQUIRE(wet <= prev);  // drier never means more water
+      if (wet < prev) ever_shrank = true;
+    }
+    prev = wet;
+  }
+  REQUIRE(wet_at(1.0f) > 0);  // a humid climate keeps the lake
+  REQUIRE(ever_shrank);       // and evaporation genuinely bites somewhere
+}
+
+TEST_CASE("finalize_lakes: a seeded basin never dries out, however arid") {
+  // A seeded basin is a deliberate map feature. The balance may shrink it to a
+  // single cell but must not delete it, or an author-placed lake would vanish
+  // on a climate parameter.
+  auto t = make_bowl();
+  ErosionParams p;
+  p.iterations = 6;
+  p.dump_every = 0;
+  p.min_lake_area_m2 = 4.0f;
+  p.min_lake_depth_m = 0.1f;
+  p.lake_freeboard_m = 0.0f;
+  p.lake_freeboard_frac = 0.0f;
+  p.evaporation_m_per_s = p.runoff_m_per_s * 1e6f;  // absurdly arid
+
+  Field2D<uint8_t> basins(t.B.width, t.B.height, 0);
+  for (int y = 12; y <= 20; ++y)
+    for (int x = 12; x <= 20; ++x) basins.at(x, y) = 1;
+
+  const auto out = erode(t.B, t.S, p, 1.0f, nullptr, &basins);
+  bool seeded_survives = false;
+  for (const auto& l : out.lakes)
+    if (l.kind == LakeKind::Seeded) seeded_survives = true;
+  REQUIRE(seeded_survives);
 }

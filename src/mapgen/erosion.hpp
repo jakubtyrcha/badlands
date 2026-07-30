@@ -35,20 +35,123 @@ struct ErosionParams {
   float lake_frac = 0.08f;
   float min_lake_area_m2 = 400.0f;
   float min_lake_depth_m = 0.5f;
+  // Lake-surface evaporation. With runoff, this decides whether a lake
+  // overflows (exorheic) or settles below its spill (endorheic):
+  //
+  //     A_bal = runoff * catchment / evaporation
+  //
+  // is the lake area evaporation can sustain. If that exceeds the lake's area
+  // at its spill level the basin overflows and feeds a river; otherwise the
+  // level settles where the surface area equals A_bal, which is the physically
+  // honest way a lake ends up below its rim.
+  //
+  // Temperate lake evaporation is ~0.8 m/yr against ~1 m/yr of runoff, so at
+  // those values nearly everything is exorheic. Raising it above runoff is
+  // what makes closed basins appear.
+  float evaporation_m_per_s = 3.17e-8f;
+  // Outlet notch depth for SEEDED basins. DISABLED (0) by default: the
+  // mechanism is exact on synthetic bowls but inert on production terrain,
+  // because seeded basins sit at bedrock minima out in the plains, where total
+  // relief is only kPlainsReliefM (2 m) and there is no lower ground for a
+  // channel to reach. Measured on seed 2: 100% of notch channels hit
+  // kMaxNotchSteps without ever meeting ground below them, so every one ends
+  // in a pit that floods with the bowl and leaves the level unmoved (9492 vs
+  // 9540 wet texels with and without). See carve_outlet_notches.
+  float notch_depth_m = 0.0f;
   int dump_every = 10;        // loop dump cadence (0 = off)
   int detail_octaves = 4;
   float detail_wavelength_m = 60.0f;
   float detail_amplitude_m = 2.0f;
-  // v1.3: river/stream flow texture thresholds (drainage area, m^2) — see
-  // river_intensity() below and the v1.3 addendum, "River/stream flow
-  // texture", in docs/superpowers/specs/2026-07-24-mapgen-erosion-lakes-design.md.
-  float stream_min_area_m2 = 1500.0f;  // below this: no stream (intensity 0)
-  float river_area_m2 = 15000.0f;      // at/above this: full river (intensity 1)
+  // --- river network (v2: graph, not intensity raster) ---
+  // See docs/superpowers/specs/2026-07-29-mapgen-river-network-design.md.
+  // Drainage area at which a cell counts as a channel and enters the graph.
+  float min_channel_area_m2 = 1500.0f;
+  // Runoff depth per second. ~1 m/year of runoff for a temperate basin, kept
+  // PHYSICALLY HONEST rather than inflated to make rivers look bigger: at this
+  // world scale a 512 m map drains at most ~0.0025 m^3/s, so these are creeks,
+  // and the renderer conveys size by class rather than by width. Inflating it
+  // would make every derived unit fictional.
+  float runoff_m_per_s = 3.17e-8f;
+  // Regime width closure w = channel_width_coeff * sqrt(Q); mid-range for
+  // natural channels.
+  float channel_width_coeff = 5.0f;
+  float manning_n = 0.035f;  // natural channel with some bed roughness
+  // Polyline de-latticing: Douglas-Peucker tolerance and resample spacing, in
+  // TEXELS (scaled by texel_m at use), since the staircase they remove is a
+  // lattice artifact and so scales with the grid, not the world.
+  float simplify_tolerance_texels = 0.9f;
+  float resample_spacing_texels = 3.0f;
+  // --- canal pre-carve (see canal_carve.hpp) ---
+  // A cheap PRIMER, not a simulation: it moves no sediment and guarantees no
+  // monotone channel, it just lowers a winding line relative to its banks so
+  // the real routing has a path to prefer.
+  //
+  // Drainage area a highland-edge cell needs before it seeds an agent.
+  float canal_seed_area_m2 = 1500.0f;
+  // How deep the canal sits below its OWN BANKS. This is the whole depth
+  // control, and it is purely local — the bed is a function of the two cells
+  // either side of the channel, never of a carried reference — so depth cannot
+  // accumulate along the path however far a canal runs.
+  float canal_depth_m = 0.5f;
+  // Minimum spacing between seeds. The highland edge is continuous, so every
+  // cell on it qualifies; without thinning, agents start on adjacent cells and
+  // annihilate on contact before travelling anywhere. Real drainage reaches
+  // the plain at discrete valley mouths, which is what this approximates.
+  float canal_seed_spacing_texels = 12.0f;
+  // How far ahead an agent can see water, and the march stride along that ray.
+  // This is a LONG horizon on purpose: at 6 texels an agent could not see a
+  // lake fifty texels off, so nothing steered it to a terminus and it wandered
+  // until it struck a trail — 0 of 9 agents reached a lake or the edge on seed
+  // 2. The cost is ~sense/stride samples per candidate per step, which is
+  // nothing against the erosion sim.
+  float canal_sense_distance_texels = 48.0f;
+  float canal_sense_stride_texels = 2.0f;
+  // 45 deg. On an 8-neighbour lattice this yields three candidates per step;
+  // anything under 45 deg would forbid turning altogether.
+  float canal_max_turn_angle_rad = 0.79f;
+  float canal_wander_chance = 0.10f;
+  float canal_water_falloff_m = 2.0f;
+  // Speed rises with distance from the source, and speed is what resists
+  // turning, so a reach far from its head sweeps WIDER arcs than a headwater.
+  // Per step of path travelled.
+  float canal_speed_gain = 0.01f;
+  // Scoring weights. Every term the score combines is in METRES, so these read
+  // as exchange rates rather than opaque gains.
+  float canal_w_flow = 1.0f;   // per metre of descent gained
+  float canal_w_dig = 3.0f;    // per metre of rock removed; MUST exceed w_flow
+  float canal_w_turn = 0.5f;   // per radian turned, scaled by speed
+  float canal_w_water_m = 3.0f;  // water ahead is worth this much drop
+  int canal_max_steps = 4096;
+
+  // Lake freeboard: the output water level sits below the spill point so a dry
+  // bank of already-carved bowl is exposed and the Lake biome covers only
+  // water. Applied at finalize only, so the sim loop is unaffected. The
+  // fractional cap stops shallow ponds from vanishing outright.
+  // Art direction, applied ON TOP of the water balance, and named honestly:
+  // there is no physics in it.
+  //
+  // It was expected that the balance would replace this. It does not, and the
+  // measurement says so plainly: at temperate rates every basin comes out
+  // exorheic and fills to its spill, so the balance moves nothing (seed 1 sits
+  // at 8.80% wet whether evaporation is 1x or 3x runoff). Switching the
+  // freeboard off costs the dry bank outright — 8.80% -> 7.34% wet on seed 1,
+  // 8.05% -> 6.90% on seed 3 — which is exactly the coast it exists to expose.
+  // So the two are orthogonal: the balance is the physical mechanism and only
+  // bites in arid settings, this is the knob that gives a temperate lake a
+  // shore.
+  float lake_freeboard_m = 0.4f;
+  float lake_freeboard_frac = 0.25f;
 };
 
 inline constexpr int kPadTexels = 16;      // sim-grid margin, cropped on output
 inline constexpr float kEpsilonM = 1e-4f;  // flood epsilon per step
 inline constexpr float kMicroFillCapM = 0.75f;  // deepest depression micro_fill may raise
+// A flooded component counts as a LAKE for routing purposes only once it ponds
+// deeper than this. Shallower ones are epsilon flats — level ground the flood
+// tilts by a fraction of a millimetre — and treating those as lakes is what
+// excluded a third to a half of all channel texels from steepest descent.
+// Shares micro_fill's cap: both are answering "is this really a lake?".
+inline constexpr float kPondedMinDepthM = kMicroFillCapM;
 // v1.3.1: basins touching the sim-grid border are breached by construction —
 // border cells seed route_flow's priority-flood at their own (possibly
 // carved-to-basin-floor) height, so a basin whose mask reaches the border
@@ -60,13 +163,47 @@ inline constexpr float kMicroFillCapM = 0.75f;  // deepest depression micro_fill
 // "Basin border rim (v1.3.1)".
 inline constexpr int kBasinBorderMarginTexels = 3;
 
+// Outlet-notch channel limits. The notch must run until it meets ground
+// already below it — lowering only the sill would leave a pit, which floods
+// together with the bowl and restores the original spill height. The cap
+// bounds how far a channel may trench when the downstream slope is very
+// gentle; hitting it means the notch only partially lowered the lake.
+inline constexpr int kMaxNotchSteps = 24;
+inline constexpr float kNotchStepDropM = 0.02f;
+
+// 4-connected components of the cells for which `flag[i]` is truthy, returned
+// in the order their lowest-index member is discovered — deterministic.
+// Used for lake components by micro_fill, deposit's lake pour, and the river
+// graph's lake nodes.
+std::vector<std::vector<int>> label_lake_components(int w, int ht,
+                                                    const std::vector<uint8_t>& flag);
+
 // Carve the bottom lake_frac quantile of bedrock into inverted-cone basins:
 // depth = slope_m_per_m * (exact EDT world-meter distance to the nearest
 // NON-basin texel). Depth scales with basin size (uncapped), mirroring the
 // mountain cone at the caller's slope. Returns the basin mask.
 Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock,
                                 float lake_frac, float slope_m_per_m,
-                                glm::vec2 texel_m);
+                                glm::vec2 texel_m, float notch_depth_m = 0.0f);
+
+// Cut an outlet notch for each basin component: find the lowest cell just
+// outside it (where it would spill anyway) and lower that cell, plus a
+// one-texel neighbourhood, by notch_depth_m.
+//
+// This is what gives a seeded lake a COAST. A bowl fills to its lowest rim
+// point, and carve_cavities zeroes the cone exactly at the mask boundary, so
+// the rim is the surrounding terrain and water reaches it everywhere — no bank
+// exists by construction. Lowering the water instead would be unphysical (a
+// real balance says these lakes fill to the brim); lowering one rim point is
+// what a real lake with an outlet river actually looks like. Routing needs no
+// change: priority-flood still finds the true spill, it is simply lower.
+//
+//     bank_width_m = notch_depth_m / basin_cone_slope
+//
+// so at the production cone slope (0.5 m/m) a 1 m notch yields a 2 m bank.
+// Judge the depth by the coast width wanted, not by the depth alone.
+void carve_outlet_notches(Field2D<float>& B, const Field2D<uint8_t>& mask,
+                          float notch_depth_m);
 
 // S0 = initial_sediment_m * clamp(1 - d/taper, 0, 1) + fBm noise, clamped >= 0;
 // zero inside basins. Noise is sampled at world meters (x * texel_m + origin_m)
@@ -134,16 +271,6 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
 void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
              float texel_m);
 
-// Per-cell river/stream intensity (0..1) from final drainage area: 0 below
-// stream_min_area_m2; else smoothstep(log2(stream_min_area_m2),
-// log2(river_area_m2), log2(A)) — faint streams, saturating rivers.
-// Monotone non-decreasing in A. Exactly 0 for in_lake cells (the lake IS the
-// water; chains resume at the outlet). This is the PRE-dilation, pre-max-pool
-// per-sim-cell value (see erode()'s finalize for the width-dilated field
-// that becomes ErosionOutputs::river).
-Field2D<float> river_intensity(const FlowRouting& r, const Field2D<float>& area,
-                               const ErosionParams& p);
-
 // Debug/preview sink for the erosion sim: dumps named raster stages as the
 // loop runs. stages: "loop-height", "loop-flow", "loop-sediment" (float);
 // "loop-lakes" (uint8). Later tasks add init/output stages.
@@ -155,22 +282,54 @@ struct MapDebugSink {
                     const Field2D<uint8_t>& mask) = 0;
 };
 
+// Where a lake came from. Seeded basins are placed deliberately by
+// carve_cavities and always read as lakes; emergent ones are whatever the sim
+// happened to pond and must clear the area/depth thresholds. Consumers care:
+// a deliberate lake is a map feature, an emergent one is incidental.
+enum class LakeKind : uint8_t { Seeded, Emergent };
+
+struct LakeInfo {
+  LakeKind kind = LakeKind::Emergent;
+  float level_m = 0.0f;      // water surface, after the freeboard
+  float area_m2 = 0.0f;
+  float max_depth_m = 0.0f;
+  int32_t outlet_cell = -1;  // the TRUE sill: lowest cell just outside it
+};
+
 struct ErosionOutputs {
   Field2D<float> water_depth;  // m of standing water after pruning
   Field2D<float> flow;         // final drainage area (m²)
-  // v1.3: river/stream intensity (0..1), width-dilated by its own intensity
-  // (streams stay 1 sim texel, rivers widen — see erode()), forced back to 0
-  // on in_lake cells so dilation never bleeds onto the lake surface. Sim
-  // grid, pre-max-pool (generator.cpp max-pools this to MapArtifacts::river).
-  Field2D<float> river;
+  // Per-cell lake index into `lakes`, -1 where dry. Surviving lakes only —
+  // pruned ponds are -1 with zero depth, like any other dry cell.
+  Field2D<int32_t> lake_id;
+  std::vector<LakeInfo> lakes;
+  // The FINAL routing, kept so the river graph can be extracted from exactly
+  // the network the outputs above were measured on. Re-routing downstream
+  // would risk a subtly different graph for no benefit.
+  FlowRouting routing;
+};
+
+// finalize_lakes' full result: kind, level, area and the true sill for every
+// surviving lake, alongside the per-cell index. Internal to erosion.cpp; the
+// pieces reach consumers through ErosionOutputs.
+struct FinalizedLakes {
+  Field2D<float> depth;
+  Field2D<int32_t> lake_id;
+  std::vector<LakeInfo> lakes;
 };
 
 // The full sim: iterations × (route → drain → incise → deposit → diffuse),
 // then a final route to flood lakes, measure spill levels, and prune lakes
-// under min area/depth, and build the river intensity field. Mutates B and
+// under min area/depth. The river NETWORK is no longer built here — see
+// river_graph.hpp, which extracts it from the final routing. Mutates B and
 // S. sink may be null.
+// `basin_mask` (optional) marks the deliberately seeded cavities. It forms the
+// first iteration's lake tag, before any lake has been resolved; from then on
+// the tag is rebuilt each iteration from the previous routing. Passing null
+// falls back to route_flow's in_lake, which also treats every FLAT as a lake.
 ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
                      const ErosionParams& p, float texel_m,
-                     MapDebugSink* sink);
+                     MapDebugSink* sink,
+                     const Field2D<uint8_t>* basin_mask = nullptr);
 
 }  // namespace badlands::mapgen

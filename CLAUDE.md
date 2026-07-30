@@ -2,13 +2,26 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## System Rules
+* Use **bullet points**.
+* Write a maximum of **two sentences** per bullet point.
+* Write **one instruction** per sentence. 
+* State the **condition first**. Example: "If the file exists, delete it."
+* If I do not ask for details, write only the core answer.
+* Make **one architectural decision** at a time.
+* If we develop a new feature, execute the sequence below:
+  1. **Ideas:** List unconstrained concepts.
+  2. **Spec:** Write the technical specification. Ask for missing requirements.
+     * Stop and wait for my approval.
+  3. **Plan:** Write the step-by-step execution tasks.
+  4. **Code:** Write the code for sub-agents. 
+     * If the implementation must deviate from the spec, stop. Ask me to recalibrate.
+
 ## Working agreement
-- **Concise. Bullet points. No fluff.**
 - **Frontload interface design.** Clarify details and assumptions with the user *before* building. Make autonomous decisions only for implementation details — never for interfaces or architecture.
 - **The rendering/engine interface is general and stable.** Keep it game-agnostic (no game types in `src/engine/` or `src/core/`). ALWAYS get user approval before changing the rendering/engine interface.
 - **UI is two separate surfaces:** game UI (in-world pane) vs debug UI (Dear ImGui). Do not conflate them.
 - **Don't build debug controls that weren't asked for.** No ImGui panels/toggles/sliders, no env-var hooks, no "demo mode" switches unless the user asks. Ship the feature with fixed constants; do NOT add a config struct, a style object, or plumbing whose only purpose is to feed a control that doesn't exist. If tuning genuinely needs a knob, ask first.
-- Co-design one decision at a time. For features, use superpowers brainstorming → spec → plan → subagent-driven-development.
 - **Simplest thing for data presentation.** To show data/results, reach for the simplest option: write files and point to the paths, print a table. Build elaborate tools/visualizations/galleries only when explicitly asked.
 - **Work on `main` (or a normal branch) — avoid git worktrees here.** Dawn/CMake builds are heavy; worktrees multiply artifacts (`build/`, `target/`, Dawn cache).
 

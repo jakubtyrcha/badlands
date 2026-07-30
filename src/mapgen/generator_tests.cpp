@@ -20,7 +20,6 @@ using badlands::mapgen::compute_cutoffs;
 using badlands::mapgen::distance_to_plains;
 using badlands::mapgen::Field2D;
 using badlands::mapgen::generate_map;
-using badlands::mapgen::kLakeStampMinDepthM;
 using badlands::mapgen::kPadTexels;
 using badlands::mapgen::MapDebugSink;
 using badlands::mapgen::MapGenParams;
@@ -40,7 +39,19 @@ TEST_CASE("generate_map: same params -> byte-identical artifacts") {
   REQUIRE(a.water_depth.data == b.water_depth.data);
   REQUIRE(a.flow.data == b.flow.data);
   REQUIRE(a.sediment.data == b.sediment.data);
-  REQUIRE(a.river.data == b.river.data);
+  REQUIRE(a.river_class.data == b.river_class.data);
+  REQUIRE(a.river_discharge_m3_s.data == b.river_discharge_m3_s.data);
+  // The GRAPH must be deterministic too, not just its raster: topology and
+  // vertex positions, since downstream carving consumes them directly.
+  REQUIRE(a.river_graph.nodes.size() == b.river_graph.nodes.size());
+  REQUIRE(a.river_graph.edges.size() == b.river_graph.edges.size());
+  for (size_t e = 0; e < a.river_graph.edges.size(); ++e) {
+    REQUIRE(a.river_graph.edges[e].from == b.river_graph.edges[e].from);
+    REQUIRE(a.river_graph.edges[e].to == b.river_graph.edges[e].to);
+    REQUIRE(a.river_graph.edges[e].strahler_order == b.river_graph.edges[e].strahler_order);
+    REQUIRE(a.river_graph.edges[e].shreve_magnitude == b.river_graph.edges[e].shreve_magnitude);
+    REQUIRE(a.river_graph.edges[e].points_m == b.river_graph.edges[e].points_m);
+  }
 }
 
 TEST_CASE("generate_map: lakes are consistent — Lake biome iff standing water") {
@@ -53,8 +64,9 @@ TEST_CASE("generate_map: lakes are consistent — Lake biome iff standing water"
   const auto a = generate_map(p);
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
     const bool lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
-    const bool has_water = a.water_depth.data[i] >= kLakeStampMinDepthM;
-    // Lake iff water_depth >= threshold
+    const bool has_water = a.water_depth.data[i] > 0.0f;
+    // Lake covers EXACTLY the water now — the freeboard in finalize_lakes
+    // leaves the rest of the carved bowl dry, so a coast exists.
     REQUIRE(lake == has_water);
     REQUIRE(a.water_depth.data[i] >= 0.0f);
     REQUIRE(a.flow.data[i] > 0.0f);       // every texel drains something
@@ -230,7 +242,14 @@ TEST_CASE("generate_map: plains relief term blends smoothly (no biome-cutoff sea
     // 2 m amplitude per step (smoothstep is bounded to [0, kPlainsReliefM]).
     const float kSlopeMPerM = 0.75f;
     const float texel = p.world_size_m / static_cast<float>(p.resolution);
-    const float bound = kSlopeMPerM * texel + 2.0f;
+    float bound = kSlopeMPerM * texel + 2.0f;
+    // Canals add a third term. A canal cell is cut to canal_depth_m below the
+    // LOWEST of its two banks, so an uncut neighbour can stand that much above
+    // it, plus one terrain step for the bank being lower than the cell itself.
+    // Derived like the others rather than loosened to fit — measured 5.94 m
+    // against the pre-canal bound of 5.0.
+    if (p.erosion.canal_seed_area_m2 > 0.0f)
+      bound += p.erosion.canal_depth_m + kSlopeMPerM * texel;
     for (int y = 0; y < p.resolution; ++y) {
       for (int x = 0; x < p.resolution; ++x) {
         const float h = a.heightmap.at(x, y);
@@ -295,7 +314,8 @@ TEST_CASE("generate_map: degenerate resolution yields empty artifacts, no throw"
   REQUIRE(a.water_depth.size() == 0);
   REQUIRE(a.flow.size() == 0);
   REQUIRE(a.sediment.size() == 0);
-  REQUIRE(a.river.size() == 0);
+  REQUIRE(a.river_class.size() == 0);
+  REQUIRE(a.river_graph.edges.empty());
 }
 
 TEST_CASE("generate_map: degenerate sim_resolution yields empty artifacts, no throw") {
@@ -308,7 +328,8 @@ TEST_CASE("generate_map: degenerate sim_resolution yields empty artifacts, no th
   REQUIRE(a.water_depth.size() == 0);
   REQUIRE(a.flow.size() == 0);
   REQUIRE(a.sediment.size() == 0);
-  REQUIRE(a.river.size() == 0);
+  REQUIRE(a.river_class.size() == 0);
+  REQUIRE(a.river_graph.edges.empty());
 }
 
 TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)") {
@@ -331,32 +352,20 @@ TEST_CASE("generate_map: sim_resolution != resolution (resample/crop/units seam)
   REQUIRE(a.flow.height == 64);
   REQUIRE(a.sediment.width == 64);
   REQUIRE(a.sediment.height == 64);
-  REQUIRE(a.river.width == 64);
-  REQUIRE(a.river.height == 64);
+  REQUIRE(a.river_class.width == 64);
+  REQUIRE(a.river_class.height == 64);
 
   for (float v : a.heightmap.data) REQUIRE(std::isfinite(v));
   for (float v : a.flow.data) REQUIRE(v > 0.0f);
   for (float v : a.sediment.data) REQUIRE(v >= 0.0f);
-  for (float v : a.river.data) {
-    REQUIRE(v >= 0.0f);
-    REQUIRE(v <= 1.0f);
-  }
+  for (uint8_t v : a.river_class.data) REQUIRE(v < badlands::mapgen::kRiverClassCount);
+  for (float v : a.river_discharge_m3_s.data) REQUIRE(v >= 0.0f);
+  // Lake covers exactly the water — no threshold band any more. The dry part
+  // of a carved basin is left to classify_biomes (Plains, at bedrock minima),
+  // which is what gives lakes a coast.
   for (size_t i = 0; i < a.biome.data.size(); ++i) {
     const bool is_lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
-    REQUIRE(is_lake == (a.water_depth.data[i] >= kLakeStampMinDepthM));
-  }
-
-  // Explicit boundary checks: mismatched-resolution resample produces fractional
-  // shallow depths, so the threshold discriminates here where grid-aligned fixtures do not.
-  for (size_t i = 0; i < a.biome.data.size(); ++i) {
-    const bool lake = a.biome.data[i] == static_cast<uint8_t>(Biome::Lake);
-    if (lake) {
-      // Every Lake texel must have water_depth >= threshold
-      REQUIRE(a.water_depth.data[i] >= kLakeStampMinDepthM);
-    } else {
-      // Every non-Lake texel must have water_depth < threshold
-      REQUIRE(a.water_depth.data[i] < kLakeStampMinDepthM);
-    }
+    REQUIRE(is_lake == (a.water_depth.data[i] > 0.0f));
   }
 }
 
@@ -370,49 +379,59 @@ TEST_CASE("generate_map: river artifact — output-res dims, some signal, "
     p.erosion.sim_resolution = 128;
     // production erosion defaults otherwise (thresholds, iterations)
     const auto a = generate_map(p);
-    REQUIRE(a.river.width == p.resolution);
-    REQUIRE(a.river.height == p.resolution);
+    REQUIRE(a.river_class.width == p.resolution);
+    REQUIRE(a.river_class.height == p.resolution);
     bool any_positive = false;
-    for (float v : a.river.data) {
-      REQUIRE(v >= 0.0f);
-      REQUIRE(v <= 1.0f);
-      if (v > 0.0f) any_positive = true;
+    for (uint8_t v : a.river_class.data) {
+      REQUIRE(v < badlands::mapgen::kRiverClassCount);
+      if (v != 0) any_positive = true;
     }
     REQUIRE(any_positive);
   }
 }
 
-TEST_CASE("generate_map: river artifact — max-pool preserves saturation "
-          "across sim-vs-output resolution mismatch (crispness)") {
-  // Same seed/world/sim_resolution/erosion params in both calls — the sim
-  // itself (and its river field) is IDENTICAL regardless of the output
-  // `resolution` (only the resample target changes), so this isolates the
-  // max-pool resample step. Tiny thresholds guarantee saturation deterministically
-  // (independent of terrain-specific luck), per the v1.3 addendum's
-  // "MAX-POOL... crisp, no bilinear smear" claim.
+TEST_CASE("generate_map: the river survives a coarse output resolution") {
+  // Replaces the old max-pool crispness test. That test guarded a real
+  // property — a thin river must not be diluted away when the output grid is
+  // coarser than the sim — but guarded it at the resample step, which no
+  // longer exists: the network is now rasterized conservatively from
+  // world-space geometry straight onto the output grid.
+  //
+  // Same seed / world / sim_resolution in both calls, so the sim and the
+  // extracted GRAPH are identical and only rasterization differs.
   MapGenParams p;
   p.seed = 3;
   p.world_size_m = 256.0f;
   p.erosion.sim_resolution = 64;
   p.erosion.iterations = 8;
-  p.erosion.stream_min_area_m2 = 20.0f;
-  p.erosion.river_area_m2 = 80.0f;
+  p.erosion.min_channel_area_m2 = 20.0f;
 
   MapGenParams matched = p;
-  matched.resolution = 64;  // == sim_resolution: pool ~ identity, ground truth
-  const auto ground_truth = generate_map(matched);
-  float max_gt = 0.0f;
-  for (float v : ground_truth.river.data) max_gt = std::max(max_gt, v);
-  REQUIRE(max_gt > 0.9f);  // this scenario does saturate somewhere
-
+  matched.resolution = 64;
+  const auto fine = generate_map(matched);
   MapGenParams coarse = p;
-  coarse.resolution = 16;  // much coarser output: heavy pooling
-  const auto pooled = generate_map(coarse);
-  float max_pooled = 0.0f;
-  for (float v : pooled.river.data) max_pooled = std::max(max_pooled, v);
-  // Bilinear would have diluted a thin saturated line toward its neighbors'
-  // (mostly non-saturated) values; max-pool must not.
-  REQUIRE(max_pooled > 0.9f);
+  coarse.resolution = 16;  // 4x coarser output
+  const auto rough = generate_map(coarse);
+
+  // The graph is resolution-independent by construction.
+  REQUIRE(fine.river_graph.edges.size() == rough.river_graph.edges.size());
+  REQUIRE(!fine.river_graph.edges.empty());
+
+  auto top_class = [](const Field2D<uint8_t>& c) {
+    uint8_t m = 0;
+    for (uint8_t v : c.data) m = std::max(m, v);
+    return m;
+  };
+  auto covered = [](const Field2D<uint8_t>& c) {
+    int n = 0;
+    for (uint8_t v : c.data) n += v != 0 ? 1 : 0;
+    return n;
+  };
+  REQUIRE(top_class(fine.river_class) > 0);
+  // The strongest reach keeps its tier at the coarser resolution — a diluting
+  // resample would have washed it down a class or dropped it entirely.
+  REQUIRE(top_class(rough.river_class) == top_class(fine.river_class));
+  REQUIRE(covered(rough.river_class) > 0);
 }
 
 namespace {

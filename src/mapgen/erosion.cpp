@@ -15,7 +15,7 @@ Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask, glm::vec2 texel_m)
 
 Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock,
                                 float lake_frac, float slope_m_per_m,
-                                glm::vec2 texel_m) {
+                                glm::vec2 texel_m, float notch_depth_m) {
   Field2D<uint8_t> mask(bedrock.width, bedrock.height, 0);
   const size_t n = bedrock.size();
   if (n == 0 || lake_frac <= 0.0f) return mask;
@@ -53,7 +53,124 @@ Field2D<uint8_t> carve_cavities(Field2D<float>& B, const Field2D<float>& bedrock
 
   for (size_t i = 0; i < n; ++i)
     if (mask.data[i]) B.data[i] -= slope_m_per_m * dist.data[i];
+
+  carve_outlet_notches(B, mask, notch_depth_m);
   return mask;
+}
+
+// NOTE: correct and exact on a bowl with somewhere to drain, but currently
+// INERT on production terrain — see ErosionParams::notch_depth_m for the
+// measurement. Kept because the mechanism is sound and the failure is about
+// where basins sit, not about how the notch is cut; raising kMaxNotchSteps far
+// enough would trench a channel across the plain to wherever ground is finally
+// lower, which is a different design decision.
+void carve_outlet_notches(Field2D<float>& B, const Field2D<uint8_t>& mask,
+                          float notch_depth_m) {
+  if (notch_depth_m <= 0.0f) return;
+  const int w = mask.width, ht = mask.height;
+  std::vector<uint8_t> flag(mask.data.begin(), mask.data.end());
+  // Route the channel down the ORIGINAL ground, cutting into the live B. Using
+  // the live surface instead would make the walk chase the cells it just
+  // lowered, which are by construction the lowest thing around.
+  const Field2D<float> B0 = B;
+  static constexpr int dx4[4] = {1, -1, 0, 0};
+  static constexpr int dy4[4] = {0, 0, 1, -1};
+
+  for (const auto& member : label_lake_components(w, ht, flag)) {
+    // The basin's spill point: the lowest cell just OUTSIDE it. That is where
+    // water would leave anyway, so notching it deepens no arbitrary channel.
+    int sill = -1;
+    for (const int i : member) {
+      const int x = i % w, y = i / w;
+      for (int k = 0; k < 4; ++k) {
+        const int nx = x + dx4[k], ny = y + dy4[k];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+        const int j = ny * w + nx;
+        if (mask.data[static_cast<size_t>(j)]) continue;  // still inside
+        if (sill < 0 || B0.data[static_cast<size_t>(j)] < B0.data[static_cast<size_t>(sill)])
+          sill = j;
+      }
+    }
+    if (sill < 0) continue;  // fully enclosed by the border margin
+
+    // Two failure modes had to be designed around here, both found by
+    // measurement rather than reasoning:
+    //
+    //  1. Lowering only the sill digs a PIT. The bowl and the pit then flood
+    //     together and spill at the original rim height, so the lake level
+    //     does not move at all. The cut must run as a channel until it meets
+    //     ground already below it.
+    //  2. Cutting only OUTSIDE the mask leaves the bowl's own outer ring as
+    //     the barrier. carve_cavities tapers the cone to zero at the mask
+    //     boundary, so that ring sits at rim height and the water still spills
+    //     over it rather than through the channel. The notch has to breach the
+    //     rim, which means cutting inward through mask cells too.
+    static constexpr int kDx8[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+    static constexpr int kDy8[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    const float notch_level = B0.data[static_cast<size_t>(sill)] - notch_depth_m;
+
+    // Breach INWARD: cut through the bowl's rim until the cone has already
+    // dropped below the notch. At a cone slope s that is notch_depth / s cells.
+    {
+      int cur_in = sill;
+      std::vector<uint8_t> seen_in(B.data.size(), 0);
+      for (int step = 0; step < kMaxNotchSteps; ++step) {
+        if (B0.data[static_cast<size_t>(cur_in)] <= notch_level) break;
+        seen_in[static_cast<size_t>(cur_in)] = 1;
+        const int ix = cur_in % w, iy = cur_in / w;
+        for (int ny = std::max(0, iy - 1); ny <= std::min(ht - 1, iy + 1); ++ny)
+          for (int nx = std::max(0, ix - 1); nx <= std::min(w - 1, ix + 1); ++nx) {
+            float& b = B.at(nx, ny);
+            b = std::min(b, notch_level);
+          }
+        int next_in = -1;  // steepest descent INTO the basin
+        for (int k = 0; k < 8; ++k) {
+          const int nx = ix + kDx8[k], ny = iy + kDy8[k];
+          if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+          const int j = ny * w + nx;
+          if (!mask.data[static_cast<size_t>(j)] || seen_in[static_cast<size_t>(j)]) continue;
+          if (next_in < 0 ||
+              B0.data[static_cast<size_t>(j)] < B0.data[static_cast<size_t>(next_in)])
+            next_in = j;
+        }
+        if (next_in < 0) break;
+        cur_in = next_in;
+      }
+    }
+
+    float level = notch_level;
+    int cur = sill;
+    // Axis cells only — NOT the widened neighbourhood. Marking the whole 3x3
+    // visited leaves the walk with no unvisited neighbour at all, so it stops
+    // after one step and the "channel" is a one-cell pit that floods together
+    // with the bowl, restoring the original spill height.
+    std::vector<uint8_t> on_axis(B.data.size(), 0);
+    for (int step = 0; step < kMaxNotchSteps; ++step) {
+      if (B0.data[static_cast<size_t>(cur)] <= level) break;  // ground already low enough
+      on_axis[static_cast<size_t>(cur)] = 1;
+      const int cx2 = cur % w, cy2 = cur / w;
+      for (int ny = std::max(0, cy2 - 1); ny <= std::min(ht - 1, cy2 + 1); ++ny)
+        for (int nx = std::max(0, cx2 - 1); nx <= std::min(w - 1, cx2 + 1); ++nx) {
+          if (mask.at(nx, ny)) continue;  // never cut into the bowl itself
+          float& b = B.at(nx, ny);
+          b = std::min(b, level);
+        }
+      // Steepest descent on the ORIGINAL ground, skipping the basin and the
+      // axis already walked.
+      int next = -1;
+      for (int k = 0; k < 8; ++k) {
+        const int nx = cx2 + kDx8[k], ny = cy2 + kDy8[k];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+        const int j = ny * w + nx;
+        if (mask.data[static_cast<size_t>(j)] || on_axis[static_cast<size_t>(j)]) continue;
+        if (next < 0 || B0.data[static_cast<size_t>(j)] < B0.data[static_cast<size_t>(next)])
+          next = j;
+      }
+      if (next < 0) break;
+      cur = next;
+      level -= kNotchStepDropM;
+    }
+  }
 }
 
 Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
@@ -80,11 +197,10 @@ Field2D<float> init_sediment(const Field2D<float>& dist_to_plains,
   return s;
 }
 
-namespace {
-
 // 4-connected components of cells for which `flag[i]` is truthy. Components
 // are returned in the order their first (lowest-index) member is discovered
-// by the scan — deterministic. Shared by micro_fill and deposit's lake pour.
+// by the scan — deterministic. Shared by micro_fill, deposit's lake pour, and
+// the river graph's lake nodes.
 std::vector<std::vector<int>> label_lake_components(int w, int ht,
                                                      const std::vector<uint8_t>& flag) {
   std::vector<std::vector<int>> components;
@@ -112,8 +228,6 @@ std::vector<std::vector<int>> label_lake_components(int w, int ht,
   }
   return components;
 }
-
-}  // namespace
 
 float micro_fill(Field2D<float>& B, Field2D<float>& S,
                  const Field2D<uint8_t>& basin_mask, float texel_m) {
@@ -226,13 +340,24 @@ float deposit(Field2D<float>& B, Field2D<float>& S,
   // Follows a member's receiver chain until it leaves ITS OWN component
   // (a cell already outside `own_component` is returned immediately, be it
   // dry or a different lake — the caller's poured/unpoured check decides
-  // what happens next; component labeling is 4-connected but the receiver
-  // graph is 8-connected, so a component's escaping edge could in principle
-  // land diagonally in a different lake rather than on dry ground). Every
-  // component has exactly one such exit: priority-flood claims each
-  // interior cell from exactly one already-visited neighbor, so a
-  // component's internal receiver edges form a tree rooted at its single
-  // spill point.
+  // what happens next).
+  //
+  // A component does NOT generally have exactly one exit — this comment used
+  // to claim it did, and the claim was already false before steepest-descent
+  // routing landed. Component labeling is 4-connected while the receiver graph
+  // is 8-connected, so a diagonal edge can leave a 4-component at several
+  // places. Measured on seed 2: 33 of 82 components had more than one exit
+  // under the old flood-parent routing (worst 5), and 41 of 133 under
+  // steepest descent (worst 13).
+  //
+  // What that costs: this walk starts from member[0] (the lowest-index
+  // member), so it finds whichever exit that member's chain happens to reach
+  // rather than the component's true sill. The result is deterministic and
+  // conserves volume — leftover overflow still deposits or exports downstream
+  // — but it can shed that overflow at the wrong rim point. Physically
+  // imprecise, not a leak. Picking the true sill (the boundary member with the
+  // lowest water_level) is deferred; the river graph's LakeOutlet node will
+  // need it, so it belongs with that work rather than here.
   auto find_exit = [&](int start, int32_t own_component) {
     int i = start;
     while (comp_of[i] == own_component) {
@@ -387,66 +512,92 @@ void diffuse(Field2D<float>& B, Field2D<float>& S, const ErosionParams& p,
   }
 }
 
-Field2D<float> river_intensity(const FlowRouting& r, const Field2D<float>& area,
-                               const ErosionParams& p) {
-  Field2D<float> out(r.width, r.height, 0.0f);
-  const float lo = std::log2(std::max(p.stream_min_area_m2, 1e-6f));
-  const float hi = std::log2(std::max(p.river_area_m2, p.stream_min_area_m2 + 1e-6f));
-  for (size_t i = 0; i < out.data.size(); ++i) {
-    if (r.in_lake[i]) continue;  // the lake IS the water: stays 0
-    const float a = area.data[i];
-    if (a < p.stream_min_area_m2) continue;  // stays 0
-    out.data[i] = glm::smoothstep(lo, hi, std::log2(a));
-  }
-  return out;
-}
-
-namespace {
-
-// Splat each cell's own river intensity onto a square neighborhood whose
-// radius grows with that intensity — 0 (a single texel: a faint stream) up
-// to kRiverMaxDilationRadius (a river reads as a few-texel-wide band), so the
-// artifact looks like a texture rather than a hairline (v1.3 addendum;
-// hairline-only would be this constant set to 0). Cells keep at least their
-// own raw value; a neighbor's splat only ever raises (max), never lowers.
-constexpr int kRiverMaxDilationRadius = 1;  // sim texels
-
-Field2D<float> dilate_river(const Field2D<float>& intensity) {
-  const int w = intensity.width, h = intensity.height;
-  Field2D<float> out = intensity;
-  for (int y = 0; y < h; ++y) {
-    for (int x = 0; x < w; ++x) {
-      const float t = intensity.at(x, y);
-      if (t <= 0.0f) continue;
-      const int radius =
-          static_cast<int>(std::lround(t * static_cast<float>(kRiverMaxDilationRadius)));
-      if (radius <= 0) continue;
-      const int x0 = std::max(0, x - radius), x1 = std::min(w - 1, x + radius);
-      const int y0 = std::max(0, y - radius), y1 = std::min(h - 1, y + radius);
-      for (int ny = y0; ny <= y1; ++ny)
-        for (int nx = x0; nx <= x1; ++nx) {
-          float& o = out.at(nx, ny);
-          o = std::max(o, t);
-        }
-    }
-  }
-  return out;
-}
-
-}  // namespace
-
 namespace {
 
 // Flood the CURRENT surface and turn flooded cells into water depths, then
 // prune lakes (4-connected components) below the area/depth thresholds.
-Field2D<float> finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
-                              const FlowRouting& r, const ErosionParams& p,
-                              float texel_m) {
+FinalizedLakes finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
+                              const FlowRouting& r, const Field2D<float>& area,
+                              const ErosionParams& p, float texel_m,
+                              const Field2D<uint8_t>* basin_mask) {
   const int w = r.width, ht = r.height;
-  Field2D<float> depth(w, ht, 0.0f);
-  for (int i = 0; i < w * ht; ++i)
-    if (r.in_lake[i])
-      depth.data[i] = r.water_level[i] - (B.data[i] + S.data[i]);
+  FinalizedLakes fin;
+  Field2D<float>& depth = fin.depth;
+  depth = Field2D<float>(w, ht, 0.0f);
+  fin.lake_id = Field2D<int32_t>(w, ht, -1);
+
+  // Fill each lake to its spill level MINUS a freeboard, so a band of already
+  // carved bowl stays dry and the Lake biome can cover only water. Filling to
+  // the brim leaves no bank at all: carve_cavities makes the cone zero exactly
+  // at the basin boundary, and priority-flood then floods right up to it.
+  //
+  // Applied here at finalize only, never inside the sim loop, so erosion
+  // behaviour is unchanged — the loop still deposits against the true spill
+  // level, and sediment left above the lowered surface simply becomes dry land
+  // (which reads as a beach or delta). The fractional cap stops shallow ponds
+  // from being drained away entirely.
+  //
+  // The component's level is the MINIMUM water_level over its members: the
+  // epsilon tilt raises interior cells above the sill, so the minimum is the
+  // real spill height. Same convention as deposit's wl_cap.
+  const float texel_area_m2 = texel_m * texel_m;
+  for (auto member : label_lake_components(w, ht, r.in_lake)) {
+    const float spill = [&] {
+      float v = r.water_level[static_cast<size_t>(member[0])];
+      for (const int i : member) v = std::min(v, r.water_level[static_cast<size_t>(i)]);
+      return v;
+    }();
+    float deepest = 0.0f;
+    bool seeded = false;
+    float catchment_m2 = 0.0f;
+    for (const int i : member) {
+      deepest = std::max(deepest, spill - (B.data[i] + S.data[i]));
+      catchment_m2 = std::max(catchment_m2, area.data[static_cast<size_t>(i)]);
+      if (basin_mask != nullptr && basin_mask->data.size() == depth.data.size() &&
+          basin_mask->data[static_cast<size_t>(i)])
+        seeded = true;
+    }
+    if (deepest <= 0.0f) continue;
+
+    // WATER BALANCE. A_bal is the lake area evaporation can sustain on this
+    // catchment's runoff. Above the lake's area at its spill level the basin
+    // overflows and fills to the brim (exorheic); below it the level settles
+    // where surface area equals A_bal (endorheic), which is how a lake ends up
+    // beneath its own rim without inventing a freeboard to put it there.
+    float level = spill;
+    if (p.evaporation_m_per_s > 0.0f) {
+      const float a_bal = p.runoff_m_per_s * catchment_m2 / p.evaporation_m_per_s;
+      const float area_at_spill = static_cast<float>(member.size()) * texel_area_m2;
+      if (a_bal < area_at_spill) {
+        // Hypsometry: sorted by ground, the k-th member's height is exactly
+        // the level at which the surface covers k cells.
+        std::sort(member.begin(), member.end(), [&](int x, int y) {
+          const float hx = B.data[static_cast<size_t>(x)] + S.data[static_cast<size_t>(x)];
+          const float hy = B.data[static_cast<size_t>(y)] + S.data[static_cast<size_t>(y)];
+          if (hx != hy) return hx < hy;
+          return x < y;  // deterministic on ties
+        });
+        size_t k = static_cast<size_t>(std::floor(std::max(a_bal, 0.0f) / texel_area_m2));
+        // A seeded basin is a deliberate map feature and never dries out
+        // completely, however arid the balance says it is.
+        if (seeded) k = std::max<size_t>(k, 1);
+        if (k == 0) continue;  // evaporation wins: no lake here
+        level = B.data[static_cast<size_t>(member[std::min(k, member.size() - 1)])] +
+                S.data[static_cast<size_t>(member[std::min(k, member.size() - 1)])];
+      }
+    }
+    // Art direction on top of whatever the balance decided — see
+    // ErosionParams. The fraction is taken against the depth at the CHOSEN
+    // level, not at the spill: on an endorheic lake those differ, and scaling
+    // a cosmetic drop by a depth the lake never reaches would over-shrink it.
+    float depth_at_level = 0.0f;
+    for (const int i : member)
+      depth_at_level = std::max(depth_at_level, level - (B.data[i] + S.data[i]));
+    level -= std::min(p.lake_freeboard_m, p.lake_freeboard_frac * depth_at_level);
+    for (const int i : member)
+      depth.data[i] = std::max(0.0f, level - (B.data[i] + S.data[i]));
+  }
+
   // component label + prune
   const float texel_area = texel_m * texel_m;
   std::vector<uint8_t> seen(depth.size(), 0);
@@ -472,27 +623,99 @@ Field2D<float> finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
         }
     }
     const float area = static_cast<float>(member.size()) * texel_area;
-    if (area < p.min_lake_area_m2 || max_depth < p.min_lake_depth_m)
+    // Seeded basins are placed deliberately, so they are never pruned however
+    // small or shallow they came out; only emergent ponds must earn their
+    // place.
+    bool seeded = false;
+    if (basin_mask != nullptr && basin_mask->data.size() == depth.data.size())
+      for (const int i : member)
+        if (basin_mask->data[static_cast<size_t>(i)]) { seeded = true; break; }
+    if (!seeded && (area < p.min_lake_area_m2 || max_depth < p.min_lake_depth_m)) {
       for (const int i : member) depth.data[i] = 0.0f;
+      continue;
+    }
+
+    LakeInfo info;
+    info.kind = seeded ? LakeKind::Seeded : LakeKind::Emergent;
+    info.area_m2 = area;
+    info.max_depth_m = max_depth;
+    info.level_m = depth.data[static_cast<size_t>(member[0])] +
+                   B.data[static_cast<size_t>(member[0])] +
+                   S.data[static_cast<size_t>(member[0])];
+    // The TRUE sill: the lowest cell just outside the lake. Deliberately not
+    // deposit's find_exit, which returns whichever exit member[0]'s receiver
+    // chain happens to reach rather than the lowest one.
+    static constexpr int kD4[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    const int32_t id = static_cast<int32_t>(fin.lakes.size());
+    for (const int i : member) {
+      fin.lake_id.data[static_cast<size_t>(i)] = id;
+      const int x = i % w, y = i / w;
+      for (const auto& d : kD4) {
+        const int nx = x + d[0], ny = y + d[1];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+        const size_t j = static_cast<size_t>(ny) * w + nx;
+        if (depth.data[j] > 0.0f) continue;  // still inside
+        if (info.outlet_cell < 0 ||
+            B.data[j] + S.data[j] < B.data[static_cast<size_t>(info.outlet_cell)] +
+                                        S.data[static_cast<size_t>(info.outlet_cell)])
+          info.outlet_cell = static_cast<int32_t>(j);
+      }
+    }
+    fin.lakes.push_back(info);
   }
-  return depth;
+  return fin;
 }
 
 }  // namespace
 
 ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
                      const ErosionParams& p, float texel_m,
-                     MapDebugSink* sink) {
+                     MapDebugSink* sink, const Field2D<uint8_t>* basin_mask) {
   const float texel_area = texel_m * texel_m;
   Field2D<float> h(B.width, B.height);
   auto ground = [&] {
     for (size_t i = 0; i < h.data.size(); ++i) h.data[i] = B.data[i] + S.data[i];
   };
+
+  // The lake TAG route_flow steers by. Resolving a lake needs catchment, which
+  // needs the receiver graph, which needs this exclusion — so the tag cannot
+  // be derived inside route_flow. It is carried here instead: iteration 1 uses
+  // the seeded basins (the only lakes known before anything is routed), and
+  // each later iteration rebuilds it from the previous routing. That is a
+  // one-iteration lag, not an approximation error; the terrain is moving under
+  // it regardless.
+  const bool tagged = basin_mask != nullptr &&
+                      basin_mask->data.size() == B.data.size();
+  Field2D<uint8_t> lake_tag;
+  if (tagged) lake_tag = *basin_mask;
+
+  // Whole COMPONENTS, never individual deep cells. Inside a lake hf is nearly
+  // flat, so an untagged shallow margin can find a dry neighbour below its
+  // epsilon-inflated level and reinstate the invented rim exits the exclusion
+  // exists to prevent.
+  auto rebuild_tag = [&](const FlowRouting& rr) {
+    if (!tagged) return;
+    Field2D<uint8_t> next(B.width, B.height, 0);
+    for (const auto& member : label_lake_components(rr.width, rr.height, rr.in_lake)) {
+      float deepest = 0.0f;
+      bool seeded = false;
+      for (const int i : member) {
+        deepest = std::max(deepest, rr.water_level[static_cast<size_t>(i)] -
+                                        h.data[static_cast<size_t>(i)]);
+        if (basin_mask->data[static_cast<size_t>(i)]) seeded = true;
+      }
+      if (!seeded && deepest < kPondedMinDepthM) continue;  // an epsilon flat
+      for (const int i : member) next.data[static_cast<size_t>(i)] = 1;
+    }
+    lake_tag = std::move(next);
+  };
+
   FlowRouting r;
   Field2D<float> area;
   for (int it = 1; it <= p.iterations; ++it) {
     ground();
-    r = route_flow(h, texel_m, kEpsilonM);
+    r = route_flow(h, texel_m, kEpsilonM, tagged ? &lake_tag : nullptr);
+    rebuild_tag(r);
     area = accumulate_drainage(r, texel_area);
     const auto eroded = incise(B, S, r, area, p, texel_m);
     deposit(B, S, eroded, r, area, p, texel_area);
@@ -508,16 +731,15 @@ ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
     }
   }
   ground();
-  r = route_flow(h, texel_m, kEpsilonM);
+  r = route_flow(h, texel_m, kEpsilonM, tagged ? &lake_tag : nullptr);
   ErosionOutputs out;
   out.flow = accumulate_drainage(r, texel_area);
-  out.water_depth = finalize_lakes(B, S, r, p, texel_m);
-  out.river = dilate_river(river_intensity(r, out.flow, p));
-  // Dilation splats from non-lake neighbors and can reach into an in_lake
-  // cell; river_intensity() already zeroed lake cells pre-dilation, so
-  // re-zero here to keep the invariant after the splat too.
-  for (size_t i = 0; i < out.river.data.size(); ++i)
-    if (r.in_lake[i]) out.river.data[i] = 0.0f;
+  auto fin = finalize_lakes(B, S, r, out.flow, p, texel_m,
+                            tagged ? basin_mask : nullptr);
+  out.water_depth = std::move(fin.depth);
+  out.lake_id = std::move(fin.lake_id);
+  out.lakes = std::move(fin.lakes);
+  out.routing = std::move(r);
   return out;
 }
 
