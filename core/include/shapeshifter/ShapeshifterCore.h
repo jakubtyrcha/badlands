@@ -59,6 +59,15 @@ public:
     // spawning (creates node, selects it, refreshes line colors)
     SpawnResult spawn(Shape shape, Op op, float x, float y);   // view points, top-left origin
 
+    // modify tool — core owns all plane math
+    void setGizmoVisible(bool visible);
+    void beginDrag(float x, float y);
+    void updateDrag(float x, float y);
+    void endDrag();
+
+    // node info (tests + later UI)
+    Vec3f nodePosition(int32_t nodeId) const;   // {0,0,0} for unknown id
+
 private:
     Editor();
     struct Impl;

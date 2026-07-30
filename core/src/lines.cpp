@@ -65,6 +65,49 @@ void append_sphere_circles(std::vector<LineVertex>& out, const simd_float4x4& wo
     }
 }
 
+void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd_float3 normal,
+                          float half_extent, int divisions) {
+    const simd_float3 ref = (std::fabs(normal.y) < 0.99f) ? simd_float3{0.0f, 1.0f, 0.0f}
+                                                            : simd_float3{1.0f, 0.0f, 0.0f};
+    const simd_float3 u = simd_normalize(simd_cross(normal, ref));
+    const simd_float3 v = simd_cross(normal, u);
+
+    const float he = half_extent;
+    const float step = 2.0f * he / static_cast<float>(divisions);
+    const int center = divisions / 2;
+
+    auto push = [&](simd_float3 p, simd_float4 color) {
+        LineVertex vertex;
+        vertex.pos = (simd_float4){p.x, p.y, p.z, 1.0f};
+        vertex.color = color;
+        out.push_back(vertex);
+    };
+
+    // Grid lines: for each sample i in [0, divisions] (skipping the center,
+    // which would duplicate the axis lines below), emit one line running
+    // along u (offset along v) and one running along v (offset along u).
+    for (int i = 0; i <= divisions; ++i) {
+        if (i == center) {
+            continue;
+        }
+        const float offset = -he + static_cast<float>(i) * step;
+        push(origin + offset * v - he * u, kColorGridLine);
+        push(origin + offset * v + he * u, kColorGridLine);
+        push(origin + offset * u - he * v, kColorGridLine);
+        push(origin + offset * u + he * v, kColorGridLine);
+    }
+
+    // Axis lines through the origin.
+    push(origin - he * u, kColorGridAxis);
+    push(origin + he * u, kColorGridAxis);
+    push(origin - he * v, kColorGridAxis);
+    push(origin + he * v, kColorGridAxis);
+
+    // Normal stub.
+    push(origin, kColorGridAxis);
+    push(origin + normal * (0.5f * he), kColorGridAxis);
+}
+
 std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id) {
     std::vector<LineVertex> out;
     for (const Node& node : doc.nodes()) {

@@ -206,6 +206,71 @@ TEST_CASE("raycast_scene: nearest node wins, miss-all is nullopt, Subtract nodes
     }
 }
 
+// --- ray_plane -------------------------------------------------------------
+
+TEST_CASE("ray_plane: literals from the task brief") {
+    SUBCASE("head-on ray onto the z=0 plane hits at the origin") {
+        const auto hit = ray_plane(Ray{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, -1.0f}}, simd_float3{0.0f, 0.0f, 0.0f},
+                                    simd_float3{0.0f, 0.0f, 1.0f});
+        REQUIRE(hit.has_value());
+        check_float3_approx(*hit, simd_float3{0.0f, 0.0f, 0.0f});
+    }
+
+    SUBCASE("oblique ray onto the y=0 plane hits at the origin") {
+        // denom = dot(normalize(0,-1,-1), (0,1,0)) = -1/sqrt(2).
+        // t = dot((0,0,0)-(0,2,2), (0,1,0)) / denom = -2 / (-1/sqrt(2)) = 2*sqrt(2).
+        // point = (0,2,2) + 2*sqrt(2) * (0,-1/sqrt(2),-1/sqrt(2)) = (0, 2-2, 2-2) = (0,0,0).
+        const simd_float3 dir = simd_normalize(simd_float3{0.0f, -1.0f, -1.0f});
+        const auto hit = ray_plane(Ray{{0.0f, 2.0f, 2.0f}, dir}, simd_float3{0.0f, 0.0f, 0.0f},
+                                    simd_float3{0.0f, 1.0f, 0.0f});
+        REQUIRE(hit.has_value());
+        check_float3_approx(*hit, simd_float3{0.0f, 0.0f, 0.0f});
+    }
+
+    SUBCASE("ray parallel to the plane misses") {
+        // dir.z=-1 is perpendicular to the plane normal (0,1,0): dot == 0, |0| < 1e-6.
+        CHECK_FALSE(ray_plane(Ray{{0.0f, 1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}}, simd_float3{0.0f, 0.0f, 0.0f},
+                               simd_float3{0.0f, 1.0f, 0.0f})
+                        .has_value());
+    }
+
+    SUBCASE("plane behind the ray origin misses") {
+        // Ray at z=5 heading toward +z (away from the z=0 plane): t would be
+        // negative, so the plane is behind the ray origin.
+        CHECK_FALSE(ray_plane(Ray{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 1.0f}}, simd_float3{0.0f, 0.0f, 0.0f},
+                               simd_float3{0.0f, 0.0f, 1.0f})
+                        .has_value());
+    }
+}
+
+// --- drag_plane_for_node ----------------------------------------------------
+
+TEST_CASE("drag_plane_for_node: snapped node ignores camera_forward, uses its snap fields") {
+    Node node;
+    node.snapped = true;
+    node.snap_point = {1.0f, 2.0f, 3.0f};
+    node.snap_normal = {0.0f, 0.0f, 1.0f};
+    node.position = {99.0f, 99.0f, 99.0f}; // must be ignored: snapped wins over position
+
+    for (const simd_float3 camera_forward :
+         {simd_float3{0.0f, 0.0f, -1.0f}, simd_float3{1.0f, 0.0f, 0.0f}, simd_normalize(simd_float3{1.0f, 1.0f, 1.0f})}) {
+        CAPTURE(camera_forward.x);
+        const DragPlane dp = drag_plane_for_node(node, camera_forward);
+        check_float3_approx(dp.point, simd_float3{1.0f, 2.0f, 3.0f});
+        check_float3_approx(dp.normal, simd_float3{0.0f, 0.0f, 1.0f});
+    }
+}
+
+TEST_CASE("drag_plane_for_node: unsnapped node uses its position and -camera_forward") {
+    Node node;
+    node.snapped = false;
+    node.position = {5.0f, 6.0f, 7.0f};
+
+    const DragPlane dp = drag_plane_for_node(node, simd_float3{0.0f, 0.0f, -1.0f});
+    check_float3_approx(dp.point, simd_float3{5.0f, 6.0f, 7.0f});
+    check_float3_approx(dp.normal, simd_float3{0.0f, 0.0f, 1.0f}); // -camera_forward
+}
+
 // --- Editor integration: scene built entirely through spawn() -------------
 
 TEST_CASE("Editor: spawn/pick/select/nodeName integration, scene built entirely through spawn()") {

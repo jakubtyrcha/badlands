@@ -47,6 +47,34 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
                 error ? error->localizedDescription()->utf8String() : "unknown error");
         assert(false && "failed to create line render pipeline state");
     }
+
+    // Second PSO for the modify-mode gizmo: identical functions/attachment
+    // format (Metal validation requires the formats to match), plus alpha
+    // blending. This is the only blended draw in the renderer.
+    NS::SharedPtr<MTL::RenderPipelineDescriptor> blendPipelineDesc =
+        NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+    blendPipelineDesc->setVertexFunction(vertex_fn.get());
+    blendPipelineDesc->setFragmentFunction(fragment_fn.get());
+    MTL::RenderPipelineColorAttachmentDescriptor* blendColorAttachment =
+        blendPipelineDesc->colorAttachments()->object(0);
+    blendColorAttachment->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    blendColorAttachment->setBlendingEnabled(true);
+    blendColorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+    blendColorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+    blendColorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+    blendColorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
+    blendColorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+    blendColorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+    // No depth attachment format here either, matching line_pso_: the gizmo
+    // draws depth-ignored, in painter's order over the opaque wireframes.
+
+    NS::Error* blend_error = nullptr;
+    line_blend_pso_ = NS::TransferPtr(device_->newRenderPipelineState(blendPipelineDesc.get(), &blend_error));
+    if (!line_blend_pso_) {
+        fprintf(stderr, "failed to create line_blend_pso_: %s\n",
+                blend_error ? blend_error->localizedDescription()->utf8String() : "unknown error");
+        assert(false && "failed to create line blend render pipeline state");
+    }
 }
 
 void Renderer::set_viewport_size(float w_pts, float h_pts, float backing_scale) {
@@ -61,6 +89,14 @@ void Renderer::set_viewport_size(float w_pts, float h_pts, float backing_scale) 
 
 void Renderer::set_scene_lines_dirty() {
     scene_lines_dirty_ = true;
+}
+
+void Renderer::set_gizmo(bool visible, simd_float3 origin, simd_float3 normal, float half_extent) {
+    gizmo_visible_ = visible;
+    gizmo_verts_.clear();
+    if (visible) {
+        append_tangent_frame(gizmo_verts_, origin, normal, half_extent, 12);
+    }
 }
 
 void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id,
@@ -95,9 +131,11 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     colorAttachment->setClearColor(MTL::ClearColor(0.02, 0.02, 0.025, 1.0));
 
     MTL::RenderCommandEncoder* encoder = commandBuffer->renderCommandEncoder(passDescriptor.get());
+
+    LineUniforms uniforms;
+    uniforms.view_proj = camera.view_proj();
+
     if (scene_line_vertex_count_ > 0) {
-        LineUniforms uniforms;
-        uniforms.view_proj = camera.view_proj();
         // Buffer indices 0/1 are hardcoded to match the shader's [[buffer(0)]]/[[buffer(1)]] — no reflection.
         encoder->setRenderPipelineState(line_pso_.get());
         encoder->setVertexBuffer(scene_lines_.get(), 0, 0);
@@ -106,6 +144,16 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
         // makes it ambiguous against the (PrimitiveType, const Buffer*, offset) overload.
         encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), scene_line_vertex_count_);
     }
+
+    // Gizmo pass: painter's order over the opaque scene lines, semi-transparent
+    // blend PSO, verts always via setVertexBytes (54 verts, never a buffer).
+    if (gizmo_visible_ && !gizmo_verts_.empty()) {
+        encoder->setRenderPipelineState(line_blend_pso_.get());
+        encoder->setVertexBytes(gizmo_verts_.data(), gizmo_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), gizmo_verts_.size());
+    }
+
     encoder->endEncoding();
 
     commandBuffer->presentDrawable(drawable);

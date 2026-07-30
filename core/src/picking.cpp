@@ -142,4 +142,25 @@ std::optional<PickHit> raycast_scene(const SceneDocument& doc, const Ray& world)
     return best;
 }
 
+std::optional<simd_float3> ray_plane(const Ray& ray, simd_float3 plane_point, simd_float3 plane_normal) {
+    const float denom = simd_dot(ray.dir, plane_normal);
+    if (std::fabs(denom) < 1e-6f) {
+        return std::nullopt; // ray parallel to the plane
+    }
+
+    const float t = simd_dot(plane_point - ray.origin, plane_normal) / denom;
+    if (t <= kEps) {
+        return std::nullopt; // intersection at/behind the ray origin
+    }
+
+    return ray.origin + t * ray.dir;
+}
+
+DragPlane drag_plane_for_node(const Node& node, simd_float3 camera_forward) {
+    if (node.snapped) {
+        return DragPlane{node.snap_point, node.snap_normal};
+    }
+    return DragPlane{node.position, -camera_forward};
+}
+
 } // namespace sq

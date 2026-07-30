@@ -25,11 +25,31 @@ final class EditorViewModel {
     var selectedNodeID: Int32? = nil
     var selectedNodeName: String? = nil
 
+    /// True while in `.modify` with nothing selected: modify mode falls back
+    /// to select-mode-like picking until something is clicked (see
+    /// `handleMouseDown`'s `.modify` case).
+    var modifyAwaitingSelection = false
+    /// True between a `.modify`-mode mouse-down that started a drag
+    /// (`editor.beginDrag`) and the matching mouse-up.
+    var isDragging = false
+
     /// Single entry point for every mode change (buttons, keys, future
     /// shortcuts) — keep it that way so later milestones have one place to
     /// hook mode-transition side effects (e.g. resetting spawn/gizmo state).
     func setMode(_ m: EditorMode) {
         mode = m
+        // Stateless derivation rather than tracking the previous mode:
+        // true only while .modify has no selection, false the instant either
+        // condition stops holding (including leaving .modify entirely).
+        modifyAwaitingSelection = (mode == .modify && selectedNodeID == nil)
+        syncGizmo()
+    }
+
+    /// Centralizes the gizmo-visibility rule (core owns the gizmo's placement
+    /// math; the VM only tells it whether to show). Call after every mode or
+    /// selection change.
+    private func syncGizmo() {
+        editor.setGizmoVisible(mode == .modify && selectedNodeID != nil)
     }
 
     // MARK: - Raw input, called by the viewport.
@@ -40,6 +60,7 @@ final class EditorViewModel {
             let r = editor.pick(Float(p.x), Float(p.y))
             editor.select(r.node_id) // miss returns kInvalidNode -> clears
             refreshSelectionMirrors()
+            syncGizmo()
         case .spawn:
             let s = editor.spawn(spawnShape, spawnOp, Float(p.x), Float(p.y))
             guard s.node_id != sq.kInvalidNode else { return } // zero-size viewport guard in core
@@ -47,19 +68,36 @@ final class EditorViewModel {
             // select() internally); the mirrors + mode switch are the VM's
             // job, same division of labor as .select's pick+select above.
             refreshSelectionMirrors()
-            setMode(.modify)
-        case .modify, .camera:
+            setMode(.modify) // selectedNodeID is already set above, so this also syncs the gizmo on
+        case .modify:
+            if selectedNodeID == nil {
+                // Modify-awaiting-selection: behave exactly like select mode
+                // until something is correctly clicked.
+                let r = editor.pick(Float(p.x), Float(p.y))
+                editor.select(r.node_id)
+                refreshSelectionMirrors()
+                if r.node_id != sq.kInvalidNode {
+                    modifyAwaitingSelection = false
+                }
+                syncGizmo()
+            } else {
+                editor.beginDrag(Float(p.x), Float(p.y))
+                isDragging = true
+            }
+        case .camera:
             break // no-op until later milestones
         }
     }
 
     func handleMouseDragged(_ p: CGPoint, delta: CGSize) {
-        // Drag-move / gizmo interaction land in later milestones.
+        guard mode == .modify, isDragging else { return }
+        editor.updateDrag(Float(p.x), Float(p.y))
     }
 
     func handleMouseUp(_ p: CGPoint) {
-        // Selection is click-driven (handleMouseDown); drag/gizmo interaction
-        // land in later milestones.
+        guard mode == .modify, isDragging else { return }
+        editor.endDrag()
+        isDragging = false
     }
 
     func handleScroll(dx: CGFloat, dy: CGFloat, shiftHeld: Bool) {

@@ -153,3 +153,78 @@ TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelecte
         }
     }
 }
+
+// --- append_tangent_frame ---------------------------------------------------
+
+TEST_CASE("append_tangent_frame: n={0,1,0}, origin={0,0,0}, he=2, divisions=12: counts, "
+          "coplanarity, and the stub's far endpoint") {
+    std::vector<LineVertex> out;
+    append_tangent_frame(out, simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f, 12);
+
+    // 24 grid lines (2*divisions) + 2 axis lines + 1 normal stub = 27 lines = 54 vertices.
+    REQUIRE(out.size() == 54);
+
+    const simd_float3 origin = {0.0f, 0.0f, 0.0f};
+    const simd_float3 normal = {0.0f, 1.0f, 0.0f};
+    for (size_t i = 0; i < out.size() - 1; ++i) { // every vertex except the stub's far endpoint (last)
+        CAPTURE(i);
+        const simd_float3 p = out[i].pos.xyz;
+        CHECK(std::fabs(simd_dot(normal, p - origin)) < 1e-5f);
+    }
+
+    // Final vertex: the stub's far endpoint, origin + n * (0.5 * he) = origin + n * 1.0.
+    check_float3_approx(out.back().pos.xyz, simd_float3{0.0f, 1.0f, 0.0f});
+
+    // Color counts: 48 grid-line verts (alpha 0.18), 6 axis/stub verts (alpha 0.9:
+    // 2 axes * 2 endpoints + stub * 2 endpoints).
+    int grid_count = 0;
+    int axis_count = 0;
+    for (const LineVertex& v : out) {
+        if (v.color.w == doctest::Approx(0.18f)) {
+            ++grid_count;
+        } else if (v.color.w == doctest::Approx(0.9f)) {
+            ++axis_count;
+        }
+    }
+    CHECK(grid_count == 48);
+    CHECK(axis_count == 6);
+}
+
+TEST_CASE("append_tangent_frame: tangent basis is always orthonormal, both branches of the |n.y| pick") {
+    auto check_orthonormal_basis = [](simd_float3 n) {
+        CAPTURE(n.x);
+        CAPTURE(n.y);
+        CAPTURE(n.z);
+        const simd_float3 ref =
+            (std::fabs(n.y) < 0.99f) ? simd_float3{0.0f, 1.0f, 0.0f} : simd_float3{1.0f, 0.0f, 0.0f};
+        const simd_float3 u = simd_normalize(simd_cross(n, ref));
+        const simd_float3 v = simd_cross(n, u);
+
+        CHECK(simd_length(u) == doctest::Approx(1.0f));
+        CHECK(simd_length(v) == doctest::Approx(1.0f));
+        CHECK(std::fabs(simd_dot(u, n)) < 1e-5f);
+        CHECK(std::fabs(simd_dot(v, n)) < 1e-5f);
+        CHECK(std::fabs(simd_dot(u, v)) < 1e-5f);
+    };
+
+    // n = {0,1,0}: |n.y| = 1.0 >= 0.99, takes the {1,0,0} reference branch.
+    check_orthonormal_basis(simd_float3{0.0f, 1.0f, 0.0f});
+    // n = normalize({1,0,1}): |n.y| = 0 < 0.99, takes the {0,1,0} reference branch.
+    check_orthonormal_basis(simd_normalize(simd_float3{1.0f, 0.0f, 1.0f}));
+}
+
+TEST_CASE("append_tangent_frame: off-origin, tilted normal — every non-stub vertex is coplanar "
+          "through origin") {
+    const simd_float3 origin = {1.0f, 2.0f, 3.0f};
+    const simd_float3 normal = simd_normalize(simd_float3{1.0f, 1.0f, 0.0f});
+
+    std::vector<LineVertex> out;
+    append_tangent_frame(out, origin, normal, 2.0f, 12);
+
+    REQUIRE(out.size() == 54);
+    for (size_t i = 0; i < out.size() - 1; ++i) { // every vertex except the stub's far endpoint (last)
+        CAPTURE(i);
+        const simd_float3 p = out[i].pos.xyz;
+        CHECK(std::fabs(simd_dot(normal, p - origin)) < 1e-5f);
+    }
+}

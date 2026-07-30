@@ -7,6 +7,7 @@
 namespace sq {
 
 class SceneDocument;
+struct Node;
 
 struct RayHit {
     float t;                 // parametric distance along the (normalized) query ray
@@ -24,5 +25,15 @@ std::optional<RayHit> ray_unit_cube(const Ray& local);     // [-0.5,0.5]^3 slab 
 struct PickHit { int32_t node_id; RayHit hit; };           // hit is world-space, t in world units
 
 std::optional<PickHit> raycast_scene(const SceneDocument& doc, const Ray& world);
+
+// Intersect a ray with a plane. Returns the world-space intersection point,
+// or nullopt when the ray is parallel to the plane (|dot(dir, n)| < 1e-6)
+// or the intersection is at/behind the ray origin (t <= 1e-4).
+std::optional<simd_float3> ray_plane(const Ray& ray, simd_float3 plane_point, simd_float3 plane_normal);
+
+// The drag/gizmo reference plane for a node: snapped -> {snap_point, snap_normal};
+// unsnapped -> {node.position, -camera_forward} (camera_forward = normalize(target - eye), unit).
+struct DragPlane { simd_float3 point; simd_float3 normal; };
+DragPlane drag_plane_for_node(const Node& node, simd_float3 camera_forward);
 
 } // namespace sq
