@@ -11,22 +11,28 @@ namespace sq {
 
 struct Vec3f { float x, y, z; };
 
-// Miss/no-selection sentinel for the picking & selection API below. This is
-// the same -1 sentinel core/src/scene.h's SceneDocument already uses for
-// "no id" (Node::id, Node::snap_parent) — deliberately not redeclared here as
-// a same-named `sq::kInvalidNode` constant: scene.h is a private core/src
-// header not on the Swift-visible include path, but Editor.cpp (and any test
-// that exercises both the picking module and SceneDocument directly) include
-// both headers in one translation unit, and two `inline constexpr` variables
-// with the same fully-qualified name in the same TU is an ODR redefinition
-// error even when byte-identical. Swift call sites never reference the
-// symbol by name (they just thread PickResult.node_id through), so nothing
-// is lost by leaving the single definition in scene.h.
+// Shape/Op cross the interop boundary (spawn() below, and Node::shape/op in
+// core/src/scene.h), so their canonical definitions live here rather than in
+// a core/src-private header. scene.h includes this header instead of
+// redefining them.
+enum class Shape : int32_t { Cube = 0, Sphere = 1 };
+enum class Op    : int32_t { Add = 0, Subtract = 1 };
+
+// Miss/no-selection/no-parent sentinel for the picking, selection, and
+// spawning APIs below, and for SceneDocument's own Node::id/snap_parent
+// (core/src/scene.h). Previously left undeclared here (see M4's deferred
+// finding) because a second same-named `inline constexpr` in scene.h would
+// ODR-conflict with any TU including both headers; now that scene.h includes
+// this header instead of defining its own copy, a single definition works.
+inline constexpr int32_t kInvalidNode = -1;
+
 struct PickResult {
-    int32_t node_id;   // -1 (SceneDocument's kInvalidNode) on miss
+    int32_t node_id;   // kInvalidNode on miss
     Vec3f point;
     Vec3f normal;
 };
+
+struct SpawnResult { int32_t node_id; bool snapped; };
 
 // One app-lifetime instance; Swift imports this as a reference type.
 class SWIFT_IMMORTAL_REFERENCE Editor {
@@ -49,6 +55,9 @@ public:
     void select(int32_t nodeId);               // -1 (kInvalidNode) clears; refreshes line colors
     int32_t selectedNode() const;
     void nodeName(int32_t nodeId, char* buf, int32_t bufLen) const;  // NUL-terminated fill; "" if unknown id
+
+    // spawning (creates node, selects it, refreshes line colors)
+    SpawnResult spawn(Shape shape, Op op, float x, float y);   // view points, top-left origin
 
 private:
     Editor();

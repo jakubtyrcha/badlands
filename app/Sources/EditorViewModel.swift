@@ -15,6 +15,11 @@ final class EditorViewModel {
     let editor = sq.Editor.create()!
     var mode: EditorMode = .select
 
+    /// Spawn tool options, bound by SpawnOptionsBar; read by handleMouseDown
+    /// in `.spawn` mode.
+    var spawnShape: sq.Shape = .Cube
+    var spawnOp: sq.Op = .Add
+
     /// Read-only mirrors of core's selection state (core owns the truth;
     /// these exist so SwiftUI views have something `@Observable` to read).
     var selectedNodeID: Int32? = nil
@@ -30,10 +35,22 @@ final class EditorViewModel {
     // MARK: - Raw input, called by the viewport.
 
     func handleMouseDown(_ p: CGPoint) {
-        guard mode == .select else { return }
-        let r = editor.pick(Float(p.x), Float(p.y))
-        editor.select(r.node_id) // miss returns kInvalidNode (-1) -> clears
-        refreshSelectionMirrors()
+        switch mode {
+        case .select:
+            let r = editor.pick(Float(p.x), Float(p.y))
+            editor.select(r.node_id) // miss returns kInvalidNode -> clears
+            refreshSelectionMirrors()
+        case .spawn:
+            let s = editor.spawn(spawnShape, spawnOp, Float(p.x), Float(p.y))
+            guard s.node_id != sq.kInvalidNode else { return } // zero-size viewport guard in core
+            // Selection was already made by core (Editor::spawn calls
+            // select() internally); the mirrors + mode switch are the VM's
+            // job, same division of labor as .select's pick+select above.
+            refreshSelectionMirrors()
+            setMode(.modify)
+        case .modify, .camera:
+            break // no-op until later milestones
+        }
     }
 
     func handleMouseDragged(_ p: CGPoint, delta: CGSize) {
@@ -75,7 +92,10 @@ final class EditorViewModel {
 
     private func refreshSelectionMirrors() {
         let id = editor.selectedNode()
-        guard id != -1 else { // kInvalidNode
+        // M4 deferred finding resolved: kInvalidNode moved to the interop
+        // header (ShapeshifterCore.h) in this milestone specifically so
+        // Swift could import it as a named sentinel instead of hardcoding -1.
+        guard id != sq.kInvalidNode else {
             selectedNodeID = nil
             selectedNodeName = nil
             return

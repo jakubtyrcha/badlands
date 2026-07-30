@@ -206,43 +206,78 @@ TEST_CASE("raycast_scene: nearest node wins, miss-all is nullopt, Subtract nodes
     }
 }
 
-// --- Editor integration: pick() must agree with Camera::project() ---------
+// --- Editor integration: scene built entirely through spawn() -------------
 
-TEST_CASE("Editor: pick/select/nodeName integration against the hardcoded scene") {
+TEST_CASE("Editor: spawn/pick/select/nodeName integration, scene built entirely through spawn()") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
     // Same camera Editor::create() wires up internally (core/src/editor.cpp):
     // eye {4,3,6}, target {0,0.5,0}, up {0,1,0}, fov_y 1.0472 rad, and aspect
     // 800/500=1.6 — matching the setViewportSize call above means this is
-    // exactly the camera editor->pick() uses, which is the whole point of
-    // this cross-validation.
-    Camera camera;
-    camera.eye = {4.0f, 3.0f, 6.0f};
-    camera.target = {0.0f, 0.5f, 0.0f};
-    camera.up = {0.0f, 1.0f, 0.0f};
-    camera.fov_y_radians = 1.0472f;
-    camera.aspect = 1.6f;
+    // exactly the camera editor->spawn()/pick() use, which is the whole
+    // point of this cross-validation. The scene starts empty (no hardcoded
+    // nodes as of this milestone), so every id/name below comes from spawn().
+    const simd_float3 eye = {4.0f, 3.0f, 6.0f};
+    const simd_float3 target = {0.0f, 0.5f, 0.0f};
+    // Independent re-derivation of ray_through_view_point's direction at the
+    // exact viewport center (400,250 of 800x500): there ndc_x=ndc_y=0, so
+    // the ray direction collapses to the look-at forward vector, matching
+    // the same pattern camera_tests.cpp uses for its own center-ray check.
+    const simd_float3 dir_center = simd_normalize(target - eye);
 
-    // Node 1 (the hardcoded cube) sits at position {-0.9,0.5,0} with
-    // identity rotation/scale, so world_from_local's translation column *is*
-    // its world center.
-    const simd_float3 cube_center = {-0.9f, 0.5f, 0.0f};
-    const ViewPoint cube_screen = camera.project(cube_center, 800.0f, 500.0f);
-    REQUIRE(cube_screen.visible);
+    SUBCASE("spawning on an empty scene misses everything and lands unsnapped at the fixed distance") {
+        const SpawnResult cube = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+        CHECK(cube.node_id == 1); // first spawn into a fresh, empty scene
+        CHECK(cube.snapped == false);
+        CHECK(editor->selectedNode() == cube.node_id);
 
-    SUBCASE("pick at the cube's projected center hits node 1 with a sensible normal") {
-        const PickResult result = editor->pick(cube_screen.x, cube_screen.y);
-        CHECK(result.node_id == 1);
+        char buf[64];
+        editor->nodeName(cube.node_id, buf, sizeof(buf));
+        CHECK(std::string(buf) == "Cube 1");
 
-        const simd_float3 normal = {result.normal.x, result.normal.y, result.normal.z};
+        // nodeName buffer-safety, exercised here since it needs a real node
+        // (the hardcoded-scene node this used to check against is gone).
+        char short_buf[3] = {'X', 'X', 'X'};
+        editor->nodeName(cube.node_id, short_buf, 3);
+        CHECK(short_buf[0] == 'C');
+        CHECK(short_buf[1] == 'u');
+        CHECK(short_buf[2] == '\0');
+
+        // kUnsnappedSpawnDistance (core/src/scene.h) == 6.0f: an unsnapped
+        // spawn's position is exactly eye + dir_center * that distance (no
+        // surface offset, unlike the snapped case).
+        const simd_float3 expected_position = eye + dir_center * kUnsnappedSpawnDistance;
+
+        // Verify indirectly: pick() along the same ray must now hit the
+        // newly-spawned cube. Kept robust rather than brittle — assert the
+        // hit is finite, in front of the camera, and near the cube's known
+        // center (within a unit cube's bounding-sphere radius,
+        // sqrt(3)*0.5 ~= 0.866), rather than pinning an exact face point.
+        const PickResult picked = editor->pick(400.0f, 250.0f);
+        CHECK(picked.node_id == cube.node_id);
+
+        const simd_float3 point = {picked.point.x, picked.point.y, picked.point.z};
+        const simd_float3 normal = {picked.normal.x, picked.normal.y, picked.normal.z};
+        CHECK(std::isfinite(point.x));
+        CHECK(std::isfinite(point.y));
+        CHECK(std::isfinite(point.z));
         CHECK(simd_length(normal) == doctest::Approx(1.0f));
 
-        // "Sensible" = the hit face points back toward the eye (the visible
-        // hemisphere), not away from it.
-        const simd_float3 point = {result.point.x, result.point.y, result.point.z};
-        const simd_float3 to_eye = simd_normalize(camera.eye - point);
-        CHECK(simd_dot(normal, to_eye) > 0.0f);
+        const float t = simd_dot(point - eye, dir_center); // in front of the camera along the ray
+        CHECK(t > 0.0f);
+        CHECK(simd_length(point - expected_position) < 0.87f);
+
+        SUBCASE("spawning again at the same point snaps onto the cube just placed") {
+            const SpawnResult sphere = editor->spawn(Shape::Sphere, Op::Subtract, 400.0f, 250.0f);
+            CHECK(sphere.node_id == 2);
+            CHECK(sphere.snapped == true); // SpawnResult carries no parent id; snap_parent == cube's
+                                            // id is covered at the SceneDocument level (scene_tests.cpp)
+            CHECK(editor->selectedNode() == sphere.node_id); // selection moved off the cube
+
+            editor->nodeName(sphere.node_id, buf, sizeof(buf));
+            CHECK(std::string(buf) == "Sphere 1");
+        }
     }
 
     SUBCASE("pick at the far corner misses everything") {
@@ -252,31 +287,15 @@ TEST_CASE("Editor: pick/select/nodeName integration against the hardcoded scene"
 
     SUBCASE("select/selectedNode round-trips, including clearing with kInvalidNode") {
         CHECK(editor->selectedNode() == kInvalidNode);
-        editor->select(1);
-        CHECK(editor->selectedNode() == 1);
-        editor->select(2);
-        CHECK(editor->selectedNode() == 2);
+        const SpawnResult cube = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+        CHECK(editor->selectedNode() == cube.node_id); // spawn() selects the new node
         editor->select(kInvalidNode);
         CHECK(editor->selectedNode() == kInvalidNode);
     }
 
-    SUBCASE("nodeName returns the hardcoded names, empty string for an unknown id") {
+    SUBCASE("nodeName returns an empty string for an unknown id") {
         char buf[64];
-        editor->nodeName(1, buf, sizeof(buf));
-        CHECK(std::string(buf) == "Cube 1");
-
-        editor->nodeName(2, buf, sizeof(buf));
-        CHECK(std::string(buf) == "Sphere 1");
-
         editor->nodeName(99, buf, sizeof(buf));
         CHECK(std::string(buf) == "");
-    }
-
-    SUBCASE("nodeName respects a short buffer without overflowing") {
-        char buf[3] = {'X', 'X', 'X'};
-        editor->nodeName(1, buf, 3);
-        CHECK(buf[0] == 'C');
-        CHECK(buf[1] == 'u');
-        CHECK(buf[2] == '\0');
     }
 }

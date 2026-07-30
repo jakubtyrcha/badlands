@@ -7,8 +7,11 @@ struct ContentView: View {
         ZStack(alignment: .topLeading) {
             MetalViewport(vm: vm)
                 .ignoresSafeArea()
-            ModeBar(vm: vm)
-                .padding(12)
+            VStack(alignment: .leading, spacing: 8) {
+                ModeBar(vm: vm)
+                SpawnOptionsBar(vm: vm)
+            }
+            .padding(12)
         }
         .overlay(alignment: .topTrailing) {
             InfoPanel(vm: vm)

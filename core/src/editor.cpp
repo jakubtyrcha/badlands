@@ -26,24 +26,7 @@ Editor* Editor::create() {
     Editor* editor = new Editor();
     Editor::Impl& impl = *editor->impl_;
 
-    Node cube;
-    cube.id = 1;
-    cube.shape = Shape::Cube;
-    cube.op = Op::Add;
-    cube.name = "Cube 1";
-    cube.position = {-0.9f, 0.5f, 0.0f};
-    cube.scale = {1.0f, 1.0f, 1.0f};
-    impl.scene.add(cube);
-
-    Node sphere;
-    sphere.id = 2;
-    sphere.shape = Shape::Sphere;
-    sphere.op = Op::Subtract;
-    sphere.name = "Sphere 1";
-    sphere.position = {0.9f, 0.5f, 0.0f};
-    sphere.scale = {1.0f, 1.0f, 1.0f};
-    impl.scene.add(sphere);
-
+    // Scene starts empty — all content comes from spawning (Editor::spawn).
     Camera camera;
     camera.eye = {4.0f, 3.0f, 6.0f};
     camera.target = {0.0f, 0.5f, 0.0f};
@@ -113,6 +96,29 @@ void Editor::select(int32_t nodeId) {
 
 int32_t Editor::selectedNode() const {
     return impl_->selected;
+}
+
+SpawnResult Editor::spawn(Shape shape, Op op, float x, float y) {
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
+        return SpawnResult{kInvalidNode, false};
+    }
+
+    const Ray ray = impl_->controller.to_camera().ray_through_view_point(
+        x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
+    const std::optional<PickHit> hit = raycast_scene(impl_->scene, ray);
+
+    int32_t id;
+    bool snapped;
+    if (hit) {
+        id = impl_->scene.spawn_snapped(shape, op, hit->hit.point, hit->hit.normal, hit->node_id);
+        snapped = true;
+    } else {
+        id = impl_->scene.spawn_unsnapped(shape, op, ray.origin + ray.dir * kUnsnappedSpawnDistance);
+        snapped = false;
+    }
+
+    select(id); // same path as select(): sets selected + marks lines dirty
+    return SpawnResult{id, snapped};
 }
 
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
