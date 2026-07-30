@@ -557,3 +557,143 @@ TEST_CASE("rasterize_rivers: resolution independent in world coordinates") {
       REQUIRE(near);
     }
 }
+
+// --- lakes in the graph -----------------------------------------------------
+//
+// No fixture here built a lake before, so extraction passes 2 and 3 — the lake
+// outflow and the through-lake edges — were entirely unexercised. Three real
+// defects lived in that gap.
+
+namespace {
+// A valley running into a bowl, with the bowl marked wet, so the extraction
+// sees an actual lake with an inlet and an outflow.
+struct LakeWorld {
+  Field2D<float> h, area, depth, ground;
+  Field2D<int32_t> lake_id;
+  std::vector<LakeInfo> lakes;
+  FlowRouting r;
+  RiverGraph g;
+};
+
+LakeWorld run_with_lake(LakeKind kind) {
+  const int n = 80;
+  LakeWorld t;
+  t.h = Field2D<float>(n, n, 0.0f);
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const float d = std::abs(static_cast<float>(x) - 40.0f);
+      t.h.at(x, y) = -1.0f * static_cast<float>(y) + 6.0f * d;  // valley down +y
+    }
+  // A bowl partway down, deep enough to hold water.
+  t.depth = Field2D<float>(n, n, 0.0f);
+  for (int y = 40; y <= 50; ++y)
+    for (int x = 35; x <= 45; ++x) {
+      t.h.at(x, y) = -60.0f;
+      t.depth.at(x, y) = 3.0f;
+    }
+  t.ground = t.h;
+  t.r = route_flow(t.h, 1.0f, kEpsilonM);
+  t.area = accumulate_drainage(t.r, 1.0f);
+
+  t.lake_id = Field2D<int32_t>(n, n, -1);
+  for (size_t i = 0; i < t.depth.data.size(); ++i)
+    if (t.depth.data[i] > 0.0f) t.lake_id.data[i] = 0;
+  LakeInfo info;
+  info.kind = kind;
+  t.lakes.push_back(info);
+
+  ErosionParams p;
+  p.min_channel_area_m2 = 60.0f;
+  t.g = extract_river_graph(t.r, t.area, t.depth, t.ground, p, 1.0f, 0.0f,
+                            &t.lake_id, &t.lakes);
+  return t;
+}
+}  // namespace
+
+TEST_CASE("extract_river_graph: a lake's outflow is emitted once, as a LakeOutlet") {
+  // A lake's sill has ZERO channel donors — the only thing draining into it is
+  // the lake, and lake cells are not in the channel set — so pass 1 also saw
+  // it as a source and walked the identical chain. Two byte-identical edges,
+  // and add_node's dedup meant the node kept kind=Source so LakeOutlet never
+  // stuck. The duplicate then gave the shared `to` node two equal-order
+  // inflows, spuriously promoting Strahler and doubling Shreve.
+  const auto t = run_with_lake(LakeKind::Seeded);
+  REQUIRE_FALSE(t.g.edges.empty());
+
+  for (size_t a = 0; a < t.g.edges.size(); ++a)
+    for (size_t b = a + 1; b < t.g.edges.size(); ++b) {
+      INFO("edges " << a << " and " << b);
+      const bool same_ends = t.g.edges[a].from == t.g.edges[b].from &&
+                             t.g.edges[a].to == t.g.edges[b].to;
+      const bool same_geom = t.g.edges[a].points_m == t.g.edges[b].points_m;
+      REQUIRE_FALSE((same_ends && same_geom));
+    }
+}
+
+TEST_CASE("extract_river_graph: lake nodes report the lake's provenance") {
+  // lake_kind was read at the NODE's cell, but a LakeInlet sits on the last
+  // dry channel cell before the shore and a LakeOutlet on the sill outside the
+  // lake — neither is ever a lake cell, so the lookup always found -1 and
+  // every node stayed Emergent.
+  for (const LakeKind kind : {LakeKind::Seeded, LakeKind::Emergent}) {
+    const auto t = run_with_lake(kind);
+    int lake_nodes = 0;
+    for (const auto& nd : t.g.nodes) {
+      if (nd.kind != RiverNodeKind::LakeInlet && nd.kind != RiverNodeKind::LakeOutlet)
+        continue;
+      ++lake_nodes;
+      INFO("node kind " << static_cast<int>(nd.kind));
+      REQUIRE(nd.lake_id >= 0);
+      REQUIRE(nd.lake_kind == kind);
+    }
+    REQUIRE(lake_nodes > 0);
+  }
+}
+
+TEST_CASE("extract_river_graph: every edge gets a stream order assigned") {
+  // Kahn's pass kept ONE outgoing edge per node, so any edge not reachable
+  // from the downstream walk was never processed and silently kept order 1 /
+  // magnitude 1 whatever its upstream network. Shreve at a confluence is the
+  // sum of its inflows, which an unprocessed edge breaks.
+  const auto t = run_with_lake(LakeKind::Seeded);
+  std::vector<std::vector<int>> incoming(t.g.nodes.size());
+  for (size_t i = 0; i < t.g.edges.size(); ++i)
+    incoming[t.g.edges[i].to].push_back(static_cast<int>(i));
+
+  for (const auto& ed : t.g.edges) {
+    if (incoming[ed.from].empty()) continue;  // a true source
+    int sum = 0, best = 0, best_n = 0;
+    for (const int u : incoming[ed.from]) {
+      sum += t.g.edges[u].shreve_magnitude;
+      const int o = t.g.edges[u].strahler_order;
+      if (o > best) { best = o; best_n = 1; }
+      else if (o == best) { ++best_n; }
+    }
+    REQUIRE(ed.shreve_magnitude == sum);
+    REQUIRE(ed.strahler_order == (best_n >= 2 ? best + 1 : best));
+  }
+}
+
+TEST_CASE("extract_river_graph: resampled vertices keep their reach's discharge") {
+  // Resampling inserts NEW vertices between the Douglas-Peucker survivors, and
+  // those can land on a hillslope cell beside the staircased chain. Sampling
+  // drainage AT the vertex read that cell's near-zero area: measured -99.2% on
+  // a straight 22.5-degree valley, which classified stretches of a real reach
+  // down to Rill and banded the raster.
+  const int n = 96;
+  const float dx = 80.0f * std::tan(22.5f * 3.14159265358979f / 180.0f);
+  const auto h = make_valley_network(
+      n, {{{48.0f - dx * 0.5f, 5.0f}, {48.0f + dx * 0.5f, 85.0f}}}, 1.0f, 6.0f);
+  const auto e = run(h);
+  REQUIRE(!e.g.edges.empty());
+
+  for (const auto& ed : e.g.edges) {
+    const auto& q = ed.discharge_m3_s;
+    for (size_t k = 1; k < q.size(); ++k) {
+      INFO("vertex " << k << " of " << q.size());
+      // Discharge is non-decreasing downstream along a reach; a resampled
+      // vertex must never read a hillslope cell's area.
+      REQUIRE(q[k] >= q[k - 1] * 0.99f);
+    }
+  }
+}

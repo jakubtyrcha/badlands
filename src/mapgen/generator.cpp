@@ -245,7 +245,10 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   a.flow = resample(sim_out.flow);
 
   // Lake identity: nearest-sample, never bilinear — an id is a label, and
-  // averaging two lake indices would name a third lake.
+  // averaging two lake indices would name a third lake. Reconciled against
+  // water_depth further down: the two are derived by DIFFERENT rules (this one
+  // nearest, water_depth from a bilinear depth_hint recomputed against the
+  // output ground), so at resolution != sim_resolution they can disagree.
   a.lakes = sim_out.lakes;
   a.lake_id = Field2D<int32_t>(w, w, -1);
   for (int y = 0; y < w; ++y)
@@ -272,6 +275,37 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
       a.water_depth.data[i] =
           std::max(0.0f, surface_out.data[i] - a.heightmap.data[i]);
   if (sink) sink->dump("water", seq++, a.water_depth);
+
+  // Reconcile lake_id with water_depth, UNCONDITIONALLY — not inside the
+  // smoothing branch, and in both directions. The two fields come from
+  // different resampling rules (nearest vs a bilinear depth_hint recomputed
+  // against the output ground), so wherever resolution != sim_resolution a
+  // texel could carry an id with no water, or water with no id. The first
+  // makes `lakes[lake_id]` describe a dry cell; the second makes a lake cell
+  // unattributable.
+  auto reconcile_lake_ids = [&] {
+    for (size_t i = 0; i < a.lake_id.data.size(); ++i)
+      if (a.water_depth.data[i] <= 0.0f) a.lake_id.data[i] = -1;
+    // Wet but unlabelled: adopt a wet neighbour's id. Two passes reach any
+    // texel within two of a labelled one, which covers a resample seam;
+    // anything further stays -1 rather than being guessed at.
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int y = 0; y < w; ++y)
+        for (int x = 0; x < w; ++x) {
+          if (a.water_depth.at(x, y) <= 0.0f || a.lake_id.at(x, y) >= 0) continue;
+          for (int dy = -1; dy <= 1 && a.lake_id.at(x, y) < 0; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+              const int nx = x + dx, ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= w || ny >= w) continue;
+              if (a.water_depth.at(nx, ny) > 0.0f && a.lake_id.at(nx, ny) >= 0) {
+                a.lake_id.at(x, y) = a.lake_id.at(nx, ny);
+                break;
+              }
+            }
+        }
+    }
+  };
+  reconcile_lake_ids();
 
   // --- detail + biome stamp ---
   const auto delta =
@@ -305,9 +339,7 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
           wet_before.data[i] > 0.0f
               ? std::max(0.0f, water_surface.data[i] - a.heightmap.data[i])
               : 0.0f;
-    // A lake cell that dried out is no longer part of any lake.
-    for (size_t i = 0; i < a.lake_id.data.size(); ++i)
-      if (a.water_depth.data[i] <= 0.0f) a.lake_id.data[i] = -1;
+    reconcile_lake_ids();  // smoothing dries out shoreline cells
   }
 
   // --- river network ---

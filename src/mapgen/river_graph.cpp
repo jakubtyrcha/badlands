@@ -211,10 +211,14 @@ void compute_stream_orders(RiverGraph& g) {
     pending[e] = static_cast<int32_t>(incoming[static_cast<size_t>(g.edges[e].from)].size());
     if (pending[e] == 0) ready.push_back(static_cast<int32_t>(e));
   }
-  // Outgoing edge per node (at most one: every node has a single receiver
-  // chain leaving it), used to walk downstream as edges resolve.
-  std::vector<int32_t> out_edge(g.nodes.size(), -1);
-  for (size_t e = 0; e < ne; ++e) out_edge[static_cast<size_t>(g.edges[e].from)] = static_cast<int32_t>(e);
+  // ALL outgoing edges per node, not one. Storing a single index silently
+  // dropped every edge but the last written: any edge not reachable from the
+  // downstream walk never has its `pending` decremented to zero, so it is
+  // never processed and keeps the default order 1 / magnitude 1 regardless of
+  // its real upstream network. A wrong answer with no diagnostic.
+  std::vector<std::vector<int32_t>> out_edges(g.nodes.size());
+  for (size_t e = 0; e < ne; ++e)
+    out_edges[static_cast<size_t>(g.edges[e].from)].push_back(static_cast<int32_t>(e));
 
   size_t head = 0;
   while (head < ready.size()) {
@@ -237,8 +241,8 @@ void compute_stream_orders(RiverGraph& g) {
       edge.strahler_order = best_count >= 2 ? best + 1 : best;
       edge.shreve_magnitude = shreve;
     }
-    const int32_t down = out_edge[static_cast<size_t>(edge.to)];
-    if (down >= 0 && --pending[static_cast<size_t>(down)] == 0) ready.push_back(down);
+    for (const int32_t down : out_edges[static_cast<size_t>(edge.to)])
+      if (--pending[static_cast<size_t>(down)] == 0) ready.push_back(down);
   }
 }
 
@@ -269,7 +273,13 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
   // One node per distinguished cell, deduplicated so a confluence is shared by
   // the edges meeting there.
   std::vector<int32_t> node_at(n, -1);
-  auto add_node = [&](int cell, RiverNodeKind kind, int32_t lake) {
+  // `lake_cell` is where provenance is READ FROM, and it is not the node's own
+  // cell: a LakeInlet sits on the last dry channel cell before the shore and a
+  // LakeOutlet on the sill just outside the lake, so neither is ever a lake
+  // cell. Reading lake_id at the node's own cell always returned -1 and left
+  // every node's kind at the default.
+  auto add_node = [&](int cell, RiverNodeKind kind, int32_t lake,
+                      int lake_cell = -1) {
     if (node_at[static_cast<size_t>(cell)] >= 0) return node_at[static_cast<size_t>(cell)];
     RiverNode nd;
     nd.pos_m = world_of(cell);
@@ -280,8 +290,8 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
     // Report the lake's provenance where the caller supplied it. Resolved from
     // the erosion pass's own labelling rather than re-derived, so the graph and
     // the water field cannot disagree about which lake a node touches.
-    if (lake >= 0 && lake_id != nullptr && lakes != nullptr) {
-      const int32_t real = lake_id->data[static_cast<size_t>(cell)];
+    if (lake >= 0 && lake_cell >= 0 && lake_id != nullptr && lakes != nullptr) {
+      const int32_t real = lake_id->data[static_cast<size_t>(lake_cell)];
       if (real >= 0 && static_cast<size_t>(real) < lakes->size())
         nd.lake_kind = (*lakes)[static_cast<size_t>(real)].kind;
     }
@@ -297,15 +307,27 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
   // v1.1 addendum.
   const int lake_count = 1 + *std::max_element(cf.lake_id.begin(), cf.lake_id.end());
   std::vector<int> sill(static_cast<size_t>(std::max(lake_count, 0)), -1);
+  std::vector<int> lake_member(static_cast<size_t>(std::max(lake_count, 0)), -1);
   for (size_t i = 0; i < n; ++i) {
     const int32_t lid = cf.lake_id[i];
     if (lid < 0) continue;
+    if (lake_member[static_cast<size_t>(lid)] < 0)
+      lake_member[static_cast<size_t>(lid)] = static_cast<int>(i);
     const int32_t rcv = r.receiver[i];
     if (rcv < 0 || cf.lake_id[static_cast<size_t>(rcv)] == lid) continue;
     int& s = sill[static_cast<size_t>(lid)];
     if (s < 0 || r.water_level[static_cast<size_t>(rcv)] < r.water_level[static_cast<size_t>(s)])
       s = rcv;
   }
+  // Sill cells are claimed by pass 2. Without this, pass 1 also starts a reach
+  // at each of them — a lake's sill has ZERO channel donors, since the only
+  // thing draining into it is the lake and lake cells are not in the channel
+  // set — so the same chain was walked twice and emitted as two identical
+  // edges. add_node dedups by cell, so pass 1 got there first and the node
+  // kept kind=Source; the LakeOutlet kind never stuck.
+  std::vector<uint8_t> is_sill(n, 0);
+  for (const int sc : sill)
+    if (sc >= 0) is_sill[static_cast<size_t>(sc)] = 1;
 
   auto is_terminal = [&](int i) {  // the chain cannot continue past here
     const int32_t rcv = r.receiver[i];
@@ -346,17 +368,37 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
     e.width_m.resize(np);
     e.depth_m.resize(np);
     e.speed_m_s.resize(np);
+    // Attributes come from the nearest CHAIN cell, not from cell_of(point).
+    // Resampling inserts NEW vertices between the Douglas-Peucker survivors,
+    // and those can land on a hillslope cell beside the staircased chain —
+    // whose drainage area is nothing. Measured on a straight 22.5-degree
+    // valley: discharge collapsing by up to 99.2% at interior vertices, which
+    // then classified stretches of a real reach down to Rill and banded the
+    // raster. Both sequences run along the path, so a monotone cursor resolves
+    // every point in linear time.
+    std::vector<int> pt_cell(np);
+    {
+      size_t cursor = 0;
+      for (size_t k = 0; k < np; ++k) {
+        auto d2 = [&](size_t idx) {
+          const glm::vec2 d = world_of(chain[idx]) - pts[k];
+          return glm::dot(d, d);
+        };
+        while (cursor + 1 < chain.size() && d2(cursor + 1) <= d2(cursor)) ++cursor;
+        pt_cell[k] = chain[cursor];
+      }
+    }
     for (size_t k = 0; k < np; ++k) {
-      const int c = cell_of(pts[k]);
+      const int c = pt_cell[k];
       const float q = p.runoff_m_per_s * area.data[static_cast<size_t>(c)];
-      // Reach slope from the neighbouring vertices' ground, over their world
-      // separation — a local finite difference along the channel.
+      // Local reach slope, from the neighbouring vertices' ground over their
+      // world separation — read at their CHAIN cells for the same reason.
       const size_t a = k > 0 ? k - 1 : k;
       const size_t b = k + 1 < np ? k + 1 : k;
       float slope = 0.0f;
       if (b > a) {
-        const float dz = ground.data[static_cast<size_t>(cell_of(pts[a]))] -
-                         ground.data[static_cast<size_t>(cell_of(pts[b]))];
+        const float dz = ground.data[static_cast<size_t>(pt_cell[a])] -
+                         ground.data[static_cast<size_t>(pt_cell[b])];
         const float dist = glm::length(pts[b] - pts[a]);
         if (dist > 0.0f) slope = dz / dist;
       }
@@ -374,6 +416,7 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
     if (!cf.channel[i]) continue;
     const bool starts = cf.donors[i] == 0 || cf.donors[i] >= 2;
     if (!starts) continue;
+    if (is_sill[i]) continue;  // pass 2 owns this reach
     // No reach LEAVES a terminal cell. Guarding only the donors==0 case would
     // let a confluence that sits right on a lake shore (or on the map edge)
     // walk a single-cell chain whose head and tail are the same cell, emitting
@@ -389,7 +432,8 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
     const int32_t rcv = r.receiver[static_cast<size_t>(tail)];
     int32_t to_node;
     if (rcv >= 0 && cf.lake_id[static_cast<size_t>(rcv)] >= 0)
-      to_node = add_node(tail, RiverNodeKind::LakeInlet, cf.lake_id[static_cast<size_t>(rcv)]);
+      to_node = add_node(tail, RiverNodeKind::LakeInlet,
+                         cf.lake_id[static_cast<size_t>(rcv)], rcv);
     else if (rcv < 0)
       to_node = add_node(tail, RiverNodeKind::Mouth, -1);
     else
@@ -401,14 +445,17 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
   for (size_t lid = 0; lid < sill.size(); ++lid) {
     const int s = sill[lid];
     if (s < 0 || !cf.channel[static_cast<size_t>(s)]) continue;
-    const int32_t out_node = add_node(s, RiverNodeKind::LakeOutlet, static_cast<int32_t>(lid));
+    const int32_t out_node = add_node(s, RiverNodeKind::LakeOutlet,
+                                      static_cast<int32_t>(lid),
+                                      lake_member[lid]);
     if (!is_terminal(s)) {
       const auto chain = walk(s);
       const int tail = chain.back();
       const int32_t rcv = r.receiver[static_cast<size_t>(tail)];
       int32_t to_node;
       if (rcv >= 0 && cf.lake_id[static_cast<size_t>(rcv)] >= 0)
-        to_node = add_node(tail, RiverNodeKind::LakeInlet, cf.lake_id[static_cast<size_t>(rcv)]);
+        to_node = add_node(tail, RiverNodeKind::LakeInlet,
+                           cf.lake_id[static_cast<size_t>(rcv)], rcv);
       else if (rcv < 0)
         to_node = add_node(tail, RiverNodeKind::Mouth, -1);
       else
