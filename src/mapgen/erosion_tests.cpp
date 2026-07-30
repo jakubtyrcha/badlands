@@ -839,7 +839,8 @@ TEST_CASE("generate_map: debug sink sees the full stage sequence") {
       "canals", "sediment-init", "micro-fill",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
-      "water", "detail-delta", "river", "final-height", "biome"};
+      "water", "detail-delta", "pre-smooth-height", "river",
+      "final-height", "biome"};
   REQUIRE(rec.stages == expected);
 }
 

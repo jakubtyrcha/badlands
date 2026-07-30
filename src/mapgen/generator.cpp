@@ -15,6 +15,7 @@
 #include "mapgen/parallel.hpp"
 #include "mapgen/resample.hpp"
 #include "mapgen/river_graph.hpp"
+#include "mapgen/smooth.hpp"
 
 namespace badlands::mapgen {
 
@@ -277,6 +278,37 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
       gully_detail_delta(a.heightmap, a.water_depth, texel_out, params.seed, ep);
   if (sink) sink->dump("detail-delta", seq++, delta);
   for (size_t i = 0; i < delta.data.size(); ++i) a.heightmap.data[i] += delta.data[i];
+
+  // --- output-res smoothing ---
+  // Capture the water SURFACE first. The renderer derives it as
+  // heightmap + water_depth, and gully_detail_delta already returns zero on wet
+  // cells, so lake surfaces are flat going in. Blurring the ground under a lake
+  // without re-deriving depth would make every lake surface wrinkled — a
+  // visible bug. `surface` is constant across a lake by construction, so
+  // recomputing depth against it keeps each lake exactly as flat as it was.
+  if (params.post.smooth_sigma_m > 0.0f && params.post.smooth_strength > 0.0f) {
+    if (sink) sink->dump("pre-smooth-height", seq++, a.heightmap);
+    Field2D<float> water_surface(w, w, 0.0f);
+    for (size_t i = 0; i < water_surface.data.size(); ++i)
+      water_surface.data[i] = a.heightmap.data[i] + a.water_depth.data[i];
+    const auto wet_before = a.water_depth;
+
+    a.heightmap = smooth_heightmap(a.heightmap, texel_out,
+                                   params.post.smooth_sigma_m,
+                                   params.post.smooth_strength);
+
+    // Only previously-wet cells get a depth; dry ones stay dry. Accepted
+    // consequence: shorelines recede slightly and shallow lakes get shallower,
+    // because blurring rounds a concave bowl floor upward.
+    for (size_t i = 0; i < a.water_depth.data.size(); ++i)
+      a.water_depth.data[i] =
+          wet_before.data[i] > 0.0f
+              ? std::max(0.0f, water_surface.data[i] - a.heightmap.data[i])
+              : 0.0f;
+    // A lake cell that dried out is no longer part of any lake.
+    for (size_t i = 0; i < a.lake_id.data.size(); ++i)
+      if (a.water_depth.data[i] <= 0.0f) a.lake_id.data[i] = -1;
+  }
 
   // --- river network ---
   // Extracted on the SIM grid (that is where the routing lives) but rasterized

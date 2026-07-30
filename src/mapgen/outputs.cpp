@@ -200,7 +200,7 @@ void PngDebugSink::dump(std::string_view stage, int seq,
   const std::string path = dump_path(out_dir_, stage, seq);
   const bool sim_relief = stage == "cone" || stage == "loop-height" ||
                           stage == "cavities-height" || stage == "canals";
-  const bool out_relief = stage == "final-height";
+  const bool out_relief = stage == "final-height" || stage == "pre-smooth-height";
   const bool flow = stage == "loop-flow" || stage == "flow";
   if (sim_relief) write_hillshade_png(field, path, sim_texel_m_);
   else if (out_relief) write_hillshade_png(field, path, out_texel_m_);

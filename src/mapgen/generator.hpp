@@ -14,15 +14,34 @@
 
 #include "mapgen/erosion.hpp"
 #include "mapgen/river_graph.hpp"
+#include "mapgen/smooth.hpp"
 #include "mapgen/field2d.hpp"
 
 namespace badlands::mapgen {
+
+// Output-resolution post-processing, distinct from the sim's own parameters.
+// The detail_* fields on ErosionParams arguably belong here too — they are
+// also an output-res post-process — but migrating them is a separable change
+// deliberately left out.
+struct PostProcessParams {
+  // Gaussian sigma in WORLD METRES; <= 0 disables. Metres rather than texels so
+  // the same value gives the same terrain at any resolution.
+  //
+  // Chosen from the preview across sigma {1, 2} x strength {0.5, 1.0}, not
+  // from the numbers: 2.0/1.0 washed the terrain out entirely (the hillshade
+  // went near-white as slope magnitudes collapsed), while 1.0/0.5 was too
+  // subtle to answer the complaint. 1.0/1.0 takes the gully wrinkle off and
+  // leaves the fans and basins reading clearly.
+  float smooth_sigma_m = 1.0f;
+  float smooth_strength = 1.0f;  // 0 = passthrough, 1 = fully blurred
+};
 
 struct MapGenParams {
   uint32_t seed = 1;
   int resolution = 512;         // output grid (texels, square)
   float world_size_m = 512.0f;  // world extent (meters, square)
   ErosionParams erosion;        // hydraulic erosion + lakes sim (own sim grid)
+  PostProcessParams post;       // output-res smoothing (see smooth.hpp)
 };
 
 // Everything one generation produces. `bedrock` is the latent field the biomes
