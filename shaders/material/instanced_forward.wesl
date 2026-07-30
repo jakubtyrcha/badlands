@@ -16,7 +16,7 @@ import package::common::frame::{frame, worldSpaceToWorldCameraOffsetedSpace, wor
 @if(!shadow_pass)
 import package::common::color::srgb_to_linear;
 @if(!shadow_pass)
-import package::common::shadow_sampling::sampleShadowMapPCF;
+import package::common::shadow_sampling::{sampleShadowMapPCF, shadowOpticalThickness};
 @if(!shadow_pass)
 import package::common::standard_lighting::{shadeStandardForward, evaluateTranslucency};
 
@@ -100,13 +100,14 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
 }
 
 @if(!shadow_pass && translucency)
-fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, shadow: f32) -> vec3<f32> {
+fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, worldPos: vec3<f32>, fragCoord: vec2<f32>) -> vec3<f32> {
     let L = normalize(frame.sunDirection.xyz);
-    return evaluateTranslucency(N, V, L, shadow, ao,
+    let thickness = shadowOpticalThickness(worldPos, fragCoord, shadow_map);
+    return evaluateTranslucency(N, V, L, thickness, ao,
                                 mat_params.transmission.rgb, mat_params.transmission.a);
 }
 @if(!shadow_pass && !translucency)
-fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, shadow: f32) -> vec3<f32> {
+fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, worldPos: vec3<f32>, fragCoord: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
 
@@ -134,7 +135,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location
 
     let color = shadeStandardForward(albedoLinear, N, V, roughness, ao, shadow,
         prefiltered_env, prefiltered_sampler, brdf_lut, brdf_lut_sampler);
-    let transmission = transmissionContribution(N, V, ao, shadow);
+    let transmission = transmissionContribution(N, V, ao, worldPos, input.position.xy);
     return vec4<f32>(color + transmission, 1.0);
 }
 

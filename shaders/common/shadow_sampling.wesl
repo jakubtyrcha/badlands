@@ -159,3 +159,59 @@ fn sampleShadowMapPCF(worldPos: vec3<f32>, normal: vec3<f32>, NdotL: f32,
     // 6. Fully lit outside the shadow frustum; otherwise the PCF result.
     return mix(1.0, pcf, inFrustum);
 }
+
+// World-space optical thickness between this receiver and the first shadow-map
+// blocker along the light direction. 0 outside the shadow frustum (treated as
+// unoccluded, matching the PCF path's lit-outside convention). Used by
+// evaluateTranslucency (standard_lighting.wesl) for Beer-Lambert foliage
+// transmission -- unlike sampleShadowMapPCF this is not a binary lit/shadowed
+// test, so it takes NO normal-offset bias (that bias exists to fight PCF
+// self-shadowing acne, not to find the true receiver depth) and reads the map
+// with a single stochastic tap rather than a 3x3 filter.
+fn shadowOpticalThickness(worldPos: vec3<f32>, fragCoord: vec2<f32>,
+                          shadowMap: texture_depth_2d) -> f32 {
+    // 1. Project the RAW receiver position (no normal-offset bias). Same
+    // uv/receiverDepth math as steps 2-3 above.
+    let clip = frame.lightViewProj * vec4<f32>(worldPos, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let receiverDepth = ndc.z;
+
+    // 2. Frustum test as a multiplier, exactly like step 3 above.
+    let inFrustum = f32(all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)) &&
+                        ndc.z >= 0.0 && ndc.z <= 1.0);
+
+    // 3. Interleaved-gradient-noise dither on the SCREEN pixel, not the
+    // shadow texel: a single unfiltered blocker tap (unlike the 3x3 PCF
+    // kernel above) would otherwise stair-step into visible banding as the
+    // tap crosses shadow-map texel boundaries. Per-pixel stochastic noise is
+    // the accepted trade for reference rendering (no TAA to resolve it). The
+    // second value reuses the same IGN formula with its two magic constants
+    // swapped -- a cheap way to decorrelate two taps from one dot product
+    // family without inventing new constants.
+    let ignA = fract(52.9829189 * fract(dot(fragCoord, vec2<f32>(0.06711056, 0.00583715))));
+    let ignB = fract(52.9829189 * fract(dot(fragCoord, vec2<f32>(0.00583715, 0.06711056))));
+    let jitter = vec2<f32>(ignA, ignB) - vec2<f32>(0.5);  // in [-0.5, 0.5]^2
+    let jitteredUV = uv + jitter * 1.5 * frame.shadowParams.y;  // shadowParams.y = 1/shadow res
+
+    // 4. Blocker tap: single textureLoad, texel coords clamped to bounds
+    // exactly like the hard-shadow debug path (step 3a above). No derivative
+    // uniformity requirement, so this is safe to call after the alpha-test
+    // discard in the caller's fs_main.
+    let dim = vec2<f32>(textureDimensions(shadowMap));
+    let texel_i = vec2<i32>(clamp(jitteredUV * dim, vec2<f32>(0.0), dim - 1.0));
+    let blocker = textureLoad(shadowMap, texel_i, 0);
+
+    // 5. Beer-Lambert thickness in WORLD units: the depth-space gap
+    // (receiver minus blocker, floored at 0 with a small epsilon to avoid
+    // self-attenuation from tap jitter/quantization at a zero-thickness
+    // receiver) times world-units-per-depth-unit = 1/length(rowZ) -- same
+    // construction as step 4's rowZ above (the light is orthographic, so
+    // depth is an affine function of world position and this conversion
+    // factor is a constant of the light matrix alone, independent of the
+    // receiver plane).
+    const kThicknessEpsilon: f32 = 0.0005;  // depth units; ~10cm at the default 200m z-range
+    let M = frame.lightViewProj;
+    let rowZ = vec3<f32>(M[0].z, M[1].z, M[2].z);
+    return inFrustum * max(0.0, receiverDepth - blocker - kThicknessEpsilon) / length(rowZ);
+}

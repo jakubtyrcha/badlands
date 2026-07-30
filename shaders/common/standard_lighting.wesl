@@ -57,21 +57,25 @@ fn shadeStandardForward(albedoLinear: vec3<f32>, N: vec3<f32>, V: vec3<f32>,
 }
 
 const kPhasePower: f32 = 4.0;  // forward-scatter lobe sharpness (flare)
+const kTransmissionSigma: f32 = 0.9;  // 1/m foliage extinction (Beer-Lambert), screenshot-tuned
 
 // Thin-slab diffuse transmission (subsurface look): light entering the far side
 // of a thin translucent surface and exiting toward the viewer. Split like
-// shadeStandard's reflection — a DIRECT sun term (caller gates it with the
-// shadow map: "shadow is for the directional light") plus an AMBIENT term from
-// the environment on the BACK hemisphere (caller gates it with ao: "AO/IBL for
-// the glare"). transmissionColor (T) and strength (s) are the material's
-// transmittance; reflectance and transmittance are independent surface
-// properties, so this is ADDED to the reflected color with no energy rebalancing.
+// shadeStandard's reflection — a DIRECT sun term, attenuated by Beer-Lambert
+// optical thickness (thicknessWorld: world-space distance from the receiver to
+// the first shadow-map blocker along the light direction, from
+// shadowOpticalThickness in shadow_sampling.wesl — NOT a binary shadow-map
+// gate any more) plus an AMBIENT term from the environment on the BACK
+// hemisphere (caller gates it with ao: "AO/IBL for the glare"). transmissionColor
+// (T) and strength (s) are the material's transmittance; reflectance and
+// transmittance are independent surface properties, so this is ADDED to the
+// reflected color with no energy rebalancing.
 fn evaluateTranslucency(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>,
-                        shadow: f32, ao: f32,
+                        thicknessWorld: f32, ao: f32,
                         transmissionColor: vec3<f32>, strength: f32) -> vec3<f32> {
     let backLit = max(-dot(N, L), 0.0);                       // sun behind the surface
     let flare = pow(max(dot(V, -L), 0.0), kPhasePower);       // forward-scatter peak
-    let direct = shadow * frame.sunColor.xyz * backLit * (1.0 + flare);
+    let direct = frame.sunColor.xyz * backLit * (1.0 + flare) * exp(-kTransmissionSigma * thicknessWorld);
     let ambient = ao * evaluateAmbientSHL2(-N, frame.ambientSH);
     return strength * transmissionColor * (direct + ambient);
 }
