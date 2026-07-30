@@ -13,6 +13,17 @@ enum class TreeType { Deciduous, Evergreen };
 // generic fat-oval fallback (byte-identical to the pre-species texture).
 enum class LeafSilhouette { Oak, Ash, Aspen, Bush, PineSprig };
 
+// The alpha-discard cutoff a per-silhouette leaf-card texture should be BAKED
+// with (BuildLeafMipChainRgba8's coverage-preserving mip chain, viewer's
+// LeafSilhouette-keyed texture cache). Single source of truth for the value
+// TreeCatalog()'s presets also assign to LeafOptions::alpha_cutoff below --
+// PineSprig's thin needle strokes need the lower cutoff so coverage
+// preservation has something to preserve; every other silhouette uses the
+// LeafOptions default (0.5).
+constexpr float LeafSilhouetteBakeCutoff(LeafSilhouette shape) {
+  return (shape == LeafSilhouette::PineSprig) ? 0.35f : 0.5f;
+}
+
 // Per-site leaf-card blade layout (tree_generator.cpp's emit_leaf):
 // SingleQuad/CrossedPair keep ez-tree's billboard=1/2 behavior; FanFromStem
 // and AxialFins are multi-blade arrangements sharing the site's stem point

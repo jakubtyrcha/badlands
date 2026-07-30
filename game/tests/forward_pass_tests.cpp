@@ -556,7 +556,7 @@ wgpu::Texture MakeShadowDepth(wgpu::Device d) {
 // Orthographic light view-proj looking straight down (-Y) at the quad centre.
 // glm::ortho under GLM_FORCE_DEPTH_ZERO_TO_ONE maps near->0, far->1 (conv-Z),
 // matching sampleShadowMapPCF's ndc.z and the LessEqual comparison sampler. The
-// quad centre (world (0,0,0) -- its modelMatrix translate is CAMERA-RELATIVE
+// quad centre (world (0,0,0)) -- its modelMatrix translate is CAMERA-RELATIVE
 // (~:643 is y=-10, but TopDownUniforms's camera sits at y=+10, netting an
 // ABSOLUTE world height of 0) sits ~mid-frustum -> receiverDepth ~= 0.49, so
 // clearing the shadow map to 1.0 leaves it fully LIT and clearing to 0.0 fully

@@ -117,6 +117,22 @@ TEST_CASE("TreeCatalog: every predefined setup generates a well-formed mesh") {
   }
 }
 
+TEST_CASE("TreeCatalog presets bake with LeafSilhouetteBakeCutoff's cutoff") {
+  // Guards against the viewer's leaf-texture cache (model_viewer_view.cpp)
+  // and TreeCatalog's per-preset LeafOptions::alpha_cutoff drifting apart --
+  // both must agree with the single shared LeafSilhouetteBakeCutoff helper.
+  auto check = [](const TreeOptions& o, const std::string& name) {
+    INFO("setup: " << name);
+    REQUIRE(o.leaves.alpha_cutoff ==
+            Catch::Approx(LeafSilhouetteBakeCutoff(o.leaves.silhouette)));
+  };
+  check(OakPreset(), "OakPreset");
+  check(PinePreset(), "PinePreset");
+
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) check(setup.options, setup.name);
+}
+
 TEST_CASE("TreeCatalog: leaf world-size bands") {
   // Same preview-height scale the viewer applies to fit every catalog tree
   // into its orbit framing (model_viewer_view.cpp's kTreePreviewHeight) --
@@ -138,7 +154,7 @@ TEST_CASE("TreeCatalog: leaf world-size bands") {
     const float world_leaf_m = lf.size * kPreviewHeight / height;
     const int quads_per_site = QuadsPerLeafSite(lf);
 
-    WARN(setup.name << ": bark_height=" << height
+    INFO(setup.name << ": bark_height=" << height
                      << " world_leaf_m=" << world_leaf_m
                      << " count=" << lf.count
                      << " quads_per_site=" << quads_per_site);

@@ -92,16 +92,14 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
     leaf_sampler_ = device_.CreateSampler(&samp);
 
     constexpr uint32_t kLeafTexSize = 128;
-    constexpr uint32_t kMipLevelCount = 8;  // log2(128) + 1
     constexpr std::array<LeafSilhouette, kLeafSilhouetteCount> kSilhouettes = {
         LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
         LeafSilhouette::Bush, LeafSilhouette::PineSprig};
 
     for (LeafSilhouette shape : kSilhouettes) {
-      // Matches TreeCatalog's per-silhouette alpha_cutoff assignments
-      // (tree_generator.cpp): PineSprig's thin needle strokes need the lower
-      // cutoff so coverage preservation has something to preserve.
-      const float cutoff = (shape == LeafSilhouette::PineSprig) ? 0.35f : 0.5f;
+      // Shared with TreeCatalog's per-silhouette alpha_cutoff assignments
+      // (tree_generator.cpp) -- see LeafSilhouetteBakeCutoff's own comment.
+      const float cutoff = LeafSilhouetteBakeCutoff(shape);
       const std::vector<std::vector<uint8_t>> mips =
           BuildLeafMipChainRgba8(static_cast<int>(kLeafTexSize),
                                  glm::vec3(1.0f), shape, cutoff);
@@ -111,7 +109,7 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
       tex_desc.format = wgpu::TextureFormat::RGBA8Unorm;
       tex_desc.usage =
           wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
-      tex_desc.mipLevelCount = kMipLevelCount;
+      tex_desc.mipLevelCount = static_cast<uint32_t>(mips.size());
       tex_desc.sampleCount = 1;
       tex_desc.dimension = wgpu::TextureDimension::e2D;
       wgpu::Texture texture = device_.CreateTexture(&tex_desc);
@@ -129,7 +127,7 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
       // buffer<->texture copies, so the tightly-packed per-level buffers
       // upload directly).
       uint32_t w = kLeafTexSize, h = kLeafTexSize;
-      for (uint32_t level = 0; level < kMipLevelCount; ++level) {
+      for (uint32_t level = 0; level < mips.size(); ++level) {
         wgpu::TexelCopyTextureInfo dst;
         dst.texture = texture;
         dst.mipLevel = level;

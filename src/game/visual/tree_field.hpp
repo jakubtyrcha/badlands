@@ -92,12 +92,13 @@ struct TreeField {
 };
 
 // Builds a TreeField for `options`: the branch skeleton is built ONCE, then
-// per LOD (0 = full detail; 1/2 = meshopt-simplified, matching the viewer's
-// manual-LOD kLodRatios) bark + leaf meshes are generated, GPU-uploaded, and
+// per LOD (0 = full detail; 1/2 = meshopt-simplified -- bark per
+// kDefaultLodRatios, leaves per the gentler kLeafLodRatios, both
+// mesh_lod.hpp) bark + leaf meshes are generated, GPU-uploaded, and
 // wired into a fresh InstancedMeshField (capacity/lod_thresholds forwarded
 // verbatim to its ctor; num_models=1, num_submeshes=2). `leaf_view`/
 // `leaf_sampler` supply the leaf-card silhouette texture (see
-// ModelViewerView::Initialize's leaf_view_/leaf_sampler_). Returns nullptr
+// ModelViewerView::Initialize's leaf_views_/leaf_sampler_). Returns nullptr
 // (after logging) on any factory-build, field-compile, or bark-mesh failure.
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
