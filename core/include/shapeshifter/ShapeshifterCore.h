@@ -34,6 +34,8 @@ struct PickResult {
 
 struct SpawnResult { int32_t node_id; bool snapped; };
 
+struct ScreenPoint { float x, y; bool visible; };   // view points, top-left origin
+
 // One app-lifetime instance; Swift imports this as a reference type.
 class SWIFT_IMMORTAL_REFERENCE Editor {
 public:
@@ -67,6 +69,23 @@ public:
 
     // node info (tests + later UI)
     Vec3f nodePosition(int32_t nodeId) const;   // {0,0,0} for unknown id
+
+    // radial-menu anchor: the selected node's position projected to the viewport.
+    // {0,0,false} when no selection, zero viewport, or the point is behind the camera.
+    ScreenPoint projectSelectedAnchor() const;
+
+    // op (menu toggle + color coding)
+    Op nodeOp(int32_t nodeId) const;                // Op::Add for unknown id (documented)
+    void setNodeOp(int32_t nodeId, Op op);          // marks scene lines dirty
+
+    // scale tool — cumulative-delta semantics
+    void beginScale();                              // captures the selected node's scale; no-op without selection
+    void updateScale(float pixelDeltaY);            // scale = start_scale * exp(-pixelDeltaY * 0.005), per component,
+                                                     // each component clamped to [0.05, 50]; no-op unless active; marks lines dirty
+    void endScale();
+
+    // node info (tests)
+    Vec3f nodeScale(int32_t nodeId) const;          // {0,0,0} for unknown id
 
 private:
     Editor();

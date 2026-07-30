@@ -141,8 +141,9 @@ struct MetalViewport: NSViewRepresentable {
         let editor = vm.editor
         editor.attachLayer(Unmanaged.passUnretained(view.metalLayer).toOpaque())
 
-        view.onSizeChange = { w, h, scale in
+        view.onSizeChange = { [vm] w, h, scale in
             editor.setViewportSize(Float(w), Float(h), Float(scale))
+            vm.handleViewportSizeChange()
         }
 
         let driver = DisplayLinkDriver(metalLayer: view.metalLayer, editor: editor)

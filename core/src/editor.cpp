@@ -1,6 +1,7 @@
 #include <shapeshifter/ShapeshifterCore.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "camera.h"
@@ -25,6 +26,16 @@ struct Editor::Impl {
         int32_t node_id = kInvalidNode; // the node the captured plane/start_* belong to
         simd_float3 plane_point, plane_normal, start_pos, start_hit, start_snap_point;
     } drag;
+
+    // Mirrors drag's shape, including the node_id mid-gesture guard: without
+    // it, a selection change between beginScale/updateScale (no interleaving
+    // endScale) would silently apply the old node's start_scale to whatever
+    // is selected now, the same class of bug the M6 drag fix addressed.
+    struct {
+        bool active = false;
+        int32_t node_id = kInvalidNode; // the node start_scale was captured for
+        simd_float3 start_scale;
+    } scale_drag;
 };
 
 Editor::Editor() : impl_(new Impl()) {}
@@ -241,6 +252,90 @@ Vec3f Editor::nodePosition(int32_t nodeId) const {
         return Vec3f{0.0f, 0.0f, 0.0f};
     }
     return Vec3f{node->position.x, node->position.y, node->position.z};
+}
+
+ScreenPoint Editor::projectSelectedAnchor() const {
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
+        return ScreenPoint{0.0f, 0.0f, false};
+    }
+    const Node* node = impl_->scene.find(impl_->selected);
+    if (node == nullptr) {
+        return ScreenPoint{0.0f, 0.0f, false};
+    }
+
+    // ViewPoint already returns {0,0,false} when the point is behind the
+    // camera (clip.w <= 0), so this is a direct field-for-field mapping.
+    const ViewPoint vp = impl_->controller.to_camera().project(
+        node->position, impl_->viewportWidthPts, impl_->viewportHeightPts);
+    return ScreenPoint{vp.x, vp.y, vp.visible};
+}
+
+Op Editor::nodeOp(int32_t nodeId) const {
+    const Node* node = impl_->scene.find(nodeId);
+    return node != nullptr ? node->op : Op::Add;
+}
+
+void Editor::setNodeOp(int32_t nodeId, Op op) {
+    Node* node = impl_->scene.find(nodeId);
+    if (node == nullptr) {
+        return;
+    }
+    node->op = op;
+    impl_->renderer.set_scene_lines_dirty(); // op changes vertex colors
+}
+
+void Editor::beginScale() {
+    Node* node = impl_->scene.find(impl_->selected);
+    if (node == nullptr) {
+        return; // no valid selection: scale does not activate
+    }
+    impl_->scale_drag.start_scale = node->scale;
+    impl_->scale_drag.node_id = node->id;
+    impl_->scale_drag.active = true;
+}
+
+void Editor::updateScale(float pixelDeltaY) {
+    if (!impl_->scale_drag.active) {
+        return;
+    }
+    // Defense in depth, mirroring updateDrag: the captured start_scale
+    // belongs to the node that was selected when beginScale ran. If the
+    // selection has since changed with no interleaving endScale, applying
+    // that stale start_scale to whatever is selected now would silently
+    // rescale the wrong node.
+    if (impl_->selected != impl_->scale_drag.node_id) {
+        return;
+    }
+    Node* node = impl_->scene.find(impl_->selected);
+    if (node == nullptr) {
+        return;
+    }
+
+    // Cumulative from the captured start scale, not incremental from the
+    // node's current scale: pixelDeltaY is always the total delta from the
+    // drag's start, so re-deriving from start_scale every call keeps the
+    // result independent of how many updateScale calls happened in between.
+    const float factor = std::exp(-pixelDeltaY * 0.005f);
+    const simd_float3& start = impl_->scale_drag.start_scale;
+    node->scale = simd_float3{
+        std::clamp(start.x * factor, 0.05f, 50.0f),
+        std::clamp(start.y * factor, 0.05f, 50.0f),
+        std::clamp(start.z * factor, 0.05f, 50.0f),
+    };
+    impl_->renderer.set_scene_lines_dirty();
+}
+
+void Editor::endScale() {
+    impl_->scale_drag.active = false;
+    impl_->scale_drag.node_id = kInvalidNode;
+}
+
+Vec3f Editor::nodeScale(int32_t nodeId) const {
+    const Node* node = impl_->scene.find(nodeId);
+    if (node == nullptr) {
+        return Vec3f{0.0f, 0.0f, 0.0f};
+    }
+    return Vec3f{node->scale.x, node->scale.y, node->scale.z};
 }
 
 } // namespace sq
