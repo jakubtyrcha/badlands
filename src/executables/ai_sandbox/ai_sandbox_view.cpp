@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
-#include <fstream>
 #include <string>
 
 #include <SDL3/SDL.h>
@@ -21,6 +20,7 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/brain_asset.hpp"
 #include "game/building_catalog.h"
 #include "game/creature_manifest.h"
 #include "game/factors_manifest.hpp"
@@ -134,31 +134,12 @@ const char* command_name(badlands::CommandKindId kind) {
   }
 }
 
-// Heroes think via the wasm brain (assets/brains/hero.wasm) when it loads;
-// there is no C++ decision layer left to fall back to (sim.cpp's mock_think
-// idles a Town-kind entity absent one). Missing/unreadable file here is
-// packaging, not a brain bug (the file simply was not built/shipped) -- log
-// and fall back to idling (via an empty BrainDesc), same as no wasm bytes
-// provided at all. A wasm module that DOES load but fails to compile/
-// instantiate is a different case entirely -- fatal, per
-// WasmBrainRuntime::create's policy (wasm_brain.h) -- because bytes were
-// actually handed to bh_load/bh_instantiate.
-std::vector<uint8_t> load_hero_wasm() {
-  constexpr const char* kPath = "assets/brains/hero.wasm";  // cwd-relative, like shaders/assets
-  std::ifstream file(kPath, std::ios::binary | std::ios::ate);
-  if (!file.good()) {
-    spdlog::warn("AiSandboxView: '{}' unreadable -- heroes will idle (no brain loaded)", kPath);
-    return {};
-  }
-  const std::streamsize size = file.tellg();
-  file.seekg(0, std::ios::beg);
-  std::vector<uint8_t> bytes(static_cast<size_t>(size));
-  if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
-    spdlog::warn("AiSandboxView: '{}' failed to read -- heroes will idle (no brain loaded)", kPath);
-    return {};
-  }
-  return bytes;
-}
+// Day length, as ONE number driving both clocks: the rendered day/night cycle
+// (SimClock::real_seconds_per_day) and the sim's own day
+// (WorldConfig::millis_per_day). Kept short here -- this is the AI observation
+// tool, where waiting out a hero's need cycle in real time is the whole cost of
+// a run. SimClock's own 300 s default would stretch that 2.5x.
+constexpr float kRealSecondsPerDay = 120.0f;
 
 }  // namespace
 
@@ -210,14 +191,21 @@ void AiSandboxView::SeedTown() {
   // the input bytes (see brainhost's bh_load -- wasmtime::Module::new copies/
   // compiles eagerly) -- so it is declared at this scope, alongside the Sim()
   // call that consumes it.
-  std::vector<uint8_t> wasm = load_hero_wasm();
+  std::vector<uint8_t> wasm = badlands::LoadBrainWasm(badlands::kHeroBrainPath);
   if (!wasm.empty()) {
     brain_desc.wasm_bytes = wasm.data();
     brain_desc.wasm_len = wasm.size();
-    spdlog::info("AiSandboxView: assets/brains/hero.wasm loaded ({} bytes) -- heroes think via "
-                 "the wasm brain",
-                 wasm.size());
+    spdlog::info("AiSandboxView: {} loaded ({} bytes) -- heroes think via the wasm brain",
+                 badlands::kHeroBrainPath, wasm.size());
   }
+
+  // The two clocks, from the one number: the sky (sim_clock_) and the sim's own
+  // day (millis_per_day, applied to whichever world config wins below). Left
+  // unset they disagree -- heroes would act on night behaviour while the sky
+  // showed something else. MillisPerDayForSimSeconds converts through ticks;
+  // seconds * 1000 would drift ~1% (see badlands_sim.hpp).
+  sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
+  const int64_t millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
 
   // Load the scenario (default: a walled arena duel; override via BADLANDS_SCENARIO).
   const char* scen_env = std::getenv("BADLANDS_SCENARIO");
@@ -239,7 +227,9 @@ void AiSandboxView::SeedTown() {
     // Greybox arena sized to the scenario's interior (accessible tiles = 2*half).
     arena_ = build_arena(glm::ivec2(static_cast<int>(scenario_.arena_half_x * 2.0f),
                                     static_cast<int>(scenario_.arena_half_z * 2.0f)));
-    sim_ = badlands::Sim(scenario_.world_config(), brain_desc);
+    badlands::WorldConfig arena_cfg = scenario_.world_config();
+    arena_cfg.millis_per_day = millis_per_day;
+    sim_ = badlands::Sim(arena_cfg, brain_desc);
     // Creature-stat overrides (optional file; a missing one keeps the defaults).
     badlands::CreatureCatalog catalog = sim_.Creatures();
     if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
@@ -261,7 +251,9 @@ void AiSandboxView::SeedTown() {
 
   // --- fallback: the original town seed -----------------------------------
   arena_ = build_arena(kSandboxArena);
-  sim_ = badlands::Sim(brain_desc);
+  badlands::WorldConfig town_cfg{};  // the shipping town world, plus our day length
+  town_cfg.millis_per_day = millis_per_day;
+  sim_ = badlands::Sim(town_cfg, brain_desc);
 
   // Behaviour tuning as data: load over the compiled defaults (a missing file
   // just keeps them). Must happen before ticking -- factors are initial config.

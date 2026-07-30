@@ -24,38 +24,50 @@ constexpr float kEntranceRadius = 0.6f;          // how close to a door to enter
 // each tick; no float accumulator (deterministic, no drift, no dt coupling).
 constexpr int64_t kSimHz = 30;                        // fixed sim rate
 constexpr int64_t kMillisPerTick = 1000 / kSimHz;     // 33 ms/tick (~30 Hz, ~1% round)
-constexpr int64_t kSecondsPerDay = 120;               // fast day for prototyping
-constexpr int64_t kMillisPerDay = kSecondsPerDay * 1000;  // day length in ms
 constexpr float kNightStart = 0.75f;                  // ~18:00
 constexpr float kNightEnd = 0.25f;                    // ~06:00
 
+// DAY LENGTH IS PER-WORLD RUNTIME CONFIG, not a compile-time constant:
+// WorldConfig::millis_per_day (badlands_sim.hpp) -> BadlandsGame::millis_per_day
+// (game_state.h); kDefaultMillisPerDay, declared with it there, is only the
+// default a world gets when its config does not say otherwise. The tick rate
+// above stays compile-time -- what varies is how many ticks make a day, never
+// how long a tick is.
+//
+// The clock helpers below are pure math over (world_millis, millis_per_day), so
+// they take the period explicitly rather than reading a global. Callers inside
+// the sim pass `game.millis_per_day`.
+
 // Fraction of the day in [0,1): 0 = midnight, 0.5 = midday.
-inline float time_of_day(int64_t world_millis) {
-    int64_t t = world_millis % kMillisPerDay;
+inline float time_of_day(int64_t world_millis, int64_t millis_per_day) {
+    int64_t t = world_millis % millis_per_day;
     if (t < 0) {
-        t += kMillisPerDay;
+        t += millis_per_day;
     }
-    return static_cast<float>(t) / static_cast<float>(kMillisPerDay);
+    return static_cast<float>(t) / static_cast<float>(millis_per_day);
 }
-inline uint32_t day_count(int64_t world_millis) {
-    return static_cast<uint32_t>(world_millis / kMillisPerDay);
+inline uint32_t day_count(int64_t world_millis, int64_t millis_per_day) {
+    return static_cast<uint32_t>(world_millis / millis_per_day);
 }
 inline bool is_night(float tod) { return tod >= kNightStart || tod < kNightEnd; }
 
 // One in-game hour of sim time. Need rates are authored in in-game hours (see
 // HeroFactors) and converted through here, so a factor says what it means.
-constexpr int64_t kMillisPerGameHour = kMillisPerDay / 24;
+// Derived from the day length rather than stored, so the two cannot disagree.
+inline constexpr int64_t millis_per_hour(int64_t millis_per_day) {
+    return millis_per_day / 24;
+}
 
 // Per-tick delta that moves a 0..1 reserve the whole way in `hours` in-game
 // hours. Deterministic and not dt-scaled, like the clock itself. Non-positive
 // hours mean "instantly" (the whole reserve in one tick), which is what makes
 // a zero in the manifest behave sensibly rather than dividing by zero.
-inline float reserve_rate_per_tick(float hours) {
+inline float reserve_rate_per_tick(float hours, int64_t millis_per_day) {
     if (hours <= 0.0f) {
         return 1.0f;
     }
     return static_cast<float>(kMillisPerTick) /
-           (hours * static_cast<float>(kMillisPerGameHour));
+           (hours * static_cast<float>(millis_per_hour(millis_per_day)));
 }
 
 struct Position {

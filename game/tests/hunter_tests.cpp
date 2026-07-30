@@ -124,7 +124,7 @@ TEST_CASE("a hunter hunts while it can, and rests once spent") {
     // tick and is hidden before the second decision happens.
     g.registry.get<Position>(e).pos = {0.0f, 0.0f};
     spawn_deer(g, {5.0f, 0.0f});          // prey right there
-    g.world_millis = kMillisPerDay / 2;   // daytime
+    g.world_millis = g.millis_per_day / 2;   // daytime
 
     // Rested: it hunts -- the very first wake (nothing running yet), one tick
     // is enough.

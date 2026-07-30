@@ -490,6 +490,24 @@ CreatureId CreatureIdFromName(const char* name);
 // from this rather than each constructing their own copy of the defaults.
 const CreatureCatalog& DefaultCreatureCatalog();
 
+// Default in-game day length, in milliseconds of sim world time (a fast day, for
+// prototyping). Only the default: WorldConfig::millis_per_day below is what a
+// world actually runs on.
+inline constexpr int64_t kDefaultMillisPerDay = 120 * 1000;
+
+// Day length in sim world-millis for a day that should take `sim_seconds` of
+// presentation time at 1x speed (i.e. SimClock::real_seconds_per_day) -- use
+// this to keep a rendered day/night cycle and the sim's own day in lockstep.
+//
+// Converts through TICKS, not sim_seconds * 1000: the sim advances by a whole
+// 33 ms per tick at 30 Hz, so a sim-second is 990 ms of world time, not 1000.
+// Multiplying by 1000 instead would leave the sim clock running ~1% fast against
+// the sky, permanently and cumulatively.
+//
+// Non-positive or absurdly large inputs clamp to a valid period (the sim divides
+// by this, so it must stay >= 1 ms).
+int64_t MillisPerDayForSimSeconds(float sim_seconds);
+
 // How to build the world (initial config). Defaults reproduce the shipping town
 // world; the arena overrides them.
 struct WorldConfig {
@@ -500,6 +518,13 @@ struct WorldConfig {
     // edge), even though pathfinding does not yet route around it.
     float arena_half_x = 0.0f;
     float arena_half_z = 0.0f;
+    // Length of one in-game day, in milliseconds of sim world time. Initial
+    // config in the determinism contract: a replay must use the same value.
+    // This sets what an in-game HOUR means (day/24), so it scales every
+    // HeroFactors rate authored in hours -- a longer day drains needs
+    // proportionally slower. Use MillisPerDayForSimSeconds above to derive it
+    // from a presentation day length. Clamped to >= 1 ms at world construction.
+    int64_t millis_per_day = kDefaultMillisPerDay;
 };
 
 // One in-flight projectile, for the debug-line overlay (Sim::Projectiles()).

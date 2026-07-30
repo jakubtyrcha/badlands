@@ -82,7 +82,7 @@ TEST_CASE("hero_behavior: a hunter accrues Hunt entity-ticks over a few in-game 
     // ~4 in-game hours: long enough to cover several of the wasm brain's own
     // wake cycles (idle_hint_millis draws 0.5-2s, scripts/brains/nim/hero.nim),
     // not just a single lucky tick.
-    const int kTicks = static_cast<int>(4 * kMillisPerGameHour / kMillisPerTick);
+    const int kTicks = static_cast<int>(4 * millis_per_hour(g.millis_per_day) / kMillisPerTick);
     for (int i = 0; i < kTicks; ++i) {
         tick_world(g, 1.0f / 30.0f);
         characters_of(g, rows);
@@ -120,7 +120,7 @@ TEST_CASE("hero_behavior: night raises a mildly-tired hero's GoHome share") {
         glm::vec2 home_door;
         REQUIRE(building_approach_tile(g.placement, g.placement.buildings[guild], home_door));
         g.registry.get<Position>(e).pos = home_door;
-        g.world_millis = night ? static_cast<int64_t>(kMillisPerDay * 0.85) : (kMillisPerDay / 2);
+        g.world_millis = night ? static_cast<int64_t>(g.millis_per_day * 0.85) : (g.millis_per_day / 2);
 
         ActivityHistogram hist;
         std::vector<CharacterState> rows;

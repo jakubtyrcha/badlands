@@ -100,7 +100,7 @@ TEST_CASE("midnight accrues tax on Houses only") {
     REQUIRE(g.placement.buildings[house].taxable_income == 0);
 
     // Step to just before the first midnight, then across it.
-    g.world_millis = kMillisPerDay - kMillisPerTick;
+    g.world_millis = g.millis_per_day - kMillisPerTick;
     tick_world(g, 1.0f / 30.0f);  // crosses into day 1
 
     CHECK(g.placement.buildings[house].taxable_income == g.factors.townfolk.house_income_per_day);

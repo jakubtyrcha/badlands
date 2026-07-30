@@ -357,6 +357,9 @@ set(badlands_app_sources_game
     src/game/scene/building_composer.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/water_surface.cpp
+    src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
+    src/game/factors_manifest.cpp   # behaviour tuning loaded as data
+    src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
     src/game/skill_manifest.cpp     # skill template overrides loaded as data
     # Game UI (the in-world HUD + world picking), distinct from the ImGui debug
     # UI. Game-specific, so it lives here rather than in badlands_engine --
@@ -371,6 +374,7 @@ set(badlands_app_sources_ai_sandbox
     src/executables/ai_sandbox/main_ai_sandbox.cpp
     src/executables/ai_sandbox/ai_sandbox_view.cpp
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
+    src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
     src/game/skill_manifest.cpp     # skill template overrides loaded as data
