@@ -12,6 +12,10 @@
 
 namespace sq {
 
+// Fixed world-space size for the tangent-frame grid, independent of the
+// selected object's scale.
+inline constexpr float kGizmoHalfExtent = 1.5f;
+
 struct Editor::Impl {
     Renderer renderer;
     SceneDocument scene;
@@ -78,11 +82,9 @@ void Editor::render(void* caMetalDrawable) {
     if (selectedNode != nullptr) {
         const simd_float3 camera_forward = simd_normalize(camera.target - camera.eye);
         const DragPlane dp = drag_plane_for_node(*selectedNode, camera_forward);
-        const float half_extent = std::max(
-            1.5f * std::max({selectedNode->scale.x, selectedNode->scale.y, selectedNode->scale.z}), 1.5f);
-        impl_->renderer.set_gizmo(true, dp.point, dp.normal, half_extent);
+        impl_->renderer.set_gizmo(true, dp.point, dp.normal, kGizmoHalfExtent);
     } else {
-        impl_->renderer.set_gizmo(false, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 1.5f);
+        impl_->renderer.set_gizmo(false, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, kGizmoHalfExtent);
     }
 
     impl_->renderer.render(static_cast<CA::MetalDrawable*>(caMetalDrawable), impl_->scene, impl_->selected, camera);
