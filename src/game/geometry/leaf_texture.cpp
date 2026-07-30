@@ -112,7 +112,7 @@ float HashRange(uint32_t seed, float lo, float hi) {
 struct SprigStamp {
   glm::vec2 center;
   float rotation;
-  float scale;  // fraction of card size (~0.12-0.25)
+  float scale;  // fraction of card size; 0.22–0.38 across species (Ash to Bush)
   float gray;
 };
 
@@ -165,6 +165,9 @@ struct SprigRecipe {
 };
 
 SprigRecipe MakeRecipe(LeafSilhouette shape) {
+  // Stamp counts (28–53 per species incl. tip stamps) and scales (0.22–0.38 range) are tuned
+  // to achieve ~0.25–0.55 alpha-coverage and closed-crown, ez-tree-like density at 512px—
+  // deliberately above the design's initial 20–40 stamp / 12–25% coverage guideline.
   switch (shape) {
     case LeafSilhouette::Oak:  // dense, lobed
       return {7, 0.12f, 0.85f, 35.0f, 55.0f, 0.34f, 0.54f, 48, 0.25f, 0.33f, 5, false, 0.05f};
@@ -473,6 +476,7 @@ std::vector<std::vector<uint8_t>> BuildLeafMipChainRgba8(int size, glm::vec3 lea
         }
         const size_t oi = (static_cast<size_t>(y) * static_cast<size_t>(nw) +
                            static_cast<size_t>(x)) * 4;
+        // RGB reset to flat leaf_color; this also flattens per-stamp brightness variation below mip 0 (accepted: distance rendering out of scope).
         next[oi + 0] = r;
         next[oi + 1] = g;
         next[oi + 2] = b;
