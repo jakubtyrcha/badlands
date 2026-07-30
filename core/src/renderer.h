@@ -20,7 +20,8 @@ public:
     // Modify-mode tangent-frame gizmo. Rebuilds the (tiny, setVertexBytes-only)
     // gizmo vertex vector on every call — 54 verts is cheap enough that
     // caching by param-equality would be over-engineering.
-    void set_gizmo(bool visible, simd_float3 origin, simd_float3 normal, float half_extent);
+    void set_gizmo(simd_float3 origin, simd_float3 normal, float half_extent);   // shows the gizmo
+    void hide_gizmo();
     void render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id, const Camera& camera); // borrowed drawable
 
 private:

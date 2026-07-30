@@ -17,7 +17,6 @@ LineVertex make_vertex(simd_float3 local, const simd_float4x4& world_from_local,
     return v;
 }
 
-constexpr int kCircleSegments = 32;
 
 } // namespace
 
@@ -44,24 +43,39 @@ void append_cube_edges(std::vector<LineVertex>& out, const simd_float4x4& world_
     }
 }
 
-void append_sphere_circles(std::vector<LineVertex>& out, const simd_float4x4& world_from_local, simd_float4 color) {
+void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& world_from_local,
+                           simd_float4 color, simd_float3 eye_world) {
     constexpr float r = 0.5f;
-    // axis 0 = X, 1 = Y, 2 = Z.
-    for (int axis = 0; axis < 3; ++axis) {
-        auto point = [&](int i) -> simd_float3 {
-            const float t = static_cast<float>(i) / static_cast<float>(kCircleSegments) * 2.0f * float(M_PI);
-            const float a = std::cos(t) * r;
-            const float b = std::sin(t) * r;
-            switch (axis) {
-                case 0: return simd_float3{0.0f, a, b};  // around X
-                case 1: return simd_float3{a, 0.0f, b};  // around Y
-                default: return simd_float3{a, b, 0.0f}; // around Z
-            }
-        };
-        for (int i = 0; i < kCircleSegments; ++i) {
-            out.push_back(make_vertex(point(i), world_from_local, color));
-            out.push_back(make_vertex(point(i + 1), world_from_local, color));
-        }
+    const simd_float4x4 local_from_world = simd_inverse(world_from_local);
+    const simd_float4 eye_local =
+        simd_mul(local_from_world, (simd_float4){eye_world.x, eye_world.y, eye_world.z, 1.0f});
+    const simd_float3 o = eye_local.xyz;
+    const float d2 = simd_length_squared(o);
+    if (d2 <= r * r + 1e-8f) {
+        return; // eye inside or on the sphere: no silhouette
+    }
+    const float d = std::sqrt(d2);
+
+    // Horizon circle of the tangency points (see lines.h): center (r^2/d^2)*o,
+    // radius r*sqrt(d^2 - r^2)/d, in the plane perpendicular to o.
+    const simd_float3 n = o / d;
+    const simd_float3 center = (r * r / d2) * o;
+    const float radius = r * std::sqrt(d2 - r * r) / d;
+
+    const simd_float3 ref = (std::fabs(n.y) < 0.99f) ? simd_float3{0.0f, 1.0f, 0.0f}
+                                                     : simd_float3{1.0f, 0.0f, 0.0f};
+    const simd_float3 u = simd_normalize(simd_cross(n, ref));
+    const simd_float3 v = simd_cross(n, u);
+
+    auto point = [&](int i) -> simd_float3 {
+        // i % segments makes the final segment land exactly on vertex 0.
+        const float t = static_cast<float>(i % kSphereOutlineSegments) /
+                        static_cast<float>(kSphereOutlineSegments) * 2.0f * float(M_PI);
+        return center + radius * (std::cos(t) * u + std::sin(t) * v);
+    };
+    for (int i = 0; i < kSphereOutlineSegments; ++i) {
+        out.push_back(make_vertex(point(i), world_from_local, color));
+        out.push_back(make_vertex(point(i + 1), world_from_local, color));
     }
 }
 
@@ -108,7 +122,7 @@ void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd
     push(origin + normal * (0.5f * he), kColorGridAxis);
 }
 
-std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id) {
+std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world) {
     std::vector<LineVertex> out;
     for (const Node& node : doc.nodes()) {
         simd_float4 color = (node.op == Op::Add) ? kColorAdd : kColorSubtract;
@@ -119,7 +133,7 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
         if (node.shape == Shape::Cube) {
             append_cube_edges(out, world_from_local, color);
         } else {
-            append_sphere_circles(out, world_from_local, color);
+            append_sphere_outline(out, world_from_local, color, eye_world);
         }
     }
     return out;

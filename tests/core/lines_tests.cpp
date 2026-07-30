@@ -83,31 +83,90 @@ TEST_CASE("append_cube_edges: translation shifts every vertex by exactly that of
     }
 }
 
-TEST_CASE("append_sphere_circles: identity transform emits 192 vertices on the unit-radius sphere") {
+// Horizon-circle derivation for the unit sphere (r = 0.5) seen from local eye o,
+// d = |o| (see https://iquilezles.org/articles/sphereproj/): the silhouette is the
+// circle of tangency points — center (r^2/d^2)*o, radius r*sqrt(d^2-r^2)/d, in the
+// plane perpendicular to o. For o = (0,0,2): d = 2, center (0,0,0.0625*2) =
+// (0, 0, 0.125), radius 0.5*sqrt(4-0.25)/2 = 0.25*sqrt(3.75) = 0.48412292.
+TEST_CASE("append_sphere_outline: identity transform, eye at (0,0,2): horizon circle "
+          "on the sphere, tangent to the eye rays") {
     std::vector<LineVertex> out;
-    append_sphere_circles(out, matrix_identity_float4x4, kColorSubtract);
+    const simd_float3 eye = {0.0f, 0.0f, 2.0f};
+    append_sphere_outline(out, matrix_identity_float4x4, kColorSubtract, eye);
 
-    REQUIRE(out.size() == 192);
+    REQUIRE(out.size() == 2 * kSphereOutlineSegments);
 
-    for (const LineVertex& v : out) {
-        const simd_float3 p = v.pos.xyz;
-        CHECK(simd_length(p) == doctest::Approx(0.5f));
+    for (size_t i = 0; i < out.size(); ++i) {
+        CAPTURE(i);
+        const LineVertex& vert = out[i];
+        const simd_float3 p = vert.pos.xyz;
+        // On the sphere surface...
+        CHECK(simd_length(p) == doctest::Approx(0.5f).epsilon(1e-4));
+        // ...in the horizon plane z = 0.125...
+        CHECK(p.z == doctest::Approx(0.125f).epsilon(1e-4));
+        // ...at the derived circle radius from the circle center...
+        CHECK(simd_length(p - simd_float3{0.0f, 0.0f, 0.125f}) ==
+              doctest::Approx(0.48412292f).epsilon(1e-4));
+        // ...and tangent: the eye ray touches the sphere, so (p - eye) is
+        // perpendicular to the surface normal (which is p, for an origin sphere).
+        CHECK(std::fabs(simd_dot(p - eye, p)) < 1e-4f);
+        CHECK(vert.pos.w == doctest::Approx(1.0f));
+        check_color_approx(vert.color, kColorSubtract);
     }
 
-    // Circles are emitted axis X, then Y, then Z, 64 vertices (32 segments * 2
-    // endpoints) each; axis X's circle lies in the local x=0 plane, etc.
-    for (size_t i = 0; i < 64; ++i) {
-        const LineVertex& v = out[i];
-        CHECK(v.pos.x == doctest::Approx(0.0f));
+    // The line loop closes: the last segment's far endpoint is the first vertex.
+    check_float3_approx(out[out.size() - 1].pos.xyz, out[0].pos.xyz);
+}
+
+TEST_CASE("append_sphere_outline: translated sphere keeps the outline on its surface") {
+    std::vector<LineVertex> out;
+    const simd_float3 position = {0.0f, 3.0f, 0.0f};
+    simd_float4x4 world_from_local = matrix_identity_float4x4;
+    world_from_local.columns[3] = simd_float4{position.x, position.y, position.z, 1.0f};
+    // Eye at (0,3,2) is (0,0,2) in local space: same circle as the identity case,
+    // shifted by the translation.
+    append_sphere_outline(out, world_from_local, kColorAdd, simd_float3{0.0f, 3.0f, 2.0f});
+
+    REQUIRE(out.size() == 2 * kSphereOutlineSegments);
+    for (size_t i = 0; i < out.size(); ++i) {
+        CAPTURE(i);
+        const simd_float3 p = out[i].pos.xyz;
+        CHECK(simd_length(p - position) == doctest::Approx(0.5f).epsilon(1e-4));
+        CHECK(p.z == doctest::Approx(0.125f).epsilon(1e-4));
     }
-    for (size_t i = 64; i < 128; ++i) {
-        const LineVertex& v = out[i];
-        CHECK(v.pos.y == doctest::Approx(0.0f));
+}
+
+TEST_CASE("append_sphere_outline: non-uniform scale (ellipsoid) stays exact via the "
+          "local-space construction") {
+    // Ellipsoid = unit sphere under M = diag(2,1,1). Affine maps preserve
+    // tangency, so the world silhouette is M * (local horizon circle seen from
+    // M^-1 * eye). Eye (4,0,0) -> local (2,0,0): local circle x = 0.125,
+    // radius 0.48412292 -> world plane x = 0.25, y^2 + z^2 = 0.48412292^2 =
+    // 0.234375.
+    std::vector<LineVertex> out;
+    const simd_float4x4 world_from_local = simd_matrix(
+        simd_float4{2.0f, 0.0f, 0.0f, 0.0f}, simd_float4{0.0f, 1.0f, 0.0f, 0.0f},
+        simd_float4{0.0f, 0.0f, 1.0f, 0.0f}, simd_float4{0.0f, 0.0f, 0.0f, 1.0f});
+    append_sphere_outline(out, world_from_local, kColorAdd, simd_float3{4.0f, 0.0f, 0.0f});
+
+    REQUIRE(out.size() == 2 * kSphereOutlineSegments);
+    for (size_t i = 0; i < out.size(); ++i) {
+        CAPTURE(i);
+        const simd_float3 p = out[i].pos.xyz;
+        CHECK(p.x == doctest::Approx(0.25f).epsilon(1e-4));
+        CHECK(p.y * p.y + p.z * p.z == doctest::Approx(0.234375f).epsilon(1e-4));
+        // On the ellipsoid: (x/2)^2 + y^2 + z^2 = 0.25.
+        CHECK((p.x * 0.5f) * (p.x * 0.5f) + p.y * p.y + p.z * p.z ==
+              doctest::Approx(0.25f).epsilon(1e-4));
     }
-    for (size_t i = 128; i < 192; ++i) {
-        const LineVertex& v = out[i];
-        CHECK(v.pos.z == doctest::Approx(0.0f));
-    }
+}
+
+TEST_CASE("append_sphere_outline: eye inside or on the sphere emits nothing") {
+    std::vector<LineVertex> out;
+    append_sphere_outline(out, matrix_identity_float4x4, kColorAdd, simd_float3{0.0f, 0.0f, 0.3f});
+    CHECK(out.empty());
+    append_sphere_outline(out, matrix_identity_float4x4, kColorAdd, simd_float3{0.0f, 0.0f, 0.5f});
+    CHECK(out.empty());
 }
 
 TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelected") {
@@ -126,28 +185,28 @@ TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelecte
     doc.add(sphere);
 
     SUBCASE("no selection") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode);
-        REQUIRE(lines.size() == 216); // 24 cube + 192 sphere
+        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode, simd_float3{0.0f, 0.0f, 5.0f});
+        REQUIRE(lines.size() == 120); // 24 cube + 96 sphere outline
 
         for (size_t i = 0; i < 24; ++i) {
             CAPTURE(i);
             check_color_approx(lines[i].color, kColorAdd);
         }
-        for (size_t i = 24; i < 216; ++i) {
+        for (size_t i = 24; i < 120; ++i) {
             CAPTURE(i);
             check_color_approx(lines[i].color, kColorSubtract);
         }
     }
 
     SUBCASE("sphere selected") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id);
-        REQUIRE(lines.size() == 216);
+        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id, simd_float3{0.0f, 0.0f, 5.0f});
+        REQUIRE(lines.size() == 120);
 
         for (size_t i = 0; i < 24; ++i) {
             CAPTURE(i);
             check_color_approx(lines[i].color, kColorAdd);
         }
-        for (size_t i = 24; i < 216; ++i) {
+        for (size_t i = 24; i < 120; ++i) {
             CAPTURE(i);
             check_color_approx(lines[i].color, kColorSelected);
         }

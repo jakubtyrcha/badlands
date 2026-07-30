@@ -82,25 +82,31 @@ void Editor::render(void* caMetalDrawable) {
     if (selectedNode != nullptr) {
         const simd_float3 camera_forward = simd_normalize(camera.target - camera.eye);
         const DragPlane dp = drag_plane_for_node(*selectedNode, camera_forward);
-        impl_->renderer.set_gizmo(true, dp.point, dp.normal, kGizmoHalfExtent);
+        impl_->renderer.set_gizmo(dp.point, dp.normal, kGizmoHalfExtent);
     } else {
-        impl_->renderer.set_gizmo(false, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, kGizmoHalfExtent);
+        impl_->renderer.hide_gizmo();
     }
 
     impl_->renderer.render(static_cast<CA::MetalDrawable*>(caMetalDrawable), impl_->scene, impl_->selected, camera);
 }
 
+// Sphere outlines are view-dependent (silhouette from the current eye), so any
+// camera move that actually happened invalidates the scene line buffer.
 void Editor::cameraOrbit(float dxPts, float dyPts) {
-    impl_->controller.orbit(dxPts, dyPts);
+    if (impl_->controller.orbit(dxPts, dyPts)) {
+        impl_->renderer.set_scene_lines_dirty();
+    }
 }
 
 void Editor::cameraZoom(float delta) {
-    impl_->controller.zoom(delta);
+    if (impl_->controller.zoom(delta)) {
+        impl_->renderer.set_scene_lines_dirty();
+    }
 }
 
 void Editor::cameraPan(float dxPts, float dyPts) {
-    if (impl_->viewportHeightPts > 0.0f) {
-        impl_->controller.pan_view(dxPts, dyPts, impl_->viewportHeightPts);
+    if (impl_->viewportHeightPts > 0.0f && impl_->controller.pan_view(dxPts, dyPts, impl_->viewportHeightPts)) {
+        impl_->renderer.set_scene_lines_dirty();
     }
 }
 

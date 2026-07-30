@@ -100,12 +100,15 @@ void Renderer::set_scene_lines_dirty() {
     scene_lines_dirty_ = true;
 }
 
-void Renderer::set_gizmo(bool visible, simd_float3 origin, simd_float3 normal, float half_extent) {
-    gizmo_visible_ = visible;
+void Renderer::set_gizmo(simd_float3 origin, simd_float3 normal, float half_extent) {
+    gizmo_visible_ = true;
     gizmo_verts_.clear();
-    if (visible) {
-        append_tangent_frame(gizmo_verts_, origin, normal, half_extent, 12);
-    }
+    append_tangent_frame(gizmo_verts_, origin, normal, half_extent, 12);
+}
+
+void Renderer::hide_gizmo() {
+    gizmo_visible_ = false;
+    gizmo_verts_.clear();
 }
 
 void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id,
@@ -113,7 +116,7 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     if (!device_ || !layer_ || !drawable) return;
 
     if (scene_lines_dirty_) {
-        std::vector<LineVertex> vertices = build_scene_lines(doc, selected_id);
+        std::vector<LineVertex> vertices = build_scene_lines(doc, selected_id, camera.eye);
         scene_line_vertex_count_ = vertices.size();
         if (!vertices.empty()) {
             // Metal disallows ever creating a zero-length buffer, hence the guard;
