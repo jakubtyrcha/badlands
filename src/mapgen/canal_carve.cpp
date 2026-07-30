@@ -74,6 +74,32 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
     return a < b;
   });
 
+  // THIN the seeds by spacing, highest flow first. The highland edge is a
+  // continuous line, so every cell along it qualifies — but real drainage
+  // concentrates at discrete valley mouths, not uniformly along the foot of a
+  // range. Seeding every qualifying cell put agents on adjacent cells where
+  // they killed each other on their first move: measured 11 of 26 agents dead
+  // at step 0 and 15 of 26 within five steps, so nothing reached a lake or the
+  // map edge at all. One canal per stream mouth is both the physical reading
+  // and what lets an agent actually travel.
+  {
+    const float min_sep = p.canal_seed_spacing_texels * texel_m;
+    const float min_sep2 = min_sep * min_sep;
+    std::vector<int> kept;
+    for (const int c : seeds) {
+      const float cxw = static_cast<float>(c % w) * texel_m;
+      const float cyw = static_cast<float>(c / w) * texel_m;
+      bool crowded = false;
+      for (const int k : kept) {
+        const float dx = cxw - static_cast<float>(k % w) * texel_m;
+        const float dy = cyw - static_cast<float>(k / w) * texel_m;
+        if (dx * dx + dy * dy < min_sep2) { crowded = true; break; }
+      }
+      if (!crowded) kept.push_back(c);
+    }
+    seeds.swap(kept);
+  }
+
   // Pre-canal terrain. Banks are measured against this, so one canal's trench
   // cannot become the next one's idea of ground level.
   const Field2D<float> B0 = B;

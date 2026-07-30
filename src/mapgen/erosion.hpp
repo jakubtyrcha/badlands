@@ -79,6 +79,11 @@ struct ErosionParams {
   // either side of the channel, never of a carried reference — so depth cannot
   // accumulate along the path however far a canal runs.
   float canal_depth_m = 0.5f;
+  // Minimum spacing between seeds. The highland edge is continuous, so every
+  // cell on it qualifies; without thinning, agents start on adjacent cells and
+  // annihilate on contact before travelling anywhere. Real drainage reaches
+  // the plain at discrete valley mouths, which is what this approximates.
+  float canal_seed_spacing_texels = 12.0f;
   float canal_sense_distance_texels = 6.0f;
   // 45 deg. On an 8-neighbour lattice this yields three candidates per step;
   // anything under 45 deg would forbid turning altogether.
