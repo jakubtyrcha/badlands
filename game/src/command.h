@@ -100,7 +100,7 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd);
 // Drains game.command_queue in FIFO order through apply_command (the AI pass).
 void apply_commands(BadlandsGame& game);
 
-// --- edge-triggered producers (shared by the C++ and noiser brain paths) ----
+// --- edge-triggered producers ----
 // Brains re-decide every tick, but re-stating an unchanged decision is not a
 // decision: it bloats the log (the debug trace of what was DECIDED) without
 // changing state. These enqueue only when the request differs from what the

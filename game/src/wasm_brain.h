@@ -9,8 +9,7 @@
 // docs/design/intention-contract.html for the full contract this implements.
 //
 // One instance drives every hero slot (per-slot state lives in the guest's
-// own bl_spawn bookkeeping, not a per-entity coroutine like the noiser
-// BrainState) -- so a BadlandsGame owns exactly one WasmBrainRuntime
+// own bl_spawn bookkeeping) -- so a BadlandsGame owns exactly one WasmBrainRuntime
 // (game_state.h's `wasm_brains`), not one per entity.
 //
 // Failure policy (unchanged from v1, Task 7's decision): ANY wasm-brain

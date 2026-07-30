@@ -35,8 +35,7 @@ bool MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
                         GBuffer::kMaterialFormat};
   desc.depth_format = GBuffer::kDepthFormat;
 
-  factory_ = BuildMaterialInstanceFactory(desc, device, queue, pipeline_gen,
-                                          /*script_provider=*/nullptr);
+  factory_ = BuildMaterialInstanceFactory(desc, device, queue, pipeline_gen);
   if (!factory_) {
     spdlog::error(
         "MaterialLibrary::Initialize: failed to build normalmapped "
@@ -56,8 +55,8 @@ bool MaterialLibrary::Initialize(wgpu::Device device, wgpu::Queue queue,
   terrain_desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
                                 GBuffer::kMaterialFormat};
   terrain_desc.depth_format = GBuffer::kDepthFormat;
-  terrain_factory_ = BuildMaterialInstanceFactory(
-      terrain_desc, device, queue, pipeline_gen, /*script_provider=*/nullptr);
+  terrain_factory_ = BuildMaterialInstanceFactory(terrain_desc, device, queue,
+                                                  pipeline_gen);
   if (!terrain_factory_) {
     spdlog::error(
         "MaterialLibrary::Initialize: failed to build terrain_blend "
@@ -185,8 +184,8 @@ DeferredMaterial MaterialLibrary::AlphaCutout(wgpu::TextureView albedo,
     desc.depth_format = SceneRenderer::kDepthFormat;
     desc.depth_write = true;
     desc.cull_mode = wgpu::CullMode::None;  // double-sided
-    alpha_cutout_factory_ = BuildMaterialInstanceFactory(
-        desc, device_, queue_, pipeline_gen_, /*script_provider=*/nullptr);
+    alpha_cutout_factory_ =
+        BuildMaterialInstanceFactory(desc, device_, queue_, pipeline_gen_);
     if (!alpha_cutout_factory_) {
       spdlog::error(
           "MaterialLibrary::AlphaCutout: failed to build standard_forward "
@@ -239,7 +238,7 @@ DeferredMaterial MaterialLibrary::TranslucentFoliage(
     desc.cull_mode = wgpu::CullMode::None;  // double-sided
     desc.extra_features = {"translucency"};
     translucent_foliage_factory_ = BuildMaterialInstanceFactory(
-        desc, device_, queue_, pipeline_gen_, /*script_provider=*/nullptr);
+        desc, device_, queue_, pipeline_gen_);
     if (!translucent_foliage_factory_) {
       spdlog::error(
           "MaterialLibrary::TranslucentFoliage: failed to build "

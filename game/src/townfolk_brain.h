@@ -2,7 +2,7 @@
 // spawns at the Castle, makes a round of every building that owes tax (banking
 // each into its carry), then returns to a Castle/Watchtower to deposit the carry
 // into the player's gold and despawn. A sequential route with memory (the
-// visited set) -- the control shape noiser could not express.
+// visited set).
 //
 // WorldView-in / Commands-out, like the other brains. Runs from the mock-brain
 // dispatch (sim.cpp) for Archetype::Townfolk; the tax collector is peaceful and

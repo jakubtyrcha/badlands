@@ -1,8 +1,8 @@
 // Catch2 invariant suite for the terrain cluster-LOD DAG build
 // (terrain_clusters.cpp). Pure CPU: synthetic MapData heightfields + a two-biome
-// split, no noiser scripts, no GPU. Pins the load-bearing seamlessness
-// invariants from the spec (docs/superpowers/specs/
-// 2026-07-19-terrain-cluster-lod-design.md, Verification section):
+// split, no GPU. Pins the load-bearing seamlessness invariants from the spec
+// (docs/superpowers/specs/2026-07-19-terrain-cluster-lod-design.md,
+// Verification section):
 //   1. error monotonicity along the DAG,
 //   2. sibling error/sphere sharing + parent-sphere nesting,
 //   3. crack-freeness (bitwise-equal shared boundary vertices),

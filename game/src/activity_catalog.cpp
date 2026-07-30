@@ -10,7 +10,7 @@
 //
 // This TU depends on nothing but badlands_sim.hpp, which is what lets lean
 // consumers (the factors manifest loader and its tests) link the naming tables
-// without pulling in the registry, the map, or the noiser VM.
+// without pulling in the registry or the map.
 
 #include "badlands_sim.hpp"
 

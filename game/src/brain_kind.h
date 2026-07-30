@@ -1,8 +1,5 @@
-// Brain routing: which decision logic drives an entity. The noiser-scripted
-// coroutine brain (BrainRuntime/BrainState) that used to live alongside these
-// is gone (wasm is the sole hero brain now, game/src/wasm_brain.h) -- this
-// header keeps only the identity bit every archetype spawn recipe and think
-// dispatch still needs.
+// Brain routing: which decision logic drives an entity. This header keeps only
+// the identity bit every archetype spawn recipe and think dispatch still needs.
 
 #pragma once
 

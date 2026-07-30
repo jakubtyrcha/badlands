@@ -107,8 +107,8 @@ enum class Archetype : int32_t {
 //
 // Every decision a brain can take is an ActivityId. One id space, shared by the
 // sim, the command log (SetBehavior.param_a), the snapshot
-// (CharacterState.behavior), the statistics histogram, and any future noiser
-// brain -- so it is APPEND-ONLY: never renumber, never reuse.
+// (CharacterState.behavior), and the statistics histogram -- so it is
+// APPEND-ONLY: never renumber, never reuse.
 //
 // (game/src/behaviours/world_view.h aliases this as `badlands::Behavior`, the
 // name the sim internals have always used.)
@@ -570,8 +570,7 @@ struct SimStats {
 //     you would go looking for a bug in the AI that is really a bug in the
 //     accounting.
 //   * Folding the same rows an observer reads means the histogram cannot
-//     disagree with the inspector next to it, and a reimplementation of the
-//     brains (the planned noiser one) changes nothing here.
+//     disagree with the inspector next to it.
 //
 // Accumulate one snapshot per tick. Sim::Tick() does this for you; a caller
 // driving the internal tick_world directly is measuring nothing and gets zeros,
