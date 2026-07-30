@@ -1047,3 +1047,59 @@ TEST_CASE("erode: the lake tag steers routing away from epsilon flats") {
   INFO("steepest-descent share: untagged " << untagged << ", tagged " << tagged);
   REQUIRE(tagged > untagged);
 }
+
+TEST_CASE("finalize_lakes: seeded lakes survive pruning, emergent ones must earn it") {
+  // L2. A seeded basin is a deliberate map feature, so it is a lake however
+  // small or shallow it came out; an emergent pond has to clear the area and
+  // depth thresholds. The distinction is provenance, not size — which is why
+  // the same fixture is run with and without the basin mask.
+  auto t = make_bowl();
+  ErosionParams p;
+  p.iterations = 6;
+  p.dump_every = 0;
+  p.min_lake_area_m2 = 1e6f;   // nothing can qualify on shape alone
+  p.min_lake_depth_m = 1e6f;
+
+  Field2D<uint8_t> basins(t.B.width, t.B.height, 0);
+  for (int y = 12; y <= 20; ++y)
+    for (int x = 12; x <= 20; ++x) basins.at(x, y) = 1;  // the summit pocket
+
+  {  // no mask: thresholds prune everything
+    auto b = t.B, s = t.S;
+    const auto out = erode(b, s, p, 1.0f, nullptr, nullptr);
+    for (float wd : out.water_depth.data) REQUIRE(wd == 0.0f);
+    REQUIRE(out.lakes.empty());
+  }
+  {  // with the mask: the seeded basin is kept regardless
+    auto b = t.B, s = t.S;
+    const auto out = erode(b, s, p, 1.0f, nullptr, &basins);
+    REQUIRE_FALSE(out.lakes.empty());
+    bool any_seeded = false;
+    for (const auto& l : out.lakes)
+      if (l.kind == LakeKind::Seeded) any_seeded = true;
+    REQUIRE(any_seeded);
+
+    // lake_id and water_depth must agree cell for cell, and every id must
+    // index a real record.
+    int wet = 0;
+    for (size_t i = 0; i < out.water_depth.data.size(); ++i) {
+      const bool has_water = out.water_depth.data[i] > 0.0f;
+      REQUIRE(has_water == (out.lake_id.data[i] >= 0));
+      if (!has_water) continue;
+      ++wet;
+      REQUIRE(static_cast<size_t>(out.lake_id.data[i]) < out.lakes.size());
+    }
+    REQUIRE(wet > 0);
+
+    for (const auto& l : out.lakes) {
+      REQUIRE(l.area_m2 > 0.0f);
+      REQUIRE(l.max_depth_m > 0.0f);
+      // The sill is a real cell OUTSIDE the lake — that is what makes it an
+      // outlet rather than a member.
+      if (l.outlet_cell >= 0) {
+        REQUIRE(static_cast<size_t>(l.outlet_cell) < out.water_depth.data.size());
+        REQUIRE(out.water_depth.data[static_cast<size_t>(l.outlet_cell)] == 0.0f);
+      }
+    }
+  }
+}

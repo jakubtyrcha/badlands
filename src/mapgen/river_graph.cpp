@@ -248,7 +248,8 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
                                const Field2D<float>& water_depth,
                                const Field2D<float>& ground,
                                const ErosionParams& p, float texel_m,
-                               float origin_m) {
+                               float origin_m, const Field2D<int32_t>* lake_id,
+                               const std::vector<LakeInfo>* lakes) {
   RiverGraph g;
   const int w = r.width, ht = r.height;
   if (w <= 0 || ht <= 0) return g;
@@ -268,14 +269,22 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
   // One node per distinguished cell, deduplicated so a confluence is shared by
   // the edges meeting there.
   std::vector<int32_t> node_at(n, -1);
-  auto add_node = [&](int cell, RiverNodeKind kind, int32_t lake_id) {
+  auto add_node = [&](int cell, RiverNodeKind kind, int32_t lake) {
     if (node_at[static_cast<size_t>(cell)] >= 0) return node_at[static_cast<size_t>(cell)];
     RiverNode nd;
     nd.pos_m = world_of(cell);
     nd.ground_m = ground.data[static_cast<size_t>(cell)];
     nd.drainage_area_m2 = area.data[static_cast<size_t>(cell)];
     nd.discharge_m3_s = p.runoff_m_per_s * nd.drainage_area_m2;
-    nd.lake_id = lake_id;
+    nd.lake_id = lake;
+    // Report the lake's provenance where the caller supplied it. Resolved from
+    // the erosion pass's own labelling rather than re-derived, so the graph and
+    // the water field cannot disagree about which lake a node touches.
+    if (lake >= 0 && lake_id != nullptr && lakes != nullptr) {
+      const int32_t real = lake_id->data[static_cast<size_t>(cell)];
+      if (real >= 0 && static_cast<size_t>(real) < lakes->size())
+        nd.lake_kind = (*lakes)[static_cast<size_t>(real)].kind;
+    }
     nd.kind = kind;
     node_at[static_cast<size_t>(cell)] = static_cast<int32_t>(g.nodes.size());
     g.nodes.push_back(nd);

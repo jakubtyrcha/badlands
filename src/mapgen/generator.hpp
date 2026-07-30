@@ -32,6 +32,12 @@ struct MapArtifacts {
   Field2D<uint8_t> biome;      // Biome enum values, incl. Lake post-erosion
   Field2D<float> heightmap;    // world meters — eroded + detailed ground surface
   Field2D<float> water_depth;  // world meters — standing water; surface = heightmap + water_depth
+  // Per-cell lake index into `lakes`, -1 where dry, and the per-lake record.
+  // A Seeded lake was placed deliberately by carve_cavities and is never
+  // pruned; an Emergent one is whatever the sim ponded. Sim-grid indices
+  // resolved to the OUTPUT grid by nearest sample.
+  Field2D<int32_t> lake_id;
+  std::vector<LakeInfo> lakes;
   Field2D<float> flow;         // drainage area (m^2)
   Field2D<float> sediment;     // sediment thickness (m)
   // v2 river network. Rasterized conservatively from `river_graph` at output

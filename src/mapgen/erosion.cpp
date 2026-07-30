@@ -516,11 +516,14 @@ namespace {
 
 // Flood the CURRENT surface and turn flooded cells into water depths, then
 // prune lakes (4-connected components) below the area/depth thresholds.
-Field2D<float> finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
+FinalizedLakes finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
                               const FlowRouting& r, const ErosionParams& p,
-                              float texel_m) {
+                              float texel_m, const Field2D<uint8_t>* basin_mask) {
   const int w = r.width, ht = r.height;
-  Field2D<float> depth(w, ht, 0.0f);
+  FinalizedLakes fin;
+  Field2D<float>& depth = fin.depth;
+  depth = Field2D<float>(w, ht, 0.0f);
+  fin.lake_id = Field2D<int32_t>(w, ht, -1);
 
   // Fill each lake to its spill level MINUS a freeboard, so a band of already
   // carved bowl stays dry and the Lake biome can cover only water. Filling to
@@ -573,10 +576,47 @@ Field2D<float> finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
         }
     }
     const float area = static_cast<float>(member.size()) * texel_area;
-    if (area < p.min_lake_area_m2 || max_depth < p.min_lake_depth_m)
+    // Seeded basins are placed deliberately, so they are never pruned however
+    // small or shallow they came out; only emergent ponds must earn their
+    // place.
+    bool seeded = false;
+    if (basin_mask != nullptr && basin_mask->data.size() == depth.data.size())
+      for (const int i : member)
+        if (basin_mask->data[static_cast<size_t>(i)]) { seeded = true; break; }
+    if (!seeded && (area < p.min_lake_area_m2 || max_depth < p.min_lake_depth_m)) {
       for (const int i : member) depth.data[i] = 0.0f;
+      continue;
+    }
+
+    LakeInfo info;
+    info.kind = seeded ? LakeKind::Seeded : LakeKind::Emergent;
+    info.area_m2 = area;
+    info.max_depth_m = max_depth;
+    info.level_m = depth.data[static_cast<size_t>(member[0])] +
+                   B.data[static_cast<size_t>(member[0])] +
+                   S.data[static_cast<size_t>(member[0])];
+    // The TRUE sill: the lowest cell just outside the lake. Deliberately not
+    // deposit's find_exit, which returns whichever exit member[0]'s receiver
+    // chain happens to reach rather than the lowest one.
+    static constexpr int kD4[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    const int32_t id = static_cast<int32_t>(fin.lakes.size());
+    for (const int i : member) {
+      fin.lake_id.data[static_cast<size_t>(i)] = id;
+      const int x = i % w, y = i / w;
+      for (const auto& d : kD4) {
+        const int nx = x + d[0], ny = y + d[1];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= ht) continue;
+        const size_t j = static_cast<size_t>(ny) * w + nx;
+        if (depth.data[j] > 0.0f) continue;  // still inside
+        if (info.outlet_cell < 0 ||
+            B.data[j] + S.data[j] < B.data[static_cast<size_t>(info.outlet_cell)] +
+                                        S.data[static_cast<size_t>(info.outlet_cell)])
+          info.outlet_cell = static_cast<int32_t>(j);
+      }
+    }
+    fin.lakes.push_back(info);
   }
-  return depth;
+  return fin;
 }
 
 }  // namespace
@@ -647,7 +687,10 @@ ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
   r = route_flow(h, texel_m, kEpsilonM, tagged ? &lake_tag : nullptr);
   ErosionOutputs out;
   out.flow = accumulate_drainage(r, texel_area);
-  out.water_depth = finalize_lakes(B, S, r, p, texel_m);
+  auto fin = finalize_lakes(B, S, r, p, texel_m, tagged ? basin_mask : nullptr);
+  out.water_depth = std::move(fin.depth);
+  out.lake_id = std::move(fin.lake_id);
+  out.lakes = std::move(fin.lakes);
   out.routing = std::move(r);
   return out;
 }

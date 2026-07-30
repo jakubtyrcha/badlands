@@ -243,6 +243,21 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   a.sediment = resample(S);
   a.flow = resample(sim_out.flow);
 
+  // Lake identity: nearest-sample, never bilinear — an id is a label, and
+  // averaging two lake indices would name a third lake.
+  a.lakes = sim_out.lakes;
+  a.lake_id = Field2D<int32_t>(w, w, -1);
+  for (int y = 0; y < w; ++y)
+    for (int x = 0; x < w; ++x) {
+      const int sx = std::clamp(
+          static_cast<int>(std::lround((x * texel_out - origin_sim) / texel_sim)),
+          0, sim_n - 1);
+      const int sy = std::clamp(
+          static_cast<int>(std::lround((y * texel_out - origin_sim) / texel_sim)),
+          0, sim_n - 1);
+      a.lake_id.at(x, y) = sim_out.lake_id.at(sx, sy);
+    }
+
   // water: resample the SURFACE (level where wet, ground where dry) and the
   // depth mask; recompute depth against the output ground so shorelines match
   Field2D<float> surface(sim_n, sim_n);
@@ -272,7 +287,8 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
     sim_ground.data[i] = B.data[i] + S.data[i];
   a.river_graph = extract_river_graph(sim_out.routing, sim_out.flow,
                                       sim_out.water_depth, sim_ground, ep,
-                                      texel_sim, origin_sim);
+                                      texel_sim, origin_sim, &sim_out.lake_id,
+                                      &sim_out.lakes);
   auto rasters = rasterize_rivers(a.river_graph, w, texel_out);
   a.river_discharge_m3_s = std::move(rasters.discharge_m3_s);
   a.river_class = std::move(rasters.cls);

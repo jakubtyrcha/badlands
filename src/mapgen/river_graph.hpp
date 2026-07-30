@@ -91,6 +91,10 @@ struct RiverNode {
   float discharge_m3_s = 0.0f;
   float width_m = 0.0f, depth_m = 0.0f, speed_m_s = 0.0f;
   int32_t lake_id = -1;  // >= 0 for LakeInlet / LakeOutlet
+  // Only meaningful when lake_id >= 0. A Seeded lake is a deliberate map
+  // feature placed by carve_cavities; an Emergent one is whatever the sim
+  // happened to pond.
+  LakeKind lake_kind = LakeKind::Emergent;
   RiverNodeKind kind = RiverNodeKind::Source;
 };
 
@@ -135,11 +139,16 @@ struct RiverGraph {
 //
 // `ground` is B + S on the sim grid, used for node elevations and reach slopes.
 // Positions are world meters: texel (x, y) sits at (x*texel_m + origin_m, ...).
+// `lake_id` / `lakes` (optional) let lake nodes report which lake they belong
+// to and whether it was seeded or emergent. Passing null leaves lake_kind at
+// its default; the graph is otherwise unchanged.
 RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
                                const Field2D<float>& water_depth,
                                const Field2D<float>& ground,
                                const ErosionParams& p, float texel_m,
-                               float origin_m);
+                               float origin_m,
+                               const Field2D<int32_t>* lake_id = nullptr,
+                               const std::vector<LakeInfo>* lakes = nullptr);
 
 // --- rasterization ----------------------------------------------------------
 

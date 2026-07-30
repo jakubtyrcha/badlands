@@ -256,13 +256,40 @@ struct MapDebugSink {
                     const Field2D<uint8_t>& mask) = 0;
 };
 
+// Where a lake came from. Seeded basins are placed deliberately by
+// carve_cavities and always read as lakes; emergent ones are whatever the sim
+// happened to pond and must clear the area/depth thresholds. Consumers care:
+// a deliberate lake is a map feature, an emergent one is incidental.
+enum class LakeKind : uint8_t { Seeded, Emergent };
+
+struct LakeInfo {
+  LakeKind kind = LakeKind::Emergent;
+  float level_m = 0.0f;      // water surface, after the freeboard
+  float area_m2 = 0.0f;
+  float max_depth_m = 0.0f;
+  int32_t outlet_cell = -1;  // the TRUE sill: lowest cell just outside it
+};
+
 struct ErosionOutputs {
   Field2D<float> water_depth;  // m of standing water after pruning
   Field2D<float> flow;         // final drainage area (m²)
+  // Per-cell lake index into `lakes`, -1 where dry. Surviving lakes only —
+  // pruned ponds are -1 with zero depth, like any other dry cell.
+  Field2D<int32_t> lake_id;
+  std::vector<LakeInfo> lakes;
   // The FINAL routing, kept so the river graph can be extracted from exactly
   // the network the outputs above were measured on. Re-routing downstream
   // would risk a subtly different graph for no benefit.
   FlowRouting routing;
+};
+
+// finalize_lakes' full result: kind, level, area and the true sill for every
+// surviving lake, alongside the per-cell index. Internal to erosion.cpp; the
+// pieces reach consumers through ErosionOutputs.
+struct FinalizedLakes {
+  Field2D<float> depth;
+  Field2D<int32_t> lake_id;
+  std::vector<LakeInfo> lakes;
 };
 
 // The full sim: iterations × (route → drain → incise → deposit → diffuse),
