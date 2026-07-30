@@ -120,6 +120,12 @@ struct ErosionParams {
 inline constexpr int kPadTexels = 16;      // sim-grid margin, cropped on output
 inline constexpr float kEpsilonM = 1e-4f;  // flood epsilon per step
 inline constexpr float kMicroFillCapM = 0.75f;  // deepest depression micro_fill may raise
+// A flooded component counts as a LAKE for routing purposes only once it ponds
+// deeper than this. Shallower ones are epsilon flats — level ground the flood
+// tilts by a fraction of a millimetre — and treating those as lakes is what
+// excluded a third to a half of all channel texels from steepest descent.
+// Shares micro_fill's cap: both are answering "is this really a lake?".
+inline constexpr float kPondedMinDepthM = kMicroFillCapM;
 // v1.3.1: basins touching the sim-grid border are breached by construction —
 // border cells seed route_flow's priority-flood at their own (possibly
 // carved-to-basin-floor) height, so a basin whose mask reaches the border
@@ -264,8 +270,13 @@ struct ErosionOutputs {
 // under min area/depth. The river NETWORK is no longer built here — see
 // river_graph.hpp, which extracts it from the final routing. Mutates B and
 // S. sink may be null.
+// `basin_mask` (optional) marks the deliberately seeded cavities. It forms the
+// first iteration's lake tag, before any lake has been resolved; from then on
+// the tag is rebuilt each iteration from the previous routing. Passing null
+// falls back to route_flow's in_lake, which also treats every FLAT as a lake.
 ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
                      const ErosionParams& p, float texel_m,
-                     MapDebugSink* sink);
+                     MapDebugSink* sink,
+                     const Field2D<uint8_t>* basin_mask = nullptr);
 
 }  // namespace badlands::mapgen

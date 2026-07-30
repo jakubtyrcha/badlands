@@ -230,7 +230,7 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   micro_fill(B, S, basins, texel_sim);
   if (sink) sink->dump("micro-fill", seq++, S);
 
-  const auto sim_out = erode(B, S, ep, texel_sim, sink);
+  const auto sim_out = erode(B, S, ep, texel_sim, sink, &basins);
 
   // --- resample to the output grid (crop = the origin offset) ---
   auto resample = [&](const Field2D<float>& f) {

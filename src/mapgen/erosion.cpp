@@ -583,17 +583,52 @@ Field2D<float> finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
 
 ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
                      const ErosionParams& p, float texel_m,
-                     MapDebugSink* sink) {
+                     MapDebugSink* sink, const Field2D<uint8_t>* basin_mask) {
   const float texel_area = texel_m * texel_m;
   Field2D<float> h(B.width, B.height);
   auto ground = [&] {
     for (size_t i = 0; i < h.data.size(); ++i) h.data[i] = B.data[i] + S.data[i];
   };
+
+  // The lake TAG route_flow steers by. Resolving a lake needs catchment, which
+  // needs the receiver graph, which needs this exclusion — so the tag cannot
+  // be derived inside route_flow. It is carried here instead: iteration 1 uses
+  // the seeded basins (the only lakes known before anything is routed), and
+  // each later iteration rebuilds it from the previous routing. That is a
+  // one-iteration lag, not an approximation error; the terrain is moving under
+  // it regardless.
+  const bool tagged = basin_mask != nullptr &&
+                      basin_mask->data.size() == B.data.size();
+  Field2D<uint8_t> lake_tag;
+  if (tagged) lake_tag = *basin_mask;
+
+  // Whole COMPONENTS, never individual deep cells. Inside a lake hf is nearly
+  // flat, so an untagged shallow margin can find a dry neighbour below its
+  // epsilon-inflated level and reinstate the invented rim exits the exclusion
+  // exists to prevent.
+  auto rebuild_tag = [&](const FlowRouting& rr) {
+    if (!tagged) return;
+    Field2D<uint8_t> next(B.width, B.height, 0);
+    for (const auto& member : label_lake_components(rr.width, rr.height, rr.in_lake)) {
+      float deepest = 0.0f;
+      bool seeded = false;
+      for (const int i : member) {
+        deepest = std::max(deepest, rr.water_level[static_cast<size_t>(i)] -
+                                        h.data[static_cast<size_t>(i)]);
+        if (basin_mask->data[static_cast<size_t>(i)]) seeded = true;
+      }
+      if (!seeded && deepest < kPondedMinDepthM) continue;  // an epsilon flat
+      for (const int i : member) next.data[static_cast<size_t>(i)] = 1;
+    }
+    lake_tag = std::move(next);
+  };
+
   FlowRouting r;
   Field2D<float> area;
   for (int it = 1; it <= p.iterations; ++it) {
     ground();
-    r = route_flow(h, texel_m, kEpsilonM);
+    r = route_flow(h, texel_m, kEpsilonM, tagged ? &lake_tag : nullptr);
+    rebuild_tag(r);
     area = accumulate_drainage(r, texel_area);
     const auto eroded = incise(B, S, r, area, p, texel_m);
     deposit(B, S, eroded, r, area, p, texel_area);
@@ -609,7 +644,7 @@ ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
     }
   }
   ground();
-  r = route_flow(h, texel_m, kEpsilonM);
+  r = route_flow(h, texel_m, kEpsilonM, tagged ? &lake_tag : nullptr);
   ErosionOutputs out;
   out.flow = accumulate_drainage(r, texel_area);
   out.water_depth = finalize_lakes(B, S, r, p, texel_m);

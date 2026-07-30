@@ -986,3 +986,64 @@ TEST_CASE("carve_outlet_notches: the level drops by exactly the notch depth") {
     prev_dry = m.dry;
   }
 }
+
+TEST_CASE("erode: the lake tag steers routing away from epsilon flats") {
+  // L5. Without a tag, route_flow excludes every in_lake cell from steepest
+  // descent — and on level ground the flood front always arrives above a
+  // cell's own height, so `in_lake` flags every FLAT as well as every lake.
+  // Passing the seeded basins lets erode() rebuild a tag each iteration from
+  // whole components ponded deeper than kPondedMinDepthM, so flats route by
+  // gradient while genuine lakes stay excluded.
+  //
+  // A bowl set into ground that drains, with a broad flat shelf around it: the
+  // shelf is what a tagless run misroutes.
+  const int n = 41;
+  Field2D<float> B(n, n, 0.0f), S(n, n, 0.0f);
+  Field2D<uint8_t> basins(n, n, 0);
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const float dx = x - 20.0f, dy = y - 20.0f;
+      const float rad = std::sqrt(dx * dx + dy * dy);
+      B.at(x, y) = -0.02f * static_cast<float>(x);  // gentle drain toward +x
+      if (rad < 6.0f) {
+        basins.at(x, y) = 1;
+        B.at(x, y) -= 0.5f * (6.0f - rad);
+      }
+    }
+
+  ErosionParams p;
+  p.iterations = 3;
+  p.dump_every = 0;
+  auto run = [&](bool with_tag) {
+    Field2D<float> b = B, s = S;
+    const auto out = erode(b, s, p, 1.0f, nullptr, with_tag ? &basins : nullptr);
+    // How many cells realise the steepest D8 descent on the filled surface?
+    static constexpr int DX[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+    static constexpr int DY[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    const float diag = std::sqrt(2.0f);
+    int total = 0, matched = 0;
+    const auto& r = out.routing;
+    for (int y = 1; y < n - 1; ++y)
+      for (int x = 1; x < n - 1; ++x) {
+        const size_t i = static_cast<size_t>(y) * n + x;
+        if (r.receiver[i] < 0) continue;
+        int best = -1;
+        float bs = 0.0f;
+        for (int k = 0; k < 8; ++k) {
+          const size_t j = static_cast<size_t>(y + DY[k]) * n + (x + DX[k]);
+          const float d = (DX[k] && DY[k]) ? diag : 1.0f;
+          const float sl = (r.water_level[i] - r.water_level[j]) / d;
+          if (sl > bs) { bs = sl; best = static_cast<int>(j); }
+        }
+        if (best < 0) continue;
+        ++total;
+        if (r.receiver[i] == best) ++matched;
+      }
+    return total > 0 ? static_cast<float>(matched) / static_cast<float>(total) : 0.0f;
+  };
+
+  const float untagged = run(false);
+  const float tagged = run(true);
+  INFO("steepest-descent share: untagged " << untagged << ", tagged " << tagged);
+  REQUIRE(tagged > untagged);
+}
