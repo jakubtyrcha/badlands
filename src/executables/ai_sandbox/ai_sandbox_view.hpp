@@ -61,7 +61,9 @@ class AiSandboxView : public AppView {
   // Commands, so the seed shows up in the command log like anything else. The
   // wasm hero brain is loaded from assets/brains/hero.wasm when readable;
   // otherwise (or on a load failure) heroes simply idle (no C++ decision
-  // layer left to fall back to -- see load_hero_wasm's comment in the .cpp).
+  // layer left to fall back to -- see LoadBrainWasm, src/game/brain_asset.hpp).
+  // Also sets the world's day length from this view's own day cadence, so the
+  // sim's night and the rendered night agree.
   void SeedTown();
   // Clears scene_ and rebuilds the STATIC geometry from the sim: re-mirrors
   // scene_context_'s lighting, then adds the floor, the wall ring, and a box

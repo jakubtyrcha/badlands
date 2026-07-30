@@ -26,7 +26,10 @@
 #include "engine/rendering/water_material.hpp"
 #include "engine/core/ray.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/brain_asset.hpp"
 #include "game/building_catalog.h"
+#include "game/creature_manifest.h"
+#include "game/factors_manifest.hpp"
 #include "game/geometry/terrain_mesh.hpp"
 #include "game/geometry/water_surface.hpp"
 #include "game/map/symbolic_map_generator.hpp"
@@ -195,13 +198,16 @@ void EmitBar(std::vector<UiQuad>& out, const UiFontInfo& font,
 constexpr double kRebakeIntervalSeconds = 1.0 / 20.0;  // ~20 Hz sky/IBL refresh
 
 // Day/night cadence: a full 24 in-game-hour cycle takes this many real-world
-// MINUTES at 1x sim speed. This is the single knob for how fast the sun moves.
+// MINUTES at 1x sim speed. THE single knob -- it drives both the sun and the
+// sim's own day (WorldConfig::millis_per_day, set in SeedTown via
+// MillisPerDayForSimSeconds), so the sky and the world agree on what time it is.
+// They are separate clocks with separate units, which is exactly why one number
+// has to feed both: left independent they drift into disagreeing about night,
+// and heroes take night behaviour under a midday sky.
 //
-// The day/night calendar and the physics sim run on independent rates off the
-// same clock (SimClock::sim_seconds): the calendar divides by
-// real_seconds_per_day (fast -- 24 h in 3 min), while physics divides by
-// kTickDt so it stays 1 in-game second == 1 real second at 1x (kSimHz ticks per
-// sim-second). Both scale together with sim speed.
+// Physics is unaffected and stays framerate-independent: it divides
+// SimClock::sim_seconds by kTickDt, so a sim second is still a real second at
+// 1x (kSimHz ticks per sim-second). All three scale together with sim speed.
 constexpr float kRealMinutesPerGameDay = 3.0f;
 constexpr float kRealSecondsPerDay = kRealMinutesPerGameDay * 60.0f;  // 180 s
 
@@ -318,9 +324,9 @@ bool GameView::Initialize(const RenderContext& ctx) {
   sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
   SeekToTimeOfDay(kInitialTimeOfDay);
 
-  // sim_ is constructed with an empty BrainDesc (mock brains only; no wasm
-  // brain needed for a static-buildings scaffold) -- construction also
-  // prebuilds the Castle at kCastleSpawn (the plains, at the town centre).
+  // Builds the world (wasm hero brain + tuning data + this view's day length),
+  // then seeds it -- construction also prebuilds the Castle at kCastleSpawn
+  // (the plains, at the town centre).
   SeedTown();
   BuildScene();
   // Water test map: keep the frame clear (no volumetric fog obscuring the lake).
@@ -421,6 +427,50 @@ void GameView::RebakeSky(const DaylightState& state) {
 }
 
 void GameView::SeedTown() {
+  // The world itself, before anything is seeded into it. sim_'s member
+  // initializer is a placeholder (an empty BrainDesc, game_view.hpp) and nothing
+  // has touched it yet -- Initialize only sets up materials, the HUD and the
+  // day/night clock before calling here -- so replacing it wholesale is safe.
+  //
+  // The brain is the difference between heroes that act and heroes that stand
+  // still: it is the ONLY hero decision layer (sim.cpp's mock_think idles a
+  // Town-kind entity absent one), so without these bytes the town is a diorama.
+  std::vector<uint8_t> wasm = badlands::LoadBrainWasm(badlands::kHeroBrainPath);
+  badlands::BrainDesc brain_desc{};
+  if (!wasm.empty()) {
+    brain_desc.wasm_bytes = wasm.data();
+    brain_desc.wasm_len = wasm.size();
+    spdlog::info("GameView: {} loaded ({} bytes) -- heroes think via the wasm brain",
+                 badlands::kHeroBrainPath, wasm.size());
+  }
+  // `wasm` only needs to outlive the Sim() construction below: bh_load compiles
+  // the module eagerly and keeps no reference to the input bytes.
+  badlands::WorldConfig world_cfg{};
+  // One number for both clocks -- the sky (sim_clock_.real_seconds_per_day, set
+  // in Initialize) and the sim's own day. Left unset they disagree, and heroes
+  // act on night behaviour while the sky shows something else.
+  world_cfg.millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
+  sim_ = badlands::Sim(world_cfg, brain_desc);
+
+  // Behaviour tuning as data, over the compiled defaults (a missing file keeps
+  // them). Initial config -- before the seeding dispatches below, and long
+  // before the first Tick. Same files the sandbox loads, so the two apps run
+  // heroes on identical tuning.
+  {
+    badlands::SimFactors factors = sim_.Factors();
+    if (badlands::LoadSimFactors("assets/creatures/factors.json", factors)) {
+      sim_.SetFactors(factors);
+    }
+    // Creature-stat overrides. Inert for the town as seeded: recruits are built
+    // from the COMPILED catalog by design (hero_desc, game/src/heroes.cpp) and
+    // the deer below carry an explicit CharacterDesc. It applies the moment
+    // this view spawns a catalog creature.
+    badlands::CreatureCatalog creatures = sim_.Creatures();
+    if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", creatures)) {
+      sim_.SetCreatureCatalog(creatures);
+    }
+  }
+
   // The town sits on the southern plains band (world z ~ +50), which is land --
   // so buildings render where the sim places them, no shift. The prebuilt Castle
   // (kCastleSpawn, id 0) sits at the town centre and is the colony seat + the
