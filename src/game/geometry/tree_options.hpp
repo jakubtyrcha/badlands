@@ -13,12 +13,20 @@ enum class TreeType { Deciduous, Evergreen };
 // generic fat-oval fallback (byte-identical to the pre-species texture).
 enum class LeafSilhouette { Oak, Ash, Aspen, Bush, PineSprig };
 
+// Per-site leaf-card blade layout (tree_generator.cpp's emit_leaf):
+// SingleQuad/CrossedPair keep ez-tree's billboard=1/2 behavior; FanFromStem
+// and AxialFins are multi-blade arrangements sharing the site's stem point
+// or long axis respectively.
+enum class LeafArrangement { SingleQuad, CrossedPair, FanFromStem, AxialFins };
+
 // Leaf-card generation parameters (ported from ez-tree TreeOptions.leaves).
 // Consumed by GenerateLeafMesh (tree_generator.hpp); leaf placement uses a
 // separate RNG stream so it never perturbs the branch skeleton.
 struct LeafOptions {
   bool  enabled = true;
-  int   billboard = 2;        // 1 = single quad, 2 = double (perpendicular cross)
+  LeafArrangement arrangement = LeafArrangement::CrossedPair;  // == old billboard=2
+  int   blade_count = 2;      // quads per site, FanFromStem/AxialFins only (2..3)
+  float card_aspect = 1.0f;   // card width = size * card_aspect (height = size)
   int   count = 18;           // leaves per leaf-bearing branch (ez-tree oak_medium)
   float start = 0.16f;        // fractional start along the branch (ez-tree)
   float size = 2.5f;          // leaf card size (native ez-tree units)

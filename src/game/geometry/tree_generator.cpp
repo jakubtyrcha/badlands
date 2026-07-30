@@ -217,6 +217,49 @@ TexturedMeshResult GenerateTreeMesh(const TreeOptions& o,
   return {.mesh = std::move(mesh), .local_bounds = bounds};
 }
 
+int QuadsPerLeafSite(const LeafOptions& lf) {
+  switch (lf.arrangement) {
+    case LeafArrangement::SingleQuad:  return 1;
+    case LeafArrangement::CrossedPair: return 2;
+    case LeafArrangement::FanFromStem:
+    case LeafArrangement::AxialFins:   return lf.blade_count;
+  }
+  return 1;  // unreachable
+}
+
+namespace {
+
+// FanFromStem: angular step between adjacent blades (N=3 -> -35/0/+35 deg,
+// N=2 -> +-17.5 deg) and the alternating out-of-plane tilt that keeps blades
+// from ever going fully coplanar -- the LOD simplifier welds bit-identical
+// full-stride vertices, so coplanar cards would invite cross-blade collapse.
+constexpr float kFanSpreadDeg = 35.0f;
+constexpr float kFanDihedralDeg = 20.0f;
+
+// Per-blade local rotation, composed onto the site's placement orientation by
+// the caller (rot_b = orient * BladeRotation(...)). RNG-free: b is the blade
+// index in [0, n), n = QuadsPerLeafSite(lf).
+glm::quat BladeRotation(LeafArrangement arrangement, int b, int n) {
+  switch (arrangement) {
+    case LeafArrangement::FanFromStem: {
+      const float spread = glm::radians(
+          (static_cast<float>(b) - (static_cast<float>(n) - 1.0f) * 0.5f) * kFanSpreadDeg);
+      const float dihedral = glm::radians((b % 2 == 0) ? kFanDihedralDeg : -kFanDihedralDeg);
+      return glm::angleAxis(spread, glm::vec3(0, 0, 1)) *
+             glm::angleAxis(dihedral, glm::vec3(0, 1, 0));
+    }
+    case LeafArrangement::AxialFins:
+      return glm::angleAxis(static_cast<float>(b) * glm::pi<float>() / static_cast<float>(n),
+                            glm::vec3(0, 1, 0));
+    case LeafArrangement::SingleQuad:
+    case LeafArrangement::CrossedPair:
+      break;
+  }
+  return glm::angleAxis((b == 1) ? glm::half_pi<float>() : 0.0f, glm::vec3(0, 1, 0));
+}
+
+}  // namespace
+
 TexturedMeshResult GenerateLeafMesh(const TreeOptions& o) {
   return GenerateLeafMesh(o, BuildTreeSkeleton(o));
 }
@@ -228,24 +271,27 @@ TexturedMeshResult GenerateLeafMesh(const TreeOptions& o,
 
   if (lf.enabled && lf.count > 0) {
     TreeRng rng(o.seed ^ 0x9E3779B9u);
-    const int quads_per_leaf = (lf.billboard >= 2) ? 2 : 1;
+    const int quads_per_leaf = QuadsPerLeafSite(lf);
 
-    // One leaf (1 or 2 crossed quads) at a placement frame. Consumes one rng draw
-    // (size variance). Shared by distributed leaves and the terminal-tip leaf.
+    // One leaf (1+ disjoint blade quads) at a placement frame. Consumes one
+    // rng draw (size variance) as its FIRST statement -- draw order/count per
+    // site is determinism-critical (byte-compared by the "deterministic" test).
+    // Shared by distributed leaves and the terminal-tip leaf.
     auto emit_leaf = [&](const glm::vec3& origin, const glm::quat& orient) {
       const float leaf_size = lf.size * (1.0f - lf.size_variance * rng.unit());
       glm::vec3 rnormal(origin.x, 0.0f, origin.z);
       rnormal = (glm::length(rnormal) > 1e-5f) ? glm::normalize(rnormal)
                                                : glm::vec3(0, 0, 1);
+      const float half_w = leaf_size * lf.card_aspect * 0.5f;
+      const glm::vec3 local[4] = {{-half_w, leaf_size, 0.0f},
+                                  {-half_w, 0.0f, 0.0f},
+                                  { half_w, 0.0f, 0.0f},
+                                  { half_w, leaf_size, 0.0f}};
+      const glm::vec2 uv[4] = {{0, 1}, {0, 0}, {1, 0}, {1, 1}};
       for (int q = 0; q < quads_per_leaf; ++q) {
-        const glm::quat rot =
-            orient *
-            glm::angleAxis((q == 1) ? glm::half_pi<float>() : 0.0f, glm::vec3(0, 1, 0));
-        const glm::vec3 local[4] = {{-leaf_size * 0.5f, leaf_size, 0.0f},
-                                    {-leaf_size * 0.5f, 0.0f, 0.0f},
-                                    { leaf_size * 0.5f, 0.0f, 0.0f},
-                                    { leaf_size * 0.5f, leaf_size, 0.0f}};
-        const glm::vec2 uv[4] = {{0, 1}, {0, 0}, {1, 0}, {1, 1}};
+        const glm::quat rot = orient * BladeRotation(lf.arrangement, q, quads_per_leaf);
+        // Every blade is a fully disjoint 4-vert quad: never share/dedupe
+        // vertices across blades (see the weld-safety note above).
         const glm::vec3 tangent = glm::normalize(rot * glm::vec3(1, 0, 0));
         const uint32_t base = mesh.vertex_count;
         for (int c = 0; c < 4; ++c) {

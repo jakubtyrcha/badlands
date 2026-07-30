@@ -136,22 +136,35 @@ TEST_CASE("GenerateLeafMesh: well-formed indexed mesh (Oak, Pine)") {
   }
 }
 
-TEST_CASE("GenerateLeafMesh: billboard=2 is exactly 2x billboard=1") {
+TEST_CASE("GenerateLeafMesh: quad count scales with QuadsPerLeafSite") {
   TreeOptions single = OakPreset();
-  single.leaves.billboard = 1;
-  TreeOptions cross = OakPreset();
-  cross.leaves.billboard = 2;
-
+  single.leaves.arrangement = LeafArrangement::SingleQuad;
+  REQUIRE(QuadsPerLeafSite(single.leaves) == 1);
   const TexturedMeshResult r1 = GenerateLeafMesh(single);
-  const TexturedMeshResult r2 = GenerateLeafMesh(cross);
-
   REQUIRE(r1.mesh.vertex_count > 0u);
-  REQUIRE(r2.mesh.vertex_count == r1.mesh.vertex_count * 2u);
-  REQUIRE(r2.mesh.indices.size() == r1.mesh.indices.size() * 2u);
-
   // Each quad = 4 verts + 6 indices.
   REQUIRE(r1.mesh.indices.size() == r1.mesh.vertex_count / 4u * 6u);
-  REQUIRE(r2.mesh.indices.size() == r2.mesh.vertex_count / 4u * 6u);
+
+  struct Case { LeafArrangement arrangement; int blade_count; int expected_quads; };
+  const Case cases[] = {
+      {LeafArrangement::CrossedPair, 2, 2},
+      {LeafArrangement::FanFromStem, 3, 3},
+      {LeafArrangement::AxialFins, 3, 3},
+  };
+  for (const Case& c : cases) {
+    INFO("arrangement index " << static_cast<int>(c.arrangement));
+    TreeOptions o = OakPreset();
+    o.leaves.arrangement = c.arrangement;
+    o.leaves.blade_count = c.blade_count;
+    REQUIRE(QuadsPerLeafSite(o.leaves) == c.expected_quads);
+
+    const TexturedMeshResult r = GenerateLeafMesh(o);
+    REQUIRE(r.mesh.vertex_count ==
+            r1.mesh.vertex_count * static_cast<uint32_t>(c.expected_quads));
+    REQUIRE(r.mesh.indices.size() ==
+            r1.mesh.indices.size() * static_cast<size_t>(c.expected_quads));
+    REQUIRE(r.mesh.indices.size() == r.mesh.vertex_count / 4u * 6u);
+  }
 }
 
 TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
@@ -297,8 +310,68 @@ TEST_CASE("GenerateLeafMesh: terminal-tip leaf adds one leaf per leaf-bearing br
   TreeOptions off = OakPreset(); off.leaves.tip_leaf = false;
   const uint32_t vn = GenerateLeafMesh(on).mesh.vertex_count;
   const uint32_t vf = GenerateLeafMesh(off).mesh.vertex_count;
-  const int quads = (OakPreset().leaves.billboard >= 2) ? 2 : 1;
+  const int quads = QuadsPerLeafSite(OakPreset().leaves);
   REQUIRE(vn > vf);
   // Each tip leaf = quads * 4 verts; one per leaf-bearing terminal branch.
   REQUIRE(vn - vf == static_cast<uint32_t>(count_terminal(OakPreset()) * quads * 4));
+}
+
+TEST_CASE("GenerateLeafMesh: FanFromStem blades never weld (full-stride distinct)") {
+  TreeOptions o = OakPreset();
+  o.leaves.arrangement = LeafArrangement::FanFromStem;
+  o.leaves.blade_count = 3;
+  const int n = QuadsPerLeafSite(o.leaves);
+  REQUIRE(n == 3);
+
+  const TexturedMeshResult r = GenerateLeafMesh(o);
+  const size_t stride = kTexturedMeshFloatsPerVertex;
+  const size_t verts_per_site = static_cast<size_t>(n) * 4u;
+  REQUIRE(r.mesh.vertices.size() >= verts_per_site * stride);
+
+  // First site (first n*4 verts). No two verts from DIFFERENT blades of this
+  // site may be bit-identical across the full 11-float stride (pos+uv+normal+
+  // tangent) -- shared full-stride verts are exactly what the LOD simplifier
+  // would weld, collapsing separate blades into one.
+  for (size_t i = 0; i < verts_per_site; ++i) {
+    for (size_t j = i + 1; j < verts_per_site; ++j) {
+      if (i / 4u == j / 4u) continue;  // same blade -- not the case under test
+      bool identical = true;
+      for (size_t k = 0; k < stride; ++k) {
+        if (r.mesh.vertices[i * stride + k] != r.mesh.vertices[j * stride + k]) {
+          identical = false;
+          break;
+        }
+      }
+      INFO("vertex " << i << " vs " << j);
+      REQUIRE_FALSE(identical);
+    }
+  }
+}
+
+TEST_CASE("GenerateLeafMesh: AxialFins blades share one long axis") {
+  TreeOptions o = OakPreset();
+  o.leaves.arrangement = LeafArrangement::AxialFins;
+  o.leaves.blade_count = 3;
+  const int n = QuadsPerLeafSite(o.leaves);
+  REQUIRE(n == 3);
+
+  const TexturedMeshResult r = GenerateLeafMesh(o);
+  const size_t stride = kTexturedMeshFloatsPerVertex;
+  auto pos = [&](size_t v) {
+    const size_t off = v * stride;
+    return glm::vec3(r.mesh.vertices[off + 0], r.mesh.vertices[off + 1],
+                     r.mesh.vertices[off + 2]);
+  };
+
+  // Quad corners are {top-left, bottom-left, bottom-right, top-right}; the
+  // card's long axis is top-left minus bottom-left (== top-right minus
+  // bottom-right, same rotated edge).
+  glm::vec3 axis[3];
+  for (int b = 0; b < n; ++b) {
+    const size_t base = static_cast<size_t>(b) * 4u;
+    axis[b] = glm::normalize(pos(base + 0) - pos(base + 1));
+  }
+  for (int i = 0; i < n; ++i)
+    for (int j = i + 1; j < n; ++j)
+      REQUIRE(std::fabs(glm::dot(axis[i], axis[j])) == Catch::Approx(1.0f).margin(1e-4f));
 }
