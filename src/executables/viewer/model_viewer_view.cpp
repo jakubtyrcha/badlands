@@ -70,25 +70,18 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   // Solid dark-brown bark color for the catalog tree meshes.
   bark_mat_ = matlib_.SolidColor(glm::vec3(0.30f, 0.19f, 0.10f), 0.9f);
 
-  // Leaf-card silhouette texture, built once and shared by every tree. White
-  // RGB (so the AlphaCutout material's per-tree tint colours it), alpha = leaf
-  // shape. Uploaded with a full mip chain so distant cards antialias.
+  // Per-silhouette leaf-card textures, built once and shared by every tree of
+  // that silhouette. White RGB (so the AlphaCutout/foliage material's
+  // per-tree tint colours it), alpha = leaf shape. Each is a CPU-computed,
+  // coverage-preserving mip chain (BuildLeafMipChainRgba8) uploaded
+  // level-by-level via WriteTexture -- NOT UploadTexture2DWithMips, whose
+  // GPU box-downsample mipgen would recompute (and so destroy) the
+  // coverage-preserved alpha this function already produced per level.
   {
-    constexpr int kLeafTexSize = 64;
-    std::vector<uint8_t> px =
-        BuildLeafRgba8(kLeafTexSize, glm::vec3(1.0f), LeafSilhouette::Bush);
-    LoadedTexture leaf = UploadTexture2DWithMips(
-        device_, queue_, *ctx.pipeline_gen, kLeafTexSize, kLeafTexSize,
-        px.data());
-    leaf_texture_ = leaf.texture;
-    leaf_view_ = leaf.view;
-    if (!leaf_view_) {
-      spdlog::error("ModelViewerView::Initialize: leaf texture upload failed");
-      return false;
-    }
-    // Trilinear + repeat sampler: the alpha mip chain must be sampled through a
-    // Linear mipmapFilter (the material factory's default is Nearest, which
-    // would defeat the mips and leave the edges aliased).
+    // Trilinear + repeat sampler, shared by every silhouette: the alpha mip
+    // chain must be sampled through a Linear mipmapFilter (the material
+    // factory's default is Nearest, which would defeat the mips and leave the
+    // edges aliased).
     wgpu::SamplerDescriptor samp = {};
     samp.minFilter = wgpu::FilterMode::Linear;
     samp.magFilter = wgpu::FilterMode::Linear;
@@ -97,6 +90,71 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
     samp.addressModeV = wgpu::AddressMode::Repeat;
     samp.maxAnisotropy = 16;
     leaf_sampler_ = device_.CreateSampler(&samp);
+
+    constexpr uint32_t kLeafTexSize = 128;
+    constexpr uint32_t kMipLevelCount = 8;  // log2(128) + 1
+    constexpr std::array<LeafSilhouette, kLeafSilhouetteCount> kSilhouettes = {
+        LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
+        LeafSilhouette::Bush, LeafSilhouette::PineSprig};
+
+    for (LeafSilhouette shape : kSilhouettes) {
+      // Matches TreeCatalog's per-silhouette alpha_cutoff assignments
+      // (tree_generator.cpp): PineSprig's thin needle strokes need the lower
+      // cutoff so coverage preservation has something to preserve.
+      const float cutoff = (shape == LeafSilhouette::PineSprig) ? 0.35f : 0.5f;
+      const std::vector<std::vector<uint8_t>> mips =
+          BuildLeafMipChainRgba8(static_cast<int>(kLeafTexSize),
+                                 glm::vec3(1.0f), shape, cutoff);
+
+      wgpu::TextureDescriptor tex_desc;
+      tex_desc.size = {kLeafTexSize, kLeafTexSize, 1};
+      tex_desc.format = wgpu::TextureFormat::RGBA8Unorm;
+      tex_desc.usage =
+          wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+      tex_desc.mipLevelCount = kMipLevelCount;
+      tex_desc.sampleCount = 1;
+      tex_desc.dimension = wgpu::TextureDimension::e2D;
+      wgpu::Texture texture = device_.CreateTexture(&tex_desc);
+
+      const size_t idx = static_cast<size_t>(shape);
+      if (!texture) {
+        spdlog::error(
+            "ModelViewerView::Initialize: leaf texture creation failed "
+            "(silhouette {})", idx);
+        return false;
+      }
+
+      // Level-by-level upload, mirroring texture_loader.cpp's level-0 upload
+      // (WriteTexture has no 256-byte row-alignment requirement, unlike
+      // buffer<->texture copies, so the tightly-packed per-level buffers
+      // upload directly).
+      uint32_t w = kLeafTexSize, h = kLeafTexSize;
+      for (uint32_t level = 0; level < kMipLevelCount; ++level) {
+        wgpu::TexelCopyTextureInfo dst;
+        dst.texture = texture;
+        dst.mipLevel = level;
+        dst.origin = {0, 0, 0};
+
+        wgpu::TexelCopyBufferLayout layout;
+        layout.bytesPerRow = w * 4;
+        layout.rowsPerImage = h;
+
+        wgpu::Extent3D extent = {w, h, 1};
+        queue_.WriteTexture(&dst, mips[level].data(), mips[level].size(),
+                           &layout, &extent);
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+      }
+
+      leaf_textures_[idx] = texture;
+      leaf_views_[idx] = texture.CreateView();
+      if (!leaf_views_[idx]) {
+        spdlog::error(
+            "ModelViewerView::Initialize: leaf texture view failed "
+            "(silhouette {})", idx);
+        return false;
+      }
+    }
   }
 
   BuildGenerators();
@@ -190,9 +248,10 @@ void ModelViewerView::RebuildScene() {
     // NOT the manual kDefaultLodRatios switch the single-tree 0/1/2 paths use
     // below. Skips the single-tree bark/leaf entities entirely.
     const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
-    std::unique_ptr<TreeField> field =
-        BuildTreeField(device_, queue_, *pipeline_gen_, *gen.tree, leaf_view_,
-                      leaf_sampler_, capacity, kMultiLodThresholds);
+    std::unique_ptr<TreeField> field = BuildTreeField(
+        device_, queue_, *pipeline_gen_, *gen.tree,
+        LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_, capacity,
+        kMultiLodThresholds);
     if (!field) {
       // Mirrors the malformed-generator branch further down: log and bail
       // with a floor-only scene, leaving the orbit framing unchanged (an
@@ -306,8 +365,9 @@ void ModelViewerView::RebuildScene() {
 
     if (leaves.mesh.vertex_count > 0) {
       DeferredMaterial lm = matlib_.TranslucentFoliage(
-          leaf_view_, leaf_sampler_, gen.tree->leaves.alpha_cutoff,
-          gen.tree->leaves.tint, gen.tree->leaves.transmission_tint,
+          LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_,
+          gen.tree->leaves.alpha_cutoff, gen.tree->leaves.tint,
+          gen.tree->leaves.transmission_tint,
           gen.tree->leaves.transmission_strength);
       AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
                                  lm.factory, lm.params, xf);

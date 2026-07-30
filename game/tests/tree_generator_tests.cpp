@@ -117,6 +117,48 @@ TEST_CASE("TreeCatalog: every predefined setup generates a well-formed mesh") {
   }
 }
 
+TEST_CASE("TreeCatalog: leaf world-size bands") {
+  // Same preview-height scale the viewer applies to fit every catalog tree
+  // into its orbit framing (model_viewer_view.cpp's kTreePreviewHeight) --
+  // world_leaf_m is the on-screen leaf-card size once a tree is scaled to
+  // that preview height, i.e. what a player actually sees.
+  constexpr float kPreviewHeight = 8.0f;
+
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) {
+    INFO("setup: " << setup.name);
+    const LeafOptions& lf = setup.options.leaves;
+    CHECK(lf.arrangement != LeafArrangement::CrossedPair);
+
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+    const TexturedMeshResult bark = GenerateTreeMesh(setup.options, skeleton);
+    const float height = bark.local_bounds.max.y - bark.local_bounds.min.y;
+    REQUIRE(height > 0.0f);
+
+    const float world_leaf_m = lf.size * kPreviewHeight / height;
+    const int quads_per_site = QuadsPerLeafSite(lf);
+
+    WARN(setup.name << ": bark_height=" << height
+                     << " world_leaf_m=" << world_leaf_m
+                     << " count=" << lf.count
+                     << " quads_per_site=" << quads_per_site);
+
+    // Band keyed off silhouette: PineSprig is a small sprig cluster (bigger
+    // card, coarser texture), Bush is a fine fat-oval leaf, everything else
+    // (Oak/Ash/Aspen) is a deciduous single-leaflet card.
+    float lo, hi;
+    if (lf.silhouette == LeafSilhouette::PineSprig) {
+      lo = 0.15f; hi = 0.35f;
+    } else if (lf.silhouette == LeafSilhouette::Bush) {
+      lo = 0.08f; hi = 0.20f;
+    } else {
+      lo = 0.10f; hi = 0.25f;
+    }
+    CHECK(world_leaf_m >= lo);
+    CHECK(world_leaf_m <= hi);
+  }
+}
+
 TEST_CASE("GenerateLeafMesh: deterministic") {
   const TexturedMeshResult a = GenerateLeafMesh(OakPreset());
   const TexturedMeshResult b = GenerateLeafMesh(OakPreset());

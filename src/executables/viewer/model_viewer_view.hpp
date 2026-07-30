@@ -7,6 +7,7 @@
 // slot in. Lives in src/executables/viewer/ (an app, not the engine).
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -90,6 +91,10 @@ class ModelViewerView : public AppView {
   // Fresh graph: re-mirror lighting, add the gray floor at y=0, then add the
   // selected mesh generator's entity. Reframes the orbit.
   void RebuildScene();
+  // Returns the cached per-silhouette leaf-card view (see leaf_views_ below).
+  wgpu::TextureView LeafViewFor(LeafSilhouette shape) const {
+    return leaf_views_[static_cast<size_t>(shape)];
+  }
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -120,12 +125,17 @@ class ModelViewerView : public AppView {
   DeferredMaterial checker_mat_;  // UV-checker debug material for the sphere
   DeferredMaterial bark_mat_;     // Solid bark color for catalog tree meshes
 
-  // Leaf-card texture: a white RGB silhouette (alpha = leaf shape), built once
-  // in Initialize and coloured per-tree via the AlphaCutout material tint. The
-  // texture keeps itself alive via leaf_view_; leaf_sampler_ is a trilinear +
-  // repeat sampler (mip-using) so the alpha mip chain is sampled.
-  wgpu::Texture leaf_texture_;
-  wgpu::TextureView leaf_view_;
+  // Per-silhouette leaf-card textures: white RGB (alpha = leaf shape), one CPU
+  // mip chain per LeafSilhouette built once in Initialize and shared by every
+  // tree of that silhouette, coloured per-tree via the AlphaCutout/foliage
+  // material tint. Indexed by static_cast<size_t>(LeafSilhouette) (see
+  // LeafViewFor above); leaf_textures_ owns the GPU textures (leaf_views_
+  // alone doesn't keep them alive). leaf_sampler_ is one shared trilinear +
+  // repeat + aniso-16 sampler so every silhouette's mip chain is sampled the
+  // same way.
+  static constexpr size_t kLeafSilhouetteCount = 5;
+  std::array<wgpu::Texture, kLeafSilhouetteCount> leaf_textures_;
+  std::array<wgpu::TextureView, kLeafSilhouetteCount> leaf_views_;
   wgpu::Sampler leaf_sampler_;
 
   // GPU pipeline generator, stashed from Initialize()'s RenderContext --
