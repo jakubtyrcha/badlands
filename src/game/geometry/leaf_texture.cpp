@@ -54,15 +54,15 @@ float CordateHalfWidth(float t) {  // Aspen: round/broad, short pointed tip.
 // slowly-varying envelope around a uniform stripe field, so it downsamples
 // predictably through the mip chain instead of moire-ing at coarse levels.
 float PineSprigAlpha(float u, float t, float v, float edge) {
-  constexpr float kStemHalfWidth = 0.03f;
+  constexpr float kStemHalfWidth = 0.04f;  // (screenshot-tuned) slightly wider stem column
   const float stem_a = AlphaFromHalfWidth(u, kStemHalfWidth, edge);
 
   const float theta = 55.0f * kPi / 180.0f;
   const float sin_t = std::sin(theta);
   const float cos_t = std::cos(theta);
   const float cot_t = cos_t / sin_t;
-  constexpr float kPeriod = 0.15625f;           // ~10px at size 128 (10 * 2/128)
-  constexpr float kStrokeHalfWidth = 0.02734f;  // ~3.5px full width at size 128 (>= the required 3px)
+  constexpr float kPeriod = 0.125f;             // ~8px at size 128 (screenshot-tuned, ~20% tighter than 10px)
+  constexpr float kStrokeHalfWidth = 0.041f;    // ~5px full width at size 128 (screenshot-tuned, x1.5 the prior 3.5px)
   constexpr float kReach = 0.20f;               // longest (base) lateral needle reach past the stem edge
 
   const float out = std::fabs(u) - kStemHalfWidth;       // lateral distance outside the stem edge

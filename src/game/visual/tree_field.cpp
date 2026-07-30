@@ -19,9 +19,11 @@ namespace badlands {
 
 namespace {
 
-// mesh_lod.hpp's kDefaultLodRatios sized to GpuInstanceRenderer::kMaxLods:
-// one ratio per LOD bucket this field builds below.
+// mesh_lod.hpp's kDefaultLodRatios/kLeafLodRatios sized to
+// GpuInstanceRenderer::kMaxLods: one ratio per LOD bucket this field builds
+// below.
 static_assert(kDefaultLodRatios.size() == GpuInstanceRenderer::kMaxLods);
+static_assert(kLeafLodRatios.size() == GpuInstanceRenderer::kMaxLods);
 
 // Matte roughness for the bark ARM texture -- same rationale/value as
 // model_viewer_view.cpp's single-tree bark_mat_ (SolidColor(..., 0.9f)).
@@ -168,9 +170,9 @@ std::unique_ptr<TreeField> BuildTreeField(
 
     if (kDefaultLodRatios[lod] < 1.0f) {
       SimplifyInPlace(bark_mesh, kDefaultLodRatios[lod]);
-      if (has_leaves) {
-        SimplifyInPlace(leaves_mesh, kDefaultLodRatios[lod]);
-      }
+    }
+    if (has_leaves && kLeafLodRatios[lod] < 1.0f) {
+      SimplifyInPlace(leaves_mesh, kLeafLodRatios[lod]);
     }
 
     if (bark_mesh.indices.empty()) {

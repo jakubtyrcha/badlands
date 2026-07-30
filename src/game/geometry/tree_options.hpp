@@ -84,7 +84,7 @@ inline TreeOptions OakPreset() {
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = 0.02f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 10.0f;
   o.leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=3, .card_aspect=0.75f,
-              .count=90, .start=0.16f, .size=0.759f, .size_variance=0.7f, .angle=42.0f,
+              .count=135, .start=0.16f, .size=0.759f, .size_variance=0.7f, .angle=42.0f,
               .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
               .transmission_strength=0.65f, .silhouette=LeafSilhouette::Oak};
   return o;
@@ -106,8 +106,8 @@ inline TreeOptions PinePreset() {
   o.twist      = {0.0f, 0.0f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = -0.003f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 1.0f;
-  o.leaves = {.arrangement=LeafArrangement::AxialFins, .blade_count=3, .card_aspect=0.3f,
-              .count=120, .start=0.09f, .size=1.547f, .size_variance=0.201f, .angle=39.0f,
+  o.leaves = {.arrangement=LeafArrangement::AxialFins, .blade_count=3, .card_aspect=0.45f,
+              .count=280, .start=0.09f, .size=2.043f, .size_variance=0.201f, .angle=39.0f,
               .alpha_cutoff=0.35f, .tint={0.16f,0.40f,0.24f}, .transmission_tint={0.32f,0.46f,0.12f},
               .transmission_strength=0.28f, .silhouette=LeafSilhouette::PineSprig, .tip_leaf=false};
   return o;

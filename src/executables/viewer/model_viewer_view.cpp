@@ -346,17 +346,16 @@ void ModelViewerView::RebuildScene() {
       bark.mesh.indices = std::move(s.indices);
       bark.mesh.vertex_count = s.vertex_count;
       bark.mesh.dirty = true;
-
-      if (leaves.mesh.vertex_count > 0) {
-        SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
-                                        kTexturedMeshFloatsPerVertex,
-                                        leaves.mesh.indices,
-                                        kDefaultLodRatios[lod_level_]);
-        leaves.mesh.vertices = std::move(ls.vertices);
-        leaves.mesh.indices = std::move(ls.indices);
-        leaves.mesh.vertex_count = ls.vertex_count;
-        leaves.mesh.dirty = true;
-      }
+    }
+    if (leaves.mesh.vertex_count > 0 && kLeafLodRatios[lod_level_] < 1.0f) {
+      SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
+                                      kTexturedMeshFloatsPerVertex,
+                                      leaves.mesh.indices,
+                                      kLeafLodRatios[lod_level_]);
+      leaves.mesh.vertices = std::move(ls.vertices);
+      leaves.mesh.indices = std::move(ls.indices);
+      leaves.mesh.vertex_count = ls.vertex_count;
+      leaves.mesh.dirty = true;
     }
     bark_tris_ = static_cast<int>(bark.mesh.indices.size() / 3);
     leaf_tris_ = static_cast<int>(leaves.mesh.indices.size() / 3);
