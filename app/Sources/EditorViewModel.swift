@@ -75,7 +75,14 @@ final class EditorViewModel {
         if mode == .modify, m != .modify, isDragging {
             switch activeRadialTool {
             case .move: editor.endDrag()
-            case .scale: editor.endScale()
+            case .scale:
+                editor.endScale()
+                // Mirror handleMouseUp's .scale arm: an aborted scale gesture
+                // reverts to .move too, so the radial menu doesn't keep
+                // showing "Scale" active (and the next modify-mode drag
+                // doesn't silently start a fresh beginScale) after returning
+                // to .modify with no radial-menu interaction to explain why.
+                activeRadialTool = .move
             }
             isDragging = false
         }
