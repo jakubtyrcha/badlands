@@ -7,50 +7,14 @@
 
 namespace badlands::mapgen {
 
-int32_t SourceSets::add() {
-  const int32_t id = static_cast<int32_t>(parent_.size());
-  parent_.push_back(id);
-  return id;
-}
-
-int32_t SourceSets::find(int32_t id) {
-  // Path compression. Iterative rather than recursive: a long merge chain
-  // should not risk the stack.
-  int32_t root = id;
-  while (parent_[static_cast<size_t>(root)] != root)
-    root = parent_[static_cast<size_t>(root)];
-  while (parent_[static_cast<size_t>(id)] != root) {
-    const int32_t next = parent_[static_cast<size_t>(id)];
-    parent_[static_cast<size_t>(id)] = root;
-    id = next;
-  }
-  return root;
-}
-
-void SourceSets::merge(int32_t a, int32_t b) {
-  const int32_t ra = find(a), rb = find(b);
-  if (ra == rb) return;
-  // By SMALLER root, not by rank or size: the representative must not depend
-  // on the order unions happen to be applied, or agent processing order would
-  // leak into which id every cell resolves to.
-  const int32_t lo = std::min(ra, rb), hi = std::max(ra, rb);
-  parent_[static_cast<size_t>(hi)] = lo;
-}
-
 namespace {
 
 // Compass directions in CIRCULAR order from +x, so index arithmetic mod 8 is
 // angular arithmetic. hydrology.cpp's dx8/dy8 are grouped orthogonals-then-
-// diagonals and are NOT circular, so they cannot be reused here. Declared in
-// the header because trail_dir indexes into them.
+// diagonals and are NOT circular, so they cannot be reused here.
 constexpr const int* kDx = kCanalDx;
 constexpr const int* kDy = kCanalDy;
 constexpr float kQuarterPi = 0.78539816339f;
-
-bool is_diagonal(int d) { return kDx[d] != 0 && kDy[d] != 0; }
-float step_len_of(int d, float texel_m) {
-  return texel_m * (is_diagonal(d) ? 1.41421356f : 1.0f);
-}
 
 // Shortest turn between two compass indices, in 45-degree steps (0..4).
 int turn_steps(int from, int to) {
@@ -80,10 +44,9 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
   CanalResult out;
   const int w = B.width, ht = B.height;
   if (w <= 0 || ht <= 0) return out;
-  const size_t n = B.data.size();
-  out.trail_discharge_m3_s = Field2D<float>(w, ht, 0.0f);
   out.trail_source = Field2D<int32_t>(w, ht, -1);
-  if (p.canal_seed_area_m2 <= 0.0f || p.canal_slope <= 0.0f) return out;
+  out.trail_dir = Field2D<uint8_t>(w, ht, kCanalNoDir);
+  if (p.canal_seed_area_m2 <= 0.0f || p.canal_depth_m <= 0.0f) return out;
 
   // --- seeding: highland edges carrying enough flow ---
   const FlowRouting r = route_flow(B, texel_m, kEpsilonM);
@@ -111,32 +74,18 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
     return a < b;
   });
 
-  // Reference discharge for the meander scaling, DERIVED rather than a
-  // parameter so it cannot drift out of step with the seeding threshold.
-  const float q_ref = std::max(p.runoff_m_per_s * p.canal_seed_area_m2, 1e-12f);
+  // Pre-canal terrain. Banks are measured against this, so one canal's trench
+  // cannot become the next one's idea of ground level.
+  const Field2D<float> B0 = B;
   const int max_turn = std::clamp(
       static_cast<int>(std::lround(p.canal_max_turn_angle_rad / kQuarterPi)), 1, 3);
   const float sense = p.canal_sense_distance_texels;
-
-  // One shared stamp array rather than a per-agent visited set: agents run
-  // sequentially, so holding the agent id gives O(1) lookup and no per-agent
-  // allocation.
-  // Pre-canal terrain: "local ground" for the depth target. Using the live B
-  // would let one canal's trench become the next one's idea of ground level.
-  const Field2D<float> B0 = B;
-  std::vector<int32_t> visit_stamp(n, -1);
-  // 0xFF = "no onward direction". A trail's LAST cell never gets an outgoing
-  // direction — the laying agent stamps it on the cell it leaves, then
-  // terminates — so without a sentinel that cell would read as 0 (east) and
-  // send a following agent stepping blindly off the trunk.
-  out.trail_dir = Field2D<uint8_t>(w, ht, kCanalNoDir);
-  Field2D<uint8_t>& trail_dir = out.trail_dir;
   std::vector<int> survivors;
 
   for (const int seed_cell : seeds) {
-    const int32_t agent = out.sets.add();
+    if (out.trail_source.data[static_cast<size_t>(seed_cell)] >= 0) continue;
+    const int32_t agent = out.stats.agents++;
     Rng rng(seed, static_cast<uint32_t>(seed_cell));
-    ++out.stats.agents;
 
     int dir = 0;  // start heading downstream, from the routing already computed
     const int32_t rcv = r.receiver[static_cast<size_t>(seed_cell)];
@@ -147,215 +96,120 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
     }
 
     int cell = seed_cell;
-    float q = p.runoff_m_per_s * area.data[static_cast<size_t>(seed_cell)];
-    float bed = B.data[static_cast<size_t>(cell)];  // the channel bed, absolute
-    bool on_trail = false;
-    // Did this agent enter `cell` as virgin ground? Only then does it own the
-    // cell's outgoing direction. Stamping unconditionally lets an agent that
-    // steers over its OWN network's cells (same root, so no merge, so
-    // on_trail stays false) overwrite their stored direction with its own
-    // heading — which can leave a trunk cell pointing back UPHILL at its
-    // parent.
-    bool owns_cell = true;
-    visit_stamp[static_cast<size_t>(cell)] = agent;
+    out.trail_source.data[static_cast<size_t>(cell)] = agent;
     CanalEnd end = CanalEnd::StepCap;
     int steps = 0;
 
     for (; steps < p.canal_max_steps; ++steps) {
       const int cx = cell % w, cy = cell / w;
-      int chosen = -1;
 
-      if (on_trail) {
-        // Steering is OFF while on a trail. After merging, every cell ahead is
-        // same-source, and same-source repulsion would shove the agent right
-        // back off the trunk it just joined.
-        chosen = trail_dir.data[static_cast<size_t>(cell)];
-        if (chosen == kCanalNoDir) {
-          // The trunk ends here — it left the map or was absorbed. Follow it
-          // no further; stepping on would be a blind move onto whatever
-          // happens to lie ahead.
-          end = CanalEnd::TrunkEnd;
-          break;
+      // Speed grows slowly with distance from the source, and speed is what
+      // resists turning — so a reach far from its head sweeps wider arcs than
+      // a headwater does, with no discharge model needed in this pass.
+      const float w_turn_eff =
+          p.canal_w_turn * (1.0f + p.canal_speed_gain * static_cast<float>(steps));
+
+      int chosen = -1, offmap_dir = -1;
+      float best = 0.0f;
+      survivors.clear();
+      for (int t = -max_turn; t <= max_turn; ++t) {
+        const int d = (dir + t + 8) % 8;
+        const int nx = cx + kDx[d], ny = cy + kDy[d];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= ht) {
+          if (offmap_dir < 0) offmap_dir = d;  // leaving the map is a real option
+          continue;
         }
-        // Rule 2 applies on this path TOO. Skipping it let a trunk lead an
-        // agent onto a mountain and cut it down to the agent's plains-level
-        // ref — measured as a 37 m trench on seed 1 before this check.
-        const int tnx = cx + kDx[chosen], tny = cy + kDy[chosen];
-        if (tnx >= 0 && tny >= 0 && tnx < w && tny < ht &&
-            B.data[static_cast<size_t>(tny) * w + tnx] > bed + p.canal_max_climb_m) {
-          end = CanalEnd::TrunkEnd;
-          break;
-        }
-      } else {
-        const float w_turn_eff = p.canal_w_turn * std::sqrt(q / q_ref);
-        float best = 0.0f;
-        int offmap_dir = -1;
-        survivors.clear();
-        for (int t = -max_turn; t <= max_turn; ++t) {
-          const int d = (dir + t + 8) % 8;
-          const int nx = cx + kDx[d], ny = cy + kDy[d];
-          if (nx < 0 || ny < 0 || nx >= w || ny >= ht) {
-            // Off-map is a real destination — water leaves at base level — not
-            // a candidate to discard. Remembering it is what stops an agent
-            // that has reached the border from reporting BoxedIn: the LeftMap
-            // check below the scoring can never fire for a direction that was
-            // filtered out before it could be chosen.
-            if (offmap_dir < 0) offmap_dir = d;
-            continue;
-          }
-          const size_t j = static_cast<size_t>(ny) * w + nx;
-          if (visit_stamp[j] == agent) continue;  // Rule 1: hard, it is the loop guarantee
-          // Rising ground is PRICED, not filtered. Two earlier shapes of this
-          // both failed, and the measurements are why:
-          //   - as a hard veto at 3 m it stranded 7 of the 9 non-merged agents
-          //     on seed 2, because an agent seeded on the highland edge faces
-          //     the 0.75 m/m cone and a three-candidate turn cone cannot swing
-          //     away in time;
-          //   - filtering it out and falling back to the least-bad option when
-          //     nothing else survived fixed the stranding but let cornered
-          //     agents tunnel mountains: max carve went back to 31 m, because
-          //     a filtered candidate never reaches w_dig to be charged for.
-          // Scoring every candidate lets w_dig do the work it exists for: a
-          // 30 m wall costs 30 * w_dig against a flat neighbour's ~0, so it
-          // only ever wins when there is genuinely nothing else. max_climb_m
-          // survives as a cap on the absurd, not as the primary mechanism.
-          if (B.data[j] > bed + p.canal_max_climb_m) continue;
-          survivors.push_back(d);
+        const size_t j = static_cast<size_t>(ny) * w + nx;
+        survivors.push_back(d);
 
-          const float ref_next =
-              std::min(B0.data[j] - p.canal_depth_m,
-                       bed - p.canal_slope * step_len_of(d, texel_m));
-          const float drop = B.data[static_cast<size_t>(cell)] - B.data[j];
-          const float excavate = std::max(0.0f, B.data[j] - ref_next);
+        // Every term in METRES, so the weights read as exchange rates rather
+        // than opaque gains.
+        const float drop = B.data[static_cast<size_t>(cell)] - B.data[j];
+        // What this step would cost to dig against the bank-relative target.
+        const float excavate =
+            std::max(0.0f, B.data[j] - (B0.data[j] - p.canal_depth_m));
 
-          // Water lookahead, signed by relative level and source-aware: below
-          // attracts, above repels, and same-source repels outright — that is
-          // the network folding back on itself, not a confluence.
-          float water_pull = 0.0f;
-          const int sx = cx + static_cast<int>(std::lround(kDx[d] * sense));
-          const int sy = cy + static_cast<int>(std::lround(kDy[d] * sense));
-          if (sx >= 0 && sy >= 0 && sx < w && sy < ht) {
-            const size_t si = static_cast<size_t>(sy) * w + sx;
-            const int32_t ssrc = out.trail_source.data[si];
-            if (ssrc >= 0 || lake_mask.data[si]) {
-              // find(), never a raw id compare — trail ids go stale on merge.
-              if (ssrc >= 0 && out.sets.same(ssrc, agent)) {
-                water_pull = -p.canal_w_water_m;
-              } else {
-                const float wd = B.data[static_cast<size_t>(cell)] - B.data[si];
-                water_pull = p.canal_w_water_m *
-                             std::clamp(wd / p.canal_water_falloff_m, -1.0f, 1.0f);
-              }
-            }
-          }
-
-          const float score =
-              p.canal_w_flow * drop - p.canal_w_dig * excavate + water_pull -
-              w_turn_eff * static_cast<float>(turn_steps(dir, d)) * kQuarterPi;
-          if (chosen < 0 || score > best) {
-            best = score;
-            chosen = d;
+        // Water ahead attracts, a lower one more than a higher one. There is
+        // deliberately NO same-source repulsion: an agent curling back into
+        // its own trail closes a meander and leaves an island, which is wanted
+        // here rather than a braid to prevent.
+        float water_pull = 0.0f;
+        const int sx = cx + static_cast<int>(std::lround(kDx[d] * sense));
+        const int sy = cy + static_cast<int>(std::lround(kDy[d] * sense));
+        if (sx >= 0 && sy >= 0 && sx < w && sy < ht) {
+          const size_t si = static_cast<size_t>(sy) * w + sx;
+          if (out.trail_source.data[si] >= 0 || lake_mask.data[si]) {
+            const float wd = B.data[static_cast<size_t>(cell)] - B.data[si];
+            water_pull = p.canal_w_water_m *
+                         std::clamp(wd / p.canal_water_falloff_m, -1.0f, 1.0f);
           }
         }
-        if (chosen < 0) {
-          // Prefer staying on the map while any in-bounds step survives; only
-          // once none does is running off the edge the answer.
-          if (offmap_dir >= 0) {
-            trail_dir.data[static_cast<size_t>(cell)] = static_cast<uint8_t>(offmap_dir);
-            end = CanalEnd::LeftMap;
-            break;
-          }
-          end = CanalEnd::BoxedIn;
-          break;
+
+        const float score =
+            p.canal_w_flow * drop - p.canal_w_dig * excavate + water_pull -
+            w_turn_eff * static_cast<float>(turn_steps(dir, d)) * kQuarterPi;
+        if (chosen < 0 || score > best) {
+          best = score;
+          chosen = d;
         }
-        // `survivors` is EMPTY whenever the climb fallback fired — every
-        // in-bounds candidate was too tall — so the emptiness guard is load
-        // bearing, not defensive: `% survivors.size()` is a modulo by zero.
-        if (!survivors.empty() && rng.unit() < p.canal_wander_chance)
-          chosen = survivors[rng.next() % survivors.size()];
       }
+      if (chosen < 0) {
+        if (offmap_dir >= 0) {
+          out.trail_dir.data[static_cast<size_t>(cell)] = static_cast<uint8_t>(offmap_dir);
+          end = CanalEnd::LeftMap;
+        } else {
+          end = CanalEnd::Merged;  // hemmed in against the border; a terminus
+        }
+        break;
+      }
+      if (!survivors.empty() && rng.unit() < p.canal_wander_chance)
+        chosen = survivors[rng.next() % survivors.size()];
 
       const int nx = cx + kDx[chosen], ny = cy + kDy[chosen];
+      out.trail_dir.data[static_cast<size_t>(cell)] = static_cast<uint8_t>(chosen);
       if (nx < 0 || ny < 0 || nx >= w || ny >= ht) {
         end = CanalEnd::LeftMap;
         break;
       }
       const size_t next = static_cast<size_t>(ny) * w + nx;
-      if (visit_stamp[next] == agent) {  // Rule 1 again, for the on-trail path
-        end = CanalEnd::BoxedIn;
+
+      // TOUCHING WATER KILLS THE AGENT, and it does NOT carve that cell. One
+      // rule doing three jobs: a tributary ends where it meets a trunk rather
+      // than following and re-excavating it (which snowballed depth across
+      // agents); an agent reaching a lake is absorbed; and an agent looping
+      // back into its own trail closes a meander and leaves an island.
+      if (out.trail_source.data[next] >= 0) {
+        end = CanalEnd::Merged;
         break;
       }
-
-      // Record the outgoing direction only once the move is COMMITTED.
-      // Writing it before the bounds and Rule-1 checks recorded steps the flow
-      // never took, leaving cells pointing at a neighbour they never drained
-      // to — including uphill.
-      if (owns_cell || on_trail)
-        trail_dir.data[static_cast<size_t>(cell)] = static_cast<uint8_t>(chosen);
-
-      // The bed is RELATIVE to local ground, not an absolute reference that
-      // only falls. `want` re-anchors to the pre-canal terrain every step, so
-      // a descending path keeps the same incision instead of accumulating an
-      // arithmetic series of decrements; `flow` supplies just enough drop to
-      // keep water moving where the ground would otherwise rise.
-      const float step_len = step_len_of(chosen, texel_m);
-      const float want = B0.data[next] - p.canal_depth_m;
-      const float flow = bed - p.canal_slope * step_len;
-      float next_bed = std::min(want, flow);
-      // Never trench deeper than the cap below local ground. A canal that
-      // follows a valley down and then climbs out would otherwise cut the far
-      // wall all the way to the valley-floor reference — 15-19 m, measured.
-      const float floor_bed = B0.data[next] - p.canal_max_depth_m;
-      if (next_bed < floor_bed) {
-        next_bed = floor_bed;
-        if (next_bed >= bed) {  // cannot descend without exceeding the cap
-          end = CanalEnd::DepthCapped;
-          break;
-        }
-      }
-      const float before = B.data[next];
-      if (before > next_bed) {
-        B.data[next] = next_bed;
-        out.stats.total_excavated_m += before - next_bed;
-        out.stats.max_carve_m = std::max(out.stats.max_carve_m, before - next_bed);
-      }
-      bed = std::min(next_bed, B.data[next]);
-      if (B.data[next] > B.data[static_cast<size_t>(cell)] + 1e-6f)
-        ++out.stats.uphill_carve_steps;  // the descent guarantee, at carve time
-
-      // Merge BEFORE overwriting the trail, and across differing roots only:
-      // adding discharge to same-source water would create water from nothing.
-      const int32_t hit = out.trail_source.data[next];
-      if (hit >= 0 && !out.sets.same(hit, agent)) {
-        out.sets.merge(agent, hit);
-        q += out.trail_discharge_m3_s.data[next];
-        on_trail = true;
-        ++out.stats.merges;
-      } else if (hit >= 0 && !on_trail) {
-        // Stepping onto our OWN network while steering freely — a fold-back,
-        // which is what the source rule exists to prevent. Note the !on_trail
-        // guard: once merged, every cell ahead IS same-source by construction,
-        // so counting those would make this fire constantly on normal travel
-        // rather than on the failure it is meant to catch.
-        ++out.stats.merges_same_root;
-      }
-
-      visit_stamp[next] = agent;
-      out.trail_source.data[next] = agent;
-      out.trail_discharge_m3_s.data[next] =
-          std::max(out.trail_discharge_m3_s.data[next], q);
-      // Only stamp an outgoing direction on a VIRGIN cell; an existing trail
-      // already knows where it goes. Leave it at the sentinel until this agent
-      // actually leaves the cell.
-      if (hit < 0) trail_dir.data[next] = kCanalNoDir;
-      owns_cell = hit < 0;
-      dir = chosen;
-      cell = static_cast<int>(next);
-
       if (lake_mask.data[next]) {
         end = CanalEnd::Lake;
         break;
       }
+
+      // Carve to a fixed depth below the BANKS — the cells either side of the
+      // direction of travel, measured on the pre-canal terrain. Purely local,
+      // so depth cannot accumulate along the path however far the canal runs.
+      // A carried reference is what produced 15-19 m trenches and depth that
+      // scaled with length.
+      const int left = (chosen + 2) % 8, right = (chosen + 6) % 8;
+      float bank = B0.data[next];
+      for (const int side : {left, right}) {
+        const int bx = nx + kDx[side], by = ny + kDy[side];
+        if (bx >= 0 && by >= 0 && bx < w && by < ht)
+          bank = std::min(bank, B0.data[static_cast<size_t>(by) * w + bx]);
+      }
+      const float bed = bank - p.canal_depth_m;
+      const float before = B.data[next];
+      if (before > bed) {
+        B.data[next] = bed;
+        out.stats.total_excavated_m += before - bed;
+        out.stats.max_carve_m = std::max(out.stats.max_carve_m, before - bed);
+      }
+
+      out.trail_source.data[next] = agent;
+      dir = chosen;
+      cell = static_cast<int>(next);
     }
     out.stats.longest_path = std::max(out.stats.longest_path, steps);
     ++out.stats.ends[static_cast<int>(end)];

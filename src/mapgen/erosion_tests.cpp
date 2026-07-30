@@ -836,7 +836,7 @@ TEST_CASE("generate_map: debug sink sees the full stage sequence") {
   generate_map(p, &rec);
   const std::vector<std::string> expected = {
       "bedrock", "biome-sim", "cone", "cavities", "cavities-height",
-      "canals", "canal-flow", "sediment-init", "micro-fill",
+      "canals", "sediment-init", "micro-fill",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
       "loop-height", "loop-flow", "loop-sediment", "loop-lakes",
       "water", "detail-delta", "river", "final-height", "biome"};

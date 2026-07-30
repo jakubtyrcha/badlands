@@ -220,7 +220,6 @@ MapArtifacts generate_map(const MapGenParams& params, MapDebugSink* sink) {
   const auto canals = carve_canals(B, basins, dist, ep, texel_sim, params.seed);
   if (sink) {
     sink->dump("canals", seq++, B);
-    sink->dump("canal-flow", seq++, canals.trail_discharge_m3_s);
   }
   auto S = init_sediment(dist, basins, ep, texel_sim, origin_sim, params.seed);
   if (sink) sink->dump("sediment-init", seq++, S);

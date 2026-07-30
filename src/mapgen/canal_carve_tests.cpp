@@ -7,94 +7,12 @@
 
 using namespace badlands::mapgen;
 
-// --- source aliasing --------------------------------------------------------
-//
-// These come first on purpose. Trail cells are never rewritten on merge, so
-// their source ids go stale, and a raw `cell.source == agent.source`
-// comparison passes essentially every other test in the suite — it only
-// misbehaves on cells laid BEFORE a merge. These are constructed so the raw
-// comparison fails.
-
-TEST_CASE("SourceSets: a stale id resolves to the merged root") {
-  SourceSets s;
-  const int32_t a = s.add();
-  const int32_t b = s.add();
-  REQUIRE(a != b);
-  REQUIRE_FALSE(s.same(a, b));
-
-  s.merge(a, b);
-
-  // THE case: a trail cell still carries the literal id `a`, while the agent
-  // travelling over it carries `b`. The raw ids differ — only the roots agree.
-  // A raw comparison would call this a DIFFERENT source, attract, and braid.
-  REQUIRE(a != b);           // the ids genuinely differ...
-  REQUIRE(s.same(a, b));     // ...and only find() sees that they are one
-}
-
-TEST_CASE("SourceSets: aliasing is transitive across three networks") {
-  SourceSets s;
-  const int32_t a = s.add(), b = s.add(), c = s.add();
-  s.merge(a, b);  // A joins B
-  s.merge(c, a);  // C joins A, which is already B
-  // C and B never merged directly, yet must read as one source.
-  REQUIRE(s.same(b, c));
-  REQUIRE(s.same(a, c));
-  REQUIRE(s.find(a) == s.find(b));
-  REQUIRE(s.find(b) == s.find(c));
-}
-
-TEST_CASE("SourceSets: the root does not depend on merge order") {
-  // Union by SMALLER ROOT rather than by rank or size, so the representative
-  // is reproducible however the unions are sequenced. Without that, agent
-  // processing order would leak into which id every cell resolves to.
-  auto build = [](bool reversed) {
-    SourceSets s;
-    std::vector<int32_t> id;
-    for (int i = 0; i < 5; ++i) id.push_back(s.add());
-    if (reversed) {
-      s.merge(id[4], id[3]);
-      s.merge(id[2], id[4]);
-      s.merge(id[0], id[2]);
-      s.merge(id[1], id[0]);
-    } else {
-      s.merge(id[0], id[1]);
-      s.merge(id[2], id[0]);
-      s.merge(id[3], id[4]);
-      s.merge(id[4], id[2]);
-    }
-    std::vector<int32_t> roots;
-    for (int32_t i : id) roots.push_back(s.find(i));
-    return roots;
-  };
-  const auto forward = build(false);
-  const auto reverse = build(true);
-  REQUIRE(forward == reverse);
-  for (int32_t r : forward) REQUIRE(r == forward[0]);  // all one set
-}
-
-TEST_CASE("SourceSets: disjoint networks stay disjoint") {
-  SourceSets s;
-  const int32_t a = s.add(), b = s.add(), c = s.add(), d = s.add();
-  s.merge(a, b);
-  s.merge(c, d);
-  REQUIRE(s.same(a, b));
-  REQUIRE(s.same(c, d));
-  // Different catchments: these must still ATTRACT each other, so they must
-  // not be conflated.
-  REQUIRE_FALSE(s.same(a, c));
-  REQUIRE_FALSE(s.same(b, d));
-}
-
-TEST_CASE("SourceSets: find is idempotent and merge is a no-op within a set") {
-  SourceSets s;
-  const int32_t a = s.add(), b = s.add();
-  s.merge(a, b);
-  const int32_t root = s.find(a);
-  REQUIRE(s.find(root) == root);
-  s.merge(a, b);  // already one set
-  REQUIRE(s.find(a) == root);
-  REQUIRE(s.find(b) == root);
-}
+// The DSU / source-aliasing suite that used to sit here is GONE, and
+// deliberately so rather than by oversight. Its only consumer was same-source
+// REPULSION, and the design no longer repels: an agent that curls back into
+// its own trail is now killed on contact, closing a meander and leaving an
+// island. Nothing merges either — touching water ends an agent — so no ids are
+// ever unioned and there are no stale aliases left to resolve.
 
 // --- agent behaviour --------------------------------------------------------
 
@@ -160,8 +78,6 @@ TEST_CASE("carve_canals: a near-flat plain gets a canal that reaches the map edg
   REQUIRE(res.stats.ends[static_cast<int>(CanalEnd::LeftMap)] > 0);
   // Rule 1 forbids non-termination outright, so a step-cap hit is a bug.
   REQUIRE(res.stats.ends[static_cast<int>(CanalEnd::StepCap)] == 0);
-  // A braid would mean the source rule failed.
-  REQUIRE(res.stats.merges_same_root == 0);
 
   int cut = 0;
   for (size_t i = 0; i < t.B.data.size(); ++i) {
@@ -171,25 +87,11 @@ TEST_CASE("carve_canals: a near-flat plain gets a canal that reaches the map edg
   REQUIRE(cut > 0);
 }
 
-TEST_CASE("carve_canals: every carved step goes downhill") {
-  // THE structural guarantee, asserted at CARVE TIME through the counter
-  // rather than by walking the finished network.
-  //
-  // Walking afterwards would be the wrong test. The guarantee is per-agent at
-  // the moment of cutting, and the height field is SHARED: a later agent
-  // crossing a cell with a lower ref deepens it, which can invert the
-  // relationship inside an EARLIER agent's channel. Those are genuine uphill
-  // steps in the finished field that were never carved as such — a limitation
-  // of the design (recorded in the spec), not a violation of the rule. Testing
-  // at carve time separates the two.
-  for (const float tilt : {0.0f, 0.001f, 0.02f, 0.5f}) {
-    auto t = make_plain(48, tilt);
-    const auto res = carve_canals(t.B, t.lake, t.dist, canal_params(), 1.0f, 11);
-    INFO("tilt " << tilt << ", agents " << res.stats.agents);
-    REQUIRE(res.stats.agents > 0);
-    REQUIRE(res.stats.uphill_carve_steps == 0);
-  }
-}
+// The "every carved step goes downhill" case is gone with the guarantee it
+// tested. This pass is a primer: it makes a channel relative to its banks and
+// leaves monotone flow to the physical sim. Depth is now bounded by
+// construction instead (see the bank-depth test below), which is the property
+// that actually matters here.
 
 TEST_CASE("carve_canals: many agents still only ever lower the ground") {
   // The multi-agent weaker property. Per-canal monotonicity is not asserted
@@ -214,29 +116,40 @@ TEST_CASE("carve_canals: an agent is absorbed by a lake ahead of it") {
   REQUIRE(res.stats.ends[static_cast<int>(CanalEnd::Lake)] > 0);
 }
 
-TEST_CASE("carve_canals: steep ground is barely touched") {
-  // Where the ground already falls faster than the forced descent there is
-  // almost nothing to fix, and `min` must never RAISE terrain.
+TEST_CASE("carve_canals: depth is bounded by the bank target, not by length") {
+  // THE property this design exists for. The bed is placed relative to the two
+  // cells either side of the channel on the PRE-CANAL terrain, so a canal is
+  // one bank-depth deep wherever it runs. Nothing is carried between steps, so
+  // there is nothing to accumulate.
   //
-  // Not exactly zero, though: a step taken ACROSS the slope is level in that
-  // direction, so it still gets the one canal_slope of forced descent. The
-  // bound is therefore a couple of steps' worth, not nothing — asserting zero
-  // would be asserting that agents only ever move straight downhill.
-  auto t = make_plain(48, 0.5f);  // 0.5 m/m, far steeper than canal_slope
-  const auto before = t.B;
+  // A carried reference previously produced 15-19 m trenches, and depth that
+  // scaled with path length: 0.52 m on a 48 grid against 2.46 m on a 96 grid.
+  // Both grids are checked here for exactly that reason.
   auto p = canal_params();
-  const auto res = carve_canals(t.B, t.lake, t.dist, p, 1.0f, 5);
-  REQUIRE(res.stats.agents > 0);
-  // The bound is max_climb_m, not zero and not one canal_slope: an agent is
-  // ALLOWED to step uphill (the user's rule — the carve is what makes it
-  // downhill), and on 0.5 m/m ground one uphill step is half a metre of rock.
-  // What must hold is that terrain is never RAISED and never cut deeper than a
-  // single permitted climb.
-  for (size_t i = 0; i < t.B.data.size(); ++i) {
-    REQUIRE(t.B.data[i] <= before.data[i] + 1e-6f);          // never raised
-    REQUIRE(t.B.data[i] >= before.data[i] - p.canal_max_climb_m);
+  for (const int n : {48, 96}) {
+    for (const float tilt : {0.0f, 0.001f, 0.01f, 0.1f}) {
+      auto t = make_plain(n, tilt);
+      const auto before = t.B;
+      const auto res = carve_canals(t.B, t.lake, t.dist, p, 1.0f, 21);
+      INFO("grid " << n << ", tilt " << tilt << ", agents " << res.stats.agents);
+      REQUIRE(res.stats.agents > 0);
+      float worst_plains = 0.0f;
+      for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+          REQUIRE(t.B.at(x, y) <= before.at(x, y) + 1e-6f);  // only ever lowers
+          // Plains only. The bank is a MINIMUM over the two flanking cells, so
+          // at the highland toe — which steps 2 m per row in this fixture —
+          // the cut legitimately reaches depth + that relief. That is the
+          // crossing price, not the length accumulation under test.
+          if (t.dist.at(x, y) != 0.0f) continue;
+          worst_plains = std::max(worst_plains, before.at(x, y) - t.B.at(x, y));
+        }
+      // Bounded by the target plus the across-channel relief the bank min
+      // picks up (at most ~0.14 m at the steepest tilt here) — and, the whole
+      // point, the SAME bound on a grid twice the size.
+      REQUIRE(worst_plains <= p.canal_depth_m + 0.2f);
+    }
   }
-  REQUIRE(res.stats.max_carve_m <= p.canal_max_climb_m);
 }
 
 TEST_CASE("carve_canals: deterministic for the same seed") {
@@ -246,9 +159,8 @@ TEST_CASE("carve_canals: deterministic for the same seed") {
   const auto rb = carve_canals(b.B, b.lake, b.dist, canal_params(), 1.0f, 42);
   REQUIRE(a.B.data == b.B.data);
   REQUIRE(ra.trail_source.data == rb.trail_source.data);
-  REQUIRE(ra.trail_discharge_m3_s.data == rb.trail_discharge_m3_s.data);
   REQUIRE(ra.stats.agents == rb.stats.agents);
-  REQUIRE(ra.stats.merges == rb.stats.merges);
+  REQUIRE(ra.trail_dir.data == rb.trail_dir.data);
 }
 
 TEST_CASE("carve_canals: agents merge, and never with their own source") {
@@ -258,7 +170,9 @@ TEST_CASE("carve_canals: agents merge, and never with their own source") {
   auto t = make_plain(64, 0.001f);
   const auto res = carve_canals(t.B, t.lake, t.dist, canal_params(), 1.0f, 9);
   REQUIRE(res.stats.agents >= 2);
-  REQUIRE(res.stats.merges_same_root == 0);
+  // Merging IS the healthy outcome now: it means the network converges rather
+  // than running parallel lines across the plain.
+  REQUIRE(res.stats.ends[static_cast<int>(CanalEnd::Merged)] > 0);
 }
 
 TEST_CASE("carve_canals: disabled by zero threshold or zero slope") {
@@ -267,9 +181,10 @@ TEST_CASE("carve_canals: disabled by zero threshold or zero slope") {
     const auto before = t.B;
     auto p = canal_params();
     if (which == 0) p.canal_seed_area_m2 = 0.0f;
-    else p.canal_slope = 0.0f;
+    else p.canal_depth_m = 0.0f;
     const auto res = carve_canals(t.B, t.lake, t.dist, p, 1.0f, 1);
     REQUIRE(res.stats.agents == 0);
     REQUIRE(t.B.data == before.data);
   }
 }
+

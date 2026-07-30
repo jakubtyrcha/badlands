@@ -242,7 +242,14 @@ TEST_CASE("generate_map: plains relief term blends smoothly (no biome-cutoff sea
     // 2 m amplitude per step (smoothstep is bounded to [0, kPlainsReliefM]).
     const float kSlopeMPerM = 0.75f;
     const float texel = p.world_size_m / static_cast<float>(p.resolution);
-    const float bound = kSlopeMPerM * texel + 2.0f;
+    float bound = kSlopeMPerM * texel + 2.0f;
+    // Canals add a third term. A canal cell is cut to canal_depth_m below the
+    // LOWEST of its two banks, so an uncut neighbour can stand that much above
+    // it, plus one terrain step for the bank being lower than the cell itself.
+    // Derived like the others rather than loosened to fit — measured 5.94 m
+    // against the pre-canal bound of 5.0.
+    if (p.erosion.canal_seed_area_m2 > 0.0f)
+      bound += p.erosion.canal_depth_m + kSlopeMPerM * texel;
     for (int y = 0; y < p.resolution; ++y) {
       for (int x = 0; x < p.resolution; ++x) {
         const float h = a.heightmap.at(x, y);

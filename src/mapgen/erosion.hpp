@@ -68,64 +68,34 @@ struct ErosionParams {
   float simplify_tolerance_texels = 0.9f;
   float resample_spacing_texels = 3.0f;
   // --- canal pre-carve (see canal_carve.hpp) ---
-  // Drainage area a highland-edge cell needs before it seeds a canal agent.
+  // A cheap PRIMER, not a simulation: it moves no sediment and guarantees no
+  // monotone channel, it just lowers a winding line relative to its banks so
+  // the real routing has a path to prefer.
   //
-  // DISABLED (0) by default. The mechanism is sound — fixtures pass, zero
-  // uphill carves at carve time, zero braids, deterministic — but it does not
-  // move the number it exists to move, across every climb policy tried.
-  //
-  // Seed 2 at 256^2, flood-parent routed against a 40.9% baseline:
-  //   hard 3 m veto        14 agents -> 41.5%   (stranded 7 of 9 non-merged)
-  //   veto + fallback      27 agents -> 40.6%   (max carve back to 31 m)
-  //   priced by w_dig      27 agents -> 43.8%   132 agents -> 47.5%
-  // Consistently flat to WORSE, and worse with more agents.
-  //
-  // The reason is structural and NOT the agents: the metric counts channel
-  // texels whose receiver came from the flood wavefront, and route_flow
-  // excludes every in_lake cell from steepest descent when no lake tag is
-  // supplied. Canals cut one-texel channels; the plain either side stays flat
-  // and still epsilon-floods, so in_lake barely moves (18.0% -> 17.6%) and the
-  // exclusion still covers the same channels. Until the lake tag is threaded
-  // through erode() (L5 in the two-kind-lakes spec), no amount of canal
-  // carving can move this.
-  //
-  // An earlier note here blamed self-avoidance. That was wrong: separating the
-  // termination causes showed only 2 of 27 agents genuinely self-avoided into
-  // a corner, 7 were stopped by the then-hard climb veto, and the other 18
-  // were merged agents correctly following a trunk to its end but mislabelled
-  // as boxed-in.
-  float canal_seed_area_m2 = 0.0f;
-  // Just enough descent per metre to keep water moving. NOT the depth control
-  // — the bed is re-anchored to local ground every step (see canal_depth_m),
-  // so this no longer accumulates into an arithmetic series down the path.
-  float canal_slope = 0.002f;
-  // The channel's target depth BELOW LOCAL GROUND. This is the relative level
-  // a canal exists to create; where the ground descends, the bed descends with
-  // it at this same offset rather than digging ever deeper.
+  // Drainage area a highland-edge cell needs before it seeds an agent.
+  float canal_seed_area_m2 = 1500.0f;
+  // How deep the canal sits below its OWN BANKS. This is the whole depth
+  // control, and it is purely local — the bed is a function of the two cells
+  // either side of the channel, never of a carried reference — so depth cannot
+  // accumulate along the path however far a canal runs.
   float canal_depth_m = 0.5f;
-  // Hard cap on incision below local ground. An agent that would have to
-  // trench deeper than this just to keep descending terminates instead.
-  // Without it a canal that follows a valley down and then climbs out cuts the
-  // far wall to the valley-floor reference — measured at 15-19 m.
-  float canal_max_depth_m = 2.0f;
   float canal_sense_distance_texels = 6.0f;
   // 45 deg. On an 8-neighbour lattice this yields three candidates per step;
   // anything under 45 deg would forbid turning altogether.
   float canal_max_turn_angle_rad = 0.79f;
   float canal_wander_chance = 0.10f;
-  // A cap on the ABSURD, not the primary mechanism: canal_w_dig prices rising
-  // ground so a wall only ever wins when nothing else is available. At 3 m
-  // this bound was doing the steering itself and stranded most agents against
-  // the 0.75 m/m mountain cone; generous enough now that it rarely binds.
-  float canal_max_climb_m = 20.0f;
   float canal_water_falloff_m = 2.0f;
+  // Speed rises with distance from the source, and speed is what resists
+  // turning, so a reach far from its head sweeps WIDER arcs than a headwater.
+  // Per step of path travelled.
+  float canal_speed_gain = 0.01f;
   // Scoring weights. Every term the score combines is in METRES, so these read
   // as exchange rates rather than opaque gains.
   float canal_w_flow = 1.0f;   // per metre of descent gained
   float canal_w_dig = 3.0f;    // per metre of rock removed; MUST exceed w_flow
-  float canal_w_turn = 0.5f;   // per radian turned, scaled by sqrt(Q/q_ref)
-  float canal_w_water_m = 3.0f;  // a lower channel is worth this much drop
-  int canal_max_steps = 4096;  // backstop only; self-avoidance already bounds it
+  float canal_w_turn = 0.5f;   // per radian turned, scaled by speed
+  float canal_w_water_m = 3.0f;  // water ahead is worth this much drop
+  int canal_max_steps = 4096;
 
   // Lake freeboard: the output water level sits below the spill point so a dry
   // bank of already-carved bowl is exposed and the Lake biome covers only
