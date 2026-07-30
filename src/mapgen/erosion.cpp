@@ -517,8 +517,9 @@ namespace {
 // Flood the CURRENT surface and turn flooded cells into water depths, then
 // prune lakes (4-connected components) below the area/depth thresholds.
 FinalizedLakes finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
-                              const FlowRouting& r, const ErosionParams& p,
-                              float texel_m, const Field2D<uint8_t>* basin_mask) {
+                              const FlowRouting& r, const Field2D<float>& area,
+                              const ErosionParams& p, float texel_m,
+                              const Field2D<uint8_t>* basin_mask) {
   const int w = r.width, ht = r.height;
   FinalizedLakes fin;
   Field2D<float>& depth = fin.depth;
@@ -539,14 +540,60 @@ FinalizedLakes finalize_lakes(const Field2D<float>& B, const Field2D<float>& S,
   // The component's level is the MINIMUM water_level over its members: the
   // epsilon tilt raises interior cells above the sill, so the minimum is the
   // real spill height. Same convention as deposit's wl_cap.
-  for (const auto& member : label_lake_components(w, ht, r.in_lake)) {
-    float level = r.water_level[static_cast<size_t>(member[0])];
-    for (const int i : member) level = std::min(level, r.water_level[static_cast<size_t>(i)]);
+  const float texel_area_m2 = texel_m * texel_m;
+  for (auto member : label_lake_components(w, ht, r.in_lake)) {
+    const float spill = [&] {
+      float v = r.water_level[static_cast<size_t>(member[0])];
+      for (const int i : member) v = std::min(v, r.water_level[static_cast<size_t>(i)]);
+      return v;
+    }();
     float deepest = 0.0f;
-    for (const int i : member)
-      deepest = std::max(deepest, level - (B.data[i] + S.data[i]));
+    bool seeded = false;
+    float catchment_m2 = 0.0f;
+    for (const int i : member) {
+      deepest = std::max(deepest, spill - (B.data[i] + S.data[i]));
+      catchment_m2 = std::max(catchment_m2, area.data[static_cast<size_t>(i)]);
+      if (basin_mask != nullptr && basin_mask->data.size() == depth.data.size() &&
+          basin_mask->data[static_cast<size_t>(i)])
+        seeded = true;
+    }
     if (deepest <= 0.0f) continue;
-    level -= std::min(p.lake_freeboard_m, p.lake_freeboard_frac * deepest);
+
+    // WATER BALANCE. A_bal is the lake area evaporation can sustain on this
+    // catchment's runoff. Above the lake's area at its spill level the basin
+    // overflows and fills to the brim (exorheic); below it the level settles
+    // where surface area equals A_bal (endorheic), which is how a lake ends up
+    // beneath its own rim without inventing a freeboard to put it there.
+    float level = spill;
+    if (p.evaporation_m_per_s > 0.0f) {
+      const float a_bal = p.runoff_m_per_s * catchment_m2 / p.evaporation_m_per_s;
+      const float area_at_spill = static_cast<float>(member.size()) * texel_area_m2;
+      if (a_bal < area_at_spill) {
+        // Hypsometry: sorted by ground, the k-th member's height is exactly
+        // the level at which the surface covers k cells.
+        std::sort(member.begin(), member.end(), [&](int x, int y) {
+          const float hx = B.data[static_cast<size_t>(x)] + S.data[static_cast<size_t>(x)];
+          const float hy = B.data[static_cast<size_t>(y)] + S.data[static_cast<size_t>(y)];
+          if (hx != hy) return hx < hy;
+          return x < y;  // deterministic on ties
+        });
+        size_t k = static_cast<size_t>(std::floor(std::max(a_bal, 0.0f) / texel_area_m2));
+        // A seeded basin is a deliberate map feature and never dries out
+        // completely, however arid the balance says it is.
+        if (seeded) k = std::max<size_t>(k, 1);
+        if (k == 0) continue;  // evaporation wins: no lake here
+        level = B.data[static_cast<size_t>(member[std::min(k, member.size() - 1)])] +
+                S.data[static_cast<size_t>(member[std::min(k, member.size() - 1)])];
+      }
+    }
+    // Art direction on top of whatever the balance decided — see
+    // ErosionParams. The fraction is taken against the depth at the CHOSEN
+    // level, not at the spill: on an endorheic lake those differ, and scaling
+    // a cosmetic drop by a depth the lake never reaches would over-shrink it.
+    float depth_at_level = 0.0f;
+    for (const int i : member)
+      depth_at_level = std::max(depth_at_level, level - (B.data[i] + S.data[i]));
+    level -= std::min(p.lake_freeboard_m, p.lake_freeboard_frac * depth_at_level);
     for (const int i : member)
       depth.data[i] = std::max(0.0f, level - (B.data[i] + S.data[i]));
   }
@@ -687,7 +734,8 @@ ErosionOutputs erode(Field2D<float>& B, Field2D<float>& S,
   r = route_flow(h, texel_m, kEpsilonM, tagged ? &lake_tag : nullptr);
   ErosionOutputs out;
   out.flow = accumulate_drainage(r, texel_area);
-  auto fin = finalize_lakes(B, S, r, p, texel_m, tagged ? basin_mask : nullptr);
+  auto fin = finalize_lakes(B, S, r, out.flow, p, texel_m,
+                            tagged ? basin_mask : nullptr);
   out.water_depth = std::move(fin.depth);
   out.lake_id = std::move(fin.lake_id);
   out.lakes = std::move(fin.lakes);

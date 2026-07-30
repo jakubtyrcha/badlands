@@ -1104,3 +1104,68 @@ TEST_CASE("finalize_lakes: seeded lakes survive pruning, emergent ones must earn
     }
   }
 }
+
+TEST_CASE("finalize_lakes: the water balance decides exorheic vs endorheic") {
+  // L4. A_bal = runoff * catchment / evaporation is the lake area evaporation
+  // can sustain. Above the lake's area at its spill the basin overflows and
+  // fills to the brim; below it the level settles where surface area equals
+  // A_bal — a lake beneath its own rim, arrived at physically rather than by
+  // subtracting a freeboard.
+  auto wet_at = [](float evap_multiple) {
+    auto t = make_bowl();
+    ErosionParams p;
+    p.iterations = 6;
+    p.dump_every = 0;
+    p.min_lake_area_m2 = 4.0f;
+    p.min_lake_depth_m = 0.1f;
+    p.lake_freeboard_m = 0.0f;  // isolate the balance
+    p.lake_freeboard_frac = 0.0f;
+    p.evaporation_m_per_s = p.runoff_m_per_s * evap_multiple;
+    const auto out = erode(t.B, t.S, p, 1.0f, nullptr, nullptr);
+    int wet = 0;
+    for (float d : out.water_depth.data) if (d > 0.0f) ++wet;
+    return wet;
+  };
+
+  // Sweep rather than pin three points: on this small bowl the catchment is
+  // tiny, so the lake is already gone well before an extreme multiplier and a
+  // fixed "arid" value would compare 0 against 0.
+  int prev = -1;
+  bool ever_shrank = false;
+  for (const float mult : {1.0f, 2.0f, 4.0f, 8.0f, 16.0f}) {
+    const int wet = wet_at(mult);
+    INFO("evaporation " << mult << "x runoff -> " << wet << " wet cells");
+    if (prev >= 0) {
+      REQUIRE(wet <= prev);  // drier never means more water
+      if (wet < prev) ever_shrank = true;
+    }
+    prev = wet;
+  }
+  REQUIRE(wet_at(1.0f) > 0);  // a humid climate keeps the lake
+  REQUIRE(ever_shrank);       // and evaporation genuinely bites somewhere
+}
+
+TEST_CASE("finalize_lakes: a seeded basin never dries out, however arid") {
+  // A seeded basin is a deliberate map feature. The balance may shrink it to a
+  // single cell but must not delete it, or an author-placed lake would vanish
+  // on a climate parameter.
+  auto t = make_bowl();
+  ErosionParams p;
+  p.iterations = 6;
+  p.dump_every = 0;
+  p.min_lake_area_m2 = 4.0f;
+  p.min_lake_depth_m = 0.1f;
+  p.lake_freeboard_m = 0.0f;
+  p.lake_freeboard_frac = 0.0f;
+  p.evaporation_m_per_s = p.runoff_m_per_s * 1e6f;  // absurdly arid
+
+  Field2D<uint8_t> basins(t.B.width, t.B.height, 0);
+  for (int y = 12; y <= 20; ++y)
+    for (int x = 12; x <= 20; ++x) basins.at(x, y) = 1;
+
+  const auto out = erode(t.B, t.S, p, 1.0f, nullptr, &basins);
+  bool seeded_survives = false;
+  for (const auto& l : out.lakes)
+    if (l.kind == LakeKind::Seeded) seeded_survives = true;
+  REQUIRE(seeded_survives);
+}

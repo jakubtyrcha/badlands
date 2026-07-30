@@ -35,6 +35,20 @@ struct ErosionParams {
   float lake_frac = 0.08f;
   float min_lake_area_m2 = 400.0f;
   float min_lake_depth_m = 0.5f;
+  // Lake-surface evaporation. With runoff, this decides whether a lake
+  // overflows (exorheic) or settles below its spill (endorheic):
+  //
+  //     A_bal = runoff * catchment / evaporation
+  //
+  // is the lake area evaporation can sustain. If that exceeds the lake's area
+  // at its spill level the basin overflows and feeds a river; otherwise the
+  // level settles where the surface area equals A_bal, which is the physically
+  // honest way a lake ends up below its rim.
+  //
+  // Temperate lake evaporation is ~0.8 m/yr against ~1 m/yr of runoff, so at
+  // those values nearly everything is exorheic. Raising it above runoff is
+  // what makes closed basins appear.
+  float evaporation_m_per_s = 3.17e-8f;
   // Outlet notch depth for SEEDED basins. DISABLED (0) by default: the
   // mechanism is exact on synthetic bowls but inert on production terrain,
   // because seeded basins sit at bedrock minima out in the plains, where total
@@ -113,6 +127,18 @@ struct ErosionParams {
   // bank of already-carved bowl is exposed and the Lake biome covers only
   // water. Applied at finalize only, so the sim loop is unaffected. The
   // fractional cap stops shallow ponds from vanishing outright.
+  // Art direction, applied ON TOP of the water balance, and named honestly:
+  // there is no physics in it.
+  //
+  // It was expected that the balance would replace this. It does not, and the
+  // measurement says so plainly: at temperate rates every basin comes out
+  // exorheic and fills to its spill, so the balance moves nothing (seed 1 sits
+  // at 8.80% wet whether evaporation is 1x or 3x runoff). Switching the
+  // freeboard off costs the dry bank outright — 8.80% -> 7.34% wet on seed 1,
+  // 8.05% -> 6.90% on seed 3 — which is exactly the coast it exists to expose.
+  // So the two are orthogonal: the balance is the physical mechanism and only
+  // bites in arid settings, this is the knob that gives a temperate lake a
+  // shore.
   float lake_freeboard_m = 0.4f;
   float lake_freeboard_frac = 0.25f;
 };
