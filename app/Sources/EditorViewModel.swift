@@ -37,6 +37,19 @@ final class EditorViewModel {
     /// shortcuts) — keep it that way so later milestones have one place to
     /// hook mode-transition side effects (e.g. resetting spawn/gizmo state).
     func setMode(_ m: EditorMode) {
+        // A mode key can fire mid-gesture (mouse button still down from a
+        // .modify drag). Without this, the eventual mouseDragged/mouseUp
+        // would fail the `mode == .modify` guard and never call endDrag(),
+        // leaving core's drag state pinned to whatever node was selected at
+        // beginDrag — a later drag on a *different* node (after returning to
+        // .modify) would then silently apply that stale plane/start state.
+        // Core also guards this defensively (Editor::updateDrag no-ops if
+        // the selection no longer matches the drag's captured node), but the
+        // gesture should be cleanly ended here regardless.
+        if mode == .modify, m != .modify, isDragging {
+            editor.endDrag()
+            isDragging = false
+        }
         mode = m
         // Stateless derivation rather than tracking the previous mode:
         // true only while .modify has no selection, false the instant either

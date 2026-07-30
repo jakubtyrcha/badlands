@@ -22,6 +22,7 @@ struct Editor::Impl {
     bool gizmo_visible = false;
     struct {
         bool active = false;
+        int32_t node_id = kInvalidNode; // the node the captured plane/start_* belong to
         simd_float3 plane_point, plane_normal, start_pos, start_hit, start_snap_point;
     } drag;
 };
@@ -188,6 +189,7 @@ void Editor::beginDrag(float x, float y) {
     impl_->drag.start_pos = node->position;
     impl_->drag.start_hit = *hit;
     impl_->drag.start_snap_point = node->snap_point;
+    impl_->drag.node_id = node->id;
     impl_->drag.active = true;
 }
 
@@ -196,6 +198,14 @@ void Editor::updateDrag(float x, float y) {
         return;
     }
     if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
+        return;
+    }
+    // Defense in depth: the captured plane/start_* state belongs to the node
+    // that was selected when beginDrag ran. If the selection has since
+    // changed (e.g. a caller drives updateDrag without a matching
+    // begin/endDrag pair around every selection change), applying that stale
+    // state to whatever is selected now would silently jump the wrong node.
+    if (impl_->selected != impl_->drag.node_id) {
         return;
     }
     Node* node = impl_->scene.find(impl_->selected);
@@ -222,6 +232,7 @@ void Editor::updateDrag(float x, float y) {
 
 void Editor::endDrag() {
     impl_->drag.active = false;
+    impl_->drag.node_id = kInvalidNode;
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {
