@@ -75,7 +75,8 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   // shape. Uploaded with a full mip chain so distant cards antialias.
   {
     constexpr int kLeafTexSize = 64;
-    std::vector<uint8_t> px = BuildLeafRgba8(kLeafTexSize, glm::vec3(1.0f));
+    std::vector<uint8_t> px =
+        BuildLeafRgba8(kLeafTexSize, glm::vec3(1.0f), LeafSilhouette::Bush);
     LoadedTexture leaf = UploadTexture2DWithMips(
         device_, queue_, *ctx.pipeline_gen, kLeafTexSize, kLeafTexSize,
         px.data());

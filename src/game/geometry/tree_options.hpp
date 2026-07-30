@@ -9,6 +9,10 @@ namespace badlands {
 
 enum class TreeType { Deciduous, Evergreen };
 
+// Per-species leaf card silhouette shape (leaf_texture.hpp). Bush is the
+// generic fat-oval fallback (byte-identical to the pre-species texture).
+enum class LeafSilhouette { Oak, Ash, Aspen, Bush, PineSprig };
+
 // Leaf-card generation parameters (ported from ez-tree TreeOptions.leaves).
 // Consumed by GenerateLeafMesh (tree_generator.hpp); leaf placement uses a
 // separate RNG stream so it never perturbs the branch skeleton.
@@ -24,6 +28,7 @@ struct LeafOptions {
   glm::vec3 tint{0.30f, 0.55f, 0.18f};  // green; per-preset overridable
   glm::vec3 transmission_tint{0.35f, 0.6f, 0.15f};  // transmitted (back-lit) colour
   float transmission_strength{0.6f};
+  LeafSilhouette silhouette = LeafSilhouette::Bush;  // card texture shape (leaf_texture.hpp)
   bool tip_leaf = true;       // ez-tree deciduous terminal-tip leaf: one extra leaf at each
                               // leaf-bearing branch's endpoint (set false for evergreens)
 };

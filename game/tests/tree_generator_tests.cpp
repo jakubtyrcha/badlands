@@ -1,5 +1,8 @@
 #include <catch_amalgamated.hpp>
+#include <algorithm>
 #include <cmath>
+#include <iterator>  // std::size
+#include <glm/gtc/constants.hpp>  // glm::pi
 #include "game/geometry/tree_options.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/leaf_texture.hpp"
@@ -159,9 +162,61 @@ TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
   REQUIRE(r.mesh.indices.empty());
 }
 
-TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card") {
+namespace {
+constexpr LeafSilhouette kAllSilhouettes[] = {
+    LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
+    LeafSilhouette::Bush, LeafSilhouette::PineSprig,
+};
+}  // namespace
+
+TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card for every silhouette") {
+  const int n = 128;
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  for (LeafSilhouette shape : kAllSilhouettes) {
+    INFO("silhouette index " << static_cast<int>(shape));
+    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, shape);
+    REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
+    auto alpha = [&](int x, int y) {
+      return px[(static_cast<size_t>(y) * n + static_cast<size_t>(x)) * 4 + 3];
+    };
+    REQUIRE(alpha(0, 0) == 0);             // corners are outside
+    REQUIRE(alpha(n - 1, 0) == 0);
+    REQUIRE(alpha(0, n - 1) == 0);
+    REQUIRE(alpha(n - 1, n - 1) == 0);
+
+    // On-shape probe: center works for the sinusoidal-envelope shapes; the
+    // needle strokes of PineSprig don't reliably cross the exact center, so
+    // probe the always-present stem column near the base instead.
+    const int probe_x = n / 2;
+    const int probe_y = (shape == LeafSilhouette::PineSprig) ? n / 16 : n / 2;
+    REQUIRE(alpha(probe_x, probe_y) == 255);
+
+    // RGB carries the passed color (green > red at the probe texel).
+    const size_t c = (static_cast<size_t>(probe_y) * n + static_cast<size_t>(probe_x)) * 4;
+    REQUIRE(px[c + 1] > px[c + 0]);
+  }
+}
+
+TEST_CASE("BuildLeafRgba8: opaque-texel counts are pairwise distinct across silhouettes") {
+  const int n = 128;
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  size_t counts[std::size(kAllSilhouettes)];
+  for (size_t i = 0; i < std::size(kAllSilhouettes); ++i) {
+    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, kAllSilhouettes[i]);
+    size_t count = 0;
+    for (size_t p = 0; p < static_cast<size_t>(n) * static_cast<size_t>(n); ++p)
+      if (px[p * 4 + 3] >= 128) ++count;
+    counts[i] = count;
+  }
+  for (size_t i = 0; i < std::size(kAllSilhouettes); ++i)
+    for (size_t j = i + 1; j < std::size(kAllSilhouettes); ++j)
+      REQUIRE(counts[i] != counts[j]);
+}
+
+TEST_CASE("BuildLeafRgba8: Bush matches the pre-species oval") {
   const int n = 64;
-  const std::vector<uint8_t> px = BuildLeafRgba8(n, glm::vec3(0.30f, 0.55f, 0.18f));
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  const std::vector<uint8_t> px = BuildLeafRgba8(n, color, LeafSilhouette::Bush);
   REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
   auto alpha = [&](int x, int y) {
     return px[(static_cast<size_t>(y) * n + static_cast<size_t>(x)) * 4 + 3];
@@ -174,6 +229,61 @@ TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card") {
   // RGB carries the leaf color (green > red at the center texel).
   const size_t c = (static_cast<size_t>(n / 2) * n + static_cast<size_t>(n / 2)) * 4;
   REQUIRE(px[c + 1] > px[c + 0]);
+
+  // Analytic half-width W*sin(pi*t) at two known rows: 3 texels inside the
+  // computed edge is opaque, 3 texels outside is transparent.
+  const float W = 0.60f;
+  const float texel_u = 2.0f / static_cast<float>(n);
+  auto x_for_u = [&](float u) {
+    return static_cast<int>(std::lround((u + 1.0f) * 0.5f * n - 0.5f));
+  };
+  for (int y : {n / 4, 3 * n / 4}) {
+    const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(n) * 2.0f - 1.0f;
+    const float t = (v + 1.0f) * 0.5f;
+    const float half_w = W * std::sin(glm::pi<float>() * t);
+    REQUIRE(alpha(x_for_u(half_w - 3.0f * texel_u), y) == 255);
+    REQUIRE(alpha(x_for_u(half_w + 3.0f * texel_u), y) == 0);
+  }
+}
+
+TEST_CASE("BuildLeafMipChainRgba8: coverage-preserving mip chain") {
+  const int n = 128;
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  struct Case { LeafSilhouette shape; float cutoff; };
+  const Case cases[] = {{LeafSilhouette::Oak, 0.5f}, {LeafSilhouette::PineSprig, 0.35f}};
+
+  for (const Case& c : cases) {
+    INFO("silhouette index " << static_cast<int>(c.shape));
+    const std::vector<std::vector<uint8_t>> mips = BuildLeafMipChainRgba8(n, color, c.shape, c.cutoff);
+    REQUIRE(mips.size() == 8u);  // 128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
+
+    auto coverage = [&](const std::vector<uint8_t>& px, int size) {
+      const uint8_t thresh = static_cast<uint8_t>(std::lround(c.cutoff * 255.0f));
+      size_t count = 0;
+      const size_t total = static_cast<size_t>(size) * static_cast<size_t>(size);
+      for (size_t i = 0; i < total; ++i)
+        if (px[i * 4 + 3] >= thresh) ++count;
+      return static_cast<float>(count) / static_cast<float>(total);
+    };
+
+    int size = n;
+    for (const std::vector<uint8_t>& level : mips) {
+      REQUIRE(level.size() == static_cast<size_t>(size) * static_cast<size_t>(size) * 4);
+      size = std::max(1, size / 2);
+    }
+
+    const float level0_coverage = coverage(mips[0], n);
+    REQUIRE(level0_coverage > 0.0f);
+
+    size = n;
+    for (const std::vector<uint8_t>& level : mips) {
+      if (size >= 8) {
+        const float cov = coverage(level, size);
+        REQUIRE(std::fabs(cov - level0_coverage) <= 0.30f * level0_coverage);
+      }
+      size = std::max(1, size / 2);
+    }
+  }
 }
 
 TEST_CASE("GenerateLeafMesh: terminal-tip leaf adds one leaf per leaf-bearing branch") {
