@@ -8,10 +8,10 @@
 //      if blocks reached around the view, every one would need revisiting.
 //   2. Blocks stay unit-testable against a synthetic view with no sim.
 //
-// Modelled on scripts/brains/hero.noiser's flat WorldView: a superset struct
-// whose fields are simply absent (has_* = false / zeroed) for archetypes that
-// do not perceive them. A hero populates buildings/needs; a deer (later phase)
-// populates threat/biome; the shared Roam/Flee blocks read the shared fields.
+// A flat aggregate struct whose fields are simply absent (has_* = false / zeroed)
+// for archetypes that do not perceive them. A hero populates buildings/needs;
+// a deer (later phase) populates threat/biome; the shared Roam/Flee blocks read
+// the shared fields.
 
 #include <cstdint>
 #include <optional>
@@ -25,8 +25,8 @@ namespace badlands {
 
 // The name the sim internals have always used for the shared goal id space.
 // There is exactly ONE such space -- the command log (SetBehavior.param_a), the
-// snapshot (CharacterState.behavior), the statistics histogram, and any future
-// noiser brain all speak it. Names + bands live in ActivityCatalog().
+// snapshot (CharacterState.behavior), and the statistics histogram all speak it.
+// Names + bands live in ActivityCatalog().
 using Behavior = ActivityId;
 
 // One perceived threat. Kept as a small fixed array on the view rather than a
@@ -129,10 +129,10 @@ struct WorldView {
 };
 
 // --- threat accessors -------------------------------------------------------
-// Free functions rather than methods so WorldView stays a flat aggregate (it is
-// the struct a noiser brain will mirror). Appending keeps the list sorted
-// nearest-first and silently drops anything past kMaxThreats, which is correct:
-// the far ones are exactly the ones you stop attending to.
+// Free functions rather than methods so WorldView stays a flat aggregate.
+// Appending keeps the list sorted nearest-first and silently drops anything past
+// kMaxThreats, which is correct: the far ones are exactly the ones you stop
+// attending to.
 inline bool has_threat(const WorldView& v) { return v.threat_count > 0; }
 
 inline glm::vec2 nearest_threat_pos(const WorldView& v) {

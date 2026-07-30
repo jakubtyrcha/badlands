@@ -27,7 +27,6 @@
 #include <algorithm>
 #include <array>
 
-#include "engine/rendering/material/script_texture_provider.hpp"
 #include "engine/rendering/texture_loader.hpp"  // CreateSolidColorArray
 #include "engine/rendering/material/standard_rendering_material_instance.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
@@ -122,16 +121,12 @@ StandardMaterialFactory::StandardMaterialFactory(
     std::string requirements_name,
     std::map<MaterialPassType, std::unique_ptr<MeshRenderingMaterial>> materials,
     std::vector<DefaultTextureView> default_view_recipes,
-    std::vector<NoiserMaterialScript> script_recipes,
-    ScriptTextureProvider* script_provider,
     wgpu::Device device, wgpu::Queue queue,
     const MaterialRequirementsRegistry& requirements_registry,
     std::vector<GeometryType> supported_geometry_types)
     : requirements_name_(std::move(requirements_name)),
       materials_(std::move(materials)),
       default_view_recipes_(std::move(default_view_recipes)),
-      script_recipes_(std::move(script_recipes)),
-      script_provider_(script_provider),
       device_(device),
       queue_(queue),
       requirements_registry_(requirements_registry),
@@ -193,11 +188,8 @@ StandardMaterialFactory::CreateInstance(GeometryType geometry_type,
     expected_type = TextureType::kArray;
   }
 
-  // Lazily resolve scripts for this geometry type
-  const auto& resolved_scripts = GetResolvedScripts(geometry_type);
-
-  // Populate textures: instance overrides → (resolved scripts + filtered
-  // default views) → factory defaults
+  // Populate textures: instance overrides → filtered default views → factory
+  // defaults
   for (const auto& req : requirements.textures) {
     wgpu::TextureView view;
     wgpu::Sampler sampler;
@@ -214,21 +206,7 @@ StandardMaterialFactory::CreateInstance(GeometryType geometry_type,
       sampler = override_it->sampler;
     }
 
-    // 2. Check resolved scripts
-    if (!view) {
-      auto script_it = std::find_if(
-          resolved_scripts.begin(), resolved_scripts.end(),
-          [&](const ResolvedRecipeTexture& r) {
-            return r.param_name == req.slot_name;
-          });
-
-      if (script_it != resolved_scripts.end()) {
-        view = script_it->view;
-        sampler = script_it->sampler;
-      }
-    }
-
-    // 3. Check default view recipes (filtered by expected texture type)
+    // 2. Check default view recipes (filtered by expected texture type)
     if (!view) {
       auto view_it = std::find_if(
           default_view_recipes_.begin(), default_view_recipes_.end(),
@@ -243,7 +221,7 @@ StandardMaterialFactory::CreateInstance(GeometryType geometry_type,
       }
     }
 
-    // 4. Fall back to factory defaults (2D or cubemap based on geometry)
+    // 3. Fall back to factory defaults (2D or cubemap based on geometry)
     if (!view) {
       view = GetDefaultTextureForSlot(req.default_texture, expected_type);
       sampler = default_nearest_sampler_;
@@ -362,46 +340,6 @@ wgpu::TextureView StandardMaterialFactory::GetDefaultTextureForSlot(
   return defaults.white;
 }
 
-const std::vector<ResolvedRecipeTexture>&
-StandardMaterialFactory::GetResolvedScripts(GeometryType geometry_type) const {
-  static const std::vector<ResolvedRecipeTexture> empty;
-  if (script_recipes_.empty()) {
-    return empty;
-  }
-
-  auto it = resolved_script_cache_.find(geometry_type);
-  if (it != resolved_script_cache_.end()) {
-    return it->second;
-  }
-
-  // Resolve all scripts for this geometry type
-  bool is_cubemap = (geometry_type == GeometryType::kSphericalMesh);
-  std::vector<ResolvedRecipeTexture> resolved;
-
-  if (script_provider_) {
-    for (const auto& script : script_recipes_) {
-      auto result = script_provider_->ExecuteScriptToTexture(
-          script.source, script.params, script.resolution, is_cubemap);
-      if (result) {
-        resolved.push_back(ResolvedRecipeTexture{
-            .param_name = script.param_name,
-            .view = result->view,
-            .sampler = result->sampler,
-        });
-      } else {
-        spdlog::warn(
-            "StandardMaterialFactory::GetResolvedScripts: failed to execute "
-            "script for '{}': {}",
-            script.param_name, result.error());
-      }
-    }
-  }
-
-  auto [ins_it, _] =
-      resolved_script_cache_.emplace(geometry_type, std::move(resolved));
-  return ins_it->second;
-}
-
 // === BuildMaterialInstanceFactory implementation ===
 
 namespace {
@@ -428,22 +366,10 @@ const std::array<VariantConfig, 3> kVariants = {{
 
 std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
     const FactoryDescriptor& desc, wgpu::Device device, wgpu::Queue queue,
-    GpuPipelineGenerator* shader_context,
-    ScriptTextureProvider* script_provider) {
+    GpuPipelineGenerator* shader_context) {
   if (!shader_context) {
     spdlog::error("BuildMaterialInstanceFactory: null shader_context");
     return nullptr;
-  }
-
-  // Check for script recipes without provider
-  for (const auto& recipe : desc.recipes) {
-    if (std::holds_alternative<NoiserMaterialScript>(recipe) &&
-        !script_provider) {
-      spdlog::error(
-          "BuildMaterialInstanceFactory: NoiserMaterialScript recipe requires "
-          "script_provider");
-      return nullptr;
-    }
   }
 
   // Register (lazily-compiled) materials for supported MaterialPassType variants
@@ -505,22 +431,6 @@ std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
             desc.cull_mode));
   }
 
-  // Split recipes into default views and unresolved scripts
-  std::vector<DefaultTextureView> default_view_recipes;
-  std::vector<NoiserMaterialScript> script_recipes;
-  for (const auto& recipe : desc.recipes) {
-    std::visit(
-        [&](auto&& item) {
-          using T = std::decay_t<decltype(item)>;
-          if constexpr (std::is_same_v<T, DefaultTextureView>) {
-            default_view_recipes.push_back(item);
-          } else if constexpr (std::is_same_v<T, NoiserMaterialScript>) {
-            script_recipes.push_back(item);
-          }
-        },
-        recipe);
-  }
-
   // Derive canonical requirements name from shader path stem
   // e.g., "material/textured_mesh.wesl" → "textured_mesh"
   std::string requirements_name = desc.shader_path;
@@ -535,10 +445,8 @@ std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
   static const MaterialRequirementsRegistry s_registry;
 
   return std::make_unique<StandardMaterialFactory>(
-      std::move(requirements_name), std::move(materials),
-      std::move(default_view_recipes), std::move(script_recipes),
-      script_provider, device, queue, s_registry,
-      desc.supported_geometry_types);
+      std::move(requirements_name), std::move(materials), desc.recipes,
+      device, queue, s_registry, desc.supported_geometry_types);
 }
 
 }  // namespace badlands

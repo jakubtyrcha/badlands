@@ -14,7 +14,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <variant>
 #include <vector>
 
 #include <dawn/webgpu_cpp.h>
@@ -26,7 +25,6 @@
 namespace badlands {
 
 class GpuPipelineGenerator;
-class ScriptTextureProvider;
 
 // === Recipe Items ===
 
@@ -36,15 +34,6 @@ struct DefaultTextureView {
   wgpu::Sampler sampler;
   TextureType type{TextureType::k2D};
 };
-
-struct NoiserMaterialScript {
-  std::string param_name;
-  std::string source;
-  int resolution{64};
-  std::unordered_map<std::string, MaterialParameterValue> params;
-};
-
-using RecipeItem = std::variant<DefaultTextureView, NoiserMaterialScript>;
 
 // === Instance Parameters (per-instance overrides) ===
 
@@ -76,7 +65,7 @@ struct FactoryDescriptor {
   std::string shader_path;
   std::string vs_entry = "vs_main";
   std::string fs_entry = "fs_main";
-  std::vector<RecipeItem> recipes;
+  std::vector<DefaultTextureView> recipes;
   // If non-empty, only register these pass type variants (default: all 3)
   std::vector<MaterialPassType> supported_pass_types;
   // If non-empty, only register these geometry types (default: both)
@@ -115,11 +104,9 @@ struct FactoryDescriptor {
   std::vector<std::string> extra_features;
 };
 
-// Build factory from descriptor. script_provider required when
-// NoiserMaterialScript recipes are present (errors if null + script recipes).
+// Build factory from descriptor.
 std::unique_ptr<MaterialInstanceFactory> BuildMaterialInstanceFactory(
     const FactoryDescriptor& desc, wgpu::Device device, wgpu::Queue queue,
-    GpuPipelineGenerator* shader_context,
-    ScriptTextureProvider* script_provider = nullptr);
+    GpuPipelineGenerator* shader_context);
 
 }  // namespace badlands

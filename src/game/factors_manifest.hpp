@@ -3,10 +3,9 @@
 // Loads badlands::SimFactors (behaviour tuning) from a JSON manifest so
 // designers can retune without a rebuild.
 //
-// App-layer on purpose: badlands_game_lib links only noiser_bundle, and adding
-// nlohmann to the sim would put a JSON parser inside the deterministic core for
-// no reason. The sim ships compiled defaults and exposes Sim::SetFactors; apps
-// parse here and push the result in. Same shape as
+// App-layer on purpose: the sim ships compiled defaults and doesn't need to
+// parse JSON, so a JSON parser should not live in the deterministic core.
+// Apps parse here and push the result to Sim::SetFactors. Same shape as
 // src/mapview/biome_manifest.hpp.
 
 #include <string>

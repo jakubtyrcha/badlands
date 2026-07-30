@@ -3,9 +3,8 @@
 //
 // Everything here must hold for ANY weights, ANY considerations, and ANY
 // activity table -- so retuning the shipping numbers must never touch this
-// file, and a reimplementation (the planned noiser brain) is correct exactly
-// when it still satisfies these. That is the whole point: this file is the
-// specification, game/src/behaviours is one implementation of it.
+// file. That is the whole point: this file is the specification,
+// game/src/behaviours is one implementation of it.
 //
 // The model is TWO tiers: Danger (immediate danger, pre-empts everything) and
 // Normal (everything else, ordered by weight x need). There is no third

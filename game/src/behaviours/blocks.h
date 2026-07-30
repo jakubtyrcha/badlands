@@ -1,9 +1,7 @@
 #pragma once
 
 // Behaviour blocks -- the reusable unit of a brain. Each block is a (score, act)
-// pair over a WorldView + SimFactors, mirroring what a noiser module would
-// export (scripts/brains/hero.noiser's score/act), so re-adopting noiser later
-// is a port rather than a rewrite.
+// pair over a WorldView + SimFactors.
 //
 //   score(view, factors) -> f32   how much this entity wants to do this now.
 //                                  0 means "not applicable"; a selector
@@ -36,9 +34,8 @@ struct Candidate {
 // `score` returns a CONSIDERATION PRODUCT in [0,1]: "how much does the
 // situation call for this", with 0 an outright veto. It must NOT encode
 // priority (that is the band) or preference (that is the weight) -- keeping
-// those three concerns in separate places is what lets weights be retuned, or
-// the whole implementation swapped for a noiser one, without disturbing the
-// guarantees the band hierarchy provides.
+// those three concerns in separate places is what lets weights be retuned
+// without disturbing the guarantees the band hierarchy provides.
 struct ActivityDef {
     ActivityId id;
     ActivityBand band;

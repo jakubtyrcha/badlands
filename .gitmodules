@@ -1,6 +1,3 @@
-[submodule "third_party/noiser"]
-	path = third_party/noiser
-	url = https://github.com/kolore-org/noiser
 [submodule "third_party/catch2"]
 	path = third_party/catch2
 	url = https://github.com/catchorg/Catch2

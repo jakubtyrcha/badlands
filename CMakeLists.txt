@@ -68,8 +68,8 @@ corrosion_set_env_vars(wesl_ffi "RUSTFLAGS=-Cpanic=unwind")
 # Rust staticlib. Unlike wesl_ffi, no dependency of this crate shares its
 # own name, so no Corrosion package-ambiguity workaround is needed here.
 #
-# PROFILE release — ALWAYS, even in a Debug C++ build (same reasoning as
-# noiser-bundle below). This crate is the image decoder, and terrain startup
+# PROFILE release — ALWAYS, even in a Debug C++ build. This crate is the
+# image decoder, and terrain startup
 # decodes 18 material textures (1024^2 each) through it. Built with cargo's dev
 # profile (opt-level 0, what CMAKE_BUILD_TYPE=Debug otherwise selects) a single
 # 1024^2 JPEG/PNG decode costs ~130-200 ms instead of ~20 ms, so the six-pack
@@ -110,28 +110,6 @@ corrosion_set_env_vars(brainhost "RUSTFLAGS=-Cpanic=unwind")
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/ui/Cargo.toml
                        PROFILE release)
 corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
-
-# noiser-bundle: aggregates noiser-compiler + noiser-vm (third_party/noiser)
-# into ONE Rust staticlib (crates/noiser-bundle) so the noiser C++ VM wrapper
-# (third_party/noiser/noiser-vm/src, compiled into badlands_game_lib below)
-# links libstd exactly once. It is a member of the root workspace (which also
-# contains the legacy Rust app); Corrosion invokes `cargo build -p
-# noiser-bundle`, which only resolves noiser-bundle + its two path deps, not
-# the legacy app's wgpu/winit/naga deps. The package name has a dash, and
-# Corrosion's imported CMake target always replaces dashes with underscores
-# (CorrosionGenerator.cmake), so the target is `noiser_bundle`, not
-# `noiser-bundle`.
-#
-# PROFILE release — ALWAYS, even in a Debug C++ build. The noiser VM is an
-# interpreter sitting on mapgen's hot path: the field script evaluates ~16
-# Perlin octaves per sample, so a 2000x2000 map is ~64M octave evaluations
-# through it. Built with cargo's dev profile (opt-level 0, which is what
-# CMAKE_BUILD_TYPE=Debug otherwise selects) that alone costs ~39s of a ~40s
-# generation. Nothing here is C++-debuggable anyway — it's a prebuilt staticlib
-# behind a C ABI — so there is no debuggability to trade away.
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/crates/noiser-bundle/Cargo.toml
-                       PROFILE release)
-corrosion_set_env_vars(noiser_bundle "RUSTFLAGS=-Cpanic=unwind")
 
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
@@ -257,11 +235,7 @@ target_include_directories(badlands_engine PUBLIC
 
 # badlands_game_lib: the C++ game simulation (EnTT + glm + spdlog), pure C++
 # with no engine/SDL/Dawn deps — geometry that needs engine types comes in a
-# later task (S2.C). The hero brain is wasm-only now (game/src/wasm_brain.h);
-# this lib also carries the sampo::noiser C++ VM wrapper (pure delegation
-# over the noiser Rust VM's C ABI) purely so badlands_mapgen_lib (below) can
-# link it for mapgen/texgen noiser scripts -- badlands uses the VM only, so
-# noiser_jit_stubs.cpp stubs the JIT (Cranelift) C ABI.
+# later task (S2.C). The hero brain is wasm-only now (game/src/wasm_brain.h).
 #
 # Named badlands_game_lib, not badlands_game: the "game" app executable below
 # is already named badlands_game (from S2.A1/A3), and CMake target names must
@@ -300,9 +274,6 @@ add_library(badlands_game_lib STATIC
     game/src/economy.cpp
     game/src/vision.cpp
     game/src/exploration.cpp
-    game/src/noiser_jit_stubs.cpp
-    third_party/noiser/noiser-vm/src/noiser.cpp
-    third_party/noiser/noiser-vm/src/noiser_crash.cpp
     # Task S2.C: procedural-geometry game data (no engine/SDL/Dawn deps — see
     # the file-level comments in src/game/building_catalog.{h,cpp} and
     # src/game/geometry/ploppable_rings.{h,cpp}).
@@ -329,12 +300,8 @@ add_library(badlands_game_lib STATIC
     game/src/nav_world.cpp
 )
 target_compile_features(badlands_game_lib PUBLIC cxx_std_23)
-# noiser_common.h intentionally ships [[deprecated]] shims.
-target_compile_options(badlands_game_lib PRIVATE -Wno-deprecated-declarations)
 target_include_directories(badlands_game_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/game/include
-    ${CMAKE_SOURCE_DIR}/third_party/noiser/noiser-vm/src
-    ${CMAKE_SOURCE_DIR}/third_party/noiser
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
@@ -353,7 +320,7 @@ target_include_directories(badlands_game_lib PRIVATE
 )
 # brainhost: wasmtime-backed brain wasm runtime (game/src/wasm_brain.cpp) --
 # mirrors how nav is linked into badlands_engine above.
-target_link_libraries(badlands_game_lib PUBLIC noiser_bundle brainhost)
+target_link_libraries(badlands_game_lib PUBLIC brainhost)
 # meshoptimizer: backs src/game/geometry/mesh_lod.cpp's SimplifyMesh (Task 1,
 # tree-LOD feature). PRIVATE -- an implementation detail of mesh_lod.cpp, not
 # part of badlands_game_lib's public header surface.
@@ -435,19 +402,6 @@ target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
 target_include_directories(badlands_mapgen_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 
-# badlands_patchgen: renders ONE noiser terrain script over a world patch to a
-# grayscale + hillshaded PNG pair. The authoring loop for terrain scripts — pure CPU, no
-# window. Scripts are functions of world meters, so a patch is a literal crop of the
-# world (see scripts/mapgen/biomes/README.md).
-add_executable(badlands_patchgen
-    src/executables/patchgen/main_patchgen.cpp
-    src/executables/patchgen/script_eval.cpp)
-target_link_libraries(badlands_patchgen PRIVATE badlands_mapgen_lib badlands_game_lib)
-target_compile_options(badlands_patchgen PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_patchgen PRIVATE "-Wl,-ld_new")
-endif()
-
 # badlands_mapview: THE map tool. `--preview-image-only` runs the generator and
 # dumps the debug rasters (pure CPU, no window); otherwise it renders the
 # generated map as Nanite-style cluster-LOD terrain with the biome-blend
@@ -463,7 +417,6 @@ add_executable(badlands_mapview
     # cut, and the Terrain debug UI.
     src/game/map/cluster_terrain.cpp)
 target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib meshoptimizer)
-target_compile_options(badlands_mapview PRIVATE -Wno-deprecated-declarations)
 if(APPLE)
     target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
 endif()
@@ -472,7 +425,7 @@ endif()
 # DAG build (error monotonicity, sphere nesting, crack-free seams, grid
 # arithmetic). Pure CPU on synthetic MapData heightfields — compiles just the
 # build TU + its deps (map_data for the frozen contract it samples, the
-# header-only Aabb) and links meshoptimizer; no noiser/Dawn/GPU. Pattern of
+# header-only Aabb) and links meshoptimizer; no Dawn/GPU. Pattern of
 # badlands_generator_tests.
 add_executable(badlands_terrain_cluster_tests
     src/game/geometry/terrain_clusters_tests.cpp
@@ -491,27 +444,6 @@ target_include_directories(badlands_terrain_cluster_tests PRIVATE
 )
 target_link_libraries(badlands_terrain_cluster_tests PRIVATE meshoptimizer)
 add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-# badlands_patch_eval_tests: the patch evaluator's world mapping (world =
-# origin + (i+0.5)*extent/res), pinned with analytic ramp scripts. Needs the
-# noiser VM, so it links badlands_game_lib (which PUBLIC-links noiser_bundle and
-# carries no engine/SDL/Dawn dependency) -- NOT badlands_mapgen_lib, which would
-# drag in the renderer for nothing.
-add_executable(badlands_patch_eval_tests
-    src/executables/patchgen/patch_eval_tests.cpp
-    src/executables/patchgen/script_eval.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_link_libraries(badlands_patch_eval_tests PRIVATE badlands_game_lib)
-target_include_directories(badlands_patch_eval_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-)
-target_compile_options(badlands_patch_eval_tests PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_patch_eval_tests PRIVATE "-Wl,-ld_new")
-endif()
-add_test(NAME badlands_patch_eval_tests COMMAND badlands_patch_eval_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_fog_generator_tests: the biome -> fog-emitter generator. Pure CPU
 # (fog_sim.hpp is header-only glm; biomes/field2d are headers), so it compiles
@@ -571,26 +503,6 @@ target_include_directories(badlands_erosion_tests PRIVATE
 )
 add_test(NAME badlands_erosion_tests COMMAND badlands_erosion_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-# badlands_noise_texgen: headless CPU tool — compile a noiser script, evaluate
-# it over a windowed 2D domain into a texture (8x8 patches across the shared
-# thread pool), and write a PNG. Links badlands_game_lib for the noiser C++ VM
-# and `assets` for PNG write; compiles src/core/parallel.cpp for ParallelFor.
-# No engine/SDL/Dawn — a fast, standalone tool. See src/tools/noise_texgen/.
-add_executable(badlands_noise_texgen
-    src/tools/noise_texgen/noise_texgen.cpp
-    src/tools/noise_texgen/texgen_core.cpp
-    src/core/parallel.cpp
-)
-target_link_libraries(badlands_noise_texgen PRIVATE badlands_game_lib assets)
-target_include_directories(badlands_noise_texgen PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
-    ${taskflow_SOURCE_DIR}
-)
-target_compile_options(badlands_noise_texgen PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_noise_texgen PRIVATE "-Wl,-ld_new")
-endif()
 
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
 # re-enabled in CMake (previously only run via `cargo test --test cpp_tests`,
@@ -670,7 +582,6 @@ target_include_directories(badlands_game_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
 )
-target_compile_options(badlands_game_tests PRIVATE -Wno-deprecated-declarations)
 target_link_libraries(badlands_game_tests PRIVATE badlands_game_lib ui)
 add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
@@ -1211,25 +1122,3 @@ target_include_directories(badlands_ray_tests PRIVATE
 target_compile_definitions(badlands_ray_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 add_test(NAME badlands_ray_tests COMMAND badlands_ray_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_texgen_tests: Catch2 suite for the noise-texgen core
-# (src/tools/noise_texgen) — determinism, 8x8-patch tiling completeness, window
-# binding, mode/return-type validation, and linear-grayscale vs sRGB-color
-# encoding. Pure CPU; must run from the repo root so assets/noiser/texgen/*.noiser
-# resolve.
-add_executable(badlands_texgen_tests
-    src/tools/noise_texgen/texgen_tests.cpp
-    src/tools/noise_texgen/texgen_core.cpp
-    src/core/parallel.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_include_directories(badlands_texgen_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
-    ${taskflow_SOURCE_DIR}
-)
-target_link_libraries(badlands_texgen_tests PRIVATE badlands_game_lib assets)
-target_compile_options(badlands_texgen_tests PRIVATE -Wno-deprecated-declarations)
-if(APPLE)
-    target_link_options(badlands_texgen_tests PRIVATE "-Wl,-ld_new")
-endif()
-add_test(NAME badlands_texgen_tests COMMAND badlands_texgen_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
