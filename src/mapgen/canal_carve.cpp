@@ -155,20 +155,30 @@ CanalResult carve_canals(Field2D<float>& B, const Field2D<uint8_t>& lake_mask,
         const float excavate =
             std::max(0.0f, B.data[j] - (B0.data[j] - p.canal_depth_m));
 
-        // Water ahead attracts, a lower one more than a higher one. There is
-        // deliberately NO same-source repulsion: an agent curling back into
-        // its own trail closes a meander and leaves an island, which is wanted
-        // here rather than a braid to prevent.
+        // MARCH along the candidate direction rather than sampling one point.
+        // A single probe at a short range meant an agent could only see water
+        // six texels ahead, so a lake fifty texels away was invisible: agents
+        // had nothing pulling them anywhere and meandered until they hit a
+        // trail. On seed 2 that left 0 of 9 agents reaching a lake or the map
+        // edge. Marching finds the NEAREST water along the ray out to a much
+        // longer horizon, and weights it by proximity.
+        //
+        // Still no same-source repulsion: an agent curling back into its own
+        // trail closes a meander and leaves an island, which is wanted here.
         float water_pull = 0.0f;
-        const int sx = cx + static_cast<int>(std::lround(kDx[d] * sense));
-        const int sy = cy + static_cast<int>(std::lround(kDy[d] * sense));
-        if (sx >= 0 && sy >= 0 && sx < w && sy < ht) {
+        for (float march = 1.0f; march <= sense; march += p.canal_sense_stride_texels) {
+          const int sx = cx + static_cast<int>(std::lround(kDx[d] * march));
+          const int sy = cy + static_cast<int>(std::lround(kDy[d] * march));
+          if (sx < 0 || sy < 0 || sx >= w || sy >= ht) break;
           const size_t si = static_cast<size_t>(sy) * w + sx;
-          if (out.trail_source.data[si] >= 0 || lake_mask.data[si]) {
-            const float wd = B.data[static_cast<size_t>(cell)] - B.data[si];
-            water_pull = p.canal_w_water_m *
-                         std::clamp(wd / p.canal_water_falloff_m, -1.0f, 1.0f);
-          }
+          if (out.trail_source.data[si] < 0 && !lake_mask.data[si]) continue;
+          // Nearer water pulls harder, and water BELOW pulls while water above
+          // pushes — a tributary joins a trunk from above, never from below.
+          const float near = 1.0f - march / sense;
+          const float wd = B.data[static_cast<size_t>(cell)] - B.data[si];
+          water_pull = p.canal_w_water_m * near *
+                       std::clamp(wd / p.canal_water_falloff_m, -1.0f, 1.0f);
+          break;  // nearest hit wins; anything behind it is occluded
         }
 
         const float score =

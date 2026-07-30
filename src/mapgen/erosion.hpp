@@ -84,7 +84,14 @@ struct ErosionParams {
   // annihilate on contact before travelling anywhere. Real drainage reaches
   // the plain at discrete valley mouths, which is what this approximates.
   float canal_seed_spacing_texels = 12.0f;
-  float canal_sense_distance_texels = 6.0f;
+  // How far ahead an agent can see water, and the march stride along that ray.
+  // This is a LONG horizon on purpose: at 6 texels an agent could not see a
+  // lake fifty texels off, so nothing steered it to a terminus and it wandered
+  // until it struck a trail — 0 of 9 agents reached a lake or the edge on seed
+  // 2. The cost is ~sense/stride samples per candidate per step, which is
+  // nothing against the erosion sim.
+  float canal_sense_distance_texels = 48.0f;
+  float canal_sense_stride_texels = 2.0f;
   // 45 deg. On an 8-neighbour lattice this yields three candidates per step;
   // anything under 45 deg would forbid turning altogether.
   float canal_max_turn_angle_rad = 0.79f;
