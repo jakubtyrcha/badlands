@@ -343,3 +343,84 @@ change and none of which are currently satisfied:
   real outlets — it is currently inert and disabled.
 - Widening canals for large discharges, if the world scale ever makes width
   exceed a texel.
+
+---
+
+## v2 addendum (2026-07-30) — the primer redesign
+
+**Everything above describes a design that no longer exists.** Four of its
+central mechanisms were removed after measurement, and the sections describing
+them (Part 2's self-avoidance and source aliasing, Part 3's guaranteed descent,
+and the DSU validation table) are superseded by this addendum. They are kept
+because the reasoning that led to them is worth reading, and because the
+measurements that killed them are recorded nowhere else.
+
+### What this pass is now
+
+A **primer**, not a simulation. It moves no sediment, conserves no water and
+guarantees no monotone channel — the physical sim does all of that afterwards.
+It lowers a winding line of cells relative to the ground beside them, cheaply,
+so the real routing has a path to prefer.
+
+### Removed, and why
+
+- **Self-avoidance.** A cycle is now wanted: an agent looping back into its own
+  trail closes a meander and leaves an island.
+- **Source ownership (the disjoint-set union, aliasing, same-source
+  repulsion).** Its only consumer was repulsion, which is gone; and nothing
+  merges any more, so no ids are ever unioned and no stale aliases exist. The
+  aliasing validation this spec argued hardest for is deleted with it.
+- **Discharge merging and trunk-following.** Agents travelling a trunk each cut
+  another slope-step into it, so a trunk crossed by many tributaries was
+  deepened once per tributary. That was the depth snowball.
+- **Guaranteed monotone descent**, along with the carried reference that
+  enforced it. The reference was ABSOLUTE: it followed the ground down into a
+  valley, so climbing out cut the far wall to the valley floor — 15–19 m
+  trenches.
+
+### The rules that replaced them
+
+**Touching water kills the agent, without carving that cell.** One rule doing
+three jobs: a tributary ends where it meets a trunk; a lake absorbs; and a
+self-intersection closes a meander.
+
+**Depth is bank-relative and purely local.** The bed sits `canal_depth_m` below
+the lower of the two cells flanking the direction of travel, on the pre-canal
+terrain. Nothing is carried between steps, so nothing accumulates: max carve is
+2.62 m across every seed, threshold and grid size measured, against 15–19 m
+before, and against depth that scaled 0.52 → 2.46 m when the grid doubled.
+
+**Seeds are thinned by spacing.** The highland edge is continuous, so every
+cell on it qualified and agents started on adjacent cells — under contact-kills
+they annihilated at birth. Measured: 11 of 26 agents dead at step 0, 15 within
+five steps, nothing reaching a lake or the map edge. Real drainage reaches a
+plain at discrete valley mouths, which `canal_seed_spacing_texels`
+approximates.
+
+**The water horizon is long and marched.** A single probe at 6 texels could not
+see a lake fifty texels off, so agents had nothing steering them to a terminus.
+Marching to the nearest water out to 48 texels roughly doubled lake arrivals
+(seed 1 at threshold 400: 8 → 19).
+
+### Known and accepted
+
+- Canals read **rectilinear** — long straight runs with right-angled corners
+  rather than natural drainage. Accepted for now by the user.
+- **Arc radius versus distance is unverified.** Speed-scaled turn cost was
+  meant to widen arcs downstream; the visual suggests it instead produces
+  longer straights with sharper corners. Accepted for now.
+- **Connection is seed-dependent.** Seed 2 lands 1 of 9 agents in a lake where
+  seed 3 lands 8 of 12.
+
+### On the metric this pass was aimed at
+
+The spec's headline target — "channel texels routed by flood parent: 33–45% →
+under 5%" — was framed against a **broken proxy**. That figure counted channel
+texels flagged `in_lake`, which equals mis-routing only while the routing
+exclusion IS `in_lake`. Measuring the receiver against steepest descent
+directly, real pre-L5 mis-routing was 10–17%, not 33–45%.
+
+Canals move that number very little. What moved it was the lake tag (L5 of the
+two-kind-lakes spec): 82.9 → 91.9%, 88.9 → 98.1%, 89.8 → 95.6% of channel
+texels realising the steepest descent. The canal pass should be judged on
+whether it primes useful drainage, not on this metric.
