@@ -241,7 +241,7 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
 
     // Night, so the tavern is not an option; starved of diversion, so they want
     // company. Rested (fatigue 1.0), so rest never takes over.
-    g.world_millis = static_cast<int64_t>(kMillisPerDay * 0.9);
+    g.world_millis = static_cast<int64_t>(g.millis_per_day * 0.9);
     for (entt::entity e : {a, b}) {
         auto& sim = g.registry.get<HeroSimulationState>(e);
         sim.content = 0.1f;
@@ -306,7 +306,7 @@ TEST_CASE("a chatting hero's CurrentIntention stays Chat across a mid-chat wake,
 
     // Same setup as "two bored heroes find each other and talk" above: night
     // (no tavern), starved of diversion, rested (so rest never takes over).
-    g.world_millis = static_cast<int64_t>(kMillisPerDay * 0.9);
+    g.world_millis = static_cast<int64_t>(g.millis_per_day * 0.9);
     for (entt::entity e : {a, b}) {
         auto& sim = g.registry.get<HeroSimulationState>(e);
         sim.content = 0.1f;

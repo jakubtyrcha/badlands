@@ -102,6 +102,16 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
     game->terrain_blocking = config.terrain_blocking;
     game->arena_half_x = config.arena_half_x;
     game->arena_half_z = config.arena_half_z;
+    // The clock helpers divide by this, so a zero/negative period would be a
+    // division by zero rather than merely a strange world -- clamp at the
+    // boundary and say so, the same shape as sanitize_factors' adjustments.
+    if (config.millis_per_day < 1) {
+        spdlog::warn("make_world: millis_per_day {} is not a valid day length -- using {}",
+                     config.millis_per_day, kDefaultMillisPerDay);
+        game->millis_per_day = kDefaultMillisPerDay;
+    } else {
+        game->millis_per_day = config.millis_per_day;
+    }
     if (desc.wasm_bytes != nullptr) {
         // Wasm bytes were explicitly provided, so a bh_load/bh_instantiate
         // failure here is a brain bug, not a config error to fall back from
@@ -127,6 +137,26 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
 // Thin forwarder onto the (BrainDesc, WorldConfig) implementation above.
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
     return make_world(desc, WorldConfig{});
+}
+
+// See the doc comment in badlands_sim.hpp for WHY this goes through ticks
+// rather than sim_seconds * 1000. kSimHz/kMillisPerTick are sim internals
+// (components.h), which is exactly why this conversion lives here instead of
+// being open-coded by every app.
+int64_t MillisPerDayForSimSeconds(float sim_seconds) {
+    // Not `<= 0` -- this form also rejects NaN, which would otherwise survive
+    // the clamp below and land as an arbitrary integer.
+    if (!(sim_seconds > 0.0f)) {
+        spdlog::warn("MillisPerDayForSimSeconds: {} is not a valid day length -- using {} ms",
+                     sim_seconds, kDefaultMillisPerDay);
+        return kDefaultMillisPerDay;
+    }
+    // A day of ~31 years, far past anything useful, but it keeps the double ->
+    // int64 conversion in range for any finite input (including +inf).
+    constexpr double kMaxMillisPerDay = 1e12;
+    const double millis = static_cast<double>(sim_seconds) *
+                          static_cast<double>(kSimHz) * static_cast<double>(kMillisPerTick);
+    return static_cast<int64_t>(std::llround(std::clamp(millis, 1.0, kMaxMillisPerDay)));
 }
 
 std::unique_ptr<BadlandsGame> make_flat_world() {

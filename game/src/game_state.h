@@ -93,6 +93,14 @@ struct BadlandsGame {
     // tick (see components.h). Deterministic, no float drift.
     int64_t world_millis = 0;
 
+    // How long one in-game day lasts, in world_millis. Copied from
+    // WorldConfig::millis_per_day at construction and never changed after --
+    // initial config in the determinism contract, and it defines what an
+    // in-game hour means (millis_per_hour(), components.h), so every
+    // hours-authored HeroFactors rate scales with it. Always >= 1 (make_world
+    // clamps), because the clock helpers divide by it.
+    int64_t millis_per_day = badlands::kDefaultMillisPerDay;
+
     // The terrain/biome field the sim reasons about (deer roam Forest/Plains,
     // hunters seek Forest). Generated once in make_world; MapData is pure CPU
     // data with no engine/GPU dependency, so the sim owns it directly. Map-local

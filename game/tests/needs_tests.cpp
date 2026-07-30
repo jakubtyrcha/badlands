@@ -67,7 +67,7 @@ TEST_CASE("the drain rate is expressed in in-game hours and is live") {
 
     // fatigue_drain_hours ticks should take a full reserve to roughly empty.
     const int64_t ticks = g->factors.hero.fatigue_drain_hours *
-                          static_cast<float>(kMillisPerGameHour) / kMillisPerTick;
+                          static_cast<float>(millis_per_hour(g->millis_per_day)) / kMillisPerTick;
     sim.fatigue = 1.0f;
     for (int64_t i = 0; i < ticks; ++i) {
         advance_needs(*g);
@@ -196,7 +196,7 @@ TEST_CASE("a rested hero heads home once fatigue falls past the seek bar") {
     REQUIRE(building_approach_tile(g->placement, g->placement.buildings[guild], home_door));
 
     g->registry.get<Position>(e).pos = {40.0f, 40.0f};  // far from home
-    g->world_millis = kMillisPerDay / 2;                 // midday, so the night bar doesn't apply
+    g->world_millis = g->millis_per_day / 2;                 // midday, so the night bar doesn't apply
     // Well below the daytime seek bar -> the hero wants to rest.
     g->registry.get<HeroSimulationState>(e).fatigue = 0.2f;
 
@@ -225,7 +225,7 @@ TEST_CASE("an under-entertained hero heads to the tavern by day") {
     REQUIRE(building_approach_tile(g->placement, g->placement.buildings[tavern], tavern_door));
 
     g->registry.get<Position>(e).pos = {0.0f, 0.0f};
-    g->world_millis = kMillisPerDay / 2;  // midday
+    g->world_millis = g->millis_per_day / 2;  // midday
     auto& sim = g->registry.get<HeroSimulationState>(e);
     sim.fatigue = 1.0f;   // fully rested, so rest does not compete
     sim.content = 0.1f;   // starved of diversion
@@ -251,7 +251,7 @@ TEST_CASE("the seek threshold is data, and urgency (not a tier) decides") {
     uint32_t hid = recruit_at(&g, guild);
     entt::entity e = g.slots[hid];
     g.registry.get<Position>(e).pos = {40.0f, 40.0f};
-    g.world_millis = kMillisPerDay / 2;  // midday
+    g.world_millis = g.millis_per_day / 2;  // midday
 
     // fatigue 0.5 near the 0.55 seek bar -> the urge is too mild to beat the
     // fallback wander, so the hero does not head home.

@@ -120,7 +120,7 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     v.health_frac = hp.max_hp > 0.0f ? hp.hp / hp.max_hp : 1.0f;
     v.inventory = sim.inventory;
     v.self_attack_range = game.registry.get<Stats>(e).attack_range;
-    v.tod = time_of_day(game.world_millis);
+    v.tod = time_of_day(game.world_millis, game.millis_per_day);
     v.night = is_night(v.tod);
     v.roam_epoch = game.world_millis / kRoamLeaseMillis;
     v.now_millis = game.world_millis;
