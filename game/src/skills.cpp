@@ -98,7 +98,10 @@ SkillCatalog::SkillCatalog() {
     calcify.target = SkillTargetMode::SelfOnly;
     calcify.attack_test = SkillAttackTest::None;  // a ward, not a blow
     calcify.intention_duration_seconds = 0.0f;    // instant
-    calcify.cooldown_seconds = 20.0f;
+    // LONGER than the 30 s the ward lasts, deliberately: at a shorter cooldown
+    // the armour could be maintained end to end, which would make it a
+    // permanent stat rather than something spent and waited for.
+    calcify.cooldown_seconds = 45.0f;
     calcify.effect = "Hardens the skin to stone; blows land, and glance.";
     set_constant(calcify, "duration_seconds", 30.0f);
 

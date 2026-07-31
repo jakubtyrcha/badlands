@@ -136,7 +136,10 @@ TEST_CASE("skill template catalog carries the compiled Calcify defaults") {
     CHECK(c.target == badlands::SkillTargetMode::SelfOnly);
     CHECK(c.attack_test == badlands::SkillAttackTest::None);
     CHECK(c.intention_duration_seconds == 0.0f);
-    CHECK(c.cooldown_seconds == 20.0f);
+    // A gap, not a rotation: the ward's 30 s must not cover its own cooldown,
+    // or the armour is permanent (code review, finding 6).
+    CHECK(c.cooldown_seconds == 45.0f);
+    CHECK(c.cooldown_seconds > c.constant("duration_seconds", 0.0f));
     CHECK(c.effect == "Hardens the skin to stone; blows land, and glance.");
     // Its constant is the DURATION; how much armour it is worth belongs to the
     // status (combat.cpp), not to whatever applied it.

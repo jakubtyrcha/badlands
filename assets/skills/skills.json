@@ -4,7 +4,7 @@
     "trigger": "action",
     "target": "self",
     "attack_test": "none",
-    "cooldown": 20,
+    "cooldown": 45,
     "intention_duration": 0,
     "effect": "Hardens the skin to stone; blows land, and glance.",
     "constants": {

@@ -156,11 +156,13 @@ TEST_CASE("a SelfOnly skill cast at somebody else is refused, not remapped",
                                    {0.0f, 0.0f}, /*param_a=*/1});
     CHECK(f.skill_cooldown(1) == Catch::Approx(0.0f));  // nothing was cast
 
-    // Cast at itself it is accepted (Calcify's own effect is a no-op, but the
-    // cast still happens: cooldown stamped).
+    // Cast at itself it is accepted, and the cooldown is stamped from the
+    // spec rather than from a number repeated here.
     apply_command(*f.game, Command{CommandKind::UseSkill, f.caster_slot, f.caster_slot,
                                    {0.0f, 0.0f}, /*param_a=*/1});
-    CHECK(f.skill_cooldown(1) == Catch::Approx(20.0f));
+    CHECK(f.skill_cooldown(1) ==
+          Catch::Approx(f.game->skills.specs[static_cast<size_t>(SkillId::Calcify)]
+                            .cooldown_seconds));
 }
 
 TEST_CASE("a trigger that does not match the channel is refused", "[skills][cast]") {

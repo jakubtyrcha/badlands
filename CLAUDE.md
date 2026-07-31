@@ -86,6 +86,26 @@ cargo test --manifest-path src/crates/brainhost/Cargo.toml --lib
 - `scripts/gitstate.sh` — branch + HEAD + short status + commits ahead of origin/main.
 - `scripts/noiser_guard.sh [BASE]` — assert `third_party/noiser` isn't staged (nor in `BASE..HEAD`).
 
+## Time convention — FOUR clocks, and they never mix
+There are four time bases. Every duration, rate and timestamp belongs to exactly one, and the name says which.
+
+| Base | What it is | Name / unit | Who may read it |
+|---|---|---|---|
+| **Real** | wall clock; ignores pause and speed | `real_dt`, `real_*`, float seconds | the app shell only (SDL loop, SimClock input) |
+| **Presentation** | real × playback speed; stops when paused | `anim_*`, float seconds | views only — animation, VFX, tracers, camera easing |
+| **Sim** | the deterministic tick clock | `*_ticks` (int64), **1 tick = 1/120 s** | everything under `game/`. THE gameplay clock |
+| **Narrative** | day/night, derived from sim time | `*_hours`, `time_of_day`, `*_days` | the day cycle, and needs |
+
+- **Authored data is in SIM SECONDS.** A `3` in `skills.json` is 3 sim seconds; at 1× playback that happens to be 3 real seconds, and that equality is a property of the speed setting, not the definition.
+- **A TICK is the atom of sim time, and a tick is 1/120 s** (`kTicksPerSecond = 120`). 120 was chosen because it divides every usual step rate — 30, 60, 120 — so a sim step is always a whole number of ticks and no clock can drift against another.
+- **Sim time is NOT milliseconds.** 1000 does not divide by 30, so a millisecond clock at 30 Hz truncates (33 ms/step → 30 steps = 990 ms, a 1% drift against the clock that decides how many steps to run). Ticks remove the rounding rather than documenting it.
+- **The sim STEP is separate from the tick.** The step rate is how often the world advances (30 Hz today = `kTicksPerStep` 4); the tick is what time is *measured* in. Changing the step rate must never change what a duration means.
+- Authored seconds convert once, at the boundary: `ticks = round(seconds × 120)`. Milliseconds survive only where a wire or a display asks for them.
+- **Nothing under `game/` may see real or presentation time.** If a sim system takes a `dt`, that is the bug: it makes the result depend on a number that is not in the command log, which the determinism contract forbids.
+- **Narrative time is DERIVED and is never a gameplay duration.** A cooldown is never "half an in-game hour". One deliberate exception, and it says so in its signature: `reserve_rate_per_tick(hours, millis_per_day)` — a need is *about* the day, so it is authored against it.
+- **Speed changes how fast ticks are issued, never what a tick means.** `SimClock` decides how many ticks to run; the length of one is a compile-time constant.
+- When talking to a human, real-world units are fine ("a 3-second stun"). In code and data they mean sim time, always.
+
 ## Architecture — the layer boundary is deliberate
 - **`src/engine/`** — engine ported from sampo (`sampo::` → `badlands::`): rendering, GPU/pipeline/reflection/frame infra, data-driven material system, scene graph + scene renderer (forward-opaque + tonemap), GPU mip generation, `Camera`. **No game logic or game types.**
 - **`src/game/`** — C++ game render/scene layer: geometry generation, scene construction, per-app `AppView`s (`GameView`, etc.), camera + input *handling*, UI *logic*. The EnTT world sim (placement/movement/brains/combat) lives in **`game/`**, built as `badlands_game_lib` and called by the apps through a C ABI.
