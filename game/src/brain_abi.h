@@ -122,7 +122,8 @@ extern "C" {
 
 // Intention kinds (append-only): the suggestion's `kind`. 0 = no suggestion
 // this wake. Mirrors badlands::IntentionKind (game/src/components.h) 1:1 for
-// values 0..8 -- BL_INT_USE_SKILL(9) has no IntentionKind counterpart yet
+// values 0..9, BL_INT_USE_SKILL included (v6: it has an IntentionKind
+// counterpart now -- a FOCUS, game/src/skill_focus.h)
 // (reserved). Same discipline as v1's BL_CMD_* list: never renumber or reuse
 // a shipped value.
 #define BL_INT_NONE 0
@@ -134,7 +135,14 @@ extern "C" {
 #define BL_INT_BUY 6
 #define BL_INT_CHAT 7
 #define BL_INT_IDLE 8
-#define BL_INT_USE_SKILL 9  // reserved: rejected (warn+ignore) by the host until the skills slice
+// A FOCUS (v6): adopt skill `arg` (an index into BlViewWire.skills) at
+// `target_slot` and hold it for that skill's intention_duration, after which
+// the engine casts it. Only a skill whose trigger is Intention may be adopted
+// this way -- an ACTION skill goes through bl_enqueue_action instead, and each
+// channel refuses the other's (game/src/skill_cast.h). Adopting anything else
+// mid-focus abandons it, which is the only way to abandon one: a focusing
+// entity does not move.
+#define BL_INT_USE_SKILL 9
 
 // Event kinds (append-only), mirroring badlands::InboxEventKind
 // (game/src/components.h) 1:1.

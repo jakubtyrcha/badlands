@@ -946,6 +946,7 @@ enum class CommandKindId : int32_t {
     Chat,
     Engage,  // hold at range of a live entity target (single-gateway combat's engagement executor)
     UseSkill,  // cast skill param_a (an index into the actor's OWN Skills) at target_id
+    CancelFocus, // abandon a long cast in progress (skill_focus.h)
     FocusSkill,  // begin a long cast of skill param_a at target_id (skill_focus.h)
 };
 

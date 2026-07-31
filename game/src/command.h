@@ -38,6 +38,12 @@ enum class CommandKind : int32_t {
                  // SkillId -- the same convention Attack's param_a uses for attacks)
                  // at target_id; the handler re-validates everything and runs the
                  // effect through game/src/skill_cast.h
+    CancelFocus, // ABANDON a long cast in progress. Logged for exactly the same
+                 // reason FocusSkill is: a replay never thinks, so a cancel
+                 // performed only inside apply_intention would happen live and
+                 // never on replay -- and the shot the live run did NOT fire
+                 // would land in the replay, which is the sharpest divergence
+                 // this contract can produce.
     FocusSkill,  // BEGIN a long cast of skill param_a at target_id: the same index
                  // convention, on the other channel (game/src/skill_focus.h).
                  //

@@ -431,3 +431,53 @@ TEST_CASE("the nav window is clipped to the view cone", "[nav]") {
         CHECK(glm::dot(glm::normalize(d), facing) >= 0.5f - 1e-3f);
     }
 }
+
+TEST_CASE("a wake that suggests nothing does not abandon the focus", "[focus][intention]") {
+    // "Anything ADOPTED that is not this focus abandons it" -- and None adopts
+    // NOTHING. A brain that yields without a suggestion must not lose its two
+    // seconds for having had no opinion.
+    FocusFixture f;
+    REQUIRE(f.adopt());
+    f.step();
+    REQUIRE(f.is_focusing());
+
+    Intention nothing;  // kind == None
+    CHECK_FALSE(apply_intention(*f.game, f.caster_slot, nothing));
+    apply_commands(*f.game);
+    CHECK(f.is_focusing());
+}
+
+TEST_CASE("the intention ends when the focus does", "[focus][intention]") {
+    // Without a completion criterion the intention outlives the commitment, and
+    // the next identical restatement resumes a focus that is no longer there --
+    // short-circuiting into no command, no cast, and exactly one shot ever.
+    FocusFixture f;
+    REQUIRE(f.adopt());
+    REQUIRE(f.game->registry.get<CurrentIntention>(f.caster()).kind ==
+            IntentionKind::UseSkill);
+
+    while (f.is_focusing()) {
+        f.step();
+    }
+    advance_intentions(*f.game);
+    CHECK(f.game->registry.get<CurrentIntention>(f.caster()).kind == IntentionKind::None);
+
+    // ...so asking again is a fresh decision, and really does fire again.
+    f.game->registry.get<Skills>(f.caster()).cooldown_remaining[0] = 0.0f;
+    REQUIRE(f.adopt());
+    CHECK(f.is_focusing());
+}
+
+TEST_CASE("a cast cannot name a target it cannot perceive", "[skill][sneak]") {
+    // The last way through the imperceptible rule: a caster holding a slot from
+    // before the target vanished. Target selection and threat perception both
+    // skip a sneaking entity, and now so does naming one directly.
+    FocusFixture f(/*apart=*/5.0f);
+    CastPlan plan;
+    REQUIRE(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan,
+                          SkillTrigger::Intention));
+
+    apply_status(*f.game, f.victim(), StatusKind::Sneaking, 5000, f.caster_slot);
+    CHECK_FALSE(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan,
+                              SkillTrigger::Intention));
+}

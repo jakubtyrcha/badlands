@@ -411,9 +411,11 @@ proc brainTick(slot: int32): int32 =
             castPointX = goal.p.x
             castPointZ = goal.p.z
 
-      # Dress wounds first: staying alive outranks any damage. SelfOnly, so it
-      # names the caster and needs no threat in view.
-      if v.healthFrac <= kDressWoundsHealthFrac:
+      # Dress wounds: staying alive outranks any DAMAGE. It does not outrank
+      # getting out -- the guard matters, because Teleport decided above and an
+      # unguarded block here would quietly overwrite it, leaving an apprentice
+      # to bandage itself in front of something it cannot beat.
+      if castSlot < 0 and v.healthFrac <= kDressWoundsHealthFrac:
         let dress = readySkillSlot(v, BL_SKILL_DRESS_WOUNDS)
         if dress >= 0:
           castSlot = dress

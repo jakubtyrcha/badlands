@@ -7,7 +7,7 @@
 #include "intention.h"  // abort_intention -- the Chat handler's never-started decline
 #include "placement.h"
 #include "skill_cast.h"  // validate_cast / run_cast -- the UseSkill handler's body
-#include "skill_focus.h"  // begin_focus -- the FocusSkill handler
+#include "skill_focus.h"  // begin_focus / cancel_focus -- the two focus handlers
 
 #include <entt/entt.hpp>
 
@@ -152,6 +152,10 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                 return 0;
             }
             run_cast(game, cmd.actor, cmd.param_a, plan);
+            return 0;
+        }
+        case CommandKind::CancelFocus: {
+            cancel_focus(game, entity_for_slot(game, static_cast<int32_t>(cmd.actor)));
             return 0;
         }
         case CommandKind::FocusSkill: {

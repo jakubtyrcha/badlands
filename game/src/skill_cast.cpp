@@ -205,6 +205,17 @@ bool validate_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index
                              caster_slot, SkillName(static_cast<int32_t>(id)));
                 return false;
             }
+            // ...and it has to be somewhere you can SEE. Target selection and
+            // threat perception both skip a sneaking entity already; without
+            // this a caster holding a slot from before it vanished could still
+            // cast at it, which would be the one way through the imperceptible
+            // rule. Never applies to the caster itself -- a sneaking hero may
+            // of course still act on itself.
+            if (target != caster && has_status(reg, target, StatusKind::Sneaking)) {
+                spdlog::warn("[skill] slot {}: {} names a target it cannot perceive, cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)));
+                return false;
+            }
             out.targets[out.target_count++] = named_target_slot;
             break;
         }

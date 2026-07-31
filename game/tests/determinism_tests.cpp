@@ -25,6 +25,7 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -508,6 +509,85 @@ TEST_CASE("a run containing a FOCUS is reproducible and replays exactly") {
     stage(replay_owned.get());
     replay_owned->replay_log = &recorded;
     for (int i = 0; i < kRunTicks * 4; ++i) {
+        tick_world(*replay_owned, 1.0f / 30.0f);
+    }
+    CHECK(replay_owned->replay_cursor == recorded.size());
+    require_same(snapshot(a_owned.get()), snapshot(replay_owned.get()));
+}
+
+TEST_CASE("a focus ABANDONED mid-cast replays exactly") {
+    // The companion to the case above, and the one that actually bites: a focus
+    // that starts and RESOLVES is symmetric, but one that is abandoned is not.
+    // The start is logged; if the cancel is not, then replay recreates the focus
+    // from the log, nothing erases it, and advance_focus fires the shot the live
+    // run never fired. Divergence in the sharpest possible direction -- a kill
+    // that only happens in the replay.
+    auto stage = [](BadlandsGame* g) {
+        const uint32_t hunter = spawn_creature_into(*g, CreatureId::Hunter, kPlayerTeam,
+                                                    {0.0f, kCastleSpawnZ}, /*level=*/5);
+        const uint32_t gob = spawn_creature_into(*g, CreatureId::Goblin, /*team=*/1,
+                                                 {14.0f, kCastleSpawnZ});
+        return std::pair<uint32_t, uint32_t>{hunter, gob};
+    };
+    auto run = [&](BadlandsGame* g) {
+        const auto [hunter, gob] = stage(g);
+        int32_t slot = -1;
+        const Skills& sk =
+            g->registry.get<Skills>(entity_for_slot(*g, static_cast<int32_t>(hunter)));
+        for (int32_t i = 0; i < sk.count; ++i) {
+            if (sk.ids[i] == SkillId::PrecisionShot) {
+                slot = i;
+            }
+        }
+        REQUIRE(slot >= 0);
+        for (int i = 0; i < kRunTicks * 2; ++i) {
+            if (i == 5) {
+                Intention focus;
+                focus.kind = IntentionKind::UseSkill;
+                focus.target_slot = gob;
+                focus.arg = slot;
+                apply_intention(*g, hunter, focus);
+                apply_commands(*g);
+            }
+            // 30 ticks in: a second thought, well inside the 2 s focus. Live,
+            // this abandons the cast and no shot is ever fired.
+            //
+            // Idle rather than MoveTo, deliberately. A brainless hero (no wasm
+            // loaded, which is what these determinism worlds use) has its
+            // MoveTarget cleared every live tick by the mock think dispatch,
+            // and replay does not think at all -- so ANY movement injected into
+            // one diverges for reasons that have nothing to do with focus. Idle
+            // adopts through SetBehavior alone and touches no movement, which
+            // keeps this case about the thing it is testing.
+            if (i == 35) {
+                Intention stop;
+                stop.kind = IntentionKind::Idle;
+                stop.duration_millis = 1000;
+                apply_intention(*g, hunter, stop);
+                apply_commands(*g);
+            }
+            tick_world(*g, 1.0f / 30.0f);
+        }
+    };
+
+    auto a_owned = make_world(BrainDesc{});
+    run(a_owned.get());
+
+    // The goblin is untouched: the shot really was abandoned, so the replay
+    // below is checking something other than "both runs did nothing".
+    const std::vector<Command>& log = a_owned->command_log;
+    CHECK(std::any_of(log.begin(), log.end(), [](const Command& c) {
+        return c.kind == CommandKind::FocusSkill;
+    }));
+    CHECK(std::any_of(log.begin(), log.end(), [](const Command& c) {
+        return c.kind == CommandKind::CancelFocus;
+    }));
+
+    const std::vector<Command> recorded = log;
+    auto replay_owned = make_world(BrainDesc{});
+    stage(replay_owned.get());
+    replay_owned->replay_log = &recorded;
+    for (int i = 0; i < kRunTicks * 2; ++i) {
         tick_world(*replay_owned, 1.0f / 30.0f);
     }
     CHECK(replay_owned->replay_cursor == recorded.size());

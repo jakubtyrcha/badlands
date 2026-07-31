@@ -210,16 +210,31 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
         return true;
     }
 
+    if (intent.kind == IntentionKind::None) {
+        return false;  // nothing suggested this wake -- and so nothing ADOPTED
+    }
+
     // Anything ADOPTED that is not this focus abandons it. That is the only way
     // "moving abandons the focus" is reachable at all -- a focusing entity does
     // not move, so the sole route out is deciding to do something else, and it
     // costs the seconds already spent. An identical restatement never reaches
-    // here (it returned above), so a brain restating its own focus resumes it.
-    cancel_focus(game, e);
+    // here (it returned above), so a brain restating its own focus resumes it;
+    // nor does a wake that suggested NOTHING, which adopts nothing and so
+    // abandons nothing (the None case above).
+    //
+    // Through a LOGGED command, like the focus's own start: a replay never
+    // thinks, so a cancel performed here and nowhere else would happen live and
+    // not on replay -- and the shot the live run never fired would land in the
+    // replay. Queued ahead of whatever this adoption pushes below, so the drain
+    // ends the old commitment before beginning any new one.
+    if (focusing(game.registry, e)) {
+        game.command_queue.push_back(
+            {CommandKind::CancelFocus, slot, UINT32_MAX, {0.0f, 0.0f}, 0});
+    }
 
     switch (intent.kind) {
         case IntentionKind::None:
-            return false;  // nothing suggested this wake
+            return false;  // unreachable: handled above
 
         case IntentionKind::UseSkill: {
             // A FOCUS: validated now, and validated AGAIN at its deadline
@@ -723,6 +738,22 @@ void advance_intentions(BadlandsGame& game) {
                 // fuller account of why every call site here needs one).
                 if (select_target(game, e) == entt::null) {
                     ended = true;  // completed stays false -> aborted
+                }
+                break;
+
+            case IntentionKind::UseSkill:
+                // A focus ENDS when it is no longer running -- resolved, stunned
+                // out, or refused at its deadline (game/src/skill_focus.h).
+                // Without this the intention would outlive the commitment, and
+                // a brain restating the same focus would be resumed against a
+                // SkillFocus that no longer exists: identical restatement,
+                // short-circuit, no new command, and exactly one shot ever.
+                //
+                // `completed` stays false -- the intention ending says only that
+                // the cast is over, not that it landed; whether it did is what
+                // the SkillUsed/FocusCancelled events say.
+                if (!focusing(reg, e)) {
+                    ended = true;
                 }
                 break;
 
