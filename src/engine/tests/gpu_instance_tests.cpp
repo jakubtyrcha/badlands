@@ -2221,6 +2221,122 @@ TEST_CASE("GPU shared-slice render: a bucket's submeshes draw the SAME "
 }
 
 // ===========================================================================
+// Phase 4 of the volumetric-foliage feature: a dedicated shadow cull set.
+// CullShadow() dispatches the SAME classify/scan/scatter pipeline as Cull(),
+// but against the light's frustum, into a SEPARATE buffer set -- Cull()'s
+// camera-frustum result and CullShadow()'s light-frustum result must never
+// leak into each other. Proven directly via GpuInstanceRenderer (not through
+// InstancedMeshField): one instance placed INSIDE the light's ortho box but
+// BEHIND the camera (so Cull() culls it, CullShadow() doesn't), and the
+// mirrored placement (inside the camera frustum, outside the light box).
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU cull: main and shadow cull sets are independent",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  Camera camera = MakeCullCamera(1.0f);  // at the origin, looking down -Z
+
+  // A top-down light: eye at (0,20,0) looking straight down at the origin,
+  // "up" = -Z (so the light's local axes are: right=world X, its own up=
+  // -world Z, forward=-world Y) -- deliberately unrelated to the camera's
+  // -Z-facing frustum, so the two only agree by coincidence, never by
+  // construction. The ortho box (verified numerically, not just by
+  // construction, since a light-space basis is easy to mis-derive by hand)
+  // covers world X in [-5,5], world Z in [-5,5], world Y in [-20,20]
+  // (eye.y-far .. eye.y-near along the forward axis).
+  const glm::mat4 light_proj = glm::ortho(-5.0f, 5.0f, -5.0f, 5.0f, 0.0f, 40.0f);
+  const glm::mat4 light_view =
+      glm::lookAt(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f),
+                  glm::vec3(0.0f, 0.0f, -1.0f));
+  const glm::mat4 light_view_proj = light_proj * light_view;
+
+  // Case 1: behind the camera (camera looks down -Z, so +Z is culled by
+  // Cull()) but squarely inside the light's box (X=0, Z=3, Y=0 -- all within
+  // the ranges above).
+  const GpuInstanceRenderer::InstanceInput behind_camera =
+      MakeInstance(glm::vec3(0.0f, 0.0f, 3.0f), /*model=*/0u, /*radius=*/0.5f);
+  // Case 2: dead ahead of the camera (inside Cull()'s frustum -- the "straight
+  // ahead" case other cull tests in this file use) but at Z=-10, outside the
+  // light's Z in [-5,5] box (outside CullShadow()'s frustum).
+  const GpuInstanceRenderer::InstanceInput outside_light =
+      MakeInstance(glm::vec3(0.0f, 0.0f, -10.0f), /*model=*/0u,
+                  /*radius=*/0.5f);
+
+  struct Survivors {
+    uint32_t main_count = 0;
+    uint32_t shadow_count = 0;
+  };
+  auto run_case = [&](const GpuInstanceRenderer::InstanceInput& instance) {
+    // thresholds pushed to +inf -> lod0 -> bucket 0 regardless of distance.
+    GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, /*capacity=*/1,
+                                 /*num_models=*/1, {1e30f, 1e30f});
+    REQUIRE(renderer.IsValid());
+    renderer.UploadInstances(
+        std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
+
+    FrameContext frame;
+    frame.Begin(g.device, g.queue, UniformData{});
+    renderer.Cull(frame, camera);
+    renderer.CullShadow(frame, camera, light_view_proj);
+    wgpu::CommandBuffer cmd = frame.End();
+    g.queue.Submit(1, &cmd);
+    test::WaitForGpu(g.instance, g.device, g.queue);
+
+    std::vector<uint32_t> main_args = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetArgsBuffer(), 0, 5);
+    std::vector<uint32_t> shadow_args = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetShadowArgsBuffer(), 0, 5);
+    REQUIRE(main_args.size() == 5);
+    REQUIRE(shadow_args.size() == 5);
+    Survivors s{main_args[1], shadow_args[1]};  // instanceCount @ index 1
+
+    // Ground-truth cross-check against the raw per-bucket counts (bucket 0),
+    // independent of the args-buffer broadcast.
+    std::vector<uint32_t> main_counts = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0, 1);
+    std::vector<uint32_t> shadow_counts = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetShadowBucketCountBuffer(), 0,
+        1);
+    REQUIRE(main_counts.size() == 1);
+    REQUIRE(shadow_counts.size() == 1);
+    CHECK(main_counts[0] == s.main_count);
+    CHECK(shadow_counts[0] == s.shadow_count);
+
+    // The surviving set's compacted transform is the instance's own (proves
+    // "shows 1 survivor" means the actual instance, not a stray write).
+    if (s.main_count == 1) {
+      std::vector<glm::mat4> compacted = test::ReadBufferSync<glm::mat4>(
+          g.instance, g.device, g.queue, renderer.GetCompactedBuffer(), 0, 1);
+      REQUIRE(compacted.size() == 1);
+      CHECK(Mat4Equal(compacted[0], instance.transform));
+    }
+    if (s.shadow_count == 1) {
+      std::vector<glm::mat4> shadow_compacted = test::ReadBufferSync<glm::mat4>(
+          g.instance, g.device, g.queue, renderer.GetShadowCompactedBuffer(), 0,
+          1);
+      REQUIRE(shadow_compacted.size() == 1);
+      CHECK(Mat4Equal(shadow_compacted[0], instance.transform));
+    }
+    return s;
+  };
+
+  {
+    Survivors s = run_case(behind_camera);
+    INFO("behind camera / inside light box: main=" << s.main_count
+                                                    << " shadow=" << s.shadow_count);
+    CHECK(s.main_count == 0);
+    CHECK(s.shadow_count == 1);
+  }
+  {
+    Survivors s = run_case(outside_light);
+    INFO("inside camera / outside light box: main=" << s.main_count
+                                                     << " shadow=" << s.shadow_count);
+    CHECK(s.main_count == 1);
+    CHECK(s.shadow_count == 0);
+  }
+}
+
+// ===========================================================================
 // Task 2: InstancedMeshField — the reusable engine component bundling a
 // GpuInstanceRenderer with a per-(bucket,submesh) {PassKind, material}
 // mapping. Fixture: one model, one lod (thresholds pushed to +inf so a single
@@ -2993,6 +3109,185 @@ TEST_CASE("InstancedMeshField::SetSubmesh rejects out-of-range lod/submesh clean
 }
 
 // ===========================================================================
+// Phase 4 of the volumetric-foliage feature: InstancedMeshField's shadow
+// slot. SetSubmeshShadow attaches a shadow-pass material to an ALREADY
+// SetSubmesh-configured slot (geometry is shared, not re-specified);
+// HasPass(kShadow) reflects only whether a shadow_material is attached
+// (independent of the slot's main PassKind/material); Draw(kShadow) draws
+// only the slots with one, routed through CullShadow()'s result set, into a
+// depth-only Depth32Float pass (mirroring the real Pass 0 attachment).
+// ---------------------------------------------------------------------------
+namespace {
+
+struct ShadowSlotFieldFixture {
+  std::unique_ptr<MaterialInstanceFactory> factory;  // casts_shadow=true
+  MaterialInstanceCache cache;
+  wgpu::Buffer ibuf;
+  wgpu::Buffer vbuf;
+  std::unique_ptr<InstancedMeshField> field;
+};
+
+// One model/lod/submesh bucket: geometry configured via SetSubmesh with a
+// NULL main-pass material (this fixture isolates the shadow path from the
+// deferred/forward-opaque ones) and no shadow material attached yet --
+// callers attach one via field->SetSubmeshShadow(...) to exercise the
+// HasPass(kShadow) flip. The instance sits at world z=0.5 so, under
+// MakeOrthoFrame's identity light_view_proj and zero camera offset, the
+// shadow vertex path's worldCameraOffsetedSpaceToLightClipSpace(world) maps
+// it straight to clip.xyz = (0,0,0.5) -- i.e. dead center of the depth
+// target, at a depth comfortably inside the shadow pass's [0,1] (conventional
+// Z, Less-compare) range.
+std::unique_ptr<ShadowSlotFieldFixture> BuildShadowSlotField(TestGpu& g) {
+  auto fx = std::make_unique<ShadowSlotFieldFixture>();
+
+  fx->factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {}, /*casts_shadow=*/true, wgpu::TextureFormat::Depth32Float);
+  REQUIRE(fx->factory != nullptr);
+
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  fx->ibuf =
+      UploadBuffer(g.device, idx.data(), sizeof(idx), wgpu::BufferUsage::Index);
+  std::vector<float> verts = QuadVerticesSized(0.4f);
+  fx->vbuf = UploadBuffer(g.device, verts.data(), verts.size() * sizeof(float),
+                          wgpu::BufferUsage::Vertex);
+
+  fx->field = std::make_unique<InstancedMeshField>(
+      g.device, g.queue, *g.gen, /*capacity=*/1, /*num_models=*/1,
+      /*num_submeshes=*/1, std::array<float, 2>{1e30f, 1e30f});
+  REQUIRE(fx->field->IsValid());
+
+  GpuInstanceRenderer::InstanceInput instance =
+      MakeInstance(glm::vec3(0.0f, 0.0f, 0.5f), /*model=*/0u, /*radius=*/0.5f);
+  fx->field->UploadInstances(
+      std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
+
+  fx->field->SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, fx->vbuf, fx->ibuf,
+                        wgpu::IndexFormat::Uint32, 6,
+                        InstancedMeshField::PassKind::kDeferred,
+                        /*material=*/nullptr);
+  REQUIRE_FALSE(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+
+  return fx;
+}
+
+// Renders `field` into `depth_view` (Depth32Float, no color attachments,
+// mirroring scene_renderer.cpp's Pass 0 descriptor) via Cull()+CullShadow()
+// (light_view_proj matching MakeOrthoFrame's identity) then
+// Draw(kShadow). Returns the Dawn validation-scope result.
+CapturedError RenderShadowSlotPass(TestGpu& g, InstancedMeshField& field,
+                                   wgpu::TextureView depth_view) {
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  Camera cull_camera = MakeCullCamera(1.0f);
+  field.Cull(frame, cull_camera);
+  field.CullShadow(frame, cull_camera, frame_uniforms.light_view_proj);
+
+  CapturedError result;
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+  {
+    wgpu::RenderPassDepthStencilAttachment depth_attachment{};
+    depth_attachment.view = depth_view;
+    depth_attachment.depthClearValue = 1.0f;  // conventional-Z: far
+    depth_attachment.depthLoadOp = wgpu::LoadOp::Clear;
+    depth_attachment.depthStoreOp = wgpu::StoreOp::Store;
+    depth_attachment.stencilLoadOp = wgpu::LoadOp::Undefined;
+    depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = 0;
+    desc.depthStencilAttachment = &depth_attachment;
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    field.Draw(pass, frame, InstancedMeshField::PassKind::kShadow);
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool done = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView msg) {
+        result.type = type;
+        result.message =
+            msg.length > 0 ? std::string(msg.data, msg.length) : std::string();
+        done = true;
+      });
+  while (!done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+  test::WaitForGpu(g.instance, g.device, g.queue);
+  return result;
+}
+
+}  // namespace
+
+TEST_CASE("InstancedMeshField: SetSubmeshShadow flips HasPass(kShadow), "
+          "Draw(kShadow) draws only once attached",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildShadowSlotField(g);
+
+  constexpr uint32_t kShadowTarget = 32;
+  wgpu::TextureDescriptor depth_desc{};
+  depth_desc.size = {kShadowTarget, kShadowTarget, 1};
+  depth_desc.format = wgpu::TextureFormat::Depth32Float;
+  depth_desc.usage =
+      wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+  wgpu::Texture depth_tex = g.device.CreateTexture(&depth_desc);
+  wgpu::TextureView depth_view = depth_tex.CreateView();
+
+  // Before SetSubmeshShadow: no shadow material is attached, so Draw(kShadow)
+  // must be a safe no-op -- NoError, and the depth target stays at its clear
+  // value (nothing was rasterized).
+  {
+    CapturedError err = RenderShadowSlotPass(g, *fx->field, depth_view);
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    TextureReadback rb(g.instance, g.device, g.queue);
+    CpuImage img = rb.ReadTextureSync(depth_tex, kShadowTarget, kShadowTarget,
+                                      wgpu::TextureFormat::Depth32Float);
+    CHECK(img.GetDepth(kShadowTarget / 2, kShadowTarget / 2) == 1.0f);
+  }
+
+  // Resolve a real kShadow material instance (casts_shadow=true factory) and
+  // attach it to the fixture's one slot.
+  InstanceParams shadow_params;
+  shadow_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  shadow_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type shadow_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"p4_shadow_slot"}.value(), GeometryType::kInstancedMesh,
+      RenderPassType::kShadow, 0);
+  auto shadow_handle = fx->cache.GetOrCreate(
+      shadow_key, *fx->factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kDeferred, RenderPassType::kShadow, shadow_params);
+  REQUIRE(shadow_handle);
+  REQUIRE(shadow_handle->IsValid());
+
+  fx->field->SetSubmeshShadow(/*model=*/0, /*lod=*/0, /*submesh=*/0,
+                              shadow_handle.operator->());
+  CHECK(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+
+  // After SetSubmeshShadow: Draw(kShadow) actually draws -- NoError, and the
+  // depth target's center pixel (under the instance -- see BuildShadowSlotField's
+  // comment) was written to something less than the 1.0 clear value.
+  {
+    CapturedError err = RenderShadowSlotPass(g, *fx->field, depth_view);
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    TextureReadback rb(g.instance, g.device, g.queue);
+    CpuImage img = rb.ReadTextureSync(depth_tex, kShadowTarget, kShadowTarget,
+                                      wgpu::TextureFormat::Depth32Float);
+    const float center_depth = img.GetDepth(kShadowTarget / 2, kShadowTarget / 2);
+    INFO("center depth = " << center_depth);
+    CHECK(center_depth < 1.0f);
+  }
+}
+
+// ===========================================================================
 // Task 3: SceneRenderer drives SceneContext::instanced_fields. Task 3 wired
 // SceneRenderer::Render to: Cull() every field BEFORE Pass 0 (frame.Begin,
 // before any render pass opens on the encoder); Draw(kDeferred) each field
@@ -3153,6 +3448,179 @@ TEST_CASE("SceneRenderer draws SceneContext::instanced_fields (empty registry, "
     CHECK(std::abs(deferred_red - background_red) < 0.05f);
     CHECK(std::abs(forward_red - background_red) < 0.05f);
   }
+}
+
+// ===========================================================================
+// Phase 4 of the volumetric-foliage feature, scene level: SceneRenderer's
+// real Pass 0 (shadow depth) now culls + draws instanced-field shadow
+// submeshes (scene_renderer.cpp's pre-pass cull block + Pass 0, gated on
+// shadow_config_.enable_shadow_map && field->HasPass(kShadow)). A field
+// carrying ONLY a shadow submesh (no deferred/forward-opaque material -- so
+// the field itself never appears in the lit image) is placed as a horizontal
+// card above a floor entity, under an overhead (straight-down) sun so the
+// shadow lands directly beneath it with zero horizontal offset. Read back in
+// ShadowDebugMode::ShadowMapOnly (shadowMapPCF alone, 1.0 = lit, 0.0 = fully
+// shadowed -- see deferred_lighting.wesl): the floor pixel directly under the
+// card must be shadowed; a floor pixel outside the card's footprint must not.
+// ===========================================================================
+namespace {
+
+// World -> pixel through camera's own matrices (mirrors this file's
+// SceneProjectToPixel/decal_pass_tests.cpp's ProjectToPixel), parameterized
+// on the target size since this test uses a different size than that helper.
+glm::ivec2 WorldToPixel(const Camera& camera, glm::vec3 world, uint32_t width,
+                        uint32_t height) {
+  const glm::vec4 clip = camera.GetProj() * camera.GetView() * glm::vec4(world, 1.0f);
+  REQUIRE(clip.w > 0.0f);  // in front of the camera
+  const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+  return glm::ivec2(
+      static_cast<int>((ndc.x * 0.5f + 0.5f) * static_cast<float>(width)),
+      static_cast<int>((1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(height)));
+}
+
+}  // namespace
+
+TEST_CASE("SceneRenderer Pass 0 draws instanced-field shadow submeshes onto "
+          "real geometry",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // A shadow-only material: casts_shadow=true, depth wired to the real
+  // shadow-map format (matches shadow_map.cpp's Depth32Float texture --
+  // scene_renderer.cpp's Pass 0 attaches shadow_map_.GetDepthView() directly).
+  auto shadow_factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {}, /*casts_shadow=*/true, wgpu::TextureFormat::Depth32Float);
+  REQUIRE(shadow_factory != nullptr);
+
+  MaterialInstanceCache field_cache;
+  InstanceParams shadow_params;
+  shadow_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  shadow_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type shadow_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"p4_scene_shadow_caster"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
+  auto shadow_handle = field_cache.GetOrCreate(
+      shadow_key, *shadow_factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kDeferred, RenderPassType::kShadow, shadow_params);
+  REQUIRE(shadow_handle);
+  REQUIRE(shadow_handle->IsValid());
+
+  // A single 4x4 (half-extent 2) horizontal card, world-up normal, centered
+  // 3 units above the origin -- the same -90deg-about-X trick AddFloorQuad
+  // uses to turn a local +Z-normal quad into a horizontal one.
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer ibuf =
+      UploadBuffer(g.device, idx.data(), sizeof(idx), wgpu::BufferUsage::Index);
+  std::vector<float> verts = QuadVerticesSized(2.0f);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+
+  InstancedMeshField field(g.device, g.queue, *g.gen, /*capacity=*/1,
+                           /*num_models=*/1, /*num_submeshes=*/1,
+                           std::array<float, 2>{1e30f, 1e30f});
+  REQUIRE(field.IsValid());
+
+  GpuInstanceRenderer::InstanceInput caster{};
+  caster.transform =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 3.0f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+  caster.bounds_sphere = glm::vec4(0.0f, 3.0f, 0.0f, 3.0f);
+  caster.model_info = glm::uvec4(0u, 0u, 0u, 0u);
+  field.UploadInstances(
+      std::span<const GpuInstanceRenderer::InstanceInput>(&caster, 1));
+
+  // Geometry + shadow material only -- no deferred/forward-opaque material,
+  // so this field never appears in the lit image itself; only its shadow does.
+  field.SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, vbuf, ibuf,
+                   wgpu::IndexFormat::Uint32, 6,
+                   InstancedMeshField::PassKind::kDeferred, /*material=*/nullptr);
+  field.SetSubmeshShadow(/*model=*/0, /*lod=*/0, /*submesh=*/0,
+                         shadow_handle.operator->());
+  REQUIRE(field.HasPass(InstancedMeshField::PassKind::kShadow));
+
+  MaterialLibrary matlib;
+  REQUIRE(matlib.Initialize(g.device, g.queue, g.gen.get()));
+
+  SceneGraph graph;
+  // Straight overhead sun: the shadow lands with zero horizontal offset
+  // directly beneath the card, so "under the card" and "outside it" are
+  // trivial to pick without re-deriving the light's oblique projection.
+  graph.SetSunDirection(glm::vec3(0.0f, 1.0f, 0.0f));
+  graph.SetSunColor(glm::vec3(1.0f));
+  graph.SetClearColor(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+  AddFloor(graph, 20.0f, matlib.SolidColor(glm::vec3(0.6f, 0.6f, 0.6f), 0.6f), 1.0f);
+
+  entt::registry registry;
+  SceneContext scene_context;
+  scene_context.registry = &registry;
+  graph.SyncToRegistry(registry, scene_context);
+  std::array<InstancedMeshField*, 1> fields = {&field};
+  scene_context.instanced_fields = fields.data();
+  scene_context.instanced_field_count = 1;
+
+  Camera camera;
+  camera.position = glm::vec3(0.0f, 8.0f, 8.0f);
+  camera.LookAt(glm::vec3(0.0f));
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 45.0f;
+  camera.aspect = 1.0f;
+  camera.near_plane = 0.1f;
+  camera.far_plane = 1000.0f;
+
+  constexpr uint32_t kShadowSceneSize = 128;
+  ColorRenderTarget rt(g.device, kShadowSceneSize, kShadowSceneSize,
+                       wgpu::TextureFormat::R32Float);
+  REQUIRE(rt.IsValid());
+
+  SceneRenderer renderer;
+  renderer.Initialize(g.device, g.queue, g.gen.get(), wgpu::TextureFormat::R32Float,
+                      kShadowSceneSize, kShadowSceneSize,
+                      g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
+  renderer.MutableFogConfig().enabled = false;  // would haze the readback
+  renderer.SetShadowDebugMode(ShadowDebugMode::ShadowMapOnly);
+
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    renderer.Render(camera, registry, scene_context, rt.GetView());
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback readback(g.instance, g.device, g.queue);
+  CpuImage image = readback.ReadTextureSync(
+      rt.GetTexture(), kShadowSceneSize, kShadowSceneSize,
+      wgpu::TextureFormat::R32Float);
+
+  // World origin: directly under the card's center -> shadowed. (0,0,-5): 3
+  // units outside the card's [-2,2] XZ footprint along -Z (further from the
+  // camera, which keeps it a safely in-bounds pixel under this camera's
+  // oblique projection -- +Z lands off-frame) -> lit.
+  const glm::ivec2 under_card =
+      WorldToPixel(camera, glm::vec3(0.0f, 0.0f, 0.0f), kShadowSceneSize,
+                  kShadowSceneSize);
+  const glm::ivec2 offset =
+      WorldToPixel(camera, glm::vec3(0.0f, 0.0f, -5.0f), kShadowSceneSize,
+                  kShadowSceneSize);
+  REQUIRE(under_card.x >= 0);
+  REQUIRE(under_card.x < static_cast<int>(kShadowSceneSize));
+  REQUIRE(under_card.y >= 0);
+  REQUIRE(under_card.y < static_cast<int>(kShadowSceneSize));
+  REQUIRE(offset.x >= 0);
+  REQUIRE(offset.x < static_cast<int>(kShadowSceneSize));
+  REQUIRE(offset.y >= 0);
+  REQUIRE(offset.y < static_cast<int>(kShadowSceneSize));
+
+  const float shadowed = image.GetDepth(static_cast<uint32_t>(under_card.x),
+                                        static_cast<uint32_t>(under_card.y));
+  const float lit = image.GetDepth(static_cast<uint32_t>(offset.x),
+                                   static_cast<uint32_t>(offset.y));
+  INFO("under-card shadow value = " << shadowed << ", offset = " << lit);
+  CHECK(shadowed < 0.3f);
+  CHECK(lit > 0.7f);
 }
 
 // ===========================================================================
