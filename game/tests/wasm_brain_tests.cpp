@@ -16,6 +16,8 @@
 #include "badlands_sim.hpp"
 #include "command.h"
 #include "components.h"
+#include "combat.h"
+#include "threat_table.h"
 #include "duel_common.h"
 #include "game_state.h"
 #include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights
@@ -421,6 +423,55 @@ TEST_CASE("wasm: a hunter keeps shooting a wounded deer that survives the first 
 }
 
 // --- pack_view_wire: the view side of the wire trust boundary --------------
+
+TEST_CASE("pack_view_wire: v5 carries both sides of the fight-or-flee comparison",
+          "[wasm_brain]") {
+    // Threat's second role (game/src/threat_table.h): the brain gets its own
+    // combat potential AND the hostile's, plus what that hostile can reach and
+    // how fast it closes -- everything a standoff decision needs, and nothing
+    // the engine decides on its brain's behalf.
+    auto g = make_world(BrainDesc{});
+    const uint32_t hero = spawn_creature_into(*g, CreatureId::Hunter, kPlayerTeam, {0.0f, 0.0f});
+    const uint32_t foe = spawn_creature_into(*g, CreatureId::Bandit, /*team=*/1, {3.0f, 0.0f});
+    entt::entity he = g->slots[hero];
+    entt::entity fe = g->slots[foe];
+
+    const ActivityWeights& weights = weights_for(*g, he);
+    const WorldView view = observe_hero(*g, hero, he, weights);
+    const BlViewWire wire = pack_view_wire(*g, he, view, weights);
+
+    CHECK(wire.self.threat == Catch::Approx(threat_of(g->registry, he)));
+    REQUIRE(wire.suggest.threat_count >= 1);
+    const BlThreat& t = wire.suggest.threats[0];
+    CHECK(t.slot == foe);
+    CHECK(t.threat == Catch::Approx(threat_of(g->registry, fe)));
+    CHECK(t.reach == Catch::Approx(melee_range(g->registry.get<Attacks>(fe))));
+    CHECK(t.ranged_reach == Catch::Approx(ranged_range(g->registry.get<Attacks>(fe))));
+    CHECK(t.move_speed == Catch::Approx(g->registry.get<Stats>(fe).move_speed));
+    // The hunter outranges the bandit and the bandit cannot shoot back: this
+    // is exactly the shape that makes the brain want a standoff.
+    CHECK(t.ranged_reach == Catch::Approx(0.0f));
+}
+
+TEST_CASE("pack_view_wire: a disengaged hero carries BL_ST_DISENGAGED", "[wasm_brain]") {
+    auto g = make_world(BrainDesc{});
+    const uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    entt::entity e = g->slots[slot];
+    REQUIRE(apply_status(*g, e, StatusKind::Disengaged, 2500, slot));
+
+    const ActivityWeights& weights = weights_for(*g, e);
+    const WorldView view = observe_hero(*g, slot, e, weights);
+    const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+    bool found = false;
+    for (int32_t i = 0; i < wire.status_count; ++i) {
+        if (wire.statuses[i].kind == BL_ST_DISENGAGED) {
+            found = true;
+            CHECK(wire.statuses[i].remaining_millis == 2500);
+        }
+    }
+    CHECK(found);
+}
 
 TEST_CASE("pack_view_wire: statuses assemble from Chatting/MeleeLock/InsideBuilding",
           "[wasm_brain]") {

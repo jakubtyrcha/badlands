@@ -68,7 +68,7 @@ extern "C" {
 
 // Wire format version. Bumped on any incompatible layout change; the host
 // (bh_instantiate) rejects a module whose bl_abi_version() disagrees.
-#define BL_ABI_VERSION 4
+#define BL_ABI_VERSION 5
 
 // Capacities baked into the wire structs below (fixed-size arrays -- no
 // dynamic length on the wasm side of this boundary).
@@ -149,6 +149,9 @@ extern "C" {
 // entity's own state and a future partial-incapacitation status will want the
 // same shape.
 #define BL_ST_STUNNED 4
+// Walked out of melee contact: can take NO action for a few seconds. Movement
+// and defense are untouched -- see game/src/movement.h's disengage penalty.
+#define BL_ST_DISENGAGED 5
 
 // --- BlViewSelf --------------------------------------------------------------
 // This entity's own state: clock, identity, needs, and a summary of what the
@@ -185,7 +188,12 @@ typedef struct BlViewSelf {
     float attack_range;           // this entity's own attack reach
     int32_t current_activity;     // ActivityId this entity is doing now; -1 = none yet
     int32_t intention_kind;       // CurrentIntention.kind (BL_INT_*); BL_INT_NONE = nothing running
-    uint32_t _pad2;
+    // v5 (was _pad2, so the struct size is unchanged): this entity's OWN
+    // combat potential (threat_of, game/src/threat_table.h). The other half of
+    // the comparison BlThreat::threat enables -- both sides ride the wire
+    // because deciding whether a fight is worth taking is the brain's call,
+    // not the engine's.
+    float threat;
 } BlViewSelf;
 
 // --- BlThreat ------------------------------------------------------------------
@@ -195,6 +203,18 @@ typedef struct BlThreat {
     float pos_z;
     float dist;
     uint32_t slot;
+    /* v5, the standoff block: what a brain needs to decide how close it is
+       willing to be, and whether the fight is worth taking at all. Standoff
+       distance is TACTICS, so it lives in the brain -- the engine grows no
+       kiting policy, it just stops making the decision unmakeable. */
+    float reach;         /* longest MELEE range in its loadout; 0 = none */
+    float ranged_reach;  /* longest RANGED range; 0 = none */
+    float move_speed;    /* how fast it closes */
+    /* Its combat potential (threat_of, game/src/threat_table.h). Compare
+       against BlViewSelf::threat. This is threat's SECOND role: a fixed
+       calibration target that, because it is kept a fair approximation, also
+       tells a brain whether to pick this fight. */
+    float threat;
 } BlThreat;
 
 // --- BlViewSuggest -------------------------------------------------------------
@@ -434,14 +454,14 @@ typedef struct BlSuggestionWire {
 // sentinel fields and the BL_MAX_ACTIVITIES/ActivityId::Count relationship
 // (which needs badlands_sim.hpp, deliberately not included here).
 static_assert(sizeof(BlViewSelf) == 88, "BlViewSelf size drifted");
-static_assert(sizeof(BlThreat) == 16, "BlThreat size drifted");
-static_assert(sizeof(BlViewSuggest) == 248, "BlViewSuggest size drifted");
+static_assert(sizeof(BlThreat) == 32, "BlThreat size drifted");
+static_assert(sizeof(BlViewSuggest) == 376, "BlViewSuggest size drifted");
 static_assert(sizeof(BlViewFactors) == 88, "BlViewFactors size drifted");
 static_assert(sizeof(BlViewChar) == 40, "BlViewChar size drifted");
 static_assert(sizeof(BlStatus) == 16, "BlStatus size drifted");
 static_assert(sizeof(BlViewAttack) == 24, "BlViewAttack size drifted");
 static_assert(sizeof(BlViewSkill) == 24, "BlViewSkill size drifted");
 static_assert(sizeof(BlEvent) == 32, "BlEvent size drifted");
-static_assert(sizeof(BlViewWire) == 1760, "BlViewWire size drifted");
+static_assert(sizeof(BlViewWire) == 1888, "BlViewWire size drifted");
 static_assert(sizeof(BlSuggestionWire) == 40, "BlSuggestionWire size drifted");
 #endif

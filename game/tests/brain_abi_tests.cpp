@@ -24,7 +24,7 @@ TEST_CASE("BL_MAX_ACTIVITIES matches ActivityId::Count", "[brain_abi]") {
     REQUIRE(BL_MAX_ACTIVITIES == static_cast<int32_t>(ActivityId::Count));
 }
 
-TEST_CASE("BL_ABI_VERSION is 4", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 4); }
+TEST_CASE("BL_ABI_VERSION is 5", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 5); }
 
 TEST_CASE("BL_MAX_ATTACKS matches badlands::kMaxAttacks", "[brain_abi]") {
     REQUIRE(BL_MAX_ATTACKS == kMaxAttacks);
@@ -39,7 +39,7 @@ TEST_CASE("BlViewSkill is the documented size", "[brain_abi]") {
 }
 
 TEST_CASE("BlViewWire is the documented size", "[brain_abi]") {
-    REQUIRE(sizeof(BlViewWire) == 1760);
+    REQUIRE(sizeof(BlViewWire) == 1888);
 }
 
 TEST_CASE("BlViewAttack is the documented size", "[brain_abi]") {
@@ -59,34 +59,34 @@ TEST_CASE("BlViewWire block order: self / suggest / factors / statuses / attacks
     // sizeof(BlViewSelf) == 88 (a multiple of 8 via its own explicit pad), so
     // `suggest` starts right after with no gap.
     REQUIRE(offsetof(BlViewWire, suggest) == 96);
-    // sizeof(BlViewSuggest) == 248 (a multiple of 8 via its own explicit
+    // sizeof(BlViewSuggest) == 376 (a multiple of 8 via its own explicit
     // trailing pad), so `factors` lands with no compiler-inserted gap.
-    REQUIRE(offsetof(BlViewWire, factors) == 344);
+    REQUIRE(offsetof(BlViewWire, factors) == 472);
     // sizeof(BlViewFactors) == 88 (a multiple of 8 via its own explicit pad,
     // even though BlViewFactors itself has no int64_t member -- see the
     // header's own comment on this one).
-    REQUIRE(offsetof(BlViewWire, status_count) == 432);
+    REQUIRE(offsetof(BlViewWire, status_count) == 560);
     // status_count(4) + _pad2(4) keep `statuses` (BlStatus starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, statuses) == 440);
+    REQUIRE(offsetof(BlViewWire, statuses) == 568);
     // statuses[8] * 16B = 128B.
-    REQUIRE(offsetof(BlViewWire, attack_count) == 568);
+    REQUIRE(offsetof(BlViewWire, attack_count) == 696);
     // attack_count(4) + _pad3(4) precede the BlViewAttack array (v3).
-    REQUIRE(offsetof(BlViewWire, attacks) == 576);
+    REQUIRE(offsetof(BlViewWire, attacks) == 704);
     // attacks[3] * 24B = 72B, then the v4 skills block.
-    REQUIRE(offsetof(BlViewWire, skill_count) == 648);
+    REQUIRE(offsetof(BlViewWire, skill_count) == 776);
     // skill_count(4) + _pad6(4) precede the BlViewSkill array.
-    REQUIRE(offsetof(BlViewWire, skills) == 656);
+    REQUIRE(offsetof(BlViewWire, skills) == 784);
     // skills[8] * 24B = 192B.
-    REQUIRE(offsetof(BlViewWire, event_count) == 848);
+    REQUIRE(offsetof(BlViewWire, event_count) == 976);
     // event_count(4) + _pad4(4) keep `events` (BlEvent starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, events) == 856);
+    REQUIRE(offsetof(BlViewWire, events) == 984);
     // events[8] * 32B = 256B.
-    REQUIRE(offsetof(BlViewWire, char_count) == 1112);
+    REQUIRE(offsetof(BlViewWire, char_count) == 1240);
     // char_count(4) + _pad5(4) keep `chars` (BlViewChar starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, chars) == 1120);
+    REQUIRE(offsetof(BlViewWire, chars) == 1248);
 }
 
 TEST_CASE("BlViewSuggest / BlViewFactors internal padding lands where documented",

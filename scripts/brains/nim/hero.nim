@@ -81,6 +81,8 @@
 # env.bl_log (enforced by src/crates/brainhost's bh_instantiate) -- so no
 # echo/io/os module usage anywhere in this file or its imports.
 
+import std/math  # sqrt -- the standoff direction below
+
 import abi
 import activity_catalog
 import hero_view
@@ -156,6 +158,52 @@ proc meleeReach(v: HeroView): float32 =
     let a = v.attacks[i]
     if a.category != kAttackCategoryRanged and a.range > result:
       result = a.range
+
+# --- skirmishing (v5) --------------------------------------------------------
+# Standoff distance is a TACTICAL choice, so it is made here rather than by the
+# engine, which grows no kiting policy at all. What the engine owes this
+# decision is information, and v5 is what supplies it: the threat's reach, its
+# speed, and what it is WORTH (BlThreat.threat, game/src/threat_table.h).
+#
+# This brain never breaks contact deliberately. With BL_ST_DISENGAGED on the
+# table -- a few seconds of being unable to act at all -- walking out of melee
+# is always the losing move, so the whole job is not being touched in the first
+# place.
+const
+  # Hold this far outside the threat's own reach.
+  kStandoffMargin: float32 = 1.5
+  # ...but only bother for something at least this fraction of our own weight.
+  # Standing off from a rat costs shots for nothing.
+  kStandoffThreatRatio: float32 = 0.5
+
+# Longest reach among this hero's RANGED attacks (0 if it has none).
+proc rangedReach(v: HeroView): float32 =
+  result = 0.0'f32
+  for i in 0 ..< v.attackCount:
+    let a = v.attacks[i]
+    if a.category == kAttackCategoryRanged and a.range > result:
+      result = a.range
+
+# Does this hero want to keep its distance from the threat in view? Only when
+# it can actually outrange the thing (a bow against a sword), the thing cannot
+# shoot back (against another archer, backing away just gives up ground for
+# free), and the thing is dangerous enough to be worth ceding ground to.
+proc wantsStandoff(v: HeroView): bool =
+  v.hasThreat and
+    rangedReach(v) > v.threatReach and
+    v.threatRangedReach <= 0.0'f32 and
+    v.threatThreat >= v.selfThreat * kStandoffThreatRatio
+
+# A point directly away from the threat, far enough to restore the margin.
+proc standoffGoal(v: HeroView): Vec2 =
+  let dx = v.pos.x - v.threatPos.x
+  let dz = v.pos.z - v.threatPos.z
+  let len = sqrt(dx * dx + dz * dz)
+  if len <= 0.0001'f32:
+    return v.pos  # exactly on top of it: no meaningful direction to back off in
+  let want = v.threatReach + kStandoffMargin
+  let step = want - v.threatDist
+  Vec2(x: v.pos.x + dx / len * step, z: v.pos.z + dz / len * step)
 
 # Floor for the re-fire hint below: never ask for a re-consult sooner than
 # this, even if an attack's own cooldown_remaining is shorter (a wake still
@@ -255,7 +303,19 @@ proc brainTick(slot: int32): int32 =
       let bash = readySkillSlot(v, BL_SKILL_SHIELD_BASH)
       if bash >= 0 and v.hasThreat and v.threatDist <= meleeReach(v):
         bl_enqueue_action(BL_ACT_USE_SKILL, targetSlot, bash)
-      Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat, targetSlot: targetSlot)
+      # Move-shoot-move (v5): a hero that outranges what is coming at it backs
+      # off to keep the margin, while still firing through the action channel
+      # above -- the action is orthogonal to the intention, which is what makes
+      # this expressible without a new intention kind. The shot's own wind-up
+      # (game/src/strike.h) is what keeps this from being free: standing still
+      # to shoot is exactly the ground the pursuer gains.
+      if not v.meleeLocked and wantsStandoff(v) and
+         v.threatDist < v.threatReach + kStandoffMargin:
+        let goal = standoffGoal(v)
+        Suggestion(kind: BL_INT_MOVE_TO, activityLabel: ActCombat,
+                   pointX: goal.x, pointZ: goal.z)
+      else:
+        Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat, targetSlot: targetSlot)
     elif hasDangerEvent(g_view_buf) and v.hasHome:
       # A recent hit or sighting biases toward retreating home over the
       # normal selection -- but only when there IS a home to retreat to;

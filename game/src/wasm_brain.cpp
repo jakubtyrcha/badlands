@@ -6,7 +6,9 @@
 #include "game_state.h"
 #include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights/kActivityCount
 #include "skills.h"           // evaluate_skill_triggers -- the skills block's ready/recommended
-#include "status.h"           // remaining_millis_of -- BL_ST_STUNNED
+#include "status.h"        // remaining_millis_of -- BL_ST_STUNNED / BL_ST_DISENGAGED
+#include "threat_table.h"  // threat_of -- both sides of the fight-or-flee comparison
+#include "combat.h"        // melee_range / ranged_range -- a threat's reach on the wire
 
 #include <spdlog/spdlog.h>
 
@@ -126,6 +128,9 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     const CurrentIntention& ci = game.registry.get<CurrentIntention>(e);
     self.intention_wake_at = ci.wake_at_millis;
     self.slot = view.slot;
+    // v5: this hero's own combat potential, the other half of the comparison
+    // BlThreat::threat enables (game/src/threat_table.h).
+    self.threat = threat_of(game.registry, e);
     self.class_id = game.registry.get<HeroCharacter>(e).hero_class;
     self.tod = view.tod;
     self.night = view.night ? 1u : 0u;
@@ -172,7 +177,23 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     sug.threat_count = view.threat_count;
     for (int32_t i = 0; i < view.threat_count; ++i) {
         const PerceivedThreat& t = view.threats[i];
-        sug.threats[i] = BlThreat{t.pos.x, t.pos.y, t.dist, t.slot};
+        // v5 standoff block: reach/speed/threat come from the hostile ITSELF,
+        // looked up by slot, because perception carries only where it is --
+        // and a brain cannot choose a standoff distance without knowing what
+        // it is standing off from.
+        BlThreat row{t.pos.x, t.pos.y, t.dist, t.slot, 0.0f, 0.0f, 0.0f, 0.0f};
+        if (const entt::entity te = entity_for_slot(game, static_cast<int32_t>(t.slot));
+            te != entt::null) {
+            if (const auto* atk = game.registry.try_get<Attacks>(te); atk != nullptr) {
+                row.reach = melee_range(*atk);
+                row.ranged_reach = ranged_range(*atk);
+            }
+            if (const auto* st = game.registry.try_get<Stats>(te); st != nullptr) {
+                row.move_speed = st->move_speed;
+            }
+            row.threat = threat_of(game.registry, te);
+        }
+        sug.threats[i] = row;
     }
     // Not part of BlViewSuggest: view.grazing (critter-only) and the
     // townfolk tax_target/deposit fields -- neither applies to a hero brain
@@ -214,6 +235,10 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     }
     if (game.registry.all_of<InsideBuilding>(e)) {
         push_status(BL_ST_INSIDE_BUILDING, 0);  // indefinite -- ends when the need is filled
+    }
+    if (const int64_t dis = remaining_millis_of(game.registry, e, StatusKind::Disengaged);
+        dis > 0) {
+        push_status(BL_ST_DISENGAGED, dis);
     }
     if (const int64_t stun = remaining_millis_of(game.registry, e, StatusKind::Stunned);
         stun > 0) {

@@ -58,6 +58,16 @@ type
     hasThreat*: bool
     threatSlot*: uint32
     threatDist*: float32
+    threatPos*: Vec2
+    # v5: what the nearest threat can reach, how fast it closes, and what it is
+    # worth -- everything a standoff decision needs. Choosing a distance is
+    # TACTICS, so it happens here in the brain; the engine grows no policy.
+    threatReach*: float32
+    threatRangedReach*: float32
+    threatSpeed*: float32
+    threatThreat*: float32
+    # This hero's own combat potential, the other half of that comparison.
+    selfThreat*: float32
 
     # combat (v3): advisory melee-lock status + this entity's own attack
     # loadout (a brain cannot pick an attack it cannot see).
@@ -110,6 +120,7 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   result.intentionKind = w.self.intention_kind
   result.intentionWakeAt = w.self.intention_wake_at
   result.selfAttackRange = w.self.attack_range
+  result.selfThreat = w.self.threat
 
   result.roamGoal = Vec2(x: w.suggest.roam_goal_x, z: w.suggest.roam_goal_z)
   result.hasExploreGoal = w.suggest.has_explore_goal != 0'u32
@@ -134,6 +145,11 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   if result.hasThreat:
     result.threatSlot = w.suggest.threats[0].slot
     result.threatDist = w.suggest.threats[0].dist
+    result.threatPos = Vec2(x: w.suggest.threats[0].pos_x, z: w.suggest.threats[0].pos_z)
+    result.threatReach = w.suggest.threats[0].reach
+    result.threatRangedReach = w.suggest.threats[0].ranged_reach
+    result.threatSpeed = w.suggest.threats[0].move_speed
+    result.threatThreat = w.suggest.threats[0].threat
 
   for i in 0 ..< w.status_count:
     if w.statuses[i].kind == BL_ST_MELEE_LOCKED.uint32:
