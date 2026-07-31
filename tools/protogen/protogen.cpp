@@ -108,7 +108,13 @@ struct Params {
   // Grain settling velocity sets how far a plume reaches before it has dropped
   // its load: fine sand 1e-2, silt 1e-3, clay 1e-6 m/s.
   float settling_velocity_m_per_s = 1.0e-2f;
-  float river_mouth_velocity_m_per_s = 1.0f;  // for the lobe length L = u*h/w_s
+  // Velocity of the plume INSIDE the lake, for the settling length
+  // L = u*h/w_s. This is not the river's inlet speed: a jet decelerates to a
+  // few cm/s within a handful of channel widths. Feeding it 1 m/s gave
+  // L = 1*260/0.01 = 26 km against a 500 m lake, so nothing settled inside and
+  // every particle carried its load to the outlet and dumped it there -- which
+  // is why the delta came out thickest at the FAR shore.
+  float plume_velocity_m_per_s = 0.08f;
   // Lateral plume wander: std dev, in DEGREES, of the per-step angular
   // perturbation applied to the outlet-ward heading inside a lake.
   //
@@ -262,11 +268,15 @@ void InitAnalytic(Grid& g, const Params& p) {
           h = 0.25f * p.bowl_rim_m * (1.0f - (y * cell) / p.world_m) +
               ((y * cell < cy) ? p.bowl_rim_m : 0.0f);
           break;
-        case Params::Terrain::Lobe:
-          // Gaussian hill: its peak must fall monotonically under erosion.
+        case Params::Terrain::Lobe: {
+          // Gaussian hill, centre offset by HALF A CELL. Centred exactly on a
+          // cell it is perfectly symmetric, so central differences give an
+          // exactly zero gradient there and no particle can ever move off it.
+          const float ox = wx - 0.5f * cell, oy = wy - 0.5f * cell;
           h = p.bowl_rim_m *
-              std::exp(-(wx * wx + wy * wy) / (2.0f * sigma * sigma));
+              std::exp(-(ox * ox + oy * oy) / (2.0f * sigma * sigma));
           break;
+        }
         default:
           h = 0.f;
           break;
@@ -595,7 +605,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
         // A 100 km L for clay is physically right: it means "does not settle
         // inside this lake", which is what lake-floor clay does.
         const float L_m = std::max(
-            p.river_mouth_velocity_m_per_s * depth_m /
+            p.plume_velocity_m_per_s * depth_m /
                 std::max(p.settling_velocity_m_per_s, 1e-9f),
             cell_m);
         drop = sediment * (1.0f - std::exp(-cell_m / L_m));
@@ -900,7 +910,7 @@ Params Base(int res = 64) {
   p.steps = 200;
   p.drops = 16;
   p.snapshot_every = 1 << 30;  // never
-  p.lake_interval = 25;
+  p.lake_interval = 50;  // production default: tests must match it
   return p;
 }
 
@@ -1300,34 +1310,76 @@ void DeltaProfile() {
   Params p = Base();
   p.terrain = Params::Terrain::Bowl;
   p.prefill = true;
-  p.bowl_well_m = 260.0f;  // deep enough to survive 300 steps of incision
+  // Basin deep enough to survive 300 steps of incision but shallow enough to
+  // be a lake (23 m at the end, not 260 m). And a grain COARSE enough to settle
+  // inside it: L = u*h/w_s = 0.08*23/0.05 = 37 m against a ~110 m lake. With
+  // the default fine sand L is 184 m, longer than the lake, so the load
+  // transits and no delta can form -- which is the whole point of the test.
+  p.bowl_well_m = 120.0f;
+  p.settling_velocity_m_per_s = 0.05f;
   p.steps = 300;
   Grid g0(p.res);
   InitTerrain(g0, p);
   std::vector<Lake> lakes; SimStats st;
   Grid g = Run(p, lakes, st);
-  // Deposit thickness by distance from the inlet (top of the basin).
+  // Measure inside the BASIN FOOTPRINT, not inside the remaining water. The
+  // delta is precisely where water got displaced, so keying off `water > 0` at
+  // the end excludes the thing being measured -- which is why this reported
+  // "no lake" while a lake plainly existed.
+  const float cell = p.world_m / float(p.res);
+  std::vector<uint8_t> pit(g.cells, 0);
+  int y0 = g.n, y1 = 0;
+  for (int y = 0; y < g.n; ++y)
+    for (int x = 0; x < g.n; ++x) {
+      const float ramp = p.bowl_rim_m * (1.0f - (y * cell) / p.world_m);
+      if (g0.height[g.idx(x, y)] * p.relief_m < ramp - 1.0f) {
+        pit[g.idx(x, y)] = 1;
+        y0 = std::min(y0, y);
+        y1 = std::max(y1, y);
+      }
+    }
+  if (y1 <= y0) { Check("delta thins with distance from inlet", false, "no basin"); return; }
   std::vector<double> band(4, 0.0);
   std::vector<int> cnt(4, 0);
-  int y0 = g.n, y1 = 0;
-  for (size_t i = 0; i < g.cells; ++i)
-    if (g.water[i] > 0.f) {
-      y0 = std::min(y0, int(i) / g.n);
-      y1 = std::max(y1, int(i) / g.n);
-    }
-  if (y1 <= y0) { Check("delta thins with distance", false, "no lake"); return; }
   for (size_t i = 0; i < g.cells; ++i) {
-    if (g.water[i] <= 0.f) continue;
-    const double d = g.height[i] - g0.height[i];
+    if (!pit[i]) continue;
+    const double d = (g.height[i] - g0.height[i]) * p.relief_m;
     if (d <= 0) continue;
     const int b = std::min(3, 4 * (int(i) / g.n - y0) / std::max(1, y1 - y0 + 1));
-    band[b] += d * p.relief_m;
+    band[b] += d;
     ++cnt[b];
   }
   for (int b = 0; b < 4; ++b) if (cnt[b]) band[b] /= cnt[b];
   const bool thins = band[0] >= band[3];
   Check("delta thins with distance from inlet", thins,
         F("near %.1f m -> far %.1f m", band[0], band[3]));
+}
+
+// --- 17. rebuild cadence is numerical, not physical -------------------------
+// How often the basin topology is re-derived is an implementation choice. If it
+// changes whether a lake EXISTS, something is being lost or reset on rebuild.
+void RebuildCadenceInvariant() {
+  double wet[2];
+  const int intervals[2] = {25, 50};
+  for (int i = 0; i < 2; ++i) {
+    Params p = Base();
+    p.terrain = Params::Terrain::Bowl;
+    p.prefill = true;
+    p.bowl_well_m = 120.0f;
+    p.steps = 300;
+    p.lake_interval = intervals[i];
+    std::vector<Lake> lakes; SimStats st;
+    Grid g = Run(p, lakes, st);
+    size_t n = 0;
+    for (float w : g.water) if (w > 0.f) ++n;
+    wet[i] = double(n) / double(g.cells);
+  }
+  const double rel = std::max(wet[0], wet[1]) > 0
+                         ? std::fabs(wet[1] - wet[0]) / std::max(wet[0], wet[1])
+                         : 0.0;
+  Check("lake survives regardless of rebuild cadence", rel < 0.5,
+        F("interval 25 -> %.2f%% wet, interval 50 -> %.2f%%", 100 * wet[0],
+          100 * wet[1]));
 }
 
 int RunAll() {
@@ -1348,6 +1400,7 @@ int RunAll() {
   LakeScaling();
   ResolutionIndependence();
   DeltaProfile();
+  RebuildCadenceInvariant();
   std::printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
@@ -1372,7 +1425,7 @@ int main(int argc, char** argv) {
     else if (a == "--runoff") p.runoff_m_per_yr = std::stof(nxt());
     else if (a == "--evaporation") p.evaporation_m_per_yr = std::stof(nxt());
     else if (a == "--settling") p.settling_velocity_m_per_s = std::stof(nxt());
-    else if (a == "--mouth-velocity") p.river_mouth_velocity_m_per_s = std::stof(nxt());
+    else if (a == "--plume-velocity") p.plume_velocity_m_per_s = std::stof(nxt());
     else if (a == "--lake-interval") p.lake_interval = std::stoi(nxt());
     else if (a == "--min-lake-area") p.min_lake_area_m2 = std::stof(nxt());
     else if (a == "--min-lake-depth") p.min_lake_depth_m = std::stof(nxt());
