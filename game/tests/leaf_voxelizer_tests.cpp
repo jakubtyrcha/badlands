@@ -1,7 +1,14 @@
 #include <catch_amalgamated.hpp>
+#include <spdlog/sinks/ringbuffer_sink.h>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <string>
+#include <vector>
 #include <glm/gtc/matrix_transform.hpp>  // glm::translate, glm::scale
 #include "game/geometry/leaf_voxelizer.hpp"
 #include "game/geometry/tree_generator.hpp"
@@ -32,6 +39,22 @@ glm::vec3 VertexNormal(const StaticTexturedMeshComponent& m, uint32_t v) {
 float SignedTetVolume(const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2,
                       const glm::vec3& p3) {
   return glm::dot(glm::cross(p1 - p0, p2 - p0), p3 - p0);
+}
+
+// Runs `fn` with the default logger's sinks swapped for a ringbuffer_sink
+// (saved/restored around the call so this doesn't leak into any other test),
+// returning the raw messages (level + payload, no pattern formatting needed)
+// recorded during the call.
+std::vector<spdlog::details::log_msg_buffer> CaptureLogMessages(
+    const std::function<void()>& fn) {
+  auto ring_sink = std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(64);
+  std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
+  const std::vector<spdlog::sink_ptr> saved_sinks = logger->sinks();
+  logger->sinks() = {ring_sink};
+  fn();
+  std::vector<spdlog::details::log_msg_buffer> messages = ring_sink->last_raw();
+  logger->sinks() = saved_sinks;
+  return messages;
 }
 
 }  // namespace
@@ -343,4 +366,146 @@ TEST_CASE(
       CHECK(tet_count > 0u);
     }
   }
+}
+
+// ===========================================================================
+// Review fix: SplatLeafCards cast `std::ceil(span/h)` to `int` BEFORE the
+// >512-cells-per-axis guard ran. span/h overflowing int range (or being
+// NaN/+-inf) makes that cast undefined behavior. On this toolchain/arch
+// (arm64 clang, saturating float->int conversion) an overflowing-positive
+// cast happens to saturate to INT_MAX, which the pre-existing `dims > 512`
+// check still (accidentally) caught -- but a NaN or -inf source (see the
+// second test below) casts to something that is NOT > 512, so it falls
+// through into the "degenerate, nothing to voxelize" early-out a few lines
+// down and silently returns an empty grid with NO error logged. The fix
+// computes the cell counts in float FIRST and gates on
+// `v >= INT_MIN_as_float && v <= 512.0f` (catching NaN, +inf, -inf, and any
+// out-of-int-range magnitude in either direction) before ever casting to int.
+//
+// A single garbage/NaN VERTEX coordinate (as the review brief's own wording
+// suggested for this test) turns out not to reach this code path at all on
+// this codebase's Aabb: ComputeLocalAabb accumulates via glm::min/max, and
+// glm::min(acc, NaN) == acc (glm's comparison-based min/max never lets a NaN
+// operand win), so a single NaN vertex is silently dropped from the AABB
+// rather than propagated -- confirmed empirically (that construction stays
+// green pre-fix, not red). The tests below instead drive NaN/-inf through
+// `cell_size` (used as a raw divisor, no min/max filtering) and through an
+// ENTIRE axis of non-finite vertices (leaves that axis's Aabb component at
+// its Aabb::Empty() sentinel, +-FLT_MAX, whose own floor(.../h)*h can then
+// overflow to +-inf) -- both are real, reachable ways this UB was hit.
+// ===========================================================================
+
+TEST_CASE("SplatLeafCards: fails loudly (empty grid) when a vertex coordinate "
+          "would overflow the int cast, not just silently degenerate") {
+  // A flat card, one edge pushed out to a coordinate so large that
+  // ceil(span/cell_size) overflows int range -- the pre-fix cast UB case.
+  // NOTE: on this arm64/clang build, the overflowing cast happens to
+  // saturate to INT_MAX (not wrap negative), so the PRE-fix code already
+  // passed this specific case (dims.x == INT_MAX > 512 still logs the
+  // existing >512 error) -- this test is not RED on this platform, but it is
+  // the exact scenario the review brief calls out and stays a meaningful
+  // regression pin post-fix (see the NaN/-inf tests below for the cases that
+  // WERE observed red here).
+  StaticTexturedMeshComponent leaf_mesh;
+  constexpr float kHuge = 1e30f;
+  const float z = 0.02f;  // flat card; not a cell_size multiple
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {kHuge, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {kHuge, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  leaf_mesh.vertex_count = 4;
+  leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
+
+  const LeafVoxelizeOptions opts;  // default cell_size=0.15
+  LeafVoxelGrid grid;
+  const std::vector<spdlog::details::log_msg_buffer> messages =
+      CaptureLogMessages([&] {
+        grid = SplatLeafCards(leaf_mesh, LeafSilhouette::Oak, opts);
+      });
+
+  CHECK(grid.cells.empty());
+  const bool logged_error =
+      std::any_of(messages.begin(), messages.end(),
+                 [](const spdlog::details::log_msg_buffer& m) {
+                   return m.level == spdlog::level::err;
+                 });
+  INFO("captured " << messages.size() << " log message(s), dims=("
+                   << grid.dims.x << "," << grid.dims.y << "," << grid.dims.z
+                   << ")");
+  CHECK(logged_error);
+}
+
+TEST_CASE("SplatLeafCards: fails loudly (empty grid) when cell_size is NaN") {
+  // cell_size is used as a raw divisor throughout (no NaN-filtering min/max
+  // in the way) -- a NaN cell_size makes origin/span/span_cells all NaN,
+  // directly exercising the guard's NaN branch. REAL-world path this
+  // mirrors: LeafVoxelizeOptions::cell_size is caller-derived (e.g.
+  // model_viewer_view.cpp's `kFoliageVoxelWorldSizes[lod] / s`) and a
+  // degenerate `s` (e.g. from a zero-height bark mesh) would feed NaN/inf in
+  // here exactly like this.
+  StaticTexturedMeshComponent leaf_mesh;
+  const float z = 0.02f;
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {0.03f, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {0.03f, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  leaf_mesh.vertex_count = 4;
+  leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
+
+  LeafVoxelizeOptions opts;
+  opts.cell_size = std::numeric_limits<float>::quiet_NaN();
+
+  LeafVoxelGrid grid;
+  const std::vector<spdlog::details::log_msg_buffer> messages =
+      CaptureLogMessages([&] {
+        grid = SplatLeafCards(leaf_mesh, LeafSilhouette::Oak, opts);
+      });
+
+  CHECK(grid.cells.empty());
+  const bool logged_error =
+      std::any_of(messages.begin(), messages.end(),
+                 [](const spdlog::details::log_msg_buffer& m) {
+                   return m.level == spdlog::level::err;
+                 });
+  INFO("captured " << messages.size() << " log message(s), dims=("
+                   << grid.dims.x << "," << grid.dims.y << "," << grid.dims.z
+                   << ")");
+  CHECK(logged_error);
+}
+
+TEST_CASE("SplatLeafCards: fails loudly (empty grid) when an entire axis is "
+          "non-finite (Aabb::Empty() sentinel -> -inf span, not just +inf)") {
+  // Every vertex's x-coordinate is NaN: glm::min/max never let a NaN operand
+  // win (see the section comment above), so aabb.min.x/aabb.max.x are left at
+  // their Aabb::Empty() sentinel (+FLT_MAX / -FLT_MAX). grid.origin.x's
+  // floor(FLT_MAX/h)*h then itself overflows to +inf, making span.x (and so
+  // span_cells.x) land at -inf -- NOT caught by a naive `!(x <= 512.0f)`
+  // guard (-inf <= 512.0f is true), which is why the fix's guard checks
+  // `>= INT_MIN` too, not only `<= 512.0f`.
+  StaticTexturedMeshComponent leaf_mesh;
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  PushVertex(leaf_mesh.vertices, {nan, 0.1f, 0.02f}, {0, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {nan, 0.0f, 0.02f}, {0, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {nan, 0.0f, 0.03f}, {1, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {nan, 0.1f, 0.03f}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  leaf_mesh.vertex_count = 4;
+  leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
+
+  const LeafVoxelizeOptions opts;  // default cell_size=0.15
+  LeafVoxelGrid grid;
+  const std::vector<spdlog::details::log_msg_buffer> messages =
+      CaptureLogMessages([&] {
+        grid = SplatLeafCards(leaf_mesh, LeafSilhouette::Oak, opts);
+      });
+
+  CHECK(grid.cells.empty());
+  const bool logged_error =
+      std::any_of(messages.begin(), messages.end(),
+                 [](const spdlog::details::log_msg_buffer& m) {
+                   return m.level == spdlog::level::err;
+                 });
+  INFO("captured " << messages.size() << " log message(s), dims=("
+                   << grid.dims.x << "," << grid.dims.y << "," << grid.dims.z
+                   << ")");
+  CHECK(logged_error);
 }

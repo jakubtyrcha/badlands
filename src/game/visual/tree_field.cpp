@@ -281,7 +281,11 @@ std::unique_ptr<TreeField> BuildTreeField(
     // empty (see leaf_voxelizer.hpp's known gap), in which case this slot is
     // simply left unconfigured: GpuInstanceRenderer::Draw skips zero-
     // index-count slots automatically, so this is safe (no dead draw, no
-    // validation error) without any special-casing at draw time. ---
+    // validation error) without any special-casing at draw time. A tree with
+    // leaves at OTHER LODs hitting this at lod N still renders bare there
+    // (fail-soft -- pine-at-dead-zone during dev must not brick the viewer),
+    // but spdlog::warn's so the gap has a diagnostic instead of silently
+    // popping the crown at that distance band. ---
     const StaticTexturedMeshComponent& leaf_mesh = leaf_lod_meshes[lod].mesh;
     if (leaf_mesh.vertex_count > 0 && !leaf_mesh.indices.empty()) {
       buffers.leaf_vertex_buffer =
@@ -338,6 +342,11 @@ std::unique_ptr<TreeField> BuildTreeField(
       tf->material_handles.push_back(leaf_shadow_handle);
       tf->field->SetSubmeshShadow(/*model=*/0u, lod, /*submesh=*/1u,
                                   leaf_shadow_handle.operator->());
+    } else if (has_leaves) {
+      spdlog::warn(
+          "BuildTreeField: lod {} supplied an empty leaf voxelization (tree "
+          "has leaves at other LODs) -- rendering bare at this LOD",
+          lod);
     }
   }
 

@@ -37,6 +37,8 @@
 #include <catch_amalgamated.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>  // glm::translate/scale, Phase 5 field tests
+#include <spdlog/sinks/ringbuffer_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <array>
@@ -45,6 +47,7 @@
 #include <limits>
 #include <memory>
 #include <span>
+#include <string>
 
 #include "core/util/cpu_image.hpp"
 #include "engine/core/camera.hpp"
@@ -681,4 +684,64 @@ TEST_CASE("TreeField deferred frames at near/mid/far camera distances "
                      << crown_px.y << ") crown_red=" << crown_red);
     CHECK(crown_red > 0.05f);
   }
+}
+
+// ===========================================================================
+// Review fix: BuildTreeField silently left a LOD's leaf submesh slot
+// unconfigured when that LOD's supplied voxel mesh was empty -- legal (a LOD
+// can genuinely voxelize empty, see leaf_voxelizer.hpp), but silent, so a
+// real regression (a LOD that SHOULD have crown geometry but doesn't) had no
+// diagnostic. BuildTreeField now spdlog::warns, naming the LOD index, when
+// this happens; the build must still succeed (pine-at-dead-zone during dev
+// must not brick the viewer). Captured via a ringbuffer_sink swapped onto the
+// default logger for the duration of the BuildTreeField call (saved/restored
+// around it, so this test doesn't leak its sink into any other test).
+// ===========================================================================
+TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
+          "naming the LOD, and the field still builds",
+          "[tree_field][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  const TreeOptions oak = OakPreset();
+  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(oak);
+  const TexturedMeshResult leaves = GenerateLeafMesh(oak, skeleton);
+
+  // Oak has no known-empty-LOD gap at a real cell size (see BuildOakField's
+  // comment above) -- deliberately blank LOD 1 here (left default-constructed,
+  // vertex_count=0) to exercise the silent-empty-slot path this test pins,
+  // while LOD 0/2 stay real non-empty crowns so the warning can be checked to
+  // name ONLY the deliberately-blanked LOD.
+  std::array<TexturedMeshResult, GpuInstanceRenderer::kMaxLods> leaf_lod_meshes;
+  for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
+    if (lod == 1) continue;  // leave default-constructed (empty)
+    leaf_lod_meshes[lod] = VoxelizeLeafCards(leaves.mesh, oak.leaves.silhouette,
+                                             LeafVoxelizeOptions{});
+    REQUIRE(leaf_lod_meshes[lod].mesh.vertex_count > 0u);
+  }
+  REQUIRE(leaf_lod_meshes[1].mesh.vertex_count == 0u);
+
+  auto ring_sink = std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(64);
+  std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
+  const std::vector<spdlog::sink_ptr> saved_sinks = logger->sinks();
+  logger->sinks() = {ring_sink};
+
+  std::unique_ptr<TreeField> field =
+      BuildTreeField(g.device, g.queue, *g.gen, oak, leaf_lod_meshes,
+                    /*capacity=*/1, kFieldLodThresholds);
+
+  const std::vector<std::string> messages = ring_sink->last_formatted();
+  logger->sinks() = saved_sinks;  // restore before any assertion below
+
+  REQUIRE(field != nullptr);
+  CHECK(field->field->HasPass(InstancedMeshField::PassKind::kDeferred));
+
+  std::string joined;
+  for (const std::string& m : messages) joined += m + "\n";
+  INFO("captured log lines:\n" << joined);
+  const bool found =
+      std::any_of(messages.begin(), messages.end(), [](const std::string& m) {
+        return m.find("empty leaf") != std::string::npos &&
+               m.find("1") != std::string::npos;
+      });
+  CHECK(found);
 }

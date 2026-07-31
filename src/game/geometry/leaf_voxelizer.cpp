@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <glm/gtc/constants.hpp>    // glm::two_pi
 #include <glm/gtc/quaternion.hpp>   // glm::angleAxis
 #include <spdlog/spdlog.h>
@@ -75,22 +76,60 @@ LeafVoxelGrid SplatLeafCards(const StaticTexturedMeshComponent& leaf_mesh,
   grid.origin = glm::vec3(std::floor(aabb.min.x / h), std::floor(aabb.min.y / h),
                           std::floor(aabb.min.z / h)) * h;
   const glm::vec3 span = aabb.max - grid.origin;
-  grid.dims = glm::ivec3(static_cast<int>(std::ceil(span.x / h)),
-                         static_cast<int>(std::ceil(span.y / h)),
-                         static_cast<int>(std::ceil(span.z / h)));
+  // Cell counts computed in FLOAT first, deliberately not yet cast to int:
+  // static_cast<int> on a value that overflows int range (a degenerate mesh,
+  // or a NaN/non-finite cell_size) or is NaN is undefined behavior -- exactly
+  // the >512 case below is trying to catch, but reached AFTER an already-UB
+  // cast would make the "caught" value itself meaningless.
+  const glm::vec3 span_cells = glm::ceil(span / h);
 
-  // >512 must fail loudly UNCONDITIONALLY -- checked before, and
-  // independently of, the degenerate-dims guard below, so a mesh that is
-  // simultaneously flat on one axis and oversized on another still logs the
-  // error (the degenerate branch's early-out must never mask this one).
-  if (grid.dims.x > 512 || grid.dims.y > 512 || grid.dims.z > 512) {
+  // A cell count is safe to static_cast<int> iff it's in [INT_MIN, 512] --
+  // NOT merely "<= 512.0f", which a naive negation would treat as safe for
+  // e.g. -1e20f or -inf (both < 512.0f, neither representable as int): a
+  // degenerate mesh whose vertices are ALL non-finite on some axis leaves
+  // that axis's Aabb component at its Aabb::Empty() sentinel (+-FLT_MAX;
+  // glm::min/max never let NaN operands win, so a garbage coordinate is
+  // silently dropped rather than propagated), and grid.origin's floor(...)*h
+  // on a FLT_MAX component can itself overflow to +-inf, so span/span_cells
+  // can legitimately land at -inf, not only NaN or +inf.
+  constexpr float kIntMax = static_cast<float>(std::numeric_limits<int>::max());
+  constexpr float kIntMin = static_cast<float>(std::numeric_limits<int>::min());
+  auto cell_count_in_range = [](float v) {
+    return v >= kIntMin && v <= 512.0f;
+  };
+
+  // >512 (or non-finite, in EITHER direction) must fail loudly
+  // UNCONDITIONALLY -- checked before, and independently of, the
+  // degenerate-dims guard below, so a mesh that is simultaneously flat on one
+  // axis and oversized/non-finite on another still logs the error (the
+  // degenerate branch's early-out must never mask this one). The negated
+  // form also catches NaN: every comparison against NaN is false, so
+  // `!(false && ...)` = true here.
+  if (!cell_count_in_range(span_cells.x) || !cell_count_in_range(span_cells.y) ||
+      !cell_count_in_range(span_cells.z)) {
+    // Safe to cast now: in-range components (kIntMin..kIntMax, a superset of
+    // the guard's tighter kIntMin..512 -- so a genuinely oversized-but-finite
+    // axis, e.g. the classic 520-cell case, still reports its REAL value
+    // here, matching this function's pre-existing contract) cast normally; a
+    // non-finite or truly out-of-int-range component -- what a plain
+    // static_cast<int> would have been UB for -- reports 0 instead.
+    auto safe_cell_count = [](float v) -> int {
+      return (v >= kIntMin && v <= kIntMax) ? static_cast<int>(v) : 0;
+    };
+    grid.dims = glm::ivec3(safe_cell_count(span_cells.x),
+                           safe_cell_count(span_cells.y),
+                           safe_cell_count(span_cells.z));
     spdlog::error(
         "SplatLeafCards: leaf mesh AABB needs a {}x{}x{} cell grid at cell_size={} "
-        "(> 512 on some axis) -- returning an empty grid",
+        "(> 512 on some axis, or non-finite) -- returning an empty grid",
         grid.dims.x, grid.dims.y, grid.dims.z, h);
     grid.cells.clear();
     return grid;
   }
+
+  grid.dims = glm::ivec3(static_cast<int>(span_cells.x),
+                         static_cast<int>(span_cells.y),
+                         static_cast<int>(span_cells.z));
 
   // Degenerate (zero-volume, e.g. an AABB axis landing exactly on a
   // cell_size multiple) -- nothing to voxelize, not an error.
