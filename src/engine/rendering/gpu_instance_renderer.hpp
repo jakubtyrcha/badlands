@@ -56,6 +56,7 @@ class RenderPassContext;
 class GpuPipelineGenerator;
 class RenderingMaterialInstance;
 struct CompiledComputePipeline;
+struct Frustum;
 
 class GpuInstanceRenderer {
  public:
@@ -91,6 +92,15 @@ class GpuInstanceRenderer {
            scatter_pipeline_ != nullptr;
   }
 
+  // Which cull/compaction result Draw() reads from. kMain is the
+  // camera-frustum result from Cull(); kShadow is the light-frustum result
+  // from CullShadow() -- a SEPARATE buffer set (see the class comment on
+  // CullShadow for why one config buffer cannot serve both in the same
+  // frame). A never-culled shadow set (CullShadow() never called this frame)
+  // draws nothing: its args buffers are zero-initialized at construction and
+  // only ever written by a scan pass, so instanceCount stays 0.
+  enum class CullSet { kMain, kShadow };
+
   uint32_t GetCapacity() const { return capacity_; }
   uint32_t GetNumModels() const { return num_models_; }
   uint32_t GetNumBuckets() const { return num_buckets_; }
@@ -124,6 +134,22 @@ class GpuInstanceRenderer {
   // (must precede BeginRenderPass).
   void Cull(FrameContext& frame, const Camera& camera);
 
+  // Same 3-pass cull/LOD/compaction pipeline as Cull(), but against the
+  // LIGHT's frustum (`Frustum::FromViewProj(light_view_proj)`) instead of the
+  // camera's, writing into the DEDICATED shadow buffer set (Draw(...,
+  // CullSet::kShadow) reads it) rather than the main one. `camera` still
+  // supplies camera_world_pos and the LOD-selection thresholds: shadow
+  // geometry must match the LOD the camera would actually render, not a
+  // light-distance LOD. A SEPARATE buffer set exists (not just a second call
+  // to Cull() with different config contents) because queue_.WriteBuffer
+  // uploads execute BEFORE the frame's command buffer runs -- two Cull()-like
+  // calls sharing one config buffer in the same frame would race, with
+  // whichever WriteBuffer lands last silently winning for BOTH dispatches.
+  // Same encoder-sequencing requirement as Cull(): before any render pass
+  // opens on this frame's encoder.
+  void CullShadow(FrameContext& frame, const Camera& camera,
+                  const glm::mat4& light_view_proj);
+
   // Per-(bucket,submesh) material resolver: given a bucket id and submesh
   // index, return the material instance to render that slot with — already
   // bound (pipeline + group 0 with its `bucketId` param == this bucket + any
@@ -138,10 +164,12 @@ class GpuInstanceRenderer {
   // indexing the GPU-computed per-bucket offsets via the vertex shader (see
   // the class comment). Slots with a GPU survivor count of 0 draw nothing
   // automatically (indirect instanceCount == 0) — no CPU readback of the
-  // counts is needed. Called inside an active render pass, after Cull() on the
-  // same encoder.
+  // counts is needed. Called inside an active render pass, after Cull()
+  // (`cull_set` == kMain, the default) or CullShadow() (`cull_set` ==
+  // kShadow) ran earlier on the same encoder.
   void Draw(RenderPassContext& pass, FrameContext& frame,
-            const BucketSubmeshMaterialFn& material_for_bucket_submesh) const;
+            const BucketSubmeshMaterialFn& material_for_bucket_submesh,
+            CullSet cull_set = CullSet::kMain) const;
 
   // Test/debug readback accessors (all created with CopySrc). The compacted
   // transforms, the per-bucket counts, the per-bucket bases (prefix-sum output),
@@ -151,6 +179,13 @@ class GpuInstanceRenderer {
   wgpu::Buffer GetBucketCountBuffer() const { return bucket_count_buffer_; }
   wgpu::Buffer GetBucketBaseBuffer() const { return bucket_base_buffer_; }
   wgpu::Buffer GetArgsBuffer() const { return args_buffer_; }
+  // Same, for the shadow cull set (CullShadow()'s output) -- see CullShadow's
+  // doc comment for why this is a distinct buffer set, not a re-read of the
+  // above after a second Cull()-like call.
+  wgpu::Buffer GetShadowCompactedBuffer() const { return compacted_buffer_shadow_; }
+  wgpu::Buffer GetShadowBucketCountBuffer() const { return bucket_count_buffer_shadow_; }
+  wgpu::Buffer GetShadowBucketBaseBuffer() const { return bucket_base_buffer_shadow_; }
+  wgpu::Buffer GetShadowArgsBuffer() const { return args_buffer_shadow_; }
   uint32_t GetCompactedCapacity() const { return compacted_capacity_; }
   static constexpr uint64_t kArgsStride = 20;
   static constexpr uint64_t kArgsInstanceCountOffset = 4;
@@ -182,6 +217,37 @@ class GpuInstanceRenderer {
   wgpu::BindGroup classify_bind_group_;
   wgpu::BindGroup scan_bind_group_;
   wgpu::BindGroup scatter_bind_group_;
+
+  // Second buffer set + bind-group trio, dedicated to CullShadow()'s
+  // light-frustum cull -- mirrors the main set above field-for-field (same
+  // sizes, same usage flags, including CopySrc on compacted_buffer_shadow_/
+  // args_buffer_shadow_ so tests can read them back the same way as the main
+  // set's). instance_buffer_ is SHARED (both culls classify the same static
+  // per-instance input); everything downstream of classify is per-set so the
+  // two culls' outputs never alias. See CullShadow's doc comment for why a
+  // second config buffer is required rather than reusing config_buffer_.
+  wgpu::Buffer config_buffer_shadow_;
+  wgpu::Buffer per_instance_bucket_buffer_shadow_;
+  wgpu::Buffer bucket_count_buffer_shadow_;
+  wgpu::Buffer bucket_base_buffer_shadow_;
+  wgpu::Buffer write_cursor_buffer_shadow_;
+  wgpu::Buffer compacted_buffer_shadow_;
+  wgpu::Buffer args_buffer_shadow_;
+
+  wgpu::BindGroup classify_bind_group_shadow_;
+  wgpu::BindGroup scan_bind_group_shadow_;
+  wgpu::BindGroup scatter_bind_group_shadow_;
+
+  // Shared body of Cull()/CullShadow(): uploads `config` (the frustum planes
+  // + camera_world_pos + LOD thresholds + counts), clears `bucket_count`, and
+  // dispatches classify/scan/scatter against the given bind-group trio. See
+  // Cull()'s .cpp comment for why the per-pass barriers need no manual sync.
+  void CullInternal(FrameContext& frame, const Frustum& frustum,
+                    glm::vec3 camera_world_pos, wgpu::Buffer config_buffer,
+                    wgpu::Buffer bucket_count_buffer,
+                    wgpu::BindGroup classify_bind_group,
+                    wgpu::BindGroup scan_bind_group,
+                    wgpu::BindGroup scatter_bind_group);
 
   struct SubmeshMesh {
     wgpu::Buffer vertex_buffer;
