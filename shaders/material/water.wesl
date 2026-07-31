@@ -1,20 +1,39 @@
 // Water surface material.
 //
+// The water BODY is a homogeneous single-scattering medium, not a tint. Along
+// the view ray inside the water, with path length d metres:
+//
+//     T        = exp(-sigma_e * d)                    per-channel transmittance
+//     L_in     = scatterAlbedo * (skySH + shadowedSun)   the in-scattered murk
+//     L_under  = bg * T + L_in * (1 - T)
+//
+// Two things fall straight out of that rather than being dialled in: at d -> 0
+// the result IS the lake bed (so the shoreline needs no coast-width fade, and
+// the surface can output alpha 1), and because sigma_e is per-channel the hue
+// slides toward the murk asymptote as the water deepens. sigma_e is stated as a
+// visibility depth in metres and converted (sigma = 3 / d_vis) -- see
+// water_material.hpp's presets.
+//
 // Variants (selected by MaterialPassType -> shader features, see
-// standard_material_factory.cpp kVariants):
+// standard_material_factory.cpp kVariants, plus FactoryDescriptor::extra_features):
 //   - "transparent" (kForwardTransparent): the production surface — vertex wave
 //     displacement, per-pixel normal = analytic wave normal + procedural
 //     high-freq detail (TBN), sun GGX specular + IBL reflection, normal-driven
-//     distortion of the copied scene colour (refraction), and depth-based coast
-//     / absorption. Premultiplied output. Does NOT write depth (FactoryDescriptor
+//     distortion of the copied scene colour (refraction), and the medium above.
+//     Premultiplied output. Does NOT write depth (FactoryDescriptor
 //     depth_write=false); rendered against a depth-read-only attachment.
+//   - "still" (extra feature, forward-transparent only): standing water. No wave
+//     displacement, shading normal pinned to +Y. Everything else — the medium,
+//     the sky reflection, the sun glint, shadowing — is unchanged. Refraction
+//     vanishes for free, since its offset is driven by N.xz.
 //   - default (kGBuffer): writes encodeOctahedron(analytic wave normal) + albedo
 //     + material to the G-buffer. Used by badlands_water_gpu_test to read the
 //     GPU wave normal back and cross-check src/engine/rendering/water_waves.hpp,
 //     and usable as a normals debug view. No detail perturbation here — this is
 //     exactly the analytic wave normal the CPU core predicts.
 //   - "shadow_pass" (kShadow): depth-only (not a shadow caster in practice, but
-//     present so the kDeferred variant's shadow pipeline compiles).
+//     present so the kDeferred variant's shadow pipeline compiles). `still` never
+//     reaches it: kForwardTransparent registers only RenderPassType::kForward.
 //
 // Vertex layout: pos(3)+uv(2)+normal(3)+tangent(3); waves are a function of TRUE
 // world XZ (offset + camera) so they are camera-stationary.
@@ -33,9 +52,15 @@ import package::common::brdf::{evaluateSpecularGgxBrdf};
 import package::common::sh_lighting::{evaluateAmbientSHL2};
 @if(transparent)
 import package::common::shadow_sampling::{sampleShadowMapPCF};
-@if(transparent)
+@if(transparent && !still)
 import package::common::water_noise::{waterDetailNormalTS};
 import package::common::water_waves::{waterWaveHeight, waterWaveNormal};
+
+// Optical path length used when nothing is behind the water (the sky, at the
+// far edge of the map). Deep enough that transmittance is negligible for any
+// plausible extinction, so such a fragment reads as open water rather than
+// glass.
+const kSkyBehindDepthM: f32 = 32.0;
 
 struct WaterUniforms {
     modelMatrix: mat4x4<f32>,
@@ -43,10 +68,16 @@ struct WaterUniforms {
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
-    deepColor: vec4<f32>,     // xyz = deep-water tint
-    shallowColor: vec4<f32>,  // xyz = shallow-water tint
-    params: vec4<f32>,        // x=absorption, y=refractStrength, z=coastWidth, w=roughness
-    params2: vec4<f32>,       // x=detailStrength
+    // Per-channel extinction coefficient, 1/m. Derived from a visibility depth:
+    // sigma = 3 / d_vis, so the bed has faded by ~95% at d_vis metres. Red is
+    // the largest, which is what turns the water toward blue as it deepens.
+    extinction: vec4<f32>,
+    // Single-scattering albedo (0..1): the fraction of extinguished light that
+    // is re-scattered toward the viewer rather than absorbed. Deep water
+    // asymptotes to this, lit by the sky + shadowed sun.
+    scatterAlbedo: vec4<f32>,
+    params: vec4<f32>,        // x=refractStrength, y=roughness, z/w reserved
+    params2: vec4<f32>,       // x=detailStrength, y=blockout flag
 }
 
 @group(1) @binding(0) var<uniform> object: WaterUniforms;
@@ -90,7 +121,7 @@ fn waterWorldOffset(localPos: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(base.x, base.y + h, base.z);
 }
 
-@if(!shadow_pass)
+@if(!shadow_pass && !still)
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
@@ -101,6 +132,20 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.position = worldCameraOffsetedSpaceToClipSpace(worldOffset);
     output.worldOffsetPos = worldOffset;
     output.worldXZ = worldXZ;
+    return output;
+}
+
+// Standing water: the surface holds its rest plane, so this is the plain
+// transform. worldXZ is still carried so the fragment stage sees one
+// VertexOutput shape across both variants.
+@if(!shadow_pass && still)
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    let base = (object.modelMatrix * vec4<f32>(input.pos, 1.0)).xyz;
+    output.position = worldCameraOffsetedSpaceToClipSpace(base);
+    output.worldOffsetPos = base;
+    output.worldXZ = base.xz + frame.cameraWorldPos.xz;
     return output;
 }
 
@@ -115,6 +160,33 @@ fn vs_main(input: VertexInput) -> VertexOutputShadow {
 // The high-frequency detail normal (fluid fBm + domain warp) lives in
 // shaders/common/water_noise.wesl (waterDetailNormalTS), forward-only.
 
+// World-space shading normal. Split at FUNCTION granularity rather than with an
+// @if inside the body: every @if in shaders/ is item-level, and there is no
+// statement-level precedent to lean on.
+@if(transparent && !still)
+fn waterShadingNormal(worldXZ: vec2<f32>) -> vec3<f32> {
+    // Blockout/flat mode (params2.y > 0.5): a dead-flat +Y shading normal for
+    // the greybox look (the vertex stage still displaces by the waves, so the
+    // surface undulates but shades flat). Uniform branch (params2.y is a
+    // uniform), so the caller's texture sampling stays in uniform control flow.
+    if (object.params2.y > 0.5) {
+        return vec3<f32>(0.0, 1.0, 0.0);
+    }
+    // Base wave normal (per-fragment), enriched with a tangent-space detail normal.
+    let Nwave = waterWaveNormal(worldXZ, object.time);
+    let ts = waterDetailNormalTS(worldXZ, object.time, object.params2.x);
+    let T = normalize(cross(vec3<f32>(0.0, 0.0, 1.0), Nwave));
+    let B = cross(Nwave, T);
+    return normalize(T * ts.x + B * ts.y + Nwave * ts.z);
+}
+
+// Standing water: dead flat. Refraction's screen offset is driven by N.xz, so
+// it vanishes here for free -- no bed smearing across the waterline.
+@if(transparent && still)
+fn waterShadingNormal(worldXZ: vec2<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
 // === G-buffer variant: write the analytic wave normal (cross-checked) ===
 @if(!shadow_pass && !transparent)
 @fragment
@@ -124,49 +196,42 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     // for a planar XZ surface) — this is what water_waves.hpp predicts.
     let N = waterWaveNormal(input.worldXZ, object.time);
     output.normals = encodeOctahedron(N);
-    output.albedo = vec4<f32>(object.shallowColor.rgb, 1.0);
-    output.material = vec4<f32>(object.params.w, 1.0, 1.0, 0.0);  // roughness, shadow, ao
+    output.albedo = vec4<f32>(object.scatterAlbedo.rgb, 1.0);
+    output.material = vec4<f32>(object.params.y, 1.0, 1.0, 0.0);  // roughness, shadow, ao
     return output;
 }
 
-// === Forward transparent variant: lit + reflection + distortion + coast ===
+// === Forward transparent variant: medium + reflection + distortion ===
 @if(transparent)
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Blockout/flat mode (params2.y > 0.5): a dead-flat +Y shading normal — no
-    // wave or detail perturbation — for the greybox look (the vertex stage still
-    // displaces by the waves, so the surface undulates but shades flat). Uniform
-    // branch (params2.y is a uniform), so the texture sampling below stays in
-    // uniform control flow.
-    var N = vec3<f32>(0.0, 1.0, 0.0);
-    if (object.params2.y <= 0.5) {
-        // Base wave normal (per-fragment), enriched with a tangent-space detail normal.
-        let Nwave = waterWaveNormal(input.worldXZ, object.time);
-        let ts = waterDetailNormalTS(input.worldXZ, object.time, object.params2.x);
-        let T = normalize(cross(vec3<f32>(0.0, 0.0, 1.0), Nwave));
-        let B = cross(Nwave, T);
-        N = normalize(T * ts.x + B * ts.y + Nwave * ts.z);
-    }
+    let N = waterShadingNormal(input.worldXZ);
 
     let V = normalize(-input.worldOffsetPos);  // camera at origin in offset space
     let NdotV = max(dot(N, V), 1e-3);
 
-    // Depth-based coast / absorption (reads scene depth; does not modify it).
+    // Optical path length through the medium, along the VIEW RAY (reads scene
+    // depth; does not modify it). This is the physically right length for
+    // Beer-Lambert: at a grazing angle the ray travels further through the
+    // water than the water is deep, and it correctly goes to zero at the
+    // waterline.
     let pixel = vec2<i32>(input.position.xy);
     let sceneDepthRaw = textureLoad(sceneDepth, pixel, 0);
     let waterZ = reconstructLinearZ(input.position.z);
-    var waterDepth = object.params.z * 4.0;  // sky behind -> treat as deep
+    var pathM = kSkyBehindDepthM;
     if (isValidDepth(sceneDepthRaw)) {
-        waterDepth = max(reconstructLinearZ(sceneDepthRaw) - waterZ, 0.0);
+        pathM = max(reconstructLinearZ(sceneDepthRaw) - waterZ, 0.0);
     }
-    let coast = smoothstep(0.0, max(object.params.z, 1e-3), waterDepth);
-    let absorb = 1.0 - exp(-waterDepth * object.params.x);
+    let T = exp(-object.extinction.xyz * pathM);
+    // How far from transparent the water is here. Ramps the refraction so a
+    // shallow shoreline does not smear the bed across the waterline.
+    let opacity = 1.0 - T.g;
 
     // Refraction: normal-driven distortion of the copied scene colour. Reject
     // the offset when it lands on foreground geometry (a surface CLOSER than the
     // water), so objects in front of the lake don't bleed across the surface.
     let screenUV = input.position.xy / frame.screenSize;
-    let refrUV = clamp(screenUV + N.xz * object.params.y * coast,
+    let refrUV = clamp(screenUV + N.xz * object.params.x * opacity,
                        vec2<f32>(0.0), vec2<f32>(1.0));
     let offDepthRaw = textureLoad(sceneDepth, vec2<i32>(refrUV * frame.screenSize), 0);
     var bgUV = refrUV;
@@ -182,26 +247,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let worldPos = input.worldOffsetPos + frame.cameraWorldPos.xyz;
     let shadow = sampleShadowMapPCF(worldPos, N, NdotL, shadowMap, shadowSampler);
 
-    // Water body colour: absorption tint lit by the sky (SH, unshadowed) plus the
-    // SHADOWED sun, so it tracks time of day and darkens inside shadow. `bg` (the
-    // refracted background) is already lit; only the tint needs it.
+    // Light available INSIDE the medium: the sky (SH, unshadowed) plus the
+    // SHADOWED sun, so the murk tracks time of day and darkens in shadow. `bg`
+    // (the refracted background) is already lit; only the in-scattering needs
+    // this.
     let envLight = evaluateAmbientSHL2(N, frame.ambientSH)
                    + NdotL * frame.sunColor.rgb * shadow;
-    let waterTint = mix(object.shallowColor.rgb, object.deepColor.rgb, absorb) * envLight;
+    let L_in = object.scatterAlbedo.rgb * envLight;
 
-    // Scattering: sunlight forward-scattered through the water body toward the
-    // viewer — shadowed, stronger looking into the sun and in deeper water.
-    let scatter = object.shallowColor.rgb * frame.sunColor.rgb * shadow
-                  * pow(max(dot(V, -L), 0.0), 4.0) * absorb;
-
-    let transmitted = mix(bg, waterTint, absorb) + scatter;
+    // Single scatter through a homogeneous medium: the bed attenuates, the murk
+    // accumulates. At pathM = 0 this is EXACTLY bg, which is why the shoreline
+    // needs no separate coast fade.
+    let transmitted = bg * T + L_in * (vec3<f32>(1.0) - T);
 
     // Reflection: a SINGLE Fresnel (split-sum LUT: ~F0 head-on, ~1 grazing) mixes
     // the transmitted colour with the raw sky IBL, so the reflection shows the sky
     // and grows at grazing angles (and tracks time of day via the prefiltered env).
     let R = reflect(-V, N);
     let maxMip = f32(textureNumLevels(iblPrefiltered) - 1u);
-    let roughness = object.params.w;
+    let roughness = object.params.y;
     let reflColor = textureSampleLevel(iblPrefiltered, iblSampler, R, roughness * maxMip).rgb;
     let F0 = vec3<f32>(0.02);
     let brdf = textureSampleLevel(brdfLut, brdfLutSampler, vec2<f32>(NdotV, roughness), 0.0).rg;
@@ -209,7 +273,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // over at grazing) — an unclamped mix factor would extrapolate past reflColor.
     var fresnel = clamp(F0 * brdf.x + vec3<f32>(brdf.y), vec3<f32>(0.0), vec3<f32>(1.0));
     var sunSpec = evaluateSpecularGgxBrdf(N, V, L, roughness, F0) * NdotL * frame.sunColor.rgb * shadow;
-    // Blockout/flat mode: no sky reflection, no sun glint — just the depth tint.
+    // Blockout/flat mode: no sky reflection, no sun glint — just the medium.
     // reflColor/brdf are still sampled above so this pipeline's @group(2) layout
     // is identical to the detailed variant (the forward-transparent pass binds
     // all 9 engine resources unconditionally — see RenderForwardTransparentMeshes).
@@ -220,8 +284,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let rgb = mix(transmitted, reflColor, fresnel) + sunSpec;
 
-    let alpha = clamp(coast, 0.0, 1.0);  // soft shoreline; interior saturates to 1
-    return vec4<f32>(rgb * alpha, alpha);  // premultiplied
+    // Opaque. The transmittance IS the shore fade: `transmitted` already reduces
+    // to the copied background at zero path length, so blending it again against
+    // that same background would only double-count it.
+    return vec4<f32>(rgb, 1.0);  // premultiplied, alpha = 1
 }
 
 // === Shadow variant: depth-only ===

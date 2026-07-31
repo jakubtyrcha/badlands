@@ -427,17 +427,18 @@ TEST_CASE("water refraction rejects foreground bleed", "[water][gpu][refraction]
   REQUIRE(occInst != nullptr);
   occInst->SetParameterByName("modelMatrix", MaterialParameterValue(model));
 
-  // Water: flat, full-frame; absorption 0 (so refracted == background), strong
-  // refraction offset, detail on. Group-2 engine resources supply scene colour
-  // + depth + (black) IBL.
+  // Water: flat, full-frame; ZERO extinction so the medium is fully
+  // transmissive (refracted == background, which is what this test measures),
+  // strong refraction offset, detail on. Group-2 engine resources supply scene
+  // colour + depth + (black) IBL.
   static const TexturedMeshResult waterMesh =
       GenerateHeightmapMesh(200.0f, 1, [](float, float) { return 0.0f; });
   wgpu::Buffer waterVerts = UploadVerts(device, waterMesh.mesh.vertices);
   InstanceParams wp;
   wp.uniform_overrides = {
-      {"deepColor", glm::vec4(0.0f, 0.0f, 1.0f, 1.0f)},
-      {"shallowColor", glm::vec4(0.0f, 0.0f, 1.0f, 1.0f)},
-      {"params", glm::vec4(0.0f, 0.4f, 0.5f, 0.9f)},  // absorb=0, refract=0.4
+      {"extinction", glm::vec4(0.0f, 0.0f, 0.0f, 0.0f)},   // T == 1 everywhere
+      {"scatterAlbedo", glm::vec4(0.0f, 0.0f, 1.0f, 0.0f)},
+      {"params", glm::vec4(0.4f, 0.9f, 0.0f, 0.0f)},  // refract=0.4, rough=0.9
       {"params2", glm::vec4(0.6f, 0.0f, 0.0f, 0.0f)},
       {"time", 3.0f},
   };
