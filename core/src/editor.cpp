@@ -89,7 +89,7 @@ void Editor::render(void* caMetalDrawable) {
         // Mid-drag the active handle owns the highlight (mouseMoved doesn't
         // fire while the button is down, so hover would be stale anyway).
         const GizmoHandle highlighted = impl_->drag.active ? impl_->drag.handle : impl_->hover;
-        impl_->renderer.set_gizmo(frame, highlighted);
+        impl_->renderer.set_gizmo(frame, highlighted, camera.eye);
     } else {
         impl_->renderer.hide_gizmo();
     }

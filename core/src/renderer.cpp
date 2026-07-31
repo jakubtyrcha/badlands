@@ -236,15 +236,18 @@ void Renderer::ensure_depth_texture(uint32_t width, uint32_t height) {
     depth_texture_height_ = height;
 }
 
-void Renderer::set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted) {
+void Renderer::set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye) {
     gizmo_visible_ = true;
-    gizmo_verts_.clear();
-    append_move_gizmo(gizmo_verts_, frame, highlighted, 12);
+    gizmo_grid_verts_.clear();
+    gizmo_handle_verts_.clear();
+    append_move_gizmo_grid(gizmo_grid_verts_, frame, 12);
+    append_move_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
 }
 
 void Renderer::hide_gizmo() {
     gizmo_visible_ = false;
-    gizmo_verts_.clear();
+    gizmo_grid_verts_.clear();
+    gizmo_handle_verts_.clear();
 }
 
 RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
@@ -378,12 +381,20 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     }
 
     // Gizmo pass: painter's order over the opaque scene lines, semi-transparent
-    // blend PSO, verts always via setVertexBytes (78 verts, never a buffer).
-    if (gizmo_visible_ && !gizmo_verts_.empty()) {
+    // blend PSO, verts always via setVertexBytes (48 + 90 verts, never a
+    // buffer). The thin grid draws first as lines, the thick handle quads as
+    // triangles on top — same PSO, the primitive type is per-draw.
+    if (gizmo_visible_ && !gizmo_grid_verts_.empty()) {
         encoder->setRenderPipelineState(line_blend_pso_.get());
-        encoder->setVertexBytes(gizmo_verts_.data(), gizmo_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBytes(gizmo_grid_verts_.data(), gizmo_grid_verts_.size() * sizeof(LineVertex), 0);
         encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
-        encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), gizmo_verts_.size());
+        encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), gizmo_grid_verts_.size());
+    }
+    if (gizmo_visible_ && !gizmo_handle_verts_.empty()) {
+        encoder->setRenderPipelineState(line_blend_pso_.get());
+        encoder->setVertexBytes(gizmo_handle_verts_.data(), gizmo_handle_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), gizmo_handle_verts_.size());
     }
 
     encoder->endEncoding();

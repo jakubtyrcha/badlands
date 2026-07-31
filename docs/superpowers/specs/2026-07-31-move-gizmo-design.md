@@ -29,6 +29,18 @@ code guard (forward-clamped world-space math already cannot pick
 behind-camera handles; pinned by test only). The plan's "R1 review
 amendments" section carries the details.
 
+AMENDMENT (R2, 2026-07-31, user visual rulings after hands-on): gizmo is
+2x larger (`kGizmoScreenFraction` 0.12 → 0.24); handle lines are THICK —
+expanded CPU-side into camera-facing quads (Metal has no line width) of
+half-width `kGizmoHandleHalfWidthFrac (0.02) · he`, drawn as triangles in
+a second gizmo draw while the grid stays thin lines; handles are COLORED:
+axes u/v/n = red/green/blue, planes = the additive mix of their two axes
+(uv yellow "110", un magenta, vn cyan). Hover/active hot color moved from
+amber to WHITE — amber collides with the yellow uv plane. §6's
+`append_move_gizmo` split into `append_move_gizmo_grid` (lines) +
+`append_move_gizmo_handles` (triangles, takes the eye for the facing
+expansion); `Renderer::set_gizmo(frame, highlighted, eye)`.
+
 ## 1. Gizmo frame — new `core/src/gizmo.h/.cpp`
 
 `GizmoFrame { simd_float3 origin; simd_float3 n, u, v; float half_extent; }`

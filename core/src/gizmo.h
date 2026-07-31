@@ -12,8 +12,9 @@ struct Node;
 // Gizmo apparent size: half_extent as a fraction of viewport height at the
 // frame origin's depth (screen-constant, R1 user ruling — a world-constant
 // gizmo would shrink to ~3% of the view at the camera's 90-unit radius
-// clamp and swallow the screen fully zoomed in).
-inline constexpr float kGizmoScreenFraction = 0.12f;
+// clamp and swallow the screen fully zoomed in). 0.24 = the R2 "2x larger"
+// user ruling over the original 0.12.
+inline constexpr float kGizmoScreenFraction = 0.24f;
 
 // The modify-mode move gizmo's tangent frame. origin/n follow
 // drag_plane_for_node (snapped -> snap frame, unsnapped -> camera-facing);

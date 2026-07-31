@@ -36,9 +36,10 @@ public:
     // definition for the replace-on-update ownership note.
     void set_mesh(const TriangleMesh& mesh);
     // Modify-mode move gizmo. Rebuilds the (tiny, setVertexBytes-only) gizmo
-    // vertex vector on every call — 78 verts is cheap enough that caching by
-    // param-equality would be over-engineering.
-    void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted);   // shows the gizmo
+    // vertex vectors on every call — ~140 verts total is cheap enough that
+    // caching by param-equality would be over-engineering. `eye` feeds the
+    // camera-facing expansion of the thick handle quads.
+    void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye);   // shows the gizmo
     void hide_gizmo();
     void render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id, const Camera& camera); // borrowed drawable
 
@@ -85,7 +86,8 @@ private:
     NS::SharedPtr<MTL::Buffer> raymarch_nodes_;
 
     bool gizmo_visible_ = false;
-    std::vector<LineVertex> gizmo_verts_;
+    std::vector<LineVertex> gizmo_grid_verts_;     // thin LINE primitives
+    std::vector<LineVertex> gizmo_handle_verts_;   // thick-quad TRIANGLE primitives
 };
 
 } // namespace sq

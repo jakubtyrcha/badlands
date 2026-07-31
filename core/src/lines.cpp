@@ -80,69 +80,110 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
     }
 }
 
-void append_move_gizmo(std::vector<LineVertex>& out, const GizmoFrame& frame,
-                       GizmoHandle highlighted, int divisions) {
+void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float step = 2.0f * he / static_cast<float>(divisions);
     const int center = divisions / 2;
 
-    auto push = [&](simd_float3 p, simd_float4 color) {
+    auto push = [&](simd_float3 p) {
         LineVertex vertex;
         vertex.pos = (simd_float4){p.x, p.y, p.z, 1.0f};
-        vertex.color = color;
+        vertex.color = kColorGridLine;
         out.push_back(vertex);
     };
-    auto color_for = [&](GizmoHandle handle, simd_float4 base) {
-        return handle == highlighted ? kColorGizmoHot : base;
-    };
 
-    // Grid lines (decoration, not a handle): for each sample i in
-    // [0, divisions] (skipping the center, which would duplicate the axis
-    // lines below), emit one line running along u (offset along v) and one
-    // running along v (offset along u).
+    // For each sample i in [0, divisions] (skipping the center, where the
+    // u/v axis handles run), emit one line running along u (offset along v)
+    // and one running along v (offset along u).
     for (int i = 0; i <= divisions; ++i) {
         if (i == center) {
             continue;
         }
         const float offset = -he + static_cast<float>(i) * step;
-        push(origin + offset * frame.v - he * frame.u, kColorGridLine);
-        push(origin + offset * frame.v + he * frame.u, kColorGridLine);
-        push(origin + offset * frame.u - he * frame.v, kColorGridLine);
-        push(origin + offset * frame.u + he * frame.v, kColorGridLine);
+        push(origin + offset * frame.v - he * frame.u);
+        push(origin + offset * frame.v + he * frame.u);
+        push(origin + offset * frame.u - he * frame.v);
+        push(origin + offset * frame.u + he * frame.v);
     }
+}
+
+namespace {
+
+// Expands the segment [a, b] into a camera-facing quad (two triangles, 6
+// verts) of the given half-width, endpoints extended by the half-width so
+// segments meeting at a corner overlap instead of notching. A segment
+// pointing straight at the eye has no on-screen extent: emit nothing.
+void append_thick_segment(std::vector<LineVertex>& out, simd_float3 a, simd_float3 b,
+                          simd_float3 eye, float half_width, simd_float4 color) {
+    const simd_float3 ab = b - a;
+    const float len = simd_length(ab);
+    if (len < 1e-6f) {
+        return;
+    }
+    const simd_float3 dir = ab / len;
+    simd_float3 side = simd_cross(dir, eye - 0.5f * (a + b));
+    const float side_len = simd_length(side);
+    if (side_len < 1e-6f) {
+        return; // edge-on to the eye
+    }
+    side *= half_width / side_len;
+
+    const simd_float3 a2 = a - half_width * dir;
+    const simd_float3 b2 = b + half_width * dir;
+
+    auto push = [&](simd_float3 p) {
+        LineVertex vertex;
+        vertex.pos = (simd_float4){p.x, p.y, p.z, 1.0f};
+        vertex.color = color;
+        out.push_back(vertex);
+    };
+    push(a2 - side); push(b2 - side); push(b2 + side);
+    push(a2 - side); push(b2 + side); push(a2 + side);
+}
+
+} // namespace
+
+void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                               GizmoHandle highlighted, simd_float3 eye) {
+    const simd_float3 origin = frame.origin;
+    const float he = frame.half_extent;
+    const float hw = kGizmoHandleHalfWidthFrac * he;
+
+    auto color_for = [&](GizmoHandle handle, simd_float4 base) {
+        return handle == highlighted ? kColorGizmoHot : base;
+    };
 
     // Axis handles through the origin, -he..+he. Emission order (u, v, n)
     // matches the pick tie-break order; lines_tests pins the layout.
-    const struct { simd_float3 dir; GizmoHandle handle; } axes[] = {
-        {frame.u, GizmoHandle::AxisU},
-        {frame.v, GizmoHandle::AxisV},
-        {frame.n, GizmoHandle::AxisN},
+    const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
+        {frame.u, kColorAxisU, GizmoHandle::AxisU},
+        {frame.v, kColorAxisV, GizmoHandle::AxisV},
+        {frame.n, kColorAxisN, GizmoHandle::AxisN},
     };
     for (const auto& axis : axes) {
-        const simd_float4 c = color_for(axis.handle, kColorGridAxis);
-        push(origin - he * axis.dir, c);
-        push(origin + he * axis.dir, c);
+        append_thick_segment(out, origin - he * axis.dir, origin + he * axis.dir,
+                             eye, hw, color_for(axis.handle, axis.color));
     }
 
     // Plane-handle patch outlines: the [0.3he, 0.6he]^2 square of each basis
     // pair — the same patch pick_gizmo_handle hit-tests.
     const float a = 0.3f * he, b = 0.6f * he;
-    const struct { simd_float3 e1, e2; GizmoHandle handle; } patches[] = {
-        {frame.u, frame.v, GizmoHandle::PlaneUV},
-        {frame.u, frame.n, GizmoHandle::PlaneUN},
-        {frame.v, frame.n, GizmoHandle::PlaneVN},
+    const struct { simd_float3 e1, e2; simd_float4 color; GizmoHandle handle; } patches[] = {
+        {frame.u, frame.v, kColorPlaneUV, GizmoHandle::PlaneUV},
+        {frame.u, frame.n, kColorPlaneUN, GizmoHandle::PlaneUN},
+        {frame.v, frame.n, kColorPlaneVN, GizmoHandle::PlaneVN},
     };
     for (const auto& patch : patches) {
-        const simd_float4 c = color_for(patch.handle, kColorGizmoPlane);
+        const simd_float4 c = color_for(patch.handle, patch.color);
         const simd_float3 p00 = origin + a * patch.e1 + a * patch.e2;
         const simd_float3 p10 = origin + b * patch.e1 + a * patch.e2;
         const simd_float3 p11 = origin + b * patch.e1 + b * patch.e2;
         const simd_float3 p01 = origin + a * patch.e1 + b * patch.e2;
-        push(p00, c); push(p10, c);
-        push(p10, c); push(p11, c);
-        push(p11, c); push(p01, c);
-        push(p01, c); push(p00, c);
+        append_thick_segment(out, p00, p10, eye, hw, c);
+        append_thick_segment(out, p10, p11, eye, hw, c);
+        append_thick_segment(out, p11, p01, eye, hw, c);
+        append_thick_segment(out, p01, p00, eye, hw, c);
     }
 }
 

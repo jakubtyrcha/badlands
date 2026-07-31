@@ -230,13 +230,13 @@ TEST_CASE("build_scene_lines: subtract-always + selected-always-overrides policy
     }
 }
 
-// --- append_move_gizmo ------------------------------------------------------
+// --- append_move_gizmo_grid / append_move_gizmo_handles ---------------------
 //
-// Emission order is pinned (the highlight cases below depend on it):
-// 48 grid verts, then axes u, v, n (2 verts each, -he then +he), then plane
-// patch outlines uv, un, vn (8 verts each) = 78 total.
-// (The tangent-basis formula itself is pinned in gizmo_tests.cpp — the old
-// duplicate orthonormality case here died with append_tangent_frame.)
+// Handle emission order is pinned (the highlight cases below depend on it):
+// thick segments of 6 triangle verts each — axes u, v, n (1 segment each,
+// [0,18)), then patch outlines uv, un, vn (4 segments = 24 verts each:
+// [18,42), [42,66), [66,90)) = 90 verts total.
+// (The tangent-basis formula itself is pinned in gizmo_tests.cpp.)
 
 namespace {
 
@@ -249,93 +249,109 @@ GizmoFrame make_gizmo_frame(simd_float3 origin, simd_float3 n, float he) {
     return f;
 }
 
-bool is_hot(const LineVertex& v) {
-    return v.color.x == doctest::Approx(kColorGizmoHot.x) &&
-           v.color.y == doctest::Approx(kColorGizmoHot.y) &&
-           v.color.z == doctest::Approx(kColorGizmoHot.z) &&
-           v.color.w == doctest::Approx(kColorGizmoHot.w);
+bool color_is(const LineVertex& v, const simd_float4 expected) {
+    return v.color.x == doctest::Approx(expected.x) &&
+           v.color.y == doctest::Approx(expected.y) &&
+           v.color.z == doctest::Approx(expected.z) &&
+           v.color.w == doctest::Approx(expected.w);
+}
+
+// Every expanded vertex of a thick segment [a,b] lies within half_width of
+// the segment's line, inside the endpoint extension along it.
+void check_on_thick_segment(const simd_float3 p, const simd_float3 a, const simd_float3 b,
+                            const float half_width) {
+    const simd_float3 dir = simd_normalize(b - a);
+    const float along = simd_dot(p - a, dir);
+    CHECK(along > -half_width - 1e-5f);
+    CHECK(along < simd_length(b - a) + half_width + 1e-5f);
+    const simd_float3 off = p - a - along * dir;
+    CHECK(simd_length(off) < half_width + 1e-5f);
 }
 
 } // namespace
 
-TEST_CASE("append_move_gizmo: n={0,1,0}, he=2, divisions=12 — counts, layout, colors, "
-          "no hot vertex without a highlight") {
+TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — thin, coplanar, faint") {
     const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
-    const float he = f.half_extent;
     std::vector<LineVertex> out;
-    append_move_gizmo(out, f, GizmoHandle::None, 12);
+    append_move_gizmo_grid(out, f, 12);
 
-    // 24 grid lines + 3 axes + 3 patches * 4 outline lines = 39 lines = 78 verts.
-    REQUIRE(out.size() == 78);
-
-    // Grid [0,48): coplanar, kColorGridLine.
-    for (size_t i = 0; i < 48; ++i) {
+    // 24 grid lines (2*divisions, center skipped) = 48 verts.
+    REQUIRE(out.size() == 48);
+    for (size_t i = 0; i < out.size(); ++i) {
         CAPTURE(i);
         const simd_float3 p = out[i].pos.xyz;
         const simd_float4 c = out[i].color;
         CHECK(std::fabs(simd_dot(f.n, p - f.origin)) < 1e-5f);
         CHECK(c.w == doctest::Approx(0.18f));
     }
+}
 
-    // Axes [48,54): endpoints origin ± he*dir, kColorGridAxis — the n axis is
-    // a full axis now, not the old half-stub.
-    check_float3_approx(out[48].pos.xyz, f.origin - he * f.u);
-    check_float3_approx(out[49].pos.xyz, f.origin + he * f.u);
-    check_float3_approx(out[50].pos.xyz, f.origin - he * f.v);
-    check_float3_approx(out[51].pos.xyz, f.origin + he * f.v);
-    check_float3_approx(out[52].pos.xyz, f.origin - he * f.n);
-    check_float3_approx(out[53].pos.xyz, f.origin + he * f.n);
-    for (size_t i = 48; i < 54; ++i) {
-        const simd_float4 c = out[i].color;
-        CHECK(c.w == doctest::Approx(0.9f));
-    }
+TEST_CASE("append_move_gizmo_handles: counts, thick-quad geometry, RGB axis colors and "
+          "additive-mix plane colors") {
+    const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
+    const float he = f.half_extent;
+    const float hw = kGizmoHandleHalfWidthFrac * he;
+    const simd_float3 eye = {3.0f, 8.0f, 2.0f}; // off every axis: no degenerate expansion
+    std::vector<LineVertex> out;
+    append_move_gizmo_handles(out, f, GizmoHandle::None, eye);
 
-    // Patches [54,78): every vertex's two in-patch coordinates sit on the
-    // [0.3he, 0.6he] square outline; color kColorGizmoPlane.
-    const struct { simd_float3 e1, e2; size_t base; } patches[] = {
-        {f.u, f.v, 54}, {f.u, f.n, 62}, {f.v, f.n, 70},
+    // (3 axes * 1 + 3 patches * 4) segments * 6 verts = 90.
+    REQUIRE(out.size() == 90);
+
+    // Axes: 6 verts each, on the ±he segment, in their axis color.
+    const struct { simd_float3 dir; simd_float4 color; size_t base; } axes[] = {
+        {f.u, kColorAxisU, 0}, {f.v, kColorAxisV, 6}, {f.n, kColorAxisN, 12},
     };
-    for (const auto& patch : patches) {
-        for (size_t i = patch.base; i < patch.base + 8; ++i) {
+    for (const auto& axis : axes) {
+        for (size_t i = axis.base; i < axis.base + 6; ++i) {
             CAPTURE(i);
-            const simd_float3 p = out[i].pos.xyz;
-            const simd_float4 c = out[i].color;
-            const float x = simd_dot(p - f.origin, patch.e1);
-            const float y = simd_dot(p - f.origin, patch.e2);
-            CHECK(x > 0.3f * he - 1e-5f);
-            CHECK(x < 0.6f * he + 1e-5f);
-            CHECK(y > 0.3f * he - 1e-5f);
-            CHECK(y < 0.6f * he + 1e-5f);
-            CHECK(c.w == doctest::Approx(kColorGizmoPlane.w));
+            check_on_thick_segment(out[i].pos.xyz, f.origin - he * axis.dir, f.origin + he * axis.dir, hw);
+            CHECK(color_is(out[i], axis.color));
         }
     }
 
-    for (const LineVertex& v : out) {
-        CHECK_FALSE(is_hot(v));
+    // Patches: 24 verts each, within the outline's thickened bounds, mixed color.
+    const struct { simd_float3 e1, e2; simd_float4 color; size_t base; } patches[] = {
+        {f.u, f.v, kColorPlaneUV, 18}, {f.u, f.n, kColorPlaneUN, 42}, {f.v, f.n, kColorPlaneVN, 66},
+    };
+    for (const auto& patch : patches) {
+        for (size_t i = patch.base; i < patch.base + 24; ++i) {
+            CAPTURE(i);
+            const simd_float3 p = out[i].pos.xyz;
+            const float x = simd_dot(p - f.origin, patch.e1);
+            const float y = simd_dot(p - f.origin, patch.e2);
+            CHECK(x > 0.3f * he - 2.0f * hw - 1e-5f);
+            CHECK(x < 0.6f * he + 2.0f * hw + 1e-5f);
+            CHECK(y > 0.3f * he - 2.0f * hw - 1e-5f);
+            CHECK(y < 0.6f * he + 2.0f * hw + 1e-5f);
+            CHECK(color_is(out[i], patch.color));
+        }
     }
 }
 
-TEST_CASE("append_move_gizmo: the highlighted handle's vertices — and only those — go hot") {
+TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and only those — "
+          "go hot (white)") {
     const GizmoFrame f = make_gizmo_frame(simd_float3{1.0f, 2.0f, 3.0f},
                                           simd_normalize(simd_float3{1.0f, 1.0f, 0.0f}), 2.0f);
+    const simd_float3 eye = {4.0f, 9.0f, 5.0f};
     std::vector<LineVertex> out;
 
-    auto hot_indices = [&](GizmoHandle highlighted, size_t expect_begin, size_t expect_count) {
+    auto check_hot_range = [&](GizmoHandle highlighted, size_t expect_begin, size_t expect_count) {
         out.clear();
-        append_move_gizmo(out, f, highlighted, 12);
-        REQUIRE(out.size() == 78);
+        append_move_gizmo_handles(out, f, highlighted, eye);
+        REQUIRE(out.size() == 90);
         size_t hot = 0;
         for (size_t i = 0; i < out.size(); ++i) {
             CAPTURE(i);
             const bool should_be_hot = i >= expect_begin && i < expect_begin + expect_count;
-            CHECK(is_hot(out[i]) == should_be_hot);
-            hot += is_hot(out[i]) ? 1 : 0;
+            CHECK(color_is(out[i], kColorGizmoHot) == should_be_hot);
+            hot += color_is(out[i], kColorGizmoHot) ? 1 : 0;
         }
         CHECK(hot == expect_count);
     };
 
-    SUBCASE("AxisU") { hot_indices(GizmoHandle::AxisU, 48, 2); }
-    SUBCASE("AxisN") { hot_indices(GizmoHandle::AxisN, 52, 2); }
-    SUBCASE("PlaneUV") { hot_indices(GizmoHandle::PlaneUV, 54, 8); }
-    SUBCASE("PlaneVN") { hot_indices(GizmoHandle::PlaneVN, 70, 8); }
+    SUBCASE("AxisU") { check_hot_range(GizmoHandle::AxisU, 0, 6); }
+    SUBCASE("AxisN") { check_hot_range(GizmoHandle::AxisN, 12, 6); }
+    SUBCASE("PlaneUV") { check_hot_range(GizmoHandle::PlaneUV, 18, 24); }
+    SUBCASE("PlaneVN") { check_hot_range(GizmoHandle::PlaneVN, 66, 24); }
 }
