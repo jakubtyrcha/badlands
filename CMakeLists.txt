@@ -651,12 +651,16 @@ add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY 
 # (WORKING_DIRECTORY = repo root); compiles the tree/leaf-voxelizer sources
 # directly (mirrors badlands_tree_tests above) rather than linking them from
 # badlands_game_lib (neither is a member of that library -- see
-# badlands_app_sources_viewer).
+# badlands_app_sources_viewer). Phase 5 extends this suite to exercise
+# TreeField/BuildTreeField (voxel-crown instanced field + field shadows), so
+# also compiles src/game/visual/tree_field.cpp directly for the same reason
+# (also only a member of badlands_app_sources_viewer, not badlands_game_lib).
 add_executable(badlands_tree_field_gpu_tests
     game/tests/tree_field_gpu_tests.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
+    src/game/visual/tree_field.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_field_gpu_tests PRIVATE
