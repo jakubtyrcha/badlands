@@ -41,6 +41,20 @@ amber to WHITE — amber collides with the yellow uv plane. §6's
 `append_move_gizmo_handles` (triangles, takes the eye for the facing
 expansion); `Renderer::set_gizmo(frame, highlighted, eye)`.
 
+AMENDMENT (R3, 2026-07-31, user rulings): gizmo axes draw the POSITIVE
+half only (0..+he) and the pickable segment clamps to match (drawn = hit
+preserved; the drag solver still runs the full line, so a grabbed axis
+drags both ways). New camera-pivot marker at the orbit target, drawn
+every frame in every mode, ALWAYS last: a world-axis-aligned "spiked
+cube" (12 wireframe edges, corners ± he, plus one spike per face from
+the wall center out to 2he), screen-constant (`kPivotScreenFraction`
+0.025 of viewport height at target depth), 2px-thick camera-facing
+quads (`kPivotLineHalfWidthPts` 1pt half-width), mid gray — opaque
+where it beats the scene depth (read-only Less pass), alpha 0.25 where
+occluded (read-only Greater pass; disjoint, no double blend). Geometry:
+`append_spiked_cube` in lines.h; `Renderer::set_pivot_gizmo`; two new
+read-only depth-stencil states.
+
 ## 1. Gizmo frame — new `core/src/gizmo.h/.cpp`
 
 `GizmoFrame { simd_float3 origin; simd_float3 n, u, v; float half_extent; }`

@@ -198,6 +198,11 @@ TEST_CASE("pick_gizmo_handle: each axis picked through a point on it; origin tie
     // Through the origin every axis is at distance 0 with the same ray-t:
     // deterministic declaration-order tie-break.
     CHECK(pick(f, eye, f.origin) == GizmoHandle::AxisU);
+
+    // Axes are positive-only (R3): the negative half is neither drawn nor
+    // pickable — a ray through -0.8he*u clamps to the origin endpoint, far
+    // outside tolerance, and the negative quadrant holds no patches either.
+    CHECK(pick(f, eye, f.origin - 0.8f * he * f.u) == GizmoHandle::None);
 }
 
 TEST_CASE("pick_gizmo_handle: plane patches hit at their centers, bounds respected, "

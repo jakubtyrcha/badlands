@@ -30,6 +30,12 @@ inline constexpr simd_float4 kColorGizmoHot = {1.0f, 1.0f, 1.0f, 1.0f};
 // width at the default kGizmoScreenFraction on a 500pt-tall viewport).
 inline constexpr float kGizmoHandleHalfWidthFrac = 0.02f;
 
+// Camera-pivot marker: mid gray, opaque where it beats the scene depth,
+// faded where occluded (user ruling: "mid gray in front, alpha blended
+// behind").
+inline constexpr simd_float4 kColorPivotFront  = {0.5f, 0.5f, 0.5f, 1.0f};
+inline constexpr simd_float4 kColorPivotBehind = {0.5f, 0.5f, 0.5f, 0.25f};
+
 inline constexpr int kSphereOutlineSegments = 48;
 
 // 12 edges -> 24 vertices. Unit cube corners at ±0.5.
@@ -70,8 +76,9 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 // no line width), endpoints extended by the half-width so segments sharing a
 // corner overlap instead of notching. Emits, in this order (pinned by
 // lines_tests):
-//  - 3 axis segments through the origin, -he..+he along u/v/n (n is a full
-//    axis — the 1-DOF off-plane pull), colors kColorAxisU/V/N
+//  - 3 axis segments from the origin, POSITIVE half only: 0..+he along
+//    u/v/n (R3 user ruling; pick clamps to the same segment), colors
+//    kColorAxisU/V/N
 //  - 3 plane-patch outlines (uv, un, vn), the [0.3he, 0.6he]^2 square in
 //    each basis pair (4 segments each), colors kColorPlaneUV/UN/VN
 // The `highlighted` handle draws in kColorGizmoHot instead of its base
@@ -81,4 +88,14 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 // separate draw).
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                GizmoHandle highlighted, simd_float3 eye);
+
+// Camera-pivot marker (the orbit target): a world-axis-aligned wireframe
+// cube (corners at center ± half_extent) with one spike protruding from the
+// center of each wall out to 2*half_extent — a "spiked cube". Same
+// camera-facing thick-quad expansion as the move-gizmo handles; one flat
+// color (the renderer draws it twice: opaque where it wins the scene depth
+// test, alpha-faded where occluded). 18 segments * 6 = 108 verts (3456B,
+// under the 4KB setVertexBytes limit).
+void append_spiked_cube(std::vector<LineVertex>& out, simd_float3 center, float half_extent,
+                        float half_width, simd_float3 eye, simd_float4 color);
 }

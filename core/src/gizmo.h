@@ -49,11 +49,12 @@ inline constexpr float kAxisViewAlignLimit = 0.995f;
 // callers keep the last position, mirroring ray_plane's parallel guard.
 std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_float3 axis_dir);
 
-// Drawn geometry = hit geometry: axes ±he along u/v/n (ray-to-segment
-// distance vs the pts tolerance above), plane patches origin + x*e1 + y*e2,
-// x,y in [0.3he, 0.6he] (ray_plane + bounds). Any axis hit beats any plane
-// hit; among axes smallest distance wins (ties: smaller ray-t, then
-// declaration order); among planes nearest ray-t wins.
+// Drawn geometry = hit geometry: axes 0..+he along u/v/n (positive half
+// only, R3 ruling; ray-to-segment distance vs the pts tolerance above),
+// plane patches origin + x*e1 + y*e2, x,y in [0.3he, 0.6he] (ray_plane +
+// bounds). Any axis hit beats any plane hit; among axes smallest distance
+// wins (ties: smaller ray-t, then declaration order); among planes nearest
+// ray-t wins.
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
                               float fov_y_radians, float viewport_h_pts);
 

@@ -13,6 +13,13 @@
 
 namespace sq {
 
+// Camera-pivot marker sizing, screen-constant like the move gizmo: the
+// spiked cube's half-extent as a fraction of viewport height at the orbit
+// target's depth, and its line half-width in view points ("2px" user
+// ruling -> 1pt half-width).
+inline constexpr float kPivotScreenFraction = 0.025f;
+inline constexpr float kPivotLineHalfWidthPts = 1.0f;
+
 struct Editor::Impl {
     Renderer renderer;
     SceneDocument scene;
@@ -92,6 +99,18 @@ void Editor::render(void* caMetalDrawable) {
         impl_->renderer.set_gizmo(frame, highlighted, camera.eye);
     } else {
         impl_->renderer.hide_gizmo();
+    }
+
+    // Camera-pivot marker (spiked cube at the orbit target), every frame in
+    // every mode. Screen-constant sizing needs the viewport height, so the
+    // marker first appears once the initial resize callback has landed.
+    if (impl_->viewportHeightPts > 0.0f) {
+        const float d = simd_length(camera.target - camera.eye);
+        const float pts_to_world = 2.0f * d * std::tan(camera.fov_y_radians * 0.5f) / impl_->viewportHeightPts;
+        impl_->renderer.set_pivot_gizmo(camera.target,
+                                        kPivotScreenFraction * impl_->viewportHeightPts * pts_to_world,
+                                        kPivotLineHalfWidthPts * pts_to_world,
+                                        camera.eye);
     }
 
     impl_->renderer.render(static_cast<CA::MetalDrawable*>(caMetalDrawable), impl_->scene, impl_->selected, camera);

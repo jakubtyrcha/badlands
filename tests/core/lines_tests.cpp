@@ -298,14 +298,15 @@ TEST_CASE("append_move_gizmo_handles: counts, thick-quad geometry, RGB axis colo
     // (3 axes * 1 + 3 patches * 4) segments * 6 verts = 90.
     REQUIRE(out.size() == 90);
 
-    // Axes: 6 verts each, on the ±he segment, in their axis color.
+    // Axes: 6 verts each, on the POSITIVE 0..+he segment only (R3 user
+    // ruling — no negative half), in their axis color.
     const struct { simd_float3 dir; simd_float4 color; size_t base; } axes[] = {
         {f.u, kColorAxisU, 0}, {f.v, kColorAxisV, 6}, {f.n, kColorAxisN, 12},
     };
     for (const auto& axis : axes) {
         for (size_t i = axis.base; i < axis.base + 6; ++i) {
             CAPTURE(i);
-            check_on_thick_segment(out[i].pos.xyz, f.origin - he * axis.dir, f.origin + he * axis.dir, hw);
+            check_on_thick_segment(out[i].pos.xyz, f.origin, f.origin + he * axis.dir, hw);
             CHECK(color_is(out[i], axis.color));
         }
     }
@@ -354,4 +355,49 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
     SUBCASE("AxisN") { check_hot_range(GizmoHandle::AxisN, 12, 6); }
     SUBCASE("PlaneUV") { check_hot_range(GizmoHandle::PlaneUV, 18, 24); }
     SUBCASE("PlaneVN") { check_hot_range(GizmoHandle::PlaneVN, 66, 24); }
+}
+
+// --- append_spiked_cube (camera-pivot marker) --------------------------------
+
+TEST_CASE("append_spiked_cube: 12 world-axis-aligned edges + 6 face spikes, bounded, "
+          "single color") {
+    const simd_float3 center = {1.0f, -2.0f, 3.0f};
+    const float he = 0.5f;
+    const float hw = 0.02f;
+    const simd_float3 eye = {5.0f, 3.0f, 9.0f};
+    const simd_float4 gray = {0.5f, 0.5f, 0.5f, 1.0f};
+
+    std::vector<LineVertex> out;
+    append_spiked_cube(out, center, he, hw, eye, gray);
+
+    // (12 cube edges + 6 spikes) thick segments * 6 verts = 108.
+    REQUIRE(out.size() == 108);
+
+    for (size_t i = 0; i < out.size(); ++i) {
+        CAPTURE(i);
+        const simd_float3 p = out[i].pos.xyz;
+        // Everything lives inside the spike envelope: 2he per world axis
+        // (+ expansion slack).
+        CHECK(std::fabs(p.x - center.x) < 2.0f * he + 2.0f * hw + 1e-5f);
+        CHECK(std::fabs(p.y - center.y) < 2.0f * he + 2.0f * hw + 1e-5f);
+        CHECK(std::fabs(p.z - center.z) < 2.0f * he + 2.0f * hw + 1e-5f);
+        CHECK(color_is(out[i], gray));
+    }
+
+    // Each spike reaches its tip at center + 2he along a world axis: some
+    // vertex must land within the expansion slack of every tip.
+    const simd_float3 axes_dirs[] = {
+        {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+    };
+    for (const simd_float3 dir : axes_dirs) {
+        CAPTURE(dir.x); CAPTURE(dir.y); CAPTURE(dir.z);
+        const simd_float3 tip = center + 2.0f * he * dir;
+        bool found = false;
+        for (const LineVertex& v : out) {
+            found = found || simd_length(v.pos.xyz - tip) < 2.0f * hw + 1e-4f;
+        }
+        CHECK(found);
+    }
 }

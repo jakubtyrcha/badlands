@@ -154,15 +154,16 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
         return handle == highlighted ? kColorGizmoHot : base;
     };
 
-    // Axis handles through the origin, -he..+he. Emission order (u, v, n)
-    // matches the pick tie-break order; lines_tests pins the layout.
+    // Axis handles from the origin, POSITIVE half only (0..+he, R3 user
+    // ruling) — pick_gizmo_handle clamps to the same segment. Emission order
+    // (u, v, n) matches the pick tie-break order; lines_tests pins the layout.
     const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
         {frame.u, kColorAxisU, GizmoHandle::AxisU},
         {frame.v, kColorAxisV, GizmoHandle::AxisV},
         {frame.n, kColorAxisN, GizmoHandle::AxisN},
     };
     for (const auto& axis : axes) {
-        append_thick_segment(out, origin - he * axis.dir, origin + he * axis.dir,
+        append_thick_segment(out, origin, origin + he * axis.dir,
                              eye, hw, color_for(axis.handle, axis.color));
     }
 
@@ -184,6 +185,42 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
         append_thick_segment(out, p10, p11, eye, hw, c);
         append_thick_segment(out, p11, p01, eye, hw, c);
         append_thick_segment(out, p01, p00, eye, hw, c);
+    }
+}
+
+void append_spiked_cube(std::vector<LineVertex>& out, simd_float3 center, float half_extent,
+                        float half_width, simd_float3 eye, simd_float4 color) {
+    const float he = half_extent;
+
+    // 12 cube edges, world-axis-aligned corners at center ± he — reuses
+    // append_cube_edges' corner/edge tables scaled inline (that function
+    // bakes a transform + thin verts, this one needs thick segments).
+    static constexpr std::array<simd_float3, 8> kCorners = {{
+        {-1.0f, -1.0f, -1.0f}, { 1.0f, -1.0f, -1.0f},
+        { 1.0f,  1.0f, -1.0f}, {-1.0f,  1.0f, -1.0f},
+        {-1.0f, -1.0f,  1.0f}, { 1.0f, -1.0f,  1.0f},
+        { 1.0f,  1.0f,  1.0f}, {-1.0f,  1.0f,  1.0f},
+    }};
+    static constexpr std::array<std::array<int, 2>, 12> kEdges = {{
+        {0, 1}, {1, 5}, {5, 4}, {4, 0}, // bottom
+        {3, 2}, {2, 6}, {6, 7}, {7, 3}, // top
+        {0, 3}, {1, 2}, {5, 6}, {4, 7}, // verticals
+    }};
+    for (const auto& edge : kEdges) {
+        append_thick_segment(out, center + he * kCorners[edge[0]], center + he * kCorners[edge[1]],
+                             eye, half_width, color);
+    }
+
+    // 6 spikes, one per face: from the wall's center out to 2he — the marker
+    // reads as a pivot from any view direction.
+    static constexpr std::array<simd_float3, 6> kFaceDirs = {{
+        { 1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+        { 0.0f, 1.0f, 0.0f}, { 0.0f, -1.0f, 0.0f},
+        { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f, -1.0f},
+    }};
+    for (const simd_float3 dir : kFaceDirs) {
+        append_thick_segment(out, center + he * dir, center + 2.0f * he * dir,
+                             eye, half_width, color);
     }
 }
 

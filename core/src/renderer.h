@@ -41,6 +41,10 @@ public:
     // camera-facing expansion of the thick handle quads.
     void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye);   // shows the gizmo
     void hide_gizmo();
+    // Camera-pivot marker (spiked cube at the orbit target), refreshed every
+    // frame like the move gizmo. Drawn LAST in two depth-read passes: opaque
+    // where in front of the scene, alpha-faded where occluded.
+    void set_pivot_gizmo(simd_float3 center, float half_extent, float half_width, simd_float3 eye);
     void render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id, const Camera& camera); // borrowed drawable
 
 private:
@@ -58,8 +62,10 @@ private:
     NS::SharedPtr<MTL::RenderPipelineState> line_blend_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> mesh_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> raymarch_pso_;
-    NS::SharedPtr<MTL::DepthStencilState> depth_test_;   // Less, write ON -- the mesh, the raymarch pass
-    NS::SharedPtr<MTL::DepthStencilState> depth_ignore_; // Always, write OFF -- lines + gizmo
+    NS::SharedPtr<MTL::DepthStencilState> depth_test_;         // Less, write ON -- the mesh, the raymarch pass
+    NS::SharedPtr<MTL::DepthStencilState> depth_ignore_;       // Always, write OFF -- lines + gizmo
+    NS::SharedPtr<MTL::DepthStencilState> depth_read_less_;    // Less, write OFF -- pivot's in-front pass
+    NS::SharedPtr<MTL::DepthStencilState> depth_read_greater_; // Greater, write OFF -- pivot's occluded pass
 
     NS::SharedPtr<MTL::Texture> depth_texture_;
     uint32_t depth_texture_width_ = 0;
@@ -88,6 +94,11 @@ private:
     bool gizmo_visible_ = false;
     std::vector<LineVertex> gizmo_grid_verts_;     // thin LINE primitives
     std::vector<LineVertex> gizmo_handle_verts_;   // thick-quad TRIANGLE primitives
+
+    // Pivot marker geometry, one copy per pass (same quads, different baked
+    // vertex color — kColorPivotFront/kColorPivotBehind).
+    std::vector<LineVertex> pivot_front_verts_;
+    std::vector<LineVertex> pivot_behind_verts_;
 };
 
 } // namespace sq

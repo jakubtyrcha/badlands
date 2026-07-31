@@ -65,7 +65,9 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         if (!s) {
             continue;
         }
-        const float s_clamped = std::clamp(*s, -he, he);
+        // Positive half only (R3): the drawn axis is 0..+he, so the pickable
+        // segment is too — drawn geometry = hit geometry.
+        const float s_clamped = std::clamp(*s, 0.0f, he);
         const simd_float3 p_axis = frame.origin + s_clamped * axis.dir;
         // Forward-clamp the ray parameter: geometry behind the ray origin can
         // only be "closest" at t = 0, where it is far outside tolerance.
