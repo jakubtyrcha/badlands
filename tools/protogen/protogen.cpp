@@ -112,7 +112,20 @@ struct Params {
   // random walk biased toward the outlet, so lateral offset accumulates as
   // sqrt(distance): turbulent dispersion, which is what the dropped
   // grad.(K grad C) term describes. 0 reproduces the old straight line.
-  float plume_wander_deg = 35.0f;
+  // CAP on the spread half-angle, not the spread itself -- the angle comes
+  // from atan(u_turb/v). Defaulted high so it does NOT bind: at 35 deg it
+  // clipped every turbulence above ~0.6 m/s to the same value, silently
+  // killing the knob exactly as the old lobe-length clamp did. 0 disables
+  // wander entirely (straight line), which is still the A/B control.
+  float plume_wander_deg = 85.0f;
+  // Ambient turbulent velocity in the lake. With the jet's centreline speed v,
+  // the spread half-angle is atan(u_turb / v): narrow while the inflow's
+  // momentum dominates, widening as it decays. plume_wander_deg is the CAP, so
+  // --wander 0 still reproduces a straight line exactly.
+  float jet_turbulence_m_per_s = 0.30f;
+  // Regime width w = k_w*sqrt(Q), reused from the repo's erosion.hpp. Sets the
+  // jet's inlet width, which is the length scale its decay is measured in.
+  float channel_width_coeff = 5.0f;
 
   // --- lakes ---
   // Water is accumulated EVERY step (see UpdateLakes); this only sets how often
@@ -464,6 +477,10 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
                          cell_m / p.relief_m;
   V2 pos{px, py}, speed{0.f, 0.f};
   float volume = 1.0f, sediment = 0.0f;
+  // Jet state, valid once the particle is in standing water.
+  bool in_jet = false;
+  V2 jet_dir{0.f, 0.f};
+  float jet_x = 0.f, jet_width_m = 0.f;
 
   for (int age = 0; age < p.max_age; ++age) {
     const int x = int(pos.x), y = int(pos.y);
@@ -527,18 +544,47 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       // Cross to the spill point so discharge continues downstream instead of
       // being swallowed. Discharge is NOT accumulated here: a lake surface is
       // not a channel, and stamping it inflates the field.
+      // On entry, the particle becomes a JET: it keeps the heading it arrived
+      // with rather than turning instantly toward the outlet, which is what it
+      // did before and why every inflow behaved identically regardless of how
+      // fast it arrived.
+      if (!in_jet) {
+        in_jet = true;
+        jet_dir = len(speed) > 0.f ? unit(speed) : unit(V2{0.f, 1.f});
+        jet_x = 0.f;
+        jet_width_m = std::max(
+            p.channel_width_coeff * std::sqrt(std::max(g.Qm3s[here], 1e-9f)),
+            cell_m);
+      }
+      // Round-jet centreline decay, v = v0 / (1 + x / 6.2 D).
+      const float v_jet = p.river_mouth_velocity_m_per_s /
+                          (1.0f + jet_x / (6.2f * jet_width_m));
       const float tx = float(int(target) % g.n) + 0.5f;
       const float ty = float(int(target) / g.n) + 0.5f;
-      V2 dir = unit(V2{tx - pos.x, ty - pos.y});
-      if (len(dir) <= 0.f) return;
+      const V2 toOut = unit(V2{tx - pos.x, ty - pos.y});
+      if (len(toOut) <= 0.f) return;
+
+      // Momentum holds the heading while the jet is fast; the outlet takes over
+      // as it decays.
+      const float pull = std::clamp(
+          1.0f - v_jet / std::max(p.river_mouth_velocity_m_per_s, 1e-6f),
+          0.0f, 1.0f);
+      V2 dir = unit(V2{(1.0f - pull) * jet_dir.x + pull * toOut.x,
+                       (1.0f - pull) * jet_dir.y + pull * toOut.y});
+      if (len(dir) <= 0.f) dir = toOut;
+
       if (p.plume_wander_deg > 0.f) {
-        // Mean heading is still the outlet, so the walk is WEIGHTED toward it;
-        // the gaussian angular jitter is what spreads the plume sideways.
-        std::normal_distribution<float> jitter(
-            0.f, p.plume_wander_deg * 3.14159265f / 180.f);
+        // Spread half-angle from the momentum-to-turbulence ratio, capped by
+        // --wander so the knob still bounds it.
+        const float sigma = std::min(
+            std::atan(p.jet_turbulence_m_per_s / std::max(v_jet, 1e-3f)),
+            p.plume_wander_deg * 3.14159265f / 180.f);
+        std::normal_distribution<float> jitter(0.f, sigma);
         const float a = std::atan2(dir.y, dir.x) + jitter(rng);
         dir = V2{std::cos(a), std::sin(a)};
       }
+      jet_dir = dir;
+      jet_x += cell_m;
       pos = V2{pos.x + dir.x, pos.y + dir.y};
       volume *= (1.0f - p.evap_rate);
       continue;
@@ -673,6 +719,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-disperse") p.disperse = false;
     else if (a == "--prefill") p.prefill = true;
     else if (a == "--wander") p.plume_wander_deg = std::stof(nxt());
+    else if (a == "--turbulence") p.jet_turbulence_m_per_s = std::stof(nxt());
     else if (a == "--dt") p.dt_years = std::stof(nxt());
     else if (a == "--min-dispersion-depth") p.min_dispersion_depth_m = std::stof(nxt());
     else if (a == "--source-x") p.source_x_frac = std::stof(nxt());
