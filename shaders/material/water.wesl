@@ -62,6 +62,13 @@ import package::common::water_waves::{waterWaveHeight, waterWaveNormal};
 // glass.
 const kSkyBehindDepthM: f32 = 32.0;
 
+// How much water the view ray must cross before refraction reaches full
+// strength. A millimetre-deep film at the waterline must not smear the bed
+// sideways, so the distortion ramps in with PATH LENGTH -- a length scale in
+// metres, deliberately not a transmittance, which would tie the geometry of the
+// refraction to whichever colour channel happened to be sampled.
+const kRefractRampM: f32 = 1.5;
+
 struct WaterUniforms {
     modelMatrix: mat4x4<f32>,
     time: f32,
@@ -223,15 +230,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         pathM = max(reconstructLinearZ(sceneDepthRaw) - waterZ, 0.0);
     }
     let T = exp(-object.extinction.xyz * pathM);
-    // How far from transparent the water is here. Ramps the refraction so a
-    // shallow shoreline does not smear the bed across the waterline.
-    let opacity = 1.0 - T.g;
+    // Ramps the refraction in with water thickness so a shallow shoreline does
+    // not smear the bed across the waterline. Driven by path length, NOT by
+    // transmittance: a medium can be optically clear and still be metres deep,
+    // and the distortion is a property of the geometry, not of the colour.
+    let refractRamp = clamp(pathM / kRefractRampM, 0.0, 1.0);
 
     // Refraction: normal-driven distortion of the copied scene colour. Reject
     // the offset when it lands on foreground geometry (a surface CLOSER than the
     // water), so objects in front of the lake don't bleed across the surface.
     let screenUV = input.position.xy / frame.screenSize;
-    let refrUV = clamp(screenUV + N.xz * object.params.x * opacity,
+    let refrUV = clamp(screenUV + N.xz * object.params.x * refractRamp,
                        vec2<f32>(0.0), vec2<f32>(1.0));
     let offDepthRaw = textureLoad(sceneDepth, vec2<i32>(refrUV * frame.screenSize), 0);
     var bgUV = refrUV;

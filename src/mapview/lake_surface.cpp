@@ -1,5 +1,6 @@
 #include "mapview/lake_surface.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -21,6 +22,12 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
   if (art.heightmap.width != w || art.heightmap.height != h) return tris;
   const float s = world_size_m / static_cast<float>(w);
   if (s <= 0.0f) return tris;
+  // The skirt grows one TEXEL at a time but is capped in METRES, so on a coarse
+  // map (say --resolution 50 --size 500x500 -> 10 m texels) the very first step
+  // would already exceed kMaxSkirtM and every lake would be clipped flush to its
+  // own boundary, with no skirt at all and no diagnostic. Allow at least one
+  // ring: one texel of overlap is the least that can hide an edge.
+  const float skirt_cap_m = std::max(kMaxSkirtM, s);
 
   // owner[i] = which lake covers texel i (-1 = none). Seeded with the lake
   // texels themselves, then grown outward by a multi-source BFS so each skirt
@@ -58,7 +65,7 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
       const int ni = nz * w + nx;
       if (owner[ni] >= 0) continue;                  // already water or claimed
       const float nd = dist[i] + s;
-      if (nd > kMaxSkirtM) continue;                 // past the cap
+      if (nd > skirt_cap_m) continue;                // past the cap
       if (art.heightmap.data[ni] < level) continue;  // would float over voids
       owner[ni] = id;
       dist[ni] = nd;

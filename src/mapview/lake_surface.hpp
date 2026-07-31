@@ -33,7 +33,24 @@ inline constexpr float kBurialM = 0.6f;
 // Hard cap on how far the skirt may run from the shoreline. A dead-flat shore
 // never reaches kBurialM; the cap stops the search from flooding the map. Such
 // shores are also where waves are smallest, so the shortfall is benign.
+//
+// On a map whose texels are coarser than this, the cap would reject even the
+// first step; BuildLakeSurfaceTriangles widens it to one texel so a skirt
+// always exists.
 inline constexpr float kMaxSkirtM = 6.0f;
+
+// KNOWN LIMITATION -- lake outlets get no skirt.
+//
+// The skirt refuses any texel whose ground sits BELOW the lake level, because
+// water hanging over lower ground reads as a floating sheet. At an outlet the
+// river channel is carved below the level by construction, so the surface stops
+// flush on the last lake texel with zero burial, and the terrain beyond is too
+// low to hide that edge: a short straight seam, visible from a low angle.
+//
+// Left as-is deliberately. The fix belongs with river rendering (the channel
+// should carry its own water surface meeting the lake's), which is out of scope
+// for this pass -- and the alternative, letting the skirt spill downhill, trades
+// a seam at the outlet for a floating sheet over the whole valley.
 
 // Flat, lattice-aligned water triangles for every lake in `art`, in map-local
 // world coordinates, wound CCW seen from +Y. Three vertices per triangle; each

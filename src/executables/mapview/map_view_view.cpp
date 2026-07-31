@@ -182,8 +182,15 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // fragment stage rather than carried on the vertices, so the coarsest LOD
   // cluster still gets full-resolution biome detail.
   t = clock::now();
-  const BiomeSplat splat = BuildBiomeSplat(
-      map_.biome, params_.world_size_m / static_cast<float>(params_.resolution));
+  // Texel size comes from the biome raster's OWN width, not params_.resolution:
+  // the blur radius and the world->UV transform below must be derived from the
+  // same source, or they would disagree silently if the generator ever emitted
+  // the biome raster at a different resolution than requested.
+  const float splat_texel_m =
+      map_.biome.width > 0
+          ? params_.world_size_m / static_cast<float>(map_.biome.width)
+          : 0.0f;
+  const BiomeSplat splat = BuildBiomeSplat(map_.biome, splat_texel_m);
   if (splat.empty()) {
     spdlog::error("MapViewView: empty biome splat");
     return false;

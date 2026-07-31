@@ -132,10 +132,14 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
   // arrays need REPEAT: it holds normalized weights over the map's own extent,
   // so a repeat sampler would fold the far edge onto the near one.
   //
-  // The splat slots are always bound in practice (ClusterTerrain::Build
-  // supplies them); the k2D "white" default only guards a programming error,
-  // and renders a neutral multi-layer average rather than failing bind-group
-  // validation.
+  // Unlike terrain_blend, this material's slots MIX dimensionalities: the three
+  // layer arrays are texture_2d_array, the two splat planes texture_2d. The
+  // factory picks its unbound-slot default per GEOMETRY type, so it cannot get
+  // both right -- kTerrainCluster stays on k2D, which suits the splat slots and
+  // would be a dimension mismatch for the array ones. The array slots are
+  // therefore not optional; ClusterTerrain::Build rejects a null view up front
+  // rather than letting one reach Dawn. `default_texture` below is the name
+  // that WOULD be used, kept accurate for the splat slots.
   MaterialRequirements terrain_cluster_reqs{
       .shader_name = "terrain_cluster",
       .textures = {

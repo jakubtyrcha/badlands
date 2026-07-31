@@ -431,6 +431,12 @@ TEST_CASE("water refraction rejects foreground bleed", "[water][gpu][refraction]
   // transmissive (refracted == background, which is what this test measures),
   // strong refraction offset, detail on. Group-2 engine resources supply scene
   // colour + depth + (black) IBL.
+  //
+  // The offset must stay NON-ZERO here or the test is vacuous: it exists to
+  // prove the foreground-rejection guard, which is only reachable when the
+  // sampled UV actually moves. water.wesl ramps refraction by PATH LENGTH
+  // (kRefractRampM), not by transmittance, so zero extinction still yields a
+  // full-strength offset -- the occluder sits metres behind the water plane.
   static const TexturedMeshResult waterMesh =
       GenerateHeightmapMesh(200.0f, 1, [](float, float) { return 0.0f; });
   wgpu::Buffer waterVerts = UploadVerts(device, waterMesh.mesh.vertices);

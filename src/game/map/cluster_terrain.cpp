@@ -35,6 +35,23 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
   model_ = model;
   inv_model_ = glm::inverse(model);
 
+  // Every texture is REQUIRED, and the check has to be here because the factory
+  // cannot cover for a missing one: its unbound-slot fallback is chosen per
+  // GEOMETRY type, and kTerrainCluster mixes texture_2d_array slots (the three
+  // PBR layers) with texture_2d ones (the two splat planes), so no single
+  // default dimensionality is correct. A null view would therefore reach Dawn
+  // as a dimension mismatch at draw time; failing here names the actual problem.
+  if (!arrays.albedo.view || !arrays.normal.view || !arrays.arm.view ||
+      !splat0 || !splat1 || !array_sampler || !splat_sampler) {
+    spdlog::error(
+        "ClusterTerrain::Build: missing terrain texture(s) -- albedo={} "
+        "normal={} arm={} splat0={} splat1={}",
+        static_cast<bool>(arrays.albedo.view),
+        static_cast<bool>(arrays.normal.view), static_cast<bool>(arrays.arm.view),
+        static_cast<bool>(splat0), static_cast<bool>(splat1));
+    return false;
+  }
+
   // Build the cluster-LOD DAG from the frozen MapData lattice.
   dag_ = BuildTerrainClusterDag(map, params);
 
@@ -83,11 +100,9 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
   fmc.params.uniform_overrides["splat_uv"] = splat_uv;
   // Matched by param_name against the terrain_cluster slots. TextureType is
   // only used to filter default-view recipes, so k2D is fine for an override.
-  // A null view is left UNBOUND so the factory resolves that slot's default
-  // (binding a null override would instead fail bind-group validation).
+  // Every view is non-null here -- checked at the top of Build.
   auto bind = [&](const char* slot, wgpu::TextureView view,
                   wgpu::Sampler samp) {
-    if (!view) return;
     fmc.params.texture_overrides.push_back(DefaultTextureView{
         .param_name = slot,
         .view = view,
