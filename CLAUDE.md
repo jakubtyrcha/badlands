@@ -82,8 +82,11 @@ cargo test --manifest-path src/crates/brainhost/Cargo.toml --lib
   failures+totals only. `scripts/test.sh <test-binary> "<catch2-filter>"` — direct filtered run
   (e.g. `scripts/test.sh badlands_game_tests "[combat]"`).
 - `scripts/screenshot.sh <app> <out.png> [args…]` — SIGALRM-bounded headless screenshot
-  (e.g. `scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 4`).
-  `--lod`: 0=Original cards, 1-3=voxel LODs L0/L1/L2, 4=Multi (instanced field).
+  (e.g. `scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 5`).
+  `--lod`: 0=Original cards, 1-4=voxel LODs L0..L3, 5=Multi (instanced field).
+  L3 is the coarse tail (~230-680 tris/tree). Multi drives the same L0..L3
+  chain: LOD count is per-model and runtime (`GpuInstanceRenderer::ModelLod`),
+  capped by the compile-time `kMaxLods` (8).
 - `scripts/gitstate.sh` — branch + HEAD + short status + commits ahead of origin/main.
 - `scripts/noiser_guard.sh [BASE]` — assert `third_party/noiser` isn't staged (nor in `BASE..HEAD`).
 

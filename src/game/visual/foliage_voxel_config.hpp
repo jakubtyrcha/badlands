@@ -7,7 +7,13 @@
 // A single source of truth here means a future retune only needs one edit;
 // the tests that depend on these values inherently track it instead of
 // silently drifting from whatever the viewer actually ships.
+#include <algorithm>
 #include <array>
+#include <cstddef>
+
+#include "engine/rendering/components/mesh_components.hpp"
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"  // kTexturedMeshFloatsPerVertex
+#include "game/geometry/mesh_lod.hpp"
 
 namespace badlands {
 
@@ -18,7 +24,7 @@ namespace badlands {
 // field) paths.
 inline constexpr float kFoliagePreviewHeight = 8.0f;
 
-// Voxel-crown LOD (volumetric-foliage Phase 3): three progressively coarser
+// Voxel-crown LOD (volumetric-foliage Phase 3): four progressively coarser
 // tet-voxelization cell sizes, one per LOD (index 0 = finest), given in
 // WORLD (preview, i.e. kFoliagePreviewHeight-rescaled) space -- callers
 // convert to a tree's own native units by dividing by its own `s` (the same
@@ -41,7 +47,77 @@ inline constexpr float kFoliagePreviewHeight = 8.0f;
 // non-empty, no preset balloons past the sane-band cap) -- see
 // leaf_voxelizer_tests.cpp's "every TreeCatalog preset stays in a sane
 // tet-count band" test.
-inline constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.20f,
-                                                                  0.60f};
+// L3 (the coarsest) continues the ~3x-per-step progression L1->L2 started,
+// and is far enough out that the crown is a loose cluster of oversized tets --
+// a blob standing in for the silhouette, not a shape. Measured tet output
+// across all 15 TreeCatalog presets: 56-428 triangles (see
+// leaf_voxelizer_tests.cpp's coarsest-level band test, which pins it).
+//
+// The chain deliberately stops here. A 5.0m L4 was tried and dropped: at that
+// cell size the tets' overscale (circumradius = 0.5 * overscale * cell) makes
+// the crown VOLUME visibly larger than the tree it stands for, so an L4 tree
+// reads as bigger than the L3 one it replaces -- worse than the level it was
+// meant to cheapen, whatever it saved in triangles. Re-adding a level means
+// adding its cell size here AND its bark rule (see the static_assert below).
+//
+// This whole chain is the foliage default: both the single-tree preview levels
+// and the instanced-field (Multi) path build every entry, since a model's LOD
+// count is runtime (GpuInstanceRenderer::ModelLod) rather than the engine's
+// kMaxLods cap.
+inline constexpr std::array<float, 4> kFoliageVoxelWorldSizes = {
+    0.15f, 0.20f, 0.60f, 1.5f};
+
+// Bark triangle budgets for the coarse tail of the voxel-crown chain --
+// indexed by `voxel_level - kDefaultLodRatios.size()`, so entry 0 is L3.
+// ABSOLUTE counts, not the kDefaultLodRatios-style ratios the finer levels
+// use, for two reasons: source bark meshes span 2.5k-13.7k triangles across
+// the catalog, so one ratio spreads the result over a 5x band (a budget
+// instead lands every preset in the same place); and the target here is a
+// fixed cost, which is what a budget states directly. 256 at L3 measures out
+// at 158-255 triangles of actual bark across the catalog.
+inline constexpr std::array<int, 1> kFoliageCoarseBarkTriBudgets = {256};
+
+// Every voxel level needs exactly one bark rule: the finer ones take a
+// kDefaultLodRatios entry, the coarse tail takes a budget. Adding a cell size
+// above without adding its bark budget would otherwise silently reuse L3's
+// (SimplifyBarkForVoxelLod clamps), giving a much coarser crown the same
+// 256-triangle trunk.
+static_assert(kFoliageVoxelWorldSizes.size() ==
+              kDefaultLodRatios.size() + kFoliageCoarseBarkTriBudgets.size());
+
+// Applies the LOD chain's bark decimation for `voxel_level` (0-based: 0 = the
+// viewer's "Voxel L0") in place. The finer levels take kDefaultLodRatios'
+// error-bounded edge collapse; the coarse levels take an absolute budget via
+// vertex clustering, since edge collapse cannot merge a tree's disconnected
+// per-branch tubes and so floors out thousands of triangles above these
+// budgets (see SimplifyMeshSloppy's comment for the measured floors).
+inline void SimplifyBarkForVoxelLod(StaticTexturedMeshComponent& bark_mesh,
+                                     size_t voxel_level) {
+  const size_t tri_count = bark_mesh.indices.size() / 3;
+  if (tri_count == 0) return;
+
+  SimplifiedMesh simplified;
+  if (voxel_level < kDefaultLodRatios.size()) {
+    if (kDefaultLodRatios[voxel_level] >= 1.0f) return;
+    simplified =
+        SimplifyMesh(bark_mesh.vertices, kTexturedMeshFloatsPerVertex,
+                     bark_mesh.indices, kDefaultLodRatios[voxel_level]);
+  } else {
+    const size_t budget_index =
+        std::min(voxel_level - kDefaultLodRatios.size(),
+                 kFoliageCoarseBarkTriBudgets.size() - 1);
+    const float ratio =
+        static_cast<float>(kFoliageCoarseBarkTriBudgets[budget_index]) /
+        static_cast<float>(tri_count);
+    simplified = SimplifyMeshSloppy(bark_mesh.vertices,
+                                    kTexturedMeshFloatsPerVertex,
+                                    bark_mesh.indices, ratio);
+  }
+
+  bark_mesh.vertices = std::move(simplified.vertices);
+  bark_mesh.indices = std::move(simplified.indices);
+  bark_mesh.vertex_count = simplified.vertex_count;
+  bark_mesh.dirty = true;
+}
 
 }  // namespace badlands

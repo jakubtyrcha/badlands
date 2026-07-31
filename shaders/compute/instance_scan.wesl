@@ -16,7 +16,7 @@
 // offsets back — the draw's vertex shader indexes
 // compacted[bucketBase[bucketId] + instance_index] instead.
 
-// CullConfig (144B) is shared with the classify + scatter passes — see
+// CullConfig (128B) is shared with the classify + scatter passes — see
 // shaders/compute/instance_common.wesl.
 import package::compute::instance_common::{CullConfig};
 

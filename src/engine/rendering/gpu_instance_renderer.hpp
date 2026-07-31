@@ -60,10 +60,28 @@ struct Frustum;
 
 class GpuInstanceRenderer {
  public:
-  // Level-of-detail count per model. `bucket = modelId*kMaxLods + lod`, so this
-  // MUST match `kMaxLods` in shaders/compute/instance_classify.wesl. kMaxLods-1
-  // distance thresholds separate the LODs.
-  static constexpr uint32_t kMaxLods = 3;
+  // Compile-time CAP on levels of detail, and the bucket stride:
+  // `bucket = modelId*kMaxLods + lod`, so this MUST match `kMaxLods` in
+  // shaders/compute/instance_classify.wesl. It does NOT say how many levels a
+  // model has -- that is per-model and runtime (see ModelLod below). Raising
+  // it costs one bucket-bookkeeping slot per model per level (a few bytes),
+  // so the cap is set generously and models take what they need.
+  static constexpr uint32_t kMaxLods = 8;
+
+  // One model's LOD chain. `lod_count` is that model's RUNTIME level count,
+  // clamped to [1, kMaxLods]; `thresholds` are its ascending distance cutoffs
+  // (LOD0 for dist < [0], LOD1 for dist < [1], … its own coarsest level
+  // otherwise), of which only the first lod_count-1 are read. Per-model rather
+  // than per-renderer because a model's useful level count and the distances
+  // it wants to switch at both follow from its own size and geometry: a rock
+  // with 2 levels and a tree with 4 coexist in one renderer, each cutting
+  // where it should. A model needing fewer levels than it declared simply
+  // leaves its top buckets unconfigured (SetBucketSubmesh never called), and
+  // those draw nothing.
+  struct ModelLod {
+    uint32_t lod_count = 1;
+    std::array<float, kMaxLods - 1> thresholds{};
+  };
 
   // Static per-instance input, uploaded once (or replaced wholesale via
   // UploadInstances). Mirrors `InstanceData` in the compute shaders
@@ -75,16 +93,19 @@ class GpuInstanceRenderer {
   };
 
   // `capacity` upper-bounds the instance-input set. `num_models` is the number
-  // of distinct model ids (buckets = num_models*kMaxLods). `lod_thresholds` are
-  // the kMaxLods-1 ascending distance cutoffs (LOD0 for dist < [0], LOD1 for
-  // dist < [1], … coarsest otherwise). `num_submeshes` (clamped >= 1) is the
-  // number of draw slots per bucket — see the class comment's submesh section;
-  // 1 (the default) is a single draw per bucket. Compiles the three compute
-  // pipelines immediately; IsValid() reports whether that succeeded.
+  // of distinct model ids (buckets = num_models*kMaxLods). `model_lods` is one
+  // LOD chain per model, indexed by model id; it must hold exactly num_models
+  // entries (a short span is an error -- logged, with the missing models
+  // falling back to a single LOD; extra entries are ignored). Uploaded once
+  // here, read by the classify pass per instance. `num_submeshes` (clamped
+  // >= 1) is the number of draw slots per bucket — see the class comment's
+  // submesh section; 1 (the default) is a single draw per bucket. Compiles the
+  // three compute pipelines immediately; IsValid() reports whether that
+  // succeeded.
   GpuInstanceRenderer(wgpu::Device device, wgpu::Queue queue,
                       GpuPipelineGenerator& pipeline_generator,
                       uint32_t capacity, uint32_t num_models,
-                      std::array<float, kMaxLods - 1> lod_thresholds,
+                      std::span<const ModelLod> model_lods,
                       uint32_t num_submeshes = 1);
 
   bool IsValid() const {
@@ -105,6 +126,12 @@ class GpuInstanceRenderer {
   uint32_t GetNumModels() const { return num_models_; }
   uint32_t GetNumBuckets() const { return num_buckets_; }
   uint32_t GetNumSubmeshes() const { return num_submeshes_; }
+  // `model`'s runtime LOD count, clamped to [1, kMaxLods] at construction. An
+  // out-of-range model id reports 1 (the same fallback the constructor gives a
+  // model the caller left unspecified).
+  uint32_t GetModelLodCount(uint32_t model) const {
+    return model < model_lods_.size() ? model_lods_[model].lod_count : 1u;
+  }
   // The bucket id a given (model, lod) routes to — the CPU-known per-draw
   // constant the vertex shader uses to look up its base offset.
   static uint32_t BucketId(uint32_t model_id, uint32_t lod) {
@@ -138,7 +165,7 @@ class GpuInstanceRenderer {
   // LIGHT's frustum (`Frustum::FromViewProj(light_view_proj)`) instead of the
   // camera's, writing into the DEDICATED shadow buffer set (Draw(...,
   // CullSet::kShadow) reads it) rather than the main one. `camera` still
-  // supplies camera_world_pos and the LOD-selection thresholds: shadow
+  // supplies camera_world_pos, which drives per-model LOD selection: shadow
   // geometry must match the LOD the camera would actually render, not a
   // light-distance LOD. A SEPARATE buffer set exists (not just a second call
   // to Cull() with different config contents) because queue_.WriteBuffer
@@ -221,13 +248,14 @@ class GpuInstanceRenderer {
   uint32_t num_buckets_ = 0;
   uint32_t compacted_capacity_ = 0;  // slots in compacted_buffer_ (== capacity_; tight packing, no padding)
   uint32_t instance_count_ = 0;
-  std::array<float, kMaxLods - 1> lod_thresholds_{};
+  std::vector<ModelLod> model_lods_;  // one per model id, size == num_models_
 
   std::shared_ptr<const CompiledComputePipeline> classify_pipeline_;
   std::shared_ptr<const CompiledComputePipeline> scan_pipeline_;
   std::shared_ptr<const CompiledComputePipeline> scatter_pipeline_;
 
-  wgpu::Buffer config_buffer_;               // CullConfig uniform (144 bytes)
+  wgpu::Buffer config_buffer_;               // CullConfig uniform (128 bytes)
+  wgpu::Buffer model_lod_buffer_;            // ModelLodData[num_models] (48B each)
   wgpu::Buffer instance_buffer_;             // InstanceData[capacity]
   wgpu::Buffer per_instance_bucket_buffer_;  // u32[capacity] (SENTINEL = culled)
   wgpu::Buffer bucket_count_buffer_;         // atomic<u32>[numBuckets]
@@ -277,7 +305,7 @@ class GpuInstanceRenderer {
   bool shadow_resources_created_ = false;
 
   // Shared body of Cull()/CullShadow(): uploads `config` (the frustum planes
-  // + camera_world_pos + LOD thresholds + counts), clears `bucket_count`, and
+  // + camera_world_pos + counts), clears `bucket_count`, and
   // dispatches classify/scan/scatter against the given bind-group trio. See
   // Cull()'s .cpp comment for why the per-pass barriers need no manual sync.
   void CullInternal(FrameContext& frame, const Frustum& frustum,

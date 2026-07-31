@@ -27,6 +27,8 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <spdlog/sinks/ringbuffer_sink.h>
+#include <spdlog/spdlog.h>
 
 #include "core/geometry_type.hpp"
 #include "core/util/cpu_image.hpp"
@@ -1046,6 +1048,24 @@ Camera MakeCullCamera(float aspect = 1.0f) {
   return camera;
 }
 
+// Every renderer in this suite was written against the pre-per-model-LOD API,
+// where ONE 3-level ladder (two cutoffs) applied to every model. This rebuilds
+// that shape as `num_models` identical 3-level chains, so those tests keep
+// exercising exactly what they did before. Tests that care about per-model
+// chains (differing lod_count/thresholds) build their own vectors instead.
+// (Callers wanting "everything lands in LOD0" pass two DISTINCT huge cutoffs,
+// e.g. 1e30/2e30, not the same value twice: equal cutoffs would make the level
+// between them unselectable, which the ctor rejects as a malformed chain.)
+std::vector<GpuInstanceRenderer::ModelLod> Lod3Chains(uint32_t num_models,
+                                                      float t0, float t1) {
+  GpuInstanceRenderer::ModelLod chain;
+  chain.lod_count = 3;
+  chain.thresholds[0] = t0;
+  chain.thresholds[1] = t1;
+  return std::vector<GpuInstanceRenderer::ModelLod>(std::max(1u, num_models),
+                                                     chain);
+}
+
 // The bucket an instance is expected to land in (CPU mirror of the classify
 // pass: frustum cull -> distance LOD -> modelId*kMaxLods + lod). nullopt =
 // culled / out of range.
@@ -1123,7 +1143,7 @@ TEST_CASE("GPU cull single-bucket: compacted + count match the in-frustum set",
   // thresholds = {1e30, 1e30} -> every survivor is lod0 -> bucket 0.
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
                                static_cast<uint32_t>(cases.size()),
-                               /*num_models=*/1, {1e30f, 1e30f});
+                               /*num_models=*/1, Lod3Chains(1, 1e30f, 2e30f));
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
 
@@ -1193,7 +1213,7 @@ TEST_CASE("GPU LOD selection: distance thresholds route into the right bucket",
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
                                static_cast<uint32_t>(inputs.size()),
                                /*num_models=*/1,
-                               {thresholds.x, thresholds.y});
+                               Lod3Chains(1, thresholds.x, thresholds.y));
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
 
@@ -1207,11 +1227,18 @@ TEST_CASE("GPU LOD selection: distance thresholds route into the right bucket",
   std::vector<uint32_t> counts = test::ReadBufferSync<uint32_t>(
       g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
       renderer.GetNumBuckets());
-  REQUIRE(counts.size() == 3);
+  // One bucket per (model, lod) SLOT -- kMaxLods of them for this 1-model
+  // renderer, whatever the model's own 3-level chain uses. The buckets past
+  // the model's lod_count stay empty (nothing can select them).
+  REQUIRE(counts.size() == GpuInstanceRenderer::kMaxLods);
   INFO("lod counts: " << counts[0] << "," << counts[1] << "," << counts[2]);
   CHECK(counts[0] == 1);  // {5}
   CHECK(counts[1] == 2);  // {10 (boundary), 15}
   CHECK(counts[2] == 2);  // {20 (boundary), 25}
+  for (size_t b = 3; b < counts.size(); ++b) {
+    INFO("bucket " << b << " is past the model's 3-level chain");
+    CHECK(counts[b] == 0);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1255,7 +1282,7 @@ TEST_CASE("GPU multi-bucket compaction: prefix-sum slices are disjoint + exact",
 
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
                                static_cast<uint32_t>(inputs.size()), num_models,
-                               {thresholds.x, thresholds.y});
+                               Lod3Chains(num_models, thresholds.x, thresholds.y));
   REQUIRE(renderer.IsValid());
   REQUIRE(renderer.GetNumBuckets() == num_buckets);
   renderer.UploadInstances(inputs);
@@ -1488,7 +1515,7 @@ TEST_CASE("GPU per-LOD render: each lod drawn with its own mesh/color/position",
 
   const uint32_t num_buckets = 1 * GpuInstanceRenderer::kMaxLods;  // 3
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 3, /*num_models=*/1,
-                               {thresholds.x, thresholds.y});
+                               Lod3Chains(1, thresholds.x, thresholds.y));
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
 
@@ -1566,7 +1593,7 @@ TEST_CASE("GPU edge: all instances culled -> empty buckets draw nothing",
   }
 
   const uint32_t num_buckets = GpuInstanceRenderer::kMaxLods;
-  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 3, 1, {10.0f, 20.0f});
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 3, 1, Lod3Chains(1, 10.0f, 20.0f));
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
 
@@ -1626,7 +1653,7 @@ TEST_CASE("GPU edge: all instances in one bucket render together",
 
   const uint32_t num_buckets = GpuInstanceRenderer::kMaxLods;
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 4, 1,
-                               {thresholds.x, thresholds.y});
+                               Lod3Chains(1, thresholds.x, thresholds.y));
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
 
@@ -1678,21 +1705,130 @@ TEST_CASE("GPU edge: all instances in one bucket render together",
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
+// A chain whose lod_count outruns the thresholds actually filled in is
+// malformed: ModelLod::thresholds default to 0.0f, so selectLod runs straight
+// past every level whose cutoff stayed 0 and those levels' meshes never draw.
+// The ctor must say so rather than let it pass silently.
+// ---------------------------------------------------------------------------
+TEST_CASE("GpuInstanceRenderer: an under-filled LOD chain is reported",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto ring_sink = std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(32);
+  std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
+  const std::vector<spdlog::sink_ptr> saved_sinks = logger->sinks();
+
+  // 4 levels declared, only the first two cutoffs set -- thresholds[2] stays
+  // 0.0f, so LOD2 could never be selected.
+  std::vector<GpuInstanceRenderer::ModelLod> chains(1);
+  chains[0].lod_count = 4;
+  chains[0].thresholds[0] = 10.0f;
+  chains[0].thresholds[1] = 20.0f;
+
+  logger->sinks() = {ring_sink};
+  { GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 1, 1, chains); }
+  logger->sinks() = saved_sinks;  // restore before any assertion below
+
+  const std::vector<std::string> messages = ring_sink->last_formatted();
+  const bool named = std::any_of(
+      messages.begin(), messages.end(), [](const std::string& m) {
+        return m.find("strictly ascending") != std::string::npos;
+      });
+  INFO("captured " << messages.size() << " message(s)");
+  CHECK(named);
+}
+
+// ---------------------------------------------------------------------------
+// Per-model LOD chains: kMaxLods is only a compile-time CAP (and the bucket
+// stride). How many levels a model actually has, and the distances it switches
+// at, are runtime and PER MODEL -- so two models with different chains can
+// share one renderer, each selecting against its own.
+//
+// Model 0 declares 2 levels cutting at 10m; model 1 declares 5 levels cutting
+// at 10/20/30/40m. Five instances of each sit at 5/15/25/35/45m. Model 0 must
+// saturate at ITS coarsest level (lod1) for everything past 10m -- not run on
+// to lod4 the way model 1 does, and not be capped at kMaxLods-1 either.
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU classify: each model selects against its own LOD chain",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  Camera camera = MakeCullCamera(1.0f);
+
+  constexpr uint32_t kNumModels = 2;
+  std::vector<GpuInstanceRenderer::ModelLod> chains(kNumModels);
+  chains[0].lod_count = 2;
+  chains[0].thresholds[0] = 10.0f;
+  chains[1].lod_count = 5;
+  chains[1].thresholds[0] = 10.0f;
+  chains[1].thresholds[1] = 20.0f;
+  chains[1].thresholds[2] = 30.0f;
+  chains[1].thresholds[3] = 40.0f;
+
+  const std::array<float, 5> distances = {5.0f, 15.0f, 25.0f, 35.0f, 45.0f};
+  std::vector<GpuInstanceRenderer::InstanceInput> inputs;
+  for (uint32_t model = 0; model < kNumModels; ++model) {
+    for (float d : distances) {
+      inputs.push_back(MakeInstance(glm::vec3(0.0f, 0.0f, -d), model, 0.1f));
+    }
+  }
+
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
+                               static_cast<uint32_t>(inputs.size()), kNumModels,
+                               chains);
+  REQUIRE(renderer.IsValid());
+  CHECK(renderer.GetModelLodCount(0) == 2);
+  CHECK(renderer.GetModelLodCount(1) == 5);
+  renderer.UploadInstances(inputs);
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.Cull(frame, camera);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  const std::vector<uint32_t> counts = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0,
+      renderer.GetNumBuckets());
+  REQUIRE(counts.size() == kNumModels * GpuInstanceRenderer::kMaxLods);
+
+  // Expected: model 0 -> one instance at lod0, the other four all at lod1
+  // (its own coarsest). Model 1 -> one instance at each of its five levels.
+  std::vector<uint32_t> expected(counts.size(), 0u);
+  expected[GpuInstanceRenderer::BucketId(0, 0)] = 1;
+  expected[GpuInstanceRenderer::BucketId(0, 1)] = 4;
+  for (uint32_t lod = 0; lod < 5; ++lod) {
+    expected[GpuInstanceRenderer::BucketId(1, lod)] = 1;
+  }
+
+  for (size_t b = 0; b < counts.size(); ++b) {
+    INFO("bucket " << b << " (model " << b / GpuInstanceRenderer::kMaxLods
+                   << ", lod " << b % GpuInstanceRenderer::kMaxLods << ")");
+    CHECK(counts[b] == expected[b]);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Finding #1 (correctness): the classify pass must guard a garbage modelId
 // BEFORE the `bucket = modelId*kMaxLods + lod` multiply. A modelId large enough
 // that modelId*kMaxLods overflows u32 and WRAPS to a small in-range value
 // defeats the post-multiply `bucket >= numBuckets` guard, corrupting a valid
 // bucket with a garbage instance's transform.
 //
-// modelId = 0x55555556u, kMaxLods = 3: 0x55555556*3 = 0x100000002, truncated to
-// u32 = 2 -> the garbage instance wraps into bucket 2. With num_models = 1
-// (num_buckets = 3) bucket 2 is a legitimate bucket (model 0, lod 2); a real
-// model-0 lod2 instance also lands there.
+// The wrapping modelId has to be re-derived whenever kMaxLods changes. At
+// kMaxLods = 8: modelId*8 is always a multiple of 8, so after truncation to
+// u32 the wrapped bucket is (multiple of 8) + lod -- to land inside a
+// num_models = 1 renderer's buckets it must wrap to exactly 0, which
+// modelId = 0x20000000 does (0x20000000*8 = 0x100000000, truncated to 0).
+// The garbage instance is therefore placed at the SAME lod as the legitimate
+// one (lod 2, i.e. beyond the 20m threshold) so both target bucket 2.
+// (At the old kMaxLods = 3 this test used modelId 0x55555556, whose *3
+// truncates to 2 directly, with the garbage instance at lod 0.)
 //
 // RED (pre-fix, no pre-multiply guard): the wrapped bucket 2 is < numBuckets,
 // so the garbage instance is appended -> counts[2] == 2 and bucket 2's compacted
 // slice contains the garbage transform. GREEN (numModels = numBuckets/kMaxLods =
-// 1; modelId 0x55555556 >= 1 -> SENTINEL): counts[2] == 1 and the slice holds
+// 1; modelId 0x20000000 >= 1 -> SENTINEL): counts[2] == 1 and the slice holds
 // ONLY the legitimate transform.
 // ---------------------------------------------------------------------------
 TEST_CASE("GPU classify: overflowing garbage modelId can't corrupt a valid bucket",
@@ -1702,19 +1838,23 @@ TEST_CASE("GPU classify: overflowing garbage modelId can't corrupt a valid bucke
   const glm::vec2 thresholds(10.0f, 20.0f);
   Camera camera = MakeCullCamera(1.0f);
 
-  // Legit: model 0 at dist 25 (lod2) -> bucket 2. Garbage: modelId 0x55555556 at
-  // dist 5 (lod0) -> bucket = 0x55555556*3 wraps to 2. Both on-axis, in-frustum.
-  constexpr uint32_t kGarbageModel = 0x55555556u;
+  // Legit: model 0 at dist 25 (lod2) -> bucket 2. Garbage: modelId 0x20000000
+  // at dist 22 (also lod2) -> bucket = 0x20000000*kMaxLods wraps to 0, + lod 2
+  // = 2. Both on-axis, in-frustum, at distinct positions so their transforms
+  // are distinguishable.
+  constexpr uint32_t kGarbageModel = 0x20000000u;
   GpuInstanceRenderer::InstanceInput legit =
       MakeInstance(glm::vec3(0.0f, 0.0f, -25.0f), 0u, 0.1f);
   GpuInstanceRenderer::InstanceInput garbage =
-      MakeInstance(glm::vec3(0.0f, 0.0f, -5.0f), kGarbageModel, 0.1f);
+      MakeInstance(glm::vec3(0.0f, 0.0f, -22.0f), kGarbageModel, 0.1f);
+  static_assert(kGarbageModel * GpuInstanceRenderer::kMaxLods == 0u,
+                "kGarbageModel must wrap to bucket base 0 at this kMaxLods");
   std::vector<GpuInstanceRenderer::InstanceInput> inputs = {legit, garbage};
 
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 2, /*num_models=*/1,
-                               {thresholds.x, thresholds.y});
+                               Lod3Chains(1, thresholds.x, thresholds.y));
   REQUIRE(renderer.IsValid());
-  REQUIRE(renderer.GetNumBuckets() == 3);
+  REQUIRE(renderer.GetNumBuckets() == GpuInstanceRenderer::kMaxLods);
   renderer.UploadInstances(inputs);
 
   FrameContext frame;
@@ -1733,8 +1873,8 @@ TEST_CASE("GPU classify: overflowing garbage modelId can't corrupt a valid bucke
   std::vector<glm::mat4> compacted = test::ReadBufferSync<glm::mat4>(
       g.instance, g.device, g.queue, renderer.GetCompactedBuffer(), 0,
       renderer.GetCompactedCapacity());
-  REQUIRE(counts.size() == 3);
-  REQUIRE(bases.size() == 3);
+  REQUIRE(counts.size() == GpuInstanceRenderer::kMaxLods);
+  REQUIRE(bases.size() == GpuInstanceRenderer::kMaxLods);
 
   INFO("counts = " << counts[0] << "," << counts[1] << "," << counts[2]);
   // Bucket 2 must contain ONLY the legitimate instance; the garbage instance
@@ -1883,7 +2023,7 @@ TEST_CASE("SetBucketSubmesh preserves the GPU-published instanceCount",
   constexpr uint32_t kExpectedCount = 4;
 
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, 4, /*num_models=*/1,
-                               {thresholds.x, thresholds.y});
+                               Lod3Chains(1, thresholds.x, thresholds.y));
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
 
@@ -1974,12 +2114,12 @@ TEST_CASE("SetBucketSubmesh: every submesh slot of a bucket carries the "
 
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
                                static_cast<uint32_t>(inputs.size()),
-                               /*num_models=*/1, {thresholds.x, thresholds.y},
+                               /*num_models=*/1, Lod3Chains(1, thresholds.x, thresholds.y),
                                kNumSubmeshes);
   REQUIRE(renderer.IsValid());
   REQUIRE(renderer.GetNumSubmeshes() == kNumSubmeshes);
   const uint32_t num_buckets = renderer.GetNumBuckets();
-  REQUIRE(num_buckets == 3);
+  REQUIRE(num_buckets == GpuInstanceRenderer::kMaxLods);
   renderer.UploadInstances(inputs);
 
   std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
@@ -2072,7 +2212,7 @@ TEST_CASE("GPU shared-slice render: a bucket's submeshes draw the SAME "
   constexpr uint32_t kNumSubmeshes = 2;
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen,
                                static_cast<uint32_t>(inputs.size()),
-                               /*num_models=*/1, {thresholds.x, thresholds.y},
+                               /*num_models=*/1, Lod3Chains(1, thresholds.x, thresholds.y),
                                kNumSubmeshes);
   REQUIRE(renderer.IsValid());
   renderer.UploadInstances(inputs);
@@ -2208,7 +2348,7 @@ TEST_CASE("GPU shadow cull resources are lazy: null until CullShadow(), then "
 
   // thresholds pushed to +inf -> lod0 -> bucket 0 regardless of distance.
   GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, /*capacity=*/1,
-                               /*num_models=*/1, {1e30f, 1e30f});
+                               /*num_models=*/1, Lod3Chains(1, 1e30f, 2e30f));
   REQUIRE(renderer.IsValid());
 
   // A dummy (never actually drawn in this test) mesh, just to give bucket
@@ -2307,7 +2447,7 @@ TEST_CASE("GPU cull: main and shadow cull sets are independent",
   auto run_case = [&](const GpuInstanceRenderer::InstanceInput& instance) {
     // thresholds pushed to +inf -> lod0 -> bucket 0 regardless of distance.
     GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, /*capacity=*/1,
-                                 /*num_models=*/1, {1e30f, 1e30f});
+                                 /*num_models=*/1, Lod3Chains(1, 1e30f, 2e30f));
     REQUIRE(renderer.IsValid());
     renderer.UploadInstances(
         std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
@@ -2483,7 +2623,7 @@ std::unique_ptr<DeferredForwardFieldFixture> BuildDeferredForwardField(
   // bucket 0 (1 model). 2 submeshes on that bucket: 0 = deferred, 1 = forward.
   fx->field = std::make_unique<InstancedMeshField>(
       g.device, g.queue, *g.gen, /*capacity=*/1, /*num_models=*/1,
-      /*num_submeshes=*/2, std::array<float, 2>{1e30f, 1e30f});
+      /*num_submeshes=*/2, Lod3Chains(1, 1e30f, 2e30f));
   REQUIRE(fx->field->IsValid());
 
   GpuInstanceRenderer::InstanceInput instance = MakeInstance(
@@ -2907,7 +3047,7 @@ TEST_CASE("InstancedMeshField: shared group-2 bind group is valid across two "
   // thresholds pushed to +inf: the one instance always lands lod0 -> bucket 0.
   InstancedMeshField field(g.device, g.queue, *g.gen, /*capacity=*/1,
                            /*num_models=*/1, /*num_submeshes=*/2,
-                           std::array<float, 2>{1e30f, 1e30f});
+                           Lod3Chains(1, 1e30f, 2e30f));
   REQUIRE(field.IsValid());
 
   GpuInstanceRenderer::InstanceInput instance =
@@ -3050,7 +3190,7 @@ TEST_CASE("InstancedMeshField::SetSubmesh rejects out-of-range lod/submesh clean
   // is the field's only valid submesh slot.
   InstancedMeshField field(g.device, g.queue, *g.gen, /*capacity=*/1,
                            /*num_models=*/1, /*num_submeshes=*/1,
-                           std::array<float, 2>{1e30f, 1e30f});
+                           Lod3Chains(1, 1e30f, 2e30f));
   REQUIRE(field.IsValid());
 
   GpuInstanceRenderer::InstanceInput instance =
@@ -3191,9 +3331,11 @@ std::unique_ptr<ShadowSlotFieldFixture> BuildShadowSlotField(TestGpu& g) {
   fx->vbuf = UploadBuffer(g.device, verts.data(), verts.size() * sizeof(float),
                           wgpu::BufferUsage::Vertex);
 
+  const std::vector<GpuInstanceRenderer::ModelLod> lods =
+      Lod3Chains(1, 1e30f, 2e30f);
   fx->field = std::make_unique<InstancedMeshField>(
       g.device, g.queue, *g.gen, /*capacity=*/1, /*num_models=*/1,
-      /*num_submeshes=*/1, std::array<float, 2>{1e30f, 1e30f});
+      /*num_submeshes=*/1, lods);
   REQUIRE(fx->field->IsValid());
 
   GpuInstanceRenderer::InstanceInput instance =
@@ -3604,7 +3746,7 @@ TEST_CASE("SceneRenderer Pass 0 draws instanced-field shadow submeshes onto "
 
   InstancedMeshField field(g.device, g.queue, *g.gen, /*capacity=*/1,
                            /*num_models=*/1, /*num_submeshes=*/1,
-                           std::array<float, 2>{1e30f, 1e30f});
+                           Lod3Chains(1, 1e30f, 2e30f));
   REQUIRE(field.IsValid());
 
   GpuInstanceRenderer::InstanceInput caster{};

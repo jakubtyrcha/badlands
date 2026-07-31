@@ -16,15 +16,28 @@ namespace badlands {
 
 namespace {
 
-// Mirrors `CullConfig` in the three compute shaders byte-for-byte (144 bytes:
-// 6 planes + camera pos + lod thresholds + counts, all 16-byte aligned).
+// Mirrors `CullConfig` in the three compute shaders byte-for-byte (128 bytes:
+// 6 planes + camera pos + counts, all 16-byte aligned). LOD thresholds are NOT
+// here: they are per-model now, in model_lod_buffer_ below.
 struct CullConfigData {
   std::array<glm::vec4, 6> planes{};
   glm::vec4 camera_world_pos{0.0f};
-  glm::vec4 lod_thresholds{0.0f};  // x=t0, y=t1 (kMaxLods-1); z,w unused
   glm::uvec4 counts{0u};  // x=instanceCount, y=numBuckets, z=compactedCapacity, w=numSubmeshes
 };
-static_assert(sizeof(CullConfigData) == 144);
+static_assert(sizeof(CullConfigData) == 128);
+
+// Mirrors `ModelLod` in instance_common.wesl byte-for-byte (48 bytes). The
+// public GpuInstanceRenderer::ModelLod is the CPU-facing form (a plain count +
+// float array); this is its std430 layout: kMaxLods-1 = 7 thresholds padded
+// out to 2 vec4s, then the count and its own tail padding.
+struct ModelLodData {
+  std::array<glm::vec4, 2> thresholds{};
+  uint32_t lod_count = 1;
+  std::array<uint32_t, 3> pad{};
+};
+static_assert(sizeof(ModelLodData) == 48);
+// 2 vec4s hold 8 floats; the cap must leave its kMaxLods-1 thresholds room.
+static_assert(GpuInstanceRenderer::kMaxLods - 1 <= 8);
 
 // Mirrors `IndirectArgs` in the shaders (and the standard DrawIndexedIndirect
 // args layout) byte-for-byte.
@@ -58,15 +71,54 @@ wgpu::BindGroupEntry StorageEntry(uint32_t binding, wgpu::Buffer buffer) {
 GpuInstanceRenderer::GpuInstanceRenderer(
     wgpu::Device device, wgpu::Queue queue,
     GpuPipelineGenerator& pipeline_generator, uint32_t capacity,
-    uint32_t num_models, std::array<float, kMaxLods - 1> lod_thresholds,
+    uint32_t num_models, std::span<const ModelLod> model_lods,
     uint32_t num_submeshes)
     : device_(device),
       queue_(queue),
       capacity_(capacity),
       num_models_(std::max(1u, num_models)),
-      num_submeshes_(std::max(1u, num_submeshes)),
-      lod_thresholds_(lod_thresholds) {
+      num_submeshes_(std::max(1u, num_submeshes)) {
   num_buckets_ = num_models_ * kMaxLods;
+
+  // One LOD chain per model, clamped to the compile-time cap. A caller that
+  // supplies fewer chains than models gets single-LOD fallbacks for the rest
+  // rather than a crash -- but it is a caller bug (those models' LOD1+ buckets
+  // would silently never be selected), so it is logged.
+  if (model_lods.size() < num_models_) {
+    spdlog::error(
+        "GpuInstanceRenderer: model_lods has {} entries for {} models; the "
+        "rest fall back to a single LOD",
+        model_lods.size(), num_models_);
+  }
+  model_lods_.resize(num_models_);
+  for (uint32_t m = 0; m < num_models_; ++m) {
+    if (m < model_lods.size()) {
+      model_lods_[m] = model_lods[m];
+    }
+    model_lods_[m].lod_count =
+        std::clamp(model_lods_[m].lod_count, 1u, kMaxLods);
+
+    // A chain owes one strictly ascending, positive cutoff per level boundary.
+    // ModelLod::thresholds default-initializes to 0.0f, so an UNDER-FILLED
+    // chain (lod_count raised without filling in the matching cutoffs) is
+    // representable -- and selectLod would then run straight past every level
+    // whose cutoff stayed 0, so those levels' meshes would simply never draw.
+    // The old fixed-width threshold array made that shape impossible; this
+    // catches it loudly instead.
+    float prev = 0.0f;
+    for (uint32_t i = 0; i + 1 < model_lods_[m].lod_count; ++i) {
+      const float t = model_lods_[m].thresholds[i];
+      if (!(t > prev)) {
+        spdlog::error(
+            "GpuInstanceRenderer: model {}'s LOD thresholds must be strictly "
+            "ascending and positive, but threshold[{}]={} does not exceed {} "
+            "-- levels between them can never be selected",
+            m, i, t, prev);
+        break;
+      }
+      prev = t;
+    }
+  }
 
   classify_pipeline_ =
       pipeline_generator.GetComputePipeline("compute/instance_classify");
@@ -92,6 +144,27 @@ GpuInstanceRenderer::GpuInstanceRenderer(
   config_buffer_ = MakeBuffer(device_, sizeof(CullConfigData),
                               wgpu::BufferUsage::Uniform |
                                   wgpu::BufferUsage::CopyDst);
+
+  // Per-model LOD chains: static for this renderer's lifetime, so pack and
+  // upload once here rather than per Cull() the way CullConfig goes. Shared by
+  // the main and shadow cull sets (both classify against the same chains --
+  // shadow geometry must match the LOD the camera renders; see CullShadow).
+  {
+    std::vector<ModelLodData> gpu_lods(num_models_);
+    for (uint32_t m = 0; m < num_models_; ++m) {
+      gpu_lods[m].lod_count = model_lods_[m].lod_count;
+      for (uint32_t i = 0; i < kMaxLods - 1; ++i) {
+        gpu_lods[m].thresholds[i / 4][static_cast<int>(i % 4)] =
+            model_lods_[m].thresholds[i];
+      }
+    }
+    model_lod_buffer_ =
+        MakeBuffer(device_, uint64_t{num_models_} * sizeof(ModelLodData),
+                   wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst);
+    queue_.WriteBuffer(model_lod_buffer_, 0, gpu_lods.data(),
+                       gpu_lods.size() * sizeof(ModelLodData));
+  }
+
   instance_buffer_ =
       MakeBuffer(device_, uint64_t{capacity_} * sizeof(InstanceInput),
                  wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst);
@@ -132,11 +205,12 @@ GpuInstanceRenderer::GpuInstanceRenderer(
   // so build them once. All three passes bind only group 0. Each pass declares
   // exactly the bindings it uses at contiguous binding numbers (0,1,2,…); the
   // buffer bound at each slot is what that pass reads/writes.
-  {  // classify: config, instances, perInstanceBucket, bucketCount
-    std::array<wgpu::BindGroupEntry, 4> e{
+  {  // classify: config, instances, perInstanceBucket, bucketCount, modelLods
+    std::array<wgpu::BindGroupEntry, 5> e{
         StorageEntry(0, config_buffer_), StorageEntry(1, instance_buffer_),
         StorageEntry(2, per_instance_bucket_buffer_),
-        StorageEntry(3, bucket_count_buffer_)};
+        StorageEntry(3, bucket_count_buffer_),
+        StorageEntry(4, model_lod_buffer_)};
     classify_bind_group_ =
         CreateComputeBindGroup(device_, *classify_pipeline_, e);
   }
@@ -205,12 +279,14 @@ void GpuInstanceRenderer::EnsureShadowCullResources() {
                      zero_args.size() * sizeof(IndirectArgsData));
 
   // Same trio as the constructor's main-set bind groups, over the shadow set
-  // (instance_buffer_ shared with the main classify/scatter bind groups).
+  // (instance_buffer_ and model_lod_buffer_ shared with the main classify/
+  // scatter bind groups -- both are static input, identical for either cull).
   {
-    std::array<wgpu::BindGroupEntry, 4> e{
+    std::array<wgpu::BindGroupEntry, 5> e{
         StorageEntry(0, config_buffer_shadow_), StorageEntry(1, instance_buffer_),
         StorageEntry(2, per_instance_bucket_buffer_shadow_),
-        StorageEntry(3, bucket_count_buffer_shadow_)};
+        StorageEntry(3, bucket_count_buffer_shadow_),
+        StorageEntry(4, model_lod_buffer_)};
     classify_bind_group_shadow_ =
         CreateComputeBindGroup(device_, *classify_pipeline_, e);
   }
@@ -350,7 +426,7 @@ void GpuInstanceRenderer::CullShadow(FrameContext& frame, const Camera& camera,
   // EnsureShadowCull() or an earlier CullShadow() already did) before this
   // dispatch reads/writes them.
   EnsureShadowCullResources();
-  // Frustum from the LIGHT's view-proj, but camera_world_pos/LOD thresholds
+  // Frustum from the LIGHT's view-proj, but camera_world_pos (and so LOD)
   // still from `camera` -- see this method's header comment.
   const Frustum frustum = Frustum::FromViewProj(light_view_proj);
   CullInternal(frame, frustum, camera.GetPosition(), config_buffer_shadow_,
@@ -368,10 +444,6 @@ void GpuInstanceRenderer::CullInternal(
     config.planes[static_cast<size_t>(i)] = frustum.planes[i];
   }
   config.camera_world_pos = glm::vec4(camera_world_pos, 0.0f);
-  config.lod_thresholds = glm::vec4(0.0f);
-  for (uint32_t i = 0; i < kMaxLods - 1; ++i) {
-    config.lod_thresholds[static_cast<int>(i)] = lod_thresholds_[i];
-  }
   config.counts = glm::uvec4(instance_count_, num_buckets_, compacted_capacity_,
                              num_submeshes_);
   queue_.WriteBuffer(config_buffer, 0, &config, sizeof(config));

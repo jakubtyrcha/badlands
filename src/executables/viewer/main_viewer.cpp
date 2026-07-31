@@ -15,10 +15,12 @@ int main(int argc, char** argv) {
   // `--screenshot` run can capture the shadow-map/contact-shadow debug masks
   // (0=Off, 1=Combined, 2=ShadowMapOnly, 3=ContactOnly) headlessly.
   auto shadow_debug_mode = badlands::ShadowDebugMode::Off;
-  // Manual LOD switch (Task 2): selects the initial tree LOD level (0..4:
-  // 0 = "Original", 1..3 = "Voxel L0/L1/L2" -- volumetric-foliage Phase 3,
-  // 4 = "Multi", an instanced grid with dynamic GPU LOD -- Task 4) so a
-  // `--screenshot` run can capture a specific LOD headlessly.
+  // Manual LOD switch (Task 2): selects the initial tree LOD level so a
+  // `--screenshot` run can capture a specific LOD headlessly. 0 =
+  // "Original"; 1..kVoxelLodCount = "Voxel L0..L3" (volumetric-foliage
+  // Phase 3, one per kFoliageVoxelWorldSizes cell size); kMultiLodLevel =
+  // "Multi", an instanced grid with dynamic GPU LOD (Task 4). The bound comes
+  // from the view itself, so adding a voxel level needs no edit here.
   int lod = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--generator") == 0 && i + 1 < argc) {
@@ -27,7 +29,8 @@ int main(int argc, char** argv) {
       shadow_debug_mode =
           static_cast<badlands::ShadowDebugMode>(std::atoi(argv[++i]));
     } else if (std::strcmp(argv[i], "--lod") == 0 && i + 1 < argc) {
-      lod = std::clamp(std::atoi(argv[++i]), 0, 4);
+      lod = std::clamp(std::atoi(argv[++i]), 0,
+                       badlands::ModelViewerView::kMultiLodLevel);
     }
   }
 

@@ -11,6 +11,7 @@
 #include <vector>
 #include <glm/gtc/matrix_transform.hpp>  // glm::translate, glm::scale
 #include "game/geometry/leaf_voxelizer.hpp"
+#include "game/geometry/mesh_lod.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
 #include "game/visual/foliage_voxel_config.hpp"
@@ -505,4 +506,91 @@ TEST_CASE("SplatLeafCards: fails loudly (empty grid) when an entire axis is "
                    << grid.dims.x << "," << grid.dims.y << "," << grid.dims.z
                    << ")");
   CHECK(logged_error);
+}
+
+// ===========================================================================
+// The coarse tail of the LOD chain (L3, the last shipped level). These pin
+// what the tail exists to deliver -- every preset still HAS a crown (no
+// dead-zone empties, the Phase 6 failure mode), and the whole tree costs a
+// bounded, small number of triangles AND vertices -- against a retune of
+// kFoliageVoxelWorldSizes / kFoliageCoarseBarkTriBudgets or a change in the
+// simplifier's behavior. Written against "the last entry in the chain" rather
+// than a level number, so shortening or extending the chain re-points them.
+// ===========================================================================
+
+TEST_CASE("Voxel L3 (the coarsest level): every TreeCatalog preset's whole "
+          "tree stays within the level's triangle band") {
+  // Measured range at the shipped tuning is ~230-680 triangles across the 15
+  // presets (crown 56-428 + bark 158-255). This bound has headroom over that
+  // spread: it exists to catch an order-of-magnitude regression (a cell-size
+  // or budget mixup), not to be a tight fit.
+  constexpr size_t kMaxTotalTris = 900;
+  constexpr size_t kCoarsest = kFoliageVoxelWorldSizes.size() - 1;
+
+  for (const NamedTreeOptions& setup : TreeCatalog()) {
+    INFO("setup: " << setup.name);
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+    TexturedMeshResult bark = GenerateTreeMesh(setup.options, skeleton);
+    const float bark_height = bark.local_bounds.max.y - bark.local_bounds.min.y;
+    const float s = kFoliagePreviewHeight / std::max(bark_height, 0.001f);
+    const TexturedMeshResult leaves = GenerateLeafMesh(setup.options, skeleton);
+
+    // Mirrors model_viewer_view.cpp's single-tree path: bark through the
+    // shared per-level policy, leaves through the voxelizer at this level's
+    // preview-space cell size converted to native units.
+    SimplifyBarkForVoxelLod(bark.mesh, kCoarsest);
+    LeafVoxelizeOptions opts;
+    opts.cell_size = kFoliageVoxelWorldSizes[kCoarsest] / s;
+    const TexturedMeshResult crown =
+        VoxelizeLeafCards(leaves.mesh, setup.options.leaves.silhouette, opts);
+
+    const size_t bark_tris = bark.mesh.indices.size() / 3;
+    const size_t crown_tris = crown.mesh.indices.size() / 3;
+    INFO("bark=" << bark_tris << " crown=" << crown_tris
+                 << " bark_verts=" << bark.mesh.vertex_count);
+
+    // The decimated bark must carry a vertex buffer sized to the triangles it
+    // kept, not the full welded set it was decimated FROM (a triangle can
+    // reference at most 3 distinct vertices, and a real mesh shares many).
+    // Pre-compaction this was ~6000 vertices behind a couple hundred
+    // triangles -- the triangle budget alone would have looked cheap while
+    // the GPU upload stayed enormous.
+    CHECK(bark.mesh.vertex_count <= 3 * bark_tris);
+
+    // A crown that voxelized to nothing would make the bound trivially easy
+    // to hit AND leave the tree a bare trunk -- check it separately.
+    CHECK(crown_tris > 0);
+    CHECK(bark_tris > 0);
+    CHECK(bark_tris + crown_tris < kMaxTotalTris);
+  }
+}
+
+TEST_CASE("Voxel LODs: every level stays non-empty and no coarser than the "
+          "level before it") {
+  // Guards the chain's monotonicity end to end (the earlier per-preset test
+  // covers levels 0-2 at flat native cell sizes; this one runs every shipped
+  // level at the viewer's own preview-space derivation) and re-checks the
+  // Phase 6 empty-crown failure mode at the coarse sizes, where the occupancy
+  // threshold (occupancy_fraction * cell^2) is largest.
+  for (const NamedTreeOptions& setup : TreeCatalog()) {
+    INFO("setup: " << setup.name);
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+    const TexturedMeshResult bark = GenerateTreeMesh(setup.options, skeleton);
+    const float bark_height = bark.local_bounds.max.y - bark.local_bounds.min.y;
+    const float s = kFoliagePreviewHeight / std::max(bark_height, 0.001f);
+    const TexturedMeshResult leaves = GenerateLeafMesh(setup.options, skeleton);
+
+    size_t prev_tris = std::numeric_limits<size_t>::max();
+    for (size_t level = 0; level < kFoliageVoxelWorldSizes.size(); ++level) {
+      LeafVoxelizeOptions opts;
+      opts.cell_size = kFoliageVoxelWorldSizes[level] / s;
+      const TexturedMeshResult r =
+          VoxelizeLeafCards(leaves.mesh, setup.options.leaves.silhouette, opts);
+      const size_t tris = r.mesh.indices.size() / 3;
+      INFO("level=" << level << " tris=" << tris << " prev=" << prev_tris);
+      CHECK(tris > 0);
+      CHECK(tris <= prev_tris);
+      prev_tris = tris;
+    }
+  }
 }
