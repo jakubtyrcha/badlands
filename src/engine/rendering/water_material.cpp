@@ -107,8 +107,18 @@ InstanceParams StillLakeWaterParams() {
       // the generator's measured bathymetry: median lake max_depth_m ~= 5 m
       // across seeds 1-5. Red dies first, so the water turns blue as it deepens.
       {"extinction", glm::vec4(1.20f, 0.43f, 0.30f, 0.0f)},
-      // Fitted so the deep asymptote renders as Iron Water's #2b3841.
-      {"scatterAlbedo", glm::vec4(0.024f, 0.040f, 0.053f, 0.0f)},
+      // Fitted against Iron Water's deep-water swatch #2b3841 = (43, 56, 65).
+      // Measured deep asymptote: (43, 72, 89) -- red lands exactly, green and
+      // blue sit above. That residual is NOT slack in this constant: with the
+      // albedo driven to zero the surface still renders (16, 58, 76), because
+      // the Fresnel sky reflection alone is brighter and bluer than the swatch
+      // in those two channels. The palette section is specified for OVERCAST
+      // light; mapview renders a clear Hosek-Wilkie sky at noon, which really
+      // does put more blue on the water. Closing the gap would mean either a
+      // dimmer sky or an unphysical Fresnel, so the hue ratio is matched
+      // (0.65:0.78:1.0 against the swatch's 0.66:0.86:1.0) and the brightness
+      // is left where the lighting puts it.
+      {"scatterAlbedo", glm::vec4(0.0048f, 0.0058f, 0.0074f, 0.0f)},
       // x=refractStrength (inert: a still surface has N.xz == 0),
       // y=roughness -- low, for the palette's tight "cold glint".
       {"params", glm::vec4(0.0f, 0.05f, 0.0f, 0.0f)},

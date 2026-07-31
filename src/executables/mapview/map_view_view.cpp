@@ -13,8 +13,15 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include "core/geometry_type.hpp"
 #include "engine/app/sdl_input_util.hpp"
 #include "engine/core/ray.hpp"
+#include "engine/rendering/components/forward_component.hpp"
+#include "engine/rendering/components/material_factory_component.hpp"
+#include "engine/rendering/components/mesh_components.hpp"
+#include "engine/rendering/components/transform.hpp"
+#include "engine/rendering/geometry/mesh_builder_utils.hpp"     // PushVertex
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"  // AABB helper
 #include "engine/rendering/scene_renderer.hpp"  // debug-view selectors
 #include "engine/rendering/texture_loader.hpp"  // UploadTexture2DWithMips
 #include "engine/ui/editor_ui.hpp"
@@ -22,6 +29,7 @@
 #include "mapgen/biomes.hpp"
 #include "mapview/biome_manifest.hpp"
 #include "mapview/biome_splat.hpp"
+#include "mapview/lake_surface.hpp"
 
 namespace badlands {
 
@@ -228,6 +236,55 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // renders after a single Update) already draws the selected cut.
   cluster_terrain_.UpdateLod(camera_, screen_h_px_);
   log_step("cluster terrain", since(t));
+
+  // Still lake water. The surface deliberately overlaps each shore and runs
+  // under the terrain; water tests depth without writing it, so the buried ring
+  // is rejected in hardware -- and that overlap is what keeps a later wave
+  // displacement from opening a gap at the waterline.
+  t = clock::now();
+  water_factory_ =
+      BuildStillWaterForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen);
+  if (!water_factory_) {
+    spdlog::error("MapViewView: water factory build failed");
+    return false;
+  }
+  const std::vector<glm::vec3> water_tris =
+      BuildLakeSurfaceTriangles(map_, params_.world_size_m);
+  if (!water_tris.empty()) {
+    std::vector<float> v;
+    v.reserve(water_tris.size() * kTexturedMeshFloatsPerVertex);
+    for (const glm::vec3& p : water_tris) {
+      // uv = world XZ, normal +Y, tangent +X -- a flat plane needs no more.
+      PushVertex(v, p, glm::vec2(p.x, p.z), glm::vec3(0.0f, 1.0f, 0.0f),
+                 glm::vec3(1.0f, 0.0f, 0.0f));
+    }
+    // Created directly in the registry, mirroring what SceneGraph's
+    // MeshAttachment path emplaces (mesh + AABB + material + the pass tag).
+    // A SceneGraph is not usable here: SyncToRegistry clears the registry.
+    const entt::entity e = registry_.create();
+    registry_.emplace<Transform>(e).matrix = glm::mat4(1.0f);
+    auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(e);
+    mesh.vertex_count =
+        static_cast<uint32_t>(v.size() / kTexturedMeshFloatsPerVertex);
+    mesh.dirty = true;
+    mesh.geometry_type = GeometryType::kTexturedMesh;
+    registry_.emplace<StaticMeshAabbComponent>(
+        e, StaticMeshAabbComponent{
+               .local = ComputeLocalAabbFromVertices(
+                   v, kTexturedMeshFloatsPerVertex)});
+    mesh.vertices = std::move(v);
+
+    MaterialFactoryComponent fmc;
+    fmc.factory = water_factory_.get();
+    fmc.pass_type = MaterialPassType::kForwardTransparent;
+    fmc.params = StillLakeWaterParams();
+    fmc.config_hash = ComputeFactoryConfigHash(fmc);
+    registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
+    registry_.emplace<ForwardTransparentRenderable>(e);
+  }
+  spdlog::info("water: {} triangles over {} lakes", water_tris.size() / 3,
+               map_.lakes.size());
+  log_step("water", since(t));
 
   spdlog::info("map load: {:.1f} ms total  ({}x{} texels)", since(t_load),
                params_.resolution, params_.resolution);

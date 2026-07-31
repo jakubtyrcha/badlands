@@ -14,6 +14,7 @@
 // a rewrite.)
 
 #include <cstdint>
+#include <memory>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
@@ -27,6 +28,7 @@
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/daylight.hpp"
 #include "engine/rendering/material_library.hpp"
+#include "engine/rendering/water_material.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
 #include "mapgen/generator.hpp"
@@ -109,6 +111,13 @@ class MapViewView : public AppView {
   // the terrain entity, the per-frame LOD cut, and the Terrain debug UI. Built
   // with an identity model (mapview vertices are absolute world).
   ClusterTerrain cluster_terrain_;
+
+  // Still lake water: one static forward-transparent entity, created DIRECTLY
+  // in the registry like the cluster terrain rather than through a SceneGraph.
+  // SceneGraph::SyncToRegistry starts with registry.clear(), so a graph sharing
+  // this registry would wipe the terrain entity every frame -- mapview owns its
+  // entities outright, and there is nothing here for a scene graph to do.
+  std::unique_ptr<MaterialInstanceFactory> water_factory_;
 
   // Where the mouse ray last hit the terrain. `hover_valid_` is false when the
   // cursor is off the terrain (sky / past the map edge) -- the hover UI hides.
