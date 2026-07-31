@@ -1,6 +1,9 @@
 #include "dcsdd.h"
 
+#include <algorithm>
+#include <array>
 #include <cassert>
+#include <cfloat>
 #include <cmath>
 #include <unordered_map>
 
@@ -13,6 +16,52 @@ HermitePoint hermite_crossing(float s_a, float s_b, simd_float3 u_a, simd_float3
     // midpoint.
     const float t = (denom == 0.0f) ? 0.5f : std::fabs(s_a) / denom;
     return HermitePoint{(1.0f - t) * u_a + t * u_b, t};
+}
+
+simd_float3 closest_point_on_triangle(simd_float3 p, simd_float3 a, simd_float3 b, simd_float3 c) {
+    // Ericson, "Real-Time Collision Detection" §5.1.5: check each vertex's
+    // and edge's Voronoi region in turn (via the standard barycentric sign
+    // tests), falling through to the face interior if none matched.
+    const simd_float3 ab = b - a;
+    const simd_float3 ac = c - a;
+    const simd_float3 ap = p - a;
+    const float d1 = simd_dot(ab, ap);
+    const float d2 = simd_dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a; // vertex region a
+
+    const simd_float3 bp = p - b;
+    const float d3 = simd_dot(ab, bp);
+    const float d4 = simd_dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b; // vertex region b
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        return a + v * ab; // edge region ab
+    }
+
+    const simd_float3 cp = p - c;
+    const float d5 = simd_dot(ab, cp);
+    const float d6 = simd_dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c; // vertex region c
+
+    const float vb_ = d5 * d2 - d1 * d6;
+    if (vb_ <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        return a + w * ac; // edge region ac
+    }
+
+    const float va_ = d3 * d6 - d5 * d4;
+    if (va_ <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + w * (c - b); // edge region bc
+    }
+
+    // Face interior: barycentric coords from the three Voronoi determinants.
+    const float denom = 1.0f / (va_ + vb_ + vc);
+    const float v = vb_ * denom;
+    const float w = vc * denom;
+    return a + ab * v + ac * w;
 }
 
 namespace {
@@ -131,6 +180,118 @@ simd_float3 hermite_normal(const SampleGrid& grid, int32_t axis, int32_t x, int3
     return simd_normalize(dir);
 }
 
+// --- D3 helpers: global mesh + sample assignment (build-local only) -------
+
+// Decodes a flat sample index back to (x,y,z) — the inverse of flat_index
+// above, used to recover an interesting edge's base-sample coordinates from
+// `DcsddInit::edge_base`.
+struct Coord3 {
+    int32_t x, y, z;
+};
+Coord3 unflatten(int32_t flat, int32_t n) {
+    return Coord3{flat % n, (flat / n) % n, flat / (n * n)};
+}
+
+// Cell id encoding, matching dcsdd_init's cell_id convention
+// (i + cells_per_axis*(j + cells_per_axis*k)).
+int32_t encode_cell_id(CellCoord c, int32_t cells_per_axis) {
+    return c.i + cells_per_axis * (c.j + cells_per_axis * c.k);
+}
+
+int32_t cell_component(CellCoord c, int32_t axis) {
+    return axis == 0 ? c.i : (axis == 1 ? c.j : c.k);
+}
+
+// The brief's binding cyclic order for the 4 cells around an interesting
+// edge (axis, x, y, z) — NOT yet reversed for outsideness. For an edge along
+// axis `a` with base sample (x,y,z), enumerate cyclically in the plane of
+// the other two axes (b,c) — (a,b,c) a right-handed permutation
+// (x->(y,z), y->(z,x), z->(x,y)) — as (b-1,c-1) -> (b,c-1) -> (b,c) ->
+// (b-1,c), where b,c are the base sample's coordinates on those axes.
+std::array<CellCoord, 4> cyclic_quad_cells(int32_t axis, int32_t x, int32_t y, int32_t z) {
+    if (axis == 0) {
+        const int32_t b = y, c = z;
+        return {CellCoord{x, b - 1, c - 1}, CellCoord{x, b, c - 1}, CellCoord{x, b, c}, CellCoord{x, b - 1, c}};
+    } else if (axis == 1) {
+        const int32_t b = z, c = x;
+        return {CellCoord{c - 1, y, b - 1}, CellCoord{c - 1, y, b}, CellCoord{c, y, b}, CellCoord{c, y, b - 1}};
+    } else {
+        const int32_t b = x, c = y;
+        return {CellCoord{b - 1, c - 1, z}, CellCoord{b, c - 1, z}, CellCoord{b, c, z}, CellCoord{b - 1, c, z}};
+    }
+}
+
+// Uniform-grid triangle binning (assign_samples' acceleration structure,
+// build-local only — never stored in SampleAssignment): CSR over ALL grid
+// cells (cells_per_axis^3, not just interesting ones), each triangle binned
+// into every cell its AABB overlaps (triangles are ~cell-sized, so this is a
+// handful of cells each).
+struct TriangleBins {
+    std::vector<int32_t> offsets; // size cells_per_axis^3 + 1
+    std::vector<int32_t> indices; // triangle indices (into mesh.tri_cells, /3)
+};
+
+TriangleBins build_triangle_bins(const SampleGrid& grid, const GlobalMesh& mesh,
+                                  const std::vector<simd_float3>& cell_vertices) {
+    const int32_t cells_per_axis = grid.n - 1;
+    const size_t total_cells = static_cast<size_t>(cells_per_axis) * cells_per_axis * cells_per_axis;
+    const size_t num_tris = mesh.tri_cells.size() / 3;
+
+    auto clamp_idx = [cells_per_axis](int32_t v) { return std::clamp(v, 0, cells_per_axis - 1); };
+    auto cell_of = [&](float world_coord, int32_t axis) {
+        return clamp_idx(static_cast<int32_t>(std::floor((world_coord - grid.origin[axis]) / grid.spacing)));
+    };
+    auto cell_id_of = [cells_per_axis](int32_t i, int32_t j, int32_t k) {
+        const size_t cpa = static_cast<size_t>(cells_per_axis);
+        return static_cast<size_t>(i) + cpa * (static_cast<size_t>(j) + cpa * static_cast<size_t>(k));
+    };
+
+    struct Range {
+        int32_t lo[3], hi[3];
+    };
+    std::vector<Range> ranges(num_tris);
+    std::vector<int32_t> counts(total_cells + 1, 0);
+    for (size_t t = 0; t < num_tris; ++t) {
+        const simd_float3 a = cell_vertices[mesh.tri_cells[3 * t + 0]];
+        const simd_float3 b = cell_vertices[mesh.tri_cells[3 * t + 1]];
+        const simd_float3 c = cell_vertices[mesh.tri_cells[3 * t + 2]];
+        const simd_float3 lo = simd_min(simd_min(a, b), c);
+        const simd_float3 hi = simd_max(simd_max(a, b), c);
+        Range r;
+        for (int32_t axis = 0; axis < 3; ++axis) {
+            r.lo[axis] = cell_of(lo[axis], axis);
+            r.hi[axis] = cell_of(hi[axis], axis);
+        }
+        ranges[t] = r;
+        for (int32_t kk = r.lo[2]; kk <= r.hi[2]; ++kk) {
+            for (int32_t jj = r.lo[1]; jj <= r.hi[1]; ++jj) {
+                for (int32_t ii = r.lo[0]; ii <= r.hi[0]; ++ii) {
+                    counts[cell_id_of(ii, jj, kk) + 1] += 1;
+                }
+            }
+        }
+    }
+    for (size_t c = 0; c < total_cells; ++c) counts[c + 1] += counts[c];
+
+    TriangleBins bins;
+    bins.offsets = counts; // prefix-summed in place above -> now the CSR offsets
+    bins.indices.resize(static_cast<size_t>(bins.offsets.back()));
+    std::vector<int32_t> cursor(total_cells, 0);
+    for (size_t t = 0; t < num_tris; ++t) {
+        const Range& r = ranges[t];
+        for (int32_t kk = r.lo[2]; kk <= r.hi[2]; ++kk) {
+            for (int32_t jj = r.lo[1]; jj <= r.hi[1]; ++jj) {
+                for (int32_t ii = r.lo[0]; ii <= r.hi[0]; ++ii) {
+                    const size_t cid = cell_id_of(ii, jj, kk);
+                    bins.indices[static_cast<size_t>(bins.offsets[cid]) + cursor[cid]] = static_cast<int32_t>(t);
+                    cursor[cid] += 1;
+                }
+            }
+        }
+    }
+    return bins;
+}
+
 } // namespace
 
 DcsddInit dcsdd_init(const SampleGrid& grid) {
@@ -216,6 +377,233 @@ DcsddInit dcsdd_init(const SampleGrid& grid) {
         }
     }
 
+    return out;
+}
+
+GlobalMesh build_global_mesh(const DcsddInit& init, const SampleGrid& grid,
+                              const std::vector<simd_float3>& cell_vertices) {
+    const int32_t n = grid.n;
+    const int32_t cells_per_axis = n - 1;
+    const int32_t cell_max = n - 2;
+
+    // Build-local lookup: interesting-cell id -> dense index (position in
+    // cell_vertices / DcsddInit::cell_id/cell_vertex), never stored in
+    // GlobalMesh.
+    std::unordered_map<int32_t, int32_t> id_to_dense;
+    id_to_dense.reserve(init.cell_id.size());
+    for (size_t d = 0; d < init.cell_id.size(); ++d) {
+        id_to_dense[init.cell_id[d]] = static_cast<int32_t>(d);
+    }
+
+    const auto in_range = [cell_max](int32_t v) { return v >= 0 && v <= cell_max; };
+
+    GlobalMesh out;
+    for (size_t ei = 0; ei < init.edge_axis.size(); ++ei) {
+        const int32_t axis = init.edge_axis[ei];
+        const Coord3 base = unflatten(init.edge_base[ei], n);
+
+        std::array<CellCoord, 4> cells4 = cyclic_quad_cells(axis, base.x, base.y, base.z);
+        bool all_in_range = true;
+        for (const CellCoord& cc : cells4) {
+            if (!in_range(cc.i) || !in_range(cc.j) || !in_range(cc.k)) {
+                all_in_range = false;
+                break;
+            }
+        }
+        // Grid-boundary edge: fewer than 4 containing cells -> no quad. The
+        // scene's +10% sampling margin (D1) makes these rare in practice.
+        if (!all_in_range) continue;
+
+        // Reverse when the base sample is outside (s >= 0) so quads wind
+        // consistently outward — the sphere acceptance test confirms this
+        // direction wins outright (every triangle normal points away from
+        // the sphere center); no flip needed.
+        const float s_base = grid.values[flat_index(base.x, base.y, base.z, n)];
+        if (s_base >= 0.0f) {
+            std::reverse(cells4.begin(), cells4.end());
+        }
+
+        std::array<int32_t, 4> dense{};
+        for (int32_t i = 0; i < 4; ++i) {
+            const int32_t id = encode_cell_id(cells4[i], cells_per_axis);
+            // Must exist: all_in_range guarantees a valid cell index, and
+            // every valid cell touched by an interesting edge is itself
+            // interesting (the edge is one of its 12 candidate edges).
+            dense[i] = id_to_dense.at(id);
+        }
+
+        out.quad_edge.push_back(static_cast<int32_t>(ei));
+        for (int32_t d : dense) out.quad_cells.push_back(d);
+
+        // Triangulation by first diagonal: (v0,v1,v2), (v0,v2,v3).
+        out.tri_cells.push_back(dense[0]);
+        out.tri_cells.push_back(dense[1]);
+        out.tri_cells.push_back(dense[2]);
+        out.tri_cells.push_back(dense[0]);
+        out.tri_cells.push_back(dense[2]);
+        out.tri_cells.push_back(dense[3]);
+
+        // Face intersection points (paper §3.2): for each of the quad's 4
+        // consecutive cell pairs, the mesh edge between their two cell
+        // vertices crosses the axis-aligned plane of their shared grid face.
+        for (int32_t i = 0; i < 4; ++i) {
+            const CellCoord ca = cells4[i];
+            const CellCoord cb = cells4[(i + 1) % 4];
+            // Consecutive cells in the cycle are face-adjacent: they differ
+            // along exactly one axis.
+            int32_t plane_axis = (ca.i != cb.i) ? 0 : ((ca.j != cb.j) ? 1 : 2);
+            assert(cell_component(ca, plane_axis) != cell_component(cb, plane_axis));
+
+            const int32_t higher = std::max(cell_component(ca, plane_axis), cell_component(cb, plane_axis));
+            const float plane = grid.origin[plane_axis] + grid.spacing * float(higher);
+
+            const simd_float3 va = cell_vertices[dense[i]];
+            const simd_float3 vb = cell_vertices[dense[(i + 1) % 4]];
+            const float denom = vb[plane_axis] - va[plane_axis];
+
+            // Guards: cell vertices may escape their cells (paper Fig. 15),
+            // so the segment may not actually cross the plane — clamp t to
+            // [0,1]; if the segment runs (near-)parallel to the plane
+            // (denom ~ 0), there's no meaningful crossing, so fall back to
+            // the midpoint.
+            float t;
+            if (std::fabs(denom) < 1e-9f) {
+                t = 0.5f;
+            } else {
+                t = (plane - va[plane_axis]) / denom;
+                t = std::clamp(t, 0.0f, 1.0f);
+            }
+            out.face_points.push_back(va + t * (vb - va));
+        }
+    }
+    return out;
+}
+
+SampleAssignment assign_samples(const SampleGrid& grid, const DcsddInit& init,
+                                 const std::vector<simd_float3>& cell_vertices, const GlobalMesh& mesh) {
+    const int32_t n = grid.n;
+    const int32_t cells_per_axis = n - 1;
+    const float cell_diag = grid.spacing * std::sqrt(3.0f);
+
+    std::unordered_map<int32_t, int32_t> id_to_dense;
+    id_to_dense.reserve(init.cell_id.size());
+    for (size_t d = 0; d < init.cell_id.size(); ++d) {
+        id_to_dense[init.cell_id[d]] = static_cast<int32_t>(d);
+    }
+
+    const TriangleBins bins = build_triangle_bins(grid, mesh, cell_vertices);
+    const auto clamp_idx = [cells_per_axis](int32_t v) { return std::clamp(v, 0, cells_per_axis - 1); };
+    const auto cell_of = [&](simd_float3 p) {
+        return std::array<int32_t, 3>{
+            clamp_idx(static_cast<int32_t>(std::floor((p.x - grid.origin.x) / grid.spacing))),
+            clamp_idx(static_cast<int32_t>(std::floor((p.y - grid.origin.y) / grid.spacing))),
+            clamp_idx(static_cast<int32_t>(std::floor((p.z - grid.origin.z) / grid.spacing))),
+        };
+    };
+    const auto cell_id_of = [cells_per_axis](int32_t i, int32_t j, int32_t k) {
+        const size_t cpa = static_cast<size_t>(cells_per_axis);
+        return static_cast<size_t>(i) + cpa * (static_cast<size_t>(j) + cpa * static_cast<size_t>(k));
+    };
+
+    std::vector<std::vector<int32_t>> buckets(init.cell_id.size());
+
+    for (int32_t z = 0; z < n; ++z) {
+        for (int32_t y = 0; y < n; ++y) {
+            for (int32_t x = 0; x < n; ++x) {
+                const int32_t flat = static_cast<int32_t>(flat_index(x, y, z, n));
+                const float s = grid.values[flat];
+
+                // Narrow band (deviation, binding): only samples with
+                // |s| < 2*cell_diagonal participate.
+                if (std::fabs(s) >= 2.0f * cell_diag) continue;
+
+                const simd_float3 p = sample_pos(grid, x, y, z);
+                const std::array<int32_t, 3> own = cell_of(p);
+                const float outlier_bound = cell_diag + std::fabs(s);
+
+                float best_dist = FLT_MAX;
+                simd_float3 best_pt{0.0f, 0.0f, 0.0f};
+
+                // Expanding Chebyshev-ring search from the sample's own
+                // cell, tracking the best hit. Two independent stopping
+                // conditions, both sufficient on their own (checked before
+                // examining ring `ring_r`, ring_r > 0):
+                //  - (ring_r-1)*spacing > best_dist: every point in ring
+                //    ring_r (and any farther ring) is at least
+                //    (ring_r-1)*spacing away from ANY point in the sample's
+                //    own cell (Chebyshev distance ring_r cells away, each
+                //    cell `spacing` wide) — so no triangle out there can
+                //    beat the best hit already found.
+                //  - ring_r*spacing > outlier_bound + spacing: even the
+                //    nearest possible point in ring_r (at least
+                //    (ring_r-1)*spacing away, i.e. > outlier_bound once
+                //    ring_r*spacing exceeds outlier_bound+spacing) can't
+                //    produce a distance within the outlier bound, so
+                //    searching farther can't rescue this sample from being
+                //    dropped as an outlier either way.
+                // Hard cap at max_ring (the farthest any cell in the grid
+                // can be from `own`) guarantees termination even for an
+                // empty mesh (best_dist never improves, neither bound ever
+                // trips because best_dist stays FLT_MAX — the cap is what
+                // stops the loop in that case).
+                const int32_t max_ring = std::max({own[0], cells_per_axis - 1 - own[0], own[1],
+                                                     cells_per_axis - 1 - own[1], own[2],
+                                                     cells_per_axis - 1 - own[2]});
+                for (int32_t ring_r = 0; ring_r <= max_ring; ++ring_r) {
+                    if (ring_r > 0) {
+                        if (float(ring_r - 1) * grid.spacing > best_dist) break;
+                        if (float(ring_r) * grid.spacing > outlier_bound + grid.spacing) break;
+                    }
+
+                    const int32_t lo_i = clamp_idx(own[0] - ring_r), hi_i = clamp_idx(own[0] + ring_r);
+                    const int32_t lo_j = clamp_idx(own[1] - ring_r), hi_j = clamp_idx(own[1] + ring_r);
+                    const int32_t lo_k = clamp_idx(own[2] - ring_r), hi_k = clamp_idx(own[2] + ring_r);
+                    for (int32_t kk = lo_k; kk <= hi_k; ++kk) {
+                        for (int32_t jj = lo_j; jj <= hi_j; ++jj) {
+                            for (int32_t ii = lo_i; ii <= hi_i; ++ii) {
+                                const int32_t cheby = std::max(
+                                    {std::abs(ii - own[0]), std::abs(jj - own[1]), std::abs(kk - own[2])});
+                                if (cheby != ring_r) continue; // only this ring's shell, not the whole cube
+                                const size_t cid = cell_id_of(ii, jj, kk);
+                                for (int32_t bi = bins.offsets[cid]; bi < bins.offsets[cid + 1]; ++bi) {
+                                    const int32_t t = bins.indices[bi];
+                                    const simd_float3 va = cell_vertices[mesh.tri_cells[3 * t + 0]];
+                                    const simd_float3 vb = cell_vertices[mesh.tri_cells[3 * t + 1]];
+                                    const simd_float3 vc = cell_vertices[mesh.tri_cells[3 * t + 2]];
+                                    const simd_float3 cp = closest_point_on_triangle(p, va, vb, vc);
+                                    const float d = simd_length(p - cp);
+                                    if (d < best_dist) {
+                                        best_dist = d;
+                                        best_pt = cp;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (best_dist == FLT_MAX) continue; // empty mesh: nothing to assign to
+
+                // Outlier rejection (paper): too far from the current
+                // surface estimate to be trustworthy.
+                if (best_dist > outlier_bound) continue;
+
+                const std::array<int32_t, 3> ci = cell_of(best_pt);
+                const int32_t cid = ci[0] + cells_per_axis * (ci[1] + cells_per_axis * ci[2]);
+                const auto it = id_to_dense.find(cid);
+                if (it == id_to_dense.end()) continue; // not an interesting cell: no vertex to optimize against
+                buckets[it->second].push_back(flat);
+            }
+        }
+    }
+
+    SampleAssignment out;
+    out.cell_sample_offsets.reserve(buckets.size() + 1);
+    out.cell_sample_offsets.push_back(0);
+    for (const std::vector<int32_t>& b : buckets) {
+        out.cell_sample_indices.insert(out.cell_sample_indices.end(), b.begin(), b.end());
+        out.cell_sample_offsets.push_back(static_cast<int32_t>(out.cell_sample_indices.size()));
+    }
     return out;
 }
 

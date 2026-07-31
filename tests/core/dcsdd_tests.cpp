@@ -1,5 +1,9 @@
 #include <doctest.h>
 
+#include <algorithm>
+#include <cfloat>
+#include <cmath>
+#include <unordered_map>
 #include <vector>
 
 #include <shapeshifter/ShapeshifterCore.h>
@@ -89,6 +93,43 @@ SampleGrid corner_sphere_grid() {
                 const simd_float3 p =
                     grid.origin + grid.spacing * simd_float3{float(x), float(y), float(z)};
                 grid.values[flat_index(x, y, z, grid.n)] = simd_length(p - center) - r;
+            }
+        }
+    }
+    return grid;
+}
+
+// n=6 grid, spacing 1, origin (-2.5,-2.5,-2.5): the same sphere (r=1.3,
+// centered at the world origin) as centered_sphere_grid(), but with an extra
+// buffer layer of samples around it. The sphere-crossing region re-lands on
+// the identical local topology (24 interesting edges, 26 interesting cells,
+// same "missing the fully-enclosed center cell" pattern), just re-indexed
+// into the larger cells_per_axis=5 space (interesting cell ids span ijk in
+// [1,3]^3 instead of [0,2]^3) -- verified via the from-scratch numpy
+// reference (dcsdd_ref.py) producing the same 24/26 counts. Used for D3's
+// assignment/ring-search tests: the buffer is generous enough that even the
+// grid's corner sample (the largest |s|, 3.0301270189221936) stays inside
+// the narrow-band threshold 2*cell_diagonal (3.4641016151377544 at
+// spacing=1) -- so in the unmodified fixture EVERY one of the 216 samples is
+// narrow-band-eligible and (per python3 dcsdd_ref.assign_samples_ref)
+// successfully assigned; the narrow-band-excluded and outlier test cases
+// below construct those situations by overriding one sample's *value* only
+// (distance-to-mesh is a pure function of position, so a value override
+// can't move the mesh -- confirmed by the outlier case's pinned distance
+// being bit-identical whether or not the override is applied).
+SampleGrid sphere_grid_n6() {
+    SampleGrid grid;
+    grid.n = 6;
+    grid.spacing = 1.0f;
+    grid.origin = simd_float3{-2.5f, -2.5f, -2.5f};
+    grid.values.resize(6u * 6u * 6u);
+    const float r = 1.3f;
+    for (int32_t z = 0; z < grid.n; ++z) {
+        for (int32_t y = 0; y < grid.n; ++y) {
+            for (int32_t x = 0; x < grid.n; ++x) {
+                const simd_float3 p =
+                    grid.origin + grid.spacing * simd_float3{float(x), float(y), float(z)};
+                grid.values[flat_index(x, y, z, grid.n)] = simd_length(p) - r;
             }
         }
     }
@@ -401,5 +442,405 @@ TEST_CASE("dcsdd_init: CSR integrity — monotone offsets, sizes match, every "
     REQUIRE(a.cell_vertex.size() == b.cell_vertex.size());
     for (size_t i = 0; i < a.cell_vertex.size(); ++i) {
         check_float3_approx(a.cell_vertex[i], b.cell_vertex[i]);
+    }
+}
+
+// =============================================================================
+// D3: global mesh + sample assignment. All pinned literals below regenerated
+// independently against the D3 brief's algorithm description (never by
+// running this codebase's C++) via a from-scratch numpy reference
+// (dcsdd_ref.py in the session scratchpad) extending the D2 reference above
+// with closest_point_on_triangle / build_global_mesh / build_triangles /
+// assign_samples_ref / triangle_bins. Driver: drive_d3.py in the same
+// directory; per-case invocations are given in comments below.
+
+// --- D3 item 1: closest_point_on_triangle ------------------------------------
+
+TEST_CASE("closest_point_on_triangle: pinned cases hitting every Voronoi region, "
+          "cross-checked against an independent numpy brute-force barycentric-grid "
+          "search (steps=4000; exact match at these points -- each closest point "
+          "lands exactly on a k/4000 barycentric grid vertex, so there is no "
+          "discretization error to tolerate)") {
+    // Fixed triangle a=(0,0,0), b=(2,0,0), c=(0,2,0) (right triangle, XY
+    // plane). python3: for each p below,
+    // dcsdd_ref.closest_point_on_triangle(p, a, b, c) names the Voronoi
+    // region hit and returns cp; dcsdd_ref.brute_force_closest(p, a, b, c,
+    // steps=4000) independently confirms both cp and distance (brute_err=0.0
+    // for every case, printed by drive_d3.py).
+    const simd_float3 a = {0.0f, 0.0f, 0.0f};
+    const simd_float3 b = {2.0f, 0.0f, 0.0f};
+    const simd_float3 c = {0.0f, 2.0f, 0.0f};
+
+    SUBCASE("face interior") {
+        // p=(0.5,0.5,1.0) -> cp=(0.5,0.5,0.0), dist=1.0
+        const simd_float3 cp = closest_point_on_triangle(simd_float3{0.5f, 0.5f, 1.0f}, a, b, c);
+        check_float3_approx(cp, simd_float3{0.5f, 0.5f, 0.0f});
+    }
+    SUBCASE("vertex_a region (d1<=0 && d2<=0)") {
+        // p=(-1,-1,-1) -> cp=a=(0,0,0), dist=sqrt(3)=1.7320508075688772
+        const simd_float3 cp = closest_point_on_triangle(simd_float3{-1.0f, -1.0f, -1.0f}, a, b, c);
+        check_float3_approx(cp, a);
+    }
+    SUBCASE("vertex_b region (d3>=0 && d4<=d3)") {
+        // p=(3,-1,1) -> cp=b=(2,0,0)
+        const simd_float3 cp = closest_point_on_triangle(simd_float3{3.0f, -1.0f, 1.0f}, a, b, c);
+        check_float3_approx(cp, b);
+    }
+    SUBCASE("vertex_c region (d6>=0 && d5<=d6)") {
+        // p=(-1,3,1) -> cp=c=(0,2,0)
+        const simd_float3 cp = closest_point_on_triangle(simd_float3{-1.0f, 3.0f, 1.0f}, a, b, c);
+        check_float3_approx(cp, c);
+    }
+    SUBCASE("edge_ab region") {
+        // p=(1,-1,0.5) -> cp=(1,0,0), dist=sqrt(1.25)=1.118033988749895
+        const simd_float3 cp = closest_point_on_triangle(simd_float3{1.0f, -1.0f, 0.5f}, a, b, c);
+        check_float3_approx(cp, simd_float3{1.0f, 0.0f, 0.0f});
+    }
+    SUBCASE("edge_ac region") {
+        // p=(-1,1,0.5) -> cp=(0,1,0), dist=1.118033988749895
+        const simd_float3 cp = closest_point_on_triangle(simd_float3{-1.0f, 1.0f, 0.5f}, a, b, c);
+        check_float3_approx(cp, simd_float3{0.0f, 1.0f, 0.0f});
+    }
+    SUBCASE("edge_bc region") {
+        // p=(1.5,1.5,0.5) -> cp=(1,1,0), dist=sqrt(0.75)=0.8660254037844386
+        const simd_float3 cp = closest_point_on_triangle(simd_float3{1.5f, 1.5f, 0.5f}, a, b, c);
+        check_float3_approx(cp, simd_float3{1.0f, 1.0f, 0.0f});
+    }
+}
+
+// --- D3 items 2/3: global mesh — counts, cyclic order, winding -------------------
+
+TEST_CASE("build_global_mesh: quad/triangle counts and the binding cyclic dense-cell "
+          "order, one pinned quad per axis, on the D2 centered-sphere fixture") {
+    // centered_sphere_grid() (n=4, spacing 1, origin (-1.5,-1.5,-1.5), r=1.3):
+    // python3 confirms all 24 interesting edges have exactly 4 containing
+    // cells (sorted(set(e['ncells'] for e in edges)) == [4]) -- no
+    // boundary-interesting-edges on this fixture (matches the brief's "the
+    // +10% sampling margin makes these rare" comment) -- so every edge
+    // produces a quad: 24 quads, 48 triangles (2x).
+    const SampleGrid grid = centered_sphere_grid();
+    const DcsddInit init = dcsdd_init(grid);
+    REQUIRE(init.edge_axis.size() == 24u);
+    REQUIRE(init.cell_id.size() == 26u);
+
+    const GlobalMesh mesh = build_global_mesh(init, grid, init.cell_vertex);
+    CHECK(mesh.quad_edge.size() == 24u);
+    CHECK(mesh.quad_cells.size() == 24u * 4u);
+    CHECK(mesh.face_points.size() == 24u * 4u);
+    CHECK(mesh.tri_cells.size() == 48u * 3u);
+
+    // Since every edge produces a quad here, build_global_mesh's single pass
+    // over interesting edges (in DcsddInit order) means quad index == edge
+    // index -- verified below alongside each pinned quad.
+    //
+    // python3 dcsdd_ref.build_global_mesh(..., reverse_when_outside=True),
+    // one quad per axis (first one found with that axis):
+    struct PinnedQuad {
+        int32_t axis;
+        int32_t edge_idx;
+        int32_t dense[4];
+    };
+    const PinnedQuad pinned[] = {
+        // axis 0, edge_idx 0, base (0,1,1), s_base=0.358312 (>=0, outside ->
+        // reversed): ijk cyclic (post-reversal)
+        // [(0,0,1),(0,1,1),(0,1,0),(0,0,0)] -> dense [9,12,3,0]
+        {0, 0, {9, 12, 3, 0}},
+        // axis 1, edge_idx 8, base (1,0,1): dense [1,10,9,0]
+        {1, 8, {1, 10, 9, 0}},
+        // axis 2, edge_idx 16, base (1,1,0): dense [3,4,1,0]
+        {2, 16, {3, 4, 1, 0}},
+    };
+    for (const PinnedQuad& pq : pinned) {
+        CAPTURE(pq.axis);
+        REQUIRE(static_cast<size_t>(pq.edge_idx) < init.edge_axis.size());
+        CHECK(init.edge_axis[pq.edge_idx] == pq.axis);
+        CHECK(mesh.quad_edge[pq.edge_idx] == pq.edge_idx);
+        for (int i = 0; i < 4; ++i) {
+            CAPTURE(i);
+            CHECK(mesh.quad_cells[4 * pq.edge_idx + i] == pq.dense[i]);
+        }
+    }
+}
+
+TEST_CASE("build_global_mesh: winding/orientation acceptance -- every triangle's "
+          "geometric normal points away from the sphere center") {
+    // python3 cross-check on this fixture: with reverse_when_outside=True
+    // (the brief's rule), 0/48 triangles have non-positive
+    // dot(normal, centroid-center) (min dot 0.40878666952986425); with
+    // reverse_when_outside=False (never reverse), exactly 24/48 fail -- so
+    // the brief's rule is the one that wins outright, no flip needed.
+    const SampleGrid grid = centered_sphere_grid();
+    const DcsddInit init = dcsdd_init(grid);
+    const GlobalMesh mesh = build_global_mesh(init, grid, init.cell_vertex);
+    REQUIRE(mesh.tri_cells.size() == 48u * 3u);
+
+    const simd_float3 sphere_center = {0.0f, 0.0f, 0.0f};
+    const size_t num_tris = mesh.tri_cells.size() / 3;
+    for (size_t t = 0; t < num_tris; ++t) {
+        const simd_float3 v0 = init.cell_vertex[mesh.tri_cells[3 * t + 0]];
+        const simd_float3 v1 = init.cell_vertex[mesh.tri_cells[3 * t + 1]];
+        const simd_float3 v2 = init.cell_vertex[mesh.tri_cells[3 * t + 2]];
+        const simd_float3 normal = simd_cross(v1 - v0, v2 - v0);
+        const simd_float3 centroid = (v0 + v1 + v2) / 3.0f;
+        CAPTURE(t);
+        CHECK(simd_dot(normal, centroid - sphere_center) > 0.0f);
+    }
+}
+
+// --- D3 item 4: face intersection points -----------------------------------------
+
+TEST_CASE("build_global_mesh: face intersection points -- straddling case (numpy "
+          "t/p), clamp guard (both endpoints on one side, both directions), and the "
+          "parallel guard (t=0.5)") {
+    // Same fixture/quad as the cyclic-order test above: axis-0 quad,
+    // edge_idx 0, base (0,1,1), dense cells [9,12,3,0] -> face_points[0] is
+    // the mesh edge between dense 9 and dense 12. Those two cells differ
+    // along axis 1 (y); their shared face plane is at world
+    // y = origin.y + spacing*max(0,1) = -1.5 + 1*1 = -0.5 (python3:
+    // diff_axis=1, plane=-0.5). cell_vertices is a *separate* input from
+    // build_global_mesh's edge/cell topology (which comes from `init`/grid
+    // values only), so overriding entries 9/12 here changes only the lerp
+    // endpoints, not which cells the quad contains or its winding.
+    const SampleGrid grid = centered_sphere_grid();
+    const DcsddInit init = dcsdd_init(grid);
+    REQUIRE(init.edge_axis[0] == 0);
+
+    SUBCASE("straddling: t and p match the numpy lerp") {
+        // python3: va=(1,-1.1,2), vb=(3,-0.2,-1) -> denom=0.9,
+        // t=0.6666666666666666, p=(2.333333333333333,-0.5,0.0)
+        std::vector<simd_float3> verts = init.cell_vertex;
+        verts[9] = simd_float3{1.0f, -1.1f, 2.0f};
+        verts[12] = simd_float3{3.0f, -0.2f, -1.0f};
+        const GlobalMesh mesh = build_global_mesh(init, grid, verts);
+        check_float3_approx(mesh.face_points[0], simd_float3{2.333333333333333f, -0.5f, 0.0f});
+    }
+    SUBCASE("clamp guard: both endpoints below the plane -> t clamps to 1 (== vb)") {
+        // python3: va=(0.5,-1.4,-0.5), vb=(0.5,-0.7,-0.5) -- both y<-0.5,
+        // denom=0.7>0, unclamped t=(-0.5-(-1.4))/0.7~=1.286>1 -> t=1,
+        // p=vb=(0.5,-0.7,-0.5)
+        std::vector<simd_float3> verts = init.cell_vertex;
+        verts[9] = simd_float3{0.5f, -1.4f, -0.5f};
+        verts[12] = simd_float3{0.5f, -0.7f, -0.5f};
+        const GlobalMesh mesh = build_global_mesh(init, grid, verts);
+        check_float3_approx(mesh.face_points[0], simd_float3{0.5f, -0.7f, -0.5f});
+    }
+    SUBCASE("clamp guard: both endpoints above the plane -> t clamps to 0 (== va)") {
+        // python3: va=(0.5,-0.3,-0.5), vb=(0.5,0.4,-0.5) -- both y>-0.5,
+        // denom=0.7>0, unclamped t=(-0.5-(-0.3))/0.7~=-0.286<0 -> t=0,
+        // p=va=(0.5,-0.3,-0.5)
+        std::vector<simd_float3> verts = init.cell_vertex;
+        verts[9] = simd_float3{0.5f, -0.3f, -0.5f};
+        verts[12] = simd_float3{0.5f, 0.4f, -0.5f};
+        const GlobalMesh mesh = build_global_mesh(init, grid, verts);
+        check_float3_approx(mesh.face_points[0], simd_float3{0.5f, -0.3f, -0.5f});
+    }
+    SUBCASE("parallel guard: denom ~ 0 (equal y) -> t=0.5, midpoint") {
+        // python3: va=(1,-0.9,2), vb=(5,-0.9,-3) -- same y, denom=0 -> t=0.5,
+        // p=(3,-0.9,-0.5)
+        std::vector<simd_float3> verts = init.cell_vertex;
+        verts[9] = simd_float3{1.0f, -0.9f, 2.0f};
+        verts[12] = simd_float3{5.0f, -0.9f, -3.0f};
+        const GlobalMesh mesh = build_global_mesh(init, grid, verts);
+        check_float3_approx(mesh.face_points[0], simd_float3{3.0f, -0.9f, -0.5f});
+    }
+}
+
+// --- D3 item 5: sample assignment -------------------------------------------------
+
+TEST_CASE("assign_samples: pinned cell landing, narrow-band exclusion, outlier "
+          "rejection, and CSR integrity, on an n=6 buffered sphere fixture") {
+    const SampleGrid grid = sphere_grid_n6();
+    const DcsddInit init = dcsdd_init(grid);
+    REQUIRE(init.edge_axis.size() == 24u);
+    REQUIRE(init.cell_id.size() == 26u);
+    const GlobalMesh mesh = build_global_mesh(init, grid, init.cell_vertex);
+    REQUIRE(mesh.tri_cells.size() == 48u * 3u);
+
+    const float cell_diag = grid.spacing * std::sqrt(3.0f); // 1.7320508075688772
+    const float two_cell_diag = 2.0f * cell_diag;           // 3.4641016151377544
+
+    SUBCASE("specific samples land in their expected dense cells") {
+        // python3 assign_samples_ref: sample (0,0,0) [flat 0], s=3.030127018922194
+        // -> dense_cell 0, dist 3.1478584448366695. sample (3,3,3)
+        // [flat_index(3,3,3,6)=129] -> dense_cell 25.
+        const SampleAssignment sa = assign_samples(grid, init, init.cell_vertex, mesh);
+        REQUIRE(sa.cell_sample_offsets.size() == init.cell_id.size() + 1);
+
+        bool found0 = false;
+        for (int32_t i = sa.cell_sample_offsets[0]; i < sa.cell_sample_offsets[1]; ++i) {
+            if (sa.cell_sample_indices[i] == 0) found0 = true;
+        }
+        CHECK(found0);
+
+        bool found25 = false;
+        const int32_t flat333 = static_cast<int32_t>(flat_index(3, 3, 3, 6));
+        for (int32_t i = sa.cell_sample_offsets[25]; i < sa.cell_sample_offsets[26]; ++i) {
+            if (sa.cell_sample_indices[i] == flat333) found25 = true;
+        }
+        CHECK(found25);
+    }
+
+    SUBCASE("sample outside the narrow band is absent from the CSR (constructed by "
+            "overriding one sample's value -- the mesh is unaffected by it)") {
+        // python3: overriding sample (5,5,5) [flat 215] to s=10.0 ->
+        // abs(s) >= 2*cell_diag (3.4641016151377544) -> narrow_band_excluded.
+        SampleGrid overridden = grid;
+        const int32_t flat215 = static_cast<int32_t>(flat_index(5, 5, 5, 6));
+        overridden.values[flat215] = 10.0f;
+        REQUIRE(std::fabs(overridden.values[flat215]) >= two_cell_diag);
+
+        const SampleAssignment sa = assign_samples(overridden, init, init.cell_vertex, mesh);
+        for (size_t c = 0; c < init.cell_id.size(); ++c) {
+            for (int32_t i = sa.cell_sample_offsets[c]; i < sa.cell_sample_offsets[c + 1]; ++i) {
+                CHECK(sa.cell_sample_indices[i] != flat215);
+            }
+        }
+    }
+
+    SUBCASE("outlier: |s| small but the closest point on the mesh is far -> dropped") {
+        // python3: overriding sample (0,0,0) [flat 0] to s=0.05 -> distance
+        // to mesh 3.1478584448366695 (position-only, unaffected by the
+        // value override) > cell_diagonal + |s| = 1.7320508075688772 + 0.05
+        // = 1.7820508075688772 -> outlier, dropped (note: this same sample
+        // is assigned to dense_cell 0 when *not* overridden -- see above --
+        // confirming the mesh geometry itself didn't move).
+        SampleGrid overridden = grid;
+        overridden.values[0] = 0.05f;
+
+        const SampleAssignment sa = assign_samples(overridden, init, init.cell_vertex, mesh);
+        for (size_t c = 0; c < init.cell_id.size(); ++c) {
+            for (int32_t i = sa.cell_sample_offsets[c]; i < sa.cell_sample_offsets[c + 1]; ++i) {
+                CHECK(sa.cell_sample_indices[i] != 0);
+            }
+        }
+    }
+
+    SUBCASE("CSR integrity: offsets monotone, sizes match, indices unique per cell") {
+        const SampleAssignment sa = assign_samples(grid, init, init.cell_vertex, mesh);
+        REQUIRE(sa.cell_sample_offsets.size() == init.cell_id.size() + 1);
+        CHECK(sa.cell_sample_offsets.front() == 0);
+        CHECK(sa.cell_sample_offsets.back() == static_cast<int32_t>(sa.cell_sample_indices.size()));
+        for (size_t c = 1; c < sa.cell_sample_offsets.size(); ++c) {
+            CHECK(sa.cell_sample_offsets[c] >= sa.cell_sample_offsets[c - 1]);
+        }
+        for (size_t c = 0; c < init.cell_id.size(); ++c) {
+            std::vector<int32_t> seen;
+            for (int32_t i = sa.cell_sample_offsets[c]; i < sa.cell_sample_offsets[c + 1]; ++i) {
+                const int32_t s = sa.cell_sample_indices[i];
+                CAPTURE(c);
+                CHECK(std::find(seen.begin(), seen.end(), s) == seen.end());
+                seen.push_back(s);
+            }
+        }
+    }
+}
+
+// --- D3 item 6: ring search --------------------------------------------------------
+
+TEST_CASE("assign_samples: ring search finds a hit when the sample's own cell has no "
+          "triangle but ring 1 does; and matches a brute-force all-triangles scan for "
+          "every narrow-band sample in the fixture") {
+    const SampleGrid grid = sphere_grid_n6();
+    const DcsddInit init = dcsdd_init(grid);
+    const GlobalMesh mesh = build_global_mesh(init, grid, init.cell_vertex);
+
+    SUBCASE("own-cell-empty, ring-1-hit: sample (0,0,0)") {
+        // python3 (triangle_bins on this fixture): occupied bin cells only
+        // span [1,3]^3 (the sphere sits well away from the outer buffer
+        // shell) -- sample (0,0,0)'s own cell is (0,0,0)
+        // (floor((p-origin)/spacing), clamped), which has zero triangles
+        // binned into it, but ring 1 (Chebyshev distance 1 -- e.g. cell
+        // (1,1,1)) does. A from-scratch python emulation of the brief's
+        // expanding-ring termination rule (mirroring the production
+        // algorithm below) confirms assignment still succeeds here (dense
+        // cell 0, matching the brute-force reference) with 0 mismatches
+        // across all 216 narrow-band samples in this fixture -- see the
+        // brute-force SUBCASE below for the same check against the actual
+        // C++ implementation.
+        const SampleAssignment sa = assign_samples(grid, init, init.cell_vertex, mesh);
+        bool found = false;
+        for (int32_t i = sa.cell_sample_offsets[0]; i < sa.cell_sample_offsets[1]; ++i) {
+            if (sa.cell_sample_indices[i] == 0) found = true;
+        }
+        CHECK(found);
+    }
+
+    SUBCASE("brute-force equivalence: for every narrow-band sample, the assigned cell "
+            "(or absence) matches an all-triangles brute-force scan written here, "
+            "independent of the production binning/ring-search acceleration") {
+        const SampleAssignment sa = assign_samples(grid, init, init.cell_vertex, mesh);
+
+        // dense_cell -> assigned sample flat indices, from production output.
+        std::vector<std::vector<int32_t>> produced(init.cell_id.size());
+        for (size_t c = 0; c < init.cell_id.size(); ++c) {
+            for (int32_t i = sa.cell_sample_offsets[c]; i < sa.cell_sample_offsets[c + 1]; ++i) {
+                produced[c].push_back(sa.cell_sample_indices[i]);
+            }
+        }
+
+        std::unordered_map<int32_t, int32_t> id_to_dense;
+        for (size_t c = 0; c < init.cell_id.size(); ++c) {
+            id_to_dense[init.cell_id[c]] = static_cast<int32_t>(c);
+        }
+
+        const int32_t n = grid.n;
+        const int32_t cells_per_axis = n - 1;
+        const float cell_diag = grid.spacing * std::sqrt(3.0f);
+        const size_t num_tris = mesh.tri_cells.size() / 3;
+
+        for (int32_t z = 0; z < n; ++z) {
+            for (int32_t y = 0; y < n; ++y) {
+                for (int32_t x = 0; x < n; ++x) {
+                    const int32_t flat = static_cast<int32_t>(flat_index(x, y, z, n));
+                    const float s = grid.values[flat];
+                    if (std::fabs(s) >= 2.0f * cell_diag) continue; // narrow-band excluded
+
+                    const simd_float3 p =
+                        grid.origin + grid.spacing * simd_float3{float(x), float(y), float(z)};
+
+                    // Brute-force: scan ALL triangles directly (no
+                    // binning/ring search -- that acceleration is
+                    // production-only, cross-checked here against this
+                    // completely independent scan).
+                    float best_dist = FLT_MAX;
+                    simd_float3 best_pt{0.0f, 0.0f, 0.0f};
+                    for (size_t t = 0; t < num_tris; ++t) {
+                        const simd_float3 va = init.cell_vertex[mesh.tri_cells[3 * t + 0]];
+                        const simd_float3 vb = init.cell_vertex[mesh.tri_cells[3 * t + 1]];
+                        const simd_float3 vc = init.cell_vertex[mesh.tri_cells[3 * t + 2]];
+                        const simd_float3 cp = closest_point_on_triangle(p, va, vb, vc);
+                        const float d = simd_length(p - cp);
+                        if (d < best_dist) {
+                            best_dist = d;
+                            best_pt = cp;
+                        }
+                    }
+
+                    int32_t expected_dense = -1; // -1 == not assigned anywhere
+                    if (best_dist <= cell_diag + std::fabs(s)) {
+                        int32_t ix = static_cast<int32_t>(std::floor((best_pt.x - grid.origin.x) / grid.spacing));
+                        int32_t iy = static_cast<int32_t>(std::floor((best_pt.y - grid.origin.y) / grid.spacing));
+                        int32_t iz = static_cast<int32_t>(std::floor((best_pt.z - grid.origin.z) / grid.spacing));
+                        ix = std::clamp(ix, 0, cells_per_axis - 1);
+                        iy = std::clamp(iy, 0, cells_per_axis - 1);
+                        iz = std::clamp(iz, 0, cells_per_axis - 1);
+                        const int32_t cid = ix + cells_per_axis * (iy + cells_per_axis * iz);
+                        const auto it = id_to_dense.find(cid);
+                        if (it != id_to_dense.end()) expected_dense = it->second;
+                    }
+
+                    int32_t actual_dense = -1;
+                    for (size_t c = 0; c < produced.size(); ++c) {
+                        for (int32_t v : produced[c]) {
+                            if (v == flat) actual_dense = static_cast<int32_t>(c);
+                        }
+                    }
+                    CAPTURE(x);
+                    CAPTURE(y);
+                    CAPTURE(z);
+                    CHECK(actual_dense == expected_dense);
+                }
+            }
+        }
     }
 }
