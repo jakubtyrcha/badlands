@@ -333,6 +333,10 @@ set(badlands_app_sources_viewer
     src/executables/viewer/model_viewer_view.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
+    # Volumetric-foliage Phase 1: CPU leaf-card voxelizer (splat cards into a
+    # cell grid, emit one jittered tet per occupied cell). Pure geometry, no
+    # renderer changes yet.
+    src/game/geometry/leaf_voxelizer.cpp
     # Multi-mode instanced tree grid (Task 4): builds an InstancedMeshField
     # from a catalog TreeOptions -- see game/visual/tree_field.hpp.
     src/game/visual/tree_field.cpp)
@@ -621,8 +625,10 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
+    game/tests/leaf_voxelizer_tests.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
+    src/game/geometry/leaf_voxelizer.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_tests PRIVATE
