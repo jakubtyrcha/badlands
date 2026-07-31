@@ -21,10 +21,24 @@ targets:
       - path: shaders/shared_types.h
         buildPhase: none
     settings:
-      HEADER_SEARCH_PATHS:
-        - "$(SRCROOT)/vendor/metal-cpp"
-        - "$(SRCROOT)/core/include"
-        - "$(SRCROOT)/shaders"
+      base:
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/vendor/metal-cpp"
+          - "$(SRCROOT)/core/include"
+          - "$(SRCROOT)/shaders"
+      configs:
+        # DCSDD reconstruction is expensive numerical code (dense per-cell
+        # least-squares solves x hundreds of cells x outer iterations); at
+        # the default Debug -O0 it runs ~43x slower than -O2 (measured with a
+        # throwaway timing probe, single-cube remesh at the editor config:
+        # 243.6s at -O0 vs 5.6s at -O2 on this machine), which makes the
+        # app's Debug build effectively unusable for interactive editing.
+        # Opt the core lib into -O2 even in Debug; the Swift app target is
+        # untouched and stays fully debuggable. CoreTests links this lib
+        # rather than compiling core/src itself, so its Debug config picks
+        # up the same speedup for free (see CoreTests' own settings comment).
+        Debug:
+          GCC_OPTIMIZATION_LEVEL: "2"
 
   Shapeshifter:
     type: application
@@ -63,6 +77,14 @@ targets:
       - sdk: CoreGraphics.framework
       - sdk: Foundation.framework
     settings:
+      # No GCC_OPTIMIZATION_LEVEL override here: CoreTests' `sources` is only
+      # tests/core -- it links ShapeshifterCore.a rather than compiling
+      # core/src itself (see USER_HEADER_SEARCH_PATHS below, which exists
+      # only to resolve local #include "camera.h"-style headers, not to add
+      # core/src to this target's own source list). So it automatically
+      # picks up ShapeshifterCore's Debug -O2 (see that target's settings
+      # comment) through the dependency, with nothing to duplicate here.
+      #
       # core/src is deliberately only a *quote* search path (USER_HEADER_SEARCH_PATHS,
       # -iquote): core/src/math.h shadows the C library's <math.h> if it's also on the
       # angle-bracket path, which breaks any TU that pulls in <cmath> (e.g. doctest.h).
