@@ -7,7 +7,7 @@
 #include "dcsdd.h" // TriangleMesh; kept out of renderer.h, see the forward declaration there
 #include "lines.h"
 #include "scene.h"
-#include "sdf.h" // pack_scene, kMaxRaymarchNodes -- the raymarch pass's per-frame node upload
+#include "sdf.h" // pack_scene -- the raymarch pass's per-frame node upload
 
 namespace sq {
 

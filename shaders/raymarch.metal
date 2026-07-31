@@ -59,7 +59,7 @@ fragment RaymarchOut raymarch_fragment(
     // `far` or the step budget is exhausted -- either way `did_hit` stays
     // false and the fragment is discarded (clear color shows through).
     float t = near;
-    float3 p = ray.origin + t * ray.dir;
+    float3 p = float3(0.0); // always overwritten before use -- see the loop's first statement
     bool did_hit = false;
     for (int i = 0; i < 128; ++i) {
         p = ray.origin + t * ray.dir;
