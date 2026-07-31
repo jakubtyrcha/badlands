@@ -118,6 +118,21 @@ class MaterialLibrary {
                                       glm::vec3 transmission_tint,
                                       float transmission_strength);
 
+  // Textureless deferred material for voxelized foliage (Phase 2 of the
+  // volumetric-foliage feature — shader "voxel_foliage", non-instanced
+  // GeometryType::kTexturedMesh only; the instanced variant the shader also
+  // compiles is wired up by a later phase's own factory, not this one).
+  // `tint` multiplies the vertex-baked per-voxel brightness (no albedo
+  // texture); `roughness` and `translucency_strength` feed
+  // packVoxelFoliageGBuffer's material.r/.g so deferred_lighting.wesl adds a
+  // transmission term for pixels this material writes. The underlying
+  // kDeferred factory (G-buffer color/depth targets, cull Back, casts_shadow
+  // = true) is built once, lazily, and shared by every call; instances are
+  // cached by the packed (tint, roughness, strength) tuple, same pattern as
+  // SolidColor. Valid after Initialize().
+  DeferredMaterial VoxelFoliage(glm::vec3 tint, float roughness,
+                                float translucency_strength);
+
   // A terrain layer set: one texture_2d_array per PBR channel, layer i built
   // from the i'th pack passed to LoadTerrainArrays. Holds the textures (not
   // just views) so the caller keeps them alive by keeping this.
@@ -209,6 +224,9 @@ class MaterialLibrary {
   // kept separate from alpha_cutout_factory_ because it compiles a different
   // shader variant (extra_features = {"translucency"}).
   std::unique_ptr<MaterialInstanceFactory> translucent_foliage_factory_;
+  // Deferred "voxel_foliage" factory (non-instanced GeometryType::
+  // kTexturedMesh only). Built lazily on the first VoxelFoliage() call.
+  std::unique_ptr<MaterialInstanceFactory> voxel_foliage_factory_;
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: dir
@@ -227,6 +245,12 @@ class MaterialLibrary {
   // solid_cache_.
   std::map<std::tuple<uint32_t, uint32_t, int, int, uint8_t>, InstanceParams>
       checker_cache_;
+
+  // key: (packed sRGB tint, roughness*255, translucency_strength*255). No
+  // texture views to keep alive here (VoxelFoliage has none) -- caching just
+  // avoids rebuilding the same uniform_overrides map on repeated calls.
+  std::map<std::tuple<uint32_t, uint8_t, uint8_t>, InstanceParams>
+      voxel_foliage_cache_;
 
   mutable bool load_failed_ = false;
 };

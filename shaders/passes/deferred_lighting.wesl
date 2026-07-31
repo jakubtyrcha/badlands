@@ -21,8 +21,9 @@
 // layout is always satisfiable.
 import package::common::frame::{frame, getFullscreenTriangleVertex, reconstructLinearZ, reconstructViewSpacePosition, viewSpaceToWorldOffsetedSpacePosition, decodeOctahedron};
 import package::common::color::srgb_to_linear;
-import package::common::shadow_sampling::sampleShadowMapPCF;
-import package::common::standard_lighting::{shadeStandard, computeSpecularOcclusion, F0_DIELECTRIC};
+import package::common::shadow_sampling::{sampleShadowMapPCF, shadowOpticalThickness};
+import package::common::standard_lighting::{shadeStandard, computeSpecularOcclusion, F0_DIELECTRIC, evaluateTranslucency};
+import package::common::gbuffer_encode::kShadingModelFoliage;
 
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
@@ -123,6 +124,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let finalColorLinear = shadeStandard(albedoLinear, normal, viewDir, roughness, ao, shadow, ambientSpecular);
 
+    // 6. Foliage transmission (Phase 2 of the volumetric-foliage feature):
+    // packVoxelFoliageGBuffer (gbuffer_encode.wesl) tags foliage pixels with
+    // material.a = kShadingModelFoliage (1.0); every standard-path pixel
+    // (packNormalMappedGBuffer, and the G-buffer's own clear value) leaves
+    // material.a at 0.0, so this gate is false for them and `transmission`
+    // stays zero -- byte-identical output to before this branch existed.
+    // materialData.g is the standard path's constant 1.0 "no shadow"
+    // sentinel but foliage's translucency strength (see
+    // packVoxelFoliageGBuffer) -- reading it here is only safe because the
+    // two shading models never share this bit. thickness is textureLoad-only
+    // (no implicit derivatives), so it's safe to compute after the sky
+    // discard above.
+    var transmission = vec3<f32>(0.0);
+    if (materialData.a > kShadingModelFoliage * 0.5) {
+        let thickness = shadowOpticalThickness(worldPos, input.Position.xy, shadow_map);
+        transmission = evaluateTranslucency(normal, viewDir, lightDir, thickness, ao,
+                                            albedoLinear, materialData.g);
+    }
+
     // Directional-shadow debug visualization (T1 plumbing, wired up by T3;
     // see ShadowDebugMode in scene_renderer.hpp). Uniform branch
     // (frame.debugFlags is the same for every pixel this frame), so this does
@@ -141,5 +161,5 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(debugValue, debugValue, debugValue, 1.0);
     }
 
-    return vec4<f32>(finalColorLinear, 1.0);
+    return vec4<f32>(finalColorLinear + transmission, 1.0);
 }
