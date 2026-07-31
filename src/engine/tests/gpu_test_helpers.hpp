@@ -5,6 +5,7 @@
 
 #include <dawn/webgpu_cpp.h>
 
+#include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -173,6 +174,51 @@ inline void WaitForGpu(wgpu::Instance instance, wgpu::Device device,
     instance.ProcessEvents();
     device.Tick();
   }
+}
+
+// What a Dawn validation-error scope observed (see RunCapturingValidationErrors
+// below). `type` stays NoError if the scope closed clean.
+struct CapturedError {
+  wgpu::ErrorType type = wgpu::ErrorType::NoError;
+  std::string message;
+};
+
+// Runs `fn` (expected to trigger GPU work that might raise a Dawn validation
+// error -- e.g. lazy pipeline compilation, a draw with a missing bind group)
+// inside a pushed validation-error scope and returns what it observed.
+// Deliberately NOT a non-null/IsValid() check on whatever `fn` produced: on
+// this Dawn build, a WGSL/bind-group validation failure can still yield a
+// "valid"-looking object (e.g. a non-null wgpu::ShaderModule/RenderPipeline
+// wrapping an internally-invalid "error object", or a draw call that's
+// simply silently dropped) -- Dawn surfaces the failure only via the
+// device's error-reporting channel, which a plain PushErrorScope/
+// PopErrorScope pair around `fn` is what actually observes. Takes
+// (instance, device) rather than a test fixture's own struct type, since
+// different test files' TestGpu fixtures aren't the same type.
+inline CapturedError RunCapturingValidationErrors(
+    wgpu::Instance instance, wgpu::Device device,
+    const std::function<void()>& fn) {
+  device.PushErrorScope(wgpu::ErrorFilter::Validation);
+  fn();
+
+  CapturedError result;
+  bool done = false;
+  device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type,
+          wgpu::StringView message) {
+        if (status == wgpu::PopErrorScopeStatus::Success) {
+          result.type = type;
+          result.message = message.length > 0
+                                ? std::string(message.data, message.length)
+                                : std::string();
+        }
+        done = true;
+      });
+  while (!done) {
+    instance.ProcessEvents();
+  }
+  return result;
 }
 
 }  // namespace badlands::test

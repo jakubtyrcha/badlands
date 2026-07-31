@@ -115,10 +115,13 @@ GpuInstanceRenderer::GpuInstanceRenderer(
                  wgpu::BufferUsage::Indirect | wgpu::BufferUsage::Storage |
                      wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc);
 
-  // Zero the indirect args (index/instance/first/base all 0), one slot per
-  // (bucket, submesh). SetBucketSubmesh fills in each configured slot's
-  // indexCount; the scan fills instanceCount (the same count, broadcast to
-  // every submesh slot of a bucket).
+  // Zero the main set's indirect args (index/instance/first/base all 0), one
+  // slot per (bucket, submesh). SetBucketSubmesh fills in each configured
+  // slot's indexCount; the scan fills instanceCount (broadcast to every
+  // submesh slot of a bucket) each Cull() call. The SHADOW set's args buffer
+  // is zeroed the same way, lazily, by EnsureShadowCullResources() below --
+  // it isn't allocated here at all (see that method + the shadow buffer
+  // fields' declaration comment in the header for why).
   std::vector<IndirectArgsData> zero_args(num_slots);
   queue_.WriteBuffer(args_buffer_, 0, zero_args.data(),
                      zero_args.size() * sizeof(IndirectArgsData));
@@ -154,6 +157,109 @@ GpuInstanceRenderer::GpuInstanceRenderer(
         StorageEntry(5, compacted_buffer_)};
     scatter_bind_group_ = CreateComputeBindGroup(device_, *scatter_pipeline_, e);
   }
+}
+
+void GpuInstanceRenderer::EnsureShadowCullResources() {
+  if (shadow_resources_created_ || !IsValid()) {
+    return;
+  }
+
+  // Second buffer set for CullShadow()'s light-frustum cull -- same sizes,
+  // same usage flags as the main set the constructor built above
+  // (instance_buffer_ is the only one NOT duplicated: both culls classify the
+  // same static per-instance input). See GpuInstanceRenderer::CullShadow's
+  // header comment for why a dedicated set exists instead of a second
+  // same-frame call sharing the main one.
+  config_buffer_shadow_ = MakeBuffer(device_, sizeof(CullConfigData),
+                                     wgpu::BufferUsage::Uniform |
+                                         wgpu::BufferUsage::CopyDst);
+  per_instance_bucket_buffer_shadow_ = MakeBuffer(
+      device_, uint64_t{capacity_} * sizeof(uint32_t), wgpu::BufferUsage::Storage);
+  bucket_count_buffer_shadow_ =
+      MakeBuffer(device_, uint64_t{num_buckets_} * sizeof(uint32_t),
+                 wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst |
+                     wgpu::BufferUsage::CopySrc);
+  bucket_base_buffer_shadow_ =
+      MakeBuffer(device_, uint64_t{num_buckets_} * sizeof(uint32_t),
+                 wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+  write_cursor_buffer_shadow_ = MakeBuffer(
+      device_, uint64_t{num_buckets_} * sizeof(uint32_t), wgpu::BufferUsage::Storage);
+  compacted_buffer_shadow_ =
+      MakeBuffer(device_, uint64_t{compacted_capacity_} * sizeof(glm::mat4),
+                 wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+  const uint32_t num_slots = static_cast<uint32_t>(submesh_meshes_.size());
+  args_buffer_shadow_ =
+      MakeBuffer(device_, uint64_t{num_slots} * sizeof(IndirectArgsData),
+                 wgpu::BufferUsage::Indirect | wgpu::BufferUsage::Storage |
+                     wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc);
+
+  // Zero the shadow set's indirect args first (index/instance/first/base all
+  // 0), THEN replay every already-configured slot's geometry fields over it
+  // below -- mirrors the constructor's main-set zero-fill, but this set can
+  // now be created well after SetBucketSubmesh calls the main set already
+  // saw, so a fresh zero-fill alone would silently lose those slots'
+  // indexCount until their next SetBucketSubmesh call (which may never come
+  // again for a field built once at startup).
+  std::vector<IndirectArgsData> zero_args(num_slots);
+  queue_.WriteBuffer(args_buffer_shadow_, 0, zero_args.data(),
+                     zero_args.size() * sizeof(IndirectArgsData));
+
+  // Same trio as the constructor's main-set bind groups, over the shadow set
+  // (instance_buffer_ shared with the main classify/scatter bind groups).
+  {
+    std::array<wgpu::BindGroupEntry, 4> e{
+        StorageEntry(0, config_buffer_shadow_), StorageEntry(1, instance_buffer_),
+        StorageEntry(2, per_instance_bucket_buffer_shadow_),
+        StorageEntry(3, bucket_count_buffer_shadow_)};
+    classify_bind_group_shadow_ =
+        CreateComputeBindGroup(device_, *classify_pipeline_, e);
+  }
+  {
+    std::array<wgpu::BindGroupEntry, 5> e{
+        StorageEntry(0, config_buffer_shadow_),
+        StorageEntry(1, bucket_count_buffer_shadow_),
+        StorageEntry(2, bucket_base_buffer_shadow_),
+        StorageEntry(3, write_cursor_buffer_shadow_),
+        StorageEntry(4, args_buffer_shadow_)};
+    scan_bind_group_shadow_ = CreateComputeBindGroup(device_, *scan_pipeline_, e);
+  }
+  {
+    std::array<wgpu::BindGroupEntry, 6> e{
+        StorageEntry(0, config_buffer_shadow_), StorageEntry(1, instance_buffer_),
+        StorageEntry(2, per_instance_bucket_buffer_shadow_),
+        StorageEntry(3, bucket_base_buffer_shadow_),
+        StorageEntry(4, write_cursor_buffer_shadow_),
+        StorageEntry(5, compacted_buffer_shadow_)};
+    scatter_bind_group_shadow_ =
+        CreateComputeBindGroup(device_, *scatter_pipeline_, e);
+  }
+
+  // REPLAY: mirrors SetBucketSubmesh's own two targeted args writes (see its
+  // .cpp comment for the exact field layout) for every slot already
+  // configured before this resource creation -- a slot's SetBucketSubmesh
+  // call could not mirror into args_buffer_shadow_ back when it ran (this
+  // set didn't exist yet), so this is the only chance for that slot's
+  // indexCount to reach the shadow args buffer short of a second
+  // SetBucketSubmesh call.
+  for (uint32_t slot = 0; slot < num_slots; ++slot) {
+    const SubmeshMesh& mesh = submesh_meshes_[slot];
+    const uint64_t base = uint64_t{slot} * sizeof(IndirectArgsData);
+    IndirectArgsData args{};
+    args.index_count = mesh.index_count;
+    queue_.WriteBuffer(args_buffer_shadow_, base, &args.index_count,
+                       sizeof(uint32_t));
+    queue_.WriteBuffer(args_buffer_shadow_, base + 8, &args.first_index,
+                       3 * sizeof(uint32_t));
+  }
+
+  shadow_resources_created_ = true;
+}
+
+void GpuInstanceRenderer::EnsureShadowCull() {
+  if (!IsValid()) {
+    return;
+  }
+  EnsureShadowCullResources();
 }
 
 void GpuInstanceRenderer::UploadInstances(
@@ -193,46 +299,87 @@ void GpuInstanceRenderer::SetBucketSubmesh(uint32_t bucket, uint32_t submesh,
                            index_count};
 
   // Pre-fill this slot's indirect-args GEOMETRY fields only, WITHOUT touching
-  // instanceCount@4: the scan publishes that every Cull() (broadcast to every
-  // submesh slot of the bucket), and SetBucketSubmesh may be called AFTER
-  // Cull() (e.g. to swap a slot's mesh) -- writing the whole 20-byte struct
-  // here would zero the slot's GPU-published survivor count. Two targeted
-  // writes straddle the instanceCount slot (struct layout: indexCount@0,
-  // instanceCount@4, firstIndex@8, baseVertex@12, firstInstance@16):
+  // instanceCount@4: the scan publishes that every Cull()/CullShadow() call
+  // (broadcast to every submesh slot of the bucket), and SetBucketSubmesh may
+  // be called AFTER Cull() (e.g. to swap a slot's mesh) -- writing the whole
+  // 20-byte struct here would zero the slot's GPU-published survivor count.
+  // Two targeted writes straddle the instanceCount slot (struct layout:
+  // indexCount@0, instanceCount@4, firstIndex@8, baseVertex@12,
+  // firstInstance@16):
   //   [0..4)   indexCount
   //   [8..20)  firstIndex + baseVertex + firstInstance (all 0)
+  // Mirrored into the main args buffer unconditionally; mirrored into the
+  // SHADOW args buffer too, but ONLY if the shadow buffer set already exists
+  // (shadow_resources_created_ -- see EnsureShadowCullResources(): it's
+  // allocated lazily, so a slot configured before that creation would target
+  // a null args_buffer_shadow_ here otherwise). A slot configured before the
+  // shadow set exists still gets its geometry there eventually --
+  // EnsureShadowCullResources() REPLAYS every submesh_meshes_ entry
+  // (including this one, updated just above) once it creates the buffer.
   IndirectArgsData args{};
   args.index_count = index_count;
   const uint64_t base = uint64_t{slot} * sizeof(IndirectArgsData);
   queue_.WriteBuffer(args_buffer_, base, &args.index_count, sizeof(uint32_t));
   queue_.WriteBuffer(args_buffer_, base + 8, &args.first_index,
                      3 * sizeof(uint32_t));
+  if (shadow_resources_created_) {
+    queue_.WriteBuffer(args_buffer_shadow_, base, &args.index_count,
+                       sizeof(uint32_t));
+    queue_.WriteBuffer(args_buffer_shadow_, base + 8, &args.first_index,
+                       3 * sizeof(uint32_t));
+  }
 }
 
 void GpuInstanceRenderer::Cull(FrameContext& frame, const Camera& camera) {
   if (!IsValid()) {
     return;
   }
-
   const Frustum frustum =
       Frustum::FromViewProj(camera.GetProj() * camera.GetView());
+  CullInternal(frame, frustum, camera.GetPosition(), config_buffer_,
+              bucket_count_buffer_, classify_bind_group_, scan_bind_group_,
+              scatter_bind_group_);
+}
+
+void GpuInstanceRenderer::CullShadow(FrameContext& frame, const Camera& camera,
+                                     const glm::mat4& light_view_proj) {
+  if (!IsValid()) {
+    return;
+  }
+  // Lazily provision the shadow buffer set/bind groups (a no-op if
+  // EnsureShadowCull() or an earlier CullShadow() already did) before this
+  // dispatch reads/writes them.
+  EnsureShadowCullResources();
+  // Frustum from the LIGHT's view-proj, but camera_world_pos/LOD thresholds
+  // still from `camera` -- see this method's header comment.
+  const Frustum frustum = Frustum::FromViewProj(light_view_proj);
+  CullInternal(frame, frustum, camera.GetPosition(), config_buffer_shadow_,
+              bucket_count_buffer_shadow_, classify_bind_group_shadow_,
+              scan_bind_group_shadow_, scatter_bind_group_shadow_);
+}
+
+void GpuInstanceRenderer::CullInternal(
+    FrameContext& frame, const Frustum& frustum, glm::vec3 camera_world_pos,
+    wgpu::Buffer config_buffer, wgpu::Buffer bucket_count_buffer,
+    wgpu::BindGroup classify_bind_group, wgpu::BindGroup scan_bind_group,
+    wgpu::BindGroup scatter_bind_group) {
   CullConfigData config{};
   for (int i = 0; i < 6; ++i) {
     config.planes[static_cast<size_t>(i)] = frustum.planes[i];
   }
-  config.camera_world_pos = glm::vec4(camera.GetPosition(), 0.0f);
+  config.camera_world_pos = glm::vec4(camera_world_pos, 0.0f);
   config.lod_thresholds = glm::vec4(0.0f);
   for (uint32_t i = 0; i < kMaxLods - 1; ++i) {
     config.lod_thresholds[static_cast<int>(i)] = lod_thresholds_[i];
   }
   config.counts = glm::uvec4(instance_count_, num_buckets_, compacted_capacity_,
                              num_submeshes_);
-  queue_.WriteBuffer(config_buffer_, 0, &config, sizeof(config));
+  queue_.WriteBuffer(config_buffer, 0, &config, sizeof(config));
 
   // Clear the per-bucket counts before classify atomicAdds into them. The scan
   // resets writeCursor itself; per_instance_bucket entries beyond
   // instance_count_ are never read (both classify and scatter guard i >= count).
-  frame.GetEncoder().ClearBuffer(bucket_count_buffer_, 0,
+  frame.GetEncoder().ClearBuffer(bucket_count_buffer, 0,
                                  uint64_t{num_buckets_} * sizeof(uint32_t));
 
   const uint32_t classify_wg =
@@ -250,21 +397,21 @@ void GpuInstanceRenderer::Cull(FrameContext& frame, const Camera& camera) {
   if (classify_dispatch > 0) {
     wgpu::ComputePassEncoder pass = frame.BeginComputePass();
     pass.SetPipeline(classify_pipeline_->pipeline);
-    pass.SetBindGroup(0, classify_bind_group_, 0, nullptr);
+    pass.SetBindGroup(0, classify_bind_group, 0, nullptr);
     pass.DispatchWorkgroups(classify_dispatch, 1, 1);
     pass.End();
   }
   {  // scan: always runs (publishes bases + zeroes instanceCounts even for 0)
     wgpu::ComputePassEncoder pass = frame.BeginComputePass();
     pass.SetPipeline(scan_pipeline_->pipeline);
-    pass.SetBindGroup(0, scan_bind_group_, 0, nullptr);
+    pass.SetBindGroup(0, scan_bind_group, 0, nullptr);
     pass.DispatchWorkgroups(1, 1, 1);
     pass.End();
   }
   if (scatter_dispatch > 0) {
     wgpu::ComputePassEncoder pass = frame.BeginComputePass();
     pass.SetPipeline(scatter_pipeline_->pipeline);
-    pass.SetBindGroup(0, scatter_bind_group_, 0, nullptr);
+    pass.SetBindGroup(0, scatter_bind_group, 0, nullptr);
     pass.DispatchWorkgroups(scatter_dispatch, 1, 1);
     pass.End();
   }
@@ -272,10 +419,26 @@ void GpuInstanceRenderer::Cull(FrameContext& frame, const Camera& camera) {
 
 void GpuInstanceRenderer::Draw(
     RenderPassContext& pass, FrameContext& frame,
-    const BucketSubmeshMaterialFn& material_for_bucket_submesh) const {
+    const BucketSubmeshMaterialFn& material_for_bucket_submesh,
+    CullSet cull_set) const {
   if (!IsValid()) {
     return;
   }
+  const bool shadow = cull_set == CullSet::kShadow;
+  // A field with no shadow-casting submesh never triggers CullShadow() or
+  // EnsureShadowCull() (see e.g. scene_renderer.cpp's HasPass(kShadow) gate
+  // around its CullShadow() call), so the shadow buffer set can genuinely
+  // never exist by the time Draw(..., kShadow) is called -- which itself is
+  // NOT gated the same way (see this method's header comment). Bail before
+  // touching any shadow_*_ buffer: they're null pre-creation, and binding/
+  // indirect-drawing against a null buffer is a Dawn validation error, not
+  // the safe no-op this call must be.
+  if (shadow && !shadow_resources_created_) {
+    return;
+  }
+  const wgpu::Buffer& compacted = shadow ? compacted_buffer_shadow_ : compacted_buffer_;
+  const wgpu::Buffer& bucket_base = shadow ? bucket_base_buffer_shadow_ : bucket_base_buffer_;
+  const wgpu::Buffer& args = shadow ? args_buffer_shadow_ : args_buffer_;
   for (uint32_t bucket = 0; bucket < num_buckets_; ++bucket) {
     for (uint32_t submesh = 0; submesh < num_submeshes_; ++submesh) {
       const uint32_t slot = bucket * num_submeshes_ + submesh;
@@ -288,15 +451,13 @@ void GpuInstanceRenderer::Draw(
       if (!material) {
         continue;  // caller opted out of this slot
       }
-      if (!material->BindInstanceData(pass, frame, compacted_buffer_,
-                                      bucket_base_buffer_)) {
+      if (!material->BindInstanceData(pass, frame, compacted, bucket_base)) {
         continue;  // not an instanced material
       }
       pass.SetVertexBuffer(0, mesh.vertex_buffer);
       pass.SetIndexBuffer(mesh.index_buffer, mesh.index_format);
       // Slots with 0 survivors draw nothing (indirect instanceCount == 0).
-      pass.DrawIndexedIndirect(args_buffer_,
-                               uint64_t{slot} * sizeof(IndirectArgsData));
+      pass.DrawIndexedIndirect(args, uint64_t{slot} * sizeof(IndirectArgsData));
     }
   }
 }

@@ -12,6 +12,7 @@
 // of an indirect-args buffer, not whatever the CPU passed at record time?
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -41,11 +42,14 @@
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material/rendering_material_instance.hpp"
+#include "engine/rendering/material_library.hpp"
 #include "engine/rendering/passes/render_forward.hpp"
+#include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/texture_readback.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
+#include "engine/scene/scene_graph.hpp"
 #include "engine/tests/buffer_readback.hpp"
 #include "gpu_test_helpers.hpp"
 
@@ -853,43 +857,12 @@ TEST_CASE("BindPerObject refuses an instanced material (no unbound group-1 draw)
 // means the shadow pipeline genuinely compiled + reflected.
 // ===========================================================================
 
-namespace {
-
-struct CapturedError {
-  wgpu::ErrorType type = wgpu::ErrorType::NoError;
-  std::string message;
-};
-
-// Runs `fn` (expected to trigger lazy pipeline compilation) inside a Dawn
-// validation-error scope and returns what it observed. See the file comment
-// above for why this — not a non-null/IsValid() check alone — is what
-// actually proves shader compilation succeeded.
-CapturedError RunCapturingValidationErrors(TestGpu& g,
-                                           const std::function<void()>& fn) {
-  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
-  fn();
-
-  CapturedError result;
-  bool done = false;
-  g.device.PopErrorScope(
-      wgpu::CallbackMode::AllowProcessEvents,
-      [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type,
-          wgpu::StringView message) {
-        if (status == wgpu::PopErrorScopeStatus::Success) {
-          result.type = type;
-          result.message = message.length > 0
-                                ? std::string(message.data, message.length)
-                                : std::string();
-        }
-        done = true;
-      });
-  while (!done) {
-    g.instance.ProcessEvents();
-  }
-  return result;
-}
-
-}  // namespace
+// CapturedError/RunCapturingValidationErrors -- shared, see
+// gpu_test_helpers.hpp for the full rationale (this file's own copy of both
+// used to live here; hoisted so game/tests/tree_field_gpu_tests.cpp doesn't
+// carry a second copy).
+using badlands::test::CapturedError;
+using badlands::test::RunCapturingValidationErrors;
 
 TEST_CASE("instanced forward material's shadow-pass variant compiles",
           "[gpu_instance][gpu]") {
@@ -908,7 +881,7 @@ TEST_CASE("instanced forward material's shadow-pass variant compiles",
       GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
 
   entt::resource<RenderingMaterialInstance> handle;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
                               MaterialPassType::kForwardOpaque,
                               RenderPassType::kShadow, InstanceParams{});
@@ -935,7 +908,7 @@ TEST_CASE("instanced G-buffer material's shadow-pass variant compiles",
       GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
 
   entt::resource<RenderingMaterialInstance> handle;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
                               MaterialPassType::kDeferred,
                               RenderPassType::kShadow, InstanceParams{});
@@ -991,7 +964,7 @@ TEST_CASE(
   };
 
   std::shared_ptr<const CompiledComputePipeline> classify, scan, scatter;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     classify = fresh_gen.GetComputePipeline("compute/instance_classify");
     scan = fresh_gen.GetComputePipeline("compute/instance_scan");
     scatter = fresh_gen.GetComputePipeline("compute/instance_scatter");
@@ -2217,6 +2190,191 @@ TEST_CASE("GPU shared-slice render: a bucket's submeshes draw the SAME "
 }
 
 // ===========================================================================
+// Review fix: the shadow cull buffer set (config/perInstanceBucket/
+// bucketCount/bucketBase/writeCursor/compacted/args, 7 buffers + 3 bind
+// groups) is now LAZY -- allocated on first need (CullShadow() or
+// InstancedMeshField::SetSubmeshShadow's EnsureShadowCull() call) rather
+// than eagerly by the constructor, since most GpuInstanceRenderers never
+// cast a shadow. Proven directly via GpuInstanceRenderer: GetShadowArgsBuffer
+// stays null until CullShadow() runs, and a slot configured via
+// SetBucketSubmesh BEFORE that first CullShadow() still has its geometry
+// (indexCount) correctly present in the shadow args buffer afterward -- the
+// REPLAY EnsureShadowCullResources() performs on creation.
+// ===========================================================================
+TEST_CASE("GPU shadow cull resources are lazy: null until CullShadow(), then "
+          "replay prefills a slot configured before the first CullShadow()",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // thresholds pushed to +inf -> lod0 -> bucket 0 regardless of distance.
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, /*capacity=*/1,
+                               /*num_models=*/1, {1e30f, 1e30f});
+  REQUIRE(renderer.IsValid());
+
+  // A dummy (never actually drawn in this test) mesh, just to give bucket
+  // 0/submesh 0 real geometry -- SetBucketSubmesh's indexCount is what the
+  // replay below must have carried into the shadow args buffer.
+  constexpr uint32_t kIndexCount = 42;
+  std::array<float, 3> dummy_verts = {0.0f, 0.0f, 0.0f};
+  std::array<uint32_t, 3> dummy_indices = {0, 0, 0};
+  wgpu::Buffer vbuf = UploadBuffer(g.device, dummy_verts.data(),
+                                   dummy_verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, dummy_indices.data(),
+                                   dummy_indices.size() * sizeof(uint32_t),
+                                   wgpu::BufferUsage::Index);
+  renderer.SetBucketSubmesh(/*bucket=*/0, /*submesh=*/0, vbuf, ibuf,
+                            wgpu::IndexFormat::Uint32, kIndexCount);
+
+  // RED (pre-fix): the shadow set was allocated eagerly by the constructor,
+  // so this was already non-null here -- no lazy-creation contract existed to
+  // check. GREEN (post-fix): still null -- nothing has requested shadow
+  // resources yet (SetBucketSubmesh alone doesn't).
+  CHECK(renderer.GetShadowArgsBuffer() == nullptr);
+
+  Camera camera = MakeCullCamera(1.0f);
+  const glm::mat4 light_view_proj(1.0f);  // contents irrelevant -- not read back
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.CullShadow(frame, camera, light_view_proj);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  REQUIRE(renderer.GetShadowArgsBuffer() != nullptr);
+
+  // Slot 0's indirect-args geometry fields (index_count@0, instance_count@4,
+  // first_index@8, base_vertex@12, first_instance@16 -- kArgsStride=20 bytes,
+  // 5 u32-sized fields) must show the REPLAYED indexCount, proving
+  // EnsureShadowCullResources() picked up a slot configured before it ever
+  // ran, not just future SetBucketSubmesh calls.
+  std::vector<uint32_t> args = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetShadowArgsBuffer(), 0, 5);
+  REQUIRE(args.size() == 5);
+  CHECK(args[0] == kIndexCount);  // index_count
+  CHECK(args[2] == 0u);           // first_index
+  CHECK(args[3] == 0u);           // base_vertex
+  CHECK(args[4] == 0u);           // first_instance
+}
+
+// ===========================================================================
+// Phase 4 of the volumetric-foliage feature: a dedicated shadow cull set.
+// CullShadow() dispatches the SAME classify/scan/scatter pipeline as Cull(),
+// but against the light's frustum, into a SEPARATE buffer set -- Cull()'s
+// camera-frustum result and CullShadow()'s light-frustum result must never
+// leak into each other. Proven directly via GpuInstanceRenderer (not through
+// InstancedMeshField): one instance placed INSIDE the light's ortho box but
+// BEHIND the camera (so Cull() culls it, CullShadow() doesn't), and the
+// mirrored placement (inside the camera frustum, outside the light box).
+// ---------------------------------------------------------------------------
+TEST_CASE("GPU cull: main and shadow cull sets are independent",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  Camera camera = MakeCullCamera(1.0f);  // at the origin, looking down -Z
+
+  // A top-down light: eye at (0,20,0) looking straight down at the origin,
+  // "up" = -Z (so the light's local axes are: right=world X, its own up=
+  // -world Z, forward=-world Y) -- deliberately unrelated to the camera's
+  // -Z-facing frustum, so the two only agree by coincidence, never by
+  // construction. The ortho box (verified numerically, not just by
+  // construction, since a light-space basis is easy to mis-derive by hand)
+  // covers world X in [-5,5], world Z in [-5,5], world Y in [-20,20]
+  // (eye.y-far .. eye.y-near along the forward axis).
+  const glm::mat4 light_proj = glm::ortho(-5.0f, 5.0f, -5.0f, 5.0f, 0.0f, 40.0f);
+  const glm::mat4 light_view =
+      glm::lookAt(glm::vec3(0.0f, 20.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f),
+                  glm::vec3(0.0f, 0.0f, -1.0f));
+  const glm::mat4 light_view_proj = light_proj * light_view;
+
+  // Case 1: behind the camera (camera looks down -Z, so +Z is culled by
+  // Cull()) but squarely inside the light's box (X=0, Z=3, Y=0 -- all within
+  // the ranges above).
+  const GpuInstanceRenderer::InstanceInput behind_camera =
+      MakeInstance(glm::vec3(0.0f, 0.0f, 3.0f), /*model=*/0u, /*radius=*/0.5f);
+  // Case 2: dead ahead of the camera (inside Cull()'s frustum -- the "straight
+  // ahead" case other cull tests in this file use) but at Z=-10, outside the
+  // light's Z in [-5,5] box (outside CullShadow()'s frustum).
+  const GpuInstanceRenderer::InstanceInput outside_light =
+      MakeInstance(glm::vec3(0.0f, 0.0f, -10.0f), /*model=*/0u,
+                  /*radius=*/0.5f);
+
+  struct Survivors {
+    uint32_t main_count = 0;
+    uint32_t shadow_count = 0;
+  };
+  auto run_case = [&](const GpuInstanceRenderer::InstanceInput& instance) {
+    // thresholds pushed to +inf -> lod0 -> bucket 0 regardless of distance.
+    GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, /*capacity=*/1,
+                                 /*num_models=*/1, {1e30f, 1e30f});
+    REQUIRE(renderer.IsValid());
+    renderer.UploadInstances(
+        std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
+
+    FrameContext frame;
+    frame.Begin(g.device, g.queue, UniformData{});
+    renderer.Cull(frame, camera);
+    renderer.CullShadow(frame, camera, light_view_proj);
+    wgpu::CommandBuffer cmd = frame.End();
+    g.queue.Submit(1, &cmd);
+    test::WaitForGpu(g.instance, g.device, g.queue);
+
+    std::vector<uint32_t> main_args = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetArgsBuffer(), 0, 5);
+    std::vector<uint32_t> shadow_args = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetShadowArgsBuffer(), 0, 5);
+    REQUIRE(main_args.size() == 5);
+    REQUIRE(shadow_args.size() == 5);
+    Survivors s{main_args[1], shadow_args[1]};  // instanceCount @ index 1
+
+    // Ground-truth cross-check against the raw per-bucket counts (bucket 0),
+    // independent of the args-buffer broadcast.
+    std::vector<uint32_t> main_counts = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetBucketCountBuffer(), 0, 1);
+    std::vector<uint32_t> shadow_counts = test::ReadBufferSync<uint32_t>(
+        g.instance, g.device, g.queue, renderer.GetShadowBucketCountBuffer(), 0,
+        1);
+    REQUIRE(main_counts.size() == 1);
+    REQUIRE(shadow_counts.size() == 1);
+    CHECK(main_counts[0] == s.main_count);
+    CHECK(shadow_counts[0] == s.shadow_count);
+
+    // The surviving set's compacted transform is the instance's own (proves
+    // "shows 1 survivor" means the actual instance, not a stray write).
+    if (s.main_count == 1) {
+      std::vector<glm::mat4> compacted = test::ReadBufferSync<glm::mat4>(
+          g.instance, g.device, g.queue, renderer.GetCompactedBuffer(), 0, 1);
+      REQUIRE(compacted.size() == 1);
+      CHECK(Mat4Equal(compacted[0], instance.transform));
+    }
+    if (s.shadow_count == 1) {
+      std::vector<glm::mat4> shadow_compacted = test::ReadBufferSync<glm::mat4>(
+          g.instance, g.device, g.queue, renderer.GetShadowCompactedBuffer(), 0,
+          1);
+      REQUIRE(shadow_compacted.size() == 1);
+      CHECK(Mat4Equal(shadow_compacted[0], instance.transform));
+    }
+    return s;
+  };
+
+  {
+    Survivors s = run_case(behind_camera);
+    INFO("behind camera / inside light box: main=" << s.main_count
+                                                    << " shadow=" << s.shadow_count);
+    CHECK(s.main_count == 0);
+    CHECK(s.shadow_count == 1);
+  }
+  {
+    Survivors s = run_case(outside_light);
+    INFO("inside camera / outside light box: main=" << s.main_count
+                                                     << " shadow=" << s.shadow_count);
+    CHECK(s.main_count == 1);
+    CHECK(s.shadow_count == 0);
+  }
+}
+
+// ===========================================================================
 // Task 2: InstancedMeshField — the reusable engine component bundling a
 // GpuInstanceRenderer with a per-(bucket,submesh) {PassKind, material}
 // mapping. Fixture: one model, one lod (thresholds pushed to +inf so a single
@@ -2989,6 +3147,230 @@ TEST_CASE("InstancedMeshField::SetSubmesh rejects out-of-range lod/submesh clean
 }
 
 // ===========================================================================
+// Phase 4 of the volumetric-foliage feature: InstancedMeshField's shadow
+// slot. SetSubmeshShadow attaches a shadow-pass material to an ALREADY
+// SetSubmesh-configured slot (geometry is shared, not re-specified);
+// HasPass(kShadow) reflects only whether a shadow_material is attached
+// (independent of the slot's main PassKind/material); Draw(kShadow) draws
+// only the slots with one, routed through CullShadow()'s result set, into a
+// depth-only Depth32Float pass (mirroring the real Pass 0 attachment).
+// ---------------------------------------------------------------------------
+namespace {
+
+struct ShadowSlotFieldFixture {
+  std::unique_ptr<MaterialInstanceFactory> factory;  // casts_shadow=true
+  MaterialInstanceCache cache;
+  wgpu::Buffer ibuf;
+  wgpu::Buffer vbuf;
+  std::unique_ptr<InstancedMeshField> field;
+};
+
+// One model/lod/submesh bucket: geometry configured via SetSubmesh with a
+// NULL main-pass material (this fixture isolates the shadow path from the
+// deferred/forward-opaque ones) and no shadow material attached yet --
+// callers attach one via field->SetSubmeshShadow(...) to exercise the
+// HasPass(kShadow) flip. The instance sits at world z=0.5 so, under
+// MakeOrthoFrame's identity light_view_proj and zero camera offset, the
+// shadow vertex path's worldCameraOffsetedSpaceToLightClipSpace(world) maps
+// it straight to clip.xyz = (0,0,0.5) -- i.e. dead center of the depth
+// target, at a depth comfortably inside the shadow pass's [0,1] (conventional
+// Z, Less-compare) range.
+std::unique_ptr<ShadowSlotFieldFixture> BuildShadowSlotField(TestGpu& g) {
+  auto fx = std::make_unique<ShadowSlotFieldFixture>();
+
+  fx->factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {}, /*casts_shadow=*/true, wgpu::TextureFormat::Depth32Float);
+  REQUIRE(fx->factory != nullptr);
+
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  fx->ibuf =
+      UploadBuffer(g.device, idx.data(), sizeof(idx), wgpu::BufferUsage::Index);
+  std::vector<float> verts = QuadVerticesSized(0.4f);
+  fx->vbuf = UploadBuffer(g.device, verts.data(), verts.size() * sizeof(float),
+                          wgpu::BufferUsage::Vertex);
+
+  fx->field = std::make_unique<InstancedMeshField>(
+      g.device, g.queue, *g.gen, /*capacity=*/1, /*num_models=*/1,
+      /*num_submeshes=*/1, std::array<float, 2>{1e30f, 1e30f});
+  REQUIRE(fx->field->IsValid());
+
+  GpuInstanceRenderer::InstanceInput instance =
+      MakeInstance(glm::vec3(0.0f, 0.0f, 0.5f), /*model=*/0u, /*radius=*/0.5f);
+  fx->field->UploadInstances(
+      std::span<const GpuInstanceRenderer::InstanceInput>(&instance, 1));
+
+  fx->field->SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, fx->vbuf, fx->ibuf,
+                        wgpu::IndexFormat::Uint32, 6,
+                        InstancedMeshField::PassKind::kDeferred,
+                        /*material=*/nullptr);
+  REQUIRE_FALSE(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+
+  return fx;
+}
+
+// Renders `field` into `depth_view` (Depth32Float, no color attachments,
+// mirroring scene_renderer.cpp's Pass 0 descriptor) via Cull()+CullShadow()
+// (light_view_proj matching MakeOrthoFrame's identity) then
+// Draw(kShadow). Returns the Dawn validation-scope result.
+CapturedError RenderShadowSlotPass(TestGpu& g, InstancedMeshField& field,
+                                   wgpu::TextureView depth_view) {
+  UniformData frame_uniforms = MakeOrthoFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  Camera cull_camera = MakeCullCamera(1.0f);
+  field.Cull(frame, cull_camera);
+  field.CullShadow(frame, cull_camera, frame_uniforms.light_view_proj);
+
+  CapturedError result;
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+  {
+    wgpu::RenderPassDepthStencilAttachment depth_attachment{};
+    depth_attachment.view = depth_view;
+    depth_attachment.depthClearValue = 1.0f;  // conventional-Z: far
+    depth_attachment.depthLoadOp = wgpu::LoadOp::Clear;
+    depth_attachment.depthStoreOp = wgpu::StoreOp::Store;
+    depth_attachment.stencilLoadOp = wgpu::LoadOp::Undefined;
+    depth_attachment.stencilStoreOp = wgpu::StoreOp::Undefined;
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = 0;
+    desc.depthStencilAttachment = &depth_attachment;
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    field.Draw(pass, frame, InstancedMeshField::PassKind::kShadow);
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+
+  bool done = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView msg) {
+        result.type = type;
+        result.message =
+            msg.length > 0 ? std::string(msg.data, msg.length) : std::string();
+        done = true;
+      });
+  while (!done) {
+    g.instance.ProcessEvents();
+    g.device.Tick();
+  }
+  test::WaitForGpu(g.instance, g.device, g.queue);
+  return result;
+}
+
+}  // namespace
+
+TEST_CASE("InstancedMeshField: SetSubmeshShadow flips HasPass(kShadow), "
+          "Draw(kShadow) draws only once attached",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildShadowSlotField(g);
+
+  constexpr uint32_t kShadowTarget = 32;
+  wgpu::TextureDescriptor depth_desc{};
+  depth_desc.size = {kShadowTarget, kShadowTarget, 1};
+  depth_desc.format = wgpu::TextureFormat::Depth32Float;
+  depth_desc.usage =
+      wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+  wgpu::Texture depth_tex = g.device.CreateTexture(&depth_desc);
+  wgpu::TextureView depth_view = depth_tex.CreateView();
+
+  // Before SetSubmeshShadow: no shadow material is attached, so Draw(kShadow)
+  // must be a safe no-op -- NoError, and the depth target stays at its clear
+  // value (nothing was rasterized).
+  {
+    CapturedError err = RenderShadowSlotPass(g, *fx->field, depth_view);
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    TextureReadback rb(g.instance, g.device, g.queue);
+    CpuImage img = rb.ReadTextureSync(depth_tex, kShadowTarget, kShadowTarget,
+                                      wgpu::TextureFormat::Depth32Float);
+    CHECK(img.GetDepth(kShadowTarget / 2, kShadowTarget / 2) == 1.0f);
+  }
+
+  // Resolve a real kShadow material instance (casts_shadow=true factory) and
+  // attach it to the fixture's one slot.
+  InstanceParams shadow_params;
+  shadow_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  shadow_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type shadow_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"p4_shadow_slot"}.value(), GeometryType::kInstancedMesh,
+      RenderPassType::kShadow, 0);
+  auto shadow_handle = fx->cache.GetOrCreate(
+      shadow_key, *fx->factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kDeferred, RenderPassType::kShadow, shadow_params);
+  REQUIRE(shadow_handle);
+  REQUIRE(shadow_handle->IsValid());
+
+  fx->field->SetSubmeshShadow(/*model=*/0, /*lod=*/0, /*submesh=*/0,
+                              shadow_handle.operator->());
+  CHECK(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+
+  // After SetSubmeshShadow: Draw(kShadow) actually draws -- NoError, and the
+  // depth target's center pixel (under the instance -- see BuildShadowSlotField's
+  // comment) was written to something less than the 1.0 clear value.
+  {
+    CapturedError err = RenderShadowSlotPass(g, *fx->field, depth_view);
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    TextureReadback rb(g.instance, g.device, g.queue);
+    CpuImage img = rb.ReadTextureSync(depth_tex, kShadowTarget, kShadowTarget,
+                                      wgpu::TextureFormat::Depth32Float);
+    const float center_depth = img.GetDepth(kShadowTarget / 2, kShadowTarget / 2);
+    INFO("center depth = " << center_depth);
+    CHECK(center_depth < 1.0f);
+  }
+}
+
+// ===========================================================================
+// Review fix: SetSubmesh must overwrite the WHOLE SlotInfo (shadow_material
+// reset to nullptr too), not just the main-pass fields -- a slot repurposed
+// via a second SetSubmesh call (new mesh/material for that slot) otherwise
+// keeps carrying whatever shadow_material an EARLIER, now-unrelated
+// SetSubmeshShadow call attached, and would draw it into the shadow pass with
+// (for a repurposed model/lod/submesh) mismatched geometry. SetSubmeshShadow
+// still attaches AFTER SetSubmesh -- see instanced_mesh_field.hpp's updated
+// order-contract comments on both methods.
+// ===========================================================================
+TEST_CASE("InstancedMeshField: SetSubmesh on an already-shadow-configured "
+          "slot resets its stale shadow_material",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildShadowSlotField(g);  // SetSubmesh(..., material=nullptr) already ran
+
+  InstanceParams shadow_params;
+  shadow_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  shadow_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type shadow_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"p_setsubmesh_reset_shadow"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
+  auto shadow_handle = fx->cache.GetOrCreate(
+      shadow_key, *fx->factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kDeferred, RenderPassType::kShadow, shadow_params);
+  REQUIRE(shadow_handle);
+  REQUIRE(shadow_handle->IsValid());
+
+  fx->field->SetSubmeshShadow(/*model=*/0, /*lod=*/0, /*submesh=*/0,
+                              shadow_handle.operator->());
+  CHECK(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+
+  // Repurpose the SAME slot via SetSubmesh (its normal use -- e.g. swapping
+  // the slot's mesh/main-pass material) WITHOUT re-attaching a shadow
+  // material. The full-reset contract says this must clear the slot's stale
+  // shadow_material along with everything else -- currently (pre-fix) it
+  // survives, so HasPass(kShadow) wrongly stays true.
+  fx->field->SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, fx->vbuf, fx->ibuf,
+                        wgpu::IndexFormat::Uint32, 6,
+                        InstancedMeshField::PassKind::kDeferred,
+                        /*material=*/nullptr);
+  CHECK_FALSE(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+}
+
+// ===========================================================================
 // Task 3: SceneRenderer drives SceneContext::instanced_fields. Task 3 wired
 // SceneRenderer::Render to: Cull() every field BEFORE Pass 0 (frame.Begin,
 // before any render pass opens on the encoder); Draw(kDeferred) each field
@@ -3087,7 +3469,7 @@ CpuImage RenderSceneWithFields(TestGpu& g, const Camera& camera,
                       g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
   renderer.MutableFogConfig().enabled = false;  // would haze the readback
 
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     renderer.Render(camera, registry, scene_context, rt.GetView());
   });
   INFO("Dawn validation error: " << err.message);
@@ -3149,4 +3531,638 @@ TEST_CASE("SceneRenderer draws SceneContext::instanced_fields (empty registry, "
     CHECK(std::abs(deferred_red - background_red) < 0.05f);
     CHECK(std::abs(forward_red - background_red) < 0.05f);
   }
+}
+
+// ===========================================================================
+// Phase 4 of the volumetric-foliage feature, scene level: SceneRenderer's
+// real Pass 0 (shadow depth) now culls + draws instanced-field shadow
+// submeshes (scene_renderer.cpp's pre-pass cull block + Pass 0, gated on
+// shadow_config_.enable_shadow_map && field->HasPass(kShadow)). A field
+// carrying ONLY a shadow submesh (no deferred/forward-opaque material -- so
+// the field itself never appears in the lit image) is placed as a horizontal
+// card above a floor entity, under an overhead (straight-down) sun so the
+// shadow lands directly beneath it with zero horizontal offset. Read back in
+// ShadowDebugMode::ShadowMapOnly (shadowMapPCF alone, 1.0 = lit, 0.0 = fully
+// shadowed -- see deferred_lighting.wesl): the floor pixel directly under the
+// card must be shadowed; a floor pixel outside the card's footprint must not.
+// ===========================================================================
+namespace {
+
+// World -> pixel through camera's own matrices (mirrors this file's
+// SceneProjectToPixel/decal_pass_tests.cpp's ProjectToPixel), parameterized
+// on the target size since this test uses a different size than that helper.
+glm::ivec2 WorldToPixel(const Camera& camera, glm::vec3 world, uint32_t width,
+                        uint32_t height) {
+  const glm::vec4 clip = camera.GetProj() * camera.GetView() * glm::vec4(world, 1.0f);
+  REQUIRE(clip.w > 0.0f);  // in front of the camera
+  const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+  return glm::ivec2(
+      static_cast<int>((ndc.x * 0.5f + 0.5f) * static_cast<float>(width)),
+      static_cast<int>((1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(height)));
+}
+
+}  // namespace
+
+TEST_CASE("SceneRenderer Pass 0 draws instanced-field shadow submeshes onto "
+          "real geometry",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // A shadow-only material: casts_shadow=true, depth wired to the real
+  // shadow-map format (matches shadow_map.cpp's Depth32Float texture --
+  // scene_renderer.cpp's Pass 0 attaches shadow_map_.GetDepthView() directly).
+  auto shadow_factory = MakeInstancedFactory(
+      g, "instanced_gbuffer", MaterialPassType::kDeferred,
+      {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat, GBuffer::kMaterialFormat},
+      {}, /*casts_shadow=*/true, wgpu::TextureFormat::Depth32Float);
+  REQUIRE(shadow_factory != nullptr);
+
+  MaterialInstanceCache field_cache;
+  InstanceParams shadow_params;
+  shadow_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  shadow_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type shadow_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"p4_scene_shadow_caster"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
+  auto shadow_handle = field_cache.GetOrCreate(
+      shadow_key, *shadow_factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kDeferred, RenderPassType::kShadow, shadow_params);
+  REQUIRE(shadow_handle);
+  REQUIRE(shadow_handle->IsValid());
+
+  // A single 4x4 (half-extent 2) horizontal card, world-up normal, centered
+  // 3 units above the origin -- the same -90deg-about-X trick AddFloorQuad
+  // uses to turn a local +Z-normal quad into a horizontal one.
+  std::array<uint32_t, 6> idx = {0, 1, 2, 0, 2, 3};
+  wgpu::Buffer ibuf =
+      UploadBuffer(g.device, idx.data(), sizeof(idx), wgpu::BufferUsage::Index);
+  std::vector<float> verts = QuadVerticesSized(2.0f);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+
+  InstancedMeshField field(g.device, g.queue, *g.gen, /*capacity=*/1,
+                           /*num_models=*/1, /*num_submeshes=*/1,
+                           std::array<float, 2>{1e30f, 1e30f});
+  REQUIRE(field.IsValid());
+
+  GpuInstanceRenderer::InstanceInput caster{};
+  caster.transform =
+      glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 3.0f, 0.0f)) *
+      glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+  caster.bounds_sphere = glm::vec4(0.0f, 3.0f, 0.0f, 3.0f);
+  caster.model_info = glm::uvec4(0u, 0u, 0u, 0u);
+  field.UploadInstances(
+      std::span<const GpuInstanceRenderer::InstanceInput>(&caster, 1));
+
+  // Geometry + shadow material only -- no deferred/forward-opaque material,
+  // so this field never appears in the lit image itself; only its shadow does.
+  field.SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, vbuf, ibuf,
+                   wgpu::IndexFormat::Uint32, 6,
+                   InstancedMeshField::PassKind::kDeferred, /*material=*/nullptr);
+  field.SetSubmeshShadow(/*model=*/0, /*lod=*/0, /*submesh=*/0,
+                         shadow_handle.operator->());
+  REQUIRE(field.HasPass(InstancedMeshField::PassKind::kShadow));
+
+  MaterialLibrary matlib;
+  REQUIRE(matlib.Initialize(g.device, g.queue, g.gen.get()));
+
+  SceneGraph graph;
+  // Straight overhead sun: the shadow lands with zero horizontal offset
+  // directly beneath the card, so "under the card" and "outside it" are
+  // trivial to pick without re-deriving the light's oblique projection.
+  graph.SetSunDirection(glm::vec3(0.0f, 1.0f, 0.0f));
+  graph.SetSunColor(glm::vec3(1.0f));
+  graph.SetClearColor(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+  AddFloor(graph, 20.0f, matlib.SolidColor(glm::vec3(0.6f, 0.6f, 0.6f), 0.6f), 1.0f);
+
+  entt::registry registry;
+  SceneContext scene_context;
+  scene_context.registry = &registry;
+  graph.SyncToRegistry(registry, scene_context);
+  std::array<InstancedMeshField*, 1> fields = {&field};
+  scene_context.instanced_fields = fields.data();
+  scene_context.instanced_field_count = 1;
+
+  Camera camera;
+  camera.position = glm::vec3(0.0f, 8.0f, 8.0f);
+  camera.LookAt(glm::vec3(0.0f));
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 45.0f;
+  camera.aspect = 1.0f;
+  camera.near_plane = 0.1f;
+  camera.far_plane = 1000.0f;
+
+  constexpr uint32_t kShadowSceneSize = 128;
+  ColorRenderTarget rt(g.device, kShadowSceneSize, kShadowSceneSize,
+                       wgpu::TextureFormat::R32Float);
+  REQUIRE(rt.IsValid());
+
+  SceneRenderer renderer;
+  renderer.Initialize(g.device, g.queue, g.gen.get(), wgpu::TextureFormat::R32Float,
+                      kShadowSceneSize, kShadowSceneSize,
+                      g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
+  renderer.MutableFogConfig().enabled = false;  // would haze the readback
+  renderer.SetShadowDebugMode(ShadowDebugMode::ShadowMapOnly);
+
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
+    renderer.Render(camera, registry, scene_context, rt.GetView());
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback readback(g.instance, g.device, g.queue);
+  CpuImage image = readback.ReadTextureSync(
+      rt.GetTexture(), kShadowSceneSize, kShadowSceneSize,
+      wgpu::TextureFormat::R32Float);
+
+  // World origin: directly under the card's center -> shadowed. (0,0,-5): 3
+  // units outside the card's [-2,2] XZ footprint along -Z (further from the
+  // camera, which keeps it a safely in-bounds pixel under this camera's
+  // oblique projection -- +Z lands off-frame) -> lit.
+  const glm::ivec2 under_card =
+      WorldToPixel(camera, glm::vec3(0.0f, 0.0f, 0.0f), kShadowSceneSize,
+                  kShadowSceneSize);
+  const glm::ivec2 offset =
+      WorldToPixel(camera, glm::vec3(0.0f, 0.0f, -5.0f), kShadowSceneSize,
+                  kShadowSceneSize);
+  REQUIRE(under_card.x >= 0);
+  REQUIRE(under_card.x < static_cast<int>(kShadowSceneSize));
+  REQUIRE(under_card.y >= 0);
+  REQUIRE(under_card.y < static_cast<int>(kShadowSceneSize));
+  REQUIRE(offset.x >= 0);
+  REQUIRE(offset.x < static_cast<int>(kShadowSceneSize));
+  REQUIRE(offset.y >= 0);
+  REQUIRE(offset.y < static_cast<int>(kShadowSceneSize));
+
+  const float shadowed = image.GetDepth(static_cast<uint32_t>(under_card.x),
+                                        static_cast<uint32_t>(under_card.y));
+  const float lit = image.GetDepth(static_cast<uint32_t>(offset.x),
+                                   static_cast<uint32_t>(offset.y));
+  INFO("under-card shadow value = " << shadowed << ", offset = " << lit);
+  CHECK(shadowed < 0.3f);
+  CHECK(lit > 0.7f);
+}
+
+// ===========================================================================
+// Phase 2 of the volumetric-foliage feature: the "voxel_foliage" G-buffer
+// material (shaders/material/voxel_foliage.wesl) + deferred_lighting.wesl's
+// foliage-transmission branch. This phase is VISUALLY INERT -- nothing yet
+// writes material.a = kShadingModelFoliage on any real scene, so there is no
+// full-pipeline (lit) test here; that arrives with Phase 3+ (real geometry
+// attached to this material). What's pinned:
+//   1. All 4 (geometry x pass) shader variants compile.
+//   2. A hand-built tet (Phase 1's leaf_voxelizer output shape, inlined --
+//      this is an ENGINE test target and must not link game code) round-trips
+//      through the non-instanced G-buffer pipeline with the expected
+//      material.a/.g/.r encoding, and CullMode::Back respects triangle
+//      winding (visible / gone).
+//   3. deferred_lighting.wesl's widened imports + foliage branch don't
+//      perturb the STANDARD (non-foliage) shading path -- material.a stays
+//      0.0 for every existing material, so `transmission` is always zero.
+// ===========================================================================
+namespace {
+
+// One hand-built Phase-1-style tet: 4 vertices / 12 indices, the 44-byte
+// textured-mesh layout (pos3, uv2 with uv.x = brightness, normal3, tangent3
+// -- see leaf_voxelizer.hpp's EmitTetMesh). v0,v1,v2 form the "near" face
+// (facing the camera, dead-center on the view axis -- its centroid projects
+// to the exact center pixel, see BuildVoxelFoliageFrame); v3 is placed FAR
+// BEHIND the camera (z = +40, camera at the origin looking down -Z) so the
+// other 3 faces (each sharing 2 vertices with the near face + v3) are almost
+// entirely near-plane/behind-eye clipped -- only a razor-thin sliver hugging
+// v0/v1/v2 themselves could remain, nowhere near the near face's own
+// centroid. This is what makes "flip ALL 12 indices -> the center pixel goes
+// background" a sound test: for a CLOSED, correctly-wound solid, flipping
+// every face's winding does NOT generally empty its silhouette (the
+// previously back-facing faces become front-facing-per-Dawn and typically
+// cover much of the SAME screen area, by convexity) -- it only works here
+// because the 3 "side" faces are frustum-clipped away regardless of winding.
+constexpr glm::vec3 kTetNearP0(0.0f, 0.5f, -2.0f);
+constexpr glm::vec3 kTetNearP1(-0.43f, -0.25f, -2.0f);
+constexpr glm::vec3 kTetNearP2(0.43f, -0.25f, -2.0f);
+constexpr glm::vec3 kTetFarApex(0.1f, -0.25f, 40.0f);
+
+// All 4 faces outward-CCW (GenerateCube's "CCW viewed from outside"
+// convention -- primitive_mesh_builders.cpp), matching the engine's
+// CullMode::Back default: the near face (0,1,2) is front-facing (visible);
+// the 3 apex faces are back-facing (their outward normal points away from
+// the camera, toward the far apex) and thus culled.
+constexpr std::array<uint32_t, 12> kTetIndicesVisible = {0, 1, 2, 0, 1, 3,
+                                                          1, 2, 3, 2, 0, 3};
+// Every triangle's last two indices swapped -- reverses all 4 faces' winding.
+constexpr std::array<uint32_t, 12> kTetIndicesFlipped = {0, 2, 1, 0, 3, 1,
+                                                          1, 3, 2, 2, 3, 0};
+
+constexpr uint32_t kTetTarget = 96;
+
+std::vector<float> BuildTetVertices(float brightness) {
+  const std::array<glm::vec3, 4> pos = {kTetNearP0, kTetNearP1, kTetNearP2,
+                                        kTetFarApex};
+  std::vector<float> verts;
+  verts.reserve(4 * 11);
+  for (const glm::vec3& p : pos) {
+    // The normal/tangent values are never read by this test (the G-buffer
+    // readback only asserts material.a/.g/.r, which packVoxelFoliageGBuffer
+    // derives from params/tint, not the normal) -- any finite unit vectors
+    // are fine.
+    const float v[11] = {p.x,  p.y,  p.z,  brightness, 0.0f, 0.0f,
+                         0.0f, 1.0f, 1.0f, 0.0f,       0.0f};
+    verts.insert(verts.end(), v, v + 11);
+  }
+  return verts;
+}
+
+// A real (non-degenerate) perspective frame, camera at the world/offset
+// origin looking down -Z -- unlike MakeOrthoFrame (which drops Z entirely,
+// fine for the CullMode::None instanced tests above but WRONG here: this
+// test needs genuine near-plane clipping to keep the 3 apex faces off the
+// near face's centroid, see the comment above). object.modelMatrix is left
+// identity (camera_world_pos = 0, so offset space == world space, and the
+// tet's own coordinates are already the "already offset" positions the
+// non-instanced vs_main expects).
+UniformData BuildVoxelFoliageFrame() {
+  UniformData u{};
+  Camera cam;
+  cam.position = glm::vec3(0.0f);
+  cam.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+  cam.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  cam.fov = 50.0f;
+  cam.aspect = 1.0f;
+  cam.near_plane = 0.1f;
+  cam.far_plane = 100.0f;
+  u.view = glm::lookAt(glm::vec3(0.0f), cam.direction, cam.up);
+  u.proj = cam.GetProj();
+  u.view_prev = u.view;
+  u.proj_prev = u.proj;
+  u.light_view_proj = glm::mat4(1.0f);
+  u.camera_world_pos = glm::vec4(0.0f);
+  u.sunDir = glm::vec4(glm::normalize(glm::vec3(0.3f, 0.8f, 0.5f)), 0.0f);
+  u.sunColor = glm::vec4(1.0f);
+  u.ambient_sh[0] = glm::vec4(1.0f);
+  u.near_plane = cam.near_plane;
+  u.far_plane = cam.far_plane;
+  u.screen_size = glm::vec2(float(kTetTarget), float(kTetTarget));
+  u.output_is_linear = 1u;
+  return u;
+}
+
+std::unique_ptr<MaterialInstanceFactory> MakeVoxelFoliageFactory(
+    TestGpu& g, GeometryType geometry, bool casts_shadow,
+    wgpu::TextureFormat depth_format = wgpu::TextureFormat::Undefined) {
+  FactoryDescriptor desc;
+  desc.shader_name = "voxel_foliage";
+  desc.shader_path = "material/voxel_foliage.wesl";
+  desc.supported_geometry_types = {geometry};
+  desc.supported_pass_types = {MaterialPassType::kDeferred};
+  desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                        GBuffer::kMaterialFormat};
+  desc.depth_format = depth_format;
+  desc.cull_mode = wgpu::CullMode::Back;
+  desc.casts_shadow = casts_shadow;
+  return BuildMaterialInstanceFactory(desc, g.device, g.queue, g.gen.get());
+}
+
+// G-buffer MRT clear values matching scene_renderer.cpp's Pass 1 exactly
+// (normals/albedo transparent-black, material {0.75, 1.0, 1.0, 0.0} -- so
+// material.a == 0.0 is the "nothing drawn here" default, same threshold
+// deferred_lighting.wesl's foliage gate relies on).
+wgpu::RenderPassColorAttachment TetClearAttachment(wgpu::TextureView view,
+                                                   wgpu::Color clear) {
+  wgpu::RenderPassColorAttachment ca{};
+  ca.view = view;
+  ca.loadOp = wgpu::LoadOp::Clear;
+  ca.storeOp = wgpu::StoreOp::Store;
+  ca.clearValue = clear;
+  ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+  return ca;
+}
+
+// Both G-buffer targets' exact center pixel for one RenderTetPixels() call --
+// see that function's comment for why the center pixel is the meaningful one.
+struct TetPixels {
+  CpuImage::Color material;
+  CpuImage::Color albedo;
+};
+
+// Renders `indices` (kTetIndicesVisible or kTetIndicesFlipped) through the
+// non-instanced voxel_foliage material, with vertex uv.x = `brightness` and
+// the material's `tint`, and returns BOTH the material and albedo targets'
+// exact center pixel -- the near face's centroid projects there by
+// construction (kTetNearP0/P1/P2 average to (0,0,-2), dead on the camera's
+// view axis). CpuImage::GetPixel already converts BGRA8Unorm storage
+// (GBuffer::kAlbedoFormat) to RGBA channel order, so the returned albedo's
+// .r/.g/.b are plain RGB regardless of the target's memory layout.
+TetPixels RenderTetPixels(TestGpu& g, MaterialInstanceFactory& factory,
+                          float roughness, float strength, float brightness,
+                          glm::vec3 tint,
+                          const std::array<uint32_t, 12>& indices) {
+  InstanceParams params;
+  params.uniform_overrides = {
+      {"tint", glm::vec4(tint, 1.0f)},
+      {"params", glm::vec4(roughness, strength, 0.0f, 0.0f)},
+  };
+  auto instance =
+      factory.CreateInstance(GeometryType::kTexturedMesh,
+                             MaterialPassType::kDeferred,
+                             RenderPassType::kGBuffer, params);
+  REQUIRE(instance != nullptr);
+  instance->SetParameterByName("modelMatrix",
+                               MaterialParameterValue(glm::mat4(1.0f)));
+
+  const std::vector<float> verts = BuildTetVertices(brightness);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, indices.data(),
+                                   indices.size() * sizeof(uint32_t),
+                                   wgpu::BufferUsage::Index);
+
+  ColorRenderTarget normals_t(g.device, kTetTarget, kTetTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kTetTarget, kTetTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kTetTarget, kTetTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(material_t.IsValid());
+
+  UniformData frame_uniforms = BuildVoxelFoliageFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        TetClearAttachment(normals_t.GetView(), {0, 0, 0, 0}),
+        TetClearAttachment(albedo_t.GetView(), {0, 0, 0, 0}),
+        TetClearAttachment(material_t.GetView(), {0.75, 1.0, 1.0, 0.0})};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    REQUIRE(instance->Bind(pass, frame));
+    REQUIRE(instance->BindPerObject(pass, frame));
+    pass.SetVertexBuffer(0, vbuf);
+    pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
+    pass.DrawIndexed(static_cast<uint32_t>(indices.size()));
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage material_img = rb.ReadTextureSync(
+      material_t.GetTexture(), kTetTarget, kTetTarget, GBuffer::kMaterialFormat);
+  CpuImage albedo_img = rb.ReadTextureSync(albedo_t.GetTexture(), kTetTarget,
+                                           kTetTarget, GBuffer::kAlbedoFormat);
+  TetPixels result;
+  result.material = material_img.GetPixel(kTetTarget / 2, kTetTarget / 2);
+  result.albedo = albedo_img.GetPixel(kTetTarget / 2, kTetTarget / 2);
+  return result;
+}
+
+}  // namespace
+
+TEST_CASE("voxel_foliage material compiles all 4 (geometry x pass) variants",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto textured_factory = MakeVoxelFoliageFactory(
+      g, GeometryType::kTexturedMesh, /*casts_shadow=*/true,
+      wgpu::TextureFormat::Depth32Float);
+  auto instanced_factory = MakeVoxelFoliageFactory(
+      g, GeometryType::kInstancedMesh, /*casts_shadow=*/true,
+      wgpu::TextureFormat::Depth32Float);
+  REQUIRE(textured_factory != nullptr);
+  REQUIRE(instanced_factory != nullptr);
+
+  struct Variant {
+    const char* label;
+    MaterialInstanceFactory* factory;
+    GeometryType geometry;
+    RenderPassType pass;
+  };
+  const std::array<Variant, 4> variants = {{
+      {"voxel_foliage_textured_gbuffer", textured_factory.get(),
+       GeometryType::kTexturedMesh, RenderPassType::kGBuffer},
+      {"voxel_foliage_textured_shadow", textured_factory.get(),
+       GeometryType::kTexturedMesh, RenderPassType::kShadow},
+      {"voxel_foliage_instanced_gbuffer", instanced_factory.get(),
+       GeometryType::kInstancedMesh, RenderPassType::kGBuffer},
+      {"voxel_foliage_instanced_shadow", instanced_factory.get(),
+       GeometryType::kInstancedMesh, RenderPassType::kShadow},
+  }};
+
+  MaterialInstanceCache cache;
+  for (const Variant& v : variants) {
+    entt::id_type key = ComposeMaterialCacheKey(
+        entt::hashed_string{v.label}.value(), v.geometry, v.pass, 0);
+    entt::resource<RenderingMaterialInstance> handle;
+    CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
+      handle = cache.GetOrCreate(key, *v.factory, v.geometry,
+                                 MaterialPassType::kDeferred, v.pass,
+                                 InstanceParams{});
+    });
+    INFO(v.label << " Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    REQUIRE(handle);
+    REQUIRE(handle->IsValid());
+  }
+}
+
+TEST_CASE("voxel_foliage G-buffer readback: material encoding + CullMode::Back "
+          "winding",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto factory = MakeVoxelFoliageFactory(g, GeometryType::kTexturedMesh,
+                                         /*casts_shadow=*/false);
+  REQUIRE(factory != nullptr);
+
+  constexpr float kRoughness = 0.6f;
+  constexpr float kStrength = 0.35f;
+  // Brightness deliberately NOT 0.0/1.0 (both are fixed points of the sRGB
+  // curve, srgb_to_linear(x) == x there -- a double-linearization bug would
+  // be invisible at either endpoint) so a bug that runs uv.x through
+  // srgb_to_linear at write time (this material) is unmistakable in the
+  // readback below.
+  constexpr float kBrightness = 0.5f;
+  const glm::vec3 kTint(0.5f, 0.25f, 1.0f);
+
+  SECTION("correct winding: material.a/.g/.r match, alpha tagged as foliage, "
+          "albedo is brightness*tint RAW (sRGB-domain, not double-linearized)") {
+    CapturedError err;
+    TetPixels px;
+    err = RunCapturingValidationErrors(g.instance, g.device, [&] {
+      px = RenderTetPixels(g, *factory, kRoughness, kStrength, kBrightness,
+                          kTint, kTetIndicesVisible);
+    });
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    INFO("material rgba = " << (int)px.material.r << "," << (int)px.material.g
+                            << "," << (int)px.material.b << ","
+                            << (int)px.material.a);
+    // material.a = kShadingModelFoliage (1.0) -- comfortably above the 0.5
+    // threshold deferred_lighting.wesl gates on.
+    CHECK(px.material.a > 127);
+    // material.g = translucency strength, material.r = roughness, both
+    // RGBA8Unorm-quantized -- +/-2/255 tolerance.
+    CHECK(std::abs(static_cast<int>(px.material.g) -
+                   static_cast<int>(std::lround(kStrength * 255.0f))) <= 2);
+    CHECK(std::abs(static_cast<int>(px.material.r) -
+                   static_cast<int>(std::lround(kRoughness * 255.0f))) <= 2);
+
+    // Albedo must be the RAW (sRGB-domain) product of the vertex-baked
+    // brightness and the material tint -- deferred_lighting.wesl's
+    // srgb_to_linear runs on READ (its albedoLinear line), so this material
+    // writing srgb_to_linear(brightness)*tint too would double-linearize and
+    // render crowns far too dark. +/-2/255 tolerance for RGBA8Unorm
+    // quantization. Pre-fix, brightness=0.5 wrote srgb_to_linear(0.5) ~=
+    // 0.214 (not 0.5) into the brightness term, so e.g. the r channel
+    // (tint.r=0.5) landed at byte ~27 instead of the expected ~64.
+    INFO("albedo rgb = " << (int)px.albedo.r << "," << (int)px.albedo.g << ","
+                         << (int)px.albedo.b);
+    const glm::vec3 expected_albedo = kBrightness * kTint;
+    CHECK(std::abs(static_cast<int>(px.albedo.r) -
+                   static_cast<int>(std::lround(expected_albedo.r * 255.0f))) <=
+          2);
+    CHECK(std::abs(static_cast<int>(px.albedo.g) -
+                   static_cast<int>(std::lround(expected_albedo.g * 255.0f))) <=
+          2);
+    CHECK(std::abs(static_cast<int>(px.albedo.b) -
+                   static_cast<int>(std::lround(expected_albedo.b * 255.0f))) <=
+          2);
+  }
+
+  SECTION("flipped index winding: the near face is culled, pixel stays "
+          "background") {
+    CapturedError err;
+    TetPixels px;
+    err = RunCapturingValidationErrors(g.instance, g.device, [&] {
+      px = RenderTetPixels(g, *factory, kRoughness, kStrength, kBrightness,
+                          kTint, kTetIndicesFlipped);
+    });
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    INFO("material rgba = " << (int)px.material.r << "," << (int)px.material.g
+                            << "," << (int)px.material.b << ","
+                            << (int)px.material.a);
+    // Nothing drawn at the center pixel -- stays at the material clear
+    // value's alpha (0.0), well below the foliage-tag threshold.
+    CHECK(px.material.a < 10);
+  }
+}
+
+TEST_CASE("MaterialLibrary::VoxelFoliage builds a textureless deferred "
+          "material",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  MaterialLibrary matlib;
+  REQUIRE(matlib.Initialize(g.device, g.queue, g.gen.get()));
+
+  const glm::vec3 tint(0.3f, 0.7f, 0.2f);
+  constexpr float kRoughness = 0.6f;
+  constexpr float kStrength = 0.35f;
+
+  DeferredMaterial result;
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
+    result = matlib.VoxelFoliage(tint, kRoughness, kStrength);
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  REQUIRE(result.factory != nullptr);
+  REQUIRE(result.params.uniform_overrides.count("tint") == 1u);
+  REQUIRE(result.params.uniform_overrides.count("params") == 1u);
+  // No texture_overrides -- voxel_foliage.wesl declares no textures/samplers.
+  CHECK(result.params.texture_overrides.empty());
+
+  const auto& tint_value = result.params.uniform_overrides.at("tint");
+  REQUIRE(std::holds_alternative<glm::vec4>(tint_value));
+  CHECK(std::get<glm::vec4>(tint_value) == glm::vec4(tint, 1.0f));
+
+  const auto& params_value = result.params.uniform_overrides.at("params");
+  REQUIRE(std::holds_alternative<glm::vec4>(params_value));
+  CHECK(std::get<glm::vec4>(params_value) ==
+       glm::vec4(kRoughness, kStrength, 0.0f, 0.0f));
+
+  // Same (tint, roughness, strength) -> same cached factory (shared, lazily
+  // built once) and equal params, mirroring SolidColor's cache contract.
+  DeferredMaterial again = matlib.VoxelFoliage(tint, kRoughness, kStrength);
+  CHECK(again.factory == result.factory);
+}
+
+TEST_CASE("deferred_lighting foliage branch is inert for standard "
+          "(non-foliage) materials",
+          "[gpu_instance][gpu]") {
+  // Renders a real SceneRenderer frame (fog off, matching RenderSceneWithFields
+  // above) with a single SolidColor-material floor -- the "normalmapped"
+  // shader's packNormalMappedGBuffer always writes material.a = 0.0, so
+  // deferred_lighting.wesl's `materialData.a > kShadingModelFoliage * 0.5`
+  // gate must stay false for every pixel this scene draws; `transmission`
+  // stays vec3(0.0) and `finalColorLinear + transmission` is arithmetically
+  // identical to the pre-Phase-2 `finalColorLinear` alone. This is a
+  // compile/shade smoke test (the widened imports + new branch don't corrupt
+  // the standard path), not a byte-exact pin against a prior build.
+  TestGpu& g = GetTestGpu();
+
+  MaterialLibrary matlib;
+  REQUIRE(matlib.Initialize(g.device, g.queue, g.gen.get()));
+
+  SceneGraph graph;
+  graph.SetSunDirection(glm::normalize(glm::vec3(0.2f, 1.0f, 0.3f)));
+  graph.SetSunColor(glm::vec3(1.0f));
+  graph.SetAmbient(glm::vec3(0.6f));
+  graph.SetClearColor(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+  AddFloor(graph, 20.0f, matlib.SolidColor(glm::vec3(0.6f, 0.35f, 0.2f), 0.6f),
+          1.0f);
+
+  entt::registry registry;
+  SceneContext scene_context;
+  scene_context.registry = &registry;
+  graph.SyncToRegistry(registry, scene_context);
+
+  Camera camera;
+  camera.position = glm::vec3(0.0f, 8.0f, 8.0f);
+  camera.LookAt(glm::vec3(0.0f));
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 45.0f;
+  camera.aspect = 1.0f;
+  camera.near_plane = 0.1f;
+  camera.far_plane = 1000.0f;
+
+  constexpr uint32_t kFloorTestSize = 128;
+  ColorRenderTarget rt(g.device, kFloorTestSize, kFloorTestSize,
+                       wgpu::TextureFormat::R32Float);
+  REQUIRE(rt.IsValid());
+
+  SceneRenderer renderer;
+  renderer.Initialize(g.device, g.queue, g.gen.get(),
+                      wgpu::TextureFormat::R32Float, kFloorTestSize,
+                      kFloorTestSize,
+                      g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
+  renderer.MutableFogConfig().enabled = false;  // would haze the readback
+
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
+    renderer.Render(camera, registry, scene_context, rt.GetView());
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback readback(g.instance, g.device, g.queue);
+  CpuImage image = readback.ReadTextureSync(
+      rt.GetTexture(), kFloorTestSize, kFloorTestSize,
+      wgpu::TextureFormat::R32Float);
+
+  // Floor center (world origin) projects to the image center under this
+  // top-down-tilted camera; a corner stays sky/background.
+  const float floor_red = image.GetDepth(kFloorTestSize / 2, kFloorTestSize / 2);
+  const float background_red = image.GetDepth(4, 4);
+  INFO("floor = " << floor_red << " background = " << background_red);
+  // The floor is lit (sun + ambient on a mid-gray albedo) -- comfortably
+  // brighter than the black clear color; finite (no NaN/Inf from a
+  // miscomposed transmission term).
+  CHECK(floor_red > background_red + 0.05f);
+  CHECK(std::isfinite(floor_red));
+  CHECK(background_red < 0.01f);
 }

@@ -459,6 +459,20 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
   // none.
   ForEachInstancedField(
       scene, [&](InstancedMeshField* field) { field->Cull(frame, camera); });
+  // Shadow cull set: a SEPARATE light-frustum cull (see
+  // GpuInstanceRenderer::CullShadow), dispatched only for fields that
+  // actually have a shadow-casting submesh (HasPass(kShadow)) and only when
+  // the shadow map itself is enabled. shadow_map_.UpdateLightMatrices() ran
+  // earlier in this function (~:396-398, before frame_uniforms was built), so
+  // GetLightViewProj() is already the light matrix this frame will render
+  // casters with.
+  if (shadow_config_.enable_shadow_map) {
+    ForEachInstancedField(scene, [&](InstancedMeshField* field) {
+      if (field->HasPass(InstancedMeshField::PassKind::kShadow)) {
+        field->CullShadow(frame, camera, shadow_map_.GetLightViewProj());
+      }
+    });
+  }
 
   // === Pass 0: Shadow depth (T2) — depth-only render of casters from the
   // sun's point of view into shadow_map_'s Depth32Float target (conventional
@@ -497,6 +511,16 @@ void SceneRenderer::Render(const Camera& camera, entt::registry& registry,
       RenderTexturedMeshes(pass, frame, registry, camera_world_pos,
                            RenderPassType::kShadow, material_instance_cache_,
                            shadow_frustum);
+      // Instanced mesh fields' shadow submeshes, into the same depth-only
+      // pass — draws every slot with a shadow_material (see
+      // InstancedMeshField::Draw's kShadow doc comment), reading the light-
+      // frustum cull dispatched above. A field with no shadow submeshes was
+      // already skipped there (HasPass(kShadow) == false); Draw() itself is
+      // still safe to call unconditionally (no-op when nothing is
+      // configured), so no matching gate is needed here.
+      ForEachInstancedField(scene, [&](InstancedMeshField* field) {
+        field->Draw(pass, frame, InstancedMeshField::PassKind::kShadow);
+      });
     }
     pass.End();
   }

@@ -23,6 +23,32 @@ fn encodeOctahedron(n: vec3<f32>) -> vec2<f32> {
     return oct;
 }
 
+// Shading model tag written to material.a. 0.0 (the standard material's
+// packNormalMappedGBuffer below, and the G-buffer's {.., 0.0} clear value —
+// scene_renderer.cpp) means the standard opaque path; deferred_lighting.wesl
+// gates its added foliage-transmission term on `material.a > 0.5`, so this
+// must be comfortably above that midpoint threshold with headroom for 8-bit
+// RGBA8Unorm quantization.
+const kShadingModelFoliage: f32 = 1.0;
+
+// Textureless voxel-foliage GBuffer assembly (Phase 2 of the volumetric-
+// foliage feature): unlike packNormalMappedGBuffer, there is no tangent-space
+// normal map (voxels have no UV-mapped textures) so `worldNormal` is written
+// straight through -- no TBN reconstruction. `material.g` carries the
+// translucency strength (instead of the standard path's constant 1.0 "no
+// shadow" sentinel -- foliage pixels are never shadow-masked via material.g)
+// so deferred_lighting.wesl's evaluateTranslucency call can read it back.
+fn packVoxelFoliageGBuffer(worldNormal: vec3<f32>, albedo: vec3<f32>,
+                           roughness: f32, ao: f32,
+                           translucencyStrength: f32) -> GBufferOutput {
+    var output: GBufferOutput;
+    output.normals = encodeOctahedron(normalize(worldNormal));
+    output.albedo = vec4<f32>(albedo, 1.0);
+    // Material: R=roughness, G=translucency strength, B=AO, A=shading model tag.
+    output.material = vec4<f32>(roughness, translucencyStrength, ao, kShadingModelFoliage);
+    return output;
+}
+
 // Shared tangent-space-normal-mapped GBuffer assembly: Gram-Schmidt TBN
 // reconstruction + tangent-space normal unpack + octahedron encode + GBuffer
 // packing. `albedo` and `normalMap`/`arm` are the caller's own texture

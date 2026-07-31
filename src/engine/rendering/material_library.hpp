@@ -118,6 +118,24 @@ class MaterialLibrary {
                                       glm::vec3 transmission_tint,
                                       float transmission_strength);
 
+  // Textureless deferred material for voxelized foliage (Phase 2 of the
+  // volumetric-foliage feature — shader "voxel_foliage", non-instanced
+  // GeometryType::kTexturedMesh only; the instanced variant the shader also
+  // compiles is wired up by a later phase's own factory, not this one).
+  // `tint` multiplies the vertex-baked per-voxel brightness (no albedo
+  // texture); `roughness` and `translucency_strength` feed
+  // packVoxelFoliageGBuffer's material.r/.g so deferred_lighting.wesl adds a
+  // transmission term for pixels this material writes. The underlying
+  // kDeferred factory (G-buffer color/depth targets, cull Back, casts_shadow
+  // = true) is built once, lazily, and shared by every call; unlike
+  // SolidColor/CheckerAlbedo (which cache to keep 1x1/procedural TEXTURE
+  // VIEWS alive), a fresh DeferredMaterial's InstanceParams is built and
+  // returned every call -- there are no texture views here to keep alive
+  // (VoxelFoliage declares no textures at all), so a params cache would only
+  // save rebuilding a small uniform_overrides map. Valid after Initialize().
+  DeferredMaterial VoxelFoliage(glm::vec3 tint, float roughness,
+                                float translucency_strength);
+
   // A terrain layer set: one texture_2d_array per PBR channel, layer i built
   // from the i'th pack passed to LoadTerrainArrays. Holds the textures (not
   // just views) so the caller keeps them alive by keeping this.
@@ -216,6 +234,9 @@ class MaterialLibrary {
   // kept separate from alpha_cutout_factory_ because it compiles a different
   // shader variant (extra_features = {"translucency"}).
   std::unique_ptr<MaterialInstanceFactory> translucent_foliage_factory_;
+  // Deferred "voxel_foliage" factory (non-instanced GeometryType::
+  // kTexturedMesh only). Built lazily on the first VoxelFoliage() call.
+  std::unique_ptr<MaterialInstanceFactory> voxel_foliage_factory_;
   wgpu::Sampler sampler_;
 
   std::unordered_map<std::string, PackTextures> cache_;  // key: dir

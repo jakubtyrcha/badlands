@@ -344,6 +344,10 @@ set(badlands_app_sources_viewer
     src/executables/viewer/model_viewer_view.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
+    # Volumetric-foliage Phase 1: CPU leaf-card voxelizer (splat cards into a
+    # cell grid, emit one jittered tet per occupied cell). Pure geometry, no
+    # renderer changes yet.
+    src/game/geometry/leaf_voxelizer.cpp
     # Multi-mode instanced tree grid (Task 4): builds an InstancedMeshField
     # from a catalog TreeOptions -- see game/visual/tree_field.hpp.
     src/game/visual/tree_field.cpp)
@@ -651,8 +655,10 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
+    game/tests/leaf_voxelizer_tests.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
+    src/game/geometry/leaf_voxelizer.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_tests PRIVATE
@@ -663,6 +669,39 @@ if(APPLE)
     target_link_options(badlands_tree_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_tree_field_gpu_tests: volumetric-foliage Phase 3's headless GPU
+# suite -- builds a real Oak crown (GenerateLeafMesh + VoxelizeLeafCards, the
+# same CPU pipeline model_viewer_view.cpp's Voxel L0/L1/L2 modes drive) as a
+# deferred VoxelFoliage entity in a real SceneGraph and renders it through the
+# full SceneRenderer pipeline (G-buffer -> shadow map -> deferred lighting ->
+# tonemap), modeled on badlands_forward_pass_test's TestGpu harness shape and
+# src/engine/tests/gpu_instance_tests.cpp's RenderSceneWithFields full-frame
+# pattern. Needs a working GPU adapter (Metal on macOS) + the shaders/ dir
+# (WORKING_DIRECTORY = repo root); compiles the tree/leaf-voxelizer sources
+# directly (mirrors badlands_tree_tests above) rather than linking them from
+# badlands_game_lib (neither is a member of that library -- see
+# badlands_app_sources_viewer). Phase 5 extends this suite to exercise
+# TreeField/BuildTreeField (voxel-crown instanced field + field shadows), so
+# also compiles src/game/visual/tree_field.cpp directly for the same reason
+# (also only a member of badlands_app_sources_viewer, not badlands_game_lib).
+add_executable(badlands_tree_field_gpu_tests
+    game/tests/tree_field_gpu_tests.cpp
+    src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
+    src/game/geometry/leaf_voxelizer.cpp
+    src/game/visual/tree_field.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_tree_field_gpu_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_tree_field_gpu_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_tree_field_gpu_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_tree_field_gpu_tests COMMAND badlands_tree_field_gpu_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of

@@ -268,6 +268,52 @@ DeferredMaterial MaterialLibrary::TranslucentFoliage(
                           .params = std::move(params)};
 }
 
+DeferredMaterial MaterialLibrary::VoxelFoliage(glm::vec3 tint, float roughness,
+                                               float translucency_strength) {
+  // Deferred "voxel_foliage" factory: same G-buffer targets as the
+  // normalmapped factory above, but non-instanced GeometryType::kTexturedMesh
+  // only (the shader's instanced variant is wired up by a later phase's own
+  // factory), Back-face culled (solid tets, not double-sided foliage cards),
+  // and shadow-casting (voxel geometry needs its own kShadow pipeline
+  // variant compiled).
+  if (!voxel_foliage_factory_) {
+    FactoryDescriptor desc;
+    desc.shader_name = "voxel_foliage";
+    desc.shader_path = "material/voxel_foliage.wesl";
+    desc.supported_pass_types = {MaterialPassType::kDeferred};
+    desc.supported_geometry_types = {GeometryType::kTexturedMesh};
+    desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                          GBuffer::kMaterialFormat};
+    desc.depth_format = GBuffer::kDepthFormat;
+    desc.cull_mode = wgpu::CullMode::Back;
+    desc.casts_shadow = true;
+    voxel_foliage_factory_ =
+        BuildMaterialInstanceFactory(desc, device_, queue_, pipeline_gen_);
+    if (!voxel_foliage_factory_) {
+      spdlog::error(
+          "MaterialLibrary::VoxelFoliage: failed to build voxel_foliage "
+          "material factory");
+      load_failed_ = true;
+      return DeferredMaterial{};
+    }
+  }
+
+  // No texture views to keep alive (VoxelFoliage declares no textures), so --
+  // unlike SolidColor/CheckerAlbedo's quantize-and-cache pattern -- there's
+  // nothing here that needs a cache to stay alive; just build fresh params
+  // every call. Group-1 (non-instanced) VoxelFoliageUniforms fields
+  // render_textured_mesh.cpp applies per-object: tint (rgb brightness
+  // multiplier) and params (x = roughness, y = translucency strength).
+  InstanceParams params;
+  params.uniform_overrides = {
+      {"tint", glm::vec4(tint, 1.0f)},
+      {"params", glm::vec4(roughness, translucency_strength, 0.0f, 0.0f)},
+  };
+
+  return DeferredMaterial{.factory = voxel_foliage_factory_.get(),
+                          .params = std::move(params)};
+}
+
 MaterialLibrary::TerrainArrays MaterialLibrary::LoadTerrainArrays(
     const std::vector<std::string>& pack_dirs) {
   TerrainArrays result;

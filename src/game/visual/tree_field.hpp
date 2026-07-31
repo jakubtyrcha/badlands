@@ -1,46 +1,54 @@
 #pragma once
 
 // Game-side builder for an InstancedMeshField that renders a whole catalog
-// tree as ONE GPU-instanced model (bark = kDeferred submesh 0, leaf card =
-// kForwardOpaque submesh 1) with GPU-driven distance LOD (see
+// tree as ONE GPU-instanced model (bark = kDeferred submesh 0, leaf voxel
+// crown = kDeferred submesh 1, BOTH shadow-casting -- volumetric-foliage
+// Phase 5) with GPU-driven distance LOD (see
 // engine/rendering/instanced_mesh_field.hpp). Used by the model viewer's
 // "Multi" mode (a grid of one tree, dynamically LOD'd) -- see
 // executables/viewer/model_viewer_view.cpp.
 //
 // TreeField owns everything the field needs: the two instanced material
-// factories (instanced_gbuffer for bark, instanced_forward for leaves), a
-// local MaterialInstanceCache + the resource handles that keep the resolved
-// materials alive (mirrors gpu_instance_tests.cpp's BucketMaterials
+// factories (instanced_gbuffer for bark, voxel_foliage for the leaf voxel
+// crown), a local MaterialInstanceCache + the resource handles that keep the
+// resolved materials alive (mirrors gpu_instance_tests.cpp's BucketMaterials
 // pattern), and the per-LOD GPU vertex/index buffers (SetSubmesh does not
 // take ownership of these -- see instanced_mesh_field.hpp).
 //
-// Deviation from a literal reading of the task brief: `instanced_gbuffer`/
-// `instanced_forward` have NO entry in
-// engine/rendering/material/material_requirements.cpp (unlike
-// "normalmapped"/"standard_forward"), so StandardMaterialFactory falls back
-// to DeriveRequirementsFromReflection, which names group-0 texture slots
-// "tex_<binding>" (not "albedo"/"normal"/"arm") and always defaults them to
-// "white". BuildTreeField below targets those reflection-derived names
-// directly (see the per-shader binding-index comments in the .cpp) rather
-// than "albedo"/"normal"/"arm" -- using the literal names from the brief
-// would silently no-op every texture override (e.g. the leaf cutout alpha
-// would never discard, rendering solid quads instead of leaf cards). This
-// stays entirely within this game-side file; no engine file is touched.
+// Deviation from a literal reading of the task brief: `instanced_gbuffer`
+// has NO entry in engine/rendering/material/material_requirements.cpp
+// (unlike "normalmapped"/"standard_forward"), so StandardMaterialFactory
+// falls back to DeriveRequirementsFromReflection, which names group-0
+// texture slots "tex_<binding>" (not "albedo"/"normal"/"arm") and always
+// defaults them to "white". BuildTreeField below targets those
+// reflection-derived names directly (see the per-shader binding-index
+// comments in the .cpp) for the BARK material's normal/ARM support textures,
+// rather than "albedo"/"normal"/"arm" -- using the literal names would
+// silently no-op the override, leaving the flat reflection-derived default
+// instead of the intended solid-bark look. This stays entirely within this
+// game-side file; no engine file is touched. (The leaf material,
+// `voxel_foliage`, declares NO textures at all -- see
+// shaders/material/voxel_foliage.wesl -- so this deviation no longer applies
+// to leaves as of volumetric-foliage Phase 5; the leaf card + its "tex_1"
+// albedo override are gone.)
 
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
 
 #include "engine/rendering/geometry/aabb.hpp"
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"  // TexturedMeshResult
 #include "engine/rendering/gpu_instance_renderer.hpp"
 #include "engine/rendering/instanced_mesh_field.hpp"
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material/rendering_material_instance.hpp"
+#include "game/geometry/tree_generator.hpp"  // SkeletonBranch
 #include "game/geometry/tree_options.hpp"
 
 namespace badlands {
@@ -49,7 +57,9 @@ class GpuPipelineGenerator;
 
 // Owns an InstancedMeshField configured for ONE tree model (model id 0),
 // LOD 0..GpuInstanceRenderer::kMaxLods-1, 2 submeshes per LOD (0 = bark
-// kDeferred, 1 = leaf kForwardOpaque, skipped if the tree has no leaves).
+// kDeferred, 1 = leaf voxel crown kDeferred, skipped for a LOD whose supplied
+// leaf mesh is empty -- see BuildTreeField below). Both submeshes cast
+// shadows (Phase 5).
 struct TreeField {
   std::unique_ptr<InstancedMeshField> field;
 
@@ -80,30 +90,49 @@ struct TreeField {
   // Raw (untransformed, native tree-generator units) LOD0 local-space
   // bounds -- the SAME bark_local_bounds a single-tree preview uses to
   // derive its scale+rest-on-floor transform (see
-  // ModelViewerView::RebuildScene's single-tree path), plus the leaf
-  // card's own bounds when the tree has any. A caller building per-instance
-  // transforms combines these (bark_local_bounds.Union(leaf_local_bounds)
-  // when has_leaves) and transforms the result by each instance's FULL
-  // transform to get that instance's world-space bounds for
+  // ModelViewerView::RebuildScene's single-tree path), plus the UNION of
+  // every supplied leaf-crown LOD mesh's own bounds (voxel tets overscale
+  // past their source cards' AABB, and different LODs can have different
+  // extents -- see the .cpp) when the tree has any. A caller building
+  // per-instance transforms combines these (bark_local_bounds.Union(
+  // leaf_local_bounds) when has_leaves) and transforms the result by each
+  // instance's FULL transform to get that instance's world-space bounds for
   // GpuInstanceRenderer::InstanceInput::bounds_sphere.
   Aabb bark_local_bounds;
   Aabb leaf_local_bounds;
   bool has_leaves = false;
 };
 
-// Builds a TreeField for `options`: the branch skeleton is built ONCE, then
-// per LOD (0 = full detail; 1/2 = meshopt-simplified -- bark per
-// kDefaultLodRatios, leaves per the gentler kLeafLodRatios, both
-// mesh_lod.hpp) bark + leaf meshes are generated, GPU-uploaded, and
+// Builds a TreeField for `options`, given the caller's own ALREADY-BUILT
+// `skeleton` (BuildTreeSkeleton(options)) and LOD0 bark mesh
+// (`bark_lod0` -- GenerateTreeMesh(options, skeleton); taken by value, moved
+// in) -- BuildTreeField used to regenerate both of these internally, a second
+// (byte-identical but wasteful) generation pass on top of whatever the
+// caller already built them for (e.g. ModelViewerView's Multi mode builds
+// them to learn the preview-rescale factor `s` before it can even voxelize
+// leaves at native cell sizes); callers now build them once and pass both in.
+// Per LOD (0 = `bark_lod0` as-is; 1/2 = meshopt-simplified per
+// kDefaultLodRatios, mesh_lod.hpp) a bark mesh is derived, and
+// `leaf_lod_meshes[lod]` -- the caller's own pre-voxelized leaf-crown mesh
+// for that LOD (see game/geometry/leaf_voxelizer.hpp's VoxelizeLeafCards;
+// ModelViewerView's Multi mode voxelizes at kFoliageVoxelWorldSizes[lod]
+// converted to native units) -- is taken as-is. Both are GPU-uploaded and
 // wired into a fresh InstancedMeshField (capacity/lod_thresholds forwarded
-// verbatim to its ctor; num_models=1, num_submeshes=2). `leaf_view`/
-// `leaf_sampler` supply the leaf-card silhouette texture (see
-// ModelViewerView::Initialize's leaf_views_/leaf_sampler_). Returns nullptr
-// (after logging) on any factory-build, field-compile, or bark-mesh failure.
+// verbatim to its ctor; num_models=1, num_submeshes=2); both submeshes
+// render kDeferred and cast shadows (see instanced_mesh_field.hpp's
+// SetSubmeshShadow). A LOD whose supplied leaf mesh is empty (e.g. a coarse
+// voxel cell size that clears no cell's occupancy threshold -- a known gap
+// for some presets, see leaf_voxelizer.hpp) simply leaves that LOD's leaf
+// submesh slot unconfigured (legal -- GpuInstanceRenderer::Draw skips
+// zero-index-count slots); it does not affect the bark submesh or any other
+// LOD. Returns nullptr (after logging) on any factory-build, field-compile,
+// or bark-mesh failure, or if `leaf_lod_meshes.size() !=
+// GpuInstanceRenderer::kMaxLods`.
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-    const TreeOptions& options, wgpu::TextureView leaf_view,
-    wgpu::Sampler leaf_sampler, uint32_t capacity,
+    const TreeOptions& options, const std::vector<SkeletonBranch>& skeleton,
+    TexturedMeshResult bark_lod0,
+    std::span<const TexturedMeshResult> leaf_lod_meshes, uint32_t capacity,
     std::array<float, GpuInstanceRenderer::kMaxLods - 1> lod_thresholds);
 
 }  // namespace badlands

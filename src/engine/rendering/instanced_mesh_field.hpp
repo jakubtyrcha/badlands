@@ -15,7 +15,11 @@
 //   same encoder (see GpuInstanceRenderer::Cull's sequencing contract), then
 //   field.Draw(pass, frame, PassKind::kDeferred) inside the G-buffer pass and
 //   field.Draw(pass, frame, PassKind::kForwardOpaque, &engine) inside the
-//   forward-opaque pass.
+//   forward-opaque pass. A field with shadow-casting submeshes (Phase 4:
+//   SetSubmeshShadow attached at least one) additionally needs
+//   field.CullShadow(frame, camera, light_view_proj) in the same pre-render-
+//   pass window, and field.Draw(pass, frame, PassKind::kShadow) inside the
+//   shadow depth pass.
 #include <array>
 #include <cstdint>
 #include <span>
@@ -36,10 +40,12 @@ struct ForwardEngineResources;
 
 class InstancedMeshField {
  public:
-  // Engine render passes an instanced submesh can be routed to. Deliberately
-  // just the two passes this field currently drives (see the design doc's
-  // "out of scope" section for shadow casting) — no game-specific pass kinds.
-  enum class PassKind { kDeferred, kForwardOpaque };
+  // Engine render passes an instanced submesh can be routed to — no
+  // game-specific pass kinds. kShadow (Phase 4 of the volumetric-foliage
+  // feature) is orthogonal to the other two: a slot's shadow_material (see
+  // SlotInfo/SetSubmeshShadow below) is independent of its main `pass`, so
+  // one slot can be e.g. kDeferred-lit AND shadow-casting at once.
+  enum class PassKind { kDeferred, kForwardOpaque, kShadow };
 
   // `capacity`/`num_models`/`lod_thresholds` forward straight to
   // GpuInstanceRenderer's ctor (note the reordered `num_submeshes` param,
@@ -66,21 +72,58 @@ class InstancedMeshField {
   // this class never sets material parameters). Not owned; `material` (and
   // the vertex/index buffers) must outlive this field's use. `material`
   // may be nullptr to clear/skip the slot.
+  //
+  // ORDER CONTRACT: this overwrites the slot's WHOLE SlotInfo, including any
+  // shadow_material a prior SetSubmeshShadow call attached to it (reset to
+  // nullptr) — a slot repurposed via SetSubmesh (new mesh/material) must not
+  // keep casting a shadow left over from its previous configuration. Call
+  // SetSubmeshShadow AFTER SetSubmesh (every caller in this codebase already
+  // does) to (re)attach a shadow material for the slot's new configuration.
   void SetSubmesh(uint32_t model, uint32_t lod, uint32_t submesh,
                   wgpu::Buffer vertex_buffer, wgpu::Buffer index_buffer,
                   wgpu::IndexFormat index_format, uint32_t index_count,
                   PassKind pass, RenderingMaterialInstance* material);
 
-  // True iff any configured slot uses this PassKind (with a non-null
-  // material). Lets a driver (SceneRenderer) skip a Draw() call entirely when
-  // this field has nothing for that pass.
+  // Attaches (or clears, via nullptr) a shadow-pass material to an ALREADY
+  // configured (model, lod, submesh) slot — geometry comes from whatever
+  // SetSubmesh set for that slot (there is no separate shadow mesh; the
+  // shadow draw reuses the exact same vertex/index buffers), so call
+  // SetSubmesh for the slot first. Not owning, same lifetime contract as
+  // SetSubmesh. `material`'s `bucketId` param must equal
+  // GpuInstanceRenderer::BucketId(model, lod), same as SetSubmesh's material.
+  // A shadow material must not declare @group(2) (no engine resources are
+  // bound for Draw(kShadow)) — see Draw()'s doc comment.
+  //
+  // ORDER CONTRACT: must run AFTER SetSubmesh for this slot — SetSubmesh
+  // resets shadow_material to nullptr (see its own doc comment above), so
+  // calling this first would just have its attachment wiped by the following
+  // SetSubmesh.
+  void SetSubmeshShadow(uint32_t model, uint32_t lod, uint32_t submesh,
+                        RenderingMaterialInstance* material);
+
+  // True iff any configured slot uses this PassKind. For kDeferred/
+  // kForwardOpaque: any slot whose main `pass` matches with a non-null
+  // `material`. For kShadow: any slot with a non-null `shadow_material`,
+  // REGARDLESS of that slot's main `pass` (shadow-casting is orthogonal to
+  // the main pass — see PassKind's doc comment). Lets a driver
+  // (SceneRenderer) skip a Cull()/Draw() call entirely when this field has
+  // nothing for that pass.
   bool HasPass(PassKind pass) const;
 
-  // Dispatches the GPU cull/LOD/compaction compute passes. See
-  // GpuInstanceRenderer::Cull's encoder-sequencing contract: must run before
-  // any render pass is begun on the same encoder.
+  // Dispatches the GPU cull/LOD/compaction compute passes against the
+  // camera's frustum (feeding Draw(..., PassKind::kDeferred/kForwardOpaque)).
+  // See GpuInstanceRenderer::Cull's encoder-sequencing contract: must run
+  // before any render pass is begun on the same encoder.
   void Cull(FrameContext& frame, const Camera& camera) {
     renderer_.Cull(frame, camera);
+  }
+
+  // Same, against the light's frustum (feeding Draw(..., PassKind::kShadow)).
+  // See GpuInstanceRenderer::CullShadow's doc comment for why this writes a
+  // SEPARATE result set from Cull() above. Same encoder-sequencing contract.
+  void CullShadow(FrameContext& frame, const Camera& camera,
+                  const glm::mat4& light_view_proj) {
+    renderer_.CullShadow(frame, camera, light_view_proj);
   }
 
   // Draws every configured slot whose PassKind == `pass_kind`. Each slot's
@@ -109,6 +152,15 @@ class InstancedMeshField {
   // declares group 2 with a DIFFERENT layout would fail Dawn validation when
   // this shared bind group is bound against its pipeline — such a mix is not
   // supported by one field and is the caller's responsibility to avoid.
+  //
+  // pass_kind == kShadow is a DIFFERENT selection rule from the other two:
+  // every slot with a non-null `shadow_material` is drawn (regardless of that
+  // slot's main `pass`), routed through GpuInstanceRenderer::CullSet::kShadow
+  // (CullShadow()'s result, not Cull()'s) so a shadow-only cast — a slot
+  // shadowing without itself being lit — is possible. `engine` is unused for
+  // kShadow: shadow materials never declare @group(2) (their WESL gates it
+  // behind `@if(!shadow_pass)`), so the group-2 machinery above is inert for
+  // them.
   void Draw(RenderPassContext& pass, FrameContext& frame, PassKind pass_kind,
             const ForwardEngineResources* engine = nullptr);
 
@@ -118,6 +170,8 @@ class InstancedMeshField {
   struct SlotInfo {
     PassKind pass = PassKind::kDeferred;
     RenderingMaterialInstance* material = nullptr;
+    // Independent of `pass`/`material` above — see PassKind's doc comment.
+    RenderingMaterialInstance* shadow_material = nullptr;
   };
   std::vector<SlotInfo> slots_;  // size GetNumBuckets() * GetNumSubmeshes()
 };

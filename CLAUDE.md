@@ -82,7 +82,8 @@ cargo test --manifest-path src/crates/brainhost/Cargo.toml --lib
   failures+totals only. `scripts/test.sh <test-binary> "<catch2-filter>"` — direct filtered run
   (e.g. `scripts/test.sh badlands_game_tests "[combat]"`).
 - `scripts/screenshot.sh <app> <out.png> [args…]` — SIGALRM-bounded headless screenshot
-  (e.g. `scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 3`).
+  (e.g. `scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 4`).
+  `--lod`: 0=Original cards, 1-3=voxel LODs L0/L1/L2, 4=Multi (instanced field).
 - `scripts/gitstate.sh` — branch + HEAD + short status + commits ahead of origin/main.
 - `scripts/noiser_guard.sh [BASE]` — assert `third_party/noiser` isn't staged (nor in `BASE..HEAD`).
 

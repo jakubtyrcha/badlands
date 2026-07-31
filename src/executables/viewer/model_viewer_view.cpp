@@ -13,9 +13,11 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/geometry/leaf_voxelizer.hpp"
 #include "game/geometry/mesh_lod.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
+#include "game/visual/foliage_voxel_config.hpp"
 
 namespace badlands {
 
@@ -30,14 +32,16 @@ constexpr float kFloorRoughness = 1.0f;
 constexpr float kFloorSize = 40.0f;
 // One floor-UV repeat per ~2 world units instead of stretching one copy.
 constexpr float kFloorUvRepeatSpacing = 2.0f;
-// Preview height the tree generators are display-scaled to (their native ez-tree
-// units are tens-of-meters tall, which frames far away and reads tiny).
-constexpr float kTreePreviewHeight = 8.0f;
+// Preview height the tree generators are display-scaled to -- see
+// foliage_voxel_config.hpp's kFoliagePreviewHeight; aliased under this file's
+// existing local name (used throughout this file, both the single-tree and
+// Multi-mode paths) rather than a blanket rename.
+constexpr float kTreePreviewHeight = kFoliagePreviewHeight;
 
-// Multi mode ("LOD 3"): a grid of one instanced tree model with dynamic GPU
+// Multi mode ("LOD 4"): a grid of one instanced tree model with dynamic GPU
 // LOD (distance-based, chosen live by InstancedMeshField::Cull -- NOT the
 // manual kDefaultLodRatios switch below (mesh_lod.hpp), which only applies to
-// the single-tree 0/1/2 paths).
+// the single-tree Voxel L0/L1/L2 (lod_level_ 1/2/3) paths).
 constexpr int kGridN = 16;
 constexpr float kGridSpacing = 8.0f;
 // Golden angle: a constant per-instance yaw increment that avoids any
@@ -46,10 +50,37 @@ const float kYawIncrement = glm::radians(137.508f);
 // Larger than the single-tree kFloorSize -- the 16x16 grid at kGridSpacing
 // spans 120 world units; 160 gives it a visible margin.
 constexpr float kMultiFloorSize = 160.0f;
-// GPU LOD thresholds (near/mid boundaries) sized to the default orbit framing
-// of the 16x16, 8.0-spacing grid, so the near/mid/far rows land in different
-// LOD bands with visible geometric detail contrast.
-constexpr std::array<float, 2> kMultiLodThresholds = {95.0f, 135.0f};
+// GPU LOD thresholds (near/mid boundaries), retuned for volumetric-foliage
+// Phase 5's voxel-crown fields (the pre-Phase-5 {95, 135} values were tuned
+// for the old billboard-card leaf field). Derivation: solve
+// kFoliageVoxelTargetPx's own world_size = target_px * distance / focal_px
+// formula (see that constant's comment below) for distance, using each
+// LOD's own kFoliageVoxelWorldSizes entry as `world_size` --
+// distance = world_size * focal_px / target_px = world_size * 935 / 8.
+// LOD0->LOD1 (world_size = kFoliageVoxelWorldSizes[0] = 0.15m): ~17.5m,
+// rounded to 18. LOD1->LOD2 (world_size = kFoliageVoxelWorldSizes[1] =
+// 0.20m, Phase 6-retuned -- see that constant's comment): ~23.4m, rounded to
+// 23. Screenshot-tuned in Phase 6 (both the empty-crown fix and this
+// threshold's re-derivation off it).
+constexpr std::array<float, 2> kMultiLodThresholds = {18.0f, 23.0f};
+
+// Voxel-crown LOD (volumetric-foliage Phase 3): three progressively coarser
+// tet-voxelization cell sizes, one per Voxel L0/L1/L2 mode
+// (kFoliageVoxelWorldSizes[lod_level_ - 1] -- see foliage_voxel_config.hpp,
+// included above, for the constant itself + its Phase 6 retune derivation),
+// given in WORLD (preview) space -- RebuildScene converts to the tree's own
+// native units by dividing by `s` (the same kTreePreviewHeight rescale bark/
+// leaves already go through) before passing it to
+// LeafVoxelizeOptions::cell_size. kFoliageVoxelTargetPx itself is not read by
+// any distance-based selection (Voxel L0/L1/L2, lod_level_ 1..3, is still a
+// manual mode switch) -- it documents the screen-space budget
+// kFoliageVoxelWorldSizes was derived from: world_size = target_px *
+// distance / focal_px, i.e. a world-space threshold distance = size *
+// focal_px / target_px. At 1920x1080/60deg vertical fovy, focal_px =
+// (height/2) / tan(fovy/2) = 540 / tan(30deg) ~= 935. kMultiLodThresholds
+// above (Phase 5) DOES derive its distance-based GPU LOD cutoffs from this
+// same formula, applied to Multi mode's own per-LOD voxel sizes.
+constexpr float kFoliageVoxelTargetPx = 8.0f;
 
 }  // namespace
 
@@ -227,13 +258,13 @@ void ModelViewerView::RebuildScene() {
   // repopulates it. Clearing unconditionally (rather than only in the
   // non-Multi branches) also releases the previous Multi-mode field's GPU
   // resources the moment a rebuild switches away from it (generator change
-  // or LOD 3 -> 0/1/2). field_ptr_ is also nulled for hygiene/safety.
+  // or LOD 4 -> 0/1/2/3). field_ptr_ is also nulled for hygiene/safety.
   scene_context_.instanced_field_count = 0;
   tree_field_.reset();
   field_ptr_ = nullptr;
 
   const MeshGenerator& gen = generators_[generator_index_];
-  const bool multi = gen.tree.has_value() && lod_level_ == 3;
+  const bool multi = gen.tree.has_value() && lod_level_ == 4;
 
   const float floor_size = multi ? kMultiFloorSize : kFloorSize;
   AddFloor(scene_, floor_size, matlib_.SolidColor(kFloorGray, kFloorRoughness),
@@ -245,12 +276,40 @@ void ModelViewerView::RebuildScene() {
   if (multi) {
     // Multi mode: a kGridN x kGridN instanced grid of the selected tree,
     // GPU-culled with dynamic distance LOD (InstancedMeshField::Cull) --
-    // NOT the manual kDefaultLodRatios switch the single-tree 0/1/2 paths use
-    // below. Skips the single-tree bark/leaf entities entirely.
+    // NOT the manual kDefaultLodRatios switch the single-tree Voxel L0/L1/L2
+    // (lod_level_ 1/2/3) paths use below. Skips the single-tree bark/leaf
+    // entities entirely.
     const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
+
+    // BuildTreeField (volumetric-foliage Phase 5) takes one pre-voxelized
+    // leaf-crown mesh per LOD rather than voxelizing internally, so `s` (the
+    // preview rescale factor) must be known BEFORE calling it, to convert
+    // kFoliageVoxelWorldSizes (preview-space) into native-unit cell sizes --
+    // generate the skeleton/bark here to learn `s` and voxelize. BuildTreeField
+    // now takes this skeleton + bark mesh directly (review fix -- it used to
+    // regenerate its own byte-identical copies of both internally, a second
+    // full generation pass on top of this one), so `bark_for_scale` is moved
+    // into the call below instead of being thrown away.
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
+    TexturedMeshResult bark_for_scale = GenerateTreeMesh(*gen.tree, skeleton);
+    const float bark_h = bark_for_scale.local_bounds.max.y -
+                         bark_for_scale.local_bounds.min.y;
+    const float s = kTreePreviewHeight / std::max(bark_h, 0.001f);
+
+    const TexturedMeshResult leaves_for_voxelize =
+        GenerateLeafMesh(*gen.tree, skeleton);
+    std::array<TexturedMeshResult, GpuInstanceRenderer::kMaxLods>
+        leaf_lod_meshes;
+    for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
+      LeafVoxelizeOptions voxel_opts;
+      voxel_opts.cell_size = kFoliageVoxelWorldSizes[lod] / s;
+      leaf_lod_meshes[lod] = VoxelizeLeafCards(
+          leaves_for_voxelize.mesh, gen.tree->leaves.silhouette, voxel_opts);
+    }
+
     std::unique_ptr<TreeField> field = BuildTreeField(
-        device_, queue_, *pipeline_gen_, *gen.tree,
-        LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_, capacity,
+        device_, queue_, *pipeline_gen_, *gen.tree, skeleton,
+        std::move(bark_for_scale), leaf_lod_meshes, capacity,
         kMultiLodThresholds);
     if (!field) {
       // Mirrors the malformed-generator branch further down: log and bail
@@ -265,10 +324,10 @@ void ModelViewerView::RebuildScene() {
 
     // Same scale + rest-on-floor transform the single-tree path derives
     // from bark.local_bounds (the `else` branch below), so a Multi-mode
-    // grid cell at the origin matches the single-tree preview exactly.
-    const float h =
-        field->bark_local_bounds.max.y - field->bark_local_bounds.min.y;
-    const float s = kTreePreviewHeight / std::max(h, 0.001f);
+    // grid cell at the origin matches the single-tree preview exactly. `s`
+    // was already computed above (from a deterministically bit-identical
+    // bark regeneration) -- reused here rather than re-derived from
+    // field->bark_local_bounds.
     const glm::mat4 xf =
         glm::translate(glm::mat4(1.0f),
                       glm::vec3(0.0f, -field->bark_local_bounds.min.y * s,
@@ -316,9 +375,14 @@ void ModelViewerView::RebuildScene() {
     scene_context_.instanced_fields = &field_ptr_;
     scene_context_.instanced_field_count = 1;
   } else if (gen.tree) {
-    // Two-material tree: deferred solid bark + forward-opaque alpha-cutout leaf
-    // cards, sharing the tree's local space (and therefore one preview
-    // transform, so the leaves stay attached to the branches).
+    // Single tree, one of two leaf representations sharing the tree's local
+    // space (and therefore one preview transform, so the leaves/crown stay
+    // attached to the branches):
+    //   - lod_level_ == 0 ("Original"): deferred solid bark + forward-opaque
+    //     alpha-cutout leaf cards -- the pre-Phase-3 path, untouched.
+    //   - lod_level_ == 1..3 ("Voxel L0/L1/L2"): deferred solid bark
+    //     (simplified per kDefaultLodRatios) + a deferred VoxelFoliage tet
+    //     crown (volumetric-foliage Phase 3) in place of the leaf cards.
     const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
     TexturedMeshResult bark = GenerateTreeMesh(*gen.tree, skeleton);
     const float h = bark.local_bounds.max.y - bark.local_bounds.min.y;
@@ -330,46 +394,82 @@ void ModelViewerView::RebuildScene() {
 
     world_bounds = bark.local_bounds.TransformedBy(xf);
 
-    TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
-    if (leaves.mesh.vertex_count > 0) {
-      world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
-    }
-
-    // Manual LOD switch: simplify bark/leaf meshes in place before they're
-    // moved into the scene. local_bounds is left as-is (simplification stays
-    // within the mesh extent, so orbit framing above is unaffected).
+    // Manual LOD switch: simplify the bark mesh in place before it's moved
+    // into the scene. local_bounds is left as-is (simplification stays
+    // within the mesh extent, so orbit framing above is unaffected). Voxel
+    // L0/L1/L2 (lod_level_ 1..3) map onto kDefaultLodRatios[lod_level_ - 1]
+    // (Voxel L0 = ratio 1.0, i.e. full bark, same as the old lod-1 mapping
+    // shifted by one now that index 0 means "Original" instead of "full
+    // detail"); Original (0) stays untouched via the guard below.
     if (lod_level_ > 0) {
-      SimplifiedMesh s = SimplifyMesh(bark.mesh.vertices,
-                                     kTexturedMeshFloatsPerVertex,
-                                     bark.mesh.indices, kDefaultLodRatios[lod_level_]);
-      bark.mesh.vertices = std::move(s.vertices);
-      bark.mesh.indices = std::move(s.indices);
-      bark.mesh.vertex_count = s.vertex_count;
+      SimplifiedMesh simplified = SimplifyMesh(
+          bark.mesh.vertices, kTexturedMeshFloatsPerVertex, bark.mesh.indices,
+          kDefaultLodRatios[lod_level_ - 1]);
+      bark.mesh.vertices = std::move(simplified.vertices);
+      bark.mesh.indices = std::move(simplified.indices);
+      bark.mesh.vertex_count = simplified.vertex_count;
       bark.mesh.dirty = true;
     }
-    if (leaves.mesh.vertex_count > 0 && kLeafLodRatios[lod_level_] < 1.0f) {
-      SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
-                                      kTexturedMeshFloatsPerVertex,
-                                      leaves.mesh.indices,
-                                      kLeafLodRatios[lod_level_]);
-      leaves.mesh.vertices = std::move(ls.vertices);
-      leaves.mesh.indices = std::move(ls.indices);
-      leaves.mesh.vertex_count = ls.vertex_count;
-      leaves.mesh.dirty = true;
-    }
     bark_tris_ = static_cast<int>(bark.mesh.indices.size() / 3);
-    leaf_tris_ = static_cast<int>(leaves.mesh.indices.size() / 3);
-
     AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
 
-    if (leaves.mesh.vertex_count > 0) {
-      DeferredMaterial lm = matlib_.TranslucentFoliage(
-          LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_,
-          gen.tree->leaves.alpha_cutoff, gen.tree->leaves.tint,
-          gen.tree->leaves.transmission_tint,
-          gen.tree->leaves.transmission_strength);
-      AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
-                                 lm.factory, lm.params, xf);
+    if (lod_level_ == 0) {
+      // Original: the pre-Phase-3 card-leaf path, byte-for-byte unchanged.
+      TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
+      if (leaves.mesh.vertex_count > 0) {
+        world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
+      }
+      if (leaves.mesh.vertex_count > 0 && kLeafLodRatios[lod_level_] < 1.0f) {
+        SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
+                                        kTexturedMeshFloatsPerVertex,
+                                        leaves.mesh.indices,
+                                        kLeafLodRatios[lod_level_]);
+        leaves.mesh.vertices = std::move(ls.vertices);
+        leaves.mesh.indices = std::move(ls.indices);
+        leaves.mesh.vertex_count = ls.vertex_count;
+        leaves.mesh.dirty = true;
+      }
+      leaf_tris_ = static_cast<int>(leaves.mesh.indices.size() / 3);
+
+      if (leaves.mesh.vertex_count > 0) {
+        DeferredMaterial lm = matlib_.TranslucentFoliage(
+            LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_,
+            gen.tree->leaves.alpha_cutoff, gen.tree->leaves.tint,
+            gen.tree->leaves.transmission_tint,
+            gen.tree->leaves.transmission_strength);
+        AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
+                                   lm.factory, lm.params, xf);
+      }
+    } else {
+      // Voxel L0/L1/L2: tet-voxelize the leaf cards instead of simplifying
+      // them. cell_size is world_size / s -- kFoliageVoxelWorldSizes is in
+      // preview (post-rescale) world units, LeafVoxelizeOptions::cell_size
+      // wants the tree's own native units, and `s` is the same
+      // kTreePreviewHeight rescale bark/xf above already apply.
+      TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
+      LeafVoxelizeOptions voxel_opts;
+      voxel_opts.cell_size = kFoliageVoxelWorldSizes[lod_level_ - 1] / s;
+      TexturedMeshResult voxels = VoxelizeLeafCards(
+          leaves.mesh, gen.tree->leaves.silhouette, voxel_opts);
+      leaf_tris_ = static_cast<int>(voxels.mesh.indices.size() / 3);
+
+      // Mirrors the Original branch's vertex_count guard above -- a tree
+      // preset with leaves disabled (or too sparse to clear
+      // occupancy_fraction at this cell size) voxelizes to an empty mesh.
+      // Guard BOTH the entity add and the bounds union: an empty
+      // TexturedMeshResult's local_bounds is Aabb::Empty() (min=+FLT_MAX,
+      // max=-FLT_MAX sentinel corners), and TransformedBy would smear those
+      // sentinels into world_bounds, corrupting orbit framing.
+      if (voxels.mesh.vertex_count > 0) {
+        // Voxel shell exceeds the source cards' AABB (tets overscale past
+        // their cell), so union rather than reuse the card bounds.
+        world_bounds = world_bounds.Union(voxels.local_bounds.TransformedBy(xf));
+        AddMeshEntity(
+            scene_, "leaves", std::move(voxels),
+            matlib_.VoxelFoliage(gen.tree->leaves.tint, 0.9f,
+                                 gen.tree->leaves.transmission_strength),
+            xf);
+      }
     }
   } else if (gen.generate) {
     GeneratedMesh generated = gen.generate();
@@ -443,14 +543,15 @@ void ModelViewerView::DrawUI() {
   if (generators_[generator_index_].tree.has_value()) {
     ImGui::Separator();
     ImGui::TextUnformatted("LOD");
-    ImGui::RadioButton("0", &lod, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("1", &lod, 1);
-    ImGui::SameLine();
-    ImGui::RadioButton("2", &lod, 2);
-    ImGui::SameLine();
-    ImGui::RadioButton("Multi", &lod, 3);
-    if (lod != 3) {
+    // One per line (rather than the old 0/1/2/Multi single-row SameLine
+    // chain) -- the longer volumetric-foliage labels ("Voxel L0/L1/L2")
+    // would overflow this window's 200px width floor packed onto one row.
+    ImGui::RadioButton("Original", &lod, 0);
+    ImGui::RadioButton("Voxel L0", &lod, 1);
+    ImGui::RadioButton("Voxel L1", &lod, 2);
+    ImGui::RadioButton("Voxel L2", &lod, 3);
+    ImGui::RadioButton("Multi", &lod, 4);
+    if (lod != 4) {
       ImGui::Text("bark: %d tris   leaves: %d tris", bark_tris_, leaf_tris_);
     }
   }
