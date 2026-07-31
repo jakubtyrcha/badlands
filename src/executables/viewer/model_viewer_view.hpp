@@ -28,6 +28,7 @@
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/rendering/scene_renderer.hpp"  // ShadowDebugMode
+#include "game/visual/foliage_voxel_config.hpp"  // kFoliageVoxelWorldSizes
 #include "engine/scene/scene_graph.hpp"
 #include "game/geometry/leaf_texture.hpp"
 #include "game/geometry/tree_options.hpp"  // TreeOptions
@@ -59,13 +60,27 @@ class ModelViewerView : public AppView {
     initial_shadow_debug_mode_ = mode;
   }
 
-  // Selects the initial LOD level (headless `--lod <n>`, 0..4: 0 = "Original"
-  // (today's full bark + billboard-card leaves), 1..3 = "Voxel L0/L1/L2"
-  // (tet-voxelized crowns at three cell sizes), 4 = "Multi" (a 16x16
-  // instanced grid of the selected tree with dynamic GPU LOD). Call before
-  // Initialize() -- RebuildScene() reads lod_level_ when generating tree
-  // meshes.
-  void SetInitialLod(int lod) { lod_level_ = std::clamp(lod, 0, 4); }
+  // The lod_level_ layout, exposed so the CLI clamps against the same bounds
+  // the view switches on (a stale hardcoded clamp here silently pinned every
+  // `--lod` past the old maximum to the last voxel level). 0 = "Original";
+  // 1..kVoxelLodCount = "Voxel L0..L3", one per kFoliageVoxelWorldSizes
+  // entry; kMultiLodLevel = "Multi". Adding a voxel level means adding a cell
+  // size to that array (plus its bark budget -- see
+  // kFoliageCoarseBarkTriBudgets' static_assert); nothing here or in
+  // main_viewer.cpp changes.
+  static constexpr int kVoxelLodCount =
+      static_cast<int>(kFoliageVoxelWorldSizes.size());
+  static constexpr int kMultiLodLevel = kVoxelLodCount + 1;
+
+  // Selects the initial LOD level (headless `--lod <n>`, 0..kMultiLodLevel):
+  // 0 = "Original" (today's full bark + billboard-card leaves),
+  // 1..kVoxelLodCount = "Voxel L0..L3" (tet-voxelized crowns at progressively
+  // coarser cell sizes), kMultiLodLevel = "Multi" (a 16x16 instanced grid of
+  // the selected tree with dynamic GPU LOD). Call before Initialize() --
+  // RebuildScene() reads lod_level_ when generating tree meshes.
+  void SetInitialLod(int lod) {
+    lod_level_ = std::clamp(lod, 0, kMultiLodLevel);
+  }
 
  private:
   // The output of a generator: a mesh plus the transform that places it. The
@@ -117,14 +132,17 @@ class ModelViewerView : public AppView {
 
   // Manual LOD switch (tree generators only): 0="Original" (full-detail bark
   // + billboard-card leaves via TranslucentFoliage, byte-for-byte the old
-  // lod-0 path), 1..3="Voxel L0/L1/L2" (bark simplified per
-  // kDefaultLodRatios[lod_level_-1], leaves replaced by a tet-voxelized
-  // crown via VoxelizeLeafCards/VoxelFoliage at progressively coarser cell
-  // sizes -- see kFoliageVoxelWorldSizes), 4="Multi" (a 16x16 instanced grid
-  // via tree_field_, dynamic GPU LOD -- see RebuildScene; voxel crowns since
-  // Phase 5, not card leaves). bark_tris_/leaf_tris_ are the single-tree (0..3)
-  // triangle counts, recomputed in RebuildScene for the ImGui readout; not
-  // meaningful in Multi mode.
+  // lod-0 path), 1..4="Voxel L0..L3" (bark simplified per
+  // SimplifyBarkForVoxelLod, leaves replaced by a tet-voxelized crown via
+  // VoxelizeLeafCards/VoxelFoliage at progressively coarser cell sizes --
+  // see kFoliageVoxelWorldSizes), 5="Multi" (a 16x16 instanced grid via
+  // tree_field_, dynamic
+  // GPU LOD -- see RebuildScene; voxel crowns since Phase 5, not card
+  // leaves). The bounds come from kFoliageVoxelWorldSizes' size, not
+  // hardcoded here -- see model_viewer_view.cpp's kVoxelLodCount /
+  // kMultiLodLevel. bark_tris_/leaf_tris_ are the single-tree triangle
+  // counts, recomputed in RebuildScene for the ImGui readout; not meaningful
+  // in Multi mode.
   int lod_level_ = 0;
   int bark_tris_ = 0;
   int leaf_tris_ = 0;

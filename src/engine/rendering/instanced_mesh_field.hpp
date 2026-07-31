@@ -47,15 +47,16 @@ class InstancedMeshField {
   // one slot can be e.g. kDeferred-lit AND shadow-casting at once.
   enum class PassKind { kDeferred, kForwardOpaque, kShadow };
 
-  // `capacity`/`num_models`/`lod_thresholds` forward straight to
+  // `capacity`/`num_models`/`model_lods` forward straight to
   // GpuInstanceRenderer's ctor (note the reordered `num_submeshes` param,
-  // ahead of `lod_thresholds` here, matching this class's declaration order).
+  // ahead of `model_lods` here, matching this class's declaration order).
+  // `model_lods` holds one LOD chain per model -- see
+  // GpuInstanceRenderer::ModelLod for the per-model runtime level count.
   InstancedMeshField(wgpu::Device device, wgpu::Queue queue,
                      GpuPipelineGenerator& pipeline_generator,
                      uint32_t capacity, uint32_t num_models,
                      uint32_t num_submeshes,
-                     std::array<float, GpuInstanceRenderer::kMaxLods - 1>
-                         lod_thresholds);
+                     std::span<const GpuInstanceRenderer::ModelLod> model_lods);
 
   bool IsValid() const { return renderer_.IsValid(); }
 

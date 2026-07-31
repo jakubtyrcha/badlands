@@ -13,9 +13,9 @@ InstancedMeshField::InstancedMeshField(
     wgpu::Device device, wgpu::Queue queue,
     GpuPipelineGenerator& pipeline_generator, uint32_t capacity,
     uint32_t num_models, uint32_t num_submeshes,
-    std::array<float, GpuInstanceRenderer::kMaxLods - 1> lod_thresholds)
+    std::span<const GpuInstanceRenderer::ModelLod> model_lods)
     : renderer_(device, queue, pipeline_generator, capacity, num_models,
-                lod_thresholds, num_submeshes) {
+                model_lods, num_submeshes) {
   slots_.resize(uint64_t{renderer_.GetNumBuckets()} *
                 renderer_.GetNumSubmeshes());
 }
