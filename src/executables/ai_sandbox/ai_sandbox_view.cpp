@@ -23,24 +23,18 @@
 #include "game/brain_asset.hpp"
 #include "game/building_catalog.h"
 #include "game/creature_manifest.h"
-#include "game/factors_manifest.hpp"
 #include "game/scene/blockout_materials.hpp"
 #include "game/skill_manifest.hpp"
-#include "mapgen/biomes.hpp"
 
 namespace badlands {
 
 namespace {
 
 // Debug materials come from the shared blockout palette (game/scene/
-// blockout_materials.hpp) so the game's blockout mode and this arena draw from
-// one source of truth: blockout::kArenaGray/kArenaRoughness for the floor +
-// walls, blockout::kWall/kRoof for the buildings, blockout::kCapsule* for the
-// hero capsules.
-
-// Wall block footprint/height (world units; tile = 1.0 world unit).
-constexpr float kWallHalfFootprint = 0.5f;
-constexpr float kWallHalfHeight = 0.6f;  // 1.2 tall
+// blockout_materials.hpp) so the game's blockout mode and this view draw from
+// one source of truth: blockout::kArenaGray/kArenaRoughness for the floor,
+// blockout::kWall/kRoof for the buildings, blockout::kCapsule* for the
+// entity capsules.
 
 // Repeat the floor UVs roughly once per 2 world units instead of stretching
 // one copy across the whole floor.
@@ -50,43 +44,11 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 constexpr float kCapsuleRadius = 0.35f;
 constexpr float kCapsuleCylinderHeight = 0.6f;
 
-// The sandbox arena: origin-centred greybox. Elongated in z so it also contains
-// the prebuilt colony Castle, which make_world now places on the plains at
-// kCastleSpawn (world z ~ +54) rather than the origin -- the floor/wall ring
-// reach it so nothing floats off the pit. The town + deer still cluster near the
-// origin; the tax collector walks north to the Castle to deposit. Well inside
-// the sim's 256 u placement grid.
-constexpr glm::ivec2 kSandboxArena{90, 130};
-
-// Snapshot buffer caps. The sandbox town is tiny; a truncated snapshot would
+// Snapshot buffer caps. A mode's world is small; a truncated snapshot would
 // only mean fewer rows drawn/listed, never a crash.
 constexpr uint32_t kMaxCharacterRows = 64;
 constexpr uint32_t kMaxBuildingRows = 64;
 constexpr uint32_t kMaxCommandRows = 24;
-
-// Where the seeded town goes. Kept clear of the origin Castle that game_create
-// prebuilds (4x4 + margin) and spaced so no footprint+margin overlaps another.
-struct TownBuilding {
-  badlands::BuildingKind kind;
-  float x, z;
-  int32_t rotation_index;
-};
-constexpr TownBuilding kTown[] = {
-    {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, -8.0f, 0},
-    {badlands::BuildingKind::FreeCompanyQuarters, -14.0f, 8.0f, 0},
-    {badlands::BuildingKind::HuntersCamp, -24.0f, 0.0f, 0},  // recruits a hunter
-    {badlands::BuildingKind::Tavern, 14.0f, -8.0f, 0},
-    {badlands::BuildingKind::Apothecary, 14.0f, 8.0f, 0},
-    {badlands::BuildingKind::House, 6.0f, 16.0f, 0},   // accrue tax for the collector
-    {badlands::BuildingKind::House, -6.0f, 16.0f, 0},
-    {badlands::BuildingKind::Watchtower, 0.0f, -16.0f, 0},  // second deposit point
-    {badlands::BuildingKind::Sewer, 18.0f, -14.0f, 0},     // rats crawl out here
-};
-
-// Heroes recruited per guild at seed time. Below kGuildRosterCap so the panel
-// can show a recruit that fails on a full roster if the cap ever shrinks.
-constexpr int kSeedHeroesPerGuild = 3;
-constexpr int kSeedDeer = 6;
 
 // Activity names come from badlands::ActivityCatalog() -- the sim's own single
 // source of truth. This used to be a hand-mirrored switch, which silently
@@ -154,7 +116,7 @@ bool AiSandboxView::Initialize(const RenderContext& ctx) {
 
   ApplyEnvironment();
 
-  SeedTown();  // loads the scenario, sizes arena_, creates + seeds the sim
+  StageWorld();  // the mode's world, built and populated
   BuildScene();
 
   // No volumetric fog over the greybox arena (it hazes the far edges). The
@@ -182,111 +144,62 @@ void AiSandboxView::ApplyEnvironment() {
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 }
 
-void AiSandboxView::SeedTown() {
+void AiSandboxView::StageWorld() {
+  // The hero brain, loaded ONCE into a member. Load-bearing that it outlives
+  // this call: every restage builds a new Sim, and the wasm module is the only
+  // hero decision layer there is (game/src/wasm_brain.h) -- a hero without it
+  // issues no intentions and no actions at all, stands still, and loses every
+  // fight to anything with a brain.
+  if (hero_wasm_.empty()) {
+    hero_wasm_ = badlands::LoadBrainWasm(badlands::kHeroBrainPath);
+    if (hero_wasm_.empty()) {
+      spdlog::error(
+          "AiSandboxView: no hero brain at {} -- heroes will idle. Run from the "
+          "repo root with git-lfs fetched.",
+          badlands::kHeroBrainPath);
+    } else {
+      spdlog::info("AiSandboxView: {} loaded ({} bytes) -- heroes think via the wasm brain",
+                   badlands::kHeroBrainPath, hero_wasm_.size());
+    }
+  }
   badlands::BrainDesc brain_desc{};
-
-  // wasm's backing storage only needs to outlive the Sim() construction below:
-  // bh_load compiles the wasm module synchronously and keeps no reference to
-  // the input bytes (see brainhost's bh_load -- wasmtime::Module::new copies/
-  // compiles eagerly) -- so it is declared at this scope, alongside the Sim()
-  // call that consumes it.
-  std::vector<uint8_t> wasm = badlands::LoadBrainWasm(badlands::kHeroBrainPath);
-  if (!wasm.empty()) {
-    brain_desc.wasm_bytes = wasm.data();
-    brain_desc.wasm_len = wasm.size();
-    spdlog::info("AiSandboxView: {} loaded ({} bytes) -- heroes think via the wasm brain",
-                 badlands::kHeroBrainPath, wasm.size());
+  if (!hero_wasm_.empty()) {
+    brain_desc.wasm_bytes = hero_wasm_.data();
+    brain_desc.wasm_len = hero_wasm_.size();
   }
 
   // The two clocks, from the one number: the sky (sim_clock_) and the sim's own
-  // day (millis_per_day, applied to whichever world config wins below). Left
-  // unset they disagree -- heroes would act on night behaviour while the sky
-  // showed something else. MillisPerDayForSimSeconds converts through ticks;
-  // seconds * 1000 would drift ~1% (see badlands_sim.hpp).
+  // day (millis_per_day). Left unset they disagree -- heroes would act on night
+  // behaviour while the sky showed something else. MillisPerDayForSimSeconds
+  // converts through ticks; seconds * 1000 would drift ~1% (see badlands_sim.hpp).
   sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
-  const int64_t millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
 
-  arena_ = build_arena(kSandboxArena);
-  badlands::WorldConfig town_cfg{};  // the shipping town world, plus our day length
-  town_cfg.millis_per_day = millis_per_day;
-  sim_ = badlands::Sim(town_cfg, brain_desc);
+  // The mode says what world to build; everything past this point is the game
+  // running normally, and nothing in it knows a mode exists.
+  badlands::WorldConfig cfg = mode_->Configure();
+  cfg.millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
+  sim_ = badlands::Sim(cfg, brain_desc);
 
-  // Behaviour tuning as data: load over the compiled defaults (a missing file
-  // just keeps them). Must happen before ticking -- factors are initial config.
-  badlands::SimFactors factors = sim_.Factors();
-  if (badlands::LoadSimFactors("assets/creatures/factors.json", factors)) {
-    sim_.SetFactors(factors);
+  // Creature stats and skill templates as data, same as game_view.cpp -- both
+  // apps must agree on them (a missing file keeps the compiled defaults). Must
+  // happen before staging: they are initial config, not live tuning.
+  badlands::CreatureCatalog catalog = sim_.Creatures();
+  if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
+    sim_.SetCreatureCatalog(catalog);
   }
-
-  // Skill templates as data, same as game_view.cpp -- both apps must agree
-  // on skill specs (a missing file keeps the compiled defaults). Must happen
-  // before ticking -- initial config, like the factors load just above.
   badlands::SkillCatalog skills = sim_.Skills();
   if (badlands::LoadSkillCatalog("assets/skills/skills.json", skills)) {
     sim_.SetSkillCatalog(skills);
   }
 
-  // Everything goes through game_dispatch, so the seed is itself a logged
-  // command sequence -- (initial config, seed, command log) still reproduces
-  // this world.
-  for (const TownBuilding& b : kTown) {
-    badlands::Action place{badlands::ActionKind::PlaceBuilding, 0, b.x, b.z,
-                     static_cast<int32_t>(b.kind), b.rotation_index};
-    const int64_t id = sim_.Dispatch(place);
-    if (id < 0) {
-      spdlog::warn("AiSandboxView::SeedTown: placing kind {} at ({}, {}) failed",
-                   static_cast<int32_t>(b.kind), b.x, b.z);
-      continue;
-    }
-    if (b.kind != badlands::BuildingKind::FreeCompanyQuarters &&
-        b.kind != badlands::BuildingKind::HuntersCamp) {
-      continue;
-    }
-    for (int i = 0; i < kSeedHeroesPerGuild; ++i) {
-      badlands::Action recruit{badlands::ActionKind::RecruitHero, static_cast<uint32_t>(id),
-                         0.0f, 0.0f, 0, 0};
-      if (sim_.Dispatch(recruit) < 0) {
-        spdlog::warn("AiSandboxView::SeedTown: recruit {} from guild {} failed", i,
-                     id);
-      }
-    }
-  }
-
-  // A small herd of deer on good terrain NEAR the town, so they are visible
-  // wandering/grazing/fleeing inside the arena. (Forest proper is a ring far
-  // outside this greybox pit; deer roaming real woods is covered by the tests.
-  // The sim reasons about the biome map even though the arena does not draw it.)
-  int deer_placed = 0;
-  for (int i = 0; i < 600 && deer_placed < kSeedDeer; ++i) {
-    const float ang = static_cast<float>(i) * 2.399963f;  // golden-angle spread
-    const float rad = 22.0f + static_cast<float>(i % 20) * 1.0f;  // the good-biome ring
-    const glm::vec2 p{std::cos(ang) * rad, std::sin(ang) * rad};
-    const int32_t b = sim_.BiomeAt(p.x, p.y);
-    if (b != static_cast<int32_t>(mapgen::Biome::Forest) &&
-        b != static_cast<int32_t>(mapgen::Biome::Plains)) {
-      continue;  // keep them off the central Lake
-    }
-    CharacterDesc d{};
-    d.archetype = badlands::Archetype::Critter;
-    d.pos_x = p.x;
-    d.pos_z = p.y;
-    d.team = 2;  // neutral wildlife
-    d.hp = 8.0f;
-    d.move_speed = 3.0f;
-    d.attack_range = 0.0f;
-    d.attack_damage = 0.0f;
-    d.attack_cooldown = 1.0f;
-    d.size_x = d.size_z = 0.7f;
-    d.size_y = 1.0f;
-    d.color_r = 0.62f;  // deer brown, distinct from the heroes' blue capsules
-    d.color_g = 0.42f;
-    d.color_b = 0.20f;
-    sim_.Spawn(d);
-    ++deer_placed;
-  }
+  mode_->Stage(sim_);
 
   building_rows_.resize(kMaxBuildingRows);
   cmd_rows_.resize(kMaxCommandRows);
+  // Both clocks restart with the world, but the SPEED control does not: it is
+  // the observer's setting, not the world's.
+  sim_ticks_done_ = 0;
+  sim_clock_.sim_seconds = 0.0;
 }
 
 void AiSandboxView::BuildScene() {
@@ -298,37 +211,15 @@ void AiSandboxView::BuildScene() {
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
 
-  // Floor covers the whole arena footprint (interior + wall ring) with
-  // headroom; scales with the configured arena size instead of a fixed
-  // constant.
-  const float full_x = static_cast<float>(arena_.accessible.x + 2);
-  const float full_z = static_cast<float>(arena_.accessible.y + 2);
-  const float floor_size = std::max(full_x, full_z) + 4.0f;
+  // Floor spans whatever the mode built, with headroom.
+  const float floor_size = 2.0f * WorldHalfExtent() + 8.0f;
   AddFloor(scene_, floor_size, matlib_.SolidColor(blockout::kArenaGray, blockout::kArenaRoughness),
            floor_size / kFloorUvRepeatSpacing);
 
-  AddWalls();
+  // No AddWalls(): a wall is a BUILDING now, so it arrives through
+  // AddBuildings() with everything else the world contains. The view has no
+  // idea an arena is what it is drawing.
   AddBuildings();
-}
-
-void AiSandboxView::AddWalls() {
-  const DeferredMaterial wall_mat =
-      matlib_.SolidColor(blockout::kArenaGray, blockout::kArenaRoughness);
-
-  int index = 0;
-  for (const glm::ivec2& tile : arena_.wall_tiles) {
-    const glm::vec2 center = arena_tile_center(tile);
-    // GenerateCube is centered at the origin -- translate up by half the
-    // height so the block's base sits on the y=0 floor.
-    const glm::mat4 transform = glm::translate(
-        glm::mat4(1.0f), glm::vec3(center.x, kWallHalfHeight, center.y));
-
-    auto cube = GenerateCube(
-        glm::vec3(kWallHalfFootprint, kWallHalfHeight, kWallHalfFootprint));
-
-    const std::string name = "wall_" + std::to_string(index++);
-    AddMeshEntity(scene_, name.c_str(), std::move(cube), wall_mat, transform);
-  }
 }
 
 void AiSandboxView::AddBuildings() {
@@ -437,13 +328,26 @@ void AiSandboxView::SyncProjectiles() {
   }
 }
 
+float AiSandboxView::WorldHalfExtent() {
+  // Derived from the world's own buildings rather than asked of the mode: the
+  // host frames whatever is out there, and stays ignorant of what shape the
+  // mode thinks it built.
+  constexpr float kMinHalfExtent = 12.0f;  // a world with nothing in it still needs a floor
+  float half = kMinHalfExtent;
+  for (const badlands::BuildingState& b : sim_.Buildings()) {
+    const float reach = 0.5f * static_cast<float>(std::max(b.width_tiles, b.depth_tiles));
+    half = std::max(half, std::max(std::abs(b.center_x), std::abs(b.center_z)) + reach);
+  }
+  return half;
+}
+
 void AiSandboxView::FrameCamera() {
   gamecam_.focus = glm::vec3(0.0f);
   gamecam_.pitch_deg = 55.0f;
 
-  // Full arena footprint including the 1-tile wall ring on every side.
-  const float half_x = 0.5f * static_cast<float>(arena_.accessible.x + 2);
-  const float half_z = 0.5f * static_cast<float>(arena_.accessible.y + 2);
+  // Whatever the mode built, walls included.
+  const float half_x = WorldHalfExtent();
+  const float half_z = half_x;
 
   // Empirically-derived coefficients (world units of visible ground extent
   // per world unit of camera height) for GameCameraController's fixed
@@ -501,6 +405,17 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   // Empty the sim's transient event stream (this view does not render a combat
   // log; without draining, game.events would grow unbounded during combat).
   sim_.DrainEvents(events_scratch_);
+
+  // The mode watches the world it asked for and says when it wants a new one.
+  // Read AFTER the ticks so it sees this frame's final state, and the scene is
+  // rebuilt on a restage because a fresh world has a different arena in it.
+  char_rows_ = sim_.Characters();
+  if (mode_->Observe(char_rows_, sim_.World().world_millis)) {
+    StageWorld();
+    BuildScene();
+    FrameCamera();
+    char_rows_ = sim_.Characters();
+  }
 
   SyncUnits();
   SyncProjectiles();
@@ -581,6 +496,10 @@ void AiSandboxView::DrawInspector() {
   ImGui::SliderFloat("speed", &sim_clock_.speed, 0.0f, 60.0f, "%.0fx");
   ImGui::SameLine();
   if (ImGui::SmallButton("1x")) sim_clock_.speed = 1.0f;
+
+  // --- the mode's own readout -------------------------------------------
+  ImGui::SeparatorText(mode_->name());
+  ImGui::TextUnformatted(mode_->Status().c_str());
 
   char_rows_ = sim_.Characters();
 

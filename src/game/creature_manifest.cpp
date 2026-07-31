@@ -79,7 +79,7 @@ bool ReadSkillGrants(const nlohmann::json& obj, const char* creature, CharacterD
 // Read the optional "growth" object: the per-level stat deltas (StatGrowth,
 // badlands_sim.hpp). Every key optional, unknown keys FAIL the load -- a
 // misspelled "armor" that silently left a class's armour flat for twenty
-// levels would be found in a duel matrix, not in the log.
+// levels would be found by watching fights, not in the log.
 bool ReadGrowth(const nlohmann::json& obj, const char* creature, CharacterDesc& d) {
     if (!obj.contains("growth")) {
         return true;

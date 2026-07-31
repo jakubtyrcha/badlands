@@ -1,8 +1,8 @@
 // Compiled defaults for the named-creature catalog (CreatureCatalog, declared in
 // badlands_sim.hpp) plus the id<->name tables. This is the single source of truth
 // for what a Mercenary / Rat / Deer / ... is; MercenaryDesc/GoblinDesc and
-// hero_desc read it, an app may override fields by name from JSON, and the arena
-// spawns creatures by id. Values are PLACEHOLDERS -- the arena exists to tune them.
+// hero_desc read it, an app may override fields by name from JSON, and
+// SpawnCreature spawns by id. Values are PLACEHOLDERS.
 //
 // NB: the legacy CharacterDesc.attack_range/damage/cooldown fields are NOT set
 // here. spawn_entity derives the entity's Stats reach from attacks[0] (the primary

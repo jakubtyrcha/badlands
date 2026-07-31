@@ -298,9 +298,6 @@ add_library(badlands_game_lib STATIC
     src/game/geometry/mesh_lod.cpp
     # Task S2.D: MaterialId -> PBR pack mapping (src/game/material_pack.h).
     src/game/material_pack.cpp
-    # Task S2.G: walled AI-sandbox arena (src/game/arena.h), reusing
-    # placement.h's centered-grid convention (kGridHalf/in_bounds_tile).
-    src/game/arena.cpp
     # Frozen map-data contract + the symbolic greybox generator behind it
     # (pure CPU: the mapgen Biome enum + glm, no engine/GPU deps).
     src/game/map/map_data.cpp
@@ -327,9 +324,8 @@ target_include_directories(badlands_game_lib PUBLIC
     # dir is added to badlands_engine above.
     ${CMAKE_SOURCE_DIR}/src/crates/brainhost/include
 )
-# Task S2.G: arena.cpp includes game/src/placement.h directly (kGridHalf/
-# in_bounds_tile grid reuse) -- PRIVATE since it's an implementation detail
-# of badlands_game_lib, not part of its public header surface.
+# The sim's own headers: an implementation detail of badlands_game_lib, not
+# part of its public header surface (which is game/include/badlands_sim.hpp).
 target_include_directories(badlands_game_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/game/src
 )
@@ -382,15 +378,19 @@ set(badlands_app_sources_game
     src/game/ui/hud.cpp
     src/game/ui/picking.cpp
     src/mapview/biome_manifest.cpp)
-# Task S2.G: AiSandboxView (walled arena via game/arena.h + 2 static
-# capsules, deferred + GameCameraController). Compiled directly into the
-# executable, same rationale as badlands_app_sources_game above.
+# AiSandboxView: the host for a SandboxMode (deferred blockout +
+# GameCameraController). Compiled directly into the executable, same rationale
+# as badlands_app_sources_game above.
 set(badlands_app_sources_ai_sandbox
     src/executables/ai_sandbox/main_ai_sandbox.cpp
     src/executables/ai_sandbox/ai_sandbox_view.cpp
+    # The puppet-master layer: what world to build, who is in it, when to
+    # restage. View-free (see sandbox_mode.hpp) and tested standalone by
+    # badlands_ai_sandbox_tests.
+    src/executables/ai_sandbox/arena.cpp
+    src/executables/ai_sandbox/duel_mode.cpp
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
     src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
-    src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
     src/game/skill_manifest.cpp)    # skill template overrides loaded as data
 
@@ -1156,6 +1156,29 @@ target_include_directories(badlands_skill_manifest_tests PRIVATE
 )
 target_link_libraries(badlands_skill_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_skill_manifest_tests COMMAND badlands_skill_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_ai_sandbox_tests: the sandbox's PUPPET-MASTER layer -- arena layouts
+# and the duel round lifecycle. Links badlands_game_lib and nothing else: no
+# engine, no Dawn, no SDL. That is deliberate rather than economical -- it is a
+# compile-time proof that a SandboxMode is view-free, so the same code the
+# window drives can be tested without one.
+add_executable(badlands_ai_sandbox_tests
+    src/executables/ai_sandbox/tests/ai_sandbox_tests.cpp
+    src/executables/ai_sandbox/arena.cpp
+    src/executables/ai_sandbox/duel_mode.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_ai_sandbox_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_ai_sandbox_tests PRIVATE badlands_game_lib)
+add_test(NAME badlands_ai_sandbox_tests COMMAND badlands_ai_sandbox_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_ray_tests: pure-CPU tests for screen-pixel -> world-ray picking
 # (src/engine/core/ray) and the fixed-angle GameCameraController's zoom that

@@ -1,17 +1,18 @@
 #pragma once
 
-// badlands_ai_sandbox's AppView: a LIVE view of the headless sim. It owns a
-// BadlandsGame, seeds a small town (guild + tavern + apothecary) and a hero
-// roster through the command layer, ticks the sim at a fixed timestep with a
-// time-acceleration control, and rebuilds blockout geometry from the sim's
-// snapshots -- boxes for buildings, capsules for heroes (the arena floor +
-// wall ring from game/arena.h stay as the greybox ground).
+// badlands_ai_sandbox's AppView: the HOST for a SandboxMode.
 //
-// This is the inspection surface for the game-systems architecture: the panel
-// shows the sim clock (day/night), every hero's needs + chosen behaviour, and
-// the tail of the command log (the trace of record). Everything it draws comes
-// through the badlands::Sim snapshot API (Characters / Buildings / World /
-// CommandLog) -- the view never reaches into the sim's registry.
+// The app is a general surface for driving the AI, and it does exactly three
+// things: it asks the mode what world to build, it ticks that world, and it
+// draws what is in it. Every system at work -- map, buildings, navmesh, brains,
+// combat, skills -- is the game's own, running as it does in the real game,
+// because nothing in the game knows a mode exists (see sandbox_mode.hpp).
+//
+// The inspection surface: the panel shows the sim clock (day/night), the mode's
+// own status line, every entity's needs + chosen behaviour, and the tail of the
+// command log (the trace of record). Everything it draws comes through the
+// badlands::Sim snapshot API (Characters / Buildings / World / CommandLog) --
+// the view never reaches into the sim's registry.
 
 #include <cstdint>
 #include <optional>
@@ -32,13 +33,16 @@
 #include "engine/rendering/light_environment.hpp"
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
-#include "game/arena.h"
+#include "executables/ai_sandbox/sandbox_mode.hpp"
 #include "game/visual/nav_debug_overlay.hpp"
 
 namespace badlands {
 
 class AiSandboxView : public AppView {
  public:
+  // Takes ownership of the mode it hosts. Never null -- main picks one.
+  explicit AiSandboxView(std::unique_ptr<SandboxMode> mode) : mode_(std::move(mode)) {}
+
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
   void Update(float dt, const bool* keyboard_state) override;
@@ -55,23 +59,25 @@ class AiSandboxView : public AppView {
   // otherwise clobber it with SceneGraph's own defaults) -- same pattern as
   // GameView::ApplyEnvironment.
   void ApplyEnvironment();
-  // Creates the sim and seeds the town: places the guild/tavern/apothecary and
-  // recruits a hero roster, all through game_dispatch -- i.e. as logged player
-  // Commands, so the seed shows up in the command log like anything else. The
-  // wasm hero brain is loaded from assets/brains/hero.wasm when readable;
-  // otherwise (or on a load failure) heroes simply idle (no C++ decision
-  // layer left to fall back to -- see LoadBrainWasm, src/game/brain_asset.hpp).
-  // Also sets the world's day length from this view's own day cadence, so the
-  // sim's night and the rendered night agree.
-  void SeedTown();
+  // Builds the world the mode asks for and hands it to the mode to populate,
+  // then loads the creature/skill data files over it (initial config, before
+  // any tick). Called at startup and again every time the mode asks for a fresh
+  // world. The wasm hero brain is loaded once into hero_wasm_ and reused: it is
+  // the ONLY hero decision layer, so a world built without it has heroes that
+  // idle (see LoadBrainWasm, src/game/brain_asset.hpp).
+  void StageWorld();
   // Clears scene_ and rebuilds the STATIC geometry from the sim: re-mirrors
-  // scene_context_'s lighting, then adds the floor, the wall ring, and a box
-  // per game_buildings() row. Heroes are NOT rebuilt here -- they get a fixed
-  // node pool (CreateUnitCapsules) that SyncUnits repositions per frame, so a
-  // moving hero costs a transform write rather than a mesh rebuild.
+  // scene_context_'s lighting, then adds the floor and a box per
+  // Sim::Buildings() row -- walls included, since a wall IS a building.
+  // Entities are NOT rebuilt here -- they get a fixed node pool
+  // (CreateUnitCapsules) that SyncUnits repositions per frame, so a moving
+  // entity costs a transform write rather than a mesh rebuild.
   void BuildScene();
-  void AddWalls();
   void AddBuildings();
+  // Half-extent of everything built in the world, for the floor size and the
+  // camera framing. Read off the building snapshot, so the host never has to
+  // ask the mode how big its world is.
+  float WorldHalfExtent();
   // Per-frame: draw a thin box "tracer" for each in-flight projectile.
   void SyncProjectiles();
   // Per-frame: reads the game_state snapshot and moves/hides the capsule pool.
@@ -106,9 +112,15 @@ class AiSandboxView : public AppView {
   // materials from MaterialLibrary::SolidColor (the library owns their 1x1
   // textures), so no per-view texture/sampler handles are needed here.
 
-  Arena arena_;
+  // What is being driven. Owns every decision about what world exists and who
+  // is in it; this view owns everything about how it is drawn.
+  std::unique_ptr<SandboxMode> mode_;
 
-  // Owns the sim (RAII; no manual destroy). Seeded in SeedTown.
+  // The hero brain wasm, read once and reused across restages -- BrainDesc
+  // borrows these bytes at each Sim construction.
+  std::vector<uint8_t> hero_wasm_;
+
+  // Owns the sim (RAII; no manual destroy). Built in StageWorld.
   badlands::Sim sim_{badlands::BrainDesc{}};
 
   // Time model (see sim_clock.hpp): real dt * speed -> sim seconds; the sim

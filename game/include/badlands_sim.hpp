@@ -328,11 +328,11 @@ SkillId SkillIdFromName(const char* name);
 // after the fact to know what it should learn.
 //
 // NB which catalog a spawn reads is a PRE-EXISTING split (heroes.cpp's
-// hero_desc): directly-spawned creatures and arena scenarios read the per-Sim
-// catalog, so assets/creatures/creatures.json overrides reach them, while
-// RECRUITED heroes read the compiled defaults and do not. Grants inherit that
-// split exactly as stats do -- editing a grant level in creatures.json changes
-// an arena mercenary and not a guild-recruited one.
+// hero_desc): a directly-spawned creature reads the per-Sim catalog, so
+// assets/creatures/creatures.json overrides reach it, while a RECRUITED hero
+// reads the compiled defaults and does not. Grants inherit that split exactly
+// as stats do -- editing a grant level in creatures.json changes a spawned
+// mercenary and not a guild-recruited one.
 struct SkillGrantRow {
     int32_t skill = -1;  // SkillId; -1 = empty row
     int32_t level = 1;
@@ -557,8 +557,8 @@ struct StatGrowth {
     float damage_frac = 0.0f;
 };
 
-// The creatures the sim knows by name. Append-only: JSON overrides and arena
-// scenarios key by name, and SpawnCreature spawns by id. The first
+// The creatures the sim knows by name. Append-only: JSON overrides key by
+// name, and SpawnCreature spawns by id. The first
 // HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight
 // to its creature.
 //
@@ -1013,8 +1013,8 @@ class Sim {
     // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (every
     // hero simply idles absent an enemy).
     explicit Sim(const BrainDesc& brain_desc);
-    // The composing form: an explicit world config (the arena uses this:
-    // flat, no colony, confined edges) x which brain. The other ctor forwards
+    // The composing form: an explicit world config (which map, what is
+    // already built, how long a day is) x which brain. The other ctor forwards
     // here conceptually (single make_world implementation, sim.cpp).
     Sim(const WorldConfig& config, const BrainDesc& brain_desc);
     ~Sim();
