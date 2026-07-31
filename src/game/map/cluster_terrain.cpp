@@ -26,7 +26,11 @@ ClusterTerrain::~ClusterTerrain() = default;
 
 bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
                            entt::registry& registry, const glm::mat4& model,
-                           const TerrainClusterParams& params) {
+                           const TerrainClusterParams& params,
+                           const MaterialLibrary::TerrainArrays& arrays,
+                           wgpu::Sampler array_sampler, wgpu::TextureView splat0,
+                           wgpu::TextureView splat1,
+                           wgpu::Sampler splat_sampler, glm::vec4 splat_uv) {
   registry_ = &registry;
   model_ = model;
   inv_model_ = glm::inverse(model);
@@ -34,10 +38,10 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
   // Build the cluster-LOD DAG from the frozen MapData lattice.
   dag_ = BuildTerrainClusterDag(map, params);
 
-  // Deferred vertex-color cluster material (game-owned; no engine-side
+  // Deferred cluster-terrain material (game-owned; no engine-side
   // MaterialLibrary entry). Mirrors the engine's terrain descriptor but for
-  // kTerrainCluster geometry + the flat-color fs_gbuffer entry, and needs no
-  // textures -- the per-vertex biome color IS the albedo.
+  // kTerrainCluster geometry. Its layer arrays are the same ones terrain_blend
+  // uses; the per-biome weights come from the splat, bound below.
   FactoryDescriptor desc;
   desc.shader_name = "terrain_cluster";
   desc.shader_path = "material/terrain_cluster.wesl";
@@ -76,6 +80,26 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
   // override NAMES, so live value changes reuse the cached instance.
   fmc.params.uniform_overrides["debug_params"] =
       glm::vec4(static_cast<float>(debug_tint_mode_), 0.0f, 0.0f, 0.0f);
+  fmc.params.uniform_overrides["splat_uv"] = splat_uv;
+  // Matched by param_name against the terrain_cluster slots. TextureType is
+  // only used to filter default-view recipes, so k2D is fine for an override.
+  // A null view is left UNBOUND so the factory resolves that slot's default
+  // (binding a null override would instead fail bind-group validation).
+  auto bind = [&](const char* slot, wgpu::TextureView view,
+                  wgpu::Sampler samp) {
+    if (!view) return;
+    fmc.params.texture_overrides.push_back(DefaultTextureView{
+        .param_name = slot,
+        .view = view,
+        .sampler = samp,
+        .type = TextureType::k2D,
+    });
+  };
+  bind("albedo_array", arrays.albedo.view, array_sampler);
+  bind("normal_array", arrays.normal.view, array_sampler);
+  bind("arm_array", arrays.arm.view, array_sampler);
+  bind("biome_splat0", splat0, splat_sampler);
+  bind("biome_splat1", splat1, splat_sampler);
   fmc.config_hash = ComputeFactoryConfigHash(fmc);
   registry.emplace<MaterialFactoryComponent>(e, std::move(fmc));
 

@@ -125,6 +125,43 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
            .default_texture = "default_arm"},
       }};
   RegisterMaterial("terrain_blend", terrain_blend_reqs, terrain_blend_reqs);
+
+  // terrain_cluster.wesl - the same three layer arrays as terrain_blend (all
+  // sharing sampler binding 2), plus two RGBA8 biome-weight splat planes on
+  // their own sampler (binding 7). The splat needs a CLAMP sampler where the
+  // arrays need REPEAT: it holds normalized weights over the map's own extent,
+  // so a repeat sampler would fold the far edge onto the near one.
+  //
+  // The splat slots are always bound in practice (ClusterTerrain::Build
+  // supplies them); the k2D "white" default only guards a programming error,
+  // and renders a neutral multi-layer average rather than failing bind-group
+  // validation.
+  MaterialRequirements terrain_cluster_reqs{
+      .shader_name = "terrain_cluster",
+      .textures = {
+          {.slot_name = "albedo_array",
+           .texture_binding = 1,
+           .sampler_binding = 2,
+           .default_texture = "white"},
+          {.slot_name = "normal_array",
+           .texture_binding = 3,
+           .sampler_binding = 2,
+           .default_texture = "flat_normal"},
+          {.slot_name = "arm_array",
+           .texture_binding = 4,
+           .sampler_binding = 2,
+           .default_texture = "default_arm"},
+          {.slot_name = "biome_splat0",
+           .texture_binding = 5,
+           .sampler_binding = 7,
+           .default_texture = "white"},
+          {.slot_name = "biome_splat1",
+           .texture_binding = 6,
+           .sampler_binding = 7,
+           .default_texture = "white"},
+      }};
+  RegisterMaterial("terrain_cluster", terrain_cluster_reqs,
+                   terrain_cluster_reqs);
 }
 
 std::string MaterialRequirementsRegistry::ResolveName(

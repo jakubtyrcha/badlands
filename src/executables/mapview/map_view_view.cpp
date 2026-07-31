@@ -16,9 +16,12 @@
 #include "engine/app/sdl_input_util.hpp"
 #include "engine/core/ray.hpp"
 #include "engine/rendering/scene_renderer.hpp"  // debug-view selectors
+#include "engine/rendering/texture_loader.hpp"  // UploadTexture2DWithMips
 #include "engine/ui/editor_ui.hpp"
 #include "game/geometry/terrain_mesh.hpp"  // RaycastTerrain(MapData)
 #include "mapgen/biomes.hpp"
+#include "mapview/biome_manifest.hpp"
+#include "mapview/biome_splat.hpp"
 
 namespace badlands {
 
@@ -148,6 +151,64 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   gamecam_.UpdateCamera(camera_);
 
+  // Terrain materials: one PBR pack per biome, keyed by name so a renamed or
+  // reordered manifest entry fails loudly instead of mis-mapping a biome.
+  t = clock::now();
+  if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
+    spdlog::error("MapViewView: MaterialLibrary init failed");
+    return false;
+  }
+  std::vector<std::string> pack_dirs;
+  if (!ResolveBiomePacks("assets/materials/terrain_biomes.json", pack_dirs)) {
+    spdlog::error("MapViewView: failed to resolve biome packs");
+    return false;
+  }
+  terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
+  if (!matlib_.ok()) {
+    spdlog::error("MapViewView: terrain arrays failed to build");
+    return false;
+  }
+  log_step("biome packs", since(t));
+
+  // Biome splat: the per-biome blend weights, sampled by world XZ in the
+  // fragment stage rather than carried on the vertices, so the coarsest LOD
+  // cluster still gets full-resolution biome detail.
+  t = clock::now();
+  const BiomeSplat splat = BuildBiomeSplat(
+      map_.biome, params_.world_size_m / static_cast<float>(params_.resolution));
+  if (splat.empty()) {
+    spdlog::error("MapViewView: empty biome splat");
+    return false;
+  }
+  splat0_view_ = UploadTexture2DWithMips(
+                     device_, queue_, *ctx.pipeline_gen,
+                     static_cast<uint32_t>(splat.width),
+                     static_cast<uint32_t>(splat.height), splat.slots0.data())
+                     .view;
+  splat1_view_ = UploadTexture2DWithMips(
+                     device_, queue_, *ctx.pipeline_gen,
+                     static_cast<uint32_t>(splat.width),
+                     static_cast<uint32_t>(splat.height), splat.slots1.data())
+                     .view;
+  if (!splat0_view_ || !splat1_view_) {
+    spdlog::error("MapViewView: biome splat upload failed");
+    return false;
+  }
+  // Trilinear + CLAMP. Mips matter: at max zoom one screen pixel covers several
+  // map texels, and unmipped weights alias into a shimmering biome mosaic.
+  wgpu::SamplerDescriptor splat_sd = {};
+  splat_sd.minFilter = wgpu::FilterMode::Linear;
+  splat_sd.magFilter = wgpu::FilterMode::Linear;
+  splat_sd.mipmapFilter = wgpu::MipmapFilterMode::Linear;
+  splat_sd.addressModeU = wgpu::AddressMode::ClampToEdge;
+  splat_sd.addressModeV = wgpu::AddressMode::ClampToEdge;
+  splat_sampler_ = device_.CreateSampler(&splat_sd);
+  // world XZ in [0, size] -> texel CENTRES in [0.5/N, 1 - 0.5/N].
+  const float inv_n = 1.0f / static_cast<float>(splat.width);
+  const float splat_scale = (1.0f - inv_n) / params_.world_size_m;
+  const glm::vec4 splat_uv(splat_scale, splat_scale, 0.5f * inv_n, 0.5f * inv_n);
+  log_step("biome splat", since(t));
+
   // Build the shared cluster-LOD terrain (identity model -- mapview vertices are
   // absolute world coords). --serial-build forces the single-threaded DAG build
   // for the perf A/B (both produce a bit-identical DAG). Seed the debug tint from
@@ -157,7 +218,9 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   cluster_params.parallel_build = !serial_build_;
   t = clock::now();
   if (!cluster_terrain_.Build(terrain_map_, ctx, registry_, glm::mat4(1.0f),
-                              cluster_params)) {
+                              cluster_params, terrain_arrays_,
+                              matlib_.shared_sampler(), splat0_view_,
+                              splat1_view_, splat_sampler_, splat_uv)) {
     spdlog::error("MapViewView: cluster terrain build failed");
     return false;
   }

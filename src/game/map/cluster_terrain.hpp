@@ -23,9 +23,11 @@
 #include <memory>
 #include <vector>
 
+#include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include "engine/rendering/material_library.hpp"  // MaterialLibrary::TerrainArrays
 #include "game/geometry/terrain_clusters.hpp"  // TerrainClusterDag, MapData, tau consts
 
 namespace badlands {
@@ -41,14 +43,28 @@ class ClusterTerrain {
   ClusterTerrain(const ClusterTerrain&) = delete;
   ClusterTerrain& operator=(const ClusterTerrain&) = delete;
 
-  // Build the DAG from `map`, the vertex-color material factory, and one terrain
+  // Build the DAG from `map`, the terrain material factory, and one terrain
   // entity into `registry`. `model` is the entity's world transform (identity
   // for mapview; a centering transform for game_view in M7.2). `params` carries
-  // the build knobs (e.g. parallel_build). Returns false if the material factory
-  // fails to build. Seeds an initial LOD cut so the first rendered frame draws.
+  // the build knobs (e.g. parallel_build).
+  //
+  // Material inputs: `arrays` supplies the three PBR layer arrays (layer index
+  // == biome), sampled through `array_sampler` -- which MUST be the
+  // MaterialLibrary's shared trilinear+aniso REPEAT sampler, since the factory's
+  // own default has mipmapFilter=Nearest and would defeat the packs' mip chains.
+  // `splat0`/`splat1` are the biome-weight planes (8 slots across two RGBA8
+  // textures) read through `splat_sampler`, which must CLAMP. `splat_uv` maps
+  // world XZ to splat UV as {scale_x, scale_z, bias_u, bias_v}.
+  //
+  // Returns false if the material factory fails to build. Seeds an initial LOD
+  // cut so the first rendered frame draws.
   bool Build(const MapData& map, const RenderContext& ctx,
-             entt::registry& registry, const glm::mat4& model = glm::mat4(1.0f),
-             const TerrainClusterParams& params = {});
+             entt::registry& registry, const glm::mat4& model,
+             const TerrainClusterParams& params,
+             const MaterialLibrary::TerrainArrays& arrays,
+             wgpu::Sampler array_sampler, wgpu::TextureView splat0,
+             wgpu::TextureView splat1, wgpu::Sampler splat_sampler,
+             glm::vec4 splat_uv);
 
   // Re-select the LOD cut for `camera` and rewrite the entity's draw ranges.
   // Call each frame. Early-outs when the cut-affecting inputs (camera position in

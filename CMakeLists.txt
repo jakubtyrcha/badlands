@@ -417,6 +417,7 @@ add_executable(badlands_mapview
     src/executables/mapview/main_mapview.cpp
     src/executables/mapview/map_view_view.cpp
     src/mapview/biome_manifest.cpp
+    src/mapview/biome_splat.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/terrain_clusters.cpp
     # Shared MapData->render cluster-terrain module, used by both apps (game_view

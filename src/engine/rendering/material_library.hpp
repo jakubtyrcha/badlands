@@ -171,6 +171,13 @@ class MaterialLibrary {
     return terrain_factory_.get();
   }
 
+  // The library's shared trilinear + 16x-aniso REPEAT sampler. Exposed because
+  // a caller that binds TerrainArrays to its OWN factory (the cluster terrain
+  // builds one, since it is a different shader and geometry type) must use this
+  // sampler: the material factory's default has mipmapFilter=Nearest and would
+  // defeat every pack's mip chain. Valid after Initialize().
+  wgpu::Sampler shared_sampler() const { return sampler_; }
+
   // False if any pack has hard-failed to load since construction (missing
   // manifest, unparseable JSON, or a missing/undecodable texture) -- see
   // LoadPack. Callers MUST check this after building their scene (which
