@@ -33,7 +33,7 @@ extern "C" {
 // Bumped on any incompatible layout change. A future host will reject a skill
 // module whose reported version disagrees, exactly as bh_instantiate does for
 // the brain wire.
-#define BL_SKILL_ABI_VERSION 1
+#define BL_SKILL_ABI_VERSION 2
 
 // Capacities baked into the fixed-size arrays below.
 #define BL_SKILL_MAX_TARGETS 8     // == badlands::kMaxSkillTargets
@@ -54,6 +54,7 @@ extern "C" {
 #define BL_FX_NONE 0
 #define BL_FX_APPLY_STATUS 1  // param_i = badlands::StatusKind, param_f = duration ms
 #define BL_FX_DAMAGE 2        // param_f = hp to remove
+#define BL_FX_HEAL 3          // param_f = hp to restore, clamped to the target's max
 
 // How a target relates to the caster (append-only). Lets one effect serve
 // friend and foe without the script re-deriving teams.
@@ -90,7 +91,11 @@ typedef struct BlSkillTarget {
     int32_t attack_test; // BL_TEST_*
     float test_damage;   // what the roll produced; 0 unless BL_TEST_HIT
     int32_t relation;    // BL_REL_*
-    uint32_t _pad;
+    // v2 (was _pad, so the struct size is unchanged): is this target currently
+    // engaging the CASTER -- fighting it, or locked with it? An effect that
+    // rewards catching someone unaware needs to know, and must not have to ask
+    // the world: a guest script never can. Non-zero = engaged with the caster.
+    int32_t engaging_caster;
 } BlSkillTarget;
 
 // --- BlSkillConstant ---------------------------------------------------------

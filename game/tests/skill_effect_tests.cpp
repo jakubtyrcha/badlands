@@ -142,3 +142,92 @@ TEST_CASE("the contract's layout is pinned", "[skill_effect]") {
     CHECK(BL_SKILL_MAX_TARGETS == badlands::kMaxSkillTargets);
     CHECK(BL_SKILL_MAX_CONSTANTS == badlands::kMaxSkillConstants);
 }
+
+// --- the class skills (Curse / DressWounds / Backstab) ----------------------
+
+namespace {
+
+// One enemy target, no attack test run (the default), plus one named constant.
+BlSkillCastContext one_target(SkillId id, const char* cname, float cvalue) {
+    BlSkillCastContext ctx{};
+    ctx.version = BL_SKILL_ABI_VERSION;
+    ctx.skill_id = static_cast<int32_t>(id);
+    ctx.target_count = 1;
+    ctx.targets[0].slot = 4u;
+    ctx.targets[0].relation = BL_REL_ENEMY;
+    ctx.targets[0].attack_test = BL_TEST_NOT_RUN;
+    std::snprintf(ctx.constants[0].name, sizeof(ctx.constants[0].name), "%s", cname);
+    ctx.constants[0].value = cvalue;
+    ctx.constant_count = 1;
+    return ctx;
+}
+
+}  // namespace
+
+TEST_CASE("curse lands without an attack test", "[skill_effect]") {
+    // Unlike shield-bash, Curse declares no test -- so there is nothing to gate
+    // on and it always applies. That is deliberate: it is the apprentice's one
+    // level-1 tool and a coin flip on it would make the class unreliable.
+    BlSkillCastContext ctx = one_target(SkillId::Curse, "duration_seconds", 8.0f);
+    BlSkillEffectBatch out{};
+    SkillEffectOf(SkillId::Curse)(ctx, out);
+
+    REQUIRE(out.count == 1);
+    CHECK(out.ops[0].kind == BL_FX_APPLY_STATUS);
+    CHECK(out.ops[0].target_slot == 4u);
+    CHECK(out.ops[0].param_i == static_cast<int32_t>(StatusKind::Cursed));
+    CHECK(out.ops[0].param_f == Catch::Approx(8000.0f));
+}
+
+TEST_CASE("dress wounds emits a heal for its constant", "[skill_effect]") {
+    BlSkillCastContext ctx = one_target(SkillId::DressWounds, "heal_amount", 8.0f);
+    ctx.targets[0].relation = BL_REL_SELF;
+    BlSkillEffectBatch out{};
+    SkillEffectOf(SkillId::DressWounds)(ctx, out);
+
+    REQUIRE(out.count == 1);
+    CHECK(out.ops[0].kind == BL_FX_HEAL);
+    CHECK(out.ops[0].param_f == Catch::Approx(8.0f));
+}
+
+TEST_CASE("backstab pays its bonus only against someone not engaging the caster",
+          "[skill_effect]") {
+    BlSkillCastContext ctx = one_target(SkillId::Backstab, "bonus_damage", 6.0f);
+    ctx.targets[0].attack_test = BL_TEST_HIT;
+    ctx.targets[0].test_damage = 4.0f;
+
+    SECTION("unaware: the bonus applies") {
+        ctx.targets[0].engaging_caster = 0;
+        BlSkillEffectBatch out{};
+        SkillEffectOf(SkillId::Backstab)(ctx, out);
+        REQUIRE(out.count == 1);
+        CHECK(out.ops[0].kind == BL_FX_DAMAGE);
+        CHECK(out.ops[0].param_f == Catch::Approx(10.0f));  // 4 + 6
+    }
+    SECTION("already fighting back: an ordinary blow") {
+        ctx.targets[0].engaging_caster = 1;
+        BlSkillEffectBatch out{};
+        SkillEffectOf(SkillId::Backstab)(ctx, out);
+        REQUIRE(out.count == 1);
+        CHECK(out.ops[0].param_f == Catch::Approx(4.0f));
+    }
+}
+
+TEST_CASE("a backstab that missed adds nothing at all", "[skill_effect]") {
+    BlSkillCastContext ctx = one_target(SkillId::Backstab, "bonus_damage", 6.0f);
+    ctx.targets[0].engaging_caster = 0;
+    for (int32_t test : {BL_TEST_BLOCKED, BL_TEST_DODGED, BL_TEST_NOT_RUN}) {
+        ctx.targets[0].attack_test = test;
+        BlSkillEffectBatch out{};
+        SkillEffectOf(SkillId::Backstab)(ctx, out);
+        CHECK(out.count == 0);
+    }
+}
+
+TEST_CASE("the skill effect contract layout is pinned at v2", "[skill_effect]") {
+    // engaging_caster took BlSkillTarget's trailing pad, so every size is
+    // unchanged -- which is the whole reason it went there.
+    CHECK(BL_SKILL_ABI_VERSION == 2);
+    CHECK(sizeof(BlSkillTarget) == 48);
+    CHECK(sizeof(BlSkillCastContext) == 712);
+}

@@ -36,6 +36,29 @@ AttackCategory category_of(SkillAttackTest test) {
     return test == SkillAttackTest::Ranged ? AttackCategory::Ranged : AttackCategory::Melee;
 }
 
+// Is `target` currently fighting `caster`? Locked with it in melee, or running
+// an Attack intention aimed at it. Engine-side because a guest script cannot
+// see either -- and because "did I catch this one unaware" is exactly the
+// question an effect like Backstab needs answered but must not answer itself.
+//
+// Conservative on purpose: anything ambiguous reads as ENGAGED, so a bonus for
+// catching someone off guard is never paid out on a doubt.
+bool engaging_of(const entt::registry& reg, entt::entity caster, entt::entity target) {
+    if (caster == target) {
+        return true;
+    }
+    if (reg.all_of<MeleeLock>(target)) {
+        // Contact is contact: it is in a melee, and the caster is the one in
+        // reach of it.
+        return true;
+    }
+    if (const auto* ci = reg.try_get<CurrentIntention>(target);
+        ci != nullptr && ci->kind == IntentionKind::Attack) {
+        return true;
+    }
+    return false;
+}
+
 int32_t relation_of(const entt::registry& reg, entt::entity caster, entt::entity target) {
     if (caster == target) {
         return BL_REL_SELF;
@@ -243,6 +266,7 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
         row.evasion = def.evasion;
         row.armour = def.armour;
         row.relation = relation_of(reg, caster, t);
+        row.engaging_caster = engaging_of(reg, caster, t) ? 1 : 0;
         row.attack_test = BL_TEST_NOT_RUN;
         row.test_damage = 0.0f;
 
@@ -322,6 +346,17 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
                 h->hp -= op.param_f;
                 emit_char_hit(game, caster_slot, op.target_slot, op.param_f, h->hp,
                               game.registry.get<Position>(target).pos);
+                break;
+            }
+            case BL_FX_HEAL: {
+                auto* h = game.registry.try_get<Health>(target);
+                if (h == nullptr || !std::isfinite(op.param_f) || op.param_f <= 0.0f) {
+                    break;
+                }
+                // Clamped to the target's own maximum: an effect asking for
+                // more than a full heal gets a full heal, never an overheal
+                // the rest of the sim has no concept of.
+                h->hp = std::min(h->max_hp, h->hp + op.param_f);
                 break;
             }
             default:

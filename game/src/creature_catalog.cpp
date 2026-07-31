@@ -98,6 +98,8 @@ CreatureCatalog::CreatureCatalog() {
         // Armour 1, evasion 1, hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.004f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
+        d.skill_grants[0] = {static_cast<int32_t>(SkillId::DressWounds), 2};
+        d.skill_grant_count = 1;
     }
     // Grave Robber: mixed -- a hand crossbow OPENER (one heavy, high-crit bolt
     // on a long reload) then blades. The reload is the whole identity: at a
@@ -120,6 +122,8 @@ CreatureCatalog::CreatureCatalog() {
         // Armour 1, evasion 2 (the nimblest of the four), hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.008f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
+        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Backstab), 3};
+        d.skill_grant_count = 1;
     }
     // Apprentice: fragile ranged caster (a magic bolt; Soul comes later).
     {
@@ -142,8 +146,11 @@ CreatureCatalog::CreatureCatalog() {
         // being tuned up here to hide that.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.0f,
                     .defense = 0.0f, .armour = 0.0f, .damage_frac = 0.08f};
-        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Calcify), 5};
-        d.skill_grant_count = 1;
+        // Curse at 1 is the apprentice's only level-1 tool; Calcify moves to 4
+        // per the design document (it was compiled at 5), effect still deferred.
+        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Curse), 1};
+        d.skill_grants[1] = {static_cast<int32_t>(SkillId::Calcify), 4};
+        d.skill_grant_count = 2;
     }
 
     // --- monsters -----------------------------------------------------------

@@ -18,6 +18,7 @@ namespace {
 constexpr std::array<const char*, static_cast<size_t>(kStatusKindCount)> kStatusNames{{
     "None",
     "Stunned",
+    "Cursed",
     "Disengaged",
 }};
 

@@ -19,5 +19,41 @@
     "constants": {
       "stun_seconds": 3
     }
+  },
+  "Curse": {
+    "trigger": "action",
+    "target": "any",
+    "target_limit": 1,
+    "attack_test": "none",
+    "cooldown": 15,
+    "intention_duration": 0,
+    "effect": "Saps the target's guard: less accurate, and its armour turns brittle.",
+    "constants": {
+      "duration_seconds": 8,
+      "range": 7
+    }
+  },
+  "DressWounds": {
+    "trigger": "action",
+    "target": "self",
+    "attack_test": "none",
+    "cooldown": 30,
+    "intention_duration": 0,
+    "effect": "Binds a wound in the field; slow to come round again.",
+    "constants": {
+      "heal_amount": 8
+    }
+  },
+  "Backstab": {
+    "trigger": "action",
+    "target": "any",
+    "target_limit": 1,
+    "attack_test": "melee",
+    "cooldown": 10,
+    "intention_duration": 0,
+    "effect": "A blade between the ribs -- devastating against someone facing elsewhere.",
+    "constants": {
+      "bonus_damage": 6
+    }
   }
 }

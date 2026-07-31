@@ -203,6 +203,9 @@ struct ActivityWeights {
 enum class StatusKind : int32_t {
     None = 0,
     Stunned,     // skips the think, freezes movement, zeroes the active defense
+    Cursed,      // accuracy/armour sapped for a duration (Apprentice's Curse).
+                 // Unlike Stunned it does NOT touch evasion: a cursed target
+                 // still dodges, it has just stopped warding.
     Disengaged,  // walked out of melee contact: no actions at all for a few
                  // seconds. Movement and defense are untouched -- this is a
                  // penalty on ACTING, not on being, and it is meant to be
@@ -219,6 +222,9 @@ const char* StatusName(int32_t kind);
 enum class SkillId : int32_t {
     Calcify = 0,   // Apprentice: absorb the next physical strike (effect deferred)
     ShieldBash,    // Mercenary: a shield slam that stuns what it lands on
+    Curse,         // Apprentice: saps a target's accuracy and armour
+    DressWounds,   // Hunter: field-dresses its own wounds
+    Backstab,      // Grave Robber: heavy bonus damage on someone not facing it
     Count,
 };
 inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);

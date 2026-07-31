@@ -21,7 +21,10 @@
       "defense": 0.0,
       "armour": 0.1,
       "damage_frac": 0.08
-    }
+    },
+    "skills": [
+      { "name": "DressWounds", "level": 2 }
+    ]
   },
   "GraveRobber": {
     "growth": {
@@ -31,7 +34,10 @@
       "defense": 0.0,
       "armour": 0.1,
       "damage_frac": 0.08
-    }
+    },
+    "skills": [
+      { "name": "Backstab", "level": 3 }
+    ]
   },
   "Apprentice": {
     "growth": {
@@ -43,7 +49,8 @@
       "damage_frac": 0.08
     },
     "skills": [
-      { "name": "Calcify", "level": 5 }
+      { "name": "Curse", "level": 1 },
+      { "name": "Calcify", "level": 4 }
     ]
   },
   "Goblin": {}

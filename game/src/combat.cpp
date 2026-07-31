@@ -18,6 +18,9 @@ constexpr float kCritMultiplier = 2.0f;
 constexpr float kRangedEvasionMult = 0.5f;   // a shot is hard to dodge
 constexpr float kMeleeThrustEvasionMult = 1.3f;  // a telegraphed thrust, easy to sidestep
 constexpr float kBluntArmourFraction = 0.3f;  // blunt crushes through 70% of armour
+// What StatusKind::Cursed takes off a victim (effective_combatant, below).
+constexpr float kCurseAccuracyPenalty = 0.15f;
+constexpr float kCurseArmourPenalty = 2.0f;
 
 // How much the defender's evasion is worth against this attack.
 float evasion_mult(AttackCategory cat, DamageType type) {
@@ -102,6 +105,16 @@ Combatant effective_combatant(const entt::registry& reg, entt::entity e) {
     if (has_status(reg, e, StatusKind::Stunned)) {
         c.defense = 0.0f;
         c.evasion = 0.0f;
+    }
+    if (has_status(reg, e, StatusKind::Cursed)) {
+        // A curse saps the guard: harder to land a blow, and the armour turns
+        // brittle. Deliberately NOT evasion -- a cursed target still dodges,
+        // it has just stopped warding, which is what distinguishes it from a
+        // stun. Penalties are compiled constants; the skill's own constants
+        // tune its DURATION, and how much a curse is worth is a property of
+        // the status rather than of whatever applied it.
+        c.accuracy = std::max(0.0f, c.accuracy - kCurseAccuracyPenalty);
+        c.armour = std::max(0.0f, c.armour - kCurseArmourPenalty);
     }
     return c;
 }
