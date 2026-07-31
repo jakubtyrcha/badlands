@@ -296,17 +296,22 @@ TEST_CASE("a mercenary learns ShieldBash at level 3 and stuns what it hits",
     const entt::entity me = game->slots[merc];
     const entt::entity ge = game->slots[gob];
 
+    REQUIRE(game->registry.get<Skills>(me).count == 0);  // level 1: nothing yet
+    award_xp(*game, merc, 100 + 303);                    // -> level 3
+    REQUIRE(game->registry.get<HeroSimulationState>(me).level == 3);
+
     // Pin the combat gates so the OUTCOME is certain and this case tests the
     // pipeline rather than the dice (the same discipline as the cases above:
     // the catalog's own 0.9 accuracy vs the goblin's 0.05 defense / 0.10
     // evasion would land ~76% of the time, which is not a test).
+    //
+    // AFTER the level-up, deliberately: apply_level_stats (progression.h)
+    // recomputes the Combatant from BaseStats + growth, so anything written
+    // straight onto the live component before a level crossing is overwritten
+    // by design.
     game->registry.get<Combatant>(me).accuracy = 1.0f;
     game->registry.get<Combatant>(ge).defense = 0.0f;
     game->registry.get<Combatant>(ge).evasion = 0.0f;
-
-    REQUIRE(game->registry.get<Skills>(me).count == 0);  // level 1: nothing yet
-    award_xp(*game, merc, 100 + 303);                    // -> level 3
-    REQUIRE(game->registry.get<HeroSimulationState>(me).level == 3);
     const Skills& sk = game->registry.get<Skills>(me);
     REQUIRE(sk.count == 1);
     REQUIRE(sk.ids[0] == SkillId::ShieldBash);

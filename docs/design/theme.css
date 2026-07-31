@@ -1,0 +1,214 @@
+/* =========================================================
+   Fog & Steel — shared document theme
+   Dark, desaturated, cold slate blues; one cyan speck.
+   Display: Pirata One · Body: IM Fell English
+   Link from any doc in this repo:  <link rel="stylesheet" href="theme.css">
+   (Font paths are relative to this file's location.)
+   ========================================================= */
+
+@font-face { font-family: "Pirata One";      src: url("fonts/Pirata_One/PirataOne-Regular.ttf") format("truetype"); }
+@font-face { font-family: "IM Fell English"; src: url("fonts/IM_Fell_English/IMFellEnglish-Regular.ttf") format("truetype"); }
+@font-face { font-family: "IM Fell English"; src: url("fonts/IM_Fell_English/IMFellEnglish-Italic.ttf") format("truetype"); font-style: italic; }
+
+:root {
+  /* surfaces */
+  --bg: #141920;
+  --bg-fog: #1b222c;        /* top-of-page fog gradient start */
+  --panel: #1a2029;
+  --line: #2a323d;          /* strong rules (table header) */
+  --line-soft: #202834;     /* soft rules (table rows) */
+  /* ink */
+  --heading: #c3ccd4;
+  --body-color: #9fa8b2;
+  --muted: #7d8894;
+  /* the speck */
+  --accent: #4fa3b8;
+  /* categorical series (CVD-validated against --bg) */
+  --c-dogma: #c4682e;
+  --c-reason: #38a0c0;
+  --c-instinct: #8a4fa0;
+  /* core class series (CVD-validated against --bg) */
+  --c-merc: #b0862c;
+  --c-grave: #35a893;
+  --c-hunter: #c05a4b;
+  --c-appr: #9468bc;
+  /* exclusive class series */
+  --c-cleric: #b89a4a;
+  --c-inq: #a53b47;
+  --c-crus: #8b9bb0;
+  /* sequential heat ramp: alpha tints of the accent hue */
+  --heat-0: rgba(56, 160, 192, .07);   /* struggles */
+  --heat-1: rgba(56, 160, 192, .18);   /* moderate  */
+  --heat-2: rgba(56, 160, 192, .34);   /* strong    */
+  --heat-3: rgba(56, 160, 192, .55);   /* excels    */
+  /* type */
+  --display: "Pirata One", serif;
+  --body-font: "IM Fell English", Georgia, serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+body {
+  background: linear-gradient(180deg, var(--bg-fog) 0%, var(--bg) 420px);
+  background-color: var(--bg);
+  color: var(--body-color);
+  font-family: var(--body-font);
+  font-size: 1.06rem;
+  line-height: 1.7;
+}
+
+/* ---------- headings & text ---------- */
+h1, h2, h3 { font-family: var(--display); color: var(--heading); font-weight: 400; line-height: 1.15; }
+h1 { font-size: clamp(2.6rem, 6vw, 3.8rem); letter-spacing: .02em; }
+h2 { font-size: 1.7rem; margin-top: 3.2rem; }
+h3 { font-size: 1.3rem; margin-top: 2.4rem; }
+h2::before, h3::before {
+  content: ""; display: inline-block; width: 14px;
+  border-top: 2px solid var(--accent); vertical-align: .32em; margin-right: .7rem;
+}
+p, ul, ol { margin-top: 1.1rem; }
+strong { color: var(--heading); font-weight: 700; }
+em { font-style: italic; }
+a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
+a:hover { color: var(--heading); border-bottom-color: var(--heading); }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+::selection { background: rgba(79, 163, 184, .3); }
+
+.kicker {
+  display: block; text-transform: uppercase; letter-spacing: .4em;
+  font-size: .7rem; color: var(--muted); margin-bottom: 1.2rem;
+}
+.kicker::before {
+  content: ""; display: inline-block; width: 26px;
+  border-top: 1px solid var(--accent); vertical-align: .3em; margin-right: .8rem;
+}
+
+/* ---------- lists ---------- */
+ul { list-style: none; }
+li { margin-top: .55rem; }
+ul > li { padding-left: 1.1rem; position: relative; }
+ul > li::before { content: "—"; position: absolute; left: 0; color: var(--muted); }
+li ul { margin-top: .3rem; }
+li li::before { content: "·"; color: var(--accent); }
+
+/* ---------- asides / notes ---------- */
+aside, .note {
+  margin-top: 1.6rem; font-style: italic; color: var(--muted);
+  border-left: 1px solid var(--accent); padding-left: 1.1rem;
+}
+
+/* ---------- tables ---------- */
+.table-scroll { overflow-x: auto; margin-top: 1.6rem; }
+table { border-collapse: collapse; width: 100%; font-size: .92em; }
+th, td { text-align: left; padding: .55rem .8rem; vertical-align: top; }
+th {
+  color: var(--heading); border-bottom: 1px solid var(--line);
+  text-transform: uppercase; font-size: .8em; letter-spacing: .1em;
+}
+td { border-bottom: 1px solid var(--line-soft); }
+td strong { font-weight: 700; }
+
+/* heatmap cells (sequential ramp legend: .heat-0 … .heat-3) */
+.heat-0 { background: var(--heat-0); }
+.heat-1 { background: var(--heat-1); }
+.heat-2 { background: var(--heat-2); }
+.heat-3 { background: var(--heat-3); color: #cfdde4; }
+.heat-3 strong { color: #eaf3f6; }
+
+/* rated matrix (0-3 scales) */
+.matrix td.r { text-align: center; font-weight: 700; color: var(--heading); }
+.matrix td.r0 { color: var(--muted); font-weight: 400; }
+.matrix tr.sum td { border-top: 1px solid var(--line); color: var(--heading); }
+.matrix tr.sum td:first-child { font-style: italic; color: var(--muted); }
+.matrix tr.group th {
+  border-bottom: none; padding: 1.2rem .8rem .2rem;
+  color: var(--muted); font-size: .72em; letter-spacing: .22em;
+}
+
+.heat-legend, .chart-legend {
+  display: flex; flex-wrap: wrap; gap: .4rem 1.3rem; margin-top: .8rem;
+  font-size: .78rem; color: var(--muted); font-style: normal;
+}
+.heat-legend span, .chart-legend span { display: inline-flex; align-items: center; gap: .45rem; }
+.heat-legend i, .chart-legend i { width: 14px; height: 14px; border: 1px solid var(--line); border-radius: 2px; }
+.chart-legend { margin-top: 1.4rem; margin-bottom: .2rem; }
+
+/* compact per-entry curve figures */
+.curve-mini { max-width: 430px; margin-top: 1.2rem; }
+
+/* SVG diagram vocabulary */
+.dg-title { font-family: var(--display); fill: var(--heading); }
+.dg-text  { font-family: var(--body-font); fill: var(--body-color); }
+.dg-small { font-family: var(--body-font); fill: var(--muted); }
+.dg-edge  { stroke: var(--line); fill: none; }
+.dg-soft  { stroke: var(--line-soft); fill: none; }
+.dg-box   { fill: var(--panel); stroke: var(--line); }
+.dg-box-locked { fill: none; stroke: var(--muted); stroke-dasharray: 4 4; }
+.dot-dogma    { fill: var(--c-dogma); }
+.dot-reason   { fill: var(--c-reason); }
+.dot-instinct { fill: var(--c-instinct); }
+.dot-merc     { fill: var(--c-merc); }
+.dot-grave    { fill: var(--c-grave); }
+.dot-hunter   { fill: var(--c-hunter); }
+.dot-appr     { fill: var(--c-appr); }
+.ln-dogma, .ln-reason, .ln-instinct { fill: none; stroke-width: 2; stroke-linecap: round; }
+.ln-dogma    { stroke: var(--c-dogma); }
+.ln-reason   { stroke: var(--c-reason); }
+.ln-instinct { stroke: var(--c-instinct); }
+
+/* ---------- figures & diagrams ---------- */
+figure { margin-top: 2rem; }
+figure svg { display: block; width: 100%; height: auto; }
+figcaption {
+  margin-top: .7rem; font-size: .85rem; color: var(--muted); font-style: italic;
+}
+.series-dogma    { color: var(--c-dogma); }
+.series-reason   { color: var(--c-reason); }
+.series-instinct { color: var(--c-instinct); }
+
+/* =========================================================
+   Document layout: fixed sidebar TOC + reading column
+   Markup: <div class="doc-layout"> <aside class="sidebar"> <details class="toc">
+           <summary>Contents</summary> <nav>…</nav> </details> </aside>
+           <main class="doc"> … </main> </div>
+   ========================================================= */
+.doc-layout { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 264px; flex: none;
+  border-right: 1px solid var(--line-soft);
+}
+.sidebar .toc { position: sticky; top: 0; max-height: 100vh; overflow-y: auto; padding: 2.2rem 1.6rem 2.2rem 2rem; }
+.toc summary {
+  cursor: pointer; list-style: none;
+  text-transform: uppercase; letter-spacing: .3em; font-size: .68rem; color: var(--muted);
+}
+.toc summary::-webkit-details-marker { display: none; }
+.toc nav { margin-top: 1.2rem; }
+.toc a {
+  display: block; border-bottom: none; color: var(--muted);
+  font-size: .88rem; line-height: 1.35; padding: .28rem 0 .28rem .9rem;
+  border-left: 1px solid var(--line-soft);
+}
+.toc a.sub { padding-left: 2rem; font-size: .82rem; }
+.toc a:hover { color: var(--heading); }
+.toc a.active { color: var(--heading); border-left: 2px solid var(--accent); padding-left: calc(.9rem - 1px); }
+.toc a.sub.active { padding-left: calc(2rem - 1px); }
+
+main.doc {
+  flex: 1; min-width: 0;
+  padding: 4.5rem clamp(1.5rem, 6vw, 6rem) 6rem;
+}
+main.doc > .inner { max-width: 68ch; margin: 0 auto; }
+main.doc header.hero { margin-bottom: 3.5rem; }
+
+section { scroll-margin-top: 1.5rem; }
+
+@media (max-width: 900px) {
+  .doc-layout { display: block; }
+  .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--line-soft); }
+  .sidebar .toc { position: static; max-height: none; padding: 1.2rem 1.5rem; }
+  main.doc { padding-top: 2.5rem; }
+}

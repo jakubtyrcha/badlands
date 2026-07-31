@@ -9,6 +9,7 @@
 #include "components.h"
 #include "game_state.h"
 #include "movement.h"
+#include "strike_test_util.h"  // land_strikes -- fire_attack commits, it no longer resolves
 #include "sim_internal.hpp"
 
 #include <catch_amalgamated.hpp>
@@ -311,6 +312,7 @@ TEST_CASE("a ranged attack spawns a projectile that damages on arrival", "[comba
     // this is has flipped meaning across that fix.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
+    testfix::land_strikes(g);  // the swing is committed here, then thrown
     CHECK(g.registry.view<Projectile>().size() == 1);
     CHECK(g.registry.get<Health>(te).hp == hp0);
 
@@ -337,6 +339,7 @@ TEST_CASE("a projectile fizzles when its target dies mid-flight", "[combat]") {
     // this is has flipped meaning across that fix.
     g.command_queue.push_back({CommandKind::Attack, s, t});
     apply_commands(g);
+    testfix::land_strikes(g);
     REQUIRE(g.registry.view<Projectile>().size() == 1);
 
     g.registry.destroy(g.slots[t]);  // target gone before the shot lands
@@ -379,6 +382,7 @@ TEST_CASE("fire_attack: -1 still auto-picks (prefers ranged); an explicit index 
     // (index 1) when unlocked -- a projectile spawns, index 0's cooldown is
     // untouched.
     fire_attack(g, s, t, -1);
+    testfix::land_strikes(g);
     CHECK(g.registry.view<Projectile>().size() == 1);
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] > 0.0f);
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] == 0.0f);
@@ -388,7 +392,8 @@ TEST_CASE("fire_attack: -1 still auto-picks (prefers ranged); an explicit index 
     // Explicit index 0: fires the melee attack exactly, even though ranged
     // (index 1) is what auto-pick would have preferred.
     fire_attack(g, s, t, 0);
-    CHECK(g.registry.view<Projectile>().size() == 0);  // melee resolves immediately, no projectile
+    testfix::land_strikes(g);
+    CHECK(g.registry.view<Projectile>().size() == 0);  // melee, so no projectile
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] > 0.0f);
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] == 0.0f);  // ranged untouched
 }
@@ -447,6 +452,7 @@ TEST_CASE(
     g.command_queue.push_back({CommandKind::Attack, a1, v, {0.0f, 0.0f}, /*param_a=*/0});
     g.command_queue.push_back({CommandKind::Attack, a2, v, {0.0f, 0.0f}, /*param_a=*/0});
     apply_commands(g);
+    testfix::land_strikes(g);
 
     CHECK(g.registry.get<Health>(ve).hp <= 0.0f);
 
@@ -458,8 +464,14 @@ TEST_CASE(
     }
     CHECK(hits_on_victim == 1);  // the second attacker's swing must not land
 
-    // The second attacker's cooldown is untouched -- its swing never fired.
-    CHECK(g.registry.get<Attacks>(a2e).cooldown_remaining[0] == 0.0f);
+    // ...but it WAS thrown, and commitment (game/src/strike.h) moved where the
+    // corpse is refused: fire_attack used to reject the second swing at
+    // declaration, so its cooldown stayed untouched. Now both attackers commit
+    // while the victim still lives, and deliver_strike drops the second when
+    // it lands on a corpse. The swing is spent either way -- which is the
+    // right way round, or an ally landing the killing blow first would refund
+    // everyone else's attack.
+    CHECK(g.registry.get<Attacks>(a2e).cooldown_remaining[0] > 0.0f);
 }
 
 TEST_CASE(
@@ -481,9 +493,10 @@ TEST_CASE(
 
     g.command_queue.push_back({CommandKind::Attack, s, t});  // param_a left unnamed
     apply_commands(g);
+    testfix::land_strikes(g);
 
     // Auto-pick chooses the usable melee attack (index 1): no projectile,
-    // melee's cooldown spent, damage lands immediately.
+    // melee's cooldown spent, damage lands.
     CHECK(g.registry.view<Projectile>().size() == 0);
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] > 0.0f);
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] == 0.0f);  // ranged untouched

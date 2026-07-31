@@ -13,6 +13,7 @@
 #include "game_state.h"
 #include "heroes.h"           // advance_chats
 #include "intention.h"
+#include "strike_test_util.h"  // land_strikes -- an attack commits before it lands
 #include "movement.h"        // plan_paths, follow_paths -- drive the MoveBlocked mirror
 #include "sim_internal.hpp"  // make_flat_world / spawn_into / tick_world
 #include "skills.h"         // learn_skill -- the BL_ACT_USE_SKILL cases below
@@ -1556,9 +1557,10 @@ TEST_CASE("resolve_action's pushed command carries the EXPLICIT index, not the a
     CHECK(g.command_queue.back().param_a == 0);
 
     apply_commands(g);
-    // Melee fired immediately (no projectile); the ranged attack's own
-    // cooldown is untouched -- proof fire_attack used exactly index 0, not
-    // whichever attack auto-pick would have preferred.
+    testfix::land_strikes(g);
+    // Melee, so no projectile; the ranged attack's own cooldown is untouched
+    // -- proof fire_attack used exactly index 0, not whichever attack
+    // auto-pick would have preferred.
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[0] > 0.0f);
     CHECK(g.registry.get<Attacks>(se).cooldown_remaining[1] == 0.0f);
     CHECK(g.registry.view<Projectile>().size() == 0);
@@ -1594,6 +1596,7 @@ TEST_CASE("resolve_action: two ATTACK actions in one wake -- the second no-ops o
     REQUIRE(g.command_queue.size() == 2);
 
     apply_commands(g);  // fire_attack is the authoritative re-check, FIFO order
+    testfix::land_strikes(g);
 
     // Exactly one hit landed -- the second command's explicit-index
     // re-validation (fire_attack, combat.h) found the cooldown the first one

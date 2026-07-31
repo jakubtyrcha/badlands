@@ -2,7 +2,7 @@
 
 #include "badlands_sim.hpp"
 #include "brain_abi.h"  // BL_ACT_ATTACK
-#include "combat.h"     // pick_attack
+#include "combat.h"     // pick_attack, melee_range, ranged_range
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
@@ -17,6 +17,16 @@
 namespace badlands {
 
 namespace {
+
+// How far outside a melee opponent's reach a ranged monster tries to stay.
+// Mirrors hero.nim's kStandoffMargin -- the two brains make the same decision
+// and should make it the same way.
+constexpr float kSkirmishMargin = 1.5f;
+
+// How far inside the margin the opponent must get before the retreat is
+// re-issued. See the use site: without it, a held standoff writes one command
+// per tick into the determinism trace.
+constexpr float kSkirmishDeadBand = 0.5f;
 
 // Nearest alive building a monster may attack (enemy_targettable: Castle/House),
 // by distance to its approach tile ("door") -- the tile the rat walks to and
@@ -97,6 +107,41 @@ void monster_think(BadlandsGame& game, uint32_t slot) {
 
         const Attacks& atk = reg.get<Attacks>(e);
         const float dist = glm::distance(pos, reg.get<Position>(target).pos);
+
+        // Skirmish (v5): the enemy-side mirror of hero.nim's standoff. Same
+        // decision, same seams -- the tier split is where a brain RUNS (engine
+        // code vs a wasm module), never which door it uses. A ranged monster
+        // that outranges what is closing on it backs off to keep the margin
+        // while still shooting through the action channel below; the shot's
+        // own wind-up (game/src/strike.h) is what makes that cost ground.
+        //
+        // Never breaks contact deliberately: once melee-locked, walking out
+        // would cost StatusKind::Disengaged, which is always worse than
+        // fighting. Spacing is the whole job.
+        const float own_ranged = ranged_range(atk);
+        if (!reg.all_of<MeleeLock>(e) && own_ranged > 0.0f) {
+            const Attacks* tatk = reg.try_get<Attacks>(target);
+            const float their_reach = tatk != nullptr ? melee_range(*tatk) : 0.0f;
+            const float their_ranged = tatk != nullptr ? ranged_range(*tatk) : 0.0f;
+            const float want = their_reach + kSkirmishMargin;
+            // A DEAD BAND, not `dist < want`. The retreat goal is derived from
+            // the opponent's live position, so it drifts every tick -- and
+            // enqueue_move_to can only dedupe a near-identical point. Without
+            // the band a standoff appends a Point command per tick to
+            // command_log, which is the determinism trace and the replay input,
+            // and is exactly what that dedupe exists to prevent. Re-issuing
+            // only once the margin has actually been eaten into keeps the
+            // behaviour and drops the churn.
+            if (own_ranged > their_reach && their_ranged <= 0.0f &&
+                dist < want - kSkirmishDeadBand) {
+                const glm::vec2 away = pos - reg.get<Position>(target).pos;
+                const float len = glm::length(away);
+                if (len > 1e-4f) {
+                    enqueue_move_to(game, slot, pos + away / len * (want - dist));
+                }
+            }
+        }
+
         const int pick = pick_attack(atk, dist, reg.all_of<MeleeLock>(e));
         if (pick >= 0) {
             resolve_action(game, slot,

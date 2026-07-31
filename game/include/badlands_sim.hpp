@@ -202,9 +202,16 @@ struct ActivityWeights {
 // its own decision.
 enum class StatusKind : int32_t {
     None = 0,
-    Stunned,  // skips the think, freezes movement, zeroes the active defense
+    Stunned,     // skips the think, freezes movement, zeroes the active defense
+    Cursed,      // accuracy/armour sapped for a duration (Apprentice's Curse).
+                 // Unlike Stunned it does NOT touch evasion: a cursed target
+                 // still dodges, it has just stopped warding.
+    Disengaged,  // walked out of melee contact: no actions at all for a few
+                 // seconds. Movement and defense are untouched -- this is a
+                 // penalty on ACTING, not on being, and it is meant to be
+                 // steep enough that a brain that can count never chooses it.
 };
-inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Stunned) + 1;
+inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Disengaged) + 1;
 // Fixed component capacity; matches BL_MAX_STATUSES (game/src/brain_abi.h).
 inline constexpr int32_t kMaxStatuses = 8;
 // Stable inspection name ("Stunned"); "-" for an out-of-range kind.
@@ -215,6 +222,9 @@ const char* StatusName(int32_t kind);
 enum class SkillId : int32_t {
     Calcify = 0,   // Apprentice: absorb the next physical strike (effect deferred)
     ShieldBash,    // Mercenary: a shield slam that stuns what it lands on
+    Curse,         // Apprentice: saps a target's accuracy and armour
+    DressWounds,   // Hunter: field-dresses its own wounds
+    Backstab,      // Grave Robber: heavy bonus damage on someone not facing it
     Count,
 };
 inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
@@ -488,8 +498,18 @@ struct Attack {
     DamageType damage_type = DamageType::Slashing;
     float base_damage = 0.0f;
     float range = 0.0f;
-    float cooldown = 0.0f;    // seconds between uses of THIS attack
+    float cooldown = 0.0f;    // seconds between uses of THIS attack, from RESOLVE
     float crit_chance = 0.0f;
+    // Commitment (game/src/strike.h). The attacker neither moves nor thinks
+    // through either window, which is what makes standing still to shoot cost
+    // ground. wind_up is CANCELLABLE (a stun drops the blow); recovery is not
+    // (the blow was already thrown).
+    //
+    // `cooldown` keeps its meaning and is measured from resolve, with recovery
+    // running INSIDE it -- so a weapon needs no third redundant number, and an
+    // un-authored attack (both 0) resolves instantly, exactly as before.
+    float wind_up_seconds = 0.0f;
+    float recovery_seconds = 0.0f;
 };
 
 // Tactical stats (the resolve_attack inputs) + the class engagement preference.
@@ -506,9 +526,64 @@ struct Combatant {
     // reserved (deferred psychology): float willpower, resolve;
 };
 
+// Per-level stat deltas. A creature's stats are ALWAYS
+//   stat = base + growth * (level - 1)
+// recomputed from scratch (game/src/progression.h's apply_level_stats), never
+// accumulated -- so a replay that recomputes lands on identical floats instead
+// of drifting, and calling it twice at one level is a no-op.
+//
+// The rates come from the design doc's level-15 rating table (docs/design/
+// game-design.html §5.2) times a per-stat step, which is why linear stat
+// growth produces a CONVEX power curve: power is roughly dps x ehp, a product
+// of two rising terms. Armour's flat reduction self-plateaus against rising
+// damage, reproducing the doc's "armour scaling hits diminishing returns"
+// without any special case.
+//
+// Monsters leave this zeroed -- they do not level.
+struct StatGrowth {
+    float hp = 0.0f;           // flat, per level
+    float accuracy = 0.0f;     // flat
+    float evasion = 0.0f;      // flat
+    float defense = 0.0f;      // flat
+    float armour = 0.0f;       // flat
+    // FRACTION of each attack's own base_damage, per level -- so a big weapon
+    // gains more per level than a small one at the same design rating.
+    float damage_frac = 0.0f;
+};
+
+// The creatures the sim knows by name. Append-only: JSON overrides and arena
+// scenarios key by name, and SpawnCreature spawns by id. The first
+// HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight
+// to its creature.
+//
+// Declared HERE, above CharacterDesc, because a desc names its own creature
+// (CharacterDesc::creature) -- the catalog struct that uses these ids still
+// lives further down, with the rest of the catalog.
+enum class CreatureId : int32_t {
+    Mercenary = 0,
+    Hunter,
+    GraveRobber,
+    Apprentice,
+    Rat,
+    Goblin,
+    Deer,
+    Bandit,
+    BanditArcher,
+    BanditLeader,
+    MudGolem,
+    Count,
+};
+inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);
+
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
     Archetype archetype = Archetype::Hero;
+    // Which catalog creature this desc IS. Authored by CreatureCatalog for
+    // every row; Count for a hand-built desc that names no creature. Copied
+    // onto the entity at spawn (components.h's CreatureKind) because the
+    // threat table is keyed by creature, and nothing else recorded what a
+    // spawned entity actually is.
+    CreatureId creature = CreatureId::Count;
     // Explicit HeroClassId for hero descs; -1 = derive from the recruiting
     // guild at spawn (heroes.cpp's spawn_entity). The hero creature-catalog
     // defs (creature_catalog.cpp) author this so a directly-spawned/recruited
@@ -543,6 +618,9 @@ struct CharacterDesc {
     CombatStance stance = CombatStance::Melee;
     Attack attacks[kMaxAttacks]{};
     int32_t attack_count = 0;
+    // Per-level deltas applied to the stats above (see StatGrowth). The values
+    // here are the LEVEL-1 row; growth carries the creature from there.
+    StatGrowth growth{};
     // Level-gated skill acquisition (see SkillGrantRow). Rows fire at their
     // exact level: spawn applies the level-1 ones, and the level-up hook
     // (game/src/progression.h) applies the rest as the hero grows.
@@ -554,21 +632,6 @@ struct CharacterDesc {
 };
 
 // ---- named-creature catalog ------------------------------------------------
-// The creatures the sim knows by name. Append-only: JSON overrides and arena
-// scenarios key by name, and SpawnCreature spawns by id. The first
-// HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight to
-// its creature.
-enum class CreatureId : int32_t {
-    Mercenary = 0,
-    Hunter,
-    GraveRobber,
-    Apprentice,
-    Rat,
-    Goblin,
-    Deer,
-    Count,
-};
-inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);
 
 // A CharacterDesc template per creature (pos/team filled in at spawn). Compiled
 // defaults live in creature_catalog.cpp; an app may override fields by name from
@@ -856,6 +919,9 @@ enum class GameEventKind : int32_t {
     SkillUsed,           // a skill was cast; actor = caster slot, target = its primary
                          // target (the caster itself for a self/untargeted cast),
                          // amount = the SkillId
+    StrikeCancelled,     // a committed attack was interrupted during its wind-up and
+                         // never landed; actor = the attacker whose swing was dropped,
+                         // target = who it was aimed at, amount = the attack index
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and

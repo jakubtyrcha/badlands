@@ -14,6 +14,12 @@ constexpr std::array<SkillDef, static_cast<size_t>(kSkillCount)> kSkills{{
      /*trigger_param=*/3.0f},
     {SkillId::ShieldBash, "ShieldBash", SkillTriggerKind::MeleeThreatClose,
      /*trigger_param=*/2.0f},
+    {SkillId::Curse, "Curse", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/7.0f},
+    {SkillId::DressWounds, "DressWounds", SkillTriggerKind::LowHealth,
+     /*trigger_param=*/0.5f},
+    {SkillId::Backstab, "Backstab", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/2.0f},
 }};
 
 constexpr bool skills_dense() {
@@ -93,6 +99,46 @@ SkillCatalog::SkillCatalog() {
     bash.intention_duration_seconds = 0.0f;
     bash.effect = "Slams the target with a shield; a landed blow leaves it stunned.";
     set_constant(bash, "stun_seconds", 3.0f);
+
+    // The apprentice's opener. Declares NO attack test -- a curse always
+    // lands, because the debuff IS the point and a coin-flip on it would make
+    // the class's one level-1 tool unreliable. Declaring no test means the
+    // reach comes from the optional "range" constant instead of a weapon
+    // (skill_cast.h); 7 keeps it from outreaching the bolt it supports.
+    SkillSpec& curse = specs[static_cast<size_t>(SkillId::Curse)];
+    curse.trigger = SkillTrigger::Action;
+    curse.target = SkillTargetMode::Any;
+    curse.target_limit = 1;
+    curse.attack_test = SkillAttackTest::None;
+    curse.cooldown_seconds = 15.0f;
+    curse.intention_duration_seconds = 0.0f;
+    curse.effect = "Saps the target's guard: less accurate, and its armour turns brittle.";
+    set_constant(curse, "duration_seconds", 8.0f);
+    set_constant(curse, "range", 7.0f);
+
+    // The hunter's sustain. SelfOnly, so the engine refuses it at anyone else
+    // outright rather than remapping.
+    SkillSpec& dress = specs[static_cast<size_t>(SkillId::DressWounds)];
+    dress.trigger = SkillTrigger::Action;
+    dress.target = SkillTargetMode::SelfOnly;
+    dress.attack_test = SkillAttackTest::None;
+    dress.cooldown_seconds = 30.0f;
+    dress.intention_duration_seconds = 0.0f;
+    dress.effect = "Binds a wound in the field; slow to come round again.";
+    set_constant(dress, "heal_amount", 8.0f);
+
+    // The grave robber's payoff for not being seen coming. Borrows the melee
+    // test (and so the blades' reach), and pays out only against something
+    // that is not currently fighting the caster.
+    SkillSpec& stab = specs[static_cast<size_t>(SkillId::Backstab)];
+    stab.trigger = SkillTrigger::Action;
+    stab.target = SkillTargetMode::Any;
+    stab.target_limit = 1;
+    stab.attack_test = SkillAttackTest::Melee;
+    stab.cooldown_seconds = 10.0f;
+    stab.intention_duration_seconds = 0.0f;
+    stab.effect = "A blade between the ribs -- devastating against someone facing elsewhere.";
+    set_constant(stab, "bonus_damage", 6.0f);
 }
 
 SkillId SkillIdFromName(const char* name) {
@@ -181,9 +227,54 @@ void shield_bash_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) 
     }
 }
 
+// Curse: no attack test was declared, so nothing was rolled and there is
+// nothing to gate on -- it always lands. The engine still decides WHO may be
+// targeted and whether the op is legal; this only says what to ask for.
+void curse_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    const float seconds = skill_constant(ctx, "duration_seconds", 0.0f);
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
+                                            static_cast<int32_t>(StatusKind::Cursed),
+                                            seconds * 1000.0f});
+    }
+}
+
+// DressWounds: the first effect to emit BL_FX_HEAL. SelfOnly, so the single
+// target the engine resolved IS the caster -- this never has to name it.
+void dress_wounds_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    const float amount = skill_constant(ctx, "heal_amount", 0.0f);
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        push_effect_op(out,
+                       BlSkillEffectOp{BL_FX_HEAL, ctx.targets[i].slot, 0, amount});
+    }
+}
+
+// Backstab: the first effect to emit BL_FX_DAMAGE, which has existed and
+// applied since the skills slice with nothing shipping that used it.
+//
+// The engine rolled the melee test and reports what it produced; this adds the
+// bonus only against a target NOT currently engaging the caster
+// (BlSkillTarget::engaging_caster, which the engine fills -- a guest script
+// could never work it out). Against someone already fighting back it is an
+// ordinary blow, which is the whole point of the skill.
+void backstab_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    const float bonus = skill_constant(ctx, "bonus_damage", 0.0f);
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        const BlSkillTarget& t = ctx.targets[i];
+        if (t.attack_test != BL_TEST_HIT) {
+            continue;  // blocked or dodged: a knife that missed adds nothing
+        }
+        const float damage = t.test_damage + (t.engaging_caster != 0 ? 0.0f : bonus);
+        push_effect_op(out, BlSkillEffectOp{BL_FX_DAMAGE, t.slot, 0, damage});
+    }
+}
+
 constexpr std::array<SkillEffectFn, static_cast<size_t>(kSkillCount)> kEffects{{
     calcify_effect,
     shield_bash_effect,
+    curse_effect,
+    dress_wounds_effect,
+    backstab_effect,
 }};
 
 }  // namespace

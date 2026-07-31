@@ -12,6 +12,7 @@
 #include "game/map/map_data.hpp"
 
 #include <entt/entt.hpp>
+#include <glm/glm.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -164,6 +165,23 @@ struct BadlandsGame {
     // monster_think, unconditionally" as the actual safety invariant, not
     // merely "was this slot in range".
     std::vector<entt::entity> nearest_enemy_scratch;
+
+    // Per-tick, indexed by slot: how far follow_paths moved this character under
+    // its own power this tick, as a DISPLACEMENT (zero = it did not move).
+    // Written at the top of follow_paths and read by update_melee_locks moments
+    // later, in the same tick and the same pipeline -- the only consumer.
+    //
+    // A displacement rather than a bare "moved" flag, and that distinction is
+    // load-bearing: the question update_melee_locks has to answer is not "did
+    // this unit move" but "did it move AWAY from what it was locked with". A
+    // mere flag charges the disengage penalty to a PURSUER -- a mercenary
+    // chasing a retreating archer moves, the gap opens past the hysteresis, and
+    // it would be punished for closing. Projecting the displacement onto the
+    // away-from-opponent direction is what separates leaving from chasing.
+    //
+    // Same shape and lifetime as nearest_enemy_scratch above; never read
+    // outside the tick that wrote it.
+    std::vector<glm::vec2> moved_by_path_scratch;
 
     ~BadlandsGame();
 };

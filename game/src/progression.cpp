@@ -9,6 +9,48 @@
 
 namespace badlands {
 
+void apply_level_stats(entt::registry& reg, entt::entity e, int32_t level) {
+    if (e == entt::null || !reg.valid(e) || !reg.all_of<BaseStats, Growth>(e)) {
+        return;
+    }
+    const BaseStats& base = reg.get<BaseStats>(e);
+    const StatGrowth& g = reg.get<Growth>(e).rows;
+    // Clamp rather than trust: a level below 1 would run the growth backwards
+    // and hand out negative hp.
+    const float steps = static_cast<float>(std::max(1, level) - 1);
+
+    if (auto* health = reg.try_get<Health>(e); health != nullptr) {
+        const float new_max = std::max(1.0f, base.hp + g.hp * steps);
+        // Keep the CURRENT fraction, so growth adds capacity without healing.
+        // Guard the divide: a max of 0 would have made every hp a NaN.
+        const float frac = health->max_hp > 0.0f
+                               ? std::clamp(health->hp / health->max_hp, 0.0f, 1.0f)
+                               : 1.0f;
+        health->max_hp = new_max;
+        health->hp = frac * new_max;
+    }
+    if (auto* c = reg.try_get<Combatant>(e); c != nullptr) {
+        // Probabilities stay in [0,1]; armour cannot go negative. Growth is
+        // authored non-negative, but a JSON override is not trusted to be.
+        c->accuracy = std::clamp(base.accuracy + g.accuracy * steps, 0.0f, 1.0f);
+        c->evasion = std::clamp(base.evasion + g.evasion * steps, 0.0f, 1.0f);
+        c->defense = std::clamp(base.defense + g.defense * steps, 0.0f, 1.0f);
+        c->armour = std::max(0.0f, base.armour + g.armour * steps);
+    }
+    if (auto* atk = reg.try_get<Attacks>(e); atk != nullptr) {
+        const float scale = std::max(0.0f, 1.0f + g.damage_frac * steps);
+        for (int i = 0; i < atk->count && i < kMaxAttacks && i < base.attack_count; ++i) {
+            atk->defs[i].base_damage = base.attack_damage[i] * scale;
+        }
+        // Stats is a legacy VIEW of the primary attack (heroes.cpp's spawn
+        // comment) -- keep the mirror honest rather than letting perception
+        // read a level-1 damage off a level-15 hero.
+        if (auto* stats = reg.try_get<Stats>(e); stats != nullptr && atk->count > 0) {
+            stats->attack_damage = atk->defs[0].base_damage;
+        }
+    }
+}
+
 int32_t xp_to_next(const ProgressionFactors& p, int32_t level) {
     const double cost = std::floor(static_cast<double>(p.level_base_xp) *
                                    std::pow(static_cast<double>(level),
@@ -47,6 +89,10 @@ void award_xp(BadlandsGame& game, uint32_t slot, int64_t amount) {
             grants != nullptr && game.registry.all_of<Skills>(e)) {
             grant_skills_for_level(game.registry.get<Skills>(e), *grants, sim.level);
         }
+        // What this level is WORTH is the entity's own growth row, the same
+        // way what it TEACHES is its own grant list: both ride the desc, so
+        // no consumer re-derives a hero's class to know either one.
+        apply_level_stats(game.registry, e, sim.level);
         const glm::vec2 pos = game.registry.get<Position>(e).pos;
         emit_event(game, GameEvent{.kind = GameEventKind::HeroLeveledUp,
                                    .actor_id = slot,

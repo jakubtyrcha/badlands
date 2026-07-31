@@ -69,9 +69,25 @@ TEST_CASE("the creature catalog carries the shipped grant lists") {
 
     const badlands::CharacterDesc& app =
         cat.defs[static_cast<int>(badlands::CreatureId::Apprentice)];
-    REQUIRE(app.skill_grant_count == 1);
-    CHECK(app.skill_grants[0].skill == static_cast<int32_t>(SkillId::Calcify));
-    CHECK(app.skill_grants[0].level == 5);
+    REQUIRE(app.skill_grant_count == 2);
+    CHECK(app.skill_grants[0].skill == static_cast<int32_t>(SkillId::Curse));
+    CHECK(app.skill_grants[0].level == 1);
+    // Calcify moved 5 -> 4, per the design document; its effect is still the
+    // documented no-op.
+    CHECK(app.skill_grants[1].skill == static_cast<int32_t>(SkillId::Calcify));
+    CHECK(app.skill_grants[1].level == 4);
+
+    const badlands::CharacterDesc& hunter =
+        cat.defs[static_cast<int>(badlands::CreatureId::Hunter)];
+    REQUIRE(hunter.skill_grant_count == 1);
+    CHECK(hunter.skill_grants[0].skill == static_cast<int32_t>(SkillId::DressWounds));
+    CHECK(hunter.skill_grants[0].level == 2);
+
+    const badlands::CharacterDesc& gr =
+        cat.defs[static_cast<int>(badlands::CreatureId::GraveRobber)];
+    REQUIRE(gr.skill_grant_count == 1);
+    CHECK(gr.skill_grants[0].skill == static_cast<int32_t>(SkillId::Backstab));
+    CHECK(gr.skill_grants[0].level == 3);
 }
 
 TEST_CASE("Calcify recommends on a close melee threat, gated by cooldown") {

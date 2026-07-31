@@ -6,7 +6,8 @@
 #include "heroes.h"     // biome_at
 #include "intention.h"  // InboxEvent, push_inbox_event -- the MoveBlocked mirror
 #include "placement.h"
-#include "status.h"  // has_status -- a stunned character stops walking
+#include "status.h"  // has_status/apply_status -- stun stops walking, disengaging costs actions
+#include "strike.h"  // striking -- so does one committed to a swing
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace badlands {
@@ -27,6 +29,10 @@ namespace {
 constexpr float kRepathCooldown = 0.3f;    // seconds between repaths
 constexpr float kGoalMovedThreshold = 1.0f;// repath a moving target when it drifts this far
 constexpr float kMeleeHysteresis = 1.15f;  // unlock past attack_range * this
+// How long a unit that walked out of melee contact can do nothing at all.
+// Long enough that disengaging is never the better option -- see the charge
+// site in update_melee_locks.
+constexpr float kDisengagePenaltySeconds = 3.0f;
 constexpr float kSepCell = 2.0f;           // separation spatial-hash cell size
 constexpr float kWorldBound = static_cast<float>(kGridHalf);
 
@@ -240,12 +246,23 @@ void follow_paths(BadlandsGame& game, float dt) {
     // adding a component while iterating a view can invalidate it.
     std::vector<std::pair<entt::entity, glm::vec2>> blocked;
 
-    // ChattingState excluded alongside InsideBuilding/MeleeLock: a
-    // conversation holds both participants in place, like a melee lock
-    // holds fighters -- a hero mid-chat must not keep walking toward
+    // Who moved under their own power this tick. update_melee_locks (below,
+    // same tick, after this) reads it to tell a DELIBERATE disengage from
+    // simply being left behind -- see its own comment.
+    game.moved_by_path_scratch.assign(game.slots.size(), glm::vec2{0.0f, 0.0f});
+
+    // MeleeLock is NO LONGER excluded (contact/disengage slice): contact
+    // forbids ranged attacks, it does not nail feet to the ground. Freezing
+    // movement made leaving contact impossible -- you could not move, so the
+    // distance never grew, so the lock never released -- which made "move,
+    // shoot, move" unreachable for anything that was touched once. Leaving is
+    // possible now, and ruinously expensive (StatusKind::Disengaged).
+    //
+    // ChattingState stays excluded: a conversation really does hold both
+    // participants in place, so a hero mid-chat must not keep walking toward
     // whatever MoveTarget it had queued up before the chat started.
     auto view = game.registry.view<NavPath, Position, const Stats>(
-        entt::exclude<InsideBuilding, MeleeLock, ChattingState>);
+        entt::exclude<InsideBuilding, ChattingState>);
     for (entt::entity e : view) {
         // Stunned: the character stops WALKING, but its NavPath is left exactly
         // as it is -- the route survives the stun and resumes on expiry, which
@@ -256,6 +273,13 @@ void follow_paths(BadlandsGame& game, float dt) {
         // Deliberately NOT gated in separate_units below: collision resolution
         // still nudges a stunned body, so units cannot stack on top of one.
         if (has_status(game.registry, e, StatusKind::Stunned)) {
+            continue;
+        }
+        // Committed to a swing: the same "stops walking, keeps its route"
+        // treatment, for the same reason. This is what makes standing still to
+        // shoot a real cost -- a kiter's effective retreat speed is its speed
+        // times the fraction of its cycle it is NOT committed.
+        if (striking(game.registry, e)) {
             continue;
         }
         NavPath& np = view.get<NavPath>(e);
@@ -286,6 +310,10 @@ void follow_paths(BadlandsGame& game, float dt) {
                 blocked.emplace_back(e, next);
                 continue;  // stop at the edge rather than cross it
             }
+            if (const uint32_t slot = slot_for_entity(game, e);
+                slot < game.moved_by_path_scratch.size()) {
+                game.moved_by_path_scratch[slot] += next - pos.pos;  // its own power
+            }
             pos.pos = next;
             // Fog-of-war: face the direction of travel (idle keeps last facing).
             if (Facing* f = game.registry.try_get<Facing>(e)) {
@@ -301,7 +329,10 @@ void follow_paths(BadlandsGame& game, float dt) {
 
 void update_melee_locks(BadlandsGame& game) {
     entt::registry& reg = game.registry;
-    std::vector<entt::entity> to_lock, to_unlock;
+    std::vector<entt::entity> to_lock;
+    // The entity being unlocked, and WHO it was locked with (null when the
+    // opponent is simply gone) -- the disengage charge below needs both.
+    std::vector<std::pair<entt::entity, entt::entity>> to_unlock;
     // Melee lock keys off the MELEE attack's reach, not a ranged one: a unit that
     // only fights at range (melee_range == 0) never locks, so a kiter holding at
     // bow distance keeps moving instead of freezing.
@@ -312,7 +343,9 @@ void update_melee_locks(BadlandsGame& game) {
         const float range = melee_range(view.get<const Attacks>(e));
         if (enemy == entt::null || range <= 0.0f) {
             if (locked) {
-                to_unlock.push_back(e);
+                // No opponent left to have walked away FROM: unlock, charge
+                // nothing. It died, or left view -- neither is a disengage.
+                to_unlock.emplace_back(e, entt::null);
             }
             continue;
         }
@@ -320,7 +353,7 @@ void update_melee_locks(BadlandsGame& game) {
         if (!locked && dist <= range) {
             to_lock.push_back(e);
         } else if (locked && dist > range * kMeleeHysteresis) {
-            to_unlock.push_back(e);
+            to_unlock.emplace_back(e, enemy);
         }
     }
     for (entt::entity e : to_lock) {
@@ -328,10 +361,40 @@ void update_melee_locks(BadlandsGame& game) {
             reg.emplace<MeleeLock>(e);
         }
     }
-    for (entt::entity e : to_unlock) {
-        if (reg.all_of<MeleeLock>(e)) {
-            reg.remove<MeleeLock>(e);
+    for (const auto& [e, opponent] : to_unlock) {
+        if (!reg.all_of<MeleeLock>(e)) {
+            continue;
         }
+        reg.remove<MeleeLock>(e);
+        // The price of LEAVING contact -- and only leaving it.
+        //
+        // Charged when this unit's own path movement carried it AWAY from the
+        // opponent it was locked with. Three things therefore pay nothing, and
+        // each matters: a unit whose opponent walked off or died (no opponent
+        // to test against); a unit that was merely nudged apart by
+        // separate_units (not path movement, so no displacement is recorded);
+        // and -- the case a bare "did it move" flag gets wrong -- a PURSUER.
+        // A mercenary chasing a retreating archer moves every tick and the gap
+        // still opens past the hysteresis; punishing it for closing would
+        // invert the whole mechanic.
+        //
+        // Deliberately steep, so a brain that can count never chooses it: the
+        // ranged classes' real job is spacing, and being caught is meant to be
+        // a genuine loss condition rather than an inconvenience to walk off.
+        if (opponent == entt::null || !reg.all_of<Position>(opponent)) {
+            continue;
+        }
+        const uint32_t slot = slot_for_entity(game, e);
+        if (slot >= game.moved_by_path_scratch.size()) {
+            continue;
+        }
+        const glm::vec2 step = game.moved_by_path_scratch[slot];
+        const glm::vec2 away = view.get<const Position>(e).pos - reg.get<Position>(opponent).pos;
+        if (glm::dot(step, step) <= 0.0f || glm::dot(step, away) <= 0.0f) {
+            continue;  // did not move, or moved TOWARD it
+        }
+        apply_status(game, e, StatusKind::Disengaged,
+                     static_cast<int64_t>(kDisengagePenaltySeconds * 1000.0f), slot);
     }
 }
 

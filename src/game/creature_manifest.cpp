@@ -76,6 +76,42 @@ bool ReadSkillGrants(const nlohmann::json& obj, const char* creature, CharacterD
     return true;
 }
 
+// Read the optional "growth" object: the per-level stat deltas (StatGrowth,
+// badlands_sim.hpp). Every key optional, unknown keys FAIL the load -- a
+// misspelled "armor" that silently left a class's armour flat for twenty
+// levels would be found in a duel matrix, not in the log.
+bool ReadGrowth(const nlohmann::json& obj, const char* creature, CharacterDesc& d) {
+    if (!obj.contains("growth")) {
+        return true;
+    }
+    if (!obj["growth"].is_object()) {
+        spdlog::warn("LoadCreatureCatalog: {}.growth is not an object", creature);
+        return false;
+    }
+    const auto& g = obj["growth"];
+    for (auto it = g.begin(); it != g.end(); ++it) {
+        const std::string& key = it.key();
+        if (key != "hp" && key != "accuracy" && key != "evasion" && key != "defense" &&
+            key != "armour" && key != "damage_frac") {
+            spdlog::warn("LoadCreatureCatalog: {}.growth has unknown key '{}'", creature, key);
+            return false;
+        }
+    }
+    StatGrowth scratch = d.growth;
+    bool ok = true;
+    ok = ok && ReadNum(g, creature, "hp", scratch.hp);
+    ok = ok && ReadNum(g, creature, "accuracy", scratch.accuracy);
+    ok = ok && ReadNum(g, creature, "evasion", scratch.evasion);
+    ok = ok && ReadNum(g, creature, "defense", scratch.defense);
+    ok = ok && ReadNum(g, creature, "armour", scratch.armour);
+    ok = ok && ReadNum(g, creature, "damage_frac", scratch.damage_frac);
+    if (!ok) {
+        return false;
+    }
+    d.growth = scratch;
+    return true;
+}
+
 }  // namespace
 
 bool LoadCreatureCatalog(const std::string& path, CreatureCatalog& out) {
@@ -128,6 +164,7 @@ bool LoadCreatureCatalog(const std::string& path, CreatureCatalog& out) {
             ok = ok && ReadNum(o, name.c_str(), "attack_cooldown", d.attacks[0].cooldown);
             ok = ok && ReadNum(o, name.c_str(), "attack_crit", d.attacks[0].crit_chance);
         }
+        ok = ok && ReadGrowth(o, name.c_str(), d);
         ok = ok && ReadSkillGrants(o, name.c_str(), d);
         if (!ok) {
             return false;

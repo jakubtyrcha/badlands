@@ -36,6 +36,48 @@ AttackCategory category_of(SkillAttackTest test) {
     return test == SkillAttackTest::Ranged ? AttackCategory::Ranged : AttackCategory::Melee;
 }
 
+// Is `target` currently fighting `caster`? Locked with it in melee, or running
+// an Attack intention aimed at it. Engine-side because a guest script cannot
+// see either -- and because "did I catch this one unaware" is exactly the
+// question an effect like Backstab needs answered but must not answer itself.
+//
+// Conservative on purpose: anything ambiguous reads as ENGAGED, so a bonus for
+// catching someone off guard is never paid out on a doubt.
+bool engaging_of(const entt::registry& reg, entt::entity caster, entt::entity target) {
+    if (caster == target) {
+        return true;
+    }
+    // "Engaging THE CASTER", not "engaged with anybody". The distinction is the
+    // whole skill: a grave robber flanking a goblin that is locked with a
+    // friendly mercenary is the textbook backstab, and treating any melee lock
+    // as engagement would suppress the bonus in exactly the group fight it
+    // exists for.
+    //
+    // Two ways to be fighting this caster specifically:
+    //   * in melee contact WITH IT -- locked, and within its own reach of the
+    //     caster (MeleeLock records no partner, so the reach test is what names
+    //     one);
+    //   * chasing it -- an Attack intention whose engagement MoveTarget holds
+    //     the caster's entity (enqueue_engage, command.h).
+    if (reg.all_of<MeleeLock>(target) && reg.all_of<Position>(target) &&
+        reg.all_of<Position>(caster)) {
+        const auto* atk = reg.try_get<Attacks>(target);
+        const float reach = atk != nullptr ? melee_range(*atk) : 0.0f;
+        if (reach > 0.0f && glm::distance(reg.get<Position>(target).pos,
+                                          reg.get<Position>(caster).pos) <= reach) {
+            return true;
+        }
+    }
+    if (const auto* ci = reg.try_get<CurrentIntention>(target);
+        ci != nullptr && ci->kind == IntentionKind::Attack) {
+        const auto* mt = reg.try_get<MoveTarget>(target);
+        if (mt != nullptr && mt->kind == MoveTarget::Kind::Entity && mt->entity == caster) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int32_t relation_of(const entt::registry& reg, entt::entity caster, entt::entity target) {
     if (caster == target) {
         return BL_REL_SELF;
@@ -92,6 +134,10 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
     if (skill_index < 0 || skill_index >= skills->count || skill_index >= kMaxSkills) {
         spdlog::warn("[skill] slot {}: skill index {} out of range (count {}), cast dropped",
                      caster_slot, skill_index, skills->count);
+        return false;
+    }
+    if (has_status(reg, caster, StatusKind::Disengaged)) {
+        spdlog::warn("[skill] slot {}: disengaged, cast dropped", caster_slot);
         return false;
     }
     if (skills->cooldown_remaining[skill_index] > 0.0f) {
@@ -195,8 +241,9 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
     ctx.world_millis = game.world_millis;
 
     const uint32_t caster_slot = slot_for_entity(game, caster);
-    const Combatant caster_stats =
-        reg.all_of<Combatant>(caster) ? reg.get<Combatant>(caster) : Combatant{};
+    // effective_combatant, not the raw component -- the same rule declare_strike
+    // follows: a cursed caster's skill test rolls at its cursed accuracy.
+    const Combatant caster_stats = effective_combatant(reg, caster);
     const Attacks* atk = reg.try_get<Attacks>(caster);
     const glm::vec2 from = reg.get<Position>(caster).pos;
 
@@ -239,6 +286,7 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
         row.evasion = def.evasion;
         row.armour = def.armour;
         row.relation = relation_of(reg, caster, t);
+        row.engaging_caster = engaging_of(reg, caster, t) ? 1 : 0;
         row.attack_test = BL_TEST_NOT_RUN;
         row.test_damage = 0.0f;
 
@@ -318,6 +366,17 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
                 h->hp -= op.param_f;
                 emit_char_hit(game, caster_slot, op.target_slot, op.param_f, h->hp,
                               game.registry.get<Position>(target).pos);
+                break;
+            }
+            case BL_FX_HEAL: {
+                auto* h = game.registry.try_get<Health>(target);
+                if (h == nullptr || !std::isfinite(op.param_f) || op.param_f <= 0.0f) {
+                    break;
+                }
+                // Clamped to the target's own maximum: an effect asking for
+                // more than a full heal gets a full heal, never an overheal
+                // the rest of the sim has no concept of.
+                h->hp = std::min(h->max_hp, h->hp + op.param_f);
                 break;
             }
             default:

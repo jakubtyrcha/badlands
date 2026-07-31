@@ -26,10 +26,11 @@
 # attacks) -- same reasoning as the attacks block: a brain cannot use a skill
 # it cannot see, and the WIRE INDEX of a skill is what it hands back as
 # BL_ACT_USE_SKILL's `arg`. BL_ACT_USE_SKILL stops being reserved, and
-# BL_ST_STUNNED joins the status vocabulary.
+# BL_ST_STUNNED joins the status vocabulary; v5 adds BL_ST_DISENGAGED plus the
+# threat/standoff block on BlThreat and BlViewSelf.
 
 const
-  BL_ABI_VERSION* = 4'i32
+  BL_ABI_VERSION* = 5'i32
   BL_MAX_THREATS* = 8
   BL_MAX_CHARS* = 16
   BL_MAX_EVENTS* = 8
@@ -83,6 +84,9 @@ const
   # Not advisory: a stunned entity is not consulted at all, so a brain only
   # sees this for a stun that ended before its wake.
   BL_ST_STUNNED* = 4'i32
+  # Walked out of melee contact: no actions at all for a few seconds.
+  BL_ST_DISENGAGED* = 5'i32
+  BL_ST_CURSED* = 6'i32
 
   # badlands::SkillTrigger (game/include/badlands_sim.hpp), mirrored here
   # because brain_abi.h deliberately excludes that header -- the same
@@ -95,6 +99,9 @@ const
   # badlands::SkillId, same discipline. Only the ids a shipping brain names.
   BL_SKILL_CALCIFY* = 0'i32
   BL_SKILL_SHIELD_BASH* = 1'i32
+  BL_SKILL_CURSE* = 2'i32
+  BL_SKILL_DRESS_WOUNDS* = 3'i32
+  BL_SKILL_BACKSTAB* = 4'i32
 
 type
   BlViewSelf* {.packed.} = object
@@ -115,13 +122,22 @@ type
     attack_range*: float32
     current_activity*: int32
     intention_kind*: int32
-    pad2*: uint32
+    # v5 (was pad2, so the size is unchanged): this hero's own combat
+    # potential. Compare against BlThreat.threat to decide whether a fight is
+    # worth taking -- see game/src/threat_table.h.
+    threat*: float32
 
   BlThreat* {.packed.} = object
     pos_x*: float32
     pos_z*: float32
     dist*: float32
     slot*: uint32
+    # v5 standoff block: what this hostile can reach, how fast it closes, and
+    # what it is worth. Hand-synced with game/src/brain_abi.h.
+    reach*: float32
+    ranged_reach*: float32
+    move_speed*: float32
+    threat*: float32
 
   BlViewSuggest* {.packed.} = object
     roam_goal_x*: float32
@@ -240,13 +256,13 @@ type
     arg*: int32                 # building kind for ENTER, etc.
 
 static: doAssert sizeof(BlViewSelf) == 88
-static: doAssert sizeof(BlThreat) == 16
-static: doAssert sizeof(BlViewSuggest) == 248
+static: doAssert sizeof(BlThreat) == 32
+static: doAssert sizeof(BlViewSuggest) == 376
 static: doAssert sizeof(BlViewFactors) == 88
 static: doAssert sizeof(BlViewChar) == 40
 static: doAssert sizeof(BlStatus) == 16
 static: doAssert sizeof(BlViewAttack) == 24
 static: doAssert sizeof(BlViewSkill) == 24
 static: doAssert sizeof(BlEvent) == 32
-static: doAssert sizeof(BlViewWire) == 1760
+static: doAssert sizeof(BlViewWire) == 1888
 static: doAssert sizeof(BlSuggestionWire) == 40

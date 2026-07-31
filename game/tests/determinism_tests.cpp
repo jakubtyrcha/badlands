@@ -325,6 +325,14 @@ TEST_CASE("a fight replays bit-identically from the log alone (no brain, no reso
     }
     REQUIRE(engaged);
     REQUIRE(attacked);
+    // Both fighters carry authored wind-ups (creature_catalog.cpp), so this
+    // fight necessarily contains committed strikes -- state that lives OUTSIDE
+    // the command log (StrikeInProgress is derived from a logged Attack plus
+    // the integer clock, exactly like projectile flight). Stated rather than
+    // left incidental: if commitment ever stopped being clock-derived, this is
+    // the test that would catch it, and it should be obvious why.
+    REQUIRE(MercenaryDesc(0.0f, 0.0f).attacks[0].wind_up_seconds > 0.0f);
+    REQUIRE(GoblinDesc(0.0f, 0.0f).attacks[0].wind_up_seconds > 0.0f);
     const std::vector<CharacterState> live_rows = characters_of(*live);
     bool damage_landed = false;
     for (const CharacterState& c : live_rows) {

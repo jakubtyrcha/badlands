@@ -21,6 +21,7 @@
 #include "progression.h"
 #include "skills.h"
 #include "status.h"
+#include "strike.h"  // advance_strikes, striking -- a committed attacker does not think
 #include "vision.h"
 
 #include "critter_brain.h"
@@ -322,6 +323,14 @@ void tick_world(BadlandsGame& g, float dt) {
             if (has_status(registry, e, StatusKind::Stunned)) {
                 continue;
             }
+            // Nor does a character committed to a swing (game/src/strike.h).
+            // The freeze IS the commitment: a brain that could re-decide
+            // mid-wind-up would get the positioning benefit of a slow weapon
+            // without its cost, and consulting it only to refuse every action
+            // it asked for would waste a wasm round-trip per tick besides.
+            if (striking(registry, e)) {
+                continue;
+            }
             auto& brain = registry.get<Brain>(e);
             if (g.wasm_brains && brain.kind == BrainKind::Town) {
                 // mock_think is never reached for this entity while a wasm
@@ -354,6 +363,14 @@ void tick_world(BadlandsGame& g, float dt) {
         // decisions and appends each to command_log (the trace).
         apply_commands(g);
     }
+
+    // Committed attacks (game/src/strike.h): land the wind-ups that elapsed,
+    // then release the recoveries that did. AFTER apply_commands, deliberately
+    // -- an attack authored with no wind-up and no recovery must still resolve
+    // inside the tick it was declared in, exactly as it did before commitment
+    // existed. BEFORE the movement pipeline below, so a striker that just
+    // became free walks this tick rather than next.
+    advance_strikes(g);
 
     // Rebuild the navmesh if a building was placed/destroyed this tick (bumps
     // placement.nav_epoch). Cheap no-op when unchanged; the whole path/cost layer
