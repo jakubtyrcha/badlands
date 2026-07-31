@@ -72,9 +72,11 @@ public:
     // selection; clears selection and refreshes line colors
     void deleteSelectedNode();
 
-    // modify tool — core owns all plane math
+    // modify tool — core owns all gizmo/plane math. beginDrag hit-tests the
+    // move-gizmo handles and returns whether a drag activated: off-handle
+    // clicks are inert by design (user ruling, move-gizmo spec).
     void setGizmoVisible(bool visible);
-    void beginDrag(float x, float y);
+    bool beginDrag(float x, float y);
     void updateDrag(float x, float y);
     void endDrag();
 

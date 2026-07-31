@@ -116,4 +116,24 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
     return best_plane ? best_plane->handle : GizmoHandle::None;
 }
 
+bool gizmo_handle_is_axis(GizmoHandle handle) {
+    return handle == GizmoHandle::AxisU || handle == GizmoHandle::AxisV || handle == GizmoHandle::AxisN;
+}
+
+simd_float3 gizmo_axis_dir(const GizmoFrame& frame, GizmoHandle handle) {
+    switch (handle) {
+        case GizmoHandle::AxisU: return frame.u;
+        case GizmoHandle::AxisV: return frame.v;
+        default:                 return frame.n;
+    }
+}
+
+simd_float3 gizmo_plane_normal(const GizmoFrame& frame, GizmoHandle handle) {
+    switch (handle) {
+        case GizmoHandle::PlaneUV: return frame.n;
+        case GizmoHandle::PlaneUN: return frame.v;
+        default:                   return frame.u;
+    }
+}
+
 } // namespace sq

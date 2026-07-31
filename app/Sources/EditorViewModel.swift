@@ -132,12 +132,14 @@ final class EditorViewModel {
             } else {
                 switch activeRadialTool {
                 case .move:
-                    editor.beginDrag(Float(p.x), Float(p.y))
+                    // Off-handle clicks are inert (core returns false): moving
+                    // happens only by grabbing a gizmo handle.
+                    isDragging = editor.beginDrag(Float(p.x), Float(p.y))
                 case .scale:
                     editor.beginScale()
                     scaleDragStartY = p.y
+                    isDragging = true
                 }
-                isDragging = true
             }
         case .camera:
             lastCameraDragPoint = p

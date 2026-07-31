@@ -56,4 +56,12 @@ std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_flo
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
                               float fov_y_radians, float viewport_h_pts);
 
+// Handle -> frame-vector mapping shared by the drag solver and rendering.
+// axis_dir: the pull direction of an axis handle. plane_normal: the drag
+// plane of a plane handle is spanned by its two basis vectors, so its normal
+// is the pair's THIRD basis vector. Both expect their own handle kind.
+bool gizmo_handle_is_axis(GizmoHandle handle);
+simd_float3 gizmo_axis_dir(const GizmoFrame& frame, GizmoHandle handle);
+simd_float3 gizmo_plane_normal(const GizmoFrame& frame, GizmoHandle handle);
+
 } // namespace sq

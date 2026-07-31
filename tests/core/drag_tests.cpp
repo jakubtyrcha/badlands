@@ -5,6 +5,10 @@
 
 #include <shapeshifter/ShapeshifterCore.h>
 
+#include "camera.h"
+#include "gizmo.h"
+#include "scene.h"
+
 using namespace sq;
 
 namespace {
@@ -21,6 +25,46 @@ void check_float3_approx(const simd_float3 actual, const simd_float3 expected) {
 
 simd_float3 to_simd(Vec3f v) { return simd_float3{v.x, v.y, v.z}; }
 
+// Editor::create()'s camera rebuilt from the same literals it documents, with
+// the aspect the 800x500 setViewportSize below produces — lets tests aim
+// clicks at world-space gizmo handle points via Camera::project.
+Camera editor_test_camera() {
+    Camera cam;
+    cam.eye = {4.0f, 3.0f, 6.0f};
+    cam.target = {0.0f, 0.5f, 0.0f};
+    cam.up = {0.0f, 1.0f, 0.0f};
+    cam.fov_y_radians = 1.0472f;
+    cam.aspect = 800.0f / 500.0f;
+    return cam;
+}
+
+// The gizmo frame the editor uses for a node, rebuilt from public state (the
+// snap fields of a snapped node come from the pick() that snapped it —
+// spawn's snap raycast and pick share the same code path).
+GizmoFrame frame_for(Editor* editor, int32_t node_id, bool snapped,
+                     simd_float3 snap_point = {}, simd_float3 snap_normal = {0.0f, 1.0f, 0.0f}) {
+    Node stub;
+    stub.position = to_simd(editor->nodePosition(node_id));
+    stub.snapped = snapped;
+    stub.snap_point = snap_point;
+    stub.snap_normal = snap_normal;
+    return gizmo_frame_for_node(stub, editor_test_camera());
+}
+
+// Projects a world point and returns its view coords, REQUIREing visibility.
+struct ClickPoint { float x, y; };
+ClickPoint click_at(simd_float3 world) {
+    const ViewPoint vp = editor_test_camera().project(world, 800.0f, 500.0f);
+    REQUIRE(vp.visible);
+    return ClickPoint{vp.x, vp.y};
+}
+
+void check_float3_close(const simd_float3 actual, const simd_float3 expected, const float tol) {
+    CHECK(std::fabs(actual.x - expected.x) < tol);
+    CHECK(std::fabs(actual.y - expected.y) < tol);
+    CHECK(std::fabs(actual.z - expected.z) < tol);
+}
+
 } // namespace
 
 // --- Editor: drag-move integration (public surface only) -------------------
@@ -32,8 +76,7 @@ simd_float3 to_simd(Vec3f v) { return simd_float3{v.x, v.y, v.z}; }
 // same two literals rather than hardcoded, so the test stays correct if the
 // camera setup ever changes.
 
-TEST_CASE("Editor: beginDrag/updateDrag/endDrag moves an unsnapped node "
-          "within the camera-orthogonal plane") {
+TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthogonal plane") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
@@ -43,21 +86,27 @@ TEST_CASE("Editor: beginDrag/updateDrag/endDrag moves an unsnapped node "
 
     // Empty scene: the center-ray raycast misses everything, so this spawn
     // lands unsnapped at eye + dir*kUnsnappedSpawnDistance (scene.h) — the
-    // drag plane for an unsnapped node is {node.position, -camera_forward}.
+    // gizmo frame for an unsnapped node is {node.position, -camera_forward}.
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
     REQUIRE(spawned.snapped == false);
 
+    const GizmoFrame f = frame_for(editor, spawned.node_id, false);
+    const float he = f.half_extent;
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
 
-    editor->beginDrag(400.0f, 250.0f);
-    editor->updateDrag(500.0f, 250.0f);
+    // Grab the u-v patch center, pull it 0.3he along u (in-plane).
+    const simd_float3 grab = f.origin + 0.45f * he * (f.u + f.v);
+    const ClickPoint p1 = click_at(grab);
+    const ClickPoint p2 = click_at(grab + 0.3f * he * f.u);
+    CHECK(editor->beginDrag(p1.x, p1.y));
+    editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
 
     const simd_float3 after = to_simd(editor->nodePosition(spawned.node_id));
     const simd_float3 delta = after - before;
 
-    CHECK(simd_length(delta) > 1e-4f); // the drag actually moved the node
+    check_float3_close(delta, 0.3f * he * f.u, 5e-3f);
     // Both the drag-start hit and every subsequent hit lie on the same
     // stored plane (normal == -camera_forward), so the delta between any two
     // of them is exactly in-plane, i.e. orthogonal to camera_forward.
@@ -69,37 +118,110 @@ TEST_CASE("Editor: beginDrag/updateDrag/endDrag moves an unsnapped node "
     }
 }
 
-TEST_CASE("Editor: beginDrag with no selection is a safe no-op") {
+TEST_CASE("Editor: AxisU drag constrains the move to the grabbed axis") {
+    Editor* editor = Editor::create();
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+    REQUIRE(spawned.snapped == false);
+
+    const GizmoFrame f = frame_for(editor, spawned.node_id, false);
+    const float he = f.half_extent;
+    const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
+
+    const ClickPoint p1 = click_at(f.origin + 0.8f * he * f.u);
+    const ClickPoint p2 = click_at(f.origin + 1.2f * he * f.u);
+    CHECK(editor->beginDrag(p1.x, p1.y));
+    editor->updateDrag(p2.x, p2.y);
+    editor->endDrag();
+
+    const simd_float3 delta = to_simd(editor->nodePosition(spawned.node_id)) - before;
+    check_float3_close(delta, 0.4f * he * f.u, 5e-3f);
+    CHECK(std::fabs(simd_dot(delta, f.v)) < 5e-3f);
+    CHECK(std::fabs(simd_dot(delta, f.n)) < 5e-3f);
+}
+
+TEST_CASE("Editor: beginDrag with no selection returns false and is a safe no-op") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
     editor->select(kInvalidNode); // fresh editor already has no selection; explicit for clarity
 
-    editor->beginDrag(400.0f, 250.0f);
+    CHECK_FALSE(editor->beginDrag(400.0f, 250.0f));
     editor->updateDrag(500.0f, 250.0f); // must not crash; nothing to move
     editor->endDrag();
 
     CHECK(editor->selectedNode() == kInvalidNode);
 }
 
-TEST_CASE("Editor: dragging a snapped node moves it without crashing") {
+TEST_CASE("Editor: off-handle click does not activate a drag") {
+    Editor* editor = Editor::create();
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+    REQUIRE(spawned.node_id != kInvalidNode);
+    const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
+
+    // Far corner: outside every handle (the gizmo spans ~±60pts around the
+    // viewport center at kGizmoScreenFraction = 0.12 of 500pts).
+    CHECK_FALSE(editor->beginDrag(60.0f, 60.0f));
+    editor->updateDrag(400.0f, 250.0f);
+    editor->endDrag();
+
+    check_float3_approx(to_simd(editor->nodePosition(spawned.node_id)), before);
+}
+
+TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; AxisN pull lifts "
+          "it off the surface and the frame follows") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
     const SpawnResult a = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(a.snapped == false);
-    // Second spawn at the same viewport point re-raycasts and hits cube A,
-    // so it snaps onto it (matches picking_tests.cpp's analogous case).
+    // The snap fields spawn will capture: pick() and spawn's snap raycast
+    // share the scene raycast, so picking the same view point first gives
+    // the snap_point/snap_normal of the spawn that follows.
+    const PickResult pr = editor->pick(400.0f, 250.0f);
+    REQUIRE(pr.node_id == a.node_id);
     const SpawnResult b = editor->spawn(Shape::Sphere, Op::Subtract, 400.0f, 250.0f);
     REQUIRE(b.snapped == true);
 
-    const simd_float3 before = to_simd(editor->nodePosition(b.node_id));
+    const GizmoFrame f = frame_for(editor, b.node_id, true, to_simd(pr.point), to_simd(pr.normal));
+    const float he = f.half_extent;
 
-    editor->beginDrag(400.0f, 250.0f);
-    editor->updateDrag(450.0f, 300.0f);
-    editor->endDrag();
+    SUBCASE("PlaneUV drag stays in the snap plane") {
+        const simd_float3 before = to_simd(editor->nodePosition(b.node_id));
+        const simd_float3 grab = f.origin + 0.45f * he * (f.u + f.v);
+        const ClickPoint p1 = click_at(grab);
+        const ClickPoint p2 = click_at(grab + 0.3f * he * f.v);
+        CHECK(editor->beginDrag(p1.x, p1.y));
+        editor->updateDrag(p2.x, p2.y);
+        editor->endDrag();
 
-    const simd_float3 after = to_simd(editor->nodePosition(b.node_id));
-    CHECK(simd_length(after - before) > 1e-4f);
+        const simd_float3 delta = to_simd(editor->nodePosition(b.node_id)) - before;
+        check_float3_close(delta, 0.3f * he * f.v, 5e-3f);
+        CHECK(std::fabs(simd_dot(delta, f.n)) < 5e-3f);
+    }
+
+    SUBCASE("AxisN pull moves along the surface normal; a second grab on the moved frame works") {
+        const simd_float3 before = to_simd(editor->nodePosition(b.node_id));
+        const ClickPoint p1 = click_at(f.origin + 0.8f * he * f.n);
+        const ClickPoint p2 = click_at(f.origin + 1.2f * he * f.n);
+        CHECK(editor->beginDrag(p1.x, p1.y));
+        editor->updateDrag(p2.x, p2.y);
+        editor->endDrag();
+
+        const simd_float3 delta = to_simd(editor->nodePosition(b.node_id)) - before;
+        check_float3_close(delta, 0.4f * he * f.n, 5e-3f);
+
+        // The frame rides rigidly with the node (snap_point += delta), so the
+        // same handle-relative grab on the NEW frame must activate again —
+        // this is the observable proof snap_point tracked the move.
+        const GizmoFrame f2 = frame_for(editor, b.node_id, true,
+                                        to_simd(pr.point) + delta, to_simd(pr.normal));
+        const ClickPoint p3 = click_at(f2.origin + 0.8f * f2.half_extent * f2.n);
+        CHECK(editor->beginDrag(p3.x, p3.y));
+        editor->endDrag();
+    }
 }
 
 // --- Regression: stale drag state must not leak across a selection change --
@@ -119,11 +241,13 @@ TEST_CASE("Editor: updateDrag ignores a stale drag left active across a selectio
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
-    // A: unsnapped cube at the center ray; beginDrag captures A's plane and
-    // start state while A is selected.
+    // A: unsnapped cube at the center ray; beginDrag on A's u-v patch
+    // captures A's frame and start state while A is selected.
     const SpawnResult a = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(a.snapped == false);
-    editor->beginDrag(400.0f, 250.0f);
+    const GizmoFrame fa = frame_for(editor, a.node_id, false);
+    const ClickPoint pa = click_at(fa.origin + 0.45f * fa.half_extent * (fa.u + fa.v));
+    REQUIRE(editor->beginDrag(pa.x, pa.y));
 
     // Selection moves to a second, unrelated node B with no endDrag() in
     // between — spawning always selects the new node (Editor::spawn), same
@@ -182,13 +306,18 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.snapped == false);
 
-    editor->beginDrag(400.0f, 250.0f);
-    editor->updateDrag(460.0f, 250.0f); // drag right in view space
+    // Pull along +u, which projects screen-LEFT for this camera (u == -camera
+    // right for an unsnapped frame): the anchor must follow below x=400.
+    const GizmoFrame f = frame_for(editor, spawned.node_id, false);
+    const ClickPoint p1 = click_at(f.origin + 0.8f * f.half_extent * f.u);
+    const ClickPoint p2 = click_at(f.origin + 1.2f * f.half_extent * f.u);
+    REQUIRE(editor->beginDrag(p1.x, p1.y));
+    editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
 
     const ScreenPoint anchor = editor->projectSelectedAnchor();
     CHECK(anchor.visible);
-    CHECK(anchor.x > 400.0f); // anchor moved the same direction as the drag
+    CHECK(anchor.x < 400.0f); // anchor moved the same direction as the drag
 }
 
 // --- Editor: scale tool ------------------------------------------------------

@@ -24,8 +24,11 @@ struct Editor::Impl {
     bool gizmo_visible = false;
     struct {
         bool active = false;
-        int32_t node_id = kInvalidNode; // the node the captured plane/start_* belong to
-        simd_float3 plane_point, plane_normal, start_pos, start_hit, start_snap_point;
+        int32_t node_id = kInvalidNode; // the node the captured frame/start_* belong to
+        GizmoHandle handle = GizmoHandle::None;
+        GizmoFrame frame;               // frozen at beginDrag for the whole gesture
+        float start_axis_s = 0.0f;      // axis handles: ray_axis_param at mouse-down
+        simd_float3 start_pos, start_hit, start_snap_point;
     } drag;
 
     // Mirrors drag's shape, including the node_id mid-gesture guard: without
@@ -201,35 +204,48 @@ void Editor::setGizmoVisible(bool visible) {
     impl_->gizmo_visible = visible;
 }
 
-void Editor::beginDrag(float x, float y) {
+bool Editor::beginDrag(float x, float y) {
     if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
-        return;
+        return false;
     }
     Node* node = impl_->scene.find(impl_->selected);
     if (node == nullptr) {
-        return; // no valid selection: drag does not activate
+        return false; // no valid selection: drag does not activate
     }
 
     const Camera camera = impl_->controller.to_camera();
-    const simd_float3 camera_forward = simd_normalize(camera.target - camera.eye);
-    // Captured NOW: the plane is fixed for the whole drag, even though the
-    // node (and, for a snapped node, its snap fields) moves as the drag
-    // proceeds.
-    const DragPlane dp = drag_plane_for_node(*node, camera_forward);
+    // Captured NOW: the frame (basis AND half_extent) is fixed for the whole
+    // drag, even though the node (and, for a snapped node, its snap fields)
+    // moves as the drag proceeds.
+    const GizmoFrame frame = gizmo_frame_for_node(*node, camera);
 
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    const std::optional<simd_float3> hit = ray_plane(ray, dp.point, dp.normal);
-    if (!hit) {
-        return; // ray parallel to / behind the plane: drag does not activate
+    const GizmoHandle handle = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts);
+    if (handle == GizmoHandle::None) {
+        return false; // off-handle: moving is deliberate, via handles only (user ruling)
     }
 
-    impl_->drag.plane_point = dp.point;
-    impl_->drag.plane_normal = dp.normal;
+    if (gizmo_handle_is_axis(handle)) {
+        const std::optional<float> s = ray_axis_param(ray, frame.origin, gizmo_axis_dir(frame, handle));
+        if (!s) {
+            return false; // grabbed a handle the solver can't parameterize: don't activate
+        }
+        impl_->drag.start_axis_s = *s;
+    } else {
+        const std::optional<simd_float3> hit = ray_plane(ray, frame.origin, gizmo_plane_normal(frame, handle));
+        if (!hit) {
+            return false; // ray parallel to / behind the plane: drag does not activate
+        }
+        impl_->drag.start_hit = *hit;
+    }
+
+    impl_->drag.frame = frame;
+    impl_->drag.handle = handle;
     impl_->drag.start_pos = node->position;
-    impl_->drag.start_hit = *hit;
     impl_->drag.start_snap_point = node->snap_point;
     impl_->drag.node_id = node->id;
     impl_->drag.active = true;
+    return true;
 }
 
 void Editor::updateDrag(float x, float y) {
@@ -254,16 +270,29 @@ void Editor::updateDrag(float x, float y) {
 
     const Camera camera = impl_->controller.to_camera();
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    const std::optional<simd_float3> hit = ray_plane(ray, impl_->drag.plane_point, impl_->drag.plane_normal);
-    if (!hit) {
-        return; // keep last position
+
+    simd_float3 delta;
+    if (gizmo_handle_is_axis(impl_->drag.handle)) {
+        const simd_float3 axis = gizmo_axis_dir(impl_->drag.frame, impl_->drag.handle);
+        const std::optional<float> s = ray_axis_param(ray, impl_->drag.frame.origin, axis);
+        if (!s) {
+            return; // near-parallel: keep last position (mirrors ray_plane's guard)
+        }
+        delta = (*s - impl_->drag.start_axis_s) * axis;
+    } else {
+        const std::optional<simd_float3> hit =
+            ray_plane(ray, impl_->drag.frame.origin, gizmo_plane_normal(impl_->drag.frame, impl_->drag.handle));
+        if (!hit) {
+            return; // keep last position
+        }
+        delta = *hit - impl_->drag.start_hit;
     }
 
-    const simd_float3 delta = *hit - impl_->drag.start_hit;
     node->position = impl_->drag.start_pos + delta;
     if (node->snapped) {
-        // delta is in-plane (both hits lie on the same stored plane), so the
-        // plane itself is unchanged by this update.
+        // Full delta, not just the in-plane part: the remembered snap frame
+        // rides rigidly with the node, so an axis-n pull lifts it off its
+        // surface without re-basing the frame mid-gesture (move-gizmo spec).
         node->snap_point = impl_->drag.start_snap_point + delta;
     }
     impl_->renderer.set_scene_lines_dirty();
