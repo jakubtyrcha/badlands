@@ -844,3 +844,457 @@ TEST_CASE("assign_samples: ring search finds a hit when the sample's own cell ha
         }
     }
 }
+
+// =============================================================================
+// D4: per-cell local optimization (inner loop). All pinned literals below
+// regenerated independently against the D4 brief's algorithm description
+// (never by running this codebase's C++) via a from-scratch numpy reference
+// (dcsdd_ref.py in the session scratchpad) extending the D2/D3 reference
+// above with closest_point_on_triangle_bary / build_sample_row /
+// build_hermite_row / solve_weighted_normal_equations /
+// optimize_cell_vertex_ref. Per-case invocations are given in comments below.
+
+// --- D4 item 2: barycentric extraction --------------------------------------
+
+TEST_CASE("closest_point_on_triangle_barycentric: pinned interior/edge/vertex cases -- "
+          "barycentric weights (u,v,w) of (a,b,c) match numpy, and always sum to 1") {
+    // Same fixed triangle as the D3 closest_point_on_triangle test:
+    // a=(0,0,0), b=(2,0,0), c=(0,2,0).
+    const simd_float3 a = {0.0f, 0.0f, 0.0f};
+    const simd_float3 b = {2.0f, 0.0f, 0.0f};
+    const simd_float3 c = {0.0f, 2.0f, 0.0f};
+
+    SUBCASE("face interior") {
+        // python3: closest_point_on_triangle_bary((0.5,0.5,1.0), a,b,c)
+        //   -> point=(0.5,0.5,0.0), (u,v,w)=(0.5,0.25,0.25)
+        const TriangleBarycentric r =
+            closest_point_on_triangle_barycentric(simd_float3{0.5f, 0.5f, 1.0f}, a, b, c);
+        check_float3_approx(r.point, simd_float3{0.5f, 0.5f, 0.0f});
+        CHECK(r.u == doctest::Approx(0.5f));
+        CHECK(r.v == doctest::Approx(0.25f));
+        CHECK(r.w == doctest::Approx(0.25f));
+    }
+    SUBCASE("edge_ab region") {
+        // python3: closest_point_on_triangle_bary((1,-1,0.5), a,b,c)
+        //   -> point=(1,0,0), (u,v,w)=(0.5,0.5,0.0)
+        const TriangleBarycentric r =
+            closest_point_on_triangle_barycentric(simd_float3{1.0f, -1.0f, 0.5f}, a, b, c);
+        check_float3_approx(r.point, simd_float3{1.0f, 0.0f, 0.0f});
+        CHECK(r.u == doctest::Approx(0.5f));
+        CHECK(r.v == doctest::Approx(0.5f));
+        CHECK(r.w == doctest::Approx(0.0f));
+    }
+    SUBCASE("edge_bc region") {
+        // python3: closest_point_on_triangle_bary((1.5,1.5,0.5), a,b,c)
+        //   -> point=(1,1,0), (u,v,w)=(0.0,0.5,0.5)
+        const TriangleBarycentric r =
+            closest_point_on_triangle_barycentric(simd_float3{1.5f, 1.5f, 0.5f}, a, b, c);
+        check_float3_approx(r.point, simd_float3{1.0f, 1.0f, 0.0f});
+        CHECK(r.u == doctest::Approx(0.0f));
+        CHECK(r.v == doctest::Approx(0.5f));
+        CHECK(r.w == doctest::Approx(0.5f));
+    }
+    SUBCASE("vertex_a region") {
+        // python3: closest_point_on_triangle_bary((-1,-1,-1), a,b,c)
+        //   -> point=a=(0,0,0), (u,v,w)=(1,0,0)
+        const TriangleBarycentric r =
+            closest_point_on_triangle_barycentric(simd_float3{-1.0f, -1.0f, -1.0f}, a, b, c);
+        check_float3_approx(r.point, a);
+        CHECK(r.u == doctest::Approx(1.0f));
+        CHECK(r.v == doctest::Approx(0.0f));
+        CHECK(r.w == doctest::Approx(0.0f));
+    }
+
+    SUBCASE("weights always sum to 1, across all four cases above") {
+        const simd_float3 pts[] = {{0.5f, 0.5f, 1.0f}, {1.0f, -1.0f, 0.5f}, {1.5f, 1.5f, 0.5f}, {-1.0f, -1.0f, -1.0f}};
+        for (const simd_float3& p : pts) {
+            const TriangleBarycentric r = closest_point_on_triangle_barycentric(p, a, b, c);
+            CHECK((r.u + r.v + r.w) == doctest::Approx(1.0f));
+        }
+    }
+}
+
+// --- D4 item 1: pinned quadratic solve vs numpy lstsq ------------------------
+
+TEST_CASE("solve_weighted_normal_equations: hand-constructed row set (2 Hermite + 3 "
+          "sample rows + mu regularizer) matches an independent numpy lstsq-of-stacked-"
+          "rows solve") {
+    // python3 (dcsdd_ref.py):
+    //   w_h=0.5, n1=(1,0,0), h1=(2,5,-1) -> build_hermite_row -> coeff=(0.5,0,0), rhs=1.0
+    //   n2=(0,1,0), h2=(-3,1.5,4)         -> coeff=(0,0.5,0), rhs=0.75
+    //   sample1: alpha=0.6,beta=0.25,gamma=0.15,d=(0,0,1),q=(1,2,3),h=(0.5,0.5,0.5),p=(-1,0,2)
+    //     -> build_sample_row -> coeff=(0,0,0.6), rhs=2.575
+    //   sample2: alpha=0.4,beta=0.4,gamma=0.2,d=(1,0,0),q=(4,-1,0),h=(2,2,2),p=(0,1,-1)
+    //     -> coeff=(0.4,0,0), rhs=3.2
+    //   sample3: alpha=0.3,beta=0.3,gamma=0.4,d=(0,1,0),q=(-2,3,1),h=(1,-1,1),p=(3,0,0)
+    //     -> coeff=(0,0.3,0), rhs=3.3
+    //   mu=0.05, x_prev=(0.1,-0.2,0.3)
+    //   solve_weighted_normal_equations(rows, mu, x_prev)
+    //     -> array([3.88043478, 3.47435897, 3.80487805])
+    //   Independent cross-check: stack all 5 rows + 3 explicit sqrt(mu)*e_i
+    //   regularizer rows (a genuinely different code path -- no QtQ/Qtc
+    //   accumulation at all) and np.linalg.lstsq -> identical to 2.22e-15.
+    const float w_h = 0.5f;
+    const SolveRow hrow1 = build_hermite_row(simd_float3{1.0f, 0.0f, 0.0f}, simd_float3{2.0f, 5.0f, -1.0f}, w_h);
+    const SolveRow hrow2 = build_hermite_row(simd_float3{0.0f, 1.0f, 0.0f}, simd_float3{-3.0f, 1.5f, 4.0f}, w_h);
+    check_float3_approx(hrow1.coeff, simd_float3{0.5f, 0.0f, 0.0f});
+    CHECK(hrow1.rhs == doctest::Approx(1.0f));
+    check_float3_approx(hrow2.coeff, simd_float3{0.0f, 0.5f, 0.0f});
+    CHECK(hrow2.rhs == doctest::Approx(0.75f));
+
+    const SolveRow srow1 = build_sample_row(0.6f, 0.25f, 0.15f, simd_float3{0.0f, 0.0f, 1.0f},
+                                             simd_float3{1.0f, 2.0f, 3.0f}, simd_float3{0.5f, 0.5f, 0.5f},
+                                             simd_float3{-1.0f, 0.0f, 2.0f});
+    const SolveRow srow2 = build_sample_row(0.4f, 0.4f, 0.2f, simd_float3{1.0f, 0.0f, 0.0f},
+                                             simd_float3{4.0f, -1.0f, 0.0f}, simd_float3{2.0f, 2.0f, 2.0f},
+                                             simd_float3{0.0f, 1.0f, -1.0f});
+    const SolveRow srow3 = build_sample_row(0.3f, 0.3f, 0.4f, simd_float3{0.0f, 1.0f, 0.0f},
+                                             simd_float3{-2.0f, 3.0f, 1.0f}, simd_float3{1.0f, -1.0f, 1.0f},
+                                             simd_float3{3.0f, 0.0f, 0.0f});
+    check_float3_approx(srow1.coeff, simd_float3{0.0f, 0.0f, 0.6f});
+    CHECK(srow1.rhs == doctest::Approx(2.575f));
+    check_float3_approx(srow2.coeff, simd_float3{0.4f, 0.0f, 0.0f});
+    CHECK(srow2.rhs == doctest::Approx(3.2f));
+    check_float3_approx(srow3.coeff, simd_float3{0.0f, 0.3f, 0.0f});
+    CHECK(srow3.rhs == doctest::Approx(3.3f));
+
+    const float mu = 0.05f;
+    const simd_float3 x_prev = {0.1f, -0.2f, 0.3f};
+    const std::vector<SolveRow> rows = {hrow1, hrow2, srow1, srow2, srow3};
+    const simd_float3 x = solve_weighted_normal_equations(rows, mu, x_prev);
+    check_float3_approx(x, simd_float3{3.88043478f, 3.47435897f, 3.80487805f});
+}
+
+// --- D4 §2: build_cell_fans CSR (not in the brief's 6-item inventory, but a
+// direct piece of the deliverable -- light hand-derivation, no python needed
+// (pure index arithmetic, checked by hand against the brief's rule)) --------
+
+TEST_CASE("build_cell_fans: CSR entries follow the brief's (cell, fp, edge) derivation "
+          "over 2 hand-crafted quads sharing 2 cells") {
+    // GlobalMesh with 2 quads (never derived from a real grid -- pure index
+    // fixture): quad 0 (edge 100, cells [0,1,2,3]) and quad 1 (edge 200,
+    // cells [1,4,5,2]), sharing cells 1 and 2. face_points aren't touched by
+    // build_cell_fans (only quad_edge/quad_cells), so left empty.
+    //
+    // Brief §2: cell at cycle position i is flanked by face points 4q+i
+    // (edge c_i->c_{i+1}) and 4q+(i+3)%4 (edge c_{i-1}->c_i), both paired
+    // with the quad's edge. By hand:
+    //   quad 0 (fp base 0): cell0:(fp0,fp3) cell1:(fp1,fp0) cell2:(fp2,fp1) cell3:(fp3,fp2), all edge 100
+    //   quad 1 (fp base 4): cell1:(fp4,fp7) cell4:(fp5,fp4) cell5:(fp6,fp5) cell2:(fp7,fp6), all edge 200
+    // Bucketed by cell (quad 0 entries visited before quad 1's):
+    //   cell0: (0,100)(3,100)                       [2]
+    //   cell1: (1,100)(0,100)(4,200)(7,200)          [4]
+    //   cell2: (2,100)(1,100)(7,200)(6,200)          [4]
+    //   cell3: (3,100)(2,100)                        [2]
+    //   cell4: (5,200)(4,200)                        [2]
+    //   cell5: (6,200)(5,200)                        [2]
+    DcsddInit init;
+    init.cell_id = {0, 1, 2, 3, 4, 5}; // only .size() matters to build_cell_fans
+
+    GlobalMesh mesh;
+    mesh.quad_edge = {100, 200};
+    mesh.quad_cells = {0, 1, 2, 3, 1, 4, 5, 2};
+    mesh.face_points.resize(8); // unused by build_cell_fans; sized to match quad count
+
+    const CellFans fans = build_cell_fans(init, mesh);
+
+    REQUIRE(fans.cell_fan_offsets.size() == 7u);
+    CHECK(fans.cell_fan_offsets.front() == 0);
+    CHECK(fans.cell_fan_offsets.back() == static_cast<int32_t>(fans.fan_face_point.size()));
+    REQUIRE(fans.fan_face_point.size() == 16u);
+    REQUIRE(fans.fan_edge.size() == 16u);
+
+    struct Expected {
+        int32_t cell;
+        std::vector<std::pair<int32_t, int32_t>> entries; // (face_point, edge)
+    };
+    const std::vector<Expected> expected = {
+        {0, {{0, 100}, {3, 100}}},
+        {1, {{1, 100}, {0, 100}, {4, 200}, {7, 200}}},
+        {2, {{2, 100}, {1, 100}, {7, 200}, {6, 200}}},
+        {3, {{3, 100}, {2, 100}}},
+        {4, {{5, 200}, {4, 200}}},
+        {5, {{6, 200}, {5, 200}}},
+    };
+    for (const Expected& e : expected) {
+        CAPTURE(e.cell);
+        const int32_t begin = fans.cell_fan_offsets[static_cast<size_t>(e.cell)];
+        const int32_t end = fans.cell_fan_offsets[static_cast<size_t>(e.cell) + 1];
+        REQUIRE(static_cast<size_t>(end - begin) == e.entries.size());
+        for (size_t k = 0; k < e.entries.size(); ++k) {
+            CAPTURE(k);
+            CHECK(fans.fan_face_point[static_cast<size_t>(begin) + k] == e.entries[k].first);
+            CHECK(fans.fan_edge[static_cast<size_t>(begin) + k] == e.entries[k].second);
+        }
+    }
+}
+
+// --- D4 item 3: no-samples cell (closed-form + immediate convergence) --------
+
+TEST_CASE("optimize_cell_vertex: a cell with no assigned samples still optimizes "
+          "(Hermite + regularizer rows only) -- matches the closed-form pinned solve, "
+          "and converges immediately (iteration 2 changes nothing)") {
+    // Crafted single-cell fixture (dense_cell 0), 3 mutually orthonormal
+    // Hermite edges (axis-aligned normals -> w_H^2*sum(n n^T) == w_H^2 * I),
+    // no assigned samples. x_start is deliberately chosen AS the closed-form
+    // Hermite-only solution x* = (h1.x, h2.y, h3.z) = (2,-3,4.5) (since
+    // n_i . h_i extracts exactly that one component when n_i is the i-th
+    // basis vector) -- so it is already the regularized system's fixed
+    // point (regularizer pulls toward x_prev==x_start every iteration, and
+    // at x*, that pull is self-consistent -- see task-D4-report.md for the
+    // algebra). python3 (dcsdd_ref.py), independent closed-form cross-check
+    // (matrix built directly, NOT via solve_weighted_normal_equations):
+    //   B = w_h**2 * (outer(n1,n1)+outer(n2,n2)+outer(n3,n3))  # == w_h^2 * I
+    //   c = w_h**2 * (dot(n1,h1)*n1 + dot(n2,h2)*n2 + dot(n3,h3)*n3)
+    //   solve(B + mu*I, c + mu*x_prev) -> array([ 2. , -3. ,  4.5])  (exact)
+    //   optimize_cell_vertex_ref(x_prev, [hermite edges], [], [], w_h, mu, 1, 0.0)
+    //     -> array([ 2. , -3. ,  4.5]) (iteration 1 already the fixed point)
+    //   ..., 2, 0.0) -> array([ 2. , -3. ,  4.5]) (iteration 2 changes nothing)
+    DcsddInit init;
+    init.cell_id = {0};
+    init.hermite_n = {
+        simd_float3{1.0f, 0.0f, 0.0f},
+        simd_float3{0.0f, 1.0f, 0.0f},
+        simd_float3{0.0f, 0.0f, 1.0f},
+    };
+    init.hermite_p = {
+        simd_float3{2.0f, 0.0f, 0.0f},
+        simd_float3{0.0f, -3.0f, 0.0f},
+        simd_float3{0.0f, 0.0f, 4.5f},
+    };
+    init.cell_edge_offsets = {0, 3};
+    init.cell_edge_indices = {0, 1, 2};
+
+    GlobalMesh mesh; // empty: no quads/face points needed (no samples)
+    CellFans fans;
+    fans.cell_fan_offsets = {0, 0}; // no fan entries
+
+    SampleAssignment assignment;
+    assignment.cell_sample_offsets = {0, 0}; // no samples assigned to cell 0
+
+    SampleGrid grid; // unused (no samples), but must be a valid (if trivial) grid
+    grid.n = 2;
+    grid.spacing = 1.0f;
+    grid.origin = simd_float3{0.0f, 0.0f, 0.0f};
+    grid.values.assign(8, 0.0f);
+
+    const simd_float3 x_start = {2.0f, -3.0f, 4.5f};
+
+    DcsddConfig config1; // defaults (w_hermite=0.02, mu=0.05); force exactly 1 iteration
+    config1.inner_iters = 1;
+    config1.inner_tol = 0.0f;
+    const simd_float3 x1 = optimize_cell_vertex(0, x_start, init, mesh, fans, assignment, grid, config1);
+    check_float3_approx(x1, x_start); // matches the pinned closed-form solve exactly
+
+    DcsddConfig config2 = config1;
+    config2.inner_iters = 2; // "iteration 2 changes nothing"
+    const simd_float3 x2 = optimize_cell_vertex(0, x_start, init, mesh, fans, assignment, grid, config2);
+    check_float3_approx(x2, x_start);
+}
+
+// --- D4 item 4 (+ item 6, tol/convergence, sharing this fixture) -------------
+
+namespace {
+
+// Shared single-cell fixture for items 4/6: one Hermite edge + one fan
+// triangle (p, h, x), all describing the plane z = z0 = 4 (p and h lie on
+// the plane, n = +z); 3 samples off the plane by various offsets, s = signed
+// distance to the plane. python3 (dcsdd_ref.py) confirms this is a
+// translated (+3,+3,+3) copy of an independently-derived (0,0,1)-plane
+// fixture -- translation invariance of the whole algorithm (Hermite rows,
+// sample rows, and the regularizer are all affine-consistent under a common
+// shift of every point, including x -- verified symbolically and numerically
+// against the untranslated version, bit-identical after shifting) -- kept
+// only to explain where the numbers come from; the fixture below is
+// evaluated directly, not via the shift.
+struct PlaneFixture {
+    DcsddInit init;
+    GlobalMesh mesh;
+    CellFans fans;
+    SampleAssignment assignment;
+    SampleGrid grid;
+    simd_float3 x_start;
+};
+
+PlaneFixture make_plane_fixture() {
+    PlaneFixture f;
+    f.init.cell_id = {0};
+    f.init.hermite_n = {simd_float3{0.0f, 0.0f, 1.0f}};
+    f.init.hermite_p = {simd_float3{3.0f, 5.0f, 4.0f}}; // h, on the plane z=4
+    f.init.cell_edge_offsets = {0, 1};
+    f.init.cell_edge_indices = {0};
+
+    f.mesh.face_points = {simd_float3{5.0f, 3.0f, 4.0f}}; // p, on the plane z=4
+    f.fans.cell_fan_offsets = {0, 1};
+    f.fans.fan_face_point = {0};
+    f.fans.fan_edge = {0}; // triangle (p, h, x) == (face_points[0], hermite_p[0], x)
+
+    // 3 samples at various offsets from the plane, spacing=0.1 so their
+    // (fractional) world positions are exactly grid-representable.
+    // python3: sample positions (3.5,3.5,4.3)/(3.7,2.7,3.6)/(2.8,3.8,4.1),
+    // s = 0.3 / -0.4 / 0.1 (signed offset from z0=4; sign is irrelevant to
+    // the algorithm -- only |s| is used, as the sphere radius).
+    f.grid.n = 44;
+    f.grid.spacing = 0.1f;
+    f.grid.origin = simd_float3{0.0f, 0.0f, 0.0f};
+    f.grid.values.assign(static_cast<size_t>(44 * 44 * 44), 0.0f);
+    const int32_t coordA[3] = {35, 35, 43};
+    const int32_t coordB[3] = {37, 27, 36};
+    const int32_t coordC[3] = {28, 38, 41};
+    const int32_t flatA = static_cast<int32_t>(flat_index(coordA[0], coordA[1], coordA[2], f.grid.n));
+    const int32_t flatB = static_cast<int32_t>(flat_index(coordB[0], coordB[1], coordB[2], f.grid.n));
+    const int32_t flatC = static_cast<int32_t>(flat_index(coordC[0], coordC[1], coordC[2], f.grid.n));
+    f.grid.values[static_cast<size_t>(flatA)] = 0.3f;
+    f.grid.values[static_cast<size_t>(flatB)] = -0.4f;
+    f.grid.values[static_cast<size_t>(flatC)] = 0.1f;
+
+    f.assignment.cell_sample_offsets = {0, 3};
+    f.assignment.cell_sample_indices = {flatA, flatB, flatC};
+
+    f.x_start = simd_float3{3.3f, 3.3f, 6.0f}; // off-plane
+    return f;
+}
+
+} // namespace
+
+TEST_CASE("optimize_cell_vertex: plane convergence -- from an off-plane x_start, the "
+          "loop drives x to the Hermite/sample-described plane z=4") {
+    const PlaneFixture f = make_plane_fixture();
+    DcsddConfig config; // defaults: w_hermite=0.02, mu=0.05, inner_iters=30, inner_tol=1e-5
+
+    const simd_float3 x = optimize_cell_vertex(0, f.x_start, f.init, f.mesh, f.fans, f.assignment, f.grid, config);
+
+    CHECK(std::isfinite(x.x));
+    CHECK(std::isfinite(x.y));
+    CHECK(std::isfinite(x.z));
+    CHECK(std::fabs(x.z - 4.0f) < 1e-3f);
+
+    // python3: optimize_cell_vertex_ref(x_start, [hermite], [3 samples],
+    // [fan tri], 0.02, 0.05, 30, 1e-5) converges (delta < tol) at iteration
+    // 10 -> array([1.99833988, 1.99833988, 4.00000089]) (float64). Per the
+    // brief, only z is pinned here: x/y sit in a direction this
+    // single-triangle/single-Hermite-edge fixture constrains only weakly
+    // (the plane's own in-plane position is barely determined), so float32
+    // vs. the numpy float64 reference diverge by ~2e-4 there after 10
+    // iterations (confirmed not a correctness bug: z, the quantity the
+    // fixture actually pins down hard, matches to ~5e-7) -- expected
+    // numerical behavior for a weakly-constrained direction, not asserted.
+    CHECK(x.z == doctest::Approx(4.00000089f));
+}
+
+TEST_CASE("optimize_cell_vertex: convergence/tol -- with inner_tol huge, exactly one "
+          "iteration runs (matches the pinned one-iteration numpy result of the plane "
+          "fixture)") {
+    const PlaneFixture f = make_plane_fixture();
+    DcsddConfig config;
+    config.inner_iters = 30;  // would run many iterations if not cut short by tol
+    config.inner_tol = 1e9f;  // any delta satisfies this -> stop after iteration 1
+
+    const simd_float3 x = optimize_cell_vertex(0, f.x_start, f.init, f.mesh, f.fans, f.assignment, f.grid, config);
+
+    // python3: same call with inner_tol=1e9 -> 1 iteration run, result
+    // array([2.31023557, 2.31023557, 5.29679057]) -- matches iterates[1] of
+    // the item-4 test above (NOT the converged value), confirming exactly
+    // one iteration ran.
+    check_float3_approx(x, simd_float3{2.31023557f, 2.31023557f, 5.29679057f});
+}
+
+// --- D4 item 5: alpha=0 rule --------------------------------------------------
+
+TEST_CASE("build_sample_row / optimize_cell_vertex: alpha=0 rule -- a sample whose "
+          "closest point lands exactly on a fan triangle's p-h edge would otherwise "
+          "lock x in place along d; the rule instead pulls x towards the sphere") {
+    // Triangle (p=(0,0,0), h=(2,0,0), x=(1,2,0)): p-h is the x-axis segment,
+    // x is the apex at y=2. Sample u=(1,-1,0) sits symmetrically below the
+    // p-h edge's midpoint -- its closest point on the triangle is exactly
+    // the midpoint (1,0,0), which lies on the p-h edge (alpha, the weight of
+    // x, is exactly 0 by the segment's left-right symmetry about x=1).
+    // python3 (dcsdd_ref.py):
+    //   closest_point_on_triangle_bary((1,-1,0), p, h, x)
+    //     -> point=(1,0,0), (gamma,beta,alpha)=(0.5,0.5,0.0)
+    //   d = normalize(point-u) = (0,1,0); q = u + |s|*d, s=0.5 -> q=(1,-0.5,0)
+    const simd_float3 p = {0.0f, 0.0f, 0.0f};
+    const simd_float3 h = {2.0f, 0.0f, 0.0f};
+    const simd_float3 x = {1.0f, 2.0f, 0.0f};
+    const simd_float3 u = {1.0f, -1.0f, 0.0f};
+
+    const TriangleBarycentric bary = closest_point_on_triangle_barycentric(u, p, h, x);
+    check_float3_approx(bary.point, simd_float3{1.0f, 0.0f, 0.0f});
+    CHECK(bary.u == doctest::Approx(0.5f));  // gamma (weight of p)
+    CHECK(bary.v == doctest::Approx(0.5f));  // beta (weight of h)
+    CHECK(bary.w == doctest::Approx(0.0f));  // alpha (weight of x) -- the locking case
+
+    const simd_float3 d = simd_normalize(bary.point - u);
+    const float s = 0.5f;
+    const simd_float3 q = u + std::fabs(s) * d;
+    check_float3_approx(d, simd_float3{0.0f, 1.0f, 0.0f});
+    check_float3_approx(q, simd_float3{1.0f, -0.5f, 0.0f});
+
+    const float mu = 0.05f;
+    const simd_float3 x_prev = x;
+
+    SUBCASE("(a) without the rule (eps=0 disables it): the row is vacuous (zero coeff), "
+            "so the solve leaves x unmoved along d -- numerically locked in place") {
+        // python3: build_sample_row(alpha=0, beta=0.5, gamma=0.5, d, q, h, p,
+        // eps=0.0) -> coeff=(0,0,0), rhs=-0.5 (contributes nothing to
+        // QtQ/Qtc: outer((0,0,0),(0,0,0))==0, (0,0,0)*rhs==(0,0,0)).
+        // solve_weighted_normal_equations([row], mu, x_prev) -> x_prev
+        // unchanged: array([1., 2., 0.]).
+        const SolveRow row = build_sample_row(bary.w, bary.v, bary.u, d, q, h, p, /*eps=*/0.0f);
+        check_float3_approx(row.coeff, simd_float3{0.0f, 0.0f, 0.0f});
+        CHECK(row.rhs == doctest::Approx(-0.5f));
+
+        const simd_float3 x_new = solve_weighted_normal_equations({row}, mu, x_prev);
+        check_float3_approx(x_new, x_prev); // locked: unmoved
+    }
+
+    SUBCASE("(b) with the rule (default eps): x moves toward the sphere along d; pinned "
+            "against numpy, and reproduced through the full one-iteration "
+            "optimize_cell_vertex pipeline") {
+        // python3: build_sample_row(0, 0.5, 0.5, d, q, h, p, eps=1e-6)
+        // (alpha<eps -> alpha=1,beta=0,gamma=0) -> coeff=(0,1,0), rhs=-0.5.
+        // solve_weighted_normal_equations([row], mu, x_prev)
+        //   -> array([ 1., -0.38095238,  0.])  (x, z unchanged: only the
+        //   regularizer constrains them; y pulled from 2 towards the sphere)
+        const SolveRow row = build_sample_row(bary.w, bary.v, bary.u, d, q, h, p); // default eps=1e-6
+        check_float3_approx(row.coeff, simd_float3{0.0f, 1.0f, 0.0f});
+        CHECK(row.rhs == doctest::Approx(-0.5f));
+
+        const simd_float3 x_new = solve_weighted_normal_equations({row}, mu, x_prev);
+        check_float3_approx(x_new, simd_float3{1.0f, -0.38095238f, 0.0f});
+
+        // Full pipeline cross-check: a single-cell fixture with 0 Hermite
+        // rows for the cell (isolating the sample row's effect) but whose
+        // fan still references this (p,h) pair, one assigned sample at u,
+        // one forced iteration.
+        DcsddInit init;
+        init.cell_id = {0};
+        init.hermite_n = {simd_float3{0.0f, 0.0f, 1.0f}}; // unused (not a Hermite row for cell 0)
+        init.hermite_p = {h};                              // fan's h
+        init.cell_edge_offsets = {0, 0};                    // no Hermite rows for cell 0
+
+        GlobalMesh mesh;
+        mesh.face_points = {p};
+        CellFans fans;
+        fans.cell_fan_offsets = {0, 1};
+        fans.fan_face_point = {0};
+        fans.fan_edge = {0};
+
+        SampleGrid grid;
+        grid.n = 2;
+        grid.spacing = 1.0f;
+        grid.origin = u; // sample (0,0,0) lands exactly at u
+        grid.values.assign(8, 0.0f);
+        grid.values[0] = s;
+
+        SampleAssignment assignment;
+        assignment.cell_sample_offsets = {0, 1};
+        assignment.cell_sample_indices = {0};
+
+        DcsddConfig config;
+        config.inner_iters = 1;
+        config.inner_tol = 0.0f;
+        const simd_float3 x_pipeline = optimize_cell_vertex(0, x, init, mesh, fans, assignment, grid, config);
+        check_float3_approx(x_pipeline, simd_float3{1.0f, -0.38095238f, 0.0f});
+    }
+}

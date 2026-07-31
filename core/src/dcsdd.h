@@ -87,6 +87,20 @@ DcsddInit dcsdd_init(const SampleGrid& grid);
 // queries below.
 simd_float3 closest_point_on_triangle(simd_float3 p, simd_float3 a, simd_float3 b, simd_float3 c);
 
+// Closest point on triangle (a,b,c) to `p`, plus the barycentric weights
+// (u,v,w) of (a,b,c) at that point (u+v+w == 1 always; a vertex hit gives a
+// one-hot weight, an edge hit gives the third weight exactly 0). Same
+// Voronoi-region derivation as closest_point_on_triangle above, extended to
+// also report the weights. D4 uses this to decompose a sample's closest
+// point on a cell's fan triangle (p, h, x) into t_j = gamma*p + beta*h +
+// alpha*x (a=p -> gamma=u, b=h -> beta=v, c=x -> alpha=w).
+struct TriangleBarycentric {
+    simd_float3 point;
+    float u, v, w;
+};
+TriangleBarycentric closest_point_on_triangle_barycentric(simd_float3 p, simd_float3 a, simd_float3 b,
+                                                            simd_float3 c);
+
 // One quad per interesting edge that has all 4 of its containing cells
 // present (grid-boundary edges — fewer than 4 containing cells — produce no
 // quad; the scene's +10% sampling margin, per D1, makes these rare in
@@ -150,5 +164,87 @@ struct SampleAssignment {
 // No config parameters: every threshold above derives from grid.spacing.
 SampleAssignment assign_samples(const SampleGrid& grid, const DcsddInit& init,
                                  const std::vector<simd_float3>& cell_vertices, const GlobalMesh& mesh);
+
+// ---------------------------------------------------------------------------
+// D4: per-cell local optimization (inner loop, paper §3.3 + supplementary
+// §C). One cell at a time; the outer loop/parallelization across cells is
+// D5, not built here.
+
+// Inner-loop tuning knobs (D5 extends this with outer-loop fields later).
+struct DcsddConfig {
+    float w_hermite = 0.02f;  // paper w_H (Eq. 5 Hermite-row weight)
+    float mu = 0.05f;         // regularizer mu (Eq. 11); paper recommends [1e-2, 1e-1]
+    int32_t inner_iters = 30; // per-cell inner-loop iteration cap; paper default 100
+    float inner_tol = 1e-5f;  // convergence threshold on ||x_{r+1} - x_r||
+};
+
+// A cell's local-mesh topology (paper Fig. 8): CSR over dense cells, each
+// entry a (face-point index, interesting-edge index) pair. Together with the
+// cell's own (moving) vertex x, entry i forms the fan triangle
+// (mesh.face_points[fan_face_point[i]], init.hermite_p[fan_edge[i]], x).
+// Flat CSR, GPU-ready; the hash map used to group entries by cell is
+// build-time only, never stored here.
+struct CellFans {
+    std::vector<int32_t> cell_fan_offsets; // size == DcsddInit::cell_id.size() + 1
+    std::vector<int32_t> fan_face_point;   // index into GlobalMesh::face_points
+    std::vector<int32_t> fan_edge;         // index into DcsddInit edge_*/hermite_* arrays
+};
+
+// Builds CellFans from the global mesh: for quad q (edge e, cells
+// quad_cells[4q..4q+4) cyclic c0..c3), the cell at cycle position i is
+// flanked by face points 4q+i (mesh edge c_i -> c_{i+1}) and 4q+(i+3)%4
+// (mesh edge c_{i-1} -> c_i); both pair with edge e. So each quad contributes
+// 8 (cell, face-point, edge) entries, grouped here by dense cell index.
+CellFans build_cell_fans(const DcsddInit& init, const GlobalMesh& mesh);
+
+// One linearized row of the per-cell least-squares system: coeff . x == rhs.
+struct SolveRow {
+    simd_float3 coeff;
+    float rhs;
+};
+
+// Builds one sample row (supplementary §C, Eq. 9 linearization):
+// alpha . d^T x = q.d - beta*(h.d) - gamma*(p.d), where (alpha,beta,gamma)
+// are the fan triangle's barycentric weights of (x,h,p) at the sample's
+// closest point (t_j = gamma*p + beta*h + alpha*x). Applies the alpha==0
+// rule verbatim from supplementary §C: when alpha is (numerically) zero, the
+// closest point lies entirely on the triangle's fixed p-h edge, independent
+// of x, so the naive row degenerates to 0 = 0 (no information -- x is free
+// to "lock" in place along d). The paper's fix instead sets
+// alpha=1,beta=0,gamma=0, turning the row into d^T x = q.d: a direct pull of
+// x towards/away from the sample's sphere, avoiding that numerical locking.
+// eps is the threshold on |alpha| (paper: "when alpha == 0"; we use < 1e-6;
+// checking the absolute value also catches the near-zero-but-negative case a
+// barycentric weight can land on due to floating-point error).
+SolveRow build_sample_row(float alpha, float beta, float gamma, simd_float3 d, simd_float3 q, simd_float3 h,
+                           simd_float3 p, float eps = 1e-6f);
+
+// Builds one Hermite row (Eq. 5): w_hermite * n^T x = w_hermite * (n.h).
+SolveRow build_hermite_row(simd_float3 n, simd_float3 h, float w_hermite);
+
+// Accumulates QtQ (3x3 symmetric) and Qtc (3) directly over `rows` (no
+// matrix library), adds the regularizer's contribution toward `x_prev`
+// (mu*I to QtQ, mu*x_prev to Qtc -- Eq. 11), and solves the resulting 3x3
+// normal equations via simd_inverse. mu > 0 makes QtQ + mu*I strictly
+// positive definite (mu*I alone is already SPD, and QtQ is PSD), so it is
+// always invertible regardless of how degenerate `rows` is (e.g. zero rows,
+// or all rows parallel). Exposed standalone as the inner loop's "one solve
+// given rows" step, so it's testable without the geometric pipeline.
+simd_float3 solve_weighted_normal_equations(const std::vector<SolveRow>& rows, float mu, simd_float3 x_prev);
+
+// Optimizes dense cell `dense_cell`'s vertex, starting from `x_start`, by
+// the per-cell inner loop (paper §3.3 + supplementary §C): each iteration,
+// for every sample assigned to this cell, finds its closest point on the
+// cell's (moving) fan triangles, derives a sample row (with the alpha==0
+// rule); for every interesting edge of this cell, a Hermite row; plus a
+// regularizer pulling towards the current iterate; solves, and repeats until
+// ||x_{r+1} - x_r|| < config.inner_tol or config.inner_iters is reached.
+// Fixed throughout: h, n, p, the fan topology, the sample assignment, and
+// all other cells' vertices -- only x moves. Vertices may leave their cell;
+// not clamped (paper Fig. 15). A cell with no assigned samples still
+// optimizes (Hermite + regularizer rows only).
+simd_float3 optimize_cell_vertex(int32_t dense_cell, simd_float3 x_start, const DcsddInit& init,
+                                  const GlobalMesh& mesh, const CellFans& fans, const SampleAssignment& assignment,
+                                  const SampleGrid& grid, const DcsddConfig& config);
 
 } // namespace sq

@@ -64,6 +64,52 @@ simd_float3 closest_point_on_triangle(simd_float3 p, simd_float3 a, simd_float3 
     return a + ab * v + ac * w;
 }
 
+TriangleBarycentric closest_point_on_triangle_barycentric(simd_float3 p, simd_float3 a, simd_float3 b,
+                                                            simd_float3 c) {
+    // Identical Voronoi-region derivation to closest_point_on_triangle above,
+    // additionally reporting the barycentric weights at each region.
+    const simd_float3 ab = b - a;
+    const simd_float3 ac = c - a;
+    const simd_float3 ap = p - a;
+    const float d1 = simd_dot(ab, ap);
+    const float d2 = simd_dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return TriangleBarycentric{a, 1.0f, 0.0f, 0.0f}; // vertex region a
+
+    const simd_float3 bp = p - b;
+    const float d3 = simd_dot(ab, bp);
+    const float d4 = simd_dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return TriangleBarycentric{b, 0.0f, 1.0f, 0.0f}; // vertex region b
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        return TriangleBarycentric{a + v * ab, 1.0f - v, v, 0.0f}; // edge region ab
+    }
+
+    const simd_float3 cp = p - c;
+    const float d5 = simd_dot(ab, cp);
+    const float d6 = simd_dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return TriangleBarycentric{c, 0.0f, 0.0f, 1.0f}; // vertex region c
+
+    const float vb_ = d5 * d2 - d1 * d6;
+    if (vb_ <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        return TriangleBarycentric{a + w * ac, 1.0f - w, 0.0f, w}; // edge region ac
+    }
+
+    const float va_ = d3 * d6 - d5 * d4;
+    if (va_ <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return TriangleBarycentric{b + w * (c - b), 0.0f, 1.0f - w, w}; // edge region bc
+    }
+
+    // Face interior: barycentric coords from the three Voronoi determinants.
+    const float denom = 1.0f / (va_ + vb_ + vc);
+    const float v = vb_ * denom;
+    const float w = vc * denom;
+    return TriangleBarycentric{a + ab * v + ac * w, 1.0f - v - w, v, w};
+}
+
 namespace {
 
 // Flat sample index, matching SampleGrid::values' documented convention.
@@ -605,6 +651,170 @@ SampleAssignment assign_samples(const SampleGrid& grid, const DcsddInit& init,
         out.cell_sample_offsets.push_back(static_cast<int32_t>(out.cell_sample_indices.size()));
     }
     return out;
+}
+
+// --- D4: per-cell local optimization (inner loop) --------------------------
+
+SolveRow build_sample_row(float alpha, float beta, float gamma, simd_float3 d, simd_float3 q, simd_float3 h,
+                           simd_float3 p, float eps) {
+    // alpha==0 rule (supplementary §C, verbatim): the closest point lies
+    // entirely on the triangle's fixed p-h edge, independent of x -- the
+    // naive row would carry no information about x (coeff would be zero),
+    // "locking" x in place along d. Substituting alpha=1,beta=0,gamma=0
+    // turns the row into d^T x = q.d, pulling x directly towards/away from
+    // the sample's sphere instead.
+    if (std::fabs(alpha) < eps) {
+        alpha = 1.0f;
+        beta = 0.0f;
+        gamma = 0.0f;
+    }
+    const simd_float3 coeff = alpha * d;
+    const float rhs = simd_dot(q, d) - beta * simd_dot(h, d) - gamma * simd_dot(p, d);
+    return SolveRow{coeff, rhs};
+}
+
+SolveRow build_hermite_row(simd_float3 n, simd_float3 h, float w_hermite) {
+    return SolveRow{w_hermite * n, w_hermite * simd_dot(n, h)};
+}
+
+simd_float3 solve_weighted_normal_equations(const std::vector<SolveRow>& rows, float mu, simd_float3 x_prev) {
+    // Accumulate QtQ/Qtc directly (no matrix library): QtQ = sum coeff*coeffT,
+    // Qtc = sum coeff*rhs.
+    simd_float3x3 QtQ = {simd_float3{0, 0, 0}, simd_float3{0, 0, 0}, simd_float3{0, 0, 0}};
+    simd_float3 Qtc = {0.0f, 0.0f, 0.0f};
+    for (const SolveRow& row : rows) {
+        const simd_float3& c = row.coeff;
+        QtQ.columns[0] += c.x * c;
+        QtQ.columns[1] += c.y * c;
+        QtQ.columns[2] += c.z * c;
+        Qtc += c * row.rhs;
+    }
+    // Regularizer (Eq. 11): mu*I toward x_prev. mu > 0 makes QtQ + mu*I
+    // strictly positive definite regardless of how degenerate `rows` is
+    // (QtQ alone is only PSD -- e.g. zero rows, or all rows parallel, would
+    // leave it singular), so this 3x3 is always invertible.
+    QtQ.columns[0].x += mu;
+    QtQ.columns[1].y += mu;
+    QtQ.columns[2].z += mu;
+    Qtc += mu * x_prev;
+
+    return simd_mul(simd_inverse(QtQ), Qtc);
+}
+
+namespace {
+
+// One inner-loop iteration (paper §3.3 + supplementary §C): builds every
+// sample row (searching the cell's fan triangles for each assigned sample's
+// closest point, via closest_point_on_triangle_barycentric) and every
+// Hermite row for `dense_cell`, then solves. `x` is the current iterate
+// (both the moving fan vertex and the regularizer's target). Factored out of
+// optimize_cell_vertex so a single iteration is independently callable.
+simd_float3 optimize_cell_vertex_step(int32_t dense_cell, simd_float3 x, const DcsddInit& init,
+                                       const GlobalMesh& mesh, const CellFans& fans,
+                                       const SampleAssignment& assignment, const SampleGrid& grid,
+                                       const DcsddConfig& config) {
+    std::vector<SolveRow> rows;
+
+    const int32_t fan_begin = fans.cell_fan_offsets[dense_cell];
+    const int32_t fan_end = fans.cell_fan_offsets[dense_cell + 1];
+
+    const int32_t sample_begin = assignment.cell_sample_offsets[dense_cell];
+    const int32_t sample_end = assignment.cell_sample_offsets[dense_cell + 1];
+    for (int32_t si = sample_begin; si < sample_end; ++si) {
+        const int32_t flat = assignment.cell_sample_indices[si];
+        const Coord3 coord = unflatten(flat, grid.n);
+        const simd_float3 u = sample_pos(grid, coord.x, coord.y, coord.z);
+        const float s = grid.values[static_cast<size_t>(flat)];
+
+        // Closest point over all of this cell's fan triangles (p, h, x);
+        // keep the winning triangle's own (p, h) alongside its barycentric
+        // result so the row below doesn't need to re-derive which triangle won.
+        bool have_best = false;
+        float best_dist = 0.0f;
+        TriangleBarycentric best{};
+        simd_float3 best_p{}, best_h{};
+        for (int32_t fi = fan_begin; fi < fan_end; ++fi) {
+            const simd_float3 p = mesh.face_points[static_cast<size_t>(fans.fan_face_point[fi])];
+            const simd_float3 h = init.hermite_p[static_cast<size_t>(fans.fan_edge[fi])];
+            const TriangleBarycentric r = closest_point_on_triangle_barycentric(u, p, h, x);
+            const float dist = simd_length(u - r.point);
+            if (!have_best || dist < best_dist) {
+                have_best = true;
+                best_dist = dist;
+                best = r;
+                best_p = p;
+                best_h = h;
+            }
+        }
+        if (!have_best) continue; // no fan triangles for this cell: nothing to project against
+
+        // t_j = best.point = gamma*p + beta*h + alpha*x (u=gamma, v=beta, w=alpha).
+        const simd_float3 t = best.point;
+        const simd_float3 diff = t - u;
+        const float diff_len = simd_length(diff);
+        if (diff_len < 1e-9f) continue; // degenerate: t_j == u_j, no direction to derive -- skip row
+
+        const simd_float3 d = diff / diff_len;
+        const simd_float3 q = u + std::fabs(s) * d;
+
+        rows.push_back(build_sample_row(best.w, best.v, best.u, d, q, best_h, best_p));
+    }
+
+    const int32_t edge_begin = init.cell_edge_offsets[dense_cell];
+    const int32_t edge_end = init.cell_edge_offsets[dense_cell + 1];
+    for (int32_t ei = edge_begin; ei < edge_end; ++ei) {
+        const int32_t edge = init.cell_edge_indices[ei];
+        rows.push_back(build_hermite_row(init.hermite_n[static_cast<size_t>(edge)],
+                                          init.hermite_p[static_cast<size_t>(edge)], config.w_hermite));
+    }
+
+    return solve_weighted_normal_equations(rows, config.mu, x);
+}
+
+} // namespace
+
+CellFans build_cell_fans(const DcsddInit& init, const GlobalMesh& mesh) {
+    const size_t num_cells = init.cell_id.size();
+    const size_t num_quads = mesh.quad_edge.size();
+
+    // Bucket by dense cell first (build-local only, never stored), then
+    // flatten to CSR -- same two-pass pattern as assign_samples.
+    std::vector<std::vector<std::pair<int32_t, int32_t>>> buckets(num_cells); // (face_point, edge)
+    for (size_t q = 0; q < num_quads; ++q) {
+        const int32_t edge = mesh.quad_edge[q];
+        for (int32_t i = 0; i < 4; ++i) {
+            const int32_t cell = mesh.quad_cells[4 * q + static_cast<size_t>(i)];
+            const int32_t fp_forward = static_cast<int32_t>(4 * q) + i;               // mesh edge c_i -> c_{i+1}
+            const int32_t fp_backward = static_cast<int32_t>(4 * q) + (i + 3) % 4;     // mesh edge c_{i-1} -> c_i
+            buckets[static_cast<size_t>(cell)].emplace_back(fp_forward, edge);
+            buckets[static_cast<size_t>(cell)].emplace_back(fp_backward, edge);
+        }
+    }
+
+    CellFans out;
+    out.cell_fan_offsets.reserve(num_cells + 1);
+    out.cell_fan_offsets.push_back(0);
+    for (const auto& bucket : buckets) {
+        for (const auto& [fp, edge] : bucket) {
+            out.fan_face_point.push_back(fp);
+            out.fan_edge.push_back(edge);
+        }
+        out.cell_fan_offsets.push_back(static_cast<int32_t>(out.fan_face_point.size()));
+    }
+    return out;
+}
+
+simd_float3 optimize_cell_vertex(int32_t dense_cell, simd_float3 x_start, const DcsddInit& init,
+                                  const GlobalMesh& mesh, const CellFans& fans, const SampleAssignment& assignment,
+                                  const SampleGrid& grid, const DcsddConfig& config) {
+    simd_float3 x = x_start;
+    for (int32_t r = 0; r < config.inner_iters; ++r) {
+        const simd_float3 x_new = optimize_cell_vertex_step(dense_cell, x, init, mesh, fans, assignment, grid, config);
+        const float delta = simd_length(x_new - x);
+        x = x_new;
+        if (delta < config.inner_tol) break;
+    }
+    return x;
 }
 
 } // namespace sq
