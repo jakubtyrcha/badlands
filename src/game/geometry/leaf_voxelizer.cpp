@@ -79,19 +79,23 @@ LeafVoxelGrid SplatLeafCards(const StaticTexturedMeshComponent& leaf_mesh,
                          static_cast<int>(std::ceil(span.y / h)),
                          static_cast<int>(std::ceil(span.z / h)));
 
-  // Degenerate (zero-volume, e.g. an AABB axis landing exactly on a
-  // cell_size multiple) -- nothing to voxelize, not an error.
-  if (grid.dims.x <= 0 || grid.dims.y <= 0 || grid.dims.z <= 0) {
-    grid.dims = glm::ivec3(0);
-    return grid;
-  }
-
+  // >512 must fail loudly UNCONDITIONALLY -- checked before, and
+  // independently of, the degenerate-dims guard below, so a mesh that is
+  // simultaneously flat on one axis and oversized on another still logs the
+  // error (the degenerate branch's early-out must never mask this one).
   if (grid.dims.x > 512 || grid.dims.y > 512 || grid.dims.z > 512) {
     spdlog::error(
         "SplatLeafCards: leaf mesh AABB needs a {}x{}x{} cell grid at cell_size={} "
         "(> 512 on some axis) -- returning an empty grid",
         grid.dims.x, grid.dims.y, grid.dims.z, h);
     grid.cells.clear();
+    return grid;
+  }
+
+  // Degenerate (zero-volume, e.g. an AABB axis landing exactly on a
+  // cell_size multiple) -- nothing to voxelize, not an error.
+  if (grid.dims.x <= 0 || grid.dims.y <= 0 || grid.dims.z <= 0) {
+    grid.dims = glm::ivec3(0);
     return grid;
   }
 

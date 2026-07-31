@@ -159,6 +159,34 @@ TEST_CASE("SplatLeafCards: fails loudly (empty grid) past the 512-cells-per-axis
   REQUIRE(grid.cells.empty());
 }
 
+TEST_CASE("SplatLeafCards: >512-axis guard fires even when another axis is degenerate") {
+  // Combines the two early-out guards in one mesh: x needs 520 cells (>512,
+  // must fail loudly) while z sits EXACTLY on a cell_size multiple (dims.z
+  // computes to 0, the "nothing to voxelize, not an error" degenerate case).
+  // The >512 check must win regardless of check order -- if the degenerate
+  // check ran first and returned early, it would zero out ALL of dims
+  // (including the legitimately oversized x) and silently swallow the
+  // failure with no spdlog::error, which is exactly the bug this pins.
+  StaticTexturedMeshComponent leaf_mesh;
+  const float hw = 39.0f;  // width 78 -> 78/0.15 = 520 cells, > 512
+  const float z = 0.0f;    // exactly a cell_size multiple -> dims.z degenerates to 0
+  PushVertex(leaf_mesh.vertices, {-hw, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {-hw, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {hw, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {hw, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  leaf_mesh.vertex_count = 4;
+  leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
+
+  const LeafVoxelizeOptions opts;  // default cell_size=0.15
+  const LeafVoxelGrid grid = SplatLeafCards(leaf_mesh, LeafSilhouette::Oak, opts);
+
+  // dims must still carry its real computed values (not zeroed to (0,0,0))
+  // -- proof the >512 branch returned first, not the degenerate branch.
+  REQUIRE(grid.dims.x > 512);
+  REQUIRE(grid.dims.z == 0);  // confirms the flat axis really was degenerate too
+  REQUIRE(grid.cells.empty());
+}
+
 TEST_CASE("EmitTetMesh: axis falls back to (cell - aabb center) when area_axis is zero") {
   LeafVoxelGrid grid;
   grid.origin = glm::vec3(0.0f);
