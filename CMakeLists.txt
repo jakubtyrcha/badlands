@@ -1047,6 +1047,21 @@ target_include_directories(badlands_biome_manifest_tests PRIVATE
 target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_biome_splat_tests: pure-CPU tests for the biome -> splat raster the
+# cluster terrain samples by world XZ (slot index == Biome enum == terrain array
+# layer index, weights sum to full, at most two layers per texel).
+add_executable(badlands_biome_splat_tests
+    src/mapview/tests/biome_splat_tests.cpp
+    src/mapview/biome_splat.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_biome_splat_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_biome_splat_tests COMMAND badlands_biome_splat_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_factors_manifest_tests: behaviour tuning loaded as data
 # (assets/creatures/factors.json -> badlands::SimFactors). App-layer, so the sim
 # keeps its lean dependency set. Reads the shipped file, so cwd = repo root.
