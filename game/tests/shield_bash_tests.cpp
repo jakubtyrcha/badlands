@@ -9,9 +9,12 @@
 
 #include "combat.h"
 #include "command.h"
+#include "intention.h"    // resolve_action -- the gateway the brain uses
+#include "progression.h"  // award_xp -- reaching the level the grant fires at
 #include "components.h"
 #include "game_state.h"
 #include "sim_internal.hpp"
+#include "brain_abi.h"  // BL_ACT_USE_SKILL
 #include "skills.h"
 #include "status.h"
 
@@ -277,4 +280,91 @@ TEST_CASE("a cast is appended to the command log", "[skills][cast]") {
     CHECK(logged.actor == f.caster_slot);
     CHECK(logged.target_id == f.victim_slot);
     CHECK(logged.param_a == 0);
+}
+
+// --- end to end: a level-3 mercenary against a goblin ------------------------
+
+TEST_CASE("a mercenary learns ShieldBash at level 3 and stuns what it hits",
+          "[skills][e2e]") {
+    auto game = make_flat_world();
+    // Catalog spawns: the mercenary's grant list rides on its desc, so leveling
+    // is the ONLY thing standing between it and the skill.
+    const uint32_t merc = spawn_creature_into(*game, CreatureId::Mercenary,
+                                              kPlayerTeam, {0.0f, 0.0f});
+    const uint32_t gob =
+        spawn_creature_into(*game, CreatureId::Goblin, /*team=*/1, {1.0f, 0.0f});
+    const entt::entity me = game->slots[merc];
+    const entt::entity ge = game->slots[gob];
+
+    // Pin the combat gates so the OUTCOME is certain and this case tests the
+    // pipeline rather than the dice (the same discipline as the cases above:
+    // the catalog's own 0.9 accuracy vs the goblin's 0.05 defense / 0.10
+    // evasion would land ~76% of the time, which is not a test).
+    game->registry.get<Combatant>(me).accuracy = 1.0f;
+    game->registry.get<Combatant>(ge).defense = 0.0f;
+    game->registry.get<Combatant>(ge).evasion = 0.0f;
+
+    REQUIRE(game->registry.get<Skills>(me).count == 0);  // level 1: nothing yet
+    award_xp(*game, merc, 100 + 303);                    // -> level 3
+    REQUIRE(game->registry.get<HeroSimulationState>(me).level == 3);
+    const Skills& sk = game->registry.get<Skills>(me);
+    REQUIRE(sk.count == 1);
+    REQUIRE(sk.ids[0] == SkillId::ShieldBash);
+
+    // Through the gateway, exactly as the wasm brain would.
+    REQUIRE(resolve_action(*game, merc, AgentAction{BL_ACT_USE_SKILL, gob, /*arg=*/0}));
+    apply_commands(*game);
+
+    // The goblin is stunned: no defense, no thinking, no walking.
+    REQUIRE(has_status(game->registry, ge, StatusKind::Stunned));
+    CHECK(effective_combatant(game->registry, ge).evasion == Catch::Approx(0.0f));
+
+    // Whether the goblin ACTED over a window: a swing always stamps its
+    // attack cooldown, hit or miss, so this is roll-independent -- unlike
+    // "did the mercenary take damage", and unlike "did it move" (the two are
+    // already in contact, so a free goblin stands and fights rather than
+    // walking anywhere).
+    auto swung_within = [&](int ticks) {
+        bool swung = false;
+        for (int i = 0; i < ticks; ++i) {
+            tick_world(*game, 1.0f / 30.0f);
+            if (game->registry.get<Attacks>(ge).cooldown_remaining[0] > 0.0f) {
+                swung = true;
+            }
+        }
+        return swung;
+    };
+
+    const glm::vec2 start = game->registry.get<Position>(ge).pos;
+    CHECK_FALSE(swung_within(60));  // ~2s of the 3s stun: no thinking, no swings
+    CHECK(has_status(game->registry, ge, StatusKind::Stunned));
+    CHECK(glm::distance(game->registry.get<Position>(ge).pos, start) ==
+          Catch::Approx(0.0f));
+
+    CHECK(swung_within(60));  // past the end of it: the goblin fights again
+    CHECK_FALSE(has_status(game->registry, ge, StatusKind::Stunned));
+}
+
+TEST_CASE("the bash is on cooldown for its authored time", "[skills][e2e]") {
+    auto game = make_flat_world();
+    const uint32_t merc = spawn_creature_into(*game, CreatureId::Mercenary,
+                                              kPlayerTeam, {0.0f, 0.0f});
+    const uint32_t gob =
+        spawn_creature_into(*game, CreatureId::Goblin, /*team=*/1, {1.0f, 0.0f});
+    award_xp(*game, merc, 100 + 303);
+    const entt::entity me = game->slots[merc];
+    // Cooldown, not outcome, is what this case is about -- but a blocked bash
+    // stamps the cooldown just the same, so no gates need pinning here.
+
+    REQUIRE(resolve_action(*game, merc, AgentAction{BL_ACT_USE_SKILL, gob, 0}));
+    apply_commands(*game);
+    CHECK(game->registry.get<Skills>(me).cooldown_remaining[0] == Catch::Approx(12.0f));
+
+    // Refused while it cools, and the cooldown really does tick with the world.
+    CHECK_FALSE(resolve_action(*game, merc, AgentAction{BL_ACT_USE_SKILL, gob, 0}));
+    for (int i = 0; i < 30; ++i) {
+        tick_world(*game, 1.0f / 30.0f);
+    }
+    CHECK(game->registry.get<Skills>(me).cooldown_remaining[0] ==
+          Catch::Approx(11.0f).margin(0.05f));
 }

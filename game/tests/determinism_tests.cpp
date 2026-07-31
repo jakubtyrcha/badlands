@@ -12,9 +12,12 @@
 //                       is what makes the log a TRACE and not just a debug list.
 
 #include "sim_internal.hpp"
+#include "brain_abi.h"    // BL_ACT_USE_SKILL
 #include "command.h"
 #include "components.h"
 #include "game_state.h"
+#include "intention.h"    // resolve_action
+#include "progression.h"  // award_xp
 #include "vision.h"
 
 #include "fixtures/wasm_hero.h"
@@ -22,6 +25,7 @@
 #include <catch_amalgamated.hpp>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace badlands;
@@ -355,4 +359,73 @@ TEST_CASE("a fight replays bit-identically from the log alone (no brain, no reso
         CHECK(replay_rows[i].pos_x == live_rows[i].pos_x);
         CHECK(replay_rows[i].pos_z == live_rows[i].pos_z);
     }
+}
+
+TEST_CASE("a run containing UseSkill is reproducible and replays exactly") {
+    // Skills are the newest mutation path, and the one with the most moving
+    // parts under the determinism contract: a seeded attack test, an effect
+    // producing ops, a status whose expiry rides the integer clock, and an
+    // intention aborted as a side effect. If any of it leaked a dependency on
+    // anything outside (initial config, seed, command log), this is where it
+    // shows.
+    auto stage = [](BadlandsGame* g) {
+        const uint32_t merc = spawn_creature_into(*g, CreatureId::Mercenary,
+                                                  kPlayerTeam, {0.0f, kCastleSpawnZ});
+        const uint32_t gob = spawn_creature_into(*g, CreatureId::Goblin, /*team=*/1,
+                                                 {1.0f, kCastleSpawnZ});
+        award_xp(*g, merc, 100 + 303);  // level 3: the bash is learned
+        return std::pair<uint32_t, uint32_t>{merc, gob};
+    };
+    // Cast on a few well-separated ticks, so the log carries several UseSkill
+    // entries at different world_millis (the seed axis) rather than one.
+    const int kCastTicks[] = {5, 400, 800};
+    auto run = [&](BadlandsGame* g) {
+        const auto [merc, gob] = stage(g);
+        for (int i = 0; i < kRunTicks * 3; ++i) {
+            for (int at : kCastTicks) {
+                if (i == at) {
+                    resolve_action(*g, merc, AgentAction{BL_ACT_USE_SKILL, gob, /*arg=*/0});
+                    apply_commands(*g);
+                }
+            }
+            tick_world(*g, 1.0f / 30.0f);
+        }
+    };
+
+    auto a_owned = make_world(BrainDesc{});
+    auto b_owned = make_world(BrainDesc{});
+    run(a_owned.get());
+    run(b_owned.get());
+    require_same(snapshot(a_owned.get()), snapshot(b_owned.get()));
+
+    const std::vector<Command>& log = a_owned->command_log;
+    REQUIRE(log.size() == b_owned->command_log.size());
+    for (size_t i = 0; i < log.size(); ++i) {
+        INFO("command " << i);
+        CHECK(same_command(log[i], b_owned->command_log[i]));
+    }
+    // The casts really are in the trace, each naming a concrete target and the
+    // caster's own skill slot (never a UINT32_MAX pass-through).
+    int casts = 0;
+    for (const Command& c : log) {
+        if (c.kind == CommandKind::UseSkill) {
+            ++casts;
+            CHECK(c.target_id != UINT32_MAX);
+            CHECK(c.param_a == 0);
+        }
+    }
+    CHECK(casts >= 1);
+
+    // Replay: brains off, the world rebuilt from the trace alone. The spawns
+    // are not commands (they are initial config), so the replay world is
+    // staged the same way -- exactly as a real replay would have to be.
+    const std::vector<Command> recorded = log;
+    auto replay_owned = make_world(BrainDesc{});
+    stage(replay_owned.get());
+    replay_owned->replay_log = &recorded;
+    for (int i = 0; i < kRunTicks * 3; ++i) {
+        tick_world(*replay_owned, 1.0f / 30.0f);
+    }
+    CHECK(replay_owned->replay_cursor == recorded.size());
+    require_same(snapshot(a_owned.get()), snapshot(replay_owned.get()));
 }
