@@ -131,7 +131,7 @@ PickResult Editor::pick(float x, float y) const {
 
 void Editor::select(int32_t nodeId) {
     impl_->selected = nodeId;
-    impl_->renderer.set_scene_lines_dirty(); // selection changes vertex colors
+    impl_->renderer.set_scene_lines_dirty(); // selection change alters which node's wireframe (if any) is drawn
 }
 
 int32_t Editor::selectedNode() const {
@@ -159,6 +159,30 @@ SpawnResult Editor::spawn(Shape shape, Op op, float x, float y) {
 
     select(id); // same path as select(): sets selected + marks lines dirty
     return SpawnResult{id, snapped};
+}
+
+void Editor::deleteSelectedNode() {
+    if (impl_->selected == kInvalidNode) {
+        return; // no-op without a selection
+    }
+
+    // An active drag/scale gesture must not survive the node it's driving
+    // going away — mirrors setMode's mid-gesture abort. Gestures only ever
+    // target the currently selected node (beginDrag/beginScale only capture
+    // state for impl_->selected), so ending both unconditionally here is
+    // equivalent to the old hand-inlined "if node_id == selected" reset,
+    // just via the real endDrag()/endScale() entry points instead of
+    // duplicating their body. Order matters: end the gestures before
+    // remove_node, so nothing is left referencing the id about to go away.
+    endDrag();
+    endScale();
+
+    impl_->scene.remove_node(impl_->selected);
+    impl_->selected = kInvalidNode;
+    // Gizmo hides on its own next render(): selectedNode is looked up via
+    // impl_->scene.find(impl_->selected), which is null once selected is
+    // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
+    impl_->renderer.set_scene_lines_dirty();
 }
 
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
@@ -289,7 +313,12 @@ void Editor::setNodeOp(int32_t nodeId, Op op) {
         return;
     }
     node->op = op;
-    impl_->renderer.set_scene_lines_dirty(); // op changes vertex colors
+    // The wireframe no longer varies with op (always kColorSelected), so this
+    // dirty call is not strictly required by the current draw -- kept anyway
+    // because it's cheap, op changes are rare, and it keeps the invalidation
+    // rule simple ("any node edit dirties the lines") rather than requiring
+    // every call site to reason about which fields the wireframe reads.
+    impl_->renderer.set_scene_lines_dirty();
 }
 
 void Editor::beginScale() {

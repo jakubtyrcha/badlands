@@ -45,6 +45,12 @@ public:
     // defaults except snap_parent, explicitly kInvalidNode.
     int32_t spawn_unsnapped(Shape shape, Op op, simd_float3 position);
 
+    // Removes the node with this id from the flat vector; unknown id is a
+    // no-op. Per-shape name counters (cube_count_/sphere_count_) are NOT
+    // reset or decremented, so a later spawn of that shape always gets the
+    // next number, never a reused name.
+    void remove_node(int32_t id);
+
 private:
     // Allocates id (next_id_++) and an auto name ("<Shape> <per-shape count>",
     // counting spawns of that shape independent of ids/removals); shape, op

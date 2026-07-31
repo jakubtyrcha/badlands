@@ -2,9 +2,9 @@
 
 Shapeshifter is a native macOS 3D SDF editor MVP: a SwiftUI + AppKit shell
 over a C++20 metal-cpp core, joined by direct Swift↔C++ interop (no bridge
-files). At this stage the editor renders debug wireframes only — no SDF
-evaluation or CSG surface rendering yet — but the full spawn/select/modify/
-camera interaction model is in place.
+files). The viewport is a per-pixel sphere-traced render of the CSG scene,
+evaluated every frame (see Rendering below); the full spawn/select/
+modify/camera interaction model, including delete, is in place.
 
 ## Requirements
 
@@ -49,12 +49,31 @@ Four modes, selected via the icon bar top-left or keys **1–4**:
    tangent plane (or a camera-facing plane if unsnapped). Entering Modify
    with nothing selected behaves like Select mode until you click something.
    A radial menu anchored on the selected shape offers: Move, Scale (drag
-   vertically; cumulative, clamped per-axis to [0.05, 50]), and toggle
-   additive/subtract.
+   vertically; cumulative, clamped per-axis to [0.05, 50]), toggle
+   additive/subtract, and Delete (removes the shape permanently — no undo —
+   and switches to Camera mode).
 4. **Camera (4)** — two-finger scroll orbits, pinch zooms, shift+scroll pans.
 
-Color legend: green = additive shape, red = subtracted shape, pale blue =
-currently selected.
+Color legend: pale blue = selected; red = a subtracted shape's wireframe
+(shown even unselected); surface = normal-colored debug (see Rendering below).
+
+## Rendering
+
+The viewport is a per-pixel sphere-traced render of the CSG scene
+(`shaders/raymarch.metal` + `shaders/sdf_scene.h`), evaluated every frame —
+edits and drags are visible live, with no reconstruction latency. Shading is
+normal-colored debug (color = 0.5·(n+1), gradient normal — no lighting). The
+wireframe draws for the selected object, plus any unselected Subtract node
+(its carve is otherwise invisible) — unselected Add nodes draw none. The
+depth buffer is real: the raymarch fragment shader writes true per-pixel
+depth, so later passes composite correctly on top of it.
+
+### DCSDD
+
+Dual Contouring of Signed Distance Data (Carrera et al., SIGGRAPH 2026) mesh
+reconstruction is implemented and tested but dormant — not triggered, not
+drawn, kept in-tree for a later iteration. See `core/src/dcsdd.h` for the
+pipeline and its tunables.
 
 ## Architecture
 
@@ -63,8 +82,9 @@ Swift app), and `CoreTests` (a doctest-based command-line test runner for
 the core).
 
 - **Core** (`core/src`) owns the scene document, orbit camera and its
-  controller, ray-based picking, drag/scale math, and all Metal rendering
-  (wireframe line geometry, pipeline, per-frame encode) via metal-cpp.
+  controller, ray-based picking, drag/scale math, DCSDD mesh reconstruction
+  (dormant, background thread), and all Metal rendering (raymarch + wireframe
+  + shaded-mesh pipelines, depth buffer, per-frame encode) via metal-cpp.
 - **Swift** (`app/Sources`) owns the 4-mode state machine, raw AppKit input
   (mouse/keyboard/gesture events on the `CAMetalLayer`-backed viewport), and
   the SwiftUI chrome/overlays (mode bar, spawn options, info panel, radial
@@ -75,9 +95,13 @@ See `CLAUDE.md` for interop and coding conventions.
 
 ## Known limitations
 
-- Debug wireframe rendering only — no SDF evaluation or CSG surface render.
-- No save/load.
-- No undo.
+- CSG min/max combine is not a true distance field near intersection curves
+  (affects raymarch step sizes there; sphere tracing tolerates the resulting
+  underestimates by design).
+- No undo (delete is permanent).
+- No rotations.
+- No materials or lighting — shading is normal-colored debug only.
+- No export/saving.
 - Single window.
 - Camera mode is trackpad-oriented: a mouse wheel only supplies vertical
   scroll deltas (no horizontal component), and a mouse has no pinch gesture,

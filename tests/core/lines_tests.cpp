@@ -169,7 +169,16 @@ TEST_CASE("append_sphere_outline: eye inside or on the sphere emits nothing") {
     CHECK(out.empty());
 }
 
-TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelected") {
+// Wireframe policy (subtract-always + selected-always-overrides): the
+// raymarched view is always the live primary, so the wireframe stays a thin
+// annotation layer, not a full-scene outline -- EXCEPT that an unselected
+// Subtract node still draws (kColorSubtract): its carve is the ONLY visual it
+// has anywhere in the viewport (additive geometry is always visible via the
+// raymarch regardless), so without this exception it would be entirely
+// unpickable-by-sight. The selected node (either op) always overrides to
+// kColorSelected. Unselected Add nodes emit nothing. This replaces (rather
+// than extends) the previous selected-only-always test case.
+TEST_CASE("build_scene_lines: subtract-always + selected-always-overrides policy") {
     SceneDocument doc;
 
     Node cube;
@@ -184,31 +193,38 @@ TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelecte
     sphere.op = Op::Subtract;
     doc.add(sphere);
 
-    SUBCASE("no selection") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode, simd_float3{0.0f, 0.0f, 5.0f});
-        REQUIRE(lines.size() == 120); // 24 cube + 96 sphere outline
+    const simd_float3 eye = {0.0f, 0.0f, 5.0f};
 
+    SUBCASE("no selection: the unselected Add cube emits nothing; the unselected "
+            "Subtract sphere still emits its outline, in kColorSubtract") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode, eye);
+        REQUIRE(lines.size() == 2 * kSphereOutlineSegments); // zero cube verts included
+        for (const LineVertex& v : lines) {
+            check_color_approx(v.color, kColorSubtract);
+        }
+    }
+
+    SUBCASE("cube (Add) selected: cube's 24 edges in kColorSelected, PLUS the "
+            "unselected Subtract sphere's outline in kColorSubtract (its always-on "
+            "visual doesn't depend on what's selected)") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, cube.id, eye);
+        REQUIRE(lines.size() == 24 + 2 * kSphereOutlineSegments);
         for (size_t i = 0; i < 24; ++i) {
             CAPTURE(i);
-            check_color_approx(lines[i].color, kColorAdd);
+            check_color_approx(lines[i].color, kColorSelected);
         }
-        for (size_t i = 24; i < 120; ++i) {
+        for (size_t i = 24; i < lines.size(); ++i) {
             CAPTURE(i);
             check_color_approx(lines[i].color, kColorSubtract);
         }
     }
 
-    SUBCASE("sphere selected") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id, simd_float3{0.0f, 0.0f, 5.0f});
-        REQUIRE(lines.size() == 120);
-
-        for (size_t i = 0; i < 24; ++i) {
-            CAPTURE(i);
-            check_color_approx(lines[i].color, kColorAdd);
-        }
-        for (size_t i = 24; i < 120; ++i) {
-            CAPTURE(i);
-            check_color_approx(lines[i].color, kColorSelected);
+    SUBCASE("sphere (Subtract) selected: the selected override wins over the "
+            "always-on subtract color -- every vertex is kColorSelected") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id, eye);
+        REQUIRE(lines.size() == 2 * kSphereOutlineSegments);
+        for (const LineVertex& v : lines) {
+            check_color_approx(v.color, kColorSelected);
         }
     }
 }

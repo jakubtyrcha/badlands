@@ -125,9 +125,13 @@ void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd
 std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world) {
     std::vector<LineVertex> out;
     for (const Node& node : doc.nodes()) {
-        simd_float4 color = (node.op == Op::Add) ? kColorAdd : kColorSubtract;
+        simd_float4 color;
         if (node.id == selected_id) {
-            color = kColorSelected;
+            color = kColorSelected; // selected override always wins, either op
+        } else if (node.op == Op::Subtract) {
+            color = kColorSubtract; // unselected Subtract: its carve is its only visual
+        } else {
+            continue; // unselected Add: already visible live via the raymarch
         }
         const simd_float4x4 world_from_local = node.world_from_local();
         if (node.shape == Shape::Cube) {
