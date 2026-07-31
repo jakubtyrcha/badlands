@@ -3,6 +3,7 @@
 #include "behaviours/rng.h"  // seed_of / unit_float -- the sim's only randomness
 #include "game_state.h"      // BadlandsGame, entity_for_slot, nearest_enemy, slot_for_entity, emit_char_hit
 #include "status.h"          // has_status -- Stunned zeroes the ACTIVE defense (effective_combatant)
+#include "strike.h"          // declare_strike -- fire_attack commits, it no longer resolves
 
 #include <algorithm>
 #include <vector>
@@ -275,40 +276,66 @@ void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slo
     const uint32_t tslot =
         (target_slot == UINT32_MAX) ? slot_for_entity(game, target) : target_slot;
 
-    Attacks& attacks = reg.get<Attacks>(self);
-    const Attack a = attacks.defs[idx];
-    attacks.cooldown_remaining[idx] = a.cooldown;
+    // Validated -- now COMMIT rather than resolve. The blow lands when the
+    // attack's wind-up elapses (strike.h); this function's whole job above is
+    // deciding that the swing is legal to start, which has not changed.
+    // declare_strike stamps nothing: the cooldown is spent at resolve, so an
+    // interrupted wind-up costs the attacker its tempo but not its attack.
+    declare_strike(game, self, idx, tslot);
+}
 
-    if (a.category == AttackCategory::Ranged) {
-        // Capture everything the shot needs so it resolves correctly on arrival
+void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInProgress& s) {
+    entt::registry& reg = game.registry;
+    const uint32_t attacker_slot = slot_for_entity(game, attacker);
+    entt::entity target = entity_for_slot(game, static_cast<int32_t>(s.target_slot));
+
+    // The world moved while the attacker was committed. A blow thrown at
+    // someone who died, vanished, or stepped out of reach WHIFFS -- it is not
+    // re-aimed, and it is not refunded. That is the point of committing, and
+    // it is what makes backing out of reach worth doing.
+    if (target == entt::null || !reg.all_of<Position, Health, Combatant>(target) ||
+        reg.get<Health>(target).hp <= 0.0f) {
+        return;
+    }
+    if (!reg.all_of<Position>(attacker)) {
+        return;
+    }
+    const float dist =
+        glm::distance(reg.get<Position>(attacker).pos, reg.get<Position>(target).pos);
+    if (dist > s.attack.range) {
+        return;  // stepped out of reach mid-swing
+    }
+
+    if (s.attack.category == AttackCategory::Ranged) {
+        // The arrow leaves NOW, at the end of the draw. Everything it needs is
+        // already captured on the strike, so it resolves correctly on arrival
         // even if the shooter dies mid-flight.
         Projectile proj;
         proj.attacker_slot = attacker_slot;
-        proj.target_slot = tslot;
-        proj.pos = reg.get<Position>(self).pos;
+        proj.target_slot = s.target_slot;
+        proj.pos = reg.get<Position>(attacker).pos;
         proj.speed = kProjectileSpeed;
-        proj.attack = a;
-        proj.attacker = reg.get<Combatant>(self);
-        proj.attack_index = idx;
-        proj.fire_millis = game.world_millis;
+        proj.attack = s.attack;
+        proj.attacker = s.attacker;
+        proj.attack_index = s.attack_index;
+        proj.fire_millis = s.declared_millis;
         reg.emplace<Projectile>(reg.create(), proj);
         return;
     }
 
-    // Melee: resolve immediately.
     CombatRequest req;
-    req.attacker = reg.get<Combatant>(self);
-    req.attack = a;
-    req.defender = effective_combatant(reg, target);
-    req.attacker_slot = attacker_slot;
-    req.target_slot = tslot;
-    req.world_millis = game.world_millis;
-    req.attack_index = idx;
+    req.attacker = s.attacker;   // captured at declaration, not re-read
+    req.attack = s.attack;
+    req.defender = effective_combatant(reg, target);  // but the DEFENDER is live:
+    req.attacker_slot = attacker_slot;                // a target stunned mid-swing
+    req.target_slot = s.target_slot;                  // is defenceless when it lands
+    req.world_millis = s.declared_millis;
+    req.attack_index = s.attack_index;
     const CombatResult res = resolve_attack(req);
     if (res.damage > 0.0f) {
         Health& th = reg.get<Health>(target);
         th.hp -= res.damage;
-        emit_char_hit(game, attacker_slot, tslot, res.damage, th.hp,
+        emit_char_hit(game, attacker_slot, s.target_slot, res.damage, th.hp,
                       reg.get<Position>(target).pos);
     }
 }

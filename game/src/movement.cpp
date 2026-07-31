@@ -7,6 +7,7 @@
 #include "intention.h"  // InboxEvent, push_inbox_event -- the MoveBlocked mirror
 #include "placement.h"
 #include "status.h"  // has_status -- a stunned character stops walking
+#include "strike.h"  // striking -- so does one committed to a swing
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -256,6 +257,13 @@ void follow_paths(BadlandsGame& game, float dt) {
         // Deliberately NOT gated in separate_units below: collision resolution
         // still nudges a stunned body, so units cannot stack on top of one.
         if (has_status(game.registry, e, StatusKind::Stunned)) {
+            continue;
+        }
+        // Committed to a swing: the same "stops walking, keeps its route"
+        // treatment, for the same reason. This is what makes standing still to
+        // shoot a real cost -- a kiter's effective retreat speed is its speed
+        // times the fraction of its cycle it is NOT committed.
+        if (striking(game.registry, e)) {
             continue;
         }
         NavPath& np = view.get<NavPath>(e);

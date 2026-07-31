@@ -488,8 +488,18 @@ struct Attack {
     DamageType damage_type = DamageType::Slashing;
     float base_damage = 0.0f;
     float range = 0.0f;
-    float cooldown = 0.0f;    // seconds between uses of THIS attack
+    float cooldown = 0.0f;    // seconds between uses of THIS attack, from RESOLVE
     float crit_chance = 0.0f;
+    // Commitment (game/src/strike.h). The attacker neither moves nor thinks
+    // through either window, which is what makes standing still to shoot cost
+    // ground. wind_up is CANCELLABLE (a stun drops the blow); recovery is not
+    // (the blow was already thrown).
+    //
+    // `cooldown` keeps its meaning and is measured from resolve, with recovery
+    // running INSIDE it -- so a weapon needs no third redundant number, and an
+    // un-authored attack (both 0) resolves instantly, exactly as before.
+    float wind_up_seconds = 0.0f;
+    float recovery_seconds = 0.0f;
 };
 
 // Tactical stats (the resolve_attack inputs) + the class engagement preference.
@@ -899,6 +909,9 @@ enum class GameEventKind : int32_t {
     SkillUsed,           // a skill was cast; actor = caster slot, target = its primary
                          // target (the caster itself for a self/untargeted cast),
                          // amount = the SkillId
+    StrikeCancelled,     // a committed attack was interrupted during its wind-up and
+                         // never landed; actor = the attacker whose swing was dropped,
+                         // target = who it was aimed at, amount = the attack index
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and

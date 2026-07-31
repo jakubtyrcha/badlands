@@ -85,7 +85,10 @@ TEST_CASE("a landed melee hit emits one attributed DamageDealt event") {
         [&](const std::vector<GameEvent>& evs) {
             return find(evs, GameEventKind::DamageDealt, d.gob, d.merc);
         },
-        60);
+        // Raised from 60: every swing now costs its wind-up before it lands
+        // (game/src/strike.h), so the first hit of a duel arrives later in
+        // ticks even though nothing about the approach changed.
+        150);
     REQUIRE(mg != nullptr);
     CHECK(mg->amount > 0.0f);
     CHECK(mg->target_kind == badlands::kEventTargetCharacter);
@@ -98,7 +101,7 @@ TEST_CASE("DrainEvents empties the buffer") {
     // Tick until at least one event has been produced (a hit lands quickly).
     const GameEvent* any = tick_until(
         d, all, [](const std::vector<GameEvent>& evs) { return evs.empty() ? nullptr : &evs.back(); },
-        60);
+        150);  // see above: wind-ups push the first event later in ticks
     REQUIRE(any != nullptr);
 
     // A drain with no tick in between yields nothing new.

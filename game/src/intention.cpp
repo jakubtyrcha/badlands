@@ -10,6 +10,7 @@
 #include "placement.h"       // nearest_building_of, PlacementState
 #include "skill_cast.h"      // validate_cast -- BL_ACT_USE_SKILL's own validation
 #include "skills.h"          // Skills, SkillId
+#include "strike.h"          // striking -- a committed attacker takes no action
 
 #include <spdlog/spdlog.h>
 
@@ -442,6 +443,18 @@ bool resolve_use_skill(BadlandsGame& game, uint32_t slot, const AgentAction& act
 }  // namespace
 
 bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action) {
+    // Committed to a swing (game/src/strike.h): no action of any kind, attack
+    // or skill. Checked once, ahead of the per-kind branches, because
+    // commitment is a property of the ACTOR rather than of what it is asking
+    // for. Belt-and-braces on top of the think dispatch already skipping a
+    // committed brain -- an engine-side brain, or a test, can reach this
+    // function without going through that dispatch at all.
+    if (entt::entity actor = entity_for_slot(game, static_cast<int32_t>(slot));
+        actor != entt::null && striking(game.registry, actor)) {
+        spdlog::warn("[action] slot {}: still committed to an attack, kind {} dropped", slot,
+                     action.kind);
+        return false;
+    }
     if (action.kind == BL_ACT_USE_SKILL) {
         return resolve_use_skill(game, slot, action);
     }

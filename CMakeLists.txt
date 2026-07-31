@@ -256,6 +256,9 @@ add_library(badlands_game_lib STATIC
     # Threat: fixed calibration anchors that double as the brains' fight-or-
     # flee input (game/src/threat_table.h). Authored, never derived.
     game/src/threat_table.cpp
+    # Attack commitment: wind-up (cancellable) + recovery (not), during which
+    # the attacker neither moves nor thinks (game/src/strike.h).
+    game/src/strike.cpp
     # Casting: validation, target resolution, the pre-rolled attack test, and
     # applying the ops an effect asked for (game/src/skill_cast.h). Separate
     # from skills.cpp, which stays world-free so it can link standalone into
@@ -610,6 +613,7 @@ add_executable(badlands_game_tests
     game/tests/progression_tests.cpp
     game/tests/growth_tests.cpp
     game/tests/threat_table_tests.cpp
+    game/tests/strike_tests.cpp
     # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
     game/tests/intention_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp

@@ -118,8 +118,26 @@ entt::entity select_target(const BadlandsGame& game, entt::entity self);
 // AGENT's own swings anymore (resolve_action always names an explicit
 // index, wasm hero or simple monster brain alike) -- Shoot (the hunter's
 // prey-hunting) is the one surviving -1 producer, out of this slice's scope.
+// As of the commitment mechanic (game/src/strike.h) this DECLARES the swing
+// rather than resolving it: everything above still happens at declaration
+// time, and the blow itself lands when the attack's wind-up elapses. A brain
+// that asked for a legal attack always gets one thrown; whether it CONNECTS is
+// decided later, by deliver_strike below.
 void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slot,
                  int32_t attack_index = -1);
+
+// Land a committed blow: melee damage applied to the live defender, or the
+// projectile spawned. Called only by advance_strikes (game/src/strike.h) when
+// a wind-up elapses -- the split is deliberate, this file owning WHAT a blow
+// does and strike.cpp owning WHEN.
+//
+// The attacker's stats and the attack come from the strike (captured at
+// declaration); the DEFENDER is read live through effective_combatant, so a
+// target stunned mid-swing is defenceless when the blow arrives -- the same
+// rule advance_projectiles already applies to a shot in flight. A blow whose
+// target died, vanished, or stepped out of reach whiffs: not re-aimed, not
+// refunded.
+void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInProgress& s);
 
 // Attack index (into the actor's Attacks) to use against `target` right now, or
 // -1. Wraps pick_attack with the live distance + melee-lock state. Single-

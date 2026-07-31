@@ -2,6 +2,7 @@
 
 #include "game_state.h"  // BadlandsGame, emit_event, slot_for_entity
 #include "intention.h"   // abort_current_intention -- a stun ends the running plan
+#include "strike.h"      // cancel_strike -- and drops a swing still being wound up
 
 #include <spdlog/spdlog.h>
 
@@ -89,6 +90,11 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
     // not consulted during one -- sim.cpp's think dispatch).
     if (kind == StatusKind::Stunned) {
         abort_current_intention(game, slot_for_entity(game, e));
+        // And drops a blow still being wound up (game/src/strike.h). This is
+        // what makes a stun an INTERRUPT rather than only a debuff: catching
+        // an opponent mid-swing costs it the whole attack. A strike already
+        // past its resolve is untouched -- that blow was thrown.
+        cancel_strike(game, e);
     }
 
     const glm::vec2 pos =

@@ -68,7 +68,7 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.9f; d.evasion = 0.05f; d.defense = 0.1f; d.armour = 3.0f;
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
-        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 6.0f, 1.5f, 1.0f, 0.1f};
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 6.0f, 1.5f, 1.0f, 0.1f, 0.35f, 0.25f};
         // Armour 2, evasion 1, hitpoints 1, dps 1 (the doc's level-15 ratings).
         // The heaviest armour growth of the four -- which is also why the
         // mercenary's curve flattens late: flat reduction loses relative value
@@ -93,8 +93,8 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.85f; d.evasion = 0.15f; d.defense = 0.05f; d.armour = 1.0f;
         d.stance = CombatStance::Ranged;
         d.attack_count = 2;
-        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 5.0f, 8.0f, 1.2f, 0.25f};
-        d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f};
+        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 5.0f, 8.0f, 1.2f, 0.25f, 0.60f, 0.30f};
+        d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f, 0.25f, 0.15f};
         // Armour 1, evasion 1, hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.004f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
@@ -115,8 +115,8 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.85f; d.evasion = 0.20f; d.defense = 0.10f; d.armour = 1.0f;
         d.stance = CombatStance::Melee;  // closes, but opens with the crossbow
         d.attack_count = 2;
-        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 5.0f, 5.0f, 2.5f, 0.30f};
-        d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 4.0f, 1.3f, 0.7f, 0.20f};
+        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 5.0f, 5.0f, 2.5f, 0.30f, 0.50f, 0.40f};
+        d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 4.0f, 1.3f, 0.7f, 0.20f, 0.25f, 0.15f};
         // Armour 1, evasion 2 (the nimblest of the four), hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.008f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
@@ -134,7 +134,7 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.9f; d.evasion = 0.05f; d.defense = 0.0f; d.armour = 0.0f;
         d.stance = CombatStance::Ranged;
         d.attack_count = 1;
-        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 6.0f, 1.5f, 0.10f};
+        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 6.0f, 1.5f, 0.10f, 0.80f, 0.35f};
         // Armour 0, evasion 0, hitpoints 1, dps 2. No defensive growth at all:
         // the apprentice never stops being fragile, and its intended late-game
         // power is SPELLS, not this bolt -- which is why a stats-only
@@ -158,7 +158,7 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.7f; d.evasion = 0.05f; d.defense = 0.0f; d.armour = 0.0f;
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
-        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.0f, 1.0f, 0.05f};
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.0f, 1.0f, 0.05f, 0.20f, 0.10f};
         d.xp_reward = 10;
     }
     // Goblin: a step up from the rat -- more hp, still light melee.
@@ -172,7 +172,7 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.8f; d.evasion = 0.10f; d.defense = 0.05f; d.armour = 0.0f;
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
-        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f};
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f, 0.25f, 0.15f};
         d.xp_reward = 25;
     }
 
@@ -188,7 +188,7 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.85f; d.evasion = 0.10f; d.defense = 0.10f; d.armour = 2.0f;
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
-        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 5.0f, 1.4f, 1.0f, 0.10f};
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 5.0f, 1.4f, 1.0f, 0.10f, 0.35f, 0.25f};
         d.xp_reward = 60;
     }
     // Bandit Archer: the enemy-side kiter. Exists so the skirmish behaviour is
@@ -204,8 +204,8 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.85f; d.evasion = 0.15f; d.defense = 0.05f; d.armour = 1.0f;
         d.stance = CombatStance::Ranged;
         d.attack_count = 2;
-        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 7.0f, 1.3f, 0.20f};
-        d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 2.0f, 1.2f, 0.8f, 0.05f};
+        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 7.0f, 1.3f, 0.20f, 0.55f, 0.30f};
+        d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 2.0f, 1.2f, 0.8f, 0.05f, 0.25f, 0.15f};
         d.xp_reward = 60;
     }
     // Bandit Leader: beats every level-1 core class. The matrix needs a ceiling
@@ -220,7 +220,7 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.95f; d.evasion = 0.15f; d.defense = 0.20f; d.armour = 4.0f;
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
-        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 8.0f, 1.5f, 0.9f, 0.15f};
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 8.0f, 1.5f, 0.9f, 0.15f, 0.30f, 0.20f};
         d.xp_reward = 200;
     }
     // Mud Golem: the Goliath. Slow, enormously durable, and the only creature
@@ -238,7 +238,7 @@ CreatureCatalog::CreatureCatalog() {
         d.accuracy = 0.80f; d.evasion = 0.0f; d.defense = 0.0f; d.armour = 8.0f;
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
-        d.attacks[0] = {AttackCategory::Melee, DamageType::Blunt, 12.0f, 1.8f, 2.2f, 0.05f};
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Blunt, 12.0f, 1.8f, 2.2f, 0.05f, 1.00f, 0.60f};
         d.xp_reward = 250;
     }
 

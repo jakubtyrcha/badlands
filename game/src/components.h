@@ -289,6 +289,23 @@ struct Growth {
     StatGrowth rows{};
 };
 
+// A committed attack, mid-throw (game/src/strike.h). Present only while the
+// attacker is winding up or recovering; phase is derived from the clock
+// against the two deadlines, so there is no phase field to fall out of sync.
+//
+// The attacker's stats and the attack itself are CAPTURED here at declaration,
+// the same rule Projectile follows: a blow already in flight must not change
+// because the thrower levelled, was cursed, or died mid-swing.
+struct StrikeInProgress {
+    int64_t resolve_at_millis = 0;   // the blow lands here (end of wind-up)
+    int64_t free_at_millis = 0;      // recovery ends here; the component is dropped
+    int64_t declared_millis = 0;     // the roll's seed axis, fixed when committed
+    int32_t attack_index = 0;
+    uint32_t target_slot = UINT32_MAX;
+    Combatant attacker{};
+    Attack attack{};
+};
+
 // WHICH catalog creature this entity is. The threat table (threat_table.h) is
 // keyed by creature, and before this nothing on a spawned entity recorded what
 // it had been spawned AS -- spawn_creature_into took a CreatureId and kept it
