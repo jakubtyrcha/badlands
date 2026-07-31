@@ -18,6 +18,7 @@ struct LeafVoxelizeOptions {
   float occupancy_fraction = 0.15f;  // occupied iff splatted card area >= fraction * cell^2
   float overscale = 1.4f;            // tet circumradius = 0.5 * overscale * cell
   float axis_jitter = 0.18f;         // ~10 deg axis perturbation
+  float position_jitter = 0.3f;      // tet center offset, +-fraction of cell per axis
   float brightness_jitter = 0.25f;   // uv.x *= (1 - jitter * hash01)
   int coverage_texture_size = 128;   // BuildLeafRgba8 resolution for CPU sampling
 };

@@ -197,12 +197,18 @@ TexturedMeshResult EmitTetMesh(const LeafVoxelGrid& grid, const LeafVoxelizeOpti
     if (acc.area_alpha < occ_threshold) continue;
 
     const glm::ivec3 cell = UnpackCellKey(key);
-    const glm::vec3 cell_center = grid.origin + (glm::vec3(cell) + 0.5f) * h;
+    const glm::vec3 lattice_center = grid.origin + (glm::vec3(cell) + 0.5f) * h;
+    // Off-lattice tet center: exact cell centers read as rows/columns aligned
+    // to the grid axes, so break the lattice up with a hashed per-cell offset.
+    // Orientation (axis fallback below) stays on the unjittered lattice center.
+    const glm::vec3 pos_hash(hash01(cell, 5), hash01(cell, 6), hash01(cell, 7));
+    const glm::vec3 cell_center =
+        lattice_center + opts.position_jitter * h * (2.0f * pos_hash - 1.0f);
 
     const float area_axis_len = glm::length(acc.area_axis);
     const glm::vec3 axis = (area_axis_len > 1e-8f)
         ? acc.area_axis / area_axis_len
-        : SafeNormalize(cell_center - aabb_center, glm::vec3(0.0f, 1.0f, 0.0f));
+        : SafeNormalize(lattice_center - aabb_center, glm::vec3(0.0f, 1.0f, 0.0f));
 
     const glm::vec3 hash3(hash01(cell, 1), hash01(cell, 2), hash01(cell, 3));
     const glm::vec3 a_prime =
