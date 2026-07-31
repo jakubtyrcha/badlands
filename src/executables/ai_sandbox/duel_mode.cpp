@@ -131,7 +131,8 @@ void DuelMode::Stage(Sim& sim) {
     decided_ = false;
 }
 
-bool DuelMode::Observe(const std::vector<CharacterState>& rows, int64_t world_millis) {
+bool DuelMode::Observe(const std::vector<CharacterState>& rows,
+                       const std::vector<GameEvent>& /*events*/, int64_t world_millis) {
     const int64_t elapsed = world_millis - started_millis_;
     if (!decided_) {
         const DuelTally t = tally_duel(rows);

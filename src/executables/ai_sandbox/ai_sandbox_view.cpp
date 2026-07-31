@@ -452,15 +452,17 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
     sim_.Tick(static_cast<float>(kTickDt));
     ++sim_ticks_done_;
   }
-  // Empty the sim's transient event stream (this view does not render a combat
-  // log; without draining, game.events would grow unbounded during combat).
+  // Drain the sim's transient event stream and hand it to the mode. It has to
+  // be emptied every frame regardless (game.events would otherwise grow
+  // unbounded during combat); passing it on costs nothing and is the only way a
+  // mode can see a decision that left no mark on the snapshot rows.
   sim_.DrainEvents(events_scratch_);
 
   // The mode watches the world it asked for and says when it wants a new one.
   // Read AFTER the ticks so it sees this frame's final state, and the scene is
   // rebuilt on a restage because a fresh world has a different arena in it.
   char_rows_ = sim_.Characters();
-  if (mode_->Observe(char_rows_, sim_.World().world_millis)) {
+  if (mode_->Observe(char_rows_, events_scratch_, sim_.World().world_millis)) {
     StageWorld();
     BuildScene();
     FrameCamera();

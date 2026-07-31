@@ -74,7 +74,10 @@ class DuelMode : public SandboxMode {
     const char* name() const override { return "duel"; }
     WorldConfig Configure() override;
     void Stage(Sim& sim) override;
-    bool Observe(const std::vector<CharacterState>& rows, int64_t world_millis) override;
+    // Events unused: a duel's verdict is entirely visible in the rows -- who
+    // is still standing -- so this mode needs no help from the stream.
+    bool Observe(const std::vector<CharacterState>& rows, const std::vector<GameEvent>& events,
+                 int64_t world_millis) override;
     std::string Status() const override;
 
    private:

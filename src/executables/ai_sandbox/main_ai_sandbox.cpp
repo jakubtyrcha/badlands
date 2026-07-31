@@ -8,6 +8,7 @@
 #include "engine/app/sdl_viewer_app.hpp"
 #include "executables/ai_sandbox/ai_sandbox_view.hpp"
 #include "executables/ai_sandbox/duel_mode.hpp"
+#include "executables/ai_sandbox/sneak_mode.hpp"
 
 namespace {
 
@@ -24,8 +25,12 @@ std::unique_ptr<badlands::SandboxMode> MakeMode(int argc, char** argv) {
       seed = std::strtoull(argv[++i], nullptr, 10);
     }
   }
+  if (name == "sneak") {
+    return std::make_unique<badlands::SneakMode>(badlands::SneakConfig{});
+  }
   if (name != "duel") {
-    spdlog::error("badlands_ai_sandbox: unknown --mode '{}' -- running duel", name);
+    spdlog::error("badlands_ai_sandbox: unknown --mode '{}' (duel, sneak) -- running duel",
+                  name);
   }
   badlands::DuelConfig cfg;
   cfg.seed = seed;

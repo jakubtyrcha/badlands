@@ -7,6 +7,7 @@
 
 #include "executables/ai_sandbox/arena.hpp"
 #include "executables/ai_sandbox/duel_mode.hpp"
+#include "executables/ai_sandbox/sneak_mode.hpp"
 
 #include "game_state.h"
 #include "nav_world.h"       // rebuild_navmesh_if_stale
@@ -92,6 +93,10 @@ std::vector<ArenaShape> all_shapes() {
     }
     return out;
 }
+
+// A duel reads its verdict off the rows, so every case here hands Observe an
+// empty stream. The event channel is for a mode watching for a DECISION.
+const std::vector<GameEvent> kNoEvents{};
 
 // A CharacterState carrying only what tally_duel reads.
 CharacterState fighter(int32_t team) {
@@ -300,10 +305,10 @@ TEST_CASE("a duel ends when one side is gone, after the linger", "[duel]") {
     const std::vector<CharacterState> both{fighter(0), fighter(1)};
     const std::vector<CharacterState> left_only{fighter(0)};
 
-    CHECK_FALSE(mode.Observe(both, 1000));
-    CHECK_FALSE(mode.Observe(left_only, 2000));   // decided here, but lingering
-    CHECK_FALSE(mode.Observe(left_only, 6999));   // still inside the linger
-    CHECK(mode.Observe(left_only, 7000));         // 2000 + 5000: restage
+    CHECK_FALSE(mode.Observe(both, kNoEvents, 1000));
+    CHECK_FALSE(mode.Observe(left_only, kNoEvents, 2000));   // decided here, but lingering
+    CHECK_FALSE(mode.Observe(left_only, kNoEvents, 6999));   // still inside the linger
+    CHECK(mode.Observe(left_only, kNoEvents, 7000));         // 2000 + 5000: restage
 }
 
 TEST_CASE("a duel with both sides alive times out as a draw", "[duel]") {
@@ -314,9 +319,9 @@ TEST_CASE("a duel with both sides alive times out as a draw", "[duel]") {
     mode.Configure();
 
     const std::vector<CharacterState> both{fighter(0), fighter(1)};
-    CHECK_FALSE(mode.Observe(both, 59999));
+    CHECK_FALSE(mode.Observe(both, kNoEvents, 59999));
     // No linger on a timeout: there is nothing left to watch.
-    CHECK(mode.Observe(both, 60000));
+    CHECK(mode.Observe(both, kNoEvents, 60000));
 }
 
 TEST_CASE("a duel with both sides gone is a draw, not a win", "[duel]") {
@@ -326,8 +331,8 @@ TEST_CASE("a duel with both sides gone is a draw, not a win", "[duel]") {
     mode.Configure();
 
     const std::vector<CharacterState> nobody{};
-    CHECK_FALSE(mode.Observe(nobody, 2000));  // decided, lingering
-    CHECK(mode.Observe(nobody, 3000));
+    CHECK_FALSE(mode.Observe(nobody, kNoEvents, 2000));  // decided, lingering
+    CHECK(mode.Observe(nobody, kNoEvents, 3000));
     // A mutual kill leaves nobody standing; the readout must not credit a side.
     const std::string status = mode.Status();
     CHECK(status.find("draw") != std::string::npos);
@@ -340,4 +345,95 @@ TEST_CASE("a critter is not a side", "[duel]") {
     const DuelTally t = tally_duel({fighter(0), deer});
     CHECK(t.left_alive);
     CHECK_FALSE(t.right_alive);  // wildlife on team 1 does not keep the round alive
+}
+
+// --- the sneak sandbox -------------------------------------------------------
+// Driven with SYNTHETIC events: no Sim, no window. The verdict logic is a pure
+// fold over the stream, which is what makes it testable at all -- and what
+// makes a FAILED line in a live run mean "the brain did not do it" rather than
+// "the mode missed it".
+
+namespace {
+
+GameEvent status_applied(uint32_t target_slot, StatusKind kind, int64_t at) {
+    GameEvent ev{};
+    ev.kind = GameEventKind::StatusApplied;
+    ev.actor_id = target_slot;
+    ev.target_id = target_slot;
+    ev.target_kind = kEventTargetCharacter;
+    ev.amount = static_cast<float>(kind);
+    ev.at_millis = at;
+    return ev;
+}
+
+GameEvent damage_dealt(uint32_t actor_slot, uint32_t target_slot, float amount, int64_t at) {
+    GameEvent ev{};
+    ev.kind = GameEventKind::DamageDealt;
+    ev.actor_id = actor_slot;
+    ev.target_id = target_slot;
+    ev.target_kind = kEventTargetCharacter;
+    ev.amount = amount;
+    ev.at_millis = at;
+    return ev;
+}
+
+}  // namespace
+
+TEST_CASE("the sneak mode sees the sneak, then the blow that ends it", "[sneak][mode]") {
+    SneakProgress p;
+    observe_sneak({damage_dealt(7, 9, 3.0f, 500)}, 7, p);
+    CHECK(p.stage == SneakStage::Waiting);  // hitting something is not sneaking
+
+    observe_sneak({status_applied(7, StatusKind::Sneaking, 1800)}, 7, p);
+    REQUIRE(p.stage == SneakStage::Sneaked);
+    CHECK(p.sneaked_at_millis == 1800);
+
+    observe_sneak({damage_dealt(7, 9, 31.2f, 7400)}, 7, p);
+    REQUIRE(p.stage == SneakStage::Struck);
+    CHECK(p.struck_at_millis == 7400);
+    CHECK(p.strike_damage == Catch::Approx(31.2f));
+}
+
+TEST_CASE("the sneak mode ignores what the other side does", "[sneak][mode]") {
+    // The bandit hitting back is the most common event in this stream by far;
+    // crediting it would make every round pass. Keyed on the ACTOR, so it
+    // cannot.
+    SneakProgress p;
+    observe_sneak({status_applied(7, StatusKind::Sneaking, 1000)}, 7, p);
+    REQUIRE(p.stage == SneakStage::Sneaked);
+
+    observe_sneak({damage_dealt(/*actor=*/9, /*target=*/7, 5.0f, 2000)}, 7, p);
+    CHECK(p.stage == SneakStage::Sneaked);  // still waiting for OUR blow
+
+    // ...and a status that is not Sneaking never starts a round either.
+    SneakProgress q;
+    observe_sneak({status_applied(7, StatusKind::Stunned, 900)}, 7, q);
+    CHECK(q.stage == SneakStage::Waiting);
+}
+
+TEST_CASE("the sneak mode reports success and restages", "[sneak][mode]") {
+    SneakMode mode(SneakConfig{});
+    mode.Configure();
+
+    const std::vector<CharacterState> rows{fighter(0), fighter(1)};
+    CHECK_FALSE(mode.Observe(rows, kNoEvents, 500));
+    // The round ends on the blow, not on the budget: there is nothing further
+    // to learn from watching the fight play out.
+    CHECK(mode.Observe(rows, {status_applied(UINT32_MAX, StatusKind::Sneaking, 0)}, 600) ==
+          false);
+    CHECK(mode.Status().find("approaching") != std::string::npos);
+}
+
+TEST_CASE("the sneak mode reports a failure on timeout, and still restages", "[sneak][mode]") {
+    // A round that produced nothing must say so out loud. Silently restaging
+    // would read exactly like a pass.
+    SneakConfig cfg;
+    cfg.max_millis = 30000;
+    SneakMode mode(cfg);
+    mode.Configure();
+
+    const std::vector<CharacterState> rows{fighter(0), fighter(1)};
+    CHECK_FALSE(mode.Observe(rows, kNoEvents, 29999));
+    CHECK(mode.Observe(rows, kNoEvents, 30000));
+    CHECK(mode.Status().find("FAILED") != std::string::npos);
 }
