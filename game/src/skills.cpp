@@ -28,6 +28,9 @@ constexpr std::array<SkillDef, static_cast<size_t>(kSkillCount)> kSkills{{
     // further away than anything can answer.
     {SkillId::PrecisionShot, "PrecisionShot", SkillTriggerKind::MeleeThreatClose,
      /*trigger_param=*/30.0f},
+    // The escape: recommended when something is close enough to matter.
+    {SkillId::Teleport, "Teleport", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/6.0f},
 }};
 
 constexpr bool skills_dense() {
@@ -188,6 +191,20 @@ SkillCatalog::SkillCatalog() {
     shot.effect = "Draws a long breath, and does not miss.";
     set_constant(shot, "range", 30.0f);
     set_constant(shot, "crit_multiplier", 3.0f);
+
+    // The apprentice's escape, and the only Point-targeted skill: it names a
+    // PLACE rather than an entity, so it resolves no targets at all and its
+    // effect spends the cast's own validated point (game/src/skill_abi.h's
+    // BL_FX_TELEPORT). The engine has already checked that point is in range
+    // and stand-on-able before the effect ever runs.
+    SkillSpec& blink = specs[static_cast<size_t>(SkillId::Teleport)];
+    blink.trigger = SkillTrigger::Action;
+    blink.target = SkillTargetMode::Point;
+    blink.attack_test = SkillAttackTest::None;
+    blink.cooldown_seconds = 25.0f;
+    blink.intention_duration_seconds = 0.0f;
+    blink.effect = "Steps sideways out of the world, and back in somewhere else.";
+    set_constant(blink, "range", 30.0f);
 }
 
 SkillId SkillIdFromName(const char* name) {
@@ -354,6 +371,14 @@ void precision_shot_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& ou
     }
 }
 
+// Teleport: one op, and it names no destination -- it cannot. The engine
+// validated a point and put it in the context; all this says is "move me
+// there". An effect that wanted to blink somewhere else has no way to express
+// it, which is the contract working rather than a limitation of this skill.
+void teleport_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    push_effect_op(out, BlSkillEffectOp{BL_FX_TELEPORT, ctx.caster.slot, 0, 0.0f});
+}
+
 constexpr std::array<SkillEffectFn, static_cast<size_t>(kSkillCount)> kEffects{{
     calcify_effect,
     shield_bash_effect,
@@ -362,6 +387,7 @@ constexpr std::array<SkillEffectFn, static_cast<size_t>(kSkillCount)> kEffects{{
     backstab_effect,
     sneak_effect,
     precision_shot_effect,
+    teleport_effect,
 }};
 
 }  // namespace

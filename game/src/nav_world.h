@@ -17,6 +17,8 @@
 
 #include <glm/glm.hpp>
 
+#include <vector>
+
 struct BadlandsGame;
 
 namespace badlands {
@@ -55,5 +57,20 @@ void rebuild_navmesh_if_stale(BadlandsGame& game);
 // worlds), so a selector gets a sensible ordering either way. Const: reads the
 // navmesh's mutable cost cache, never rebuilds -- the sim rebuilds before think.
 float nav_cost(const BadlandsGame& game, glm::vec2 from, glm::vec2 to);
+
+// Can something STAND at this world point? Rebuilds a stale navmesh first, so
+// a caller does not have to know whether a building was placed this tick.
+//
+// Always TRUE in a world with terrain blocking off: that world has no navmesh
+// at all and movement is deliberately obstacle-oblivious (make_flat_world's
+// contract), so refusing every point there would make a point-targeted skill
+// silently uncastable in exactly the worlds the movement tests use.
+bool nav_point_free(BadlandsGame& game, glm::vec2 p);
+
+// The navmesh rectangles near `origin`, nearest-first and capped -- the window
+// a brain is shown so it can choose somewhere to go (game/src/brain_abi.h's
+// BlNavPoly). Empty when no navmesh is built.
+void nav_cells_near(BadlandsGame& game, glm::vec2 origin, float radius, size_t max_out,
+                    std::vector<nav::NavMesh::DebugCell>& out);
 
 }  // namespace badlands

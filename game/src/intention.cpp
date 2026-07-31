@@ -463,8 +463,11 @@ bool resolve_use_skill(BadlandsGame& game, uint32_t slot, const AgentAction& act
         (action.arg >= 0 && action.arg < skills.count)
             ? game.skills.specs[static_cast<size_t>(skills.ids[action.arg])].target
             : SkillTargetMode::Any;
-    const bool self_cast =
-        mode == SkillTargetMode::SelfOnly || mode == SkillTargetMode::None;
+    // A POINT cast names a PLACE, so it names no victim either -- and inferring
+    // one would make an escape blink castable only while already engaged, which
+    // is the opposite of what it is for.
+    const bool self_cast = mode == SkillTargetMode::SelfOnly ||
+                           mode == SkillTargetMode::None || mode == SkillTargetMode::Point;
     if (self_cast && target_slot == UINT32_MAX) {
         target_slot = slot;
     } else if (!resolve_action_target(game, slot, actor, target_slot, "BL_ACT_USE_SKILL",
@@ -473,11 +476,15 @@ bool resolve_use_skill(BadlandsGame& game, uint32_t slot, const AgentAction& act
     }
 
     CastPlan plan;
-    if (!validate_cast(game, slot, action.arg, target_slot, plan)) {
+    if (!validate_cast(game, slot, action.arg, target_slot, plan, SkillTrigger::Action,
+                       action.point)) {
         return false;  // validate_cast warned with the specific reason
     }
+    // The point rides the Command's own point field, which has been there since
+    // the log's first version -- so a point cast records and replays with no
+    // change to the trace format at all.
     game.command_queue.push_back(
-        {CommandKind::UseSkill, slot, target_slot, {0.0f, 0.0f}, action.arg});
+        {CommandKind::UseSkill, slot, target_slot, action.point, action.arg});
     return true;
 }
 

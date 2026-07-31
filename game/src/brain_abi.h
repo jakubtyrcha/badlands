@@ -17,7 +17,7 @@
 // v3 (contract-v3-alignment, docs/superpowers/specs/
 // 2026-07-25-contract-v3-alignment-design.md): adds a second, write-only
 // channel alongside the one suggestion a wake still returns -- a brain may
-// call the new bl_enqueue_action(kind, target_slot, arg) host import
+// call the new bl_enqueue_action(kind, target_slot, arg, point_x, point_z) host import
 // (src/crates/brainhost/include/brainhost.h) any number of times per wake to
 // fire instant actions (BL_ACT_*; only BL_ACT_ATTACK is live), each
 // validated by the engine independently at resolve time, in enqueue order.
@@ -68,7 +68,7 @@ extern "C" {
 
 // Wire format version. Bumped on any incompatible layout change; the host
 // (bh_instantiate) rejects a module whose bl_abi_version() disagrees.
-#define BL_ABI_VERSION 5
+#define BL_ABI_VERSION 6
 
 // Capacities baked into the wire structs below (fixed-size arrays -- no
 // dynamic length on the wasm side of this boundary).
@@ -88,6 +88,11 @@ extern "C" {
 // same way in wasm_brain.cpp.
 #define BL_MAX_SKILLS 8
 
+// Navmesh rectangles a brain is shown around itself (v6). A brain cannot pick
+// somewhere to go that it cannot see, and a POINT-targeted skill needs exactly
+// that -- so this is the local ground, nearest-first and capped.
+#define BL_MAX_NAV_POLYS 32
+
 // Action kinds (append-only): the vocabulary for bl_enqueue_action's `kind`
 // argument (src/crates/brainhost/include/brainhost.h's BhActionFn). Unlike
 // BL_INT_* (one suggestion per wake, validated/tracked by apply_intention),
@@ -102,9 +107,12 @@ extern "C" {
 // live: arg = index into BlViewWire.skills (the actor's OWN skill slots, the
 // same convention BL_ACT_ATTACK's arg uses for its attacks), target_slot =
 // the victim (UINT32_MAX = the current Attack-intention's target, or the
-// caster itself for a self-targeted skill). Everything else -- cooldown,
-// whether the skill is castable as an action at all, targeting-mode legality,
-// reach -- is checked host-side (game/src/skill_cast.h's validate_cast).
+// caster itself for a self-targeted skill). A POINT-targeted skill names its
+// destination in the call's point_x/point_z instead (v6); every other action
+// passes zeroes. Everything else -- cooldown, whether the skill is castable as
+// an action at all, targeting-mode legality, reach, and whether that point is
+// somewhere anything could stand -- is checked host-side (game/src/
+// skill_cast.h's validate_cast).
 #define BL_ACT_USE_SKILL 1
 #define BL_ACT_USE_POTION 2  // reserved
 // live: arg = index into BlViewWire.attacks (BL_ACT_ATTACK's attack index),
@@ -391,6 +399,22 @@ typedef struct BlEvent {
     uint32_t _pad;
 } BlEvent;
 
+// --- BlNavPoly ---------------------------------------------------------------
+// One navmesh leaf near this entity: an axis-aligned world rect and whether
+// anything can stand on it. Both passable and impassable ones are carried --
+// a brain choosing where to go needs to see the walls too, and filtering them
+// out here would make "nothing nearby" and "nothing walkable nearby" look the
+// same.
+//
+// Filled ONLY for an entity that owns a point-targeted skill; everyone else
+// reads nav_poly_count == 0 and pays nothing for the block existing.
+typedef struct BlNavPoly {
+    float min_x, min_z;
+    float max_x, max_z;
+    int32_t passable;   // bool
+    uint32_t _pad;
+} BlNavPoly;
+
 // --- BlViewWire ------------------------------------------------------------
 // The whole per-wake view buffer: bl_view_buf() points at one of these.
 // Buffer addresses are fixed for the instance's lifetime (src/crates/
@@ -424,6 +448,9 @@ typedef struct BlViewWire {
     int32_t skill_count;   // number of valid entries in `skills` (0..BL_MAX_SKILLS)
     uint32_t _pad6;         // explicit: same "every gap is named" discipline as _pad3
     BlViewSkill skills[BL_MAX_SKILLS];
+    int32_t nav_poly_count;  // valid entries in `nav_polys` (0..BL_MAX_NAV_POLYS)
+    uint32_t _pad7;          // explicit: same "every gap is named" discipline as _pad3
+    BlNavPoly nav_polys[BL_MAX_NAV_POLYS];
     int32_t event_count;   // number of valid entries in `events` (0..BL_MAX_EVENTS)
     uint32_t _pad4;         // explicit: keeps `events` (BlEvent starts with int64_t) 8-aligned
     BlEvent events[BL_MAX_EVENTS];
@@ -473,6 +500,10 @@ static_assert(sizeof(BlStatus) == 16, "BlStatus size drifted");
 static_assert(sizeof(BlViewAttack) == 24, "BlViewAttack size drifted");
 static_assert(sizeof(BlViewSkill) == 24, "BlViewSkill size drifted");
 static_assert(sizeof(BlEvent) == 32, "BlEvent size drifted");
-static_assert(sizeof(BlViewWire) == 1888, "BlViewWire size drifted");
+static_assert(sizeof(BlNavPoly) == 24, "BlNavPoly size drifted");
+// 1888 (v5) + 776: the count, its explicit pad, and 32 x 24 bytes of local
+// ground. The whole block is filled only for an entity that owns a
+// point-targeted skill -- everyone else pays the bytes and not the work.
+static_assert(sizeof(BlViewWire) == 2664, "BlViewWire size drifted");
 static_assert(sizeof(BlSuggestionWire) == 40, "BlSuggestionWire size drifted");
 #endif

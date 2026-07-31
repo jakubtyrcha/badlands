@@ -53,7 +53,8 @@
     },
     "skills": [
       { "name": "Curse", "level": 1 },
-      { "name": "Calcify", "level": 4 }
+      { "name": "Calcify", "level": 4 },
+      { "name": "Teleport", "level": 8 }
     ]
   },
   "Goblin": {}

@@ -242,6 +242,7 @@ enum class SkillId : int32_t {
     Backstab,      // Grave Robber: heavy bonus damage on someone not facing it
     Sneak,         // Grave Robber: goes unseen until it strikes
     PrecisionShot, // Hunter / Grave Robber: a focused shot that cannot miss
+    Teleport,      // Apprentice: blinks to a chosen point within range
     Count,
 };
 inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
@@ -610,6 +611,12 @@ enum class CreatureId : int32_t {
     BanditArcher,
     BanditLeader,
     MudGolem,
+    // A threat number that walks. NO attacks at all and a threat anchor far
+    // above anything else in the roster, so a brain can be shown something
+    // overwhelming without a fight breaking out -- threat approximates what a
+    // creature is worth, and the number is the whole of what a brain reacts to.
+    // Unarmed, so it stays out of anything that samples fighters by that rule.
+    TrainingDummy,
     Count,
 };
 inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);

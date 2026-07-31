@@ -24,7 +24,7 @@ TEST_CASE("BL_MAX_ACTIVITIES matches ActivityId::Count", "[brain_abi]") {
     REQUIRE(BL_MAX_ACTIVITIES == static_cast<int32_t>(ActivityId::Count));
 }
 
-TEST_CASE("BL_ABI_VERSION is 5", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 5); }
+TEST_CASE("BL_ABI_VERSION is 6", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 6); }
 
 TEST_CASE("BL_MAX_ATTACKS matches badlands::kMaxAttacks", "[brain_abi]") {
     REQUIRE(BL_MAX_ATTACKS == kMaxAttacks);
@@ -39,7 +39,7 @@ TEST_CASE("BlViewSkill is the documented size", "[brain_abi]") {
 }
 
 TEST_CASE("BlViewWire is the documented size", "[brain_abi]") {
-    REQUIRE(sizeof(BlViewWire) == 1888);
+    REQUIRE(sizeof(BlViewWire) == 2664);
 }
 
 TEST_CASE("BlViewAttack is the documented size", "[brain_abi]") {
@@ -77,16 +77,19 @@ TEST_CASE("BlViewWire block order: self / suggest / factors / statuses / attacks
     REQUIRE(offsetof(BlViewWire, skill_count) == 776);
     // skill_count(4) + _pad6(4) precede the BlViewSkill array.
     REQUIRE(offsetof(BlViewWire, skills) == 784);
-    // skills[8] * 24B = 192B.
-    REQUIRE(offsetof(BlViewWire, event_count) == 976);
+    // skills[8] * 24B = 192B, then the v6 nav window: nav_poly_count(4) +
+    // _pad7(4) + nav_polys[32] * 24B = 776B.
+    REQUIRE(offsetof(BlViewWire, nav_poly_count) == 976);
+    REQUIRE(offsetof(BlViewWire, nav_polys) == 984);
+    REQUIRE(offsetof(BlViewWire, event_count) == 1752);
     // event_count(4) + _pad4(4) keep `events` (BlEvent starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, events) == 984);
+    REQUIRE(offsetof(BlViewWire, events) == 1760);
     // events[8] * 32B = 256B.
-    REQUIRE(offsetof(BlViewWire, char_count) == 1240);
+    REQUIRE(offsetof(BlViewWire, char_count) == 2016);
     // char_count(4) + _pad5(4) keep `chars` (BlViewChar starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, chars) == 1248);
+    REQUIRE(offsetof(BlViewWire, chars) == 2024);
 }
 
 TEST_CASE("BlViewSuggest / BlViewFactors internal padding lands where documented",

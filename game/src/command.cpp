@@ -147,7 +147,8 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             // command in the same batch may have spent the cooldown. Nothing
             // is stamped and no effect runs unless validate_cast agrees NOW.
             CastPlan plan;
-            if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan)) {
+            if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan,
+                               SkillTrigger::Action, cmd.point)) {
                 return 0;
             }
             run_cast(game, cmd.actor, cmd.param_a, plan);

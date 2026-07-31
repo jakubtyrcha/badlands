@@ -100,7 +100,8 @@ include brain_scaffold
 # (pickBestAttack + brainTick): at most ONCE per wake (the soft one-action
 # convention resolve_action, game/src/intention.h, documents but does not
 # itself enforce).
-proc bl_enqueue_action(kind: int32; target: uint32; arg: int32) {.importc, cdecl.}
+proc bl_enqueue_action(kind: int32; target: uint32; arg: int32;
+                       pointX: float32; pointZ: float32) {.importc, cdecl.}
 
 # badlands::AttackCategory (game/include/badlands_sim.hpp): Melee=0, Ranged=1.
 # Not part of the wire vocabulary proper -- brain_abi.h deliberately excludes
@@ -171,6 +172,41 @@ proc meleeReach(v: HeroView): float32 =
     if a.category != kAttackCategoryRanged and a.range > result:
       result = a.range
 
+# --- point targeting (v6) ----------------------------------------------------
+# The farthest passable spot within `radius` from the threat we are running
+# from. Picked from the NAV WINDOW the host packs (BlNavPoly) rather than
+# guessed: a point the engine will refuse costs a whole cooldown to discover,
+# and a brain cannot see walls any other way.
+#
+# "Farthest from the threat", not "farthest from us": the distance that matters
+# is the one being opened up. A cell centre is used as the point, which is by
+# construction inside a passable leaf.
+type FleeGoal = object
+  ok*: bool
+  p*: Vec2
+
+proc farthestFreeGround(v: HeroView, radius: float32): FleeGoal =
+  result = FleeGoal(ok: false, p: v.pos)
+  var bestScore = -1.0'f32
+  for i in 0 ..< v.navPolyCount:
+    let c = v.navPolys[i]
+    if c.passable == 0:
+      continue
+    let cx = (c.min_x + c.max_x) * 0.5'f32
+    let cz = (c.min_z + c.max_z) * 0.5'f32
+    # Inside our own reach (the host re-checks this, but asking for a refusal
+    # spends a wake), and as far from the threat as that allows.
+    let dxs = cx - v.pos.x
+    let dzs = cz - v.pos.z
+    if dxs * dxs + dzs * dzs > radius * radius:
+      continue
+    let dxt = cx - v.threatPos.x
+    let dzt = cz - v.threatPos.z
+    let score = dxt * dxt + dzt * dzt
+    if score > bestScore:
+      bestScore = score
+      result = FleeGoal(ok: true, p: Vec2(x: cx, z: cz))
+
 # --- skirmishing (v5) --------------------------------------------------------
 # Standoff distance is a TACTICAL choice, so it is made here rather than by the
 # engine, which grows no kiting policy at all. What the engine owes this
@@ -192,6 +228,12 @@ const
   # with the same hand-sync discipline: the engine re-checks it, so a mismatch
   # costs a wasted wake and not correctness.
   kPrecisionShotRange: float32 = 30.0
+  # Teleport's own authored range (30.0, skills.json), same hand-sync rule.
+  kTeleportRange: float32 = 30.0
+  # Blink when something this much stronger is this close. Both are TACTICS and
+  # so live here rather than in the engine, which grows no flee policy at all.
+  kTeleportThreatRatio: float32 = 3.0
+  kTeleportFleeDist: float32 = 8.0
 
   # Hold this far outside the threat's own reach.
   kStandoffMargin: float32 = 1.5
@@ -347,6 +389,27 @@ proc brainTick(slot: int32): int32 =
       # so a wake is not spent asking for a cast the engine will refuse.
       var castSlot = -1'i32
       var castTarget = targetSlot
+      # Where a POINT-targeted cast wants to land. Ignored by every other
+      # targeting mode, and re-checked host-side either way.
+      var castPointX = 0.0'f32
+      var castPointZ = 0.0'f32
+
+      # Teleport, FIRST: it is the answer to something the hero cannot beat,
+      # and every other cast below is an answer to something it can. Gated on
+      # THREAT rather than on health -- the wire carries what the thing in
+      # front of us is worth (BlThreat.threat) against what we are worth
+      # (BlViewSelf.threat), and a fight that lopsided is lost before the first
+      # blow lands, not after half the hitpoints are gone.
+      if v.hasThreat and v.threatDist <= kTeleportFleeDist and
+         v.threatThreat >= v.selfThreat * kTeleportThreatRatio:
+        let blink = readySkillSlot(v, BL_SKILL_TELEPORT)
+        if blink >= 0:
+          let goal = farthestFreeGround(v, kTeleportRange)
+          if goal.ok:
+            castSlot = blink
+            castTarget = v.slot
+            castPointX = goal.p.x
+            castPointZ = goal.p.z
 
       # Dress wounds first: staying alive outranks any damage. SelfOnly, so it
       # names the caster and needs no threat in view.
@@ -413,12 +476,12 @@ proc brainTick(slot: int32): int32 =
         focusSlot = readyIntentionSkillSlot(v, BL_SKILL_PRECISION_SHOT)
 
       if castSlot >= 0:
-        bl_enqueue_action(BL_ACT_USE_SKILL, castTarget, castSlot)
+        bl_enqueue_action(BL_ACT_USE_SKILL, castTarget, castSlot, castPointX, castPointZ)
       # ...and the swing after it: a SECOND action this wake, not a replacement
       # for the cast. The engine stamps only the skill's own cooldown, so a
       # mercenary that opens with a bash still swings the same tick.
       if best >= 0:
-        bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best)
+        bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best, 0.0'f32, 0.0'f32)
       # Move-shoot-move (v5): a hero that outranges what is coming at it backs
       # off to keep the margin, while still firing through the action channel
       # above -- the action is orthogonal to the intention, which is what makes
@@ -472,7 +535,7 @@ proc brainTick(slot: int32): int32 =
   if chosen.kind == BL_INT_SHOOT:
     let best = pickBestAttack(v, true, v.preyDist)
     if best >= 0:
-      bl_enqueue_action(BL_ACT_ATTACK, v.preySlot, best)
+      bl_enqueue_action(BL_ACT_ATTACK, v.preySlot, best, 0.0'f32, 0.0'f32)
     else:
       refireHintMillis = minLegalCooldownMillis(v)
 

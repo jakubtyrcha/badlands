@@ -163,7 +163,10 @@ TEST_CASE("a SelfOnly skill cast at somebody else is refused, not remapped",
     CHECK(f.skill_cooldown(1) == Catch::Approx(20.0f));
 }
 
-TEST_CASE("a trigger the engine cannot execute is refused", "[skills][cast]") {
+TEST_CASE("a trigger that does not match the channel is refused", "[skills][cast]") {
+    // Passive is still declared-and-never-executed. Intention IS executed now,
+    // but on the OTHER channel (a focus) -- so firing it through the action
+    // gateway is still a refusal, and for a sharper reason than before.
     for (SkillTrigger trigger : {SkillTrigger::Passive, SkillTrigger::Intention}) {
         BashFixture f;
         SkillCatalog cat = f.game->skills;
@@ -178,7 +181,10 @@ TEST_CASE("a trigger the engine cannot execute is refused", "[skills][cast]") {
 
 TEST_CASE("a targeting mode the engine cannot resolve is refused",
           "[skills][cast]") {
-    for (SkillTargetMode mode : {SkillTargetMode::Multi, SkillTargetMode::Point}) {
+    // Point USED to be here. It is implemented now (game/src/skill_cast.cpp),
+    // so only Multi is left declared-and-refused -- and it stays refused rather
+    // than being approximated as Any, which is the rule this case exists for.
+    for (SkillTargetMode mode : {SkillTargetMode::Multi}) {
         BashFixture f;
         SkillCatalog cat = f.game->skills;
         cat.specs[static_cast<size_t>(SkillId::ShieldBash)].target = mode;

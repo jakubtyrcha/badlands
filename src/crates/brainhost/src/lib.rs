@@ -186,7 +186,7 @@ type BhLogFn = extern "C" fn(i32, *const u8, usize, *mut c_void);
 /// Same `Option<...>` reasoning as `BhLogFn` above. `target_slot` is `u32`
 /// here (matching the C typedef) even though the wasm import itself passes
 /// it as a plain i32 — see `host_bl_enqueue_action`'s cast.
-type BhActionFn = extern "C" fn(i32, u32, i32, *mut c_void);
+type BhActionFn = extern "C" fn(i32, u32, i32, f32, f32, *mut c_void);
 
 /// Per-Store data: just the two registered callbacks. Deliberately data-only
 /// — see CLAUDE.md's "FFI is data-only and mockable".
@@ -261,7 +261,7 @@ fn host_bl_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32
     log_fn(level, bytes.as_ptr(), bytes.len(), log_user);
 }
 
-/// The env.bl_enqueue_action host function: forwards {kind, target_slot, arg}
+/// The env.bl_enqueue_action host function: forwards {kind, target_slot, arg, point}
 /// to the registered `BhActionFn`, synchronously, once per call — no bytes/
 /// memory involved (unlike host_bl_log above), so there is nothing here to
 /// bounds-check. `target_slot` arrives from wasm as a plain i32 (wasm has no
@@ -269,7 +269,14 @@ fn host_bl_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32
 /// convention brain_abi.h's own wire structs use for slot indices, and it
 /// round-trips UINT32_MAX (the "current Attack-intention target" sentinel)
 /// exactly, unlike a saturating or checked conversion would.
-fn host_bl_enqueue_action(caller: Caller<'_, HostState>, kind: i32, target_slot: i32, arg: i32) {
+fn host_bl_enqueue_action(
+    caller: Caller<'_, HostState>,
+    kind: i32,
+    target_slot: i32,
+    arg: i32,
+    point_x: f32,
+    point_z: f32,
+) {
     let (action_fn, action_user) = {
         let state = caller.data();
         (state.action_fn, state.action_user)
@@ -277,7 +284,7 @@ fn host_bl_enqueue_action(caller: Caller<'_, HostState>, kind: i32, target_slot:
     let Some(action_fn) = action_fn else {
         return;
     };
-    action_fn(kind, target_slot as u32, arg, action_user);
+    action_fn(kind, target_slot as u32, arg, point_x, point_z, action_user);
 }
 
 /// Resolve+typecheck one required export. A missing export or a signature
@@ -703,7 +710,7 @@ mod tests {
     // whole suite; `abi_version_mismatch_rejected` deliberately uses an
     // independent literal (999) for its mismatching module, so it is
     // unaffected by this value either way.
-    const ABI_VERSION: i32 = 5;
+    const ABI_VERSION: i32 = 6;
 
     /// A conforming brain module's fixed layout: view/out buffers at 1024 /
     /// 2048 in a single 64 KiB memory page, so tests can reason about exact
@@ -948,19 +955,31 @@ mod tests {
     // kind/target_slot/arg it was given.
     #[test]
     fn bl_enqueue_action_forwards_calls_in_order() {
-        static CAPTURED: Mutex<Vec<(i32, u32, i32)>> = Mutex::new(Vec::new());
-        extern "C" fn capture_action(kind: i32, target_slot: u32, arg: i32, _user: *mut c_void) {
-            CAPTURED.lock().unwrap().push((kind, target_slot, arg));
+        static CAPTURED: Mutex<Vec<(i32, u32, i32, f32, f32)>> = Mutex::new(Vec::new());
+        extern "C" fn capture_action(
+            kind: i32,
+            target_slot: u32,
+            arg: i32,
+            point_x: f32,
+            point_z: f32,
+            _user: *mut c_void,
+        ) {
+            CAPTURED.lock().unwrap().push((kind, target_slot, arg, point_x, point_z));
         }
         CAPTURED.lock().unwrap().clear();
 
+        // v6: the call carries a POINT as well, for a point-targeted cast. The
+        // f32 pair has to arrive intact -- a guest that says "blink to (1.5,
+        // -2.5)" and gets (0, 0) would silently teleport into a wall.
         let tick_body = "\
-            i32.const 3 i32.const 5 i32.const 42 call $bl_enqueue_action \
-            i32.const 3 i32.const 6 i32.const 43 call $bl_enqueue_action \
+            i32.const 3 i32.const 5 i32.const 42 f32.const 1.5 f32.const -2.5 \
+            call $bl_enqueue_action \
+            i32.const 3 i32.const 6 i32.const 43 f32.const 0 f32.const 0 \
+            call $bl_enqueue_action \
             i32.const 0";
         let wasm = build_wasm(
             ABI_VERSION,
-            r#"(import "env" "bl_enqueue_action" (func $bl_enqueue_action (param i32 i32 i32)))"#,
+            r#"(import "env" "bl_enqueue_action" (func $bl_enqueue_action (param i32 i32 i32 f32 f32)))"#,
             "",
             tick_body,
         );
@@ -988,7 +1007,7 @@ mod tests {
         assert_eq!(rc, BH_OK, "bh_tick failed: {}", last_error());
 
         let captured = CAPTURED.lock().unwrap();
-        assert_eq!(*captured, vec![(3, 5, 42), (3, 6, 43)]);
+        assert_eq!(*captured, vec![(3, 5, 42, 1.5, -2.5), (3, 6, 43, 0.0, 0.0)]);
         drop(captured);
 
         unsafe {

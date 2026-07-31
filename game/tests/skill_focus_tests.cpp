@@ -20,13 +20,17 @@
 #include "sim_internal.hpp"
 #include "skill_cast.h"
 #include "skills.h"
+#include "nav_world.h"
+#include "placement.h"
 #include "status.h"
 
 #include <catch_amalgamated.hpp>
 
 #include <entt/entt.hpp>
 
+#include <algorithm>
 #include <memory>
+#include <vector>
 
 using namespace badlands;
 
@@ -270,4 +274,160 @@ TEST_CASE("the two cast channels refuse each other's skills", "[focus][skill]") 
     CHECK_FALSE(apply_intention(*f.game, f.caster_slot, as_focus));
     apply_commands(*f.game);
     CHECK_FALSE(f.is_focusing());
+}
+
+// --- point targeting ---------------------------------------------------------
+// Teleport is the only Point-targeted skill, and the only thing that moves an
+// entity outside the movement pipeline. The through-line here is the op: it
+// carries NO destination, so an effect can ask for somebody to be moved but
+// never for where.
+
+namespace {
+
+// An apprentice on flat ground WITH terrain blocking on, so there is a real
+// navmesh to be passable or not against -- the whole point of the cast's
+// second check.
+struct BlinkFixture {
+    std::unique_ptr<BadlandsGame> game;
+    uint32_t caster_slot = 0;
+
+    BlinkFixture() {
+        WorldConfig cfg;
+        cfg.prebuild_colony = false;
+        cfg.map = MapKind::FlatPlains;
+        cfg.terrain_blocking = true;
+        // A wall to aim into: the point check has to have something to refuse.
+        cfg.plops.push_back(
+            PlacementDesc{static_cast<int32_t>(BuildingKind::Wall), 0, 12.0f, 0.0f});
+        game = make_world(BrainDesc{}, cfg);
+
+        CharacterDesc app{};
+        app.archetype = Archetype::Hero;
+        app.hero_class = HERO_APPRENTICE;
+        app.team = 1;
+        app.hp = 16.0f;
+        app.move_speed = 2.4f;
+        app.size_x = app.size_y = app.size_z = 1.0f;
+        app.attack_count = 1;
+        app.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 6.0f, 1.5f, 0.0f};
+        caster_slot = spawn_into(*game, app);
+        learn_skill(game->registry.get<Skills>(caster()), SkillId::Teleport);
+    }
+
+    entt::entity caster() const { return game->slots[caster_slot]; }
+    glm::vec2 pos() const { return game->registry.get<Position>(caster()).pos; }
+
+    // Through the authoritative gate, with the point riding the Command's own
+    // point field -- exactly as a brain's action does.
+    int64_t blink_to(glm::vec2 p) {
+        return apply_command(*game, Command{CommandKind::UseSkill, caster_slot, caster_slot,
+                                            p, /*param_a=*/0});
+    }
+};
+
+}  // namespace
+
+TEST_CASE("a legal teleport moves the caster to exactly the cast point", "[skill][point]") {
+    BlinkFixture f;
+    const glm::vec2 to{-20.0f, 6.0f};
+    REQUIRE(f.blink_to(to) >= 0);
+    // EXACTLY there, not near it: the engine validated that spot, so that spot
+    // is where the caster ends up.
+    CHECK(f.pos() == to);
+}
+
+TEST_CASE("a point cast beyond range is refused", "[skill][point]") {
+    BlinkFixture f;
+    const glm::vec2 before = f.pos();
+    const SkillSpec& spec = f.game->skills.specs[static_cast<size_t>(SkillId::Teleport)];
+    const float range = spec.constant("range", 0.0f);
+    REQUIRE(range > 0.0f);
+
+    f.blink_to({before.x + range + 5.0f, before.y});
+    CHECK(f.pos() == before);
+    CHECK(f.game->registry.get<Skills>(f.caster()).cooldown_remaining[0] == 0.0f);
+}
+
+TEST_CASE("a point cast onto an impassable cell is refused", "[skill][point]") {
+    // Into the wall's own footprint. In range, and still not somewhere anything
+    // could stand -- which is a separate check from the range one, and this is
+    // what proves both run.
+    BlinkFixture f;
+    const glm::vec2 before = f.pos();
+    f.blink_to({12.0f, 0.0f});
+    CHECK(f.pos() == before);
+}
+
+TEST_CASE("a teleport op cannot name a point of its own", "[skill][point]") {
+    // STRUCTURAL: BL_FX_TELEPORT has no coordinate fields, so an effect that
+    // wanted an arbitrary destination has no way to express one. Here the op is
+    // handed deliberate garbage in the fields it DOES have, and the caster
+    // still lands on the context's point -- the only place it can.
+    BlinkFixture f;
+    const glm::vec2 to{-15.0f, -4.0f};
+    BlSkillCastContext ctx{};
+    ctx.version = BL_SKILL_ABI_VERSION;
+    ctx.skill_id = static_cast<int32_t>(SkillId::Teleport);
+    ctx.caster.slot = f.caster_slot;
+    ctx.point_x = to.x;
+    ctx.point_z = to.y;
+
+    BlSkillEffectBatch batch{};
+    batch.count = 1;
+    batch.ops[0] = BlSkillEffectOp{BL_FX_TELEPORT, f.caster_slot, /*param_i=*/999,
+                                   /*param_f=*/12345.0f};
+    apply_effect_batch(*f.game, f.caster_slot, ctx, batch);
+    CHECK(f.pos() == to);
+}
+
+TEST_CASE("nav cells near a point come back nearest-first and capped", "[nav]") {
+    BlinkFixture f;
+    rebuild_navmesh_if_stale(*f.game);
+    REQUIRE_FALSE(f.game->navmesh.empty());
+
+    std::vector<nav::NavMesh::DebugCell> cells;
+    f.game->navmesh.CellsNear(f.pos(), /*radius=*/30.0f, /*max_out=*/8, cells);
+    CHECK(cells.size() <= 8);
+    REQUIRE(!cells.empty());
+    // Non-decreasing in centre distance: what survives the cap is always the
+    // CLOSEST ground, which is what makes a bounded window usable at all.
+    float last = -1.0f;
+    for (const nav::NavMesh::DebugCell& c : cells) {
+        const glm::vec2 centre = (c.min_world + c.max_world) * 0.5f;
+        const float d = glm::distance(centre, f.pos());
+        CHECK(d >= last - 1e-3f);
+        last = d;
+    }
+    // ...and the walls are in there too: a brain choosing where to stand needs
+    // to see what it cannot stand on.
+    std::vector<nav::NavMesh::DebugCell> wide;
+    f.game->navmesh.CellsNear({12.0f, 0.0f}, /*radius=*/6.0f, /*max_out=*/64, wide);
+    CHECK(std::any_of(wide.begin(), wide.end(),
+                      [](const nav::NavMesh::DebugCell& c) { return !c.passable; }));
+}
+
+TEST_CASE("the nav window is clipped to the view cone", "[nav]") {
+    // You may not pick ground you cannot see. The cone is applied BEFORE the
+    // thinning, so a narrow one spends the whole budget on what is actually in
+    // front rather than returning a handful of survivors.
+    BlinkFixture f;
+    rebuild_navmesh_if_stale(*f.game);
+    const glm::vec2 from = f.pos();
+    const glm::vec2 facing{1.0f, 0.0f};  // +x
+
+    std::vector<nav::NavMesh::DebugCell> all;
+    f.game->navmesh.CellsNear(from, 30.0f, 64, all);  // full circle by default
+    std::vector<nav::NavMesh::DebugCell> ahead;
+    f.game->navmesh.CellsNear(from, 30.0f, 64, ahead, facing, /*cone_half_cos=*/0.5f);  // 60 deg
+
+    REQUIRE(!ahead.empty());
+    CHECK(ahead.size() < all.size());  // a cone is not the whole disc
+    for (const nav::NavMesh::DebugCell& c : ahead) {
+        const glm::vec2 centre = (c.min_world + c.max_world) * 0.5f;
+        const glm::vec2 d = centre - from;
+        if (glm::dot(d, d) < 1e-6f) {
+            continue;  // the cell underfoot has no direction; always kept
+        }
+        CHECK(glm::dot(glm::normalize(d), facing) >= 0.5f - 1e-3f);
+    }
 }

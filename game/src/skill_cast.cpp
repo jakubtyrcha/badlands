@@ -4,6 +4,7 @@
 #include "combat.h"      // resolve_attack, effective_combatant, melee_range, ranged_range
 #include "components.h"  // Attacks, Skills, Health, Position, Team
 #include "game_state.h"  // BadlandsGame, entity_for_slot, slot_for_entity, emit_event
+#include "nav_world.h"   // nav_point_free -- a point cast must land somewhere stand-on-able
 #include "skills.h"      // SkillEffectOf
 #include "status.h"      // apply_status
 
@@ -131,8 +132,9 @@ float skill_cast_range(const entt::registry& reg, entt::entity caster,
                                                        : melee_range(*atk);
 }
 
-bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
-                   uint32_t named_target_slot, CastPlan& out, SkillTrigger channel) {
+bool validate_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
+                   uint32_t named_target_slot, CastPlan& out, SkillTrigger channel,
+                   glm::vec2 point) {
     const entt::registry& reg = game.registry;
     const entt::entity caster = entity_for_slot(game, static_cast<int32_t>(caster_slot));
     const auto* skills = (caster != entt::null) ? reg.try_get<Skills>(caster) : nullptr;
@@ -206,8 +208,34 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
             out.targets[out.target_count++] = named_target_slot;
             break;
         }
+        case SkillTargetMode::Point: {
+            // Targets NOBODY -- a point cast affects a place, and the effect
+            // gets that place through the context rather than a target list.
+            if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
+                spdlog::warn("[skill] slot {}: {} names a non-finite point, cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)));
+                return false;
+            }
+            const float reach = skill_cast_range(reg, caster, spec);
+            const glm::vec2 from = reg.get<Position>(caster).pos;
+            if (reach > 0.0f && glm::distance(from, point) > reach) {
+                spdlog::warn("[skill] slot {}: {} point is out of reach ({:.1f}), cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)), reach);
+                return false;
+            }
+            // ...and it has to be somewhere you could stand. This is the whole
+            // reason validate_cast is non-const: answering needs a current
+            // navmesh (nav_world.h).
+            if (!nav_point_free(game, point)) {
+                spdlog::warn("[skill] slot {}: {} point ({:.1f}, {:.1f}) is not passable, "
+                             "cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)), point.x, point.y);
+                return false;
+            }
+            out.point = point;
+            break;
+        }
         case SkillTargetMode::Multi:
-        case SkillTargetMode::Point:
             spdlog::warn("[skill] slot {}: {} uses targeting mode {}, which this build does "
                          "not resolve yet; cast dropped",
                          caster_slot, SkillName(static_cast<int32_t>(id)),
@@ -251,11 +279,14 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
 
 BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity caster,
                                       SkillId id, const SkillSpec& spec,
-                                      const uint32_t target_slots[], int32_t target_count) {
+                                      const uint32_t target_slots[], int32_t target_count,
+                                      glm::vec2 point) {
     const entt::registry& reg = game.registry;
     BlSkillCastContext ctx{};
     ctx.version = BL_SKILL_ABI_VERSION;
     ctx.skill_id = static_cast<int32_t>(id);
+    ctx.point_x = point.x;
+    ctx.point_z = point.y;
     ctx.world_millis = game.world_millis;
 
     const uint32_t caster_slot = slot_for_entity(game, caster);
@@ -356,11 +387,15 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
         // An op may only reach an entity the engine itself put in the context.
         // This is the bound on a scripted effect: it cannot name a slot it was
         // never shown, however it came by the number.
-        bool in_context = false;
-        for (int32_t k = 0; k < ctx.target_count && k < BL_SKILL_MAX_TARGETS; ++k) {
+        // The CASTER is always in context -- it is right there in ctx.caster,
+        // so an op naming it reaches nothing the effect was not shown. This is
+        // what lets a targetless cast (None, or a Point cast, which resolves
+        // no entities at all) still act on the one who cast it.
+        bool in_context = op.target_slot == ctx.caster.slot;
+        for (int32_t k = 0; !in_context && k < ctx.target_count && k < BL_SKILL_MAX_TARGETS;
+             ++k) {
             if (ctx.targets[k].slot == op.target_slot) {
                 in_context = true;
-                break;
             }
         }
         if (!in_context) {
@@ -420,6 +455,34 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
                 h->hp = std::min(h->max_hp, h->hp + op.param_f);
                 break;
             }
+            case BL_FX_TELEPORT: {
+                auto* pos = game.registry.try_get<Position>(target);
+                if (pos == nullptr) {
+                    break;
+                }
+                // The op named no destination and could not have: it is moved to
+                // the CAST'S point, which the engine already checked is in range
+                // and stand-on-able. Whatever the effect wrote into param_f/
+                // param_i is ignored here, which is the point.
+                const glm::vec2 to{ctx.point_x, ctx.point_z};
+                if (!std::isfinite(to.x) || !std::isfinite(to.y)) {
+                    break;
+                }
+                pos->pos = to;
+                // The route it was walking is abandoned rather than re-planned:
+                // its waypoints lead from somewhere this entity no longer is,
+                // and plan_paths re-plans from the MoveTarget next tick anyway.
+                if (auto* np = game.registry.try_get<NavPath>(target); np != nullptr) {
+                    np->waypoints.clear();
+                    np->cursor = 0;
+                }
+                // Contact is broken by arriving somewhere else -- but WITHOUT the
+                // disengage penalty, which is charged for walking out under your
+                // own steam (movement.h). Blinking is the alternative to that
+                // walk, not an instance of it.
+                game.registry.remove<MeleeLock>(target);
+                break;
+            }
             default:
                 spdlog::warn("[skill] unrecognized effect op kind {}, skipped", op.kind);
                 break;
@@ -431,7 +494,8 @@ void run_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
               const CastPlan& plan) {
     const SkillSpec& spec = *plan.spec;
     const BlSkillCastContext ctx = build_cast_context(game, plan.caster, plan.id, spec,
-                                                      plan.targets, plan.target_count);
+                                                      plan.targets, plan.target_count,
+                                                      plan.point);
     BlSkillEffectBatch batch{};
     SkillEffectOf(plan.id)(ctx, batch);
 

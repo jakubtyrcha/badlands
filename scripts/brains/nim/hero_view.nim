@@ -86,6 +86,12 @@ type
     skillCount*: int32
     skills*: array[BL_MAX_SKILLS, BlViewSkill]
 
+    # nav window (v6): the ground near this hero, nearest-first, as the host
+    # measured it. Non-empty ONLY for a hero owning a point-targeted skill --
+    # nobody else can spend it, so nobody else is shown it.
+    navPolyCount*: int32
+    navPolys*: array[BL_MAX_NAV_POLYS, BlNavPoly]
+
     # exploration
     hasExploreGoal*: bool
     exploreGoal*: Vec2
@@ -171,3 +177,7 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   result.skillCount = w.skill_count
   for i in 0 ..< w.skill_count:
     result.skills[i] = w.skills[i]
+
+  result.navPolyCount = w.nav_poly_count
+  for i in 0 ..< w.nav_poly_count:
+    result.navPolys[i] = w.nav_polys[i]

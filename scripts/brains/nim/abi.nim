@@ -30,7 +30,7 @@
 # threat/standoff block on BlThreat and BlViewSelf.
 
 const
-  BL_ABI_VERSION* = 5'i32
+  BL_ABI_VERSION* = 6'i32
   BL_MAX_THREATS* = 8
   BL_MAX_CHARS* = 16
   BL_MAX_EVENTS* = 8
@@ -38,6 +38,7 @@ const
   BL_MAX_ACTIVITIES* = 14
   BL_MAX_ATTACKS* = 3
   BL_MAX_SKILLS* = 8
+  BL_MAX_NAV_POLYS* = 32
 
   # BL_ACT_*: action kinds (append-only) -- bl_enqueue_action's `kind`
   # argument. Fire-and-forget: no return, validated by the engine at resolve
@@ -106,6 +107,7 @@ const
   BL_SKILL_BACKSTAB* = 4'i32
   BL_SKILL_SNEAK* = 5'i32
   BL_SKILL_PRECISION_SHOT* = 6'i32
+  BL_SKILL_TELEPORT* = 7'i32
 
 type
   BlViewSelf* {.packed.} = object
@@ -220,6 +222,15 @@ type
     trigger*: int32             # badlands::SkillTrigger
     target_mode*: int32         # badlands::SkillTargetMode
 
+  # v6: one navmesh leaf near this entity -- an axis-aligned world rect and
+  # whether anything can stand on it. Both passable and impassable ones are
+  # carried, because a brain choosing somewhere to go needs to see the walls.
+  BlNavPoly* {.packed.} = object
+    min_x*, min_z*: float32
+    max_x*, max_z*: float32
+    passable*: int32
+    pad*: uint32
+
   BlEvent* {.packed.} = object
     at_millis*: int64
     ttl_millis*: int64
@@ -243,6 +254,9 @@ type
     skill_count*: int32
     pad5*: uint32
     skills*: array[BL_MAX_SKILLS, BlViewSkill]
+    nav_poly_count*: int32
+    pad6*: uint32
+    nav_polys*: array[BL_MAX_NAV_POLYS, BlNavPoly]
     event_count*: int32
     pad2*: uint32
     events*: array[BL_MAX_EVENTS, BlEvent]
@@ -267,6 +281,7 @@ static: doAssert sizeof(BlViewChar) == 40
 static: doAssert sizeof(BlStatus) == 16
 static: doAssert sizeof(BlViewAttack) == 24
 static: doAssert sizeof(BlViewSkill) == 24
+static: doAssert sizeof(BlNavPoly) == 24
 static: doAssert sizeof(BlEvent) == 32
-static: doAssert sizeof(BlViewWire) == 1888
+static: doAssert sizeof(BlViewWire) == 2664
 static: doAssert sizeof(BlSuggestionWire) == 40

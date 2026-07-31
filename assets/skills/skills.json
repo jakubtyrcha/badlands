@@ -73,6 +73,17 @@
       "crit_multiplier": 3
     }
   },
+  "Teleport": {
+    "trigger": "action",
+    "target": "point",
+    "attack_test": "none",
+    "cooldown": 25,
+    "intention_duration": 0,
+    "effect": "Steps sideways out of the world, and back in somewhere else.",
+    "constants": {
+      "range": 30
+    }
+  },
   "Sneak": {
     "trigger": "action",
     "target": "self",

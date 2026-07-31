@@ -51,6 +51,10 @@ struct PendingAction {
     int32_t kind;
     uint32_t target_slot;
     int32_t arg;
+    // v6: where a POINT-targeted cast wants to land. Zero for every other
+    // action, and validated host-side like everything else the guest asks for.
+    float point_x;
+    float point_z;
 };
 
 // RAII owner of one loaded + instantiated brain wasm module.

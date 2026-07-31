@@ -9,6 +9,7 @@
 #include "status.h"        // remaining_millis_of -- BL_ST_STUNNED / BL_ST_DISENGAGED
 #include "threat_table.h"  // threat_of -- both sides of the fight-or-flee comparison
 #include "combat.h"        // melee_range / ranged_range -- a threat's reach on the wire
+#include "skill_cast.h"    // skill_cast_range -- how wide that window has to be
 
 #include <spdlog/spdlog.h>
 
@@ -76,9 +77,10 @@ void forward_log(int32_t level, const uint8_t* msg, size_t len, void* /*user*/) 
 // LIVE against the shipping brain: hero.nim enqueues one BL_ACT_ATTACK per
 // combat wake, and tick_wasm_brain drains pending_actions through
 // resolve_action (game/src/intention.h) right after the intention applies.
-void forward_action(int32_t kind, uint32_t target_slot, int32_t arg, void* user) {
+void forward_action(int32_t kind, uint32_t target_slot, int32_t arg, float point_x,
+                    float point_z, void* user) {
     auto* runtime = static_cast<WasmBrainRuntime*>(user);
-    runtime->pending_actions.push_back(PendingAction{kind, target_slot, arg});
+    runtime->pending_actions.push_back(PendingAction{kind, target_slot, arg, point_x, point_z});
 }
 
 // The single fail-fast enforcement point (see wasm_brain.h's policy note):
@@ -298,7 +300,68 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
         sctx.threats = view.threats;
         sctx.threat_count = view.threat_count;
         const int32_t n = evaluate_skill_triggers(*skills, sctx, recs);
-        wire.skill_count = n;
+        // --- nav polys (v6): the local ground, so a brain can pick somewhere to go.
+    //
+    // Filled ONLY for an entity that owns a POINT-targeted skill. Nothing else
+    // can use it, and the window costs a bounded quadtree scan per wake -- a
+    // price worth paying for the one apprentice in a fight and not for every
+    // rat in it. Everyone else reads nav_poly_count == 0.
+    wire.nav_poly_count = 0;
+    {
+        bool wants_ground = false;
+        if (const auto* sk = game.registry.try_get<Skills>(e); sk != nullptr) {
+            for (int32_t i = 0; i < sk->count && i < kMaxSkills && !wants_ground; ++i) {
+                wants_ground = game.skills.specs[static_cast<size_t>(sk->ids[i])].target ==
+                               SkillTargetMode::Point;
+            }
+        }
+        if (wants_ground) {
+            // Cast in the widest reach any of this entity's point skills has,
+            // so the window always covers what it could legally choose.
+            float radius = 0.0f;
+            const Skills& sk = game.registry.get<Skills>(e);
+            for (int32_t i = 0; i < sk.count && i < kMaxSkills; ++i) {
+                const SkillSpec& spec = game.skills.specs[static_cast<size_t>(sk.ids[i])];
+                if (spec.target == SkillTargetMode::Point) {
+                    radius = std::max(radius, skill_cast_range(game.registry, e, spec));
+                }
+            }
+            // ...and only what this entity can actually SEE. The window is its
+            // own vision cone, the same Vision component the fog of war reads,
+            // so a hero cannot pick a destination behind its own back. Sight
+            // also CAPS the radius: you may not blink somewhere you have not
+            // looked, however far the skill would reach.
+            //
+            // Read straight off the mesh, no rebuild: tick_world makes the
+            // navmesh current BEFORE any brain thinks (sim.cpp), precisely so
+            // that AI goal selection sees this tick's obstacles. Rebuilding
+            // here would be a redundant pass and would force this whole packer
+            // to take a mutable world for one query.
+            glm::vec2 facing{0.0f, 1.0f};
+            float cone_half_cos = -1.0f;
+            if (const auto* f = game.registry.try_get<Facing>(e); f != nullptr) {
+                facing = f->dir;
+            }
+            if (const auto* vis = game.registry.try_get<Vision>(e);
+                vis != nullptr && vis->radius > 0.0f) {
+                cone_half_cos = vis->cone_half_cos;
+                radius = std::min(radius, vis->radius);
+            }
+            std::vector<nav::NavMesh::DebugCell> cells;
+            game.navmesh.CellsNear(view.pos, radius, BL_MAX_NAV_POLYS, cells, facing,
+                                   cone_half_cos);
+            for (const nav::NavMesh::DebugCell& c : cells) {
+                BlNavPoly& p = wire.nav_polys[wire.nav_poly_count++];
+                p.min_x = c.min_world.x;
+                p.min_z = c.min_world.y;
+                p.max_x = c.max_world.x;
+                p.max_z = c.max_world.y;
+                p.passable = c.passable ? 1 : 0;
+            }
+        }
+    }
+
+    wire.skill_count = n;
         for (int32_t i = 0; i < n && i < BL_MAX_SKILLS; ++i) {
             const SkillSpec& spec = game.skills.specs[static_cast<size_t>(skills->ids[i])];
             wire.skills[i] = BlViewSkill{static_cast<int32_t>(skills->ids[i]),
@@ -526,7 +589,9 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // adopted above (resolve_action never touches CurrentIntention) or the
     // rest of this batch.
     for (const PendingAction& action : runtime.pending_actions) {
-        resolve_action(game, slot, AgentAction{action.kind, action.target_slot, action.arg});
+        resolve_action(game, slot,
+                       AgentAction{action.kind, action.target_slot, action.arg,
+                                   {action.point_x, action.point_z}});
     }
 }
 

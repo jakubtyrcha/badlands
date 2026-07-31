@@ -102,6 +102,9 @@ struct AgentAction {
     int32_t kind = 0;                       // BL_ACT_*
     uint32_t target_slot = UINT32_MAX;      // UINT32_MAX = infer (see resolve_action)
     int32_t arg = 0;                        // BL_ACT_ATTACK: attack index
+    // BL_ACT_USE_SKILL of a POINT-targeted skill: where to land. Ignored by
+    // every other action and by every other targeting mode.
+    glm::vec2 point{0.0f, 0.0f};
 };
 
 // The single action gateway: both the wasm callback drain (tick_wasm_brain,

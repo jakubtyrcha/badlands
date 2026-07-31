@@ -66,6 +66,35 @@ class NavMesh {
     };
     void DebugCells(std::vector<DebugCell>& out) const;
 
+    // A SPREAD SAMPLE of the leaves within `radius` of `origin` AND inside the
+    // view cone (`facing`, `cone_half_cos` = cos of the half-angle, -1 for a
+    // full circle -- the same encoding the sim's Vision component uses): at
+    // most `max_out` of them, nearest-first, thinned so no two kept centres sit
+    // closer than about radius * sqrt(pi / max_out).
+    //
+    // The cone is applied BEFORE the thinning, not after, or the budget would
+    // be spent on ground that is then discarded.
+    //
+    // The thinning is the whole point, and taking simply the nearest N is the
+    // trap it avoids. The quadtree subdivides finely near obstacles and coarsely
+    // in the open, so "the 32 nearest leaves" is a 6 m disc against a wall and a
+    // 60 m one in a field -- a caller asking for ground within 30 m would get a
+    // window that silently shrinks exactly where the geometry is interesting.
+    // Spacing them out instead makes the window cover the RADIUS ASKED FOR at a
+    // resolution the budget can afford.
+    //
+    // Both passable and impassable leaves are returned -- a consumer deciding
+    // where to go needs to see the walls too, and filtering here would make
+    // "nothing nearby" and "nothing walkable nearby" indistinguishable.
+    void CellsNear(glm::vec2 origin, float radius, size_t max_out,
+                   std::vector<DebugCell>& out, glm::vec2 facing = {0.0f, 1.0f},
+                   float cone_half_cos = -1.0f) const;
+
+    // Is this world point on a passable leaf? False on an empty mesh and false
+    // outside the grid -- both are "you cannot stand there", which is the only
+    // question the caller is asking.
+    bool PassableAt(glm::vec2 w) const;
+
     // --- world <-> cell mapping (world XZ metres) ---
     glm::ivec2 WorldToCell(glm::vec2 w) const;
     glm::vec2 CellCenterWorld(int cx, int cz) const;

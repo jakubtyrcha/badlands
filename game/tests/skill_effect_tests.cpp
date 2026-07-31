@@ -148,7 +148,7 @@ TEST_CASE("the contract's layout is pinned", "[skill_effect]") {
     CHECK(sizeof(BlSkillCaster) == 32);
     CHECK(sizeof(BlSkillTarget) == 48);
     CHECK(sizeof(BlSkillConstant) == 32);
-    CHECK(sizeof(BlSkillCastContext) == 712);
+    CHECK(sizeof(BlSkillCastContext) == 720);
     CHECK(sizeof(BlSkillEffectOp) == 16);
     CHECK(sizeof(BlSkillEffectBatch) == 136);
     CHECK(BL_SKILL_MAX_TARGETS == badlands::kMaxSkillTargets);
@@ -236,10 +236,14 @@ TEST_CASE("a backstab that missed adds nothing at all", "[skill_effect]") {
     }
 }
 
-TEST_CASE("the skill effect contract layout is pinned at v2", "[skill_effect]") {
-    // engaging_caster took BlSkillTarget's trailing pad, so every size is
-    // unchanged -- which is the whole reason it went there.
-    CHECK(BL_SKILL_ABI_VERSION == 2);
+TEST_CASE("the skill effect contract layout is pinned at v3", "[skill_effect]") {
+    // v2 put engaging_caster in BlSkillTarget's trailing pad, so every size was
+    // unchanged. v3 adds the cast POINT to the context, which is 8 real bytes
+    // -- the op and batch are untouched, because BL_FX_TELEPORT deliberately
+    // carries no destination of its own.
+    CHECK(BL_SKILL_ABI_VERSION == 3);
     CHECK(sizeof(BlSkillTarget) == 48);
-    CHECK(sizeof(BlSkillCastContext) == 712);
+    CHECK(sizeof(BlSkillCastContext) == 720);
+    CHECK(sizeof(BlSkillEffectOp) == 16);
+    CHECK(sizeof(BlSkillEffectBatch) == 136);
 }

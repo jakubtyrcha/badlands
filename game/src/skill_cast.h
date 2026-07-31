@@ -20,6 +20,7 @@
 #include "skill_abi.h"       // BlSkillCastContext, BlSkillEffectBatch
 
 #include <entt/entt.hpp>
+#include <glm/glm.hpp>
 
 #include <cstdint>
 
@@ -57,6 +58,9 @@ struct CastPlan {
     const SkillSpec* spec = nullptr;
     uint32_t targets[kMaxSkillTargets]{};
     int32_t target_count = 0;
+    // Point targeting only: where the cast landed, once validated (in range and
+    // on passable ground). Zero for every other mode.
+    glm::vec2 point{0.0f, 0.0f};
 };
 
 // Every check the engine makes before an effect may run, in one place so the
@@ -74,13 +78,20 @@ struct CastPlan {
 //      an Intention skill fired as an action would cost nothing to cast, and
 //      an Action skill adopted as a focus would idle for a duration it never
 //      declared. Passive remains declared vocabulary and is refused outright.
-//   5. Its targeting mode resolves against `named_target_slot`: None targets
-//      nobody, SelfOnly targets the caster and REFUSES a named other, Any
-//      takes the named entity. Multi/Point are declared and refused.
+//   5. Its targeting mode resolves against `named_target_slot` / `point`: None
+//      targets nobody, SelfOnly targets the caster and REFUSES a named other,
+//      Any takes the named entity, and POINT targets nobody but must name a
+//      spot that is both in range and PASSABLE -- you cannot blink into a wall
+//      or off the map. Multi remains declared and refused.
 //   6. Every resolved target is within skill_cast_range.
-bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
+//
+// NON-CONST on the game: a Point cast asks whether its destination is stand-
+// on-able, and answering means the navmesh has to be current (nav_world.h's
+// nav_point_free rebuilds a stale one). Every other check is a pure read.
+bool validate_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
                    uint32_t named_target_slot, CastPlan& out,
-                   SkillTrigger channel = SkillTrigger::Action);
+                   SkillTrigger channel = SkillTrigger::Action,
+                   glm::vec2 point = {0.0f, 0.0f});
 
 // Builds the flat context an effect receives: the caster's view, one view per
 // resolved target (defensive stats via effective_combatant, so a stunned
@@ -89,7 +100,8 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
 // or replaying.
 BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity caster,
                                       SkillId id, const SkillSpec& spec,
-                                      const uint32_t target_slots[], int32_t target_count);
+                                      const uint32_t target_slots[], int32_t target_count,
+                                      glm::vec2 point = {0.0f, 0.0f});
 
 // Applies what the effect asked for. Every op is re-checked against the
 // context it was given: the target must be one of the context's own targets
