@@ -4,7 +4,7 @@
 #include <optional>
 #include <vector>
 
-#include "sdf_scene.h" // SdfNode, dual-compile CSG fold (shared with the planned raymarch shader)
+#include "sdf_scene.h" // SdfNode, dual-compile CSG fold (shared with shaders/raymarch.metal)
 
 namespace sq {
 
@@ -34,7 +34,7 @@ float sd_ellipsoid(simd_float3 q, simd_float3 radii);
 
 // SdfNode packing budget: kMaxRaymarchNodes * sizeof(SdfNode) (32 B) = 4096 B
 // -- exactly Metal's setFragmentBytes 4 KB limit for buffers bound that way
-// (the planned raymarch shader's per-frame node-array binding).
+// (the raymarch shader's per-frame node-array binding).
 inline constexpr int32_t kMaxRaymarchNodes = 128;
 
 // Packs the scene's nodes into SdfNode array, in document order (see

@@ -131,7 +131,7 @@ PickResult Editor::pick(float x, float y) const {
 
 void Editor::select(int32_t nodeId) {
     impl_->selected = nodeId;
-    impl_->renderer.set_scene_lines_dirty(); // selection changes vertex colors
+    impl_->renderer.set_scene_lines_dirty(); // selection change alters which node's wireframe (if any) is drawn
 }
 
 int32_t Editor::selectedNode() const {
@@ -314,7 +314,12 @@ void Editor::setNodeOp(int32_t nodeId, Op op) {
         return;
     }
     node->op = op;
-    impl_->renderer.set_scene_lines_dirty(); // op changes vertex colors
+    // The wireframe no longer varies with op (always kColorSelected), so this
+    // dirty call is not strictly required by the current draw -- kept anyway
+    // because it's cheap, op changes are rare, and it keeps the invalidation
+    // rule simple ("any node edit dirties the lines") rather than requiring
+    // every call site to reason about which fields the wireframe reads.
+    impl_->renderer.set_scene_lines_dirty();
 }
 
 void Editor::beginScale() {

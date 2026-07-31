@@ -39,6 +39,11 @@ inline float hit_epsilon(float t) {
     return max(1e-4f, 5e-4f * t);
 }
 
+// Sphere-trace step budget (see the trace loop below for what happens when
+// it's exhausted). Not to be confused with kMaxRaymarchNodes
+// (core/src/sdf.h), the unrelated 128-node scene cap.
+constant int kMaxTraceSteps = 128;
+
 } // namespace
 
 fragment RaymarchOut raymarch_fragment(
@@ -54,14 +59,17 @@ fragment RaymarchOut raymarch_fragment(
 
     const SdfRay ray = sdf_ray_for_pixel(frag_coord.x, frag_coord.y, viewport_w, viewport_h, uniforms.inv_view_proj);
 
-    // Sphere trace: up to 128 steps, starting at `near`. Hit when the SDF
-    // value drops below the distance-scaled epsilon; miss when `t` runs past
-    // `far` or the step budget is exhausted -- either way `did_hit` stays
-    // false and the fragment is discarded (clear color shows through).
+    // Sphere trace: up to kMaxTraceSteps steps, starting at `near`. Hit when
+    // the SDF value drops below the distance-scaled epsilon; miss when `t`
+    // runs past `far` or the step budget is exhausted -- either way `did_hit`
+    // stays false and the fragment is discarded (clear color shows through).
+    // Budget exhaustion as a miss is a known sphere-tracing artifact at
+    // grazing silhouettes (steps shrink faster than t closes on the surface);
+    // accepted rather than worked around, since this is a debug view.
     float t = near;
     float3 p = float3(0.0); // always overwritten before use -- see the loop's first statement
     bool did_hit = false;
-    for (int i = 0; i < 128; ++i) {
+    for (int i = 0; i < kMaxTraceSteps; ++i) {
         p = ray.origin + t * ray.dir;
         const float d = sdf_fold(nodes, node_count, p);
         if (d < hit_epsilon(t)) {
@@ -103,6 +111,11 @@ fragment RaymarchOut raymarch_fragment(
 
     RaymarchOut out;
     out.color = float4(0.5 * (n + 1.0), 1.0);
+    // clip.z / clip.w can land fractionally below 0.0 for an oblique hit
+    // found at t ~= near (the hit epsilon's tolerance lets p sit just short
+    // of the near plane); the hardware clamps depth writes to [0,1], so this
+    // is silently harmless. Only reachable with the camera nearly touching a
+    // surface.
     out.depth = clip.z / clip.w;
     return out;
 }

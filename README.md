@@ -54,8 +54,8 @@ Four modes, selected via the icon bar top-left or keys **1–4**:
    and switches to Camera mode).
 4. **Camera (4)** — two-finger scroll orbits, pinch zooms, shift+scroll pans.
 
-Color legend: green = additive shape, red = subtracted shape, pale blue =
-currently selected.
+Color legend: pale blue wireframe = currently selected; surface shading is
+normal-colored debug (see Rendering below).
 
 ## Rendering
 

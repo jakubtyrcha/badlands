@@ -2,7 +2,7 @@
 
 // SDF scene representation, CSG evaluation, and ray-generation -- the single
 // source of truth shared by the CPU (DCSDD sampling, core/src/sdf.cpp) and
-// the GPU raymarch shader (planned; not wired up until a later milestone).
+// the GPU raymarch shader (shaders/raymarch.metal).
 // Dual-compile: this header is included from both plain C++ (core/) and MSL
 // (shaders/*.metal). MSL has neither <simd/simd.h> nor <cfloat>/std::, so
 // every type and math call below is selected via __METAL_VERSION__, the same
@@ -29,7 +29,7 @@ typedef simd_float3 sq_float3;
 #endif
 
 // `constant` is Metal's address-space qualifier for buffers bound via
-// setFragmentBytes (the planned raymarch shader's node-array binding); plain
+// setFragmentBytes (the raymarch shader's node-array binding); plain
 // C++ has no address spaces, so a packed node array is just `const T*` there.
 #ifdef __METAL_VERSION__
 #define SDF_NODE_PTR constant SdfNode*
