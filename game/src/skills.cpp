@@ -26,10 +26,6 @@ constexpr bool skills_dense() {
 }
 static_assert(skills_dense(), "SkillCatalog must be indexed by SkillId");
 
-constexpr std::array<SkillGrant, 1> kGrants{{
-    {HERO_APPRENTICE, 5, SkillId::Calcify},
-}};
-
 }  // namespace
 
 std::span<const SkillDef> SkillDefs() { return kSkills; }
@@ -108,8 +104,6 @@ SkillId SkillIdFromName(const char* name) {
     return SkillId::Count;
 }
 
-std::span<const SkillGrant> SkillGrantTable() { return kGrants; }
-
 bool learn_skill(Skills& s, SkillId id) {
     for (int32_t i = 0; i < s.count; ++i) {
         if (s.ids[i] == id) {
@@ -125,11 +119,16 @@ bool learn_skill(Skills& s, SkillId id) {
     return true;
 }
 
-void grant_skills_for_level(Skills& s, int32_t hero_class, int32_t level) {
-    for (const SkillGrant& g : SkillGrantTable()) {
-        if (g.hero_class == hero_class && g.level == level) {
-            learn_skill(s, g.skill);
+void grant_skills_for_level(Skills& s, const SkillGrants& grants, int32_t level) {
+    for (int32_t i = 0; i < grants.count && i < kMaxSkills; ++i) {
+        const SkillGrantRow& row = grants.rows[i];
+        if (row.level != level) {
+            continue;
         }
+        if (row.skill < 0 || row.skill >= kSkillCount) {
+            continue;  // an empty or out-of-range row (sanitized input, not trusted)
+        }
+        learn_skill(s, static_cast<SkillId>(row.skill));
     }
 }
 

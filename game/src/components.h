@@ -256,6 +256,17 @@ struct Statuses {
     int32_t count = 0;
 };
 
+// The spawn desc's level-gated grant list, copied onto the entity at spawn
+// (heroes.cpp) so the level-up hook (progression.cpp) has it without looking
+// anything up by class. That indirection is the point: WHICH creature learns
+// WHAT is catalog data (creature_catalog.cpp, overridable from
+// assets/creatures/creatures.json), and the engine only ever reads the list it
+// was handed.
+struct SkillGrants {
+    SkillGrantRow rows[kMaxSkills]{};
+    int32_t count = 0;
+};
+
 // Present only on entities whose death pays XP (CharacterDesc.xp_reward > 0).
 // Read by the death sweep (sim.cpp), which collects the payout before the
 // destroy and spreads it via spread_kill_xp (progression.h).

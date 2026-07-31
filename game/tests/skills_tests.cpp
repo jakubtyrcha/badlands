@@ -30,16 +30,48 @@ TEST_CASE("learn_skill is dupe-proof and bounded") {
     CHECK(s.cooldown_remaining[0] == 0.0f);
 }
 
-TEST_CASE("the grant table teaches the Apprentice Calcify at level 5") {
+TEST_CASE("grants fire at their exact level, once") {
+    badlands::SkillGrants g{};
+    g.rows[0] = {static_cast<int32_t>(SkillId::ShieldBash), 3};
+    g.count = 1;
+
     Skills s{};
-    badlands::grant_skills_for_level(s, badlands::HERO_APPRENTICE, 4);
+    badlands::grant_skills_for_level(s, g, 2);
     CHECK(s.count == 0);
-    badlands::grant_skills_for_level(s, badlands::HERO_APPRENTICE, 5);
+    badlands::grant_skills_for_level(s, g, 4);
+    CHECK(s.count == 0);  // a level PAST the grant does not teach it either
+    badlands::grant_skills_for_level(s, g, 3);
     REQUIRE(s.count == 1);
-    CHECK(s.ids[0] == SkillId::Calcify);
-    Skills merc{};
-    badlands::grant_skills_for_level(merc, badlands::HERO_MERCENARY, 5);
-    CHECK(merc.count == 0);
+    CHECK(s.ids[0] == SkillId::ShieldBash);
+    CHECK(s.cooldown_remaining[0] == 0.0f);
+
+    badlands::grant_skills_for_level(s, g, 3);  // replayed level: dupe-proof
+    CHECK(s.count == 1);
+}
+
+TEST_CASE("an out-of-range grant row is ignored rather than trusted") {
+    badlands::SkillGrants g{};
+    g.rows[0] = {badlands::kSkillCount + 7, 1};
+    g.rows[1] = {-1, 1};
+    g.count = 2;
+    Skills s{};
+    badlands::grant_skills_for_level(s, g, 1);
+    CHECK(s.count == 0);
+}
+
+TEST_CASE("the creature catalog carries the shipped grant lists") {
+    const badlands::CreatureCatalog& cat = badlands::DefaultCreatureCatalog();
+    const badlands::CharacterDesc& merc =
+        cat.defs[static_cast<int>(badlands::CreatureId::Mercenary)];
+    REQUIRE(merc.skill_grant_count == 1);
+    CHECK(merc.skill_grants[0].skill == static_cast<int32_t>(SkillId::ShieldBash));
+    CHECK(merc.skill_grants[0].level == 3);
+
+    const badlands::CharacterDesc& app =
+        cat.defs[static_cast<int>(badlands::CreatureId::Apprentice)];
+    REQUIRE(app.skill_grant_count == 1);
+    CHECK(app.skill_grants[0].skill == static_cast<int32_t>(SkillId::Calcify));
+    CHECK(app.skill_grants[0].level == 5);
 }
 
 TEST_CASE("Calcify recommends on a close melee threat, gated by cooldown") {

@@ -22,14 +22,15 @@ TEST_CASE("xp_to_next follows floor(base * level^exponent)") {
     CHECK(badlands::xp_to_next(p, 4) == 918);
 }
 
-TEST_CASE("award_xp levels up, grants class skills, emits one event per level") {
+TEST_CASE("award_xp levels up, grants the desc's skills, emits one event per level") {
     auto owned = badlands::make_world(BrainDesc{});
     BadlandsGame& g = *owned;
-    const uint32_t slot =
-        badlands::spawn_into(g, badlands::MercenaryDesc(0.0f, 20.0f));
+    // A catalog mercenary: its desc carries the grant list (ShieldBash at 3),
+    // so nothing has to be patched onto the entity after the fact -- which is
+    // the whole point of grants riding on the desc.
+    const uint32_t slot = badlands::spawn_creature_into(
+        g, badlands::CreatureId::Mercenary, badlands::kPlayerTeam, {0.0f, 20.0f});
     entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
-    // Homeless spawn has class -1; the grant table keys on class, so set it.
-    g.registry.get<badlands::HeroCharacter>(e).hero_class = badlands::HERO_APPRENTICE;
     auto& sim = g.registry.get<badlands::HeroSimulationState>(e);
     REQUIRE(sim.level == 1);
     REQUIRE(sim.xp == 0);
@@ -44,7 +45,7 @@ TEST_CASE("award_xp levels up, grants class skills, emits one event per level") 
 
     const auto& sk = g.registry.get<badlands::Skills>(e);
     REQUIRE(sk.count == 1);
-    CHECK(sk.ids[0] == SkillId::Calcify);
+    CHECK(sk.ids[0] == SkillId::ShieldBash);  // granted on reaching level 3
 
     int leveled = 0;
     for (const GameEvent& ev : g.events) {
@@ -101,10 +102,19 @@ TEST_CASE("spawn_creature_into stamps the catalog class before spawn-time grants
         entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
         CHECK(g.registry.get<badlands::HeroCharacter>(e).hero_class == row.hero_class);
 
-        // The spawn-time grant (heroes.cpp) must have run against the FINAL
-        // class, not a stale -1 patched in after the fact.
+        // The spawn-time grant (heroes.cpp) applies the DESC's own level-1
+        // rows -- and copies the whole list onto the entity so the level-up
+        // hook can apply the rest later.
+        badlands::SkillGrants grants{};
+        const badlands::CharacterDesc& desc =
+            badlands::DefaultCreatureCatalog().defs[static_cast<int>(row.id)];
+        grants.count = desc.skill_grant_count;
+        for (int32_t i = 0; i < grants.count; ++i) {
+            grants.rows[i] = desc.skill_grants[i];
+        }
+        CHECK(g.registry.get<badlands::SkillGrants>(e).count == grants.count);
         badlands::Skills expected{};
-        badlands::grant_skills_for_level(expected, row.hero_class, 1);
+        badlands::grant_skills_for_level(expected, grants, 1);
         const auto& sk = g.registry.get<badlands::Skills>(e);
         REQUIRE(sk.count == expected.count);
         for (int32_t i = 0; i < expected.count; ++i) {
@@ -296,10 +306,9 @@ TEST_CASE("award_xp is bounded by kMaxHeroLevel even under a degenerate zero-cos
 TEST_CASE("the snapshot carries level/xp/skills; zeroed for non-heroes") {
     auto owned = badlands::make_world(badlands::BrainDesc{});
     BadlandsGame& g = *owned;
-    const uint32_t h = badlands::spawn_into(g, badlands::MercenaryDesc(0.0f, 20.0f));
-    entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(h));
-    g.registry.get<badlands::HeroCharacter>(e).hero_class = badlands::HERO_APPRENTICE;
-    badlands::award_xp(g, h, 2000);  // past level 5: Calcify granted
+    const uint32_t h = badlands::spawn_creature_into(
+        g, badlands::CreatureId::Mercenary, badlands::kPlayerTeam, {0.0f, 20.0f});
+    badlands::award_xp(g, h, 2000);  // past level 5: ShieldBash granted at 3
     const uint32_t rat =
         badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {5.0f, 0.0f});
 
@@ -317,7 +326,7 @@ TEST_CASE("the snapshot carries level/xp/skills; zeroed for non-heroes") {
     CHECK(hero_row->xp_next ==
           badlands::xp_to_next(g.factors.progression, hero_row->level));
     REQUIRE(hero_row->skill_count == 1);
-    CHECK(hero_row->skills[0] == static_cast<int32_t>(SkillId::Calcify));
+    CHECK(hero_row->skills[0] == static_cast<int32_t>(SkillId::ShieldBash));
     CHECK(rat_row->level == 0);
     CHECK(rat_row->skill_count == 0);
 }

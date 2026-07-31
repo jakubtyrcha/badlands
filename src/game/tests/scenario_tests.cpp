@@ -100,3 +100,59 @@ TEST_CASE("LoadCreatureCatalog rejects a non-numeric value") {
     CHECK_FALSE(LoadCreatureCatalog(p, cat));
     CHECK(cat.defs[static_cast<int>(CreatureId::Rat)].hp == rat_hp0);  // untouched on failure
 }
+
+// --- level-gated skill acquisition, as data ---------------------------------
+// Which creature learns what, at which level, is catalog data a designer can
+// override without a rebuild. Fixtures are test-local: nothing here asserts on
+// the shipped assets/creatures/creatures.json.
+
+TEST_CASE("LoadCreatureCatalog reads a creature's level-gated skill list") {
+    const std::string p = write_temp(
+        "cre_skills.json",
+        R"({ "Mercenary": { "skills": [ { "name": "ShieldBash", "level": 4 },
+                                        { "name": "Calcify", "level": 7 } ] } })");
+    CreatureCatalog cat;
+    REQUIRE(LoadCreatureCatalog(p, cat));
+    const CharacterDesc& d = cat.defs[static_cast<int>(CreatureId::Mercenary)];
+    REQUIRE(d.skill_grant_count == 2);
+    CHECK(d.skill_grants[0].skill == static_cast<int32_t>(SkillId::ShieldBash));
+    CHECK(d.skill_grants[0].level == 4);   // overrides the compiled 3
+    CHECK(d.skill_grants[1].skill == static_cast<int32_t>(SkillId::Calcify));
+    CHECK(d.skill_grants[1].level == 7);
+}
+
+TEST_CASE("an omitted level defaults to 1, and an empty list takes skills away") {
+    {
+        const std::string p = write_temp(
+            "cre_skills_lvl1.json", R"({ "Mercenary": { "skills": [ { "name": "ShieldBash" } ] } })");
+        CreatureCatalog cat;
+        REQUIRE(LoadCreatureCatalog(p, cat));
+        const CharacterDesc& d = cat.defs[static_cast<int>(CreatureId::Mercenary)];
+        REQUIRE(d.skill_grant_count == 1);
+        CHECK(d.skill_grants[0].level == 1);
+    }
+    {
+        // The override REPLACES rather than merges, which is the only way to
+        // author a class that learns nothing.
+        const std::string p =
+            write_temp("cre_skills_none.json", R"({ "Mercenary": { "skills": [] } })");
+        CreatureCatalog cat;
+        REQUIRE(LoadCreatureCatalog(p, cat));
+        CHECK(cat.defs[static_cast<int>(CreatureId::Mercenary)].skill_grant_count == 0);
+    }
+}
+
+TEST_CASE("a malformed skill grant fails the load loudly") {
+    CreatureCatalog fresh;
+    const int32_t before = fresh.defs[static_cast<int>(CreatureId::Mercenary)].skill_grant_count;
+    for (const char* body : {R"({ "Mercenary": { "skills": [ { "name": "Nope" } ] } })",
+                             R"({ "Mercenary": { "skills": [ { "level": 3 } ] } })",
+                             R"({ "Mercenary": { "skills": [ { "name": "ShieldBash",
+                                                               "level": 0 } ] } })",
+                             R"({ "Mercenary": { "skills": "ShieldBash" } })"}) {
+        const std::string p = write_temp("cre_skills_bad.json", body);
+        CreatureCatalog cat;
+        CHECK_FALSE(LoadCreatureCatalog(p, cat));
+        CHECK(cat.defs[static_cast<int>(CreatureId::Mercenary)].skill_grant_count == before);
+    }
+}

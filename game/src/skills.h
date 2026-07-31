@@ -33,18 +33,16 @@ std::span<const SkillDef> SkillDefs();
 // Out-of-range ids resolve to the Calcify row (id 0), mirroring ActivityInfoOf.
 const SkillDef& SkillDefOf(SkillId id);
 
-// One row of "class X learns skill Y at level L". Append-only.
-struct SkillGrant {
-    int32_t hero_class;  // HeroClassId
-    int32_t level;
-    SkillId skill;
-};
-std::span<const SkillGrant> SkillGrantTable();
-
 // Dupe-proof append; false when already known or the component is full.
 bool learn_skill(Skills& s, SkillId id);
-// Applies every grant row matching (hero_class, level) exactly.
-void grant_skills_for_level(Skills& s, int32_t hero_class, int32_t level);
+
+// Applies every grant row whose level EXACTLY equals `level` -- so a level-up
+// teaches only what that level teaches, and a spawn at level 1 teaches only
+// the level-1 rows. Dupe-proof (learn_skill), so replaying a level is
+// harmless. The rows come from the entity's own SkillGrants component, which
+// spawn copied off its CharacterDesc: there is no class -> skill table in the
+// engine anymore, only data the catalog handed it.
+void grant_skills_for_level(Skills& s, const SkillGrants& grants, int32_t level);
 
 // What the host tells a brain about each learned skill: `ready` = off
 // cooldown, `recommended` = the skill's trigger condition currently holds.

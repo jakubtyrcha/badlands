@@ -1122,11 +1122,17 @@ add_executable(badlands_scenario_tests
     src/game/scenario.cpp
     src/game/creature_manifest.cpp
     game/src/creature_catalog.cpp
+    # The skill vocabulary: creature_manifest.cpp resolves a grant's skill NAME
+    # through SkillIdFromName. World-free, so it links standalone here exactly
+    # as it does in badlands_skill_manifest_tests (which is why the casting
+    # half lives in skill_cast.cpp instead).
+    game/src/skills.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_scenario_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/third_party/entt/single_include

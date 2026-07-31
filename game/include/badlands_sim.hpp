@@ -305,6 +305,17 @@ struct SkillCatalog {
 // Parse a skill name ("Calcify"); returns SkillId::Count if unknown.
 SkillId SkillIdFromName(const char* name);
 
+// One "this creature learns skill X on reaching level L" row. Authored per
+// creature in the catalog (game/src/creature_catalog.cpp) and overridable from
+// assets/creatures/creatures.json, so ADDING A SKILL TO A CLASS IS DATA, not a
+// rebuild. Carried on the spawn desc rather than looked up by class, so a
+// directly-spawned or arena-scenario mercenary learns exactly what a recruited
+// one does.
+struct SkillGrantRow {
+    int32_t skill = -1;  // SkillId; -1 = empty row
+    int32_t level = 1;
+};
+
 // ---- tuning factors (data, not code) ---------------------------------------
 // Per-archetype behaviour tuning. The sim ships the defaults below, so it is
 // fully usable -- and unit-testable -- with no file present; an app may load
@@ -526,6 +537,11 @@ struct CharacterDesc {
     CombatStance stance = CombatStance::Melee;
     Attack attacks[kMaxAttacks]{};
     int32_t attack_count = 0;
+    // Level-gated skill acquisition (see SkillGrantRow). Rows fire at their
+    // exact level: spawn applies the level-1 ones, and the level-up hook
+    // (game/src/progression.h) applies the rest as the hero grows.
+    SkillGrantRow skill_grants[kMaxSkills]{};
+    int32_t skill_grant_count = 0;
     // XP paid out on this creature's death, split over nearby heroes (see
     // ProgressionFactors.kill_xp_radius). 0 = no reward (deer, heroes, dummies).
     int32_t xp_reward = 0;

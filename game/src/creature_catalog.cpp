@@ -67,6 +67,10 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 6.0f, 1.5f, 1.0f, 0.1f};
+        // Utility arrives with the shield: at level 3 the tank stops being
+        // only a wall and starts taking a turn away from whatever it hits.
+        d.skill_grants[0] = {static_cast<int32_t>(SkillId::ShieldBash), 3};
+        d.skill_grant_count = 1;
     }
     // Hunter: primarily ranged (a bow), with a knife for when something closes.
     {
@@ -114,6 +118,8 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Ranged;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 6.0f, 1.5f, 0.10f};
+        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Calcify), 5};
+        d.skill_grant_count = 1;
     }
 
     // --- monsters -----------------------------------------------------------

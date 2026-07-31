@@ -1,5 +1,9 @@
 {
-  "_comment": "Rebalance creature stats without a rebuild. Keys are creature names; every field is optional and overrides the compiled default. Attack category/type stay compiled.",
-  "Mercenary": {},
+  "_comment": "Rebalance creature stats without a rebuild. Keys are creature names; every field is optional and overrides the compiled default. Attack category/type stay compiled. 'skills' is the level-gated acquisition list and REPLACES the compiled one when present.",
+  "Mercenary": {
+    "skills": [
+      { "name": "ShieldBash", "level": 3 }
+    ]
+  },
   "Goblin": {}
 }
