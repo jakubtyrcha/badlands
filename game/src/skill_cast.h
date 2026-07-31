@@ -35,9 +35,13 @@ inline constexpr int32_t kSkillSeedBase = 100;
 
 // The cast range: the reach of whichever attack the skill's SkillAttackTest
 // names (Melee -> melee reach, Ranged -> ranged reach), or -- for a skill that
-// declares no test -- its optional "range" constant, whose absence means "no
-// range check", which is what a SelfOnly ward wants. One source of truth: a
+// declares no test -- its optional "range" constant. One source of truth: a
 // bash reaches exactly as far as the sword whose test it borrows.
+//
+// A NON-POSITIVE result means UNBOUNDED (validate_cast skips the reach check
+// entirely), not "zero reach". That is what a SelfOnly ward wants, and equally
+// what an unranged support skill wants -- authoring no "range" constant must
+// not silently make a skill uncastable at anything but its own caster.
 float skill_cast_range(const entt::registry& reg, entt::entity caster, const SkillSpec& spec);
 
 // A validated cast, ready to run. Produced by validate_cast, consumed by the

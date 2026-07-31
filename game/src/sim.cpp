@@ -764,8 +764,26 @@ SimFactors sanitize_factors(SimFactors f) {
 // The SetSkillCatalog validation boundary, sanitize_factors' sibling: the
 // execution slice divides/waits on these, so negatives are clamped here.
 SkillCatalog sanitize_skill_catalog(SkillCatalog c) {
+    // Clamp an out-of-range enum to its safest member rather than trusting it:
+    // every consumer switches on these, and a value outside the vocabulary
+    // would fall through as "none of the above" somewhere downstream.
+    auto clamp_enum = [](const char* field, auto& value, int32_t count, auto fallback) {
+        const int32_t raw = static_cast<int32_t>(value);
+        if (raw < 0 || raw >= count) {
+            warn_adjusted(field, raw, static_cast<int32_t>(fallback));
+            value = fallback;
+        }
+    };
     for (int32_t i = 0; i < kSkillCount; ++i) {
         SkillSpec& s = c.specs[i];
+        // Passive is the inert fallback: a garbled trigger must not become a
+        // castable action, and a garbled target must not become a live one.
+        clamp_enum("skill.trigger", s.trigger,
+                   static_cast<int32_t>(SkillTrigger::Intention) + 1, SkillTrigger::Passive);
+        clamp_enum("skill.target", s.target,
+                   static_cast<int32_t>(SkillTargetMode::Point) + 1, SkillTargetMode::SelfOnly);
+        clamp_enum("skill.attack_test", s.attack_test,
+                   static_cast<int32_t>(SkillAttackTest::Ranged) + 1, SkillAttackTest::None);
         clamp_nonneg("skill.intention_duration_seconds", s.intention_duration_seconds);
         clamp_nonneg("skill.cooldown_seconds", s.cooldown_seconds);
         // A Multi cast has to hit at least one thing to mean anything, and it

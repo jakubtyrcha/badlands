@@ -259,9 +259,10 @@ struct Statuses {
 // The spawn desc's level-gated grant list, copied onto the entity at spawn
 // (heroes.cpp) so the level-up hook (progression.cpp) has it without looking
 // anything up by class. That indirection is the point: WHICH creature learns
-// WHAT is catalog data (creature_catalog.cpp, overridable from
-// assets/creatures/creatures.json), and the engine only ever reads the list it
-// was handed.
+// WHAT is catalog data (creature_catalog.cpp), and the engine only ever reads
+// the list it was handed. Which catalog a given spawn path reads -- compiled
+// defaults vs the JSON-overridable per-Sim one -- is hero_desc's pre-existing
+// split; see SkillGrantRow (badlands_sim.hpp).
 struct SkillGrants {
     SkillGrantRow rows[kMaxSkills]{};
     int32_t count = 0;

@@ -149,11 +149,24 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
                          caster_slot, SkillName(static_cast<int32_t>(id)),
                          static_cast<int32_t>(spec.target));
             return false;
+        default:
+            // Unreachable through the manifest (ReadChoice only accepts named
+            // values) and through sanitize_skill_catalog, but Sim::SetSkillCatalog
+            // is public API: refuse rather than fall through having resolved
+            // nobody, which would otherwise report success and stamp a cooldown.
+            spdlog::warn("[skill] slot {}: {} has an unknown targeting mode {}, cast dropped",
+                         caster_slot, SkillName(static_cast<int32_t>(id)),
+                         static_cast<int32_t>(spec.target));
+            return false;
     }
 
     // Reach, against every resolved target (the caster itself is trivially in
-    // range, so a SelfOnly cast never fails this).
+    // range, so a SelfOnly cast never fails this). A non-positive reach means
+    // UNBOUNDED, not "zero reach": a skill that declares no attack test and
+    // authors no "range" constant is deliberately unranged (skill_cast.h), and
+    // treating 0 as a distance would refuse every target except the caster.
     const float reach = skill_cast_range(reg, caster, spec);
+    const bool ranged_check = reach > 0.0f;
     const glm::vec2 from = reg.get<Position>(caster).pos;
     for (int32_t i = 0; i < out.target_count; ++i) {
         const entt::entity t = entity_for_slot(game, static_cast<int32_t>(out.targets[i]));
@@ -163,7 +176,7 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
         if (t == caster) {
             continue;
         }
-        if (glm::distance(from, reg.get<Position>(t).pos) > reach) {
+        if (ranged_check && glm::distance(from, reg.get<Position>(t).pos) > reach) {
             spdlog::warn("[skill] slot {}: {} is out of reach ({:.1f}), cast dropped",
                          caster_slot, SkillName(static_cast<int32_t>(id)), reach);
             return false;

@@ -87,11 +87,20 @@ land in one wake.
 ## 5. Acquisition is creature config
 
 `CharacterDesc::skill_grants` (`{skill, level}` rows), authored in the creature
-catalog and overridable in `assets/creatures/creatures.json`. The list travels
-with the desc and is copied onto the entity at spawn, so a recruited hero, a
-directly-spawned one, and an arena scenario's learn the same things at the same
-levels. The compiled class→skill table is deleted. An override REPLACES rather
-than merges — the only way to author a class that learns nothing.
+catalog and parsed from `assets/creatures/creatures.json`. The list travels
+with the desc and is copied onto the entity at spawn, so no consumer re-derives
+a hero's class to know what it should learn. The compiled class→skill table is
+deleted. An override REPLACES rather than merges — the only way to author a
+class that learns nothing.
+
+**Known limit (pre-existing, inherited):** `hero_desc` (`heroes.cpp`) reads the
+COMPILED catalog for recruited heroes; only directly-spawned creatures and
+arena scenarios read the per-`Sim` catalog that `LoadCreatureCatalog` fills. So
+a `creatures.json` grant edit changes an arena mercenary and not a
+guild-recruited one — exactly as it already does for hp/armour/attack stats.
+Making recruits read the per-`Sim` catalog would fix both at once, but it
+changes stat behaviour for every recruited hero and so is a decision to take
+deliberately, not a side effect of this slice.
 
 ## 6. Hero view
 

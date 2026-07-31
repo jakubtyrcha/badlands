@@ -188,9 +188,9 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             reg.emplace<EntityMemory>(e, mem);
 
             // Learned-skill loadout. The grant list travels with the DESC
-            // (creature catalog data, overridable from creatures.json), so a
-            // recruited hero and a directly-spawned one learn the same things
-            // at the same levels; it is copied onto the entity because the
+            // (creature catalog data), so every spawn path applies whatever
+            // list its own desc carried -- see hero_desc above for which
+            // catalog each path reads. Copied onto the entity because the
             // level-up hook (progression.cpp) needs it later, long after the
             // desc is gone.
             SkillGrants grants{};

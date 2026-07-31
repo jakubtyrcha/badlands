@@ -368,3 +368,60 @@ TEST_CASE("the bash is on cooldown for its authored time", "[skills][e2e]") {
     CHECK(game->registry.get<Skills>(me).cooldown_remaining[0] ==
           Catch::Approx(11.0f).margin(0.05f));
 }
+
+// --- review findings (2026-07-31): the vocabulary's uncast corners -----------
+
+TEST_CASE("an unranged skill is castable at a distant target, not just at itself",
+          "[skills][cast]") {
+    // attack_test = none and no "range" constant means UNBOUNDED, not zero
+    // reach (skill_cast.h). Treating 0 as a distance refused every target
+    // except the caster, which would have made a support skill uncastable.
+    BashFixture f(0.0f, 0.0f, /*apart=*/9.0f);
+    SkillCatalog cat = f.game->skills;
+    SkillSpec& bash = cat.specs[static_cast<size_t>(SkillId::ShieldBash)];
+    bash.attack_test = SkillAttackTest::None;  // no test -> no borrowed reach
+    f.game->skills = cat;
+
+    CastPlan plan;
+    CHECK(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan));
+    CHECK(plan.target_count == 1);
+
+    // An authored range constant is still honoured as a real limit.
+    bash.constants[bash.constant_count].name = "range";
+    bash.constants[bash.constant_count].value = 2.0f;
+    ++bash.constant_count;
+    f.game->skills = cat;
+    CHECK_FALSE(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan));
+}
+
+TEST_CASE("an unknown targeting mode is refused, not silently cast at nobody",
+          "[skills][cast]") {
+    // Sim::SetSkillCatalog is public API; sanitize_skill_catalog clamps a
+    // garbled mode, but validate_cast refuses one regardless rather than
+    // resolving zero targets and reporting success.
+    BashFixture f;
+    SkillCatalog cat = f.game->skills;
+    cat.specs[static_cast<size_t>(SkillId::ShieldBash)].target =
+        static_cast<SkillTargetMode>(99);
+    f.game->skills = cat;
+
+    CastPlan plan;
+    CHECK_FALSE(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan));
+    f.bash();
+    CHECK(f.skill_cooldown() == Catch::Approx(0.0f));  // no cooldown stamped
+}
+
+TEST_CASE("SetSkillCatalog clamps a garbled trigger/target/attack_test",
+          "[skills]") {
+    Sim sim{BrainDesc{}};
+    SkillCatalog cat;
+    cat.specs[0].trigger = static_cast<SkillTrigger>(42);
+    cat.specs[0].target = static_cast<SkillTargetMode>(-3);
+    cat.specs[0].attack_test = static_cast<SkillAttackTest>(9);
+    sim.SetSkillCatalog(cat);
+
+    const SkillSpec& s = sim.Skills().specs[0];
+    CHECK(s.trigger == SkillTrigger::Passive);      // inert, never castable
+    CHECK(s.target == SkillTargetMode::SelfOnly);   // cannot reach anyone else
+    CHECK(s.attack_test == SkillAttackTest::None);
+}

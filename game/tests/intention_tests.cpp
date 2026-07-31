@@ -1731,3 +1731,23 @@ TEST_CASE("BL_ACT_USE_SKILL never touches CurrentIntention", "[intention][action
     resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, 0});
     CHECK(a.g().registry.get<CurrentIntention>(a.g().slots[a.s]).kind == IntentionKind::MoveTo);
 }
+
+TEST_CASE("BL_ACT_USE_SKILL: a skill that names nobody needs no target to infer",
+          "[intention][action][skills]") {
+    // SelfOnly and None both name nobody. Routing either through the
+    // "infer a victim from the running Attack intention" path would make a
+    // ward castable only mid-melee -- so both bypass it.
+    for (SkillTargetMode mode : {SkillTargetMode::SelfOnly, SkillTargetMode::None}) {
+        BashActor a;
+        SkillCatalog cat = a.g().skills;
+        cat.specs[static_cast<size_t>(SkillId::ShieldBash)].target = mode;
+        cat.specs[static_cast<size_t>(SkillId::ShieldBash)].attack_test =
+            SkillAttackTest::None;  // a ward borrows no weapon's reach
+        a.g().skills = cat;
+
+        // No target named, and nothing running to infer one from.
+        CHECK(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, UINT32_MAX, 0}));
+        REQUIRE(a.g().command_queue.size() == 1);
+        CHECK(a.g().command_queue[0].target_id == a.s);  // resolved to the caster
+    }
+}

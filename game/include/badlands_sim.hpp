@@ -306,11 +306,17 @@ struct SkillCatalog {
 SkillId SkillIdFromName(const char* name);
 
 // One "this creature learns skill X on reaching level L" row. Authored per
-// creature in the catalog (game/src/creature_catalog.cpp) and overridable from
-// assets/creatures/creatures.json, so ADDING A SKILL TO A CLASS IS DATA, not a
-// rebuild. Carried on the spawn desc rather than looked up by class, so a
-// directly-spawned or arena-scenario mercenary learns exactly what a recruited
-// one does.
+// creature in the catalog (game/src/creature_catalog.cpp), so which class
+// learns what is DATA rather than an engine table. Carried on the spawn desc
+// rather than looked up by class, so nothing has to re-derive a hero's class
+// after the fact to know what it should learn.
+//
+// NB which catalog a spawn reads is a PRE-EXISTING split (heroes.cpp's
+// hero_desc): directly-spawned creatures and arena scenarios read the per-Sim
+// catalog, so assets/creatures/creatures.json overrides reach them, while
+// RECRUITED heroes read the compiled defaults and do not. Grants inherit that
+// split exactly as stats do -- editing a grant level in creatures.json changes
+// an arena mercenary and not a guild-recruited one.
 struct SkillGrantRow {
     int32_t skill = -1;  // SkillId; -1 = empty row
     int32_t level = 1;

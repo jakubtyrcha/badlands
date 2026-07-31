@@ -127,38 +127,6 @@ std::string SkillCooldownText(float seconds) {
   return buf;
 }
 
-// The right panel is kPanelWidth (240px) wide; the ui crate cannot clip, so
-// text that would overflow it has to be pre-wrapped here. Greedily packs
-// whitespace-separated words onto label-less rows of at most `budget` chars;
-// a word longer than `budget` rides alone on its own row, untruncated.
-void AppendWrapped(HudList& list, const std::string& text, size_t budget) {
-  size_t pos = 0;
-  std::string line;
-  while (pos < text.size()) {
-    const size_t space = text.find(' ', pos);
-    const size_t word_end = space == std::string::npos ? text.size() : space;
-    const std::string word = text.substr(pos, word_end - pos);
-    if (line.empty()) {
-      line = word;
-    } else if (line.size() + 1 + word.size() <= budget) {
-      line += ' ';
-      line += word;
-    } else {
-      list.entries.emplace_back("", line);
-      line = word;
-    }
-    pos = space == std::string::npos ? text.size() : space + 1;
-  }
-  if (!line.empty()) {
-    list.entries.emplace_back("", line);
-  }
-}
-
-// Row-wrap budget for the skills list (name/summary/effect rows all share the
-// panel's content width): picked to fit the shipped font/panel (see the
-// finding this answers -- 216px content width, ~6.7-7px/char).
-constexpr size_t kSkillTextWrapChars = 30;
-
 }  // namespace
 
 bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,

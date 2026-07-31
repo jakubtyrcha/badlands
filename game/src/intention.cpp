@@ -407,17 +407,22 @@ bool resolve_use_skill(BadlandsGame& game, uint32_t slot, const AgentAction& act
         return false;
     }
 
-    // A SelfOnly skill is cast at the caster: resolving "no target named" as
-    // the actor itself (rather than demanding a running Attack intention) is
-    // what lets a ward be cast out of combat at all. validate_cast still has
-    // the last word on whether that pairing is legal for this skill.
+    // A skill that names nobody -- SelfOnly (the caster) or None (nobody at
+    // all) -- must NOT be routed through the "infer a victim" path below:
+    // that path demands a running Attack intention, which would make a ward or
+    // a self-contained effect castable only mid-melee. Resolving to the caster
+    // is inert for None (validate_cast's None branch resolves no targets
+    // regardless) and correct for SelfOnly. validate_cast still has the last
+    // word on whether the pairing is legal.
     uint32_t target_slot = action.target_slot;
     entt::entity target = entt::null;
     const Skills& skills = game.registry.get<Skills>(actor);
+    const SkillTargetMode mode =
+        (action.arg >= 0 && action.arg < skills.count)
+            ? game.skills.specs[static_cast<size_t>(skills.ids[action.arg])].target
+            : SkillTargetMode::Any;
     const bool self_cast =
-        action.arg >= 0 && action.arg < skills.count &&
-        game.skills.specs[static_cast<size_t>(skills.ids[action.arg])].target ==
-            SkillTargetMode::SelfOnly;
+        mode == SkillTargetMode::SelfOnly || mode == SkillTargetMode::None;
     if (self_cast && target_slot == UINT32_MAX) {
         target_slot = slot;
     } else if (!resolve_action_target(game, slot, actor, target_slot, "BL_ACT_USE_SKILL",
