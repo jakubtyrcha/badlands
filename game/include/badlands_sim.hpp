@@ -675,16 +675,36 @@ inline constexpr int64_t kDefaultMillisPerDay = 120 * 1000;
 // by this, so it must stay >= 1 ms).
 int64_t MillisPerDayForSimSeconds(float sim_seconds);
 
-// How to build the world (initial config). Defaults reproduce the shipping town
-// world; the arena overrides them.
+// What to place, and where. Declared up here rather than beside the rest of the
+// placement surface below because WorldConfig carries a list of them, and a
+// world's initial config has to be describable before the placement API is.
+struct PlacementDesc {
+    int32_t kind;
+    int32_t rotation_index;
+    float world_x, world_z;
+};
+
+// Which terrain a world stands on. The town's hand-authored map, or nothing at
+// all -- a world that wants no terrain says so rather than inheriting the
+// town's and quietly standing on its central lake.
+enum class MapKind : int32_t {
+    Symbolic = 0,  // the hand-authored greybox map (SymbolicMapGenerator)
+    FlatPlains,    // featureless flat plain everywhere (FlatMapGenerator)
+};
+
+// How to build the world (initial config).
 struct WorldConfig {
-    bool prebuild_colony = true;   // seed the colony Castle (false for the arena)
-    bool terrain_blocking = true;  // false = flat floor (no lake), for the arena
-    // >0 confines movement to [-half, +half] on that axis -- the arena's blocked
-    // edges. The world refuses a step past the edge (exactly like the water's
-    // edge), even though pathfinding does not yet route around it.
-    float arena_half_x = 0.0f;
-    float arena_half_z = 0.0f;
+    bool prebuild_colony = true;   // seed the colony Castle
+    bool terrain_blocking = true;  // false = terrain stops nobody, and no navmesh is built
+    MapKind map = MapKind::Symbolic;
+    // Structures that exist the moment the world does, plopped in order through
+    // plop_building -- so they carry no player margin and may abut into a
+    // continuous run. Initial config, exactly like prebuild_colony: part of the
+    // `state = f(config, log, ticks)` input rather than a command.
+    //
+    // The sim neither knows nor cares what shape they form. Whoever builds the
+    // config does.
+    std::vector<PlacementDesc> plops;
     // Length of one in-game day, in milliseconds of sim world time. Initial
     // config in the determinism contract: a replay must use the same value.
     // This sets what an in-game HOUR means (day/24), so it scales every
@@ -814,12 +834,6 @@ struct RenderBox {
 
 // Placement request: a raw (un-snapped) desired center + rotation. The sim
 // snaps the center to the grid lattice for the kind's parity.
-struct PlacementDesc {
-    int32_t kind;
-    int32_t rotation_index;
-    float world_x, world_z;
-};
-
 // One grid triangle in a probe readout.
 struct GridTriangle {
     int32_t tile_x, tile_z;  // tile min-corner, in [-H, H)

@@ -305,6 +305,7 @@ add_library(badlands_game_lib STATIC
     # (pure CPU: the mapgen Biome enum + glm, no engine/GPU deps).
     src/game/map/map_data.cpp
     src/game/map/symbolic_map_generator.cpp
+    src/game/map/flat_map_generator.cpp
     # Nav core: adaptive quadtree navmesh + HPA* pathfinding (pure CPU over the
     # injected NavSource; glm only, no engine/GPU/EnTT deps).
     game/src/navmesh/quadtree.cpp
@@ -998,6 +999,7 @@ add_test(NAME badlands_terrain_mesh_tests COMMAND badlands_terrain_mesh_tests WO
 add_executable(badlands_symbolic_map_tests
     src/game/map/map_data.cpp
     src/game/map/symbolic_map_generator.cpp
+    src/game/map/flat_map_generator.cpp
     src/game/geometry/water_surface.cpp
     game/tests/symbolic_map_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp

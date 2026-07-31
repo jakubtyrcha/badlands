@@ -29,6 +29,7 @@
 #include "monster_brain.h"
 #include "townfolk_brain.h"
 
+#include "game/map/flat_map_generator.hpp"
 #include "game/map/symbolic_map_generator.hpp"
 #include "wasm_brain.h"
 
@@ -89,21 +90,33 @@ void mock_think(BadlandsGame& game, entt::entity self, uint32_t slot) {
 
 std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfig& config) {
     auto game = std::make_unique<BadlandsGame>();
-    // Terrain/biomes the sim reasons about. SymbolicMapGenerator is a pure
-    // function of its compile-time constants, so every world would generate a
-    // byte-identical map -- generate once and copy (the shaping blur passes cost
-    // ~0.7 s, which a test suite creating a world per case cannot pay).
-    // Determinism is unaffected: the copied data is the same either way.
+    // Terrain/biomes the sim reasons about. Both generators are pure functions
+    // of their compile-time constants, so every world would generate a
+    // byte-identical map -- generate once and copy (the symbolic map's shaping
+    // blur passes cost ~0.7 s, which a test suite creating a world per case
+    // cannot pay). Determinism is unaffected: the copied data is the same
+    // either way.
     // The placement/movement grid must span the whole map (tile == 1 world unit ==
-    // 1 map metre). If the map size changes, kGridHalfExtentTiles must track it.
+    // 1 map metre). If a map size changes, kGridHalfExtentTiles must track it.
     static_assert(2 * kGridHalfExtentTiles ==
                       static_cast<int>(SymbolicMapGenerator::kMapSizeM),
                   "gameplay grid must span the full map");
-    static const MapData kSymbolicMap = SymbolicMapGenerator{}.Generate();
-    game->map = kSymbolicMap;
+    static_assert(2 * kGridHalfExtentTiles == static_cast<int>(FlatMapGenerator::kMapSizeM),
+                  "gameplay grid must span the full map");
+    switch (config.map) {
+        case MapKind::FlatPlains: {
+            static const MapData kFlatMap = FlatMapGenerator{}.Generate();
+            game->map = kFlatMap;
+            break;
+        }
+        case MapKind::Symbolic:
+        default: {
+            static const MapData kSymbolicMap = SymbolicMapGenerator{}.Generate();
+            game->map = kSymbolicMap;
+            break;
+        }
+    }
     game->terrain_blocking = config.terrain_blocking;
-    game->arena_half_x = config.arena_half_x;
-    game->arena_half_z = config.arena_half_z;
     // The clock helpers divide by this, so a zero/negative period would be a
     // division by zero rather than merely a strange world -- clamp at the
     // boundary and say so, the same shape as sanitize_factors' adjustments.
@@ -132,6 +145,17 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
             PlacementDesc{static_cast<int32_t>(BuildingKind::Castle), 0, kCastleSpawnX,
                           kCastleSpawnZ},
             /*player=*/false);
+    }
+    // Structures the config asked for, plopped: no player margin, so a run of
+    // them abuts into something solid. Loud on refusal -- a silently dropped
+    // plop is a hole in whatever it was part of, and a wall with a hole in it
+    // looks exactly like a wall until something walks through it.
+    for (size_t i = 0; i < config.plops.size(); ++i) {
+        if (plop_building(*game, config.plops[i]) == std::numeric_limits<uint32_t>::max()) {
+            spdlog::warn("make_world: plop {} (kind {} at {}, {}) was refused", i,
+                         config.plops[i].kind, config.plops[i].world_x,
+                         config.plops[i].world_z);
+        }
     }
     return game;
 }
@@ -162,9 +186,14 @@ int64_t MillisPerDayForSimSeconds(float sim_seconds) {
 }
 
 std::unique_ptr<BadlandsGame> make_flat_world() {
-    auto game = make_world(BrainDesc{});
-    game->terrain_blocking = false;
-    return game;
+    // Flat in both senses now: no terrain features, and terrain stops nobody.
+    // Before the map choice existed this still stood on the symbolic map, so
+    // "flat" was only true of the movement rule -- a test that happened to read
+    // the biome under its units got the town's lake.
+    WorldConfig cfg;
+    cfg.map = MapKind::FlatPlains;
+    cfg.terrain_blocking = false;
+    return make_world(BrainDesc{}, cfg);
 }
 
 void tick_world(BadlandsGame& g, float dt) {
