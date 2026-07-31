@@ -7,6 +7,7 @@
 
 #include "badlands_sim.hpp"  // ProgressionFactors
 
+#include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
 #include <cstdint>
@@ -15,6 +16,20 @@
 struct BadlandsGame;
 
 namespace badlands {
+
+// Recomputes every level-scaled stat for `level`: Health.max_hp, the Combatant
+// gates, each attack's base_damage, and the legacy Stats mirror of attack 0.
+//
+// ALWAYS base + growth * (level - 1) read off the entity's own BaseStats/
+// Growth -- never an accumulating +=. That makes it idempotent (calling it
+// twice at one level changes nothing) and replay-exact (a recompute lands on
+// the identical float rather than drifting by an accumulated epsilon).
+//
+// Current hp rides max_hp proportionally, so a level-up is not a free heal:
+// a hero at half health is at half health one level later, with more of it.
+// A level below 1 is clamped to 1 rather than running the growth backwards.
+// A no-op on an entity carrying no BaseStats/Growth.
+void apply_level_stats(entt::registry& reg, entt::entity e, int32_t level);
 
 // XP needed to advance FROM `level`: floor(base * level^exponent), never
 // below 1 (sanitize keeps base >= 1, exponent >= 0). Saturates to INT32_MAX

@@ -67,6 +67,12 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Melee;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 6.0f, 1.5f, 1.0f, 0.1f};
+        // Armour 2, evasion 1, hitpoints 1, dps 1 (the doc's level-15 ratings).
+        // The heaviest armour growth of the four -- which is also why the
+        // mercenary's curve flattens late: flat reduction loses relative value
+        // as everything else's damage climbs.
+        d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.004f,
+                    .defense = 0.0f, .armour = 0.20f, .damage_frac = 0.04f};
         // Utility arrives with the shield: at level 3 the tank stops being
         // only a wall and starts taking a turn away from whatever it hits.
         d.skill_grants[0] = {static_cast<int32_t>(SkillId::ShieldBash), 3};
@@ -87,22 +93,31 @@ CreatureCatalog::CreatureCatalog() {
         d.attack_count = 2;
         d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 5.0f, 8.0f, 1.2f, 0.25f};
         d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f};
+        // Armour 1, evasion 1, hitpoints 1, dps 2.
+        d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.004f,
+                    .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
     }
-    // Grave Robber: mixed -- a hand crossbow opener (high crit) then blades.
+    // Grave Robber: mixed -- a hand crossbow OPENER (one heavy, high-crit bolt
+    // on a long reload) then blades. The reload is the whole identity: at a
+    // short cooldown the crossbow out-DPSes the hunter's bow and inverts the
+    // two classes, which their threat anchors (1.0 vs 1.5) say it must not.
     {
         CharacterDesc& d = at(CreatureId::GraveRobber);
         d.archetype = Archetype::Hero;
         d.hero_class = HERO_GRAVE_ROBBER;
         d.hp = 24.0f;
-        d.move_speed = 2.6f;
+        d.move_speed = 2.8f;
         d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
         d.color_r = 0.60f; d.color_g = 0.45f; d.color_b = 0.75f;  // violet
         d.vision_radius = 14.0f; d.vision_cone_half_angle_deg = 60.0f;
         d.accuracy = 0.85f; d.evasion = 0.20f; d.defense = 0.10f; d.armour = 1.0f;
         d.stance = CombatStance::Melee;  // closes, but opens with the crossbow
         d.attack_count = 2;
-        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 3.0f, 5.0f, 0.6f, 0.30f};
+        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 5.0f, 5.0f, 2.5f, 0.30f};
         d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 4.0f, 1.3f, 0.7f, 0.20f};
+        // Armour 1, evasion 2 (the nimblest of the four), hitpoints 1, dps 2.
+        d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.008f,
+                    .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
     }
     // Apprentice: fragile ranged caster (a magic bolt; Soul comes later).
     {
@@ -118,6 +133,13 @@ CreatureCatalog::CreatureCatalog() {
         d.stance = CombatStance::Ranged;
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 6.0f, 1.5f, 0.10f};
+        // Armour 0, evasion 0, hitpoints 1, dps 2. No defensive growth at all:
+        // the apprentice never stops being fragile, and its intended late-game
+        // power is SPELLS, not this bolt -- which is why a stats-only
+        // apprentice undershoots its curve (design doc §1) rather than
+        // being tuned up here to hide that.
+        d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.0f,
+                    .defense = 0.0f, .armour = 0.0f, .damage_frac = 0.08f};
         d.skill_grants[0] = {static_cast<int32_t>(SkillId::Calcify), 5};
         d.skill_grant_count = 1;
     }

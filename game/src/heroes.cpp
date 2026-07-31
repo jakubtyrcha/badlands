@@ -125,6 +125,24 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
         reg.emplace<Stats>(e, desc.move_speed, desc.attack_range, desc.attack_damage,
                            desc.attack_cooldown);
     }
+    // Level scaling (progression.h): the level-1 row is kept as the growth
+    // ORIGIN, because apply_level_stats recomputes from it rather than
+    // accumulating onto the live stats. Emplaced for EVERY archetype, not
+    // just heroes -- a monster's zeroed growth makes the call a no-op, and
+    // one code path is worth more than the two components it costs a rat.
+    BaseStats base{};
+    base.hp = desc.hp;
+    base.accuracy = desc.accuracy;
+    base.evasion = desc.evasion;
+    base.defense = desc.defense;
+    base.armour = desc.armour;
+    base.attack_count = atk.count;
+    for (int i = 0; i < atk.count && i < kMaxAttacks; ++i) {
+        base.attack_damage[i] = atk.defs[i].base_damage;
+    }
+    reg.emplace<BaseStats>(e, base);
+    reg.emplace<Growth>(e, Growth{desc.growth});
+
     reg.emplace<RenderShape>(e, glm::vec3{desc.size_x, desc.size_y, desc.size_z},
                              glm::vec3{desc.color_r, desc.color_g, desc.color_b});
 

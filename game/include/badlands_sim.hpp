@@ -506,6 +506,31 @@ struct Combatant {
     // reserved (deferred psychology): float willpower, resolve;
 };
 
+// Per-level stat deltas. A creature's stats are ALWAYS
+//   stat = base + growth * (level - 1)
+// recomputed from scratch (game/src/progression.h's apply_level_stats), never
+// accumulated -- so a replay that recomputes lands on identical floats instead
+// of drifting, and calling it twice at one level is a no-op.
+//
+// The rates come from the design doc's level-15 rating table (docs/design/
+// game-design.html §5.2) times a per-stat step, which is why linear stat
+// growth produces a CONVEX power curve: power is roughly dps x ehp, a product
+// of two rising terms. Armour's flat reduction self-plateaus against rising
+// damage, reproducing the doc's "armour scaling hits diminishing returns"
+// without any special case.
+//
+// Monsters leave this zeroed -- they do not level.
+struct StatGrowth {
+    float hp = 0.0f;           // flat, per level
+    float accuracy = 0.0f;     // flat
+    float evasion = 0.0f;      // flat
+    float defense = 0.0f;      // flat
+    float armour = 0.0f;       // flat
+    // FRACTION of each attack's own base_damage, per level -- so a big weapon
+    // gains more per level than a small one at the same design rating.
+    float damage_frac = 0.0f;
+};
+
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
     Archetype archetype = Archetype::Hero;
@@ -543,6 +568,9 @@ struct CharacterDesc {
     CombatStance stance = CombatStance::Melee;
     Attack attacks[kMaxAttacks]{};
     int32_t attack_count = 0;
+    // Per-level deltas applied to the stats above (see StatGrowth). The values
+    // here are the LEVEL-1 row; growth carries the creature from there.
+    StatGrowth growth{};
     // Level-gated skill acquisition (see SkillGrantRow). Rows fire at their
     // exact level: spawn applies the level-1 ones, and the level-up hook
     // (game/src/progression.h) applies the rest as the hero grows.

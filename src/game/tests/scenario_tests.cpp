@@ -101,6 +101,38 @@ TEST_CASE("LoadCreatureCatalog rejects a non-numeric value") {
     CHECK(cat.defs[static_cast<int>(CreatureId::Rat)].hp == rat_hp0);  // untouched on failure
 }
 
+// --- level scaling, as data --------------------------------------------------
+
+TEST_CASE("LoadCreatureCatalog reads a creature's growth row") {
+    const std::string p = write_temp(
+        "cre_growth.json",
+        R"({ "Mercenary": { "growth": { "hp": 3, "armour": 0.5, "damage_frac": 0.1 } } })");
+    CreatureCatalog cat;
+    const float evasion0 =
+        cat.defs[static_cast<int>(CreatureId::Mercenary)].growth.evasion;
+    REQUIRE(LoadCreatureCatalog(p, cat));
+    const StatGrowth& g = cat.defs[static_cast<int>(CreatureId::Mercenary)].growth;
+    CHECK(g.hp == 3.0f);
+    CHECK(g.armour == 0.5f);
+    CHECK(g.damage_frac == 0.1f);
+    // Unlike the skill list, growth MERGES: it is a bag of independent
+    // scalars, so overriding hp must not silently zero the others.
+    CHECK(g.evasion == evasion0);
+}
+
+TEST_CASE("a malformed growth row fails the load loudly") {
+    CreatureCatalog fresh;
+    const float before = fresh.defs[static_cast<int>(CreatureId::Mercenary)].growth.hp;
+    for (const char* body : {R"({ "Mercenary": { "growth": { "armor": 0.5 } } })",
+                             R"({ "Mercenary": { "growth": { "hp": "fast" } } })",
+                             R"({ "Mercenary": { "growth": 3 } })"}) {
+        const std::string p = write_temp("cre_growth_bad.json", body);
+        CreatureCatalog cat;
+        CHECK_FALSE(LoadCreatureCatalog(p, cat));
+        CHECK(cat.defs[static_cast<int>(CreatureId::Mercenary)].growth.hp == before);
+    }
+}
+
 // --- level-gated skill acquisition, as data ---------------------------------
 // Which creature learns what, at which level, is catalog data a designer can
 // override without a rebuild. Fixtures are test-local: nothing here asserts on

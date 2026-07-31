@@ -1,8 +1,49 @@
 {
-  "_comment": "Rebalance creature stats without a rebuild. Keys are creature names; every field is optional and overrides the compiled default. Attack category/type stay compiled. 'skills' is the level-gated acquisition list and REPLACES the compiled one when present.",
+  "_comment": "Rebalance creature stats without a rebuild. Keys are creature names; every field is optional and overrides the compiled default. Attack category/type stay compiled. 'skills' is the level-gated acquisition list and REPLACES the compiled one when present. 'growth' is the per-level stat delta (stat = base + growth * (level-1)) and MERGES key by key; unknown keys fail the load.",
   "Mercenary": {
+    "growth": {
+      "hp": 1.5,
+      "accuracy": 0.005,
+      "evasion": 0.004,
+      "defense": 0.0,
+      "armour": 0.2,
+      "damage_frac": 0.04
+    },
     "skills": [
       { "name": "ShieldBash", "level": 3 }
+    ]
+  },
+  "Hunter": {
+    "growth": {
+      "hp": 1.5,
+      "accuracy": 0.005,
+      "evasion": 0.004,
+      "defense": 0.0,
+      "armour": 0.1,
+      "damage_frac": 0.08
+    }
+  },
+  "GraveRobber": {
+    "growth": {
+      "hp": 1.5,
+      "accuracy": 0.005,
+      "evasion": 0.008,
+      "defense": 0.0,
+      "armour": 0.1,
+      "damage_frac": 0.08
+    }
+  },
+  "Apprentice": {
+    "growth": {
+      "hp": 1.5,
+      "accuracy": 0.005,
+      "evasion": 0.0,
+      "defense": 0.0,
+      "armour": 0.0,
+      "damage_frac": 0.08
+    },
+    "skills": [
+      { "name": "Calcify", "level": 5 }
     ]
   },
   "Goblin": {}

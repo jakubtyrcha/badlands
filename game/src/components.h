@@ -268,6 +268,27 @@ struct SkillGrants {
     int32_t count = 0;
 };
 
+// The level-1 stat row, kept for the whole life of the entity because level
+// scaling RECOMPUTES from it rather than accumulating onto the live stats
+// (see StatGrowth / apply_level_stats). Without this the origin would be lost
+// the first time a hero levelled, and every later recompute would compound.
+struct BaseStats {
+    float hp = 0.0f;
+    float accuracy = 0.0f;
+    float evasion = 0.0f;
+    float defense = 0.0f;
+    float armour = 0.0f;
+    float attack_damage[kMaxAttacks]{};
+    int32_t attack_count = 0;
+};
+
+// The spawn desc's growth row, copied onto the entity for the same reason
+// SkillGrants is: the level-up hook (progression.cpp) must not have to find
+// the desc again, or re-derive it from a class.
+struct Growth {
+    StatGrowth rows{};
+};
+
 // Present only on entities whose death pays XP (CharacterDesc.xp_reward > 0).
 // Read by the death sweep (sim.cpp), which collects the payout before the
 // destroy and spreads it via spread_kill_xp (progression.h).
