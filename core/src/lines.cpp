@@ -84,7 +84,6 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float step = 2.0f * he / static_cast<float>(divisions);
-    const int center = divisions / 2;
 
     auto push = [&](simd_float3 p) {
         LineVertex vertex;
@@ -93,13 +92,13 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
         out.push_back(vertex);
     };
 
-    // For each sample i in [0, divisions] (skipping the center, where the
-    // u/v axis handles run), emit one line running along u (offset along v)
-    // and one running along v (offset along u).
+    // For each sample i in [0, divisions], emit one line running along u
+    // (offset along v) and one running along v (offset along u). The center
+    // lines are drawn like any other: the axis handles only cover their
+    // positive halves (R3), so skipping the center would leave the -he..0
+    // halves gapped; the positive halves just sit under the thick opaque
+    // handles.
     for (int i = 0; i <= divisions; ++i) {
-        if (i == center) {
-            continue;
-        }
         const float offset = -he + static_cast<float>(i) * step;
         push(origin + offset * frame.v - he * frame.u);
         push(origin + offset * frame.v + he * frame.u);

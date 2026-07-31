@@ -319,6 +319,14 @@ TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it po
         editor->deleteSelectedNode();
         CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
     }
+
+    SUBCASE("endDrag clears hover — a drag can move the gizmo out from under the cursor, "
+            "so the pre-drag hover is stale (post-R3 review finding)") {
+        REQUIRE(editor->beginDrag(on_u.x, on_u.y));
+        editor->updateDrag(on_u.x + 40.0f, on_u.y);
+        editor->endDrag();
+        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    }
 }
 
 // --- Editor: radial-menu anchor projection ----------------------------------

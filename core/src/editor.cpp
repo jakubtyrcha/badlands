@@ -332,6 +332,14 @@ void Editor::updateDrag(float x, float y) {
     simd_float3 delta;
     if (gizmo_handle_is_axis(impl_->drag.handle)) {
         const simd_float3 axis = gizmo_axis_dir(impl_->drag.frame, impl_->drag.handle);
+        // Same view-align guard as pick_gizmo_handle, here per-update: an
+        // axis grabbed just inside the pick limit can still be dragged
+        // toward its vanishing point, where the solver's 1/sin^2 term
+        // amplifies cursor noise into huge jumps. Keep the last position
+        // instead (post-R3 review finding).
+        if (std::fabs(simd_dot(ray.dir, axis)) > kAxisViewAlignLimit) {
+            return;
+        }
         const std::optional<float> s = ray_axis_param(ray, impl_->drag.frame.origin, axis);
         if (!s) {
             return; // near-parallel: keep last position (mirrors ray_plane's guard)
@@ -359,6 +367,11 @@ void Editor::updateDrag(float x, float y) {
 void Editor::endDrag() {
     impl_->drag.active = false;
     impl_->drag.node_id = kInvalidNode;
+    // The drag may have moved the gizmo out from under the cursor, so the
+    // pre-drag hover is stale. The app layer re-derives hover from the
+    // mouse-up position right after this (EditorViewModel.handleMouseUp);
+    // for positionless callers (mode-switch aborts, deletion) None is right.
+    impl_->hover = GizmoHandle::None;
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {

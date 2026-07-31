@@ -275,14 +275,25 @@ TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — thin, copla
     std::vector<LineVertex> out;
     append_move_gizmo_grid(out, f, 12);
 
-    // 24 grid lines (2*divisions, center skipped) = 48 verts.
-    REQUIRE(out.size() == 48);
+    // 26 grid lines (2*(divisions+1), center lines included — the positive-
+    // only axis handles no longer cover their negative halves) = 52 verts.
+    REQUIRE(out.size() == 52);
     for (size_t i = 0; i < out.size(); ++i) {
         CAPTURE(i);
         const simd_float3 p = out[i].pos.xyz;
         const simd_float4 c = out[i].color;
         CHECK(std::fabs(simd_dot(f.n, p - f.origin)) < 1e-5f);
         CHECK(c.w == doctest::Approx(0.18f));
+    }
+
+    // Regression (post-R3 review): the center lines must reach the NEGATIVE
+    // ends — the positive-only axis handles no longer cover them.
+    for (const simd_float3 neg_end : {f.origin - 2.0f * f.u, f.origin - 2.0f * f.v}) {
+        bool found = false;
+        for (const LineVertex& v : out) {
+            found = found || simd_length(v.pos.xyz - neg_end) < 1e-4f;
+        }
+        CHECK(found);
     }
 }
 

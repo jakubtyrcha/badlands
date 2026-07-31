@@ -66,8 +66,9 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
 // two appends because the two halves draw with different primitives:
 //
 // Grid (thin LINE primitives, decoration): grid lines i in 0..divisions
-// along BOTH u and v directions, SKIPPING the center line (i == divisions/2)
-// in each direction: 2*divisions lines = 48 verts at divisions=12, color
+// along BOTH u and v directions, center lines included — the axis handles
+// only cover the positive halves (R3), so a skipped center would gap the
+// -he..0 halves: 2*(divisions+1) lines = 52 verts at divisions=12, color
 // kColorGridLine.
 void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions);
 //

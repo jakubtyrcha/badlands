@@ -183,6 +183,10 @@ final class EditorViewModel {
         switch activeRadialTool {
         case .move:
             editor.endDrag()
+            // endDrag cleared the (stale) pre-drag hover; re-derive it from
+            // where the mouse actually is so a handle still under the cursor
+            // stays lit without waiting for the next mouse move.
+            editor.updateGizmoHover(Float(p.x), Float(p.y))
         case .scale:
             editor.endScale()
             activeRadialTool = .move
