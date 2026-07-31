@@ -1,5 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include "game/geometry/leaf_voxelizer.hpp"
 #include "game/geometry/tree_generator.hpp"
@@ -250,6 +251,73 @@ TEST_CASE("VoxelizeLeafCards: every TreeCatalog preset voxelizes at 3 cell sizes
       const uint32_t tet_count = m.vertex_count / 4u;
       if (i > 0) CHECK(tet_count <= prev_tet_count);  // coarser cells -> not more tets
       prev_tet_count = tet_count;
+    }
+  }
+}
+
+TEST_CASE(
+    "VoxelizeLeafCards: every TreeCatalog preset stays in a sane tet-count "
+    "band at the viewer's 3 native cell sizes") {
+  // Mirrors model_viewer_view.cpp's per-tree native cell-size derivation
+  // (kFoliageVoxelWorldSizes[lod_level_ - 1] / s, s = kTreePreviewHeight /
+  // bark_height) -- duplicated here (not shared via a header) since those
+  // are viewer-local constants in model_viewer_view.cpp's anonymous
+  // namespace. Unlike the flat 0.15/0.30/0.60-NATIVE-units test above, this
+  // uses the tree's own preview-rescaled cell size, which varies a lot by
+  // preset since `s` depends on the preset's own native height -- e.g. a
+  // Bush's L0 native cell size is ~0.23 while an Aspen (large)'s is ~1.86.
+  constexpr float kTreePreviewHeight = 8.0f;
+  constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.30f, 0.60f};
+  // Generous headroom over the largest count measured across all 15 presets
+  // x 3 levels (Oak (large) L0, ~11.7k tets) -- this bound exists to catch a
+  // real order-of-magnitude blowup (e.g. a stray cell_size/rescale mixup),
+  // not to be a tight fit.
+  constexpr uint32_t kMaxSaneTetCount = 50000u;
+
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  REQUIRE(catalog.size() == 15u);
+
+  for (const NamedTreeOptions& setup : catalog) {
+    INFO("setup: " << setup.name);
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+    const TexturedMeshResult bark = GenerateTreeMesh(setup.options, skeleton);
+    const float bark_height = bark.local_bounds.max.y - bark.local_bounds.min.y;
+    const float s = kTreePreviewHeight / std::max(bark_height, 0.001f);
+    const TexturedMeshResult leaves = GenerateLeafMesh(setup.options, skeleton);
+    REQUIRE(leaves.mesh.vertex_count > 0u);
+
+    for (int level = 0; level < 3; ++level) {
+      LeafVoxelizeOptions opts;
+      opts.cell_size = kFoliageVoxelWorldSizes[static_cast<size_t>(level)] / s;
+      INFO("level=" << level << " native cell_size=" << opts.cell_size);
+
+      const TexturedMeshResult r =
+          VoxelizeLeafCards(leaves.mesh, setup.options.leaves.silhouette, opts);
+      const uint32_t tet_count = r.mesh.vertex_count / 4u;
+      INFO("tet_count=" << tet_count);
+      CHECK(tet_count <= kMaxSaneTetCount);
+
+      // Known gap, measured directly (not a Phase 3 regression): "Pine
+      // (medium)"/"Pine (large)" voxelize to a genuinely EMPTY crown at
+      // their own Voxel-L1 native cell size (occupancy_fraction=0.15,
+      // Phase 1's default, interacting with Pine's sparse needle-stroke
+      // leaf cards -- the accumulated card area per cell fails to keep pace
+      // with the cell-area threshold's quadratic growth right at this cell
+      // size, even though it clears the threshold at both the finer L0 and
+      // the coarser L2 size). Retuning occupancy_fraction/cell_size per
+      // species is Phase 6's job, not Phase 3's -- this phase's manual
+      // screenshot gate doesn't hit it (Oak L0..L2 and Pine L0 all stay
+      // non-empty; see phase-3-report.md). Every OTHER preset x level
+      // combination is asserted non-empty, so a genuine new regression still
+      // fails loudly here.
+      const bool known_empty_gap =
+          (setup.name == "Pine (medium)" || setup.name == "Pine (large)") &&
+          level == 1;
+      if (!known_empty_gap) {
+        CHECK(tet_count > 0u);
+      } else {
+        CHECK(tet_count == 0u);  // pins the known gap; fails loudly if it's ever fixed unnoticed
+      }
     }
   }
 }

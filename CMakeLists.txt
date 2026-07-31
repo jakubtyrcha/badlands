@@ -640,6 +640,35 @@ if(APPLE)
 endif()
 add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_tree_field_gpu_tests: volumetric-foliage Phase 3's headless GPU
+# suite -- builds a real Oak crown (GenerateLeafMesh + VoxelizeLeafCards, the
+# same CPU pipeline model_viewer_view.cpp's Voxel L0/L1/L2 modes drive) as a
+# deferred VoxelFoliage entity in a real SceneGraph and renders it through the
+# full SceneRenderer pipeline (G-buffer -> shadow map -> deferred lighting ->
+# tonemap), modeled on badlands_forward_pass_test's TestGpu harness shape and
+# src/engine/tests/gpu_instance_tests.cpp's RenderSceneWithFields full-frame
+# pattern. Needs a working GPU adapter (Metal on macOS) + the shaders/ dir
+# (WORKING_DIRECTORY = repo root); compiles the tree/leaf-voxelizer sources
+# directly (mirrors badlands_tree_tests above) rather than linking them from
+# badlands_game_lib (neither is a member of that library -- see
+# badlands_app_sources_viewer).
+add_executable(badlands_tree_field_gpu_tests
+    game/tests/tree_field_gpu_tests.cpp
+    src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
+    src/game/geometry/leaf_voxelizer.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_tree_field_gpu_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_tree_field_gpu_tests PRIVATE badlands_engine badlands_game_lib)
+if(APPLE)
+    target_link_options(badlands_tree_field_gpu_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_tree_field_gpu_tests COMMAND badlands_tree_field_gpu_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of
 # shaders/passes/decals.wesl. Pure CPU (header-only math + glm), so it runs the
