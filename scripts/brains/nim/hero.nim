@@ -199,6 +199,11 @@ proc rangedReach(v: HeroView): float32 =
 # free), and the thing is dangerous enough to be worth ceding ground to.
 proc wantsStandoff(v: HeroView): bool =
   v.hasThreat and
+    # Not while unseen. Sneaking is a commitment to the knife: the whole value
+    # of it is spent on the opening blow in melee, and a hero that both holds
+    # its fire (below) and keeps its distance would simply stand there until
+    # the status ran out. Being unseen already provides what a standoff buys.
+    not v.sneaking and
     rangedReach(v) > v.threatReach and
     v.threatRangedReach <= 0.0'f32 and
     v.threatThreat >= v.selfThreat * kStandoffThreatRatio
@@ -300,15 +305,24 @@ proc brainTick(slot: int32): int32 =
       # is fine; it mirrors bl_enqueue_action's own "let the engine infer it"
       # sentinel below.
       let targetSlot = if v.hasThreat: v.threatSlot else: high(uint32)
-      let best = pickBestAttack(v, v.hasThreat, v.threatDist)
-      if best >= 0:
-        bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best)
-      # Shield-bash (v4): a SECOND action this wake, not a replacement for the
-      # swing -- the bash stamps only its own cooldown host-side, so a
-      # mercenary that opens with it still swings the same tick. Only fired
-      # at a threat actually in view (a locked-but-unseen opponent gives no
-      # distance to gate on) and only inside melee reach, which is the same
-      # gate validate_cast applies host-side.
+      # HOLD FIRE WHILE UNSEEN AND STILL CLOSING. Any attack ends the sneak the
+      # moment it is declared (game/src/combat.h), and pickBestAttack picks by
+      # damage -- so a grave robber, whose crossbow outdamages its blades and
+      # outranges them fourfold, would open with a bolt from 5 m and spend the
+      # entire approach on one shot. Being unseen is worth more than the shot:
+      # wait until the blades can reach, and the stab below collects both
+      # bonuses at once.
+      let holdingFire = v.sneaking and v.threatDist > meleeReach(v)
+      let best =
+        if holdingFire: -1'i32
+        else: pickBestAttack(v, v.hasThreat, v.threatDist)
+      # The cast is decided FIRST and enqueued BEFORE the swing (v6). Actions
+      # drain in enqueue order, and several things are consumed by whichever
+      # act uses them first: declaring a strike ends Sneak, so a swing enqueued
+      # ahead of the stab would spend the whole approach on an ordinary blow.
+      # Casting first is also simply better for the others -- a bash lands on
+      # something that is then stunned for the sword.
+      #
       # Skills, in priority order, at most ONE per wake: the engine stamps only
       # the skill's own cooldown, so a cast and a swing can both land in a
       # tick, but two casts in one wake is not a thing this brain does.
@@ -326,12 +340,34 @@ proc brainTick(slot: int32): int32 =
           castSlot = dress
           castTarget = v.slot
 
+      # Sneak, BEFORE the stab and before contact: it is the approach, not a
+      # trick played in a fight. Cast while the threat is still further off
+      # than a blade can reach and we are not already locked -- which is also
+      # exactly what the engine refuses (skills.json's castable_in_melee), so
+      # a wake is never spent asking for a cast that will be dropped.
+      #
+      # The pair is the whole grave robber: arrive unseen, and the opening blow
+      # gets both the sneak bonus and Backstab's own (the target cannot be
+      # engaging someone it cannot see).
+      if castSlot < 0 and v.hasThreat and not v.meleeLocked and
+         v.threatDist > meleeReach(v) and not v.sneaking:
+        let sneak = readySkillSlot(v, BL_SKILL_SNEAK)
+        if sneak >= 0:
+          castSlot = sneak
+          castTarget = v.slot
+
       # Backstab: melee-tested, and only worth its cooldown against something
       # not already fighting us (the engine decides that, but asking while
-      # locked in a face-to-face melee spends the cooldown for an ordinary
-      # blow).
+      # locked in a face-to-face melee usually spends the cooldown for an
+      # ordinary blow).
+      #
+      # ...UNLESS we are unseen. A melee lock says the bodies are in contact,
+      # not that the other one knows who with -- and something that cannot
+      # perceive us cannot be engaging us, which is exactly the condition the
+      # bonus pays out on. Without this the lock lands on the same tick contact
+      # does and the stab never fires at all.
       if castSlot < 0 and v.hasThreat and v.threatDist <= meleeReach(v) and
-         not v.meleeLocked:
+         (not v.meleeLocked or v.sneaking):
         let stab = readySkillSlot(v, BL_SKILL_BACKSTAB)
         if stab >= 0:
           castSlot = stab
@@ -351,6 +387,11 @@ proc brainTick(slot: int32): int32 =
 
       if castSlot >= 0:
         bl_enqueue_action(BL_ACT_USE_SKILL, castTarget, castSlot)
+      # ...and the swing after it: a SECOND action this wake, not a replacement
+      # for the cast. The engine stamps only the skill's own cooldown, so a
+      # mercenary that opens with a bash still swings the same tick.
+      if best >= 0:
+        bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best)
       # Move-shoot-move (v5): a hero that outranges what is coming at it backs
       # off to keep the margin, while still firing through the action channel
       # above -- the action is orthogonal to the intention, which is what makes

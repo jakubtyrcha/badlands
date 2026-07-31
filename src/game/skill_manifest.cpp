@@ -24,6 +24,21 @@ bool ReadNum(const nlohmann::json& obj, const std::string& skill, const char* ke
     return true;
 }
 
+// Read an optional boolean key. Same contract as ReadNum: absent keeps the
+// compiled default, present-but-wrong-type fails loudly.
+bool ReadBool(const nlohmann::json& obj, const std::string& skill, const char* key,
+              bool& dst) {
+    if (!obj.contains(key)) {
+        return true;
+    }
+    if (!obj[key].is_boolean()) {
+        spdlog::warn("LoadSkillCatalog: {}.{} is not a boolean", skill, key);
+        return false;
+    }
+    dst = obj[key].get<bool>();
+    return true;
+}
+
 bool ReadString(const nlohmann::json& obj, const std::string& skill, const char* key,
                 std::string& dst) {
     if (!obj.contains(key)) {
@@ -155,6 +170,7 @@ bool LoadSkillCatalog(const std::string& path, SkillCatalog& out) {
             ReadNum(o, name, "target_limit", s.target_limit) &&
             ReadNum(o, name, "cooldown", s.cooldown_seconds) &&
             ReadNum(o, name, "intention_duration", s.intention_duration_seconds) &&
+            ReadBool(o, name, "castable_in_melee", s.castable_in_melee) &&
             ReadString(o, name, "effect", s.effect) &&
             ReadConstants(o, name, s);
         if (!ok) {

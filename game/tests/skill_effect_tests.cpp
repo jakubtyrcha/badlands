@@ -121,15 +121,27 @@ TEST_CASE("push_effect_op drops past capacity instead of overrunning",
           static_cast<uint32_t>(BL_SKILL_MAX_OPS - 1));
 }
 
-TEST_CASE("every skill has an effect, and Calcify's is a documented no-op",
-          "[skill_effect]") {
+TEST_CASE("every skill has an effect", "[skill_effect]") {
+    // SkillEffectOf is TOTAL over the id space, which is what lets a new skill
+    // be added without a call site anywhere learning about it.
     for (int32_t i = 0; i < badlands::kSkillCount; ++i) {
         CHECK(SkillEffectOf(static_cast<SkillId>(i)) != nullptr);
     }
-    const BlSkillCastContext ctx = bash_context(BL_TEST_HIT);
+}
+
+TEST_CASE("Calcify asks for its own status and nothing else", "[skill_effect]") {
+    // The ward's magnitude is not here and must not be: how much armour a
+    // calcification is worth belongs to the STATUS (combat.cpp), so the only
+    // number this effect reads is the duration.
+    BlSkillCastContext ctx = bash_context(BL_TEST_NOT_RUN);
+    std::snprintf(ctx.constants[0].name, BL_SKILL_NAME_LEN, "duration_seconds");
+    ctx.constants[0].value = 30.0f;
     BlSkillEffectBatch out{};
     SkillEffectOf(SkillId::Calcify)(ctx, out);
-    CHECK(out.count == 0);  // the ward's own mechanic is a later slice
+    REQUIRE(out.count == 1);
+    CHECK(out.ops[0].kind == BL_FX_APPLY_STATUS);
+    CHECK(out.ops[0].param_i == static_cast<int32_t>(StatusKind::Calcified));
+    CHECK(out.ops[0].param_f == Catch::Approx(30000.0f));  // seconds -> ms
 }
 
 TEST_CASE("the contract's layout is pinned", "[skill_effect]") {

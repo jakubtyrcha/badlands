@@ -83,11 +83,15 @@ TEST_CASE("the creature catalog carries the shipped grant lists") {
     CHECK(hunter.skill_grants[0].skill == static_cast<int32_t>(SkillId::DressWounds));
     CHECK(hunter.skill_grants[0].level == 2);
 
+    // Two rows at the same level: the approach and the payoff are one tool,
+    // and grant_skills_for_level applies every row that matches, not the first.
     const badlands::CharacterDesc& gr =
         cat.defs[static_cast<int>(badlands::CreatureId::GraveRobber)];
-    REQUIRE(gr.skill_grant_count == 1);
-    CHECK(gr.skill_grants[0].skill == static_cast<int32_t>(SkillId::Backstab));
+    REQUIRE(gr.skill_grant_count == 2);
+    CHECK(gr.skill_grants[0].skill == static_cast<int32_t>(SkillId::Sneak));
     CHECK(gr.skill_grants[0].level == 3);
+    CHECK(gr.skill_grants[1].skill == static_cast<int32_t>(SkillId::Backstab));
+    CHECK(gr.skill_grants[1].level == 3);
 }
 
 TEST_CASE("Calcify recommends on a close melee threat, gated by cooldown") {
@@ -126,7 +130,10 @@ TEST_CASE("skill template catalog carries the compiled Calcify defaults") {
     CHECK(c.attack_test == badlands::SkillAttackTest::None);
     CHECK(c.intention_duration_seconds == 0.0f);
     CHECK(c.cooldown_seconds == 20.0f);
-    CHECK(c.effect == "Absorbs the next physical strike, then shatters.");
+    CHECK(c.effect == "Hardens the skin to stone; blows land, and glance.");
+    // Its constant is the DURATION; how much armour it is worth belongs to the
+    // status (combat.cpp), not to whatever applied it.
+    CHECK(c.constant("duration_seconds", 0.0f) == 30.0f);
 }
 
 TEST_CASE("ShieldBash template: an action, at an enemy, with a melee test") {

@@ -100,7 +100,27 @@ int pick_attack(const Attacks& atk, float dist, bool melee_locked);
 
 // The "pick the enemy" contract -- returns nearest_enemy today, the one place a
 // Threat-Score model drops in later. Null if there is no enemy.
+//
+// Skips anything carrying StatusKind::Sneaking. That skip and the matching one
+// in collect_threats (behaviours/perception.cpp) are the WHOLE of what
+// imperceptibility means: between them they cover every way anything in this
+// sim learns another entity is there, so no brain needs to know the status
+// exists.
 entt::entity select_target(const BadlandsGame& game, entt::entity self);
+
+// Ends StatusKind::Sneaking, if it is up. An AGGRESSIVE ACT is the only thing
+// that cuts stealth short of its timer, and it is precisely two things:
+//
+//   * declaring a strike (strike.cpp's declare_strike), called AFTER the
+//     attacker's stats are captured -- so the blow that breaks stealth is the
+//     blow that benefits from it, which is the entire skill;
+//   * a cast whose effect batch damages somebody else (skill_cast.cpp's
+//     apply_effect_batch). Backstab and any other damaging skill therefore
+//     break it; Calcify, Dress Wounds and Teleport do not.
+//
+// A no-op on an entity that is not sneaking, so both call sites can be
+// unconditional.
+void end_sneak_on_aggression(BadlandsGame& game, entt::entity e);
 
 // Resolve one attack by `attacker_slot` against `target_slot` right now: the
 // single entry point the Attack command handler calls. Authoritative -- it

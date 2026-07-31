@@ -158,6 +158,13 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
                      static_cast<int32_t>(spec.trigger));
         return false;
     }
+    if (!spec.castable_in_melee && reg.all_of<MeleeLock>(caster)) {
+        // Authored data, checked here so BOTH gates enforce it -- you cannot
+        // vanish out of a fight somebody is already in with you.
+        spdlog::warn("[skill] slot {}: {} cannot be cast in melee contact, cast dropped",
+                     caster_slot, SkillName(static_cast<int32_t>(id)));
+        return false;
+    }
 
     // Target resolution by mode.
     out = CastPlan{};
@@ -366,6 +373,15 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
                 h->hp -= op.param_f;
                 emit_char_hit(game, caster_slot, op.target_slot, op.param_f, h->hp,
                               game.registry.get<Position>(target).pos);
+                // Hurting somebody else is the other aggressive act (combat.h),
+                // so a damaging cast breaks stealth exactly as a swing does --
+                // and a self-buff or a heal does not. Checked per op rather
+                // than per cast: what makes a skill aggressive is what it did,
+                // not what it is called.
+                if (op.target_slot != caster_slot) {
+                    end_sneak_on_aggression(
+                        game, entity_for_slot(game, static_cast<int32_t>(caster_slot)));
+                }
                 break;
             }
             case BL_FX_HEAL: {

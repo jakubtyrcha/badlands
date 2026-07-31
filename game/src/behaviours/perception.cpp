@@ -3,6 +3,7 @@
 #include "brain_kind.h"  // BrainKind (what "my kind" means for NotMyKind)
 #include "components.h"
 #include "game_state.h"
+#include "status.h"  // has_status -- Sneaking is unperceivable
 
 namespace badlands {
 
@@ -54,6 +55,12 @@ int32_t collect_threats(const BadlandsGame& game, entt::entity self, glm::vec2 p
         // Hidden and dead entities are not threats: one you cannot see, the
         // other cannot act.
         if (game.registry.all_of<InsideBuilding>(e)) {
+            continue;
+        }
+        // Sneaking is the other way to be unseeable -- outside, alive, and
+        // still not there. The matching skip in nearest_enemy (game.cpp) covers
+        // target selection; this one covers everything a brain perceives.
+        if (has_status(game.registry, e, StatusKind::Sneaking)) {
             continue;
         }
         const auto* health = game.registry.try_get<Health>(e);

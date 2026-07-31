@@ -216,8 +216,17 @@ enum class StatusKind : int32_t {
                  // seconds. Movement and defense are untouched -- this is a
                  // penalty on ACTING, not on being, and it is meant to be
                  // steep enough that a brain that can count never chooses it.
+    Sneaking,    // IMPERCEPTIBLE. Skipped by target selection (nearest_enemy)
+                 // and by threat perception (collect_threats) alike, so no
+                 // brain -- wasm or engine-side -- has a special case for it.
+                 // Ends on an aggressive act, not only on its timer
+                 // (combat.h's end_sneak_on_aggression), and carries an
+                 // accuracy and crit bonus into the blow that ends it.
+    Calcified,   // hardened: flat armour up. ARMOUR ONLY -- a calcified target
+                 // still misses and still gets dodged around, which is what
+                 // makes it a ward rather than a general buff.
 };
-inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Disengaged) + 1;
+inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Calcified) + 1;
 // Fixed component capacity; matches BL_MAX_STATUSES (game/src/brain_abi.h).
 inline constexpr int32_t kMaxStatuses = 8;
 // Stable inspection name ("Stunned"); "-" for an out-of-range kind.
@@ -226,11 +235,12 @@ const char* StatusName(int32_t kind);
 // ---- skills (identity only; defs/triggers live in game/src/skills.h) -------
 // Append-only id space, same discipline as ActivityId.
 enum class SkillId : int32_t {
-    Calcify = 0,   // Apprentice: absorb the next physical strike (effect deferred)
+    Calcify = 0,   // Apprentice: hardens its own hide -- flat armour, for a while
     ShieldBash,    // Mercenary: a shield slam that stuns what it lands on
     Curse,         // Apprentice: saps a target's accuracy and armour
     DressWounds,   // Hunter: field-dresses its own wounds
     Backstab,      // Grave Robber: heavy bonus damage on someone not facing it
+    Sneak,         // Grave Robber: goes unseen until it strikes
     Count,
 };
 inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
@@ -299,6 +309,11 @@ struct SkillSpec {
     float cooldown_seconds = 0.0f;             // <= 0 => none
     float intention_duration_seconds = 0.0f;   // <= 0 => none; Intention only
     SkillAttackTest attack_test = SkillAttackTest::None;
+    // May this be cast while the caster is locked in melee contact? The first
+    // skill whose legality depends on the caster's SITUATION rather than on its
+    // target -- and situation is data the engine checks, never effect logic:
+    // an effect cannot refuse a cast, it can only decline to emit ops.
+    bool castable_in_melee = true;
     std::string effect;                        // brief descriptive string
     SkillConstant constants[kMaxSkillConstants];
     int32_t constant_count = 0;
@@ -523,11 +538,21 @@ struct Attack {
 // evasion:  the defender's chance to dodge an on-target blow (gate 2).
 // defense:  the defender's parry/block (contested by accuracy in gate 1).
 // armour:   flat damage reduction (gate 3).
+// What a critical hit multiplies penetrated damage by, before any status has
+// its say. Lives here rather than beside combat.cpp's other tuning constants
+// because it is the DEFAULT of the field below, and a default initializer needs
+// it visible; everything else about crits stays in resolve_attack.
+inline constexpr float kBaseCritMultiplier = 2.0f;
+
 struct Combatant {
     float accuracy = 0.0f;
     float evasion = 0.0f;
     float defense = 0.0f;
     float armour = 0.0f;
+    // Attacker-side, and per-entity so a STATUS can raise it: effective_combatant
+    // returns a copy, so a bonus rides through to resolve_attack without a new
+    // CombatRequest field and without touching a single assembly site.
+    float crit_multiplier = kBaseCritMultiplier;
     CombatStance stance = CombatStance::Melee;
     // reserved (deferred psychology): float willpower, resolve;
 };

@@ -244,6 +244,16 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
         dis > 0) {
         push_status(BL_ST_DISENGAGED, dis);
     }
+    if (const int64_t sneak = remaining_millis_of(game.registry, e, StatusKind::Sneaking);
+        sneak > 0) {
+        // A brain only ever sees this on its OWN wire: a sneaking entity is
+        // absent from everyone else's threat list, which is the whole mechanic.
+        push_status(BL_ST_SNEAKING, sneak);
+    }
+    if (const int64_t calc = remaining_millis_of(game.registry, e, StatusKind::Calcified);
+        calc > 0) {
+        push_status(BL_ST_CALCIFIED, calc);
+    }
     if (const int64_t stun = remaining_millis_of(game.registry, e, StatusKind::Stunned);
         stun > 0) {
         // Rarely seen by the brain it belongs to -- a stunned entity is not

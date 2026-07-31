@@ -36,6 +36,7 @@
       "damage_frac": 0.08
     },
     "skills": [
+      { "name": "Sneak", "level": 3 },
       { "name": "Backstab", "level": 3 }
     ]
   },

@@ -54,6 +54,15 @@ int64_t remaining_millis_of(const entt::registry& reg, entt::entity e, StatusKin
 bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t millis,
                   uint32_t source_slot);
 
+// Ends `kind` NOW, ahead of its timer. Returns whether anything was cleared.
+//
+// The counterpart to apply_status, and used where a status has a condition
+// other than time that ends it -- Sneaking, whose whole shape is "until you do
+// something aggressive" (combat.h's end_sneak_on_aggression). Emits nothing: an
+// expiry is not an event today either, and a status ending early should not read
+// differently from one running out.
+bool clear_status(BadlandsGame& game, entt::entity e, StatusKind kind);
+
 // Per-tick sweep (tick_world, sim.cpp): decrements every entry by
 // kMillisPerTick and compacts out the expired ones. Runs unconditionally --
 // live and replaying alike -- because it is pure derived state over a timer,

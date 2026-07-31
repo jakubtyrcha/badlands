@@ -14,13 +14,19 @@ namespace {
 
 // Placeholder tuning constants. Watching fights is what finds the right
 // values; the pipeline SHAPE is what the tests pin, not the numbers.
-constexpr float kCritMultiplier = 2.0f;
 constexpr float kRangedEvasionMult = 0.5f;   // a shot is hard to dodge
 constexpr float kMeleeThrustEvasionMult = 1.3f;  // a telegraphed thrust, easy to sidestep
 constexpr float kBluntArmourFraction = 0.3f;  // blunt crushes through 70% of armour
 // What StatusKind::Cursed takes off a victim (effective_combatant, below).
 constexpr float kCurseAccuracyPenalty = 0.15f;
 constexpr float kCurseArmourPenalty = 2.0f;
+// What StatusKind::Sneaking is worth to the blow that ends it, and what
+// StatusKind::Calcified is worth to whoever wears it. COMPILED, like the curse
+// penalties above and for the same reason: how much a status is worth is a
+// property of the status, and a skill's own constants tune its DURATION.
+constexpr float kSneakAccuracyBonus = 0.15f;
+constexpr float kSneakCritMultiplier = 3.0f;
+constexpr float kCalcifyArmourBonus = 4.0f;
 
 // How much the defender's evasion is worth against this attack.
 float evasion_mult(AttackCategory cat, DamageType type) {
@@ -85,15 +91,21 @@ CombatResult resolve_attack(const CombatRequest& req) {
                                 req.defender.armour);
 
     // 4. Crit multiplies the penetrated damage (the attack's own crit_chance, so
-    // a piercing thrust -- authored with a higher chance -- benefits most).
+    // a piercing thrust -- authored with a higher chance -- benefits most). The
+    // MULTIPLIER is the attacker's, not a global: a status can raise it
+    // (effective_combatant), and it can never shrink a hit.
     if (damage > 0.0f &&
         unit_float(s) < std::clamp(req.attack.crit_chance, 0.0f, 1.0f)) {
         res.crit = true;
-        damage *= kCritMultiplier;
+        damage *= std::max(1.0f, req.attacker.crit_multiplier);
     }
 
     res.damage = damage;
     return res;
+}
+
+void end_sneak_on_aggression(BadlandsGame& game, entt::entity e) {
+    clear_status(game, e, StatusKind::Sneaking);
 }
 
 Combatant effective_combatant(const entt::registry& reg, entt::entity e) {
@@ -115,6 +127,17 @@ Combatant effective_combatant(const entt::registry& reg, entt::entity e) {
         // the status rather than of whatever applied it.
         c.accuracy = std::max(0.0f, c.accuracy - kCurseAccuracyPenalty);
         c.armour = std::max(0.0f, c.armour - kCurseArmourPenalty);
+    }
+    if (has_status(reg, e, StatusKind::Sneaking)) {
+        // Attacker-side only, and the blow that spends it is the blow that
+        // gets it: declare_strike captures these stats and THEN clears the
+        // status (strike.cpp). Nothing defensive moves -- an unseen grave
+        // robber that is somehow hit is no harder to hit than usual.
+        c.accuracy = std::clamp(c.accuracy + kSneakAccuracyBonus, 0.0f, 1.0f);
+        c.crit_multiplier = std::max(c.crit_multiplier, kSneakCritMultiplier);
+    }
+    if (has_status(reg, e, StatusKind::Calcified)) {
+        c.armour += kCalcifyArmourBonus;
     }
     return c;
 }

@@ -72,6 +72,11 @@ type
     # combat (v3): advisory melee-lock status + this entity's own attack
     # loadout (a brain cannot pick an attack it cannot see).
     meleeLocked*: bool
+    # v6: are WE currently unseen? Only ever true on our own wire -- a sneaking
+    # entity is absent from everyone else's threat list -- so this is the one
+    # way the brain can tell it is already hidden and need not spend the
+    # cooldown again.
+    sneaking*: bool
     attackCount*: int32
     attacks*: array[BL_MAX_ATTACKS, BlViewAttack]
 
@@ -152,9 +157,12 @@ proc viewFromWire*(w: BlViewWire): HeroView =
     result.threatThreat = w.suggest.threats[0].threat
 
   for i in 0 ..< w.status_count:
+    # No early break: more than one of these matters now, and the list is at
+    # most BL_MAX_STATUSES long.
     if w.statuses[i].kind == BL_ST_MELEE_LOCKED.uint32:
       result.meleeLocked = true
-      break
+    elif w.statuses[i].kind == BL_ST_SNEAKING.uint32:
+      result.sneaking = true
 
   result.attackCount = w.attack_count
   for i in 0 ..< w.attack_count:

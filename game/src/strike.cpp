@@ -49,6 +49,11 @@ bool declare_strike(BadlandsGame& game, entt::entity e, int32_t attack_index,
     s.attacker = effective_combatant(reg, e);  // captured: the blow is what it
     s.attack = atk.defs[attack_index];         // was when it was thrown
     reg.emplace<StrikeInProgress>(e, s);
+    // AFTER the capture, and that ordering is the whole of the sneak payoff:
+    // the stats above already carry the sneak bonus, so the blow that breaks
+    // stealth is the blow that benefits from it. Doing this first would hand
+    // the bonus to nobody (combat.h's end_sneak_on_aggression).
+    end_sneak_on_aggression(game, e);
     return true;
 }
 

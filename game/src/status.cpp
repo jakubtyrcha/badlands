@@ -20,6 +20,8 @@ constexpr std::array<const char*, static_cast<size_t>(kStatusKindCount)> kStatus
     "Stunned",
     "Cursed",
     "Disengaged",
+    "Sneaking",
+    "Calcified",
 }};
 
 // Index of `kind` in `s`, or -1.
@@ -109,6 +111,27 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
                                .x = pos.x,
                                .z = pos.y,
                                .at_millis = game.world_millis});
+    return true;
+}
+
+bool clear_status(BadlandsGame& game, entt::entity e, StatusKind kind) {
+    if (e == entt::null || !game.registry.valid(e)) {
+        return false;
+    }
+    auto* s = game.registry.try_get<Statuses>(e);
+    if (s == nullptr) {
+        return false;
+    }
+    const int32_t i = index_of(*s, kind);
+    if (i < 0) {
+        return false;
+    }
+    // Same in-place compaction the per-tick sweep uses, so an early clear and
+    // an expiry leave the array in the same shape.
+    for (int32_t k = i + 1; k < s->count && k < kMaxStatuses; ++k) {
+        s->entries[k - 1] = s->entries[k];
+    }
+    --s->count;
     return true;
 }
 

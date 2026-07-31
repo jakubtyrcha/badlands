@@ -156,6 +156,13 @@ extern "C" {
 // that can see it may choose to disengage-and-wait or press anyway. Adding a
 // STATUS VALUE changes no struct layout, so this is not an ABI break.
 #define BL_ST_CURSED 6
+// Unseen: this entity is skipped by every target selection and every threat
+// scan in the sim (combat.h's select_target, behaviours/perception.cpp's
+// collect_threats). A brain sees it on its OWN wire and never on anyone
+// else's -- that is the point of it.
+#define BL_ST_SNEAKING 7
+// Hide hardened to stone: flat armour up, nothing else. Advisory.
+#define BL_ST_CALCIFIED 8
 
 // --- BlViewSelf --------------------------------------------------------------
 // This entity's own state: clock, identity, needs, and a summary of what the

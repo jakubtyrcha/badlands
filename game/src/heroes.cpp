@@ -96,8 +96,15 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     // derived from the legacy attack_* fields (at the default Combatant this
     // reduces to the old deterministic melee); attack_damage == 0 means "no
     // attacks" -- genuinely harmless (deer, inert test dummies).
-    reg.emplace<Combatant>(e, Combatant{desc.accuracy, desc.evasion, desc.defense,
-                                        desc.armour, desc.stance});
+    // Designated, not positional: Combatant grew a field between `armour` and
+    // `stance` (crit_multiplier) and a positional list would have silently
+    // handed the stance to it. crit_multiplier is deliberately left at its
+    // default -- it is not a per-creature stat, it is what a STATUS raises.
+    reg.emplace<Combatant>(e, Combatant{.accuracy = desc.accuracy,
+                                        .evasion = desc.evasion,
+                                        .defense = desc.defense,
+                                        .armour = desc.armour,
+                                        .stance = desc.stance});
     Attacks atk{};
     if (desc.attack_count > 0) {
         atk.count = std::min(desc.attack_count, kMaxAttacks);

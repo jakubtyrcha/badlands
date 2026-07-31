@@ -122,8 +122,11 @@ CreatureCatalog::CreatureCatalog() {
         // Armour 1, evasion 2 (the nimblest of the four), hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.008f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
-        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Backstab), 3};
-        d.skill_grant_count = 1;
+        // Sneak and Backstab both at 3, deliberately: the approach and the
+        // payoff are one tool, and either alone is half a class.
+        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Sneak), 3};
+        d.skill_grants[1] = {static_cast<int32_t>(SkillId::Backstab), 3};
+        d.skill_grant_count = 2;
     }
     // Apprentice: fragile ranged caster (a magic bolt; Soul comes later).
     {

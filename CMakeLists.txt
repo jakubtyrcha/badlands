@@ -389,6 +389,7 @@ set(badlands_app_sources_ai_sandbox
     # badlands_ai_sandbox_tests.
     src/executables/ai_sandbox/arena.cpp
     src/executables/ai_sandbox/duel_mode.cpp
+    src/executables/ai_sandbox/sneak_mode.cpp
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
     src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
@@ -610,6 +611,9 @@ add_executable(badlands_game_tests
     # Casting end to end: shield-bash through the UseSkill command handler
     # (game/src/skill_cast.h).
     game/tests/shield_bash_tests.cpp
+    # Imperceptibility and the armour ward: the two statuses whose rules live
+    # where the decisions already happen (perception, effective_combatant).
+    game/tests/sneak_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
     game/tests/growth_tests.cpp
@@ -1167,6 +1171,7 @@ add_executable(badlands_ai_sandbox_tests
     src/executables/ai_sandbox/tests/ai_sandbox_tests.cpp
     src/executables/ai_sandbox/arena.cpp
     src/executables/ai_sandbox/duel_mode.cpp
+    src/executables/ai_sandbox/sneak_mode.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_ai_sandbox_tests PRIVATE
