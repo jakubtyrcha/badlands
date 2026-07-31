@@ -1365,6 +1365,30 @@ TEST_CASE("smallest_eigenvector_symmetric3x3 / pca_best_fit_plane: degenerate-is
     CHECK(simd_length(plane.normal) == doctest::Approx(1.0f));
 }
 
+TEST_CASE("smallest_eigenvector_symmetric3x3 / pca_best_fit_plane: rank-0 covariance "
+          "(4 coincident points) returns the zero-vector sentinel, not NaN "
+          "(D8 review finding: all 3 row-pair cross products are exactly zero here, "
+          "so simd_normalize would otherwise silently produce NaN)") {
+    // 4 identical points -> covariance C is the exact zero matrix -> every
+    // eigenvalue is 0 -> the shifted matrix (m - lambda_min*I) is also the
+    // zero matrix -> row0 x row1 == row0 x row2 == row1 x row2 == (0,0,0)
+    // exactly, all three, not just the first candidate. This is the case the
+    // guard exists for.
+    const std::array<simd_float3, 4> pts = {
+        simd_float3{2.0f, 3.0f, 4.0f},
+        simd_float3{2.0f, 3.0f, 4.0f},
+        simd_float3{2.0f, 3.0f, 4.0f},
+        simd_float3{2.0f, 3.0f, 4.0f},
+    };
+    const PcaPlane plane = pca_best_fit_plane(pts);
+    check_float3_approx(plane.centroid, simd_float3{2.0f, 3.0f, 4.0f});
+    // The sentinel: exact zero vector, every component finite (not NaN).
+    check_float3_approx(plane.normal, simd_float3{0.0f, 0.0f, 0.0f});
+    CHECK(std::isfinite(plane.normal.x));
+    CHECK(std::isfinite(plane.normal.y));
+    CHECK(std::isfinite(plane.normal.z));
+}
+
 // --- D5 item: sign disambiguation ----------------------------------------------
 
 TEST_CASE("disambiguate_normal_sign: flips n when it disagrees with n_old (dot<0), "
@@ -1519,6 +1543,26 @@ TEST_CASE("update_edge_hermite: full per-edge pipeline (gather -> PCA -> sign "
         const HermiteUpdate upd = update_edge_hermite(pts, h_old, n_old, edge_base, axis_dir, 1.0f, 0.5f);
         check_float3_approx(upd.h, h_old);
         check_float3_approx(upd.n, n_old);
+    }
+    SUBCASE("D8 review finding: 4 coincident cell vertices (rank-0 covariance) -- the "
+            "zero-vector PCA normal makes intersect_plane_edge's denom~0 guard trip, "
+            "same as the exactly-planar case above, so h_old/n_old come back unchanged "
+            "and finite (not NaN)") {
+        const std::array<simd_float3, 4> pts = {
+            simd_float3{3.0f, 3.0f, 3.0f},
+            simd_float3{3.0f, 3.0f, 3.0f},
+            simd_float3{3.0f, 3.0f, 3.0f},
+            simd_float3{3.0f, 3.0f, 3.0f},
+        };
+        const simd_float3 n_old = simd_normalize(simd_float3{0.3f, 0.4f, 0.866f});
+        const simd_float3 h_old = {9.0f, 8.0f, 7.0f}; // arbitrary; must come back unchanged
+        const simd_float3 edge_base = {2.0f, 2.0f, 2.0f};
+        const simd_float3 axis_dir = {1.0f, 0.0f, 0.0f};
+        const HermiteUpdate upd = update_edge_hermite(pts, h_old, n_old, edge_base, axis_dir, 1.0f, 0.5f);
+        check_float3_approx(upd.h, h_old);
+        check_float3_approx(upd.n, n_old);
+        CHECK(std::isfinite(upd.h.x));
+        CHECK(std::isfinite(upd.n.x));
     }
 }
 

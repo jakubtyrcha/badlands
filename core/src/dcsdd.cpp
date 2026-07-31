@@ -904,6 +904,27 @@ simd_float3 smallest_eigenvector_symmetric3x3(simd_float3x3 m) {
     float best = len01;
     if (len02 > best) { c = c02; best = len02; }
     if (len12 > best) { c = c12; best = len12; }
+    // Exact-zero guard (e.g. 4 bit-for-bit coincident points, or any input
+    // whose shifted matrix is the exact zero matrix): all three row-pair
+    // cross products are then exactly (0,0,0), and simd_normalize(0,0,0) is
+    // an exact 0/0 that silently returns NaN, poisoning every downstream
+    // consumer (pca_best_fit_plane's normal, then Hermite state). Deliberately
+    // an EXACT equality check, not a small-magnitude epsilon: a tiny-but-
+    // nonzero `best` (e.g. ~1e-13) still normalizes to a perfectly finite --
+    // if noisy -- unit vector (no float32 underflow risk at that scale), and
+    // is exactly the "pick the best-conditioned of the three" case the
+    // comment above already handles; a review pass that first tried a loose
+    // epsilon here (~1e-12) measurably hurt the Fig. 16 box acceptance test
+    // by overriding those still-valid-but-small normals with the fallback
+    // below, so only the true zero needs one. Return the zero vector as a
+    // documented sentinel: it threads through cleanly with no extra check
+    // needed anywhere else -- a zero plane_normal makes intersect_plane_edge's
+    // own denom~0 guard trip (dot(0, axis_dir) == 0 exactly), so
+    // update_edge_hermite already keeps the caller's old Hermite data via its
+    // existing near-parallel path.
+    if (best == 0.0f) {
+        return simd_float3{0.0f, 0.0f, 0.0f};
+    }
     return simd_normalize(c);
 }
 

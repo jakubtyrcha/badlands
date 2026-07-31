@@ -179,7 +179,12 @@ struct DcsddConfig {
     float inner_tol = 1e-5f;  // convergence threshold on ||x_{r+1} - x_r||
 
     int32_t outer_iters = 30; // outer-loop iteration cap (fixed count, no early exit); paper default 100
-    float w_update = 0.5f;    // paper w_u (Eq. 7 Hermite-update weight); paper recommends [0.2, 0.8]
+    // paper w_u (Eq. 7 Hermite-update weight); paper recommends [0.2, 0.8].
+    // WARNING (D5 finding): at low outer-iteration counts, this paper-
+    // faithful default can produce unstable/inverted facet winding (paper
+    // Fig. 11's own caveat) -- see editor_mesh_config() in core/src/
+    // editor.cpp, which pins 0.1 for exactly this reason.
+    float w_update = 0.5f;
     int32_t resolution = 64;  // grid samples per axis; consumed by editor-side sampling (later task) --
                                // carried here so all DCSDD tunables live in one struct
 };
@@ -274,13 +279,27 @@ simd_float3 optimize_cell_vertex(int32_t dense_cell, simd_float3 x_start, const 
 // surfaced: a tiny float32 residual in one row, amplified by another row's
 // much larger magnitude, can clear any reasonable fixed epsilon while still
 // pointing the wrong way). Pinned against np.linalg.eigh in tests.
+//
+// Degenerate case: if `m`'s shifted matrix (m - lambda_min*I) is EXACTLY the
+// zero matrix (e.g. 4 bit-for-bit coincident points, so the covariance itself
+// is exactly zero), the null space is 2D or 3D, so all 3 candidate row-pair
+// cross products are exactly (0,0,0) and there's no well-defined smallest-
+// eigenvector direction. Rather than silently return NaN (simd_normalize of
+// an exact-zero vector is a 0/0), this returns the exact zero vector as a
+// documented sentinel -- see the guard's comment at the return site (an EXACT
+// equality check, deliberately not a small-magnitude epsilon: a merely-tiny
+// nonzero cross product still normalizes to a finite unit vector and is
+// already handled by the best-of-3-candidates logic above), and
+// update_edge_hermite's doc below for how a caller should treat it.
 simd_float3 smallest_eigenvector_symmetric3x3(simd_float3x3 m);
 
 // PCA best-fit plane through exactly 4 points (paper §3.2 Hermite update):
 // centroid c = mean(points), normal = smallest_eigenvector_symmetric3x3 of
 // the covariance C = sum (v-c)(v-c)^T. `normal` is unit length but NOT
 // sign-disambiguated (eigenvectors have arbitrary sign) -- see
-// disambiguate_normal_sign below.
+// disambiguate_normal_sign below. Degenerate input (4 bit-for-bit coincident
+// points): `normal` is the zero vector (see smallest_eigenvector_symmetric3x3
+// above), not unit length and not NaN.
 struct PcaPlane {
     simd_float3 centroid;
     simd_float3 normal;
@@ -325,7 +344,11 @@ HermiteUpdate hermite_eq7_blend(simd_float3 h_old, simd_float3 n_old, simd_float
 // Full per-edge Hermite update (paper §3.2): PCA best-fit plane of the
 // edge's 4 containing cells' NEW vertices, sign disambiguation against
 // n_old, edge-line intersection, Eq. 7 blend. Guard (near-parallel
-// plane/edge, per intersect_plane_edge) leaves h_old/n_old unchanged.
+// plane/edge, per intersect_plane_edge) leaves h_old/n_old unchanged. The
+// same guard also catches the degenerate exact-zero-covariance case (4
+// bit-for-bit coincident cell vertices, see smallest_eigenvector_symmetric3x3
+// above): a zero-vector PCA normal makes intersect_plane_edge's denom~0
+// check trip exactly, so no separate check is needed here.
 // Callers only invoke this for edges with all 4 containing cells present --
 // GlobalMesh::quad_cells/quad_edge already restrict to exactly these (an
 // edge without a quad keeps its old Hermite data untouched, per the brief:

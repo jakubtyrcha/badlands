@@ -49,6 +49,12 @@ struct Editor::Impl {
     struct {
         bool active = false;
         int32_t node_id = kInvalidNode; // the node the captured plane/start_* belong to
+        // Set by updateDrag whenever it actually applies a new position;
+        // endDrag reads it to decide whether the gesture is worth a remesh
+        // (see the requestRemesh call site there) -- a click with no
+        // intervening updateDrag (moved stays false) must not burn a full
+        // reconstruction of an unchanged scene.
+        bool moved = false;
         simd_float3 plane_point, plane_normal, start_pos, start_hit, start_snap_point;
     } drag;
 
@@ -59,16 +65,15 @@ struct Editor::Impl {
     struct {
         bool active = false;
         int32_t node_id = kInvalidNode; // the node start_scale was captured for
+        bool moved = false;             // see drag.moved above; same role for endScale
         simd_float3 start_scale;
     } scale_drag;
 
     // D6: background reconstruction. meshJobRunner owns the worker thread;
-    // latest_mesh/mesh_version are the CPU-side result D7's renderer upload
-    // will key off (mesh_version bumps only when poll() in render() actually
-    // returns a newly finished mesh).
+    // latest_mesh is the CPU-side result D7's renderer upload pulls from,
+    // whenever poll() in render() returns a newly finished mesh.
     MeshJobRunner meshJobRunner{editor_mesh_config()};
     TriangleMesh latest_mesh;
-    uint64_t mesh_version = 0;
 
     // Snapshots the scene (copy, taken here on the main thread) and hands it
     // to the runner. Called from every mutation that changes the CSG result
@@ -116,7 +121,6 @@ void Editor::render(void* caMetalDrawable) {
     // flip in both directions (e.g. the empty-scene clear path), so this is
     // unconditional rather than trying to detect which way it flipped.
     if (impl_->meshJobRunner.poll(impl_->latest_mesh)) {
-        ++impl_->mesh_version;
         impl_->renderer.set_mesh(impl_->latest_mesh);
         impl_->renderer.set_scene_lines_dirty();
     }
@@ -284,6 +288,7 @@ void Editor::beginDrag(float x, float y) {
     impl_->drag.start_snap_point = node->snap_point;
     impl_->drag.node_id = node->id;
     impl_->drag.active = true;
+    impl_->drag.moved = false;
 }
 
 void Editor::updateDrag(float x, float y) {
@@ -320,13 +325,21 @@ void Editor::updateDrag(float x, float y) {
         // plane itself is unchanged by this update.
         node->snap_point = impl_->drag.start_snap_point + delta;
     }
+    impl_->drag.moved = true;
     impl_->renderer.set_scene_lines_dirty();
 }
 
 void Editor::endDrag() {
+    // A click without an intervening updateDrag (e.g. mouse-down then
+    // mouse-up with no move in between) never touched the node -- skip the
+    // remesh rather than reconstructing an unchanged scene.
+    const bool moved = impl_->drag.moved;
     impl_->drag.active = false;
     impl_->drag.node_id = kInvalidNode;
-    impl_->requestRemesh();
+    impl_->drag.moved = false;
+    if (moved) {
+        impl_->requestRemesh();
+    }
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {
@@ -379,6 +392,7 @@ void Editor::beginScale() {
     impl_->scale_drag.start_scale = node->scale;
     impl_->scale_drag.node_id = node->id;
     impl_->scale_drag.active = true;
+    impl_->scale_drag.moved = false;
 }
 
 void Editor::updateScale(float pixelDeltaY) {
@@ -409,13 +423,20 @@ void Editor::updateScale(float pixelDeltaY) {
         std::clamp(start.y * factor, 0.05f, 50.0f),
         std::clamp(start.z * factor, 0.05f, 50.0f),
     };
+    impl_->scale_drag.moved = true;
     impl_->renderer.set_scene_lines_dirty();
 }
 
 void Editor::endScale() {
+    // See endDrag's comment: a click without an intervening updateScale
+    // never touched the node -- skip the remesh.
+    const bool moved = impl_->scale_drag.moved;
     impl_->scale_drag.active = false;
     impl_->scale_drag.node_id = kInvalidNode;
-    impl_->requestRemesh();
+    impl_->scale_drag.moved = false;
+    if (moved) {
+        impl_->requestRemesh();
+    }
 }
 
 Vec3f Editor::nodeScale(int32_t nodeId) const {

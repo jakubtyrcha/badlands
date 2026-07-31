@@ -256,7 +256,12 @@ TEST_CASE("Editor: deleteSelectedNode during an active drag leaves the editor in
     editor->deleteSelectedNode();
     CHECK(editor->selectedNode() == kInvalidNode);
 
-    editor->updateDrag(500.0f, 250.0f); // must not crash despite the still-open gesture
+    // deleteSelectedNode already closed the gesture above (drag.active reset
+    // to false, per the mid-gesture abort this test targets), so these two
+    // calls exercise updateDrag/endDrag's plain "not active" no-op guards --
+    // pinning that a post-delete call into either is safe, not that a
+    // gesture is somehow still open.
+    editor->updateDrag(500.0f, 250.0f); // must not crash
     editor->endDrag();                  // must not crash
 
     // A fresh node created after the delete is unaffected by the stale
