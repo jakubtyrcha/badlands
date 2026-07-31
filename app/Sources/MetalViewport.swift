@@ -21,6 +21,8 @@ final class ViewportNSView: NSView {
     var onMouseDown: ((CGPoint) -> Void)?
     var onMouseDragged: ((CGPoint) -> Void)?
     var onMouseUp: ((CGPoint) -> Void)?
+    var onMouseMoved: ((CGPoint) -> Void)?
+    var onMouseExited: (() -> Void)?
     /// (dx, dy, shiftHeld)
     var onScroll: ((CGFloat, CGFloat, Bool) -> Void)?
     var onMagnify: ((CGFloat) -> Void)?
@@ -62,6 +64,26 @@ final class ViewportNSView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self) // so keys work immediately, no click needed
+    }
+
+    // Move-gizmo hover needs un-buttoned mouse positions, which AppKit only
+    // delivers to views with a tracking area (.inVisibleRect keeps the rect
+    // in sync with the view automatically; rect: .zero is then ignored).
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        onMouseMoved?(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onMouseExited?()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -155,6 +177,8 @@ struct MetalViewport: NSViewRepresentable {
         view.onMouseDown = { [vm] p in vm.handleMouseDown(p) }
         view.onMouseDragged = { [vm] p in vm.handleMouseDragged(p) }
         view.onMouseUp = { [vm] p in vm.handleMouseUp(p) }
+        view.onMouseMoved = { [vm] p in vm.handleMouseMoved(p) }
+        view.onMouseExited = { [vm] in vm.handleMouseExited() }
         view.onScroll = { [vm] dx, dy, shiftHeld in vm.handleScroll(dx: dx, dy: dy, shiftHeld: shiftHeld) }
         view.onMagnify = { [vm] delta in vm.handleMagnify(delta) }
         view.onKeyDown = { [vm] characters in vm.handleKeyDown(characters) }

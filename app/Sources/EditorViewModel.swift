@@ -95,6 +95,13 @@ final class EditorViewModel {
         }
         mode = m
         syncGizmo()
+        if m != .modify {
+            // Belt to core's suspenders: core self-clears hover on selection
+            // loss/gizmo hide/deletion, but a mode switch with the cursor
+            // parked on a handle would otherwise leave the highlight lit
+            // until the next mouse move.
+            editor.clearGizmoHover()
+        }
     }
 
     /// Centralizes the gizmo-visibility rule (core owns the gizmo's placement
@@ -181,6 +188,15 @@ final class EditorViewModel {
             activeRadialTool = .move
         }
         isDragging = false
+    }
+
+    func handleMouseMoved(_ p: CGPoint) {
+        guard mode == .modify, selectedNodeID != nil else { return }
+        editor.updateGizmoHover(Float(p.x), Float(p.y))
+    }
+
+    func handleMouseExited() {
+        editor.clearGizmoHover()
     }
 
     func handleScroll(dx: CGFloat, dy: CGFloat, shiftHeld: Bool) {
