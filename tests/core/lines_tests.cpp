@@ -169,53 +169,13 @@ TEST_CASE("append_sphere_outline: eye inside or on the sphere emits nothing") {
     CHECK(out.empty());
 }
 
-TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelected") {
-    SceneDocument doc;
-
-    Node cube;
-    cube.id = 1;
-    cube.shape = Shape::Cube;
-    cube.op = Op::Add;
-    doc.add(cube);
-
-    Node sphere;
-    sphere.id = 2;
-    sphere.shape = Shape::Sphere;
-    sphere.op = Op::Subtract;
-    doc.add(sphere);
-
-    SUBCASE("no selection") {
-        const std::vector<LineVertex> lines =
-            build_scene_lines(doc, kInvalidNode, simd_float3{0.0f, 0.0f, 5.0f}, false);
-        REQUIRE(lines.size() == 120); // 24 cube + 96 sphere outline
-
-        for (size_t i = 0; i < 24; ++i) {
-            CAPTURE(i);
-            check_color_approx(lines[i].color, kColorAdd);
-        }
-        for (size_t i = 24; i < 120; ++i) {
-            CAPTURE(i);
-            check_color_approx(lines[i].color, kColorSubtract);
-        }
-    }
-
-    SUBCASE("sphere selected") {
-        const std::vector<LineVertex> lines =
-            build_scene_lines(doc, sphere.id, simd_float3{0.0f, 0.0f, 5.0f}, false);
-        REQUIRE(lines.size() == 120);
-
-        for (size_t i = 0; i < 24; ++i) {
-            CAPTURE(i);
-            check_color_approx(lines[i].color, kColorAdd);
-        }
-        for (size_t i = 24; i < 120; ++i) {
-            CAPTURE(i);
-            check_color_approx(lines[i].color, kColorSelected);
-        }
-    }
-}
-
-TEST_CASE("build_scene_lines: mesh_present=true restricts the wireframe to the selected node only") {
+// R2 policy (selected-only-always): the raymarched view is always the live
+// primary, so the wireframe is purely a selection annotation -- no selection
+// emits nothing, and a selection emits ONLY that node's edges/outline, all
+// kColorSelected. The previous mesh_present-gated "draw every node, colored
+// by op" behavior is gone along with the parameter; this replaces (rather
+// than extends) the old two build_scene_lines test cases.
+TEST_CASE("build_scene_lines: selected-only-always policy") {
     SceneDocument doc;
 
     Node cube;
@@ -233,20 +193,22 @@ TEST_CASE("build_scene_lines: mesh_present=true restricts the wireframe to the s
     const simd_float3 eye = {0.0f, 0.0f, 5.0f};
 
     SUBCASE("no selection: nothing is emitted") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode, eye, true);
+        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode, eye);
         CHECK(lines.empty());
     }
 
-    SUBCASE("cube selected: only the cube's 24 edge vertices") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, cube.id, eye, true);
+    SUBCASE("cube selected: only the cube's 24 edge vertices, all kColorSelected "
+            "(the unselected sphere contributes nothing)") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, cube.id, eye);
         REQUIRE(lines.size() == 24);
         for (const LineVertex& v : lines) {
             check_color_approx(v.color, kColorSelected);
         }
     }
 
-    SUBCASE("sphere selected: only the sphere's outline vertices") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id, eye, true);
+    SUBCASE("sphere selected: only the sphere's 2*kSphereOutlineSegments outline vertices, "
+            "all kColorSelected (the unselected cube contributes nothing)") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id, eye);
         REQUIRE(lines.size() == 2 * kSphereOutlineSegments);
         for (const LineVertex& v : lines) {
             check_color_approx(v.color, kColorSelected);

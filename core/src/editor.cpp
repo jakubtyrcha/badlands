@@ -6,7 +6,6 @@
 
 #include "camera.h"
 #include "camera_controller.h"
-#include "mesh_job.h"
 #include "picking.h"
 #include "renderer.h"
 #include "scene.h"
@@ -16,20 +15,6 @@ namespace sq {
 // Fixed world-space size for the tangent-frame grid, independent of the
 // selected object's scale.
 inline constexpr float kGizmoHalfExtent = 1.5f;
-
-namespace {
-
-// Editor-tuned DCSDD config: struct defaults only (resolution 64,
-// outer_iters 30, inner_iters 30, w_update 0.1 -- see DcsddConfig's own
-// comment in dcsdd.h for why w_update departs from the paper's 0.5 default;
-// this function used to override it explicitly, until D8 review finding 3
-// made 0.1 the struct default itself, since every real consumer -- this one
-// included -- already wanted it).
-DcsddConfig editor_mesh_config() {
-    return DcsddConfig{};
-}
-
-} // namespace
 
 struct Editor::Impl {
     Renderer renderer;
@@ -43,12 +28,6 @@ struct Editor::Impl {
     struct {
         bool active = false;
         int32_t node_id = kInvalidNode; // the node the captured plane/start_* belong to
-        // Set by updateDrag whenever it actually applies a new position;
-        // endDrag reads it to decide whether the gesture is worth a remesh
-        // (see the requestRemesh call site there) -- a click with no
-        // intervening updateDrag (moved stays false) must not burn a full
-        // reconstruction of an unchanged scene.
-        bool moved = false;
         simd_float3 plane_point, plane_normal, start_pos, start_hit, start_snap_point;
     } drag;
 
@@ -59,21 +38,8 @@ struct Editor::Impl {
     struct {
         bool active = false;
         int32_t node_id = kInvalidNode; // the node start_scale was captured for
-        bool moved = false;             // see drag.moved above; same role for endScale
         simd_float3 start_scale;
     } scale_drag;
-
-    // D6: background reconstruction. meshJobRunner owns the worker thread;
-    // latest_mesh is the CPU-side result D7's renderer upload pulls from,
-    // whenever poll() in render() returns a newly finished mesh.
-    MeshJobRunner meshJobRunner{editor_mesh_config()};
-    TriangleMesh latest_mesh;
-
-    // Snapshots the scene (copy, taken here on the main thread) and hands it
-    // to the runner. Called from every mutation that changes the CSG result
-    // -- see each call site's comment -- but never from updateDrag/
-    // updateScale (no remesh during an active gesture, per the plan).
-    void requestRemesh() { meshJobRunner.request(scene); }
 };
 
 Editor::Editor() : impl_(new Impl()) {}
@@ -108,17 +74,6 @@ void Editor::setViewportSize(float widthPts, float heightPts, float backingScale
 }
 
 void Editor::render(void* caMetalDrawable) {
-    // Nonblocking poll, before any encoding: picks up the latest finished
-    // background mesh (if any) so it's available this frame. On a new mesh,
-    // upload it and force a scene-lines rebuild: the wireframe policy
-    // (lines.h/build_scene_lines) depends on mesh presence, and presence can
-    // flip in both directions (e.g. the empty-scene clear path), so this is
-    // unconditional rather than trying to detect which way it flipped.
-    if (impl_->meshJobRunner.poll(impl_->latest_mesh)) {
-        impl_->renderer.set_mesh(impl_->latest_mesh);
-        impl_->renderer.set_scene_lines_dirty();
-    }
-
     const Camera camera = impl_->controller.to_camera();
 
     // Per-frame gizmo push: core owns all the plane math, so the renderer
@@ -203,7 +158,6 @@ SpawnResult Editor::spawn(Shape shape, Op op, float x, float y) {
     }
 
     select(id); // same path as select(): sets selected + marks lines dirty
-    impl_->requestRemesh();
     return SpawnResult{id, snapped};
 }
 
@@ -230,7 +184,6 @@ void Editor::deleteSelectedNode() {
     // impl_->scene.find(impl_->selected), which is null once selected is
     // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
     impl_->renderer.set_scene_lines_dirty();
-    impl_->requestRemesh();
 }
 
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
@@ -282,7 +235,6 @@ void Editor::beginDrag(float x, float y) {
     impl_->drag.start_snap_point = node->snap_point;
     impl_->drag.node_id = node->id;
     impl_->drag.active = true;
-    impl_->drag.moved = false;
 }
 
 void Editor::updateDrag(float x, float y) {
@@ -319,21 +271,12 @@ void Editor::updateDrag(float x, float y) {
         // plane itself is unchanged by this update.
         node->snap_point = impl_->drag.start_snap_point + delta;
     }
-    impl_->drag.moved = true;
     impl_->renderer.set_scene_lines_dirty();
 }
 
 void Editor::endDrag() {
-    // A click without an intervening updateDrag (e.g. mouse-down then
-    // mouse-up with no move in between) never touched the node -- skip the
-    // remesh rather than reconstructing an unchanged scene.
-    const bool moved = impl_->drag.moved;
     impl_->drag.active = false;
     impl_->drag.node_id = kInvalidNode;
-    impl_->drag.moved = false;
-    if (moved) {
-        impl_->requestRemesh();
-    }
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {
@@ -370,12 +313,8 @@ void Editor::setNodeOp(int32_t nodeId, Op op) {
     if (node == nullptr) {
         return;
     }
-    const bool changed = node->op != op;
     node->op = op;
     impl_->renderer.set_scene_lines_dirty(); // op changes vertex colors
-    if (changed) {
-        impl_->requestRemesh(); // op is part of the CSG result; a no-op set shouldn't spawn a job
-    }
 }
 
 void Editor::beginScale() {
@@ -386,7 +325,6 @@ void Editor::beginScale() {
     impl_->scale_drag.start_scale = node->scale;
     impl_->scale_drag.node_id = node->id;
     impl_->scale_drag.active = true;
-    impl_->scale_drag.moved = false;
 }
 
 void Editor::updateScale(float pixelDeltaY) {
@@ -417,20 +355,12 @@ void Editor::updateScale(float pixelDeltaY) {
         std::clamp(start.y * factor, 0.05f, 50.0f),
         std::clamp(start.z * factor, 0.05f, 50.0f),
     };
-    impl_->scale_drag.moved = true;
     impl_->renderer.set_scene_lines_dirty();
 }
 
 void Editor::endScale() {
-    // See endDrag's comment: a click without an intervening updateScale
-    // never touched the node -- skip the remesh.
-    const bool moved = impl_->scale_drag.moved;
     impl_->scale_drag.active = false;
     impl_->scale_drag.node_id = kInvalidNode;
-    impl_->scale_drag.moved = false;
-    if (moved) {
-        impl_->requestRemesh();
-    }
 }
 
 Vec3f Editor::nodeScale(int32_t nodeId) const {

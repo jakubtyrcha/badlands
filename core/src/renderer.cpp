@@ -264,10 +264,7 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     if (!device_ || !layer_ || !drawable) return;
 
     if (scene_lines_dirty_) {
-        // mesh_vertex_count_ > 0 is the wireframe policy's mesh_present flag: once
-        // there's a shaded mesh to draw, the wireframe narrows to a selection
-        // annotation (see build_scene_lines's doc comment in lines.h).
-        std::vector<LineVertex> vertices = build_scene_lines(doc, selected_id, camera.eye, mesh_vertex_count_ > 0);
+        std::vector<LineVertex> vertices = build_scene_lines(doc, selected_id, camera.eye);
         scene_line_vertex_count_ = vertices.size();
         if (!vertices.empty()) {
             // Metal disallows ever creating a zero-length buffer, hence the guard;
