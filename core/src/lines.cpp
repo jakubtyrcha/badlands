@@ -122,9 +122,15 @@ void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd
     push(origin + normal * (0.5f * he), kColorGridAxis);
 }
 
-std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world) {
+std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world,
+                                          bool mesh_present) {
     std::vector<LineVertex> out;
     for (const Node& node : doc.nodes()) {
+        // Once the shaded mesh is on screen, the wireframe is a selection
+        // annotation, not a full scene outline: skip every non-selected node.
+        if (mesh_present && node.id != selected_id) {
+            continue;
+        }
         simd_float4 color = (node.op == Op::Add) ? kColorAdd : kColorSubtract;
         if (node.id == selected_id) {
             color = kColorSelected;

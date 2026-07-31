@@ -22,3 +22,12 @@ typedef struct {
 typedef struct {
     sq_float4x4 view_proj;
 } LineUniforms;
+
+typedef struct {
+    sq_float4 pos;    // xyz used, w=1
+    sq_float4 normal; // xyz used, w=0
+} MeshVertex;
+
+// Compiled under both __METAL_VERSION__ (mesh.metal) and plain C++ (core/tests),
+// via the dual-compile typedefs above -- so this one assert covers both sides.
+static_assert(sizeof(MeshVertex) == 32, "MeshVertex must be 32 bytes");

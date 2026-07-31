@@ -5,8 +5,10 @@
 
 static_assert(sizeof(LineVertex) == 32, "LineVertex must be 32 bytes");
 static_assert(sizeof(LineUniforms) == 64, "LineUniforms must be 64 bytes");
+static_assert(sizeof(MeshVertex) == 32, "MeshVertex must be 32 bytes");
 
 TEST_CASE("shared GPU struct layout") {
     CHECK(sizeof(LineVertex) == 32);
     CHECK(sizeof(LineUniforms) == 64);
+    CHECK(sizeof(MeshVertex) == 32);
 }

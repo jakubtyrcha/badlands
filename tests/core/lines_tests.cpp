@@ -185,7 +185,8 @@ TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelecte
     doc.add(sphere);
 
     SUBCASE("no selection") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode, simd_float3{0.0f, 0.0f, 5.0f});
+        const std::vector<LineVertex> lines =
+            build_scene_lines(doc, kInvalidNode, simd_float3{0.0f, 0.0f, 5.0f}, false);
         REQUIRE(lines.size() == 120); // 24 cube + 96 sphere outline
 
         for (size_t i = 0; i < 24; ++i) {
@@ -199,7 +200,8 @@ TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelecte
     }
 
     SUBCASE("sphere selected") {
-        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id, simd_float3{0.0f, 0.0f, 5.0f});
+        const std::vector<LineVertex> lines =
+            build_scene_lines(doc, sphere.id, simd_float3{0.0f, 0.0f, 5.0f}, false);
         REQUIRE(lines.size() == 120);
 
         for (size_t i = 0; i < 24; ++i) {
@@ -209,6 +211,45 @@ TEST_CASE("build_scene_lines: colors by op, selection overrides to kColorSelecte
         for (size_t i = 24; i < 120; ++i) {
             CAPTURE(i);
             check_color_approx(lines[i].color, kColorSelected);
+        }
+    }
+}
+
+TEST_CASE("build_scene_lines: mesh_present=true restricts the wireframe to the selected node only") {
+    SceneDocument doc;
+
+    Node cube;
+    cube.id = 1;
+    cube.shape = Shape::Cube;
+    cube.op = Op::Add;
+    doc.add(cube);
+
+    Node sphere;
+    sphere.id = 2;
+    sphere.shape = Shape::Sphere;
+    sphere.op = Op::Subtract;
+    doc.add(sphere);
+
+    const simd_float3 eye = {0.0f, 0.0f, 5.0f};
+
+    SUBCASE("no selection: nothing is emitted") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, kInvalidNode, eye, true);
+        CHECK(lines.empty());
+    }
+
+    SUBCASE("cube selected: only the cube's 24 edge vertices") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, cube.id, eye, true);
+        REQUIRE(lines.size() == 24);
+        for (const LineVertex& v : lines) {
+            check_color_approx(v.color, kColorSelected);
+        }
+    }
+
+    SUBCASE("sphere selected: only the sphere's outline vertices") {
+        const std::vector<LineVertex> lines = build_scene_lines(doc, sphere.id, eye, true);
+        REQUIRE(lines.size() == 2 * kSphereOutlineSegments);
+        for (const LineVertex& v : lines) {
+            check_color_approx(v.color, kColorSelected);
         }
     }
 }

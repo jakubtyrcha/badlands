@@ -29,7 +29,13 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
                            simd_float4 color, simd_float3 eye_world);
 // Color per node op (Add=kColorAdd, Subtract=kColorSubtract); selected node overrides to
 // kColorSelected. eye_world feeds the sphere outlines, making the result view-dependent.
-std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world);
+// Wireframe policy: mesh_present=false emits every node's wireframe (pre-D7 behavior, still
+// used once no mesh has been reconstructed yet, e.g. an empty scene). mesh_present=true emits
+// ONLY the selected node's wireframe (nothing when selected_id is invalid) -- once the shaded
+// mesh is on screen, drawing every node's edges on top would be visual clutter; the wireframe
+// becomes a selection annotation instead.
+std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world,
+                                          bool mesh_present);
 
 // Floating tangent-frame grid + axes, centered at `origin` in the plane with unit `normal`.
 // Tangent basis: u = normalize(cross(n, |n.y| < 0.99 ? {0,1,0} : {1,0,0})), v = cross(n, u).

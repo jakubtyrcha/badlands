@@ -110,11 +110,15 @@ void Editor::setViewportSize(float widthPts, float heightPts, float backingScale
 
 void Editor::render(void* caMetalDrawable) {
     // Nonblocking poll, before any encoding: picks up the latest finished
-    // background mesh (if any) so it's available this frame. D7's renderer
-    // upload consumes latest_mesh/mesh_version; nothing else happens with it
-    // here.
+    // background mesh (if any) so it's available this frame. On a new mesh,
+    // upload it and force a scene-lines rebuild: the wireframe policy
+    // (lines.h/build_scene_lines) depends on mesh presence, and presence can
+    // flip in both directions (e.g. the empty-scene clear path), so this is
+    // unconditional rather than trying to detect which way it flipped.
     if (impl_->meshJobRunner.poll(impl_->latest_mesh)) {
         ++impl_->mesh_version;
+        impl_->renderer.set_mesh(impl_->latest_mesh);
+        impl_->renderer.set_scene_lines_dirty();
     }
 
     const Camera camera = impl_->controller.to_camera();
