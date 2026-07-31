@@ -6,8 +6,10 @@
 #include "command.h"         // CommandKind, Command, enqueue_move_to, enqueue_set_behavior
 #include "components.h"
 #include "game_state.h"      // BadlandsGame, entity_for_slot, slot_for_entity
-#include "movement.h"        // kArriveRadius
+#include "movement.h"         // kArriveRadius
 #include "placement.h"       // nearest_building_of, PlacementState
+#include "skill_cast.h"      // validate_cast -- BL_ACT_USE_SKILL's own validation
+#include "skills.h"          // Skills, SkillId
 
 #include <spdlog/spdlog.h>
 
@@ -353,11 +355,95 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     return true;
 }
 
+namespace {
+
+// Target resolution shared by every action kind that names a victim: a named
+// slot must be a live entity; UINT32_MAX only resolves while the actor is
+// ALREADY mid-Attack (hit whatever it is engaged with -- the same actor-only
+// contract apply_intention's Attack case documents). A live select_target
+// scan, not the per-tick nearest_enemy_scratch cache (game_state.h): this can
+// be called from a context that cache was never populated for (a direct test,
+// or a future simple brain outside sim.cpp's think loop).
+//
+// No adoption re-check on the NAMED path, deliberately -- see the long-form
+// account below in resolve_action's BL_ACT_ATTACK branch: the per-kind
+// re-validation (attack_usable there, validate_cast for a skill) is what
+// keeps a stale or adversarial action harmless, not an intention-kind gate.
+bool resolve_action_target(BadlandsGame& game, uint32_t slot, entt::entity actor,
+                           uint32_t named_slot, const char* what, entt::entity& out_target,
+                           uint32_t& out_slot) {
+    if (named_slot != UINT32_MAX) {
+        out_target = entity_for_slot(game, static_cast<int32_t>(named_slot));
+        out_slot = named_slot;
+    } else {
+        const auto* ci = game.registry.try_get<CurrentIntention>(actor);
+        if (ci == nullptr || ci->kind != IntentionKind::Attack) {
+            spdlog::warn("[action] slot {}: {} names no target and has no running Attack "
+                         "intention to infer one from, dropped", slot, what);
+            return false;
+        }
+        out_target = select_target(game, actor);
+        out_slot = slot_for_entity(game, out_target);
+    }
+    if (out_target == entt::null) {
+        spdlog::warn("[action] slot {}: {} target_slot {} names no live entity, dropped", slot,
+                     what, named_slot);
+        return false;
+    }
+    return true;
+}
+
+// BL_ACT_USE_SKILL: `arg` is an index into the ACTOR's own Skills, the same
+// convention BL_ACT_ATTACK's arg uses for its Attacks. Everything else --
+// cooldown, trigger executability, targeting-mode legality, reach -- is
+// validate_cast (skill_cast.h), the SAME function the UseSkill command handler
+// re-runs authoritatively at drain time, so the early refusal here and the
+// late one cannot drift apart.
+bool resolve_use_skill(BadlandsGame& game, uint32_t slot, const AgentAction& action) {
+    entt::entity actor = entity_for_slot(game, static_cast<int32_t>(slot));
+    if (actor == entt::null || !game.registry.all_of<Skills>(actor)) {
+        spdlog::warn("[action] slot {}: BL_ACT_USE_SKILL from a slot with no live/skilled "
+                     "actor, dropped", slot);
+        return false;
+    }
+
+    // A SelfOnly skill is cast at the caster: resolving "no target named" as
+    // the actor itself (rather than demanding a running Attack intention) is
+    // what lets a ward be cast out of combat at all. validate_cast still has
+    // the last word on whether that pairing is legal for this skill.
+    uint32_t target_slot = action.target_slot;
+    entt::entity target = entt::null;
+    const Skills& skills = game.registry.get<Skills>(actor);
+    const bool self_cast =
+        action.arg >= 0 && action.arg < skills.count &&
+        game.skills.specs[static_cast<size_t>(skills.ids[action.arg])].target ==
+            SkillTargetMode::SelfOnly;
+    if (self_cast && target_slot == UINT32_MAX) {
+        target_slot = slot;
+    } else if (!resolve_action_target(game, slot, actor, target_slot, "BL_ACT_USE_SKILL",
+                                      target, target_slot)) {
+        return false;
+    }
+
+    CastPlan plan;
+    if (!validate_cast(game, slot, action.arg, target_slot, plan)) {
+        return false;  // validate_cast warned with the specific reason
+    }
+    game.command_queue.push_back(
+        {CommandKind::UseSkill, slot, target_slot, {0.0f, 0.0f}, action.arg});
+    return true;
+}
+
+}  // namespace
+
 bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action) {
+    if (action.kind == BL_ACT_USE_SKILL) {
+        return resolve_use_skill(game, slot, action);
+    }
     if (action.kind != BL_ACT_ATTACK) {
-        // BL_ACT_NONE, the reserved USE_SKILL/USE_POTION, and anything
-        // unrecognized all land here -- forward-compat posture, same as
-        // decode_suggestion's unknown-intention-kind case (wasm_brain.cpp).
+        // BL_ACT_NONE, the reserved USE_POTION, and anything unrecognized all
+        // land here -- forward-compat posture, same as decode_suggestion's
+        // unknown-intention-kind case (wasm_brain.cpp).
         spdlog::warn("[action] slot {}: kind {} is reserved or unrecognized, dropped", slot,
                      action.kind);
         return false;

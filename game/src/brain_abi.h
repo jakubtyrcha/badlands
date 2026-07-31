@@ -96,7 +96,13 @@ extern "C" {
 // the batch or the yielded suggestion. Same discipline as every other
 // append-only vocabulary here: never renumber or reuse a shipped value.
 #define BL_ACT_NONE 0
-#define BL_ACT_USE_SKILL 1   // reserved
+// live: arg = index into BlViewWire.skills (the actor's OWN skill slots, the
+// same convention BL_ACT_ATTACK's arg uses for its attacks), target_slot =
+// the victim (UINT32_MAX = the current Attack-intention's target, or the
+// caster itself for a self-targeted skill). Everything else -- cooldown,
+// whether the skill is castable as an action at all, targeting-mode legality,
+// reach -- is checked host-side (game/src/skill_cast.h's validate_cast).
+#define BL_ACT_USE_SKILL 1
 #define BL_ACT_USE_POTION 2  // reserved
 // live: arg = index into BlViewWire.attacks (BL_ACT_ATTACK's attack index),
 // target_slot = victim slot (UINT32_MAX = the current Attack-intention's
