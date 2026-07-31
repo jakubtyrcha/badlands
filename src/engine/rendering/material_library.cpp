@@ -298,33 +298,20 @@ DeferredMaterial MaterialLibrary::VoxelFoliage(glm::vec3 tint, float roughness,
     }
   }
 
-  auto to_byte = [](float c) {
-    return static_cast<uint8_t>(
-        std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f));
+  // No texture views to keep alive (VoxelFoliage declares no textures), so --
+  // unlike SolidColor/CheckerAlbedo's quantize-and-cache pattern -- there's
+  // nothing here that needs a cache to stay alive; just build fresh params
+  // every call. Group-1 (non-instanced) VoxelFoliageUniforms fields
+  // render_textured_mesh.cpp applies per-object: tint (rgb brightness
+  // multiplier) and params (x = roughness, y = translucency strength).
+  InstanceParams params;
+  params.uniform_overrides = {
+      {"tint", glm::vec4(tint, 1.0f)},
+      {"params", glm::vec4(roughness, translucency_strength, 0.0f, 0.0f)},
   };
-  const uint32_t packed_tint = (static_cast<uint32_t>(to_byte(tint.r)) << 16) |
-                               (static_cast<uint32_t>(to_byte(tint.g)) << 8) |
-                               static_cast<uint32_t>(to_byte(tint.b));
-  const uint8_t packed_roughness = to_byte(roughness);
-  const uint8_t packed_strength = to_byte(translucency_strength);
-  const auto key =
-      std::make_tuple(packed_tint, packed_roughness, packed_strength);
-
-  auto it = voxel_foliage_cache_.find(key);
-  if (it == voxel_foliage_cache_.end()) {
-    InstanceParams params;
-    // Group-1 (non-instanced) VoxelFoliageUniforms fields render_textured_mesh
-    // .cpp applies per-object: tint (rgb brightness multiplier) and params
-    // (x = roughness, y = translucency strength).
-    params.uniform_overrides = {
-        {"tint", glm::vec4(tint, 1.0f)},
-        {"params", glm::vec4(roughness, translucency_strength, 0.0f, 0.0f)},
-    };
-    it = voxel_foliage_cache_.emplace(key, std::move(params)).first;
-  }
 
   return DeferredMaterial{.factory = voxel_foliage_factory_.get(),
-                          .params = it->second};
+                          .params = std::move(params)};
 }
 
 MaterialLibrary::TerrainArrays MaterialLibrary::LoadTerrainArrays(

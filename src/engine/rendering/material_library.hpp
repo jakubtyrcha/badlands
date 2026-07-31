@@ -127,9 +127,12 @@ class MaterialLibrary {
   // packVoxelFoliageGBuffer's material.r/.g so deferred_lighting.wesl adds a
   // transmission term for pixels this material writes. The underlying
   // kDeferred factory (G-buffer color/depth targets, cull Back, casts_shadow
-  // = true) is built once, lazily, and shared by every call; instances are
-  // cached by the packed (tint, roughness, strength) tuple, same pattern as
-  // SolidColor. Valid after Initialize().
+  // = true) is built once, lazily, and shared by every call; unlike
+  // SolidColor/CheckerAlbedo (which cache to keep 1x1/procedural TEXTURE
+  // VIEWS alive), a fresh DeferredMaterial's InstanceParams is built and
+  // returned every call -- there are no texture views here to keep alive
+  // (VoxelFoliage declares no textures at all), so a params cache would only
+  // save rebuilding a small uniform_overrides map. Valid after Initialize().
   DeferredMaterial VoxelFoliage(glm::vec3 tint, float roughness,
                                 float translucency_strength);
 
@@ -245,12 +248,6 @@ class MaterialLibrary {
   // solid_cache_.
   std::map<std::tuple<uint32_t, uint32_t, int, int, uint8_t>, InstanceParams>
       checker_cache_;
-
-  // key: (packed sRGB tint, roughness*255, translucency_strength*255). No
-  // texture views to keep alive here (VoxelFoliage has none) -- caching just
-  // avoids rebuilding the same uniform_overrides map on repeated calls.
-  std::map<std::tuple<uint32_t, uint8_t, uint8_t>, InstanceParams>
-      voxel_foliage_cache_;
 
   mutable bool load_failed_ = false;
 };
