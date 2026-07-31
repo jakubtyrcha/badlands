@@ -1077,13 +1077,19 @@ TriangleMesh reconstruct(const SampleGrid& grid, const DcsddConfig& config) {
 
     const int32_t num_cells = static_cast<int32_t>(state.cell_id.size());
     for (int32_t outer = 0; outer < config.outer_iters; ++outer) {
-        // Rebuilt every iteration for fresh face_points (the vertices moved
-        // last iteration); topology (quad_edge/quad_cells/tri_cells) comes
-        // out identical to the invariant one above every time -- recomputing
-        // it is cheap relative to the per-cell optimization below, and one
-        // code path is simpler than threading a "topology-only" variant
-        // through assign_samples too.
-        mesh = build_global_mesh(state, grid, vertices);
+        // Rebuilt every iteration (outer > 0) for fresh face_points (the
+        // vertices moved last iteration); topology (quad_edge/quad_cells/
+        // tri_cells) comes out identical to the invariant one above every
+        // time -- recomputing it is cheap relative to the per-cell
+        // optimization below, and one code path is simpler than threading a
+        // "topology-only" variant through assign_samples too. Skipped at
+        // outer == 0: `vertices` is still exactly the centroid values the
+        // pre-loop build_global_mesh call above already used, so re-running
+        // it here would recompute byte-identical state -- `mesh` from that
+        // call is reused as-is for this first iteration.
+        if (outer > 0) {
+            mesh = build_global_mesh(state, grid, vertices);
+        }
         const SampleAssignment assignment = assign_samples(grid, state, vertices, mesh);
 
         // Parallel phase: every interesting cell's NEW vertex goes into its

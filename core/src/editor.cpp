@@ -166,17 +166,16 @@ void Editor::deleteSelectedNode() {
         return; // no-op without a selection
     }
 
-    // An active drag/scale gesture referencing the node being deleted must
-    // not survive it — mirrors setMode's mid-gesture abort (impl_->drag /
-    // impl_->scale_drag reset the same way endDrag()/endScale() do).
-    if (impl_->drag.active && impl_->drag.node_id == impl_->selected) {
-        impl_->drag.active = false;
-        impl_->drag.node_id = kInvalidNode;
-    }
-    if (impl_->scale_drag.active && impl_->scale_drag.node_id == impl_->selected) {
-        impl_->scale_drag.active = false;
-        impl_->scale_drag.node_id = kInvalidNode;
-    }
+    // An active drag/scale gesture must not survive the node it's driving
+    // going away — mirrors setMode's mid-gesture abort. Gestures only ever
+    // target the currently selected node (beginDrag/beginScale only capture
+    // state for impl_->selected), so ending both unconditionally here is
+    // equivalent to the old hand-inlined "if node_id == selected" reset,
+    // just via the real endDrag()/endScale() entry points instead of
+    // duplicating their body. Order matters: end the gestures before
+    // remove_node, so nothing is left referencing the id about to go away.
+    endDrag();
+    endScale();
 
     impl_->scene.remove_node(impl_->selected);
     impl_->selected = kInvalidNode;
