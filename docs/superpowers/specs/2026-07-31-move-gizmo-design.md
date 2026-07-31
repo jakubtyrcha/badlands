@@ -13,6 +13,22 @@ convention — axes swim as the camera orbits); all three plane handles
 **nothing** — a deliberate behavior change from today's click-anywhere
 free drag, so existing `drag_tests.cpp` free-drag cases get reworked.
 
+AMENDMENT (R1, 2026-07-31, external plan review + user rulings): the
+gizmo is **screen-constant sized** (whole gizmo, grid included):
+`half_extent = kGizmoScreenFraction (0.12) · length(origin − eye) ·
+2·tan(fov_y/2)`, replacing the world-constant `kGizmoHalfExtent`;
+`tangent_basis` gains a degenerate-normal fallback (‖n‖ ≈ 0 → {0,1,0});
+axes seen nearly end-on (`|dot(ray, axis)| > 0.995`) are unpickable —
+this, not the solver's 1e-6 denominator, is what protects axis drags
+from parameter spikes; axis tie-break is distance, then nearest ray-t,
+then declaration order; `deleteSelectedNode` clears hover (it bypasses
+`select()`). Rejected in the same review, with verification: mouse-move
+throttling (pick is ~6 analytic tests), a resize-mid-drag guard
+(updateDrag already reads current viewport dims), and a behind-camera
+code guard (forward-clamped world-space math already cannot pick
+behind-camera handles; pinned by test only). The plan's "R1 review
+amendments" section carries the details.
+
 ## 1. Gizmo frame — new `core/src/gizmo.h/.cpp`
 
 `GizmoFrame { simd_float3 origin; simd_float3 n, u, v; float half_extent; }`
