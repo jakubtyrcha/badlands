@@ -766,8 +766,27 @@ SimFactors sanitize_factors(SimFactors f) {
 SkillCatalog sanitize_skill_catalog(SkillCatalog c) {
     for (int32_t i = 0; i < kSkillCount; ++i) {
         SkillSpec& s = c.specs[i];
-        clamp_nonneg("skill.duration_seconds", s.duration_seconds);
+        clamp_nonneg("skill.intention_duration_seconds", s.intention_duration_seconds);
         clamp_nonneg("skill.cooldown_seconds", s.cooldown_seconds);
+        // A Multi cast has to hit at least one thing to mean anything, and it
+        // cannot hit more than the cast context can carry (BL_SKILL_MAX_TARGETS
+        // -- kMaxSkillTargets here, the sim-side mirror).
+        if (s.target_limit < 1) {
+            warn_adjusted("skill.target_limit", s.target_limit, int32_t{1});
+            s.target_limit = 1;
+        } else if (s.target_limit > kMaxSkillTargets) {
+            warn_adjusted("skill.target_limit", s.target_limit, kMaxSkillTargets);
+            s.target_limit = kMaxSkillTargets;
+        }
+        // Constants are the skill's own business (a negative one may be
+        // perfectly meaningful), but a non-finite value would propagate
+        // through an effect into a duration or an amount, so it is zeroed.
+        for (int32_t k = 0; k < s.constant_count && k < kMaxSkillConstants; ++k) {
+            if (!std::isfinite(s.constants[k].value)) {
+                warn_adjusted("skill.constant", s.constants[k].value, 0.0f);
+                s.constants[k].value = 0.0f;
+            }
+        }
     }
     return c;
 }

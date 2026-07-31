@@ -61,6 +61,50 @@ bool ReadChoice(const nlohmann::json& obj, const std::string& skill, const char*
     return false;
 }
 
+// Read the optional "constants" object: skill-specific tuning numbers, the
+// ONLY thing this manifest is allowed to carry (behaviour stays in code -- see
+// SkillSpec's own doc comment). A name absent from the compiled defaults is
+// APPENDED rather than rejected: the manifest is the tuning surface, and a
+// skill's code decides which names it reads.
+bool ReadConstants(const nlohmann::json& obj, const std::string& skill, SkillSpec& s) {
+    if (!obj.contains("constants")) {
+        return true;
+    }
+    if (!obj["constants"].is_object()) {
+        spdlog::warn("LoadSkillCatalog: {}.constants is not an object", skill);
+        return false;
+    }
+    for (const auto& [key, value] : obj["constants"].items()) {
+        if (!value.is_number()) {
+            spdlog::warn("LoadSkillCatalog: {}.constants.{} is not a number", skill, key);
+            return false;
+        }
+        const float v = value.get<float>();
+        bool replaced = false;
+        for (int32_t i = 0; i < s.constant_count && i < kMaxSkillConstants; ++i) {
+            if (s.constants[i].name == key) {
+                s.constants[i].value = v;
+                replaced = true;
+                break;
+            }
+        }
+        if (replaced) {
+            continue;
+        }
+        if (s.constant_count >= kMaxSkillConstants) {
+            // Failing loudly rather than dropping: a designer who authored a
+            // ninth constant is missing one silently otherwise.
+            spdlog::warn("LoadSkillCatalog: {} has more than {} constants", skill,
+                         kMaxSkillConstants);
+            return false;
+        }
+        s.constants[s.constant_count].name = key;
+        s.constants[s.constant_count].value = v;
+        ++s.constant_count;
+    }
+    return true;
+}
+
 }  // namespace
 
 bool LoadSkillCatalog(const std::string& path, SkillCatalog& out) {
@@ -97,19 +141,28 @@ bool LoadSkillCatalog(const std::string& path, SkillCatalog& out) {
             return false;
         }
         SkillSpec& s = parsed.specs[static_cast<size_t>(id)];
-        int32_t activation = static_cast<int32_t>(s.activation);
-        int32_t targeting = static_cast<int32_t>(s.targeting);
+        int32_t trigger = static_cast<int32_t>(s.trigger);
+        int32_t target = static_cast<int32_t>(s.target);
+        int32_t attack_test = static_cast<int32_t>(s.attack_test);
         const bool ok =
-            ReadChoice(o, name, "activation", {{"active", 0}, {"passive", 1}}, activation) &&
-            ReadChoice(o, name, "targeting", {{"direct", 0}, {"aoe", 1}}, targeting) &&
-            ReadNum(o, name, "duration", s.duration_seconds) &&
+            ReadChoice(o, name, "trigger",
+                       {{"action", 0}, {"passive", 1}, {"intention", 2}}, trigger) &&
+            ReadChoice(o, name, "target",
+                       {{"none", 0}, {"self", 1}, {"any", 2}, {"multi", 3}, {"point", 4}},
+                       target) &&
+            ReadChoice(o, name, "attack_test",
+                       {{"none", 0}, {"melee", 1}, {"ranged", 2}}, attack_test) &&
+            ReadNum(o, name, "target_limit", s.target_limit) &&
             ReadNum(o, name, "cooldown", s.cooldown_seconds) &&
-            ReadString(o, name, "effect", s.effect);
+            ReadNum(o, name, "intention_duration", s.intention_duration_seconds) &&
+            ReadString(o, name, "effect", s.effect) &&
+            ReadConstants(o, name, s);
         if (!ok) {
             return false;
         }
-        s.activation = static_cast<SkillActivation>(activation);
-        s.targeting = static_cast<SkillTargeting>(targeting);
+        s.trigger = static_cast<SkillTrigger>(trigger);
+        s.target = static_cast<SkillTargetMode>(target);
+        s.attack_test = static_cast<SkillAttackTest>(attack_test);
     }
 
     out = parsed;

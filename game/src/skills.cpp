@@ -10,6 +10,8 @@ namespace {
 constexpr std::array<SkillDef, static_cast<size_t>(kSkillCount)> kSkills{{
     {SkillId::Calcify, "Calcify", SkillTriggerKind::MeleeThreatClose,
      /*trigger_param=*/3.0f},
+    {SkillId::ShieldBash, "ShieldBash", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/2.0f},
 }};
 
 constexpr bool skills_dense() {
@@ -45,13 +47,54 @@ const char* SkillName(int32_t id) {
     return kSkills[static_cast<size_t>(id)].name;
 }
 
+namespace {
+
+// Appends one authored constant; the catalog author is trusted (these are
+// compile-time literals), so an overflow is a programming error, not input.
+void set_constant(SkillSpec& s, const char* name, float value) {
+    if (s.constant_count >= kMaxSkillConstants) {
+        return;
+    }
+    s.constants[s.constant_count].name = name;
+    s.constants[s.constant_count].value = value;
+    ++s.constant_count;
+}
+
+}  // namespace
+
+float SkillSpec::constant(const char* name, float fallback) const {
+    if (name == nullptr) {
+        return fallback;
+    }
+    for (int32_t i = 0; i < constant_count && i < kMaxSkillConstants; ++i) {
+        if (constants[i].name == name) {
+            return constants[i].value;
+        }
+    }
+    return fallback;
+}
+
 SkillCatalog::SkillCatalog() {
     SkillSpec& calcify = specs[static_cast<size_t>(SkillId::Calcify)];
-    calcify.activation = SkillActivation::Active;
-    calcify.targeting = SkillTargeting::Direct;
-    calcify.duration_seconds = 0.0f;  // instant to apply; the shield persists until consumed
+    calcify.trigger = SkillTrigger::Action;
+    calcify.target = SkillTargetMode::SelfOnly;
+    calcify.attack_test = SkillAttackTest::None;  // a ward, not a blow
+    calcify.intention_duration_seconds = 0.0f;    // instant; the shield persists until consumed
     calcify.cooldown_seconds = 20.0f;
     calcify.effect = "Absorbs the next physical strike, then shatters.";
+
+    // The mercenary's control tool: a shield slam that deals nothing and stuns
+    // what it lands on. Range comes from attack_test = Melee (the caster's own
+    // melee reach), so a mercenary's bash reaches exactly as far as its sword.
+    SkillSpec& bash = specs[static_cast<size_t>(SkillId::ShieldBash)];
+    bash.trigger = SkillTrigger::Action;
+    bash.target = SkillTargetMode::Any;
+    bash.target_limit = 1;
+    bash.attack_test = SkillAttackTest::Melee;
+    bash.cooldown_seconds = 12.0f;
+    bash.intention_duration_seconds = 0.0f;
+    bash.effect = "Slams the target with a shield; a landed blow leaves it stunned.";
+    set_constant(bash, "stun_seconds", 3.0f);
 }
 
 SkillId SkillIdFromName(const char* name) {

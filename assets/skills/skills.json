@@ -1,10 +1,23 @@
 {
-  "_comment": "Skill template overrides; keys are skill names (identity). Absent fields keep compiled defaults.",
+  "_comment": "Skill templates; keys are skill names (identity, not overridable). Absent fields keep the compiled defaults. This file carries CONSTANTS and engine-checked data only -- never behaviour: trigger = action|passive|intention, target = none|self|any|multi|point, attack_test = none|melee|ranged (which also fixes the cast range), cooldown/intention_duration in seconds, and per-skill constants each skill's own code reads by name.",
   "Calcify": {
-    "activation": "active",
-    "targeting": "direct",
-    "duration": 0,
+    "trigger": "action",
+    "target": "self",
+    "attack_test": "none",
     "cooldown": 20,
+    "intention_duration": 0,
     "effect": "Absorbs the next physical strike, then shatters."
+  },
+  "ShieldBash": {
+    "trigger": "action",
+    "target": "any",
+    "target_limit": 1,
+    "attack_test": "melee",
+    "cooldown": 12,
+    "intention_duration": 0,
+    "effect": "Slams the target with a shield; a landed blow leaves it stunned.",
+    "constants": {
+      "stun_seconds": 3
+    }
   }
 }

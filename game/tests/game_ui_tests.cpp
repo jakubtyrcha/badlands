@@ -486,7 +486,7 @@ TEST_CASE("hero progression rows: level, xp, and the skills list",
     CHECK(sel.lists[0].entries[0].label == "Calcify");
     CHECK(sel.lists[0].entries[0].value == "");
     CHECK(sel.lists[0].entries[1].label == "");
-    CHECK(sel.lists[0].entries[1].value == "active, direct, instant, cd 20s");
+    CHECK(sel.lists[0].entries[1].value == "action, self, cd 20s");
     CHECK(sel.lists[0].entries[2].label == "");
     CHECK(sel.lists[0].entries[2].value == "Absorbs the next physical");
     CHECK(sel.lists[0].entries[3].label == "");
@@ -510,12 +510,11 @@ TEST_CASE("progression rows: non-heroes add nothing; skill-less heroes skip the 
     CHECK(sel.lists.empty());
 }
 
-TEST_CASE("skill summary omits cd when none and shows duration seconds",
+TEST_CASE("skill summary reads the trigger/target vocabulary and omits an absent cd",
           "[game_ui][hud]") {
     SkillCatalog cat;
-    cat.specs[0].activation = SkillActivation::Passive;
-    cat.specs[0].targeting = SkillTargeting::Aoe;
-    cat.specs[0].duration_seconds = 6.0f;
+    cat.specs[0].trigger = SkillTrigger::Passive;
+    cat.specs[0].target = SkillTargetMode::Point;
     cat.specs[0].cooldown_seconds = 0.0f;
     CharacterState hero{};
     hero.level = 1;
@@ -527,7 +526,7 @@ TEST_CASE("skill summary omits cd when none and shows duration seconds",
     // name row, summary row, then the (untouched, compiled-default) effect
     // text wrapped onto two more rows -- see the wrap test below for the split.
     REQUIRE(sel.lists[0].entries.size() == 4);
-    CHECK(sel.lists[0].entries[1].value == "passive, aoe, 6s");
+    CHECK(sel.lists[0].entries[1].value == "passive, point");
 }
 
 TEST_CASE("skill effect text wraps at word boundaries within the panel width",

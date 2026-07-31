@@ -76,21 +76,41 @@ int32_t AddLabel(std::vector<UiElement>& els, TextBlob& blob, int32_t parent,
   return static_cast<int32_t>(els.size()) - 1;
 }
 
-// "active, direct, instant, cd 20s" -- duration shows as seconds when timed,
-// "instant" otherwise; the cd fragment is omitted when the skill has none.
-std::string SkillSummary(const SkillSpec& s) {
-  std::string out =
-      s.activation == SkillActivation::Passive ? "passive" : "active";
-  out += s.targeting == SkillTargeting::Aoe ? ", aoe" : ", direct";
-  // >= 0.5f so a sub-half-second duration rounds to "0s" under %.0f and reads
-  // as "instant" instead of the misleading ", 0s".
-  if (s.duration_seconds >= 0.5f) {
-    char buf[24];
-    std::snprintf(buf, sizeof(buf), ", %.0fs", s.duration_seconds);
-    out += buf;
-  } else {
-    out += ", instant";
+// The user-facing word for how a skill is initiated. "focus" rather than
+// "intention": the player sees a cast that takes time, not the engine's
+// scheduling vocabulary.
+std::string SkillTypeText(SkillTrigger t) {
+  switch (t) {
+    case SkillTrigger::Passive:
+      return "passive";
+    case SkillTrigger::Intention:
+      return "focus";
+    case SkillTrigger::Action:
+      break;
   }
+  return "action";
+}
+
+std::string SkillTargetText(SkillTargetMode m) {
+  switch (m) {
+    case SkillTargetMode::None:
+      return "none";
+    case SkillTargetMode::SelfOnly:
+      return "self";
+    case SkillTargetMode::Multi:
+      return "multi";
+    case SkillTargetMode::Point:
+      return "point";
+    case SkillTargetMode::Any:
+      break;
+  }
+  return "any";
+}
+
+// "action, any, cd 12s" -- the cd fragment is omitted when the skill has none.
+std::string SkillSummary(const SkillSpec& s) {
+  std::string out = SkillTypeText(s.trigger);
+  out += ", " + SkillTargetText(s.target);
   if (s.cooldown_seconds > 0.0f) {
     char buf[24];
     std::snprintf(buf, sizeof(buf), ", cd %.0fs", s.cooldown_seconds);
