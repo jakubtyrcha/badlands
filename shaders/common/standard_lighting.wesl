@@ -90,7 +90,7 @@ fn evaluateTranslucency(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>,
 // bound shadow map; both material shaders build with the "translucency"
 // feature only for the translucent variant (material_library.cpp), so the
 // @if(!translucency) stub below is what every OTHER material shader (and
-// deferred_lighting.wesl/water.wesl, which import this file without ever
+// deferred_lighting.wesl, which imports this file without ever
 // setting "translucency") actually gets -- it must stay a no-op, not an
 // error, for shaders that never call it.
 @if(translucency)

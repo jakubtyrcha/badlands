@@ -19,17 +19,17 @@ enum class TreeType { Deciduous, Evergreen };
 // enumeration for this enum -- consumers that need to iterate every value or
 // size a per-silhouette array (model_viewer_view.hpp's leaf_textures_/
 // leaf_views_, model_viewer_view.cpp's texture bake loop,
-// tree_generator_tests.cpp) must use them instead of hand-listing the values,
-// so adding a new silhouette here can't silently desync those sites. NEW
-// ENUM VALUES MUST BE ADDED TO kAllLeafSilhouettes TOO.
+// tree_generator_tests.cpp) must use them instead of hand-listing the values.
+// When adding a new LeafSilhouette, append it to the enum and to kAllLeafSilhouettes,
+// then update kLeafSilhouetteCount to match the array size.
 enum class LeafSilhouette { Oak, Ash, Aspen, Bush, PineSprig };
 
 inline constexpr size_t kLeafSilhouetteCount = 5;
 inline constexpr std::array<LeafSilhouette, kLeafSilhouetteCount> kAllLeafSilhouettes = {
     LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
     LeafSilhouette::Bush, LeafSilhouette::PineSprig};
-static_assert(kAllLeafSilhouettes.size() == kLeafSilhouetteCount,
-              "kAllLeafSilhouettes must list every LeafSilhouette value");
+static_assert(static_cast<size_t>(kAllLeafSilhouettes.back()) + 1 == kLeafSilhouetteCount,
+              "append new LeafSilhouette values at the end and update kAllLeafSilhouettes + kLeafSilhouetteCount");
 
 // The alpha-discard cutoff a per-silhouette leaf-card texture should be BAKED
 // with (BuildLeafMipChainRgba8's coverage-preserving mip chain, viewer's
