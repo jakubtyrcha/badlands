@@ -1,65 +1,53 @@
 #include "sdf.h"
 
+#include <algorithm>
 #include <cassert>
-#include <cfloat>
 #include <cmath>
 
 #include "scene.h"
 
 namespace sq {
 
+// Both thin wrappers over sdf_scene.h's dual-compile math (sq_float3 ==
+// simd_float3 in plain C++ builds, so no conversion is needed) -- kept as
+// free functions here because sdf_tests.cpp pins them directly by this exact
+// name/signature (the refactor guard: those expectations are unchanged).
 float sd_box(simd_float3 q, simd_float3 half_extents) {
-    const simd_float3 d = simd_abs(q) - half_extents;
-    const float outside = simd_length(simd_max(d, simd_float3{0.0f, 0.0f, 0.0f}));
-    const float inside = std::fmin(simd_reduce_max(d), 0.0f);
-    return outside + inside;
+    return sdf_sd_box(q, half_extents);
 }
 
 float sd_ellipsoid(simd_float3 q, simd_float3 radii) {
-    const float k0 = simd_length(q / radii);
-    const float k1 = simd_length(q / (radii * radii));
-    if (k1 == 0.0f) {
-        // q == 0: the approximation divides by k1, which is singular at the
-        // center. The nearest surface point from the center lies along the
-        // smallest radius, so the exact distance there is -min_component(radii).
-        return -simd_reduce_min(radii);
+    return sdf_sd_ellipsoid(q, radii);
+}
+
+std::vector<SdfNode> pack_scene(const SceneDocument& doc) {
+    const std::vector<Node>& nodes = doc.nodes();
+    const size_t count = std::min(nodes.size(), static_cast<size_t>(kMaxRaymarchNodes));
+
+    std::vector<SdfNode> packed;
+    packed.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const Node& node = nodes[i];
+        const simd_float3 half = node.scale * 0.5f;
+        SdfNode sn;
+        sn.pos_shape = sdf_make4(node.position.x, node.position.y, node.position.z,
+                                  (node.shape == Shape::Cube) ? 0.0f : 1.0f);
+        sn.half_extents_op =
+            sdf_make4(half.x, half.y, half.z, (node.op == Op::Add) ? 0.0f : 1.0f);
+        packed.push_back(sn);
     }
-    return k0 * (k0 - 1.0f) / k1;
+    return packed;
 }
-
-namespace {
-
-// Evaluates one node's local SDF at a world-space point p.
-//
-// Node rotation is always identity in the current MVP (see scene.h), so we
-// evaluate directly in the node's translation-only frame: q = p - node.position.
-// If/when rotation becomes editable, q must be rotated by the inverse rotation
-// before this dispatch (and before the box/ellipsoid math above, which assumes
-// q already comes in axis-aligned with the shape).
-float sd_node(const Node& node, simd_float3 p) {
-    const simd_float3 q = p - node.position;
-    const simd_float3 half = node.scale * 0.5f;
-    return (node.shape == Shape::Cube) ? sd_box(q, half) : sd_ellipsoid(q, half);
-}
-
-} // namespace
 
 std::optional<float> evaluate_scene_sdf(const SceneDocument& doc, simd_float3 p) {
     if (doc.nodes().empty()) {
         return std::nullopt;
     }
-
-    float d = FLT_MAX;
-    for (const Node& node : doc.nodes()) {
-        const float d_node = sd_node(node, p);
-        // Known approximation: min/max CSG combine is not a true distance
-        // field near intersection curves (only the zero-set/surface is
-        // exact). The DCSDD paper (Table 1) shows the reconstruction
-        // tolerates comparable noise, so this is accepted rather than
-        // worked around.
-        d = (node.op == Op::Add) ? std::fmin(d, d_node) : std::fmax(d, -d_node);
-    }
-    return d;
+    // Single-point convenience query: packs once, folds once. sample_scene
+    // below is the perf-sensitive path (N^3 fold evaluations) and packs
+    // once itself rather than calling this function per sample point.
+    const std::vector<SdfNode> packed = pack_scene(doc);
+    return sdf_fold(packed.data(), static_cast<int>(packed.size()), p);
 }
 
 namespace {
@@ -104,6 +92,12 @@ SampleGrid sample_scene(const SceneDocument& doc, int32_t n) {
     grid.n = n;
     grid.values.resize(static_cast<size_t>(n) * static_cast<size_t>(n) * static_cast<size_t>(n));
 
+    // Pack once, fold N^3 times: evaluate_scene_sdf would re-pack (allocate)
+    // per sample point, which is the exact per-call cost this loop cannot
+    // afford at n=64 (262144 samples).
+    const std::vector<SdfNode> packed = pack_scene(doc);
+    const int node_count = static_cast<int>(packed.size());
+
     for (int32_t z = 0; z < n; ++z) {
         for (int32_t y = 0; y < n; ++y) {
             for (int32_t x = 0; x < n; ++x) {
@@ -112,7 +106,7 @@ SampleGrid sample_scene(const SceneDocument& doc, int32_t n) {
                 const simd_float3 p = grid.origin + offset;
                 const size_t un = static_cast<size_t>(n);
                 const size_t index = static_cast<size_t>(x) + un * (static_cast<size_t>(y) + un * static_cast<size_t>(z));
-                grid.values[index] = evaluate_scene_sdf(doc, p).value(); // non-empty scene: always has a value
+                grid.values[index] = sdf_fold(packed.data(), node_count, p);
             }
         }
     }

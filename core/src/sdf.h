@@ -4,6 +4,8 @@
 #include <optional>
 #include <vector>
 
+#include "sdf_scene.h" // SdfNode, dual-compile CSG fold (shared with the planned raymarch shader)
+
 namespace sq {
 
 class SceneDocument;
@@ -29,6 +31,23 @@ float sd_box(simd_float3 q, simd_float3 half_extents);
 // (division by zero); guarded to return -min_component(radii), the exact
 // distance to the nearest surface point from the center.
 float sd_ellipsoid(simd_float3 q, simd_float3 radii);
+
+// SdfNode packing budget: kMaxRaymarchNodes * sizeof(SdfNode) (32 B) = 4096 B
+// -- exactly Metal's setFragmentBytes 4 KB limit for buffers bound that way
+// (the planned raymarch shader's per-frame node-array binding).
+inline constexpr int32_t kMaxRaymarchNodes = 128;
+
+// Packs the scene's nodes into SdfNode array, in document order (see
+// sdf_scene.h for the exact SdfNode field packing). A scene with more than
+// kMaxRaymarchNodes nodes is not reachable through the app's current spawn
+// flow; if it ever is, this truncates (keeps the first kMaxRaymarchNodes
+// nodes) rather than growing past the raymarch shader's buffer budget above.
+// Deliberately not a crashing assert(): the truncation behavior itself is a
+// pinned, always-green test (see sdf_scene_tests.cpp), and this project's
+// CoreTests only ever builds in a configuration where assert() is live, so a
+// tripped assert() here would abort that test rather than let it observe the
+// truncated result.
+std::vector<SdfNode> pack_scene(const SceneDocument& doc);
 
 // Evaluates the scene's CSG SDF at a world-space point by combining every
 // node's local SDF in document order (Add -> min(d, d_node), Subtract ->
