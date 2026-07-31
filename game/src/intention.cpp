@@ -9,6 +9,7 @@
 #include "movement.h"         // kArriveRadius
 #include "placement.h"       // nearest_building_of, PlacementState
 #include "skill_cast.h"      // validate_cast -- BL_ACT_USE_SKILL's own validation
+#include "skill_focus.h"     // begin_focus / cancel_focus -- the Intention trigger
 #include "skills.h"          // Skills, SkillId
 #include "status.h"          // has_status -- a disengaged actor takes no action either
 #include "strike.h"          // striking -- nor does a committed attacker
@@ -59,6 +60,12 @@ bool is_identical_restatement(const CurrentIntention& ci, const Intention& inten
         case IntentionKind::EnterHome:
         case IntentionKind::Buy:
             return true;  // no distinguishing field -- actor-only/untargeted
+        case IntentionKind::UseSkill:
+            // BOTH fields, because both change what is being cast at whom. A
+            // restate that matches resumes the RUNNING focus -- its deadline is
+            // untouched -- which is what stops a brain restating the same focus
+            // every wake from starting the two seconds over forever.
+            return ci.target_slot == intent.target_slot && ci.arg == intent.arg;
         case IntentionKind::Idle:
         case IntentionKind::None:
         default:
@@ -203,9 +210,35 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
         return true;
     }
 
+    // Anything ADOPTED that is not this focus abandons it. That is the only way
+    // "moving abandons the focus" is reachable at all -- a focusing entity does
+    // not move, so the sole route out is deciding to do something else, and it
+    // costs the seconds already spent. An identical restatement never reaches
+    // here (it returned above), so a brain restating its own focus resumes it.
+    cancel_focus(game, e);
+
     switch (intent.kind) {
         case IntentionKind::None:
             return false;  // nothing suggested this wake
+
+        case IntentionKind::UseSkill: {
+            // A FOCUS: validated now, and validated AGAIN at its deadline
+            // (skill_focus.cpp) because nothing about it is captured. The
+            // channel is Intention, so only a skill that declares that trigger
+            // can be adopted this way -- an action skill adopted as a focus
+            // would idle for a duration it never declared.
+            CastPlan plan;
+            if (!validate_cast(game, slot, intent.arg, intent.target_slot, plan,
+                               SkillTrigger::Intention)) {
+                return false;
+            }
+            // Through a LOGGED command, not a direct begin_focus: a replay never
+            // thinks, so a focus created here and nowhere else would exist live
+            // and never on replay (command.h's FocusSkill).
+            game.command_queue.push_back({CommandKind::FocusSkill, slot, intent.target_slot,
+                                          {0.0f, 0.0f}, intent.arg});
+            break;
+        }
 
         case IntentionKind::MoveTo:
             if (!std::isfinite(intent.point.x) || !std::isfinite(intent.point.y)) {
@@ -348,10 +381,17 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // suggestion, say) would silently make advance_intentions treat it as a
     // target-bearing intention it is not.
     ci.point = (intent.kind == IntentionKind::MoveTo) ? intent.point : glm::vec2{0.0f, 0.0f};
-    ci.target_slot = (intent.kind == IntentionKind::Shoot || intent.kind == IntentionKind::Chat)
+    ci.target_slot = (intent.kind == IntentionKind::Shoot ||
+                      intent.kind == IntentionKind::Chat ||
+                      intent.kind == IntentionKind::UseSkill)
                          ? intent.target_slot
                          : UINT32_MAX;
-    ci.arg = (intent.kind == IntentionKind::Enter) ? intent.arg : 0;
+    // UseSkill uses BOTH -- which skill, at whom -- and both are what
+    // is_identical_restatement compares. Zeroing either would make every
+    // restate look like a new decision and restart the focus forever.
+    ci.arg = (intent.kind == IntentionKind::Enter || intent.kind == IntentionKind::UseSkill)
+                 ? intent.arg
+                 : 0;
     ci.started_at_millis = game.world_millis;
     ci.wake_at_millis = game.world_millis + deadline;  // deadline is always > 0 now (see above)
     return true;

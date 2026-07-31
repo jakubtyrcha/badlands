@@ -7,6 +7,7 @@
 #include "intention.h"  // InboxEvent, push_inbox_event -- the MoveBlocked mirror
 #include "placement.h"
 #include "status.h"  // has_status/apply_status -- stun stops walking, disengaging costs actions
+#include "skill_focus.h"  // focusing -- a long cast holds you still, like a wind-up
 #include "strike.h"  // striking -- so does one committed to a swing
 
 #include <entt/entt.hpp>
@@ -280,6 +281,12 @@ void follow_paths(BadlandsGame& game, float dt) {
         // shoot a real cost -- a kiter's effective retreat speed is its speed
         // times the fraction of its cycle it is NOT committed.
         if (striking(game.registry, e)) {
+            continue;
+        }
+        // ...and the same for a long cast (game/src/skill_focus.h). Standing
+        // still for two seconds is what a focused shot COSTS; a caster that
+        // could walk through it would be paying nothing for the guarantee.
+        if (focusing(game.registry, e)) {
             continue;
         }
         NavPath& np = view.get<NavPath>(e);

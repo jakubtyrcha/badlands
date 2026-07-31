@@ -148,6 +148,18 @@ proc readySkillSlot(v: HeroView, wantedId: int32): int32 =
        s.trigger == BL_SKILL_TRIGGER_ACTION:
       return i.int32
 
+# readySkillSlot's twin for the OTHER channel: a skill whose trigger is
+# Intention is adopted as a focus, never fired as an action, and the engine
+# refuses each on the other's channel (skill_cast.h). Checking the trigger here
+# as well means a wake is not spent asking for a refusal.
+proc readyIntentionSkillSlot(v: HeroView, wantedId: int32): int32 =
+  result = -1
+  for i in 0 ..< v.skillCount:
+    let s = v.skills[i]
+    if s.skill_id == wantedId and s.ready != 0'u32 and
+       s.trigger == BL_SKILL_TRIGGER_INTENTION:
+      return i.int32
+
 # Longest reach among this hero's melee attacks -- the reach a melee-tested
 # skill (ShieldBash) is gated on host-side (skill_cast.h's skill_cast_range),
 # mirrored here so the brain does not spend a wake asking for a cast the
@@ -176,6 +188,10 @@ const
   # correctness.
   kDressWoundsHealthFrac: float32 = 0.5
   kCurseRange: float32 = 7.0
+  # PrecisionShot's authored "range" constant (30.0, skills.json), mirrored
+  # with the same hand-sync discipline: the engine re-checks it, so a mismatch
+  # costs a wasted wake and not correctness.
+  kPrecisionShotRange: float32 = 30.0
 
   # Hold this far outside the threat's own reach.
   kStandoffMargin: float32 = 1.5
@@ -385,6 +401,17 @@ proc brainTick(slot: int32): int32 =
         if curse >= 0:
           castSlot = curse
 
+      # Precision shot: an INTENTION, so it is decided here but suggested at
+      # the tail rather than enqueued as an action. Worth the two seconds only
+      # against something that cannot reach us while we stand still for them --
+      # outside melee reach, inside the skill's own 30 m, and not already in
+      # contact. A hero that focused with something in its face would simply be
+      # standing still to be hit.
+      var focusSlot = -1'i32
+      if not v.meleeLocked and v.hasThreat and not v.sneaking and
+         v.threatDist > meleeReach(v) and v.threatDist <= kPrecisionShotRange:
+        focusSlot = readyIntentionSkillSlot(v, BL_SKILL_PRECISION_SHOT)
+
       if castSlot >= 0:
         bl_enqueue_action(BL_ACT_USE_SKILL, castTarget, castSlot)
       # ...and the swing after it: a SECOND action this wake, not a replacement
@@ -407,6 +434,17 @@ proc brainTick(slot: int32): int32 =
         let goal = standoffGoal(v)
         Suggestion(kind: BL_INT_MOVE_TO, activityLabel: ActCombat,
                    pointX: goal.x, pointZ: goal.z)
+      elif focusSlot >= 0:
+        # A FOCUS is an intention, not an action -- it replaces what this hero
+        # is doing for two seconds rather than riding alongside it, which is
+        # exactly why it goes through the suggestion channel and why the engine
+        # refuses it on the action one (skill_cast.h's channel split).
+        #
+        # Restated unconditionally every wake, like every other suggestion this
+        # brain makes: an identical restatement RESUMES the running focus
+        # (intention.cpp) rather than restarting its clock.
+        Suggestion(kind: BL_INT_USE_SKILL, activityLabel: ActCombat,
+                   targetSlot: targetSlot, arg: focusSlot)
       else:
         Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat, targetSlot: targetSlot)
     elif hasDangerEvent(g_view_buf) and v.hasHome:

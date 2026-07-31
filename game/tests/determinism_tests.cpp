@@ -18,6 +18,7 @@
 #include "game_state.h"
 #include "intention.h"    // resolve_action
 #include "progression.h"  // award_xp
+#include "skills.h"       // Skills -- finding the focus skill's slot
 #include "vision.h"
 
 #include "fixtures/wasm_hero.h"
@@ -432,6 +433,81 @@ TEST_CASE("a run containing UseSkill is reproducible and replays exactly") {
     stage(replay_owned.get());
     replay_owned->replay_log = &recorded;
     for (int i = 0; i < kRunTicks * 3; ++i) {
+        tick_world(*replay_owned, 1.0f / 30.0f);
+    }
+    CHECK(replay_owned->replay_cursor == recorded.size());
+    require_same(snapshot(a_owned.get()), snapshot(replay_owned.get()));
+}
+
+TEST_CASE("a run containing a FOCUS is reproducible and replays exactly") {
+    // The regression this exists for: a focus that began only inside
+    // apply_intention would exist live and NEVER on replay -- a replay does not
+    // think, it applies the log -- so its shot would silently go missing and
+    // the two runs would diverge. Logging the START (CommandKind::FocusSkill)
+    // is what closes that; the RESOLUTION deliberately has no command of its
+    // own, being a timer over derived state that advance_focus re-runs
+    // identically either way.
+    //
+    // Which makes this the sharpest determinism case in the file: it is the
+    // only mutation whose cause and whose effect land on DIFFERENT ticks.
+    auto stage = [](BadlandsGame* g) {
+        const uint32_t hunter = spawn_creature_into(*g, CreatureId::Hunter, kPlayerTeam,
+                                                    {0.0f, kCastleSpawnZ}, /*level=*/5);
+        const uint32_t gob = spawn_creature_into(*g, CreatureId::Goblin, /*team=*/1,
+                                                 {14.0f, kCastleSpawnZ});
+        return std::pair<uint32_t, uint32_t>{hunter, gob};
+    };
+    // Well outside the hunter's own 8 m bow and well inside the shot's 30 m, so
+    // the cast is only legal at all because the skill's authored range wins.
+    const int kFocusTicks[] = {5, 600, 1200};
+    auto run = [&](BadlandsGame* g) {
+        const auto [hunter, gob] = stage(g);
+        // Which slot the shot landed in is grant-order business, not this
+        // test's: find it rather than assuming.
+        int32_t slot = -1;
+        const Skills& sk = g->registry.get<Skills>(entity_for_slot(*g, static_cast<int32_t>(hunter)));
+        for (int32_t i = 0; i < sk.count; ++i) {
+            if (sk.ids[i] == SkillId::PrecisionShot) {
+                slot = i;
+            }
+        }
+        REQUIRE(slot >= 0);
+        for (int i = 0; i < kRunTicks * 4; ++i) {
+            for (int at : kFocusTicks) {
+                if (i == at) {
+                    Intention focus;
+                    focus.kind = IntentionKind::UseSkill;
+                    focus.target_slot = gob;
+                    focus.arg = slot;
+                    apply_intention(*g, hunter, focus);
+                    apply_commands(*g);
+                }
+            }
+            tick_world(*g, 1.0f / 30.0f);
+        }
+    };
+
+    auto a_owned = make_world(BrainDesc{});
+    auto b_owned = make_world(BrainDesc{});
+    run(a_owned.get());
+    run(b_owned.get());
+    require_same(snapshot(a_owned.get()), snapshot(b_owned.get()));
+
+    const std::vector<Command>& log = a_owned->command_log;
+    int focuses = 0;
+    for (const Command& c : log) {
+        if (c.kind == CommandKind::FocusSkill) {
+            ++focuses;
+            CHECK(c.target_id != UINT32_MAX);
+        }
+    }
+    CHECK(focuses >= 1);  // the trace really does carry the commitment
+
+    const std::vector<Command> recorded = log;
+    auto replay_owned = make_world(BrainDesc{});
+    stage(replay_owned.get());
+    replay_owned->replay_log = &recorded;
+    for (int i = 0; i < kRunTicks * 4; ++i) {
         tick_world(*replay_owned, 1.0f / 30.0f);
     }
     CHECK(replay_owned->replay_cursor == recorded.size());

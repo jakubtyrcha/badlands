@@ -109,8 +109,17 @@ void copy_name(char (&dst)[BL_SKILL_NAME_LEN], const std::string& src) {
 
 float skill_cast_range(const entt::registry& reg, entt::entity caster,
                        const SkillSpec& spec) {
+    // An authored "range" wins outright, test or no test. A skill that borrows
+    // a weapon's test does not necessarily borrow its reach: a precision shot
+    // is thrown with the same bow and lands a great deal further away, and
+    // there is no way to say so if the weapon always decides. The weapon
+    // remains the DEFAULT -- a bash that authors nothing still cannot outreach
+    // the sword it borrows -- which was the property this rule existed for.
+    if (const float authored = spec.constant("range", 0.0f); authored > 0.0f) {
+        return authored;
+    }
     if (spec.attack_test == SkillAttackTest::None) {
-        return spec.constant("range", 0.0f);
+        return 0.0f;  // unbounded; see the header
     }
     const auto* atk = (caster != entt::null && reg.valid(caster))
                           ? reg.try_get<Attacks>(caster)
@@ -123,7 +132,7 @@ float skill_cast_range(const entt::registry& reg, entt::entity caster,
 }
 
 bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
-                   uint32_t named_target_slot, CastPlan& out) {
+                   uint32_t named_target_slot, CastPlan& out, SkillTrigger channel) {
     const entt::registry& reg = game.registry;
     const entt::entity caster = entity_for_slot(game, static_cast<int32_t>(caster_slot));
     const auto* skills = (caster != entt::null) ? reg.try_get<Skills>(caster) : nullptr;
@@ -149,13 +158,15 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
 
     const SkillId id = skills->ids[skill_index];
     const SkillSpec& spec = game.skills.specs[static_cast<size_t>(id)];
-    if (spec.trigger != SkillTrigger::Action) {
-        // Declared vocabulary the engine does not execute yet. Refused, never
-        // approximated as an action -- a passive that silently fired on demand
-        // would be a different skill than the one authored.
-        spdlog::warn("[skill] slot {}: {} is not an action skill (trigger {}), cast dropped",
+    if (spec.trigger == SkillTrigger::Passive || spec.trigger != channel) {
+        // The channel split, both ways. An Intention skill fired through the
+        // action gateway would cost nothing to cast; an Action skill adopted as
+        // a focus would idle for a duration it never declared. Passive is still
+        // declared vocabulary with no execution at all, so it is refused on
+        // every channel -- never approximated as its nearest neighbour.
+        spdlog::warn("[skill] slot {}: {} has trigger {} but arrived on channel {}, cast dropped",
                      caster_slot, SkillName(static_cast<int32_t>(id)),
-                     static_cast<int32_t>(spec.trigger));
+                     static_cast<int32_t>(spec.trigger), static_cast<int32_t>(channel));
         return false;
     }
     if (!spec.castable_in_melee && reg.all_of<MeleeLock>(caster)) {
@@ -306,6 +317,20 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
             req.target_slot = target_slots[i];
             req.world_millis = game.world_millis;
             req.attack_index = kSkillSeedBase + ctx.skill_id;
+            if (spec.guaranteed_test) {
+                // A guaranteed shot is expressed by DIALLING THE GATES, not by
+                // bypassing resolve_attack: armour still applies, the damage
+                // type still matters, and the whole thing stays one seeded,
+                // replayable pipeline. Accuracy 1 against defense 0 cannot
+                // miss, evasion 0 cannot dodge, crit_chance 1 always crits.
+                req.attacker.accuracy = 1.0f;
+                req.attacker.crit_multiplier =
+                    std::max(req.attacker.crit_multiplier,
+                             spec.constant("crit_multiplier", kBaseCritMultiplier));
+                req.defender.defense = 0.0f;
+                req.defender.evasion = 0.0f;
+                req.attack.crit_chance = 1.0f;
+            }
             const CombatResult res = resolve_attack(req);
             row.attack_test = res.blocked  ? BL_TEST_BLOCKED
                               : res.dodged ? BL_TEST_DODGED

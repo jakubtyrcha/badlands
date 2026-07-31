@@ -24,6 +24,10 @@ constexpr std::array<SkillDef, static_cast<size_t>(kSkillCount)> kSkills{{
     // APPROACH, so the moment it is worth doing is before contact, not in it.
     {SkillId::Sneak, "Sneak", SkillTriggerKind::MeleeThreatClose,
      /*trigger_param=*/20.0f},
+    // Recommended at its own long reach: the shot exists to be taken from
+    // further away than anything can answer.
+    {SkillId::PrecisionShot, "PrecisionShot", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/30.0f},
 }};
 
 constexpr bool skills_dense() {
@@ -163,6 +167,27 @@ SkillCatalog::SkillCatalog() {
     sneak.intention_duration_seconds = 0.0f;
     sneak.effect = "Slips out of sight; the next blow comes from nowhere.";
     set_constant(sneak, "duration_seconds", 20.0f);
+
+    // The FOCUS, and the only skill that executes SkillTrigger::Intention: two
+    // seconds of standing still, then a shot that cannot be blocked or dodged
+    // and always crits. Its "range" outreaches every bow in the game, which is
+    // why skill_cast_range lets an authored range beat the weapon it borrows
+    // the test from.
+    //
+    // The wind-up IS the cost. Nothing is captured when the focus begins, so a
+    // target that dies, walks away, or goes unseen in those two seconds simply
+    // gets no shot at all (game/src/skill_focus.h).
+    SkillSpec& shot = specs[static_cast<size_t>(SkillId::PrecisionShot)];
+    shot.trigger = SkillTrigger::Intention;
+    shot.target = SkillTargetMode::Any;
+    shot.target_limit = 1;
+    shot.attack_test = SkillAttackTest::Ranged;
+    shot.guaranteed_test = true;
+    shot.cooldown_seconds = 15.0f;
+    shot.intention_duration_seconds = 2.0f;
+    shot.effect = "Draws a long breath, and does not miss.";
+    set_constant(shot, "range", 30.0f);
+    set_constant(shot, "crit_multiplier", 3.0f);
 }
 
 SkillId SkillIdFromName(const char* name) {
@@ -314,6 +339,21 @@ void sneak_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
     }
 }
 
+// PrecisionShot: the engine already rolled a test that could not fail, so the
+// whole effect is "deal what that produced". No conditional, no bonus of its
+// own -- everything that makes the shot special (it lands, it crits, it
+// reaches) is engine-checked DATA on the spec, which is what keeps a
+// guaranteed hit from being something an effect can grant itself.
+void precision_shot_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        const BlSkillTarget& t = ctx.targets[i];
+        if (t.attack_test != BL_TEST_HIT || t.test_damage <= 0.0f) {
+            continue;  // armour ate it, or the host declined the test entirely
+        }
+        push_effect_op(out, BlSkillEffectOp{BL_FX_DAMAGE, t.slot, 0, t.test_damage});
+    }
+}
+
 constexpr std::array<SkillEffectFn, static_cast<size_t>(kSkillCount)> kEffects{{
     calcify_effect,
     shield_bash_effect,
@@ -321,6 +361,7 @@ constexpr std::array<SkillEffectFn, static_cast<size_t>(kSkillCount)> kEffects{{
     dress_wounds_effect,
     backstab_effect,
     sneak_effect,
+    precision_shot_effect,
 }};
 
 }  // namespace

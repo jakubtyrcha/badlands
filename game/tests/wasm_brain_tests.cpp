@@ -672,14 +672,22 @@ TEST_CASE("decode_suggestion: each BL_INT_* kind maps onto the matching Intentio
     }
 }
 
-TEST_CASE("decode_suggestion: BL_INT_USE_SKILL is reserved -- decodes to IntentionKind::None, "
-         "not rejected",
+TEST_CASE("decode_suggestion: BL_INT_USE_SKILL decodes like any other kind",
           "[wasm_brain]") {
+    // Was reserved (warn + None) until the Intention trigger had an execution
+    // to point at. Now it is ordinary: decode carries it straight across, and
+    // WHETHER a given skill may be adopted as a focus is apply_intention's
+    // business -- a skill whose trigger is not Intention is refused there, on
+    // the channel split, not here on the wire.
     BlSuggestionWire wire{};
     wire.intention_kind = BL_INT_USE_SKILL;
+    wire.target_slot = 7;
+    wire.arg = 2;
     const std::optional<Intention> intent = decode_suggestion(wire, 0);
-    REQUIRE(intent.has_value());  // well-formed -- not the malformed/FATAL path
-    CHECK(intent->kind == IntentionKind::None);
+    REQUIRE(intent.has_value());
+    CHECK(intent->kind == IntentionKind::UseSkill);
+    CHECK(intent->target_slot == 7);
+    CHECK(intent->arg == 2);
 }
 
 TEST_CASE("decode_suggestion: malformed wires are rejected", "[wasm_brain]") {

@@ -21,6 +21,7 @@
 #include "progression.h"
 #include "skills.h"
 #include "status.h"
+#include "skill_focus.h"  // advance_focus -- long casts resolve beside the strikes
 #include "strike.h"  // advance_strikes, striking -- a committed attacker does not think
 #include "vision.h"
 
@@ -357,6 +358,12 @@ void tick_world(BadlandsGame& g, float dt) {
             // mid-wind-up would get the positioning benefit of a slow weapon
             // without its cost, and consulting it only to refuse every action
             // it asked for would waste a wasm round-trip per tick besides.
+            //
+            // A FOCUS is deliberately NOT skipped here (game/src/skill_focus.h).
+            // A long cast freezes movement but not thought, and that asymmetry
+            // is the whole of "moving abandons the focus": deciding to do
+            // something else is the only way out, and it costs the seconds
+            // already spent.
             if (striking(registry, e)) {
                 continue;
             }
@@ -400,6 +407,12 @@ void tick_world(BadlandsGame& g, float dt) {
     // existed. BEFORE the movement pipeline below, so a striker that just
     // became free walks this tick rather than next.
     advance_strikes(g);
+
+    // Long casts (game/src/skill_focus.h), beside the strikes and for the same
+    // reason: a commitment made earlier resolves after this tick's command
+    // drain, before the movement pipeline, so a caster that just became free
+    // walks this tick rather than next.
+    advance_focus(g);
 
     // Rebuild the navmesh if a building was placed/destroyed this tick (bumps
     // placement.nav_epoch). Cheap no-op when unchanged; the whole path/cost layer

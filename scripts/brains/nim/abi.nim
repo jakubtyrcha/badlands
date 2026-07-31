@@ -105,6 +105,7 @@ const
   BL_SKILL_DRESS_WOUNDS* = 3'i32
   BL_SKILL_BACKSTAB* = 4'i32
   BL_SKILL_SNEAK* = 5'i32
+  BL_SKILL_PRECISION_SHOT* = 6'i32
 
 type
   BlViewSelf* {.packed.} = object

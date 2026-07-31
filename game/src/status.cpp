@@ -2,6 +2,7 @@
 
 #include "game_state.h"  // BadlandsGame, emit_event, slot_for_entity
 #include "intention.h"   // abort_current_intention -- a stun ends the running plan
+#include "skill_focus.h"  // cancel_focus -- a stun interrupts a long cast too
 #include "strike.h"      // cancel_strike -- and drops a swing still being wound up
 
 #include <spdlog/spdlog.h>
@@ -99,6 +100,10 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
         // an opponent mid-swing costs it the whole attack. A strike already
         // past its resolve is untouched -- that blow was thrown.
         cancel_strike(game, e);
+        // ...and a long cast still being focused (game/src/skill_focus.h). Same
+        // rule on the other channel: a stun is an INTERRUPT, and two seconds of
+        // standing still is exactly the window it exists to punish.
+        cancel_focus(game, e);
     }
 
     const glm::vec2 pos =

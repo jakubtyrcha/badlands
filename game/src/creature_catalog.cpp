@@ -98,8 +98,11 @@ CreatureCatalog::CreatureCatalog() {
         // Armour 1, evasion 1, hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.004f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
+        // Two at level 2: with Skin Game deferred (no corpses exist to skin)
+        // the hunter would otherwise be a one-skill class.
         d.skill_grants[0] = {static_cast<int32_t>(SkillId::DressWounds), 2};
-        d.skill_grant_count = 1;
+        d.skill_grants[1] = {static_cast<int32_t>(SkillId::PrecisionShot), 2};
+        d.skill_grant_count = 2;
     }
     // Grave Robber: mixed -- a hand crossbow OPENER (one heavy, high-crit bolt
     // on a long reload) then blades. The reload is the whole identity: at a
@@ -126,7 +129,8 @@ CreatureCatalog::CreatureCatalog() {
         // payoff are one tool, and either alone is half a class.
         d.skill_grants[0] = {static_cast<int32_t>(SkillId::Sneak), 3};
         d.skill_grants[1] = {static_cast<int32_t>(SkillId::Backstab), 3};
-        d.skill_grant_count = 2;
+        d.skill_grants[2] = {static_cast<int32_t>(SkillId::PrecisionShot), 5};
+        d.skill_grant_count = 3;
     }
     // Apprentice: fragile ranged caster (a magic bolt; Soul comes later).
     {

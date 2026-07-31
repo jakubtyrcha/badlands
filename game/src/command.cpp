@@ -7,6 +7,7 @@
 #include "intention.h"  // abort_intention -- the Chat handler's never-started decline
 #include "placement.h"
 #include "skill_cast.h"  // validate_cast / run_cast -- the UseSkill handler's body
+#include "skill_focus.h"  // begin_focus -- the FocusSkill handler
 
 #include <entt/entt.hpp>
 
@@ -150,6 +151,20 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                 return 0;
             }
             run_cast(game, cmd.actor, cmd.param_a, plan);
+            return 0;
+        }
+        case CommandKind::FocusSkill: {
+            // The other channel's authoritative gate, and the same discipline:
+            // apply_intention already checked this cast at adoption, but this
+            // is what a REPLAY runs (a replay never thinks), so nothing is
+            // taken on trust from the producer.
+            CastPlan plan;
+            if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan,
+                               SkillTrigger::Intention)) {
+                return 0;
+            }
+            begin_focus(game, entity_for_slot(game, static_cast<int32_t>(cmd.actor)),
+                        cmd.param_a, cmd.target_id);
             return 0;
         }
         case CommandKind::CollectTax: {

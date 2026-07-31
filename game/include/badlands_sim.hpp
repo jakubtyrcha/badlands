@@ -241,6 +241,7 @@ enum class SkillId : int32_t {
     DressWounds,   // Hunter: field-dresses its own wounds
     Backstab,      // Grave Robber: heavy bonus damage on someone not facing it
     Sneak,         // Grave Robber: goes unseen until it strikes
+    PrecisionShot, // Hunter / Grave Robber: a focused shot that cannot miss
     Count,
 };
 inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
@@ -314,6 +315,13 @@ struct SkillSpec {
     // target -- and situation is data the engine checks, never effect logic:
     // an effect cannot refuse a cast, it can only decline to emit ops.
     bool castable_in_melee = true;
+    // Does the declared attack test SKIP its gates? When set, the engine's
+    // per-target pre-roll cannot block or dodge and always crits, at the
+    // skill's own "crit_multiplier" constant. Engine-checked data, not effect
+    // logic: an effect is HANDED an outcome, it never decides one -- which is
+    // exactly why "guaranteed" has to live on this side of the contract.
+    // Meaningless (and ignored) when attack_test is None.
+    bool guaranteed_test = false;
     std::string effect;                        // brief descriptive string
     SkillConstant constants[kMaxSkillConstants];
     int32_t constant_count = 0;
@@ -931,6 +939,7 @@ enum class CommandKindId : int32_t {
     Chat,
     Engage,  // hold at range of a live entity target (single-gateway combat's engagement executor)
     UseSkill,  // cast skill param_a (an index into the actor's OWN Skills) at target_id
+    FocusSkill,  // begin a long cast of skill param_a at target_id (skill_focus.h)
 };
 
 struct CommandRecord {
@@ -968,6 +977,11 @@ enum class GameEventKind : int32_t {
     StrikeCancelled,     // a committed attack was interrupted during its wind-up and
                          // never landed; actor = the attacker whose swing was dropped,
                          // target = who it was aimed at, amount = the attack index
+    FocusCancelled,      // a long cast was abandoned before it resolved -- stunned,
+                         // re-decided, or no longer legal at its deadline; actor =
+                         // the caster, target = what it was aimed at, amount = the
+                         // SkillId. The strike's counterpart on the other channel
+                         // (game/src/skill_focus.h).
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and

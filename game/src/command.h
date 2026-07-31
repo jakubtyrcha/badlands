@@ -38,6 +38,17 @@ enum class CommandKind : int32_t {
                  // SkillId -- the same convention Attack's param_a uses for attacks)
                  // at target_id; the handler re-validates everything and runs the
                  // effect through game/src/skill_cast.h
+    FocusSkill,  // BEGIN a long cast of skill param_a at target_id: the same index
+                 // convention, on the other channel (game/src/skill_focus.h).
+                 //
+                 // A Command rather than a direct begin_focus call inside
+                 // apply_intention, and that is load-bearing: a REPLAY never
+                 // thinks (apply_replay_commands runs INSTEAD of the think pass),
+                 // so a focus created only at adoption would exist live and never
+                 // on replay, and its shot would silently go missing. Logging the
+                 // start is what makes the whole two seconds reproducible -- the
+                 // RESOLUTION needs no command of its own, being a timer over
+                 // derived state that advance_focus re-runs identically either way.
 };
 
 // The log is exposed verbatim through Sim::CommandLog(), so the two enums are

@@ -306,6 +306,23 @@ struct StrikeInProgress {
     Attack attack{};
 };
 
+// A skill that takes TIME to cast: the caster is committed from here until the
+// deadline, at which point the cast runs. Deliberately shaped like
+// StrikeInProgress above -- one commitment at a time, the phase derived from
+// the clock rather than stored -- because it is the same idea applied to the
+// other channel (game/src/skill_focus.h).
+//
+// NOTHING is captured here, unlike a strike. A focus re-runs validate_cast at
+// its deadline, so a target that died, walked out of range, or is no longer
+// legal simply gets no shot -- which is what makes the 2 seconds a real risk
+// rather than a delayed certainty.
+struct SkillFocus {
+    int64_t resolve_at_millis = 0;
+    SkillId id = SkillId::Count;
+    int32_t skill_index = -1;   // index into the caster's OWN Skills
+    uint32_t target_slot = UINT32_MAX;
+};
+
 // WHICH catalog creature this entity is. The threat table (threat_table.h) is
 // keyed by creature, and before this nothing on a spawned entity recorded what
 // it had been spawned AS -- spawn_creature_into took a CreatureId and kept it
@@ -449,7 +466,16 @@ struct EventInbox {
 
 // Native mirror of BL_INT_* -- the suggestion's kind. UseSkill is reserved for
 // the skills slice (see intention-contract.html's vocab table).
-enum class IntentionKind : int32_t { None = 0, MoveTo, Attack, Shoot, Enter, EnterHome, Buy, Chat, Idle };
+// Values are 1:1 with the wire's BL_INT_* (game/src/brain_abi.h) --
+// decode_suggestion casts straight across -- so this is append-only and
+// UseSkill must stay at 9.
+enum class IntentionKind : int32_t {
+    None = 0, MoveTo, Attack, Shoot, Enter, EnterHome, Buy, Chat, Idle,
+    UseSkill,  // a FOCUS: cast skill `arg` at `target_slot` after the skill's
+               // own intention_duration of uninterrupted execution
+               // (game/src/skill_focus.h). Only a skill whose trigger is
+               // Intention may be adopted this way.
+};
 
 // What the engine is currently executing for a hero -- durable across ticks,
 // outlives a single wake. Read by should_wake, written by apply_intention

@@ -376,8 +376,10 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 //    out-of-range activity_label clamps to -1 (inspection-only field, no
 //    downstream index risk once clamped).
 //
-// BL_INT_USE_SKILL is a THIRD case: known and in-range, but reserved --
-// same warn+None outcome as an unknown kind, with its own message.
+// BL_INT_USE_SKILL is no longer a third case: it is an ordinary kind now, and
+// decodes straight across like every other one (game/src/skill_focus.h). What
+// it means -- a FOCUS -- is apply_intention's business, and a skill whose
+// trigger is not Intention is refused there, not here.
 std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t slot) {
     if (!std::isfinite(out.point_x) || !std::isfinite(out.point_z)) {
         return std::nullopt;
@@ -398,10 +400,7 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
     intent.duration_millis = out.duration_millis;
     intent.idle_hint_millis = out.idle_hint_millis;
 
-    if (out.intention_kind == BL_INT_USE_SKILL) {
-        spdlog::warn("[wasm-brain] slot {}: BL_INT_USE_SKILL is reserved, ignored", slot);
-        intent.kind = IntentionKind::None;
-    } else if (out.intention_kind < BL_INT_NONE || out.intention_kind > BL_INT_USE_SKILL) {
+    if (out.intention_kind < BL_INT_NONE || out.intention_kind > BL_INT_USE_SKILL) {
         spdlog::warn("[wasm-brain] slot {}: unrecognized intention_kind {}, ignored (forward-compat)",
                     slot, out.intention_kind);
         intent.kind = IntentionKind::None;
@@ -496,9 +495,9 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
         brain_fatal("tick", slot, std::string("bh_tick failed: ") + bh_last_error());
     }
 
-    // decode_suggestion is pure aside from the one BL_INT_USE_SKILL warning
-    // (see its doc comment); a std::nullopt here is a brain bug under the
-    // fail-fast policy, so this is the escalation point.
+    // decode_suggestion is pure aside from its forward-compat warnings (see its
+    // doc comment); a std::nullopt here is a brain bug under the fail-fast
+    // policy, so this is the escalation point.
     const std::optional<Intention> intent = decode_suggestion(out, slot);
     if (!intent.has_value()) {
         brain_fatal("decode", slot,

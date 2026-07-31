@@ -33,10 +33,15 @@ namespace badlands {
 // borrowed would share the sword's roll. Well clear of kMaxAttacks.
 inline constexpr int32_t kSkillSeedBase = 100;
 
-// The cast range: the reach of whichever attack the skill's SkillAttackTest
-// names (Melee -> melee reach, Ranged -> ranged reach), or -- for a skill that
-// declares no test -- its optional "range" constant. One source of truth: a
-// bash reaches exactly as far as the sword whose test it borrows.
+// The cast range, in priority order: an authored "range" constant if there is
+// one, otherwise the reach of whichever attack the skill's SkillAttackTest
+// names (Melee -> melee reach, Ranged -> ranged reach), otherwise unbounded.
+//
+// The weapon is the DEFAULT, not the law. A bash that authors no range still
+// reaches exactly as far as the sword whose test it borrows -- the property
+// this rule exists for -- but a skill that says otherwise is believed: a
+// precision shot leaves the same bow and lands a great deal further away, and
+// nothing could express that if the weapon always decided.
 //
 // A NON-POSITIVE result means UNBOUNDED (validate_cast skips the reach check
 // entirely), not "zero reach". That is what a SelfOnly ward wants, and equally
@@ -62,14 +67,20 @@ struct CastPlan {
 //   2. `skill_index` is a live index into ITS loadout (not a SkillId -- the
 //      same convention BL_ACT_ATTACK's attack index uses).
 //   3. That skill is off cooldown.
-//   4. Its trigger is one the engine executes (Action today; Passive and
-//      Intention are declared vocabulary and refused here, never approximated).
+//   4. Its trigger MATCHES THE CHANNEL the cast arrived on. `channel` is
+//      Action for the action gateway (BL_ACT_USE_SKILL) and Intention for a
+//      focus (BL_INT_USE_SKILL, game/src/skill_focus.h); a mismatch is refused
+//      both ways, so neither channel can be used to skip the other's rules --
+//      an Intention skill fired as an action would cost nothing to cast, and
+//      an Action skill adopted as a focus would idle for a duration it never
+//      declared. Passive remains declared vocabulary and is refused outright.
 //   5. Its targeting mode resolves against `named_target_slot`: None targets
 //      nobody, SelfOnly targets the caster and REFUSES a named other, Any
 //      takes the named entity. Multi/Point are declared and refused.
 //   6. Every resolved target is within skill_cast_range.
 bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
-                   uint32_t named_target_slot, CastPlan& out);
+                   uint32_t named_target_slot, CastPlan& out,
+                   SkillTrigger channel = SkillTrigger::Action);
 
 // Builds the flat context an effect receives: the caster's view, one view per
 // resolved target (defensive stats via effective_combatant, so a stunned

@@ -23,7 +23,8 @@
       "damage_frac": 0.08
     },
     "skills": [
-      { "name": "DressWounds", "level": 2 }
+      { "name": "DressWounds", "level": 2 },
+      { "name": "PrecisionShot", "level": 2 }
     ]
   },
   "GraveRobber": {
@@ -37,7 +38,8 @@
     },
     "skills": [
       { "name": "Sneak", "level": 3 },
-      { "name": "Backstab", "level": 3 }
+      { "name": "Backstab", "level": 3 },
+      { "name": "PrecisionShot", "level": 5 }
     ]
   },
   "Apprentice": {

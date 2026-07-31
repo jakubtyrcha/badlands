@@ -171,6 +171,7 @@ bool LoadSkillCatalog(const std::string& path, SkillCatalog& out) {
             ReadNum(o, name, "cooldown", s.cooldown_seconds) &&
             ReadNum(o, name, "intention_duration", s.intention_duration_seconds) &&
             ReadBool(o, name, "castable_in_melee", s.castable_in_melee) &&
+            ReadBool(o, name, "guaranteed_test", s.guaranteed_test) &&
             ReadString(o, name, "effect", s.effect) &&
             ReadConstants(o, name, s);
         if (!ok) {

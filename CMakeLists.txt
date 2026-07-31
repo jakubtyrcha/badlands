@@ -264,6 +264,7 @@ add_library(badlands_game_lib STATIC
     # from skills.cpp, which stays world-free so it can link standalone into
     # the manifest test target below.
     game/src/skill_cast.cpp
+    game/src/skill_focus.cpp
     game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
@@ -614,6 +615,9 @@ add_executable(badlands_game_tests
     # Imperceptibility and the armour ward: the two statuses whose rules live
     # where the decisions already happen (perception, effective_combatant).
     game/tests/sneak_tests.cpp
+    # A skill that takes TIME: SkillTrigger::Intention, executed
+    # (game/src/skill_focus.h).
+    game/tests/skill_focus_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
     game/tests/growth_tests.cpp
