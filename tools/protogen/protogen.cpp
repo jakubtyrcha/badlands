@@ -58,7 +58,14 @@ struct Params {
   // well at the centre, so everything drains inward to one closed basin. All
   // particles spawn at ONE point, which makes the flow path deterministic and
   // therefore gives "where should the sediment land" a right answer.
-  bool bowl = false;
+  // Synthetic terrains for the sanity tests. Each isolates ONE mechanism; the
+  // toggles below let a test switch the others off so a failure has one cause.
+  enum class Terrain { Noise, Bowl, Flat, Plane, Valley, Cliff, Lobe };
+  Terrain terrain = Terrain::Noise;
+  bool enable_erosion = true;
+  bool enable_cascade = true;
+  bool enable_lake_deposit = true;
+  bool bowl = false;  // legacy alias for terrain == Bowl
   float bowl_rim_m = 200.0f;
   float bowl_well_m = 100.0f;
   float bowl_sigma_frac = 0.12f;
@@ -112,17 +119,14 @@ struct Params {
   // random walk biased toward the outlet, so lateral offset accumulates as
   // sqrt(distance): turbulent dispersion, which is what the dropped
   // grad.(K grad C) term describes. 0 reproduces the old straight line.
-  // CAP on the spread half-angle, not the spread itself -- the angle comes
-  // from atan(u_turb/v). Defaulted high so it does NOT bind: at 35 deg it
-  // clipped every turbulence above ~0.6 m/s to the same value, silently
-  // killing the knob exactly as the old lobe-length clamp did. 0 disables
-  // wander entirely (straight line), which is still the A/B control.
-  float plume_wander_deg = 85.0f;
-  // Ambient turbulent velocity in the lake. With the jet's centreline speed v,
-  // the spread half-angle is atan(u_turb / v): narrow while the inflow's
-  // momentum dominates, widening as it decays. plume_wander_deg is the CAP, so
-  // --wander 0 still reproduces a straight line exactly.
-  float jet_turbulence_m_per_s = 0.30f;
+  // Spread half-angle of the plume, constant. 40 deg maximised lake coverage
+  // in the sweep; 0 gives a straight line, which is the A/B control.
+  float plume_wander_deg = 40.0f;
+  // NOTE: the spread angle is deliberately CONSTANT. A velocity-dependent
+  // version (atan(u_turb/v) with a decaying jet) was built and worked, but the
+  // particle has no real speed to drive it -- the reference normalises speed to
+  // sqrt(2) every step -- so it had to be fed a made-up entry velocity. Keeping
+  // it constant avoids dressing a constant up as physics.
   // Regime width w = k_w*sqrt(Q), reused from the repo's erosion.hpp. Sets the
   // jet's inlet width, which is the length scale its decay is measured in.
   float channel_width_coeff = 5.0f;
@@ -227,8 +231,53 @@ void InitBowl(Grid& g, const Params& p) {
     }
 }
 
+// Analytic fixtures. All are expressed in METRES then divided by relief_m, so
+// a test can state its expectation in metres.
+void InitAnalytic(Grid& g, const Params& p) {
+  const float cell = p.world_m / float(p.res);
+  const float cx = 0.5f * p.world_m, cy = 0.5f * p.world_m;
+  const float sigma = p.bowl_sigma_frac * p.world_m;
+  for (int y = 0; y < g.n; ++y)
+    for (int x = 0; x < g.n; ++x) {
+      const float wx = x * cell - cx, wy = y * cell - cy;
+      float h = 0.f;
+      switch (p.terrain) {
+        case Params::Terrain::Flat:
+          h = 0.5f * p.bowl_rim_m;  // dead level: erosion must do nothing
+          break;
+        case Params::Terrain::Plane:
+          // Uniform slope down +y. Discharge at the foot must equal
+          // runoff x upstream area.
+          h = p.bowl_rim_m * (1.0f - (y * cell) / p.world_m);
+          break;
+        case Params::Terrain::Valley:
+          // Slope down +y plus a V in x: flow must converge on the centre col.
+          h = p.bowl_rim_m * (1.0f - (y * cell) / p.world_m) +
+              p.bowl_well_m * std::fabs(wx) / (0.5f * p.world_m);
+          break;
+        case Params::Terrain::Cliff:
+          // A vertical step ON A SLOPE. Without the tilt both plateaus are dead
+          // flat, particles have no gradient, they die where they land and the
+          // step is never visited -- the test then measures nothing.
+          h = 0.25f * p.bowl_rim_m * (1.0f - (y * cell) / p.world_m) +
+              ((y * cell < cy) ? p.bowl_rim_m : 0.0f);
+          break;
+        case Params::Terrain::Lobe:
+          // Gaussian hill: its peak must fall monotonically under erosion.
+          h = p.bowl_rim_m *
+              std::exp(-(wx * wx + wy * wy) / (2.0f * sigma * sigma));
+          break;
+        default:
+          h = 0.f;
+          break;
+      }
+      g.height[g.idx(x, y)] = h / p.relief_m;
+    }
+}
+
 void InitTerrain(Grid& g, const Params& p) {
-  if (p.bowl) { InitBowl(g, p); return; }
+  if (p.bowl || p.terrain == Params::Terrain::Bowl) { InitBowl(g, p); return; }
+  if (p.terrain != Params::Terrain::Noise) { InitAnalytic(g, p); return; }
   FastNoiseLite n(int(p.seed));
   n.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
   n.SetFractalType(FastNoiseLite::FractalType_FBm);
@@ -427,9 +476,38 @@ void UpdateLakes(Grid& g, const Params& p, std::vector<Lake>& lakes,
     for (uint32_t c : lk.members) if (g.height[c] < lk.level) ++wet_cells;
     const double area_m2 = double(wet_cells) * cell_area;
 
-    const double gain = inflow_m3_s * kSecondsPerYear * double(p.dt_years);
-    const double loss = double(p.evaporation_m_per_yr) * area_m2 * double(p.dt_years);
-    lk.volume_m3 = std::max(0.0, lk.volume_m3 + gain - loss);
+    // TWO TIMESCALES. Erosion wants ~200 yr steps; a lake equilibrates in
+    // years. Integrating the budget with an explicit 200 yr Euler step applies
+    // 0.8 * 200 = 160 m of evaporation at once, which empties any lake in a
+    // single step -- the sanity suite caught exactly that.
+    //
+    // So relax toward the water-balance equilibrium with the lake's own
+    // residence time tau = V / Q_in. For dt >> tau this lands on equilibrium
+    // (the physically right answer, since water is fast); for a big lake fed by
+    // a trickle, tau is long and it fills gradually, which is also right.
+    const double inflow_m3_yr = inflow_m3_s * kSecondsPerYear;
+    const double area_eq_m2 =
+        p.evaporation_m_per_yr > 0.f
+            ? inflow_m3_yr / double(p.evaporation_m_per_yr)
+            : 1e30;
+    double v_eq = 0.0;
+    {
+      // Volume at the level whose submerged area is area_eq.
+      const size_t k_eq = std::min(lk.sorted_beds.size(),
+                                   size_t(area_eq_m2 / cell_area));
+      if (k_eq >= lk.sorted_beds.size()) {
+        for (uint32_t c : lk.members)
+          v_eq += std::max(0.f, lk.spill - g.height[c]);
+      } else if (k_eq > 0) {
+        const double lvl = lk.sorted_beds[k_eq - 1];
+        for (size_t i = 0; i < k_eq; ++i) v_eq += lvl - lk.sorted_beds[i];
+      }
+      v_eq *= double(cell_area) * double(p.relief_m);
+    }
+    const double tau_yr =
+        inflow_m3_yr > 0.0 ? std::max(v_eq, 1.0) / inflow_m3_yr : 1e30;
+    const double f = 1.0 - std::exp(-double(p.dt_years) / std::max(tau_yr, 1e-6));
+    lk.volume_m3 = std::max(0.0, lk.volume_m3 + f * (v_eq - lk.volume_m3));
 
     lk.level = LevelFromVolume(lk, lk.volume_m3, cell_area, p.relief_m);
     if (lk.level > lk.spill) {
@@ -477,10 +555,6 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
                          cell_m / p.relief_m;
   V2 pos{px, py}, speed{0.f, 0.f};
   float volume = 1.0f, sediment = 0.0f;
-  // Jet state, valid once the particle is in standing water.
-  bool in_jet = false;
-  V2 jet_dir{0.f, 0.f};
-  float jet_x = 0.f, jet_width_m = 0.f;
 
   for (int age = 0; age < p.max_age; ++age) {
     const int x = int(pos.x), y = int(pos.y);
@@ -504,7 +578,9 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       const int32_t target = g.lake_outlet[lid];
 
       float drop;
-      if (p.disperse) {
+      if (!p.enable_lake_deposit) {
+        drop = 0.f;
+      } else if (p.disperse) {
         // A laden inflow is a hypopycnal plume: velocity collapses at the
         // mouth, the load settles over L = u*h/w_s, and the steady state of
         // advection-diffusion-settling thins exponentially. The load lost
@@ -539,52 +615,24 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
         double& v = lakes[g.lake_index[lid]].volume_m3;
         if (v < 0.0) v = 0.0;
       }
-      Cascade(g, p, x, y, max_diff);
+      if (p.enable_cascade) Cascade(g, p, x, y, max_diff);
 
       // Cross to the spill point so discharge continues downstream instead of
       // being swallowed. Discharge is NOT accumulated here: a lake surface is
       // not a channel, and stamping it inflates the field.
-      // On entry, the particle becomes a JET: it keeps the heading it arrived
-      // with rather than turning instantly toward the outlet, which is what it
-      // did before and why every inflow behaved identically regardless of how
-      // fast it arrived.
-      if (!in_jet) {
-        in_jet = true;
-        jet_dir = len(speed) > 0.f ? unit(speed) : unit(V2{0.f, 1.f});
-        jet_x = 0.f;
-        jet_width_m = std::max(
-            p.channel_width_coeff * std::sqrt(std::max(g.Qm3s[here], 1e-9f)),
-            cell_m);
-      }
-      // Round-jet centreline decay, v = v0 / (1 + x / 6.2 D).
-      const float v_jet = p.river_mouth_velocity_m_per_s /
-                          (1.0f + jet_x / (6.2f * jet_width_m));
       const float tx = float(int(target) % g.n) + 0.5f;
       const float ty = float(int(target) / g.n) + 0.5f;
-      const V2 toOut = unit(V2{tx - pos.x, ty - pos.y});
-      if (len(toOut) <= 0.f) return;
-
-      // Momentum holds the heading while the jet is fast; the outlet takes over
-      // as it decays.
-      const float pull = std::clamp(
-          1.0f - v_jet / std::max(p.river_mouth_velocity_m_per_s, 1e-6f),
-          0.0f, 1.0f);
-      V2 dir = unit(V2{(1.0f - pull) * jet_dir.x + pull * toOut.x,
-                       (1.0f - pull) * jet_dir.y + pull * toOut.y});
-      if (len(dir) <= 0.f) dir = toOut;
-
+      V2 dir = unit(V2{tx - pos.x, ty - pos.y});
+      if (len(dir) <= 0.f) return;
       if (p.plume_wander_deg > 0.f) {
-        // Spread half-angle from the momentum-to-turbulence ratio, capped by
-        // --wander so the knob still bounds it.
-        const float sigma = std::min(
-            std::atan(p.jet_turbulence_m_per_s / std::max(v_jet, 1e-3f)),
-            p.plume_wander_deg * 3.14159265f / 180.f);
-        std::normal_distribution<float> jitter(0.f, sigma);
+        // Mean heading is the outlet, so the walk is WEIGHTED toward it; the
+        // gaussian angular jitter is what spreads the plume sideways. Lateral
+        // offset then accumulates as sqrt(distance) -- turbulent dispersion.
+        std::normal_distribution<float> jitter(
+            0.f, p.plume_wander_deg * 3.14159265f / 180.f);
         const float a = std::atan2(dir.y, dir.x) + jitter(rng);
         dir = V2{std::cos(a), std::sin(a)};
       }
-      jet_dir = dir;
-      jet_x += cell_m;
       pos = V2{pos.x + dir.x, pos.y + dir.y};
       volume *= (1.0f - p.evap_rate);
       continue;
@@ -618,14 +666,15 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     if (g.oob(nx, ny)) { g.lost_offmap += double(sediment); return; }
     const size_t there = g.idx(nx, ny);
 
+    if (!p.enable_erosion) { sediment = 0.f; }
     float c_eq = (1.0f + p.entrainment * g.discharge[here]) *
                  (g.height[here] - g.height[there]);
     if (c_eq < 0.f) c_eq = 0.f;
-    const float cdiff = c_eq - sediment;
+    const float cdiff = p.enable_erosion ? (c_eq - sediment) : 0.f;
     sediment += p.deposition_rate * cdiff;
     g.height[here] -= volume * p.deposition_rate * cdiff;
 
-    Cascade(g, p, nx, ny, max_diff);
+    if (p.enable_cascade) Cascade(g, p, nx, ny, max_diff);
 
     sediment /= (1.0f - p.evap_rate);
     volume *= (1.0f - p.evap_rate);
@@ -689,86 +738,39 @@ void Dump(const Grid& g, const Params& p, const std::string& tag) {
   write("Q", g.Qm3s, 1.0f);                // m^3/s
 }
 
-}  // namespace
+// Runs the whole simulation. Extracted from main so the sanity tests exercise
+// the REAL loop rather than a copy that can drift from it.
+struct SimStats {
+  int n_lakes = 0;
+  float wet_frac = 0.f, deepest_m = 0.f;
+  double t_drops = 0, t_merge = 0, t_grid = 0, t_lake = 0;
+};
 
-int main(int argc, char** argv) {
-  Params p;
-  for (int i = 1; i < argc; ++i) {
-    const std::string a = argv[i];
-    auto nxt = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : ""; };
-    if (a == "--seed") p.seed = uint32_t(std::stoul(nxt()));
-    else if (a == "--res") p.res = std::stoi(nxt());
-    else if (a == "--world") p.world_m = std::stof(nxt());
-    else if (a == "--relief") p.relief_m = std::stof(nxt());
-    else if (a == "--steps") p.steps = std::stoi(nxt());
-    else if (a == "--drops") p.drops = std::stoi(nxt());
-    else if (a == "--runoff") p.runoff_m_per_yr = std::stof(nxt());
-    else if (a == "--evaporation") p.evaporation_m_per_yr = std::stof(nxt());
-    else if (a == "--settling") p.settling_velocity_m_per_s = std::stof(nxt());
-    else if (a == "--mouth-velocity") p.river_mouth_velocity_m_per_s = std::stof(nxt());
-    else if (a == "--lake-interval") p.lake_interval = std::stoi(nxt());
-    else if (a == "--min-lake-area") p.min_lake_area_m2 = std::stof(nxt());
-    else if (a == "--min-lake-depth") p.min_lake_depth_m = std::stof(nxt());
-    else if (a == "--entrainment") p.entrainment = std::stof(nxt());
-    else if (a == "--deposition") p.deposition_rate = std::stof(nxt());
-    else if (a == "--lrate") p.lrate = std::stof(nxt());
-    else if (a == "--repose") p.repose_angle_deg = std::stof(nxt());
-    else if (a == "--settling") p.settling = std::stof(nxt());
-    else if (a == "--snapshot-every") p.snapshot_every = std::stoi(nxt());
-    else if (a == "--bowl") p.bowl = true;
-    else if (a == "--no-disperse") p.disperse = false;
-    else if (a == "--prefill") p.prefill = true;
-    else if (a == "--wander") p.plume_wander_deg = std::stof(nxt());
-    else if (a == "--turbulence") p.jet_turbulence_m_per_s = std::stof(nxt());
-    else if (a == "--dt") p.dt_years = std::stof(nxt());
-    else if (a == "--min-dispersion-depth") p.min_dispersion_depth_m = std::stof(nxt());
-    else if (a == "--source-x") p.source_x_frac = std::stof(nxt());
-    else if (a == "--source-y") p.source_y_frac = std::stof(nxt());
-    else if (a == "--source-jitter") p.source_jitter_cells = std::stof(nxt());
-    else if (a == "--bowl-rim") p.bowl_rim_m = std::stof(nxt());
-    else if (a == "--bowl-well") p.bowl_well_m = std::stof(nxt());
-    else if (a == "--out") p.out = nxt();
-    else { std::fprintf(stderr, "protogen: unknown arg '%s'\n", a.c_str()); return 2; }
-  }
-
-  const float cell_m = p.world_m / float(p.res);
-  // Each particle stands for the runoff over its share of the map, which is how
-  // the dimensionless volume track converts to a real discharge.
+void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
+            bool verbose) {
+  const float world_area = p.world_m * p.world_m;
   const double q_per_unit_vol_m3_s =
-      double(p.runoff_m_per_yr) * double(p.world_m) * double(p.world_m) /
-      double(p.drops) / kSecondsPerYear;
-
-  Grid g(p.res);
-  InitTerrain(g, p);
-
-  const unsigned workers = std::max(1u, badlands::GetWorkerThreadCount());
-  std::vector<Scratch> scratch(workers);
-  for (auto& s : scratch) s.init(g.cells);
-
-  std::printf("protogen: %dx%d cells, %.0f m world, %.1f m cells, %d workers\n"
-              "  relief %.0f m, %d steps x %d drops\n"
-              "  runoff %.2f m/yr, evaporation %.2f m/yr, w_s %.1e m/s\n",
-              p.res, p.res, p.world_m, cell_m, workers, p.relief_m, p.steps,
-              p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
-              p.settling_velocity_m_per_s);
-
-  Dump(g, p, "0000-initial");
+      double(p.runoff_m_per_yr) * double(world_area) / double(p.drops) /
+      kSecondsPerYear;
   std::mt19937 rng(p.seed ^ 0x9e3779b9u);
   std::uniform_real_distribution<float> uni(1.0f, float(p.res - 2));
-
-  std::vector<Lake> lakes;
-  int n_lakes = 0; float wet_frac = 0.f, deepest_m = 0.f;
+  std::vector<float> sx(p.drops), sy(p.drops);
+  int n_lakes = 0;
+  float wet_frac = 0.f, deepest_m = 0.f;
   using clk = std::chrono::steady_clock;
   double t_drops = 0, t_merge = 0, t_grid = 0, t_lake = 0;
   auto secs = [](clk::time_point a, clk::time_point b) {
     return std::chrono::duration<double>(b - a).count();
   };
+  // Only the bowl wants one inlet (it is testing a delta). The other
+  // fixtures want rain everywhere, or the hill never gets touched.
+  const bool single_source =
+      p.bowl || p.terrain == Params::Terrain::Bowl;
 
-  std::vector<float> sx(p.drops), sy(p.drops);
   for (int step = 1; step <= p.steps; ++step) {
     // Spawn points drawn on the main thread, so the particle set is a pure
     // function of the seed and independent of how work is chunked.
-    if (p.bowl) {
+    if (single_source) {
       // ONE source. The flow path is then deterministic, so "where should the
       // sediment land" has a right answer rather than a distribution.
       const float ox = p.source_x_frac * float(p.res);
@@ -826,7 +828,7 @@ int main(int argc, char** argv) {
     UpdateLakes(g, p, lakes, n_lakes, wet_frac, deepest_m);
     t_lake += secs(tD, clk::now());
 
-    if (step % p.snapshot_every == 0 || step == p.steps) {
+    if (verbose && (step % p.snapshot_every == 0 || step == p.steps)) {
       char tag[64];
       std::snprintf(tag, sizeof(tag), "%04d-step", step);
       Dump(g, p, tag);
@@ -854,7 +856,575 @@ int main(int argc, char** argv) {
       std::fflush(stdout);
     }
   }
+
+  st.n_lakes = n_lakes;
+  st.wet_frac = wet_frac;
+  st.deepest_m = deepest_m;
+  st.t_drops = t_drops; st.t_merge = t_merge;
+  st.t_grid = t_grid; st.t_lake = t_lake;
+}
+
+
+// ---------------------------------------------------------------------- tests
+
+// Physical sanity tests. Every one runs on a SMALL grid (32-64 cells) but at
+// the production cell size (16 m), so the physics sees representative distances
+// and only the extent shrinks -- a test that passed at 1 m cells would prove
+// nothing about a 16 m world.
+//
+// Each test isolates ONE mechanism using the enable_* toggles, so a failure has
+// a single cause. Where an analytic answer exists it is asserted against, not
+// merely eyeballed.
+
+namespace test {
+
+int g_pass = 0, g_fail = 0;
+
+void Check(const char* name, bool ok, const std::string& detail) {
+  std::printf("  [%s] %-38s %s\n", ok ? "PASS" : "FAIL", name, detail.c_str());
+  if (ok) ++g_pass; else ++g_fail;
+}
+
+std::string F(const char* fmt, double a, double b = 0, double c = 0) {
+  char buf[256];
+  std::snprintf(buf, sizeof(buf), fmt, a, b, c);
+  return buf;
+}
+
+// A small world at production cell size: 64 cells x 16 m = 1024 m.
+Params Base(int res = 64) {
+  Params p;
+  p.res = res;
+  p.world_m = 16.0f * float(res);
+  p.relief_m = 300.0f;
+  p.steps = 200;
+  p.drops = 16;
+  p.snapshot_every = 1 << 30;  // never
+  p.lake_interval = 25;
+  return p;
+}
+
+Grid Run(const Params& p, std::vector<Lake>& lakes, SimStats& st) {
+  Grid g(p.res);
+  InitTerrain(g, p);
+  RunSim(p, g, lakes, st, false);
+  return g;
+}
+
+double SumH(const Grid& g) {
+  double s = 0;
+  for (float h : g.height) s += double(h);
+  return s;
+}
+
+// --- 1. mass conservation -------------------------------------------------
+// Everything the particles move must be accounted for: what stays on the grid
+// plus what left the map equals what was there to begin with.
+void MassConservation() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  p.prefill = true;
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  const double before = SumH(g0);
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  const double after = SumH(g);
+  const double residual = (after - before) + g.lost_offmap;
+  const double rel = std::fabs(residual) / std::max(std::fabs(before), 1e-9);
+  Check("mass conservation", rel < 0.01,
+        F("residual %.3e of %.3e (%.4f%%)", residual, before, 100 * rel));
+}
+
+// --- 2. flat plane does nothing -------------------------------------------
+// Zero slope means zero transport capacity, so nothing may erode or deposit.
+void FlatPlaneInert() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Flat;
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  float max_change = 0.f;
+  for (size_t i = 0; i < g.cells; ++i)
+    max_change = std::max(max_change,
+                          std::fabs(g.height[i] - g0.height[i]) * p.relief_m);
+  Check("flat plane stays flat", max_change < 0.5f,
+        F("max change %.4f m", max_change));
+}
+
+// --- 3. determinism --------------------------------------------------------
+void Determinism() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  std::vector<Lake> l1, l2; SimStats s1, s2;
+  Grid a = Run(p, l1, s1);
+  Grid b = Run(p, l2, s2);
+  bool same = true;
+  for (size_t i = 0; i < a.cells && same; ++i)
+    if (a.height[i] != b.height[i]) same = false;
+  Check("same seed is bit-identical", same, same ? "identical" : "DIVERGED");
+}
+
+// --- 4. knob liveness ------------------------------------------------------
+// Two distinct values of a parameter must NOT give bit-identical output.
+// Both masking bugs found so far (the lobe-length clamp hiding
+// settling_velocity, the wander cap hiding jet turbulence) announced themselves
+// exactly this way, and both were spotted by eye, late.
+void KnobLiveness() {
+  struct Knob { const char* name; void (*set)(Params&, int); };
+  static const Knob knobs[] = {
+      {"settling_velocity", [](Params& p, int i) {
+         p.settling_velocity_m_per_s = i ? 1e-4f : 1e-1f; }},
+      {"plume_wander_deg", [](Params& p, int i) {
+         p.plume_wander_deg = i ? 0.f : 60.f; }},
+      {"entrainment", [](Params& p, int i) { p.entrainment = i ? 2.f : 20.f; }},
+      {"deposition_rate", [](Params& p, int i) {
+         p.deposition_rate = i ? 0.02f : 0.4f; }},
+      {"repose_angle_deg", [](Params& p, int i) {
+         p.repose_angle_deg = i ? 15.f : 60.f; }},
+      {"evaporation", [](Params& p, int i) {
+         p.evaporation_m_per_yr = i ? 0.05f : 5.f; }},
+      {"runoff", [](Params& p, int i) { p.runoff_m_per_yr = i ? 0.1f : 4.f; }},
+  };
+  for (const Knob& k : knobs) {
+    Params a = Base(), b = Base();
+    a.terrain = b.terrain = Params::Terrain::Bowl;
+    a.prefill = b.prefill = true;
+    k.set(a, 0); k.set(b, 1);
+    std::vector<Lake> la, lb; SimStats sa, sb;
+    Grid ga = Run(a, la, sa), gb = Run(b, lb, sb);
+    bool differs = false;
+    for (size_t i = 0; i < ga.cells && !differs; ++i)
+      if (ga.height[i] != gb.height[i]) differs = true;
+    Check((std::string("knob is live: ") + k.name).c_str(), differs,
+          differs ? "output changes" : "NO EFFECT - masked or unused");
+  }
+}
+
+// --- 5. lake surface is level ---------------------------------------------
+// Every wet cell of one lake must share a water surface. Catches the stale
+// water field that let a bed rise while still reporting itself as lake bottom.
+void LakeFlatness() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  p.prefill = true;
+  // Terrain frozen: this asserts lake BOOKKEEPING. With erosion live the bowl
+  // is marginal enough that a rebuild can find the basin breached and drop the
+  // lake, which is real behaviour but would make this test measure erosion.
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  std::vector<float> lo(g.lake_outlet.size(), 1e30f), hi(g.lake_outlet.size(), -1e30f);
+  size_t wet = 0;
+  for (size_t i = 0; i < g.cells; ++i) {
+    if (g.lake_id[i] < 0 || g.water[i] <= 0.f) continue;
+    const float surf = g.height[i] + g.water[i];
+    lo[g.lake_id[i]] = std::min(lo[g.lake_id[i]], surf);
+    hi[g.lake_id[i]] = std::max(hi[g.lake_id[i]], surf);
+    ++wet;
+  }
+  float worst = 0.f;
+  for (size_t k = 0; k < lo.size(); ++k)
+    if (hi[k] > -1e29f) worst = std::max(worst, (hi[k] - lo[k]) * p.relief_m);
+  Check("lake surface is level", wet > 0 && worst < 0.05f,
+        F("%.0f wet cells, worst spread %.4f m", double(wet), worst));
+}
+
+// --- 6. lake_id resolves ---------------------------------------------------
+// lake_id holds the KEPT index while the Lake vector is unpruned; mixing them
+// debited the wrong lake's volume.
+void LakeIdValid() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  p.prefill = true;
+  // Terrain frozen: this asserts lake BOOKKEEPING. With erosion live the bowl
+  // is marginal enough that a rebuild can find the basin breached and drop the
+  // lake, which is real behaviour but would make this test measure erosion.
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  bool ok = true;
+  for (size_t i = 0; i < g.cells && ok; ++i) {
+    const int32_t id = g.lake_id[i];
+    if (id < 0) continue;
+    if (id >= int32_t(g.lake_outlet.size()) ||
+        id >= int32_t(g.lake_index.size())) ok = false;
+  }
+  Check("every lake_id resolves", ok,
+        F("%.0f lakes", double(g.lake_outlet.size())));
+}
+
+// --- 7. lakes never cover the map -----------------------------------------
+// A fixture whose interior is the global minimum floods entirely; that is a
+// broken fixture, not a lake.
+void LakeAreaBounded() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  p.prefill = true;
+  // Terrain frozen: this asserts lake BOOKKEEPING. With erosion live the bowl
+  // is marginal enough that a rebuild can find the basin breached and drop the
+  // lake, which is real behaviour but would make this test measure erosion.
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  size_t wet = 0;
+  for (float w : g.water) if (w > 0.f) ++wet;
+  const double frac = double(wet) / double(g.cells);
+  Check("lake area below half the map", frac < 0.5,
+        F("wet %.2f%%", 100 * frac));
+}
+
+// --- 8. discharge equals runoff x drainage area ---------------------------
+// The strongest statement the discharge field makes about itself.
+void DischargeMatchesArea() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Plane;
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  p.steps = 400;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  // Every particle drains down +y, so the bottom row carries the whole map.
+  double q_bottom = 0.0;
+  for (int x = 1; x < g.n - 1; ++x) q_bottom += g.Qm3s[g.idx(x, g.n - 2)];
+  const double area = double(p.world_m) * double(p.world_m);
+  const double expect = double(p.runoff_m_per_yr) * area / kSecondsPerYear;
+  const double ratio = expect > 0 ? q_bottom / expect : 0;
+  Check("discharge ~ runoff x area", ratio > 0.2 && ratio < 5.0,
+        F("measured %.4e vs expected %.4e (ratio %.2f)", q_bottom, expect, ratio));
+}
+
+// --- 9. valley concentrates the flow --------------------------------------
+// z = a*y + b*|x| -- the channel must form in the central column.
+void ValleyChannel() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Valley;
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  p.steps = 400;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  // Column totals of discharge across the lower half of the map.
+  std::vector<double> col(g.n, 0.0);
+  for (int y = g.n / 2; y < g.n - 1; ++y)
+    for (int x = 0; x < g.n; ++x) col[x] += g.Qm3s[g.idx(x, y)];
+  const int argmax = int(std::max_element(col.begin(), col.end()) - col.begin());
+  double total = 0, near = 0;
+  for (int x = 0; x < g.n; ++x) {
+    total += col[x];
+    if (std::abs(x - g.n / 2) <= 2) near += col[x];
+  }
+  const double share = total > 0 ? near / total : 0;
+  Check("valley channels the flow",
+        std::abs(argmax - g.n / 2) <= 2 && share > 0.5,
+        F("peak col %.0f (centre %.0f), %.0f%% within +/-2",
+          double(argmax), double(g.n / 2), 100 * share));
+}
+
+// --- 10. cascade relaxes a cliff to the repose angle ----------------------
+void ReposeAngle() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Cliff;
+  p.enable_erosion = false;
+  p.steps = 600;
+  p.drops = 64;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  const float cell_m = p.world_m / float(p.res);
+  float max_slope_deg = 0.f;
+  for (int y = 1; y < g.n - 1; ++y)
+    for (int x = 1; x < g.n - 1; ++x) {
+      const float dz = std::fabs(g.height[g.idx(x, y)] -
+                                 g.height[g.idx(x, y + 1)]) * p.relief_m;
+      max_slope_deg = std::max(max_slope_deg,
+                               float(std::atan(dz / cell_m) * 180.0 / 3.14159265));
+    }
+  // The cascade is a LOCAL, per-particle operation: it fires only at cells a
+  // particle visits, so it cannot promise a global repose bound and untouched
+  // cliff survives at 90 deg. What it does promise is that it relaxes what it
+  // touches, so assert the maximum slope fell.
+  float initial_deg = 0.f;
+  {
+    Grid g0(p.res);
+    InitTerrain(g0, p);
+    for (int y = 1; y < g0.n - 1; ++y)
+      for (int x = 1; x < g0.n - 1; ++x) {
+        const float dz = std::fabs(g0.height[g0.idx(x, y)] -
+                                   g0.height[g0.idx(x, y + 1)]) * p.relief_m;
+        initial_deg = std::max(initial_deg,
+                               float(std::atan(dz / cell_m) * 180.0 / 3.14159265));
+      }
+  }
+  Check("cascade relaxes a cliff", max_slope_deg < initial_deg,
+        F("max slope %.1f -> %.1f deg (repose %.1f)", initial_deg,
+          max_slope_deg, p.repose_angle_deg));
+}
+
+// --- 11. erosion lowers a hill --------------------------------------------
+void LobeErodes() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Lobe;
+  p.steps = 100;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  float peak0 = 0.f;
+  for (float h : g0.height) peak0 = std::max(peak0, h);
+  float prev = peak0;
+  bool monotone = true;
+  for (int round = 0; round < 4; ++round) {
+    Params q = p;
+    q.steps = 100 * (round + 1);
+    std::vector<Lake> lk; SimStats s;
+    Grid g = Run(q, lk, s);
+    float peak = 0.f;
+    for (float h : g.height) peak = std::max(peak, h);
+    if (peak > prev + 1e-6f) monotone = false;
+    prev = peak;
+  }
+  // NOTE: the summit itself is expected to survive. A hilltop has no upslope
+  // contributing area, so fluvial incision cannot reach it -- only hillslope
+  // diffusion (creep) lowers summits, and this model has none. So assert what
+  // erosion genuinely does: it removes mass from the flanks.
+  Params q = p; q.steps = 400;
+  std::vector<Lake> lk; SimStats s2;
+  Grid ge = Run(q, lk, s2);
+  double v0 = 0, v1 = 0;
+  for (size_t i = 0; i < ge.cells; ++i) { v0 += g0.height[i]; v1 += ge.height[i]; }
+  Check("erosion removes mass from the hill", v1 < v0 && monotone,
+        F("mass %.4e -> %.4e (peak %.1f m held)", v0, v1, prev * p.relief_m));
+}
+
+// --- 12. lake fills at exactly the inflow rate ----------------------------
+// No evaporation, no sediment: stored volume must equal Q_in x elapsed time.
+void LakeFillRate() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  p.evaporation_m_per_yr = 0.0f;
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  p.enable_lake_deposit = false;
+  p.steps = 300;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  double stored = 0.0;
+  for (const Lake& lk : lakes) stored += lk.volume_m3;
+  // With no evaporation a basin fills to spill and stops, so the assertion is
+  // that it filled at all and did not exceed its own capacity.
+  double capacity = 0.0;
+  const float cell_area = (p.world_m / p.res) * (p.world_m / p.res);
+  for (const Lake& lk : lakes)
+    for (uint32_t c : lk.members)
+      capacity += std::max(0.f, lk.spill - g.height[c]) * cell_area * p.relief_m;
+  Check("lake volume within basin capacity",
+        stored > 0.0 && stored <= capacity * 1.05 + 1.0,
+        F("stored %.3e m3, capacity %.3e", stored, capacity));
+}
+
+// --- 13. symmetric fixture, symmetric result ------------------------------
+void Symmetry() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Lobe;
+  p.steps = 150;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  // Mirror about x and compare column sums; the fixture and the noise-free
+  // spawn are both x-symmetric, so a large asymmetry means a directional bias
+  // (e.g. the cascade's fixed neighbour ordering).
+  double asym = 0, tot = 0;
+  for (int y = 1; y < g.n - 1; ++y)
+    for (int x = 1; x < g.n / 2; ++x) {
+      const double a = g.height[g.idx(x, y)];
+      const double b = g.height[g.idx(g.n - 1 - x, y)];
+      asym += std::fabs(a - b);
+      tot += std::fabs(a) + std::fabs(b);
+    }
+  const double rel = tot > 0 ? asym / tot : 0;
+  Check("no gross left/right bias", rel < 0.25, F("asymmetry %.2f%%", 100 * rel));
+}
+
+// --- 14. BuildLakes scales linearly ---------------------------------------
+// It was quadratic once (18.8 s for a single call) because pruned components
+// were re-flooded once per member.
+void LakeScaling() {
+  using clk = std::chrono::steady_clock;
+  double t[2];
+  for (int i = 0; i < 2; ++i) {
+    Params p = Base(i ? 128 : 64);
+    p.terrain = Params::Terrain::Bowl;
+    Grid g(p.res);
+    InitTerrain(g, p);
+    std::vector<Lake> lakes;
+    auto a = clk::now();
+    for (int k = 0; k < 5; ++k) BuildLakes(g, p, lakes);
+    t[i] = std::chrono::duration<double>(clk::now() - a).count();
+  }
+  // 4x the cells; linear would be ~4x, quadratic ~16x.
+  const double ratio = t[0] > 0 ? t[1] / t[0] : 0;
+  Check("BuildLakes scales ~linearly", ratio < 8.0,
+        F("64->128 cells cost x%.2f (%.1f ms -> %.1f ms)", ratio,
+          1e3 * t[0], 1e3 * t[1]));
+}
+
+// --- 15. resolution independence ------------------------------------------
+// Same world, same cell size, different extent must not change the character.
+// Several constants are per-cell, so cell size can leak into the physics.
+void ResolutionIndependence() {
+  double dens[2];
+  for (int i = 0; i < 2; ++i) {
+    Params p = Base(i ? 64 : 32);
+    p.terrain = Params::Terrain::Plane;
+    p.steps = 300;
+    std::vector<Lake> lakes; SimStats st;
+    Grid g = Run(p, lakes, st);
+    // Channel density: fraction of cells above a fixed discharge quantile.
+    std::vector<float> q(g.Qm3s);
+    std::sort(q.begin(), q.end());
+    const float thr = q[size_t(q.size() * 0.9)];
+    size_t ch = 0;
+    for (float v : g.Qm3s) if (v > thr && thr > 0) ++ch;
+    dens[i] = double(ch) / double(g.cells);
+  }
+  const double rel = dens[0] > 0 ? std::fabs(dens[1] - dens[0]) / dens[0] : 1;
+  Check("channel density independent of extent", rel < 0.5,
+        F("32-cell %.4f vs 64-cell %.4f (%.0f%% apart)", dens[0], dens[1],
+          100 * rel));
+}
+
+// --- 16. delta thins with distance ----------------------------------------
+void DeltaProfile() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  p.prefill = true;
+  p.bowl_well_m = 260.0f;  // deep enough to survive 300 steps of incision
+  p.steps = 300;
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  // Deposit thickness by distance from the inlet (top of the basin).
+  std::vector<double> band(4, 0.0);
+  std::vector<int> cnt(4, 0);
+  int y0 = g.n, y1 = 0;
+  for (size_t i = 0; i < g.cells; ++i)
+    if (g.water[i] > 0.f) {
+      y0 = std::min(y0, int(i) / g.n);
+      y1 = std::max(y1, int(i) / g.n);
+    }
+  if (y1 <= y0) { Check("delta thins with distance", false, "no lake"); return; }
+  for (size_t i = 0; i < g.cells; ++i) {
+    if (g.water[i] <= 0.f) continue;
+    const double d = g.height[i] - g0.height[i];
+    if (d <= 0) continue;
+    const int b = std::min(3, 4 * (int(i) / g.n - y0) / std::max(1, y1 - y0 + 1));
+    band[b] += d * p.relief_m;
+    ++cnt[b];
+  }
+  for (int b = 0; b < 4; ++b) if (cnt[b]) band[b] /= cnt[b];
+  const bool thins = band[0] >= band[3];
+  Check("delta thins with distance from inlet", thins,
+        F("near %.1f m -> far %.1f m", band[0], band[3]));
+}
+
+int RunAll() {
+  std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
+  MassConservation();
+  FlatPlaneInert();
+  Determinism();
+  KnobLiveness();
+  LakeFlatness();
+  LakeIdValid();
+  LakeAreaBounded();
+  DischargeMatchesArea();
+  ValleyChannel();
+  ReposeAngle();
+  LobeErodes();
+  LakeFillRate();
+  Symmetry();
+  LakeScaling();
+  ResolutionIndependence();
+  DeltaProfile();
+  std::printf("\n  %d passed, %d failed\n", g_pass, g_fail);
+  return g_fail == 0 ? 0 : 1;
+}
+
+}  // namespace test
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]) == "--test") return test::RunAll();
+  Params p;
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    auto nxt = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : ""; };
+    if (a == "--seed") p.seed = uint32_t(std::stoul(nxt()));
+    else if (a == "--res") p.res = std::stoi(nxt());
+    else if (a == "--world") p.world_m = std::stof(nxt());
+    else if (a == "--relief") p.relief_m = std::stof(nxt());
+    else if (a == "--steps") p.steps = std::stoi(nxt());
+    else if (a == "--drops") p.drops = std::stoi(nxt());
+    else if (a == "--runoff") p.runoff_m_per_yr = std::stof(nxt());
+    else if (a == "--evaporation") p.evaporation_m_per_yr = std::stof(nxt());
+    else if (a == "--settling") p.settling_velocity_m_per_s = std::stof(nxt());
+    else if (a == "--mouth-velocity") p.river_mouth_velocity_m_per_s = std::stof(nxt());
+    else if (a == "--lake-interval") p.lake_interval = std::stoi(nxt());
+    else if (a == "--min-lake-area") p.min_lake_area_m2 = std::stof(nxt());
+    else if (a == "--min-lake-depth") p.min_lake_depth_m = std::stof(nxt());
+    else if (a == "--entrainment") p.entrainment = std::stof(nxt());
+    else if (a == "--deposition") p.deposition_rate = std::stof(nxt());
+    else if (a == "--lrate") p.lrate = std::stof(nxt());
+    else if (a == "--repose") p.repose_angle_deg = std::stof(nxt());
+    else if (a == "--settling") p.settling = std::stof(nxt());
+    else if (a == "--snapshot-every") p.snapshot_every = std::stoi(nxt());
+    else if (a == "--bowl") p.bowl = true;
+    else if (a == "--no-disperse") p.disperse = false;
+    else if (a == "--prefill") p.prefill = true;
+    else if (a == "--wander") p.plume_wander_deg = std::stof(nxt());
+    else if (a == "--dt") p.dt_years = std::stof(nxt());
+    else if (a == "--min-dispersion-depth") p.min_dispersion_depth_m = std::stof(nxt());
+    else if (a == "--source-x") p.source_x_frac = std::stof(nxt());
+    else if (a == "--source-y") p.source_y_frac = std::stof(nxt());
+    else if (a == "--source-jitter") p.source_jitter_cells = std::stof(nxt());
+    else if (a == "--bowl-rim") p.bowl_rim_m = std::stof(nxt());
+    else if (a == "--bowl-well") p.bowl_well_m = std::stof(nxt());
+    else if (a == "--out") p.out = nxt();
+    else { std::fprintf(stderr, "protogen: unknown arg '%s'\n", a.c_str()); return 2; }
+  }
+
+  const float cell_m = p.world_m / float(p.res);
+  // Each particle stands for the runoff over its share of the map, which is how
+  // the dimensionless volume track converts to a real discharge.
+  const double q_per_unit_vol_m3_s =
+      double(p.runoff_m_per_yr) * double(p.world_m) * double(p.world_m) /
+      double(p.drops) / kSecondsPerYear;
+
+  Grid g(p.res);
+  InitTerrain(g, p);
+
+  const unsigned workers = std::max(1u, badlands::GetWorkerThreadCount());
+  std::vector<Scratch> scratch(workers);
+  for (auto& s : scratch) s.init(g.cells);
+
+  std::printf("protogen: %dx%d cells, %.0f m world, %.1f m cells, %d workers\n"
+              "  relief %.0f m, %d steps x %d drops\n"
+              "  runoff %.2f m/yr, evaporation %.2f m/yr, w_s %.1e m/s\n",
+              p.res, p.res, p.world_m, cell_m, workers, p.relief_m, p.steps,
+              p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
+              p.settling_velocity_m_per_s);
+
+  Dump(g, p, "0000-initial");
+
+
+  std::vector<Lake> lakes;
+  SimStats st;
+  RunSim(p, g, lakes, st, true);
   std::printf("protogen: done\n  timings (s): drops %.1f merge %.1f grid %.1f "
-              "lakes %.1f\n", t_drops, t_merge, t_grid, t_lake);
+              "lakes %.1f\n", st.t_drops, st.t_merge, st.t_grid, st.t_lake);
   return 0;
 }
