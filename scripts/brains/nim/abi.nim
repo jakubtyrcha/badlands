@@ -21,22 +21,30 @@
 # see -- and a new write-only host import, bl_enqueue_action, for firing
 # instant actions (BL_ACT_*) independently of the one suggestion a wake still
 # returns.
+#
+# v4 (skills execution): BlViewWire gains the skills block (BlViewSkill, after
+# attacks) -- same reasoning as the attacks block: a brain cannot use a skill
+# it cannot see, and the WIRE INDEX of a skill is what it hands back as
+# BL_ACT_USE_SKILL's `arg`. BL_ACT_USE_SKILL stops being reserved, and
+# BL_ST_STUNNED joins the status vocabulary.
 
 const
-  BL_ABI_VERSION* = 3'i32
+  BL_ABI_VERSION* = 4'i32
   BL_MAX_THREATS* = 8
   BL_MAX_CHARS* = 16
   BL_MAX_EVENTS* = 8
   BL_MAX_STATUSES* = 8
   BL_MAX_ACTIVITIES* = 14
   BL_MAX_ATTACKS* = 3
+  BL_MAX_SKILLS* = 8
 
   # BL_ACT_*: action kinds (append-only) -- bl_enqueue_action's `kind`
   # argument. Fire-and-forget: no return, validated by the engine at resolve
   # time, independently of the wake's own suggestion. Only BL_ACT_ATTACK is
   # live this slice.
   BL_ACT_NONE* = 0'i32
-  BL_ACT_USE_SKILL* = 1'i32   # reserved
+  BL_ACT_USE_SKILL* = 1'i32   # arg = SKILL SLOT index (into BlViewWire.skills),
+                              # target = victim slot (or the caster for a self skill)
   BL_ACT_USE_POTION* = 2'i32  # reserved
   BL_ACT_ATTACK* = 3'i32      # arg = attack index, target = victim slot
                                # (UINT32_MAX = the current Attack intention's target)
@@ -72,6 +80,21 @@ const
   BL_ST_CHATTING* = 1'i32
   BL_ST_MELEE_LOCKED* = 2'i32
   BL_ST_INSIDE_BUILDING* = 3'i32
+  # Not advisory: a stunned entity is not consulted at all, so a brain only
+  # sees this for a stun that ended before its wake.
+  BL_ST_STUNNED* = 4'i32
+
+  # badlands::SkillTrigger (game/include/badlands_sim.hpp), mirrored here
+  # because brain_abi.h deliberately excludes that header -- the same
+  # hand-sync discipline every other vocabulary in this file follows. Only an
+  # Action skill can be fired through bl_enqueue_action.
+  BL_SKILL_TRIGGER_ACTION* = 0'i32
+  BL_SKILL_TRIGGER_PASSIVE* = 1'i32
+  BL_SKILL_TRIGGER_INTENTION* = 2'i32
+
+  # badlands::SkillId, same discipline. Only the ids a shipping brain names.
+  BL_SKILL_CALCIFY* = 0'i32
+  BL_SKILL_SHIELD_BASH* = 1'i32
 
 type
   BlViewSelf* {.packed.} = object
@@ -169,6 +192,14 @@ type
     cooldown_remaining*: float32  # seconds; 0 = ready
     pad0*: uint32
 
+  BlViewSkill* {.packed.} = object
+    skill_id*: int32            # badlands::SkillId
+    cooldown_remaining*: float32  # seconds; 0 = ready
+    ready*: uint32              # bool: off cooldown
+    recommended*: uint32        # bool: the host's trigger advice
+    trigger*: int32             # badlands::SkillTrigger
+    target_mode*: int32         # badlands::SkillTargetMode
+
   BlEvent* {.packed.} = object
     at_millis*: int64
     ttl_millis*: int64
@@ -189,6 +220,9 @@ type
     attack_count*: int32
     pad4*: uint32
     attacks*: array[BL_MAX_ATTACKS, BlViewAttack]
+    skill_count*: int32
+    pad5*: uint32
+    skills*: array[BL_MAX_SKILLS, BlViewSkill]
     event_count*: int32
     pad2*: uint32
     events*: array[BL_MAX_EVENTS, BlEvent]
@@ -212,6 +246,7 @@ static: doAssert sizeof(BlViewFactors) == 88
 static: doAssert sizeof(BlViewChar) == 40
 static: doAssert sizeof(BlStatus) == 16
 static: doAssert sizeof(BlViewAttack) == 24
+static: doAssert sizeof(BlViewSkill) == 24
 static: doAssert sizeof(BlEvent) == 32
-static: doAssert sizeof(BlViewWire) == 1560
+static: doAssert sizeof(BlViewWire) == 1760
 static: doAssert sizeof(BlSuggestionWire) == 40

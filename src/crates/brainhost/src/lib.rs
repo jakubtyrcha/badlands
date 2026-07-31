@@ -695,14 +695,14 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // v3 (contract-v3-alignment, game/src/brain_abi.h): bumped in lockstep
+    // v4 (skills execution, game/src/brain_abi.h): bumped in lockstep
     // with BL_ABI_VERSION whenever the wire layout changes. Every synthetic
     // WAT fixture below builds its OWN `bl_abi_version` export from this same
     // constant via `build_wasm`, so the bump stays self-consistent across the
     // whole suite; `abi_version_mismatch_rejected` deliberately uses an
     // independent literal (999) for its mismatching module, so it is
     // unaffected by this value either way.
-    const ABI_VERSION: i32 = 3;
+    const ABI_VERSION: i32 = 4;
 
     /// A conforming brain module's fixed layout: view/out buffers at 1024 /
     /// 2048 in a single 64 KiB memory page, so tests can reason about exact
@@ -1042,15 +1042,15 @@ mod tests {
     // the same way scripts/brains/nim/abi.nim does on the Nim side.
     #[test]
     fn real_hero_wasm_conforms() {
-        // sizeof(BlViewWire) per game/src/brain_abi.h's static_assert (v3:
-        // 1560 -- the attack-loadout block contract-v3-alignment added, on
-        // top of v2's statuses/events blocks).
-        const VIEW_WIRE_LEN: usize = 1560;
+        // sizeof(BlViewWire) per game/src/brain_abi.h's static_assert (v4:
+        // 1760 -- the skills block, on top of v3's attack loadout and v2's
+        // statuses/events blocks).
+        const VIEW_WIRE_LEN: usize = 1760;
         // sizeof(BlSuggestionWire) per game/src/brain_abi.h's static_assert
         // (v2's replacement for BlDecisionWire -- still 40 bytes, coincidentally;
         // unchanged by v3, which adds no fields to BlSuggestionWire).
         const DECISION_WIRE_LEN: usize = 40;
-        // offsetof(BlViewWire, version) is 0; BL_ABI_VERSION is 3 (both in
+        // offsetof(BlViewWire, version) is 0; BL_ABI_VERSION is 4 (both in
         // game/src/brain_abi.h). A zeroed buffer with just the version
         // stamped is exactly what a host that hasn't populated the rest of
         // the view yet would send on a first tick.
@@ -1133,7 +1133,7 @@ mod tests {
         // buffers (see scripts/brains/nim/trap_test.nim), so the same
         // static_assert'd sizes from game/src/brain_abi.h apply as
         // real_hero_wasm_conforms uses above.
-        const VIEW_WIRE_LEN: usize = 1560;
+        const VIEW_WIRE_LEN: usize = 1760;
         const DECISION_WIRE_LEN: usize = 40;
 
         let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

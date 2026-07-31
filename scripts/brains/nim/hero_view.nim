@@ -14,10 +14,14 @@
 # it anymore now that deliberation.nim is gone).
 #
 # v3 (contract-v3-alignment): gains meleeLocked (BL_ST_MELEE_LOCKED, scanned
-# out of the wire's statuses block) and the attack loadout (attackCount/
+# out of the wire's statuses block), the attack loadout (attackCount/
 # attacks, copied straight off BlViewWire.attacks -- a brain cannot pick an
 # attack it cannot see, brain_abi.h's BlViewAttack doc) -- both read by
 # hero.nim's own BL_ACT_ATTACK picker, not by any blocks.nim score_*/act_*.
+#
+# v4 (skills execution): gains the skill loadout (skillCount/skills), copied
+# in WIRE ORDER for the same reason -- the index is the handle
+# (BL_ACT_USE_SKILL's arg), so it is never re-sorted or filtered here.
 
 import abi
 
@@ -60,6 +64,12 @@ type
     meleeLocked*: bool
     attackCount*: int32
     attacks*: array[BL_MAX_ATTACKS, BlViewAttack]
+
+    # skills (v4): this hero's learned skills, in WIRE ORDER -- the index into
+    # this array is what bl_enqueue_action(BL_ACT_USE_SKILL, ...) names as its
+    # `arg`, so it must never be re-sorted or filtered on the way in.
+    skillCount*: int32
+    skills*: array[BL_MAX_SKILLS, BlViewSkill]
 
     # exploration
     hasExploreGoal*: bool
@@ -133,3 +143,7 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   result.attackCount = w.attack_count
   for i in 0 ..< w.attack_count:
     result.attacks[i] = w.attacks[i]
+
+  result.skillCount = w.skill_count
+  for i in 0 ..< w.skill_count:
+    result.skills[i] = w.skills[i]

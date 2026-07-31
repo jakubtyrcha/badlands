@@ -5,6 +5,8 @@
 #include "entity_memory.h"
 #include "game_state.h"
 #include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights/kActivityCount
+#include "skills.h"           // evaluate_skill_triggers -- the skills block's ready/recommended
+#include "status.h"           // remaining_millis_of -- BL_ST_STUNNED
 
 #include <spdlog/spdlog.h>
 
@@ -37,6 +39,9 @@ static_assert(BL_MAX_EVENTS == kInboxCapacity,
 static_assert(BL_MAX_ATTACKS == kMaxAttacks,
              "BlViewAttack[] and Attacks::defs/cooldown_remaining must share one capacity -- "
              "attacks are copied 1:1, no cap re-check per element below");
+static_assert(BL_MAX_SKILLS == kMaxSkills,
+             "BlViewSkill[] and Skills::ids/cooldown_remaining must share one capacity -- the "
+             "wire index IS the Skills index (BL_ACT_USE_SKILL's arg), so they cannot differ");
 
 // bl_log's host sink: forwards to spdlog with a "[brain]" prefix so wasm
 // brain diagnostics land in the same log a human already watches. Level is
@@ -210,6 +215,15 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     if (game.registry.all_of<InsideBuilding>(e)) {
         push_status(BL_ST_INSIDE_BUILDING, 0);  // indefinite -- ends when the need is filled
     }
+    if (const int64_t stun = remaining_millis_of(game.registry, e, StatusKind::Stunned);
+        stun > 0) {
+        // Rarely seen by the brain it belongs to -- a stunned entity is not
+        // consulted at all (sim.cpp's think dispatch) -- but carried for the
+        // same reason every other status is: it is this entity's own state,
+        // and a brain waking the tick a stun expires should be able to tell
+        // that is what just happened.
+        push_status(BL_ST_STUNNED, stun);
+    }
     wire.status_count = status_count;
 
     // --- attacks: this hero's attack loadout (the Attacks component -- every
@@ -230,6 +244,31 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
                                        def.range,
                                        atk.cooldown_remaining[i],
                                        /*_pad=*/0u};
+    }
+
+    // --- skills: this hero's learned skills, packed 1:1 with its Skills
+    // component so the WIRE INDEX IS THE SKILLS INDEX -- which is exactly
+    // what a brain hands back as BL_ACT_USE_SKILL's `arg` (brain_abi.h's
+    // BlViewSkill doc). `ready`/`recommended` come from evaluate_skill_triggers
+    // (skills.h), the host's own advice: a brain may ignore both, and the
+    // engine re-validates everything at resolve time regardless.
+    if (const auto* skills = game.registry.try_get<Skills>(e)) {
+        SkillRecommendation recs[kMaxSkills];
+        SkillContext sctx;
+        sctx.health_frac = view.health_frac;
+        sctx.threats = view.threats;
+        sctx.threat_count = view.threat_count;
+        const int32_t n = evaluate_skill_triggers(*skills, sctx, recs);
+        wire.skill_count = n;
+        for (int32_t i = 0; i < n && i < BL_MAX_SKILLS; ++i) {
+            const SkillSpec& spec = game.skills.specs[static_cast<size_t>(skills->ids[i])];
+            wire.skills[i] = BlViewSkill{static_cast<int32_t>(skills->ids[i]),
+                                         skills->cooldown_remaining[i],
+                                         recs[i].ready ? 1u : 0u,
+                                         recs[i].recommended ? 1u : 0u,
+                                         static_cast<int32_t>(spec.trigger),
+                                         static_cast<int32_t>(spec.target)};
+        }
     }
 
     // --- events: EventInbox, copied 1:1 (BL_MAX_EVENTS == kInboxCapacity) ------

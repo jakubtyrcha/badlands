@@ -132,6 +132,31 @@ proc pickBestAttack(v: HeroView, hasDist: bool, dist: float32): int32 =
       bestDamage = a.base_damage
       result = i.int32
 
+# The skill picker's twin of pickBestAttack: the SLOT INDEX of `wantedId` in
+# this hero's own skill list when it is ready to fire right now, or -1. Slot
+# index, not id: that index is exactly what bl_enqueue_action names as its
+# `arg` (brain_abi.h's BlViewSkill doc), and the two must not be confused.
+# Trigger is checked here as well as host-side, so a class that is later
+# authored a passive of the same name never gets it fired as an action.
+proc readySkillSlot(v: HeroView, wantedId: int32): int32 =
+  result = -1
+  for i in 0 ..< v.skillCount:
+    let s = v.skills[i]
+    if s.skill_id == wantedId and s.ready != 0'u32 and
+       s.trigger == BL_SKILL_TRIGGER_ACTION:
+      return i.int32
+
+# Longest reach among this hero's melee attacks -- the reach a melee-tested
+# skill (ShieldBash) is gated on host-side (skill_cast.h's skill_cast_range),
+# mirrored here so the brain does not spend a wake asking for a cast the
+# engine will refuse.
+proc meleeReach(v: HeroView): float32 =
+  result = 0.0'f32
+  for i in 0 ..< v.attackCount:
+    let a = v.attacks[i]
+    if a.category != kAttackCategoryRanged and a.range > result:
+      result = a.range
+
 # Floor for the re-fire hint below: never ask for a re-consult sooner than
 # this, even if an attack's own cooldown_remaining is shorter (a wake still
 # costs a host round-trip).
@@ -221,6 +246,15 @@ proc brainTick(slot: int32): int32 =
       let best = pickBestAttack(v, v.hasThreat, v.threatDist)
       if best >= 0:
         bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best)
+      # Shield-bash (v4): a SECOND action this wake, not a replacement for the
+      # swing -- the bash stamps only its own cooldown host-side, so a
+      # mercenary that opens with it still swings the same tick. Only fired
+      # at a threat actually in view (a locked-but-unseen opponent gives no
+      # distance to gate on) and only inside melee reach, which is the same
+      # gate validate_cast applies host-side.
+      let bash = readySkillSlot(v, BL_SKILL_SHIELD_BASH)
+      if bash >= 0 and v.hasThreat and v.threatDist <= meleeReach(v):
+        bl_enqueue_action(BL_ACT_USE_SKILL, targetSlot, bash)
       Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat, targetSlot: targetSlot)
     elif hasDangerEvent(g_view_buf) and v.hasHome:
       # A recent hit or sighting biases toward retreating home over the

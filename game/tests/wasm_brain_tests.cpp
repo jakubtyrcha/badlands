@@ -21,6 +21,8 @@
 #include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights
 #include "intention.h"
 #include "sim_internal.hpp"
+#include "skills.h"
+#include "status.h"
 #include "wasm_brain.h"
 
 #include <catch_amalgamated.hpp>
@@ -476,6 +478,51 @@ TEST_CASE("pack_view_wire: statuses assemble from Chatting/MeleeLock/InsideBuild
 
         CHECK(wire.status_count == 0);
     }
+}
+
+TEST_CASE("pack_view_wire: the skills block is packed 1:1 with the Skills component",
+          "[wasm_brain][skills]") {
+    auto g = make_world(BrainDesc{});
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    entt::entity e = g->slots[slot];
+    Skills& sk = g->registry.get<Skills>(e);
+    sk = Skills{};
+    learn_skill(sk, SkillId::ShieldBash);
+    learn_skill(sk, SkillId::Calcify);
+    sk.cooldown_remaining[1] = 4.0f;  // Calcify still cooling
+
+    const ActivityWeights& weights = weights_for(*g, e);
+    const WorldView view = observe_hero(*g, slot, e, weights);
+    const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+    REQUIRE(wire.skill_count == 2);
+    // Index on the wire IS the index in Skills -- that is what a brain hands
+    // back as BL_ACT_USE_SKILL's arg.
+    CHECK(wire.skills[0].skill_id == static_cast<int32_t>(SkillId::ShieldBash));
+    CHECK(wire.skills[0].cooldown_remaining == Catch::Approx(0.0f));
+    CHECK(wire.skills[0].ready == 1u);
+    CHECK(wire.skills[0].trigger == static_cast<int32_t>(SkillTrigger::Action));
+    CHECK(wire.skills[0].target_mode == static_cast<int32_t>(SkillTargetMode::Any));
+    CHECK(wire.skills[1].skill_id == static_cast<int32_t>(SkillId::Calcify));
+    CHECK(wire.skills[1].cooldown_remaining == Catch::Approx(4.0f));
+    CHECK(wire.skills[1].ready == 0u);
+    CHECK(wire.skills[1].target_mode == static_cast<int32_t>(SkillTargetMode::SelfOnly));
+}
+
+TEST_CASE("pack_view_wire: a stun rides the statuses block with its remaining time",
+          "[wasm_brain][skills]") {
+    auto g = make_world(BrainDesc{});
+    uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
+    entt::entity e = g->slots[slot];
+    apply_status(*g, e, StatusKind::Stunned, 1500, 3u);
+
+    const ActivityWeights& weights = weights_for(*g, e);
+    const WorldView view = observe_hero(*g, slot, e, weights);
+    const BlViewWire wire = pack_view_wire(*g, e, view, weights);
+
+    REQUIRE(wire.status_count == 1);
+    CHECK(wire.statuses[0].kind == BL_ST_STUNNED);
+    CHECK(wire.statuses[0].remaining_millis == 1500);
 }
 
 TEST_CASE("pack_view_wire: events copy 1:1 from the EventInbox", "[wasm_brain]") {
