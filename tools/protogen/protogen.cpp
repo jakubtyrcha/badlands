@@ -115,6 +115,16 @@ struct Params {
   // every particle carried its load to the outlet and dumped it there -- which
   // is why the delta came out thickest at the FAR shore.
   float plume_velocity_m_per_s = 0.08f;
+  // How many in-lake steps the plume deposits over before it is CUT OFF.
+  //
+  // Beyond a few steps the load is essentially spent (4 steps at L = 37 m and
+  // 16 m cells sheds 1 - exp(-64/37) = 82% of it), and continuing to shed all
+  // the way to the spill point is what put the thickest deposit at the OUTLET
+  // instead of the inlet: every particle steers at the same outlet cell, so
+  // those cells collect a shed from every single visitor. After the cutoff the
+  // particle still travels to the outlet and exits -- it just lays nothing
+  // down -- so the outflow river below the lake keeps its discharge.
+  int lake_deposit_steps = 4;
   // Lateral plume wander: std dev, in DEGREES, of the per-step angular
   // perturbation applied to the outlet-ward heading inside a lake.
   //
@@ -565,6 +575,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
                          cell_m / p.relief_m;
   V2 pos{px, py}, speed{0.f, 0.f};
   float volume = 1.0f, sediment = 0.0f;
+  int lake_steps = 0;  // in-lake steps taken, for the deposition cutoff
 
   for (int age = 0; age < p.max_age; ++age) {
     const int x = int(pos.x), y = int(pos.y);
@@ -587,8 +598,11 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       if (lid < 0 || lid >= int32_t(g.lake_outlet.size())) return;
       const int32_t target = g.lake_outlet[lid];
 
+      ++lake_steps;
+      const bool depositing =
+          p.enable_lake_deposit && lake_steps <= p.lake_deposit_steps;
       float drop;
-      if (!p.enable_lake_deposit) {
+      if (!depositing) {
         drop = 0.f;
       } else if (p.disperse) {
         // A laden inflow is a hypopycnal plume: velocity collapses at the
@@ -634,7 +648,9 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       const float ty = float(int(target) / g.n) + 0.5f;
       V2 dir = unit(V2{tx - pos.x, ty - pos.y});
       if (len(dir) <= 0.f) return;
-      if (p.plume_wander_deg > 0.f) {
+      // Wander only while the plume is live; once spent it is just water
+      // heading for the spill point.
+      if (p.plume_wander_deg > 0.f && depositing) {
         // Mean heading is the outlet, so the walk is WEIGHTED toward it; the
         // gaussian angular jitter is what spreads the plume sideways. Lateral
         // offset then accumulates as sqrt(distance) -- turbulent dispersion.
@@ -1322,37 +1338,49 @@ void DeltaProfile() {
   InitTerrain(g0, p);
   std::vector<Lake> lakes; SimStats st;
   Grid g = Run(p, lakes, st);
-  // Measure inside the BASIN FOOTPRINT, not inside the remaining water. The
-  // delta is precisely where water got displaced, so keying off `water > 0` at
-  // the end excludes the thing being measured -- which is why this reported
-  // "no lake" while a lake plainly existed.
+  // Distance is measured from the ACTUAL INLET -- the wet cell carrying the
+  // most discharge -- not from the top of the basin. The basin's upstream edge
+  // is dry land above the waterline, so banding by it put band 0 entirely on
+  // ground the plume never touches and reported 0.0 m every time.
   const float cell = p.world_m / float(p.res);
-  std::vector<uint8_t> pit(g.cells, 0);
-  int y0 = g.n, y1 = 0;
-  for (int y = 0; y < g.n; ++y)
-    for (int x = 0; x < g.n; ++x) {
-      const float ramp = p.bowl_rim_m * (1.0f - (y * cell) / p.world_m);
-      if (g0.height[g.idx(x, y)] * p.relief_m < ramp - 1.0f) {
-        pit[g.idx(x, y)] = 1;
-        y0 = std::min(y0, y);
-        y1 = std::max(y1, y);
-      }
-    }
-  if (y1 <= y0) { Check("delta thins with distance from inlet", false, "no basin"); return; }
+  int inlet = -1;
+  float best_q = -1.f;
+  for (size_t i = 0; i < g.cells; ++i)
+    if (g.water[i] > 0.f && g.Qm3s[i] > best_q) { best_q = g.Qm3s[i]; inlet = int(i); }
+  if (inlet < 0) {
+    // The delta may have filled the lake; fall back to the deposit's own
+    // upstream end within the basin.
+    for (size_t i = 0; i < g.cells; ++i)
+      if (g.height[i] > g0.height[i] + 1e-6f) { inlet = int(i); break; }
+  }
+  if (inlet < 0) { Check("delta thins with distance from inlet", false, "no deposit"); return; }
+  const int ix = inlet % g.n, iy = inlet / g.n;
+
+  // Mean deposit thickness in four annuli out from the inlet.
   std::vector<double> band(4, 0.0);
   std::vector<int> cnt(4, 0);
+  double rmax = 0;
   for (size_t i = 0; i < g.cells; ++i) {
-    if (!pit[i]) continue;
+    if (g.height[i] <= g0.height[i] + 1e-6f) continue;
+    const double dx = double(int(i) % g.n - ix), dy = double(int(i) / g.n - iy);
+    rmax = std::max(rmax, std::sqrt(dx * dx + dy * dy));
+  }
+  if (rmax <= 0) { Check("delta thins with distance from inlet", false, "no deposit"); return; }
+  for (size_t i = 0; i < g.cells; ++i) {
     const double d = (g.height[i] - g0.height[i]) * p.relief_m;
     if (d <= 0) continue;
-    const int b = std::min(3, 4 * (int(i) / g.n - y0) / std::max(1, y1 - y0 + 1));
-    band[b] += d;
-    ++cnt[b];
+    const double dx = double(int(i) % g.n - ix), dy = double(int(i) / g.n - iy);
+    const double r = std::sqrt(dx * dx + dy * dy);
+    const int bi = std::min(3, int(4.0 * r / (rmax + 1e-9)));
+    band[bi] += d;
+    ++cnt[bi];
   }
-  for (int b = 0; b < 4; ++b) if (cnt[b]) band[b] /= cnt[b];
+  for (int bi = 0; bi < 4; ++bi) if (cnt[bi]) band[bi] /= cnt[bi];
   const bool thins = band[0] >= band[3];
+  (void)cell;
   Check("delta thins with distance from inlet", thins,
-        F("near %.1f m -> far %.1f m", band[0], band[3]));
+        F("near %.2f m -> far %.2f m (peak %.2f)", band[0], band[3],
+          *std::max_element(band.begin(), band.end())));
 }
 
 // --- 17. rebuild cadence is numerical, not physical -------------------------
