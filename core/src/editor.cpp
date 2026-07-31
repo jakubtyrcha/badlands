@@ -6,6 +6,7 @@
 
 #include "camera.h"
 #include "camera_controller.h"
+#include "mesh_job.h"
 #include "picking.h"
 #include "renderer.h"
 #include "scene.h"
@@ -15,6 +16,26 @@ namespace sq {
 // Fixed world-space size for the tangent-frame grid, independent of the
 // selected object's scale.
 inline constexpr float kGizmoHalfExtent = 1.5f;
+
+namespace {
+
+// Editor-tuned DCSDD config: w_update lowered from the paper-faithful
+// default (0.5) to 0.1, carrying forward a D5 review finding. At low outer-
+// iteration counts, the default 0.5 produced unstable facet orientation --
+// the sphere acceptance test (see task-D5-report.md and dcsdd_tests.cpp)
+// intermittently hit a handful of near-degenerate, noise-dominated quad
+// diagonals whose winding flipped depending on w_update (non-monotone
+// inverted-facet counts across the outer-iteration sweep in that test);
+// w_update = 0.1 was validated stable there (0/816 failing triangles across
+// outer_iters in {10,20,30}). All other fields stay at struct defaults
+// (resolution 64, outer_iters 30, inner_iters 30).
+DcsddConfig editor_mesh_config() {
+    DcsddConfig config;
+    config.w_update = 0.1f;
+    return config;
+}
+
+} // namespace
 
 struct Editor::Impl {
     Renderer renderer;
@@ -40,6 +61,20 @@ struct Editor::Impl {
         int32_t node_id = kInvalidNode; // the node start_scale was captured for
         simd_float3 start_scale;
     } scale_drag;
+
+    // D6: background reconstruction. meshJobRunner owns the worker thread;
+    // latest_mesh/mesh_version are the CPU-side result D7's renderer upload
+    // will key off (mesh_version bumps only when poll() in render() actually
+    // returns a newly finished mesh).
+    MeshJobRunner meshJobRunner{editor_mesh_config()};
+    TriangleMesh latest_mesh;
+    uint64_t mesh_version = 0;
+
+    // Snapshots the scene (copy, taken here on the main thread) and hands it
+    // to the runner. Called from every mutation that changes the CSG result
+    // -- see each call site's comment -- but never from updateDrag/
+    // updateScale (no remesh during an active gesture, per the plan).
+    void requestRemesh() { meshJobRunner.request(scene); }
 };
 
 Editor::Editor() : impl_(new Impl()) {}
@@ -74,6 +109,14 @@ void Editor::setViewportSize(float widthPts, float heightPts, float backingScale
 }
 
 void Editor::render(void* caMetalDrawable) {
+    // Nonblocking poll, before any encoding: picks up the latest finished
+    // background mesh (if any) so it's available this frame. D7's renderer
+    // upload consumes latest_mesh/mesh_version; nothing else happens with it
+    // here.
+    if (impl_->meshJobRunner.poll(impl_->latest_mesh)) {
+        ++impl_->mesh_version;
+    }
+
     const Camera camera = impl_->controller.to_camera();
 
     // Per-frame gizmo push: core owns all the plane math, so the renderer
@@ -158,6 +201,7 @@ SpawnResult Editor::spawn(Shape shape, Op op, float x, float y) {
     }
 
     select(id); // same path as select(): sets selected + marks lines dirty
+    impl_->requestRemesh();
     return SpawnResult{id, snapped};
 }
 
@@ -184,6 +228,7 @@ void Editor::deleteSelectedNode() {
     // impl_->scene.find(impl_->selected), which is null once selected is
     // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
     impl_->renderer.set_scene_lines_dirty();
+    impl_->requestRemesh();
 }
 
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
@@ -277,6 +322,7 @@ void Editor::updateDrag(float x, float y) {
 void Editor::endDrag() {
     impl_->drag.active = false;
     impl_->drag.node_id = kInvalidNode;
+    impl_->requestRemesh();
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {
@@ -313,8 +359,12 @@ void Editor::setNodeOp(int32_t nodeId, Op op) {
     if (node == nullptr) {
         return;
     }
+    const bool changed = node->op != op;
     node->op = op;
     impl_->renderer.set_scene_lines_dirty(); // op changes vertex colors
+    if (changed) {
+        impl_->requestRemesh(); // op is part of the CSG result; a no-op set shouldn't spawn a job
+    }
 }
 
 void Editor::beginScale() {
@@ -361,6 +411,7 @@ void Editor::updateScale(float pixelDeltaY) {
 void Editor::endScale() {
     impl_->scale_drag.active = false;
     impl_->scale_drag.node_id = kInvalidNode;
+    impl_->requestRemesh();
 }
 
 Vec3f Editor::nodeScale(int32_t nodeId) const {
