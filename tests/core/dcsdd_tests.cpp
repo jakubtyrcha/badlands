@@ -4,6 +4,7 @@
 #include <cfloat>
 #include <cmath>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <shapeshifter/ShapeshifterCore.h>

@@ -6,6 +6,7 @@
 #include <cfloat>
 #include <cmath>
 #include <unordered_map>
+#include <utility>
 
 namespace sq {
 
