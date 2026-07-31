@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <glm/gtc/matrix_transform.hpp>  // glm::translate, glm::scale
 #include "game/geometry/leaf_voxelizer.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
@@ -317,6 +318,43 @@ TEST_CASE(
         CHECK(tet_count > 0u);
       } else {
         CHECK(tet_count == 0u);  // pins the known gap; fails loudly if it's ever fixed unnoticed
+
+        // Pins the Phase 3 review fix: model_viewer_view.cpp's voxel-mode
+        // world_bounds union must skip an empty crown -- r.local_bounds is
+        // Aabb::Empty() (min=+FLT_MAX, max=-FLT_MAX sentinel corners) here,
+        // and TransformedBy would smear those sentinels through xf into
+        // world_bounds if unioned unguarded, corrupting orbit-camera framing
+        // (reviewer-reproduced: tiny, distant tree). Exercise the SAME
+        // vertex_count>0 guard the viewer now applies, against this real
+        // empty-crown case (not a synthetic all-zero mesh).
+        const glm::mat4 xf =
+            glm::translate(
+                glm::mat4(1.0f),
+                glm::vec3(0.0f, -bark.local_bounds.min.y * s, 0.0f)) *
+            glm::scale(glm::mat4(1.0f), glm::vec3(s));
+        const Aabb bark_world_bounds = bark.local_bounds.TransformedBy(xf);
+
+        Aabb guarded = bark_world_bounds;
+        if (r.mesh.vertex_count > 0) {
+          guarded = guarded.Union(r.local_bounds.TransformedBy(xf));
+        }
+        const bool guarded_matches_bark_only =
+            guarded.min == bark_world_bounds.min &&
+            guarded.max == bark_world_bounds.max;
+        CHECK(guarded_matches_bark_only);
+
+        // Contrast: the same union WITHOUT the guard corrupts world_bounds
+        // with the Aabb::Empty() sentinel's transformed garbage -- proves
+        // the guard is load-bearing, not defensive dead code.
+        const Aabb unguarded =
+            bark_world_bounds.Union(r.local_bounds.TransformedBy(xf));
+        const bool corrupted = std::abs(unguarded.min.x) > 1e6f ||
+                               std::abs(unguarded.min.y) > 1e6f ||
+                               std::abs(unguarded.min.z) > 1e6f ||
+                               std::abs(unguarded.max.x) > 1e6f ||
+                               std::abs(unguarded.max.y) > 1e6f ||
+                               std::abs(unguarded.max.z) > 1e6f;
+        CHECK(corrupted);
       }
     }
   }

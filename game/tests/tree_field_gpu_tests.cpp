@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "core/util/cpu_image.hpp"
@@ -90,6 +91,43 @@ TestGpu& GetTestGpu() {
     return t;
   }();
   return *g;
+}
+
+struct CapturedError {
+  wgpu::ErrorType type = wgpu::ErrorType::NoError;
+  std::string message;
+};
+
+// Runs `fn` (expected to trigger the full-frame render) inside a Dawn
+// validation-error scope and returns what it observed. Mirrors
+// gpu_instance_tests.cpp's RunCapturingValidationErrors (:871-894): every
+// other full-frame GPU test in the codebase wraps SceneRenderer::Render in
+// this pattern -- the default device error callback only logs to stderr and
+// cannot fail a test, so a WGSL/bind-group validation error introduced by
+// this crown's VoxelFoliage material would otherwise go unnoticed here.
+CapturedError RunCapturingValidationErrors(TestGpu& g,
+                                           const std::function<void()>& fn) {
+  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+  fn();
+
+  CapturedError result;
+  bool done = false;
+  g.device.PopErrorScope(
+      wgpu::CallbackMode::AllowProcessEvents,
+      [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type,
+          wgpu::StringView message) {
+        if (status == wgpu::PopErrorScopeStatus::Success) {
+          result.type = type;
+          result.message = message.length > 0
+                                ? std::string(message.data, message.length)
+                                : std::string();
+        }
+        done = true;
+      });
+  while (!done) {
+    g.instance.ProcessEvents();
+  }
+  return result;
 }
 
 // Voxelizes OakPreset's leaf cards with default LeafVoxelizeOptions -- the
@@ -165,7 +203,11 @@ CpuImage RenderOakCrownFrame(TestGpu& g, const Camera& camera,
                       g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
   renderer.MutableFogConfig().enabled = false;  // would haze the readback
 
-  renderer.Render(camera, registry, scene_context, rt.GetView());
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    renderer.Render(camera, registry, scene_context, rt.GetView());
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
   test::WaitForGpu(g.instance, g.device, g.queue);
 
   TextureReadback readback(g.instance, g.device, g.queue);

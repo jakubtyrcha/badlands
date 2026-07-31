@@ -35,10 +35,10 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 // units are tens-of-meters tall, which frames far away and reads tiny).
 constexpr float kTreePreviewHeight = 8.0f;
 
-// Multi mode ("LOD 3"): a grid of one instanced tree model with dynamic GPU
+// Multi mode ("LOD 4"): a grid of one instanced tree model with dynamic GPU
 // LOD (distance-based, chosen live by InstancedMeshField::Cull -- NOT the
 // manual kDefaultLodRatios switch below (mesh_lod.hpp), which only applies to
-// the single-tree 0/1/2 paths).
+// the single-tree Voxel L0/L1/L2 (lod_level_ 1/2/3) paths).
 constexpr int kGridN = 16;
 constexpr float kGridSpacing = 8.0f;
 // Golden angle: a constant per-instance yaw increment that avoids any
@@ -243,7 +243,7 @@ void ModelViewerView::RebuildScene() {
   // repopulates it. Clearing unconditionally (rather than only in the
   // non-Multi branches) also releases the previous Multi-mode field's GPU
   // resources the moment a rebuild switches away from it (generator change
-  // or LOD 3 -> 0/1/2). field_ptr_ is also nulled for hygiene/safety.
+  // or LOD 4 -> 0/1/2/3). field_ptr_ is also nulled for hygiene/safety.
   scene_context_.instanced_field_count = 0;
   tree_field_.reset();
   field_ptr_ = nullptr;
@@ -261,8 +261,9 @@ void ModelViewerView::RebuildScene() {
   if (multi) {
     // Multi mode: a kGridN x kGridN instanced grid of the selected tree,
     // GPU-culled with dynamic distance LOD (InstancedMeshField::Cull) --
-    // NOT the manual kDefaultLodRatios switch the single-tree 0/1/2 paths use
-    // below. Skips the single-tree bark/leaf entities entirely.
+    // NOT the manual kDefaultLodRatios switch the single-tree Voxel L0/L1/L2
+    // (lod_level_ 1/2/3) paths use below. Skips the single-tree bark/leaf
+    // entities entirely.
     const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
     std::unique_ptr<TreeField> field = BuildTreeField(
         device_, queue_, *pipeline_gen_, *gen.tree,
@@ -408,16 +409,19 @@ void ModelViewerView::RebuildScene() {
       voxel_opts.cell_size = kFoliageVoxelWorldSizes[lod_level_ - 1] / s;
       TexturedMeshResult voxels = VoxelizeLeafCards(
           leaves.mesh, gen.tree->leaves.silhouette, voxel_opts);
-      // Voxel shell exceeds the source cards' AABB (tets overscale past
-      // their cell), so union rather than reuse the card bounds.
-      world_bounds = world_bounds.Union(voxels.local_bounds.TransformedBy(xf));
       leaf_tris_ = static_cast<int>(voxels.mesh.indices.size() / 3);
 
       // Mirrors the Original branch's vertex_count guard above -- a tree
       // preset with leaves disabled (or too sparse to clear
-      // occupancy_fraction at this cell size) voxelizes to an empty mesh;
-      // skip the entity rather than upload a zero-vertex GPU buffer.
+      // occupancy_fraction at this cell size) voxelizes to an empty mesh.
+      // Guard BOTH the entity add and the bounds union: an empty
+      // TexturedMeshResult's local_bounds is Aabb::Empty() (min=+FLT_MAX,
+      // max=-FLT_MAX sentinel corners), and TransformedBy would smear those
+      // sentinels into world_bounds, corrupting orbit framing.
       if (voxels.mesh.vertex_count > 0) {
+        // Voxel shell exceeds the source cards' AABB (tets overscale past
+        // their cell), so union rather than reuse the card bounds.
+        world_bounds = world_bounds.Union(voxels.local_bounds.TransformedBy(xf));
         AddMeshEntity(
             scene_, "leaves", std::move(voxels),
             matlib_.VoxelFoliage(gen.tree->leaves.tint, 0.9f,

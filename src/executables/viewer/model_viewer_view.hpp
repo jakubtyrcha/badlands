@@ -151,7 +151,7 @@ class ModelViewerView : public AppView {
   // material factories. Not owned; outlives this view (see render_context.hpp).
   GpuPipelineGenerator* pipeline_gen_ = nullptr;
 
-  // Multi-mode instanced tree grid. Built in RebuildScene when lod_level_==3,
+  // Multi-mode instanced tree grid. Built in RebuildScene when lod_level_==4,
   // reset (and scene_context_.instanced_field_count cleared) otherwise.
   // field_ptr_ is the stable single-element array scene_context_.
   // instanced_fields points at (SceneContext::instanced_fields is
