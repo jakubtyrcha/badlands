@@ -47,23 +47,32 @@ const float kYawIncrement = glm::radians(137.508f);
 // Larger than the single-tree kFloorSize -- the 16x16 grid at kGridSpacing
 // spans 120 world units; 160 gives it a visible margin.
 constexpr float kMultiFloorSize = 160.0f;
-// GPU LOD thresholds (near/mid boundaries) sized to the default orbit framing
-// of the 16x16, 8.0-spacing grid, so the near/mid/far rows land in different
-// LOD bands with visible geometric detail contrast.
-constexpr std::array<float, 2> kMultiLodThresholds = {95.0f, 135.0f};
+// GPU LOD thresholds (near/mid boundaries), retuned for volumetric-foliage
+// Phase 5's voxel-crown fields (the pre-Phase-5 {95, 135} values were tuned
+// for the old billboard-card leaf field). Derivation: solve
+// kFoliageVoxelTargetPx's own world_size = target_px * distance / focal_px
+// formula (see that constant's comment below) for distance, using each
+// LOD's own kFoliageVoxelWorldSizes entry as `world_size` --
+// distance = world_size * focal_px / target_px = world_size * 935 / 8.
+// LOD0->LOD1 (world_size = kFoliageVoxelWorldSizes[0] = 0.15m): ~17.5m,
+// rounded to 18. LOD1->LOD2 (world_size = kFoliageVoxelWorldSizes[1] =
+// 0.30m): ~35.1m, rounded to 36. Screenshot-tune in Phase 6.
+constexpr std::array<float, 2> kMultiLodThresholds = {18.0f, 36.0f};
 
 // Voxel-crown LOD (volumetric-foliage Phase 3): three progressively coarser
 // tet-voxelization cell sizes, one per Voxel L0/L1/L2 mode
 // (kFoliageVoxelWorldSizes[lod_level_ - 1]), given in WORLD (preview) space
 // -- RebuildScene converts to the tree's own native units by dividing by `s`
 // (the same kTreePreviewHeight rescale bark/leaves already go through) before
-// passing it to LeafVoxelizeOptions::cell_size. kFoliageVoxelTargetPx is not
-// consumed yet (Phase 3 is a manual mode switch, no distance-based
-// selection) -- it documents the screen-space budget the sizes below were
-// derived from, for whichever later phase adds automatic LOD selection:
-// world_size = target_px * distance / focal_px, i.e. a world-space threshold
-// distance = size * focal_px / target_px. At 1920x1080/60deg vertical fovy,
-// focal_px = (height/2) / tan(fovy/2) = 540 / tan(30deg) ~= 935.
+// passing it to LeafVoxelizeOptions::cell_size. kFoliageVoxelTargetPx itself
+// is not read by any distance-based selection (Voxel L0/L1/L2, lod_level_
+// 1..3, is still a manual mode switch) -- it documents the screen-space
+// budget the sizes below were derived from: world_size = target_px *
+// distance / focal_px, i.e. a world-space threshold distance = size *
+// focal_px / target_px. At 1920x1080/60deg vertical fovy, focal_px =
+// (height/2) / tan(fovy/2) = 540 / tan(30deg) ~= 935. kMultiLodThresholds
+// above (Phase 5) DOES derive its distance-based GPU LOD cutoffs from this
+// same formula, applied to Multi mode's own per-LOD voxel sizes.
 constexpr float kFoliageVoxelTargetPx = 8.0f;
 constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.30f, 0.60f};
 
@@ -265,10 +274,37 @@ void ModelViewerView::RebuildScene() {
     // (lod_level_ 1/2/3) paths use below. Skips the single-tree bark/leaf
     // entities entirely.
     const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
-    std::unique_ptr<TreeField> field = BuildTreeField(
-        device_, queue_, *pipeline_gen_, *gen.tree,
-        LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_, capacity,
-        kMultiLodThresholds);
+
+    // BuildTreeField (volumetric-foliage Phase 5) takes one pre-voxelized
+    // leaf-crown mesh per LOD rather than voxelizing internally, so `s` (the
+    // preview rescale factor) must be known BEFORE calling it, to convert
+    // kFoliageVoxelWorldSizes (preview-space) into native-unit cell sizes --
+    // generate the skeleton/bark/leaves here to learn `s` and voxelize.
+    // BuildTreeField below regenerates its own bark internally from the same
+    // (options, skeleton) -- byte-identical, since generation is
+    // deterministic (see tree_field.cpp's own "generate once" comment) --
+    // so this is one extra generation pass, not a divergent source of truth.
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
+    const TexturedMeshResult bark_for_scale =
+        GenerateTreeMesh(*gen.tree, skeleton);
+    const float bark_h = bark_for_scale.local_bounds.max.y -
+                         bark_for_scale.local_bounds.min.y;
+    const float s = kTreePreviewHeight / std::max(bark_h, 0.001f);
+
+    const TexturedMeshResult leaves_for_voxelize =
+        GenerateLeafMesh(*gen.tree, skeleton);
+    std::array<TexturedMeshResult, GpuInstanceRenderer::kMaxLods>
+        leaf_lod_meshes;
+    for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
+      LeafVoxelizeOptions voxel_opts;
+      voxel_opts.cell_size = kFoliageVoxelWorldSizes[lod] / s;
+      leaf_lod_meshes[lod] = VoxelizeLeafCards(
+          leaves_for_voxelize.mesh, gen.tree->leaves.silhouette, voxel_opts);
+    }
+
+    std::unique_ptr<TreeField> field =
+        BuildTreeField(device_, queue_, *pipeline_gen_, *gen.tree,
+                       leaf_lod_meshes, capacity, kMultiLodThresholds);
     if (!field) {
       // Mirrors the malformed-generator branch further down: log and bail
       // with a floor-only scene, leaving the orbit framing unchanged (an
@@ -282,10 +318,10 @@ void ModelViewerView::RebuildScene() {
 
     // Same scale + rest-on-floor transform the single-tree path derives
     // from bark.local_bounds (the `else` branch below), so a Multi-mode
-    // grid cell at the origin matches the single-tree preview exactly.
-    const float h =
-        field->bark_local_bounds.max.y - field->bark_local_bounds.min.y;
-    const float s = kTreePreviewHeight / std::max(h, 0.001f);
+    // grid cell at the origin matches the single-tree preview exactly. `s`
+    // was already computed above (from a deterministically bit-identical
+    // bark regeneration) -- reused here rather than re-derived from
+    // field->bark_local_bounds.
     const glm::mat4 xf =
         glm::translate(glm::mat4(1.0f),
                       glm::vec3(0.0f, -field->bark_local_bounds.min.y * s,
