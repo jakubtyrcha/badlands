@@ -7,6 +7,7 @@
 #include "dcsdd.h" // TriangleMesh; kept out of renderer.h, see the forward declaration there
 #include "lines.h"
 #include "scene.h"
+#include "sdf.h" // pack_scene, kMaxRaymarchNodes -- the raymarch pass's per-frame node upload
 
 namespace sq {
 
@@ -124,6 +125,40 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
         assert(false && "failed to create mesh render pipeline state");
     }
 
+    // Raymarch PSO: per-pixel sphere-traced primary view (R1), drawn first
+    // in render() so the mesh/lines/gizmo passes composite on top of it via
+    // the shared depth buffer. No vertex buffer (fullscreen triangle from
+    // vertex_id), fragment writes real depth, no blending -- same opaque
+    // shape as mesh_pso_ above.
+    NS::SharedPtr<MTL::Function> raymarch_vertex_fn = NS::TransferPtr(
+        library_->newFunction(NS::String::string("raymarch_vertex", NS::UTF8StringEncoding)));
+    NS::SharedPtr<MTL::Function> raymarch_fragment_fn = NS::TransferPtr(
+        library_->newFunction(NS::String::string("raymarch_fragment", NS::UTF8StringEncoding)));
+    if (!raymarch_vertex_fn) {
+        fprintf(stderr, "failed to create raymarch_vertex: missing from default.metallib\n");
+        assert(false && "raymarch_vertex missing from default.metallib");
+    }
+    if (!raymarch_fragment_fn) {
+        fprintf(stderr, "failed to create raymarch_fragment: missing from default.metallib\n");
+        assert(false && "raymarch_fragment missing from default.metallib");
+    }
+
+    NS::SharedPtr<MTL::RenderPipelineDescriptor> raymarchPipelineDesc =
+        NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+    raymarchPipelineDesc->setVertexFunction(raymarch_vertex_fn.get());
+    raymarchPipelineDesc->setFragmentFunction(raymarch_fragment_fn.get());
+    raymarchPipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    raymarchPipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+    // No blending set: defaults to disabled, matching mesh_pso_'s opaque draw.
+
+    NS::Error* raymarch_error = nullptr;
+    raymarch_pso_ = NS::TransferPtr(device_->newRenderPipelineState(raymarchPipelineDesc.get(), &raymarch_error));
+    if (!raymarch_pso_) {
+        fprintf(stderr, "failed to create raymarch_pso_: %s\n",
+                raymarch_error ? raymarch_error->localizedDescription()->utf8String() : "unknown error");
+        assert(false && "failed to create raymarch render pipeline state");
+    }
+
     // Two depth-stencil states, both created once here (stencil unused by
     // either -- default front/backFaceStencil is nil, i.e. disabled).
     // Depth convention: the pinned projection maps near->0/far->1 (see
@@ -212,6 +247,18 @@ void Renderer::hide_gizmo() {
     gizmo_verts_.clear();
 }
 
+RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
+                                          float drawable_width_px, float drawable_height_px,
+                                          int32_t node_count, float near, float far) {
+    RaymarchUniforms uniforms;
+    uniforms.view_proj = view_proj;
+    uniforms.inv_view_proj = inv_view_proj;
+    uniforms.params0 = simd_make_float4(drawable_width_px, drawable_height_px,
+                                         static_cast<float>(node_count), 0.0f);
+    uniforms.params1 = simd_make_float4(near, far, 0.0f, 0.0f);
+    return uniforms;
+}
+
 void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id,
                        const Camera& camera) {
     if (!device_ || !layer_ || !drawable) return;
@@ -265,9 +312,40 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     LineUniforms uniforms;
     uniforms.view_proj = camera.view_proj();
 
-    // Draw order: mesh (depth-tested) first, then scene lines, then the
+    // Raymarch pass: reuses raymarch_scratch_ (cleared + refilled by
+    // pack_scene's out-param overload) rather than allocating a fresh vector
+    // every frame -- once the scene's node count stabilizes, this loop does
+    // no heap allocation at all. Packed fresh each frame (not dirty-tracked
+    // like scene_lines_): the whole point of raymarch is that it can never
+    // go stale, so there is no staleness state to track.
+    pack_scene(doc, raymarch_scratch_);
+    const int32_t raymarch_node_count = static_cast<int32_t>(raymarch_scratch_.size());
+
+    // Draw order: raymarch (depth-tested, writes real per-pixel depth) first,
+    // then the mesh (depth-tested) — stage-2 leftover, currently unfed per
+    // R2's plan but the pipeline stays wired — then scene lines, then the
     // gizmo — both depth-ignored so they stay in painter's order on top of
-    // the mesh and of each other, exactly as before D7.
+    // everything.
+    if (raymarch_node_count > 0) {
+        // Empty-scene skip: cheaper than dispatching a full-screen trace
+        // that is guaranteed to march to `far` and miss on every pixel.
+        // Reuses uniforms.view_proj (just computed above) instead of calling
+        // camera.view_proj() a second time this frame.
+        const simd_float4x4 inv_view_proj = simd_inverse(uniforms.view_proj);
+        const RaymarchUniforms raymarch_uniforms = build_raymarch_uniforms(
+            uniforms.view_proj, inv_view_proj, static_cast<float>(drawable->texture()->width()),
+            static_cast<float>(drawable->texture()->height()), raymarch_node_count, Camera::kNear, Camera::kFar);
+
+        // Buffer indices 0/1 hardcoded to match raymarch.metal's
+        // [[buffer(0)]]/[[buffer(1)]] — same setFragmentBytes convention as
+        // the vertex-side buffers elsewhere in this function.
+        encoder->setRenderPipelineState(raymarch_pso_.get());
+        encoder->setDepthStencilState(depth_test_.get());
+        encoder->setFragmentBytes(&raymarch_uniforms, sizeof(RaymarchUniforms), 0);
+        encoder->setFragmentBytes(raymarch_scratch_.data(), raymarch_scratch_.size() * sizeof(SdfNode), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+    }
+
     if (mesh_vertex_count_ > 0) {
         encoder->setRenderPipelineState(mesh_pso_.get());
         encoder->setDepthStencilState(depth_test_.get());

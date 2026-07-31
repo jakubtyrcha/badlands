@@ -20,12 +20,12 @@ float sd_ellipsoid(simd_float3 q, simd_float3 radii) {
     return sdf_sd_ellipsoid(q, radii);
 }
 
-std::vector<SdfNode> pack_scene(const SceneDocument& doc) {
+void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
+    out.clear();
     const std::vector<Node>& nodes = doc.nodes();
     const size_t count = std::min(nodes.size(), static_cast<size_t>(kMaxRaymarchNodes));
 
-    std::vector<SdfNode> packed;
-    packed.reserve(count);
+    out.reserve(count); // no-op once out's capacity already covers count
     for (size_t i = 0; i < count; ++i) {
         const Node& node = nodes[i];
         const simd_float3 half = node.scale * 0.5f;
@@ -34,8 +34,13 @@ std::vector<SdfNode> pack_scene(const SceneDocument& doc) {
                                   (node.shape == Shape::Cube) ? 0.0f : 1.0f);
         sn.half_extents_op =
             sdf_make4(half.x, half.y, half.z, (node.op == Op::Add) ? 0.0f : 1.0f);
-        packed.push_back(sn);
+        out.push_back(sn);
     }
+}
+
+std::vector<SdfNode> pack_scene(const SceneDocument& doc) {
+    std::vector<SdfNode> packed;
+    pack_scene(doc, packed);
     return packed;
 }
 

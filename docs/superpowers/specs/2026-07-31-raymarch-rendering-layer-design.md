@@ -32,9 +32,16 @@ New header compiling as both MSL and C++ (same idiom as `shared_types.h`):
 ## 2. Raymarch pass — `shaders/raymarch.metal`
 
 - Fullscreen triangle from `vertex_id`, no vertex buffer.
-- `RaymarchUniforms { float4x4 view_proj; float4x4 inv_view_proj; float4 eye;
-  float4 params }` (node count, near, far in params; static_asserted, dual-compile,
-  lives in `shared_types.h` with the other GPU-shared render types).
+- `RaymarchUniforms { float4x4 view_proj; float4x4 inv_view_proj; float4 params0;
+  float4 params1 }` (params0 = drawable width/height/node_count/0, params1 =
+  near/far/0/0; static_asserted, dual-compile, lives in `shared_types.h` with the
+  other GPU-shared render types).
+  AMENDMENT (R1, 2026-07-31): dropped the `eye` field this section originally
+  specified. R0 proved the ray origin is recoverable exactly from
+  `inv_view_proj` alone (column 2, divided by its own w -- see
+  `sdf_ray_for_pixel`'s doc comment in `sdf_scene.h`), so a stored eye field
+  would be dead weight; `params0`/`params1` carry everything else the shader
+  needs instead of the single `params` field this section originally specified.
 - Fragment: generate ray via the shared formula; sphere-trace — start at near (0.1),
   max 128 steps, hit epsilon scaled with distance (`max(1e-4, 5e-4·t)`), tmax = far
   (100). Miss → `discard_fragment()` (clear color shows through).

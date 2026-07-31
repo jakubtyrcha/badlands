@@ -7,11 +7,22 @@
 #include <vector>
 #include <shared_types.h>
 
+#include "sdf_scene.h" // SdfNode -- the raymarch pass's per-frame node scratch buffer
+
 namespace sq {
 
 class SceneDocument;
 struct Camera;
 struct TriangleMesh; // dcsdd.h; kept out of this header, see renderer.cpp
+
+// Pure, allocation-free per-frame RaymarchUniforms builder -- pulled out of
+// Renderer::render() so it's directly unit-testable (see
+// tests/core/renderer_tests.cpp) without any Metal device/drawable involved.
+// `near`/`far` and `node_count` ride in as plain values rather than a Camera
+// reference so this has no dependency beyond shared_types.h's struct layout.
+RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
+                                          float drawable_width_px, float drawable_height_px,
+                                          int32_t node_count, float near, float far);
 
 class Renderer {
 public:
@@ -44,7 +55,8 @@ private:
     NS::SharedPtr<MTL::RenderPipelineState> line_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> line_blend_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> mesh_pso_;
-    NS::SharedPtr<MTL::DepthStencilState> depth_test_;   // Less, write ON -- the mesh
+    NS::SharedPtr<MTL::RenderPipelineState> raymarch_pso_;
+    NS::SharedPtr<MTL::DepthStencilState> depth_test_;   // Less, write ON -- the mesh, the raymarch pass
     NS::SharedPtr<MTL::DepthStencilState> depth_ignore_; // Always, write OFF -- lines + gizmo
 
     NS::SharedPtr<MTL::Texture> depth_texture_;
@@ -57,6 +69,12 @@ private:
 
     NS::SharedPtr<MTL::Buffer> mesh_vertices_;
     size_t mesh_vertex_count_ = 0;
+
+    // Raymarch pass: reused every frame (pack_scene's out-param overload
+    // clears + refills it in place) so packing the scene doesn't allocate
+    // once capacity has grown to the scene's steady-state node count.
+    // Uploaded via setFragmentBytes, not a Buffer -- no dirty tracking needed.
+    std::vector<SdfNode> raymarch_scratch_;
 
     bool gizmo_visible_ = false;
     std::vector<LineVertex> gizmo_verts_;

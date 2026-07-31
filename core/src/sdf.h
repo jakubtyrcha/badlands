@@ -49,6 +49,14 @@ inline constexpr int32_t kMaxRaymarchNodes = 128;
 // truncated result.
 std::vector<SdfNode> pack_scene(const SceneDocument& doc);
 
+// Out-param overload: same packing as above, but clears and fills the
+// caller-owned `out` vector in place instead of returning a fresh one. Lets a
+// per-frame caller (the raymarch renderer) reuse one scratch vector across
+// frames -- `out`'s capacity is only grown on the first call or two (until it
+// reaches the scene's steady-state node count), never reallocated every
+// frame after that.
+void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out);
+
 // Evaluates the scene's CSG SDF at a world-space point by combining every
 // node's local SDF in document order (Add -> min(d, d_node), Subtract ->
 // max(d, -d_node), starting d = +FLT_MAX). Nullopt for an empty scene (no

@@ -143,6 +143,49 @@ TEST_CASE("pack_scene: a >128-node document caps at kMaxRaymarchNodes, keeping t
     CHECK(packed.back().pos_shape.x == doctest::Approx(127.0f));
 }
 
+// --- pack_scene: out-param overload (R1's per-frame scratch-buffer helper) --
+
+TEST_CASE("pack_scene(doc, out): matches the return-by-value overload, and "
+          "reusing `out` across a shrinking scene clears the stale tail") {
+    SceneDocument doc3;
+    for (int32_t i = 0; i < 3; ++i) {
+        Node n;
+        n.id = i + 1;
+        n.shape = Shape::Cube;
+        n.op = Op::Add;
+        n.position = {static_cast<float>(i), 0.0f, 0.0f};
+        n.scale = {1.0f, 1.0f, 1.0f};
+        doc3.add(n);
+    }
+
+    std::vector<SdfNode> out;
+    pack_scene(doc3, out);
+    const std::vector<SdfNode> expected3 = pack_scene(doc3);
+    REQUIRE(out.size() == expected3.size());
+    for (size_t i = 0; i < out.size(); ++i) {
+        check_float3_approx(out[i].pos_shape.xyz, expected3[i].pos_shape.xyz);
+        check_float3_approx(out[i].half_extents_op.xyz, expected3[i].half_extents_op.xyz);
+    }
+
+    // Reuse the same `out` (nonempty, capacity already >= 1) for a
+    // single-node scene: the leftover entries from the 3-node pack above
+    // must not survive -- pack_scene's out.clear() is the guard against a
+    // caller (the renderer's per-frame scratch vector) observing stale
+    // nodes from a larger previous scene.
+    SceneDocument doc1;
+    Node n1;
+    n1.id = 1;
+    n1.shape = Shape::Sphere;
+    n1.op = Op::Add;
+    n1.position = {9.0f, 9.0f, 9.0f};
+    n1.scale = {2.0f, 2.0f, 2.0f};
+    doc1.add(n1);
+
+    pack_scene(doc1, out);
+    REQUIRE(out.size() == 1u);
+    check_float3_approx(out[0].pos_shape.xyz, simd_float3{9.0f, 9.0f, 9.0f});
+}
+
 // --- sdf_ray_for_pixel <-> Camera::ray_through_view_point agreement --------
 
 TEST_CASE("sdf_ray_for_pixel agrees with Camera::ray_through_view_point at center, "
