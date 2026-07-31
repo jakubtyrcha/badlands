@@ -57,7 +57,48 @@ per snapshot. `lakes.py` / `lakestats.py` are post-hoc priority-flood analysis.
   water cells, so `Qm3s` inside a lake decays to zero under the EMA and every
   lake starves itself out of existence.
 
+- **Lake deposition must be cut off after a few in-lake steps.** Every particle
+  steers at the same spill cell, so shedding all the way there put the thickest
+  deposit at the OUTLET. 4 steps is right: 2 is too short to deposit near the
+  inlet, none reproduces the defect.
+- **Rebuild cadence must be in the converged regime.** `lake_interval` sets how
+  stale the hypsometry is, so a coarse value keeps a silted-up basin looking
+  alive. Intervals 5/10/25 agree (0% wet); 50 and 100 report 2.66%/2.25%. The
+  old default of 50 was in the lagging regime.
+
+## Verification
+
+`protogen --test` — 23 assertions on 32–64 cell grids at the production 16 m
+cell size, under a second. Every bug above has one. Absolute numbers check
+against analytic answers: mass conserves to 0.16%, discharge matches
+`runoff × area`, lake volume equals basin capacity, lake surfaces level to
+0.0000 m.
+
+**The single most productive diagnostic in this work: a real logic change that
+produces bit-identical output.** It caught two masked parameters (the lobe-length
+clamp hiding `settling_velocity`, the wander cap hiding jet turbulence) and
+disproved two wrong diagnoses of the cadence bug. `knob liveness` in the suite
+automates it.
+
+## Full-map runs
+
+| | 8 km (512²) | 16 km (1024²) |
+|---|---|---|
+| steps × drops | 3000 × 1024 | 3000 × 4096 |
+| runtime | 51 s | 5 min |
+| final relief | 879 m | 806 m |
+| lakes at end | **0** | **89** |
+| wet at end | 0.00% | 2.52% |
+
+**Lakes persist at 16 km but not at 8 km** — bigger basins outlast the sediment
+supply. Earlier notes calling lakes "transient" were reporting a
+scale-dependent result as a general one.
+
 ## Open
 
-- Lakes are transient: they peak early and are erased as drainage integrates.
-- Sediment dispersion is unverified — no synthetic fixture yet.
+- **Deepest lake reports 203 m** at 16 km, which is far too deep for that
+  footprint. Same signature as un-eroded fBm minima surviving as holes rather
+  than landforms; lake bathymetry is not trustworthy until chased down.
+- The particle pass is serial. Racy in-place writes would parallelise it the way
+  the reference does, at the cost of reproducibility.
+- No hillslope diffusion, so divides lower only very slowly.
