@@ -321,13 +321,15 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
     if (!reg.all_of<Position>(attacker)) {
         return;
     }
-    const float dist =
-        glm::distance(reg.get<Position>(attacker).pos, reg.get<Position>(target).pos);
-    if (dist > s.attack.range) {
-        return;  // stepped out of reach mid-swing
-    }
-
     if (s.attack.category == AttackCategory::Ranged) {
+        // NO range re-check for a shot. The arrow leaves the bow at the end of
+        // the draw and then homes on its target (advance_projectiles), so a
+        // target that backed off during the wind-up is chased by the arrow, not
+        // missed by it -- which is also what happened before commitment
+        // existed, when the projectile spawned the instant the attack was
+        // declared. Re-checking here would silently eat the shot AND its
+        // cooldown, and with both heroes and archers now actively backing away
+        // it would do so routinely.
         // The arrow leaves NOW, at the end of the draw. Everything it needs is
         // already captured on the strike, so it resolves correctly on arrival
         // even if the shooter dies mid-flight.
@@ -341,6 +343,14 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
         proj.attack_index = s.attack_index;
         proj.fire_millis = s.declared_millis;
         reg.emplace<Projectile>(reg.create(), proj);
+        return;
+    }
+
+    // Melee only: a swing at someone who stepped out of reach hits empty air.
+    // Not re-aimed, not refunded -- that is what makes backing off worth doing.
+    const float dist =
+        glm::distance(reg.get<Position>(attacker).pos, reg.get<Position>(target).pos);
+    if (dist > s.attack.range) {
         return;
     }
 

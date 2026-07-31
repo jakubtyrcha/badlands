@@ -50,17 +50,23 @@ struct CombatResult {
 // Deterministic: identical requests produce identical results.
 CombatResult resolve_attack(const CombatRequest& req);
 
-// The defender's tactical stats AS THEY COUNT RIGHT NOW -- the single place a
-// status is allowed to change what resolve_attack sees. A Stunned defender has
-// no ACTIVE defense: parry (defense) and evasion both read 0, because both are
-// things a defender DOES rather than wears. Armour is unaffected (it is worn),
-// and so is accuracy (that is the entity's own attacking, not its defending).
+// An entity's tactical stats AS THEY COUNT RIGHT NOW -- the single place a
+// status is allowed to change what resolve_attack sees, on EITHER side of the
+// request.
 //
-// Every CombatRequest.defender in the codebase goes through here, melee
-// (fire_attack) and projectile-arrival (advance_projectiles) alike -- which is
-// what makes "stunned means defenceless" true for a shot already in flight
-// when the stun lands, without either call site knowing about statuses.
-// Returns a default-constructed Combatant for an entity that has none.
+// Stunned zeroes the ACTIVE defense: parry (defense) and evasion both read 0,
+// because both are things a defender DOES rather than wears. Armour is
+// unaffected (it is worn). Cursed saps accuracy and armour but leaves evasion
+// alone -- a cursed fighter still dodges, it has just stopped warding.
+//
+// Every CombatRequest goes through here for BOTH `attacker` and `defender`:
+// melee (deliver_strike), the capture at declaration (declare_strike), the
+// skill pre-roll (build_cast_context) and projectile arrival
+// (advance_projectiles). That is what makes "stunned means defenceless" true
+// for a shot already in flight, and what makes a curse's accuracy penalty
+// reach the cursed entity's own swings -- which it does NOT if an attacker's
+// Combatant is read raw. Returns a default-constructed Combatant for an entity
+// that has none.
 Combatant effective_combatant(const entt::registry& reg, entt::entity e);
 
 // --- targeting + attack selection seams -------------------------------------

@@ -24,7 +24,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -209,11 +211,13 @@ int main(int argc, char** argv) {
     samples = std::max(1, samples);
     max_level = std::max(level, max_level);
 
-    // No <filesystem> dance: the tool is run from the repo root and the caller
-    // makes the directory, exactly like --record does for frame dumps.
-    const std::string mk = "mkdir -p '" + out_dir + "'";
-    if (std::system(mk.c_str()) != 0) {
-        std::fprintf(stderr, "duelsim: cannot create '%s'\n", out_dir.c_str());
+    // std::filesystem, not a shell: --out is user input, and interpolating it
+    // into a mkdir command lets a quote in the path run arbitrary commands.
+    std::error_code ec;
+    std::filesystem::create_directories(out_dir, ec);
+    if (ec && !std::filesystem::is_directory(out_dir)) {
+        std::fprintf(stderr, "duelsim: cannot create '%s': %s\n", out_dir.c_str(),
+                     ec.message().c_str());
         return 1;
     }
 

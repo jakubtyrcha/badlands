@@ -23,6 +23,11 @@ namespace {
 // and should make it the same way.
 constexpr float kSkirmishMargin = 1.5f;
 
+// How far inside the margin the opponent must get before the retreat is
+// re-issued. See the use site: without it, a held standoff writes one command
+// per tick into the determinism trace.
+constexpr float kSkirmishDeadBand = 0.5f;
+
 // Nearest alive building a monster may attack (enemy_targettable: Castle/House),
 // by distance to its approach tile ("door") -- the tile the rat walks to and
 // bites from. Returns its id and door.
@@ -119,7 +124,16 @@ void monster_think(BadlandsGame& game, uint32_t slot) {
             const float their_reach = tatk != nullptr ? melee_range(*tatk) : 0.0f;
             const float their_ranged = tatk != nullptr ? ranged_range(*tatk) : 0.0f;
             const float want = their_reach + kSkirmishMargin;
-            if (own_ranged > their_reach && their_ranged <= 0.0f && dist < want) {
+            // A DEAD BAND, not `dist < want`. The retreat goal is derived from
+            // the opponent's live position, so it drifts every tick -- and
+            // enqueue_move_to can only dedupe a near-identical point. Without
+            // the band a standoff appends a Point command per tick to
+            // command_log, which is the determinism trace and the replay input,
+            // and is exactly what that dedupe exists to prevent. Re-issuing
+            // only once the margin has actually been eaten into keeps the
+            // behaviour and drops the churn.
+            if (own_ranged > their_reach && their_ranged <= 0.0f &&
+                dist < want - kSkirmishDeadBand) {
                 const glm::vec2 away = pos - reg.get<Position>(target).pos;
                 const float len = glm::length(away);
                 if (len > 1e-4f) {

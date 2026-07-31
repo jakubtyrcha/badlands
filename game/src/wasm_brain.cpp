@@ -236,6 +236,10 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     if (game.registry.all_of<InsideBuilding>(e)) {
         push_status(BL_ST_INSIDE_BUILDING, 0);  // indefinite -- ends when the need is filled
     }
+    if (const int64_t cursed = remaining_millis_of(game.registry, e, StatusKind::Cursed);
+        cursed > 0) {
+        push_status(BL_ST_CURSED, cursed);
+    }
     if (const int64_t dis = remaining_millis_of(game.registry, e, StatusKind::Disengaged);
         dis > 0) {
         push_status(BL_ST_DISENGAGED, dis);

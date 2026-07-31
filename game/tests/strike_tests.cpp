@@ -207,6 +207,43 @@ TEST_CASE("a blow whiffs on a target that stepped out of reach", "[strike]") {
     CHECK(g.registry.get<Attacks>(b.ae).cooldown_remaining[0] > 0.0f);
 }
 
+TEST_CASE("a shot is NOT eaten by the target backing off during the draw", "[strike]") {
+    // An arrow leaves the bow at the end of the draw and then homes on its
+    // target, so a target that retreated mid-wind-up is chased by the arrow
+    // rather than missed by it -- which is also what happened before commitment
+    // existed. Re-checking weapon range at resolve would silently eat the shot
+    // AND its cooldown, routinely, now that heroes and archers both back away.
+    Bout b(/*wind_up=*/0.5f, /*recovery=*/0.0f, AttackCategory::Ranged);
+    BadlandsGame& g = b.game();
+    g.registry.get<Position>(b.ve).pos = glm::vec2{5.0f, 0.0f};
+    const float hp0 = b.victim_hp();
+
+    b.declare();
+    b.tick(5);
+    // Past the bow's 6.0 reach while the draw is still running.
+    g.registry.get<Position>(b.ve).pos = glm::vec2{9.0f, 0.0f};
+    b.tick(12);
+    CHECK(g.registry.view<Projectile>().size() >= 1);  // loosed anyway
+    b.tick(30);
+    CHECK(b.victim_hp() < hp0);  // and it arrived
+}
+
+TEST_CASE("a zero-wind-up strike has no cancellable window", "[strike][status]") {
+    // No wind-up means the blow is thrown the instant it is declared; only
+    // advance_strikes' position in the tick makes it observable in between.
+    // A stun landing in that gap must NOT interrupt it, or every legacy 0/0
+    // attack would become interruptible by command ordering alone.
+    Bout b(/*wind_up=*/0.0f, /*recovery=*/0.0f);
+    b.declare();
+    REQUIRE(striking(b.game().registry, b.ae));
+    CHECK_FALSE(cancel_strike(b.game(), b.ae));
+
+    const float hp0 = b.victim_hp();
+    apply_status(b.game(), b.ae, StatusKind::Stunned, 1000, UINT32_MAX);
+    b.tick(1);
+    CHECK(b.victim_hp() < hp0);  // the blow still landed
+}
+
 TEST_CASE("a zero-timing attack still resolves inside its own tick", "[strike]") {
     // Every un-authored attack, and every legacy fixture, is 0/0 -- those must
     // behave exactly as they did before commitment existed.

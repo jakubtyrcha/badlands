@@ -152,6 +152,10 @@ extern "C" {
 // Walked out of melee contact: can take NO action for a few seconds. Movement
 // and defense are untouched -- see game/src/movement.h's disengage penalty.
 #define BL_ST_DISENGAGED 5
+// Accuracy and armour sapped for a duration. Advisory like the rest: a brain
+// that can see it may choose to disengage-and-wait or press anyway. Adding a
+// STATUS VALUE changes no struct layout, so this is not an ABI break.
+#define BL_ST_CURSED 6
 
 // --- BlViewSelf --------------------------------------------------------------
 // This entity's own state: clock, identity, needs, and a summary of what the

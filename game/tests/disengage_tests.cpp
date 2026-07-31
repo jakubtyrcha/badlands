@@ -134,6 +134,25 @@ TEST_CASE("a separation nudge does not", "[disengage]") {
     CHECK_FALSE(has_status(c.game().registry, c.be, StatusKind::Disengaged));
 }
 
+TEST_CASE("a PURSUER is not punished for chasing", "[disengage]") {
+    // The case a bare "did it move" flag gets wrong, and the reason the scratch
+    // records a displacement instead. B backs away; A chases it. A moves every
+    // tick and the gap still opens past the hysteresis -- but A moved TOWARD
+    // its opponent, so it pays nothing. Punishing the chaser would invert the
+    // whole mechanic, since closing is exactly what a melee class must do.
+    Contact c;
+    c.walk_away(c.be, 40.0f);            // B retreats
+    c.walk_away(c.ae, 40.0f);            // A follows it
+    // A is slower than the gap opens, so the lock breaks while A is advancing.
+    c.game().registry.get<badlands::Stats>(c.ae).move_speed = 1.0f;
+    c.game().registry.get<badlands::Stats>(c.be).move_speed = 4.0f;
+    c.step(30);
+
+    CHECK_FALSE(c.game().registry.all_of<MeleeLock>(c.ae));
+    CHECK_FALSE(has_status(c.game().registry, c.ae, StatusKind::Disengaged));
+    CHECK(has_status(c.game().registry, c.be, StatusKind::Disengaged));  // B left
+}
+
 TEST_CASE("Disengaged refuses every action", "[disengage]") {
     Contact c;
     BadlandsGame& g = c.game();

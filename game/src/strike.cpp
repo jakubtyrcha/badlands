@@ -43,8 +43,11 @@ bool declare_strike(BadlandsGame& game, entt::entity e, int32_t attack_index,
         s.resolve_at_millis + millis_of(atk.defs[attack_index].recovery_seconds);
     s.attack_index = attack_index;
     s.target_slot = target_slot;
-    s.attacker = reg.get<Combatant>(e);   // captured: the blow is what it was
-    s.attack = atk.defs[attack_index];    // when it was thrown
+    // effective_combatant, NOT the raw component: a curse saps the accuracy of
+    // the cursed entity's OWN swings, and reading the component directly here
+    // would silently drop half of what Curse is authored to do.
+    s.attacker = effective_combatant(reg, e);  // captured: the blow is what it
+    s.attack = atk.defs[attack_index];         // was when it was thrown
     reg.emplace<StrikeInProgress>(e, s);
     return true;
 }
@@ -71,6 +74,16 @@ bool cancel_strike(BadlandsGame& game, entt::entity e) {
         return false;  // nothing committed, or already thrown -- not preventable
     }
     const StrikeInProgress s = reg.get<StrikeInProgress>(e);
+    if (s.resolve_at_millis <= s.declared_millis) {
+        // No wind-up at all means no cancellable WINDOW: the blow is thrown the
+        // instant it is declared, and only advance_strikes' position in the
+        // tick makes it observable in between. Without this an attack authored
+        // 0/0 -- every un-authored one, and every legacy fixture -- could be
+        // interrupted by a stun landing later in the SAME command drain, which
+        // it never could before commitment existed. Ordering-sensitive
+        // behaviour that no caller asked for.
+        return false;
+    }
     reg.erase<StrikeInProgress>(e);
     const glm::vec2 pos =
         reg.all_of<Position>(e) ? reg.get<Position>(e).pos : glm::vec2{0.0f, 0.0f};

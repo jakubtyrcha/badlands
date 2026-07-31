@@ -86,6 +86,7 @@ const
   BL_ST_STUNNED* = 4'i32
   # Walked out of melee contact: no actions at all for a few seconds.
   BL_ST_DISENGAGED* = 5'i32
+  BL_ST_CURSED* = 6'i32
 
   # badlands::SkillTrigger (game/include/badlands_sim.hpp), mirrored here
   # because brain_abi.h deliberately excludes that header -- the same
@@ -98,6 +99,9 @@ const
   # badlands::SkillId, same discipline. Only the ids a shipping brain names.
   BL_SKILL_CALCIFY* = 0'i32
   BL_SKILL_SHIELD_BASH* = 1'i32
+  BL_SKILL_CURSE* = 2'i32
+  BL_SKILL_DRESS_WOUNDS* = 3'i32
+  BL_SKILL_BACKSTAB* = 4'i32
 
 type
   BlViewSelf* {.packed.} = object

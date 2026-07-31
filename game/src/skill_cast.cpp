@@ -47,14 +47,33 @@ bool engaging_of(const entt::registry& reg, entt::entity caster, entt::entity ta
     if (caster == target) {
         return true;
     }
-    if (reg.all_of<MeleeLock>(target)) {
-        // Contact is contact: it is in a melee, and the caster is the one in
-        // reach of it.
-        return true;
+    // "Engaging THE CASTER", not "engaged with anybody". The distinction is the
+    // whole skill: a grave robber flanking a goblin that is locked with a
+    // friendly mercenary is the textbook backstab, and treating any melee lock
+    // as engagement would suppress the bonus in exactly the group fight it
+    // exists for.
+    //
+    // Two ways to be fighting this caster specifically:
+    //   * in melee contact WITH IT -- locked, and within its own reach of the
+    //     caster (MeleeLock records no partner, so the reach test is what names
+    //     one);
+    //   * chasing it -- an Attack intention whose engagement MoveTarget holds
+    //     the caster's entity (enqueue_engage, command.h).
+    if (reg.all_of<MeleeLock>(target) && reg.all_of<Position>(target) &&
+        reg.all_of<Position>(caster)) {
+        const auto* atk = reg.try_get<Attacks>(target);
+        const float reach = atk != nullptr ? melee_range(*atk) : 0.0f;
+        if (reach > 0.0f && glm::distance(reg.get<Position>(target).pos,
+                                          reg.get<Position>(caster).pos) <= reach) {
+            return true;
+        }
     }
     if (const auto* ci = reg.try_get<CurrentIntention>(target);
         ci != nullptr && ci->kind == IntentionKind::Attack) {
-        return true;
+        const auto* mt = reg.try_get<MoveTarget>(target);
+        if (mt != nullptr && mt->kind == MoveTarget::Kind::Entity && mt->entity == caster) {
+            return true;
+        }
     }
     return false;
 }
@@ -222,8 +241,9 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
     ctx.world_millis = game.world_millis;
 
     const uint32_t caster_slot = slot_for_entity(game, caster);
-    const Combatant caster_stats =
-        reg.all_of<Combatant>(caster) ? reg.get<Combatant>(caster) : Combatant{};
+    // effective_combatant, not the raw component -- the same rule declare_strike
+    // follows: a cursed caster's skill test rolls at its cursed accuracy.
+    const Combatant caster_stats = effective_combatant(reg, caster);
     const Attacks* atk = reg.try_get<Attacks>(caster);
     const glm::vec2 from = reg.get<Position>(caster).pos;
 

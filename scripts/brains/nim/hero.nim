@@ -170,8 +170,17 @@ proc meleeReach(v: HeroView): float32 =
 # is always the losing move, so the whole job is not being touched in the first
 # place.
 const
+  # Cast gates, mirrored from the skills' own authored data (skills.json) with
+  # the same hand-sync discipline kAttackCategoryRanged uses: the engine
+  # re-checks every one of them, so a mismatch costs a wasted wake, not
+  # correctness.
+  kDressWoundsHealthFrac: float32 = 0.5
+  kCurseRange: float32 = 7.0
+
   # Hold this far outside the threat's own reach.
   kStandoffMargin: float32 = 1.5
+  # ...and only back off again once this much of the margin has been eaten.
+  kStandoffDeadBand: float32 = 0.5
   # ...but only bother for something at least this fraction of our own weight.
   # Standing off from a rat costs shots for nothing.
   kStandoffThreatRatio: float32 = 0.5
@@ -300,17 +309,60 @@ proc brainTick(slot: int32): int32 =
       # at a threat actually in view (a locked-but-unseen opponent gives no
       # distance to gate on) and only inside melee reach, which is the same
       # gate validate_cast applies host-side.
-      let bash = readySkillSlot(v, BL_SKILL_SHIELD_BASH)
-      if bash >= 0 and v.hasThreat and v.threatDist <= meleeReach(v):
-        bl_enqueue_action(BL_ACT_USE_SKILL, targetSlot, bash)
+      # Skills, in priority order, at most ONE per wake: the engine stamps only
+      # the skill's own cooldown, so a cast and a swing can both land in a
+      # tick, but two casts in one wake is not a thing this brain does.
+      #
+      # Each gate mirrors what validate_cast (skill_cast.h) checks host-side,
+      # so a wake is not spent asking for a cast the engine will refuse.
+      var castSlot = -1'i32
+      var castTarget = targetSlot
+
+      # Dress wounds first: staying alive outranks any damage. SelfOnly, so it
+      # names the caster and needs no threat in view.
+      if v.healthFrac <= kDressWoundsHealthFrac:
+        let dress = readySkillSlot(v, BL_SKILL_DRESS_WOUNDS)
+        if dress >= 0:
+          castSlot = dress
+          castTarget = v.slot
+
+      # Backstab: melee-tested, and only worth its cooldown against something
+      # not already fighting us (the engine decides that, but asking while
+      # locked in a face-to-face melee spends the cooldown for an ordinary
+      # blow).
+      if castSlot < 0 and v.hasThreat and v.threatDist <= meleeReach(v) and
+         not v.meleeLocked:
+        let stab = readySkillSlot(v, BL_SKILL_BACKSTAB)
+        if stab >= 0:
+          castSlot = stab
+
+      # Shield bash: the mercenary's control tool, inside its own sword's reach.
+      if castSlot < 0 and v.hasThreat and v.threatDist <= meleeReach(v):
+        let bash = readySkillSlot(v, BL_SKILL_SHIELD_BASH)
+        if bash >= 0:
+          castSlot = bash
+
+      # Curse: no attack test, so it always lands -- open with it. Gated on the
+      # authored "range" constant, mirrored here (7.0, skills.json).
+      if castSlot < 0 and v.hasThreat and v.threatDist <= kCurseRange:
+        let curse = readySkillSlot(v, BL_SKILL_CURSE)
+        if curse >= 0:
+          castSlot = curse
+
+      if castSlot >= 0:
+        bl_enqueue_action(BL_ACT_USE_SKILL, castTarget, castSlot)
       # Move-shoot-move (v5): a hero that outranges what is coming at it backs
       # off to keep the margin, while still firing through the action channel
       # above -- the action is orthogonal to the intention, which is what makes
       # this expressible without a new intention kind. The shot's own wind-up
       # (game/src/strike.h) is what keeps this from being free: standing still
       # to shoot is exactly the ground the pursuer gains.
+      # Dead band, for the same reason monster_brain.cpp has one: the retreat
+      # point is derived from the threat's live position and so drifts every
+      # wake, which apply_intention cannot dedupe -- a held standoff would
+      # write a MoveTo into the command log every single wake.
       if not v.meleeLocked and wantsStandoff(v) and
-         v.threatDist < v.threatReach + kStandoffMargin:
+         v.threatDist < v.threatReach + kStandoffMargin - kStandoffDeadBand:
         let goal = standoffGoal(v)
         Suggestion(kind: BL_INT_MOVE_TO, activityLabel: ActCombat,
                    pointX: goal.x, pointZ: goal.z)
