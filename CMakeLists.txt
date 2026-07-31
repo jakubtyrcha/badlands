@@ -250,6 +250,9 @@ add_library(badlands_game_lib STATIC
     game/src/movement.cpp
     game/src/heroes.cpp
     game/src/skills.cpp
+    # Timed statuses (stun and whatever follows): timers only -- what a status
+    # DOES is enforced by the systems that read it (game/src/status.h).
+    game/src/status.cpp
     game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
@@ -584,6 +587,9 @@ add_executable(badlands_game_tests
     src/game/visual/world_labels.cpp
     # Skill vocabulary: catalog, grant table, Skills component (game/src/skills.h).
     game/tests/skills_tests.cpp
+    # Timed statuses: application/refresh/expiry + the cooldown sweep
+    # (game/src/status.h).
+    game/tests/status_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
     # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).

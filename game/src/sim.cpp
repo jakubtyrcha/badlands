@@ -20,6 +20,7 @@
 #include "placement.h"
 #include "progression.h"
 #include "skills.h"
+#include "status.h"
 #include "vision.h"
 
 #include "critter_brain.h"
@@ -182,6 +183,24 @@ void tick_world(BadlandsGame& g, float dt) {
                 std::max(0.0f, attacks.cooldown_remaining[i] - dt);
         }
     }
+
+    // Per-skill cooldowns, the same shape (one timer per learned skill). Float
+    // seconds like the attack timers above, not int64 ms like a status: a
+    // cooldown gates a DECISION (may I cast?) rather than dating a world fact,
+    // and it sits alongside SkillSpec::cooldown_seconds, which is authored in
+    // seconds.
+    for (auto [e, skills] : registry.view<Skills>().each()) {
+        for (int i = 0; i < skills.count && i < kMaxSkills; ++i) {
+            skills.cooldown_remaining[i] =
+                std::max(0.0f, skills.cooldown_remaining[i] - dt);
+        }
+    }
+
+    // Statuses expire on the integer clock, BEFORE anything reads them: the
+    // think dispatch, movement, and combat all gate on has_status further down
+    // this same tick, so a status whose last millisecond ran out must be gone
+    // by the time they look rather than granting one extra tick of effect.
+    advance_statuses(g);
 
     // Needs first: reserves drain (and refill, for anyone inside) before
     // anything looks at them, so a hero whose sleep just topped out is released

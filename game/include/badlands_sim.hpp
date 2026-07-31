@@ -189,6 +189,27 @@ struct ActivityWeights {
     }
 };
 
+// ---- statuses --------------------------------------------------------------
+// A timed condition on a character. Append-only id space, same discipline as
+// ActivityId/SkillId: never renumber, never reuse a value (the wire's BL_ST_*
+// mirrors these, and a status can outlive the tick it was applied on).
+//
+// A status is DATA + A TIMER here and nothing else: what a status DOES is
+// enforced by the systems that care about it (the think dispatch, movement,
+// the combat defender assembly), never by this vocabulary. That is what keeps
+// "stunned" from becoming a special case threaded through the sim -- each
+// system asks `has_status(...)` for itself, at the one place it already makes
+// its own decision.
+enum class StatusKind : int32_t {
+    None = 0,
+    Stunned,  // skips the think, freezes movement, zeroes the active defense
+};
+inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Stunned) + 1;
+// Fixed component capacity; matches BL_MAX_STATUSES (game/src/brain_abi.h).
+inline constexpr int32_t kMaxStatuses = 8;
+// Stable inspection name ("Stunned"); "-" for an out-of-range kind.
+const char* StatusName(int32_t kind);
+
 // ---- skills (identity only; defs/triggers live in game/src/skills.h) -------
 // Append-only id space, same discipline as ActivityId.
 enum class SkillId : int32_t {
@@ -752,6 +773,8 @@ enum class GameEventKind : int32_t {
     HeroDowned,          // a character's HP reached 0; actor = attacker (or NONE)
     HeroDied,            // reserved: true removal, distinct from downing. Not emitted yet.
     HeroLeveledUp,       // a hero crossed a level threshold; actor = hero slot, amount = new level
+    StatusApplied,       // a status was applied/refreshed; target = afflicted slot,
+                         // actor = who inflicted it, amount = the StatusKind
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and
