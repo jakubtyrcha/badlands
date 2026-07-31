@@ -326,3 +326,45 @@ TEST_CASE("terrain_blend: derived tangent basis orients the normal map") {
   CHECK(std::abs(int(v.r) - 128) < 25);
   CHECK(std::abs(int(v.g) - 128) < 25);
 }
+
+TEST_CASE("terrain_blend: height-lerped -- equal weights, the taller layer wins") {
+  // The blend is height-lerped (Mishkinis), not a linear cross-fade: each
+  // layer's displacement (carried in ARM alpha, see LoadPack) biases its weight
+  // so materials interlock -- pebbles poke through mud rather than dissolving
+  // into it.
+  //
+  // Two layers at EQUAL vertex weight (0.5/0.5). Layer 0 is red and sits low
+  // (disp 32/255); layer 1 is green and stands proud (disp 224/255). A linear
+  // blend would return the midpoint; the height-lerp must return essentially
+  // pure GREEN, because the height gap far exceeds the transition width.
+  TestGpu g = MakeGpu();
+  GpuPipelineGenerator pipeline_gen(g.device, FindShaderDirectory());
+  MaterialLibrary lib;
+  REQUIRE(lib.Initialize(g.device, g.queue, &pipeline_gen));
+
+  const std::array<uint8_t, 8> albedo_layers = {255, 0, 0, 255,    // 0: red
+                                                0, 255, 0, 255};   // 1: green
+  // R=AO(1) G=roughness(1) B=metal(0) A=DISPLACEMENT.
+  const std::array<uint8_t, 8> arm_layers = {255, 255, 0, 32,      // 0: low
+                                             255, 255, 0, 224};    // 1: high
+  MaterialLibrary::TerrainArrays arrays;
+  arrays.albedo.view =
+      CreateSolidColorArray(g.device, g.queue, albedo_layers.data(), 2);
+  arrays.arm.view =
+      CreateSolidColorArray(g.device, g.queue, arm_layers.data(), 2);
+  DeferredMaterial mat = lib.TerrainBlend(arrays);
+  REQUIRE(mat.factory != nullptr);
+
+  entt::registry registry;
+  const glm::vec4 half(0.5f, 0.5f, 0.0f, 0.0f);
+  AddTerrainQuad(registry, mat.factory, mat.params, {half, half, half, half},
+                 {0, 1, 0, 0});
+
+  CpuImage image = RenderDebug(g.instance, g.device, g.queue, pipeline_gen,
+                               registry, GBufferDebugMode::Albedo);
+
+  const CpuImage::Color c = image.GetPixel(kW / 2, kH / 2);
+  INFO("center RGBA = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  CHECK(int(c.g) > 200);
+  CHECK(int(c.r) < 40);
+}
