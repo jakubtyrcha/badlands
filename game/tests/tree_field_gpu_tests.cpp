@@ -104,42 +104,13 @@ TestGpu& GetTestGpu() {
   return *g;
 }
 
-struct CapturedError {
-  wgpu::ErrorType type = wgpu::ErrorType::NoError;
-  std::string message;
-};
-
-// Runs `fn` (expected to trigger the full-frame render) inside a Dawn
-// validation-error scope and returns what it observed. Mirrors
-// gpu_instance_tests.cpp's RunCapturingValidationErrors (:871-894): every
-// other full-frame GPU test in the codebase wraps SceneRenderer::Render in
-// this pattern -- the default device error callback only logs to stderr and
-// cannot fail a test, so a WGSL/bind-group validation error introduced by
-// this crown's VoxelFoliage material would otherwise go unnoticed here.
-CapturedError RunCapturingValidationErrors(TestGpu& g,
-                                           const std::function<void()>& fn) {
-  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
-  fn();
-
-  CapturedError result;
-  bool done = false;
-  g.device.PopErrorScope(
-      wgpu::CallbackMode::AllowProcessEvents,
-      [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type,
-          wgpu::StringView message) {
-        if (status == wgpu::PopErrorScopeStatus::Success) {
-          result.type = type;
-          result.message = message.length > 0
-                                ? std::string(message.data, message.length)
-                                : std::string();
-        }
-        done = true;
-      });
-  while (!done) {
-    g.instance.ProcessEvents();
-  }
-  return result;
-}
+// CapturedError/RunCapturingValidationErrors -- shared, see
+// gpu_test_helpers.hpp for the full rationale (every full-frame GPU test in
+// the codebase wraps SceneRenderer::Render in this pattern -- the default
+// device error callback only logs to stderr and cannot fail a test, so a
+// WGSL/bind-group validation error would otherwise go unnoticed here).
+using badlands::test::CapturedError;
+using badlands::test::RunCapturingValidationErrors;
 
 // Voxelizes OakPreset's leaf cards with default LeafVoxelizeOptions -- the
 // same SplatLeafCards/EmitTetMesh pipeline model_viewer_view.cpp's Voxel
@@ -214,7 +185,7 @@ CpuImage RenderOakCrownFrame(TestGpu& g, const Camera& camera,
                       g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
   renderer.MutableFogConfig().enabled = false;  // would haze the readback
 
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     renderer.Render(camera, registry, scene_context, rt.GetView());
   });
   INFO("Dawn validation error: " << err.message);
@@ -471,7 +442,7 @@ CpuImage RenderFieldFrame(TestGpu& g, InstancedMeshField* field,
   renderer.MutableFogConfig().enabled = false;  // would haze the readback
   renderer.SetShadowDebugMode(shadow_debug_mode);
 
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     renderer.Render(camera, registry, scene_context, rt.GetView());
   });
   INFO("Dawn validation error: " << err.message);

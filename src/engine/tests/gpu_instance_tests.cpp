@@ -857,43 +857,12 @@ TEST_CASE("BindPerObject refuses an instanced material (no unbound group-1 draw)
 // means the shadow pipeline genuinely compiled + reflected.
 // ===========================================================================
 
-namespace {
-
-struct CapturedError {
-  wgpu::ErrorType type = wgpu::ErrorType::NoError;
-  std::string message;
-};
-
-// Runs `fn` (expected to trigger lazy pipeline compilation) inside a Dawn
-// validation-error scope and returns what it observed. See the file comment
-// above for why this — not a non-null/IsValid() check alone — is what
-// actually proves shader compilation succeeded.
-CapturedError RunCapturingValidationErrors(TestGpu& g,
-                                           const std::function<void()>& fn) {
-  g.device.PushErrorScope(wgpu::ErrorFilter::Validation);
-  fn();
-
-  CapturedError result;
-  bool done = false;
-  g.device.PopErrorScope(
-      wgpu::CallbackMode::AllowProcessEvents,
-      [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type,
-          wgpu::StringView message) {
-        if (status == wgpu::PopErrorScopeStatus::Success) {
-          result.type = type;
-          result.message = message.length > 0
-                                ? std::string(message.data, message.length)
-                                : std::string();
-        }
-        done = true;
-      });
-  while (!done) {
-    g.instance.ProcessEvents();
-  }
-  return result;
-}
-
-}  // namespace
+// CapturedError/RunCapturingValidationErrors -- shared, see
+// gpu_test_helpers.hpp for the full rationale (this file's own copy of both
+// used to live here; hoisted so game/tests/tree_field_gpu_tests.cpp doesn't
+// carry a second copy).
+using badlands::test::CapturedError;
+using badlands::test::RunCapturingValidationErrors;
 
 TEST_CASE("instanced forward material's shadow-pass variant compiles",
           "[gpu_instance][gpu]") {
@@ -912,7 +881,7 @@ TEST_CASE("instanced forward material's shadow-pass variant compiles",
       GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
 
   entt::resource<RenderingMaterialInstance> handle;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
                               MaterialPassType::kForwardOpaque,
                               RenderPassType::kShadow, InstanceParams{});
@@ -939,7 +908,7 @@ TEST_CASE("instanced G-buffer material's shadow-pass variant compiles",
       GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
 
   entt::resource<RenderingMaterialInstance> handle;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     handle = cache.GetOrCreate(key, *factory, GeometryType::kInstancedMesh,
                               MaterialPassType::kDeferred,
                               RenderPassType::kShadow, InstanceParams{});
@@ -995,7 +964,7 @@ TEST_CASE(
   };
 
   std::shared_ptr<const CompiledComputePipeline> classify, scan, scatter;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     classify = fresh_gen.GetComputePipeline("compute/instance_classify");
     scan = fresh_gen.GetComputePipeline("compute/instance_scan");
     scatter = fresh_gen.GetComputePipeline("compute/instance_scatter");
@@ -3500,7 +3469,7 @@ CpuImage RenderSceneWithFields(TestGpu& g, const Camera& camera,
                       g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
   renderer.MutableFogConfig().enabled = false;  // would haze the readback
 
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     renderer.Render(camera, registry, scene_context, rt.GetView());
   });
   INFO("Dawn validation error: " << err.message);
@@ -3697,7 +3666,7 @@ TEST_CASE("SceneRenderer Pass 0 draws instanced-field shadow submeshes onto "
   renderer.MutableFogConfig().enabled = false;  // would haze the readback
   renderer.SetShadowDebugMode(ShadowDebugMode::ShadowMapOnly);
 
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     renderer.Render(camera, registry, scene_context, rt.GetView());
   });
   INFO("Dawn validation error: " << err.message);
@@ -3990,7 +3959,7 @@ TEST_CASE("voxel_foliage material compiles all 4 (geometry x pass) variants",
     entt::id_type key = ComposeMaterialCacheKey(
         entt::hashed_string{v.label}.value(), v.geometry, v.pass, 0);
     entt::resource<RenderingMaterialInstance> handle;
-    CapturedError err = RunCapturingValidationErrors(g, [&] {
+    CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
       handle = cache.GetOrCreate(key, *v.factory, v.geometry,
                                  MaterialPassType::kDeferred, v.pass,
                                  InstanceParams{});
@@ -4024,7 +3993,7 @@ TEST_CASE("voxel_foliage G-buffer readback: material encoding + CullMode::Back "
           "albedo is brightness*tint RAW (sRGB-domain, not double-linearized)") {
     CapturedError err;
     TetPixels px;
-    err = RunCapturingValidationErrors(g, [&] {
+    err = RunCapturingValidationErrors(g.instance, g.device, [&] {
       px = RenderTetPixels(g, *factory, kRoughness, kStrength, kBrightness,
                           kTint, kTetIndicesVisible);
     });
@@ -4069,7 +4038,7 @@ TEST_CASE("voxel_foliage G-buffer readback: material encoding + CullMode::Back "
           "background") {
     CapturedError err;
     TetPixels px;
-    err = RunCapturingValidationErrors(g, [&] {
+    err = RunCapturingValidationErrors(g.instance, g.device, [&] {
       px = RenderTetPixels(g, *factory, kRoughness, kStrength, kBrightness,
                           kTint, kTetIndicesFlipped);
     });
@@ -4096,7 +4065,7 @@ TEST_CASE("MaterialLibrary::VoxelFoliage builds a textureless deferred "
   constexpr float kStrength = 0.35f;
 
   DeferredMaterial result;
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     result = matlib.VoxelFoliage(tint, kRoughness, kStrength);
   });
   INFO("Dawn validation error: " << err.message);
@@ -4173,7 +4142,7 @@ TEST_CASE("deferred_lighting foliage branch is inert for standard "
                       g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
   renderer.MutableFogConfig().enabled = false;  // would haze the readback
 
-  CapturedError err = RunCapturingValidationErrors(g, [&] {
+  CapturedError err = RunCapturingValidationErrors(g.instance, g.device, [&] {
     renderer.Render(camera, registry, scene_context, rt.GetView());
   });
   INFO("Dawn validation error: " << err.message);
