@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <queue>
 #include <random>
 #include <string>
@@ -203,23 +204,6 @@ struct Grid {
   inline size_t idx(int x, int y) const { return size_t(y) * n + x; }
   inline bool oob(int x, int y) const {
     return x < 1 || y < 1 || x >= n - 1 || y >= n - 1;
-  }
-};
-
-// Per-worker scatter buffers: dense for O(1) accumulation with no atomics, plus
-// a dirty list so the merge touches only visited cells.
-struct Scratch {
-  std::vector<float> dz, dvol, dmx, dmy;
-  std::vector<uint8_t> marked;
-  std::vector<uint32_t> dirty;
-  void init(size_t cells) {
-    dz.assign(cells, 0.f); dvol.assign(cells, 0.f);
-    dmx.assign(cells, 0.f); dmy.assign(cells, 0.f);
-    marked.assign(cells, 0);
-    dirty.reserve(1u << 18);
-  }
-  inline void touch(size_t i) {
-    if (!marked[i]) { marked[i] = 1; dirty.push_back(uint32_t(i)); }
   }
 };
 
@@ -441,6 +425,11 @@ void BuildLakes(Grid& g, const Params& p, std::vector<Lake>& lakes,
           lk.shore.push_back(uint32_t(j));
           continue;
         }
+        if (filled[j] > lk.spill + 1e-5f) {
+          // A lake perched above us spills into us: count its flow.
+          lk.shore.push_back(uint32_t(j));
+          continue;
+        }
         if (seen[j]) continue;
         if (std::fabs(filled[j] - lk.spill) > 1e-5f) continue;
         seen[j] = 1;
@@ -524,7 +513,6 @@ void UpdateLakes(Grid& g, const Params& p, std::vector<Lake>& lakes,
     // what makes the equilibrium A_eq = Q_in/E emerge instead of being imposed.
     size_t wet_cells = 0;
     for (uint32_t c : lk.members) if (g.height[c] < lk.level) ++wet_cells;
-    const double area_m2 = double(wet_cells) * cell_area;
 
     // TWO TIMESCALES. Erosion wants ~200 yr steps; a lake equilibrates in
     // years. Integrating the budget with an explicit 200 yr Euler step applies
@@ -543,8 +531,8 @@ void UpdateLakes(Grid& g, const Params& p, std::vector<Lake>& lakes,
     double v_eq = 0.0;
     {
       // Volume at the level whose submerged area is area_eq.
-      const size_t k_eq = std::min(lk.sorted_beds.size(),
-                                   size_t(area_eq_m2 / cell_area));
+      const size_t k_eq = size_t(std::min(area_eq_m2 / double(cell_area),
+                                          double(lk.sorted_beds.size())));
       if (k_eq >= lk.sorted_beds.size()) {
         for (uint32_t c : lk.members)
           v_eq += std::max(0.f, lk.spill - g.height[c]);
@@ -606,11 +594,13 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   V2 pos{px, py}, speed{0.f, 0.f};
   float volume = 1.0f, sediment = 0.0f;
   int lake_steps = 0;  // in-lake steps taken, for the deposition cutoff
+  size_t last_cell = g.idx(int(px), int(py));
 
   for (int age = 0; age < p.max_age; ++age) {
     const int x = int(pos.x), y = int(pos.y);
     if (g.oob(x, y)) { g.lost_offmap += double(sediment); return; }
     const size_t here = g.idx(x, y);
+    last_cell = here;
     ++g.visits[here];
 
     if (volume < p.min_vol) {
@@ -625,7 +615,11 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     // behaving as a river, or dispersion fires on every wet-ish channel cell.
     if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m) {
       const int32_t lid = g.lake_id[here];
-      if (lid < 0 || lid >= int32_t(g.lake_outlet.size())) return;
+      if (lid < 0 || lid >= int32_t(g.lake_outlet.size())) {
+        g.height[here] += sediment;
+        g.deposited_death += double(sediment);
+        return;
+      }
       const int32_t target = g.lake_outlet[lid];
 
       ++lake_steps;
@@ -735,6 +729,12 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     sediment /= (1.0f - p.evap_rate);
     volume *= (1.0f - p.evap_rate);
   }
+  // Reached max_age still carrying a load. The reference deposits it here;
+  // dropping that made this a silent mass sink, and it is the DOMINANT exit --
+  // volume only decays to 0.61 over 500 steps, so the volume < min_vol branch
+  // above is unreachable in practice.
+  g.height[last_cell] += sediment;
+  g.deposited_death += double(sediment);
 }
 
 // ------------------------------------------------------------------- cascade
@@ -768,8 +768,12 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff) {
   // Steepest drop settles first.
   std::sort(nb, nb + count, [](const Nb& a, const Nb& b) { return a.d > b.d; });
   for (int k = 0; k < count; ++k) {
-    const float excess = nb[k].d - max_diff;
-    if (excess <= 0.f) break;  // sorted: nothing after this exceeds either
+    // Re-read: the previous iteration lowered height[here], so a snapshotted
+    // drop is stale and the sort no longer bounds the remainder -- hence
+    // `continue`, not `break`. Using stale drops could transfer more than the
+    // excess and push this cell below the neighbours it was shedding onto.
+    const float excess = (g.height[here] - g.height[nb[k].i]) - max_diff;
+    if (excess <= 0.f) continue;
     const float transfer = p.settling * excess * 0.5f;
     g.height[here] -= transfer;
     g.height[nb[k].i] += transfer;
@@ -784,7 +788,10 @@ void Dump(const Grid& g, const Params& p, const std::string& tag) {
     for (size_t i = 0; i < g.cells; ++i) tmp[i] = f[i] * sc;
     const std::string path = p.out + "/" + tag + "-" + name + ".f32";
     FILE* fp = std::fopen(path.c_str(), "wb");
-    if (!fp) return;
+    if (!fp) {
+      std::fprintf(stderr, "protogen: cannot write %s\n", path.c_str());
+      return;
+    }
     std::fwrite(tmp.data(), sizeof(float), tmp.size(), fp);
     std::fclose(fp);
   };
@@ -799,7 +806,7 @@ void Dump(const Grid& g, const Params& p, const std::string& tag) {
 struct SimStats {
   int n_lakes = 0;
   float wet_frac = 0.f, deepest_m = 0.f;
-  double t_drops = 0, t_merge = 0, t_grid = 0, t_lake = 0;
+  double t_drops = 0, t_grid = 0, t_lake = 0;
 };
 
 void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
@@ -814,7 +821,7 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
   int n_lakes = 0;
   float wet_frac = 0.f, deepest_m = 0.f;
   using clk = std::chrono::steady_clock;
-  double t_drops = 0, t_merge = 0, t_grid = 0, t_lake = 0;
+  double t_drops = 0, t_grid = 0, t_lake = 0;
   auto secs = [](clk::time_point a, clk::time_point b) {
     return std::chrono::duration<double>(b - a).count();
   };
@@ -857,8 +864,7 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
     std::fill(g.visits.begin(), g.visits.end(), 0u);
     for (int d = 0; d < p.drops; ++d) Descend(g, p, lakes, rng, sx[d], sy[d]);
 
-    auto tB = clk::now(); t_drops += secs(tA, tB);
-    auto tC = tB;
+    auto tC = clk::now(); t_drops += secs(tA, tC);
     // EMA, double buffered: one writer per cell, so no atomics. Averaging is
     // what lets a channel persist between steps and attract later drops.
     const float lr = p.lrate, es = p.erf_scale;
@@ -917,8 +923,7 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
   st.n_lakes = n_lakes;
   st.wet_frac = wet_frac;
   st.deepest_m = deepest_m;
-  st.t_drops = t_drops; st.t_merge = t_merge;
-  st.t_grid = t_grid; st.t_lake = t_lake;
+  st.t_drops = t_drops; st.t_grid = t_grid; st.t_lake = t_lake;
 }
 
 
@@ -1476,6 +1481,7 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i)
     if (std::string(argv[i]) == "--test") return test::RunAll();
   Params p;
+  try {
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     auto nxt = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : ""; };
@@ -1487,7 +1493,8 @@ int main(int argc, char** argv) {
     else if (a == "--drops") p.drops = std::stoi(nxt());
     else if (a == "--runoff") p.runoff_m_per_yr = std::stof(nxt());
     else if (a == "--evaporation") p.evaporation_m_per_yr = std::stof(nxt());
-    else if (a == "--settling") p.settling_velocity_m_per_s = std::stof(nxt());
+    else if (a == "--grain-velocity")
+      p.settling_velocity_m_per_s = std::stof(nxt());
     else if (a == "--plume-velocity") p.plume_velocity_m_per_s = std::stof(nxt());
     else if (a == "--lake-interval") p.lake_interval = std::stoi(nxt());
     else if (a == "--min-lake-area") p.min_lake_area_m2 = std::stof(nxt());
@@ -1496,7 +1503,7 @@ int main(int argc, char** argv) {
     else if (a == "--deposition") p.deposition_rate = std::stof(nxt());
     else if (a == "--lrate") p.lrate = std::stof(nxt());
     else if (a == "--repose") p.repose_angle_deg = std::stof(nxt());
-    else if (a == "--settling") p.settling = std::stof(nxt());
+    else if (a == "--cascade-settling") p.settling = std::stof(nxt());
     else if (a == "--snapshot-every") p.snapshot_every = std::stoi(nxt());
     else if (a == "--bowl") p.bowl = true;
     else if (a == "--no-disperse") p.disperse = false;
@@ -1512,6 +1519,12 @@ int main(int argc, char** argv) {
     else if (a == "--out") p.out = nxt();
     else { std::fprintf(stderr, "protogen: unknown arg '%s'\n", a.c_str()); return 2; }
   }
+  } catch (const std::exception& e) {
+    // A trailing flag makes nxt() return "", and stof("") throws. Without this
+    // `protogen --steps` aborted instead of reporting the problem.
+    std::fprintf(stderr, "protogen: bad or missing argument value (%s)\n", e.what());
+    return 2;
+  }
 
   const float cell_m = p.world_m / float(p.res);
   // Each particle stands for the runoff over its share of the map, which is how
@@ -1524,8 +1537,6 @@ int main(int argc, char** argv) {
   InitTerrain(g, p);
 
   const unsigned workers = std::max(1u, badlands::GetWorkerThreadCount());
-  std::vector<Scratch> scratch(workers);
-  for (auto& s : scratch) s.init(g.cells);
 
   std::printf("protogen: %dx%d cells, %.0f m world, %.1f m cells, %d workers\n"
               "  relief %.0f m, %d steps x %d drops\n"
@@ -1534,13 +1545,22 @@ int main(int argc, char** argv) {
               p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
               p.settling_velocity_m_per_s);
 
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(p.out, ec);
+    if (ec) {
+      std::fprintf(stderr, "protogen: cannot create out dir '%s': %s\n",
+                   p.out.c_str(), ec.message().c_str());
+      return 1;
+    }
+  }
   Dump(g, p, "0000-initial");
 
 
   std::vector<Lake> lakes;
   SimStats st;
   RunSim(p, g, lakes, st, true);
-  std::printf("protogen: done\n  timings (s): drops %.1f merge %.1f grid %.1f "
-              "lakes %.1f\n", st.t_drops, st.t_merge, st.t_grid, st.t_lake);
+  std::printf("protogen: done\n  timings (s): drops %.1f grid %.1f lakes %.1f\n",
+              st.t_drops, st.t_grid, st.t_lake);
   return 0;
 }
