@@ -56,8 +56,10 @@ constexpr float kMultiFloorSize = 160.0f;
 // distance = world_size * focal_px / target_px = world_size * 935 / 8.
 // LOD0->LOD1 (world_size = kFoliageVoxelWorldSizes[0] = 0.15m): ~17.5m,
 // rounded to 18. LOD1->LOD2 (world_size = kFoliageVoxelWorldSizes[1] =
-// 0.30m): ~35.1m, rounded to 36. Screenshot-tune in Phase 6.
-constexpr std::array<float, 2> kMultiLodThresholds = {18.0f, 36.0f};
+// 0.20m, Phase 6-retuned -- see that constant's comment): ~23.4m, rounded to
+// 23. Screenshot-tuned in Phase 6 (both the empty-crown fix and this
+// threshold's re-derivation off it).
+constexpr std::array<float, 2> kMultiLodThresholds = {18.0f, 23.0f};
 
 // Voxel-crown LOD (volumetric-foliage Phase 3): three progressively coarser
 // tet-voxelization cell sizes, one per Voxel L0/L1/L2 mode
@@ -74,7 +76,24 @@ constexpr std::array<float, 2> kMultiLodThresholds = {18.0f, 36.0f};
 // above (Phase 5) DOES derive its distance-based GPU LOD cutoffs from this
 // same formula, applied to Multi mode's own per-LOD voxel sizes.
 constexpr float kFoliageVoxelTargetPx = 8.0f;
-constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.30f, 0.60f};
+// Phase 6 MUST-FIX retune: L1 was 0.30 (the naive 0.15/0.30/0.60 doubling
+// progression), but at that exact preview-rescaled cell size, Pine
+// (medium)/(large)'s needle-sprig cards hit an aliasing dead zone in
+// SplatLeafCards' per-quad lattice sampling (nu=ceil(w_len/(cell_size/3))
+// lands on an even sample count for most of the crown's cards, so no
+// lattice sample -- all offset away from u=0 -- ever lands inside the
+// PineSprig stem/needle band; area_alpha is then exactly 0 for every cell,
+// not merely below occupancy_fraction*cell^2, so no occupancy_fraction
+// value can recover it). Swept world_l1 in
+// game/tests/leaf_voxelizer_tests.cpp: Pine (medium)/(large) (and, briefly,
+// Bush 3) go empty for every value in [0.23, 0.30]; [0.16, 0.22] is clear of
+// the dead zone for all 15 TreeCatalog presets. 0.20 sits mid-band for
+// margin on both sides and keeps monotonic tet counts (L0 >= L1 >= L2, all
+// non-empty, no preset balloons past the sane-band cap) -- see
+// leaf_voxelizer_tests.cpp's "every TreeCatalog preset stays in a sane
+// tet-count band" test, whose own kFoliageVoxelWorldSizes mirror must be
+// kept in sync with this array.
+constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.20f, 0.60f};
 
 }  // namespace
 

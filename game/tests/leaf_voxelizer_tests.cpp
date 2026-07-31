@@ -142,6 +142,36 @@ TEST_CASE("SplatLeafCards / EmitTetMesh: empty input produces empty output") {
   const TexturedMeshResult r = EmitTetMesh(grid, opts);
   REQUIRE(r.mesh.vertex_count == 0u);
   REQUIRE(r.mesh.indices.empty());
+
+  // Pins the Phase 3 review fix (formerly exercised via Pine's real
+  // empty-crown case, now that Phase 6 retuned kFoliageVoxelWorldSizes so no
+  // TreeCatalog preset voxelizes empty any more -- see the sane-tet-count-
+  // band test above): model_viewer_view.cpp's voxel-mode world_bounds union
+  // must skip an empty crown. r.local_bounds is Aabb::Empty() (min=+FLT_MAX,
+  // max=-FLT_MAX sentinel corners) here, and TransformedBy would smear those
+  // sentinels through xf into world_bounds if unioned unguarded, corrupting
+  // orbit-camera framing. Exercise the SAME vertex_count>0 guard the viewer
+  // applies, against an arbitrary non-trivial transform.
+  const glm::mat4 xf = glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 1.0f, -2.0f)) *
+                       glm::scale(glm::mat4(1.0f), glm::vec3(2.0f));
+  const Aabb bark_world_bounds =
+      Aabb::FromMinMax(glm::vec3(-1.0f), glm::vec3(1.0f)).TransformedBy(xf);
+
+  Aabb guarded = bark_world_bounds;
+  if (r.mesh.vertex_count > 0) {
+    guarded = guarded.Union(r.local_bounds.TransformedBy(xf));
+  }
+  CHECK(guarded.min == bark_world_bounds.min);
+  CHECK(guarded.max == bark_world_bounds.max);
+
+  // Contrast: the same union WITHOUT the guard corrupts world_bounds with
+  // the Aabb::Empty() sentinel's transformed garbage -- proves the guard is
+  // load-bearing, not defensive dead code.
+  const Aabb unguarded = bark_world_bounds.Union(r.local_bounds.TransformedBy(xf));
+  const bool corrupted = std::abs(unguarded.min.x) > 1e6f || std::abs(unguarded.min.y) > 1e6f ||
+                         std::abs(unguarded.min.z) > 1e6f || std::abs(unguarded.max.x) > 1e6f ||
+                         std::abs(unguarded.max.y) > 1e6f || std::abs(unguarded.max.z) > 1e6f;
+  CHECK(corrupted);
 }
 
 TEST_CASE("SplatLeafCards: fails loudly (empty grid) past the 512-cells-per-axis guard") {
@@ -267,8 +297,11 @@ TEST_CASE(
   // uses the tree's own preview-rescaled cell size, which varies a lot by
   // preset since `s` depends on the preset's own native height -- e.g. a
   // Bush's L0 native cell size is ~0.23 while an Aspen (large)'s is ~1.86.
+  // Keep this array in sync with model_viewer_view.cpp's own
+  // kFoliageVoxelWorldSizes (Phase 6 retuned L1 from 0.30 to 0.20 -- see
+  // that constant's comment for why).
   constexpr float kTreePreviewHeight = 8.0f;
-  constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.30f, 0.60f};
+  constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.20f, 0.60f};
   // Generous headroom over the largest count measured across all 15 presets
   // x 3 levels (Oak (large) L0, ~11.7k tets) -- this bound exists to catch a
   // real order-of-magnitude blowup (e.g. a stray cell_size/rescale mixup),
@@ -298,64 +331,16 @@ TEST_CASE(
       INFO("tet_count=" << tet_count);
       CHECK(tet_count <= kMaxSaneTetCount);
 
-      // Known gap, measured directly (not a Phase 3 regression): "Pine
-      // (medium)"/"Pine (large)" voxelize to a genuinely EMPTY crown at
-      // their own Voxel-L1 native cell size (occupancy_fraction=0.15,
-      // Phase 1's default, interacting with Pine's sparse needle-stroke
-      // leaf cards -- the accumulated card area per cell fails to keep pace
-      // with the cell-area threshold's quadratic growth right at this cell
-      // size, even though it clears the threshold at both the finer L0 and
-      // the coarser L2 size). Retuning occupancy_fraction/cell_size per
-      // species is Phase 6's job, not Phase 3's -- this phase's manual
-      // screenshot gate doesn't hit it (Oak L0..L2 and Pine L0 all stay
-      // non-empty; see phase-3-report.md). Every OTHER preset x level
-      // combination is asserted non-empty, so a genuine new regression still
+      // Phase 6 MUST-FIX: "Pine (medium)"/"Pine (large)" used to voxelize to
+      // a genuinely EMPTY crown at Voxel-L1's old 0.30 world size (a
+      // SplatLeafCards lattice-sampling aliasing dead zone, not an
+      // occupancy_fraction threshold issue -- area_alpha was exactly 0, not
+      // merely below occ_threshold; see model_viewer_view.cpp's
+      // kFoliageVoxelWorldSizes comment). Retuning L1 to 0.20 clears it for
+      // all 15 presets x 3 levels, so every combination is now asserted
+      // non-empty -- a real regression (this gap recurring, or a new one)
       // fails loudly here.
-      const bool known_empty_gap =
-          (setup.name == "Pine (medium)" || setup.name == "Pine (large)") &&
-          level == 1;
-      if (!known_empty_gap) {
-        CHECK(tet_count > 0u);
-      } else {
-        CHECK(tet_count == 0u);  // pins the known gap; fails loudly if it's ever fixed unnoticed
-
-        // Pins the Phase 3 review fix: model_viewer_view.cpp's voxel-mode
-        // world_bounds union must skip an empty crown -- r.local_bounds is
-        // Aabb::Empty() (min=+FLT_MAX, max=-FLT_MAX sentinel corners) here,
-        // and TransformedBy would smear those sentinels through xf into
-        // world_bounds if unioned unguarded, corrupting orbit-camera framing
-        // (reviewer-reproduced: tiny, distant tree). Exercise the SAME
-        // vertex_count>0 guard the viewer now applies, against this real
-        // empty-crown case (not a synthetic all-zero mesh).
-        const glm::mat4 xf =
-            glm::translate(
-                glm::mat4(1.0f),
-                glm::vec3(0.0f, -bark.local_bounds.min.y * s, 0.0f)) *
-            glm::scale(glm::mat4(1.0f), glm::vec3(s));
-        const Aabb bark_world_bounds = bark.local_bounds.TransformedBy(xf);
-
-        Aabb guarded = bark_world_bounds;
-        if (r.mesh.vertex_count > 0) {
-          guarded = guarded.Union(r.local_bounds.TransformedBy(xf));
-        }
-        const bool guarded_matches_bark_only =
-            guarded.min == bark_world_bounds.min &&
-            guarded.max == bark_world_bounds.max;
-        CHECK(guarded_matches_bark_only);
-
-        // Contrast: the same union WITHOUT the guard corrupts world_bounds
-        // with the Aabb::Empty() sentinel's transformed garbage -- proves
-        // the guard is load-bearing, not defensive dead code.
-        const Aabb unguarded =
-            bark_world_bounds.Union(r.local_bounds.TransformedBy(xf));
-        const bool corrupted = std::abs(unguarded.min.x) > 1e6f ||
-                               std::abs(unguarded.min.y) > 1e6f ||
-                               std::abs(unguarded.min.z) > 1e6f ||
-                               std::abs(unguarded.max.x) > 1e6f ||
-                               std::abs(unguarded.max.y) > 1e6f ||
-                               std::abs(unguarded.max.z) > 1e6f;
-        CHECK(corrupted);
-      }
+      CHECK(tet_count > 0u);
     }
   }
 }

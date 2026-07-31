@@ -355,9 +355,11 @@ namespace {
 // instance is rescaled to, so the camera distances / LOD thresholds below
 // (picked in these display-space units) are meaningful.
 constexpr float kFieldTreeHeight = 8.0f;
-// Mirrors kFoliageVoxelWorldSizes (preview-space cell sizes per LOD).
+// Mirrors kFoliageVoxelWorldSizes (preview-space cell sizes per LOD; Phase 6
+// retuned L1 from 0.30 to 0.20 -- see that constant's comment in
+// model_viewer_view.cpp for why).
 constexpr std::array<float, GpuInstanceRenderer::kMaxLods> kFieldVoxelWorldSizes = {
-    0.15f, 0.30f, 0.60f};
+    0.15f, 0.20f, 0.60f};
 // Straddled by the ~10/25/45m camera distances the LOD-selection test below
 // uses: 10 < 15 -> LOD0, 15 <= 25 < 35 -> LOD1, 45 >= 35 -> LOD2.
 constexpr std::array<float, 2> kFieldLodThresholds = {15.0f, 35.0f};
