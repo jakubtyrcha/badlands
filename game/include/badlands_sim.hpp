@@ -531,9 +531,39 @@ struct StatGrowth {
     float damage_frac = 0.0f;
 };
 
+// The creatures the sim knows by name. Append-only: JSON overrides and arena
+// scenarios key by name, and SpawnCreature spawns by id. The first
+// HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight
+// to its creature.
+//
+// Declared HERE, above CharacterDesc, because a desc names its own creature
+// (CharacterDesc::creature) -- the catalog struct that uses these ids still
+// lives further down, with the rest of the catalog.
+enum class CreatureId : int32_t {
+    Mercenary = 0,
+    Hunter,
+    GraveRobber,
+    Apprentice,
+    Rat,
+    Goblin,
+    Deer,
+    Bandit,
+    BanditArcher,
+    BanditLeader,
+    MudGolem,
+    Count,
+};
+inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);
+
 // Spawn input. pos is on the ground (XZ) plane, matching the renderer.
 struct CharacterDesc {
     Archetype archetype = Archetype::Hero;
+    // Which catalog creature this desc IS. Authored by CreatureCatalog for
+    // every row; Count for a hand-built desc that names no creature. Copied
+    // onto the entity at spawn (components.h's CreatureKind) because the
+    // threat table is keyed by creature, and nothing else recorded what a
+    // spawned entity actually is.
+    CreatureId creature = CreatureId::Count;
     // Explicit HeroClassId for hero descs; -1 = derive from the recruiting
     // guild at spawn (heroes.cpp's spawn_entity). The hero creature-catalog
     // defs (creature_catalog.cpp) author this so a directly-spawned/recruited
@@ -582,21 +612,6 @@ struct CharacterDesc {
 };
 
 // ---- named-creature catalog ------------------------------------------------
-// The creatures the sim knows by name. Append-only: JSON overrides and arena
-// scenarios key by name, and SpawnCreature spawns by id. The first
-// HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight to
-// its creature.
-enum class CreatureId : int32_t {
-    Mercenary = 0,
-    Hunter,
-    GraveRobber,
-    Apprentice,
-    Rat,
-    Goblin,
-    Deer,
-    Count,
-};
-inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);
 
 // A CharacterDesc template per creature (pos/team filled in at spawn). Compiled
 // defaults live in creature_catalog.cpp; an app may override fields by name from

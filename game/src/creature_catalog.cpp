@@ -18,7 +18,8 @@ namespace badlands {
 namespace {
 
 constexpr const char* kNames[kCreatureCount] = {
-    "Mercenary", "Hunter", "GraveRobber", "Apprentice", "Rat", "Goblin", "Deer",
+    "Mercenary", "Hunter", "GraveRobber", "Apprentice", "Rat",         "Goblin",
+    "Deer",      "Bandit", "BanditArcher", "BanditLeader", "MudGolem",
 };
 
 }  // namespace
@@ -48,6 +49,7 @@ CreatureCatalog::CreatureCatalog() {
     auto at = [&](CreatureId id) -> CharacterDesc& {
         CharacterDesc& d = defs[static_cast<int>(id)];
         d = CharacterDesc{};  // zero + apply default member initializers
+        d.creature = id;      // so a spawned entity knows what it is (CreatureKind)
         return d;
     };
 
@@ -172,6 +174,72 @@ CreatureCatalog::CreatureCatalog() {
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 3.0f, 1.2f, 0.8f, 0.10f};
         d.xp_reward = 25;
+    }
+
+    // Bandit: an armed and armoured human -- the level-1 hero's fair fight, and
+    // the first monster built to the same recipe a hero is.
+    {
+        CharacterDesc& d = at(CreatureId::Bandit);
+        d.archetype = Archetype::Monster;
+        d.hp = 26.0f;
+        d.move_speed = 2.8f;
+        d.size_x = 0.9f; d.size_y = 1.8f; d.size_z = 0.9f;
+        d.color_r = 0.55f; d.color_g = 0.30f; d.color_b = 0.25f;  // rust
+        d.accuracy = 0.85f; d.evasion = 0.10f; d.defense = 0.10f; d.armour = 2.0f;
+        d.stance = CombatStance::Melee;
+        d.attack_count = 1;
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 5.0f, 1.4f, 1.0f, 0.10f};
+        d.xp_reward = 60;
+    }
+    // Bandit Archer: the enemy-side kiter. Exists so the skirmish behaviour is
+    // tested from BOTH ends -- a hero holding its distance is only half the
+    // mechanic if nothing ever holds distance from the hero.
+    {
+        CharacterDesc& d = at(CreatureId::BanditArcher);
+        d.archetype = Archetype::Monster;
+        d.hp = 18.0f;
+        d.move_speed = 3.0f;
+        d.size_x = 0.85f; d.size_y = 1.75f; d.size_z = 0.85f;
+        d.color_r = 0.60f; d.color_g = 0.42f; d.color_b = 0.22f;  // tan
+        d.accuracy = 0.85f; d.evasion = 0.15f; d.defense = 0.05f; d.armour = 1.0f;
+        d.stance = CombatStance::Ranged;
+        d.attack_count = 2;
+        d.attacks[0] = {AttackCategory::Ranged, DamageType::Piercing, 4.0f, 7.0f, 1.3f, 0.20f};
+        d.attacks[1] = {AttackCategory::Melee, DamageType::Slashing, 2.0f, 1.2f, 0.8f, 0.05f};
+        d.xp_reward = 60;
+    }
+    // Bandit Leader: beats every level-1 core class. The matrix needs a ceiling
+    // as much as it needs the rat's floor, or every row reads the same.
+    {
+        CharacterDesc& d = at(CreatureId::BanditLeader);
+        d.archetype = Archetype::Monster;
+        d.hp = 45.0f;
+        d.move_speed = 2.8f;
+        d.size_x = 1.0f; d.size_y = 1.9f; d.size_z = 1.0f;
+        d.color_r = 0.70f; d.color_g = 0.20f; d.color_b = 0.20f;  // deep red
+        d.accuracy = 0.95f; d.evasion = 0.15f; d.defense = 0.20f; d.armour = 4.0f;
+        d.stance = CombatStance::Melee;
+        d.attack_count = 1;
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Slashing, 8.0f, 1.5f, 0.9f, 0.15f};
+        d.xp_reward = 200;
+    }
+    // Mud Golem: the Goliath. Slow, enormously durable, and the only creature
+    // anywhere that swings BLUNT -- so it is the only one that exercises
+    // resolve_attack's defense bypass and apply_armour's 30% branch in a live
+    // fight rather than a unit test. Heavy armour makes it near-immune to the
+    // apprentice's piercing bolt (all-or-nothing) while a slash still scratches.
+    {
+        CharacterDesc& d = at(CreatureId::MudGolem);
+        d.archetype = Archetype::Monster;
+        d.hp = 90.0f;
+        d.move_speed = 1.4f;
+        d.size_x = 1.6f; d.size_y = 2.4f; d.size_z = 1.6f;
+        d.color_r = 0.38f; d.color_g = 0.32f; d.color_b = 0.24f;  // wet earth
+        d.accuracy = 0.80f; d.evasion = 0.0f; d.defense = 0.0f; d.armour = 8.0f;
+        d.stance = CombatStance::Melee;
+        d.attack_count = 1;
+        d.attacks[0] = {AttackCategory::Melee, DamageType::Blunt, 12.0f, 1.8f, 2.2f, 0.05f};
+        d.xp_reward = 250;
     }
 
     // --- critters -----------------------------------------------------------

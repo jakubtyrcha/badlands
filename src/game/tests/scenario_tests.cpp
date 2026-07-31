@@ -101,6 +101,22 @@ TEST_CASE("LoadCreatureCatalog rejects a non-numeric value") {
     CHECK(cat.defs[static_cast<int>(CreatureId::Rat)].hp == rat_hp0);  // untouched on failure
 }
 
+TEST_CASE("every creature name round-trips through the id table") {
+    // The manifest and the scenario loader both key by NAME, so a creature
+    // appended to the enum without a kNames entry would silently become
+    // unaddressable from data rather than failing here.
+    for (int i = 0; i < kCreatureCount; ++i) {
+        const CreatureId id = static_cast<CreatureId>(i);
+        const char* name = CreatureName(id);
+        REQUIRE(name[0] != '\0');
+        CHECK(CreatureIdFromName(name) == id);
+    }
+    CHECK(CreatureIdFromName("Bandit") == CreatureId::Bandit);
+    CHECK(CreatureIdFromName("BanditArcher") == CreatureId::BanditArcher);
+    CHECK(CreatureIdFromName("BanditLeader") == CreatureId::BanditLeader);
+    CHECK(CreatureIdFromName("MudGolem") == CreatureId::MudGolem);
+}
+
 // --- level scaling, as data --------------------------------------------------
 
 TEST_CASE("LoadCreatureCatalog reads a creature's growth row") {

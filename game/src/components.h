@@ -289,6 +289,14 @@ struct Growth {
     StatGrowth rows{};
 };
 
+// WHICH catalog creature this entity is. The threat table (threat_table.h) is
+// keyed by creature, and before this nothing on a spawned entity recorded what
+// it had been spawned AS -- spawn_creature_into took a CreatureId and kept it
+// nowhere. Count for a hand-built desc that names no creature.
+struct CreatureKind {
+    CreatureId id = CreatureId::Count;
+};
+
 // Present only on entities whose death pays XP (CharacterDesc.xp_reward > 0).
 // Read by the death sweep (sim.cpp), which collects the payout before the
 // destroy and spreads it via spread_kill_xp (progression.h).

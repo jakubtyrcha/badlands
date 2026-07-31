@@ -142,6 +142,7 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
     }
     reg.emplace<BaseStats>(e, base);
     reg.emplace<Growth>(e, Growth{desc.growth});
+    reg.emplace<CreatureKind>(e, CreatureKind{desc.creature});
 
     reg.emplace<RenderShape>(e, glm::vec3{desc.size_x, desc.size_y, desc.size_z},
                              glm::vec3{desc.color_r, desc.color_g, desc.color_b});
