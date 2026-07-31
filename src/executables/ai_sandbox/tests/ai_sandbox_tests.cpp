@@ -8,9 +8,11 @@
 #include "executables/ai_sandbox/arena.hpp"
 #include "executables/ai_sandbox/duel_mode.hpp"
 #include "executables/ai_sandbox/sneak_mode.hpp"
+#include "executables/ai_sandbox/teleport_mode.hpp"
 
 #include "game_state.h"
 #include "nav_world.h"       // rebuild_navmesh_if_stale
+#include "threat_table.h"    // threat_target -- the dummy IS its anchor
 #include "placement.h"       // tri_index / in_bounds_tile -- the flood fill works in tiles
 #include "sim_internal.hpp"  // make_world / buildings_of
 
@@ -436,4 +438,64 @@ TEST_CASE("the sneak mode reports a failure on timeout, and still restages", "[s
     CHECK_FALSE(mode.Observe(rows, kNoEvents, 29999));
     CHECK(mode.Observe(rows, kNoEvents, 30000));
     CHECK(mode.Status().find("FAILED") != std::string::npos);
+}
+
+// --- the teleport sandbox ----------------------------------------------------
+
+TEST_CASE("the teleport mode counts only a teleport", "[teleport][mode]") {
+    // A level-8 apprentice also knows Curse and Calcify. Keying on the caster
+    // alone would make every round pass on the first thing it cast.
+    TeleportProgress p;
+    GameEvent curse{};
+    curse.kind = GameEventKind::SkillUsed;
+    curse.actor_id = 3;
+    curse.amount = static_cast<float>(SkillId::Curse);
+    curse.at_millis = 500;
+    observe_teleport({curse}, 3, p);
+    CHECK_FALSE(p.blinked);
+
+    GameEvent blink = curse;
+    blink.amount = static_cast<float>(SkillId::Teleport);
+    blink.at_millis = 2300;
+    observe_teleport({blink}, 3, p);
+    REQUIRE(p.blinked);
+    CHECK(p.blinked_at_millis == 2300);
+
+    // ...and somebody ELSE blinking is not our apprentice blinking.
+    TeleportProgress q;
+    GameEvent other = blink;
+    other.actor_id = 9;
+    observe_teleport({other}, 3, q);
+    CHECK_FALSE(q.blinked);
+}
+
+TEST_CASE("the teleport mode reports a failure on timeout, and still restages",
+          "[teleport][mode]") {
+    TeleportConfig cfg;
+    cfg.max_millis = 30000;
+    TeleportMode mode(cfg);
+    mode.Configure();
+
+    const std::vector<CharacterState> rows{fighter(0), fighter(1)};
+    CHECK_FALSE(mode.Observe(rows, kNoEvents, 29999));
+    CHECK(mode.Observe(rows, kNoEvents, 30000));
+    CHECK(mode.Status().find("FAILED") != std::string::npos);
+}
+
+TEST_CASE("the training dummy is worth its anchor and swings at nothing", "[threat]") {
+    // The whole creature IS the number. It has to be perceivable (Monster, not
+    // Critter -- nearest_enemy skips wildlife entirely) and it has to be
+    // harmless, so what a brain does about it can be watched without a race
+    // against the observer's own death.
+    const CharacterDesc& d =
+        DefaultCreatureCatalog().defs[static_cast<int>(CreatureId::TrainingDummy)];
+    CHECK(d.archetype == Archetype::Monster);
+    CHECK(d.attack_count == 0);
+    CHECK(d.attack_damage == 0.0f);  // nor the legacy single-attack field
+    CHECK(threat_target(CreatureId::TrainingDummy, 1) == 20.0f);
+
+    // ...and it stays out of the duel pool BY THE UNARMED RULE, with no name
+    // check anywhere: assert the rule, not the roster.
+    const std::vector<CreatureId> pool = duel_pool(DefaultCreatureCatalog());
+    CHECK(std::find(pool.begin(), pool.end(), CreatureId::TrainingDummy) == pool.end());
 }
