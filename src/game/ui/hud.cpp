@@ -1,5 +1,6 @@
 #include "game/ui/hud.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -24,6 +25,14 @@ constexpr float kGap = 6.0f;
 constexpr float kLogPanelHeight = 300.0f;
 constexpr float kLogHeadingHeight = 22.0f;
 constexpr float kLogRowHeight = 18.0f;
+// Skills: a FIXED-height region in the hero panel, for the same reason the
+// combat log is fixed -- the `ui` crate cannot clip, so the card capacity has
+// to be exact and the caller windows to it (HudSkillCardCapacity).
+constexpr float kSkillPanelHeight = 200.0f;
+constexpr float kSkillCardHeight = 52.0f;
+constexpr float kSkillCardGap = 4.0f;
+constexpr float kSkillHeadingHeight = 22.0f;
+
 // Top-bar speed buttons. Pause is wider to fit its word; 1x/2x/4x are compact.
 constexpr float kPauseBtnWidth = 60.0f;
 constexpr float kSpeedBtnWidth = 40.0f;
@@ -91,6 +100,8 @@ std::string SkillTypeText(SkillTrigger t) {
   return "action";
 }
 
+// What the skill may be aimed at -- its declared SkillTargetMode, verbatim.
+// "any" is honest about meaning friend or foe; the effect decides which.
 std::string SkillTargetText(SkillTargetMode m) {
   switch (m) {
     case SkillTargetMode::None:
@@ -107,16 +118,13 @@ std::string SkillTargetText(SkillTargetMode m) {
   return "any";
 }
 
-// "action, any, cd 12s" -- the cd fragment is omitted when the skill has none.
-std::string SkillSummary(const SkillSpec& s) {
-  std::string out = SkillTypeText(s.trigger);
-  out += ", " + SkillTargetText(s.target);
-  if (s.cooldown_seconds > 0.0f) {
-    char buf[24];
-    std::snprintf(buf, sizeof(buf), ", cd %.0fs", s.cooldown_seconds);
-    out += buf;
+std::string SkillCooldownText(float seconds) {
+  if (seconds <= 0.0f) {
+    return "no cd";
   }
-  return out;
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "cd %.0fs", seconds);
+  return buf;
 }
 
 // The right panel is kPanelWidth (240px) wide; the ui crate cannot clip, so
@@ -298,6 +306,44 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
       add_detail_row(r.label, r.value, r.click_id);
     }
 
+    // Skills: a fixed-height region of bordered cards. Fixed for the same
+    // reason the combat log is (the ui crate cannot clip), and carrying an id
+    // so a wheel over it scrolls the cards instead of zooming the camera.
+    if (!sel.skill_cards.cards.empty()) {
+      UiElement region = Make(UI_ELEM_PANEL, top_index);
+      region.id = kHudSkillList;
+      region.fixed = kSkillPanelHeight;
+      region.bg_rgba = kLogBg;
+      region.pad = kGap;
+      region.gap = kSkillCardGap;
+      els.push_back(region);
+      const int32_t region_index = static_cast<int32_t>(els.size()) - 1;
+
+      std::string heading = sel.skill_cards.heading;
+      if (sel.skill_cards.total > static_cast<int>(sel.skill_cards.cards.size())) {
+        // Say what is off-screen rather than silently truncating: "3-5 / 8".
+        const int first = sel.skill_cards.scroll + 1;
+        const int last = sel.skill_cards.scroll +
+                         static_cast<int>(sel.skill_cards.cards.size());
+        heading += "  " + std::to_string(first) + "-" + std::to_string(last) + " / " +
+                   std::to_string(sel.skill_cards.total);
+      }
+      AddLabel(els, blob, region_index, heading, kMutedFg, kSkillHeadingHeight);
+
+      for (const HudSkillCard& card : sel.skill_cards.cards) {
+        UiElement c = Make(UI_ELEM_PANEL, region_index);
+        c.fixed = kSkillCardHeight;
+        c.bg_rgba = kLinkBg;
+        c.pad = 4.0f;
+        els.push_back(c);
+        const int32_t card_index = static_cast<int32_t>(els.size()) - 1;
+        AddLabel(els, blob, card_index, card.name, kTitleFg, kRowHeight);
+        AddLabel(els, blob, card_index,
+                 card.type + " / " + card.target + " / " + card.cooldown, kMutedFg,
+                 kLogRowHeight);
+      }
+    }
+
     // Clickable member lists (residents / visitors): a muted heading, one
     // navigable row per entry, then a "+N more" line when the source was capped
     // (the ui crate has no scrolling yet).
@@ -407,7 +453,7 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
 }
 
 void AppendHeroProgressionRows(HudSelection& sel, const CharacterState& hero,
-                               const SkillCatalog& skills) {
+                               const SkillCatalog& skills, int scroll) {
   if (hero.level <= 0) {
     return;  // level >= 1 marks a hero row (snapshot contract)
   }
@@ -417,24 +463,41 @@ void AppendHeroProgressionRows(HudSelection& sel, const CharacterState& hero,
   if (hero.skill_count <= 0) {
     return;
   }
-  HudList list;
-  list.heading = "Skills";
-  for (int32_t i = 0; i < hero.skill_count && i < kMaxSkills; ++i) {
+  const int total = std::min(hero.skill_count, kMaxSkills);
+  sel.skill_cards.total = total;
+  const int cap = static_cast<int>(HudSkillCardCapacity());
+  if (cap <= 0) {
+    return;
+  }
+  // Clamp to the last FULL window rather than letting an over-large offset
+  // scroll past the end into an empty panel (the same clamp the combat log
+  // applies to its own offset, view-side).
+  const int max_scroll = std::max(0, total - cap);
+  const int first = std::clamp(scroll, 0, max_scroll);
+  sel.skill_cards.scroll = first;
+
+  for (int i = first; i < total && i < first + cap; ++i) {
     const int32_t id = hero.skills[i];
     const bool known = id >= 0 && id < kSkillCount;
-    // The name gets its own row (a label alongside a ~31-char summary would
-    // collide in the panel); the summary is a label-less value-only row below
-    // it, and the effect text -- which can run well past the panel width --
-    // is greedily word-wrapped onto further label-less rows.
-    list.entries.emplace_back(SkillName(id), "");
+    HudSkillCard card;
+    card.name = SkillName(id);
     if (known) {
-      list.entries.emplace_back("", SkillSummary(skills.specs[id]));
-      if (!skills.specs[id].effect.empty()) {
-        AppendWrapped(list, skills.specs[id].effect, kSkillTextWrapChars);
-      }
+      const SkillSpec& spec = skills.specs[id];
+      card.type = SkillTypeText(spec.trigger);
+      card.target = SkillTargetText(spec.target);
+      card.cooldown = SkillCooldownText(spec.cooldown_seconds);
     }
+    sel.skill_cards.cards.push_back(std::move(card));
   }
-  sel.lists.push_back(std::move(list));
+}
+
+uint32_t HudSkillCardCapacity() {
+  // Mirrors the region BuildHud lays out: a fixed height, a heading, then
+  // cards each followed by a gap. Scale cancels, so the count is unitless.
+  const float cards_h = kSkillPanelHeight - 2.0f * kGap - kSkillHeadingHeight;
+  if (cards_h <= 0.0f) return 0;
+  const int n = static_cast<int>(cards_h / (kSkillCardHeight + kSkillCardGap));
+  return n > 0 ? static_cast<uint32_t>(n) : 0u;
 }
 
 uint32_t HudCombatLogCapacity() {

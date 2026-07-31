@@ -43,6 +43,10 @@ enum HudId : uint32_t {
   // (a) a click on it is consumed like the rest of the panel chrome and (b) the
   // view can route a mouse-wheel over it to log scrolling instead of camera zoom.
   kHudCombatLog,
+  // The hero panel's skills region, for the same two reasons: a click on it is
+  // consumed like the rest of the panel chrome, and the view routes a wheel
+  // over it to card scrolling instead of camera zoom.
+  kHudSkillList,
 };
 
 // Clickable entity rows (guild residents, building visitors, the hero's home
@@ -71,6 +75,26 @@ struct HudList {
   uint32_t overflow = 0;
 };
 
+// One skill's card in the hero panel: what it is called, how it is initiated,
+// what it may be aimed at, and how long before it can be used again. Model
+// only -- BuildHud lays these out; the view fills them.
+struct HudSkillCard {
+  std::string name;      // "ShieldBash"
+  std::string type;      // "action" | "passive" | "focus"  (SkillTrigger)
+  std::string target;    // "none" | "self" | "any" | "multi" | "point"
+  std::string cooldown;  // "cd 12s" | "no cd"
+};
+
+// The windowed card list. The `ui` crate cannot clip or scroll, so the CALLER
+// windows the cards to what fits (HudSkillCardCapacity) and passes the offset
+// along for the position line -- the same arrangement the combat log uses.
+struct HudSkillCards {
+  std::string heading = "Skills";
+  std::vector<HudSkillCard> cards;  // already windowed
+  int scroll = 0;                   // cards hidden above the window
+  int total = 0;                    // how many the hero actually has
+};
+
 struct HudSelection {
   enum class Kind { Building, Hero };
   Kind kind = Kind::Building;
@@ -81,6 +105,9 @@ struct HudSelection {
   std::vector<HudRow> rows;
   // Clickable member lists (residents / visitors), rendered after the stat rows.
   std::vector<HudList> lists;
+  // A hero's skills, one card each (empty for buildings and for heroes who
+  // have not learned anything yet).
+  HudSkillCards skill_cards;
   bool can_recruit = false;   // guild with roster space
   bool can_destroy = false;   // user_destructible and alive
   // Shown greyed (still clickable, so the click is consumed) when the action
@@ -116,14 +143,21 @@ bool BuildHud(UiContext* ctx, const HudModel& model, float viewport_w_px,
               float viewport_h_px, float scale, HudFrame& out);
 
 // Appends a hero's progression detail to a selection: `level` and `xp` rows,
-// then a "Skills" list with, per learned skill, a name row, a label-less
-// summary row ("active, direct, instant, cd 20s"), and its effect text
-// word-wrapped onto further label-less rows -- the panel is a fixed width and
-// the ui crate cannot clip, so long text is pre-wrapped here rather than
-// overflowing. Pure model-building (no layout, no GPU), so tests cover the
+// then one card per learned skill (name / type / target / cooldown), windowed
+// to what the fixed-height skills region fits starting at `scroll`. An
+// over-large `scroll` clamps to the last full window rather than emptying the
+// list. Pure model-building (no layout, no GPU), so tests cover the
 // composition; no-op for non-hero rows (level <= 0).
 void AppendHeroProgressionRows(HudSelection& sel, const CharacterState& hero,
-                               const SkillCatalog& skills);
+                               const SkillCatalog& skills, int scroll);
+
+// How many skill cards fit the fixed-height skills region. The view calls it
+// to clamp its scroll offset before filling the model -- one source of truth
+// for the layout math, exactly like HudCombatLogCapacity below, because the
+// ui crate cannot clip and so the windowing and the panel must agree.
+// Scale-invariant (the region is a fixed logical height), so it takes no
+// arguments.
+uint32_t HudSkillCardCapacity();
 
 // How many combat-log lines fit the fixed-height bottom panel. The view calls it
 // to window its log ring buffer before filling HudModel.combat_log -- a single

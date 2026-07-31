@@ -758,9 +758,15 @@ void GameView::HandleEvent(const SDL_Event& event, int width, int height) {
           screen.y > 0.0f ? static_cast<float>(height) / screen.y : 1.0f);
       const glm::vec2 cur_physical(event.wheel.mouse_x * to_physical.x,
                                    event.wheel.mouse_y * to_physical.y);
-      if (HudHitTest(hud_frame_, cur_physical.x, cur_physical.y) == kHudCombatLog) {
-        ScrollCombatLog(NormalizedWheelY(event.wheel));
-        return;
+      switch (HudHitTest(hud_frame_, cur_physical.x, cur_physical.y)) {
+        case kHudCombatLog:
+          ScrollCombatLog(NormalizedWheelY(event.wheel));
+          return;
+        case kHudSkillList:
+          ScrollSkillList(NormalizedWheelY(event.wheel));
+          return;
+        default:
+          break;
       }
       ZoomAtCursor(gamecam_, camera_, NormalizedWheelY(event.wheel),
                    glm::vec2(event.wheel.mouse_x, event.wheel.mouse_y), screen);
@@ -960,6 +966,17 @@ void GameView::PushLogLine(std::string line) {
   // If the user is reading older lines, keep their window on the same content as
   // new lines arrive (RefreshHud clamps the offset to the current total).
   if (combat_log_scroll_ > 0) ++combat_log_scroll_;
+}
+
+void GameView::ScrollSkillList(float wheel_y) {
+  // Wheel down (negative) walks down the list; up returns toward the first
+  // card. The upper bound is applied where the model is built (RefreshHud),
+  // which is the only place that knows how many cards the hero actually has.
+  if (wheel_y < 0.0f) {
+    ++skill_scroll_;
+  } else if (wheel_y > 0.0f && skill_scroll_ > 0) {
+    --skill_scroll_;
+  }
 }
 
 void GameView::ScrollCombatLog(float wheel_y) {
@@ -1407,7 +1424,16 @@ void GameView::RefreshHud() {
           home ? AddSelectTarget(HudSelectTarget::Kind::Building, home->id) : 0;
       s.rows.emplace_back("guild", label, click);
     }
-    AppendHeroProgressionRows(s, *hero, sim_.Skills());
+    // A different hero than the offset was scrolled for opens at the top.
+    if (skill_scroll_hero_ != hero->id) {
+      skill_scroll_hero_ = hero->id;
+      skill_scroll_ = 0;
+    }
+    // The clamp lives in AppendHeroProgressionRows (it knows the capacity and
+    // the count); read back what it settled on so the wheel does not keep
+    // winding an offset the panel is already ignoring.
+    AppendHeroProgressionRows(s, *hero, sim_.Skills(), skill_scroll_);
+    skill_scroll_ = s.skill_cards.scroll;
     model.has_selection = true;
     model.selection = std::move(s);
   }

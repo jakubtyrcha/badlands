@@ -238,6 +238,12 @@ class GameView : public AppView {
   // lines the user has scrolled up from the tail (0 = following the newest).
   std::vector<std::string> combat_log_lines_;
   int combat_log_scroll_ = 0;
+  // How many skill cards the selected hero's panel is scrolled down by (0 =
+  // showing its first), and WHICH hero that offset belongs to. Tracking the
+  // owner here (rather than resetting at every selection site) is what keeps a
+  // newly selected hero's list from opening halfway down.
+  int skill_scroll_ = 0;
+  uint32_t skill_scroll_hero_ = UINT32_MAX;
 
   // Drains this frame's sim events: appends combat-log lines and spawns floating
   // damage numbers on the victims. Runs every frame (even headless) so the sim's
@@ -254,6 +260,10 @@ class GameView : public AppView {
   float EventActorSize(uint32_t slot) const;
   // Adjusts the combat-log scroll offset by a wheel delta (+ older / - newer).
   void ScrollCombatLog(float wheel_y);
+  // Adjusts the hero panel's skill-card offset by a wheel delta (+ down the
+  // list / - back up). Clamped against the actual card count in RefreshHud,
+  // the same arrangement the combat log uses.
+  void ScrollSkillList(float wheel_y);
   // Builds the floating world-label quads (names / health bars / damage numbers)
   // from the current snapshot + camera into `out` (physical-pixel UiQuads).
   void BuildFloatingLabels(std::vector<UiQuad>& out);
