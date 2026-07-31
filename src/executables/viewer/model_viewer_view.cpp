@@ -13,6 +13,7 @@
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
+#include "game/geometry/leaf_voxelizer.hpp"
 #include "game/geometry/mesh_lod.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
@@ -50,6 +51,21 @@ constexpr float kMultiFloorSize = 160.0f;
 // of the 16x16, 8.0-spacing grid, so the near/mid/far rows land in different
 // LOD bands with visible geometric detail contrast.
 constexpr std::array<float, 2> kMultiLodThresholds = {95.0f, 135.0f};
+
+// Voxel-crown LOD (volumetric-foliage Phase 3): three progressively coarser
+// tet-voxelization cell sizes, one per Voxel L0/L1/L2 mode
+// (kFoliageVoxelWorldSizes[lod_level_ - 1]), given in WORLD (preview) space
+// -- RebuildScene converts to the tree's own native units by dividing by `s`
+// (the same kTreePreviewHeight rescale bark/leaves already go through) before
+// passing it to LeafVoxelizeOptions::cell_size. kFoliageVoxelTargetPx is not
+// consumed yet (Phase 3 is a manual mode switch, no distance-based
+// selection) -- it documents the screen-space budget the sizes below were
+// derived from, for whichever later phase adds automatic LOD selection:
+// world_size = target_px * distance / focal_px, i.e. a world-space threshold
+// distance = size * focal_px / target_px. At 1920x1080/60deg vertical fovy,
+// focal_px = (height/2) / tan(fovy/2) = 540 / tan(30deg) ~= 935.
+constexpr float kFoliageVoxelTargetPx = 8.0f;
+constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.30f, 0.60f};
 
 }  // namespace
 
@@ -233,7 +249,7 @@ void ModelViewerView::RebuildScene() {
   field_ptr_ = nullptr;
 
   const MeshGenerator& gen = generators_[generator_index_];
-  const bool multi = gen.tree.has_value() && lod_level_ == 3;
+  const bool multi = gen.tree.has_value() && lod_level_ == 4;
 
   const float floor_size = multi ? kMultiFloorSize : kFloorSize;
   AddFloor(scene_, floor_size, matlib_.SolidColor(kFloorGray, kFloorRoughness),
@@ -316,9 +332,14 @@ void ModelViewerView::RebuildScene() {
     scene_context_.instanced_fields = &field_ptr_;
     scene_context_.instanced_field_count = 1;
   } else if (gen.tree) {
-    // Two-material tree: deferred solid bark + forward-opaque alpha-cutout leaf
-    // cards, sharing the tree's local space (and therefore one preview
-    // transform, so the leaves stay attached to the branches).
+    // Single tree, one of two leaf representations sharing the tree's local
+    // space (and therefore one preview transform, so the leaves/crown stay
+    // attached to the branches):
+    //   - lod_level_ == 0 ("Original"): deferred solid bark + forward-opaque
+    //     alpha-cutout leaf cards -- the pre-Phase-3 path, untouched.
+    //   - lod_level_ == 1..3 ("Voxel L0/L1/L2"): deferred solid bark
+    //     (simplified per kDefaultLodRatios) + a deferred VoxelFoliage tet
+    //     crown (volumetric-foliage Phase 3) in place of the leaf cards.
     const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
     TexturedMeshResult bark = GenerateTreeMesh(*gen.tree, skeleton);
     const float h = bark.local_bounds.max.y - bark.local_bounds.min.y;
@@ -330,46 +351,79 @@ void ModelViewerView::RebuildScene() {
 
     world_bounds = bark.local_bounds.TransformedBy(xf);
 
-    TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
-    if (leaves.mesh.vertex_count > 0) {
-      world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
-    }
-
-    // Manual LOD switch: simplify bark/leaf meshes in place before they're
-    // moved into the scene. local_bounds is left as-is (simplification stays
-    // within the mesh extent, so orbit framing above is unaffected).
+    // Manual LOD switch: simplify the bark mesh in place before it's moved
+    // into the scene. local_bounds is left as-is (simplification stays
+    // within the mesh extent, so orbit framing above is unaffected). Voxel
+    // L0/L1/L2 (lod_level_ 1..3) map onto kDefaultLodRatios[lod_level_ - 1]
+    // (Voxel L0 = ratio 1.0, i.e. full bark, same as the old lod-1 mapping
+    // shifted by one now that index 0 means "Original" instead of "full
+    // detail"); Original (0) stays untouched via the guard below.
     if (lod_level_ > 0) {
-      SimplifiedMesh s = SimplifyMesh(bark.mesh.vertices,
-                                     kTexturedMeshFloatsPerVertex,
-                                     bark.mesh.indices, kDefaultLodRatios[lod_level_]);
-      bark.mesh.vertices = std::move(s.vertices);
-      bark.mesh.indices = std::move(s.indices);
-      bark.mesh.vertex_count = s.vertex_count;
+      SimplifiedMesh simplified = SimplifyMesh(
+          bark.mesh.vertices, kTexturedMeshFloatsPerVertex, bark.mesh.indices,
+          kDefaultLodRatios[lod_level_ - 1]);
+      bark.mesh.vertices = std::move(simplified.vertices);
+      bark.mesh.indices = std::move(simplified.indices);
+      bark.mesh.vertex_count = simplified.vertex_count;
       bark.mesh.dirty = true;
     }
-    if (leaves.mesh.vertex_count > 0 && kLeafLodRatios[lod_level_] < 1.0f) {
-      SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
-                                      kTexturedMeshFloatsPerVertex,
-                                      leaves.mesh.indices,
-                                      kLeafLodRatios[lod_level_]);
-      leaves.mesh.vertices = std::move(ls.vertices);
-      leaves.mesh.indices = std::move(ls.indices);
-      leaves.mesh.vertex_count = ls.vertex_count;
-      leaves.mesh.dirty = true;
-    }
     bark_tris_ = static_cast<int>(bark.mesh.indices.size() / 3);
-    leaf_tris_ = static_cast<int>(leaves.mesh.indices.size() / 3);
-
     AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
 
-    if (leaves.mesh.vertex_count > 0) {
-      DeferredMaterial lm = matlib_.TranslucentFoliage(
-          LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_,
-          gen.tree->leaves.alpha_cutoff, gen.tree->leaves.tint,
-          gen.tree->leaves.transmission_tint,
-          gen.tree->leaves.transmission_strength);
-      AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
-                                 lm.factory, lm.params, xf);
+    if (lod_level_ == 0) {
+      // Original: the pre-Phase-3 card-leaf path, byte-for-byte unchanged.
+      TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
+      if (leaves.mesh.vertex_count > 0) {
+        world_bounds = world_bounds.Union(leaves.local_bounds.TransformedBy(xf));
+      }
+      if (leaves.mesh.vertex_count > 0 && kLeafLodRatios[lod_level_] < 1.0f) {
+        SimplifiedMesh ls = SimplifyMesh(leaves.mesh.vertices,
+                                        kTexturedMeshFloatsPerVertex,
+                                        leaves.mesh.indices,
+                                        kLeafLodRatios[lod_level_]);
+        leaves.mesh.vertices = std::move(ls.vertices);
+        leaves.mesh.indices = std::move(ls.indices);
+        leaves.mesh.vertex_count = ls.vertex_count;
+        leaves.mesh.dirty = true;
+      }
+      leaf_tris_ = static_cast<int>(leaves.mesh.indices.size() / 3);
+
+      if (leaves.mesh.vertex_count > 0) {
+        DeferredMaterial lm = matlib_.TranslucentFoliage(
+            LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_,
+            gen.tree->leaves.alpha_cutoff, gen.tree->leaves.tint,
+            gen.tree->leaves.transmission_tint,
+            gen.tree->leaves.transmission_strength);
+        AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
+                                   lm.factory, lm.params, xf);
+      }
+    } else {
+      // Voxel L0/L1/L2: tet-voxelize the leaf cards instead of simplifying
+      // them. cell_size is world_size / s -- kFoliageVoxelWorldSizes is in
+      // preview (post-rescale) world units, LeafVoxelizeOptions::cell_size
+      // wants the tree's own native units, and `s` is the same
+      // kTreePreviewHeight rescale bark/xf above already apply.
+      TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
+      LeafVoxelizeOptions voxel_opts;
+      voxel_opts.cell_size = kFoliageVoxelWorldSizes[lod_level_ - 1] / s;
+      TexturedMeshResult voxels = VoxelizeLeafCards(
+          leaves.mesh, gen.tree->leaves.silhouette, voxel_opts);
+      // Voxel shell exceeds the source cards' AABB (tets overscale past
+      // their cell), so union rather than reuse the card bounds.
+      world_bounds = world_bounds.Union(voxels.local_bounds.TransformedBy(xf));
+      leaf_tris_ = static_cast<int>(voxels.mesh.indices.size() / 3);
+
+      // Mirrors the Original branch's vertex_count guard above -- a tree
+      // preset with leaves disabled (or too sparse to clear
+      // occupancy_fraction at this cell size) voxelizes to an empty mesh;
+      // skip the entity rather than upload a zero-vertex GPU buffer.
+      if (voxels.mesh.vertex_count > 0) {
+        AddMeshEntity(
+            scene_, "leaves", std::move(voxels),
+            matlib_.VoxelFoliage(gen.tree->leaves.tint, 0.9f,
+                                 gen.tree->leaves.transmission_strength),
+            xf);
+      }
     }
   } else if (gen.generate) {
     GeneratedMesh generated = gen.generate();
@@ -443,14 +497,15 @@ void ModelViewerView::DrawUI() {
   if (generators_[generator_index_].tree.has_value()) {
     ImGui::Separator();
     ImGui::TextUnformatted("LOD");
-    ImGui::RadioButton("0", &lod, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("1", &lod, 1);
-    ImGui::SameLine();
-    ImGui::RadioButton("2", &lod, 2);
-    ImGui::SameLine();
-    ImGui::RadioButton("Multi", &lod, 3);
-    if (lod != 3) {
+    // One per line (rather than the old 0/1/2/Multi single-row SameLine
+    // chain) -- the longer volumetric-foliage labels ("Voxel L0/L1/L2")
+    // would overflow this window's 200px width floor packed onto one row.
+    ImGui::RadioButton("Original", &lod, 0);
+    ImGui::RadioButton("Voxel L0", &lod, 1);
+    ImGui::RadioButton("Voxel L1", &lod, 2);
+    ImGui::RadioButton("Voxel L2", &lod, 3);
+    ImGui::RadioButton("Multi", &lod, 4);
+    if (lod != 4) {
       ImGui::Text("bark: %d tris   leaves: %d tris", bark_tris_, leaf_tris_);
     }
   }

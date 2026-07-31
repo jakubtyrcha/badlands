@@ -59,11 +59,13 @@ class ModelViewerView : public AppView {
     initial_shadow_debug_mode_ = mode;
   }
 
-  // Selects the initial LOD level (headless `--lod <n>`, 0..3; 3 = "Multi",
-  // a 16x16 instanced grid of the selected tree with dynamic GPU LOD). Call
-  // before Initialize() -- RebuildScene() reads lod_level_ when generating
-  // tree meshes.
-  void SetInitialLod(int lod) { lod_level_ = std::clamp(lod, 0, 3); }
+  // Selects the initial LOD level (headless `--lod <n>`, 0..4: 0 = "Original"
+  // (today's full bark + billboard-card leaves), 1..3 = "Voxel L0/L1/L2"
+  // (tet-voxelized crowns at three cell sizes), 4 = "Multi" (a 16x16
+  // instanced grid of the selected tree with dynamic GPU LOD). Call before
+  // Initialize() -- RebuildScene() reads lod_level_ when generating tree
+  // meshes.
+  void SetInitialLod(int lod) { lod_level_ = std::clamp(lod, 0, 4); }
 
  private:
   // The output of a generator: a mesh plus the transform that places it. The
@@ -113,11 +115,16 @@ class ModelViewerView : public AppView {
   std::vector<MeshGenerator> generators_;
   int generator_index_ = 0;
 
-  // Manual LOD switch (tree generators only): 0=full detail, 1/2=meshopt
-  // simplified per kLodRatios, 3="Multi" (a 16x16 instanced grid via
-  // tree_field_, dynamic GPU LOD -- see RebuildScene). bark_tris_/leaf_tris_
-  // are the single-tree (0/1/2) triangle counts, recomputed in RebuildScene
-  // for the ImGui readout; not meaningful in Multi mode.
+  // Manual LOD switch (tree generators only): 0="Original" (full-detail bark
+  // + billboard-card leaves via TranslucentFoliage, byte-for-byte the old
+  // lod-0 path), 1..3="Voxel L0/L1/L2" (bark simplified per
+  // kDefaultLodRatios[lod_level_-1], leaves replaced by a tet-voxelized
+  // crown via VoxelizeLeafCards/VoxelFoliage at progressively coarser cell
+  // sizes -- see kFoliageVoxelWorldSizes), 4="Multi" (a 16x16 instanced grid
+  // via tree_field_, dynamic GPU LOD -- see RebuildScene; still card leaves
+  // until a later phase). bark_tris_/leaf_tris_ are the single-tree (0..3)
+  // triangle counts, recomputed in RebuildScene for the ImGui readout; not
+  // meaningful in Multi mode.
   int lod_level_ = 0;
   int bark_tris_ = 0;
   int leaf_tris_ = 0;
