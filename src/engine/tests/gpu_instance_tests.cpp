@@ -12,6 +12,7 @@
 // of an indirect-args buffer, not whatever the CPU passed at record time?
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -41,11 +42,14 @@
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material/rendering_material_instance.hpp"
+#include "engine/rendering/material_library.hpp"
 #include "engine/rendering/passes/render_forward.hpp"
+#include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/rendering/shader/gpu_pipeline_generator.hpp"
 #include "engine/rendering/texture_readback.hpp"
 #include "engine/rendering/util/find_shader_directory.hpp"
+#include "engine/scene/scene_graph.hpp"
 #include "engine/tests/buffer_readback.hpp"
 #include "gpu_test_helpers.hpp"
 
@@ -3149,4 +3153,413 @@ TEST_CASE("SceneRenderer draws SceneContext::instanced_fields (empty registry, "
     CHECK(std::abs(deferred_red - background_red) < 0.05f);
     CHECK(std::abs(forward_red - background_red) < 0.05f);
   }
+}
+
+// ===========================================================================
+// Phase 2 of the volumetric-foliage feature: the "voxel_foliage" G-buffer
+// material (shaders/material/voxel_foliage.wesl) + deferred_lighting.wesl's
+// foliage-transmission branch. This phase is VISUALLY INERT -- nothing yet
+// writes material.a = kShadingModelFoliage on any real scene, so there is no
+// full-pipeline (lit) test here; that arrives with Phase 3+ (real geometry
+// attached to this material). What's pinned:
+//   1. All 4 (geometry x pass) shader variants compile.
+//   2. A hand-built tet (Phase 1's leaf_voxelizer output shape, inlined --
+//      this is an ENGINE test target and must not link game code) round-trips
+//      through the non-instanced G-buffer pipeline with the expected
+//      material.a/.g/.r encoding, and CullMode::Back respects triangle
+//      winding (visible / gone).
+//   3. deferred_lighting.wesl's widened imports + foliage branch don't
+//      perturb the STANDARD (non-foliage) shading path -- material.a stays
+//      0.0 for every existing material, so `transmission` is always zero.
+// ===========================================================================
+namespace {
+
+// One hand-built Phase-1-style tet: 4 vertices / 12 indices, the 44-byte
+// textured-mesh layout (pos3, uv2 with uv.x = brightness, normal3, tangent3
+// -- see leaf_voxelizer.hpp's EmitTetMesh). v0,v1,v2 form the "near" face
+// (facing the camera, dead-center on the view axis -- its centroid projects
+// to the exact center pixel, see BuildVoxelFoliageFrame); v3 is placed FAR
+// BEHIND the camera (z = +40, camera at the origin looking down -Z) so the
+// other 3 faces (each sharing 2 vertices with the near face + v3) are almost
+// entirely near-plane/behind-eye clipped -- only a razor-thin sliver hugging
+// v0/v1/v2 themselves could remain, nowhere near the near face's own
+// centroid. This is what makes "flip ALL 12 indices -> the center pixel goes
+// background" a sound test: for a CLOSED, correctly-wound solid, flipping
+// every face's winding does NOT generally empty its silhouette (the
+// previously back-facing faces become front-facing-per-Dawn and typically
+// cover much of the SAME screen area, by convexity) -- it only works here
+// because the 3 "side" faces are frustum-clipped away regardless of winding.
+constexpr glm::vec3 kTetNearP0(0.0f, 0.5f, -2.0f);
+constexpr glm::vec3 kTetNearP1(-0.43f, -0.25f, -2.0f);
+constexpr glm::vec3 kTetNearP2(0.43f, -0.25f, -2.0f);
+constexpr glm::vec3 kTetFarApex(0.1f, -0.25f, 40.0f);
+
+// All 4 faces outward-CCW (GenerateCube's "CCW viewed from outside"
+// convention -- primitive_mesh_builders.cpp), matching the engine's
+// CullMode::Back default: the near face (0,1,2) is front-facing (visible);
+// the 3 apex faces are back-facing (their outward normal points away from
+// the camera, toward the far apex) and thus culled.
+constexpr std::array<uint32_t, 12> kTetIndicesVisible = {0, 1, 2, 0, 1, 3,
+                                                          1, 2, 3, 2, 0, 3};
+// Every triangle's last two indices swapped -- reverses all 4 faces' winding.
+constexpr std::array<uint32_t, 12> kTetIndicesFlipped = {0, 2, 1, 0, 3, 1,
+                                                          1, 3, 2, 2, 3, 0};
+
+constexpr uint32_t kTetTarget = 96;
+
+std::vector<float> BuildTetVertices(float brightness) {
+  const std::array<glm::vec3, 4> pos = {kTetNearP0, kTetNearP1, kTetNearP2,
+                                        kTetFarApex};
+  std::vector<float> verts;
+  verts.reserve(4 * 11);
+  for (const glm::vec3& p : pos) {
+    // The normal/tangent values are never read by this test (the G-buffer
+    // readback only asserts material.a/.g/.r, which packVoxelFoliageGBuffer
+    // derives from params/tint, not the normal) -- any finite unit vectors
+    // are fine.
+    const float v[11] = {p.x,  p.y,  p.z,  brightness, 0.0f, 0.0f,
+                         0.0f, 1.0f, 1.0f, 0.0f,       0.0f};
+    verts.insert(verts.end(), v, v + 11);
+  }
+  return verts;
+}
+
+// A real (non-degenerate) perspective frame, camera at the world/offset
+// origin looking down -Z -- unlike MakeOrthoFrame (which drops Z entirely,
+// fine for the CullMode::None instanced tests above but WRONG here: this
+// test needs genuine near-plane clipping to keep the 3 apex faces off the
+// near face's centroid, see the comment above). object.modelMatrix is left
+// identity (camera_world_pos = 0, so offset space == world space, and the
+// tet's own coordinates are already the "already offset" positions the
+// non-instanced vs_main expects).
+UniformData BuildVoxelFoliageFrame() {
+  UniformData u{};
+  Camera cam;
+  cam.position = glm::vec3(0.0f);
+  cam.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+  cam.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  cam.fov = 50.0f;
+  cam.aspect = 1.0f;
+  cam.near_plane = 0.1f;
+  cam.far_plane = 100.0f;
+  u.view = glm::lookAt(glm::vec3(0.0f), cam.direction, cam.up);
+  u.proj = cam.GetProj();
+  u.view_prev = u.view;
+  u.proj_prev = u.proj;
+  u.light_view_proj = glm::mat4(1.0f);
+  u.camera_world_pos = glm::vec4(0.0f);
+  u.sunDir = glm::vec4(glm::normalize(glm::vec3(0.3f, 0.8f, 0.5f)), 0.0f);
+  u.sunColor = glm::vec4(1.0f);
+  u.ambient_sh[0] = glm::vec4(1.0f);
+  u.near_plane = cam.near_plane;
+  u.far_plane = cam.far_plane;
+  u.screen_size = glm::vec2(float(kTetTarget), float(kTetTarget));
+  u.output_is_linear = 1u;
+  return u;
+}
+
+std::unique_ptr<MaterialInstanceFactory> MakeVoxelFoliageFactory(
+    TestGpu& g, GeometryType geometry, bool casts_shadow,
+    wgpu::TextureFormat depth_format = wgpu::TextureFormat::Undefined) {
+  FactoryDescriptor desc;
+  desc.shader_name = "voxel_foliage";
+  desc.shader_path = "material/voxel_foliage.wesl";
+  desc.supported_geometry_types = {geometry};
+  desc.supported_pass_types = {MaterialPassType::kDeferred};
+  desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                        GBuffer::kMaterialFormat};
+  desc.depth_format = depth_format;
+  desc.cull_mode = wgpu::CullMode::Back;
+  desc.casts_shadow = casts_shadow;
+  return BuildMaterialInstanceFactory(desc, g.device, g.queue, g.gen.get());
+}
+
+// G-buffer MRT clear values matching scene_renderer.cpp's Pass 1 exactly
+// (normals/albedo transparent-black, material {0.75, 1.0, 1.0, 0.0} -- so
+// material.a == 0.0 is the "nothing drawn here" default, same threshold
+// deferred_lighting.wesl's foliage gate relies on).
+wgpu::RenderPassColorAttachment TetClearAttachment(wgpu::TextureView view,
+                                                   wgpu::Color clear) {
+  wgpu::RenderPassColorAttachment ca{};
+  ca.view = view;
+  ca.loadOp = wgpu::LoadOp::Clear;
+  ca.storeOp = wgpu::StoreOp::Store;
+  ca.clearValue = clear;
+  ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+  return ca;
+}
+
+// Renders `indices` (kTetIndicesVisible or kTetIndicesFlipped) through the
+// non-instanced voxel_foliage material and returns the material target's
+// exact center pixel -- the near face's centroid projects there by
+// construction (kTetNearP0/P1/P2 average to (0,0,-2), dead on the camera's
+// view axis).
+CpuImage::Color RenderTetMaterialCenterPixel(
+    TestGpu& g, MaterialInstanceFactory& factory, float roughness,
+    float strength, const std::array<uint32_t, 12>& indices) {
+  InstanceParams params;
+  params.uniform_overrides = {
+      {"tint", glm::vec4(1.0f)},
+      {"params", glm::vec4(roughness, strength, 0.0f, 0.0f)},
+  };
+  auto instance =
+      factory.CreateInstance(GeometryType::kTexturedMesh,
+                             MaterialPassType::kDeferred,
+                             RenderPassType::kGBuffer, params);
+  REQUIRE(instance != nullptr);
+  instance->SetParameterByName("modelMatrix",
+                               MaterialParameterValue(glm::mat4(1.0f)));
+
+  const std::vector<float> verts = BuildTetVertices(0.8f);
+  wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
+                                   verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, indices.data(),
+                                   indices.size() * sizeof(uint32_t),
+                                   wgpu::BufferUsage::Index);
+
+  ColorRenderTarget normals_t(g.device, kTetTarget, kTetTarget,
+                              GBuffer::kNormalsFormat);
+  ColorRenderTarget albedo_t(g.device, kTetTarget, kTetTarget,
+                             GBuffer::kAlbedoFormat);
+  ColorRenderTarget material_t(g.device, kTetTarget, kTetTarget,
+                               GBuffer::kMaterialFormat);
+  REQUIRE(material_t.IsValid());
+
+  UniformData frame_uniforms = BuildVoxelFoliageFrame();
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, frame_uniforms);
+  {
+    std::array<wgpu::RenderPassColorAttachment, 3> ca = {
+        TetClearAttachment(normals_t.GetView(), {0, 0, 0, 0}),
+        TetClearAttachment(albedo_t.GetView(), {0, 0, 0, 0}),
+        TetClearAttachment(material_t.GetView(), {0.75, 1.0, 1.0, 0.0})};
+    wgpu::RenderPassDescriptor desc{};
+    desc.colorAttachmentCount = ca.size();
+    desc.colorAttachments = ca.data();
+    RenderPassContext pass = frame.BeginRenderPass(desc);
+    REQUIRE(instance->Bind(pass, frame));
+    REQUIRE(instance->BindPerObject(pass, frame));
+    pass.SetVertexBuffer(0, vbuf);
+    pass.SetIndexBuffer(ibuf, wgpu::IndexFormat::Uint32);
+    pass.DrawIndexed(static_cast<uint32_t>(indices.size()));
+    pass.End();
+  }
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback rb(g.instance, g.device, g.queue);
+  CpuImage material_img = rb.ReadTextureSync(
+      material_t.GetTexture(), kTetTarget, kTetTarget, GBuffer::kMaterialFormat);
+  return material_img.GetPixel(kTetTarget / 2, kTetTarget / 2);
+}
+
+}  // namespace
+
+TEST_CASE("voxel_foliage material compiles all 4 (geometry x pass) variants",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  auto textured_factory = MakeVoxelFoliageFactory(
+      g, GeometryType::kTexturedMesh, /*casts_shadow=*/true,
+      wgpu::TextureFormat::Depth32Float);
+  auto instanced_factory = MakeVoxelFoliageFactory(
+      g, GeometryType::kInstancedMesh, /*casts_shadow=*/true,
+      wgpu::TextureFormat::Depth32Float);
+  REQUIRE(textured_factory != nullptr);
+  REQUIRE(instanced_factory != nullptr);
+
+  struct Variant {
+    const char* label;
+    MaterialInstanceFactory* factory;
+    GeometryType geometry;
+    RenderPassType pass;
+  };
+  const std::array<Variant, 4> variants = {{
+      {"voxel_foliage_textured_gbuffer", textured_factory.get(),
+       GeometryType::kTexturedMesh, RenderPassType::kGBuffer},
+      {"voxel_foliage_textured_shadow", textured_factory.get(),
+       GeometryType::kTexturedMesh, RenderPassType::kShadow},
+      {"voxel_foliage_instanced_gbuffer", instanced_factory.get(),
+       GeometryType::kInstancedMesh, RenderPassType::kGBuffer},
+      {"voxel_foliage_instanced_shadow", instanced_factory.get(),
+       GeometryType::kInstancedMesh, RenderPassType::kShadow},
+  }};
+
+  MaterialInstanceCache cache;
+  for (const Variant& v : variants) {
+    entt::id_type key = ComposeMaterialCacheKey(
+        entt::hashed_string{v.label}.value(), v.geometry, v.pass, 0);
+    entt::resource<RenderingMaterialInstance> handle;
+    CapturedError err = RunCapturingValidationErrors(g, [&] {
+      handle = cache.GetOrCreate(key, *v.factory, v.geometry,
+                                 MaterialPassType::kDeferred, v.pass,
+                                 InstanceParams{});
+    });
+    INFO(v.label << " Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    REQUIRE(handle);
+    REQUIRE(handle->IsValid());
+  }
+}
+
+TEST_CASE("voxel_foliage G-buffer readback: material encoding + CullMode::Back "
+          "winding",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto factory = MakeVoxelFoliageFactory(g, GeometryType::kTexturedMesh,
+                                         /*casts_shadow=*/false);
+  REQUIRE(factory != nullptr);
+
+  constexpr float kRoughness = 0.6f;
+  constexpr float kStrength = 0.35f;
+
+  SECTION("correct winding: material.a/.g/.r match, alpha tagged as foliage") {
+    CapturedError err;
+    CpuImage::Color px;
+    err = RunCapturingValidationErrors(g, [&] {
+      px = RenderTetMaterialCenterPixel(g, *factory, kRoughness, kStrength,
+                                        kTetIndicesVisible);
+    });
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    INFO("material rgba = " << (int)px.r << "," << (int)px.g << ","
+                            << (int)px.b << "," << (int)px.a);
+    // material.a = kShadingModelFoliage (1.0) -- comfortably above the 0.5
+    // threshold deferred_lighting.wesl gates on.
+    CHECK(px.a > 127);
+    // material.g = translucency strength, material.r = roughness, both
+    // RGBA8Unorm-quantized -- +/-2/255 tolerance.
+    CHECK(std::abs(static_cast<int>(px.g) -
+                   static_cast<int>(std::lround(kStrength * 255.0f))) <= 2);
+    CHECK(std::abs(static_cast<int>(px.r) -
+                   static_cast<int>(std::lround(kRoughness * 255.0f))) <= 2);
+  }
+
+  SECTION("flipped index winding: the near face is culled, pixel stays "
+          "background") {
+    CapturedError err;
+    CpuImage::Color px;
+    err = RunCapturingValidationErrors(g, [&] {
+      px = RenderTetMaterialCenterPixel(g, *factory, kRoughness, kStrength,
+                                        kTetIndicesFlipped);
+    });
+    INFO("Dawn validation error: " << err.message);
+    CHECK(err.type == wgpu::ErrorType::NoError);
+    INFO("material rgba = " << (int)px.r << "," << (int)px.g << ","
+                            << (int)px.b << "," << (int)px.a);
+    // Nothing drawn at the center pixel -- stays at the material clear
+    // value's alpha (0.0), well below the foliage-tag threshold.
+    CHECK(px.a < 10);
+  }
+}
+
+TEST_CASE("MaterialLibrary::VoxelFoliage builds a textureless deferred "
+          "material",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  MaterialLibrary matlib;
+  REQUIRE(matlib.Initialize(g.device, g.queue, g.gen.get()));
+
+  const glm::vec3 tint(0.3f, 0.7f, 0.2f);
+  constexpr float kRoughness = 0.6f;
+  constexpr float kStrength = 0.35f;
+
+  DeferredMaterial result = matlib.VoxelFoliage(tint, kRoughness, kStrength);
+  REQUIRE(result.factory != nullptr);
+  REQUIRE(result.params.uniform_overrides.count("tint") == 1u);
+  REQUIRE(result.params.uniform_overrides.count("params") == 1u);
+  // No texture_overrides -- voxel_foliage.wesl declares no textures/samplers.
+  CHECK(result.params.texture_overrides.empty());
+
+  const auto& tint_value = result.params.uniform_overrides.at("tint");
+  REQUIRE(std::holds_alternative<glm::vec4>(tint_value));
+  CHECK(std::get<glm::vec4>(tint_value) == glm::vec4(tint, 1.0f));
+
+  const auto& params_value = result.params.uniform_overrides.at("params");
+  REQUIRE(std::holds_alternative<glm::vec4>(params_value));
+  CHECK(std::get<glm::vec4>(params_value) ==
+       glm::vec4(kRoughness, kStrength, 0.0f, 0.0f));
+
+  // Same (tint, roughness, strength) -> same cached factory (shared, lazily
+  // built once) and equal params, mirroring SolidColor's cache contract.
+  DeferredMaterial again = matlib.VoxelFoliage(tint, kRoughness, kStrength);
+  CHECK(again.factory == result.factory);
+}
+
+TEST_CASE("deferred_lighting foliage branch is inert for standard "
+          "(non-foliage) materials",
+          "[gpu_instance][gpu]") {
+  // Renders a real SceneRenderer frame (fog off, matching RenderSceneWithFields
+  // above) with a single SolidColor-material floor -- the "normalmapped"
+  // shader's packNormalMappedGBuffer always writes material.a = 0.0, so
+  // deferred_lighting.wesl's `materialData.a > kShadingModelFoliage * 0.5`
+  // gate must stay false for every pixel this scene draws; `transmission`
+  // stays vec3(0.0) and `finalColorLinear + transmission` is arithmetically
+  // identical to the pre-Phase-2 `finalColorLinear` alone. This is a
+  // compile/shade smoke test (the widened imports + new branch don't corrupt
+  // the standard path), not a byte-exact pin against a prior build.
+  TestGpu& g = GetTestGpu();
+
+  MaterialLibrary matlib;
+  REQUIRE(matlib.Initialize(g.device, g.queue, g.gen.get()));
+
+  SceneGraph graph;
+  graph.SetSunDirection(glm::normalize(glm::vec3(0.2f, 1.0f, 0.3f)));
+  graph.SetSunColor(glm::vec3(1.0f));
+  graph.SetAmbient(glm::vec3(0.6f));
+  graph.SetClearColor(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+  AddFloor(graph, 20.0f, matlib.SolidColor(glm::vec3(0.6f, 0.35f, 0.2f), 0.6f),
+          1.0f);
+
+  entt::registry registry;
+  SceneContext scene_context;
+  scene_context.registry = &registry;
+  graph.SyncToRegistry(registry, scene_context);
+
+  Camera camera;
+  camera.position = glm::vec3(0.0f, 8.0f, 8.0f);
+  camera.LookAt(glm::vec3(0.0f));
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 45.0f;
+  camera.aspect = 1.0f;
+  camera.near_plane = 0.1f;
+  camera.far_plane = 1000.0f;
+
+  constexpr uint32_t kFloorTestSize = 128;
+  ColorRenderTarget rt(g.device, kFloorTestSize, kFloorTestSize,
+                       wgpu::TextureFormat::R32Float);
+  REQUIRE(rt.IsValid());
+
+  SceneRenderer renderer;
+  renderer.Initialize(g.device, g.queue, g.gen.get(),
+                      wgpu::TextureFormat::R32Float, kFloorTestSize,
+                      kFloorTestSize,
+                      g.device.HasFeature(wgpu::FeatureName::TextureFormatsTier1));
+  renderer.MutableFogConfig().enabled = false;  // would haze the readback
+
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    renderer.Render(camera, registry, scene_context, rt.GetView());
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  TextureReadback readback(g.instance, g.device, g.queue);
+  CpuImage image = readback.ReadTextureSync(
+      rt.GetTexture(), kFloorTestSize, kFloorTestSize,
+      wgpu::TextureFormat::R32Float);
+
+  // Floor center (world origin) projects to the image center under this
+  // top-down-tilted camera; a corner stays sky/background.
+  const float floor_red = image.GetDepth(kFloorTestSize / 2, kFloorTestSize / 2);
+  const float background_red = image.GetDepth(4, 4);
+  INFO("floor = " << floor_red << " background = " << background_red);
+  // The floor is lit (sun + ambient on a mid-gray albedo) -- comfortably
+  // brighter than the black clear color; finite (no NaN/Inf from a
+  // miscomposed transmission term).
+  CHECK(floor_red > background_red + 0.05f);
+  CHECK(std::isfinite(floor_red));
+  CHECK(background_red < 0.01f);
 }
