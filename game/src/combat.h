@@ -50,6 +50,19 @@ struct CombatResult {
 // Deterministic: identical requests produce identical results.
 CombatResult resolve_attack(const CombatRequest& req);
 
+// The defender's tactical stats AS THEY COUNT RIGHT NOW -- the single place a
+// status is allowed to change what resolve_attack sees. A Stunned defender has
+// no ACTIVE defense: parry (defense) and evasion both read 0, because both are
+// things a defender DOES rather than wears. Armour is unaffected (it is worn),
+// and so is accuracy (that is the entity's own attacking, not its defending).
+//
+// Every CombatRequest.defender in the codebase goes through here, melee
+// (fire_attack) and projectile-arrival (advance_projectiles) alike -- which is
+// what makes "stunned means defenceless" true for a shot already in flight
+// when the stun lands, without either call site knowing about statuses.
+// Returns a default-constructed Combatant for an entity that has none.
+Combatant effective_combatant(const entt::registry& reg, entt::entity e);
+
 // --- targeting + attack selection seams -------------------------------------
 // Longest range among the loadout's melee / ranged attacks (0 if it has none of
 // that category). Melee lock and stance engagement key off these rather than a

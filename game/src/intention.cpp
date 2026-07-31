@@ -681,6 +681,37 @@ void note_think_outcome(BadlandsGame& game, uint32_t slot, bool adopted) {
     }
 }
 
+namespace {
+
+// The shared body of abort_intention / abort_current_intention: clears `ci`
+// and posts the IntentionEnded(aborted) event. The two differ only in whether
+// the caller names the kind it expects to be ending.
+void abort_now(BadlandsGame& game, entt::entity e, CurrentIntention& ci) {
+    ci.kind = IntentionKind::None;
+    ci.target_slot = UINT32_MAX;
+    ci.arg = 0;
+    ci.wake_at_millis = 0;
+
+    InboxEvent ev;
+    ev.kind = InboxEventKind::IntentionEnded;
+    ev.param = 0.0f;  // aborted
+    push_inbox_event(game, e, ev);
+}
+
+}  // namespace
+
+void abort_current_intention(BadlandsGame& game, uint32_t slot) {
+    entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
+    if (e == entt::null) {
+        return;
+    }
+    auto* ci = game.registry.try_get<CurrentIntention>(e);
+    if (ci == nullptr || ci->kind == IntentionKind::None) {
+        return;  // nothing running (a replayed world always lands here)
+    }
+    abort_now(game, e, *ci);
+}
+
 void abort_intention(BadlandsGame& game, uint32_t slot, IntentionKind expected) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
@@ -692,15 +723,7 @@ void abort_intention(BadlandsGame& game, uint32_t slot, IntentionKind expected) 
                  // CurrentIntention.kind is always None (apply_intention
                  // never runs there)
     }
-    ci->kind = IntentionKind::None;
-    ci->target_slot = UINT32_MAX;
-    ci->arg = 0;
-    ci->wake_at_millis = 0;
-
-    InboxEvent ev;
-    ev.kind = InboxEventKind::IntentionEnded;
-    ev.param = 0.0f;  // aborted
-    push_inbox_event(game, e, ev);
+    abort_now(game, e, *ci);
 }
 
 }  // namespace badlands

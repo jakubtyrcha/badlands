@@ -313,6 +313,15 @@ void tick_world(BadlandsGame& g, float dt) {
             if (!registry.valid(e) || registry.all_of<InsideBuilding>(e)) {
                 continue;  // hidden heroes don't think
             }
+            // Stunned characters don't think either -- wasm hero and simple
+            // engine-side brain alike, since both are dispatched from here.
+            // The wake bookkeeping is deliberately left untouched: a stunned
+            // hero simply misses its consults, and whatever piled up in its
+            // inbox meanwhile is still there (sticky by design) when the stun
+            // lapses and should_wake fires again.
+            if (has_status(registry, e, StatusKind::Stunned)) {
+                continue;
+            }
             auto& brain = registry.get<Brain>(e);
             if (g.wasm_brains && brain.kind == BrainKind::Town) {
                 // mock_think is never reached for this entity while a wasm

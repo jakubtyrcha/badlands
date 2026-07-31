@@ -40,7 +40,11 @@ int64_t remaining_millis_of(const entt::registry& reg, entt::entity e, StatusKin
 //    stun landing mid-stun cannot cure the first one.
 //  * A full component warns and drops rather than evicting something.
 //
-// Emits GameEventKind::StatusApplied on success.
+// StatusKind::Stunned additionally ABORTS the victim's running
+// CurrentIntention (intention.h's abort_current_intention), so the brain
+// re-decides from scratch on its first wake after the stun rather than
+// resuming a plan it made before being hit. Emits GameEventKind::StatusApplied
+// on success.
 bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t millis,
                   uint32_t source_slot);
 

@@ -1,6 +1,7 @@
 #include "status.h"
 
 #include "game_state.h"  // BadlandsGame, emit_event, slot_for_entity
+#include "intention.h"   // abort_current_intention -- a stun ends the running plan
 
 #include <spdlog/spdlog.h>
 
@@ -79,6 +80,15 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
         }
         s.entries[s.count] = StatusEntry{kind, millis, source_slot};
         ++s.count;
+    }
+
+    // Stunned ends whatever the victim was doing. Not a timer concern, but it
+    // belongs here rather than in every caller: a stun applied by a skill, a
+    // trap, or a future monster ability must all interrupt the same way. The
+    // brain re-decides from scratch on its first wake after the stun (it is
+    // not consulted during one -- sim.cpp's think dispatch).
+    if (kind == StatusKind::Stunned) {
+        abort_current_intention(game, slot_for_entity(game, e));
     }
 
     const glm::vec2 pos =
