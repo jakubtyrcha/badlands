@@ -1063,6 +1063,21 @@ target_include_directories(badlands_biome_splat_tests PRIVATE
 )
 add_test(NAME badlands_biome_splat_tests COMMAND badlands_biome_splat_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
+# its buried skirt -- the overlap that keeps a later wave displacement from
+# opening a gap at the shoreline.
+add_executable(badlands_lake_surface_tests
+    src/mapview/tests/lake_surface_tests.cpp
+    src/mapview/lake_surface.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_lake_surface_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_lake_surface_tests COMMAND badlands_lake_surface_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_factors_manifest_tests: behaviour tuning loaded as data
 # (assets/creatures/factors.json -> badlands::SimFactors). App-layer, so the sim
 # keeps its lean dependency set. Reads the shipped file, so cwd = repo root.
