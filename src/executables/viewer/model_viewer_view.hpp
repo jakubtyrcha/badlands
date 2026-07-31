@@ -121,8 +121,8 @@ class ModelViewerView : public AppView {
   // kDefaultLodRatios[lod_level_-1], leaves replaced by a tet-voxelized
   // crown via VoxelizeLeafCards/VoxelFoliage at progressively coarser cell
   // sizes -- see kFoliageVoxelWorldSizes), 4="Multi" (a 16x16 instanced grid
-  // via tree_field_, dynamic GPU LOD -- see RebuildScene; still card leaves
-  // until a later phase). bark_tris_/leaf_tris_ are the single-tree (0..3)
+  // via tree_field_, dynamic GPU LOD -- see RebuildScene; voxel crowns since
+  // Phase 5, not card leaves). bark_tris_/leaf_tris_ are the single-tree (0..3)
   // triangle counts, recomputed in RebuildScene for the ImGui readout; not
   // meaningful in Multi mode.
   int lod_level_ = 0;

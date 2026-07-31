@@ -28,7 +28,7 @@ import package::common::gbuffer_encode::kShadingModelFoliage;
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
 @group(0) @binding(3) var albedo_texture: texture_2d<f32>;
-@group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow, B=baked AO
+@group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow (legacy 1.0; foliage: translucency strength -- see the transmission step), B=baked AO
 @group(0) @binding(5) var shadow_map: texture_depth_2d;         // Directional shadow map (conventional Z)
 @group(0) @binding(6) var shadow_sampler: sampler_comparison;   // LessEqual compare (T3)
 @group(0) @binding(7) var ao_texture: texture_2d<f32>;          // GTAO screen-space AO (R8: 1=unoccluded)

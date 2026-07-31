@@ -145,7 +145,7 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
     // No texture: albedo is the vertex-baked brightness (uv.x, see
     // leaf_voxelizer.hpp's tet vertex layout) tinted by the material's tint.
     let albedo = srgb_to_linear(vec3<f32>(input.uv.x)) * object.tint.rgb;
-    return packVoxelFoliageGBuffer(normalize(input.worldNormal), albedo,
+    return packVoxelFoliageGBuffer(input.worldNormal, albedo,
                                    object.params.x, 1.0, object.params.y);
 }
 
@@ -153,7 +153,7 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
 @fragment
 fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
     let albedo = srgb_to_linear(vec3<f32>(input.uv.x)) * mat_params.tint.rgb;
-    return packVoxelFoliageGBuffer(normalize(input.worldNormal), albedo,
+    return packVoxelFoliageGBuffer(input.worldNormal, albedo,
                                    mat_params.params.x, 1.0, mat_params.params.y);
 }
 

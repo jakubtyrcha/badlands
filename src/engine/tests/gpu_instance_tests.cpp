@@ -3934,7 +3934,12 @@ TEST_CASE("MaterialLibrary::VoxelFoliage builds a textureless deferred "
   constexpr float kRoughness = 0.6f;
   constexpr float kStrength = 0.35f;
 
-  DeferredMaterial result = matlib.VoxelFoliage(tint, kRoughness, kStrength);
+  DeferredMaterial result;
+  CapturedError err = RunCapturingValidationErrors(g, [&] {
+    result = matlib.VoxelFoliage(tint, kRoughness, kStrength);
+  });
+  INFO("Dawn validation error: " << err.message);
+  CHECK(err.type == wgpu::ErrorType::NoError);
   REQUIRE(result.factory != nullptr);
   REQUIRE(result.params.uniform_overrides.count("tint") == 1u);
   REQUIRE(result.params.uniform_overrides.count("params") == 1u);
