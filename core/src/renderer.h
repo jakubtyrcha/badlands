@@ -72,9 +72,16 @@ private:
 
     // Raymarch pass: reused every frame (pack_scene's out-param overload
     // clears + refills it in place) so packing the scene doesn't allocate
-    // once capacity has grown to the scene's steady-state node count.
-    // Uploaded via setFragmentBytes, not a Buffer -- no dirty tracking needed.
+    // once capacity has grown to the scene's steady-state node count. This is
+    // the CPU-side scratch that feeds raymarch_nodes_'s per-frame upload below.
     std::vector<SdfNode> raymarch_scratch_;
+
+    // Real MTL::Buffer, not setFragmentBytes: the scene is uncapped (sdf.h),
+    // so its packed byte size can exceed Metal's 4 KB setFragmentBytes limit.
+    // Allocated fresh from raymarch_scratch_ every frame in render() -- no
+    // dirty tracking, same as raymarch_scratch_ above (see render()'s
+    // allocation site for the ownership/lifetime reasoning).
+    NS::SharedPtr<MTL::Buffer> raymarch_nodes_;
 
     bool gizmo_visible_ = false;
     std::vector<LineVertex> gizmo_verts_;

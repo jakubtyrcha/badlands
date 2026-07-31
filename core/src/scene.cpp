@@ -67,6 +67,17 @@ int32_t SceneDocument::spawn_unsnapped(Shape shape, Op op, simd_float3 position)
 
 void SceneDocument::remove_node(int32_t id) {
     std::erase_if(nodes_, [id](const Node& node) { return node.id == id; });
+
+    // Fix up survivors that were snapped onto the just-removed node: leaving
+    // snap_parent pointing at a dead id would be a dangling reference (drag
+    // math -- drag_plane_for_node -- keys off `snapped`, so clearing it here
+    // makes the plane fall back to camera-facing, same as an unsnapped node).
+    for (Node& node : nodes_) {
+        if (node.snap_parent == id) {
+            node.snapped = false;
+            node.snap_parent = kInvalidNode;
+        }
+    }
 }
 
 } // namespace sq

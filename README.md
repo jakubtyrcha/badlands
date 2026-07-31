@@ -54,8 +54,8 @@ Four modes, selected via the icon bar top-left or keys **1–4**:
    and switches to Camera mode).
 4. **Camera (4)** — two-finger scroll orbits, pinch zooms, shift+scroll pans.
 
-Color legend: pale blue wireframe = currently selected; surface shading is
-normal-colored debug (see Rendering below).
+Color legend: pale blue = selected; red = a subtracted shape's wireframe
+(shown even unselected); surface = normal-colored debug (see Rendering below).
 
 ## Rendering
 
@@ -63,10 +63,10 @@ The viewport is a per-pixel sphere-traced render of the CSG scene
 (`shaders/raymarch.metal` + `shaders/sdf_scene.h`), evaluated every frame —
 edits and drags are visible live, with no reconstruction latency. Shading is
 normal-colored debug (color = 0.5·(n+1), gradient normal — no lighting). The
-wireframe draws for the selected object only (no selection, no wireframe).
-The scene is capped at `kMaxRaymarchNodes` (128) shapes for the per-frame GPU
-upload. The depth buffer is real: the raymarch fragment shader writes true
-per-pixel depth, so later passes composite correctly on top of it.
+wireframe draws for the selected object, plus any unselected Subtract node
+(its carve is otherwise invisible) — unselected Add nodes draw none. The
+depth buffer is real: the raymarch fragment shader writes true per-pixel
+depth, so later passes composite correctly on top of it.
 
 ### DCSDD
 

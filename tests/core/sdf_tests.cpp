@@ -204,6 +204,37 @@ TEST_CASE("evaluate_scene_sdf: Add sphere then Subtract box carves the box out; 
     }
 }
 
+// --- evaluate_scene_sdf: no node cap (wave-B fix 2) ----------------------------
+
+TEST_CASE("evaluate_scene_sdf: a 129-node document evaluates ALL nodes, including "
+          "the 129th -- the old 128-node pack_scene cap used to make this node "
+          "invisible to the field") {
+    SceneDocument doc;
+    for (int32_t i = 0; i < 129; ++i) {
+        Node n;
+        n.id = i + 1;
+        n.shape = Shape::Cube;
+        n.op = Op::Add;
+        // Spaced 10 apart (half-extent 0.5 each): no two nodes' influence
+        // overlaps, so a probe at one node's center is unambiguously inside
+        // ONLY that node.
+        n.position = {static_cast<float>(i) * 10.0f, 0.0f, 0.0f};
+        n.scale = {1.0f, 1.0f, 1.0f};
+        doc.add(n);
+    }
+    REQUIRE(doc.nodes().size() == 129u);
+
+    // Node #129 (index 128) is centered at x = 1280 -- under the old 128-node
+    // cap, pack_scene drops it entirely, so the folded field at this point
+    // would be the empty-fold sentinel (FLT_MAX, positive/outside); with the
+    // cap removed, node #129 is present and the probe (its own center) reads
+    // negative (inside).
+    const simd_float3 p = {1280.0f, 0.0f, 0.0f};
+    const auto d = evaluate_scene_sdf(doc, p);
+    REQUIRE(d.has_value());
+    CHECK(*d < 0.0f);
+}
+
 // --- evaluate_scene_sdf / sample_scene: empty scene ----------------------------
 
 TEST_CASE("evaluate_scene_sdf: empty scene returns nullopt") {

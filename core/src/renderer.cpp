@@ -333,13 +333,27 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
             uniforms.view_proj, inv_view_proj, static_cast<float>(drawable->texture()->width()),
             static_cast<float>(drawable->texture()->height()), raymarch_node_count, Camera::kNear, Camera::kFar);
 
+        // Node array: a real MTL::Buffer, allocated fresh from
+        // raymarch_scratch_ every frame -- the scene is uncapped (sdf.h), so
+        // its packed byte size can exceed Metal's 4 KB setFragmentBytes
+        // limit, which is why this isn't a second setFragmentBytes call like
+        // RaymarchUniforms above. Reallocating (rather than dirty-tracking
+        // and reusing) is safe even mid-flight: an in-flight command buffer
+        // retains the old MTL::Buffer via ARC, same reasoning as
+        // scene_lines_'s replace-on-update above. A ring buffer (cycling a
+        // few pre-allocated buffers by frame index, avoiding the per-frame
+        // alloc) would be a future perf refinement, not needed for
+        // correctness at the scene sizes this editor deals in.
+        raymarch_nodes_ = NS::TransferPtr(device_->newBuffer(
+            raymarch_scratch_.data(), raymarch_scratch_.size() * sizeof(SdfNode), MTL::ResourceStorageModeShared));
+
         // Buffer indices 0/1 hardcoded to match raymarch.metal's
-        // [[buffer(0)]]/[[buffer(1)]] — same setFragmentBytes convention as
-        // the vertex-side buffers elsewhere in this function.
+        // [[buffer(0)]]/[[buffer(1)]] — uniforms (small, fixed-size) stay on
+        // setFragmentBytes; the node array above is a real buffer binding.
         encoder->setRenderPipelineState(raymarch_pso_.get());
         encoder->setDepthStencilState(depth_test_.get());
         encoder->setFragmentBytes(&raymarch_uniforms, sizeof(RaymarchUniforms), 0);
-        encoder->setFragmentBytes(raymarch_scratch_.data(), raymarch_scratch_.size() * sizeof(SdfNode), 1);
+        encoder->setFragmentBuffer(raymarch_nodes_.get(), 0, 1);
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
     }
 

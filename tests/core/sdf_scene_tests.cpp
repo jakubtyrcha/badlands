@@ -13,14 +13,17 @@
 using namespace sq;
 
 // This file pins two pieces introduced by task R0:
-//  - pack_scene()'s exact SdfNode packing (including the >128-node cap).
+//  - pack_scene()'s exact SdfNode packing.
 //  - sdf_ray_for_pixel()'s agreement with the already-pinned
 //    Camera::ray_through_view_point() (existing camera_tests.cpp literals
 //    are the reference; agreement itself is the assertion, per the brief —
 //    no new numpy derivation needed for this half).
 //
-// sdf_tests.cpp (sd_box/sd_ellipsoid/evaluate_scene_sdf/sample_scene) is
-// intentionally untouched by this task — it is the refactor guard.
+// Wave-B fix 2 removed the (bug: setFragmentBytes-sized) 128-node cap that
+// R0 originally introduced pack_scene with -- the ">128-node cap" case below
+// was reworked in place to pin the now-uncapped behavior instead. The
+// companion evaluate_scene_sdf case for the same removed cap lives in
+// sdf_tests.cpp (alongside evaluate_scene_sdf's other cases), not here.
 
 namespace {
 
@@ -116,14 +119,13 @@ TEST_CASE("pack_scene: 3-node document (cube add / sphere subtract / cube add, "
     }
 }
 
-// --- pack_scene: >128-node cap ----------------------------------------------
+// --- pack_scene: no cap (fka >128-node cap) ---------------------------------
 
-TEST_CASE("pack_scene: a >128-node document caps at kMaxRaymarchNodes, keeping the "
-          "first 128 nodes in document order") {
-    CHECK(kMaxRaymarchNodes == 128);
-
+TEST_CASE("pack_scene: a 129-node document packs every node, in document order -- "
+          "the old 128-node cap (a setFragmentBytes-sizing artifact) is gone now "
+          "that the node upload is a real MTL::Buffer") {
     SceneDocument doc;
-    for (int32_t i = 0; i < 130; ++i) {
+    for (int32_t i = 0; i < 129; ++i) {
         Node n;
         n.id = i + 1;
         n.shape = Shape::Cube;
@@ -132,15 +134,14 @@ TEST_CASE("pack_scene: a >128-node document caps at kMaxRaymarchNodes, keeping t
         n.scale = {1.0f, 1.0f, 1.0f};
         doc.add(n);
     }
-    REQUIRE(doc.nodes().size() == 130u);
+    REQUIRE(doc.nodes().size() == 129u);
 
     const std::vector<SdfNode> packed = pack_scene(doc);
 
-    CHECK(packed.size() == static_cast<size_t>(kMaxRaymarchNodes));
-    CHECK(packed.size() == 128u);
-    // First 128 kept, in order: node i's x == i, so the kept range is x in [0, 127].
+    CHECK(packed.size() == 129u);
+    // All 129 kept, in order: node i's x == i.
     CHECK(packed.front().pos_shape.x == doctest::Approx(0.0f));
-    CHECK(packed.back().pos_shape.x == doctest::Approx(127.0f));
+    CHECK(packed.back().pos_shape.x == doctest::Approx(128.0f));
 }
 
 // --- pack_scene: out-param overload (R1's per-frame scratch-buffer helper) --

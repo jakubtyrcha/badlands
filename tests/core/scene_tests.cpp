@@ -161,6 +161,36 @@ TEST_CASE("SceneDocument::remove_node: removing an unknown id is a no-op") {
     CHECK(doc.nodes()[1].id == b);
 }
 
+TEST_CASE("SceneDocument::remove_node: survivors snapped onto the removed node have their "
+          "snap state cleared (snapped=false, snap_parent=kInvalidNode), so drag falls back "
+          "to camera-facing rather than referencing a dead id; an unrelated snapped pair is "
+          "untouched") {
+    SceneDocument doc;
+
+    const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
+    const simd_float3 normal = {1.0f, 0.0f, 0.0f};
+    const int32_t b = doc.spawn_snapped(Shape::Sphere, Op::Add, {0.5f, 0.0f, 0.0f}, normal, a);
+    REQUIRE(doc.find(b)->snapped == true);
+    REQUIRE(doc.find(b)->snap_parent == a);
+
+    // Unrelated snapped pair (C onto D) that must survive A's removal untouched.
+    const int32_t d = doc.spawn_unsnapped(Shape::Cube, Op::Add, {5.0f, 0.0f, 0.0f});
+    const int32_t c = doc.spawn_snapped(Shape::Sphere, Op::Add, {5.5f, 0.0f, 0.0f}, normal, d);
+    REQUIRE(doc.find(c)->snapped == true);
+    REQUIRE(doc.find(c)->snap_parent == d);
+
+    doc.remove_node(a);
+
+    REQUIRE(doc.find(b) != nullptr);
+    CHECK(doc.find(b)->snapped == false);
+    CHECK(doc.find(b)->snap_parent == kInvalidNode);
+
+    // Unrelated pair (C/D) untouched by A's removal.
+    REQUIRE(doc.find(c) != nullptr);
+    CHECK(doc.find(c)->snapped == true);
+    CHECK(doc.find(c)->snap_parent == d);
+}
+
 TEST_CASE("SceneDocument::remove_node: per-shape name counters continue after removal, never reused") {
     SceneDocument doc;
 

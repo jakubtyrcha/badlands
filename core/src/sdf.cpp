@@ -1,6 +1,5 @@
 #include "sdf.h"
 
-#include <algorithm>
 #include <cassert>
 #include <cmath>
 
@@ -23,7 +22,7 @@ float sd_ellipsoid(simd_float3 q, simd_float3 radii) {
 void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
     out.clear();
     const std::vector<Node>& nodes = doc.nodes();
-    const size_t count = std::min(nodes.size(), static_cast<size_t>(kMaxRaymarchNodes));
+    const size_t count = nodes.size();
 
     out.reserve(count); // no-op once out's capacity already covers count
     for (size_t i = 0; i < count; ++i) {

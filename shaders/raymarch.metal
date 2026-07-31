@@ -40,8 +40,8 @@ inline float hit_epsilon(float t) {
 }
 
 // Sphere-trace step budget (see the trace loop below for what happens when
-// it's exhausted). Not to be confused with kMaxRaymarchNodes
-// (core/src/sdf.h), the unrelated 128-node scene cap.
+// it's exhausted). Unrelated to the node buffer below (`nodes`), which is
+// sized to the scene's actual node count each frame -- no fixed cap.
 constant int kMaxTraceSteps = 128;
 
 } // namespace
@@ -49,7 +49,7 @@ constant int kMaxTraceSteps = 128;
 fragment RaymarchOut raymarch_fragment(
     float4 frag_coord [[position]],
     constant RaymarchUniforms& uniforms [[buffer(0)]],
-    constant SdfNode* nodes [[buffer(1)]])
+    device const SdfNode* nodes [[buffer(1)]])
 {
     const float viewport_w = uniforms.params0.x;
     const float viewport_h = uniforms.params0.y;

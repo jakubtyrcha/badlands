@@ -27,10 +27,15 @@ void append_cube_edges(std::vector<LineVertex>& out, const simd_float4x4& world_
 // vertices; emits nothing when the eye is inside (or on) the sphere.
 void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& world_from_local,
                            simd_float4 color, simd_float3 eye_world);
-// Wireframe policy (R2, selected-only-always): emits the selected node's wireframe only
-// (kColorSelected; nothing when selected_id is invalid) -- the raymarched view (R1) always
-// shows the full scene live, so the wireframe is purely a selection annotation, never a
-// full-scene outline. eye_world feeds the sphere outline, making the result view-dependent.
+// Wireframe policy (subtract-always + selected-always-overrides): per node --
+// the selected node (either op) always draws in kColorSelected, overriding
+// everything else; otherwise an unselected Subtract node still draws, in
+// kColorSubtract; otherwise (an unselected Add node) nothing is emitted. The
+// raymarched view (R1) always shows the full scene live, so additive geometry
+// is already visible there -- but a Subtract node's carve is its ONLY visual
+// anywhere in the viewport, so it keeps a wireframe even unselected (without
+// this exception it would be entirely unpickable-by-sight). eye_world feeds
+// the sphere outline, making the result view-dependent.
 std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world);
 
 // Floating tangent-frame grid + axes, centered at `origin` in the plane with unit `normal`.

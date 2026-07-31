@@ -28,11 +28,12 @@ typedef simd_float3 sq_float3;
 #define SDF_FLT_MAX FLT_MAX
 #endif
 
-// `constant` is Metal's address-space qualifier for buffers bound via
-// setFragmentBytes (the raymarch shader's node-array binding); plain
-// C++ has no address spaces, so a packed node array is just `const T*` there.
+// `device` is Metal's address-space qualifier for a real MTL::Buffer of
+// arbitrary size (the raymarch shader's node-array binding -- `constant` is
+// for small fixed-size setFragmentBytes data, not this); plain C++ has no
+// address spaces, so a packed node array is just `const T*` there.
 #ifdef __METAL_VERSION__
-#define SDF_NODE_PTR constant SdfNode*
+#define SDF_NODE_PTR device const SdfNode*
 #else
 #define SDF_NODE_PTR const SdfNode*
 #endif
@@ -72,8 +73,9 @@ inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return simd_mul(m, 
 
 // ---------------------------------------------------------------------------
 // SdfNode: one CSG primitive, packed for the raymarch shader's node buffer
-// (bound via setFragmentBytes, see kMaxRaymarchNodes in core/src/sdf.h for
-// the 4 KB budget this is sized against).
+// (bound as a `device const SdfNode*` MTL::Buffer, sized to the packed
+// scene's actual byte length each frame -- see core/src/renderer.cpp -- not
+// a fixed-size setFragmentBytes binding, so there is no node-count cap).
 //
 // pos_shape.xyz = world position; pos_shape.w = shape (0 = cube, 1 = sphere).
 // half_extents_op.xyz = per-axis half extents (scale * 0.5);
