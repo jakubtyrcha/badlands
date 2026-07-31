@@ -15,6 +15,7 @@
 #include "intention.h"
 #include "strike_test_util.h"  // land_strikes -- an attack commits before it lands
 #include "movement.h"        // plan_paths, follow_paths -- drive the MoveBlocked mirror
+#include "nav_world.h"       // rebuild_navmesh_if_stale -- plopped walls block via the mesh
 #include "sim_internal.hpp"  // make_flat_world / spawn_into / tick_world
 #include "skills.h"         // learn_skill -- the BL_ACT_USE_SKILL cases below
 
@@ -122,18 +123,34 @@ TEST_CASE("emit_char_hit writes DamageTaken into the victim hero's inbox", "[int
 // --- MoveBlocked mirror ------------------------------------------------------
 
 TEST_CASE("a refused step mirrors MoveBlocked into the hero's inbox", "[intention]") {
-    auto owned = make_flat_world();  // terrain_blocking off -- use the arena wall instead
+    // A sealed ring of plopped Walls, so the goal outside it is genuinely
+    // unreachable. note_move_blocked is the single site both refusal paths go
+    // through (an unreachable goal here, impassable terrain in follow_paths),
+    // which is what keeps the component and the inbox from drifting apart.
+    WorldConfig cfg;
+    cfg.prebuild_colony = false;
+    cfg.map = MapKind::FlatPlains;
+    cfg.terrain_blocking = true;
+    constexpr int32_t kWallKind = static_cast<int32_t>(BuildingKind::Wall);
+    for (float x : {-6.0f, -2.0f, 2.0f, 6.0f}) {
+        cfg.plops.push_back({kWallKind, 0, x, -6.0f});
+        cfg.plops.push_back({kWallKind, 0, x, 6.0f});
+    }
+    for (float z : {-2.0f, 2.0f}) {
+        cfg.plops.push_back({kWallKind, 0, -6.0f, z});
+        cfg.plops.push_back({kWallKind, 0, 6.0f, z});
+    }
+    auto owned = make_world(BrainDesc{}, cfg);
     BadlandsGame& g = *owned;
-    g.arena_half_x = 5.0f;
-    g.arena_half_z = 5.0f;
+    rebuild_navmesh_if_stale(g);
 
-    CharacterDesc d = MercenaryDesc(4.0f, 0.0f);
+    CharacterDesc d = MercenaryDesc(0.0f, 0.0f);
     d.move_speed = 6.0f;
     entt::entity e = g.slots[spawn_into(g, d)];
 
     MoveTarget& mt = g.registry.get<MoveTarget>(e);
     mt.kind = MoveTarget::Kind::Point;
-    mt.point = {100.0f, 0.0f};  // far past the east wall
+    mt.point = {100.0f, 0.0f};  // far outside the ring
 
     for (int i = 0; i < 60 && !g.registry.all_of<MoveBlocked>(e); ++i) {
         plan_paths(g, 1.0f / 30.0f);

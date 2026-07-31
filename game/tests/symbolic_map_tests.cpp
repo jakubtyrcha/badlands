@@ -10,6 +10,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "game/geometry/water_surface.hpp"
+#include "game/map/flat_map_generator.hpp"
 #include "game/map/map_data.hpp"
 #include "game/map/symbolic_map_generator.hpp"
 
@@ -273,4 +274,27 @@ TEST_CASE("water covers every lake cell, and cuts the shore diagonally") {
   CHECK(diagonal_cells > 0);
   CHECK(static_cast<int>(tris.size() / 3) ==
         4 * lake_cells + 2 * diagonal_cells);
+}
+
+// --- the flat map ------------------------------------------------------------
+
+TEST_CASE("the flat map is plains everywhere, at one height") {
+    const MapData map = badlands::FlatMapGenerator{}.Generate();
+    REQUIRE_FALSE(map.empty());
+    CHECK(map.size_x_m() == Catch::Approx(badlands::FlatMapGenerator::kMapSizeM));
+    CHECK(map.size_z_m() == Catch::Approx(badlands::FlatMapGenerator::kMapSizeM));
+
+    // A spread across the map, plus the exact CENTRE. The centre is the case
+    // that matters: it is where the sandbox stages every world, and it is
+    // Lake on the symbolic map -- the coupling this generator exists to break.
+    const float size = badlands::FlatMapGenerator::kMapSizeM;
+    const float probes[] = {0.0f, 1.0f, size * 0.25f, size * 0.5f, size * 0.5f + 0.5f,
+                            size * 0.75f, size - 1.0f, size};
+    for (float x : probes) {
+        for (float z : probes) {
+            CHECK(map.DominantBiomeAt(x, z) == Biome::Plains);
+            CHECK(map.HeightAt(x, z) ==
+                  Catch::Approx(badlands::FlatMapGenerator::kHeightM));
+        }
+    }
 }

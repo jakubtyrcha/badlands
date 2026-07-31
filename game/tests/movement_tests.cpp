@@ -289,3 +289,130 @@ TEST_CASE("footprint reprojection engages only once a navmesh exists") {
     separate_units(*game);
     CHECK(glm::distance(pos_of(game, id), center) > 1e-3f);
 }
+
+// --- plopped structures as obstacles -----------------------------------------
+//
+// A wall is a building, so it obstructs through the SAME two seams a house
+// does: the navmesh routes around it, and footprint reprojection keeps bodies
+// out of it. These replace the arena-rectangle tests that used to live in
+// combat_tests.cpp -- the rectangle was a second, parallel notion of "you
+// cannot go there" that the pathfinder could not see.
+
+namespace {
+
+constexpr int32_t kWallKind = static_cast<int32_t>(BuildingKind::Wall);
+
+// A closed ring of 4x4 Walls around the origin with an 8x8 m interior. Plopped,
+// so the blocks abut and the ring is genuinely sealed -- placed with the
+// player's margin they could not touch at all.
+std::vector<PlacementDesc> wall_ring() {
+    std::vector<PlacementDesc> plops;
+    for (float x : {-6.0f, -2.0f, 2.0f, 6.0f}) {
+        plops.push_back({kWallKind, 0, x, -6.0f});
+        plops.push_back({kWallKind, 0, x, 6.0f});
+    }
+    for (float z : {-2.0f, 2.0f}) {
+        plops.push_back({kWallKind, 0, -6.0f, z});
+        plops.push_back({kWallKind, 0, 6.0f, z});
+    }
+    return plops;
+}
+
+// A flat, colony-free world: no terrain features anywhere, so the only thing
+// that can obstruct is what the config plops.
+WorldConfig flat_arena_config() {
+    WorldConfig cfg;
+    cfg.prebuild_colony = false;
+    cfg.map = MapKind::FlatPlains;
+    cfg.terrain_blocking = true;  // flat plains blocks nothing; it builds the navmesh
+    return cfg;
+}
+
+// Exact for the rotation-0 Walls used here: their footprint corners ARE the
+// axis-aligned box. (movement.cpp's own point_in_convex handles the diagonal
+// case, but it is file-local.)
+bool inside_any_footprint(const BadlandsGame& game, glm::vec2 p) {
+    for (const PlacedBuilding& b : game.placement.buildings) {
+        if (!b.alive) {
+            continue;
+        }
+        const std::array<glm::vec2, 4> c = building_footprint_corners(b);
+        glm::vec2 lo = c[0], hi = c[0];
+        for (const glm::vec2& v : c) {
+            lo = glm::min(lo, v);
+            hi = glm::max(hi, v);
+        }
+        if (p.x > lo.x && p.x < hi.x && p.y > lo.y && p.y < hi.y) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("a world plops its configured structures") {
+    WorldConfig cfg = flat_arena_config();
+    cfg.plops = {{kWallKind, 0, 20.0f, 0.0f}, {kWallKind, 0, 24.0f, 0.0f},
+                 {kWallKind, 0, 28.0f, 0.0f}};
+    auto owned = make_world(BrainDesc{}, cfg);
+    BadlandsGame* game = owned.get();
+
+    REQUIRE(buildings_of(*game).size() == 3);
+    // Solid across the whole run: the seams between abutting plops are not
+    // lanes. tile 21 and tile 25 straddle the two seams.
+    for (int tx = 18; tx <= 29; ++tx) {
+        for (int c = 0; c < 4; ++c) {
+            CHECK(game->placement.footprint[tri_index(tx, 0, c)]);
+        }
+    }
+}
+
+TEST_CASE("a goal behind a plopped wall is unreachable") {
+    WorldConfig cfg = flat_arena_config();
+    cfg.plops = wall_ring();
+    auto owned = make_world(BrainDesc{}, cfg);
+    BadlandsGame* game = owned.get();
+    rebuild_navmesh_if_stale(*game);
+    REQUIRE_FALSE(game->navmesh.empty());
+
+    const uint32_t id = spawn_unit(game, 0.0f, 0.0f, 0);  // inside the ring
+    entt::entity e = game->slots[id];
+    MoveTarget& mt = game->registry.get<MoveTarget>(e);
+    mt.kind = MoveTarget::Kind::Point;
+    mt.point = {40.0f, 0.0f};  // outside it
+    mt.stop_distance = 0.1f;
+
+    plan_paths(*game, 1.0f);
+    CHECK(game->registry.all_of<MoveBlocked>(e));
+    CHECK(game->registry.get<NavPath>(e).waypoints.empty());
+
+    // And it never gets out: 300 ticks of trying leaves it inside the ring.
+    for (int i = 0; i < 300; ++i) {
+        plan_paths(*game, 1.0f / 30.0f);
+        follow_paths(*game, 1.0f / 30.0f);
+        separate_units(*game);
+    }
+    const glm::vec2 p = pos_of(game, id);
+    CHECK(std::abs(p.x) < 4.0f);
+    CHECK(std::abs(p.y) < 4.0f);
+}
+
+TEST_CASE("separation cannot shove a unit inside a wall") {
+    WorldConfig cfg = flat_arena_config();
+    cfg.plops = {{kWallKind, 0, 10.0f, 0.0f}};  // footprint x in [8, 12]
+    auto owned = make_world(BrainDesc{}, cfg);
+    BadlandsGame* game = owned.get();
+    rebuild_navmesh_if_stale(*game);
+    REQUIRE_FALSE(game->navmesh.empty());
+
+    // Two coincident units pressed against the wall's west face. The push-apart
+    // sends one of them east, into the masonry -- reprojection is what has to
+    // put it back.
+    const uint32_t a = spawn_unit(game, 7.9f, 0.0f, 0);
+    const uint32_t b = spawn_unit(game, 7.9f, 0.0f, 0);
+    separate_units(*game);
+
+    CHECK_FALSE(inside_any_footprint(*game, pos_of(game, a)));
+    CHECK_FALSE(inside_any_footprint(*game, pos_of(game, b)));
+}

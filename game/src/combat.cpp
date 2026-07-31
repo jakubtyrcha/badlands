@@ -12,8 +12,8 @@ namespace badlands {
 
 namespace {
 
-// Placeholder tuning constants. The arena exists to find the right values; the
-// pipeline SHAPE is what these tests pin, not the numbers.
+// Placeholder tuning constants. Watching fights is what finds the right
+// values; the pipeline SHAPE is what the tests pin, not the numbers.
 constexpr float kCritMultiplier = 2.0f;
 constexpr float kRangedEvasionMult = 0.5f;   // a shot is hard to dodge
 constexpr float kMeleeThrustEvasionMult = 1.3f;  // a telegraphed thrust, easy to sidestep

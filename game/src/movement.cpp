@@ -300,13 +300,12 @@ void follow_paths(BadlandsGame& game, float dt) {
             // The world gets the last word on where a character can go. A path
             // may cross terrain nobody has surveyed -- the planner routes around
             // buildings only -- so the refusal happens HERE, at the step, and
-            // becomes an event the brain can act on. The arena's blocked edges
-            // refuse a step the same way the water's edge does.
-            const bool past_arena_edge =
-                (game.arena_half_x > 0.0f && std::abs(next.x) > game.arena_half_x) ||
-                (game.arena_half_z > 0.0f && std::abs(next.y) > game.arena_half_z);
-            if (past_arena_edge ||
-                (game.terrain_blocking && !is_walkable(biome_at(game, next)))) {
+            // becomes an event the brain can act on.
+            //
+            // Terrain is the only thing that refuses a STEP. A building does
+            // not: the planner already routes around its footprint, and
+            // separate_units reprojects a body that ends up inside one anyway.
+            if (game.terrain_blocking && !is_walkable(biome_at(game, next))) {
                 blocked.emplace_back(e, next);
                 continue;  // stop at the edge rather than cross it
             }
@@ -478,15 +477,6 @@ void separate_units(BadlandsGame& game) {
             reproject_out_of_footprints(game, pos.pos);
         }
         pos.pos = glm::clamp(pos.pos, glm::vec2(-kWorldBound), glm::vec2(kWorldBound - 1e-3f));
-        // Keep units inside the arena's blocked edges too. follow_paths refuses a
-        // STEP past the edge, but a separation shove is not a step -- so a unit
-        // pushed out would otherwise be stranded (every inward step then refused).
-        if (game.arena_half_x > 0.0f) {
-            pos.pos.x = glm::clamp(pos.pos.x, -game.arena_half_x, game.arena_half_x);
-        }
-        if (game.arena_half_z > 0.0f) {
-            pos.pos.y = glm::clamp(pos.pos.y, -game.arena_half_z, game.arena_half_z);
-        }
     }
 }
 

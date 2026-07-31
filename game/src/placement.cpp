@@ -18,6 +18,7 @@ constexpr int32_t kWatchtower = static_cast<int32_t>(BuildingKind::Watchtower);
 constexpr int32_t kApothecary = static_cast<int32_t>(BuildingKind::Apothecary);
 constexpr int32_t kHouse = static_cast<int32_t>(BuildingKind::House);
 constexpr int32_t kSewer = static_cast<int32_t>(BuildingKind::Sewer);
+constexpr int32_t kWall = static_cast<int32_t>(BuildingKind::Wall);
 constexpr int32_t kKindCount = static_cast<int32_t>(BuildingKind::Count);
 
 // Footprint sizes + flags + vision + recruit set, indexed by BuildingKind.
@@ -41,6 +42,10 @@ constexpr BuildingDef kDefs[kKindCount] = {
     {1, 1, false, true, false, 40.0f, 0, {}},                    // Watchtower
     {2, 1, true, false, true, 6.0f, 0, {}},                      // House (poppable)
     {1, 1, true, false, false, 0.0f, 0, {}},                     // Sewer (poppable)
+    // Wall: a solid 4x4 obstacle. Not poppable, not player-destructible, and
+    // deliberately NOT enemy_targettable -- monsters gnaw structures worth
+    // taking down, and masonry with nothing behind it is not one.
+    {4, 4, false, false, false, 0.0f, 0, {}},                    // Wall
 };
 
 // Urban-sprawl contribution in quarter-units. Watchtower is a small structure
@@ -50,7 +55,7 @@ uint32_t urban_contribution(int kind) {
     if (kind == kWatchtower) {
         return 3;
     }
-    if (kind == kHouse || kind == kSewer || kind == kCastle) {
+    if (kind == kHouse || kind == kSewer || kind == kCastle || kind == kWall) {
         return 0;
     }
     return 4;
@@ -231,9 +236,12 @@ void margin_triangles(const Footprint& fp, std::vector<TriRef>& out) {
     }
 }
 
-bool placement_valid(const PlacementState& st, const Footprint& fp) {
+bool placement_valid(const PlacementState& st, const Footprint& fp, PlacementMargin margin) {
     if (!footprint_in_bounds(fp)) {
         return false;
+    }
+    if (margin == PlacementMargin::None) {
+        return true;  // in bounds is the whole rule -- see the header
     }
     // The candidate footprint may not land on any existing footprint or margin.
     std::vector<TriRef> foot;
@@ -282,23 +290,28 @@ float poppable_score(const PlacementState& st, glm::vec2 candidate) {
 
 namespace {
 
-// Stamps a footprint + margin into the blocked grid and records the building.
-uint32_t commit(PlacementState& st, int kind, int rot, glm::vec2 center) {
+// Stamps a footprint (and, for a player placement, its margin) into the blocked
+// grid and records the building.
+uint32_t commit(PlacementState& st, int kind, int rot, glm::vec2 center,
+                PlacementMargin margin) {
     Footprint fp = make_footprint(kind, rot, center);
-    std::vector<TriRef> foot, marg;
+    std::vector<TriRef> foot;
     footprint_triangles(fp, foot);
-    margin_triangles(fp, marg);
     for (const TriRef& t : foot) {
         int idx = tri_index(t.tx, t.tz, static_cast<int>(t.corner));
         st.footprint[idx] = 1;
         st.blocked[idx] = 1;
     }
-    for (const TriRef& t : marg) {
-        st.blocked[tri_index(t.tx, t.tz, static_cast<int>(t.corner))] = 1;
+    if (margin == PlacementMargin::Player) {
+        std::vector<TriRef> marg;
+        margin_triangles(fp, marg);
+        for (const TriRef& t : marg) {
+            st.blocked[tri_index(t.tx, t.tz, static_cast<int>(t.corner))] = 1;
+        }
     }
     const BuildingDef& def = def_of(kind);
     uint32_t id = static_cast<uint32_t>(st.buildings.size());
-    st.buildings.push_back({kind, center, rot, def.width_tiles, def.depth_tiles});
+    st.buildings.push_back({kind, center, rot, def.width_tiles, def.depth_tiles, margin});
     ++st.nav_epoch;
     return id;
 }
@@ -332,7 +345,7 @@ bool best_poppable(const PlacementState& st, int kind, glm::vec2 anchor, glm::ve
                     continue;
                 }
                 Footprint fp = make_footprint(kind, rot, center);
-                if (!placement_valid(st, fp)) {
+                if (!placement_valid(st, fp, PlacementMargin::Player)) {
                     continue;
                 }
                 float score = poppable_score(st, center);
@@ -360,7 +373,7 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor) {
         if (!best_poppable(st, kSewer, anchor, center, rot)) {
             break;
         }
-        commit(st, kSewer, rot, center);  // bumps nav_epoch -> navmesh rebuilds
+        commit(st, kSewer, rot, center, PlacementMargin::Player);  // bumps nav_epoch
         ++st.sewers_made;
     }
     while (st.houses_made < houses_owed) {
@@ -369,7 +382,7 @@ void process_poppables(BadlandsGame& game, glm::vec2 anchor) {
         if (!best_poppable(st, kHouse, anchor, center, rot)) {
             break;
         }
-        commit(st, kHouse, rot, center);  // bumps nav_epoch -> navmesh rebuilds
+        commit(st, kHouse, rot, center, PlacementMargin::Player);  // bumps nav_epoch
         ++st.houses_made;
     }
 }
@@ -458,18 +471,35 @@ void rebuild_occupancy(PlacementState& st) {
         }
         Footprint fp = make_footprint(b.kind, b.rot, b.center);
         foot.clear();
-        marg.clear();
         footprint_triangles(fp, foot);
-        margin_triangles(fp, marg);
         for (const TriRef& t : foot) {
             int idx = tri_index(t.tx, t.tz, static_cast<int>(t.corner));
             st.footprint[idx] = 1;
             st.blocked[idx] = 1;
         }
-        for (const TriRef& t : marg) {
-            st.blocked[tri_index(t.tx, t.tz, static_cast<int>(t.corner))] = 1;
+        // Each survivor is restamped under the rule it was placed under. A
+        // plopped wall has no margin and must not acquire one here, or a
+        // destruction anywhere would silently prise apart every abutting run
+        // in the world.
+        if (b.margin == PlacementMargin::Player) {
+            marg.clear();
+            margin_triangles(fp, marg);
+            for (const TriRef& t : marg) {
+                st.blocked[tri_index(t.tx, t.tz, static_cast<int>(t.corner))] = 1;
+            }
         }
     }
+}
+
+uint32_t plop_building(BadlandsGame& game, const PlacementDesc& desc) {
+    PlacementState& st = game.placement;
+    int rot = ((desc.rotation_index % 4) + 4) % 4;
+    glm::vec2 center = snap_center(desc.kind, rot, {desc.world_x, desc.world_z});
+    Footprint fp = make_footprint(desc.kind, rot, center);
+    if (!placement_valid(st, fp, PlacementMargin::None)) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return commit(st, desc.kind, rot, center, PlacementMargin::None);  // bumps nav_epoch
 }
 
 uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool player) {
@@ -477,10 +507,10 @@ uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool play
     int rot = ((desc.rotation_index % 4) + 4) % 4;
     glm::vec2 center = snap_center(desc.kind, rot, {desc.world_x, desc.world_z});
     Footprint fp = make_footprint(desc.kind, rot, center);
-    if (!placement_valid(st, fp)) {
+    if (!placement_valid(st, fp, PlacementMargin::Player)) {
         return std::numeric_limits<uint32_t>::max();
     }
-    uint32_t id = commit(st, desc.kind, rot, center);  // bumps nav_epoch
+    uint32_t id = commit(st, desc.kind, rot, center, PlacementMargin::Player);
     if (player) {
         st.urban_quarters += urban_contribution(desc.kind);
         process_poppables(game, center);
@@ -525,7 +555,9 @@ PlacementProbe probe_of(const BadlandsGame& game, const PlacementDesc& desc,
     Footprint fp = make_footprint(desc.kind, rot, center);
 
     PlacementProbe probe{};
-    probe.valid = placement_valid(st, fp);
+    // The probe is the PLAYER's placement cursor, so it previews the player's
+    // rule -- plopping has no cursor.
+    probe.valid = placement_valid(st, fp, PlacementMargin::Player);
     probe.snapped_x = center.x;
     probe.snapped_z = center.y;
 

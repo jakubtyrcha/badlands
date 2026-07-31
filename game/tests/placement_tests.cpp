@@ -256,7 +256,7 @@ TEST_CASE("a diagonal 2x1 overlapping the castle is always rejected") {
                     }
                 }
                 if (overlaps) {
-                    CHECK_FALSE(placement_valid(g->placement, fp));
+                    CHECK_FALSE(placement_valid(g->placement, fp, PlacementMargin::Player));
                 }
             }
         }
@@ -289,7 +289,7 @@ TEST_CASE("a candidate whose margin covers an existing footprint is rejected") {
                     }
                 }
                 if (margin_hits_footprint) {
-                    CHECK_FALSE(placement_valid(game->placement, fp));
+                    CHECK_FALSE(placement_valid(game->placement, fp, PlacementMargin::Player));
                 }
             }
         }
@@ -584,4 +584,145 @@ TEST_CASE("BuildingDef flags: user_destructible and enemy_targettable are decoup
     BuildingDef house = BuildingDefOf(BuildingKind::House);
     CHECK(!house.user_destructible);
     CHECK(house.enemy_targettable);
+}
+
+// --- plopping: the placement primitive ---------------------------------------
+//
+// place_building is plop_building PLUS the player's constraints. These pin the
+// one axis the two differ on: the margin. Everything else -- snapping,
+// footprint rasterization, nav_epoch, the building record -- is shared, and a
+// plopped structure must be indistinguishable from a placed one afterwards.
+
+namespace {
+
+// Every triangle of `tile` is footprint (not merely margin). "Solid", as a
+// wall has to be: a tile with even one free triangle is a lane something could
+// path through.
+bool tile_is_solid(const PlacementState& st, int tx, int tz) {
+    for (int c = 0; c < 4; ++c) {
+        if (!st.footprint[tri_index(tx, tz, c)]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool tile_is_blocked(const PlacementState& st, int tx, int tz) {
+    for (int c = 0; c < 4; ++c) {
+        if (st.blocked[tri_index(tx, tz, c)]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr int32_t kWall = static_cast<int32_t>(BuildingKind::Wall);
+constexpr int32_t kTower = static_cast<int32_t>(BuildingKind::Watchtower);
+
+}  // namespace
+
+TEST_CASE("plopped footprints may touch") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    // 4x4 Walls, centres 4 apart: their footprints share the x = 22 lattice
+    // line. Far from the prebuilt Castle and its margin.
+    PlacementDesc a{kWall, 0, 20.0f, -20.0f};
+    PlacementDesc b{kWall, 0, 24.0f, -20.0f};
+    REQUIRE(plop_building(*game, a) != UINT32_MAX);
+    REQUIRE(plop_building(*game, b) != UINT32_MAX);
+
+    // The whole 8x4 span is solid -- no free lane down the seam, which is the
+    // entire point of a placement that does not enforce a margin.
+    for (int tz = -22; tz <= -19; ++tz) {
+        for (int tx = 18; tx <= 25; ++tx) {
+            CHECK(tile_is_solid(game->placement, tx, tz));
+        }
+    }
+}
+
+TEST_CASE("plopped footprints may overlap") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    // Two Walls on nearly the same ground, one rotated 45 degrees. Overlapping
+    // is legal for a plop and load-bearing: a slanted wall meeting an
+    // axis-aligned one cannot abut exactly, so the junction is an overlap or a
+    // hole, and occupancy is a bitmask so the union rasterizes the same either
+    // way.
+    REQUIRE(plop_building(*game, PlacementDesc{kWall, 0, 20.0f, -20.0f}) != UINT32_MAX);
+    REQUIRE(plop_building(*game, PlacementDesc{kWall, 1, 21.0f, -21.0f}) != UINT32_MAX);
+    CHECK(game->placement.buildings.size() >= 2);
+    CHECK(tile_is_solid(game->placement, 20, -20));  // still solid, not double-counted
+}
+
+TEST_CASE("player placement still refuses to touch a plopped block") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    PlacementDesc wall{kWall, 0, 20.0f, -20.0f};  // footprint x in [18, 22]
+    REQUIRE(plop_building(*game, wall) != UINT32_MAX);
+
+    // Immediately east of the wall. The tower's own margin would cover the
+    // wall's footprint, so the player rule refuses it -- unchanged by the
+    // primitive existing underneath.
+    PlacementDesc tower{kTower, 0, 22.5f, -20.5f};
+    CHECK(place(game, &tower) == UINT32_MAX);
+}
+
+TEST_CASE("a plop may land on an existing building's margin") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    PlacementDesc tower{kTower, 0, 22.5f, -20.5f};  // footprint x in [22, 23]
+    REQUIRE(place(game, &tower) != UINT32_MAX);
+
+    // The same pair as the test above, in the other order. The wall's footprint
+    // reaches into the tower's margin and is allowed to: a plop tests
+    // footprint-vs-footprint only.
+    PlacementDesc wall{kWall, 0, 20.0f, -20.0f};
+    CHECK(plop_building(*game, wall) != UINT32_MAX);
+}
+
+TEST_CASE("plopping accrues no urban sprawl and no poppables") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    const uint32_t quarters_before = game->placement.urban_quarters;
+    const size_t count_before = game->placement.buildings.size();
+
+    PlacementDesc wall{kWall, 0, 20.0f, -20.0f};
+    REQUIRE(plop_building(*game, wall) != UINT32_MAX);
+
+    CHECK(game->placement.urban_quarters == quarters_before);
+    CHECK(game->placement.buildings.size() == count_before + 1);  // the wall, nothing else
+}
+
+TEST_CASE("a plop bumps nav_epoch") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    const uint32_t epoch_before = game->placement.nav_epoch;
+    PlacementDesc wall{kWall, 0, 20.0f, -20.0f};
+    REQUIRE(plop_building(*game, wall) != UINT32_MAX);
+    CHECK(game->placement.nav_epoch > epoch_before);  // the navmesh must rebuild
+}
+
+TEST_CASE("plops survive a rebuild_occupancy round trip") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    PlacementDesc a{kWall, 0, 20.0f, -20.0f};
+    PlacementDesc b{kWall, 0, 24.0f, -20.0f};
+    REQUIRE(plop_building(*game, a) != UINT32_MAX);
+    REQUIRE(plop_building(*game, b) != UINT32_MAX);
+    // A player building elsewhere, then destroyed: destruction restamps the
+    // WHOLE occupancy grid from the surviving rows, so a plop that did not
+    // record its own margin rule would come back inflated with one.
+    PlacementDesc tower{kTower, 0, 40.5f, -40.5f};
+    const uint32_t id = place(game, &tower);
+    REQUIRE(id != UINT32_MAX);
+    REQUIRE(dispatch_into(*game, Action{ActionKind::DestroyBuilding, id, 0.0f, 0.0f, 0, 0}) == 0);
+
+    for (int tz = -22; tz <= -19; ++tz) {
+        for (int tx = 18; tx <= 25; ++tx) {
+            CHECK(tile_is_solid(game->placement, tx, tz));  // still solid
+        }
+    }
+    // And still un-margined: tile 17 abuts the wall's west face and would be
+    // blocked if the restamp had given the plop a margin it never had.
+    CHECK_FALSE(tile_is_blocked(game->placement, 17, -20));
 }

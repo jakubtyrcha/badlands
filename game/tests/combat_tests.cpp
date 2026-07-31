@@ -503,55 +503,11 @@ TEST_CASE(
     CHECK(g.registry.get<Health>(te).hp < hp0);
 }
 
-TEST_CASE("the arena's blocked edges refuse a step past the wall", "[combat]") {
-    WorldConfig cfg;
-    cfg.terrain_blocking = false;
-    cfg.prebuild_colony = false;
-    cfg.arena_half_x = 10.0f;
-    cfg.arena_half_z = 6.0f;
-    auto owned = make_world(BrainDesc{}, cfg);
-    BadlandsGame& g = *owned;
-
-    CharacterDesc d{};
-    d.pos_x = 8.0f;
-    d.hp = 10.0f;
-    d.move_speed = 6.0f;
-    d.size_x = d.size_y = d.size_z = 1.0f;
-    const entt::entity e = g.slots[spawn_into(g, d)];
-    // Order it to march far past the east edge; drive movement directly (no brain).
-    MoveTarget& mt = g.registry.get<MoveTarget>(e);
-    mt.kind = MoveTarget::Kind::Point;
-    mt.point = {100.0f, 0.0f};
-    for (int i = 0; i < 200; ++i) {
-        plan_paths(g, 1.0f / 30.0f);
-        follow_paths(g, 1.0f / 30.0f);
-    }
-    CHECK(g.registry.get<Position>(e).pos.x <= cfg.arena_half_x + 1e-3f);  // never crossed
-    CHECK(g.registry.all_of<MoveBlocked>(e));                              // and knows it
-}
-
-TEST_CASE("separation cannot shove a unit past the arena wall", "[combat]") {
-    WorldConfig cfg;
-    cfg.terrain_blocking = false;
-    cfg.prebuild_colony = false;
-    cfg.arena_half_x = 10.0f;
-    cfg.arena_half_z = 6.0f;
-    auto owned = make_world(BrainDesc{}, cfg);
-    BadlandsGame& g = *owned;
-    // Two units piled on the exact same spot hard against the east wall: the
-    // push-apart shoves one outward, and without an arena clamp it lands outside
-    // the wall (where follow_paths then refuses every inward step -- a freeze).
-    CharacterDesc d{};
-    d.pos_x = 9.9f;
-    d.hp = 10.0f;
-    d.size_x = d.size_y = d.size_z = 1.0f;
-    spawn_into(g, d);
-    spawn_into(g, d);
-    separate_units(g);
-    for (const CharacterState& row : characters_of(g)) {
-        CHECK(std::abs(row.pos_x) <= cfg.arena_half_x + 1e-3f);
-    }
-}
+// The two arena-edge cases that used to sit here are gone with the arena
+// rectangle itself. Confinement is a wall now -- an ordinary building -- so its
+// tests live with the seams that enforce it: "a goal behind a plopped wall is
+// unreachable" and "separation cannot shove a unit inside a wall", both in
+// game/tests/movement_tests.cpp.
 
 TEST_CASE("Stats reach is derived from the primary attack, not a stale mirror", "[combat]") {
     auto owned = make_flat_world();

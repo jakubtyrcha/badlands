@@ -21,11 +21,20 @@ constexpr int kGridHalf = kGridHalfExtentTiles;  // 48
 constexpr int kGridSize = 2 * kGridHalf;                // 96 tiles per axis
 constexpr int kTriangleCount = kGridSize * kGridSize * 4;
 
+// Whether a placement enforces the player's spacing rule. The ONE axis on which
+// plopping and player placement differ at the occupancy layer -- everything
+// else (snapping, rasterization, the building record, nav_epoch) is shared.
+enum class PlacementMargin { None, Player };
+
 struct PlacedBuilding {
     int32_t kind;
     glm::vec2 center;  // XZ, snapped
     int32_t rot;       // 0..3
     int32_t w, d;      // footprint tiles
+    // How this building was placed. Recorded rather than re-derived because
+    // rebuild_occupancy restamps every survivor after a destruction, and a
+    // plopped wall must not come back inflated with a margin it never had.
+    PlacementMargin margin = PlacementMargin::Player;
     bool alive = true; // tombstone: destruction sets false; id is never reused
     // Uncollected tax owed by this building; a tax collector banks it. Houses
     // accrue it at midnight (economy.cpp); a collector visit zeroes it.
@@ -103,14 +112,43 @@ bool footprint_in_bounds(const Footprint& fp);
 void footprint_triangles(const Footprint& fp, std::vector<TriRef>& out);
 void margin_triangles(const Footprint& fp, std::vector<TriRef>& out);
 
-// A footprint is placeable iff it fits the grid and no footprint triangle hits
-// an already-blocked cell.
-bool placement_valid(const PlacementState& st, const Footprint& fp);
+// Is this footprint placeable?
+//
+// PlacementMargin::None: it must fit the grid. That is the whole rule.
+// PlacementMargin::Player: it must additionally miss every existing footprint
+// AND margin, in both directions -- the candidate may not land on one, and its
+// own margin may not cover an existing footprint.
+//
+// NOT overlapping another building is a PLAYER constraint, which is why it sits
+// on that side of the line rather than in the primitive. Two authored blocks
+// sharing ground is harmless -- occupancy is a bitmask, so the union rasterizes
+// identically either way -- and forbidding it makes whole classes of structure
+// inexpressible. A 45-degree wall meeting an axis-aligned one is the case that
+// proves it: a slanted boundary and a vertical one cannot coincide, so every
+// such junction is either a small overlap or a gap, and a gap in a wall is a
+// hole. Refusing the overlap does not prevent the overlap; it prevents the wall.
+bool placement_valid(const PlacementState& st, const Footprint& fp, PlacementMargin margin);
 
 // --- Placement + poppables --------------------------------------------------
 
-// Places a building (snapping desc center). Returns the id, or UINT32_MAX on an
-// invalid footprint. `player` gates the urban-sprawl accumulator + poppables.
+// The PRIMITIVE. Stamps a footprint into the grid and records the building:
+// snap, bounds, commit, bump nav_epoch. No margin, no overlap rule, no urban
+// sprawl, no poppables, no cost. Returns the id, or UINT32_MAX (out of bounds
+// is the only refusal).
+//
+// Two plops may TOUCH and may OVERLAP, which is what makes a solid wall
+// expressible at all -- in any direction, not only along the axes. See
+// placement_valid above for why non-overlap belongs to the player.
+//
+// This is the reusable layer: place_building (below) is this plus the player's
+// constraints, and anything else that authors structures directly -- a prefab,
+// a scripted layout, a generated map feature -- calls this and gets buildings
+// indistinguishable from the player's own afterwards.
+uint32_t plop_building(BadlandsGame& game, const PlacementDesc& desc);
+
+// The PLAYER path: plop_building plus the player's constraints. Refuses a
+// placement that lands on an existing footprint OR margin (either direction);
+// `player` additionally gates the urban-sprawl accumulator + poppables.
 uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool player);
 
 // Inconvenience heuristic: closeness to the castle plus the nearest apothecary.

@@ -34,6 +34,12 @@ enum class BuildingKind : int32_t {
     Watchtower,
     House,  // poppable
     Sewer,  // poppable
+    // A solid 4x4 block of masonry: no door, no roof, nothing inside. Exists to
+    // be an OBSTACLE -- it blocks the navmesh and the placement grid like any
+    // other building and does nothing else. Plopped rather than placed (see
+    // plop_building, game/src/placement.h), so a run of them abuts into a
+    // continuous wall with no lane down the seam.
+    Wall,
     Count
 };
 
@@ -322,11 +328,11 @@ SkillId SkillIdFromName(const char* name);
 // after the fact to know what it should learn.
 //
 // NB which catalog a spawn reads is a PRE-EXISTING split (heroes.cpp's
-// hero_desc): directly-spawned creatures and arena scenarios read the per-Sim
-// catalog, so assets/creatures/creatures.json overrides reach them, while
-// RECRUITED heroes read the compiled defaults and do not. Grants inherit that
-// split exactly as stats do -- editing a grant level in creatures.json changes
-// an arena mercenary and not a guild-recruited one.
+// hero_desc): a directly-spawned creature reads the per-Sim catalog, so
+// assets/creatures/creatures.json overrides reach it, while a RECRUITED hero
+// reads the compiled defaults and does not. Grants inherit that split exactly
+// as stats do -- editing a grant level in creatures.json changes a spawned
+// mercenary and not a guild-recruited one.
 struct SkillGrantRow {
     int32_t skill = -1;  // SkillId; -1 = empty row
     int32_t level = 1;
@@ -551,8 +557,8 @@ struct StatGrowth {
     float damage_frac = 0.0f;
 };
 
-// The creatures the sim knows by name. Append-only: JSON overrides and arena
-// scenarios key by name, and SpawnCreature spawns by id. The first
+// The creatures the sim knows by name. Append-only: JSON overrides key by
+// name, and SpawnCreature spawns by id. The first
 // HERO_CLASS_COUNT ids line up with HeroClassId, so a hero class maps straight
 // to its creature.
 //
@@ -669,16 +675,39 @@ inline constexpr int64_t kDefaultMillisPerDay = 120 * 1000;
 // by this, so it must stay >= 1 ms).
 int64_t MillisPerDayForSimSeconds(float sim_seconds);
 
-// How to build the world (initial config). Defaults reproduce the shipping town
-// world; the arena overrides them.
+// Placement request: a raw (un-snapped) desired center + rotation. The sim
+// snaps the center to the grid lattice for the kind's parity.
+//
+// Declared up here rather than beside the rest of the placement surface below
+// because WorldConfig carries a list of them, and a world's initial config has
+// to be describable before the placement API is.
+struct PlacementDesc {
+    int32_t kind;
+    int32_t rotation_index;
+    float world_x, world_z;
+};
+
+// Which terrain a world stands on. The town's hand-authored map, or nothing at
+// all -- a world that wants no terrain says so rather than inheriting the
+// town's and quietly standing on its central lake.
+enum class MapKind : int32_t {
+    Symbolic = 0,  // the hand-authored greybox map (SymbolicMapGenerator)
+    FlatPlains,    // featureless flat plain everywhere (FlatMapGenerator)
+};
+
+// How to build the world (initial config).
 struct WorldConfig {
-    bool prebuild_colony = true;   // seed the colony Castle (false for the arena)
-    bool terrain_blocking = true;  // false = flat floor (no lake), for the arena
-    // >0 confines movement to [-half, +half] on that axis -- the arena's blocked
-    // edges. The world refuses a step past the edge (exactly like the water's
-    // edge), even though pathfinding does not yet route around it.
-    float arena_half_x = 0.0f;
-    float arena_half_z = 0.0f;
+    bool prebuild_colony = true;   // seed the colony Castle
+    bool terrain_blocking = true;  // false = terrain stops nobody, and no navmesh is built
+    MapKind map = MapKind::Symbolic;
+    // Structures that exist the moment the world does, plopped in order through
+    // plop_building -- so they carry no player margin and may abut into a
+    // continuous run. Initial config, exactly like prebuild_colony: part of the
+    // `state = f(config, log, ticks)` input rather than a command.
+    //
+    // The sim neither knows nor cares what shape they form. Whoever builds the
+    // config does.
+    std::vector<PlacementDesc> plops;
     // Length of one in-game day, in milliseconds of sim world time. Initial
     // config in the determinism contract: a replay must use the same value.
     // This sets what an in-game HOUR means (day/24), so it scales every
@@ -804,14 +833,6 @@ struct BuildingDef {
 struct RenderBox {
     float size_x, size_z;
     float yaw_radians;
-};
-
-// Placement request: a raw (un-snapped) desired center + rotation. The sim
-// snaps the center to the grid lattice for the kind's parity.
-struct PlacementDesc {
-    int32_t kind;
-    int32_t rotation_index;
-    float world_x, world_z;
 };
 
 // One grid triangle in a probe readout.
@@ -993,8 +1014,8 @@ class Sim {
     // game/src/wasm_brain.h); wasm_bytes null is not a failure at all (every
     // hero simply idles absent an enemy).
     explicit Sim(const BrainDesc& brain_desc);
-    // The composing form: an explicit world config (the arena uses this:
-    // flat, no colony, confined edges) x which brain. The other ctor forwards
+    // The composing form: an explicit world config (which map, what is
+    // already built, how long a day is) x which brain. The other ctor forwards
     // here conceptually (single make_world implementation, sim.cpp).
     Sim(const WorldConfig& config, const BrainDesc& brain_desc);
     ~Sim();

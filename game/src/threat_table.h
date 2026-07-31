@@ -3,12 +3,11 @@
 // ONE NUMBER, TWO ROLES, deliberately (docs/superpowers/specs/
 // 2026-07-31-core-classes-combat-design.md §7):
 //
-//   1. CALIBRATION. These anchors are fixed TARGETS. The duel matrix
-//      (src/executables/duelsim) measures how far the stats land from them;
-//      balancing moves the STATS toward the anchors, never the anchors toward
-//      the stats. Deriving threat from stats would make the whole report
-//      circular -- it would validate the numbers against a restatement of
-//      themselves.
+//   1. CALIBRATION. These anchors are fixed TARGETS. Watching duels (the AI
+//      sandbox's duel mode) shows how far the stats land from them; balancing
+//      moves the STATS toward the anchors, never the anchors toward the stats.
+//      Deriving threat from stats would make the whole exercise circular -- it
+//      would validate the numbers against a restatement of themselves.
 //
 //   2. BRAIN DECISIONS. Because role 1 keeps it a fair approximation, a brain
 //      can compare its own threat against a hostile's and be smart about

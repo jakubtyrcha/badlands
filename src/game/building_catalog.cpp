@@ -24,6 +24,7 @@ constexpr BuildingLabel kBuildingLabels[] = {
     {BuildingKind::Watchtower, "Watchtower"},
     {BuildingKind::House, "House"},
     {BuildingKind::Sewer, "Sewer"},
+    {BuildingKind::Wall, "Wall"},
 };
 static_assert(sizeof(kBuildingLabels) / sizeof(kBuildingLabels[0]) ==
                   static_cast<size_t>(BuildingKind::Count),
@@ -86,6 +87,13 @@ BuildingVisual building_visual(BuildingKind kind) {
              .roof_material = kSlateRoof};
     case BuildingKind::Sewer:
       return {.height = 0.4f,
+             .roof = RoofShape::None,
+             .wall_material = MaterialId::RockWall,
+             .roof_material = MaterialId::RockWall};
+    case BuildingKind::Wall:
+      // Solid masonry, roofless: a Wall is an obstacle, not a structure with an
+      // inside. Tall enough to read as impassable from the fixed camera pitch.
+      return {.height = 2.4f,
              .roof = RoofShape::None,
              .wall_material = MaterialId::RockWall,
              .roof_material = MaterialId::RockWall};

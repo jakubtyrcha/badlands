@@ -64,12 +64,6 @@ struct BadlandsGame {
     // coordinates they picked, which is a fragile thing to assert about.
     bool terrain_blocking = true;
 
-    // Arena confinement (the "blocked edges"). >0 on an axis makes the movement
-    // pipeline refuse a step past [-half, +half] there, exactly as terrain refuses
-    // a step into water. 0 = unbounded (the normal world). Initial config.
-    float arena_half_x = 0.0f;
-    float arena_half_z = 0.0f;
-
     // Event-sourced command layer (see command.h). AI decisions are enqueued
     // during think and drained in one ordered apply pass per tick; every
     // applied command (player + AI) is appended to command_log (the trace).
