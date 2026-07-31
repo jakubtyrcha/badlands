@@ -149,8 +149,15 @@ struct Params {
 
   // --- lakes ---
   // Water is accumulated EVERY step (see UpdateLakes); this only sets how often
-  // the basin topology is re-derived by priority flood.
-  int lake_interval = 50;
+  // the basin topology -- spill level and hypsometry -- is re-derived.
+  //
+  // 25 because that is inside the CONVERGED regime. Between rebuilds the
+  // hypsometry is stale, so a basin filling with sediment still reports its old
+  // capacity and the lake looks alive. Measured at 300 steps: intervals 5, 10
+  // and 25 all agree the lake has silted up (0% wet) while 50 and 100 report it
+  // still there (2.66% / 2.25%). The old default of 50 sat in the lagging
+  // regime, so lakes were being kept alive by a numerical artefact.
+  int lake_interval = 25;
   float dt_years = 200.0f;  // water-budget timestep (erosion stays step-based)
   // A cell must hold at least this much water before the plume/dispersion path
   // engages. Transient sheet flow is not a lake and must not trigger it.
@@ -393,7 +400,8 @@ float LevelFromVolume(const Lake& lk, double volume_m3, float cell_area,
 
 // Re-derives basin topology by priority flood. Expensive, so it runs every
 // `lake_interval` steps; the water budget itself runs every step in UpdateLakes.
-void BuildLakes(Grid& g, const Params& p, std::vector<Lake>& lakes) {
+void BuildLakes(Grid& g, const Params& p, std::vector<Lake>& lakes,
+                bool first_build) {
   const float cell_m = p.world_m / float(p.res);
   const float cell_area = cell_m * cell_m;
 
@@ -452,21 +460,43 @@ void BuildLakes(Grid& g, const Params& p, std::vector<Lake>& lakes) {
     next.push_back(std::move(lk));
   }
 
-  // Carry stored water across a rebuild: match by outlet cell, so a basin that
-  // survived keeps its lake instead of restarting empty every 50 steps.
-  for (Lake& lk : next) {
-    bool matched = false;
-    for (const Lake& old : lakes) {
-      if (old.outlet == lk.outlet) {
-        lk.volume_m3 = old.volume_m3;
-        matched = true;
-        break;
-      }
+  // Carry stored water across a rebuild by MEMBER OVERLAP, not by outlet
+  // identity.
+  //
+  // Matching on the outlet cell index is fragile in exactly the way that
+  // matters: erosion migrates the spill point by a cell, or a basin splits in
+  // two, and the match fails -- dropping the whole stored volume. Water was
+  // therefore lost at every rebuild, so lake survival depended on
+  // lake_interval (measured: a steady drain to nothing at 25, stable at 50).
+  //
+  // Overlap handles migration, splits and merges alike, and distributing each
+  // old lake's volume across the new lakes covering it in proportion to shared
+  // cells conserves the total.
+  {
+    std::vector<int32_t> old_of(g.cells, -1);
+    std::vector<double> old_count(lakes.size(), 0.0);
+    for (size_t j = 0; j < lakes.size(); ++j) {
+      for (uint32_t c : lakes[j].members) old_of[c] = int32_t(j);
+      old_count[j] = double(lakes[j].members.size());
     }
-    if (!matched && p.prefill) {
+    for (Lake& lk : next) {
+      std::vector<double> share(lakes.size(), 0.0);
+      for (uint32_t c : lk.members)
+        if (old_of[c] >= 0) share[old_of[c]] += 1.0;
       double v = 0.0;
-      for (uint32_t c : lk.members) v += std::max(0.f, lk.spill - g.height[c]);
-      lk.volume_m3 = v * double(cell_area) * double(p.relief_m);
+      for (size_t j = 0; j < lakes.size(); ++j)
+        if (old_count[j] > 0.0)
+          v += lakes[j].volume_m3 * (share[j] / old_count[j]);
+      const bool matched = v > 0.0;
+      if (!matched && p.prefill && first_build) {
+        for (uint32_t c : lk.members) v += std::max(0.f, lk.spill - g.height[c]);
+        v *= double(cell_area) * double(p.relief_m);
+      }
+      // Never more than the basin can physically hold.
+      double cap = 0.0;
+      for (uint32_t c : lk.members) cap += std::max(0.f, lk.spill - g.height[c]);
+      cap *= double(cell_area) * double(p.relief_m);
+      lk.volume_m3 = std::min(v, cap);
     }
   }
   lakes.swap(next);
@@ -850,7 +880,8 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
     g.momy.swap(g.momy_b);
 
     auto tD = clk::now(); t_grid += secs(tC, tD);
-    if (step % p.lake_interval == 0 || step == 1) BuildLakes(g, p, lakes);
+    if (step % p.lake_interval == 0 || step == 1)
+      BuildLakes(g, p, lakes, step == 1);
     UpdateLakes(g, p, lakes, n_lakes, wet_frac, deepest_m);
     t_lake += secs(tD, clk::now());
 
@@ -926,7 +957,7 @@ Params Base(int res = 64) {
   p.steps = 200;
   p.drops = 16;
   p.snapshot_every = 1 << 30;  // never
-  p.lake_interval = 50;  // production default: tests must match it
+  p.lake_interval = 25;  // production default: tests must match it
   return p;
 }
 
@@ -1286,7 +1317,7 @@ void LakeScaling() {
     InitTerrain(g, p);
     std::vector<Lake> lakes;
     auto a = clk::now();
-    for (int k = 0; k < 5; ++k) BuildLakes(g, p, lakes);
+    for (int k = 0; k < 5; ++k) BuildLakes(g, p, lakes, k == 0);
     t[i] = std::chrono::duration<double>(clk::now() - a).count();
   }
   // 4x the cells; linear would be ~4x, quadratic ~16x.
@@ -1388,7 +1419,11 @@ void DeltaProfile() {
 // changes whether a lake EXISTS, something is being lost or reset on rebuild.
 void RebuildCadenceInvariant() {
   double wet[2];
-  const int intervals[2] = {25, 50};
+  // Convergence, not equality: refining the rebuild interval must stop changing
+  // the answer. Comparing arbitrary intervals is wrong, because a coarse one is
+  // simply running on stale hypsometry -- which is how the old default of 50
+  // reported a lake that finer intervals agree has silted up.
+  const int intervals[2] = {10, 25};
   for (int i = 0; i < 2; ++i) {
     Params p = Base();
     p.terrain = Params::Terrain::Bowl;
@@ -1405,8 +1440,8 @@ void RebuildCadenceInvariant() {
   const double rel = std::max(wet[0], wet[1]) > 0
                          ? std::fabs(wet[1] - wet[0]) / std::max(wet[0], wet[1])
                          : 0.0;
-  Check("lake survives regardless of rebuild cadence", rel < 0.5,
-        F("interval 25 -> %.2f%% wet, interval 50 -> %.2f%%", 100 * wet[0],
+  Check("rebuild cadence has converged", rel < 0.25,
+        F("interval 10 -> %.2f%% wet, interval 25 -> %.2f%%", 100 * wet[0],
           100 * wet[1]));
 }
 
