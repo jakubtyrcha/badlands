@@ -102,6 +102,17 @@ struct Params {
   // its load: fine sand 1e-2, silt 1e-3, clay 1e-6 m/s.
   float settling_velocity_m_per_s = 1.0e-2f;
   float river_mouth_velocity_m_per_s = 1.0f;  // for the lobe length L = u*h/w_s
+  // Lateral plume wander: std dev, in DEGREES, of the per-step angular
+  // perturbation applied to the outlet-ward heading inside a lake.
+  //
+  // This is the missing lateral term. The along-path decay
+  // qs*(1-exp(-cell/L)) spreads the load DOWNSTREAM correctly, but deposits it
+  // into the one cell the particle occupies -- so with a straight-line traverse
+  // every delta is a 1-D stripe. Perturbing the heading makes the traverse a
+  // random walk biased toward the outlet, so lateral offset accumulates as
+  // sqrt(distance): turbulent dispersion, which is what the dropped
+  // grad.(K grad C) term describes. 0 reproduces the old straight line.
+  float plume_wander_deg = 35.0f;
 
   // --- lakes ---
   // Water is accumulated EVERY step (see UpdateLakes); this only sets how often
@@ -444,8 +455,8 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff);
 // The reference's descend, verbatim, plus a lake branch. Serial and IN PLACE:
 // particles interact through the terrain within a step and that coupling is
 // part of the physics (see README).
-void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes, float px,
-             float py) {
+void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
+             std::mt19937& rng, float px, float py) {
   const float cell_m = p.world_m / float(p.res);
   const float scale = p.relief_m / cell_m;  // height units per cell width
   // Repose threshold in height units: tan(angle) * cell / relief.
@@ -518,8 +529,16 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes, float px,
       // not a channel, and stamping it inflates the field.
       const float tx = float(int(target) % g.n) + 0.5f;
       const float ty = float(int(target) / g.n) + 0.5f;
-      const V2 dir = unit(V2{tx - pos.x, ty - pos.y});
+      V2 dir = unit(V2{tx - pos.x, ty - pos.y});
       if (len(dir) <= 0.f) return;
+      if (p.plume_wander_deg > 0.f) {
+        // Mean heading is still the outlet, so the walk is WEIGHTED toward it;
+        // the gaussian angular jitter is what spreads the plume sideways.
+        std::normal_distribution<float> jitter(
+            0.f, p.plume_wander_deg * 3.14159265f / 180.f);
+        const float a = std::atan2(dir.y, dir.x) + jitter(rng);
+        dir = V2{std::cos(a), std::sin(a)};
+      }
       pos = V2{pos.x + dir.x, pos.y + dir.y};
       volume *= (1.0f - p.evap_rate);
       continue;
@@ -653,6 +672,7 @@ int main(int argc, char** argv) {
     else if (a == "--bowl") p.bowl = true;
     else if (a == "--no-disperse") p.disperse = false;
     else if (a == "--prefill") p.prefill = true;
+    else if (a == "--wander") p.plume_wander_deg = std::stof(nxt());
     else if (a == "--dt") p.dt_years = std::stof(nxt());
     else if (a == "--min-dispersion-depth") p.min_dispersion_depth_m = std::stof(nxt());
     else if (a == "--source-x") p.source_x_frac = std::stof(nxt());
@@ -730,7 +750,7 @@ int main(int argc, char** argv) {
     std::fill(g.mx_track.begin(), g.mx_track.end(), 0.f);
     std::fill(g.my_track.begin(), g.my_track.end(), 0.f);
     std::fill(g.visits.begin(), g.visits.end(), 0u);
-    for (int d = 0; d < p.drops; ++d) Descend(g, p, lakes, sx[d], sy[d]);
+    for (int d = 0; d < p.drops; ++d) Descend(g, p, lakes, rng, sx[d], sy[d]);
 
     auto tB = clk::now(); t_drops += secs(tA, tB);
     auto tC = tB;
