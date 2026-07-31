@@ -190,7 +190,7 @@ struct DcsddConfig {
     // w_update sweep comment in dcsdd_tests.cpp for the concrete
     // failure-rate numbers this was root-caused against. Every real
     // consumer at this file's default outer_iters was already overriding to
-    // 0.1 before this fix (editor_mesh_config() in core/src/editor.cpp,
+    // 0.1 before this fix (the editor's now-dormant DCSDD override,
     // MeshJobRunner's tests); this just makes the struct's own default match
     // reality instead of the unstable paper value.
     float w_update = 0.1f;
