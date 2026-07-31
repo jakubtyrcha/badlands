@@ -54,6 +54,17 @@ final class EditorViewModel {
     /// start, not incremental — see `Editor::updateScale`).
     private var scaleDragStartY: CGFloat = 0
 
+    /// Previous mouse position of an in-progress `.camera`-mode drag-pan; nil
+    /// when no camera drag is active. Set only by a camera-mode mouse-down, so
+    /// it doubles as the mid-gesture guard: switching into `.camera` while the
+    /// button is already down leaves it nil and drags are ignored until the
+    /// next mouse-down (no huge first-delta jump). No core cleanup is needed
+    /// when switching out mid-drag — `cameraPan` is stateless per-event,
+    /// unlike modify-mode's begin/end drag pair — and a stale anchor left by
+    /// an out-switch is overwritten by the next camera-mode mouse-down before
+    /// any drag can read it.
+    private var lastCameraDragPoint: CGPoint? = nil
+
     /// Single entry point for every mode change (buttons, keys, future
     /// shortcuts) — keep it that way so later milestones have one place to
     /// hook mode-transition side effects (e.g. resetting spawn/gizmo state).
@@ -129,11 +140,21 @@ final class EditorViewModel {
                 isDragging = true
             }
         case .camera:
-            break // no-op until later milestones
+            lastCameraDragPoint = p
         }
     }
 
     func handleMouseDragged(_ p: CGPoint) {
+        if mode == .camera {
+            // Grab-the-world pan: raw p − last deltas keep the clicked
+            // point under the cursor (see pan_view's sign convention;
+            // flipped view coords, no negation needed).
+            guard let last = lastCameraDragPoint else { return }
+            editor.cameraPan(Float(p.x - last.x), Float(p.y - last.y))
+            lastCameraDragPoint = p
+            refreshOverlayState()
+            return
+        }
         guard mode == .modify, isDragging else { return }
         switch activeRadialTool {
         case .move:
@@ -145,6 +166,10 @@ final class EditorViewModel {
     }
 
     func handleMouseUp(_ p: CGPoint) {
+        if mode == .camera {
+            lastCameraDragPoint = nil
+            return
+        }
         guard mode == .modify, isDragging else { return }
         switch activeRadialTool {
         case .move:
