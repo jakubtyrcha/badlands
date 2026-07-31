@@ -614,6 +614,7 @@ add_executable(badlands_game_tests
     game/tests/growth_tests.cpp
     game/tests/threat_table_tests.cpp
     game/tests/strike_tests.cpp
+    game/tests/disengage_tests.cpp
     # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
     game/tests/intention_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp

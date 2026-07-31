@@ -94,6 +94,10 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
                      caster_slot, skill_index, skills->count);
         return false;
     }
+    if (has_status(reg, caster, StatusKind::Disengaged)) {
+        spdlog::warn("[skill] slot {}: disengaged, cast dropped", caster_slot);
+        return false;
+    }
     if (skills->cooldown_remaining[skill_index] > 0.0f) {
         spdlog::warn("[skill] slot {}: skill {} still cooling down ({:.1f}s), cast dropped",
                      caster_slot, SkillName(static_cast<int32_t>(skills->ids[skill_index])),

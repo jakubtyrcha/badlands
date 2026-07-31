@@ -165,6 +165,17 @@ struct BadlandsGame {
     // merely "was this slot in range".
     std::vector<entt::entity> nearest_enemy_scratch;
 
+    // Per-tick, indexed by slot: 1 for a character follow_paths actually moved
+    // under its own power this tick. Written at the top of follow_paths and
+    // read by update_melee_locks moments later, in the same tick and the same
+    // pipeline -- the only consumer, and the reason the flag exists at all:
+    // it is how the engine tells a DELIBERATE disengage (you walked out of
+    // contact, so you pay StatusKind::Disengaged) from merely being left
+    // behind (your opponent walked away, or died, so you pay nothing). Same
+    // shape and lifetime as nearest_enemy_scratch above; never read outside
+    // the tick that wrote it.
+    std::vector<uint8_t> moved_by_path_scratch;
+
     ~BadlandsGame();
 };
 

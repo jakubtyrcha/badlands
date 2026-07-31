@@ -6,7 +6,7 @@
 #include "heroes.h"     // biome_at
 #include "intention.h"  // InboxEvent, push_inbox_event -- the MoveBlocked mirror
 #include "placement.h"
-#include "status.h"  // has_status -- a stunned character stops walking
+#include "status.h"  // has_status/apply_status -- stun stops walking, disengaging costs actions
 #include "strike.h"  // striking -- so does one committed to a swing
 
 #include <entt/entt.hpp>
@@ -28,6 +28,10 @@ namespace {
 constexpr float kRepathCooldown = 0.3f;    // seconds between repaths
 constexpr float kGoalMovedThreshold = 1.0f;// repath a moving target when it drifts this far
 constexpr float kMeleeHysteresis = 1.15f;  // unlock past attack_range * this
+// How long a unit that walked out of melee contact can do nothing at all.
+// Long enough that disengaging is never the better option -- see the charge
+// site in update_melee_locks.
+constexpr float kDisengagePenaltySeconds = 3.0f;
 constexpr float kSepCell = 2.0f;           // separation spatial-hash cell size
 constexpr float kWorldBound = static_cast<float>(kGridHalf);
 
@@ -241,12 +245,23 @@ void follow_paths(BadlandsGame& game, float dt) {
     // adding a component while iterating a view can invalidate it.
     std::vector<std::pair<entt::entity, glm::vec2>> blocked;
 
-    // ChattingState excluded alongside InsideBuilding/MeleeLock: a
-    // conversation holds both participants in place, like a melee lock
-    // holds fighters -- a hero mid-chat must not keep walking toward
+    // Who moved under their own power this tick. update_melee_locks (below,
+    // same tick, after this) reads it to tell a DELIBERATE disengage from
+    // simply being left behind -- see its own comment.
+    game.moved_by_path_scratch.assign(game.slots.size(), 0);
+
+    // MeleeLock is NO LONGER excluded (contact/disengage slice): contact
+    // forbids ranged attacks, it does not nail feet to the ground. Freezing
+    // movement made leaving contact impossible -- you could not move, so the
+    // distance never grew, so the lock never released -- which made "move,
+    // shoot, move" unreachable for anything that was touched once. Leaving is
+    // possible now, and ruinously expensive (StatusKind::Disengaged).
+    //
+    // ChattingState stays excluded: a conversation really does hold both
+    // participants in place, so a hero mid-chat must not keep walking toward
     // whatever MoveTarget it had queued up before the chat started.
     auto view = game.registry.view<NavPath, Position, const Stats>(
-        entt::exclude<InsideBuilding, MeleeLock, ChattingState>);
+        entt::exclude<InsideBuilding, ChattingState>);
     for (entt::entity e : view) {
         // Stunned: the character stops WALKING, but its NavPath is left exactly
         // as it is -- the route survives the stun and resumes on expiry, which
@@ -295,6 +310,10 @@ void follow_paths(BadlandsGame& game, float dt) {
                 continue;  // stop at the edge rather than cross it
             }
             pos.pos = next;
+            if (const uint32_t slot = slot_for_entity(game, e);
+                slot < game.moved_by_path_scratch.size()) {
+                game.moved_by_path_scratch[slot] = 1;  // moved under its own power
+            }
             // Fog-of-war: face the direction of travel (idle keeps last facing).
             if (Facing* f = game.registry.try_get<Facing>(e)) {
                 f->dir = d / len;
@@ -337,8 +356,25 @@ void update_melee_locks(BadlandsGame& game) {
         }
     }
     for (entt::entity e : to_unlock) {
-        if (reg.all_of<MeleeLock>(e)) {
-            reg.remove<MeleeLock>(e);
+        if (!reg.all_of<MeleeLock>(e)) {
+            continue;
+        }
+        reg.remove<MeleeLock>(e);
+        // The price of leaving contact. Charged ONLY to a unit that walked out
+        // under its own power this tick (moved_by_path_scratch, written at the
+        // top of follow_paths): if the contact broke because the opponent left
+        // or died, this unit moved nothing and pays nothing. A separate_units
+        // nudge never counts either -- it is not path-following, so it never
+        // sets the flag.
+        //
+        // Deliberately steep. It exists so a brain that can count NEVER
+        // chooses to disengage: the ranged classes' real job is spacing, and
+        // being caught is meant to be a genuine loss condition rather than an
+        // inconvenience to walk off.
+        const uint32_t slot = slot_for_entity(game, e);
+        if (slot < game.moved_by_path_scratch.size() && game.moved_by_path_scratch[slot] != 0) {
+            apply_status(game, e, StatusKind::Disengaged,
+                         static_cast<int64_t>(kDisengagePenaltySeconds * 1000.0f), slot);
         }
     }
 }

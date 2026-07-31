@@ -10,7 +10,8 @@
 #include "placement.h"       // nearest_building_of, PlacementState
 #include "skill_cast.h"      // validate_cast -- BL_ACT_USE_SKILL's own validation
 #include "skills.h"          // Skills, SkillId
-#include "strike.h"          // striking -- a committed attacker takes no action
+#include "status.h"          // has_status -- a disengaged actor takes no action either
+#include "strike.h"          // striking -- nor does a committed attacker
 
 #include <spdlog/spdlog.h>
 
@@ -450,10 +451,21 @@ bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action
     // committed brain -- an engine-side brain, or a test, can reach this
     // function without going through that dispatch at all.
     if (entt::entity actor = entity_for_slot(game, static_cast<int32_t>(slot));
-        actor != entt::null && striking(game.registry, actor)) {
-        spdlog::warn("[action] slot {}: still committed to an attack, kind {} dropped", slot,
-                     action.kind);
-        return false;
+        actor != entt::null) {
+        if (striking(game.registry, actor)) {
+            spdlog::warn("[action] slot {}: still committed to an attack, kind {} dropped",
+                         slot, action.kind);
+            return false;
+        }
+        // Disengaged: walked out of melee contact, and can do NOTHING for a
+        // few seconds -- no attack, no skill. Movement and defense are
+        // untouched (movement.cpp charges this); the penalty is on acting.
+        if (has_status(game.registry, actor, StatusKind::Disengaged)) {
+            spdlog::warn("[action] slot {}: disengaged ({} ms left), kind {} dropped", slot,
+                         remaining_millis_of(game.registry, actor, StatusKind::Disengaged),
+                         action.kind);
+            return false;
+        }
     }
     if (action.kind == BL_ACT_USE_SKILL) {
         return resolve_use_skill(game, slot, action);

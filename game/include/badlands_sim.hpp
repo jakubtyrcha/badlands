@@ -202,9 +202,13 @@ struct ActivityWeights {
 // its own decision.
 enum class StatusKind : int32_t {
     None = 0,
-    Stunned,  // skips the think, freezes movement, zeroes the active defense
+    Stunned,     // skips the think, freezes movement, zeroes the active defense
+    Disengaged,  // walked out of melee contact: no actions at all for a few
+                 // seconds. Movement and defense are untouched -- this is a
+                 // penalty on ACTING, not on being, and it is meant to be
+                 // steep enough that a brain that can count never chooses it.
 };
-inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Stunned) + 1;
+inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Disengaged) + 1;
 // Fixed component capacity; matches BL_MAX_STATUSES (game/src/brain_abi.h).
 inline constexpr int32_t kMaxStatuses = 8;
 // Stable inspection name ("Stunned"); "-" for an out-of-range kind.

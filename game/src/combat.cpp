@@ -227,6 +227,14 @@ void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slo
     if (self == entt::null) {
         return;
     }
+    // Disengaged (movement.h): walked out of melee contact, so it can do
+    // nothing at all for a few seconds. Checked HERE rather than in the Attack
+    // command handler so every caller is covered -- the handler, a test, a
+    // future engine-side producer -- the same reason the cooldown/range
+    // re-checks live here and not at the queue site.
+    if (has_status(reg, self, StatusKind::Disengaged)) {
+        return;
+    }
     // Engine picks the enemy when the producer named none (mock/scripted brains);
     // the hunter names its neutral prey explicitly.
     entt::entity target = (target_slot == UINT32_MAX)

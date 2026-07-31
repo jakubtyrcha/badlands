@@ -8,9 +8,15 @@
 //
 // Determinism: durations are int64 milliseconds decremented by the
 // compile-time kMillisPerTick (components.h), so every expiry lands on the
-// same tick live and on replay. Application itself always arrives through a
-// Command handler (never a brain, never a system's own initiative), which is
-// what keeps the status stream in the command log.
+// same tick live and on replay.
+//
+// Application usually arrives through a Command handler (never a brain), which
+// keeps the status stream in the command log. The one exception is
+// StatusKind::Disengaged, applied directly by update_melee_locks
+// (game/src/movement.h) -- it is a PURE SYSTEM RULE over deterministic state
+// ("you walked out of contact this tick"), not a decision anyone took, and it
+// replays by re-running the same system. Exactly the precedent
+// advance_projectiles sets by applying arrival damage outside the log.
 
 #pragma once
 
