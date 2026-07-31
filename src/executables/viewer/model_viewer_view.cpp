@@ -78,25 +78,27 @@ bool ModelViewerView::Initialize(const RenderContext& ctx) {
   // GPU box-downsample mipgen would recompute (and so destroy) the
   // coverage-preserved alpha this function already produced per level.
   {
-    // Trilinear + repeat sampler, shared by every silhouette: the alpha mip
+    // Trilinear + clamp sampler, shared by every silhouette: the alpha mip
     // chain must be sampled through a Linear mipmapFilter (the material
     // factory's default is Nearest, which would defeat the mips and leave the
-    // edges aliased).
+    // edges aliased). Repeat was harmless for the old zero-border oval (its
+    // edge texels were all transparent), but sprig layouts bake alpha-255
+    // texels right up to the card's top/bottom edge rows -- Repeat would wrap
+    // those into the opposite edge under bilinear/trilinear filtering,
+    // producing detached leaf slivers at card tops/bottoms. Leaf quad UVs are
+    // strictly 0..1, so ClampToEdge is correct here.
     wgpu::SamplerDescriptor samp = {};
     samp.minFilter = wgpu::FilterMode::Linear;
     samp.magFilter = wgpu::FilterMode::Linear;
     samp.mipmapFilter = wgpu::MipmapFilterMode::Linear;
-    samp.addressModeU = wgpu::AddressMode::Repeat;
-    samp.addressModeV = wgpu::AddressMode::Repeat;
+    samp.addressModeU = wgpu::AddressMode::ClampToEdge;
+    samp.addressModeV = wgpu::AddressMode::ClampToEdge;
     samp.maxAnisotropy = 16;
     leaf_sampler_ = device_.CreateSampler(&samp);
 
     constexpr uint32_t kLeafTexSize = 512;
-    constexpr std::array<LeafSilhouette, kLeafSilhouetteCount> kSilhouettes = {
-        LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
-        LeafSilhouette::Bush, LeafSilhouette::PineSprig};
 
-    for (LeafSilhouette shape : kSilhouettes) {
+    for (LeafSilhouette shape : kAllLeafSilhouettes) {
       // Shared with TreeCatalog's per-silhouette alpha_cutoff assignments
       // (tree_generator.cpp) -- see LeafSilhouetteBakeCutoff's own comment.
       const float cutoff = LeafSilhouetteBakeCutoff(shape);

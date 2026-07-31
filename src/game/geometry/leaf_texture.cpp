@@ -497,8 +497,12 @@ std::vector<std::vector<uint8_t>> BuildLeafMipChainRgba8(int size, glm::vec3 lea
         return static_cast<float>(count) / static_cast<float>(texel_count);
       };
       // Coverage is monotonic non-decreasing in s, so bisect for the scale
-      // whose coverage best matches level 0's.
-      float lo = 1.0f, hi = 4.0f, best_s = 1.0f;
+      // whose coverage best matches level 0's. Box-downsampling can also
+      // INFLATE coverage at coarse mips (thin sprig/needle content averages
+      // toward higher alpha as more partially-covered texels blend together),
+      // which a scale floor of 1.0 could never correct -- [0.25, 4.0] covers
+      // both directions.
+      float lo = 0.25f, hi = 4.0f, best_s = 1.0f;
       float best_diff = std::fabs(coverage_at_scale(1.0f) - level0_coverage);
       for (int i = 0; i < 10; ++i) {
         const float mid = 0.5f * (lo + hi);

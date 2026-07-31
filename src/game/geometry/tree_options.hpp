@@ -10,8 +10,26 @@ namespace badlands {
 enum class TreeType { Deciduous, Evergreen };
 
 // Per-species leaf card silhouette shape (leaf_texture.hpp). Bush is the
-// generic fat-oval fallback (byte-identical to the pre-species texture).
+// generic fat-oval fallback; PineSprig alone keeps the pre-species texture's
+// byte-identical legacy path (see PineSprigAlpha's DO NOT TOUCH note in
+// leaf_texture.cpp) -- Bush routes through the sprig builder like every other
+// silhouette.
+//
+// kLeafSilhouetteCount/kAllLeafSilhouettes below are the canonical size/
+// enumeration for this enum -- consumers that need to iterate every value or
+// size a per-silhouette array (model_viewer_view.hpp's leaf_textures_/
+// leaf_views_, model_viewer_view.cpp's texture bake loop,
+// tree_generator_tests.cpp) must use them instead of hand-listing the values,
+// so adding a new silhouette here can't silently desync those sites. NEW
+// ENUM VALUES MUST BE ADDED TO kAllLeafSilhouettes TOO.
 enum class LeafSilhouette { Oak, Ash, Aspen, Bush, PineSprig };
+
+inline constexpr size_t kLeafSilhouetteCount = 5;
+inline constexpr std::array<LeafSilhouette, kLeafSilhouetteCount> kAllLeafSilhouettes = {
+    LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
+    LeafSilhouette::Bush, LeafSilhouette::PineSprig};
+static_assert(kAllLeafSilhouettes.size() == kLeafSilhouetteCount,
+              "kAllLeafSilhouettes must list every LeafSilhouette value");
 
 // The alpha-discard cutoff a per-silhouette leaf-card texture should be BAKED
 // with (BuildLeafMipChainRgba8's coverage-preserving mip chain, viewer's

@@ -1,7 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include <algorithm>
 #include <cmath>
-#include <iterator>  // std::size
 #include <glm/gtc/constants.hpp>  // glm::pi
 #include "game/geometry/tree_options.hpp"
 #include "game/geometry/tree_generator.hpp"
@@ -235,17 +234,10 @@ TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
   REQUIRE(r.mesh.indices.empty());
 }
 
-namespace {
-constexpr LeafSilhouette kAllSilhouettes[] = {
-    LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
-    LeafSilhouette::Bush, LeafSilhouette::PineSprig,
-};
-}  // namespace
-
 TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card for every silhouette") {
   const int n = 128;
   const glm::vec3 color(0.30f, 0.55f, 0.18f);
-  for (LeafSilhouette shape : kAllSilhouettes) {
+  for (LeafSilhouette shape : kAllLeafSilhouettes) {
     INFO("silhouette index " << static_cast<int>(shape));
     const std::vector<uint8_t> px = BuildLeafRgba8(n, color, shape);
     REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
@@ -275,16 +267,16 @@ TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card for every silhouette") {
 TEST_CASE("BuildLeafRgba8: opaque-texel counts are pairwise distinct across silhouettes") {
   const int n = 128;
   const glm::vec3 color(0.30f, 0.55f, 0.18f);
-  size_t counts[std::size(kAllSilhouettes)];
-  for (size_t i = 0; i < std::size(kAllSilhouettes); ++i) {
-    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, kAllSilhouettes[i]);
+  size_t counts[kAllLeafSilhouettes.size()];
+  for (size_t i = 0; i < kAllLeafSilhouettes.size(); ++i) {
+    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, kAllLeafSilhouettes[i]);
     size_t count = 0;
     for (size_t p = 0; p < static_cast<size_t>(n) * static_cast<size_t>(n); ++p)
       if (px[p * 4 + 3] >= 128) ++count;
     counts[i] = count;
   }
-  for (size_t i = 0; i < std::size(kAllSilhouettes); ++i)
-    for (size_t j = i + 1; j < std::size(kAllSilhouettes); ++j)
+  for (size_t i = 0; i < kAllLeafSilhouettes.size(); ++i)
+    for (size_t j = i + 1; j < kAllLeafSilhouettes.size(); ++j)
       REQUIRE(counts[i] != counts[j]);
 }
 
@@ -319,15 +311,26 @@ TEST_CASE("BuildLeafRgba8: deterministic (no RNG state, byte-identical run-to-ru
 }
 
 TEST_CASE("BuildLeafMipChainRgba8: coverage-preserving mip chain") {
-  const int n = 128;
   const glm::vec3 color(0.30f, 0.55f, 0.18f);
-  struct Case { LeafSilhouette shape; float cutoff; };
-  const Case cases[] = {{LeafSilhouette::Oak, 0.5f}, {LeafSilhouette::PineSprig, 0.35f}};
+  struct Case { LeafSilhouette shape; float cutoff; int n; };
+  const Case cases[] = {
+      {LeafSilhouette::Oak, 0.5f, 128},
+      {LeafSilhouette::PineSprig, 0.35f, 128},
+      // Production bake size (model_viewer_view.cpp's kLeafTexSize). Box-
+      // downsampling INFLATES PineSprig's thin needle-stripe coverage at
+      // coarse mips here (empirically 1.19-1.54x pre-fix) -- the 128 probe
+      // above doesn't reproduce it; this is the case the Castano bisection's
+      // [0.25, 4.0] scale range (leaf_texture.cpp) exists to correct, since a
+      // scale floor of 1.0 can never shrink inflated coverage back down.
+      {LeafSilhouette::PineSprig, 0.35f, 512},
+  };
 
   for (const Case& c : cases) {
-    INFO("silhouette index " << static_cast<int>(c.shape));
-    const std::vector<std::vector<uint8_t>> mips = BuildLeafMipChainRgba8(n, color, c.shape, c.cutoff);
-    REQUIRE(mips.size() == 8u);  // 128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
+    INFO("silhouette index " << static_cast<int>(c.shape) << " n=" << c.n);
+    const std::vector<std::vector<uint8_t>> mips = BuildLeafMipChainRgba8(c.n, color, c.shape, c.cutoff);
+    size_t expected_levels = 1;
+    for (int w = c.n; w > 1; w /= 2) ++expected_levels;
+    REQUIRE(mips.size() == expected_levels);
 
     auto coverage = [&](const std::vector<uint8_t>& px, int size) {
       const uint8_t thresh = static_cast<uint8_t>(std::lround(c.cutoff * 255.0f));
@@ -338,16 +341,16 @@ TEST_CASE("BuildLeafMipChainRgba8: coverage-preserving mip chain") {
       return static_cast<float>(count) / static_cast<float>(total);
     };
 
-    int size = n;
+    int size = c.n;
     for (const std::vector<uint8_t>& level : mips) {
       REQUIRE(level.size() == static_cast<size_t>(size) * static_cast<size_t>(size) * 4);
       size = std::max(1, size / 2);
     }
 
-    const float level0_coverage = coverage(mips[0], n);
+    const float level0_coverage = coverage(mips[0], c.n);
     REQUIRE(level0_coverage > 0.0f);
 
-    size = n;
+    size = c.n;
     for (const std::vector<uint8_t>& level : mips) {
       if (size >= 8) {
         const float cov = coverage(level, size);

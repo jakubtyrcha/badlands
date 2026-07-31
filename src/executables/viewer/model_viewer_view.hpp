@@ -131,9 +131,9 @@ class ModelViewerView : public AppView {
   // material tint. Indexed by static_cast<size_t>(LeafSilhouette) (see
   // LeafViewFor above); leaf_textures_ owns the GPU textures (leaf_views_
   // alone doesn't keep them alive). leaf_sampler_ is one shared trilinear +
-  // repeat + aniso-16 sampler so every silhouette's mip chain is sampled the
-  // same way.
-  static constexpr size_t kLeafSilhouetteCount = 5;
+  // clamp-to-edge + aniso-16 sampler so every silhouette's mip chain is
+  // sampled the same way. Sized via tree_options.hpp's canonical
+  // kLeafSilhouetteCount, not a hand-copied literal.
   std::array<wgpu::Texture, kLeafSilhouetteCount> leaf_textures_;
   std::array<wgpu::TextureView, kLeafSilhouetteCount> leaf_views_;
   wgpu::Sampler leaf_sampler_;
