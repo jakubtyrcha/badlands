@@ -1,8 +1,9 @@
 #pragma once
 #include <simd/simd.h>
+#include <optional>
 
 #include <shapeshifter/ShapeshifterCore.h>   // GizmoHandle (interop enum)
-#include "camera.h"                          // Camera
+#include "camera.h"                          // Camera, Ray
 
 namespace sq {
 
@@ -31,5 +32,28 @@ struct GizmoFrame {
 void tangent_basis(simd_float3 n, simd_float3& u, simd_float3& v);
 
 GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera);
+
+// Screen-constant axis grab tolerance, converted to world units at the
+// candidate point's depth inside pick_gizmo_handle (same scale family as
+// CameraController::pan_view).
+inline constexpr float kAxisPickTolerancePts = 8.0f;
+// An axis seen nearly end-on (|dot(ray, axis)| above this) is skipped
+// entirely: the drag solver's parameter explodes long before its 1e-6
+// denominator cutoff (sin^2 of the angle), so an axis that can't be dragged
+// stably must not be grabbable or hoverable either.
+inline constexpr float kAxisViewAlignLimit = 0.995f;
+
+// Closest-approach parameter s of `ray` to the line origin + s*axis_dir
+// (axis_dir unit). nullopt when near-parallel (denominator < 1e-6) — drag
+// callers keep the last position, mirroring ray_plane's parallel guard.
+std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_float3 axis_dir);
+
+// Drawn geometry = hit geometry: axes ±he along u/v/n (ray-to-segment
+// distance vs the pts tolerance above), plane patches origin + x*e1 + y*e2,
+// x,y in [0.3he, 0.6he] (ray_plane + bounds). Any axis hit beats any plane
+// hit; among axes smallest distance wins (ties: smaller ray-t, then
+// declaration order); among planes nearest ray-t wins.
+GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
+                              float fov_y_radians, float viewport_h_pts);
 
 } // namespace sq
