@@ -90,6 +90,34 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   log_step("mg:generate", since(t));
   map_size_m_ = params_.world_size_m;
 
+  // Lake bathymetry, logged once: the water material's extinction coefficients
+  // are derived from a visibility depth in metres, so the depth distribution
+  // the generator actually produces is a load-bearing input, not trivia.
+  {
+    std::vector<float> depths;
+    depths.reserve(map_.lakes.size());
+    for (const mapgen::LakeInfo& l : map_.lakes) depths.push_back(l.max_depth_m);
+    std::sort(depths.begin(), depths.end());
+    int wet = 0;
+    for (float d : map_.water_depth.data) {
+      if (d > 0.0f) ++wet;
+    }
+    const float wet_frac =
+        map_.water_depth.data.empty()
+            ? 0.0f
+            : static_cast<float>(wet) /
+                  static_cast<float>(map_.water_depth.data.size());
+    if (depths.empty()) {
+      spdlog::info("lakes: none (wet {:.2f}%)", 100.0f * wet_frac);
+    } else {
+      spdlog::info(
+          "lakes: {}  max_depth_m min/median/max = {:.2f}/{:.2f}/{:.2f}  "
+          "wet {:.2f}%",
+          depths.size(), depths.front(), depths[depths.size() / 2],
+          depths.back(), 100.0f * wet_frac);
+    }
+  }
+
   // Wrap the generator output in the frozen MapData contract (one-hot biomes) at
   // the raster's own texel spacing -- the input to the cluster terrain and
   // picking. The cluster LOD's job is to decimate from full detail, so the leaf
