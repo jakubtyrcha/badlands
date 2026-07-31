@@ -65,6 +65,9 @@ struct Params {
   float source_x_frac = 0.5f, source_y_frac = 0.12f;
   float source_jitter_cells = 1.0f;
   bool disperse = true;  // --no-disperse dumps at the entry cell instead
+  // Fill every basin to its spill level on the first build. For the A/B
+  // test only: it removes the fill-up transient so a short run has a lake.
+  bool prefill = false;
 
   int steps = 3000;
   int drops = 4096;
@@ -359,8 +362,18 @@ void BuildLakes(Grid& g, const Params& p, std::vector<Lake>& lakes) {
   // Carry stored water across a rebuild: match by outlet cell, so a basin that
   // survived keeps its lake instead of restarting empty every 50 steps.
   for (Lake& lk : next) {
+    bool matched = false;
     for (const Lake& old : lakes) {
-      if (old.outlet == lk.outlet) { lk.volume_m3 = old.volume_m3; break; }
+      if (old.outlet == lk.outlet) {
+        lk.volume_m3 = old.volume_m3;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched && p.prefill) {
+      double v = 0.0;
+      for (uint32_t c : lk.members) v += std::max(0.f, lk.spill - g.height[c]);
+      lk.volume_m3 = v * double(cell_area) * double(p.relief_m);
     }
   }
   lakes.swap(next);
@@ -471,10 +484,16 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes, float px,
         // DIVERGENCE. Depositing the flux itself is dimensionally the wrong
         // quantity and diverged to 2e5 m of relief.
         const float depth_m = g.water[here] * p.relief_m;
-        const float L_m = std::clamp(
+        // No upper clamp. The old 64-cell cap was left over from when this
+        // was an O(R^2) kernel splat; deposition is O(1) along the path now, so
+        // there is no cost reason for it -- and it silently killed the grain
+        // knob, collapsing everything finer than ~1e-2 m/s to the same reach.
+        // A 100 km L for clay is physically right: it means "does not settle
+        // inside this lake", which is what lake-floor clay does.
+        const float L_m = std::max(
             p.river_mouth_velocity_m_per_s * depth_m /
                 std::max(p.settling_velocity_m_per_s, 1e-9f),
-            cell_m, 64.0f * cell_m);
+            cell_m);
         drop = sediment * (1.0f - std::exp(-cell_m / L_m));
       } else {
         drop = sediment;  // control: dump the whole load at the entry cell
@@ -633,6 +652,7 @@ int main(int argc, char** argv) {
     else if (a == "--snapshot-every") p.snapshot_every = std::stoi(nxt());
     else if (a == "--bowl") p.bowl = true;
     else if (a == "--no-disperse") p.disperse = false;
+    else if (a == "--prefill") p.prefill = true;
     else if (a == "--dt") p.dt_years = std::stof(nxt());
     else if (a == "--min-dispersion-depth") p.min_dispersion_depth_m = std::stof(nxt());
     else if (a == "--source-x") p.source_x_frac = std::stof(nxt());
