@@ -187,11 +187,20 @@ uint32_t spawn_entity(BadlandsGame& game, const CharacterDesc& desc, int32_t hom
             }
             reg.emplace<EntityMemory>(e, mem);
 
-            // Learned-skill loadout: starts with the class's level-1 grants
-            // (none authored yet); the level-up hook (progression.cpp) adds
-            // the rest.
+            // Learned-skill loadout. The grant list travels with the DESC
+            // (creature catalog data), so every spawn path applies whatever
+            // list its own desc carried -- see hero_desc above for which
+            // catalog each path reads. Copied onto the entity because the
+            // level-up hook (progression.cpp) needs it later, long after the
+            // desc is gone.
+            SkillGrants grants{};
+            grants.count = std::min(desc.skill_grant_count, kMaxSkills);
+            for (int32_t i = 0; i < grants.count; ++i) {
+                grants.rows[i] = desc.skill_grants[i];
+            }
+            reg.emplace<SkillGrants>(e, grants);
             Skills sk{};
-            grant_skills_for_level(sk, hero_class, 1);
+            grant_skills_for_level(sk, grants, 1);
             reg.emplace<Skills>(e, sk);
 
             // Intention contract (game/src/intention.h): heroes only, spawned

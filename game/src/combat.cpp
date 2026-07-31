@@ -2,6 +2,7 @@
 
 #include "behaviours/rng.h"  // seed_of / unit_float -- the sim's only randomness
 #include "game_state.h"      // BadlandsGame, entity_for_slot, nearest_enemy, slot_for_entity, emit_char_hit
+#include "status.h"          // has_status -- Stunned zeroes the ACTIVE defense (effective_combatant)
 
 #include <algorithm>
 #include <vector>
@@ -89,6 +90,19 @@ CombatResult resolve_attack(const CombatRequest& req) {
 
     res.damage = damage;
     return res;
+}
+
+Combatant effective_combatant(const entt::registry& reg, entt::entity e) {
+    const auto* base = (e != entt::null && reg.valid(e)) ? reg.try_get<Combatant>(e) : nullptr;
+    if (base == nullptr) {
+        return Combatant{};
+    }
+    Combatant c = *base;
+    if (has_status(reg, e, StatusKind::Stunned)) {
+        c.defense = 0.0f;
+        c.evasion = 0.0f;
+    }
+    return c;
 }
 
 namespace {
@@ -285,7 +299,7 @@ void fire_attack(BadlandsGame& game, uint32_t attacker_slot, uint32_t target_slo
     CombatRequest req;
     req.attacker = reg.get<Combatant>(self);
     req.attack = a;
-    req.defender = reg.get<Combatant>(target);
+    req.defender = effective_combatant(reg, target);
     req.attacker_slot = attacker_slot;
     req.target_slot = tslot;
     req.world_millis = game.world_millis;
@@ -315,7 +329,7 @@ void advance_projectiles(BadlandsGame& game, float dt) {
             CombatRequest req;
             req.attacker = proj.attacker;
             req.attack = proj.attack;
-            req.defender = reg.get<Combatant>(target);
+            req.defender = effective_combatant(reg, target);
             req.attacker_slot = proj.attacker_slot;
             req.target_slot = proj.target_slot;
             req.world_millis = proj.fire_millis;  // seed fixed at fire time

@@ -6,6 +6,7 @@
 #include "heroes.h"     // biome_at
 #include "intention.h"  // InboxEvent, push_inbox_event -- the MoveBlocked mirror
 #include "placement.h"
+#include "status.h"  // has_status -- a stunned character stops walking
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -246,6 +247,17 @@ void follow_paths(BadlandsGame& game, float dt) {
     auto view = game.registry.view<NavPath, Position, const Stats>(
         entt::exclude<InsideBuilding, MeleeLock, ChattingState>);
     for (entt::entity e : view) {
+        // Stunned: the character stops WALKING, but its NavPath is left exactly
+        // as it is -- the route survives the stun and resumes on expiry, which
+        // is the difference between being interrupted and being reset. Checked
+        // here rather than as a view exclusion because a status is a timer on
+        // a component, not a component of its own (game/src/status.h).
+        //
+        // Deliberately NOT gated in separate_units below: collision resolution
+        // still nudges a stunned body, so units cannot stack on top of one.
+        if (has_status(game.registry, e, StatusKind::Stunned)) {
+            continue;
+        }
         NavPath& np = view.get<NavPath>(e);
         Position& pos = view.get<Position>(e);
         float speed = view.get<const Stats>(e).move_speed;

@@ -68,7 +68,7 @@ extern "C" {
 
 // Wire format version. Bumped on any incompatible layout change; the host
 // (bh_instantiate) rejects a module whose bl_abi_version() disagrees.
-#define BL_ABI_VERSION 3
+#define BL_ABI_VERSION 4
 
 // Capacities baked into the wire structs below (fixed-size arrays -- no
 // dynamic length on the wasm side of this boundary).
@@ -84,6 +84,9 @@ extern "C" {
 // at compile time in wasm_brain.cpp (which already includes badlands_sim.hpp
 // via components.h), same reasoning as BL_MAX_ACTIVITIES above.
 #define BL_MAX_ATTACKS 3
+// Must equal badlands::kMaxSkills (game/include/badlands_sim.hpp), checked the
+// same way in wasm_brain.cpp.
+#define BL_MAX_SKILLS 8
 
 // Action kinds (append-only): the vocabulary for bl_enqueue_action's `kind`
 // argument (src/crates/brainhost/include/brainhost.h's BhActionFn). Unlike
@@ -96,7 +99,13 @@ extern "C" {
 // the batch or the yielded suggestion. Same discipline as every other
 // append-only vocabulary here: never renumber or reuse a shipped value.
 #define BL_ACT_NONE 0
-#define BL_ACT_USE_SKILL 1   // reserved
+// live: arg = index into BlViewWire.skills (the actor's OWN skill slots, the
+// same convention BL_ACT_ATTACK's arg uses for its attacks), target_slot =
+// the victim (UINT32_MAX = the current Attack-intention's target, or the
+// caster itself for a self-targeted skill). Everything else -- cooldown,
+// whether the skill is castable as an action at all, targeting-mode legality,
+// reach -- is checked host-side (game/src/skill_cast.h's validate_cast).
+#define BL_ACT_USE_SKILL 1
 #define BL_ACT_USE_POTION 2  // reserved
 // live: arg = index into BlViewWire.attacks (BL_ACT_ATTACK's attack index),
 // target_slot = victim slot (UINT32_MAX = the current Attack-intention's
@@ -133,6 +142,13 @@ extern "C" {
 #define BL_ST_CHATTING 1
 #define BL_ST_MELEE_LOCKED 2
 #define BL_ST_INSIDE_BUILDING 3
+// The first status that is NOT merely advisory: a stunned entity is not
+// consulted at all (sim.cpp's think dispatch skips it), so a brain only ever
+// sees this on the wire for an entity whose stun ended before its wake. It is
+// carried anyway, with its remaining time, because the vocabulary is the
+// entity's own state and a future partial-incapacitation status will want the
+// same shape.
+#define BL_ST_STUNNED 4
 
 // --- BlViewSelf --------------------------------------------------------------
 // This entity's own state: clock, identity, needs, and a summary of what the
@@ -309,6 +325,28 @@ typedef struct BlViewAttack {
     uint32_t _pad;
 } BlViewAttack;
 
+// --- BlViewSkill -------------------------------------------------------------
+// One of this entity's learned skills. Its INDEX in this array is exactly what
+// BL_ACT_USE_SKILL's `arg` names -- the array is packed 1:1 with the entity's
+// own Skills component (game/src/components.h), the same way `attacks` is
+// packed with Attacks. A brain cannot use a skill it cannot see, and cannot
+// name one by id: it names the slot it was shown.
+//
+// `trigger`/`target_mode` are badlands::SkillTrigger/SkillTargetMode, so a
+// brain can tell an action it may fire from a passive it may not; `ready` is
+// the cooldown gate pre-computed, and `recommended` is the host's advice
+// (evaluate_skill_triggers, game/src/skills.h) -- ADVICE, never a command.
+// No int64_t member, so alignof is 4; the array still needs no compiler gap
+// because 24 is a multiple of 8.
+typedef struct BlViewSkill {
+    int32_t skill_id;           /* badlands::SkillId */
+    float cooldown_remaining;   /* seconds; 0 = ready */
+    uint32_t ready;             /* bool: off cooldown */
+    uint32_t recommended;       /* bool: the host's trigger advice */
+    int32_t trigger;            /* badlands::SkillTrigger */
+    int32_t target_mode;        /* badlands::SkillTargetMode */
+} BlViewSkill;
+
 // --- BlEvent -----------------------------------------------------------------
 // One timed inbox entry (mirrors badlands::InboxEvent, game/src/components.h
 // 1:1): {kind, source_slot, param}, plus the two clocks a sticky, TTL-expiring
@@ -332,7 +370,9 @@ typedef struct BlEvent {
 // does, satisfies this trivially).
 //
 // Block order is binding: self / suggest / factors / statuses / attacks /
-// events / chars. `attacks` (v3) sits right after `statuses`.
+// skills / events / chars. `attacks` (v3) sits right after `statuses`, and
+// `skills` (v4) right after `attacks` -- the entity's own loadout blocks stay
+// adjacent.
 typedef struct BlViewWire {
     uint32_t version;    // must equal BL_ABI_VERSION
     uint32_t _pad;       // explicit: keeps `self` (starts with int64_t) 8-aligned
@@ -350,6 +390,9 @@ typedef struct BlViewWire {
                             // the same "every gap is explicit" discipline (see BlViewAttack's
                             // own doc comment, which mirrors BlViewFactors' identical case).
     BlViewAttack attacks[BL_MAX_ATTACKS];
+    int32_t skill_count;   // number of valid entries in `skills` (0..BL_MAX_SKILLS)
+    uint32_t _pad6;         // explicit: same "every gap is named" discipline as _pad3
+    BlViewSkill skills[BL_MAX_SKILLS];
     int32_t event_count;   // number of valid entries in `events` (0..BL_MAX_EVENTS)
     uint32_t _pad4;         // explicit: keeps `events` (BlEvent starts with int64_t) 8-aligned
     BlEvent events[BL_MAX_EVENTS];
@@ -397,7 +440,8 @@ static_assert(sizeof(BlViewFactors) == 88, "BlViewFactors size drifted");
 static_assert(sizeof(BlViewChar) == 40, "BlViewChar size drifted");
 static_assert(sizeof(BlStatus) == 16, "BlStatus size drifted");
 static_assert(sizeof(BlViewAttack) == 24, "BlViewAttack size drifted");
+static_assert(sizeof(BlViewSkill) == 24, "BlViewSkill size drifted");
 static_assert(sizeof(BlEvent) == 32, "BlEvent size drifted");
-static_assert(sizeof(BlViewWire) == 1560, "BlViewWire size drifted");
+static_assert(sizeof(BlViewWire) == 1760, "BlViewWire size drifted");
 static_assert(sizeof(BlSuggestionWire) == 40, "BlSuggestionWire size drifted");
 #endif

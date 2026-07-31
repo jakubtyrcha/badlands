@@ -234,6 +234,40 @@ struct Skills {
     int32_t count = 0;
 };
 
+// The timed conditions on a character right now (POD fixed array, like Attacks
+// and Skills). Emplaced on demand by apply_status (game/src/status.h) -- an
+// entity that has never been afflicted carries no component at all, so the
+// per-tick sweep only visits entities that actually have something running.
+//
+// `remaining_millis` is int64 MILLISECONDS, not float seconds: it is sim time,
+// which this codebase counts in integer ms advanced by a compile-time
+// per-tick constant (kMillisPerTick, above) so a replay reproduces every
+// expiry on exactly the tick the live run did. The float-seconds cooldowns on
+// Attacks/Skills predate that rule and are dt-scaled; new timers do not follow
+// them.
+struct StatusEntry {
+    StatusKind kind = StatusKind::None;
+    int64_t remaining_millis = 0;      // always > 0 while present; 0 never persists
+    uint32_t source_slot = UINT32_MAX; // who inflicted it (inspection/attribution)
+};
+
+struct Statuses {
+    StatusEntry entries[kMaxStatuses]{};
+    int32_t count = 0;
+};
+
+// The spawn desc's level-gated grant list, copied onto the entity at spawn
+// (heroes.cpp) so the level-up hook (progression.cpp) has it without looking
+// anything up by class. That indirection is the point: WHICH creature learns
+// WHAT is catalog data (creature_catalog.cpp), and the engine only ever reads
+// the list it was handed. Which catalog a given spawn path reads -- compiled
+// defaults vs the JSON-overridable per-Sim one -- is hero_desc's pre-existing
+// split; see SkillGrantRow (badlands_sim.hpp).
+struct SkillGrants {
+    SkillGrantRow rows[kMaxSkills]{};
+    int32_t count = 0;
+};
+
 // Present only on entities whose death pays XP (CharacterDesc.xp_reward > 0).
 // Read by the death sweep (sim.cpp), which collects the payout before the
 // destroy and spreads it via spread_kill_xp (progression.h).

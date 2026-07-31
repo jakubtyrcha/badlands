@@ -189,6 +189,15 @@ void note_think_outcome(BadlandsGame& game, uint32_t slot, bool adopted);
 // else in the contract ends an intention that never began.
 void abort_intention(BadlandsGame& game, uint32_t slot, IntentionKind expected);
 
+// Aborts whatever slot is currently running, kind unknown to the caller --
+// abort_intention above without the `expected` gate. For interruptions that
+// are about the ACTOR rather than about the plan: a stun does not care what
+// the hero had decided, it ends it (game/src/status.h's apply_status). Same
+// IntentionEnded(aborted) event, so the brain's first wake after the
+// interruption re-decides from scratch instead of resuming a plan it made
+// before being hit. No-op when nothing is running.
+void abort_current_intention(BadlandsGame& game, uint32_t slot);
+
 // Push one event into a hero's inbox (newest evicts oldest when full);
 // no-op if `e` has no EventInbox (heroes only). Stamps at_millis/ttl_millis
 // from game.world_millis/kInboxTtlMillis -- callers fill in kind/source_slot/

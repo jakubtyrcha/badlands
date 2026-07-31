@@ -250,6 +250,14 @@ add_library(badlands_game_lib STATIC
     game/src/movement.cpp
     game/src/heroes.cpp
     game/src/skills.cpp
+    # Timed statuses (stun and whatever follows): timers only -- what a status
+    # DOES is enforced by the systems that read it (game/src/status.h).
+    game/src/status.cpp
+    # Casting: validation, target resolution, the pre-rolled attack test, and
+    # applying the ops an effect asked for (game/src/skill_cast.h). Separate
+    # from skills.cpp, which stays world-free so it can link standalone into
+    # the manifest test target below.
+    game/src/skill_cast.cpp
     game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
@@ -586,6 +594,15 @@ add_executable(badlands_game_tests
     src/game/visual/world_labels.cpp
     # Skill vocabulary: catalog, grant table, Skills component (game/src/skills.h).
     game/tests/skills_tests.cpp
+    # Timed statuses: application/refresh/expiry + the cooldown sweep
+    # (game/src/status.h).
+    game/tests/status_tests.cpp
+    # Skill effects in isolation: the pure (cast context -> op batch) contract
+    # (game/src/skill_abi.h). No world, no Sim -- that IS the test.
+    game/tests/skill_effect_tests.cpp
+    # Casting end to end: shield-bash through the UseSkill command handler
+    # (game/src/skill_cast.h).
+    game/tests/shield_bash_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
     # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
@@ -1137,11 +1154,17 @@ add_executable(badlands_scenario_tests
     src/game/scenario.cpp
     src/game/creature_manifest.cpp
     game/src/creature_catalog.cpp
+    # The skill vocabulary: creature_manifest.cpp resolves a grant's skill NAME
+    # through SkillIdFromName. World-free, so it links standalone here exactly
+    # as it does in badlands_skill_manifest_tests (which is why the casting
+    # half lives in skill_cast.cpp instead).
+    game/src/skills.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_scenario_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/third_party/entt/single_include

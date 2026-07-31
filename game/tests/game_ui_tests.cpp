@@ -462,109 +462,141 @@ TEST_CASE("BuildHud renders the four speed buttons, each hit-testable",
     ui_destroy(ctx);
 }
 
-TEST_CASE("hero progression rows: level, xp, and the skills list",
+TEST_CASE("the skills region is laid out and hit-testable", "[game_ui][hud]") {
+    // The wheel routing (GameView) can only work if the region emits a hit
+    // rect of its own, so that is what this pins -- the layout half of the
+    // card feature, which the model tests below cannot see.
+    UiContext* ctx = LoadHudFont();
+    REQUIRE(ctx != nullptr);
+
+    CharacterState hero{};
+    hero.level = 3;
+    hero.xp = 10;
+    hero.xp_next = 579;
+    hero.skill_count = 2;
+    hero.skills[0] = static_cast<int32_t>(SkillId::ShieldBash);
+    hero.skills[1] = static_cast<int32_t>(SkillId::Calcify);
+    SkillCatalog cat;
+
+    HudModel model;
+    model.gold = 7;
+    model.clock_text = "Day 1   12:00";
+    model.has_selection = true;
+    model.selection.kind = HudSelection::Kind::Hero;
+    model.selection.title = "Bran";
+    AppendHeroProgressionRows(model.selection, hero, cat, /*scroll=*/0);
+    REQUIRE(model.selection.skill_cards.cards.size() == 2);
+
+    HudFrame frame;
+    REQUIRE(BuildHud(ctx, model, 1600.0f, 900.0f, 1.0f, frame));
+
+    const UiHitRect* region = FindHitRect(frame, kHudSkillList);
+    REQUIRE(region != nullptr);
+    REQUIRE(region->x > 900.0f);  // the right-hand panel
+    REQUIRE(HudHitTest(frame, region->x + 4.0f, region->y + 4.0f) == kHudSkillList);
+    REQUIRE(HudSkillCardCapacity() > 0u);
+
+    // With no cards the region is absent entirely -- a skill-less hero gets no
+    // empty well, and a wheel there zooms the camera as usual.
+    HudModel bare = model;
+    bare.selection.skill_cards = HudSkillCards{};
+    HudFrame bare_frame;
+    REQUIRE(BuildHud(ctx, bare, 1600.0f, 900.0f, 1.0f, bare_frame));
+    CHECK(FindHitRect(bare_frame, kHudSkillList) == nullptr);
+
+    ui_destroy(ctx);
+}
+
+TEST_CASE("hero progression rows: level, xp, and the skill cards",
           "[game_ui][hud]") {
     CharacterState hero{};
     hero.level = 5;
     hero.xp = 137;
     hero.xp_next = 918;
     hero.skill_count = 1;
-    hero.skills[0] = static_cast<int32_t>(SkillId::Calcify);
+    hero.skills[0] = static_cast<int32_t>(SkillId::ShieldBash);
     SkillCatalog cat;  // compiled defaults
     HudSelection sel;
-    AppendHeroProgressionRows(sel, hero, cat);
+    AppendHeroProgressionRows(sel, hero, cat, /*scroll=*/0);
     REQUIRE(sel.rows.size() == 2);
     CHECK(sel.rows[0].label == "level");
     CHECK(sel.rows[0].value == "5");
     CHECK(sel.rows[1].label == "xp");
     CHECK(sel.rows[1].value == "137 / 918");
-    REQUIRE(sel.lists.size() == 1);
-    CHECK(sel.lists[0].heading == "Skills");
-    // name row, summary row, then the effect greedily word-wrapped at 30
-    // chars: "Absorbs the next physical" / "strike, then shatters."
-    REQUIRE(sel.lists[0].entries.size() == 4);
-    CHECK(sel.lists[0].entries[0].label == "Calcify");
-    CHECK(sel.lists[0].entries[0].value == "");
-    CHECK(sel.lists[0].entries[1].label == "");
-    CHECK(sel.lists[0].entries[1].value == "active, direct, instant, cd 20s");
-    CHECK(sel.lists[0].entries[2].label == "");
-    CHECK(sel.lists[0].entries[2].value == "Absorbs the next physical");
-    CHECK(sel.lists[0].entries[3].label == "");
-    CHECK(sel.lists[0].entries[3].value == "strike, then shatters.");
+
+    CHECK(sel.skill_cards.heading == "Skills");
+    REQUIRE(sel.skill_cards.cards.size() == 1);
+    CHECK(sel.skill_cards.cards[0].name == "ShieldBash");
+    CHECK(sel.skill_cards.cards[0].type == "action");
+    CHECK(sel.skill_cards.cards[0].target == "any");
+    CHECK(sel.skill_cards.cards[0].cooldown == "cd 12s");
+    CHECK(sel.skill_cards.total == 1);
+    CHECK(sel.skill_cards.scroll == 0);
 }
 
-TEST_CASE("progression rows: non-heroes add nothing; skill-less heroes skip the list",
-          "[game_ui][hud]") {
-    SkillCatalog cat;
-    HudSelection sel;
-    CharacterState rat{};  // level 0 marks a non-hero row
-    AppendHeroProgressionRows(sel, rat, cat);
-    CHECK(sel.rows.empty());
-    CHECK(sel.lists.empty());
-    CharacterState hero{};
-    hero.level = 1;
-    hero.xp_next = 100;
-    AppendHeroProgressionRows(sel, hero, cat);
-    REQUIRE(sel.rows.size() == 2);
-    CHECK(sel.rows[1].value == "0 / 100");
-    CHECK(sel.lists.empty());
-}
-
-TEST_CASE("skill summary omits cd when none and shows duration seconds",
-          "[game_ui][hud]") {
-    SkillCatalog cat;
-    cat.specs[0].activation = SkillActivation::Passive;
-    cat.specs[0].targeting = SkillTargeting::Aoe;
-    cat.specs[0].duration_seconds = 6.0f;
-    cat.specs[0].cooldown_seconds = 0.0f;
-    CharacterState hero{};
-    hero.level = 1;
-    hero.skill_count = 1;
-    hero.skills[0] = 0;
-    HudSelection sel;
-    AppendHeroProgressionRows(sel, hero, cat);
-    REQUIRE(sel.lists.size() == 1);
-    // name row, summary row, then the (untouched, compiled-default) effect
-    // text wrapped onto two more rows -- see the wrap test below for the split.
-    REQUIRE(sel.lists[0].entries.size() == 4);
-    CHECK(sel.lists[0].entries[1].value == "passive, aoe, 6s");
-}
-
-TEST_CASE("skill effect text wraps at word boundaries within the panel width",
-          "[game_ui][hud]") {
-    SkillCatalog cat;
-    const std::string long_word(40, 'x');  // exceeds the 30-char wrap budget
-    cat.specs[0].effect = "Deals modest damage then " + long_word +
-                          " lingers for a short while longer.";
-    CharacterState hero{};
-    hero.level = 1;
-    hero.skill_count = 1;
-    hero.skills[0] = 0;
-    HudSelection sel;
-    AppendHeroProgressionRows(sel, hero, cat);
-    REQUIRE(sel.lists.size() == 1);
-    const std::vector<HudRow>& entries = sel.lists[0].entries;
-    // entries[0] = name, entries[1] = summary, entries[2..] = wrapped effect.
-    REQUIRE(entries.size() > 3);
-
-    std::string reconstructed;
-    bool saw_long_word = false;
-    for (size_t i = 2; i < entries.size(); ++i) {
-        CHECK(entries[i].label == "");
-        const std::string& line = entries[i].value;
-        if (line == long_word) {
-            saw_long_word = true;
-        } else {
-            CHECK(line.size() <= 30);
-        }
-        if (!reconstructed.empty()) reconstructed += ' ';
-        reconstructed += line;
+TEST_CASE("skill cards read the trigger/target vocabulary", "[game_ui][hud]") {
+    struct Row {
+        SkillTrigger trigger;
+        SkillTargetMode target;
+        const char* type_text;
+        const char* target_text;
+    };
+    const Row rows[] = {
+        {SkillTrigger::Action, SkillTargetMode::Any, "action", "any"},
+        {SkillTrigger::Passive, SkillTargetMode::SelfOnly, "passive", "self"},
+        {SkillTrigger::Intention, SkillTargetMode::Point, "focus", "point"},
+        {SkillTrigger::Action, SkillTargetMode::Multi, "action", "multi"},
+        {SkillTrigger::Action, SkillTargetMode::None, "action", "none"},
+    };
+    for (const Row& r : rows) {
+        SkillCatalog cat;
+        cat.specs[0].trigger = r.trigger;
+        cat.specs[0].target = r.target;
+        cat.specs[0].cooldown_seconds = 0.0f;
+        CharacterState hero{};
+        hero.level = 1;
+        hero.skill_count = 1;
+        hero.skills[0] = 0;
+        HudSelection sel;
+        AppendHeroProgressionRows(sel, hero, cat, 0);
+        REQUIRE(sel.skill_cards.cards.size() == 1);
+        CHECK(sel.skill_cards.cards[0].type == r.type_text);
+        CHECK(sel.skill_cards.cards[0].target == r.target_text);
+        CHECK(sel.skill_cards.cards[0].cooldown == "no cd");
     }
-    // Wrapping only ever replaces a space with a row break -- no word is
-    // split or truncated -- so rejoining the rows with spaces recovers the
-    // original effect text exactly.
-    CHECK(reconstructed == cat.specs[0].effect);
-    CHECK(saw_long_word);
+}
+
+TEST_CASE("the card window honours the scroll offset and clamps",
+          "[game_ui][hud]") {
+    const uint32_t cap = HudSkillCardCapacity();
+    REQUIRE(cap >= 2);
+    REQUIRE(cap < static_cast<uint32_t>(kMaxSkills));  // else nothing ever scrolls
+
+    SkillCatalog cat;
+    CharacterState hero{};
+    hero.level = 4;
+    hero.skill_count = kMaxSkills;
+    for (int32_t i = 0; i < kMaxSkills; ++i) {
+        hero.skills[i] = i % kSkillCount;
+    }
+
+    HudSelection top;
+    AppendHeroProgressionRows(top, hero, cat, /*scroll=*/0);
+    CHECK(top.skill_cards.cards.size() == cap);
+    CHECK(top.skill_cards.total == kMaxSkills);
+    CHECK(top.skill_cards.cards[0].name == std::string(SkillName(hero.skills[0])));
+
+    HudSelection scrolled;
+    AppendHeroProgressionRows(scrolled, hero, cat, /*scroll=*/2);
+    CHECK(scrolled.skill_cards.cards.size() == cap);
+    CHECK(scrolled.skill_cards.scroll == 2);
+    CHECK(scrolled.skill_cards.cards[0].name == std::string(SkillName(hero.skills[2])));
+
+    // Past the end: clamped to the last full window rather than emptying.
+    HudSelection past;
+    AppendHeroProgressionRows(past, hero, cat, /*scroll=*/99);
+    CHECK(past.skill_cards.cards.size() == cap);
+    CHECK(past.skill_cards.scroll == static_cast<int>(kMaxSkills - cap));
 }
 
 TEST_CASE("BuildHud makes list entries clickable selection targets",

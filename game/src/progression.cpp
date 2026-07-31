@@ -40,10 +40,12 @@ void award_xp(BadlandsGame& game, uint32_t slot, int64_t amount) {
            sim.xp >= xp_to_next(game.factors.progression, sim.level)) {
         sim.xp -= xp_to_next(game.factors.progression, sim.level);
         ++sim.level;
-        if (const auto* hero = game.registry.try_get<HeroCharacter>(e);
-            hero != nullptr && game.registry.all_of<Skills>(e)) {
-            grant_skills_for_level(game.registry.get<Skills>(e), hero->hero_class,
-                                   sim.level);
+        // What this level teaches is the entity's OWN grant list (copied off
+        // its spawn desc, heroes.cpp) -- there is no class -> skill table to
+        // consult, which is what makes acquisition data rather than code.
+        if (const auto* grants = game.registry.try_get<SkillGrants>(e);
+            grants != nullptr && game.registry.all_of<Skills>(e)) {
+            grant_skills_for_level(game.registry.get<Skills>(e), *grants, sim.level);
         }
         const glm::vec2 pos = game.registry.get<Position>(e).pos;
         emit_event(game, GameEvent{.kind = GameEventKind::HeroLeveledUp,

@@ -6,6 +6,7 @@
 #include "heroes.h"
 #include "intention.h"  // abort_intention -- the Chat handler's never-started decline
 #include "placement.h"
+#include "skill_cast.h"  // validate_cast / run_cast -- the UseSkill handler's body
 
 #include <entt/entt.hpp>
 
@@ -135,6 +136,20 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             // uses). Melee lands now; a ranged attack spawns a projectile that
             // resolves on arrival.
             fire_attack(game, cmd.actor, cmd.target_id, cmd.param_a);
+            return 0;
+        }
+        case CommandKind::UseSkill: {
+            // AUTHORITATIVE re-validation, the same discipline fire_attack
+            // follows: the gateway (resolve_action, intention.h) already
+            // checked this cast, but the world may have moved on between the
+            // enqueue and this drain -- the target may have died, an earlier
+            // command in the same batch may have spent the cooldown. Nothing
+            // is stamped and no effect runs unless validate_cast agrees NOW.
+            CastPlan plan;
+            if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan)) {
+                return 0;
+            }
+            run_cast(game, cmd.actor, cmd.param_a, plan);
             return 0;
         }
         case CommandKind::CollectTax: {

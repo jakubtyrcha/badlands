@@ -20,6 +20,7 @@
 #include "placement.h"
 #include "progression.h"
 #include "skills.h"
+#include "status.h"
 #include "vision.h"
 
 #include "critter_brain.h"
@@ -183,6 +184,24 @@ void tick_world(BadlandsGame& g, float dt) {
         }
     }
 
+    // Per-skill cooldowns, the same shape (one timer per learned skill). Float
+    // seconds like the attack timers above, not int64 ms like a status: a
+    // cooldown gates a DECISION (may I cast?) rather than dating a world fact,
+    // and it sits alongside SkillSpec::cooldown_seconds, which is authored in
+    // seconds.
+    for (auto [e, skills] : registry.view<Skills>().each()) {
+        for (int i = 0; i < skills.count && i < kMaxSkills; ++i) {
+            skills.cooldown_remaining[i] =
+                std::max(0.0f, skills.cooldown_remaining[i] - dt);
+        }
+    }
+
+    // Statuses expire on the integer clock, BEFORE anything reads them: the
+    // think dispatch, movement, and combat all gate on has_status further down
+    // this same tick, so a status whose last millisecond ran out must be gone
+    // by the time they look rather than granting one extra tick of effect.
+    advance_statuses(g);
+
     // Needs first: reserves drain (and refill, for anyone inside) before
     // anything looks at them, so a hero whose sleep just topped out is released
     // by advance_inside on the same tick rather than one later.
@@ -293,6 +312,15 @@ void tick_world(BadlandsGame& g, float dt) {
             entt::entity e = g.slots[slot];
             if (!registry.valid(e) || registry.all_of<InsideBuilding>(e)) {
                 continue;  // hidden heroes don't think
+            }
+            // Stunned characters don't think either -- wasm hero and simple
+            // engine-side brain alike, since both are dispatched from here.
+            // The wake bookkeeping is deliberately left untouched: a stunned
+            // hero simply misses its consults, and whatever piled up in its
+            // inbox meanwhile is still there (sticky by design) when the stun
+            // lapses and should_wake fires again.
+            if (has_status(registry, e, StatusKind::Stunned)) {
+                continue;
             }
             auto& brain = registry.get<Brain>(e);
             if (g.wasm_brains && brain.kind == BrainKind::Town) {
@@ -736,10 +764,47 @@ SimFactors sanitize_factors(SimFactors f) {
 // The SetSkillCatalog validation boundary, sanitize_factors' sibling: the
 // execution slice divides/waits on these, so negatives are clamped here.
 SkillCatalog sanitize_skill_catalog(SkillCatalog c) {
+    // Clamp an out-of-range enum to its safest member rather than trusting it:
+    // every consumer switches on these, and a value outside the vocabulary
+    // would fall through as "none of the above" somewhere downstream.
+    auto clamp_enum = [](const char* field, auto& value, int32_t count, auto fallback) {
+        const int32_t raw = static_cast<int32_t>(value);
+        if (raw < 0 || raw >= count) {
+            warn_adjusted(field, raw, static_cast<int32_t>(fallback));
+            value = fallback;
+        }
+    };
     for (int32_t i = 0; i < kSkillCount; ++i) {
         SkillSpec& s = c.specs[i];
-        clamp_nonneg("skill.duration_seconds", s.duration_seconds);
+        // Passive is the inert fallback: a garbled trigger must not become a
+        // castable action, and a garbled target must not become a live one.
+        clamp_enum("skill.trigger", s.trigger,
+                   static_cast<int32_t>(SkillTrigger::Intention) + 1, SkillTrigger::Passive);
+        clamp_enum("skill.target", s.target,
+                   static_cast<int32_t>(SkillTargetMode::Point) + 1, SkillTargetMode::SelfOnly);
+        clamp_enum("skill.attack_test", s.attack_test,
+                   static_cast<int32_t>(SkillAttackTest::Ranged) + 1, SkillAttackTest::None);
+        clamp_nonneg("skill.intention_duration_seconds", s.intention_duration_seconds);
         clamp_nonneg("skill.cooldown_seconds", s.cooldown_seconds);
+        // A Multi cast has to hit at least one thing to mean anything, and it
+        // cannot hit more than the cast context can carry (BL_SKILL_MAX_TARGETS
+        // -- kMaxSkillTargets here, the sim-side mirror).
+        if (s.target_limit < 1) {
+            warn_adjusted("skill.target_limit", s.target_limit, int32_t{1});
+            s.target_limit = 1;
+        } else if (s.target_limit > kMaxSkillTargets) {
+            warn_adjusted("skill.target_limit", s.target_limit, kMaxSkillTargets);
+            s.target_limit = kMaxSkillTargets;
+        }
+        // Constants are the skill's own business (a negative one may be
+        // perfectly meaningful), but a non-finite value would propagate
+        // through an effect into a duration or an amount, so it is zeroed.
+        for (int32_t k = 0; k < s.constant_count && k < kMaxSkillConstants; ++k) {
+            if (!std::isfinite(s.constants[k].value)) {
+                warn_adjusted("skill.constant", s.constants[k].value, 0.0f);
+                s.constants[k].value = 0.0f;
+            }
+        }
     }
     return c;
 }

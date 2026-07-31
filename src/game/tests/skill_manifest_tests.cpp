@@ -12,10 +12,11 @@
 #include <fstream>
 #include <string>
 
-using badlands::SkillActivation;
+using badlands::SkillAttackTest;
 using badlands::SkillCatalog;
 using badlands::SkillId;
-using badlands::SkillTargeting;
+using badlands::SkillTargetMode;
+using badlands::SkillTrigger;
 
 namespace {
 
@@ -39,19 +40,47 @@ TEST_CASE("partial override keeps unspecified fields at compiled defaults") {
     const auto& c = cat.specs[static_cast<size_t>(SkillId::Calcify)];
     CHECK(c.cooldown_seconds == 5.0f);
     CHECK(c.effect == "New text.");
-    CHECK(c.activation == SkillActivation::Active);   // untouched default
-    CHECK(c.targeting == SkillTargeting::Direct);     // untouched default
-    CHECK(c.duration_seconds == 0.0f);                // untouched default
+    CHECK(c.trigger == SkillTrigger::Action);         // untouched default
+    CHECK(c.target == SkillTargetMode::SelfOnly);     // untouched default
+    CHECK(c.intention_duration_seconds == 0.0f);      // untouched default
 }
 
-TEST_CASE("enum fields parse their named choices") {
-    TempManifest m(R"({"Calcify": {"activation": "passive", "targeting": "aoe", "duration": 4}})");
+TEST_CASE("the whole engine-checked vocabulary parses") {
+    // Every field the engine validates a cast against, including the ones it
+    // does not execute yet (passive/multi) -- those are DECLARED, so they must
+    // load; refusing them is the cast path's job, not the loader's.
+    TempManifest m(R"({"ShieldBash": {"trigger": "intention", "target": "multi",
+                                      "target_limit": 3, "cooldown": 9,
+                                      "intention_duration": 2.5,
+                                      "attack_test": "ranged",
+                                      "constants": {"stun_seconds": 4.5, "radius": 2}}})");
     SkillCatalog cat;
     REQUIRE(badlands::LoadSkillCatalog(m.path, cat));
-    const auto& c = cat.specs[static_cast<size_t>(SkillId::Calcify)];
-    CHECK(c.activation == SkillActivation::Passive);
-    CHECK(c.targeting == SkillTargeting::Aoe);
-    CHECK(c.duration_seconds == 4.0f);
+    const auto& c = cat.specs[static_cast<size_t>(SkillId::ShieldBash)];
+    CHECK(c.trigger == SkillTrigger::Intention);
+    CHECK(c.target == SkillTargetMode::Multi);
+    CHECK(c.target_limit == 3);
+    CHECK(c.cooldown_seconds == 9.0f);
+    CHECK(c.intention_duration_seconds == 2.5f);
+    CHECK(c.attack_test == SkillAttackTest::Ranged);
+    CHECK(c.constant("stun_seconds") == 4.5f);   // overrides the compiled 3
+    CHECK(c.constant("radius") == 2.0f);         // a name the defaults never had
+}
+
+TEST_CASE("a bad constant fails the whole load") {
+    SkillCatalog cat;
+    const float before = cat.specs[static_cast<size_t>(SkillId::ShieldBash)]
+                             .constant("stun_seconds");
+    {
+        TempManifest m(R"({"ShieldBash": {"constants": {"stun_seconds": "soon"}}})");
+        CHECK_FALSE(badlands::LoadSkillCatalog(m.path, cat));
+    }
+    {
+        TempManifest m(R"({"ShieldBash": {"constants": 3}})");
+        CHECK_FALSE(badlands::LoadSkillCatalog(m.path, cat));
+    }
+    CHECK(cat.specs[static_cast<size_t>(SkillId::ShieldBash)].constant("stun_seconds") ==
+          before);
 }
 
 TEST_CASE("unknown skill names, bad choices, and wrong types fail loudly") {
@@ -62,7 +91,7 @@ TEST_CASE("unknown skill names, bad choices, and wrong types fail loudly") {
         CHECK_FALSE(badlands::LoadSkillCatalog(m.path, cat));
     }
     {
-        TempManifest m(R"({"Calcify": {"activation": "sometimes"}})");
+        TempManifest m(R"({"Calcify": {"trigger": "sometimes"}})");
         CHECK_FALSE(badlands::LoadSkillCatalog(m.path, cat));
     }
     {

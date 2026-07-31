@@ -15,11 +15,14 @@
 #include "intention.h"
 #include "movement.h"        // plan_paths, follow_paths -- drive the MoveBlocked mirror
 #include "sim_internal.hpp"  // make_flat_world / spawn_into / tick_world
+#include "skills.h"         // learn_skill -- the BL_ACT_USE_SKILL cases below
 
 #include <catch_amalgamated.hpp>
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
+
+#include <memory>
 
 using namespace badlands;
 
@@ -1442,7 +1445,6 @@ TEST_CASE("resolve_action drops reserved and unrecognized action kinds", "[inten
     uint32_t t = spawn_into(g, GoblinDesc(1.0f, 0.0f));
 
     CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_NONE, t, 0}));
-    CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_USE_SKILL, t, 0}));
     CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_USE_POTION, t, 0}));
     CHECK_FALSE(resolve_action(g, s, AgentAction{999, t, 0}));  // unrecognized -- forward-compat
     CHECK(g.command_queue.empty());
@@ -1617,4 +1619,135 @@ TEST_CASE("resolve_action never touches CurrentIntention, valid or invalid", "[i
     CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_USE_SKILL, t, /*arg=*/0}));  // invalid -> drops
     CHECK(ci.kind == IntentionKind::Idle);
     CHECK(ci.wake_at_millis == 42424242);
+}
+
+// --- action resolver: BL_ACT_USE_SKILL --------------------------------------
+// The skills slice's half of the same gateway. `arg` is an index into the
+// ACTOR's own Skills (not a SkillId), exactly as BL_ACT_ATTACK's arg indexes
+// its Attacks. Every refusal here is the cheap early one; the UseSkill command
+// handler re-validates authoritatively at drain time (game/src/skill_cast.h).
+
+namespace {
+
+// A mercenary who knows ShieldBash at skill slot 0, with a goblin one unit
+// away -- inside the 1.5 melee reach the bash's declared test borrows.
+struct BashActor {
+    std::unique_ptr<BadlandsGame> owned = make_flat_world();
+    uint32_t s = spawn_into(*owned, MercenaryDesc(0.0f, 0.0f));
+    uint32_t t = spawn_into(*owned, GoblinDesc(1.0f, 0.0f));
+
+    BashActor() { learn_skill(owned->registry.get<Skills>(owned->slots[s]), SkillId::ShieldBash); }
+    BadlandsGame& g() { return *owned; }
+};
+
+}  // namespace
+
+TEST_CASE("BL_ACT_USE_SKILL queues a UseSkill command when valid",
+          "[intention][action][skills]") {
+    BashActor a;
+    CHECK(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, /*arg=*/0}));
+    REQUIRE(a.g().command_queue.size() == 1);
+    const Command& c = a.g().command_queue[0];
+    CHECK(c.kind == CommandKind::UseSkill);
+    CHECK(c.actor == a.s);
+    CHECK(c.target_id == a.t);  // concrete, never a UINT32_MAX pass-through
+    CHECK(c.param_a == 0);
+}
+
+TEST_CASE("BL_ACT_USE_SKILL drops a bad index, a cooling skill, or an out-of-reach target",
+          "[intention][action][skills]") {
+    {
+        BashActor a;
+        CHECK_FALSE(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, /*arg=*/5}));
+        CHECK_FALSE(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, /*arg=*/-1}));
+        CHECK(a.g().command_queue.empty());
+    }
+    {
+        BashActor a;
+        a.g().registry.get<Skills>(a.g().slots[a.s]).cooldown_remaining[0] = 4.0f;
+        CHECK_FALSE(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, 0}));
+        CHECK(a.g().command_queue.empty());
+    }
+    {
+        BashActor a;
+        a.g().registry.get<Position>(a.g().slots[a.t]).pos = {20.0f, 0.0f};
+        CHECK_FALSE(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, 0}));
+        CHECK(a.g().command_queue.empty());
+    }
+}
+
+TEST_CASE("BL_ACT_USE_SKILL infers its target from a running Attack intention",
+          "[intention][action][skills]") {
+    BashActor a;
+    Intention attack;
+    attack.kind = IntentionKind::Attack;
+    REQUIRE(apply_intention(a.g(), a.s, attack));
+    a.g().command_queue.clear();
+
+    CHECK(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, UINT32_MAX, 0}));
+    REQUIRE(a.g().command_queue.size() == 1);
+    CHECK(a.g().command_queue[0].target_id == a.t);  // resolved, not passed through
+}
+
+TEST_CASE("BL_ACT_USE_SKILL with no target and nothing to infer from is dropped",
+          "[intention][action][skills]") {
+    BashActor a;
+    CHECK_FALSE(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, UINT32_MAX, 0}));
+    CHECK(a.g().command_queue.empty());
+}
+
+TEST_CASE("BL_ACT_USE_SKILL refuses a SelfOnly skill aimed at somebody else",
+          "[intention][action][skills]") {
+    BashActor a;
+    Skills& sk = a.g().registry.get<Skills>(a.g().slots[a.s]);
+    learn_skill(sk, SkillId::Calcify);  // SelfOnly, skill slot 1
+
+    CHECK_FALSE(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, /*arg=*/1}));
+    CHECK(a.g().command_queue.empty());
+    CHECK(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.s, /*arg=*/1}));
+    CHECK(a.g().command_queue.size() == 1);
+}
+
+TEST_CASE("BL_ACT_USE_SKILL refuses a trigger the engine does not execute",
+          "[intention][action][skills]") {
+    for (SkillTrigger trigger : {SkillTrigger::Passive, SkillTrigger::Intention}) {
+        BashActor a;
+        SkillCatalog cat = a.g().skills;
+        cat.specs[static_cast<size_t>(SkillId::ShieldBash)].trigger = trigger;
+        a.g().skills = cat;
+
+        CHECK_FALSE(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, 0}));
+        CHECK(a.g().command_queue.empty());
+    }
+}
+
+TEST_CASE("BL_ACT_USE_SKILL never touches CurrentIntention", "[intention][action][skills]") {
+    BashActor a;
+    Intention move;
+    move.kind = IntentionKind::MoveTo;
+    move.point = {5.0f, 0.0f};
+    REQUIRE(apply_intention(a.g(), a.s, move));
+
+    resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, a.t, 0});
+    CHECK(a.g().registry.get<CurrentIntention>(a.g().slots[a.s]).kind == IntentionKind::MoveTo);
+}
+
+TEST_CASE("BL_ACT_USE_SKILL: a skill that names nobody needs no target to infer",
+          "[intention][action][skills]") {
+    // SelfOnly and None both name nobody. Routing either through the
+    // "infer a victim from the running Attack intention" path would make a
+    // ward castable only mid-melee -- so both bypass it.
+    for (SkillTargetMode mode : {SkillTargetMode::SelfOnly, SkillTargetMode::None}) {
+        BashActor a;
+        SkillCatalog cat = a.g().skills;
+        cat.specs[static_cast<size_t>(SkillId::ShieldBash)].target = mode;
+        cat.specs[static_cast<size_t>(SkillId::ShieldBash)].attack_test =
+            SkillAttackTest::None;  // a ward borrows no weapon's reach
+        a.g().skills = cat;
+
+        // No target named, and nothing running to infer one from.
+        CHECK(resolve_action(a.g(), a.s, AgentAction{BL_ACT_USE_SKILL, UINT32_MAX, 0}));
+        REQUIRE(a.g().command_queue.size() == 1);
+        CHECK(a.g().command_queue[0].target_id == a.s);  // resolved to the caster
+    }
 }

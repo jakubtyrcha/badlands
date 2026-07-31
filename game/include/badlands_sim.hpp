@@ -189,10 +189,32 @@ struct ActivityWeights {
     }
 };
 
+// ---- statuses --------------------------------------------------------------
+// A timed condition on a character. Append-only id space, same discipline as
+// ActivityId/SkillId: never renumber, never reuse a value (the wire's BL_ST_*
+// mirrors these, and a status can outlive the tick it was applied on).
+//
+// A status is DATA + A TIMER here and nothing else: what a status DOES is
+// enforced by the systems that care about it (the think dispatch, movement,
+// the combat defender assembly), never by this vocabulary. That is what keeps
+// "stunned" from becoming a special case threaded through the sim -- each
+// system asks `has_status(...)` for itself, at the one place it already makes
+// its own decision.
+enum class StatusKind : int32_t {
+    None = 0,
+    Stunned,  // skips the think, freezes movement, zeroes the active defense
+};
+inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Stunned) + 1;
+// Fixed component capacity; matches BL_MAX_STATUSES (game/src/brain_abi.h).
+inline constexpr int32_t kMaxStatuses = 8;
+// Stable inspection name ("Stunned"); "-" for an out-of-range kind.
+const char* StatusName(int32_t kind);
+
 // ---- skills (identity only; defs/triggers live in game/src/skills.h) -------
 // Append-only id space, same discipline as ActivityId.
 enum class SkillId : int32_t {
-    Calcify = 0,  // Apprentice: absorb the next physical strike (effect in slice 2)
+    Calcify = 0,   // Apprentice: absorb the next physical strike (effect deferred)
+    ShieldBash,    // Mercenary: a shield slam that stuns what it lands on
     Count,
 };
 inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
@@ -202,19 +224,73 @@ inline constexpr int32_t kMaxSkills = 8;
 const char* SkillName(int32_t id);
 
 // ---- skill templates --------------------------------------------------------
-// Designer-authored per-skill data (presentation + mechanics). The AI
-// vocabulary (triggers, grants) stays internal in game/src/skills.h.
-enum class SkillActivation : int32_t { Active = 0, Passive };
-enum class SkillTargeting : int32_t { Direct = 0, Aoe };
+// A skill is DATA THE ENGINE CHECKS plus an EFFECT. The data below is the
+// engine's whole vocabulary -- everything it validates before an effect ever
+// runs -- and the effect is a pure function of a flat context
+// (game/src/skill_abi.h), so it can be C++ today and a wasm script later
+// without this template changing. The AI advice vocabulary (which condition
+// recommends a skill) stays internal in game/src/skills.h.
+//
+// Unimplemented values are REFUSED, never approximated: an engine that cannot
+// yet execute a trigger or a targeting mode warns and drops the cast rather
+// than silently treating it as its nearest implemented neighbour.
 
-// One skill's template. Initial config in the determinism contract (the
-// execution slice reads cooldown/duration from here); display-only today.
+// How a skill is initiated.
+//   Action    -- instant, fired through the action channel (BL_ACT_USE_SKILL).
+//   Passive   -- no cast at all; applies at some engine hook. DECLARED ONLY.
+//   Intention -- a "focus": adopted as an intention, its effect landing after
+//                intention_duration_seconds of uninterrupted execution.
+//                DECLARED ONLY.
+enum class SkillTrigger : int32_t { Action = 0, Passive, Intention };
+
+// Who a cast may name.
+//   None     -- targets nobody (a pure self-contained effect).
+//   SelfOnly -- the caster, and ONLY the caster: naming anyone else is
+//               refused by the engine, never remapped back onto the caster.
+//   Any      -- one named entity, friend or foe (the effect decides what that
+//               means; `relation` reaches it through the cast context).
+//   Multi    -- up to target_limit entities. DECLARED ONLY.
+//   Point    -- an area centred on a point. DECLARED ONLY.
+enum class SkillTargetMode : int32_t { None = 0, SelfOnly, Any, Multi, Point };
+
+// Whether the engine rolls a combat test per target before the effect runs,
+// and off which of the caster's attacks. The declared test also SUPPLIES THE
+// CAST RANGE (one source of truth, no second range field to disagree with the
+// weapon): Melee -> the caster's melee reach, Ranged -> its ranged reach,
+// None -> the optional "range" constant, whose absence (0) means no range
+// check at all -- which is what a SelfOnly skill wants.
+enum class SkillAttackTest : int32_t { None = 0, Melee, Ranged };
+
+// One authored tuning value. Skill-specific by design: the manifest carries
+// CONSTANTS, never logic, and each skill's own code knows the names it reads.
+inline constexpr int32_t kMaxSkillConstants = 8;
+// Most entities one cast may affect; mirrors BL_SKILL_MAX_TARGETS
+// (game/src/skill_abi.h), the capacity of the context an effect receives.
+inline constexpr int32_t kMaxSkillTargets = 8;
+struct SkillConstant {
+    std::string name;
+    float value = 0.0f;
+};
+
+// One skill's template: the five engine-checked fields plus its constants.
+// Initial config in the determinism contract -- a replay must use the same
+// catalog, since cooldowns, target legality, and effect tuning all read from
+// here.
 struct SkillSpec {
-    SkillActivation activation = SkillActivation::Active;
-    SkillTargeting targeting = SkillTargeting::Direct;
-    float duration_seconds = 0.0f;  // <= 0 => instant
-    float cooldown_seconds = 0.0f;  // <= 0 => none
-    std::string effect;             // brief descriptive string
+    SkillTrigger trigger = SkillTrigger::Action;
+    SkillTargetMode target = SkillTargetMode::Any;
+    int32_t target_limit = 1;                  // Multi only; >= 1
+    float cooldown_seconds = 0.0f;             // <= 0 => none
+    float intention_duration_seconds = 0.0f;   // <= 0 => none; Intention only
+    SkillAttackTest attack_test = SkillAttackTest::None;
+    std::string effect;                        // brief descriptive string
+    SkillConstant constants[kMaxSkillConstants];
+    int32_t constant_count = 0;
+
+    // Named lookup, `fallback` when absent. The ONE way skill code reads
+    // tuning -- host-side today, and the same lookup a guest reimplements
+    // over the cast context's own copy of these (game/src/skill_abi.h).
+    float constant(const char* name, float fallback = 0.0f) const;
 };
 
 // A SkillSpec per skill (specs[i] belongs to SkillId(i)). Compiled defaults
@@ -228,6 +304,23 @@ struct SkillCatalog {
 
 // Parse a skill name ("Calcify"); returns SkillId::Count if unknown.
 SkillId SkillIdFromName(const char* name);
+
+// One "this creature learns skill X on reaching level L" row. Authored per
+// creature in the catalog (game/src/creature_catalog.cpp), so which class
+// learns what is DATA rather than an engine table. Carried on the spawn desc
+// rather than looked up by class, so nothing has to re-derive a hero's class
+// after the fact to know what it should learn.
+//
+// NB which catalog a spawn reads is a PRE-EXISTING split (heroes.cpp's
+// hero_desc): directly-spawned creatures and arena scenarios read the per-Sim
+// catalog, so assets/creatures/creatures.json overrides reach them, while
+// RECRUITED heroes read the compiled defaults and do not. Grants inherit that
+// split exactly as stats do -- editing a grant level in creatures.json changes
+// an arena mercenary and not a guild-recruited one.
+struct SkillGrantRow {
+    int32_t skill = -1;  // SkillId; -1 = empty row
+    int32_t level = 1;
+};
 
 // ---- tuning factors (data, not code) ---------------------------------------
 // Per-archetype behaviour tuning. The sim ships the defaults below, so it is
@@ -450,6 +543,11 @@ struct CharacterDesc {
     CombatStance stance = CombatStance::Melee;
     Attack attacks[kMaxAttacks]{};
     int32_t attack_count = 0;
+    // Level-gated skill acquisition (see SkillGrantRow). Rows fire at their
+    // exact level: spawn applies the level-1 ones, and the level-up hook
+    // (game/src/progression.h) applies the rest as the hero grows.
+    SkillGrantRow skill_grants[kMaxSkills]{};
+    int32_t skill_grant_count = 0;
     // XP paid out on this creature's death, split over nearby heroes (see
     // ProgressionFactors.kill_xp_radius). 0 = no reward (deer, heroes, dummies).
     int32_t xp_reward = 0;
@@ -723,6 +821,7 @@ enum class CommandKindId : int32_t {
     AttackBuilding,
     Chat,
     Engage,  // hold at range of a live entity target (single-gateway combat's engagement executor)
+    UseSkill,  // cast skill param_a (an index into the actor's OWN Skills) at target_id
 };
 
 struct CommandRecord {
@@ -752,6 +851,11 @@ enum class GameEventKind : int32_t {
     HeroDowned,          // a character's HP reached 0; actor = attacker (or NONE)
     HeroDied,            // reserved: true removal, distinct from downing. Not emitted yet.
     HeroLeveledUp,       // a hero crossed a level threshold; actor = hero slot, amount = new level
+    StatusApplied,       // a status was applied/refreshed; target = afflicted slot,
+                         // actor = who inflicted it, amount = the StatusKind
+    SkillUsed,           // a skill was cast; actor = caster slot, target = its primary
+                         // target (the caster itself for a self/untargeted cast),
+                         // amount = the SkillId
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and
