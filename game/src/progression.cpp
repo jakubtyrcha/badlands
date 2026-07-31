@@ -51,6 +51,31 @@ void apply_level_stats(entt::registry& reg, entt::entity e, int32_t level) {
     }
 }
 
+void set_hero_level(BadlandsGame& game, entt::entity e, int32_t level) {
+    if (e == entt::null || !game.registry.valid(e) ||
+        !game.registry.all_of<HeroSimulationState>(e)) {
+        return;  // not something that levels; see the header
+    }
+    const int32_t target = std::clamp(level, 1, kMaxHeroLevel);
+    game.registry.get<HeroSimulationState>(e).level = target;
+    game.registry.get<HeroSimulationState>(e).xp = 0;
+
+    // From 2: spawn already applied the level-1 rows, and re-applying them is
+    // harmless anyway (learn_skill is dupe-proof) -- starting here just says
+    // out loud where the ladder is picked up.
+    if (const auto* grants = game.registry.try_get<SkillGrants>(e);
+        grants != nullptr && game.registry.all_of<Skills>(e)) {
+        Skills& sk = game.registry.get<Skills>(e);
+        for (int32_t l = 2; l <= target; ++l) {
+            grant_skills_for_level(sk, *grants, l);
+        }
+    }
+    // LAST, and once: apply_level_stats recomputes from BaseStats/Growth rather
+    // than accumulating, so running it per level would be identical work for
+    // the same answer.
+    apply_level_stats(game.registry, e, target);
+}
+
 int32_t xp_to_next(const ProgressionFactors& p, int32_t level) {
     const double cost = std::floor(static_cast<double>(p.level_base_xp) *
                                    std::pow(static_cast<double>(level),

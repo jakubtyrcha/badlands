@@ -1024,11 +1024,20 @@ class Sim {
     Sim(const Sim&) = delete;
     Sim& operator=(const Sim&) = delete;
 
-    // Returns the entity id used in CharacterState rows.
-    uint32_t Spawn(const CharacterDesc& desc);
+    // Returns the entity id used in CharacterState rows. `level` > 1 puts a
+    // HERO at that level (see SpawnCreature).
+    uint32_t Spawn(const CharacterDesc& desc, int32_t level = 1);
     // Spawns a named creature from the catalog at (pos_x, pos_z) on `team`;
     // returns its entity id. Hero creatures also get their hero class set.
-    uint32_t SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z);
+    //
+    // `level` > 1 starts a HERO partway up the ladder: its stats are recomputed
+    // from its growth row and every skill grant up to that level is applied, so
+    // it is indistinguishable from one that earned its way there. Ignored by
+    // anything that does not level -- monsters have a threat anchor authored at
+    // level 1 and no growth row at all. INITIAL CONFIG, not a command: a replay
+    // reproduces it from the same spawn call, exactly as prebuild_colony is.
+    uint32_t SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z,
+                           int32_t level = 1);
     // Replaces the creature catalog (see CreatureCatalog). Call before spawning;
     // a replay must use the same catalog the recorded run used.
     void SetCreatureCatalog(const CreatureCatalog& catalog);

@@ -28,10 +28,13 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc);
 // lake, so the convenient coordinates are the ones you cannot walk on.
 std::unique_ptr<BadlandsGame> make_flat_world();
 void tick_world(BadlandsGame&, float dt);
-uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
+// `level` > 1 puts a HERO at that level (progression.h's set_hero_level);
+// ignored by anything that does not level.
+uint32_t spawn_into(BadlandsGame&, const CharacterDesc&, int32_t level = 1);
 // Spawn a named creature from the world's catalog at `pos` on `team`; sets the
 // hero class for hero creatures. Returns the public slot id.
-uint32_t spawn_creature_into(BadlandsGame&, CreatureId id, int32_t team, glm::vec2 pos);
+uint32_t spawn_creature_into(BadlandsGame&, CreatureId id, int32_t team, glm::vec2 pos,
+                             int32_t level = 1);
 int64_t dispatch_into(BadlandsGame&, const Action&);
 std::vector<CharacterState> characters_of(const BadlandsGame&);
 void characters_of(const BadlandsGame&, std::vector<CharacterState>& out);

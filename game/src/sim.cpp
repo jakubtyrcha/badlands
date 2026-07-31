@@ -479,13 +479,21 @@ void tick_world(BadlandsGame& g, float dt) {
     ++g.ticks;
 }
 
-uint32_t spawn_into(BadlandsGame& g, const CharacterDesc& desc) {
+uint32_t spawn_into(BadlandsGame& g, const CharacterDesc& desc, int32_t level) {
     // Plain (home-less) spawn; heroes::spawn_entity emplaces the full component
     // set shared with recruit.
-    return spawn_entity(g, desc, -1);
+    const uint32_t slot = spawn_entity(g, desc, -1);
+    // AFTER the spawn, because set_hero_level reads the components spawn just
+    // emplaced -- the grant list, the growth row, and the level-1 loadout it is
+    // about to extend.
+    if (level > 1) {
+        set_hero_level(g, entity_for_slot(g, static_cast<int32_t>(slot)), level);
+    }
+    return slot;
 }
 
-uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::vec2 pos) {
+uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::vec2 pos,
+                             int32_t level) {
     const int i = static_cast<int>(id);
     if (i < 0 || i >= kCreatureCount) {
         return UINT32_MAX;
@@ -499,7 +507,7 @@ uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::
     // stamps HeroCharacter with the FINAL class at spawn time -- no post-spawn
     // patch needed (nor safe: spawn-time grants would have already run
     // against the stale value).
-    return spawn_entity(g, desc, -1);
+    return spawn_into(g, desc, level);
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {
@@ -900,9 +908,12 @@ Sim::~Sim() = default;
 Sim::Sim(Sim&&) noexcept = default;
 Sim& Sim::operator=(Sim&&) noexcept = default;
 
-uint32_t Sim::Spawn(const CharacterDesc& desc) { return spawn_into(*world_, desc); }
-uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z) {
-    return spawn_creature_into(*world_, id, team, {pos_x, pos_z});
+uint32_t Sim::Spawn(const CharacterDesc& desc, int32_t level) {
+    return spawn_into(*world_, desc, level);
+}
+uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z,
+                            int32_t level) {
+    return spawn_creature_into(*world_, id, team, {pos_x, pos_z}, level);
 }
 void Sim::SetCreatureCatalog(const CreatureCatalog& catalog) { world_->creatures = catalog; }
 const CreatureCatalog& Sim::Creatures() const { return world_->creatures; }

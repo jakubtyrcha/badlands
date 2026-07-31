@@ -25,6 +25,12 @@ struct DuelConfig {
     // How long to keep watching after one side falls, so the end of a fight is
     // visible rather than cutting to the next stage the instant it lands.
     int64_t linger_millis = 5000;
+    // Hero level range, inclusive. The design doc's early game is levels 1-8,
+    // and 8 is where the last skill unlocks -- so this range is what makes
+    // every skill a class has reachable in a duel at all. Ignored for monsters:
+    // they do not level.
+    int32_t min_level = 1;
+    int32_t max_level = 8;
 };
 
 // Every creature that can actually fight: not a Critter, and declaring at least
@@ -41,6 +47,12 @@ struct DuelSetup {
     ArenaShape shape = ArenaShape::Tube;
     CreatureId left = CreatureId::Count;
     CreatureId right = CreatureId::Count;
+    // Drawn for BOTH sides regardless of what was sampled, and simply ignored
+    // by a monster. Drawing unconditionally keeps the sampler a pure function
+    // of (seed, round) -- branching the draw on the creature would make the
+    // stream depend on what came out of an earlier draw.
+    int32_t left_level = 1;
+    int32_t right_level = 1;
 };
 
 // Pure: (seed, round) -> setup. The same pair always gives the same duel, so a

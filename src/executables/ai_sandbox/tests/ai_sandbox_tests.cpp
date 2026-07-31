@@ -247,6 +247,8 @@ TEST_CASE("sampling is a pure function of seed and round", "[duel]") {
         CHECK(a.shape == b.shape);
         CHECK(a.left == b.left);
         CHECK(a.right == b.right);
+        CHECK(a.left_level == b.left_level);
+        CHECK(a.right_level == b.right_level);
     }
     // ...and it actually varies, or the "samples" axis is decorative.
     bool varies = false;
@@ -256,6 +258,36 @@ TEST_CASE("sampling is a pure function of seed and round", "[duel]") {
         varies = s.left != s0.left || s.right != s0.right || s.shape != s0.shape;
     }
     CHECK(varies);
+}
+
+TEST_CASE("a duel samples a level in range for each side", "[duel]") {
+    // Levels 1-8 is the design doc's early game, and 8 is where the last skill
+    // unlocks -- so this range is what makes every skill a class has reachable
+    // in a duel at all.
+    DuelConfig cfg;
+    cfg.seed = 777;
+    const std::vector<CreatureId> pool = duel_pool(DefaultCreatureCatalog());
+
+    bool saw_low = false;
+    bool saw_high = false;
+    for (uint32_t r = 0; r < 64; ++r) {
+        const DuelSetup s = sample_duel(cfg, pool, r);
+        REQUIRE(s.left_level >= cfg.min_level);
+        REQUIRE(s.left_level <= cfg.max_level);
+        REQUIRE(s.right_level >= cfg.min_level);
+        REQUIRE(s.right_level <= cfg.max_level);
+        saw_low = saw_low || s.left_level <= 2;
+        saw_high = saw_high || s.left_level >= 7;
+    }
+    // Spread, not just legality: a sampler pinned to one value would satisfy
+    // the range check above and teach us nothing.
+    CHECK(saw_low);
+    CHECK(saw_high);
+
+    // A single-level range collapses to that level rather than dividing by zero.
+    DuelConfig fixed = cfg;
+    fixed.min_level = fixed.max_level = 4;
+    CHECK(sample_duel(fixed, pool, 0).left_level == 4);
 }
 
 TEST_CASE("a duel ends when one side is gone, after the linger", "[duel]") {

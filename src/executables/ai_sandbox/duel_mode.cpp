@@ -1,5 +1,6 @@
 #include "executables/ai_sandbox/duel_mode.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 #include <spdlog/spdlog.h>
@@ -23,6 +24,23 @@ uint64_t draw(uint64_t seed, uint32_t round, uint32_t axis) {
 }
 
 float seconds_of(int64_t millis) { return static_cast<float>(millis) / 1000.0f; }
+
+// "Hunter(lvl 6)" for something that levels, plain "Rat" for something that
+// does not. Printing a level on a monster would be a lie -- SpawnCreature
+// ignores the argument for anything without HeroSimulationState -- and the
+// whole reason the level is in the log is so a lopsided result reads as a level
+// gap rather than as a balance problem.
+std::string side_name(CreatureId id, int32_t level) {
+    const int i = static_cast<int>(id);
+    const bool levels = i >= 0 && i < kCreatureCount &&
+                        DefaultCreatureCatalog().defs[i].archetype == Archetype::Hero;
+    if (!levels) {
+        return CreatureName(id);
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s(lvl %d)", CreatureName(id), level);
+    return buf;
+}
 
 }  // namespace
 
@@ -59,6 +77,11 @@ DuelSetup sample_duel(const DuelConfig& cfg, const std::vector<CreatureId>& pool
     // the one pairing whose expected result is known, so a lopsided one says
     // something about the mechanics rather than about the matchup.
     s.right = pool[draw(cfg.seed, round, 2) % n];
+    const int32_t lo = std::max(1, cfg.min_level);
+    const int32_t hi = std::max(lo, cfg.max_level);
+    const uint64_t span = static_cast<uint64_t>(hi - lo) + 1;
+    s.left_level = lo + static_cast<int32_t>(draw(cfg.seed, round, 3) % span);
+    s.right_level = lo + static_cast<int32_t>(draw(cfg.seed, round, 4) % span);
     return s;
 }
 
@@ -99,8 +122,10 @@ WorldConfig DuelMode::Configure() {
 }
 
 void DuelMode::Stage(Sim& sim) {
-    sim.SpawnCreature(setup_.left, /*team=*/0, layout_.spawn_a.x, layout_.spawn_a.y);
-    sim.SpawnCreature(setup_.right, /*team=*/1, layout_.spawn_b.x, layout_.spawn_b.y);
+    sim.SpawnCreature(setup_.left, /*team=*/0, layout_.spawn_a.x, layout_.spawn_a.y,
+                      setup_.left_level);
+    sim.SpawnCreature(setup_.right, /*team=*/1, layout_.spawn_b.x, layout_.spawn_b.y,
+                      setup_.right_level);
     started_millis_ = sim.World().world_millis;
     report_at_millis_ = 0;
     decided_ = false;
@@ -116,22 +141,23 @@ bool DuelMode::Observe(const std::vector<CharacterState>& rows, int64_t world_mi
             return false;
         }
         decided_ = true;
+        const std::string left = side_name(setup_.left, setup_.left_level);
+        const std::string right = side_name(setup_.right, setup_.right_level);
         char line[256];
         if (over && t.left_alive) {
-            std::snprintf(line, sizeof(line), "%s beats %s on %s in %.1fs",
-                          CreatureName(setup_.left), CreatureName(setup_.right),
-                          arena_shape_name(setup_.shape), seconds_of(elapsed));
+            std::snprintf(line, sizeof(line), "%s beats %s on %s in %.1fs", left.c_str(),
+                          right.c_str(), arena_shape_name(setup_.shape),
+                          seconds_of(elapsed));
         } else if (over && t.right_alive) {
-            std::snprintf(line, sizeof(line), "%s beats %s on %s in %.1fs",
-                          CreatureName(setup_.right), CreatureName(setup_.left),
-                          arena_shape_name(setup_.shape), seconds_of(elapsed));
+            std::snprintf(line, sizeof(line), "%s beats %s on %s in %.1fs", right.c_str(),
+                          left.c_str(), arena_shape_name(setup_.shape),
+                          seconds_of(elapsed));
         } else {
             // Both gone, or neither: a stalemate and a mutual kill are both
             // draws, and both are worth being able to see in the log.
             std::snprintf(line, sizeof(line), "%s vs %s on %s -> draw (%s) in %.1fs",
-                          CreatureName(setup_.left), CreatureName(setup_.right),
-                          arena_shape_name(setup_.shape), timed_out ? "timeout" : "mutual",
-                          seconds_of(elapsed));
+                          left.c_str(), right.c_str(), arena_shape_name(setup_.shape),
+                          timed_out ? "timeout" : "mutual", seconds_of(elapsed));
         }
         last_result_ = line;
         spdlog::info("duel {}: {}", round_, last_result_);
@@ -149,7 +175,8 @@ bool DuelMode::Observe(const std::vector<CharacterState>& rows, int64_t world_mi
 std::string DuelMode::Status() const {
     char line[256];
     std::snprintf(line, sizeof(line), "duel %u: %s vs %s on %s\nlast: %s", round_,
-                  CreatureName(setup_.left), CreatureName(setup_.right),
+                  side_name(setup_.left, setup_.left_level).c_str(),
+                  side_name(setup_.right, setup_.right_level).c_str(),
                   arena_shape_name(setup_.shape), last_result_.c_str());
     return line;
 }
