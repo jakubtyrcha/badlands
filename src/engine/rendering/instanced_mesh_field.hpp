@@ -72,6 +72,13 @@ class InstancedMeshField {
   // this class never sets material parameters). Not owned; `material` (and
   // the vertex/index buffers) must outlive this field's use. `material`
   // may be nullptr to clear/skip the slot.
+  //
+  // ORDER CONTRACT: this overwrites the slot's WHOLE SlotInfo, including any
+  // shadow_material a prior SetSubmeshShadow call attached to it (reset to
+  // nullptr) — a slot repurposed via SetSubmesh (new mesh/material) must not
+  // keep casting a shadow left over from its previous configuration. Call
+  // SetSubmeshShadow AFTER SetSubmesh (every caller in this codebase already
+  // does) to (re)attach a shadow material for the slot's new configuration.
   void SetSubmesh(uint32_t model, uint32_t lod, uint32_t submesh,
                   wgpu::Buffer vertex_buffer, wgpu::Buffer index_buffer,
                   wgpu::IndexFormat index_format, uint32_t index_count,
@@ -86,6 +93,11 @@ class InstancedMeshField {
   // GpuInstanceRenderer::BucketId(model, lod), same as SetSubmesh's material.
   // A shadow material must not declare @group(2) (no engine resources are
   // bound for Draw(kShadow)) — see Draw()'s doc comment.
+  //
+  // ORDER CONTRACT: must run AFTER SetSubmesh for this slot — SetSubmesh
+  // resets shadow_material to nullptr (see its own doc comment above), so
+  // calling this first would just have its attachment wiped by the following
+  // SetSubmesh.
   void SetSubmeshShadow(uint32_t model, uint32_t lod, uint32_t submesh,
                         RenderingMaterialInstance* material);
 

@@ -2221,6 +2221,75 @@ TEST_CASE("GPU shared-slice render: a bucket's submeshes draw the SAME "
 }
 
 // ===========================================================================
+// Review fix: the shadow cull buffer set (config/perInstanceBucket/
+// bucketCount/bucketBase/writeCursor/compacted/args, 7 buffers + 3 bind
+// groups) is now LAZY -- allocated on first need (CullShadow() or
+// InstancedMeshField::SetSubmeshShadow's EnsureShadowCull() call) rather
+// than eagerly by the constructor, since most GpuInstanceRenderers never
+// cast a shadow. Proven directly via GpuInstanceRenderer: GetShadowArgsBuffer
+// stays null until CullShadow() runs, and a slot configured via
+// SetBucketSubmesh BEFORE that first CullShadow() still has its geometry
+// (indexCount) correctly present in the shadow args buffer afterward -- the
+// REPLAY EnsureShadowCullResources() performs on creation.
+// ===========================================================================
+TEST_CASE("GPU shadow cull resources are lazy: null until CullShadow(), then "
+          "replay prefills a slot configured before the first CullShadow()",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+
+  // thresholds pushed to +inf -> lod0 -> bucket 0 regardless of distance.
+  GpuInstanceRenderer renderer(g.device, g.queue, *g.gen, /*capacity=*/1,
+                               /*num_models=*/1, {1e30f, 1e30f});
+  REQUIRE(renderer.IsValid());
+
+  // A dummy (never actually drawn in this test) mesh, just to give bucket
+  // 0/submesh 0 real geometry -- SetBucketSubmesh's indexCount is what the
+  // replay below must have carried into the shadow args buffer.
+  constexpr uint32_t kIndexCount = 42;
+  std::array<float, 3> dummy_verts = {0.0f, 0.0f, 0.0f};
+  std::array<uint32_t, 3> dummy_indices = {0, 0, 0};
+  wgpu::Buffer vbuf = UploadBuffer(g.device, dummy_verts.data(),
+                                   dummy_verts.size() * sizeof(float),
+                                   wgpu::BufferUsage::Vertex);
+  wgpu::Buffer ibuf = UploadBuffer(g.device, dummy_indices.data(),
+                                   dummy_indices.size() * sizeof(uint32_t),
+                                   wgpu::BufferUsage::Index);
+  renderer.SetBucketSubmesh(/*bucket=*/0, /*submesh=*/0, vbuf, ibuf,
+                            wgpu::IndexFormat::Uint32, kIndexCount);
+
+  // RED (pre-fix): the shadow set was allocated eagerly by the constructor,
+  // so this was already non-null here -- no lazy-creation contract existed to
+  // check. GREEN (post-fix): still null -- nothing has requested shadow
+  // resources yet (SetBucketSubmesh alone doesn't).
+  CHECK(renderer.GetShadowArgsBuffer() == nullptr);
+
+  Camera camera = MakeCullCamera(1.0f);
+  const glm::mat4 light_view_proj(1.0f);  // contents irrelevant -- not read back
+
+  FrameContext frame;
+  frame.Begin(g.device, g.queue, UniformData{});
+  renderer.CullShadow(frame, camera, light_view_proj);
+  wgpu::CommandBuffer cmd = frame.End();
+  g.queue.Submit(1, &cmd);
+  test::WaitForGpu(g.instance, g.device, g.queue);
+
+  REQUIRE(renderer.GetShadowArgsBuffer() != nullptr);
+
+  // Slot 0's indirect-args geometry fields (index_count@0, instance_count@4,
+  // first_index@8, base_vertex@12, first_instance@16 -- kArgsStride=20 bytes,
+  // 5 u32-sized fields) must show the REPLAYED indexCount, proving
+  // EnsureShadowCullResources() picked up a slot configured before it ever
+  // ran, not just future SetBucketSubmesh calls.
+  std::vector<uint32_t> args = test::ReadBufferSync<uint32_t>(
+      g.instance, g.device, g.queue, renderer.GetShadowArgsBuffer(), 0, 5);
+  REQUIRE(args.size() == 5);
+  CHECK(args[0] == kIndexCount);  // index_count
+  CHECK(args[2] == 0u);           // first_index
+  CHECK(args[3] == 0u);           // base_vertex
+  CHECK(args[4] == 0u);           // first_instance
+}
+
+// ===========================================================================
 // Phase 4 of the volumetric-foliage feature: a dedicated shadow cull set.
 // CullShadow() dispatches the SAME classify/scan/scatter pipeline as Cull(),
 // but against the light's frustum, into a SEPARATE buffer set -- Cull()'s
@@ -3288,6 +3357,51 @@ TEST_CASE("InstancedMeshField: SetSubmeshShadow flips HasPass(kShadow), "
 }
 
 // ===========================================================================
+// Review fix: SetSubmesh must overwrite the WHOLE SlotInfo (shadow_material
+// reset to nullptr too), not just the main-pass fields -- a slot repurposed
+// via a second SetSubmesh call (new mesh/material for that slot) otherwise
+// keeps carrying whatever shadow_material an EARLIER, now-unrelated
+// SetSubmeshShadow call attached, and would draw it into the shadow pass with
+// (for a repurposed model/lod/submesh) mismatched geometry. SetSubmeshShadow
+// still attaches AFTER SetSubmesh -- see instanced_mesh_field.hpp's updated
+// order-contract comments on both methods.
+// ===========================================================================
+TEST_CASE("InstancedMeshField: SetSubmesh on an already-shadow-configured "
+          "slot resets its stale shadow_material",
+          "[gpu_instance][gpu]") {
+  TestGpu& g = GetTestGpu();
+  auto fx = BuildShadowSlotField(g);  // SetSubmesh(..., material=nullptr) already ran
+
+  InstanceParams shadow_params;
+  shadow_params.uniform_overrides["tint"] =
+      MaterialParameterValue(glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  shadow_params.uniform_overrides["bucketId"] = MaterialParameterValue(uint32_t(0));
+  entt::id_type shadow_key = ComposeMaterialCacheKey(
+      entt::hashed_string{"p_setsubmesh_reset_shadow"}.value(),
+      GeometryType::kInstancedMesh, RenderPassType::kShadow, 0);
+  auto shadow_handle = fx->cache.GetOrCreate(
+      shadow_key, *fx->factory, GeometryType::kInstancedMesh,
+      MaterialPassType::kDeferred, RenderPassType::kShadow, shadow_params);
+  REQUIRE(shadow_handle);
+  REQUIRE(shadow_handle->IsValid());
+
+  fx->field->SetSubmeshShadow(/*model=*/0, /*lod=*/0, /*submesh=*/0,
+                              shadow_handle.operator->());
+  CHECK(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+
+  // Repurpose the SAME slot via SetSubmesh (its normal use -- e.g. swapping
+  // the slot's mesh/main-pass material) WITHOUT re-attaching a shadow
+  // material. The full-reset contract says this must clear the slot's stale
+  // shadow_material along with everything else -- currently (pre-fix) it
+  // survives, so HasPass(kShadow) wrongly stays true.
+  fx->field->SetSubmesh(/*model=*/0, /*lod=*/0, /*submesh=*/0, fx->vbuf, fx->ibuf,
+                        wgpu::IndexFormat::Uint32, 6,
+                        InstancedMeshField::PassKind::kDeferred,
+                        /*material=*/nullptr);
+  CHECK_FALSE(fx->field->HasPass(InstancedMeshField::PassKind::kShadow));
+}
+
+// ===========================================================================
 // Task 3: SceneRenderer drives SceneContext::instanced_fields. Task 3 wired
 // SceneRenderer::Render to: Cull() every field BEFORE Pass 0 (frame.Begin,
 // before any render pass opens on the encoder); Draw(kDeferred) each field
@@ -3757,17 +3871,28 @@ wgpu::RenderPassColorAttachment TetClearAttachment(wgpu::TextureView view,
   return ca;
 }
 
+// Both G-buffer targets' exact center pixel for one RenderTetPixels() call --
+// see that function's comment for why the center pixel is the meaningful one.
+struct TetPixels {
+  CpuImage::Color material;
+  CpuImage::Color albedo;
+};
+
 // Renders `indices` (kTetIndicesVisible or kTetIndicesFlipped) through the
-// non-instanced voxel_foliage material and returns the material target's
+// non-instanced voxel_foliage material, with vertex uv.x = `brightness` and
+// the material's `tint`, and returns BOTH the material and albedo targets'
 // exact center pixel -- the near face's centroid projects there by
 // construction (kTetNearP0/P1/P2 average to (0,0,-2), dead on the camera's
-// view axis).
-CpuImage::Color RenderTetMaterialCenterPixel(
-    TestGpu& g, MaterialInstanceFactory& factory, float roughness,
-    float strength, const std::array<uint32_t, 12>& indices) {
+// view axis). CpuImage::GetPixel already converts BGRA8Unorm storage
+// (GBuffer::kAlbedoFormat) to RGBA channel order, so the returned albedo's
+// .r/.g/.b are plain RGB regardless of the target's memory layout.
+TetPixels RenderTetPixels(TestGpu& g, MaterialInstanceFactory& factory,
+                          float roughness, float strength, float brightness,
+                          glm::vec3 tint,
+                          const std::array<uint32_t, 12>& indices) {
   InstanceParams params;
   params.uniform_overrides = {
-      {"tint", glm::vec4(1.0f)},
+      {"tint", glm::vec4(tint, 1.0f)},
       {"params", glm::vec4(roughness, strength, 0.0f, 0.0f)},
   };
   auto instance =
@@ -3778,7 +3903,7 @@ CpuImage::Color RenderTetMaterialCenterPixel(
   instance->SetParameterByName("modelMatrix",
                                MaterialParameterValue(glm::mat4(1.0f)));
 
-  const std::vector<float> verts = BuildTetVertices(0.8f);
+  const std::vector<float> verts = BuildTetVertices(brightness);
   wgpu::Buffer vbuf = UploadBuffer(g.device, verts.data(),
                                    verts.size() * sizeof(float),
                                    wgpu::BufferUsage::Vertex);
@@ -3820,7 +3945,12 @@ CpuImage::Color RenderTetMaterialCenterPixel(
   TextureReadback rb(g.instance, g.device, g.queue);
   CpuImage material_img = rb.ReadTextureSync(
       material_t.GetTexture(), kTetTarget, kTetTarget, GBuffer::kMaterialFormat);
-  return material_img.GetPixel(kTetTarget / 2, kTetTarget / 2);
+  CpuImage albedo_img = rb.ReadTextureSync(albedo_t.GetTexture(), kTetTarget,
+                                           kTetTarget, GBuffer::kAlbedoFormat);
+  TetPixels result;
+  result.material = material_img.GetPixel(kTetTarget / 2, kTetTarget / 2);
+  result.albedo = albedo_img.GetPixel(kTetTarget / 2, kTetTarget / 2);
+  return result;
 }
 
 }  // namespace
@@ -3882,44 +4012,75 @@ TEST_CASE("voxel_foliage G-buffer readback: material encoding + CullMode::Back "
 
   constexpr float kRoughness = 0.6f;
   constexpr float kStrength = 0.35f;
+  // Brightness deliberately NOT 0.0/1.0 (both are fixed points of the sRGB
+  // curve, srgb_to_linear(x) == x there -- a double-linearization bug would
+  // be invisible at either endpoint) so a bug that runs uv.x through
+  // srgb_to_linear at write time (this material) is unmistakable in the
+  // readback below.
+  constexpr float kBrightness = 0.5f;
+  const glm::vec3 kTint(0.5f, 0.25f, 1.0f);
 
-  SECTION("correct winding: material.a/.g/.r match, alpha tagged as foliage") {
+  SECTION("correct winding: material.a/.g/.r match, alpha tagged as foliage, "
+          "albedo is brightness*tint RAW (sRGB-domain, not double-linearized)") {
     CapturedError err;
-    CpuImage::Color px;
+    TetPixels px;
     err = RunCapturingValidationErrors(g, [&] {
-      px = RenderTetMaterialCenterPixel(g, *factory, kRoughness, kStrength,
-                                        kTetIndicesVisible);
+      px = RenderTetPixels(g, *factory, kRoughness, kStrength, kBrightness,
+                          kTint, kTetIndicesVisible);
     });
     INFO("Dawn validation error: " << err.message);
     CHECK(err.type == wgpu::ErrorType::NoError);
-    INFO("material rgba = " << (int)px.r << "," << (int)px.g << ","
-                            << (int)px.b << "," << (int)px.a);
+    INFO("material rgba = " << (int)px.material.r << "," << (int)px.material.g
+                            << "," << (int)px.material.b << ","
+                            << (int)px.material.a);
     // material.a = kShadingModelFoliage (1.0) -- comfortably above the 0.5
     // threshold deferred_lighting.wesl gates on.
-    CHECK(px.a > 127);
+    CHECK(px.material.a > 127);
     // material.g = translucency strength, material.r = roughness, both
     // RGBA8Unorm-quantized -- +/-2/255 tolerance.
-    CHECK(std::abs(static_cast<int>(px.g) -
+    CHECK(std::abs(static_cast<int>(px.material.g) -
                    static_cast<int>(std::lround(kStrength * 255.0f))) <= 2);
-    CHECK(std::abs(static_cast<int>(px.r) -
+    CHECK(std::abs(static_cast<int>(px.material.r) -
                    static_cast<int>(std::lround(kRoughness * 255.0f))) <= 2);
+
+    // Albedo must be the RAW (sRGB-domain) product of the vertex-baked
+    // brightness and the material tint -- deferred_lighting.wesl's
+    // srgb_to_linear runs on READ (its albedoLinear line), so this material
+    // writing srgb_to_linear(brightness)*tint too would double-linearize and
+    // render crowns far too dark. +/-2/255 tolerance for RGBA8Unorm
+    // quantization. Pre-fix, brightness=0.5 wrote srgb_to_linear(0.5) ~=
+    // 0.214 (not 0.5) into the brightness term, so e.g. the r channel
+    // (tint.r=0.5) landed at byte ~27 instead of the expected ~64.
+    INFO("albedo rgb = " << (int)px.albedo.r << "," << (int)px.albedo.g << ","
+                         << (int)px.albedo.b);
+    const glm::vec3 expected_albedo = kBrightness * kTint;
+    CHECK(std::abs(static_cast<int>(px.albedo.r) -
+                   static_cast<int>(std::lround(expected_albedo.r * 255.0f))) <=
+          2);
+    CHECK(std::abs(static_cast<int>(px.albedo.g) -
+                   static_cast<int>(std::lround(expected_albedo.g * 255.0f))) <=
+          2);
+    CHECK(std::abs(static_cast<int>(px.albedo.b) -
+                   static_cast<int>(std::lround(expected_albedo.b * 255.0f))) <=
+          2);
   }
 
   SECTION("flipped index winding: the near face is culled, pixel stays "
           "background") {
     CapturedError err;
-    CpuImage::Color px;
+    TetPixels px;
     err = RunCapturingValidationErrors(g, [&] {
-      px = RenderTetMaterialCenterPixel(g, *factory, kRoughness, kStrength,
-                                        kTetIndicesFlipped);
+      px = RenderTetPixels(g, *factory, kRoughness, kStrength, kBrightness,
+                          kTint, kTetIndicesFlipped);
     });
     INFO("Dawn validation error: " << err.message);
     CHECK(err.type == wgpu::ErrorType::NoError);
-    INFO("material rgba = " << (int)px.r << "," << (int)px.g << ","
-                            << (int)px.b << "," << (int)px.a);
+    INFO("material rgba = " << (int)px.material.r << "," << (int)px.material.g
+                            << "," << (int)px.material.b << ","
+                            << (int)px.material.a);
     // Nothing drawn at the center pixel -- stays at the material clear
     // value's alpha (0.0), well below the foliage-tag threshold.
-    CHECK(px.a < 10);
+    CHECK(px.material.a < 10);
   }
 }
 

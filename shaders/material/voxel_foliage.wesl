@@ -34,8 +34,6 @@ import package::common::frame::{frame, worldSpaceToClipSpace};
 @if(instanced && shadow_pass)
 import package::common::frame::{frame, worldSpaceToWorldCameraOffsetedSpace, worldCameraOffsetedSpaceToLightClipSpace};
 @if(!shadow_pass)
-import package::common::color::srgb_to_linear;
-@if(!shadow_pass)
 import package::common::gbuffer_encode::{GBufferOutput, packVoxelFoliageGBuffer};
 
 // Non-instanced: group-1 per-object UBO (modelMatrix + material constants),
@@ -143,8 +141,12 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
 @fragment
 fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
     // No texture: albedo is the vertex-baked brightness (uv.x, see
-    // leaf_voxelizer.hpp's tet vertex layout) tinted by the material's tint.
-    let albedo = srgb_to_linear(vec3<f32>(input.uv.x)) * object.tint.rgb;
+    // leaf_voxelizer.hpp's tet vertex layout) tinted by the material's tint,
+    // written RAW (sRGB-domain) -- matching normalmapped/instanced_gbuffer's
+    // convention of writing `sample * tint` unlinearized and letting
+    // deferred_lighting.wesl's srgb_to_linear(albedo_texture) do the one and
+    // only linearization on READ. Linearizing here too would double it.
+    let albedo = vec3<f32>(input.uv.x) * object.tint.rgb;
     return packVoxelFoliageGBuffer(input.worldNormal, albedo,
                                    object.params.x, 1.0, object.params.y);
 }
@@ -152,7 +154,8 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
 @if(!shadow_pass && instanced)
 @fragment
 fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
-    let albedo = srgb_to_linear(vec3<f32>(input.uv.x)) * mat_params.tint.rgb;
+    // Same RAW sRGB-domain convention as the non-instanced fs_main above.
+    let albedo = vec3<f32>(input.uv.x) * mat_params.tint.rgb;
     return packVoxelFoliageGBuffer(input.worldNormal, albedo,
                                    mat_params.params.x, 1.0, mat_params.params.y);
 }

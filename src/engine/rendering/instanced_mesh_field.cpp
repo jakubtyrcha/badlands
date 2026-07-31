@@ -42,11 +42,14 @@ void InstancedMeshField::SetSubmesh(uint32_t model, uint32_t lod,
   }
   renderer_.SetBucketSubmesh(bucket, submesh, vertex_buffer, index_buffer,
                              index_format, index_count);
-  // Preserve whatever shadow_material this slot already carries (SetSubmesh
-  // may be called more than once, e.g. to swap a slot's main-pass material —
-  // that must not silently detach an already-attached shadow material).
-  slots_[bucket * renderer_.GetNumSubmeshes() + submesh].pass = pass;
-  slots_[bucket * renderer_.GetNumSubmeshes() + submesh].material = material;
+  // Full-reset contract: SetSubmesh overwrites the WHOLE SlotInfo, including
+  // shadow_material -- a slot repurposed via a second SetSubmesh call (new
+  // mesh/material) must not keep casting a shadow from whatever material an
+  // earlier, now-unrelated SetSubmeshShadow call attached. Callers that want
+  // the slot to keep casting a shadow call SetSubmeshShadow again AFTER this
+  // (see both methods' header comments for the order contract).
+  slots_[bucket * renderer_.GetNumSubmeshes() + submesh] =
+      SlotInfo{.pass = pass, .material = material};
 }
 
 void InstancedMeshField::SetSubmeshShadow(uint32_t model, uint32_t lod,
@@ -63,6 +66,16 @@ void InstancedMeshField::SetSubmeshShadow(uint32_t model, uint32_t lod,
     return;
   }
   slots_[bucket * num_submeshes + submesh].shadow_material = material;
+  // Registering a real shadow material provisions the renderer's lazily-
+  // created shadow cull buffer set/bind groups (see
+  // GpuInstanceRenderer::EnsureShadowCull()) ahead of the first CullShadow()
+  // call, rather than waiting for a driver (e.g. SceneRenderer) to notice
+  // HasPass(kShadow) and call CullShadow() itself -- a no-op if that's
+  // already happened, or if `material` is nullptr (clearing a slot, which
+  // doesn't need shadow resources to exist).
+  if (material != nullptr) {
+    renderer_.EnsureShadowCull();
+  }
 }
 
 bool InstancedMeshField::HasPass(PassKind pass) const {
