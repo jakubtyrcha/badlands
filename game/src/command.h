@@ -34,6 +34,10 @@ enum class CommandKind : int32_t {
     AttackBuilding,  // monster swings at a building (target_id); razes it at 0 hp
     Chat,            // two heroes start a conversation (target_id = partner slot)
     Engage,      // hold at range of a live entity target (target_id; point.x = stop_distance)
+    UseSkill,    // cast skill param_a (an index into the ACTOR's own Skills, not a
+                 // SkillId -- the same convention Attack's param_a uses for attacks)
+                 // at target_id; the handler re-validates everything and runs the
+                 // effect through game/src/skill_cast.h
 };
 
 // The log is exposed verbatim through Sim::CommandLog(), so the two enums are
@@ -66,6 +70,8 @@ static_assert(static_cast<int32_t>(CommandKind::Chat) ==
               static_cast<int32_t>(CommandKindId::Chat));
 static_assert(static_cast<int32_t>(CommandKind::Engage) ==
               static_cast<int32_t>(CommandKindId::Engage));
+static_assert(static_cast<int32_t>(CommandKind::UseSkill) ==
+              static_cast<int32_t>(CommandKindId::UseSkill));
 
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional

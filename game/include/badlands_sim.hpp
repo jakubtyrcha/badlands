@@ -799,6 +799,7 @@ enum class CommandKindId : int32_t {
     AttackBuilding,
     Chat,
     Engage,  // hold at range of a live entity target (single-gateway combat's engagement executor)
+    UseSkill,  // cast skill param_a (an index into the actor's OWN Skills) at target_id
 };
 
 struct CommandRecord {
@@ -830,6 +831,9 @@ enum class GameEventKind : int32_t {
     HeroLeveledUp,       // a hero crossed a level threshold; actor = hero slot, amount = new level
     StatusApplied,       // a status was applied/refreshed; target = afflicted slot,
                          // actor = who inflicted it, amount = the StatusKind
+    SkillUsed,           // a skill was cast; actor = caster slot, target = its primary
+                         // target (the caster itself for a self/untargeted cast),
+                         // amount = the SkillId
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and

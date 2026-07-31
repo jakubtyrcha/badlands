@@ -253,6 +253,11 @@ add_library(badlands_game_lib STATIC
     # Timed statuses (stun and whatever follows): timers only -- what a status
     # DOES is enforced by the systems that read it (game/src/status.h).
     game/src/status.cpp
+    # Casting: validation, target resolution, the pre-rolled attack test, and
+    # applying the ops an effect asked for (game/src/skill_cast.h). Separate
+    # from skills.cpp, which stays world-free so it can link standalone into
+    # the manifest test target below.
+    game/src/skill_cast.cpp
     game/src/progression.cpp
     game/src/entity_memory.cpp
     game/src/needs.cpp
@@ -593,6 +598,9 @@ add_executable(badlands_game_tests
     # Skill effects in isolation: the pure (cast context -> op batch) contract
     # (game/src/skill_abi.h). No world, no Sim -- that IS the test.
     game/tests/skill_effect_tests.cpp
+    # Casting end to end: shield-bash through the UseSkill command handler
+    # (game/src/skill_cast.h).
+    game/tests/shield_bash_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
     # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
