@@ -1,6 +1,7 @@
 #include "scene.h"
 
 #include <string>
+#include <vector>
 
 #include "math.h"
 
@@ -62,6 +63,10 @@ int32_t SceneDocument::spawn_unsnapped(Shape shape, Op op, simd_float3 position)
     node.snapped = false;
     node.snap_parent = kInvalidNode;
     return add(std::move(node)).id;
+}
+
+void SceneDocument::remove_node(int32_t id) {
+    std::erase_if(nodes_, [id](const Node& node) { return node.id == id; });
 }
 
 } // namespace sq

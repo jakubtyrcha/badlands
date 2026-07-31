@@ -2,9 +2,10 @@ import SwiftUI
 import ShapeshifterCore
 
 /// Sims-style semicircle menu anchored to the selected node's projected
-/// screen position (`vm.radialAnchor`). Three ~36pt circular buttons sit on
-/// the upper semicircle of radius 64pt around the anchor, at 150°/90°/30°
-/// (measured from +x, y up in screen terms) — i.e. left-up / top / right-up.
+/// screen position (`vm.radialAnchor`). Four ~36pt circular buttons sit on
+/// the upper semicircle of radius 64pt around the anchor, evenly spaced at
+/// 157.5°/112.5°/67.5°/22.5° (measured from +x, y up in screen terms) — i.e.
+/// left-up / top-left / top-right / right-up.
 ///
 /// `ContentView` centers this view on the anchor via `.position(anchor)`,
 /// which places the anchor at the CENTER of this view's own layout frame.
@@ -22,18 +23,21 @@ struct RadialMenu: View {
 
     var body: some View {
         ZStack {
-            button(angleDegrees: 150, active: vm.activeRadialTool == .move,
+            button(angleDegrees: 157.5, active: vm.activeRadialTool == .move,
                    symbol: "arrow.up.and.down.and.arrow.left.and.right", help: "Move") {
                 vm.radialSelectMove()
             }
-            button(angleDegrees: 90, active: vm.activeRadialTool == .scale,
+            button(angleDegrees: 112.5, active: vm.activeRadialTool == .scale,
                    symbol: "arrow.up.left.and.arrow.down.right", help: "Scale") {
                 vm.radialSelectScale()
             }
-            button(angleDegrees: 30, active: false,
+            button(angleDegrees: 67.5, active: false,
                    symbol: vm.selectedNodeOp == .Subtract ? "minus.circle.fill" : "plus.circle.fill",
                    help: "Additive / Subtract") {
                 vm.radialToggleOp()
+            }
+            button(angleDegrees: 22.5, active: false, symbol: "xmark", help: "Delete") {
+                vm.deleteSelected()
             }
         }
         .frame(width: Self.extent * 2, height: Self.extent * 2)

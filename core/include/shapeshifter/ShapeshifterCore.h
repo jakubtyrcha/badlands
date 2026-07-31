@@ -61,6 +61,10 @@ public:
     // spawning (creates node, selects it, refreshes line colors)
     SpawnResult spawn(Shape shape, Op op, float x, float y);   // view points, top-left origin
 
+    // deletes the selected node (permanent, no undo); no-op without a
+    // selection; clears selection and refreshes line colors
+    void deleteSelectedNode();
+
     // modify tool — core owns all plane math
     void setGizmoVisible(bool visible);
     void beginDrag(float x, float y);

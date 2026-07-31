@@ -195,6 +195,14 @@ final class EditorViewModel {
         refreshOverlayState()
     }
 
+    /// Deletes the selected node (permanent — no undo) and switches to
+    /// camera mode (user ruling).
+    func deleteSelected() {
+        editor.deleteSelectedNode()
+        refreshSelectionMirrors()
+        setMode(.camera)
+    }
+
     /// Returns true if the key was consumed (so the caller skips
     /// `super.keyDown`).
     func handleKeyDown(_ characters: String) -> Bool {

@@ -161,6 +161,31 @@ SpawnResult Editor::spawn(Shape shape, Op op, float x, float y) {
     return SpawnResult{id, snapped};
 }
 
+void Editor::deleteSelectedNode() {
+    if (impl_->selected == kInvalidNode) {
+        return; // no-op without a selection
+    }
+
+    // An active drag/scale gesture referencing the node being deleted must
+    // not survive it — mirrors setMode's mid-gesture abort (impl_->drag /
+    // impl_->scale_drag reset the same way endDrag()/endScale() do).
+    if (impl_->drag.active && impl_->drag.node_id == impl_->selected) {
+        impl_->drag.active = false;
+        impl_->drag.node_id = kInvalidNode;
+    }
+    if (impl_->scale_drag.active && impl_->scale_drag.node_id == impl_->selected) {
+        impl_->scale_drag.active = false;
+        impl_->scale_drag.node_id = kInvalidNode;
+    }
+
+    impl_->scene.remove_node(impl_->selected);
+    impl_->selected = kInvalidNode;
+    // Gizmo hides on its own next render(): selectedNode is looked up via
+    // impl_->scene.find(impl_->selected), which is null once selected is
+    // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
+    impl_->renderer.set_scene_lines_dirty();
+}
+
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
     if (buf == nullptr || bufLen <= 0) {
         return;
