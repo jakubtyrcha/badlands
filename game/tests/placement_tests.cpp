@@ -640,6 +640,20 @@ TEST_CASE("plopped footprints may touch") {
     }
 }
 
+TEST_CASE("plopped footprints may overlap") {
+    auto owned = make_world(BrainDesc{});
+    BadlandsGame* game = owned.get();
+    // Two Walls on nearly the same ground, one rotated 45 degrees. Overlapping
+    // is legal for a plop and load-bearing: a slanted wall meeting an
+    // axis-aligned one cannot abut exactly, so the junction is an overlap or a
+    // hole, and occupancy is a bitmask so the union rasterizes the same either
+    // way.
+    REQUIRE(plop_building(*game, PlacementDesc{kWall, 0, 20.0f, -20.0f}) != UINT32_MAX);
+    REQUIRE(plop_building(*game, PlacementDesc{kWall, 1, 21.0f, -21.0f}) != UINT32_MAX);
+    CHECK(game->placement.buildings.size() >= 2);
+    CHECK(tile_is_solid(game->placement, 20, -20));  // still solid, not double-counted
+}
+
 TEST_CASE("player placement still refuses to touch a plopped block") {
     auto owned = make_world(BrainDesc{});
     BadlandsGame* game = owned.get();

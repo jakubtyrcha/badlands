@@ -18,6 +18,7 @@ constexpr int32_t kWatchtower = static_cast<int32_t>(BuildingKind::Watchtower);
 constexpr int32_t kApothecary = static_cast<int32_t>(BuildingKind::Apothecary);
 constexpr int32_t kHouse = static_cast<int32_t>(BuildingKind::House);
 constexpr int32_t kSewer = static_cast<int32_t>(BuildingKind::Sewer);
+constexpr int32_t kWall = static_cast<int32_t>(BuildingKind::Wall);
 constexpr int32_t kKindCount = static_cast<int32_t>(BuildingKind::Count);
 
 // Footprint sizes + flags + vision + recruit set, indexed by BuildingKind.
@@ -54,7 +55,7 @@ uint32_t urban_contribution(int kind) {
     if (kind == kWatchtower) {
         return 3;
     }
-    if (kind == kHouse || kind == kSewer || kind == kCastle) {
+    if (kind == kHouse || kind == kSewer || kind == kCastle || kind == kWall) {
         return 0;
     }
     return 4;
@@ -239,21 +240,16 @@ bool placement_valid(const PlacementState& st, const Footprint& fp, PlacementMar
     if (!footprint_in_bounds(fp)) {
         return false;
     }
-    // Always: the candidate footprint may not land on an existing FOOTPRINT.
-    // Two structures cannot occupy the same ground however they were placed.
-    // (With PlacementMargin::Player this reads `blocked`, the union of every
-    // footprint and margin, which subsumes the footprint test.)
-    const std::vector<uint8_t>& occupied =
-        (margin == PlacementMargin::Player) ? st.blocked : st.footprint;
+    if (margin == PlacementMargin::None) {
+        return true;  // in bounds is the whole rule -- see the header
+    }
+    // The candidate footprint may not land on any existing footprint or margin.
     std::vector<TriRef> foot;
     footprint_triangles(fp, foot);
     for (const TriRef& t : foot) {
-        if (occupied[tri_index(t.tx, t.tz, static_cast<int>(t.corner))]) {
+        if (st.blocked[tri_index(t.tx, t.tz, static_cast<int>(t.corner))]) {
             return false;
         }
-    }
-    if (margin == PlacementMargin::None) {
-        return true;  // abutting is the whole point -- no spacing rule to apply
     }
     // ...and the candidate's own blocking margin may not cover an existing
     // footprint (the reverse direction, which the discrete margins make a

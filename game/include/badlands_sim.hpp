@@ -675,9 +675,12 @@ inline constexpr int64_t kDefaultMillisPerDay = 120 * 1000;
 // by this, so it must stay >= 1 ms).
 int64_t MillisPerDayForSimSeconds(float sim_seconds);
 
-// What to place, and where. Declared up here rather than beside the rest of the
-// placement surface below because WorldConfig carries a list of them, and a
-// world's initial config has to be describable before the placement API is.
+// Placement request: a raw (un-snapped) desired center + rotation. The sim
+// snaps the center to the grid lattice for the kind's parity.
+//
+// Declared up here rather than beside the rest of the placement surface below
+// because WorldConfig carries a list of them, and a world's initial config has
+// to be describable before the placement API is.
 struct PlacementDesc {
     int32_t kind;
     int32_t rotation_index;
@@ -832,8 +835,6 @@ struct RenderBox {
     float yaw_radians;
 };
 
-// Placement request: a raw (un-snapped) desired center + rotation. The sim
-// snaps the center to the grid lattice for the kind's parity.
 // One grid triangle in a probe readout.
 struct GridTriangle {
     int32_t tile_x, tile_z;  // tile min-corner, in [-H, H)

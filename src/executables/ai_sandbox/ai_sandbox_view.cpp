@@ -23,6 +23,7 @@
 #include "game/brain_asset.hpp"
 #include "game/building_catalog.h"
 #include "game/creature_manifest.h"
+#include "game/factors_manifest.hpp"
 #include "game/scene/blockout_materials.hpp"
 #include "game/skill_manifest.hpp"
 
@@ -180,9 +181,19 @@ void AiSandboxView::StageWorld() {
   cfg.millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
   sim_ = badlands::Sim(cfg, brain_desc);
 
-  // Creature stats and skill templates as data, same as game_view.cpp -- both
-  // apps must agree on them (a missing file keeps the compiled defaults). Must
-  // happen before staging: they are initial config, not live tuning.
+  // Behaviour tuning, creature stats and skill templates as data, same as
+  // game_view.cpp -- both apps MUST agree on them (a missing file keeps the
+  // compiled defaults). Must happen before staging: they are initial config,
+  // not live tuning.
+  //
+  // Loading the same three files the game loads is what makes this harness
+  // worth anything: a brain tuned against defaults here and against the JSON
+  // there would be a different brain, and the divergence would show up as a
+  // mystery in the game rather than as a result in the sandbox.
+  badlands::SimFactors factors = sim_.Factors();
+  if (badlands::LoadSimFactors("assets/creatures/factors.json", factors)) {
+    sim_.SetFactors(factors);
+  }
   badlands::CreatureCatalog catalog = sim_.Creatures();
   if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
     sim_.SetCreatureCatalog(catalog);
@@ -210,6 +221,16 @@ void AiSandboxView::BuildScene() {
   scene_.SetSunDirection(scene_context_.sun_direction);
   scene_.SetSunColor(scene_context_.sun_color);
   scene_.SetAmbientSH(scene_context_.ambient_sh);
+
+  // Every handle into the OLD graph is now a dangling id, and a dangling
+  // NodeHandle here does not merely fail -- it ALIASES. A fresh SceneGraph
+  // restarts its id counter at 1, so the stale capsule handles name the floor
+  // and the wall blocks just added, and SyncUnits' destroy pass would delete
+  // the arena it is standing in. Same for the projectile pool, which is
+  // persistent and would otherwise never be recreated: it would spend the rest
+  // of the session writing tracer transforms onto building parts.
+  capsule_nodes_.clear();
+  projectile_nodes_.clear();
 
   // Floor spans whatever the mode built, with headroom.
   const float floor_size = 2.0f * WorldHalfExtent() + 8.0f;

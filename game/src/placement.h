@@ -112,24 +112,33 @@ bool footprint_in_bounds(const Footprint& fp);
 void footprint_triangles(const Footprint& fp, std::vector<TriRef>& out);
 void margin_triangles(const Footprint& fp, std::vector<TriRef>& out);
 
-// Is this footprint placeable? Always: it must fit the grid, and its own
-// triangles may not land on an existing FOOTPRINT.
+// Is this footprint placeable?
 //
-// PlacementMargin::Player additionally enforces the player's spacing rule, in
-// both directions -- the candidate may not land on an existing MARGIN, and its
-// own margin may not cover an existing footprint. PlacementMargin::None drops
-// that rule entirely, so two footprints may abut.
+// PlacementMargin::None: it must fit the grid. That is the whole rule.
+// PlacementMargin::Player: it must additionally miss every existing footprint
+// AND margin, in both directions -- the candidate may not land on one, and its
+// own margin may not cover an existing footprint.
+//
+// NOT overlapping another building is a PLAYER constraint, which is why it sits
+// on that side of the line rather than in the primitive. Two authored blocks
+// sharing ground is harmless -- occupancy is a bitmask, so the union rasterizes
+// identically either way -- and forbidding it makes whole classes of structure
+// inexpressible. A 45-degree wall meeting an axis-aligned one is the case that
+// proves it: a slanted boundary and a vertical one cannot coincide, so every
+// such junction is either a small overlap or a gap, and a gap in a wall is a
+// hole. Refusing the overlap does not prevent the overlap; it prevents the wall.
 bool placement_valid(const PlacementState& st, const Footprint& fp, PlacementMargin margin);
 
 // --- Placement + poppables --------------------------------------------------
 
 // The PRIMITIVE. Stamps a footprint into the grid and records the building:
-// snap, bounds, footprint-vs-footprint, commit, bump nav_epoch. No margin, no
-// urban sprawl, no poppables, no cost. Returns the id, or UINT32_MAX.
+// snap, bounds, commit, bump nav_epoch. No margin, no overlap rule, no urban
+// sprawl, no poppables, no cost. Returns the id, or UINT32_MAX (out of bounds
+// is the only refusal).
 //
-// Two plops may TOUCH, which is what makes a solid wall expressible at all --
-// the player's margin exists precisely to keep buildings apart, and a wall is
-// the case where that is wrong.
+// Two plops may TOUCH and may OVERLAP, which is what makes a solid wall
+// expressible at all -- in any direction, not only along the axes. See
+// placement_valid above for why non-overlap belongs to the player.
 //
 // This is the reusable layer: place_building (below) is this plus the player's
 // constraints, and anything else that authors structures directly -- a prefab,

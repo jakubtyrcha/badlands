@@ -15,8 +15,10 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <deque>
+#include <utility>
 #include <vector>
 
 using namespace badlands;
@@ -110,11 +112,34 @@ TEST_CASE("every arena plops completely", "[arena]") {
         const ArenaLayout layout = build_arena(shape);
         REQUIRE(layout.plops.size() > 0);
         auto owned = arena_world(layout);
-        // Not one plop refused. Blocks tile the plane, so an overlap -- the
-        // only thing that can refuse one -- means the shape generator has left
-        // the lattice.
+        // Not one plop refused. Out of bounds is the only refusal a plop has,
+        // so this catches a shape that has wandered off the grid.
         CHECK(buildings_of(*owned).size() == layout.plops.size());
     }
+}
+
+TEST_CASE("every arena uses both lattices where its shape needs them", "[arena]") {
+    // The point of the diagonal rotation: a 45-degree side is a real slanted
+    // wall, not a staircase of axis-aligned boxes. A shape with slanted sides
+    // that emitted no rotation-1 blocks would have quietly regressed to one.
+    auto counts = [](ArenaShape s) {
+        int axis = 0, diag = 0;
+        for (const PlacementDesc& p : build_arena(s).plops) {
+            (p.rotation_index == 0 ? axis : diag) += 1;
+        }
+        return std::pair{axis, diag};
+    };
+    const auto [tube_axis, tube_diag] = counts(ArenaShape::Tube);
+    CHECK(tube_axis > 0);
+    CHECK(tube_diag == 0);  // a rectangle has no slanted side to build
+
+    const auto [oct_axis, oct_diag] = counts(ArenaShape::Octagon);
+    CHECK(oct_axis > 0);   // the flat top and bottom
+    CHECK(oct_diag > 0);   // the four slants
+
+    const auto [rhomb_axis, rhomb_diag] = counts(ArenaShape::Rhomboid);
+    CHECK(rhomb_diag > 0);  // every side is a slant
+    CHECK(rhomb_axis == 4); // the four columns, and nothing else
 }
 
 TEST_CASE("every arena is sealed", "[arena]") {
@@ -146,15 +171,19 @@ TEST_CASE("both spawn points are free and mutually reachable", "[arena]") {
     }
 }
 
-TEST_CASE("the diamond's columns obstruct", "[arena]") {
-    const ArenaLayout layout = build_arena(ArenaShape::Diamond);
+TEST_CASE("the rhomboid's columns obstruct", "[arena]") {
+    const ArenaLayout layout = build_arena(ArenaShape::Rhomboid);
     auto owned = arena_world(layout);
     rebuild_navmesh_if_stale(*owned);
     REQUIRE_FALSE(owned->navmesh.empty());
 
-    // Straight across the arena, through the column on the +x axis.
-    const glm::vec2 from{-18.0f, 0.0f};
-    const glm::vec2 to{18.0f, 0.0f};
+    // Straight past the +x column, which sits between these two points. Chosen
+    // well clear of the rhombus's sharp points: the walls converge there, so
+    // after the navmesh's clearance dilation the last few metres of each tip
+    // are not walkable -- correct for a 45-degree corner, and not what this
+    // case is about.
+    const glm::vec2 from{12.0f, -6.0f};
+    const glm::vec2 to{12.0f, 6.0f};
     const nav::NavMesh::PathResult r = owned->navmesh.FindPath(from, to);
     REQUIRE(r.reachable);
     float len = 0.0f;

@@ -391,6 +391,7 @@ set(badlands_app_sources_ai_sandbox
     src/executables/ai_sandbox/duel_mode.cpp
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
     src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
+    src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
     src/game/skill_manifest.cpp)    # skill template overrides loaded as data
 

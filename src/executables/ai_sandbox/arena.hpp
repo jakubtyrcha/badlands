@@ -8,22 +8,21 @@
 // system ever learns that these particular walls form a ring. "Arena" is a
 // pattern the sandbox knows how to lay out, and only the sandbox.
 //
-// EVERYTHING IS BUILT ON THE BLOCK LATTICE. A Wall is 4x4 tiles and snaps to an
-// integer centre, so blocks centred on multiples of 4 TILE THE PLANE exactly --
-// block (i, j) covers world [4i-2, 4i+2] x [4j-2, 4j+2]. Two consequences, and
-// both are why the shapes are defined this way rather than by tracing outlines:
+// SHAPES ARE BUILT FROM WALL RUNS ON BOTH LATTICES the placement grid provides.
+// The grid is a TRIANGLE grid (four triangles per tile, placement.h's
+// tri_index), and a footprint may be axis-aligned OR diagonal -- rotation 1
+// snaps a building to the (u, v) = (x+z, x-z) lattice instead of (x, z). So:
 //
-//   * No two plops can overlap, so none is ever refused, so a wall can never
-//     come out with a hole in it.
-//   * A shape is a PREDICATE over block coordinates, and its wall is the
-//     8-neighbour dilation of its interior minus the interior. That is sealed
-//     by construction: any path leaving the interior enters a wall block, and
-//     the 8- rather than 4-neighbour dilation is what closes the corner-to-
-//     corner diagonal gaps a staircase would otherwise leave.
+//   * an AXIS run is 4x4 blocks stepping 4 m along x or z; consecutive blocks
+//     share a face.
+//   * a DIAGONAL run is rotation-1 blocks stepping 6 in u (or v); each covers
+//     a 6-wide band in the other coordinate, and consecutive blocks share a
+//     face there too. The result is a true 45-degree wall, not a staircase.
 //
-// The cost is that diagonals are block staircases rather than true 45-degree
-// faces. At 4 m per block against a 40 m arena that reads as a chamfer, and it
-// buys the two guarantees above outright.
+// Runs may OVERLAP where they meet, and must: a slanted boundary and a vertical
+// one cannot coincide, so the octagon's flat side meeting its cut corner is
+// either a small overlap or a hole. plop_building allows the overlap precisely
+// so the hole is not the only alternative (see placement.h).
 
 #include <vector>
 
@@ -35,14 +34,16 @@ namespace badlands {
 
 enum class ArenaShape : int32_t {
     // A long corridor: room to run, nowhere to hide. The kiting reference --
-    // its long axis is several times a bow's reach.
+    // its long axis is several times a bow's reach. Axis runs only.
     Tube = 0,
-    // Wide and corner-less. No straight line longer than the width and no
-    // corner to be pinned in: the tube's opposite.
+    // Eight sides: a square with its corners cut, four axis-aligned faces and
+    // four 45-degree ones. Wide, corner-less, and nowhere to be pinned: the
+    // tube's opposite.
     Octagon,
-    // A square stood on its diagonal, with four block-sized columns ringing an
-    // open centre. The only shape where a runner can break line of pursuit.
-    Diamond,
+    // A rhombus -- four 45-degree sides and nothing else -- with four
+    // block-sized columns ringing an open centre. The only shape where a runner
+    // can break line of pursuit.
+    Rhomboid,
     Count
 };
 
@@ -56,8 +57,5 @@ struct ArenaLayout {
 };
 
 ArenaLayout build_arena(ArenaShape shape);
-
-// World XZ centre of block (i, j). Exposed because the tests reason in blocks.
-glm::vec2 arena_block_center(int i, int j);
 
 }  // namespace badlands
