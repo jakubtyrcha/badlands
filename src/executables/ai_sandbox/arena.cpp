@@ -94,10 +94,15 @@ void build_octagon(ArenaLayout& out) {
 // Interior |x| + |z| <= 21, i.e. |u| <= 21 and |v| <= 21: a rhombus 42 m across
 // each diagonal, with four pillars ringing an open centre.
 void build_rhomboid(ArenaLayout& out) {
+    // The u runs own the four tips: a v run reaching u = +-24 would emit a
+    // block the u run already placed, and a coincident duplicate is two
+    // identical meshes z-fighting on the sharpest, most visible corner of the
+    // arena. Stopping the v runs one step short costs no coverage -- the tip
+    // block is there either way.
     diag_run_u(out.plops, 24, -24, 24);
     diag_run_u(out.plops, -24, -24, 24);
-    diag_run_v(out.plops, 24, -24, 24);
-    diag_run_v(out.plops, -24, -24, 24);
+    diag_run_v(out.plops, 24, -18, 18);
+    diag_run_v(out.plops, -24, -18, 18);
     // Far enough apart that every lane between them stays wider than the
     // navmesh's clearance dilation -- a column that seals a corridor is a wall
     // with extra steps.
@@ -129,17 +134,8 @@ ArenaLayout build_arena(ArenaShape shape) {
         case ArenaShape::Tube: build_tube(layout); break;
         case ArenaShape::Octagon: build_octagon(layout); break;
         case ArenaShape::Rhomboid: build_rhomboid(layout); break;
-        case ArenaShape::Count: return layout;
+        case ArenaShape::Count: break;
     }
-
-    // Outer footprint, from the blocks themselves rather than restated per
-    // shape: a run that grows cannot leave the framing behind.
-    float half = 0.0f;
-    for (const PlacementDesc& p : layout.plops) {
-        const float reach = (p.rotation_index == 0) ? kAxisReach : kDiagReach;
-        half = std::max(half, std::max(std::abs(p.world_x), std::abs(p.world_z)) + reach);
-    }
-    layout.half_extent = {half, half};
     return layout;
 }
 

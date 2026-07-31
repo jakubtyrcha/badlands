@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -115,6 +116,18 @@ TEST_CASE("every arena plops completely", "[arena]") {
         // Not one plop refused. Out of bounds is the only refusal a plop has,
         // so this catches a shape that has wandered off the grid.
         CHECK(buildings_of(*owned).size() == layout.plops.size());
+
+        // ...and no two plops are the same block. Comparing counts alone
+        // cannot see this: a duplicate inflates BOTH sides equally. Two
+        // coincident blocks are two identical meshes z-fighting, which is
+        // exactly what happened where the rhomboid's diagonal runs met at its
+        // tips.
+        std::vector<std::tuple<int, float, float>> keys;
+        for (const PlacementDesc& p : layout.plops) {
+            keys.emplace_back(p.rotation_index, p.world_x, p.world_z);
+        }
+        std::sort(keys.begin(), keys.end());
+        CHECK(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
     }
 }
 

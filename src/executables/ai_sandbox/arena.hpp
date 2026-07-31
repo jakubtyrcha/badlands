@@ -53,7 +53,8 @@ struct ArenaLayout {
     std::vector<PlacementDesc> plops;  // walls first, then columns
     glm::vec2 spawn_a{};               // opposed interior points, both reachable
     glm::vec2 spawn_b{};
-    glm::vec2 half_extent{};           // outer footprint half-size (floor + framing)
+    // No extent field: the host measures the world it was given rather than
+    // being told, so it stays ignorant of what shape a mode thinks it built.
 };
 
 ArenaLayout build_arena(ArenaShape shape);

@@ -45,10 +45,14 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 constexpr float kCapsuleRadius = 0.35f;
 constexpr float kCapsuleCylinderHeight = 0.6f;
 
-// Snapshot buffer caps. A mode's world is small; a truncated snapshot would
-// only mean fewer rows drawn/listed, never a crash.
+// Snapshot buffer caps. A truncated snapshot means fewer rows drawn/listed,
+// never a crash.
 constexpr uint32_t kMaxCharacterRows = 64;
-constexpr uint32_t kMaxBuildingRows = 64;
+// Buildings needs real headroom now that a WALL is a building: an arena's ring
+// alone is 30-45 blocks, and the old town-sized 64 would silently stop drawing
+// part of a larger one -- as a gap in a wall, which is the single most
+// misleading thing this view could show.
+constexpr uint32_t kMaxBuildingRows = 512;
 constexpr uint32_t kMaxCommandRows = 24;
 
 // Activity names come from badlands::ActivityCatalog() -- the sim's own single
@@ -232,8 +236,10 @@ void AiSandboxView::BuildScene() {
   capsule_nodes_.clear();
   projectile_nodes_.clear();
 
-  // Floor spans whatever the mode built, with headroom.
-  const float floor_size = 2.0f * WorldHalfExtent() + 8.0f;
+  // Floor spans whatever the mode built, with headroom. Square, so it covers
+  // the longer axis.
+  const glm::vec2 half = WorldHalfExtent();
+  const float floor_size = 2.0f * std::max(half.x, half.y) + 8.0f;
   AddFloor(scene_, floor_size, matlib_.SolidColor(blockout::kArenaGray, blockout::kArenaRoughness),
            floor_size / kFloorUvRepeatSpacing);
 
@@ -261,15 +267,23 @@ void AiSandboxView::AddBuildings() {
   for (uint32_t i = 0; i < count; ++i) {
     const badlands::BuildingState& b = building_rows_[i];
     const BuildingVisual bv = building_visual(static_cast<badlands::BuildingKind>(b.kind));
-    const badlands::RenderBox box = badlands::RenderBoxOf(static_cast<badlands::BuildingKind>(b.kind), 0);
-    const badlands::RenderBox placed = badlands::RenderBoxOf(static_cast<badlands::BuildingKind>(b.kind), b.rotation_index);
+    // Dimensions AND yaw from the PLACED rotation. Taking the dimensions from
+    // rotation 0 instead is wrong the moment a building is placed diagonally: a
+    // rotation-1 footprint is a lattice diamond whose world side is
+    // spans/sqrt2 (RenderBoxOf's diagonal branch), 4.243 m for a 4x4 Wall, not
+    // the 4.0 the axis-aligned box reports. Consecutive blocks in a diagonal
+    // wall run sit 4.243 m apart, so the short mesh leaves a ~0.24 m slot
+    // between every pair -- a wall the navmesh treats as solid, drawn with gaps
+    // in it, in a harness whose whole job is watching AI deal with walls.
+    const badlands::RenderBox placed = badlands::RenderBoxOf(
+        static_cast<badlands::BuildingKind>(b.kind), b.rotation_index);
 
     const glm::mat4 transform =
         glm::translate(glm::mat4(1.0f), glm::vec3(b.center_x, 0.0f, b.center_z)) *
         glm::rotate(glm::mat4(1.0f), placed.yaw_radians, glm::vec3(0.0f, 1.0f, 0.0f));
 
     for (BuildingPart& part :
-         BuildBuildingParts(box.size_x, box.size_z, bv.height, bv.roof)) {
+         BuildBuildingParts(placed.size_x, placed.size_z, bv.height, bv.roof)) {
       const std::string name = "building_part_" + std::to_string(part_index++);
       AddMeshEntity(scene_, name.c_str(), std::move(part.mesh),
                     part.kind == BuildingPartKind::Wall ? wall_mat : roof_mat,
@@ -349,15 +363,28 @@ void AiSandboxView::SyncProjectiles() {
   }
 }
 
-float AiSandboxView::WorldHalfExtent() {
+glm::vec2 AiSandboxView::WorldHalfExtent() {
   // Derived from the world's own buildings rather than asked of the mode: the
   // host frames whatever is out there, and stays ignorant of what shape the
   // mode thinks it built.
+  //
+  // Per axis, not one number for both -- a 44 x 20 m corridor framed as a
+  // square is watched from nearly twice the height it needs.
   constexpr float kMinHalfExtent = 12.0f;  // a world with nothing in it still needs a floor
-  float half = kMinHalfExtent;
+  glm::vec2 half{kMinHalfExtent};
   for (const badlands::BuildingState& b : sim_.Buildings()) {
-    const float reach = 0.5f * static_cast<float>(std::max(b.width_tiles, b.depth_tiles));
-    half = std::max(half, std::max(std::abs(b.center_x), std::abs(b.center_z)) + reach);
+    // Through RenderBoxOf, so a DIAGONAL placement reports its real world
+    // bounding box: a rotation-1 4x4 reaches 3 m from its centre, not the 2 m
+    // the tile dimensions suggest.
+    const badlands::RenderBox box =
+        badlands::RenderBoxOf(static_cast<badlands::BuildingKind>(b.kind), b.rotation_index);
+    const float c = std::abs(std::cos(box.yaw_radians));
+    const float s = std::abs(std::sin(box.yaw_radians));
+    const float hx = 0.5f * box.size_x;
+    const float hz = 0.5f * box.size_z;
+    const glm::vec2 reach{hx * c + hz * s, hx * s + hz * c};  // the rotated box's AABB
+    half.x = std::max(half.x, std::abs(b.center_x) + reach.x);
+    half.y = std::max(half.y, std::abs(b.center_z) + reach.y);
   }
   return half;
 }
@@ -366,9 +393,11 @@ void AiSandboxView::FrameCamera() {
   gamecam_.focus = glm::vec3(0.0f);
   gamecam_.pitch_deg = 55.0f;
 
-  // Whatever the mode built, walls included.
-  const float half_x = WorldHalfExtent();
-  const float half_z = half_x;
+  // Whatever the mode built, walls included -- per axis, so a corridor is not
+  // framed as though it were as deep as it is long.
+  const glm::vec2 half = WorldHalfExtent();
+  const float half_x = half.x;
+  const float half_z = half.y;
 
   // Empirically-derived coefficients (world units of visible ground extent
   // per world unit of camera height) for GameCameraController's fixed

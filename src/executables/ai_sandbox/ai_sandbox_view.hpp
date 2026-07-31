@@ -74,10 +74,10 @@ class AiSandboxView : public AppView {
   // entity costs a transform write rather than a mesh rebuild.
   void BuildScene();
   void AddBuildings();
-  // Half-extent of everything built in the world, for the floor size and the
-  // camera framing. Read off the building snapshot, so the host never has to
-  // ask the mode how big its world is.
-  float WorldHalfExtent();
+  // Per-axis half-extent of everything built in the world, for the floor size
+  // and the camera framing. Read off the building snapshot, so the host never
+  // has to ask the mode how big its world is.
+  glm::vec2 WorldHalfExtent();
   // Per-frame: draw a thin box "tracer" for each in-flight projectile.
   void SyncProjectiles();
   // Per-frame: reads the game_state snapshot and moves/hides the capsule pool.
