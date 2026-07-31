@@ -34,6 +34,12 @@ enum class BuildingKind : int32_t {
     Watchtower,
     House,  // poppable
     Sewer,  // poppable
+    // A solid 4x4 block of masonry: no door, no roof, nothing inside. Exists to
+    // be an OBSTACLE -- it blocks the navmesh and the placement grid like any
+    // other building and does nothing else. Plopped rather than placed (see
+    // plop_building, game/src/placement.h), so a run of them abuts into a
+    // continuous wall with no lane down the seam.
+    Wall,
     Count
 };
 

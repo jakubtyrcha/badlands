@@ -21,11 +21,20 @@ constexpr int kGridHalf = kGridHalfExtentTiles;  // 48
 constexpr int kGridSize = 2 * kGridHalf;                // 96 tiles per axis
 constexpr int kTriangleCount = kGridSize * kGridSize * 4;
 
+// Whether a placement enforces the player's spacing rule. The ONE axis on which
+// plopping and player placement differ at the occupancy layer -- everything
+// else (snapping, rasterization, the building record, nav_epoch) is shared.
+enum class PlacementMargin { None, Player };
+
 struct PlacedBuilding {
     int32_t kind;
     glm::vec2 center;  // XZ, snapped
     int32_t rot;       // 0..3
     int32_t w, d;      // footprint tiles
+    // How this building was placed. Recorded rather than re-derived because
+    // rebuild_occupancy restamps every survivor after a destruction, and a
+    // plopped wall must not come back inflated with a margin it never had.
+    PlacementMargin margin = PlacementMargin::Player;
     bool alive = true; // tombstone: destruction sets false; id is never reused
     // Uncollected tax owed by this building; a tax collector banks it. Houses
     // accrue it at midnight (economy.cpp); a collector visit zeroes it.
@@ -103,14 +112,34 @@ bool footprint_in_bounds(const Footprint& fp);
 void footprint_triangles(const Footprint& fp, std::vector<TriRef>& out);
 void margin_triangles(const Footprint& fp, std::vector<TriRef>& out);
 
-// A footprint is placeable iff it fits the grid and no footprint triangle hits
-// an already-blocked cell.
-bool placement_valid(const PlacementState& st, const Footprint& fp);
+// Is this footprint placeable? Always: it must fit the grid, and its own
+// triangles may not land on an existing FOOTPRINT.
+//
+// PlacementMargin::Player additionally enforces the player's spacing rule, in
+// both directions -- the candidate may not land on an existing MARGIN, and its
+// own margin may not cover an existing footprint. PlacementMargin::None drops
+// that rule entirely, so two footprints may abut.
+bool placement_valid(const PlacementState& st, const Footprint& fp, PlacementMargin margin);
 
 // --- Placement + poppables --------------------------------------------------
 
-// Places a building (snapping desc center). Returns the id, or UINT32_MAX on an
-// invalid footprint. `player` gates the urban-sprawl accumulator + poppables.
+// The PRIMITIVE. Stamps a footprint into the grid and records the building:
+// snap, bounds, footprint-vs-footprint, commit, bump nav_epoch. No margin, no
+// urban sprawl, no poppables, no cost. Returns the id, or UINT32_MAX.
+//
+// Two plops may TOUCH, which is what makes a solid wall expressible at all --
+// the player's margin exists precisely to keep buildings apart, and a wall is
+// the case where that is wrong.
+//
+// This is the reusable layer: place_building (below) is this plus the player's
+// constraints, and anything else that authors structures directly -- a prefab,
+// a scripted layout, a generated map feature -- calls this and gets buildings
+// indistinguishable from the player's own afterwards.
+uint32_t plop_building(BadlandsGame& game, const PlacementDesc& desc);
+
+// The PLAYER path: plop_building plus the player's constraints. Refuses a
+// placement that lands on an existing footprint OR margin (either direction);
+// `player` additionally gates the urban-sprawl accumulator + poppables.
 uint32_t place_building(BadlandsGame& game, const PlacementDesc& desc, bool player);
 
 // Inconvenience heuristic: closeness to the castle plus the nearest apothecary.
