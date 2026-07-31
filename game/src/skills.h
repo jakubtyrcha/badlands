@@ -8,6 +8,7 @@
 
 #include "badlands_sim.hpp"
 #include "components.h"  // Skills
+#include "skill_abi.h"   // BlSkillCastContext / BlSkillEffectBatch -- the effect contract
 #include "behaviours/world_view.h"  // PerceivedThreat
 
 #include <span>
@@ -65,5 +66,29 @@ struct SkillRecommendation {
 // Fills out[0 .. Skills.count); returns Skills.count.
 int32_t evaluate_skill_triggers(const Skills& s, const SkillContext& ctx,
                                 SkillRecommendation out[kMaxSkills]);
+
+// --- effects: the pure half of a cast ---------------------------------------
+// One function per skill, and the ONLY thing a skill's own author writes. It
+// reads a flat context and appends ops (game/src/skill_abi.h) -- it cannot
+// touch the registry, cannot roll, and cannot apply anything itself. That is
+// what lets the same function be C++ today and a wasm export later: the
+// signature already is the wire.
+
+using SkillEffectFn = void (*)(const BlSkillCastContext&, BlSkillEffectBatch&);
+
+// Dense, indexed by SkillId (static_assert-pinned like SkillDefs). Never null:
+// a skill whose mechanic is not written yet gets a documented no-op.
+SkillEffectFn SkillEffectOf(SkillId id);
+
+// Named lookup over a context's constants, `fallback` when absent -- the
+// guest-side twin of SkillSpec::constant (the engine copies the spec's
+// constants into every context, so both read the same numbers by the same
+// names).
+float skill_constant(const BlSkillCastContext& ctx, const char* name, float fallback = 0.0f);
+
+// Appends one op; warns and drops at BL_SKILL_MAX_OPS rather than overrunning
+// (an effect asking for more than the batch holds is a bug in the effect, and
+// silently truncating it would read as "the engine ignored me").
+void push_effect_op(BlSkillEffectBatch& out, const BlSkillEffectOp& op);
 
 }  // namespace badlands

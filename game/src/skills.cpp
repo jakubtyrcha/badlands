@@ -1,5 +1,7 @@
 #include "skills.h"
 
+#include <spdlog/spdlog.h>
+
 #include <array>
 #include <cstring>
 
@@ -129,6 +131,70 @@ void grant_skills_for_level(Skills& s, int32_t hero_class, int32_t level) {
             learn_skill(s, g.skill);
         }
     }
+}
+
+// --- effects -----------------------------------------------------------------
+
+float skill_constant(const BlSkillCastContext& ctx, const char* name, float fallback) {
+    if (name == nullptr) {
+        return fallback;
+    }
+    for (int32_t i = 0; i < ctx.constant_count && i < BL_SKILL_MAX_CONSTANTS; ++i) {
+        if (std::strncmp(ctx.constants[i].name, name, BL_SKILL_NAME_LEN) == 0) {
+            return ctx.constants[i].value;
+        }
+    }
+    return fallback;
+}
+
+void push_effect_op(BlSkillEffectBatch& out, const BlSkillEffectOp& op) {
+    if (out.count >= BL_SKILL_MAX_OPS) {
+        spdlog::warn("[skill] effect asked for more than {} ops; extra dropped",
+                     BL_SKILL_MAX_OPS);
+        return;
+    }
+    out.ops[out.count++] = op;
+}
+
+namespace {
+
+// Calcify: absorbing the next strike needs a status that does not exist yet
+// (an absorb charge, not a timer), so this ward has no effect to run. It still
+// exists, is still granted, and still displays -- the mechanic is a later
+// slice. A no-op rather than a missing table entry, so SkillEffectOf is
+// total.
+void calcify_effect(const BlSkillCastContext&, BlSkillEffectBatch&) {}
+
+// ShieldBash: PURE CONTROL. The engine has already rolled the melee test this
+// skill declared (SkillAttackTest::Melee) against every target; a landed one
+// is stunned for the authored number of seconds, and the damage that roll
+// produced is deliberately thrown away -- the shield knocks the wind out of
+// something, it does not cut it.
+void shield_bash_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    const float seconds = skill_constant(ctx, "stun_seconds", 0.0f);
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        if (ctx.targets[i].attack_test != BL_TEST_HIT) {
+            continue;  // blocked, dodged, or never rolled -- nothing to stun
+        }
+        push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
+                                            static_cast<int32_t>(StatusKind::Stunned),
+                                            seconds * 1000.0f});
+    }
+}
+
+constexpr std::array<SkillEffectFn, static_cast<size_t>(kSkillCount)> kEffects{{
+    calcify_effect,
+    shield_bash_effect,
+}};
+
+}  // namespace
+
+SkillEffectFn SkillEffectOf(SkillId id) {
+    const int32_t i = static_cast<int32_t>(id);
+    if (i < 0 || i >= kSkillCount) {
+        return kEffects[0];
+    }
+    return kEffects[static_cast<size_t>(i)];
 }
 
 int32_t evaluate_skill_triggers(const Skills& s, const SkillContext& ctx,

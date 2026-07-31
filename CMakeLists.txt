@@ -590,6 +590,9 @@ add_executable(badlands_game_tests
     # Timed statuses: application/refresh/expiry + the cooldown sweep
     # (game/src/status.h).
     game/tests/status_tests.cpp
+    # Skill effects in isolation: the pure (cast context -> op batch) contract
+    # (game/src/skill_abi.h). No world, no Sim -- that IS the test.
+    game/tests/skill_effect_tests.cpp
     # Hero progression: leveling curve + XP accrual (game/src/progression.h).
     game/tests/progression_tests.cpp
     # Intention contract: inbox, wake rule, apply seam (game/src/intention.h).
