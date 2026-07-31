@@ -13,6 +13,7 @@
 #include "game/geometry/leaf_voxelizer.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
+#include "game/visual/foliage_voxel_config.hpp"
 #include "engine/rendering/geometry/mesh_builder_utils.hpp"  // PushVertex
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 
@@ -313,18 +314,14 @@ TEST_CASE(
     "VoxelizeLeafCards: every TreeCatalog preset stays in a sane tet-count "
     "band at the viewer's 3 native cell sizes") {
   // Mirrors model_viewer_view.cpp's per-tree native cell-size derivation
-  // (kFoliageVoxelWorldSizes[lod_level_ - 1] / s, s = kTreePreviewHeight /
-  // bark_height) -- duplicated here (not shared via a header) since those
-  // are viewer-local constants in model_viewer_view.cpp's anonymous
-  // namespace. Unlike the flat 0.15/0.30/0.60-NATIVE-units test above, this
-  // uses the tree's own preview-rescaled cell size, which varies a lot by
-  // preset since `s` depends on the preset's own native height -- e.g. a
+  // (kFoliageVoxelWorldSizes[lod_level_ - 1] / s, s = kFoliagePreviewHeight /
+  // bark_height) -- kFoliageVoxelWorldSizes/kFoliagePreviewHeight now come
+  // from the shared game/visual/foliage_voxel_config.hpp (see the include
+  // above) rather than a local mirror, so a retune there is tracked here
+  // automatically. Unlike the flat 0.15/0.30/0.60-NATIVE-units test above,
+  // this uses the tree's own preview-rescaled cell size, which varies a lot
+  // by preset since `s` depends on the preset's own native height -- e.g. a
   // Bush's L0 native cell size is ~0.23 while an Aspen (large)'s is ~1.86.
-  // Keep this array in sync with model_viewer_view.cpp's own
-  // kFoliageVoxelWorldSizes (Phase 6 retuned L1 from 0.30 to 0.20 -- see
-  // that constant's comment for why).
-  constexpr float kTreePreviewHeight = 8.0f;
-  constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.20f, 0.60f};
   // Generous headroom over the largest count measured across all 15 presets
   // x 3 levels (Oak (large) L0, ~11.7k tets) -- this bound exists to catch a
   // real order-of-magnitude blowup (e.g. a stray cell_size/rescale mixup),
@@ -339,7 +336,7 @@ TEST_CASE(
     const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
     const TexturedMeshResult bark = GenerateTreeMesh(setup.options, skeleton);
     const float bark_height = bark.local_bounds.max.y - bark.local_bounds.min.y;
-    const float s = kTreePreviewHeight / std::max(bark_height, 0.001f);
+    const float s = kFoliagePreviewHeight / std::max(bark_height, 0.001f);
     const TexturedMeshResult leaves = GenerateLeafMesh(setup.options, skeleton);
     REQUIRE(leaves.mesh.vertex_count > 0u);
 

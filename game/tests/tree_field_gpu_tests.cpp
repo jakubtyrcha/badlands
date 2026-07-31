@@ -68,6 +68,7 @@
 #include "game/geometry/leaf_voxelizer.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
+#include "game/visual/foliage_voxel_config.hpp"
 #include "game/visual/tree_field.hpp"  // Phase 5 field tests
 
 using namespace badlands;
@@ -354,15 +355,17 @@ TEST_CASE(
 // ===========================================================================
 namespace {
 
-// Mirrors model_viewer_view.cpp's kTreePreviewHeight -- the height one field
-// instance is rescaled to, so the camera distances / LOD thresholds below
-// (picked in these display-space units) are meaningful.
-constexpr float kFieldTreeHeight = 8.0f;
-// Mirrors kFoliageVoxelWorldSizes (preview-space cell sizes per LOD; Phase 6
-// retuned L1 from 0.30 to 0.20 -- see that constant's comment in
-// model_viewer_view.cpp for why).
-constexpr std::array<float, GpuInstanceRenderer::kMaxLods> kFieldVoxelWorldSizes = {
-    0.15f, 0.20f, 0.60f};
+// Aliases game/visual/foliage_voxel_config.hpp's shared kFoliagePreviewHeight
+// -- the height one field instance is rescaled to, so the camera distances /
+// LOD thresholds below (picked in these display-space units) are meaningful
+// -- under this file's existing local name (used throughout this section)
+// rather than a blanket rename.
+constexpr float kFieldTreeHeight = kFoliagePreviewHeight;
+// Aliases the shared kFoliageVoxelWorldSizes (preview-space cell sizes per
+// LOD -- see foliage_voxel_config.hpp for the constant itself + its Phase 6
+// retune derivation) under this file's existing local name.
+constexpr std::array<float, GpuInstanceRenderer::kMaxLods> kFieldVoxelWorldSizes =
+    kFoliageVoxelWorldSizes;
 // Straddled by the ~10/25/45m camera distances the LOD-selection test below
 // uses: 10 < 15 -> LOD0, 15 <= 25 < 35 -> LOD1, 45 >= 35 -> LOD2.
 constexpr std::array<float, 2> kFieldLodThresholds = {15.0f, 35.0f};
@@ -383,7 +386,7 @@ OakField BuildOakField(TestGpu& g, uint32_t capacity,
                        std::array<float, 2> lod_thresholds) {
   const TreeOptions oak = OakPreset();
   const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(oak);
-  const TexturedMeshResult bark = GenerateTreeMesh(oak, skeleton);
+  TexturedMeshResult bark = GenerateTreeMesh(oak, skeleton);
   const float h = bark.local_bounds.max.y - bark.local_bounds.min.y;
   const float s = kFieldTreeHeight / std::max(h, 0.001f);
 
@@ -399,8 +402,9 @@ OakField BuildOakField(TestGpu& g, uint32_t capacity,
 
   OakField result;
   result.s = s;
-  result.tf = BuildTreeField(g.device, g.queue, *g.gen, oak, leaf_lod_meshes,
-                             capacity, lod_thresholds);
+  result.tf = BuildTreeField(g.device, g.queue, *g.gen, oak, skeleton,
+                             std::move(bark), leaf_lod_meshes, capacity,
+                             lod_thresholds);
   REQUIRE(result.tf != nullptr);
   return result;
 }
@@ -704,6 +708,7 @@ TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
 
   const TreeOptions oak = OakPreset();
   const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(oak);
+  TexturedMeshResult bark = GenerateTreeMesh(oak, skeleton);
   const TexturedMeshResult leaves = GenerateLeafMesh(oak, skeleton);
 
   // Oak has no known-empty-LOD gap at a real cell size (see BuildOakField's
@@ -726,7 +731,8 @@ TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
   logger->sinks() = {ring_sink};
 
   std::unique_ptr<TreeField> field =
-      BuildTreeField(g.device, g.queue, *g.gen, oak, leaf_lod_meshes,
+      BuildTreeField(g.device, g.queue, *g.gen, oak, skeleton,
+                    std::move(bark), leaf_lod_meshes,
                     /*capacity=*/1, kFieldLodThresholds);
 
   const std::vector<std::string> messages = ring_sink->last_formatted();

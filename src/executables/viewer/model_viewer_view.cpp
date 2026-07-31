@@ -17,6 +17,7 @@
 #include "game/geometry/mesh_lod.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
+#include "game/visual/foliage_voxel_config.hpp"
 
 namespace badlands {
 
@@ -31,9 +32,11 @@ constexpr float kFloorRoughness = 1.0f;
 constexpr float kFloorSize = 40.0f;
 // One floor-UV repeat per ~2 world units instead of stretching one copy.
 constexpr float kFloorUvRepeatSpacing = 2.0f;
-// Preview height the tree generators are display-scaled to (their native ez-tree
-// units are tens-of-meters tall, which frames far away and reads tiny).
-constexpr float kTreePreviewHeight = 8.0f;
+// Preview height the tree generators are display-scaled to -- see
+// foliage_voxel_config.hpp's kFoliagePreviewHeight; aliased under this file's
+// existing local name (used throughout this file, both the single-tree and
+// Multi-mode paths) rather than a blanket rename.
+constexpr float kTreePreviewHeight = kFoliagePreviewHeight;
 
 // Multi mode ("LOD 4"): a grid of one instanced tree model with dynamic GPU
 // LOD (distance-based, chosen live by InstancedMeshField::Cull -- NOT the
@@ -63,37 +66,21 @@ constexpr std::array<float, 2> kMultiLodThresholds = {18.0f, 23.0f};
 
 // Voxel-crown LOD (volumetric-foliage Phase 3): three progressively coarser
 // tet-voxelization cell sizes, one per Voxel L0/L1/L2 mode
-// (kFoliageVoxelWorldSizes[lod_level_ - 1]), given in WORLD (preview) space
-// -- RebuildScene converts to the tree's own native units by dividing by `s`
-// (the same kTreePreviewHeight rescale bark/leaves already go through) before
-// passing it to LeafVoxelizeOptions::cell_size. kFoliageVoxelTargetPx itself
-// is not read by any distance-based selection (Voxel L0/L1/L2, lod_level_
-// 1..3, is still a manual mode switch) -- it documents the screen-space
-// budget the sizes below were derived from: world_size = target_px *
+// (kFoliageVoxelWorldSizes[lod_level_ - 1] -- see foliage_voxel_config.hpp,
+// included above, for the constant itself + its Phase 6 retune derivation),
+// given in WORLD (preview) space -- RebuildScene converts to the tree's own
+// native units by dividing by `s` (the same kTreePreviewHeight rescale bark/
+// leaves already go through) before passing it to
+// LeafVoxelizeOptions::cell_size. kFoliageVoxelTargetPx itself is not read by
+// any distance-based selection (Voxel L0/L1/L2, lod_level_ 1..3, is still a
+// manual mode switch) -- it documents the screen-space budget
+// kFoliageVoxelWorldSizes was derived from: world_size = target_px *
 // distance / focal_px, i.e. a world-space threshold distance = size *
 // focal_px / target_px. At 1920x1080/60deg vertical fovy, focal_px =
 // (height/2) / tan(fovy/2) = 540 / tan(30deg) ~= 935. kMultiLodThresholds
 // above (Phase 5) DOES derive its distance-based GPU LOD cutoffs from this
 // same formula, applied to Multi mode's own per-LOD voxel sizes.
 constexpr float kFoliageVoxelTargetPx = 8.0f;
-// Phase 6 MUST-FIX retune: L1 was 0.30 (the naive 0.15/0.30/0.60 doubling
-// progression), but at that exact preview-rescaled cell size, Pine
-// (medium)/(large)'s needle-sprig cards hit an aliasing dead zone in
-// SplatLeafCards' per-quad lattice sampling (nu=ceil(w_len/(cell_size/3))
-// lands on an even sample count for most of the crown's cards, so no
-// lattice sample -- all offset away from u=0 -- ever lands inside the
-// PineSprig stem/needle band; area_alpha is then exactly 0 for every cell,
-// not merely below occupancy_fraction*cell^2, so no occupancy_fraction
-// value can recover it). Swept world_l1 in
-// game/tests/leaf_voxelizer_tests.cpp: Pine (medium)/(large) (and, briefly,
-// Bush 3) go empty for every value in [0.23, 0.30]; [0.16, 0.22] is clear of
-// the dead zone for all 15 TreeCatalog presets. 0.20 sits mid-band for
-// margin on both sides and keeps monotonic tet counts (L0 >= L1 >= L2, all
-// non-empty, no preset balloons past the sane-band cap) -- see
-// leaf_voxelizer_tests.cpp's "every TreeCatalog preset stays in a sane
-// tet-count band" test, whose own kFoliageVoxelWorldSizes mirror must be
-// kept in sync with this array.
-constexpr std::array<float, 3> kFoliageVoxelWorldSizes = {0.15f, 0.20f, 0.60f};
 
 }  // namespace
 
@@ -298,14 +285,13 @@ void ModelViewerView::RebuildScene() {
     // leaf-crown mesh per LOD rather than voxelizing internally, so `s` (the
     // preview rescale factor) must be known BEFORE calling it, to convert
     // kFoliageVoxelWorldSizes (preview-space) into native-unit cell sizes --
-    // generate the skeleton/bark/leaves here to learn `s` and voxelize.
-    // BuildTreeField below regenerates its own bark internally from the same
-    // (options, skeleton) -- byte-identical, since generation is
-    // deterministic (see tree_field.cpp's own "generate once" comment) --
-    // so this is one extra generation pass, not a divergent source of truth.
+    // generate the skeleton/bark here to learn `s` and voxelize. BuildTreeField
+    // now takes this skeleton + bark mesh directly (review fix -- it used to
+    // regenerate its own byte-identical copies of both internally, a second
+    // full generation pass on top of this one), so `bark_for_scale` is moved
+    // into the call below instead of being thrown away.
     const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
-    const TexturedMeshResult bark_for_scale =
-        GenerateTreeMesh(*gen.tree, skeleton);
+    TexturedMeshResult bark_for_scale = GenerateTreeMesh(*gen.tree, skeleton);
     const float bark_h = bark_for_scale.local_bounds.max.y -
                          bark_for_scale.local_bounds.min.y;
     const float s = kTreePreviewHeight / std::max(bark_h, 0.001f);
@@ -321,9 +307,10 @@ void ModelViewerView::RebuildScene() {
           leaves_for_voxelize.mesh, gen.tree->leaves.silhouette, voxel_opts);
     }
 
-    std::unique_ptr<TreeField> field =
-        BuildTreeField(device_, queue_, *pipeline_gen_, *gen.tree,
-                       leaf_lod_meshes, capacity, kMultiLodThresholds);
+    std::unique_ptr<TreeField> field = BuildTreeField(
+        device_, queue_, *pipeline_gen_, *gen.tree, skeleton,
+        std::move(bark_for_scale), leaf_lod_meshes, capacity,
+        kMultiLodThresholds);
     if (!field) {
       // Mirrors the malformed-generator branch further down: log and bail
       // with a floor-only scene, leaving the orbit framing unchanged (an

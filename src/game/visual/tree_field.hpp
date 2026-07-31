@@ -48,6 +48,7 @@
 #include "engine/rendering/material/material_instance_cache.hpp"
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material/rendering_material_instance.hpp"
+#include "game/geometry/tree_generator.hpp"  // SkeletonBranch
 #include "game/geometry/tree_options.hpp"
 
 namespace badlands {
@@ -102,27 +103,35 @@ struct TreeField {
   bool has_leaves = false;
 };
 
-// Builds a TreeField for `options`: the branch skeleton is built ONCE, then
-// per LOD (0 = full detail; 1/2 = meshopt-simplified per kDefaultLodRatios,
-// mesh_lod.hpp) a bark mesh is generated, and `leaf_lod_meshes[lod]` -- the
-// caller's own pre-voxelized leaf-crown mesh for that LOD (see
-// game/geometry/leaf_voxelizer.hpp's VoxelizeLeafCards; ModelViewerView's
-// Multi mode voxelizes at kFoliageVoxelWorldSizes[lod] converted to native
-// units) -- is taken as-is. Both are GPU-uploaded and wired into a fresh
-// InstancedMeshField (capacity/lod_thresholds forwarded verbatim to its
-// ctor; num_models=1, num_submeshes=2); both submeshes render kDeferred and
-// cast shadows (see instanced_mesh_field.hpp's SetSubmeshShadow). A LOD
-// whose supplied leaf mesh is empty (e.g. a coarse voxel cell size that
-// clears no cell's occupancy threshold -- a known gap for some presets, see
-// leaf_voxelizer.hpp) simply leaves that LOD's leaf submesh slot
-// unconfigured (legal -- GpuInstanceRenderer::Draw skips zero-index-count
-// slots); it does not affect the bark submesh or any other LOD. Returns
-// nullptr (after logging) on any factory-build, field-compile, or
-// bark-mesh failure, or if `leaf_lod_meshes.size() !=
+// Builds a TreeField for `options`, given the caller's own ALREADY-BUILT
+// `skeleton` (BuildTreeSkeleton(options)) and LOD0 bark mesh
+// (`bark_lod0` -- GenerateTreeMesh(options, skeleton); taken by value, moved
+// in) -- BuildTreeField used to regenerate both of these internally, a second
+// (byte-identical but wasteful) generation pass on top of whatever the
+// caller already built them for (e.g. ModelViewerView's Multi mode builds
+// them to learn the preview-rescale factor `s` before it can even voxelize
+// leaves at native cell sizes); callers now build them once and pass both in.
+// Per LOD (0 = `bark_lod0` as-is; 1/2 = meshopt-simplified per
+// kDefaultLodRatios, mesh_lod.hpp) a bark mesh is derived, and
+// `leaf_lod_meshes[lod]` -- the caller's own pre-voxelized leaf-crown mesh
+// for that LOD (see game/geometry/leaf_voxelizer.hpp's VoxelizeLeafCards;
+// ModelViewerView's Multi mode voxelizes at kFoliageVoxelWorldSizes[lod]
+// converted to native units) -- is taken as-is. Both are GPU-uploaded and
+// wired into a fresh InstancedMeshField (capacity/lod_thresholds forwarded
+// verbatim to its ctor; num_models=1, num_submeshes=2); both submeshes
+// render kDeferred and cast shadows (see instanced_mesh_field.hpp's
+// SetSubmeshShadow). A LOD whose supplied leaf mesh is empty (e.g. a coarse
+// voxel cell size that clears no cell's occupancy threshold -- a known gap
+// for some presets, see leaf_voxelizer.hpp) simply leaves that LOD's leaf
+// submesh slot unconfigured (legal -- GpuInstanceRenderer::Draw skips
+// zero-index-count slots); it does not affect the bark submesh or any other
+// LOD. Returns nullptr (after logging) on any factory-build, field-compile,
+// or bark-mesh failure, or if `leaf_lod_meshes.size() !=
 // GpuInstanceRenderer::kMaxLods`.
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-    const TreeOptions& options,
+    const TreeOptions& options, const std::vector<SkeletonBranch>& skeleton,
+    TexturedMeshResult bark_lod0,
     std::span<const TexturedMeshResult> leaf_lod_meshes, uint32_t capacity,
     std::array<float, GpuInstanceRenderer::kMaxLods - 1> lod_thresholds);
 

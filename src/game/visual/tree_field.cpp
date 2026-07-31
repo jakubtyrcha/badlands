@@ -77,7 +77,8 @@ void SimplifyInPlace(StaticTexturedMeshComponent& mesh, float ratio) {
 
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-    const TreeOptions& options,
+    const TreeOptions& options, const std::vector<SkeletonBranch>& skeleton,
+    TexturedMeshResult bark_lod0,
     std::span<const TexturedMeshResult> leaf_lod_meshes, uint32_t capacity,
     std::array<float, GpuInstanceRenderer::kMaxLods - 1> lod_thresholds) {
   if (leaf_lod_meshes.size() != GpuInstanceRenderer::kMaxLods) {
@@ -161,16 +162,20 @@ std::unique_ptr<TreeField> BuildTreeField(
   wgpu::SamplerDescriptor support_sampler_desc{};
   tf->bark_support_sampler = device.CreateSampler(&support_sampler_desc);
 
-  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(options);
-
-  // Generate the bark mesh ONCE at LOD0 -- generation is deterministic, so a
-  // fresh GenerateTreeMesh call per lod (as this used to do) would reproduce
-  // byte-identical vertices/indices at 3x the cost. LOD1/2 below simplify a
-  // COPY of this LOD0 data at the shared ratio (kDefaultLodRatios), the
-  // single-tree path's exact pattern (model_viewer_view.cpp). Leaves have no
-  // such step here anymore: `leaf_lod_meshes[lod]` is already the caller's
-  // final per-LOD mesh (volumetric-foliage Phase 5).
-  TexturedMeshResult bark_lod0 = GenerateTreeMesh(options, skeleton);
+  // `skeleton`/`bark_lod0` are the CALLER's already-built skeleton + LOD0
+  // bark mesh (see this function's .hpp doc comment) -- generation is
+  // deterministic, so this used to rebuild both internally from `options`,
+  // reproducing byte-identical results at the cost of a second full
+  // generation pass on top of whatever the caller already needed them for.
+  // `skeleton` itself isn't read again here (bark_lod0 already carries
+  // everything this function needs from it); it's still a parameter so a
+  // caller's (options, skeleton) pairing stays explicit at the call site,
+  // matching GenerateTreeMesh/GenerateLeafMesh's own (options, skeleton)
+  // convention. LOD1/2 below simplify a COPY of bark_lod0's data at the
+  // shared ratio (kDefaultLodRatios), the single-tree path's exact pattern
+  // (model_viewer_view.cpp). Leaves have no such step here: `leaf_lod_meshes
+  // [lod]` is already the caller's final per-LOD mesh (volumetric-foliage
+  // Phase 5).
   tf->bark_local_bounds = bark_lod0.local_bounds;
 
   // leaf_local_bounds = the UNION of every supplied LOD's own bounds (voxel
