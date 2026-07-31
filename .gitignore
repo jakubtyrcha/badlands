@@ -10,3 +10,4 @@ build/
 .superpowers/
 __pycache__/
 third_party/toolchains/
+duelsim_out/

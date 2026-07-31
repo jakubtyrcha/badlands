@@ -1159,6 +1159,49 @@ add_test(NAME badlands_skill_manifest_tests COMMAND badlands_skill_manifest_test
 # badlands_scenario_tests: the app-layer sandbox loaders (arena scenarios +
 # creature-stat overrides -> sim data). Lean, like factors_manifest_tests:
 # creature_catalog.cpp depends on badlands_sim.hpp alone, so no full-sim link.
+# badlands_duelsim: the balance REPORT tool. Headless and pure-CPU -- links
+# badlands_game_lib only (no engine, no Dawn, no SDL), so it builds and runs
+# fast. Simulates every 1v1 pairing and writes a win matrix, a calibration
+# report against the fixed threat anchors, and SVG parameter charts. It
+# REPORTS; nothing here asserts a balance outcome.
+add_executable(badlands_duelsim
+    src/executables/duelsim/main_duelsim.cpp
+    src/executables/duelsim/duel_matrix.cpp
+    src/executables/duelsim/svg_chart.cpp
+    src/game/brain_asset.cpp  # the hero brain wasm: the ONLY hero decision layer
+)
+target_include_directories(badlands_duelsim PRIVATE
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+)
+target_link_libraries(badlands_duelsim PRIVATE badlands_game_lib)
+
+# badlands_duelsim_tests: the svg writer (pure, no game types) plus the duel
+# runner's determinism. Mechanism only -- see the tool's own file comment.
+add_executable(badlands_duelsim_tests
+    src/executables/duelsim/tests/duelsim_tests.cpp
+    src/executables/duelsim/duel_matrix.cpp
+    src/executables/duelsim/svg_chart.cpp
+    src/game/brain_asset.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_duelsim_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/game/include
+    ${CMAKE_SOURCE_DIR}/game/src
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/executables/duelsim
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/entt/single_include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_duelsim_tests PRIVATE badlands_game_lib)
+add_test(NAME badlands_duelsim_tests COMMAND badlands_duelsim_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(badlands_scenario_tests
     src/game/tests/scenario_tests.cpp
     src/game/scenario.cpp
