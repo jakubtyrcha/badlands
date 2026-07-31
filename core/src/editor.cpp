@@ -19,20 +19,14 @@ inline constexpr float kGizmoHalfExtent = 1.5f;
 
 namespace {
 
-// Editor-tuned DCSDD config: w_update lowered from the paper-faithful
-// default (0.5) to 0.1, carrying forward a D5 review finding. At low outer-
-// iteration counts, the default 0.5 produced unstable facet orientation --
-// the sphere acceptance test (see task-D5-report.md and dcsdd_tests.cpp)
-// intermittently hit a handful of near-degenerate, noise-dominated quad
-// diagonals whose winding flipped depending on w_update (non-monotone
-// inverted-facet counts across the outer-iteration sweep in that test);
-// w_update = 0.1 was validated stable there (0/816 failing triangles across
-// outer_iters in {10,20,30}). All other fields stay at struct defaults
-// (resolution 64, outer_iters 30, inner_iters 30).
+// Editor-tuned DCSDD config: struct defaults only (resolution 64,
+// outer_iters 30, inner_iters 30, w_update 0.1 -- see DcsddConfig's own
+// comment in dcsdd.h for why w_update departs from the paper's 0.5 default;
+// this function used to override it explicitly, until D8 review finding 3
+// made 0.1 the struct default itself, since every real consumer -- this one
+// included -- already wanted it).
 DcsddConfig editor_mesh_config() {
-    DcsddConfig config;
-    config.w_update = 0.1f;
-    return config;
+    return DcsddConfig{};
 }
 
 } // namespace

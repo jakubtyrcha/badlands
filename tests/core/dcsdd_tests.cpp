@@ -1301,6 +1301,86 @@ TEST_CASE("build_sample_row / optimize_cell_vertex: alpha=0 rule -- a sample who
     }
 }
 
+// --- D8 review finding 2: NaN lock-in in the fan-triangle winner search ------
+
+TEST_CASE("optimize_cell_vertex: a degenerate FIRST fan triangle (face point bitwise-"
+          "equal to its own Hermite point -> 0/0 barycentric -> NaN closest-point "
+          "distance) must not lock the per-sample winner search in place forever; a "
+          "later valid triangle should still win, matching the result obtained with "
+          "only the valid entry present") {
+    // Whenever a fan triangle's a==b bitwise (face_point == hermite_point,
+    // i.e. p==h), closest_point_on_triangle_barycentric's Voronoi cascade
+    // ALWAYS lands on the "edge ab" branch, regardless of the query point:
+    // ab=(0,0,0) forces d1=dot(ab,ap)=0 and d3=dot(ab,bp)=0 exactly, which
+    // forces vc=d1*d4-d3*d2=0 exactly, so the edge-ab condition
+    // (vc<=0 && d1>=0 && d3<=0) holds trivially -- UNLESS the earlier
+    // vertex-a check (d1<=0 && d2<=0) fires first, so this fixture's query
+    // point is chosen with d2=dot(ac,ap) > 0 to reach the edge-ab branch
+    // instead. There, v = d1/(d1-d3) = 0/0 -> NaN, and the returned point is
+    // a + NaN*(0,0,0) = NaN in every component.
+    //
+    // Fan entry 0 (degenerate): face_points[0] == hermite_p[0] == (0,0,0)
+    // bitwise. Fan entry 1 (valid): the same (p,h) pair used by the plane-
+    // convergence fixture elsewhere in this file (face_points[1]=(5,3,4),
+    // hermite_p[1]=(3,5,4)).
+    DcsddInit init;
+    init.cell_id = {0};
+    init.hermite_n = {simd_float3{1.0f, 0.0f, 0.0f}, simd_float3{0.0f, 0.0f, 1.0f}};
+    init.hermite_p = {simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{3.0f, 5.0f, 4.0f}};
+    init.cell_edge_offsets = {0, 2};
+    init.cell_edge_indices = {0, 1};
+
+    GlobalMesh mesh;
+    mesh.face_points = {simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{5.0f, 3.0f, 4.0f}};
+
+    CellFans fans_buggy;
+    fans_buggy.cell_fan_offsets = {0, 2};
+    fans_buggy.fan_face_point = {0, 1}; // entry0: degenerate; entry1: valid -- degenerate FIRST
+    fans_buggy.fan_edge = {0, 1};
+
+    CellFans fans_control; // same state, only the valid (second) fan entry present
+    fans_control.cell_fan_offsets = {0, 1};
+    fans_control.fan_face_point = {1};
+    fans_control.fan_edge = {1};
+
+    SampleGrid grid;
+    grid.n = 44;
+    grid.spacing = 0.1f;
+    grid.origin = simd_float3{0.0f, 0.0f, 0.0f};
+    grid.values.assign(static_cast<size_t>(44 * 44 * 44), 0.0f);
+    const int32_t coordA[3] = {35, 35, 43}; // world (3.5,3.5,4.3)
+    const int32_t flatA = static_cast<int32_t>(flat_index(coordA[0], coordA[1], coordA[2], grid.n));
+    grid.values[static_cast<size_t>(flatA)] = 0.3f; // s
+
+    SampleAssignment assignment;
+    assignment.cell_sample_offsets = {0, 1};
+    assignment.cell_sample_indices = {flatA};
+
+    // d2 = dot(x_start - p0, sample_pos - p0) = dot(x_start, sample_pos)
+    // (p0 is the origin) = 3.3*3.5 + 3.3*3.5 + 6.0*4.3 = 48.9 > 0 -- reaches
+    // the edge-ab branch rather than the earlier vertex-a shortcut.
+    const simd_float3 x_start = {3.3f, 3.3f, 6.0f};
+
+    DcsddConfig config; // defaults
+
+    const simd_float3 x_buggy = optimize_cell_vertex(0, x_start, init, mesh, fans_buggy, assignment, grid, config);
+    CHECK(std::isfinite(x_buggy.x));
+    CHECK(std::isfinite(x_buggy.y));
+    CHECK(std::isfinite(x_buggy.z));
+
+    const simd_float3 x_control =
+        optimize_cell_vertex(0, x_start, init, mesh, fans_control, assignment, grid, config);
+    check_float3_approx(x_buggy, x_control);
+}
+
+// --- D8 review finding 3: DcsddConfig's w_update default ---------------------
+
+TEST_CASE("DcsddConfig: w_update defaults to 0.1, not the paper-faithful 0.5 (this "
+          "struct's own comment documents 0.5 as unstable at outer_iters=30, and every "
+          "real consumer wanted 0.1 anyway -- D8 review finding 3)") {
+    CHECK(DcsddConfig{}.w_update == 0.1f);
+}
+
 // =============================================================================
 // D5: Hermite update (Eq. 7) + outer loop + full pipeline. All pinned
 // literals below regenerated independently against the D5 brief's algorithm
@@ -1387,6 +1467,63 @@ TEST_CASE("smallest_eigenvector_symmetric3x3 / pca_best_fit_plane: rank-0 covari
     CHECK(std::isfinite(plane.normal.x));
     CHECK(std::isfinite(plane.normal.y));
     CHECK(std::isfinite(plane.normal.z));
+}
+
+// --- D8 review finding 1: eigenvalues_symmetric3x3's diagonal-branch guard ---
+// must be scale-relative, not absolute.
+
+TEST_CASE("smallest_eigenvector_symmetric3x3 / pca_best_fit_plane: small-world-scale "
+          "genuinely-non-diagonal covariance -- the old ABSOLUTE p1 < 1e-12f guard "
+          "misfires here (p1 ~2.5e-15) even though the matrix is far from diagonal "
+          "(p1/frob_sq ~0.2), so a scale-RELATIVE guard is required") {
+    // 4 points exactly on the plane x=y (x_i == y_i bitwise), spread by
+    // ~1e-4 within that plane (a tiny, small-world-scale cell -- e.g. a fine
+    // grid's cell diagonal), plus a similarly tiny, independent z spread.
+    // Because x==y exactly, Cxy == Cxx == Cyy exactly -- NOT negligible
+    // relative to the diagonal, i.e. the covariance is genuinely rank-
+    // deficient along (1,-1,0), not diagonal -- but the tiny absolute scale
+    // (~1e-4 deviations) still drives every entry down to ~1e-8, so
+    // p1 = Cxy^2+Cxz^2+Cyz^2 lands at ~2.5e-15: comfortably under the old
+    // absolute `p1 < 1e-12f` threshold (same failure class the brief
+    // describes, same order of magnitude as its illustrative ~2e-8
+    // off-diagonal / ~4e-16 p1 figures), while p1/frob_sq is ~0.2 -- nowhere
+    // near negligible.
+    //
+    // python3 (np.float64), independent of this codebase:
+    //   pts = [(-1.5e-4,-1.5e-4,0.5e-4), (-0.5e-4,-0.5e-4,-1.5e-4),
+    //          (0.5e-4,0.5e-4,1.5e-4), (1.5e-4,1.5e-4,-0.5e-4)]
+    //   centroid = (0,0,0) (exactly, up to float64 noise ~1.7e-21)
+    //   cov = [[5e-8,5e-8,~0],[5e-8,5e-8,~0],[~0,~0,5e-8]]
+    //     (the ~0 off-diagonal entries are float64 noise, ~3.7e-25)
+    //   p1 = m01^2+m02^2+m12^2 = 2.4999999999999992e-15
+    //     (< 1e-12 -- the OLD code's absolute guard fires here)
+    //   frob_sq (sum of squares of all 9 entries) = 1.2499999999999996e-14;
+    //     p1/frob_sq = 0.2 -- genuinely non-diagonal; a relative guard with
+    //     kRelEps ~1e-12f correctly does NOT fire (0.2 >> 1e-12)
+    //   np.linalg.eigh(cov) -> eigenvalues [0, 5e-08, 1e-07], smallest
+    //     eigenvector (-0.7071067811865475, 0.7071067811865475,
+    //     -5.27e-18) == -(0.70710678,-0.70710678,0) (sign is arbitrary --
+    //     eigenvectors are sign-ambiguous)
+    //   Simulating THIS file's exact algorithm (eigenvalues_symmetric3x3's
+    //   general trigonometric branch + smallest_eigenvector_symmetric3x3's
+    //   best-of-3-row-pairs cross product) in float32 on this covariance
+    //   gives (0.7071068,-0.7071068,0.0) -- the fixed sign pinned below.
+    //   The OLD buggy code instead takes the diagonal branch (sorted diag =
+    //   [5e-8,5e-8,5e-8], lambda_min=5e-8 -- WRONG, the true smallest is 0),
+    //   then runs the SAME cross-product eigenvector step on that wrong
+    //   lambda_min, landing on (-7.45e-18,-7.45e-18,-1.0) -- i.e.
+    //   (0,0,-1)-ish, exactly the brief's predicted failure mode, nowhere
+    //   near the plane's true normal.
+    const std::array<simd_float3, 4> pts = {
+        simd_float3{-1.5e-4f, -1.5e-4f, 0.5e-4f},
+        simd_float3{-0.5e-4f, -0.5e-4f, -1.5e-4f},
+        simd_float3{0.5e-4f, 0.5e-4f, 1.5e-4f},
+        simd_float3{1.5e-4f, 1.5e-4f, -0.5e-4f},
+    };
+    const PcaPlane plane = pca_best_fit_plane(pts);
+    check_float3_approx(plane.centroid, simd_float3{0.0f, 0.0f, 0.0f});
+    check_float3_approx(plane.normal, simd_float3{0.70710678f, -0.70710678f, 0.0f});
+    CHECK(simd_length(plane.normal) == doctest::Approx(1.0f));
 }
 
 // --- D5 item: sign disambiguation ----------------------------------------------
@@ -1614,35 +1751,36 @@ TEST_CASE("reconstruct: sphere acceptance -- every output vertex within tol of t
           "points outward") {
     // Test-speed config per the brief: outer=10, inner=10 (paper defaults are
     // 100/100; the acceptance property itself, not iteration count, is what's
-    // pinned).
+    // pinned). w_update stays at DcsddConfig's own default (0.1, not the
+    // paper's 0.5 -- see DcsddConfig's comment in dcsdd.h; D8 review finding
+    // 3 made that struct default match what this test -- and every other
+    // real consumer -- already needed, so no override here anymore).
     //
-    // w_update lowered from DcsddConfig's default (0.5) to 0.1 for THIS test
-    // only (still inside Eq. 7's valid w_u in [0,1], just below the paper's
-    // "generally best results" range [0.2,0.8] -- that range is about
-    // long-run quality at the paper's default 100 outer iterations, not a
-    // hard floor). Root-caused via a standalone diagnostic (see
-    // task-D5-report.md): at only 10 outer iterations, w_update=0.5
-    // intermittently produced a handful of quads (out of ~800) where two
-    // ADJACENT cells' vertices converge close together tangentially (an
-    // expected DC-family effect -- vertex position is strongly constrained
-    // along the Hermite normal but only weakly tangentially), shrinking one
-    // half of the quad into a near-degenerate sliver whose orientation
-    // becomes noise-dominated; a smaller w_update damps the per-iteration
-    // Hermite-normal swing (Eq. 7 weights the FRESH PCA normal at 1 and only
-    // the OLD normal at w_u, so larger w_u swings the normal further towards
-    // each iteration's fresh -- and possibly noisy -- PCA estimate) enough to
-    // avoid it. This matches the paper's own Fig. 11 caption verbatim:
-    // "Increasing the update weight wu may not always improve accuracy when
-    // the number of outer iterations is low". Swept w_update in
-    // {0.05,0.1,0.15} and outer_iters in {10,20,30} at inner=10: 0.1 gives
-    // 0/816 failing triangles at all three outer_iters values (0.05 and 0.15
-    // both leave a couple), so this isn't a lucky one-off pin -- see the
-    // report for the full sweep.
+    // Why 0.1 and not the paper's 0.5 (still inside Eq. 7's valid w_u in
+    // [0,1], just below the paper's "generally best results" range
+    // [0.2,0.8] -- that range is about long-run quality at the paper's
+    // default 100 outer iterations, not a hard floor): root-caused via a
+    // standalone diagnostic (see task-D5-report.md): at only 10 outer
+    // iterations, w_update=0.5 intermittently produced a handful of quads
+    // (out of ~800) where two ADJACENT cells' vertices converge close
+    // together tangentially (an expected DC-family effect -- vertex position
+    // is strongly constrained along the Hermite normal but only weakly
+    // tangentially), shrinking one half of the quad into a near-degenerate
+    // sliver whose orientation becomes noise-dominated; a smaller w_update
+    // damps the per-iteration Hermite-normal swing (Eq. 7 weights the FRESH
+    // PCA normal at 1 and only the OLD normal at w_u, so larger w_u swings
+    // the normal further towards each iteration's fresh -- and possibly
+    // noisy -- PCA estimate) enough to avoid it. This matches the paper's
+    // own Fig. 11 caption verbatim: "Increasing the update weight wu may not
+    // always improve accuracy when the number of outer iterations is low".
+    // Swept w_update in {0.05,0.1,0.15} and outer_iters in {10,20,30} at
+    // inner=10: 0.1 gives 0/816 failing triangles at all three outer_iters
+    // values (0.05 and 0.15 both leave a couple), so this isn't a lucky
+    // one-off pin -- see the report for the full sweep.
     const SampleGrid grid = sphere_acceptance_grid();
     DcsddConfig config;
     config.outer_iters = 10;
     config.inner_iters = 10;
-    config.w_update = 0.1f;
 
     const TriangleMesh mesh = reconstruct(grid, config);
     REQUIRE_FALSE(mesh.positions.empty());
@@ -1734,9 +1872,12 @@ TEST_CASE("reconstruct: Fig. 16 box acceptance -- a grid-misaligned box's 8 true
         CAPTURE(max_corner_err);
         CHECK(best < eps);
     }
-    // Achieved max corner error on this fixture: 0.005021 -- well inside eps
-    // (0.0225, ~4.5x margin). Not pinned as a literal (emergent property of
-    // the whole pipeline) -- see task-D5-report.md.
+    // Achieved max corner error on this fixture: 0.006774 -- well inside eps
+    // (0.0225, ~3.3x margin). Not pinned as a literal (emergent property of
+    // the whole pipeline) -- see task-D5-report.md. (D8 review finding 3:
+    // this moved from 0.005021/~4.5x margin when w_update was still the
+    // paper-faithful 0.5 -- this test never overrode it -- to 0.006774/~3.3x
+    // now that DcsddConfig's own default is 0.1; still comfortably passing.)
 }
 
 // --- D5 item 6: determinism -------------------------------------------------------

@@ -179,12 +179,21 @@ struct DcsddConfig {
     float inner_tol = 1e-5f;  // convergence threshold on ||x_{r+1} - x_r||
 
     int32_t outer_iters = 30; // outer-loop iteration cap (fixed count, no early exit); paper default 100
-    // paper w_u (Eq. 7 Hermite-update weight); paper recommends [0.2, 0.8].
-    // WARNING (D5 finding): at low outer-iteration counts, this paper-
-    // faithful default can produce unstable/inverted facet winding (paper
-    // Fig. 11's own caveat) -- see editor_mesh_config() in core/src/
-    // editor.cpp, which pins 0.1 for exactly this reason.
-    float w_update = 0.5f;
+    // paper w_u (Eq. 7 Hermite-update weight); paper's own value is 0.5,
+    // with a "generally best results" range of [0.2, 0.8] (both reference
+    // points for the paper's default outer_iters=100). D8 review finding 3:
+    // this struct's default instead departs from the paper at 0.1, because
+    // at the outer_iters=30 default directly above, the paper-faithful 0.5
+    // produced unstable/inverted facet winding (paper Fig. 11's own caveat:
+    // "increasing w_u may not always improve accuracy when the number of
+    // outer iterations is low") -- see the sphere acceptance test's
+    // w_update sweep comment in dcsdd_tests.cpp for the concrete
+    // failure-rate numbers this was root-caused against. Every real
+    // consumer at this file's default outer_iters was already overriding to
+    // 0.1 before this fix (editor_mesh_config() in core/src/editor.cpp,
+    // MeshJobRunner's tests); this just makes the struct's own default match
+    // reality instead of the unstable paper value.
+    float w_update = 0.1f;
     int32_t resolution = 64;  // grid samples per axis; consumed by editor-side sampling (later task) --
                                // carried here so all DCSDD tunables live in one struct
 };

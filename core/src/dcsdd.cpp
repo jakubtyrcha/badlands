@@ -21,55 +21,19 @@ HermitePoint hermite_crossing(float s_a, float s_b, simd_float3 u_a, simd_float3
 }
 
 simd_float3 closest_point_on_triangle(simd_float3 p, simd_float3 a, simd_float3 b, simd_float3 c) {
-    // Ericson, "Real-Time Collision Detection" §5.1.5: check each vertex's
-    // and edge's Voronoi region in turn (via the standard barycentric sign
-    // tests), falling through to the face interior if none matched.
-    const simd_float3 ab = b - a;
-    const simd_float3 ac = c - a;
-    const simd_float3 ap = p - a;
-    const float d1 = simd_dot(ab, ap);
-    const float d2 = simd_dot(ac, ap);
-    if (d1 <= 0.0f && d2 <= 0.0f) return a; // vertex region a
-
-    const simd_float3 bp = p - b;
-    const float d3 = simd_dot(ab, bp);
-    const float d4 = simd_dot(ac, bp);
-    if (d3 >= 0.0f && d4 <= d3) return b; // vertex region b
-
-    const float vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
-        const float v = d1 / (d1 - d3);
-        return a + v * ab; // edge region ab
-    }
-
-    const simd_float3 cp = p - c;
-    const float d5 = simd_dot(ab, cp);
-    const float d6 = simd_dot(ac, cp);
-    if (d6 >= 0.0f && d5 <= d6) return c; // vertex region c
-
-    const float vb_ = d5 * d2 - d1 * d6;
-    if (vb_ <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
-        const float w = d2 / (d2 - d6);
-        return a + w * ac; // edge region ac
-    }
-
-    const float va_ = d3 * d6 - d5 * d4;
-    if (va_ <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
-        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return b + w * (c - b); // edge region bc
-    }
-
-    // Face interior: barycentric coords from the three Voronoi determinants.
-    const float denom = 1.0f / (va_ + vb_ + vc);
-    const float v = vb_ * denom;
-    const float w = vc * denom;
-    return a + ab * v + ac * w;
+    // Thin wrapper: closest_point_on_triangle_barycentric below holds the
+    // one Voronoi-region implementation; this just discards the weights.
+    return closest_point_on_triangle_barycentric(p, a, b, c).point;
 }
 
 TriangleBarycentric closest_point_on_triangle_barycentric(simd_float3 p, simd_float3 a, simd_float3 b,
                                                             simd_float3 c) {
-    // Identical Voronoi-region derivation to closest_point_on_triangle above,
-    // additionally reporting the barycentric weights at each region.
+    // Ericson, "Real-Time Collision Detection" §5.1.5: check each vertex's
+    // and edge's Voronoi region in turn (via the standard barycentric sign
+    // tests), falling through to the face interior if none matched, also
+    // reporting the barycentric weights at each region. The sole
+    // implementation of this derivation -- closest_point_on_triangle above
+    // is a thin wrapper over this function that discards the weights.
     const simd_float3 ab = b - a;
     const simd_float3 ac = c - a;
     const simd_float3 ap = p - a;
@@ -679,28 +643,52 @@ SolveRow build_hermite_row(simd_float3 n, simd_float3 h, float w_hermite) {
     return SolveRow{w_hermite * n, w_hermite * simd_dot(n, h)};
 }
 
-simd_float3 solve_weighted_normal_equations(const std::vector<SolveRow>& rows, float mu, simd_float3 x_prev) {
-    // Accumulate QtQ/Qtc directly (no matrix library): QtQ = sum coeff*coeffT,
-    // Qtc = sum coeff*rhs.
+namespace {
+
+// Row-accumulator unit: folds SolveRows one at a time straight into the 3x3
+// QtQ/Qtc sums (add()), then solves the regularized normal equations
+// (solve()). Factored out of solve_weighted_normal_equations so
+// optimize_cell_vertex_step's hot loop (below) can fold each row in as it's
+// built -- via add() -- instead of materializing a std::vector<SolveRow> and
+// handing it to solve_weighted_normal_equations wholesale (that function
+// still exists, in terms of this same accumulator, for its own direct
+// callers/tests). Folding one row at a time like this, in the same order the
+// vector-based loop used to push_back them, keeps the summation bit-
+// identical -- floating-point addition is not associative, so accumulation
+// ORDER (not just membership) must be preserved for the determinism test and
+// every pinned solve literal to keep matching.
+struct NormalEquationsAccumulator {
     simd_float3x3 QtQ = {simd_float3{0, 0, 0}, simd_float3{0, 0, 0}, simd_float3{0, 0, 0}};
     simd_float3 Qtc = {0.0f, 0.0f, 0.0f};
-    for (const SolveRow& row : rows) {
+
+    void add(const SolveRow& row) {
         const simd_float3& c = row.coeff;
         QtQ.columns[0] += c.x * c;
         QtQ.columns[1] += c.y * c;
         QtQ.columns[2] += c.z * c;
         Qtc += c * row.rhs;
     }
-    // Regularizer (Eq. 11): mu*I toward x_prev. mu > 0 makes QtQ + mu*I
-    // strictly positive definite regardless of how degenerate `rows` is
-    // (QtQ alone is only PSD -- e.g. zero rows, or all rows parallel, would
-    // leave it singular), so this 3x3 is always invertible.
-    QtQ.columns[0].x += mu;
-    QtQ.columns[1].y += mu;
-    QtQ.columns[2].z += mu;
-    Qtc += mu * x_prev;
 
-    return simd_mul(simd_inverse(QtQ), Qtc);
+    simd_float3 solve(float mu, simd_float3 x_prev) {
+        // Regularizer (Eq. 11): mu*I toward x_prev. mu > 0 makes QtQ + mu*I
+        // strictly positive definite regardless of how degenerate the
+        // accumulated rows are (QtQ alone is only PSD -- e.g. zero rows, or
+        // all rows parallel, would leave it singular), so this 3x3 is always
+        // invertible.
+        QtQ.columns[0].x += mu;
+        QtQ.columns[1].y += mu;
+        QtQ.columns[2].z += mu;
+        Qtc += mu * x_prev;
+        return simd_mul(simd_inverse(QtQ), Qtc);
+    }
+};
+
+} // namespace
+
+simd_float3 solve_weighted_normal_equations(const std::vector<SolveRow>& rows, float mu, simd_float3 x_prev) {
+    NormalEquationsAccumulator acc;
+    for (const SolveRow& row : rows) acc.add(row);
+    return acc.solve(mu, x_prev);
 }
 
 namespace {
@@ -715,7 +703,13 @@ simd_float3 optimize_cell_vertex_step(int32_t dense_cell, simd_float3 x, const D
                                        const GlobalMesh& mesh, const CellFans& fans,
                                        const SampleAssignment& assignment, const SampleGrid& grid,
                                        const DcsddConfig& config) {
-    std::vector<SolveRow> rows;
+    // Folds every sample/Hermite row straight into the QtQ/Qtc accumulators
+    // as it's built -- no std::vector<SolveRow> materialized per cell per
+    // inner iteration (this ran hot: one alloc+free per cell per outer
+    // iteration x inner iteration). Same fold order as the old vector-based
+    // loop (samples first, then Hermite rows), so results stay bit-
+    // identical (see NormalEquationsAccumulator's comment).
+    NormalEquationsAccumulator acc;
 
     const int32_t fan_begin = fans.cell_fan_offsets[dense_cell];
     const int32_t fan_end = fans.cell_fan_offsets[dense_cell + 1];
@@ -731,8 +725,17 @@ simd_float3 optimize_cell_vertex_step(int32_t dense_cell, simd_float3 x, const D
         // Closest point over all of this cell's fan triangles (p, h, x);
         // keep the winning triangle's own (p, h) alongside its barycentric
         // result so the row below doesn't need to re-derive which triangle won.
-        bool have_best = false;
-        float best_dist = 0.0f;
+        // NaN-immune pattern (matches assign_samples' ring search above): a
+        // degenerate fan triangle (e.g. face_point bitwise-equal to its own
+        // Hermite point) makes closest_point_on_triangle_barycentric fall
+        // into a 0/0 barycentric division, producing a NaN dist. With a
+        // `have_best` flag, first-accept semantics would let that NaN win on
+        // the first fan entry and then lock in forever (NaN < x is always
+        // false, so no later, valid entry could ever displace it). Seeding
+        // best_dist at FLT_MAX instead means a NaN dist never beats it
+        // (dist < best_dist is false for NaN), so a degenerate entry is
+        // simply skipped, regardless of where in the fan it appears.
+        float best_dist = FLT_MAX;
         TriangleBarycentric best{};
         simd_float3 best_p{}, best_h{};
         for (int32_t fi = fan_begin; fi < fan_end; ++fi) {
@@ -740,15 +743,14 @@ simd_float3 optimize_cell_vertex_step(int32_t dense_cell, simd_float3 x, const D
             const simd_float3 h = init.hermite_p[static_cast<size_t>(fans.fan_edge[fi])];
             const TriangleBarycentric r = closest_point_on_triangle_barycentric(u, p, h, x);
             const float dist = simd_length(u - r.point);
-            if (!have_best || dist < best_dist) {
-                have_best = true;
+            if (dist < best_dist) {
                 best_dist = dist;
                 best = r;
                 best_p = p;
                 best_h = h;
             }
         }
-        if (!have_best) continue; // no fan triangles for this cell: nothing to project against
+        if (best_dist == FLT_MAX) continue; // no (non-degenerate) fan triangles: nothing to project against
 
         // t_j = best.point = gamma*p + beta*h + alpha*x (u=gamma, v=beta, w=alpha).
         const simd_float3 t = best.point;
@@ -759,18 +761,18 @@ simd_float3 optimize_cell_vertex_step(int32_t dense_cell, simd_float3 x, const D
         const simd_float3 d = diff / diff_len;
         const simd_float3 q = u + std::fabs(s) * d;
 
-        rows.push_back(build_sample_row(best.w, best.v, best.u, d, q, best_h, best_p));
+        acc.add(build_sample_row(best.w, best.v, best.u, d, q, best_h, best_p));
     }
 
     const int32_t edge_begin = init.cell_edge_offsets[dense_cell];
     const int32_t edge_end = init.cell_edge_offsets[dense_cell + 1];
     for (int32_t ei = edge_begin; ei < edge_end; ++ei) {
         const int32_t edge = init.cell_edge_indices[ei];
-        rows.push_back(build_hermite_row(init.hermite_n[static_cast<size_t>(edge)],
-                                          init.hermite_p[static_cast<size_t>(edge)], config.w_hermite));
+        acc.add(build_hermite_row(init.hermite_n[static_cast<size_t>(edge)],
+                                   init.hermite_p[static_cast<size_t>(edge)], config.w_hermite));
     }
 
-    return solve_weighted_normal_equations(rows, config.mu, x);
+    return acc.solve(config.mu, x);
 }
 
 } // namespace
@@ -826,22 +828,45 @@ namespace {
 // Eigenvalues of a real symmetric 3x3 matrix, ascending (smallest, mid,
 // largest), via the standard closed-form trigonometric method (see e.g.
 // Smith, "Eigenvalues of a symmetric 3x3 matrix", 1961). Guard: if every
-// off-diagonal entry is (near-)zero, `m` is already diagonal -- its
-// eigenvalues are just the diagonal entries, sorted (the general formula
-// below divides by `p`, which would be ~0 in this case).
+// off-diagonal entry is (near-)zero RELATIVE TO the matrix's overall scale,
+// `m` is already (numerically) diagonal -- its eigenvalues are just the
+// diagonal entries, sorted (the general formula below divides by `p`, which
+// would be ~0 in this case).
+//
+// The comparison is deliberately SCALE-RELATIVE (p1 against the squared
+// Frobenius norm), not absolute (D8 review finding 1): a fixed absolute
+// threshold like `p1 < 1e-12f` misclassifies at small world scales -- 4
+// points exactly on the plane x=y, spread by only ~1e-4 within it, produce a
+// covariance that is genuinely rank-deficient along (1,-1,0) (off-diagonal
+// Cxy equals diagonal Cxx/Cyy exactly, nowhere near negligible relative to
+// them) yet has every entry driven down to ~1e-8 by the tiny absolute scale,
+// landing p1 ~2.5e-15 -- comfortably under the old absolute guard, which
+// then returns the wrong eigenvector entirely (see the degenerate-PCA test
+// in dcsdd_tests.cpp for the concrete failing case a TDD cycle surfaced).
+// kRelEps = 1e-12f is chosen to match the old guard's absolute value at
+// O(1)-scale matrices (frob_sq ~1, so the two guards coincide there) while
+// scaling correctly down to arbitrarily small (or up to arbitrarily large)
+// covariances. `frob_sq == 0` (e.g. 4 bit-for-bit coincident points, see the
+// rank-0 covariance test) still takes this branch: p1 is then also exactly 0,
+// and 0 <= kRelEps*0 (== 0) holds trivially -- preserving the existing rank-0
+// guard's downstream behavior (smallest_eigenvector_symmetric3x3's own
+// exact-zero sentinel further down) with no separate special case needed.
 struct Eigenvalues3 {
     float smallest, mid, largest;
 };
 Eigenvalues3 eigenvalues_symmetric3x3(simd_float3x3 m) {
+    const float m00 = m.columns[0][0], m11 = m.columns[1][1], m22 = m.columns[2][2];
     const float m01 = m.columns[1][0], m02 = m.columns[2][0], m12 = m.columns[2][1];
     const float p1 = m01 * m01 + m02 * m02 + m12 * m12;
-    if (p1 < 1e-12f) {
-        float d[3] = {m.columns[0][0], m.columns[1][1], m.columns[2][2]};
+    constexpr float kRelEps = 1e-12f; // see the comment above
+    const float frob_sq = m00 * m00 + m11 * m11 + m22 * m22 + 2.0f * p1; // sum of squares of all 9 entries
+    if (p1 <= kRelEps * frob_sq) {
+        float d[3] = {m00, m11, m22};
         std::sort(d, d + 3);
         return Eigenvalues3{d[0], d[1], d[2]};
     }
-    const float q = (m.columns[0][0] + m.columns[1][1] + m.columns[2][2]) / 3.0f;
-    const float d00 = m.columns[0][0] - q, d11 = m.columns[1][1] - q, d22 = m.columns[2][2] - q;
+    const float q = (m00 + m11 + m22) / 3.0f;
+    const float d00 = m00 - q, d11 = m11 - q, d22 = m22 - q;
     const float p2 = d00 * d00 + d11 * d11 + d22 * d22 + 2.0f * p1;
     const float p = std::sqrt(p2 / 6.0f);
     // B = (1/p) * (m - q*I); r = det(B)/2, clamped to [-1,1] for acos below

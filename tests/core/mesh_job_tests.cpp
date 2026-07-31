@@ -191,7 +191,6 @@ TEST_CASE("MeshJobRunner: one-sphere scene reconstructs to a bit-exact match of 
     config.resolution = 12;
     config.outer_iters = 5;
     config.inner_iters = 5;
-    config.w_update = 0.1f;
 
     MeshJobRunner runner(config);
     runner.request(doc);
@@ -227,7 +226,6 @@ TEST_CASE("MeshJobRunner: destructor waits for an in-flight job instead of leaki
     config.resolution = 12;
     config.outer_iters = 5;
     config.inner_iters = 5;
-    config.w_update = 0.1f;
 
     const auto start = std::chrono::steady_clock::now();
     {
