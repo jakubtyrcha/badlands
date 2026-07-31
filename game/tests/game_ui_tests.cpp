@@ -462,6 +462,51 @@ TEST_CASE("BuildHud renders the four speed buttons, each hit-testable",
     ui_destroy(ctx);
 }
 
+TEST_CASE("the skills region is laid out and hit-testable", "[game_ui][hud]") {
+    // The wheel routing (GameView) can only work if the region emits a hit
+    // rect of its own, so that is what this pins -- the layout half of the
+    // card feature, which the model tests below cannot see.
+    UiContext* ctx = LoadHudFont();
+    REQUIRE(ctx != nullptr);
+
+    CharacterState hero{};
+    hero.level = 3;
+    hero.xp = 10;
+    hero.xp_next = 579;
+    hero.skill_count = 2;
+    hero.skills[0] = static_cast<int32_t>(SkillId::ShieldBash);
+    hero.skills[1] = static_cast<int32_t>(SkillId::Calcify);
+    SkillCatalog cat;
+
+    HudModel model;
+    model.gold = 7;
+    model.clock_text = "Day 1   12:00";
+    model.has_selection = true;
+    model.selection.kind = HudSelection::Kind::Hero;
+    model.selection.title = "Bran";
+    AppendHeroProgressionRows(model.selection, hero, cat, /*scroll=*/0);
+    REQUIRE(model.selection.skill_cards.cards.size() == 2);
+
+    HudFrame frame;
+    REQUIRE(BuildHud(ctx, model, 1600.0f, 900.0f, 1.0f, frame));
+
+    const UiHitRect* region = FindHitRect(frame, kHudSkillList);
+    REQUIRE(region != nullptr);
+    REQUIRE(region->x > 900.0f);  // the right-hand panel
+    REQUIRE(HudHitTest(frame, region->x + 4.0f, region->y + 4.0f) == kHudSkillList);
+    REQUIRE(HudSkillCardCapacity() > 0u);
+
+    // With no cards the region is absent entirely -- a skill-less hero gets no
+    // empty well, and a wheel there zooms the camera as usual.
+    HudModel bare = model;
+    bare.selection.skill_cards = HudSkillCards{};
+    HudFrame bare_frame;
+    REQUIRE(BuildHud(ctx, bare, 1600.0f, 900.0f, 1.0f, bare_frame));
+    CHECK(FindHitRect(bare_frame, kHudSkillList) == nullptr);
+
+    ui_destroy(ctx);
+}
+
 TEST_CASE("hero progression rows: level, xp, and the skill cards",
           "[game_ui][hud]") {
     CharacterState hero{};
