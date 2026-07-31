@@ -24,7 +24,6 @@
 #include "game/building_catalog.h"
 #include "game/creature_manifest.h"
 #include "game/factors_manifest.hpp"
-#include "game/scenario.h"
 #include "game/scene/blockout_materials.hpp"
 #include "game/skill_manifest.hpp"
 #include "mapgen/biomes.hpp"
@@ -207,49 +206,6 @@ void AiSandboxView::SeedTown() {
   sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
   const int64_t millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
 
-  // Load the scenario (default: a walled arena duel; override via BADLANDS_SCENARIO).
-  const char* scen_env = std::getenv("BADLANDS_SCENARIO");
-  const std::string scen_path =
-      scen_env ? scen_env : "assets/scenarios/arena_duel.json";
-  scenario_ = badlands::Scenario{};
-  const bool loaded = badlands::LoadScenario(scen_path, scenario_);
-  scenario_load_error_ = !loaded;
-  if (!loaded) {
-    // Loudly, not silently: a mistyped creature name or bad JSON otherwise drops
-    // the user into the demo town with no idea their scenario was rejected.
-    spdlog::error(
-        "AiSandboxView: scenario '{}' failed to load -- falling back to the town seed",
-        scen_path);
-  }
-  scenario_is_arena_ = loaded && scenario_.is_arena();
-
-  if (scenario_is_arena_) {
-    // Greybox arena sized to the scenario's interior (accessible tiles = 2*half).
-    arena_ = build_arena(glm::ivec2(static_cast<int>(scenario_.arena_half_x * 2.0f),
-                                    static_cast<int>(scenario_.arena_half_z * 2.0f)));
-    badlands::WorldConfig arena_cfg = scenario_.world_config();
-    arena_cfg.millis_per_day = millis_per_day;
-    sim_ = badlands::Sim(arena_cfg, brain_desc);
-    // Creature-stat overrides (optional file; a missing one keeps the defaults).
-    badlands::CreatureCatalog catalog = sim_.Creatures();
-    if (badlands::LoadCreatureCatalog("assets/creatures/creatures.json", catalog)) {
-      sim_.SetCreatureCatalog(catalog);
-    }
-    // Skill templates as data, same as game_view.cpp -- both apps must agree
-    // on skill specs (a missing file keeps the compiled defaults).
-    badlands::SkillCatalog arena_skills = sim_.Skills();
-    if (badlands::LoadSkillCatalog("assets/skills/skills.json", arena_skills)) {
-      sim_.SetSkillCatalog(arena_skills);
-    }
-    for (const badlands::ScenarioSpawn& s : scenario_.spawns) {
-      sim_.SpawnCreature(s.creature, s.team, s.x, s.z);
-    }
-    building_rows_.resize(kMaxBuildingRows);
-    cmd_rows_.resize(kMaxCommandRows);
-    return;
-  }
-
-  // --- fallback: the original town seed -----------------------------------
   arena_ = build_arena(kSandboxArena);
   badlands::WorldConfig town_cfg{};  // the shipping town world, plus our day length
   town_cfg.millis_per_day = millis_per_day;
@@ -625,27 +581,8 @@ void AiSandboxView::DrawInspector() {
   ImGui::SliderFloat("speed", &sim_clock_.speed, 0.0f, 60.0f, "%.0fx");
   ImGui::SameLine();
   if (ImGui::SmallButton("1x")) sim_clock_.speed = 1.0f;
-  if (scenario_load_error_) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                       "scenario failed to load -- showing the town seed (see log)");
-  }
 
   char_rows_ = sim_.Characters();
-
-  // --- arena: who is winning -------------------------------------------
-  // Neutrality is by archetype (Critter), not a hardcoded team, so a scenario may
-  // put fighters on any team. tally_arena is unit-tested (scenario_tests.cpp).
-  if (scenario_is_arena_) {
-    ImGui::SeparatorText("Arena");
-    const badlands::ArenaTally tally = badlands::tally_arena(char_rows_);
-    for (const auto& [team, count] : tally.teams) {
-      ImGui::Text("team %d: %d alive", team, count);
-    }
-    if (tally.teams.size() <= 1) {
-      ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-                         tally.winner >= 0 ? "Team %d wins!" : "no combatants", tally.winner);
-    }
-  }
 
   // --- heroes ----------------------------------------------------------
   ImGui::SeparatorText("Entities");

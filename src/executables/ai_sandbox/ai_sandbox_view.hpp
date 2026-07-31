@@ -33,7 +33,6 @@
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "game/arena.h"
-#include "game/scenario.h"
 #include "game/visual/nav_debug_overlay.hpp"
 
 namespace badlands {
@@ -108,11 +107,6 @@ class AiSandboxView : public AppView {
   // textures), so no per-view texture/sampler handles are needed here.
 
   Arena arena_;
-
-  // The loaded scenario (a walled arena + creatures, or empty => the town seed).
-  Scenario scenario_;
-  bool scenario_is_arena_ = false;
-  bool scenario_load_error_ = false;  // a requested scenario failed to parse
 
   // Owns the sim (RAII; no manual destroy). Seeded in SeedTown.
   badlands::Sim sim_{badlands::BrainDesc{}};
