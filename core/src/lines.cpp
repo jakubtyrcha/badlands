@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 
+#include "gizmo.h"
 #include "scene.h"
 
 namespace sq {
@@ -81,10 +82,10 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
 
 void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd_float3 normal,
                           float half_extent, int divisions) {
-    const simd_float3 ref = (std::fabs(normal.y) < 0.99f) ? simd_float3{0.0f, 1.0f, 0.0f}
-                                                            : simd_float3{1.0f, 0.0f, 0.0f};
-    const simd_float3 u = simd_normalize(simd_cross(normal, ref));
-    const simd_float3 v = simd_cross(normal, u);
+    // Basis shared with the gizmo hit-testing (gizmo.h) so drawn geometry and
+    // pick geometry cannot drift.
+    simd_float3 u, v;
+    tangent_basis(normal, u, v);
 
     const float he = half_extent;
     const float step = 2.0f * he / static_cast<float>(divisions);

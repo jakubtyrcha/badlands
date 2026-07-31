@@ -18,6 +18,13 @@ struct Vec3f { float x, y, z; };
 enum class Shape : int32_t { Cube = 0, Sphere = 1 };
 enum class Op    : int32_t { Add = 0, Subtract = 1 };
 
+// Move-gizmo handles (modify mode). Crosses the boundary like Shape/Op: the
+// canonical definition lives here, core/src/gizmo.h consumes it. Axis order
+// is also the pick tie-break order (see pick_gizmo_handle).
+enum class GizmoHandle : int32_t {
+    None = 0, AxisU = 1, AxisV = 2, AxisN = 3, PlaneUV = 4, PlaneUN = 5, PlaneVN = 6
+};
+
 // Miss/no-selection/no-parent sentinel for the picking, selection, and
 // spawning APIs below, and for SceneDocument's own Node::id/snap_parent
 // (core/src/scene.h). Previously left undeclared here (see M4's deferred

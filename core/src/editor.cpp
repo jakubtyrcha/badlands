@@ -6,15 +6,12 @@
 
 #include "camera.h"
 #include "camera_controller.h"
+#include "gizmo.h"
 #include "picking.h"
 #include "renderer.h"
 #include "scene.h"
 
 namespace sq {
-
-// Fixed world-space size for the tangent-frame grid, independent of the
-// selected object's scale.
-inline constexpr float kGizmoHalfExtent = 1.5f;
 
 struct Editor::Impl {
     Renderer renderer;
@@ -80,9 +77,8 @@ void Editor::render(void* caMetalDrawable) {
     // just gets an origin/normal/extent to draw a grid at.
     const Node* selectedNode = impl_->gizmo_visible ? impl_->scene.find(impl_->selected) : nullptr;
     if (selectedNode != nullptr) {
-        const simd_float3 camera_forward = simd_normalize(camera.target - camera.eye);
-        const DragPlane dp = drag_plane_for_node(*selectedNode, camera_forward);
-        impl_->renderer.set_gizmo(dp.point, dp.normal, kGizmoHalfExtent);
+        const GizmoFrame frame = gizmo_frame_for_node(*selectedNode, camera);
+        impl_->renderer.set_gizmo(frame.origin, frame.n, frame.half_extent);
     } else {
         impl_->renderer.hide_gizmo();
     }
