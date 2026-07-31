@@ -1,5 +1,6 @@
 #pragma once
 #include <simd/simd.h>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -170,12 +171,17 @@ SampleAssignment assign_samples(const SampleGrid& grid, const DcsddInit& init,
 // §C). One cell at a time; the outer loop/parallelization across cells is
 // D5, not built here.
 
-// Inner-loop tuning knobs (D5 extends this with outer-loop fields later).
+// Inner-loop tuning knobs, extended by D5 with outer-loop/final-mesh fields.
 struct DcsddConfig {
     float w_hermite = 0.02f;  // paper w_H (Eq. 5 Hermite-row weight)
     float mu = 0.05f;         // regularizer mu (Eq. 11); paper recommends [1e-2, 1e-1]
     int32_t inner_iters = 30; // per-cell inner-loop iteration cap; paper default 100
     float inner_tol = 1e-5f;  // convergence threshold on ||x_{r+1} - x_r||
+
+    int32_t outer_iters = 30; // outer-loop iteration cap (fixed count, no early exit); paper default 100
+    float w_update = 0.5f;    // paper w_u (Eq. 7 Hermite-update weight); paper recommends [0.2, 0.8]
+    int32_t resolution = 64;  // grid samples per axis; consumed by editor-side sampling (later task) --
+                               // carried here so all DCSDD tunables live in one struct
 };
 
 // A cell's local-mesh topology (paper Fig. 8): CSR over dense cells, each
@@ -246,5 +252,108 @@ simd_float3 solve_weighted_normal_equations(const std::vector<SolveRow>& rows, f
 simd_float3 optimize_cell_vertex(int32_t dense_cell, simd_float3 x_start, const DcsddInit& init,
                                   const GlobalMesh& mesh, const CellFans& fans, const SampleAssignment& assignment,
                                   const SampleGrid& grid, const DcsddConfig& config);
+
+// ---------------------------------------------------------------------------
+// D5: Hermite-data update (paper §3.2, Eq. 7), the outer loop, and the public
+// reconstruct() entry point. After each outer iteration's per-cell vertex
+// optimization (D4), every interesting edge's Hermite data (h, n) is updated
+// from the 4 new vertices of its containing cells, via PCA best-fit plane +
+// Eq. 7 blend. See task-D5-report.md for the exact printed form of Eq. 7 and
+// how it maps onto the functions below.
+
+// Analytic smallest eigenvector of a symmetric 3x3 matrix `m` (paper §3.2 PCA
+// step, applied to the 4-point covariance in pca_best_fit_plane below):
+// eigenvalues via the standard closed-form trigonometric method for
+// symmetric 3x3 matrices, eigenvector via the cross product of two rows of
+// (m - lambda_min*I) (each row pair spans the same null-space direction, up
+// to sign/scale, for a matrix of rank <= 2). Of the 3 candidate row pairs,
+// picks whichever cross product has the largest norm -- the best-
+// conditioned choice -- rather than a fixed pair with a fallback: a fixed
+// absolute-magnitude threshold on just row0 x row1 turned out not to be
+// robust (see task-D5-report.md for the concrete failing case a TDD cycle
+// surfaced: a tiny float32 residual in one row, amplified by another row's
+// much larger magnitude, can clear any reasonable fixed epsilon while still
+// pointing the wrong way). Pinned against np.linalg.eigh in tests.
+simd_float3 smallest_eigenvector_symmetric3x3(simd_float3x3 m);
+
+// PCA best-fit plane through exactly 4 points (paper §3.2 Hermite update):
+// centroid c = mean(points), normal = smallest_eigenvector_symmetric3x3 of
+// the covariance C = sum (v-c)(v-c)^T. `normal` is unit length but NOT
+// sign-disambiguated (eigenvectors have arbitrary sign) -- see
+// disambiguate_normal_sign below.
+struct PcaPlane {
+    simd_float3 centroid;
+    simd_float3 normal;
+};
+PcaPlane pca_best_fit_plane(const std::array<simd_float3, 4>& points);
+
+// Flips `n` to the hemisphere of `n_old` when they disagree (dot < 0);
+// eigenvectors have arbitrary sign, so without this the Hermite normal could
+// flip direction between outer iterations for no geometric reason.
+simd_float3 disambiguate_normal_sign(simd_float3 n, simd_float3 n_old);
+
+// Intersection of a plane (through `plane_point`, normal `plane_normal`)
+// with the grid edge's line e(t) = edge_base + t*axis_dir (world space, unit
+// axis_dir, t in [0, spacing]): solves plane_normal.(e(t)-plane_point) = 0
+// for t. `valid=false` if |plane_normal.axis_dir| ~ 0 (near-parallel: no
+// reliable intersection -- caller should keep the old Hermite data). `t` is
+// clamped to [0, spacing] so `y` stays on the physical edge segment: a
+// robustness deviation from the paper's letter (cell vertices may wander far
+// from their cells -- paper Fig. 15 -- so the best-fit plane's true
+// intersection can fall outside the segment) -- flagged here per the brief.
+struct EdgeIntersection {
+    bool valid;
+    simd_float3 y;
+};
+EdgeIntersection intersect_plane_edge(simd_float3 plane_point, simd_float3 plane_normal, simd_float3 edge_base,
+                                       simd_float3 axis_dir, float spacing);
+
+// Eq. 7 (paper page 6), transcribed EXACTLY as printed (see task-D5-report.md
+// for the printed form alongside this):
+//   h^{k+1} = h^k + w_u*(y - h^k)
+//   n^{k+1} = normalize(n_new + w_u*n_old)
+// NOT symmetric with the position update: the freshly-computed PCA normal
+// `n_new` (already sign-disambiguated against `n_old` -- see
+// disambiguate_normal_sign) carries weight 1, while `w_u` weights the OLD
+// normal `n_old`.
+struct HermiteUpdate {
+    simd_float3 h;
+    simd_float3 n;
+};
+HermiteUpdate hermite_eq7_blend(simd_float3 h_old, simd_float3 n_old, simd_float3 y, simd_float3 n_new, float w_u);
+
+// Full per-edge Hermite update (paper §3.2): PCA best-fit plane of the
+// edge's 4 containing cells' NEW vertices, sign disambiguation against
+// n_old, edge-line intersection, Eq. 7 blend. Guard (near-parallel
+// plane/edge, per intersect_plane_edge) leaves h_old/n_old unchanged.
+// Callers only invoke this for edges with all 4 containing cells present --
+// GlobalMesh::quad_cells/quad_edge already restrict to exactly these (an
+// edge without a quad keeps its old Hermite data untouched, per the brief:
+// "skip edges with <4 containing cells -- no quad, no update").
+HermiteUpdate update_edge_hermite(const std::array<simd_float3, 4>& cell_vertices, simd_float3 h_old,
+                                   simd_float3 n_old, simd_float3 edge_base, simd_float3 axis_dir, float spacing,
+                                   float w_u);
+
+// ---------------------------------------------------------------------------
+// Public entry point: the full DCSDD pipeline (paper Algorithm 1).
+
+// Flat, GPU-ready, non-indexed triangle mesh: 3 positions/normals per
+// triangle (no shared-vertex indexing).
+struct TriangleMesh {
+    std::vector<simd_float3> positions; // 3 per triangle
+    std::vector<simd_float3> normals;   // facet normal, repeated 3x per triangle
+};
+
+// Runs the full DCSDD reconstruction: dcsdd_init, then config.outer_iters
+// outer iterations of (build_global_mesh -> assign_samples -> parallel
+// optimize_cell_vertex over every interesting cell -> Hermite update), then
+// triangulates the final quads into a flat mesh with per-facet normals.
+// Empty grid (no interesting cells) -> empty mesh (both vectors empty). Fixed
+// iteration count, no early exit (matches the paper; comment at the call
+// site). Deterministic: the parallel per-cell optimization phase writes each
+// cell's new vertex to its own slot in a fresh output array (never in-place),
+// so repeated calls on the same input produce bit-identical output regardless
+// of thread scheduling.
+TriangleMesh reconstruct(const SampleGrid& grid, const DcsddConfig& config);
 
 } // namespace sq

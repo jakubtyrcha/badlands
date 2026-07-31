@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cfloat>
 #include <cmath>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -816,6 +817,348 @@ simd_float3 optimize_cell_vertex(int32_t dense_cell, simd_float3 x_start, const 
         if (delta < config.inner_tol) break;
     }
     return x;
+}
+
+// --- D5: Hermite update (Eq. 7) + outer loop + full pipeline ---------------
+
+namespace {
+
+// Eigenvalues of a real symmetric 3x3 matrix, ascending (smallest, mid,
+// largest), via the standard closed-form trigonometric method (see e.g.
+// Smith, "Eigenvalues of a symmetric 3x3 matrix", 1961). Guard: if every
+// off-diagonal entry is (near-)zero, `m` is already diagonal -- its
+// eigenvalues are just the diagonal entries, sorted (the general formula
+// below divides by `p`, which would be ~0 in this case).
+struct Eigenvalues3 {
+    float smallest, mid, largest;
+};
+Eigenvalues3 eigenvalues_symmetric3x3(simd_float3x3 m) {
+    const float m01 = m.columns[1][0], m02 = m.columns[2][0], m12 = m.columns[2][1];
+    const float p1 = m01 * m01 + m02 * m02 + m12 * m12;
+    if (p1 < 1e-12f) {
+        float d[3] = {m.columns[0][0], m.columns[1][1], m.columns[2][2]};
+        std::sort(d, d + 3);
+        return Eigenvalues3{d[0], d[1], d[2]};
+    }
+    const float q = (m.columns[0][0] + m.columns[1][1] + m.columns[2][2]) / 3.0f;
+    const float d00 = m.columns[0][0] - q, d11 = m.columns[1][1] - q, d22 = m.columns[2][2] - q;
+    const float p2 = d00 * d00 + d11 * d11 + d22 * d22 + 2.0f * p1;
+    const float p = std::sqrt(p2 / 6.0f);
+    // B = (1/p) * (m - q*I); r = det(B)/2, clamped to [-1,1] for acos below
+    // (round-off can push it just outside that range).
+    const simd_float3x3 B = {simd_float3{d00, m01, m02} / p, simd_float3{m01, d11, m12} / p,
+                              simd_float3{m02, m12, d22} / p};
+    // simd_float3x3 is column-major (columns[c][r]); det via the standard
+    // 3x3 cofactor expansion over columns.
+    const simd_float3& c0 = B.columns[0];
+    const simd_float3& c1 = B.columns[1];
+    const simd_float3& c2 = B.columns[2];
+    const float det = simd_dot(c0, simd_cross(c1, c2));
+    const float r = std::clamp(det / 2.0f, -1.0f, 1.0f);
+    const float phi = std::acos(r) / 3.0f;
+    constexpr float kTwoPiOverThree = 2.0943951023931953f; // 2*pi/3
+    const float eig_largest = q + 2.0f * p * std::cos(phi);
+    const float eig_smallest = q + 2.0f * p * std::cos(phi + kTwoPiOverThree);
+    const float eig_mid = 3.0f * q - eig_largest - eig_smallest;
+    return Eigenvalues3{eig_smallest, eig_mid, eig_largest};
+}
+
+} // namespace
+
+simd_float3 smallest_eigenvector_symmetric3x3(simd_float3x3 m) {
+    const Eigenvalues3 eig = eigenvalues_symmetric3x3(m);
+    // M = m - lambda_min*I, rows as simd_float3 (m is column-major, so row r
+    // is (m.columns[0][r], m.columns[1][r], m.columns[2][r])).
+    simd_float3x3 shifted = m;
+    shifted.columns[0].x -= eig.smallest;
+    shifted.columns[1].y -= eig.smallest;
+    shifted.columns[2].z -= eig.smallest;
+    const simd_float3 row0 = {shifted.columns[0].x, shifted.columns[1].x, shifted.columns[2].x};
+    const simd_float3 row1 = {shifted.columns[0].y, shifted.columns[1].y, shifted.columns[2].y};
+    const simd_float3 row2 = {shifted.columns[0].z, shifted.columns[1].z, shifted.columns[2].z};
+
+    // Cross product of two rows of the (rank-deficient) shifted matrix spans
+    // its null space -- i.e. the eigenvector for lambda_min -- as long as the
+    // chosen pair isn't itself (near-)parallel. The brief's prescription is
+    // "try row0 x row1, fall back to another pair when degenerate" -- but an
+    // absolute-magnitude threshold on the FIRST pair alone isn't reliable: a
+    // TDD failure surfaced a case (see the degenerate-PCA test) where
+    // lambda_min's float32 residual (true value exactly 0, computed as
+    // ~-2.65e-5) leaves row1 not-quite-zero, and row0's much larger
+    // magnitude (~5) amplifies that residual so row0 x row1's norm clears
+    // any reasonable fixed epsilon while still pointing the WRONG direction
+    // (it's dominated by noise, not signal). Since all three row-pairs of a
+    // rank-deficient matrix are mathematically parallel to the same true
+    // null-space vector (assuming a non-repeated smallest eigenvalue), the
+    // fix is to pick whichever pair's cross product has the LARGEST norm --
+    // the best-conditioned of the three, not just the first one that clears
+    // a threshold. This generalizes the brief's "fallback row pair" to all
+    // 3 candidates rather than a fixed try-order.
+    const simd_float3 c01 = simd_cross(row0, row1);
+    const simd_float3 c02 = simd_cross(row0, row2);
+    const simd_float3 c12 = simd_cross(row1, row2);
+    const float len01 = simd_length_squared(c01);
+    const float len02 = simd_length_squared(c02);
+    const float len12 = simd_length_squared(c12);
+    simd_float3 c = c01;
+    float best = len01;
+    if (len02 > best) { c = c02; best = len02; }
+    if (len12 > best) { c = c12; best = len12; }
+    return simd_normalize(c);
+}
+
+PcaPlane pca_best_fit_plane(const std::array<simd_float3, 4>& points) {
+    simd_float3 centroid = {0.0f, 0.0f, 0.0f};
+    for (const simd_float3& p : points) centroid += p;
+    centroid /= 4.0f;
+
+    simd_float3x3 cov = {simd_float3{0, 0, 0}, simd_float3{0, 0, 0}, simd_float3{0, 0, 0}};
+    for (const simd_float3& p : points) {
+        const simd_float3 d = p - centroid;
+        cov.columns[0] += d.x * d;
+        cov.columns[1] += d.y * d;
+        cov.columns[2] += d.z * d;
+    }
+    return PcaPlane{centroid, smallest_eigenvector_symmetric3x3(cov)};
+}
+
+simd_float3 disambiguate_normal_sign(simd_float3 n, simd_float3 n_old) {
+    return (simd_dot(n, n_old) < 0.0f) ? -n : n;
+}
+
+EdgeIntersection intersect_plane_edge(simd_float3 plane_point, simd_float3 plane_normal, simd_float3 edge_base,
+                                       simd_float3 axis_dir, float spacing) {
+    const float denom = simd_dot(plane_normal, axis_dir);
+    if (std::fabs(denom) < 1e-9f) {
+        return EdgeIntersection{false, simd_float3{0.0f, 0.0f, 0.0f}};
+    }
+    const float t = simd_dot(plane_normal, plane_point - edge_base) / denom;
+    // Robustness deviation from the paper's letter: clamp t to [0, spacing]
+    // so y stays on the physical edge segment. Cell vertices may wander far
+    // outside their cells (paper Fig. 15), so the best-fit plane's true
+    // intersection with the edge's infinite line can fall well outside the
+    // segment; clamping keeps the Hermite point physically meaningful.
+    const float t_clamped = std::clamp(t, 0.0f, spacing);
+    return EdgeIntersection{true, edge_base + t_clamped * axis_dir};
+}
+
+HermiteUpdate hermite_eq7_blend(simd_float3 h_old, simd_float3 n_old, simd_float3 y, simd_float3 n_new, float w_u) {
+    // Eq. 7, page 6, transcribed exactly (see task-D5-report.md):
+    //   h^{k+1} = h^k + w_u*(y - h^k)
+    //   n^{k+1} = normalize(n_new + w_u*n_old)   -- NOT (1-w_u)*n_old + w_u*n_new;
+    //   the fresh PCA normal n_new carries weight 1, w_u weights n_old.
+    const simd_float3 h = h_old + w_u * (y - h_old);
+    const simd_float3 n = simd_normalize(n_new + w_u * n_old);
+    return HermiteUpdate{h, n};
+}
+
+HermiteUpdate update_edge_hermite(const std::array<simd_float3, 4>& cell_vertices, simd_float3 h_old,
+                                   simd_float3 n_old, simd_float3 edge_base, simd_float3 axis_dir, float spacing,
+                                   float w_u) {
+    const PcaPlane plane = pca_best_fit_plane(cell_vertices);
+    const simd_float3 n_new = disambiguate_normal_sign(plane.normal, n_old);
+    const EdgeIntersection isect = intersect_plane_edge(plane.centroid, n_new, edge_base, axis_dir, spacing);
+    if (!isect.valid) {
+        // Near-parallel plane/edge: no reliable intersection -- keep the old
+        // Hermite data untouched rather than blend towards a meaningless y.
+        return HermiteUpdate{h_old, n_old};
+    }
+    return hermite_eq7_blend(h_old, n_old, isect.y, n_new, w_u);
+}
+
+namespace {
+
+// Runs fn(i) for every i in [0, n), split into std::thread::hardware_
+// concurrency() contiguous ranges, one std::thread per range (joined before
+// returning). Deterministic by construction: callers must ensure each index
+// writes only its own slot of any output (see reconstruct's per-cell
+// optimization phase below) -- no reductions, no shared mutable state across
+// indices, so which thread executes which index never affects the result.
+// File-local: an implementation detail of reconstruct's parallel phase, not
+// part of the public API.
+template <typename Fn>
+void parallel_for(int32_t n, Fn&& fn) {
+    if (n <= 0) return;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const int32_t num_threads = std::min(static_cast<int32_t>(hw), n);
+    const int32_t chunk = (n + num_threads - 1) / num_threads;
+
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(num_threads));
+    for (int32_t t = 0; t < num_threads; ++t) {
+        const int32_t begin = t * chunk;
+        const int32_t end = std::min(n, begin + chunk);
+        if (begin >= end) continue;
+        threads.emplace_back([begin, end, &fn]() {
+            for (int32_t i = begin; i < end; ++i) fn(i);
+        });
+    }
+    for (std::thread& th : threads) th.join();
+}
+
+} // namespace
+
+TriangleMesh reconstruct(const SampleGrid& grid, const DcsddConfig& config) {
+    TriangleMesh out;
+
+    // Mutable copy of the init state: its hermite_p/hermite_n evolve across
+    // outer iterations (the Hermite update below writes back into `state`,
+    // not a separate array) so that the NEXT iteration's optimize_cell_vertex
+    // calls -- which read Hermite data via `state` (unchanged D2-D4
+    // signatures) -- see the updated values. No changes to D2-D4 internals:
+    // this is orchestration only.
+    DcsddInit state = dcsdd_init(grid);
+    if (state.cell_id.empty()) {
+        return out; // no interesting cells -> empty mesh
+    }
+
+    std::vector<simd_float3> vertices = state.cell_vertex; // Eq. 3 centroid initial values
+
+    // CellFans' topology (which face points / edges flank each cell) depends
+    // only on GlobalMesh's quad_edge/quad_cells, which depend only on grid
+    // values + state's edge/cell topology -- NOT on the vertices' actual
+    // positions (those only feed face_points, recomputed fresh every
+    // iteration below). So it's genuinely invariant across outer iterations;
+    // built once here rather than every iteration (the brief permits either
+    // choice when the code separates cleanly -- it does, since
+    // build_global_mesh computes quad_edge/quad_cells/tri_cells from
+    // `state`/`grid` alone, only touching `cell_vertices` for face_points).
+    // Also seeds `mesh` below (holding the centroid-vertex quads) so the
+    // final triangulation still has valid topology to work with even if
+    // config.outer_iters == 0 (no optimization iterations at all).
+    GlobalMesh mesh = build_global_mesh(state, grid, vertices);
+    const CellFans fans = build_cell_fans(state, mesh);
+
+    const int32_t num_cells = static_cast<int32_t>(state.cell_id.size());
+    for (int32_t outer = 0; outer < config.outer_iters; ++outer) {
+        // Rebuilt every iteration for fresh face_points (the vertices moved
+        // last iteration); topology (quad_edge/quad_cells/tri_cells) comes
+        // out identical to the invariant one above every time -- recomputing
+        // it is cheap relative to the per-cell optimization below, and one
+        // code path is simpler than threading a "topology-only" variant
+        // through assign_samples too.
+        mesh = build_global_mesh(state, grid, vertices);
+        const SampleAssignment assignment = assign_samples(grid, state, vertices, mesh);
+
+        // Parallel phase: every interesting cell's NEW vertex goes into its
+        // own slot of a FRESH array, never overwriting `vertices` in place --
+        // optimize_cell_vertex only ever reads `vertices[c]` for its OWN
+        // cell c (all cross-cell interaction happens through `mesh`/`fans`/
+        // `assignment`, all read-only and already frozen for this
+        // iteration), so this is race-free and deterministic regardless of
+        // thread scheduling.
+        std::vector<simd_float3> new_vertices(vertices.size());
+        parallel_for(num_cells, [&](int32_t c) {
+            const size_t idx = static_cast<size_t>(c);
+            new_vertices[idx] = optimize_cell_vertex(c, vertices[idx], state, mesh, fans, assignment, grid, config);
+        });
+        vertices.swap(new_vertices);
+
+        // Hermite update (Eq. 7), using the NEW vertices: one quad per
+        // interesting edge with all 4 containing cells present (mesh.
+        // quad_edge/quad_cells already restrict to exactly these); edges
+        // without a quad keep their old h/n, simply never visited here.
+        const size_t num_quads = mesh.quad_edge.size();
+        for (size_t q = 0; q < num_quads; ++q) {
+            const int32_t edge = mesh.quad_edge[q];
+            std::array<simd_float3, 4> cell_verts;
+            for (size_t i = 0; i < 4; ++i) {
+                cell_verts[i] = vertices[static_cast<size_t>(mesh.quad_cells[4 * q + i])];
+            }
+            const Coord3 base = unflatten(state.edge_base[static_cast<size_t>(edge)], grid.n);
+            const simd_float3 edge_base_pos = sample_pos(grid, base.x, base.y, base.z);
+            const int32_t axis = state.edge_axis[static_cast<size_t>(edge)];
+            const simd_float3 axis_dir = {axis == 0 ? 1.0f : 0.0f, axis == 1 ? 1.0f : 0.0f, axis == 2 ? 1.0f : 0.0f};
+
+            const HermiteUpdate upd = update_edge_hermite(
+                cell_verts, state.hermite_p[static_cast<size_t>(edge)], state.hermite_n[static_cast<size_t>(edge)],
+                edge_base_pos, axis_dir, grid.spacing, config.w_update);
+            state.hermite_p[static_cast<size_t>(edge)] = upd.h;
+            state.hermite_n[static_cast<size_t>(edge)] = upd.n;
+        }
+        // No early exit: the paper runs a fixed outer-iteration count
+        // (config.outer_iters), and so do we.
+    }
+
+    // Final: triangulate each quad (mesh.quad_cells, 4 dense cells in the
+    // brief's binding cyclic order) via D3's first-diagonal rule -- (v0,v1,v2),
+    // (v0,v2,v3), matching GlobalMesh::tri_cells exactly (letter of the
+    // brief's "D3's first-diagonal rule / existing tri_cells" preserved) --
+    // with the final vertices; facet normal = normalize(cross(v1-v0,v2-v0))
+    // per triangle, oriented against a robust per-quad reference (see below).
+    //
+    // Orientation robustness note (found via a standalone diagnostic, see
+    // task-D5-report.md): after `config.outer_iters` iterations, a quad's 4
+    // corners can end up locally non-planar/twisted -- an expected DC-family
+    // effect, not a D2-D4 bug -- because the algorithm constrains a vertex
+    // strongly along its Hermite normal directions but only weakly
+    // tangentially (echoing D4's own report on weakly-constrained
+    // directions), so two DIFFERENT cells sharing a quad can converge close
+    // together tangentially, shrinking one half of the fixed first-diagonal
+    // split into a thin sliver whose own cross-product-derived normal is
+    // noise-dominated (near-zero area) and can point either way. Fixing this
+    // by ADAPTIVELY PICKING A DIFFERENT DIAGONAL didn't work (tried first,
+    // then measured): the tiny quad-boundary edge causing the sliver is
+    // shared by ONE triangle under EITHER diagonal choice, so neither
+    // avoids it. What works: compute each quad's own normal via Newell's
+    // method (an area-weighted sum over all 4 corners -- robust even for a
+    // non-planar/near-degenerate quad, since it's dominated by the LARGE,
+    // reliable triangle's contribution, not the noisy sliver's) as a
+    // reference direction, and flip either resulting triangle's own facet
+    // normal to agree with it if they disagree. This does NOT change
+    // GlobalMesh::tri_cells or its use anywhere above (assign_samples'
+    // closest-point queries don't care about winding) -- only this final
+    // OUTPUT step's reported normals.
+    const size_t num_quads = mesh.quad_edge.size();
+    out.positions.reserve(num_quads * 6);
+    out.normals.reserve(num_quads * 6);
+    const auto facet_normal = [](simd_float3 a, simd_float3 b, simd_float3 c) -> simd_float3 {
+        const simd_float3 n = simd_cross(b - a, c - a);
+        const float len = simd_length(n);
+        // Degenerate (zero-area) triangle: normalize would divide by ~0.
+        // Fallback normal instead of NaN -- filtering degenerates isn't this
+        // task's job.
+        return (len > 1e-12f) ? (n / len) : simd_float3{0.0f, 0.0f, 1.0f};
+    };
+    // Newell's method: robust normal for a (possibly non-planar) quad,
+    // weighted by enclosed area over all 4 corners.
+    const auto newell_normal = [](simd_float3 a, simd_float3 b, simd_float3 c, simd_float3 d) -> simd_float3 {
+        const simd_float3 verts[4] = {a, b, c, d};
+        simd_float3 n = {0.0f, 0.0f, 0.0f};
+        for (int i = 0; i < 4; ++i) {
+            const simd_float3& cur = verts[i];
+            const simd_float3& nxt = verts[(i + 1) % 4];
+            n.x += (cur.y - nxt.y) * (cur.z + nxt.z);
+            n.y += (cur.z - nxt.z) * (cur.x + nxt.x);
+            n.z += (cur.x - nxt.x) * (cur.y + nxt.y);
+        }
+        const float len = simd_length(n);
+        return (len > 1e-12f) ? (n / len) : simd_float3{0.0f, 0.0f, 1.0f};
+    };
+    const auto emit = [&](simd_float3 a, simd_float3 b, simd_float3 c, simd_float3 n) {
+        out.positions.push_back(a);
+        out.positions.push_back(b);
+        out.positions.push_back(c);
+        out.normals.push_back(n);
+        out.normals.push_back(n);
+        out.normals.push_back(n);
+    };
+    for (size_t q = 0; q < num_quads; ++q) {
+        const simd_float3 v0 = vertices[static_cast<size_t>(mesh.quad_cells[4 * q + 0])];
+        const simd_float3 v1 = vertices[static_cast<size_t>(mesh.quad_cells[4 * q + 1])];
+        const simd_float3 v2 = vertices[static_cast<size_t>(mesh.quad_cells[4 * q + 2])];
+        const simd_float3 v3 = vertices[static_cast<size_t>(mesh.quad_cells[4 * q + 3])];
+
+        const simd_float3 quad_ref = newell_normal(v0, v1, v2, v3);
+        simd_float3 n0 = facet_normal(v0, v1, v2);
+        if (simd_dot(n0, quad_ref) < 0.0f) n0 = -n0;
+        simd_float3 n1 = facet_normal(v0, v2, v3);
+        if (simd_dot(n1, quad_ref) < 0.0f) n1 = -n1;
+
+        emit(v0, v1, v2, n0);
+        emit(v0, v2, v3, n1);
+    }
+    return out;
 }
 
 } // namespace sq
