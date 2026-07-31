@@ -2,9 +2,9 @@
 
 Shapeshifter is a native macOS 3D SDF editor MVP: a SwiftUI + AppKit shell
 over a C++20 metal-cpp core, joined by direct Swift↔C++ interop (no bridge
-files). At this stage the editor renders debug wireframes only — no SDF
-evaluation or CSG surface rendering yet — but the full spawn/select/modify/
-camera interaction model is in place.
+files). The viewport reconstructs the CSG scene into a shaded mesh in the
+background after every edit (see Rendering below); the full spawn/select/
+modify/camera interaction model, including delete, is in place.
 
 ## Requirements
 
@@ -49,12 +49,35 @@ Four modes, selected via the icon bar top-left or keys **1–4**:
    tangent plane (or a camera-facing plane if unsnapped). Entering Modify
    with nothing selected behaves like Select mode until you click something.
    A radial menu anchored on the selected shape offers: Move, Scale (drag
-   vertically; cumulative, clamped per-axis to [0.05, 50]), and toggle
-   additive/subtract.
+   vertically; cumulative, clamped per-axis to [0.05, 50]), toggle
+   additive/subtract, and Delete (removes the shape permanently — no undo —
+   and switches to Camera mode).
 4. **Camera (4)** — two-finger scroll orbits, pinch zooms, shift+scroll pans.
 
 Color legend: green = additive shape, red = subtracted shape, pale blue =
 currently selected.
+
+## Rendering
+
+After every edit that changes the CSG result — spawn, drag/scale release,
+add/subtract toggle, delete — the scene is reconstructed into a solid
+triangle mesh on a background thread, via Dual Contouring of Signed Distance
+Data (Carrera et al., SIGGRAPH 2026). Reconstruction takes on the order of
+seconds at the editor's settings; the mesh pops in when ready. Shading is
+normal-colored debug (color = 0.5·(n+1), facet normals — no lighting).
+Wireframes draw for every object until a mesh exists; once one does, only
+the selected object's wireframe still draws, as a selection annotation (an
+empty scene has no mesh, so every object goes back to drawing as a
+wireframe).
+
+### Tunables
+
+Reconstruction is configured by `DcsddConfig` (`core/src/dcsdd.h`); the
+editor overrides one field (`editor_mesh_config()` in `core/src/editor.cpp`):
+a 64³ sample grid, 30 outer x 30 inner iterations, `w_update = 0.1` (lowered
+from the paper's 0.5 default, for stable facet winding at these iteration
+counts). Grid resolution and iteration counts trade reconstruction latency
+against mesh fidelity.
 
 ## Architecture
 
@@ -63,8 +86,9 @@ Swift app), and `CoreTests` (a doctest-based command-line test runner for
 the core).
 
 - **Core** (`core/src`) owns the scene document, orbit camera and its
-  controller, ray-based picking, drag/scale math, and all Metal rendering
-  (wireframe line geometry, pipeline, per-frame encode) via metal-cpp.
+  controller, ray-based picking, drag/scale math, DCSDD mesh reconstruction
+  (background thread), and all Metal rendering (wireframe + shaded-mesh
+  pipelines, depth buffer, per-frame encode) via metal-cpp.
 - **Swift** (`app/Sources`) owns the 4-mode state machine, raw AppKit input
   (mouse/keyboard/gesture events on the `CAMetalLayer`-backed viewport), and
   the SwiftUI chrome/overlays (mode bar, spawn options, info panel, radial
@@ -75,9 +99,15 @@ See `CLAUDE.md` for interop and coding conventions.
 
 ## Known limitations
 
-- Debug wireframe rendering only — no SDF evaluation or CSG surface render.
-- No save/load.
-- No undo.
+- CSG min/max combine is not a true distance field near intersection curves
+  (accepted approximation — the reconstruction tolerates the resulting
+  noise).
+- No undo (delete is permanent).
+- Reconstruction latency: no live remesh during an active drag/scale, only
+  on release.
+- No rotations.
+- No materials or lighting — shading is normal-colored debug only.
+- No export/saving.
 - Single window.
 - Camera mode is trackpad-oriented: a mouse wheel only supplies vertical
   scroll deltas (no horizontal component), and a mouse has no pinch gesture,
