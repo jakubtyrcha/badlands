@@ -217,6 +217,49 @@ TexturedMeshResult GenerateTreeMesh(const TreeOptions& o,
   return {.mesh = std::move(mesh), .local_bounds = bounds};
 }
 
+int QuadsPerLeafSite(const LeafOptions& lf) {
+  switch (lf.arrangement) {
+    case LeafArrangement::SingleQuad:  return 1;
+    case LeafArrangement::CrossedPair: return 2;
+    case LeafArrangement::FanFromStem:
+    case LeafArrangement::AxialFins:   return lf.blade_count;
+  }
+  return 1;  // unreachable
+}
+
+namespace {
+
+// FanFromStem: angular step between adjacent blades (N=3 -> -35/0/+35 deg,
+// N=2 -> +-17.5 deg) and the alternating out-of-plane tilt that keeps blades
+// from ever going fully coplanar -- the LOD simplifier welds bit-identical
+// full-stride vertices, so coplanar cards would invite cross-blade collapse.
+constexpr float kFanSpreadDeg = 35.0f;
+constexpr float kFanDihedralDeg = 20.0f;
+
+// Per-blade local rotation, composed onto the site's placement orientation by
+// the caller (rot_b = orient * BladeRotation(...)). RNG-free: b is the blade
+// index in [0, n), n = QuadsPerLeafSite(lf).
+glm::quat BladeRotation(LeafArrangement arrangement, int b, int n) {
+  switch (arrangement) {
+    case LeafArrangement::FanFromStem: {
+      const float spread = glm::radians(
+          (static_cast<float>(b) - (static_cast<float>(n) - 1.0f) * 0.5f) * kFanSpreadDeg);
+      const float dihedral = glm::radians((b % 2 == 0) ? kFanDihedralDeg : -kFanDihedralDeg);
+      return glm::angleAxis(spread, glm::vec3(0, 0, 1)) *
+             glm::angleAxis(dihedral, glm::vec3(0, 1, 0));
+    }
+    case LeafArrangement::AxialFins:
+      return glm::angleAxis(static_cast<float>(b) * glm::pi<float>() / static_cast<float>(n),
+                            glm::vec3(0, 1, 0));
+    case LeafArrangement::SingleQuad:
+    case LeafArrangement::CrossedPair:
+      break;
+  }
+  return glm::angleAxis((b == 1) ? glm::half_pi<float>() : 0.0f, glm::vec3(0, 1, 0));
+}
+
+}  // namespace
+
 TexturedMeshResult GenerateLeafMesh(const TreeOptions& o) {
   return GenerateLeafMesh(o, BuildTreeSkeleton(o));
 }
@@ -228,24 +271,27 @@ TexturedMeshResult GenerateLeafMesh(const TreeOptions& o,
 
   if (lf.enabled && lf.count > 0) {
     TreeRng rng(o.seed ^ 0x9E3779B9u);
-    const int quads_per_leaf = (lf.billboard >= 2) ? 2 : 1;
+    const int quads_per_leaf = QuadsPerLeafSite(lf);
 
-    // One leaf (1 or 2 crossed quads) at a placement frame. Consumes one rng draw
-    // (size variance). Shared by distributed leaves and the terminal-tip leaf.
+    // One leaf (1+ disjoint blade quads) at a placement frame. Consumes one
+    // rng draw (size variance) as its FIRST statement -- draw order/count per
+    // site is determinism-critical (byte-compared by the "deterministic" test).
+    // Shared by distributed leaves and the terminal-tip leaf.
     auto emit_leaf = [&](const glm::vec3& origin, const glm::quat& orient) {
       const float leaf_size = lf.size * (1.0f - lf.size_variance * rng.unit());
       glm::vec3 rnormal(origin.x, 0.0f, origin.z);
       rnormal = (glm::length(rnormal) > 1e-5f) ? glm::normalize(rnormal)
                                                : glm::vec3(0, 0, 1);
+      const float half_w = leaf_size * lf.card_aspect * 0.5f;
+      const glm::vec3 local[4] = {{-half_w, leaf_size, 0.0f},
+                                  {-half_w, 0.0f, 0.0f},
+                                  { half_w, 0.0f, 0.0f},
+                                  { half_w, leaf_size, 0.0f}};
+      const glm::vec2 uv[4] = {{0, 1}, {0, 0}, {1, 0}, {1, 1}};
       for (int q = 0; q < quads_per_leaf; ++q) {
-        const glm::quat rot =
-            orient *
-            glm::angleAxis((q == 1) ? glm::half_pi<float>() : 0.0f, glm::vec3(0, 1, 0));
-        const glm::vec3 local[4] = {{-leaf_size * 0.5f, leaf_size, 0.0f},
-                                    {-leaf_size * 0.5f, 0.0f, 0.0f},
-                                    { leaf_size * 0.5f, 0.0f, 0.0f},
-                                    { leaf_size * 0.5f, leaf_size, 0.0f}};
-        const glm::vec2 uv[4] = {{0, 1}, {0, 0}, {1, 0}, {1, 1}};
+        const glm::quat rot = orient * BladeRotation(lf.arrangement, q, quads_per_leaf);
+        // Every blade is a fully disjoint 4-vert quad: never share/dedupe
+        // vertices across blades (see the weld-safety note above).
         const glm::vec3 tangent = glm::normalize(rot * glm::vec3(1, 0, 0));
         const uint32_t base = mesh.vertex_count;
         for (int c = 0; c < 4; ++c) {
@@ -320,8 +366,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {16, 9, 8, 1}, .segments = {7, 5, 3, 3},
       .start = {0, 0.49f, 0.06f, 0.12f}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
       .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.count=14, .start=0.16f, .size=1.38f, .size_variance=0.7f, .angle=42.0f, .tint={0.32f,0.52f,0.18f},
-                 .transmission_tint={0.55f,0.62f,0.10f}, .transmission_strength=0.65f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=24, .start=0.16f, .size=1.46f, .size_variance=0.7f, .angle=42.0f,
+                 .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
+                 .transmission_strength=0.65f, .silhouette=LeafSilhouette::Oak}}});
   catalog.push_back({"Oak (medium)", OakPreset()});
   catalog.push_back({"Oak (large)", {
       .seed = 23399, .type = T::Deciduous, .levels = 3,
@@ -331,8 +379,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {16, 9, 8, 3}, .segments = {12, 5, 3, 3},
       .start = {0, 0.35f, 0.1f, 0}, .taper = {0.73f, 0.42f, 0.69f, 0.75f},
       .twist = {-0.23f, 0.42f, 0, 0}, .force_strength = 0.02f,
-      .leaves = {.count=10, .start=0.16f, .size=4.5f, .size_variance=0.7f, .angle=36.0f, .tint={0.32f,0.52f,0.18f},
-                 .transmission_tint={0.55f,0.62f,0.10f}, .transmission_strength=0.65f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=17, .start=0.16f, .size=3.94f, .size_variance=0.7f, .angle=36.0f,
+                 .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
+                 .transmission_strength=0.65f, .silhouette=LeafSilhouette::Oak}}});
   catalog.push_back({"Pine (small)", {
       .seed = 11744, .type = T::Evergreen, .levels = 1,
       .angle = {0, 117, 60, 60}, .children = {91, 7, 5, 0},
@@ -341,8 +391,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.16f, 0.3f, 0.3f}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.0f,
-      .leaves = {.count=21, .start=0.0f, .size=0.965f, .size_variance=0.7f, .angle=10.0f, .tint={0.16f,0.40f,0.24f},
-                 .transmission_tint={0.32f,0.46f,0.12f}, .transmission_strength=0.28f, .tip_leaf=false}}});
+      .leaves = {.arrangement=LeafArrangement::AxialFins, .blade_count=3, .card_aspect=0.45f,
+                 .count=196, .start=0.0f, .size=1.610f, .size_variance=0.7f, .angle=10.0f,
+                 .alpha_cutoff=0.35f, .tint={0.16f,0.40f,0.24f}, .transmission_tint={0.32f,0.46f,0.12f},
+                 .transmission_strength=0.28f, .silhouette=LeafSilhouette::PineSprig, .tip_leaf=false}}});
   catalog.push_back({"Pine (medium)", PinePreset()});
   catalog.push_back({"Pine (large)", {
       .seed = 44166, .type = T::Evergreen, .levels = 1,
@@ -352,8 +404,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.29f, 0.14f, 0.3f}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.009f,
-      .leaves = {.count=18, .start=0.076f, .size=2.609f, .size_variance=0.201f, .angle=17.0f, .tint={0.16f,0.40f,0.24f},
-                 .transmission_tint={0.32f,0.46f,0.12f}, .transmission_strength=0.28f, .tip_leaf=false}}});
+      .leaves = {.arrangement=LeafArrangement::AxialFins, .blade_count=3, .card_aspect=0.45f,
+                 .count=168, .start=0.076f, .size=2.687f, .size_variance=0.201f, .angle=17.0f,
+                 .alpha_cutoff=0.35f, .tint={0.16f,0.40f,0.24f}, .transmission_tint={0.32f,0.46f,0.12f},
+                 .transmission_strength=0.28f, .silhouette=LeafSilhouette::PineSprig, .tip_leaf=false}}});
   catalog.push_back({"Ash (small)", {
       .seed = 26867, .type = T::Deciduous, .levels = 2,
       .angle = {0, 48, 75, 60}, .children = {10, 3, 3, 0},
@@ -362,8 +416,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 10, 10}, .segments = {8, 6, 4, 3},
       .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.count=30, .start=0.0f, .size=2.05f, .size_variance=0.717f, .angle=55.0f, .tint={0.34f,0.56f,0.20f},
-                 .transmission_tint={0.58f,0.64f,0.12f}, .transmission_strength=0.62f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=45, .start=0.0f, .size=2.93f, .size_variance=0.717f, .angle=55.0f,
+                 .tint={0.34f,0.56f,0.20f}, .transmission_tint={0.58f,0.64f,0.12f},
+                 .transmission_strength=0.62f, .silhouette=LeafSilhouette::Ash}}});
   catalog.push_back({"Ash (medium)", {
       .seed = 36330, .type = T::Deciduous, .levels = 3,
       .angle = {0, 48, 75, 60}, .children = {7, 4, 3, 0},
@@ -372,8 +428,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 8, 6, 4}, .segments = {12, 6, 4, 3},
       .start = {0, 0.23f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.count=16, .start=0.0f, .size=2.67f, .size_variance=0.72f, .angle=55.0f, .tint={0.34f,0.56f,0.20f},
-                 .transmission_tint={0.58f,0.64f,0.12f}, .transmission_strength=0.62f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=24, .start=0.0f, .size=2.49f, .size_variance=0.72f, .angle=55.0f,
+                 .tint={0.34f,0.56f,0.20f}, .transmission_tint={0.58f,0.64f,0.12f},
+                 .transmission_strength=0.62f, .silhouette=LeafSilhouette::Ash}}});
   catalog.push_back({"Ash (large)", {
       .seed = 29919, .type = T::Deciduous, .levels = 3,
       .angle = {0, 39, 39, 51}, .children = {10, 4, 3, 0},
@@ -382,8 +440,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 8, 6, 4}, .segments = {8, 6, 4, 3},
       .start = {0, 0.32f, 0.34f, 0}, .taper = {0.7f, 0.62f, 0.76f, 0},
       .twist = {0.09f, -0.07f, 0, 0}, .force_strength = 0.01f,
-      .leaves = {.count=10, .start=0.01f, .size=4.62f, .size_variance=0.72f, .angle=30.0f, .tint={0.34f,0.56f,0.20f},
-                 .transmission_tint={0.58f,0.64f,0.12f}, .transmission_strength=0.62f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=15, .start=0.01f, .size=3.51f, .size_variance=0.72f, .angle=30.0f,
+                 .tint={0.34f,0.56f,0.20f}, .transmission_tint={0.58f,0.64f,0.12f},
+                 .transmission_strength=0.62f, .silhouette=LeafSilhouette::Ash}}});
   catalog.push_back({"Aspen (small)", {
       .seed = 36330, .type = T::Deciduous, .levels = 2,
       .angle = {0, 70, 35, 7}, .children = {4, 3, 3, 0},
@@ -392,8 +452,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.45f, 0.33f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.0109f,
-      .leaves = {.count=13, .start=0.2f, .size=2.5f, .size_variance=0.7f, .angle=30.0f, .tint={0.52f,0.66f,0.22f},
-                 .transmission_tint={0.75f,0.78f,0.14f}, .transmission_strength=0.78f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=13, .start=0.2f, .size=2.07f, .size_variance=0.7f, .angle=30.0f,
+                 .tint={0.52f,0.66f,0.22f}, .transmission_tint={0.75f,0.78f,0.14f},
+                 .transmission_strength=0.78f, .silhouette=LeafSilhouette::Aspen}}});
   catalog.push_back({"Aspen (medium)", {
       .seed = 18020, .type = T::Deciduous, .levels = 2,
       .angle = {0, 75, 32, 7}, .children = {10, 3, 3, 0},
@@ -402,8 +464,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.59f, 0.35f, 0}, .taper = {0.37f, 0.13f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.0148f,
-      .leaves = {.count=11, .start=0.124f, .size=2.5f, .size_variance=0.7f, .angle=30.0f, .tint={0.52f,0.66f,0.22f},
-                 .transmission_tint={0.75f,0.78f,0.14f}, .transmission_strength=0.78f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=11, .start=0.124f, .size=4.58f, .size_variance=0.7f, .angle=30.0f,
+                 .tint={0.52f,0.66f,0.22f}, .transmission_tint={0.75f,0.78f,0.14f},
+                 .transmission_strength=0.78f, .silhouette=LeafSilhouette::Aspen}}});
   catalog.push_back({"Aspen (large)", {
       .seed = 30631, .type = T::Deciduous, .levels = 2,
       .angle = {0, 47, 63, 7}, .children = {10, 6, 0, 0},
@@ -412,8 +476,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {12, 10, 8, 6}, .segments = {8, 6, 4, 3},
       .start = {0, 0.62f, 0.05f, 0}, .taper = {0.7f, 0.13f, 0.7f, 0.7f},
       .twist = {0, 0, 0, 0}, .force_strength = 0.0217f,
-      .leaves = {.count=20, .start=0.152f, .size=3.478f, .size_variance=0.7f, .angle=36.0f, .tint={0.52f,0.66f,0.22f},
-                 .transmission_tint={0.75f,0.78f,0.14f}, .transmission_strength=0.78f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=20, .start=0.152f, .size=7.68f, .size_variance=0.7f, .angle=36.0f,
+                 .tint={0.52f,0.66f,0.22f}, .transmission_tint={0.75f,0.78f,0.14f},
+                 .transmission_strength=0.78f, .silhouette=LeafSilhouette::Aspen}}});
   catalog.push_back({"Bush 1", {
       .seed = 45590, .type = T::Deciduous, .levels = 3,
       .angle = {0, 21.52f, 62.61f, 60}, .children = {7, 3, 2, 0},
@@ -422,8 +488,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {6, 6, 10, 10}, .segments = {4, 4, 4, 3},
       .start = {0, 0.53f, 0.33f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.3f, -0.07f, 0, 0}, .force_strength = 0.0f,
-      .leaves = {.count=12, .start=0.0f, .size=2.446f, .size_variance=0.717f, .angle=55.0f, .tint={0.40f,0.62f,0.20f},
-                 .transmission_tint={0.62f,0.68f,0.14f}, .transmission_strength=0.60f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=27, .start=0.0f, .size=0.62f, .size_variance=0.717f, .angle=55.0f,
+                 .tint={0.40f,0.62f,0.20f}, .transmission_tint={0.62f,0.68f,0.14f},
+                 .transmission_strength=0.60f, .silhouette=LeafSilhouette::Bush}}});
   catalog.push_back({"Bush 2", {
       .seed = 45590, .type = T::Deciduous, .levels = 2,
       .angle = {0, 19.57f, 27.39f, 60}, .children = {10, 3, 2, 0},
@@ -432,8 +500,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {3, 4, 10, 10}, .segments = {4, 4, 4, 3},
       .start = {0, 0.64f, 0.71f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.36f, -0.04f, 0, 0}, .force_strength = 0.0f,
-      .leaves = {.count=7, .start=0.0f, .size=2.446f, .size_variance=0.717f, .angle=55.0f, .tint={0.40f,0.62f,0.20f},
-                 .transmission_tint={0.62f,0.68f,0.14f}, .transmission_strength=0.60f}}});
+      .leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+                 .count=16, .start=0.0f, .size=1.49f, .size_variance=0.717f, .angle=55.0f,
+                 .tint={0.40f,0.62f,0.20f}, .transmission_tint={0.62f,0.68f,0.14f},
+                 .transmission_strength=0.60f, .silhouette=LeafSilhouette::Bush}}});
   catalog.push_back({"Bush 3", {
       .seed = 31343, .type = T::Evergreen, .levels = 3,
       .angle = {0, 66.52f, 52.83f, 0}, .children = {13, 4, 4, 0},
@@ -442,8 +512,10 @@ std::vector<NamedTreeOptions> TreeCatalog() {
       .sections = {4, 3, 3, 10}, .segments = {3, 3, 3, 3},
       .start = {0, 0.14f, 0.29f, 0}, .taper = {0.7f, 0.7f, 0.7f, 0.7f},
       .twist = {0.3f, -0.03f, 0, 0}, .force_strength = 0.0f,
-      .leaves = {.count=3, .start=0.152f, .size=3.043f, .size_variance=0.457f, .angle=54.0f, .tint={0.20f,0.46f,0.32f},
-                 .transmission_tint={0.38f,0.52f,0.20f}, .transmission_strength=0.30f, .tip_leaf=false}}});
+      .leaves = {.arrangement=LeafArrangement::AxialFins, .blade_count=3, .card_aspect=0.45f,
+                 .count=48, .start=0.152f, .size=0.728f, .size_variance=0.457f, .angle=54.0f,
+                 .alpha_cutoff=0.35f, .tint={0.20f,0.46f,0.32f}, .transmission_tint={0.38f,0.52f,0.20f},
+                 .transmission_strength=0.30f, .silhouette=LeafSilhouette::PineSprig, .tip_leaf=false}}});
   return catalog;
 }
 

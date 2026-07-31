@@ -19,6 +19,10 @@ namespace badlands {
 // plain 3-level LOD chain rather than a bespoke ratio schedule.
 inline constexpr std::array<float, 3> kDefaultLodRatios{1.0f, 0.5f, 0.2f};
 
+// Leaves lose visual mass quadratically when whole cards are deleted; decimate
+// them more gently than bark. (screenshot-tuned)
+inline constexpr std::array<float, 3> kLeafLodRatios = {1.0f, 0.65f, 0.35f};
+
 struct SimplifiedMesh {
   std::vector<float> vertices;    // same layout as input (floats_per_vertex each)
   std::vector<uint32_t> indices;  // reduced index buffer

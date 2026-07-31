@@ -556,9 +556,14 @@ wgpu::Texture MakeShadowDepth(wgpu::Device d) {
 // Orthographic light view-proj looking straight down (-Y) at the quad centre.
 // glm::ortho under GLM_FORCE_DEPTH_ZERO_TO_ONE maps near->0, far->1 (conv-Z),
 // matching sampleShadowMapPCF's ndc.z and the LessEqual comparison sampler. The
-// quad centre (world (0,0,0)) sits ~mid-frustum -> receiverDepth ~= 0.49, so
+// quad centre (world (0,0,0)) -- its modelMatrix translate is CAMERA-RELATIVE
+// (~:643 is y=-10, but TopDownUniforms's camera sits at y=+10, netting an
+// ABSOLUTE world height of 0) sits ~mid-frustum -> receiverDepth ~= 0.49, so
 // clearing the shadow map to 1.0 leaves it fully LIT and clearing to 0.0 fully
 // OCCLUDED. Frustum (+/-30) covers the whole +/-20 quad so every pixel agrees.
+// Task 4 re-derives + empirically confirms this 0.49 exactly (as 49/99, via a
+// bisection probe) for shadowOpticalThickness's monotonicity test below -- see
+// that TEST_CASE's comment for the full derivation.
 glm::mat4 DownLightViewProj() {
   glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 50.0f, 0.0f),
                                glm::vec3(0.0f, 0.0f, 0.0f),
@@ -591,7 +596,13 @@ UniformData StandardForwardUniforms(bool ambient_on, bool sun_toward_viewer) {
 constexpr glm::vec3 kTransTint{0.2f, 1.0f, 0.2f};
 
 struct ForwardShadeParams {
-  float shadow_clear_depth;  // 1.0 = lit texel, 0.0 = occluding texel
+  // Depth value cleared across the whole (uniform) shadow map. Task 4:
+  // shadowOpticalThickness now reads this as the BLOCKER depth, so it no
+  // longer just toggles lit(1.0)/occluded(0.0) -- 1.0 (far plane, behind the
+  // receiver) still means "no blocker -> thickness 0 -> full transmission",
+  // and 0.0 (near plane) still means "far in front -> huge thickness -> ~no
+  // transmission", but intermediate values now give intermediate thickness.
+  float shadow_clear_depth;
   bool ambient_on;
   bool sun_toward_viewer;
   float transmission_strength = 0.0f;
@@ -774,17 +785,23 @@ TEST_CASE("standard_forward receives the standard sun + shadow via @group(2)",
   CHECK(MaxChannel(lit_direct) - MaxChannel(occluded) > 30);  // shadow received
 }
 
-// Test C: standard_forward's translucency term (Task 1's evaluateTranslucency,
-// wired through the "transmission" uniform: rgb=tint, a=strength). Model under
-// test: Lo += strength * T * (direct + ambient), direct = shadow * sunColor *
-// backLit * (1+flare) with backLit = max(-dot(N,L),0) (only nonzero when the
-// sun is BEHIND the leaf), ambient = ao * evaluateAmbientSHL2(-N, ambientSH).
-// So: transmission needs back-lighting; `direct` is shadow-gated; `ambient`
-// (the AO/IBL "glare") is only ao-gated, not shadow-gated. Differential
-// (ON @ strength 0.8 vs OFF @ strength 0) assertions are self-validating: a
-// no-op transmission collapses ON==OFF and fails every check below.
+// Test C: standard_forward's translucency term (Task 4: evaluateTranslucency's
+// `direct` term is Beer-Lambert-attenuated by shadowOpticalThickness's
+// world-space optical thickness, not shadow-gated). Model under test:
+// Lo += strength * T * (direct + ambient), direct = sunColor * backLit *
+// (1+flare) * exp(-kTransmissionSigma * thicknessWorld) with
+// backLit = max(-dot(N,L),0) (only nonzero when the sun is BEHIND the leaf),
+// thicknessWorld = world-space gap between the receiver and the first
+// shadow-map blocker along the light direction (0 when unoccluded, matching
+// the old shadow=1 "fully lit" case exactly), ambient = ao *
+// evaluateAmbientSHL2(-N, ambientSH). So: transmission needs back-lighting;
+// `direct` decays exponentially with occluder depth instead of a binary gate;
+// `ambient` (the AO/IBL "glare") is only ao-gated, thickness-independent.
+// Differential (ON @ strength 0.8 vs OFF @ strength 0) assertions are
+// self-validating: a no-op transmission collapses ON==OFF and fails every
+// check below.
 TEST_CASE(
-    "standard_forward translucency: back-lit transmission (shadow-gated "
+    "standard_forward translucency: back-lit transmission (Beer-Lambert "
     "direct + AO/IBL glare)",
     "[forward][gpu][shadow]") {
   TestGpu& g = GetTestGpu();
@@ -874,22 +891,77 @@ TEST_CASE(
   // frontlit_off's here.
   CHECK(std::abs(MaxChannel(frontlit_on) - MaxChannel(frontlit_off)) <= 2);
 
-  // (3) Direct is shadow-gated: back-lit, ambient=off, strength=0.8: shadow
-  // lit vs occluded. No ambient => a shadowed back-lit leaf is ~black.
-  CpuImage::Color backlit_occluded = render({.shadow_clear_depth = 0.0f,
-                                             .ambient_on = false,
-                                             .sun_toward_viewer = false,
-                                             .transmission_strength = 0.8f});
-  INFO("backlit_occluded rgb = " << (int)backlit_occluded.r << ","
-                                 << (int)backlit_occluded.g << ","
-                                 << (int)backlit_occluded.b);
-  CHECK(MaxChannel(backlit_on) - MaxChannel(backlit_occluded) > 20);
-  CHECK(MaxChannel(backlit_occluded) < 6);
+  // (3) Exponential attenuation monotonicity (Task 4, replaces the old binary
+  // "direct is shadow-gated" check): three renders differing ONLY in
+  // shadow_clear_depth, which this shader version reads as the BLOCKER depth
+  // across the whole (uniformly-cleared) shadow map rather than a lit/occluded
+  // toggle. Back-lit, ambient off (isolates the `direct` term, same as (1)).
+  //
+  // receiverDepth measured EMPIRICALLY, not assumed: a temporary bisection
+  // probe (rendered this same back-lit rig at a low, non-saturating strength
+  // and searched for the shadow_clear_depth where output first dropped below
+  // the unattenuated baseline; since removed) found the plateau edge
+  // (receiverDepth - kThicknessEpsilon) at shadow_clear_depth ~= 0.494404.
+  // That matches the closed-form prediction to ~5.5e-4 (~= kThicknessEpsilon
+  // itself): this rig's quad sits at CAMERA-RELATIVE y=-10 (~:643) while
+  // TopDownUniforms's camera is at y=+10 (fs_main's worldPos re-adds
+  // frame.cameraWorldPos), netting an ABSOLUTE world height of y=0 --
+  // DownLightViewProj's ortho (eye y=50, near=1, far=100) gives
+  // receiverDepth = (49 - y)/99 = 49/99 ~= 0.494949 at y=0, and
+  // kThicknessEpsilon (shadow_sampling.wesl) = 0.0005 depth units shaves the
+  // plateau's edge by 0.494949 - 0.494404 ~= 0.00055, consistent with the
+  // probe's detection resolution. worldUnitsPerDepthUnit = 1/length(rowZ) = 99
+  // for this light matrix (its ortho far-near range), so 1 world metre =
+  // 1/99 depth units.
+  //
+  // Compares the RED channel (kTransTint.r=0.2), not MaxChannel/.g
+  // (kTransTint.g=1.0): at strength=0.8 the green channel's UNATTENUATED
+  // value (sunColor(3)*backLit(1)*(1+flare(1))*strength(0.8)*tint.g(1.0)=4.8)
+  // clamps to the render target's [0,1] range for any attenuation factor
+  // above ~0.21 -- e.g. case (b) below (attenuation ~=0.25) would render
+  // pixel-identical to case (a), masking the curve entirely. Red's
+  // unattenuated value (=0.96) stays just under 1.0, so its brightness tracks
+  // exp(-thickness) faithfully across all three cases.
+  constexpr float kReceiverDepth = 49.0f / 99.0f;
+  constexpr float kWorldUnitsPerDepthUnit = 99.0f;
 
-  // (4) Glare survives shadow: back-lit, ambient=on, OCCLUDED (shadow=0),
-  // ON(0.8) vs OFF(0). Isolates the SH(-N) transmission glare: it's
-  // ao-gated, not shadow-gated, while the reflection-side ambient term is
-  // identical for ON/OFF and cancels out of the differential.
+  // (a) No blocker (shadow_clear_depth=1.0, far plane): thickness clamps to
+  // 0 -> full (unattenuated) transmission. Identical rig to backlit_on above.
+  CpuImage::Color no_blocker = backlit_on;
+  // (b) Blocker ~1.6m above the receiver: thickness ~1.6m - kThicknessEpsilon
+  // (~0.05m) ~= 1.55m -> exp(-kTransmissionSigma * 1.55) ~= 0.25: clearly
+  // partial, per the brief's own worked example.
+  CpuImage::Color partial_blocker = render(
+      {.shadow_clear_depth = kReceiverDepth - 1.6f / kWorldUnitsPerDepthUnit,
+       .ambient_on = false,
+       .sun_toward_viewer = false,
+       .transmission_strength = 0.8f});
+  // (c) Blocker at the near plane (shadow_clear_depth=0.0): thickness ~=
+  // receiverDepth * 99 ~= 49m of foliage -> exp(-0.9*49) ~= 0: no direct
+  // transmission survives (same rig as the old backlit_occluded case).
+  CpuImage::Color near_plane_blocker = render({.shadow_clear_depth = 0.0f,
+                                               .ambient_on = false,
+                                               .sun_toward_viewer = false,
+                                               .transmission_strength = 0.8f});
+  INFO("no_blocker rgb = " << (int)no_blocker.r << "," << (int)no_blocker.g
+                          << "," << (int)no_blocker.b);
+  INFO("partial_blocker rgb = " << (int)partial_blocker.r << ","
+                                << (int)partial_blocker.g << ","
+                                << (int)partial_blocker.b);
+  INFO("near_plane_blocker rgb = " << (int)near_plane_blocker.r << ","
+                                   << (int)near_plane_blocker.g << ","
+                                   << (int)near_plane_blocker.b);
+  // Ordering only (no exact constants), per the brief: keeps this test
+  // independent of kTransmissionSigma retuning in Phase 5.
+  CHECK((int)no_blocker.r > (int)partial_blocker.r + 40);
+  CHECK((int)partial_blocker.r > (int)near_plane_blocker.r + 10);
+  CHECK((int)near_plane_blocker.r < 6);  // ~fully attenuated, like the old shadow=0 case
+
+  // (4) Glare survives occlusion: back-lit, ambient=on, blocker at the near
+  // plane (shadow_clear_depth=0.0, huge thickness), ON(0.8) vs OFF(0).
+  // Isolates the SH(-N) transmission glare: it's ao-gated, not
+  // thickness-gated, while the reflection-side ambient term is identical for
+  // ON/OFF and cancels out of the differential.
   CpuImage::Color glare_on = render({.shadow_clear_depth = 0.0f,
                                      .ambient_on = true,
                                      .sun_toward_viewer = false,

@@ -9,12 +9,53 @@ namespace badlands {
 
 enum class TreeType { Deciduous, Evergreen };
 
+// Per-species leaf card silhouette shape (leaf_texture.hpp). Bush is the
+// generic fat-oval fallback; PineSprig alone keeps the pre-species texture's
+// byte-identical legacy path (see PineSprigAlpha's DO NOT TOUCH note in
+// leaf_texture.cpp) -- Bush routes through the sprig builder like every other
+// silhouette.
+//
+// kLeafSilhouetteCount/kAllLeafSilhouettes below are the canonical size/
+// enumeration for this enum -- consumers that need to iterate every value or
+// size a per-silhouette array (model_viewer_view.hpp's leaf_textures_/
+// leaf_views_, model_viewer_view.cpp's texture bake loop,
+// tree_generator_tests.cpp) must use them instead of hand-listing the values.
+// When adding a new LeafSilhouette, append it to the enum and to kAllLeafSilhouettes,
+// then update kLeafSilhouetteCount to match the array size.
+enum class LeafSilhouette { Oak, Ash, Aspen, Bush, PineSprig };
+
+inline constexpr size_t kLeafSilhouetteCount = 5;
+inline constexpr std::array<LeafSilhouette, kLeafSilhouetteCount> kAllLeafSilhouettes = {
+    LeafSilhouette::Oak, LeafSilhouette::Ash, LeafSilhouette::Aspen,
+    LeafSilhouette::Bush, LeafSilhouette::PineSprig};
+static_assert(static_cast<size_t>(kAllLeafSilhouettes.back()) + 1 == kLeafSilhouetteCount,
+              "append new LeafSilhouette values at the end and update kAllLeafSilhouettes + kLeafSilhouetteCount");
+
+// The alpha-discard cutoff a per-silhouette leaf-card texture should be BAKED
+// with (BuildLeafMipChainRgba8's coverage-preserving mip chain, viewer's
+// LeafSilhouette-keyed texture cache). Single source of truth for the value
+// TreeCatalog()'s presets also assign to LeafOptions::alpha_cutoff below --
+// PineSprig's thin needle strokes need the lower cutoff so coverage
+// preservation has something to preserve; every other silhouette uses the
+// LeafOptions default (0.5).
+constexpr float LeafSilhouetteBakeCutoff(LeafSilhouette shape) {
+  return (shape == LeafSilhouette::PineSprig) ? 0.35f : 0.5f;
+}
+
+// Per-site leaf-card blade layout (tree_generator.cpp's emit_leaf):
+// SingleQuad/CrossedPair keep ez-tree's billboard=1/2 behavior; FanFromStem
+// and AxialFins are multi-blade arrangements sharing the site's stem point
+// or long axis respectively.
+enum class LeafArrangement { SingleQuad, CrossedPair, FanFromStem, AxialFins };
+
 // Leaf-card generation parameters (ported from ez-tree TreeOptions.leaves).
 // Consumed by GenerateLeafMesh (tree_generator.hpp); leaf placement uses a
 // separate RNG stream so it never perturbs the branch skeleton.
 struct LeafOptions {
   bool  enabled = true;
-  int   billboard = 2;        // 1 = single quad, 2 = double (perpendicular cross)
+  LeafArrangement arrangement = LeafArrangement::CrossedPair;  // == old billboard=2
+  int   blade_count = 2;      // quads per site, FanFromStem/AxialFins only (2..3)
+  float card_aspect = 1.0f;   // card width = size * card_aspect (height = size)
   int   count = 18;           // leaves per leaf-bearing branch (ez-tree oak_medium)
   float start = 0.16f;        // fractional start along the branch (ez-tree)
   float size = 2.5f;          // leaf card size (native ez-tree units)
@@ -24,6 +65,7 @@ struct LeafOptions {
   glm::vec3 tint{0.30f, 0.55f, 0.18f};  // green; per-preset overridable
   glm::vec3 transmission_tint{0.35f, 0.6f, 0.15f};  // transmitted (back-lit) colour
   float transmission_strength{0.6f};
+  LeafSilhouette silhouette = LeafSilhouette::Bush;  // card texture shape (leaf_texture.hpp)
   bool tip_leaf = true;       // ez-tree deciduous terminal-tip leaf: one extra leaf at each
                               // leaf-bearing branch's endpoint (set false for evergreens)
 };
@@ -70,8 +112,10 @@ inline TreeOptions OakPreset() {
   o.twist      = {-0.23f, 0.42f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = 0.02f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 10.0f;
-  o.leaves = {.count=18, .start=0.16f, .size=2.5f, .size_variance=0.7f, .angle=42.0f, .tint={0.32f,0.52f,0.18f},
-              .transmission_tint={0.55f,0.62f,0.10f}, .transmission_strength=0.65f};
+  o.leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
+              .count=30, .start=0.16f, .size=2.32f, .size_variance=0.7f, .angle=42.0f,
+              .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
+              .transmission_strength=0.65f, .silhouette=LeafSilhouette::Oak};
   return o;
 }
 
@@ -91,8 +135,10 @@ inline TreeOptions PinePreset() {
   o.twist      = {0.0f, 0.0f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = -0.003f;
   o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 1.0f;
-  o.leaves = {.count=30, .start=0.09f, .size=1.435f, .size_variance=0.201f, .angle=39.0f, .tint={0.16f,0.40f,0.24f},
-              .transmission_tint={0.32f,0.46f,0.12f}, .transmission_strength=0.28f, .tip_leaf=false};
+  o.leaves = {.arrangement=LeafArrangement::AxialFins, .blade_count=3, .card_aspect=0.45f,
+              .count=280, .start=0.09f, .size=2.043f, .size_variance=0.201f, .angle=39.0f,
+              .alpha_cutoff=0.35f, .tint={0.16f,0.40f,0.24f}, .transmission_tint={0.32f,0.46f,0.12f},
+              .transmission_strength=0.28f, .silhouette=LeafSilhouette::PineSprig, .tip_leaf=false};
   return o;
 }
 

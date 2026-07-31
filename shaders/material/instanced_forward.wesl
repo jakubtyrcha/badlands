@@ -1,11 +1,12 @@
 // Instanced forward-opaque, standard-lit material. Forked from
 // standard_forward.wesl for the GPU-driven instanced-rendering feature: the
-// fragment stage (shadow-map PCF + IBL + shadeStandard assembly via the shared
-// shadeStandardForward helper + the @if(translucency) transmission path)
-// matches standard_forward.wesl's; only the vertex stage + group layout
-// change. The per-object model matrix is read per-instance from a group-1
-// storage array indexed by @builtin(instance_index); material constants (tint,
-// params, transmission) live in a group-0 UBO.
+// fragment stage (shadow-map PCF + IBL + shadeStandard assembly via the
+// shared shadeStandardForward helper + the shared, @if(translucency)-gated
+// transmissionContribution helper, both from standard_lighting.wesl) matches
+// standard_forward.wesl's; only the vertex stage + group layout change. The
+// per-object model matrix is read per-instance from a group-1 storage array
+// indexed by @builtin(instance_index); material constants (tint, params,
+// transmission) live in a group-0 UBO.
 //
 // Feature: `instanced`. Vertex layout: pos(3)+uv(2)+normal(3)+tangent(3).
 
@@ -18,7 +19,7 @@ import package::common::color::srgb_to_linear;
 @if(!shadow_pass)
 import package::common::shadow_sampling::sampleShadowMapPCF;
 @if(!shadow_pass)
-import package::common::standard_lighting::{shadeStandardForward, evaluateTranslucency};
+import package::common::standard_lighting::{shadeStandardForward, transmissionContribution};
 
 // Group 0: frame UBO (@0, imported) + albedo texture + sampler + material
 // constants UBO (@3). The model matrix is NOT here — it is per-instance.
@@ -99,17 +100,6 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
     return output;
 }
 
-@if(!shadow_pass && translucency)
-fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, shadow: f32) -> vec3<f32> {
-    let L = normalize(frame.sunDirection.xyz);
-    return evaluateTranslucency(N, V, L, shadow, ao,
-                                mat_params.transmission.rgb, mat_params.transmission.a);
-}
-@if(!shadow_pass && !translucency)
-fn transmissionContribution(N: vec3<f32>, V: vec3<f32>, ao: f32, shadow: f32) -> vec3<f32> {
-    return vec3<f32>(0.0);
-}
-
 @if(!shadow_pass)
 @fragment
 fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
@@ -134,7 +124,8 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location
 
     let color = shadeStandardForward(albedoLinear, N, V, roughness, ao, shadow,
         prefiltered_env, prefiltered_sampler, brdf_lut, brdf_lut_sampler);
-    let transmission = transmissionContribution(N, V, ao, shadow);
+    let transmission = transmissionContribution(N, V, ao, worldPos, input.position.xy,
+                                                 mat_params.transmission, shadow_map);
     return vec4<f32>(color + transmission, 1.0);
 }
 

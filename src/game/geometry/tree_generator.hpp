@@ -16,6 +16,11 @@ struct SkeletonBranch {
   int level = 0;  // recursion depth (0 = trunk); used for debug-graph coloring
 };
 
+// Quads emitted per leaf site for a given arrangement: SingleQuad->1,
+// CrossedPair->2, FanFromStem/AxialFins->lf.blade_count. Shared by the
+// generator and its tests so the quad-count arithmetic isn't duplicated.
+int QuadsPerLeafSite(const LeafOptions& lf);
+
 // Phase A: seeded recursive branch skeleton (quaternion growth, child spawning).
 std::vector<SkeletonBranch> BuildTreeSkeleton(const TreeOptions& options);
 // Phase B: sweep tapered rings along each branch -> one opaque bark mesh,

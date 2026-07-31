@@ -1,5 +1,7 @@
 #include <catch_amalgamated.hpp>
+#include <algorithm>
 #include <cmath>
+#include <glm/gtc/constants.hpp>  // glm::pi
 #include "game/geometry/tree_options.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/leaf_texture.hpp"
@@ -114,6 +116,66 @@ TEST_CASE("TreeCatalog: every predefined setup generates a well-formed mesh") {
   }
 }
 
+TEST_CASE("TreeCatalog presets bake with LeafSilhouetteBakeCutoff's cutoff") {
+  // Guards against the viewer's leaf-texture cache (model_viewer_view.cpp)
+  // and TreeCatalog's per-preset LeafOptions::alpha_cutoff drifting apart --
+  // both must agree with the single shared LeafSilhouetteBakeCutoff helper.
+  auto check = [](const TreeOptions& o, const std::string& name) {
+    INFO("setup: " << name);
+    REQUIRE(o.leaves.alpha_cutoff ==
+            Catch::Approx(LeafSilhouetteBakeCutoff(o.leaves.silhouette)));
+  };
+  check(OakPreset(), "OakPreset");
+  check(PinePreset(), "PinePreset");
+
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) check(setup.options, setup.name);
+}
+
+TEST_CASE("TreeCatalog: leaf world-size bands") {
+  // Same preview-height scale the viewer applies to fit every catalog tree
+  // into its orbit framing (model_viewer_view.cpp's kTreePreviewHeight) --
+  // world_leaf_m is the on-screen leaf-card size once a tree is scaled to
+  // that preview height, i.e. what a player actually sees.
+  constexpr float kPreviewHeight = 8.0f;
+
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) {
+    INFO("setup: " << setup.name);
+    const LeafOptions& lf = setup.options.leaves;
+    CHECK(lf.arrangement != LeafArrangement::CrossedPair);
+
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+    const TexturedMeshResult bark = GenerateTreeMesh(setup.options, skeleton);
+    const float height = bark.local_bounds.max.y - bark.local_bounds.min.y;
+    REQUIRE(height > 0.0f);
+
+    const float world_leaf_m = lf.size * kPreviewHeight / height;
+    const int quads_per_site = QuadsPerLeafSite(lf);
+
+    INFO(setup.name << ": bark_height=" << height
+                     << " world_leaf_m=" << world_leaf_m
+                     << " count=" << lf.count
+                     << " quads_per_site=" << quads_per_site);
+
+    // Band keyed off silhouette: PineSprig is a small evergreen sprig cluster
+    // (unchanged), Bush is a compact deciduous sprig, Oak/Ash/Aspen are the
+    // bigger cluster-card deciduous sprigs (each card now depicts a whole
+    // photographed branch, not one leaf, so it needs to read at 5-8% of tree
+    // height -- ~0.45-0.65m at the 8m preview -- to show that content).
+    float lo, hi;
+    if (lf.silhouette == LeafSilhouette::PineSprig) {
+      lo = 0.15f; hi = 0.35f;
+    } else if (lf.silhouette == LeafSilhouette::Bush) {
+      lo = 0.25f; hi = 0.6f;
+    } else {
+      lo = 0.35f; hi = 0.8f;
+    }
+    CHECK(world_leaf_m >= lo);
+    CHECK(world_leaf_m <= hi);
+  }
+}
+
 TEST_CASE("GenerateLeafMesh: deterministic") {
   const TexturedMeshResult a = GenerateLeafMesh(OakPreset());
   const TexturedMeshResult b = GenerateLeafMesh(OakPreset());
@@ -133,22 +195,35 @@ TEST_CASE("GenerateLeafMesh: well-formed indexed mesh (Oak, Pine)") {
   }
 }
 
-TEST_CASE("GenerateLeafMesh: billboard=2 is exactly 2x billboard=1") {
+TEST_CASE("GenerateLeafMesh: quad count scales with QuadsPerLeafSite") {
   TreeOptions single = OakPreset();
-  single.leaves.billboard = 1;
-  TreeOptions cross = OakPreset();
-  cross.leaves.billboard = 2;
-
+  single.leaves.arrangement = LeafArrangement::SingleQuad;
+  REQUIRE(QuadsPerLeafSite(single.leaves) == 1);
   const TexturedMeshResult r1 = GenerateLeafMesh(single);
-  const TexturedMeshResult r2 = GenerateLeafMesh(cross);
-
   REQUIRE(r1.mesh.vertex_count > 0u);
-  REQUIRE(r2.mesh.vertex_count == r1.mesh.vertex_count * 2u);
-  REQUIRE(r2.mesh.indices.size() == r1.mesh.indices.size() * 2u);
-
   // Each quad = 4 verts + 6 indices.
   REQUIRE(r1.mesh.indices.size() == r1.mesh.vertex_count / 4u * 6u);
-  REQUIRE(r2.mesh.indices.size() == r2.mesh.vertex_count / 4u * 6u);
+
+  struct Case { LeafArrangement arrangement; int blade_count; int expected_quads; };
+  const Case cases[] = {
+      {LeafArrangement::CrossedPair, 2, 2},
+      {LeafArrangement::FanFromStem, 3, 3},
+      {LeafArrangement::AxialFins, 3, 3},
+  };
+  for (const Case& c : cases) {
+    INFO("arrangement index " << static_cast<int>(c.arrangement));
+    TreeOptions o = OakPreset();
+    o.leaves.arrangement = c.arrangement;
+    o.leaves.blade_count = c.blade_count;
+    REQUIRE(QuadsPerLeafSite(o.leaves) == c.expected_quads);
+
+    const TexturedMeshResult r = GenerateLeafMesh(o);
+    REQUIRE(r.mesh.vertex_count ==
+            r1.mesh.vertex_count * static_cast<uint32_t>(c.expected_quads));
+    REQUIRE(r.mesh.indices.size() ==
+            r1.mesh.indices.size() * static_cast<size_t>(c.expected_quads));
+    REQUIRE(r.mesh.indices.size() == r.mesh.vertex_count / 4u * 6u);
+  }
 }
 
 TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
@@ -159,21 +234,131 @@ TEST_CASE("GenerateLeafMesh: disabled produces an empty mesh") {
   REQUIRE(r.mesh.indices.empty());
 }
 
-TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card") {
-  const int n = 64;
-  const std::vector<uint8_t> px = BuildLeafRgba8(n, glm::vec3(0.30f, 0.55f, 0.18f));
-  REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
-  auto alpha = [&](int x, int y) {
-    return px[(static_cast<size_t>(y) * n + static_cast<size_t>(x)) * 4 + 3];
+TEST_CASE("BuildLeafRgba8: leaf-shaped alpha card for every silhouette") {
+  const int n = 128;
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  for (LeafSilhouette shape : kAllLeafSilhouettes) {
+    INFO("silhouette index " << static_cast<int>(shape));
+    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, shape);
+    REQUIRE(px.size() == static_cast<size_t>(n) * static_cast<size_t>(n) * 4);
+    auto alpha = [&](int x, int y) {
+      return px[(static_cast<size_t>(y) * n + static_cast<size_t>(x)) * 4 + 3];
+    };
+    REQUIRE(alpha(0, 0) == 0);             // corners are outside
+    REQUIRE(alpha(n - 1, 0) == 0);
+    REQUIRE(alpha(0, n - 1) == 0);
+    REQUIRE(alpha(n - 1, n - 1) == 0);
+
+    // On-shape probe: every silhouette is now a sprig (Oak/Ash/Aspen/Bush) or
+    // the needle-stripe sprig (PineSprig) built around a main stem pinned to
+    // u=0 near the card's base -- probe that always-present stem column
+    // rather than the exact center, which for a sprig may land in a gap
+    // between leaf stamps.
+    const int probe_x = n / 2;
+    const int probe_y = n / 16;
+    REQUIRE(alpha(probe_x, probe_y) == 255);
+
+    // RGB carries the passed color (green > red at the probe texel).
+    const size_t c = (static_cast<size_t>(probe_y) * n + static_cast<size_t>(probe_x)) * 4;
+    REQUIRE(px[c + 1] > px[c + 0]);
+  }
+}
+
+TEST_CASE("BuildLeafRgba8: opaque-texel counts are pairwise distinct across silhouettes") {
+  const int n = 128;
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  size_t counts[kAllLeafSilhouettes.size()];
+  for (size_t i = 0; i < kAllLeafSilhouettes.size(); ++i) {
+    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, kAllLeafSilhouettes[i]);
+    size_t count = 0;
+    for (size_t p = 0; p < static_cast<size_t>(n) * static_cast<size_t>(n); ++p)
+      if (px[p * 4 + 3] >= 128) ++count;
+    counts[i] = count;
+  }
+  for (size_t i = 0; i < kAllLeafSilhouettes.size(); ++i)
+    for (size_t j = i + 1; j < kAllLeafSilhouettes.size(); ++j)
+      REQUIRE(counts[i] != counts[j]);
+}
+
+TEST_CASE("BuildLeafRgba8: deciduous sprigs land in the ez-tree-like coverage band") {
+  // Each deciduous silhouette is now a full branch sprig (main stem + twigs +
+  // 20-40 leaf stamps), not one leaf filling the card -- assert overall alpha
+  // coverage at the production size/cutoff lands in the target density band
+  // (ez-tree's photographed sprigs read roughly 30-50% covered).
+  const int n = 512;
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  constexpr LeafSilhouette kDeciduous[] = {LeafSilhouette::Oak, LeafSilhouette::Ash,
+                                           LeafSilhouette::Aspen, LeafSilhouette::Bush};
+  for (LeafSilhouette shape : kDeciduous) {
+    INFO("silhouette index " << static_cast<int>(shape));
+    const std::vector<uint8_t> px = BuildLeafRgba8(n, color, shape);
+    const size_t total = static_cast<size_t>(n) * static_cast<size_t>(n);
+    size_t covered = 0;
+    for (size_t i = 0; i < total; ++i)
+      if (px[i * 4 + 3] >= 128) ++covered;  // cutoff 0.5
+    const float coverage = static_cast<float>(covered) / static_cast<float>(total);
+    INFO("coverage=" << coverage);
+    CHECK(coverage >= 0.25f);
+    CHECK(coverage <= 0.55f);
+  }
+}
+
+TEST_CASE("BuildLeafRgba8: deterministic (no RNG state, byte-identical run-to-run)") {
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  const std::vector<uint8_t> a = BuildLeafRgba8(512, color, LeafSilhouette::Oak);
+  const std::vector<uint8_t> b = BuildLeafRgba8(512, color, LeafSilhouette::Oak);
+  REQUIRE(a == b);
+}
+
+TEST_CASE("BuildLeafMipChainRgba8: coverage-preserving mip chain") {
+  const glm::vec3 color(0.30f, 0.55f, 0.18f);
+  struct Case { LeafSilhouette shape; float cutoff; int n; };
+  const Case cases[] = {
+      {LeafSilhouette::Oak, 0.5f, 128},
+      {LeafSilhouette::PineSprig, 0.35f, 128},
+      // Production bake size (model_viewer_view.cpp's kLeafTexSize). Box-
+      // downsampling INFLATES PineSprig's thin needle-stripe coverage at
+      // coarse mips here (empirically 1.19-1.54x pre-fix) -- the 128 probe
+      // above doesn't reproduce it; this is the case the Castano bisection's
+      // [0.25, 4.0] scale range (leaf_texture.cpp) exists to correct, since a
+      // scale floor of 1.0 can never shrink inflated coverage back down.
+      {LeafSilhouette::PineSprig, 0.35f, 512},
   };
-  REQUIRE(alpha(n / 2, n / 2) == 255);   // center is inside the leaf
-  REQUIRE(alpha(0, 0) == 0);             // corners are outside
-  REQUIRE(alpha(n - 1, 0) == 0);
-  REQUIRE(alpha(0, n - 1) == 0);
-  REQUIRE(alpha(n - 1, n - 1) == 0);
-  // RGB carries the leaf color (green > red at the center texel).
-  const size_t c = (static_cast<size_t>(n / 2) * n + static_cast<size_t>(n / 2)) * 4;
-  REQUIRE(px[c + 1] > px[c + 0]);
+
+  for (const Case& c : cases) {
+    INFO("silhouette index " << static_cast<int>(c.shape) << " n=" << c.n);
+    const std::vector<std::vector<uint8_t>> mips = BuildLeafMipChainRgba8(c.n, color, c.shape, c.cutoff);
+    size_t expected_levels = 1;
+    for (int w = c.n; w > 1; w /= 2) ++expected_levels;
+    REQUIRE(mips.size() == expected_levels);
+
+    auto coverage = [&](const std::vector<uint8_t>& px, int size) {
+      const uint8_t thresh = static_cast<uint8_t>(std::lround(c.cutoff * 255.0f));
+      size_t count = 0;
+      const size_t total = static_cast<size_t>(size) * static_cast<size_t>(size);
+      for (size_t i = 0; i < total; ++i)
+        if (px[i * 4 + 3] >= thresh) ++count;
+      return static_cast<float>(count) / static_cast<float>(total);
+    };
+
+    int size = c.n;
+    for (const std::vector<uint8_t>& level : mips) {
+      REQUIRE(level.size() == static_cast<size_t>(size) * static_cast<size_t>(size) * 4);
+      size = std::max(1, size / 2);
+    }
+
+    const float level0_coverage = coverage(mips[0], c.n);
+    REQUIRE(level0_coverage > 0.0f);
+
+    size = c.n;
+    for (const std::vector<uint8_t>& level : mips) {
+      if (size >= 8) {
+        const float cov = coverage(level, size);
+        REQUIRE(std::fabs(cov - level0_coverage) <= 0.30f * level0_coverage);
+      }
+      size = std::max(1, size / 2);
+    }
+  }
 }
 
 TEST_CASE("GenerateLeafMesh: terminal-tip leaf adds one leaf per leaf-bearing branch") {
@@ -187,8 +372,68 @@ TEST_CASE("GenerateLeafMesh: terminal-tip leaf adds one leaf per leaf-bearing br
   TreeOptions off = OakPreset(); off.leaves.tip_leaf = false;
   const uint32_t vn = GenerateLeafMesh(on).mesh.vertex_count;
   const uint32_t vf = GenerateLeafMesh(off).mesh.vertex_count;
-  const int quads = (OakPreset().leaves.billboard >= 2) ? 2 : 1;
+  const int quads = QuadsPerLeafSite(OakPreset().leaves);
   REQUIRE(vn > vf);
   // Each tip leaf = quads * 4 verts; one per leaf-bearing terminal branch.
   REQUIRE(vn - vf == static_cast<uint32_t>(count_terminal(OakPreset()) * quads * 4));
+}
+
+TEST_CASE("GenerateLeafMesh: FanFromStem blades never weld (full-stride distinct)") {
+  TreeOptions o = OakPreset();
+  o.leaves.arrangement = LeafArrangement::FanFromStem;
+  o.leaves.blade_count = 3;
+  const int n = QuadsPerLeafSite(o.leaves);
+  REQUIRE(n == 3);
+
+  const TexturedMeshResult r = GenerateLeafMesh(o);
+  const size_t stride = kTexturedMeshFloatsPerVertex;
+  const size_t verts_per_site = static_cast<size_t>(n) * 4u;
+  REQUIRE(r.mesh.vertices.size() >= verts_per_site * stride);
+
+  // First site (first n*4 verts). No two verts from DIFFERENT blades of this
+  // site may be bit-identical across the full 11-float stride (pos+uv+normal+
+  // tangent) -- shared full-stride verts are exactly what the LOD simplifier
+  // would weld, collapsing separate blades into one.
+  for (size_t i = 0; i < verts_per_site; ++i) {
+    for (size_t j = i + 1; j < verts_per_site; ++j) {
+      if (i / 4u == j / 4u) continue;  // same blade -- not the case under test
+      bool identical = true;
+      for (size_t k = 0; k < stride; ++k) {
+        if (r.mesh.vertices[i * stride + k] != r.mesh.vertices[j * stride + k]) {
+          identical = false;
+          break;
+        }
+      }
+      INFO("vertex " << i << " vs " << j);
+      REQUIRE_FALSE(identical);
+    }
+  }
+}
+
+TEST_CASE("GenerateLeafMesh: AxialFins blades share one long axis") {
+  TreeOptions o = OakPreset();
+  o.leaves.arrangement = LeafArrangement::AxialFins;
+  o.leaves.blade_count = 3;
+  const int n = QuadsPerLeafSite(o.leaves);
+  REQUIRE(n == 3);
+
+  const TexturedMeshResult r = GenerateLeafMesh(o);
+  const size_t stride = kTexturedMeshFloatsPerVertex;
+  auto pos = [&](size_t v) {
+    const size_t off = v * stride;
+    return glm::vec3(r.mesh.vertices[off + 0], r.mesh.vertices[off + 1],
+                     r.mesh.vertices[off + 2]);
+  };
+
+  // Quad corners are {top-left, bottom-left, bottom-right, top-right}; the
+  // card's long axis is top-left minus bottom-left (== top-right minus
+  // bottom-right, same rotated edge).
+  glm::vec3 axis[3];
+  for (int b = 0; b < n; ++b) {
+    const size_t base = static_cast<size_t>(b) * 4u;
+    axis[b] = glm::normalize(pos(base + 0) - pos(base + 1));
+  }
+  for (int i = 0; i < n; ++i)
+    for (int j = i + 1; j < n; ++j)
+      REQUIRE(std::fabs(glm::dot(axis[i], axis[j])) == Catch::Approx(1.0f).margin(1e-4f));
 }
