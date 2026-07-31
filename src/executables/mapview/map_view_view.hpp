@@ -14,6 +14,7 @@
 // a rewrite.)
 
 #include <cstdint>
+#include <memory>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
@@ -26,6 +27,8 @@
 #include "engine/rendering/context/scene_context.hpp"
 #include "engine/rendering/cubemap_builder.hpp"
 #include "engine/rendering/daylight.hpp"
+#include "engine/rendering/material_library.hpp"
+#include "engine/rendering/water_material.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
 #include "mapgen/generator.hpp"
@@ -91,10 +94,30 @@ class MapViewView : public AppView {
   // builder and mouse picking read.
   MapData terrain_map_;
 
-  // The shared cluster-LOD terrain module: owns the DAG, its vertex-color
-  // material factory, the terrain entity, the per-frame LOD cut, and the Terrain
-  // debug UI. Built with an identity model (mapview vertices are absolute world).
+  // Terrain materials: one PBR pack per biome (layer index == Biome enum),
+  // resolved through assets/materials/terrain_biomes.json. The library also owns
+  // the shared trilinear+aniso sampler the arrays must be read through.
+  MaterialLibrary matlib_;
+  MaterialLibrary::TerrainArrays terrain_arrays_;
+
+  // Biome weights as a splat texture sampled by world XZ: 8 slots across two
+  // RGBA8 planes. Held as views (each keeps its texture alive) for the lifetime
+  // of the terrain material that binds them. Its sampler CLAMPS -- the splat
+  // covers the map's own extent, so repeating would fold edge onto edge.
+  wgpu::TextureView splat0_view_, splat1_view_;
+  wgpu::Sampler splat_sampler_;
+
+  // The shared cluster-LOD terrain module: owns the DAG, its material factory,
+  // the terrain entity, the per-frame LOD cut, and the Terrain debug UI. Built
+  // with an identity model (mapview vertices are absolute world).
   ClusterTerrain cluster_terrain_;
+
+  // Still lake water: one static forward-transparent entity, created DIRECTLY
+  // in the registry like the cluster terrain rather than through a SceneGraph.
+  // SceneGraph::SyncToRegistry starts with registry.clear(), so a graph sharing
+  // this registry would wipe the terrain entity every frame -- mapview owns its
+  // entities outright, and there is nothing here for a scene graph to do.
+  std::unique_ptr<MaterialInstanceFactory> water_factory_;
 
   // Where the mouse ray last hit the terrain. `hover_valid_` is false when the
   // cursor is off the terrain (sky / past the map edge) -- the hover UI hides.

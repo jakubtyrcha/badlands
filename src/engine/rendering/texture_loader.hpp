@@ -96,6 +96,19 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
                                       uint32_t width, uint32_t height,
                                       const uint8_t* rgba);
 
+// Copies `src_rgba`'s RED channel into `rgba`'s ALPHA channel, in place, for
+// `pixel_count` tightly-packed RGBA8 pixels. Both buffers must hold at least
+// `pixel_count * 4` bytes and describe the same image size.
+//
+// This is how a PBR pack's grayscale displacement map rides along in the unused
+// alpha of its ARM texture, so height-blended terrain costs no extra texture
+// array, binding, or fetch. Pure CPU and side-effect free so it is unit
+// testable without a GPU -- the same reason LoadTexture2D's DX->GL green flip
+// is a CPU step, and for the same second reason: the mip chain must be
+// generated from already-merged pixels, not merged afterwards per level.
+void CopyRedIntoAlpha(uint8_t* rgba, const uint8_t* src_rgba,
+                      size_t pixel_count);
+
 // Packs N already-mipped 2D textures into one texture ARRAY (layer i =
 // layers[i]) and returns an e2DArray view over all layers + mip levels. The
 // array takes its format from the sources (RGBA8Unorm for everything

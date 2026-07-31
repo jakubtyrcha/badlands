@@ -125,6 +125,47 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
            .default_texture = "default_arm"},
       }};
   RegisterMaterial("terrain_blend", terrain_blend_reqs, terrain_blend_reqs);
+
+  // terrain_cluster.wesl - the same three layer arrays as terrain_blend (all
+  // sharing sampler binding 2), plus two RGBA8 biome-weight splat planes on
+  // their own sampler (binding 7). The splat needs a CLAMP sampler where the
+  // arrays need REPEAT: it holds normalized weights over the map's own extent,
+  // so a repeat sampler would fold the far edge onto the near one.
+  //
+  // Unlike terrain_blend, this material's slots MIX dimensionalities: the three
+  // layer arrays are texture_2d_array, the two splat planes texture_2d. The
+  // factory picks its unbound-slot default per GEOMETRY type, so it cannot get
+  // both right -- kTerrainCluster stays on k2D, which suits the splat slots and
+  // would be a dimension mismatch for the array ones. The array slots are
+  // therefore not optional; ClusterTerrain::Build rejects a null view up front
+  // rather than letting one reach Dawn. `default_texture` below is the name
+  // that WOULD be used, kept accurate for the splat slots.
+  MaterialRequirements terrain_cluster_reqs{
+      .shader_name = "terrain_cluster",
+      .textures = {
+          {.slot_name = "albedo_array",
+           .texture_binding = 1,
+           .sampler_binding = 2,
+           .default_texture = "white"},
+          {.slot_name = "normal_array",
+           .texture_binding = 3,
+           .sampler_binding = 2,
+           .default_texture = "flat_normal"},
+          {.slot_name = "arm_array",
+           .texture_binding = 4,
+           .sampler_binding = 2,
+           .default_texture = "default_arm"},
+          {.slot_name = "biome_splat0",
+           .texture_binding = 5,
+           .sampler_binding = 7,
+           .default_texture = "white"},
+          {.slot_name = "biome_splat1",
+           .texture_binding = 6,
+           .sampler_binding = 7,
+           .default_texture = "white"},
+      }};
+  RegisterMaterial("terrain_cluster", terrain_cluster_reqs,
+                   terrain_cluster_reqs);
 }
 
 std::string MaterialRequirementsRegistry::ResolveName(

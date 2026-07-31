@@ -51,8 +51,9 @@ cmake --build build                                   # builds the apps + Rust s
 perl -e 'alarm 30; exec @ARGV' ./build/badlands_game  # SIGALRM-bounded headless smoke run
 ```
 `badlands_mapview` is the map tool: it generates a map procedurally (bedrock field →
-quantile-cut biomes → stream-power erosion + lakes) and renders it as
-biome-colored terrain. `--preview-image-only` instead dumps the debug rasters
+quantile-cut biomes → stream-power erosion + lakes) and renders it as cluster-LOD
+terrain wearing one PBR material per biome (blended from a biome splat texture),
+with still, murky lake water. `--preview-image-only` instead dumps the debug rasters
 (bedrock/biome/heightmap/hillshade/flow/water/sediment PNGs plus a numbered
 per-stage + per-N-iterations film strip) to `--out` and exits (pure CPU, no
 window).
@@ -101,4 +102,7 @@ Data flow: WESL (Rust) → WGSL → Dawn pipeline + reflection → material inst
 - **Material textures resolve by `param_name == slot_name`** (e.g. `textured_mesh`'s albedo slot is `"mesh_texture"`). `InstanceParams.texture_overrides` carry their own sampler; the factory's default sampler uses `mipmapFilter=Nearest`, so supply a trilinear+aniso sampler when you want the mip chain used.
 - **Corrosion crate quirks:** each `src/crates/*/Cargo.toml` needs an empty `[workspace]` table (so cargo doesn't walk up the tree looking for a parent workspace); crate profiles set `panic="abort"` and Corrosion overrides to `-Cpanic=unwind` at link so the extern-"C" `catch_unwind` thunks actually catch. The `wesl` crate's Cargo *target* is named `wesl_ffi` to avoid colliding with the `wesl` dependency.
 - **FFI is data-only and mockable.** Cross-language seams are contracts (narrow C ABIs, tested across the boundary). Keep them low-level — no game concepts leak into the Rust libs.
+- **Terrain layer blending is height-lerped, and displacement rides in ARM alpha.** `shaders/common/terrain_layers.wesl` is shared by `terrain_blend` (weights per VERTEX) and `terrain_cluster` (weights from a biome SPLAT texture sampled in world XZ, so they survive LOD decimation); `LoadTerrainArrays` folds each pack's `disp` red into its `arm` alpha, so height blending costs no extra array, binding, or fetch.
+- **Water is a Beer-Lambert medium, not a tint.** `water.wesl` takes a per-channel extinction in 1/m plus a scattering albedo; the shore fade and the depth hue shift both fall out of transmittance, so there is no coast-width or absorption knob and the surface outputs alpha 1. Extinction is always stated as a visibility depth and converted (`sigma = 3 / d_vis`). The `still` shader feature is standing water (no waves, flat normal) — it only ever reaches the forward-transparent variant, since `kForwardTransparent` registers no shadow pass.
+- **`SceneGraph::SyncToRegistry` starts with `registry.clear()`.** An app that creates entities directly in its registry (mapview: the cluster terrain, the lake water) cannot also drive a SceneGraph over that same registry — the sync would wipe them every frame.
 - **Binary assets are git LFS** (`*.bin/*.jpg/*.jpeg/*.png/*.ttf`); a plain `git add` on one stores an LFS pointer, so stage asset paths deliberately. `build/`, `target/`, `.claude/`, and `.superpowers/` are gitignored.

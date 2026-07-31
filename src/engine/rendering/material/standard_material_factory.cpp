@@ -180,7 +180,15 @@ StandardMaterialFactory::CreateInstance(GeometryType geometry_type,
     }
   }
 
-  // Determine expected texture type from geometry
+  // Determine expected texture type from geometry.
+  //
+  // NOTE: this is per-GEOMETRY, so it cannot describe a material whose slots
+  // mix dimensionalities. kTerrainCluster is exactly that -- three
+  // texture_2d_arrays plus two texture_2d splat planes -- so neither k2D nor
+  // kArray is right for all of its slots, and it deliberately stays on the k2D
+  // default. Its array slots are therefore REQUIRED to be bound by the caller;
+  // ClusterTerrain::Build enforces that rather than letting a wrong-dimension
+  // default reach Dawn.
   TextureType expected_type = TextureType::k2D;
   if (geometry_type == GeometryType::kSphericalMesh) {
     expected_type = TextureType::kCubemap;

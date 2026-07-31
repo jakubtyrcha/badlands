@@ -170,3 +170,28 @@ TEST_CASE("PackTexturesIntoArray: mismatched layers are rejected") {
   CHECK_FALSE(format_mismatch.texture);
   CHECK_FALSE(format_mismatch.view);
 }
+
+// CopyRedIntoAlpha is the CPU step that lets a PBR pack's grayscale
+// displacement map ride along in the unused alpha of its ARM texture, so
+// height-blended terrain costs no extra texture array, binding or fetch. Pure
+// CPU, so it needs no GPU fixture.
+TEST_CASE("CopyRedIntoAlpha moves the source red channel into the destination alpha") {
+  // 2 pixels: dst is an ARM texel (AO, roughness, metal, unused alpha),
+  // src is a displacement texel (grayscale, so R carries the height).
+  std::vector<uint8_t> dst = {200, 100, 0, 255,
+                              10,  20,  30, 255};
+  const std::vector<uint8_t> src = {64, 64, 64, 255,
+                                    192, 192, 192, 255};
+
+  CopyRedIntoAlpha(dst.data(), src.data(), 2);
+
+  // RGB is untouched; alpha becomes the source red.
+  CHECK(dst[0] == 200);
+  CHECK(dst[1] == 100);
+  CHECK(dst[2] == 0);
+  CHECK(dst[3] == 64);
+  CHECK(dst[4] == 10);
+  CHECK(dst[5] == 20);
+  CHECK(dst[6] == 30);
+  CHECK(dst[7] == 192);
+}

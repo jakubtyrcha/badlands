@@ -13,12 +13,23 @@
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include "core/geometry_type.hpp"
 #include "engine/app/sdl_input_util.hpp"
 #include "engine/core/ray.hpp"
+#include "engine/rendering/components/forward_component.hpp"
+#include "engine/rendering/components/material_factory_component.hpp"
+#include "engine/rendering/components/mesh_components.hpp"
+#include "engine/rendering/components/transform.hpp"
+#include "engine/rendering/geometry/mesh_builder_utils.hpp"     // PushVertex
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"  // AABB helper
 #include "engine/rendering/scene_renderer.hpp"  // debug-view selectors
+#include "engine/rendering/texture_loader.hpp"  // UploadTexture2DWithMips
 #include "engine/ui/editor_ui.hpp"
 #include "game/geometry/terrain_mesh.hpp"  // RaycastTerrain(MapData)
 #include "mapgen/biomes.hpp"
+#include "mapview/biome_manifest.hpp"
+#include "mapview/biome_splat.hpp"
+#include "mapview/lake_surface.hpp"
 
 namespace badlands {
 
@@ -90,6 +101,34 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   log_step("mg:generate", since(t));
   map_size_m_ = params_.world_size_m;
 
+  // Lake bathymetry, logged once: the water material's extinction coefficients
+  // are derived from a visibility depth in metres, so the depth distribution
+  // the generator actually produces is a load-bearing input, not trivia.
+  {
+    std::vector<float> depths;
+    depths.reserve(map_.lakes.size());
+    for (const mapgen::LakeInfo& l : map_.lakes) depths.push_back(l.max_depth_m);
+    std::sort(depths.begin(), depths.end());
+    int wet = 0;
+    for (float d : map_.water_depth.data) {
+      if (d > 0.0f) ++wet;
+    }
+    const float wet_frac =
+        map_.water_depth.data.empty()
+            ? 0.0f
+            : static_cast<float>(wet) /
+                  static_cast<float>(map_.water_depth.data.size());
+    if (depths.empty()) {
+      spdlog::info("lakes: none (wet {:.2f}%)", 100.0f * wet_frac);
+    } else {
+      spdlog::info(
+          "lakes: {}  max_depth_m min/median/max = {:.2f}/{:.2f}/{:.2f}  "
+          "wet {:.2f}%",
+          depths.size(), depths.front(), depths[depths.size() / 2],
+          depths.back(), 100.0f * wet_frac);
+    }
+  }
+
   // Wrap the generator output in the frozen MapData contract (one-hot biomes) at
   // the raster's own texel spacing -- the input to the cluster terrain and
   // picking. The cluster LOD's job is to decimate from full detail, so the leaf
@@ -120,6 +159,71 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   gamecam_.UpdateCamera(camera_);
 
+  // Terrain materials: one PBR pack per biome, keyed by name so a renamed or
+  // reordered manifest entry fails loudly instead of mis-mapping a biome.
+  t = clock::now();
+  if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
+    spdlog::error("MapViewView: MaterialLibrary init failed");
+    return false;
+  }
+  std::vector<std::string> pack_dirs;
+  if (!ResolveBiomePacks("assets/materials/terrain_biomes.json", pack_dirs)) {
+    spdlog::error("MapViewView: failed to resolve biome packs");
+    return false;
+  }
+  terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
+  if (!matlib_.ok()) {
+    spdlog::error("MapViewView: terrain arrays failed to build");
+    return false;
+  }
+  log_step("biome packs", since(t));
+
+  // Biome splat: the per-biome blend weights, sampled by world XZ in the
+  // fragment stage rather than carried on the vertices, so the coarsest LOD
+  // cluster still gets full-resolution biome detail.
+  t = clock::now();
+  // Texel size comes from the biome raster's OWN width, not params_.resolution:
+  // the blur radius and the world->UV transform below must be derived from the
+  // same source, or they would disagree silently if the generator ever emitted
+  // the biome raster at a different resolution than requested.
+  const float splat_texel_m =
+      map_.biome.width > 0
+          ? params_.world_size_m / static_cast<float>(map_.biome.width)
+          : 0.0f;
+  const BiomeSplat splat = BuildBiomeSplat(map_.biome, splat_texel_m);
+  if (splat.empty()) {
+    spdlog::error("MapViewView: empty biome splat");
+    return false;
+  }
+  splat0_view_ = UploadTexture2DWithMips(
+                     device_, queue_, *ctx.pipeline_gen,
+                     static_cast<uint32_t>(splat.width),
+                     static_cast<uint32_t>(splat.height), splat.slots0.data())
+                     .view;
+  splat1_view_ = UploadTexture2DWithMips(
+                     device_, queue_, *ctx.pipeline_gen,
+                     static_cast<uint32_t>(splat.width),
+                     static_cast<uint32_t>(splat.height), splat.slots1.data())
+                     .view;
+  if (!splat0_view_ || !splat1_view_) {
+    spdlog::error("MapViewView: biome splat upload failed");
+    return false;
+  }
+  // Trilinear + CLAMP. Mips matter: at max zoom one screen pixel covers several
+  // map texels, and unmipped weights alias into a shimmering biome mosaic.
+  wgpu::SamplerDescriptor splat_sd = {};
+  splat_sd.minFilter = wgpu::FilterMode::Linear;
+  splat_sd.magFilter = wgpu::FilterMode::Linear;
+  splat_sd.mipmapFilter = wgpu::MipmapFilterMode::Linear;
+  splat_sd.addressModeU = wgpu::AddressMode::ClampToEdge;
+  splat_sd.addressModeV = wgpu::AddressMode::ClampToEdge;
+  splat_sampler_ = device_.CreateSampler(&splat_sd);
+  // world XZ in [0, size] -> texel CENTRES in [0.5/N, 1 - 0.5/N].
+  const float inv_n = 1.0f / static_cast<float>(splat.width);
+  const float splat_scale = (1.0f - inv_n) / params_.world_size_m;
+  const glm::vec4 splat_uv(splat_scale, splat_scale, 0.5f * inv_n, 0.5f * inv_n);
+  log_step("biome splat", since(t));
+
   // Build the shared cluster-LOD terrain (identity model -- mapview vertices are
   // absolute world coords). --serial-build forces the single-threaded DAG build
   // for the perf A/B (both produce a bit-identical DAG). Seed the debug tint from
@@ -129,7 +233,9 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   cluster_params.parallel_build = !serial_build_;
   t = clock::now();
   if (!cluster_terrain_.Build(terrain_map_, ctx, registry_, glm::mat4(1.0f),
-                              cluster_params)) {
+                              cluster_params, terrain_arrays_,
+                              matlib_.shared_sampler(), splat0_view_,
+                              splat1_view_, splat_sampler_, splat_uv)) {
     spdlog::error("MapViewView: cluster terrain build failed");
     return false;
   }
@@ -137,6 +243,55 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // renders after a single Update) already draws the selected cut.
   cluster_terrain_.UpdateLod(camera_, screen_h_px_);
   log_step("cluster terrain", since(t));
+
+  // Still lake water. The surface deliberately overlaps each shore and runs
+  // under the terrain; water tests depth without writing it, so the buried ring
+  // is rejected in hardware -- and that overlap is what keeps a later wave
+  // displacement from opening a gap at the waterline.
+  t = clock::now();
+  water_factory_ =
+      BuildStillWaterForwardFactory(ctx.device, ctx.queue, ctx.pipeline_gen);
+  if (!water_factory_) {
+    spdlog::error("MapViewView: water factory build failed");
+    return false;
+  }
+  const std::vector<glm::vec3> water_tris =
+      BuildLakeSurfaceTriangles(map_, params_.world_size_m);
+  if (!water_tris.empty()) {
+    std::vector<float> v;
+    v.reserve(water_tris.size() * kTexturedMeshFloatsPerVertex);
+    for (const glm::vec3& p : water_tris) {
+      // uv = world XZ, normal +Y, tangent +X -- a flat plane needs no more.
+      PushVertex(v, p, glm::vec2(p.x, p.z), glm::vec3(0.0f, 1.0f, 0.0f),
+                 glm::vec3(1.0f, 0.0f, 0.0f));
+    }
+    // Created directly in the registry, mirroring what SceneGraph's
+    // MeshAttachment path emplaces (mesh + AABB + material + the pass tag).
+    // A SceneGraph is not usable here: SyncToRegistry clears the registry.
+    const entt::entity e = registry_.create();
+    registry_.emplace<Transform>(e).matrix = glm::mat4(1.0f);
+    auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(e);
+    mesh.vertex_count =
+        static_cast<uint32_t>(v.size() / kTexturedMeshFloatsPerVertex);
+    mesh.dirty = true;
+    mesh.geometry_type = GeometryType::kTexturedMesh;
+    registry_.emplace<StaticMeshAabbComponent>(
+        e, StaticMeshAabbComponent{
+               .local = ComputeLocalAabbFromVertices(
+                   v, kTexturedMeshFloatsPerVertex)});
+    mesh.vertices = std::move(v);
+
+    MaterialFactoryComponent fmc;
+    fmc.factory = water_factory_.get();
+    fmc.pass_type = MaterialPassType::kForwardTransparent;
+    fmc.params = StillLakeWaterParams();
+    fmc.config_hash = ComputeFactoryConfigHash(fmc);
+    registry_.emplace<MaterialFactoryComponent>(e, std::move(fmc));
+    registry_.emplace<ForwardTransparentRenderable>(e);
+  }
+  spdlog::info("water: {} triangles over {} lakes", water_tris.size() / 3,
+               map_.lakes.size());
+  log_step("water", since(t));
 
   spdlog::info("map load: {:.1f} ms total  ({}x{} texels)", since(t_load),
                params_.resolution, params_.resolution);
