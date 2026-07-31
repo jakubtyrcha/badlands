@@ -80,6 +80,14 @@ public:
     void updateDrag(float x, float y);
     void endDrag();
 
+    // Gizmo hover (modify-mode mouse-moved feedback). Hover state never
+    // outlives the gizmo it points at: it self-clears on selection change,
+    // gizmo hide, and node deletion — the app layer's clears are only a
+    // belt to these suspenders.
+    void updateGizmoHover(float x, float y);
+    void clearGizmoHover();
+    GizmoHandle gizmoHoverHandle() const;
+
     // node info (tests + later UI)
     Vec3f nodePosition(int32_t nodeId) const;   // {0,0,0} for unknown id
 

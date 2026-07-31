@@ -31,6 +31,11 @@ struct Editor::Impl {
         simd_float3 start_pos, start_hit, start_snap_point;
     } drag;
 
+    // Hovered gizmo handle (modify-mode mouse-moved feedback). Cleared
+    // anywhere the gizmo it points at can go away: select(), gizmo hide,
+    // deleteSelectedNode — hover must never outlive its gizmo.
+    GizmoHandle hover = GizmoHandle::None;
+
     // Mirrors drag's shape, including the node_id mid-gesture guard: without
     // it, a selection change between beginScale/updateScale (no interleaving
     // endScale) would silently apply the old node's start_scale to whatever
@@ -130,6 +135,7 @@ PickResult Editor::pick(float x, float y) const {
 
 void Editor::select(int32_t nodeId) {
     impl_->selected = nodeId;
+    impl_->hover = GizmoHandle::None; // the hovered handle belonged to the old selection's gizmo
     impl_->renderer.set_scene_lines_dirty(); // selection change alters which node's wireframe (if any) is drawn
 }
 
@@ -178,6 +184,7 @@ void Editor::deleteSelectedNode() {
 
     impl_->scene.remove_node(impl_->selected);
     impl_->selected = kInvalidNode;
+    impl_->hover = GizmoHandle::None; // deletion bypasses select(), so clear here too
     // Gizmo hides on its own next render(): selectedNode is looked up via
     // impl_->scene.find(impl_->selected), which is null once selected is
     // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
@@ -202,6 +209,35 @@ void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
 
 void Editor::setGizmoVisible(bool visible) {
     impl_->gizmo_visible = visible;
+    if (!visible) {
+        impl_->hover = GizmoHandle::None; // no gizmo, nothing to hover
+    }
+}
+
+void Editor::updateGizmoHover(float x, float y) {
+    // Same guards as beginDrag, plus gizmo visibility: an invisible gizmo has
+    // no handles to hover. Failing any guard clears rather than keeps stale.
+    impl_->hover = GizmoHandle::None;
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f || !impl_->gizmo_visible) {
+        return;
+    }
+    const Node* node = impl_->scene.find(impl_->selected);
+    if (node == nullptr) {
+        return;
+    }
+
+    const Camera camera = impl_->controller.to_camera();
+    const GizmoFrame frame = gizmo_frame_for_node(*node, camera);
+    const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
+    impl_->hover = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts);
+}
+
+void Editor::clearGizmoHover() {
+    impl_->hover = GizmoHandle::None;
+}
+
+GizmoHandle Editor::gizmoHoverHandle() const {
+    return impl_->hover;
 }
 
 bool Editor::beginDrag(float x, float y) {

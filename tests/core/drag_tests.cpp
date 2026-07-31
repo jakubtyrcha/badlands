@@ -267,6 +267,60 @@ TEST_CASE("Editor: updateDrag ignores a stale drag left active across a selectio
     editor->endDrag();
 }
 
+// --- Editor: gizmo hover -----------------------------------------------------
+
+TEST_CASE("Editor: updateGizmoHover with no viewport or no selection stays None") {
+    Editor* editor = Editor::create();
+    editor->updateGizmoHover(400.0f, 250.0f); // zero viewport
+    CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+    editor->updateGizmoHover(400.0f, 250.0f); // no selection
+    CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+}
+
+TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it points at") {
+    Editor* editor = Editor::create();
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+    REQUIRE(spawned.node_id != kInvalidNode);
+    editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
+
+    const GizmoFrame f = frame_for(editor, spawned.node_id, false);
+    const ClickPoint on_u = click_at(f.origin + 0.8f * f.half_extent * f.u);
+
+    editor->updateGizmoHover(on_u.x, on_u.y);
+    CHECK(editor->gizmoHoverHandle() == GizmoHandle::AxisU);
+
+    SUBCASE("moving off every handle resets to None") {
+        editor->updateGizmoHover(60.0f, 60.0f);
+        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    }
+
+    SUBCASE("clearGizmoHover resets") {
+        editor->clearGizmoHover();
+        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    }
+
+    SUBCASE("hiding the gizmo clears hover, and hover stays None while hidden") {
+        editor->setGizmoVisible(false);
+        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        editor->updateGizmoHover(on_u.x, on_u.y);
+        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    }
+
+    SUBCASE("selection change clears hover") {
+        editor->select(kInvalidNode);
+        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    }
+
+    SUBCASE("deleting the selected node clears hover (deletion bypasses select())") {
+        editor->deleteSelectedNode();
+        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    }
+}
+
 // --- Editor: radial-menu anchor projection ----------------------------------
 
 TEST_CASE("Editor: projectSelectedAnchor round-trips the selected node's screen position, "
