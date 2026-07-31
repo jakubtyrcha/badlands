@@ -4,14 +4,18 @@
 #include <vector>
 #include <shared_types.h>
 
+#include "gizmo.h"   // GizmoFrame/GizmoHandle for append_move_gizmo
+
 namespace sq {
 class SceneDocument;
 
-inline constexpr simd_float4 kColorAdd      = {0.1f, 1.0f, 0.1f, 1.0f};
-inline constexpr simd_float4 kColorSubtract = {1.0f, 0.2f, 0.15f, 1.0f};
-inline constexpr simd_float4 kColorSelected = {0.6f, 0.8f, 1.0f, 1.0f};
-inline constexpr simd_float4 kColorGridLine = {1.0f, 1.0f, 1.0f, 0.18f};
-inline constexpr simd_float4 kColorGridAxis = {1.0f, 1.0f, 1.0f, 0.9f};
+inline constexpr simd_float4 kColorAdd        = {0.1f, 1.0f, 0.1f, 1.0f};
+inline constexpr simd_float4 kColorSubtract   = {1.0f, 0.2f, 0.15f, 1.0f};
+inline constexpr simd_float4 kColorSelected   = {0.6f, 0.8f, 1.0f, 1.0f};
+inline constexpr simd_float4 kColorGridLine   = {1.0f, 1.0f, 1.0f, 0.18f};
+inline constexpr simd_float4 kColorGridAxis   = {1.0f, 1.0f, 1.0f, 0.9f};
+inline constexpr simd_float4 kColorGizmoPlane = {1.0f, 1.0f, 1.0f, 0.45f};
+inline constexpr simd_float4 kColorGizmoHot   = {1.0f, 0.85f, 0.2f, 1.0f};
 
 inline constexpr int kSphereOutlineSegments = 48;
 
@@ -38,15 +42,21 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
 // the sphere outline, making the result view-dependent.
 std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world);
 
-// Floating tangent-frame grid + axes, centered at `origin` in the plane with unit `normal`.
-// Tangent basis: u = normalize(cross(n, |n.y| < 0.99 ? {0,1,0} : {1,0,0})), v = cross(n, u).
-// Emits, for even `divisions` (with he = half_extent, step = 2*he/divisions):
-//  - grid lines i in 0..divisions along BOTH u and v directions, SKIPPING the center line
-//    (i == divisions/2) in each direction: 2*divisions lines, color kColorGridLine
-//  - 2 axis lines through the origin (u from -he to +he, v likewise), color kColorGridAxis
-//  - 1 normal stub: origin -> origin + n * (0.5 * he), color kColorGridAxis
-// Total for divisions=12: 24 + 2 + 1 = 27 lines = 54 vertices (54 * 32B = 1728B, safely
-// under the 4KB setVertexBytes limit).
-void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd_float3 normal,
-                          float half_extent, int divisions);
+// The modify-mode move gizmo: tangent-frame grid + the full handle set, drawn
+// from the same GizmoFrame the hit-testing uses (gizmo.h) so drawn geometry
+// and pick geometry cannot drift. Emits, in this order (with he =
+// frame.half_extent, step = 2*he/divisions, even `divisions`):
+//  - grid lines i in 0..divisions along BOTH u and v directions, SKIPPING the
+//    center line (i == divisions/2) in each direction: 2*divisions lines,
+//    color kColorGridLine
+//  - 3 axis lines through the origin, -he..+he along u, v, n (n is a full
+//    axis — the 1-DOF off-plane pull), color kColorGridAxis
+//  - 3 plane-patch outlines (uv, un, vn), the [0.3he, 0.6he]^2 square in each
+//    basis pair (4 lines each), color kColorGizmoPlane
+// The `highlighted` handle's lines use kColorGizmoHot instead of their base
+// color (hover/active feedback). Total for divisions=12: 24 + 3 + 12 = 39
+// lines = 78 vertices (78 * 32B = 2496B, safely under the 4KB setVertexBytes
+// limit).
+void append_move_gizmo(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                       GizmoHandle highlighted, int divisions);
 }

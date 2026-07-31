@@ -236,10 +236,10 @@ void Renderer::ensure_depth_texture(uint32_t width, uint32_t height) {
     depth_texture_height_ = height;
 }
 
-void Renderer::set_gizmo(simd_float3 origin, simd_float3 normal, float half_extent) {
+void Renderer::set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted) {
     gizmo_visible_ = true;
     gizmo_verts_.clear();
-    append_tangent_frame(gizmo_verts_, origin, normal, half_extent, 12);
+    append_move_gizmo(gizmo_verts_, frame, highlighted, 12);
 }
 
 void Renderer::hide_gizmo() {
@@ -378,7 +378,7 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     }
 
     // Gizmo pass: painter's order over the opaque scene lines, semi-transparent
-    // blend PSO, verts always via setVertexBytes (54 verts, never a buffer).
+    // blend PSO, verts always via setVertexBytes (78 verts, never a buffer).
     if (gizmo_visible_ && !gizmo_verts_.empty()) {
         encoder->setRenderPipelineState(line_blend_pso_.get());
         encoder->setVertexBytes(gizmo_verts_.data(), gizmo_verts_.size() * sizeof(LineVertex), 0);

@@ -7,6 +7,7 @@
 #include <vector>
 #include <shared_types.h>
 
+#include "gizmo.h"     // GizmoFrame/GizmoHandle for set_gizmo
 #include "sdf_scene.h" // SdfNode -- the raymarch pass's per-frame node scratch buffer
 
 namespace sq {
@@ -34,10 +35,10 @@ public:
     // creating a zero-length one (Metal disallows those) -- see set_mesh's
     // definition for the replace-on-update ownership note.
     void set_mesh(const TriangleMesh& mesh);
-    // Modify-mode tangent-frame gizmo. Rebuilds the (tiny, setVertexBytes-only)
-    // gizmo vertex vector on every call — 54 verts is cheap enough that
-    // caching by param-equality would be over-engineering.
-    void set_gizmo(simd_float3 origin, simd_float3 normal, float half_extent);   // shows the gizmo
+    // Modify-mode move gizmo. Rebuilds the (tiny, setVertexBytes-only) gizmo
+    // vertex vector on every call — 78 verts is cheap enough that caching by
+    // param-equality would be over-engineering.
+    void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted);   // shows the gizmo
     void hide_gizmo();
     void render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id, const Camera& camera); // borrowed drawable
 

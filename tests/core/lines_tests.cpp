@@ -4,6 +4,7 @@
 #include <cmath>
 #include <vector>
 
+#include "gizmo.h"
 #include "lines.h"
 #include "scene.h"
 
@@ -229,77 +230,112 @@ TEST_CASE("build_scene_lines: subtract-always + selected-always-overrides policy
     }
 }
 
-// --- append_tangent_frame ---------------------------------------------------
+// --- append_move_gizmo ------------------------------------------------------
+//
+// Emission order is pinned (the highlight cases below depend on it):
+// 48 grid verts, then axes u, v, n (2 verts each, -he then +he), then plane
+// patch outlines uv, un, vn (8 verts each) = 78 total.
+// (The tangent-basis formula itself is pinned in gizmo_tests.cpp — the old
+// duplicate orthonormality case here died with append_tangent_frame.)
 
-TEST_CASE("append_tangent_frame: n={0,1,0}, origin={0,0,0}, he=2, divisions=12: counts, "
-          "coplanarity, and the stub's far endpoint") {
+namespace {
+
+GizmoFrame make_gizmo_frame(simd_float3 origin, simd_float3 n, float he) {
+    GizmoFrame f;
+    f.origin = origin;
+    f.n = n;
+    tangent_basis(n, f.u, f.v);
+    f.half_extent = he;
+    return f;
+}
+
+bool is_hot(const LineVertex& v) {
+    return v.color.x == doctest::Approx(kColorGizmoHot.x) &&
+           v.color.y == doctest::Approx(kColorGizmoHot.y) &&
+           v.color.z == doctest::Approx(kColorGizmoHot.z) &&
+           v.color.w == doctest::Approx(kColorGizmoHot.w);
+}
+
+} // namespace
+
+TEST_CASE("append_move_gizmo: n={0,1,0}, he=2, divisions=12 — counts, layout, colors, "
+          "no hot vertex without a highlight") {
+    const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
+    const float he = f.half_extent;
     std::vector<LineVertex> out;
-    append_tangent_frame(out, simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f, 12);
+    append_move_gizmo(out, f, GizmoHandle::None, 12);
 
-    // 24 grid lines (2*divisions) + 2 axis lines + 1 normal stub = 27 lines = 54 vertices.
-    REQUIRE(out.size() == 54);
+    // 24 grid lines + 3 axes + 3 patches * 4 outline lines = 39 lines = 78 verts.
+    REQUIRE(out.size() == 78);
 
-    const simd_float3 origin = {0.0f, 0.0f, 0.0f};
-    const simd_float3 normal = {0.0f, 1.0f, 0.0f};
-    for (size_t i = 0; i < out.size() - 1; ++i) { // every vertex except the stub's far endpoint (last)
+    // Grid [0,48): coplanar, kColorGridLine.
+    for (size_t i = 0; i < 48; ++i) {
         CAPTURE(i);
         const simd_float3 p = out[i].pos.xyz;
-        CHECK(std::fabs(simd_dot(normal, p - origin)) < 1e-5f);
+        const simd_float4 c = out[i].color;
+        CHECK(std::fabs(simd_dot(f.n, p - f.origin)) < 1e-5f);
+        CHECK(c.w == doctest::Approx(0.18f));
     }
 
-    // Final vertex: the stub's far endpoint, origin + n * (0.5 * he) = origin + n * 1.0.
-    check_float3_approx(out.back().pos.xyz, simd_float3{0.0f, 1.0f, 0.0f});
+    // Axes [48,54): endpoints origin ± he*dir, kColorGridAxis — the n axis is
+    // a full axis now, not the old half-stub.
+    check_float3_approx(out[48].pos.xyz, f.origin - he * f.u);
+    check_float3_approx(out[49].pos.xyz, f.origin + he * f.u);
+    check_float3_approx(out[50].pos.xyz, f.origin - he * f.v);
+    check_float3_approx(out[51].pos.xyz, f.origin + he * f.v);
+    check_float3_approx(out[52].pos.xyz, f.origin - he * f.n);
+    check_float3_approx(out[53].pos.xyz, f.origin + he * f.n);
+    for (size_t i = 48; i < 54; ++i) {
+        const simd_float4 c = out[i].color;
+        CHECK(c.w == doctest::Approx(0.9f));
+    }
 
-    // Color counts: 48 grid-line verts (alpha 0.18), 6 axis/stub verts (alpha 0.9:
-    // 2 axes * 2 endpoints + stub * 2 endpoints).
-    int grid_count = 0;
-    int axis_count = 0;
-    for (const LineVertex& v : out) {
-        if (v.color.w == doctest::Approx(0.18f)) {
-            ++grid_count;
-        } else if (v.color.w == doctest::Approx(0.9f)) {
-            ++axis_count;
+    // Patches [54,78): every vertex's two in-patch coordinates sit on the
+    // [0.3he, 0.6he] square outline; color kColorGizmoPlane.
+    const struct { simd_float3 e1, e2; size_t base; } patches[] = {
+        {f.u, f.v, 54}, {f.u, f.n, 62}, {f.v, f.n, 70},
+    };
+    for (const auto& patch : patches) {
+        for (size_t i = patch.base; i < patch.base + 8; ++i) {
+            CAPTURE(i);
+            const simd_float3 p = out[i].pos.xyz;
+            const simd_float4 c = out[i].color;
+            const float x = simd_dot(p - f.origin, patch.e1);
+            const float y = simd_dot(p - f.origin, patch.e2);
+            CHECK(x > 0.3f * he - 1e-5f);
+            CHECK(x < 0.6f * he + 1e-5f);
+            CHECK(y > 0.3f * he - 1e-5f);
+            CHECK(y < 0.6f * he + 1e-5f);
+            CHECK(c.w == doctest::Approx(kColorGizmoPlane.w));
         }
     }
-    CHECK(grid_count == 48);
-    CHECK(axis_count == 6);
+
+    for (const LineVertex& v : out) {
+        CHECK_FALSE(is_hot(v));
+    }
 }
 
-TEST_CASE("append_tangent_frame: tangent basis is always orthonormal, both branches of the |n.y| pick") {
-    auto check_orthonormal_basis = [](simd_float3 n) {
-        CAPTURE(n.x);
-        CAPTURE(n.y);
-        CAPTURE(n.z);
-        const simd_float3 ref =
-            (std::fabs(n.y) < 0.99f) ? simd_float3{0.0f, 1.0f, 0.0f} : simd_float3{1.0f, 0.0f, 0.0f};
-        const simd_float3 u = simd_normalize(simd_cross(n, ref));
-        const simd_float3 v = simd_cross(n, u);
+TEST_CASE("append_move_gizmo: the highlighted handle's vertices — and only those — go hot") {
+    const GizmoFrame f = make_gizmo_frame(simd_float3{1.0f, 2.0f, 3.0f},
+                                          simd_normalize(simd_float3{1.0f, 1.0f, 0.0f}), 2.0f);
+    std::vector<LineVertex> out;
 
-        CHECK(simd_length(u) == doctest::Approx(1.0f));
-        CHECK(simd_length(v) == doctest::Approx(1.0f));
-        CHECK(std::fabs(simd_dot(u, n)) < 1e-5f);
-        CHECK(std::fabs(simd_dot(v, n)) < 1e-5f);
-        CHECK(std::fabs(simd_dot(u, v)) < 1e-5f);
+    auto hot_indices = [&](GizmoHandle highlighted, size_t expect_begin, size_t expect_count) {
+        out.clear();
+        append_move_gizmo(out, f, highlighted, 12);
+        REQUIRE(out.size() == 78);
+        size_t hot = 0;
+        for (size_t i = 0; i < out.size(); ++i) {
+            CAPTURE(i);
+            const bool should_be_hot = i >= expect_begin && i < expect_begin + expect_count;
+            CHECK(is_hot(out[i]) == should_be_hot);
+            hot += is_hot(out[i]) ? 1 : 0;
+        }
+        CHECK(hot == expect_count);
     };
 
-    // n = {0,1,0}: |n.y| = 1.0 >= 0.99, takes the {1,0,0} reference branch.
-    check_orthonormal_basis(simd_float3{0.0f, 1.0f, 0.0f});
-    // n = normalize({1,0,1}): |n.y| = 0 < 0.99, takes the {0,1,0} reference branch.
-    check_orthonormal_basis(simd_normalize(simd_float3{1.0f, 0.0f, 1.0f}));
-}
-
-TEST_CASE("append_tangent_frame: off-origin, tilted normal — every non-stub vertex is coplanar "
-          "through origin") {
-    const simd_float3 origin = {1.0f, 2.0f, 3.0f};
-    const simd_float3 normal = simd_normalize(simd_float3{1.0f, 1.0f, 0.0f});
-
-    std::vector<LineVertex> out;
-    append_tangent_frame(out, origin, normal, 2.0f, 12);
-
-    REQUIRE(out.size() == 54);
-    for (size_t i = 0; i < out.size() - 1; ++i) { // every vertex except the stub's far endpoint (last)
-        CAPTURE(i);
-        const simd_float3 p = out[i].pos.xyz;
-        CHECK(std::fabs(simd_dot(normal, p - origin)) < 1e-5f);
-    }
+    SUBCASE("AxisU") { hot_indices(GizmoHandle::AxisU, 48, 2); }
+    SUBCASE("AxisN") { hot_indices(GizmoHandle::AxisN, 52, 2); }
+    SUBCASE("PlaneUV") { hot_indices(GizmoHandle::PlaneUV, 54, 8); }
+    SUBCASE("PlaneVN") { hot_indices(GizmoHandle::PlaneVN, 70, 8); }
 }

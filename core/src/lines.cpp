@@ -80,14 +80,10 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
     }
 }
 
-void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd_float3 normal,
-                          float half_extent, int divisions) {
-    // Basis shared with the gizmo hit-testing (gizmo.h) so drawn geometry and
-    // pick geometry cannot drift.
-    simd_float3 u, v;
-    tangent_basis(normal, u, v);
-
-    const float he = half_extent;
+void append_move_gizmo(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                       GizmoHandle highlighted, int divisions) {
+    const simd_float3 origin = frame.origin;
+    const float he = frame.half_extent;
     const float step = 2.0f * he / static_cast<float>(divisions);
     const int center = divisions / 2;
 
@@ -97,30 +93,57 @@ void append_tangent_frame(std::vector<LineVertex>& out, simd_float3 origin, simd
         vertex.color = color;
         out.push_back(vertex);
     };
+    auto color_for = [&](GizmoHandle handle, simd_float4 base) {
+        return handle == highlighted ? kColorGizmoHot : base;
+    };
 
-    // Grid lines: for each sample i in [0, divisions] (skipping the center,
-    // which would duplicate the axis lines below), emit one line running
-    // along u (offset along v) and one running along v (offset along u).
+    // Grid lines (decoration, not a handle): for each sample i in
+    // [0, divisions] (skipping the center, which would duplicate the axis
+    // lines below), emit one line running along u (offset along v) and one
+    // running along v (offset along u).
     for (int i = 0; i <= divisions; ++i) {
         if (i == center) {
             continue;
         }
         const float offset = -he + static_cast<float>(i) * step;
-        push(origin + offset * v - he * u, kColorGridLine);
-        push(origin + offset * v + he * u, kColorGridLine);
-        push(origin + offset * u - he * v, kColorGridLine);
-        push(origin + offset * u + he * v, kColorGridLine);
+        push(origin + offset * frame.v - he * frame.u, kColorGridLine);
+        push(origin + offset * frame.v + he * frame.u, kColorGridLine);
+        push(origin + offset * frame.u - he * frame.v, kColorGridLine);
+        push(origin + offset * frame.u + he * frame.v, kColorGridLine);
     }
 
-    // Axis lines through the origin.
-    push(origin - he * u, kColorGridAxis);
-    push(origin + he * u, kColorGridAxis);
-    push(origin - he * v, kColorGridAxis);
-    push(origin + he * v, kColorGridAxis);
+    // Axis handles through the origin, -he..+he. Emission order (u, v, n)
+    // matches the pick tie-break order; lines_tests pins the layout.
+    const struct { simd_float3 dir; GizmoHandle handle; } axes[] = {
+        {frame.u, GizmoHandle::AxisU},
+        {frame.v, GizmoHandle::AxisV},
+        {frame.n, GizmoHandle::AxisN},
+    };
+    for (const auto& axis : axes) {
+        const simd_float4 c = color_for(axis.handle, kColorGridAxis);
+        push(origin - he * axis.dir, c);
+        push(origin + he * axis.dir, c);
+    }
 
-    // Normal stub.
-    push(origin, kColorGridAxis);
-    push(origin + normal * (0.5f * he), kColorGridAxis);
+    // Plane-handle patch outlines: the [0.3he, 0.6he]^2 square of each basis
+    // pair — the same patch pick_gizmo_handle hit-tests.
+    const float a = 0.3f * he, b = 0.6f * he;
+    const struct { simd_float3 e1, e2; GizmoHandle handle; } patches[] = {
+        {frame.u, frame.v, GizmoHandle::PlaneUV},
+        {frame.u, frame.n, GizmoHandle::PlaneUN},
+        {frame.v, frame.n, GizmoHandle::PlaneVN},
+    };
+    for (const auto& patch : patches) {
+        const simd_float4 c = color_for(patch.handle, kColorGizmoPlane);
+        const simd_float3 p00 = origin + a * patch.e1 + a * patch.e2;
+        const simd_float3 p10 = origin + b * patch.e1 + a * patch.e2;
+        const simd_float3 p11 = origin + b * patch.e1 + b * patch.e2;
+        const simd_float3 p01 = origin + a * patch.e1 + b * patch.e2;
+        push(p00, c); push(p10, c);
+        push(p10, c); push(p11, c);
+        push(p11, c); push(p01, c);
+        push(p01, c); push(p00, c);
+    }
 }
 
 std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world) {
