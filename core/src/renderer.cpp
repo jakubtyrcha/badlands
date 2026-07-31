@@ -156,6 +156,12 @@ void Renderer::set_scene_lines_dirty() {
 }
 
 void Renderer::set_mesh(const TriangleMesh& mesh) {
+    // TriangleMesh's own invariant (dcsdd.h): positions/normals are always
+    // the same length (3 of each per triangle, written in lockstep by
+    // reconstruct()). Asserted here since this loop indexes both by the
+    // same i.
+    assert(mesh.normals.size() == mesh.positions.size());
+
     mesh_vertex_count_ = mesh.positions.size();
     if (mesh_vertex_count_ == 0) {
         mesh_vertices_.reset(); // drop the buffer -- Metal disallows zero-length ones
