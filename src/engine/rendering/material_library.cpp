@@ -403,12 +403,17 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
   }
 
   nlohmann::json manifest;
-  std::string albedo_rel, normal_rel, arm_rel, normal_format;
+  std::string albedo_rel, normal_rel, arm_rel, disp_rel, normal_format;
   try {
     manifest_file >> manifest;
     albedo_rel = manifest.at("albedo").get<std::string>();
     normal_rel = manifest.at("normal").get<std::string>();
     arm_rel = manifest.at("arm").get<std::string>();
+    // Optional: a pack without a displacement map keeps ARM alpha at whatever
+    // its own file carries (255 for the opaque PNGs we ship), which the
+    // height-lerp reads as a uniform height -- i.e. a plain weighted blend for
+    // that layer.
+    disp_rel = manifest.value("displacement", std::string());
     normal_format = manifest.value("normal_format", std::string("dx"));
   } catch (const nlohmann::json::exception& e) {
     spdlog::error(
@@ -438,7 +443,36 @@ MaterialLibrary::PackTextures MaterialLibrary::LoadPack(
   result.albedo = LoadTexture2D(device_, queue_, *pipeline_gen_, albedo_path);
   result.normal = LoadTexture2D(device_, queue_, *pipeline_gen_, normal_path,
                                 /*flip_green_dx=*/is_dx_normal);
-  result.arm = LoadTexture2D(device_, queue_, *pipeline_gen_, arm_path);
+  if (disp_rel.empty()) {
+    result.arm = LoadTexture2D(device_, queue_, *pipeline_gen_, arm_path);
+  } else {
+    // Decode ARM and displacement, fold disp.r into arm.a, then upload ONCE so
+    // the mip chain is generated from already-merged data. Merging after the
+    // fact would leave every mip below 0 carrying an unmerged alpha.
+    const std::string disp_path = dir + "/" + disp_rel;
+    ImageGuard arm_img{badlands_decode_image(arm_path.c_str())};
+    ImageGuard disp_img{badlands_decode_image(disp_path.c_str())};
+    if (arm_img.image.rgba == nullptr || disp_img.image.rgba == nullptr) {
+      spdlog::error("MaterialLibrary: pack '{}' failed to decode arm/disp", dir);
+      load_failed_ = true;
+      return result;
+    }
+    if (arm_img.image.width != disp_img.image.width ||
+        arm_img.image.height != disp_img.image.height) {
+      spdlog::error("MaterialLibrary: pack '{}' arm {}x{} != displacement {}x{}",
+                    dir, arm_img.image.width, arm_img.image.height,
+                    disp_img.image.width, disp_img.image.height);
+      load_failed_ = true;
+      return result;
+    }
+    const size_t pixels = static_cast<size_t>(arm_img.image.width) *
+                          static_cast<size_t>(arm_img.image.height);
+    CopyRedIntoAlpha(arm_img.image.rgba, disp_img.image.rgba, pixels);
+    result.arm =
+        UploadTexture2DWithMips(device_, queue_, *pipeline_gen_,
+                                arm_img.image.width, arm_img.image.height,
+                                arm_img.image.rgba);
+  }
 
   if (!result.albedo.texture || !result.normal.texture ||
       !result.arm.texture) {

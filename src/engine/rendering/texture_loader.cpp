@@ -234,6 +234,13 @@ LoadedTexture UploadTexture2DWithMips(wgpu::Device device, wgpu::Queue queue,
   return LoadedTexture{.texture = texture, .view = view};
 }
 
+void CopyRedIntoAlpha(uint8_t* rgba, const uint8_t* src_rgba,
+                      size_t pixel_count) {
+  for (size_t i = 0; i < pixel_count; ++i) {
+    rgba[i * 4 + 3] = src_rgba[i * 4 + 0];
+  }
+}
+
 LoadedTexture PackTexturesIntoArray(wgpu::Device device, wgpu::Queue queue,
                                     const std::vector<wgpu::Texture>& layers) {
   if (layers.empty()) {
