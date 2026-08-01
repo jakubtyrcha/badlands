@@ -104,10 +104,34 @@ fixed 8× subdivision, heightfield)` and never of which tile is being built.
 
 ### The fan band
 
-Graded over a 1 m collar (1 → 0.5 → 0.25 → 0.125), which keeps every triangle
-under 2:1 aspect. The alternative — fanning straight from 1 m to 0.125 m —
-is watertight but produces 8:1 slivers that shade poorly and simplify badly.
-The collar costs one extra metre of corridor width.
+**One step, no graded collar.** The band is the 0.125 m strip immediately inside
+∂R: each coarse boundary edge (2 vertices, 1 m apart) fans to the 9 fine
+vertices of the first inner ring.
+
+A graded collar was specified first and is wrong here. The corridor is only
+2 texels wide at the median brook (`max(3w, 2 m)` with w = 0.52 m), so a 1 m
+collar on each side consumes it entirely and leaves no fine core — the collar
+works only for the trunk, which is the one place it was not needed. Keeping it
+means widening the corridor by 2 m everywhere:
+
+| | corridor | added verts | worst aspect |
+|---|---|---|---|
+| **one step (chosen)** | 21,479 m² | **+1.35M (+32%)** | 8:1 |
+| 0.5 m single grading step | 30,745 m² | +1.94M (+46%) | ~4:1 |
+| 1 m graded collar | 40,011 m² | +2.52M (+60%) | ~2:1 |
+
+Nearly double the budget to avoid slivers in a 0.125 m-deep ring over 0.5% of
+the map. The slivers are also unavoidable rather than a triangulation mistake:
+covering a 1 m gap with only two vertices on one side forces at least one
+1 m × 0.125 m triangle however the strip is cut. They cost rasterizer quad
+overdraw and nothing else — vertex normals come from the heightfield, not from
+the triangle — and a collar would have pushed fine samples out of exactly where
+the cavity's banks sit.
+
+At 0.125 m spacing the inner ring's vertices land on x = 0, 0.125, … 1.0, so its
+corner vertices coincide in XZ with the coarse ∂R vertices and differ only by the
+inset. The band is therefore a plain rectangular strip per boundary edge, with
+special cases only at the staircase's convex and concave turns.
 
 ### The cluster triangle budget — the structural change
 
