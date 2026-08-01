@@ -33,9 +33,10 @@
 #include "engine/rendering/water_material.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
-#include "engine/rendering/debug_line_buffer.hpp"
 #include "game/visual/forest_renderer.hpp"
 #include "mapgen/generator.hpp"
+#include "mapgen/river_arcs.hpp"
+#include "mapgen/river_carve.hpp"
 #include "mapgen/window_rivers.hpp"
 
 namespace badlands {
@@ -155,18 +156,42 @@ class MapViewView : public AppView {
 
   float map_size_m_ = 0.0f;
 
-  // River network, built at load from the routed window (see window_rivers.hpp).
-  // Drawn through the engine's debug-line pass rather than as a world-space
-  // ribbon mesh: the pass emits screen-aligned antialiased quads, and at a
-  // median channel width of ~8 cm a true-width ribbon would be sub-texel and
-  // invisible at any useful camera height. Constant screen width is what makes a
-  // debug layer legible.
+  // River network, built at load from the routed window (see window_rivers.hpp),
+  // then refitted reach by reach as a chain of CIRCULAR ARCS
+  // (mapgen/river_arcs.hpp), CARVED into the terrain, and floated as the
+  // channel water surface inside that carved cavity.
+  //
+  // This replaced a debug-LINE layer, and the two cannot coexist: they share a
+  // centreline, and a screen-space line 1-4 px wide covers the channel at every
+  // camera height where you would look at the map. The line layer was the
+  // placeholder; what it carried and this does not is Strahler order, traded
+  // for true width.
   mapgen::WindowRivers rivers_;
-  DebugLineBuffer river_lines_;
+  std::vector<mapgen::RiverArcChain> river_arcs_;
   bool show_rivers_ = true;
-  // Rebuilt only when the toggle or the camera-independent settings change --
-  // the segment list is static, so it is built once and pointed at each frame.
-  void BuildRiverLines();
+  // One static forward-transparent entity (the lake water's material), created
+  // directly in the registry like the lake surface. Held so the visibility
+  // toggle can destroy and rebuild it: there is no per-entity visibility flag in
+  // the registry, and dropping the mesh is cheaper than carrying one.
+  entt::entity river_mesh_ = entt::null;
+  void BuildRiverMesh();
+
+  // THE ADAPTER: the only place a river meets the terrain builder.
+  //
+  // The carve owns the corridor mask + the carved-height field; the exponent
+  // grid and detail field below are that mask restated in the builder's own
+  // generic vocabulary ("this quad wants 2^k subdivision, and here is the
+  // height function"). Downstream -- ClusterTerrain, BuildTerrainClusterDag --
+  // nothing knows a river exists.
+  //
+  // ADDRESS STABILITY is why the carve is a unique_ptr rather than a value or
+  // an optional: `river_detail_.height_at` closes over a raw pointer to it and
+  // the DAG build calls that millions of times, so the carve must outlive the
+  // build and must never move. The exponent vector is a member for the same
+  // reason -- TerrainDetailField::level points straight at its storage.
+  std::unique_ptr<mapgen::RiverCarve> river_carve_;
+  std::vector<uint8_t> river_detail_level_;
+  TerrainDetailField river_detail_;
 
   // Starting camera height override (0 = default); applied once in Initialize.
   float camera_height_override_ = 0.0f;

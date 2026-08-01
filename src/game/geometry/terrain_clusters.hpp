@@ -26,6 +26,7 @@
 // validity, and serial==parallel build determinism.
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -100,7 +101,12 @@ struct TerrainCluster {
   Aabb bounds;                 // world-space
   int own_group = kNoGroup;    // group that produced this cluster (leaf: none)
   int parent_group = kNoGroup; // group that consumed this cluster (root: none)
-  int level = 0;               // 0 = full-res leaf
+  // Depth in the build hierarchy: 0 for emitted leaves, 1 + max(child.level)
+  // above. DESCRIPTIVE ONLY -- on a mixed-depth DAG (locally refined tiles)
+  // level is neither a resolution tier nor a leaf test, and nothing may branch
+  // on it for correctness. Leafness is `own_group == kNoGroup`; selection reads
+  // errors and spheres, never this. Debug display (tint, histogram) only.
+  int level = 0;
 };
 
 // One group: consumes kGroupDim^2 (fewer at the map edge) same-level clusters,
@@ -137,13 +143,59 @@ struct TerrainClusterDag {
   glm::vec4 ClusterOwnSphere(const TerrainCluster& c) const;
 };
 
+// Optional LOCAL SUBDIVISION of the leaf lattice. Null (or all-zero) = exactly
+// today's build, bit for bit.
+//
+// GENERIC BY CONTRACT: producers (a river carve, a canal, a road bed, a
+// building pad, an authored patch) describe WHERE detail lives and WHAT height
+// it has; this module only tessellates. Nothing in the cluster build may know
+// what put the detail there.
+//
+// Seam rule, stated once: a shared edge between two quads is tessellated at
+// 2^min(ka, kb) -- the coarser side's resolution -- and the finer side fans its
+// first interior row down to it (a restricted-quadtree edge). This subsumes
+// every case: refined-vs-plain (min = 0, the edge keeps only its two lattice
+// corners), equal exponents (full fine edge, both sides identical), and unequal
+// exponents (arbitrary jumps are legal -- no 2:1 balance constraint, because
+// dyadic levels nest and the coarser row is a subset of the finer one).
+//
+// Two consequences the consumer can rely on:
+//   - Plain quads are BIT-IDENTICAL to a detail-free build; the fan lives
+//     entirely on the finer side, so no new vertex ever lands on a plain quad.
+//   - Base-lattice nodes always carry the coarse record (map height/normal/
+//     biome) even inside a refined quad, so a node shared with a plain quad
+//     welds. The producer's compact-support contract (height_at == base surface
+//     wherever it could meet a plain quad) is what makes that non-lossy; the
+//     conservative corridor mask guarantees it by construction.
+struct TerrainDetailField {
+  // Per-QUAD subdivision exponent over the map's quad grid, row-major,
+  // (nodes_x-1) x (nodes_z-1). 0 = the base quad, k = 2^k x 2^k sub-quads. The
+  // maximum usable exponent derives from the CLUSTER BUDGET, not from any use
+  // case: 2*4^k <= 2*tile_quads^2, i.e. k <= 3 at the default 128-triangle
+  // budget. Larger values are clamped (with a warning).
+  const uint8_t* level = nullptr;
+  int width = 0, height = 0;
+  // Height of the detailed surface at any world position, in world meters.
+  // Must return the base surface EXACTLY (bitwise) wherever the detail is
+  // absent; normals for fine vertices are computed numerically from this
+  // (central differences at the seam-canonical spacing), because the coarse
+  // NormalAt would shade the detail flat.
+  std::function<float(float wx, float wz)> height_at;
+};
+
 // Build the DAG from the frozen MapData contract. The leaf vertex grid is the
 // map lattice: nodes_x x nodes_z nodes at map.spacing_m() (world meters), so
 // (nodes_x-1) x (nodes_z-1) quads span the map and ceil(quads/tile_quads) tiles
 // cover each axis. Height = map.height(i,j); per-vertex color = the palette of
 // map.WeightsAtNode(i,j).Dominant(). Logs per-level stats via spdlog.
+//
+// `detail`, if non-null, subdivides the quads its exponent grid marks (see
+// TerrainDetailField). A tile containing refined quads emits MULTIPLE leaf
+// clusters (packed to the triangle budget), so regions can start with more than
+// one cluster.
 TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
-                                         const TerrainClusterParams& params = {});
+                                         const TerrainClusterParams& params = {},
+                                         const TerrainDetailField* detail = nullptr);
 
 // Runtime cluster selection. Selects the cut where projected own-error <= tau and
 // projected parent error > tau.

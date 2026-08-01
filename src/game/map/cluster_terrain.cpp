@@ -1,6 +1,7 @@
 #include "game/map/cluster_terrain.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cfloat>
 #include <chrono>
 #include <string>
@@ -30,7 +31,8 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
                            const MaterialLibrary::TerrainArrays& arrays,
                            wgpu::Sampler array_sampler, wgpu::TextureView splat0,
                            wgpu::TextureView splat1,
-                           wgpu::Sampler splat_sampler, glm::vec4 splat_uv) {
+                           wgpu::Sampler splat_sampler, glm::vec4 splat_uv,
+                           const TerrainDetailField* detail) {
   registry_ = &registry;
   model_ = model;
   inv_model_ = glm::inverse(model);
@@ -52,8 +54,9 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
     return false;
   }
 
-  // Build the cluster-LOD DAG from the frozen MapData lattice.
-  dag_ = BuildTerrainClusterDag(map, params);
+  // Build the cluster-LOD DAG from the frozen MapData lattice, subdividing
+  // wherever `detail` asks for it (null = the plain lattice).
+  dag_ = BuildTerrainClusterDag(map, params, detail);
 
   // Deferred cluster-terrain material (game-owned; no engine-side
   // MaterialLibrary entry). Mirrors the engine's terrain descriptor but for
@@ -121,10 +124,15 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
   // Whole-map (map-local) AABB for the entity-level cull; per-range culling
   // happens inside the pass. Leaves are full-resolution, so their union is the
   // whole terrain. The draw ranges start empty -- UpdateLod fills the LOD cut.
+  //
+  // A leaf is a cluster NO GROUP PRODUCED (own_group == kNoGroup, the header's
+  // sentinel) -- not `level == 0`: locally refined tiles give the DAG mixed
+  // depth, where level stops meaning "resolution tier" and a level test here
+  // would compute the AABB from a subset and cull terrain away.
   glm::vec3 lo(FLT_MAX), hi(-FLT_MAX);
   int leaf_count = 0;
   for (const TerrainCluster& c : dag_.clusters) {
-    if (c.level != 0) continue;
+    if (c.own_group != kNoGroup) continue;
     lo = glm::min(lo, c.bounds.min);
     hi = glm::max(hi, c.bounds.max);
     ++leaf_count;
@@ -180,7 +188,12 @@ void ClusterTerrain::UpdateLod(const Camera& camera, float screen_h_px) {
     ranges->ranges.push_back(
         MeshDrawRange{c.first_index, c.index_count, c.bounds});
     sel_tri_count_ += c.index_count / 3;
-    if (c.level < static_cast<int>(sel_level_hist_.size())) ++sel_level_hist_[c.level];
+    // level_count is derived as 1 + max(cluster.level) by the build, so every
+    // level indexes in range; assert rather than skip, because a silently
+    // dropped bucket would hide exactly the mixed-depth anomaly this histogram
+    // exists to show.
+    assert(c.level >= 0 && c.level < static_cast<int>(sel_level_hist_.size()));
+    ++sel_level_hist_[c.level];
   }
   sel_cluster_count_ = static_cast<int>(selected_clusters_.size());
 

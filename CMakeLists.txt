@@ -451,6 +451,8 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/erosion.cpp
     src/mapgen/detail_filter.cpp
     src/mapgen/river_graph.cpp
+    src/mapgen/river_arcs.cpp
+    src/mapgen/river_carve.cpp
     src/mapgen/canal_carve.cpp
     src/mapgen/smooth.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
@@ -467,6 +469,7 @@ add_executable(badlands_mapview
     src/mapview/biome_manifest.cpp
     src/mapview/biome_splat.cpp
     src/mapview/lake_surface.cpp
+    src/mapview/river_surface.cpp
     src/game/geometry/terrain_mesh.cpp
     src/game/geometry/terrain_clusters.cpp
     # Shared MapData->render cluster-terrain module, used by both apps (game_view
@@ -570,6 +573,10 @@ add_executable(badlands_erosion_tests
     src/mapgen/detail_filter.cpp
     src/mapgen/river_graph_tests.cpp
     src/mapgen/river_graph.cpp
+    src/mapgen/river_arcs_tests.cpp
+    src/mapgen/river_arcs.cpp
+    src/mapgen/river_carve_tests.cpp
+    src/mapgen/river_carve.cpp
     src/mapgen/canal_carve_tests.cpp
     src/mapgen/canal_carve.cpp
     src/mapgen/smooth_tests.cpp
@@ -1258,6 +1265,23 @@ target_include_directories(badlands_lake_surface_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_lake_surface_tests COMMAND badlands_lake_surface_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_river_surface_tests: pure-CPU tests for the river channel ribbon --
+# the arc-chain fit turned into draped, hydraulically-sized geometry. Compiles
+# river_arcs.cpp directly (rather than linking badlands_mapgen_lib, which pulls
+# in badlands_engine) so the whole check stays CPU-only.
+add_executable(badlands_river_surface_tests
+    src/mapview/tests/river_surface_tests.cpp
+    src/mapview/river_surface.cpp
+    src/mapgen/river_arcs.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_river_surface_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+add_test(NAME badlands_river_surface_tests COMMAND badlands_river_surface_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_factors_manifest_tests: behaviour tuning loaded as data
 # (assets/creatures/factors.json -> badlands::SimFactors). App-layer, so the sim

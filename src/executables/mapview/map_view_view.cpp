@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <limits>
 #include <optional>
 #include <cmath>
 #include <string>
@@ -35,8 +36,10 @@
 #include "mapview/biome_manifest.hpp"
 #include "mapview/biome_splat.hpp"
 #include "mapgen/map_io.hpp"
+#include "mapgen/river_arcs.hpp"
 #include "mapgen/window_rivers.hpp"
 #include "mapview/lake_surface.hpp"
+#include "mapview/river_surface.hpp"
 
 namespace badlands {
 
@@ -49,6 +52,23 @@ constexpr float kMinRiverWidthM = 0.3f;
 // Shortest headwater branch worth drawing. Leaf-only, so the network cannot be
 // severed; applied repeatedly, since removing one leaf exposes the next.
 constexpr float kMinRiverBranchM = 32.0f;
+
+// How far a fitted arc may stray from the reach polyline, in TEXELS. Half a
+// texel: the polyline itself came out of a Douglas-Peucker pass at ~1 texel, so
+// fitting tighter than this spends arcs chasing error the input does not have.
+constexpr float kRiverArcToleranceTexels = 0.5f;
+
+// Subdivision exponent for the river corridor: 2^3 = 8x8 sub-quads, so the
+// carve is sampled every 0.125 m inside a 1 m lattice.
+//
+// Both bounds are forced, which is why this is a constant and not a knob. From
+// BELOW: the median channel is 0.52 m wide and 0.06 m deep, so a cavity on the
+// base lattice is sub-texel and aliases into a one-vertex notch. From ABOVE:
+// the cluster triangle budget is 2*tile_quads^2, and one refined quad costs
+// 2*4^k triangles, so k <= 3 at the default 128. 0.125 is also a power of two,
+// which keeps fine vertex coordinates exact in float -- the seam weld compares
+// positions with ==.
+constexpr uint8_t kRiverDetailExponent = 3;
 
 // Wrap the generator output in the frozen MapData contract at the raster's own
 // texel spacing. Slices are ONE-HOT: the hard per-pixel biome assignment, so
@@ -80,56 +100,72 @@ MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, glm::vec2 size_m) {
 }  // namespace
 
 
-// Turns the river graph into world-space debug segments.
+// Turns the river ARC CHAINS into the channel WATER mesh -- the free surface
+// inside the carved cavity, on the same still-water material as the lakes.
 //
-// Height comes from the terrain raster, not from the graph's node elevations:
-// the graph carries elevation only at nodes, while `points_m` is resampled at
-// variable arc length along a reach, so interpolating node heights would let a
-// long reach float above or sink under the ground between them.
+// The geometry is built in src/mapview/river_surface.cpp (pure CPU, tested);
+// everything here is the registry/material half. One entity for the whole
+// network -- one material, so splitting it per reach would buy nothing and cost
+// a draw call each.
 //
-// Colour encodes STRAHLER ORDER rather than discharge, because order is constant
-// along a reach and discharge is not -- a per-point discharge ramp would make one
-// river read as several. Order is the hierarchy the eye should pick out.
-void MapViewView::BuildRiverLines() {
-  river_lines_.Clear();
-  if (!show_rivers_) return;
-  const int w = map_.heightmap.width, h = map_.heightmap.height;
-  if (w <= 0 || h <= 0 || map_size_m_ <= 0.0f) return;
-  const float texel_m = map_size_m_ / static_cast<float>(w);
-
-  // Lifted clear of the surface so the line is not z-fought by the terrain it
-  // follows. In metres, so it is independent of camera height.
-  constexpr float kLiftM = 0.35f;
-  // Screen-space pixels. A trunk is only ~1.6 m wide here, far below a pixel at
-  // any sane camera height, so thickness carries HIERARCHY, not true width.
-  constexpr float kBaseThicknessPx = 1.2f;
-  constexpr float kThicknessPerOrderPx = 0.9f;
-
-  auto ground_at = [&](glm::vec2 p) {
-    const int x = std::clamp(static_cast<int>(p.x / texel_m), 0, w - 1);
-    const int z = std::clamp(static_cast<int>(p.y / texel_m), 0, h - 1);
-    float y = map_.heightmap.at(x, z);
-    // Ride the lake surface where there is one, or the line disappears under it.
-    if (map_.water_depth.width == w && map_.water_depth.height == h)
-      y += map_.water_depth.at(x, z);
-    return y + kLiftM;
-  };
-
-  for (const mapgen::RiverEdge& e : rivers_.graph.edges) {
-    if (e.points_m.size() < 2) continue;
-    const int order = std::max(1, e.strahler_order);
-    // Headwaters pale, trunks saturated -- a single hue so the network still
-    // reads as one system.
-    const float tt = std::clamp((order - 1) / 4.0f, 0.0f, 1.0f);
-    const glm::vec3 color = glm::mix(glm::vec3(0.45f, 0.72f, 0.92f),
-                                     glm::vec3(0.08f, 0.34f, 0.78f), tt);
-    const float thickness = kBaseThicknessPx + kThicknessPerOrderPx * (order - 1);
-    for (size_t i = 1; i < e.points_m.size(); ++i) {
-      const glm::vec2 a = e.points_m[i - 1], b = e.points_m[i];
-      river_lines_.AddLine(glm::vec3(a.x, ground_at(a), a.y),
-                           glm::vec3(b.x, ground_at(b), b.y), color, thickness);
-    }
+// No carve, no water: without a cavity there is nothing for a surface to sit
+// in, and a sheet at ground level would be the decal the carve replaced. The
+// generated-map path has no river graph at all, so it never gets here.
+//
+// Destroyed and rebuilt on toggle rather than hidden: the registry has no
+// per-entity visibility flag, and at this size (tens of thousands of triangles)
+// the rebuild is cheaper than the machinery to avoid it.
+void MapViewView::BuildRiverMesh() {
+  if (registry_.valid(river_mesh_)) {
+    registry_.destroy(river_mesh_);
+    river_mesh_ = entt::null;
   }
+  if (!show_rivers_ || river_arcs_.empty() || !river_carve_ || !water_factory_)
+    return;
+
+  // The SAME analytic field the terrain was tessellated from, so the surface
+  // and the bed under it can never disagree.
+  const std::vector<glm::vec3> tris = BuildRiverWaterTriangles(
+      map_, map_size_m_, rivers_.graph, river_arcs_,
+      [carve = river_carve_.get()](float wx, float wz) {
+        return carve->HeightAt(wx, wz);
+      });
+  if (tris.empty()) return;
+
+  std::vector<float> v;
+  v.reserve(tris.size() * kTexturedMeshFloatsPerVertex);
+  for (const glm::vec3& p : tris) {
+    // uv = world XZ, normal +Y, tangent +X -- exactly the lake surface's
+    // convention, and correct for the same reason: each cross-section is FLAT
+    // at its own water level, so the surface has no slope to shade.
+    PushVertex(v, p, glm::vec2(p.x, p.z), glm::vec3(0.0f, 1.0f, 0.0f),
+               glm::vec3(1.0f, 0.0f, 0.0f));
+  }
+
+  river_mesh_ = registry_.create();
+  registry_.emplace<Transform>(river_mesh_).matrix = glm::mat4(1.0f);
+  auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(river_mesh_);
+  mesh.vertex_count =
+      static_cast<uint32_t>(v.size() / kTexturedMeshFloatsPerVertex);
+  mesh.dirty = true;
+  mesh.geometry_type = GeometryType::kTexturedMesh;
+  registry_.emplace<StaticMeshAabbComponent>(
+      river_mesh_,
+      StaticMeshAabbComponent{.local = ComputeLocalAabbFromVertices(
+                                  v, kTexturedMeshFloatsPerVertex)});
+  mesh.vertices = std::move(v);
+
+  // The lakes' still-water material, on the same forward-transparent pass. Its
+  // Beer-Lambert extinction is calibrated to 2.5-10 m visibility depths, so at
+  // a 0.06 m median these brooks render nearly clear -- accepted: the CAVITY,
+  // not the tint, is what makes a sub-metre channel visible.
+  MaterialFactoryComponent fmc;
+  fmc.factory = water_factory_.get();
+  fmc.pass_type = MaterialPassType::kForwardTransparent;
+  fmc.params = StillLakeWaterParams();
+  fmc.config_hash = ComputeFactoryConfigHash(fmc);
+  registry_.emplace<MaterialFactoryComponent>(river_mesh_, std::move(fmc));
+  registry_.emplace<ForwardTransparentRenderable>(river_mesh_);
 }
 
 bool MapViewView::Initialize(const RenderContext& ctx) {
@@ -221,17 +257,134 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     // 0.5 m is Q >= 0.01 m3/s.
     rivers_ = mapgen::build_window_rivers(map_, params_.world_size_m, inflows, rp,
                                           kMinRiverWidthM, kMinRiverBranchM);
-    BuildRiverLines();
+    const float texel_m =
+        params_.world_size_m / static_cast<float>(std::max(1, map_.heightmap.width));
+    river_arcs_ = mapgen::build_river_arcs(
+        rivers_.graph, kRiverArcToleranceTexels * texel_m);
     log_step("rivers", since(t));
     float q_max = 0.0f;
     for (const mapgen::RiverEdge& e : rivers_.graph.edges)
       for (float q : e.discharge_m3_s) q_max = std::max(q_max, q);
     spdlog::info(
-        "rivers: {} nodes, {} reaches, {} segments | inflow {:.4f} + rain {:.4f} "
+        "rivers: {} nodes, {} reaches | inflow {:.4f} + rain {:.4f} "
         "= {:.4f} m3/s | peak Q {:.4f} m3/s",
         rivers_.graph.nodes.size(), rivers_.graph.edges.size(),
-        river_lines_.lines.size(), rivers_.inflow_m3_s, rivers_.rain_m3_s,
+        rivers_.inflow_m3_s, rivers_.rain_m3_s,
         rivers_.inflow_m3_s + rivers_.rain_m3_s, q_max);
+
+    // The arc fit, reported as what it buys and what it costs.
+    //
+    // FIT ERROR is the one that can invalidate everything downstream: the arcs
+    // replace the polyline, so if the worst point sits further off than the
+    // tolerance allowed, the fit silently moved the river. TIGHT arcs are the
+    // other failure -- a radius below the channel's own half-width is a lattice
+    // hairpin, not a meander, and it is what the ribbon's fold guard exists for.
+    size_t pts = 0, arcs = 0, straight = 0, tight = 0;
+    float min_r = std::numeric_limits<float>::infinity();
+    float arc_len = 0.0f, worst_fit = 0.0f;
+    for (const mapgen::RiverArcChain& c : river_arcs_) {
+      const mapgen::RiverEdge& e = rivers_.graph.edges[c.edge];
+      arcs += c.arcs.size();
+      arc_len += c.length_m;
+      pts += e.points_m.size();
+      for (const glm::vec2& p : e.points_m) {
+        float best = std::numeric_limits<float>::max();
+        for (const mapgen::RiverArc& a : c.arcs)
+          best = std::min(best, mapgen::arc_distance_m(a, p));
+        worst_fit = std::max(worst_fit, best);
+      }
+      const std::vector<float> ep = mapgen::polyline_params(e.points_m);
+      for (const mapgen::RiverArc& a : c.arcs) {
+        if (a.curvature_1_m == 0.0f) {
+          ++straight;
+          continue;
+        }
+        const float r = mapgen::arc_radius_m(a);
+        min_r = std::min(min_r, r);
+        // "Tighter than the channel" is measured against the channel's OWN
+        // half-width at the arc's midpoint -- the exact quantity the water
+        // surface's fold guard clamps.
+        const float u_mid = 0.5f * (a.param0 + a.param1);
+        if (r < 0.5f * mapgen::sample_at_param(ep, e.width_m, u_mid)) ++tight;
+      }
+    }
+    spdlog::info(
+        "river arcs: {} chains, {} arcs ({} straight) from {} polyline points "
+        "({:.2f}x) | {:.0f} m of channel | fit error <= {:.2f} m | "
+        "min radius {:.1f} m, {} tighter than the channel",
+        river_arcs_.size(), arcs, straight, pts,
+        pts > 0 ? static_cast<double>(pts) /
+                      static_cast<double>(std::max<size_t>(arcs, 1))
+                : 0.0,
+        arc_len, worst_fit, min_r, tight);
+
+    // THE ADAPTER, and the only place in the codebase where rivers meet the
+    // terrain builder. The carve owns the corridor mask and the carved-height
+    // field; everything below restates them in the builder's generic
+    // vocabulary -- a per-quad subdivision exponent plus a height function --
+    // so nothing downstream of here knows what a river is.
+    //
+    // The carve is HEAP-ALLOCATED and never moved: river_detail_.height_at
+    // closes over a raw pointer to it, the DAG build calls that once per fine
+    // vertex (and four more times per numeric normal), and BuildRiverMesh calls
+    // it again on every toggle.
+    t = clock::now();
+    river_carve_ = std::make_unique<mapgen::RiverCarve>(
+        mapgen::build_river_carve(rivers_.graph, river_arcs_, map_.heightmap,
+                                  params_.world_size_m));
+    // Mask texels and quads are DIFFERENT SQUARES, so this is a dilation, not
+    // a copy. Mask texel (i, j) is CENTRED on node (i, j) -- RiverCarve::
+    // HeightAt indexes it as floor(w/texel + 0.5) -- while quad (i, j) spans
+    // [i, i+1] * texel. They are offset by half a texel, and the four quads a
+    // mask texel overlaps are (i-1, j-1), (i, j-1), (i-1, j), (i, j).
+    //
+    // Marking exactly those four is also what the tessellator needs, for a
+    // reason beyond the offset: LatticeNodeVertex gives a base-lattice node the
+    // COARSE height unless ALL FOUR of its incident quads are refined (it must
+    // -- a node bordering a plain quad has to weld with that quad's record).
+    // An element-for-element copy therefore left the carve unapplied at nodes
+    // just inside the channel, standing them up as posts: MEASURED at 0.4163 m
+    // in a 0.602 m cavity, 69% of the carve, on every offset and width tried.
+    // The dilation makes "texel set => all four of that node's quads refined"
+    // hold by construction, and the same probe then reports 0.0000 m.
+    size_t corridor_texels = 0;
+    const int mw = river_carve_->mask.width, mh = river_carve_->mask.height;
+    river_detail_level_.assign(static_cast<size_t>(mw) * mh, 0);
+    for (int j = 0; j < mh; ++j) {
+      for (int i = 0; i < mw; ++i) {
+        if (river_carve_->mask.at(i, j) == 0) continue;
+        ++corridor_texels;
+        for (int dz = -1; dz <= 0; ++dz) {
+          for (int dx = -1; dx <= 0; ++dx) {
+            const int qx = i + dx, qz = j + dz;
+            if (qx >= 0 && qz >= 0 && qx < mw && qz < mh)
+              river_detail_level_[static_cast<size_t>(qz) * mw + qx] =
+                  kRiverDetailExponent;
+          }
+        }
+      }
+    }
+    river_detail_.level = river_detail_level_.data();
+    river_detail_.width = river_carve_->mask.width;
+    river_detail_.height = river_carve_->mask.height;
+    river_detail_.height_at = [carve = river_carve_.get()](float wx, float wz) {
+      return carve->HeightAt(wx, wz);
+    };
+    log_step("carve", since(t));
+    const size_t mask_texels = std::max<size_t>(river_carve_->mask.data.size(), 1);
+    // Refined quads are reported SEPARATELY from corridor texels: the dilation
+    // means they are not the same count, and quads are what the DAG pays for.
+    size_t refined_quads = 0;
+    for (uint8_t k : river_detail_level_) refined_quads += (k > 0) ? 1 : 0;
+    spdlog::info(
+        "river carve: {} corridor texels -> {} refined quads ({:.2f}% of the "
+        "map), exponent {} ({:.3f} m sampling)",
+        corridor_texels, refined_quads,
+        100.0 * static_cast<double>(refined_quads) /
+            static_cast<double>(mask_texels),
+        static_cast<int>(kRiverDetailExponent),
+        (params_.world_size_m / static_cast<float>(std::max(1, map_.heightmap.width))) /
+            static_cast<float>(1 << kRiverDetailExponent));
   }
 
   // Lake bathymetry, logged once: the water material's extinction coefficients
@@ -366,11 +519,28 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   cluster_terrain_.debug_tint_mode() = initial_tint_;
   TerrainClusterParams cluster_params;
   cluster_params.parallel_build = !serial_build_;
+  // Local refinement, if a carve produced any. The grid must BE the map's quad
+  // grid (both come from the same rasters, so this holds by construction) --
+  // the check is a tripwire for a future map source where it would not, and
+  // dropping the detail is the safe answer there.
+  const TerrainDetailField* detail = nullptr;
+  if (river_carve_ && river_detail_.level != nullptr) {
+    if (river_detail_.width == terrain_map_.nodes_x() - 1 &&
+        river_detail_.height == terrain_map_.nodes_z() - 1) {
+      detail = &river_detail_;
+    } else {
+      spdlog::error(
+          "MapViewView: corridor grid {}x{} != quad grid {}x{}; building the "
+          "terrain WITHOUT the river carve",
+          river_detail_.width, river_detail_.height, terrain_map_.nodes_x() - 1,
+          terrain_map_.nodes_z() - 1);
+    }
+  }
   t = clock::now();
   if (!cluster_terrain_.Build(terrain_map_, ctx, registry_, glm::mat4(1.0f),
                               cluster_params, terrain_arrays_,
                               matlib_.shared_sampler(), splat0_view_,
-                              splat1_view_, splat_sampler_, splat_uv)) {
+                              splat1_view_, splat_sampler_, splat_uv, detail)) {
     spdlog::error("MapViewView: cluster terrain build failed");
     return false;
   }
@@ -431,6 +601,18 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   spdlog::info("water: {} triangles over {} lakes", water_tris.size() / 3,
                map_.lakes.size());
   log_step("water", since(t));
+
+  // The channel water. AFTER the lake water because it shares its factory, and
+  // it reads better in that order too: ground, then standing water, then the
+  // channels between them.
+  t = clock::now();
+  BuildRiverMesh();
+  if (registry_.valid(river_mesh_)) {
+    spdlog::info("rivers: {} water triangles",
+                 registry_.get<StaticTexturedMeshComponent>(river_mesh_)
+                         .vertex_count / 3);
+  }
+  log_step("river mesh", since(t));
 
   // The forest. Placement is pure CPU over the frozen MapData contract, so
   // nothing here knows how the map was made -- a generated map simply reports
@@ -518,12 +700,6 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
 void MapViewView::Update(float dt, const bool* keyboard_state) {
   dt_ = dt;
 
-  // The segment list is static (built once at load), so this just re-points the
-  // context; nullptr when hidden or when there is no network, which is what the
-  // debug-line pass reads as "draw nothing".
-  scene_context_.debug_lines =
-      (show_rivers_ && !river_lines_.empty()) ? &river_lines_ : nullptr;
-
   // Advance the shared clock; when it's running, move the sun (paused =>
   // holds). The daylight re-bake is throttled implicitly: ApplyDaylight only
   // runs while time actually moves.
@@ -558,9 +734,11 @@ void MapViewView::DrawUI() {
               params_.world_size_m);
   cluster_terrain_.DrawDebugUI();
   if (!rivers_.graph.edges.empty()) {
-    if (ImGui::Checkbox("rivers (debug)", &show_rivers_)) BuildRiverLines();
-    ImGui::Text("  %zu reaches, %zu segments", rivers_.graph.edges.size(),
-                river_lines_.lines.size());
+    if (ImGui::Checkbox("river water", &show_rivers_)) BuildRiverMesh();
+    size_t arcs = 0;
+    for (const mapgen::RiverArcChain& c : river_arcs_) arcs += c.arcs.size();
+    ImGui::Text("  %zu reaches, %zu chains, %zu arcs",
+                rivers_.graph.edges.size(), river_arcs_.size(), arcs);
     ImGui::Text("  inflow %.4f + rain %.4f m3/s", rivers_.inflow_m3_s,
                 rivers_.rain_m3_s);
   }
