@@ -100,7 +100,12 @@ struct TerrainCluster {
   Aabb bounds;                 // world-space
   int own_group = kNoGroup;    // group that produced this cluster (leaf: none)
   int parent_group = kNoGroup; // group that consumed this cluster (root: none)
-  int level = 0;               // 0 = full-res leaf
+  // Depth in the build hierarchy: 0 for emitted leaves, 1 + max(child.level)
+  // above. DESCRIPTIVE ONLY -- on a mixed-depth DAG (locally refined tiles)
+  // level is neither a resolution tier nor a leaf test, and nothing may branch
+  // on it for correctness. Leafness is `own_group == kNoGroup`; selection reads
+  // errors and spheres, never this. Debug display (tint, histogram) only.
+  int level = 0;
 };
 
 // One group: consumes kGroupDim^2 (fewer at the map edge) same-level clusters,

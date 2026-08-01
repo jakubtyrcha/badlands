@@ -589,18 +589,27 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
         const glm::vec4 footprint = work[g].footprint;
         GroupResult& gr = results[g];
 
+        // The output level derives from the CHILDREN, not from the loop
+        // counter: 1 + max(child.level). Identical on a uniform build (every
+        // child sits at `cur`), but the loop counter stops being a tree
+        // property the moment a region arrives pre-reduced at a deeper level
+        // -- and from then on `level` is descriptive only (see the hpp).
+        int out_level = 0;
+        for (uint32_t c : children)
+          out_level = std::max(out_level, dag.clusters[c].level + 1);
+
         // Reserve the group slot, emit its outputs (own_group = this group).
         const int gidx = static_cast<int>(dag.groups.size());
         dag.groups.emplace_back();
         std::vector<uint32_t> out_clusters;
         for (ClusterGeom& out : gr.outputs)
           out_clusters.push_back(EmitCluster(dag, cluster_geom, std::move(out),
-                                             cur + 1, gidx));
+                                             out_level, gidx));
 
         // Group record: monotone error + a sphere nesting the children spheres
         // and the outputs' AABB.
         TerrainClusterGroup& G = dag.groups[gidx];
-        G.level = cur + 1;
+        G.level = out_level;
         G.footprint = footprint;
         G.first_child = static_cast<uint32_t>(dag.group_children.size());
         G.child_count = static_cast<uint32_t>(children.size());
@@ -639,17 +648,25 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
       }
     }
     grid = std::move(next);
-    // Free the just-consumed level's scratch geometry. Every level-`cur` cluster
-    // was in `grid` and has now been welded into level cur+1; WeldChildren only
-    // ever reads the live grid's level, so this geom is dead. cluster_geom is
-    // parallel to dag.clusters and never serialized, so clearing it cannot
-    // perturb the DAG output (the determinism/invariant tests stay green).
-    for (uint32_t c = 0; c < cluster_geom.size(); ++c) {
-      if (dag.clusters[c].level == cur) cluster_geom[c] = ClusterGeom{};
-    }
+    // Free the just-consumed scratch geometry BY LIVENESS, never by level:
+    // exactly the clusters gathered as children this round are dead (welded
+    // into their groups' outputs), and nothing else. The old form freed by
+    // `level == cur`, which is the same set on a uniform build -- but on a
+    // mixed-depth build a level-`cur` cluster can still be WAITING in a
+    // region, and freeing it would silently weld an empty cluster later.
+    // cluster_geom is parallel to dag.clusters and never serialized, so
+    // clearing it cannot perturb the DAG output.
+    for (const GroupWork& w : work)
+      for (uint32_t c : w.children) cluster_geom[c] = ClusterGeom{};
     ++cur;
   }
-  dag.level_count = cur + 1;
+  // 1 + the deepest level actually emitted -- NOT the loop count. Identical on
+  // a uniform build (the last merge emits at cur); on a mixed-depth build the
+  // loop count and the tree depth diverge, and every consumer sizing by
+  // level_count (selection histogram, LogStats) needs the true depth.
+  dag.level_count = 0;
+  for (const TerrainCluster& c : dag.clusters)
+    dag.level_count = std::max(dag.level_count, c.level + 1);
 
   const double build_ms =
       std::chrono::duration<double, std::milli>(
