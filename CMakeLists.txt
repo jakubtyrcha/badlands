@@ -452,6 +452,7 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/detail_filter.cpp
     src/mapgen/river_graph.cpp
     src/mapgen/river_arcs.cpp
+    src/mapgen/river_carve.cpp
     src/mapgen/canal_carve.cpp
     src/mapgen/smooth.cpp)
 target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
@@ -574,6 +575,8 @@ add_executable(badlands_erosion_tests
     src/mapgen/river_graph.cpp
     src/mapgen/river_arcs_tests.cpp
     src/mapgen/river_arcs.cpp
+    src/mapgen/river_carve_tests.cpp
+    src/mapgen/river_carve.cpp
     src/mapgen/canal_carve_tests.cpp
     src/mapgen/canal_carve.cpp
     src/mapgen/smooth_tests.cpp

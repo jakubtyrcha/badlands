@@ -157,6 +157,20 @@ float arc_distance_m(const RiverArc& a, glm::vec2 p) {
   return std::min(glm::length(p - a.p0), glm::length(p - a.p1));
 }
 
+float arc_closest_param_m(const RiverArc& a, glm::vec2 p) {
+  if (!(a.length_m > 0.0f)) return 0.0f;
+  // t0 is unit, so the projection onto the line IS the arc length.
+  if (a.curvature_1_m == 0.0f)
+    return std::clamp(glm::dot(p - a.p0, a.t0), 0.0f, a.length_m);
+  const float sweep = a.curvature_1_m * a.length_m;
+  const float d = arc_sweep_of(a, p);
+  const bool inside = (a.curvature_1_m > 0.0f) ? (d <= sweep) : (d >= sweep);
+  // Angle travelled / curvature is arc length, and the sweep is signed the same
+  // way as the curvature, so the division lands in [0, length_m] identically.
+  if (inside) return std::clamp(d / a.curvature_1_m, 0.0f, a.length_m);
+  return (glm::length(p - a.p0) <= glm::length(p - a.p1)) ? 0.0f : a.length_m;
+}
+
 // --- fitting ----------------------------------------------------------------
 
 std::vector<RiverArc> fit_biarc(glm::vec2 p0, glm::vec2 t0, glm::vec2 p1,

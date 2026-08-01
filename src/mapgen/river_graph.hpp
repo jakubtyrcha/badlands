@@ -190,4 +190,21 @@ std::vector<glm::vec2> simplify_polyline(const std::vector<glm::vec2>& pts,
 std::vector<glm::vec2> resample_polyline(const std::vector<glm::vec2>& pts,
                                          float spacing_m);
 
+// --- conservative-rasterization helpers (shared, not just for tests) --------
+//
+// Exposed because the conservative rule above is a CONTRACT the carve pass has
+// to honour too (river_carve.cpp rasterizes the arc chains against the same
+// texel squares, one chord at a time). A second copy of this geometry would be
+// a second chance to get the "square, not centre" test subtly wrong.
+
+// Does the segment ab touch the axis-aligned box at all? Liang-Barsky slab clip.
+bool segment_hits_aabb(glm::vec2 a, glm::vec2 b, glm::vec2 lo, glm::vec2 hi);
+
+// Exact minimum distance between a segment and an axis-aligned box (0 when they
+// intersect). For two convex sets the minimum is attained at a vertex of one
+// against the other, so the box's corners against the segment plus the
+// segment's endpoints against the box cover every case.
+float segment_aabb_distance(glm::vec2 a, glm::vec2 b, glm::vec2 lo,
+                            glm::vec2 hi);
+
 }  // namespace badlands::mapgen

@@ -76,6 +76,14 @@ glm::vec2 arc_centre(const RiverArc& a);
 // its circle: outside the swept angle the nearest point is an endpoint.
 float arc_distance_m(const RiverArc& a, glm::vec2 p);
 
+// Arc length in [0, length_m] of the point arc_distance_m measured to -- the
+// companion answer to the same query. A consumer that wants the CHANNEL at the
+// nearest point (its width, its bed, its flow) needs the parameter, not just
+// the distance, and re-deriving it from the distance is not possible. Uses the
+// same containment test as arc_distance_m, so the two always agree on which
+// point they are talking about.
+float arc_closest_param_m(const RiverArc& a, glm::vec2 p);
+
 // The arcs of one reach, in downstream order. Consecutive arcs share an
 // endpoint and a tangent, so the chain is G1 (continuous position and heading);
 // it is NOT G2 -- curvature steps at every joint, which is exactly what an arc

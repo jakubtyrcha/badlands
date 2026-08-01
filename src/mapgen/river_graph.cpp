@@ -128,7 +128,10 @@ float point_aabb_distance(glm::vec2 p, glm::vec2 lo, glm::vec2 hi) {
   return glm::length(d);
 }
 
-// Does the segment ab touch the box at all? Liang-Barsky slab clip.
+}  // namespace
+
+// Declared in the header: the carve pass rasterizes arc chords against the same
+// texel squares and must apply the identical "square, not centre" test.
 bool segment_hits_aabb(glm::vec2 a, glm::vec2 b, glm::vec2 lo, glm::vec2 hi) {
   float t0 = 0.0f, t1 = 1.0f;
   const glm::vec2 d = b - a;
@@ -158,6 +161,8 @@ float segment_aabb_distance(glm::vec2 a, glm::vec2 b, glm::vec2 lo, glm::vec2 hi
   for (const auto& c : corners) best = std::min(best, point_segment_distance(c, a, b));
   return best;
 }
+
+namespace {
 
 // Per-cell scratch shared by the extraction passes.
 struct ChannelField {
