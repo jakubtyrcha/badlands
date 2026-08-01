@@ -1,7 +1,30 @@
 # Foliage Generator — Forest Plopper on Biome + Heightmap — Design
 
 **Date:** 2026-08-01
-**Status:** Approved (design + plan), implementation in progress.
+**Status:** Implemented on `feat/foliage-generator`. Visual sign-off pending.
+
+## Implementation notes (what differed from the design)
+
+- **The clump window was tuned against measurement, not by eye.** FastNoiseLite's
+  fBm is nothing like uniform on [-1,1] -- at 3 octaves it measures mean 0.000,
+  sd 0.354. The natural-looking `[0.35, 0.80]` window leaves only 4.1% of the map
+  at full density, so it thins the forest evenly instead of carving glades;
+  `[0.30, 0.55]` gives 40.6% closed canopy against 14.8% true glade.
+- **The test map truncates its gaussian tails.** A gaussian is never zero, so
+  without a subtracted floor ~89% of the map carried some forest weight, which
+  (with soft slices) tints the terrain material nearly everywhere and leaves the
+  depth field no clean edge to measure from.
+- **The spacing acceleration grid is verified end-to-end rather than directly.**
+  It is an implementation detail of `scatter.cpp`; a brute-force O(n^2) pass over
+  the whole generated field asserts the same invariant without exposing it, and
+  fails identically if the 3x3 neighbourhood ever misses a conflict.
+- **`ForestRenderer` (game/visual) was added** beyond what the design named: the
+  per-cell cull and upload-on-change logic is a reusable component, not mapview
+  view code.
+
+Measured on the 128 m test map: 1083 instances across 16 cells from 28 models,
+8 ms to place, 1.2 s to build the meshes (parallel). A procedural map places
+nothing and builds no GPU resources at all.
 
 ## Goal
 
