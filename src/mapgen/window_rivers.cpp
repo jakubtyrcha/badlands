@@ -119,8 +119,13 @@ float boundary_crossing_t(glm::vec2 a, glm::vec2 b, float size_m) {
   return best;
 }
 
+// Upper bound EXCLUSIVE. Texel centres sit at `index * texel_m` with the ghost
+// ring at origin_m = -texel_m, so the -x/-y ghosts land at -texel_m (clearly
+// out) but the +x/+y ghosts land at exactly `world_size_m`. An inclusive bound
+// kept the overhang on two sides of four, which is both wrong and asymmetric.
+// No real texel reaches world_size_m -- the last is at (n-1)*texel_m.
 bool inside_window(glm::vec2 p, float size_m) {
-  return p.x >= 0.0f && p.y >= 0.0f && p.x <= size_m && p.y <= size_m;
+  return p.x >= 0.0f && p.y >= 0.0f && p.x < size_m && p.y < size_m;
 }
 
 }  // namespace
@@ -130,77 +135,108 @@ void clip_river_graph_to_window(RiverGraph& g, float world_size_m) {
   std::vector<RiverEdge> kept;
   kept.reserve(g.edges.size());
 
-  // Mints a node exactly on the frame, with every property interpolated along
-  // the crossing segment. A reach that leaves the window must END somewhere
-  // real: without this it either dangles a point outside the map or stops at
-  // whichever sample happened to be last inside, which is a different place
-  // every time the resolution changes.
-  const auto add_boundary_node = [&](const RiverEdge& e, size_t i, float t,
-                                     bool outgoing) {
-    const size_t j = i + 1;
+  // Mints a node on the frame, with every property interpolated along the
+  // crossing segment. A reach that meets the boundary must start or end at a
+  // real place: without this it stops at whichever sample happened to be last
+  // inside, which moves whenever the resampling changes.
+  const auto add_crossing = [&](const RiverEdge& e, size_t i, size_t j, float t,
+                                RiverNodeKind kind) {
     RiverNode n;
     n.pos_m = glm::mix(e.points_m[i], e.points_m[j], t);
     n.discharge_m3_s = glm::mix(e.discharge_m3_s[i], e.discharge_m3_s[j], t);
     n.width_m = glm::mix(e.width_m[i], e.width_m[j], t);
     n.depth_m = glm::mix(e.depth_m[i], e.depth_m[j], t);
     n.speed_m_s = glm::mix(e.speed_m_s[i], e.speed_m_s[j], t);
-    // Both directions are map boundaries; Mouth is the kind that already means
-    // "the network leaves here", and an entry is the same fact seen upstream.
-    n.kind = RiverNodeKind::Mouth;
-    (void)outgoing;
+    n.kind = kind;
     g.nodes.push_back(n);
     return static_cast<int32_t>(g.nodes.size() - 1);
   };
 
   for (const RiverEdge& e : g.edges) {
-    if (e.points_m.size() < 2) continue;
-    // Walk the chain, emitting each contiguous run that lies inside the window.
+    // THROUGH-LAKE EDGES CARRY NO GEOMETRY ON PURPOSE (river_graph.cpp pass 3):
+    // an inlet -> outlet edge exists so the network stays traversable
+    // river -> lake -> river, and the lake surface is already water so drawing a
+    // channel across it would be wrong. Dropping them for having < 2 points
+    // severed that link, which also left every lake's OUTFLOW reach with
+    // in_deg == 0 -- so the length prune saw it as a headwater and could delete
+    // the trunk below a lake. They have nothing to clip; pass them through.
+    if (e.points_m.size() < 2) {
+      kept.push_back(e);
+      continue;
+    }
+
+    const size_t np = e.points_m.size();
     size_t i = 0;
-    while (i + 1 < e.points_m.size()) {
+    while (i < np) {
       if (!inside_window(e.points_m[i], world_size_m)) { ++i; continue; }
+
       RiverEdge run;
       run.strahler_order = e.strahler_order;
       run.shreve_magnitude = e.shreve_magnitude;
-      run.from = (i == 0) ? e.from : -1;
-      const auto push = [&](glm::vec2 p, float q, float wd, float dp, float sp) {
-        run.points_m.push_back(p);
+      const auto push = [&](glm::vec2 pt, float q, float wd, float dp, float sp) {
+        run.points_m.push_back(pt);
         run.discharge_m3_s.push_back(q);
         run.width_m.push_back(wd);
         run.depth_m.push_back(dp);
         run.speed_m_s.push_back(sp);
       };
+
+      if (i == 0) {
+        run.from = e.from;
+      } else {
+        // ENTERING the window. The upstream end gets a frame node too -- the
+        // same interpolation as the exit, mirrored. Without it a reach began at
+        // whichever resampled sample first landed inside.
+        const float t = boundary_crossing_t(e.points_m[i - 1], e.points_m[i],
+                                            world_size_m);
+        if (t >= 0.0f) {
+          const int32_t nid =
+              add_crossing(e, i - 1, i, t, RiverNodeKind::Source);
+          push(g.nodes[nid].pos_m, g.nodes[nid].discharge_m3_s,
+               g.nodes[nid].width_m, g.nodes[nid].depth_m,
+               g.nodes[nid].speed_m_s);
+          run.from = nid;
+        } else {
+          run.from = -1;  // anchored below
+        }
+      }
+
       push(e.points_m[i], e.discharge_m3_s[i], e.width_m[i], e.depth_m[i],
            e.speed_m_s[i]);
+
       size_t k = i;
-      bool exited = false;
-      while (k + 1 < e.points_m.size()) {
-        const float t = boundary_crossing_t(e.points_m[k], e.points_m[k + 1],
-                                            world_size_m);
-        if (t >= 0.0f && !inside_window(e.points_m[k + 1], world_size_m)) {
-          const int32_t nid = add_boundary_node(e, k, t, true);
-          push(g.nodes[nid].pos_m, g.nodes[nid].discharge_m3_s,
-               g.nodes[nid].width_m, g.nodes[nid].depth_m, g.nodes[nid].speed_m_s);
-          run.to = nid;
-          exited = true;
-          ++k;
-          break;
-        }
+      while (k + 1 < np && inside_window(e.points_m[k + 1], world_size_m)) {
         ++k;
-        if (!inside_window(e.points_m[k], world_size_m)) { exited = true; break; }
         push(e.points_m[k], e.discharge_m3_s[k], e.width_m[k], e.depth_m[k],
              e.speed_m_s[k]);
       }
-      if (!exited) run.to = e.to;
+
+      if (k + 1 < np) {
+        // LEAVING the window. `to` is assigned on every path out of this branch:
+        // a run that exited with to == -1 was a downstream endpoint no node
+        // explained, which happened whenever the last inside sample sat exactly
+        // on the frame and the crossing parameter degenerated.
+        const float t =
+            boundary_crossing_t(e.points_m[k], e.points_m[k + 1], world_size_m);
+        const int32_t nid =
+            add_crossing(e, k, k + 1, t >= 0.0f ? t : 0.0f, RiverNodeKind::Mouth);
+        push(g.nodes[nid].pos_m, g.nodes[nid].discharge_m3_s,
+             g.nodes[nid].width_m, g.nodes[nid].depth_m, g.nodes[nid].speed_m_s);
+        run.to = nid;
+      } else {
+        run.to = e.to;
+      }
+
       if (run.points_m.size() >= 2) kept.push_back(std::move(run));
       i = k + 1;
     }
   }
   g.edges = std::move(kept);
 
-  // A run that started mid-chain has no upstream node yet; give it one where it
-  // enters, so every reach is anchored at both ends.
+  // A run that started mid-chain with a degenerate crossing has no upstream node
+  // yet; give it one where it enters, so every reach is anchored at both ends.
   for (RiverEdge& e : g.edges) {
-    if (e.from >= 0) continue;
+    if (e.from >= 0 || e.points_m.empty()) continue;
     RiverNode n;
     n.pos_m = e.points_m.front();
     n.discharge_m3_s = e.discharge_m3_s.front();
@@ -272,6 +308,10 @@ void prune_river_graph_by_length(RiverGraph& g, float min_length_m) {
       const RiverEdge& e0 = g.edges[ei];
       if (e0.from < 0 || e0.from >= static_cast<int32_t>(nn)) continue;
       if (in_deg[e0.from] != 0) continue;  // not a headwater
+      // A through-lake connector has no geometry, so it contributes no length
+      // and must never START a branch measurement -- otherwise a lake's outflow
+      // chain measures 0 m and gets deleted.
+      if (g.edges[ei].points_m.size() < 2) continue;
       float len = 0.0f;
       std::vector<size_t> chain;
       int32_t cur = static_cast<int32_t>(ei);
@@ -346,6 +386,13 @@ void prune_river_graph_by_width(RiverGraph& g, float min_width_m) {
   std::vector<RiverEdge> kept;
   kept.reserve(g.edges.size());
   for (RiverEdge& e : g.edges) {
+    // Through-lake connectors carry no geometry and therefore no width. They are
+    // topology, not channel -- dropping them for having no samples severed
+    // river -> lake -> river and orphaned every lake's outflow reach.
+    if (e.points_m.size() < 2) {
+      kept.push_back(std::move(e));
+      continue;
+    }
     if (e.width_m.empty()) continue;
     float widest = 0.0f;
     for (float w : e.width_m) widest = std::max(widest, w);

@@ -4,6 +4,7 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@
 
 #include "mapgen/biomes.hpp"
 #include "mapgen/map_io.hpp"
+#include "mapgen/window_rivers.hpp"
 
 using namespace badlands::mapgen;
 
@@ -238,4 +240,125 @@ TEST_CASE("unknown manifest keys are ignored so the writer can add fields",
   CHECK(man->resolution == 4);
   CHECK(man->world_size_m == 32.0f);
   CHECK(man->source == "protogen tag=x");
+}
+
+// --- window_rivers graph surgery ------------------------------------------
+//
+// These cover clip/prune invariants that were silently violated: they produce a
+// plausible-looking graph, so nothing fails until a trunk river vanishes.
+
+TEST_CASE("clipping preserves geometry-less through-lake edges", "[window_rivers]") {
+  // extract_river_graph emits inlet -> outlet edges with NO points on purpose,
+  // so the network stays traversable river -> lake -> river. Dropping them for
+  // having < 2 points severed that link AND left the lake's outflow reach with
+  // in_deg == 0, so the length prune saw a headwater and could delete the trunk.
+  RiverGraph g;
+  g.nodes.resize(3);
+  g.nodes[0].kind = RiverNodeKind::LakeInlet;
+  g.nodes[1].kind = RiverNodeKind::LakeOutlet;
+  g.nodes[2].kind = RiverNodeKind::Mouth;
+  RiverEdge through;  // no geometry at all
+  through.from = 0;
+  through.to = 1;
+  RiverEdge below;    // the outflow reach, well inside the window
+  below.from = 1;
+  below.to = 2;
+  below.points_m = {{10.0f, 10.0f}, {40.0f, 40.0f}};
+  below.discharge_m3_s = {1.0f, 1.0f};
+  below.width_m = {2.0f, 2.0f};
+  below.depth_m = {0.5f, 0.5f};
+  below.speed_m_s = {1.0f, 1.0f};
+  g.edges = {through, below};
+
+  clip_river_graph_to_window(g, 100.0f);
+  CHECK(g.edges.size() == 2);
+  prune_river_graph_by_width(g, 0.5f);
+  CHECK(g.edges.size() == 2);
+  // With the connector intact the outflow reach is not a headwater, so a length
+  // prune cannot mistake it for a stub.
+  prune_river_graph_by_length(g, 1000.0f);
+  bool outflow_survives = false;
+  for (const RiverEdge& e : g.edges)
+    if (e.points_m.size() == 2) outflow_survives = true;
+  CHECK(outflow_survives);
+}
+
+TEST_CASE("every clipped reach is anchored at both ends", "[window_rivers]") {
+  // A run whose last inside sample sat exactly on the frame exited without ever
+  // assigning `to`, leaving a downstream endpoint no node explained.
+  RiverGraph g;
+  g.nodes.resize(2);
+  RiverEdge e;
+  e.from = 0;
+  e.to = 1;
+  // Crosses the +x frame exactly on a sample, then continues into the ghost.
+  e.points_m = {{50.0f, 50.0f}, {80.0f, 50.0f}, {100.0f, 50.0f}, {130.0f, 50.0f}};
+  e.discharge_m3_s = {1.0f, 1.0f, 1.0f, 1.0f};
+  e.width_m = {2.0f, 2.0f, 2.0f, 2.0f};
+  e.depth_m = {0.5f, 0.5f, 0.5f, 0.5f};
+  e.speed_m_s = {1.0f, 1.0f, 1.0f, 1.0f};
+  g.edges = {e};
+
+  clip_river_graph_to_window(g, 100.0f);
+  REQUIRE(!g.edges.empty());
+  for (const RiverEdge& r : g.edges) {
+    CHECK(r.from >= 0);
+    CHECK(r.to >= 0);
+    CHECK(r.to < static_cast<int32_t>(g.nodes.size()));
+    // and nothing survives beyond the frame
+    for (const glm::vec2& p : r.points_m) CHECK(p.x <= 100.0f);
+  }
+}
+
+TEST_CASE("a reach entering the window gets a frame node too", "[window_rivers]") {
+  // The exit crossing was minted but the entry was not, so a reach began at
+  // whichever resampled sample first landed inside -- the very failure clipping
+  // exists to prevent, mirrored upstream.
+  RiverGraph g;
+  g.nodes.resize(2);
+  RiverEdge e;
+  e.from = 0;
+  e.to = 1;
+  e.points_m = {{-30.0f, 50.0f}, {-10.0f, 50.0f}, {20.0f, 50.0f}, {60.0f, 50.0f}};
+  e.discharge_m3_s = {1.0f, 1.0f, 1.0f, 1.0f};
+  e.width_m = {2.0f, 2.0f, 2.0f, 2.0f};
+  e.depth_m = {0.5f, 0.5f, 0.5f, 0.5f};
+  e.speed_m_s = {1.0f, 1.0f, 1.0f, 1.0f};
+  g.edges = {e};
+
+  clip_river_graph_to_window(g, 100.0f);
+  REQUIRE(g.edges.size() == 1);
+  // The first point is ON the frame (x == 0), not at the first inside sample.
+  CHECK(g.edges[0].points_m.front().x == Catch::Approx(0.0f).margin(1e-3));
+  CHECK(g.edges[0].from >= 0);
+}
+
+TEST_CASE("length pruning never severs the network", "[window_rivers]") {
+  // Only headwater chains may be dropped; an interior reach is a real river,
+  // just a short one, and removing it would strand everything above.
+  RiverGraph g;
+  g.nodes.resize(4);
+  const auto mk = [](int32_t f, int32_t t, float x0, float x1) {
+    RiverEdge e;
+    e.from = f;
+    e.to = t;
+    e.points_m = {{x0, 50.0f}, {x1, 50.0f}};
+    e.discharge_m3_s = {1.0f, 1.0f};
+    e.width_m = {2.0f, 2.0f};
+    e.depth_m = {0.5f, 0.5f};
+    e.speed_m_s = {1.0f, 1.0f};
+    return e;
+  };
+  g.edges = {mk(0, 1, 10.0f, 60.0f),   // long headwater
+             mk(2, 1, 30.0f, 32.0f),   // 2 m stub headwater -> should go
+             mk(1, 3, 60.0f, 61.0f)};  // 1 m INTERIOR reach -> must stay
+  prune_river_graph_by_length(g, 32.0f);
+  bool interior = false, stub = false;
+  for (const RiverEdge& e : g.edges) {
+    const float len = std::abs(e.points_m.back().x - e.points_m.front().x);
+    if (len == Catch::Approx(1.0f)) interior = true;
+    if (len == Catch::Approx(2.0f)) stub = true;
+  }
+  CHECK(interior);
+  CHECK_FALSE(stub);
 }

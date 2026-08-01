@@ -735,18 +735,29 @@ std::vector<Inflow> FindInflows(const Field& h, const Field& q, int cx, int cy,
 // Entry points in OUTPUT texels, so the consumer never needs the source grid.
 bool WriteInflows(const std::string& dir, const std::vector<Inflow>& in,
                   int win_cells, int out_res, float runoff_m_per_yr) {
+  if (win_cells <= 0 || out_res <= 0) return false;
   const std::string path = dir + "/inflows.txt";
   FILE* fp = std::fopen(path.c_str(), "w");
   if (!fp) {
     std::fprintf(stderr, "window: cannot write %s\n", path.c_str());
     return false;
   }
-  const int f = out_res / win_cells;
+  // Source cell -> output texel as a RATIO, not an integer factor. `out_res /
+  // win_cells` truncates, and nothing forces it to be whole: the geometry check
+  // only requires the window to be a whole number of source CELLS. At
+  // --out-res 800 --out-texel 0.6 the factor is 26.67, and truncating to 26
+  // displaced the farthest inflow by ~18 texels -- which is where the upstream
+  // catchment gets seeded, so the trunk river would enter in the wrong place
+  // with no diagnostic.
+  const double f = double(out_res) / double(win_cells);
   std::fprintf(fp, "# river inflow across the window boundary\n");
   std::fprintf(fp, "# runoff_m_per_yr %.6f\n", double(runoff_m_per_yr));
   std::fprintf(fp, "# texel_x texel_y discharge_m3_s\n");
+  const int hi = out_res - 1;
   for (const Inflow& i : in)
-    std::fprintf(fp, "%d %d %.9g\n", i.x * f + f / 2, i.y * f + f / 2,
+    std::fprintf(fp, "%d %d %.9g\n",
+                 std::clamp(int(std::lround((i.x + 0.5) * f - 0.5)), 0, hi),
+                 std::clamp(int(std::lround((i.y + 0.5) * f - 0.5)), 0, hi),
                  double(i.q_m3_s));
   std::fclose(fp);
   return true;
@@ -1252,8 +1263,12 @@ int main(int argc, char** argv) {
   }();
   std::printf("\n  %zu of %d windows pass all four; %zu distinct locations\n",
               all.size(), total_windows, distinct.size());
-  if (distinct.empty()) {
-    std::fprintf(stderr, "window: nothing passes -- relax a gate\n");
+  // Only fatal when we are RANKING. A pinned origin is emitted whether or not
+  // anything qualifies -- that is the whole contract of pinning, and bailing
+  // here contradicted it the moment a gate was tightened.
+  if (distinct.empty() && p.origin_x < 0 && p.origin_y < 0) {
+    std::fprintf(stderr, "window: nothing passes -- relax a gate, or pin one "
+                         "with --origin-cell X,Y\n");
     return 1;
   }
   PrintCandidates(distinct, p, p.report);

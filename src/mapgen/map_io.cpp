@@ -93,6 +93,10 @@ void derive_water(const Field2D<float>& heightmap, const Field2D<float>& level,
   lake_id = Field2D<int32_t>(w, h, -1);
   lakes.clear();
   if (w <= 0 || h <= 0) return;
+  // `level` is indexed over heightmap's extent below. load_map builds both n*n,
+  // but this is exported for other callers, and every other size assumption in
+  // this file is checked rather than assumed.
+  if (level.width != w || level.height != h) return;
 
   for (size_t i = 0; i < water_depth.data.size(); ++i) {
     const float d = level.data[i] - heightmap.data[i];

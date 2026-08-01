@@ -1149,12 +1149,21 @@ add_test(NAME badlands_biome_splat_tests COMMAND badlands_biome_splat_tests WORK
 add_executable(badlands_map_io_tests
     src/mapgen/map_io_tests.cpp
     src/mapgen/map_io.cpp
+    src/mapgen/window_rivers.cpp
+    src/mapgen/hydrology.cpp
+    src/mapgen/river_graph.cpp
+    src/mapgen/erosion.cpp
+    src/mapgen/smooth.cpp
+    src/mapgen/canal_carve.cpp
+    src/mapgen/generator.cpp
+    src/mapgen/detail_filter.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_map_io_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
 )
 add_test(NAME badlands_map_io_tests COMMAND badlands_map_io_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
