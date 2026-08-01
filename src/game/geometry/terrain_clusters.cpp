@@ -211,6 +211,315 @@ ClusterGeom BuildLeafGeom(const MapData& map, int qx0, int qz0, int qx1,
   return g;
 }
 
+// --- local subdivision (TerrainDetailField) ---------------------------------
+//
+// EXACT ARITHMETIC IS LOAD-BEARING here: WeldChildren and LockVertex compare
+// positions with ==, and the same physical vertex is emitted by up to four
+// quads at DIFFERENT subdivision factors. Every world coordinate below is one
+// IEEE multiplication (integer fine index) * (dyadic step), both factors exact,
+// so each expression is the correctly-rounded value of the same real number --
+// (q*8 + 2t) * (sp/8) and (q*4 + t) * (sp/4) land on the identical float. Any
+// other factorization (q*sp + t*step) rounds twice and breaks the weld.
+
+// Validated, clamped view of a TerrainDetailField. `kmax` derives from the
+// CLUSTER BUDGET (2*4^k <= budget), not from any use case.
+struct DetailView {
+  const TerrainDetailField* field = nullptr;  // null = no detail anywhere
+  int kmax = 0;
+
+  int QuadExp(int qx, int qz) const {
+    if (!field) return 0;
+    if (qx < 0 || qz < 0 || qx >= field->width || qz >= field->height) return 0;
+    const int k = field->level[static_cast<size_t>(qz) * field->width + qx];
+    return std::min(k, kmax);
+  }
+};
+
+DetailView MakeDetailView(const TerrainDetailField* detail, int W, int H,
+                          int budget) {
+  DetailView v;
+  if (!detail || !detail->level) return v;
+  if (detail->width != W || detail->height != H) {
+    spdlog::warn(
+        "TerrainDetailField ignored: exponent grid {}x{} does not match the "
+        "map quad grid {}x{}",
+        detail->width, detail->height, W, H);
+    return v;
+  }
+  if (!detail->height_at) {
+    spdlog::warn("TerrainDetailField ignored: no height_at sampler");
+    return v;
+  }
+  v.field = detail;
+  while (2 * (1 << (2 * (v.kmax + 1))) <= budget) ++v.kmax;
+  return v;
+}
+
+// Central-difference normal of the DETAIL surface. Same shape as NormalAt, but
+// against height_at and at spacing `d` -- the coarse NormalAt would shade a
+// carved channel flat. `d` must be SEAM-CANONICAL: every emitter of the same
+// vertex must pass the same d (interior verts use the quad's own step, on-edge
+// verts the shared edge's step), or the weld breaks on the normal.
+glm::vec3 DetailNormalAt(const TerrainDetailField& f, float wx, float wz,
+                         float d) {
+  const float hl = f.height_at(wx - d, wz);
+  const float hr = f.height_at(wx + d, wz);
+  const float hd = f.height_at(wx, wz - d);
+  const float hu = f.height_at(wx, wz + d);
+  return glm::normalize(glm::vec3(-(hr - hl) / (2.0f * d), 1.0f,
+                                  -(hu - hd) / (2.0f * d)));
+}
+
+// A base-lattice node's record under detail. The rule is decided by the FOUR
+// quads around the node, which every emitter can look up identically:
+//
+//   - any of them plain (or off-map)  -> the COARSE record (map height,
+//     NormalAt, node biome), bitwise what BuildLeafGeom emits -- because a
+//     plain quad WILL emit this node and the two copies must weld. The
+//     producer's compact-support contract makes this non-lossy: a node
+//     touching an unrefined quad is outside the detail's support.
+//   - all four refined -> the DETAIL record, or the node would pin an uncarved
+//     post into the middle of every channel. The differencing step is
+//     canonical over the same four exponents (the minimum), so all four
+//     emitters agree bitwise.
+WorkVertex LatticeNodeVertex(const MapData& map, const DetailView& dv, int i,
+                             int j) {
+  const float sp = map.spacing_m();
+  const float wx = static_cast<float>(i) * sp;
+  const float wz = static_cast<float>(j) * sp;
+  WorkVertex v;
+  v.biome = static_cast<uint8_t>(map.WeightsAtNode(i, j).Dominant());
+  const int kmin =
+      std::min(std::min(dv.QuadExp(i - 1, j - 1), dv.QuadExp(i, j - 1)),
+               std::min(dv.QuadExp(i - 1, j), dv.QuadExp(i, j)));
+  if (kmin == 0) {
+    v.pos = glm::vec3(wx, map.height(i, j), wz);
+    v.normal = NormalAt(map, wx, wz);
+    return v;
+  }
+  const float d = sp / static_cast<float>(1 << kmin);
+  v.pos = glm::vec3(wx, dv.field->height_at(wx, wz), wz);
+  v.normal = DetailNormalAt(*dv.field, wx, wz, d);
+  return v;
+}
+
+// One vertex of a refined quad, by GLOBAL fine index (gx, gz) at factor f.
+// Base-lattice nodes (both indices multiples of f) route through
+// LatticeNodeVertex; everything else samples the detail surface, with
+// `normal_d` the seam-canonical differencing step (the quad's own step for
+// interior vertices, the shared edge's step for on-edge vertices).
+WorkVertex DetailVertex(const MapData& map, const DetailView& dv, int f, int gx,
+                        int gz, float normal_d) {
+  if (gx % f == 0 && gz % f == 0)
+    return LatticeNodeVertex(map, dv, gx / f, gz / f);
+  const TerrainDetailField& field = *dv.field;
+  const float sp = map.spacing_m();
+  const float step = sp / static_cast<float>(f);
+  const float wx = static_cast<float>(gx) * step;
+  const float wz = static_cast<float>(gz) * step;
+  WorkVertex v;
+  v.pos = glm::vec3(wx, field.height_at(wx, wz), wz);
+  v.normal = DetailNormalAt(field, wx, wz, normal_d);
+  v.biome = static_cast<uint8_t>(map.BiomesAt(wx, wz).Dominant());
+  return v;
+}
+
+// Appends one quad's triangles to `g`, welding vertices through `weld` (keyed
+// by exact position). Plain quads (k == 0) emit exactly BuildLeafGeom's two
+// triangles -- same records, same diagonal -- so a hot tile's plain remainder
+// is indistinguishable from a cold tile's geometry.
+//
+// A refined quad is (a) its full-resolution interior grid, inset one fine step
+// from the quad boundary, plus (b) ONE ring strip joining two closed loops:
+// the inset grid's perimeter (always at the quad's own resolution) and the
+// quad boundary (each edge at ITS OWN resolution, 2^min(ka, kb) against that
+// edge's neighbour). The two loops are walked in lockstep by normalized
+// perimeter arc length, emitting one triangle per step -- equal-resolution
+// edges, fanned edges, and the corners where they meet all fall out of the
+// same walk, so there is no corner case to enumerate (or get wrong).
+void AppendQuadGeom(ClusterGeom& g,
+                    std::unordered_map<PosKey, uint32_t, PosKeyHash>& weld,
+                    const MapData& map, const DetailView& dv, int qx, int qz) {
+  const float sp = map.spacing_m();
+  auto add = [&](const WorkVertex& v) -> uint32_t {
+    const PosKey key = KeyOf(v.pos);
+    auto it = weld.find(key);
+    if (it != weld.end()) return it->second;
+    const uint32_t idx = static_cast<uint32_t>(g.verts.size());
+    g.verts.push_back(v);
+    weld.emplace(key, idx);
+    return idx;
+  };
+  auto tri = [&](uint32_t a, uint32_t b, uint32_t c) {
+    g.tris.insert(g.tris.end(), {a, b, c});
+  };
+
+  const int k = dv.QuadExp(qx, qz);
+  if (k == 0) {
+    // BuildLeafGeom's quad, record for record: a plain quad forces kmin == 0
+    // at all four of its nodes, so LatticeNodeVertex yields exactly the coarse
+    // records. Same diagonal n00 -> n11, CCW seen from +Y.
+    auto corner = [&](int i, int j) {
+      return add(LatticeNodeVertex(map, dv, i, j));
+    };
+    const uint32_t n00 = corner(qx, qz), n10 = corner(qx + 1, qz);
+    const uint32_t n01 = corner(qx, qz + 1), n11 = corner(qx + 1, qz + 1);
+    tri(n00, n11, n10);
+    tri(n00, n01, n11);
+    return;
+  }
+
+  const int f = 1 << k;
+  const float own_d = sp / static_cast<float>(f);
+
+  // Interior grid: vertices (1..f-1)^2 in quad-local fine coords, faces over
+  // the (f-2)^2 inner cells. Same diagonal and winding as the coarse quad.
+  auto interior = [&](int li, int lj) {
+    return add(DetailVertex(map, dv, f, qx * f + li, qz * f + lj, own_d));
+  };
+  for (int lj = 1; lj + 1 <= f - 1; ++lj) {
+    for (int li = 1; li + 1 <= f - 1; ++li) {
+      const uint32_t n00 = interior(li, lj), n10 = interior(li + 1, lj);
+      const uint32_t n01 = interior(li, lj + 1), n11 = interior(li + 1, lj + 1);
+      tri(n00, n11, n10);
+      tri(n00, n01, n11);
+    }
+  }
+
+  // The two ring loops, both traversed (0,0) -> (0,f) -> (f,f) -> (f,0) in
+  // quad-local fine coords -- the orientation that makes the emitted strip
+  // face +Y (verified by the winding test). Each loop vertex carries its
+  // normalized perimeter position for the lockstep walk.
+  struct LoopVert {
+    uint32_t idx;
+    float param;
+  };
+
+  // Outer loop: the quad boundary. Edge order west/north/east/south to match
+  // the traversal above; each edge at 2^min(k, neighbour k). On-edge non-corner
+  // vertices difference at the EDGE's step (seam-canonical: the neighbour quad
+  // computes the same fe from the same pair of exponents).
+  std::vector<LoopVert> outer;
+  {
+    struct Edge {
+      int nqx, nqz;        // the neighbour that shares it
+      int ox, oz, dx, dz;  // start corner and direction, quad-local units
+    };
+    const Edge edges[4] = {
+        {qx - 1, qz, 0, 0, 0, 1},  // west:  (0,0) -> (0,f)
+        {qx, qz + 1, 0, 1, 1, 0},  // north: (0,f) -> (f,f)
+        {qx + 1, qz, 1, 1, 0, -1}, // east:  (f,f) -> (f,0)
+        {qx, qz - 1, 1, 0, -1, 0}, // south: (f,0) -> (0,0)
+    };
+    for (int e = 0; e < 4; ++e) {
+      const int fe = 1 << std::min(k, dv.QuadExp(edges[e].nqx, edges[e].nqz));
+      const int stride = f / fe;  // fine steps between edge vertices
+      const float edge_d = sp / static_cast<float>(fe);
+      for (int t = 0; t < f; t += stride) {
+        const int li = edges[e].ox * f + edges[e].dx * t;
+        const int lj = edges[e].oz * f + edges[e].dz * t;
+        const uint32_t idx = add(DetailVertex(map, dv, f, qx * f + li,
+                                              qz * f + lj, edge_d));
+        outer.push_back(
+            {idx, (static_cast<float>(e) + static_cast<float>(t) /
+                                               static_cast<float>(f)) *
+                      0.25f});
+      }
+    }
+  }
+
+  // Inner loop: the inset grid's perimeter, same rotational sense. Degenerates
+  // to a single vertex at f == 2, which turns the walk into a plain fan.
+  std::vector<LoopVert> inner;
+  if (f == 2) {
+    inner.push_back({interior(1, 1), 0.0f});
+  } else {
+    const int m = f - 2;  // segments per inner edge
+    const int corners[4][4] = {
+        {1, 1, 0, 1},          // west:  (1,1) -> (1,f-1)
+        {1, f - 1, 1, 0},      // north
+        {f - 1, f - 1, 0, -1}, // east
+        {f - 1, 1, -1, 0},     // south
+    };
+    for (int e = 0; e < 4; ++e) {
+      for (int t = 0; t < m; ++t) {
+        const int li = corners[e][0] + corners[e][2] * t;
+        const int lj = corners[e][1] + corners[e][3] * t;
+        inner.push_back(
+            {interior(li, lj), (static_cast<float>(e) + static_cast<float>(t) /
+                                                            static_cast<float>(m)) *
+                                   0.25f});
+      }
+    }
+  }
+
+  // Lockstep walk: advance whichever loop's NEXT vertex sits earlier along the
+  // perimeter (ties to the outer), one triangle per advance. No + Ni triangles;
+  // with every neighbour at the same exponent that is exactly the 2*f^2 - the
+  // interior faces of a full grid, so nothing is lost to the ring.
+  const size_t no = outer.size(), ni = inner.size();
+  size_t o = 0, i = (ni == 1) ? 1 : 0;
+  while (o < no || i < ni) {
+    const float next_o = (o + 1 < no) ? outer[o + 1].param : 1.0f;
+    const float next_i = (i + 1 < ni) ? inner[i + 1].param : 1.0f;
+    const bool adv_outer = (i >= ni) || (o < no && next_o <= next_i);
+    if (adv_outer) {
+      tri(outer[o].idx, outer[(o + 1) % no].idx, inner[i % ni].idx);
+      ++o;
+    } else {
+      tri(outer[o % no].idx, inner[(i + 1) % ni].idx, inner[i].idx);
+      ++i;
+    }
+  }
+}
+
+// Triangle count of one quad under `dv`, without building it -- what the leaf
+// packer cuts clusters by.
+int QuadTriCount(const DetailView& dv, int qx, int qz) {
+  const int k = dv.QuadExp(qx, qz);
+  if (k == 0) return 2;
+  const int f = 1 << k;
+  int ring = (f == 2) ? 0 : 4 * (f - 2);  // inner loop
+  const int nqs[4][2] = {{qx - 1, qz}, {qx, qz + 1}, {qx + 1, qz}, {qx, qz - 1}};
+  for (const auto& n : nqs) ring += 1 << std::min(k, dv.QuadExp(n[0], n[1]));
+  const int inner_cells = std::max(0, f - 2);  // per axis
+  return 2 * inner_cells * inner_cells + ring;
+}
+
+// The leaf clusters of a tile CONTAINING refined quads: quads are packed
+// row-major into clusters cut at the triangle budget. A k=3 quad is exactly one
+// budget's worth, so the per-quad-cluster case degenerates out of the general
+// rule rather than being the rule. Vertices are welded within a cluster and
+// duplicated (bitwise-identically) across clusters, matching the DAG-wide
+// convention.
+std::vector<ClusterGeom> BuildDetailedTileGeoms(const MapData& map,
+                                                const DetailView& dv, int qx0,
+                                                int qz0, int qx1, int qz1,
+                                                int budget) {
+  std::vector<ClusterGeom> out;
+  ClusterGeom cur;
+  std::unordered_map<PosKey, uint32_t, PosKeyHash> weld;
+  auto flush = [&] {
+    if (!cur.tris.empty()) {
+      out.push_back(std::move(cur));
+      cur = ClusterGeom{};
+      weld.clear();
+    }
+  };
+  for (int qz = qz0; qz < qz1; ++qz) {
+    for (int qx = qx0; qx < qx1; ++qx) {
+      const int need = QuadTriCount(dv, qx, qz);
+      if (!cur.tris.empty() &&
+          static_cast<int>(cur.tris.size()) / 3 + need > budget) {
+        flush();
+      }
+      AppendQuadGeom(cur, weld, map, dv, qx, qz);
+    }
+  }
+  flush();
+  return out;
+}
+
 // Weld the children's geometry by exact float position. Attributes come from the
 // first occurrence (all copies of a shared vertex are bitwise-identical).
 ClusterGeom WeldChildren(const std::vector<ClusterGeom>& cluster_geom,
@@ -461,7 +770,8 @@ void SelectClusters(const TerrainClusterDag& dag, glm::vec3 cam_pos,
 }
 
 TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
-                                         const TerrainClusterParams& params) {
+                                         const TerrainClusterParams& params,
+                                         const TerrainDetailField* detail) {
   const auto t_start = std::chrono::steady_clock::now();
   const float sp = map.spacing_m();
   const int Q = std::max(1, params.tile_quads);
@@ -480,6 +790,8 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
   std::vector<ClusterGeom> cluster_geom;
 
   // --- Level 0: grid-tile leaves -------------------------------------------
+  const int budget = kTrisPerQuad * Q * Q;
+  const DetailView dv = MakeDetailView(detail, W, H, budget);
   const int tiles_x = (W + Q - 1) / Q;
   const int tiles_z = (H + Q - 1) / Q;
   RegionGrid grid;
@@ -490,15 +802,37 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
     for (int tx = 0; tx < tiles_x; ++tx) {
       const int qx0 = tx * Q, qx1 = std::min((tx + 1) * Q, W);
       const int qz0 = tz * Q, qz1 = std::min((tz + 1) * Q, H);
-      ClusterGeom leaf = BuildLeafGeom(map, qx0, qz0, qx1, qz1);
-      const uint32_t cidx =
-          EmitCluster(dag, cluster_geom, std::move(leaf), 0, kNoGroup);
       Region& r = grid.at(tx, tz);
       r.x0 = qx0 * sp;
       r.z0 = qz0 * sp;
       r.x1 = qx1 * sp;
       r.z1 = qz1 * sp;
-      r.clusters = {cidx};
+      // A tile with NO refined quads takes exactly the pre-detail path, so a
+      // null (or all-zero) detail field reproduces today's build bit for bit
+      // -- and so does every cold tile of a detailed build, which is what
+      // keeps the refinement provably local.
+      bool hot = false;
+      if (dv.field) {
+        for (int qz = qz0; qz < qz1 && !hot; ++qz)
+          for (int qx = qx0; qx < qx1 && !hot; ++qx)
+            hot = dv.QuadExp(qx, qz) > 0;
+      }
+      if (!hot) {
+        ClusterGeom leaf = BuildLeafGeom(map, qx0, qz0, qx1, qz1);
+        const uint32_t cidx =
+            EmitCluster(dag, cluster_geom, std::move(leaf), 0, kNoGroup);
+        r.clusters = {cidx};
+        continue;
+      }
+      // A hot tile emits several budget-packed leaf clusters; the region
+      // holds them all, and the reduction rounds bring it back to one
+      // cluster before the main merge loop consumes it.
+      std::vector<ClusterGeom> geoms =
+          BuildDetailedTileGeoms(map, dv, qx0, qz0, qx1, qz1, budget);
+      r.clusters.clear();
+      for (ClusterGeom& gm : geoms)
+        r.clusters.push_back(
+            EmitCluster(dag, cluster_geom, std::move(gm), 0, kNoGroup));
     }
   }
 

@@ -576,3 +576,322 @@ TEST_CASE("terrain cluster DAG: non-default constants hold invariants", "[terrai
   CheckLeafCoverage(dag, w, h);
   CheckAllInvariants(dag);
 }
+
+// --- local subdivision (TerrainDetailField) ----------------------------------
+//
+// The detail feature's contract, pinned from four directions:
+//   1. absence is EXACT: null / all-zero fields reproduce today's DAG bitwise,
+//      and cold tiles of a detailed build stay byte-identical per tile;
+//   2. presence is WATERTIGHT: the leaf set (and every selected cut) is
+//      edge-manifold -- a T-junction, a dropped fan triangle, or a 1-ulp weld
+//      miss all surface as an interior boundary edge;
+//   3. the seam rule is factor-generic: k in {1,2,3}, mixed exponents, islands
+//      and single quads all hold the same invariants (a bug that shows at one
+//      factor only is a genericity bug by definition);
+//   4. budgets hold: no leaf cluster exceeds the triangle budget.
+
+namespace {
+
+using badlands::TerrainDetailField;
+
+// A compliant producer: the base bilinear surface minus a compact-support
+// cosine dent. `map` must outlive the fixture (the sampler captures it).
+struct DetailFixture {
+  std::vector<uint8_t> exp;
+  TerrainDetailField field;
+};
+
+DetailFixture MakeDetail(const MapData& map, int w, int h,
+                         const std::function<int(int, int)>& exp_of,
+                         float dent_cx, float dent_cz, float dent_r,
+                         float dent_depth) {
+  DetailFixture fx;
+  fx.exp.resize(static_cast<size_t>(w) * h);
+  for (int qz = 0; qz < h; ++qz)
+    for (int qx = 0; qx < w; ++qx)
+      fx.exp[static_cast<size_t>(qz) * w + qx] =
+          static_cast<uint8_t>(exp_of(qx, qz));
+  fx.field.level = fx.exp.data();
+  fx.field.width = w;
+  fx.field.height = h;
+  fx.field.height_at = [&map, dent_cx, dent_cz, dent_r,
+                        dent_depth](float wx, float wz) {
+    const float base = map.HeightAt(wx, wz);
+    const float dx = wx - dent_cx, dz = wz - dent_cz;
+    const float d = std::sqrt(dx * dx + dz * dz);
+    if (d >= dent_r) return base;
+    return base -
+           dent_depth * (0.5f + 0.5f * std::cos(3.14159265f * d / dent_r));
+  };
+  return fx;
+}
+
+std::vector<uint32_t> LeafClusters(const TerrainClusterDag& dag) {
+  std::vector<uint32_t> out;
+  for (uint32_t i = 0; i < dag.clusters.size(); ++i)
+    if (dag.clusters[i].own_group == kNoGroup) out.push_back(i);
+  return out;
+}
+
+// Edge-manifold check over a set of clusters: every triangle edge is shared by
+// EXACTLY two triangles, or lies on the map perimeter. Stated geometrically
+// (bit-exact endpoint positions), so it is depth- and level-agnostic by
+// construction, and strictly stronger than comparing seam vertex sets.
+void CheckEdgeManifold(const TerrainClusterDag& dag,
+                       const std::vector<uint32_t>& clusters, float map_w,
+                       float map_h) {
+  using EdgeKey = std::array<uint32_t, 6>;  // two position bit-triples, sorted
+  std::map<EdgeKey, int> count;
+  for (uint32_t cidx : clusters) {
+    const auto& c = dag.clusters[cidx];
+    for (uint32_t t = 0; t + 2 < c.index_count; t += 3) {
+      const uint32_t idx[3] = {dag.indices[c.first_index + t],
+                               dag.indices[c.first_index + t + 1],
+                               dag.indices[c.first_index + t + 2]};
+      for (int e = 0; e < 3; ++e) {
+        const auto pa = PosBits(Record(dag, idx[e]));
+        const auto pb = PosBits(Record(dag, idx[(e + 1) % 3]));
+        REQUIRE(pa != pb);  // no degenerate edges
+        EdgeKey k;
+        const bool swap = pb < pa;
+        const auto& lo = swap ? pb : pa;
+        const auto& hi = swap ? pa : pb;
+        std::copy(lo.begin(), lo.end(), k.begin());
+        std::copy(hi.begin(), hi.end(), k.begin() + 3);
+        ++count[k];
+      }
+    }
+  }
+  for (const auto& [k, n] : count) {
+    std::array<uint32_t, 8> ra{}, rb{};
+    std::copy(k.begin(), k.begin() + 3, ra.begin());
+    std::copy(k.begin() + 3, k.end(), rb.begin());
+    const glm::vec3 a = PosOf(ra), b = PosOf(rb);
+    CAPTURE(a.x, a.z, b.x, b.z, n);
+    REQUIRE(n <= 2);
+    if (n == 1) {
+      // A boundary edge must lie ON one perimeter line of the map -- both
+      // endpoints on the same border. Anything else is a crack.
+      const bool on_border =
+          (a.x == 0.0f && b.x == 0.0f) || (a.x == map_w && b.x == map_w) ||
+          (a.z == 0.0f && b.z == 0.0f) || (a.z == map_h && b.z == map_h);
+      REQUIRE(on_border);
+    }
+  }
+}
+
+// Every triangle faces up (+Y geometric normal). Also rejects zero-area
+// triangles, which a broken ring walk would emit.
+void CheckFacesUp(const TerrainClusterDag& dag,
+                  const std::vector<uint32_t>& clusters) {
+  for (uint32_t cidx : clusters) {
+    const auto& c = dag.clusters[cidx];
+    for (uint32_t t = 0; t + 2 < c.index_count; t += 3) {
+      const glm::vec3 p0 = PosOf(Record(dag, dag.indices[c.first_index + t]));
+      const glm::vec3 p1 =
+          PosOf(Record(dag, dag.indices[c.first_index + t + 1]));
+      const glm::vec3 p2 =
+          PosOf(Record(dag, dag.indices[c.first_index + t + 2]));
+      CAPTURE(p0, p1, p2);
+      REQUIRE(glm::cross(p1 - p0, p2 - p0).y > 0.0f);
+    }
+  }
+}
+
+// For every tile whose quads are all plain, the detailed build's single leaf
+// cluster must match the null build's byte for byte (records AND order). This
+// is "the refinement is provably local", stated as a test. Leaves are assigned
+// to tiles by their AABB minimum, which always lies inside the owning tile.
+void CheckColdTilesIdentical(const TerrainClusterDag& da,
+                             const TerrainClusterDag& db,
+                             const std::vector<uint8_t>& exp, int w, int h,
+                             int tile_quads) {
+  const int tiles_x = (w + tile_quads - 1) / tile_quads;
+  const int tiles_z = (h + tile_quads - 1) / tile_quads;
+  auto leaves_by_tile = [&](const TerrainClusterDag& dag) {
+    std::map<std::pair<int, int>, std::vector<uint32_t>> out;
+    for (uint32_t i : LeafClusters(dag)) {
+      const auto& c = dag.clusters[i];
+      const int tx = std::min(tiles_x - 1,
+                              static_cast<int>(c.bounds.min.x) / tile_quads);
+      const int tz = std::min(tiles_z - 1,
+                              static_cast<int>(c.bounds.min.z) / tile_quads);
+      out[{tx, tz}].push_back(i);
+    }
+    return out;
+  };
+  const auto la = leaves_by_tile(da);
+  const auto lb = leaves_by_tile(db);
+  for (int tz = 0; tz < tiles_z; ++tz) {
+    for (int tx = 0; tx < tiles_x; ++tx) {
+      bool hot = false;
+      for (int qz = tz * tile_quads; qz < std::min((tz + 1) * tile_quads, h);
+           ++qz)
+        for (int qx = tx * tile_quads; qx < std::min((tx + 1) * tile_quads, w);
+             ++qx)
+          hot |= exp[static_cast<size_t>(qz) * w + qx] != 0;
+      if (hot) continue;
+      CAPTURE(tx, tz);
+      const auto& ca_list = la.at({tx, tz});
+      const auto& cb_list = lb.at({tx, tz});
+      REQUIRE(ca_list.size() == 1);
+      REQUIRE(cb_list.size() == 1);
+      const auto& ca = da.clusters[ca_list[0]];
+      const auto& cb = db.clusters[cb_list[0]];
+      REQUIRE(ca.vertex_count == cb.vertex_count);
+      REQUIRE(ca.index_count == cb.index_count);
+      REQUIRE(std::memcmp(
+                  da.vertices.data() + ca.first_vertex * 8,
+                  db.vertices.data() + cb.first_vertex * 8,
+                  static_cast<size_t>(ca.vertex_count) * 8 * sizeof(float)) ==
+              0);
+      for (uint32_t j = 0; j < ca.index_count; ++j)
+        REQUIRE(da.indices[ca.first_index + j] - ca.first_vertex ==
+                db.indices[cb.first_index + j] - cb.first_vertex);
+    }
+  }
+}
+
+}  // namespace
+
+TEST_CASE("terrain detail: absent detail reproduces today's build bitwise",
+          "[terrain_clusters]") {
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  const auto base = BuildTerrainClusterDag(map);
+  SECTION("null field") {
+    RequireDagsBitIdentical(base, BuildTerrainClusterDag(map, {}, nullptr));
+  }
+  SECTION("all-zero exponents") {
+    const DetailFixture fx = MakeDetail(
+        map, w, h, [](int, int) { return 0; }, 16.0f, 16.0f, 6.0f, 0.3f);
+    RequireDagsBitIdentical(base, BuildTerrainClusterDag(map, {}, &fx.field));
+  }
+  SECTION("mismatched grid is ignored, not half-applied") {
+    DetailFixture fx = MakeDetail(
+        map, w, h, [](int, int) { return 3; }, 16.0f, 16.0f, 6.0f, 0.3f);
+    fx.field.width = w - 1;  // wrong on purpose
+    RequireDagsBitIdentical(base, BuildTerrainClusterDag(map, {}, &fx.field));
+  }
+}
+
+TEST_CASE("terrain detail: refined leaves are watertight at every factor",
+          "[terrain_clusters]") {
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  const auto base = BuildTerrainClusterDag(map);
+  for (int k : {1, 2, 3}) {
+    DYNAMIC_SECTION("k=" << k) {
+      // A diagonal band of refined quads: crosses tile boundaries, touches
+      // plain quads on both flanks, and is wholly interior to the map.
+      const DetailFixture fx = MakeDetail(
+          map, w, h,
+          [&](int qx, int qz) {
+            return (std::abs(qx - qz) <= 1 && qx > 2 && qx < 29) ? k : 0;
+          },
+          16.0f, 16.0f, 8.0f, 0.3f);
+      const auto dag = BuildTerrainClusterDag(map, {}, &fx.field);
+
+      const std::vector<uint32_t> leaves = LeafClusters(dag);
+      CheckEdgeManifold(dag, leaves, static_cast<float>(w),
+                        static_cast<float>(h));
+      CheckFacesUp(dag, leaves);
+      for (uint32_t i : leaves)
+        REQUIRE(dag.clusters[i].index_count / 3 <=
+                static_cast<uint32_t>(badlands::kClusterTriBudget));
+      CheckLeafCoverage(dag, w, h);
+      CheckColdTilesIdentical(dag, base, fx.exp, w, h,
+                              badlands::kTileQuads);
+      CheckAllInvariants(dag);
+    }
+  }
+}
+
+TEST_CASE("terrain detail: unequal exponents meet at the coarser resolution",
+          "[terrain_clusters]") {
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  // k=3 against k=2 side by side within one tile: the shared edge must carry
+  // exactly the coarser side's vertices (fe = 4 -> 3 interior positions), with
+  // the finer side fanning down to them.
+  const DetailFixture fx = MakeDetail(
+      map, w, h,
+      [](int qx, int qz) {
+        if (qz != 10) return 0;
+        if (qx == 10) return 3;
+        if (qx == 11) return 2;
+        return 0;
+      },
+      10.5f, 10.5f, 2.0f, 0.2f);
+  const auto dag = BuildTerrainClusterDag(map, {}, &fx.field);
+  const std::vector<uint32_t> leaves = LeafClusters(dag);
+  CheckEdgeManifold(dag, leaves, static_cast<float>(w), static_cast<float>(h));
+  CheckFacesUp(dag, leaves);
+
+  // Count distinct vertex positions on the open shared edge x == 11, z in
+  // (10, 11): exactly the coarser factor's 3 interior vertices.
+  std::set<uint32_t> z_bits;
+  for (uint32_t cidx : leaves) {
+    const auto& c = dag.clusters[cidx];
+    for (uint32_t v = 0; v < c.vertex_count; ++v) {
+      const glm::vec3 p = PosOf(Record(dag, c.first_vertex + v));
+      if (p.x == 11.0f && p.z > 10.0f && p.z < 11.0f) {
+        uint32_t zb;
+        std::memcpy(&zb, &p.z, 4);
+        z_bits.insert(zb);
+      }
+    }
+  }
+  REQUIRE(z_bits.size() == 3);
+}
+
+TEST_CASE("terrain detail: islands and single quads hold the invariants",
+          "[terrain_clusters]") {
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  const auto base = BuildTerrainClusterDag(map);
+  const DetailFixture fx = MakeDetail(
+      map, w, h,
+      [](int qx, int qz) {
+        if (qx >= 3 && qx <= 4 && qz >= 3 && qz <= 4) return 2;    // island A
+        if (qx >= 20 && qx <= 21 && qz >= 20 && qz <= 21) return 3;  // island B
+        if (qx == 28 && qz == 5) return 1;  // a single isolated quad
+        return 0;
+      },
+      3.5f, 3.5f, 1.5f, 0.2f);
+  const auto dag = BuildTerrainClusterDag(map, {}, &fx.field);
+  const std::vector<uint32_t> leaves = LeafClusters(dag);
+  CheckEdgeManifold(dag, leaves, static_cast<float>(w), static_cast<float>(h));
+  CheckFacesUp(dag, leaves);
+  CheckLeafCoverage(dag, w, h);
+  CheckColdTilesIdentical(dag, base, fx.exp, w, h, badlands::kTileQuads);
+  CheckAllInvariants(dag);
+}
+
+TEST_CASE("terrain detail: selected cuts stay exact watertight covers",
+          "[terrain_clusters]") {
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  const DetailFixture fx = MakeDetail(
+      map, w, h,
+      [](int qx, int qz) { return (std::abs(qx - qz) <= 1) ? 3 : 0; }, 16.0f,
+      16.0f, 8.0f, 0.3f);
+  const glm::vec3 cams[] = {{16.0f, 40.0f, 16.0f}, {2.0f, 6.0f, 2.0f}};
+  const float fov = 45.0f, screen_h = 900.0f;
+  for (const bool with_detail : {false, true}) {
+    DYNAMIC_SECTION("detail=" << with_detail) {
+      const auto dag = BuildTerrainClusterDag(
+          map, {}, with_detail ? &fx.field : nullptr);
+      for (const glm::vec3& cam : cams) {
+        for (float tau : {0.25f, 1.5f, 16.0f}) {
+          CAPTURE(cam, tau);
+          CheckCutValidity(dag, cam, fov, screen_h, tau);
+          std::vector<uint32_t> sel;
+          SelectClusters(dag, cam, fov, screen_h, tau, sel);
+          CheckEdgeManifold(dag, sel, static_cast<float>(w),
+                            static_cast<float>(h));
+        }
+      }
+    }
+  }
+}
