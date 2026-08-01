@@ -14,7 +14,7 @@
 # v2 (the intention contract): BL_CMD_*/BlDecisionWire are gone, replaced by
 # BL_INT_*/BlSuggestionWire; BlViewWire gains statuses/events blocks and
 # BlViewSelf gains a current-intention summary; BlViewFactors drops
-# think_min_millis/think_max_millis (deliberation is gone).
+# think_min_ticks/think_max_ticks (deliberation is gone).
 #
 # v3 (contract-v3-alignment): BlViewWire gains the attack-loadout block
 # (BlViewAttack, after statuses) -- a brain cannot pick an attack it cannot
@@ -30,7 +30,7 @@
 # threat/standoff block on BlThreat and BlViewSelf.
 
 const
-  BL_ABI_VERSION* = 5'i32
+  BL_ABI_VERSION* = 7'i32
   BL_MAX_THREATS* = 8
   BL_MAX_CHARS* = 16
   BL_MAX_EVENTS* = 8
@@ -38,6 +38,7 @@ const
   BL_MAX_ACTIVITIES* = 14
   BL_MAX_ATTACKS* = 3
   BL_MAX_SKILLS* = 8
+  BL_MAX_NAV_POLYS* = 32
 
   # BL_ACT_*: action kinds (append-only) -- bl_enqueue_action's `kind`
   # argument. Fire-and-forget: no return, validated by the engine at resolve
@@ -63,7 +64,7 @@ const
   BL_INT_ENTER_HOME* = 5'i32
   BL_INT_BUY* = 6'i32
   BL_INT_CHAT* = 7'i32        # target_slot = chat partner slot
-  BL_INT_IDLE* = 8'i32        # duration_millis = explicit idle-for-X
+  BL_INT_IDLE* = 8'i32        # duration_ticks = explicit idle-for-X
   BL_INT_USE_SKILL* = 9'i32   # reserved
 
   # BL_EV_*: event-inbox kinds (append-only), mirroring
@@ -87,6 +88,8 @@ const
   # Walked out of melee contact: no actions at all for a few seconds.
   BL_ST_DISENGAGED* = 5'i32
   BL_ST_CURSED* = 6'i32
+  BL_ST_SNEAKING* = 7'i32
+  BL_ST_CALCIFIED* = 8'i32
 
   # badlands::SkillTrigger (game/include/badlands_sim.hpp), mirrored here
   # because brain_abi.h deliberately excludes that header -- the same
@@ -102,11 +105,14 @@ const
   BL_SKILL_CURSE* = 2'i32
   BL_SKILL_DRESS_WOUNDS* = 3'i32
   BL_SKILL_BACKSTAB* = 4'i32
+  BL_SKILL_SNEAK* = 5'i32
+  BL_SKILL_PRECISION_SHOT* = 6'i32
+  BL_SKILL_TELEPORT* = 7'i32
 
 type
   BlViewSelf* {.packed.} = object
-    world_millis*: int64
-    think_until_millis*: int64
+    world_ticks*: int64
+    think_until_ticks*: int64
     roam_epoch*: int64
     intention_wake_at*: int64
     slot*: uint32
@@ -185,7 +191,7 @@ type
                                      # see brain_abi.h's BlViewFactors comment
 
   BlViewChar* {.packed.} = object
-    last_seen_millis*: int64
+    last_seen_ticks*: int64
     slot*: uint32
     archetype*: int32
     team*: int32
@@ -196,7 +202,7 @@ type
     pad0*: uint32
 
   BlStatus* {.packed.} = object
-    remaining_millis*: int64   # 0 = indefinite
+    remaining_ticks*: int64   # 0 = indefinite
     kind*: uint32
     pad0*: uint32
 
@@ -216,9 +222,18 @@ type
     trigger*: int32             # badlands::SkillTrigger
     target_mode*: int32         # badlands::SkillTargetMode
 
+  # v6: one navmesh leaf near this entity -- an axis-aligned world rect and
+  # whether anything can stand on it. Both passable and impassable ones are
+  # carried, because a brain choosing somewhere to go needs to see the walls.
+  BlNavPoly* {.packed.} = object
+    min_x*, min_z*: float32
+    max_x*, max_z*: float32
+    passable*: int32
+    pad*: uint32
+
   BlEvent* {.packed.} = object
-    at_millis*: int64
-    ttl_millis*: int64
+    at_ticks*: int64
+    ttl_ticks*: int64
     kind*: uint32
     source_slot*: uint32
     param*: float32
@@ -239,6 +254,9 @@ type
     skill_count*: int32
     pad5*: uint32
     skills*: array[BL_MAX_SKILLS, BlViewSkill]
+    nav_poly_count*: int32
+    pad6*: uint32
+    nav_polys*: array[BL_MAX_NAV_POLYS, BlNavPoly]
     event_count*: int32
     pad2*: uint32
     events*: array[BL_MAX_EVENTS, BlEvent]
@@ -247,8 +265,8 @@ type
     chars*: array[BL_MAX_CHARS, BlViewChar]
 
   BlSuggestionWire* {.packed.} = object
-    idle_hint_millis*: int64    # 0 = none
-    duration_millis*: int64     # BL_INT_IDLE only
+    idle_hint_ticks*: int64    # 0 = none
+    duration_ticks*: int64     # BL_INT_IDLE only
     intention_kind*: int32      # BL_INT_*
     activity_label*: int32      # ActivityId, inspection only
     point_x*, point_z*: float32
@@ -263,6 +281,7 @@ static: doAssert sizeof(BlViewChar) == 40
 static: doAssert sizeof(BlStatus) == 16
 static: doAssert sizeof(BlViewAttack) == 24
 static: doAssert sizeof(BlViewSkill) == 24
+static: doAssert sizeof(BlNavPoly) == 24
 static: doAssert sizeof(BlEvent) == 32
-static: doAssert sizeof(BlViewWire) == 1888
+static: doAssert sizeof(BlViewWire) == 2664
 static: doAssert sizeof(BlSuggestionWire) == 40

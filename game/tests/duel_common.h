@@ -37,7 +37,7 @@ inline std::vector<badlands::CharacterState> snapshot(const badlands::Sim& sim) 
 // or mutual destruction. Returns the survivor row.
 inline badlands::CharacterState run_duel(badlands::Sim& sim) {
     for (int i = 0; i < kMaxTicks; ++i) {
-        sim.Tick(kTickDt);
+        sim.Step();
         auto rows = snapshot(sim);
         REQUIRE(!rows.empty());  // mutual destruction would be a combat bug
         if (rows.size() == 1) {

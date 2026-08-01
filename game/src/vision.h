@@ -59,7 +59,7 @@ void configure_vision(VisionGrid& g, float world_min_x, float world_min_z,
 // One vision source's newly-discovered texel count this resolve -- the
 // exploration-XP input. Counts are reported per STAMPING CHARACTER (any
 // player-team character with vision, not just heroes); callers apply the
-// crediting policy (e.g. tick_world's award_xp, which no-ops non-heroes).
+// crediting policy (e.g. step_world's award_xp, which no-ops non-heroes).
 // First stamper wins a texel (the resolve's deterministic source order breaks
 // same-tick ties).
 struct DiscoveryCredit {

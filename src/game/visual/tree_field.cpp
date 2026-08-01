@@ -11,18 +11,12 @@
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // kTexturedMeshFloatsPerVertex
 #include "engine/rendering/texture_loader.hpp"                   // CreateSolidColorTexture
-#include "game/geometry/mesh_lod.hpp"
 #include "game/geometry/tree_generator.hpp"
+#include "game/visual/foliage_voxel_config.hpp"  // SimplifyBarkForVoxelLod
 
 namespace badlands {
 
 namespace {
-
-// mesh_lod.hpp's kDefaultLodRatios sized to GpuInstanceRenderer::kMaxLods:
-// one ratio per bark LOD bucket this field builds below. Leaves no longer go
-// through this file's own LOD simplification (volumetric-foliage Phase 5 --
-// the caller supplies one pre-voxelized mesh per LOD directly).
-static_assert(kDefaultLodRatios.size() == GpuInstanceRenderer::kMaxLods);
 
 // Matte roughness for the bark ARM texture AND the voxel-leaf material's
 // `params.x` -- same rationale/value as model_viewer_view.cpp's single-tree
@@ -61,18 +55,6 @@ wgpu::Buffer UploadIndexBuffer(wgpu::Device device,
                       wgpu::BufferUsage::Index);
 }
 
-// Simplifies `mesh` in place to `ratio` (a no-op for ratio >= 1.0, since
-// SimplifyMesh short-circuits that case -- so calling this with
-// kDefaultLodRatios[0] == 1.0 would still leave the LOD0 mesh byte-identical
-// to a freshly generated one).
-void SimplifyInPlace(StaticTexturedMeshComponent& mesh, float ratio) {
-  SimplifiedMesh simplified = SimplifyMesh(
-      mesh.vertices, kTexturedMeshFloatsPerVertex, mesh.indices, ratio);
-  mesh.vertices = std::move(simplified.vertices);
-  mesh.indices = std::move(simplified.indices);
-  mesh.vertex_count = simplified.vertex_count;
-}
-
 }  // namespace
 
 std::unique_ptr<TreeField> BuildTreeField(
@@ -80,11 +62,21 @@ std::unique_ptr<TreeField> BuildTreeField(
     const TreeOptions& options, const std::vector<SkeletonBranch>& skeleton,
     TexturedMeshResult bark_lod0,
     std::span<const TexturedMeshResult> leaf_lod_meshes, uint32_t capacity,
-    std::array<float, GpuInstanceRenderer::kMaxLods - 1> lod_thresholds) {
-  if (leaf_lod_meshes.size() != GpuInstanceRenderer::kMaxLods) {
+    std::span<const float> lod_thresholds) {
+  // The model's RUNTIME LOD count: as many levels as the caller supplied
+  // crown meshes for, bounded by the engine's compile-time cap.
+  const size_t lod_count = leaf_lod_meshes.size();
+  if (lod_count == 0 || lod_count > GpuInstanceRenderer::kMaxLods) {
     spdlog::error(
-        "BuildTreeField: leaf_lod_meshes.size()={} != kMaxLods={}",
-        leaf_lod_meshes.size(), GpuInstanceRenderer::kMaxLods);
+        "BuildTreeField: leaf_lod_meshes.size()={} outside [1, kMaxLods={}]",
+        lod_count, GpuInstanceRenderer::kMaxLods);
+    return nullptr;
+  }
+  if (lod_thresholds.size() != lod_count - 1) {
+    spdlog::error(
+        "BuildTreeField: lod_thresholds.size()={} != lod_count-1={} (one "
+        "cutoff between each adjacent pair of levels)",
+        lod_thresholds.size(), lod_count - 1);
     return nullptr;
   }
 
@@ -139,9 +131,18 @@ std::unique_ptr<TreeField> BuildTreeField(
     }
   }
 
+  // The single tree model's LOD chain: its runtime level count plus the
+  // caller's cutoffs, padded out to the engine's fixed-width threshold array
+  // (entries past lod_count-1 are never read -- see ModelLod).
+  GpuInstanceRenderer::ModelLod tree_lod;
+  tree_lod.lod_count = static_cast<uint32_t>(lod_count);
+  std::copy(lod_thresholds.begin(), lod_thresholds.end(),
+            tree_lod.thresholds.begin());
+  const std::array<GpuInstanceRenderer::ModelLod, 1> model_lods{tree_lod};
+
   tf->field = std::make_unique<InstancedMeshField>(
       device, queue, pipeline_gen, capacity, /*num_models=*/1u,
-      /*num_submeshes=*/2u, lod_thresholds);
+      /*num_submeshes=*/2u, model_lods);
   if (!tf->field->IsValid()) {
     spdlog::error("BuildTreeField: InstancedMeshField compile failed");
     return nullptr;
@@ -171,9 +172,9 @@ std::unique_ptr<TreeField> BuildTreeField(
   // everything this function needs from it); it's still a parameter so a
   // caller's (options, skeleton) pairing stays explicit at the call site,
   // matching GenerateTreeMesh/GenerateLeafMesh's own (options, skeleton)
-  // convention. LOD1/2 below simplify a COPY of bark_lod0's data at the
-  // shared ratio (kDefaultLodRatios), the single-tree path's exact pattern
-  // (model_viewer_view.cpp). Leaves have no such step here: `leaf_lod_meshes
+  // convention. The coarser LODs below simplify a COPY of bark_lod0's data
+  // through the shared SimplifyBarkForVoxelLod policy, the single-tree path's
+  // exact pattern (model_viewer_view.cpp). Leaves have no such step here: `leaf_lod_meshes
   // [lod]` is already the caller's final per-LOD mesh (volumetric-foliage
   // Phase 5).
   tf->bark_local_bounds = bark_lod0.local_bounds;
@@ -198,12 +199,10 @@ std::unique_ptr<TreeField> BuildTreeField(
   tf->leaf_local_bounds = leaf_bounds;
   tf->has_leaves = has_leaves;
 
-  for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
+  tf->lod_buffers.resize(lod_count);
+  for (uint32_t lod = 0; lod < static_cast<uint32_t>(lod_count); ++lod) {
     StaticTexturedMeshComponent bark_mesh = bark_lod0.mesh;
-
-    if (kDefaultLodRatios[lod] < 1.0f) {
-      SimplifyInPlace(bark_mesh, kDefaultLodRatios[lod]);
-    }
+    SimplifyBarkForVoxelLod(bark_mesh, lod);
 
     if (bark_mesh.indices.empty()) {
       spdlog::error("BuildTreeField: empty bark mesh at lod {}", lod);

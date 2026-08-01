@@ -8,7 +8,7 @@
 namespace badlands {
 
 // Which decision logic drives this entity when no script brain is running.
-// Set once by the spawn recipe (heroes.cpp) and dispatched on in tick_world --
+// Set once by the spawn recipe (heroes.cpp) and dispatched on in step_world --
 // this is how archetype selects a brain WITHOUT anything querying "is this a
 // Hero" at think time.
 enum class BrainKind : int32_t {

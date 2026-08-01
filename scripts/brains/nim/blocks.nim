@@ -61,7 +61,7 @@ proc distSq(a, b: Vec2): float32 =
   result = dx * dx + dz * dz
 
 # One activity's suggestion: BL_INT_* + the fields it uses (mirrors
-# BlSuggestionWire's own shape, minus duration_millis/idle_hint_millis,
+# BlSuggestionWire's own shape, minus duration_ticks/idle_hint_ticks,
 # which hero.nim's top-level react() fills in once, not per-activity).
 type Suggestion* = object
   kind*: int32              # BL_INT_*
@@ -136,7 +136,7 @@ proc actChat*(v: HeroView, f: BlViewFactors): Suggestion =
     # its started marker) with Idle on every mid-chat wake, which is exactly
     # what broke advance_intentions' Chat completion tracking (Finding B).
     # Restating Chat gets the same fresh-wake-schedule benefit Idle was
-    # chosen for (the restate-resume path still refreshes wake_at_millis from
+    # chosen for (the restate-resume path still refreshes wake_at_ticks from
     # this suggestion's idle hint, intention.cpp) without any of that cost.
     return Suggestion(kind: BL_INT_CHAT, activityLabel: ActChat, targetSlot: v.partnerSlot)
   # Walk over, and strike it up once close enough -- the engine still gates
@@ -184,6 +184,6 @@ proc actRoam*(v: HeroView, f: BlViewFactors): Suggestion =
 proc scoreIdle*(v: HeroView, f: BlViewFactors): float32 = kApplies
 
 proc actIdle*(v: HeroView, f: BlViewFactors): Suggestion =
-  # duration_millis is filled in by hero.nim's top-level react() (the idle
+  # duration_ticks is filled in by hero.nim's top-level react() (the idle
   # hint IS the duration now -- see its own comment).
   Suggestion(kind: BL_INT_IDLE, activityLabel: ActIdle)

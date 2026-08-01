@@ -42,6 +42,10 @@ namespace {
 // hairlines that tells you nothing; w = k_w*sqrt(Q) makes this Q >= 0.0036 m3/s.
 constexpr float kMinRiverWidthM = 0.3f;
 
+// Shortest headwater branch worth drawing. Leaf-only, so the network cannot be
+// severed; applied repeatedly, since removing one leaf exposes the next.
+constexpr float kMinRiverBranchM = 32.0f;
+
 // Wrap the generator output in the frozen MapData contract at the raster's own
 // texel spacing. Slices are ONE-HOT: the hard per-pixel biome assignment, so
 // WeightsAtNode(i,j).Dominant() == the single biome and the cluster terrain's
@@ -188,7 +192,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     // downstream should see the same network. w = k_w*sqrt(Q) with k_w = 5, so
     // 0.5 m is Q >= 0.01 m3/s.
     rivers_ = mapgen::build_window_rivers(map_, params_.world_size_m, inflows, rp,
-                                          kMinRiverWidthM);
+                                          kMinRiverWidthM, kMinRiverBranchM);
     BuildRiverLines();
     log_step("rivers", since(t));
     float q_max = 0.0f;

@@ -92,7 +92,7 @@ TEST_CASE("an enemy never runs the townsfolk errand loop") {
     spawn_into(g, goblin);
 
     for (int i = 0; i < 60; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
     }
 
     CHECK_FALSE(log_has(g, CommandKind::Buy));
@@ -113,7 +113,7 @@ TEST_CASE("recruited heroes still run the town loop") {
     REQUIRE(dispatch_into(g, recruit) >= 0);
 
     for (int i = 0; i < 60; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
     }
 
     CHECK(log_has(g, CommandKind::MoveTo));

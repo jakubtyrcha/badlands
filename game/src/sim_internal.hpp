@@ -27,11 +27,19 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc);
 // generator happens to put under those coordinates -- and the map's centre is a
 // lake, so the convenient coordinates are the ones you cannot walk on.
 std::unique_ptr<BadlandsGame> make_flat_world();
-void tick_world(BadlandsGame&, float dt);
-uint32_t spawn_into(BadlandsGame&, const CharacterDesc&);
+// Advance the world by exactly ONE STEP (kTicksPerStep ticks). Takes no dt, and
+// must not: a real-time delta is not in the command log, so any system reading
+// one would depend on a number a replay cannot reproduce (CLAUDE.md's time
+// convention). How OFTEN this is called is the caller's business -- SimClock's;
+// how much time it represents is a compile-time constant.
+void step_world(BadlandsGame&);
+// `level` > 1 puts a HERO at that level (progression.h's set_hero_level);
+// ignored by anything that does not level.
+uint32_t spawn_into(BadlandsGame&, const CharacterDesc&, int32_t level = 1);
 // Spawn a named creature from the world's catalog at `pos` on `team`; sets the
 // hero class for hero creatures. Returns the public slot id.
-uint32_t spawn_creature_into(BadlandsGame&, CreatureId id, int32_t team, glm::vec2 pos);
+uint32_t spawn_creature_into(BadlandsGame&, CreatureId id, int32_t team, glm::vec2 pos,
+                             int32_t level = 1);
 int64_t dispatch_into(BadlandsGame&, const Action&);
 std::vector<CharacterState> characters_of(const BadlandsGame&);
 void characters_of(const BadlandsGame&, std::vector<CharacterState>& out);

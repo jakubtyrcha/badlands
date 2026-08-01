@@ -9,7 +9,7 @@
 #include "nav_world.h"  // sim_nav_params / rebuild_navmesh_if_stale
 #include "navmesh/source.h"
 #include "placement.h"
-#include "sim_internal.hpp"  // make_world / spawn_into / tick_world / characters_of
+#include "sim_internal.hpp"  // make_world / spawn_into / step_world / characters_of
 
 #include <catch_amalgamated.hpp>
 #include <entt/entt.hpp>
@@ -74,8 +74,8 @@ TEST_CASE("plan/follow drive a unit to a clear point") {
     mt.stop_distance = 0.1f;
 
     for (int i = 0; i < 400 && glm::distance(pos_of(game, id), {15.0f, 10.0f}) > 0.15f; ++i) {
-        plan_paths(*game, 1.0f / 30.0f);
-        follow_paths(*game, 1.0f / 30.0f);
+        plan_paths(*game);
+        follow_paths(*game);
     }
     CHECK(glm::distance(pos_of(game, id), glm::vec2{15.0f, 10.0f}) < 0.2f);
 }
@@ -94,7 +94,7 @@ TEST_CASE("follow_paths tracks a multi-waypoint route without cutting the corner
 
     float max_x_before_turn = -1e9f;
     for (int i = 0; i < 600 && glm::distance(pos_of(game, id), {16.0f, 16.0f}) > 0.15f; ++i) {
-        follow_paths(*game, 1.0f / 30.0f);
+        follow_paths(*game);
         glm::vec2 p = pos_of(game, id);
         if (p.y < 15.0f) {
             max_x_before_turn = std::max(max_x_before_turn, p.x);
@@ -120,7 +120,7 @@ TEST_CASE("plan_paths routes a unit around a navmesh obstacle") {
     mt.point = {10.0f, 0.0f};
     mt.stop_distance = 0.1f;
 
-    plan_paths(*game, 1.0f);
+    plan_paths(*game);
     NavPath& np = game->registry.get<NavPath>(e);
     REQUIRE(!np.waypoints.empty());
     CHECK(np.waypoints.size() >= 3);  // detoured, not a straight shot
@@ -146,7 +146,7 @@ TEST_CASE("plan_paths raises MoveBlocked for an unreachable goal") {
     mt.stop_distance = 0.1f;
     REQUIRE_FALSE(game->registry.all_of<MoveBlocked>(e));
 
-    plan_paths(*game, 1.0f);
+    plan_paths(*game);
     CHECK(game->registry.all_of<MoveBlocked>(e));
     CHECK(game->registry.get<NavPath>(e).waypoints.empty());
 }
@@ -183,8 +183,8 @@ TEST_CASE("melee lock freezes the locked unit's follow movement") {
     REQUIRE(game->registry.all_of<MeleeLock>(ea));
 
     glm::vec2 before = pos_of(game, a);
-    plan_paths(*game, 1.0f / 30.0f);
-    follow_paths(*game, 1.0f / 30.0f);
+    plan_paths(*game);
+    follow_paths(*game);
     CHECK(glm::distance(pos_of(game, a), before) < 1e-5f);  // frozen
 }
 
@@ -201,13 +201,19 @@ TEST_CASE("plan_paths repaths when nav_epoch bumps") {
     mt.point = {-20.0f, 50.0f};
     mt.stop_distance = 0.1f;
 
-    plan_paths(*game, 0.5f);
+    plan_paths(*game);
     NavPath& np = game->registry.get<NavPath>(e);
     REQUIRE(!np.waypoints.empty());
     CHECK(np.epoch == game->placement.nav_epoch);
 
     ++game->placement.nav_epoch;  // a building was placed/destroyed elsewhere
-    plan_paths(*game, 0.5f);      // cooldown elapsed + epoch invalidated -> repath
+    // The repath cooldown has to actually drain now that plan_paths takes no
+    // dt -- a test can no longer hand it half a second in one call. Bounded, so
+    // a repath that never happens fails instead of looping.
+    const int max_steps = 2 * static_cast<int>(badlands::kStepsPerSecond);
+    for (int i = 0; i < max_steps && np.epoch != game->placement.nav_epoch; ++i) {
+        plan_paths(*game);
+    }
     CHECK(np.epoch == game->placement.nav_epoch);
 }
 
@@ -223,7 +229,7 @@ TEST_CASE("mock duel resolves through the movement pipeline and engages melee lo
     bool saw_lock = false;
     int survivors = 2;
     for (int i = 0; i < 3000; ++i) {
-        tick_world(*game, 1.0f / 30.0f);
+        step_world(*game);
         if (game->registry.view<MeleeLock>().begin() != game->registry.view<MeleeLock>().end()) {
             saw_lock = true;
         }
@@ -260,8 +266,8 @@ TEST_CASE("a unit reaches a building's approach tile via the navmesh") {
     mt.stop_distance = 0.1f;
 
     for (int i = 0; i < 600 && glm::distance(pos_of(game, id), tile) > kEntranceRadius; ++i) {
-        plan_paths(*game, 1.0f / 30.0f);
-        follow_paths(*game, 1.0f / 30.0f);
+        plan_paths(*game);
+        follow_paths(*game);
         separate_units(*game);
     }
     CHECK(glm::distance(pos_of(game, id), tile) <= kEntranceRadius);
@@ -383,14 +389,14 @@ TEST_CASE("a goal behind a plopped wall is unreachable") {
     mt.point = {40.0f, 0.0f};  // outside it
     mt.stop_distance = 0.1f;
 
-    plan_paths(*game, 1.0f);
+    plan_paths(*game);
     CHECK(game->registry.all_of<MoveBlocked>(e));
     CHECK(game->registry.get<NavPath>(e).waypoints.empty());
 
     // And it never gets out: 300 ticks of trying leaves it inside the ring.
     for (int i = 0; i < 300; ++i) {
-        plan_paths(*game, 1.0f / 30.0f);
-        follow_paths(*game, 1.0f / 30.0f);
+        plan_paths(*game);
+        follow_paths(*game);
         separate_units(*game);
     }
     const glm::vec2 p = pos_of(game, id);

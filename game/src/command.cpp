@@ -7,6 +7,7 @@
 #include "intention.h"  // abort_intention -- the Chat handler's never-started decline
 #include "placement.h"
 #include "skill_cast.h"  // validate_cast / run_cast -- the UseSkill handler's body
+#include "skill_focus.h"  // begin_focus / cancel_focus -- the two focus handlers
 
 #include <entt/entt.hpp>
 
@@ -20,7 +21,7 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
     // Log the command (the trace / replay input) before applying it, stamped
     // with the sim time it took effect.
     game.command_log.push_back(cmd);
-    game.command_log.back().at_millis = game.world_millis;
+    game.command_log.back().at_ticks = game.world_ticks;
 
     constexpr auto kNoId = std::numeric_limits<uint32_t>::max();
 
@@ -85,33 +86,33 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                     // ActivityId::Think anymore, so the branch that used to
                     // set this non-zero is dead and was removed. The field
                     // itself stays: hero_perception.cpp's observe_hero still
-                    // copies it into WorldView::think_until_millis, which
+                    // copies it into WorldView::think_until_ticks, which
                     // wasm_brain.cpp still packs into BlViewSelf::
-                    // think_until_millis on the wire (kept there only for 1:1
+                    // think_until_ticks on the wire (kept there only for 1:1
                     // parity with WorldView -- see that field's own comment,
                     // brain_abi.h) -- so it is not dead by the grep, just
                     // permanently 0.
-                    sim->think_until_millis = 0;
+                    sim->think_until_ticks = 0;
                 } else if (auto* cs = game.registry.try_get<CritterState>(e)) {
                     cs->behavior = cmd.param_a;
                 } else if (auto* tc = game.registry.try_get<TaxCollectorState>(e)) {
                     tc->behavior = cmd.param_a;
                 }
                 // Intention contract (game/src/intention.h): the wake
-                // schedule rides on cmd.param_b (SetBehavior's duration_millis)
-                // -- deriving wake_at_millis HERE (not in apply_intention) is
+                // schedule rides on cmd.param_b (SetBehavior's duration_ticks)
+                // -- deriving wake_at_ticks HERE (not in apply_intention) is
                 // what makes it replay-derivable: any tick that applies this
                 // exact command, live or replayed, reconstructs the same
-                // wake_at_millis. Harmless for critters/townfolk: only heroes
+                // wake_at_ticks. Harmless for critters/townfolk: only heroes
                 // get a CurrentIntention (heroes.cpp emplaces it for every
                 // hero, wasm-brained or not), so try_get above is a no-op for
                 // them.
                 if (auto* ci = game.registry.try_get<CurrentIntention>(e)) {
                     // v3 invariant (docs/design/intention-contract.html §2,
-                    // intention.cpp's apply_intention): wake_at_millis == 0
+                    // intention.cpp's apply_intention): wake_at_ticks == 0
                     // means "never adopted/restated yet" ONLY -- every
                     // producer today guarantees cmd.param_b > 0 (apply_
-                    // intention substitutes kDefaultWakeCadenceMillis for a
+                    // intention substitutes kDefaultWakeCadenceTicks for a
                     // non-positive duration/hint before logging), but that is
                     // an unenforced cross-file invariant a future producer
                     // could violate. Defend it HERE too, not just at the
@@ -121,8 +122,8 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
                     // resurrect exactly the stuck-forever-with-hint-0 defect
                     // class v3 was meant to delete.
                     const int64_t duration =
-                        cmd.param_b > 0 ? cmd.param_b : kDefaultWakeCadenceMillis;
-                    ci->wake_at_millis = game.world_millis + duration;
+                        cmd.param_b > 0 ? cmd.param_b : kDefaultWakeCadenceTicks;
+                    ci->wake_at_ticks = game.world_ticks + duration;
                 }
             }
             return 0;
@@ -146,10 +147,29 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             // command in the same batch may have spent the cooldown. Nothing
             // is stamped and no effect runs unless validate_cast agrees NOW.
             CastPlan plan;
-            if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan)) {
+            if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan,
+                               SkillTrigger::Action, cmd.point)) {
                 return 0;
             }
             run_cast(game, cmd.actor, cmd.param_a, plan);
+            return 0;
+        }
+        case CommandKind::CancelFocus: {
+            cancel_focus(game, entity_for_slot(game, static_cast<int32_t>(cmd.actor)));
+            return 0;
+        }
+        case CommandKind::FocusSkill: {
+            // The other channel's authoritative gate, and the same discipline:
+            // apply_intention already checked this cast at adoption, but this
+            // is what a REPLAY runs (a replay never thinks), so nothing is
+            // taken on trust from the producer.
+            CastPlan plan;
+            if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan,
+                               SkillTrigger::Intention, cmd.point)) {
+                return 0;
+            }
+            begin_focus(game, entity_for_slot(game, static_cast<int32_t>(cmd.actor)),
+                        cmd.param_a, cmd.target_id, cmd.point);
             return 0;
         }
         case CommandKind::CollectTax: {
@@ -348,7 +368,7 @@ void enqueue_engage(BadlandsGame& game, uint32_t slot, uint32_t target_slot,
 }
 
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
-                          int64_t duration_millis, bool force) {
+                          int64_t duration_ticks, bool force) {
     entt::entity e = entity_for_slot(game, static_cast<int32_t>(slot));
     if (e == entt::null) {
         return;
@@ -372,7 +392,7 @@ void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
                                   UINT32_MAX,
                                   {0.0f, 0.0f},
                                   behavior,
-                                  static_cast<int32_t>(duration_millis)});
+                                  static_cast<int32_t>(duration_ticks)});
 }
 
 void apply_replay_commands(BadlandsGame& game) {
@@ -380,11 +400,11 @@ void apply_replay_commands(BadlandsGame& game) {
         return;
     }
     const std::vector<Command>& log = *game.replay_log;
-    // Stamps are non-decreasing (world_millis only advances), so a monotonic
+    // Stamps are non-decreasing (world_ticks only advances), so a monotonic
     // cursor is enough -- no search, and every command lands on exactly the tick
     // boundary it was originally applied at.
     while (game.replay_cursor < log.size() &&
-           log[game.replay_cursor].at_millis <= game.world_millis) {
+           log[game.replay_cursor].at_ticks <= game.world_ticks) {
         game.command_queue.push_back(log[game.replay_cursor++]);
     }
     apply_commands(game);

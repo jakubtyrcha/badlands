@@ -4,6 +4,7 @@
 #include "combat.h"      // resolve_attack, effective_combatant, melee_range, ranged_range
 #include "components.h"  // Attacks, Skills, Health, Position, Team
 #include "game_state.h"  // BadlandsGame, entity_for_slot, slot_for_entity, emit_event
+#include "nav_world.h"   // nav_point_free -- a point cast must land somewhere stand-on-able
 #include "skills.h"      // SkillEffectOf
 #include "status.h"      // apply_status
 
@@ -109,8 +110,17 @@ void copy_name(char (&dst)[BL_SKILL_NAME_LEN], const std::string& src) {
 
 float skill_cast_range(const entt::registry& reg, entt::entity caster,
                        const SkillSpec& spec) {
+    // An authored "range" wins outright, test or no test. A skill that borrows
+    // a weapon's test does not necessarily borrow its reach: a precision shot
+    // is thrown with the same bow and lands a great deal further away, and
+    // there is no way to say so if the weapon always decides. The weapon
+    // remains the DEFAULT -- a bash that authors nothing still cannot outreach
+    // the sword it borrows -- which was the property this rule existed for.
+    if (const float authored = spec.constant("range", 0.0f); authored > 0.0f) {
+        return authored;
+    }
     if (spec.attack_test == SkillAttackTest::None) {
-        return spec.constant("range", 0.0f);
+        return 0.0f;  // unbounded; see the header
     }
     const auto* atk = (caster != entt::null && reg.valid(caster))
                           ? reg.try_get<Attacks>(caster)
@@ -122,8 +132,9 @@ float skill_cast_range(const entt::registry& reg, entt::entity caster,
                                                        : melee_range(*atk);
 }
 
-bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
-                   uint32_t named_target_slot, CastPlan& out) {
+bool validate_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
+                   uint32_t named_target_slot, CastPlan& out, SkillTrigger channel,
+                   glm::vec2 point) {
     const entt::registry& reg = game.registry;
     const entt::entity caster = entity_for_slot(game, static_cast<int32_t>(caster_slot));
     const auto* skills = (caster != entt::null) ? reg.try_get<Skills>(caster) : nullptr;
@@ -149,13 +160,33 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
 
     const SkillId id = skills->ids[skill_index];
     const SkillSpec& spec = game.skills.specs[static_cast<size_t>(id)];
-    if (spec.trigger != SkillTrigger::Action) {
-        // Declared vocabulary the engine does not execute yet. Refused, never
-        // approximated as an action -- a passive that silently fired on demand
-        // would be a different skill than the one authored.
-        spdlog::warn("[skill] slot {}: {} is not an action skill (trigger {}), cast dropped",
+    if (spec.trigger == SkillTrigger::Passive || spec.trigger != channel) {
+        // The channel split, both ways. An Intention skill fired through the
+        // action gateway would cost nothing to cast; an Action skill adopted as
+        // a focus would idle for a duration it never declared. Passive is still
+        // declared vocabulary with no execution at all, so it is refused on
+        // every channel -- never approximated as its nearest neighbour.
+        spdlog::warn("[skill] slot {}: {} has trigger {} but arrived on channel {}, cast dropped",
                      caster_slot, SkillName(static_cast<int32_t>(id)),
-                     static_cast<int32_t>(spec.trigger));
+                     static_cast<int32_t>(spec.trigger), static_cast<int32_t>(channel));
+        return false;
+    }
+    if (channel == SkillTrigger::Intention && spec.intention_duration_seconds <= 0.0f) {
+        // A focus with no duration is a contradiction, and begin_focus already
+        // refuses one -- but refusing it HERE is what stops the loop: without
+        // this the cast validates, gets adopted, queues a logged FocusSkill that
+        // begin_focus then declines, advance_intentions ends the intention
+        // because nothing is running, and the brain re-suggests it on the very
+        // next wake. Forever, one command in the replay log per wake.
+        spdlog::warn("[skill] slot {}: {} is an intention skill with no duration, cast dropped",
+                     caster_slot, SkillName(static_cast<int32_t>(id)));
+        return false;
+    }
+    if (!spec.castable_in_melee && reg.all_of<MeleeLock>(caster)) {
+        // Authored data, checked here so BOTH gates enforce it -- you cannot
+        // vanish out of a fight somebody is already in with you.
+        spdlog::warn("[skill] slot {}: {} cannot be cast in melee contact, cast dropped",
+                     caster_slot, SkillName(static_cast<int32_t>(id)));
         return false;
     }
 
@@ -185,11 +216,48 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
                              caster_slot, SkillName(static_cast<int32_t>(id)));
                 return false;
             }
+            // ...and it has to be somewhere you can SEE. Target selection and
+            // threat perception both skip a sneaking entity already; without
+            // this a caster holding a slot from before it vanished could still
+            // cast at it, which would be the one way through the imperceptible
+            // rule. Never applies to the caster itself -- a sneaking hero may
+            // of course still act on itself.
+            if (target != caster && has_status(reg, target, StatusKind::Sneaking)) {
+                spdlog::warn("[skill] slot {}: {} names a target it cannot perceive, cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)));
+                return false;
+            }
             out.targets[out.target_count++] = named_target_slot;
             break;
         }
+        case SkillTargetMode::Point: {
+            // Targets NOBODY -- a point cast affects a place, and the effect
+            // gets that place through the context rather than a target list.
+            if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
+                spdlog::warn("[skill] slot {}: {} names a non-finite point, cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)));
+                return false;
+            }
+            const float reach = skill_cast_range(reg, caster, spec);
+            const glm::vec2 from = reg.get<Position>(caster).pos;
+            if (reach > 0.0f && glm::distance(from, point) > reach) {
+                spdlog::warn("[skill] slot {}: {} point is out of reach ({:.1f}), cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)), reach);
+                return false;
+            }
+            // ...and it has to be somewhere you could stand. This is the whole
+            // reason validate_cast is non-const: answering needs a current
+            // navmesh (nav_world.h).
+            if (!nav_point_free(game, point)) {
+                spdlog::warn("[skill] slot {}: {} point ({:.1f}, {:.1f}) is not passable, "
+                             "cast dropped",
+                             caster_slot, SkillName(static_cast<int32_t>(id)), point.x, point.y);
+                return false;
+            }
+            out.point = point;
+            break;
+        }
         case SkillTargetMode::Multi:
-        case SkillTargetMode::Point:
             spdlog::warn("[skill] slot {}: {} uses targeting mode {}, which this build does "
                          "not resolve yet; cast dropped",
                          caster_slot, SkillName(static_cast<int32_t>(id)),
@@ -233,12 +301,15 @@ bool validate_cast(const BadlandsGame& game, uint32_t caster_slot, int32_t skill
 
 BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity caster,
                                       SkillId id, const SkillSpec& spec,
-                                      const uint32_t target_slots[], int32_t target_count) {
+                                      const uint32_t target_slots[], int32_t target_count,
+                                      glm::vec2 point) {
     const entt::registry& reg = game.registry;
     BlSkillCastContext ctx{};
     ctx.version = BL_SKILL_ABI_VERSION;
     ctx.skill_id = static_cast<int32_t>(id);
-    ctx.world_millis = game.world_millis;
+    ctx.point_x = point.x;
+    ctx.point_z = point.y;
+    ctx.world_ticks = game.world_ticks;
 
     const uint32_t caster_slot = slot_for_entity(game, caster);
     // effective_combatant, not the raw component -- the same rule declare_strike
@@ -257,8 +328,8 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
 
     // The seed an effect may draw from: the same identity axes the combat
     // rolls use (who, when, which skill), so it is replay-reproducible.
-    ctx.seed = seed_of(caster_slot, game.world_millis) ^
-               seed_of(static_cast<uint32_t>(kSkillSeedBase + ctx.skill_id), game.world_millis);
+    ctx.seed = seed_of(caster_slot, game.world_ticks) ^
+               seed_of(static_cast<uint32_t>(kSkillSeedBase + ctx.skill_id), game.world_ticks);
 
     // The declared attack test, rolled ONCE per target, here -- an effect
     // never rolls (skill_abi.h). The seed's attack_index axis is offset by
@@ -297,8 +368,22 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
             req.defender = def;
             req.attacker_slot = caster_slot;
             req.target_slot = target_slots[i];
-            req.world_millis = game.world_millis;
+            req.world_ticks = game.world_ticks;
             req.attack_index = kSkillSeedBase + ctx.skill_id;
+            if (spec.guaranteed_test) {
+                // A guaranteed shot is expressed by DIALLING THE GATES, not by
+                // bypassing resolve_attack: armour still applies, the damage
+                // type still matters, and the whole thing stays one seeded,
+                // replayable pipeline. Accuracy 1 against defense 0 cannot
+                // miss, evasion 0 cannot dodge, crit_chance 1 always crits.
+                req.attacker.accuracy = 1.0f;
+                req.attacker.crit_multiplier =
+                    std::max(req.attacker.crit_multiplier,
+                             spec.constant("crit_multiplier", kBaseCritMultiplier));
+                req.defender.defense = 0.0f;
+                req.defender.evasion = 0.0f;
+                req.attack.crit_chance = 1.0f;
+            }
             const CombatResult res = resolve_attack(req);
             row.attack_test = res.blocked  ? BL_TEST_BLOCKED
                               : res.dodged ? BL_TEST_DODGED
@@ -324,11 +409,15 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
         // An op may only reach an entity the engine itself put in the context.
         // This is the bound on a scripted effect: it cannot name a slot it was
         // never shown, however it came by the number.
-        bool in_context = false;
-        for (int32_t k = 0; k < ctx.target_count && k < BL_SKILL_MAX_TARGETS; ++k) {
+        // The CASTER is always in context -- it is right there in ctx.caster,
+        // so an op naming it reaches nothing the effect was not shown. This is
+        // what lets a targetless cast (None, or a Point cast, which resolves
+        // no entities at all) still act on the one who cast it.
+        bool in_context = op.target_slot == ctx.caster.slot;
+        for (int32_t k = 0; !in_context && k < ctx.target_count && k < BL_SKILL_MAX_TARGETS;
+             ++k) {
             if (ctx.targets[k].slot == op.target_slot) {
                 in_context = true;
-                break;
             }
         }
         if (!in_context) {
@@ -366,6 +455,15 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
                 h->hp -= op.param_f;
                 emit_char_hit(game, caster_slot, op.target_slot, op.param_f, h->hp,
                               game.registry.get<Position>(target).pos);
+                // Hurting somebody else is the other aggressive act (combat.h),
+                // so a damaging cast breaks stealth exactly as a swing does --
+                // and a self-buff or a heal does not. Checked per op rather
+                // than per cast: what makes a skill aggressive is what it did,
+                // not what it is called.
+                if (op.target_slot != caster_slot) {
+                    end_sneak_on_aggression(
+                        game, entity_for_slot(game, static_cast<int32_t>(caster_slot)));
+                }
                 break;
             }
             case BL_FX_HEAL: {
@@ -379,6 +477,34 @@ void apply_effect_batch(BadlandsGame& game, uint32_t caster_slot,
                 h->hp = std::min(h->max_hp, h->hp + op.param_f);
                 break;
             }
+            case BL_FX_TELEPORT: {
+                auto* pos = game.registry.try_get<Position>(target);
+                if (pos == nullptr) {
+                    break;
+                }
+                // The op named no destination and could not have: it is moved to
+                // the CAST'S point, which the engine already checked is in range
+                // and stand-on-able. Whatever the effect wrote into param_f/
+                // param_i is ignored here, which is the point.
+                const glm::vec2 to{ctx.point_x, ctx.point_z};
+                if (!std::isfinite(to.x) || !std::isfinite(to.y)) {
+                    break;
+                }
+                pos->pos = to;
+                // The route it was walking is abandoned rather than re-planned:
+                // its waypoints lead from somewhere this entity no longer is,
+                // and plan_paths re-plans from the MoveTarget next tick anyway.
+                if (auto* np = game.registry.try_get<NavPath>(target); np != nullptr) {
+                    np->waypoints.clear();
+                    np->cursor = 0;
+                }
+                // Contact is broken by arriving somewhere else -- but WITHOUT the
+                // disengage penalty, which is charged for walking out under your
+                // own steam (movement.h). Blinking is the alternative to that
+                // walk, not an instance of it.
+                game.registry.remove<MeleeLock>(target);
+                break;
+            }
             default:
                 spdlog::warn("[skill] unrecognized effect op kind {}, skipped", op.kind);
                 break;
@@ -390,7 +516,8 @@ void run_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
               const CastPlan& plan) {
     const SkillSpec& spec = *plan.spec;
     const BlSkillCastContext ctx = build_cast_context(game, plan.caster, plan.id, spec,
-                                                      plan.targets, plan.target_count);
+                                                      plan.targets, plan.target_count,
+                                                      plan.point);
     BlSkillEffectBatch batch{};
     SkillEffectOf(plan.id)(ctx, batch);
 
@@ -409,7 +536,7 @@ void run_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
                                .amount = static_cast<float>(plan.id),
                                .x = at.x,
                                .z = at.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
 
     apply_effect_batch(game, caster_slot, ctx, batch);
 }

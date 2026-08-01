@@ -22,7 +22,7 @@ namespace badlands {
 namespace {
 
 // Deer re-draw their wander goal (and flip walk<->graze) on this window.
-constexpr int64_t kRoamLeaseMillis = 4000;
+constexpr int64_t kRoamLeaseTicks = ticks_of(4.0f);  // 4 s
 // How many biome-filtered candidates to try before accepting whatever we drew.
 constexpr int kRoamBiomeTries = 6;
 
@@ -51,12 +51,12 @@ WorldView observe_critter(const BadlandsGame& game, uint32_t slot, entt::entity 
     WorldView v;
     v.slot = slot;
     v.pos = game.registry.get<Position>(e).pos;
-    v.roam_epoch = game.world_millis / kRoamLeaseMillis;
+    v.roam_epoch = game.world_ticks / kRoamLeaseTicks;
 
     // Graze during the tail fraction of each roam window (walk -> graze -> walk).
-    const int64_t phase = game.world_millis % kRoamLeaseMillis;
+    const int64_t phase = game.world_ticks % kRoamLeaseTicks;
     const int64_t graze_start =
-        static_cast<int64_t>((1.0f - cf.graze_fraction) * static_cast<float>(kRoamLeaseMillis));
+        static_cast<int64_t>((1.0f - cf.graze_fraction) * static_cast<float>(kRoamLeaseTicks));
     v.grazing = phase >= graze_start;
 
     // Deer bolt from anything that is not another deer -- heroes, tax

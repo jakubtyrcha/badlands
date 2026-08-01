@@ -96,7 +96,8 @@ TEST_CASE("a landed bash stuns the target and deals no damage", "[skills][cast]"
     f.bash();
 
     CHECK(f.victim_stunned());
-    CHECK(remaining_millis_of(f.game->registry, f.victim(), StatusKind::Stunned) == 3000);
+    CHECK(remaining_ticks_of(f.game->registry, f.victim(), StatusKind::Stunned) ==
+          ticks_of(3.0f));
     CHECK(f.victim_hp() == Catch::Approx(hp_before));  // pure control
 }
 
@@ -156,14 +157,19 @@ TEST_CASE("a SelfOnly skill cast at somebody else is refused, not remapped",
                                    {0.0f, 0.0f}, /*param_a=*/1});
     CHECK(f.skill_cooldown(1) == Catch::Approx(0.0f));  // nothing was cast
 
-    // Cast at itself it is accepted (Calcify's own effect is a no-op, but the
-    // cast still happens: cooldown stamped).
+    // Cast at itself it is accepted, and the cooldown is stamped from the
+    // spec rather than from a number repeated here.
     apply_command(*f.game, Command{CommandKind::UseSkill, f.caster_slot, f.caster_slot,
                                    {0.0f, 0.0f}, /*param_a=*/1});
-    CHECK(f.skill_cooldown(1) == Catch::Approx(20.0f));
+    CHECK(f.skill_cooldown(1) ==
+          Catch::Approx(f.game->skills.specs[static_cast<size_t>(SkillId::Calcify)]
+                            .cooldown_seconds));
 }
 
-TEST_CASE("a trigger the engine cannot execute is refused", "[skills][cast]") {
+TEST_CASE("a trigger that does not match the channel is refused", "[skills][cast]") {
+    // Passive is still declared-and-never-executed. Intention IS executed now,
+    // but on the OTHER channel (a focus) -- so firing it through the action
+    // gateway is still a refusal, and for a sharper reason than before.
     for (SkillTrigger trigger : {SkillTrigger::Passive, SkillTrigger::Intention}) {
         BashFixture f;
         SkillCatalog cat = f.game->skills;
@@ -178,7 +184,10 @@ TEST_CASE("a trigger the engine cannot execute is refused", "[skills][cast]") {
 
 TEST_CASE("a targeting mode the engine cannot resolve is refused",
           "[skills][cast]") {
-    for (SkillTargetMode mode : {SkillTargetMode::Multi, SkillTargetMode::Point}) {
+    // Point USED to be here. It is implemented now (game/src/skill_cast.cpp),
+    // so only Multi is left declared-and-refused -- and it stays refused rather
+    // than being approximated as Any, which is the rule this case exists for.
+    for (SkillTargetMode mode : {SkillTargetMode::Multi}) {
         BashFixture f;
         SkillCatalog cat = f.game->skills;
         cat.specs[static_cast<size_t>(SkillId::ShieldBash)].target = mode;
@@ -202,13 +211,16 @@ TEST_CASE("an op naming an entity outside the context is dropped",
 
     BlSkillEffectBatch batch{};
     push_effect_op(batch, BlSkillEffectOp{BL_FX_APPLY_STATUS, 999u,
-                                          static_cast<int32_t>(StatusKind::Stunned), 5000.0f});
+                                          static_cast<int32_t>(StatusKind::Stunned),
+                                          static_cast<float>(ticks_of(5.0f))});
     push_effect_op(batch, BlSkillEffectOp{BL_FX_APPLY_STATUS, f.victim_slot,
-                                          static_cast<int32_t>(StatusKind::Stunned), 5000.0f});
+                                          static_cast<int32_t>(StatusKind::Stunned),
+                                          static_cast<float>(ticks_of(5.0f))});
     apply_effect_batch(*f.game, f.caster_slot, ctx, batch);
 
     CHECK(f.victim_stunned());  // the legitimate op still applied
-    CHECK(remaining_millis_of(f.game->registry, f.victim(), StatusKind::Stunned) == 5000);
+    CHECK(remaining_ticks_of(f.game->registry, f.victim(), StatusKind::Stunned) ==
+          ticks_of(5.0f));
 }
 
 TEST_CASE("the cast context carries the pre-rolled test and the constants",
@@ -237,7 +249,7 @@ TEST_CASE("a stunned target is defenceless against the bash's own test",
     // stunned, which zeroes it (effective_combatant), so the context the effect
     // sees reports a hit.
     BashFixture f(/*victim_defense=*/0.0f, /*victim_evasion=*/1.0f);
-    apply_status(*f.game, f.victim(), StatusKind::Stunned, 500, UINT32_MAX);
+    apply_status(*f.game, f.victim(), StatusKind::Stunned, ticks_of(0.5f), UINT32_MAX);
 
     const uint32_t targets[1] = {f.victim_slot};
     const SkillSpec& spec = f.game->skills.specs[static_cast<size_t>(SkillId::ShieldBash)];
@@ -332,7 +344,7 @@ TEST_CASE("a mercenary learns ShieldBash at level 3 and stuns what it hits",
     auto swung_within = [&](int ticks) {
         bool swung = false;
         for (int i = 0; i < ticks; ++i) {
-            tick_world(*game, 1.0f / 30.0f);
+            step_world(*game);
             if (game->registry.get<Attacks>(ge).cooldown_remaining[0] > 0.0f) {
                 swung = true;
             }
@@ -368,7 +380,7 @@ TEST_CASE("the bash is on cooldown for its authored time", "[skills][e2e]") {
     // Refused while it cools, and the cooldown really does tick with the world.
     CHECK_FALSE(resolve_action(*game, merc, AgentAction{BL_ACT_USE_SKILL, gob, 0}));
     for (int i = 0; i < 30; ++i) {
-        tick_world(*game, 1.0f / 30.0f);
+        step_world(*game);
     }
     CHECK(game->registry.get<Skills>(me).cooldown_remaining[0] ==
           Catch::Approx(11.0f).margin(0.05f));

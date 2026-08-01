@@ -1,5 +1,5 @@
 // EntityMemory (game/src/entity_memory.h): the host-owned per-character
-// knowledge sandbox. Pure derived state driven by tick_world -- these tests
+// knowledge sandbox. Pure derived state driven by step_world -- these tests
 // exercise the update pass (visibility/TTL/eviction), spawn seeding, and the
 // determinism contract, entirely through the internal BadlandsGame fixture
 // style shared with heroes_tests.cpp / vision_tests.cpp / determinism_tests.cpp.
@@ -8,7 +8,7 @@
 #include "entity_memory.h"
 #include "game_state.h"
 #include "heroes.h"           // spawn_entity (direct home-having, non-hero spawns)
-#include "sim_internal.hpp"  // make_world / spawn_into / dispatch_into / tick_world
+#include "sim_internal.hpp"  // make_world / spawn_into / dispatch_into / step_world
 
 #include <catch_amalgamated.hpp>
 #include <entt/entt.hpp>
@@ -141,7 +141,7 @@ TEST_CASE("two characters within vision radius remember each other after one tic
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 14.0f));
     make_observer(*g, a);
     make_observer(*g, b);
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     const MemoryChar* a_sees_b = find_char(*g, g->slots[a], b);
     REQUIRE(a_sees_b != nullptr);
@@ -150,7 +150,7 @@ TEST_CASE("two characters within vision radius remember each other after one tic
     CHECK(a_sees_b->team == 0);
     CHECK(a_sees_b->last_pos == glm::vec2(5.0f, 0.0f));
     CHECK(a_sees_b->last_hp == 10.0f);
-    CHECK(a_sees_b->last_seen_millis == g->world_millis);
+    CHECK(a_sees_b->last_seen_ticks == g->world_ticks);
 
     const MemoryChar* b_sees_a = find_char(*g, g->slots[b], a);
     REQUIRE(b_sees_a != nullptr);
@@ -163,7 +163,7 @@ TEST_CASE("characters outside vision radius are not remembered") {
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 10.0f));
     make_observer(*g, a);
     spawn_into(*g, scout(100.0f, 100.0f, 10.0f));
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     const EntityMemory& mem = g->registry.get<EntityMemory>(g->slots[a]);
     CHECK(mem.char_count == 0);
@@ -174,26 +174,26 @@ TEST_CASE("a missing or zero-radius Vision means seeing nothing this tick") {
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 0.0f));  // radius 0
     make_observer(*g, a);
     spawn_into(*g, scout(1.0f, 0.0f, 14.0f));
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
     CHECK(g->registry.get<EntityMemory>(g->slots[a]).char_count == 0);
 }
 
 TEST_CASE("persistence: a teleported target is remembered stale, forgotten exactly one tick past "
          "the TTL boundary") {
     auto g = make_world(BrainDesc{});
-    // Tick-aligned (a multiple of kMillisPerTick) so the "age == ttl" boundary
+    // Tick-aligned (a multiple of kTicksPerStep) so the "age == ttl" boundary
     // below lands on an exact tick rather than being straddled by one (the
     // 10s compiled default, 10000, is not a multiple of the 33ms tick).
-    g->factors.hero.memory_ttl_millis = 10 * kMillisPerTick;
+    g->factors.hero.memory_ttl_ticks = 10 * kTicksPerStep;
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 20.0f));
     make_observer(*g, a);
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 0.0f));
-    tick_world(*g, 1.0f / 30.0f);  // A sees B
+    step_world(*g);  // A sees B
 
     entt::entity ae = g->slots[a];
     entt::entity be = g->slots[b];
     const glm::vec2 b_seen_pos = g->registry.get<Position>(be).pos;
-    const int64_t seen_at = g->world_millis;
+    const int64_t seen_at = g->world_ticks;
 
     const MemoryChar* rec = find_char(*g, ae, b);
     REQUIRE(rec != nullptr);
@@ -202,26 +202,26 @@ TEST_CASE("persistence: a teleported target is remembered stale, forgotten exact
 
     // Teleport B far out of A's radius directly via the registry (a test).
     g->registry.get<Position>(be).pos = glm::vec2(500.0f, 500.0f);
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     rec = find_char(*g, ae, b);
     REQUIRE(rec != nullptr);
     CHECK_FALSE(rec->visible_now);
     CHECK(rec->last_pos == b_seen_pos);       // stale: the OLD position
-    CHECK(rec->last_seen_millis == seen_at);  // not refreshed
+    CHECK(rec->last_seen_ticks == seen_at);  // not refreshed
 
-    // Advance to EXACTLY memory_ttl_millis past the sighting: the rule is
+    // Advance to EXACTLY memory_ttl_ticks past the sighting: the rule is
     // "drop when age > ttl", so age == ttl must still be remembered.
-    const int64_t ttl = g->factors.hero.memory_ttl_millis;
-    while (g->world_millis - seen_at < ttl) {
-        tick_world(*g, 1.0f / 30.0f);
+    const int64_t ttl = g->factors.hero.memory_ttl_ticks;
+    while (g->world_ticks - seen_at < ttl) {
+        step_world(*g);
     }
-    REQUIRE(g->world_millis - seen_at == ttl);
+    REQUIRE(g->world_ticks - seen_at == ttl);
     CHECK(find_char(*g, ae, b) != nullptr);  // still remembered at the exact boundary
 
     // One tick past the boundary: age > ttl, forgotten.
-    tick_world(*g, 1.0f / 30.0f);
-    REQUIRE(g->world_millis - seen_at > ttl);
+    step_world(*g);
+    REQUIRE(g->world_ticks - seen_at > ttl);
     CHECK(find_char(*g, ae, b) == nullptr);
 }
 
@@ -233,7 +233,7 @@ TEST_CASE("capacity: a 17th simultaneous sighting is dropped, not an incumbent")
     for (int i = 0; i < 17; ++i) {
         targets.push_back(spawn_into(*g, scout(static_cast<float>(i + 1), 0.0f, 0.0f)));
     }
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     entt::entity oe = g->slots[obs];
     const EntityMemory& mem = g->registry.get<EntityMemory>(oe);
@@ -253,18 +253,18 @@ TEST_CASE("capacity: a stale incumbent is evicted for a new sighting (tie -> lar
     for (int i = 0; i < 16; ++i) {
         targets.push_back(spawn_into(*g, scout(static_cast<float>(i + 1), 0.0f, 0.0f)));
     }
-    tick_world(*g, 1.0f / 30.0f);  // tick 1: all 16 seen, memory full
+    step_world(*g);  // tick 1: all 16 seen, memory full
 
     entt::entity oe = g->slots[obs];
     entt::entity stale_lo = g->slots[targets[0]];   // slot 1 (smallest)
     entt::entity stale_hi = g->slots[targets[15]];  // slot 16 (largest)
 
     // Move the LOWEST- and HIGHEST-slot incumbents out of radius together, so
-    // after the next tick both are stale with an EQUAL, older last_seen_millis
+    // after the next tick both are stale with an EQUAL, older last_seen_ticks
     // than the 14 that stay in radius and keep refreshing -- a genuine tie.
     g->registry.get<Position>(stale_lo).pos = glm::vec2(1000.0f, 1000.0f);
     g->registry.get<Position>(stale_hi).pos = glm::vec2(1000.0f, 1000.0f);
-    tick_world(*g, 1.0f / 30.0f);  // tick 2: targets[0]/targets[15] age; the rest refresh
+    step_world(*g);  // tick 2: targets[0]/targets[15] age; the rest refresh
 
     const EntityMemory& mem_before = g->registry.get<EntityMemory>(oe);
     REQUIRE(mem_before.char_count == BL_MAX_CHARS);
@@ -274,13 +274,13 @@ TEST_CASE("capacity: a stale incumbent is evicted for a new sighting (tie -> lar
     REQUIRE(hi != nullptr);
     CHECK_FALSE(lo->visible_now);
     CHECK_FALSE(hi->visible_now);
-    REQUIRE(lo->last_seen_millis == hi->last_seen_millis);  // the tie is set up
+    REQUIRE(lo->last_seen_ticks == hi->last_seen_ticks);  // the tie is set up
 
     // A 17th target comes into radius: the array is full, but the oldest-seen
     // entry (the tie) is NOT visible_now, so the newcomer is recorded rather
     // than dropped.
     uint32_t seventeenth = spawn_into(*g, scout(17.0f, 0.0f, 0.0f));
-    tick_world(*g, 1.0f / 30.0f);  // tick 3
+    step_world(*g);  // tick 3
 
     const EntityMemory& mem = g->registry.get<EntityMemory>(oe);
     CHECK(mem.char_count == BL_MAX_CHARS);
@@ -366,7 +366,7 @@ TEST_CASE("is_home is sticky: a non-hero's home never flips false when re-observ
     // is_home=false for a TaxCollectorState home every single tick --
     // is_home must stay true regardless (identity, not a live status).
     g->registry.get<Vision>(e).radius = 20.0f;
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     const MemoryBuilding* rec = find_building(g->registry.get<EntityMemory>(e), 0);
     REQUIRE(rec != nullptr);
@@ -411,7 +411,7 @@ TEST_CASE("is_home is LIVE for heroes: rehoming flips the old home false, the ne
             static_cast<int32_t>(b));
 
     // Tick so the hero's memory re-observes both the ruins of A and B.
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     const EntityMemory& mem = g->registry.get<EntityMemory>(e);
     const MemoryBuilding* old_home = find_building(mem, a);
@@ -455,7 +455,7 @@ TEST_CASE("building sighting: recorded when seen, alive flips false when destroy
     uint32_t bid = place_at(g, BuildingKind::Tavern, -40.0f, -35.0f);  // ~5 units away
     REQUIRE(bid != UINT32_MAX);
 
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
     entt::entity oe = g->slots[obs];
     const MemoryBuilding* rec = find_building(g->registry.get<EntityMemory>(oe), bid);
     REQUIRE(rec != nullptr);
@@ -463,7 +463,7 @@ TEST_CASE("building sighting: recorded when seen, alive flips false when destroy
     CHECK(rec->kind == static_cast<int32_t>(BuildingKind::Tavern));
 
     REQUIRE(destroy_at(g, bid) == 0);
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
     rec = find_building(g->registry.get<EntityMemory>(oe), bid);
     REQUIRE(rec != nullptr);
     CHECK_FALSE(rec->alive);
@@ -476,15 +476,15 @@ TEST_CASE("building sighting: destroyed out of sight keeps the memory's stale al
     make_observer(*g, obs);
     uint32_t bid = place_at(g, BuildingKind::Tavern, -40.0f, -35.0f);
     REQUIRE(bid != UINT32_MAX);
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
     entt::entity oe = g->slots[obs];
     REQUIRE(find_building(g->registry.get<EntityMemory>(oe), bid) != nullptr);
 
     // Move the observer far away, out of sight, THEN destroy the building.
     g->registry.get<Position>(oe).pos = glm::vec2(500.0f, 500.0f);
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
     REQUIRE(destroy_at(g, bid) == 0);
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     const MemoryBuilding* rec = find_building(g->registry.get<EntityMemory>(oe), bid);
     REQUIRE(rec != nullptr);
@@ -500,8 +500,8 @@ TEST_CASE("EntityMemory is deterministic: two identical runs match after sorting
     seed_town(a);
     seed_town(b);
     for (int i = 0; i < 50; ++i) {
-        tick_world(*a, 1.0f / 30.0f);
-        tick_world(*b, 1.0f / 30.0f);
+        step_world(*a);
+        step_world(*b);
     }
 
     REQUIRE(a->slots.size() == b->slots.size());
@@ -526,7 +526,7 @@ TEST_CASE("EntityMemory is deterministic: two identical runs match after sorting
             CHECK(ca[i].last_pos == cb[i].last_pos);
             CHECK(ca[i].last_hp == cb[i].last_hp);
             CHECK(ca[i].visible_now == cb[i].visible_now);
-            CHECK(ca[i].last_seen_millis == cb[i].last_seen_millis);
+            CHECK(ca[i].last_seen_ticks == cb[i].last_seen_ticks);
         }
 
         auto bda = sorted_buildings(ma);
@@ -539,23 +539,23 @@ TEST_CASE("EntityMemory is deterministic: two identical runs match after sorting
             CHECK(bda[i].door == bdb[i].door);
             CHECK(bda[i].alive == bdb[i].alive);
             CHECK(bda[i].is_home == bdb[i].is_home);
-            CHECK(bda[i].last_seen_millis == bdb[i].last_seen_millis);
+            CHECK(bda[i].last_seen_ticks == bdb[i].last_seen_ticks);
         }
     }
 }
 
-TEST_CASE("a smaller memory_ttl_millis factor forgets a stale sighting sooner") {
+TEST_CASE("a smaller memory_ttl_ticks factor forgets a stale sighting sooner") {
     auto g = make_world(BrainDesc{});
     // Direct field write, not Sim::SetFactors -- consistent with this suite's
-    // BadlandsGame*-fixture style (make_world/tick_world, not the Sim
+    // BadlandsGame*-fixture style (make_world/step_world, not the Sim
     // wrapper). This deliberately bypasses set_factors_of's sanitize_factors
     // boundary (sim.cpp); the value used (200, positive) is sanitize-clean
     // regardless, so the bypass changes nothing observable here.
-    g->factors.hero.memory_ttl_millis = 200;  // ~6 ticks, instead of the 10s default
+    g->factors.hero.memory_ttl_ticks = ticks_of(0.2f);  // 0.2s, instead of the 10s default
     uint32_t a = spawn_into(*g, scout(0.0f, 0.0f, 20.0f));
     make_observer(*g, a);
     uint32_t b = spawn_into(*g, scout(5.0f, 0.0f, 0.0f));
-    tick_world(*g, 1.0f / 30.0f);  // A sees B
+    step_world(*g);  // A sees B
 
     entt::entity ae = g->slots[a];
     REQUIRE(find_char(*g, ae, b) != nullptr);
@@ -566,7 +566,7 @@ TEST_CASE("a smaller memory_ttl_millis factor forgets a stale sighting sooner") 
     g->registry.get<Position>(g->slots[b]).pos = glm::vec2(500.0f, 500.0f);
     int ticks = 0;
     while (find_char(*g, ae, b) != nullptr && ticks < 30) {
-        tick_world(*g, 1.0f / 30.0f);
+        step_world(*g);
         ++ticks;
     }
     CHECK(find_char(*g, ae, b) == nullptr);

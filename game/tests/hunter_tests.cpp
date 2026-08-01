@@ -76,7 +76,7 @@ TEST_CASE("only a hunter hunts; a mercenary ignores deer") {
     // A plain mercenary right next to the deer does not hunt it.
     CharacterDesc merc = MercenaryDesc(4.0f, 0.0f);
     uint32_t mid = spawn_into(g, merc);  // Mercenary class by default
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
     CHECK(g.registry.get<HeroSimulationState>(g.slots[mid]).behavior != static_cast<int32_t>(Behavior::Hunt));
     // The deer survives the mercenary's presence (it may flee, but is not shot).
     CHECK(g.registry.valid(de));
@@ -91,13 +91,13 @@ TEST_CASE("a hunter runs down a deer and kills it") {
     uint32_t hunter = spawn_hunter(g, {0.0f, kCastleSpawnZ});
     entt::entity de = g.slots[deer];
 
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
     CHECK(g.registry.get<HeroSimulationState>(g.slots[hunter]).behavior ==
           static_cast<int32_t>(Behavior::Hunt));
 
     bool killed = false;
     for (int i = 0; i < 600; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         if (!g.registry.valid(de)) {
             killed = true;
             break;
@@ -124,24 +124,24 @@ TEST_CASE("a hunter hunts while it can, and rests once spent") {
     // tick and is hidden before the second decision happens.
     g.registry.get<Position>(e).pos = {0.0f, 0.0f};
     spawn_deer(g, {5.0f, 0.0f});          // prey right there
-    g.world_millis = g.millis_per_day / 2;   // daytime
+    g.world_ticks = g.ticks_per_day / 2;   // daytime
 
     // Rested: it hunts -- the very first wake (nothing running yet), one tick
     // is enough.
     g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
     CHECK(g.registry.get<HeroSimulationState>(e).behavior ==
           static_cast<int32_t>(Behavior::Hunt));
 
     // Spent: rest's urgency now dominates, and it heads home despite the prey
     // -- once it next wakes to notice. Think-on-wake means that is not
     // necessarily the very next tick: every wake schedules a guaranteed
-    // re-wake within idle_hint_millis (0.5-2s, scripts/brains/nim/hero.nim),
+    // re-wake within idle_hint_ticks (0.5-2s, scripts/brains/nim/hero.nim),
     // so a bounded few dozen ticks is the honest bound, not exactly one.
     g.registry.get<HeroSimulationState>(e).fatigue = 0.05f;
     bool went_home = false;
     for (int i = 0; i < 90 && !went_home; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         went_home = g.registry.get<HeroSimulationState>(e).behavior ==
                    static_cast<int32_t>(Behavior::GoHome);
     }

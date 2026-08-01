@@ -7,7 +7,7 @@
 #include "game_state.h"
 #include "heroes.h"
 #include "placement.h"
-#include "sim_internal.hpp"  // make_world / dispatch_into / characters_of / tick_world
+#include "sim_internal.hpp"  // make_world / dispatch_into / characters_of / step_world
 
 #include <catch_amalgamated.hpp>
 #include <entt/entt.hpp>
@@ -136,7 +136,7 @@ TEST_CASE("a hero enters a building, hides from Characters()'s drawable set, the
 
     // Tick past the stay: the hero reappears at the approach tile.
     for (int i = 0; i < 300 && game->registry.all_of<InsideBuilding>(e); ++i) {
-        tick_world(*game, 1.0f / 30.0f);
+        step_world(*game);
     }
     CHECK(!game->registry.all_of<InsideBuilding>(e));
     for (const auto& row : chars(game)) {

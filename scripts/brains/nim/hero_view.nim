@@ -9,7 +9,7 @@
 # the wire (a hero brain never perceives them, brain_abi.h says so), and the
 # full 8-deep threat list collapses to the nearest one -- the slot/dist react()
 # actually consults (nearest-first, per BlThreat's own doc, brain_abi.h). Also
-# dropped versus v1: thinkUntilMillis (HeroSimulationState's own deliberation
+# dropped versus v1: thinkUntilTicks (HeroSimulationState's own deliberation
 # pause -- unrelated to the intention contract, and nothing on this path reads
 # it anymore now that deliberation.nim is gone).
 #
@@ -38,7 +38,7 @@ type
     inventory*: int32
 
     # clock
-    nowMillis*: int64
+    nowTicks*: int64
     night*: bool
 
     # wander goal (drawn host-side; the block just walks to it)
@@ -72,6 +72,11 @@ type
     # combat (v3): advisory melee-lock status + this entity's own attack
     # loadout (a brain cannot pick an attack it cannot see).
     meleeLocked*: bool
+    # v6: are WE currently unseen? Only ever true on our own wire -- a sneaking
+    # entity is absent from everyone else's threat list -- so this is the one
+    # way the brain can tell it is already hidden and need not spend the
+    # cooldown again.
+    sneaking*: bool
     attackCount*: int32
     attacks*: array[BL_MAX_ATTACKS, BlViewAttack]
 
@@ -80,6 +85,12 @@ type
     # `arg`, so it must never be re-sorted or filtered on the way in.
     skillCount*: int32
     skills*: array[BL_MAX_SKILLS, BlViewSkill]
+
+    # nav window (v6): the ground near this hero, nearest-first, as the host
+    # measured it. Non-empty ONLY for a hero owning a point-targeted skill --
+    # nobody else can spend it, so nobody else is shown it.
+    navPolyCount*: int32
+    navPolys*: array[BL_MAX_NAV_POLYS, BlNavPoly]
 
     # exploration
     hasExploreGoal*: bool
@@ -105,7 +116,7 @@ type
     # already mid-MoveTo/etc. on a spurious wake.
     currentActivity*: int32       # ActivityId this entity is doing now; -1 = none yet
     intentionKind*: int32         # BL_INT_*; BL_INT_NONE = nothing running
-    intentionWakeAt*: int64       # CurrentIntention.wake_at_millis; 0 = no deadline
+    intentionWakeAt*: int64       # CurrentIntention.wake_at_ticks; 0 = no deadline
 
 proc viewFromWire*(w: BlViewWire): HeroView =
   result.slot = w.self.slot
@@ -115,7 +126,7 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   result.healthFrac = w.self.health_frac
   result.inventory = w.self.inventory
   result.night = w.self.night != 0'u32
-  result.nowMillis = w.self.world_millis
+  result.nowTicks = w.self.world_ticks
   result.currentActivity = w.self.current_activity
   result.intentionKind = w.self.intention_kind
   result.intentionWakeAt = w.self.intention_wake_at
@@ -152,9 +163,12 @@ proc viewFromWire*(w: BlViewWire): HeroView =
     result.threatThreat = w.suggest.threats[0].threat
 
   for i in 0 ..< w.status_count:
+    # No early break: more than one of these matters now, and the list is at
+    # most BL_MAX_STATUSES long.
     if w.statuses[i].kind == BL_ST_MELEE_LOCKED.uint32:
       result.meleeLocked = true
-      break
+    elif w.statuses[i].kind == BL_ST_SNEAKING.uint32:
+      result.sneaking = true
 
   result.attackCount = w.attack_count
   for i in 0 ..< w.attack_count:
@@ -163,3 +177,7 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   result.skillCount = w.skill_count
   for i in 0 ..< w.skill_count:
     result.skills[i] = w.skills[i]
+
+  result.navPolyCount = w.nav_poly_count
+  for i in 0 ..< w.nav_poly_count:
+    result.navPolys[i] = w.nav_polys[i]

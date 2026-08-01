@@ -13,11 +13,11 @@
 //
 // Phase is DERIVED FROM THE CLOCK rather than stored, so there is no phase enum
 // to keep in sync with the timers:
-//     world_millis <  resolve_at  ->  WIND-UP   (cancellable)
-//     world_millis >= resolve_at  ->  RECOVERY  (committed)
-//     world_millis >= free_at     ->  gone
+//     world_ticks <  resolve_at  ->  WIND-UP   (cancellable)
+//     world_ticks >= resolve_at  ->  RECOVERY  (committed)
+//     world_ticks >= free_at     ->  gone
 //
-// Determinism: both deadlines are int64 milliseconds off the world clock, so a
+// Determinism: both deadlines are int64 ticks off the world clock, so a
 // strike resolves on the same tick live and on replay. A strike is derived
 // state -- it follows from a logged Attack command plus the clock -- so it is
 // NOT itself a command, exactly like projectile arrival (combat.h's
@@ -60,7 +60,7 @@ bool winding_up(const entt::registry& reg, entt::entity e);
 // Returns whether anything was cancelled.
 bool cancel_strike(BadlandsGame& game, entt::entity e);
 
-// Per-tick sweep (tick_world, sim.cpp): resolves strikes whose wind-up has
+// Per-tick sweep (step_world, sim.cpp): resolves strikes whose wind-up has
 // elapsed -- melee damage applied, or the projectile spawned, via combat.h's
 // deliver_strike -- stamping the attack's cooldown AT RESOLVE, then drops
 // those whose recovery has elapsed. Runs unconditionally, live and replaying

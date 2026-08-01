@@ -230,6 +230,116 @@ void clip_river_graph_to_window(RiverGraph& g, float world_size_m) {
   }
 }
 
+namespace {
+
+float polyline_length_m(const std::vector<glm::vec2>& pts) {
+  float len = 0.0f;
+  for (size_t i = 1; i < pts.size(); ++i) {
+    const glm::vec2 d = pts[i] - pts[i - 1];
+    len += std::sqrt(d.x * d.x + d.y * d.y);
+  }
+  return len;
+}
+
+}  // namespace
+
+void prune_river_graph_by_length(RiverGraph& g, float min_length_m) {
+  if (!(min_length_m > 0.0f)) return;
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    const size_t nn = g.nodes.size();
+    std::vector<int> in_deg(nn, 0), out_deg(nn, 0);
+    std::vector<int32_t> single_out(nn, -1);
+    for (size_t ei = 0; ei < g.edges.size(); ++ei) {
+      const RiverEdge& e = g.edges[ei];
+      if (e.to >= 0 && e.to < static_cast<int32_t>(nn)) in_deg[e.to]++;
+      if (e.from >= 0 && e.from < static_cast<int32_t>(nn)) {
+        out_deg[e.from]++;
+        single_out[e.from] = static_cast<int32_t>(ei);
+      }
+    }
+
+    // A BRANCH is the whole chain from a headwater down to the first
+    // confluence, not one reach. Measuring per reach was wrong: clipping splits
+    // a reach at the frame and gives each fragment its own start node, so every
+    // fragment looked like a headwater and the pass ate a 700 m trunk one
+    // fragment at a time (peak Q fell 0.7183 -> 0.0218 m3/s). Accumulating along
+    // the chain is immune to how the reach happens to be subdivided.
+    std::vector<uint8_t> drop(g.edges.size(), 0);
+    for (size_t ei = 0; ei < g.edges.size(); ++ei) {
+      const RiverEdge& e0 = g.edges[ei];
+      if (e0.from < 0 || e0.from >= static_cast<int32_t>(nn)) continue;
+      if (in_deg[e0.from] != 0) continue;  // not a headwater
+      float len = 0.0f;
+      std::vector<size_t> chain;
+      int32_t cur = static_cast<int32_t>(ei);
+      while (cur >= 0) {
+        chain.push_back(static_cast<size_t>(cur));
+        len += polyline_length_m(g.edges[cur].points_m);
+        if (len >= min_length_m) break;  // long enough; stop walking
+        const int32_t to = g.edges[cur].to;
+        // Stop at a confluence: past it the water is no longer this branch.
+        if (to < 0 || to >= static_cast<int32_t>(nn) || in_deg[to] >= 2 ||
+            out_deg[to] != 1)
+          break;
+        cur = single_out[to];
+      }
+      // A branch that ENDS IN WATER is kept whatever its length. Channel
+      // geometry stops at the shoreline, so a river crossing a lake arm survives
+      // only as short dry connectors between arms -- on this window the four
+      // highest-discharge reaches are 1.0-4.5 m long and carry 0.72 m3/s, the
+      // trunk itself. Length is a noise filter for channels that peter out on dry
+      // ground; a channel that reaches water is a feature no matter how short.
+      const int32_t last_to = g.edges[chain.back()].to;
+      const bool ends_in_water =
+          last_to >= 0 && last_to < static_cast<int32_t>(nn) &&
+          (g.nodes[last_to].kind == RiverNodeKind::LakeInlet ||
+           g.nodes[last_to].kind == RiverNodeKind::LakeOutlet);
+      if (len < min_length_m && !ends_in_water)
+        for (size_t c : chain) drop[c] = 1;
+    }
+
+    std::vector<RiverEdge> kept;
+    kept.reserve(g.edges.size());
+    for (size_t ei = 0; ei < g.edges.size(); ++ei) {
+      if (drop[ei]) { changed = true; continue; }
+      kept.push_back(std::move(g.edges[ei]));
+    }
+    g.edges = std::move(kept);
+  }
+
+  // Compact the node set to what survived and re-derive the kinds, exactly as
+  // the width prune does -- a confluence that lost every tributary is a source.
+  std::vector<int32_t> remap(g.nodes.size(), -1);
+  std::vector<RiverNode> nodes;
+  const auto keep_node = [&](int32_t id) -> int32_t {
+    if (id < 0 || id >= static_cast<int32_t>(remap.size())) return -1;
+    if (remap[id] < 0) {
+      remap[id] = static_cast<int32_t>(nodes.size());
+      nodes.push_back(g.nodes[id]);
+    }
+    return remap[id];
+  };
+  for (RiverEdge& e : g.edges) {
+    e.from = keep_node(e.from);
+    e.to = keep_node(e.to);
+  }
+  std::vector<int> in_deg(nodes.size(), 0);
+  for (const RiverEdge& e : g.edges)
+    if (e.to >= 0) in_deg[e.to]++;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    RiverNode& n = nodes[i];
+    if (n.kind == RiverNodeKind::LakeInlet || n.kind == RiverNodeKind::LakeOutlet ||
+        n.kind == RiverNodeKind::Mouth)
+      continue;
+    if (in_deg[i] == 0) n.kind = RiverNodeKind::Source;
+    else if (in_deg[i] >= 2) n.kind = RiverNodeKind::Confluence;
+  }
+  g.nodes = std::move(nodes);
+}
+
 void prune_river_graph_by_width(RiverGraph& g, float min_width_m) {
   if (!(min_width_m > 0.0f)) return;
 
@@ -301,7 +411,8 @@ void prune_river_graph_by_width(RiverGraph& g, float min_width_m) {
 WindowRivers build_window_rivers(const MapArtifacts& art, float world_size_m,
                                  const std::vector<RiverInflow>& inflows,
                                  const ErosionParams& p,
-                                 float min_channel_width_m) {
+                                 float min_channel_width_m,
+                                 float min_branch_length_m) {
   WindowRivers out;
   const int w = art.heightmap.width, h = art.heightmap.height;
   if (w <= 0 || h <= 0 || world_size_m <= 0.0f) return out;
@@ -365,6 +476,10 @@ WindowRivers build_window_rivers(const MapArtifacts& art, float world_size_m,
   // Trim the ghost overhang and mint a node exactly where each reach crosses.
   clip_river_graph_to_window(out.graph, world_size_m);
   prune_river_graph_by_width(out.graph, min_channel_width_m);
+  // Length AFTER width: the width cut trims reaches back to where they qualify,
+  // so a reach's length is only final once that has happened. Running length
+  // first would measure stretches the width cut was about to discard anyway.
+  prune_river_graph_by_length(out.graph, min_branch_length_m);
 
   // Report drainage over the REAL window, not the padded grid.
   out.drainage_area_m2 = Field2D<float>(w, h, 0.0f);

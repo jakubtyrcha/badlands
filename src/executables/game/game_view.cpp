@@ -199,8 +199,8 @@ constexpr double kRebakeIntervalSeconds = 1.0 / 20.0;  // ~20 Hz sky/IBL refresh
 
 // Day/night cadence: a full 24 in-game-hour cycle takes this many real-world
 // MINUTES at 1x sim speed. THE single knob -- it drives both the sun and the
-// sim's own day (WorldConfig::millis_per_day, set in SeedTown via
-// MillisPerDayForSimSeconds), so the sky and the world agree on what time it is.
+// sim's own day (WorldConfig::ticks_per_day, set in SeedTown via
+// TicksPerDayForSimSeconds), so the sky and the world agree on what time it is.
 // They are separate clocks with separate units, which is exactly why one number
 // has to feed both: left independent they drift into disagreeing about night,
 // and heroes take night behaviour under a midday sky.
@@ -449,7 +449,7 @@ void GameView::SeedTown() {
   // One number for both clocks -- the sky (sim_clock_.real_seconds_per_day, set
   // in Initialize) and the sim's own day. Left unset they disagree, and heroes
   // act on night behaviour while the sky shows something else.
-  world_cfg.millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
+  world_cfg.ticks_per_day = badlands::TicksPerDayForSimSeconds(kRealSecondsPerDay);
   sim_ = badlands::Sim(world_cfg, brain_desc);
 
   // Behaviour tuning as data, over the compiled defaults (a missing file keeps
@@ -1139,7 +1139,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     scene_renderer_->GetFogSimulation().AddTime(static_cast<float>(sim_dt));
   }
 
-  // Fixed-interval game logic: run sim_.Tick(kTickDt) until we've caught up to
+  // Fixed-interval game logic: run sim_.Step() until we've caught up to
   // the clock's tick target. Bounded (real dt is clamped in Advance); the
   // budget is pure spiral-of-death safety. Ticks scale with sim speed because
   // the target is derived from sim time.
@@ -1149,7 +1149,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
     const unsigned long long tick_target = sim_clock_.TickTarget();
     int budget = kMaxSimTicksPerFrame;
     while (sim_ticks_done_ < tick_target && budget-- > 0) {
-      sim_.Tick(static_cast<float>(kTickDt));
+      sim_.Step();
       ++sim_ticks_done_;
       ticked_this_frame = true;
     }

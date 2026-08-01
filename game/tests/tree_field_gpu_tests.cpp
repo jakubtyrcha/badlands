@@ -334,15 +334,24 @@ namespace {
 constexpr float kFieldTreeHeight = kFoliagePreviewHeight;
 // Aliases the shared kFoliageVoxelWorldSizes (preview-space cell sizes per
 // LOD -- see foliage_voxel_config.hpp for the constant itself + its Phase 6
-// retune derivation) under this file's existing local name.
-constexpr std::array<float, GpuInstanceRenderer::kMaxLods> kFieldVoxelWorldSizes =
-    kFoliageVoxelWorldSizes;
-// Straddled by the ~10/25/45m camera distances the LOD-selection test below
-// uses: 10 < 15 -> LOD0, 15 <= 25 < 35 -> LOD1, 45 >= 35 -> LOD2.
-constexpr std::array<float, 2> kFieldLodThresholds = {15.0f, 35.0f};
+// retune derivation) under this file's existing local name. Its LENGTH is the
+// tree model's runtime LOD count: within the engine's kMaxLods cap, a model
+// declares as many levels as it has meshes for, and foliage's default is this
+// whole chain (L0..L3).
+constexpr std::array<float, kFoliageVoxelWorldSizes.size()>
+    kFieldVoxelWorldSizes = kFoliageVoxelWorldSizes;
+static_assert(kFieldVoxelWorldSizes.size() <= GpuInstanceRenderer::kMaxLods);
+// One cutoff between each adjacent pair of the model's levels. The first two
+// are straddled by the ~10/25/45m camera distances the LOD-selection test
+// below uses: 10 < 15 -> LOD0, 15 <= 25 < 35 -> LOD1, 45 >= 35 -> LOD2. The
+// rest sit far enough out that those same distances never reach LOD3, so the
+// test's expectations are unaffected by the chain's length changing.
+constexpr std::array<float, kFieldVoxelWorldSizes.size() - 1>
+    kFieldLodThresholds = {15.0f, 35.0f, 500.0f};
 
 // A TreeField for OakPreset built the same way ModelViewerView's Multi mode
-// builds one (RebuildScene's `multi` branch): voxelize 3 LODs once (Oak has
+// builds one (RebuildScene's `multi` branch): voxelize every LOD of the
+// model's chain once (Oak has
 // no known-empty-LOD gap -- unlike some pine presets, see
 // leaf_voxelizer.hpp -- so every LOD is asserted non-empty here), pass the
 // span to BuildTreeField. `s` (native -> kFieldTreeHeight) is kept around for
@@ -353,8 +362,9 @@ struct OakField {
   float s = 1.0f;
 };
 
-OakField BuildOakField(TestGpu& g, uint32_t capacity,
-                       std::array<float, 2> lod_thresholds) {
+OakField BuildOakField(
+    TestGpu& g, uint32_t capacity,
+    std::array<float, kFieldVoxelWorldSizes.size() - 1> lod_thresholds) {
   const TreeOptions oak = OakPreset();
   const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(oak);
   TexturedMeshResult bark = GenerateTreeMesh(oak, skeleton);
@@ -362,8 +372,8 @@ OakField BuildOakField(TestGpu& g, uint32_t capacity,
   const float s = kFieldTreeHeight / std::max(h, 0.001f);
 
   const TexturedMeshResult leaves = GenerateLeafMesh(oak, skeleton);
-  std::array<TexturedMeshResult, GpuInstanceRenderer::kMaxLods> leaf_lod_meshes;
-  for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
+  std::array<TexturedMeshResult, kFieldVoxelWorldSizes.size()> leaf_lod_meshes;
+  for (size_t lod = 0; lod < leaf_lod_meshes.size(); ++lod) {
     LeafVoxelizeOptions opts;
     opts.cell_size = kFieldVoxelWorldSizes[lod] / s;
     leaf_lod_meshes[lod] =
@@ -478,6 +488,11 @@ TEST_CASE("TreeField (voxel leaves): HasPass(kDeferred) && HasPass(kShadow), "
   REQUIRE(of.tf->field->IsValid());
   CHECK(of.tf->field->HasPass(InstancedMeshField::PassKind::kDeferred));
   CHECK(of.tf->field->HasPass(InstancedMeshField::PassKind::kShadow));
+  // The tree model's RUNTIME LOD count is however many crown meshes it was
+  // built with -- the foliage default, kFoliageVoxelWorldSizes' whole L0..L3
+  // chain -- NOT the engine's kMaxLods cap.
+  CHECK(of.tf->lod_buffers.size() == kFoliageVoxelWorldSizes.size());
+  CHECK(kFoliageVoxelWorldSizes.size() < GpuInstanceRenderer::kMaxLods);
 
   const glm::mat4 xf = OakInstanceTransform(of);
   const Aabb world_bounds = OakInstanceWorldBounds(of, xf);
@@ -685,10 +700,10 @@ TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
   // Oak has no known-empty-LOD gap at a real cell size (see BuildOakField's
   // comment above) -- deliberately blank LOD 1 here (left default-constructed,
   // vertex_count=0) to exercise the silent-empty-slot path this test pins,
-  // while LOD 0/2 stay real non-empty crowns so the warning can be checked to
-  // name ONLY the deliberately-blanked LOD.
-  std::array<TexturedMeshResult, GpuInstanceRenderer::kMaxLods> leaf_lod_meshes;
-  for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
+  // while every other LOD stays a real non-empty crown so the warning can be
+  // checked to name ONLY the deliberately-blanked LOD.
+  std::array<TexturedMeshResult, kFieldVoxelWorldSizes.size()> leaf_lod_meshes;
+  for (size_t lod = 0; lod < leaf_lod_meshes.size(); ++lod) {
     if (lod == 1) continue;  // leave default-constructed (empty)
     leaf_lod_meshes[lod] = VoxelizeLeafCards(leaves.mesh, oak.leaves.silhouette,
                                              LeafVoxelizeOptions{});

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <string>
 #include <utility>
 
 #include <glm/gtc/matrix_transform.hpp>  // glm::translate, glm::rotate, glm::scale
@@ -38,10 +39,20 @@ constexpr float kFloorUvRepeatSpacing = 2.0f;
 // Multi-mode paths) rather than a blanket rename.
 constexpr float kTreePreviewHeight = kFoliagePreviewHeight;
 
-// Multi mode ("LOD 4"): a grid of one instanced tree model with dynamic GPU
-// LOD (distance-based, chosen live by InstancedMeshField::Cull -- NOT the
-// manual kDefaultLodRatios switch below (mesh_lod.hpp), which only applies to
-// the single-tree Voxel L0/L1/L2 (lod_level_ 1/2/3) paths).
+// lod_level_ layout (ModelViewerView::kVoxelLodCount / kMultiLodLevel, in the
+// header so SetInitialLod's clamp and main_viewer's --lod parse share it):
+// 0 = "Original" (leaf cards), 1..kVoxelLodCount = "Voxel L0..L3" (one per
+// kFoliageVoxelWorldSizes entry), kMultiLodLevel = "Multi".
+constexpr int kVoxelLodCount = ModelViewerView::kVoxelLodCount;
+constexpr int kMultiLodLevel = ModelViewerView::kMultiLodLevel;
+
+// Multi mode: a grid of one instanced tree model with dynamic GPU LOD
+// (distance-based, chosen live by InstancedMeshField::Cull -- NOT the manual
+// per-level switch the single-tree Voxel L0..L3 paths use below). The tree
+// model declares kVoxelLodCount runtime LODs (one per kFoliageVoxelWorldSizes
+// entry), which is what a model gets to choose within the engine's
+// GpuInstanceRenderer::kMaxLods compile-time cap -- so Multi mode and the
+// single-tree levels now walk the SAME chain, L0..L3.
 constexpr int kGridN = 16;
 constexpr float kGridSpacing = 8.0f;
 // Golden angle: a constant per-instance yaw increment that avoids any
@@ -50,30 +61,31 @@ const float kYawIncrement = glm::radians(137.508f);
 // Larger than the single-tree kFloorSize -- the 16x16 grid at kGridSpacing
 // spans 120 world units; 160 gives it a visible margin.
 constexpr float kMultiFloorSize = 160.0f;
-// GPU LOD thresholds (near/mid boundaries), retuned for volumetric-foliage
-// Phase 5's voxel-crown fields (the pre-Phase-5 {95, 135} values were tuned
-// for the old billboard-card leaf field). Derivation: solve
-// kFoliageVoxelTargetPx's own world_size = target_px * distance / focal_px
-// formula (see that constant's comment below) for distance, using each
-// LOD's own kFoliageVoxelWorldSizes entry as `world_size` --
-// distance = world_size * focal_px / target_px = world_size * 935 / 8.
-// LOD0->LOD1 (world_size = kFoliageVoxelWorldSizes[0] = 0.15m): ~17.5m,
-// rounded to 18. LOD1->LOD2 (world_size = kFoliageVoxelWorldSizes[1] =
-// 0.20m, Phase 6-retuned -- see that constant's comment): ~23.4m, rounded to
-// 23. Screenshot-tuned in Phase 6 (both the empty-crown fix and this
-// threshold's re-derivation off it).
-constexpr std::array<float, 2> kMultiLodThresholds = {18.0f, 23.0f};
+// GPU LOD thresholds, one cutoff between each adjacent pair of the tree
+// model's kVoxelLodCount levels, retuned for volumetric-foliage Phase 5's
+// voxel-crown fields (the pre-Phase-5 {95, 135} values were tuned for the old
+// billboard-card leaf field). Derivation: solve kFoliageVoxelTargetPx's own
+// world_size = target_px * distance / focal_px formula (see that constant's
+// comment below) for distance, using each LOD's own kFoliageVoxelWorldSizes
+// entry as `world_size` -- distance = world_size * focal_px / target_px =
+// world_size * 935 / 8. LOD0->LOD1 (world_size = 0.15m): ~17.5m, rounded to
+// 18. LOD1->LOD2 (0.20m, Phase 6-retuned -- see that constant's comment):
+// ~23.4m, rounded to 23. LOD2->LOD3 (0.60m): ~70.1m, rounded to 70. The first
+// two were screenshot-tuned in Phase 6 (both the empty-crown fix and their
+// re-derivation off it); the last is the formula's value as-is.
+constexpr std::array<float, kVoxelLodCount - 1> kMultiLodThresholds = {
+    18.0f, 23.0f, 70.0f};
 
-// Voxel-crown LOD (volumetric-foliage Phase 3): three progressively coarser
-// tet-voxelization cell sizes, one per Voxel L0/L1/L2 mode
+// Voxel-crown LOD (volumetric-foliage Phase 3): progressively coarser
+// tet-voxelization cell sizes, one per Voxel L0..L3 mode
 // (kFoliageVoxelWorldSizes[lod_level_ - 1] -- see foliage_voxel_config.hpp,
 // included above, for the constant itself + its Phase 6 retune derivation),
 // given in WORLD (preview) space -- RebuildScene converts to the tree's own
 // native units by dividing by `s` (the same kTreePreviewHeight rescale bark/
 // leaves already go through) before passing it to
 // LeafVoxelizeOptions::cell_size. kFoliageVoxelTargetPx itself is not read by
-// any distance-based selection (Voxel L0/L1/L2, lod_level_ 1..3, is still a
-// manual mode switch) -- it documents the screen-space budget
+// any distance-based selection (Voxel L0..L3 is still a manual mode switch)
+// -- it documents the screen-space budget
 // kFoliageVoxelWorldSizes was derived from: world_size = target_px *
 // distance / focal_px, i.e. a world-space threshold distance = size *
 // focal_px / target_px. At 1920x1080/60deg vertical fovy, focal_px =
@@ -258,13 +270,14 @@ void ModelViewerView::RebuildScene() {
   // repopulates it. Clearing unconditionally (rather than only in the
   // non-Multi branches) also releases the previous Multi-mode field's GPU
   // resources the moment a rebuild switches away from it (generator change
-  // or LOD 4 -> 0/1/2/3). field_ptr_ is also nulled for hygiene/safety.
+  // or Multi -> any single-tree level). field_ptr_ is also nulled for
+  // hygiene/safety.
   scene_context_.instanced_field_count = 0;
   tree_field_.reset();
   field_ptr_ = nullptr;
 
   const MeshGenerator& gen = generators_[generator_index_];
-  const bool multi = gen.tree.has_value() && lod_level_ == 4;
+  const bool multi = gen.tree.has_value() && lod_level_ == kMultiLodLevel;
 
   const float floor_size = multi ? kMultiFloorSize : kFloorSize;
   AddFloor(scene_, floor_size, matlib_.SolidColor(kFloorGray, kFloorRoughness),
@@ -298,12 +311,12 @@ void ModelViewerView::RebuildScene() {
 
     const TexturedMeshResult leaves_for_voxelize =
         GenerateLeafMesh(*gen.tree, skeleton);
-    std::array<TexturedMeshResult, GpuInstanceRenderer::kMaxLods>
-        leaf_lod_meshes;
-    for (uint32_t lod = 0; lod < GpuInstanceRenderer::kMaxLods; ++lod) {
+    std::array<TexturedMeshResult, kVoxelLodCount> leaf_lod_meshes;
+    for (int lod = 0; lod < kVoxelLodCount; ++lod) {
       LeafVoxelizeOptions voxel_opts;
-      voxel_opts.cell_size = kFoliageVoxelWorldSizes[lod] / s;
-      leaf_lod_meshes[lod] = VoxelizeLeafCards(
+      voxel_opts.cell_size =
+          kFoliageVoxelWorldSizes[static_cast<size_t>(lod)] / s;
+      leaf_lod_meshes[static_cast<size_t>(lod)] = VoxelizeLeafCards(
           leaves_for_voxelize.mesh, gen.tree->leaves.silhouette, voxel_opts);
     }
 
@@ -380,9 +393,10 @@ void ModelViewerView::RebuildScene() {
     // attached to the branches):
     //   - lod_level_ == 0 ("Original"): deferred solid bark + forward-opaque
     //     alpha-cutout leaf cards -- the pre-Phase-3 path, untouched.
-    //   - lod_level_ == 1..3 ("Voxel L0/L1/L2"): deferred solid bark
-    //     (simplified per kDefaultLodRatios) + a deferred VoxelFoliage tet
-    //     crown (volumetric-foliage Phase 3) in place of the leaf cards.
+    //   - lod_level_ == 1..kVoxelLodCount ("Voxel L0..L3"): deferred solid
+    //     bark (simplified per SimplifyBarkForVoxelLod) + a deferred
+    //     VoxelFoliage tet crown (volumetric-foliage Phase 3) in place of the
+    //     leaf cards.
     const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
     TexturedMeshResult bark = GenerateTreeMesh(*gen.tree, skeleton);
     const float h = bark.local_bounds.max.y - bark.local_bounds.min.y;
@@ -397,18 +411,13 @@ void ModelViewerView::RebuildScene() {
     // Manual LOD switch: simplify the bark mesh in place before it's moved
     // into the scene. local_bounds is left as-is (simplification stays
     // within the mesh extent, so orbit framing above is unaffected). Voxel
-    // L0/L1/L2 (lod_level_ 1..3) map onto kDefaultLodRatios[lod_level_ - 1]
-    // (Voxel L0 = ratio 1.0, i.e. full bark, same as the old lod-1 mapping
-    // shifted by one now that index 0 means "Original" instead of "full
-    // detail"); Original (0) stays untouched via the guard below.
+    // L0..L3 (lod_level_ 1..kVoxelLodCount) map onto voxel level
+    // lod_level_ - 1 (Voxel L0 = ratio 1.0, i.e. full bark, same as the old
+    // lod-1 mapping shifted by one now that index 0 means "Original" instead
+    // of "full detail"); Original (0) stays untouched via the guard below.
     if (lod_level_ > 0) {
-      SimplifiedMesh simplified = SimplifyMesh(
-          bark.mesh.vertices, kTexturedMeshFloatsPerVertex, bark.mesh.indices,
-          kDefaultLodRatios[lod_level_ - 1]);
-      bark.mesh.vertices = std::move(simplified.vertices);
-      bark.mesh.indices = std::move(simplified.indices);
-      bark.mesh.vertex_count = simplified.vertex_count;
-      bark.mesh.dirty = true;
+      SimplifyBarkForVoxelLod(bark.mesh,
+                              static_cast<size_t>(lod_level_ - 1));
     }
     bark_tris_ = static_cast<int>(bark.mesh.indices.size() / 3);
     AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
@@ -441,7 +450,7 @@ void ModelViewerView::RebuildScene() {
                                    lm.factory, lm.params, xf);
       }
     } else {
-      // Voxel L0/L1/L2: tet-voxelize the leaf cards instead of simplifying
+      // Voxel L0..L3: tet-voxelize the leaf cards instead of simplifying
       // them. cell_size is world_size / s -- kFoliageVoxelWorldSizes is in
       // preview (post-rescale) world units, LeafVoxelizeOptions::cell_size
       // wants the tree's own native units, and `s` is the same
@@ -544,15 +553,17 @@ void ModelViewerView::DrawUI() {
     ImGui::Separator();
     ImGui::TextUnformatted("LOD");
     // One per line (rather than the old 0/1/2/Multi single-row SameLine
-    // chain) -- the longer volumetric-foliage labels ("Voxel L0/L1/L2")
+    // chain) -- the longer volumetric-foliage labels ("Voxel L0".."Voxel L3")
     // would overflow this window's 200px width floor packed onto one row.
     ImGui::RadioButton("Original", &lod, 0);
-    ImGui::RadioButton("Voxel L0", &lod, 1);
-    ImGui::RadioButton("Voxel L1", &lod, 2);
-    ImGui::RadioButton("Voxel L2", &lod, 3);
-    ImGui::RadioButton("Multi", &lod, 4);
-    if (lod != 4) {
-      ImGui::Text("bark: %d tris   leaves: %d tris", bark_tris_, leaf_tris_);
+    for (int level = 0; level < kVoxelLodCount; ++level) {
+      const std::string label = "Voxel L" + std::to_string(level);
+      ImGui::RadioButton(label.c_str(), &lod, level + 1);
+    }
+    ImGui::RadioButton("Multi", &lod, kMultiLodLevel);
+    if (lod != kMultiLodLevel) {
+      ImGui::Text("bark: %d   leaves: %d   total: %d tris", bark_tris_,
+                  leaf_tris_, bark_tris_ + leaf_tris_);
     }
   }
   ImGui::End();

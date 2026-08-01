@@ -1,6 +1,6 @@
 # Test-only fixture brain (v2, the intention contract): implements the same
 # ABI surface as hero.nim, but bl_tick always suggests BL_INT_IDLE (activity
-# label ActivityId::Idle) with duration_millis 0 -- "idle until woken"
+# label ActivityId::Idle) with duration_ticks 0 -- "idle until woken"
 # (apply_intention's own sentinel: 0 is "no deadline", so this intention
 # never self-completes and never spuriously re-wakes on a timer; see
 # game/src/intention.h's CurrentIntention doc). Every existing test that
@@ -30,8 +30,8 @@ proc brainTick(slot: int32): int32 =
   if g_view_buf.version != BL_ABI_VERSION.uint32:
     return 1
   g_out_buf = BlSuggestionWire(
-    idle_hint_millis: 0,
-    duration_millis: 0,       # 0 = idle until woken, never self-completes
+    idle_hint_ticks: 0,
+    duration_ticks: 0,       # 0 = idle until woken, never self-completes
     intention_kind: BL_INT_IDLE,
     activity_label: 0,        # ActivityId::Idle
     point_x: 0.0,

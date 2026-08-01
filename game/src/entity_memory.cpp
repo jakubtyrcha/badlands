@@ -16,7 +16,7 @@ namespace badlands {
 namespace {
 
 // The shared eviction-candidate scan both upsert_char and upsert_building run
-// when their array is full: the oldest-last_seen_millis entry, ties broken
+// when their array is full: the oldest-last_seen_ticks entry, ties broken
 // toward the LARGEST key (`key(entry)` -- a slot for chars, an id for
 // buildings). Every POLICY difference in what happens once the candidate is
 // found (chars: drop the newcomer instead if the candidate is visible_now;
@@ -28,8 +28,8 @@ int32_t find_oldest_index(const E* entries, int32_t count, KeyFn key) {
     for (int32_t i = 1; i < count; ++i) {
         const E& c = entries[i];
         const E& best = entries[oldest];
-        if (c.last_seen_millis < best.last_seen_millis ||
-            (c.last_seen_millis == best.last_seen_millis && key(c) > key(best))) {
+        if (c.last_seen_ticks < best.last_seen_ticks ||
+            (c.last_seen_ticks == best.last_seen_ticks && key(c) > key(best))) {
             oldest = i;
         }
     }
@@ -38,7 +38,7 @@ int32_t find_oldest_index(const E* entries, int32_t count, KeyFn key) {
 
 // Refreshes (or inserts) `slot`'s entry as seen right now. On a full array,
 // evicts the oldest-seen entry (ties -> largest slot) -- EXCEPT: a visible
-// entry's last_seen_millis == `now`, the maximum possible value this tick, so
+// entry's last_seen_ticks == `now`, the maximum possible value this tick, so
 // the oldest entry can only be visible_now if EVERY entry currently is. In
 // that case the newcomer is dropped rather than bumping someone mid-sighting
 // (attention is full) -- see entity_memory.h / the task brief for why this is
@@ -53,7 +53,7 @@ void upsert_char(EntityMemory& mem, uint32_t slot, int32_t archetype, int32_t te
             c.last_pos = pos;
             c.last_hp = hp;
             c.visible_now = true;
-            c.last_seen_millis = now;
+            c.last_seen_ticks = now;
             return;
         }
     }
@@ -65,7 +65,7 @@ void upsert_char(EntityMemory& mem, uint32_t slot, int32_t archetype, int32_t te
     fresh.last_pos = pos;
     fresh.last_hp = hp;
     fresh.visible_now = true;
-    fresh.last_seen_millis = now;
+    fresh.last_seen_ticks = now;
 
     if (mem.char_count < BL_MAX_CHARS) {
         mem.chars[mem.char_count++] = fresh;
@@ -111,7 +111,7 @@ void upsert_building(EntityMemory& mem, uint32_t id, int32_t kind, glm::vec2 doo
             b.door = door;
             b.alive = alive;
             b.is_home = authoritative ? is_home : (b.is_home || is_home);
-            b.last_seen_millis = now;
+            b.last_seen_ticks = now;
             return;
         }
     }
@@ -122,7 +122,7 @@ void upsert_building(EntityMemory& mem, uint32_t id, int32_t kind, glm::vec2 doo
     fresh.door = door;
     fresh.alive = alive;
     fresh.is_home = is_home;
-    fresh.last_seen_millis = now;
+    fresh.last_seen_ticks = now;
 
     if (mem.building_count < kMemoryMaxBuildings) {
         mem.buildings[mem.building_count++] = fresh;
@@ -172,8 +172,8 @@ private:
 
 void update_entity_memory(BadlandsGame& game) {
     entt::registry& reg = game.registry;
-    const int64_t now = game.world_millis;
-    const int64_t ttl = game.factors.hero.memory_ttl_millis;
+    const int64_t now = game.world_ticks;
+    const int64_t ttl = game.factors.hero.memory_ttl_ticks;
     const auto& buildings = game.placement.buildings;
     ApproachTileMemo approach_tile(game.placement);
 
@@ -229,10 +229,10 @@ void update_entity_memory(BadlandsGame& game) {
         }
 
         // TTL: any char entry not refreshed above ages out once too stale.
-        // A visible entry has last_seen_millis == now, so it never qualifies
+        // A visible entry has last_seen_ticks == now, so it never qualifies
         // here. Dense swap-remove -- array order is not part of the contract.
         for (int32_t i = 0; i < mem->char_count;) {
-            if (now - mem->chars[i].last_seen_millis > ttl) {
+            if (now - mem->chars[i].last_seen_ticks > ttl) {
                 mem->chars[i] = mem->chars[mem->char_count - 1];
                 --mem->char_count;
             } else {
@@ -290,7 +290,7 @@ void seed_home_town_memory(BadlandsGame& game, EntityMemory& mem, uint32_t home_
         rec.door = door;
         rec.alive = b.alive;
         rec.is_home = is_home;
-        rec.last_seen_millis = game.world_millis;
+        rec.last_seen_ticks = game.world_ticks;
         mem.buildings[mem.building_count++] = rec;
         return true;
     };

@@ -628,11 +628,11 @@ WorldState world_of(const BadlandsGame& game) {
         .queued_poppables = queued,
         .urban_quarters = st.urban_quarters,
         .guild_roster_cap = static_cast<uint32_t>(kGuildRosterCap),
-        .world_millis = game.world_millis,
-        .time_of_day = time_of_day(game.world_millis, game.millis_per_day),
-        .day = day_count(game.world_millis, game.millis_per_day),
+        .world_ticks = game.world_ticks,
+        .time_of_day = time_of_day(game.world_ticks, game.ticks_per_day),
+        .day = day_count(game.world_ticks, game.ticks_per_day),
         .is_night =
-            is_night(time_of_day(game.world_millis, game.millis_per_day)) ? 1 : 0,
+            is_night(time_of_day(game.world_ticks, game.ticks_per_day)) ? 1 : 0,
     };
 }
 

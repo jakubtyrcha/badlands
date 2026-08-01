@@ -183,7 +183,7 @@ void resolve_vision(BadlandsGame& game, std::vector<DiscoveryCredit>* credits) {
         if (team.id != kPlayerTeam || vis.radius <= 0.0f) continue;
         const int fresh = stamp_cone(g, pos.pos, facing.dir, vis.radius, vis.cone_half_cos);
         // Every stamper is reported here, hero or not -- the crediting policy
-        // (today: only heroes gain XP) lives with the caller (tick_world's
+        // (today: only heroes gain XP) lives with the caller (step_world's
         // award_xp, which no-ops non-heroes), not with the resolve.
         if (credits != nullptr && fresh > 0) {
             credits->push_back({slot_for_entity(game, e), fresh});

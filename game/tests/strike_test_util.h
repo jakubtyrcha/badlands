@@ -2,7 +2,7 @@
 //
 // fire_attack (and so the Attack command handler) now COMMITS a swing rather
 // than resolving it: the blow lands when the attack's wind-up elapses, in
-// advance_strikes. Inside tick_world that happens automatically, right after
+// advance_strikes. Inside step_world that happens automatically, right after
 // apply_commands -- so an attack authored with no wind-up and no recovery
 // still resolves within its own tick, exactly as it did before commitment
 // existed.
@@ -12,7 +12,7 @@
 
 #pragma once
 
-#include "components.h"  // StrikeInProgress, kMillisPerTick
+#include "components.h"  // StrikeInProgress, kTicksPerStep
 #include "game_state.h"
 #include "strike.h"
 
@@ -27,7 +27,7 @@ namespace testfix {
 inline void land_strikes(BadlandsGame& g, int max_ticks = 400) {
     for (int i = 0; i < max_ticks && !g.registry.view<badlands::StrikeInProgress>().empty();
          ++i) {
-        g.world_millis += badlands::kMillisPerTick;
+        g.world_ticks += badlands::kTicksPerStep;
         badlands::advance_strikes(g);
     }
 }

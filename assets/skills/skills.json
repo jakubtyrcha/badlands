@@ -1,12 +1,15 @@
 {
-  "_comment": "Skill templates; keys are skill names (identity, not overridable). Absent fields keep the compiled defaults. This file carries CONSTANTS and engine-checked data only -- never behaviour: trigger = action|passive|intention, target = none|self|any|multi|point, attack_test = none|melee|ranged (which also fixes the cast range), cooldown/intention_duration in seconds, and per-skill constants each skill's own code reads by name.",
+  "_comment": "Skill templates; keys are skill names (identity, not overridable). Absent fields keep the compiled defaults. This file carries CONSTANTS and engine-checked data only -- never behaviour: trigger = action|passive|intention, target = none|self|any|multi|point, attack_test = none|melee|ranged (which also fixes the cast range), cooldown/intention_duration in seconds, castable_in_melee = whether the caster may be in melee contact, guaranteed_test = whether the declared test skips its gates and always crits, and per-skill constants each skill's own code reads by name.",
   "Calcify": {
     "trigger": "action",
     "target": "self",
     "attack_test": "none",
-    "cooldown": 20,
+    "cooldown": 45,
     "intention_duration": 0,
-    "effect": "Absorbs the next physical strike, then shatters."
+    "effect": "Hardens the skin to stone; blows land, and glance.",
+    "constants": {
+      "duration_seconds": 30
+    }
   },
   "ShieldBash": {
     "trigger": "action",
@@ -54,6 +57,43 @@
     "effect": "A blade between the ribs -- devastating against someone facing elsewhere.",
     "constants": {
       "bonus_damage": 6
+    }
+  },
+  "PrecisionShot": {
+    "trigger": "intention",
+    "target": "any",
+    "target_limit": 1,
+    "attack_test": "ranged",
+    "guaranteed_test": true,
+    "cooldown": 15,
+    "intention_duration": 2,
+    "effect": "Draws a long breath, and does not miss.",
+    "constants": {
+      "range": 30,
+      "crit_multiplier": 3
+    }
+  },
+  "Teleport": {
+    "trigger": "action",
+    "target": "point",
+    "attack_test": "none",
+    "cooldown": 25,
+    "intention_duration": 0,
+    "effect": "Steps sideways out of the world, and back in somewhere else.",
+    "constants": {
+      "range": 30
+    }
+  },
+  "Sneak": {
+    "trigger": "action",
+    "target": "self",
+    "attack_test": "none",
+    "castable_in_melee": false,
+    "cooldown": 25,
+    "intention_duration": 0,
+    "effect": "Slips out of sight; the next blow comes from nowhere.",
+    "constants": {
+      "duration_seconds": 20
     }
   }
 }

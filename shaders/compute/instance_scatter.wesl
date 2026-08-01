@@ -9,7 +9,7 @@
 // count[b] (exactly count[b] instances map to it), a bucket never spills into a
 // neighbor — the only guard needed is a global capacity clamp.
 
-// CullConfig (144B), InstanceData (96B), and SENTINEL are shared with the
+// CullConfig (128B), InstanceData (96B), and SENTINEL are shared with the
 // classify + scan passes — see shaders/compute/instance_common.wesl.
 import package::compute::instance_common::{CullConfig, InstanceData, SENTINEL};
 

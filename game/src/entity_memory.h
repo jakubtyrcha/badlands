@@ -39,7 +39,7 @@ struct MemoryChar {
     glm::vec2 last_pos{0.0f, 0.0f};
     float last_hp = 0.0f;
     bool visible_now = false;
-    int64_t last_seen_millis = 0;
+    int64_t last_seen_ticks = 0;
 };
 
 // One building this entity currently sees or remembers seeing.
@@ -49,7 +49,7 @@ struct MemoryBuilding {
     glm::vec2 door{0.0f, 0.0f};
     bool alive = false;  // as last seen
     bool is_home = false;
-    int64_t last_seen_millis = 0;
+    int64_t last_seen_ticks = 0;
 };
 
 // ECS component: `chars`/`buildings` are dense (count + swap-remove on
@@ -62,7 +62,7 @@ struct EntityMemory {
     MemoryBuilding buildings[kMemoryMaxBuildings];
 };
 
-// Tick sub-pass (sim.cpp's tick_world calls this once per tick, before
+// Tick sub-pass (sim.cpp's step_world calls this once per tick, before
 // think, unconditionally -- including during replay, since this is pure
 // derived state that must stay consistent for inspection either way).
 //
@@ -70,7 +70,7 @@ struct EntityMemory {
 // index ascending): refreshes which OTHER characters (by slot index
 // ascending) and buildings (by building id ascending) are within its
 // Vision radius right now, ages out character sightings older than
-// HeroFactors::memory_ttl_millis, and evicts on overflow. See
+// HeroFactors::memory_ttl_ticks, and evicts on overflow. See
 // entity_memory.cpp for the exact per-field rules.
 void update_entity_memory(BadlandsGame& game);
 

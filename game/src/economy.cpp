@@ -14,13 +14,13 @@ namespace badlands {
 
 namespace {
 
-// True on the tick that world_millis crosses a `period` boundary (the same
+// True on the tick that world_ticks crosses a `period` boundary (the same
 // crossing test day_count/midnight uses). period must be > 0.
-bool crossed(int64_t world_millis, int64_t period) {
+bool crossed(int64_t world_ticks, int64_t period) {
     if (period <= 0) {
         return false;
     }
-    return (world_millis / period) != ((world_millis - kMillisPerTick) / period);
+    return (world_ticks / period) != ((world_ticks - kTicksPerStep) / period);
 }
 
 uint32_t count_alive_tax_collectors(const BadlandsGame& game) {
@@ -85,7 +85,7 @@ void spawn_tax_collector(BadlandsGame& game, uint32_t castle_id, glm::vec2 door)
 }  // namespace
 
 void advance_economy(BadlandsGame& game) {
-    if (!crossed(game.world_millis, game.millis_per_day)) {
+    if (!crossed(game.world_ticks, game.ticks_per_day)) {
         return;  // not midnight
     }
     const uint32_t income = game.factors.townfolk.house_income_per_day;
@@ -102,7 +102,7 @@ namespace {
 // if a spawn interval crossed and the live count is under the cap.
 void spawn_from_buildings(BadlandsGame& game, BuildingKind from, int64_t interval,
                           int32_t cap, uint32_t live, void (*spawn)(BadlandsGame&, glm::vec2)) {
-    if (!crossed(game.world_millis, interval) || live >= static_cast<uint32_t>(cap)) {
+    if (!crossed(game.world_ticks, interval) || live >= static_cast<uint32_t>(cap)) {
         return;
     }
     const auto& bs = game.placement.buildings;
@@ -125,7 +125,7 @@ void run_spawners(BadlandsGame& game) {
     // must not share an early return, or one interval silently suppresses the
     // other.) The tax collector needs its home castle id, so it spawns inline.
     const TownfolkFactors& tf = game.factors.townfolk;
-    if (crossed(game.world_millis, tf.spawn_interval_millis) &&
+    if (crossed(game.world_ticks, tf.spawn_interval_ticks) &&
         count_alive_tax_collectors(game) < static_cast<uint32_t>(tf.max_alive)) {
         const auto& bs = game.placement.buildings;
         for (uint32_t i = 0; i < bs.size(); ++i) {
@@ -141,7 +141,7 @@ void run_spawners(BadlandsGame& game) {
     }
 
     const MonsterFactors& mf = game.factors.monster;
-    spawn_from_buildings(game, BuildingKind::Sewer, mf.spawn_interval_millis, mf.max_alive,
+    spawn_from_buildings(game, BuildingKind::Sewer, mf.spawn_interval_ticks, mf.max_alive,
                          count_alive_rats(game), spawn_rat);
 }
 

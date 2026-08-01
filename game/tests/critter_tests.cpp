@@ -114,7 +114,7 @@ TEST_CASE("a deer bolts from an approaching hero, then settles when it leaves") 
     spawn_into(g, hunter);
 
     const glm::vec2 threat{woods.x + 2.0f, woods.y};
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
 
     const MoveTarget& mt = g.registry.get<MoveTarget>(de);
     REQUIRE(mt.kind == MoveTarget::Kind::Point);
@@ -174,8 +174,8 @@ TEST_CASE("a deer wanders within its home range and keeps to good biome") {
     int good = 0;
     int samples = 0;
     for (int i = 0; i < 20; ++i) {
-        g.world_millis = static_cast<int64_t>(i) * 4000;  // step one roam window each time
-        tick_world(g, 1.0f / 30.0f);
+        g.world_ticks = static_cast<int64_t>(i) * 4000;  // step one roam window each time
+        step_world(g);
         const MoveTarget& mt = g.registry.get<MoveTarget>(de);
         if (mt.kind != MoveTarget::Kind::Point) {
             continue;  // grazing window: holds position

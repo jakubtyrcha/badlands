@@ -14,13 +14,19 @@ namespace {
 
 // Placeholder tuning constants. Watching fights is what finds the right
 // values; the pipeline SHAPE is what the tests pin, not the numbers.
-constexpr float kCritMultiplier = 2.0f;
 constexpr float kRangedEvasionMult = 0.5f;   // a shot is hard to dodge
 constexpr float kMeleeThrustEvasionMult = 1.3f;  // a telegraphed thrust, easy to sidestep
 constexpr float kBluntArmourFraction = 0.3f;  // blunt crushes through 70% of armour
 // What StatusKind::Cursed takes off a victim (effective_combatant, below).
 constexpr float kCurseAccuracyPenalty = 0.15f;
 constexpr float kCurseArmourPenalty = 2.0f;
+// What StatusKind::Sneaking is worth to the blow that ends it, and what
+// StatusKind::Calcified is worth to whoever wears it. COMPILED, like the curse
+// penalties above and for the same reason: how much a status is worth is a
+// property of the status, and a skill's own constants tune its DURATION.
+constexpr float kSneakAccuracyBonus = 0.15f;
+constexpr float kSneakCritMultiplier = 3.0f;
+constexpr float kCalcifyArmourBonus = 4.0f;
 
 // How much the defender's evasion is worth against this attack.
 float evasion_mult(AttackCategory cat, DamageType type) {
@@ -51,7 +57,7 @@ float apply_armour(DamageType type, float base, float armour) {
 // Fold the four replay-reproducible identity axes into one non-zero seed, so the
 // whole roll stream is a pure function of (who, whom, when, which attack).
 uint64_t combat_seed(const CombatRequest& r) {
-    uint64_t s = seed_of(r.attacker_slot, r.world_millis);
+    uint64_t s = seed_of(r.attacker_slot, r.world_ticks);
     s ^= seed_of(r.target_slot, static_cast<int64_t>(r.attack_index) + 1);
     return s == 0 ? 1ull : s;
 }
@@ -85,15 +91,21 @@ CombatResult resolve_attack(const CombatRequest& req) {
                                 req.defender.armour);
 
     // 4. Crit multiplies the penetrated damage (the attack's own crit_chance, so
-    // a piercing thrust -- authored with a higher chance -- benefits most).
+    // a piercing thrust -- authored with a higher chance -- benefits most). The
+    // MULTIPLIER is the attacker's, not a global: a status can raise it
+    // (effective_combatant), and it can never shrink a hit.
     if (damage > 0.0f &&
         unit_float(s) < std::clamp(req.attack.crit_chance, 0.0f, 1.0f)) {
         res.crit = true;
-        damage *= kCritMultiplier;
+        damage *= std::max(1.0f, req.attacker.crit_multiplier);
     }
 
     res.damage = damage;
     return res;
+}
+
+void end_sneak_on_aggression(BadlandsGame& game, entt::entity e) {
+    clear_status(game, e, StatusKind::Sneaking);
 }
 
 Combatant effective_combatant(const entt::registry& reg, entt::entity e) {
@@ -115,6 +127,17 @@ Combatant effective_combatant(const entt::registry& reg, entt::entity e) {
         // the status rather than of whatever applied it.
         c.accuracy = std::max(0.0f, c.accuracy - kCurseAccuracyPenalty);
         c.armour = std::max(0.0f, c.armour - kCurseArmourPenalty);
+    }
+    if (has_status(reg, e, StatusKind::Sneaking)) {
+        // Attacker-side only, and the blow that spends it is the blow that
+        // gets it: declare_strike captures these stats and THEN clears the
+        // status (strike.cpp). Nothing defensive moves -- an unseen grave
+        // robber that is somehow hit is no harder to hit than usual.
+        c.accuracy = std::clamp(c.accuracy + kSneakAccuracyBonus, 0.0f, 1.0f);
+        c.crit_multiplier = std::max(c.crit_multiplier, kSneakCritMultiplier);
+    }
+    if (has_status(reg, e, StatusKind::Calcified)) {
+        c.armour += kCalcifyArmourBonus;
     }
     return c;
 }
@@ -341,7 +364,7 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
         proj.attack = s.attack;
         proj.attacker = s.attacker;
         proj.attack_index = s.attack_index;
-        proj.fire_millis = s.declared_millis;
+        proj.fire_ticks = s.declared_ticks;
         reg.emplace<Projectile>(reg.create(), proj);
         return;
     }
@@ -360,7 +383,7 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
     req.defender = effective_combatant(reg, target);  // but the DEFENDER is live:
     req.attacker_slot = attacker_slot;                // a target stunned mid-swing
     req.target_slot = s.target_slot;                  // is defenceless when it lands
-    req.world_millis = s.declared_millis;
+    req.world_ticks = s.declared_ticks;
     req.attack_index = s.attack_index;
     const CombatResult res = resolve_attack(req);
     if (res.damage > 0.0f) {
@@ -371,7 +394,7 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
     }
 }
 
-void advance_projectiles(BadlandsGame& game, float dt) {
+void advance_projectiles(BadlandsGame& game) {
     entt::registry& reg = game.registry;
     std::vector<entt::entity> spent;
     for (auto [e, proj] : reg.view<Projectile>().each()) {
@@ -382,7 +405,7 @@ void advance_projectiles(BadlandsGame& game, float dt) {
         }
         const glm::vec2 to = reg.get<Position>(target).pos - proj.pos;
         const float dist = glm::length(to);
-        const float step = proj.speed * dt;
+        const float step = proj.speed * kSecondsPerStep;
         if (dist <= step + kProjectileHitRadius) {
             CombatRequest req;
             req.attacker = proj.attacker;
@@ -390,7 +413,7 @@ void advance_projectiles(BadlandsGame& game, float dt) {
             req.defender = effective_combatant(reg, target);
             req.attacker_slot = proj.attacker_slot;
             req.target_slot = proj.target_slot;
-            req.world_millis = proj.fire_millis;  // seed fixed at fire time
+            req.world_ticks = proj.fire_ticks;  // seed fixed at fire time
             req.attack_index = proj.attack_index;
             const CombatResult res = resolve_attack(req);
             if (res.damage > 0.0f) {

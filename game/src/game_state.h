@@ -78,23 +78,23 @@ struct BadlandsGame {
     std::vector<badlands::GameEvent> events;
 
     // Replay mode. Non-null makes game_tick take this tick's decisions from the
-    // log (by at_millis) instead of running the brains -- the determinism
+    // log (by at_ticks) instead of running the brains -- the determinism
     // contract made executable: (initial config, seed, command log) -> state.
     // The caller owns the log and must outlive the game.
     const std::vector<badlands::Command>* replay_log = nullptr;
     size_t replay_cursor = 0;
 
-    // Day/night clock: integer milliseconds, advanced by kMillisPerTick each
+    // Day/night clock: integer ticks, advanced by kTicksPerStep each
     // tick (see components.h). Deterministic, no float drift.
-    int64_t world_millis = 0;
+    int64_t world_ticks = 0;
 
-    // How long one in-game day lasts, in world_millis. Copied from
-    // WorldConfig::millis_per_day at construction and never changed after --
+    // How long one in-game day lasts, in world_ticks. Copied from
+    // WorldConfig::ticks_per_day at construction and never changed after --
     // initial config in the determinism contract, and it defines what an
-    // in-game hour means (millis_per_hour(), components.h), so every
+    // in-game hour means (ticks_per_hour(), components.h), so every
     // hours-authored HeroFactors rate scales with it. Always >= 1 (make_world
     // clamps), because the clock helpers divide by it.
-    int64_t millis_per_day = badlands::kDefaultMillisPerDay;
+    int64_t ticks_per_day = badlands::kDefaultTicksPerDay;
 
     // The terrain/biome field the sim reasons about (deer roam Forest/Plains,
     // hunters seek Forest). Generated once in make_world; MapData is pure CPU
@@ -119,7 +119,7 @@ struct BadlandsGame {
     uint64_t ticks = 0;
 
     // One-tick nearest-enemy cache, indexed by slot (Cleanup: sim.cpp's
-    // tick_world, the ThreatSighted pass -- BEFORE think -- populates one
+    // step_world, the ThreatSighted pass -- BEFORE think -- populates one
     // entry per visible (non-hidden) EventInbox-bearing entity: heroes AND,
     // since the single-gateway cutover, monsters too (heroes.cpp's spawn
     // recipe emplaces EventInbox for Archetype::Monster). monster_think

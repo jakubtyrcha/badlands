@@ -31,6 +31,24 @@ namespace badlands {
 // A no-op on an entity carrying no BaseStats/Growth.
 void apply_level_stats(entt::registry& reg, entt::entity e, int32_t level);
 
+// Puts an already-spawned hero at `level`, as though it had EARNED its way
+// there: every grant row from 2 up to and including `level` is replayed (spawn
+// already applied the level-1 ones), then apply_level_stats recomputes the
+// stats. Those are exactly the two operations award_xp's level loop performs,
+// run once per level instead of once per XP threshold -- so a hero dropped in
+// at 8 is indistinguishable from one that fought its way to 8.
+//
+// Replaying the ladder is load-bearing, not belt-and-braces: grant rows fire at
+// their EXACT level (grant_skills_for_level), so jumping straight to 8 would
+// arrive knowing only what level 8 itself teaches.
+//
+// A NO-OP for anything without HeroSimulationState. Monsters carry a zeroed
+// growth row and a threat anchor authored at level 1 -- "level" is not a thing
+// they have, so the argument is ignored rather than quietly inventing a
+// stronger rat. Clamped to [1, kMaxHeroLevel]; idempotent, because both halves
+// are (apply_level_stats recomputes from base, learn_skill is dupe-proof).
+void set_hero_level(BadlandsGame& game, entt::entity e, int32_t level);
+
 // XP needed to advance FROM `level`: floor(base * level^exponent), never
 // below 1 (sanitize keeps base >= 1, exponent >= 0). Saturates to INT32_MAX
 // if the curve runs past int range (an effective level cap, not an overflow).
