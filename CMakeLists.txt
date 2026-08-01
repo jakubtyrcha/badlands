@@ -467,8 +467,21 @@ add_executable(badlands_mapview
     # Shared MapData->render cluster-terrain module, used by both apps (game_view
     # wired in M7.2). Owns the DAG, its vertex-color material factory, the LOD
     # cut, and the Terrain debug UI.
-    src/game/map/cluster_terrain.cpp)
-target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib meshoptimizer)
+    src/game/map/cluster_terrain.cpp
+    # Foliage: the tree geometry pipeline (also compiled into badlands_viewer),
+    # the multi-model instanced field, badlands' forest content table, the
+    # per-cell cull + upload renderer, and the synthetic forest test map.
+    src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
+    src/game/geometry/leaf_voxelizer.cpp
+    src/game/visual/tree_field.cpp
+    src/game/visual/forest_catalog.cpp
+    src/game/visual/forest_renderer.cpp
+    src/game/map/forest_test_map_generator.cpp)
+target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib
+                                               badlands_foliage_lib meshoptimizer)
+target_include_directories(badlands_mapview PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 if(APPLE)
     target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
 endif()

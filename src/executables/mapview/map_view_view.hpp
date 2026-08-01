@@ -31,6 +31,7 @@
 #include "engine/rendering/water_material.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
+#include "game/visual/forest_renderer.hpp"
 #include "mapgen/generator.hpp"
 
 namespace badlands {
@@ -47,12 +48,18 @@ class MapViewView : public AppView {
   // baseline; default is the parallel build). The overrides exist mainly so
   // headless --screenshot runs can frame near/far and set the tint without
   // touching the interactive defaults.
+  // `test_map` swaps the procedural generator for the synthetic forest map
+  // (game/map/forest_test_map_generator.hpp). It exists because
+  // mapgen::classify_biomes emits no Biome::Forest, so a generated map has no
+  // forest for the plopper to plant into -- see Initialize.
   explicit MapViewView(mapgen::MapGenParams params, float camera_height = 0.0f,
-                       int lod_tint = 0, bool serial_build = false)
+                       int lod_tint = 0, bool serial_build = false,
+                       bool test_map = false)
       : params_(params),
         camera_height_override_(camera_height),
         initial_tint_(lod_tint),
-        serial_build_(serial_build) {}
+        serial_build_(serial_build),
+        test_map_(test_map) {}
 
   bool Initialize(const RenderContext& ctx) override;
   void HandleEvent(const SDL_Event& event, int width, int height) override;
@@ -119,6 +126,14 @@ class MapViewView : public AppView {
   // entities outright, and there is nothing here for a scene graph to do.
   std::unique_ptr<MaterialInstanceFactory> water_factory_;
 
+  // The forest: placed instances filed into 32 m cells, drawn as one GPU-culled
+  // instanced field of ~28 tree models. Empty (and costing nothing) unless
+  // --test-map is on, since a procedural map has no Forest biome to plant into.
+  ForestRenderer forest_;
+  // The single instanced field pointer SceneContext::instanced_fields points
+  // at. A member because the context holds it by pointer across frames.
+  InstancedMeshField* forest_field_ = nullptr;
+
   // Where the mouse ray last hit the terrain. `hover_valid_` is false when the
   // cursor is off the terrain (sky / past the map edge) -- the hover UI hides.
   glm::vec3 hover_point_{0.0f};
@@ -134,6 +149,8 @@ class MapViewView : public AppView {
   // Force the single-threaded cluster DAG build (perf A/B baseline); seeded once
   // in Initialize, not runtime-toggleable (the DAG is built there).
   bool serial_build_ = false;
+  // --test-map: use the synthetic forest map instead of running the generator.
+  bool test_map_ = false;
   // Viewport height in pixels, tracked by OnResize -- the LOD screen-space-error
   // metric's numerator. Seeded so the first Update (before any resize) still has
   // a sane value in headless paths.
