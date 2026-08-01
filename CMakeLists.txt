@@ -410,12 +410,36 @@ foreach(app viewer game ai_sandbox)
     endif()
 endforeach()
 
+# badlands_foliage_lib: the game-agnostic foliage placement library
+# (src/foliage/). Deliberately links NEITHER badlands_engine NOR
+# badlands_mapgen_lib: it compiles the EDT TU directly (that is why
+# distance_to_mask was split out of generator.cpp) so the whole placement half
+# stays pure CPU -- no Dawn, no EnTT, no engine -- and is unit-testable without
+# a GPU. glm/spdlog/FastNoiseLite are headers only.
+add_library(badlands_foliage_lib STATIC
+    src/foliage/foliage_types.cpp
+    src/foliage/forest_type.cpp
+    src/foliage/depth_field.cpp
+    src/foliage/scatter.cpp
+    src/mapgen/distance_field.cpp)
+target_compile_features(badlands_foliage_lib PUBLIC cxx_std_23)
+target_include_directories(badlands_foliage_lib PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+target_include_directories(badlands_foliage_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
+
 # badlands_mapgen_lib: the map generator (bedrock+quantile biomes) + fog
 # generator + hillshade relief preview + PNG outputs, as a static lib. Links
 # badlands_engine for CpuImage (PNG write via the `assets` crate).
 add_library(badlands_mapgen_lib STATIC
     src/mapgen/fog_generator.cpp
     src/mapgen/generator.cpp
+    # Exact EDT, split out of generator.cpp so a consumer can link the distance
+    # transform ALONE (src/foliage/ compiles this TU directly rather than
+    # linking this lib, which links badlands_engine).
+    src/mapgen/distance_field.cpp
     src/mapgen/hillshade.cpp
     src/mapgen/hydrology.cpp
     src/mapgen/outputs.cpp
@@ -496,6 +520,7 @@ add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests 
 add_executable(badlands_generator_tests
     src/mapgen/generator_tests.cpp
     src/mapgen/generator.cpp
+    src/mapgen/distance_field.cpp
     src/mapgen/hydrology.cpp
     src/mapgen/erosion.cpp
     src/mapgen/detail_filter.cpp
@@ -522,6 +547,7 @@ add_executable(badlands_erosion_tests
     src/mapgen/erosion_tests.cpp
     src/mapgen/erosion.cpp
     src/mapgen/generator.cpp
+    src/mapgen/distance_field.cpp
     src/mapgen/detail_filter_tests.cpp
     src/mapgen/detail_filter.cpp
     src/mapgen/river_graph_tests.cpp
@@ -1120,6 +1146,26 @@ add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_test
 # badlands_biome_splat_tests: pure-CPU tests for the biome -> splat raster the
 # cluster terrain samples by world XZ (slot index == Biome enum == terrain array
 # layer index, weights sum to full, at most two layers per texel).
+# badlands_foliage_tests: the foliage placement library — the underlying
+# methods (depth curve, hash, clump remap, EDT depth field, slope probe, cell
+# indexing) each against an analytic answer, then the whole-generator
+# guarantees (determinism, spacing, depth ordering, terrain rejection). Pure
+# CPU: links badlands_foliage_lib, no Dawn/GPU.
+add_executable(badlands_foliage_tests
+    src/foliage/tests/foliage_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_link_libraries(badlands_foliage_tests PRIVATE badlands_foliage_lib)
+target_include_directories(badlands_foliage_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    # The clump-window test measures the ACTUAL fBm distribution the defaults
+    # were tuned against, so it needs the generator's own noise source.
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+)
+add_test(NAME badlands_foliage_tests COMMAND badlands_foliage_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(badlands_biome_splat_tests
     src/mapview/tests/biome_splat_tests.cpp
     src/mapview/biome_splat.cpp

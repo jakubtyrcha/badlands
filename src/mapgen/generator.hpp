@@ -12,6 +12,7 @@
 
 #include <glm/glm.hpp>
 
+#include "mapgen/distance_field.hpp"  // distance_to_mask (re-exported, see below)
 #include "mapgen/erosion.hpp"
 #include "mapgen/river_graph.hpp"
 #include "mapgen/smooth.hpp"
@@ -98,14 +99,11 @@ BiomeCutoffs compute_cutoffs(const Field2D<float>& bedrock);
 Field2D<uint8_t> classify_biomes(const Field2D<float>& bedrock,
                                  const BiomeCutoffs& cutoffs);
 
-// Exact Euclidean distance (WORLD METERS) from each texel to the nearest
-// nonzero mask texel, with texel (x, y) at world (x*texel_m.x, y*texel_m.y).
-// Felzenszwalb–Huttenlocher two-pass EDT — exact, not a chamfer
-// approximation. An all-zero mask returns all zeros. Generic over the seed
-// set (distance_to_plains wraps this with a Plains mask; the detail filter
-// needs distance-to-water).
-Field2D<float> distance_to_mask(const Field2D<uint8_t>& mask,
-                                glm::vec2 texel_m);
+// distance_to_mask (the exact EDT) moved to mapgen/distance_field.hpp, which
+// this header includes — every existing caller keeps compiling against
+// "mapgen/generator.hpp" unchanged. It lives there so a consumer can link the
+// EDT without dragging in erosion/rivers/smoothing and the noise pipeline;
+// src/foliage/ is the reason.
 
 // Exact Euclidean distance (WORLD METERS) from each texel to the nearest
 // texel classified Plains, with texel (x, y) at world (x*texel_m.x,
