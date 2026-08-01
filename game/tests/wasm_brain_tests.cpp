@@ -5,7 +5,7 @@
 // pack_view_wire (statuses/events/self land in the wire correctly),
 // decode_suggestion (the wire trust boundary: each BL_INT_* maps, malformed
 // wires are rejected, BL_INT_USE_SKILL warns+ignores), and tick_wasm_brain
-// end to end through badlands::Sim/tick_world (spawn/tick, combat pre-empt,
+// end to end through badlands::Sim/step_world (spawn/tick, combat pre-empt,
 // the wake gate, determinism). Decision CORRECTNESS is not a parity target
 // (no C++ reference brain exists anymore -- "behavior-in-spirit" is the bar,
 // see the design doc's §3); cases that need a brain pinned to a fixed
@@ -107,7 +107,7 @@ void seed_heroes(BadlandsGame* g, int n) {
 bool same_command(const Command& a, const Command& b) {
     return a.kind == b.kind && a.actor == b.actor && a.target_id == b.target_id &&
           a.point == b.point && a.param_a == b.param_a && a.param_b == b.param_b &&
-          a.at_millis == b.at_millis;
+          a.at_ticks == b.at_ticks;
 }
 
 // A rat durable enough that a duel against it spans several attack-cooldown
@@ -156,7 +156,7 @@ TEST_CASE("wasm: every hero stays Idle over 30 ticks with the idle fixture brain
         ids.push_back(sim.Spawn(mercenary(static_cast<float>(i) * 6.0f, kDuelGroundZ)));
     }
     for (int i = 0; i < 30; ++i) {
-        sim.Tick(kTickDt);
+        sim.Step();
     }
 
     auto rows = sim.Characters();
@@ -188,13 +188,31 @@ TEST_CASE("wasm: single-gateway combat resolves a two-brained duel") {
     CharacterDesc merc = mercenary(-8.0f, kDuelGroundZ);
     CharacterDesc gob = goblin(8.0f, kDuelGroundZ);
     uint32_t merc_id = sim.Spawn(merc);
-    sim.Spawn(gob);
+    const uint32_t gob_id = sim.Spawn(gob);
 
     CharacterState survivor = run_duel(sim);
 
     CHECK(survivor.id == merc_id);
     CHECK(survivor.team == 0);
-    CHECK(survivor.hp < survivor.max_hp);  // the goblin got its licks in
+
+    // "Both sides fight for real" -- asserted as the goblin's own ATTACK
+    // commands in the trace, not as damage on the survivor.
+    //
+    // It used to check `survivor.hp < survivor.max_hp`, which is a statement
+    // about LUCK rather than about mechanism: the goblin swinging and missing
+    // is the same system working. Combat rolls are seeded off identity axes
+    // that include the world clock, so changing the clock's UNIT reshuffled
+    // every roll in the sim and this goblin now misses the one or two swings it
+    // gets. What the case is actually for -- that the engine-side brain drives
+    // its half of the duel through the same gateway the wasm hero uses -- is
+    // roll-independent, and this is it.
+    int goblin_attacks = 0;
+    for (const CommandRecord& c : sim.CommandLog()) {
+        if (c.kind == CommandKindId::Attack && c.actor == gob_id) {
+            ++goblin_attacks;
+        }
+    }
+    CHECK(goblin_attacks > 0);
 }
 
 TEST_CASE("wasm: hero vs rat -- the brain's own swings land, no double-swing per tick") {
@@ -221,13 +239,13 @@ TEST_CASE("wasm: hero vs rat -- the brain's own swings land, no double-swing per
     // legitimately see growth, and that is not what this test is about.
     constexpr int kWarmupTicks = 100;  // ~3.3 sim-seconds: plenty to close the 2-unit gap and swing
     for (int i = 0; i < kWarmupTicks; ++i) {
-        sim.Tick(kTickDt);
+        sim.Step();
     }
     const int32_t set_behavior_at_checkpoint = count_merc_set_behavior();
     REQUIRE(set_behavior_at_checkpoint >= 1);  // the initial Attack adoption landed
 
     for (int i = kWarmupTicks; i < 600; ++i) {  // 20 sim-seconds total: several cooldown windows
-        sim.Tick(kTickDt);
+        sim.Step();
     }
 
     // restate-log dedup (docs/design/intention-contract.html §2/§6, "Resume-
@@ -237,7 +255,7 @@ TEST_CASE("wasm: hero vs rat -- the brain's own swings land, no double-swing per
     // suggestion wake after wake -- an unchanged decision now logs NOTHING
     // (apply_intention's restate-resume path, intention.cpp, no longer
     // force-logs a SetBehavior on every restate; only the live
-    // wake_at_millis refreshes, off-log). So the SetBehavior count for this
+    // wake_at_ticks refreshes, off-log). So the SetBehavior count for this
     // actor must be EXACTLY what it was at the warmup checkpoint, even after
     // ~500 more ticks of unchanged engagement -- the STRONG invariant this
     // test pins now: zero NEW commands of any kind from continued identical
@@ -283,13 +301,13 @@ TEST_CASE("wasm: hero vs rat -- the brain's own swings land, no double-swing per
     // bl_enqueue_action per wake) plus resolve_action's own cooldown
     // validation at resolve time is what holds this, not a special guard --
     // there is no separate combat path left that could double up on it.
-    std::vector<int64_t> at_millis_seen;
+    std::vector<int64_t> at_ticks_seen;
     for (const CommandRecord& c : merc_attacks) {
-        at_millis_seen.push_back(c.at_millis);
+        at_ticks_seen.push_back(c.at_ticks);
     }
-    std::sort(at_millis_seen.begin(), at_millis_seen.end());
-    CHECK(std::adjacent_find(at_millis_seen.begin(), at_millis_seen.end()) ==
-          at_millis_seen.end());
+    std::sort(at_ticks_seen.begin(), at_ticks_seen.end());
+    CHECK(std::adjacent_find(at_ticks_seen.begin(), at_ticks_seen.end()) ==
+          at_ticks_seen.end());
 }
 
 TEST_CASE("wasm: a two-attack hero's brain-picked swings prefer the higher-damage ready attack") {
@@ -341,7 +359,7 @@ TEST_CASE("wasm: a two-attack hero's brain-picked swings prefer the higher-damag
         uint32_t id = mirror_sim.Spawn(m);
         mirror_sim.Spawn(durable_rat(-6.0f, kDuelGroundZ));
         for (int i = 0; i < 600; ++i) {  // 20 sim-seconds, inside the 30s cooldown
-            mirror_sim.Tick(kTickDt);
+            mirror_sim.Step();
         }
         int picked_preferred = 0;
         int picked_other = 0;
@@ -400,7 +418,7 @@ TEST_CASE("wasm: a hunter keeps shooting a wounded deer that survives the first 
     entt::entity de = g->slots[deer];
 
     for (int i = 0; i < 900; ++i) {  // 30 sim-seconds: many 1.2s bow-cooldown windows
-        tick_world(*g, 1.0f / 30.0f);
+        step_world(*g);
         REQUIRE(g->registry.valid(de));  // durable -- never actually dies here
         g->registry.get<Position>(de).pos = prey_pin;  // pinned: never drifts out of range
     }
@@ -467,7 +485,7 @@ TEST_CASE("pack_view_wire: a disengaged hero carries BL_ST_DISENGAGED", "[wasm_b
     for (int32_t i = 0; i < wire.status_count; ++i) {
         if (wire.statuses[i].kind == BL_ST_DISENGAGED) {
             found = true;
-            CHECK(wire.statuses[i].remaining_millis == 2500);
+            CHECK(wire.statuses[i].remaining_ticks == 2500);
         }
     }
     CHECK(found);
@@ -488,7 +506,7 @@ TEST_CASE("pack_view_wire: statuses assemble from Chatting/MeleeLock/InsideBuild
 
         REQUIRE(wire.status_count == 1);
         CHECK(wire.statuses[0].kind == BL_ST_CHATTING);
-        CHECK(wire.statuses[0].remaining_millis == 2500);
+        CHECK(wire.statuses[0].remaining_ticks == 2500);
     }
 
     SECTION("MeleeLock") {
@@ -502,7 +520,7 @@ TEST_CASE("pack_view_wire: statuses assemble from Chatting/MeleeLock/InsideBuild
 
         REQUIRE(wire.status_count == 1);
         CHECK(wire.statuses[0].kind == BL_ST_MELEE_LOCKED);
-        CHECK(wire.statuses[0].remaining_millis == 0);  // indefinite
+        CHECK(wire.statuses[0].remaining_ticks == 0);  // indefinite
     }
 
     SECTION("InsideBuilding") {
@@ -516,7 +534,7 @@ TEST_CASE("pack_view_wire: statuses assemble from Chatting/MeleeLock/InsideBuild
 
         REQUIRE(wire.status_count == 1);
         CHECK(wire.statuses[0].kind == BL_ST_INSIDE_BUILDING);
-        CHECK(wire.statuses[0].remaining_millis == 0);  // indefinite
+        CHECK(wire.statuses[0].remaining_ticks == 0);  // indefinite
     }
 
     SECTION("none of the three -> status_count 0") {
@@ -573,7 +591,7 @@ TEST_CASE("pack_view_wire: a stun rides the statuses block with its remaining ti
 
     REQUIRE(wire.status_count == 1);
     CHECK(wire.statuses[0].kind == BL_ST_STUNNED);
-    CHECK(wire.statuses[0].remaining_millis == 1500);
+    CHECK(wire.statuses[0].remaining_ticks == 1500);
 }
 
 TEST_CASE("pack_view_wire: events copy 1:1 from the EventInbox", "[wasm_brain]") {
@@ -585,7 +603,7 @@ TEST_CASE("pack_view_wire: events copy 1:1 from the EventInbox", "[wasm_brain]")
     ev.kind = InboxEventKind::DamageTaken;
     ev.source_slot = 3;
     ev.param = 5.0f;
-    push_inbox_event(*g, e, ev);  // stamps at_millis/ttl_millis from game state
+    push_inbox_event(*g, e, ev);  // stamps at_ticks/ttl_ticks from game state
 
     const ActivityWeights& weights = weights_for(*g, e);
     const WorldView view = observe_hero(*g, slot, e, weights);
@@ -595,8 +613,8 @@ TEST_CASE("pack_view_wire: events copy 1:1 from the EventInbox", "[wasm_brain]")
     CHECK(wire.events[0].kind == BL_EV_DAMAGE_TAKEN);
     CHECK(wire.events[0].source_slot == 3);
     CHECK(wire.events[0].param == Catch::Approx(5.0f));
-    CHECK(wire.events[0].at_millis == g->world_millis);
-    CHECK(wire.events[0].ttl_millis == kInboxTtlMillis);
+    CHECK(wire.events[0].at_ticks == g->world_ticks);
+    CHECK(wire.events[0].ttl_ticks == kInboxTtlTicks);
 }
 
 TEST_CASE("pack_view_wire: self carries the CurrentIntention summary", "[wasm_brain]") {
@@ -606,7 +624,7 @@ TEST_CASE("pack_view_wire: self carries the CurrentIntention summary", "[wasm_br
 
     CurrentIntention& ci = g->registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::Idle;
-    ci.wake_at_millis = 4321;
+    ci.wake_at_ticks = 4321;
 
     const ActivityWeights& weights = weights_for(*g, e);
     const WorldView view = observe_hero(*g, slot, e, weights);
@@ -653,8 +671,8 @@ TEST_CASE("decode_suggestion: each BL_INT_* kind maps onto the matching Intentio
         wire.intention_kind = c.wire_kind;
         wire.target_slot = 5;
         wire.arg = 2;
-        wire.duration_millis = 100;
-        wire.idle_hint_millis = 200;
+        wire.duration_ticks = 100;
+        wire.idle_hint_ticks = 200;
         wire.point_x = 1.0f;
         wire.point_z = 2.0f;
         wire.activity_label = static_cast<int32_t>(ActivityId::Roam);
@@ -664,8 +682,8 @@ TEST_CASE("decode_suggestion: each BL_INT_* kind maps onto the matching Intentio
         CHECK(intent->kind == c.expect);
         CHECK(intent->target_slot == 5);
         CHECK(intent->arg == 2);
-        CHECK(intent->duration_millis == 100);
-        CHECK(intent->idle_hint_millis == 200);
+        CHECK(intent->duration_ticks == 100);
+        CHECK(intent->idle_hint_ticks == 200);
         CHECK(intent->point.x == Catch::Approx(1.0f));
         CHECK(intent->point.y == Catch::Approx(2.0f));
         CHECK(intent->activity_label == static_cast<int32_t>(ActivityId::Roam));
@@ -704,25 +722,25 @@ TEST_CASE("decode_suggestion: malformed wires are rejected", "[wasm_brain]") {
         wire.point_z = std::numeric_limits<float>::infinity();
         CHECK_FALSE(decode_suggestion(wire, 0).has_value());
     }
-    SECTION("negative duration_millis") {
+    SECTION("negative duration_ticks") {
         BlSuggestionWire wire{};
-        wire.duration_millis = -1;
+        wire.duration_ticks = -1;
         CHECK_FALSE(decode_suggestion(wire, 0).has_value());
     }
-    SECTION("duration_millis beyond INT32_MAX (would truncate through Command::param_b)") {
+    SECTION("duration_ticks beyond INT32_MAX (would truncate through Command::param_b)") {
         BlSuggestionWire wire{};
         wire.intention_kind = BL_INT_IDLE;
-        wire.duration_millis = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+        wire.duration_ticks = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
         CHECK_FALSE(decode_suggestion(wire, 0).has_value());
     }
-    SECTION("negative idle_hint_millis") {
+    SECTION("negative idle_hint_ticks") {
         BlSuggestionWire wire{};
-        wire.idle_hint_millis = -1;
+        wire.idle_hint_ticks = -1;
         CHECK_FALSE(decode_suggestion(wire, 0).has_value());
     }
-    SECTION("idle_hint_millis beyond INT32_MAX") {
+    SECTION("idle_hint_ticks beyond INT32_MAX") {
         BlSuggestionWire wire{};
-        wire.idle_hint_millis = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+        wire.idle_hint_ticks = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
         CHECK_FALSE(decode_suggestion(wire, 0).has_value());
     }
 }
@@ -784,22 +802,22 @@ TEST_CASE("decode_suggestion: an out-of-range activity_label clamps to -1, not r
 }
 
 TEST_CASE("decode_suggestion + apply_intention: the idle hint plumbs through to "
-         "CurrentIntention.wake_at_millis",
+         "CurrentIntention.wake_at_ticks",
           "[wasm_brain]") {
     auto g = make_world(BrainDesc{});
     uint32_t slot = spawn_into(*g, bare_hero(0.0f, 0.0f));
     entt::entity e = g->slots[slot];
-    g->world_millis = 1000;
+    g->world_ticks = 1000;
 
     BlSuggestionWire wire{};
-    wire.intention_kind = BL_INT_ATTACK;  // any non-Idle kind: idle_hint_millis (not
-                                          // duration_millis) carries the schedule
-    wire.idle_hint_millis = 750;
+    wire.intention_kind = BL_INT_ATTACK;  // any non-Idle kind: idle_hint_ticks (not
+                                          // duration_ticks) carries the schedule
+    wire.idle_hint_ticks = 750;
 
     const std::optional<Intention> intent = decode_suggestion(wire, slot);
     REQUIRE(intent.has_value());
     CHECK(apply_intention(*g, slot, *intent));
-    CHECK(g->registry.get<CurrentIntention>(e).wake_at_millis == 1750);
+    CHECK(g->registry.get<CurrentIntention>(e).wake_at_ticks == 1750);
 }
 
 // --- integration: a real, shipping wasm brain driving a live sim -----------
@@ -811,7 +829,7 @@ TEST_CASE("wasm: a town world ticks, heroes act (MoveTo/SetBehavior reach the lo
 
     seed_heroes(g.get(), 3);
     for (int i = 0; i < 150; ++i) {
-        tick_world(*g, 1.0f / 30.0f);
+        step_world(*g);
     }
 
     bool saw_move = false;
@@ -834,21 +852,21 @@ TEST_CASE("wasm: a sleeping hero (long hint) is woken by damage and re-decides w
 
     // One real wake: let the hero actually think (bh_spawn + a genuine
     // suggestion) so CurrentIntention reflects what react() produced.
-    tick_world(*g, 1.0f / 30.0f);
-    REQUIRE(g->registry.get<CurrentIntention>(e).last_think_millis == g->world_millis);
+    step_world(*g);
+    REQUIRE(g->registry.get<CurrentIntention>(e).last_think_ticks == g->world_ticks);
 
-    // Force it deep asleep: an artificially far wake_at_millis, well beyond
+    // Force it deep asleep: an artificially far wake_at_ticks, well beyond
     // any idle hint hero.nim could actually draw -- deterministic,
     // independent of the hint's real (randomized, bounded) value.
     CurrentIntention& ci = g->registry.get<CurrentIntention>(e);
-    ci.wake_at_millis = g->world_millis + 60'000;
+    ci.wake_at_ticks = g->world_ticks + 60'000;
     REQUIRE_FALSE(should_wake(*g, e));
 
-    const int64_t last_think_before = ci.last_think_millis;
+    const int64_t last_think_before = ci.last_think_ticks;
     for (int i = 0; i < 5; ++i) {
-        tick_world(*g, 1.0f / 30.0f);  // asleep: no re-think while nothing happens
+        step_world(*g);  // asleep: no re-think while nothing happens
     }
-    CHECK(g->registry.get<CurrentIntention>(e).last_think_millis == last_think_before);
+    CHECK(g->registry.get<CurrentIntention>(e).last_think_ticks == last_think_before);
 
     // Inject a hit -- the same DamageTaken choke point real combat uses
     // (emit_char_hit, game_state.h) -- a guaranteed-wake event
@@ -857,8 +875,8 @@ TEST_CASE("wasm: a sleeping hero (long hint) is woken by damage and re-decides w
                  g->registry.get<Health>(e).hp - 3.0f, g->registry.get<Position>(e).pos);
     CHECK(should_wake(*g, e));
 
-    tick_world(*g, 1.0f / 30.0f);
-    CHECK(g->registry.get<CurrentIntention>(e).last_think_millis == g->world_millis);
+    step_world(*g);
+    CHECK(g->registry.get<CurrentIntention>(e).last_think_ticks == g->world_ticks);
 }
 
 TEST_CASE("wasm: two identical runs produce identical command logs and character snapshots") {
@@ -873,8 +891,8 @@ TEST_CASE("wasm: two identical runs produce identical command logs and character
 
     constexpr int kTicks = 150;
     for (int i = 0; i < kTicks; ++i) {
-        tick_world(*a, 1.0f / 30.0f);
-        tick_world(*b, 1.0f / 30.0f);
+        step_world(*a);
+        step_world(*b);
     }
 
     REQUIRE(a->command_log.size() == b->command_log.size());

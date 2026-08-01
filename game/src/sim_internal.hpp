@@ -27,7 +27,12 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc);
 // generator happens to put under those coordinates -- and the map's centre is a
 // lake, so the convenient coordinates are the ones you cannot walk on.
 std::unique_ptr<BadlandsGame> make_flat_world();
-void tick_world(BadlandsGame&, float dt);
+// Advance the world by exactly ONE STEP (kTicksPerStep ticks). Takes no dt, and
+// must not: a real-time delta is not in the command log, so any system reading
+// one would depend on a number a replay cannot reproduce (CLAUDE.md's time
+// convention). How OFTEN this is called is the caller's business -- SimClock's;
+// how much time it represents is a compile-time constant.
+void step_world(BadlandsGame&);
 // `level` > 1 puts a HERO at that level (progression.h's set_hero_level);
 // ignored by anything that does not level.
 uint32_t spawn_into(BadlandsGame&, const CharacterDesc&, int32_t level = 1);

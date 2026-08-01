@@ -109,9 +109,9 @@ struct Command {
     glm::vec2 point{0.0f, 0.0f};
     int32_t param_a = -1;
     int32_t param_b = 0;
-    // Stamped by apply_command from game.world_millis. Producers leave it 0; it
+    // Stamped by apply_command from game.world_ticks. Producers leave it 0; it
     // is what makes the log self-describing (and replayable at tick boundaries).
-    int64_t at_millis = 0;
+    int64_t at_ticks = 0;
 };
 
 // Applies one command (the single mutation point) and appends it to
@@ -130,12 +130,12 @@ void apply_commands(BadlandsGame& game);
 // entity already has. Both read components that replay reproduces exactly, so a
 // live run and its replay emit identical command streams.
 void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target);
-// `duration_millis` rides along on SetBehavior: for the intention contract
+// `duration_ticks` rides along on SetBehavior: for the intention contract
 // (game/src/intention.h's apply_intention) it is the wake schedule (Idle's
 // own duration, or the idle hint for any other kind). Putting it IN the
 // command is what makes it replayable -- a replay does not re-draw/re-derive
 // it, it reads the one the live run logged (the SetBehavior command handler,
-// command.cpp, derives CurrentIntention::wake_at_millis from it too, so a
+// command.cpp, derives CurrentIntention::wake_at_ticks from it too, so a
 // replay reconstructs the schedule from the log alone). Unused (0) for
 // critter/townfolk callers below, which never carry a CurrentIntention to
 // schedule a wake for; formerly also carried the C++ hero decision layer's
@@ -151,7 +151,7 @@ void enqueue_move_to(BadlandsGame& game, uint32_t slot, glm::vec2 target);
 // log-bloat concern to trade against here the way there is for a per-tick
 // re-decision).
 void enqueue_set_behavior(BadlandsGame& game, uint32_t slot, int32_t behavior,
-                          int64_t duration_millis = 0, bool force = false);
+                          int64_t duration_ticks = 0, bool force = false);
 
 // Sets/maintains MoveTarget as Kind::Entity toward `target_slot`, holding at
 // `stop_distance` (the caller's engagement_range) -- unlike enqueue_move_to's
@@ -171,7 +171,7 @@ void enqueue_engage(BadlandsGame& game, uint32_t slot, uint32_t target_slot,
                     float stop_distance);
 
 // Replay: enqueues + applies every command in game.replay_log stamped at or
-// before the current game.world_millis, advancing game.replay_cursor. game_tick
+// before the current game.world_ticks, advancing game.replay_cursor. game_tick
 // calls this INSTEAD of the brain-think pass when a replay log is set, which is
 // what makes (initial config, seed, command log) -> state reproducible: no
 // decision is re-derived, they are all replayed at the tick they were made.

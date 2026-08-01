@@ -31,10 +31,10 @@ struct SneakConfig {
     int32_t hero_level = 8;
     // How long the robber gets. Generous: crossing the arena unseen is most of
     // the scenario, and a timeout is a real finding rather than an impatience.
-    int64_t max_millis = 30000;
+    int64_t max_ticks = 30 * 120;  // 30 s
     // How far the starting separation shifts between rounds, cycling over a few
     // values. Without it every round is byte-identical -- combat rolls are
-    // seeded off (attacker, target, world_millis, attack_index), so an
+    // seeded off (attacker, target, world_ticks, attack_index), so an
     // identical scenario replays exactly and running the mode twelve times
     // tells you precisely what running it once did. A different closing time is
     // a genuinely different roll stream.
@@ -49,8 +49,8 @@ enum class SneakStage : int32_t { Waiting = 0, Sneaked, Struck };
 // handed, so the whole verdict is testable without a Sim.
 struct SneakProgress {
     SneakStage stage = SneakStage::Waiting;
-    int64_t sneaked_at_millis = 0;
-    int64_t struck_at_millis = 0;
+    int64_t sneaked_at_ticks = 0;
+    int64_t struck_at_ticks = 0;
     float strike_damage = 0.0f;
     // Did the opening blow come out of Backstab, or was it an ordinary swing?
     // Reported rather than required: the pair is what the class is FOR, and a
@@ -74,7 +74,7 @@ class SneakMode : public SandboxMode {
     WorldConfig Configure() override;
     void Stage(Sim& sim) override;
     bool Observe(const std::vector<CharacterState>& rows, const std::vector<GameEvent>& events,
-                 int64_t world_millis) override;
+                 int64_t world_ticks) override;
     std::string Status() const override;
 
    private:
@@ -82,7 +82,7 @@ class SneakMode : public SandboxMode {
     ArenaLayout layout_{};
     uint32_t round_ = 0;
     uint32_t hero_slot_ = UINT32_MAX;
-    int64_t started_millis_ = 0;
+    int64_t started_ticks_ = 0;
     SneakProgress progress_{};
     std::string last_result_ = "no round yet";
 };

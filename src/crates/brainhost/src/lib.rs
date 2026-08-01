@@ -710,7 +710,7 @@ mod tests {
     // whole suite; `abi_version_mismatch_rejected` deliberately uses an
     // independent literal (999) for its mismatching module, so it is
     // unaffected by this value either way.
-    const ABI_VERSION: i32 = 6;
+    const ABI_VERSION: i32 = 7;
 
     /// A conforming brain module's fixed layout: view/out buffers at 1024 /
     /// 2048 in a single 64 KiB memory page, so tests can reason about exact
@@ -1123,7 +1123,7 @@ mod tests {
         // vacuous fallback: BL_INT_NONE ("nothing suggested this wake"),
         // activity_label=0/point=0/target_slot=0/arg=0, and -- since a
         // BL_INT_NONE suggestion carries no schedule apply_intention would
-        // ever read -- idle_hint_millis=duration_millis=0 too. I.e. every
+        // ever read -- idle_hint_ticks=duration_ticks=0 too. I.e. every
         // byte of the SuggestionWire zero.
         assert!(
             out.iter().all(|&b| b == 0),

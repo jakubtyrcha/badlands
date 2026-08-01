@@ -195,8 +195,8 @@ void walk_toward(BadlandsGame& g, entt::entity e, glm::vec2 goal, int ticks) {
     mt.point = goal;
     mt.stop_distance = 0.1f;
     for (int i = 0; i < ticks; ++i) {
-        plan_paths(g, 1.0f / 30.0f);
-        follow_paths(g, 1.0f / 30.0f);
+        plan_paths(g);
+        follow_paths(g);
     }
 }
 
@@ -207,7 +207,7 @@ TEST_CASE("a character told to walk into water stops and raises the event") {
     // impossible, and finding out is an EVENT rather than a precondition.
     auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
-    g.world_millis = 5000;  // so the event's stamp is distinguishable from zero
+    g.world_ticks = 5000;  // so the event's stamp is distinguishable from zero
 
     // On the plains south of the central lake, aimed at open water.
     const uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, kCastleSpawnZ));
@@ -221,7 +221,7 @@ TEST_CASE("a character told to walk into water stops and raises the event") {
     CHECK(is_walkable(biome_at(g, stopped)));
     CHECK(glm::distance(stopped, glm::vec2{0.0f, 0.0f}) > 1.0f);  // never reached the goal
     REQUIRE(g.registry.all_of<MoveBlocked>(e));
-    CHECK(g.registry.get<MoveBlocked>(e).at_millis == g.world_millis);
+    CHECK(g.registry.get<MoveBlocked>(e).at_ticks == g.world_ticks);
     CHECK_FALSE(is_walkable(biome_at(g, g.registry.get<MoveBlocked>(e).point)));
 }
 
@@ -268,14 +268,14 @@ TEST_CASE("a hunter actually sets off into the unknown, through the sim") {
     g.registry.get<HeroCharacter>(e).hero_class = HERO_HUNTER;
 
     // ~40 in-game seconds: generous room for the wasm brain's own wake
-    // cadence (idle_hint_millis, 0.5-2s, scripts/brains/nim/hero.nim) to land
+    // cadence (idle_hint_ticks, 0.5-2s, scripts/brains/nim/hero.nim) to land
     // on a wake where the appetite draw hits and the picker finds a target,
     // not just the first tick.
     bool explored = false;
     glm::vec2 goal{};
     for (int i = 0; i < 1200 && !explored; ++i) {
         g.registry.get<HeroSimulationState>(e).fatigue = 1.0f;  // fully rested: keep rest out of it
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         if (g.registry.get<HeroSimulationState>(e).behavior ==
             static_cast<int32_t>(ActivityId::Explore)) {
             explored = true;

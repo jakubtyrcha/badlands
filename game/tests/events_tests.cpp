@@ -59,7 +59,7 @@ template <class Pred>
 const GameEvent* tick_until(Duel& d, std::vector<GameEvent>& all, Pred found, int max_ticks) {
     std::vector<GameEvent> evs;
     for (int i = 0; i < max_ticks; ++i) {
-        d.sim.Tick(kTickDt);
+        d.sim.Step();
         d.sim.DrainEvents(evs);
         for (const GameEvent& e : evs) {
             all.push_back(e);
@@ -123,7 +123,7 @@ TEST_CASE("a lethal blow emits DamageDealt plus HeroDowned for the loser") {
     bool merc_downed = false;
     bool goblin_downed = false;
     for (int i = 0; i < 3000; ++i) {
-        d.sim.Tick(kTickDt);
+        d.sim.Step();
         d.sim.DrainEvents(evs);
         for (const GameEvent& e : evs) {
             if (e.kind == GameEventKind::HeroDowned) {

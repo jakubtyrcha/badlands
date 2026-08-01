@@ -146,7 +146,7 @@ TEST_CASE("a monster's xp_reward splits evenly (round up) over nearby heroes") {
         badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {1.0f, 0.0f});
     g.registry.get<badlands::Health>(
         badlands::entity_for_slot(g, static_cast<int32_t>(rat))).hp = 0.0f;
-    badlands::tick_world(g, kTickDt);  // death sweep spreads the reward
+    badlands::step_world(g);  // death sweep spreads the reward
 
     CHECK(xp_of(g, h1) == 5);  // ceil(10 / 2)
     CHECK(xp_of(g, h2) == 5);
@@ -167,7 +167,7 @@ TEST_CASE("heroes hidden inside buildings get no kill XP; alone gets it all") {
         badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {0.5f, 0.0f});
     g.registry.get<badlands::Health>(
         badlands::entity_for_slot(g, static_cast<int32_t>(rat))).hp = 0.0f;
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
 
     CHECK(xp_of(g, outside) == 10);  // whole reward: the only eligible hero
     CHECK(xp_of(g, hidden) == 0);
@@ -200,13 +200,13 @@ TEST_CASE("newly discovered texels award xp_per_texel to the discovering hero") 
     d.vision_cone_half_angle_deg = 180.0f;  // full circle
     const uint32_t slot = badlands::spawn_into(g, d);
 
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
     const int total = discovered_texels(g.vision);
     REQUIRE(total > 0);
     CHECK(xp_of(g, slot) == total * g.factors.progression.xp_per_texel);
 
     // The invariant holds tick over tick (the hero may roam and reveal more):
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
     CHECK(xp_of(g, slot) ==
           discovered_texels(g.vision) * g.factors.progression.xp_per_texel);
 }
@@ -228,7 +228,7 @@ TEST_CASE("overlapping discoveries are credited exactly once (union, no double)"
     d.pos_x = 4.0f;  // overlapping circles
     const uint32_t b = badlands::spawn_into(g, d);
 
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
     CHECK(xp_of(g, a) + xp_of(g, b) == discovered_texels(g.vision));
     CHECK(xp_of(g, a) > 0);
     CHECK(xp_of(g, b) > 0);
@@ -251,7 +251,7 @@ TEST_CASE("oversized exploration awards saturate instead of wrapping") {
     d.vision_cone_half_angle_deg = 180.0f;  // full circle
     const uint32_t slot = badlands::spawn_into(g, d);
 
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
 
     // cost(1) = level_base_xp = 1e9, consumed on the way to level 2; cost(2)
     // (~3.03e9) saturates to INT32_MAX, so the level-up loop stops there.

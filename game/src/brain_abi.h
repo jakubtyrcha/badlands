@@ -68,7 +68,13 @@ extern "C" {
 
 // Wire format version. Bumped on any incompatible layout change; the host
 // (bh_instantiate) rejects a module whose bl_abi_version() disagrees.
-#define BL_ABI_VERSION 6
+// v7: sim time is TICKS of 1/120 s, not milliseconds. NO STRUCT CHANGED SIZE --
+// every one of these fields was an int64 before and is an int64 now -- so the
+// size static_asserts below are BLIND to this break. The version is the only
+// signal that the numbers mean something new, which is exactly why it must be
+// bumped: a v6 guest talking to a v7 host would read every duration 3.6x short
+// and nothing would fail loudly.
+#define BL_ABI_VERSION 7
 
 // Capacities baked into the wire structs below (fixed-size arrays -- no
 // dynamic length on the wasm side of this boundary).
@@ -188,16 +194,16 @@ extern "C" {
 // on a fresh wake). One per BlViewWire (the thinking entity), as opposed to
 // BlViewChar (every OTHER entity it can currently see).
 typedef struct BlViewSelf {
-    int64_t world_millis;         // sim clock right now
-    int64_t think_until_millis;   // carried from v1 (HeroSimulationState's own
+    int64_t world_ticks;         // sim clock right now
+    int64_t think_until_ticks;   // carried from v1 (HeroSimulationState's own
                                    // deliberation pause, unrelated to the
                                    // intention contract) -- always 0 for a
                                    // hero driven by this wire, since nothing
                                    // on this path ever requests ActivityId::
                                    // Think anymore; kept only because BlViewSelf
                                    // otherwise stays 1:1 with WorldView.
-    int64_t roam_epoch;           // world_millis / roam lease window (stable roam goal)
-    int64_t intention_wake_at;    // CurrentIntention.wake_at_millis; 0 only for a
+    int64_t roam_epoch;           // world_ticks / roam lease window (stable roam goal)
+    int64_t intention_wake_at;    // CurrentIntention.wake_at_ticks; 0 only for a
                                    // hero that has never been adopted/restated
                                    // yet -- v3's default wake cadence
                                    // (intention-contract.html §2) means an
@@ -296,8 +302,8 @@ typedef struct BlViewSuggest {
 // (scripts/brains/nim/hero.nim's kHeroActivities -- the sole implementation
 // now; game/src/behaviours/blocks.cpp keeps only the shared/non-hero blocks).
 // Unlike v1, this does NOT carry
-// think_min_millis/think_max_millis -- deliberation is gone; the idle hint
-// (BlSuggestionWire::idle_hint_millis, drawn guest-side against a compiled
+// think_min_ticks/think_max_ticks -- deliberation is gone; the idle hint
+// (BlSuggestionWire::idle_hint_ticks, drawn guest-side against a compiled
 // constant) replaces it. Perception-only factors (radii used by observe_hero,
 // explore_chance, drain/fill rates, lease windows) stay excluded, same as v1.
 typedef struct BlViewFactors {
@@ -328,7 +334,7 @@ typedef struct BlViewFactors {
 // raw character list a brain's own logic might scan, e.g. to pick a
 // companion or a target). Unchanged from v1.
 typedef struct BlViewChar {
-    int64_t last_seen_millis;
+    int64_t last_seen_ticks;
     uint32_t slot;
     int32_t archetype;    // badlands::Archetype
     int32_t team;
@@ -341,13 +347,13 @@ typedef struct BlViewChar {
 
 // --- BlStatus --------------------------------------------------------------
 // One advisory status affecting this entity right now: {kind, remaining}.
-// kind in BL_ST_*; remaining_millis == 0 means indefinite (ends on some
+// kind in BL_ST_*; remaining_ticks == 0 means indefinite (ends on some
 // condition other than a timer -- e.g. BL_ST_INSIDE_BUILDING ends when the
 // need that sent the hero in is filled, not on a clock). All three v1 kinds
 // are advisory only this slice -- none bypasses the think (see brain_abi.h's
 // BL_ST_* doc above and docs/design/intention-contract.html §2).
 typedef struct BlStatus {
-    int64_t remaining_millis;    // 0 = indefinite
+    int64_t remaining_ticks;    // 0 = indefinite
     uint32_t kind;
     uint32_t _pad;
 } BlStatus;
@@ -399,8 +405,8 @@ typedef struct BlViewSkill {
 // 1:1): {kind, source_slot, param}, plus the two clocks a sticky, TTL-expiring
 // entry needs (when it happened, how much longer it survives unread).
 typedef struct BlEvent {
-    int64_t at_millis;
-    int64_t ttl_millis;
+    int64_t at_ticks;
+    int64_t ttl_ticks;
     uint32_t kind;
     uint32_t source_slot;
     float param;
@@ -478,10 +484,10 @@ typedef struct BlViewWire {
 // not a promise in either direction). activity_label is inspection/histogram
 // only; it carries no semantics the engine reads.
 typedef struct BlSuggestionWire {
-    int64_t idle_hint_millis;    // 0 = no preference (v3: the engine defaults this
+    int64_t idle_hint_ticks;    // 0 = no preference (v3: the engine defaults this
                                   // to a ~1s cadence rather than "forever" --
                                   // intention-contract.html §2)
-    int64_t duration_millis;     // BL_INT_IDLE only
+    int64_t duration_ticks;     // BL_INT_IDLE only
     int32_t intention_kind;      // BL_INT_*
     int32_t activity_label;      // ActivityId, inspection only
     float point_x, point_z;

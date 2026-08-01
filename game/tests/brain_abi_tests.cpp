@@ -24,7 +24,7 @@ TEST_CASE("BL_MAX_ACTIVITIES matches ActivityId::Count", "[brain_abi]") {
     REQUIRE(BL_MAX_ACTIVITIES == static_cast<int32_t>(ActivityId::Count));
 }
 
-TEST_CASE("BL_ABI_VERSION is 6", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 6); }
+TEST_CASE("BL_ABI_VERSION is 7", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 7); }
 
 TEST_CASE("BL_MAX_ATTACKS matches badlands::kMaxAttacks", "[brain_abi]") {
     REQUIRE(BL_MAX_ATTACKS == kMaxAttacks);
@@ -96,7 +96,7 @@ TEST_CASE("BlViewSuggest / BlViewFactors internal padding lands where documented
           "[brain_abi]") {
     // threat_count(4) + the explicit _pad(4) precede the BlThreat array.
     REQUIRE(offsetof(BlViewSuggest, threats) == 120);
-    // weights[] leads BlViewFactors now (think_min/max_millis are gone).
+    // weights[] leads BlViewFactors now (think_min/max_ticks are gone).
     REQUIRE(offsetof(BlViewFactors, weights) == 0);
     // weights[14] (56 bytes) precede the scalar tail.
     REQUIRE(offsetof(BlViewFactors, fatigue_seek) == 56);
@@ -104,7 +104,7 @@ TEST_CASE("BlViewSuggest / BlViewFactors internal padding lands where documented
 
 TEST_CASE("BlViewSelf's current-intention summary is grouped per the layout rules",
           "[brain_abi]") {
-    // The four int64_t fields (world_millis, think_until_millis, roam_epoch,
+    // The four int64_t fields (world_ticks, think_until_ticks, roam_epoch,
     // intention_wake_at) are grouped first; intention_kind joins the other
     // 4-byte fields, with _pad2 rounding the struct to a multiple of 8.
     REQUIRE(offsetof(BlViewSelf, intention_wake_at) == 24);

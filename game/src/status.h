@@ -6,8 +6,8 @@
 // effective_combatant). Adding a status kind therefore costs one enum value
 // plus the gates that care, and nothing here has to know about any of them.
 //
-// Determinism: durations are int64 milliseconds decremented by the
-// compile-time kMillisPerTick (components.h), so every expiry lands on the
+// Determinism: durations are int64 ticks decremented by the
+// compile-time kTicksPerStep (components.h), so every expiry lands on the
 // same tick live and on replay.
 //
 // Application usually arrives through a Command handler (never a brain), which
@@ -33,10 +33,10 @@ namespace badlands {
 // True while `e` carries `kind`. Safe on an entity with no Statuses component.
 bool has_status(const entt::registry& reg, entt::entity e, StatusKind kind);
 
-// Milliseconds left on `kind`, or 0 when it is not present.
-int64_t remaining_millis_of(const entt::registry& reg, entt::entity e, StatusKind kind);
+// Ticks left on `kind`, or 0 when it is not present.
+int64_t remaining_ticks_of(const entt::registry& reg, entt::entity e, StatusKind kind);
 
-// Applies (or refreshes) `kind` for `millis` milliseconds, emplacing Statuses
+// Applies (or refreshes) `kind` for `millis` ticks, emplacing Statuses
 // on demand. Returns whether anything was applied.
 //
 //  * A non-positive `millis` is a no-op -- "for no time at all" is not an
@@ -63,8 +63,8 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
 // differently from one running out.
 bool clear_status(BadlandsGame& game, entt::entity e, StatusKind kind);
 
-// Per-tick sweep (tick_world, sim.cpp): decrements every entry by
-// kMillisPerTick and compacts out the expired ones. Runs unconditionally --
+// Per-tick sweep (step_world, sim.cpp): decrements every entry by
+// kTicksPerStep and compacts out the expired ones. Runs unconditionally --
 // live and replaying alike -- because it is pure derived state over a timer,
 // not a decision.
 void advance_statuses(BadlandsGame& game);

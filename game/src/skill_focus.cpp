@@ -12,10 +12,6 @@ namespace badlands {
 
 namespace {
 
-int64_t millis_of(float seconds) {
-    return static_cast<int64_t>(std::lround(seconds * 1000.0f));
-}
-
 void emit_cancelled(BadlandsGame& game, entt::entity e, const SkillFocus& f) {
     const glm::vec2 pos = game.registry.all_of<Position>(e)
                               ? game.registry.get<Position>(e).pos
@@ -27,7 +23,7 @@ void emit_cancelled(BadlandsGame& game, entt::entity e, const SkillFocus& f) {
                                .amount = static_cast<float>(f.id),
                                .x = pos.x,
                                .z = pos.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
 }
 
 }  // namespace
@@ -48,7 +44,7 @@ bool begin_focus(BadlandsGame& game, entt::entity e, int32_t skill_index,
     }
     const SkillId id = skills->ids[skill_index];
     const SkillSpec& spec = game.skills.specs[static_cast<size_t>(id)];
-    const int64_t duration = millis_of(spec.intention_duration_seconds);
+    const int64_t duration = ticks_of(spec.intention_duration_seconds);
     if (duration <= 0) {
         // An "instant focus" is a contradiction. Running it as an ordinary cast
         // instead would make the trigger meaningless -- the whole difference
@@ -57,7 +53,7 @@ bool begin_focus(BadlandsGame& game, entt::entity e, int32_t skill_index,
                      SkillName(static_cast<int32_t>(id)));
         return false;
     }
-    reg.emplace<SkillFocus>(e, SkillFocus{.resolve_at_millis = game.world_millis + duration,
+    reg.emplace<SkillFocus>(e, SkillFocus{.resolve_at_ticks = game.world_ticks + duration,
                                           .id = id,
                                           .skill_index = skill_index,
                                           .target_slot = target_slot});
@@ -85,7 +81,7 @@ void advance_focus(BadlandsGame& game) {
     // and a view iterated while its own pool is written to is not safe.
     std::vector<entt::entity> due;
     for (auto [e, f] : game.registry.view<const SkillFocus>().each()) {
-        if (game.world_millis >= f.resolve_at_millis) {
+        if (game.world_ticks >= f.resolve_at_ticks) {
             due.push_back(e);
         }
     }

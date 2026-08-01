@@ -45,7 +45,7 @@ void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot
                                .amount = amount,
                                .x = pos.x,
                                .z = pos.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
     if (hp_after <= 0.0f) {
         emit_event(game, GameEvent{.kind = GameEventKind::HeroDowned,
                                    .actor_id = actor_slot,
@@ -54,7 +54,7 @@ void emit_char_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t target_slot
                                    .amount = 0.0f,
                                    .x = pos.x,
                                    .z = pos.y,
-                                   .at_millis = game.world_millis});
+                                   .at_ticks = game.world_ticks});
     }
 
     // Intention contract: mirror the hit into the victim's inbox -- a
@@ -85,7 +85,7 @@ void emit_building_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t bid,
                                .amount = amount,
                                .x = center.x,
                                .z = center.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
     if (hp_after <= 0.0f) {
         emit_event(game, GameEvent{.kind = GameEventKind::BuildingDestroyed,
                                    .actor_id = actor_slot,
@@ -94,7 +94,7 @@ void emit_building_hit(BadlandsGame& game, uint32_t actor_slot, uint32_t bid,
                                    .amount = 0.0f,
                                    .x = center.x,
                                    .z = center.y,
-                                   .at_millis = game.world_millis});
+                                   .at_ticks = game.world_ticks});
     }
 }
 

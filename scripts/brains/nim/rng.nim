@@ -19,13 +19,13 @@ proc xorshift64*(s: var uint64): uint64 =
 
 # Mixes an entity slot and a time (or epoch) into a non-zero seed. The
 # splitmix64 finalizer is load-bearing (see rng.h) -- avalanche first, then
-# draw. `whenMillis` mirrors the C++ int64_t `when` parameter; the
+# draw. `whenTicks` mirrors the C++ int64_t `when` parameter; the
 # static_cast<uint64_t> reinterpretation of a (possibly negative) int64 is
 # exactly what Nim's `uint64(x)` conversion between same-width signed/unsigned
 # integers does too (two's-complement bit pattern, no range check).
-proc seedOf*(slot: uint32, whenMillis: int64): uint64 =
+proc seedOf*(slot: uint32, whenTicks: int64): uint64 =
   var s: uint64 = uint64(slot) * 0x9E3779B97F4A7C15'u64
-  s = s xor (uint64(whenMillis) + 0x9E3779B97F4A7C15'u64)
+  s = s xor (uint64(whenTicks) + 0x9E3779B97F4A7C15'u64)
   s = s xor (s shr 30)
   s = s * 0xBF58476D1CE4E5B9'u64
   s = s xor (s shr 27)

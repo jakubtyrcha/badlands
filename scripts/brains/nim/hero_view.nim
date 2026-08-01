@@ -9,7 +9,7 @@
 # the wire (a hero brain never perceives them, brain_abi.h says so), and the
 # full 8-deep threat list collapses to the nearest one -- the slot/dist react()
 # actually consults (nearest-first, per BlThreat's own doc, brain_abi.h). Also
-# dropped versus v1: thinkUntilMillis (HeroSimulationState's own deliberation
+# dropped versus v1: thinkUntilTicks (HeroSimulationState's own deliberation
 # pause -- unrelated to the intention contract, and nothing on this path reads
 # it anymore now that deliberation.nim is gone).
 #
@@ -38,7 +38,7 @@ type
     inventory*: int32
 
     # clock
-    nowMillis*: int64
+    nowTicks*: int64
     night*: bool
 
     # wander goal (drawn host-side; the block just walks to it)
@@ -116,7 +116,7 @@ type
     # already mid-MoveTo/etc. on a spurious wake.
     currentActivity*: int32       # ActivityId this entity is doing now; -1 = none yet
     intentionKind*: int32         # BL_INT_*; BL_INT_NONE = nothing running
-    intentionWakeAt*: int64       # CurrentIntention.wake_at_millis; 0 = no deadline
+    intentionWakeAt*: int64       # CurrentIntention.wake_at_ticks; 0 = no deadline
 
 proc viewFromWire*(w: BlViewWire): HeroView =
   result.slot = w.self.slot
@@ -126,7 +126,7 @@ proc viewFromWire*(w: BlViewWire): HeroView =
   result.healthFrac = w.self.health_frac
   result.inventory = w.self.inventory
   result.night = w.self.night != 0'u32
-  result.nowMillis = w.self.world_millis
+  result.nowTicks = w.self.world_ticks
   result.currentActivity = w.self.current_activity
   result.intentionKind = w.self.intention_kind
   result.intentionWakeAt = w.self.intention_wake_at

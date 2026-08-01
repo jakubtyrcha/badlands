@@ -65,10 +65,10 @@ struct Contact {
     // MoveTargets these cases set (mock_think, sim.cpp).
     void step(int n = 1) {
         for (int i = 0; i < n; ++i) {
-            owned->world_millis += kMillisPerTick;
+            owned->world_ticks += kTicksPerStep;
             advance_statuses(*owned);
-            plan_paths(*owned, kDt);
-            follow_paths(*owned, kDt);
+            plan_paths(*owned);
+            follow_paths(*owned);
             update_melee_locks(*owned);
             separate_units(*owned);
         }
@@ -96,7 +96,7 @@ TEST_CASE("walking out of contact earns the penalty", "[disengage]") {
 
     CHECK_FALSE(c.game().registry.all_of<MeleeLock>(c.ae));
     CHECK(has_status(c.game().registry, c.ae, StatusKind::Disengaged));
-    CHECK(remaining_millis_of(c.game().registry, c.ae, StatusKind::Disengaged) > 0);
+    CHECK(remaining_ticks_of(c.game().registry, c.ae, StatusKind::Disengaged) > 0);
 }
 
 TEST_CASE("being left behind does not", "[disengage]") {
@@ -156,7 +156,7 @@ TEST_CASE("a PURSUER is not punished for chasing", "[disengage]") {
 TEST_CASE("Disengaged refuses every action", "[disengage]") {
     Contact c;
     BadlandsGame& g = c.game();
-    REQUIRE(apply_status(g, c.ae, StatusKind::Disengaged, 3000, c.a));
+    REQUIRE(apply_status(g, c.ae, StatusKind::Disengaged, ticks_of(3.0f), c.a));
 
     CHECK_FALSE(resolve_action(g, c.a, AgentAction{BL_ACT_ATTACK, c.b, 0}));
     CHECK(g.command_queue.empty());
@@ -172,7 +172,7 @@ TEST_CASE("Disengaged refuses every action", "[disengage]") {
 TEST_CASE("Disengaged stops acting, not moving or defending", "[disengage]") {
     Contact c;
     BadlandsGame& g = c.game();
-    apply_status(g, c.ae, StatusKind::Disengaged, 3000, c.a);
+    apply_status(g, c.ae, StatusKind::Disengaged, ticks_of(3.0f), c.a);
 
     // Still dodges and parries: this is a penalty on ACTING, unlike Stunned.
     const Combatant& base = g.registry.get<Combatant>(c.ae);
@@ -189,8 +189,8 @@ TEST_CASE("Disengaged stops acting, not moving or defending", "[disengage]") {
 
 TEST_CASE("the penalty expires", "[disengage]") {
     Contact c;
-    apply_status(c.game(), c.ae, StatusKind::Disengaged, 500, c.a);
-    c.step(16);  // 528 ms
+    apply_status(c.game(), c.ae, StatusKind::Disengaged, ticks_of(0.5f), c.a);
+    c.step(16);  // 0.5s == 60 ticks == exactly 15 steps; 16 is comfortably past it
     CHECK_FALSE(has_status(c.game().registry, c.ae, StatusKind::Disengaged));
     CHECK(resolve_action(c.game(), c.a, AgentAction{BL_ACT_ATTACK, c.b, 0}));
 }

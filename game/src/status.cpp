@@ -45,10 +45,10 @@ const char* StatusName(int32_t kind) {
 }
 
 bool has_status(const entt::registry& reg, entt::entity e, StatusKind kind) {
-    return remaining_millis_of(reg, e, kind) > 0;
+    return remaining_ticks_of(reg, e, kind) > 0;
 }
 
-int64_t remaining_millis_of(const entt::registry& reg, entt::entity e, StatusKind kind) {
+int64_t remaining_ticks_of(const entt::registry& reg, entt::entity e, StatusKind kind) {
     if (e == entt::null || !reg.valid(e)) {
         return 0;
     }
@@ -57,7 +57,7 @@ int64_t remaining_millis_of(const entt::registry& reg, entt::entity e, StatusKin
         return 0;
     }
     const int32_t i = index_of(*s, kind);
-    return i < 0 ? 0 : s->entries[i].remaining_millis;
+    return i < 0 ? 0 : s->entries[i].remaining_ticks;
 }
 
 bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t millis,
@@ -74,8 +74,8 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
     if (const int32_t i = index_of(s, kind); i >= 0) {
         // Refresh: keep the longer remaining. A weaker stun landing mid-stun
         // must not cure the stronger one already running.
-        if (millis > s.entries[i].remaining_millis) {
-            s.entries[i].remaining_millis = millis;
+        if (millis > s.entries[i].remaining_ticks) {
+            s.entries[i].remaining_ticks = millis;
             s.entries[i].source_slot = source_slot;
         }
     } else {
@@ -115,7 +115,7 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
                                .amount = static_cast<float>(kind),
                                .x = pos.x,
                                .z = pos.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
     return true;
 }
 
@@ -144,8 +144,8 @@ void advance_statuses(BadlandsGame& game) {
     for (auto [e, s] : game.registry.view<Statuses>().each()) {
         int32_t live = 0;
         for (int32_t i = 0; i < s.count && i < kMaxStatuses; ++i) {
-            s.entries[i].remaining_millis -= kMillisPerTick;
-            if (s.entries[i].remaining_millis > 0) {
+            s.entries[i].remaining_ticks -= kTicksPerStep;
+            if (s.entries[i].remaining_ticks > 0) {
                 // Compact in place: survivors keep their relative order, so
                 // the array never depends on which entry expired.
                 s.entries[live++] = s.entries[i];

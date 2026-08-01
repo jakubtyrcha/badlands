@@ -299,42 +299,44 @@ TEST_CASE("a duel samples a level in range for each side", "[duel]") {
 
 TEST_CASE("a duel ends when one side is gone, after the linger", "[duel]") {
     DuelConfig cfg;
-    cfg.max_millis = 60000;
-    cfg.linger_millis = 5000;
+    cfg.max_ticks = ticks_of(60.0f);
+    cfg.linger_ticks = ticks_of(5.0f);
     DuelMode mode(cfg);
     mode.Configure();
 
     const std::vector<CharacterState> both{fighter(0), fighter(1)};
     const std::vector<CharacterState> left_only{fighter(0)};
 
-    CHECK_FALSE(mode.Observe(both, kNoEvents, 1000));
-    CHECK_FALSE(mode.Observe(left_only, kNoEvents, 2000));   // decided here, but lingering
-    CHECK_FALSE(mode.Observe(left_only, kNoEvents, 6999));   // still inside the linger
-    CHECK(mode.Observe(left_only, kNoEvents, 7000));         // 2000 + 5000: restage
+    CHECK_FALSE(mode.Observe(both, kNoEvents, ticks_of(1.0f)));
+    CHECK_FALSE(mode.Observe(left_only, kNoEvents, ticks_of(2.0f)));  // decided, but lingering
+    CHECK_FALSE(mode.Observe(left_only, kNoEvents,
+                             ticks_of(2.0f) + ticks_of(5.0f) - 1));  // still inside the linger
+    CHECK(mode.Observe(left_only, kNoEvents,
+                       ticks_of(2.0f) + ticks_of(5.0f)));  // 2s + 5s: restage
 }
 
 TEST_CASE("a duel with both sides alive times out as a draw", "[duel]") {
     DuelConfig cfg;
-    cfg.max_millis = 60000;
-    cfg.linger_millis = 5000;
+    cfg.max_ticks = ticks_of(60.0f);
+    cfg.linger_ticks = ticks_of(5.0f);
     DuelMode mode(cfg);
     mode.Configure();
 
     const std::vector<CharacterState> both{fighter(0), fighter(1)};
-    CHECK_FALSE(mode.Observe(both, kNoEvents, 59999));
+    CHECK_FALSE(mode.Observe(both, kNoEvents, ticks_of(60.0f) - 1));
     // No linger on a timeout: there is nothing left to watch.
-    CHECK(mode.Observe(both, kNoEvents, 60000));
+    CHECK(mode.Observe(both, kNoEvents, ticks_of(60.0f)));
 }
 
 TEST_CASE("a duel with both sides gone is a draw, not a win", "[duel]") {
     DuelConfig cfg;
-    cfg.linger_millis = 1000;
+    cfg.linger_ticks = ticks_of(1.0f);
     DuelMode mode(cfg);
     mode.Configure();
 
     const std::vector<CharacterState> nobody{};
-    CHECK_FALSE(mode.Observe(nobody, kNoEvents, 2000));  // decided, lingering
-    CHECK(mode.Observe(nobody, kNoEvents, 3000));
+    CHECK_FALSE(mode.Observe(nobody, kNoEvents, ticks_of(2.0f)));  // decided, lingering
+    CHECK(mode.Observe(nobody, kNoEvents, ticks_of(2.0f) + ticks_of(1.0f)));
     // A mutual kill leaves nobody standing; the readout must not credit a side.
     const std::string status = mode.Status();
     CHECK(status.find("draw") != std::string::npos);
@@ -364,7 +366,7 @@ GameEvent status_applied(uint32_t target_slot, StatusKind kind, int64_t at) {
     ev.target_id = target_slot;
     ev.target_kind = kEventTargetCharacter;
     ev.amount = static_cast<float>(kind);
-    ev.at_millis = at;
+    ev.at_ticks = at;
     return ev;
 }
 
@@ -375,7 +377,7 @@ GameEvent damage_dealt(uint32_t actor_slot, uint32_t target_slot, float amount, 
     ev.target_id = target_slot;
     ev.target_kind = kEventTargetCharacter;
     ev.amount = amount;
-    ev.at_millis = at;
+    ev.at_ticks = at;
     return ev;
 }
 
@@ -388,11 +390,11 @@ TEST_CASE("the sneak mode sees the sneak, then the blow that ends it", "[sneak][
 
     observe_sneak({status_applied(7, StatusKind::Sneaking, 1800)}, 7, p);
     REQUIRE(p.stage == SneakStage::Sneaked);
-    CHECK(p.sneaked_at_millis == 1800);
+    CHECK(p.sneaked_at_ticks == 1800);
 
     observe_sneak({damage_dealt(7, 9, 31.2f, 7400)}, 7, p);
     REQUIRE(p.stage == SneakStage::Struck);
-    CHECK(p.struck_at_millis == 7400);
+    CHECK(p.struck_at_ticks == 7400);
     CHECK(p.strike_damage == Catch::Approx(31.2f));
 }
 
@@ -430,13 +432,13 @@ TEST_CASE("the sneak mode reports a failure on timeout, and still restages", "[s
     // A round that produced nothing must say so out loud. Silently restaging
     // would read exactly like a pass.
     SneakConfig cfg;
-    cfg.max_millis = 30000;
+    cfg.max_ticks = ticks_of(30.0f);
     SneakMode mode(cfg);
     mode.Configure();
 
     const std::vector<CharacterState> rows{fighter(0), fighter(1)};
-    CHECK_FALSE(mode.Observe(rows, kNoEvents, 29999));
-    CHECK(mode.Observe(rows, kNoEvents, 30000));
+    CHECK_FALSE(mode.Observe(rows, kNoEvents, ticks_of(30.0f) - 1));
+    CHECK(mode.Observe(rows, kNoEvents, ticks_of(30.0f)));
     CHECK(mode.Status().find("FAILED") != std::string::npos);
 }
 
@@ -450,16 +452,16 @@ TEST_CASE("the teleport mode counts only a teleport", "[teleport][mode]") {
     curse.kind = GameEventKind::SkillUsed;
     curse.actor_id = 3;
     curse.amount = static_cast<float>(SkillId::Curse);
-    curse.at_millis = 500;
+    curse.at_ticks = 500;
     observe_teleport({curse}, 3, p);
     CHECK_FALSE(p.blinked);
 
     GameEvent blink = curse;
     blink.amount = static_cast<float>(SkillId::Teleport);
-    blink.at_millis = 2300;
+    blink.at_ticks = 2300;
     observe_teleport({blink}, 3, p);
     REQUIRE(p.blinked);
-    CHECK(p.blinked_at_millis == 2300);
+    CHECK(p.blinked_at_ticks == 2300);
 
     // ...and somebody ELSE blinking is not our apprentice blinking.
     TeleportProgress q;
@@ -472,13 +474,13 @@ TEST_CASE("the teleport mode counts only a teleport", "[teleport][mode]") {
 TEST_CASE("the teleport mode reports a failure on timeout, and still restages",
           "[teleport][mode]") {
     TeleportConfig cfg;
-    cfg.max_millis = 30000;
+    cfg.max_ticks = ticks_of(30.0f);
     TeleportMode mode(cfg);
     mode.Configure();
 
     const std::vector<CharacterState> rows{fighter(0), fighter(1)};
-    CHECK_FALSE(mode.Observe(rows, kNoEvents, 29999));
-    CHECK(mode.Observe(rows, kNoEvents, 30000));
+    CHECK_FALSE(mode.Observe(rows, kNoEvents, ticks_of(30.0f) - 1));
+    CHECK(mode.Observe(rows, kNoEvents, ticks_of(30.0f)));
     CHECK(mode.Status().find("FAILED") != std::string::npos);
 }
 

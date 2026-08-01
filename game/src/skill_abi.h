@@ -33,7 +33,10 @@ extern "C" {
 // Bumped on any incompatible layout change. A future host will reject a skill
 // module whose reported version disagrees, exactly as bh_instantiate does for
 // the brain wire.
-#define BL_SKILL_ABI_VERSION 3
+// v4: durations in a cast context and an effect batch are TICKS (1/120 s), not
+// milliseconds. No struct changed size, so the asserts below cannot see it --
+// the version is the whole signal (see brain_abi.h's v7 note).
+#define BL_SKILL_ABI_VERSION 4
 
 // Capacities baked into the fixed-size arrays below.
 #define BL_SKILL_MAX_TARGETS 8     // == badlands::kMaxSkillTargets
@@ -128,7 +131,7 @@ typedef struct BlSkillCastContext {
     // on passable ground). Zero for every other targeting mode. An effect that
     // wants to move something has to spend THIS point -- see BL_FX_TELEPORT.
     float point_x, point_z;
-    int64_t world_millis;
+    int64_t world_ticks;
     uint64_t seed;
     BlSkillCaster caster;
     int32_t target_count;

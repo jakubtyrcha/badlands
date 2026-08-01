@@ -28,7 +28,7 @@ struct CombatRequest {
     Combatant defender;
     uint32_t attacker_slot = 0;
     uint32_t target_slot = 0;
-    int64_t world_millis = 0;
+    int64_t world_ticks = 0;
     int32_t attack_index = 0;
 };
 
@@ -182,6 +182,6 @@ int select_attack(const BadlandsGame& game, entt::entity self, entt::entity targ
 // Fly every in-flight projectile toward its target and resolve it on arrival
 // (applying resolve_attack to the target's Health), despawning on hit or when the
 // target is gone. A pure system rule -- runs identically live and on replay.
-void advance_projectiles(BadlandsGame& game, float dt);
+void advance_projectiles(BadlandsGame& game);
 
 }  // namespace badlands

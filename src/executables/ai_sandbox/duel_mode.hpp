@@ -21,10 +21,10 @@ struct DuelConfig {
     uint64_t seed = 1;
     // Sim-time budget for a round. A pairing that cannot resolve inside it is a
     // draw and says so -- a stalemate is a result, not a hang.
-    int64_t max_millis = 60000;
+    int64_t max_ticks = 60 * 120;    // 60 s
     // How long to keep watching after one side falls, so the end of a fight is
     // visible rather than cutting to the next stage the instant it lands.
-    int64_t linger_millis = 5000;
+    int64_t linger_ticks = 5 * 120;  // 5 s
     // Hero level range, inclusive. The design doc's early game is levels 1-8,
     // and 8 is where the last skill unlocks -- so this range is what makes
     // every skill a class has reachable in a duel at all. Ignored for monsters:
@@ -77,7 +77,7 @@ class DuelMode : public SandboxMode {
     // Events unused: a duel's verdict is entirely visible in the rows -- who
     // is still standing -- so this mode needs no help from the stream.
     bool Observe(const std::vector<CharacterState>& rows, const std::vector<GameEvent>& events,
-                 int64_t world_millis) override;
+                 int64_t world_ticks) override;
     std::string Status() const override;
 
    private:
@@ -89,10 +89,10 @@ class DuelMode : public SandboxMode {
     // Sim time this round began. Every deadline is measured against the world
     // clock, not real seconds, so the speed control changes how long you WAIT
     // and never who wins.
-    int64_t started_millis_ = 0;
+    int64_t started_ticks_ = 0;
     // Sim time the round is to be reported at: set when one side falls, so the
     // linger is a deadline rather than a countdown to decrement.
-    int64_t report_at_millis_ = 0;
+    int64_t report_at_ticks_ = 0;
     bool decided_ = false;
     std::string last_result_ = "no duel yet";
 };

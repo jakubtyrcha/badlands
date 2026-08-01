@@ -281,7 +281,7 @@ void calcify_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
     for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
         push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
                                             static_cast<int32_t>(StatusKind::Calcified),
-                                            seconds * 1000.0f});
+                                            static_cast<float>(ticks_of(seconds))});
     }
 }
 
@@ -298,7 +298,7 @@ void shield_bash_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) 
         }
         push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
                                             static_cast<int32_t>(StatusKind::Stunned),
-                                            seconds * 1000.0f});
+                                            static_cast<float>(ticks_of(seconds))});
     }
 }
 
@@ -310,7 +310,7 @@ void curse_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
     for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
         push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
                                             static_cast<int32_t>(StatusKind::Cursed),
-                                            seconds * 1000.0f});
+                                            static_cast<float>(ticks_of(seconds))});
     }
 }
 
@@ -355,7 +355,7 @@ void sneak_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
     for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
         push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
                                             static_cast<int32_t>(StatusKind::Sneaking),
-                                            seconds * 1000.0f});
+                                            static_cast<float>(ticks_of(seconds))});
     }
 }
 

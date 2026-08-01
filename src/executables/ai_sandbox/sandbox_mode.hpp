@@ -48,7 +48,7 @@ class SandboxMode {
     // particular decision is reading something that already exists rather than
     // asking the sim a new question.
     virtual bool Observe(const std::vector<CharacterState>& rows,
-                         const std::vector<GameEvent>& events, int64_t world_millis) = 0;
+                         const std::vector<GameEvent>& events, int64_t world_ticks) = 0;
 
     // One line of mode-specific text for the debug panel.
     virtual std::string Status() const = 0;

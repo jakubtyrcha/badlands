@@ -9,7 +9,9 @@ namespace badlands {
 
 namespace {
 
-float seconds_of(int64_t millis) { return static_cast<float>(millis) / 1000.0f; }
+// Ticks -> seconds for the log line. The sim counts in ticks; a human reads
+// seconds (badlands_sim.hpp).
+float seconds_of(int64_t ticks) { return seconds_of_ticks(ticks); }
 
 const CharacterState* row_for(const std::vector<CharacterState>& rows, uint32_t slot) {
     for (const CharacterState& r : rows) {
@@ -34,7 +36,7 @@ void observe_teleport(const std::vector<GameEvent>& events, uint32_t hero_slot,
         if (ev.kind == GameEventKind::SkillUsed && ev.actor_id == hero_slot &&
             static_cast<int32_t>(ev.amount) == static_cast<int32_t>(SkillId::Teleport)) {
             p.blinked = true;
-            p.blinked_at_millis = ev.at_millis;
+            p.blinked_at_ticks = ev.at_ticks;
             return;
         }
     }
@@ -67,15 +69,15 @@ void TeleportMode::Stage(Sim& sim) {
                                    start_pos_.y, cfg_.hero_level);
     sim.SpawnCreature(CreatureId::TrainingDummy, /*team=*/1, start_pos_.x + cfg_.start_gap_m,
                       start_pos_.y);
-    started_millis_ = sim.World().world_millis;
+    started_ticks_ = sim.World().world_ticks;
     progress_ = TeleportProgress{};
 }
 
 bool TeleportMode::Observe(const std::vector<CharacterState>& rows,
-                           const std::vector<GameEvent>& events, int64_t world_millis) {
+                           const std::vector<GameEvent>& events, int64_t world_ticks) {
     observe_teleport(events, hero_slot_, progress_);
-    const int64_t elapsed = world_millis - started_millis_;
-    if (!progress_.blinked && elapsed < cfg_.max_millis) {
+    const int64_t elapsed = world_ticks - started_ticks_;
+    if (!progress_.blinked && elapsed < cfg_.max_ticks) {
         return false;
     }
 
@@ -89,11 +91,11 @@ bool TeleportMode::Observe(const std::vector<CharacterState>& rows,
             moved = std::hypot(r->pos_x - start_pos_.x, r->pos_z - start_pos_.y);
         }
         std::snprintf(line, sizeof(line), "blinked %.1f m at %.1fs (%s)", moved,
-                      seconds_of(progress_.blinked_at_millis - started_millis_),
+                      seconds_of(progress_.blinked_at_ticks - started_ticks_),
                       moved > 1.0f ? "OK" : "FAILED: cast but did not move");
     } else {
         std::snprintf(line, sizeof(line), "never blinked in %.0fs (FAILED)",
-                      seconds_of(cfg_.max_millis));
+                      seconds_of(cfg_.max_ticks));
     }
     last_result_ = line;
     spdlog::info("teleport {}: {}", round_, last_result_);

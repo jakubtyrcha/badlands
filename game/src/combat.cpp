@@ -57,7 +57,7 @@ float apply_armour(DamageType type, float base, float armour) {
 // Fold the four replay-reproducible identity axes into one non-zero seed, so the
 // whole roll stream is a pure function of (who, whom, when, which attack).
 uint64_t combat_seed(const CombatRequest& r) {
-    uint64_t s = seed_of(r.attacker_slot, r.world_millis);
+    uint64_t s = seed_of(r.attacker_slot, r.world_ticks);
     s ^= seed_of(r.target_slot, static_cast<int64_t>(r.attack_index) + 1);
     return s == 0 ? 1ull : s;
 }
@@ -364,7 +364,7 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
         proj.attack = s.attack;
         proj.attacker = s.attacker;
         proj.attack_index = s.attack_index;
-        proj.fire_millis = s.declared_millis;
+        proj.fire_ticks = s.declared_ticks;
         reg.emplace<Projectile>(reg.create(), proj);
         return;
     }
@@ -383,7 +383,7 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
     req.defender = effective_combatant(reg, target);  // but the DEFENDER is live:
     req.attacker_slot = attacker_slot;                // a target stunned mid-swing
     req.target_slot = s.target_slot;                  // is defenceless when it lands
-    req.world_millis = s.declared_millis;
+    req.world_ticks = s.declared_ticks;
     req.attack_index = s.attack_index;
     const CombatResult res = resolve_attack(req);
     if (res.damage > 0.0f) {
@@ -394,7 +394,7 @@ void deliver_strike(BadlandsGame& game, entt::entity attacker, const StrikeInPro
     }
 }
 
-void advance_projectiles(BadlandsGame& game, float dt) {
+void advance_projectiles(BadlandsGame& game) {
     entt::registry& reg = game.registry;
     std::vector<entt::entity> spent;
     for (auto [e, proj] : reg.view<Projectile>().each()) {
@@ -405,7 +405,7 @@ void advance_projectiles(BadlandsGame& game, float dt) {
         }
         const glm::vec2 to = reg.get<Position>(target).pos - proj.pos;
         const float dist = glm::length(to);
-        const float step = proj.speed * dt;
+        const float step = proj.speed * kSecondsPerStep;
         if (dist <= step + kProjectileHitRadius) {
             CombatRequest req;
             req.attacker = proj.attacker;
@@ -413,7 +413,7 @@ void advance_projectiles(BadlandsGame& game, float dt) {
             req.defender = effective_combatant(reg, target);
             req.attacker_slot = proj.attacker_slot;
             req.target_slot = proj.target_slot;
-            req.world_millis = proj.fire_millis;  // seed fixed at fire time
+            req.world_ticks = proj.fire_ticks;  // seed fixed at fire time
             req.attack_index = proj.attack_index;
             const CombatResult res = resolve_attack(req);
             if (res.damage > 0.0f) {

@@ -6,7 +6,7 @@
 #include "game_state.h"
 #include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights/kActivityCount
 #include "skills.h"           // evaluate_skill_triggers -- the skills block's ready/recommended
-#include "status.h"        // remaining_millis_of -- BL_ST_STUNNED / BL_ST_DISENGAGED
+#include "status.h"        // remaining_ticks_of -- BL_ST_STUNNED / BL_ST_DISENGAGED
 #include "threat_table.h"  // threat_of -- both sides of the fight-or-flee comparison
 #include "combat.h"        // melee_range / ranged_range -- a threat's reach on the wire
 #include "skill_cast.h"    // skill_cast_range -- how wide that window has to be
@@ -124,11 +124,11 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 
     // --- self ---------------------------------------------------------------
     BlViewSelf& self = wire.self;
-    self.world_millis = view.now_millis;
-    self.think_until_millis = view.think_until_millis;
+    self.world_ticks = view.now_ticks;
+    self.think_until_ticks = view.think_until_ticks;
     self.roam_epoch = view.roam_epoch;
     const CurrentIntention& ci = game.registry.get<CurrentIntention>(e);
-    self.intention_wake_at = ci.wake_at_millis;
+    self.intention_wake_at = ci.wake_at_ticks;
     self.slot = view.slot;
     // v5: this hero's own combat potential, the other half of the comparison
     // BlThreat::threat enables (game/src/threat_table.h).
@@ -218,15 +218,15 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     // Deliberately excluded (see brain_abi.h's BlViewFactors doc comment):
     // perception-only factors (radii, drain/fill rates, lease windows) --
     // those stay host-side, read by observe_hero above, not the brain. Also
-    // excluded (v2): think_min_millis/think_max_millis -- deliberation is
+    // excluded (v2): think_min_ticks/think_max_ticks -- deliberation is
     // gone.
 
     // --- statuses: advisory only this slice (brain_abi.h's BL_ST_* doc) -------
     int32_t status_count = 0;
-    auto push_status = [&](int32_t kind, int64_t remaining_millis) {
+    auto push_status = [&](int32_t kind, int64_t remaining_ticks) {
         if (status_count < BL_MAX_STATUSES) {
             wire.statuses[status_count++] =
-                BlStatus{remaining_millis, static_cast<uint32_t>(kind), 0u};
+                BlStatus{remaining_ticks, static_cast<uint32_t>(kind), 0u};
         }
     };
     if (const auto* cs = game.registry.try_get<ChattingState>(e)) {
@@ -238,25 +238,25 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     if (game.registry.all_of<InsideBuilding>(e)) {
         push_status(BL_ST_INSIDE_BUILDING, 0);  // indefinite -- ends when the need is filled
     }
-    if (const int64_t cursed = remaining_millis_of(game.registry, e, StatusKind::Cursed);
+    if (const int64_t cursed = remaining_ticks_of(game.registry, e, StatusKind::Cursed);
         cursed > 0) {
         push_status(BL_ST_CURSED, cursed);
     }
-    if (const int64_t dis = remaining_millis_of(game.registry, e, StatusKind::Disengaged);
+    if (const int64_t dis = remaining_ticks_of(game.registry, e, StatusKind::Disengaged);
         dis > 0) {
         push_status(BL_ST_DISENGAGED, dis);
     }
-    if (const int64_t sneak = remaining_millis_of(game.registry, e, StatusKind::Sneaking);
+    if (const int64_t sneak = remaining_ticks_of(game.registry, e, StatusKind::Sneaking);
         sneak > 0) {
         // A brain only ever sees this on its OWN wire: a sneaking entity is
         // absent from everyone else's threat list, which is the whole mechanic.
         push_status(BL_ST_SNEAKING, sneak);
     }
-    if (const int64_t calc = remaining_millis_of(game.registry, e, StatusKind::Calcified);
+    if (const int64_t calc = remaining_ticks_of(game.registry, e, StatusKind::Calcified);
         calc > 0) {
         push_status(BL_ST_CALCIFIED, calc);
     }
-    if (const int64_t stun = remaining_millis_of(game.registry, e, StatusKind::Stunned);
+    if (const int64_t stun = remaining_ticks_of(game.registry, e, StatusKind::Stunned);
         stun > 0) {
         // Rarely seen by the brain it belongs to -- a stunned entity is not
         // consulted at all (sim.cpp's think dispatch) -- but carried for the
@@ -332,7 +332,7 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
             // also CAPS the radius: you may not blink somewhere you have not
             // looked, however far the skill would reach.
             //
-            // Read straight off the mesh, no rebuild: tick_world makes the
+            // Read straight off the mesh, no rebuild: step_world makes the
             // navmesh current BEFORE any brain thinks (sim.cpp), precisely so
             // that AI goal selection sees this tick's obstacles. Rebuilding
             // here would be a redundant pass and would force this whole packer
@@ -378,8 +378,8 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     wire.event_count = inbox.count;
     for (int32_t i = 0; i < inbox.count; ++i) {
         const InboxEvent& ev = inbox.events[i];
-        wire.events[i] = BlEvent{ev.at_millis,
-                                 ev.ttl_millis,
+        wire.events[i] = BlEvent{ev.at_ticks,
+                                 ev.ttl_ticks,
                                  static_cast<uint32_t>(ev.kind),
                                  ev.source_slot,
                                  ev.param,
@@ -398,7 +398,7 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     wire.char_count = n;
     for (int32_t i = 0; i < n; ++i) {
         const MemoryChar& mc = *ordered[i];
-        wire.chars[i] = BlViewChar{mc.last_seen_millis,
+        wire.chars[i] = BlViewChar{mc.last_seen_ticks,
                                    mc.slot,
                                    mc.archetype,
                                    mc.team,
@@ -418,8 +418,8 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 //
 //  - MALFORMED (corruption-shaped, FATAL -> nullopt, escalated by the
 //    caller): a non-finite point coordinate (would propagate into
-//    MoveTo/distance math, apply_intention/intention.cpp) or a duration_millis/
-//    idle_hint_millis outside [0, INT32_MAX] (narrows losslessly into a
+//    MoveTo/distance math, apply_intention/intention.cpp) or a duration_ticks/
+//    idle_hint_ticks outside [0, INT32_MAX] (narrows losslessly into a
 //    Command's int32_t param_b ONLY because this check bounds it first,
 //    command.cpp's enqueue_set_behavior). These shapes cannot come from a
 //    well-formed guest of ANY version -- they indicate a buggy/adversarial
@@ -447,12 +447,12 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
     if (!std::isfinite(out.point_x) || !std::isfinite(out.point_z)) {
         return std::nullopt;
     }
-    if (out.duration_millis < 0 ||
-        out.duration_millis > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+    if (out.duration_ticks < 0 ||
+        out.duration_ticks > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
         return std::nullopt;
     }
-    if (out.idle_hint_millis < 0 ||
-        out.idle_hint_millis > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+    if (out.idle_hint_ticks < 0 ||
+        out.idle_hint_ticks > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
         return std::nullopt;
     }
 
@@ -460,8 +460,8 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
     intent.point = {out.point_x, out.point_z};
     intent.target_slot = out.target_slot;
     intent.arg = out.arg;
-    intent.duration_millis = out.duration_millis;
-    intent.idle_hint_millis = out.idle_hint_millis;
+    intent.duration_ticks = out.duration_ticks;
+    intent.idle_hint_ticks = out.idle_hint_ticks;
 
     if (out.intention_kind < BL_INT_NONE || out.intention_kind > BL_INT_USE_SKILL) {
         spdlog::warn("[wasm-brain] slot {}: unrecognized intention_kind {}, ignored (forward-compat)",

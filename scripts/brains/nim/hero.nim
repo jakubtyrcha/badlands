@@ -280,24 +280,24 @@ proc standoffGoal(v: HeroView): Vec2 =
 # Floor for the re-fire hint below: never ask for a re-consult sooner than
 # this, even if an attack's own cooldown_remaining is shorter (a wake still
 # costs a host round-trip).
-const kMinShootRefireMillis: int64 = 100
+const kMinShootRefireTicks: int64 = 12   # ~0.1 s at 120 ticks/s
 
-# Smallest cooldown_remaining (ms) among this hero's attacks that are LEGAL
+# Smallest cooldown_remaining (TICKS) among this hero's attacks that are LEGAL
 # under the current melee lock (the same category gate pickBestAttack uses
 # above) -- how soon a hunt-wake retry could actually land a shot, floored at
-# kMinShootRefireMillis. -1 when no attack qualifies (nothing legal to wait
+# kMinShootRefireTicks. -1 when no attack qualifies (nothing legal to wait
 # on; the caller falls back to the ordinary idle hint instead).
-proc minLegalCooldownMillis(v: HeroView): int64 =
+proc minLegalCooldownTicks(v: HeroView): int64 =
   result = -1'i64
   for i in 0 ..< v.attackCount:
     let a = v.attacks[i]
     if v.meleeLocked and a.category == kAttackCategoryRanged:
       continue
-    let ms = (a.cooldown_remaining * 1000.0'f32).int64
-    if result < 0 or ms < result:
-      result = ms
-  if result >= 0 and result < kMinShootRefireMillis:
-    result = kMinShootRefireMillis
+    let ticks = (a.cooldown_remaining * 120.0'f32).int64  # seconds -> ticks
+    if result < 0 or ticks < result:
+      result = ticks
+  if result >= 0 and result < kMinShootRefireTicks:
+    result = kMinShootRefireTicks
 
 # EVERY hero class runs this one table (the now-deleted town_brain.cpp's own
 # comment: "there is no per-class list" -- what a class does, how eagerly,
@@ -315,15 +315,15 @@ const kHeroActivities = [
   ActivityEntry(id: ActIdle, band: bNormal, score: scoreIdle, act: actIdle),
 ]
 
-# The idle hint's bounds (ms): replaces the wire's v1 think_min_millis/
-# think_max_millis (BlViewFactors) -- deliberation is gone, so this is a
+# The idle hint's bounds (TICKS): replaces the wire's v1 think_min_ticks/
+# think_max_ticks (BlViewFactors) -- deliberation is gone, so this is a
 # compiled constant now, not a tunable factor (CLAUDE.md: fixed constants
 # until a knob is asked for). Same order of magnitude as the shipped v1
 # defaults (0..833ms). Scheduling advice only ("you don't need me for X
-# ms"), never a promise -- a spurious wake is always tolerated.
+# ticks"), never a promise -- a spurious wake is always tolerated.
 const
-  kIdleHintMinMillis: int64 = 500
-  kIdleHintMaxMillis: int64 = 2000
+  kIdleHintMinTicks: int64 = 60    # 0.5 s
+  kIdleHintMaxTicks: int64 = 240   # 2 s
 
 proc brainInit() =
   const msg: cstring = "hero brain v3 init"
@@ -529,36 +529,36 @@ proc brainTick(slot: int32): int32 =
   # unconditionally: actHunt (blocks.nim) only ever suggests Shoot once
   # preyDist is already within selfAttackRange, so the distance is always
   # known and meaningful here. When nothing qualifies (every legal attack
-  # still cooling down), no action fires this wake, and refireHintMillis
+  # still cooling down), no action fires this wake, and refireHintTicks
   # asks for a re-consult closer to the actual cooldown (floored at
-  # kMinShootRefireMillis) instead of the ordinary 0.5-2s idle hint below --
+  # kMinShootRefireTicks) instead of the ordinary 0.5-2s idle hint below --
   # so the next shot does not wait out the full window.
-  var refireHintMillis = -1'i64  # -1 = no override; the ordinary hint stands
+  var refireHintTicks = -1'i64  # -1 = no override; the ordinary hint stands
   if chosen.kind == BL_INT_SHOOT:
     let best = pickBestAttack(v, true, v.preyDist)
     if best >= 0:
       bl_enqueue_action(BL_ACT_ATTACK, v.preySlot, best, 0.0'f32, 0.0'f32)
     else:
-      refireHintMillis = minLegalCooldownMillis(v)
+      refireHintTicks = minLegalCooldownTicks(v)
 
-  # The idle hint: "you don't need me for X ms" -- the SAME draw doubles as
-  # BL_INT_IDLE's own duration_millis (the pause IS the idle hint now) and as
-  # idle_hint_millis for every other kind. BL_INT_NONE gets neither: it is
+  # The idle hint: "you don't need me for X ticks" -- the SAME draw doubles as
+  # BL_INT_IDLE's own duration_ticks (the pause IS the idle hint now) and as
+  # idle_hint_ticks for every other kind. BL_INT_NONE gets neither: it is
   # apply_intention's own "nothing suggested this wake" no-op (discarded
   # wholesale, CurrentIntention untouched) -- reachable today only via
   # selectBanded's vacuous all-weights-zero fallback (src/crates/brainhost's
   # real_hero_wasm_conforms test), which also asserts an all-zero-bytes
   # SuggestionWire back, so a hint here would break that acceptance test for
   # no behavioural gain (apply_intention never reads it for None anyway).
-  var s = seedOf(v.slot, v.nowMillis)
-  let drawnHint = rangeI64(s, kIdleHintMinMillis, kIdleHintMaxMillis)
-  let hint = if refireHintMillis >= 0: refireHintMillis else: drawnHint
+  var s = seedOf(v.slot, v.nowTicks)
+  let drawnHint = rangeI64(s, kIdleHintMinTicks, kIdleHintMaxTicks)
+  let hint = if refireHintTicks >= 0: refireHintTicks else: drawnHint
   let isIdle = chosen.kind == BL_INT_IDLE
   let isNone = chosen.kind == BL_INT_NONE
 
   g_out_buf = BlSuggestionWire(
-    idle_hint_millis: (if isIdle or isNone: 0'i64 else: hint),
-    duration_millis: (if isIdle: hint else: 0'i64),
+    idle_hint_ticks: (if isIdle or isNone: 0'i64 else: hint),
+    duration_ticks: (if isIdle: hint else: 0'i64),
     intention_kind: chosen.kind,
     activity_label: chosen.activityLabel,
     point_x: chosen.pointX,

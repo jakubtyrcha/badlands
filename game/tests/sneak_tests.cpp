@@ -203,14 +203,14 @@ TEST_CASE("a damaging cast ends sneak; a self-buff does not", "[sneak][skill]") 
 TEST_CASE("sneak expires on its own timer", "[sneak]") {
     SneakFixture f;
     REQUIRE(f.cast_sneak() >= 0);
-    const int64_t left = remaining_millis_of(f.game->registry, f.robber(), StatusKind::Sneaking);
+    const int64_t left = remaining_ticks_of(f.game->registry, f.robber(), StatusKind::Sneaking);
     REQUIRE(left > 0);
 
     // Ticked by the compile-time per-tick constant, so the deadline is exact
     // rather than a count of frames. Rounded UP: a duration that is not a whole
     // number of ticks has a remainder tick, and truncating would assert the
     // status was gone while it still had milliseconds left.
-    const int64_t ticks = (left + kMillisPerTick - 1) / kMillisPerTick;
+    const int64_t ticks = (left + kTicksPerStep - 1) / kTicksPerStep;
     for (int64_t i = 0; i < ticks - 1; ++i) {
         advance_statuses(*f.game);
     }

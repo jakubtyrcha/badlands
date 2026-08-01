@@ -57,7 +57,7 @@ struct Bout {
     float victim_hp() { return owned->registry.get<Health>(ve).hp; }
     void tick(int n = 1) {
         for (int i = 0; i < n; ++i) {
-            tick_world(*owned, kDt);
+            step_world(*owned);
         }
     }
     void declare() { fire_attack(*owned, attacker, victim, 0); }
@@ -67,11 +67,11 @@ struct Bout {
     // drive the pipeline directly -- the same reason movement_tests does.
     void step_no_think(int n = 1) {
         for (int i = 0; i < n; ++i) {
-            owned->world_millis += kMillisPerTick;
+            owned->world_ticks += kTicksPerStep;
             advance_statuses(*owned);
             advance_strikes(*owned);
-            plan_paths(*owned, kDt);
-            follow_paths(*owned, kDt);
+            plan_paths(*owned);
+            follow_paths(*owned);
         }
     }
 };
@@ -86,8 +86,10 @@ TEST_CASE("a swing resolves at the end of its wind-up, not on declaration", "[st
     CHECK(b.victim_hp() == hp0);          // committed, nothing thrown yet
     CHECK(striking(b.game().registry, b.ae));
 
-    // 500 ms = 15.15 ticks, so 15 ticks is still short of the deadline.
-    b.tick(15);
+    // wind_up 0.5s == 60 ticks == exactly 15 steps of kTicksPerStep (4) each,
+    // and advance_strikes resolves on >=, so the deadline lands exactly AT
+    // step 15 -- 14 steps is still short of it.
+    b.tick(14);
     CHECK(b.victim_hp() == hp0);
     b.tick(1);
     CHECK(b.victim_hp() < hp0);

@@ -1,5 +1,5 @@
 // Day/night clock: integer-millisecond sim time at a fixed 30 Hz (components.h),
-// advanced deterministically by tick_world.
+// advanced deterministically by step_world.
 
 #include "sim_internal.hpp"
 #include "behaviours/world_view.h"
@@ -17,7 +17,7 @@
 using namespace badlands;
 
 TEST_CASE("time helpers derive day/night from integer ms") {
-    constexpr int64_t kDay = kDefaultMillisPerDay;
+    constexpr int64_t kDay = kDefaultTicksPerDay;
     CHECK(day_count(0, kDay) == 0);
     CHECK(day_count(kDay, kDay) == 1);
     CHECK(day_count(kDay * 3 + 5, kDay) == 3);
@@ -32,7 +32,7 @@ TEST_CASE("time helpers derive day/night from integer ms") {
 }
 
 TEST_CASE("time helpers honour a non-default day length") {
-    // The whole point of the period being a parameter: the SAME world_millis
+    // The whole point of the period being a parameter: the SAME world_ticks
     // reads as a different time of day under a different day length.
     constexpr int64_t kShort = 60'000;   // half the default
     constexpr int64_t kLong = 240'000;   // twice the default
@@ -44,30 +44,32 @@ TEST_CASE("time helpers honour a non-default day length") {
     CHECK(time_of_day(30'000, kLong) == Catch::Approx(0.125f));
 
     // An in-game hour is day/24, so hours-authored rates scale with the day.
-    CHECK(millis_per_hour(kShort) == 2'500);
-    CHECK(millis_per_hour(kLong) == 10'000);
-    CHECK(reserve_rate_per_tick(1.0f, kLong) ==
-          Catch::Approx(reserve_rate_per_tick(1.0f, kShort) * 0.25f));
+    CHECK(ticks_per_hour(kShort) == 2'500);
+    CHECK(ticks_per_hour(kLong) == 10'000);
+    CHECK(reserve_rate_per_step(1.0f, kLong) ==
+          Catch::Approx(reserve_rate_per_step(1.0f, kShort) * 0.25f));
     // Non-positive hours still mean "the whole reserve in one tick".
-    CHECK(reserve_rate_per_tick(0.0f, kLong) == Catch::Approx(1.0f));
+    CHECK(reserve_rate_per_step(0.0f, kLong) == Catch::Approx(1.0f));
 }
 
-TEST_CASE("MillisPerDayForSimSeconds converts through ticks, not seconds*1000") {
-    // A tick is 33 ms at 30 Hz, so a sim-second is 990 ms of world time. The
-    // seconds*1000 answer (180'000) would leave the sim ~1% fast against the sky.
-    CHECK(MillisPerDayForSimSeconds(180.0f) == 178'200);
-    CHECK(MillisPerDayForSimSeconds(120.0f) == 118'800);
+TEST_CASE("TicksPerDayForSimSeconds is exact") {
+    // The whole point of counting in ticks: a sim-second IS kTicksPerSecond
+    // ticks, so this is a multiplication and not an approximation. The
+    // millisecond version of this helper existed only to correct a 1% drift
+    // that a 33 ms tick made unavoidable -- there is nothing left to correct.
+    CHECK(TicksPerDayForSimSeconds(180.0f) == 180 * badlands::kTicksPerSecond);
+    CHECK(TicksPerDayForSimSeconds(120.0f) == 120 * badlands::kTicksPerSecond);
     // Garbage in -> the default, not a division by zero downstream.
-    CHECK(MillisPerDayForSimSeconds(0.0f) == kDefaultMillisPerDay);
-    CHECK(MillisPerDayForSimSeconds(-5.0f) == kDefaultMillisPerDay);
+    CHECK(TicksPerDayForSimSeconds(0.0f) == kDefaultTicksPerDay);
+    CHECK(TicksPerDayForSimSeconds(-5.0f) == kDefaultTicksPerDay);
 }
 
-TEST_CASE("WorldConfig::millis_per_day reaches the world and rescales need drain") {
+TEST_CASE("WorldConfig::ticks_per_day reaches the world and rescales need drain") {
     // The seam that would otherwise silently no-op: config -> world -> the
     // hours-authored need rates. A doubled day must drain exactly half as fast.
-    auto seed = [](int64_t millis_per_day) {
+    auto seed = [](int64_t ticks_per_day) {
         WorldConfig cfg{};
-        cfg.millis_per_day = millis_per_day;
+        cfg.ticks_per_day = ticks_per_day;
         std::unique_ptr<BadlandsGame> g = make_world(BrainDesc{}, cfg);
         Action place{ActionKind::PlaceBuilding, 0, -20.0f, 20.0f,
                      static_cast<int32_t>(BuildingKind::FreeCompanyQuarters), 0};
@@ -78,15 +80,15 @@ TEST_CASE("WorldConfig::millis_per_day reaches the world and rescales need drain
         return std::pair{std::move(g), hid};
     };
 
-    auto [normal, normal_hero] = seed(kDefaultMillisPerDay);
-    auto [slow, slow_hero] = seed(kDefaultMillisPerDay * 2);
-    CHECK(normal->millis_per_day == kDefaultMillisPerDay);
-    CHECK(slow->millis_per_day == kDefaultMillisPerDay * 2);
+    auto [normal, normal_hero] = seed(kDefaultTicksPerDay);
+    auto [slow, slow_hero] = seed(kDefaultTicksPerDay * 2);
+    CHECK(normal->ticks_per_day == kDefaultTicksPerDay);
+    CHECK(slow->ticks_per_day == kDefaultTicksPerDay * 2);
 
     constexpr int kTicks = 300;
     for (int i = 0; i < kTicks; ++i) {
-        tick_world(*normal, 1.0f / 30.0f);
-        tick_world(*slow, 1.0f / 30.0f);
+        step_world(*normal);
+        step_world(*slow);
     }
 
     const float normal_drop =
@@ -99,23 +101,23 @@ TEST_CASE("WorldConfig::millis_per_day reaches the world and rescales need drain
 
 TEST_CASE("an invalid day length falls back to the default instead of dividing by zero") {
     WorldConfig cfg{};
-    cfg.millis_per_day = 0;
+    cfg.ticks_per_day = 0;
     auto g = make_world(BrainDesc{}, cfg);
-    CHECK(g->millis_per_day == kDefaultMillisPerDay);
+    CHECK(g->ticks_per_day == kDefaultTicksPerDay);
 }
 
-TEST_CASE("tick_world advances the clock by kMillisPerTick") {
+TEST_CASE("step_world advances the clock by kTicksPerStep") {
     auto g_owned = make_world(BrainDesc{});
     BadlandsGame* g = g_owned.get();
-    CHECK(g->world_millis == 0);
+    CHECK(g->world_ticks == 0);
 
-    tick_world(*g, 1.0f / 30.0f);
-    CHECK(g->world_millis == kMillisPerTick);
+    step_world(*g);
+    CHECK(g->world_ticks == kTicksPerStep);
 
     for (int i = 0; i < 9; ++i) {
-        tick_world(*g, 1.0f / 30.0f);
+        step_world(*g);
     }
-    CHECK(g->world_millis == kMillisPerTick * 10);
+    CHECK(g->world_ticks == kTicksPerStep * 10);
 
     }
 
@@ -131,13 +133,13 @@ TEST_CASE("snapshots expose the clock and per-hero needs (observation ABI)") {
     uint32_t hid = static_cast<uint32_t>(dispatch_into(*g, recruit));
     REQUIRE(hid != UINT32_MAX);
 
-    g->world_millis = 3 * g->millis_per_day + g->millis_per_day * 4 / 5;  // day 3, night
+    g->world_ticks = 3 * g->ticks_per_day + g->ticks_per_day * 4 / 5;  // day 3, night
 
     const WorldState w = world_of(*g);
     CHECK(w.day == 3);
     CHECK(w.time_of_day == Catch::Approx(0.8f));
     CHECK(w.is_night == 1);
-    CHECK(w.world_millis == g->world_millis);
+    CHECK(w.world_ticks == g->world_ticks);
 
     g->registry.get<badlands::HeroSimulationState>(g->slots[hid]).fatigue = 0.4f;
     g->registry.get<badlands::HeroSimulationState>(g->slots[hid]).content = 0.6f;
@@ -169,6 +171,34 @@ TEST_CASE("command_log_of exposes the applied trace") {
     CHECK(log[0].kind == CommandKindId::PlaceBuilding);
     CHECK(log[1].kind == CommandKindId::RecruitHero);
     // Stamped with the sim time each took effect (pre-tick dispatches -> 0).
-    CHECK(log[0].at_millis == 0);
+    CHECK(log[0].at_ticks == 0);
 
     }
+
+TEST_CASE("a second is exactly kTicksPerSecond ticks, and a step divides it") {
+    // THE invariant this whole unit change exists for, and the one the
+    // millisecond clock could not state: 1000 does not divide by 30, so a
+    // 33 ms tick made thirty steps 990 ms against a SimClock second of 1000 --
+    // 1% slow, permanently and cumulatively, which is why the day-length helper
+    // above needed a correction factor at all.
+    CHECK(badlands::kTicksPerSecond % badlands::kStepsPerSecond == 0);
+    CHECK(badlands::kStepsPerSecond * badlands::kTicksPerStep ==
+          badlands::kTicksPerSecond);
+
+    // ...and the world clock agrees with it, measured rather than asserted:
+    // exactly kStepsPerSecond steps advance world_ticks by exactly one second.
+    auto owned = badlands::make_flat_world();
+    BadlandsGame& g = *owned;
+    const int64_t before = g.world_ticks;
+    for (int64_t i = 0; i < badlands::kStepsPerSecond; ++i) {
+        badlands::step_world(g);
+    }
+    CHECK(g.world_ticks - before == badlands::kTicksPerSecond);
+
+    // The authoring conversion round-trips through whole seconds.
+    CHECK(badlands::ticks_of(3.0f) == 3 * badlands::kTicksPerSecond);
+    CHECK(badlands::seconds_of_ticks(badlands::ticks_of(2.5f)) == Catch::Approx(2.5f));
+    // A positive duration never rounds away to nothing, which downstream would
+    // read as "no duration at all".
+    CHECK(badlands::ticks_of(0.001f) > 0);
+}

@@ -9,7 +9,9 @@ namespace badlands {
 
 namespace {
 
-float seconds_of(int64_t millis) { return static_cast<float>(millis) / 1000.0f; }
+// Ticks -> seconds for the log line. The sim counts in ticks; a human reads
+// seconds (badlands_sim.hpp).
+float seconds_of(int64_t ticks) { return seconds_of_ticks(ticks); }
 
 }  // namespace
 
@@ -27,7 +29,7 @@ void observe_sneak(const std::vector<GameEvent>& events, uint32_t hero_slot,
                     static_cast<int32_t>(ev.amount) ==
                         static_cast<int32_t>(StatusKind::Sneaking)) {
                     p.stage = SneakStage::Sneaked;
-                    p.sneaked_at_millis = ev.at_millis;
+                    p.sneaked_at_ticks = ev.at_ticks;
                 }
                 break;
             case GameEventKind::SkillUsed:
@@ -44,7 +46,7 @@ void observe_sneak(const std::vector<GameEvent>& events, uint32_t hero_slot,
                 if (p.stage == SneakStage::Sneaked && ev.actor_id == hero_slot &&
                     ev.target_kind == kEventTargetCharacter) {
                     p.stage = SneakStage::Struck;
-                    p.struck_at_millis = ev.at_millis;
+                    p.struck_at_ticks = ev.at_ticks;
                     p.strike_damage = ev.amount;
                 }
                 break;
@@ -81,19 +83,19 @@ void SneakMode::Stage(Sim& sim) {
     hero_slot_ = sim.SpawnCreature(CreatureId::GraveRobber, /*team=*/0, start_x,
                                    layout_.spawn_a.y, cfg_.hero_level);
     sim.SpawnCreature(CreatureId::Bandit, /*team=*/1, layout_.spawn_b.x, layout_.spawn_b.y);
-    started_millis_ = sim.World().world_millis;
+    started_ticks_ = sim.World().world_ticks;
     progress_ = SneakProgress{};
 }
 
 bool SneakMode::Observe(const std::vector<CharacterState>& /*rows*/,
-                        const std::vector<GameEvent>& events, int64_t world_millis) {
+                        const std::vector<GameEvent>& events, int64_t world_ticks) {
     observe_sneak(events, hero_slot_, progress_);
-    const int64_t elapsed = world_millis - started_millis_;
+    const int64_t elapsed = world_ticks - started_ticks_;
 
     // The round ends the moment the blow lands -- there is nothing further to
     // learn from watching the fight play out -- or when the budget runs out.
     const bool done = progress_.stage == SneakStage::Struck;
-    if (!done && elapsed < cfg_.max_millis) {
+    if (!done && elapsed < cfg_.max_ticks) {
         return false;
     }
 
@@ -101,17 +103,17 @@ bool SneakMode::Observe(const std::vector<CharacterState>& /*rows*/,
     if (done) {
         std::snprintf(line, sizeof(line),
                       "sneaked at %.1fs, %s at %.1fs for %.1f (OK)",
-                      seconds_of(progress_.sneaked_at_millis - started_millis_),
+                      seconds_of(progress_.sneaked_at_ticks - started_ticks_),
                       progress_.backstabbed ? "STABBED" : "swung",
-                      seconds_of(progress_.struck_at_millis - started_millis_),
+                      seconds_of(progress_.struck_at_ticks - started_ticks_),
                       progress_.strike_damage);
     } else if (progress_.stage == SneakStage::Sneaked) {
         std::snprintf(line, sizeof(line), "sneaked at %.1fs but never struck in %.0fs (FAILED)",
-                      seconds_of(progress_.sneaked_at_millis - started_millis_),
-                      seconds_of(cfg_.max_millis));
+                      seconds_of(progress_.sneaked_at_ticks - started_ticks_),
+                      seconds_of(cfg_.max_ticks));
     } else {
         std::snprintf(line, sizeof(line), "never sneaked in %.0fs (FAILED)",
-                      seconds_of(cfg_.max_millis));
+                      seconds_of(cfg_.max_ticks));
     }
     last_result_ = line;
     spdlog::info("sneak {}: {}", round_, last_result_);

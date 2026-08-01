@@ -26,7 +26,7 @@ struct TeleportConfig {
     // Teleport unlocks at 8, so this is the lowest level that can show anything
     // -- and the top of the design doc's early game.
     int32_t hero_level = 8;
-    int64_t max_millis = 30000;
+    int64_t max_ticks = 30 * 120;  // 30 s
     // How close the dummy starts. Inside the apprentice's own bolt range, so it
     // has every reason to be somewhere else.
     float start_gap_m = 4.0f;
@@ -36,7 +36,7 @@ struct TeleportConfig {
 // handed, so the verdict is testable without a Sim.
 struct TeleportProgress {
     bool blinked = false;
-    int64_t blinked_at_millis = 0;
+    int64_t blinked_at_ticks = 0;
 };
 
 // Folds one tick's events into `p`. Only a SkillUsed naming Teleport by the
@@ -53,7 +53,7 @@ class TeleportMode : public SandboxMode {
     WorldConfig Configure() override;
     void Stage(Sim& sim) override;
     bool Observe(const std::vector<CharacterState>& rows, const std::vector<GameEvent>& events,
-                 int64_t world_millis) override;
+                 int64_t world_ticks) override;
     std::string Status() const override;
 
    private:
@@ -61,7 +61,7 @@ class TeleportMode : public SandboxMode {
     ArenaLayout layout_{};
     uint32_t round_ = 0;
     uint32_t hero_slot_ = UINT32_MAX;
-    int64_t started_millis_ = 0;
+    int64_t started_ticks_ = 0;
     // Where the apprentice was standing when the round began, so the log can
     // report how far it actually got rather than only that it cast something.
     glm::vec2 start_pos_{};

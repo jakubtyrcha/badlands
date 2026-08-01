@@ -23,7 +23,9 @@ uint64_t draw(uint64_t seed, uint32_t round, uint32_t axis) {
     return mix(mix(seed ^ (static_cast<uint64_t>(round) << 32)) + axis);
 }
 
-float seconds_of(int64_t millis) { return static_cast<float>(millis) / 1000.0f; }
+// Ticks -> seconds for the log line. The sim counts in ticks; a human reads
+// seconds (badlands_sim.hpp).
+float seconds_of(int64_t ticks) { return seconds_of_ticks(ticks); }
 
 // "Hunter(lvl 6)" for something that levels, plain "Rat" for something that
 // does not. Printing a level on a monster would be a lie -- SpawnCreature
@@ -126,18 +128,18 @@ void DuelMode::Stage(Sim& sim) {
                       setup_.left_level);
     sim.SpawnCreature(setup_.right, /*team=*/1, layout_.spawn_b.x, layout_.spawn_b.y,
                       setup_.right_level);
-    started_millis_ = sim.World().world_millis;
-    report_at_millis_ = 0;
+    started_ticks_ = sim.World().world_ticks;
+    report_at_ticks_ = 0;
     decided_ = false;
 }
 
 bool DuelMode::Observe(const std::vector<CharacterState>& rows,
-                       const std::vector<GameEvent>& /*events*/, int64_t world_millis) {
-    const int64_t elapsed = world_millis - started_millis_;
+                       const std::vector<GameEvent>& /*events*/, int64_t world_ticks) {
+    const int64_t elapsed = world_ticks - started_ticks_;
     if (!decided_) {
         const DuelTally t = tally_duel(rows);
         const bool over = !t.left_alive || !t.right_alive;
-        const bool timed_out = elapsed >= cfg_.max_millis;
+        const bool timed_out = elapsed >= cfg_.max_ticks;
         if (!over && !timed_out) {
             return false;
         }
@@ -164,9 +166,9 @@ bool DuelMode::Observe(const std::vector<CharacterState>& rows,
         spdlog::info("duel {}: {}", round_, last_result_);
         // A decided round lingers so the end of the fight is watchable; a timed
         // out one has nothing left to watch, so it restages at once.
-        report_at_millis_ = world_millis + (timed_out ? 0 : cfg_.linger_millis);
+        report_at_ticks_ = world_ticks + (timed_out ? 0 : cfg_.linger_ticks);
     }
-    if (world_millis < report_at_millis_) {
+    if (world_ticks < report_at_ticks_) {
         return false;
     }
     ++round_;

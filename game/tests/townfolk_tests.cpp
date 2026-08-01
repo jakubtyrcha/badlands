@@ -100,8 +100,8 @@ TEST_CASE("midnight accrues tax on Houses only") {
     REQUIRE(g.placement.buildings[house].taxable_income == 0);
 
     // Step to just before the first midnight, then across it.
-    g.world_millis = g.millis_per_day - kMillisPerTick;
-    tick_world(g, 1.0f / 30.0f);  // crosses into day 1
+    g.world_ticks = g.ticks_per_day - kTicksPerStep;
+    step_world(g);  // crosses into day 1
 
     CHECK(g.placement.buildings[house].taxable_income == g.factors.townfolk.house_income_per_day);
     CHECK(g.placement.buildings[tavern].taxable_income == 0);  // only Houses accrue
@@ -131,7 +131,7 @@ TEST_CASE("a tax collector rounds up the tax, banks it at the castle, and despaw
     // Run the round to completion (collector is brisk; generous budget).
     bool despawned = false;
     for (int i = 0; i < 4000; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         if (entity_for_slot(g, static_cast<int32_t>(slot)) == entt::null) {
             despawned = true;
             break;
@@ -149,7 +149,7 @@ TEST_CASE("the spawner emits a collector at the castle, capped at max_alive") {
     auto owned = make_world(BrainDesc{});
     BadlandsGame& g = *owned;
     SimFactors f = g.factors;
-    f.townfolk.spawn_interval_millis = 1000;  // spawn quickly for the test
+    f.townfolk.spawn_interval_ticks = 1000;  // spawn quickly for the test
     f.townfolk.max_alive = 1;
     set_factors_of(g, f);
 
@@ -160,16 +160,16 @@ TEST_CASE("the spawner emits a collector at the castle, capped at max_alive") {
     REQUIRE(house != UINT32_MAX);
     g.placement.buildings[house].taxable_income = 10;
 
-    const int64_t interval_ticks = f.townfolk.spawn_interval_millis / kMillisPerTick;
+    const int64_t interval_ticks = f.townfolk.spawn_interval_ticks / kTicksPerStep;
     for (int64_t i = 0; i <= interval_ticks + 2; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
     }
     CHECK(alive_collectors(g) == 1);  // spawned at the castle, still on its round
 
     // Keep ticking past several more intervals: the cap holds (never 2 at once).
     uint32_t peak = alive_collectors(g);
     for (int i = 0; i < static_cast<int>(interval_ticks) * 3; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         peak = std::max(peak, alive_collectors(g));
     }
     CHECK(peak <= 1);
@@ -190,7 +190,7 @@ TEST_CASE("dying mid-round loses the carried gold") {
 
     // Let it collect (it starts at the house door), then verify it is carrying.
     for (int i = 0; i < 30; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
     }
     REQUIRE(g.registry.valid(e));
     CHECK(g.registry.get<TaxCollectorState>(e).carried_gold == 40);
@@ -198,7 +198,7 @@ TEST_CASE("dying mid-round loses the carried gold") {
     // Kill it before it reaches the castle: gold is not credited.
     const uint32_t gold_before = g.gold;
     g.registry.get<Health>(e).hp = 0.0f;
-    tick_world(g, 1.0f / 30.0f);  // death pass removes it
+    step_world(g);  // death pass removes it
     CHECK((entity_for_slot(g, static_cast<int32_t>(slot)) == entt::null));
     CHECK(g.gold == gold_before);  // the 40 died with it
 }

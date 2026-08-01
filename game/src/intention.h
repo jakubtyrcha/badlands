@@ -32,9 +32,9 @@ struct Intention {
     glm::vec2 point{0.0f, 0.0f};
     uint32_t target_slot = UINT32_MAX;
     int32_t arg = 0;
-    int64_t duration_millis = 0;   // Idle
+    int64_t duration_ticks = 0;   // Idle
     int32_t activity_label = -1;   // ActivityId, inspection only
-    int64_t idle_hint_millis = 0;
+    int64_t idle_hint_ticks = 0;
 };
 
 // Validates + adopts a suggestion for the hero at `slot`: feasibility-checks
@@ -52,8 +52,8 @@ struct Intention {
 // target_slot/arg, per the vocab table; Idle is excluded, see
 // is_identical_restatement's own comment, intention.cpp) and, if identical,
 // resumes -- returns true WITHOUT running the kind's producer, without
-// re-stamping started_at_millis, and WITHOUT logging anything: only the live
-// wake schedule (CurrentIntention::wake_at_millis) refreshes, off-log --
+// re-stamping started_at_ticks, and WITHOUT logging anything: only the live
+// wake schedule (CurrentIntention::wake_at_ticks) refreshes, off-log --
 // sameness is implied by the absence of a Command, exactly like every other
 // producer's own edge-trigger (command.h's doctrine: "re-stating an
 // unchanged decision is not a decision"). See apply_intention's own comment
@@ -68,14 +68,14 @@ struct Intention {
 // account).
 //
 // v3 hint default (docs/design/intention-contract.html §2, "Tiered wake
-// guarantees"): a non-positive idle_hint_millis (or, for Idle, a
-// non-positive duration_millis) no longer means "no deadline" -- it arms
-// kDefaultWakeCadenceMillis (components.h) instead, so a suggestion with no
+// guarantees"): a non-positive idle_hint_ticks (or, for Idle, a
+// non-positive duration_ticks) no longer means "no deadline" -- it arms
+// kDefaultWakeCadenceTicks (components.h) instead, so a suggestion with no
 // cadence preference still gets a consult roughly once a second rather than
 // sleeping forever.
 //
 // Purely validate-and-adopt: it does NOT touch the wake-bookkeeping fields
-// (EventInbox::last_seen_seq, CurrentIntention::last_think_millis/wake_at_
+// (EventInbox::last_seen_seq, CurrentIntention::last_think_ticks/wake_at_
 // millis-on-rejection) -- that is note_think_outcome's job (below), a
 // separate call the caller makes once per think regardless of what
 // apply_intention decided. Splitting them keeps "did we adopt this
@@ -163,7 +163,7 @@ bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action
 // was rejected or explicitly BL_INT_NONE) AND the current deadline is not
 // doing useful work of its own (already due, and not Idle -- Finding 2, see
 // this function's definition for the full rationale), also re-arms
-// CurrentIntention::wake_at_millis to `now + kRejectedSuggestionBackoffMillis`
+// CurrentIntention::wake_at_ticks to `now + kRejectedSuggestionBackoffTicks`
 // (components.h) -- otherwise a hero with no CurrentIntention running (which
 // is exactly what a rejected/no-op decision leaves behind) satisfies
 // should_wake's "nothing running" clause every single tick, forever. A
@@ -180,7 +180,7 @@ bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action
 void note_think_outcome(BadlandsGame& game, uint32_t slot, bool adopted);
 
 // Aborts slot's CurrentIntention if its kind currently equals `expected`:
-// kind -> None, target_slot/arg/wake_at_millis reset, and an
+// kind -> None, target_slot/arg/wake_at_ticks reset, and an
 // IntentionEnded(aborted) event pushed to the inbox. No-op otherwise --
 // including when `slot` names no hero, or a replayed world where
 // CurrentIntention.kind is always None (apply_intention never runs there),
@@ -202,12 +202,12 @@ void abort_intention(BadlandsGame& game, uint32_t slot, IntentionKind expected);
 void abort_current_intention(BadlandsGame& game, uint32_t slot);
 
 // Push one event into a hero's inbox (newest evicts oldest when full);
-// no-op if `e` has no EventInbox (heroes only). Stamps at_millis/ttl_millis
-// from game.world_millis/kInboxTtlMillis -- callers fill in kind/source_slot/
+// no-op if `e` has no EventInbox (heroes only). Stamps at_ticks/ttl_ticks
+// from game.world_ticks/kInboxTtlTicks -- callers fill in kind/source_slot/
 // param only.
 void push_inbox_event(BadlandsGame& game, entt::entity e, InboxEvent ev);
 
-// Per-tick maintenance (tick_world, sim.cpp): decrements every hero's inbox
+// Per-tick maintenance (step_world, sim.cpp): decrements every hero's inbox
 // TTLs and drops expired entries, then detects each hero's CurrentIntention
 // completion/abort (arrival, dead target, gone building) and writes
 // IntentionEnded. See sim.cpp's call site comment for why it runs after
@@ -225,13 +225,13 @@ void advance_intentions(BadlandsGame& game);
 //      OFFER of per-tick consultation, not a guarantee every offered wake
 //      produces a new command (see apply_intention's restate-resume above).
 //   2. No active intention AND no backoff armed (CurrentIntention::kind ==
-//      None and wake_at_millis == 0 -- a fresh/never-consulted hero) -> true.
+//      None and wake_at_ticks == 0 -- a fresh/never-consulted hero) -> true.
 //   3. Its wake_at deadline has passed (an Idle/idle-hint deadline OR a
 //      rejection backoff, both ride the same field) -> true.
 //   4. An inbox event was pushed since it last thought
 //      (EventInbox::last_pushed_seq > last_seen_seq, timestamp-free -- see
 //      that component's own comment on why a sequence counter, not
-//      `at_millis` vs CurrentIntention::last_think_millis, is the
+//      `at_ticks` vs CurrentIntention::last_think_ticks, is the
 //      comparison) -> true.
 //   Else -> false.
 //

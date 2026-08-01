@@ -126,7 +126,7 @@ void award_xp(BadlandsGame& game, uint32_t slot, int64_t amount) {
                                    .amount = static_cast<float>(sim.level),
                                    .x = pos.x,
                                    .z = pos.y,
-                                   .at_millis = game.world_millis});
+                                   .at_ticks = game.world_ticks});
     }
 }
 

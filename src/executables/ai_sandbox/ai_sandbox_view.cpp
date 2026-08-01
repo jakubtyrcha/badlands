@@ -102,7 +102,7 @@ const char* command_name(badlands::CommandKindId kind) {
 
 // Day length, as ONE number driving both clocks: the rendered day/night cycle
 // (SimClock::real_seconds_per_day) and the sim's own day
-// (WorldConfig::millis_per_day). Kept short here -- this is the AI observation
+// (WorldConfig::ticks_per_day). Kept short here -- this is the AI observation
 // tool, where waiting out a hero's need cycle in real time is the whole cost of
 // a run. SimClock's own 300 s default would stretch that 2.5x.
 constexpr float kRealSecondsPerDay = 120.0f;
@@ -174,15 +174,15 @@ void AiSandboxView::StageWorld() {
   }
 
   // The two clocks, from the one number: the sky (sim_clock_) and the sim's own
-  // day (millis_per_day). Left unset they disagree -- heroes would act on night
-  // behaviour while the sky showed something else. MillisPerDayForSimSeconds
+  // day (ticks_per_day). Left unset they disagree -- heroes would act on night
+  // behaviour while the sky showed something else. TicksPerDayForSimSeconds
   // converts through ticks; seconds * 1000 would drift ~1% (see badlands_sim.hpp).
   sim_clock_.real_seconds_per_day = kRealSecondsPerDay;
 
   // The mode says what world to build; everything past this point is the game
   // running normally, and nothing in it knows a mode exists.
   badlands::WorldConfig cfg = mode_->Configure();
-  cfg.millis_per_day = badlands::MillisPerDayForSimSeconds(kRealSecondsPerDay);
+  cfg.ticks_per_day = badlands::TicksPerDayForSimSeconds(kRealSecondsPerDay);
   sim_ = badlands::Sim(cfg, brain_desc);
 
   // Behaviour tuning, creature stats and skill templates as data, same as
@@ -449,7 +449,7 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   const unsigned long long tick_target = sim_clock_.TickTarget();
   int budget = kMaxSimTicksPerFrame;
   while (sim_ticks_done_ < tick_target && budget-- > 0) {
-    sim_.Tick(static_cast<float>(kTickDt));
+    sim_.Step();
     ++sim_ticks_done_;
   }
   // Drain the sim's transient event stream and hand it to the mode. It has to
@@ -462,7 +462,7 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   // Read AFTER the ticks so it sees this frame's final state, and the scene is
   // rebuilt on a restage because a fresh world has a different arena in it.
   char_rows_ = sim_.Characters();
-  if (mode_->Observe(char_rows_, events_scratch_, sim_.World().world_millis)) {
+  if (mode_->Observe(char_rows_, events_scratch_, sim_.World().world_ticks)) {
     StageWorld();
     BuildScene();
     FrameCamera();
@@ -543,7 +543,7 @@ void AiSandboxView::DrawInspector() {
               static_cast<int>(world.time_of_day * 24.0f),
               static_cast<int>(world.time_of_day * 24.0f * 60.0f) % 60,
               world.is_night ? "(night)" : "(day)");
-  ImGui::Text("t = %lld ms   tick %llu", static_cast<long long>(world.world_millis),
+  ImGui::Text("t = %.1f s   tick %llu", badlands::seconds_of_ticks(world.world_ticks),
               static_cast<unsigned long long>(stats.ticks));
   ImGui::SliderFloat("speed", &sim_clock_.speed, 0.0f, 60.0f, "%.0fx");
   ImGui::SameLine();

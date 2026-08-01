@@ -103,7 +103,7 @@ struct FocusFixture {
     bool is_focusing() const { return focusing(game->registry, caster()); }
     int64_t deadline() const {
         const auto* f = game->registry.try_get<SkillFocus>(caster());
-        return f != nullptr ? f->resolve_at_millis : -1;
+        return f != nullptr ? f->resolve_at_ticks : -1;
     }
     float cooldown() const {
         return game->registry.get<Skills>(caster()).cooldown_remaining[0];
@@ -113,7 +113,7 @@ struct FocusFixture {
     // tick: these cases are about the deadline, not about everything else the
     // world does while it elapses.
     void step() {
-        game->world_millis += kMillisPerTick;
+        game->world_ticks += kTicksPerStep;
         advance_focus(*game);
     }
 };
@@ -127,12 +127,12 @@ TEST_CASE("a focus resolves at its deadline, not before", "[focus]") {
 
     // The DEADLINE, computed from the authored duration -- not a tick count.
     const int64_t duration =
-        f.game->skills.specs[static_cast<size_t>(SkillId::PrecisionShot)]
-            .intention_duration_seconds * 1000.0f;
+        badlands::ticks_of(f.game->skills.specs[static_cast<size_t>(SkillId::PrecisionShot)]
+                               .intention_duration_seconds);
     CHECK(f.deadline() == duration);
 
     const float hp_before = f.victim_hp();
-    while (f.game->world_millis + kMillisPerTick < duration) {
+    while (f.game->world_ticks + kTicksPerStep < duration) {
         f.step();
         REQUIRE(f.victim_hp() == Catch::Approx(hp_before));
         REQUIRE(f.is_focusing());
@@ -170,7 +170,7 @@ TEST_CASE("a stun mid-focus drops it with no cast", "[focus][status]") {
 
     f.step();
     REQUIRE(f.is_focusing());
-    apply_status(*f.game, f.caster(), StatusKind::Stunned, 3000, f.victim_slot);
+    apply_status(*f.game, f.caster(), StatusKind::Stunned, ticks_of(3.0f), f.victim_slot);
     CHECK_FALSE(f.is_focusing());
 
     // ...and the shot never arrives afterwards, nor was the cooldown spent: an
@@ -219,12 +219,12 @@ TEST_CASE("a focusing entity does not move", "[focus][movement]") {
     walk.point = {0.0f, 25.0f};
     REQUIRE(apply_intention(*f.game, f.caster_slot, walk));
     apply_commands(*f.game);
-    plan_paths(*f.game, 0.033f);
+    plan_paths(*f.game);
     REQUIRE(f.adopt());  // ...which cancels the walk's intention, but not its path
 
     const glm::vec2 before = f.game->registry.get<Position>(f.caster()).pos;
     for (int i = 0; i < 10; ++i) {
-        follow_paths(*f.game, 0.033f);
+        follow_paths(*f.game);
     }
     CHECK(f.game->registry.get<Position>(f.caster()).pos == before);
 }
@@ -477,7 +477,7 @@ TEST_CASE("a cast cannot name a target it cannot perceive", "[skill][sneak]") {
     REQUIRE(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan,
                           SkillTrigger::Intention));
 
-    apply_status(*f.game, f.victim(), StatusKind::Sneaking, 5000, f.caster_slot);
+    apply_status(*f.game, f.victim(), StatusKind::Sneaking, ticks_of(5.0f), f.caster_slot);
     CHECK_FALSE(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan,
                               SkillTrigger::Intention));
 }

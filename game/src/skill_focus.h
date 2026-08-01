@@ -9,8 +9,8 @@
 // channel: one commitment at a time, and the phase is DERIVED FROM THE CLOCK
 // rather than stored, so there is no state to fall out of sync.
 //
-//     world_millis <  resolve_at  ->  focusing
-//     world_millis >= resolve_at  ->  the cast runs, the focus is dropped
+//     world_ticks <  resolve_at  ->  focusing
+//     world_ticks >= resolve_at  ->  the cast runs, the focus is dropped
 //
 // Where it differs from a strike, and the difference is the mechanic: a strike
 // CAPTURES the attacker's stats at declaration, while a focus captures nothing
@@ -27,7 +27,7 @@
 //     reachable, since a focusing entity does not move;
 //   * validate_cast disagreeing at the deadline (out of range, target gone).
 //
-// Determinism: the deadline is int64 milliseconds off the world clock, so a
+// Determinism: the deadline is int64 ticks off the world clock, so a
 // focus resolves on the same tick live and on replay. A focus is DERIVED
 // STATE -- it follows from a logged intention plus the clock -- so it is not
 // itself a Command, exactly like a strike and like projectile arrival.
@@ -59,7 +59,7 @@ bool focusing(const entt::registry& reg, entt::entity e);
 // whether anything was cancelled, so callers can be unconditional.
 bool cancel_focus(BadlandsGame& game, entt::entity e);
 
-// Per-tick sweep (tick_world, sim.cpp): re-validates every focus whose
+// Per-tick sweep (step_world, sim.cpp): re-validates every focus whose
 // deadline has elapsed and, when it still holds, runs the ordinary cast. Runs
 // unconditionally, live and replaying alike, because it is a timer over
 // derived state rather than a decision.

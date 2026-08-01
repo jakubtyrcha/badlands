@@ -1,7 +1,7 @@
 // Intention contract engine groundwork (game/src/intention.h): the inbox
 // ring, the engine-side writers (DamageTaken via emit_char_hit, MoveBlocked
 // via movement.cpp, the edge-triggered ThreatSighted pass in sim.cpp's
-// tick_world), the pure should_wake predicate, and apply_intention's
+// step_world), the pure should_wake predicate, and apply_intention's
 // validate-then-adopt seam. The contract is live: sim.cpp's think loop gates
 // every wasm hero's tick on should_wake and adopts each wake's suggestion via
 // apply_intention (wasm_brain.cpp) -- see docs/design/intention-contract.html
@@ -16,7 +16,7 @@
 #include "strike_test_util.h"  // land_strikes -- an attack commits before it lands
 #include "movement.h"        // plan_paths, follow_paths -- drive the MoveBlocked mirror
 #include "nav_world.h"       // rebuild_navmesh_if_stale -- plopped walls block via the mesh
-#include "sim_internal.hpp"  // make_flat_world / spawn_into / tick_world
+#include "sim_internal.hpp"  // make_flat_world / spawn_into / step_world
 #include "skills.h"         // learn_skill -- the BL_ACT_USE_SKILL cases below
 
 #include <catch_amalgamated.hpp>
@@ -81,12 +81,12 @@ TEST_CASE("advance_intentions decrements inbox TTLs and drops expired entries", 
 
     InboxEvent ev;
     ev.kind = InboxEventKind::DamageTaken;
-    push_inbox_event(g, e, ev);  // ttl_millis = kInboxTtlMillis
+    push_inbox_event(g, e, ev);  // ttl_ticks = kInboxTtlTicks
     REQUIRE(g.registry.get<EventInbox>(e).count == 1);
 
-    const int ticks_to_expire = static_cast<int>(kInboxTtlMillis / kMillisPerTick) + 1;
+    const int ticks_to_expire = static_cast<int>(kInboxTtlTicks / kTicksPerStep) + 1;
     for (int i = 0; i < ticks_to_expire; ++i) {
-        g.world_millis += kMillisPerTick;
+        g.world_ticks += kTicksPerStep;
         advance_intentions(g);
     }
     CHECK(g.registry.get<EventInbox>(e).count == 0);
@@ -153,8 +153,8 @@ TEST_CASE("a refused step mirrors MoveBlocked into the hero's inbox", "[intentio
     mt.point = {100.0f, 0.0f};  // far outside the ring
 
     for (int i = 0; i < 60 && !g.registry.all_of<MoveBlocked>(e); ++i) {
-        plan_paths(g, 1.0f / 30.0f);
-        follow_paths(g, 1.0f / 30.0f);
+        plan_paths(g);
+        follow_paths(g);
     }
     REQUIRE(g.registry.all_of<MoveBlocked>(e));
 
@@ -168,7 +168,7 @@ TEST_CASE("a refused step mirrors MoveBlocked into the hero's inbox", "[intentio
 
 // --- ThreatSighted: edge-triggered, not per-tick ----------------------------
 
-TEST_CASE("tick_world writes ThreatSighted once on the empty->nonempty edge", "[intention]") {
+TEST_CASE("step_world writes ThreatSighted once on the empty->nonempty edge", "[intention]") {
     auto owned = make_flat_world();
     BadlandsGame& g = *owned;
 
@@ -191,7 +191,7 @@ TEST_CASE("tick_world writes ThreatSighted once on the empty->nonempty edge", "[
     spawn_into(g, monster_d);
 
     for (int i = 0; i < 20; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
     }
 
     const EventInbox& inbox = g.registry.get<EventInbox>(hero);
@@ -233,7 +233,7 @@ TEST_CASE(
     entt::entity monster1 = g.slots[spawn_into(g, monster_d)];
 
     // Establish the edge: flag goes true, event written.
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
     REQUIRE(g.registry.get<EventInbox>(hero).threat_was_present);
 
     // Hero hides. Fatigue floored first: should_leave_building (heroes.cpp)
@@ -244,12 +244,12 @@ TEST_CASE(
     g.registry.get<HeroSimulationState>(hero).fatigue = 0.0f;
     g.registry.emplace<InsideBuilding>(hero, /*building_id=*/0,
                                        static_cast<int32_t>(ActivityId::GoHome));
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
     REQUIRE(g.registry.all_of<InsideBuilding>(hero));  // still hidden
 
     // The old threat dies and is destroyed while the hero is hidden.
     g.registry.get<Health>(monster1).hp = 0.0f;
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
     REQUIRE(g.registry.all_of<InsideBuilding>(hero));  // still hidden
 
     // A new threat spawns while the hero is still hidden.
@@ -259,7 +259,7 @@ TEST_CASE(
 
     // Hero re-emerges.
     g.registry.remove<InsideBuilding>(hero);
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
 
     const EventInbox& inbox = g.registry.get<EventInbox>(hero);
     bool found = false;
@@ -290,7 +290,7 @@ TEST_CASE("should_wake: no intention, new event, deadline", "[intention]") {
     // now split -- see both functions' doc comments).
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::MoveTo;
-    ci.started_at_millis = g.world_millis;
+    ci.started_at_ticks = g.world_ticks;
     note_think_outcome(g, slot, /*adopted=*/true);
     CHECK_FALSE(should_wake(g, e));
 
@@ -298,7 +298,7 @@ TEST_CASE("should_wake: no intention, new event, deadline", "[intention]") {
     // sequence number, not timestamp, so this holds even within the SAME
     // tick -- see EventInbox's own comment on why a timestamp comparison
     // cannot distinguish a pre-think push from a post-think one).
-    g.world_millis += kMillisPerTick;
+    g.world_ticks += kTicksPerStep;
     InboxEvent ev;
     ev.kind = InboxEventKind::DamageTaken;
     push_inbox_event(g, e, ev);
@@ -307,20 +307,20 @@ TEST_CASE("should_wake: no intention, new event, deadline", "[intention]") {
     CHECK_FALSE(should_wake(g, e));
 
     // wake_at deadline passed -> wake, even with an empty inbox. Advance the
-    // clock first: wake_at_millis == 0 is the "none" sentinel, so a deadline
+    // clock first: wake_at_ticks == 0 is the "none" sentinel, so a deadline
     // has to be a genuine positive timestamp to test the check at all.
-    g.world_millis += 1000;
-    ci.wake_at_millis = 500;  // already behind the clock
+    g.world_ticks += 1000;
+    ci.wake_at_ticks = 500;  // already behind the clock
     CHECK(should_wake(g, e));
 }
 
 // --- Fix 1 RED A: a same-tick, POST-think inbox push must still count as
 // "new" (finding: should_wake's event clause used strict `>` on
-// TIMESTAMPS -- at_millis vs last_think_millis -- and every event pushed
-// within the SAME tick shares one world_millis stamp, so a push that lands
+// TIMESTAMPS -- at_ticks vs last_think_ticks -- and every event pushed
+// within the SAME tick shares one world_ticks stamp, so a push that lands
 // AFTER a think that already happened this tick is timestamp-indistinguishable
 // from one that landed BEFORE it and already informed that think). Written
-// against TODAY's fields (ci.last_think_millis, poked directly -- mirrors
+// against TODAY's fields (ci.last_think_ticks, poked directly -- mirrors
 // what apply_intention currently stamps) so it fails for the documented
 // reason before the seq-based fix lands; see the fix's later revision of
 // this same case once note_think_outcome exists.
@@ -333,18 +333,18 @@ TEST_CASE(
     uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
     entt::entity e = g.slots[slot];
 
-    // A running intention that just thought THIS tick (last_think_millis ==
-    // world_millis, exactly what apply_intention stamps at adoption time).
+    // A running intention that just thought THIS tick (last_think_ticks ==
+    // world_ticks, exactly what apply_intention stamps at adoption time).
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::Idle;
-    ci.wake_at_millis = 0;  // no deadline -- isolate the inbox-event path
-    ci.last_think_millis = g.world_millis;
+    ci.wake_at_ticks = 0;  // no deadline -- isolate the inbox-event path
+    ci.last_think_ticks = g.world_ticks;
 
     // Something pushes an event to this hero's inbox LATER in the SAME
     // tick (e.g. movement's MoveBlocked mirror, which runs after the
-    // think-dispatch loop) -- push_inbox_event stamps at_millis from the
-    // CURRENT world_millis, which has not advanced, so at_millis ==
-    // last_think_millis even though this push is genuinely new information
+    // think-dispatch loop) -- push_inbox_event stamps at_ticks from the
+    // CURRENT world_ticks, which has not advanced, so at_ticks ==
+    // last_think_ticks even though this push is genuinely new information
     // the hero has not yet seen.
     InboxEvent ev;
     ev.kind = InboxEventKind::MoveBlocked;
@@ -374,30 +374,30 @@ TEST_CASE(
     // Idle at/past its own deadline is a completion, not a plain re-check
     // (Finding 2 below) -- advance_intentions retires it the same tick, so
     // note_think_outcome must leave its deadline alone. Attack has no
-    // completion criterion tied to wake_at_millis at all, so it is the
+    // completion criterion tied to wake_at_ticks at all, so it is the
     // clean case for "deadline already due, rejected -> back off."
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::Attack;
-    ci.wake_at_millis = g.world_millis;  // already due
+    ci.wake_at_ticks = g.world_ticks;  // already due
 
     note_think_outcome(g, slot, /*adopted=*/false);
 
     // Re-armed into the future, not left at/behind "now" -- a rejected
     // suggestion must not refire the deadline every single tick.
-    CHECK(ci.wake_at_millis > g.world_millis);
-    CHECK(ci.wake_at_millis == g.world_millis + kRejectedSuggestionBackoffMillis);
+    CHECK(ci.wake_at_ticks > g.world_ticks);
+    CHECK(ci.wake_at_ticks == g.world_ticks + kRejectedSuggestionBackoffTicks);
     CHECK_FALSE(should_wake(g, e));
 }
 
 // --- Finding 2: the rejection backoff must not clobber a RUNNING
-// intention's own deadline -- wake_at_millis doubles as Idle's completion
+// intention's own deadline -- wake_at_ticks doubles as Idle's completion
 // time, and as any kind's still-future idle-hint reminder. A rejected
 // suggestion may only re-arm when the current deadline is not doing useful
 // work: already due AND not Idle (an Idle at/past its deadline completes via
 // advance_intentions this same tick; re-arming would extend the logged idle
 // past its own SetBehavior duration). A future deadline stands untouched
 // (this was a rejected EARLY/event-driven wake -- the running intention's
-// own schedule is still the right one), and kind None (wake_at_millis always
+// own schedule is still the right one), and kind None (wake_at_ticks always
 // 0, so always "due") keeps the anti-spin backoff.
 
 TEST_CASE(
@@ -410,22 +410,22 @@ TEST_CASE(
 
     Intention idle;
     idle.kind = IntentionKind::Idle;
-    idle.duration_millis = 2000;
-    g.world_millis = 1000;
+    idle.duration_ticks = 2000;
+    g.world_ticks = 1000;
     CHECK(apply_intention(g, slot, idle));
     apply_commands(g);
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
-    REQUIRE(ci.wake_at_millis == 3000);
+    REQUIRE(ci.wake_at_ticks == 3000);
 
     // A rejected/no-op think mid-yield (an early, event-driven wake) must
     // not touch the Idle's own completion deadline.
-    g.world_millis = 1500;
+    g.world_ticks = 1500;
     note_think_outcome(g, slot, /*adopted=*/false);
-    CHECK(ci.wake_at_millis == 3000);  // unchanged -- was 2000 before the fix
+    CHECK(ci.wake_at_ticks == 3000);  // unchanged -- was 2000 before the fix
     CHECK(ci.kind == IntentionKind::Idle);  // still running, not aborted
 
     // Advancing to the real deadline still completes it normally.
-    g.world_millis = 3000;
+    g.world_ticks = 3000;
     advance_intentions(g);
     CHECK(ci.kind == IntentionKind::None);
     const EventInbox& inbox = g.registry.get<EventInbox>(e);
@@ -446,15 +446,15 @@ TEST_CASE("note_think_outcome still re-arms the anti-spin backoff for kind None"
     uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
     entt::entity e = g.slots[slot];
 
-    // Never adopted anything: kind stays None, wake_at_millis stays its
+    // Never adopted anything: kind stays None, wake_at_ticks stays its
     // default 0 -- always "due" by should_wake's own reading.
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     REQUIRE(ci.kind == IntentionKind::None);
-    REQUIRE(ci.wake_at_millis == 0);
+    REQUIRE(ci.wake_at_ticks == 0);
 
-    g.world_millis = 5000;
+    g.world_ticks = 5000;
     note_think_outcome(g, slot, /*adopted=*/false);
-    CHECK(ci.wake_at_millis == 5000 + kRejectedSuggestionBackoffMillis);
+    CHECK(ci.wake_at_ticks == 5000 + kRejectedSuggestionBackoffTicks);
 }
 
 // --- v3 high-stakes clause: threat_was_present / MeleeLock win over
@@ -475,7 +475,7 @@ TEST_CASE(
     // should_wake checks says "stay asleep."
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::Idle;
-    ci.wake_at_millis = g.world_millis + 4 * 3600 * 1000;  // 4 hours out
+    ci.wake_at_ticks = g.world_ticks + ticks_of(4 * 3600.0f);  // 4 hours out
     note_think_outcome(g, slot, /*adopted=*/true);
     CHECK_FALSE(should_wake(g, e));  // sanity: the long hint alone stays quiet
 
@@ -483,7 +483,7 @@ TEST_CASE(
     for (int i = 0; i < 5; ++i) {
         inbox.threat_was_present = true;  // this tick's value, per sim.cpp's writer
         CHECK(should_wake(g, e));
-        g.world_millis += kMillisPerTick;
+        g.world_ticks += kTicksPerStep;
     }
 
     // The offer withdraws the instant the flag clears (mirrors the writer
@@ -501,14 +501,14 @@ TEST_CASE("should_wake: an active MeleeLock wakes every tick, same as a present 
 
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::Attack;
-    ci.wake_at_millis = g.world_millis + 4 * 3600 * 1000;
+    ci.wake_at_ticks = g.world_ticks + ticks_of(4 * 3600.0f);
     note_think_outcome(g, slot, /*adopted=*/true);
     CHECK_FALSE(should_wake(g, e));  // sanity: not locked yet -> the long hint holds
 
     g.registry.emplace<MeleeLock>(e);
     for (int i = 0; i < 5; ++i) {
         CHECK(should_wake(g, e));
-        g.world_millis += kMillisPerTick;
+        g.world_ticks += kTicksPerStep;
     }
 
     g.registry.erase<MeleeLock>(e);
@@ -528,7 +528,7 @@ TEST_CASE("apply_intention adopts a valid MoveTo, logs it, and carries the wake 
     intent.kind = IntentionKind::MoveTo;
     intent.point = {5.0f, 7.0f};
     intent.activity_label = static_cast<int32_t>(ActivityId::Explore);  // != spawn default (-1)
-    intent.idle_hint_millis = 500;
+    intent.idle_hint_ticks = 500;
     // Stray values a MoveTo never uses -- as if carried over from some prior
     // suggestion. Review fix: apply_intention must zero these for a kind
     // that doesn't use them, not stamp them onto CurrentIntention verbatim.
@@ -543,8 +543,8 @@ TEST_CASE("apply_intention adopts a valid MoveTo, logs it, and carries the wake 
     CHECK(ci.point.y == Catch::Approx(7.0f));
     CHECK(ci.target_slot == UINT32_MAX);  // zeroed: MoveTo doesn't use a target
     CHECK(ci.arg == 0);                   // zeroed: MoveTo doesn't use arg
-    CHECK(ci.started_at_millis == g.world_millis);
-    CHECK(ci.wake_at_millis == g.world_millis + 500);
+    CHECK(ci.started_at_ticks == g.world_ticks);
+    CHECK(ci.wake_at_ticks == g.world_ticks + 500);
 
     apply_commands(g);  // drain the queue this task enqueued into
 
@@ -566,11 +566,11 @@ TEST_CASE("apply_intention adopts a valid MoveTo, logs it, and carries the wake 
     CHECK(g.registry.get<MoveTarget>(e).point.x == Catch::Approx(5.0f));
 }
 
-// --- v3 hint default: a hint of 0 (or unset) arms kDefaultWakeCadenceMillis
+// --- v3 hint default: a hint of 0 (or unset) arms kDefaultWakeCadenceTicks
 // exactly; a genuine long hint is still honored verbatim (docs/design/
 // intention-contract.html §2, "Tiered wake guarantees") -----------------------
 
-TEST_CASE("apply_intention: idle_hint_millis == 0 arms the default cadence, exactly +1000ms",
+TEST_CASE("apply_intention: idle_hint_ticks == 0 arms the default cadence, exactly +1000ms",
           "[intention]") {
     auto owned = make_flat_world();
     BadlandsGame& g = *owned;
@@ -580,25 +580,25 @@ TEST_CASE("apply_intention: idle_hint_millis == 0 arms the default cadence, exac
     Intention intent;
     intent.kind = IntentionKind::MoveTo;
     intent.point = {3.0f, 4.0f};
-    intent.idle_hint_millis = 0;  // "no preference" -- NOT the v2 "no deadline"
+    intent.idle_hint_ticks = 0;  // "no preference" -- NOT the v2 "no deadline"
 
     CHECK(apply_intention(g, slot, intent));
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
-    CHECK(ci.wake_at_millis == g.world_millis + kDefaultWakeCadenceMillis);
+    CHECK(ci.wake_at_ticks == g.world_ticks + kDefaultWakeCadenceTicks);
 
     apply_commands(g);
     bool found_setbehavior = false;
     for (const Command& c : g.command_log) {
         if (c.kind == CommandKind::SetBehavior && c.actor == slot) {
             found_setbehavior = true;
-            CHECK(c.param_b == kDefaultWakeCadenceMillis);  // logged, not 0
+            CHECK(c.param_b == kDefaultWakeCadenceTicks);  // logged, not 0
         }
     }
     CHECK(found_setbehavior);
 }
 
 TEST_CASE(
-    "apply_intention: a multi-hour idle_hint_millis is honored verbatim, and a guaranteed "
+    "apply_intention: a multi-hour idle_hint_ticks is honored verbatim, and a guaranteed "
     "event still pre-empts it",
     "[intention]") {
     auto owned = make_flat_world();
@@ -606,15 +606,15 @@ TEST_CASE(
     uint32_t slot = spawn_into(g, MercenaryDesc(0.0f, 0.0f));
     entt::entity e = g.slots[slot];
 
-    constexpr int64_t kFourHours = 4 * 3600 * 1000;
+    constexpr int64_t kFourHours = ticks_of(4 * 3600.0f);
     Intention intent;
     intent.kind = IntentionKind::MoveTo;
     intent.point = {3.0f, 4.0f};
-    intent.idle_hint_millis = kFourHours;
+    intent.idle_hint_ticks = kFourHours;
 
     CHECK(apply_intention(g, slot, intent));
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
-    CHECK(ci.wake_at_millis == g.world_millis + kFourHours);  // honored, not defaulted
+    CHECK(ci.wake_at_ticks == g.world_ticks + kFourHours);  // honored, not defaulted
     note_think_outcome(g, slot, /*adopted=*/true);
     CHECK_FALSE(should_wake(g, e));  // nowhere near due, no event -> stays asleep
 
@@ -629,7 +629,7 @@ TEST_CASE(
 
 // --- v3 invariant defended at the SetBehavior HANDLER too, not just at
 // apply_intention: every producer today guarantees param_b > 0 (apply_
-// intention substitutes kDefaultWakeCadenceMillis before logging), but that
+// intention substitutes kDefaultWakeCadenceTicks before logging), but that
 // is an unenforced cross-file invariant -- a future producer that logged a
 // non-positive duration must not silently resurrect the v2 "wake_at 0 =
 // forever" sentinel for a hero with kind != None. Drives the handler
@@ -646,17 +646,17 @@ TEST_CASE(
     entt::entity e = g.slots[slot];
 
     // A hero with a running intention (kind != None) -- the exact shape a
-    // wake_at_millis == 0 regression would misread as "idle until woken
+    // wake_at_ticks == 0 regression would misread as "idle until woken
     // forever" rather than "never adopted."
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::MoveTo;
-    ci.started_at_millis = g.world_millis;
+    ci.started_at_ticks = g.world_ticks;
 
     Command cmd{CommandKind::SetBehavior, slot, UINT32_MAX, {0.0f, 0.0f},
                 static_cast<int32_t>(ActivityId::Explore), /*param_b=*/0};
     apply_command(g, cmd);
 
-    CHECK(ci.wake_at_millis == g.world_millis + kDefaultWakeCadenceMillis);  // NOT 0
+    CHECK(ci.wake_at_ticks == g.world_ticks + kDefaultWakeCadenceTicks);  // NOT 0
 }
 
 TEST_CASE("apply_intention rejects Shoot at an unknown target and adopts nothing",
@@ -669,7 +669,7 @@ TEST_CASE("apply_intention rejects Shoot at an unknown target and adopts nothing
     // A prior, distinguishable CurrentIntention proves it is left untouched.
     CurrentIntention& ci_before = g.registry.get<CurrentIntention>(e);
     ci_before.kind = IntentionKind::Idle;
-    ci_before.wake_at_millis = 12345;
+    ci_before.wake_at_ticks = 12345;
 
     Intention intent;
     intent.kind = IntentionKind::Shoot;
@@ -679,7 +679,7 @@ TEST_CASE("apply_intention rejects Shoot at an unknown target and adopts nothing
 
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     CHECK(ci.kind == IntentionKind::Idle);
-    CHECK(ci.wake_at_millis == 12345);
+    CHECK(ci.wake_at_ticks == 12345);
     CHECK(g.command_queue.empty());
 }
 
@@ -691,12 +691,12 @@ TEST_CASE("apply_intention Idle stamps wake_at from the duration", "[intention]"
 
     Intention intent;
     intent.kind = IntentionKind::Idle;
-    intent.duration_millis = 2000;
+    intent.duration_ticks = 2000;
 
     CHECK(apply_intention(g, slot, intent));
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     CHECK(ci.kind == IntentionKind::Idle);
-    CHECK(ci.wake_at_millis == g.world_millis + 2000);
+    CHECK(ci.wake_at_ticks == g.world_ticks + 2000);
 }
 
 // --- Fix 2: adopting Idle must halt movement, not just stop issuing new
@@ -720,21 +720,21 @@ TEST_CASE("apply_intention Idle halts a hero that was mid-MoveTo", "[intention]"
 
     // A few ticks of real movement so the hero is genuinely underway.
     for (int i = 0; i < 5; ++i) {
-        plan_paths(g, 1.0f / 30.0f);
-        follow_paths(g, 1.0f / 30.0f);
+        plan_paths(g);
+        follow_paths(g);
     }
     const glm::vec2 moving_pos = g.registry.get<Position>(e).pos;
     CHECK(moving_pos.x > 0.0f);  // it did advance toward {100, 0}
 
     Intention idle;
     idle.kind = IntentionKind::Idle;
-    idle.duration_millis = 60'000;  // long -- irrelevant to this check
+    idle.duration_ticks = 60'000;  // long -- irrelevant to this check
     CHECK(apply_intention(g, slot, idle));
     apply_commands(g);
 
     // One more tick: position must NOT keep advancing toward the old goal.
-    plan_paths(g, 1.0f / 30.0f);
-    follow_paths(g, 1.0f / 30.0f);
+    plan_paths(g);
+    follow_paths(g);
     const glm::vec2 after_idle = g.registry.get<Position>(e).pos;
     CHECK(glm::distance(moving_pos, after_idle) < 0.01f);
 }
@@ -743,11 +743,11 @@ TEST_CASE(
     "v3: Idle duration 0 means \"no cadence preference\", not \"idle until woken\" -- "
     "self-completes at the default +1000ms",
     "[intention]") {
-    // v2 read duration_millis == 0 as colliding with wake_at_millis == 0's
+    // v2 read duration_ticks == 0 as colliding with wake_at_ticks == 0's
     // "no deadline" sentinel and treated it as "idle until woken, forever."
     // v3 (docs/design/intention-contract.html §2, "Tiered wake guarantees")
     // supersedes that: 0 means "no preference," so it arms
-    // kDefaultWakeCadenceMillis instead -- and because Idle's wake_at_millis
+    // kDefaultWakeCadenceTicks instead -- and because Idle's wake_at_ticks
     // doubles as its OWN completion criterion (advance_intentions), a
     // duration-0 Idle now runs for exactly the default cadence and then
     // completes on its own, rather than running forever.
@@ -758,17 +758,17 @@ TEST_CASE(
 
     Intention intent;
     intent.kind = IntentionKind::Idle;
-    intent.duration_millis = 0;
+    intent.duration_ticks = 0;
     CHECK(apply_intention(g, slot, intent));
 
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     CHECK(ci.kind == IntentionKind::Idle);
-    CHECK(ci.wake_at_millis == g.world_millis + kDefaultWakeCadenceMillis);  // exact +1000, not 0
+    CHECK(ci.wake_at_ticks == g.world_ticks + kDefaultWakeCadenceTicks);  // exact +1000, not 0
 
     // Just shy of the deadline: still running, should_wake still quiet (no
     // event, no threat/melee-lock -- isolates the deadline clause).
-    while (g.world_millis + kMillisPerTick < ci.wake_at_millis) {
-        g.world_millis += kMillisPerTick;
+    while (g.world_ticks + kTicksPerStep < ci.wake_at_ticks) {
+        g.world_ticks += kTicksPerStep;
         advance_intentions(g);
         CHECK(ci.kind == IntentionKind::Idle);
         CHECK_FALSE(should_wake(g, e));
@@ -777,7 +777,7 @@ TEST_CASE(
     // The tick the deadline elapses: should_wake fires and advance_intentions
     // completes the Idle (IntentionEnded(completed)), same as any other
     // Idle deadline -- this one is just defaulted rather than authored.
-    g.world_millis += kMillisPerTick;
+    g.world_ticks += kTicksPerStep;
     advance_intentions(g);
     CHECK(ci.kind == IntentionKind::None);  // self-completed, not stuck forever
     CHECK(should_wake(g, e));                // nothing running now -> worth a wake
@@ -804,7 +804,7 @@ TEST_CASE("advance_intentions completes a MoveTo on arrival and writes Intention
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::MoveTo;
     ci.point = g.registry.get<Position>(e).pos;  // already there
-    ci.started_at_millis = g.world_millis;
+    ci.started_at_ticks = g.world_ticks;
 
     advance_intentions(g);
 
@@ -830,7 +830,7 @@ TEST_CASE("advance_intentions aborts when a named target dies", "[intention]") {
     CurrentIntention& ci = g.registry.get<CurrentIntention>(hero);
     ci.kind = IntentionKind::Shoot;
     ci.target_slot = target_slot;
-    ci.started_at_millis = g.world_millis;
+    ci.started_at_ticks = g.world_ticks;
 
     g.registry.get<Health>(target).hp = 0.0f;  // dies this tick
     advance_intentions(g);
@@ -864,7 +864,7 @@ TEST_CASE("advance_intentions dispatches on ci.kind, not a stray target_slot", "
     ci.kind = IntentionKind::MoveTo;
     ci.point = g.registry.get<Position>(hero).pos;  // already there -> arrival
     ci.target_slot = stray_slot;                    // stray, unrelated to MoveTo
-    ci.started_at_millis = g.world_millis;
+    ci.started_at_ticks = g.world_ticks;
 
     g.registry.get<Health>(stray).hp = 0.0f;  // the stray "target" dies this tick too
     advance_intentions(g);
@@ -944,21 +944,21 @@ TEST_CASE("Chat lifecycle (b): movement halts for both participants while Chatti
     const glm::vec2 start = g.registry.get<Position>(b).pos;
     const float dt = 1.0f / 30.0f;
     // Stop a few ticks short of the session's own natural expiry -- driving
-    // plan_paths/follow_paths/advance_chats directly (not tick_world) so
+    // plan_paths/follow_paths/advance_chats directly (not step_world) so
     // this pins the movement-exclusion fix in isolation, not entangled with
     // a brain re-issuing MoveTo.
     const int ticks = static_cast<int>(duration / dt) - 5;
     for (int i = 0; i < ticks; ++i) {
-        advance_chats(g, dt);
-        plan_paths(g, dt);
-        follow_paths(g, dt);
+        advance_chats(g);
+        plan_paths(g);
+        follow_paths(g);
         REQUIRE(g.registry.all_of<ChattingState>(b));  // hasn't dissolved early via drift
     }
     CHECK(glm::distance(g.registry.get<Position>(b).pos, start) < 0.01f);
 
     // Let it run to its natural end and confirm it still dissolves normally.
     for (int i = 0; i < 10; ++i) {
-        advance_chats(g, dt);
+        advance_chats(g);
     }
     CHECK_FALSE(g.registry.all_of<ChattingState>(b));
 }
@@ -975,7 +975,7 @@ TEST_CASE("Chat lifecycle (c): a full session completes normally -- IntentionEnd
     CurrentIntention& ci = g.registry.get<CurrentIntention>(a);
     ci.kind = IntentionKind::Chat;
     ci.target_slot = b_slot;
-    ci.started_at_millis = g.world_millis;
+    ci.started_at_ticks = g.world_ticks;
 
     const float duration = g.factors.hero.chat_duration;
     g.registry.emplace<ChattingState>(a, b_slot, duration);
@@ -987,10 +987,10 @@ TEST_CASE("Chat lifecycle (c): a full session completes normally -- IntentionEnd
     CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::Chat);
 
     // Run the session out via the real dissolve path (advance_chats) plus
-    // advance_intentions, same order tick_world uses.
+    // advance_intentions, same order step_world uses.
     const int ticks = static_cast<int>(duration / dt) + 5;
     for (int i = 0; i < ticks; ++i) {
-        advance_chats(g, dt);
+        advance_chats(g);
         advance_intentions(g);
     }
 
@@ -1067,14 +1067,14 @@ TEST_CASE(
     // compare new pushes against.
     CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
     ci.kind = IntentionKind::Idle;
-    ci.wake_at_millis = 0;  // no deadline -- isolate the inbox-event path
+    ci.wake_at_ticks = 0;  // no deadline -- isolate the inbox-event path
     note_think_outcome(g, slot, /*adopted=*/true);
 
-    // An event arrives on a LATER tick (mirrors sim.cpp's tick_world: the
+    // An event arrives on a LATER tick (mirrors sim.cpp's step_world: the
     // ThreatSighted/DamageTaken/MoveBlocked writers run BEFORE the
     // think-dispatch loop, in the SAME tick a hero might wake and decide --
     // this is that later tick's event, strictly after the think above).
-    g.world_millis += kMillisPerTick;
+    g.world_ticks += kTicksPerStep;
     InboxEvent ev;
     ev.kind = InboxEventKind::ThreatSighted;
     push_inbox_event(g, e, ev);
@@ -1095,7 +1095,7 @@ TEST_CASE(
     // would immediately re-wake the brain for no NEW reason. (The rejection
     // backoff note_think_outcome just armed does not interfere here either:
     // it is 500ms out, well past this one-tick advance.)
-    g.world_millis += kMillisPerTick;
+    g.world_ticks += kTicksPerStep;
     CHECK_FALSE(should_wake(g, e));
 
     // A genuinely new event (after the think above) still wakes it.
@@ -1119,11 +1119,11 @@ TEST_CASE(
     Intention first;
     first.kind = IntentionKind::Idle;
     first.activity_label = static_cast<int32_t>(ActivityId::Idle);
-    first.duration_millis = 300;
-    live.world_millis = 1000;
+    first.duration_ticks = 300;
+    live.world_ticks = 1000;
     CHECK(apply_intention(live, slot, first));
     apply_commands(live);
-    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 1300);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_ticks == 1300);
 
     // A SECOND wake, same activity_label (Idle) as `first` -- exactly the
     // edge-trigger case this test is about: enqueue_set_behavior's ordinary
@@ -1132,11 +1132,11 @@ TEST_CASE(
     Intention second;
     second.kind = IntentionKind::Idle;
     second.activity_label = static_cast<int32_t>(ActivityId::Idle);
-    second.duration_millis = 900;
-    live.world_millis = 2000;
+    second.duration_ticks = 900;
+    live.world_ticks = 2000;
     CHECK(apply_intention(live, slot, second));
     apply_commands(live);
-    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 2900);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_ticks == 2900);
 
     int32_t set_behavior_count = 0;
     for (const Command& c : live.command_log) {
@@ -1147,9 +1147,9 @@ TEST_CASE(
     REQUIRE(set_behavior_count == 2);
 
     // Replay: a fresh world, given an equivalent hero but NEVER calling
-    // apply_intention/react() at all (sim.cpp's tick_world replay branch
+    // apply_intention/react() at all (sim.cpp's step_world replay branch
     // never calls tick_wasm_brain/apply_intention -- see its own comment),
-    // reconstructs the SAME wake_at_millis from the logged SetBehavior
+    // reconstructs the SAME wake_at_ticks from the logged SetBehavior
     // commands alone, via apply_command's SetBehavior handler (command.cpp).
     auto replay_owned = make_flat_world();
     BadlandsGame& replay = *replay_owned;
@@ -1158,19 +1158,19 @@ TEST_CASE(
     entt::entity re = replay.slots[replay_slot];
 
     replay.replay_log = &live.command_log;
-    replay.world_millis = 1000;
+    replay.world_ticks = 1000;
     apply_replay_commands(replay);
-    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 1300);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_ticks == 1300);
 
-    replay.world_millis = 2000;
+    replay.world_ticks = 2000;
     apply_replay_commands(replay);
-    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 2900);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_ticks == 2900);
 }
 
 // --- v3 restate-resume (docs/design/intention-contract.html §2, "Resume-by-
 // default"): an incoming suggestion identical to the running CurrentIntention
 // is a resume, not a new decision -- no re-run producer, no re-stamped
-// started_at_millis, only a LIVE-refreshed wake schedule, which deliberately
+// started_at_ticks, only a LIVE-refreshed wake schedule, which deliberately
 // does NOT reach the log (restate-log dedup: sameness is implied by logging
 // nothing; the tests below pin both halves) -------------------------------
 
@@ -1186,13 +1186,13 @@ TEST_CASE(
     Intention first;
     first.kind = IntentionKind::MoveTo;
     first.point = {9.0f, -2.0f};
-    first.idle_hint_millis = 500;
-    g.world_millis = 1000;
+    first.idle_hint_ticks = 500;
+    g.world_ticks = 1000;
     CHECK(apply_intention(g, slot, first));
     apply_commands(g);
-    const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_millis;
+    const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_ticks;
     CHECK(started_at == 1000);
-    CHECK(g.registry.get<CurrentIntention>(e).wake_at_millis == 1500);
+    CHECK(g.registry.get<CurrentIntention>(e).wake_at_ticks == 1500);
     const size_t log_size_after_adopt = g.command_log.size();
 
     // Restate: SAME point, a DIFFERENT hint -- proves the LIVE refresh reads
@@ -1200,14 +1200,14 @@ TEST_CASE(
     Intention restate;
     restate.kind = IntentionKind::MoveTo;
     restate.point = {9.0f, -2.0f};
-    restate.idle_hint_millis = 800;
-    g.world_millis = 1200;
+    restate.idle_hint_ticks = 800;
+    g.world_ticks = 1200;
     CHECK(apply_intention(g, slot, restate));
     apply_commands(g);
 
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
-    CHECK(ci.started_at_millis == started_at);  // NOT re-stamped
-    CHECK(ci.wake_at_millis == 1200 + 800);      // refreshed LIVE from the restate's hint
+    CHECK(ci.started_at_ticks == started_at);  // NOT re-stamped
+    CHECK(ci.wake_at_ticks == 1200 + 800);      // refreshed LIVE from the restate's hint
     CHECK(ci.point.x == Catch::Approx(9.0f));
     CHECK(ci.point.y == Catch::Approx(-2.0f));
 
@@ -1241,23 +1241,23 @@ TEST_CASE(
 
     Intention first;
     first.kind = IntentionKind::Attack;
-    first.idle_hint_millis = 300;
-    g.world_millis = 1000;
+    first.idle_hint_ticks = 300;
+    g.world_ticks = 1000;
     CHECK(apply_intention(g, slot, first));
     apply_commands(g);
-    const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_millis;
+    const int64_t started_at = g.registry.get<CurrentIntention>(e).started_at_ticks;
     const size_t log_size_after_adopt = g.command_log.size();
 
     // A combat-tick wake (e.g. forced by the high-stakes MeleeLock clause)
     // restates the SAME Attack -- the worked example in the design doc.
     Intention restate;
     restate.kind = IntentionKind::Attack;
-    restate.idle_hint_millis = 300;
-    g.world_millis += kMillisPerTick;
+    restate.idle_hint_ticks = 300;
+    g.world_ticks += kTicksPerStep;
     CHECK(apply_intention(g, slot, restate));
     apply_commands(g);
 
-    CHECK(g.registry.get<CurrentIntention>(e).started_at_millis == started_at);
+    CHECK(g.registry.get<CurrentIntention>(e).started_at_ticks == started_at);
 
     // restate-log dedup: zero log delta -- an identical restatement (Attack's
     // engagement executor re-running to re-aim at a live target notwithstanding,
@@ -1291,18 +1291,18 @@ TEST_CASE("apply_intention: a MoveTo to a DIFFERENT point is a new decision, not
     Intention first;
     first.kind = IntentionKind::MoveTo;
     first.point = {9.0f, -2.0f};
-    g.world_millis = 1000;
+    g.world_ticks = 1000;
     CHECK(apply_intention(g, slot, first));
 
     Intention different;
     different.kind = IntentionKind::MoveTo;
     different.point = {1.0f, 1.0f};  // a genuinely new goal
-    g.world_millis = 1200;
+    g.world_ticks = 1200;
     CHECK(apply_intention(g, slot, different));
     apply_commands(g);
 
     const CurrentIntention& ci = g.registry.get<CurrentIntention>(e);
-    CHECK(ci.started_at_millis == 1200);  // DID re-stamp -- this is a real new decision
+    CHECK(ci.started_at_ticks == 1200);  // DID re-stamp -- this is a real new decision
     CHECK(ci.point.x == Catch::Approx(1.0f));
 
     int32_t move_count = 0;
@@ -1325,20 +1325,20 @@ TEST_CASE(
 
     Intention first;
     first.kind = IntentionKind::Idle;
-    first.duration_millis = 300;
-    g.world_millis = 1000;
+    first.duration_ticks = 300;
+    g.world_ticks = 1000;
     CHECK(apply_intention(g, slot, first));
 
     Intention second;
     second.kind = IntentionKind::Idle;
-    second.duration_millis = 300;  // textually identical
-    g.world_millis = 1200;
+    second.duration_ticks = 300;  // textually identical
+    g.world_ticks = 1200;
     CHECK(apply_intention(g, slot, second));
 
-    // A real restate would have left started_at_millis at 1000 -- Idle must
+    // A real restate would have left started_at_ticks at 1000 -- Idle must
     // always take the full-adopt path instead.
-    CHECK(g.registry.get<CurrentIntention>(e).started_at_millis == 1200);
-    CHECK(g.registry.get<CurrentIntention>(e).wake_at_millis == 1200 + 300);
+    CHECK(g.registry.get<CurrentIntention>(e).started_at_ticks == 1200);
+    CHECK(g.registry.get<CurrentIntention>(e).wake_at_ticks == 1200 + 300);
 }
 
 TEST_CASE(
@@ -1352,26 +1352,26 @@ TEST_CASE(
 
     Intention first;
     first.kind = IntentionKind::Attack;
-    first.idle_hint_millis = 300;
-    live.world_millis = 1000;
+    first.idle_hint_ticks = 300;
+    live.world_ticks = 1000;
     CHECK(apply_intention(live, slot, first));
     apply_commands(live);
-    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 1300);
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_ticks == 1300);
     const size_t log_size_after_adopt = live.command_log.size();
 
     // A pure restate this time (identical Attack, a FRESH hint). restate-log
     // dedup (apply_intention, intention.cpp) means this logs NOTHING -- the
-    // live wake_at_millis still refreshes (it is live-only engine scheduling
+    // live wake_at_ticks still refreshes (it is live-only engine scheduling
     // state, the same class note_think_outcome's rejection backoff already
     // is, per that function's own determinism comment, intention.h), but no
     // SetBehavior reaches the command log for it.
     Intention restate;
     restate.kind = IntentionKind::Attack;
-    restate.idle_hint_millis = 900;
-    live.world_millis = 2000;
+    restate.idle_hint_ticks = 900;
+    live.world_ticks = 2000;
     CHECK(apply_intention(live, slot, restate));
     apply_commands(live);
-    CHECK(live.registry.get<CurrentIntention>(e).wake_at_millis == 2900);  // LIVE refresh
+    CHECK(live.registry.get<CurrentIntention>(e).wake_at_ticks == 2900);  // LIVE refresh
     CHECK(live.command_log.size() == log_size_after_adopt);  // NOTHING logged for the restate
 
     int32_t attack_count = 0, set_behavior_count = 0;
@@ -1390,7 +1390,7 @@ TEST_CASE(
     REQUIRE(set_behavior_count == 1);  // only the ADOPTION's schedule is in the log
 
     // Replay: a fresh world, given an equivalent hero but NEVER calling
-    // apply_intention/react() at all, reconstructs wake_at_millis from the
+    // apply_intention/react() at all, reconstructs wake_at_ticks from the
     // log alone -- and the log only ever carried the ADOPTION-time deadline
     // (1300), never the restate's live-only refresh (2900).
     auto replay_owned = make_flat_world();
@@ -1400,11 +1400,11 @@ TEST_CASE(
     entt::entity re = replay.slots[replay_slot];
 
     replay.replay_log = &live.command_log;
-    replay.world_millis = 1000;
+    replay.world_ticks = 1000;
     apply_replay_commands(replay);
-    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 1300);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_ticks == 1300);
 
-    replay.world_millis = 2000;
+    replay.world_ticks = 2000;
     apply_replay_commands(replay);
     // Still 1300, NOT 2900 -- the restate logged nothing to replay here,
     // which is the entire point of restate-log dedup.
@@ -1412,7 +1412,7 @@ TEST_CASE(
     // Why this divergence is acceptable (the safety argument, mirrored from
     // apply_intention's own comment): replay never THINKS -- it never calls
     // apply_intention/should_wake at all (docs/design/intention-contract.html
-    // §6), so wake_at_millis never influences anything replay actually
+    // §6), so wake_at_ticks never influences anything replay actually
     // reproduces here (positions/hp/building occupancy, all logged Commands
     // this test never touches). It only matters if a LIVE run later resumes
     // from this replayed state: that continuation would then consult the
@@ -1425,7 +1425,7 @@ TEST_CASE(
     // should_wake's event/high-stakes clauses surviving replay: see
     // apply_intention's safety-argument comment (intention.cpp), stated
     // once there.
-    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_millis == 1300);
+    CHECK(replay.registry.get<CurrentIntention>(re).wake_at_ticks == 1300);
 }
 
 // --- action resolver: resolve_action / BL_ACT_ATTACK (v3, contract-v3-
@@ -1630,15 +1630,15 @@ TEST_CASE("resolve_action never touches CurrentIntention, valid or invalid", "[i
 
     CurrentIntention& ci = g.registry.get<CurrentIntention>(se);
     ci.kind = IntentionKind::Idle;
-    ci.wake_at_millis = 42424242;
+    ci.wake_at_ticks = 42424242;
 
     CHECK(resolve_action(g, s, AgentAction{BL_ACT_ATTACK, t, /*arg=*/0}));  // valid -> fires
     CHECK(ci.kind == IntentionKind::Idle);
-    CHECK(ci.wake_at_millis == 42424242);
+    CHECK(ci.wake_at_ticks == 42424242);
 
     CHECK_FALSE(resolve_action(g, s, AgentAction{BL_ACT_USE_SKILL, t, /*arg=*/0}));  // invalid -> drops
     CHECK(ci.kind == IntentionKind::Idle);
-    CHECK(ci.wake_at_millis == 42424242);
+    CHECK(ci.wake_at_ticks == 42424242);
 }
 
 // --- action resolver: BL_ACT_USE_SKILL --------------------------------------

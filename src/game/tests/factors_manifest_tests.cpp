@@ -80,7 +80,7 @@ TEST_CASE("the shipped manifest tunes every archetype section") {
     CHECK(f.hero.hunt_sight_radius == Catch::Approx(22.0f));
     CHECK(f.critter.flee_radius == Catch::Approx(8.0f));
     CHECK(f.townfolk.house_income_per_day == 50u);
-    CHECK(f.townfolk.spawn_interval_millis == 60000);
+    CHECK(f.townfolk.spawn_interval_ticks == 60 * 120);  // 60 s in ticks
     CHECK(f.monster.max_alive == 4);
 }
 

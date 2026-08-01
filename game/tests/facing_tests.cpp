@@ -5,7 +5,7 @@
 // vision cone), and (2) moving a vision source reveals fresh terrain.
 //
 // These drive the movement/vision pipeline directly (follow_paths, resolve_
-// vision, characters_of) rather than tick_world, so the entity's brain does not
+// vision, characters_of) rather than step_world, so the entity's brain does not
 // overwrite the MoveTarget we set up -- the test controls the motion.
 
 #include "components.h"
@@ -53,7 +53,7 @@ void walk_to(BadlandsGame& g, entt::entity e, glm::vec2 goal, int ticks) {
     np.waypoints = {goal};
     np.cursor = 0;
     for (int i = 0; i < ticks; ++i) {
-        follow_paths(g, 1.0f / 30.0f);
+        follow_paths(g);
     }
 }
 
@@ -111,7 +111,7 @@ TEST_CASE("facing equals the normalized displacement actually moved") {
     np.cursor = 0;
 
     const glm::vec2 before = g.registry.get<Position>(e).pos;
-    follow_paths(g, 1.0f / 30.0f);
+    follow_paths(g);
     const glm::vec2 after = g.registry.get<Position>(e).pos;
     const glm::vec2 delta = after - before;
     REQUIRE(glm::length(delta) > 1e-4f);
@@ -134,7 +134,7 @@ TEST_CASE("an idle (arrived) unit keeps its last facing") {
 
     // No waypoints left -> follow_paths leaves facing untouched.
     for (int i = 0; i < 30; ++i) {
-        follow_paths(g, 1.0f / 30.0f);
+        follow_paths(g);
     }
     CHECK(g.registry.get<Facing>(e).dir.x == Catch::Approx(faced.x));
     CHECK(g.registry.get<Facing>(e).dir.y == Catch::Approx(faced.y));

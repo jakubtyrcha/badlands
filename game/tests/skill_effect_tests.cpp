@@ -21,7 +21,7 @@ BlSkillCastContext bash_context(int32_t test_outcome, float test_damage = 6.0f) 
     BlSkillCastContext ctx{};
     ctx.version = BL_SKILL_ABI_VERSION;
     ctx.skill_id = static_cast<int32_t>(SkillId::ShieldBash);
-    ctx.world_millis = 12345;
+    ctx.world_ticks = 12345;
     ctx.caster.slot = 1u;
     ctx.caster.accuracy = 1.0f;
     ctx.caster.melee_range = 1.5f;
@@ -48,7 +48,7 @@ TEST_CASE("shield-bash stuns a target its test landed on", "[skill_effect]") {
     CHECK(out.ops[0].kind == BL_FX_APPLY_STATUS);
     CHECK(out.ops[0].target_slot == 4u);
     CHECK(out.ops[0].param_i == static_cast<int32_t>(StatusKind::Stunned));
-    CHECK(out.ops[0].param_f == Catch::Approx(3000.0f));  // seconds -> ms
+    CHECK(out.ops[0].param_f == Catch::Approx(3.0f * 120));  // seconds -> ticks
 }
 
 TEST_CASE("a blocked or dodged bash produces no ops at all", "[skill_effect]") {
@@ -141,7 +141,7 @@ TEST_CASE("Calcify asks for its own status and nothing else", "[skill_effect]") 
     REQUIRE(out.count == 1);
     CHECK(out.ops[0].kind == BL_FX_APPLY_STATUS);
     CHECK(out.ops[0].param_i == static_cast<int32_t>(StatusKind::Calcified));
-    CHECK(out.ops[0].param_f == Catch::Approx(30000.0f));  // seconds -> ms
+    CHECK(out.ops[0].param_f == Catch::Approx(30.0f * 120));  // seconds -> ticks
 }
 
 TEST_CASE("the contract's layout is pinned", "[skill_effect]") {
@@ -188,7 +188,7 @@ TEST_CASE("curse lands without an attack test", "[skill_effect]") {
     CHECK(out.ops[0].kind == BL_FX_APPLY_STATUS);
     CHECK(out.ops[0].target_slot == 4u);
     CHECK(out.ops[0].param_i == static_cast<int32_t>(StatusKind::Cursed));
-    CHECK(out.ops[0].param_f == Catch::Approx(8000.0f));
+    CHECK(out.ops[0].param_f == Catch::Approx(8.0f * 120));
 }
 
 TEST_CASE("dress wounds emits a heal for its constant", "[skill_effect]") {
@@ -236,12 +236,12 @@ TEST_CASE("a backstab that missed adds nothing at all", "[skill_effect]") {
     }
 }
 
-TEST_CASE("the skill effect contract layout is pinned at v3", "[skill_effect]") {
+TEST_CASE("the skill effect contract layout is pinned at v4", "[skill_effect]") {
     // v2 put engaging_caster in BlSkillTarget's trailing pad, so every size was
     // unchanged. v3 adds the cast POINT to the context, which is 8 real bytes
     // -- the op and batch are untouched, because BL_FX_TELEPORT deliberately
     // carries no destination of its own.
-    CHECK(BL_SKILL_ABI_VERSION == 3);
+    CHECK(BL_SKILL_ABI_VERSION == 4);
     CHECK(sizeof(BlSkillTarget) == 48);
     CHECK(sizeof(BlSkillCastContext) == 720);
     CHECK(sizeof(BlSkillEffectOp) == 16);

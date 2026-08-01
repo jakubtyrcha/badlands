@@ -499,7 +499,7 @@ void advance_inside(BadlandsGame& game) {
     }
 }
 
-void advance_chats(BadlandsGame& game, float dt) {
+void advance_chats(BadlandsGame& game) {
     entt::registry& reg = game.registry;
     const HeroFactors& hf = game.factors.hero;
 
@@ -507,7 +507,7 @@ void advance_chats(BadlandsGame& game, float dt) {
     // too, and removing components mid-view is not safe.
     std::vector<entt::entity> ending;
     for (auto [e, chat] : reg.view<ChattingState>().each()) {
-        chat.remaining -= dt;
+        chat.remaining -= kSecondsPerStep;
         const entt::entity partner =
             entity_for_slot(game, static_cast<int32_t>(chat.partner_slot));
 

@@ -20,8 +20,8 @@
     "hunt_sight_radius": 22.0,
     "threat_radius": 14.0,
 
-    "think_min_millis": 0,
-    "think_max_millis": 833,
+    "think_min_ticks": 0,
+    "think_max_ticks": 100,
 
     "chat_content_seek": 0.5,
     "chat_fill_hours": 20.0,
@@ -34,7 +34,7 @@
     "explore_min_distance": 6.0,
     "explore_max_distance": 18.0,
     "explore_search_radius": 90.0,
-    "explore_lease_millis": 8000,
+    "explore_lease_ticks": 960,
 
     "_explore_chance_comment": "How often a class feels like exploring at all, drawn once per lease window. This is a FREQUENCY, which a weight cannot express: Explore is alone in the Productive band, and a weight only ranks rivals within a band.",
     "explore_chance": {
@@ -61,14 +61,14 @@
   },
 
   "townfolk": {
-    "spawn_interval_millis": 60000,
+    "spawn_interval_ticks": 7200,
     "max_alive": 2,
     "move_speed": 2.2,
     "house_income_per_day": 50
   },
 
   "monster": {
-    "spawn_interval_millis": 20000,
+    "spawn_interval_ticks": 2400,
     "max_alive": 4
   }
 }

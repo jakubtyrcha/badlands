@@ -298,7 +298,7 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
     ctx.skill_id = static_cast<int32_t>(id);
     ctx.point_x = point.x;
     ctx.point_z = point.y;
-    ctx.world_millis = game.world_millis;
+    ctx.world_ticks = game.world_ticks;
 
     const uint32_t caster_slot = slot_for_entity(game, caster);
     // effective_combatant, not the raw component -- the same rule declare_strike
@@ -317,8 +317,8 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
 
     // The seed an effect may draw from: the same identity axes the combat
     // rolls use (who, when, which skill), so it is replay-reproducible.
-    ctx.seed = seed_of(caster_slot, game.world_millis) ^
-               seed_of(static_cast<uint32_t>(kSkillSeedBase + ctx.skill_id), game.world_millis);
+    ctx.seed = seed_of(caster_slot, game.world_ticks) ^
+               seed_of(static_cast<uint32_t>(kSkillSeedBase + ctx.skill_id), game.world_ticks);
 
     // The declared attack test, rolled ONCE per target, here -- an effect
     // never rolls (skill_abi.h). The seed's attack_index axis is offset by
@@ -357,7 +357,7 @@ BlSkillCastContext build_cast_context(const BadlandsGame& game, entt::entity cas
             req.defender = def;
             req.attacker_slot = caster_slot;
             req.target_slot = target_slots[i];
-            req.world_millis = game.world_millis;
+            req.world_ticks = game.world_ticks;
             req.attack_index = kSkillSeedBase + ctx.skill_id;
             if (spec.guaranteed_test) {
                 // A guaranteed shot is expressed by DIALLING THE GATES, not by
@@ -525,7 +525,7 @@ void run_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index,
                                .amount = static_cast<float>(plan.id),
                                .x = at.x,
                                .z = at.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
 
     apply_effect_batch(game, caster_slot, ctx, batch);
 }

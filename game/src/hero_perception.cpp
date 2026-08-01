@@ -19,9 +19,9 @@ namespace badlands {
 
 namespace {
 
-// Roam re-draws its goal only when this window rolls over (world_millis / lease),
+// Roam re-draws its goal only when this window rolls over (world_ticks / lease),
 // so a wanderer holds a stable target for ~2 s instead of jittering each tick.
-constexpr int64_t kRoamLeaseMillis = 2000;
+constexpr int64_t kRoamLeaseTicks = ticks_of(2.0f);  // 2 s
 
 // Approach-tile ("door") of the nearest alive building of `kind` to `pos`.
 bool door_of_kind(const BadlandsGame& game, int kind, glm::vec2 pos, glm::vec2& out) {
@@ -120,11 +120,11 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     v.health_frac = hp.max_hp > 0.0f ? hp.hp / hp.max_hp : 1.0f;
     v.inventory = sim.inventory;
     v.self_attack_range = game.registry.get<Stats>(e).attack_range;
-    v.tod = time_of_day(game.world_millis, game.millis_per_day);
+    v.tod = time_of_day(game.world_ticks, game.ticks_per_day);
     v.night = is_night(v.tod);
-    v.roam_epoch = game.world_millis / kRoamLeaseMillis;
-    v.now_millis = game.world_millis;
-    v.think_until_millis = sim.think_until_millis;
+    v.roam_epoch = game.world_ticks / kRoamLeaseTicks;
+    v.now_ticks = game.world_ticks;
+    v.think_until_ticks = sim.think_until_ticks;
     v.current_activity = sim.behavior;
 
     // Threats in proximity: the perception the Danger band (and, on the wasm
@@ -151,7 +151,7 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     // in, so a refusal makes the hero try somewhere else next window instead of
     // giving up on exploring forever.
     const int32_t cls = game.registry.get<HeroCharacter>(e).hero_class;
-    const int64_t explore_epoch = game.world_millis / game.factors.hero.explore_lease_millis;
+    const int64_t explore_epoch = game.world_ticks / game.factors.hero.explore_lease_ticks;
     if (weights.of(ActivityId::Explore) > 0.0f) {
         uint64_t rng = seed_of(slot, explore_epoch * 2 + 1);
         const float appetite =
@@ -168,7 +168,7 @@ WorldView observe_hero(const BadlandsGame& game, uint32_t slot, entt::entity e,
     }
     if (const auto* blocked = game.registry.try_get<MoveBlocked>(e)) {
         v.move_blocked =
-            blocked->at_millis / game.factors.hero.explore_lease_millis == explore_epoch;
+            blocked->at_ticks / game.factors.hero.explore_lease_ticks == explore_epoch;
         v.blocked_point = blocked->point;
     }
 

@@ -155,7 +155,7 @@ TEST_CASE("Sim::Tick folds statistics, and the totals reconcile") {
 
     uint64_t expected = 0;
     for (int i = 0; i < 60; ++i) {
-        sim.Tick(1.0f / 30.0f);
+        sim.Step();
         expected += sim.Characters().size();
     }
 
@@ -176,21 +176,21 @@ TEST_CASE("statistics survive a reset and keep accumulating") {
     Sim sim(BrainDesc{});
     sim.Spawn(MercenaryDesc(0.0f, kCastleSpawnZ));
     for (int i = 0; i < 10; ++i) {
-        sim.Tick(1.0f / 30.0f);
+        sim.Step();
     }
     REQUIRE(sim.ActivityStats().Samples() > 0);
 
     sim.ResetActivityStats();
     CHECK(sim.ActivityStats().Samples() == 0);
 
-    sim.Tick(1.0f / 30.0f);
+    sim.Step();
     CHECK(sim.ActivityStats().Samples() == 1);
 }
 
 TEST_CASE("the snapshot carries the hero class the histogram attributes by") {
     Sim sim(BrainDesc{});
     sim.Spawn(MercenaryDesc(0.0f, kCastleSpawnZ));
-    sim.Tick(1.0f / 30.0f);
+    sim.Step();
 
     const std::vector<CharacterState> rows = sim.Characters();
     REQUIRE(rows.size() == 1);
@@ -210,7 +210,7 @@ TEST_CASE("a recruited hero reports its guild's class") {
     REQUIRE(camp >= 0);
     Action hire{ActionKind::RecruitHero, static_cast<uint32_t>(camp), 0.0f, 0.0f, 0, 0};
     REQUIRE(sim.Dispatch(hire) >= 0);
-    sim.Tick(1.0f / 30.0f);
+    sim.Step();
 
     bool found = false;
     for (const CharacterState& r : sim.Characters()) {

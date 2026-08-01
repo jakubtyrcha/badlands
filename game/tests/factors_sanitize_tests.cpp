@@ -52,10 +52,10 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 
 }  // namespace
 
-// --- self-review finding: explore_lease_millis is ALSO a divisor -----------
-// (hero_perception.cpp's observe_hero: `world_millis / explore_lease_millis`,
+// --- self-review finding: explore_lease_ticks is ALSO a divisor -----------
+// (hero_perception.cpp's observe_hero: `world_ticks / explore_lease_ticks`,
 // run UNCONDITIONALLY for every hero every tick, with no <=0 guard of its own
-// -- unlike the needs.cpp hours-rate fields, which reserve_rate_per_tick itself
+// -- unlike the needs.cpp hours-rate fields, which reserve_rate_per_step itself
 // guards). Caught auditing sanitize_factors' sweep against every division
 // site in game/src, not just needs.cpp's. Not one of the brief's three
 // repros, and not demonstrated live: an int64 divide-by-zero here is
@@ -63,19 +63,19 @@ BrainDesc wasm_desc(const std::vector<uint8_t>& bytes) {
 // rather than trapping, so it would not reproduce as a visible abort here
 // the way (b) does) -- pinned as a unit-level non-zero check instead.
 
-TEST_CASE("sanitize_factors: explore_lease_millis (a divisor in hero_perception.cpp) "
+TEST_CASE("sanitize_factors: explore_lease_ticks (a divisor in hero_perception.cpp) "
          "never comes back <= 0") {
     Sim sim{BrainDesc{}};
 
     SimFactors f = sim.Factors();
-    f.hero.explore_lease_millis = -1;
+    f.hero.explore_lease_ticks = -1;
     sim.SetFactors(f);
-    CHECK(sim.Factors().hero.explore_lease_millis > 0);
+    CHECK(sim.Factors().hero.explore_lease_ticks > 0);
 
     f = sim.Factors();
-    f.hero.explore_lease_millis = 0;
+    f.hero.explore_lease_ticks = 0;
     sim.SetFactors(f);
-    CHECK(sim.Factors().hero.explore_lease_millis > 0);
+    CHECK(sim.Factors().hero.explore_lease_ticks > 0);
 }
 
 // --- review fast-follow: MonsterFactors was entirely unswept ---------------
@@ -99,36 +99,36 @@ TEST_CASE("sanitize_factors: a negative monster max_alive comes back 0, not unde
 TEST_CASE("sanitize_factors: an inverted think-pause pair comes back min <= max") {
     Sim sim{BrainDesc{}};
     SimFactors f = sim.Factors();
-    f.hero.think_min_millis = 5000;
-    f.hero.think_max_millis = 1000;
+    f.hero.think_min_ticks = 5000;
+    f.hero.think_max_ticks = 1000;
     sim.SetFactors(f);
 
     const SimFactors& out = sim.Factors();
-    CHECK(out.hero.think_min_millis <= out.hero.think_max_millis);
+    CHECK(out.hero.think_min_ticks <= out.hero.think_max_ticks);
     // Specifically: max is left alone (already >= 0), min is pulled down into
     // range -- not the other way around (see sanitize_factors' doc comment).
-    CHECK(out.hero.think_max_millis == 1000);
-    CHECK(out.hero.think_min_millis == 1000);
+    CHECK(out.hero.think_max_ticks == 1000);
+    CHECK(out.hero.think_min_ticks == 1000);
 }
 
 // --- (b) the crash repro, superseded by the wire v2 flip --------------------
 // Pre-flip, this pinned: a wasm-brained Think pause whose duration draw
 // (behaviours/rng.h's range_i64 returns `lo` unconditionally when hi <= lo,
-// so an inverted think_min/think_max pair drew think_min_millis) exceeded
-// think_max_millis, which decode_decision (wasm_brain.cpp) validated against
+// so an inverted think_min/think_max pair drew think_min_ticks) exceeded
+// think_max_ticks, which decode_decision (wasm_brain.cpp) validated against
 // and rejected -- escalating to brain_fatal() (spdlog::critical +
 // std::abort()). See git history for the captured abort output this test
 // used to guard against.
 //
-// The intention contract's wire v2 (brain_abi.h) removes think_min_millis/
-// think_max_millis from BlViewFactors entirely -- deliberation (and its
+// The intention contract's wire v2 (brain_abi.h) removes think_min_ticks/
+// think_max_ticks from BlViewFactors entirely -- deliberation (and its
 // pause-duration bound check) is gone from the wasm hero path outright, not
 // merely re-validated more leniently -- so this exact hazard class is now
 // STRUCTURALLY unreachable for a wasm-driven hero: there is no wire field
 // left for an inverted pair to corrupt. (a) above still pins the min<=max
 // invariant itself -- sanitize_factors' own contract on HeroFactors, kept
 // even though the C++ hero decision layer that used to consume
-// think_min/think_max_millis (town_brain.cpp's deliberate()) is gone too
+// think_min/think_max_ticks (town_brain.cpp's deliberate()) is gone too
 // (a later task in this same slice): the fields are still sanitized, just
 // vestigial -- nothing reads them for behavior on any hero path anymore.
 // This case is replaced with a narrower regression: a wasm-driven run with the SAME
@@ -141,8 +141,8 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair has no effect on a was
     Sim sim{wasm_desc(bytes)};
 
     SimFactors f = sim.Factors();
-    f.hero.think_min_millis = 5000;
-    f.hero.think_max_millis = 1000;
+    f.hero.think_min_ticks = 5000;
+    f.hero.think_max_ticks = 1000;
     sim.SetFactors(f);
 
     Action place{ActionKind::PlaceBuilding, 0, -14.0f, -8.0f,
@@ -164,7 +164,7 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair has no effect on a was
     reg.get<HeroSimulationState>(hero_entity).fatigue = 0.05f;  // force a genuine activity change
 
     for (int i = 0; i < 30; ++i) {
-        sim.Tick(1.0f / 30.0f);
+        sim.Step();
     }
 
     // The point: this ticks along fine (a wasm-brain bug would abort the
@@ -173,13 +173,13 @@ TEST_CASE("sanitize_factors: an inverted think-pause pair has no effect on a was
     CHECK(sim.GetStats().ticks == 30);
 }
 
-// --- (c) TTL: a negative memory_ttl_millis must not evict a same-tick sighting
+// --- (c) TTL: a negative memory_ttl_ticks must not evict a same-tick sighting
 
 TEST_CASE("sanitize_factors: a negative memory TTL still lets two mercenaries remember "
          "each other") {
     Sim sim{BrainDesc{}};
     SimFactors f = sim.Factors();
-    f.hero.memory_ttl_millis = -1;
+    f.hero.memory_ttl_ticks = -1;
     sim.SetFactors(f);
 
     // Both Hero archetype (EntityMemory opt-in, heroes.cpp's spawn_entity),
@@ -188,10 +188,10 @@ TEST_CASE("sanitize_factors: a negative memory TTL still lets two mercenaries re
     // (see entity_memory.cpp's own comment on Vision::cone_half_cos).
     sim.SpawnCreature(CreatureId::Mercenary, /*team=*/0, 0.0f, kCastleSpawnZ);
     sim.SpawnCreature(CreatureId::Mercenary, /*team=*/0, 5.0f, kCastleSpawnZ);
-    sim.Tick(1.0f / 30.0f);
+    sim.Step();
 
     // TODAY (pre-fix): ttl == -1 makes update_entity_memory's TTL sweep
-    // (`now - last_seen_millis > ttl`) true even for an entry seen THIS
+    // (`now - last_seen_ticks > ttl`) true even for an entry seen THIS
     // tick (age 0 > -1), so EntityMemory empties every tick regardless of
     // who is actually in sight.
     entt::registry& reg = sim.registry();

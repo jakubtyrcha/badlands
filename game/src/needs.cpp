@@ -15,15 +15,15 @@ void advance_needs(BadlandsGame& game) {
 
     // Rates are read fresh every tick, so retuning them through
     // Sim::SetFactors takes effect immediately rather than at the next spawn.
-    // An in-game hour is game.millis_per_day / 24, so these hours-authored rates
+    // An in-game hour is game.ticks_per_day / 24, so these hours-authored rates
     // scale with the world's day length (a longer day drains proportionally
     // slower) rather than against a fixed compile-time day.
-    const int64_t day = game.millis_per_day;
-    const float fatigue_drain = reserve_rate_per_tick(hf.fatigue_drain_hours, day);
-    const float content_drain = reserve_rate_per_tick(hf.content_drain_hours, day);
-    const float rest_fill = reserve_rate_per_tick(hf.rest_fill_hours, day);
-    const float tavern_fill = reserve_rate_per_tick(hf.tavern_fill_hours, day);
-    const float chat_fill = reserve_rate_per_tick(hf.chat_fill_hours, day);
+    const int64_t day = game.ticks_per_day;
+    const float fatigue_drain = reserve_rate_per_step(hf.fatigue_drain_hours, day);
+    const float content_drain = reserve_rate_per_step(hf.content_drain_hours, day);
+    const float rest_fill = reserve_rate_per_step(hf.rest_fill_hours, day);
+    const float tavern_fill = reserve_rate_per_step(hf.tavern_fill_hours, day);
+    const float chat_fill = reserve_rate_per_step(hf.chat_fill_hours, day);
 
     for (auto [e, sim] : game.registry.view<HeroSimulationState>().each()) {
         const auto* inside = game.registry.try_get<InsideBuilding>(e);

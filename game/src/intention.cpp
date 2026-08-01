@@ -36,8 +36,8 @@ namespace {
 // the same one of those kinds are always identical.
 //
 // Idle is DELIBERATELY excluded, always returning false: Idle's own "field"
-// (duration_millis) is never stored on CurrentIntention -- only the deadline
-// it produces (wake_at_millis) is, and that is a moving target (it is
+// (duration_ticks) is never stored on CurrentIntention -- only the deadline
+// it produces (wake_at_ticks) is, and that is a moving target (it is
 // `now + duration`, so it differs across two calls even for the textually
 // same duration). Treating "kind == Idle" alone as identical would silently
 // swallow a genuinely new duration (e.g. a second Idle(900ms) landing on top
@@ -80,8 +80,8 @@ void push_inbox_event(BadlandsGame& game, entt::entity e, InboxEvent ev) {
     if (inbox == nullptr) {
         return;  // non-heroes carry no inbox -- a silent no-op, not an error
     }
-    ev.at_millis = game.world_millis;
-    ev.ttl_millis = kInboxTtlMillis;
+    ev.at_ticks = game.world_ticks;
+    ev.ttl_ticks = kInboxTtlTicks;
     // Wake bookkeeping (Fix 1, EventInbox's own comment): bump the
     // timestamp-free sequence counter on EVERY push, regardless of eviction
     // below -- should_wake's event clause only cares whether something
@@ -108,7 +108,7 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     const glm::vec2 self_pos = reg.get<Position>(e).pos;
 
     // Fetched once here, reused by the tail below. The wake-bookkeeping
-    // stamps that USED to live here unconditionally (last_think_millis,
+    // stamps that USED to live here unconditionally (last_think_ticks,
     // the rejection backoff) moved to note_think_outcome (intention.h) --
     // this function is purely validate-and-adopt now; see both doc
     // comments for why they are split.
@@ -160,19 +160,19 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // v3 restate-resume + restate-log dedup: an incoming suggestion identical
     // to what's already running is a fresh yield with a fresh hint, not a new
     // decision (the engine diffs) -- resume WITHOUT re-running the kind's
-    // producer, without re-stamping started_at_millis, and WITHOUT logging
-    // anything at all. Only the live `ci.wake_at_millis` refreshes from the
+    // producer, without re-stamping started_at_ticks, and WITHOUT logging
+    // anything at all. Only the live `ci.wake_at_ticks` refreshes from the
     // (defaulted) hint. This is command.h's own doctrine applied literally:
     // "re-stating an unchanged decision is not a decision" -- sameness is
     // implied by the ABSENCE of a log entry, exactly like every other
     // producer's ordinary edge-trigger (enqueue_move_to/enqueue_set_behavior)
     // already works. Idle can never land here (is_identical_restatement
-    // excludes it), so `intent.idle_hint_millis` is always the right field to
-    // read, never `intent.duration_millis`.
+    // excludes it), so `intent.idle_hint_ticks` is always the right field to
+    // read, never `intent.duration_ticks`.
     //
     // Safety argument for dropping the force-log this path used to do:
     //   1. Replay never THINKS -- it never calls apply_intention at all
-    //      (docs/design/intention-contract.html §6), so wake_at_millis can
+    //      (docs/design/intention-contract.html §6), so wake_at_ticks can
     //      never influence anything replay actually reproduces (positions,
     //      hp, building occupancy -- all logged Commands). It is read-only
     //      input to should_wake, and should_wake only runs on a LIVE tick.
@@ -205,8 +205,8 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // sameness is implied by logging nothing.
     if (is_identical_restatement(ci, intent)) {
         const int64_t hint =
-            intent.idle_hint_millis > 0 ? intent.idle_hint_millis : kDefaultWakeCadenceMillis;
-        ci.wake_at_millis = game.world_millis + hint;
+            intent.idle_hint_ticks > 0 ? intent.idle_hint_ticks : kDefaultWakeCadenceTicks;
+        ci.wake_at_ticks = game.world_ticks + hint;
         return true;
     }
 
@@ -341,7 +341,7 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
         }
 
         case IntentionKind::Idle:
-            if (intent.duration_millis < 0) {
+            if (intent.duration_ticks < 0) {
                 spdlog::warn("[intention] slot {}: Idle with a negative duration, ignored", slot);
                 return false;
             }
@@ -363,7 +363,7 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // a spurious-wake reminder only. Logged via enqueue_set_behavior's
     // duration field, so the wake schedule is IN the command log (the
     // SetBehavior handler, command.cpp, derives CurrentIntention::
-    // wake_at_millis from it too, so a replay reconstructs the schedule from
+    // wake_at_ticks from it too, so a replay reconstructs the schedule from
     // the log alone -- see docs/design/intention-contract.html §6.
     // `force=true`: every ADOPTED intention is a real
     // decision (a wake, gated sparsely by should_wake) and must reach the
@@ -373,17 +373,17 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // here.
     //
     // v3 supersedes the v2 rule that used to live in this comment (Idle
-    // duration_millis == 0 reading as "idle until woken," wake_at_millis == 0
+    // duration_ticks == 0 reading as "idle until woken," wake_at_ticks == 0
     // being the "no deadline" sentinel): docs/design/intention-contract.html
     // §2 now reads 0 as "no cadence preference," not "no deadline," for BOTH
-    // fields -- kDefaultWakeCadenceMillis (components.h) is substituted for a
+    // fields -- kDefaultWakeCadenceTicks (components.h) is substituted for a
     // non-positive requested duration/hint either way, so `deadline` below is
     // now ALWAYS a genuine positive duration, never a sentinel. Idle still
     // rejects only a NEGATIVE duration above, not a zero one -- zero is valid
     // input, just no longer meaning "forever."
     const int64_t requested =
-        (intent.kind == IntentionKind::Idle) ? intent.duration_millis : intent.idle_hint_millis;
-    const int64_t deadline = requested > 0 ? requested : kDefaultWakeCadenceMillis;
+        (intent.kind == IntentionKind::Idle) ? intent.duration_ticks : intent.idle_hint_ticks;
+    const int64_t deadline = requested > 0 ? requested : kDefaultWakeCadenceTicks;
     enqueue_set_behavior(game, slot, intent.activity_label, deadline, /*force=*/true);
 
     ci.kind = intent.kind;
@@ -407,8 +407,8 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     ci.arg = (intent.kind == IntentionKind::Enter || intent.kind == IntentionKind::UseSkill)
                  ? intent.arg
                  : 0;
-    ci.started_at_millis = game.world_millis;
-    ci.wake_at_millis = game.world_millis + deadline;  // deadline is always > 0 now (see above)
+    ci.started_at_ticks = game.world_ticks;
+    ci.wake_at_ticks = game.world_ticks + deadline;  // deadline is always > 0 now (see above)
     return true;
 }
 
@@ -523,8 +523,8 @@ bool resolve_action(BadlandsGame& game, uint32_t slot, const AgentAction& action
         // few seconds -- no attack, no skill. Movement and defense are
         // untouched (movement.cpp charges this); the penalty is on acting.
         if (has_status(game.registry, actor, StatusKind::Disengaged)) {
-            spdlog::warn("[action] slot {}: disengaged ({} ms left), kind {} dropped", slot,
-                         remaining_millis_of(game.registry, actor, StatusKind::Disengaged),
+            spdlog::warn("[action] slot {}: disengaged ({} ticks left), kind {} dropped", slot,
+                         remaining_ticks_of(game.registry, actor, StatusKind::Disengaged),
                          action.kind);
             return false;
         }
@@ -624,8 +624,8 @@ void advance_intentions(BadlandsGame& game) {
         int32_t kept = 0;
         for (int32_t i = 0; i < inbox.count; ++i) {
             InboxEvent ev = inbox.events[i];
-            ev.ttl_millis -= kMillisPerTick;
-            if (ev.ttl_millis > 0) {
+            ev.ttl_ticks -= kTicksPerStep;
+            if (ev.ttl_ticks > 0) {
                 inbox.events[kept++] = ev;
             }
         }
@@ -662,7 +662,7 @@ void advance_intentions(BadlandsGame& game) {
                 break;
 
             case IntentionKind::Idle:
-                if (ci.wake_at_millis > 0 && game.world_millis >= ci.wake_at_millis) {
+                if (ci.wake_at_ticks > 0 && game.world_ticks >= ci.wake_at_ticks) {
                     ended = true;
                     completed = true;
                 }
@@ -772,7 +772,7 @@ void advance_intentions(BadlandsGame& game) {
             ci.kind = IntentionKind::None;
             ci.target_slot = UINT32_MAX;
             ci.arg = 0;
-            ci.wake_at_millis = 0;
+            ci.wake_at_ticks = 0;
         }
     }
 }
@@ -794,7 +794,7 @@ bool should_wake(const BadlandsGame& game, entt::entity e) {
     // schedule refresh is live-only now, see that path's own comment).
     //
     // threat_was_present reads THIS TICK's value, not an edge -- sim.cpp's
-    // ThreatSighted pass (tick_world) runs BEFORE the think loop every tick
+    // ThreatSighted pass (step_world) runs BEFORE the think loop every tick
     // and maintains it there (force-resetting it false for a hidden hero, so
     // a hero currently hidden never reads true here), so by the time
     // should_wake is consulted this tick's perception has already landed;
@@ -812,14 +812,14 @@ bool should_wake(const BadlandsGame& game, entt::entity e) {
     const auto* ci = game.registry.try_get<CurrentIntention>(e);
     // "Nothing running" is worth a wake only when NO backoff is armed
     // either (see this function's doc comment): note_think_outcome can set
-    // wake_at_millis while leaving kind == None (a rejected/no-op
+    // wake_at_ticks while leaving kind == None (a rejected/no-op
     // suggestion), and that hero must sleep out the backoff, not busy-wake
     // every tick -- so this can no longer be an unconditional short-circuit
     // the way it was before Fix 1.
-    if (ci == nullptr || (ci->kind == IntentionKind::None && ci->wake_at_millis == 0)) {
+    if (ci == nullptr || (ci->kind == IntentionKind::None && ci->wake_at_ticks == 0)) {
         return true;  // fresh/never-consulted -- always worth a wake
     }
-    if (ci->wake_at_millis > 0 && game.world_millis >= ci->wake_at_millis) {
+    if (ci->wake_at_ticks > 0 && game.world_ticks >= ci->wake_at_ticks) {
         return true;  // Idle/idle-hint deadline, or a rejection backoff, elapsed
     }
     if (const auto* inbox = game.registry.try_get<EventInbox>(e)) {
@@ -841,14 +841,14 @@ void note_think_outcome(BadlandsGame& game, uint32_t slot, bool adopted) {
     }
     // Inspection only now -- should_wake reads the sequence counter below,
     // not this timestamp (see EventInbox's own comment on why).
-    ci->last_think_millis = game.world_millis;
+    ci->last_think_ticks = game.world_ticks;
     if (auto* inbox = game.registry.try_get<EventInbox>(e)) {
         inbox->last_seen_seq = inbox->last_pushed_seq;
     }
     // Finding 2: re-arm ONLY when the current deadline is not doing useful
-    // work of its own -- already due, and not Idle. wake_at_millis doubles
+    // work of its own -- already due, and not Idle. wake_at_ticks doubles
     // as more than "when to next busy-wake":
-    //   - kind None always has wake_at_millis == 0 (never adopted anything),
+    //   - kind None always has wake_at_ticks == 0 (never adopted anything),
     //     which is always "due" -- the anti-spin backoff below still applies
     //     there, same as before.
     //   - A rejected EARLY wake (should_wake's event/high-stakes clauses
@@ -857,21 +857,21 @@ void note_think_outcome(BadlandsGame& game, uint32_t slot, bool adopted) {
     //     results (the event's seq was already consumed above, so should_wake
     //     will not re-fire for the SAME event), and re-arming here would
     //     needlessly shorten a long yield (e.g. a multi-hour Idle) down to
-    //     kRejectedSuggestionBackoffMillis.
+    //     kRejectedSuggestionBackoffTicks.
     //   - A running Idle AT OR PAST its own deadline is excluded even though
-    //     it is "due": wake_at_millis IS Idle's completion time
+    //     it is "due": wake_at_ticks IS Idle's completion time
     //     (advance_intentions, below in this file), and advance_intentions
     //     retires it (kind -> None) this same tick, after this function runs
     //     (sim.cpp's tick order: think, then advance_intentions). Re-arming
     //     here would extend the logged idle past its own SetBehavior
     //     duration instead of letting it complete on schedule.
-    if (!adopted && ci->wake_at_millis <= game.world_millis &&
+    if (!adopted && ci->wake_at_ticks <= game.world_ticks &&
         ci->kind != IntentionKind::Idle) {
         // Rejected or explicit "nothing new" (BL_INT_NONE): re-arm the
         // schedule so should_wake's deadline clause, not its "nothing
         // running" clause, governs the next wake -- see should_wake's own
         // comment for why the latter can no longer fire unconditionally.
-        ci->wake_at_millis = game.world_millis + kRejectedSuggestionBackoffMillis;
+        ci->wake_at_ticks = game.world_ticks + kRejectedSuggestionBackoffTicks;
     }
 }
 
@@ -884,7 +884,7 @@ void abort_now(BadlandsGame& game, entt::entity e, CurrentIntention& ci) {
     ci.kind = IntentionKind::None;
     ci.target_slot = UINT32_MAX;
     ci.arg = 0;
-    ci.wake_at_millis = 0;
+    ci.wake_at_ticks = 0;
 
     InboxEvent ev;
     ev.kind = InboxEventKind::IntentionEnded;

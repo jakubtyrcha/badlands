@@ -61,7 +61,7 @@ std::vector<glm::vec2> query_path(BadlandsGame& game, glm::vec2 start, glm::vec2
     }
     // No navmesh built: straight-line fallback, obstacle-oblivious BY DESIGN.
     // Only headless mechanics tests that never rebuild the navmesh hit this; the
-    // sim rebuilds it every tick (rebuild_navmesh_if_stale in tick_world), so
+    // sim rebuilds it every tick (rebuild_navmesh_if_stale in step_world), so
     // shipping units always route around buildings + impassable terrain. (start
     // included so follow_paths advances past it.)
     return {start, goal};
@@ -131,7 +131,7 @@ void reproject_out_of_footprints(BadlandsGame& game, glm::vec2& p) {
 // Collapses what used to be two independent hand-copies of the same three
 // lines, one per caller.
 void note_move_blocked(BadlandsGame& game, entt::entity e, glm::vec2 point) {
-    game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_millis);
+    game.registry.emplace_or_replace<MoveBlocked>(e, point, game.world_ticks);
     InboxEvent ev;
     ev.kind = InboxEventKind::MoveBlocked;
     push_inbox_event(game, e, ev);
@@ -147,7 +147,7 @@ bool is_walkable(mapgen::Biome biome) {
     return biome != mapgen::Biome::Lake;
 }
 
-void plan_paths(BadlandsGame& game, float dt) {
+void plan_paths(BadlandsGame& game) {
     entt::registry& reg = game.registry;
     // Goals the navmesh reported unreachable this pass -> MoveBlocked, applied
     // after the loop (emplacing a component while iterating a view can invalidate
@@ -211,7 +211,7 @@ void plan_paths(BadlandsGame& game, float dt) {
             continue;
         }
 
-        np.repath_cooldown = std::max(0.0f, np.repath_cooldown - dt);
+        np.repath_cooldown = std::max(0.0f, np.repath_cooldown - kSecondsPerStep);
         // Repath when the resolved goal has drifted from the planned route's end.
         // Applies to Kind::Point too: scripted pursuit re-issues enqueue_move_to
         // (a Point) at the target's fresh position every tick, so a moving Point
@@ -242,7 +242,7 @@ void plan_paths(BadlandsGame& game, float dt) {
     }
 }
 
-void follow_paths(BadlandsGame& game, float dt) {
+void follow_paths(BadlandsGame& game) {
     // Steps refused this tick. Collected rather than emplaced inline, because
     // adding a component while iterating a view can invalidate it.
     std::vector<std::pair<entt::entity, glm::vec2>> blocked;
@@ -303,7 +303,7 @@ void follow_paths(BadlandsGame& game, float dt) {
         glm::vec2 d = np.waypoints[np.cursor] - pos.pos;
         float len = glm::length(d);
         if (len > 0.0f) {
-            const glm::vec2 next = pos.pos + d / len * std::min(len, speed * dt);
+            const glm::vec2 next = pos.pos + d / len * std::min(len, speed * kSecondsPerStep);
             // The world gets the last word on where a character can go. A path
             // may cross terrain nobody has surveyed -- the planner routes around
             // buildings only -- so the refusal happens HERE, at the step, and
@@ -400,7 +400,7 @@ void update_melee_locks(BadlandsGame& game) {
             continue;  // did not move, or moved TOWARD it
         }
         apply_status(game, e, StatusKind::Disengaged,
-                     static_cast<int64_t>(kDisengagePenaltySeconds * 1000.0f), slot);
+                     ticks_of(kDisengagePenaltySeconds), slot);
     }
 }
 
