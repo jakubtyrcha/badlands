@@ -445,6 +445,8 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/distance_field.cpp
     src/mapgen/hillshade.cpp
     src/mapgen/hydrology.cpp
+    src/mapgen/map_io.cpp
+    src/mapgen/window_rivers.cpp
     src/mapgen/outputs.cpp
     src/mapgen/erosion.cpp
     src/mapgen/detail_filter.cpp
@@ -1214,6 +1216,33 @@ target_include_directories(badlands_biome_splat_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
 add_test(NAME badlands_biome_splat_tests COMMAND badlands_biome_splat_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_map_io_tests: the on-disk map form -- the level convention
+# (depth = max(0, level - height)), lake derivation, and the size/range checks
+# that stand between a wrong manifest and a silently reinterpreted map.
+add_executable(badlands_map_io_tests
+    src/mapgen/map_io_tests.cpp
+    src/mapgen/map_io.cpp
+    src/mapgen/window_rivers.cpp
+    src/mapgen/hydrology.cpp
+    src/mapgen/river_graph.cpp
+    src/mapgen/erosion.cpp
+    src/mapgen/smooth.cpp
+    src/mapgen/canal_carve.cpp
+    src/mapgen/generator.cpp
+    src/mapgen/detail_filter.cpp
+    # Exact EDT; split out of generator.cpp upstream, so it must be listed
+    # explicitly here too (carve_cavities and distance_to_plains both call it).
+    src/mapgen/distance_field.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_map_io_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+)
+add_test(NAME badlands_map_io_tests COMMAND badlands_map_io_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
 # its buried skirt -- the overlap that keeps a later wave displacement from

@@ -146,8 +146,13 @@ FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m,
 // `wl >= level + epsilon_m`): that argued the pass-1 claim parent pops first,
 // and pass 2 replaces the claim parent. The strict-descent rule is what
 // carries the property now.
-Field2D<float> accumulate_drainage(const FlowRouting& r, float texel_area_m2) {
+Field2D<float> accumulate_drainage(const FlowRouting& r, float texel_area_m2,
+                                   const Field2D<float>* extra_area_m2) {
   Field2D<float> a(r.width, r.height, texel_area_m2);
+  if (extra_area_m2 && extra_area_m2->width == r.width &&
+      extra_area_m2->height == r.height) {
+    for (size_t i = 0; i < a.data.size(); ++i) a.data[i] += extra_area_m2->data[i];
+  }
   for (size_t k = r.order.size(); k-- > 0;) {
     const int i = r.order[k];
     const int32_t rcv = r.receiver[i];

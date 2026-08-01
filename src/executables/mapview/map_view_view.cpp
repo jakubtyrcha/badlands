@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <optional>
 #include <cmath>
 #include <string>
 #include <string_view>
@@ -33,11 +34,21 @@
 #include "mapgen/biomes.hpp"
 #include "mapview/biome_manifest.hpp"
 #include "mapview/biome_splat.hpp"
+#include "mapgen/map_io.hpp"
+#include "mapgen/window_rivers.hpp"
 #include "mapview/lake_surface.hpp"
 
 namespace badlands {
 
 namespace {
+
+// Narrowest channel that counts as a river. Below this the network is a haze of
+// hairlines that tells you nothing; w = k_w*sqrt(Q) makes this Q >= 0.0036 m3/s.
+constexpr float kMinRiverWidthM = 0.3f;
+
+// Shortest headwater branch worth drawing. Leaf-only, so the network cannot be
+// severed; applied repeatedly, since removing one leaf exposes the next.
+constexpr float kMinRiverBranchM = 32.0f;
 
 // Wrap the generator output in the frozen MapData contract at the raster's own
 // texel spacing. Slices are ONE-HOT: the hard per-pixel biome assignment, so
@@ -67,6 +78,59 @@ MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, glm::vec2 size_m) {
   return map;
 }
 }  // namespace
+
+
+// Turns the river graph into world-space debug segments.
+//
+// Height comes from the terrain raster, not from the graph's node elevations:
+// the graph carries elevation only at nodes, while `points_m` is resampled at
+// variable arc length along a reach, so interpolating node heights would let a
+// long reach float above or sink under the ground between them.
+//
+// Colour encodes STRAHLER ORDER rather than discharge, because order is constant
+// along a reach and discharge is not -- a per-point discharge ramp would make one
+// river read as several. Order is the hierarchy the eye should pick out.
+void MapViewView::BuildRiverLines() {
+  river_lines_.Clear();
+  if (!show_rivers_) return;
+  const int w = map_.heightmap.width, h = map_.heightmap.height;
+  if (w <= 0 || h <= 0 || map_size_m_ <= 0.0f) return;
+  const float texel_m = map_size_m_ / static_cast<float>(w);
+
+  // Lifted clear of the surface so the line is not z-fought by the terrain it
+  // follows. In metres, so it is independent of camera height.
+  constexpr float kLiftM = 0.35f;
+  // Screen-space pixels. A trunk is only ~1.6 m wide here, far below a pixel at
+  // any sane camera height, so thickness carries HIERARCHY, not true width.
+  constexpr float kBaseThicknessPx = 1.2f;
+  constexpr float kThicknessPerOrderPx = 0.9f;
+
+  auto ground_at = [&](glm::vec2 p) {
+    const int x = std::clamp(static_cast<int>(p.x / texel_m), 0, w - 1);
+    const int z = std::clamp(static_cast<int>(p.y / texel_m), 0, h - 1);
+    float y = map_.heightmap.at(x, z);
+    // Ride the lake surface where there is one, or the line disappears under it.
+    if (map_.water_depth.width == w && map_.water_depth.height == h)
+      y += map_.water_depth.at(x, z);
+    return y + kLiftM;
+  };
+
+  for (const mapgen::RiverEdge& e : rivers_.graph.edges) {
+    if (e.points_m.size() < 2) continue;
+    const int order = std::max(1, e.strahler_order);
+    // Headwaters pale, trunks saturated -- a single hue so the network still
+    // reads as one system.
+    const float tt = std::clamp((order - 1) / 4.0f, 0.0f, 1.0f);
+    const glm::vec3 color = glm::mix(glm::vec3(0.45f, 0.72f, 0.92f),
+                                     glm::vec3(0.08f, 0.34f, 0.78f), tt);
+    const float thickness = kBaseThicknessPx + kThicknessPerOrderPx * (order - 1);
+    for (size_t i = 1; i < e.points_m.size(); ++i) {
+      const glm::vec2 a = e.points_m[i - 1], b = e.points_m[i];
+      river_lines_.AddLine(glm::vec3(a.x, ground_at(a), a.y),
+                           glm::vec3(b.x, ground_at(b), b.y), color, thickness);
+    }
+  }
+}
 
 bool MapViewView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
@@ -98,12 +162,13 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   scene_context_.registry = &registry_;
   log_step("daylight", since(t));
 
+  // THREE map sources, mutually exclusive (main_mapview rejects combinations).
+  t = clock::now();
   if (test_map_) {
     // --test-map: the synthetic forest map instead of the generator. The
     // generator's classify_biomes emits only Plains/Hills/Mountain, so a
     // procedural map has zero Biome::Forest coverage and the forest plopper
     // has nothing to plant into; this map exists to give it one.
-    t = clock::now();
     map_size_m_ = ForestTestMapGenerator::kMapSizeM;
     params_.world_size_m = map_size_m_;
     terrain_map_ = ForestTestMapGenerator(params_.seed).Generate();
@@ -119,13 +184,54 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
       }
     }
     log_step("test map", since(t));
+  } else if (!load_dir_.empty()) {
+    // --load: rasters on disk. A LOADED map is by definition simulated
+    // elsewhere, so the generator's "terrain and preview PNGs can never
+    // disagree" guarantee does not apply to it.
+    std::string err;
+    std::optional<mapgen::MapArtifacts> loaded = mapgen::load_map(load_dir_, &err);
+    if (!loaded) {
+      spdlog::error("MapViewView: {}", err);
+      return false;
+    }
+    map_ = std::move(*loaded);
+    map_size_m_ = params_.world_size_m;
+    log_step("mg:load", since(t));
   } else {
     // Build the map in-process — the same generator --preview-image-only dumps,
     // so the rendered terrain and the preview PNGs can never disagree.
-    t = clock::now();
     map_ = mapgen::generate_map(params_);
-    log_step("mg:generate", since(t));
     map_size_m_ = params_.world_size_m;
+    log_step("mg:generate", since(t));
+  }
+
+
+  // River network. Only a LOADED map carries the boundary inflows a windowed
+  // cutout needs; a generated map already owns its whole catchment and has its
+  // own river graph, so this is deliberately load-path only.
+  if (!load_dir_.empty()) {
+    t = clock::now();
+    float runoff_m_per_yr = 1.0f;
+    const std::vector<mapgen::RiverInflow> inflows =
+        mapgen::load_inflows(load_dir_, &runoff_m_per_yr);
+    mapgen::ErosionParams rp;
+    rp.runoff_m_per_s = runoff_m_per_yr / 31557600.0f;
+    // Brooks are cut from the graph, not hidden at draw time: everything
+    // downstream should see the same network. w = k_w*sqrt(Q) with k_w = 5, so
+    // 0.5 m is Q >= 0.01 m3/s.
+    rivers_ = mapgen::build_window_rivers(map_, params_.world_size_m, inflows, rp,
+                                          kMinRiverWidthM, kMinRiverBranchM);
+    BuildRiverLines();
+    log_step("rivers", since(t));
+    float q_max = 0.0f;
+    for (const mapgen::RiverEdge& e : rivers_.graph.edges)
+      for (float q : e.discharge_m3_s) q_max = std::max(q_max, q);
+    spdlog::info(
+        "rivers: {} nodes, {} reaches, {} segments | inflow {:.4f} + rain {:.4f} "
+        "= {:.4f} m3/s | peak Q {:.4f} m3/s",
+        rivers_.graph.nodes.size(), rivers_.graph.edges.size(),
+        river_lines_.lines.size(), rivers_.inflow_m3_s, rivers_.rain_m3_s,
+        rivers_.inflow_m3_s + rivers_.rain_m3_s, q_max);
   }
 
   // Lake bathymetry, logged once: the water material's extinction coefficients
@@ -412,6 +518,12 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
 void MapViewView::Update(float dt, const bool* keyboard_state) {
   dt_ = dt;
 
+  // The segment list is static (built once at load), so this just re-points the
+  // context; nullptr when hidden or when there is no network, which is what the
+  // debug-line pass reads as "draw nothing".
+  scene_context_.debug_lines =
+      (show_rivers_ && !river_lines_.empty()) ? &river_lines_ : nullptr;
+
   // Advance the shared clock; when it's running, move the sun (paused =>
   // holds). The daylight re-bake is throttled implicitly: ApplyDaylight only
   // runs while time actually moves.
@@ -445,6 +557,13 @@ void MapViewView::DrawUI() {
               params_.resolution, params_.resolution, params_.world_size_m,
               params_.world_size_m);
   cluster_terrain_.DrawDebugUI();
+  if (!rivers_.graph.edges.empty()) {
+    if (ImGui::Checkbox("rivers (debug)", &show_rivers_)) BuildRiverLines();
+    ImGui::Text("  %zu reaches, %zu segments", rivers_.graph.edges.size(),
+                river_lines_.lines.size());
+    ImGui::Text("  inflow %.4f + rain %.4f m3/s", rivers_.inflow_m3_s,
+                rivers_.rain_m3_s);
+  }
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {
     const std::string_view bn = mapgen::biome_name(

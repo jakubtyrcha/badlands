@@ -67,6 +67,16 @@ FlowRouting route_flow(const Field2D<float>& h, float texel_m, float epsilon_m,
 // Per-cell contributing drainage area (m^2): every cell starts with
 // `texel_area_m2` of its own rain and accumulates from all cells that name
 // it as receiver, walked in reverse topological (leaf-to-root) order.
-Field2D<float> accumulate_drainage(const FlowRouting& r, float texel_area_m2);
+//
+// `extra_area_m2`, when non-null, adds a per-cell EXTERNAL contribution on top
+// of the cell's own rain. It exists for windowed maps: a river entering a cutout
+// carries a catchment that lies outside it, and the only honest way to represent
+// that upstream area is to seed it at the entry cell. Expressing the inflow as an
+// AREA rather than a discharge is what keeps it in the same units as the
+// accumulation, so downstream discharge stays consistent with the parent map's
+// without a second conversion. Must match `r`'s dimensions; null reproduces the
+// rain-only result exactly.
+Field2D<float> accumulate_drainage(const FlowRouting& r, float texel_area_m2,
+                                   const Field2D<float>* extra_area_m2 = nullptr);
 
 }  // namespace badlands::mapgen

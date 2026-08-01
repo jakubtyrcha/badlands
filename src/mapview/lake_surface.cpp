@@ -73,13 +73,32 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
     }
   }
 
-  // Two triangles per covered texel, on the terrain's own cell lattice.
+  // Two triangles per maximal RUN of same-owner texels along a row, not per
+  // texel. A lake surface is flat and single-coloured, so every texel in a run
+  // is coplanar and the merged quad covers exactly the same ground with the
+  // same winding and the same Y -- the geometry is identical, only the
+  // tessellation is coarser.
+  //
+  // Per-texel emission does not survive a fine grid: a 2048^2 map produced
+  // 1.38M triangles and a 379 MB vertex buffer, over Dawn's 268 MB default
+  // maxBufferSize, which invalidated the command buffer and blanked the frame.
+  // Runs are hundreds of texels long on a real lake, so this is a ~1000x cut.
+  // Merging along one axis keeps it a single pass with no bookkeeping; the
+  // second axis would need a rectangle decomposition for far less.
   for (int z = 0; z < h; ++z) {
-    for (int x = 0; x < w; ++x) {
-      const int i = z * w + x;
-      if (owner[i] < 0) continue;
-      const float y = art.lakes[owner[i]].level_m;
-      const float x0 = static_cast<float>(x) * s, x1 = x0 + s;
+    int x = 0;
+    while (x < w) {
+      const int32_t id = owner[static_cast<size_t>(z) * w + x];
+      if (id < 0) {
+        ++x;
+        continue;
+      }
+      int run_end = x + 1;
+      while (run_end < w && owner[static_cast<size_t>(z) * w + run_end] == id)
+        ++run_end;
+      const float y = art.lakes[id].level_m;
+      const float x0 = static_cast<float>(x) * s;
+      const float x1 = static_cast<float>(run_end) * s;
       const float z0 = static_cast<float>(z) * s, z1 = z0 + s;
       const glm::vec3 a(x0, y, z0), b(x1, y, z0), c(x1, y, z1), d(x0, y, z1);
       // CCW seen from +Y.
@@ -89,6 +108,7 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
       tris.push_back(a);
       tris.push_back(c);
       tris.push_back(b);
+      x = run_end;
     }
   }
   return tris;

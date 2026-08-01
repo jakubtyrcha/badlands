@@ -15,6 +15,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <utility>
 
 #include <dawn/webgpu_cpp.h>
 #include <entt/entt.hpp>
@@ -31,8 +33,10 @@
 #include "engine/rendering/water_material.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
+#include "engine/rendering/debug_line_buffer.hpp"
 #include "game/visual/forest_renderer.hpp"
 #include "mapgen/generator.hpp"
+#include "mapgen/window_rivers.hpp"
 
 namespace badlands {
 
@@ -48,14 +52,23 @@ class MapViewView : public AppView {
   // baseline; default is the parallel build). The overrides exist mainly so
   // headless --screenshot runs can frame near/far and set the tint without
   // touching the interactive defaults.
-  // `test_map` swaps the procedural generator for the synthetic forest map
-  // (game/map/forest_test_map_generator.hpp). It exists because
-  // mapgen::classify_biomes emits no Biome::Forest, so a generated map has no
-  // forest for the plopper to plant into -- see Initialize.
+  //
+  // THREE ways to get a map, and they are mutually exclusive:
+  //   - neither flag: mapgen::generate_map, the procedural generator.
+  //   - `load_dir` non-empty: rasters on disk (mapgen::load_map), so a world
+  //     simulated outside this process renders through the identical path.
+  //     main_mapview parses the manifest FIRST and writes
+  //     params.resolution/world_size_m from it, so every params_ use below stays
+  //     correct without a second source of truth.
+  //   - `test_map`: the synthetic forest map
+  //     (game/map/forest_test_map_generator.hpp). It exists because
+  //     mapgen::classify_biomes emits no Biome::Forest, so a generated map has
+  //     no forest for the plopper to plant into -- see Initialize.
   explicit MapViewView(mapgen::MapGenParams params, float camera_height = 0.0f,
                        int lod_tint = 0, bool serial_build = false,
-                       bool test_map = false)
+                       std::string load_dir = {}, bool test_map = false)
       : params_(params),
+        load_dir_(std::move(load_dir)),
         camera_height_override_(camera_height),
         initial_tint_(lod_tint),
         serial_build_(serial_build),
@@ -73,6 +86,7 @@ class MapViewView : public AppView {
 
  private:
   mapgen::MapGenParams params_;
+  std::string load_dir_;  // non-empty => load rasters instead of generating
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -140,6 +154,19 @@ class MapViewView : public AppView {
   bool hover_valid_ = false;
 
   float map_size_m_ = 0.0f;
+
+  // River network, built at load from the routed window (see window_rivers.hpp).
+  // Drawn through the engine's debug-line pass rather than as a world-space
+  // ribbon mesh: the pass emits screen-aligned antialiased quads, and at a
+  // median channel width of ~8 cm a true-width ribbon would be sub-texel and
+  // invisible at any useful camera height. Constant screen width is what makes a
+  // debug layer legible.
+  mapgen::WindowRivers rivers_;
+  DebugLineBuffer river_lines_;
+  bool show_rivers_ = true;
+  // Rebuilt only when the toggle or the camera-independent settings change --
+  // the segment list is static, so it is built once and pointed at each frame.
+  void BuildRiverLines();
 
   // Starting camera height override (0 = default); applied once in Initialize.
   float camera_height_override_ = 0.0f;

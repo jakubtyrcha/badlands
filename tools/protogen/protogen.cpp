@@ -90,6 +90,24 @@ struct Params {
   float momentum_transfer = 1.0f;
   float lrate = 0.01f;
   float erf_scale = 0.4f;
+
+  // --- two-layer substrate ---
+  //
+  // The surface is bedrock + soil. THE TRANSPORT LAW IS UNCHANGED: c_eq and the
+  // deposition_rate step below are the reference's, verbatim. What the substrate
+  // changes is only how much of the requested cut is actually YIELDED -- soil
+  // gives way at full rate, bedrock at `bedrock_erodibility` of it. Deposition
+  // is never resisted and always lands on soil.
+  //
+  // The ratio is k_bedrock/k_sediment from src/mapgen/erosion.hpp (5e-4 / 5e-3),
+  // so the two generators agree on how much harder rock is.
+  float bedrock_erodibility = 0.1f;
+  // Uniform starting soil, matching mapgen's initial_sediment_m. Applied as a
+  // layer WITHIN the initial surface (bedrock = height - soil) rather than on
+  // top of it, so the run starts from exactly the same terrain as before and an
+  // A/B against a no-substrate run stays meaningful.
+  float initial_soil_m = 4.0f;
+
   // Repose angle, in DEGREES -- the physical form of the reference's
   // dimensionless max_diff. 40 deg is steep rock; wet sediment is nearer 30.
   float repose_angle_deg = 40.0f;
@@ -180,6 +198,10 @@ struct Grid {
   std::vector<float> Qm3s, Qm3s_b;            // real discharge, for lakes/output
   std::vector<float> momx, momy, momx_b, momy_b;
   std::vector<float> water;                   // standing depth, height units
+  // Erodible thickness over bedrock, height units. The surface is `height`;
+  // bedrock is implicitly height - soil, so `height` stays authoritative and
+  // every existing read of it is untouched.
+  std::vector<float> soil;
   std::vector<int32_t> lake_id;
   std::vector<int32_t> lake_outlet;
   // kept lake id -> index into the Lake vector. lake_id stores the KEPT id
@@ -197,7 +219,7 @@ struct Grid {
         discharge(cells, 0.f), discharge_b(cells, 0.f),
         Qm3s(cells, 0.f), Qm3s_b(cells, 0.f),
         momx(cells, 0.f), momy(cells, 0.f), momx_b(cells, 0.f), momy_b(cells, 0.f),
-        water(cells, 0.f), lake_id(cells, -1),
+        water(cells, 0.f), soil(cells, 0.f), lake_id(cells, -1),
         vol_track(cells, 0.f), mx_track(cells, 0.f), my_track(cells, 0.f),
         visits(cells, 0u) {}
 
@@ -206,6 +228,34 @@ struct Grid {
     return x < 1 || y < 1 || x >= n - 1 || y >= n - 1;
   }
 };
+
+// --- substrate ---------------------------------------------------------------
+//
+// Every mutation of the surface goes through these two, so `height == bedrock +
+// soil` cannot drift and soil can never go negative.
+
+// Lays `amount` of loose material down. Deposition is never resisted -- what
+// settles is soil by definition, whatever it was eroded from.
+inline void Deposit(Grid& g, size_t c, float amount) {
+  if (amount <= 0.f) return;
+  g.soil[c] += amount;
+  g.height[c] += amount;
+}
+
+// Cuts `depth` from the surface and returns what the substrate ACTUALLY yielded.
+// Soil goes first at full rate; once it is gone the cut bites bedrock, which
+// gives up only `bedrock_erodibility` of what was asked. A bare-rock cell
+// therefore lowers ~10x slower than an alluvial one under identical forcing --
+// which is what makes ridges hold up and valleys fill.
+inline float Erode(Grid& g, const Params& p, size_t c, float depth) {
+  if (depth <= 0.f) return 0.f;
+  const float from_soil = std::min(depth, g.soil[c]);
+  const float from_rock = (depth - from_soil) * p.bedrock_erodibility;
+  g.soil[c] -= from_soil;
+  const float removed = from_soil + from_rock;
+  g.height[c] -= removed;
+  return removed;
+}
 
 struct V2 { float x = 0, y = 0; };
 inline float len(V2 a) { return std::sqrt(a.x * a.x + a.y * a.y); }
@@ -286,7 +336,17 @@ void InitAnalytic(Grid& g, const Params& p) {
     }
 }
 
+// Seeds the soil layer. Applied as a layer WITHIN the initial surface -- the
+// bedrock is implicitly height - soil -- so `height` is bit-identical to a
+// no-substrate run at step 0 and the A/B stays honest. A cell only starts
+// behaving differently once it has eroded through its starting soil.
+void InitSoil(Grid& g, const Params& p) {
+  const float s = (p.relief_m > 0.f) ? p.initial_soil_m / p.relief_m : 0.f;
+  std::fill(g.soil.begin(), g.soil.end(), s);
+}
+
 void InitTerrain(Grid& g, const Params& p) {
+  InitSoil(g, p);
   if (p.bowl || p.terrain == Params::Terrain::Bowl) { InitBowl(g, p); return; }
   if (p.terrain != Params::Terrain::Noise) { InitAnalytic(g, p); return; }
   FastNoiseLite n(int(p.seed));
@@ -604,7 +664,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     ++g.visits[here];
 
     if (volume < p.min_vol) {
-      g.height[here] += sediment;
+      Deposit(g, here, sediment);
       g.deposited_death += double(sediment);
       return;
     }
@@ -616,7 +676,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m) {
       const int32_t lid = g.lake_id[here];
       if (lid < 0 || lid >= int32_t(g.lake_outlet.size())) {
-        g.height[here] += sediment;
+        Deposit(g, here, sediment);
         g.deposited_death += double(sediment);
         return;
       }
@@ -652,7 +712,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       }
       drop = std::min(drop, sediment);
       sediment -= drop;
-      g.height[here] += drop;
+      Deposit(g, here, drop);
       g.deposited_lake += double(drop);
       // Sediment DISPLACES water: the deposit comes out of the lake's storage,
       // so the basin shallows as it fills rather than growing a bed under a
@@ -721,8 +781,22 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
                  (g.height[here] - g.height[there]);
     if (c_eq < 0.f) c_eq = 0.f;
     const float cdiff = p.enable_erosion ? (c_eq - sediment) : 0.f;
-    sediment += p.deposition_rate * cdiff;
-    g.height[here] -= volume * p.deposition_rate * cdiff;
+    // Positive = cut the surface, negative = lay material down. The reference
+    // wrote this straight to height; routing it through the substrate is the
+    // ONLY change to the law, and it changes the amount realized, never c_eq.
+    const float want = volume * p.deposition_rate * cdiff;
+    float realized;
+    if (want >= 0.f) {
+      realized = Erode(g, p, here, want);
+    } else {
+      Deposit(g, here, -want);
+      realized = want;  // deposition is never resisted
+    }
+    // The particle may only pick up what the ground actually gave. Without this
+    // scaling a bedrock cell would hand the drop a full load while losing a
+    // tenth of the depth, inventing mass out of the substrate.
+    const float yielded = (want != 0.f) ? realized / want : 1.f;
+    sediment += p.deposition_rate * cdiff * yielded;
 
     if (p.enable_cascade) Cascade(g, p, nx, ny, max_diff);
 
@@ -733,7 +807,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   // dropping that made this a silent mass sink, and it is the DOMINANT exit --
   // volume only decays to 0.61 over 500 steps, so the volume < min_vol branch
   // above is unreachable in practice.
-  g.height[last_cell] += sediment;
+  Deposit(g, last_cell, sediment);
   g.deposited_death += double(sediment);
 }
 
@@ -775,8 +849,10 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff) {
     const float excess = (g.height[here] - g.height[nb[k].i]) - max_diff;
     if (excess <= 0.f) continue;
     const float transfer = p.settling * excess * 0.5f;
-    g.height[here] -= transfer;
-    g.height[nb[k].i] += transfer;
+    // Talus is a transport of loose material, so it moves through the substrate
+    // too: a bare-rock cell sheds only a tenth as fast, which is what keeps
+    // rock slopes standing steeper than alluvial ones.
+    Deposit(g, nb[k].i, Erode(g, p, here, transfer));
   }
 }
 
@@ -799,6 +875,7 @@ void Dump(const Grid& g, const Params& p, const std::string& tag) {
   write("water", g.water, p.relief_m);     // metres
   write("discharge", g.discharge, 1.0f);
   write("Q", g.Qm3s, 1.0f);                // m^3/s
+  write("soil", g.soil, p.relief_m);       // metres of erodible cover
 }
 
 // Runs the whole simulation. Extracted from main so the sanity tests exercise
@@ -1226,6 +1303,104 @@ void ReposeAngle() {
           max_slope_deg, p.repose_angle_deg));
 }
 
+// --- substrate: bedrock actually resists ----------------------------------
+// The whole point of the two-layer substrate. Same fixture, same forcing, only
+// the starting soil differs: a deeply-mantled hill must lose substantially more
+// material than a bare-rock one.
+void BedrockResists() {
+  Params soft = Base(), hard = Base();
+  soft.terrain = hard.terrain = Params::Terrain::Lobe;
+  soft.steps = hard.steps = 200;
+  soft.initial_soil_m = 500.0f;  // effectively unlimited cover
+  hard.initial_soil_m = 0.0f;    // bare rock from the first step
+  std::vector<Lake> ls, lh; SimStats ss, sh;
+  Grid g0(soft.res);
+  InitTerrain(g0, soft);
+  Grid gs = Run(soft, ls, ss), gh = Run(hard, lh, sh);
+  double base = 0, vs = 0, vh = 0;
+  for (size_t i = 0; i < gs.cells; ++i) {
+    base += g0.height[i];
+    vs += gs.height[i];
+    vh += gh.height[i];
+  }
+  const double lost_soft = base - vs, lost_hard = base - vh;
+  // Not asserting the exact 10x: the cascade, the lakes and the death deposits
+  // all put material back, so the ratio at the landscape scale is softer than
+  // the per-cut one. What must hold is a clear, ordered difference.
+  Check("substrate: bedrock resists erosion", lost_hard < lost_soft * 0.75,
+        F("lost soft %.4e vs bare rock %.4e (ratio %.2f)", lost_soft, lost_hard,
+          lost_soft > 0 ? lost_hard / lost_soft : 0.0));
+}
+
+// --- substrate: inert while soil lasts ------------------------------------
+// A real logic change that must produce BIT-IDENTICAL output -- the diagnostic
+// that has caught every masked knob in this work. With cover deeper than the run
+// can ever cut through, bedrock hardness is unreachable, so varying it must
+// change nothing. If this ever differs, the substrate is biting when it should
+// not be.
+void SubstrateInertWhileSoilLasts() {
+  Params a = Base(), b = Base();
+  a.terrain = b.terrain = Params::Terrain::Lobe;
+  a.steps = b.steps = 120;
+  a.initial_soil_m = b.initial_soil_m = 1000.0f;
+  a.bedrock_erodibility = 1.0f;   // as soft as soil
+  b.bedrock_erodibility = 1e-6f;  // effectively unbreakable
+  std::vector<Lake> la, lb; SimStats sa, sb;
+  Grid ga = Run(a, la, sa), gb = Run(b, lb, sb);
+  size_t diff = 0;
+  for (size_t i = 0; i < ga.cells; ++i)
+    if (ga.height[i] != gb.height[i]) ++diff;
+  Check("substrate: inert while soil lasts", diff == 0,
+        diff == 0 ? "bit-identical" : F("%.0f cells differ", double(diff)));
+}
+
+// --- substrate: soil is conserved and never negative ----------------------
+// height == bedrock + soil is the invariant every mutation site must preserve.
+// A negative soil would mean Erode took more cover than existed.
+void SoilStaysPhysical() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Lobe;
+  p.steps = 250;
+  std::vector<Lake> lk; SimStats st;
+  Grid g = Run(p, lk, st);
+  float worst = 0.f;
+  size_t bare = 0;
+  for (float s : g.soil) {
+    worst = std::min(worst, s);
+    if (s <= 0.f) ++bare;
+  }
+  // Some cells MUST reach bare rock, or the fixture never exercised the
+  // bedrock path and the test above proves nothing.
+  Check("substrate: soil stays physical", worst >= 0.f && bare > 0,
+        F("min soil %.6f m, %.0f of %.0f cells stripped to rock",
+          worst * p.relief_m, double(bare), double(g.cells)));
+}
+
+// --- substrate: deposition builds soil ------------------------------------
+// Material that settles is loose by definition. A basin that receives fill must
+// end with MORE cover than it started with, or deposition is writing to bedrock.
+void DepositionBuildsSoil() {
+  Params p = Base();
+  p.terrain = Params::Terrain::Bowl;
+  p.steps = 200;
+  std::vector<Lake> lk; SimStats st;
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  Grid g = Run(p, lk, st);
+  // Compare where the surface rose: those cells received fill.
+  double gained_height = 0, gained_soil = 0;
+  for (size_t i = 0; i < g.cells; ++i) {
+    const float dh = g.height[i] - g0.height[i];
+    if (dh > 0.f) {
+      gained_height += dh;
+      gained_soil += g.soil[i] - g0.soil[i];
+    }
+  }
+  Check("substrate: deposition builds soil", gained_height > 0 && gained_soil > 0,
+        F("surface +%.4e, soil +%.4e over filled cells", gained_height,
+          gained_soil));
+}
+
 // --- 11. erosion lowers a hill --------------------------------------------
 void LobeErodes() {
   Params p = Base();
@@ -1463,6 +1638,10 @@ int RunAll() {
   ValleyChannel();
   ReposeAngle();
   LobeErodes();
+  BedrockResists();
+  SubstrateInertWhileSoilLasts();
+  SoilStaysPhysical();
+  DepositionBuildsSoil();
   LakeFillRate();
   Symmetry();
   LakeScaling();
@@ -1503,6 +1682,8 @@ int main(int argc, char** argv) {
     else if (a == "--deposition") p.deposition_rate = std::stof(nxt());
     else if (a == "--lrate") p.lrate = std::stof(nxt());
     else if (a == "--repose") p.repose_angle_deg = std::stof(nxt());
+    else if (a == "--bedrock-erodibility") p.bedrock_erodibility = std::stof(nxt());
+    else if (a == "--initial-soil") p.initial_soil_m = std::stof(nxt());
     else if (a == "--cascade-settling") p.settling = std::stof(nxt());
     else if (a == "--snapshot-every") p.snapshot_every = std::stoi(nxt());
     else if (a == "--bowl") p.bowl = true;
