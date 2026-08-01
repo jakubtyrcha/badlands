@@ -198,6 +198,10 @@ std::vector<glm::vec2> resample_polyline(const std::vector<glm::vec2>& pts,
 // a second chance to get the "square, not centre" test subtly wrong.
 
 // Does the segment ab touch the axis-aligned box at all? Liang-Barsky slab clip.
+// Exported alongside segment_aabb_distance (which uses it) rather than for its
+// own sake -- river_carve.cpp calls only the distance. Kept declared because
+// "do they touch" and "how far apart" are one predicate split in two, and
+// hiding half of it invites the next caller to rewrite it.
 bool segment_hits_aabb(glm::vec2 a, glm::vec2 b, glm::vec2 lo, glm::vec2 hi);
 
 // Exact minimum distance between a segment and an axis-aligned box (0 when they

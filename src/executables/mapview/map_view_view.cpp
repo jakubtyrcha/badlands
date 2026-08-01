@@ -332,17 +332,37 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     river_carve_ = std::make_unique<mapgen::RiverCarve>(
         mapgen::build_river_carve(rivers_.graph, river_arcs_, map_.heightmap,
                                   params_.world_size_m));
-    // The mask is on the height lattice, which IS the map's quad grid: node
-    // (i, j) sits at (i, j) * texel and MakeOneHotMapData builds one more node
-    // than texels per axis, so quad (i, j) is the square whose corner is node
-    // (i, j). The exponent grid is therefore an element-for-element restatement
-    // of the mask.
+    // Mask texels and quads are DIFFERENT SQUARES, so this is a dilation, not
+    // a copy. Mask texel (i, j) is CENTRED on node (i, j) -- RiverCarve::
+    // HeightAt indexes it as floor(w/texel + 0.5) -- while quad (i, j) spans
+    // [i, i+1] * texel. They are offset by half a texel, and the four quads a
+    // mask texel overlaps are (i-1, j-1), (i, j-1), (i-1, j), (i, j).
+    //
+    // Marking exactly those four is also what the tessellator needs, for a
+    // reason beyond the offset: LatticeNodeVertex gives a base-lattice node the
+    // COARSE height unless ALL FOUR of its incident quads are refined (it must
+    // -- a node bordering a plain quad has to weld with that quad's record).
+    // An element-for-element copy therefore left the carve unapplied at nodes
+    // just inside the channel, standing them up as posts: MEASURED at 0.4163 m
+    // in a 0.602 m cavity, 69% of the carve, on every offset and width tried.
+    // The dilation makes "texel set => all four of that node's quads refined"
+    // hold by construction, and the same probe then reports 0.0000 m.
     size_t corridor_texels = 0;
-    river_detail_level_.assign(river_carve_->mask.data.size(), 0);
-    for (size_t i = 0; i < river_carve_->mask.data.size(); ++i) {
-      if (river_carve_->mask.data[i] == 0) continue;
-      river_detail_level_[i] = kRiverDetailExponent;
-      ++corridor_texels;
+    const int mw = river_carve_->mask.width, mh = river_carve_->mask.height;
+    river_detail_level_.assign(static_cast<size_t>(mw) * mh, 0);
+    for (int j = 0; j < mh; ++j) {
+      for (int i = 0; i < mw; ++i) {
+        if (river_carve_->mask.at(i, j) == 0) continue;
+        ++corridor_texels;
+        for (int dz = -1; dz <= 0; ++dz) {
+          for (int dx = -1; dx <= 0; ++dx) {
+            const int qx = i + dx, qz = j + dz;
+            if (qx >= 0 && qz >= 0 && qx < mw && qz < mh)
+              river_detail_level_[static_cast<size_t>(qz) * mw + qx] =
+                  kRiverDetailExponent;
+          }
+        }
+      }
     }
     river_detail_.level = river_detail_level_.data();
     river_detail_.width = river_carve_->mask.width;
@@ -352,11 +372,15 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     };
     log_step("carve", since(t));
     const size_t mask_texels = std::max<size_t>(river_carve_->mask.data.size(), 1);
+    // Refined quads are reported SEPARATELY from corridor texels: the dilation
+    // means they are not the same count, and quads are what the DAG pays for.
+    size_t refined_quads = 0;
+    for (uint8_t k : river_detail_level_) refined_quads += (k > 0) ? 1 : 0;
     spdlog::info(
-        "river carve: {} corridor texels ({:.2f}% of the map), refined at "
-        "exponent {} ({:.3f} m sampling)",
-        corridor_texels,
-        100.0 * static_cast<double>(corridor_texels) /
+        "river carve: {} corridor texels -> {} refined quads ({:.2f}% of the "
+        "map), exponent {} ({:.3f} m sampling)",
+        corridor_texels, refined_quads,
+        100.0 * static_cast<double>(refined_quads) /
             static_cast<double>(mask_texels),
         static_cast<int>(kRiverDetailExponent),
         (params_.world_size_m / static_cast<float>(std::max(1, map_.heightmap.width))) /

@@ -351,3 +351,54 @@ TEST_CASE("build_river_arcs skips geometry-free reaches and keeps edge ids",
   CHECK(chains[1].edge == 2);  // NOT 1 -- the index is the edge, not the slot
   for (const RiverArcChain& c : chains) CHECK(c.length_m > 0.0f);
 }
+
+TEST_CASE("an end tangent never fights the direction of travel", "[river_arcs]") {
+  // The angle extrapolation is exact on a circle and WRONG on a corner: it
+  // doubles the chord-to-chord angle, so an L-bend two points in swung the
+  // estimate 45 degrees off the way the polyline actually leaves, bowing the
+  // end arc ~0.15-0.21 m off a 1 m segment. Nothing else caught it -- the end
+  // arc interpolates both knots exactly, so the knot-distance fit metric reads
+  // zero, and fit_arc_chain skips the deviation check on a one-segment span.
+  const std::vector<std::vector<glm::vec2>> corners = {
+      {{0, 0}, {1, 0}, {1, 1}, {1, 2}, {1, 3}},          // L at the start
+      {{0, 0}, {1, 0}, {1, 1}, {2, 1}, {2, 2}, {3, 2}},  // staircase, both ends
+      {{0, 0}, {2, 0}, {2, 2}},                          // the minimum case
+  };
+  for (const auto& pts : corners) {
+    const size_t n = pts.size();
+    INFO("polyline of " << n << " points");
+    const std::vector<glm::vec2> t = polyline_tangents(pts);
+    // Never more than 45 degrees off the segment it belongs to.
+    CHECK(glm::dot(t.front(), glm::normalize(pts[1] - pts[0])) >= 0.707f);
+    CHECK(glm::dot(t.back(), glm::normalize(pts[n - 1] - pts[n - 2])) >= 0.707f);
+
+    // And the fitted chain stays near the polyline BETWEEN knots, which is
+    // where the bow lived.
+    const RiverArcChain c = fit_arc_chain(pts, 0.5f);
+    REQUIRE(!c.arcs.empty());
+    for (size_t i = 1; i < n; ++i) {
+      const glm::vec2 mid = 0.5f * (pts[i - 1] + pts[i]);
+      float best = 1e30f;
+      for (const RiverArc& a : c.arcs) best = std::min(best, arc_distance_m(a, mid));
+      INFO("segment " << i << " midpoint");
+      CHECK(best <= 0.5f);
+    }
+  }
+}
+
+TEST_CASE("the circle case still uses the extrapolation", "[river_arcs]") {
+  // The guard must not disable the thing it guards: on a genuine circle the
+  // extrapolated end tangent is exact and well inside the 45-degree window, so
+  // it still wins over the (half-angle-off) end segment.
+  const float r = 40.0f, sweep = 1.2f;
+  const int n = 9;
+  std::vector<glm::vec2> pts;
+  for (int i = 0; i < n; ++i) {
+    const float a = sweep * static_cast<float>(i) / static_cast<float>(n - 1);
+    pts.push_back(glm::vec2(r * std::cos(a), r * std::sin(a)));
+  }
+  const std::vector<glm::vec2> t = polyline_tangents(pts);
+  CHECK(glm::dot(t.front(), glm::vec2(0.0f, 1.0f)) == Catch::Approx(1.0f).margin(1e-4));
+  const glm::vec2 want_end(-std::sin(sweep), std::cos(sweep));
+  CHECK(glm::dot(t.back(), want_end) == Catch::Approx(1.0f).margin(1e-4));
+}

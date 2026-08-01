@@ -249,6 +249,17 @@ std::vector<glm::vec2> polyline_tangents(const std::vector<glm::vec2>& pts) {
   // Endpoints: extrapolate the heading in ANGLE off the two chords that reach
   // in from the end, which is exact on a circle. Falls back to the end segment
   // when there is no third point or the chords are degenerate.
+  //
+  // GUARDED, because the extrapolation is exact on a circle and wrong on a
+  // CORNER: it doubles the chord-to-chord angle, so an L-bend two points in
+  // swings the estimate the wrong way -- measured at 45 degrees off the
+  // direction of travel on {0,0},{1,0},{1,1},{1,2}, which bowed the end arc
+  // ~0.15-0.21 m off a 1 m segment. Nothing else catches that: the end arc
+  // interpolates both knots exactly, so the fit-error metric (knot distances)
+  // reads zero, and fit_arc_chain skips the deviation check on a
+  // single-segment span. When the estimate disagrees with the end segment by
+  // more than ~45 degrees the polyline is not locally circular and the segment
+  // direction is the honest answer.
   auto end_tangent = [&](size_t e, size_t m, size_t f) {
     const glm::vec2 c1 = pts[m] - pts[e];
     const glm::vec2 seg = safe_normalize(c1, glm::vec2(1.0f, 0.0f));
@@ -256,7 +267,8 @@ std::vector<glm::vec2> polyline_tangents(const std::vector<glm::vec2>& pts) {
     const glm::vec2 c2 = pts[f] - pts[e];
     if (glm::length(c1) <= kEps || glm::length(c2) <= kEps) return seg;
     const float a = 2.0f * std::atan2(c1.y, c1.x) - std::atan2(c2.y, c2.x);
-    return glm::vec2(std::cos(a), std::sin(a));
+    const glm::vec2 ext(std::cos(a), std::sin(a));
+    return (glm::dot(ext, seg) >= 0.707f) ? ext : seg;
   };
   t[0] = end_tangent(0, 1, std::min<size_t>(2, n - 1));
   // The last point's tangent points downstream, so extrapolate backwards and

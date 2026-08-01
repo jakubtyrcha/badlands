@@ -252,6 +252,16 @@ DetailView MakeDetailView(const TerrainDetailField* detail, int W, int H,
   }
   v.field = detail;
   while (2 * (1 << (2 * (v.kmax + 1))) <= budget) ++v.kmax;
+  // QuadExp clamps silently per quad, so say it ONCE here: a producer that
+  // asked for detail it did not get should hear about it rather than wonder
+  // why the carve looks coarse.
+  int asked = 0;
+  for (int i = 0; i < W * H; ++i) asked = std::max(asked, int(detail->level[i]));
+  if (asked > v.kmax)
+    spdlog::warn(
+        "TerrainDetailField: exponent {} exceeds what the {}-triangle cluster "
+        "budget allows ({}); clamped",
+        asked, budget, v.kmax);
   return v;
 }
 
