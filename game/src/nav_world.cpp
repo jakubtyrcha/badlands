@@ -81,4 +81,26 @@ float nav_cost(const BadlandsGame& game, glm::vec2 from, glm::vec2 to) {
     return game.navmesh.Cost(from, to);
 }
 
+bool nav_point_free(BadlandsGame& game, glm::vec2 p) {
+    if (!game.terrain_blocking) {
+        // The documented flat-world contract: no navmesh is built at all and
+        // movement is obstacle-oblivious. Refusing every point here would make
+        // a point-targeted skill silently uncastable in exactly the worlds the
+        // movement tests use.
+        return true;
+    }
+    rebuild_navmesh_if_stale(game);
+    return game.navmesh.PassableAt(p);
+}
+
+void nav_cells_near(BadlandsGame& game, glm::vec2 origin, float radius, size_t max_out,
+                    std::vector<nav::NavMesh::DebugCell>& out) {
+    out.clear();
+    if (!game.terrain_blocking) {
+        return;  // nothing to show: see nav_point_free
+    }
+    rebuild_navmesh_if_stale(game);
+    game.navmesh.CellsNear(origin, radius, max_out, out);
+}
+
 }  // namespace badlands

@@ -146,7 +146,7 @@ TEST_CASE("a monster's xp_reward splits evenly (round up) over nearby heroes") {
         badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {1.0f, 0.0f});
     g.registry.get<badlands::Health>(
         badlands::entity_for_slot(g, static_cast<int32_t>(rat))).hp = 0.0f;
-    badlands::tick_world(g, kTickDt);  // death sweep spreads the reward
+    badlands::step_world(g);  // death sweep spreads the reward
 
     CHECK(xp_of(g, h1) == 5);  // ceil(10 / 2)
     CHECK(xp_of(g, h2) == 5);
@@ -167,7 +167,7 @@ TEST_CASE("heroes hidden inside buildings get no kill XP; alone gets it all") {
         badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {0.5f, 0.0f});
     g.registry.get<badlands::Health>(
         badlands::entity_for_slot(g, static_cast<int32_t>(rat))).hp = 0.0f;
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
 
     CHECK(xp_of(g, outside) == 10);  // whole reward: the only eligible hero
     CHECK(xp_of(g, hidden) == 0);
@@ -200,13 +200,13 @@ TEST_CASE("newly discovered texels award xp_per_texel to the discovering hero") 
     d.vision_cone_half_angle_deg = 180.0f;  // full circle
     const uint32_t slot = badlands::spawn_into(g, d);
 
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
     const int total = discovered_texels(g.vision);
     REQUIRE(total > 0);
     CHECK(xp_of(g, slot) == total * g.factors.progression.xp_per_texel);
 
     // The invariant holds tick over tick (the hero may roam and reveal more):
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
     CHECK(xp_of(g, slot) ==
           discovered_texels(g.vision) * g.factors.progression.xp_per_texel);
 }
@@ -228,7 +228,7 @@ TEST_CASE("overlapping discoveries are credited exactly once (union, no double)"
     d.pos_x = 4.0f;  // overlapping circles
     const uint32_t b = badlands::spawn_into(g, d);
 
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
     CHECK(xp_of(g, a) + xp_of(g, b) == discovered_texels(g.vision));
     CHECK(xp_of(g, a) > 0);
     CHECK(xp_of(g, b) > 0);
@@ -251,7 +251,7 @@ TEST_CASE("oversized exploration awards saturate instead of wrapping") {
     d.vision_cone_half_angle_deg = 180.0f;  // full circle
     const uint32_t slot = badlands::spawn_into(g, d);
 
-    badlands::tick_world(g, kTickDt);
+    badlands::step_world(g);
 
     // cost(1) = level_base_xp = 1e9, consumed on the way to level 2; cost(2)
     // (~3.03e9) saturates to INT32_MAX, so the level-up loop stops there.
@@ -329,4 +329,107 @@ TEST_CASE("the snapshot carries level/xp/skills; zeroed for non-heroes") {
     CHECK(hero_row->skills[0] == static_cast<int32_t>(SkillId::ShieldBash));
     CHECK(rat_row->level == 0);
     CHECK(rat_row->skill_count == 0);
+}
+
+// --- spawning at a level -----------------------------------------------------
+// A hero can start life partway up the ladder. The rule is that it looks
+// exactly like one that EARNED its way there: stats recomputed from the growth
+// row, and every grant row up to and including its level applied. Nothing here
+// is a shortcut past award_xp -- it is the same two operations award_xp's loop
+// performs, run once per level instead of once per XP threshold.
+
+TEST_CASE("a hero spawned at a level has that level's stats", "[progression][spawn]") {
+    auto owned = badlands::make_world(BrainDesc{});
+    BadlandsGame& g = *owned;
+
+    const uint32_t base_slot = badlands::spawn_creature_into(
+        g, badlands::CreatureId::Mercenary, badlands::kPlayerTeam, {0.0f, 20.0f}, 1);
+    const uint32_t high_slot = badlands::spawn_creature_into(
+        g, badlands::CreatureId::Mercenary, badlands::kPlayerTeam, {8.0f, 20.0f}, 5);
+    entt::entity lo = badlands::entity_for_slot(g, static_cast<int32_t>(base_slot));
+    entt::entity hi = badlands::entity_for_slot(g, static_cast<int32_t>(high_slot));
+
+    CHECK(g.registry.get<badlands::HeroSimulationState>(hi).level == 5);
+    // Starts fresh toward the NEXT level rather than carrying phantom progress:
+    // xp_next is derived from the level in the snapshot, so the level is the
+    // only thing there is to stamp.
+    CHECK(g.registry.get<badlands::HeroSimulationState>(hi).xp == 0);
+
+    // Recomputed from the entity's OWN rows rather than compared against an
+    // authored number -- the growth table is tuning and may move.
+    const badlands::BaseStats& base = g.registry.get<badlands::BaseStats>(hi);
+    const badlands::StatGrowth& grow = g.registry.get<badlands::Growth>(hi).rows;
+    CHECK(g.registry.get<badlands::Health>(hi).max_hp ==
+          Catch::Approx(base.hp + grow.hp * 4.0f));
+    CHECK(g.registry.get<badlands::Combatant>(hi).armour ==
+          Catch::Approx(base.armour + grow.armour * 4.0f));
+    // ...and the level-1 twin is untouched, so the argument did the work.
+    CHECK(g.registry.get<badlands::Health>(lo).max_hp == Catch::Approx(base.hp));
+}
+
+TEST_CASE("a hero spawned at a level knows every skill up to it", "[progression][spawn]") {
+    // The grant ladder is the point: rows fire at their EXACT level, so a
+    // spawn at N has to replay 1..N or it arrives missing everything it should
+    // have learned on the way. Test-local grant rows, never the shipped catalog.
+    auto owned = badlands::make_world(BrainDesc{});
+    BadlandsGame& g = *owned;
+
+    badlands::CharacterDesc d{};
+    d.archetype = badlands::Archetype::Hero;
+    d.hero_class = 0;
+    d.hp = 20.0f;
+    d.move_speed = 2.0f;
+    d.size_x = d.size_y = d.size_z = 1.0f;
+    d.team = badlands::kPlayerTeam;
+    d.skill_grants[0] = {static_cast<int32_t>(SkillId::Curse), 1};
+    d.skill_grants[1] = {static_cast<int32_t>(SkillId::ShieldBash), 3};
+    d.skill_grants[2] = {static_cast<int32_t>(SkillId::Backstab), 5};
+    d.skill_grant_count = 3;
+
+    auto learned_at = [&](int32_t level) {
+        badlands::CharacterDesc copy = d;
+        copy.pos_x = static_cast<float>(level) * 4.0f;
+        copy.pos_z = 30.0f;
+        const uint32_t slot = badlands::spawn_into(g, copy, level);
+        entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
+        return g.registry.get<badlands::Skills>(e).count;
+    };
+    CHECK(learned_at(1) == 1);
+    CHECK(learned_at(2) == 1);
+    CHECK(learned_at(3) == 2);
+    CHECK(learned_at(4) == 2);
+    CHECK(learned_at(5) == 3);
+}
+
+TEST_CASE("set_hero_level is idempotent", "[progression]") {
+    // Recompute-from-base, never accumulate: calling it twice at one level must
+    // land on the identical float, or a replay could drift from a live run.
+    auto owned = badlands::make_world(BrainDesc{});
+    BadlandsGame& g = *owned;
+    const uint32_t slot = badlands::spawn_creature_into(
+        g, badlands::CreatureId::Hunter, badlands::kPlayerTeam, {0.0f, 20.0f}, 6);
+    entt::entity e = badlands::entity_for_slot(g, static_cast<int32_t>(slot));
+
+    const float hp = g.registry.get<badlands::Health>(e).max_hp;
+    const int32_t skills = g.registry.get<badlands::Skills>(e).count;
+    badlands::set_hero_level(g, e, 6);
+    CHECK(g.registry.get<badlands::Health>(e).max_hp == hp);
+    CHECK(g.registry.get<badlands::Skills>(e).count == skills);
+}
+
+TEST_CASE("spawning a monster at a level changes nothing", "[progression][spawn]") {
+    // Monsters carry a zeroed growth row and a threat anchor authored at level
+    // 1 -- "level" is not a thing they have, so the argument is ignored rather
+    // than quietly inventing a stronger rat.
+    auto owned = badlands::make_world(BrainDesc{});
+    BadlandsGame& g = *owned;
+    const uint32_t a =
+        badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {5.0f, 0.0f}, 1);
+    const uint32_t b =
+        badlands::spawn_creature_into(g, badlands::CreatureId::Rat, 1, {9.0f, 0.0f}, 8);
+    entt::entity ea = badlands::entity_for_slot(g, static_cast<int32_t>(a));
+    entt::entity eb = badlands::entity_for_slot(g, static_cast<int32_t>(b));
+    CHECK(g.registry.get<badlands::Health>(ea).max_hp ==
+          g.registry.get<badlands::Health>(eb).max_hp);
+    CHECK(!g.registry.all_of<badlands::HeroSimulationState>(eb));
 }

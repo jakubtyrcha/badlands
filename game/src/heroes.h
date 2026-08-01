@@ -93,6 +93,6 @@ void advance_inside(BadlandsGame& game);
 // the world, and running it as a rule means a replay dissolves it identically
 // without the log having to carry an event for it. Both sides always leave
 // together, so a half-session cannot exist.
-void advance_chats(BadlandsGame& game, float dt);
+void advance_chats(BadlandsGame& game);
 
 }  // namespace badlands

@@ -19,55 +19,82 @@ namespace badlands {
 constexpr int kInventoryCap = 2;                 // elixirs a hero can carry
 constexpr float kEntranceRadius = 0.6f;          // how close to a door to enter
 
-// --- day/night clock (integer milliseconds, fixed 30 Hz) --------------------
-// Sim time is an int64 millisecond count advanced by a compile-time constant
-// each tick; no float accumulator (deterministic, no drift, no dt coupling).
-constexpr int64_t kSimHz = 30;                        // fixed sim rate
-constexpr int64_t kMillisPerTick = 1000 / kSimHz;     // 33 ms/tick (~30 Hz, ~1% round)
+// --- the sim clock (integer TICKS; see CLAUDE.md's time convention) ----------
+// Sim time is an int64 count of TICKS, advanced by a compile-time constant each
+// step; no float accumulator (deterministic, no drift, no dt coupling).
+//
+// A TICK IS 1/120 s, and 120 is not arbitrary: it divides every usual step rate
+// (30, 60, 120), so a step is always a whole number of ticks and no clock can
+// drift against another. Milliseconds could not do that -- 1000 does not divide
+// by 30, so the millisecond clock this replaced advanced 33 ms per step and left
+// thirty steps at 990 ms against a SimClock second of 1000, permanently 1% slow.
+//
+// The two rates are DIFFERENT THINGS and must not be conflated: kTicksPerSecond
+// is what time is measured in, kStepHz is how often the world advances. Changing
+// the step rate must never change what a duration means.
+// kTicksPerSecond / ticks_of / seconds_of_ticks are PUBLIC (badlands_sim.hpp) --
+// an app renders a clock too. What lives here is the STEP, which is a sim
+// internal: nothing outside needs to know how often the world advances.
+constexpr int64_t kStepHz = kStepsPerSecond;                       // world advances this often
+constexpr int64_t kTicksPerStep = kTicksPerSecond / kStepHz;      // 4, exactly
+static_assert(kTicksPerStep * kStepHz == kTicksPerSecond,
+              "the step rate must divide the tick rate exactly -- that is the whole point");
+// Seconds of sim time in one step, for the few places that integrate a RATE
+// (distance = speed * time) rather than counting down a duration.
+constexpr float kSecondsPerStep = 1.0f / static_cast<float>(kStepHz);
+
+
 constexpr float kNightStart = 0.75f;                  // ~18:00
 constexpr float kNightEnd = 0.25f;                    // ~06:00
 
 // DAY LENGTH IS PER-WORLD RUNTIME CONFIG, not a compile-time constant:
-// WorldConfig::millis_per_day (badlands_sim.hpp) -> BadlandsGame::millis_per_day
-// (game_state.h); kDefaultMillisPerDay, declared with it there, is only the
+// WorldConfig::ticks_per_day (badlands_sim.hpp) -> BadlandsGame::ticks_per_day
+// (game_state.h); kDefaultTicksPerDay, declared with it there, is only the
 // default a world gets when its config does not say otherwise. The tick rate
 // above stays compile-time -- what varies is how many ticks make a day, never
 // how long a tick is.
 //
-// The clock helpers below are pure math over (world_millis, millis_per_day), so
+// The clock helpers below are pure math over (world_ticks, ticks_per_day), so
 // they take the period explicitly rather than reading a global. Callers inside
-// the sim pass `game.millis_per_day`.
+// the sim pass `game.ticks_per_day`.
+//
+// NARRATIVE time (time of day, days, in-game hours) is DERIVED here and is never
+// a gameplay duration -- see CLAUDE.md. The one deliberate crossing is
+// reserve_rate_per_step below, and it says so in its signature.
 
 // Fraction of the day in [0,1): 0 = midnight, 0.5 = midday.
-inline float time_of_day(int64_t world_millis, int64_t millis_per_day) {
-    int64_t t = world_millis % millis_per_day;
+inline float time_of_day(int64_t world_ticks, int64_t ticks_per_day) {
+    int64_t t = world_ticks % ticks_per_day;
     if (t < 0) {
-        t += millis_per_day;
+        t += ticks_per_day;
     }
-    return static_cast<float>(t) / static_cast<float>(millis_per_day);
+    return static_cast<float>(t) / static_cast<float>(ticks_per_day);
 }
-inline uint32_t day_count(int64_t world_millis, int64_t millis_per_day) {
-    return static_cast<uint32_t>(world_millis / millis_per_day);
+inline uint32_t day_count(int64_t world_ticks, int64_t ticks_per_day) {
+    return static_cast<uint32_t>(world_ticks / ticks_per_day);
 }
 inline bool is_night(float tod) { return tod >= kNightStart || tod < kNightEnd; }
 
 // One in-game hour of sim time. Need rates are authored in in-game hours (see
 // HeroFactors) and converted through here, so a factor says what it means.
 // Derived from the day length rather than stored, so the two cannot disagree.
-inline constexpr int64_t millis_per_hour(int64_t millis_per_day) {
-    return millis_per_day / 24;
+inline constexpr int64_t ticks_per_hour(int64_t ticks_per_day) {
+    return ticks_per_day / 24;
 }
 
-// Per-tick delta that moves a 0..1 reserve the whole way in `hours` in-game
+// Per-STEP delta that moves a 0..1 reserve the whole way in `hours` in-game
 // hours. Deterministic and not dt-scaled, like the clock itself. Non-positive
-// hours mean "instantly" (the whole reserve in one tick), which is what makes
+// hours mean "instantly" (the whole reserve in one step), which is what makes
 // a zero in the manifest behave sensibly rather than dividing by zero.
-inline float reserve_rate_per_tick(float hours, int64_t millis_per_day) {
+//
+// The one place gameplay reads NARRATIVE time on purpose: a need is *about* the
+// day, so it is authored against it rather than in seconds.
+inline float reserve_rate_per_step(float hours, int64_t ticks_per_day) {
     if (hours <= 0.0f) {
         return 1.0f;
     }
-    return static_cast<float>(kMillisPerTick) /
-           (hours * static_cast<float>(millis_per_hour(millis_per_day)));
+    return static_cast<float>(kTicksPerStep) /
+           (hours * static_cast<float>(ticks_per_hour(ticks_per_day)));
 }
 
 struct Position {
@@ -151,18 +178,18 @@ struct HeroSimulationState {
     int32_t level = 1;
     int32_t xp = 0;
     // Vestigial: was the C++ hero decision layer's own deliberation pause
-    // ("while world_millis is below this the hero is standing and
+    // ("while world_ticks is below this the hero is standing and
     // thinking"), set by the SetBehavior handler from the command's
     // duration. That layer is gone -- the intention contract
     // (game/src/intention.h) replaced it -- and nothing emits
     // SetBehavior(Think, ...) anymore (command.cpp's SetBehavior handler),
     // so this is unconditionally 0 now. Kept only because
-    // hero_perception.cpp still copies it into WorldView::think_until_millis,
-    // which wasm_brain.cpp packs into BlViewSelf::think_until_millis for 1:1
+    // hero_perception.cpp still copies it into WorldView::think_until_ticks,
+    // which wasm_brain.cpp packs into BlViewSelf::think_until_ticks for 1:1
     // wire-shape parity (brain_abi.h) -- removing it outright is an
     // ABI-layout change (sizeof/offsetof are static-asserted on all three
     // structs), deferred rather than done here.
-    int64_t think_until_millis = 0;
+    int64_t think_until_ticks = 0;
 };
 
 // Display: renderer/panel-facing.
@@ -239,15 +266,15 @@ struct Skills {
 // entity that has never been afflicted carries no component at all, so the
 // per-tick sweep only visits entities that actually have something running.
 //
-// `remaining_millis` is int64 MILLISECONDS, not float seconds: it is sim time,
-// which this codebase counts in integer ms advanced by a compile-time
-// per-tick constant (kMillisPerTick, above) so a replay reproduces every
+// `remaining_ticks` is int64 TICKS, not float seconds: it is sim time,
+// which this codebase counts in integer ticks advanced by a compile-time
+// per-tick constant (kTicksPerStep, above) so a replay reproduces every
 // expiry on exactly the tick the live run did. The float-seconds cooldowns on
 // Attacks/Skills predate that rule and are dt-scaled; new timers do not follow
 // them.
 struct StatusEntry {
     StatusKind kind = StatusKind::None;
-    int64_t remaining_millis = 0;      // always > 0 while present; 0 never persists
+    int64_t remaining_ticks = 0;      // always > 0 while present; 0 never persists
     uint32_t source_slot = UINT32_MAX; // who inflicted it (inspection/attribution)
 };
 
@@ -297,13 +324,36 @@ struct Growth {
 // the same rule Projectile follows: a blow already in flight must not change
 // because the thrower levelled, was cursed, or died mid-swing.
 struct StrikeInProgress {
-    int64_t resolve_at_millis = 0;   // the blow lands here (end of wind-up)
-    int64_t free_at_millis = 0;      // recovery ends here; the component is dropped
-    int64_t declared_millis = 0;     // the roll's seed axis, fixed when committed
+    int64_t resolve_at_ticks = 0;   // the blow lands here (end of wind-up)
+    int64_t free_at_ticks = 0;      // recovery ends here; the component is dropped
+    int64_t declared_ticks = 0;     // the roll's seed axis, fixed when committed
     int32_t attack_index = 0;
     uint32_t target_slot = UINT32_MAX;
     Combatant attacker{};
     Attack attack{};
+};
+
+// A skill that takes TIME to cast: the caster is committed from here until the
+// deadline, at which point the cast runs. Deliberately shaped like
+// StrikeInProgress above -- one commitment at a time, the phase derived from
+// the clock rather than stored -- because it is the same idea applied to the
+// other channel (game/src/skill_focus.h).
+//
+// NOTHING is captured here, unlike a strike. A focus re-runs validate_cast at
+// its deadline, so a target that died, walked out of range, or is no longer
+// legal simply gets no shot -- which is what makes the 2 seconds a real risk
+// rather than a delayed certainty.
+struct SkillFocus {
+    int64_t resolve_at_ticks = 0;
+    SkillId id = SkillId::Count;
+    int32_t skill_index = -1;   // index into the caster's OWN Skills
+    uint32_t target_slot = UINT32_MAX;
+    // Point targeting only, and carried for the same reason the action channel
+    // carries it: without it a Point-targeted FOCUS would be re-validated at
+    // its deadline against the world origin rather than against what the brain
+    // actually asked for. No shipped skill is both Point and Intention today --
+    // this keeps the two channels from being quietly asymmetric when one is.
+    glm::vec2 point{0.0f, 0.0f};
 };
 
 // WHICH catalog creature this entity is. The threat table (threat_table.h) is
@@ -333,7 +383,7 @@ struct Projectile {
     Attack attack{};
     Combatant attacker{};
     int32_t attack_index = 0;
-    int64_t fire_millis = 0;  // the world_millis seed axis, fixed at fire time
+    int64_t fire_ticks = 0;  // the world_ticks seed axis, fixed at fire time
 };
 
 // The world refused a step: the character tried to walk into terrain it cannot
@@ -344,11 +394,11 @@ struct Projectile {
 // character can actually get to". A brain is allowed to want the impossible --
 // it plans through unexplored ground it has no information about — and finding
 // out is an EVENT it reacts to, not a precondition it must check. It is never
-// cleared: `at_millis` says when it happened, and perception decides whether
+// cleared: `at_ticks` says when it happened, and perception decides whether
 // that is still relevant (which keeps a stale blockage from vetoing forever).
 struct MoveBlocked {
     glm::vec2 point{0.0f, 0.0f};  // where the step was refused
-    int64_t at_millis = 0;
+    int64_t at_ticks = 0;
 };
 
 // Present on BOTH heroes of a conversation. Created only by the Chat command
@@ -375,7 +425,7 @@ enum class InboxEventKind : int32_t { None = 0, DamageTaken, ThreatSighted, Move
 
 // Default TTL for a freshly pushed inbox event. A compile-time constant, not a
 // ProgressionFactors scalar -- constants until a knob is asked for (CLAUDE.md).
-inline constexpr int64_t kInboxTtlMillis = 3000;
+inline constexpr int64_t kInboxTtlTicks = ticks_of(3.0f);  // 3 s
 
 // How long note_think_outcome (game/src/intention.h) backs off should_wake
 // after a rejected or no-op (BL_INT_NONE) suggestion, so a brain that keeps
@@ -383,28 +433,28 @@ inline constexpr int64_t kInboxTtlMillis = 3000;
 // without this, a hero with no CurrentIntention running -- exactly what a
 // rejected/no-op decision leaves behind -- satisfies should_wake's "nothing
 // running" clause unconditionally, forever. A compile-time constant, not a
-// ProgressionFactors scalar, same reasoning as kInboxTtlMillis above.
-inline constexpr int64_t kRejectedSuggestionBackoffMillis = 500;
+// ProgressionFactors scalar, same reasoning as kInboxTtlTicks above.
+inline constexpr int64_t kRejectedSuggestionBackoffTicks = ticks_of(0.5f);  // 0.5 s
 
 // v3 "no preference" default wake cadence (docs/design/intention-contract.html
-// §2, "Tiered wake guarantees"): an idle_hint_millis of 0 -- or, since Idle's
+// §2, "Tiered wake guarantees"): an idle_hint_ticks of 0 -- or, since Idle's
 // own duration IS its wake deadline (apply_intention's adopt tail,
-// game/src/intention.cpp), a duration_millis of 0 -- used to mean "no
+// game/src/intention.cpp), a duration_ticks of 0 -- used to mean "no
 // deadline at all" (v2). In v3 it means "no cadence preference," and arms
 // this default instead, so a hero that yields no preference is still
 // guaranteed a consult once per second rather than sleeping forever
 // (the class of stuck-forever-with-hint-0 defect the amendment calls out). A
 // compile-time constant, not a ProgressionFactors scalar, same reasoning as
-// kInboxTtlMillis/kRejectedSuggestionBackoffMillis above.
-inline constexpr int64_t kDefaultWakeCadenceMillis = 1000;
+// kInboxTtlTicks/kRejectedSuggestionBackoffTicks above.
+inline constexpr int64_t kDefaultWakeCadenceTicks = ticks_of(1.0f);  // 1 s
 
 // One timed inbox entry. `param` is kind-specific: damage amount
 // (DamageTaken), 1/0 completed-vs-aborted (IntentionEnded); unused (0) for
 // ThreatSighted/MoveBlocked today -- their source_slot / the sibling
 // MoveBlocked component already carry what a consumer needs.
 struct InboxEvent {
-    int64_t at_millis = 0;
-    int64_t ttl_millis = 0;      // decremented per tick; <= 0 -> dropped
+    int64_t at_ticks = 0;
+    int64_t ttl_ticks = 0;      // decremented per tick; <= 0 -> dropped
     InboxEventKind kind = InboxEventKind::None;
     uint32_t source_slot = UINT32_MAX;
     float param = 0.0f;
@@ -415,28 +465,28 @@ inline constexpr int32_t kInboxCapacity = 8;
 // A hero's durable, sticky event ring (docs/design/intention-contract.html
 // §4): a sleeping hero does not miss what happened while it slept. Newest
 // evicts oldest when full (game/src/intention.h's push_inbox_event); an entry
-// expires on its own ttl_millis, never on being read. Heroes only.
+// expires on its own ttl_ticks, never on being read. Heroes only.
 struct EventInbox {
     InboxEvent events[kInboxCapacity]{};
     int32_t count = 0;
-    // Edge-detector for the ThreatSighted writer (sim.cpp's tick_world): true
+    // Edge-detector for the ThreatSighted writer (sim.cpp's step_world): true
     // when a threat was present as of the LAST tick's check, so the writer
     // fires only on the empty -> nonempty transition instead of once per tick
     // a threat remains in view. Lives on the component (not file-local
     // scratch state) so a replay reproduces the same edges, the same reason
-    // MoveBlocked keeps its at_millis on the component rather than elsewhere.
+    // MoveBlocked keeps its at_ticks on the component rather than elsewhere.
     bool threat_was_present = false;
     // Wake bookkeeping (Fix 1, docs/design/intention-contract.html §2):
     // should_wake's event clause is "something was pushed since the hero
     // last thought" -- TIMESTAMP-free, deliberately. A timestamp comparison
     // (the pre-fix implementation) cannot distinguish a push that landed
     // BEFORE a think this tick from one that landed AFTER it: every event
-    // pushed in the same tick shares one world_millis stamp
+    // pushed in the same tick shares one world_ticks stamp
     // (push_inbox_event), so a post-think push (e.g. movement's MoveBlocked
     // mirror, which runs after the think-dispatch loop) is
     // timestamp-indistinguishable from a pre-think one the brain already
     // saw. A monotonic counter has no such collision: `last_pushed_seq`
-    // bumps on every push_inbox_event call regardless of world_millis, and
+    // bumps on every push_inbox_event call regardless of world_ticks, and
     // `last_seen_seq` is stamped to the CURRENT last_pushed_seq by
     // note_think_outcome (game/src/intention.h) at think time -- so a push
     // strictly AFTER that stamp always reads as new, same tick or not.
@@ -449,7 +499,16 @@ struct EventInbox {
 
 // Native mirror of BL_INT_* -- the suggestion's kind. UseSkill is reserved for
 // the skills slice (see intention-contract.html's vocab table).
-enum class IntentionKind : int32_t { None = 0, MoveTo, Attack, Shoot, Enter, EnterHome, Buy, Chat, Idle };
+// Values are 1:1 with the wire's BL_INT_* (game/src/brain_abi.h) --
+// decode_suggestion casts straight across -- so this is append-only and
+// UseSkill must stay at 9.
+enum class IntentionKind : int32_t {
+    None = 0, MoveTo, Attack, Shoot, Enter, EnterHome, Buy, Chat, Idle,
+    UseSkill,  // a FOCUS: cast skill `arg` at `target_slot` after the skill's
+               // own intention_duration of uninterrupted execution
+               // (game/src/skill_focus.h). Only a skill whose trigger is
+               // Intention may be adopted this way.
+};
 
 // What the engine is currently executing for a hero -- durable across ticks,
 // outlives a single wake. Read by should_wake, written by apply_intention
@@ -460,28 +519,28 @@ struct CurrentIntention {
     glm::vec2 point{0.0f, 0.0f};
     uint32_t target_slot = UINT32_MAX;
     int32_t arg = 0;
-    int64_t started_at_millis = 0;
+    int64_t started_at_ticks = 0;
     // The Idle-duration deadline (kind == Idle) OR the idle-hint deadline for
     // any other kind -- both are "the next scheduled wake time"; only the
     // Idle case doubles as a completion criterion (advance_intentions) -- for
     // every other kind reaching this deadline is just a spurious-wake
     // reminder, not a reason to end the intention. 0 means "never adopted/
     // restated yet" (the spawn default) ONLY -- as of v3, apply_intention's
-    // deadline calculation always substitutes kDefaultWakeCadenceMillis for a
+    // deadline calculation always substitutes kDefaultWakeCadenceTicks for a
     // non-positive duration/hint (see that constant's own comment), so a
     // hero that has been through apply_intention at least once always carries
     // a genuine future timestamp here, never 0.
-    int64_t wake_at_millis = 0;
+    int64_t wake_at_ticks = 0;
     // The last time the brain was actually consulted (apply_intention was
     // called), regardless of what it decided -- including a BL_INT_NONE
-    // "nothing new to suggest" wake. Distinct from started_at_millis (when
+    // "nothing new to suggest" wake. Distinct from started_at_ticks (when
     // the CURRENTLY adopted intention began): a None decision leaves kind/
-    // started_at_millis untouched but still means the inbox events present
+    // started_at_ticks untouched but still means the inbox events present
     // at that moment already informed a real think. should_wake compares new
     // inbox events against this, STRICTLY, so an event that informed the
     // last think does not by itself force an immediate re-wake next tick
     // (game/src/intention.h's should_wake).
-    int64_t last_think_millis = 0;
+    int64_t last_think_ticks = 0;
 };
 
 // --- v0.3 movement / pathfinding --------------------------------------------

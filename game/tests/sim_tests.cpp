@@ -91,7 +91,7 @@ TEST_CASE("movement is clamped to move_speed * dt") {
     sim.Spawn(a);
     sim.Spawn(b);
 
-    sim.Tick(kTickDt);
+    sim.Step();
 
     auto rows = sim.Characters();
     REQUIRE(rows.size() == 2);
@@ -116,17 +116,22 @@ TEST_CASE("attacks respect the cooldown") {
     sim.Spawn(attacker);
     sim.Spawn(victim);
 
-    // dt of 0.25 is binary-exact, so the cooldown arithmetic is deterministic.
-    sim.Tick(0.25f);
+    // A step is a FIXED span of sim time now (CLAUDE.md's time convention), so
+    // this counts real steps instead of fabricating a convenient 0.25 s dt --
+    // which is the whole point of the parameter being gone.
+    sim.Step();
     CHECK(sim.Characters()[1].hp == 97.0f);  // first swing lands immediately
 
-    // Cooldown (1s) blocks the swing while it drains: 0.75, 0.5, 0.25.
-    for (int i = 0; i < 3; ++i) {
-        sim.Tick(0.25f);
+    // The 1 s cooldown blocks the swing for exactly one second of sim time,
+    // which is kStepHz steps -- expressed as the rate rather than a count, so
+    // the test still means "one second" if the step rate ever moves.
+    const int steps_per_second = static_cast<int>(badlands::kStepsPerSecond);
+    for (int i = 0; i < steps_per_second - 1; ++i) {
+        sim.Step();
     }
     CHECK(sim.Characters()[1].hp == 97.0f);
 
-    sim.Tick(0.25f);  // cooldown reaches zero -> swing lands
+    sim.Step();  // cooldown reaches zero -> swing lands
     CHECK(sim.Characters()[1].hp == 94.0f);
 }
 
@@ -143,7 +148,7 @@ TEST_CASE("dead entities leave the state snapshot") {
     uint32_t killer_id = sim.Spawn(killer);
     sim.Spawn(victim);
 
-    sim.Tick(kTickDt);
+    sim.Step();
 
     auto rows = sim.Characters();
     REQUIRE(rows.size() == 1);

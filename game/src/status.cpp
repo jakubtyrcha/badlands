@@ -2,6 +2,7 @@
 
 #include "game_state.h"  // BadlandsGame, emit_event, slot_for_entity
 #include "intention.h"   // abort_current_intention -- a stun ends the running plan
+#include "skill_focus.h"  // cancel_focus -- a stun interrupts a long cast too
 #include "strike.h"      // cancel_strike -- and drops a swing still being wound up
 
 #include <spdlog/spdlog.h>
@@ -20,6 +21,8 @@ constexpr std::array<const char*, static_cast<size_t>(kStatusKindCount)> kStatus
     "Stunned",
     "Cursed",
     "Disengaged",
+    "Sneaking",
+    "Calcified",
 }};
 
 // Index of `kind` in `s`, or -1.
@@ -42,10 +45,10 @@ const char* StatusName(int32_t kind) {
 }
 
 bool has_status(const entt::registry& reg, entt::entity e, StatusKind kind) {
-    return remaining_millis_of(reg, e, kind) > 0;
+    return remaining_ticks_of(reg, e, kind) > 0;
 }
 
-int64_t remaining_millis_of(const entt::registry& reg, entt::entity e, StatusKind kind) {
+int64_t remaining_ticks_of(const entt::registry& reg, entt::entity e, StatusKind kind) {
     if (e == entt::null || !reg.valid(e)) {
         return 0;
     }
@@ -54,7 +57,7 @@ int64_t remaining_millis_of(const entt::registry& reg, entt::entity e, StatusKin
         return 0;
     }
     const int32_t i = index_of(*s, kind);
-    return i < 0 ? 0 : s->entries[i].remaining_millis;
+    return i < 0 ? 0 : s->entries[i].remaining_ticks;
 }
 
 bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t millis,
@@ -71,8 +74,8 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
     if (const int32_t i = index_of(s, kind); i >= 0) {
         // Refresh: keep the longer remaining. A weaker stun landing mid-stun
         // must not cure the stronger one already running.
-        if (millis > s.entries[i].remaining_millis) {
-            s.entries[i].remaining_millis = millis;
+        if (millis > s.entries[i].remaining_ticks) {
+            s.entries[i].remaining_ticks = millis;
             s.entries[i].source_slot = source_slot;
         }
     } else {
@@ -97,6 +100,10 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
         // an opponent mid-swing costs it the whole attack. A strike already
         // past its resolve is untouched -- that blow was thrown.
         cancel_strike(game, e);
+        // ...and a long cast still being focused (game/src/skill_focus.h). Same
+        // rule on the other channel: a stun is an INTERRUPT, and two seconds of
+        // standing still is exactly the window it exists to punish.
+        cancel_focus(game, e);
     }
 
     const glm::vec2 pos =
@@ -108,7 +115,28 @@ bool apply_status(BadlandsGame& game, entt::entity e, StatusKind kind, int64_t m
                                .amount = static_cast<float>(kind),
                                .x = pos.x,
                                .z = pos.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
+    return true;
+}
+
+bool clear_status(BadlandsGame& game, entt::entity e, StatusKind kind) {
+    if (e == entt::null || !game.registry.valid(e)) {
+        return false;
+    }
+    auto* s = game.registry.try_get<Statuses>(e);
+    if (s == nullptr) {
+        return false;
+    }
+    const int32_t i = index_of(*s, kind);
+    if (i < 0) {
+        return false;
+    }
+    // Same in-place compaction the per-tick sweep uses, so an early clear and
+    // an expiry leave the array in the same shape.
+    for (int32_t k = i + 1; k < s->count && k < kMaxStatuses; ++k) {
+        s->entries[k - 1] = s->entries[k];
+    }
+    --s->count;
     return true;
 }
 
@@ -116,8 +144,8 @@ void advance_statuses(BadlandsGame& game) {
     for (auto [e, s] : game.registry.view<Statuses>().each()) {
         int32_t live = 0;
         for (int32_t i = 0; i < s.count && i < kMaxStatuses; ++i) {
-            s.entries[i].remaining_millis -= kMillisPerTick;
-            if (s.entries[i].remaining_millis > 0) {
+            s.entries[i].remaining_ticks -= kTicksPerStep;
+            if (s.entries[i].remaining_ticks > 0) {
                 // Compact in place: survivors keep their relative order, so
                 // the array never depends on which entry expired.
                 s.entries[live++] = s.entries[i];

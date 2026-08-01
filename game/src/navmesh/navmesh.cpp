@@ -281,4 +281,92 @@ void NavMesh::DebugCells(std::vector<DebugCell>& out) const {
     }
 }
 
+void NavMesh::CellsNear(glm::vec2 origin, float radius, size_t max_out,
+                        std::vector<DebugCell>& out, glm::vec2 facing,
+                        float cone_half_cos) const {
+    out.clear();
+    if (empty() || radius <= 0.0f || max_out == 0) {
+        return;
+    }
+    const float r2 = radius * radius;
+
+    // Collected with their distances, then partially sorted: the leaves are
+    // quadtree order, which is not distance order, so taking the first N would
+    // return an arbitrary handful rather than the nearest ones.
+    std::vector<std::pair<float, DebugCell>> scored;
+    scored.reserve(qt_.leaves().size());
+    for (const Leaf& l : qt_.leaves()) {
+        DebugCell c;
+        c.min_world =
+            origin_ + glm::vec2(static_cast<float>(l.x0), static_cast<float>(l.z0)) * cell_size_;
+        c.max_world = origin_ + glm::vec2(static_cast<float>(l.x0 + l.size),
+                                          static_cast<float>(l.z0 + l.size)) *
+                                    cell_size_;
+        c.cost = l.cost;
+        c.passable = l.passable;
+
+        const glm::vec2 centre = (c.min_world + c.max_world) * 0.5f;
+        const glm::vec2 d = centre - origin;
+        const float d2 = glm::dot(d, d);
+        if (d2 > r2) {
+            continue;
+        }
+        // Inside the cone. The cell the caller is STANDING ON has no meaningful
+        // direction, so it is always kept -- excluding it on a degenerate dot
+        // product would drop the one square anyone is certain about.
+        if (cone_half_cos > -1.0f && d2 > 1e-6f) {
+            const glm::vec2 dir = d / std::sqrt(d2);
+            if (glm::dot(dir, facing) < cone_half_cos) {
+                continue;
+            }
+        }
+        scored.emplace_back(d2, c);
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Thinned, nearest-first: enough separation that `max_out` cells span the
+    // whole disc rather than piling up wherever the quadtree happens to be
+    // finely subdivided (see the header -- taking the nearest N is the trap).
+    const float spacing =
+        radius * std::sqrt(3.14159265f / static_cast<float>(max_out));
+    const float spacing2 = spacing * spacing;
+    out.reserve(std::min(max_out, scored.size()));
+    for (const auto& [d2, cell] : scored) {
+        if (out.size() >= max_out) {
+            break;
+        }
+        const glm::vec2 centre = (cell.min_world + cell.max_world) * 0.5f;
+        bool too_close = false;
+        for (const DebugCell& kept : out) {
+            const glm::vec2 k = (kept.min_world + kept.max_world) * 0.5f;
+            const glm::vec2 delta = centre - k;
+            if (glm::dot(delta, delta) < spacing2) {
+                too_close = true;
+                break;
+            }
+        }
+        if (!too_close) {
+            out.push_back(cell);
+        }
+    }
+}
+
+bool NavMesh::PassableAt(glm::vec2 w) const {
+    if (empty()) {
+        return false;
+    }
+    // WorldToCell CLAMPS, so a point far outside the grid would otherwise
+    // report the passability of the nearest edge cell -- which is a different
+    // question, and a yes to it would teleport somebody off the map.
+    const glm::vec2 c = (w - origin_) / cell_size_;
+    const int cx = static_cast<int>(std::floor(c.x));
+    const int cz = static_cast<int>(std::floor(c.y));
+    if (cx < 0 || cz < 0 || cx >= side_ || cz >= side_) {
+        return false;
+    }
+    const int li = qt_.LeafAt(cx, cz);
+    return li >= 0 && qt_.leaves()[li].passable;
+}
+
 }  // namespace badlands::nav

@@ -24,7 +24,7 @@ TEST_CASE("BL_MAX_ACTIVITIES matches ActivityId::Count", "[brain_abi]") {
     REQUIRE(BL_MAX_ACTIVITIES == static_cast<int32_t>(ActivityId::Count));
 }
 
-TEST_CASE("BL_ABI_VERSION is 5", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 5); }
+TEST_CASE("BL_ABI_VERSION is 7", "[brain_abi]") { REQUIRE(BL_ABI_VERSION == 7); }
 
 TEST_CASE("BL_MAX_ATTACKS matches badlands::kMaxAttacks", "[brain_abi]") {
     REQUIRE(BL_MAX_ATTACKS == kMaxAttacks);
@@ -39,7 +39,7 @@ TEST_CASE("BlViewSkill is the documented size", "[brain_abi]") {
 }
 
 TEST_CASE("BlViewWire is the documented size", "[brain_abi]") {
-    REQUIRE(sizeof(BlViewWire) == 1888);
+    REQUIRE(sizeof(BlViewWire) == 2664);
 }
 
 TEST_CASE("BlViewAttack is the documented size", "[brain_abi]") {
@@ -77,23 +77,26 @@ TEST_CASE("BlViewWire block order: self / suggest / factors / statuses / attacks
     REQUIRE(offsetof(BlViewWire, skill_count) == 776);
     // skill_count(4) + _pad6(4) precede the BlViewSkill array.
     REQUIRE(offsetof(BlViewWire, skills) == 784);
-    // skills[8] * 24B = 192B.
-    REQUIRE(offsetof(BlViewWire, event_count) == 976);
+    // skills[8] * 24B = 192B, then the v6 nav window: nav_poly_count(4) +
+    // _pad7(4) + nav_polys[32] * 24B = 776B.
+    REQUIRE(offsetof(BlViewWire, nav_poly_count) == 976);
+    REQUIRE(offsetof(BlViewWire, nav_polys) == 984);
+    REQUIRE(offsetof(BlViewWire, event_count) == 1752);
     // event_count(4) + _pad4(4) keep `events` (BlEvent starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, events) == 984);
+    REQUIRE(offsetof(BlViewWire, events) == 1760);
     // events[8] * 32B = 256B.
-    REQUIRE(offsetof(BlViewWire, char_count) == 1240);
+    REQUIRE(offsetof(BlViewWire, char_count) == 2016);
     // char_count(4) + _pad5(4) keep `chars` (BlViewChar starts with an
     // int64_t) 8-aligned.
-    REQUIRE(offsetof(BlViewWire, chars) == 1248);
+    REQUIRE(offsetof(BlViewWire, chars) == 2024);
 }
 
 TEST_CASE("BlViewSuggest / BlViewFactors internal padding lands where documented",
           "[brain_abi]") {
     // threat_count(4) + the explicit _pad(4) precede the BlThreat array.
     REQUIRE(offsetof(BlViewSuggest, threats) == 120);
-    // weights[] leads BlViewFactors now (think_min/max_millis are gone).
+    // weights[] leads BlViewFactors now (think_min/max_ticks are gone).
     REQUIRE(offsetof(BlViewFactors, weights) == 0);
     // weights[14] (56 bytes) precede the scalar tail.
     REQUIRE(offsetof(BlViewFactors, fatigue_seek) == 56);
@@ -101,7 +104,7 @@ TEST_CASE("BlViewSuggest / BlViewFactors internal padding lands where documented
 
 TEST_CASE("BlViewSelf's current-intention summary is grouped per the layout rules",
           "[brain_abi]") {
-    // The four int64_t fields (world_millis, think_until_millis, roam_epoch,
+    // The four int64_t fields (world_ticks, think_until_ticks, roam_epoch,
     // intention_wake_at) are grouped first; intention_kind joins the other
     // 4-byte fields, with _pad2 rounding the struct to a multiple of 8.
     REQUIRE(offsetof(BlViewSelf, intention_wake_at) == 24);

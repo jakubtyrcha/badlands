@@ -1,5 +1,5 @@
 // badlands::Sim method bodies + the extracted shared free functions
-// (make_world / tick_world / *_of snapshots / spawn_into / dispatch_into) over
+// (make_world / step_world / *_of snapshots / spawn_into / dispatch_into) over
 // the UNCHANGED internal world (struct BadlandsGame), plus the handle-less
 // helpers (RenderBoxOf / BuildingDefOf / MercenaryDesc / GoblinDesc).
 // badlands::Sim and the internal system tests call these free functions
@@ -21,6 +21,7 @@
 #include "progression.h"
 #include "skills.h"
 #include "status.h"
+#include "skill_focus.h"  // advance_focus -- long casts resolve beside the strikes
 #include "strike.h"  // advance_strikes, striking -- a committed attacker does not think
 #include "vision.h"
 
@@ -120,12 +121,12 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc, const WorldConfi
     // The clock helpers divide by this, so a zero/negative period would be a
     // division by zero rather than merely a strange world -- clamp at the
     // boundary and say so, the same shape as sanitize_factors' adjustments.
-    if (config.millis_per_day < 1) {
-        spdlog::warn("make_world: millis_per_day {} is not a valid day length -- using {}",
-                     config.millis_per_day, kDefaultMillisPerDay);
-        game->millis_per_day = kDefaultMillisPerDay;
+    if (config.ticks_per_day < 1) {
+        spdlog::warn("make_world: ticks_per_day {} is not a valid day length -- using {}",
+                     config.ticks_per_day, kDefaultTicksPerDay);
+        game->ticks_per_day = kDefaultTicksPerDay;
     } else {
-        game->millis_per_day = config.millis_per_day;
+        game->ticks_per_day = config.ticks_per_day;
     }
     if (desc.wasm_bytes != nullptr) {
         // Wasm bytes were explicitly provided, so a bh_load/bh_instantiate
@@ -166,23 +167,23 @@ std::unique_ptr<BadlandsGame> make_world(const BrainDesc& desc) {
 }
 
 // See the doc comment in badlands_sim.hpp for WHY this goes through ticks
-// rather than sim_seconds * 1000. kSimHz/kMillisPerTick are sim internals
+// rather than sim_seconds * 1000. kSimHz/kTicksPerStep are sim internals
 // (components.h), which is exactly why this conversion lives here instead of
 // being open-coded by every app.
-int64_t MillisPerDayForSimSeconds(float sim_seconds) {
+int64_t TicksPerDayForSimSeconds(float sim_seconds) {
     // Not `<= 0` -- this form also rejects NaN, which would otherwise survive
     // the clamp below and land as an arbitrary integer.
     if (!(sim_seconds > 0.0f)) {
-        spdlog::warn("MillisPerDayForSimSeconds: {} is not a valid day length -- using {} ms",
-                     sim_seconds, kDefaultMillisPerDay);
-        return kDefaultMillisPerDay;
+        spdlog::warn("TicksPerDayForSimSeconds: {} is not a valid day length -- using {} ticks",
+                     sim_seconds, kDefaultTicksPerDay);
+        return kDefaultTicksPerDay;
     }
     // A day of ~31 years, far past anything useful, but it keeps the double ->
     // int64 conversion in range for any finite input (including +inf).
-    constexpr double kMaxMillisPerDay = 1e12;
-    const double millis = static_cast<double>(sim_seconds) *
-                          static_cast<double>(kSimHz) * static_cast<double>(kMillisPerTick);
-    return static_cast<int64_t>(std::llround(std::clamp(millis, 1.0, kMaxMillisPerDay)));
+    constexpr double kMaxTicksPerDay = 1e12;
+    const double ticks =
+        static_cast<double>(sim_seconds) * static_cast<double>(kTicksPerSecond);
+    return static_cast<int64_t>(std::llround(std::clamp(ticks, 1.0, kMaxTicksPerDay)));
 }
 
 std::unique_ptr<BadlandsGame> make_flat_world() {
@@ -196,39 +197,39 @@ std::unique_ptr<BadlandsGame> make_flat_world() {
     return make_world(BrainDesc{}, cfg);
 }
 
-void tick_world(BadlandsGame& g, float dt) {
+void step_world(BadlandsGame& g) {
     auto& registry = g.registry;
 
     // Replay: commands stamped at the CURRENT time were originally applied
     // before this tick (player dispatches between ticks), so they land first.
     apply_replay_commands(g);
 
-    // Day/night clock: integer ms, fixed compile-time increment (deterministic).
-    g.world_millis += kMillisPerTick;
+    // Day/night clock: integer ticks, fixed compile-time increment (deterministic).
+    g.world_ticks += kTicksPerStep;
 
     // Per-attack cooldowns tick down (one timer per attack-skill).
     for (auto [e, attacks] : registry.view<Attacks>().each()) {
         for (int i = 0; i < attacks.count && i < kMaxAttacks; ++i) {
             attacks.cooldown_remaining[i] =
-                std::max(0.0f, attacks.cooldown_remaining[i] - dt);
+                std::max(0.0f, attacks.cooldown_remaining[i] - kSecondsPerStep);
         }
     }
 
     // Per-skill cooldowns, the same shape (one timer per learned skill). Float
-    // seconds like the attack timers above, not int64 ms like a status: a
+    // seconds like the attack timers above, not int64 ticks like a status: a
     // cooldown gates a DECISION (may I cast?) rather than dating a world fact,
     // and it sits alongside SkillSpec::cooldown_seconds, which is authored in
     // seconds.
     for (auto [e, skills] : registry.view<Skills>().each()) {
         for (int i = 0; i < skills.count && i < kMaxSkills; ++i) {
             skills.cooldown_remaining[i] =
-                std::max(0.0f, skills.cooldown_remaining[i] - dt);
+                std::max(0.0f, skills.cooldown_remaining[i] - kSecondsPerStep);
         }
     }
 
     // Statuses expire on the integer clock, BEFORE anything reads them: the
     // think dispatch, movement, and combat all gate on has_status further down
-    // this same tick, so a status whose last millisecond ran out must be gone
+    // this same tick, so a status whose last tick ran out must be gone
     // by the time they look rather than granting one extra tick of effect.
     advance_statuses(g);
 
@@ -243,7 +244,7 @@ void tick_world(BadlandsGame& g, float dt) {
     // Run conversations and dissolve the finished ones, before think, so a hero
     // whose companion just left decides afresh this very tick rather than
     // standing about for one more.
-    advance_chats(g, dt);
+    advance_chats(g);
 
     // Town economy + population: midnight tax accrual, then periodic spawning
     // (tax collectors from the castle). Deterministic clock-driven systems, so
@@ -278,7 +279,7 @@ void tick_world(BadlandsGame& g, float dt) {
     // only run on an actual wake (should_wake-gated), but this pass must see
     // every hero every tick regardless of whether it wakes this tick. threat_was_present
     // lives on EventInbox itself (not scratch state here), the same reason
-    // MoveBlocked keeps its at_millis on the component, so a replay
+    // MoveBlocked keeps its at_ticks on the component, so a replay
     // reproduces the same edges.
     //
     // Iterates EVERY hero, hidden ones included (review fix: excluding them
@@ -357,6 +358,12 @@ void tick_world(BadlandsGame& g, float dt) {
             // mid-wind-up would get the positioning benefit of a slow weapon
             // without its cost, and consulting it only to refuse every action
             // it asked for would waste a wasm round-trip per tick besides.
+            //
+            // A FOCUS is deliberately NOT skipped here (game/src/skill_focus.h).
+            // A long cast freezes movement but not thought, and that asymmetry
+            // is the whole of "moving abandons the focus": deciding to do
+            // something else is the only way out, and it costs the seconds
+            // already spent.
             if (striking(registry, e)) {
                 continue;
             }
@@ -401,6 +408,12 @@ void tick_world(BadlandsGame& g, float dt) {
     // became free walks this tick rather than next.
     advance_strikes(g);
 
+    // Long casts (game/src/skill_focus.h), beside the strikes and for the same
+    // reason: a commitment made earlier resolves after this tick's command
+    // drain, before the movement pipeline, so a caster that just became free
+    // walks this tick rather than next.
+    advance_focus(g);
+
     // Rebuild the navmesh if a building was placed/destroyed this tick (bumps
     // placement.nav_epoch). Cheap no-op when unchanged; the whole path/cost layer
     // reads from it, so it must be current before plan_paths.
@@ -415,8 +428,8 @@ void tick_world(BadlandsGame& g, float dt) {
 
     // Navmesh movement pipeline: plan/follow durable MoveTargets, maintain melee
     // locks, and resolve unit-unit collisions. All exclude hidden (inside) heroes.
-    plan_paths(g, dt);
-    follow_paths(g, dt);
+    plan_paths(g);
+    follow_paths(g);
     update_melee_locks(g);
     separate_units(g);
 
@@ -425,7 +438,7 @@ void tick_world(BadlandsGame& g, float dt) {
     // deterministic, runs identically live and on replay. Both damage sites
     // (fire_attack + advance_projectiles) emit the same DamageDealt/HeroDowned
     // events the old combat pass did.
-    advance_projectiles(g, dt);
+    advance_projectiles(g);
 
     // Intention contract: inbox TTL housekeeping + CurrentIntention
     // completion/abort detection (see intention.h). Placed AFTER
@@ -479,13 +492,21 @@ void tick_world(BadlandsGame& g, float dt) {
     ++g.ticks;
 }
 
-uint32_t spawn_into(BadlandsGame& g, const CharacterDesc& desc) {
+uint32_t spawn_into(BadlandsGame& g, const CharacterDesc& desc, int32_t level) {
     // Plain (home-less) spawn; heroes::spawn_entity emplaces the full component
     // set shared with recruit.
-    return spawn_entity(g, desc, -1);
+    const uint32_t slot = spawn_entity(g, desc, -1);
+    // AFTER the spawn, because set_hero_level reads the components spawn just
+    // emplaced -- the grant list, the growth row, and the level-1 loadout it is
+    // about to extend.
+    if (level > 1) {
+        set_hero_level(g, entity_for_slot(g, static_cast<int32_t>(slot)), level);
+    }
+    return slot;
 }
 
-uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::vec2 pos) {
+uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::vec2 pos,
+                             int32_t level) {
     const int i = static_cast<int>(id);
     if (i < 0 || i >= kCreatureCount) {
         return UINT32_MAX;
@@ -499,7 +520,7 @@ uint32_t spawn_creature_into(BadlandsGame& g, CreatureId id, int32_t team, glm::
     // stamps HeroCharacter with the FINAL class at spawn time -- no post-spawn
     // patch needed (nor safe: spawn-time grants would have already run
     // against the stale value).
-    return spawn_entity(g, desc, -1);
+    return spawn_into(g, desc, level);
 }
 
 int64_t dispatch_into(BadlandsGame& g, const Action& action) {
@@ -636,7 +657,7 @@ std::vector<CommandRecord> command_log_of(const BadlandsGame& g) {
             .point_z = c.point.y,
             .param_a = c.param_a,
             .param_b = c.param_b,
-            .at_millis = c.at_millis,
+            .at_ticks = c.at_ticks,
         });
     }
     return rows;
@@ -655,7 +676,7 @@ namespace {
 // sim_internal.hpp: tests exercise it only through Sim::SetFactors/Factors.
 //
 // Rules:
-//  - hero.think_max_millis/think_min_millis: vestigial (badlands_sim.hpp's
+//  - hero.think_max_ticks/think_min_ticks: vestigial (badlands_sim.hpp's
 //    own comment on the fields has the full account -- the deliberation pause
 //    they used to size is deleted, replaced by the intention contract) and
 //    unread by decode_suggestion (wasm_brain.cpp), which has no think_max/
@@ -663,16 +684,16 @@ namespace {
 //    internally sane (max >= 0, min in [0, max]) for as long as the fields
 //    stay in the manifest schema -- not because anything downstream still
 //    relies on the invariant.
-//  - hero.memory_ttl_millis: 0 means "remember only the tick you saw them"
+//  - hero.memory_ttl_ticks: 0 means "remember only the tick you saw them"
 //    (see the eviction comment in entity_memory.cpp) -- negative would evict
 //    a just-seen entry (age 0) the same tick it was recorded.
 //  - hours-rate fields that feed a DIVISION downstream (needs.cpp's
-//    advance_needs -> reserve_rate_per_tick, components.h): floored at a
+//    advance_needs -> reserve_rate_per_step, components.h): floored at a
 //    small positive epsilon rather than 0, so the field itself stays
-//    strictly positive instead of leaning on reserve_rate_per_tick's own
+//    strictly positive instead of leaning on reserve_rate_per_step's own
 //    <=0 "instantly" guard to stay finite.
-//  - hero.explore_lease_millis: also a DIVISOR (hero_perception.cpp's
-//    observe_hero computes `world_millis / explore_lease_millis`
+//  - hero.explore_lease_ticks: also a DIVISOR (hero_perception.cpp's
+//    observe_hero computes `world_ticks / explore_lease_ticks`
 //    UNCONDITIONALLY, for every hero, every tick, with no <=0 guard of its
 //    own -- unlike the hours-rate fields above) -- floored at a small
 //    positive integer rather than 0 for the same reason: 0 is a genuine
@@ -700,7 +721,7 @@ namespace {
 // A field is only warned about (old value -> new value) when sanitize
 // actually moves it.
 constexpr float kMinPositiveHours = 1e-3f;
-constexpr int64_t kMinPositiveMillis = 1;
+constexpr int64_t kMinPositiveTicks = 1;
 
 template <typename T>
 void warn_adjusted(const char* field, T old_value, T new_value) {
@@ -718,7 +739,7 @@ void clamp_nonneg(const char* field, T& value) {
 }
 
 // `value` is a DIVISOR downstream (needs.cpp's advance_needs ->
-// reserve_rate_per_tick, components.h): floor at a small positive epsilon
+// reserve_rate_per_step, components.h): floor at a small positive epsilon
 // instead of 0.
 void floor_positive_hours(const char* field, float& value) {
     if (value <= 0.0f) {
@@ -727,27 +748,27 @@ void floor_positive_hours(const char* field, float& value) {
     }
 }
 
-// `value` is an integer-millis DIVISOR downstream (hero_perception.cpp's
-// observe_hero: world_millis / explore_lease_millis): floor at the smallest
-// positive millisecond instead of 0.
-void floor_positive_millis(const char* field, int64_t& value) {
+// `value` is an integer-ticks DIVISOR downstream (hero_perception.cpp's
+// observe_hero: world_ticks / explore_lease_ticks): floor at the smallest
+// positive tick instead of 0.
+void floor_positive_ticks(const char* field, int64_t& value) {
     if (value <= 0) {
-        warn_adjusted(field, value, kMinPositiveMillis);
-        value = kMinPositiveMillis;
+        warn_adjusted(field, value, kMinPositiveTicks);
+        value = kMinPositiveTicks;
     }
 }
 
 SimFactors sanitize_factors(SimFactors f) {
     HeroFactors& h = f.hero;
 
-    clamp_nonneg("hero.think_max_millis", h.think_max_millis);
-    if (h.think_min_millis < 0 || h.think_min_millis > h.think_max_millis) {
-        const int64_t clamped = std::clamp<int64_t>(h.think_min_millis, 0, h.think_max_millis);
-        warn_adjusted("hero.think_min_millis", h.think_min_millis, clamped);
-        h.think_min_millis = clamped;
+    clamp_nonneg("hero.think_max_ticks", h.think_max_ticks);
+    if (h.think_min_ticks < 0 || h.think_min_ticks > h.think_max_ticks) {
+        const int64_t clamped = std::clamp<int64_t>(h.think_min_ticks, 0, h.think_max_ticks);
+        warn_adjusted("hero.think_min_ticks", h.think_min_ticks, clamped);
+        h.think_min_ticks = clamped;
     }
 
-    clamp_nonneg("hero.memory_ttl_millis", h.memory_ttl_millis);
+    clamp_nonneg("hero.memory_ttl_ticks", h.memory_ttl_ticks);
 
     floor_positive_hours("hero.fatigue_drain_hours", h.fatigue_drain_hours);
     floor_positive_hours("hero.content_drain_hours", h.content_drain_hours);
@@ -768,7 +789,7 @@ SimFactors sanitize_factors(SimFactors f) {
     clamp_nonneg("hero.explore_min_distance", h.explore_min_distance);
     clamp_nonneg("hero.explore_max_distance", h.explore_max_distance);
     clamp_nonneg("hero.explore_search_radius", h.explore_search_radius);
-    floor_positive_millis("hero.explore_lease_millis", h.explore_lease_millis);
+    floor_positive_ticks("hero.explore_lease_ticks", h.explore_lease_ticks);
     clamp_nonneg("hero.roam_radius", h.roam_radius);
     clamp_nonneg("hero.hunt_sight_radius", h.hunt_sight_radius);
     clamp_nonneg("hero.threat_radius", h.threat_radius);
@@ -781,13 +802,13 @@ SimFactors sanitize_factors(SimFactors f) {
     clamp_nonneg("critter.graze_fraction", c.graze_fraction);
 
     TownfolkFactors& t = f.townfolk;
-    clamp_nonneg("townfolk.spawn_interval_millis", t.spawn_interval_millis);
+    clamp_nonneg("townfolk.spawn_interval_ticks", t.spawn_interval_ticks);
     clamp_nonneg("townfolk.max_alive", t.max_alive);
     clamp_nonneg("townfolk.move_speed", t.move_speed);
     // house_income_per_day is unsigned -- no sign to sanitize.
 
     MonsterFactors& m = f.monster;
-    clamp_nonneg("monster.spawn_interval_millis", m.spawn_interval_millis);
+    clamp_nonneg("monster.spawn_interval_ticks", m.spawn_interval_ticks);
     // max_alive: see this function's doc comment -- a negative cap underflows
     // through economy.cpp's `live >= static_cast<uint32_t>(cap)` and silently
     // disables the spawn cap instead of capping at 0.
@@ -900,9 +921,12 @@ Sim::~Sim() = default;
 Sim::Sim(Sim&&) noexcept = default;
 Sim& Sim::operator=(Sim&&) noexcept = default;
 
-uint32_t Sim::Spawn(const CharacterDesc& desc) { return spawn_into(*world_, desc); }
-uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z) {
-    return spawn_creature_into(*world_, id, team, {pos_x, pos_z});
+uint32_t Sim::Spawn(const CharacterDesc& desc, int32_t level) {
+    return spawn_into(*world_, desc, level);
+}
+uint32_t Sim::SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z,
+                            int32_t level) {
+    return spawn_creature_into(*world_, id, team, {pos_x, pos_z}, level);
 }
 void Sim::SetCreatureCatalog(const CreatureCatalog& catalog) { world_->creatures = catalog; }
 const CreatureCatalog& Sim::Creatures() const { return world_->creatures; }
@@ -910,10 +934,10 @@ void Sim::SetSkillCatalog(const SkillCatalog& catalog) {
     world_->skills = sanitize_skill_catalog(catalog);
 }
 const SkillCatalog& Sim::Skills() const { return world_->skills; }
-void Sim::Tick(float dt) {
-    tick_world(*world_, dt);
+void Sim::Step() {
+    step_world(*world_);
     // Goal statistics are folded HERE, in the wrapper, from the very rows an
-    // observer would read -- never inside tick_world. Counting is an
+    // observer would read -- never inside step_world. Counting is an
     // observation of the sim, not a part of it; see ActivityHistogram.
     characters_of(*world_, stats_scratch_);
     activity_stats_.Accumulate(stats_scratch_);

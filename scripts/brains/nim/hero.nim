@@ -100,7 +100,8 @@ include brain_scaffold
 # (pickBestAttack + brainTick): at most ONCE per wake (the soft one-action
 # convention resolve_action, game/src/intention.h, documents but does not
 # itself enforce).
-proc bl_enqueue_action(kind: int32; target: uint32; arg: int32) {.importc, cdecl.}
+proc bl_enqueue_action(kind: int32; target: uint32; arg: int32;
+                       pointX: float32; pointZ: float32) {.importc, cdecl.}
 
 # badlands::AttackCategory (game/include/badlands_sim.hpp): Melee=0, Ranged=1.
 # Not part of the wire vocabulary proper -- brain_abi.h deliberately excludes
@@ -148,6 +149,18 @@ proc readySkillSlot(v: HeroView, wantedId: int32): int32 =
        s.trigger == BL_SKILL_TRIGGER_ACTION:
       return i.int32
 
+# readySkillSlot's twin for the OTHER channel: a skill whose trigger is
+# Intention is adopted as a focus, never fired as an action, and the engine
+# refuses each on the other's channel (skill_cast.h). Checking the trigger here
+# as well means a wake is not spent asking for a refusal.
+proc readyIntentionSkillSlot(v: HeroView, wantedId: int32): int32 =
+  result = -1
+  for i in 0 ..< v.skillCount:
+    let s = v.skills[i]
+    if s.skill_id == wantedId and s.ready != 0'u32 and
+       s.trigger == BL_SKILL_TRIGGER_INTENTION:
+      return i.int32
+
 # Longest reach among this hero's melee attacks -- the reach a melee-tested
 # skill (ShieldBash) is gated on host-side (skill_cast.h's skill_cast_range),
 # mirrored here so the brain does not spend a wake asking for a cast the
@@ -158,6 +171,41 @@ proc meleeReach(v: HeroView): float32 =
     let a = v.attacks[i]
     if a.category != kAttackCategoryRanged and a.range > result:
       result = a.range
+
+# --- point targeting (v6) ----------------------------------------------------
+# The farthest passable spot within `radius` from the threat we are running
+# from. Picked from the NAV WINDOW the host packs (BlNavPoly) rather than
+# guessed: a point the engine will refuse costs a whole cooldown to discover,
+# and a brain cannot see walls any other way.
+#
+# "Farthest from the threat", not "farthest from us": the distance that matters
+# is the one being opened up. A cell centre is used as the point, which is by
+# construction inside a passable leaf.
+type FleeGoal = object
+  ok*: bool
+  p*: Vec2
+
+proc farthestFreeGround(v: HeroView, radius: float32): FleeGoal =
+  result = FleeGoal(ok: false, p: v.pos)
+  var bestScore = -1.0'f32
+  for i in 0 ..< v.navPolyCount:
+    let c = v.navPolys[i]
+    if c.passable == 0:
+      continue
+    let cx = (c.min_x + c.max_x) * 0.5'f32
+    let cz = (c.min_z + c.max_z) * 0.5'f32
+    # Inside our own reach (the host re-checks this, but asking for a refusal
+    # spends a wake), and as far from the threat as that allows.
+    let dxs = cx - v.pos.x
+    let dzs = cz - v.pos.z
+    if dxs * dxs + dzs * dzs > radius * radius:
+      continue
+    let dxt = cx - v.threatPos.x
+    let dzt = cz - v.threatPos.z
+    let score = dxt * dxt + dzt * dzt
+    if score > bestScore:
+      bestScore = score
+      result = FleeGoal(ok: true, p: Vec2(x: cx, z: cz))
 
 # --- skirmishing (v5) --------------------------------------------------------
 # Standoff distance is a TACTICAL choice, so it is made here rather than by the
@@ -176,6 +224,16 @@ const
   # correctness.
   kDressWoundsHealthFrac: float32 = 0.5
   kCurseRange: float32 = 7.0
+  # PrecisionShot's authored "range" constant (30.0, skills.json), mirrored
+  # with the same hand-sync discipline: the engine re-checks it, so a mismatch
+  # costs a wasted wake and not correctness.
+  kPrecisionShotRange: float32 = 30.0
+  # Teleport's own authored range (30.0, skills.json), same hand-sync rule.
+  kTeleportRange: float32 = 30.0
+  # Blink when something this much stronger is this close. Both are TACTICS and
+  # so live here rather than in the engine, which grows no flee policy at all.
+  kTeleportThreatRatio: float32 = 3.0
+  kTeleportFleeDist: float32 = 8.0
 
   # Hold this far outside the threat's own reach.
   kStandoffMargin: float32 = 1.5
@@ -199,6 +257,11 @@ proc rangedReach(v: HeroView): float32 =
 # free), and the thing is dangerous enough to be worth ceding ground to.
 proc wantsStandoff(v: HeroView): bool =
   v.hasThreat and
+    # Not while unseen. Sneaking is a commitment to the knife: the whole value
+    # of it is spent on the opening blow in melee, and a hero that both holds
+    # its fire (below) and keeps its distance would simply stand there until
+    # the status ran out. Being unseen already provides what a standoff buys.
+    not v.sneaking and
     rangedReach(v) > v.threatReach and
     v.threatRangedReach <= 0.0'f32 and
     v.threatThreat >= v.selfThreat * kStandoffThreatRatio
@@ -217,24 +280,24 @@ proc standoffGoal(v: HeroView): Vec2 =
 # Floor for the re-fire hint below: never ask for a re-consult sooner than
 # this, even if an attack's own cooldown_remaining is shorter (a wake still
 # costs a host round-trip).
-const kMinShootRefireMillis: int64 = 100
+const kMinShootRefireTicks: int64 = 12   # ~0.1 s at 120 ticks/s
 
-# Smallest cooldown_remaining (ms) among this hero's attacks that are LEGAL
+# Smallest cooldown_remaining (TICKS) among this hero's attacks that are LEGAL
 # under the current melee lock (the same category gate pickBestAttack uses
 # above) -- how soon a hunt-wake retry could actually land a shot, floored at
-# kMinShootRefireMillis. -1 when no attack qualifies (nothing legal to wait
+# kMinShootRefireTicks. -1 when no attack qualifies (nothing legal to wait
 # on; the caller falls back to the ordinary idle hint instead).
-proc minLegalCooldownMillis(v: HeroView): int64 =
+proc minLegalCooldownTicks(v: HeroView): int64 =
   result = -1'i64
   for i in 0 ..< v.attackCount:
     let a = v.attacks[i]
     if v.meleeLocked and a.category == kAttackCategoryRanged:
       continue
-    let ms = (a.cooldown_remaining * 1000.0'f32).int64
-    if result < 0 or ms < result:
-      result = ms
-  if result >= 0 and result < kMinShootRefireMillis:
-    result = kMinShootRefireMillis
+    let ticks = (a.cooldown_remaining * 120.0'f32).int64  # seconds -> ticks
+    if result < 0 or ticks < result:
+      result = ticks
+  if result >= 0 and result < kMinShootRefireTicks:
+    result = kMinShootRefireTicks
 
 # EVERY hero class runs this one table (the now-deleted town_brain.cpp's own
 # comment: "there is no per-class list" -- what a class does, how eagerly,
@@ -252,15 +315,15 @@ const kHeroActivities = [
   ActivityEntry(id: ActIdle, band: bNormal, score: scoreIdle, act: actIdle),
 ]
 
-# The idle hint's bounds (ms): replaces the wire's v1 think_min_millis/
-# think_max_millis (BlViewFactors) -- deliberation is gone, so this is a
+# The idle hint's bounds (TICKS): replaces the wire's v1 think_min_ticks/
+# think_max_ticks (BlViewFactors) -- deliberation is gone, so this is a
 # compiled constant now, not a tunable factor (CLAUDE.md: fixed constants
 # until a knob is asked for). Same order of magnitude as the shipped v1
 # defaults (0..833ms). Scheduling advice only ("you don't need me for X
-# ms"), never a promise -- a spurious wake is always tolerated.
+# ticks"), never a promise -- a spurious wake is always tolerated.
 const
-  kIdleHintMinMillis: int64 = 500
-  kIdleHintMaxMillis: int64 = 2000
+  kIdleHintMinTicks: int64 = 60    # 0.5 s
+  kIdleHintMaxTicks: int64 = 240   # 2 s
 
 proc brainInit() =
   const msg: cstring = "hero brain v3 init"
@@ -300,15 +363,24 @@ proc brainTick(slot: int32): int32 =
       # is fine; it mirrors bl_enqueue_action's own "let the engine infer it"
       # sentinel below.
       let targetSlot = if v.hasThreat: v.threatSlot else: high(uint32)
-      let best = pickBestAttack(v, v.hasThreat, v.threatDist)
-      if best >= 0:
-        bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best)
-      # Shield-bash (v4): a SECOND action this wake, not a replacement for the
-      # swing -- the bash stamps only its own cooldown host-side, so a
-      # mercenary that opens with it still swings the same tick. Only fired
-      # at a threat actually in view (a locked-but-unseen opponent gives no
-      # distance to gate on) and only inside melee reach, which is the same
-      # gate validate_cast applies host-side.
+      # HOLD FIRE WHILE UNSEEN AND STILL CLOSING. Any attack ends the sneak the
+      # moment it is declared (game/src/combat.h), and pickBestAttack picks by
+      # damage -- so a grave robber, whose crossbow outdamages its blades and
+      # outranges them fourfold, would open with a bolt from 5 m and spend the
+      # entire approach on one shot. Being unseen is worth more than the shot:
+      # wait until the blades can reach, and the stab below collects both
+      # bonuses at once.
+      let holdingFire = v.sneaking and v.threatDist > meleeReach(v)
+      let best =
+        if holdingFire: -1'i32
+        else: pickBestAttack(v, v.hasThreat, v.threatDist)
+      # The cast is decided FIRST and enqueued BEFORE the swing (v6). Actions
+      # drain in enqueue order, and several things are consumed by whichever
+      # act uses them first: declaring a strike ends Sneak, so a swing enqueued
+      # ahead of the stab would spend the whole approach on an ordinary blow.
+      # Casting first is also simply better for the others -- a bash lands on
+      # something that is then stunned for the sword.
+      #
       # Skills, in priority order, at most ONE per wake: the engine stamps only
       # the skill's own cooldown, so a cast and a swing can both land in a
       # tick, but two casts in one wake is not a thing this brain does.
@@ -317,21 +389,66 @@ proc brainTick(slot: int32): int32 =
       # so a wake is not spent asking for a cast the engine will refuse.
       var castSlot = -1'i32
       var castTarget = targetSlot
+      # Where a POINT-targeted cast wants to land. Ignored by every other
+      # targeting mode, and re-checked host-side either way.
+      var castPointX = 0.0'f32
+      var castPointZ = 0.0'f32
 
-      # Dress wounds first: staying alive outranks any damage. SelfOnly, so it
-      # names the caster and needs no threat in view.
-      if v.healthFrac <= kDressWoundsHealthFrac:
+      # Teleport, FIRST: it is the answer to something the hero cannot beat,
+      # and every other cast below is an answer to something it can. Gated on
+      # THREAT rather than on health -- the wire carries what the thing in
+      # front of us is worth (BlThreat.threat) against what we are worth
+      # (BlViewSelf.threat), and a fight that lopsided is lost before the first
+      # blow lands, not after half the hitpoints are gone.
+      if v.hasThreat and v.threatDist <= kTeleportFleeDist and
+         v.threatThreat >= v.selfThreat * kTeleportThreatRatio:
+        let blink = readySkillSlot(v, BL_SKILL_TELEPORT)
+        if blink >= 0:
+          let goal = farthestFreeGround(v, kTeleportRange)
+          if goal.ok:
+            castSlot = blink
+            castTarget = v.slot
+            castPointX = goal.p.x
+            castPointZ = goal.p.z
+
+      # Dress wounds: staying alive outranks any DAMAGE. It does not outrank
+      # getting out -- the guard matters, because Teleport decided above and an
+      # unguarded block here would quietly overwrite it, leaving an apprentice
+      # to bandage itself in front of something it cannot beat.
+      if castSlot < 0 and v.healthFrac <= kDressWoundsHealthFrac:
         let dress = readySkillSlot(v, BL_SKILL_DRESS_WOUNDS)
         if dress >= 0:
           castSlot = dress
           castTarget = v.slot
 
+      # Sneak, BEFORE the stab and before contact: it is the approach, not a
+      # trick played in a fight. Cast while the threat is still further off
+      # than a blade can reach and we are not already locked -- which is also
+      # exactly what the engine refuses (skills.json's castable_in_melee), so
+      # a wake is never spent asking for a cast that will be dropped.
+      #
+      # The pair is the whole grave robber: arrive unseen, and the opening blow
+      # gets both the sneak bonus and Backstab's own (the target cannot be
+      # engaging someone it cannot see).
+      if castSlot < 0 and v.hasThreat and not v.meleeLocked and
+         v.threatDist > meleeReach(v) and not v.sneaking:
+        let sneak = readySkillSlot(v, BL_SKILL_SNEAK)
+        if sneak >= 0:
+          castSlot = sneak
+          castTarget = v.slot
+
       # Backstab: melee-tested, and only worth its cooldown against something
       # not already fighting us (the engine decides that, but asking while
-      # locked in a face-to-face melee spends the cooldown for an ordinary
-      # blow).
+      # locked in a face-to-face melee usually spends the cooldown for an
+      # ordinary blow).
+      #
+      # ...UNLESS we are unseen. A melee lock says the bodies are in contact,
+      # not that the other one knows who with -- and something that cannot
+      # perceive us cannot be engaging us, which is exactly the condition the
+      # bonus pays out on. Without this the lock lands on the same tick contact
+      # does and the stab never fires at all.
       if castSlot < 0 and v.hasThreat and v.threatDist <= meleeReach(v) and
-         not v.meleeLocked:
+         (not v.meleeLocked or v.sneaking):
         let stab = readySkillSlot(v, BL_SKILL_BACKSTAB)
         if stab >= 0:
           castSlot = stab
@@ -349,8 +466,24 @@ proc brainTick(slot: int32): int32 =
         if curse >= 0:
           castSlot = curse
 
+      # Precision shot: an INTENTION, so it is decided here but suggested at
+      # the tail rather than enqueued as an action. Worth the two seconds only
+      # against something that cannot reach us while we stand still for them --
+      # outside melee reach, inside the skill's own 30 m, and not already in
+      # contact. A hero that focused with something in its face would simply be
+      # standing still to be hit.
+      var focusSlot = -1'i32
+      if not v.meleeLocked and v.hasThreat and not v.sneaking and
+         v.threatDist > meleeReach(v) and v.threatDist <= kPrecisionShotRange:
+        focusSlot = readyIntentionSkillSlot(v, BL_SKILL_PRECISION_SHOT)
+
       if castSlot >= 0:
-        bl_enqueue_action(BL_ACT_USE_SKILL, castTarget, castSlot)
+        bl_enqueue_action(BL_ACT_USE_SKILL, castTarget, castSlot, castPointX, castPointZ)
+      # ...and the swing after it: a SECOND action this wake, not a replacement
+      # for the cast. The engine stamps only the skill's own cooldown, so a
+      # mercenary that opens with a bash still swings the same tick.
+      if best >= 0:
+        bl_enqueue_action(BL_ACT_ATTACK, targetSlot, best, 0.0'f32, 0.0'f32)
       # Move-shoot-move (v5): a hero that outranges what is coming at it backs
       # off to keep the margin, while still firing through the action channel
       # above -- the action is orthogonal to the intention, which is what makes
@@ -366,6 +499,17 @@ proc brainTick(slot: int32): int32 =
         let goal = standoffGoal(v)
         Suggestion(kind: BL_INT_MOVE_TO, activityLabel: ActCombat,
                    pointX: goal.x, pointZ: goal.z)
+      elif focusSlot >= 0:
+        # A FOCUS is an intention, not an action -- it replaces what this hero
+        # is doing for two seconds rather than riding alongside it, which is
+        # exactly why it goes through the suggestion channel and why the engine
+        # refuses it on the action one (skill_cast.h's channel split).
+        #
+        # Restated unconditionally every wake, like every other suggestion this
+        # brain makes: an identical restatement RESUMES the running focus
+        # (intention.cpp) rather than restarting its clock.
+        Suggestion(kind: BL_INT_USE_SKILL, activityLabel: ActCombat,
+                   targetSlot: targetSlot, arg: focusSlot)
       else:
         Suggestion(kind: BL_INT_ATTACK, activityLabel: ActCombat, targetSlot: targetSlot)
     elif hasDangerEvent(g_view_buf) and v.hasHome:
@@ -385,36 +529,36 @@ proc brainTick(slot: int32): int32 =
   # unconditionally: actHunt (blocks.nim) only ever suggests Shoot once
   # preyDist is already within selfAttackRange, so the distance is always
   # known and meaningful here. When nothing qualifies (every legal attack
-  # still cooling down), no action fires this wake, and refireHintMillis
+  # still cooling down), no action fires this wake, and refireHintTicks
   # asks for a re-consult closer to the actual cooldown (floored at
-  # kMinShootRefireMillis) instead of the ordinary 0.5-2s idle hint below --
+  # kMinShootRefireTicks) instead of the ordinary 0.5-2s idle hint below --
   # so the next shot does not wait out the full window.
-  var refireHintMillis = -1'i64  # -1 = no override; the ordinary hint stands
+  var refireHintTicks = -1'i64  # -1 = no override; the ordinary hint stands
   if chosen.kind == BL_INT_SHOOT:
     let best = pickBestAttack(v, true, v.preyDist)
     if best >= 0:
-      bl_enqueue_action(BL_ACT_ATTACK, v.preySlot, best)
+      bl_enqueue_action(BL_ACT_ATTACK, v.preySlot, best, 0.0'f32, 0.0'f32)
     else:
-      refireHintMillis = minLegalCooldownMillis(v)
+      refireHintTicks = minLegalCooldownTicks(v)
 
-  # The idle hint: "you don't need me for X ms" -- the SAME draw doubles as
-  # BL_INT_IDLE's own duration_millis (the pause IS the idle hint now) and as
-  # idle_hint_millis for every other kind. BL_INT_NONE gets neither: it is
+  # The idle hint: "you don't need me for X ticks" -- the SAME draw doubles as
+  # BL_INT_IDLE's own duration_ticks (the pause IS the idle hint now) and as
+  # idle_hint_ticks for every other kind. BL_INT_NONE gets neither: it is
   # apply_intention's own "nothing suggested this wake" no-op (discarded
   # wholesale, CurrentIntention untouched) -- reachable today only via
   # selectBanded's vacuous all-weights-zero fallback (src/crates/brainhost's
   # real_hero_wasm_conforms test), which also asserts an all-zero-bytes
   # SuggestionWire back, so a hint here would break that acceptance test for
   # no behavioural gain (apply_intention never reads it for None anyway).
-  var s = seedOf(v.slot, v.nowMillis)
-  let drawnHint = rangeI64(s, kIdleHintMinMillis, kIdleHintMaxMillis)
-  let hint = if refireHintMillis >= 0: refireHintMillis else: drawnHint
+  var s = seedOf(v.slot, v.nowTicks)
+  let drawnHint = rangeI64(s, kIdleHintMinTicks, kIdleHintMaxTicks)
+  let hint = if refireHintTicks >= 0: refireHintTicks else: drawnHint
   let isIdle = chosen.kind == BL_INT_IDLE
   let isNone = chosen.kind == BL_INT_NONE
 
   g_out_buf = BlSuggestionWire(
-    idle_hint_millis: (if isIdle or isNone: 0'i64 else: hint),
-    duration_millis: (if isIdle: hint else: 0'i64),
+    idle_hint_ticks: (if isIdle or isNone: 0'i64 else: hint),
+    duration_ticks: (if isIdle: hint else: 0'i64),
     intention_kind: chosen.kind,
     activity_label: chosen.activityLabel,
     point_x: chosen.pointX,

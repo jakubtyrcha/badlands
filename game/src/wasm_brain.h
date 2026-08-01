@@ -51,6 +51,10 @@ struct PendingAction {
     int32_t kind;
     uint32_t target_slot;
     int32_t arg;
+    // v6: where a POINT-targeted cast wants to land. Zero for every other
+    // action, and validated host-side like everything else the guest asks for.
+    float point_x;
+    float point_z;
 };
 
 // RAII owner of one loaded + instantiated brain wasm module.
@@ -117,7 +121,7 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 //
 //  - MALFORMED, corruption-shaped -> rejected (returns std::nullopt,
 //    escalated to FATAL by the caller, tick_wasm_brain): a non-finite
-//    point_x/point_z, or a duration_millis/idle_hint_millis outside
+//    point_x/point_z, or a duration_ticks/idle_hint_ticks outside
 //    [0, INT32_MAX] (both narrow into a Command's int32_t param_b downstream
 //    -- command.cpp's enqueue_set_behavior -- so a value beyond that range
 //    would corrupt silently rather than merely being policy-noncompliant).

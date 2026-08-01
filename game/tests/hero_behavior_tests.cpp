@@ -80,11 +80,11 @@ TEST_CASE("hero_behavior: a hunter accrues Hunt entity-ticks over a few in-game 
     ActivityHistogram hist;
     std::vector<CharacterState> rows;
     // ~4 in-game hours: long enough to cover several of the wasm brain's own
-    // wake cycles (idle_hint_millis draws 0.5-2s, scripts/brains/nim/hero.nim),
+    // wake cycles (idle_hint_ticks draws 0.5-2s, scripts/brains/nim/hero.nim),
     // not just a single lucky tick.
-    const int kTicks = static_cast<int>(4 * millis_per_hour(g.millis_per_day) / kMillisPerTick);
+    const int kTicks = static_cast<int>(4 * ticks_per_hour(g.ticks_per_day) / kTicksPerStep);
     for (int i = 0; i < kTicks; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         characters_of(g, rows);
         hist.Accumulate(rows);
     }
@@ -120,7 +120,7 @@ TEST_CASE("hero_behavior: night raises a mildly-tired hero's GoHome share") {
         glm::vec2 home_door;
         REQUIRE(building_approach_tile(g.placement, g.placement.buildings[guild], home_door));
         g.registry.get<Position>(e).pos = home_door;
-        g.world_millis = night ? static_cast<int64_t>(g.millis_per_day * 0.85) : (g.millis_per_day / 2);
+        g.world_ticks = night ? static_cast<int64_t>(g.ticks_per_day * 0.85) : (g.ticks_per_day / 2);
 
         ActivityHistogram hist;
         std::vector<CharacterState> rows;
@@ -130,7 +130,7 @@ TEST_CASE("hero_behavior: night raises a mildly-tired hero's GoHome share") {
             auto& sim = g.registry.get<HeroSimulationState>(e);
             sim.fatigue = 0.5f;  // below the night bar (0.90), above the day one (0.55)
             sim.content = 1.0f;
-            tick_world(g, 1.0f / 30.0f);
+            step_world(g);
             characters_of(g, rows);
             hist.Accumulate(rows);
         }
@@ -171,7 +171,7 @@ TEST_CASE("hero_behavior: a spawned rat flips idle heroes into engaging it") {
 
     bool all_idle = false;
     for (int i = 0; i < 90 && !all_idle; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         all_idle = true;
         for (entt::entity e : heroes) {
             // Review fix (intention-contract fix wave): adopting Idle now
@@ -210,7 +210,7 @@ TEST_CASE("hero_behavior: a spawned rat flips idle heroes into engaging it") {
     // follows once it closes the gap.
     bool engaged = false;
     for (int i = 0; i < 10 && !engaged; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         for (entt::entity e : heroes) {
             const bool attacking = g.registry.get<CurrentIntention>(e).kind == IntentionKind::Attack;
             const bool tracking = g.registry.get<MoveTarget>(e).kind == MoveTarget::Kind::Entity;
@@ -221,7 +221,7 @@ TEST_CASE("hero_behavior: a spawned rat flips idle heroes into engaging it") {
 
     bool attacked = false;
     for (int i = 0; i < 200 && !attacked; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         for (const Command& c : g.command_log) {
             attacked = attacked || c.kind == CommandKind::Attack;
         }
@@ -249,7 +249,7 @@ TEST_CASE("hero_behavior: wasm hero: an exhausted, homed hero decides GoHome") {
 
     bool went_home = false;
     for (int i = 0; i < 30 && !went_home; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         for (const Command& c : g.command_log) {
             went_home = went_home || (c.kind == CommandKind::SetBehavior &&
                                       c.param_a == static_cast<int32_t>(ActivityId::GoHome));
@@ -273,7 +273,7 @@ TEST_CASE("hero_behavior: wasm hero: a hero with an apothecary in town decides B
 
     bool decided_buy = false;
     for (int i = 0; i < 10 && !decided_buy; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         for (const Command& c : g.command_log) {
             decided_buy = decided_buy || (c.kind == CommandKind::SetBehavior &&
                                           c.param_a == static_cast<int32_t>(ActivityId::Buy));

@@ -57,6 +57,37 @@ enum class ActionKind : int32_t {
 // to the map span.)
 inline constexpr int32_t kGridHalfExtentTiles = 128;  // was GAME_GRID_HALF_EXTENT_TILES
 
+// ---- sim time (see CLAUDE.md's time convention) -----------------------------
+// Sim time is an int64 count of TICKS. A TICK IS 1/120 s, and 120 is not
+// arbitrary: it divides every usual step rate (30, 60, 120), so a step is
+// always a whole number of ticks and no clock can drift against another.
+//
+// PUBLIC because an app has to render a clock and log a duration -- the
+// conversion belongs here rather than being re-derived (and mis-derived) at
+// each display site.
+inline constexpr int64_t kTicksPerSecond = 120;
+
+// How often the world advances -- i.e. how many times a second a caller is
+// expected to call Sim::Step(). PUBLIC for the same reason kTicksPerSecond is:
+// anything driving the sim has to turn elapsed time into a number of steps, and
+// a caller guessing 30 is a caller that breaks silently when the rate moves.
+inline constexpr int64_t kStepsPerSecond = 30;
+
+// The ONE conversion for a human-authored duration. Rounds rather than
+// truncates, and never rounds a positive duration down to zero -- which would
+// read as "no duration at all" everywhere downstream.
+inline constexpr int64_t ticks_of(float seconds) {
+    if (seconds <= 0.0f) {
+        return 0;
+    }
+    const int64_t t = static_cast<int64_t>(static_cast<double>(seconds) *
+                                               static_cast<double>(kTicksPerSecond) + 0.5);
+    return t > 0 ? t : 1;
+}
+inline constexpr float seconds_of_ticks(int64_t ticks) {
+    return static_cast<float>(ticks) / static_cast<float>(kTicksPerSecond);
+}
+
 // Hero guild classes (the recruitable "class type id"). Unscoped + HERO_*
 // enumerators to match the sim-internal usage this was promoted from (was
 // heroes.h's HeroClassId); the numeric values are load-bearing (color table,
@@ -216,8 +247,17 @@ enum class StatusKind : int32_t {
                  // seconds. Movement and defense are untouched -- this is a
                  // penalty on ACTING, not on being, and it is meant to be
                  // steep enough that a brain that can count never chooses it.
+    Sneaking,    // IMPERCEPTIBLE. Skipped by target selection (nearest_enemy)
+                 // and by threat perception (collect_threats) alike, so no
+                 // brain -- wasm or engine-side -- has a special case for it.
+                 // Ends on an aggressive act, not only on its timer
+                 // (combat.h's end_sneak_on_aggression), and carries an
+                 // accuracy and crit bonus into the blow that ends it.
+    Calcified,   // hardened: flat armour up. ARMOUR ONLY -- a calcified target
+                 // still misses and still gets dodged around, which is what
+                 // makes it a ward rather than a general buff.
 };
-inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Disengaged) + 1;
+inline constexpr int32_t kStatusKindCount = static_cast<int32_t>(StatusKind::Calcified) + 1;
 // Fixed component capacity; matches BL_MAX_STATUSES (game/src/brain_abi.h).
 inline constexpr int32_t kMaxStatuses = 8;
 // Stable inspection name ("Stunned"); "-" for an out-of-range kind.
@@ -226,11 +266,14 @@ const char* StatusName(int32_t kind);
 // ---- skills (identity only; defs/triggers live in game/src/skills.h) -------
 // Append-only id space, same discipline as ActivityId.
 enum class SkillId : int32_t {
-    Calcify = 0,   // Apprentice: absorb the next physical strike (effect deferred)
+    Calcify = 0,   // Apprentice: hardens its own hide -- flat armour, for a while
     ShieldBash,    // Mercenary: a shield slam that stuns what it lands on
     Curse,         // Apprentice: saps a target's accuracy and armour
     DressWounds,   // Hunter: field-dresses its own wounds
     Backstab,      // Grave Robber: heavy bonus damage on someone not facing it
+    Sneak,         // Grave Robber: goes unseen until it strikes
+    PrecisionShot, // Hunter / Grave Robber: a focused shot that cannot miss
+    Teleport,      // Apprentice: blinks to a chosen point within range
     Count,
 };
 inline constexpr int32_t kSkillCount = static_cast<int32_t>(SkillId::Count);
@@ -299,6 +342,18 @@ struct SkillSpec {
     float cooldown_seconds = 0.0f;             // <= 0 => none
     float intention_duration_seconds = 0.0f;   // <= 0 => none; Intention only
     SkillAttackTest attack_test = SkillAttackTest::None;
+    // May this be cast while the caster is locked in melee contact? The first
+    // skill whose legality depends on the caster's SITUATION rather than on its
+    // target -- and situation is data the engine checks, never effect logic:
+    // an effect cannot refuse a cast, it can only decline to emit ops.
+    bool castable_in_melee = true;
+    // Does the declared attack test SKIP its gates? When set, the engine's
+    // per-target pre-roll cannot block or dodge and always crits, at the
+    // skill's own "crit_multiplier" constant. Engine-checked data, not effect
+    // logic: an effect is HANDED an outcome, it never decides one -- which is
+    // exactly why "guaranteed" has to live on this side of the contract.
+    // Meaningless (and ignored) when attack_test is None.
+    bool guaranteed_test = false;
     std::string effect;                        // brief descriptive string
     SkillConstant constants[kMaxSkillConstants];
     int32_t constant_count = 0;
@@ -393,7 +448,7 @@ struct HeroFactors {
     float explore_min_distance = 6.0f;    // how far past the frontier to aim
     float explore_max_distance = 18.0f;
     float explore_search_radius = 90.0f;  // how far afield to look for a frontier
-    int64_t explore_lease_millis = 8000;  // how long one target is committed to
+    int64_t explore_lease_ticks = 8 * 120;   // 8 s  // how long one target is committed to
     // Per-class appetite, drawn once per lease window: the probability a hero of
     // that class feels like exploring at all. A FREQUENCY, which a weight cannot
     // express -- a weight decides which activity wins when both apply, so a low
@@ -405,14 +460,14 @@ struct HeroFactors {
     // gates deliberation (you do not stand and think with a rat closing in).
     float threat_radius = 14.0f;
     // How long EntityMemory (game/src/entity_memory.h) keeps a character
-    // sighting after it was last actually seen; once world_millis advances
-    // past last_seen_millis by more than this, the entry is forgotten
+    // sighting after it was last actually seen; once world_ticks advances
+    // past last_seen_ticks by more than this, the entry is forgotten
     // (evicted) on the next tick's update pass. Buildings never expire this
     // way, so this only bounds char entries.
-    int64_t memory_ttl_millis = 10000;
+    int64_t memory_ttl_ticks = 10 * 120;     // 10 s
     // Vestigial: was the deliberation pause between goal changes, drawn
     // uniformly from this range (the prototype day is 120 s, so an in-game
-    // minute was ~83 ms of sim time and the default range was roughly 0-10
+    // minute was ~10 ticks of sim time and the default range was roughly 0-10
     // in-game minutes). Deliberation itself is deleted -- the intention
     // contract (game/src/intention.h) replaced it, and no consumer downstream
     // of factors reads either field anymore (sim.cpp's sanitize_factors is
@@ -420,8 +475,8 @@ struct HeroFactors {
     // than acting on the values). Kept only pending a wire/factors
     // retirement decision -- removing the fields outright would ripple into
     // the JSON manifest schema, not just this struct.
-    int64_t think_min_millis = 0;
-    int64_t think_max_millis = 833;
+    int64_t think_min_ticks = 0;
+    int64_t think_max_ticks = 100;  // ~0.83 s; vestigial (see above)
     // Per-class preference table (see ActivityWeights). Filled with the
     // compiled defaults by SimFactors' constructor; factors.json may override
     // any single entry. This is the primary dial for class personality.
@@ -444,7 +499,7 @@ struct CritterFactors {
 
 // Townfolk (tax collector) tuning + the town economy.
 struct TownfolkFactors {
-    int64_t spawn_interval_millis = 60000;  // a collector leaves the castle this often
+    int64_t spawn_interval_ticks = 60 * 120; // 60 s  // a collector leaves the castle this often
     int32_t max_alive = 2;                  // cap on live collectors
     float move_speed = 2.2f;                // a plodding taxman
     uint32_t house_income_per_day = 50;     // each House accrues this each midnight
@@ -453,7 +508,7 @@ struct TownfolkFactors {
 // Monster (rat) tuning. Rats spawn from the Sewer and attack the nearest hostile
 // unit, falling back to gnawing the nearest targettable building.
 struct MonsterFactors {
-    int64_t spawn_interval_millis = 20000;  // a rat crawls out this often
+    int64_t spawn_interval_ticks = 20 * 120; // 20 s  // a rat crawls out this often
     int32_t max_alive = 4;                  // cap on live rats
 };
 
@@ -523,11 +578,21 @@ struct Attack {
 // evasion:  the defender's chance to dodge an on-target blow (gate 2).
 // defense:  the defender's parry/block (contested by accuracy in gate 1).
 // armour:   flat damage reduction (gate 3).
+// What a critical hit multiplies penetrated damage by, before any status has
+// its say. Lives here rather than beside combat.cpp's other tuning constants
+// because it is the DEFAULT of the field below, and a default initializer needs
+// it visible; everything else about crits stays in resolve_attack.
+inline constexpr float kBaseCritMultiplier = 2.0f;
+
 struct Combatant {
     float accuracy = 0.0f;
     float evasion = 0.0f;
     float defense = 0.0f;
     float armour = 0.0f;
+    // Attacker-side, and per-entity so a STATUS can raise it: effective_combatant
+    // returns a copy, so a bonus rides through to resolve_attack without a new
+    // CombatRequest field and without touching a single assembly site.
+    float crit_multiplier = kBaseCritMultiplier;
     CombatStance stance = CombatStance::Melee;
     // reserved (deferred psychology): float willpower, resolve;
 };
@@ -577,6 +642,12 @@ enum class CreatureId : int32_t {
     BanditArcher,
     BanditLeader,
     MudGolem,
+    // A threat number that walks. NO attacks at all and a threat anchor far
+    // above anything else in the roster, so a brain can be shown something
+    // overwhelming without a fight breaking out -- threat approximates what a
+    // creature is worth, and the number is the whole of what a brain reacts to.
+    // Unarmed, so it stays out of anything that samples fighters by that rule.
+    TrainingDummy,
     Count,
 };
 inline constexpr int kCreatureCount = static_cast<int>(CreatureId::Count);
@@ -657,23 +728,23 @@ CreatureId CreatureIdFromName(const char* name);
 // from this rather than each constructing their own copy of the defaults.
 const CreatureCatalog& DefaultCreatureCatalog();
 
-// Default in-game day length, in milliseconds of sim world time (a fast day, for
-// prototyping). Only the default: WorldConfig::millis_per_day below is what a
-// world actually runs on.
-inline constexpr int64_t kDefaultMillisPerDay = 120 * 1000;
+// Default in-game day length, in TICKS of sim world time (a fast day, for
+// prototyping): two sim-minutes. Only the default -- WorldConfig::ticks_per_day
+// below is what a world actually runs on.
+inline constexpr int64_t kDefaultTicksPerDay = 120 * 120;  // 120 s x 120 ticks/s
 
-// Day length in sim world-millis for a day that should take `sim_seconds` of
-// presentation time at 1x speed (i.e. SimClock::real_seconds_per_day) -- use
-// this to keep a rendered day/night cycle and the sim's own day in lockstep.
+// Day length in TICKS for a day that should take `sim_seconds` of presentation
+// time at 1x speed (i.e. SimClock::real_seconds_per_day) -- use this to keep a
+// rendered day/night cycle and the sim's own day in lockstep.
 //
-// Converts through TICKS, not sim_seconds * 1000: the sim advances by a whole
-// 33 ms per tick at 30 Hz, so a sim-second is 990 ms of world time, not 1000.
-// Multiplying by 1000 instead would leave the sim clock running ~1% fast against
-// the sky, permanently and cumulatively.
+// Exact, and trivially so: a sim-second IS kTicksPerSecond ticks. The
+// millisecond version of this helper existed only to correct a 1% drift that a
+// 33 ms tick made unavoidable; ticks removed the drift, so the correction went
+// with it.
 //
 // Non-positive or absurdly large inputs clamp to a valid period (the sim divides
-// by this, so it must stay >= 1 ms).
-int64_t MillisPerDayForSimSeconds(float sim_seconds);
+// by this, so it must stay >= 1 tick).
+int64_t TicksPerDayForSimSeconds(float sim_seconds);
 
 // Placement request: a raw (un-snapped) desired center + rotation. The sim
 // snaps the center to the grid lattice for the kind's parity.
@@ -708,13 +779,13 @@ struct WorldConfig {
     // The sim neither knows nor cares what shape they form. Whoever builds the
     // config does.
     std::vector<PlacementDesc> plops;
-    // Length of one in-game day, in milliseconds of sim world time. Initial
+    // Length of one in-game day, in TICKS of sim world time. Initial
     // config in the determinism contract: a replay must use the same value.
     // This sets what an in-game HOUR means (day/24), so it scales every
     // HeroFactors rate authored in hours -- a longer day drains needs
-    // proportionally slower. Use MillisPerDayForSimSeconds above to derive it
-    // from a presentation day length. Clamped to >= 1 ms at world construction.
-    int64_t millis_per_day = kDefaultMillisPerDay;
+    // proportionally slower. Use TicksPerDayForSimSeconds above to derive it
+    // from a presentation day length. Clamped to >= 1 tick at world construction.
+    int64_t ticks_per_day = kDefaultTicksPerDay;
 };
 
 // One in-flight projectile, for the debug-line overlay (Sim::Projectiles()).
@@ -778,7 +849,7 @@ struct SimStats {
 // happen to be watching at the right moment.
 //
 // It is a FOLD OVER SNAPSHOTS, deliberately outside the sim core: neither
-// tick_world nor any brain knows it exists. Two reasons, and both matter:
+// step_world nor any brain knows it exists. Two reasons, and both matter:
 //
 //   * A counter threaded through decision code drifts from reality the moment
 //     one path forgets to bump it, and a wrong histogram is worse than none --
@@ -788,7 +859,7 @@ struct SimStats {
 //     disagree with the inspector next to it.
 //
 // Accumulate one snapshot per tick. Sim::Tick() does this for you; a caller
-// driving the internal tick_world directly is measuring nothing and gets zeros,
+// driving the internal step_world directly is measuring nothing and gets zeros,
 // which is the honest answer.
 // ---------------------------------------------------------------------------
 class ActivityHistogram {
@@ -874,9 +945,9 @@ struct WorldState {
     uint32_t queued_poppables;  // owed but not yet placeable (crowded map)
     uint32_t urban_quarters;    // sprawl accumulator in quarter-units
     uint32_t guild_roster_cap;  // kGuildRosterCap (heroes per guild); UI mirrors it
-    // The sim clock. world_millis is the authoritative integer time (advanced by
+    // The sim clock. world_ticks is the authoritative integer time (advanced by
     // a compile-time constant per tick at a fixed 30 Hz); the rest are derived.
-    int64_t world_millis;
+    int64_t world_ticks;
     float time_of_day;  // 0..1 within the current day
     uint32_t day;       // whole days elapsed
     int32_t is_night;   // 0/1
@@ -906,6 +977,8 @@ enum class CommandKindId : int32_t {
     Chat,
     Engage,  // hold at range of a live entity target (single-gateway combat's engagement executor)
     UseSkill,  // cast skill param_a (an index into the actor's OWN Skills) at target_id
+    CancelFocus, // abandon a long cast in progress (skill_focus.h)
+    FocusSkill,  // begin a long cast of skill param_a at target_id (skill_focus.h)
 };
 
 struct CommandRecord {
@@ -914,7 +987,7 @@ struct CommandRecord {
     uint32_t target_id;
     float point_x, point_z;
     int32_t param_a, param_b;
-    int64_t at_millis;  // sim time the command took effect
+    int64_t at_ticks;  // sim time the command took effect
 };
 
 // ---------------------------------------------------------------------------
@@ -943,6 +1016,11 @@ enum class GameEventKind : int32_t {
     StrikeCancelled,     // a committed attack was interrupted during its wind-up and
                          // never landed; actor = the attacker whose swing was dropped,
                          // target = who it was aimed at, amount = the attack index
+    FocusCancelled,      // a long cast was abandoned before it resolved -- stunned,
+                         // re-decided, or no longer legal at its deadline; actor =
+                         // the caster, target = what it was aimed at, amount = the
+                         // SkillId. The strike's counterpart on the other channel
+                         // (game/src/skill_focus.h).
 };
 
 // One event. Field meaning is per `kind` (see GameEventKind). `actor_id` and
@@ -957,7 +1035,7 @@ struct GameEvent {
     int32_t target_kind;  // 0 = Character, 1 = Building
     float amount;         // DamageDealt: hp removed; else 0
     float x, z;           // victim world position at event time
-    int64_t at_millis;    // sim time the event fired
+    int64_t at_ticks;    // sim time the event fired
 };
 
 // The two target_kind values, named for readability at call sites.
@@ -1024,11 +1102,20 @@ class Sim {
     Sim(const Sim&) = delete;
     Sim& operator=(const Sim&) = delete;
 
-    // Returns the entity id used in CharacterState rows.
-    uint32_t Spawn(const CharacterDesc& desc);
+    // Returns the entity id used in CharacterState rows. `level` > 1 puts a
+    // HERO at that level (see SpawnCreature).
+    uint32_t Spawn(const CharacterDesc& desc, int32_t level = 1);
     // Spawns a named creature from the catalog at (pos_x, pos_z) on `team`;
     // returns its entity id. Hero creatures also get their hero class set.
-    uint32_t SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z);
+    //
+    // `level` > 1 starts a HERO partway up the ladder: its stats are recomputed
+    // from its growth row and every skill grant up to that level is applied, so
+    // it is indistinguishable from one that earned its way there. Ignored by
+    // anything that does not level -- monsters have a threat anchor authored at
+    // level 1 and no growth row at all. INITIAL CONFIG, not a command: a replay
+    // reproduces it from the same spawn call, exactly as prebuild_colony is.
+    uint32_t SpawnCreature(CreatureId id, int32_t team, float pos_x, float pos_z,
+                           int32_t level = 1);
     // Replaces the creature catalog (see CreatureCatalog). Call before spawning;
     // a replay must use the same catalog the recorded run used.
     void SetCreatureCatalog(const CreatureCatalog& catalog);
@@ -1038,7 +1125,10 @@ class Sim {
     // call before ticking; a replay must use the same catalog.
     void SetSkillCatalog(const SkillCatalog& catalog);
     const SkillCatalog& Skills() const;
-    void Tick(float dt);
+    // Advance the world by exactly one STEP. No dt: a step is a fixed span of
+    // sim time (kTicksPerStep ticks), and how often you call this is what a
+    // speed control changes -- never what a step means.
+    void Step();
     // Executes a player action. Returns >= 0 on success (a new building/hero
     // id, or 0 for id-less actions) and < 0 on error.
     int64_t Dispatch(const Action& action);

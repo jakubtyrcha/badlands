@@ -21,10 +21,16 @@ struct DuelConfig {
     uint64_t seed = 1;
     // Sim-time budget for a round. A pairing that cannot resolve inside it is a
     // draw and says so -- a stalemate is a result, not a hang.
-    int64_t max_millis = 60000;
+    int64_t max_ticks = 60 * 120;    // 60 s
     // How long to keep watching after one side falls, so the end of a fight is
     // visible rather than cutting to the next stage the instant it lands.
-    int64_t linger_millis = 5000;
+    int64_t linger_ticks = 5 * 120;  // 5 s
+    // Hero level range, inclusive. The design doc's early game is levels 1-8,
+    // and 8 is where the last skill unlocks -- so this range is what makes
+    // every skill a class has reachable in a duel at all. Ignored for monsters:
+    // they do not level.
+    int32_t min_level = 1;
+    int32_t max_level = 8;
 };
 
 // Every creature that can actually fight: not a Critter, and declaring at least
@@ -41,6 +47,12 @@ struct DuelSetup {
     ArenaShape shape = ArenaShape::Tube;
     CreatureId left = CreatureId::Count;
     CreatureId right = CreatureId::Count;
+    // Drawn for BOTH sides regardless of what was sampled, and simply ignored
+    // by a monster. Drawing unconditionally keeps the sampler a pure function
+    // of (seed, round) -- branching the draw on the creature would make the
+    // stream depend on what came out of an earlier draw.
+    int32_t left_level = 1;
+    int32_t right_level = 1;
 };
 
 // Pure: (seed, round) -> setup. The same pair always gives the same duel, so a
@@ -62,7 +74,10 @@ class DuelMode : public SandboxMode {
     const char* name() const override { return "duel"; }
     WorldConfig Configure() override;
     void Stage(Sim& sim) override;
-    bool Observe(const std::vector<CharacterState>& rows, int64_t world_millis) override;
+    // Events unused: a duel's verdict is entirely visible in the rows -- who
+    // is still standing -- so this mode needs no help from the stream.
+    bool Observe(const std::vector<CharacterState>& rows, const std::vector<GameEvent>& events,
+                 int64_t world_ticks) override;
     std::string Status() const override;
 
    private:
@@ -74,10 +89,10 @@ class DuelMode : public SandboxMode {
     // Sim time this round began. Every deadline is measured against the world
     // clock, not real seconds, so the speed control changes how long you WAIT
     // and never who wins.
-    int64_t started_millis_ = 0;
+    int64_t started_ticks_ = 0;
     // Sim time the round is to be reported at: set when one side falls, so the
     // linger is a deadline rather than a countdown to decrement.
-    int64_t report_at_millis_ = 0;
+    int64_t report_at_ticks_ = 0;
     bool decided_ = false;
     std::string last_result_ = "no duel yet";
 };

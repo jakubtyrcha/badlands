@@ -14,14 +14,14 @@
 //   bl_out_buf()  -> i32          (pointer into the module's own memory)
 //   bl_tick(i32 slot) -> i32      (0 == ok, nonzero == script-reported error)
 // and imports AT MOST `env.bl_log(i32 level, i32 ptr, i32 len)` and
-// `env.bl_enqueue_action(i32 kind, i32 target_slot, i32 arg)` — any other
+// `env.bl_enqueue_action(i32 kind, i32 target_slot, i32 arg, f32 point_x, f32 point_z)` — any other
 // import makes bh_instantiate fail (the no-WASI guarantee: brains cannot
 // touch the filesystem, clock, env, or network). A module may import
 // neither, either, or both of the two — bh_instantiate does not require
 // either to be present, only that nothing ELSE is imported.
 //
 // bl_enqueue_action is write-only and fire-and-forget: it takes no host-side
-// action itself beyond forwarding {kind, target_slot, arg} to the registered
+// action itself beyond forwarding {kind, target_slot, arg, point_x, point_z} to the registered
 // BhActionFn callback, synchronously, in the order the guest called it. This
 // crate has no opinion on `kind`/`target_slot`/`arg`'s meaning — same as
 // bl_log's `level`, that vocabulary belongs to the caller (game/src/
@@ -82,10 +82,11 @@ typedef void (*BhLogFn)(int32_t level, const uint8_t* msg, size_t len, void* use
 // `action_user` pointer bh_instantiate was given, passed through unexamined,
 // same convention as BhLogFn's `user`/`log_user`. Unlike BhLogFn there is no
 // bytes-plus-length pair to bounds-check — kind/target_slot/arg are plain
-// wasm i32 values, not a guest-memory range, so there is nothing here for
-// this crate to validate; it is pure pass-through (see this header's top
-// comment).
-typedef void (*BhActionFn)(int32_t kind, uint32_t target_slot, int32_t arg, void* user);
+// wasm i32 values and the point is a plain pair of f32s, not a guest-memory
+// range, so there is nothing here for this crate to validate; it is pure
+// pass-through (see this header's top comment).
+typedef void (*BhActionFn)(int32_t kind, uint32_t target_slot, int32_t arg, float point_x,
+                           float point_z, void* user);
 
 // Return codes shared by every brainhost entry point below that reports
 // success/failure as an int32_t. 0 is the only success value.

@@ -64,7 +64,7 @@ TEST_CASE("a rat targets the nearest hostile unit") {
     entt::entity hero = g.slots[hid];
     const float hero_hp0 = g.registry.get<Health>(hero).hp;
 
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
 
     // The rat chases the hero (a unit), not a building -- now via its simple
     // brain's Attack intention (monster_brain.cpp: apply_intention adopts
@@ -74,7 +74,7 @@ TEST_CASE("a rat targets the nearest hostile unit") {
     CHECK(g.registry.get<MoveTarget>(rat).kind == MoveTarget::Kind::Entity);
 
     for (int i = 0; i < 60; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
     }
     // Combat happened -- the brainless merc rolls only passive defense
     // (single-gateway combat: no swing without a brain), so any health lost
@@ -113,7 +113,7 @@ TEST_CASE("with no units in reach, a rat gnaws the nearest building down") {
     const float hp0 = g.placement.buildings[house].hp;
     bool razed = false;
     for (int i = 0; i < 400; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         if (!g.placement.buildings[house].alive) {
             razed = true;
             break;
@@ -131,7 +131,7 @@ TEST_CASE("a rat prefers a hostile unit over a building") {
     spawn_into(g, MercenaryDesc(6.0f, 0.0f));    // but a hero is closer
     uint32_t rid = spawn_rat(g, {8.0f, 0.0f});
 
-    tick_world(g, 1.0f / 30.0f);
+    step_world(g);
     // Unit takes priority: the rat's simple brain adopts Attack (the unit
     // branch of monster_think, monster_brain.cpp), not the building-gnaw
     // fallback -- so it chases the hero (Entity), not the House door.
@@ -147,14 +147,14 @@ TEST_CASE("the spawner emits rats from a Sewer, capped at max_alive") {
     REQUIRE(sewer != UINT32_MAX);
 
     SimFactors f = g.factors;
-    f.monster.spawn_interval_millis = 1000;
+    f.monster.spawn_interval_ticks = 1000;
     f.monster.max_alive = 2;
     set_factors_of(g, f);
 
-    const int64_t interval_ticks = f.monster.spawn_interval_millis / kMillisPerTick;
+    const int64_t interval_ticks = f.monster.spawn_interval_ticks / kTicksPerStep;
     uint32_t peak = 0;
     for (int64_t i = 0; i < interval_ticks * 5; ++i) {
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         peak = std::max(peak, alive_rats(g));
     }
     CHECK(peak >= 1);            // rats crawled out

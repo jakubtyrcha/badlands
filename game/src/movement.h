@@ -36,10 +36,10 @@ bool is_walkable(mapgen::Biome biome);
 // Resolve each MoveTarget's goal and (re)plan its NavPath via the navmesh,
 // throttled by a repath cooldown and invalidated by nav_epoch / goal drift. A
 // goal the navmesh reports unreachable raises MoveBlocked for the brain.
-void plan_paths(BadlandsGame& game, float dt);
+void plan_paths(BadlandsGame& game);
 
 // Step each unit along its NavPath at move_speed*dt (skips MeleeLock'd units).
-void follow_paths(BadlandsGame& game, float dt);
+void follow_paths(BadlandsGame& game);
 
 // Add/remove MeleeLock based on proximity to the nearest enemy (hysteresis).
 void update_melee_locks(BadlandsGame& game);

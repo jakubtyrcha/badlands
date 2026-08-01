@@ -37,7 +37,7 @@ CombatRequest clean_hit(float base_damage) {
     r.attack.crit_chance = 0.0f;
     r.attacker_slot = 1;
     r.target_slot = 2;
-    r.world_millis = 1000;
+    r.world_ticks = 1000;
     r.attack_index = 0;
     return r;
 }
@@ -319,7 +319,7 @@ TEST_CASE("a ranged attack spawns a projectile that damages on arrival", "[comba
     // Fly it in; damage lands only on arrival, then the projectile is spent.
     bool damaged = false;
     for (int i = 0; i < 90 && !damaged; ++i) {
-        advance_projectiles(g, 1.0f / 30.0f);
+        advance_projectiles(g);
         damaged = g.registry.get<Health>(te).hp < hp0;
     }
     CHECK(damaged);
@@ -343,7 +343,7 @@ TEST_CASE("a projectile fizzles when its target dies mid-flight", "[combat]") {
     REQUIRE(g.registry.view<Projectile>().size() == 1);
 
     g.registry.destroy(g.slots[t]);  // target gone before the shot lands
-    advance_projectiles(g, 1.0f / 30.0f);
+    advance_projectiles(g);
     CHECK(g.registry.view<Projectile>().size() == 0);  // despawned, no crash
 }
 

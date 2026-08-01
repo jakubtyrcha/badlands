@@ -33,7 +33,10 @@ extern "C" {
 // Bumped on any incompatible layout change. A future host will reject a skill
 // module whose reported version disagrees, exactly as bh_instantiate does for
 // the brain wire.
-#define BL_SKILL_ABI_VERSION 2
+// v4: durations in a cast context and an effect batch are TICKS (1/120 s), not
+// milliseconds. No struct changed size, so the asserts below cannot see it --
+// the version is the whole signal (see brain_abi.h's v7 note).
+#define BL_SKILL_ABI_VERSION 4
 
 // Capacities baked into the fixed-size arrays below.
 #define BL_SKILL_MAX_TARGETS 8     // == badlands::kMaxSkillTargets
@@ -55,6 +58,13 @@ extern "C" {
 #define BL_FX_APPLY_STATUS 1  // param_i = badlands::StatusKind, param_f = duration ms
 #define BL_FX_DAMAGE 2        // param_f = hp to remove
 #define BL_FX_HEAL 3          // param_f = hp to restore, clamped to the target's max
+// Move target_slot to the CAST'S OWN validated point (the context's point_x/
+// point_z). The op carries NO destination of its own, deliberately: an effect
+// may ask that somebody be moved, but only to the place the engine already
+// checked was in range and stand-on-able. That is the whole safety argument of
+// this contract in miniature -- a guest cannot reach anywhere it was not shown,
+// and here it cannot even name anywhere at all.
+#define BL_FX_TELEPORT 4
 
 // How a target relates to the caster (append-only). Lets one effect serve
 // friend and foe without the script re-deriving teams.
@@ -117,7 +127,11 @@ typedef struct BlSkillConstant {
 typedef struct BlSkillCastContext {
     uint32_t version;    // == BL_SKILL_ABI_VERSION
     int32_t skill_id;    // badlands::SkillId
-    int64_t world_millis;
+    // v3: where a Point cast landed, already validated by the engine (in range,
+    // on passable ground). Zero for every other targeting mode. An effect that
+    // wants to move something has to spend THIS point -- see BL_FX_TELEPORT.
+    float point_x, point_z;
+    int64_t world_ticks;
     uint64_t seed;
     BlSkillCaster caster;
     int32_t target_count;
@@ -156,7 +170,7 @@ typedef struct BlSkillEffectBatch {
 static_assert(sizeof(BlSkillCaster) == 32, "BlSkillCaster size drifted");
 static_assert(sizeof(BlSkillTarget) == 48, "BlSkillTarget size drifted");
 static_assert(sizeof(BlSkillConstant) == 32, "BlSkillConstant size drifted");
-static_assert(sizeof(BlSkillCastContext) == 712, "BlSkillCastContext size drifted");
+static_assert(sizeof(BlSkillCastContext) == 720, "BlSkillCastContext size drifted");
 static_assert(sizeof(BlSkillEffectOp) == 16, "BlSkillEffectOp size drifted");
 static_assert(sizeof(BlSkillEffectBatch) == 136, "BlSkillEffectBatch size drifted");
 #endif

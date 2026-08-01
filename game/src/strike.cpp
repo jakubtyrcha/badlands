@@ -8,20 +8,6 @@
 
 namespace badlands {
 
-namespace {
-
-// Seconds -> the integer millisecond clock. llround, not a truncation: a
-// 0.35 s wind-up must be 350 ms on every platform, since the deadline is
-// compared against a clock that advances by a fixed integer step.
-int64_t millis_of(float seconds) {
-    if (!(seconds > 0.0f)) {
-        return 0;  // also catches NaN
-    }
-    return static_cast<int64_t>(std::llround(static_cast<double>(seconds) * 1000.0));
-}
-
-}  // namespace
-
 bool declare_strike(BadlandsGame& game, entt::entity e, int32_t attack_index,
                     uint32_t target_slot) {
     entt::registry& reg = game.registry;
@@ -37,10 +23,10 @@ bool declare_strike(BadlandsGame& game, entt::entity e, int32_t attack_index,
     }
 
     StrikeInProgress s;
-    s.declared_millis = game.world_millis;
-    s.resolve_at_millis = game.world_millis + millis_of(atk.defs[attack_index].wind_up_seconds);
-    s.free_at_millis =
-        s.resolve_at_millis + millis_of(atk.defs[attack_index].recovery_seconds);
+    s.declared_ticks = game.world_ticks;
+    s.resolve_at_ticks = game.world_ticks + ticks_of(atk.defs[attack_index].wind_up_seconds);
+    s.free_at_ticks =
+        s.resolve_at_ticks + ticks_of(atk.defs[attack_index].recovery_seconds);
     s.attack_index = attack_index;
     s.target_slot = target_slot;
     // effective_combatant, NOT the raw component: a curse saps the accuracy of
@@ -49,6 +35,11 @@ bool declare_strike(BadlandsGame& game, entt::entity e, int32_t attack_index,
     s.attacker = effective_combatant(reg, e);  // captured: the blow is what it
     s.attack = atk.defs[attack_index];         // was when it was thrown
     reg.emplace<StrikeInProgress>(e, s);
+    // AFTER the capture, and that ordering is the whole of the sneak payoff:
+    // the stats above already carry the sneak bonus, so the blow that breaks
+    // stealth is the blow that benefits from it. Doing this first would hand
+    // the bonus to nobody (combat.h's end_sneak_on_aggression).
+    end_sneak_on_aggression(game, e);
     return true;
 }
 
@@ -65,7 +56,7 @@ bool winding_up(const entt::registry& reg, entt::entity e) {
     // advance_strikes marks the transition by zeroing resolve_at. See its
     // comment: after the blow lands, resolve_at is set to INT64_MIN so "still
     // winding up" is a pure component read with no clock needed.
-    return reg.get<StrikeInProgress>(e).resolve_at_millis != INT64_MIN;
+    return reg.get<StrikeInProgress>(e).resolve_at_ticks != INT64_MIN;
 }
 
 bool cancel_strike(BadlandsGame& game, entt::entity e) {
@@ -74,7 +65,7 @@ bool cancel_strike(BadlandsGame& game, entt::entity e) {
         return false;  // nothing committed, or already thrown -- not preventable
     }
     const StrikeInProgress s = reg.get<StrikeInProgress>(e);
-    if (s.resolve_at_millis <= s.declared_millis) {
+    if (s.resolve_at_ticks <= s.declared_ticks) {
         // No wind-up at all means no cancellable WINDOW: the blow is thrown the
         // instant it is declared, and only advance_strikes' position in the
         // tick makes it observable in between. Without this an attack authored
@@ -94,7 +85,7 @@ bool cancel_strike(BadlandsGame& game, entt::entity e) {
                                .amount = static_cast<float>(s.attack_index),
                                .x = pos.x,
                                .z = pos.y,
-                               .at_millis = game.world_millis});
+                               .at_ticks = game.world_ticks});
     return true;
 }
 
@@ -104,7 +95,7 @@ void advance_strikes(BadlandsGame& game) {
     // invalidates the view, neither of which is safe mid-iteration.
     std::vector<entt::entity> to_land;
     for (auto [e, s] : reg.view<StrikeInProgress>().each()) {
-        if (s.resolve_at_millis != INT64_MIN && game.world_millis >= s.resolve_at_millis) {
+        if (s.resolve_at_ticks != INT64_MIN && game.world_ticks >= s.resolve_at_ticks) {
             to_land.push_back(e);
         }
     }
@@ -125,7 +116,7 @@ void advance_strikes(BadlandsGame& game) {
         // cancellable. INT64_MIN is the sentinel winding_up reads, which keeps
         // "is this still preventable" a component read rather than a second
         // clock comparison every caller would have to get right.
-        s.resolve_at_millis = INT64_MIN;
+        s.resolve_at_ticks = INT64_MIN;
         deliver_strike(game, e, captured);
     }
 
@@ -136,7 +127,7 @@ void advance_strikes(BadlandsGame& game) {
     // apply_commands (sim.cpp) for the same reason.
     std::vector<entt::entity> to_free;
     for (auto [e, s] : reg.view<StrikeInProgress>().each()) {
-        if (s.resolve_at_millis == INT64_MIN && game.world_millis >= s.free_at_millis) {
+        if (s.resolve_at_ticks == INT64_MIN && game.world_ticks >= s.free_at_ticks) {
             to_free.push_back(e);
         }
     }

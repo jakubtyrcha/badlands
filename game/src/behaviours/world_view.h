@@ -52,7 +52,7 @@ struct WorldView {
     // --- clock --------------------------------------------------------------
     float tod = 0.0f;      // time of day in [0,1)
     bool night = false;
-    // Quantized time window for a stable roam goal (world_millis / lease): the
+    // Quantized time window for a stable roam goal (world_ticks / lease): the
     // roam target is re-drawn only when this changes, so a wanderer does not
     // jitter to a fresh point every tick (and plan_paths does not repath).
     int64_t roam_epoch = 0;
@@ -102,16 +102,16 @@ struct WorldView {
     bool chatting = false;
 
     // --- self summary (feeds BlViewSelf on the wire) -------------------------
-    int64_t now_millis = 0;           // sim clock (-> BlViewSelf::world_millis)
+    int64_t now_ticks = 0;           // sim clock (-> BlViewSelf::world_ticks)
     // Vestigial: was the C++ hero decision layer's own deliberation-pause
     // deadline ("a pause in progress ends at this time"). That layer is gone
     // -- the intention contract (game/src/intention.h) replaced it -- and
     // nothing sets this above 0 anymore (command.cpp's SetBehavior handler
     // never sees ActivityId::Think). Kept only because wasm_brain.cpp packs
-    // it into BlViewSelf::think_until_millis for 1:1 wire-shape parity
+    // it into BlViewSelf::think_until_ticks for 1:1 wire-shape parity
     // (brain_abi.h) -- removing it outright is an ABI-layout change,
     // deferred rather than done here.
-    int64_t think_until_millis = 0;
+    int64_t think_until_ticks = 0;
     int32_t current_activity = -1;    // what this entity is doing now; -1 = nothing yet
 
     // --- hunter: nearest prey (a critter within hunt sight) ----------------

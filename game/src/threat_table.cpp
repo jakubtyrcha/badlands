@@ -28,6 +28,10 @@ constexpr ThreatAnchor kBandit[]{{1, 2.0f}};
 constexpr ThreatAnchor kBanditArcher[]{{1, 2.0f}};
 constexpr ThreatAnchor kBanditLeader[]{{1, 5.0f}};
 constexpr ThreatAnchor kMudGolem[]{{1, 6.0f}};
+// Far above anything else in the roster, and deliberately so: it exists to be
+// something a brain reads as overwhelming. Nothing here is derived -- the
+// anchor IS the creature, and it has no stats worth speaking of behind it.
+constexpr ThreatAnchor kTrainingDummy[]{{1, 20.0f}};
 
 struct CreatureAnchors {
     const ThreatAnchor* anchors;
@@ -41,6 +45,7 @@ constexpr CreatureAnchors kTable[kCreatureCount] = {
     {kMercenary, 1}, {kHunter, 1},       {kGraveRobber, 1},  {kApprentice, 1},
     {kRat, 1},       {kGoblin, 1},       {kDeer, 1},         {kBandit, 1},
     {kBanditArcher, 1}, {kBanditLeader, 1}, {kMudGolem, 1},
+    {kTrainingDummy, 1},
 };
 static_assert(std::size(kTable) == static_cast<size_t>(kCreatureCount),
               "every CreatureId needs a threat anchor row");

@@ -76,7 +76,7 @@ TEST_CASE("game_tick drains queued AI commands (apply + log) during the tick") {
     g->command_queue.push_back({CommandKind::MoveTo, slot, UINT32_MAX, {3.0f, 4.0f}, 0, 0});
     size_t log_before = g->command_log.size();
 
-    tick_world(*g, 1.0f / 30.0f);
+    step_world(*g);
 
     CHECK(g->command_queue.empty());
     CHECK(g->command_log.size() > log_before);

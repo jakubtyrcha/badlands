@@ -36,10 +36,19 @@ class SandboxMode {
     // Populate the freshly-built world, through the ordinary Sim API.
     virtual void Stage(Sim& sim) = 0;
 
-    // One tick's snapshot, after the tick. Returns true to ask the host for a
-    // FRESH world -- Configure() and Stage() again. Whatever the mode wants to
-    // report about the round it just finished, it logs here.
-    virtual bool Observe(const std::vector<CharacterState>& rows, int64_t world_millis) = 0;
+    // One tick's snapshot, after the tick, plus the events that tick produced.
+    // Returns true to ask the host for a FRESH world -- Configure() and Stage()
+    // again. Whatever the mode wants to report about the round it just
+    // finished, it logs here.
+    //
+    // The EVENTS are here because the rows cannot answer "did it happen": a
+    // CharacterState carries no statuses, and a status that comes and goes
+    // between two frames leaves no trace in them at all. The host already
+    // drains this stream every tick and discards it, so a mode watching for one
+    // particular decision is reading something that already exists rather than
+    // asking the sim a new question.
+    virtual bool Observe(const std::vector<CharacterState>& rows,
+                         const std::vector<GameEvent>& events, int64_t world_ticks) = 0;
 
     // One line of mode-specific text for the debug panel.
     virtual std::string Status() const = 0;

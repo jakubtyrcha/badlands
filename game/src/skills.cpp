@@ -20,6 +20,17 @@ constexpr std::array<SkillDef, static_cast<size_t>(kSkillCount)> kSkills{{
      /*trigger_param=*/0.5f},
     {SkillId::Backstab, "Backstab", SkillTriggerKind::MeleeThreatClose,
      /*trigger_param=*/2.0f},
+    // Recommended while something is still at a distance -- sneaking is the
+    // APPROACH, so the moment it is worth doing is before contact, not in it.
+    {SkillId::Sneak, "Sneak", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/20.0f},
+    // Recommended at its own long reach: the shot exists to be taken from
+    // further away than anything can answer.
+    {SkillId::PrecisionShot, "PrecisionShot", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/30.0f},
+    // The escape: recommended when something is close enough to matter.
+    {SkillId::Teleport, "Teleport", SkillTriggerKind::MeleeThreatClose,
+     /*trigger_param=*/6.0f},
 }};
 
 constexpr bool skills_dense() {
@@ -79,13 +90,20 @@ float SkillSpec::constant(const char* name, float fallback) const {
 }
 
 SkillCatalog::SkillCatalog() {
+    // The apprentice's ward: it hardens its own hide for a while. ARMOUR only,
+    // which is what keeps it a ward rather than a general buff -- a calcified
+    // apprentice is still as easy to hit, its blows just land on stone.
     SkillSpec& calcify = specs[static_cast<size_t>(SkillId::Calcify)];
     calcify.trigger = SkillTrigger::Action;
     calcify.target = SkillTargetMode::SelfOnly;
     calcify.attack_test = SkillAttackTest::None;  // a ward, not a blow
-    calcify.intention_duration_seconds = 0.0f;    // instant; the shield persists until consumed
-    calcify.cooldown_seconds = 20.0f;
-    calcify.effect = "Absorbs the next physical strike, then shatters.";
+    calcify.intention_duration_seconds = 0.0f;    // instant
+    // LONGER than the 30 s the ward lasts, deliberately: at a shorter cooldown
+    // the armour could be maintained end to end, which would make it a
+    // permanent stat rather than something spent and waited for.
+    calcify.cooldown_seconds = 45.0f;
+    calcify.effect = "Hardens the skin to stone; blows land, and glance.";
+    set_constant(calcify, "duration_seconds", 30.0f);
 
     // The mercenary's control tool: a shield slam that deals nothing and stuns
     // what it lands on. Range comes from attack_test = Melee (the caster's own
@@ -139,6 +157,57 @@ SkillCatalog::SkillCatalog() {
     stab.intention_duration_seconds = 0.0f;
     stab.effect = "A blade between the ribs -- devastating against someone facing elsewhere.";
     set_constant(stab, "bonus_damage", 6.0f);
+
+    // The grave robber's approach. Long enough to cross an arena, and it ends
+    // the moment its owner does anything aggressive rather than only on the
+    // timer -- so the duration is a ceiling, not a plan.
+    //
+    // castable_in_melee = false is the one rule that keeps it an OPENER: you
+    // cannot vanish out of a fight somebody is already in with you.
+    SkillSpec& sneak = specs[static_cast<size_t>(SkillId::Sneak)];
+    sneak.trigger = SkillTrigger::Action;
+    sneak.target = SkillTargetMode::SelfOnly;
+    sneak.attack_test = SkillAttackTest::None;
+    sneak.castable_in_melee = false;
+    sneak.cooldown_seconds = 25.0f;
+    sneak.intention_duration_seconds = 0.0f;
+    sneak.effect = "Slips out of sight; the next blow comes from nowhere.";
+    set_constant(sneak, "duration_seconds", 20.0f);
+
+    // The FOCUS, and the only skill that executes SkillTrigger::Intention: two
+    // seconds of standing still, then a shot that cannot be blocked or dodged
+    // and always crits. Its "range" outreaches every bow in the game, which is
+    // why skill_cast_range lets an authored range beat the weapon it borrows
+    // the test from.
+    //
+    // The wind-up IS the cost. Nothing is captured when the focus begins, so a
+    // target that dies, walks away, or goes unseen in those two seconds simply
+    // gets no shot at all (game/src/skill_focus.h).
+    SkillSpec& shot = specs[static_cast<size_t>(SkillId::PrecisionShot)];
+    shot.trigger = SkillTrigger::Intention;
+    shot.target = SkillTargetMode::Any;
+    shot.target_limit = 1;
+    shot.attack_test = SkillAttackTest::Ranged;
+    shot.guaranteed_test = true;
+    shot.cooldown_seconds = 15.0f;
+    shot.intention_duration_seconds = 2.0f;
+    shot.effect = "Draws a long breath, and does not miss.";
+    set_constant(shot, "range", 30.0f);
+    set_constant(shot, "crit_multiplier", 3.0f);
+
+    // The apprentice's escape, and the only Point-targeted skill: it names a
+    // PLACE rather than an entity, so it resolves no targets at all and its
+    // effect spends the cast's own validated point (game/src/skill_abi.h's
+    // BL_FX_TELEPORT). The engine has already checked that point is in range
+    // and stand-on-able before the effect ever runs.
+    SkillSpec& blink = specs[static_cast<size_t>(SkillId::Teleport)];
+    blink.trigger = SkillTrigger::Action;
+    blink.target = SkillTargetMode::Point;
+    blink.attack_test = SkillAttackTest::None;
+    blink.cooldown_seconds = 25.0f;
+    blink.intention_duration_seconds = 0.0f;
+    blink.effect = "Steps sideways out of the world, and back in somewhere else.";
+    set_constant(blink, "range", 30.0f);
 }
 
 SkillId SkillIdFromName(const char* name) {
@@ -203,12 +272,18 @@ void push_effect_op(BlSkillEffectBatch& out, const BlSkillEffectOp& op) {
 
 namespace {
 
-// Calcify: absorbing the next strike needs a status that does not exist yet
-// (an absorb charge, not a timer), so this ward has no effect to run. It still
-// exists, is still granted, and still displays -- the mechanic is a later
-// slice. A no-op rather than a missing table entry, so SkillEffectOf is
-// total.
-void calcify_effect(const BlSkillCastContext&, BlSkillEffectBatch&) {}
+// Calcify: a plain timed ward on the caster. SelfOnly, so the single target
+// the engine resolved IS the caster and this never has to name it. How much
+// armour a calcification is worth lives with the STATUS (combat.cpp), not
+// here -- the constant this reads is its duration.
+void calcify_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    const float seconds = skill_constant(ctx, "duration_seconds", 0.0f);
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
+                                            static_cast<int32_t>(StatusKind::Calcified),
+                                            static_cast<float>(ticks_of(seconds))});
+    }
+}
 
 // ShieldBash: PURE CONTROL. The engine has already rolled the melee test this
 // skill declared (SkillAttackTest::Melee) against every target; a landed one
@@ -223,7 +298,7 @@ void shield_bash_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) 
         }
         push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
                                             static_cast<int32_t>(StatusKind::Stunned),
-                                            seconds * 1000.0f});
+                                            static_cast<float>(ticks_of(seconds))});
     }
 }
 
@@ -235,7 +310,7 @@ void curse_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
     for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
         push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
                                             static_cast<int32_t>(StatusKind::Cursed),
-                                            seconds * 1000.0f});
+                                            static_cast<float>(ticks_of(seconds))});
     }
 }
 
@@ -269,12 +344,53 @@ void backstab_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
     }
 }
 
+// Sneak: applies the status and stops. Everything that makes it interesting --
+// being unperceivable, the bonus on the blow that ends it, the fact that the
+// blow ends it at all -- belongs to the STATUS and is enforced where those
+// decisions already happen (combat.cpp, perception.cpp, strike.cpp). This is
+// the status subsystem's whole design showing through: an effect starts a
+// timer, and the systems that care ask.
+void sneak_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    const float seconds = skill_constant(ctx, "duration_seconds", 0.0f);
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        push_effect_op(out, BlSkillEffectOp{BL_FX_APPLY_STATUS, ctx.targets[i].slot,
+                                            static_cast<int32_t>(StatusKind::Sneaking),
+                                            static_cast<float>(ticks_of(seconds))});
+    }
+}
+
+// PrecisionShot: the engine already rolled a test that could not fail, so the
+// whole effect is "deal what that produced". No conditional, no bonus of its
+// own -- everything that makes the shot special (it lands, it crits, it
+// reaches) is engine-checked DATA on the spec, which is what keeps a
+// guaranteed hit from being something an effect can grant itself.
+void precision_shot_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    for (int32_t i = 0; i < ctx.target_count && i < BL_SKILL_MAX_TARGETS; ++i) {
+        const BlSkillTarget& t = ctx.targets[i];
+        if (t.attack_test != BL_TEST_HIT || t.test_damage <= 0.0f) {
+            continue;  // armour ate it, or the host declined the test entirely
+        }
+        push_effect_op(out, BlSkillEffectOp{BL_FX_DAMAGE, t.slot, 0, t.test_damage});
+    }
+}
+
+// Teleport: one op, and it names no destination -- it cannot. The engine
+// validated a point and put it in the context; all this says is "move me
+// there". An effect that wanted to blink somewhere else has no way to express
+// it, which is the contract working rather than a limitation of this skill.
+void teleport_effect(const BlSkillCastContext& ctx, BlSkillEffectBatch& out) {
+    push_effect_op(out, BlSkillEffectOp{BL_FX_TELEPORT, ctx.caster.slot, 0, 0.0f});
+}
+
 constexpr std::array<SkillEffectFn, static_cast<size_t>(kSkillCount)> kEffects{{
     calcify_effect,
     shield_bash_effect,
     curse_effect,
     dress_wounds_effect,
     backstab_effect,
+    sneak_effect,
+    precision_shot_effect,
+    teleport_effect,
 }};
 
 }  // namespace

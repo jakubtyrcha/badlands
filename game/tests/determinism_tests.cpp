@@ -18,12 +18,14 @@
 #include "game_state.h"
 #include "intention.h"    // resolve_action
 #include "progression.h"  // award_xp
+#include "skills.h"       // Skills -- finding the focus skill's slot
 #include "vision.h"
 
 #include "fixtures/wasm_hero.h"
 
 #include <catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -79,7 +81,7 @@ Snapshot snapshot(BadlandsGame* g) {
 void require_same(const Snapshot& a, const Snapshot& b) {
     REQUIRE(a.characters.size() == b.characters.size());
     REQUIRE(a.ticks == b.ticks);
-    CHECK(a.world.world_millis == b.world.world_millis);
+    CHECK(a.world.world_ticks == b.world.world_ticks);
     CHECK(a.world.gold == b.world.gold);
     for (size_t i = 0; i < a.characters.size(); ++i) {
         const CharacterState& x = a.characters[i];
@@ -102,7 +104,7 @@ void require_same(const Snapshot& a, const Snapshot& b) {
 bool same_command(const Command& a, const Command& b) {
     return a.kind == b.kind && a.actor == b.actor && a.target_id == b.target_id &&
            a.point == b.point && a.param_a == b.param_a && a.param_b == b.param_b &&
-           a.at_millis == b.at_millis;
+           a.at_ticks == b.at_ticks;
 }
 
 }  // namespace
@@ -115,8 +117,8 @@ TEST_CASE("the same inputs produce the same state and the same command log") {
     seed_town(a);
     seed_town(b);
     for (int i = 0; i < kRunTicks; ++i) {
-        tick_world(*a, 1.0f / 30.0f);
-        tick_world(*b, 1.0f / 30.0f);
+        step_world(*a);
+        step_world(*b);
     }
 
     require_same(snapshot(a), snapshot(b));
@@ -136,7 +138,7 @@ TEST_CASE("a recorded command log replays into a fresh sim exactly") {
     BadlandsGame* live = live_owned.get();
     seed_town(live);
     for (int i = 0; i < kRunTicks; ++i) {
-        tick_world(*live, 1.0f / 30.0f);
+        step_world(*live);
     }
     const std::vector<Command> log = live->command_log;
     REQUIRE(!log.empty());
@@ -148,7 +150,7 @@ TEST_CASE("a recorded command log replays into a fresh sim exactly") {
     BadlandsGame* replay = replay_owned.get();
     replay->replay_log = &log;
     for (int i = 0; i < kRunTicks; ++i) {
-        tick_world(*replay, 1.0f / 30.0f);
+        step_world(*replay);
     }
 
     CHECK(replay->replay_cursor == log.size());  // the whole trace was consumed
@@ -169,8 +171,8 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     // way -- exactly as a real replay would have to.
     //
     // Its own tick budget (not the file's shared kRunTicks): think-on-wake
-    // means a hero re-considers exploring only once per wake (idle_hint_millis,
-    // 0.5-2s) and only once per explore_lease_millis window (8s = 240 ticks)
+    // means a hero re-considers exploring only once per wake (idle_hint_ticks,
+    // 0.5-2s) and only once per explore_lease_ticks window (8s = 240 ticks)
     // at that, so this needs several lease windows' worth of room, not just
     // kRunTicks' 400.
     constexpr int kExploreTicks = 1500;
@@ -191,7 +193,7 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     BadlandsGame* live = live_owned.get();
     seed_world(live);
     for (int i = 0; i < kExploreTicks; ++i) {
-        tick_world(*live, 1.0f / 30.0f);
+        step_world(*live);
     }
     const std::vector<Command> log = live->command_log;
 
@@ -208,7 +210,7 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
     BadlandsGame* twin = twin_owned.get();
     seed_world(twin);
     for (int i = 0; i < kExploreTicks; ++i) {
-        tick_world(*twin, 1.0f / 30.0f);
+        step_world(*twin);
     }
     REQUIRE(twin->command_log.size() == log.size());
     for (size_t i = 0; i < log.size(); ++i) {
@@ -219,14 +221,14 @@ TEST_CASE("a run with fog of war and explorers replays exactly") {
 
     // And the recorded trace, replayed with the brains off, rebuilds the
     // world -- no wasm brain needed here at all: replay takes every decision
-    // from the log (tick_world's replay_log branch never reaches a brain,
+    // from the log (step_world's replay_log branch never reaches a brain,
     // wasm or mock).
     auto replay_owned = make_world(BrainDesc{});
     BadlandsGame* replay = replay_owned.get();
     configure_vision(replay->vision, -128.0f, -128.0f, 256.0f, 256.0f, 1.0f);
     replay->replay_log = &log;
     for (int i = 0; i < kExploreTicks; ++i) {
-        tick_world(*replay, 1.0f / 30.0f);
+        step_world(*replay);
     }
     CHECK(replay->replay_cursor == log.size());
     require_same(snapshot(live), snapshot(replay));
@@ -237,7 +239,7 @@ TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
     BadlandsGame* live = live_owned.get();
     seed_town(live);
     for (int i = 0; i < 120; ++i) {
-        tick_world(*live, 1.0f / 30.0f);
+        step_world(*live);
     }
     const std::vector<Command> log = live->command_log;
 
@@ -245,7 +247,7 @@ TEST_CASE("replayed commands re-log identically (the trace round-trips)") {
     BadlandsGame* replay = replay_owned.get();
     replay->replay_log = &log;
     for (int i = 0; i < 120; ++i) {
-        tick_world(*replay, 1.0f / 30.0f);
+        step_world(*replay);
     }
 
     REQUIRE(replay->command_log.size() == log.size());
@@ -268,7 +270,7 @@ TEST_CASE("a fight runs to the same state twice (seeded combat is deterministic)
         spawn_into(*g, MercenaryDesc(-4.0f, 0.0f));
         spawn_into(*g, GoblinDesc(4.0f, 0.0f));
         for (int i = 0; i < 300; ++i) {
-            tick_world(*g, 1.0f / 30.0f);
+            step_world(*g);
         }
         return characters_of(*g);
     };
@@ -303,14 +305,14 @@ TEST_CASE("a fight replays bit-identically from the log alone (no brain, no reso
     // command.h, driven by apply_intention's Attack case) and every swing is
     // the logged Attack command (resolve_action) -- so a replay with NO
     // brain and NO combat decision-making of any kind (monster_think never
-    // runs; apply_replay_commands is the only thing tick_world calls) must
+    // runs; apply_replay_commands is the only thing step_world calls) must
     // still fight the fight and land on the identical final state.
     auto live_owned = make_flat_world();
     BadlandsGame* live = live_owned.get();
     spawn_into(*live, MercenaryDesc(-4.0f, 0.0f));
     spawn_into(*live, GoblinDesc(4.0f, 0.0f));
     for (int i = 0; i < 300; ++i) {
-        tick_world(*live, 1.0f / 30.0f);
+        step_world(*live);
     }
     const std::vector<Command> log = live->command_log;
     REQUIRE(!log.empty());
@@ -354,7 +356,7 @@ TEST_CASE("a fight replays bit-identically from the log alone (no brain, no reso
     spawn_into(*replay, GoblinDesc(4.0f, 0.0f));
     replay->replay_log = &log;
     for (int i = 0; i < 300; ++i) {
-        tick_world(*replay, 1.0f / 30.0f);
+        step_world(*replay);
     }
     CHECK(replay->replay_cursor == log.size());  // the whole trace was consumed
 
@@ -385,7 +387,7 @@ TEST_CASE("a run containing UseSkill is reproducible and replays exactly") {
         return std::pair<uint32_t, uint32_t>{merc, gob};
     };
     // Cast on a few well-separated ticks, so the log carries several UseSkill
-    // entries at different world_millis (the seed axis) rather than one.
+    // entries at different world_ticks (the seed axis) rather than one.
     const int kCastTicks[] = {5, 400, 800};
     auto run = [&](BadlandsGame* g) {
         const auto [merc, gob] = stage(g);
@@ -396,7 +398,7 @@ TEST_CASE("a run containing UseSkill is reproducible and replays exactly") {
                     apply_commands(*g);
                 }
             }
-            tick_world(*g, 1.0f / 30.0f);
+            step_world(*g);
         }
     };
 
@@ -432,7 +434,161 @@ TEST_CASE("a run containing UseSkill is reproducible and replays exactly") {
     stage(replay_owned.get());
     replay_owned->replay_log = &recorded;
     for (int i = 0; i < kRunTicks * 3; ++i) {
-        tick_world(*replay_owned, 1.0f / 30.0f);
+        step_world(*replay_owned);
+    }
+    CHECK(replay_owned->replay_cursor == recorded.size());
+    require_same(snapshot(a_owned.get()), snapshot(replay_owned.get()));
+}
+
+TEST_CASE("a run containing a FOCUS is reproducible and replays exactly") {
+    // The regression this exists for: a focus that began only inside
+    // apply_intention would exist live and NEVER on replay -- a replay does not
+    // think, it applies the log -- so its shot would silently go missing and
+    // the two runs would diverge. Logging the START (CommandKind::FocusSkill)
+    // is what closes that; the RESOLUTION deliberately has no command of its
+    // own, being a timer over derived state that advance_focus re-runs
+    // identically either way.
+    //
+    // Which makes this the sharpest determinism case in the file: it is the
+    // only mutation whose cause and whose effect land on DIFFERENT ticks.
+    auto stage = [](BadlandsGame* g) {
+        const uint32_t hunter = spawn_creature_into(*g, CreatureId::Hunter, kPlayerTeam,
+                                                    {0.0f, kCastleSpawnZ}, /*level=*/5);
+        const uint32_t gob = spawn_creature_into(*g, CreatureId::Goblin, /*team=*/1,
+                                                 {14.0f, kCastleSpawnZ});
+        return std::pair<uint32_t, uint32_t>{hunter, gob};
+    };
+    // Well outside the hunter's own 8 m bow and well inside the shot's 30 m, so
+    // the cast is only legal at all because the skill's authored range wins.
+    const int kFocusTicks[] = {5, 600, 1200};
+    auto run = [&](BadlandsGame* g) {
+        const auto [hunter, gob] = stage(g);
+        // Which slot the shot landed in is grant-order business, not this
+        // test's: find it rather than assuming.
+        int32_t slot = -1;
+        const Skills& sk = g->registry.get<Skills>(entity_for_slot(*g, static_cast<int32_t>(hunter)));
+        for (int32_t i = 0; i < sk.count; ++i) {
+            if (sk.ids[i] == SkillId::PrecisionShot) {
+                slot = i;
+            }
+        }
+        REQUIRE(slot >= 0);
+        for (int i = 0; i < kRunTicks * 4; ++i) {
+            for (int at : kFocusTicks) {
+                if (i == at) {
+                    Intention focus;
+                    focus.kind = IntentionKind::UseSkill;
+                    focus.target_slot = gob;
+                    focus.arg = slot;
+                    apply_intention(*g, hunter, focus);
+                    apply_commands(*g);
+                }
+            }
+            step_world(*g);
+        }
+    };
+
+    auto a_owned = make_world(BrainDesc{});
+    auto b_owned = make_world(BrainDesc{});
+    run(a_owned.get());
+    run(b_owned.get());
+    require_same(snapshot(a_owned.get()), snapshot(b_owned.get()));
+
+    const std::vector<Command>& log = a_owned->command_log;
+    int focuses = 0;
+    for (const Command& c : log) {
+        if (c.kind == CommandKind::FocusSkill) {
+            ++focuses;
+            CHECK(c.target_id != UINT32_MAX);
+        }
+    }
+    CHECK(focuses >= 1);  // the trace really does carry the commitment
+
+    const std::vector<Command> recorded = log;
+    auto replay_owned = make_world(BrainDesc{});
+    stage(replay_owned.get());
+    replay_owned->replay_log = &recorded;
+    for (int i = 0; i < kRunTicks * 4; ++i) {
+        step_world(*replay_owned);
+    }
+    CHECK(replay_owned->replay_cursor == recorded.size());
+    require_same(snapshot(a_owned.get()), snapshot(replay_owned.get()));
+}
+
+TEST_CASE("a focus ABANDONED mid-cast replays exactly") {
+    // The companion to the case above, and the one that actually bites: a focus
+    // that starts and RESOLVES is symmetric, but one that is abandoned is not.
+    // The start is logged; if the cancel is not, then replay recreates the focus
+    // from the log, nothing erases it, and advance_focus fires the shot the live
+    // run never fired. Divergence in the sharpest possible direction -- a kill
+    // that only happens in the replay.
+    auto stage = [](BadlandsGame* g) {
+        const uint32_t hunter = spawn_creature_into(*g, CreatureId::Hunter, kPlayerTeam,
+                                                    {0.0f, kCastleSpawnZ}, /*level=*/5);
+        const uint32_t gob = spawn_creature_into(*g, CreatureId::Goblin, /*team=*/1,
+                                                 {14.0f, kCastleSpawnZ});
+        return std::pair<uint32_t, uint32_t>{hunter, gob};
+    };
+    auto run = [&](BadlandsGame* g) {
+        const auto [hunter, gob] = stage(g);
+        int32_t slot = -1;
+        const Skills& sk =
+            g->registry.get<Skills>(entity_for_slot(*g, static_cast<int32_t>(hunter)));
+        for (int32_t i = 0; i < sk.count; ++i) {
+            if (sk.ids[i] == SkillId::PrecisionShot) {
+                slot = i;
+            }
+        }
+        REQUIRE(slot >= 0);
+        for (int i = 0; i < kRunTicks * 2; ++i) {
+            if (i == 5) {
+                Intention focus;
+                focus.kind = IntentionKind::UseSkill;
+                focus.target_slot = gob;
+                focus.arg = slot;
+                apply_intention(*g, hunter, focus);
+                apply_commands(*g);
+            }
+            // 30 ticks in: a second thought, well inside the 2 s focus. Live,
+            // this abandons the cast and no shot is ever fired.
+            //
+            // Idle rather than MoveTo, deliberately. A brainless hero (no wasm
+            // loaded, which is what these determinism worlds use) has its
+            // MoveTarget cleared every live tick by the mock think dispatch,
+            // and replay does not think at all -- so ANY movement injected into
+            // one diverges for reasons that have nothing to do with focus. Idle
+            // adopts through SetBehavior alone and touches no movement, which
+            // keeps this case about the thing it is testing.
+            if (i == 35) {
+                Intention stop;
+                stop.kind = IntentionKind::Idle;
+                stop.duration_ticks = 1000;
+                apply_intention(*g, hunter, stop);
+                apply_commands(*g);
+            }
+            step_world(*g);
+        }
+    };
+
+    auto a_owned = make_world(BrainDesc{});
+    run(a_owned.get());
+
+    // The goblin is untouched: the shot really was abandoned, so the replay
+    // below is checking something other than "both runs did nothing".
+    const std::vector<Command>& log = a_owned->command_log;
+    CHECK(std::any_of(log.begin(), log.end(), [](const Command& c) {
+        return c.kind == CommandKind::FocusSkill;
+    }));
+    CHECK(std::any_of(log.begin(), log.end(), [](const Command& c) {
+        return c.kind == CommandKind::CancelFocus;
+    }));
+
+    const std::vector<Command> recorded = log;
+    auto replay_owned = make_world(BrainDesc{});
+    stage(replay_owned.get());
+    replay_owned->replay_log = &recorded;
+    for (int i = 0; i < kRunTicks * 2; ++i) {
+        step_world(*replay_owned);
     }
     CHECK(replay_owned->replay_cursor == recorded.size());
     require_same(snapshot(a_owned.get()), snapshot(replay_owned.get()));

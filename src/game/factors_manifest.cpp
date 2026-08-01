@@ -129,9 +129,9 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             !ReadNum(*s, "hero", "roam_radius", manifest_path, h.roam_radius) ||
             !ReadNum(*s, "hero", "hunt_sight_radius", manifest_path, h.hunt_sight_radius) ||
             !ReadNum(*s, "hero", "threat_radius", manifest_path, h.threat_radius) ||
-            !ReadNum(*s, "hero", "memory_ttl_millis", manifest_path, h.memory_ttl_millis) ||
-            !ReadNum(*s, "hero", "think_min_millis", manifest_path, h.think_min_millis) ||
-            !ReadNum(*s, "hero", "think_max_millis", manifest_path, h.think_max_millis) ||
+            !ReadNum(*s, "hero", "memory_ttl_ticks", manifest_path, h.memory_ttl_ticks) ||
+            !ReadNum(*s, "hero", "think_min_ticks", manifest_path, h.think_min_ticks) ||
+            !ReadNum(*s, "hero", "think_max_ticks", manifest_path, h.think_max_ticks) ||
             !ReadNum(*s, "hero", "chat_content_seek", manifest_path, h.chat_content_seek) ||
             !ReadNum(*s, "hero", "chat_fill_hours", manifest_path, h.chat_fill_hours) ||
             !ReadNum(*s, "hero", "chat_content_ceiling", manifest_path,
@@ -144,7 +144,7 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
             !ReadNum(*s, "hero", "explore_max_distance", manifest_path, h.explore_max_distance) ||
             !ReadNum(*s, "hero", "explore_search_radius", manifest_path,
                      h.explore_search_radius) ||
-            !ReadNum(*s, "hero", "explore_lease_millis", manifest_path, h.explore_lease_millis)) {
+            !ReadNum(*s, "hero", "explore_lease_ticks", manifest_path, h.explore_lease_ticks)) {
             return false;
         }
         // "explore_chance": { "<Hero class>": <0..1>, ... } -- how often a class
@@ -220,8 +220,8 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
     }
     if (s != nullptr) {
         TownfolkFactors& t = parsed.townfolk;
-        if (!ReadNum(*s, "townfolk", "spawn_interval_millis", manifest_path,
-                     t.spawn_interval_millis) ||
+        if (!ReadNum(*s, "townfolk", "spawn_interval_ticks", manifest_path,
+                     t.spawn_interval_ticks) ||
             !ReadNum(*s, "townfolk", "max_alive", manifest_path, t.max_alive) ||
             !ReadNum(*s, "townfolk", "move_speed", manifest_path, t.move_speed) ||
             !ReadNum(*s, "townfolk", "house_income_per_day", manifest_path,
@@ -234,8 +234,8 @@ bool LoadSimFactors(const std::string& manifest_path, SimFactors& out) {
     }
     if (s != nullptr) {
         MonsterFactors& m = parsed.monster;
-        if (!ReadNum(*s, "monster", "spawn_interval_millis", manifest_path,
-                     m.spawn_interval_millis) ||
+        if (!ReadNum(*s, "monster", "spawn_interval_ticks", manifest_path,
+                     m.spawn_interval_ticks) ||
             !ReadNum(*s, "monster", "max_alive", manifest_path, m.max_alive)) {
             return false;
         }

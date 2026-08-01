@@ -20,6 +20,7 @@ namespace {
 constexpr const char* kNames[kCreatureCount] = {
     "Mercenary", "Hunter", "GraveRobber", "Apprentice", "Rat",         "Goblin",
     "Deer",      "Bandit", "BanditArcher", "BanditLeader", "MudGolem",
+    "TrainingDummy",
 };
 
 }  // namespace
@@ -98,8 +99,11 @@ CreatureCatalog::CreatureCatalog() {
         // Armour 1, evasion 1, hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.004f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
+        // Two at level 2: with Skin Game deferred (no corpses exist to skin)
+        // the hunter would otherwise be a one-skill class.
         d.skill_grants[0] = {static_cast<int32_t>(SkillId::DressWounds), 2};
-        d.skill_grant_count = 1;
+        d.skill_grants[1] = {static_cast<int32_t>(SkillId::PrecisionShot), 2};
+        d.skill_grant_count = 2;
     }
     // Grave Robber: mixed -- a hand crossbow OPENER (one heavy, high-crit bolt
     // on a long reload) then blades. The reload is the whole identity: at a
@@ -122,8 +126,12 @@ CreatureCatalog::CreatureCatalog() {
         // Armour 1, evasion 2 (the nimblest of the four), hitpoints 1, dps 2.
         d.growth = {.hp = 1.5f, .accuracy = 0.005f, .evasion = 0.008f,
                     .defense = 0.0f, .armour = 0.10f, .damage_frac = 0.08f};
-        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Backstab), 3};
-        d.skill_grant_count = 1;
+        // Sneak and Backstab both at 3, deliberately: the approach and the
+        // payoff are one tool, and either alone is half a class.
+        d.skill_grants[0] = {static_cast<int32_t>(SkillId::Sneak), 3};
+        d.skill_grants[1] = {static_cast<int32_t>(SkillId::Backstab), 3};
+        d.skill_grants[2] = {static_cast<int32_t>(SkillId::PrecisionShot), 5};
+        d.skill_grant_count = 3;
     }
     // Apprentice: fragile ranged caster (a magic bolt; Soul comes later).
     {
@@ -150,7 +158,8 @@ CreatureCatalog::CreatureCatalog() {
         // per the design document (it was compiled at 5), effect still deferred.
         d.skill_grants[0] = {static_cast<int32_t>(SkillId::Curse), 1};
         d.skill_grants[1] = {static_cast<int32_t>(SkillId::Calcify), 4};
-        d.skill_grant_count = 2;
+        d.skill_grants[2] = {static_cast<int32_t>(SkillId::Teleport), 8};
+        d.skill_grant_count = 3;
     }
 
     // --- monsters -----------------------------------------------------------
@@ -247,6 +256,30 @@ CreatureCatalog::CreatureCatalog() {
         d.attack_count = 1;
         d.attacks[0] = {AttackCategory::Melee, DamageType::Blunt, 12.0f, 1.8f, 2.2f, 0.05f, 1.00f, 0.60f};
         d.xp_reward = 250;
+    }
+    // Training dummy: a THREAT NUMBER THAT WALKS. Its whole content is its
+    // threat anchor (threat_table.cpp: 20, far above anything else here), and
+    // it is deliberately unarmed -- so a brain can be shown something
+    // overwhelming without a fight breaking out, and whatever it decides can be
+    // observed without a race against its own death.
+    //
+    // Monster, not Critter: a critter is neutral wildlife and nearest_enemy
+    // skips it entirely, so it would be perceived by nobody. This has to be
+    // hostile to be seen at all.
+    //
+    // Being unarmed also keeps it out of anything that samples fighters by
+    // whether they can fight -- no name check needed anywhere.
+    {
+        CharacterDesc& d = at(CreatureId::TrainingDummy);
+        d.archetype = Archetype::Monster;
+        d.hp = 400.0f;  // it is not meant to fall over while being reacted to
+        d.move_speed = 1.6f;
+        d.size_x = 1.2f; d.size_y = 2.0f; d.size_z = 1.2f;
+        d.color_r = 0.55f; d.color_g = 0.50f; d.color_b = 0.42f;  // sackcloth
+        d.accuracy = 0.0f; d.evasion = 0.0f; d.defense = 0.0f; d.armour = 0.0f;
+        d.stance = CombatStance::Melee;
+        d.attack_count = 0;  // no attacks at all, and no legacy attack_damage
+        d.xp_reward = 0;
     }
 
     // --- critters -----------------------------------------------------------

@@ -6,9 +6,10 @@
 #include "game_state.h"
 #include "hero_perception.h"  // observe_hero/weights_for/WorldView/ActivityWeights/kActivityCount
 #include "skills.h"           // evaluate_skill_triggers -- the skills block's ready/recommended
-#include "status.h"        // remaining_millis_of -- BL_ST_STUNNED / BL_ST_DISENGAGED
+#include "status.h"        // remaining_ticks_of -- BL_ST_STUNNED / BL_ST_DISENGAGED
 #include "threat_table.h"  // threat_of -- both sides of the fight-or-flee comparison
 #include "combat.h"        // melee_range / ranged_range -- a threat's reach on the wire
+#include "skill_cast.h"    // skill_cast_range -- how wide that window has to be
 
 #include <spdlog/spdlog.h>
 
@@ -76,9 +77,10 @@ void forward_log(int32_t level, const uint8_t* msg, size_t len, void* /*user*/) 
 // LIVE against the shipping brain: hero.nim enqueues one BL_ACT_ATTACK per
 // combat wake, and tick_wasm_brain drains pending_actions through
 // resolve_action (game/src/intention.h) right after the intention applies.
-void forward_action(int32_t kind, uint32_t target_slot, int32_t arg, void* user) {
+void forward_action(int32_t kind, uint32_t target_slot, int32_t arg, float point_x,
+                    float point_z, void* user) {
     auto* runtime = static_cast<WasmBrainRuntime*>(user);
-    runtime->pending_actions.push_back(PendingAction{kind, target_slot, arg});
+    runtime->pending_actions.push_back(PendingAction{kind, target_slot, arg, point_x, point_z});
 }
 
 // The single fail-fast enforcement point (see wasm_brain.h's policy note):
@@ -122,11 +124,11 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 
     // --- self ---------------------------------------------------------------
     BlViewSelf& self = wire.self;
-    self.world_millis = view.now_millis;
-    self.think_until_millis = view.think_until_millis;
+    self.world_ticks = view.now_ticks;
+    self.think_until_ticks = view.think_until_ticks;
     self.roam_epoch = view.roam_epoch;
     const CurrentIntention& ci = game.registry.get<CurrentIntention>(e);
-    self.intention_wake_at = ci.wake_at_millis;
+    self.intention_wake_at = ci.wake_at_ticks;
     self.slot = view.slot;
     // v5: this hero's own combat potential, the other half of the comparison
     // BlThreat::threat enables (game/src/threat_table.h).
@@ -216,19 +218,24 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     // Deliberately excluded (see brain_abi.h's BlViewFactors doc comment):
     // perception-only factors (radii, drain/fill rates, lease windows) --
     // those stay host-side, read by observe_hero above, not the brain. Also
-    // excluded (v2): think_min_millis/think_max_millis -- deliberation is
+    // excluded (v2): think_min_ticks/think_max_ticks -- deliberation is
     // gone.
 
     // --- statuses: advisory only this slice (brain_abi.h's BL_ST_* doc) -------
     int32_t status_count = 0;
-    auto push_status = [&](int32_t kind, int64_t remaining_millis) {
+    auto push_status = [&](int32_t kind, int64_t remaining_ticks) {
         if (status_count < BL_MAX_STATUSES) {
             wire.statuses[status_count++] =
-                BlStatus{remaining_millis, static_cast<uint32_t>(kind), 0u};
+                BlStatus{remaining_ticks, static_cast<uint32_t>(kind), 0u};
         }
     };
     if (const auto* cs = game.registry.try_get<ChattingState>(e)) {
-        push_status(BL_ST_CHATTING, static_cast<int64_t>(cs->remaining * 1000.0f));
+        // ticks_of, NOT * 1000: ChattingState::remaining is float SECONDS and
+        // this wire field is ticks. The ms->ticks sweep could not see this one
+        // -- there is no identifier here to rename, only a bare conversion --
+        // which is exactly why the ABI version bump exists: no struct changed
+        // size, so nothing else would have caught it.
+        push_status(BL_ST_CHATTING, ticks_of(cs->remaining));
     }
     if (game.registry.all_of<MeleeLock>(e)) {
         push_status(BL_ST_MELEE_LOCKED, 0);  // indefinite -- ends when combat resolves
@@ -236,15 +243,25 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     if (game.registry.all_of<InsideBuilding>(e)) {
         push_status(BL_ST_INSIDE_BUILDING, 0);  // indefinite -- ends when the need is filled
     }
-    if (const int64_t cursed = remaining_millis_of(game.registry, e, StatusKind::Cursed);
+    if (const int64_t cursed = remaining_ticks_of(game.registry, e, StatusKind::Cursed);
         cursed > 0) {
         push_status(BL_ST_CURSED, cursed);
     }
-    if (const int64_t dis = remaining_millis_of(game.registry, e, StatusKind::Disengaged);
+    if (const int64_t dis = remaining_ticks_of(game.registry, e, StatusKind::Disengaged);
         dis > 0) {
         push_status(BL_ST_DISENGAGED, dis);
     }
-    if (const int64_t stun = remaining_millis_of(game.registry, e, StatusKind::Stunned);
+    if (const int64_t sneak = remaining_ticks_of(game.registry, e, StatusKind::Sneaking);
+        sneak > 0) {
+        // A brain only ever sees this on its OWN wire: a sneaking entity is
+        // absent from everyone else's threat list, which is the whole mechanic.
+        push_status(BL_ST_SNEAKING, sneak);
+    }
+    if (const int64_t calc = remaining_ticks_of(game.registry, e, StatusKind::Calcified);
+        calc > 0) {
+        push_status(BL_ST_CALCIFIED, calc);
+    }
+    if (const int64_t stun = remaining_ticks_of(game.registry, e, StatusKind::Stunned);
         stun > 0) {
         // Rarely seen by the brain it belongs to -- a stunned entity is not
         // consulted at all (sim.cpp's think dispatch) -- but carried for the
@@ -288,7 +305,82 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
         sctx.threats = view.threats;
         sctx.threat_count = view.threat_count;
         const int32_t n = evaluate_skill_triggers(*skills, sctx, recs);
-        wire.skill_count = n;
+        // --- nav polys (v6): the local ground, so a brain can pick somewhere to go.
+    //
+    // Filled ONLY for an entity that owns a POINT-targeted skill. Nothing else
+    // can use it, and the window costs a bounded quadtree scan per wake -- a
+    // price worth paying for the one apprentice in a fight and not for every
+    // rat in it. Everyone else reads nav_poly_count == 0.
+    wire.nav_poly_count = 0;
+    {
+        bool wants_ground = false;
+        if (const auto* sk = game.registry.try_get<Skills>(e); sk != nullptr) {
+            for (int32_t i = 0; i < sk->count && i < kMaxSkills && !wants_ground; ++i) {
+                wants_ground = game.skills.specs[static_cast<size_t>(sk->ids[i])].target ==
+                               SkillTargetMode::Point;
+            }
+        }
+        if (wants_ground) {
+            // Cast in the widest reach any of this entity's point skills has,
+            // so the window always covers what it could legally choose.
+            // A NON-POSITIVE cast range means UNBOUNDED (skill_cast.h), not
+            // "zero metres" -- folding it with max() would let an unbounded
+            // skill lose to a bounded one, and a lone unbounded skill would ask
+            // for a radius of 0 and be handed an empty window it can never pick
+            // from. Sight caps the result either way, just below.
+            float radius = 0.0f;
+            bool unbounded = false;
+            const Skills& sk = game.registry.get<Skills>(e);
+            for (int32_t i = 0; i < sk.count && i < kMaxSkills; ++i) {
+                const SkillSpec& spec = game.skills.specs[static_cast<size_t>(sk.ids[i])];
+                if (spec.target != SkillTargetMode::Point) {
+                    continue;
+                }
+                const float r = skill_cast_range(game.registry, e, spec);
+                if (r > 0.0f) {
+                    radius = std::max(radius, r);
+                } else {
+                    unbounded = true;
+                }
+            }
+            // ...and only what this entity can actually SEE. The window is its
+            // own vision cone, the same Vision component the fog of war reads,
+            // so a hero cannot pick a destination behind its own back. Sight
+            // also CAPS the radius: you may not blink somewhere you have not
+            // looked, however far the skill would reach.
+            //
+            // Read straight off the mesh, no rebuild: step_world makes the
+            // navmesh current BEFORE any brain thinks (sim.cpp), precisely so
+            // that AI goal selection sees this tick's obstacles. Rebuilding
+            // here would be a redundant pass and would force this whole packer
+            // to take a mutable world for one query.
+            glm::vec2 facing{0.0f, 1.0f};
+            float cone_half_cos = -1.0f;
+            if (const auto* f = game.registry.try_get<Facing>(e); f != nullptr) {
+                facing = f->dir;
+            }
+            if (const auto* vis = game.registry.try_get<Vision>(e);
+                vis != nullptr && vis->radius > 0.0f) {
+                cone_half_cos = vis->cone_half_cos;
+                // Sight is the cap, and for an unbounded skill it is the whole
+                // bound: you may not blink somewhere you have not looked.
+                radius = unbounded ? vis->radius : std::min(radius, vis->radius);
+            }
+            std::vector<nav::NavMesh::DebugCell> cells;
+            game.navmesh.CellsNear(view.pos, radius, BL_MAX_NAV_POLYS, cells, facing,
+                                   cone_half_cos);
+            for (const nav::NavMesh::DebugCell& c : cells) {
+                BlNavPoly& p = wire.nav_polys[wire.nav_poly_count++];
+                p.min_x = c.min_world.x;
+                p.min_z = c.min_world.y;
+                p.max_x = c.max_world.x;
+                p.max_z = c.max_world.y;
+                p.passable = c.passable ? 1 : 0;
+            }
+        }
+    }
+
+    wire.skill_count = n;
         for (int32_t i = 0; i < n && i < BL_MAX_SKILLS; ++i) {
             const SkillSpec& spec = game.skills.specs[static_cast<size_t>(skills->ids[i])];
             wire.skills[i] = BlViewSkill{static_cast<int32_t>(skills->ids[i]),
@@ -305,8 +397,8 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     wire.event_count = inbox.count;
     for (int32_t i = 0; i < inbox.count; ++i) {
         const InboxEvent& ev = inbox.events[i];
-        wire.events[i] = BlEvent{ev.at_millis,
-                                 ev.ttl_millis,
+        wire.events[i] = BlEvent{ev.at_ticks,
+                                 ev.ttl_ticks,
                                  static_cast<uint32_t>(ev.kind),
                                  ev.source_slot,
                                  ev.param,
@@ -325,7 +417,7 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
     wire.char_count = n;
     for (int32_t i = 0; i < n; ++i) {
         const MemoryChar& mc = *ordered[i];
-        wire.chars[i] = BlViewChar{mc.last_seen_millis,
+        wire.chars[i] = BlViewChar{mc.last_seen_ticks,
                                    mc.slot,
                                    mc.archetype,
                                    mc.team,
@@ -345,8 +437,8 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 //
 //  - MALFORMED (corruption-shaped, FATAL -> nullopt, escalated by the
 //    caller): a non-finite point coordinate (would propagate into
-//    MoveTo/distance math, apply_intention/intention.cpp) or a duration_millis/
-//    idle_hint_millis outside [0, INT32_MAX] (narrows losslessly into a
+//    MoveTo/distance math, apply_intention/intention.cpp) or a duration_ticks/
+//    idle_hint_ticks outside [0, INT32_MAX] (narrows losslessly into a
 //    Command's int32_t param_b ONLY because this check bounds it first,
 //    command.cpp's enqueue_set_behavior). These shapes cannot come from a
 //    well-formed guest of ANY version -- they indicate a buggy/adversarial
@@ -366,18 +458,20 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
 //    out-of-range activity_label clamps to -1 (inspection-only field, no
 //    downstream index risk once clamped).
 //
-// BL_INT_USE_SKILL is a THIRD case: known and in-range, but reserved --
-// same warn+None outcome as an unknown kind, with its own message.
+// BL_INT_USE_SKILL is no longer a third case: it is an ordinary kind now, and
+// decodes straight across like every other one (game/src/skill_focus.h). What
+// it means -- a FOCUS -- is apply_intention's business, and a skill whose
+// trigger is not Intention is refused there, not here.
 std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t slot) {
     if (!std::isfinite(out.point_x) || !std::isfinite(out.point_z)) {
         return std::nullopt;
     }
-    if (out.duration_millis < 0 ||
-        out.duration_millis > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+    if (out.duration_ticks < 0 ||
+        out.duration_ticks > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
         return std::nullopt;
     }
-    if (out.idle_hint_millis < 0 ||
-        out.idle_hint_millis > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+    if (out.idle_hint_ticks < 0 ||
+        out.idle_hint_ticks > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
         return std::nullopt;
     }
 
@@ -385,13 +479,10 @@ std::optional<Intention> decode_suggestion(const BlSuggestionWire& out, uint32_t
     intent.point = {out.point_x, out.point_z};
     intent.target_slot = out.target_slot;
     intent.arg = out.arg;
-    intent.duration_millis = out.duration_millis;
-    intent.idle_hint_millis = out.idle_hint_millis;
+    intent.duration_ticks = out.duration_ticks;
+    intent.idle_hint_ticks = out.idle_hint_ticks;
 
-    if (out.intention_kind == BL_INT_USE_SKILL) {
-        spdlog::warn("[wasm-brain] slot {}: BL_INT_USE_SKILL is reserved, ignored", slot);
-        intent.kind = IntentionKind::None;
-    } else if (out.intention_kind < BL_INT_NONE || out.intention_kind > BL_INT_USE_SKILL) {
+    if (out.intention_kind < BL_INT_NONE || out.intention_kind > BL_INT_USE_SKILL) {
         spdlog::warn("[wasm-brain] slot {}: unrecognized intention_kind {}, ignored (forward-compat)",
                     slot, out.intention_kind);
         intent.kind = IntentionKind::None;
@@ -486,9 +577,9 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
         brain_fatal("tick", slot, std::string("bh_tick failed: ") + bh_last_error());
     }
 
-    // decode_suggestion is pure aside from the one BL_INT_USE_SKILL warning
-    // (see its doc comment); a std::nullopt here is a brain bug under the
-    // fail-fast policy, so this is the escalation point.
+    // decode_suggestion is pure aside from its forward-compat warnings (see its
+    // doc comment); a std::nullopt here is a brain bug under the fail-fast
+    // policy, so this is the escalation point.
     const std::optional<Intention> intent = decode_suggestion(out, slot);
     if (!intent.has_value()) {
         brain_fatal("decode", slot,
@@ -517,7 +608,9 @@ void tick_wasm_brain(BadlandsGame& game, uint32_t slot) {
     // adopted above (resolve_action never touches CurrentIntention) or the
     // rest of this batch.
     for (const PendingAction& action : runtime.pending_actions) {
-        resolve_action(game, slot, AgentAction{action.kind, action.target_slot, action.arg});
+        resolve_action(game, slot,
+                       AgentAction{action.kind, action.target_slot, action.arg,
+                                   {action.point_x, action.point_z}});
     }
 }
 

@@ -17,7 +17,7 @@
 // v3 (contract-v3-alignment, docs/superpowers/specs/
 // 2026-07-25-contract-v3-alignment-design.md): adds a second, write-only
 // channel alongside the one suggestion a wake still returns -- a brain may
-// call the new bl_enqueue_action(kind, target_slot, arg) host import
+// call the new bl_enqueue_action(kind, target_slot, arg, point_x, point_z) host import
 // (src/crates/brainhost/include/brainhost.h) any number of times per wake to
 // fire instant actions (BL_ACT_*; only BL_ACT_ATTACK is live), each
 // validated by the engine independently at resolve time, in enqueue order.
@@ -68,7 +68,13 @@ extern "C" {
 
 // Wire format version. Bumped on any incompatible layout change; the host
 // (bh_instantiate) rejects a module whose bl_abi_version() disagrees.
-#define BL_ABI_VERSION 5
+// v7: sim time is TICKS of 1/120 s, not milliseconds. NO STRUCT CHANGED SIZE --
+// every one of these fields was an int64 before and is an int64 now -- so the
+// size static_asserts below are BLIND to this break. The version is the only
+// signal that the numbers mean something new, which is exactly why it must be
+// bumped: a v6 guest talking to a v7 host would read every duration 3.6x short
+// and nothing would fail loudly.
+#define BL_ABI_VERSION 7
 
 // Capacities baked into the wire structs below (fixed-size arrays -- no
 // dynamic length on the wasm side of this boundary).
@@ -88,6 +94,11 @@ extern "C" {
 // same way in wasm_brain.cpp.
 #define BL_MAX_SKILLS 8
 
+// Navmesh rectangles a brain is shown around itself (v6). A brain cannot pick
+// somewhere to go that it cannot see, and a POINT-targeted skill needs exactly
+// that -- so this is the local ground, nearest-first and capped.
+#define BL_MAX_NAV_POLYS 32
+
 // Action kinds (append-only): the vocabulary for bl_enqueue_action's `kind`
 // argument (src/crates/brainhost/include/brainhost.h's BhActionFn). Unlike
 // BL_INT_* (one suggestion per wake, validated/tracked by apply_intention),
@@ -102,9 +113,12 @@ extern "C" {
 // live: arg = index into BlViewWire.skills (the actor's OWN skill slots, the
 // same convention BL_ACT_ATTACK's arg uses for its attacks), target_slot =
 // the victim (UINT32_MAX = the current Attack-intention's target, or the
-// caster itself for a self-targeted skill). Everything else -- cooldown,
-// whether the skill is castable as an action at all, targeting-mode legality,
-// reach -- is checked host-side (game/src/skill_cast.h's validate_cast).
+// caster itself for a self-targeted skill). A POINT-targeted skill names its
+// destination in the call's point_x/point_z instead (v6); every other action
+// passes zeroes. Everything else -- cooldown, whether the skill is castable as
+// an action at all, targeting-mode legality, reach, and whether that point is
+// somewhere anything could stand -- is checked host-side (game/src/
+// skill_cast.h's validate_cast).
 #define BL_ACT_USE_SKILL 1
 #define BL_ACT_USE_POTION 2  // reserved
 // live: arg = index into BlViewWire.attacks (BL_ACT_ATTACK's attack index),
@@ -114,7 +128,8 @@ extern "C" {
 
 // Intention kinds (append-only): the suggestion's `kind`. 0 = no suggestion
 // this wake. Mirrors badlands::IntentionKind (game/src/components.h) 1:1 for
-// values 0..8 -- BL_INT_USE_SKILL(9) has no IntentionKind counterpart yet
+// values 0..9, BL_INT_USE_SKILL included (v6: it has an IntentionKind
+// counterpart now -- a FOCUS, game/src/skill_focus.h)
 // (reserved). Same discipline as v1's BL_CMD_* list: never renumber or reuse
 // a shipped value.
 #define BL_INT_NONE 0
@@ -126,7 +141,14 @@ extern "C" {
 #define BL_INT_BUY 6
 #define BL_INT_CHAT 7
 #define BL_INT_IDLE 8
-#define BL_INT_USE_SKILL 9  // reserved: rejected (warn+ignore) by the host until the skills slice
+// A FOCUS (v6): adopt skill `arg` (an index into BlViewWire.skills) at
+// `target_slot` and hold it for that skill's intention_duration, after which
+// the engine casts it. Only a skill whose trigger is Intention may be adopted
+// this way -- an ACTION skill goes through bl_enqueue_action instead, and each
+// channel refuses the other's (game/src/skill_cast.h). Adopting anything else
+// mid-focus abandons it, which is the only way to abandon one: a focusing
+// entity does not move.
+#define BL_INT_USE_SKILL 9
 
 // Event kinds (append-only), mirroring badlands::InboxEventKind
 // (game/src/components.h) 1:1.
@@ -156,6 +178,13 @@ extern "C" {
 // that can see it may choose to disengage-and-wait or press anyway. Adding a
 // STATUS VALUE changes no struct layout, so this is not an ABI break.
 #define BL_ST_CURSED 6
+// Unseen: this entity is skipped by every target selection and every threat
+// scan in the sim (combat.h's select_target, behaviours/perception.cpp's
+// collect_threats). A brain sees it on its OWN wire and never on anyone
+// else's -- that is the point of it.
+#define BL_ST_SNEAKING 7
+// Hide hardened to stone: flat armour up, nothing else. Advisory.
+#define BL_ST_CALCIFIED 8
 
 // --- BlViewSelf --------------------------------------------------------------
 // This entity's own state: clock, identity, needs, and a summary of what the
@@ -165,16 +194,16 @@ extern "C" {
 // on a fresh wake). One per BlViewWire (the thinking entity), as opposed to
 // BlViewChar (every OTHER entity it can currently see).
 typedef struct BlViewSelf {
-    int64_t world_millis;         // sim clock right now
-    int64_t think_until_millis;   // carried from v1 (HeroSimulationState's own
+    int64_t world_ticks;         // sim clock right now
+    int64_t think_until_ticks;   // carried from v1 (HeroSimulationState's own
                                    // deliberation pause, unrelated to the
                                    // intention contract) -- always 0 for a
                                    // hero driven by this wire, since nothing
                                    // on this path ever requests ActivityId::
                                    // Think anymore; kept only because BlViewSelf
                                    // otherwise stays 1:1 with WorldView.
-    int64_t roam_epoch;           // world_millis / roam lease window (stable roam goal)
-    int64_t intention_wake_at;    // CurrentIntention.wake_at_millis; 0 only for a
+    int64_t roam_epoch;           // world_ticks / roam lease window (stable roam goal)
+    int64_t intention_wake_at;    // CurrentIntention.wake_at_ticks; 0 only for a
                                    // hero that has never been adopted/restated
                                    // yet -- v3's default wake cadence
                                    // (intention-contract.html §2) means an
@@ -273,8 +302,8 @@ typedef struct BlViewSuggest {
 // (scripts/brains/nim/hero.nim's kHeroActivities -- the sole implementation
 // now; game/src/behaviours/blocks.cpp keeps only the shared/non-hero blocks).
 // Unlike v1, this does NOT carry
-// think_min_millis/think_max_millis -- deliberation is gone; the idle hint
-// (BlSuggestionWire::idle_hint_millis, drawn guest-side against a compiled
+// think_min_ticks/think_max_ticks -- deliberation is gone; the idle hint
+// (BlSuggestionWire::idle_hint_ticks, drawn guest-side against a compiled
 // constant) replaces it. Perception-only factors (radii used by observe_hero,
 // explore_chance, drain/fill rates, lease windows) stay excluded, same as v1.
 typedef struct BlViewFactors {
@@ -305,7 +334,7 @@ typedef struct BlViewFactors {
 // raw character list a brain's own logic might scan, e.g. to pick a
 // companion or a target). Unchanged from v1.
 typedef struct BlViewChar {
-    int64_t last_seen_millis;
+    int64_t last_seen_ticks;
     uint32_t slot;
     int32_t archetype;    // badlands::Archetype
     int32_t team;
@@ -318,13 +347,13 @@ typedef struct BlViewChar {
 
 // --- BlStatus --------------------------------------------------------------
 // One advisory status affecting this entity right now: {kind, remaining}.
-// kind in BL_ST_*; remaining_millis == 0 means indefinite (ends on some
+// kind in BL_ST_*; remaining_ticks == 0 means indefinite (ends on some
 // condition other than a timer -- e.g. BL_ST_INSIDE_BUILDING ends when the
 // need that sent the hero in is filled, not on a clock). All three v1 kinds
 // are advisory only this slice -- none bypasses the think (see brain_abi.h's
 // BL_ST_* doc above and docs/design/intention-contract.html §2).
 typedef struct BlStatus {
-    int64_t remaining_millis;    // 0 = indefinite
+    int64_t remaining_ticks;    // 0 = indefinite
     uint32_t kind;
     uint32_t _pad;
 } BlStatus;
@@ -376,13 +405,29 @@ typedef struct BlViewSkill {
 // 1:1): {kind, source_slot, param}, plus the two clocks a sticky, TTL-expiring
 // entry needs (when it happened, how much longer it survives unread).
 typedef struct BlEvent {
-    int64_t at_millis;
-    int64_t ttl_millis;
+    int64_t at_ticks;
+    int64_t ttl_ticks;
     uint32_t kind;
     uint32_t source_slot;
     float param;
     uint32_t _pad;
 } BlEvent;
+
+// --- BlNavPoly ---------------------------------------------------------------
+// One navmesh leaf near this entity: an axis-aligned world rect and whether
+// anything can stand on it. Both passable and impassable ones are carried --
+// a brain choosing where to go needs to see the walls too, and filtering them
+// out here would make "nothing nearby" and "nothing walkable nearby" look the
+// same.
+//
+// Filled ONLY for an entity that owns a point-targeted skill; everyone else
+// reads nav_poly_count == 0 and pays nothing for the block existing.
+typedef struct BlNavPoly {
+    float min_x, min_z;
+    float max_x, max_z;
+    int32_t passable;   // bool
+    uint32_t _pad;
+} BlNavPoly;
 
 // --- BlViewWire ------------------------------------------------------------
 // The whole per-wake view buffer: bl_view_buf() points at one of these.
@@ -417,6 +462,9 @@ typedef struct BlViewWire {
     int32_t skill_count;   // number of valid entries in `skills` (0..BL_MAX_SKILLS)
     uint32_t _pad6;         // explicit: same "every gap is named" discipline as _pad3
     BlViewSkill skills[BL_MAX_SKILLS];
+    int32_t nav_poly_count;  // valid entries in `nav_polys` (0..BL_MAX_NAV_POLYS)
+    uint32_t _pad7;          // explicit: same "every gap is named" discipline as _pad3
+    BlNavPoly nav_polys[BL_MAX_NAV_POLYS];
     int32_t event_count;   // number of valid entries in `events` (0..BL_MAX_EVENTS)
     uint32_t _pad4;         // explicit: keeps `events` (BlEvent starts with int64_t) 8-aligned
     BlEvent events[BL_MAX_EVENTS];
@@ -436,10 +484,10 @@ typedef struct BlViewWire {
 // not a promise in either direction). activity_label is inspection/histogram
 // only; it carries no semantics the engine reads.
 typedef struct BlSuggestionWire {
-    int64_t idle_hint_millis;    // 0 = no preference (v3: the engine defaults this
+    int64_t idle_hint_ticks;    // 0 = no preference (v3: the engine defaults this
                                   // to a ~1s cadence rather than "forever" --
                                   // intention-contract.html §2)
-    int64_t duration_millis;     // BL_INT_IDLE only
+    int64_t duration_ticks;     // BL_INT_IDLE only
     int32_t intention_kind;      // BL_INT_*
     int32_t activity_label;      // ActivityId, inspection only
     float point_x, point_z;
@@ -466,6 +514,10 @@ static_assert(sizeof(BlStatus) == 16, "BlStatus size drifted");
 static_assert(sizeof(BlViewAttack) == 24, "BlViewAttack size drifted");
 static_assert(sizeof(BlViewSkill) == 24, "BlViewSkill size drifted");
 static_assert(sizeof(BlEvent) == 32, "BlEvent size drifted");
-static_assert(sizeof(BlViewWire) == 1888, "BlViewWire size drifted");
+static_assert(sizeof(BlNavPoly) == 24, "BlNavPoly size drifted");
+// 1888 (v5) + 776: the count, its explicit pad, and 32 x 24 bytes of local
+// ground. The whole block is filled only for an entity that owns a
+// point-targeted skill -- everyone else pays the bytes and not the work.
+static_assert(sizeof(BlViewWire) == 2664, "BlViewWire size drifted");
 static_assert(sizeof(BlSuggestionWire) == 40, "BlSuggestionWire size drifted");
 #endif

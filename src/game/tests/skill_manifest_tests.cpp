@@ -104,7 +104,7 @@ TEST_CASE("unknown skill names, bad choices, and wrong types fail loudly") {
 TEST_CASE("missing file returns false and leaves the catalog untouched") {
     SkillCatalog cat;
     CHECK_FALSE(badlands::LoadSkillCatalog("build/definitely_absent.json", cat));
-    CHECK(cat.specs[0].cooldown_seconds == 20.0f);
+    CHECK(cat.specs[0].cooldown_seconds == 45.0f);
 }
 
 TEST_CASE("a full record (cooldown + effect text together) parses correctly") {

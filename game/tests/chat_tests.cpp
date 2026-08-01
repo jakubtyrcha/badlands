@@ -137,7 +137,14 @@ TEST_CASE("a conversation ends on expiry, and both leave together") {
     apply_command(g, Command{CommandKind::Chat, t.heroes[0], t.heroes[1]});
     REQUIRE(g.registry.all_of<ChattingState>(a));
 
-    advance_chats(g, g.factors.hero.chat_duration + 0.1f);
+    // Stepped, not skipped: advance_chats no longer takes a dt, so the session
+    // has to actually elapse. Bounded well past the duration so a hang is a
+    // failure rather than a spin.
+    const int max_steps = static_cast<int>(
+        (g.factors.hero.chat_duration + 1.0f) * static_cast<float>(badlands::kStepsPerSecond));
+    for (int i = 0; i < max_steps && g.registry.all_of<ChattingState>(a); ++i) {
+        advance_chats(g);
+    }
     CHECK_FALSE(g.registry.all_of<ChattingState>(a));
     CHECK_FALSE(g.registry.all_of<ChattingState>(b));  // never one-sided
 }
@@ -153,11 +160,11 @@ TEST_CASE("a conversation ends when the pair drifts apart") {
 
     // A nudge is tolerated; walking off is not.
     g.registry.get<Position>(b).pos = {g.factors.hero.chat_radius * 1.2f, 0.0f};
-    advance_chats(g, 1.0f / 30.0f);
+    advance_chats(g);
     CHECK(g.registry.all_of<ChattingState>(a));
 
     g.registry.get<Position>(b).pos = {40.0f, 0.0f};
-    advance_chats(g, 1.0f / 30.0f);
+    advance_chats(g);
     CHECK_FALSE(g.registry.all_of<ChattingState>(a));
     CHECK_FALSE(g.registry.all_of<ChattingState>(b));
 }
@@ -171,7 +178,7 @@ TEST_CASE("a conversation ends when a partner dies") {
     REQUIRE(g.registry.all_of<ChattingState>(a));
 
     g.registry.destroy(g.slots[t.heroes[1]]);
-    advance_chats(g, 1.0f / 30.0f);
+    advance_chats(g);
     CHECK_FALSE(g.registry.all_of<ChattingState>(a));  // not left talking to nobody
 }
 
@@ -184,7 +191,7 @@ TEST_CASE("a threat breaks up a conversation") {
     REQUIRE(g.registry.all_of<ChattingState>(a));
 
     spawn_into(g, GoblinDesc(2.0f, 0.0f));  // hostile team
-    advance_chats(g, 1.0f / 30.0f);
+    advance_chats(g);
     CHECK_FALSE(g.registry.all_of<ChattingState>(a));
 }
 
@@ -241,7 +248,7 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
 
     // Night, so the tavern is not an option; starved of diversion, so they want
     // company. Rested (fatigue 1.0), so rest never takes over.
-    g.world_millis = static_cast<int64_t>(g.millis_per_day * 0.9);
+    g.world_ticks = static_cast<int64_t>(g.ticks_per_day * 0.9);
     for (entt::entity e : {a, b}) {
         auto& sim = g.registry.get<HeroSimulationState>(e);
         sim.content = 0.1f;
@@ -253,7 +260,7 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
         auto& sa = g.registry.get<HeroSimulationState>(a);
         auto& sb = g.registry.get<HeroSimulationState>(b);
         sa.fatigue = sb.fatigue = 1.0f;  // keep rest from taking over
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         talked = g.registry.all_of<ChattingState>(a) && g.registry.all_of<ChattingState>(b);
     }
     CHECK(talked);
@@ -279,7 +286,7 @@ TEST_CASE("two bored heroes find each other and talk, through the sim") {
         auto& sa = g.registry.get<HeroSimulationState>(a);
         auto& sb = g.registry.get<HeroSimulationState>(b);
         sa.fatigue = sb.fatigue = 1.0f;  // keep rest from taking over
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         REQUIRE(g.registry.all_of<ChattingState>(a));  // not dissolved early
         REQUIRE(g.registry.all_of<ChattingState>(b));
         CHECK(glm::distance(g.registry.get<Position>(a).pos, a_pos) < 0.5f);
@@ -306,7 +313,7 @@ TEST_CASE("a chatting hero's CurrentIntention stays Chat across a mid-chat wake,
 
     // Same setup as "two bored heroes find each other and talk" above: night
     // (no tavern), starved of diversion, rested (so rest never takes over).
-    g.world_millis = static_cast<int64_t>(g.millis_per_day * 0.9);
+    g.world_ticks = static_cast<int64_t>(g.ticks_per_day * 0.9);
     for (entt::entity e : {a, b}) {
         auto& sim = g.registry.get<HeroSimulationState>(e);
         sim.content = 0.1f;
@@ -318,7 +325,7 @@ TEST_CASE("a chatting hero's CurrentIntention stays Chat across a mid-chat wake,
         auto& sa = g.registry.get<HeroSimulationState>(a);
         auto& sb = g.registry.get<HeroSimulationState>(b);
         sa.fatigue = sb.fatigue = 1.0f;
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         talked = g.registry.all_of<ChattingState>(a) && g.registry.all_of<ChattingState>(b);
     }
     REQUIRE(talked);
@@ -339,7 +346,7 @@ TEST_CASE("a chatting hero's CurrentIntention stays Chat across a mid-chat wake,
         sa.fatigue = sb.fatigue = 1.0f;
         g.registry.get<Position>(a).pos = a_pos;
         g.registry.get<Position>(b).pos = b_pos;
-        tick_world(g, 1.0f / 30.0f);
+        step_world(g);
         if (g.registry.all_of<ChattingState>(a)) {
             CHECK(g.registry.get<CurrentIntention>(a).kind == IntentionKind::Chat);
         } else {

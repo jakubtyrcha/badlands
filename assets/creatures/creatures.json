@@ -23,7 +23,8 @@
       "damage_frac": 0.08
     },
     "skills": [
-      { "name": "DressWounds", "level": 2 }
+      { "name": "DressWounds", "level": 2 },
+      { "name": "PrecisionShot", "level": 2 }
     ]
   },
   "GraveRobber": {
@@ -36,7 +37,9 @@
       "damage_frac": 0.08
     },
     "skills": [
-      { "name": "Backstab", "level": 3 }
+      { "name": "Sneak", "level": 3 },
+      { "name": "Backstab", "level": 3 },
+      { "name": "PrecisionShot", "level": 5 }
     ]
   },
   "Apprentice": {
@@ -50,7 +53,8 @@
     },
     "skills": [
       { "name": "Curse", "level": 1 },
-      { "name": "Calcify", "level": 4 }
+      { "name": "Calcify", "level": 4 },
+      { "name": "Teleport", "level": 8 }
     ]
   },
   "Goblin": {}
