@@ -1072,14 +1072,20 @@ add_executable(badlands_symbolic_map_tests
     src/game/map/map_data.cpp
     src/game/map/symbolic_map_generator.cpp
     src/game/map/flat_map_generator.cpp
+    # The synthetic forest map + the MapData -> foliage::TerrainQuery adapter:
+    # the seam between the map contract and the placement library.
+    src/game/map/forest_test_map_generator.cpp
+    game/tests/forest_test_map_tests.cpp
     src/game/geometry/water_surface.cpp
     game/tests/symbolic_map_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
+target_link_libraries(badlands_symbolic_map_tests PRIVATE badlands_foliage_lib)
 target_include_directories(badlands_symbolic_map_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
 )
 add_test(NAME badlands_symbolic_map_tests COMMAND badlands_symbolic_map_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
