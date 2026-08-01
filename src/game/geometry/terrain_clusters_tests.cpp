@@ -7,6 +7,13 @@
 //   2. sibling error/sphere sharing + parent-sphere nesting,
 //   3. crack-freeness (bitwise-equal shared boundary vertices),
 //   4/5. grid arithmetic incl. non-square + a rebuild with non-default constants.
+//
+// DEPTH-AGNOSTIC BY CONSTRUCTION. Nothing here may read `level` as a resolution
+// tier or as "is this a leaf" — locally refined tiles will give the DAG mixed
+// depth, and any such check would then silently skip or miscount at exactly the
+// new seams. Leafness is `own_group == kNoGroup` (the header's sentinel), seam
+// checks span the whole DAG rather than one level, and the only level-dependent
+// datum in a vertex record (the lod_level debug byte) is masked out.
 
 #include <array>
 #include <cmath>
@@ -87,6 +94,23 @@ std::array<uint32_t, 8> Record(const TerrainClusterDag& dag, uint32_t vidx) {
   return r;
 }
 
+// The crack-relevant payload of a vertex record. Word 7 is the meta word,
+// PackU8x4{biome_id, cluster_hash_byte, lod_level, 0}: EmitCluster stamps its
+// bits 16..23 with the EMITTING LEVEL as a debug tint, so that byte is
+// level-varying BY CONSTRUCTION and can never participate in a cross-level
+// comparison. Mask it out; everything else — position, normal, packed color,
+// biome id, and the position-hash byte (a pure function of position) — is the
+// payload a crack would perturb, and it must agree everywhere in the DAG.
+// Masking loses nothing WITHIN a level (the byte is constant across a level), so
+// every check below is strictly stronger than the per-level form it replaces.
+constexpr uint32_t kLodLevelByteMask = 0x00FF0000u;
+
+std::array<uint32_t, 8> CrackRecord(const TerrainClusterDag& dag, uint32_t vidx) {
+  auto r = Record(dag, vidx);
+  r[7] &= ~kLodLevelByteMask;
+  return r;
+}
+
 std::array<uint32_t, 3> PosBits(const std::array<uint32_t, 8>& rec) {
   return {rec[0], rec[1], rec[2]};
 }
@@ -131,27 +155,38 @@ void CheckSpheres(const TerrainClusterDag& dag) {
   }
 }
 
-// (3a) Agreement: within a level, any two vertices sharing a bitwise position
-// share the whole 8-float record. A mismatch here is exactly a crack.
+// (3a) Agreement: ACROSS THE WHOLE DAG, any two vertices sharing a bitwise
+// position share the whole crack-relevant record. A mismatch here is exactly a
+// crack. Deliberately NOT bucketed per level: simplification never CREATES
+// vertices, it only removes them, so every vertex at every level is a bitwise
+// copy of some leaf vertex, and the leaf lattice is position-injective. Same
+// position therefore implies the same payload globally, not merely within one
+// level — which also keeps this check meaningful once the DAG has mixed depth
+// and `level` no longer names a resolution tier.
 void CheckSeamAgreement(const TerrainClusterDag& dag) {
-  std::map<int, std::map<std::array<uint32_t, 3>, std::array<uint32_t, 8>>> seen;
+  std::map<std::array<uint32_t, 3>, std::array<uint32_t, 8>> seen;
   for (const auto& c : dag.clusters) {
-    auto& level_map = seen[c.level];
     for (uint32_t v = 0; v < c.vertex_count; ++v) {
-      const auto rec = Record(dag, c.first_vertex + v);
+      const auto rec = CrackRecord(dag, c.first_vertex + v);
       const auto pos = PosBits(rec);
-      auto it = level_map.find(pos);
-      if (it == level_map.end())
-        level_map.emplace(pos, rec);
+      auto it = seen.find(pos);
+      if (it == seen.end())
+        seen.emplace(pos, rec);
       else
         REQUIRE(it->second == rec);
     }
   }
 }
 
-// (3b) Completeness: for adjacent groups at a level (footprints sharing an edge
-// line), the SETS of boundary-vertex records on that line are identical — so a
-// coarse neighbor can't drop a vertex the finer side keeps (a T-junction).
+// (3b) Completeness: for ANY two adjacent groups (footprints sharing an edge
+// segment), WHATEVER THEIR LEVELS, the SETS of boundary-vertex records on that
+// line are identical — so a coarse neighbor can't drop a vertex the finer side
+// keeps (a T-junction). The invariant is level-free: LockVertex locks every
+// vertex lying on an interior footprint line, and locked vertices survive
+// simplification bitwise, so any two groups whose footprints share a segment
+// carry identical vertex-record sets on the overlap regardless of the levels
+// they sit at. That is exactly the case a mixed-depth DAG creates, and the case
+// a level filter here would silently skip.
 void CheckSeamCompleteness(const TerrainClusterDag& dag) {
   // Bucket output clusters by producing group.
   std::map<int, std::vector<uint32_t>> outputs_of;  // group -> cluster indices
@@ -165,7 +200,7 @@ void CheckSeamCompleteness(const TerrainClusterDag& dag) {
     for (uint32_t cidx : outputs_of[gidx]) {
       const auto& c = dag.clusters[cidx];
       for (uint32_t v = 0; v < c.vertex_count; ++v) {
-        const auto rec = Record(dag, c.first_vertex + v);
+        const auto rec = CrackRecord(dag, c.first_vertex + v);
         const glm::vec3 p = PosOf(rec);
         const float on = vertical ? p.x : p.z;
         const float along = vertical ? p.z : p.x;
@@ -180,7 +215,6 @@ void CheckSeamCompleteness(const TerrainClusterDag& dag) {
     for (int b = a + 1; b < ng; ++b) {
       const auto& ga = dag.groups[a];
       const auto& gb = dag.groups[b];
-      if (ga.level != gb.level) continue;
       const glm::vec4 fa = ga.footprint, fb = gb.footprint;
       // vertical shared edge: a's right == b's left (or vice versa), z overlap.
       auto try_edge = [&](bool vertical) {
@@ -212,12 +246,14 @@ void CheckSeamCompleteness(const TerrainClusterDag& dag) {
   }
 }
 
-// Coverage: the union of all leaf (level-0) clusters spans the full map extent.
+// Coverage: the union of all leaf clusters spans the full map extent.
 void CheckLeafCoverage(const TerrainClusterDag& dag, int w, int h) {
   glm::vec3 lo(1e9f), hi(-1e9f);
   int leaves = 0;
   for (const auto& c : dag.clusters) {
-    if (c.level != 0) continue;
+    // A leaf is a cluster no group produced (header's kNoGroup sentinel); level
+    // 0 will no longer mean leaf once the DAG has locally refined tiles.
+    if (c.own_group != kNoGroup) continue;
     ++leaves;
     lo = glm::min(lo, c.bounds.min);
     hi = glm::max(hi, c.bounds.max);
@@ -232,7 +268,9 @@ void CheckLeafCoverage(const TerrainClusterDag& dag, int w, int h) {
 int LeafCount(const TerrainClusterDag& dag) {
   int n = 0;
   for (const auto& c : dag.clusters)
-    if (c.level == 0) ++n;
+    // Leaf = produced by no group; level 0 will no longer mean leaf once the DAG
+    // has locally refined tiles.
+    if (c.own_group == kNoGroup) ++n;
   return n;
 }
 
@@ -320,7 +358,9 @@ void CheckCutValidity(const TerrainClusterDag& dag, glm::vec3 cam, float fov_deg
   // ancestor group).
   for (uint32_t i = 0; i < dag.clusters.size(); ++i) {
     const TerrainCluster& c = dag.clusters[i];
-    if (c.level != 0) continue;
+    // Leaf = produced by no group; level 0 will no longer mean leaf once the DAG
+    // has locally refined tiles.
+    if (c.own_group != kNoGroup) continue;
     int covers = selected.count(i) ? 1 : 0;
     int g = c.parent_group;
     while (g != kNoGroup) {
