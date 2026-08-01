@@ -574,7 +574,8 @@ unsigned char LockVertex(const glm::vec3& p, const glm::vec4& fp, float map_w,
 // x1, z1}.
 GroupResult SimplifyAndSplit(ClusterGeom merged, const glm::vec4& footprint,
                              float map_w, float map_h,
-                             const TerrainClusterParams& params) {
+                             const TerrainClusterParams& params,
+                             bool collapse_to_one = false) {
   const size_t vcount = merged.verts.size();
   std::vector<float> positions(vcount * 3);
   std::vector<float> attrs(vcount * 6);
@@ -634,10 +635,22 @@ GroupResult SimplifyAndSplit(ClusterGeom merged, const glm::vec4& footprint,
 
   // Output-cluster count: a full group splits into group_split_count; a small
   // group (trailing / already-cheap) collapses to a single parent.
+  //
+  // `collapse_to_one` (the TERMINAL round of a ReduceGrid, everything in one
+  // group) overrides the size test, and is what makes termination PROVABLE
+  // rather than usual: the locked-vertex simplify floor can hold a merge above
+  // small_group_max forever -- two clusters weld to 258 locked-floored
+  // triangles, split back into two, weld to the same 258, ad infinitum (a
+  // measured livelock, ~50 MB/s of appended clusters). A terminal merge has no
+  // one to split FOR, so it emits one cluster of whatever size the floor
+  // dictates; the overshoot drains at the next level up, where the alternating
+  // partition buries the locked seam inside a group. On a uniform build the
+  // terminal merge already lands under small_group_max, so this is a no-op
+  // there (bit-identical, pinned by the determinism suite).
   const int budget = kTrisPerQuad * params.tile_quads * params.tile_quads;
   const int small_group_max =
       static_cast<int>(budget * kSmallGroupBudgetFactor);
-  int num_out = (static_cast<int>(tri_count) <= small_group_max)
+  int num_out = (collapse_to_one || static_cast<int>(tri_count) <= small_group_max)
                     ? 1
                     : params.group_split_count;
   num_out = std::min<int>(num_out, static_cast<int>(tri_count));
@@ -740,9 +753,18 @@ void LogStats(const TerrainClusterDag& dag, double build_ms, bool parallel,
 // axes, later rounds alternate one); levels derive from children at emission
 // and the scratch free is by liveness, so the counter carries no tree meaning.
 // Deterministic: Phase B parallelism never touches emission order.
+// `prepass` marks the intra-region reduction rounds and unlocks ONE shortcut:
+// a group whose welded input is already at or under the small-group threshold
+// may PASS THROUGH unsimplified (one output, simplification error exactly 0).
+// Reduction progress there is on CLUSTER count, not triangle count -- welding
+// four 2-triangle plain cells and asking meshopt to halve them is pure
+// overhead, and it was ~95% of the pre-pass's meshopt calls (measured 933 s of
+// DAG build on the production corridor, dominated by meshopt on tiny groups).
+// The MAIN merge never passes through, so a null-detail build -- which runs no
+// pre-pass at all -- is bit-identical by construction, not by threshold luck.
 void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
                 RegionGrid& grid, float map_w, float map_h,
-                const TerrainClusterParams& params) {
+                const TerrainClusterParams& params, bool prepass = false) {
   int cur = 0;
   auto grid_total = [&]() {
     size_t n = 0;
@@ -807,13 +829,32 @@ void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
     // distinct groups never touch shared mutable state and the per-slot results
     // are independent of scheduling — the determinism test pins parallel ==
     // serial byte-for-byte.
+    // The 1x1 grid is the TERMINAL round -- one group, everything in it --
+    // and it must collapse to a single cluster no matter what the locked
+    // floor lets meshopt reach, or the loop never converges (see
+    // SimplifyAndSplit's collapse_to_one).
+    const bool terminal = grid.nx == 1 && grid.nz == 1;
+    const int small_group_max = static_cast<int>(
+        kTrisPerQuad * params.tile_quads * params.tile_quads *
+        kSmallGroupBudgetFactor);
     std::vector<GroupResult> results(group_count);
     auto compute = [&](size_t g) {
       ClusterGeom merged = WeldChildren(cluster_geom, work[g].children);
+      if (prepass &&
+          static_cast<int>(merged.tris.size()) / 3 <= small_group_max) {
+        // Pre-pass pass-through (see the function comment): the weld IS the
+        // reduction, and an unsimplified output carries zero new error.
+        results[g].result_error = 0.0f;
+        results[g].outputs.clear();
+        results[g].outputs.push_back(std::move(merged));
+        return;
+      }
       results[g] = SimplifyAndSplit(std::move(merged), work[g].footprint, map_w,
-                                    map_h, params);
+                                    map_h, params, terminal);
     };
-    if (params.parallel_build) {
+    // Tiny rounds (per-tile pre-passes shrink to a handful of groups) pay more
+    // in ParallelFor synchronization than the work is worth; run them inline.
+    if (params.parallel_build && group_count >= 16) {
       ParallelFor(group_count, compute);
     } else {
       for (size_t g = 0; g < group_count; ++g) compute(g);
@@ -1044,7 +1085,8 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
         }
       }
       if (cells.nx * cells.nz > 1)
-        ReduceGrid(dag, cluster_geom, sub, map_w, map_h, params);
+        ReduceGrid(dag, cluster_geom, sub, map_w, map_h, params,
+                   /*prepass=*/true);
       r.clusters.clear();
       for (const Region& sr : sub.cells)
         for (uint32_t c : sr.clusters) r.clusters.push_back(c);

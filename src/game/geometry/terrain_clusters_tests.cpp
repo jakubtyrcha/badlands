@@ -1057,3 +1057,39 @@ TEST_CASE("terrain detail: parallel == serial, bitwise, on a mixed-depth build",
   RequireDagsBitIdentical(build(false), build(true));
   RequireDagsBitIdentical(build(true), build(true));
 }
+
+TEST_CASE("terrain detail: a solid refined block terminates and stays sound",
+          "[terrain_clusters]") {
+  // The livelock fixture. A SOLID k=3 block spanning four full tiles gives
+  // interior tiles whose entire boundary is fine-locked; before the terminal
+  // round forced a single output, their pre-pass fixpointed -- two clusters
+  // welding to the same locked-floored triangle count, splitting back into
+  // two, forever (measured on the real river corridor as an unbounded DAG
+  // build at ~50 MB/s). This test's job is to TERMINATE; the checks after are
+  // the usual soundness sweep on the fixture's unusually seam-heavy tree.
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  const DetailFixture fx = MakeDetail(
+      map, w, h,
+      [](int qx, int qz) {
+        return (qx >= 8 && qx < 24 && qz >= 8 && qz < 24) ? 3 : 0;
+      },
+      16.0f, 16.0f, 7.0f, 0.3f);
+  const auto dag = BuildTerrainClusterDag(map, {}, &fx.field);
+
+  CheckLeafCoverage(dag, w, h);
+  CheckAllInvariants(dag);
+  for (const auto& c : dag.clusters) {
+    REQUIRE(c.vertex_count > 0);
+    REQUIRE(c.index_count >= 3);
+  }
+  const glm::vec3 cam(16.0f, 40.0f, 16.0f);
+  for (float tau : {0.25f, 1.5f, 16.0f}) {
+    CAPTURE(tau);
+    CheckCutValidity(dag, cam, 45.0f, 900.0f, tau);
+    std::vector<uint32_t> sel;
+    SelectClusters(dag, cam, 45.0f, 900.0f, tau, sel);
+    CheckCutWatertight(dag, sel, static_cast<float>(w), static_cast<float>(h));
+    CheckNoInvertedFaces(dag, sel);
+  }
+}
