@@ -682,6 +682,11 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
     game/tests/leaf_voxelizer_tests.cpp
+    # badlands' forest content table (which TreeCatalog preset each foliage
+    # model index IS). Lives here rather than in badlands_foliage_tests because
+    # it needs TreeCatalog(), which the foliage library deliberately cannot see.
+    game/tests/forest_catalog_tests.cpp
+    src/game/visual/forest_catalog.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
@@ -690,7 +695,8 @@ add_executable(badlands_tree_tests
 target_include_directories(badlands_tree_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-target_link_libraries(badlands_tree_tests PRIVATE badlands_engine badlands_game_lib)
+target_link_libraries(badlands_tree_tests PRIVATE badlands_engine badlands_game_lib
+                                                 badlands_foliage_lib)
 if(APPLE)
     target_link_options(badlands_tree_tests PRIVATE "-Wl,-ld_new")
 endif()
