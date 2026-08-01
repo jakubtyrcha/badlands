@@ -55,13 +55,54 @@ namespace badlands {
 
 class GpuPipelineGenerator;
 
-// Owns an InstancedMeshField configured for ONE tree model (model id 0) whose
-// LOD count is RUNTIME -- however many leaf-crown meshes the caller supplies,
-// up to the engine's GpuInstanceRenderer::kMaxLods cap (the foliage default is
-// kFoliageVoxelWorldSizes.size(), i.e. L0..L3). 2 submeshes per LOD (0 = bark
-// kDeferred, 1 = leaf voxel crown kDeferred, skipped for a LOD whose supplied
-// leaf mesh is empty -- see BuildTreeField below). Both submeshes cast
-// shadows (Phase 5).
+// One model's fully-prepared CPU geometry. The caller builds these (see
+// BuildTreeFieldModel below, which is the standard way) and BuildTreeField
+// uploads them -- generation stays on the caller's side so a caller that
+// already needed the bark mesh for something else does not pay for a second,
+// byte-identical generation pass.
+struct TreeFieldModel {
+  // Only the leaf tint/transmission are read from this at build time; it is
+  // kept whole so the model stays self-describing.
+  TreeOptions options;
+  TexturedMeshResult bark_lod0;
+  // One pre-voxelized crown per LOD. An entry may legitimately be EMPTY (see
+  // leaf_voxelizer.hpp's known gap) -- that LOD then renders bare rather than
+  // failing the build.
+  std::vector<TexturedMeshResult> leaf_lod_meshes;
+  // Ascending distance cutoffs, exactly leaf_lod_meshes.size() - 1 of them.
+  std::vector<float> lod_thresholds;
+  // Native ez-tree units -> world metres for this model, i.e.
+  // target_height_m / bark height in native units. The caller needs it to build
+  // instance transforms, so it is computed once here rather than re-derived.
+  float native_to_world_scale = 1.0f;
+};
+
+// Per-model local-space bounds, in NATIVE (untransformed) units.
+struct TreeModelBounds {
+  Aabb bark_local_bounds = Aabb::Empty();
+  // UNION over every supplied crown LOD: voxel tets overscale past their source
+  // cards' AABB, and different LODs have different extents, so no single LOD's
+  // bounds are conservative for all of them.
+  Aabb leaf_local_bounds = Aabb::Empty();
+  bool has_leaves = false;
+
+  // What a caller should transform by an instance's full matrix to get that
+  // instance's world bounds for InstanceInput::bounds_sphere.
+  Aabb Combined() const {
+    return has_leaves ? bark_local_bounds.Union(leaf_local_bounds)
+                      : bark_local_bounds;
+  }
+};
+
+// Owns an InstancedMeshField configured for N tree models, each with its OWN
+// runtime LOD count and its own distance cutoffs (GpuInstanceRenderer::ModelLod
+// is per model), bounded by the engine's compile-time kMaxLods cap. 2 submeshes
+// per (model, LOD): 0 = bark kDeferred, 1 = leaf voxel crown kDeferred, the
+// latter skipped for any (model, LOD) whose supplied leaf mesh is empty. Both
+// submeshes cast shadows (Phase 5).
+//
+// A single-tree caller passes a 1-element span and gets exactly the previous
+// behaviour; a forest passes ~28 (see game/visual/forest_catalog.hpp).
 struct TreeField {
   std::unique_ptr<InstancedMeshField> field;
 
@@ -81,10 +122,10 @@ struct TreeField {
     wgpu::Buffer leaf_vertex_buffer;
     wgpu::Buffer leaf_index_buffer;
   };
-  // One entry per LOD the field was actually built with (lod_buffers.size()
-  // == the model's runtime LOD count), NOT kMaxLods entries -- that constant
-  // is only the cap.
-  std::vector<LodBuffers> lod_buffers;
+  // Indexed [model][lod]. The inner vector holds one entry per LOD that model
+  // was actually built with (its runtime LOD count), NOT kMaxLods entries --
+  // that constant is only the cap.
+  std::vector<std::vector<LodBuffers>> lod_buffers;
 
   // One-time 1x1 support textures for the solid-color bark material (flat
   // tangent-space normal + a fixed-roughness ARM), kept alive the same way.
@@ -92,57 +133,57 @@ struct TreeField {
   wgpu::TextureView bark_arm_view;
   wgpu::Sampler bark_support_sampler;
 
-  // Raw (untransformed, native tree-generator units) LOD0 local-space
-  // bounds -- the SAME bark_local_bounds a single-tree preview uses to
-  // derive its scale+rest-on-floor transform (see
-  // ModelViewerView::RebuildScene's single-tree path), plus the UNION of
-  // every supplied leaf-crown LOD mesh's own bounds (voxel tets overscale
-  // past their source cards' AABB, and different LODs can have different
-  // extents -- see the .cpp) when the tree has any. A caller building
-  // per-instance transforms combines these (bark_local_bounds.Union(
-  // leaf_local_bounds) when has_leaves) and transforms the result by each
-  // instance's FULL transform to get that instance's world-space bounds for
-  // GpuInstanceRenderer::InstanceInput::bounds_sphere.
-  Aabb bark_local_bounds;
-  Aabb leaf_local_bounds;
-  bool has_leaves = false;
+  // Per-model raw (untransformed, native tree-generator units) local-space
+  // bounds -- for model 0 these are the SAME bark_local_bounds a single-tree
+  // preview uses to derive its scale + rest-on-floor transform (see
+  // ModelViewerView::RebuildScene's single-tree path). Parallel to the
+  // `models` span BuildTreeField was given.
+  std::vector<TreeModelBounds> model_bounds;
+
+  // Native -> world scale per model, copied from TreeFieldModel so a caller
+  // building instance transforms does not have to keep the inputs alive.
+  std::vector<float> native_to_world_scale;
+
+  size_t model_count() const { return model_bounds.size(); }
 };
 
-// Builds a TreeField for `options`, given the caller's own ALREADY-BUILT
-// `skeleton` (BuildTreeSkeleton(options)) and LOD0 bark mesh
-// (`bark_lod0` -- GenerateTreeMesh(options, skeleton); taken by value, moved
-// in) -- BuildTreeField used to regenerate both of these internally, a second
-// (byte-identical but wasteful) generation pass on top of whatever the
-// caller already built them for (e.g. ModelViewerView's Multi mode builds
-// them to learn the preview-rescale factor `s` before it can even voxelize
-// leaves at native cell sizes); callers now build them once and pass both in.
-// The model's LOD count is `leaf_lod_meshes.size()` (1..kMaxLods). Per LOD
-// (0 = `bark_lod0` as-is; coarser levels decimated by the shared
-// SimplifyBarkForVoxelLod policy, foliage_voxel_config.hpp) a bark mesh is
-// derived, and
-// `leaf_lod_meshes[lod]` -- the caller's own pre-voxelized leaf-crown mesh
-// for that LOD (see game/geometry/leaf_voxelizer.hpp's VoxelizeLeafCards;
-// ModelViewerView's Multi mode voxelizes at kFoliageVoxelWorldSizes[lod]
-// converted to native units) -- is taken as-is. Both are GPU-uploaded and
-// wired into a fresh InstancedMeshField (capacity forwarded verbatim, and the
-// LOD count + `lod_thresholds` packed into the model's
-// GpuInstanceRenderer::ModelLod chain; num_models=1, num_submeshes=2); both submeshes
-// render kDeferred and cast shadows (see instanced_mesh_field.hpp's
-// SetSubmeshShadow). A LOD whose supplied leaf mesh is empty (e.g. a coarse
-// voxel cell size that clears no cell's occupancy threshold -- a known gap
-// for some presets, see leaf_voxelizer.hpp) simply leaves that LOD's leaf
-// submesh slot unconfigured (legal -- GpuInstanceRenderer::Draw skips
-// zero-index-count slots); it does not affect the bark submesh or any other
-// LOD. Returns nullptr (after logging) on any factory-build, field-compile,
-// or bark-mesh failure, if `leaf_lod_meshes` is empty or longer than
-// GpuInstanceRenderer::kMaxLods, or if `lod_thresholds.size() !=
-// leaf_lod_meshes.size() - 1` (one ascending distance cutoff between each
-// adjacent pair of levels).
+// Prepares ONE model's CPU geometry for a tree that stands `target_height_m`
+// tall in the world: skeleton, LOD0 bark, and one voxelized crown per level of
+// the standard foliage chain (kFoliageVoxelWorldSizes), with the cell sizes and
+// the distance cutoffs both retargeted from the 8 m preview tree to this one --
+// see FoliageLodThresholdsForHeight in foliage_voxel_config.hpp for why both
+// scale by the same ratio.
+//
+// Pure CPU and independent per model, so a caller building a whole forest can
+// run these in parallel and upload the results serially.
+TreeFieldModel BuildTreeFieldModel(const TreeOptions& options,
+                                   float target_height_m);
+
+// Builds a TreeField from N already-prepared models (BuildTreeFieldModel is the
+// standard way to get them). Generation stays on the caller's side on purpose:
+// this function used to regenerate the skeleton and bark internally, a second
+// byte-identical pass on top of whatever the caller had already built them for.
+//
+// Each model contributes its own GpuInstanceRenderer::ModelLod chain (its LOD
+// count is its `leaf_lod_meshes.size()`, its cutoffs its `lod_thresholds`), so
+// models with different LOD counts coexist in one field. Per (model, LOD): the
+// bark mesh is LOD0 decimated by the shared SimplifyBarkForVoxelLod policy, and
+// the crown is `leaf_lod_meshes[lod]` taken as-is. The field is created with
+// num_models = models.size() and num_submeshes = 2; both submeshes render
+// kDeferred and cast shadows (see instanced_mesh_field.hpp's SetSubmeshShadow).
+//
+// A (model, LOD) whose supplied leaf mesh is empty -- a coarse voxel cell size
+// that clears no cell's occupancy threshold, a known gap for some presets (see
+// leaf_voxelizer.hpp) -- simply leaves that leaf submesh slot unconfigured,
+// which is legal: GpuInstanceRenderer::Draw skips zero-index-count slots. It
+// affects neither that LOD's bark nor any other LOD or model.
+//
+// Returns nullptr (after logging) on any factory-build, field-compile or
+// bark-mesh failure, if `models` is empty, or if any model's LOD count is
+// outside [1, GpuInstanceRenderer::kMaxLods] or its `lod_thresholds.size() !=
+// lod_count - 1` (one ascending cutoff between each adjacent pair of levels).
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-    const TreeOptions& options, const std::vector<SkeletonBranch>& skeleton,
-    TexturedMeshResult bark_lod0,
-    std::span<const TexturedMeshResult> leaf_lod_meshes, uint32_t capacity,
-    std::span<const float> lod_thresholds);
+    std::span<const TreeFieldModel> models, uint32_t capacity);
 
 }  // namespace badlands

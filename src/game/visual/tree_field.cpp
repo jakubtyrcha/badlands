@@ -11,6 +11,7 @@
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"  // kTexturedMeshFloatsPerVertex
 #include "engine/rendering/texture_loader.hpp"                   // CreateSolidColorTexture
+#include "game/geometry/leaf_voxelizer.hpp"  // VoxelizeLeafCards
 #include "game/geometry/tree_generator.hpp"
 #include "game/visual/foliage_voxel_config.hpp"  // SimplifyBarkForVoxelLod
 
@@ -57,27 +58,58 @@ wgpu::Buffer UploadIndexBuffer(wgpu::Device device,
 
 }  // namespace
 
+TreeFieldModel BuildTreeFieldModel(const TreeOptions& options,
+                                   float target_height_m) {
+  TreeFieldModel out;
+  out.options = options;
+
+  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(options);
+  out.bark_lod0 = GenerateTreeMesh(options, skeleton);
+
+  const float bark_h = out.bark_lod0.local_bounds.max.y -
+                       out.bark_lod0.local_bounds.min.y;
+  const float native_h = std::max(bark_h, 0.001f);
+  out.native_to_world_scale = target_height_m / native_h;
+
+  const TexturedMeshResult leaves = GenerateLeafMesh(options, skeleton);
+  out.leaf_lod_meshes.reserve(kFoliageVoxelWorldSizes.size());
+  for (size_t lod = 0; lod < kFoliageVoxelWorldSizes.size(); ++lod) {
+    LeafVoxelizeOptions voxel_opts;
+    voxel_opts.cell_size = FoliageVoxelCellNativeM(lod, native_h);
+    out.leaf_lod_meshes.push_back(
+        VoxelizeLeafCards(leaves.mesh, options.leaves.silhouette, voxel_opts));
+  }
+
+  const auto thresholds = FoliageLodThresholdsForHeight(target_height_m);
+  out.lod_thresholds.assign(thresholds.begin(), thresholds.end());
+  return out;
+}
+
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-    const TreeOptions& options, const std::vector<SkeletonBranch>& skeleton,
-    TexturedMeshResult bark_lod0,
-    std::span<const TexturedMeshResult> leaf_lod_meshes, uint32_t capacity,
-    std::span<const float> lod_thresholds) {
-  // The model's RUNTIME LOD count: as many levels as the caller supplied
-  // crown meshes for, bounded by the engine's compile-time cap.
-  const size_t lod_count = leaf_lod_meshes.size();
-  if (lod_count == 0 || lod_count > GpuInstanceRenderer::kMaxLods) {
-    spdlog::error(
-        "BuildTreeField: leaf_lod_meshes.size()={} outside [1, kMaxLods={}]",
-        lod_count, GpuInstanceRenderer::kMaxLods);
+    std::span<const TreeFieldModel> models, uint32_t capacity) {
+  if (models.empty()) {
+    spdlog::error("BuildTreeField: no models supplied");
     return nullptr;
   }
-  if (lod_thresholds.size() != lod_count - 1) {
-    spdlog::error(
-        "BuildTreeField: lod_thresholds.size()={} != lod_count-1={} (one "
-        "cutoff between each adjacent pair of levels)",
-        lod_thresholds.size(), lod_count - 1);
-    return nullptr;
+  for (size_t mi = 0; mi < models.size(); ++mi) {
+    // Each model's RUNTIME LOD count: as many levels as the caller supplied
+    // crown meshes for, bounded by the engine's compile-time cap.
+    const size_t lod_count = models[mi].leaf_lod_meshes.size();
+    if (lod_count == 0 || lod_count > GpuInstanceRenderer::kMaxLods) {
+      spdlog::error(
+          "BuildTreeField: model {} has leaf_lod_meshes.size()={} outside "
+          "[1, kMaxLods={}]",
+          mi, lod_count, GpuInstanceRenderer::kMaxLods);
+      return nullptr;
+    }
+    if (models[mi].lod_thresholds.size() != lod_count - 1) {
+      spdlog::error(
+          "BuildTreeField: model {} has lod_thresholds.size()={} != "
+          "lod_count-1={} (one cutoff between each adjacent pair of levels)",
+          mi, models[mi].lod_thresholds.size(), lod_count - 1);
+      return nullptr;
+    }
   }
 
   auto tf = std::make_unique<TreeField>();
@@ -131,17 +163,23 @@ std::unique_ptr<TreeField> BuildTreeField(
     }
   }
 
-  // The single tree model's LOD chain: its runtime level count plus the
-  // caller's cutoffs, padded out to the engine's fixed-width threshold array
-  // (entries past lod_count-1 are never read -- see ModelLod).
-  GpuInstanceRenderer::ModelLod tree_lod;
-  tree_lod.lod_count = static_cast<uint32_t>(lod_count);
-  std::copy(lod_thresholds.begin(), lod_thresholds.end(),
-            tree_lod.thresholds.begin());
-  const std::array<GpuInstanceRenderer::ModelLod, 1> model_lods{tree_lod};
+  // One LOD chain per model: its runtime level count plus its own cutoffs,
+  // padded out to the engine's fixed-width threshold array (entries past
+  // lod_count-1 are never read -- see ModelLod). Models with different LOD
+  // counts coexist; the chain is per model, not per field.
+  std::vector<GpuInstanceRenderer::ModelLod> model_lods;
+  model_lods.reserve(models.size());
+  for (const TreeFieldModel& m : models) {
+    GpuInstanceRenderer::ModelLod lod_chain;
+    lod_chain.lod_count = static_cast<uint32_t>(m.leaf_lod_meshes.size());
+    std::copy(m.lod_thresholds.begin(), m.lod_thresholds.end(),
+              lod_chain.thresholds.begin());
+    model_lods.push_back(lod_chain);
+  }
 
   tf->field = std::make_unique<InstancedMeshField>(
-      device, queue, pipeline_gen, capacity, /*num_models=*/1u,
+      device, queue, pipeline_gen, capacity,
+      static_cast<uint32_t>(models.size()),
       /*num_submeshes=*/2u, model_lods);
   if (!tf->field->IsValid()) {
     spdlog::error("BuildTreeField: InstancedMeshField compile failed");
@@ -163,194 +201,212 @@ std::unique_ptr<TreeField> BuildTreeField(
   wgpu::SamplerDescriptor support_sampler_desc{};
   tf->bark_support_sampler = device.CreateSampler(&support_sampler_desc);
 
-  // `skeleton`/`bark_lod0` are the CALLER's already-built skeleton + LOD0
-  // bark mesh (see this function's .hpp doc comment) -- generation is
-  // deterministic, so this used to rebuild both internally from `options`,
-  // reproducing byte-identical results at the cost of a second full
-  // generation pass on top of whatever the caller already needed them for.
-  // `skeleton` itself isn't read again here (bark_lod0 already carries
-  // everything this function needs from it); it's still a parameter so a
-  // caller's (options, skeleton) pairing stays explicit at the call site,
-  // matching GenerateTreeMesh/GenerateLeafMesh's own (options, skeleton)
-  // convention. The coarser LODs below simplify a COPY of bark_lod0's data
-  // through the shared SimplifyBarkForVoxelLod policy, the single-tree path's
-  // exact pattern (model_viewer_view.cpp). Leaves have no such step here: `leaf_lod_meshes
-  // [lod]` is already the caller's final per-LOD mesh (volumetric-foliage
-  // Phase 5).
-  tf->bark_local_bounds = bark_lod0.local_bounds;
+  // Each model's meshes are the CALLER's already-built geometry (see this
+  // function's .hpp doc comment) -- generation is deterministic, so this used
+  // to rebuild it internally, reproducing byte-identical results at the cost
+  // of a second full generation pass on top of whatever the caller already
+  // needed it for. The coarser LODs below simplify a COPY of the model's LOD0
+  // bark through the shared SimplifyBarkForVoxelLod policy, the single-tree
+  // path's exact pattern (model_viewer_view.cpp). Leaves have no such step:
+  // `leaf_lod_meshes[lod]` is already the caller's final per-LOD mesh
+  // (volumetric-foliage Phase 5).
+  tf->model_bounds.resize(models.size());
+  tf->native_to_world_scale.resize(models.size());
+  tf->lod_buffers.resize(models.size());
 
-  // leaf_local_bounds = the UNION of every supplied LOD's own bounds (voxel
-  // tets overscale past their source cards' AABB, and different LODs can
-  // have different extents, so no single LOD's bounds alone would be
-  // conservative for every LOD). Aabb::Union is a no-op for an
-  // Aabb::Empty()-sentinel operand (min=+FLT_MAX/max=-FLT_MAX, see
-  // aabb.cpp), so unioning in an empty LOD's bounds unguarded is safe --
-  // matters for the known pine-preset gap where one LOD's voxelization can
-  // legitimately be empty (see leaf_voxelizer.hpp) while others aren't.
-  // has_leaves reflects whether ANY supplied LOD has geometry.
-  Aabb leaf_bounds = Aabb::Empty();
-  bool has_leaves = false;
-  for (const TexturedMeshResult& m : leaf_lod_meshes) {
-    if (m.mesh.vertex_count > 0) {
-      has_leaves = true;
-    }
-    leaf_bounds = leaf_bounds.Union(m.local_bounds);
-  }
-  tf->leaf_local_bounds = leaf_bounds;
-  tf->has_leaves = has_leaves;
+  for (uint32_t model = 0; model < static_cast<uint32_t>(models.size());
+       ++model) {
+    const TreeFieldModel& src = models[model];
+    const size_t lod_count = src.leaf_lod_meshes.size();
 
-  tf->lod_buffers.resize(lod_count);
-  for (uint32_t lod = 0; lod < static_cast<uint32_t>(lod_count); ++lod) {
-    StaticTexturedMeshComponent bark_mesh = bark_lod0.mesh;
-    SimplifyBarkForVoxelLod(bark_mesh, lod);
+    tf->native_to_world_scale[model] = src.native_to_world_scale;
 
-    if (bark_mesh.indices.empty()) {
-      spdlog::error("BuildTreeField: empty bark mesh at lod {}", lod);
-      return nullptr;
+    TreeModelBounds& bounds = tf->model_bounds[model];
+    bounds.bark_local_bounds = src.bark_lod0.local_bounds;
+
+    // leaf_local_bounds = the UNION of every supplied LOD's own bounds (voxel
+    // tets overscale past their source cards' AABB, and different LODs can
+    // have different extents, so no single LOD's bounds alone would be
+    // conservative for every LOD). Aabb::Union is a no-op for an
+    // Aabb::Empty()-sentinel operand (min=+FLT_MAX/max=-FLT_MAX, see
+    // aabb.cpp), so unioning in an empty LOD's bounds unguarded is safe --
+    // matters for the known pine-preset gap where one LOD's voxelization can
+    // legitimately be empty (see leaf_voxelizer.hpp) while others aren't.
+    // has_leaves reflects whether ANY supplied LOD has geometry.
+    for (const TexturedMeshResult& m : src.leaf_lod_meshes) {
+      if (m.mesh.vertex_count > 0) bounds.has_leaves = true;
+      bounds.leaf_local_bounds = bounds.leaf_local_bounds.Union(m.local_bounds);
     }
 
-    const uint32_t bucket = GpuInstanceRenderer::BucketId(/*model=*/0u, lod);
-    TreeField::LodBuffers& buffers = tf->lod_buffers[lod];
+    std::vector<TreeField::LodBuffers>& model_buffers = tf->lod_buffers[model];
+    model_buffers.resize(lod_count);
 
-    // --- Bark submesh (0, kDeferred + kShadow). ---
-    buffers.bark_vertex_buffer = UploadVertexBuffer(device, bark_mesh.vertices);
-    buffers.bark_index_buffer = UploadIndexBuffer(device, bark_mesh.indices);
-    const uint32_t bark_index_count =
-        static_cast<uint32_t>(bark_mesh.indices.size());
+    for (uint32_t lod = 0; lod < static_cast<uint32_t>(lod_count); ++lod) {
+      StaticTexturedMeshComponent bark_mesh = src.bark_lod0.mesh;
+      SimplifyBarkForVoxelLod(bark_mesh, lod);
 
-    InstanceParams bark_params;
-    // instanced_gbuffer's group-0 texture bindings (albedo@1, normal@3,
-    // arm@4 -- see shaders/material/instanced_gbuffer.wesl) have no
-    // material_requirements.cpp entry, so StandardMaterialFactory derives
-    // slot names from reflection as "tex_<binding>" (see the .hpp's
-    // deviation note). Albedo (tex_1) is left unset -- its "white" factory
-    // default * `tint` below reproduces a flat solid bark color. Reused
-    // as-is for the shadow-pass instance below (its bindings are declared
-    // unconditionally in the WESL, not gated on shadow_pass -- see the
-    // .wesl file) -- bucketId is what the shadow vertex path actually needs
-    // (bucketBase[mat_params.bucketId]).
-    bark_params.texture_overrides.push_back(DefaultTextureView{
-        .param_name = "tex_3",
-        .view = tf->bark_normal_view,
-        .sampler = tf->bark_support_sampler,
-        .type = TextureType::k2D,
-    });
-    bark_params.texture_overrides.push_back(DefaultTextureView{
-        .param_name = "tex_4",
-        .view = tf->bark_arm_view,
-        .sampler = tf->bark_support_sampler,
-        .type = TextureType::k2D,
-    });
-    bark_params.uniform_overrides["tint"] =
-        MaterialParameterValue(glm::vec4(0.30f, 0.19f, 0.10f, 1.0f));
-    bark_params.uniform_overrides["bucketId"] = MaterialParameterValue(bucket);
+      if (bark_mesh.indices.empty()) {
+        spdlog::error("BuildTreeField: empty bark mesh at model {} lod {}",
+                      model, lod);
+        return nullptr;
+      }
 
-    entt::id_type bark_key = ComposeMaterialCacheKey(
-        entt::hashed_string{"tree_bark"}.value(), GeometryType::kInstancedMesh,
-        RenderPassType::kGBuffer, bucket);
-    auto bark_handle = tf->material_cache.GetOrCreate(
-        bark_key, *tf->bark_factory, GeometryType::kInstancedMesh,
-        MaterialPassType::kDeferred, RenderPassType::kGBuffer, bark_params);
-    if (!bark_handle) {
-      spdlog::error("BuildTreeField: bark material resolve failed at lod {}",
-                    lod);
-      return nullptr;
-    }
-    tf->material_handles.push_back(bark_handle);
-    tf->field->SetSubmesh(/*model=*/0u, lod, /*submesh=*/0u,
-                          buffers.bark_vertex_buffer,
-                          buffers.bark_index_buffer, wgpu::IndexFormat::Uint32,
-                          bark_index_count,
-                          InstancedMeshField::PassKind::kDeferred,
-                          bark_handle.operator->());
+      const uint32_t bucket = GpuInstanceRenderer::BucketId(model, lod);
+      TreeField::LodBuffers& buffers = model_buffers[lod];
 
-    entt::id_type bark_shadow_key = ComposeMaterialCacheKey(
-        entt::hashed_string{"tree_bark_shadow"}.value(),
-        GeometryType::kInstancedMesh, RenderPassType::kShadow, bucket);
-    auto bark_shadow_handle = tf->material_cache.GetOrCreate(
-        bark_shadow_key, *tf->bark_factory, GeometryType::kInstancedMesh,
-        MaterialPassType::kDeferred, RenderPassType::kShadow, bark_params);
-    if (!bark_shadow_handle) {
-      spdlog::error(
-          "BuildTreeField: bark shadow material resolve failed at lod {}",
-          lod);
-      return nullptr;
-    }
-    tf->material_handles.push_back(bark_shadow_handle);
-    tf->field->SetSubmeshShadow(/*model=*/0u, lod, /*submesh=*/0u,
-                                bark_shadow_handle.operator->());
+      // --- Bark submesh (0, kDeferred + kShadow). ---
+      buffers.bark_vertex_buffer =
+          UploadVertexBuffer(device, bark_mesh.vertices);
+      buffers.bark_index_buffer = UploadIndexBuffer(device, bark_mesh.indices);
+      const uint32_t bark_index_count =
+          static_cast<uint32_t>(bark_mesh.indices.size());
 
-    // --- Leaf submesh (1, kDeferred + kShadow), only for a LOD whose
-    // supplied mesh actually has geometry -- a LOD can legally voxelize
-    // empty (see leaf_voxelizer.hpp's known gap), in which case this slot is
-    // simply left unconfigured: GpuInstanceRenderer::Draw skips zero-
-    // index-count slots automatically, so this is safe (no dead draw, no
-    // validation error) without any special-casing at draw time. A tree with
-    // leaves at OTHER LODs hitting this at lod N still renders bare there
-    // (fail-soft -- pine-at-dead-zone during dev must not brick the viewer),
-    // but spdlog::warn's so the gap has a diagnostic instead of silently
-    // popping the crown at that distance band. ---
-    const StaticTexturedMeshComponent& leaf_mesh = leaf_lod_meshes[lod].mesh;
-    if (leaf_mesh.vertex_count > 0 && !leaf_mesh.indices.empty()) {
-      buffers.leaf_vertex_buffer =
-          UploadVertexBuffer(device, leaf_mesh.vertices);
-      buffers.leaf_index_buffer = UploadIndexBuffer(device, leaf_mesh.indices);
-      const uint32_t leaf_index_count =
-          static_cast<uint32_t>(leaf_mesh.indices.size());
-
-      InstanceParams leaf_params;
-      // voxel_foliage declares no textures at all (see the .wesl) -- no
-      // texture_overrides needed. `params`: x = roughness, y = translucency
-      // strength (shaders/material/voxel_foliage.wesl's MaterialParams).
-      // Reused as-is for the shadow-pass instance below (voxel_foliage's
-      // shadow_pass vertex stage still reads mat_params.bucketId).
-      leaf_params.uniform_overrides["tint"] =
-          MaterialParameterValue(glm::vec4(options.leaves.tint, 1.0f));
-      leaf_params.uniform_overrides["params"] = MaterialParameterValue(
-          glm::vec4(kBarkRoughness, options.leaves.transmission_strength,
-                    0.0f, 0.0f));
-      leaf_params.uniform_overrides["bucketId"] =
+      InstanceParams bark_params;
+      // instanced_gbuffer's group-0 texture bindings (albedo@1, normal@3,
+      // arm@4 -- see shaders/material/instanced_gbuffer.wesl) have no
+      // material_requirements.cpp entry, so StandardMaterialFactory derives
+      // slot names from reflection as "tex_<binding>" (see the .hpp's
+      // deviation note). Albedo (tex_1) is left unset -- its "white" factory
+      // default * `tint` below reproduces a flat solid bark color. Reused
+      // as-is for the shadow-pass instance below (its bindings are declared
+      // unconditionally in the WESL, not gated on shadow_pass -- see the
+      // .wesl file) -- bucketId is what the shadow vertex path actually needs
+      // (bucketBase[mat_params.bucketId]).
+      bark_params.texture_overrides.push_back(DefaultTextureView{
+          .param_name = "tex_3",
+          .view = tf->bark_normal_view,
+          .sampler = tf->bark_support_sampler,
+          .type = TextureType::k2D,
+      });
+      bark_params.texture_overrides.push_back(DefaultTextureView{
+          .param_name = "tex_4",
+          .view = tf->bark_arm_view,
+          .sampler = tf->bark_support_sampler,
+          .type = TextureType::k2D,
+      });
+      bark_params.uniform_overrides["tint"] =
+          MaterialParameterValue(glm::vec4(0.30f, 0.19f, 0.10f, 1.0f));
+      bark_params.uniform_overrides["bucketId"] =
           MaterialParameterValue(bucket);
 
-      entt::id_type leaf_key = ComposeMaterialCacheKey(
-          entt::hashed_string{"tree_leaf"}.value(),
+      // The cache key is keyed on `bucket`, which already encodes
+      // (model, lod) -- so every model gets its own material instances
+      // without a second key dimension.
+      entt::id_type bark_key = ComposeMaterialCacheKey(
+          entt::hashed_string{"tree_bark"}.value(),
           GeometryType::kInstancedMesh, RenderPassType::kGBuffer, bucket);
-      auto leaf_handle = tf->material_cache.GetOrCreate(
-          leaf_key, *tf->leaf_factory, GeometryType::kInstancedMesh,
-          MaterialPassType::kDeferred, RenderPassType::kGBuffer, leaf_params);
-      if (!leaf_handle) {
+      auto bark_handle = tf->material_cache.GetOrCreate(
+          bark_key, *tf->bark_factory, GeometryType::kInstancedMesh,
+          MaterialPassType::kDeferred, RenderPassType::kGBuffer, bark_params);
+      if (!bark_handle) {
         spdlog::error(
-            "BuildTreeField: leaf material resolve failed at lod {}", lod);
+            "BuildTreeField: bark material resolve failed at model {} lod {}",
+            model, lod);
         return nullptr;
       }
-      tf->material_handles.push_back(leaf_handle);
-      tf->field->SetSubmesh(/*model=*/0u, lod, /*submesh=*/1u,
-                            buffers.leaf_vertex_buffer,
-                            buffers.leaf_index_buffer,
-                            wgpu::IndexFormat::Uint32, leaf_index_count,
+      tf->material_handles.push_back(bark_handle);
+      tf->field->SetSubmesh(model, lod, /*submesh=*/0u,
+                            buffers.bark_vertex_buffer,
+                            buffers.bark_index_buffer,
+                            wgpu::IndexFormat::Uint32, bark_index_count,
                             InstancedMeshField::PassKind::kDeferred,
-                            leaf_handle.operator->());
+                            bark_handle.operator->());
 
-      entt::id_type leaf_shadow_key = ComposeMaterialCacheKey(
-          entt::hashed_string{"tree_leaf_shadow"}.value(),
+      entt::id_type bark_shadow_key = ComposeMaterialCacheKey(
+          entt::hashed_string{"tree_bark_shadow"}.value(),
           GeometryType::kInstancedMesh, RenderPassType::kShadow, bucket);
-      auto leaf_shadow_handle = tf->material_cache.GetOrCreate(
-          leaf_shadow_key, *tf->leaf_factory, GeometryType::kInstancedMesh,
-          MaterialPassType::kDeferred, RenderPassType::kShadow, leaf_params);
-      if (!leaf_shadow_handle) {
+      auto bark_shadow_handle = tf->material_cache.GetOrCreate(
+          bark_shadow_key, *tf->bark_factory, GeometryType::kInstancedMesh,
+          MaterialPassType::kDeferred, RenderPassType::kShadow, bark_params);
+      if (!bark_shadow_handle) {
         spdlog::error(
-            "BuildTreeField: leaf shadow material resolve failed at lod {}",
-            lod);
+            "BuildTreeField: bark shadow material resolve failed at model {} "
+            "lod {}",
+            model, lod);
         return nullptr;
       }
-      tf->material_handles.push_back(leaf_shadow_handle);
-      tf->field->SetSubmeshShadow(/*model=*/0u, lod, /*submesh=*/1u,
-                                  leaf_shadow_handle.operator->());
-    } else if (has_leaves) {
-      spdlog::warn(
-          "BuildTreeField: lod {} supplied an empty leaf voxelization (tree "
-          "has leaves at other LODs) -- rendering bare at this LOD",
-          lod);
+      tf->material_handles.push_back(bark_shadow_handle);
+      tf->field->SetSubmeshShadow(model, lod, /*submesh=*/0u,
+                                  bark_shadow_handle.operator->());
+
+      // --- Leaf submesh (1, kDeferred + kShadow), only for a LOD whose
+      // supplied mesh actually has geometry -- a LOD can legally voxelize
+      // empty (see leaf_voxelizer.hpp's known gap), in which case this slot
+      // is simply left unconfigured: GpuInstanceRenderer::Draw skips zero-
+      // index-count slots automatically, so this is safe (no dead draw, no
+      // validation error) without any special-casing at draw time. A tree
+      // with leaves at OTHER LODs hitting this at lod N still renders bare
+      // there (fail-soft -- pine-at-dead-zone during dev must not brick the
+      // viewer), but spdlog::warn's so the gap has a diagnostic instead of
+      // silently popping the crown at that distance band. ---
+      const StaticTexturedMeshComponent& leaf_mesh =
+          src.leaf_lod_meshes[lod].mesh;
+      if (leaf_mesh.vertex_count > 0 && !leaf_mesh.indices.empty()) {
+        buffers.leaf_vertex_buffer =
+            UploadVertexBuffer(device, leaf_mesh.vertices);
+        buffers.leaf_index_buffer =
+            UploadIndexBuffer(device, leaf_mesh.indices);
+        const uint32_t leaf_index_count =
+            static_cast<uint32_t>(leaf_mesh.indices.size());
+
+        InstanceParams leaf_params;
+        // voxel_foliage declares no textures at all (see the .wesl) -- no
+        // texture_overrides needed. `params`: x = roughness, y = translucency
+        // strength (shaders/material/voxel_foliage.wesl's MaterialParams).
+        // Reused as-is for the shadow-pass instance below (voxel_foliage's
+        // shadow_pass vertex stage still reads mat_params.bucketId).
+        leaf_params.uniform_overrides["tint"] =
+            MaterialParameterValue(glm::vec4(src.options.leaves.tint, 1.0f));
+        leaf_params.uniform_overrides["params"] = MaterialParameterValue(
+            glm::vec4(kBarkRoughness,
+                      src.options.leaves.transmission_strength, 0.0f, 0.0f));
+        leaf_params.uniform_overrides["bucketId"] =
+            MaterialParameterValue(bucket);
+
+        entt::id_type leaf_key = ComposeMaterialCacheKey(
+            entt::hashed_string{"tree_leaf"}.value(),
+            GeometryType::kInstancedMesh, RenderPassType::kGBuffer, bucket);
+        auto leaf_handle = tf->material_cache.GetOrCreate(
+            leaf_key, *tf->leaf_factory, GeometryType::kInstancedMesh,
+            MaterialPassType::kDeferred, RenderPassType::kGBuffer,
+            leaf_params);
+        if (!leaf_handle) {
+          spdlog::error(
+              "BuildTreeField: leaf material resolve failed at model {} lod {}",
+              model, lod);
+          return nullptr;
+        }
+        tf->material_handles.push_back(leaf_handle);
+        tf->field->SetSubmesh(model, lod, /*submesh=*/1u,
+                              buffers.leaf_vertex_buffer,
+                              buffers.leaf_index_buffer,
+                              wgpu::IndexFormat::Uint32, leaf_index_count,
+                              InstancedMeshField::PassKind::kDeferred,
+                              leaf_handle.operator->());
+
+        entt::id_type leaf_shadow_key = ComposeMaterialCacheKey(
+            entt::hashed_string{"tree_leaf_shadow"}.value(),
+            GeometryType::kInstancedMesh, RenderPassType::kShadow, bucket);
+        auto leaf_shadow_handle = tf->material_cache.GetOrCreate(
+            leaf_shadow_key, *tf->leaf_factory, GeometryType::kInstancedMesh,
+            MaterialPassType::kDeferred, RenderPassType::kShadow, leaf_params);
+        if (!leaf_shadow_handle) {
+          spdlog::error(
+              "BuildTreeField: leaf shadow material resolve failed at model {} "
+              "lod {}",
+              model, lod);
+          return nullptr;
+        }
+        tf->material_handles.push_back(leaf_shadow_handle);
+        tf->field->SetSubmeshShadow(model, lod, /*submesh=*/1u,
+                                    leaf_shadow_handle.operator->());
+      } else if (bounds.has_leaves) {
+        spdlog::warn(
+            "BuildTreeField: model {} lod {} supplied an empty leaf "
+            "voxelization (tree has leaves at other LODs) -- rendering bare "
+            "at this LOD",
+            model, lod);
+      }
     }
   }
 
