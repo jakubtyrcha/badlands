@@ -3,6 +3,9 @@
 //   --preview-image-only   run the generator and dump a numbered PNG per
 //                          pipeline stage plus the legacy preview rasters
 //                          into --out, then exit. Pure CPU: no window, no GPU.
+//   --load DIR             render a map LOADED from rasters on disk instead of
+//                          generating one (see mapgen/map_io.hpp for the form).
+//                          --resolution/--size come from the manifest.
 //   (default)              generate the map and render it as the in-game
 //                          terrain (cluster-LOD, biome-colored) with a
 //                          fixed-angle camera.
@@ -10,7 +13,7 @@
 // Run from the repo root (shaders/ and assets/ resolve relative to cwd).
 //
 // Usage: badlands_mapview [--seed N] [--resolution WxH] [--size WxH] [--out DIR]
-//                         [--preview-image-only]
+//                         [--preview-image-only] [--load DIR]
 //                         [--screenshot out.png] [--record dir/]
 //
 //   --resolution WxH  map texels, square only: W must equal H (default 512x512)
@@ -34,6 +37,7 @@
 
 #include "engine/app/sdl_viewer_app.hpp"
 #include "mapgen/generator.hpp"
+#include "mapgen/map_io.hpp"
 #include "mapgen/outputs.hpp"
 #include "executables/mapview/map_view_view.hpp"
 
@@ -97,6 +101,7 @@ int RunPreviewOnly(const MapGenParams& params, const std::string& out_dir) {
 int main(int argc, char** argv) {
   MapGenParams params;
   std::string out_dir = "mapgen_out";
+  std::string load_dir;
   bool preview_only = false;
   float camera_height = 0.0f;  // 0 = keep the default framing
   int lod_tint = 0;            // 0 shaded / 1 triangle hash / 2 LOD level
@@ -162,6 +167,8 @@ int main(int argc, char** argv) {
         return 2;
       }
       params.world_size_m = r->first;
+    } else if (a == "--load") {
+      if (auto v = next("--load")) load_dir = *v; else return 2;
     } else if (a == "--out") {
       if (auto v = next("--out")) out_dir = *v; else return 2;
     } else if (a == "--camera-height") {
@@ -187,13 +194,42 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (preview_only) return RunPreviewOnly(params, out_dir);
+  if (preview_only) {
+    if (!load_dir.empty()) {
+      std::fprintf(stderr,
+                   "mapview: --load and --preview-image-only are exclusive "
+                   "(the preview dumps generator stages a loaded map has none of)\n");
+      return 2;
+    }
+    return RunPreviewOnly(params, out_dir);
+  }
+
+  // Read the manifest BEFORE constructing the view and write the geometry into
+  // `params`, so resolution/world_size_m have one source of truth and every
+  // existing params_ use inside MapViewView (splat texel size, camera framing)
+  // stays correct on the load path.
+  if (!load_dir.empty()) {
+    std::string err;
+    const auto man = badlands::mapgen::load_manifest(load_dir, &err);
+    if (!man) {
+      std::fprintf(stderr, "mapview: %s\n", err.c_str());
+      return 1;
+    }
+    params.resolution = man->resolution;
+    params.world_size_m = man->world_size_m;
+    std::printf("mapview: loading %s (%dx%d texels, %.0f m, %.2f m/texel)\n",
+                load_dir.c_str(), man->resolution, man->resolution,
+                man->world_size_m,
+                man->world_size_m / static_cast<float>(man->resolution));
+    if (!man->source.empty())
+      std::printf("mapview:   source: %s\n", man->source.c_str());
+  }
 
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
   return app.Run(argc, argv,
-                 [params, camera_height, lod_tint,
-                  serial_build](const badlands::RenderContext&) {
+                 [params, camera_height, lod_tint, serial_build,
+                  load_dir](const badlands::RenderContext&) {
                    return std::make_unique<badlands::MapViewView>(
-                       params, camera_height, lod_tint, serial_build);
+                       params, camera_height, lod_tint, serial_build, load_dir);
                  });
 }

@@ -178,6 +178,29 @@ bool GpuContext::Initialize(SDL_Window* window) {
     device_desc.requiredFeatures = required_features.data();
   }
 
+  // Raise the buffer-size ceilings to whatever the adapter actually supports.
+  // WebGPU's DEFAULT maxBufferSize is 256 MiB regardless of hardware, and a
+  // single mesh crosses it sooner than it sounds: a 2048^2 heightfield builds an
+  // 11.9M-vertex cluster DAG, which at 32 B/vertex is a 379 MB vertex buffer.
+  // Exceeding it does not fail loudly at the allocation -- the buffer comes back
+  // invalid, poisons the command buffer that binds it, and the frame renders
+  // BLACK with only a validation message to say why.
+  //
+  // Same opportunistic shape as the features above: read what the adapter
+  // offers and ask for exactly that, so this can only ever widen the ceiling and
+  // never request something the adapter would refuse device creation over. On
+  // this machine the adapter reports 4 GiB against the 256 MiB default.
+  wgpu::Limits adapter_limits{};
+  wgpu::Limits required_limits{};
+  bool want_limits = false;
+  if (adapter_.GetLimits(&adapter_limits) == wgpu::Status::Success) {
+    required_limits.maxBufferSize = adapter_limits.maxBufferSize;
+    required_limits.maxStorageBufferBindingSize =
+        adapter_limits.maxStorageBufferBindingSize;
+    want_limits = true;
+  }
+  if (want_limits) device_desc.requiredLimits = &required_limits;
+
   device_desc.SetUncapturedErrorCallback(
       [](const wgpu::Device&, wgpu::ErrorType type, wgpu::StringView message) {
         std::fprintf(stderr, "WebGPU Error: %d - %s\n",

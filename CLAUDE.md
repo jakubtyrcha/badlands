@@ -58,9 +58,16 @@ with still, murky lake water. `--preview-image-only` instead dumps the debug ras
 (bedrock/biome/heightmap/hillshade/flow/water/sediment PNGs plus a numbered
 per-stage + per-N-iterations film strip) to `--out` and exits (pure CPU, no
 window).
+`--load DIR` instead renders a map read from rasters on disk rather than
+generated — `src/mapgen/map_io.hpp` defines the form (a `map.txt` manifest plus
+headerless `height.f32`/`level.f32`/`biome.u8`). Water rides in the LEVEL raster,
+not a depth field: `depth = max(0, level - height)`, and a dry texel stores
+`level == height`, so a lake surface is exactly flat by construction.
+`tools/protogen/window.cpp` writes this set.
 ```sh
 ./build/badlands_mapview --seed 2 --resolution 500x500 --size 500x500   # view it
 ./build/badlands_mapview --preview-image-only --out mapgen_out          # dump PNGs
+./build/badlands_mapview --load window_out                              # load rasters
 ```
 Rust feature-lib tests — **use `--lib`** (bare `cargo test` here prints only the empty doctest target):
 ```sh
