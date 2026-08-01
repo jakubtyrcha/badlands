@@ -107,34 +107,40 @@ keep the split structural across windows.
   window. Padding the routing does **not** change this (measured: identical), and
   a window that drains outward will never show rivers reaching its own lake.
 
-### From graph to geometry: circular arcs, then a ribbon
+### From graph to geometry: arcs, a carve, and water in the cavity
 
-Every reach is refitted as a chain of **circular arcs** (`src/mapgen/river_arcs.hpp`)
-and swept into a draped mesh (`src/mapview/river_surface.hpp`). Two files because
-the curve is not the mesh: a carve pass, a flow field and a bank spline all want
-the same curve and none of them wants triangles.
+Every reach is refitted as a chain of **circular arcs** (`src/mapgen/river_arcs.hpp`);
+the arcs drive a **carve** into the terrain (`src/mapgen/river_carve.hpp`) and a
+**water surface** inside it (`src/mapview/river_surface.hpp`). Three files because
+the curve is not the cavity and the cavity is not the water — a flow field or a
+bank spline would want the same curve and neither of the meshes.
 
 - **Arcs, not a spline.** A meander *is* an arc — curvature is the quantity river
   geometry is written in — so the representation stores what you want to read.
   Offsetting to a bank is closed-form (same arc at `r ∓ w/2`), and arc length is
-  exact, so parameterising by distance along the river is free.
-- **Biarcs.** Each span is two arcs meeting tangentially at an equal-chord joint,
-  where G1 falls out algebraically rather than being solved for. Spans are grown
-  greedily until a skipped point exceeds tolerance, so a straight run collapses to
-  one arc. On the pinned 2 km window: **666 arcs from 1687 polyline points (2.53×),
-  fit error ≤ 0.50 m** against a 0.5-texel tolerance.
-- **The ribbon is true width**, `w = k_w·√Q` per vertex, so the trunk swells
-  downstream instead of being drawn at a uniform thickness. The one deliberate
-  lie is `kMinRibbonWidthM` (1.5 m): a 0.3 m headwater drawn to scale aliases to
-  nothing and the network looks like it stops partway down.
-- **It replaced a debug-LINE layer, and the two cannot coexist.** They share a
-  centreline, and a screen-space line 1–4 px wide covers a 1.5–4 m ribbon at every
-  camera height where you would look at the map. What the lines carried and the
-  ribbon does not is Strahler order, traded for true width.
-- Fit quality is logged at load — compression, worst fit error, minimum radius,
-  and how many arcs bend tighter than the channel is wide. That last one is the
-  lattice-hairpin check: an arc tighter than its own half-width would fold the
-  ribbon inside out, so the mesh clamps the offset (0 arcs on the pinned window).
+  exact, so parameterising by distance along the river is free. Biarc spans grow
+  greedily under a 0.5-texel tolerance; fit quality is logged at load.
+- **The carve is physical, not authored:** `cavity = 1.390·d_flow + 0.45·w^0.6`.
+  Bankfull (the 1–2 yr flood, ~3× mean, `d ~ Q^0.3` ⟹ ×1.39) plus a bank cut
+  whose exponent falls out of hydraulic geometry (`d ~ Q^0.3, w ~ Q^0.5` ⟹
+  `d ~ w^0.6`); `k_bank` is the single free coefficient. The bed elevation comes
+  from the CENTRELINE (running downstream minimum), never from local terrain, so
+  a carved channel cannot run uphill. Compact support: outside the corridor the
+  carved field returns the base surface **bitwise**.
+- **The corridor is locally refined, not baked.** A 0.34 m-deep, 0.52 m-wide
+  median cavity is sub-texel on the 1 m lattice, so the cluster DAG subdivides
+  corridor quads 8× (0.125 m) through a *generic* per-quad detail field
+  (`TerrainDetailField` — the DAG knows nothing about rivers; the adapter in
+  `map_view_view.cpp` is the only place the two meet). Fan seams keep plain
+  terrain bit-identical; measured on W7 at 3 m/yr: 35,722 corridor texels
+  (0.85% of the map), DAG 31 s / 18.9M verts vs 14 s / 11.9M plain.
+- **The water sits IN the cavity** at `bed + d_flow`, per cross-section, at TRUE
+  width — no minimum-width floor anymore; the cavity, not a drawn stripe, is
+  what makes a 0.5 m brook visible. It uses the lakes' still-water material;
+  its extinction is calibrated to 2.5–10 m visibility, so brooks render nearly
+  clear (accepted — the den does the work).
+- The old debug-line layer and the drawn-to-width debug ribbon are both gone;
+  what the lines carried and the carve does not is Strahler order.
 
 ## Known limits
 
