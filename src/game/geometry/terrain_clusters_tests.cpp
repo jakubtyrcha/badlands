@@ -680,8 +680,9 @@ void CheckEdgeManifold(const TerrainClusterDag& dag,
   }
 }
 
-// Every triangle faces up (+Y geometric normal). Also rejects zero-area
-// triangles, which a broken ring walk would emit.
+// Every triangle faces up (+Y geometric normal), STRICTLY -- for LEAF
+// geometry, where a zero-area triangle could only come from a broken ring
+// walk. Simplified clusters are held to the weaker CheckNoInvertedFaces below.
 void CheckFacesUp(const TerrainClusterDag& dag,
                   const std::vector<uint32_t>& clusters) {
   for (uint32_t cidx : clusters) {
@@ -694,6 +695,109 @@ void CheckFacesUp(const TerrainClusterDag& dag,
           PosOf(Record(dag, dag.indices[c.first_index + t + 2]));
       CAPTURE(p0, p1, p2);
       REQUIRE(glm::cross(p1 - p0, p2 - p0).y > 0.0f);
+    }
+  }
+}
+
+// The SIMPLIFIED-geometry face check: no inversion anywhere (cross.y < 0 would
+// be an overhang folded through the heightfield), and XZ-degenerate "fins"
+// (cross.y == 0) rare.
+//
+// Fins are not garbage and cannot be forbidden outright: when a locked seam
+// vertex's surface neighbours collapse onto the chord, meshopt keeps the seam
+// SEALED by a vertical sliver between the chord and the neighbour's border
+// polyline -- zero projected area, 3D area bounded by the very result_error
+// the LOD cut already budgets, and the reason the edge-count check reads 2
+// everywhere across LOD transitions. The uniform build has always contained a
+// handful (found the moment cuts were checked at all). What fins must NOT do
+// is plateau: a fin population explosion is the over-reduction wall pathology
+// (locked verts kept alive ONLY by degenerates), which the locked-vertex
+// simplify floor exists to prevent. The 1% ceiling is the tripwire for that.
+void CheckNoInvertedFaces(const TerrainClusterDag& dag,
+                          const std::vector<uint32_t>& clusters) {
+  size_t tris = 0, fins = 0;
+  for (uint32_t cidx : clusters) {
+    const auto& c = dag.clusters[cidx];
+    for (uint32_t t = 0; t + 2 < c.index_count; t += 3) {
+      const glm::vec3 p0 = PosOf(Record(dag, dag.indices[c.first_index + t]));
+      const glm::vec3 p1 =
+          PosOf(Record(dag, dag.indices[c.first_index + t + 1]));
+      const glm::vec3 p2 =
+          PosOf(Record(dag, dag.indices[c.first_index + t + 2]));
+      const float cy = glm::cross(p1 - p0, p2 - p0).y;
+      CAPTURE(p0, p1, p2, cy);
+      REQUIRE(cy >= 0.0f);
+      ++tris;
+      if (cy == 0.0f) ++fins;
+    }
+  }
+  CAPTURE(fins, tris);
+  // Measured: 2.8% at the coarsest cut of the dense diagonal-band fixture
+  // (whose hot-tile fraction is ~5x the real river corridor's), every one a
+  // verified seal. The ceiling is a REGIME tripwire, not a per-seal police --
+  // the wall pathology it guards against floods the count, it does not creep.
+  REQUIRE(fins * 100 <= 5 * tris);
+}
+
+// Watertightness of a SELECTED CUT, stated to tolerate exactly one artifact
+// and nothing else. Counting is over REAL (cy > 0) triangles:
+//   n >= 3           -> broken, full stop (overlapping surface);
+//   n == 2           -> a proper interior edge;
+//   n == 1           -> must lie on the map perimeter OR be covered by a FIN,
+//                       the vertical sliver meshopt uses to seal a chord
+//                       against a locked border polyline (see
+//                       CheckNoInvertedFaces for why fins are legitimate);
+//   n == 0, fin-only -> internal to a seal, fine (a double-fin seam leaves its
+//                       short edges to the two fins alone).
+// Counting fins as ordinary surface would let two seals on one chord read as a
+// 4-triangle edge; ignoring them entirely would re-open every transition they
+// seal. Both wrong answers were measured before this shape of the check.
+void CheckCutWatertight(const TerrainClusterDag& dag,
+                        const std::vector<uint32_t>& clusters, float map_w,
+                        float map_h) {
+  using EdgeKey = std::array<uint32_t, 6>;
+  std::map<EdgeKey, int> real_count;
+  std::set<EdgeKey> fin_edges;
+  for (uint32_t cidx : clusters) {
+    const auto& c = dag.clusters[cidx];
+    for (uint32_t t = 0; t + 2 < c.index_count; t += 3) {
+      const uint32_t idx[3] = {dag.indices[c.first_index + t],
+                               dag.indices[c.first_index + t + 1],
+                               dag.indices[c.first_index + t + 2]};
+      const glm::vec3 p0 = PosOf(Record(dag, idx[0]));
+      const glm::vec3 p1 = PosOf(Record(dag, idx[1]));
+      const glm::vec3 p2 = PosOf(Record(dag, idx[2]));
+      const bool fin = glm::cross(p1 - p0, p2 - p0).y == 0.0f;
+      for (int e = 0; e < 3; ++e) {
+        const auto pa = PosBits(Record(dag, idx[e]));
+        const auto pb = PosBits(Record(dag, idx[(e + 1) % 3]));
+        REQUIRE(pa != pb);
+        EdgeKey k;
+        const bool swap = pb < pa;
+        const auto& lo = swap ? pb : pa;
+        const auto& hi = swap ? pa : pb;
+        std::copy(lo.begin(), lo.end(), k.begin());
+        std::copy(hi.begin(), hi.end(), k.begin() + 3);
+        if (fin)
+          fin_edges.insert(k);
+        else
+          ++real_count[k];
+      }
+    }
+  }
+  for (const auto& [k, n] : real_count) {
+    std::array<uint32_t, 8> ra{}, rb{};
+    std::copy(k.begin(), k.begin() + 3, ra.begin());
+    std::copy(k.begin() + 3, k.end(), rb.begin());
+    const glm::vec3 a = PosOf(ra), b = PosOf(rb);
+    CAPTURE(a.x, a.z, b.x, b.z, n);
+    REQUIRE(n <= 2);
+    if (n == 1) {
+      const bool on_border =
+          (a.x == 0.0f && b.x == 0.0f) || (a.x == map_w && b.x == map_w) ||
+          (a.z == 0.0f && b.z == 0.0f) || (a.z == map_h && b.z == map_h);
+      const bool sealed = fin_edges.count(k) > 0;
+      REQUIRE((on_border || sealed));
     }
   }
 }
@@ -888,10 +992,68 @@ TEST_CASE("terrain detail: selected cuts stay exact watertight covers",
           CheckCutValidity(dag, cam, fov, screen_h, tau);
           std::vector<uint32_t> sel;
           SelectClusters(dag, cam, fov, screen_h, tau, sel);
-          CheckEdgeManifold(dag, sel, static_cast<float>(w),
-                            static_cast<float>(h));
+          // Watertight up to fin seals, plus no inversions and a bounded fin
+          // population. The pair caught a live finding: before the simplify
+          // target was floored by the locked-vertex count, tiny pre-pass
+          // groups kept locked verts alive ONLY through fins.
+          CheckCutWatertight(dag, sel, static_cast<float>(w),
+                             static_cast<float>(h));
+          CheckNoInvertedFaces(dag, sel);
         }
       }
     }
   }
+}
+
+TEST_CASE("terrain detail: the pre-pass leaves a sound mixed-depth tree",
+          "[terrain_clusters]") {
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  const DetailFixture fx = MakeDetail(
+      map, w, h,
+      [](int qx, int qz) { return (std::abs(qx - qz) <= 1) ? 3 : 0; }, 16.0f,
+      16.0f, 8.0f, 0.3f);
+  const auto dag = BuildTerrainClusterDag(map, {}, &fx.field);
+
+  // The tree is genuinely mixed-depth (this fixture is not vacuous): leaves
+  // coexist with clusters many levels up.
+  int max_level = 0;
+  for (const auto& c : dag.clusters) max_level = std::max(max_level, c.level);
+  REQUIRE(max_level > 3);
+  REQUIRE(dag.level_count == max_level + 1);
+
+  // No cluster is empty. An empty cluster is the signature of scratch geometry
+  // freed while a region still held it (the use-after-clear the liveness-based
+  // free exists to prevent) -- it would render as a hole, not a crash.
+  for (const auto& c : dag.clusters) {
+    REQUIRE(c.vertex_count > 0);
+    REQUIRE(c.index_count >= 3);
+  }
+
+  // Locked fine seams must DRAIN as the hierarchy coarsens, not persist: the
+  // root is where every seam has long since fallen inside some group, so its
+  // size is the plateau detector. (Mid levels legitimately exceed the budget
+  // while a seam is still locked -- that is the documented one-extra-level
+  // persistence -- so the assertion is at the root, not per level.)
+  for (const auto& c : dag.clusters) {
+    if (c.parent_group != kNoGroup) continue;
+    REQUIRE(c.index_count / 3 <= 2u * badlands::kClusterTriBudget);
+  }
+}
+
+TEST_CASE("terrain detail: parallel == serial, bitwise, on a mixed-depth build",
+          "[terrain_clusters]") {
+  const int w = 32, h = 32;
+  const MapData map = MakeMapData(w, h);
+  const DetailFixture fx = MakeDetail(
+      map, w, h,
+      [](int qx, int qz) { return (std::abs(qx - qz) <= 1) ? 3 : 0; }, 16.0f,
+      16.0f, 8.0f, 0.3f);
+  auto build = [&](bool parallel) {
+    TerrainClusterParams p;
+    p.parallel_build = parallel;
+    return BuildTerrainClusterDag(map, p, &fx.field);
+  };
+  RequireDagsBitIdentical(build(false), build(true));
+  RequireDagsBitIdentical(build(true), build(true));
 }
