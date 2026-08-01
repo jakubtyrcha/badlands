@@ -230,7 +230,12 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
         }
     };
     if (const auto* cs = game.registry.try_get<ChattingState>(e)) {
-        push_status(BL_ST_CHATTING, static_cast<int64_t>(cs->remaining * 1000.0f));
+        // ticks_of, NOT * 1000: ChattingState::remaining is float SECONDS and
+        // this wire field is ticks. The ms->ticks sweep could not see this one
+        // -- there is no identifier here to rename, only a bare conversion --
+        // which is exactly why the ABI version bump exists: no struct changed
+        // size, so nothing else would have caught it.
+        push_status(BL_ST_CHATTING, ticks_of(cs->remaining));
     }
     if (game.registry.all_of<MeleeLock>(e)) {
         push_status(BL_ST_MELEE_LOCKED, 0);  // indefinite -- ends when combat resolves
@@ -318,12 +323,24 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
         if (wants_ground) {
             // Cast in the widest reach any of this entity's point skills has,
             // so the window always covers what it could legally choose.
+            // A NON-POSITIVE cast range means UNBOUNDED (skill_cast.h), not
+            // "zero metres" -- folding it with max() would let an unbounded
+            // skill lose to a bounded one, and a lone unbounded skill would ask
+            // for a radius of 0 and be handed an empty window it can never pick
+            // from. Sight caps the result either way, just below.
             float radius = 0.0f;
+            bool unbounded = false;
             const Skills& sk = game.registry.get<Skills>(e);
             for (int32_t i = 0; i < sk.count && i < kMaxSkills; ++i) {
                 const SkillSpec& spec = game.skills.specs[static_cast<size_t>(sk.ids[i])];
-                if (spec.target == SkillTargetMode::Point) {
-                    radius = std::max(radius, skill_cast_range(game.registry, e, spec));
+                if (spec.target != SkillTargetMode::Point) {
+                    continue;
+                }
+                const float r = skill_cast_range(game.registry, e, spec);
+                if (r > 0.0f) {
+                    radius = std::max(radius, r);
+                } else {
+                    unbounded = true;
                 }
             }
             // ...and only what this entity can actually SEE. The window is its
@@ -345,7 +362,9 @@ BlViewWire pack_view_wire(const BadlandsGame& game, entt::entity e, const WorldV
             if (const auto* vis = game.registry.try_get<Vision>(e);
                 vis != nullptr && vis->radius > 0.0f) {
                 cone_half_cos = vis->cone_half_cos;
-                radius = std::min(radius, vis->radius);
+                // Sight is the cap, and for an unbounded skill it is the whole
+                // bound: you may not blink somewhere you have not looked.
+                radius = unbounded ? vis->radius : std::min(radius, vis->radius);
             }
             std::vector<nav::NavMesh::DebugCell> cells;
             game.navmesh.CellsNear(view.pos, radius, BL_MAX_NAV_POLYS, cells, facing,

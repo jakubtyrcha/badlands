@@ -222,15 +222,18 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // nor does a wake that suggested NOTHING, which adopts nothing and so
     // abandons nothing (the None case above).
     //
-    // Through a LOGGED command, like the focus's own start: a replay never
-    // thinks, so a cancel performed here and nowhere else would happen live and
-    // not on replay -- and the shot the live run never fired would land in the
-    // replay. Queued ahead of whatever this adoption pushes below, so the drain
-    // ends the old commitment before beginning any new one.
-    if (focusing(game.registry, e)) {
-        game.command_queue.push_back(
-            {CommandKind::CancelFocus, slot, UINT32_MAX, {0.0f, 0.0f}, 0});
-    }
+    // Where this adoption's own commands start. The focus cancel is INSERTED
+    // here afterwards rather than pushed now, and both halves of that matter:
+    //
+    //   * only on SUCCESS -- the switch below has seven paths that validate and
+    //     then return false (an unknown Shoot target, a dead Chat partner, a
+    //     razed building...). Pushing the cancel first threw away a running cast
+    //     for a suggestion that was then REFUSED, which is the opposite of the
+    //     rule above: nothing was adopted, so nothing should have been abandoned.
+    //   * before them -- the drain has to end the old commitment ahead of
+    //     anything the new one queues, or a UseSkill adoption would begin its
+    //     focus and then immediately cancel it.
+    const size_t queued_before = game.command_queue.size();
 
     switch (intent.kind) {
         case IntentionKind::None:
@@ -244,14 +247,14 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
             // would idle for a duration it never declared.
             CastPlan plan;
             if (!validate_cast(game, slot, intent.arg, intent.target_slot, plan,
-                               SkillTrigger::Intention)) {
+                               SkillTrigger::Intention, intent.point)) {
                 return false;
             }
             // Through a LOGGED command, not a direct begin_focus: a replay never
             // thinks, so a focus created here and nowhere else would exist live
             // and never on replay (command.h's FocusSkill).
             game.command_queue.push_back({CommandKind::FocusSkill, slot, intent.target_slot,
-                                          {0.0f, 0.0f}, intent.arg});
+                                          intent.point, intent.arg});
             break;
         }
 
@@ -381,6 +384,13 @@ bool apply_intention(BadlandsGame& game, uint32_t slot, const Intention& intent)
     // now ALWAYS a genuine positive duration, never a sentinel. Idle still
     // rejects only a NEGATIVE duration above, not a zero one -- zero is valid
     // input, just no longer meaning "forever."
+    // Adopted for real, so the old commitment ends -- see queued_before.
+    if (focusing(game.registry, e)) {
+        game.command_queue.insert(
+            game.command_queue.begin() + static_cast<ptrdiff_t>(queued_before),
+            Command{CommandKind::CancelFocus, slot, UINT32_MAX, {0.0f, 0.0f}, 0});
+    }
+
     const int64_t requested =
         (intent.kind == IntentionKind::Idle) ? intent.duration_ticks : intent.idle_hint_ticks;
     const int64_t deadline = requested > 0 ? requested : kDefaultWakeCadenceTicks;

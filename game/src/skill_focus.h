@@ -37,6 +37,7 @@
 #include "components.h"  // SkillFocus
 
 #include <entt/entt.hpp>
+#include <glm/glm.hpp>
 
 #include <cstdint>
 
@@ -50,7 +51,7 @@ namespace badlands {
 // duration -- an "instant focus" is a contradiction, and silently running it
 // as an ordinary cast would make the trigger meaningless.
 bool begin_focus(BadlandsGame& game, entt::entity e, int32_t skill_index,
-                 uint32_t target_slot);
+                 uint32_t target_slot, glm::vec2 point = {0.0f, 0.0f});
 
 // True while committed. The single gate movement and the think dispatch ask.
 bool focusing(const entt::registry& reg, entt::entity e);

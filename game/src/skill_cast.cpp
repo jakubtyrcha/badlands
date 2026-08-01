@@ -171,6 +171,17 @@ bool validate_cast(BadlandsGame& game, uint32_t caster_slot, int32_t skill_index
                      static_cast<int32_t>(spec.trigger), static_cast<int32_t>(channel));
         return false;
     }
+    if (channel == SkillTrigger::Intention && spec.intention_duration_seconds <= 0.0f) {
+        // A focus with no duration is a contradiction, and begin_focus already
+        // refuses one -- but refusing it HERE is what stops the loop: without
+        // this the cast validates, gets adopted, queues a logged FocusSkill that
+        // begin_focus then declines, advance_intentions ends the intention
+        // because nothing is running, and the brain re-suggests it on the very
+        // next wake. Forever, one command in the replay log per wake.
+        spdlog::warn("[skill] slot {}: {} is an intention skill with no duration, cast dropped",
+                     caster_slot, SkillName(static_cast<int32_t>(id)));
+        return false;
+    }
     if (!spec.castable_in_melee && reg.all_of<MeleeLock>(caster)) {
         // Authored data, checked here so BOTH gates enforce it -- you cannot
         // vanish out of a fight somebody is already in with you.

@@ -29,6 +29,7 @@
 #include <entt/entt.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -480,4 +481,56 @@ TEST_CASE("a cast cannot name a target it cannot perceive", "[skill][sneak]") {
     apply_status(*f.game, f.victim(), StatusKind::Sneaking, ticks_of(5.0f), f.caster_slot);
     CHECK_FALSE(validate_cast(*f.game, f.caster_slot, 0, f.victim_slot, plan,
                               SkillTrigger::Intention));
+}
+
+TEST_CASE("a REFUSED suggestion does not abandon the focus", "[focus][intention]") {
+    // The rule is that anything ADOPTED which is not this focus abandons it.
+    // A suggestion that fails validation adopts nothing, so it must cost
+    // nothing -- and there are seven such paths through apply_intention.
+    //
+    // Concretely: a hunter 1.9 s into a 2 s shot whose next wake names a Chat
+    // partner that died this tick used to lose the whole cast and get nothing
+    // in exchange for it.
+    FocusFixture f;
+    REQUIRE(f.adopt());
+    f.step();
+    REQUIRE(f.is_focusing());
+
+    Intention bad_chat;
+    bad_chat.kind = IntentionKind::Chat;
+    bad_chat.target_slot = 4242;  // nobody
+    CHECK_FALSE(apply_intention(*f.game, f.caster_slot, bad_chat));
+    apply_commands(*f.game);
+    CHECK(f.is_focusing());
+
+    Intention bad_move;
+    bad_move.kind = IntentionKind::MoveTo;
+    bad_move.point = {std::numeric_limits<float>::quiet_NaN(), 0.0f};
+    CHECK_FALSE(apply_intention(*f.game, f.caster_slot, bad_move));
+    apply_commands(*f.game);
+    CHECK(f.is_focusing());
+
+    // ...and the shot still lands, so the focus was genuinely intact and not
+    // merely still present as a component.
+    const float hp_before = f.victim_hp();
+    while (f.is_focusing()) {
+        f.step();
+    }
+    CHECK(f.victim_hp() < hp_before);
+}
+
+TEST_CASE("an intention skill with no duration is refused at the gate", "[focus][skill]") {
+    // Otherwise it validates, gets adopted, queues a LOGGED FocusSkill that
+    // begin_focus then declines, and advance_intentions ends the intention
+    // because nothing is running -- so the brain re-suggests it on the next
+    // wake, forever, appending one command per wake to the replay log.
+    FocusFixture f;
+    SkillCatalog cat = f.game->skills;
+    cat.specs[static_cast<size_t>(SkillId::PrecisionShot)].intention_duration_seconds = 0.0f;
+    f.game->skills = cat;
+
+    const size_t log_before = f.game->command_log.size();
+    CHECK_FALSE(f.adopt());
+    CHECK_FALSE(f.is_focusing());
+    CHECK(f.game->command_log.size() == log_before);  // nothing reached the trace
 }

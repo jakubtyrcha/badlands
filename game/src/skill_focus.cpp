@@ -29,7 +29,7 @@ void emit_cancelled(BadlandsGame& game, entt::entity e, const SkillFocus& f) {
 }  // namespace
 
 bool begin_focus(BadlandsGame& game, entt::entity e, int32_t skill_index,
-                 uint32_t target_slot) {
+                 uint32_t target_slot, glm::vec2 point) {
     entt::registry& reg = game.registry;
     if (e == entt::null || !reg.valid(e)) {
         return false;
@@ -56,7 +56,8 @@ bool begin_focus(BadlandsGame& game, entt::entity e, int32_t skill_index,
     reg.emplace<SkillFocus>(e, SkillFocus{.resolve_at_ticks = game.world_ticks + duration,
                                           .id = id,
                                           .skill_index = skill_index,
-                                          .target_slot = target_slot});
+                                          .target_slot = target_slot,
+                                          .point = point});
     return true;
 }
 
@@ -96,7 +97,7 @@ void advance_focus(BadlandsGame& game) {
         // went unseeable in the meantime gets no shot at all.
         CastPlan plan;
         if (!validate_cast(game, caster_slot, f.skill_index, f.target_slot, plan,
-                           SkillTrigger::Intention)) {
+                           SkillTrigger::Intention, f.point)) {
             game.registry.erase<SkillFocus>(e);
             emit_cancelled(game, e, f);
             continue;

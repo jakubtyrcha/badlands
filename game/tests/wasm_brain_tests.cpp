@@ -506,7 +506,10 @@ TEST_CASE("pack_view_wire: statuses assemble from Chatting/MeleeLock/InsideBuild
 
         REQUIRE(wire.status_count == 1);
         CHECK(wire.statuses[0].kind == BL_ST_CHATTING);
-        CHECK(wire.statuses[0].remaining_ticks == 2500);
+        // In TICKS, expressed from the seconds it means -- this is the
+        // assertion that catches a seconds->wire conversion using the wrong
+        // factor, so a bare literal here would have hidden exactly that bug.
+        CHECK(wire.statuses[0].remaining_ticks == badlands::ticks_of(2.5f));
     }
 
     SECTION("MeleeLock") {

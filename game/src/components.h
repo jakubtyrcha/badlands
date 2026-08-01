@@ -348,6 +348,12 @@ struct SkillFocus {
     SkillId id = SkillId::Count;
     int32_t skill_index = -1;   // index into the caster's OWN Skills
     uint32_t target_slot = UINT32_MAX;
+    // Point targeting only, and carried for the same reason the action channel
+    // carries it: without it a Point-targeted FOCUS would be re-validated at
+    // its deadline against the world origin rather than against what the brain
+    // actually asked for. No shipped skill is both Point and Intention today --
+    // this keeps the two channels from being quietly asymmetric when one is.
+    glm::vec2 point{0.0f, 0.0f};
 };
 
 // WHICH catalog creature this entity is. The threat table (threat_table.h) is

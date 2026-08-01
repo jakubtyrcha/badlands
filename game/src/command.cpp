@@ -165,11 +165,11 @@ int64_t apply_command(BadlandsGame& game, const Command& cmd) {
             // taken on trust from the producer.
             CastPlan plan;
             if (!validate_cast(game, cmd.actor, cmd.param_a, cmd.target_id, plan,
-                               SkillTrigger::Intention)) {
+                               SkillTrigger::Intention, cmd.point)) {
                 return 0;
             }
             begin_focus(game, entity_for_slot(game, static_cast<int32_t>(cmd.actor)),
-                        cmd.param_a, cmd.target_id);
+                        cmd.param_a, cmd.target_id, cmd.point);
             return 0;
         }
         case CommandKind::CollectTax: {
