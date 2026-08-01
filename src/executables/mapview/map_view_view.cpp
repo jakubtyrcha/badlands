@@ -25,7 +25,11 @@
 #include "engine/rendering/scene_renderer.hpp"  // debug-view selectors
 #include "engine/rendering/texture_loader.hpp"  // UploadTexture2DWithMips
 #include "engine/ui/editor_ui.hpp"
+#include "foliage/scatter.hpp"             // GenerateFoliage
 #include "game/geometry/terrain_mesh.hpp"  // RaycastTerrain(MapData)
+#include "game/map/forest_test_map_generator.hpp"
+#include "game/map/map_data_terrain_query.hpp"
+#include "game/visual/forest_catalog.hpp"
 #include "mapgen/biomes.hpp"
 #include "mapview/biome_manifest.hpp"
 #include "mapview/biome_splat.hpp"
@@ -94,17 +98,40 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   scene_context_.registry = &registry_;
   log_step("daylight", since(t));
 
-  // Build the map in-process — the same generator --preview-image-only dumps,
-  // so the rendered terrain and the preview PNGs can never disagree.
-  t = clock::now();
-  map_ = mapgen::generate_map(params_);
-  log_step("mg:generate", since(t));
-  map_size_m_ = params_.world_size_m;
+  if (test_map_) {
+    // --test-map: the synthetic forest map instead of the generator. The
+    // generator's classify_biomes emits only Plains/Hills/Mountain, so a
+    // procedural map has zero Biome::Forest coverage and the forest plopper
+    // has nothing to plant into; this map exists to give it one.
+    t = clock::now();
+    map_size_m_ = ForestTestMapGenerator::kMapSizeM;
+    params_.world_size_m = map_size_m_;
+    terrain_map_ = ForestTestMapGenerator(params_.seed).Generate();
+    // The splat builder wants a HARD per-texel biome raster (it derives its own
+    // blend from it), so hand it the argmax of the soft slices. The 3 m blur it
+    // applies re-softens the boundary for the terrain material.
+    map_.biome = mapgen::Field2D<uint8_t>(terrain_map_.nodes_x(),
+                                          terrain_map_.nodes_z(), 0);
+    for (int j = 0; j < terrain_map_.nodes_z(); ++j) {
+      for (int i = 0; i < terrain_map_.nodes_x(); ++i) {
+        map_.biome.at(i, j) =
+            static_cast<uint8_t>(terrain_map_.WeightsAtNode(i, j).Dominant());
+      }
+    }
+    log_step("test map", since(t));
+  } else {
+    // Build the map in-process — the same generator --preview-image-only dumps,
+    // so the rendered terrain and the preview PNGs can never disagree.
+    t = clock::now();
+    map_ = mapgen::generate_map(params_);
+    log_step("mg:generate", since(t));
+    map_size_m_ = params_.world_size_m;
+  }
 
   // Lake bathymetry, logged once: the water material's extinction coefficients
   // are derived from a visibility depth in metres, so the depth distribution
   // the generator actually produces is a load-bearing input, not trivia.
-  {
+  if (!test_map_) {
     std::vector<float> depths;
     depths.reserve(map_.lakes.size());
     for (const mapgen::LakeInfo& l : map_.lakes) depths.push_back(l.max_depth_m);
@@ -134,9 +161,11 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // picking. The cluster LOD's job is to decimate from full detail, so the leaf
   // lattice is the finest source data (one node per texel), not a coarser mesh
   // density; LOD selection manages the triangle cost.
-  t = clock::now();
-  terrain_map_ = MakeOneHotMapData(map_, glm::vec2(params_.world_size_m));
-  log_step("map->MapData", since(t));
+  if (!test_map_) {
+    t = clock::now();
+    terrain_map_ = MakeOneHotMapData(map_, glm::vec2(params_.world_size_m));
+    log_step("map->MapData", since(t));
+  }
 
   // Frame the camera BEFORE building the terrain, so the cluster path's initial
   // LOD selection already runs against the real camera position rather than the
@@ -255,8 +284,12 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     spdlog::error("MapViewView: water factory build failed");
     return false;
   }
+  // The test map has no lakes at all (its water level sits below the lowest
+  // ground), so BuildLakeSurfaceTriangles has nothing to read -- skip it rather
+  // than hand it the empty artifacts left over from the skipped generator run.
   const std::vector<glm::vec3> water_tris =
-      BuildLakeSurfaceTriangles(map_, params_.world_size_m);
+      test_map_ ? std::vector<glm::vec3>{}
+                : BuildLakeSurfaceTriangles(map_, params_.world_size_m);
   if (!water_tris.empty()) {
     std::vector<float> v;
     v.reserve(water_tris.size() * kTexturedMeshFloatsPerVertex);
@@ -292,6 +325,40 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   spdlog::info("water: {} triangles over {} lakes", water_tris.size() / 3,
                map_.lakes.size());
   log_step("water", since(t));
+
+  // The forest. Placement is pure CPU over the frozen MapData contract, so
+  // nothing here knows how the map was made -- a generated map simply reports
+  // zero Forest coverage and plants nothing.
+  t = clock::now();
+  ForestCatalog forest_catalog;
+  if (!BuildForestCatalog(forest_catalog)) {
+    spdlog::error("MapViewView: forest catalog build failed");
+    return false;
+  }
+
+  const MapDataTerrainQuery forest_query(terrain_map_, mapgen::Biome::Forest);
+  foliage::FoliageGenParams foliage_params;
+  foliage_params.seed = params_.seed;
+  foliage_params.origin_m = glm::vec2(0.0f);
+  foliage_params.size_m = glm::vec2(terrain_map_.size_x_m(),
+                                    terrain_map_.size_z_m());
+  foliage::FoliageField foliage_field = foliage::GenerateFoliage(
+      forest_catalog.type, forest_query, foliage_params);
+  log_step("foliage place", since(t));
+
+  t = clock::now();
+  if (!forest_.Build(ctx.device, ctx.queue, *ctx.pipeline_gen,
+                     std::move(forest_catalog), std::move(foliage_field))) {
+    spdlog::error("MapViewView: forest renderer build failed");
+    return false;
+  }
+  forest_field_ = forest_.instanced_field();
+  if (forest_field_) {
+    forest_.Update(camera_, scene_context_.sun_direction);
+    scene_context_.instanced_fields = &forest_field_;
+    scene_context_.instanced_field_count = 1;
+  }
+  log_step("forest build", since(t));
 
   spdlog::info("map load: {:.1f} ms total  ({}x{} texels)", since(t_load),
                params_.resolution, params_.resolution);
@@ -365,6 +432,10 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
   // Re-select the LOD cluster cut for the new camera and rewrite the draw
   // ranges. Cheap flat pass over the DAG; no buffer re-upload.
   cluster_terrain_.UpdateLod(camera_, screen_h_px_);
+
+  // Coarse-cull the 32 m foliage cells and re-upload only if the visible set
+  // changed (see forest_renderer.hpp). No-op for a forest-less map.
+  forest_.Update(camera_, scene_context_.sun_direction);
 }
 
 void MapViewView::DrawUI() {

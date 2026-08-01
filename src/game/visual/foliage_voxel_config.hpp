@@ -77,6 +77,52 @@ inline constexpr std::array<float, 4> kFoliageVoxelWorldSizes = {
 // at 158-255 triangles of actual bark across the catalog.
 inline constexpr std::array<int, 1> kFoliageCoarseBarkTriBudgets = {256};
 
+// Distance cutoffs (WORLD METRES) between adjacent voxel-crown LODs, for a tree
+// displayed at kFoliagePreviewHeight. One entry per adjacent pair, so
+// kFoliageVoxelWorldSizes.size() - 1 of them.
+//
+// Derived from the same screen-space budget kFoliageVoxelWorldSizes was:
+// distance = world_cell_size * focal_px / kFoliageVoxelTargetPx, with focal_px
+// = (1080/2) / tan(30deg) ~= 935 at 1920x1080 / 60deg vertical fov. L0->L1
+// (0.15 m) ~= 17.5, rounded to 18; L1->L2 (0.20 m) ~= 23.4, rounded to 23;
+// L2->L3 (0.60 m) ~= 70.1. The first two were screenshot-tuned alongside the
+// Phase 6 empty-crown fix; the last is the formula's value as-is.
+//
+// Moved here from model_viewer_view.cpp so the instanced-field path can scale
+// them per model -- see FoliageLodThresholdsForHeight.
+inline constexpr std::array<float, kFoliageVoxelWorldSizes.size() - 1>
+    kFoliageLodThresholdsPreviewM = {18.0f, 23.0f, 70.0f};
+
+// The LOD chain retargeted from the 8 m preview tree to a tree that actually
+// stands `target_height_m` tall.
+//
+// Both halves scale by the SAME height ratio, and they have to: LOD selection
+// is a screen-space budget, not a world-space one. Scaling the voxel cell size
+// with the tree keeps the crown's RELATIVE resolution fixed (so a 24 m oak does
+// not silently cost ~27x the tets of an 8 m preview tree at L0), and scaling the
+// switch distance with it keeps the on-screen tet size at the same few pixels --
+// a bigger tree is legitimately visible from further away.
+//
+// FoliageVoxelCellNativeM is stated in the tree's OWN native ez-tree units
+// (what LeafVoxelizeOptions::cell_size wants) and is deliberately algebraically
+// identical to what the model viewer already passes for its preview tree
+// (kFoliageVoxelWorldSizes[lod] / (kFoliagePreviewHeight / bark_height_native)),
+// so the Phase 6 pine dead-zone retune and leaf_voxelizer_tests' sane-band
+// coverage keep holding unchanged.
+inline float FoliageVoxelCellNativeM(size_t lod, float bark_height_native) {
+  return kFoliageVoxelWorldSizes[lod] * bark_height_native /
+         kFoliagePreviewHeight;
+}
+
+inline std::array<float, kFoliageLodThresholdsPreviewM.size()>
+FoliageLodThresholdsForHeight(float target_height_m) {
+  const float r = target_height_m / kFoliagePreviewHeight;
+  std::array<float, kFoliageLodThresholdsPreviewM.size()> out{};
+  for (size_t i = 0; i < out.size(); ++i)
+    out[i] = kFoliageLodThresholdsPreviewM[i] * r;
+  return out;
+}
+
 // Every voxel level needs exactly one bark rule: the finer ones take a
 // kDefaultLodRatios entry, the coarse tail takes a budget. Adding a cell size
 // above without adding its bark budget would otherwise silently reuse L3's

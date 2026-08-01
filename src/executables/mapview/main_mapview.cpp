@@ -23,6 +23,13 @@
 //   --serial-build    build the cluster DAG single-threaded (default: parallel).
 //                     The output DAG is bit-identical either way; this is the
 //                     perf A/B baseline (build time shows in the stats log).
+//   --test-map        skip the generator and load the synthetic 128 m forest
+//                     map instead. It exists because classify_biomes emits no
+//                     Biome::Forest, so a GENERATED map has no forest for the
+//                     plopper to plant into and renders no trees at all.
+//                     --seed still applies (it varies the terrain and the
+//                     forest, not the forest's outline); --resolution/--size
+//                     are ignored, the map is always 128x128 m.
 
 #include <cstdio>
 #include <cstdlib>
@@ -101,6 +108,7 @@ int main(int argc, char** argv) {
   float camera_height = 0.0f;  // 0 = keep the default framing
   int lod_tint = 0;            // 0 shaded / 1 triangle hash / 2 LOD level
   bool serial_build = false;   // force single-threaded DAG build (perf A/B)
+  bool test_map = false;       // synthetic forest map instead of the generator
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -128,6 +136,8 @@ int main(int argc, char** argv) {
       preview_only = true;
     } else if (a == "--serial-build") {
       serial_build = true;
+    } else if (a == "--test-map") {
+      test_map = true;
     } else if (a == "--seed") {
       if (!parse_num(
               "--seed", "a number",
@@ -187,13 +197,24 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (preview_only) return RunPreviewOnly(params, out_dir);
+  if (preview_only) {
+    if (test_map) {
+      // The preview dump renders the GENERATOR's debug rasters, none of which
+      // the test map produces. Combining the two flags asks for something that
+      // does not exist, so say so rather than dumping a blank set.
+      std::fprintf(stderr,
+                   "mapview: --test-map has no preview rasters; use it without "
+                   "--preview-image-only\n");
+      return 2;
+    }
+    return RunPreviewOnly(params, out_dir);
+  }
 
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
   return app.Run(argc, argv,
-                 [params, camera_height, lod_tint,
-                  serial_build](const badlands::RenderContext&) {
+                 [params, camera_height, lod_tint, serial_build,
+                  test_map](const badlands::RenderContext&) {
                    return std::make_unique<badlands::MapViewView>(
-                       params, camera_height, lod_tint, serial_build);
+                       params, camera_height, lod_tint, serial_build, test_map);
                  });
 }

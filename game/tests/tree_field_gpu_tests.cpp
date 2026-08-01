@@ -381,11 +381,24 @@ OakField BuildOakField(
     REQUIRE(leaf_lod_meshes[lod].mesh.vertex_count > 0u);
   }
 
+  // Assembled by hand rather than via BuildTreeFieldModel: these tests pick
+  // their own voxel cell sizes and thresholds (kFieldVoxelWorldSizes) so they
+  // can pin specific LOD behaviour, including the deliberately-empty crown in
+  // the test further down.
+  TreeFieldModel model;
+  model.options = oak;
+  model.bark_lod0 = std::move(bark);
+  model.leaf_lod_meshes.assign(
+      std::make_move_iterator(leaf_lod_meshes.begin()),
+      std::make_move_iterator(leaf_lod_meshes.end()));
+  model.lod_thresholds.assign(lod_thresholds.begin(), lod_thresholds.end());
+  model.native_to_world_scale = s;
+
+  const std::array<TreeFieldModel, 1> models{std::move(model)};
+
   OakField result;
   result.s = s;
-  result.tf = BuildTreeField(g.device, g.queue, *g.gen, oak, skeleton,
-                             std::move(bark), leaf_lod_meshes, capacity,
-                             lod_thresholds);
+  result.tf = BuildTreeField(g.device, g.queue, *g.gen, models, capacity);
   REQUIRE(result.tf != nullptr);
   return result;
 }
@@ -394,20 +407,18 @@ OakField BuildOakField(
 // the world origin -- same derivation as ModelViewerView::RebuildScene's
 // Multi-mode `xf`.
 glm::mat4 OakInstanceTransform(const OakField& of) {
-  return glm::translate(glm::mat4(1.0f),
-                        glm::vec3(0.0f, -of.tf->bark_local_bounds.min.y * of.s,
-                                  0.0f)) *
+  return glm::translate(
+             glm::mat4(1.0f),
+             glm::vec3(
+                 0.0f,
+                 -of.tf->model_bounds[0].bark_local_bounds.min.y * of.s, 0.0f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(of.s));
 }
 
 // This instance's world-space bounds (bark UNION leaf when the tree has any,
 // transformed by `xf`) -- for framing a camera / picking an off-canopy pixel.
 Aabb OakInstanceWorldBounds(const OakField& of, const glm::mat4& xf) {
-  Aabb local = of.tf->bark_local_bounds;
-  if (of.tf->has_leaves) {
-    local = local.Union(of.tf->leaf_local_bounds);
-  }
-  return local.TransformedBy(xf);
+  return of.tf->model_bounds[0].Combined().TransformedBy(xf);
 }
 
 // Uploads ONE instance (at the world origin, OakInstanceTransform(of)) into
@@ -488,10 +499,13 @@ TEST_CASE("TreeField (voxel leaves): HasPass(kDeferred) && HasPass(kShadow), "
   REQUIRE(of.tf->field->IsValid());
   CHECK(of.tf->field->HasPass(InstancedMeshField::PassKind::kDeferred));
   CHECK(of.tf->field->HasPass(InstancedMeshField::PassKind::kShadow));
-  // The tree model's RUNTIME LOD count is however many crown meshes it was
-  // built with -- the foliage default, kFoliageVoxelWorldSizes' whole L0..L3
-  // chain -- NOT the engine's kMaxLods cap.
-  CHECK(of.tf->lod_buffers.size() == kFoliageVoxelWorldSizes.size());
+  // lod_buffers is indexed [model][lod]: one model here, whose RUNTIME LOD
+  // count is however many crown meshes it was built with -- the foliage
+  // default, kFoliageVoxelWorldSizes' whole L0..L3 chain -- NOT the engine's
+  // kMaxLods cap.
+  REQUIRE(of.tf->lod_buffers.size() == 1);
+  CHECK(of.tf->model_count() == 1);
+  CHECK(of.tf->lod_buffers[0].size() == kFoliageVoxelWorldSizes.size());
   CHECK(kFoliageVoxelWorldSizes.size() < GpuInstanceRenderer::kMaxLods);
 
   const glm::mat4 xf = OakInstanceTransform(of);
@@ -687,6 +701,124 @@ TEST_CASE("TreeField deferred frames at near/mid/far camera distances "
 // default logger for the duration of the BuildTreeField call (saved/restored
 // around it, so this test doesn't leak its sink into any other test).
 // ===========================================================================
+TEST_CASE("TreeField with N models: each instance draws ITS model's mesh",
+          "[tree_field][gpu]") {
+  // The multi-model dimension a forest needs (game/visual/forest_catalog.hpp
+  // builds 28). The wiring under test is model -> bucket -> mesh: if
+  // InstanceInput::model_info.x did not actually select the model's own
+  // bucket, both instances below would draw the same geometry.
+  //
+  // The two models are chosen to be unmistakable at a glance: a 1.5 m bush and
+  // a 25 m pine. A mis-wired field renders two bushes or two pines, and the
+  // per-half vertical extent check catches either.
+  TestGpu& g = GetTestGpu();
+
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  const TreeOptions* bush = nullptr;
+  const TreeOptions* pine = nullptr;
+  for (const NamedTreeOptions& n : catalog) {
+    if (n.name == "Bush 3") bush = &n.options;
+    if (n.name == "Pine (large)") pine = &n.options;
+  }
+  REQUIRE(bush != nullptr);
+  REQUIRE(pine != nullptr);
+
+  constexpr float kBushHeight = 1.5f;
+  constexpr float kPineHeight = 25.0f;
+  const std::array<TreeFieldModel, 2> models{
+      BuildTreeFieldModel(*bush, kBushHeight),
+      BuildTreeFieldModel(*pine, kPineHeight)};
+
+  std::unique_ptr<TreeField> tf =
+      BuildTreeField(g.device, g.queue, *g.gen, models, /*capacity=*/2);
+  REQUIRE(tf != nullptr);
+  REQUIRE(tf->field->IsValid());
+  REQUIRE(tf->model_count() == 2);
+  CHECK(tf->lod_buffers.size() == 2);
+  CHECK(tf->lod_buffers[0].size() == kFoliageVoxelWorldSizes.size());
+  CHECK(tf->lod_buffers[1].size() == kFoliageVoxelWorldSizes.size());
+
+  // Per-model LOD retargeting: the taller model must switch LOD further out,
+  // because LOD is a screen-space budget (see FoliageLodThresholdsForHeight).
+  REQUIRE(models[0].lod_thresholds.size() == models[1].lod_thresholds.size());
+  for (size_t i = 0; i < models[0].lod_thresholds.size(); ++i) {
+    CHECK(models[1].lod_thresholds[i] > models[0].lod_thresholds[i]);
+  }
+
+  // One instance of each, side by side: model 0 on the left (-X), model 1 on
+  // the right (+X).
+  constexpr float kOffsetX = 10.0f;
+  std::array<GpuInstanceRenderer::InstanceInput, 2> instances{};
+  for (uint32_t m = 0; m < 2; ++m) {
+    const float s = tf->native_to_world_scale[m];
+    const TreeModelBounds& b = tf->model_bounds[m];
+    const float x = (m == 0) ? -kOffsetX : kOffsetX;
+    const glm::mat4 xf =
+        glm::translate(glm::mat4(1.0f),
+                       glm::vec3(x, -b.bark_local_bounds.min.y * s, 0.0f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(s));
+    const Aabb world = b.Combined().TransformedBy(xf);
+    const glm::vec3 center = world.Center();
+    instances[m].transform = xf;
+    instances[m].bounds_sphere = glm::vec4(
+        center, std::max(glm::length(world.max - center), 0.1f));
+    instances[m].model_info = glm::uvec4(m, 0u, 0u, 0u);
+  }
+  tf->field->UploadInstances(instances);
+
+  Camera camera;
+  camera.position = glm::vec3(0.0f, kPineHeight * 0.5f, 55.0f);
+  camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+  camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+  camera.fov = 55.0f;
+  camera.aspect = 1.0f;
+  camera.near_plane = 0.05f;
+  camera.far_plane = 400.0f;
+
+  entt::registry registry;
+  SceneContext scene_context;
+  scene_context.sun_direction = glm::normalize(glm::vec3(0.3f, 0.6f, 0.7f));
+  scene_context.sun_color = glm::vec3(2.0f);
+  scene_context.ambient_sh[0] = glm::vec3(0.4f);
+  scene_context.clear_color = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+
+  const CpuImage image = RenderFieldFrame(g, tf->field.get(), registry,
+                                          scene_context, camera,
+                                          ShadowDebugMode::Off);
+
+  // Vertical extent of lit pixels in each half of the frame. Comparing SPANS
+  // rather than absolute rows keeps this independent of whether row 0 is the
+  // top or the bottom of the readback.
+  constexpr float kLit = 0.02f;
+  auto lit_span = [&](uint32_t x0, uint32_t x1) {
+    uint32_t lo = kSceneSize, hi = 0;
+    int count = 0;
+    for (uint32_t y = 0; y < kSceneSize; ++y) {
+      for (uint32_t x = x0; x < x1; ++x) {
+        if (image.GetDepth(x, y) <= kLit) continue;
+        lo = std::min(lo, y);
+        hi = std::max(hi, y);
+        count++;
+      }
+    }
+    return std::pair<int, int>{count, count ? static_cast<int>(hi - lo) : 0};
+  };
+
+  const auto [left_count, left_span] = lit_span(0, kSceneSize / 2);
+  const auto [right_count, right_span] = lit_span(kSceneSize / 2, kSceneSize);
+  INFO("left(bush) count=" << left_count << " span=" << left_span
+                           << "  right(pine) count=" << right_count
+                           << " span=" << right_span);
+
+  // Both models drew something: a field that silently dropped model 1 would
+  // leave one half empty.
+  CHECK(left_count > 0);
+  CHECK(right_count > 0);
+  // And each drew ITS OWN mesh: a 25 m pine covers far more vertical frame
+  // than a 1.5 m bush. Two bushes (or two pines) would make these comparable.
+  CHECK(right_span > left_span * 3);
+}
+
 TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
           "naming the LOD, and the field still builds",
           "[tree_field][gpu]") {
@@ -716,10 +848,18 @@ TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
   const std::vector<spdlog::sink_ptr> saved_sinks = logger->sinks();
   logger->sinks() = {ring_sink};
 
+  TreeFieldModel model;
+  model.options = oak;
+  model.bark_lod0 = std::move(bark);
+  model.leaf_lod_meshes.assign(
+      std::make_move_iterator(leaf_lod_meshes.begin()),
+      std::make_move_iterator(leaf_lod_meshes.end()));
+  model.lod_thresholds.assign(kFieldLodThresholds.begin(),
+                              kFieldLodThresholds.end());
+  const std::array<TreeFieldModel, 1> models{std::move(model)};
+
   std::unique_ptr<TreeField> field =
-      BuildTreeField(g.device, g.queue, *g.gen, oak, skeleton,
-                    std::move(bark), leaf_lod_meshes,
-                    /*capacity=*/1, kFieldLodThresholds);
+      BuildTreeField(g.device, g.queue, *g.gen, models, /*capacity=*/1);
 
   const std::vector<std::string> messages = ring_sink->last_formatted();
   logger->sinks() = saved_sinks;  // restore before any assertion below

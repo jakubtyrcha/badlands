@@ -1,0 +1,65 @@
+{
+  "_comment": "badlands' temperate forest. Edit and RELAUNCH -- no rebuild. Layers are placed in the order listed and earlier instances block later ones, so the canopy must come first if it is to claim its space before the undergrowth fills in. A `depth` or `density` curve is a trapezoid [rise_start, rise_end, fall_start, fall_end] in METRES of depth-into-forest, and null means 'never falls' (a plateau that runs to the core). `preset` must name a TreeCatalog() entry exactly; a typo fails the load loudly rather than planting the wrong species. `variants` is how many distinct mesh variants to generate (variant 0 keeps the preset's own seed, so it is the tree the model viewer shows).",
+
+  "_tuning_note": "grid_m is the density ceiling: one candidate per grid_m square. Density does NOT scale as 1/grid^2 -- widening the grid also un-crowds the survivors, so the spacing test rejects fewer of them and hands some of the loss back. Measured: a clean sqrt(2) on every layer gave 0.56x/0.62x/0.69x, not 0.5x. Effective exponent runs from about -1.7 for the canopy (roll-limited) to about -1.0 for bushes (spacing-limited). Retune by measuring the per-layer counts the load log prints, not by deriving from area.",
+
+  "noise": {
+    "_comment": "clump_lo/clump_hi window the clump fBm, which is NOT uniform on [-1,1] -- at 3 octaves it measures mean 0.000, sd 0.354. Read the window against that: the natural-looking [0.35, 0.80] leaves only 4.1% of the map at full density, so it thins the forest evenly instead of carving glades. [0.30, 0.55] gives 40.6% closed canopy against 14.8% true glade. warp_* makes the tree line ragged; without it the boundary is a perfect offset curve of the biome mask.",
+    "clump_wavelength_m": 35.0,
+    "clump_octaves": 3,
+    "clump_lo": 0.30,
+    "clump_hi": 0.55,
+    "warp_amp_m": 4.0,
+    "warp_wavelength_m": 12.0
+  },
+
+  "layers": [
+    {
+      "name": "canopy",
+      "_comment": "7.6 m against a 3.4 m radius is an OPEN stand you can see through, a deliberate gameplay choice over the 40-60 m^2/stem a real mature temperate forest runs. Species depth curves are the ecological gradient: aspen is a pioneer and takes the edge, pine holds the sheltered interior, oak and ash span both.",
+      "grid_m": 7.6,
+      "max_slope_deg": 32.0,
+      "density": [1.0, 14.0, null, null],
+      "scale_range": [0.85, 1.15],
+      "edge_scale": 0.55,
+      "edge_scale_depth_m": 25.0,
+      "species": [
+        { "preset": "Oak (large)",   "variants": 4, "height_m": 22.0, "radius_m": 3.4, "weight": 1.00, "depth": [2.0, 10.0, null, null] },
+        { "preset": "Pine (large)",  "variants": 4, "height_m": 27.0, "radius_m": 2.8, "weight": 1.00, "depth": [6.0, 20.0, null, null] },
+        { "preset": "Ash (large)",   "variants": 4, "height_m": 24.0, "radius_m": 3.2, "weight": 0.80, "depth": [2.0, 10.0, null, null] },
+        { "preset": "Aspen (large)", "variants": 4, "height_m": 19.0, "radius_m": 2.4, "weight": 0.70, "depth": [0.0, 4.0, 18.0, 30.0] }
+      ]
+    },
+    {
+      "name": "sapling",
+      "_comment": "The same pioneer/interior split, compressed into the narrower band the sapling layer occupies.",
+      "grid_m": 5.0,
+      "max_slope_deg": 36.0,
+      "density": [0.0, 3.0, 16.0, 34.0],
+      "scale_range": [0.75, 1.25],
+      "edge_scale": 0.80,
+      "edge_scale_depth_m": 12.0,
+      "species": [
+        { "preset": "Oak (small)",   "variants": 2, "height_m": 5.0, "radius_m": 1.5, "weight": 1.00, "depth": [0.0, 2.0, 20.0, 40.0] },
+        { "preset": "Pine (small)",  "variants": 2, "height_m": 5.5, "radius_m": 1.2, "weight": 0.90, "depth": [4.0, 14.0, null, null] },
+        { "preset": "Ash (small)",   "variants": 2, "height_m": 4.5, "radius_m": 1.4, "weight": 0.80, "depth": [0.0, 2.0, 20.0, 40.0] },
+        { "preset": "Aspen (small)", "variants": 2, "height_m": 4.0, "radius_m": 1.1, "weight": 1.10, "depth": [0.0, 1.0, 12.0, 26.0] }
+      ]
+    },
+    {
+      "name": "bush",
+      "_comment": "Bush 1 gets two variants because it is the one that carries the forest edge; Bush 3 (the evergreen) leans interior. No edge scale ramp -- a bush at the edge is not a younger bush.",
+      "grid_m": 2.8,
+      "max_slope_deg": 40.0,
+      "density": [0.0, 1.0, 10.0, 22.0],
+      "scale_range": [0.80, 1.30],
+      "edge_scale": 1.0,
+      "edge_scale_depth_m": 1.0,
+      "species": [
+        { "preset": "Bush 1", "variants": 2, "height_m": 1.5, "radius_m": 0.90, "weight": 1.00, "depth": [0.0, 1.0, 14.0, 26.0] },
+        { "preset": "Bush 2", "variants": 1, "height_m": 1.3, "radius_m": 0.80, "weight": 0.80, "depth": [0.0, 1.0, 12.0, 24.0] },
+        { "preset": "Bush 3", "variants": 1, "height_m": 1.1, "radius_m": 0.70, "weight": 0.60, "depth": [3.0, 10.0, null, null] }
+      ]
+    }
+  ]
+}
