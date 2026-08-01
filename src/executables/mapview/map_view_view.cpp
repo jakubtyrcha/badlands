@@ -354,7 +354,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   forest_field_ = forest_.instanced_field();
   if (forest_field_) {
-    forest_.Update(camera_);  // seed the instance set for frame one (headless)
+    forest_.Update(camera_, scene_context_.sun_direction);
     scene_context_.instanced_fields = &forest_field_;
     scene_context_.instanced_field_count = 1;
   }
@@ -435,7 +435,7 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
 
   // Coarse-cull the 32 m foliage cells and re-upload only if the visible set
   // changed (see forest_renderer.hpp). No-op for a forest-less map.
-  forest_.Update(camera_);
+  forest_.Update(camera_, scene_context_.sun_direction);
 }
 
 void MapViewView::DrawUI() {

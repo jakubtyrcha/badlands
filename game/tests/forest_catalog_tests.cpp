@@ -207,6 +207,70 @@ TEST_CASE("Layers do not overlap in stature", "[foliage]") {
   }
 }
 
+TEST_CASE("A species' share does not depend on its variant count", "[foliage]") {
+  // `weight` is documented as the species' share of its layer. The sampler
+  // picks over MODELS, so handing each variant the full weight silently made a
+  // species' actual share weight * variants. It was live in the shipped file:
+  // Bush 1 (weight 1.00, 2 variants) took 59% of bushes against the 42% the
+  // file reads as.
+  //
+  // Two species, identical weight, different variant counts -- their summed
+  // model weight must come out equal.
+  const std::string body = R"JSON({
+    "grid_m": 6.0, "max_slope_deg": 32.0,
+    "density": [0.0, 1.0, null, null],
+    "scale_range": [0.9, 1.1],
+    "edge_scale": 1.0, "edge_scale_depth_m": 1.0,
+    "species": [
+      { "preset": "Bush 1", "variants": 4, "height_m": 1.5, "radius_m": 0.9,
+        "weight": 1.0, "depth": [0.0, 1.0, null, null] },
+      { "preset": "Bush 2", "variants": 1, "height_m": 1.3, "radius_m": 0.8,
+        "weight": 1.0, "depth": [0.0, 1.0, null, null] }
+    ]
+  })JSON";
+
+  ForestCatalog fc;
+  REQUIRE(LoadFromText(MinimalForest(body), fc));
+  REQUIRE(fc.models.size() == 5);
+
+  float bush1 = 0.0f, bush2 = 0.0f;
+  for (size_t i = 0; i < fc.models.size(); ++i) {
+    if (fc.models[i].debug_name.rfind("Bush 1", 0) == 0)
+      bush1 += fc.type.models[i].weight;
+    if (fc.models[i].debug_name.rfind("Bush 2", 0) == 0)
+      bush2 += fc.type.models[i].weight;
+  }
+  CHECK(bush1 == Catch::Approx(bush2));
+  CHECK(bush1 == Catch::Approx(1.0f));
+}
+
+TEST_CASE("The shipped bush layer has the species mix its file states",
+          "[foliage]") {
+  // The concrete case the variant-weight bug corrupted. Reads the intended
+  // shares straight off the layer, so retuning the file moves both sides
+  // together and this stays a statement about the LOADER, not about content.
+  ForestCatalog fc;
+  REQUIRE(BuildForestCatalog(fc));
+  REQUIRE(fc.type.layers.size() == 3);
+  const foliage::FoliageLayer& bush = fc.type.layers[2];
+
+  std::map<std::string, float> share;
+  float total = 0.0f;
+  for (uint16_t k = 0; k < bush.model_count; ++k) {
+    const uint16_t i = static_cast<uint16_t>(bush.first_model + k);
+    const std::string species =
+        fc.models[i].debug_name.substr(0, fc.models[i].debug_name.rfind(" v"));
+    share[species] += fc.type.models[i].weight;
+    total += fc.type.models[i].weight;
+  }
+
+  // Bush 1 at weight 1.00 against Bush 2's 0.80 and Bush 3's 0.60 is 1/2.4.
+  REQUIRE(total == Catch::Approx(2.4f));
+  CHECK(share["Bush 1"] / total == Catch::Approx(1.00f / 2.4f));
+  CHECK(share["Bush 2"] / total == Catch::Approx(0.80f / 2.4f));
+  CHECK(share["Bush 3"] / total == Catch::Approx(0.60f / 2.4f));
+}
+
 TEST_CASE("Something is plantable at every depth inside the forest",
           "[foliage]") {
   // A depth band where every model's curve has fallen to zero is a hole in the

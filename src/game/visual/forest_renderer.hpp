@@ -58,9 +58,17 @@ class ForestRenderer {
              GpuPipelineGenerator& pipeline_gen, ForestCatalog catalog,
              foliage::FoliageField field);
 
-  // Culls cells against the camera frustum and re-uploads only if the visible
-  // set changed. Cheap to call every frame.
-  void Update(const Camera& camera);
+  // Culls cells and re-uploads only if the visible set changed. Cheap to call
+  // every frame.
+  //
+  // `sun_direction` points TOWARD the sun (SceneContext::sun_direction's
+  // convention) and is load-bearing, not cosmetic: a cell is kept if it is
+  // visible OR if its SHADOW could fall into view. The uploaded instance set
+  // feeds both of GpuInstanceRenderer's cull sets, so an instance dropped here
+  // cannot be recovered by the engine's separate light-frustum cull -- culling
+  // on the camera alone would delete shadow casters, and stands just off-screen
+  // would drop their shadows off visible ground.
+  void Update(const Camera& camera, const glm::vec3& sun_direction);
 
   // Null until a successful Build, and null for an empty forest -- callers
   // should skip wiring it into SceneContext in that case.
@@ -87,6 +95,16 @@ class ForestRenderer {
   std::vector<uint8_t> visible_;
   std::vector<uint8_t> next_visible_;
   bool uploaded_once_ = false;
+
+  // Largest world-space horizontal crown reach across every model, at that
+  // model's largest instance scale. A cell's XZ box is padded by it: a 22 m oak
+  // planted a metre inside a cell edge has a crown metres wider than the cell,
+  // so the bare 32 m footprint would cull trees that are still partly on
+  // screen, popping them in at the frame edge.
+  float max_crown_radius_m_ = 0.0f;
+  // Lowest ground any instance stands on, for bounding how far a shadow can
+  // travel before it lands.
+  float min_ground_y_ = 0.0f;
 
   ForestRendererStats stats_;
 };

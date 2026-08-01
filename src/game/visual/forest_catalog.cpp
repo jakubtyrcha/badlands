@@ -229,6 +229,14 @@ bool ReadLayer(const json& l, const std::string& where,
       return false;
     }
 
+    // `weight` is the SPECIES' share of its layer, so it has to be split
+    // across that species' variants: the sampler picks over models, and
+    // handing each variant the full weight would make a species' actual
+    // share weight * variants. Live in the shipped file before this fix --
+    // Bush 1 (weight 1.00, 2 variants) was taking 59% of bushes against the
+    // 42% the file reads as. Variants are a mesh-variety concern; they must
+    // not move the ecological mix.
+    const float per_variant_weight = fm.weight / static_cast<float>(variants);
     for (int v = 0; v < variants; ++v) {
       ForestModelSpec spec;
       spec.options = *it->second;
@@ -236,7 +244,10 @@ bool ReadLayer(const json& l, const std::string& where,
       spec.target_height_m = fm.height_m;
       spec.debug_name = preset + " v" + std::to_string(v);
       out.models.push_back(std::move(spec));
-      out.type.models.push_back(fm);
+
+      foliage::FoliageModel variant_model = fm;
+      variant_model.weight = per_variant_weight;
+      out.type.models.push_back(variant_model);
     }
   }
 

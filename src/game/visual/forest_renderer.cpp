@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -10,6 +11,7 @@
 
 #include "engine/rendering/frustum.hpp"
 #include "engine/rendering/geometry/aabb.hpp"
+#include "game/visual/foliage_cell_cull.hpp"
 
 namespace badlands {
 
@@ -96,6 +98,28 @@ bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
   visible_.assign(static_cast<size_t>(stats_.total_cells), 0);
   next_visible_.assign(static_cast<size_t>(stats_.total_cells), 0);
 
+  // How far a crown can reach horizontally past the trunk it stands on, at the
+  // largest scale any instance of that model can take. One global maximum
+  // rather than a per-cell figure: it is a single float, it is conservative,
+  // and over-including a cell only costs a GPU per-instance cull that runs
+  // anyway.
+  max_crown_radius_m_ = 0.0f;
+  for (size_t m = 0; m < tree_field_->model_count(); ++m) {
+    const Aabb local = tree_field_->model_bounds[m].Combined();
+    const float half_extent =
+        std::max({std::abs(local.min.x), std::abs(local.max.x),
+                  std::abs(local.min.z), std::abs(local.max.z)});
+    const float scale = tree_field_->native_to_world_scale[m] *
+                        catalog_.type.models[m].scale_range.y;
+    max_crown_radius_m_ = std::max(max_crown_radius_m_, half_extent * scale);
+  }
+
+  min_ground_y_ = std::numeric_limits<float>::max();
+  for (const foliage::CellYBounds& yb : field_.cell_y) {
+    if (!yb.empty()) min_ground_y_ = std::min(min_ground_y_, yb.min_y);
+  }
+  if (min_ground_y_ == std::numeric_limits<float>::max()) min_ground_y_ = 0.0f;
+
   // Per-layer counts, because the total alone cannot tell a forest that is too
   // dense from one whose undergrowth is too dense -- and those are different
   // knobs (each layer's own grid_m).
@@ -116,7 +140,8 @@ bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
   return true;
 }
 
-void ForestRenderer::Update(const Camera& camera) {
+void ForestRenderer::Update(const Camera& camera,
+                            const glm::vec3& sun_direction) {
   if (!tree_field_ || stats_.total_instances == 0) return;
 
   const Frustum frustum = Frustum::FromViewProj(camera.GetProj() * camera.GetView());
@@ -129,12 +154,13 @@ void ForestRenderer::Update(const Camera& camera) {
       const foliage::CellYBounds& yb = field_.cell_y[ci];
       if (yb.empty()) continue;  // no instances -- nothing to test or draw
 
-      const glm::vec2 o = field_.CellOrigin(cx, cz);
-      const Aabb cell_box{
-          glm::vec3(o.x, yb.min_y, o.y),
-          glm::vec3(o.x + foliage::kFoliageCellSizeM, yb.max_y,
-                    o.y + foliage::kFoliageCellSizeM)};
-      if (!frustum.Intersects(cell_box)) continue;
+      const Aabb cell_box = FoliageCellBounds(
+          field_.CellOrigin(cx, cz), foliage::kFoliageCellSizeM, yb.min_y,
+          yb.max_y, max_crown_radius_m_);
+      if (!FoliageCellVisibleOrCasts(frustum, cell_box, sun_direction,
+                                     min_ground_y_)) {
+        continue;
+      }
 
       next_visible_[ci] = 1;
       visible_cells++;

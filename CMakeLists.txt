@@ -699,6 +699,9 @@ add_executable(badlands_tree_tests
     # model index IS). Lives here rather than in badlands_foliage_tests because
     # it needs TreeCatalog(), which the foliage library deliberately cannot see.
     game/tests/forest_catalog_tests.cpp
+    # The CPU foliage-cell cull predicate: header-only, no GPU, so the shadow
+    # caster + crown overhang behaviour is testable without a device.
+    game/tests/foliage_cell_cull_tests.cpp
     src/game/visual/forest_catalog.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
