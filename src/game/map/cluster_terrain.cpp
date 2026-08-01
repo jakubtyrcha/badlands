@@ -31,7 +31,8 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
                            const MaterialLibrary::TerrainArrays& arrays,
                            wgpu::Sampler array_sampler, wgpu::TextureView splat0,
                            wgpu::TextureView splat1,
-                           wgpu::Sampler splat_sampler, glm::vec4 splat_uv) {
+                           wgpu::Sampler splat_sampler, glm::vec4 splat_uv,
+                           const TerrainDetailField* detail) {
   registry_ = &registry;
   model_ = model;
   inv_model_ = glm::inverse(model);
@@ -53,8 +54,9 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
     return false;
   }
 
-  // Build the cluster-LOD DAG from the frozen MapData lattice.
-  dag_ = BuildTerrainClusterDag(map, params);
+  // Build the cluster-LOD DAG from the frozen MapData lattice, subdividing
+  // wherever `detail` asks for it (null = the plain lattice).
+  dag_ = BuildTerrainClusterDag(map, params, detail);
 
   // Deferred cluster-terrain material (game-owned; no engine-side
   // MaterialLibrary entry). Mirrors the engine's terrain descriptor but for

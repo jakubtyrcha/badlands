@@ -1,9 +1,12 @@
-// Pure-CPU tests for the river channel ribbon.
+// Pure-CPU tests for the river channel WATER surface.
 //
-// Three things are load-bearing and each is easy to get silently wrong:
-//   - the ribbon SITS ON the rendered terrain (same node lattice, same bilinear
-//     rule), rather than on a plane through it;
-//   - its width is the hydraulic width the graph solved, not a constant;
+// Four things are load-bearing and each is easy to get silently wrong:
+//   - the level is the CARVED BED under the centreline plus the flow depth, so
+//     the water sits inside the cavity with the banks proud of it;
+//   - each cross-section is FLAT at that level across its full width -- draping
+//     it is the debug-decal behaviour this replaced;
+//   - its width is the hydraulic width the graph solved, TRUE to scale (the
+//     legibility floor is gone with the cavity to sit in);
 //   - it is wound so it faces UP, or half the network renders backfacing.
 
 #include <catch_amalgamated.hpp>
@@ -21,27 +24,28 @@ namespace {
 
 constexpr int kN = 16;             // texels per side
 constexpr float kWorldM = 160.0f;  // => 10 m texels
-constexpr float kTexelM = kWorldM / static_cast<float>(kN);
+constexpr float kReachZ = 80.0f;   // every straight fixture runs along this z
 
-mapgen::MapArtifacts FlatMap(float ground) {
+// The artifacts supply only the raster LATTICE now (it sets the centreline
+// sampling step); the surface itself comes from the height_at closure.
+mapgen::MapArtifacts Lattice() {
   mapgen::MapArtifacts a;
-  a.heightmap = mapgen::Field2D<float>(kN, kN, ground);
-  a.water_depth = mapgen::Field2D<float>(kN, kN, 0.0f);
-  a.lake_id = mapgen::Field2D<int32_t>(kN, kN, -1);
+  a.heightmap = mapgen::Field2D<float>(kN, kN, 0.0f);
   return a;
 }
 
-// A straight west-to-east reach down the middle of the map, `width` wide
-// throughout.
-mapgen::RiverGraph StraightReach(float width, float x0, float x1, float z) {
+// A straight west-to-east reach down the middle of the map, `width` wide and
+// `depth` deep throughout.
+mapgen::RiverGraph StraightReach(float width, float depth, float x0 = 20.0f,
+                                 float x1 = 140.0f) {
   mapgen::RiverGraph g;
   g.nodes.resize(2);
   mapgen::RiverEdge e;
   for (int i = 0; i <= 8; ++i) {
     const float t = static_cast<float>(i) / 8.0f;
-    e.points_m.push_back(glm::vec2(x0 + (x1 - x0) * t, z));
+    e.points_m.push_back(glm::vec2(x0 + (x1 - x0) * t, kReachZ));
     e.width_m.push_back(width);
-    e.depth_m.push_back(0.2f);
+    e.depth_m.push_back(depth);
     e.speed_m_s.push_back(1.0f);
     e.discharge_m3_s.push_back(0.1f);
   }
@@ -49,7 +53,14 @@ mapgen::RiverGraph StraightReach(float width, float x0, float x1, float z) {
   return g;
 }
 
-// Bounds of the ribbon on one axis, so "how wide is it" is measurable.
+// A flat 10 m plain with a NARROW ditch cut along the reach: 1 m deep, and only
+// 1 m to either side of the centreline. Narrower than the channels drawn on it,
+// so a per-vertex drape and a flat section give different answers.
+float DitchAt(float /*wx*/, float wz) {
+  return std::abs(wz - kReachZ) <= 1.0f ? 9.0f : 10.0f;
+}
+
+// Bounds of the surface on one axis, so "how wide is it" is measurable.
 struct Span {
   float lo = 1e30f, hi = -1e30f;
   void add(float v) {
@@ -59,23 +70,22 @@ struct Span {
   float extent() const { return hi - lo; }
 };
 
-std::vector<glm::vec3> Build(const mapgen::MapArtifacts& art,
-                             const mapgen::RiverGraph& g) {
-  return BuildRiverRibbonTriangles(art, kWorldM, g,
-                                   mapgen::build_river_arcs(g, 0.5f));
+std::vector<glm::vec3> Build(const mapgen::RiverGraph& g,
+                             std::function<float(float, float)> height_at) {
+  return BuildRiverWaterTriangles(Lattice(), kWorldM, g,
+                                  mapgen::build_river_arcs(g, 0.5f),
+                                  std::move(height_at));
 }
 
 }  // namespace
 
 TEST_CASE("an empty network produces no geometry", "[river_surface]") {
-  const mapgen::MapArtifacts art = FlatMap(10.0f);
-  CHECK(Build(art, mapgen::RiverGraph{}).empty());
+  CHECK(Build(mapgen::RiverGraph{}, DitchAt).empty());
 }
 
-TEST_CASE("the ribbon faces up", "[river_surface]") {
+TEST_CASE("the water surface faces up", "[river_surface]") {
   // Winding, checked as the thing it actually controls: the geometric normal.
-  const mapgen::MapArtifacts art = FlatMap(10.0f);
-  const std::vector<glm::vec3> tris = Build(art, StraightReach(4.0f, 20.0f, 140.0f, 80.0f));
+  const std::vector<glm::vec3> tris = Build(StraightReach(4.0f, 0.2f), DitchAt);
   REQUIRE(tris.size() >= 3);
   REQUIRE(tris.size() % 3 == 0);
   for (size_t i = 0; i < tris.size(); i += 3) {
@@ -85,11 +95,56 @@ TEST_CASE("the ribbon faces up", "[river_surface]") {
   }
 }
 
-TEST_CASE("the drawn width is the channel's hydraulic width", "[river_surface]") {
-  const mapgen::MapArtifacts art = FlatMap(10.0f);
-  // Well clear of kMinRibbonWidthM so the floor is not what is being measured.
-  for (const float w : {4.0f, 9.0f}) {
-    const std::vector<glm::vec3> tris = Build(art, StraightReach(w, 20.0f, 140.0f, 80.0f));
+TEST_CASE("the water sits at the carved bed plus the flow depth",
+          "[river_surface]") {
+  // The bed is 9 m under the reach; 0.35 m of flow puts the surface at 9.35 m
+  // (plus the z-fight epsilon) -- NOT at the 10 m plain the cavity was cut into.
+  const std::vector<glm::vec3> tris = Build(StraightReach(4.0f, 0.35f), DitchAt);
+  REQUIRE(!tris.empty());
+  for (const glm::vec3& p : tris) {
+    INFO("at x=" << p.x << " z=" << p.z);
+    CHECK(p.y == Catch::Approx(9.0f + 0.35f + kWaterEpsilonM).margin(1e-4));
+  }
+}
+
+TEST_CASE("a cross-section is flat across its width, not draped",
+          "[river_surface]") {
+  // The channel is 6 m wide over a ditch only 2 m wide, so a draped surface
+  // would put its outer vertices on the 10 m plain. Water is level across a
+  // channel: every vertex takes the CENTRELINE's bed.
+  const std::vector<glm::vec3> tris = Build(StraightReach(6.0f, 0.2f), DitchAt);
+  REQUIRE(!tris.empty());
+  Span across, level;
+  for (const glm::vec3& p : tris) {
+    across.add(p.z);
+    level.add(p.y);
+  }
+  CHECK(across.extent() == Catch::Approx(6.0f).margin(1e-3));
+  CHECK(level.extent() == Catch::Approx(0.0f).margin(1e-4));
+  CHECK(level.lo == Catch::Approx(9.0f + 0.2f + kWaterEpsilonM).margin(1e-4));
+}
+
+TEST_CASE("the surface follows the bed downstream", "[river_surface]") {
+  // A bed that drops 1 m per 10 m of easting. A surface built off one level, or
+  // off the reach's endpoints, would pass every other test in this file.
+  auto ramp = [](float wx, float /*wz*/) { return 40.0f - 0.1f * wx; };
+  const std::vector<glm::vec3> tris = Build(StraightReach(4.0f, 0.2f), ramp);
+  REQUIRE(!tris.empty());
+  for (const glm::vec3& p : tris) {
+    INFO("at x=" << p.x);
+    CHECK(p.y == Catch::Approx(ramp(p.x, p.z) + 0.2f + kWaterEpsilonM)
+                     .margin(1e-3));
+  }
+}
+
+TEST_CASE("the drawn width is the channel's true width, with no floor",
+          "[river_surface]") {
+  // A 0.2 m brook is drawn 0.2 m wide. The retired kMinRibbonWidthM used to
+  // inflate this to 1.5 m because a hairline on smooth ground aliased to
+  // nothing; the cavity is what makes it visible now, so the surface no longer
+  // lies about its width.
+  for (const float w : {0.2f, 4.0f, 9.0f}) {
+    const std::vector<glm::vec3> tris = Build(StraightReach(w, 0.2f), DitchAt);
     REQUIRE(!tris.empty());
     Span across;
     for (const glm::vec3& p : tris) across.add(p.z);
@@ -98,32 +153,20 @@ TEST_CASE("the drawn width is the channel's hydraulic width", "[river_surface]")
   }
 }
 
-TEST_CASE("a hairline is floored, not drawn true to width", "[river_surface]") {
-  // The one deliberate departure from physical truth in this file; if the floor
-  // ever stops applying, the thin half of the network silently disappears.
-  const mapgen::MapArtifacts art = FlatMap(10.0f);
-  const std::vector<glm::vec3> tris = Build(art, StraightReach(0.2f, 20.0f, 140.0f, 80.0f));
-  REQUIRE(!tris.empty());
-  Span across;
-  for (const glm::vec3& p : tris) across.add(p.z);
-  CHECK(across.extent() == Catch::Approx(kMinRibbonWidthM).margin(1e-3));
-}
-
 TEST_CASE("width follows the reach downstream", "[river_surface]") {
-  // A reach that swells 2 m -> 8 m must produce a ribbon that swells with it.
-  // A constant-width ribbon would pass every other test in this file.
-  mapgen::MapArtifacts art = FlatMap(10.0f);
+  // A reach that swells 2 m -> 8 m must produce a surface that swells with it.
   mapgen::RiverGraph g;
   g.nodes.resize(2);
   mapgen::RiverEdge e;
   for (int i = 0; i <= 8; ++i) {
     const float t = static_cast<float>(i) / 8.0f;
-    e.points_m.push_back(glm::vec2(20.0f + 120.0f * t, 80.0f));
+    e.points_m.push_back(glm::vec2(20.0f + 120.0f * t, kReachZ));
     e.width_m.push_back(2.0f + 6.0f * t);
+    e.depth_m.push_back(0.2f);
   }
   g.edges.push_back(std::move(e));
 
-  const std::vector<glm::vec3> tris = Build(art, g);
+  const std::vector<glm::vec3> tris = Build(g, DitchAt);
   REQUIRE(!tris.empty());
   Span up, down;
   for (const glm::vec3& p : tris) {
@@ -135,51 +178,21 @@ TEST_CASE("width follows the reach downstream", "[river_surface]") {
   CHECK(down.extent() > up.extent() + 2.0f);
 }
 
-TEST_CASE("the ribbon sits on the terrain, not on a plane", "[river_surface]") {
-  // A ramp in X. Every vertex must land on the bilinear surface + the lift; a
-  // ribbon built off node heights alone would sag between texels.
-  mapgen::MapArtifacts art = FlatMap(0.0f);
-  for (int z = 0; z < kN; ++z)
-    for (int x = 0; x < kN; ++x) art.heightmap.at(x, z) = 3.0f * static_cast<float>(x);
-
-  const std::vector<glm::vec3> tris = Build(art, StraightReach(4.0f, 20.0f, 140.0f, 80.0f));
-  REQUIRE(!tris.empty());
-  for (const glm::vec3& p : tris) {
-    // Terrain node i carries texel min(i, kN-1)'s height, so the ramp is
-    // h = 3*x/texel until the last node pair, which is flat.
-    const float fx = std::clamp(p.x / kTexelM, 0.0f, static_cast<float>(kN));
-    const int i0 = std::clamp(static_cast<int>(std::floor(fx)), 0, kN);
-    const float t = fx - static_cast<float>(i0);
-    const float h0 = 3.0f * static_cast<float>(std::min(i0, kN - 1));
-    const float h1 = 3.0f * static_cast<float>(std::min(i0 + 1, kN - 1));
-    INFO("at x=" << p.x);
-    CHECK(p.y == Catch::Approx(h0 + (h1 - h0) * t + kRiverLiftM).margin(1e-2));
-  }
-}
-
-TEST_CASE("the ribbon rides standing water instead of sinking under it",
-          "[river_surface]") {
-  mapgen::MapArtifacts art = FlatMap(10.0f);
-  // Flood the eastern half to a surface of 14 m.
-  for (int z = 0; z < kN; ++z)
-    for (int x = kN / 2; x < kN; ++x) art.water_depth.at(x, z) = 4.0f;
-
-  const std::vector<glm::vec3> tris = Build(art, StraightReach(4.0f, 20.0f, 140.0f, 80.0f));
-  REQUIRE(!tris.empty());
-  Span dry, wet;
-  for (const glm::vec3& p : tris) {
-    if (p.x < 60.0f) dry.add(p.y);
-    if (p.x > 100.0f) wet.add(p.y);
-  }
-  CHECK(dry.lo == Catch::Approx(10.0f + kRiverLiftM).margin(1e-3));
-  CHECK(wet.lo == Catch::Approx(14.0f + kRiverLiftM).margin(1e-3));
+TEST_CASE("a reach with no flow carries no water", "[river_surface]") {
+  // Depth is the whole reason there is a surface to draw; a dry channel must
+  // leave the cavity empty rather than paint a sheet across it.
+  CHECK(Build(StraightReach(4.0f, 0.0f), DitchAt).empty());
+  // And a reach carrying no per-point depth at all (sample_at_param returns 0
+  // for an empty attribute) is the same case.
+  mapgen::RiverGraph g = StraightReach(4.0f, 0.2f);
+  g.edges[0].depth_m.clear();
+  CHECK(Build(g, DitchAt).empty());
 }
 
 TEST_CASE("a curved reach bends rather than facets", "[river_surface]") {
-  // A quarter circle of radius 40 m. The ribbon's centreline should stay on
-  // that circle to well under a metre -- the polyline it was fitted from has
-  // 9 vertices and would cut ~1.2 m of corner.
-  mapgen::MapArtifacts art = FlatMap(5.0f);
+  // A quarter circle of radius 40 m. The centreline should stay on that circle
+  // to well under a metre -- the polyline it was fitted from has 9 vertices and
+  // would cut ~1.2 m of corner.
   mapgen::RiverGraph g;
   g.nodes.resize(2);
   mapgen::RiverEdge e;
@@ -189,10 +202,11 @@ TEST_CASE("a curved reach bends rather than facets", "[river_surface]") {
     const float a = 1.5f * static_cast<float>(i) / 8.0f;
     e.points_m.push_back(c + r * glm::vec2(std::cos(a), std::sin(a)));
     e.width_m.push_back(3.0f);
+    e.depth_m.push_back(0.2f);
   }
   g.edges.push_back(std::move(e));
 
-  const std::vector<glm::vec3> tris = Build(art, g);
+  const std::vector<glm::vec3> tris = Build(g, [](float, float) { return 5.0f; });
   REQUIRE(!tris.empty());
   float worst = 0.0f;
   for (const glm::vec3& p : tris) {
@@ -206,24 +220,28 @@ TEST_CASE("a curved reach bends rather than facets", "[river_surface]") {
 
 TEST_CASE("a chain pointing outside the graph is ignored, not dereferenced",
           "[river_surface]") {
-  const mapgen::MapArtifacts art = FlatMap(10.0f);
-  const mapgen::RiverGraph g = StraightReach(4.0f, 20.0f, 140.0f, 80.0f);
+  const mapgen::RiverGraph g = StraightReach(4.0f, 0.2f);
   std::vector<mapgen::RiverArcChain> chains = mapgen::build_river_arcs(g, 0.5f);
   REQUIRE(chains.size() == 1);
   chains[0].edge = 7;
-  CHECK(BuildRiverRibbonTriangles(art, kWorldM, g, chains).empty());
+  CHECK(BuildRiverWaterTriangles(Lattice(), kWorldM, g, chains, DitchAt).empty());
   chains[0].edge = -1;
-  CHECK(BuildRiverRibbonTriangles(art, kWorldM, g, chains).empty());
+  CHECK(BuildRiverWaterTriangles(Lattice(), kWorldM, g, chains, DitchAt).empty());
 }
 
 TEST_CASE("degenerate inputs produce nothing rather than NaNs",
           "[river_surface]") {
-  const mapgen::RiverGraph g = StraightReach(4.0f, 20.0f, 140.0f, 80.0f);
+  const mapgen::RiverGraph g = StraightReach(4.0f, 0.2f);
   const std::vector<mapgen::RiverArcChain> chains = mapgen::build_river_arcs(g, 0.5f);
-  CHECK(BuildRiverRibbonTriangles(mapgen::MapArtifacts{}, kWorldM, g, chains).empty());
-  CHECK(BuildRiverRibbonTriangles(FlatMap(1.0f), 0.0f, g, chains).empty());
+  CHECK(BuildRiverWaterTriangles(mapgen::MapArtifacts{}, kWorldM, g, chains,
+                                 DitchAt)
+            .empty());
+  CHECK(BuildRiverWaterTriangles(Lattice(), 0.0f, g, chains, DitchAt).empty());
+  // No carve, no cavity, no water -- an absent height_at is not a reason to
+  // guess a level.
+  CHECK(BuildRiverWaterTriangles(Lattice(), kWorldM, g, chains, {}).empty());
 
-  const std::vector<glm::vec3> tris = Build(FlatMap(10.0f), g);
+  const std::vector<glm::vec3> tris = Build(g, DitchAt);
   for (const glm::vec3& p : tris) {
     CHECK(std::isfinite(p.x));
     CHECK(std::isfinite(p.y));

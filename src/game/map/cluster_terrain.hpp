@@ -56,6 +56,13 @@ class ClusterTerrain {
   // textures) read through `splat_sampler`, which must CLAMP. `splat_uv` maps
   // world XZ to splat UV as {scale_x, scale_z, bias_u, bias_v}.
   //
+  // `detail`, if non-null, locally subdivides the leaf lattice (see
+  // TerrainDetailField): the app describes WHERE the terrain needs more
+  // resolution and WHAT height lives there, and the DAG builder tessellates it.
+  // Null -- the default, and what every caller without local detail passes --
+  // is a bit-identical build. Nothing here knows or cares what produced the
+  // detail; the producer's adapter is the app's business.
+  //
   // Returns false if the material factory fails to build. Seeds an initial LOD
   // cut so the first rendered frame draws.
   bool Build(const MapData& map, const RenderContext& ctx,
@@ -64,7 +71,7 @@ class ClusterTerrain {
              const MaterialLibrary::TerrainArrays& arrays,
              wgpu::Sampler array_sampler, wgpu::TextureView splat0,
              wgpu::TextureView splat1, wgpu::Sampler splat_sampler,
-             glm::vec4 splat_uv);
+             glm::vec4 splat_uv, const TerrainDetailField* detail = nullptr);
 
   // Re-select the LOD cut for `camera` and rewrite the entity's draw ranges.
   // Call each frame. Early-outs when the cut-affecting inputs (camera position in
