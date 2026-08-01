@@ -1,6 +1,6 @@
 #pragma once
 
-// badlands' temperate forest, as content: the bridge between the game-agnostic
+// badlands' forest, loaded as DATA: the bridge between the game-agnostic
 // placement library (src/foliage/) and the tree generator (game/geometry/).
 //
 // The split matters. `foliage::ForestType` carries only what the SAMPLER needs
@@ -10,8 +10,15 @@
 // Nothing in src/foliage/ can see a TreeOptions, and nothing here changes how
 // placement works.
 //
+// WHY A FILE AND NOT A C++ TABLE. Forest tuning is an iterate-and-look loop:
+// change a number, relaunch, judge the screenshot. With the table compiled in,
+// every one of those iterations cost a full rebuild -- unaffordable for numbers
+// that can only be chosen by eye. The JSON is the single source of truth, with
+// no compiled-in defaults shadowing it, so what you read in the file is what
+// the forest is.
+//
 // Presets are referenced BY NAME, not by index into TreeCatalog(): a reordered
-// or renamed catalog entry then fails loudly at build time instead of silently
+// or renamed catalog entry then fails loudly at load instead of silently
 // planting the wrong species (the convention biome_manifest.hpp already uses
 // for the same reason).
 
@@ -45,18 +52,23 @@ struct ForestCatalog {
   bool empty() const { return models.empty(); }
 };
 
-// Builds badlands' forest. Returns false (after logging which preset name it
-// could not find) if TreeCatalog() has drifted from the names this file
-// expects; `out` is left empty in that case.
+// The shipped forest definition. Relative to the repo root, like every other
+// asset path (apps run from there so `assets/` resolves).
+inline constexpr const char* kTemperateForestPath =
+    "assets/foliage/temperate_forest.json";
+
+// Loads a forest definition. Returns false (after logging exactly which field
+// was wrong) on a missing/unparseable file, an unknown preset name, a malformed
+// depth curve, or any out-of-range number; `out` is left empty in that case.
 //
-// Three layers, placed canopy first so it claims its space before the
-// undergrowth fills in:
-//   canopy   Oak/Pine/Ash/Aspen (large), 4 mesh variants each
-//   sapling  Oak/Pine/Ash/Aspen (small), 2 variants each
-//   bush     Bush 1 (x2), Bush 2, Bush 3
-// 28 models total. Deliberately NOT a species x tier x variant cross-product:
-// a tier only exists where a layer uses it, so nothing is generated that
-// nothing plants.
-bool BuildForestCatalog(ForestCatalog& out);
+// Everything is validated rather than defaulted: a forest that silently ran
+// with half its layers because a key was misspelled would be far harder to
+// diagnose from a screenshot than a refusal to load.
+bool LoadForestCatalog(const std::string& path, ForestCatalog& out);
+
+// Convenience overload for the shipped definition.
+inline bool BuildForestCatalog(ForestCatalog& out) {
+  return LoadForestCatalog(kTemperateForestPath, out);
+}
 
 }  // namespace badlands

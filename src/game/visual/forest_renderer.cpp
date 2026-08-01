@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <string>
 #include <thread>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -95,10 +96,23 @@ bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
   visible_.assign(static_cast<size_t>(stats_.total_cells), 0);
   next_visible_.assign(static_cast<size_t>(stats_.total_cells), 0);
 
+  // Per-layer counts, because the total alone cannot tell a forest that is too
+  // dense from one whose undergrowth is too dense -- and those are different
+  // knobs (each layer's own grid_m).
+  std::vector<int> per_layer(catalog_.type.layers.size(), 0);
+  for (const std::vector<foliage::FoliageInstance>& cell : field_.cells) {
+    for (const foliage::FoliageInstance& inst : cell) {
+      if (inst.layer < per_layer.size()) per_layer[inst.layer]++;
+    }
+  }
+  std::string breakdown;
+  for (size_t i = 0; i < per_layer.size(); ++i) {
+    breakdown += (i ? ", " : "");
+    breakdown += "L" + std::to_string(i) + "=" + std::to_string(per_layer[i]);
+  }
   spdlog::info(
-      "ForestRenderer: {} instances across {} cells, {} models, capacity {}",
-      stats_.total_instances, stats_.total_cells, models.size(),
-      stats_.total_instances);
+      "ForestRenderer: {} instances ({}) across {} cells, {} models",
+      stats_.total_instances, breakdown, stats_.total_cells, models.size());
   return true;
 }
 
