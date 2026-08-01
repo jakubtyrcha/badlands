@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <limits>
 #include <optional>
 #include <cmath>
 #include <string>
@@ -35,8 +36,10 @@
 #include "mapview/biome_manifest.hpp"
 #include "mapview/biome_splat.hpp"
 #include "mapgen/map_io.hpp"
+#include "mapgen/river_arcs.hpp"
 #include "mapgen/window_rivers.hpp"
 #include "mapview/lake_surface.hpp"
+#include "mapview/river_surface.hpp"
 
 namespace badlands {
 
@@ -49,6 +52,17 @@ constexpr float kMinRiverWidthM = 0.3f;
 // Shortest headwater branch worth drawing. Leaf-only, so the network cannot be
 // severed; applied repeatedly, since removing one leaf exposes the next.
 constexpr float kMinRiverBranchM = 32.0f;
+
+// How far a fitted arc may stray from the reach polyline, in TEXELS. Half a
+// texel: the polyline itself came out of a Douglas-Peucker pass at ~1 texel, so
+// fitting tighter than this spends arcs chasing error the input does not have.
+constexpr float kRiverArcToleranceTexels = 0.5f;
+
+// The channel ribbon's look. Deferred solid colour -- a river SHADER is
+// explicitly out of scope for this pass, and a flat albedo is what makes this
+// read as a debug layer rather than as finished water.
+constexpr glm::vec3 kRiverRibbonColor{0.10f, 0.35f, 0.68f};
+constexpr float kRiverRibbonRoughness = 0.22f;
 
 // Wrap the generator output in the frozen MapData contract at the raster's own
 // texel spacing. Slices are ONE-HOT: the hard per-pixel biome assignment, so
@@ -80,56 +94,67 @@ MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, glm::vec2 size_m) {
 }  // namespace
 
 
-// Turns the river graph into world-space debug segments.
+// Turns the river ARC CHAINS into the channel ribbon mesh.
 //
-// Height comes from the terrain raster, not from the graph's node elevations:
-// the graph carries elevation only at nodes, while `points_m` is resampled at
-// variable arc length along a reach, so interpolating node heights would let a
-// long reach float above or sink under the ground between them.
+// The geometry is built in src/mapview/river_surface.cpp (pure CPU, tested);
+// everything here is the registry/material half. One entity for the whole
+// network -- the ribbon is a single solid colour, so splitting it per reach
+// would buy nothing and cost a draw call each.
 //
-// Colour encodes STRAHLER ORDER rather than discharge, because order is constant
-// along a reach and discharge is not -- a per-point discharge ramp would make one
-// river read as several. Order is the hierarchy the eye should pick out.
-void MapViewView::BuildRiverLines() {
-  river_lines_.Clear();
-  if (!show_rivers_) return;
-  const int w = map_.heightmap.width, h = map_.heightmap.height;
-  if (w <= 0 || h <= 0 || map_size_m_ <= 0.0f) return;
-  const float texel_m = map_size_m_ / static_cast<float>(w);
+// Destroyed and rebuilt on toggle rather than hidden: the registry has no
+// per-entity visibility flag, and at this size (tens of thousands of triangles)
+// the rebuild is cheaper than the machinery to avoid it.
+void MapViewView::BuildRiverMesh() {
+  if (registry_.valid(river_mesh_)) {
+    registry_.destroy(river_mesh_);
+    river_mesh_ = entt::null;
+  }
+  if (!show_rivers_ || river_arcs_.empty()) return;
 
-  // Lifted clear of the surface so the line is not z-fought by the terrain it
-  // follows. In metres, so it is independent of camera height.
-  constexpr float kLiftM = 0.35f;
-  // Screen-space pixels. A trunk is only ~1.6 m wide here, far below a pixel at
-  // any sane camera height, so thickness carries HIERARCHY, not true width.
-  constexpr float kBaseThicknessPx = 1.2f;
-  constexpr float kThicknessPerOrderPx = 0.9f;
+  const std::vector<glm::vec3> tris = BuildRiverRibbonTriangles(
+      map_, map_size_m_, rivers_.graph, river_arcs_);
+  if (tris.empty()) return;
 
-  auto ground_at = [&](glm::vec2 p) {
-    const int x = std::clamp(static_cast<int>(p.x / texel_m), 0, w - 1);
-    const int z = std::clamp(static_cast<int>(p.y / texel_m), 0, h - 1);
-    float y = map_.heightmap.at(x, z);
-    // Ride the lake surface where there is one, or the line disappears under it.
-    if (map_.water_depth.width == w && map_.water_depth.height == h)
-      y += map_.water_depth.at(x, z);
-    return y + kLiftM;
-  };
-
-  for (const mapgen::RiverEdge& e : rivers_.graph.edges) {
-    if (e.points_m.size() < 2) continue;
-    const int order = std::max(1, e.strahler_order);
-    // Headwaters pale, trunks saturated -- a single hue so the network still
-    // reads as one system.
-    const float tt = std::clamp((order - 1) / 4.0f, 0.0f, 1.0f);
-    const glm::vec3 color = glm::mix(glm::vec3(0.45f, 0.72f, 0.92f),
-                                     glm::vec3(0.08f, 0.34f, 0.78f), tt);
-    const float thickness = kBaseThicknessPx + kThicknessPerOrderPx * (order - 1);
-    for (size_t i = 1; i < e.points_m.size(); ++i) {
-      const glm::vec2 a = e.points_m[i - 1], b = e.points_m[i];
-      river_lines_.AddLine(glm::vec3(a.x, ground_at(a), a.y),
-                           glm::vec3(b.x, ground_at(b), b.y), color, thickness);
+  std::vector<float> v;
+  v.reserve(tris.size() * kTexturedMeshFloatsPerVertex);
+  for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+    // Flat GEOMETRIC normals, so the ribbon is shaded by the slope it lies on
+    // and disappears into the hillside's own lighting instead of reading as a
+    // horizontal sheet laid over it.
+    const glm::vec3 e0 = tris[i + 1] - tris[i];
+    const glm::vec3 e1 = tris[i + 2] - tris[i];
+    const glm::vec3 cr = glm::cross(e0, e1);
+    const float len = glm::length(cr);
+    const glm::vec3 n = (len > 1e-8f) ? cr / len : glm::vec3(0.0f, 1.0f, 0.0f);
+    const glm::vec3 tg =
+        (glm::length(e0) > 1e-8f) ? glm::normalize(e0) : glm::vec3(1.0f, 0.0f, 0.0f);
+    for (int k = 0; k < 3; ++k) {
+      const glm::vec3& p = tris[i + k];
+      PushVertex(v, p, glm::vec2(p.x, p.z), n, tg);
     }
   }
+
+  const DeferredMaterial mat =
+      matlib_.SolidColor(kRiverRibbonColor, kRiverRibbonRoughness);
+  river_mesh_ = registry_.create();
+  registry_.emplace<Transform>(river_mesh_).matrix = glm::mat4(1.0f);
+  auto& mesh = registry_.emplace<StaticTexturedMeshComponent>(river_mesh_);
+  mesh.vertex_count =
+      static_cast<uint32_t>(v.size() / kTexturedMeshFloatsPerVertex);
+  mesh.dirty = true;
+  mesh.geometry_type = GeometryType::kTexturedMesh;
+  registry_.emplace<StaticMeshAabbComponent>(
+      river_mesh_,
+      StaticMeshAabbComponent{.local = ComputeLocalAabbFromVertices(
+                                  v, kTexturedMeshFloatsPerVertex)});
+  mesh.vertices = std::move(v);
+
+  MaterialFactoryComponent fmc;
+  fmc.factory = mat.factory;
+  fmc.pass_type = MaterialPassType::kDeferred;
+  fmc.params = mat.params;
+  fmc.config_hash = ComputeFactoryConfigHash(fmc);
+  registry_.emplace<MaterialFactoryComponent>(river_mesh_, std::move(fmc));
 }
 
 bool MapViewView::Initialize(const RenderContext& ctx) {
@@ -221,17 +246,61 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     // 0.5 m is Q >= 0.01 m3/s.
     rivers_ = mapgen::build_window_rivers(map_, params_.world_size_m, inflows, rp,
                                           kMinRiverWidthM, kMinRiverBranchM);
-    BuildRiverLines();
+    const float texel_m =
+        params_.world_size_m / static_cast<float>(std::max(1, map_.heightmap.width));
+    river_arcs_ = mapgen::build_river_arcs(
+        rivers_.graph, kRiverArcToleranceTexels * texel_m);
     log_step("rivers", since(t));
     float q_max = 0.0f;
     for (const mapgen::RiverEdge& e : rivers_.graph.edges)
       for (float q : e.discharge_m3_s) q_max = std::max(q_max, q);
     spdlog::info(
-        "rivers: {} nodes, {} reaches, {} segments | inflow {:.4f} + rain {:.4f} "
+        "rivers: {} nodes, {} reaches | inflow {:.4f} + rain {:.4f} "
         "= {:.4f} m3/s | peak Q {:.4f} m3/s",
         rivers_.graph.nodes.size(), rivers_.graph.edges.size(),
-        river_lines_.lines.size(), rivers_.inflow_m3_s, rivers_.rain_m3_s,
+        rivers_.inflow_m3_s, rivers_.rain_m3_s,
         rivers_.inflow_m3_s + rivers_.rain_m3_s, q_max);
+
+    // The arc fit, reported as what it buys and what it costs.
+    //
+    // FIT ERROR is the one that can invalidate everything downstream: the arcs
+    // replace the polyline, so if the worst point sits further off than the
+    // tolerance allowed, the fit silently moved the river. TIGHT arcs are the
+    // other failure -- a radius below the channel's own half-width is a lattice
+    // hairpin, not a meander, and it is what the ribbon's fold guard exists for.
+    size_t pts = 0, arcs = 0, straight = 0, tight = 0;
+    float min_r = std::numeric_limits<float>::infinity();
+    float arc_len = 0.0f, worst_fit = 0.0f;
+    for (const mapgen::RiverArcChain& c : river_arcs_) {
+      const mapgen::RiverEdge& e = rivers_.graph.edges[c.edge];
+      arcs += c.arcs.size();
+      arc_len += c.length_m;
+      pts += e.points_m.size();
+      for (const glm::vec2& p : e.points_m) {
+        float best = std::numeric_limits<float>::max();
+        for (const mapgen::RiverArc& a : c.arcs)
+          best = std::min(best, mapgen::arc_distance_m(a, p));
+        worst_fit = std::max(worst_fit, best);
+      }
+      for (const mapgen::RiverArc& a : c.arcs) {
+        if (a.curvature_1_m == 0.0f) {
+          ++straight;
+          continue;
+        }
+        const float r = mapgen::arc_radius_m(a);
+        min_r = std::min(min_r, r);
+        if (r < 0.5f * kMinRibbonWidthM) ++tight;
+      }
+    }
+    spdlog::info(
+        "river arcs: {} chains, {} arcs ({} straight) from {} polyline points "
+        "({:.2f}x) | {:.0f} m of channel | fit error <= {:.2f} m | "
+        "min radius {:.1f} m, {} tighter than the channel",
+        river_arcs_.size(), arcs, straight, pts,
+        pts > 0 ? static_cast<double>(pts) /
+                      static_cast<double>(std::max<size_t>(arcs, 1))
+                : 0.0,
+        arc_len, worst_fit, min_r, tight);
   }
 
   // Lake bathymetry, logged once: the water material's extinction coefficients
@@ -432,6 +501,18 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
                map_.lakes.size());
   log_step("water", since(t));
 
+  // The river channels, as geometry. After the lake water because it needs
+  // matlib_, and it reads better in that order: ground, then standing water,
+  // then the channels between them.
+  t = clock::now();
+  BuildRiverMesh();
+  if (registry_.valid(river_mesh_)) {
+    spdlog::info("rivers: {} ribbon triangles",
+                 registry_.get<StaticTexturedMeshComponent>(river_mesh_)
+                         .vertex_count / 3);
+  }
+  log_step("river mesh", since(t));
+
   // The forest. Placement is pure CPU over the frozen MapData contract, so
   // nothing here knows how the map was made -- a generated map simply reports
   // zero Forest coverage and plants nothing.
@@ -518,12 +599,6 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
 void MapViewView::Update(float dt, const bool* keyboard_state) {
   dt_ = dt;
 
-  // The segment list is static (built once at load), so this just re-points the
-  // context; nullptr when hidden or when there is no network, which is what the
-  // debug-line pass reads as "draw nothing".
-  scene_context_.debug_lines =
-      (show_rivers_ && !river_lines_.empty()) ? &river_lines_ : nullptr;
-
   // Advance the shared clock; when it's running, move the sun (paused =>
   // holds). The daylight re-bake is throttled implicitly: ApplyDaylight only
   // runs while time actually moves.
@@ -558,9 +633,11 @@ void MapViewView::DrawUI() {
               params_.world_size_m);
   cluster_terrain_.DrawDebugUI();
   if (!rivers_.graph.edges.empty()) {
-    if (ImGui::Checkbox("rivers (debug)", &show_rivers_)) BuildRiverLines();
-    ImGui::Text("  %zu reaches, %zu segments", rivers_.graph.edges.size(),
-                river_lines_.lines.size());
+    if (ImGui::Checkbox("rivers (debug)", &show_rivers_)) BuildRiverMesh();
+    size_t arcs = 0;
+    for (const mapgen::RiverArcChain& c : river_arcs_) arcs += c.arcs.size();
+    ImGui::Text("  %zu reaches, %zu chains, %zu arcs",
+                rivers_.graph.edges.size(), river_arcs_.size(), arcs);
     ImGui::Text("  inflow %.4f + rain %.4f m3/s", rivers_.inflow_m3_s,
                 rivers_.rain_m3_s);
   }

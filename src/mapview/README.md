@@ -91,11 +91,7 @@ keep the split structural across windows.
 ## Rivers
 
 `src/mapgen/window_rivers.hpp` routes the loaded window and extracts its network
-(`route_flow` → `accumulate_drainage` → `extract_river_graph`). Drawn through the
-engine's **debug-line pass**, not as a ribbon mesh: at a median channel width of
-~8 cm a true-width ribbon is sub-texel and invisible, so constant screen width is
-what makes the layer legible. Colour is Strahler order, which is constant along a
-reach — a per-point discharge ramp would make one river read as several.
+(`route_flow` → `accumulate_drainage` → `extract_river_graph`).
 
 - **A window is a cutout, so it needs boundary inflow.** Rivers cross into it
   carrying catchment it cannot see; each crossing converts to the upstream area
@@ -110,6 +106,35 @@ reach — a per-point discharge ramp would make one river read as several.
   parent map it travels on and reaches a lake kilometres away, outside the
   window. Padding the routing does **not** change this (measured: identical), and
   a window that drains outward will never show rivers reaching its own lake.
+
+### From graph to geometry: circular arcs, then a ribbon
+
+Every reach is refitted as a chain of **circular arcs** (`src/mapgen/river_arcs.hpp`)
+and swept into a draped mesh (`src/mapview/river_surface.hpp`). Two files because
+the curve is not the mesh: a carve pass, a flow field and a bank spline all want
+the same curve and none of them wants triangles.
+
+- **Arcs, not a spline.** A meander *is* an arc — curvature is the quantity river
+  geometry is written in — so the representation stores what you want to read.
+  Offsetting to a bank is closed-form (same arc at `r ∓ w/2`), and arc length is
+  exact, so parameterising by distance along the river is free.
+- **Biarcs.** Each span is two arcs meeting tangentially at an equal-chord joint,
+  where G1 falls out algebraically rather than being solved for. Spans are grown
+  greedily until a skipped point exceeds tolerance, so a straight run collapses to
+  one arc. On the pinned 2 km window: **666 arcs from 1687 polyline points (2.53×),
+  fit error ≤ 0.50 m** against a 0.5-texel tolerance.
+- **The ribbon is true width**, `w = k_w·√Q` per vertex, so the trunk swells
+  downstream instead of being drawn at a uniform thickness. The one deliberate
+  lie is `kMinRibbonWidthM` (1.5 m): a 0.3 m headwater drawn to scale aliases to
+  nothing and the network looks like it stops partway down.
+- **It replaced a debug-LINE layer, and the two cannot coexist.** They share a
+  centreline, and a screen-space line 1–4 px wide covers a 1.5–4 m ribbon at every
+  camera height where you would look at the map. What the lines carried and the
+  ribbon does not is Strahler order, traded for true width.
+- Fit quality is logged at load — compression, worst fit error, minimum radius,
+  and how many arcs bend tighter than the channel is wide. That last one is the
+  lattice-hairpin check: an arc tighter than its own half-width would fold the
+  ribbon inside out, so the mesh clamps the offset (0 arcs on the pinned window).
 
 ## Known limits
 
