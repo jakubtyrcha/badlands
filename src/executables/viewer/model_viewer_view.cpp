@@ -73,8 +73,9 @@ constexpr float kMultiFloorSize = 160.0f;
 // ~23.4m, rounded to 23. LOD2->LOD3 (0.60m): ~70.1m, rounded to 70. The first
 // two were screenshot-tuned in Phase 6 (both the empty-crown fix and their
 // re-derivation off it); the last is the formula's value as-is.
-constexpr std::array<float, kVoxelLodCount - 1> kMultiLodThresholds = {
-    18.0f, 23.0f, 70.0f};
+// (The distance cutoffs themselves now live in foliage_voxel_config.hpp as
+// kFoliageLodThresholdsPreviewM, since the instanced-field path scales them per
+// model -- BuildTreeFieldModel applies them.)
 
 // Voxel-crown LOD (volumetric-foliage Phase 3): progressively coarser
 // tet-voxelization cell sizes, one per Voxel L0..L3 mode
@@ -294,36 +295,18 @@ void ModelViewerView::RebuildScene() {
     // entities entirely.
     const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
 
-    // BuildTreeField (volumetric-foliage Phase 5) takes one pre-voxelized
-    // leaf-crown mesh per LOD rather than voxelizing internally, so `s` (the
-    // preview rescale factor) must be known BEFORE calling it, to convert
-    // kFoliageVoxelWorldSizes (preview-space) into native-unit cell sizes --
-    // generate the skeleton/bark here to learn `s` and voxelize. BuildTreeField
-    // now takes this skeleton + bark mesh directly (review fix -- it used to
-    // regenerate its own byte-identical copies of both internally, a second
-    // full generation pass on top of this one), so `bark_for_scale` is moved
-    // into the call below instead of being thrown away.
-    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
-    TexturedMeshResult bark_for_scale = GenerateTreeMesh(*gen.tree, skeleton);
-    const float bark_h = bark_for_scale.local_bounds.max.y -
-                         bark_for_scale.local_bounds.min.y;
-    const float s = kTreePreviewHeight / std::max(bark_h, 0.001f);
+    // One model, prepared exactly the way a forest prepares its 28 (see
+    // game/visual/tree_field.hpp): BuildTreeFieldModel does the skeleton, the
+    // LOD0 bark, and the per-LOD voxelization at cell sizes retargeted to the
+    // requested display height. At kTreePreviewHeight that retargeting is the
+    // identity, so the meshes here are byte-identical to what this call site
+    // built by hand before.
+    const std::array<TreeFieldModel, 1> field_models{
+        BuildTreeFieldModel(*gen.tree, kTreePreviewHeight)};
+    const float s = field_models[0].native_to_world_scale;
 
-    const TexturedMeshResult leaves_for_voxelize =
-        GenerateLeafMesh(*gen.tree, skeleton);
-    std::array<TexturedMeshResult, kVoxelLodCount> leaf_lod_meshes;
-    for (int lod = 0; lod < kVoxelLodCount; ++lod) {
-      LeafVoxelizeOptions voxel_opts;
-      voxel_opts.cell_size =
-          kFoliageVoxelWorldSizes[static_cast<size_t>(lod)] / s;
-      leaf_lod_meshes[static_cast<size_t>(lod)] = VoxelizeLeafCards(
-          leaves_for_voxelize.mesh, gen.tree->leaves.silhouette, voxel_opts);
-    }
-
-    std::unique_ptr<TreeField> field = BuildTreeField(
-        device_, queue_, *pipeline_gen_, *gen.tree, skeleton,
-        std::move(bark_for_scale), leaf_lod_meshes, capacity,
-        kMultiLodThresholds);
+    std::unique_ptr<TreeField> field =
+        BuildTreeField(device_, queue_, *pipeline_gen_, field_models, capacity);
     if (!field) {
       // Mirrors the malformed-generator branch further down: log and bail
       // with a floor-only scene, leaving the orbit framing unchanged (an
@@ -338,20 +321,15 @@ void ModelViewerView::RebuildScene() {
     // Same scale + rest-on-floor transform the single-tree path derives
     // from bark.local_bounds (the `else` branch below), so a Multi-mode
     // grid cell at the origin matches the single-tree preview exactly. `s`
-    // was already computed above (from a deterministically bit-identical
-    // bark regeneration) -- reused here rather than re-derived from
-    // field->bark_local_bounds.
+    // came from BuildTreeFieldModel above rather than being re-derived here.
+    const TreeModelBounds& bounds = field->model_bounds[0];
     const glm::mat4 xf =
         glm::translate(glm::mat4(1.0f),
-                      glm::vec3(0.0f, -field->bark_local_bounds.min.y * s,
+                      glm::vec3(0.0f, -bounds.bark_local_bounds.min.y * s,
                                 0.0f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(s));
 
-    Aabb combined_local_bounds = field->bark_local_bounds;
-    if (field->has_leaves) {
-      combined_local_bounds =
-          combined_local_bounds.Union(field->leaf_local_bounds);
-    }
+    const Aabb combined_local_bounds = bounds.Combined();
 
     std::vector<GpuInstanceRenderer::InstanceInput> instances;
     instances.reserve(capacity);

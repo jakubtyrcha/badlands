@@ -413,12 +413,36 @@ foreach(app viewer game ai_sandbox)
     endif()
 endforeach()
 
+# badlands_foliage_lib: the game-agnostic foliage placement library
+# (src/foliage/). Deliberately links NEITHER badlands_engine NOR
+# badlands_mapgen_lib: it compiles the EDT TU directly (that is why
+# distance_to_mask was split out of generator.cpp) so the whole placement half
+# stays pure CPU -- no Dawn, no EnTT, no engine -- and is unit-testable without
+# a GPU. glm/spdlog/FastNoiseLite are headers only.
+add_library(badlands_foliage_lib STATIC
+    src/foliage/foliage_types.cpp
+    src/foliage/forest_type.cpp
+    src/foliage/depth_field.cpp
+    src/foliage/scatter.cpp
+    src/mapgen/distance_field.cpp)
+target_compile_features(badlands_foliage_lib PUBLIC cxx_std_23)
+target_include_directories(badlands_foliage_lib PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+target_include_directories(badlands_foliage_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
+
 # badlands_mapgen_lib: the map generator (bedrock+quantile biomes) + fog
 # generator + hillshade relief preview + PNG outputs, as a static lib. Links
 # badlands_engine for CpuImage (PNG write via the `assets` crate).
 add_library(badlands_mapgen_lib STATIC
     src/mapgen/fog_generator.cpp
     src/mapgen/generator.cpp
+    # Exact EDT, split out of generator.cpp so a consumer can link the distance
+    # transform ALONE (src/foliage/ compiles this TU directly rather than
+    # linking this lib, which links badlands_engine).
+    src/mapgen/distance_field.cpp
     src/mapgen/hillshade.cpp
     src/mapgen/hydrology.cpp
     src/mapgen/map_io.cpp
@@ -448,8 +472,21 @@ add_executable(badlands_mapview
     # Shared MapData->render cluster-terrain module, used by both apps (game_view
     # wired in M7.2). Owns the DAG, its vertex-color material factory, the LOD
     # cut, and the Terrain debug UI.
-    src/game/map/cluster_terrain.cpp)
-target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib meshoptimizer)
+    src/game/map/cluster_terrain.cpp
+    # Foliage: the tree geometry pipeline (also compiled into badlands_viewer),
+    # the multi-model instanced field, badlands' forest content table, the
+    # per-cell cull + upload renderer, and the synthetic forest test map.
+    src/game/geometry/tree_generator.cpp
+    src/game/geometry/leaf_texture.cpp
+    src/game/geometry/leaf_voxelizer.cpp
+    src/game/visual/tree_field.cpp
+    src/game/visual/forest_catalog.cpp
+    src/game/visual/forest_renderer.cpp
+    src/game/map/forest_test_map_generator.cpp)
+target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib
+                                               badlands_foliage_lib meshoptimizer)
+target_include_directories(badlands_mapview PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 if(APPLE)
     target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
 endif()
@@ -501,6 +538,7 @@ add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests 
 add_executable(badlands_generator_tests
     src/mapgen/generator_tests.cpp
     src/mapgen/generator.cpp
+    src/mapgen/distance_field.cpp
     src/mapgen/hydrology.cpp
     src/mapgen/erosion.cpp
     src/mapgen/detail_filter.cpp
@@ -527,6 +565,7 @@ add_executable(badlands_erosion_tests
     src/mapgen/erosion_tests.cpp
     src/mapgen/erosion.cpp
     src/mapgen/generator.cpp
+    src/mapgen/distance_field.cpp
     src/mapgen/detail_filter_tests.cpp
     src/mapgen/detail_filter.cpp
     src/mapgen/river_graph_tests.cpp
@@ -667,6 +706,14 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
     game/tests/leaf_voxelizer_tests.cpp
+    # badlands' forest content table (which TreeCatalog preset each foliage
+    # model index IS). Lives here rather than in badlands_foliage_tests because
+    # it needs TreeCatalog(), which the foliage library deliberately cannot see.
+    game/tests/forest_catalog_tests.cpp
+    # The CPU foliage-cell cull predicate: header-only, no GPU, so the shadow
+    # caster + crown overhang behaviour is testable without a device.
+    game/tests/foliage_cell_cull_tests.cpp
+    src/game/visual/forest_catalog.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
@@ -675,7 +722,8 @@ add_executable(badlands_tree_tests
 target_include_directories(badlands_tree_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-target_link_libraries(badlands_tree_tests PRIVATE badlands_engine badlands_game_lib)
+target_link_libraries(badlands_tree_tests PRIVATE badlands_engine badlands_game_lib
+                                                 badlands_foliage_lib)
 if(APPLE)
     target_link_options(badlands_tree_tests PRIVATE "-Wl,-ld_new")
 endif()
@@ -1051,14 +1099,20 @@ add_executable(badlands_symbolic_map_tests
     src/game/map/map_data.cpp
     src/game/map/symbolic_map_generator.cpp
     src/game/map/flat_map_generator.cpp
+    # The synthetic forest map + the MapData -> foliage::TerrainQuery adapter:
+    # the seam between the map contract and the placement library.
+    src/game/map/forest_test_map_generator.cpp
+    game/tests/forest_test_map_tests.cpp
     src/game/geometry/water_surface.cpp
     game/tests/symbolic_map_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
+target_link_libraries(badlands_symbolic_map_tests PRIVATE badlands_foliage_lib)
 target_include_directories(badlands_symbolic_map_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
 )
 add_test(NAME badlands_symbolic_map_tests COMMAND badlands_symbolic_map_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
@@ -1131,6 +1185,26 @@ add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_test
 # badlands_biome_splat_tests: pure-CPU tests for the biome -> splat raster the
 # cluster terrain samples by world XZ (slot index == Biome enum == terrain array
 # layer index, weights sum to full, at most two layers per texel).
+# badlands_foliage_tests: the foliage placement library — the underlying
+# methods (depth curve, hash, clump remap, EDT depth field, slope probe, cell
+# indexing) each against an analytic answer, then the whole-generator
+# guarantees (determinism, spacing, depth ordering, terrain rejection). Pure
+# CPU: links badlands_foliage_lib, no Dawn/GPU.
+add_executable(badlands_foliage_tests
+    src/foliage/tests/foliage_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_link_libraries(badlands_foliage_tests PRIVATE badlands_foliage_lib)
+target_include_directories(badlands_foliage_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    # The clump-window test measures the ACTUAL fBm distribution the defaults
+    # were tuned against, so it needs the generator's own noise source.
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+)
+add_test(NAME badlands_foliage_tests COMMAND badlands_foliage_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(badlands_biome_splat_tests
     src/mapview/tests/biome_splat_tests.cpp
     src/mapview/biome_splat.cpp
@@ -1157,6 +1231,9 @@ add_executable(badlands_map_io_tests
     src/mapgen/canal_carve.cpp
     src/mapgen/generator.cpp
     src/mapgen/detail_filter.cpp
+    # Exact EDT; split out of generator.cpp upstream, so it must be listed
+    # explicitly here too (carve_cavities and distance_to_plains both call it).
+    src/mapgen/distance_field.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_map_io_tests PRIVATE

@@ -26,6 +26,13 @@
 //   --serial-build    build the cluster DAG single-threaded (default: parallel).
 //                     The output DAG is bit-identical either way; this is the
 //                     perf A/B baseline (build time shows in the stats log).
+//   --test-map        skip the generator and load the synthetic 128 m forest
+//                     map instead. It exists because classify_biomes emits no
+//                     Biome::Forest, so a GENERATED map has no forest for the
+//                     plopper to plant into and renders no trees at all.
+//                     --seed still applies (it varies the terrain and the
+//                     forest, not the forest's outline); --resolution/--size
+//                     are ignored, the map is always 128x128 m.
 
 #include <cstdio>
 #include <cstdlib>
@@ -106,6 +113,7 @@ int main(int argc, char** argv) {
   float camera_height = 0.0f;  // 0 = keep the default framing
   int lod_tint = 0;            // 0 shaded / 1 triangle hash / 2 LOD level
   bool serial_build = false;   // force single-threaded DAG build (perf A/B)
+  bool test_map = false;       // synthetic forest map instead of the generator
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -133,6 +141,8 @@ int main(int argc, char** argv) {
       preview_only = true;
     } else if (a == "--serial-build") {
       serial_build = true;
+    } else if (a == "--test-map") {
+      test_map = true;
     } else if (a == "--seed") {
       if (!parse_num(
               "--seed", "a number",
@@ -195,13 +205,24 @@ int main(int argc, char** argv) {
   }
 
   if (preview_only) {
-    if (!load_dir.empty()) {
+    // The preview dump renders the GENERATOR's debug rasters, and neither the
+    // loaded map nor the test map produces any. Combining the flags asks for
+    // something that does not exist, so say so rather than dumping a blank set.
+    if (!load_dir.empty() || test_map) {
       std::fprintf(stderr,
-                   "mapview: --load and --preview-image-only are exclusive "
-                   "(the preview dumps generator stages a loaded map has none of)\n");
+                   "mapview: --preview-image-only needs the generator; %s has no "
+                   "preview rasters\n",
+                   load_dir.empty() ? "--test-map" : "--load");
       return 2;
     }
     return RunPreviewOnly(params, out_dir);
+  }
+
+  if (!load_dir.empty() && test_map) {
+    std::fprintf(stderr,
+                 "mapview: --load and --test-map are exclusive -- each names a "
+                 "different map\n");
+    return 2;
   }
 
   // Read the manifest BEFORE constructing the view and write the geometry into
@@ -228,8 +249,9 @@ int main(int argc, char** argv) {
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
   return app.Run(argc, argv,
                  [params, camera_height, lod_tint, serial_build,
-                  load_dir](const badlands::RenderContext&) {
+                  load_dir, test_map](const badlands::RenderContext&) {
                    return std::make_unique<badlands::MapViewView>(
-                       params, camera_height, lod_tint, serial_build, load_dir);
+                       params, camera_height, lod_tint, serial_build, load_dir,
+                       test_map);
                  });
 }
