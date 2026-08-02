@@ -180,6 +180,14 @@ struct TerrainDetailField {
   // absent; normals for fine vertices are computed numerically from this
   // (central differences at the seam-canonical spacing), because the coarse
   // NormalAt would shade the detail flat.
+  //
+  // MUST BE THREAD-SAFE AND RE-ENTRANT. The leaf pass fans out over tiles, so
+  // this is called concurrently from every worker thread. A pure const sampler
+  // (what RiverCarve::HeightAt is) needs nothing; a producer that MEMOIZES --
+  // the obvious optimization, since each fine vertex costs five calls here --
+  // must synchronize its cache or keep it per-thread. An unguarded cache races
+  // and corrupts the weld silently, because a wrong height is still a valid
+  // float.
   std::function<float(float wx, float wz)> height_at;
 };
 
