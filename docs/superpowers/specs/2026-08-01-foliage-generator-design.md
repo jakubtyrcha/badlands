@@ -22,9 +22,64 @@
   per-cell cull and upload-on-change logic is a reusable component, not mapview
   view code.
 
-Measured on the 128 m test map: 1083 instances across 16 cells from 28 models,
-8 ms to place, 1.2 s to build the meshes (parallel). A procedural map places
-nothing and builds no GPU resources at all.
+## Revision: crown-circle spacing (2026-08-01)
+
+The first cut spaced instances by a hand-typed `radius_m` under a `max(r_i, r_j)`
+rule. Both halves were wrong, and together they produced the jungle the first
+screenshots showed:
+
+- **The radius was a guess, and a small one.** The file gave a 22 m oak a 3.4 m
+  radius; the tree's bark alone measures 8.5 m and its LOD0 crown 10.1 m. Trees
+  stood at a third of their own crown width apart, so crowns grew through each
+  other.
+- **`max` is the wrong pairwise rule.** It keeps TRUNKS apart. A bush cleared
+  3.4 m from an oak and stood well inside its drip line -- the "small trees under
+  large trees" symptom exactly.
+
+Now: `radius_m` is **measured** off the model's own geometry by
+`BuildForestModels` and the rule is the **sum** `r_i * s_i + r_j * s_j`, so two
+crown circles never overlap and an instance's own scale is what it reserves. The
+file cannot supply a radius at all -- declaring one is a load error, because a
+number that spacing silently ignores is worse than a missing one.
+
+Three things this surfaced, each worth keeping:
+
+- **Measure LOD0, not `TreeModelBounds::Combined()`.** The latter unions every
+  crown LOD and is correct for the GPU bounds sphere (coarse voxels overscale
+  past their source cards), but it runs 25-40% wide as a silhouette -- Oak
+  (large) v0 measures 13.9 m unioned against 10.1 m at LOD0. Spacing by it costs
+  1.8x the ground area per tree for geometry no one can see.
+- **The radius is the largest half-extent, not the box diagonal.** A crown is a
+  disc inscribed in its box, not circumscribing it; the corner would inflate
+  every radius by up to sqrt(2). Half-extents are taken about the trunk axis
+  rather than the box centre, since instances are randomly yawed about it.
+- **`grid_m` must stay well below the layer's neighbour distance.** With the
+  canopy at `grid_m` 7.6 against a ~20 m exclusion diameter, the layer went
+  roll-limited: there were barely more candidates than accepted trees, so
+  tightening the spacing by 27% changed the tree count not at all. Geometry only
+  decides density if enough candidates are tried for it to reject.
+
+Separately, the voxel crown's **tet position jitter is now scaled per LOD**
+(`FoliagePositionJitterForLod`). `LeafVoxelizeOptions::position_jitter` is a
+fraction of a cell and the chain's cell grows 10x from L0 to L3, so the coarsest
+level threw its tets ten times further than the finest -- +-1.52 m against
++-0.15 m on a 27 m pine, with only a few dozen tets to absorb it. The chain's own
+comment wants L3 to read as "a blob standing in for the silhouette"; the jitter
+was pulling that blob apart into separated lumps with the trunk visible through
+it. Holding the displacement at L0's absolute value closes it for dense crowns.
+Only position scales -- `axis_jitter` is an angle (a tet rotated in place varies
+its facing without leaving the shape) and `overscale` is what makes coarse tets
+overlap into a mass at all. Placement is unaffected: spacing measures LOD0.
+
+Not fixed by that, and worth knowing: presets with **narrow columnar crowns
+(e.g. Pine (medium)) are occupancy-limited at L3**, not jitter-limited -- too few
+cells clear `occupancy_fraction` at that cell size, so their L3 is sparse
+regardless. That is a separate knob.
+
+Measured on the 128 m test map with the pine forest: 464 instances (26 canopy,
+182 sapling, 256 bush) across 16 cells from 16 models, 16 ms to place, 0.8 s to
+build the meshes (parallel). A procedural map places nothing and builds no GPU
+resources at all.
 
 ## Goal
 
@@ -117,7 +172,7 @@ stays three functions. `CoverageAt` is per-forest-type — the game-side adapter
 struct DepthCurve { float rise_start, rise_end, fall_start, fall_end; };  // metres
                                                     // fall_end = FLT_MAX -> plateau
 struct FoliageModel {
-  float radius_m, height_m;      // spacing footprint; height for cell Y bounds
+  float radius_m, height_m;      // MEASURED crown radius; height for cell Y bounds
   glm::vec2 scale_range;
   float weight;                  // selection weight within its layer
   DepthCurve depth;              // species mix shifts with depth
@@ -163,9 +218,11 @@ ground height expanded by `model.height_m * scale`.
   cell yields the jittered position, every accept-roll, the model pick, yaw and scale.
 - **Accept tests, in cost order:** `coverage > 0` -> density roll -> slope and water
   clearance -> spacing.
-- **Spacing** uses a uniform hash grid; reject when an accepted instance is within
-  `max(r_i, r_j)`. That is the multi-class rule: bushes pack tightly among themselves but
-  still respect a canopy tree's footprint.
+- **Spacing** uses a uniform hash grid; reject when a candidate's crown circle would
+  overlap an accepted one, i.e. when they are closer than `r_i * s_i + r_j * s_j`. Radii
+  are the models' MEASURED crown radii and `s` each instance's own scale. That is the
+  multi-class rule: bushes pack tightly among themselves but stand clear of a canopy
+  tree's drip line, not merely of its trunk.
 - **Scale** is `lerp(scale_range, hash01)` times an edge ramp climbing from `edge_scale` at
   depth 0 to 1.0 at `edge_scale_depth_m`.
 - Instances stay **upright** — trees grow vertical, they do not align to the ground normal.
@@ -174,20 +231,24 @@ ground height expanded by `model.height_m * scale`.
 
 ## Content
 
-28 models, per-layer species sets:
+A **pine** forest, 16 models, per-layer species sets:
 
-| Layer   | Models                                      | Target height |
-| ------- | ------------------------------------------- | ------------- |
-| Canopy  | Oak/Pine/Ash/Aspen **(large)** x 4 seeds = 16 | 18-26 m     |
-| Sapling | Oak/Pine/Ash/Aspen **(small)** x 2 seeds = 8  | 4-5 m       |
-| Bush    | Bush 1 x 2, Bush 2, Bush 3 = 4                | 1.2-1.6 m   |
+| Layer   | Models                                            | Target height |
+| ------- | ------------------------------------------------- | ------------- |
+| Canopy  | Pine (large) x 4 seeds, Pine (medium) x 4 seeds = 8 | 19-27 m     |
+| Sapling | Pine (small) x 3 seeds = 3                          | 6.5 m       |
+| Bush    | Bush 3 x 2, Bush 1 x 2, Bush 2 = 5                  | 1.2-1.5 m   |
 
-A variant is the same preset with a different `TreeOptions::seed`, which changes the
-skeleton (`BuildTreeSkeleton` reads it) and therefore the mesh.
+Variation within one species comes from three independent sources, which is what keeps a
+single-species stand from reading as a texture: a **variant** is the same preset with a
+different `TreeOptions::seed`, so its skeleton and therefore its mesh differ; **large and
+medium are different presets**, not one tree scaled, so their silhouettes differ; and
+`scale_range` varies each instance on top of both.
 
-Per-model depth curves give the canopy species mix a real gradient, and it happens to be
-ecologically right: **aspen is a pioneer**, so it takes the edge; pine takes the interior;
-oak and ash are broad.
+Per-model depth curves still give the canopy a gradient, now within the species rather
+than across species: the medium pine reaches the tree line, the large one holds the
+sheltered interior, since a stand's tallest trees are the ones that grew up with shelter
+on every side. Bush 3 (the evergreen) leans interior; Bush 1 and 2 carry the edge.
 
 ## Per-model LOD scaling
 

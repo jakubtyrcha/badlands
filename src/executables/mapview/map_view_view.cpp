@@ -630,13 +630,34 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   foliage_params.origin_m = glm::vec2(0.0f);
   foliage_params.size_m = glm::vec2(terrain_map_.size_x_m(),
                                     terrain_map_.size_z_m());
-  foliage::FoliageField foliage_field = foliage::GenerateFoliage(
-      forest_catalog.type, forest_query, foliage_params);
-  log_step("foliage place", since(t));
+
+  // Ask whether there is anywhere to grow BEFORE building any geometry.
+  // Placement spaces trees by their measured crowns, so the meshes have to
+  // exist before GenerateFoliage -- which means an empty field can no longer
+  // save that cost after the fact. On a generated map (mapgen emits no Forest
+  // biome yet) this is ~1 s of meshing that would be discarded immediately.
+  std::vector<TreeFieldModel> forest_models;
+  foliage::FoliageField foliage_field;
+  if (foliage::AnyCoverage(forest_query, foliage_params)) {
+    forest_models = BuildForestModels(forest_catalog);
+    log_step("foliage mesh", since(t));
+
+    t = clock::now();
+    foliage_field = foliage::GenerateFoliage(forest_catalog.type, forest_query,
+                                             foliage_params);
+    log_step("foliage place", since(t));
+  } else {
+    // The empty field below takes ForestRenderer::Build's "nothing to plant"
+    // path, which builds no GPU resources either.
+    spdlog::info(
+        "MapViewView: no Forest coverage on this map -- skipping the foliage "
+        "mesh build entirely");
+  }
 
   t = clock::now();
   if (!forest_.Build(ctx.device, ctx.queue, *ctx.pipeline_gen,
-                     std::move(forest_catalog), std::move(foliage_field))) {
+                     std::move(forest_catalog), std::move(forest_models),
+                     std::move(foliage_field))) {
     spdlog::error("MapViewView: forest renderer build failed");
     return false;
   }

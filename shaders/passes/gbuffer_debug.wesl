@@ -19,7 +19,7 @@ import package::common::ui_composite::{loadUiOverlay, compositeUiOverEncoded};
 @group(0) @binding(3) var albedo_texture: texture_2d<f32>;
 @group(0) @binding(4) var material_texture: texture_2d<f32>;  // RGBA8: R=roughness, G=shadow, B=baked AO
 @group(0) @binding(5) var hdr_texture: texture_2d<f32>;       // lit HDR accumulation
-@group(0) @binding(6) var<uniform> debug_mode: u32;           // 1=Depth 2=Normals 3=Albedo 4=Roughness 5=Hdr 6=Ao
+@group(0) @binding(6) var<uniform> debug_mode: u32;           // 1=Depth 2=Normals 3=Albedo 4=Roughness 5=Hdr 6=Ao 7=Translucency 8=BakedAo
 @group(0) @binding(7) var ao_texture: texture_2d<f32>;        // GTAO screen-space AO (R8)
 @group(0) @binding(8) var ui_overlay: texture_2d<f32>;        // premultiplied encoded UI (1x1 transparent when absent)
 
@@ -78,6 +78,20 @@ fn debugColor(texCoord: vec2<i32>) -> vec4<f32> {
             // Ao: GTAO screen-space occlusion field, grayscale (dark at
             // contacts/crevices). 1.0 (white) everywhere when GTAO is off.
             let ao = textureLoad(ao_texture, texCoord, 0).r;
+            return vec4<f32>(vec3<f32>(ao), 1.0);
+        }
+        case 7u: {
+            // Translucency: material.g, grayscale. Foliage transmission
+            // strength; 1.0 on the standard path, where the channel is the
+            // legacy shadow slot.
+            let t = textureLoad(material_texture, texCoord, 0).g;
+            return vec4<f32>(vec3<f32>(t), 1.0);
+        }
+        case 8u: {
+            // BakedAo: material.b, grayscale. The per-MATERIAL occlusion
+            // written at G-buffer fill, which lighting mins against the
+            // screen-space GTAO field shown by case 6 -- a different quantity.
+            let ao = textureLoad(material_texture, texCoord, 0).b;
             return vec4<f32>(vec3<f32>(ao), 1.0);
         }
         default: {

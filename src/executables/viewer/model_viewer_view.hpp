@@ -10,6 +10,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <span>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,7 +32,8 @@
 #include "game/visual/foliage_voxel_config.hpp"  // kFoliageVoxelWorldSizes
 #include "engine/scene/scene_graph.hpp"
 #include "game/geometry/leaf_texture.hpp"
-#include "game/geometry/tree_options.hpp"  // TreeOptions
+#include "game/geometry/tree_options.hpp"
+#include "game/visual/impostor_baker.hpp"  // ImpostorBakeResult, BakeImpostorAtlas
 #include "game/visual/tree_field.hpp"       // TreeField, BuildTreeField
 
 namespace badlands {
@@ -162,6 +164,34 @@ class ModelViewerView : public AppView {
   std::array<wgpu::Texture, kLeafSilhouetteCount> leaf_textures_;
   std::array<wgpu::TextureView, kLeafSilhouetteCount> leaf_views_;
   wgpu::Sampler leaf_sampler_;
+
+  // Deferred alpha-cutout material for the "Original" leaf cards. Game-side
+  // (shaders/game/foliage_cutout.wesl) rather than a MaterialLibrary entry: it
+  // shares voxel_foliage's shading model and per-object UBO so the finest level
+  // of the chain is lit identically to every coarser one, which is the whole
+  // point of moving it off the forward path.
+  std::unique_ptr<MaterialInstanceFactory> leaf_cutout_factory_;
+
+  // The impostor preview, which now occupies the slot the retired voxel L3 used
+  // to hold. Baked lazily per generator (the atlas is per MODEL, and the viewer
+  // shows one at a time) and kept alive because the material only references
+  // its views.
+  std::unique_ptr<MaterialInstanceFactory> impostor_preview_factory_;
+  ImpostorBakeResult impostor_preview_;
+  int impostor_preview_generator_ = -1;
+
+  // Bakes `models` into impostor_preview_ unless the current generator's atlas
+  // is already there. Shared by BOTH impostor consumers -- the single-tree
+  // "Impostor" level and Multi's LOD4 -- because they bake the same model at
+  // the same preview height, so a second bake would be pure duplicate work.
+  // Returns false if the bake failed; the caller then falls back to the
+  // voxel-only chain.
+  bool EnsureImpostorPreview(std::span<const TreeFieldModel> models);
+
+  // Whether impostor_preview_ already holds the current generator's atlas.
+  // Exposed so a caller can skip building the TreeFieldModel that
+  // EnsureImpostorPreview would otherwise be handed and discard.
+  bool ImpostorPreviewIsCurrent() const;
 
   // GPU pipeline generator, stashed from Initialize()'s RenderContext --
   // BuildTreeField (called from RebuildScene, not Initialize, since it needs

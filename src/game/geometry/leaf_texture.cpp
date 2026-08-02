@@ -1,5 +1,7 @@
 // leaf_texture.cpp
 #include "game/geometry/leaf_texture.hpp"
+
+#include "game/visual/alpha_coverage.hpp"
 #include <algorithm>
 #include <cmath>
 #include <glm/gtc/constants.hpp>  // glm::pi
@@ -439,18 +441,11 @@ std::vector<std::vector<uint8_t>> BuildLeafMipChainRgba8(int size, glm::vec3 lea
   const uint8_t cutoff_byte =
       static_cast<uint8_t>(std::lround(std::clamp(alpha_cutoff, 0.0f, 1.0f) * 255.0f));
 
-  auto coverage = [&](const std::vector<uint8_t>& px, size_t texel_count) {
-    if (texel_count == 0) return 0.0f;
-    size_t count = 0;
-    for (size_t i = 0; i < texel_count; ++i) {
-      if (px[i * 4 + 3] >= cutoff_byte) ++count;
-    }
-    return static_cast<float>(count) / static_cast<float>(texel_count);
-  };
-
   std::vector<std::vector<uint8_t>> mips;
   mips.push_back(BuildLeafRgba8(size, leaf_color, shape));
-  const float level0_coverage = coverage(mips[0], static_cast<size_t>(size) * static_cast<size_t>(size));
+  const float level0_coverage =
+      AlphaCoverage(mips[0], static_cast<size_t>(size) * static_cast<size_t>(size),
+                    cutoff_byte);
 
   int w = size, h = size;
   while (w > 1 || h > 1) {
@@ -484,37 +479,16 @@ std::vector<std::vector<uint8_t>> BuildLeafMipChainRgba8(int size, glm::vec3 lea
       }
     }
 
-    // Coverage preservation (Castano): rescale this level's alpha by s so its
+    // Coverage preservation (Castano): rescale this level's alpha so its
     // coverage at alpha_cutoff matches level 0's. Skip trivially-small levels.
+    // The kernel lives in game/visual/alpha_coverage.hpp -- shared with the
+    // impostor atlas, which needs the identical treatment for the identical
+    // reason.
     const size_t texel_count = static_cast<size_t>(nw) * static_cast<size_t>(nh);
     if (texel_count > 4) {
-      auto coverage_at_scale = [&](float s) {
-        size_t count = 0;
-        for (size_t i = 0; i < texel_count; ++i) {
-          const float scaled = std::min(255.0f, std::round(static_cast<float>(next[i * 4 + 3]) * s));
-          if (scaled >= static_cast<float>(cutoff_byte)) ++count;
-        }
-        return static_cast<float>(count) / static_cast<float>(texel_count);
-      };
-      // Coverage is monotonic non-decreasing in s, so bisect for the scale
-      // whose coverage best matches level 0's. Box-downsampling can also
-      // INFLATE coverage at coarse mips (thin sprig/needle content averages
-      // toward higher alpha as more partially-covered texels blend together),
-      // which a scale floor of 1.0 could never correct -- [0.25, 4.0] covers
-      // both directions.
-      float lo = 0.25f, hi = 4.0f, best_s = 1.0f;
-      float best_diff = std::fabs(coverage_at_scale(1.0f) - level0_coverage);
-      for (int i = 0; i < 10; ++i) {
-        const float mid = 0.5f * (lo + hi);
-        const float cov = coverage_at_scale(mid);
-        const float diff = std::fabs(cov - level0_coverage);
-        if (diff < best_diff) { best_diff = diff; best_s = mid; }
-        if (cov < level0_coverage) lo = mid; else hi = mid;
-      }
-      for (size_t i = 0; i < texel_count; ++i) {
-        const float scaled = std::min(255.0f, std::round(static_cast<float>(next[i * 4 + 3]) * best_s));
-        next[i * 4 + 3] = static_cast<uint8_t>(scaled);
-      }
+      const float best_s =
+          FitAlphaCoverageScale(next, texel_count, cutoff_byte, level0_coverage);
+      ApplyAlphaScale(next, texel_count, best_s);
     }
 
     mips.push_back(std::move(next));

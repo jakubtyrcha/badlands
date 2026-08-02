@@ -17,10 +17,13 @@ namespace {
 constexpr float kTwoPi = 6.28318530718f;
 
 // Already-placed instances, filed into a uniform grid so a spacing test touches
-// a 3x3 neighbourhood instead of every instance placed so far. The grid's cell
-// size is the LARGEST model radius in the forest, which is what makes 3x3
-// sufficient: the pairwise rule is max(r_i, r_j), and that can never exceed the
-// largest radius, so no conflicting instance can sit more than one cell away.
+// a 3x3 neighbourhood instead of every instance placed so far.
+//
+// `cell_m` must be at least TWICE the largest radius any instance can take.
+// The pairwise rule is r_p + r_q, so a conflicting neighbour can sit up to
+// 2 * R_max away; only a cell that wide guarantees it is at most one cell out
+// and therefore inside the 3x3 sweep. (It used to be R_max, which was correct
+// for the old max(r_p, r_q) rule and silently wrong for this one.)
 class SpacingGrid {
  public:
   SpacingGrid(glm::vec2 origin_m, glm::vec2 size_m, float cell_m)
@@ -35,8 +38,9 @@ class SpacingGrid {
     buckets_[static_cast<size_t>(c.y) * nx_ + c.x].push_back({p, radius});
   }
 
-  // True when `p` is too close to something already placed, under the
-  // multi-class rule max(r_p, r_other).
+  // True when `p`'s crown circle would overlap one already placed -- the
+  // multi-class rule r_p + r_other. Both radii are the instances' own, already
+  // multiplied by their instance scale.
   bool Conflicts(glm::vec2 p, float radius) const {
     const glm::ivec2 c = Coord(p);
     for (int dz = -1; dz <= 1; ++dz) {
@@ -44,7 +48,7 @@ class SpacingGrid {
         const int x = c.x + dx, z = c.y + dz;
         if (x < 0 || z < 0 || x >= nx_ || z >= nz_) continue;
         for (const Placed& q : buckets_[static_cast<size_t>(z) * nx_ + x]) {
-          const float r = std::max(radius, q.radius);
+          const float r = radius + q.radius;
           const glm::vec2 d = p - q.pos;
           if (glm::dot(d, d) < r * r) return true;
         }
@@ -73,6 +77,28 @@ class SpacingGrid {
 };
 
 }  // namespace
+
+bool AnyCoverage(const TerrainQuery& query, const FoliageGenParams& params) {
+  if (params.size_m.x <= 0.0f || params.size_m.y <= 0.0f ||
+      params.mask_texel_m <= 0.0f) {
+    return false;
+  }
+  const int nx =
+      std::max(1, static_cast<int>(std::ceil(params.size_m.x / params.mask_texel_m)));
+  const int nz =
+      std::max(1, static_cast<int>(std::ceil(params.size_m.y / params.mask_texel_m)));
+
+  for (int j = 0; j <= nz; ++j) {
+    const float z = params.origin_m.y +
+                    static_cast<float>(j) * params.mask_texel_m;
+    for (int i = 0; i <= nx; ++i) {
+      const float x = params.origin_m.x +
+                      static_cast<float>(i) * params.mask_texel_m;
+      if (query.CoverageAt(x, z) > 0.0f) return true;
+    }
+  }
+  return false;
+}
 
 float SlopeDegreesAt(const TerrainQuery& query, float x, float z) {
   const float s = kSlopeProbeM;
@@ -107,10 +133,15 @@ FoliageField GenerateFoliage(const ForestType& forest,
     return {};
   }
 
-  float max_radius = 0.0f;
+  // The largest crown circle any single instance can present: a model's radius
+  // at the top of its scale range (the edge ramp only ever shrinks it).
+  float max_scaled_radius = 0.0f;
   for (const FoliageModel& m : forest.models)
-    max_radius = std::max(max_radius, m.radius_m);
-  if (max_radius <= 0.0f) {
+    max_scaled_radius = std::max(max_scaled_radius, m.radius_m * m.scale_range.y);
+  if (max_scaled_radius <= 0.0f) {
+    // Also the guard against a consumer that forgot to measure: radii are
+    // filled in from the models' real bounds, and a table of zeroes would
+    // otherwise place a forest with no spacing at all.
     spdlog::error("GenerateFoliage: every model has radius <= 0; placing nothing");
     return {};
   }
@@ -136,7 +167,7 @@ FoliageField GenerateFoliage(const ForestType& forest,
   field.cell_y.assign(static_cast<size_t>(field.cells_x) * field.cells_z,
                       CellYBounds::Empty());
 
-  SpacingGrid spacing(params.origin_m, params.size_m, max_radius);
+  SpacingGrid spacing(params.origin_m, params.size_m, 2.0f * max_scaled_radius);
 
   const glm::vec2 lo = params.origin_m;
   const glm::vec2 hi = params.origin_m + params.size_m;
@@ -201,22 +232,34 @@ FoliageField GenerateFoliage(const ForestType& forest,
         }
         const FoliageModel& model = forest.models[model_index];
 
-        // 4. Terrain.
-        const float ground = query.HeightAt(px, pz);
-        if (ground <= water_floor) continue;
-        if (SlopeDegreesAt(query, px, pz) > layer.max_slope_deg) continue;
-
-        // 5. Spacing, against every layer placed so far as well as this one.
-        const glm::vec2 p(px, pz);
-        if (spacing.Conflicts(p, model.radius_m)) continue;
-
-        // Accepted. The edge ramp is what makes trees near the boundary read as
-        // younger rather than merely sparser.
+        // 4. Scale, rolled BEFORE the spacing test because the exclusion circle
+        //    is this instance's own, not its model's: a 0.85-scaled oak really
+        //    does take less room than a 1.15-scaled one, and spacing every oak
+        //    by the largest it could have been thins the stand for nothing. The
+        //    edge ramp is what makes trees near the boundary read as younger
+        //    rather than merely sparser -- and, now that it feeds the radius, a
+        //    young edge tree correctly lets its neighbours stand closer.
         float scale = rng.NextRange(model.scale_range.x, model.scale_range.y);
         if (layer.edge_scale < 1.0f && layer.edge_scale_depth_m > 0.0f) {
           const float t = std::clamp(depth / layer.edge_scale_depth_m, 0.0f, 1.0f);
           scale *= layer.edge_scale + (1.0f - layer.edge_scale) * t;
         }
+
+        // 5. Terrain.
+        const float ground = query.HeightAt(px, pz);
+        if (ground <= water_floor) continue;
+        if (SlopeDegreesAt(query, px, pz) > layer.max_slope_deg) continue;
+
+        // 6. Spacing, against every layer placed so far as well as this one:
+        //    this instance's crown circle may not overlap any already placed.
+        //    The SUM of the two radii, not the max -- max only kept the trunks
+        //    apart, so a bush cleared a 3 m radius from an oak whose crown
+        //    reached 7 m and ended up standing under it. Because the canopy
+        //    layer is declared first it claims its circles before anything
+        //    else, which is what keeps the undergrowth out of the shade.
+        const glm::vec2 p(px, pz);
+        const float radius = model.radius_m * scale;
+        if (spacing.Conflicts(p, radius)) continue;
 
         FoliageInstance inst;
         inst.position = glm::vec3(px, ground - kGroundSinkM, pz);
@@ -225,7 +268,7 @@ FoliageField GenerateFoliage(const ForestType& forest,
         inst.model = model_index;
         inst.layer = static_cast<uint16_t>(li);
 
-        spacing.Insert(p, model.radius_m);
+        spacing.Insert(p, radius);
 
         const int ci = field.CellIndexAt(px, pz);
         field.cells[static_cast<size_t>(ci)].push_back(inst);

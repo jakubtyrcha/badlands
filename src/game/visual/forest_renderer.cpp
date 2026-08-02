@@ -11,6 +11,7 @@
 
 #include "engine/rendering/frustum.hpp"
 #include "engine/rendering/geometry/aabb.hpp"
+#include "game/visual/crown_bounds.hpp"
 #include "game/visual/foliage_cell_cull.hpp"
 
 namespace badlands {
@@ -45,7 +46,71 @@ void ParallelFor(size_t n, F&& body) {
   for (std::thread& t : pool) t.join();
 }
 
+// What the model looks like CLOSE UP: its bark, unioned with its LOD0 crown
+// only.
+//
+// Deliberately not TreeModelBounds::Combined(), which unions every crown LOD.
+// That union is the right answer for the GPU bounds sphere -- a coarse LOD's
+// voxels overscale past the cards they came from, and an instance's sphere has
+// to cover whichever LOD is actually drawn. It is the wrong answer for spacing,
+// where it silently pads every tree with voxel quantization it does not appear
+// to have: measured on the shipped forest, the union runs 25-40% wider than
+// LOD0 (Oak (large) v0: 13.9 m against 10.1 m), and spacing by it opens the
+// stand to 1.8x the ground area per tree for geometry no one can see.
+// A crown LOD may legitimately voxelize to nothing (see leaf_voxelizer.hpp),
+// so take the FINEST level that actually produced geometry rather than index 0
+// blindly. Falling through to bark-only would report a radius of roughly the
+// trunk's half-width, and that species would then pack at trunk distance with
+// crowns straight through each other -- with nothing in the log but a small,
+// entirely plausible-looking number.
+Aabb SilhouetteBounds(const TreeFieldModel& model) {
+  Aabb bounds = model.bark_lod0.local_bounds;
+  for (const TexturedMeshResult& crown : model.leaf_lod_meshes) {
+    if (crown.mesh.vertex_count == 0) continue;
+    bounds = bounds.Union(crown.local_bounds);
+    break;
+  }
+  return bounds;
+}
+
 }  // namespace
+
+std::vector<TreeFieldModel> BuildForestModels(ForestCatalog& catalog) {
+  std::vector<TreeFieldModel> models(catalog.models.size());
+  ParallelFor(catalog.models.size(), [&](size_t i) {
+    models[i] = BuildTreeFieldModel(catalog.models[i].options,
+                                    catalog.models[i].target_height_m);
+  });
+
+  for (size_t i = 0; i < models.size(); ++i) {
+    catalog.type.models[i].radius_m =
+        CrownRadiusM(SilhouetteBounds(models[i]), models[i].native_to_world_scale);
+  }
+
+  // Per-layer crown radius range, named. This is the number a person editing
+  // the forest file cannot otherwise see, and it sets that layer's density
+  // ceiling outright: under a sum-of-radii rule two neighbours of radius r
+  // stand 2r apart, so a layer's spacing is legible from this line alone and a
+  // grid_m below it is simply wasted candidates.
+  for (size_t li = 0; li < catalog.type.layers.size(); ++li) {
+    const foliage::FoliageLayer& layer = catalog.type.layers[li];
+    if (layer.model_count == 0) continue;
+
+    float lo = std::numeric_limits<float>::max(), hi = 0.0f;
+    size_t widest = layer.first_model;
+    for (uint16_t k = 0; k < layer.model_count; ++k) {
+      const size_t mi = static_cast<size_t>(layer.first_model) + k;
+      const float r = catalog.type.models[mi].radius_m;
+      lo = std::min(lo, r);
+      if (r > hi) { hi = r; widest = mi; }
+    }
+    spdlog::info(
+        "forest models: layer {} crown radius {:.1f}-{:.1f} m (widest: {}), "
+        "so neighbours stand {:.1f}-{:.1f} m apart",
+        li, lo, hi, catalog.models[widest].debug_name, 2.0f * lo, 2.0f * hi);
+  }
+  return models;
+}
 
 glm::mat4 ForestRenderer::InstanceTransform(
     const foliage::FoliageInstance& inst) const {
@@ -63,6 +128,7 @@ glm::mat4 ForestRenderer::InstanceTransform(
 bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
                            GpuPipelineGenerator& pipeline_gen,
                            ForestCatalog catalog,
+                           std::vector<TreeFieldModel> models,
                            foliage::FoliageField field) {
   catalog_ = std::move(catalog);
   field_ = std::move(field);
@@ -79,15 +145,49 @@ bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
     return true;
   }
 
-  std::vector<TreeFieldModel> models(catalog_.models.size());
-  ParallelFor(catalog_.models.size(), [&](size_t i) {
-    models[i] = BuildTreeFieldModel(catalog_.models[i].options,
-                                    catalog_.models[i].target_height_m);
-  });
+  // The mesh build and the upload are two calls now, and a caller has to pair
+  // them. An unpaired one is not a crash here but a silent out-of-bounds read
+  // every frame: instances carry model indices into the CATALOG, while
+  // native_to_world_scale and model_bounds are sized by `models`.
+  if (models.size() != catalog_.models.size()) {
+    spdlog::error(
+        "ForestRenderer: {} prepared models against a {}-model catalog -- pass "
+        "the vector BuildForestModels returned for THIS catalog",
+        models.size(), catalog_.models.size());
+    return false;
+  }
+  // And a catalog whose radii were never measured would have been placed with
+  // no spacing at all. GenerateFoliage refuses that outright, so reaching here
+  // with an all-zero table means the field came from somewhere else entirely.
+  const bool any_radius =
+      std::any_of(catalog_.type.models.begin(), catalog_.type.models.end(),
+                  [](const foliage::FoliageModel& m) { return m.radius_m > 0.0f; });
+  if (!any_radius) {
+    spdlog::error(
+        "ForestRenderer: every model has radius 0 -- this catalog never went "
+        "through BuildForestModels, so nothing was spaced");
+    return false;
+  }
+
+  // Bake the LOD4 impostor atlas from the same models the voxel chain uses.
+  // A failed bake is NOT fatal: the forest simply keeps the voxel-only chain,
+  // which is the behaviour that existed before LOD4 and is far better than
+  // refusing to render a forest at all.
+  impostor_ = BakeImpostorAtlas(device, queue, pipeline_gen, models);
+  TreeFieldImpostor impostor_slot;
+  if (impostor_.ok) {
+    impostor_slot.atlas = &impostor_.atlas;
+    impostor_slot.placement = impostor_.placement;
+  } else {
+    spdlog::warn(
+        "ForestRenderer: impostor bake failed -- falling back to the "
+        "voxel-only LOD chain");
+  }
 
   tree_field_ =
       BuildTreeField(device, queue, pipeline_gen, models,
-                     static_cast<uint32_t>(stats_.total_instances));
+                     static_cast<uint32_t>(stats_.total_instances),
+                     impostor_slot);
   if (!tree_field_) {
     spdlog::error("ForestRenderer: BuildTreeField failed for {} models",
                   models.size());
@@ -103,6 +203,15 @@ bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
   // rather than a per-cell figure: it is a single float, it is conservative,
   // and over-including a cell only costs a GPU per-instance cull that runs
   // anyway.
+  //
+  // NOT the sampler's radius, and the difference is load-bearing. Spacing asks
+  // "how wide does this tree LOOK", so it measures LOD0 (see SilhouetteBounds).
+  // This asks "how far can anything DRAWN reach out of the cell", and at
+  // distance what is drawn is a coarse voxel crown that overscales past its
+  // source cards -- 25-40% wider on the shipped forest. Padding by the LOD0
+  // figure culls cells whose coarse crowns are still on screen, which is the
+  // frame-edge pop-in the padding exists to prevent, and it only ever shows up
+  // at LOD range. So this reads the union over every LOD.
   max_crown_radius_m_ = 0.0f;
   for (size_t m = 0; m < tree_field_->model_count(); ++m) {
     const Aabb local = tree_field_->model_bounds[m].Combined();
