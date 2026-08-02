@@ -90,8 +90,13 @@ struct TreeOptions {
 
   glm::vec3 force_dir{0.0f, 1.0f, 0.0f};
   float force_strength = 0.0f;
-  float bark_uv_scale_x = 1.0f;                // wraps = round(base_radius * this)
-  float bark_uv_scale_y = 1.0f;                // V = cumulative_length / this
+  // The bark texture's world size, in native tree units, on BOTH axes:
+  // V = arc_length_from_root / this, and wraps = round(circumference / this).
+  // One knob, so U and V stay isotropic and texel density is the same on a
+  // trunk and a twig. (There was a separate bark_uv_scale_x; it multiplied the
+  // raw radius, which made density jump at every joint, and it is gone rather
+  // than left as a number the generator quietly ignores.)
+  float bark_uv_scale_y = 1.0f;
 
   LeafOptions leaves;
 };
@@ -111,7 +116,7 @@ inline TreeOptions OakPreset() {
   o.taper      = {0.73f, 0.42f, 0.69f, 0.75f};
   o.twist      = {-0.23f, 0.42f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = 0.02f;
-  o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 10.0f;
+  o.bark_uv_scale_y = 10.0f;
   o.leaves = {.arrangement=LeafArrangement::FanFromStem, .blade_count=2, .card_aspect=0.95f,
               .count=30, .start=0.16f, .size=2.32f, .size_variance=0.7f, .angle=42.0f,
               .tint={0.32f,0.52f,0.18f}, .transmission_tint={0.55f,0.62f,0.10f},
@@ -134,7 +139,7 @@ inline TreeOptions PinePreset() {
   o.taper      = {0.7f, 0.7f, 0.7f, 0.7f};
   o.twist      = {0.0f, 0.0f, 0.0f, 0.0f};
   o.force_dir = {0.0f, 1.0f, 0.0f}; o.force_strength = -0.003f;
-  o.bark_uv_scale_x = 1.0f; o.bark_uv_scale_y = 1.0f;
+  o.bark_uv_scale_y = 1.0f;
   o.leaves = {.arrangement=LeafArrangement::AxialFins, .blade_count=3, .card_aspect=0.45f,
               .count=280, .start=0.09f, .size=2.043f, .size_variance=0.201f, .angle=39.0f,
               .alpha_cutoff=0.35f, .tint={0.16f,0.40f,0.24f}, .transmission_tint={0.32f,0.46f,0.12f},

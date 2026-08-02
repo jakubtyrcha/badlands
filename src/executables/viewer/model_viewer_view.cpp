@@ -428,7 +428,14 @@ void ModelViewerView::RebuildScene() {
     //     VoxelFoliage tet crown (volumetric-foliage Phase 3) in place of the
     //     leaf cards.
     const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(*gen.tree);
-    TexturedMeshResult bark = GenerateTreeMesh(*gen.tree, skeleton);
+    BarkMeshStats bark_stats;
+    TexturedMeshResult bark = GenerateTreeMesh(*gen.tree, skeleton, &bark_stats);
+    // How much of this tree's bark merged into one mesh component. `fallback`
+    // counts branches still standing as independent buried tubes, which is the
+    // pre-graft behaviour and what limits how far the bark LODs can decimate.
+    spdlog::info("bark graft [{}]: {} junctions, {} stitched ({} shrunk), {} fell back",
+                 gen.name, bark_stats.junctions, bark_stats.stitched,
+                 bark_stats.shrunk, bark_stats.fallback);
     const float h = bark.local_bounds.max.y - bark.local_bounds.min.y;
     const float s = kTreePreviewHeight / std::max(h, 0.001f);
     const glm::mat4 xf =
