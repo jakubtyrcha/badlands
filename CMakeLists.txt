@@ -452,7 +452,6 @@ add_library(badlands_mapgen_lib STATIC
     src/mapgen/hydrology.cpp
     src/mapgen/river_clip.cpp
     src/mapgen/river_prune.cpp
-    src/mapgen/window_rivers.cpp
     src/mapgen/river_graph.cpp
     src/mapgen/river_arcs.cpp
     src/mapgen/river_carve.cpp
@@ -486,7 +485,8 @@ target_link_libraries(badlands_patch_lib PUBLIC badlands_mapgen_lib)
 add_library(badlands_patch_providers STATIC
     src/mapgen/patch_io.cpp
     src/mapgen/synthetic_patch_source.cpp
-    src/mapgen/file_patch_source.cpp)
+    src/mapgen/file_patch_source.cpp
+    src/mapgen/coarse_world_patch_source.cpp)
 target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
 
 # badlands_mapview_view: everything the map tool needs to fetch a patch and
@@ -1270,6 +1270,21 @@ target_include_directories(badlands_patch_io_tests PRIVATE
 )
 target_link_libraries(badlands_patch_io_tests PRIVATE badlands_patch_providers)
 add_test(NAME badlands_patch_io_tests COMMAND badlands_patch_io_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_patch_tests: CoarseWorldPatchSource -- resample (both directions),
+# water rebuild, biome classification from the manifest cutoffs, and river
+# clip/rebase/prune, plus the cross-provider structural invariants shared with
+# SyntheticPatchSource. HARD RULE: no test here may run the coarse sim; every
+# fixture is a synthetic coarse artifact the test writes itself.
+add_executable(badlands_patch_tests
+    src/mapgen/coarse_world_patch_source_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_patch_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_patch_tests PRIVATE badlands_patch_providers)
+add_test(NAME badlands_patch_tests COMMAND badlands_patch_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
 # its buried skirt -- the overlap that keeps a later wave displacement from

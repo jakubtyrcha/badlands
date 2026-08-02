@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/river_io.hpp"
 
 namespace badlands::mapgen {
 
@@ -218,7 +219,16 @@ std::optional<PatchData> load_patch(const std::string& dir, std::string* error) 
 
   derive_water(p.height, p.level, p.texel_m, p.water_depth, p.lake_id, p.lakes);
   p.elevation_range = compute_elevation_range(p.height);
-  // `rivers` stays empty: the graph is not in this on-disk form yet.
+
+  // Rivers are optional on disk, the same way soil is: absence means a patch
+  // written before rivers.bin existed, not an error. A present-but-malformed
+  // file IS an error.
+  const std::string rivers_path = dir + "/rivers.bin";
+  if (std::filesystem::exists(rivers_path)) {
+    std::optional<RiverGraph> rivers = read_river_graph(rivers_path, error);
+    if (!rivers) return std::nullopt;
+    p.rivers = std::move(*rivers);
+  }
   return p;
 }
 
@@ -262,7 +272,8 @@ bool write_patch(const std::string& dir, const PatchData& patch,
   return write_raster(dir + "/height.f32", patch.height.data, error) &&
          write_raster(dir + "/level.f32", patch.level.data, error) &&
          write_raster(dir + "/biome.u8", patch.biome.data, error) &&
-         write_raster(dir + "/soil.f32", patch.soil.data, error);
+         write_raster(dir + "/soil.f32", patch.soil.data, error) &&
+         write_river_graph(dir + "/rivers.bin", patch.rivers, error);
 }
 
 }  // namespace badlands::mapgen

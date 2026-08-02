@@ -13,6 +13,7 @@
 //     level.f32      float32 metres, LAKE SURFACE elevation
 //     biome.u8       uint8, Biome values
 //     soil.f32       float32 metres of erodible cover (see below)
+//     rivers.bin     binary RiverGraph dump, mapgen/river_io.hpp (see below)
 //
 // THE LEVEL RASTER CARRIES THE WATER, not a depth field:
 //
@@ -30,10 +31,11 @@
 // error -- only absence is tolerated, which is the same forward-compatibility
 // rule the manifest applies to unknown keys.
 //
-// RIVERS ARE NOT IN THIS FORM YET. load_patch leaves PatchData::rivers empty and
-// write_patch does not emit it; the graph gets its own serialization alongside
-// the coarse artifact. A provider that needs rivers from a directory derives
-// them (see file_patch_source.hpp) until then.
+// RIVERS ARE OPTIONAL ON DISK, THE SAME WAY SOIL IS. write_patch always emits
+// rivers.bin (mapgen/river_io.hpp's write_river_graph); load_patch reads it if
+// present and fills PatchData::rivers, or leaves it empty if the file is
+// absent -- a patch directory written before this existed is still loadable. A
+// present-but-malformed rivers.bin is still an error, same rule as soil.f32.
 
 #include <optional>
 #include <string>
@@ -58,16 +60,18 @@ std::optional<PatchManifest> load_patch_manifest(const std::string& dir,
                                                  std::string* error = nullptr);
 
 // Reads the manifest and the rasters into a PatchData. `water_depth`, `lake_id`
-// and `lakes` are DERIVED here from height + level; `rivers` is left empty.
+// and `lakes` are DERIVED here from height + level; `rivers` is read from
+// rivers.bin if present, or left empty if the file is absent.
 //
 // Returns nullopt with a reason in `error` on a missing file, a size that
-// contradicts the manifest, or a non-finite sample.
+// contradicts the manifest, a non-finite sample, or a malformed rivers.bin.
 std::optional<PatchData> load_patch(const std::string& dir,
                                     std::string* error = nullptr);
 
-// Writes the manifest and the four rasters. `source` is recorded verbatim as
-// provenance. The derived water block is NOT written -- it is reproduced exactly
-// by load_patch, and storing it would create a second truth that can drift.
+// Writes the manifest, the four rasters, and rivers.bin. `source` is recorded
+// verbatim as provenance. The derived water block is NOT written -- it is
+// reproduced exactly by load_patch, and storing it would create a second
+// truth that can drift.
 bool write_patch(const std::string& dir, const PatchData& patch,
                  const std::string& source, std::string* error = nullptr);
 

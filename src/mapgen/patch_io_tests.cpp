@@ -14,6 +14,7 @@
 #include "mapgen/biomes.hpp"
 #include "mapgen/patch_io.hpp"
 #include "mapgen/river_clip.hpp"
+#include "mapgen/river_io.hpp"
 #include "mapgen/river_prune.hpp"
 
 using namespace badlands::mapgen;
@@ -285,7 +286,10 @@ TEST_CASE("write_patch + load_patch round-trips a PatchData bit-identically",
     CHECK(loaded->lakes[i].level_m == p.lakes[i].level_m);
     CHECK(loaded->lakes[i].max_depth_m == p.lakes[i].max_depth_m);
   }
-  // `rivers` is not serialized yet -- deliberately not asserted on here.
+  // `rivers` stays default-empty on both sides here; the dedicated rivers
+  // round-trip test below exercises a non-empty graph through this same path.
+  CHECK(loaded->rivers.nodes.empty());
+  CHECK(loaded->rivers.edges.empty());
 }
 
 TEST_CASE("soil absent on disk loads as zeros, correctly sized",
@@ -307,6 +311,97 @@ TEST_CASE("soil absent on disk loads as zeros, correctly sized",
   CHECK(p->soil.width == n);
   CHECK(p->soil.height == n);
   for (float s : p->soil.data) CHECK(s == 0.0f);
+}
+
+TEST_CASE("write_patch + load_patch round-trips rivers exactly", "[map_io]") {
+  // Unlike river_io_tests.cpp's direct write_river_graph/read_river_graph
+  // round trip, this goes through the PATCH form -- rivers.bin sitting
+  // alongside the other rasters in the same directory write_patch produces.
+  TempDir dir("rivers_roundtrip");
+  const int n = 6;
+  const float size_m = 48.0f;
+
+  PatchData p;
+  p.texel_m = size_m / static_cast<float>(n);
+  p.height = Field2D<float>(n, n, 100.0f);
+  p.level = Field2D<float>(n, n, 100.0f);
+  p.biome = Field2D<uint8_t>(n, n, uint8_t(Biome::Plains));
+  p.soil = Field2D<float>(n, n, 1.0f);
+  derive_water(p.height, p.level, p.texel_m, p.water_depth, p.lake_id, p.lakes);
+
+  // A small graph with a Source and a FrameEntry -- the node kind most likely
+  // to be dropped by a lossy path, since it was appended last to the enum.
+  p.rivers.nodes.resize(3);
+  p.rivers.nodes[0].kind = RiverNodeKind::FrameEntry;
+  p.rivers.nodes[0].pos_m = glm::vec2(-2.0f, 20.0f);
+  p.rivers.nodes[1].kind = RiverNodeKind::Confluence;
+  p.rivers.nodes[1].pos_m = glm::vec2(10.0f, 20.0f);
+  p.rivers.nodes[1].ground_m = 95.0f;
+  p.rivers.nodes[2].kind = RiverNodeKind::Mouth;
+  p.rivers.nodes[2].pos_m = glm::vec2(40.0f, 20.0f);
+
+  RiverEdge e0;
+  e0.from = 0;
+  e0.to = 1;
+  e0.points_m = {{-2.0f, 20.0f}, {10.0f, 20.0f}};
+  e0.discharge_m3_s = {0.05f, 0.08f};
+  e0.width_m = {1.0f, 1.3f};
+  e0.depth_m = {0.2f, 0.25f};
+  e0.speed_m_s = {0.6f, 0.65f};
+  e0.strahler_order = 1;
+  e0.shreve_magnitude = 1;
+
+  RiverEdge e1;
+  e1.from = 1;
+  e1.to = 2;
+  e1.points_m = {{10.0f, 20.0f}, {40.0f, 20.0f}};
+  e1.discharge_m3_s = {0.08f, 0.10f};
+  e1.width_m = {1.3f, 1.5f};
+  e1.depth_m = {0.25f, 0.3f};
+  e1.speed_m_s = {0.65f, 0.7f};
+  e1.strahler_order = 1;
+  e1.shreve_magnitude = 1;
+  p.rivers.edges = {e0, e1};
+
+  std::string err;
+  REQUIRE(write_patch(dir.str(), p, "unit-test", &err));
+  CHECK(err.empty());
+  CHECK(std::filesystem::exists(dir.str() + "/rivers.bin"));
+
+  const auto loaded = load_patch(dir.str(), &err);
+  REQUIRE(loaded.has_value());
+  CHECK(err.empty());
+
+  REQUIRE(loaded->rivers.nodes.size() == p.rivers.nodes.size());
+  REQUIRE(loaded->rivers.edges.size() == p.rivers.edges.size());
+  for (size_t i = 0; i < p.rivers.nodes.size(); ++i) {
+    CHECK(loaded->rivers.nodes[i].kind == p.rivers.nodes[i].kind);
+    CHECK(loaded->rivers.nodes[i].pos_m == p.rivers.nodes[i].pos_m);
+  }
+  for (size_t i = 0; i < p.rivers.edges.size(); ++i) {
+    CHECK(loaded->rivers.edges[i].from == p.rivers.edges[i].from);
+    CHECK(loaded->rivers.edges[i].to == p.rivers.edges[i].to);
+    CHECK(loaded->rivers.edges[i].points_m == p.rivers.edges[i].points_m);
+  }
+}
+
+TEST_CASE("rivers.bin absent on disk loads as an empty graph", "[map_io]") {
+  // RIVERS ARE OPTIONAL ON DISK, THE SAME WAY SOIL IS (patch_io.hpp): a patch
+  // directory written before rivers.bin existed must still load, with
+  // PatchData::rivers empty rather than failing.
+  TempDir dir("norivers");
+  const int n = 5;
+  std::vector<float> height(n * n, 10.0f), level(n * n, 10.0f);
+  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
+  write_map(dir.str(), n, 40.0f, height, level, biome);  // no rivers.bin written
+  CHECK_FALSE(std::filesystem::exists(dir.str() + "/rivers.bin"));
+
+  std::string err;
+  const auto p = load_patch(dir.str(), &err);
+  REQUIRE(p.has_value());
+  CHECK(err.empty());
+  CHECK(p->rivers.nodes.empty());
+  CHECK(p->rivers.edges.empty());
 }
 
 // --- window_rivers graph surgery ------------------------------------------

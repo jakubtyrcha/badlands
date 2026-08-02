@@ -1,10 +1,20 @@
 // badlands_mapview: the map tool. Exactly one of three ways to get a map:
 //
-//   --load DIR     render a patch LOADED from rasters on disk (see
-//                  mapgen/patch_io.hpp for the on-disk form) -- a window
-//                  simulated by tools/protogen/. Geometry (resolution,
-//                  world_size_m, origin_m) comes from the manifest, not the
-//                  CLI.
+//   --load DIR     render a patch cut from a directory on disk -- which of
+//                  two kinds of directory it is gets DETECTED, not chosen:
+//                    - world.txt present -> a COARSE world (a whole
+//                      tools/protogen/ dump). Loaded as a
+//                      mapgen::CoarseWorldPatchSource, which can answer any
+//                      request inside the world's extent; geometry comes
+//                      from --patch-size / --patch-res / --patch-origin
+//                      (--tag picks which snapshot, default the latest).
+//                    - map.txt present -> a finished PATCH (mapgen/
+//                      patch_io.hpp's on-disk form). Loaded as a
+//                      mapgen::FilePatchSource; geometry (resolution,
+//                      world_size_m, origin_m) comes from the manifest, not
+//                      the CLI -- a directory is one patch, not a queryable
+//                      world.
+//                    - neither -> an error, not a guess.
 //   --synthetic    render a patch invented analytically
 //                  (mapgen/synthetic_patch_source.hpp) -- no files, no
 //                  upstream stage. Geometry comes from --patch-size /
@@ -18,14 +28,20 @@
 // Run from the repo root (shaders/ and assets/ resolve relative to cwd).
 //
 // Usage: badlands_mapview (--load DIR | --synthetic | --test-map)
+//                         [--tag NAME]
 //                         [--patch-size M] [--patch-res N]
 //                         [--patch-origin X,Y] [--seed N]
 //                         [--camera-height H] [--lod-tint N] [--serial-build]
 //                         [--screenshot out.png] [--record dir/]
 //
-//   --patch-size M     --synthetic patch extent in metres (default 128).
-//   --patch-res N      --synthetic patch resolution in texels (default 128).
-//   --patch-origin X,Y --synthetic patch origin in metres (default 0,0).
+//   --tag NAME         --load of a coarse world: which snapshot to read
+//                       (default: the latest step written).
+//   --patch-size M     patch extent in metres for --synthetic or a coarse
+//                       --load (default 128).
+//   --patch-res N      patch resolution in texels for --synthetic or a
+//                       coarse --load (default 128).
+//   --patch-origin X,Y patch origin in metres for --synthetic or a coarse
+//                       --load (default 0,0).
 //   --seed N          seeds foliage placement (and, with --test-map, the
 //                      synthetic forest layout) -- never terrain.
 //   --camera-height H starting camera height in metres (headless framing: a
@@ -39,6 +55,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -47,6 +64,7 @@
 
 #include "engine/app/sdl_viewer_app.hpp"
 #include "executables/mapview/map_view_view.hpp"
+#include "mapgen/coarse_world_patch_source.hpp"
 #include "mapgen/file_patch_source.hpp"
 #include "mapgen/synthetic_patch_source.hpp"
 
@@ -54,6 +72,7 @@ namespace {
 
 constexpr const char* kUsage =
     "usage: badlands_mapview (--load DIR | --synthetic | --test-map) "
+    "[--tag NAME] "
     "[--patch-size M] [--patch-res N] [--patch-origin X,Y] [--seed N] "
     "[--camera-height H] [--lod-tint N] [--serial-build] "
     "[--screenshot out.png] [--record dir/]\n";
@@ -69,32 +88,66 @@ bool is_app_flag_with_value(const std::string& a) {
 // --test-map) and one PatchRequest, decided here and nowhere else -- main()
 // hands the result straight to MapViewView without ever inspecting which flag
 // won. Returns false (having already printed the reason to stderr) if --load
-// named a directory that failed to load; true otherwise, including --test-map
-// (where `source` stays null and `request` stays default) and --synthetic.
+// named a directory that failed to load, or that named neither kind of
+// manifest; true otherwise, including --test-map (where `source` stays null
+// and `request` stays default) and --synthetic.
 bool SelectPatchSource(
-    bool load, const std::string& load_dir, bool synthetic, float patch_size_m,
-    int patch_res, glm::dvec2 patch_origin_m,
+    bool load, const std::string& load_dir, const std::string& tag,
+    bool synthetic, float patch_size_m, int patch_res,
+    glm::dvec2 patch_origin_m,
     std::shared_ptr<const badlands::mapgen::PatchSource>& source,
     badlands::mapgen::PatchRequest& request) {
   if (load) {
-    std::string err;
-    std::unique_ptr<badlands::mapgen::FilePatchSource> file_source =
-        badlands::mapgen::LoadFilePatchSource(load_dir, &err);
-    if (!file_source) {
-      std::fprintf(stderr, "mapview: %s\n", err.c_str());
+    // Which kind of directory this is gets DETECTED, not chosen: world.txt
+    // means a whole coarse world (any request inside its extent is
+    // answerable); map.txt means one finished patch (the manifest names its
+    // own geometry, full stop -- see mapgen/patch_io.hpp).
+    const bool has_world = std::filesystem::exists(load_dir + "/world.txt");
+    const bool has_patch = std::filesystem::exists(load_dir + "/map.txt");
+    if (has_world) {
+      std::string err;
+      std::unique_ptr<badlands::mapgen::CoarseWorldPatchSource> coarse_source =
+          badlands::mapgen::LoadCoarseWorldPatchSource(load_dir, tag, &err);
+      if (!coarse_source) {
+        std::fprintf(stderr, "mapview: %s\n", err.c_str());
+        return false;
+      }
+      const badlands::mapgen::CoarseManifest& man = coarse_source->manifest();
+      std::printf(
+          "mapview: loading coarse world %s (%dx%d texels, %.0f m, "
+          "%.2f m/texel)\n",
+          load_dir.c_str(), man.resolution, man.resolution, man.world_size_m,
+          man.texel_m);
+      request.world_size_m = patch_size_m;
+      request.resolution = patch_res;
+      request.origin_m = patch_origin_m;
+      source = std::move(coarse_source);
+    } else if (has_patch) {
+      std::string err;
+      std::unique_ptr<badlands::mapgen::FilePatchSource> file_source =
+          badlands::mapgen::LoadFilePatchSource(load_dir, &err);
+      if (!file_source) {
+        std::fprintf(stderr, "mapview: %s\n", err.c_str());
+        return false;
+      }
+      // A directory is a finished artifact, not a queryable world -- Fetch
+      // ignores the request and returns what the file holds, so the request
+      // we hand back out is the geometry the file actually has.
+      request = file_source->native_request();
+      std::printf("mapview: loading %s (%dx%d texels, %.0f m, %.2f m/texel)\n",
+                  load_dir.c_str(), request.resolution, request.resolution,
+                  request.world_size_m,
+                  badlands::mapgen::patch_texel_m(request));
+      if (!file_source->source().empty())
+        std::printf("mapview:   source: %s\n", file_source->source().c_str());
+      source = std::move(file_source);
+    } else {
+      std::fprintf(stderr,
+                   "mapview: %s has neither world.txt (a coarse world) nor "
+                   "map.txt (a patch)\n",
+                   load_dir.c_str());
       return false;
     }
-    // A directory is a finished artifact, not a queryable world -- Fetch
-    // ignores the request and returns what the file holds, so the request we
-    // hand back out is the geometry the file actually has.
-    request = file_source->native_request();
-    std::printf("mapview: loading %s (%dx%d texels, %.0f m, %.2f m/texel)\n",
-                load_dir.c_str(), request.resolution, request.resolution,
-                request.world_size_m,
-                badlands::mapgen::patch_texel_m(request));
-    if (!file_source->source().empty())
-      std::printf("mapview:   source: %s\n", file_source->source().c_str());
-    source = std::move(file_source);
   } else if (synthetic) {
     source = std::make_shared<badlands::mapgen::SyntheticPatchSource>();
     request.world_size_m = patch_size_m;
@@ -111,6 +164,7 @@ bool SelectPatchSource(
 int main(int argc, char** argv) {
   bool load = false, synthetic = false, test_map = false;
   std::string load_dir;
+  std::string tag;  // --load of a coarse world: which snapshot (default latest)
   float patch_size_m = 128.0f;
   int patch_res = 128;
   double patch_origin_x = 0.0, patch_origin_y = 0.0;
@@ -157,6 +211,12 @@ int main(int argc, char** argv) {
       if (auto v = next("--load")) {
         load = true;
         load_dir = *v;
+      } else {
+        return 2;
+      }
+    } else if (a == "--tag") {
+      if (auto v = next("--tag")) {
+        tag = *v;
       } else {
         return 2;
       }
@@ -219,7 +279,7 @@ int main(int argc, char** argv) {
 
   std::shared_ptr<const badlands::mapgen::PatchSource> source;
   badlands::mapgen::PatchRequest request;
-  if (!SelectPatchSource(load, load_dir, synthetic, patch_size_m, patch_res,
+  if (!SelectPatchSource(load, load_dir, tag, synthetic, patch_size_m, patch_res,
                          glm::dvec2(patch_origin_x, patch_origin_y), source,
                          request))
     return 1;

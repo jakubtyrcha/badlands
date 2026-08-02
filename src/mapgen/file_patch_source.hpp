@@ -10,13 +10,13 @@
 // rather than guess. The source that genuinely answers arbitrary requests is the
 // coarse-world one.
 //
-// RIVERS ARE DERIVED HERE, FOR NOW. The on-disk form does not carry the graph
-// yet, so this source routes the loaded bed, extracts the network and culls it,
-// exactly as the map view used to do inline at load time. When the coarse
-// artifact starts carrying a serialized graph, this changes to a read and
-// NOTHING ELSE MOVES -- the interface does not know the difference. That is the
-// property the whole split is for, so it is worth having a case that exercises
-// it.
+// RIVERS ARE READ, NOT DERIVED. This source used to route the loaded bed,
+// extract the network and cull it inline -- a temporary bridge for when the
+// on-disk form did not carry the graph. It now does (patch_io.hpp's
+// rivers.bin), so Fetch is nothing but a read: load_patch already fills
+// PatchData::rivers, and this source hands the result straight through.
+// NOTHING ELSE ABOUT THE INTERFACE MOVED when that changed -- exactly the
+// property the whole split is for.
 //
 // Construction is where failure is reported (a missing directory, a manifest
 // that contradicts its rasters). By the time a PatchSource exists, it works.

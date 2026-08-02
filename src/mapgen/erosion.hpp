@@ -2,7 +2,7 @@
 
 // Channel-hydraulics parameters: what is left of the erosion sim's parameter
 // block now that the sim itself is gone. Six fields, every one of them still
-// read by the surviving river code (river_graph.cpp, window_rivers.cpp).
+// read by the surviving river code (river_graph.cpp).
 //
 // The lake record moved to mapgen/lake.hpp. This header now includes NOTHING --
 // it previously pulled field2d.hpp, hydrology.hpp and glm without using any of
