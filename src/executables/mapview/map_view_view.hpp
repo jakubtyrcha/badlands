@@ -1,12 +1,14 @@
 #pragma once
 
-// badlands_mapview's AppView: generates a map in-process via
-// mapgen::generate_map, wraps it in the frozen MapData contract, and renders
-// it as Nanite-style cluster-LOD terrain (the shared ClusterTerrain module)
-// with the fixed-angle GameCameraController. Terrain is one entity holding the
-// shared cluster mesh; a MeshDrawRangesComponent carries the per-frame LOD
-// cut. Entities are created directly in the registry (no SceneGraph -- the
-// terrain is a raw indexed mesh, not a MeshAttachment).
+// badlands_mapview's AppView: fetches a patch (mapgen::PatchSource -- rasters
+// on disk, a synthetic source, or a coarse-world cut, all through the same
+// interface -- or the synthetic --test-map forest fixture), wraps it in the
+// frozen MapData contract, and renders it as Nanite-style cluster-LOD terrain
+// (the shared ClusterTerrain module) with the fixed-angle GameCameraController. Terrain is
+// one entity holding the shared cluster mesh; a MeshDrawRangesComponent
+// carries the per-frame LOD cut. Entities are created directly in the
+// registry (no SceneGraph -- the terrain is a raw indexed mesh, not a
+// MeshAttachment).
 //
 // Beyond the terrain the view carries a shared SimClock driving the sun and
 // cursor-anchored zoom. Hovering the mouse over the terrain shows its world
@@ -34,10 +36,9 @@
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
 #include "game/visual/forest_renderer.hpp"
-#include "mapgen/generator.hpp"
+#include "mapgen/patch_source.hpp"
 #include "mapgen/river_arcs.hpp"
 #include "mapgen/river_carve.hpp"
-#include "mapgen/window_rivers.hpp"
 
 namespace badlands {
 
@@ -45,8 +46,12 @@ class SceneRenderer;
 
 class MapViewView : public AppView {
  public:
-  // `params` is the generator params (seed/resolution/size), so everything the
-  // CLI exposes reaches the viewer. `camera_height` overrides the starting
+  // `request` + `source` are how the CLI's chosen map reaches the viewer:
+  // `source_->Fetch(request_)` in Initialize is the ONLY way a patch enters
+  // this class (see mapgen/patch_source.hpp -- stage 3's whole view of where a
+  // map comes from). `foliage_seed` seeds foliage placement (and, with
+  // `test_map`, the synthetic forest layout) -- it is NOT a terrain seed, since
+  // terrain now comes from the source. `camera_height` overrides the starting
   // camera height (0 = keep the default ground-level framing); `lod_tint`
   // seeds the cluster debug tint (0 shaded / 1 triangle hash / 2 LOD level).
   // `serial_build` forces the single-threaded DAG build (the perf A/B
@@ -54,22 +59,23 @@ class MapViewView : public AppView {
   // headless --screenshot runs can frame near/far and set the tint without
   // touching the interactive defaults.
   //
-  // THREE ways to get a map, and they are mutually exclusive:
-  //   - neither flag: mapgen::generate_map, the procedural generator.
-  //   - `load_dir` non-empty: rasters on disk (mapgen::load_map), so a world
-  //     simulated outside this process renders through the identical path.
-  //     main_mapview parses the manifest FIRST and writes
-  //     params.resolution/world_size_m from it, so every params_ use below stays
-  //     correct without a second source of truth.
-  //   - `test_map`: the synthetic forest map
-  //     (game/map/forest_test_map_generator.hpp). It exists because
-  //     mapgen::classify_biomes emits no Biome::Forest, so a generated map has
-  //     no forest for the plopper to plant into -- see Initialize.
-  explicit MapViewView(mapgen::MapGenParams params, float camera_height = 0.0f,
+  // TWO ways to get a map, and they are mutually exclusive (main_mapview
+  // requires exactly one):
+  //   - `test_map` false: `source` is fetched with `request`, so a map coming
+  //     from any PatchSource -- rasters on disk, a synthetic patch, a coarse
+  //     world -- renders through the identical path.
+  //   - `test_map` true: the synthetic forest map
+  //     (game/map/forest_test_map_generator.hpp), and `source`/`request` are
+  //     ignored. It exists to give the forest plopper something to plant into
+  //     -- see Initialize.
+  explicit MapViewView(mapgen::PatchRequest request,
+                       std::shared_ptr<const mapgen::PatchSource> source,
+                       uint32_t foliage_seed, float camera_height = 0.0f,
                        int lod_tint = 0, bool serial_build = false,
-                       std::string load_dir = {}, bool test_map = false)
-      : params_(params),
-        load_dir_(std::move(load_dir)),
+                       bool test_map = false)
+      : request_(request),
+        source_(std::move(source)),
+        foliage_seed_(foliage_seed),
         camera_height_override_(camera_height),
         initial_tint_(lod_tint),
         serial_build_(serial_build),
@@ -86,8 +92,9 @@ class MapViewView : public AppView {
   SceneContext& GetSceneContext() override { return scene_context_; }
 
  private:
-  mapgen::MapGenParams params_;
-  std::string load_dir_;  // non-empty => load rasters instead of generating
+  mapgen::PatchRequest request_;
+  std::shared_ptr<const mapgen::PatchSource> source_;  // null when test_map_
+  uint32_t foliage_seed_ = 1;
 
   wgpu::Device device_;
   wgpu::Queue queue_;
@@ -108,12 +115,12 @@ class MapViewView : public AppView {
   Camera camera_;
   GameCameraController gamecam_;
 
-  // The generated map. `heightmap` is kept for mouse picking, `bedrock` for
-  // previews/erosion later -- both outlive Initialize.
-  mapgen::MapArtifacts map_;
-  // The generator output wrapped in the frozen MapData contract (one-hot biome
-  // slices at the raster's own texel spacing) -- what the cluster terrain
-  // builder and mouse picking read.
+  // The fetched/synthetic patch. `height` is kept for mouse picking; outlives
+  // Initialize.
+  mapgen::PatchData patch_;
+  // The map wrapped in the frozen MapData contract (one-hot biome slices at
+  // the raster's own texel spacing) -- what the cluster terrain builder and
+  // mouse picking read.
   MapData terrain_map_;
 
   // Terrain materials: one PBR pack per biome (layer index == Biome enum),
@@ -156,17 +163,16 @@ class MapViewView : public AppView {
 
   float map_size_m_ = 0.0f;
 
-  // River network, built at load from the routed window (see window_rivers.hpp),
-  // then refitted reach by reach as a chain of CIRCULAR ARCS
-  // (mapgen/river_arcs.hpp), CARVED into the terrain, and floated as the
-  // channel water surface inside that carved cavity.
+  // River network, carried by the patch (PatchData::rivers -- see
+  // mapgen/patch_data.hpp), then refitted reach by reach as a chain of
+  // CIRCULAR ARCS (mapgen/river_arcs.hpp), CARVED into the terrain, and
+  // floated as the channel water surface inside that carved cavity.
   //
   // This replaced a debug-LINE layer, and the two cannot coexist: they share a
   // centreline, and a screen-space line 1-4 px wide covers the channel at every
   // camera height where you would look at the map. The line layer was the
   // placeholder; what it carried and this does not is Strahler order, traded
   // for true width.
-  mapgen::WindowRivers rivers_;
   std::vector<mapgen::RiverArcChain> river_arcs_;
   bool show_rivers_ = true;
   // One static forward-transparent entity (the lake water's material), created
@@ -201,7 +207,7 @@ class MapViewView : public AppView {
   // Force the single-threaded cluster DAG build (perf A/B baseline); seeded once
   // in Initialize, not runtime-toggleable (the DAG is built there).
   bool serial_build_ = false;
-  // --test-map: use the synthetic forest map instead of running the generator.
+  // --test-map: use the synthetic forest map instead of fetching from `source_`.
   bool test_map_ = false;
   // Viewport height in pixels, tracked by OnResize -- the LOD screen-space-error
   // metric's numerator. Seeded so the first Update (before any resize) still has

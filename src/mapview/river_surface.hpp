@@ -31,7 +31,6 @@
 
 #include <glm/glm.hpp>
 
-#include "mapgen/generator.hpp"
 #include "mapgen/river_arcs.hpp"
 #include "mapgen/river_graph.hpp"
 
@@ -65,14 +64,15 @@ inline constexpr float kRiverSagittaM = 0.15f;
 // width -- water is level across a channel, and draping it on the banks is
 // exactly the debug-decal look the carve replaced.
 //
-// `art` supplies only the raster LATTICE (its texel size sets how finely the
-// centreline is sampled); the surface itself comes from `height_at`.
+// `lattice_texels` supplies only the raster LATTICE's resolution (it sets how
+// finely the centreline is sampled, via world_size_m / lattice_texels); the
+// surface itself comes from `height_at`.
 //
 // Stations with no flow (d_flow <= 0) carry no water and are not drawn: the
 // strip is emitted in runs, so a dry reach in the middle of a chain leaves a
 // gap rather than a sheet of water bridging it.
 std::vector<glm::vec3> BuildRiverWaterTriangles(
-    const mapgen::MapArtifacts& art, float world_size_m,
+    int lattice_texels, float world_size_m,
     const mapgen::RiverGraph& graph,
     const std::vector<mapgen::RiverArcChain>& chains,
     const std::function<float(float wx, float wz)>& height_at);

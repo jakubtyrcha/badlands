@@ -59,9 +59,10 @@ RiverCarve build_river_carve(const RiverGraph& g,
 struct RiverCarve {
   // Corridor mask on the SAME lattice as base_height (1 m texels on the
   // production map). Non-zero where the texel's SQUARE comes within the local
-  // corridor half-width of a channel centreline -- conservative, following
-  // rasterize_rivers. Centre sampling would drop texels a sub-metre channel
-  // passes straight through.
+  // corridor half-width of a channel centreline -- conservative, following the
+  // same "square, not centre" rule as segment_aabb_distance (river_graph.hpp).
+  // Centre sampling would drop texels a sub-metre channel passes straight
+  // through.
   Field2D<uint8_t> mask;
 
   // Carved surface height at any world position.

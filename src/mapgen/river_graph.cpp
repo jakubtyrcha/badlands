@@ -34,6 +34,37 @@ RiverClass classify_discharge(float discharge_m3_s) {
   return RiverClass::Major;
 }
 
+// 4-connected components of cells for which `flag[i]` is truthy. Components
+// are returned in the order their first (lowest-index) member is discovered
+// by the scan — deterministic.
+std::vector<std::vector<int>> label_lake_components(int w, int ht,
+                                                     const std::vector<uint8_t>& flag) {
+  std::vector<std::vector<int>> components;
+  std::vector<uint8_t> seen(flag.size(), 0);
+  std::vector<int> stack;
+  for (int start = 0; start < w * ht; ++start) {
+    if (seen[start] || !flag[start]) continue;
+    stack.assign(1, start);
+    seen[start] = 1;
+    std::vector<int> member;
+    while (!stack.empty()) {
+      const int i = stack.back();
+      stack.pop_back();
+      member.push_back(i);
+      const int x = i % w, y = i / w;
+      const int nb[4] = {i - 1, i + 1, i - w, i + w};
+      const bool ok[4] = {x > 0, x < w - 1, y > 0, y < ht - 1};
+      for (int k = 0; k < 4; ++k)
+        if (ok[k] && !seen[nb[k]] && flag[nb[k]]) {
+          seen[nb[k]] = 1;
+          stack.push_back(nb[k]);
+        }
+    }
+    components.push_back(std::move(member));
+  }
+  return components;
+}
+
 namespace {
 
 // Perpendicular distance from `p` to the segment ab (to the nearest endpoint
@@ -506,64 +537,6 @@ RiverGraph extract_river_graph(const FlowRouting& r, const Field2D<float>& area,
     nd.speed_m_s = hyd.speed_m_s;
   }
   return g;
-}
-
-RiverRasters rasterize_rivers(const RiverGraph& g, int res, float texel_m) {
-  RiverRasters out;
-  if (res <= 0 || texel_m <= 0.0f) return out;
-  out.discharge_m3_s = Field2D<float>(res, res, 0.0f);
-  out.cls = Field2D<uint8_t>(res, res, static_cast<uint8_t>(RiverClass::None));
-  out.depth_m = Field2D<float>(res, res, 0.0f);
-  out.speed_m_s = Field2D<float>(res, res, 0.0f);
-  out.flow_dir = Field2D<glm::vec2>(res, res, glm::vec2(0.0f));
-
-  const float half = 0.5f * texel_m;  // texel (x,y) is centred at x*texel_m
-  for (const auto& e : g.edges) {
-    // Through-lake edges carry no geometry on purpose: the lake surface is
-    // already water, so there is nothing to draw across it.
-    if (e.points_m.size() < 2) continue;
-    for (size_t k = 1; k < e.points_m.size(); ++k) {
-      const glm::vec2 a = e.points_m[k - 1], b = e.points_m[k];
-      const glm::vec2 ab = b - a;
-      const float seg_len2 = glm::dot(ab, ab);
-      if (seg_len2 <= 0.0f) continue;
-      const float r0 = 0.5f * e.width_m[k - 1], r1 = 0.5f * e.width_m[k];
-      const float rmax = std::max(r0, r1);
-      const glm::vec2 dir = ab / std::sqrt(seg_len2);
-
-      const int x0 = std::max(0, static_cast<int>(std::floor((std::min(a.x, b.x) - rmax) / texel_m)) - 1);
-      const int x1 = std::min(res - 1, static_cast<int>(std::ceil((std::max(a.x, b.x) + rmax) / texel_m)) + 1);
-      const int y0 = std::max(0, static_cast<int>(std::floor((std::min(a.y, b.y) - rmax) / texel_m)) - 1);
-      const int y1 = std::min(res - 1, static_cast<int>(std::ceil((std::max(a.y, b.y) + rmax) / texel_m)) + 1);
-
-      for (int y = y0; y <= y1; ++y) {
-        for (int x = x0; x <= x1; ++x) {
-          const glm::vec2 c(static_cast<float>(x) * texel_m, static_cast<float>(y) * texel_m);
-          const glm::vec2 lo = c - half, hi = c + half;
-          // CONSERVATIVE: the texel's SQUARE must come within the radius, not
-          // its centre. That is what keeps the covered set connected end to
-          // end even when the channel is narrower than a texel — the axis
-          // still passes through the square, so radius 0 still covers it.
-          const float t = std::clamp(glm::dot(c - a, ab) / seg_len2, 0.0f, 1.0f);
-          const float radius = r0 + (r1 - r0) * t;
-          if (segment_aabb_distance(a, b, lo, hi) > radius) continue;
-
-          const float q = e.discharge_m3_s[k - 1] +
-                          (e.discharge_m3_s[k] - e.discharge_m3_s[k - 1]) * t;
-          // Higher discharge wins where reaches overlap, so a trunk beats its
-          // tributary at a confluence — and that decides the rendered class.
-          const size_t i = static_cast<size_t>(y) * res + static_cast<size_t>(x);
-          if (q <= out.discharge_m3_s.data[i]) continue;
-          out.discharge_m3_s.data[i] = q;
-          out.cls.data[i] = static_cast<uint8_t>(classify_discharge(q));
-          out.depth_m.data[i] = e.depth_m[k - 1] + (e.depth_m[k] - e.depth_m[k - 1]) * t;
-          out.speed_m_s.data[i] = e.speed_m_s[k - 1] + (e.speed_m_s[k] - e.speed_m_s[k - 1]) * t;
-          out.flow_dir.data[i] = dir;
-        }
-      }
-    }
-  }
-  return out;
 }
 
 }  // namespace badlands::mapgen

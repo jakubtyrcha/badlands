@@ -42,6 +42,15 @@
 #include "FastNoiseLite.h"
 #include "core/parallel.hpp"
 
+// The OUTPUT BOUNDARY: world.txt's manifest and rivers.bin's river-graph
+// dump, plus the river extraction pipeline that fills the latter. None of
+// this touches the sim above -- it reads the FINISHED height/water/soil
+// fields, the same fields the .f32 dump already carries.
+#include "mapgen/coarse_io.hpp"
+#include "mapgen/river_graph.hpp"
+#include "mapgen/river_io.hpp"
+#include "mapgen/river_prune.hpp"
+
 namespace {
 
 constexpr double kSecondsPerYear = 31557600.0;
@@ -1003,6 +1012,219 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
   st.t_drops = t_drops; st.t_grid = t_grid; st.t_lake = t_lake;
 }
 
+// ----------------------------------------------------------- world artifacts
+//
+// world.txt's manifest and rivers.bin's whole-world river graph -- the
+// OUTPUT BOUNDARY this file exists to describe (see the header comment on the
+// includes above). Nothing here feeds back into the sim; it only reads the
+// FINISHED height/water/soil fields, in real metres, the same fields the
+// .f32 dump already carries.
+
+namespace mg = badlands::mapgen;
+
+// Narrowest channel worth keeping in the whole-world graph -- the same
+// physical threshold src/mapgen/file_patch_source.cpp culls a loaded network
+// to (w = k_w*sqrt(Q) makes this Q >= 0.0036 m3/s): below it the network is a
+// haze of hairlines. NOT the length prune -- a branch's length is only
+// meaningful relative to a frame, and there is none yet at the whole-world
+// scale; window.cpp/window_rivers.cpp apply that one per patch, later.
+constexpr float kMinRiverWidthM = 0.3f;
+
+// Same fractions tools/protogen/window.cpp's ClassifyBiomes cuts biomes with
+// (kMountainFrac/kHillsFrac there). Duplicated rather than shared: window.cpp
+// is its own standalone TU with its own build command, and this is a handful
+// of lines -- see the README's TU-firewall note by the Field2D adapter below.
+constexpr float kMountainFrac = 0.12f;
+constexpr float kHillsFrac = 0.33f;
+
+// mg::Field2D<float> differs from Grid's flat std::vector<float> at
+// DIMENSIONLESS ~[0,1] scale (see the Grid struct's header note); this is the
+// only place the two meet. Kept tiny and separate on purpose: the sim's own
+// representation must not have to change shape to satisfy Field2D's, and this
+// handful of lines is a firewall protecting it from that churn.
+mg::Field2D<float> ToField2D(const std::vector<float>& v, int n, float scale) {
+  mg::Field2D<float> f(n, n);
+  for (size_t i = 0; i < v.size(); ++i) f.data[i] = v[i] * scale;
+  return f;
+}
+
+// Whole-world quantiles of the DRY soil distribution, in metres -- the two
+// numbers a patch cut later needs to classify biomes the same way regardless
+// of what was cut, so it does not have to see the whole world to agree with
+// it. Mirrors window.cpp's ClassifyBiomes exactly: same fractions, same "wet
+// cells excluded" rule (a lake surface says nothing about the substrate under
+// it).
+void SoilCutoffs(const mg::Field2D<float>& soil_m, const mg::Field2D<float>& water_m,
+                 float& t_mountain, float& t_hills) {
+  std::vector<float> dry;
+  dry.reserve(soil_m.data.size());
+  for (size_t i = 0; i < soil_m.data.size(); ++i)
+    if (water_m.data[i] <= 0.0f) dry.push_back(soil_m.data[i]);
+  if (dry.empty()) { t_mountain = 0.0f; t_hills = 0.0f; return; }
+  std::sort(dry.begin(), dry.end());
+  const auto q = [&](float f) {
+    return dry[std::min(dry.size() - 1, size_t(f * double(dry.size())))];
+  };
+  t_mountain = q(kMountainFrac);
+  t_hills = q(kMountainFrac + kHillsFrac);
+}
+
+// What WriteWorldArtifacts needs, already in real metres -- built either from
+// the live Grid right after RunSim (BuildInputsFromGrid, scaling by
+// relief_m), or loaded back off an existing dump's .f32 rasters
+// (RunExtractRivers, already metric on disk). Both feed the same function, so
+// a normal run and `--extract-rivers` on its own output cannot diverge.
+struct WorldArtifactInputs {
+  int res = 0;
+  float world_m = 0.0f;
+  float runoff_m_per_yr = 0.0f;
+  uint32_t seed = 0;
+  int steps = 0;
+  mg::Field2D<float> height_m;  // bed + soil, dry-land surface
+  mg::Field2D<float> water_m;   // standing water depth
+  mg::Field2D<float> soil_m;    // erodible cover thickness
+};
+
+// Writes world.txt then rivers.bin to `out_dir`. The manifest goes first
+// because write_coarse_manifest is what creates `out_dir` if it does not
+// exist yet; write_river_graph does not.
+//
+// No lake_id/LakeInfo is threaded through here: extract_river_graph derives
+// its own lake components from water_m > 0 internally (the optional lake_id/
+// lakes parameters exist only to report LakeKind::Seeded provenance, and
+// protogen has no seeded lakes -- every one of its lakes is Emergent by
+// construction -- so the default is already the right answer).
+bool WriteWorldArtifacts(const WorldArtifactInputs& in, const std::string& out_dir) {
+  float t_mountain = 0.0f, t_hills = 0.0f;
+  SoilCutoffs(in.soil_m, in.water_m, t_mountain, t_hills);
+
+  mg::CoarseManifest man;
+  man.resolution = in.res;
+  man.world_size_m = in.world_m;
+  man.texel_m = in.res > 0 ? in.world_m / float(in.res) : 0.0f;
+  man.seed = in.seed;
+  man.runoff_m_per_yr = in.runoff_m_per_yr;
+  man.steps = in.steps;
+  man.soil_cut_mountain_m = t_mountain;
+  man.soil_cut_hills_m = t_hills;
+
+  std::string err;
+  if (!mg::write_coarse_manifest(out_dir, man, &err)) {
+    std::fprintf(stderr, "protogen: %s\n", err.c_str());
+    return false;
+  }
+
+  // Route on bed + standing water, exactly what build_window_rivers does for
+  // a patch (window_rivers.cpp) -- a lake surface is where flow actually
+  // travels, not a hole in the terrain. No ghost padding: unlike a windowed
+  // cutout, the whole world's own border genuinely IS base level.
+  const float texel_m = man.texel_m;
+  mg::Field2D<float> surface = in.height_m;
+  for (size_t i = 0; i < surface.data.size(); ++i)
+    surface.data[i] += in.water_m.data[i];
+  mg::Field2D<uint8_t> lake_tag(in.res, in.res, 0);
+  for (size_t i = 0; i < lake_tag.data.size(); ++i)
+    lake_tag.data[i] = in.water_m.data[i] > 0.0f ? 1 : 0;
+
+  const mg::FlowRouting routing =
+      mg::route_flow(surface, texel_m, mg::kEpsilonM, &lake_tag);
+  const mg::Field2D<float> area =
+      mg::accumulate_drainage(routing, texel_m * texel_m);
+
+  mg::ErosionParams ep;  // defaults, except runoff -- matched to the sim's own rate
+  ep.runoff_m_per_s = float(double(in.runoff_m_per_yr) / kSecondsPerYear);
+
+  mg::RiverGraph graph = mg::extract_river_graph(routing, area, in.water_m,
+                                                 surface, ep, texel_m, 0.0f);
+  // ONLY the width prune -- see kMinRiverWidthM above for why the length
+  // prune does not belong here.
+  mg::prune_river_graph_by_width(graph, kMinRiverWidthM);
+
+  if (!mg::write_river_graph(out_dir + "/rivers.bin", graph, &err)) {
+    std::fprintf(stderr, "protogen: %s\n", err.c_str());
+    return false;
+  }
+  std::printf("protogen: wrote %s/world.txt + rivers.bin (%zu nodes, %zu edges)\n",
+              out_dir.c_str(), graph.nodes.size(), graph.edges.size());
+  return true;
+}
+
+WorldArtifactInputs BuildInputsFromGrid(const Grid& g, const Params& p) {
+  WorldArtifactInputs in;
+  in.res = g.n;
+  in.world_m = p.world_m;
+  in.runoff_m_per_yr = p.runoff_m_per_yr;
+  in.seed = p.seed;
+  in.steps = p.steps;
+  in.height_m = ToField2D(g.height, g.n, p.relief_m);
+  in.water_m = ToField2D(g.water, g.n, p.relief_m);
+  in.soil_m = ToField2D(g.soil, g.n, p.relief_m);
+  return in;
+}
+
+// Reads exactly n*n floats off `path` -- the same headerless .f32 form Dump()
+// writes -- into a right-sized vector. A size mismatch (wrong --res, or a
+// dump that predates the substrate) is reported, not guessed.
+bool LoadDumpField(const std::string& path, int n, std::vector<float>& out) {
+  out.assign(size_t(n) * n, 0.0f);
+  FILE* fp = std::fopen(path.c_str(), "rb");
+  if (!fp) {
+    std::fprintf(stderr, "protogen: cannot open %s\n", path.c_str());
+    return false;
+  }
+  const size_t want = out.size();
+  const size_t got = std::fread(out.data(), sizeof(float), want, fp);
+  std::fclose(fp);
+  if (got != want) {
+    std::fprintf(stderr, "protogen: %s is %zu floats, expected %zu (wrong --res?)\n",
+                 path.c_str(), got, want);
+    return false;
+  }
+  return true;
+}
+
+// `--extract-rivers <dir>`: re-runs ONLY the extraction + serialization
+// above against an EXISTING dump, and exits. Exists so an extraction bug
+// costs seconds instead of the several-minute re-sim a full run takes -- and
+// because it calls the exact same WriteWorldArtifacts a normal run does, the
+// two paths cannot silently diverge.
+//
+// Reads the FINAL snapshot: RunSim always dumps at step == p.steps regardless
+// of --snapshot-every (see its verbose block), so world.txt's own `steps`
+// names that tag exactly.
+int RunExtractRivers(const std::string& dir) {
+  std::string err;
+  const auto man = mg::load_coarse_manifest(dir, &err);
+  if (!man) {
+    std::fprintf(stderr, "protogen: --extract-rivers: %s\n", err.c_str());
+    return 1;
+  }
+
+  char tag[64];
+  std::snprintf(tag, sizeof(tag), "%04d-step", man->steps);
+  const std::string base = dir + "/" + std::string(tag) + "-";
+
+  WorldArtifactInputs in;
+  in.res = man->resolution;
+  in.world_m = man->world_size_m;
+  in.runoff_m_per_yr = man->runoff_m_per_yr;
+  in.seed = man->seed;
+  in.steps = man->steps;
+
+  std::vector<float> height, water, soil;
+  if (!LoadDumpField(base + "height.f32", in.res, height)) return 1;
+  if (!LoadDumpField(base + "water.f32", in.res, water)) return 1;
+  if (!LoadDumpField(base + "soil.f32", in.res, soil)) return 1;
+
+  in.height_m = mg::Field2D<float>(in.res, in.res);
+  in.height_m.data = std::move(height);
+  in.water_m = mg::Field2D<float>(in.res, in.res);
+  in.water_m.data = std::move(water);
+  in.soil_m = mg::Field2D<float>(in.res, in.res);
+  in.soil_m.data = std::move(soil);
+
+  return WriteWorldArtifacts(in, dir) ? 0 : 1;
+}
 
 // ---------------------------------------------------------------------- tests
 
@@ -1659,6 +1881,14 @@ int RunAll() {
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i)
     if (std::string(argv[i]) == "--test") return test::RunAll();
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) != "--extract-rivers") continue;
+    if (i + 1 >= argc) {
+      std::fprintf(stderr, "protogen: --extract-rivers needs a directory\n");
+      return 2;
+    }
+    return RunExtractRivers(argv[i + 1]);
+  }
   Params p;
   try {
   for (int i = 1; i < argc; ++i) {
@@ -1743,5 +1973,9 @@ int main(int argc, char** argv) {
   RunSim(p, g, lakes, st, true);
   std::printf("protogen: done\n  timings (s): drops %.1f grid %.1f lakes %.1f\n",
               st.t_drops, st.t_grid, st.t_lake);
+
+  // Output boundary: world.txt + rivers.bin, off the FINISHED grid. Same
+  // function --extract-rivers calls, so the two paths cannot diverge.
+  if (!WriteWorldArtifacts(BuildInputsFromGrid(g, p), p.out)) return 1;
   return 0;
 }

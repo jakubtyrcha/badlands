@@ -15,20 +15,67 @@ plus standing water, a lake water balance, and sediment dispersion in lakes.
 
 ## Build and run
 
-Taskflow is header-only, so this stays a single standalone TU:
+Taskflow is header-only, so this is still a small, hand-listed set of TUs, no
+CMake. It now also pulls in the OUTPUT BOUNDARY (world.txt's manifest, the
+river extraction pipeline, rivers.bin's binary graph dump) straight from
+`src/mapgen/` -- see "Self-describing output" below:
 
 ```sh
-c++ -O3 -std=c++20 \
-  -I src -I third_party/FastNoiseLite -I build/_deps/taskflow-src \
-  tools/protogen/protogen.cpp src/core/parallel.cpp -o /tmp/protogen
+c++ -O3 -std=c++23 \
+  -I src -I third_party/FastNoiseLite -I third_party/glm -I build/_deps/taskflow-src \
+  tools/protogen/protogen.cpp src/core/parallel.cpp \
+  src/mapgen/hydrology.cpp src/mapgen/river_graph.cpp src/mapgen/river_prune.cpp \
+  src/mapgen/coarse_io.cpp src/mapgen/river_io.cpp \
+  -o /tmp/protogen
 
 mkdir -p /tmp/pg && /tmp/protogen --res 512 --world 8192 --steps 3000 \
   --drops 1024 --snapshot-every 750 --out /tmp/pg
-python3 tools/protogen/show.py /tmp/pg 512 8192
+python3 tools/protogen/show.py /tmp/pg
 ```
 
 `show.py` writes `-map.png` (hillshade + rivers + lakes) and `-hillshade.png`
 per snapshot. `lakes.py` / `lakestats.py` are post-hoc priority-flood analysis.
+All four now read resolution and world size from `world.txt` -- see below --
+instead of taking them as positional args: `show.py`/`soil.py` take the dump
+directory directly, `lakes.py`/`lakestats.py` take one `.f32` file and find
+`world.txt` next to it. The old explicit `<n> <world_m>` form still works as
+an override (needed for a `window.cpp` output dir, which has no `world.txt`
+of its own -- see its "Viewing it in mapview" section below).
+
+## Self-describing output
+
+A dump used to be headerless rasters plus whatever `--res`/`--world` a
+consumer happened to pass on argv -- so its 16 m cell size existed nowhere in
+the data, and a wrong flag silently reinterpreted the bytes. protogen now
+writes two more things next to the `.f32` rasters, once the sim finishes:
+
+- **`world.txt`** -- a `src/mapgen/coarse_io.hpp` manifest: resolution, world
+  size (and the texel size derived from them, for readers that would rather
+  not divide), seed, runoff, steps, and the whole-world DRY-soil quantiles
+  (`soil_cut_mountain_m` / `soil_cut_hills_m`, the same fractions
+  `window.cpp`'s `ClassifyBiomes` cuts with) -- so a patch cut later from
+  anywhere in the world classifies biomes the same way regardless of what was
+  cut.
+- **`rivers.bin`** -- a `src/mapgen/river_io.hpp` binary dump of the
+  WHOLE-WORLD `RiverGraph`: `route_flow` -> `accumulate_drainage` ->
+  `extract_river_graph` -> `prune_river_graph_by_width` ONLY. Not the length
+  prune -- a branch's length is only meaningful relative to a frame, and
+  there is none yet at whole-world scale; `window_rivers.cpp` applies that one
+  per patch, later. Binary because text would be ~35 MB at 16 km.
+
+```sh
+# Re-run ONLY the extraction + serialization above against an existing dump,
+# skipping the several-minute re-sim -- so an extraction bug costs seconds.
+# Calls the exact same code path a normal run does at the end, so the two
+# cannot diverge.
+/tmp/protogen --extract-rivers /tmp/pg
+```
+
+The duplication between `src/mapgen/*`'s `Field2D<T>` and protogen's own flat
+`std::vector<float>` fields (see `Grid` in protogen.cpp) is deliberate: a tiny
+adapter converts one to the other at the output boundary rather than protogen
+adopting `Field2D` internally, so a change to either representation cannot
+ripple into the other.
 
 ## Findings so far — read before changing anything
 

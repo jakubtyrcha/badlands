@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cmath>
 
-#include "mapgen/generator.hpp"
 #include "mapgen/river_arcs.hpp"
 #include "mapview/river_surface.hpp"
 
@@ -26,13 +25,9 @@ constexpr int kN = 16;             // texels per side
 constexpr float kWorldM = 160.0f;  // => 10 m texels
 constexpr float kReachZ = 80.0f;   // every straight fixture runs along this z
 
-// The artifacts supply only the raster LATTICE now (it sets the centreline
+// The lattice now supplies only its own resolution (it sets the centreline
 // sampling step); the surface itself comes from the height_at closure.
-mapgen::MapArtifacts Lattice() {
-  mapgen::MapArtifacts a;
-  a.heightmap = mapgen::Field2D<float>(kN, kN, 0.0f);
-  return a;
-}
+int Lattice() { return kN; }
 
 // A straight west-to-east reach down the middle of the map, `width` wide and
 // `depth` deep throughout.
@@ -233,9 +228,7 @@ TEST_CASE("degenerate inputs produce nothing rather than NaNs",
           "[river_surface]") {
   const mapgen::RiverGraph g = StraightReach(4.0f, 0.2f);
   const std::vector<mapgen::RiverArcChain> chains = mapgen::build_river_arcs(g, 0.5f);
-  CHECK(BuildRiverWaterTriangles(mapgen::MapArtifacts{}, kWorldM, g, chains,
-                                 DitchAt)
-            .empty());
+  CHECK(BuildRiverWaterTriangles(0, kWorldM, g, chains, DitchAt).empty());
   CHECK(BuildRiverWaterTriangles(Lattice(), 0.0f, g, chains, DitchAt).empty());
   // No carve, no cavity, no water -- an absent height_at is not a reason to
   // guess a level.

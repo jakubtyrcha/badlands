@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
-"""Per-lake geometry from a priority-flood fill: area, depths, volume."""
+"""Per-lake geometry from a priority-flood fill: area, depths, volume.
+
+usage: lakestats.py <height.f32> <relief_m>
+       lakestats.py <height.f32> <n> <world_m> <relief_m>   (explicit override)
+
+Resolution and world size come from world.txt (src/mapgen/coarse_io.hpp) next
+to <height.f32> unless given explicitly.
+"""
+import os
 import sys
 import numpy as np
-from lakes import priority_flood, label
+from lakes import priority_flood, label, read_world_txt
 
-hp, n, world, relief = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+if len(sys.argv) >= 5:
+    hp, n, world, relief = (sys.argv[1], int(sys.argv[2]), float(sys.argv[3]),
+                            float(sys.argv[4]))
+else:
+    hp, relief = sys.argv[1], float(sys.argv[2])
+    n, world = read_world_txt(os.path.dirname(hp) or ".")
 cell = world / n
 ca = cell * cell
 h = np.fromfile(hp, dtype=np.float32).reshape(n, n).astype(np.float64) * relief

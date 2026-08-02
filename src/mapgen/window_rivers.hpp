@@ -55,51 +55,6 @@ struct WindowRivers {
   float rain_m3_s = 0.0f;     // runoff over the window's own area
 };
 
-// Drops every reach that never reaches `min_width_m`, and trims the headwater
-// end of the survivors back to the point where they do — so a kept river starts
-// where it BECOMES one rather than at a hairline that happens to grow.
-//
-// Width is monotone downstream (w = k_w * sqrt(Q), and Q only accumulates), so a
-// reach's maximum is its downstream end: testing that tests the whole reach, and
-// the trim is a single cut rather than a filter.
-//
-// Node kinds are recomputed against the surviving topology. A confluence whose
-// tributaries were all pruned IS a source afterwards, and leaving it labelled
-// Confluence would misreport where the water enters — which is exactly what the
-// source list is for. Lake and mouth kinds describe a boundary rather than an
-// upstream count, so they are left alone.
-// Clips every reach to the window rect, minting a node exactly where the chain
-// crosses the frame with all of its properties (discharge, width, depth, speed)
-// interpolated along the crossing segment.
-//
-// Needed because routing happens on a GHOST-PADDED grid: reaches legitimately
-// run one cell past the frame, and a reach that leaves must end at a real place
-// rather than dangle outside the map or stop at whichever sample happened to be
-// last inside — which would move every time the resolution changed.
-void clip_river_graph_to_window(RiverGraph& g, float world_size_m);
-
-void prune_river_graph_by_width(RiverGraph& g, float min_width_m);
-
-// Drops stubby headwater BRANCHES -- the whole chain from a headwater down to
-// the first confluence, when that chain is shorter than `min_length_m`.
-//
-// A branch, not a reach. Clipping splits a reach at the frame and gives each
-// fragment its own start node, so a per-reach test saw every fragment as a
-// headwater and ate a 700 m trunk one fragment at a time (peak Q fell
-// 0.7183 -> 0.0218 m3/s). Accumulating along the chain is immune to how a reach
-// happens to be subdivided.
-//
-// Only headwater chains, because removing an interior reach would cut the
-// network in two and strand everything above it. Applied REPEATEDLY, since
-// removing a branch can expose the next one; it converges because every round
-// strictly shrinks the edge set.
-//
-// This is a different filter from the width one and neither implies the other: a
-// wide reach can be stubby (a lake inlet metres from the shore) and a hairline
-// can run for a kilometre. Width says "is this a river", length says "is this
-// worth drawing".
-void prune_river_graph_by_length(RiverGraph& g, float min_length_m);
-
 // Routes the window, accumulates drainage with `inflows` seeded as upstream
 // area, and extracts the river graph. `art` must carry heightmap, water_depth,
 // lake_id and lakes (map_io fills all four).
@@ -108,7 +63,8 @@ void prune_river_graph_by_length(RiverGraph& g, float min_length_m);
 // instead of taking steepest descent — without it a flat lake surface invents
 // downhill exits through its own rim.
 //
-// `min_channel_width_m` and `min_branch_length_m` prune the result (see above);
+// `min_channel_width_m` and `min_branch_length_m` prune the result via
+// river_prune.hpp (prune_river_graph_by_width / prune_river_graph_by_length);
 // 0 keeps everything. Width is applied first, since it trims reaches back to
 // where they qualify and so decides what a reach's length even is.
 WindowRivers build_window_rivers(const MapArtifacts& art, float world_size_m,

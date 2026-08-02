@@ -14,12 +14,12 @@ constexpr std::array<glm::ivec2, 4> kNeighbours = {
 
 }  // namespace
 
-std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art,
+std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::PatchData& patch,
                                                  float world_size_m) {
   std::vector<glm::vec3> tris;
-  const int w = art.lake_id.width, h = art.lake_id.height;
-  if (w <= 0 || h <= 0 || art.lakes.empty()) return tris;
-  if (art.heightmap.width != w || art.heightmap.height != h) return tris;
+  const int w = patch.lake_id.width, h = patch.lake_id.height;
+  if (w <= 0 || h <= 0 || patch.lakes.empty()) return tris;
+  if (patch.height.width != w || patch.height.height != h) return tris;
   const float s = world_size_m / static_cast<float>(w);
   if (s <= 0.0f) return tris;
   // The skirt grows one TEXEL at a time but is capped in METRES, so on a coarse
@@ -38,8 +38,8 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
   std::vector<float> dist(static_cast<size_t>(w) * h, 0.0f);
   std::deque<int> queue;
   for (int i = 0; i < w * h; ++i) {
-    const int32_t id = art.lake_id.data[i];
-    if (id >= 0 && id < static_cast<int32_t>(art.lakes.size())) {
+    const int32_t id = patch.lake_id.data[i];
+    if (id >= 0 && id < static_cast<int32_t>(patch.lakes.size())) {
       owner[i] = id;
       queue.push_back(i);
     }
@@ -49,13 +49,13 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
     const int i = queue.front();
     queue.pop_front();
     const int32_t id = owner[i];
-    const float level = art.lakes[id].level_m;
+    const float level = patch.lakes[id].level_m;
     const int x = i % w, z = i / w;
 
     // This texel is the buried boundary: keep it, but expand no further. Lake
     // texels themselves always expand (their bed is below the level by
     // definition).
-    if (art.lake_id.data[i] < 0 && art.heightmap.data[i] >= level + kBurialM) {
+    if (patch.lake_id.data[i] < 0 && patch.height.data[i] >= level + kBurialM) {
       continue;
     }
 
@@ -66,7 +66,7 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
       if (owner[ni] >= 0) continue;                  // already water or claimed
       const float nd = dist[i] + s;
       if (nd > skirt_cap_m) continue;                // past the cap
-      if (art.heightmap.data[ni] < level) continue;  // would float over voids
+      if (patch.height.data[ni] < level) continue;  // would float over voids
       owner[ni] = id;
       dist[ni] = nd;
       queue.push_back(ni);
@@ -96,7 +96,7 @@ std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art
       int run_end = x + 1;
       while (run_end < w && owner[static_cast<size_t>(z) * w + run_end] == id)
         ++run_end;
-      const float y = art.lakes[id].level_m;
+      const float y = patch.lakes[id].level_m;
       const float x0 = static_cast<float>(x) * s;
       const float x1 = static_cast<float>(run_end) * s;
       const float z0 = static_cast<float>(z) * s, z1 = z0 + s;
