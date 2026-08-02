@@ -11,6 +11,8 @@
 
 #include <entt/entt.hpp>
 
+#include <string>
+
 using namespace badlands;
 
 TEST_CASE("apply_command MoveTo sets the actor's MoveTarget and logs it") {
@@ -82,3 +84,35 @@ TEST_CASE("game_tick drains queued AI commands (apply + log) during the tick") {
     CHECK(g->command_log.size() > log_before);
 
     }
+
+// --- naming catalogs --------------------------------------------------------
+// The log is the trace of record, and a debug panel reads it through these.
+// A hand-written switch is what these replace: it printed "?" for every kind
+// added after it was written, and nothing failed until somebody read the panel.
+
+TEST_CASE("every CommandKindId has a name") {
+    for (int32_t i = 0; i < kCommandKindCount; ++i) {
+        const char* n = CommandKindName(static_cast<CommandKindId>(i));
+        REQUIRE(n != nullptr);
+        INFO("CommandKindId " << i);
+        CHECK(std::string(n) != "?");
+        CHECK(std::string(n) != "");
+    }
+}
+
+TEST_CASE("every BuildingKind has a name") {
+    for (int32_t i = 0; i < static_cast<int32_t>(BuildingKind::Count); ++i) {
+        const char* n = BuildingKindName(static_cast<BuildingKind>(i));
+        REQUIRE(n != nullptr);
+        INFO("BuildingKind " << i);
+        CHECK(std::string(n) != "?");
+        CHECK(std::string(n) != "");
+    }
+}
+
+TEST_CASE("out-of-range kinds resolve to the sentinel rather than reading off the table") {
+    CHECK(std::string(CommandKindName(static_cast<CommandKindId>(-1))) == "?");
+    CHECK(std::string(CommandKindName(CommandKindId::Count)) == "?");
+    CHECK(std::string(BuildingKindName(static_cast<BuildingKind>(-1))) == "?");
+    CHECK(std::string(BuildingKindName(BuildingKind::Count)) == "?");
+}

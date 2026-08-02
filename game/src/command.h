@@ -89,6 +89,14 @@ static_assert(static_cast<int32_t>(CommandKind::Engage) ==
               static_cast<int32_t>(CommandKindId::Engage));
 static_assert(static_cast<int32_t>(CommandKind::UseSkill) ==
               static_cast<int32_t>(CommandKindId::UseSkill));
+static_assert(static_cast<int32_t>(CommandKind::CancelFocus) ==
+              static_cast<int32_t>(CommandKindId::CancelFocus));
+static_assert(static_cast<int32_t>(CommandKind::FocusSkill) ==
+              static_cast<int32_t>(CommandKindId::FocusSkill));
+// The two enums must also be the same LENGTH: a kind added to only one of them
+// would leave every assert above passing while the log carried an id the
+// public enum cannot name.
+static_assert(static_cast<int32_t>(CommandKind::FocusSkill) + 1 == kCommandKindCount);
 
 // One command. `actor` is the acting entity slot (UINT32_MAX = player/global);
 // `target_id` is a building/entity id; `point` is world XZ for positional

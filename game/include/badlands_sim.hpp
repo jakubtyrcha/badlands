@@ -43,6 +43,12 @@ enum class BuildingKind : int32_t {
     Count
 };
 
+// Stable inspection-facing label for a building kind ("Tavern"), backed by a
+// dense catalog in game/src/command_catalog.cpp -- not a switch, which is what
+// silently rots into "?" the day a kind is added (the same argument
+// ActivityName's comment makes). "?" for an out-of-range kind.
+const char* BuildingKindName(BuildingKind kind);
+
 enum class ActionKind : int32_t {
     PlaceBuilding = 0,  // world_x/z, param_a = kind, param_b = rotation_index
     RecruitHero,        // target_id = guild building id
@@ -979,7 +985,17 @@ enum class CommandKindId : int32_t {
     UseSkill,  // cast skill param_a (an index into the actor's OWN Skills) at target_id
     CancelFocus, // abandon a long cast in progress (skill_focus.h)
     FocusSkill,  // begin a long cast of skill param_a at target_id (skill_focus.h)
+    Count
 };
+
+inline constexpr int32_t kCommandKindCount = static_cast<int32_t>(CommandKindId::Count);
+
+// Stable inspection-facing label for a command kind ("FocusSkill"), backed by a
+// dense catalog in game/src/command_catalog.cpp. A debug panel reads THIS rather
+// than keeping its own switch: the one it replaced printed "?" for every kind
+// added after it was written, which is exactly the rot ActivityName exists to
+// prevent. "?" for an out-of-range kind.
+const char* CommandKindName(CommandKindId kind);
 
 struct CommandRecord {
     CommandKindId kind;
