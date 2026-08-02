@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -81,22 +83,89 @@ const char* archetype_name(int32_t a) {
   }
 }
 
-const char* command_name(badlands::CommandKindId kind) {
-  switch (kind) {
-    case badlands::CommandKindId::PlaceBuilding: return "PlaceBuilding";
-    case badlands::CommandKindId::RecruitHero: return "RecruitHero";
-    case badlands::CommandKindId::DestroyBuilding: return "DestroyBuilding";
-    case badlands::CommandKindId::MoveTo: return "MoveTo";
-    case badlands::CommandKindId::EnterBuilding: return "EnterBuilding";
-    case badlands::CommandKindId::EnterHome: return "EnterHome";
-    case badlands::CommandKindId::Buy: return "Buy";
-    case badlands::CommandKindId::Attack: return "Attack";
-    case badlands::CommandKindId::SetBehavior: return "SetBehavior";
-    case badlands::CommandKindId::CollectTax: return "CollectTax";
-    case badlands::CommandKindId::Deposit: return "Deposit";
-    case badlands::CommandKindId::AttackBuilding: return "AttackBuilding";
-    case badlands::CommandKindId::Chat: return "Chat";
-    default: return "?";
+// A command's target, or "-" when it names nobody.
+std::string target_label(uint32_t target_id) {
+  return target_id == UINT32_MAX ? std::string("-") : ("->" + std::to_string(target_id));
+}
+
+// SkillName for one of the ACTOR'S OWN skill slots -- the index UseSkill and
+// FocusSkill carry in param_a (see CommandKindId, badlands_sim.hpp), which is
+// not a SkillId. nullptr when it cannot be resolved: the log is history, so a
+// row can name an actor that has since died and left the snapshot.
+const char* actor_skill_name(const std::vector<badlands::CharacterState>& chars,
+                             uint32_t actor, int32_t slot) {
+  for (const badlands::CharacterState& c : chars) {
+    if (c.id != actor) {
+      continue;
+    }
+    if (slot < 0 || slot >= c.skill_count) {
+      return nullptr;
+    }
+    return badlands::SkillName(c.skills[slot]);
+  }
+  return nullptr;
+}
+
+// The kind-specific half of a log row, spelled out.
+//
+// param_a and param_b mean something DIFFERENT per kind -- an activity id here,
+// a skill slot there, a building kind, an attack index -- so one generic "a=%d"
+// column cannot be read without the command.h comment open beside it. Each kind
+// resolves its own payload through the catalog that owns those ids.
+std::string command_payload(const badlands::CommandRecord& r,
+                            const std::vector<badlands::CharacterState>& chars) {
+  char buf[160];
+  switch (r.kind) {
+    case badlands::CommandKindId::SetBehavior:
+      // param_b is the wake schedule the intention contract rides on
+      // (enqueue_set_behavior's duration_ticks, game/src/command.h).
+      std::snprintf(buf, sizeof(buf), "%s wake=+%lldt", badlands::ActivityName(r.param_a),
+                    static_cast<long long>(r.param_b));
+      return buf;
+    case badlands::CommandKindId::UseSkill:
+    case badlands::CommandKindId::FocusSkill: {
+      const char* skill = actor_skill_name(chars, r.actor, r.param_a);
+      const std::string label =
+          skill != nullptr ? std::string(skill) : ("slot#" + std::to_string(r.param_a));
+      std::snprintf(buf, sizeof(buf), "%s %s", label.c_str(),
+                    target_label(r.target_id).c_str());
+      return buf;
+    }
+    case badlands::CommandKindId::Attack:
+      // -1 is auto-pick (select_attack's tie-break); anything else names an
+      // index into the actor's own Attacks. CharacterState carries no attacks
+      // array, so the index is as far as this can be resolved.
+      if (r.param_a < 0) {
+        std::snprintf(buf, sizeof(buf), "auto %s", target_label(r.target_id).c_str());
+      } else {
+        std::snprintf(buf, sizeof(buf), "atk#%d %s", r.param_a,
+                      target_label(r.target_id).c_str());
+      }
+      return buf;
+    case badlands::CommandKindId::PlaceBuilding:
+      std::snprintf(buf, sizeof(buf), "%s rot=%d (%.1f, %.1f)",
+                    badlands::BuildingKindName(static_cast<badlands::BuildingKind>(r.param_a)),
+                    r.param_b, r.point_x, r.point_z);
+      return buf;
+    case badlands::CommandKindId::EnterBuilding:
+      // Kind only, no target: hero_enter is nearest-of-kind and never reads
+      // target_id (command.cpp), so printing one would invent a destination the
+      // command did not name.
+      return badlands::BuildingKindName(static_cast<badlands::BuildingKind>(r.param_a));
+    case badlands::CommandKindId::Engage:
+      // point.x is the caller's engagement_range (command.h's Engage comment).
+      std::snprintf(buf, sizeof(buf), "%s hold=%.1fm", target_label(r.target_id).c_str(),
+                    r.point_x);
+      return buf;
+    case badlands::CommandKindId::MoveTo:
+      std::snprintf(buf, sizeof(buf), "(%.1f, %.1f)", r.point_x, r.point_z);
+      return buf;
+    default:
+      // Everything left is target-only (RecruitHero, DestroyBuilding,
+      // EnterHome, Buy, CollectTax, Deposit, AttackBuilding, Chat,
+      // CancelFocus). No `?` fallback: the KIND is always named by the
+      // catalog, so an unlisted kind still reads correctly here.
+      return target_label(r.target_id);
   }
 }
 
@@ -663,11 +732,16 @@ void AiSandboxView::DrawInspector() {
               std::min(command_log_total_, kMaxCommandRows));
   const uint32_t shown = std::min(command_log_total_, kMaxCommandRows);
   if (ImGui::BeginChild("cmdlog", ImVec2(0.0f, 160.0f))) {
-    for (uint32_t i = 0; i < shown; ++i) {
+    // The log is append-ordered (oldest first, command_log_of in game/src/
+    // sim.cpp), so the LAST rows are the tail this panel promises -- starting
+    // at 0 froze it on the opening 24 commands of the run and never moved
+    // again, which for an observation tool is the whole panel gone.
+    for (uint32_t i = command_log_total_ - shown; i < command_log_total_; ++i) {
       const badlands::CommandRecord& r = cmd_rows_[i];
-      ImGui::Text("%-14s actor=%s (%.1f, %.1f) a=%d", command_name(r.kind),
+      ImGui::Text("%7lldt %-15s %-6s %s", static_cast<long long>(r.at_ticks),
+                  badlands::CommandKindName(r.kind),
                   r.actor == UINT32_MAX ? "player" : std::to_string(r.actor).c_str(),
-                  r.point_x, r.point_z, r.param_a);
+                  command_payload(r, char_rows_).c_str());
     }
   }
   ImGui::EndChild();

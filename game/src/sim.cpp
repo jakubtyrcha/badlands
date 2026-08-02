@@ -954,7 +954,7 @@ std::vector<NavDebugCell> Sim::NavDebugCells() {
     out.reserve(cells.size());
     for (const nav::NavMesh::DebugCell& c : cells) {
         out.push_back({c.min_world.x, c.min_world.y, c.max_world.x, c.max_world.y, c.cost,
-                       c.passable});
+                       c.passable, c.tri_mask});
     }
     return out;
 }

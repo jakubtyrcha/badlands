@@ -25,10 +25,29 @@ void NavDebugOverlay::Rebuild(Sim& sim, SceneContext& ctx, const GroundHeightFn&
       const glm::vec3 b(c.max_x, gy(c.max_x, c.min_z, lift), c.min_z);
       const glm::vec3 d(c.max_x, gy(c.max_x, c.max_z, lift), c.max_z);
       const glm::vec3 e(c.min_x, gy(c.min_x, c.max_z, lift), c.max_z);
-      lines_.AddLine(a, b, col);
-      lines_.AddLine(b, d, col);
-      lines_.AddLine(d, e, col);
-      lines_.AddLine(e, a, col);
+      if (c.tri_mask == 0 || c.tri_mask == 0xF) {
+        lines_.AddLine(a, b, col);
+        lines_.AddLine(b, d, col);
+        lines_.AddLine(d, e, col);
+        lines_.AddLine(e, a, col);
+        continue;
+      }
+      // A PARTIAL cell: a diagonal footprint covers some corner triangles and
+      // not others. Drawing the rect whole would show exactly the fat wall the
+      // triangle mask exists to stop showing -- so draw the four quarters
+      // individually, each in its own colour. Corner order is -Z, +X, +Z, -X
+      // (game/src/navmesh/tri.h), and the shared apex is the cell centre.
+      const float mid_x = 0.5f * (c.min_x + c.max_x);
+      const float mid_z = 0.5f * (c.min_z + c.max_z);
+      const glm::vec3 centre(mid_x, gy(mid_x, mid_z, lift), mid_z);
+      const glm::vec3 corner_edge[4][2] = {{a, b}, {b, d}, {d, e}, {e, a}};
+      for (int t = 0; t < 4; ++t) {
+        const bool solid = (c.tri_mask & (1u << t)) != 0;
+        const glm::vec3 tc = solid ? glm::vec3(0.85f, 0.12f, 0.12f) : col;
+        lines_.AddLine(corner_edge[t][0], corner_edge[t][1], tc);
+        lines_.AddLine(corner_edge[t][0], centre, tc);
+        lines_.AddLine(corner_edge[t][1], centre, tc);
+      }
     }
   }
 

@@ -63,6 +63,12 @@ class NavMesh {
         glm::vec2 max_world{0.0f};
         float cost = 0.0f;
         bool passable = false;
+        // Which corner triangles of the rect are solid (navmesh/tri.h).
+        // kMaskFree or kMaskSolid on a merged leaf; anything else means the
+        // rect is only PARTLY the thing `passable` says it is, and a consumer
+        // that draws the rect whole is drawing the artefact this mask exists to
+        // remove.
+        uint8_t tri_mask = kMaskFree;
     };
     void DebugCells(std::vector<DebugCell>& out) const;
 
@@ -98,6 +104,9 @@ class NavMesh {
     // --- world <-> cell mapping (world XZ metres) ---
     glm::ivec2 WorldToCell(glm::vec2 w) const;
     glm::vec2 CellCenterWorld(int cx, int cz) const;
+    // The triangle a world point falls in. Clamped to the grid like
+    // WorldToCell, so callers that care about being off-grid check first.
+    TriId WorldToTri(glm::vec2 w) const;
 
    private:
     // A clearance-exempt world rect (a target building being entered). When
@@ -109,13 +118,21 @@ class NavMesh {
         bool active = false;
     };
 
-    // Is cell (cx,cz) traversable for this query? A real passable leaf always is;
-    // an impassable cell is too when it lies within an active exempt rect.
-    bool CellOk(int cx, int cz, const Exempt& exempt) const;
-    // True if the straight segment a->b (world) crosses only CellOk cells.
+    // Is triangle (cx,cz,corner) traversable for this query? A free triangle
+    // always is; a solid one is too when it lies within an active exempt rect.
+    bool TriOk(int cx, int cz, int corner, const Exempt& exempt) const;
+    // True if the straight segment a->b (world) crosses only TriOk triangles.
     bool SegmentClear(glm::vec2 a, glm::vec2 b, const Exempt& exempt) const;
-    // Nearest passable cell to (cx,cz) within a bounded spiral; false if none.
-    bool RecoverCell(int cx, int cz, glm::ivec2& out) const;
+    // The part of a->b inside cell (cx,cz), split at the cell's two diagonals
+    // so each piece lies wholly in one triangle. `pa`/`pb` are in cell
+    // coordinates and [t0,t1] is the sub-segment's parameter range.
+    bool SubsegmentClear(int cx, int cz, glm::vec2 pa, glm::vec2 pb, float t0, float t1,
+                         const Exempt& exempt) const;
+    // Nearest free triangle to `p_cells` (cell coordinates) within a bounded
+    // spiral; false if none. Nearest by centroid, not first-in-scan-order --
+    // opposite corners of a cell are not graph-joined, so the choice can put a
+    // recovered body on the wrong side of a wall.
+    bool RecoverTri(glm::vec2 p_cells, TriId& out) const;
     // Node covering a world point (after recovery), or -1.
     int NodeAtWorld(glm::vec2 w) const;
     // Shared path core; exempt.active == false is the plain (no-exempt) path.
@@ -128,7 +145,7 @@ class NavMesh {
     float cell_size_ = 1.0f;
     glm::vec2 origin_{0.0f};
     int side_ = 0;
-    int clearance_ = 0;  // obstacle dilation baked at Build (cells); exempt margin
+    float clearance_m_ = 0.0f;  // obstacle dilation baked at Build; exempt margin
     // Cost query memo, keyed (from_cell_index << 32 | to_cell_index). Cleared by
     // Build. mutable so Cost() stays a const query.
     mutable std::unordered_map<uint64_t, float> cost_cache_;

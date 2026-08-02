@@ -56,23 +56,27 @@ TEST_CASE("SimNavSource marks the prebuilt castle footprint blocked", "[navworld
     SimNavSource src(*game);
     REQUIRE(!game->placement.buildings.empty());  // the castle
 
-    // Every footprint triangle's tile is blocked in the adapter.
+    // The adapter carries the footprint BIT FOR BIT, not "any corner set". A
+    // mismatch here is the whole defect this layer had: OR-ing the four bits
+    // turned every half-covered cell solid, which fattened each diagonal wall
+    // by a metre it does not occupy.
     int checked = 0;
     for (int tz = -kGridHalf; tz < kGridHalf; ++tz) {
         for (int tx = -kGridHalf; tx < kGridHalf; ++tx) {
-            bool foot = false;
-            for (int corner = 0; corner < 4; ++corner)
-                foot |= game->placement.footprint[tri_index(tx, tz, corner)] != 0;
-            if (foot) {
-                CHECK(src.blocked(tx + kGridHalf, tz + kGridHalf));
+            uint8_t want = nav::kMaskFree;
+            for (int corner = 0; corner < nav::kTriPerCell; ++corner)
+                if (game->placement.footprint[tri_index(tx, tz, corner)] != 0)
+                    want |= nav::tri_bit(corner);
+            if (want != nav::kMaskFree) {
+                CHECK(src.blocked_mask(tx + kGridHalf, tz + kGridHalf) == want);
                 ++checked;
             }
         }
     }
     CHECK(checked > 0);  // the castle occupies some tiles
-    // Out-of-world cells are blocked.
-    CHECK(src.blocked(-1, 0));
-    CHECK(src.blocked(kGridSize, 0));
+    // Out-of-world cells are wholly solid.
+    CHECK(src.blocked_mask(-1, 0) == nav::kMaskSolid);
+    CHECK(src.blocked_mask(kGridSize, 0) == nav::kMaskSolid);
 }
 
 TEST_CASE("rebuild_navmesh_if_stale builds once and tracks the nav epoch", "[navworld]") {
@@ -108,11 +112,122 @@ TEST_CASE("nav_cost with a navmesh is a weighted length >= the straight line", "
     CHECK(c == Catch::Approx(game->navmesh.Cost(a, b)));  // same as the mesh query
 }
 
-TEST_CASE("nav clearance covers the largest agent radius", "[navworld]") {
-    // Single-mesh clearance (F3): the baked clearance (metres) must be >= the
-    // largest agent radius the game spawns, or a unit could be routed through a
-    // gap too tight for it. Heroes are the largest at radius 0.5 (0.5 * size 1.0).
+TEST_CASE("nav clearance is sized to the body that walks it", "[navworld]") {
+    // Clearance is a standoff the PATH keeps from a footprint, bought by
+    // declaring ground unwalkable. Two numbers bracket what is sensible:
+    //
+    //   1/6 ~ 0.167   below this the lattice cannot express any standoff at all
+    //                 (NavParams::clearance_m), so a path grazes the footprint
+    //   ~0.45         Agent::radius for a hero (heroes.cpp: half the min body
+    //                 extent of a 0.9-wide body) -- the point at which the body
+    //                 fits wherever its centre is routed
+    //
+    // The old value was 1 whole cell: expressible only because it was an
+    // integer count, and about twice a hero. Combined with a per-cell obstacle
+    // boolean that already rounded diagonal walls outward, that is what made
+    // the arenas play far smaller than they draw.
+    //
+    // NB the mesh still does not GUARANTEE a body fits -- 0.4 is just under a
+    // hero and well under the 0.8 of the widest creature. What is guaranteed is
+    // that the routed CENTRE stays off the footprint, enforced exactly by
+    // reproject_out_of_footprints (movement.cpp) against the true oriented
+    // polygon.
     const nav::NavParams p = sim_nav_params();
-    const float clearance_m = static_cast<float>(p.clearance_cells) * 1.0f;  // 1 m cells
-    CHECK(clearance_m >= 0.5f);
+    CHECK(p.clearance_m > 1.0f / 6.0f);
+    CHECK(p.clearance_m <= 0.45f);
 }
+
+// --- the triangle lattice, across the two files that describe it ------------
+
+TEST_CASE("nav's corner convention matches the placement grid's", "[navworld]") {
+    // navmesh/tri.h re-declares the quarter-tile convention that placement.cpp
+    // stamps footprints with, because the nav core may not include placement.h
+    // (the injected-source boundary is what makes it testable without a sim).
+    // Two copies of a convention drift; this is what stops them. A mismatch
+    // would not crash -- units would just clip the wrong half of every
+    // diagonal wall, which is far harder to notice.
+    for (int corner = 0; corner < nav::kTriPerCell; ++corner) {
+        CAPTURE(corner);
+        for (int tz = -2; tz <= 2; ++tz) {
+            for (int tx = -2; tx <= 2; ++tx) {
+                // placement's representative point, read back through nav's
+                // point -> corner test.
+                const glm::vec2 p = triangle_centroid(tx, tz, corner);
+                CHECK(nav::corner_at(p.x - static_cast<float>(tx), p.y - static_cast<float>(tz)) ==
+                      corner);
+                // ...and nav's own centroid must BE that point.
+                const glm::vec2 q = nav::tri_centroid_cells(tx, tz, corner);
+                CHECK(q.x == Catch::Approx(p.x));
+                CHECK(q.y == Catch::Approx(p.y));
+            }
+        }
+    }
+}
+
+TEST_CASE("a diagonal building leaves half its boundary cells walkable", "[navworld]") {
+    // The defect in one test. A rotation-1 wall snaps to the (u,v) lattice, so
+    // its edge runs through cells rather than between them. Collapsing those
+    // cells to solid -- what the old per-cell boolean did -- is a metre of
+    // phantom wall down both faces of every diagonal run in the sandbox.
+    WorldConfig cfg;
+    cfg.prebuild_colony = false;
+    cfg.map = MapKind::FlatPlains;
+    cfg.terrain_blocking = true;
+    auto game = make_world(BrainDesc{}, cfg);
+    REQUIRE(plop_building(*game, PlacementDesc{static_cast<int32_t>(BuildingKind::Wall), 1,
+                                               0.0f, 0.0f}) != UINT32_MAX);
+
+    SimNavSource src(*game);
+    int partial = 0, solid = 0;
+    for (int cz = 0; cz < kGridSize; ++cz) {
+        for (int cx = 0; cx < kGridSize; ++cx) {
+            const uint8_t m = src.blocked_mask(cx, cz);
+            if (m == nav::kMaskFree) {
+                continue;
+            }
+            (m == nav::kMaskSolid) ? ++solid : ++partial;
+        }
+    }
+    // A diagonal footprint MUST produce half-covered cells; if it does not, the
+    // adapter has rounded them off and the rest of this is moot.
+    CHECK(partial > 0);
+    CHECK(solid > 0);  // and a solid interior
+
+    // Whether those free halves survive to the MESH is a question about the
+    // standoff, not about the mask -- so ask it at both sides of the ceiling.
+    // This is what keeps the shipped configuration honest: the half-covered
+    // cells are genuinely there, and it is the radius, not a rounding bug, that
+    // decides whether anything may stand on them.
+    auto any_free_half_standable = [&](float clearance_m) {
+        nav::NavMesh mesh;
+        mesh.Build(src, nav::NavParams{0.05f, 0.25f, clearance_m, 32});
+        for (int cz = 0; cz < kGridSize; ++cz) {
+            for (int cx = 0; cx < kGridSize; ++cx) {
+                const uint8_t m = src.blocked_mask(cx, cz);
+                if (m == nav::kMaskFree || m == nav::kMaskSolid) {
+                    continue;
+                }
+                for (int c = 0; c < nav::kTriPerCell; ++c) {
+                    if (nav::mask_has(m, c)) {
+                        continue;
+                    }
+                    const glm::vec2 w =
+                        src.origin_m() + nav::tri_centroid_cells(cx, cz, c) * src.cell_size_m();
+                    if (mesh.PassableAt(w)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    };
+    // Under the ceiling the free half is walkable -- proof the mask reaches the
+    // mesh intact, which is the whole of part B.
+    CHECK(any_free_half_standable(0.2f));
+    // At the shipped 0.4 it is not: a free corner is 0.236 from its own cell's
+    // solid corners, so the standoff absorbs it and the diagonal face goes back
+    // to cell-quantised. Deliberate (sim_nav_params has the reasoning) -- but
+    // asserted, so it cannot become true again by accident.
+    CHECK_FALSE(any_free_half_standable(sim_nav_params().clearance_m));
+}
+

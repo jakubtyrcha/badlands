@@ -279,6 +279,9 @@ add_library(badlands_game_lib STATIC
     # The wasm hero brain runtime (brainhost C ABI) -- see game/src/wasm_brain.h.
     game/src/wasm_brain.cpp
     game/src/activity_catalog.cpp
+    # Names for CommandKindId + BuildingKind (the command log's rows). Same
+    # badlands_sim.hpp-only dependency set as activity_catalog.cpp.
+    game/src/command_catalog.cpp
     game/src/activity_histogram.cpp
     game/src/behaviours/blocks.cpp
     game/src/behaviours/selectors.cpp

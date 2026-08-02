@@ -10,7 +10,7 @@ void NavMesh::Build(const NavSource& src, const NavParams& params) {
     cell_size_ = src.cell_size_m();
     origin_ = src.origin_m();
     side_ = src.side();
-    clearance_ = std::max(0, params.clearance_cells);
+    clearance_m_ = std::max(0.0f, params.clearance_m);
     qt_.Build(src, params);
     graph_.Build(qt_);
     cost_cache_.clear();  // stale against the old mesh
@@ -29,17 +29,31 @@ glm::vec2 NavMesh::CellCenterWorld(int cx, int cz) const {
     return origin_ + (glm::vec2(static_cast<float>(cx), static_cast<float>(cz)) + 0.5f) * cell_size_;
 }
 
-// Traversable for a query: a real passable leaf, or (when an exempt rect is
-// active) an impassable cell within that rect expanded by the mesh clearance --
-// i.e. the target building's clearance ring, lifted.
-bool NavMesh::CellOk(int cx, int cz, const Exempt& ex) const {
-    const int li = qt_.LeafAt(cx, cz);
-    if (li >= 0 && qt_.leaves()[li].passable) {
+TriId NavMesh::WorldToTri(glm::vec2 w) const {
+    const glm::ivec2 c = WorldToCell(w);
+    const glm::vec2 p = (w - origin_) / cell_size_;
+    // WorldToCell CLAMPS to the grid, so the local fraction has to be clamped
+    // with it. Left raw, a point well off the map gives a fraction in the tens
+    // and corner_at names an arbitrary corner of the edge cell -- which then
+    // gets probed as if it meant something.
+    const float fx = std::clamp(p.x - static_cast<float>(c.x), 0.0f, 1.0f);
+    const float fz = std::clamp(p.y - static_cast<float>(c.y), 0.0f, 1.0f);
+    return TriId{c.x, c.y, corner_at(fx, fz)};
+}
+
+// Traversable for a query: a free triangle, or (when an exempt rect is active)
+// a solid one within that rect expanded by the mesh clearance -- i.e. the
+// target building's clearance ring, lifted.
+bool NavMesh::TriOk(int cx, int cz, int corner, const Exempt& ex) const {
+    if (qt_.TriPassable(cx, cz, corner)) {
         return true;
     }
     if (ex.active) {
-        const glm::vec2 c = CellCenterWorld(cx, cz);
-        const float m = static_cast<float>(clearance_) * cell_size_ + 1e-3f;
+        // Measured at the triangle's centroid rather than the cell centre: a
+        // cell centre sits exactly on the (u,v) diagonals, so on a partial cell
+        // it belongs to no triangle in particular.
+        const glm::vec2 c = origin_ + tri_centroid_cells(cx, cz, corner) * cell_size_;
+        const float m = clearance_m_ + 1e-3f;
         if (c.x >= ex.min.x - m && c.x <= ex.max.x + m && c.y >= ex.min.y - m &&
             c.y <= ex.max.y + m) {
             return true;
@@ -48,10 +62,51 @@ bool NavMesh::CellOk(int cx, int cz, const Exempt& ex) const {
     return false;
 }
 
-// Amanatides-Woo cell traversal: the segment is clear iff every cell it touches
-// is CellOk. Out-of-range cells count as blocked.
+// The piece of the segment inside one cell, tested per triangle.
+//
+// The cell's two diagonals (z = x and z = 1-x in local coordinates) are linear
+// in the segment parameter, so their crossings split [t0,t1] into at most three
+// pieces, each lying wholly inside one corner triangle. Evaluating each piece
+// at its MIDPOINT keeps the test off the diagonals themselves, where
+// corner_at's tie-break would otherwise decide the answer.
+bool NavMesh::SubsegmentClear(int cx, int cz, glm::vec2 pa, glm::vec2 pb, float t0, float t1,
+                              const Exempt& ex) const {
+    const glm::vec2 lo = pa - glm::vec2(static_cast<float>(cx), static_cast<float>(cz));
+    const glm::vec2 d = pb - pa;
+    float ts[4] = {t0, t1, 0.0f, 0.0f};
+    int nt = 2;
+    // g(t) = 0 on the diagonal. Both are affine in t, so at most one root each.
+    const auto add_root = [&](float g0, float g1) {
+        if (g0 == g1) {
+            return;  // parallel to this diagonal: no crossing
+        }
+        const float t = -g0 / (g1 - g0);
+        if (t > t0 && t < t1) {
+            ts[nt++] = t;
+        }
+    };
+    // main diagonal: (z - cz) - (x - cx) = 0; anti: (z - cz) + (x - cx) - 1 = 0
+    add_root(lo.y - lo.x, (lo.y + d.y) - (lo.x + d.x));
+    add_root(lo.y + lo.x - 1.0f, (lo.y + d.y) + (lo.x + d.x) - 1.0f);
+    std::sort(ts, ts + nt);
+
+    for (int i = 0; i + 1 < nt; ++i) {
+        const float mid = 0.5f * (ts[i] + ts[i + 1]);
+        if (ts[i + 1] - ts[i] <= 0.0f) {
+            continue;  // degenerate sliver (the segment grazed a diagonal)
+        }
+        const glm::vec2 p = pa + d * mid;
+        const int corner = corner_at(p.x - static_cast<float>(cx), p.y - static_cast<float>(cz));
+        if (!TriOk(cx, cz, corner, ex)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Amanatides-Woo cell traversal, testing TRIANGLES within each cell it visits.
+// Out-of-range cells count as blocked.
 bool NavMesh::SegmentClear(glm::vec2 a, glm::vec2 b, const Exempt& ex) const {
-    auto passable = [&](int cx, int cz) { return CellOk(cx, cz, ex); };
     const glm::vec2 pa = (a - origin_) / cell_size_;
     const glm::vec2 pb = (b - origin_) / cell_size_;
     int cx = static_cast<int>(std::floor(pa.x));
@@ -77,13 +132,22 @@ bool NavMesh::SegmentClear(glm::vec2 a, glm::vec2 b, const Exempt& ex) const {
         t_delta_z = static_cast<float>(stepz) / dz;
     }
 
+    // `t_enter` trails the traversal so each cell knows the parameter range of
+    // the piece of segment inside it -- what SubsegmentClear splits on.
+    float t_enter = 0.0f;
     for (int guard = 0; guard < 4 * side_ + 4; ++guard) {
-        if (!passable(cx, cz)) {
+        const bool last = (cx == gx && cz == gz);
+        const float t_exit = last ? 1.0f : std::min(1.0f, std::min(t_max_x, t_max_z));
+        if (cx < 0 || cz < 0 || cx >= side_ || cz >= side_) {
+            return false;  // off-grid is a wall
+        }
+        if (!SubsegmentClear(cx, cz, pa, pb, t_enter, t_exit, ex)) {
             return false;
         }
-        if (cx == gx && cz == gz) {
+        if (last) {
             return true;
         }
+        t_enter = t_exit;
         if (t_max_x < t_max_z) {
             t_max_x += t_delta_x;
             cx += stepx;
@@ -92,23 +156,58 @@ bool NavMesh::SegmentClear(glm::vec2 a, glm::vec2 b, const Exempt& ex) const {
             cz += stepz;
         }
         if (t_max_x > 1.0f && t_max_z > 1.0f) {
-            // Past the segment end without landing exactly on (gx,gz); validate
-            // the end cell directly.
-            return passable(gx, gz);
+            // Both next boundaries are past the segment end, so the cell just
+            // stepped into holds it. Validate the remaining [t_enter, 1] there
+            // -- against (cx,cz) and NOT (gx,gz): t_enter is the exit parameter
+            // of the cell before this one, so it only describes a range inside
+            // the cell the traversal is actually in. They agree except under
+            // float drift at a corner, and on that path the pair would split
+            // the sub-segment against the wrong cell's diagonals.
+            break;
         }
     }
-    return passable(gx, gz);
+    if (cx < 0 || cz < 0 || cx >= side_ || cz >= side_) {
+        return false;
+    }
+    // The guard is sized well past a full grid crossing (a DDA needs at most
+    // 2*side steps), so reaching it means the walk did not terminate. Nothing
+    // has validated the tail, and "clear" is not a safe thing to guess.
+    if (!SubsegmentClear(cx, cz, pa, pb, t_enter, 1.0f, ex)) {
+        return false;
+    }
+    return cx == gx && cz == gz;
 }
 
-// Nearest passable cell to (cx,cz), searched ring by ring so the closest wins;
-// deterministic scan order within a ring.
-bool NavMesh::RecoverCell(int cx, int cz, glm::ivec2& out) const {
-    auto ok = [&](int x, int z) {
-        const int li = qt_.LeafAt(x, z);
-        return li >= 0 && qt_.leaves()[li].passable;
+// Nearest free triangle to `p_cells`, searched ring by ring so the closest ring
+// wins, and NEAREST BY CENTROID within a ring rather than first-in-scan-order.
+//
+// Which corner is picked is not cosmetic. Opposite corners of a cell are not
+// graph-joined (they meet at a point), so on a cell split by a wall the two
+// free halves can sit on opposite sides of it. Taking N because N is scanned
+// first would recover a body standing in the S half to a node across the wall,
+// and the path would be planned the long way round -- or reported unreachable.
+// Ties go to scan order, so the choice stays deterministic.
+bool NavMesh::RecoverTri(glm::vec2 p_cells, TriId& out) const {
+    const int cx = static_cast<int>(std::floor(p_cells.x));
+    const int cz = static_cast<int>(std::floor(p_cells.y));
+    bool found = false;
+    float best = std::numeric_limits<float>::infinity();
+    auto scan_cell = [&](int x, int z) {
+        for (int c = 0; c < kTriPerCell; ++c) {
+            if (!qt_.TriPassable(x, z, c)) {
+                continue;
+            }
+            const glm::vec2 d = tri_centroid_cells(x, z, c) - p_cells;
+            const float d2 = glm::dot(d, d);
+            if (d2 < best) {
+                best = d2;
+                out = TriId{x, z, c};
+                found = true;
+            }
+        }
     };
-    if (ok(cx, cz)) {
-        out = {cx, cz};
+    scan_cell(cx, cz);
+    if (found) {
         return true;
     }
     const int max_r = side_;
@@ -118,24 +217,34 @@ bool NavMesh::RecoverCell(int cx, int cz, glm::ivec2& out) const {
                 if (std::max(std::abs(dx), std::abs(dz)) != r) {
                     continue;  // ring shell only
                 }
-                const int x = cx + dx, z = cz + dz;
-                if (ok(x, z)) {
-                    out = {x, z};
-                    return true;
-                }
+                scan_cell(cx + dx, cz + dz);
             }
+        }
+        if (found) {
+            return true;  // nearest within the closest ring that has anything
         }
     }
     return false;
 }
 
 int NavMesh::NodeAtWorld(glm::vec2 w) const {
-    const glm::ivec2 c = WorldToCell(w);
-    glm::ivec2 r;
-    if (!RecoverCell(c.x, c.y, r)) {
+    const TriId t = WorldToTri(w);
+    // The point's OWN triangle first -- recovery is for endpoints that landed
+    // inside an obstacle, and on a partial cell the free half is usually right
+    // there rather than a ring away.
+    if (qt_.TriPassable(t.cx, t.cz, t.corner)) {
+        return graph_.NodeAt(t.cx, t.cz, t.corner);
+    }
+    // Recover from the CLAMPED cell's own coordinates, not the raw point: an
+    // off-grid query would otherwise measure every candidate against somewhere
+    // outside the map and rank them all alike.
+    const glm::vec2 p = glm::clamp((w - origin_) / cell_size_, glm::vec2(0.0f),
+                                   glm::vec2(static_cast<float>(side_)));
+    TriId r;
+    if (!RecoverTri(p, r)) {
         return -1;
     }
-    return graph_.NodeAt(r.x, r.y);
+    return graph_.NodeAt(r.cx, r.cz, r.corner);
 }
 
 NavMesh::PathResult NavMesh::FindPath(glm::vec2 from, glm::vec2 to) const {
@@ -191,20 +300,28 @@ NavMesh::PathResult NavMesh::FindPathImpl(glm::vec2 from, glm::vec2 to, const Ex
         const glm::vec2 to_cells = (to - origin_) / cell_size_;
         int best = -1;
         float best_metric = std::numeric_limits<float>::infinity();
+        // The metric is tested BEFORE the line-of-sight, which is a pure
+        // speed-up and not a change of answer: a node whose metric cannot beat
+        // the incumbent loses whether or not it can see the goal, so the same
+        // node wins and ties still go to the lowest index. It matters because
+        // SegmentClear is O(side) and this loop runs over every reachable node
+        // -- and the triangle decomposition made that node count larger, since
+        // a cell in an obstacle's standoff ring is now a partial leaf with its
+        // own nodes rather than part of one merged solid leaf.
         for (int c = 0; c < graph_.node_count(); ++c) {
             if (!std::isfinite(dist[c])) {
                 continue;
             }
             const glm::vec2 cc = graph_.center_cells(c);
-            const glm::vec2 cw = origin_ + cc * cell_size_;
-            if (!SegmentClear(cw, to, ex)) {
+            const float metric = dist[c] + glm::distance(cc, to_cells);
+            if (metric >= best_metric) {
                 continue;
             }
-            const float metric = dist[c] + glm::distance(cc, to_cells);
-            if (metric < best_metric) {
-                best_metric = metric;
-                best = c;
+            if (!SegmentClear(origin_ + cc * cell_size_, to, ex)) {
+                continue;
             }
+            best_metric = metric;
+            best = c;
         }
         if (best < 0) {
             return res;  // unreachable even with the exemption
@@ -215,13 +332,18 @@ NavMesh::PathResult NavMesh::FindPathImpl(glm::vec2 from, glm::vec2 to, const Ex
         std::reverse(nodes.begin(), nodes.end());
     }
 
-    // Coarse polyline: the true endpoints with the leaf centres between them.
+    // Coarse polyline: the true endpoints with the node centres between them.
+    //
+    // The centre is used AS IT IS, not rounded to a cell. Truncating it to
+    // CellCenterWorld put every waypoint back on the cell centre -- which is
+    // exactly where the two (u,v) diagonals cross, so on a partial cell it lands
+    // on the boundary of the wall the node exists to avoid, and on a triangle
+    // node it discards which half was free in the first place.
     std::vector<glm::vec2> coarse;
     coarse.reserve(nodes.size() + 2);
     coarse.push_back(from);
     for (int nd : nodes) {
-        const glm::vec2 cc = graph_.center_cells(nd);
-        coarse.push_back(CellCenterWorld(static_cast<int>(cc.x), static_cast<int>(cc.y)));
+        coarse.push_back(origin_ + graph_.center_cells(nd) * cell_size_);
     }
     coarse.push_back(to);
 
@@ -277,6 +399,7 @@ void NavMesh::DebugCells(std::vector<DebugCell>& out) const {
                                     cell_size_;
         c.cost = l.cost;
         c.passable = l.passable;
+        c.tri_mask = l.tri_mask;
         out.push_back(c);
     }
 }
@@ -304,6 +427,7 @@ void NavMesh::CellsNear(glm::vec2 origin, float radius, size_t max_out,
                                     cell_size_;
         c.cost = l.cost;
         c.passable = l.passable;
+        c.tri_mask = l.tri_mask;
 
         const glm::vec2 centre = (c.min_world + c.max_world) * 0.5f;
         const glm::vec2 d = centre - origin;
@@ -365,8 +489,40 @@ bool NavMesh::PassableAt(glm::vec2 w) const {
     if (cx < 0 || cz < 0 || cx >= side_ || cz >= side_) {
         return false;
     }
-    const int li = qt_.LeafAt(cx, cz);
-    return li >= 0 && qt_.leaves()[li].passable;
+    // Per triangle, not per cell: half a cell beside a diagonal wall is a real
+    // place to stand, and answering for the whole cell is what made it look
+    // like a wall.
+    //
+    // EVERY triangle whose closed region holds the point, which on a boundary
+    // means more than one -- two across a diagonal or a cell edge, four at a
+    // cell corner. Picking one arbitrarily made this disagree with
+    // SegmentClear, which samples strictly inside triangles and so never meets
+    // the tie; nav_point_free would then refuse ground a unit had just been
+    // routed across. That is not hypothetical or rare: a whole leaf's centre is
+    // the waypoint the string-pull emits, and an even-sized leaf's centre has
+    // integer coordinates -- i.e. lands exactly on a cell corner.
+    //
+    // Permissive on the boundary is also the direction the rest of this layer
+    // errs, for the reason sim_nav_params gives.
+    const bool on_x_border = c.x == std::floor(c.x);
+    const bool on_z_border = c.y == std::floor(c.y);
+    for (int dz = on_z_border ? -1 : 0; dz <= 0; ++dz) {
+        for (int dx = on_x_border ? -1 : 0; dx <= 0; ++dx) {
+            const int nx = cx + dx, nz = cz + dz;
+            if (nx < 0 || nz < 0) {
+                continue;
+            }
+            int corners[kTriPerCell];
+            const int n =
+                corners_at(c.x - static_cast<float>(nx), c.y - static_cast<float>(nz), corners);
+            for (int i = 0; i < n; ++i) {
+                if (qt_.TriPassable(nx, nz, corners[i])) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 }  // namespace badlands::nav

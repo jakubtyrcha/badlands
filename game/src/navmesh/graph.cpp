@@ -8,49 +8,87 @@
 
 namespace badlands::nav {
 
-// Nodes = passable leaves. Edges join passable leaves that share a 4-connected
-// border, weighted by centre-to-centre distance x average terrain cost.
+// Nodes = passable leaves, split per free corner where a leaf is partial. Edges
+// join nodes that share an EDGE, weighted by centre-to-centre distance x
+// average terrain cost.
 void NavGraph::Build(const Quadtree& qt) {
     qt_ = &qt;
     const std::vector<Leaf>& leaves = qt.leaves();
+    const int n = qt.side();
     node_leaf_.clear();
-    leaf_node_.assign(leaves.size(), -1);
+    node_tri_.clear();
+    cell_tri_node_.assign(static_cast<size_t>(n) * n * kTriPerCell, -1);
+    const auto tri_slot = [n](int x, int z, int c) {
+        return (static_cast<size_t>(z) * n + x) * kTriPerCell + c;
+    };
+
+    // Numbered in LEAF order, and within a partial leaf in corner order
+    // N,E,S,W -- the determinism the replay contract rests on comes from this
+    // walk, not from the cell scan below.
     for (int li = 0; li < static_cast<int>(leaves.size()); ++li) {
-        if (leaves[li].passable) {
-            leaf_node_[li] = static_cast<int>(node_leaf_.size());
+        const Leaf& l = leaves[li];
+        if (!l.passable) {
+            continue;
+        }
+        if (l.tri_mask == kMaskFree) {
+            const int node = static_cast<int>(node_leaf_.size());
             node_leaf_.push_back(li);
+            node_tri_.push_back(-1);
+            for (int z = l.z0; z < l.z0 + l.size; ++z) {
+                for (int x = l.x0; x < l.x0 + l.size; ++x) {
+                    for (int c = 0; c < kTriPerCell; ++c) {
+                        cell_tri_node_[tri_slot(x, z, c)] = node;
+                    }
+                }
+            }
+            continue;
+        }
+        // Partial leaves are always a single cell (the quadtree refuses to
+        // merge one), so the corners map straight onto that cell.
+        for (int c = 0; c < kTriPerCell; ++c) {
+            if (mask_has(l.tri_mask, c)) {
+                continue;
+            }
+            const int node = static_cast<int>(node_leaf_.size());
+            node_leaf_.push_back(li);
+            node_tri_.push_back(c);
+            cell_tri_node_[tri_slot(l.x0, l.z0, c)] = node;
         }
     }
     adj_.assign(node_leaf_.size(), {});
 
     std::set<std::pair<int, int>> seen;
-    auto try_link = [&](int a_leaf, int b_leaf) {
-        if (a_leaf < 0 || b_leaf < 0 || a_leaf == b_leaf) {
-            return;
-        }
-        const int na = leaf_node_[a_leaf], nb = leaf_node_[b_leaf];
-        if (na < 0 || nb < 0) {
-            return;  // one side impassable
+    auto try_link = [&](int na, int nb) {
+        if (na < 0 || nb < 0 || na == nb) {
+            return;  // off-grid, solid, or both sides inside one leaf
         }
         const std::pair<int, int> key = std::minmax(na, nb);
         if (!seen.insert(key).second) {
             return;  // border already linked
         }
         const float dist = glm::distance(center_cells(na), center_cells(nb));
-        const float w = dist * 0.5f * (leaves[a_leaf].cost + leaves[b_leaf].cost);
+        const float w =
+            dist * 0.5f * (leaves[node_leaf_[na]].cost + leaves[node_leaf_[nb]].cost);
         adj_[na].push_back({nb, w});
         adj_[nb].push_back({na, w});
     };
 
-    const int n = qt.side();
+    // Walk every triangle and link it to its three edge-sharing neighbours.
+    // Inside a big whole-leaf node the in-tile links are self-links and drop
+    // out, so what survives there is exactly the old across-the-border rule.
     for (int z = 0; z < n; ++z) {
         for (int x = 0; x < n; ++x) {
-            const int here = qt.LeafAt(x, z);
-            if (x + 1 < n) {
-                try_link(here, qt.LeafAt(x + 1, z));
-            }
-            if (z + 1 < n) {
-                try_link(here, qt.LeafAt(x, z + 1));
+            for (int c = 0; c < kTriPerCell; ++c) {
+                const int here = cell_tri_node_[tri_slot(x, z, c)];
+                if (here < 0) {
+                    continue;
+                }
+                for (const TriId& t : tri_neighbors(x, z, c)) {
+                    if (t.cx < 0 || t.cz < 0 || t.cx >= n || t.cz >= n) {
+                        continue;
+                    }
+                    try_link(here, cell_tri_node_[tri_slot(t.cx, t.cz, t.corner)]);
+                }
             }
         }
     }
@@ -59,16 +97,23 @@ void NavGraph::Build(const Quadtree& qt) {
     }
 }
 
-int NavGraph::NodeAt(int cx, int cz) const {
+int NavGraph::NodeAt(int cx, int cz, int corner) const {
     if (qt_ == nullptr) {
         return -1;
     }
-    const int li = qt_->LeafAt(cx, cz);
-    return li < 0 ? -1 : leaf_node_[li];
+    const int n = qt_->side();
+    if (cx < 0 || cz < 0 || cx >= n || cz >= n || corner < 0 || corner >= kTriPerCell) {
+        return -1;
+    }
+    return cell_tri_node_[(static_cast<size_t>(cz) * n + cx) * kTriPerCell + corner];
 }
 
 glm::vec2 NavGraph::center_cells(int node) const {
     const Leaf& l = qt_->leaves()[node_leaf_[node]];
+    const int c = node_tri_[node];
+    if (c >= 0) {
+        return tri_centroid_cells(l.x0, l.z0, c);
+    }
     const float h = static_cast<float>(l.size) * 0.5f;
     return {static_cast<float>(l.x0) + h, static_cast<float>(l.z0) + h};
 }
