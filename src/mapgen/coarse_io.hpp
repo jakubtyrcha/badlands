@@ -28,10 +28,14 @@ struct CoarseManifest {
   uint32_t seed = 0;
   float runoff_m_per_yr = 0.0f;
   int steps = 0;
-  // Whole-world soil quantiles (the same fractions window.cpp's
-  // kMountainFrac/kHillsFrac cut with), so a patch cut later from anywhere in
-  // the world classifies biomes the same way regardless of what was cut. Two
-  // floats instead of a raster.
+  // Whole-world soil quantiles: the thinnest 12% of dry cover is Mountain, the
+  // next 33% Hills. They live HERE, computed once over the whole world, because
+  // quantiles taken over a patch make the same ground classify differently
+  // depending on what was cut -- which breaks the density- and
+  // resolution-independence guarantees outright. Two floats instead of a
+  // raster, so classification stays re-tunable in stage 2 without re-running
+  // the world. Applied by coarse_world_patch_source.cpp, which compares soil
+  // against these values directly.
   float soil_cut_mountain_m = 0.0f;
   float soil_cut_hills_m = 0.0f;
 };

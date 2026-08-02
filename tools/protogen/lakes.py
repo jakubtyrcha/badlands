@@ -6,11 +6,18 @@ Watershed-Labeling Algorithm". O(n log n), deterministic, no sim changes.
 water_depth = filled - height; lakes are the connected components of depth > 0,
 each flat at its own spill elevation.
 
-usage: lakes.py <height.f32> <relief_m> <out.png>
-       lakes.py <height.f32> <n> <world_m> <relief_m> <out.png>   (explicit override)
+usage: lakes.py <height.f32> <out.png>
+       lakes.py <height.f32> <n> <world_m> <out.png>   (explicit override)
 
 Resolution and world size come from world.txt (src/mapgen/coarse_io.hpp) next
 to <height.f32> unless given explicitly.
+
+HEIGHT IS ALREADY IN METRES. protogen's Dump() writes `height * relief_m`, so
+the raster on disk is metres and needs no further scaling. This script used to
+take a <relief_m> argument and multiply by it a SECOND time, which put every
+depth it printed out by that factor -- depths in the tens of thousands of
+metres. The argument is gone rather than fixed, because with the double-scale
+removed it had no remaining use.
 """
 import sys, os, heapq
 import numpy as np
@@ -101,21 +108,22 @@ def hillshade(z, cell, az=315.0, alt=45.0):
 
 
 def main():
-    if len(sys.argv) >= 6:
-        hp, n, world, relief, out = (sys.argv[1], int(sys.argv[2]),
-                                     float(sys.argv[3]), float(sys.argv[4]),
-                                     sys.argv[5])
+    if len(sys.argv) >= 5:
+        hp, n, world, out = (sys.argv[1], int(sys.argv[2]), float(sys.argv[3]),
+                             sys.argv[4])
     else:
-        hp, relief, out = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+        hp, out = sys.argv[1], sys.argv[2]
         n, world = read_world_txt(os.path.dirname(hp) or ".")
     cell = world / n
     cell_area = cell * cell
-    h = np.fromfile(hp, dtype=np.float32).reshape(n, n).astype(np.float64) * relief
+    # No scaling: the raster is metres already (see the module docstring).
+    h = np.fromfile(hp, dtype=np.float32).reshape(n, n).astype(np.float64)
 
     filled = priority_flood(h)
     depth = np.maximum(filled - h, 0.0)
 
-    print(f"--- {hp}  ({n}x{n}, cell {cell:.1f} m, relief {relief:.0f} m)")
+    print(f"--- {hp}  ({n}x{n}, cell {cell:.1f} m, "
+          f"relief {h.max()-h.min():.0f} m)")
     for thr in (0.01, 0.5, 2.0):
         wet = depth > thr
         print(f"  depth > {thr:>4} m : {100*wet.mean():5.2f}% of map, "

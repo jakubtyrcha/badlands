@@ -20,6 +20,11 @@ Decided in the design conversation, with the measurements that decided it.
 | sub-texel geometry | stays in **stage 3** | a 0.34 m cavity is not representable on a 1 m lattice |
 | patch size / resolution | **fully configurable, independent** | 128² is an iteration size; the game uses 2048² |
 | coarse density | **read from the data** | must never be hardcoded, in any consumer |
+| where stage 2 lives | `src/mapgen/`, namespace `badlands::mapgen` | no new module; the layering is enforced by CMake targets instead (§3.6) |
+| the water block | carried in `PatchData`, not derived per consumer | the contract says a patch HAS water; how a provider gets it is its own business (§3.1) |
+| river culling | **flow** in stage 1, **frame + length** in stage 2 | length relative to a frame is meaningless without a frame (§2.2) |
+| biome cutoffs | two floats in the coarse manifest | per-patch quantiles make the same ground classify differently (§2.3) |
+| patch coordinates | **patch-local**, `origin_m` echoed as provenance | every stage-3 consumer assumes a zero-based lattice; 16 km offsets cost float precision |
 
 Three findings that shaped this and should not be re-litigated:
 
@@ -96,6 +101,47 @@ The network is extracted where the catchment exists — on the whole coarse worl
 
 This is a defect fix, not a preference. See §5.
 
+**Two culls, in two stages, and the split is not arbitrary.** Stage 1 culls by
+**flow** — a physical, patch-independent threshold that means the same thing
+everywhere. It cannot cull by length, because "is this branch too short to
+bother with" is a question about a frame, and stage 1 has no frame. Stage 2
+therefore clips to the patch and *then* culls by length, so stage 3 receives
+only channel worth drawing.
+
+**That ordering exposed a latent bug, and closing it is part of this design.**
+Clipping minted an inbound frame crossing as `RiverNodeKind::Source`; both prune
+passes re-derive `Source` from `in_deg == 0`; and the length cull removes only
+headwater chains. So a trunk that merely *enters* a patch read as a headwater
+and was deleted whenever its in-frame stretch fell below the threshold — the
+same failure the prune already documented one level down (a 700 m trunk eaten
+fragment by fragment, peak Q 0.7183 → 0.0218 m³/s).
+
+The fix is a new node kind, **`RiverNodeKind::FrameEntry`** — the inbound twin
+of the existing `Mouth` — minted by the clip and exempted by the culls. Two
+things are worth recording because neither was obvious:
+
+- The exemption lists alone are **not** sufficient. They govern how surviving
+  nodes are re-labelled; the cull's own trigger is purely topological, so it
+  also needs an explicit `FrameEntry` guard or the fix is cosmetic.
+- The degenerate branch matters more than the interpolated one. The crossing
+  solver rejects `t >= 1`, so a sample landing *exactly* on the frame falls
+  through to a fallback path — which is precisely what a lattice-aligned channel
+  does routinely. That fallback was the likeliest route to the bug, not the
+  least likely.
+
+### 2.3 Biome cutoffs are whole-world, and live in the manifest
+
+Biomes are cut on **quantiles of the soil distribution**, and the old tool took
+those quantiles *over the window it was cutting*. That makes the same ground
+classify differently depending on what you cut — which fails the density- and
+resolution-independence guarantees in §8 outright, not marginally.
+
+Stage 1 therefore computes the quantiles once over the whole world and records
+the two **threshold values** in its manifest. Stage 2 applies them per patch.
+Two floats, not a raster: classification stays re-tunable in stage 2 without
+re-running or re-post-processing the world, and the same ground classifies the
+same way regardless of the cut.
+
 ## 3. Stage 2 — detailed-patch-extraction
 
 The one frozen interface in this design. It is a boundary, **not an algorithm**:
@@ -112,13 +158,31 @@ PatchRequest
 
 PatchData
   texel_m
+  origin_m          echoed for provenance only; the lattice is zero-based
   height            f32 metres — the BED, never the water surface
   level             f32 metres — lake surface elevation, flat per lake
+  water_depth       f32 metres
+  lake_id           i32, index into `lakes`, -1 where dry
+  lakes             per-lake records
   biome             u8, mapgen::Biome
   soil              f32 metres of erodible cover
-  rivers            RiverGraph, clipped to the patch, in world coords
+  rivers            RiverGraph, clipped + culled, PATCH-LOCAL metres
   elevation_range   min/max metres
 ```
+
+- **The water block is carried, not derived by each consumer.** An earlier draft
+  had `PatchData` hold `level` alone, with a free function producing depth /
+  lake ids / lake records — on the grounds that a provider which *cannot* write
+  a derived field cannot write it inconsistently. That was reasoning from what
+  today's providers happen to do. The contract says a patch HAS water; whether a
+  given provider derives it or authors it outright is that provider's business,
+  and a future one may well have better information than a re-derivation can
+  recover.
+- **Coordinates are patch-local**: texel (0, 0) at world (0, 0), spanning
+  `[0, world_size_m]`. Forced from two directions — every stage-3 consumer
+  already assumes a zero-based lattice, and absolute coordinates at a 16 km
+  offset spend float precision on an offset the patch cannot use. `origin_m`
+  rides along as provenance and nothing transforms by it.
 
 - **`depth = max(0, level − height)`**, with a dry texel storing `level ==
   height`. No sentinel, no mask, and a lake surface is exactly flat by
@@ -215,6 +279,33 @@ The channel carve is **not** in this chain. It is sub-texel and belongs to stage
   the caller's.** Per-texel taps cost nothing.
 - The honest half of the old rule survives: geometry is never silently
   reinterpreted, and a contradiction is an error.
+
+### 3.6 The layering is enforced by CMake, not by convention
+
+Stage 2 lives in `src/mapgen/` under the existing namespace — no new module, no
+second namespace. That directory is not a stage; it is the shared vocabulary
+(`Field2D`, `Biome`, `LakeInfo`, the river algebra) that all three stages sit
+on, and every type the contract needs already lives there.
+
+The cost of that choice is that nothing in the *tree* records which file belongs
+to which stage. So the boundary is drawn in the build instead:
+
+```
+badlands_mapgen_lib        vocabulary + river algebra + artifact I/O   links nothing
+badlands_patch_lib         patch_data, patch_source  — THE CONTRACT    -> mapgen_lib
+badlands_patch_providers   the three providers + patch I/O             -> patch_lib
+badlands_mapview_view      map_view_view.cpp + stage-3 render code     -> patch_lib
+badlands_mapview           main_mapview.cpp only          -> mapview_view + providers
+```
+
+**`map_view_view.cpp` compiles into a library that does not link the
+providers.** If stage 3 ever reaches around the interface to a concrete source,
+it fails to link. Only the app's `main` — the one named selection boundary, the
+same shape `main_ai_sandbox.cpp` uses to pick a `SandboxMode` — sees them.
+
+That `badlands_mapgen_lib` links **nothing** is load-bearing too: four test
+targets link it precisely because it drags in no Dawn, and they previously
+hand-compiled its TUs to avoid exactly that.
 
 ## 4. Stage 3 — map-detailing
 
@@ -317,6 +408,17 @@ removes it from styling loops entirely.
 - Navmesh population from `PatchData` is out of scope.
 
 ## 8. Testing
+
+**No test runs the coarse simulation.** Not once, not a short one. Stage 1's
+physics is covered separately and already is, by protogen's own in-binary suite
+(27 assertions on 32–64 cell grids, sub-second, outside ctest). Everything here
+builds a **synthetic coarse artifact** — analytic bed, hand-written manifest,
+hand-built graph — into a temp directory. Coarse fixtures at 32²/64², patches at
+64²/128². Nothing needs to be big to be correct.
+
+The two independence tests below are the ones that catch a hardcoded density,
+and **neither means anything unless `world_size_m` is held FIXED** across the
+comparison. Vary exactly one thing.
 
 - **Provider indistinguishability.** Stage 3 renders a `SyntheticPatchSource`
   patch and a `FilePatchSource` patch through the identical path. If it needs to
