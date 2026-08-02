@@ -57,6 +57,114 @@ constexpr int kTrisPerQuad = 2;
 // groups); the spec's "~1.5x budget" heuristic.
 constexpr float kSmallGroupBudgetFactor = 1.5f;
 
+// --- Build instrumentation ---------------------------------------------------
+// Wall-clock accounting for the build, reported after LogStats. Its ONE job is
+// to locate the serial fraction: the build is a level-synchronous fan-out with
+// serial phases on both sides of every barrier, so the Amdahl floor -- not the
+// parallel section -- is what decides whether more threads can help at all.
+// Cost is one steady_clock pair per group / per tile, nanoseconds against a
+// meshopt call, so it stays unconditionally on like LogStats.
+//
+// Phase B accumulates into a per-group slot (never a shared counter), so the
+// numbers are race-free under ParallelFor and identical to a serial run.
+using ProfClock = std::chrono::steady_clock;
+
+double MsSince(ProfClock::time_point t) {
+  return std::chrono::duration<double, std::milli>(ProfClock::now() - t).count();
+}
+
+// Per-group Phase B breakdown. weld = WeldChildren, simplify = the meshopt
+// call, split = centroid sort + per-output compaction.
+struct GroupTiming {
+  double weld_ms = 0.0;
+  double simplify_ms = 0.0;
+  double split_ms = 0.0;
+
+  double Total() const { return weld_ms + simplify_ms + split_ms; }
+};
+
+// One Phase B slot: its timing plus the triangle counts that show how much
+// reduction the round actually bought.
+struct GroupStat {
+  GroupTiming t;
+  uint64_t in_tris = 0, out_tris = 0;
+};
+
+// One reduction round (one level of one ReduceGrid). b_wall is elapsed time,
+// b_cpu is summed per-group time -- b_cpu / (b_wall * workers) is the round's
+// parallel efficiency, and b_cpu / b_wall its realized speedup.
+struct RoundProfile {
+  size_t groups = 0;
+  uint64_t in_tris = 0, out_tris = 0;
+  double a_ms = 0.0, b_wall_ms = 0.0, b_cpu_ms = 0.0;
+  // Phase C splits into a SERIAL prefix that fixes the layout (c1) and a
+  // PARALLEL pack (c2). Kept apart because only c1 counts against Amdahl.
+  double c1_ms = 0.0, c2_ms = 0.0;
+  GroupTiming parts;
+  bool parallel = false;
+};
+
+// Whole-build accounting. Pre-pass rounds are SUMMED ACROSS TILES by round
+// index (thousands of tiny grids, one row each) while the main merge keeps one
+// row per round; both are serial-outer today, which is exactly what the report
+// is meant to expose.
+struct BuildProfile {
+  double leaf_scan_ms = 0.0;   // the "is this tile hot" quad scan
+  double leaf_cold_ms = 0.0;   // BuildLeafGeom on plain tiles
+  double leaf_cells_ms = 0.0;  // BuildDetailedTileCells on refined tiles
+  double leaf_emit_ms = 0.0;   // EmitCluster, both paths
+  double prepass_ms = 0.0;     // per-tile ReduceGrid, wall
+  // Wall clock of the leaf pass's two halves. The component timings above are
+  // summed CPU across tiles, so leaf_fanout_ms vs their sum is the fan-out's
+  // realized speedup; leaf_merge_ms is the serial arena concatenation.
+  double leaf_fanout_ms = 0.0;
+  // The arena merge splits the same way Phase C does: a SERIAL prefix over the
+  // tiles' sizes (leaf_prefix_ms) then a PARALLEL copy (leaf_copy_ms).
+  double leaf_prefix_ms = 0.0;
+  double leaf_copy_ms = 0.0;
+  double leaf_total_ms = 0.0;
+  double main_ms = 0.0;
+  size_t cold_tiles = 0, hot_tiles = 0, hot_cells = 0;
+  std::vector<RoundProfile> prepass_rounds;
+  std::vector<RoundProfile> main_rounds;
+
+  // Fold a per-tile profile into this one. Tiles are profiled into their own
+  // slots so the parallel leaf pass never shares a counter; this runs in the
+  // serial merge afterwards. NOTE the units shift: with the tile pass parallel,
+  // the leaf component timings are summed CPU time, not wall time.
+  void MergeFrom(const BuildProfile& o) {
+    leaf_scan_ms += o.leaf_scan_ms;
+    leaf_cold_ms += o.leaf_cold_ms;
+    leaf_cells_ms += o.leaf_cells_ms;
+    leaf_emit_ms += o.leaf_emit_ms;
+    prepass_ms += o.prepass_ms;
+    cold_tiles += o.cold_tiles;
+    hot_tiles += o.hot_tiles;
+    hot_cells += o.hot_cells;
+    for (size_t i = 0; i < o.prepass_rounds.size(); ++i)
+      Add(prepass_rounds, i, o.prepass_rounds[i]);
+  }
+
+  // Accumulate `r` into row `round` of `rows`, growing as needed.
+  static void Add(std::vector<RoundProfile>& rows, size_t round,
+                  const RoundProfile& r) {
+    if (rows.size() <= round) rows.resize(round + 1);
+    RoundProfile& d = rows[round];
+    d.groups += r.groups;
+    d.in_tris += r.in_tris;
+    d.out_tris += r.out_tris;
+    d.a_ms += r.a_ms;
+    d.b_wall_ms += r.b_wall_ms;
+    d.b_cpu_ms += r.b_cpu_ms;
+    d.c1_ms += r.c1_ms;
+    d.c2_ms += r.c2_ms;
+    d.parts.weld_ms += r.parts.weld_ms;
+    d.parts.simplify_ms += r.parts.simplify_ms;
+    d.parts.split_ms += r.parts.split_ms;
+    d.parallel = d.parallel || r.parallel;
+  }
+};
+
 // A build-time vertex. Position + the leaf-derived normal + biome id; color is
 // re-derived from the biome palette at pack time so its bytes stay exact and
 // bitwise-stable across clusters (crack-freeness). Normal is CARRIED unchanged
@@ -115,10 +223,27 @@ struct PosKey {
 };
 struct PosKeyHash {
   size_t operator()(const PosKey& k) const {
-    size_t h = k.x * 73856093u;
-    h ^= k.y * 19349663u + (h << 6) + (h >> 2);
-    h ^= k.z * 83492791u + (h << 6) + (h >> 2);
-    return h;
+    uint64_t h = static_cast<uint64_t>(k.x) * 73856093u;
+    h ^= static_cast<uint64_t>(k.y) * 19349663u + (h << 6) + (h >> 2);
+    h ^= static_cast<uint64_t>(k.z) * 83492791u + (h << 6) + (h >> 2);
+    // FINALIZER, and it is load-bearing: PosTable masks the LOW bits, and the
+    // low bits of the mix above are structurally dead for lattice geometry. A
+    // grid-aligned coordinate i*spacing has ~16 trailing zero mantissa bits,
+    // multiplying by an odd constant preserves trailing zeros exactly, and the
+    // only term moving entropy downward is (h >> 2) -- not far enough.
+    //
+    // On a map whose height is bitwise constant (a flat plateau, a clamped sea
+    // level, the blockout maps, MakeFlatMapData in the test suite) this is not
+    // a slight imbalance: MEASURED, all 16641 keys of a 129x129 weld hashed to
+    // ONE bucket, turning each weld into an O(n^2) probe walk.
+    //
+    // This was invisible while the welds used std::unordered_map, whose PRIME
+    // bucket count folds the high bits back in for free. Power-of-two masking
+    // does not, so the mixing has to be explicit here.
+    h ^= h >> 32;
+    h *= 0x9E3779B97F4A7C15ull;
+    h ^= h >> 29;
+    return static_cast<size_t>(h);
   }
 };
 PosKey KeyOf(const glm::vec3& p) {
@@ -129,22 +254,87 @@ PosKey KeyOf(const glm::vec3& p) {
   return k;
 }
 
-// Pack a cluster's geometry into the DAG's shared buffers, appending the cluster
-// record + its ClusterGeom (kept for the next level to consume). Returns the new
-// cluster index.
-uint32_t EmitCluster(TerrainClusterDag& dag,
-                     std::vector<ClusterGeom>& cluster_geom, ClusterGeom geom,
-                     int level, int own_group) {
+// Open-addressed position -> index table, replacing the
+// std::unordered_map<PosKey, uint32_t, PosKeyHash> both welds used. That map is
+// node-based: one allocation per distinct vertex, on a path that welds every
+// vertex of every cluster at every level. Linear probing over a power-of-two
+// table keeps the whole structure in two flat arrays and makes a probe three
+// integer compares.
+//
+// The table only answers "have I seen this position"; the caller still appends
+// vertices in encounter order, so first-seen index assignment -- and therefore
+// the welded output -- is bit-identical to the map version.
+class PosTable {
+ public:
+  static constexpr uint32_t kAbsent = 0xFFFFFFFFu;
+
+  explicit PosTable(size_t expected_keys) { Rehash(CapacityFor(expected_keys)); }
+
+  // Returns the value already stored for `k`; if `k` is new, stores
+  // `value_if_new` and returns kAbsent to say so.
+  uint32_t FindOrInsert(const PosKey& k, uint32_t value_if_new) {
+    size_t i = PosKeyHash{}(k) & mask_;
+    while (val_[i] != kAbsent) {
+      if (key_[i] == k) return val_[i];
+      i = (i + 1) & mask_;
+    }
+    key_[i] = k;
+    val_[i] = value_if_new;
+    // Keep the load factor at or under 1/2; linear probing degrades fast above
+    // that. Sizing from the caller's bound normally makes this never fire.
+    if (++size_ * 2 > mask_ + 1) Rehash((mask_ + 1) * 2);
+    return kAbsent;
+  }
+
+ private:
+  static size_t CapacityFor(size_t expected) {
+    size_t cap = 16;
+    while (cap < expected * 2) cap <<= 1;
+    return cap;
+  }
+
+  void Rehash(size_t cap) {
+    std::vector<PosKey> old_key;
+    std::vector<uint32_t> old_val;
+    old_key.swap(key_);
+    old_val.swap(val_);
+    key_.assign(cap, PosKey{});
+    val_.assign(cap, kAbsent);
+    mask_ = cap - 1;
+    for (size_t i = 0; i < old_val.size(); ++i) {
+      if (old_val[i] == kAbsent) continue;
+      size_t j = PosKeyHash{}(old_key[i]) & mask_;
+      while (val_[j] != kAbsent) j = (j + 1) & mask_;
+      key_[j] = old_key[i];
+      val_[j] = old_val[i];
+    }
+  }
+
+  std::vector<PosKey> key_;
+  std::vector<uint32_t> val_;
+  size_t mask_ = 0;
+  size_t size_ = 0;
+};
+
+// Packs one cluster's geometry into PRE-SIZED buffer slices at the given
+// offsets and returns its record. Writes only [first_vertex, +vertex_count) and
+// [first_index, +index_count), so callers holding disjoint offsets may run this
+// concurrently -- which is what lets emission be parallelized once a serial
+// prefix pass has fixed the layout.
+TerrainCluster PackClusterAt(TerrainClusterDag& dag, const ClusterGeom& geom,
+                             int level, int own_group, uint32_t first_vertex,
+                             uint32_t first_index) {
   TerrainCluster c;
-  c.first_vertex = static_cast<uint32_t>(dag.vertices.size() /
-                                         kFloatsPerClusterVertex);
+  c.first_vertex = first_vertex;
   c.vertex_count = static_cast<uint32_t>(geom.verts.size());
-  c.first_index = static_cast<uint32_t>(dag.indices.size());
+  c.first_index = first_index;
   c.index_count = static_cast<uint32_t>(geom.tris.size());
   c.level = level;
   c.own_group = own_group;
 
   glm::vec3 lo(FLT_MAX), hi(-FLT_MAX);
+  float* out = dag.vertices.data() +
+               static_cast<size_t>(first_vertex) * kFloatsPerClusterVertex;
   for (const WorkVertex& v : geom.verts) {
     // Palette bytes are written RAW (no sRGB->linear decode), matching the
     // engine terrain_blend material: the G-buffer albedo target is linear
@@ -152,21 +342,38 @@ uint32_t EmitCluster(TerrainClusterDag& dag,
     // sRGB decode), so both treat 8-bit albedo as linear. Linearizing here would
     // make cluster terrain too dark. See the M4 color-path finding in the docs.
     const mapgen::Rgb col = kBiomePalette[v.biome];
-    dag.vertices.push_back(v.pos.x);
-    dag.vertices.push_back(v.pos.y);
-    dag.vertices.push_back(v.pos.z);
-    dag.vertices.push_back(v.normal.x);
-    dag.vertices.push_back(v.normal.y);
-    dag.vertices.push_back(v.normal.z);
-    dag.vertices.push_back(PackU8x4(col.r, col.g, col.b, 255));
-    dag.vertices.push_back(PackU8x4(v.biome, ClusterHashByte(v.pos),
-                                    static_cast<uint8_t>(level), 0));
+    *out++ = v.pos.x;
+    *out++ = v.pos.y;
+    *out++ = v.pos.z;
+    *out++ = v.normal.x;
+    *out++ = v.normal.y;
+    *out++ = v.normal.z;
+    *out++ = PackU8x4(col.r, col.g, col.b, 255);
+    *out++ = PackU8x4(v.biome, ClusterHashByte(v.pos),
+                      static_cast<uint8_t>(level), 0);
     lo = glm::min(lo, v.pos);
     hi = glm::max(hi, v.pos);
   }
-  for (uint32_t idx : geom.tris) dag.indices.push_back(c.first_vertex + idx);
+  for (size_t k = 0; k < geom.tris.size(); ++k)
+    dag.indices[first_index + k] = first_vertex + geom.tris[k];
   c.bounds = Aabb::FromMinMax(lo, hi);
+  return c;
+}
 
+// Appending form: grows the buffers, then packs at the end. Used where emission
+// is naturally serial anyway (inside one tile's own arena).
+uint32_t EmitCluster(TerrainClusterDag& dag,
+                     std::vector<ClusterGeom>& cluster_geom, ClusterGeom geom,
+                     int level, int own_group) {
+  const uint32_t first_vertex = static_cast<uint32_t>(
+      dag.vertices.size() / kFloatsPerClusterVertex);
+  const uint32_t first_index = static_cast<uint32_t>(dag.indices.size());
+  dag.vertices.resize(dag.vertices.size() +
+                      geom.verts.size() * kFloatsPerClusterVertex);
+  dag.indices.resize(dag.indices.size() + geom.tris.size());
+
+  const TerrainCluster c =
+      PackClusterAt(dag, geom, level, own_group, first_vertex, first_index);
   const uint32_t cidx = static_cast<uint32_t>(dag.clusters.size());
   dag.clusters.push_back(c);
   cluster_geom.push_back(std::move(geom));
@@ -347,17 +554,14 @@ WorkVertex DetailVertex(const MapData& map, const DetailView& dv, int f, int gx,
 // perimeter arc length, emitting one triangle per step -- equal-resolution
 // edges, fanned edges, and the corners where they meet all fall out of the
 // same walk, so there is no corner case to enumerate (or get wrong).
-void AppendQuadGeom(ClusterGeom& g,
-                    std::unordered_map<PosKey, uint32_t, PosKeyHash>& weld,
-                    const MapData& map, const DetailView& dv, int qx, int qz) {
+void AppendQuadGeom(ClusterGeom& g, PosTable& weld, const MapData& map,
+                    const DetailView& dv, int qx, int qz) {
   const float sp = map.spacing_m();
   auto add = [&](const WorkVertex& v) -> uint32_t {
-    const PosKey key = KeyOf(v.pos);
-    auto it = weld.find(key);
-    if (it != weld.end()) return it->second;
     const uint32_t idx = static_cast<uint32_t>(g.verts.size());
+    const uint32_t got = weld.FindOrInsert(KeyOf(v.pos), idx);
+    if (got != PosTable::kAbsent) return got;
     g.verts.push_back(v);
-    weld.emplace(key, idx);
     return idx;
   };
   auto tri = [&](uint32_t a, uint32_t b, uint32_t c) {
@@ -518,7 +722,12 @@ TileCells BuildDetailedTileCells(const MapData& map, const DetailView& dv,
   for (int cz = 0; cz < out.nz; ++cz) {
     for (int cx = 0; cx < out.nx; ++cx) {
       ClusterGeom g;
-      std::unordered_map<PosKey, uint32_t, PosKeyHash> weld;
+      // A cell holds at most `side^2` quads, each contributing at most
+      // (2^kmax + 1)^2 vertices before welding -- an upper bound, so the table
+      // is allocated once and never rehashes.
+      const size_t per_quad = static_cast<size_t>((1 << kmax) + 1) *
+                              static_cast<size_t>((1 << kmax) + 1);
+      PosTable weld(static_cast<size_t>(out.side) * out.side * per_quad);
       const int ax0 = qx0 + cx * out.side;
       const int ax1 = std::min(ax0 + out.side, qx1);
       const int az0 = qz0 + cz * out.side;
@@ -536,21 +745,31 @@ TileCells BuildDetailedTileCells(const MapData& map, const DetailView& dv,
 // first occurrence (all copies of a shared vertex are bitwise-identical).
 ClusterGeom WeldChildren(const std::vector<ClusterGeom>& cluster_geom,
                          const std::vector<uint32_t>& children) {
+  // Exact upper bounds: the weld can only ever shrink the vertex count, and
+  // never touches the triangle count. Sizing the table from the bound means it
+  // never rehashes.
+  size_t max_verts = 0, total_tris = 0;
+  for (uint32_t c : children) {
+    max_verts += cluster_geom[c].verts.size();
+    total_tris += cluster_geom[c].tris.size();
+  }
+
   ClusterGeom merged;
-  std::unordered_map<PosKey, uint32_t, PosKeyHash> weld;
+  merged.verts.reserve(max_verts);
+  merged.tris.reserve(total_tris);
+  PosTable weld(max_verts);
+  std::vector<uint32_t> remap;
   for (uint32_t cidx : children) {
     const ClusterGeom& cg = cluster_geom[cidx];
-    std::vector<uint32_t> remap(cg.verts.size());
+    remap.resize(cg.verts.size());
     for (size_t v = 0; v < cg.verts.size(); ++v) {
-      const PosKey k = KeyOf(cg.verts[v].pos);
-      auto it = weld.find(k);
-      if (it == weld.end()) {
-        const uint32_t nv = static_cast<uint32_t>(merged.verts.size());
+      const uint32_t nv = static_cast<uint32_t>(merged.verts.size());
+      const uint32_t got = weld.FindOrInsert(KeyOf(cg.verts[v].pos), nv);
+      if (got == PosTable::kAbsent) {
         merged.verts.push_back(cg.verts[v]);
-        weld.emplace(k, nv);
         remap[v] = nv;
       } else {
-        remap[v] = it->second;
+        remap[v] = got;
       }
     }
     for (uint32_t idx : cg.tris) merged.tris.push_back(remap[idx]);
@@ -585,7 +804,8 @@ unsigned char LockVertex(const glm::vec3& p, const glm::vec4& fp, float map_w,
 GroupResult SimplifyAndSplit(ClusterGeom merged, const glm::vec4& footprint,
                              float map_w, float map_h,
                              const TerrainClusterParams& params,
-                             bool collapse_to_one = false) {
+                             bool collapse_to_one = false,
+                             GroupTiming* timing = nullptr) {
   const size_t vcount = merged.verts.size();
   std::vector<float> positions(vcount * 3);
   std::vector<float> attrs(vcount * 6);
@@ -631,11 +851,13 @@ GroupResult SimplifyAndSplit(ClusterGeom merged, const glm::vec4& footprint,
 
   std::vector<uint32_t> simplified(index_count);
   float result_error = 0.0f;
+  const auto t_simplify = ProfClock::now();
   const size_t got = meshopt_simplifyWithAttributes(
       simplified.data(), merged.tris.data(), index_count, positions.data(),
       vcount, sizeof(float) * 3, attrs.data(), sizeof(float) * 6, weights, 6,
       lock.data(), target, FLT_MAX, meshopt_SimplifyErrorAbsolute,
       &result_error);
+  if (timing) timing->simplify_ms += MsSince(t_simplify);
   simplified.resize(got);
 
   GroupResult res;
@@ -667,42 +889,59 @@ GroupResult SimplifyAndSplit(ClusterGeom merged, const glm::vec4& footprint,
   num_out = std::max(1, num_out);
 
   // Sort triangles by centroid along the longer footprint axis, cut at medians.
+  //
+  // Centroids are computed ONCE into a flat array rather than inside the
+  // comparator. The comparator form recomputed three random-access vertex loads
+  // plus the vec3 average on EVERY comparison -- O(n log n) times, all of it
+  // cache-missing -- and the split was measured at ~40% of all Phase B CPU,
+  // nearly as much as meshoptimizer itself. The sort is over identical float
+  // values in identical order, and std::stable_sort on equal keys yields the
+  // same permutation, so the output is bit-identical (pinned by the golden hash).
+  const auto t_split = ProfClock::now();
   const bool split_x = (footprint.z - footprint.x) >= (footprint.w - footprint.y);
-  std::vector<uint32_t> order(tri_count);
-  std::iota(order.begin(), order.end(), 0u);
-  auto centroid = [&](uint32_t t) {
+  std::vector<float> centroid(tri_count);
+  for (size_t t = 0; t < tri_count; ++t) {
     const glm::vec3& a = merged.verts[simplified[t * 3 + 0]].pos;
     const glm::vec3& b = merged.verts[simplified[t * 3 + 1]].pos;
     const glm::vec3& c = merged.verts[simplified[t * 3 + 2]].pos;
     const glm::vec3 m = (a + b + c) / 3.0f;
-    return split_x ? m.x : m.z;
-  };
-  std::stable_sort(order.begin(), order.end(),
-                   [&](uint32_t l, uint32_t r) { return centroid(l) < centroid(r); });
+    centroid[t] = split_x ? m.x : m.z;
+  }
+  std::vector<uint32_t> order(tri_count);
+  std::iota(order.begin(), order.end(), 0u);
+  std::stable_sort(
+      order.begin(), order.end(),
+      [&](uint32_t l, uint32_t r) { return centroid[l] < centroid[r]; });
+
+  // Welded index -> this output's local index. A STAMPED flat array rather than
+  // a per-output hash map: the key is already a dense index into merged.verts,
+  // so hashing it bought nothing and cost a node allocation per unique vertex.
+  // The stamp makes the reset O(1) instead of O(vcount) per output. First-seen
+  // ordering is preserved -- vertices are still appended in encounter order --
+  // so the outputs are bit-identical.
+  std::vector<uint32_t> local_of(vcount);
+  std::vector<uint32_t> stamp(vcount, 0);
 
   res.outputs.resize(num_out);
   for (int o = 0; o < num_out; ++o) {
     const size_t lo = tri_count * o / num_out;
     const size_t hi = tri_count * (o + 1) / num_out;
     ClusterGeom& out = res.outputs[o];
-    std::unordered_map<uint32_t, uint32_t> compact;  // welded idx -> local idx
+    const uint32_t mark = static_cast<uint32_t>(o) + 1;
     for (size_t s = lo; s < hi; ++s) {
       const uint32_t t = order[s];
       for (int k = 0; k < 3; ++k) {
         const uint32_t wi = simplified[t * 3 + k];
-        auto it = compact.find(wi);
-        uint32_t local;
-        if (it == compact.end()) {
-          local = static_cast<uint32_t>(out.verts.size());
+        if (stamp[wi] != mark) {
+          stamp[wi] = mark;
+          local_of[wi] = static_cast<uint32_t>(out.verts.size());
           out.verts.push_back(merged.verts[wi]);
-          compact.emplace(wi, local);
-        } else {
-          local = it->second;
         }
-        out.tris.push_back(local);
+        out.tris.push_back(local_of[wi]);
       }
     }
   }
+  if (timing) timing->split_ms += MsSince(t_split);
   return res;
 }
 
@@ -752,6 +991,77 @@ void LogStats(const TerrainClusterDag& dag, double build_ms, bool parallel,
                parallel ? "parallel" : "serial", workers);
 }
 
+// Where the build's wall time goes, and how much of it is STRUCTURALLY SERIAL
+// today. The last two lines are the point: `spdup` per round is the realized
+// speedup of the only parallel section (B_cpu / B_wall), and the Amdahl floor
+// is what the build would still cost if that section became free. If the floor
+// is most of the build, more threads inside Phase B cannot help and the
+// partitioning has to change instead.
+void LogProfile(const BuildProfile& p, double build_ms, unsigned workers) {
+  auto table = [](const char* title, const std::vector<RoundProfile>& rows) {
+    if (rows.empty()) return;
+    spdlog::info("  {}", title);
+    spdlog::info(
+        "    rd  groups    in_tris   out_tris     A_ms    B_wall     B_cpu  "
+        "spdup     C_ms   weld  simplfy   split");
+    for (size_t i = 0; i < rows.size(); ++i) {
+      const RoundProfile& r = rows[i];
+      const double spd = r.b_wall_ms > 0.0 ? r.b_cpu_ms / r.b_wall_ms : 0.0;
+      spdlog::info(
+          "    {:<2}{}{:>7} {:>10} {:>10} {:>8.1f} {:>9.1f} {:>9.1f} {:>5.2f}x"
+          " {:>8.1f} {:>6.1f} {:>8.1f} {:>7.1f}",
+          i, r.parallel ? ' ' : '*', r.groups, r.in_tris, r.out_tris, r.a_ms,
+          r.b_wall_ms, r.b_cpu_ms, spd, r.c1_ms + r.c2_ms, r.parts.weld_ms,
+          r.parts.simplify_ms, r.parts.split_ms);
+    }
+  };
+
+  spdlog::info("terrain cluster DAG build profile ({} workers, {:.1f} ms):",
+               workers, build_ms);
+  // Components are summed CPU across tiles; fan-out/merge are wall clock.
+  const double leaf_cpu = p.leaf_scan_ms + p.leaf_cold_ms + p.leaf_cells_ms +
+                          p.leaf_emit_ms + p.prepass_ms;
+  spdlog::info(
+      "  leaf pass {:.1f} ms = fanout {:.1f} wall ({:.1f} cpu, {:.2f}x) + "
+      "prefix {:.1f} serial + copy {:.1f} parallel",
+      p.leaf_total_ms, p.leaf_fanout_ms, leaf_cpu,
+      p.leaf_fanout_ms > 0.0 ? leaf_cpu / p.leaf_fanout_ms : 0.0,
+      p.leaf_prefix_ms, p.leaf_copy_ms);
+  spdlog::info(
+      "    cpu: scan {:.1f} | cold {:.1f} ({} tiles) | cells {:.1f} ({} tiles, "
+      "{} cells) | emit {:.1f} | pre-pass {:.1f}",
+      p.leaf_scan_ms, p.leaf_cold_ms, p.cold_tiles, p.leaf_cells_ms,
+      p.hot_tiles, p.hot_cells, p.leaf_emit_ms, p.prepass_ms);
+  spdlog::info("  main merge {:.1f} ms      (* = round ran serial)", p.main_ms);
+  table("pre-pass rounds (summed across hot tiles):", p.prepass_rounds);
+  table("main merge rounds:", p.main_rounds);
+
+  double main_a = 0.0, main_b_wall = 0.0, main_b_cpu = 0.0, main_c1 = 0.0,
+         main_c2 = 0.0;
+  for (const RoundProfile& r : p.main_rounds) {
+    main_a += r.a_ms;
+    main_b_wall += r.b_wall_ms;
+    main_b_cpu += r.b_cpu_ms;
+    main_c1 += r.c1_ms;
+    main_c2 += r.c2_ms;
+  }
+  // Serial = what no amount of threads can remove: the two layout-fixing prefix
+  // passes plus Phase A. Everything else fans out.
+  const double serial_ms = p.leaf_prefix_ms + main_a + main_c1;
+  const double pct = build_ms > 0.0 ? 100.0 * serial_ms / build_ms : 0.0;
+  spdlog::info(
+      "  serial {:.1f} ms ({:.1f}%) = leaf prefix {:.1f} + phaseA {:.1f} + "
+      "phaseC1 {:.1f}   |   parallel: leaf fanout {:.1f} + leaf copy {:.1f} + "
+      "phaseC2 {:.1f} + phaseB {:.1f} wall / {:.1f} cpu ({:.2f}x)",
+      serial_ms, pct, p.leaf_prefix_ms, main_a, main_c1, p.leaf_fanout_ms,
+      p.leaf_copy_ms, main_c2, main_b_wall, main_b_cpu,
+      main_b_wall > 0.0 ? main_b_cpu / main_b_wall : 0.0);
+  spdlog::info(
+      "  Amdahl: every parallel section free -> {:.1f} ms floor ({:.2f}x "
+      "ceiling)",
+      serial_ms, serial_ms > 0.0 ? build_ms / serial_ms : 0.0);
+}
+
 // Reduces `grid` to a single surviving cluster by repeated block -> weld ->
 // boundary-locked-simplify -> split rounds (Phases A/B/C). THE machinery of
 // the whole build: the map-level merge and the per-tile detail pre-pass both
@@ -774,7 +1084,8 @@ void LogStats(const TerrainClusterDag& dag, double build_ms, bool parallel,
 // pre-pass at all -- is bit-identical by construction, not by threshold luck.
 void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
                 RegionGrid& grid, float map_w, float map_h,
-                const TerrainClusterParams& params, bool prepass = false) {
+                const TerrainClusterParams& params, bool prepass = false,
+                BuildProfile* prof = nullptr) {
   int cur = 0;
   auto grid_total = [&]() {
     size_t n = 0;
@@ -818,6 +1129,10 @@ void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
       std::vector<uint32_t> children;
       glm::vec4 footprint{0.0f};
     };
+    RoundProfile round;
+    round.groups = group_count;
+    const auto t_phase_a = ProfClock::now();
+
     std::vector<GroupWork> work(group_count);
     for (int orz = 0; orz < next.nz; ++orz) {
       for (int orx = 0; orx < next.nx; ++orx) {
@@ -832,6 +1147,7 @@ void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
                                 grid.at(rx1 - 1, rz1 - 1).z1);
       }
     }
+    round.a_ms = MsSince(t_phase_a);
 
     // Phase B (parallel): weld + simplify + split each group into its own slot.
     // Both are pure functions of the immutable cluster_geom below this level and
@@ -848,8 +1164,13 @@ void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
         kTrisPerQuad * params.tile_quads * params.tile_quads *
         kSmallGroupBudgetFactor);
     std::vector<GroupResult> results(group_count);
+    std::vector<GroupStat> stats(group_count);
     auto compute = [&](size_t g) {
+      GroupStat& st = stats[g];
+      const auto t_weld = ProfClock::now();
       ClusterGeom merged = WeldChildren(cluster_geom, work[g].children);
+      st.t.weld_ms = MsSince(t_weld);
+      st.in_tris = merged.tris.size() / 3;
       if (prepass &&
           static_cast<int>(merged.tris.size()) / 3 <= small_group_max) {
         // Pre-pass pass-through (see the function comment): the weld IS the
@@ -857,86 +1178,150 @@ void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
         results[g].result_error = 0.0f;
         results[g].outputs.clear();
         results[g].outputs.push_back(std::move(merged));
-        return;
+      } else {
+        results[g] = SimplifyAndSplit(std::move(merged), work[g].footprint,
+                                      map_w, map_h, params, terminal, &st.t);
       }
-      results[g] = SimplifyAndSplit(std::move(merged), work[g].footprint, map_w,
-                                    map_h, params, terminal);
+      for (const ClusterGeom& o : results[g].outputs)
+        st.out_tris += o.tris.size() / 3;
     };
     // Tiny rounds (per-tile pre-passes shrink to a handful of groups) pay more
     // in ParallelFor synchronization than the work is worth; run them inline.
-    if (params.parallel_build && group_count >= 16) {
+    const auto t_phase_b = ProfClock::now();
+    round.parallel = params.parallel_build && group_count >= 16;
+    if (round.parallel) {
       ParallelFor(group_count, compute);
     } else {
       for (size_t g = 0; g < group_count; ++g) compute(g);
     }
+    round.b_wall_ms = MsSince(t_phase_b);
+    for (const GroupStat& st : stats) {
+      round.b_cpu_ms += st.t.Total();
+      round.parts.weld_ms += st.t.weld_ms;
+      round.parts.simplify_ms += st.t.simplify_ms;
+      round.parts.split_ms += st.t.split_ms;
+      round.in_tris += st.in_tris;
+      round.out_tris += st.out_tris;
+    }
+    const auto t_phase_c = ProfClock::now();
 
     // Phase C (serial, deterministic): emit clusters/groups + build spheres in
     // the fixed g order. This is the only phase that mutates the DAG, so the
     // output layout is independent of how Phase B was scheduled.
-    for (int orz = 0; orz < next.nz; ++orz) {
-      for (int orx = 0; orx < next.nx; ++orx) {
-        const size_t g = static_cast<size_t>(orz) * next.nx + orx;
-        const std::vector<uint32_t>& children = work[g].children;
-        const glm::vec4 footprint = work[g].footprint;
-        GroupResult& gr = results[g];
-
-        // The output level derives from the CHILDREN, not from the loop
-        // counter: 1 + max(child.level). Identical on a uniform build (every
-        // child sits at `cur`), but the loop counter stops being a tree
-        // property the moment a region arrives pre-reduced at a deeper level
-        // -- and from then on `level` is descriptive only (see the hpp).
-        int out_level = 0;
-        for (uint32_t c : children)
-          out_level = std::max(out_level, dag.clusters[c].level + 1);
-
-        // Reserve the group slot, emit its outputs (own_group = this group).
-        const int gidx = static_cast<int>(dag.groups.size());
-        dag.groups.emplace_back();
-        std::vector<uint32_t> out_clusters;
-        for (ClusterGeom& out : gr.outputs)
-          out_clusters.push_back(EmitCluster(dag, cluster_geom, std::move(out),
-                                             out_level, gidx));
-
-        // Group record: monotone error + a sphere nesting the children spheres
-        // and the outputs' AABB.
-        TerrainClusterGroup& G = dag.groups[gidx];
-        G.level = out_level;
-        G.footprint = footprint;
-        G.first_child = static_cast<uint32_t>(dag.group_children.size());
-        G.child_count = static_cast<uint32_t>(children.size());
-        float child_err = 0.0f;
-        glm::vec3 center(0.0f);
-        for (uint32_t c : children) {
-          dag.group_children.push_back(c);
-          dag.clusters[c].parent_group = gidx;
-          child_err = std::max(child_err, dag.ClusterOwnError(dag.clusters[c]));
-          center += glm::vec3(dag.ClusterOwnSphere(dag.clusters[c]));
+    // C1 (serial): fix the LAYOUT with a prefix over g in the same order the
+    // single loop used, so every id and buffer offset is what the serial build
+    // would have assigned. O(groups), not O(geometry).
+    //
+    // out_level derives from the CHILDREN, not from the loop counter:
+    // 1 + max(child.level). Identical on a uniform build (every child sits at
+    // `cur`), but the loop counter stops being a tree property the moment a
+    // region arrives pre-reduced at a deeper level -- and from then on `level`
+    // is descriptive only (see the hpp).
+    struct GroupEmit {
+      uint32_t cluster = 0, vert = 0, index = 0, group_child = 0;
+      int gidx = 0, out_level = 0;
+    };
+    std::vector<GroupEmit> emit(group_count);
+    {
+      GroupEmit at;
+      at.cluster = static_cast<uint32_t>(dag.clusters.size());
+      at.vert =
+          static_cast<uint32_t>(dag.vertices.size() / kFloatsPerClusterVertex);
+      at.index = static_cast<uint32_t>(dag.indices.size());
+      at.group_child = static_cast<uint32_t>(dag.group_children.size());
+      at.gidx = static_cast<int>(dag.groups.size());
+      for (size_t g = 0; g < group_count; ++g) {
+        emit[g] = at;
+        for (uint32_t c : work[g].children)
+          emit[g].out_level =
+              std::max(emit[g].out_level, dag.clusters[c].level + 1);
+        for (const ClusterGeom& o : results[g].outputs) {
+          at.cluster += 1;
+          at.vert += static_cast<uint32_t>(o.verts.size());
+          at.index += static_cast<uint32_t>(o.tris.size());
         }
-        center /= static_cast<float>(children.size());
-        float radius = 0.0f;
-        for (uint32_t c : children) {
-          const glm::vec4 s = dag.ClusterOwnSphere(dag.clusters[c]);
-          radius = std::max(radius, glm::length(center - glm::vec3(s)) + s.w);
-        }
-        for (uint32_t oc : out_clusters) {
-          const Aabb& b = dag.clusters[oc].bounds;
-          for (int corner = 0; corner < 8; ++corner) {
-            const glm::vec3 p((corner & 1) ? b.max.x : b.min.x,
-                              (corner & 2) ? b.max.y : b.min.y,
-                              (corner & 4) ? b.max.z : b.min.z);
-            radius = std::max(radius, glm::length(center - p));
-          }
-        }
-        G.error_m = std::max(gr.result_error, child_err);
-        G.sphere = glm::vec4(center, radius);
-
-        Region& nr = next.at(orx, orz);
-        nr.x0 = footprint.x;
-        nr.z0 = footprint.y;
-        nr.x1 = footprint.z;
-        nr.z1 = footprint.w;
-        nr.clusters = std::move(out_clusters);
+        at.group_child += static_cast<uint32_t>(work[g].children.size());
+        at.gidx += 1;
       }
+      dag.clusters.resize(at.cluster);
+      dag.vertices.resize(static_cast<size_t>(at.vert) * kFloatsPerClusterVertex);
+      dag.indices.resize(at.index);
+      dag.group_children.resize(at.group_child);
+      dag.groups.resize(static_cast<size_t>(at.gidx));
+      cluster_geom.resize(at.cluster);
+    }
+    round.c1_ms = MsSince(t_phase_c);
+    const auto t_phase_c2 = ProfClock::now();
+
+    // C2 (parallel): pack geometry and build the group records. Every write goes
+    // to this group's own reserved slice; every cross-group READ (a child's
+    // level, error, sphere) targets an EARLIER round and is already final. The
+    // one write outside the slice -- child.parent_group -- is still disjoint,
+    // because Phase A built the children lists from a partition of the previous
+    // grid, so no cluster is a child of two groups.
+    auto emit_group = [&](size_t g) {
+      const GroupEmit& e = emit[g];
+      const std::vector<uint32_t>& children = work[g].children;
+      const glm::vec4 footprint = work[g].footprint;
+      GroupResult& gr = results[g];
+
+      std::vector<uint32_t> out_clusters;
+      uint32_t ci = e.cluster, v = e.vert, i = e.index;
+      for (ClusterGeom& out : gr.outputs) {
+        dag.clusters[ci] =
+            PackClusterAt(dag, out, e.out_level, e.gidx, v, i);
+        v += static_cast<uint32_t>(out.verts.size());
+        i += static_cast<uint32_t>(out.tris.size());
+        cluster_geom[ci] = std::move(out);
+        out_clusters.push_back(ci);
+        ++ci;
+      }
+
+      // Group record: monotone error + a sphere nesting the children spheres
+      // and the outputs' AABB.
+      TerrainClusterGroup& G = dag.groups[static_cast<size_t>(e.gidx)];
+      G.level = e.out_level;
+      G.footprint = footprint;
+      G.first_child = e.group_child;
+      G.child_count = static_cast<uint32_t>(children.size());
+      float child_err = 0.0f;
+      glm::vec3 center(0.0f);
+      for (size_t k = 0; k < children.size(); ++k) {
+        const uint32_t c = children[k];
+        dag.group_children[e.group_child + k] = c;
+        dag.clusters[c].parent_group = e.gidx;
+        child_err = std::max(child_err, dag.ClusterOwnError(dag.clusters[c]));
+        center += glm::vec3(dag.ClusterOwnSphere(dag.clusters[c]));
+      }
+      center /= static_cast<float>(children.size());
+      float radius = 0.0f;
+      for (uint32_t c : children) {
+        const glm::vec4 s = dag.ClusterOwnSphere(dag.clusters[c]);
+        radius = std::max(radius, glm::length(center - glm::vec3(s)) + s.w);
+      }
+      for (uint32_t oc : out_clusters) {
+        const Aabb& b = dag.clusters[oc].bounds;
+        for (int corner = 0; corner < 8; ++corner) {
+          const glm::vec3 p((corner & 1) ? b.max.x : b.min.x,
+                            (corner & 2) ? b.max.y : b.min.y,
+                            (corner & 4) ? b.max.z : b.min.z);
+          radius = std::max(radius, glm::length(center - p));
+        }
+      }
+      G.error_m = std::max(gr.result_error, child_err);
+      G.sphere = glm::vec4(center, radius);
+
+      Region& nr = next.cells[g];
+      nr.x0 = footprint.x;
+      nr.z0 = footprint.y;
+      nr.x1 = footprint.z;
+      nr.z1 = footprint.w;
+      nr.clusters = std::move(out_clusters);
+    };
+    if (round.parallel) {
+      ParallelFor(group_count, emit_group);
+    } else {
+      for (size_t g = 0; g < group_count; ++g) emit_group(g);
     }
     grid = std::move(next);
     // Free the just-consumed scratch geometry BY LIVENESS, never by level:
@@ -949,8 +1334,194 @@ void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
     // clearing it cannot perturb the DAG output.
     for (const GroupWork& w : work)
       for (uint32_t c : w.children) cluster_geom[c] = ClusterGeom{};
+
+    // c2 covers the parallel pack plus the scratch free that follows it.
+    round.c2_ms = MsSince(t_phase_c2);
+    if (prof)
+      BuildProfile::Add(prepass ? prof->prepass_rounds : prof->main_rounds,
+                        static_cast<size_t>(cur), round);
     ++cur;
   }
+}
+
+// --- the leaf pass, tile by tile ---------------------------------------------
+//
+// Tiles are INDEPENDENT and always were: BuildLeafGeom and BuildDetailedTileCells
+// read only the const MapData and DetailView, and a hot tile's pre-pass reduction
+// runs on its own sub-grid and never reads a neighbour's clusters. The single
+// thing that coupled them was EmitCluster appending to one shared DAG -- which is
+// an EMISSION ORDER dependency, not a data dependency.
+//
+// So each tile builds into a private arena and the arenas are concatenated
+// afterwards in row-major tile order. Because that is exactly the order the
+// serial loop visited tiles in, the running offsets applied during the merge
+// equal the counts the serial build had accumulated at the same point: cluster
+// ids, group ids and buffer offsets all come out identical, and the DAG is
+// bit-identical to a serial build rather than merely equivalent.
+
+struct TileBuild {
+  TerrainClusterDag dag;              // arena-local; indices are arena-local
+  std::vector<ClusterGeom> geom;      // parallel to dag.clusters
+  std::vector<uint32_t> out_clusters;  // arena-local ids surviving in the region
+  BuildProfile prof;
+};
+
+// Builds one tile into its own arena. `params` must have parallel_build OFF:
+// with 65k tile tasks in flight the outer fan-out already saturates the pool, so
+// an inner fan-out would only add synchronization -- and the measurement agrees
+// (per-tile pre-pass rounds have a handful of groups and were already falling
+// below the inline threshold). parallel_build is a scheduling knob only, so
+// forcing it off here cannot change the output.
+void BuildTile(const MapData& map, const DetailView& dv, int tx, int tz, int Q,
+               int W, int H, float map_w, float map_h,
+               const TerrainClusterParams& params, TileBuild& out) {
+  const float sp = map.spacing_m();
+  const int qx0 = tx * Q, qx1 = std::min((tx + 1) * Q, W);
+  const int qz0 = tz * Q, qz1 = std::min((tz + 1) * Q, H);
+  BuildProfile& prof = out.prof;
+
+  // A tile with NO refined quads takes exactly the pre-detail path, so a null
+  // (or all-zero) detail field reproduces today's build bit for bit -- and so
+  // does every cold tile of a detailed build, which is what keeps the refinement
+  // provably local.
+  const auto t_scan = ProfClock::now();
+  bool hot = false;
+  if (dv.field) {
+    for (int qz = qz0; qz < qz1 && !hot; ++qz)
+      for (int qx = qx0; qx < qx1 && !hot; ++qx) hot = dv.QuadExp(qx, qz) > 0;
+  }
+  prof.leaf_scan_ms += MsSince(t_scan);
+
+  if (!hot) {
+    ++prof.cold_tiles;
+    const auto t_cold = ProfClock::now();
+    ClusterGeom leaf = BuildLeafGeom(map, qx0, qz0, qx1, qz1);
+    prof.leaf_cold_ms += MsSince(t_cold);
+    const auto t_emit = ProfClock::now();
+    out.out_clusters = {
+        EmitCluster(out.dag, out.geom, std::move(leaf), 0, kNoGroup)};
+    prof.leaf_emit_ms += MsSince(t_emit);
+    return;
+  }
+
+  ++prof.hot_tiles;
+  // A hot tile emits one leaf cluster per cell of its sub-grid, then the
+  // INTRA-REGION REDUCTION ROUNDS bring the region back to a single cluster
+  // before the map-level merge ever sees it. The trigger is purely structural --
+  // more than one cluster in the region -- and the reduction is ReduceGrid
+  // itself on the finer grid, not a second code path.
+  const auto t_cells = ProfClock::now();
+  TileCells cells = BuildDetailedTileCells(map, dv, qx0, qz0, qx1, qz1, Q);
+  prof.leaf_cells_ms += MsSince(t_cells);
+  prof.hot_cells += static_cast<size_t>(cells.nx) * cells.nz;
+
+  RegionGrid sub;
+  sub.nx = cells.nx;
+  sub.nz = cells.nz;
+  sub.cells.resize(static_cast<size_t>(cells.nx) * cells.nz);
+  for (int cz = 0; cz < cells.nz; ++cz) {
+    for (int cx = 0; cx < cells.nx; ++cx) {
+      ClusterGeom& gm = cells.geoms[static_cast<size_t>(cz) * cells.nx + cx];
+      const auto t_emit = ProfClock::now();
+      const uint32_t cidx =
+          EmitCluster(out.dag, out.geom, std::move(gm), 0, kNoGroup);
+      prof.leaf_emit_ms += MsSince(t_emit);
+      Region& sr = sub.at(cx, cz);
+      const int ax0 = qx0 + cx * cells.side;
+      const int az0 = qz0 + cz * cells.side;
+      sr.x0 = ax0 * sp;
+      sr.z0 = az0 * sp;
+      sr.x1 = std::min(ax0 + cells.side, qx1) * sp;
+      sr.z1 = std::min(az0 + cells.side, qz1) * sp;
+      sr.clusters = {cidx};
+    }
+  }
+  if (cells.nx * cells.nz > 1) {
+    const auto t_pre = ProfClock::now();
+    ReduceGrid(out.dag, out.geom, sub, map_w, map_h, params, /*prepass=*/true,
+               &prof);
+    prof.prepass_ms += MsSince(t_pre);
+  }
+  for (const Region& sr : sub.cells)
+    for (uint32_t c : sr.clusters) out.out_clusters.push_back(c);
+}
+
+// Where one tile's arena lands in the global DAG. A prefix sum over the tiles'
+// sizes, so tile t's bases are exactly the totals the serial build had reached
+// before visiting tile t.
+struct TileOffset {
+  uint32_t vert = 0;  // in VERTICES, not floats
+  uint32_t index = 0;
+  uint32_t cluster = 0;
+  uint32_t group_child = 0;
+  int group = 0;
+};
+
+// Copies a finished tile arena into its reserved slice of the global DAG,
+// rebasing every index by that tile's offsets.
+//
+// Correctness has two halves. The OFFSETS come from a serial prefix over tiles
+// in row-major order, so they equal the counts the serial build held at the same
+// point -- ids and buffer positions are therefore identical, not merely
+// consistent. The COPY then touches only tile t's own disjoint slice, so running
+// the copies concurrently cannot change what any of them writes.
+void AppendTileAt(TerrainClusterDag& dag, std::vector<ClusterGeom>& geom,
+                  TileBuild& tile, Region& region, const TileOffset& o) {
+  std::copy(tile.dag.vertices.begin(), tile.dag.vertices.end(),
+            dag.vertices.begin() +
+                static_cast<ptrdiff_t>(o.vert) * kFloatsPerClusterVertex);
+
+  // Indices are stored ALREADY BIASED by their cluster's first_vertex (see
+  // EmitCluster), so rebasing them is one add of the vertex offset.
+  for (size_t k = 0; k < tile.dag.indices.size(); ++k)
+    dag.indices[o.index + k] = tile.dag.indices[k] + o.vert;
+
+  for (size_t k = 0; k < tile.dag.clusters.size(); ++k) {
+    TerrainCluster c = tile.dag.clusters[k];
+    c.first_vertex += o.vert;
+    c.first_index += o.index;
+    if (c.own_group != kNoGroup) c.own_group += o.group;
+    if (c.parent_group != kNoGroup) c.parent_group += o.group;
+    dag.clusters[o.cluster + k] = c;
+  }
+  for (size_t k = 0; k < tile.dag.groups.size(); ++k) {
+    TerrainClusterGroup g = tile.dag.groups[k];
+    g.first_child += o.group_child;
+    dag.groups[static_cast<size_t>(o.group) + k] = g;
+  }
+  for (size_t k = 0; k < tile.dag.group_children.size(); ++k)
+    dag.group_children[o.group_child + k] = tile.dag.group_children[k] + o.cluster;
+  for (size_t k = 0; k < tile.geom.size(); ++k)
+    geom[o.cluster + k] = std::move(tile.geom[k]);
+
+  region.clusters.clear();
+  for (uint32_t c : tile.out_clusters) region.clusters.push_back(c + o.cluster);
+
+  // Release this arena as soon as it is copied. NOTE what this does and does
+  // not buy: the global buffers are sized for the WHOLE leaf level before any
+  // arena is freed, so THE PACKED LEAF LEVEL IS RESIDENT TWICE at peak. That
+  // duplication is structural to build-into-arenas-then-concatenate, not
+  // something this free avoids; what it avoids is holding the arenas for the
+  // whole copy phase on top of it.
+  //
+  // MEASURED at 2048^2 (65536 tiles), at the moment of the merge:
+  //   arena packed buffers   461.2 MB   <- duplicated; this is the cost
+  //   arena ClusterGeom      239.0 MB   <- MOVED into cluster_geom, not copied
+  //   dag packed buffers     461.2 MB
+  // against a 3.40 GB peak RSS for the whole map load, so ~13%. Tolerable here,
+  // but it scales with the map: 4096^2 would duplicate ~1.8 GB.
+  //
+  // The fix, when it matters, is to run the fan-out and merge in BATCHES of
+  // tiles rather than all-then-all. Two things to know before trying it: the
+  // global buffers would then grow incrementally instead of being sized once,
+  // and the transient old+new during each reallocation eats part of the saving
+  // (~1.5x rather than 1.0x) unless an exact reserve is computed up front --
+  // which needs per-tile sizes, which needs the build, so it is circular. And
+  // it puts a barrier per batch into the phase that currently scales best
+  // (16.72x on 17 workers), which is the number to protect.
+  tile.dag = TerrainClusterDag{};
+  tile.geom.clear();
+  tile.geom.shrink_to_fit();
 }
 
 }  // namespace
@@ -1040,6 +1611,10 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
   grid.nx = tiles_x;
   grid.nz = tiles_z;
   grid.cells.resize(static_cast<size_t>(tiles_x) * tiles_z);
+  BuildProfile prof;
+  const auto t_leaf = ProfClock::now();
+
+  // Region rects first (pure arithmetic, and the merge below needs them).
   for (int tz = 0; tz < tiles_z; ++tz) {
     for (int tx = 0; tx < tiles_x; ++tx) {
       const int qx0 = tx * Q, qx1 = std::min((tx + 1) * Q, W);
@@ -1049,61 +1624,71 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
       r.z0 = qz0 * sp;
       r.x1 = qx1 * sp;
       r.z1 = qz1 * sp;
-      // A tile with NO refined quads takes exactly the pre-detail path, so a
-      // null (or all-zero) detail field reproduces today's build bit for bit
-      // -- and so does every cold tile of a detailed build, which is what
-      // keeps the refinement provably local.
-      bool hot = false;
-      if (dv.field) {
-        for (int qz = qz0; qz < qz1 && !hot; ++qz)
-          for (int qx = qx0; qx < qx1 && !hot; ++qx)
-            hot = dv.QuadExp(qx, qz) > 0;
-      }
-      if (!hot) {
-        ClusterGeom leaf = BuildLeafGeom(map, qx0, qz0, qx1, qz1);
-        const uint32_t cidx =
-            EmitCluster(dag, cluster_geom, std::move(leaf), 0, kNoGroup);
-        r.clusters = {cidx};
-        continue;
-      }
-      // A hot tile emits one leaf cluster per cell of its sub-grid, then the
-      // INTRA-REGION REDUCTION ROUNDS bring the region back to a single
-      // cluster before the map-level merge ever sees it. The trigger is
-      // purely structural -- more than one cluster in the region -- and the
-      // reduction is ReduceGrid itself on the finer grid, not a second code
-      // path. Emission stays serial and row-major throughout, so the DAG
-      // layout is deterministic.
-      TileCells cells =
-          BuildDetailedTileCells(map, dv, qx0, qz0, qx1, qz1, Q);
-      RegionGrid sub;
-      sub.nx = cells.nx;
-      sub.nz = cells.nz;
-      sub.cells.resize(static_cast<size_t>(cells.nx) * cells.nz);
-      for (int cz = 0; cz < cells.nz; ++cz) {
-        for (int cx = 0; cx < cells.nx; ++cx) {
-          ClusterGeom& gm = cells.geoms[static_cast<size_t>(cz) * cells.nx + cx];
-          const uint32_t cidx =
-              EmitCluster(dag, cluster_geom, std::move(gm), 0, kNoGroup);
-          Region& sr = sub.at(cx, cz);
-          const int ax0 = qx0 + cx * cells.side;
-          const int az0 = qz0 + cz * cells.side;
-          sr.x0 = ax0 * sp;
-          sr.z0 = az0 * sp;
-          sr.x1 = std::min(ax0 + cells.side, qx1) * sp;
-          sr.z1 = std::min(az0 + cells.side, qz1) * sp;
-          sr.clusters = {cidx};
-        }
-      }
-      if (cells.nx * cells.nz > 1)
-        ReduceGrid(dag, cluster_geom, sub, map_w, map_h, params,
-                   /*prepass=*/true);
-      r.clusters.clear();
-      for (const Region& sr : sub.cells)
-        for (uint32_t c : sr.clusters) r.clusters.push_back(c);
     }
   }
 
-  ReduceGrid(dag, cluster_geom, grid, map_w, map_h, params);
+  // PHASE 1 (parallel): every tile into its own arena. Cost per tile spans ~350x
+  // between a plain tile and a river-refined one, so this leans on ParallelFor's
+  // per-item dynamic scheduling; any chunked split strands the expensive tiles.
+  const size_t tile_count = grid.cells.size();
+  std::vector<TileBuild> tiles(tile_count);
+  TerrainClusterParams tile_params = params;
+  tile_params.parallel_build = false;  // see BuildTile
+  auto build_tile = [&](size_t t) {
+    BuildTile(map, dv, static_cast<int>(t % tiles_x), static_cast<int>(t / tiles_x),
+              Q, W, H, map_w, map_h, tile_params, tiles[t]);
+  };
+  const auto t_fanout = ProfClock::now();
+  if (params.parallel_build && tile_count >= 16) {
+    ParallelFor(tile_count, build_tile);
+  } else {
+    for (size_t t = 0; t < tile_count; ++t) build_tile(t);
+  }
+  prof.leaf_fanout_ms = MsSince(t_fanout);
+
+  // PHASE 2a (serial, deterministic): prefix-sum the arena sizes in row-major
+  // tile order. This is the step that fixes the layout -- and it is O(tiles),
+  // not O(geometry), so it stays cheap however big the map gets.
+  const auto t_merge = ProfClock::now();
+  std::vector<TileOffset> offsets(tile_count);
+  TileOffset running;
+  for (size_t t = 0; t < tile_count; ++t) {
+    prof.MergeFrom(tiles[t].prof);
+    offsets[t] = running;
+    const TerrainClusterDag& d = tiles[t].dag;
+    running.vert += static_cast<uint32_t>(d.vertices.size() /
+                                          kFloatsPerClusterVertex);
+    running.index += static_cast<uint32_t>(d.indices.size());
+    running.cluster += static_cast<uint32_t>(d.clusters.size());
+    running.group_child += static_cast<uint32_t>(d.group_children.size());
+    running.group += static_cast<int>(d.groups.size());
+  }
+  dag.vertices.resize(static_cast<size_t>(running.vert) * kFloatsPerClusterVertex);
+  dag.indices.resize(running.index);
+  dag.clusters.resize(running.cluster);
+  dag.groups.resize(static_cast<size_t>(running.group));
+  dag.group_children.resize(running.group_child);
+  cluster_geom.resize(running.cluster);
+  prof.leaf_prefix_ms = MsSince(t_merge);
+
+  // PHASE 2b (parallel): each tile copies into its own reserved slice.
+  const auto t_copy = ProfClock::now();
+  auto merge_tile = [&](size_t t) {
+    AppendTileAt(dag, cluster_geom, tiles[t], grid.cells[t], offsets[t]);
+  };
+  if (params.parallel_build && tile_count >= 16) {
+    ParallelFor(tile_count, merge_tile);
+  } else {
+    for (size_t t = 0; t < tile_count; ++t) merge_tile(t);
+  }
+  prof.leaf_copy_ms = MsSince(t_copy);
+
+  prof.leaf_total_ms = MsSince(t_leaf);
+
+  const auto t_main = ProfClock::now();
+  ReduceGrid(dag, cluster_geom, grid, map_w, map_h, params, /*prepass=*/false,
+             &prof);
+  prof.main_ms = MsSince(t_main);
   // 1 + the deepest level actually emitted -- NOT the loop count. Identical on
   // a uniform build (the last merge emits at cur); on a mixed-depth build the
   // loop count and the tree depth diverge, and every consumer sizing by
@@ -1117,6 +1702,7 @@ TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
           std::chrono::steady_clock::now() - t_start)
           .count();
   LogStats(dag, build_ms, params.parallel_build, GetWorkerThreadCount());
+  LogProfile(prof, build_ms, GetWorkerThreadCount());
   return dag;
 }
 
