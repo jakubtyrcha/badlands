@@ -1,10 +1,15 @@
 #include <catch_amalgamated.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <functional>
+#include <map>
+#include <set>
 #include <glm/gtc/constants.hpp>  // glm::pi
 #include "game/geometry/tree_options.hpp"
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/leaf_texture.hpp"
+#include "game/geometry/mesh_lod.hpp"
 #include "engine/rendering/geometry/textured_mesh_builders.hpp"
 
 using namespace badlands;
@@ -32,6 +37,333 @@ TEST_CASE("BuildTreeSkeleton: deterministic branch structure") {
   // Evergreen: trunk + children[0] radial, no continuation.
   const auto pine = BuildTreeSkeleton(PinePreset());
   REQUIRE(pine.size() == 83u);
+}
+
+namespace {
+
+// FNV-1a over the skeleton's GEOMETRY only -- origin, orientation, radius per
+// section, plus level/base_radius/segment_count per branch. Deliberately does
+// NOT cover the parentage fields (parent/attach_section/attach_alpha/
+// is_continuation/base_arc_len): those are bookkeeping the bark grafter reads,
+// and adding them must not move a single vertex. This is the guard that says so.
+uint64_t HashSkeletonGeometry(const std::vector<SkeletonBranch>& skeleton) {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](const void* bytes, size_t n) {
+    const auto* p = static_cast<const unsigned char*>(bytes);
+    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+  };
+  for (const SkeletonBranch& br : skeleton) {
+    mix(&br.level, sizeof(br.level));
+    mix(&br.base_radius, sizeof(br.base_radius));
+    mix(&br.segment_count, sizeof(br.segment_count));
+    for (const BranchSection& s : br.sections) {
+      mix(&s.origin, sizeof(s.origin));
+      mix(&s.orientation, sizeof(s.orientation));
+      mix(&s.radius, sizeof(s.radius));
+    }
+  }
+  return h;
+}
+
+// Connected-component count of a mesh AFTER the same weld SimplifyMesh does --
+// meshopt_generateVertexRemap over the FULL vertex stride, so two vertices merge
+// only if they are bit-identical in position, UV, normal AND tangent. That is
+// the number meshoptimizer's edge collapse actually sees: it cannot merge
+// separate components, so this is the mesh's decimation floor in disguise.
+size_t WeldedComponentCount(const StaticTexturedMeshComponent& m) {
+  constexpr size_t kStride = kTexturedMeshFloatsPerVertex;
+  std::map<std::vector<float>, uint32_t> canonical;
+  std::vector<uint32_t> weld(m.vertex_count);
+  for (uint32_t v = 0; v < m.vertex_count; ++v) {
+    std::vector<float> key(m.vertices.begin() + static_cast<long>(v * kStride),
+                           m.vertices.begin() + static_cast<long>((v + 1) * kStride));
+    weld[v] = canonical.emplace(std::move(key), static_cast<uint32_t>(canonical.size()))
+                  .first->second;
+  }
+
+  std::vector<uint32_t> parent(canonical.size());
+  for (uint32_t i = 0; i < parent.size(); ++i) parent[i] = i;
+  std::function<uint32_t(uint32_t)> find = [&](uint32_t x) {
+    while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  };
+  auto unite = [&](uint32_t a, uint32_t b) {
+    const uint32_t ra = find(a), rb = find(b);
+    if (ra != rb) parent[ra] = rb;
+  };
+  for (size_t i = 0; i + 2 < m.indices.size(); i += 3) {
+    unite(weld[m.indices[i]], weld[m.indices[i + 1]]);
+    unite(weld[m.indices[i]], weld[m.indices[i + 2]]);
+  }
+
+  std::set<uint32_t> roots;
+  for (uint32_t idx : m.indices) roots.insert(find(weld[idx]));
+  return roots.size();
+}
+
+}  // namespace
+
+// The skeleton is load-bearing far beyond bark: leaves attach to its branches,
+// voxel crowns come from those leaves, impostors are baked from both, and
+// SilhouetteBounds -> CrownRadiusM feeds foliage SPACING. Any change that moves
+// it silently relays out the forest. Pinned per preset so a failure names the
+// one that drifted.
+TEST_CASE("BuildTreeSkeleton: geometry is byte-stable across the catalog") {
+  // Measured on the pre-graft generator; in TreeCatalog() order. A change here
+  // is either a deliberate skeleton retune (update these and expect the forest
+  // to re-lay-out) or a bug.
+  static constexpr std::array<uint64_t, 15> kGolden = {
+      0x90fa4e91c56a600aull,  // Oak (small)
+      0xa7bb6890f479829full,  // Oak (medium)
+      0xad2aa0919040487full,  // Oak (large)
+      0x8f4bf7e178ab2adaull,  // Pine (small)
+      0x31cf4ab13defa2b6ull,  // Pine (medium)
+      0x08a812127241b485ull,  // Pine (large)
+      0xf47c09bf67638ce5ull,  // Ash (small)
+      0xfba671736feb9cd0ull,  // Ash (medium)
+      0x6a8d48c32abf53a3ull,  // Ash (large)
+      0xe525e934bea6ac1bull,  // Aspen (small)
+      0xd39649251a045b35ull,  // Aspen (medium)
+      0x02d6f74153600bddull,  // Aspen (large)
+      0x7f0f7015cc993d68ull,  // Bush 1
+      0x5d442c6390d6beb1ull,  // Bush 2
+      0x2bc9c2e25183d4ddull,  // Bush 3
+  };
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  REQUIRE(catalog.size() == kGolden.size());
+  for (size_t i = 0; i < catalog.size(); ++i) {
+    CAPTURE(catalog[i].name);
+    CHECK(HashSkeletonGeometry(BuildTreeSkeleton(catalog[i].options)) == kGolden[i]);
+  }
+}
+
+TEST_CASE("BuildTreeSkeleton: parentage is well-formed") {
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) {
+    CAPTURE(setup.name);
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+
+    // The trunk is the root, and it is index 0.
+    REQUIRE(skeleton[0].parent == -1);
+    REQUIRE_FALSE(skeleton[0].is_continuation);
+    REQUIRE(skeleton[0].base_arc_len == 0.0f);
+
+    int continuations = 0;
+    for (size_t i = 1; i < skeleton.size(); ++i) {
+      CAPTURE(i);
+      const SkeletonBranch& br = skeleton[i];
+      // Growth is a FIFO queue, so a parent is always recorded before its
+      // children -- the grafter relies on this to build parents first.
+      REQUIRE(br.parent >= 0);
+      REQUIRE(br.parent < static_cast<int>(i));
+
+      const SkeletonBranch& parent = skeleton[static_cast<size_t>(br.parent)];
+      REQUIRE(br.attach_section >= 0);
+      REQUIRE(br.attach_section < static_cast<int>(parent.sections.size()));
+      REQUIRE(br.attach_alpha >= 0.0f);
+      REQUIRE(br.attach_alpha <= 1.0f);
+      REQUIRE(br.level == parent.level + 1);
+      // V continues down the chain, so arc length never runs backwards.
+      REQUIRE(br.base_arc_len >= parent.base_arc_len);
+      if (br.is_continuation) {
+        ++continuations;
+        // A continuation starts at its parent's LAST section, which is what
+        // makes its ring 0 coincident and therefore weldable.
+        REQUIRE(br.attach_section == static_cast<int>(parent.sections.size()) - 1);
+      }
+    }
+
+    // Evergreens have no stem continuation at all; deciduous trees get one per
+    // branch below the terminal level.
+    if (setup.options.type == TreeType::Evergreen) {
+      REQUIRE(continuations == 0);
+    } else {
+      int below_terminal = 0;
+      for (const SkeletonBranch& br : skeleton)
+        if (br.level < setup.options.levels) ++below_terminal;
+      REQUIRE(continuations == below_terminal);
+    }
+  }
+}
+
+// THE point of the whole graft. meshoptimizer's edge collapse cannot merge
+// separate components, so bark used to floor at ~4 triangles per shell (~774
+// for Oak (large), see mesh_lod.hpp). Every junction that stitches removes a
+// shell; every one that falls back keeps its own. One shell plus one per
+// fallback is therefore the exact expected count, and it is what makes the
+// coarse LOD tail honest instead of clustered.
+TEST_CASE("GenerateTreeMesh: the bark is one shell plus one per fallback") {
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) {
+    BarkMeshStats stats;
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+    const TexturedMeshResult r = GenerateTreeMesh(setup.options, skeleton, &stats);
+    CAPTURE(setup.name, skeleton.size(), stats.junctions, stats.stitched,
+            stats.shrunk, stats.fallback);
+    CHECK(stats.junctions == stats.stitched + stats.fallback);
+    CHECK(WeldedComponentCount(r.mesh) == static_cast<size_t>(1 + stats.fallback));
+  }
+}
+
+// The measured fallback rate, pinned so a regression that silently stops
+// stitching cannot pass as "still one shell plus fallbacks".
+//
+// Everything merges except three junctions on Bush 2, and those are the
+// documented degenerate case: its `length[0]` is 0.1 over 3 sections, so the
+// trunk they attach to is ~0.03 per section and has no surface worth cutting.
+TEST_CASE("GenerateTreeMesh: fallbacks stay confined to the known hard cases") {
+  // Measured, in TreeCatalog() order. A fallback means one branch stayed an
+  // independent buried tube and still costs its own mesh component, so this is
+  // the cap on how far bark can decimate. Asserted as an upper bound: getting
+  // BETTER is fine, getting worse is a regression that must be looked at.
+  //
+  // All 14 of these come from quantization -- a socket whose rounded quad
+  // rectangle collides with a sibling's, which MarkHole refuses rather than
+  // tear a crack between two collars -- or from Bush 1/2's stub trunks, which
+  // are ~0.05 long and have no surface worth cutting.
+  static constexpr std::array<int, 15> kMaxFallback = {
+      1,  // Oak (small)
+      0,  // Oak (medium)
+      0,  // Oak (large)
+      0,  // Pine (small)
+      2,  // Pine (medium)
+      1,  // Pine (large)
+      0,  // Ash (small)
+      0,  // Ash (medium)
+      0,  // Ash (large)
+      0,  // Aspen (small)
+      0,  // Aspen (medium)
+      0,  // Aspen (large)
+      3,  // Bush 1
+      6,  // Bush 2  -- 0.1-long trunk over 3 sections
+      1,  // Bush 3
+  };
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  REQUIRE(catalog.size() == kMaxFallback.size());
+  int total_junctions = 0, total_fallback = 0;
+  for (size_t i = 0; i < catalog.size(); ++i) {
+    BarkMeshStats stats;
+    GenerateTreeMesh(catalog[i].options, BuildTreeSkeleton(catalog[i].options), &stats);
+    CAPTURE(catalog[i].name, stats.junctions, stats.stitched, stats.fallback);
+    REQUIRE(stats.junctions > 0);
+    CHECK(stats.fallback <= kMaxFallback[i]);
+    total_junctions += stats.junctions;
+    total_fallback += stats.fallback;
+  }
+  // Under 1% of junctions across the whole catalog.
+  CAPTURE(total_junctions, total_fallback);
+  CHECK(total_fallback * 100 < total_junctions);
+}
+
+// What the shipped LOD chain actually asks of bark. SimplifyBarkForVoxelLod
+// runs kDefaultLodRatios (0.5 at L1, 0.2 at L2) through error-bounded collapse,
+// and an absolute 256-triangle budget through SimplifyMeshSloppy at L3 -- it
+// never uses the very low ratios mesh_lod.hpp's ~774 floor note was measured at.
+//
+// Measured after grafting: L1 lands exactly on target for all 15 presets and L3
+// stays inside its budget for all 15. L2 is exact for 9 of them; the deciduous
+// presets with the deepest recursion run over, Bush 3 worst at ~2.1x.
+//
+// Connectivity did NOT remove meshoptimizer's deep-decimation floor, and it is
+// worth knowing why before anyone tries: at ratio 0.05 every preset still floors
+// (identical counts at 0.05, 0.01 and 0.005). Re-welding on POSITION ONLY --
+// which closes the duplicated UV seam column that currently splits every tube
+// into a bordered rectangle -- roughly halves that floor (Pine 1734 -> 815
+// against a 680 target). That is a mesh_lod.cpp change and its own piece of work.
+TEST_CASE("GenerateTreeMesh: bark meets the LOD chain's actual budgets") {
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) {
+    CAPTURE(setup.name);
+    const TexturedMeshResult r = GenerateTreeMesh(setup.options);
+    const size_t src = r.mesh.indices.size() / 3;
+
+    const size_t l1 = SimplifyMesh(r.mesh.vertices, kTexturedMeshFloatsPerVertex,
+                                   r.mesh.indices, kDefaultLodRatios[1]).indices.size() / 3;
+    const size_t l2 = SimplifyMesh(r.mesh.vertices, kTexturedMeshFloatsPerVertex,
+                                   r.mesh.indices, kDefaultLodRatios[2]).indices.size() / 3;
+    const size_t l3 = SimplifyMeshSloppy(r.mesh.vertices, kTexturedMeshFloatsPerVertex,
+                                         r.mesh.indices,
+                                         256.0f / static_cast<float>(src)).indices.size() / 3;
+    CAPTURE(src, l1, l2, l3);
+
+    // L1 is exact everywhere -- a miss here means collapse got blocked outright.
+    CHECK(l1 <= static_cast<size_t>(kDefaultLodRatios[1] * src) + 8);
+    // L2 overshoots on the deepest deciduous presets; 2.2x bounds the worst.
+    CHECK(l2 <= static_cast<size_t>(2.2 * kDefaultLodRatios[2] * static_cast<double>(src)));
+    // The coarse tail is a fixed budget, and clustering must still hit it.
+    CHECK(l3 <= 256u);
+  }
+}
+
+// THE spacing guarantee. Bark local_bounds flows through SilhouetteBounds ->
+// CrownRadiusM -> ForestType::models[i].radius_m -> the sampler's sum-of-radii
+// spacing rule, so a bark AABB that moved would silently re-lay-out the whole
+// forest. The graft only ever replaces geometry BURIED inside a parent, so the
+// swept skeleton's own extent is the reference the mesh has to match.
+TEST_CASE("GenerateTreeMesh: grafting does not move the bark silhouette") {
+  const std::vector<NamedTreeOptions> catalog = TreeCatalog();
+  for (const NamedTreeOptions& setup : catalog) {
+    CAPTURE(setup.name);
+    const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(setup.options);
+
+    // Every ring vertex of every branch, exactly as the pre-graft generator
+    // swept them -- computed from the skeleton, so it is independent of the
+    // mesh builder under test.
+    Aabb reference = Aabb::Empty();
+    for (const SkeletonBranch& br : skeleton) {
+      const int segments = std::max(3, br.segment_count);
+      for (const BranchSection& sec : br.sections) {
+        for (int j = 0; j < segments; ++j) {
+          const float angle = glm::two_pi<float>() * static_cast<float>(j) /
+                              static_cast<float>(segments);
+          const glm::vec3 dir(std::cos(angle), 0.0f, std::sin(angle));
+          reference = reference.Union(
+              Aabb{sec.origin + sec.orientation * (dir * sec.radius),
+                   sec.origin + sec.orientation * (dir * sec.radius)});
+        }
+      }
+    }
+
+    const Aabb got = GenerateTreeMesh(setup.options, skeleton).local_bounds;
+    const float scale = std::max(1.0f, glm::length(reference.max - reference.min));
+    const float tol = 1e-3f * scale;
+
+    // X and Z are the spacing guarantee and they are EXACT: CrownRadiusM takes
+    // the largest half-extent about the trunk axis from these two alone, so a
+    // drift here would move every tree in the forest.
+    for (int axis : {0, 2}) {
+      CAPTURE(axis);
+      CHECK(got.min[axis] == Catch::Approx(reference.min[axis]).margin(tol));
+      CHECK(got.max[axis] == Catch::Approx(reference.max[axis]).margin(tol));
+    }
+
+    // Y may only ever SHRINK, and only from below. A branch's base ring is
+    // buried by definition -- its centre sits on the parent's axis -- so on a
+    // preset whose trunk is shorter than a child's own radius, part of that
+    // ring hangs out underneath and goes away with it. Only Bush 1 does this
+    // (`length[0]` 0.1 over 6 sections and a 2x deciduous decay = a 0.05-tall
+    // trunk against 0.58 radius), and it costs 0.068 of an 11-unit tree. Growth
+    // in either direction is still a failure everywhere.
+    const float height = std::max(1.0f, reference.max.y - reference.min.y);
+    CHECK(got.max.y <= reference.max.y + tol);
+    CHECK(got.min.y >= reference.min.y - tol);
+    CHECK(got.max.y >= reference.max.y - tol);          // the crown never drops
+    CHECK(got.min.y - reference.min.y <= 0.01f * height);
+  }
+}
+
+TEST_CASE("GenerateTreeMesh: V is continuous and monotone along a stem chain") {
+  const TreeOptions oak = OakPreset();
+  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(oak);
+  for (const SkeletonBranch& br : skeleton) {
+    if (!br.is_continuation) continue;
+    // A continuation's base V picks up exactly where its parent's tip left off.
+    const SkeletonBranch& parent = skeleton[static_cast<size_t>(br.parent)];
+    float parent_arc = 0.0f;
+    for (size_t k = 1; k < parent.sections.size(); ++k)
+      parent_arc += glm::length(parent.sections[k].origin - parent.sections[k - 1].origin);
+    REQUIRE(br.base_arc_len == Catch::Approx(parent.base_arc_len + parent_arc));
+  }
 }
 
 TEST_CASE("BuildTreeSkeleton: trunk rooted at origin, tapers, deterministic") {
@@ -76,13 +408,35 @@ TEST_CASE("GenerateTreeMesh: deterministic, seed-sensitive") {
   REQUIRE(c.mesh.vertices != a.mesh.vertices);  // different tree
 }
 
-TEST_CASE("GenerateTreeMesh: exact counts for the (continuation-free) Pine") {
-  // Pine is evergreen -> no stem continuation -> clean per-level counts.
-  // Trunk: 13 rings * (8+1) = 117 verts; 82 branches * (11 rings * (6+1)) = 6314.
-  // Indices: 12*8*6 + 82*(10*6*6) = 576 + 29520 = 30096.
-  const TexturedMeshResult p = GenerateTreeMesh(PinePreset());
-  REQUIRE(p.mesh.vertex_count == 6431u);
-  REQUIRE(p.mesh.indices.size() == 30096u);
+// This used to pin Pine at exactly 6431 verts / 30096 indices, arithmetic that
+// held only while every branch was an independent tube. Ring refinement adds
+// rings where a socket would otherwise fall between two (Pine needs it: ~0.4-
+// tall footprints against ~4.2-tall quads), so a closed-form count no longer
+// exists. What is worth pinning is the SHAPE of the cost, not a magic number.
+TEST_CASE("GenerateTreeMesh: refinement costs stay bounded (Pine)") {
+  BarkMeshStats stats;
+  const TreeOptions pine = PinePreset();
+  const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(pine);
+  const TexturedMeshResult p = GenerateTreeMesh(pine, skeleton, &stats);
+
+  // All but a couple of the trunk's 82 laterals are socketed; the exceptions
+  // are sockets whose quantized quad rectangle collided with a sibling's.
+  REQUIRE(stats.junctions == 82);
+  REQUIRE(stats.fallback <= 2);
+
+  // Refinement only touches the branch being cut into (the trunk), so the
+  // vertex count must stay near the un-refined 6431 rather than scaling with
+  // the whole tree. Two extra rings per socket on an 8-segment trunk is
+  // 82 * 2 * 9 = 1476 at the absolute worst, before deduplication.
+  CAPTURE(p.mesh.vertex_count);
+  REQUIRE(p.mesh.vertex_count > 6431u);
+  REQUIRE(p.mesh.vertex_count < 6431u + 1476u);
+
+  // Collars add triangles; holes remove them. Neither may run away.
+  const size_t tris = p.mesh.indices.size() / 3;
+  CAPTURE(tris);
+  REQUIRE(tris > 30096u / 3);
+  REQUIRE(tris < 30096u);
 }
 
 TEST_CASE("TreeCatalog: every predefined setup generates a well-formed mesh") {

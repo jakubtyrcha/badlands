@@ -344,6 +344,7 @@ set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
     src/executables/viewer/model_viewer_view.cpp
     src/game/geometry/tree_generator.cpp
+    src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     # Volumetric-foliage Phase 1: CPU leaf-card voxelizer (splat cards into a
     # cell grid, emit one jittered tet per occupied cell). Pure geometry, no
@@ -482,6 +483,7 @@ add_executable(badlands_mapview
     # the multi-model instanced field, badlands' forest content table, the
     # per-cell cull + upload renderer, and the synthetic forest test map.
     src/game/geometry/tree_generator.cpp
+    src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
     src/game/visual/tree_field.cpp
@@ -752,6 +754,9 @@ add_test(NAME badlands_geometry_tests COMMAND badlands_geometry_tests WORKING_DI
 
 add_executable(badlands_tree_tests
     game/tests/tree_generator_tests.cpp
+    # Junction geometry (socket footprints, loop stitching, ring refinement):
+    # pure math over section polylines, so it needs no device.
+    game/tests/branch_junction_tests.cpp
     game/tests/leaf_voxelizer_tests.cpp
     # badlands' forest content table (which TreeCatalog preset each foliage
     # model index IS). Lives here rather than in badlands_foliage_tests because
@@ -772,6 +777,7 @@ add_executable(badlands_tree_tests
     src/game/visual/impostor_atlas.cpp
     src/game/visual/forest_catalog.cpp
     src/game/geometry/tree_generator.cpp
+    src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
@@ -813,6 +819,7 @@ add_executable(badlands_tree_field_gpu_tests
     src/game/visual/impostor_atlas.cpp
     src/game/visual/impostor_baker.cpp
     src/game/geometry/tree_generator.cpp
+    src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
     src/game/visual/tree_field.cpp

@@ -64,7 +64,21 @@ TreeFieldModel BuildTreeFieldModel(const TreeOptions& options,
   out.options = options;
 
   const std::vector<SkeletonBranch> skeleton = BuildTreeSkeleton(options);
-  out.bark_lod0 = GenerateTreeMesh(options, skeleton);
+  BarkMeshStats bark_stats;
+  out.bark_lod0 = GenerateTreeMesh(options, skeleton, &bark_stats);
+  // One line per model, not per junction -- BuildForestModels runs this under
+  // ParallelFor for every model in the forest. A non-zero `fallback` is the
+  // signal that some branch could not be merged into its parent and still costs
+  // its own mesh component, which is what caps how far bark can decimate.
+  if (bark_stats.fallback > 0) {
+    spdlog::info(
+        "bark graft: seed {} -- {} junctions, {} stitched ({} shrunk), {} FELL BACK",
+        options.seed, bark_stats.junctions, bark_stats.stitched, bark_stats.shrunk,
+        bark_stats.fallback);
+  } else {
+    spdlog::debug("bark graft: seed {} -- {} junctions all stitched ({} shrunk)",
+                  options.seed, bark_stats.junctions, bark_stats.shrunk);
+  }
 
   const float bark_h = out.bark_lod0.local_bounds.max.y -
                        out.bark_lod0.local_bounds.min.y;
