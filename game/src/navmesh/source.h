@@ -11,8 +11,11 @@
 
 #pragma once
 
+#include "tri.h"
+
 #include <glm/glm.hpp>
 
+#include <cstdint>
 #include <limits>
 
 namespace badlands::nav {
@@ -40,15 +43,35 @@ struct NavSource {
     // co-planarity merge so a slope is not collapsed into one flat leaf.
     virtual float height(int cx, int cz) const = 0;
 
-    // Obstacle (building) occupancy. A blocked cell is impassable regardless of
-    // its terrain cost.
-    virtual bool blocked(int cx, int cz) const = 0;
+    // Obstacle (building) occupancy, as a per-corner-triangle bitmask (navmesh/
+    // tri.h): bit `corner` set = that quarter of the cell is inside a footprint.
+    // kMaskFree / kMaskSolid for a cell that is wholly one or the other.
+    //
+    // A MASK and not a bool, deliberately. Footprints are authored per triangle
+    // and a diagonal building genuinely covers half a cell; the boolean this
+    // replaced ORed the four bits, which made every 45-degree wall a whole cell
+    // fatter than it is drawn. There is no boolean overload to fall back to --
+    // a caller that wants one has to say which way it is rounding.
+    virtual uint8_t blocked_mask(int cx, int cz) const = 0;
 };
 
-// A cell is traversable iff it is neither a building nor impassable terrain.
-inline bool cell_passable(const NavSource& s, int cx, int cz) {
-    return !s.blocked(cx, cz) && s.cost(cx, cz) < kImpassable;
+// Terrain alone, ignoring buildings. Terrain cost is sampled per cell (biomes
+// are a tile-resolution field), so it has no sub-cell structure to lose.
+inline bool cell_terrain_passable(const NavSource& s, int cx, int cz) {
+    return s.cost(cx, cz) < kImpassable;
 }
+
+// A triangle is traversable iff it is neither a footprint nor impassable
+// terrain. This is the atom the whole nav core is built on.
+inline bool tri_passable(const NavSource& s, int cx, int cz, int corner) {
+    return !mask_has(s.blocked_mask(cx, cz), corner) && cell_terrain_passable(s, cx, cz);
+}
+
+// NB there is deliberately no cell-level "is this whole cell free/solid"
+// helper over the SOURCE. The quadtree's merge test has to run on the
+// POST-CLEARANCE masks, not on raw source data, and a helper that looks like it
+// answers the same question would disagree with the quadtree for every cell in
+// an obstacle's standoff ring.
 
 // Bounded-error merge tolerances + agent clearance + HPA* cluster size. The two
 // epsilons ARE the accuracy guarantee: no merged leaf spans a cost range wider
@@ -56,8 +79,35 @@ inline bool cell_passable(const NavSource& s, int cx, int cz) {
 struct NavParams {
     float cost_epsilon = 0.05f;    // max cost spread inside one merged leaf
     float height_epsilon = 0.25f;  // max height spread (world m) inside one leaf
-    int clearance_cells = 1;       // dilate obstacles+impassable by this many cells
-    int cluster_cells = 32;        // HPA* cluster side (must divide side())
+    // Agent standoff: dilate obstacles + impassable terrain by this many world
+    // METRES. Metres and not cells because the useful values are sub-cell -- on
+    // the 1 m grid this was an int, so the only radii expressible were 0 and a
+    // full metre, and the agent radius is neither.
+    //
+    // The dilation runs over triangles (a triangle is blocked when its centroid
+    // comes within this of a solid one), so it is QUANTISED to the triangle
+    // lattice rather than honoured continuously. Three distances decide
+    // everything, all measured from a centroid:
+    //
+    //   1/6      ~ 0.167   to its own cell's edge  -> the triangle ACROSS the border
+    //   sqrt2/6  ~ 0.236   to its own cell's diagonals -> the two IN-TILE corners
+    //   1/3      ~ 0.333   to the opposite corner of its own cell
+    //
+    // which carves out three regimes:
+    //
+    //   <= 0.167          no standoff at all; paths graze the exact footprint.
+    //   0.167 .. 0.236    one triangle across the border. THE USEFUL BAND.
+    //   >= 0.236          a partial cell's free half is inside its own solid
+    //                     half's radius, so EVERY half-covered cell fills in and
+    //                     collapses to solid -- which silently throws away the
+    //                     entire triangle mask and puts the fat diagonal walls
+    //                     straight back. game/tests/navmesh_tests.cpp pins this.
+    //
+    // Metres and not cells because that band is sub-cell throughout: on the old
+    // 1 m integer grid the only radii expressible were 0 and a full metre, and
+    // a metre is ~2x a hero.
+    float clearance_m = 0.2f;
+    int cluster_cells = 32;  // HPA* cluster side (must divide side())
 };
 
 }  // namespace badlands::nav

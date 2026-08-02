@@ -1078,6 +1078,12 @@ struct NavDebugCell {
     float min_x = 0.0f, min_z = 0.0f, max_x = 0.0f, max_z = 0.0f;
     float cost = 0.0f;
     bool passable = false;
+    // Which of the rect's four corner triangles are SOLID -- bit 0 = the -Z
+    // corner, then +X, +Z, -X (game/src/navmesh/tri.h). 0 and 15 are the whole
+    // rect either way; anything else is a cell a diagonal footprint only half
+    // covers, and drawing such a rect whole is the artefact the mask exists to
+    // remove.
+    uint8_t tri_mask = 0;
 };
 
 // A debug path query result: waypoints as flat world-XZ pairs (x0,z0,x1,z1,...),

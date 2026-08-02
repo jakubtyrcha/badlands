@@ -50,14 +50,16 @@ glm::vec2 pos_of(BadlandsGame* game, uint32_t id) {
 // -128): all passable at cost 1 except caller-marked wall cells. Lets a movement
 // test stage an obstacle without depending on where the map puts biomes.
 struct WallSource : nav::NavSource {
-    std::vector<char> blk = std::vector<char>(kGridSize * kGridSize, 0);
+    std::vector<uint8_t> blk = std::vector<uint8_t>(kGridSize * kGridSize, nav::kMaskFree);
     int side() const override { return kGridSize; }
     float cell_size_m() const override { return 1.0f; }
     glm::vec2 origin_m() const override { return glm::vec2(-static_cast<float>(kGridHalf)); }
     float cost(int, int) const override { return 1.0f; }
     float height(int, int) const override { return 0.0f; }
-    bool blocked(int x, int z) const override { return blk[z * kGridSize + x] != 0; }
-    void wall(int x, int z) { blk[z * kGridSize + x] = 1; }
+    uint8_t blocked_mask(int x, int z) const override { return blk[z * kGridSize + x]; }
+    // A whole-cell wall: every corner triangle solid, which is what an
+    // axis-aligned footprint stamps anyway.
+    void wall(int x, int z) { blk[z * kGridSize + x] = nav::kMaskSolid; }
 };
 
 }  // namespace
@@ -126,7 +128,7 @@ TEST_CASE("plan_paths routes a unit around a navmesh obstacle") {
     CHECK(np.waypoints.size() >= 3);  // detoured, not a straight shot
     for (const glm::vec2& w : np.waypoints) {
         const glm::ivec2 c = game->navmesh.WorldToCell(w);
-        CHECK_FALSE(src.blocked(c.x, c.y));  // no waypoint on the wall
+        CHECK(src.blocked_mask(c.x, c.y) == nav::kMaskFree);  // no waypoint on the wall
     }
 }
 

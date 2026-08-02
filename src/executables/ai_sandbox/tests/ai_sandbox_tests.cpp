@@ -13,12 +13,13 @@
 #include "game_state.h"
 #include "nav_world.h"       // rebuild_navmesh_if_stale
 #include "threat_table.h"    // threat_target -- the dummy IS its anchor
-#include "placement.h"       // tri_index / in_bounds_tile -- the flood fill works in tiles
+#include "placement.h"       // tri_index / in_bounds_tile -- the fill works in TRIANGLES
 #include "sim_internal.hpp"  // make_world / buildings_of
 
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <tuple>
@@ -39,49 +40,96 @@ std::unique_ptr<BadlandsGame> arena_world(const ArenaLayout& layout) {
     return make_world(BrainDesc{}, cfg);
 }
 
-bool tile_free(const BadlandsGame& g, int tx, int tz) {
-    if (!in_bounds_tile(tx, tz)) {
-        return false;
+// Free per TRIANGLE, which is the resolution a footprint is actually stamped
+// at. The tile-level "any corner occupied => the whole tile is wall" this
+// replaced made the seal test weaker than it reads: a half-covered tile counted
+// as solid, so a fill could be stopped by ground a unit can walk on and report
+// a leaky arena as sealed. Every diagonal run in these shapes is made of such
+// tiles.
+bool tri_free(const BadlandsGame& g, int tx, int tz, int corner) {
+    return in_bounds_tile(tx, tz) && !g.placement.footprint[tri_index(tx, tz, corner)];
+}
+
+// The three cell corners a corner triangle owns (its two outer vertices plus
+// the tile centre), in tile-local half-integer coordinates x2 so they compare
+// as exact integers.
+std::array<glm::ivec2, 3> tri_verts_x2(int tx, int tz, int corner) {
+    const int x = 2 * tx, z = 2 * tz;
+    switch (corner) {
+        case 0: return {glm::ivec2{x, z}, glm::ivec2{x + 2, z}, glm::ivec2{x + 1, z + 1}};
+        case 1: return {glm::ivec2{x + 2, z}, glm::ivec2{x + 2, z + 2}, glm::ivec2{x + 1, z + 1}};
+        case 2: return {glm::ivec2{x, z + 2}, glm::ivec2{x + 2, z + 2}, glm::ivec2{x + 1, z + 1}};
+        default: return {glm::ivec2{x, z}, glm::ivec2{x, z + 2}, glm::ivec2{x + 1, z + 1}};
     }
-    for (int c = 0; c < 4; ++c) {
-        if (g.placement.footprint[tri_index(tx, tz, c)]) {
-            return false;
+}
+
+// Do two triangles' closed regions touch? They are corner triangles of unit
+// tiles, so sharing any vertex is exactly that -- edge contact just shares two.
+// Vertex contact and not edge contact for the reason the fill was 8-connected
+// before: a body is not a lattice-stepper, so two blocks meeting at a point are
+// a hole, not a seal.
+bool tris_touch(int ax, int az, int ac, int bx, int bz, int bc) {
+    for (const glm::ivec2& p : tri_verts_x2(ax, az, ac)) {
+        for (const glm::ivec2& q : tri_verts_x2(bx, bz, bc)) {
+            if (p == q) {
+                return true;
+            }
         }
     }
-    return true;
+    return false;
 }
 
 glm::ivec2 tile_of(glm::vec2 p) {
     return {static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.y))};
 }
 
-// 8-connected flood fill over FREE tiles from `start`, bounded by `limit`.
-// Eight and not four deliberately: a body is not a tile-stepper, so a pair of
-// blocks touching corner-to-corner is a hole even though a 4-connected fill
-// would call it sealed. Returns false if the fill ever reaches the bound --
-// i.e. the arena leaks.
+// Flood fill over FREE TRIANGLES from `start`, bounded by `limit`, spreading
+// to anything its closure touches (see tris_touch). Returns false if the fill
+// ever reaches the bound -- i.e. the arena leaks.
+//
+// Triangles rather than tiles because these shapes are largely diagonal runs,
+// whose walls are half-covered tiles: filling by tile would treat the walkable
+// half of every one of them as solid, and an arena that leaks through such a
+// gap would still report sealed.
 bool fill_stays_inside(const BadlandsGame& g, glm::vec2 start, int limit) {
+    const int span = 2 * limit + 1;
     const glm::ivec2 s = tile_of(start);
-    std::vector<uint8_t> seen(static_cast<size_t>(2 * limit + 1) * (2 * limit + 1), 0);
-    auto idx = [limit](int tx, int tz) {
-        return static_cast<size_t>(tz + limit) * (2 * limit + 1) + (tx + limit);
+    std::vector<uint8_t> seen(static_cast<size_t>(span) * span * 4, 0);
+    auto idx = [limit, span](int tx, int tz, int c) {
+        return (static_cast<size_t>(tz + limit) * span + (tx + limit)) * 4 + c;
     };
-    std::deque<glm::ivec2> queue{s};
-    seen[idx(s.x, s.y)] = 1;
+    // Seed from every free corner of the start tile; a spawn point sits at a
+    // tile centre, which belongs to all four.
+    std::deque<std::array<int, 3>> queue;
+    for (int c = 0; c < 4; ++c) {
+        if (tri_free(g, s.x, s.y, c)) {
+            seen[idx(s.x, s.y, c)] = 1;
+            queue.push_back({s.x, s.y, c});
+        }
+    }
+    if (queue.empty()) {
+        return false;  // a spawn buried inside a wall is a bug, not a seal
+    }
     while (!queue.empty()) {
-        const glm::ivec2 t = queue.front();
+        const std::array<int, 3> t = queue.front();
         queue.pop_front();
-        if (std::abs(t.x) >= limit || std::abs(t.y) >= limit) {
+        if (std::abs(t[0]) >= limit || std::abs(t[1]) >= limit) {
             return false;  // escaped
         }
         for (int dz = -1; dz <= 1; ++dz) {
             for (int dx = -1; dx <= 1; ++dx) {
-                const glm::ivec2 n{t.x + dx, t.y + dz};
-                if ((dx == 0 && dz == 0) || !tile_free(g, n.x, n.y) || seen[idx(n.x, n.y)]) {
-                    continue;
+                for (int c = 0; c < 4; ++c) {
+                    const int nx = t[0] + dx, nz = t[1] + dz;
+                    if ((dx == 0 && dz == 0 && c == t[2]) || !tri_free(g, nx, nz, c) ||
+                        !tris_touch(t[0], t[1], t[2], nx, nz, c)) {
+                        continue;
+                    }
+                    if (seen[idx(nx, nz, c)]) {
+                        continue;
+                    }
+                    seen[idx(nx, nz, c)] = 1;
+                    queue.push_back({nx, nz, c});
                 }
-                seen[idx(n.x, n.y)] = 1;
-                queue.push_back(n);
             }
         }
     }
@@ -178,8 +226,10 @@ TEST_CASE("both spawn points are free and mutually reachable", "[arena]") {
         auto owned = arena_world(layout);
         const glm::ivec2 a = tile_of(layout.spawn_a);
         const glm::ivec2 b = tile_of(layout.spawn_b);
-        REQUIRE(tile_free(*owned, a.x, a.y));
-        REQUIRE(tile_free(*owned, b.x, b.y));
+        for (int c = 0; c < 4; ++c) {
+            REQUIRE(tri_free(*owned, a.x, a.y, c));
+            REQUIRE(tri_free(*owned, b.x, b.y, c));
+        }
         // Reachable through the NAVMESH, not just the tile grid: this is what
         // proves the clearance dilation did not quietly seal a corridor the
         // flood fill still walks down.
@@ -501,3 +551,44 @@ TEST_CASE("the training dummy is worth its anchor and swings at nothing", "[thre
     const std::vector<CreatureId> pool = duel_pool(DefaultCreatureCatalog());
     CHECK(std::find(pool.begin(), pool.end(), CreatureId::TrainingDummy) == pool.end());
 }
+
+TEST_CASE("a diagonal arena's mesh carries partial cells, and they are walkable", "[arena]") {
+    // Octagon and Rhomboid are built largely (Rhomboid entirely) from 45-degree
+    // runs, so much of their geometry produces cells a footprint only HALF
+    // covers. Rounding those to solid -- the per-cell boolean the nav source
+    // used to hand over -- is a metre of wall that is not there, and it is why
+    // these arenas played smaller than they draw.
+    //
+    // What this pins is that partial leaves reach the MESH and are standable.
+    // It deliberately does NOT claim the diagonal FACES keep theirs: at the
+    // shipped 0.4 m clearance those are absorbed by the standoff (the count
+    // drops 256 -> 64 on the rhomboid), and the cells counted here are mostly
+    // the ones the dilation carves around square blocks. The face question is
+    // asked directly, at both sides of the ceiling, by "a diagonal building
+    // leaves half its boundary cells walkable" in nav_world_tests.cpp.
+    for (ArenaShape shape : {ArenaShape::Octagon, ArenaShape::Rhomboid}) {
+        CAPTURE(arena_shape_name(shape));
+        auto owned = arena_world(build_arena(shape));
+        rebuild_navmesh_if_stale(*owned);
+        REQUIRE_FALSE(owned->navmesh.empty());
+
+        std::vector<nav::NavMesh::DebugCell> cells;
+        owned->navmesh.DebugCells(cells);
+        int partial = 0;
+        for (const nav::NavMesh::DebugCell& c : cells) {
+            if (c.tri_mask == nav::kMaskFree || c.tri_mask == nav::kMaskSolid) {
+                continue;
+            }
+            ++partial;
+            // A partial leaf is somewhere to stand by definition -- if these
+            // came back impassable the mask would be decoration.
+            CHECK(c.passable);
+        }
+        // A floor by a wide margin at the shipped clearance (measured: 136 for
+        // the octagon, 64 for the rhomboid). Zero is what the old per-cell
+        // boolean produced, at any clearance -- it had no way to say "half".
+        CHECK(partial > 20);
+    }
+}
+
+

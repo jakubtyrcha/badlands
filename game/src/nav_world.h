@@ -5,6 +5,11 @@
 // into the nav::NavSource the quadtree reads. The nav core stays biome-agnostic;
 // the biome -> cost policy lives here.
 //
+// Footprints cross the boundary as the per-triangle mask they were stamped as
+// (placement.h's tri_index, mirrored by navmesh/tri.h) -- terrain is per cell,
+// obstacles are per quarter-cell, and the two resolutions do not meet until the
+// quadtree merges them.
+//
 // Coordinates line up 1:1: the placement/movement grid is kGridSize (256) tiles
 // of 1 world unit = 1 m, centred on the origin, which is exactly the nav grid
 // (side 256, cell 1 m, origin (-kGridHalf, -kGridHalf)).
@@ -40,7 +45,7 @@ class SimNavSource : public nav::NavSource {
     glm::vec2 origin_m() const override;
     float cost(int cx, int cz) const override;
     float height(int cx, int cz) const override;
-    bool blocked(int cx, int cz) const override;
+    uint8_t blocked_mask(int cx, int cz) const override;
 
    private:
     glm::vec2 cell_center(int cx, int cz) const;

@@ -27,10 +27,30 @@ float biome_move_cost(mapgen::Biome biome) {
 }
 
 nav::NavParams sim_nav_params() {
-    // cost/height tolerances bound the merge error; clearance 1 cell ~ agent
-    // radius; cluster size is unused until HPA* (deferred).
+    // cost/height tolerances bound the merge error; cluster size is unused until
+    // HPA* (deferred).
+    //
+    // 0.4 m of standoff: roughly a hero's body radius (Agent::radius is half the
+    // min body extent, heroes.cpp -- 0.45 for a 0.9-wide hero), so a routed path
+    // very nearly fits the thing walking it. The old value was 1 whole cell,
+    // about twice that.
+    //
+    // This is ABOVE the sqrt(2)/6 ~ 0.236 ceiling in NavParams::clearance_m, and
+    // that costs something real: a diagonal wall's half-covered boundary cells
+    // are within 0.4 of their own solid half, so they fill in and those walls go
+    // back to cell-quantised. Measured on the sandbox arenas, the all-diagonal
+    // rhomboid keeps 64 partial cells instead of 256, and its blocked area is
+    // 752 m2 rather than 656 -- still well under the 1192 the per-cell boolean
+    // plus 1 m Chebyshev produced, because THAT is the part the triangle mask
+    // and the metric dilation fix regardless of radius.
+    //
+    // The trade is standoff against diagonal fidelity, and on a 1 m lattice you
+    // cannot have both: a 0.4 m offset from a 45-degree line does not fall on
+    // the quarter-tile lattice at all. Halving the nav cell to 0.5 m would buy
+    // both at 4x the cells and ~4x the rebuild (~100 ms -> ~400 ms per
+    // nav_epoch bump), which is why it is not done here.
     return nav::NavParams{/*cost_epsilon=*/0.05f, /*height_epsilon=*/0.25f,
-                          /*clearance_cells=*/1, /*cluster_cells=*/32};
+                          /*clearance_m=*/0.4f, /*cluster_cells=*/32};
 }
 
 int SimNavSource::side() const { return kGridSize; }
@@ -51,18 +71,23 @@ float SimNavSource::height(int cx, int cz) const {
     return height_at(*game_, cell_center(cx, cz));
 }
 
-bool SimNavSource::blocked(int cx, int cz) const {
+// The placement grid IS a triangle grid, and its corner numbering is the one
+// nav/tri.h mirrors -- so this is a straight copy of four bits the sim already
+// stamped, not a re-rasterization. (It used to OR them into one boolean, which
+// is what made a diagonal wall a cell fatter than its own geometry.)
+uint8_t SimNavSource::blocked_mask(int cx, int cz) const {
     const int tx = cx - kGridHalf;
     const int tz = cz - kGridHalf;
     if (!in_bounds_tile(tx, tz)) {
-        return true;  // outside the world is a wall
+        return nav::kMaskSolid;  // outside the world is a wall
     }
-    for (int corner = 0; corner < 4; ++corner) {
+    uint8_t mask = nav::kMaskFree;
+    for (int corner = 0; corner < nav::kTriPerCell; ++corner) {
         if (game_->placement.footprint[tri_index(tx, tz, corner)]) {
-            return true;  // a building tile
+            mask |= nav::tri_bit(corner);
         }
     }
-    return false;
+    return mask;
 }
 
 void rebuild_navmesh_if_stale(BadlandsGame& game) {
