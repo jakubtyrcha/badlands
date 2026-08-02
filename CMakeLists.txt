@@ -518,6 +518,42 @@ target_include_directories(badlands_terrain_cluster_tests PRIVATE
 target_link_libraries(badlands_terrain_cluster_tests PRIVATE meshoptimizer)
 add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_terrain_cluster_bench: the GOLDEN OUTPUT PIN + benchmarks for the same
+# build, on a fixture whose cost profile matches the production map. Separate
+# target from the invariant suite above because it needs the real mapgen river
+# carve (river_carve/river_arcs — both pure CPU, no engine link): an analytic
+# stand-in would not reproduce the per-hot-tile cost that dominates the build.
+# The BENCHMARK cases are tagged [.][bench] so ctest runs only the golden checks;
+# time them with `scripts/test.sh badlands_terrain_cluster_bench "[bench]"`.
+add_executable(badlands_terrain_cluster_bench
+    src/game/geometry/terrain_clusters_bench.cpp
+    src/game/geometry/terrain_clusters.cpp
+    src/game/map/map_data.cpp
+    src/engine/rendering/geometry/aabb.cpp
+    src/core/parallel.cpp
+    src/mapgen/river_carve.cpp
+    src/mapgen/river_arcs.cpp
+    # segment_aabb_distance lives in river_graph.cpp, which drags in the routing
+    # code's own deps. Compiled directly rather than via badlands_mapgen_lib
+    # because that lib links badlands_engine (Dawn/GPU) and this target must stay
+    # a pure-CPU, fast-to-build test binary.
+    src/mapgen/river_graph.cpp
+    src/mapgen/erosion.cpp
+    src/mapgen/hydrology.cpp
+    src/mapgen/distance_field.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_terrain_cluster_bench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite  # erosion.cpp
+    ${taskflow_SOURCE_DIR}
+)
+target_link_libraries(badlands_terrain_cluster_bench PRIVATE meshoptimizer)
+add_test(NAME badlands_terrain_cluster_bench COMMAND badlands_terrain_cluster_bench WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_fog_generator_tests: the biome -> fog-emitter generator. Pure CPU
 # (fog_sim.hpp is header-only glm; biomes/field2d are headers), so it compiles
 # fog_generator.cpp directly with no engine link.
