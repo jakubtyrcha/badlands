@@ -50,10 +50,17 @@
 #include "engine/rendering/material/rendering_material_instance.hpp"
 #include "game/geometry/tree_generator.hpp"  // SkeletonBranch
 #include "game/geometry/tree_options.hpp"
+#include "game/visual/impostor_atlas.hpp"
 
 namespace badlands {
 
 class GpuPipelineGenerator;
+
+// The solid colour every tree's bark renders with. Named and shared because the
+// impostor bake (game/visual/impostor_baker.hpp) has to reproduce it exactly --
+// if the two drift, a tree visibly changes hue at the LOD4 switch distance,
+// which reads as a lighting bug rather than as a mismatched constant.
+inline constexpr glm::vec3 kTreeBarkColor{0.30f, 0.19f, 0.10f};
 
 // One model's fully-prepared CPU geometry. The caller builds these (see
 // BuildTreeFieldModel below, which is the standard way) and BuildTreeField
@@ -75,6 +82,23 @@ struct TreeFieldModel {
   // target_height_m / bark height in native units. The caller needs it to build
   // instance transforms, so it is computed once here rather than re-derived.
   float native_to_world_scale = 1.0f;
+  // What this model was built to stand at, in metres. Derivable from the bark
+  // height and the scale above, but stored because the LOD chain's cutoffs are
+  // a function of it and re-deriving them is how the two drift.
+  float target_height_m = 1.0f;
+};
+
+// The optional impostor level (LOD4). Supplying a valid atlas whose placement
+// count matches the models adds one LOD to every model; leaving it default
+// builds exactly the voxel-only chain that existed before.
+struct TreeFieldImpostor {
+  const ImpostorAtlas* atlas = nullptr;
+  std::span<const ImpostorPlacement> placement;
+
+  bool active(size_t model_count) const {
+    return atlas != nullptr && atlas->valid() &&
+           placement.size() == model_count;
+  }
 };
 
 // Per-model local-space bounds, in NATIVE (untransformed) units.
@@ -126,6 +150,13 @@ struct TreeField {
   // was actually built with (its runtime LOD count), NOT kMaxLods entries --
   // that constant is only the cap.
   std::vector<std::vector<LodBuffers>> lod_buffers;
+
+  // The impostor level's shared unit quad (one for every model -- the geometry
+  // is identical, only the material differs) and its factory. Null unless a
+  // TreeFieldImpostor was supplied.
+  std::unique_ptr<MaterialInstanceFactory> impostor_factory;
+  wgpu::Buffer impostor_vertex_buffer;
+  wgpu::Buffer impostor_index_buffer;
 
   // One-time 1x1 support textures for the solid-color bark material (flat
   // tangent-space normal + a fixed-roughness ARM), kept alive the same way.
@@ -184,6 +215,7 @@ TreeFieldModel BuildTreeFieldModel(const TreeOptions& options,
 // lod_count - 1` (one ascending cutoff between each adjacent pair of levels).
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-    std::span<const TreeFieldModel> models, uint32_t capacity);
+    std::span<const TreeFieldModel> models, uint32_t capacity,
+    const TreeFieldImpostor& impostor = {});
 
 }  // namespace badlands

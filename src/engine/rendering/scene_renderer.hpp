@@ -64,6 +64,14 @@ enum class GBufferDebugMode {
               // resolve without a separate "off" state.
   Ao,         // the GTAO screen-space AO field (grayscale, dark at contacts).
               // Shows 1.0 (white) everywhere when GTAO is off / unsupported.
+  // The two G-buffer material channels that had no view. Both are written at
+  // G-buffer fill time and consumed by deferred lighting, so a material that
+  // packs them in the wrong order produces a plausible-looking image and no
+  // error -- which is exactly what happened to the foliage impostor. `Ao` above
+  // is the SCREEN-SPACE GTAO field and is a different quantity from BakedAo.
+  Translucency,  // material.g, grayscale. Foliage transmission strength.
+  BakedAo,       // material.b, grayscale. The per-material baked occlusion
+                 // that lighting mins against GTAO.
 };
 
 // Directional-shadow debug visualization modes (Task T1). debug_flags == 0

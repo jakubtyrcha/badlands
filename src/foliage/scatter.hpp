@@ -11,10 +11,12 @@
 //
 // Why this and not Bridson Poisson-disk: Bridson needs a global active list,
 // which makes it order-dependent and awkward to parallelize, and it gives one
-// radius per run. Here the exclusion radius is per MODEL and the rule between
-// two instances is max(r_i, r_j) -- so bushes pack tightly among themselves but
-// still respect an oak's footprint. That is multi-class blue noise, without the
-// global state.
+// radius per run. Here the exclusion radius is per MODEL -- each model's
+// MEASURED crown radius -- and the rule between two instances is
+// r_i * s_i + r_j * s_j, a sum, so no two crown circles overlap and a bush
+// stands clear of an oak's drip line rather than merely of its trunk. Bushes
+// still pack tightly among themselves, because their own radii are small. That
+// is multi-class blue noise, without the global state.
 //
 // Layers are placed in declaration order and earlier instances block later
 // ones, so ordering the canopy first is what lets it claim its space before the
@@ -65,6 +67,20 @@ struct FoliageGenParams {
 FoliageField GenerateFoliage(const ForestType& forest,
                              const TerrainQuery& query,
                              const FoliageGenParams& params);
+
+// True if ANY point of the region's coverage raster is non-zero -- i.e. whether
+// this forest type has anywhere at all to grow.
+//
+// Exists because a consumer whose models are expensive to build cannot learn
+// this from an empty FoliageField: placement spaces by each model's MEASURED
+// crown, so the models must exist before GenerateFoliage runs, and a field that
+// comes back empty has already paid for them. On a map with no forest biome
+// that was ~1 s of mesh generation discarded on every load.
+//
+// Samples the same raster BuildDepthField would, so it sees exactly what
+// placement will: a patch too small to register here is one that would have
+// been thresholded away regardless.
+bool AnyCoverage(const TerrainQuery& query, const FoliageGenParams& params);
 
 // Slope in DEGREES at world XZ, by central differences on query.HeightAt.
 // Exposed because it is a distinct method with a checkable answer -- the tests

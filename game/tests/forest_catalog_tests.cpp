@@ -71,7 +71,7 @@ const char* kGoodLayer = R"JSON({
   "edge_scale": 0.55, "edge_scale_depth_m": 25.0,
   "species": [
     { "preset": "Oak (large)", "variants": 2, "height_m": 22.0,
-      "radius_m": 3.4, "weight": 1.0, "depth": [2.0, 10.0, null, null] }
+      "weight": 1.0, "depth": [2.0, 10.0, null, null] }
   ]
 })JSON";
 
@@ -197,10 +197,14 @@ TEST_CASE("Layers do not overlap in stature", "[foliage]") {
     CHECK(lo_a > hi_b);
   }
 
-  // And every model has a usable footprint.
+  // And every model is otherwise usable. radius_m is deliberately still 0
+  // here: a loaded catalog carries no spacing radius at all, because the
+  // radius is MEASURED off each model's built geometry by BuildForestModels.
+  // A non-zero value out of the loader would mean a file had smuggled one in
+  // and placement would space by a guess instead of by the mesh.
   for (const foliage::FoliageModel& m : fc.type.models) {
-    CHECK(m.radius_m > 0.0f);
-    CHECK(m.radius_m < m.height_m);
+    CHECK(m.radius_m == 0.0f);
+    CHECK(m.height_m > 0.0f);
     CHECK(m.scale_range.x > 0.0f);
     CHECK(m.scale_range.y >= m.scale_range.x);
     CHECK(m.weight > 0.0f);
@@ -222,9 +226,9 @@ TEST_CASE("A species' share does not depend on its variant count", "[foliage]") 
     "scale_range": [0.9, 1.1],
     "edge_scale": 1.0, "edge_scale_depth_m": 1.0,
     "species": [
-      { "preset": "Bush 1", "variants": 4, "height_m": 1.5, "radius_m": 0.9,
+      { "preset": "Bush 1", "variants": 4, "height_m": 1.5,
         "weight": 1.0, "depth": [0.0, 1.0, null, null] },
-      { "preset": "Bush 2", "variants": 1, "height_m": 1.3, "radius_m": 0.8,
+      { "preset": "Bush 2", "variants": 1, "height_m": 1.3,
         "weight": 1.0, "depth": [0.0, 1.0, null, null] }
     ]
   })JSON";
@@ -244,31 +248,40 @@ TEST_CASE("A species' share does not depend on its variant count", "[foliage]") 
   CHECK(bush1 == Catch::Approx(1.0f));
 }
 
-TEST_CASE("The shipped bush layer has the species mix its file states",
+TEST_CASE("In the shipped forest, a species' variants split its share evenly",
           "[foliage]") {
-  // The concrete case the variant-weight bug corrupted. Reads the intended
-  // shares straight off the layer, so retuning the file moves both sides
-  // together and this stays a statement about the LOADER, not about content.
+  // The shipped-file half of the variant-weight bug. The regression itself is
+  // pinned by the in-memory test above, which can control both species' weights
+  // and variant counts; what is worth checking against the real file is that
+  // the split actually happens there, and that the file still MIXES variant
+  // counts -- if every species had the same count, the bug would be invisible
+  // and this whole guard vacuous.
+  //
+  // Stated without naming a species or a number, so retuning the forest (or
+  // swapping it to a different one entirely) moves nothing here.
   ForestCatalog fc;
   REQUIRE(BuildForestCatalog(fc));
-  REQUIRE(fc.type.layers.size() == 3);
-  const foliage::FoliageLayer& bush = fc.type.layers[2];
 
-  std::map<std::string, float> share;
-  float total = 0.0f;
-  for (uint16_t k = 0; k < bush.model_count; ++k) {
-    const uint16_t i = static_cast<uint16_t>(bush.first_model + k);
+  std::map<std::string, std::vector<float>> weights_by_species;
+  for (size_t i = 0; i < fc.models.size(); ++i) {
     const std::string species =
         fc.models[i].debug_name.substr(0, fc.models[i].debug_name.rfind(" v"));
-    share[species] += fc.type.models[i].weight;
-    total += fc.type.models[i].weight;
+    weights_by_species[species].push_back(fc.type.models[i].weight);
   }
+  REQUIRE(weights_by_species.size() >= 2);
 
-  // Bush 1 at weight 1.00 against Bush 2's 0.80 and Bush 3's 0.60 is 1/2.4.
-  REQUIRE(total == Catch::Approx(2.4f));
-  CHECK(share["Bush 1"] / total == Catch::Approx(1.00f / 2.4f));
-  CHECK(share["Bush 2"] / total == Catch::Approx(0.80f / 2.4f));
-  CHECK(share["Bush 3"] / total == Catch::Approx(0.60f / 2.4f));
+  std::set<size_t> variant_counts;
+  for (const auto& [species, weights] : weights_by_species) {
+    INFO("species " << species);
+    variant_counts.insert(weights.size());
+    for (float w : weights) {
+      CHECK(w == Catch::Approx(weights.front()));
+      CHECK(w > 0.0f);
+    }
+  }
+  INFO("every species ships the same number of variants, so this file could "
+       "not reveal a variant-count-dependent share");
+  CHECK(variant_counts.size() >= 2);
 }
 
 TEST_CASE("Something is plantable at every depth inside the forest",
@@ -356,11 +369,23 @@ TEST_CASE("Out-of-range and missing numbers are rejected", "[foliage]") {
   CHECK_FALSE(LoadFromText(with_replacement("\"variants\": 2", "\"variants\": 0"), fc));
   CHECK_FALSE(LoadFromText(
       with_replacement("\"max_slope_deg\": 32.0", "\"max_slope_deg\": 120.0"), fc));
-  // A footprint wider than the tree is tall spaces the forest out to nothing.
-  CHECK_FALSE(LoadFromText(
-      with_replacement("\"radius_m\": 3.4", "\"radius_m\": 30.0"), fc));
   // A missing key, not just a bad value.
   CHECK_FALSE(LoadFromText(with_replacement("\"weight\": 1.0,", ""), fc));
+}
+
+TEST_CASE("A file that declares radius_m is rejected, not ignored", "[foliage]") {
+  // radius_m used to be a file field. It is now measured from the model's own
+  // geometry, so a file still carrying one is a file written against the old
+  // rules -- and the number in it would be silently discarded. Silently is the
+  // problem: whoever typed 3.4 m for a tree whose crown measures 10 m would
+  // have no way to learn that spacing stopped listening to them.
+  std::string body = kGoodLayer;
+  const size_t at = body.find("\"height_m\": 22.0,");
+  REQUIRE(at != std::string::npos);
+  body.insert(at, "\"radius_m\": 3.4, ");
+
+  ForestCatalog fc;
+  CHECK_FALSE(LoadFromText(MinimalForest(body), fc));
 }
 
 TEST_CASE("An inverted clump window is rejected", "[foliage]") {

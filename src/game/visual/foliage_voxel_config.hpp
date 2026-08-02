@@ -114,6 +114,50 @@ inline float FoliageVoxelCellNativeM(size_t lod, float bark_height_native) {
          kFoliagePreviewHeight;
 }
 
+// The per-LOD tet POSITION jitter that holds the tets' ABSOLUTE displacement
+// constant across the chain. `base_jitter` is LeafVoxelizeOptions' own default
+// (passed in rather than included, to keep this header off the voxelizer).
+//
+// LeafVoxelizeOptions::position_jitter is a FRACTION OF A CELL, and the chain's
+// cell grows 10x from L0 (0.15) to L3 (1.5) -- so a fixed fraction throws a
+// coarse tet ten times further than a fine one. On a 27 m pine that is +-0.15 m
+// at L0 against +-1.52 m at L3, and L3 has only a few dozen tets to begin with:
+// the displacement stops reading as organic noise on a dense crown and starts
+// reading as a scatter of separated lumps with the trunk visible through it.
+// The chain's own comment wants L3 to be "a blob standing in for the
+// silhouette" -- a blob is exactly what the jitter was pulling apart.
+//
+// Only POSITION is scaled. axis_jitter is an ANGLE: a tet rotated in place
+// varies its facing without moving away from the shape, so it stays useful at
+// every level. overscale is likewise left alone -- it is what makes coarse tets
+// overlap into a mass, and shrinking it would reopen the gaps this closes.
+inline float FoliagePositionJitterForLod(size_t lod, float base_jitter) {
+  const size_t level = std::min(lod, kFoliageVoxelWorldSizes.size() - 1);
+  return base_jitter * kFoliageVoxelWorldSizes[0] /
+         kFoliageVoxelWorldSizes[level];
+}
+
+// L3 -> L4, the switch to the baked impostor.
+//
+// MUST be strictly greater than the last voxel cutoff. GpuInstanceRenderer
+// validates the chain as strictly ascending and says so loudly; an equal pair
+// makes the level between them unreachable, which it treats as a malformed
+// chain rather than as a way to retire a level.
+//
+// 130 rather than 70. Setting it to 70 -- L2->L3's own value -- was an attempt
+// to retire L3 on the strength of a 400 m A/B where L3's tets read as fat blobs
+// against the impostor's clean silhouette. That comparison was sound at 400 m
+// and the conclusion drawn from it was not: it ignored the impostor's OTHER
+// error term. 16 views over a hemisphere are ~20 deg apart, so a view up to
+// ~10 deg off the nearest baked one shows a parallax error of roughly
+// 0.18 * crown depth -- about 19 px for an 8 m tree at 70 preview metres, which
+// is glaring. The tile resolution stops binding at ~58; the VIEW COUNT does not
+// stop binding until several times that. 130 is where the earlier screenshots
+// looked right, and L3 keeps the 70-130 band.
+//
+// Raising kImpostorViewsPerAxis is what would let this come in earlier.
+inline constexpr float kFoliageImpostorThresholdPreviewM = 130.0f;
+
 inline std::array<float, kFoliageLodThresholdsPreviewM.size()>
 FoliageLodThresholdsForHeight(float target_height_m) {
   const float r = target_height_m / kFoliagePreviewHeight;

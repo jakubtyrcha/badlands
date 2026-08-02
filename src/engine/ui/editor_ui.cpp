@@ -90,6 +90,12 @@ void DrawGBufferDebugSelector(SceneRenderer& renderer) {
   if (ImGui::RadioButton("Albedo", mode == GBufferDebugMode::Albedo)) {
     mode = GBufferDebugMode::Albedo;
   }
+  if (ImGui::RadioButton("Translucency", mode == GBufferDebugMode::Translucency)) {
+    mode = GBufferDebugMode::Translucency;
+  }
+  if (ImGui::RadioButton("Baked AO", mode == GBufferDebugMode::BakedAo)) {
+    mode = GBufferDebugMode::BakedAo;
+  }
   if (ImGui::RadioButton("Roughness", mode == GBufferDebugMode::Roughness)) {
     mode = GBufferDebugMode::Roughness;
   }

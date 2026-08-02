@@ -216,16 +216,21 @@ bool ReadLayer(const json& l, const std::string& where,
     fm.scale_range = scale_range;
     if (!ReadInt(s, swhere, "variants", variants, 1, 16) ||
         !ReadNumber(s, swhere, "height_m", fm.height_m, 0.05f, 200.0f) ||
-        !ReadNumber(s, swhere, "radius_m", fm.radius_m, 0.01f, 100.0f) ||
         !ReadNumber(s, swhere, "weight", fm.weight, 0.0001f, 1000.0f) ||
         !ReadCurve(s, swhere, "depth", fm.depth)) {
       return false;
     }
-    if (fm.radius_m >= fm.height_m) {
+    // Deliberately 0, not a default: the crown radius is MEASURED off the built
+    // model (BuildForestModels), never declared. A file cannot supply one, so a
+    // catalog used without that step spaces nothing -- and GenerateFoliage
+    // refuses an all-zero radius table rather than carpeting the map.
+    fm.radius_m = 0.0f;
+    if (s.contains("radius_m")) {
       spdlog::error(
-          "forest catalog: {} has radius_m {} >= height_m {} -- a footprint "
-          "wider than the tree is tall spaces the forest out to nothing",
-          swhere, fm.radius_m, fm.height_m);
+          "forest catalog: {} declares radius_m, which is no longer a file "
+          "field -- crown radius is measured from the model's own bounds so it "
+          "cannot drift from the mesh. Remove it.",
+          swhere);
       return false;
     }
 

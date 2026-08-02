@@ -17,7 +17,7 @@ Run from the repo root — `shaders/` and `assets/` resolve relative to cwd.
 ./build/badlands_game --record frames/       # headless: render a frame sequence
 scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 5
 ```
-- `badlands_viewer --lod`: 0 = original cards, 1–4 = voxel LODs L0..L3, 5 = Multi (instanced field). L3 is the coarse tail (~230–680 tris/tree). Multi drives the same L0..L3 chain: LOD count is per-model and runtime (`GpuInstanceRenderer::ModelLod`), capped by the compile-time `kMaxLods` (8).
+- `badlands_viewer --lod`: 0 = original cards (now deferred alpha-cutout, not forward), 1–3 = voxel LODs L0..L2, **4 = Impostor** (the baked octahedral billboard, which took over the slot voxel L3 used to hold), 5 = Multi (instanced field). Multi drives the same chain the game does, impostor included: LOD count is per-model and runtime (`GpuInstanceRenderer::ModelLod`), capped by the compile-time `kMaxLods` (8). Voxel L3 is still BUILT (the field selects it between 70 and 130 preview metres) but is no longer reachable from the viewer's manual switch.
 - `badlands_game` reads `USE_BLOCKOUT_MODE` (any non-empty value) to render greybox proxies instead of detailed PBR materials.
 
 ## The AI sandbox is a puppet-master layer, and it is one-way

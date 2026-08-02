@@ -11,6 +11,7 @@
 
 #include "engine/app/sdl_input_util.hpp"  // NormalizedWheelY
 #include "engine/rendering/gpu_instance_renderer.hpp"  // GpuInstanceRenderer::InstanceInput
+#include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/scene_build.hpp"
 #include "engine/rendering/scene_renderer.hpp"
 #include "engine/ui/editor_ui.hpp"
@@ -95,7 +96,47 @@ constexpr float kMultiFloorSize = 160.0f;
 // same formula, applied to Multi mode's own per-LOD voxel sizes.
 constexpr float kFoliageVoxelTargetPx = 8.0f;
 
+// lod_level_ of the IMPOSTOR. It takes the slot the coarsest voxel level used to
+// hold, so the numbering and the `--lod` flag are unchanged: 0 = Original,
+// 1..kVoxelLodCount-1 = Voxel L0..L2, kVoxelLodCount = Impostor.
+constexpr int kImpostorLodLevel = kVoxelLodCount;
+
+// The impostor's unit quad, in the standard textured-mesh layout. Position is
+// unused -- foliage_impostor.wesl builds the quad from the instance transform --
+// so only uv carries information, and it IS the local uv into the baked tile.
+TexturedMeshResult MakeImpostorQuad() {
+  TexturedMeshResult out;
+  out.mesh.geometry_type = GeometryType::kTexturedMesh;
+  out.mesh.vertices = {
+      0, 0, 0,  0, 0,  0, 0, 1,  1, 0, 0,
+      0, 0, 0,  1, 0,  0, 0, 1,  1, 0, 0,
+      0, 0, 0,  0, 1,  0, 0, 1,  1, 0, 0,
+      0, 0, 0,  1, 1,  0, 0, 1,  1, 0, 0,
+  };
+  out.mesh.vertex_count = 4;
+  out.mesh.indices = {0, 1, 2, 2, 1, 3};
+  out.mesh.dirty = true;
+  // Bounds are only used for entity culling; the real extent is the placement
+  // radius the material expands the quad to.
+  out.local_bounds = Aabb{glm::vec3(-1.0f), glm::vec3(1.0f)};
+  return out;
+}
+
 }  // namespace
+
+bool ModelViewerView::ImpostorPreviewIsCurrent() const {
+  return impostor_preview_.ok && impostor_preview_generator_ == generator_index_;
+}
+
+bool ModelViewerView::EnsureImpostorPreview(
+    std::span<const TreeFieldModel> models) {
+  if (ImpostorPreviewIsCurrent()) {
+    return true;
+  }
+  impostor_preview_ = BakeImpostorAtlas(device_, queue_, *pipeline_gen_, models);
+  impostor_preview_generator_ = generator_index_;
+  return impostor_preview_.ok;
+}
 
 bool ModelViewerView::Initialize(const RenderContext& ctx) {
   device_ = ctx.device;
@@ -305,8 +346,19 @@ void ModelViewerView::RebuildScene() {
         BuildTreeFieldModel(*gen.tree, kTreePreviewHeight)};
     const float s = field_models[0].native_to_world_scale;
 
+    // Multi walks the SAME chain the game's forest does, impostor included --
+    // otherwise the mode that exists to show dynamic LOD would stop one level
+    // short of what the game actually draws at distance, and the retired L3
+    // would still be its coarsest level.
+    TreeFieldImpostor impostor_slot;
+    if (EnsureImpostorPreview(field_models)) {
+      impostor_slot.atlas = &impostor_preview_.atlas;
+      impostor_slot.placement = impostor_preview_.placement;
+    }
+
     std::unique_ptr<TreeField> field =
-        BuildTreeField(device_, queue_, *pipeline_gen_, field_models, capacity);
+        BuildTreeField(device_, queue_, *pipeline_gen_, field_models, capacity,
+                       impostor_slot);
     if (!field) {
       // Mirrors the malformed-generator branch further down: log and bail
       // with a floor-only scene, leaving the orbit framing unchanged (an
@@ -397,8 +449,13 @@ void ModelViewerView::RebuildScene() {
       SimplifyBarkForVoxelLod(bark.mesh,
                               static_cast<size_t>(lod_level_ - 1));
     }
-    bark_tris_ = static_cast<int>(bark.mesh.indices.size() / 3);
-    AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
+    // The impostor level draws NO separate bark: its atlas already contains
+    // the bark, so adding the mesh too would show the real trunk in front of a
+    // billboard that also depicts one.
+    if (lod_level_ != kImpostorLodLevel) {
+      bark_tris_ = static_cast<int>(bark.mesh.indices.size() / 3);
+      AddMeshEntity(scene_, "bark", std::move(bark), bark_mat_, xf);
+    }
 
     if (lod_level_ == 0) {
       // Original: the pre-Phase-3 card-leaf path, byte-for-byte unchanged.
@@ -419,23 +476,117 @@ void ModelViewerView::RebuildScene() {
       leaf_tris_ = static_cast<int>(leaves.mesh.indices.size() / 3);
 
       if (leaves.mesh.vertex_count > 0) {
-        DeferredMaterial lm = matlib_.TranslucentFoliage(
-            LeafViewFor(gen.tree->leaves.silhouette), leaf_sampler_,
-            gen.tree->leaves.alpha_cutoff, gen.tree->leaves.tint,
-            gen.tree->leaves.transmission_tint,
-            gen.tree->leaves.transmission_strength);
-        AddForwardOpaqueMeshEntity(scene_, "leaves", std::move(leaves),
-                                   lm.factory, lm.params, xf);
+        // DEFERRED, not forward-opaque. The cards used to go through
+        // MaterialLibrary::TranslucentFoliage, which left the chain's finest
+        // level lit by a different path than L0-L4 -- no GTAO, no contact
+        // shadows, and a second lighting model to keep in step. A card is
+        // opaque wherever it is opaque; all it needs beyond voxel_foliage is
+        // an alpha test.
+        if (!leaf_cutout_factory_) {
+          FactoryDescriptor desc;
+          desc.shader_name = "foliage_cutout";
+          desc.shader_path = "game/foliage_cutout";
+          desc.supported_pass_types = {MaterialPassType::kDeferred};
+          desc.supported_geometry_types = {GeometryType::kTexturedMesh};
+          desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                                GBuffer::kMaterialFormat};
+          desc.depth_format = GBuffer::kDepthFormat;
+          desc.cull_mode = wgpu::CullMode::None;  // double-sided cards
+          desc.casts_shadow = true;
+          leaf_cutout_factory_ = BuildMaterialInstanceFactory(
+              desc, device_, queue_, pipeline_gen_);
+        }
+        if (leaf_cutout_factory_) {
+          InstanceParams params;
+          // Reflection-derived slot name for the group-0 texture at binding 1
+          // (see tree_field.hpp's deviation note).
+          params.texture_overrides.push_back(DefaultTextureView{
+              .param_name = "tex_1",
+              .view = LeafViewFor(gen.tree->leaves.silhouette),
+              .sampler = leaf_sampler_,
+              .type = TextureType::k2D,
+          });
+          params.uniform_overrides["tint"] = MaterialParameterValue(
+              glm::vec4(gen.tree->leaves.tint, 1.0f));
+          params.uniform_overrides["params"] = MaterialParameterValue(glm::vec4(
+              0.9f, gen.tree->leaves.transmission_strength,
+              gen.tree->leaves.alpha_cutoff, 1.0f));
+          DeferredMaterial lm;
+          lm.factory = leaf_cutout_factory_.get();
+          lm.params = std::move(params);
+          AddMeshEntity(scene_, "leaves", std::move(leaves), lm, xf);
+        }
       }
+    } else if (lod_level_ == kImpostorLodLevel) {
+      // The IMPOSTOR occupies the slot voxel L3 used to hold. L3's tets
+      // overscale, so a coarse voxel crown reads as a bigger tree than the one
+      // it replaces -- the same defect that killed the earlier attempt at a
+      // voxel L4. The impostor is a picture of the tree instead, so it cannot
+      // have that error, and it costs two triangles. The field's LOD chain made
+      // the same swap (see kFoliageImpostorThresholdPreviewM); this keeps the
+      // viewer showing what the game actually draws.
+      // Check the cache BEFORE building: BuildTreeFieldModel is a skeleton plus
+      // four voxelizations, the dominant cost of a rebuild, and RebuildScene
+      // runs on every LOD radio change -- so toggling in and out of this level
+      // would otherwise pay for a model the bake then discards.
+      bool have_impostor = ImpostorPreviewIsCurrent();
+      if (!have_impostor) {
+        const std::array<TreeFieldModel, 1> one = {
+            BuildTreeFieldModel(*gen.tree, kTreePreviewHeight)};
+        have_impostor = EnsureImpostorPreview(one);
+      }
+      if (have_impostor) {
+        if (!impostor_preview_factory_) {
+          FactoryDescriptor desc;
+          desc.shader_name = "foliage_impostor";
+          desc.shader_path = "game/foliage_impostor";
+          desc.supported_pass_types = {MaterialPassType::kDeferred};
+          desc.supported_geometry_types = {GeometryType::kTexturedMesh};
+          desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                                GBuffer::kMaterialFormat};
+          desc.depth_format = GBuffer::kDepthFormat;
+          desc.cull_mode = wgpu::CullMode::None;
+          desc.casts_shadow = true;
+          impostor_preview_factory_ = BuildMaterialInstanceFactory(
+              desc, device_, queue_, pipeline_gen_);
+        }
+        if (impostor_preview_factory_) {
+          InstanceParams params;
+          if (BindImpostorAtlas(impostor_preview_.atlas, params)) {
+            const ImpostorPlacement& place = impostor_preview_.placement[0];
+            params.uniform_overrides["placement"] = MaterialParameterValue(
+                glm::vec4(place.local_center, place.radius));
+            // params.w = the atlas layer; the preview bakes one model, so 0.
+            params.uniform_overrides["params"] = MaterialParameterValue(
+                glm::vec4(0.9f, gen.tree->leaves.transmission_strength,
+                          kImpostorAlphaCutoff, 0.0f));
+
+            DeferredMaterial im;
+            im.factory = impostor_preview_factory_.get();
+            im.params = std::move(params);
+            AddMeshEntity(scene_, "impostor", MakeImpostorQuad(), im, xf);
+          }
+        }
+      }
+      // The quad is two triangles and carries no bark of its own -- the bake
+      // included it, so the separate bark entity is skipped for this level.
+      bark_tris_ = 0;
+      leaf_tris_ = 2;
     } else {
-      // Voxel L0..L3: tet-voxelize the leaf cards instead of simplifying
+      // Voxel L0..L2: tet-voxelize the leaf cards instead of simplifying
       // them. cell_size is world_size / s -- kFoliageVoxelWorldSizes is in
       // preview (post-rescale) world units, LeafVoxelizeOptions::cell_size
       // wants the tree's own native units, and `s` is the same
       // kTreePreviewHeight rescale bark/xf above already apply.
       TexturedMeshResult leaves = GenerateLeafMesh(*gen.tree, skeleton);
       LeafVoxelizeOptions voxel_opts;
-      voxel_opts.cell_size = kFoliageVoxelWorldSizes[lod_level_ - 1] / s;
+      const size_t voxel_level = static_cast<size_t>(lod_level_ - 1);
+      voxel_opts.cell_size = kFoliageVoxelWorldSizes[voxel_level] / s;
+      // Coarse levels shrink the jitter FRACTION so the absolute displacement
+      // stays L0's -- otherwise L3's few oversized tets scatter instead of
+      // massing into a silhouette. Same call the instanced-field path makes.
+      voxel_opts.position_jitter =
+          FoliagePositionJitterForLod(voxel_level, voxel_opts.position_jitter);
       TexturedMeshResult voxels = VoxelizeLeafCards(
           leaves.mesh, gen.tree->leaves.silhouette, voxel_opts);
       leaf_tris_ = static_cast<int>(voxels.mesh.indices.size() / 3);
@@ -535,7 +686,11 @@ void ModelViewerView::DrawUI() {
     // would overflow this window's 200px width floor packed onto one row.
     ImGui::RadioButton("Original", &lod, 0);
     for (int level = 0; level < kVoxelLodCount; ++level) {
-      const std::string label = "Voxel L" + std::to_string(level);
+      // The last slot is the impostor, not a voxel level -- L3 was retired
+      // because its tets overscale (see kFoliageImpostorThresholdPreviewM).
+      const std::string label = (level == kVoxelLodCount - 1)
+                                    ? std::string("Impostor")
+                                    : "Voxel L" + std::to_string(level);
       ImGui::RadioButton(label.c_str(), &lod, level + 1);
     }
     ImGui::RadioButton("Multi", &lod, kMultiLodLevel);

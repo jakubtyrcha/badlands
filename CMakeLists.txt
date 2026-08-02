@@ -351,7 +351,9 @@ set(badlands_app_sources_viewer
     src/game/geometry/leaf_voxelizer.cpp
     # Multi-mode instanced tree grid (Task 4): builds an InstancedMeshField
     # from a catalog TreeOptions -- see game/visual/tree_field.hpp.
-    src/game/visual/tree_field.cpp)
+    src/game/visual/tree_field.cpp
+    src/game/visual/impostor_atlas.cpp
+    src/game/visual/impostor_baker.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
 # its building_scene helper. Compiled directly into the executable (like
 # model_viewer_view.cpp above), not into badlands_engine/badlands_game_lib --
@@ -478,8 +480,10 @@ add_executable(badlands_mapview
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
     src/game/visual/tree_field.cpp
+    src/game/visual/impostor_atlas.cpp
     src/game/visual/forest_catalog.cpp
     src/game/visual/forest_renderer.cpp
+    src/game/visual/impostor_baker.cpp
     src/game/map/forest_test_map_generator.cpp)
 target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib
                                                badlands_foliage_lib meshoptimizer)
@@ -711,6 +715,16 @@ add_executable(badlands_tree_tests
     # The CPU foliage-cell cull predicate: header-only, no GPU, so the shadow
     # caster + crown overhang behaviour is testable without a device.
     game/tests/foliage_cell_cull_tests.cpp
+    # Bounding box -> spacing circle, likewise header-only and GPU-free.
+    game/tests/crown_bounds_tests.cpp
+    # The impostor's hemi-octahedral view parameterization: shared by the baker
+    # and the material, so it is pinned where neither needs a device.
+    game/tests/octahedral_tests.cpp
+    # The impostor atlas' tile layout -- likewise shared by baker and material.
+    # The .cpp comes along for BindImpostorAtlas' refuse-an-unbuilt-atlas guard;
+    # nothing here creates a device.
+    game/tests/impostor_atlas_tests.cpp
+    src/game/visual/impostor_atlas.cpp
     src/game/visual/forest_catalog.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
@@ -744,6 +758,15 @@ add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY 
 # (also only a member of badlands_app_sources_viewer, not badlands_game_lib).
 add_executable(badlands_tree_field_gpu_tests
     game/tests/tree_field_gpu_tests.cpp
+    # The impostor bake (volumetric-foliage LOD4): verified by reading the
+    # atlas back, so it needs a real adapter like the rest of this target.
+    game/tests/impostor_bake_gpu_tests.cpp
+    # The impostor's RENDER path, on an artificial sphere whose impostor has an
+    # analytic expected value -- every impostor bug that reached review lived
+    # here and was invisible to the atlas-readback tests above.
+    game/tests/impostor_render_gpu_tests.cpp
+    src/game/visual/impostor_atlas.cpp
+    src/game/visual/impostor_baker.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp

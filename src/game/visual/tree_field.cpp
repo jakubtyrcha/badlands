@@ -70,12 +70,15 @@ TreeFieldModel BuildTreeFieldModel(const TreeOptions& options,
                        out.bark_lod0.local_bounds.min.y;
   const float native_h = std::max(bark_h, 0.001f);
   out.native_to_world_scale = target_height_m / native_h;
+  out.target_height_m = target_height_m;
 
   const TexturedMeshResult leaves = GenerateLeafMesh(options, skeleton);
   out.leaf_lod_meshes.reserve(kFoliageVoxelWorldSizes.size());
   for (size_t lod = 0; lod < kFoliageVoxelWorldSizes.size(); ++lod) {
     LeafVoxelizeOptions voxel_opts;
     voxel_opts.cell_size = FoliageVoxelCellNativeM(lod, native_h);
+    voxel_opts.position_jitter =
+        FoliagePositionJitterForLod(lod, voxel_opts.position_jitter);
     out.leaf_lod_meshes.push_back(
         VoxelizeLeafCards(leaves.mesh, options.leaves.silhouette, voxel_opts));
   }
@@ -85,17 +88,56 @@ TreeFieldModel BuildTreeFieldModel(const TreeOptions& options,
   return out;
 }
 
+namespace {
+
+// The bounds BuildTreeField publishes as TreeField::model_bounds. File-local:
+// the union over every LOD is what an instance's GPU bounds sphere and the
+// cell-cull padding want, and it is NOT what the foliage sampler should space
+// by -- forest_renderer.cpp measures its own, finer silhouette for that. A
+// public name here would invite exactly the wrong one.
+TreeModelBounds ComputeTreeModelBounds(const TreeFieldModel& model) {
+  TreeModelBounds bounds;
+  bounds.bark_local_bounds = model.bark_lod0.local_bounds;
+
+  // leaf_local_bounds = the UNION of every supplied LOD's own bounds (voxel
+  // tets overscale past their source cards' AABB, and different LODs can have
+  // different extents, so no single LOD's bounds alone would be conservative
+  // for every LOD). Aabb::Union is a no-op for an Aabb::Empty()-sentinel
+  // operand (min=+FLT_MAX/max=-FLT_MAX, see aabb.cpp), so unioning in an empty
+  // LOD's bounds unguarded is safe -- matters for the known pine-preset gap
+  // where one LOD's voxelization can legitimately be empty (see
+  // leaf_voxelizer.hpp) while others aren't. has_leaves reflects whether ANY
+  // supplied LOD has geometry.
+  for (const TexturedMeshResult& m : model.leaf_lod_meshes) {
+    if (m.mesh.vertex_count > 0) bounds.has_leaves = true;
+    bounds.leaf_local_bounds = bounds.leaf_local_bounds.Union(m.local_bounds);
+  }
+  return bounds;
+}
+
+}  // namespace
+
 std::unique_ptr<TreeField> BuildTreeField(
     wgpu::Device device, wgpu::Queue queue, GpuPipelineGenerator& pipeline_gen,
-    std::span<const TreeFieldModel> models, uint32_t capacity) {
+    std::span<const TreeFieldModel> models, uint32_t capacity,
+    const TreeFieldImpostor& impostor) {
   if (models.empty()) {
     spdlog::error("BuildTreeField: no models supplied");
     return nullptr;
   }
+  // The impostor adds exactly one level on top of the voxel chain. Off unless
+  // a valid atlas AND a placement per model were supplied -- a half-supplied
+  // impostor silently rendering nothing at range would be worse than not
+  // having one.
+  const bool with_impostor = impostor.active(models.size());
+  const uint32_t extra_lods = with_impostor ? 1u : 0u;
+
   for (size_t mi = 0; mi < models.size(); ++mi) {
     // Each model's RUNTIME LOD count: as many levels as the caller supplied
-    // crown meshes for, bounded by the engine's compile-time cap.
-    const size_t lod_count = models[mi].leaf_lod_meshes.size();
+    // crown meshes for, plus the impostor if there is one, bounded by the
+    // engine's compile-time cap.
+    const size_t voxel_lods = models[mi].leaf_lod_meshes.size();
+    const size_t lod_count = voxel_lods + extra_lods;
     if (lod_count == 0 || lod_count > GpuInstanceRenderer::kMaxLods) {
       spdlog::error(
           "BuildTreeField: model {} has leaf_lod_meshes.size()={} outside "
@@ -103,12 +145,34 @@ std::unique_ptr<TreeField> BuildTreeField(
           mi, lod_count, GpuInstanceRenderer::kMaxLods);
       return nullptr;
     }
-    if (models[mi].lod_thresholds.size() != lod_count - 1) {
+    // The model supplies the VOXEL chain's cutoffs; the impostor's own cutoff
+    // is appended below rather than demanded from the caller, since a model has
+    // no reason to know whether an impostor exists.
+    //
+    // The zero-voxel case is handled explicitly rather than folded into the
+    // comparison: `voxel_lods - 1` is unsigned, so it would wrap to SIZE_MAX
+    // and print as one. An impostor-only model is a legitimate one-level chain
+    // and owes no cutoffs at all.
+    const size_t expected_cutoffs = voxel_lods == 0 ? 0 : voxel_lods - 1;
+    if (models[mi].lod_thresholds.size() != expected_cutoffs) {
       spdlog::error(
-          "BuildTreeField: model {} has lod_thresholds.size()={} != "
-          "lod_count-1={} (one cutoff between each adjacent pair of levels)",
-          mi, models[mi].lod_thresholds.size(), lod_count - 1);
+          "BuildTreeField: model {} has lod_thresholds.size()={} != {} (one "
+          "cutoff between each adjacent pair of voxel levels)",
+          mi, models[mi].lod_thresholds.size(), expected_cutoffs);
       return nullptr;
+    }
+  }
+
+  // Effective cutoffs per model: the voxel chain's, plus the impostor's if it
+  // is on. Height-scaled like every other level -- a taller tree is legitimately
+  // legible from further away, so its switch distances are further too.
+  std::vector<std::vector<float>> effective_thresholds(models.size());
+  for (size_t mi = 0; mi < models.size(); ++mi) {
+    effective_thresholds[mi] = models[mi].lod_thresholds;
+    if (with_impostor) {
+      effective_thresholds[mi].push_back(kFoliageImpostorThresholdPreviewM *
+                                         models[mi].target_height_m /
+                                         kFoliagePreviewHeight);
     }
   }
 
@@ -163,6 +227,47 @@ std::unique_ptr<TreeField> BuildTreeField(
     }
   }
 
+  // --- Impostor factory + the shared unit quad (LOD4). ---
+  if (with_impostor) {
+    FactoryDescriptor desc;
+    desc.shader_name = "foliage_impostor";
+    desc.shader_path = "game/foliage_impostor";
+    desc.supported_pass_types = {MaterialPassType::kDeferred};
+    desc.supported_geometry_types = {GeometryType::kInstancedMesh};
+    desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                          GBuffer::kMaterialFormat};
+    desc.depth_format = GBuffer::kDepthFormat;
+    // A billboard has no back: it is built facing the viewer, so culling would
+    // only ever discard it on a sign convention.
+    desc.cull_mode = wgpu::CullMode::None;
+    desc.casts_shadow = true;
+    tf->impostor_factory =
+        BuildMaterialInstanceFactory(desc, device, queue, &pipeline_gen);
+    if (!tf->impostor_factory) {
+      spdlog::error("BuildTreeField: failed to build foliage_impostor factory");
+      return nullptr;
+    }
+
+    // One quad for every model: the geometry is identical and only the
+    // material differs. Position is unused -- the vertex stage builds the quad
+    // from the instance transform -- so only uv carries information, and it IS
+    // the local uv into the baked tile.
+    const std::vector<float> quad = {
+        // pos            uv          normal        tangent
+        0, 0, 0,   0, 0,   0, 0, 1,   1, 0, 0,
+        0, 0, 0,   1, 0,   0, 0, 1,   1, 0, 0,
+        0, 0, 0,   0, 1,   0, 0, 1,   1, 0, 0,
+        0, 0, 0,   1, 1,   0, 0, 1,   1, 0, 0,
+    };
+    const std::vector<uint32_t> quad_indices = {0, 1, 2, 2, 1, 3};
+    tf->impostor_vertex_buffer = UploadVertexBuffer(device, quad);
+    tf->impostor_index_buffer = UploadIndexBuffer(device, quad_indices);
+    if (!tf->impostor_vertex_buffer || !tf->impostor_index_buffer) {
+      spdlog::error("BuildTreeField: impostor quad upload failed");
+      return nullptr;
+    }
+  }
+
   // One LOD chain per model: its runtime level count plus its own cutoffs,
   // padded out to the engine's fixed-width threshold array (entries past
   // lod_count-1 are never read -- see ModelLod). Models with different LOD
@@ -171,8 +276,10 @@ std::unique_ptr<TreeField> BuildTreeField(
   model_lods.reserve(models.size());
   for (const TreeFieldModel& m : models) {
     GpuInstanceRenderer::ModelLod lod_chain;
-    lod_chain.lod_count = static_cast<uint32_t>(m.leaf_lod_meshes.size());
-    std::copy(m.lod_thresholds.begin(), m.lod_thresholds.end(),
+    lod_chain.lod_count =
+        static_cast<uint32_t>(m.leaf_lod_meshes.size()) + extra_lods;
+    std::copy(effective_thresholds[model_lods.size()].begin(),
+              effective_thresholds[model_lods.size()].end(),
               lod_chain.thresholds.begin());
     model_lods.push_back(lod_chain);
   }
@@ -221,22 +328,7 @@ std::unique_ptr<TreeField> BuildTreeField(
 
     tf->native_to_world_scale[model] = src.native_to_world_scale;
 
-    TreeModelBounds& bounds = tf->model_bounds[model];
-    bounds.bark_local_bounds = src.bark_lod0.local_bounds;
-
-    // leaf_local_bounds = the UNION of every supplied LOD's own bounds (voxel
-    // tets overscale past their source cards' AABB, and different LODs can
-    // have different extents, so no single LOD's bounds alone would be
-    // conservative for every LOD). Aabb::Union is a no-op for an
-    // Aabb::Empty()-sentinel operand (min=+FLT_MAX/max=-FLT_MAX, see
-    // aabb.cpp), so unioning in an empty LOD's bounds unguarded is safe --
-    // matters for the known pine-preset gap where one LOD's voxelization can
-    // legitimately be empty (see leaf_voxelizer.hpp) while others aren't.
-    // has_leaves reflects whether ANY supplied LOD has geometry.
-    for (const TexturedMeshResult& m : src.leaf_lod_meshes) {
-      if (m.mesh.vertex_count > 0) bounds.has_leaves = true;
-      bounds.leaf_local_bounds = bounds.leaf_local_bounds.Union(m.local_bounds);
-    }
+    tf->model_bounds[model] = ComputeTreeModelBounds(src);
 
     std::vector<TreeField::LodBuffers>& model_buffers = tf->lod_buffers[model];
     model_buffers.resize(lod_count);
@@ -285,7 +377,7 @@ std::unique_ptr<TreeField> BuildTreeField(
           .type = TextureType::k2D,
       });
       bark_params.uniform_overrides["tint"] =
-          MaterialParameterValue(glm::vec4(0.30f, 0.19f, 0.10f, 1.0f));
+          MaterialParameterValue(glm::vec4(kTreeBarkColor, 1.0f));
       bark_params.uniform_overrides["bucketId"] =
           MaterialParameterValue(bucket);
 
@@ -400,13 +492,73 @@ std::unique_ptr<TreeField> BuildTreeField(
         tf->material_handles.push_back(leaf_shadow_handle);
         tf->field->SetSubmeshShadow(model, lod, /*submesh=*/1u,
                                     leaf_shadow_handle.operator->());
-      } else if (bounds.has_leaves) {
+      } else if (tf->model_bounds[model].has_leaves) {
         spdlog::warn(
             "BuildTreeField: model {} lod {} supplied an empty leaf "
             "voxelization (tree has leaves at other LODs) -- rendering bare "
             "at this LOD",
             model, lod);
       }
+    }
+
+    // --- The impostor level. ---
+    //
+    // Submesh 0 only, and it carries the WHOLE tree: the atlas baked bark and
+    // crown together, so there is no separate bark submesh here. Leaving
+    // submesh 1 unconfigured is legal -- Draw skips zero-index-count slots.
+    if (with_impostor) {
+      const uint32_t lod = static_cast<uint32_t>(src.leaf_lod_meshes.size());
+      const uint32_t bucket = GpuInstanceRenderer::BucketId(model, lod);
+      const ImpostorPlacement& place = impostor.placement[model];
+
+      InstanceParams params;
+      if (!BindImpostorAtlas(*impostor.atlas, params)) return nullptr;
+      params.uniform_overrides["placement"] = MaterialParameterValue(
+          glm::vec4(place.local_center, place.radius));
+      // params.w is the atlas LAYER, and the atlas is one layer per model, so
+      // it is the model id. Carried as a float so the instanced and
+      // non-instanced variants share one field list (see the shader).
+      params.uniform_overrides["params"] = MaterialParameterValue(glm::vec4(
+          kBarkRoughness, src.options.leaves.transmission_strength,
+          kImpostorAlphaCutoff, static_cast<float>(model)));
+      params.uniform_overrides["bucketId"] = MaterialParameterValue(bucket);
+
+      entt::id_type key = ComposeMaterialCacheKey(
+          entt::hashed_string{"tree_impostor"}.value(),
+          GeometryType::kInstancedMesh, RenderPassType::kGBuffer, bucket);
+      auto handle = tf->material_cache.GetOrCreate(
+          key, *tf->impostor_factory, GeometryType::kInstancedMesh,
+          MaterialPassType::kDeferred, RenderPassType::kGBuffer, params);
+      if (!handle) {
+        spdlog::error("BuildTreeField: impostor material resolve failed at "
+                      "model {}", model);
+        return nullptr;
+      }
+      tf->material_handles.push_back(handle);
+      tf->field->SetSubmesh(model, lod, /*submesh=*/0u,
+                            tf->impostor_vertex_buffer,
+                            tf->impostor_index_buffer,
+                            wgpu::IndexFormat::Uint32, /*index_count=*/6u,
+                            InstancedMeshField::PassKind::kDeferred,
+                            handle.operator->());
+
+      // The shadow variant faces the LIGHT and cuts out against the same
+      // atlas, so a distant tree casts a tree-shaped shadow rather than a
+      // sliver (see foliage_impostor.wesl).
+      entt::id_type shadow_key = ComposeMaterialCacheKey(
+          entt::hashed_string{"tree_impostor_shadow"}.value(),
+          GeometryType::kInstancedMesh, RenderPassType::kShadow, bucket);
+      auto shadow_handle = tf->material_cache.GetOrCreate(
+          shadow_key, *tf->impostor_factory, GeometryType::kInstancedMesh,
+          MaterialPassType::kDeferred, RenderPassType::kShadow, params);
+      if (!shadow_handle) {
+        spdlog::error("BuildTreeField: impostor shadow material resolve failed "
+                      "at model {}", model);
+        return nullptr;
+      }
+      tf->material_handles.push_back(shadow_handle);
+      tf->field->SetSubmeshShadow(model, lod, /*submesh=*/0u,
+                                  shadow_handle.operator->());
     }
   }
 

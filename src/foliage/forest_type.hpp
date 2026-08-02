@@ -42,12 +42,24 @@ struct DepthCurve {
   float Evaluate(float depth_m) const;
 };
 
-// One plantable thing. `radius_m` is its exclusion footprint -- the ONLY
-// spacing radius in the system, deliberately per-model rather than per-layer:
-// that is what makes the sampler multi-class, letting a bush and an oak in the
-// same forest keep entirely different amounts of room. `height_m` is its
-// standing height at scale 1, used ONLY to give a cell its Y bounds (the
-// generator never draws anything).
+// One plantable thing.
+//
+// `radius_m` is the model's CROWN radius at scale 1 -- the radius of the
+// smallest vertical cylinder about its trunk that contains everything it draws.
+// It is not a hand-picked "personal space" figure: the consumer measures it off
+// the model's own bounds (see game/visual/crown_bounds.hpp) and writes it here,
+// because a number typed by hand drifts from the mesh the moment a preset
+// changes, and every drift shows up as either interpenetrating crowns or a
+// forest mysteriously too sparse.
+//
+// The sampler treats it as a circle that may not overlap another instance's
+// circle -- the rule is r_i * s_i + r_j * s_j, a SUM, so a bush is pushed clear
+// of an oak's drip line rather than merely clear of its trunk. That the radius
+// is per-model is what makes the sampler multi-class: a bush and an oak in one
+// forest keep entirely different amounts of room.
+//
+// `height_m` is its standing height at scale 1, used ONLY to give a cell its Y
+// bounds (the generator never draws anything).
 struct FoliageModel {
   float radius_m = 1.0f;
   float height_m = 1.0f;

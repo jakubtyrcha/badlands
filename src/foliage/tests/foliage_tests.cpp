@@ -457,10 +457,60 @@ TEST_CASE("A different seed gives a different forest", "[foliage]") {
   CHECK(differs);
 }
 
-TEST_CASE("No two instances violate the multi-class spacing rule", "[foliage]") {
+TEST_CASE("AnyCoverage agrees with whether anything gets planted", "[foliage]") {
+  // This gates the whole forest build: a consumer skips generating its models'
+  // meshes when it answers false, and those models are what placement measures
+  // its spacing from -- so a false negative silently deletes a forest that
+  // would otherwise have grown, and no later stage can notice.
+  //
+  // Pinned against GenerateFoliage itself rather than against a hand-picked
+  // expectation, since agreeing with placement is the entire contract.
+  const ForestType forest = MakeTestForest();
+
+  StubTerrain has_forest;
+  const FoliageGenParams params = MakeParams(7);
+  CHECK(AnyCoverage(has_forest, params));
+  CHECK(GenerateFoliage(forest, has_forest, params).InstanceCount() > 0);
+
+  StubTerrain no_forest;
+  // Negative, not 0: at radius 0 the disc's own centre still satisfies
+  // `distance <= radius`, so one texel would legitimately report coverage.
+  no_forest.disc_radius = -1.0f;
+  CHECK_FALSE(AnyCoverage(no_forest, params));
+  CHECK(GenerateFoliage(forest, no_forest, params).InstanceCount() == 0);
+
+  // A disc small enough to fall between raster samples must not report true --
+  // and equally, whatever the raster sees is what the depth field will see, so
+  // the two cannot disagree about a patch this size either.
+  StubTerrain tiny;
+  tiny.disc_radius = 0.2f;
+  const bool seen = AnyCoverage(tiny, params);
+  const bool planted = GenerateFoliage(forest, tiny, params).InstanceCount() > 0;
+  INFO("AnyCoverage " << seen << " vs planted " << planted);
+  CHECK((seen || !planted));
+}
+
+TEST_CASE("A degenerate region reports no coverage", "[foliage]") {
+  // Guards the sampling arithmetic: a zero or negative extent must return false
+  // rather than divide its way to a huge raster or an infinite loop.
+  StubTerrain terrain;
+  FoliageGenParams params = MakeParams(7);
+
+  params.size_m = glm::vec2(0.0f);
+  CHECK_FALSE(AnyCoverage(terrain, params));
+
+  params = MakeParams(7);
+  params.mask_texel_m = 0.0f;
+  CHECK_FALSE(AnyCoverage(terrain, params));
+}
+
+TEST_CASE("No two instances' crown circles overlap", "[foliage]") {
   // Brute force over the whole output. This is also what verifies the internal
   // spacing acceleration grid: if its 3x3 neighbourhood ever missed a
-  // conflicting neighbour, the violation surfaces right here.
+  // conflicting neighbour, the violation surfaces right here -- and the
+  // neighbourhood is only wide enough because the grid's cell is 2x the
+  // largest scaled radius, which is exactly the assumption this brute force
+  // does not share.
   StubTerrain terrain;
   const ForestType forest = MakeTestForest();
   const FoliageField field = GenerateFoliage(forest, terrain, MakeParams(7));
@@ -469,12 +519,43 @@ TEST_CASE("No two instances violate the multi-class spacing rule", "[foliage]") 
 
   for (size_t i = 0; i < all.size(); ++i) {
     for (size_t j = i + 1; j < all.size(); ++j) {
-      const float ri = forest.models[all[i].model].radius_m;
-      const float rj = forest.models[all[j].model].radius_m;
-      const float r = std::max(ri, rj);
+      // The SUM of the two instances' own radii, each at its own instance
+      // scale. Not max(): under max() a bush merely cleared a canopy tree's
+      // trunk and stood under its crown.
+      const float ri = forest.models[all[i].model].radius_m * all[i].scale;
+      const float rj = forest.models[all[j].model].radius_m * all[j].scale;
+      const float r = ri + rj;
       const glm::vec2 d(all[i].position.x - all[j].position.x,
                         all[i].position.z - all[j].position.z);
       CHECK(glm::dot(d, d) >= r * r - 1e-3f);
+    }
+  }
+}
+
+TEST_CASE("Nothing small stands inside a big model's crown", "[foliage]") {
+  // The symptom the sum rule exists to kill, stated in its own terms: a bush or
+  // a sapling planted under a canopy tree. It is worth asserting separately
+  // from the pairwise rule above because this is the reading a person can check
+  // against a screenshot -- every small instance is OUTSIDE the drip line of
+  // every big one, not merely some distance from its trunk.
+  StubTerrain terrain;
+  const ForestType forest = MakeTestForest();
+  const FoliageField field = GenerateFoliage(forest, terrain, MakeParams(7));
+  const std::vector<FoliageInstance> all = Flatten(field);
+
+  std::vector<const FoliageInstance*> canopy, understory;
+  for (const FoliageInstance& i : all) {
+    (i.layer == 0 ? canopy : understory).push_back(&i);
+  }
+  REQUIRE(canopy.size() > 5);
+  REQUIRE(understory.size() > 5);
+
+  for (const FoliageInstance* big : canopy) {
+    const float crown = forest.models[big->model].radius_m * big->scale;
+    for (const FoliageInstance* small : understory) {
+      const glm::vec2 d(small->position.x - big->position.x,
+                        small->position.z - big->position.z);
+      CHECK(glm::length(d) >= crown - 1e-3f);
     }
   }
 }
