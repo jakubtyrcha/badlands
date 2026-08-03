@@ -1189,40 +1189,12 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     // the first attempt. Using the traversed drop keeps the reference's
     // self-limiting behaviour: cutting `here` shrinks the drop and the capacity
     // with it.
-    float c_eq = 0.f;
-    float drop_hu_step = 0.f;  // drop across the whole step, for the limiter
-    const int nx = int(pos_next.x), ny = int(pos_next.y);
-    const float span_m =
-        len(V2{pos_next.x - pos.x, pos_next.y - pos.y}) * cell_m;
-    if (!p.enable_erosion) {
-      sediment = 0.f;
-    } else if (!g.oob(nx, ny) && span_m > 1e-6f) {
-      // Gradient over ONE CELL in the direction of travel -- never over the
-      // integration step.
-      //
-      // Tying it to the step is what broke refinement twice. Using cell indices
-      // with a sub-cell step returns the full cell-to-cell drop over a short
-      // span and reads 4x too steep; interpolating the endpoints instead makes
-      // the sensing continuous while erosion stays discrete, so a cell can be
-      // cut far deeper before the drop responds and the feedback goes
-      // under-damped (measured 7.5e5 m). Sampling one cell along the flow is
-      // independent of the step by construction, and still contains h[here], so
-      // cutting this cell shrinks its own capacity.
-      const V2 fd = unit(speed);
-      const int ax = std::clamp(x + (fd.x > 0.4f ? 1 : (fd.x < -0.4f ? -1 : 0)),
-                                1, g.n - 2);
-      const int ay = std::clamp(y + (fd.y > 0.4f ? 1 : (fd.y < -0.4f ? -1 : 0)),
-                                1, g.n - 2);
-      const size_t ahead = g.idx(ax, ay);
-      const float dist_m =
-          std::max(cell_m * std::sqrt(float((ax - x) * (ax - x) +
-                                            (ay - y) * (ay - y))),
-                   cell_m);
-      drop_hu_step = g.height[here] - g.height[ahead];
-      c_eq = (1.0f + p.entrainment * g.discharge[here]) *
-             (drop_hu_step / dist_m) * p.capacity_length_m;
-      if (c_eq < 0.f) c_eq = 0.f;
-    }
+    if (!p.enable_erosion) sediment = 0.f;
+    // Flow direction is constant across the step (a straight segment); the
+    // TERRAIN it crosses is not, so capacity is re-derived per cell below.
+    const V2 fd = unit(speed);
+    const int dxi = fd.x > 0.4f ? 1 : (fd.x < -0.4f ? -1 : 0);
+    const int dyi = fd.y > 0.4f ? 1 : (fd.y < -0.4f ? -1 : 0);
 
     // Walk the swept segment. Cells are visited IN ORDER and written IN PLACE,
     // so the intra-step feedback the README requires is preserved: the first
@@ -1248,6 +1220,26 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       g.my_track[ci] += volume * speed.y * share;
       ++g.visits[ci];
 
+      // Capacity re-derived HERE, for THIS cell -- not carried in from the
+      // start of the step. A segment spanning several cells crosses terrain the
+      // start cell knows nothing about, so one shared c_eq averages over a
+      // ridge it never saw; that is what made multi-cell steps unsafe.
+      // Replaying the update per cell removes the limit: measured stable across
+      // a 32x range of step sizes, where before it diverged.
+      //
+      // The gradient is taken one cell along the flow FROM THIS CELL, so it is
+      // step-independent and still contains this cell's own height -- eroding
+      // it shrinks its own capacity, the negative feedback the scheme rests on.
+      const int ax = std::clamp(cx + dxi, 1, g.n - 2);
+      const int ay = std::clamp(cy + dyi, 1, g.n - 2);
+      const float dist_m = std::max(
+          cell_m * std::sqrt(float((ax - cx) * (ax - cx) +
+                                   (ay - cy) * (ay - cy))), cell_m);
+      const float drop_hu = g.height[ci] - g.height[g.idx(ax, ay)];
+      float c_eq = (1.0f + p.entrainment * g.discharge[ci]) *
+                   (drop_hu / dist_m) * p.capacity_length_m;
+      if (c_eq < 0.f) c_eq = 0.f;
+
       // Relaxation over the distance actually travelled inside THIS cell.
       // d(sediment)/ds = (c_eq - sediment)/L integrates to this exactly, so
       // splitting a step in two gives the same total -- which is the whole
@@ -1268,7 +1260,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       // that it changes nothing.
       if (want > 0.f) {
         const float drop_share =
-            std::max(0.f, drop_hu_step) * std::min(1.0f, ds_m / cell_m);
+            std::max(0.f, drop_hu) * std::min(1.0f, ds_m / cell_m);
         want = std::min(want, drop_share);
       }
       float realized;
@@ -2602,7 +2594,8 @@ void VolumeDiscretizationInvariance() {
                 "mean |dh| %.3f / %.3f / %.3f m at 32x4 / 64x2 / 128x1; "
                 "successive %.0f%% then %.0f%%",
                 coarse[0], mid[0], fine[0], 100 * d_cm, 100 * d_mf);
-  Pending("T2 volume is pure discretization", d_mf < 0.05 && d_mf < d_cm, buf);
+  // ENFORCED once the update is resolved PER CELL along the swept segment.
+  Check("T2 volume is pure discretization", d_mf < 0.05 && d_mf < d_cm, buf);
 }
 
 // --- T3. diffusion relaxes a ridge and conserves mass ---------------------
