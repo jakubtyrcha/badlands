@@ -20,6 +20,16 @@ namespace sq {
 inline constexpr float kPivotScreenFraction = 0.025f;
 inline constexpr float kPivotLineHalfWidthPts = 1.0f;
 
+// World-origin marker sizing. The height is world-constant on purpose -- the
+// +Y axis is a world landmark like the plate's X/Z lines, so it should shrink
+// with distance rather than hold a fixed screen size the way a manipulator
+// does. Only the shaft width and pip are screen-constant, to keep a steady
+// visual weight. Geometry lives in lines.h (append_origin_marker); these are
+// sizing policy, which is why they sit here alongside the pivot's.
+inline constexpr float kOriginMarkerHeight = 3.0f;       // world units
+inline constexpr float kOriginMarkerHalfWidthPts = 1.0f; // ~2pt shaft
+inline constexpr float kOriginPipHalfSizePts = 2.5f;
+
 struct Editor::Impl {
     Renderer renderer;
     SceneDocument scene;
@@ -101,16 +111,33 @@ void Editor::render(void* caMetalDrawable) {
         impl_->renderer.hide_gizmo();
     }
 
-    // Camera-pivot marker (spiked cube at the orbit target), every frame in
-    // every mode. Screen-constant sizing needs the viewport height, so the
-    // marker first appears once the initial resize callback has landed.
+    // Screen-constant chrome. All of it needs the same conversion -- view
+    // points to world units at some depth -- so the factor is derived once
+    // here per subject depth. Everything below first appears once the initial
+    // resize callback has landed and viewportHeightPts is real.
     if (impl_->viewportHeightPts > 0.0f) {
-        const float d = simd_length(camera.target - camera.eye);
-        const float pts_to_world = 2.0f * d * std::tan(camera.fov_y_radians * 0.5f) / impl_->viewportHeightPts;
+        const auto pts_to_world_at = [&](simd_float3 subject) {
+            const float d = simd_length(subject - camera.eye);
+            return 2.0f * d * std::tan(camera.fov_y_radians * 0.5f) / impl_->viewportHeightPts;
+        };
+
+        // Camera-pivot marker (spiked cube at the orbit target), every frame
+        // in every mode.
+        const float pivot_scale = pts_to_world_at(camera.target);
         impl_->renderer.set_pivot_gizmo(camera.target,
-                                        kPivotScreenFraction * impl_->viewportHeightPts * pts_to_world,
-                                        kPivotLineHalfWidthPts * pts_to_world,
+                                        kPivotScreenFraction * impl_->viewportHeightPts * pivot_scale,
+                                        kPivotLineHalfWidthPts * pivot_scale,
                                         camera.eye);
+
+        // World-origin +Y axis and pip. Height is world-constant (it is a
+        // world-space landmark, like the plate's X/Z axes) while the shaft
+        // width and pip stay screen-constant, so the marker keeps a steady
+        // visual weight without lying about how tall 3 units is.
+        const float origin_scale = pts_to_world_at((simd_float3){0.0f, 0.0f, 0.0f});
+        impl_->renderer.set_origin_marker(kOriginMarkerHeight,
+                                          kOriginMarkerHalfWidthPts * origin_scale,
+                                          kOriginPipHalfSizePts * origin_scale,
+                                          camera.eye);
     }
 
     impl_->renderer.render(static_cast<CA::MetalDrawable*>(caMetalDrawable), impl_->scene, impl_->selected, camera);

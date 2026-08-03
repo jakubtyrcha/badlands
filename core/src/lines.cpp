@@ -3,6 +3,8 @@
 #include <array>
 #include <cmath>
 
+#include <ground_grid.h> // kGroundAxisY -- shared with the ground plate's shader
+
 #include "gizmo.h"
 #include "scene.h"
 
@@ -141,6 +143,36 @@ void append_thick_segment(std::vector<LineVertex>& out, simd_float3 a, simd_floa
     push(a2 - side); push(b2 + side); push(a2 + side);
 }
 
+// A square facing the eye, centered at `center` with the given half-size (two
+// triangles, 6 verts). Used for the point-like bits of chrome -- the origin
+// pip and the gizmo's axis terminator dots -- where a screen-space dot is
+// wanted but the pass draws world geometry. The in-plane basis comes from
+// tangent_basis (gizmo.h), the same routine the gizmo frame uses, so the
+// square's orientation is derived exactly once in the codebase.
+void append_camera_facing_quad(std::vector<LineVertex>& out, simd_float3 center, float half_size,
+                               simd_float3 eye, simd_float4 color) {
+    simd_float3 n = eye - center;
+    const float len = simd_length(n);
+    if (len < 1e-6f) {
+        return; // eye exactly at the center: no facing direction to build from
+    }
+    n /= len;
+
+    simd_float3 u, v;
+    tangent_basis(n, u, v);
+    const simd_float3 su = half_size * u;
+    const simd_float3 sv = half_size * v;
+
+    auto push = [&](simd_float3 p) {
+        LineVertex vertex;
+        vertex.pos = (simd_float4){p.x, p.y, p.z, 1.0f};
+        vertex.color = color;
+        out.push_back(vertex);
+    };
+    push(center - su - sv); push(center + su - sv); push(center + su + sv);
+    push(center - su - sv); push(center + su + sv); push(center - su + sv);
+}
+
 } // namespace
 
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
@@ -185,6 +217,17 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
         append_thick_segment(out, p11, p01, eye, hw, c);
         append_thick_segment(out, p01, p00, eye, hw, c);
     }
+}
+
+void append_origin_marker(std::vector<LineVertex>& out, float height, float half_width,
+                          float pip_half_size, simd_float3 eye) {
+    const simd_float3 origin = {0.0f, 0.0f, 0.0f};
+    // kGroundAxisY is the shader's own constant (ground_grid.h), not a copy:
+    // the +Y shaft has to match the X/Z lines the plate draws, and those live
+    // on the other side of the language boundary.
+    append_thick_segment(out, origin, (simd_float3){0.0f, height, 0.0f}, eye, half_width,
+                         kGroundAxisY);
+    append_camera_facing_quad(out, origin, pip_half_size, eye, kColorOriginPip);
 }
 
 void append_spiked_cube(std::vector<LineVertex>& out, simd_float3 center, float half_extent,

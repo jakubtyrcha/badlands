@@ -55,6 +55,10 @@ public:
     // frame like the move gizmo. Drawn LAST in two depth-read passes: opaque
     // where in front of the scene, alpha-faded where occluded.
     void set_pivot_gizmo(simd_float3 center, float half_extent, float half_width, simd_float3 eye);
+    // World-origin +Y axis and pip. Rebuilt every frame like the gizmo (12
+    // verts); drawn in the ground plate's depth-tested pass so it occludes
+    // against the scene the same way the plate's X/Z axes do.
+    void set_origin_marker(float height, float half_width, float pip_half_size, simd_float3 eye);
     void render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id, const Camera& camera); // borrowed drawable
 
 private:
@@ -110,6 +114,8 @@ private:
     // vertex color — kColorPivotFront/kColorPivotBehind).
     std::vector<LineVertex> pivot_front_verts_;
     std::vector<LineVertex> pivot_behind_verts_;
+
+    std::vector<LineVertex> origin_marker_verts_; // +Y shaft + pip, TRIANGLE primitives
 };
 
 } // namespace sq

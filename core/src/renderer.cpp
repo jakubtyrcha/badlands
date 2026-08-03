@@ -312,6 +312,11 @@ void Renderer::hide_gizmo() {
     gizmo_handle_verts_.clear();
 }
 
+void Renderer::set_origin_marker(float height, float half_width, float pip_half_size, simd_float3 eye) {
+    origin_marker_verts_.clear();
+    append_origin_marker(origin_marker_verts_, height, half_width, pip_half_size, eye);
+}
+
 void Renderer::set_pivot_gizmo(simd_float3 center, float half_extent, float half_width, simd_float3 eye) {
     pivot_front_verts_.clear();
     pivot_behind_verts_.clear();
@@ -471,6 +476,18 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
         encoder->setDepthStencilState(depth_read_less_.get());
         encoder->setFragmentBytes(&ground_uniforms, sizeof(GroundGridUniforms), 0);
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+    }
+
+    // Origin +Y shaft and pip, riding in the plate's depth state so all three
+    // world axes occlude against the scene identically. Straight-alpha PSO
+    // (line_blend_pso_) rather than the plate's premultiplied one -- these are
+    // ordinary opaque-coloured vertices, not composited coverage.
+    if (!origin_marker_verts_.empty()) {
+        encoder->setRenderPipelineState(line_blend_pso_.get());
+        encoder->setVertexBytes(origin_marker_verts_.data(),
+                                 origin_marker_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), origin_marker_verts_.size());
     }
 
     encoder->setDepthStencilState(depth_ignore_.get());

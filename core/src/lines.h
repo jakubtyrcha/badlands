@@ -36,6 +36,12 @@ inline constexpr float kGizmoHandleHalfWidthFrac = 0.02f;
 inline constexpr simd_float4 kColorPivotFront  = {0.5f, 0.5f, 0.5f, 1.0f};
 inline constexpr simd_float4 kColorPivotBehind = {0.5f, 0.5f, 0.5f, 0.25f};
 
+// World-origin marker. The pip is white; the +Y shaft's colour comes from
+// ground_grid.h's kGroundAxisY -- the same header the shader reads X and Z
+// from -- so the three world axes cannot drift apart across the language
+// boundary.
+inline constexpr simd_float4 kColorOriginPip = {1.0f, 1.0f, 1.0f, 0.9f};
+
 inline constexpr int kSphereOutlineSegments = 48;
 
 // 12 edges -> 24 vertices. Unit cube corners at ±0.5.
@@ -89,6 +95,18 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 // separate draw).
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                GizmoHandle highlighted, simd_float3 eye);
+
+// The world origin's vertical marker: the +Y axis plus a small pip at the
+// origin itself. X and Z are drawn by the ground plate's fragment shader
+// (they lie in the plate's plane); Y is above it, so it has to be geometry.
+// Drawn in the same depth-tested pass as the plate so all three axes occlude
+// consistently against the scene.
+//
+// `height` is world units; `half_width` and `pip_half_size` are world units
+// the caller derives from a screen-constant point size at the origin's depth.
+// 1 shaft segment + 1 camera-facing pip quad = 12 verts (TRIANGLE primitives).
+void append_origin_marker(std::vector<LineVertex>& out, float height, float half_width,
+                          float pip_half_size, simd_float3 eye);
 
 // Camera-pivot marker (the orbit target): a world-axis-aligned wireframe
 // cube (corners at center ± half_extent) with one spike protruding from the
