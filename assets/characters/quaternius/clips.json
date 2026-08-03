@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "Quaternius Universal Animation Library (CC0), as converted by ozz-animation 0.17",
+    "(third_party/ozz-animation/media/bin/quaternius). This file says WHICH FILE backs a",
+    "logical clip; code says which logical clip a gameplay state plays. Renaming or",
+    "reauthoring a clip is a change here, not a code change.",
+    "No _RM variants are shipped: game/ owns movement in ticks, so root motion is",
+    "deliberately excluded and the sim's authored window defines timing."
+  ],
+  "skeleton": "skeleton.ozz",
+  "clips": {
+    "idle": "Rig_Idle_Loop.ozz",
+    "walk": "Rig_Walk_Loop.ozz",
+    "jog": "Rig_Jog_Fwd_Loop.ozz",
+    "sprint": "Rig_Sprint_Loop.ozz",
+    "combat_idle": "Rig_Sword_Idle.ozz",
+    "attack": "Rig_Sword_Attack.ozz",
+    "cast_enter": "Rig_Spell_Simple_Enter.ozz",
+    "cast_idle": "Rig_Spell_Simple_Idle_Loop.ozz",
+    "cast_shoot": "Rig_Spell_Simple_Shoot.ozz",
+    "cast_exit": "Rig_Spell_Simple_Exit.ozz",
+    "hit_body": "Rig_Hit_Chest.ozz",
+    "hit_head": "Rig_Hit_Head.ozz",
+    "death": "Rig_Death01.ozz",
+    "interact": "Rig_Interact.ozz"
+  }
+}

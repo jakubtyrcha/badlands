@@ -26,8 +26,9 @@ git lfs pull                           # fetch the ~35 MB of LFS binaries
 ## Git LFS
 
 Binary assets live in git LFS. `.gitattributes` tracks `*.bin`, `*.jpg`, `*.jpeg`,
-`*.png`, `*.ttf`, and `*.wasm` — the fonts under `assets/fonts/`, the PBR material
-packs under `assets/materials/`, and the brain modules under `assets/brains/`. New binaries of those types are tracked automatically; a
+`*.ozz`, `*.png`, `*.ttf`, and `*.wasm` — the fonts under `assets/fonts/`, the PBR material
+packs under `assets/materials/`, the brain modules under `assets/brains/`, and the
+skeleton + animation clips under `assets/characters/`. New binaries of those types are tracked automatically; a
 plain `git add` on them stores an LFS pointer, not the blob. Keep large binaries in
 one of those extensions (or add the extension to `.gitattributes`) so the repo stays
 lean.
@@ -35,6 +36,9 @@ lean.
 ## Build & run
 
 Run from the repo root (`shaders/` + `assets/` resolve relative to cwd).
+
+**CMake 3.30 or newer is required** — that floor comes from `third_party/ozz-animation`
+(the skeletal-animation runtime), not from our own build files.
 
 ```sh
 cmake -S . -B build -G Ninja    # configure (first Dawn-from-source build is long, then cached)
