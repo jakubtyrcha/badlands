@@ -43,6 +43,12 @@ Every duration, rate and timestamp belongs to exactly one base, and the name say
 - **The sim owns the TIMING, the view owns the CLIP.** A swing's window is authored data in ticks; the view stretches its clip to fit, so a blow and its animation cannot drift. No clip ever gets named under `game/`.
 - **The projector runs LAST in `step_world` and that placement is load-bearing.** It reads `moved_by_path_scratch`, whose contract is "never read outside the tick that wrote it"; earlier placement reads a half-filled buffer and reports actions later systems superseded.
 
+## Facing has TWO writers, and both are deliberate
+- **Movement writes the direction of travel** (`movement.cpp`), and **`declare_strike` turns the attacker toward its target** (`strike.cpp`). Nothing else writes `Facing`.
+- **The strike turn exists because a fighter that stopped moving kept whatever way it last walked** and swung at empty air. Invisible on a symmetric capsule; unmissable the moment a skeleton was drawn on one.
+- **It aims the VISION CONE too, and that is the point rather than a side effect** — a unit looks at what it is fighting. Deterministic, since both positions are sim state.
+- **Coincident positions keep the last facing.** `Facing.dir` is documented unit-length and the vision cone divides by it, so a zero vector is never stored.
+
 ## Brains and combat
 - **The hero brain is Nim→WASM and is the only hero brain** — run in a wasmtime host (`src/crates/brainhost`) behind the wire contract `game/src/brain_abi.h`. A world with no wasm bytes loaded simply idles its heroes; no mock/C++ hero decision layer exists.
 - **Monster brains (rats, goblins) are engine code** (`game/src/monster_brain.*`, `game/src/critter_brain.*`), but they go through the same seams as wasm heroes.

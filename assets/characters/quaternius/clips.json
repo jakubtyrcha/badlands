@@ -5,16 +5,28 @@
     "logical clip; code says which logical clip a gameplay state plays. Renaming or",
     "reauthoring a clip is a change here, not a code change.",
     "No _RM variants are shipped: game/ owns movement in ticks, so root motion is",
-    "deliberately excluded and the sim's authored window defines timing."
+    "deliberately excluded and the sim's authored window defines timing.",
+    "",
+    "A clip is a bare filename, or an object when it carries metadata. 'pivot' is",
+    "the normalized point where the clip's action culminates: a swing's wind-up",
+    "plays [0, pivot] and its recovery plays [pivot, 1], so the impact frame lands",
+    "on the exact tick the sim resolves damage. Absent, it defaults to 1.0."
   ],
   "skeleton": "skeleton.ozz",
+  "_yaw_note": [
+    "This rig FACES -Z: both toes sit at smaller Z than their ankles in the rest",
+    "pose (DEF-toe.L z=-0.275 vs DEF-foot.L z=-0.127). The sim's forward is +Z",
+    "(kCharacterForward, game/src/components.h), so the rig is turned 180 to",
+    "agree with it -- otherwise every character walks backwards."
+  ],
+  "yaw_offset_degrees": 180,
   "clips": {
     "idle": "Rig_Idle_Loop.ozz",
     "walk": "Rig_Walk_Loop.ozz",
     "jog": "Rig_Jog_Fwd_Loop.ozz",
     "sprint": "Rig_Sprint_Loop.ozz",
     "combat_idle": "Rig_Sword_Idle.ozz",
-    "attack": "Rig_Sword_Attack.ozz",
+    "attack": { "file": "Rig_Sword_Attack.ozz", "pivot": 0.45 },
     "cast_enter": "Rig_Spell_Simple_Enter.ozz",
     "cast_idle": "Rig_Spell_Simple_Idle_Loop.ozz",
     "cast_shoot": "Rig_Spell_Simple_Shoot.ozz",

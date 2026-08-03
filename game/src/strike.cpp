@@ -35,6 +35,33 @@ bool declare_strike(BadlandsGame& game, entt::entity e, int32_t attack_index,
     s.attacker = effective_combatant(reg, e);  // captured: the blow is what it
     s.attack = atk.defs[attack_index];         // was when it was thrown
     reg.emplace<StrikeInProgress>(e, s);
+
+    // Turn to face what is being hit. Facing is otherwise written ONLY by the
+    // movement pass (the direction of travel, movement.cpp), so a fighter that
+    // had stopped kept whatever way it last walked and swung at empty air --
+    // invisible on a symmetric capsule, unmissable once a skeleton is drawn on
+    // it. A committed swing is exactly the moment attention snaps to a target.
+    //
+    // This also aims the VISION CONE, which is the point rather than a side
+    // effect: a unit looks at what it is fighting. Deterministic (both
+    // positions are sim state), so a replay reproduces the same turn.
+    if (const auto* self_pos = reg.try_get<Position>(e)) {
+        const entt::entity target = entity_for_slot(game, static_cast<int32_t>(target_slot));
+        if (target != entt::null) {
+            if (const auto* target_pos = reg.try_get<Position>(target)) {
+                const glm::vec2 to_target = target_pos->pos - self_pos->pos;
+                const float len = glm::length(to_target);
+                // Coincident positions give no direction; keep the last facing
+                // rather than storing a zero vector, which Facing forbids (it is
+                // documented unit-length and the vision cone divides by it).
+                if (len > 1e-4f) {
+                    if (Facing* f = reg.try_get<Facing>(e)) {
+                        f->dir = to_target / len;
+                    }
+                }
+            }
+        }
+    }
     // AFTER the capture, and that ordering is the whole of the sneak payoff:
     // the stats above already carry the sneak bonus, so the blow that breaks
     // stealth is the blow that benefits from it. Doing this first would hand

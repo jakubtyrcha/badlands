@@ -34,7 +34,9 @@
 #include "engine/rendering/material_library.hpp"
 #include "engine/scene/scene_graph.hpp"
 #include "executables/ai_sandbox/sandbox_mode.hpp"
+#include "engine/rendering/debug_line_buffer.hpp"
 #include "game/visual/nav_debug_overlay.hpp"
+#include "game/visual/skeleton_debug_overlay.hpp"
 
 namespace badlands {
 
@@ -154,7 +156,19 @@ class AiSandboxView : public AppView {
   // (y = 0); picks come from HandleNavPick's ground-plane raycast.
   NavDebugOverlay nav_debug_;
 
-  float dt_ = 0.0f;
+  // Character skeletons over the capsules (shared with the game view). Duel mode
+  // is where a swing's wind-up and recovery are actually visible.
+  SkeletonDebugOverlay skeleton_debug_;
+
+  // ONE debug-line buffer per frame, shared by every overlay above.
+  // SceneContext::debug_lines is a single pointer, so an overlay owning its own
+  // buffer and assigning that pointer would silently clobber the others.
+  DebugLineBuffer frame_lines_;
+
+  float dt_ = 0.0f;       // real seconds, for the ImGui debug panel only
+  // Presentation seconds this frame (real x speed; 0 while paused). Animation
+  // advances on THIS, never on dt_ -- game/CLAUDE.md's four-clocks contract.
+  float anim_dt_ = 0.0f;
 };
 
 }  // namespace badlands

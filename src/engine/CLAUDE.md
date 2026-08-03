@@ -24,6 +24,7 @@ mips → sampled.
 - **The per-object uniform buffer is the `group==1` UBO, not `uniform_buffers[0]`** — reflection returns *all* UBOs including the group-0 `frame` UBO, whose emission order varies by shader.
 - **Material textures resolve by `param_name == slot_name`** (e.g. `textured_mesh`'s albedo slot is `"mesh_texture"`). `InstanceParams.texture_overrides` carry their own sampler; the factory's default sampler uses `mipmapFilter=Nearest`, so supply a trilinear+aniso sampler when you want the mip chain used.
 - **`SceneGraph::SyncToRegistry` starts with `registry.clear()`.** An app that creates entities directly in its registry (mapview: the cluster terrain, the lake water) cannot also drive a SceneGraph over that same registry — the sync would wipe them every frame.
+- **`SceneContext::debug_lines` is ONE pointer, so a frame has ONE debug-line buffer.** The HOST owns it, clears it once, lets every overlay append, and points the context at it last. An overlay that owns its own buffer and assigns that pointer silently erases whatever another overlay drew, with no error anywhere — which is exactly what happened when the skeleton overlay joined the navmesh one (`src/game/visual/*_debug_overlay.*`).
 
 ## Verifying rendering work
 - Verify through the existing G-buffer debug views and the R/G/B debug materials rather than new tooling.

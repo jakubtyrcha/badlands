@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -22,7 +23,10 @@
 #include <ozz/base/io/stream.h>
 #include <ozz/base/maths/soa_transform.h>
 
+#include "engine/tests/animation_fixture.hpp"
+
 #include "engine/animation/animation_clip.hpp"
+#include "engine/animation/animation_set.hpp"
 #include "engine/animation/pose.hpp"
 #include "engine/animation/sampler.hpp"
 #include "engine/animation/skeleton.hpp"
@@ -30,75 +34,9 @@
 #include "engine/rendering/debug_line_buffer.hpp"
 
 using namespace badlands;
+using namespace badlands::test;
 
 namespace {
-
-// The fixture hierarchy: one root with two children, so there are 3 joints,
-// 1 root, and therefore exactly 2 bone segments to draw.
-constexpr int kNumJoints = 3;
-constexpr int kNumRoots = 1;
-constexpr float kChildOffsetY = 2.0f;
-
-std::filesystem::path TempDir() {
-  const std::filesystem::path dir =
-      std::filesystem::temp_directory_path() / "badlands_animation_tests";
-  std::filesystem::create_directories(dir);
-  return dir;
-}
-
-// root at origin; child_a offset +Y; child_b offset -Y.
-ozz::unique_ptr<ozz::animation::Skeleton> BuildRawSkeleton() {
-  ozz::animation::offline::RawSkeleton raw;
-  raw.roots.resize(1);
-
-  ozz::animation::offline::RawSkeleton::Joint& root = raw.roots[0];
-  root.name = "root";
-  root.transform = ozz::math::Transform::identity();
-  root.children.resize(2);
-
-  root.children[0].name = "child_a";
-  root.children[0].transform = ozz::math::Transform::identity();
-  root.children[0].transform.translation = ozz::math::Float3(0.0f, kChildOffsetY, 0.0f);
-
-  root.children[1].name = "child_b";
-  root.children[1].transform = ozz::math::Transform::identity();
-  root.children[1].transform.translation = ozz::math::Float3(0.0f, -kChildOffsetY, 0.0f);
-
-  REQUIRE(raw.Validate());
-  ozz::animation::offline::SkeletonBuilder builder;
-  return builder(raw);
-}
-
-// A 1-second clip that slides the ROOT from x=0 to x=10, leaving the children
-// at their rest offsets. Linear, so the value at a ratio is exactly 10*ratio —
-// which is what makes the sampling assertions below unambiguous.
-ozz::unique_ptr<ozz::animation::Animation> BuildRawAnimation(float duration = 1.0f) {
-  ozz::animation::offline::RawAnimation raw;
-  raw.duration = duration;
-  raw.tracks.resize(kNumJoints);
-
-  raw.tracks[0].translations.push_back({0.0f, ozz::math::Float3(0.0f, 0.0f, 0.0f)});
-  raw.tracks[0].translations.push_back({duration, ozz::math::Float3(10.0f, 0.0f, 0.0f)});
-
-  raw.tracks[1].translations.push_back({0.0f, ozz::math::Float3(0.0f, kChildOffsetY, 0.0f)});
-  raw.tracks[2].translations.push_back({0.0f, ozz::math::Float3(0.0f, -kChildOffsetY, 0.0f)});
-
-  REQUIRE(raw.Validate());
-  ozz::animation::offline::AnimationBuilder builder;
-  return builder(raw);
-}
-
-template <typename T>
-std::string WriteOzz(const T& object, const std::string& filename) {
-  const std::string path = (TempDir() / filename).string();
-  {
-    ozz::io::File file(path.c_str(), "wb");
-    REQUIRE(file.opened());
-    ozz::io::OArchive archive(&file);
-    archive << object;
-  }
-  return path;
-}
 
 // Reads joint `index`'s translation X out of a pose's SoA locals. SoA packs
 // four joints per entry, so joint i lives at entry i/4, lane i%4.
@@ -137,13 +75,13 @@ Fixture LoadFixture(float duration = 1.0f) {
 TEST_CASE("skeleton round-trips through a .ozz archive", "[animation]") {
   Fixture fixture = LoadFixture();
 
-  CHECK(fixture.skeleton.num_joints() == kNumJoints);
-  CHECK(fixture.skeleton.num_roots() == kNumRoots);
+  CHECK(fixture.skeleton.num_joints() == kFixtureJoints);
+  CHECK(fixture.skeleton.num_roots() == kFixtureRoots);
   CHECK(fixture.skeleton.num_soa_joints() == 1);  // 3 joints pack into one SoA entry
 
   // Exactly one joint has no parent, and the children point at it.
   const ozz::span<const int16_t> parents = fixture.skeleton.joint_parents();
-  REQUIRE(parents.size() == kNumJoints);
+  REQUIRE(parents.size() == kFixtureJoints);
   CHECK(parents[0] == ozz::animation::Skeleton::kNoParent);
   CHECK(parents[1] == 0);
   CHECK(parents[2] == 0);
@@ -296,9 +234,9 @@ TEST_CASE("LocalToModel composes a child onto its parent", "[animation]") {
 
   CHECK(root.x == Catch::Approx(5.0f).margin(1e-3));
   CHECK(child_a.x == Catch::Approx(5.0f).margin(1e-3));
-  CHECK(child_a.y == Catch::Approx(kChildOffsetY).margin(1e-3));
+  CHECK(child_a.y == Catch::Approx(kFixtureChildOffsetY).margin(1e-3));
   CHECK(child_b.x == Catch::Approx(5.0f).margin(1e-3));
-  CHECK(child_b.y == Catch::Approx(-kChildOffsetY).margin(1e-3));
+  CHECK(child_b.y == Catch::Approx(-kFixtureChildOffsetY).margin(1e-3));
 }
 
 TEST_CASE("blending two poses weights their locals", "[animation]") {
@@ -358,20 +296,72 @@ TEST_CASE("the skeleton emitter draws one segment per non-root joint",
   EmitSkeletonLines(fixture.skeleton, pose, glm::mat4(1.0f), lines);
 
   CHECK(lines.lines.size() ==
-        static_cast<size_t>(kNumJoints - kNumRoots));
+        static_cast<size_t>(kFixtureJoints - kFixtureRoots));
 
   // Both bones start at the root's origin and reach its children.
   for (const DebugLine& line : lines.lines) {
     CHECK(line.start.x == Catch::Approx(0.0f).margin(1e-3));
     CHECK(line.start.y == Catch::Approx(0.0f).margin(1e-3));
-    CHECK(std::abs(line.end.y) == Catch::Approx(kChildOffsetY).margin(1e-3));
+    CHECK(std::abs(line.end.y) == Catch::Approx(kFixtureChildOffsetY).margin(1e-3));
   }
 
   // Appending is additive: a second character's bones join the same buffer,
   // which is what lets one frame carry several overlays.
   EmitSkeletonLines(fixture.skeleton, pose, glm::mat4(1.0f), lines);
   CHECK(lines.lines.size() ==
-        static_cast<size_t>(2 * (kNumJoints - kNumRoots)));
+        static_cast<size_t>(2 * (kFixtureJoints - kFixtureRoots)));
+}
+
+TEST_CASE("a manifest accepts both clip forms and defaults the pivot",
+          "[animation]") {
+  // Written in-test rather than asserting against assets/characters/, so
+  // retuning shipped data can never break this.
+  const std::string skeleton_path =
+      WriteOzz(*BuildRawSkeleton(), "manifest_skeleton.ozz");
+  const std::string clip_path = WriteOzz(*BuildRawAnimation(), "manifest_clip.ozz");
+
+  const std::filesystem::path manifest_path = TempDir() / "manifest.json";
+  {
+    std::ofstream out(manifest_path);
+    REQUIRE(out.good());
+    out << R"({
+      "_comment": "ignored",
+      "skeleton": ")" << std::filesystem::path(skeleton_path).filename().string()
+        << R"(",
+      "clips": {
+        "plain": ")" << std::filesystem::path(clip_path).filename().string()
+        << R"(",
+        "with_pivot": { "file": ")"
+        << std::filesystem::path(clip_path).filename().string()
+        << R"(", "pivot": 0.25 },
+        "out_of_range": { "file": ")"
+        << std::filesystem::path(clip_path).filename().string()
+        << R"(", "pivot": 4.0 }
+      }
+    })";
+  }
+
+  std::optional<AnimationSet> set = AnimationSet::Load(manifest_path.string());
+  REQUIRE(set.has_value());
+  REQUIRE(set->clip_count() == 3);
+
+  const int plain = set->FindClip("plain");
+  const int with_pivot = set->FindClip("with_pivot");
+  const int out_of_range = set->FindClip("out_of_range");
+  REQUIRE(plain >= 0);
+  REQUIRE(with_pivot >= 0);
+  REQUIRE(out_of_range >= 0);
+
+  // A bare filename stays valid, so adding a pivot to one clip does not force
+  // rewriting the rest; absent, it defaults to "the whole clip is phase one".
+  CHECK(set->clip_pivot(plain) == Catch::Approx(1.0f));
+  CHECK(set->clip_pivot(with_pivot) == Catch::Approx(0.25f));
+  // A nonsense authored value is clamped, not trusted into the sampler.
+  CHECK(set->clip_pivot(out_of_range) == Catch::Approx(1.0f));
+
+  // Manifest order is preserved, so clip indices mean what the file says.
+  CHECK(set->clip_name(0) == "plain");
+  CHECK(set->clip_name(1) == "with_pivot");
 }
 
 TEST_CASE("the emitter applies its world transform", "[animation]") {
@@ -387,7 +377,7 @@ TEST_CASE("the emitter applies its world transform", "[animation]") {
   DebugLineBuffer lines;
   EmitSkeletonLines(fixture.skeleton, pose, world, lines);
 
-  REQUIRE(lines.lines.size() == static_cast<size_t>(kNumJoints - kNumRoots));
+  REQUIRE(lines.lines.size() == static_cast<size_t>(kFixtureJoints - kFixtureRoots));
   for (const DebugLine& line : lines.lines) {
     CHECK(line.start.x == Catch::Approx(100.0f).margin(1e-3));
     CHECK(line.start.z == Catch::Approx(-50.0f).margin(1e-3));

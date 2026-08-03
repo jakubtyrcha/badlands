@@ -190,6 +190,10 @@ bool AiSandboxView::Initialize(const RenderContext& ctx) {
 
   ApplyEnvironment();
 
+  // Character skeletons are optional scenery: if the assets are missing the
+  // overlay disables itself and the sandbox runs exactly as before.
+  skeleton_debug_.Initialize();
+
   StageWorld();  // the mode's world, built and populated
   BuildScene();
 
@@ -374,6 +378,15 @@ void AiSandboxView::SyncUnits() {
   capsule_nodes_.clear();
 
   char_rows_ = sim_.Characters();
+  // The skeleton overlay REPLACES the capsules rather than layering over them:
+  // a capsule swallows the rig it is drawn around, and the whole point of the
+  // overlay is to read the pose. Nothing else changes -- picking, the inspector
+  // and the sim all still work off the same rows.
+  if (skeleton_debug_.enabled()) {
+    cmd_rows_ = sim_.CommandLog();
+    command_log_total_ = static_cast<uint32_t>(cmd_rows_.size());
+    return;
+  }
   int index = 0;
   for (const badlands::CharacterState& c : char_rows_) {
     if (c.inside_building_id >= 0) {
@@ -514,7 +527,11 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   // therefore accelerates the day/night loop WITHOUT changing the fixed rate
   // the sim itself sees -- determinism is preserved (the sim never observes a
   // variable dt), only how fast we feed it changes.
-  sim_clock_.Advance(static_cast<double>(dt));
+  // The return is PRESENTATION time (real dt x speed, clamped): it stops at
+  // pause and scales with the speed control, which is what the overlay's
+  // looping clips must advance on. dt_ is real time and must not be used for
+  // animation -- see the four-clocks table in game/CLAUDE.md.
+  anim_dt_ = static_cast<float>(sim_clock_.Advance(static_cast<double>(dt)));
   const unsigned long long tick_target = sim_clock_.TickTarget();
   int budget = kMaxSimTicksPerFrame;
   while (sim_ticks_done_ < tick_target && budget-- > 0) {
@@ -557,10 +574,15 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   gamecam_.UpdateCamera(camera_);
   scene_.SyncToRegistry(registry_, scene_context_);
 
-  // Nav overlay last: it owns scene_context_.debug_lines (SyncToRegistry does
-  // not touch that field), so setting it here survives to the render pass. The
-  // arena floor is flat at y = 0.
-  nav_debug_.Rebuild(sim_, scene_context_, [](float, float) { return 0.0f; });
+  // Overlays last: SyncToRegistry does not touch scene_context_.debug_lines, so
+  // pointing it at the frame buffer here survives to the render pass. ONE buffer
+  // for every overlay -- see frame_lines_' comment. The arena floor is flat at
+  // y = 0.
+  const auto flat_ground = [](float, float) { return 0.0f; };
+  frame_lines_.Clear();
+  nav_debug_.Rebuild(sim_, frame_lines_, flat_ground);
+  skeleton_debug_.Rebuild(sim_, char_rows_, frame_lines_, flat_ground, anim_dt_);
+  scene_context_.debug_lines = frame_lines_.empty() ? nullptr : &frame_lines_;
 }
 
 void AiSandboxView::DrawUI() {
@@ -578,6 +600,8 @@ void AiSandboxView::DrawUI() {
   DrawInspector();
   ImGui::Begin("Nav (debug)");
   nav_debug_.DrawControls();
+  ImGui::Separator();
+  skeleton_debug_.DrawControls();
   ImGui::End();
 }
 

@@ -35,7 +35,9 @@
 #include "game/visual/world_labels.hpp"
 #include "game/visual/composite_post_pass.hpp"
 #include "game/visual/cone_overlay_pass.hpp"
+#include "engine/rendering/debug_line_buffer.hpp"
 #include "game/visual/nav_debug_overlay.hpp"
+#include "game/visual/skeleton_debug_overlay.hpp"
 #include "game/visual/render_mode.hpp"
 #include "game/visual/selection_decals.hpp"
 #include "game/visual/vision_overlay_pass.hpp"
@@ -163,6 +165,19 @@ class GameView : public AppView {
   // "Gameplay Debug" panel next to the vision cones. Ground height comes from the
   // terrain (GroundAt); picks come from the terrain raycast in HandleEvent.
   NavDebugOverlay nav_debug_;
+
+  // Character skeletons over the unit capsules, toggled in the same panel.
+  // Capsules remain the blockout mesh; this draws on top of them.
+  SkeletonDebugOverlay skeleton_debug_;
+
+  // ONE debug-line buffer per frame, shared by every overlay above.
+  // SceneContext::debug_lines is a single pointer, so an overlay owning its own
+  // buffer and assigning that pointer would silently clobber the others.
+  DebugLineBuffer frame_lines_;
+
+  // Presentation seconds this frame (real x speed; 0 while paused). Looping
+  // animation advances on THIS, never on the real dt the debug panel shows.
+  float anim_dt_ = 0.0f;
 
   // Selection highlights: projected decals (a ring under the selected unit, a
   // rounded rect around the selected building), rebuilt every frame and handed
