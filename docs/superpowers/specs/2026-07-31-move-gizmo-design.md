@@ -55,6 +55,17 @@ occluded (read-only Greater pass; disjoint, no double blend). Geometry:
 `append_spiked_cube` in lines.h; `Renderer::set_pivot_gizmo`; two new
 read-only depth-stencil states.
 
+SUPERSEDED (2026-08-03, `2026-08-03-viewport-orientation-aids-design.md`):
+R3's camera-pivot marker is **gone**. The always-on spiked cube is replaced
+by a transient flat crosshair shown only during camera gestures, and its
+two-pass front/behind depth treatment by a single depth-ignored draw — see
+that spec's §4. `append_spiked_cube`, `kColorPivotFront`/`Behind`,
+`kPivotScreenFraction`, `kPivotLineHalfWidthPts` and `depth_read_greater_`
+no longer exist. R3's positive-only axis ruling is unaffected and still
+stands; the same spec's §3 restyles those axes and moves the plane-patch
+bounds from `[0.3, 0.6]·he` to `[0.24, 0.50]·he` (shared constants, so §2's
+"drawn = hit" invariant holds as written).
+
 ## 1. Gizmo frame — new `core/src/gizmo.h/.cpp`
 
 `GizmoFrame { simd_float3 origin; simd_float3 n, u, v; float half_extent; }`
