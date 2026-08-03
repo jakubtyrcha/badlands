@@ -1,4 +1,10 @@
-cmake_minimum_required(VERSION 3.24)
+# Raised from 3.24 to match ozz-animation's own floor
+# (third_party/ozz-animation/CMakeLists.txt); everything else here configures
+# under 3.24. A subdirectory may legally declare a higher minimum than its
+# parent, so this is NOT what makes add_subdirectory(ozz) work — the real effect
+# is setting policies CMP0125..CMP0169 to NEW project-wide, which is why it is
+# stated here rather than left implicit.
+cmake_minimum_required(VERSION 3.30)
 project(badlands LANGUAGES C CXX OBJC OBJCXX)   # OBJC/OBJCXX: Dawn Metal backend on Apple
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,6 +58,28 @@ FetchContent_MakeAvailable(taskflow)
 set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
 set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/meshoptimizer)
+
+# ozz-animation: the skeletal-animation runtime (src/engine/animation), vendored
+# as a pinned submodule (tag 0.17.0, third_party/ozz-animation). We take the
+# RUNTIME only — ozz_base + ozz_animation — plus ozz_animation_offline, which the
+# animation tests use to BUILD their skeleton/clip fixtures in-test rather than
+# committing a binary (see badlands_animation_tests). ozz_geometry stays out
+# until characters have skinned meshes.
+#
+# Samples/howtos/tests are off because we don't build upstream's; tools and the
+# Fbx/glTF importers are off because the character data we ship is already
+# converted (.ozz, assets/characters/), so nothing here needs the Fbx SDK.
+set(ozz_build_samples OFF CACHE BOOL "" FORCE)
+set(ozz_build_howtos OFF CACHE BOOL "" FORCE)
+set(ozz_build_tests OFF CACHE BOOL "" FORCE)
+set(ozz_build_tools OFF CACHE BOOL "" FORCE)
+set(ozz_build_fbx OFF CACHE BOOL "" FORCE)
+set(ozz_build_gltf OFF CACHE BOOL "" FORCE)
+set(ozz_build_data OFF CACHE BOOL "" FORCE)
+# Per-config name postfix (ozz_base_d etc.) off: our target_link_libraries name
+# the targets directly, and the postfix only complicates the link line.
+set(ozz_build_postfix OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/ozz-animation)
 
 # wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
 # The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
@@ -185,6 +213,15 @@ add_library(badlands_engine STATIC
     src/engine/app/game_camera_controller.cpp
     src/engine/app/sdl_input_util.cpp
     src/engine/core/ray.cpp
+    # Skeletal animation runtime (ozz): loading, sampling, blending and the
+    # skeleton debug-line emitter. Game-agnostic — no EnTT and no game types,
+    # so badlands_viewer drives it with no Sim present.
+    src/engine/animation/skeleton.cpp
+    src/engine/animation/animation_clip.cpp
+    src/engine/animation/pose.cpp
+    src/engine/animation/sampler.cpp
+    src/engine/animation/animation_set.cpp
+    src/engine/animation/skeleton_lines.cpp
     src/engine/ui/imgui_impl_wgpu_custom.cpp
     src/engine/ui/editor_ui.cpp
     src/engine/ui/ui_renderer.cpp
@@ -195,7 +232,11 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json)
+target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json
+    # Skeletal animation runtime (src/engine/animation). PUBLIC because the
+    # engine's animation headers expose ozz types (Skeleton::raw(), the SoA
+    # locals a Pose holds), so every consumer needs ozz's include path.
+    ozz_base ozz_animation)
 if(APPLE)
     # CAMetalLayer color-space tagging (Display-P3 / EDR): the pinned Dawn
     # rejects wgpu::SurfaceColorManagement, so GpuContext sets the layer
@@ -346,6 +387,10 @@ target_link_libraries(badlands_game_lib PRIVATE meshoptimizer)
 set(badlands_app_sources_viewer
     src/executables/viewer/main_viewer.cpp
     src/executables/viewer/model_viewer_view.cpp
+    # The app's second AppView (`--character`): one skeleton on a floor, posed
+    # by the engine animation runtime and drawn as debug lines. Chosen at
+    # startup by main_viewer.cpp -- the two views do not switch in-session.
+    src/executables/viewer/character_viewer_view.cpp
     src/game/geometry/tree_generator.cpp
     src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
@@ -835,6 +880,25 @@ if(APPLE)
     target_link_options(badlands_tree_field_gpu_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_tree_field_gpu_tests COMMAND badlands_tree_field_gpu_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_animation_tests: Catch2 suite for the skeletal-animation runtime
+# (src/engine/animation). Links ozz_animation_offline so the SKELETON AND CLIP
+# FIXTURES ARE BUILT IN-TEST (RawSkeleton/RawAnimation -> builders -> a temp
+# .ozz) and loaded back through the real Load() path — no fixture binary is
+# committed, and nothing here asserts against assets/characters/, so retuning
+# shipped data can never break it. Pure CPU: no device, no window.
+add_executable(badlands_animation_tests
+    src/engine/tests/animation_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_animation_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_animation_tests PRIVATE badlands_engine ozz_animation_offline)
+if(APPLE)
+    target_link_options(badlands_animation_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_animation_tests COMMAND badlands_animation_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of
