@@ -378,6 +378,15 @@ void AiSandboxView::SyncUnits() {
   capsule_nodes_.clear();
 
   char_rows_ = sim_.Characters();
+  // The skeleton overlay REPLACES the capsules rather than layering over them:
+  // a capsule swallows the rig it is drawn around, and the whole point of the
+  // overlay is to read the pose. Nothing else changes -- picking, the inspector
+  // and the sim all still work off the same rows.
+  if (skeleton_debug_.enabled()) {
+    cmd_rows_ = sim_.CommandLog();
+    command_log_total_ = static_cast<uint32_t>(cmd_rows_.size());
+    return;
+  }
   int index = 0;
   for (const badlands::CharacterState& c : char_rows_) {
     if (c.inside_building_id >= 0) {

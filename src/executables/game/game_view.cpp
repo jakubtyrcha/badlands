@@ -631,6 +631,12 @@ void GameView::SyncUnits() {
   }
   unit_nodes_.clear();
 
+  // The skeleton overlay REPLACES the capsules rather than layering over them:
+  // a capsule swallows the rig it is drawn around, and the whole point of the
+  // overlay is to read the pose. Picking, the HUD and selection are untouched --
+  // they all work off character_rows_, not off these nodes.
+  if (skeleton_debug_.enabled()) return;
+
   // character_rows_ is the frame's single character snapshot, taken by
   // SnapshotCharacters() earlier in Update() and shared with RefreshHud +
   // world picking -- read it, don't re-snapshot.
