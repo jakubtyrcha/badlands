@@ -531,6 +531,18 @@ no validation message, just a wrong or empty image.
   category, so a constant buffer, a texture and a sampler can all report index 0. The
   engine's `slot` must be the parameter ordinal; conflating them collapses distinct
   bindings and silently drops all but the first.
+- **A cluster's parent error is measured against the PARENT GROUP's sphere**, not the
+  cluster's own. Reusing one sphere for both halves of the cut test drops clusters and
+  tears holes in the terrain — and only at full resolution, where they are visible.
+  `ClusterGpu` therefore carries two spheres.
+
+### Port a rule, keep its oracle
+
+The selector bug above was found by running the CPU `SelectClusters` alongside the GPU
+one and comparing counts — 68 against 86. `rhi_lab` now does that comparison **every run**
+and logs an error on mismatch, because a diverged cut produces holes rather than any kind
+of failure. When a rule moves from CPU to GPU, keeping the original as a live oracle costs
+almost nothing and is the only cheap way to know the port is faithful.
 
 ### What the validation layer caught
 

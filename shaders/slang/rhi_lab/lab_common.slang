@@ -20,16 +20,21 @@ public struct LabFrame
     public float4   limits;
 };
 
-// One terrain cluster, as the GPU selector sees it. `own_error`/`parent_error`
-// plus the bounding sphere are exactly what SelectClusters uses on the CPU
-// today -- the selection rule is unchanged, only where it runs.
+// One terrain cluster, as the GPU selector sees it. Exactly the inputs
+// SelectClusters uses on the CPU -- the rule is unchanged, only where it runs.
+//
+// TWO spheres, not one: the parent's projected error must be measured against
+// the PARENT GROUP's sphere, which encloses more geometry and sits at a
+// different centre. Reusing the cluster's own sphere for both tests drops
+// clusters from the cut and tears visible holes in the terrain.
 public struct ClusterGpu
 {
-    public float4 sphere;        // xyz center, w radius
+    public float4 sphere;         // own LOD sphere: xyz centre, w radius
+    public float4 parent_sphere;  // parent group's sphere; unused for roots
     public uint   first_index;
     public uint   index_count;
-    public float  own_error;     // world metres; 0 for leaves
-    public float  parent_error;  // +inf for roots
+    public float  own_error;      // world metres; 0 for leaves
+    public float  parent_error;   // huge for roots, so they are never dropped
 };
 
 // Matches TerrainClusterDag's vertex layout byte-for-byte (8 floats:
@@ -59,14 +64,18 @@ public struct TreeInstance
     public float4 tint;
 };
 
-// Projected screen-space error, in pixels, for a sphere at `world_error`
-// metres of geometric error. Same expression the CPU selector uses.
+// Projected screen-space error in pixels. Mirrors SelectClusters' `proj`
+// lambda exactly, including both special cases: a zero-error cluster projects
+// to 0 from anywhere, and a camera INSIDE the sphere projects to infinity so
+// the cut is forced to refine past it.
 public float ProjectedError(float world_error, float4 sphere, float3 cam_pos,
                             float fov_deg, float screen_h_px)
 {
-    let d = max(length(sphere.xyz - cam_pos) - sphere.w, 1e-3);
-    let half_fov = radians(fov_deg) * 0.5;
-    return world_error * (screen_h_px * 0.5) / (d * tan(half_fov));
+    if (world_error <= 0.0) { return 0.0; }
+    let dist = length(cam_pos - sphere.xyz);
+    if (dist <= sphere.w) { return 1e30; }
+    let k = screen_h_px / (2.0 * tan(radians(fov_deg) * 0.5));
+    return world_error * k / max(dist - sphere.w, 1e-4);
 }
 
 // Irradiance from L2 spherical harmonics. Small enough to inline here rather

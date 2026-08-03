@@ -39,7 +39,7 @@ void cs_select(uint3 gid : SV_DispatchThreadID)
     let cam = frame.cameraPos.xyz;
 
     let own = ProjectedError(c.own_error, c.sphere, cam, fov, screen_h);
-    let parent = ProjectedError(c.parent_error, c.sphere, cam, fov, screen_h);
+    let parent = ProjectedError(c.parent_error, c.parent_sphere, cam, fov, screen_h);
 
     // Roots carry +inf parent error, so they survive when nothing finer does.
     if (!(own <= tau && parent > tau)) { return; }

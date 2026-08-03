@@ -1,5 +1,6 @@
 #include "src/executables/rhi_lab/lab_scene.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -79,9 +80,16 @@ Scene BuildScene(int nodes, float spacing_m, int tree_count, uint32_t seed) {
   s.size_z_m = map.size_z_m();
 
   s.dag = BuildTerrainClusterDag(map);
-  spdlog::info("rhi_lab: cluster DAG — {} clusters, {} levels, {} tris",
+  uint32_t max_indices = 0;
+  size_t over_budget = 0;
+  for (const auto& c : s.dag.clusters) {
+    max_indices = std::max(max_indices, c.index_count);
+    if (c.index_count > 384) ++over_budget;
+  }
+  spdlog::info("rhi_lab: cluster DAG — {} clusters, {} levels, {} tris, "
+               "max index_count {} ({} clusters over the 384 budget)",
                s.dag.clusters.size(), s.dag.level_count,
-               s.dag.indices.size() / 3);
+               s.dag.indices.size() / 3, max_indices, over_budget);
 
   // Flatten the DAG into what the GPU selector reads. own/parent error and the
   // bounding sphere are exactly the inputs SelectClusters uses on the CPU --
@@ -95,9 +103,16 @@ Scene BuildScene(int nodes, float spacing_m, int tree_count, uint32_t seed) {
     g.own_error = s.dag.ClusterOwnError(c);
     // A root is never coarsened, which selection expresses as infinite parent
     // error. Using a large finite value keeps the shader free of inf handling.
-    g.parent_error = c.parent_group == kNoGroup
-                         ? 1e30f
-                         : s.dag.groups[c.parent_group].error_m;
+    if (c.parent_group == kNoGroup) {
+      g.parent_error = 1e30f;  // a root is never coarsened
+      g.parent_sphere = g.sphere;
+    } else {
+      // The parent's error is measured against the PARENT's sphere, not this
+      // cluster's -- see ClusterGpu in lab_common.slang.
+      const auto& pg = s.dag.groups[c.parent_group];
+      g.parent_error = pg.error_m;
+      g.parent_sphere = pg.sphere;
+    }
     s.clusters.push_back(g);
   }
 

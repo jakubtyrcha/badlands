@@ -32,6 +32,7 @@ extern "C" {
 
 #include "engine/rhi/rhi_device.hpp"
 #include "engine/slang/slang_compiler.hpp"
+#include "game/geometry/terrain_clusters.hpp"
 #include "src/executables/rhi_lab/lab_scene.hpp"
 
 using namespace badlands;
@@ -79,7 +80,13 @@ bool ParseArgs(int argc, char** argv, Options& o) {
       }
       return argv[++i];
     };
-    if (a == "--out") { const char* v = next("--out"); if (!v) return false; o.out = v; }
+    // --screenshot is the project-wide flag scripts/screenshot.sh passes; this
+    // app is headless so it means the same thing as --out.
+    if (a == "--out" || a == "--screenshot") {
+      const char* v = next(a.c_str());
+      if (!v) return false;
+      o.out = v;
+    }
     else if (a == "--width") { const char* v = next("--width"); if (!v) return false; o.width = uint32_t(std::stoul(v)); }
     else if (a == "--height") { const char* v = next("--height"); if (!v) return false; o.height = uint32_t(std::stoul(v)); }
     else if (a == "--nodes") { const char* v = next("--nodes"); if (!v) return false; o.nodes = std::stoi(v); }
@@ -89,7 +96,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
     else if (a == "--debug-vis") { o.debug_vis = true; }
     else if (a == "--help" || a == "-h") {
       std::printf(
-          "rhi_lab [--out FILE] [--width N] [--height N] [--nodes N]\n"
+          "rhi_lab [--out|--screenshot FILE] [--width N] [--height N]\n"
           "        [--trees N] [--tau PX] [--seed N] [--debug-vis]\n");
       return false;
     } else {
@@ -416,6 +423,13 @@ int main(int argc, char** argv) {
   f.limits = glm::vec4(float(capacity), 0, 0, 0);
   frame_ubo->Write(0, Bytes(f));
 
+  // Oracle: the CPU selector this pass replaces. Same camera, same tau. If the
+  // GPU picks a different number the port of the rule is wrong, and that shows
+  // up as holes in the terrain rather than as an error.
+  std::vector<uint32_t> cpu_cut;
+  SelectClusters(scene.dag, eye, fov_deg, float(opt.height), opt.tau, cpu_cut);
+  const size_t cpu_selected = cpu_cut.size();
+
   // --- Binding tables ----------------------------------------------------
   const auto& sel_refl = select_pipe->GetReflection();
   auto select_table = device->CreateBindingTable(
@@ -590,6 +604,18 @@ int main(int argc, char** argv) {
                "one indirect draw of {} indices x {} instances",
                drawn, capacity, opt.tau, gpu_args.index_count,
                gpu_args.instance_count);
+  // A mismatch means the GPU port of the selection rule has drifted from the
+  // CPU reference, which shows up as holes in the terrain rather than as any
+  // kind of error -- so it is checked every run, not just when something looks
+  // wrong.
+  if (drawn != cpu_selected) {
+    spdlog::error("rhi_lab: selector MISMATCH — GPU {} vs CPU {}. The cut is "
+                  "no longer an exact cover; expect holes.",
+                  drawn, cpu_selected);
+  } else {
+    spdlog::info("rhi_lab: selector matches the CPU oracle ({} clusters)",
+                 cpu_selected);
+  }
 
   std::vector<uint32_t> vis(size_t(opt.width) * opt.height, 0);
   if (vis_readback->Read(0, {reinterpret_cast<uint8_t*>(vis.data()),

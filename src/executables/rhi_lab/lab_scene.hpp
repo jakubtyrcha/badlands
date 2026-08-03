@@ -15,13 +15,14 @@ namespace badlands::lab {
 
 // Mirrors ClusterGpu in shaders/slang/rhi_lab/lab_common.slang.
 struct ClusterGpu {
-  glm::vec4 sphere{0.0f};  // xyz centre, w radius
+  glm::vec4 sphere{0.0f};         // own LOD sphere: xyz centre, w radius
+  glm::vec4 parent_sphere{0.0f};  // parent group's sphere; unused for roots
   uint32_t first_index = 0;
   uint32_t index_count = 0;
   float own_error = 0.0f;
   float parent_error = 0.0f;
 };
-static_assert(sizeof(ClusterGpu) == 32, "must match the shader struct");
+static_assert(sizeof(ClusterGpu) == 48, "must match the shader struct");
 
 // Mirrors TreeInstance.
 struct TreeInstance {
