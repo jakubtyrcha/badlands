@@ -61,3 +61,18 @@ typedef struct {
 // Compiled under both __METAL_VERSION__ (raymarch.metal) and plain C++
 // (core/tests) -- same precedent as MeshVertex above.
 static_assert(sizeof(RaymarchUniforms) == 160, "RaymarchUniforms must be 160 bytes");
+
+// Per-frame uniforms for the ground-plate pass (shaders/ground_grid.metal),
+// uploaded via setFragmentBytes. Same shape and same reasoning as
+// RaymarchUniforms above: inv_view_proj drives sdf_ray_for_pixel (no separate
+// eye field needed -- it is recoverable from column 2), view_proj drives the
+// fragment's depth output, and the scalars ride in float4s per this file's
+// float4-only convention.
+typedef struct {
+    sq_float4x4 view_proj;      // for fragment depth output
+    sq_float4x4 inv_view_proj;  // for ray generation
+    sq_float4   params0;        // (drawable_width_px, drawable_height_px, half_extent, 0)
+    sq_float4   params1;        // (minor_spacing, major_spacing, 0, 0)
+} GroundGridUniforms;
+
+static_assert(sizeof(GroundGridUniforms) == 160, "GroundGridUniforms must be 160 bytes");

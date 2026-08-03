@@ -95,13 +95,29 @@ final class EditorViewModel {
         }
         mode = m
         syncGizmo()
+        if m != .modify {
+            // Belt to core's suspenders: core self-clears hover on selection
+            // loss/gizmo hide/deletion, but a mode switch with the cursor
+            // parked on a handle would otherwise leave the highlight lit
+            // until the next mouse move.
+            editor.clearGizmoHover()
+        }
     }
 
     /// Centralizes the gizmo-visibility rule (core owns the gizmo's placement
     /// math; the VM only tells it whether to show). Call after every mode or
-    /// selection change.
+    /// selection change — **and after every `activeRadialTool` change**, which
+    /// now feeds into it.
+    ///
+    /// The move gizmo is hidden while the radial menu is on `.scale`: its
+    /// handles do nothing there (a `.scale` mouse-down runs `beginScale`, not
+    /// an axis drag), so showing them advertised an affordance that did not
+    /// exist — and the restyle made that worse by giving hover a much louder
+    /// highlight. A scale-specific gizmo is planned; until then Scale simply
+    /// has no gizmo. Core enforces the other half: a hidden gizmo is neither
+    /// hoverable nor grabbable (`Editor::beginDrag`).
     private func syncGizmo() {
-        editor.setGizmoVisible(mode == .modify && selectedNodeID != nil)
+        editor.setGizmoVisible(mode == .modify && selectedNodeID != nil && activeRadialTool == .move)
     }
 
     // MARK: - Raw input, called by the viewport.
@@ -132,12 +148,14 @@ final class EditorViewModel {
             } else {
                 switch activeRadialTool {
                 case .move:
-                    editor.beginDrag(Float(p.x), Float(p.y))
+                    // Off-handle clicks are inert (core returns false): moving
+                    // happens only by grabbing a gizmo handle.
+                    isDragging = editor.beginDrag(Float(p.x), Float(p.y))
                 case .scale:
                     editor.beginScale()
                     scaleDragStartY = p.y
+                    isDragging = true
                 }
-                isDragging = true
             }
         case .camera:
             lastCameraDragPoint = p
@@ -174,11 +192,30 @@ final class EditorViewModel {
         switch activeRadialTool {
         case .move:
             editor.endDrag()
+            // endDrag cleared the (stale) pre-drag hover; re-derive it from
+            // where the mouse actually is so a handle still under the cursor
+            // stays lit without waiting for the next mouse move.
+            editor.updateGizmoHover(Float(p.x), Float(p.y))
         case .scale:
             editor.endScale()
+            // Reverting to .move brings the gizmo back, so re-sync and then
+            // re-derive hover from where the mouse actually is — same
+            // reasoning as the .move arm above, and it means the gizmo never
+            // reappears carrying a highlight left over from before the scale.
             activeRadialTool = .move
+            syncGizmo()
+            editor.updateGizmoHover(Float(p.x), Float(p.y))
         }
         isDragging = false
+    }
+
+    func handleMouseMoved(_ p: CGPoint) {
+        guard mode == .modify, selectedNodeID != nil else { return }
+        editor.updateGizmoHover(Float(p.x), Float(p.y))
+    }
+
+    func handleMouseExited() {
+        editor.clearGizmoHover()
     }
 
     func handleScroll(dx: CGFloat, dy: CGFloat, shiftHeld: Bool) {
@@ -208,10 +245,12 @@ final class EditorViewModel {
 
     func radialSelectMove() {
         activeRadialTool = .move
+        syncGizmo() // the gizmo is move-only; switching tools shows/hides it
     }
 
     func radialSelectScale() {
         activeRadialTool = .scale
+        syncGizmo() // hides the gizmo — Scale has no handles of its own yet
     }
 
     func radialToggleOp() {

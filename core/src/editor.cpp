@@ -1,20 +1,34 @@
 #include <shapeshifter/ShapeshifterCore.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
 #include "camera.h"
 #include "camera_controller.h"
+#include "gizmo.h"
 #include "picking.h"
 #include "renderer.h"
 #include "scene.h"
 
 namespace sq {
 
-// Fixed world-space size for the tangent-frame grid, independent of the
-// selected object's scale.
-inline constexpr float kGizmoHalfExtent = 1.5f;
+// Camera-pivot marker sizing, screen-constant like the move gizmo: the ring's
+// radius and line half-width in view points, converted to world units at the
+// orbit target's depth.
+inline constexpr float kPivotRadiusPts = 14.0f;
+inline constexpr float kPivotLineHalfWidthPts = 0.75f;
+
+// World-origin marker sizing. The height is world-constant on purpose -- the
+// +Y axis is a world landmark like the plate's X/Z lines, so it should shrink
+// with distance rather than hold a fixed screen size the way a manipulator
+// does. Only the shaft width and pip are screen-constant, to keep a steady
+// visual weight. Geometry lives in lines.h (append_origin_marker); these are
+// sizing policy, which is why they sit here alongside the pivot's.
+inline constexpr float kOriginMarkerHeight = 3.0f;       // world units
+inline constexpr float kOriginMarkerHalfWidthPts = 1.0f; // ~2pt shaft
+inline constexpr float kOriginPipHalfSizePts = 2.5f;
 
 struct Editor::Impl {
     Renderer renderer;
@@ -27,9 +41,29 @@ struct Editor::Impl {
     bool gizmo_visible = false;
     struct {
         bool active = false;
-        int32_t node_id = kInvalidNode; // the node the captured plane/start_* belong to
-        simd_float3 plane_point, plane_normal, start_pos, start_hit, start_snap_point;
+        int32_t node_id = kInvalidNode; // the node the captured frame/start_* belong to
+        GizmoHandle handle = GizmoHandle::None;
+        GizmoFrame frame;               // frozen at beginDrag for the whole gesture
+        float start_axis_s = 0.0f;      // axis handles: ray_axis_param at mouse-down
+        simd_float3 start_pos, start_hit, start_snap_point;
     } drag;
+
+    // When the camera last actually moved. The pivot marker is derived from
+    // this rather than from explicit gesture begin/end plumbing: scroll and
+    // magnify are discrete event streams with no end event, so there is no
+    // single place a "gesture ended" signal could come from. A timestamp
+    // covers drag-pan, scroll and pinch uniformly and needs no interop change.
+    //
+    // Initialised well in the past so the marker starts hidden (hold + fade is
+    // 0.6s total). Not time_point::min(), whose distance from now() would
+    // overflow the duration arithmetic below.
+    std::chrono::steady_clock::time_point last_camera_activity =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
+
+    // Hovered gizmo handle (modify-mode mouse-moved feedback). Cleared
+    // anywhere the gizmo it points at can go away: select(), gizmo hide,
+    // deleteSelectedNode — hover must never outlive its gizmo.
+    GizmoHandle hover = GizmoHandle::None;
 
     // Mirrors drag's shape, including the node_id mid-gesture guard: without
     // it, a selection change between beginScale/updateScale (no interleaving
@@ -80,11 +114,46 @@ void Editor::render(void* caMetalDrawable) {
     // just gets an origin/normal/extent to draw a grid at.
     const Node* selectedNode = impl_->gizmo_visible ? impl_->scene.find(impl_->selected) : nullptr;
     if (selectedNode != nullptr) {
-        const simd_float3 camera_forward = simd_normalize(camera.target - camera.eye);
-        const DragPlane dp = drag_plane_for_node(*selectedNode, camera_forward);
-        impl_->renderer.set_gizmo(dp.point, dp.normal, kGizmoHalfExtent);
+        const GizmoFrame frame = gizmo_frame_for_node(*selectedNode, camera);
+        // Mid-drag the active handle owns the highlight (mouseMoved doesn't
+        // fire while the button is down, so hover would be stale anyway).
+        const GizmoHandle highlighted = impl_->drag.active ? impl_->drag.handle : impl_->hover;
+        impl_->renderer.set_gizmo(frame, highlighted, camera.eye);
     } else {
         impl_->renderer.hide_gizmo();
+    }
+
+    // Screen-constant chrome. All of it needs the same conversion -- view
+    // points to world units at some depth -- so the factor is derived once
+    // here per subject depth. Everything below first appears once the initial
+    // resize callback has landed and viewportHeightPts is real.
+    if (impl_->viewportHeightPts > 0.0f) {
+        const auto pts_to_world_at = [&](simd_float3 subject) {
+            const float d = simd_length(subject - camera.eye);
+            return 2.0f * d * std::tan(camera.fov_y_radians * 0.5f) / impl_->viewportHeightPts;
+        };
+
+        // Camera-pivot marker: visible only around a camera gesture. Alpha
+        // reaches 0 shortly after the last camera move and set_pivot_marker
+        // then emits nothing, so the resting cost is a subtraction.
+        const float since_camera_move = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - impl_->last_camera_activity).count();
+        const float pivot_scale = pts_to_world_at(camera.target);
+        impl_->renderer.set_pivot_marker(camera.target,
+                                         kPivotRadiusPts * pivot_scale,
+                                         kPivotLineHalfWidthPts * pivot_scale,
+                                         camera.eye,
+                                         pivot_marker_alpha(since_camera_move));
+
+        // World-origin +Y axis and pip. Height is world-constant (it is a
+        // world-space landmark, like the plate's X/Z axes) while the shaft
+        // width and pip stay screen-constant, so the marker keeps a steady
+        // visual weight without lying about how tall 3 units is.
+        const float origin_scale = pts_to_world_at((simd_float3){0.0f, 0.0f, 0.0f});
+        impl_->renderer.set_origin_marker(kOriginMarkerHeight,
+                                          kOriginMarkerHalfWidthPts * origin_scale,
+                                          kOriginPipHalfSizePts * origin_scale,
+                                          camera.eye);
     }
 
     impl_->renderer.render(static_cast<CA::MetalDrawable*>(caMetalDrawable), impl_->scene, impl_->selected, camera);
@@ -94,18 +163,21 @@ void Editor::render(void* caMetalDrawable) {
 // camera move that actually happened invalidates the scene line buffer.
 void Editor::cameraOrbit(float dxPts, float dyPts) {
     if (impl_->controller.orbit(dxPts, dyPts)) {
+        impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->renderer.set_scene_lines_dirty();
     }
 }
 
 void Editor::cameraZoom(float delta) {
     if (impl_->controller.zoom(delta)) {
+        impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->renderer.set_scene_lines_dirty();
     }
 }
 
 void Editor::cameraPan(float dxPts, float dyPts) {
     if (impl_->viewportHeightPts > 0.0f && impl_->controller.pan_view(dxPts, dyPts, impl_->viewportHeightPts)) {
+        impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->renderer.set_scene_lines_dirty();
     }
 }
@@ -131,6 +203,7 @@ PickResult Editor::pick(float x, float y) const {
 
 void Editor::select(int32_t nodeId) {
     impl_->selected = nodeId;
+    impl_->hover = GizmoHandle::None; // the hovered handle belonged to the old selection's gizmo
     impl_->renderer.set_scene_lines_dirty(); // selection change alters which node's wireframe (if any) is drawn
 }
 
@@ -179,6 +252,7 @@ void Editor::deleteSelectedNode() {
 
     impl_->scene.remove_node(impl_->selected);
     impl_->selected = kInvalidNode;
+    impl_->hover = GizmoHandle::None; // deletion bypasses select(), so clear here too
     // Gizmo hides on its own next render(): selectedNode is looked up via
     // impl_->scene.find(impl_->selected), which is null once selected is
     // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
@@ -203,37 +277,86 @@ void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
 
 void Editor::setGizmoVisible(bool visible) {
     impl_->gizmo_visible = visible;
+    if (!visible) {
+        impl_->hover = GizmoHandle::None; // no gizmo, nothing to hover
+    }
 }
 
-void Editor::beginDrag(float x, float y) {
-    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
+void Editor::updateGizmoHover(float x, float y) {
+    // Same guards as beginDrag, plus gizmo visibility: an invisible gizmo has
+    // no handles to hover. Failing any guard clears rather than keeps stale.
+    impl_->hover = GizmoHandle::None;
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f || !impl_->gizmo_visible) {
         return;
     }
-    Node* node = impl_->scene.find(impl_->selected);
+    const Node* node = impl_->scene.find(impl_->selected);
     if (node == nullptr) {
-        return; // no valid selection: drag does not activate
+        return;
     }
 
     const Camera camera = impl_->controller.to_camera();
-    const simd_float3 camera_forward = simd_normalize(camera.target - camera.eye);
-    // Captured NOW: the plane is fixed for the whole drag, even though the
-    // node (and, for a snapped node, its snap fields) moves as the drag
-    // proceeds.
-    const DragPlane dp = drag_plane_for_node(*node, camera_forward);
-
+    const GizmoFrame frame = gizmo_frame_for_node(*node, camera);
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    const std::optional<simd_float3> hit = ray_plane(ray, dp.point, dp.normal);
-    if (!hit) {
-        return; // ray parallel to / behind the plane: drag does not activate
+    impl_->hover = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts);
+}
+
+void Editor::clearGizmoHover() {
+    impl_->hover = GizmoHandle::None;
+}
+
+GizmoHandle Editor::gizmoHoverHandle() const {
+    return impl_->hover;
+}
+
+bool Editor::beginDrag(float x, float y) {
+    // Same guards as updateGizmoHover, gizmo visibility included: an
+    // invisible gizmo has no handles to hover AND none to grab. The two used
+    // to disagree, which meant a click at a hidden handle's last position
+    // still started a real drag and moved the node (branch review finding,
+    // pinned by drag_tests). Reachable in practice since the app hides the
+    // gizmo while the radial menu is on Scale.
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f ||
+        !impl_->gizmo_visible) {
+        return false;
+    }
+    Node* node = impl_->scene.find(impl_->selected);
+    if (node == nullptr) {
+        return false; // no valid selection: drag does not activate
     }
 
-    impl_->drag.plane_point = dp.point;
-    impl_->drag.plane_normal = dp.normal;
+    const Camera camera = impl_->controller.to_camera();
+    // Captured NOW: the frame (basis AND half_extent) is fixed for the whole
+    // drag, even though the node (and, for a snapped node, its snap fields)
+    // moves as the drag proceeds.
+    const GizmoFrame frame = gizmo_frame_for_node(*node, camera);
+
+    const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
+    const GizmoHandle handle = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts);
+    if (handle == GizmoHandle::None) {
+        return false; // off-handle: moving is deliberate, via handles only (user ruling)
+    }
+
+    if (gizmo_handle_is_axis(handle)) {
+        const std::optional<float> s = ray_axis_param(ray, frame.origin, gizmo_axis_dir(frame, handle));
+        if (!s) {
+            return false; // grabbed a handle the solver can't parameterize: don't activate
+        }
+        impl_->drag.start_axis_s = *s;
+    } else {
+        const std::optional<simd_float3> hit = ray_plane(ray, frame.origin, gizmo_plane_normal(frame, handle));
+        if (!hit) {
+            return false; // ray parallel to / behind the plane: drag does not activate
+        }
+        impl_->drag.start_hit = *hit;
+    }
+
+    impl_->drag.frame = frame;
+    impl_->drag.handle = handle;
     impl_->drag.start_pos = node->position;
-    impl_->drag.start_hit = *hit;
     impl_->drag.start_snap_point = node->snap_point;
     impl_->drag.node_id = node->id;
     impl_->drag.active = true;
+    return true;
 }
 
 void Editor::updateDrag(float x, float y) {
@@ -258,16 +381,37 @@ void Editor::updateDrag(float x, float y) {
 
     const Camera camera = impl_->controller.to_camera();
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    const std::optional<simd_float3> hit = ray_plane(ray, impl_->drag.plane_point, impl_->drag.plane_normal);
-    if (!hit) {
-        return; // keep last position
+
+    simd_float3 delta;
+    if (gizmo_handle_is_axis(impl_->drag.handle)) {
+        const simd_float3 axis = gizmo_axis_dir(impl_->drag.frame, impl_->drag.handle);
+        // Same view-align guard as pick_gizmo_handle, here per-update: an
+        // axis grabbed just inside the pick limit can still be dragged
+        // toward its vanishing point, where the solver's 1/sin^2 term
+        // amplifies cursor noise into huge jumps. Keep the last position
+        // instead (post-R3 review finding).
+        if (std::fabs(simd_dot(ray.dir, axis)) > kAxisViewAlignLimit) {
+            return;
+        }
+        const std::optional<float> s = ray_axis_param(ray, impl_->drag.frame.origin, axis);
+        if (!s) {
+            return; // near-parallel: keep last position (mirrors ray_plane's guard)
+        }
+        delta = (*s - impl_->drag.start_axis_s) * axis;
+    } else {
+        const std::optional<simd_float3> hit =
+            ray_plane(ray, impl_->drag.frame.origin, gizmo_plane_normal(impl_->drag.frame, impl_->drag.handle));
+        if (!hit) {
+            return; // keep last position
+        }
+        delta = *hit - impl_->drag.start_hit;
     }
 
-    const simd_float3 delta = *hit - impl_->drag.start_hit;
     node->position = impl_->drag.start_pos + delta;
     if (node->snapped) {
-        // delta is in-plane (both hits lie on the same stored plane), so the
-        // plane itself is unchanged by this update.
+        // Full delta, not just the in-plane part: the remembered snap frame
+        // rides rigidly with the node, so an axis-n pull lifts it off its
+        // surface without re-basing the frame mid-gesture (move-gizmo spec).
         node->snap_point = impl_->drag.start_snap_point + delta;
     }
     impl_->renderer.set_scene_lines_dirty();
@@ -276,6 +420,11 @@ void Editor::updateDrag(float x, float y) {
 void Editor::endDrag() {
     impl_->drag.active = false;
     impl_->drag.node_id = kInvalidNode;
+    // The drag may have moved the gizmo out from under the cursor, so the
+    // pre-drag hover is stale. The app layer re-derives hover from the
+    // mouse-up position right after this (EditorViewModel.handleMouseUp);
+    // for positionless callers (mode-switch aborts, deletion) None is right.
+    impl_->hover = GizmoHandle::None;
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {

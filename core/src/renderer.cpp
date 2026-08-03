@@ -5,6 +5,7 @@
 
 #include "camera.h"
 #include "dcsdd.h" // TriangleMesh; kept out of renderer.h, see the forward declaration there
+#include "ground_grid.h" // kGroundHalfExtent / kGroundMinorSpacing / kGroundMajorSpacing
 #include "lines.h"
 #include "scene.h"
 #include "sdf.h" // pack_scene -- the raymarch pass's per-frame node upload
@@ -64,9 +65,11 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
         assert(false && "failed to create line render pipeline state");
     }
 
-    // Second PSO for the modify-mode gizmo: identical functions/attachment
-    // format (Metal validation requires the formats to match), plus alpha
-    // blending. This is the only blended draw in the renderer.
+    // Second PSO for the modify-mode gizmo, the pivot marker and the origin
+    // marker: identical functions/attachment format (Metal validation
+    // requires the formats to match), plus STRAIGHT-alpha blending. The other
+    // blended PSO, ground_pso_ below, uses premultiplied factors instead --
+    // see its comment for why.
     NS::SharedPtr<MTL::RenderPipelineDescriptor> blendPipelineDesc =
         NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
     blendPipelineDesc->setVertexFunction(vertex_fn.get());
@@ -159,6 +162,51 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
         assert(false && "failed to create raymarch render pipeline state");
     }
 
+    // Ground-plate PSO: fullscreen-triangle pass over the y=0 orientation
+    // grid. Like raymarch it takes no vertex buffer and writes real depth --
+    // but unlike raymarch it BLENDS, and specifically with PREMULTIPLIED
+    // factors (One / OneMinusSourceAlpha) rather than line_blend_pso_'s
+    // straight-alpha SourceAlpha / OneMinusSourceAlpha, because
+    // ground_grid_shade composites its tiers front-to-back and hands back a
+    // premultiplied colour. Getting this pair wrong shows up as a plate that
+    // is too dark, not as a validation error, so it is called out here.
+    NS::SharedPtr<MTL::Function> ground_vertex_fn = NS::TransferPtr(
+        library_->newFunction(NS::String::string("ground_grid_vertex", NS::UTF8StringEncoding)));
+    NS::SharedPtr<MTL::Function> ground_fragment_fn = NS::TransferPtr(
+        library_->newFunction(NS::String::string("ground_grid_fragment", NS::UTF8StringEncoding)));
+    if (!ground_vertex_fn) {
+        fprintf(stderr, "failed to create ground_grid_vertex: missing from default.metallib\n");
+        assert(false && "ground_grid_vertex missing from default.metallib");
+    }
+    if (!ground_fragment_fn) {
+        fprintf(stderr, "failed to create ground_grid_fragment: missing from default.metallib\n");
+        assert(false && "ground_grid_fragment missing from default.metallib");
+    }
+
+    NS::SharedPtr<MTL::RenderPipelineDescriptor> groundPipelineDesc =
+        NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+    groundPipelineDesc->setVertexFunction(ground_vertex_fn.get());
+    groundPipelineDesc->setFragmentFunction(ground_fragment_fn.get());
+    MTL::RenderPipelineColorAttachmentDescriptor* groundColorAttachment =
+        groundPipelineDesc->colorAttachments()->object(0);
+    groundColorAttachment->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    groundColorAttachment->setBlendingEnabled(true);
+    groundColorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
+    groundColorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+    groundColorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+    groundColorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+    groundColorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+    groundColorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+    groundPipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+
+    NS::Error* ground_error = nullptr;
+    ground_pso_ = NS::TransferPtr(device_->newRenderPipelineState(groundPipelineDesc.get(), &ground_error));
+    if (!ground_pso_) {
+        fprintf(stderr, "failed to create ground_pso_: %s\n",
+                ground_error ? ground_error->localizedDescription()->utf8String() : "unknown error");
+        assert(false && "failed to create ground render pipeline state");
+    }
+
     // Two depth-stencil states, both created once here (stencil unused by
     // either -- default front/backFaceStencil is nil, i.e. disabled).
     // Depth convention: the pinned projection maps near->0/far->1 (see
@@ -174,6 +222,17 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
     depthIgnoreDesc->setDepthCompareFunction(MTL::CompareFunctionAlways);
     depthIgnoreDesc->setDepthWriteEnabled(false);
     depth_ignore_ = NS::TransferPtr(device_->newDepthStencilState(depthIgnoreDesc.get()));
+
+    // Read-only depth for the world-space overlay layer (ground plate, origin
+    // marker): tests against what the raymarch/mesh passes wrote, so geometry
+    // on the floor occludes it, but writes nothing itself. The matching
+    // Greater state went away with the spiked-cube pivot, which was the only
+    // thing that ever split a draw into visible/occluded halves.
+    NS::SharedPtr<MTL::DepthStencilDescriptor> depthReadLessDesc =
+        NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
+    depthReadLessDesc->setDepthCompareFunction(MTL::CompareFunctionLess);
+    depthReadLessDesc->setDepthWriteEnabled(false);
+    depth_read_less_ = NS::TransferPtr(device_->newDepthStencilState(depthReadLessDesc.get()));
 }
 
 void Renderer::set_viewport_size(float w_pts, float h_pts, float backing_scale) {
@@ -236,15 +295,44 @@ void Renderer::ensure_depth_texture(uint32_t width, uint32_t height) {
     depth_texture_height_ = height;
 }
 
-void Renderer::set_gizmo(simd_float3 origin, simd_float3 normal, float half_extent) {
+void Renderer::set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye) {
     gizmo_visible_ = true;
-    gizmo_verts_.clear();
-    append_tangent_frame(gizmo_verts_, origin, normal, half_extent, 12);
+    gizmo_grid_verts_.clear();
+    gizmo_handle_verts_.clear();
+    append_move_gizmo_grid(gizmo_grid_verts_, frame, 12);
+    append_move_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
 }
 
 void Renderer::hide_gizmo() {
     gizmo_visible_ = false;
-    gizmo_verts_.clear();
+    gizmo_grid_verts_.clear();
+    gizmo_handle_verts_.clear();
+}
+
+void Renderer::upload_line_verts(NS::SharedPtr<MTL::Buffer>& buffer,
+                                  const std::vector<LineVertex>& verts) {
+    if (verts.empty()) {
+        buffer.reset(); // Metal disallows zero-length buffers
+        return;
+    }
+    buffer = NS::TransferPtr(device_->newBuffer(verts.data(), verts.size() * sizeof(LineVertex),
+                                                 MTL::ResourceStorageModeShared));
+}
+
+void Renderer::set_origin_marker(float height, float half_width, float pip_half_size, simd_float3 eye) {
+    origin_marker_verts_.clear();
+    append_origin_marker(origin_marker_verts_, height, half_width, pip_half_size, eye);
+}
+
+void Renderer::set_pivot_marker(simd_float3 center, float radius, float half_width, simd_float3 eye,
+                                 float alpha) {
+    pivot_verts_.clear();
+    if (alpha <= 0.0f) {
+        return; // faded out: the resting state, so this is the common path
+    }
+    simd_float4 color = kColorPivot;
+    color.w *= alpha;
+    append_pivot_crosshair(pivot_verts_, center, radius, half_width, eye, color);
 }
 
 RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
@@ -256,6 +344,18 @@ RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 
     uniforms.params0 = simd_make_float4(drawable_width_px, drawable_height_px,
                                          static_cast<float>(node_count), 0.0f);
     uniforms.params1 = simd_make_float4(near, far, 0.0f, 0.0f);
+    return uniforms;
+}
+
+GroundGridUniforms build_ground_grid_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
+                                               float drawable_width_px, float drawable_height_px,
+                                               float half_extent, float minor_spacing,
+                                               float major_spacing) {
+    GroundGridUniforms uniforms;
+    uniforms.view_proj = view_proj;
+    uniforms.inv_view_proj = inv_view_proj;
+    uniforms.params0 = simd_make_float4(drawable_width_px, drawable_height_px, half_extent, 0.0f);
+    uniforms.params1 = simd_make_float4(minor_spacing, major_spacing, 0.0f, 0.0f);
     return uniforms;
 }
 
@@ -323,12 +423,17 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     // R2's plan but the pipeline stays wired — then scene lines, then the
     // gizmo — both depth-ignored so they stay in painter's order on top of
     // everything.
+    // Shared by the raymarch and ground passes (both reconstruct world rays
+    // from it via sdf_ray_for_pixel). Hoisted out of the raymarch block
+    // because the ground plate draws even when the scene is empty -- which is
+    // exactly when the user most needs something to orient against.
+    const simd_float4x4 inv_view_proj = simd_inverse(uniforms.view_proj);
+
     if (raymarch_node_count > 0) {
         // Empty-scene skip: cheaper than dispatching a full-screen trace
         // that is guaranteed to march to `far` and miss on every pixel.
         // Reuses uniforms.view_proj (just computed above) instead of calling
         // camera.view_proj() a second time this frame.
-        const simd_float4x4 inv_view_proj = simd_inverse(uniforms.view_proj);
         const RaymarchUniforms raymarch_uniforms = build_raymarch_uniforms(
             uniforms.view_proj, inv_view_proj, static_cast<float>(drawable->texture()->width()),
             static_cast<float>(drawable->texture()->height()), raymarch_node_count, Camera::kNear, Camera::kFar);
@@ -365,6 +470,37 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), mesh_vertex_count_);
     }
 
+    // Ground plate: the world-space orientation layer, on y=0. Drawn AFTER
+    // the opaque scene passes and depth-tested read-only against what they
+    // wrote (depth_read_less_), so anything resting on the floor occludes the
+    // plate behind it -- that occlusion is the cue that answers "is this on
+    // the ground or floating?", and it is why this pass sits here rather than
+    // with the depth-ignored overlays below. No vertex buffer (fullscreen
+    // triangle from vertex_id); uniforms fit setFragmentBytes at 160 B.
+    {
+        const GroundGridUniforms ground_uniforms = build_ground_grid_uniforms(
+            uniforms.view_proj, inv_view_proj, static_cast<float>(drawable->texture()->width()),
+            static_cast<float>(drawable->texture()->height()), kGroundHalfExtent,
+            kGroundMinorSpacing, kGroundMajorSpacing);
+
+        encoder->setRenderPipelineState(ground_pso_.get());
+        encoder->setDepthStencilState(depth_read_less_.get());
+        encoder->setFragmentBytes(&ground_uniforms, sizeof(GroundGridUniforms), 0);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+    }
+
+    // Origin +Y shaft and pip, riding in the plate's depth state so all three
+    // world axes occlude against the scene identically. Straight-alpha PSO
+    // (line_blend_pso_) rather than the plate's premultiplied one -- these are
+    // ordinary opaque-coloured vertices, not composited coverage.
+    if (!origin_marker_verts_.empty()) {
+        encoder->setRenderPipelineState(line_blend_pso_.get());
+        encoder->setVertexBytes(origin_marker_verts_.data(),
+                                 origin_marker_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), origin_marker_verts_.size());
+    }
+
     encoder->setDepthStencilState(depth_ignore_.get());
 
     if (scene_line_vertex_count_ > 0) {
@@ -378,12 +514,43 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     }
 
     // Gizmo pass: painter's order over the opaque scene lines, semi-transparent
-    // blend PSO, verts always via setVertexBytes (54 verts, never a buffer).
-    if (gizmo_visible_ && !gizmo_verts_.empty()) {
+    // blend PSO. The thin grid draws first as lines, the handle triangles on
+    // top — same PSO, the primitive type is per-draw.
+    //
+    // Both ride real vertex buffers rather than setVertexBytes: the grid's
+    // per-vertex radial fade needs each line subdivided (624 verts) and the
+    // restyled handles come to 132, so both are past the 4KB inline limit.
+    // See upload_line_verts for the per-frame allocation reasoning.
+    if (gizmo_visible_) {
+        upload_line_verts(gizmo_grid_buffer_, gizmo_grid_verts_);
+        upload_line_verts(gizmo_handle_buffer_, gizmo_handle_verts_);
+    }
+    if (gizmo_visible_ && gizmo_grid_buffer_) {
         encoder->setRenderPipelineState(line_blend_pso_.get());
-        encoder->setVertexBytes(gizmo_verts_.data(), gizmo_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBuffer(gizmo_grid_buffer_.get(), 0, 0);
         encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
-        encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), gizmo_verts_.size());
+        encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), gizmo_grid_verts_.size());
+    }
+    if (gizmo_visible_ && gizmo_handle_buffer_) {
+        encoder->setRenderPipelineState(line_blend_pso_.get());
+        encoder->setVertexBuffer(gizmo_handle_buffer_.get(), 0, 0);
+        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), gizmo_handle_verts_.size());
+    }
+
+    // Camera-pivot marker: ALWAYS the last draw of the frame. Depth-IGNORED,
+    // single pass -- it is feedback about the gesture you are performing right
+    // now, so being occluded by the very model you are orbiting would defeat
+    // it. (The old spiked cube split into visible/occluded passes because it
+    // was persistent pseudo-geometry; a transient flat annotation has nothing
+    // to split.) Empty whenever the fade has run out, which is most frames.
+    upload_line_verts(pivot_buffer_, pivot_verts_);
+    if (pivot_buffer_) {
+        encoder->setRenderPipelineState(line_blend_pso_.get());
+        encoder->setDepthStencilState(depth_ignore_.get());
+        encoder->setVertexBuffer(pivot_buffer_.get(), 0, 0);
+        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), pivot_verts_.size());
     }
 
     encoder->endEncoding();

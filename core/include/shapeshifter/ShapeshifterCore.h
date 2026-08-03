@@ -18,6 +18,13 @@ struct Vec3f { float x, y, z; };
 enum class Shape : int32_t { Cube = 0, Sphere = 1 };
 enum class Op    : int32_t { Add = 0, Subtract = 1 };
 
+// Move-gizmo handles (modify mode). Crosses the boundary like Shape/Op: the
+// canonical definition lives here, core/src/gizmo.h consumes it. Axis order
+// is also the pick tie-break order (see pick_gizmo_handle).
+enum class GizmoHandle : int32_t {
+    None = 0, AxisU = 1, AxisV = 2, AxisN = 3, PlaneUV = 4, PlaneUN = 5, PlaneVN = 6
+};
+
 // Miss/no-selection/no-parent sentinel for the picking, selection, and
 // spawning APIs below, and for SceneDocument's own Node::id/snap_parent
 // (core/src/scene.h). Previously left undeclared here (see M4's deferred
@@ -65,11 +72,21 @@ public:
     // selection; clears selection and refreshes line colors
     void deleteSelectedNode();
 
-    // modify tool — core owns all plane math
+    // modify tool — core owns all gizmo/plane math. beginDrag hit-tests the
+    // move-gizmo handles and returns whether a drag activated: off-handle
+    // clicks are inert by design (user ruling, move-gizmo spec).
     void setGizmoVisible(bool visible);
-    void beginDrag(float x, float y);
+    bool beginDrag(float x, float y);
     void updateDrag(float x, float y);
     void endDrag();
+
+    // Gizmo hover (modify-mode mouse-moved feedback). Hover state never
+    // outlives the gizmo it points at: it self-clears on selection change,
+    // gizmo hide, and node deletion — the app layer's clears are only a
+    // belt to these suspenders.
+    void updateGizmoHover(float x, float y);
+    void clearGizmoHover();
+    GizmoHandle gizmoHoverHandle() const;
 
     // node info (tests + later UI)
     Vec3f nodePosition(int32_t nodeId) const;   // {0,0,0} for unknown id
