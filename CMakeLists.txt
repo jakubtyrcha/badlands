@@ -146,6 +146,32 @@ if(APPLE)
         "-framework Metal" "-framework Foundation")
 endif()
 
+# badlands_slang: Slang -> (target source + engine reflection). Sits ABOVE the
+# RHI; the RHI never invokes a compiler, so the dependency runs one way.
+#
+# The SDK is gitignored (see tools/slang_probe/README.md for how to fetch it),
+# so this target and its tests are SKIPPED when it is absent rather than
+# breaking the build for a fresh clone.
+set(BADLANDS_SLANG_ROOT "${CMAKE_SOURCE_DIR}/third_party/toolchains/slang"
+    CACHE PATH "Prebuilt Slang SDK root")
+if(EXISTS "${BADLANDS_SLANG_ROOT}/include/slang.h")
+    message(STATUS "badlands_slang: enabled (${BADLANDS_SLANG_ROOT})")
+    add_library(badlands_slang STATIC src/engine/slang/slang_compiler.cpp)
+    target_include_directories(badlands_slang PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+        ${BADLANDS_SLANG_ROOT}/include
+        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+    target_link_libraries(badlands_slang PUBLIC
+        badlands_rhi "${BADLANDS_SLANG_ROOT}/lib/libslang.dylib")
+    set_target_properties(badlands_slang PROPERTIES
+        BUILD_RPATH "${BADLANDS_SLANG_ROOT}/lib"
+        INSTALL_RPATH "${BADLANDS_SLANG_ROOT}/lib")
+    set(BADLANDS_HAVE_SLANG ON)
+else()
+    message(STATUS "badlands_slang: skipped (no SDK at ${BADLANDS_SLANG_ROOT})")
+    set(BADLANDS_HAVE_SLANG OFF)
+endif()
+
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
 # types/logic live here — see src/engine/app/app_view.hpp.
@@ -1114,6 +1140,25 @@ if(APPLE)
     target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi)
     target_link_options(badlands_rhi_metal_tests PRIVATE "-Wl,-ld_new")
     add_test(NAME badlands_rhi_metal_tests COMMAND badlands_rhi_metal_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
+# badlands_slang_tests: compile, cache, hot-reload and reflection, against
+# test-local fixtures. Skipped along with badlands_slang when the SDK is absent.
+if(BADLANDS_HAVE_SLANG)
+    add_executable(badlands_slang_tests
+        src/engine/tests/slang_compiler_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp
+    )
+    target_include_directories(badlands_slang_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/src/engine/tests
+    )
+    target_link_libraries(badlands_slang_tests PRIVATE badlands_slang)
+    if(APPLE)
+        target_link_options(badlands_slang_tests PRIVATE "-Wl,-ld_new")
+    endif()
+    add_test(NAME badlands_slang_tests COMMAND badlands_slang_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
