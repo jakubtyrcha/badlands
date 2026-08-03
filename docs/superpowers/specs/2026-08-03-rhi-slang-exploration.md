@@ -59,6 +59,106 @@ Each entry records what was chosen and why. Supersede by appending, not editing.
 - **Build the heap allocator first.** It improves the non-bindless path too, and is the
   real prerequisite for going bindless later.
 
+### D11 — A new app is the integration testbed (2026-08-03)
+
+- Build a new `src/executables/` app that draws a **terrain patch plus instanced trees** on
+  the new stack. It is the consumer that stages 1-3 are developed against, not a separate
+  later step.
+- **`badlands_mapview` already draws exactly this scene** — cluster-LOD terrain via
+  `ClusterTerrain` plus an `InstancedMeshField` forest, in ~1,276 LOC. It is both the
+  reference implementation and the visual comparison target.
+- The new app depends on far less than the game does. `terrain_clusters.hpp` is pure CPU
+  with no GPU dependency, so the chain is MapData → cluster DAG → GPU buffers → graph → RHI.
+- **It needs none of `SceneGraph`, `MaterialInstance`, `MeshRenderingMaterial`,
+  `StandardMaterialFactory` or `SceneRenderer`.** mapview already bypasses the scene graph
+  for its terrain, so this is a narrowing of an existing pattern rather than a new one.
+- Start it at stage 1 as the vertical slice — a single Slang shader through the RHI — and
+  grow it as the graph and vis-buffer land. Infrastructure never sits without a consumer.
+- It is also where 64-bit atomics and mesh shaders first get exercised, so the motivating
+  features are proven early rather than at the end.
+
+#### Prototype scope: material id + real terrain blending, no lighting
+
+**The prototype resolves triangle/cluster id AND real blended terrain material. No lighting,
+no post, no bindless.**
+
+Terrain blending turns out to be the one material path that needs none of the deferred
+machinery, because of a decision already made in `material/terrain_cluster.wesl`:
+
+- **Biome weights come from a splat texture sampled in world XZ, explicitly not from vertex
+  data** — chosen so boundaries survive LOD decimation. So cluster and LOD are irrelevant to
+  the blend.
+- Its resources are **7 fixed group-0 bindings**: three `texture_2d_array`s
+  (albedo / normal / ARM), two splat textures, two samplers. All static, all declarable as
+  graph ports.
+- **World position reconstructs from depth**, so the resolve needs no barycentric attribute
+  fetch at all. Layer UVs are planar from world position (`terrainPlanarUv`).
+- The only attribute genuinely lost is the vertex normal. Deriving a geometric normal from
+  depth derivatives is adequate for a material-and-blend view.
+
+Trees carry a small fixed set too — `InstancedMeshField` runs `num_submeshes=2`, so two
+material ids over two static resource sets.
+
+**The general rule this establishes:** a small fixed material set needs no bindless.
+Material id indexes a statically declared array of resource sets. Bindless is required only
+when the material count becomes large or dynamic — which is exactly why D4's deferral holds.
+
+What the prototype **proves**: the RHI, the graph including barrier derivation, Slang shaders
+end to end, GPU-driven cluster selection, indirect draw, **and the graph's port model against
+real texture resources rather than only render targets**.
+
+What it **defers**: bindless and the heap allocator, lighting, post, and the general material
+system. That is the right split — the prototype tests the architecture, and now renders
+something worth looking at while doing it.
+
+### D10 — Visibility-buffer, GPU-driven; renderer rewrite accepted (2026-08-03)
+
+Answers the geometry-pass question left open by D7. A renderer rewrite is acceptable — the
+current pipeline is a prototype.
+
+- **A visibility buffer dissolves the geometry-pass problem.** The only thing that resists a
+  dataflow graph is per-draw material binding; a vis-buffer pass writes
+  `{cluster_id, triangle_id}` and binds no material at all.
+- So there is no special geometry node kind: **one raster node** with a static port set
+  (vertex/index heap, cluster buffer, indirect args, visbuffer target, depth), plus an
+  ordinary screen-space resolve node reading a bindless material table.
+- This is why the two motivating features cohere — 64-bit atomics for the compute-raster
+  path on small triangles, mesh shaders for the hardware path on larger clusters. That is
+  Nanite's dual-path design, and the terrain cluster DAG is already built for it.
+
+#### Where the terrain actually stands
+
+The build side is genuine Nanite; the runtime is not.
+
+- DAG, boundary-locked QEM simplification, 13 levels, ~8.2k clusters, ~1.05M tris for a
+  512² map. Seamlessness is a build invariant, already pinned by tests.
+- **Runtime is CPU**: `SelectClusters` is a flat pass over all clusters, then per-cluster
+  `DrawIndexed` over ranges of one shared buffer.
+- **Measured: ~0.95-1.0 ms per frame on selection alone, and ~908 draws** for the near
+  camera. Roughly 6% of a 16 ms budget spent deciding what to draw.
+- The gap to GPU-driven is narrow and specific: move selection to compute, emit indirect
+  args, collapse ~908 draws into one `DrawIndexedIndirect`.
+- Terrain already has the prerequisites — one shared buffer, per-cluster error and bounding
+  sphere, and a cut that is a pure function of camera and τ. **That is the same
+  classify → scan → scatter → indirect shape `GpuInstanceRenderer` runs for trees**, so both
+  geometry producers converge on one model.
+
+#### Consequences for earlier decisions
+
+- **D4's rationale is superseded.** Bindless was deferred partly because "the GPU doesn't
+  pick materials yet"; vis-buffer material resolve *requires* bindless, since selection is
+  per-pixel. The deferral stands as sequencing, but its deadline is now known: **before the
+  vis-buffer resolve pass.**
+- **D8's correctness rider is retired.** Geometry nodes touch no material textures, so there
+  is nothing for them to declare. The heap is declared by the resolve node.
+
+#### Known cost
+
+- Material evaluation moves to screen space; vertex attributes need manual barycentric
+  interpolation from triangle IDs; G-buffer and deferred lighting get restructured.
+- Shadows likely stay depth-only raster, so two geometry paths persist regardless.
+- The batch/slot model is still needed transitionally, since not everything converts at once.
+
 ### D9 — No strings at record time (2026-08-03)
 
 Rule: **strings are permitted at compile and resolve time, never at record time.**
@@ -263,22 +363,27 @@ Re-measure before trusting these; they are a snapshot, not a contract.
 
 Each stage must be independently verifiable against current renders.
 
-1. **RHI interface + Metal backend + DX12 stub**, with RHI-level tests and one new Slang
-   shader. A vertical slice; nothing ported yet.
+The new app (D11) is the consumer throughout — it starts at stage 1 and grows. Infrastructure
+is never built without something drawing through it.
+
+1. **RHI interface + Metal backend + DX12 stub**, with RHI-level tests. The new app draws
+   its first triangle from one hand-written Slang shader.
 2. **Slang toolchain + reflection contract.** Slang replaces the `wesl` crate's compile and
    naga reflection. Reflection is expressed in engine-owned types, never `wgpu::`.
    This must precede the graph, because the graph's auto-binding consumes it.
 3. **Render graph over the RHI.** Port sampo's DAG skeleton and its tests, retarget the node
    interface from `wgpu::` to RHI types, add port usage, reflection-driven binding, and
-   barrier derivation. Add the geometry-pass node kind.
-4. **Port shaders to Slang, MSL only.** Verification is the Metal path itself — there is no
-   WGSL bridge (D6), so the Metal backend must render before shaders can be checked.
-5. **Port engine passes onto the graph**, each verified by its existing property-based GPU
-   tests.
-6. **DX12 backend**, once the seam and the barrier derivation have proven themselves.
+   barrier derivation. The app's passes move onto it.
+4. **GPU-driven terrain + trees, visbuffer with material-id resolve.** Cluster selection
+   moves to compute; ~908 draws collapse to one indirect draw. The resolve reconstructs
+   world position from depth and runs the real splat-driven terrain blend. This is the
+   prototype's finished state.
+5. **Materials, bindless and the heap allocator**, then lighting — the deferred half of D11.
+6. **Migrate the game onto the stack**, and **DX12**, once the seam and barrier derivation
+   have proven themselves.
 
-Stages 1 and 4 overlap by construction: the vertical slice already needs one Slang shader
-running through Metal.
+Stages 1-4 are all one app growing. Nothing from the existing renderer is ported until
+stage 6, so `main` stays untouched (D6).
 
 ## Risks and open questions
 
