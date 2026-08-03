@@ -319,6 +319,12 @@ struct Params {
   // A cell must hold at least this much water before the plume/dispersion path
   // engages. Transient sheet flow is not a lake and must not trigger it.
   float min_dispersion_depth_m = 1.0f;
+  // Water leaves the map at or below this. For the horseshoe it coincides with
+  // the outflow edge, which the generator already places at 0.
+  float sea_level_m = 0.0f;
+  // Ordered sweeps of the water relaxation per step, warm-started. Cold start
+  // at t = 0 runs to convergence instead.
+  int water_sweeps = 4;
   float min_lake_area_m2 = 1.0e4f;  // 1 ha
   float min_lake_depth_m = 0.5f;
 
@@ -346,6 +352,9 @@ struct Grid {
   std::vector<float> Qm3s, Qm3s_b;
   std::vector<float> momx, momy, momx_b, momy_b;
   std::vector<float> water;                   // standing depth, height units
+  // Relaxed water SURFACE (height units), the Planchon-Darboux fixed point.
+  // Persisted across steps so the relaxation can warm-start.
+  std::vector<float> wsurf;
   // Erodible thickness over bedrock, height units. The surface is `height`;
   // bedrock is implicitly height - soil, so `height` stays authoritative and
   // every existing read of it is untouched.
@@ -368,7 +377,8 @@ struct Grid {
         discharge(cells, 0.f), discharge_b(cells, 0.f),
         Qm3s(cells, 0.f), Qm3s_b(cells, 0.f),
         momx(cells, 0.f), momy(cells, 0.f), momx_b(cells, 0.f), momy_b(cells, 0.f),
-        water(cells, 0.f), soil(cells, 0.f), lake_id(cells, -1),
+        water(cells, 0.f), wsurf(cells, 0.f), soil(cells, 0.f),
+        lake_id(cells, -1),
         vol_track(cells, 0.f), mx_track(cells, 0.f), my_track(cells, 0.f),
         visits(cells, 0u) {}
 
@@ -614,6 +624,80 @@ void PriorityFlood(const Grid& g, std::vector<float>& filled,
       filled[j] = flooded ? it.e : g.height[j];
       outlet_of[j] = flooded ? it.src : int32_t(j);
       pq.push({filled[j], int32_t(j), outlet_of[j]});
+    }
+  }
+}
+
+// ------------------------------------------------------- water relaxation
+
+// Water surface by ORDERED-SWEEP relaxation (Planchon-Darboux).
+//
+// The filled surface is the fixed point of
+//     w[i] = max( h[i], min over 4-neighbours j of w[j] )
+// with w pinned to h wherever water leaves the map. That is the SAME answer
+// PriorityFlood computes -- but as a bounded, warm-startable grid pass instead
+// of a global priority queue. Which is what lets it run every step (no rebuild
+// cadence to be wrong about) and what makes it portable to a compute shader:
+// a priority queue is the one part of this sim that cannot go on a GPU.
+//
+// MUST be initialised from ABOVE. The iteration has other fixed points
+// reachable from below: on h = [10,5,0,5,10] with pinned ends, starting at
+// w = h sticks at [10,5,5,5,10] rather than filling to 10. From above, w
+// decreases monotonically to the correct surface, so a partial sweep budget
+// leaves lakes slightly TOO FULL -- a conservative error that shrinks with more
+// sweeps, rather than a wrong answer.
+//
+// Sweeps alternate scan direction. A Jacobi pass propagates information one
+// cell per iteration, so a long spillway would need O(n) of them; an ordered
+// sweep carries it the whole length of the scan line in one pass, which is why
+// priming is affordable.
+void RelaxWater(Grid& g, const Params& p, int sweeps, bool cold) {
+  const int n = g.n;
+  const float inf = 1e30f;
+  auto pinned = [&](int x, int y) {
+    // Water leaves at the map edge, and at or below sea level, which for the
+    // horseshoe is exactly its outflow edge (u = 0 there by construction).
+    return x == 0 || y == 0 || x == n - 1 || y == n - 1 ||
+           g.height[g.idx(x, y)] * p.relief_m <= p.sea_level_m;
+  };
+  if (cold) {
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        g.wsurf[i] = pinned(x, y) ? g.height[i] : inf;
+      }
+  } else {
+    // Warm start. Valid while the previous surface sits at or above the new
+    // solution, which incision guarantees. If a DIVIDE aggrades the spill can
+    // rise above the old surface and this starts from below, under-filling that
+    // basin until a cold pass; lifting to h is the cheap half of the repair.
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        g.wsurf[i] = pinned(x, y) ? g.height[i]
+                                  : std::max(g.wsurf[i], g.height[i]);
+      }
+  }
+  static const int dx4[4] = {1, -1, 0, 0}, dy4[4] = {0, 0, 1, -1};
+  for (int s = 0; s < sweeps; ++s) {
+    const bool rev_x = (s & 1) != 0, rev_y = (s & 2) != 0;
+    for (int yy = 0; yy < n; ++yy) {
+      const int y = rev_y ? n - 1 - yy : yy;
+      for (int xx = 0; xx < n; ++xx) {
+        const int x = rev_x ? n - 1 - xx : xx;
+        if (pinned(x, y)) continue;
+        const size_t i = g.idx(x, y);
+        float lo = inf;
+        for (int k = 0; k < 4; ++k) {
+          const int ax = x + dx4[k], ay = y + dy4[k];
+          if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;
+          lo = std::min(lo, g.wsurf[g.idx(ax, ay)]);
+        }
+        // In place, so the rest of this scan line sees the update -- that is
+        // the whole speed advantage over a Jacobi pass.
+        const float want = std::max(g.height[i], lo);
+        if (want < g.wsurf[i]) g.wsurf[i] = want;
+      }
     }
   }
 }
@@ -2821,6 +2905,45 @@ void StepSizeIndependence() {
   Check("T8 landscape independent of step size", d_mf < 0.10, buf);
 }
 
+// --- T9. relaxation converges to the priority-flood surface ----------------
+// The ORACLE for the whole water rewrite. PriorityFlood is exact, so it is kept
+// as ground truth and the relaxation is checked against it rather than against
+// itself. If these agree, swapping a global priority queue for a bounded grid
+// pass is a change of METHOD, not of answer.
+//
+// Also measures how far a 4-sweep budget is from converged, since that is what
+// runs per step in production -- an assertion is worth more than an assumption
+// about "a few sweeps should do".
+void WaterRelaxationMatchesFlood() {
+  // 256, not 64: sweep propagation scales with grid size, so a small fixture
+  // would report convergence the production grid does not have.
+  Params p = Base(256);
+  p.terrain = Params::Terrain::Horseshoe;
+  Grid g(p.res);
+  InitTerrain(g, p);
+
+  std::vector<float> filled;
+  std::vector<int32_t> outlet;
+  PriorityFlood(g, filled, outlet);
+
+  RelaxWater(g, p, 400, true);  // cold, run to convergence
+  double worst = 0.0, worst4 = 0.0;
+  for (size_t i = 0; i < g.cells; ++i)
+    worst = std::max(worst, std::fabs(double(g.wsurf[i] - filled[i])));
+
+  // And what a production-budget pass gets from cold.
+  RelaxWater(g, p, p.water_sweeps, true);
+  for (size_t i = 0; i < g.cells; ++i)
+    worst4 = std::max(worst4, std::fabs(double(g.wsurf[i] - filled[i])));
+
+  const double worst_m = worst * p.relief_m, worst4_m = worst4 * p.relief_m;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "converged worst |dw| %.2e m; %d sweeps from cold %.2f m",
+                worst_m, p.water_sweeps, worst4_m);
+  Check("T9 water relaxation == priority flood", worst_m < 1e-3, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -2854,6 +2977,7 @@ int RunAll() {
   MassConservationLongRun();
   HorseshoeDrainsToOutflow();
   StepSizeIndependence();
+  WaterRelaxationMatchesFlood();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)
