@@ -90,6 +90,18 @@ TEST_CASE("Null: compute dispatch is recorded", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckComputeDispatchIsRecorded(*d);
 }
+TEST_CASE("Null: indexed draw honours first_index", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckIndexedDrawHonoursFirstIndex(*d);
+}
+TEST_CASE("Null: texture upload is sampled", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckTextureUploadIsSampled(*d);
+}
+TEST_CASE("Null: LoadOp preserves previous contents", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckLoadOpPreservesPreviousContents(*d);
+}
 
 // --- Null-specific: the recording behaviour that makes it a usable double ---
 

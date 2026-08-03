@@ -56,6 +56,23 @@ TEST_CASE("validation: a clean scope observes nothing", "[rhi][validation]") {
   CHECK_FALSE(observed.has_value());
 }
 
+TEST_CASE("validation: the command log is reachable through the decorator",
+          "[rhi][validation]") {
+  // Without this, every GetCommandLog()-guarded assertion in the conformance
+  // list silently skips when the device is validated -- so the "runs clean
+  // under validation" case below was only ever checking half of what it looked
+  // like it checked. A log assertion that quietly does not run is worse than
+  // one that fails.
+  auto device = MakeValidated();
+  REQUIRE(device);
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+
+  auto encoder = device->CreateCommandEncoder("through_decorator");
+  encoder->Finish();
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::Finish) == 1);
+}
+
 TEST_CASE("validation: the full conformance list runs clean under validation",
           "[rhi][validation]") {
   // The strongest single assertion here: the shared behavioural list is not

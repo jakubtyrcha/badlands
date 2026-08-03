@@ -1147,6 +1147,11 @@ if(APPLE)
     target_link_options(badlands_rhi_metal_tests PRIVATE "-Wl,-ld_new")
     add_test(NAME badlands_rhi_metal_tests COMMAND badlands_rhi_metal_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # Metal's own validation layers, always on for this suite. They catch
+    # invalid API use that a passing test otherwise hides — the first time they
+    # were switched on they aborted the suite on an invalid dispatch.
+    set_tests_properties(badlands_rhi_metal_tests PROPERTIES
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
 endif()
 
 # badlands_rhi_lab: the MVP that proves the RHI + Slang + visibility-buffer

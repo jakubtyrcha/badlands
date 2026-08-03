@@ -89,6 +89,24 @@ TEST_CASE("metal: the conformance list runs clean under validation",
   CHECK_FALSE(observed.has_value());
 }
 
+// The three cases that had no coverage at all before. They live in the shared
+// list, so Null runs the same sequence; only Metal can assert the pixels.
+TEST_CASE("metal: indexed draw honours first_index", "[rhi][metal][gpu]") {
+  auto d = MakeMetal(false);
+  REQUIRE(d);
+  rhitest::CheckIndexedDrawHonoursFirstIndex(*d);
+}
+TEST_CASE("metal: a texture upload is visible to a shader", "[rhi][metal][gpu]") {
+  auto d = MakeMetal(false);
+  REQUIRE(d);
+  rhitest::CheckTextureUploadIsSampled(*d);
+}
+TEST_CASE("metal: LoadOp::Load preserves the previous pass", "[rhi][metal][gpu]") {
+  auto d = MakeMetal(false);
+  REQUIRE(d);
+  rhitest::CheckLoadOpPreservesPreviousContents(*d);
+}
+
 // --- Real GPU work ----------------------------------------------------------
 
 TEST_CASE("metal: a compute dispatch with atomics produces the right count",

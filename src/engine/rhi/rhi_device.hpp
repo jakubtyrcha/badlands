@@ -46,6 +46,16 @@ class IRhiDevice {
 
   virtual BackendKind GetBackend() const = 0;
 
+  // The device this one wraps, or null if it wraps nothing. Only the
+  // validation decorator returns non-null.
+  //
+  // Exists so backend-specific test helpers can reach past a decorator: a
+  // `dynamic_cast` to a concrete device fails on a wrapped one, which made
+  // every log-guarded assertion in the conformance list silently skip when
+  // validation was enabled. A check that quietly does not run is worse than
+  // one that fails.
+  virtual IRhiDevice* Inner() { return nullptr; }
+
   // --- Resources ---
   virtual BufferPtr CreateBuffer(const BufferDesc& desc) = 0;
   virtual TexturePtr CreateTexture(const TextureDesc& desc) = 0;

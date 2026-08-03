@@ -42,7 +42,11 @@ inline const char* MinimalComputeSource(BackendKind backend) {
       return R"(
 #include <metal_stdlib>
 using namespace metal;
-kernel void cs_main(uint gid [[thread_position_in_grid]]) {}
+// uint3, not uint: CheckComputeDispatchIsRecorded dispatches a 2-D grid,
+// and a scalar thread id makes that an invalid call that only
+// MTL_DEBUG_LAYER=1 reports -- it aborted the suite the first time the layer
+// was switched on.
+kernel void cs_main(uint3 gid [[thread_position_in_grid]]) {}
 )";
     case BackendKind::Null:
       return "";
@@ -66,6 +70,70 @@ fragment float4 fs_main() { return float4(1.0); }
       return "";
   }
   return "";
+}
+
+// Draws a real triangle by pulling positions from a storage buffer via the
+// vertex id -- the MVP's vertex model, and the only way to exercise DrawIndexed
+// without vertex input layouts.
+inline const char* PullingGraphicsSource(BackendKind backend) {
+  switch (backend) {
+    case BackendKind::Metal:
+      return R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VOut { float4 pos [[position]]; };
+vertex VOut vs_main(uint vid [[vertex_id]],
+                    device const float4* verts [[buffer(0)]]) {
+  VOut o; o.pos = verts[vid]; return o;
+}
+fragment float4 fs_main() { return float4(0.0, 1.0, 0.0, 1.0); }
+)";
+    case BackendKind::Null:
+      return "";
+  }
+  return "";
+}
+
+// Samples a texture across a fullscreen triangle, so an upload can be proven to
+// have reached the GPU rather than merely not crashed.
+inline const char* SamplingGraphicsSource(BackendKind backend) {
+  switch (backend) {
+    case BackendKind::Metal:
+      return R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VOut { float4 pos [[position]]; float2 uv; };
+vertex VOut vs_main(uint vid [[vertex_id]]) {
+  float2 uv = float2(float((vid << 1) & 2), float(vid & 2));
+  VOut o; o.pos = float4(uv * 2.0 - 1.0, 0.0, 1.0); o.uv = uv; return o;
+}
+fragment float4 fs_main(VOut i [[stage_in]],
+                        texture2d<float> tex [[texture(0)]],
+                        sampler samp [[sampler(0)]]) {
+  return tex.sample(samp, i.uv);
+}
+)";
+    case BackendKind::Null:
+      return "";
+  }
+  return "";
+}
+
+// Whether this backend actually rasterizes, so readback assertions mean
+// something. Null records commands but produces no pixels.
+//
+// Deliberately keyed on the backend rather than on "is there a command log":
+// per this directory's rule 6, anything Null cannot observe still needs a
+// real assertion somewhere, and making that explicit keeps the gap visible.
+inline bool ProducesPixels(IRhiDevice& device) {
+  return device.GetBackend() != BackendKind::Null;
+}
+
+// Reads the centre texel of an RGBA8 target that has been copied into `buf`.
+struct Rgba { uint8_t r, g, b, a; };
+inline Rgba CentrePixel(const std::vector<uint8_t>& px, uint32_t w, uint32_t h) {
+  const size_t o = (size_t(h / 2) * w + w / 2) * 4;
+  return {px[o], px[o + 1], px[o + 2], px[o + 3]};
 }
 
 // A reflection covering one binding of every kind at group 0, plus a compute
@@ -421,6 +489,223 @@ inline void CheckComputeDispatchIsRecorded(IRhiDevice& device) {
   }
 }
 
+// --- Cases that need real rasterization -------------------------------------
+
+// DrawIndexed had NO test on either backend before this, so the
+// `index_offset + first_index * stride` arithmetic in the Metal backend was
+// entirely unverified. The index buffer here deliberately starts with junk and
+// the draw uses first_index=3, so a wrong offset draws the junk instead.
+inline void CheckIndexedDrawHonoursFirstIndex(IRhiDevice& device) {
+  constexpr uint32_t kW = 16, kH = 16;
+  ShaderReflection refl;
+  refl.bindings.push_back({.group = 0, .slot = 0, .name = "verts",
+                           .kind = BindingKind::ReadOnlyStorageBuffer,
+                           .location = {.space = 0, .index = 0}});
+  auto shader = device.CreateShaderModule(
+      PullingGraphicsSource(device.GetBackend()), refl, "pull");
+  REQUIRE(shader);
+  auto pipe = device.CreateRenderPipeline(
+      {.vertex_shader = shader.get(), .vertex_entry = "vs_main",
+       .fragment_shader = shader.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm},
+       .cull_mode = CullMode::None, .label = "pull"});
+  REQUIRE(pipe);
+
+  // Six positions: three degenerate, then the covering triangle.
+  const float verts[6][4] = {
+      {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1},
+      {-3, -1, 0, 1}, {3, -1, 0, 1}, {0, 3, 0, 1}};
+  auto vbuf = device.CreateBuffer({.size = sizeof(verts),
+                                   .usage = BufferUsage::Storage |
+                                            BufferUsage::CopyDst,
+                                   .label = "verts"});
+  vbuf->Write(0, {reinterpret_cast<const uint8_t*>(verts), sizeof(verts)});
+
+  const uint32_t indices[6] = {0, 1, 2, 3, 4, 5};
+  auto ibuf = device.CreateBuffer({.size = sizeof(indices),
+                                   .usage = BufferUsage::Index |
+                                            BufferUsage::CopyDst,
+                                   .label = "indices"});
+  ibuf->Write(0, {reinterpret_cast<const uint8_t*>(indices), sizeof(indices)});
+
+  auto color = device.CreateTexture({.width = kW, .height = kH,
+                                     .format = Format::RGBA8Unorm,
+                                     .usage = TextureUsage::RenderTarget |
+                                              TextureUsage::CopySrc,
+                                     .label = "indexed_target"});
+  auto readback = device.CreateBuffer(
+      {.size = kW * kH * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead});
+
+  auto table = device.CreateBindingTable(
+      {.render_pipeline = pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::ReadOnlyStorageBuffer,
+                    .buffer = vbuf.get()}}});
+
+  auto encoder = device.CreateCommandEncoder("indexed");
+  encoder->Transition(vbuf.get(), ResourceState::ShaderRead);
+  encoder->Transition(color.get(), ResourceState::RenderTarget);
+  RenderPassDesc desc;
+  desc.color_attachments.push_back({.view = color->GetDefaultView(),
+                                    .load_op = LoadOp::Clear,
+                                    .store_op = StoreOp::Store,
+                                    .clear_color = {0, 0, 0, 1}});
+  auto* pass = encoder->BeginRenderPass(desc);
+  REQUIRE(pass != nullptr);
+  pass->SetPipeline(pipe.get());
+  pass->SetBindingTable(0, table.get());
+  pass->SetIndexBuffer(ibuf.get(), IndexFormat::Uint32);
+  pass->SetViewport(0, 0, float(kW), float(kH));
+  pass->DrawIndexed(/*index_count=*/3, /*instance_count=*/1, /*first_index=*/3);
+  pass->End();
+  encoder->Transition(color.get(), ResourceState::CopySrc);
+  encoder->Transition(readback.get(), ResourceState::CopyDst);
+  encoder->CopyTextureToBuffer(color.get(), 0, 0, readback.get(), 0);
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.WaitIdle();
+
+  if (!ProducesPixels(device)) return;
+  std::vector<uint8_t> px(kW * kH * 4, 0);
+  REQUIRE(readback->Read(0, px));
+  const Rgba c = CentrePixel(px, kW, kH);
+  INFO("centre = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  // Green means the draw used indices 3..5. Black means first_index was
+  // ignored and the degenerate triangle was drawn instead.
+  CHECK(c.g > 200);
+  CHECK(c.r < 32);
+}
+
+// Proves a texture upload actually reached the GPU, which nothing did before:
+// ITexture::Write was never called by any RHI test.
+inline void CheckTextureUploadIsSampled(IRhiDevice& device) {
+  constexpr uint32_t kW = 8, kH = 8;
+  ShaderReflection refl;
+  refl.bindings.push_back({.group = 0, .slot = 0, .name = "tex",
+                           .kind = BindingKind::SampledTexture,
+                           .location = {.space = 0, .index = 0}});
+  refl.bindings.push_back({.group = 0, .slot = 1, .name = "samp",
+                           .kind = BindingKind::Sampler,
+                           .location = {.space = 0, .index = 0}});
+  auto shader = device.CreateShaderModule(
+      SamplingGraphicsSource(device.GetBackend()), refl, "sample");
+  REQUIRE(shader);
+  auto pipe = device.CreateRenderPipeline(
+      {.vertex_shader = shader.get(), .vertex_entry = "vs_main",
+       .fragment_shader = shader.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm},
+       .cull_mode = CullMode::None, .label = "sample"});
+  REQUIRE(pipe);
+
+  // A uniform, unmistakable colour, so a sample from anywhere proves upload.
+  auto src = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled |
+                                            TextureUsage::CopyDst,
+                                   .label = "uploaded"});
+  std::vector<uint8_t> texels(4 * 4 * 4);
+  for (size_t i = 0; i < texels.size(); i += 4) {
+    texels[i + 0] = 200; texels[i + 1] = 40; texels[i + 2] = 120; texels[i + 3] = 255;
+  }
+  src->Write(0, 0, AsBytes(texels));
+  auto samp = device.CreateSampler({.address_u = AddressMode::ClampToEdge,
+                                    .address_v = AddressMode::ClampToEdge});
+
+  auto color = device.CreateTexture({.width = kW, .height = kH,
+                                     .format = Format::RGBA8Unorm,
+                                     .usage = TextureUsage::RenderTarget |
+                                              TextureUsage::CopySrc});
+  auto readback = device.CreateBuffer(
+      {.size = kW * kH * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead});
+
+  auto table = device.CreateBindingTable(
+      {.render_pipeline = pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::SampledTexture,
+                    .texture_view = src->GetDefaultView()},
+                   {.slot = 1, .kind = BindingKind::Sampler,
+                    .sampler = samp.get()}}});
+
+  auto encoder = device.CreateCommandEncoder("sample");
+  encoder->Transition(src.get(), ResourceState::ShaderRead);
+  encoder->Transition(color.get(), ResourceState::RenderTarget);
+  RenderPassDesc desc;
+  desc.color_attachments.push_back({.view = color->GetDefaultView(),
+                                    .load_op = LoadOp::Clear,
+                                    .store_op = StoreOp::Store});
+  auto* pass = encoder->BeginRenderPass(desc);
+  REQUIRE(pass != nullptr);
+  pass->SetPipeline(pipe.get());
+  pass->SetBindingTable(0, table.get());
+  pass->SetViewport(0, 0, float(kW), float(kH));
+  pass->Draw(3);
+  pass->End();
+  encoder->Transition(color.get(), ResourceState::CopySrc);
+  encoder->Transition(readback.get(), ResourceState::CopyDst);
+  encoder->CopyTextureToBuffer(color.get(), 0, 0, readback.get(), 0);
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.WaitIdle();
+
+  if (!ProducesPixels(device)) return;
+  std::vector<uint8_t> px(kW * kH * 4, 0);
+  REQUIRE(readback->Read(0, px));
+  const Rgba c = CentrePixel(px, kW, kH);
+  INFO("centre = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  CHECK(c.r == Catch::Approx(200).margin(3));
+  CHECK(c.g == Catch::Approx(40).margin(3));
+  CHECK(c.b == Catch::Approx(120).margin(3));
+}
+
+// LoadOp::Load must preserve what a previous pass stored. Asserted only on
+// Null before this, where nothing is actually preserved or discarded.
+inline void CheckLoadOpPreservesPreviousContents(IRhiDevice& device) {
+  constexpr uint32_t kW = 8, kH = 8;
+  auto color = device.CreateTexture({.width = kW, .height = kH,
+                                     .format = Format::RGBA8Unorm,
+                                     .usage = TextureUsage::RenderTarget |
+                                              TextureUsage::CopySrc,
+                                     .label = "loadop"});
+  auto readback = device.CreateBuffer(
+      {.size = kW * kH * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead});
+
+  auto encoder = device.CreateCommandEncoder("loadop");
+  encoder->Transition(color.get(), ResourceState::RenderTarget);
+
+  // Pass 1: clear to a known colour and store it.
+  RenderPassDesc clear_pass;
+  clear_pass.label = "clear";
+  clear_pass.color_attachments.push_back(
+      {.view = color->GetDefaultView(), .load_op = LoadOp::Clear,
+       .store_op = StoreOp::Store, .clear_color = {1.0f, 0.5f, 0.0f, 1.0f}});
+  encoder->BeginRenderPass(clear_pass)->End();
+
+  // Pass 2: load, draw nothing, store. The colour must survive.
+  RenderPassDesc load_pass;
+  load_pass.label = "load";
+  load_pass.color_attachments.push_back(
+      {.view = color->GetDefaultView(), .load_op = LoadOp::Load,
+       .store_op = StoreOp::Store});
+  encoder->BeginRenderPass(load_pass)->End();
+
+  encoder->Transition(color.get(), ResourceState::CopySrc);
+  encoder->Transition(readback.get(), ResourceState::CopyDst);
+  encoder->CopyTextureToBuffer(color.get(), 0, 0, readback.get(), 0);
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.WaitIdle();
+
+  if (!ProducesPixels(device)) return;
+  std::vector<uint8_t> px(kW * kH * 4, 0);
+  REQUIRE(readback->Read(0, px));
+  const Rgba c = CentrePixel(px, kW, kH);
+  INFO("centre = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  CHECK(c.r == Catch::Approx(255).margin(3));
+  CHECK(c.g == Catch::Approx(128).margin(3));
+  CHECK(c.b < 8);
+}
+
 // --- The whole list ---------------------------------------------------------
 
 // Every backend runs exactly this. Adding a feature means adding a case here,
@@ -439,6 +724,9 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckBufferCopyMovesBytes(device);
   CheckTransitionsAreRecorded(device);
   CheckComputeDispatchIsRecorded(device);
+  CheckIndexedDrawHonoursFirstIndex(device);
+  CheckTextureUploadIsSampled(device);
+  CheckLoadOpPreservesPreviousContents(device);
 }
 
 }  // namespace badlands::rhi::test

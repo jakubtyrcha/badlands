@@ -473,7 +473,11 @@ std::unique_ptr<IRhiDevice> CreateNullDevice(const std::string& label) {
 }
 
 CommandLog* GetCommandLog(IRhiDevice& device) {
-  if (auto* nd = dynamic_cast<NullDevice*>(&device)) return &nd->Log();
+  // Walk the decorator chain: a validated Null device is a ValidationDevice
+  // wrapping a NullDevice, and a direct cast would miss it.
+  for (IRhiDevice* d = &device; d != nullptr; d = d->Inner()) {
+    if (auto* nd = dynamic_cast<NullDevice*>(d)) return &nd->Log();
+  }
   return nullptr;
 }
 

@@ -517,6 +517,8 @@ class ValidationDevice final : public IRhiDevice {
 
   BackendKind GetBackend() const override { return inner_->GetBackend(); }
 
+  IRhiDevice* Inner() override { return inner_.get(); }
+
   BufferPtr CreateBuffer(const BufferDesc& d) override {
     if (d.size == 0) ctx_.recorder.Report("CreateBuffer: zero size");
     if (!Any(d.usage)) {
