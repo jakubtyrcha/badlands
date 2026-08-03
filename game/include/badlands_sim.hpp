@@ -841,6 +841,62 @@ struct CharacterState {
     int32_t skills[kMaxSkills];  // SkillId values; only [0, skill_count) valid
 };
 
+// ---------------------------------------------------------------------------
+// Animation projection (the render layer's ONLY view of what a character is
+// doing)
+//
+// A per-character summary written by ONE system, project_anim_state
+// (game/src/anim_projection.h), as the last act of every tick. The renderer
+// reads it off the shared registry (Sim::registry()) and maps it to clips; the
+// sim never names a clip and never reads this component back.
+//
+// Why a projection and not events: an event may be RETRACTED (a mechanic can
+// undo what a tick decided), and a consumer that latched onto one has already
+// committed to an animation it must then cancel. A state is what stuck, so an
+// observer of it self-corrects on the next tick with no cancellation path.
+//
+// Why the sim owns the TIMING and the view owns the CLIP: the gameplay window
+// (a swing's wind-up) is authored data and lives here in ticks; the view
+// stretches its clip to fit that window, so the blow and its animation cannot
+// drift apart. Nothing about clips leaks into the sim.
+// ---------------------------------------------------------------------------
+
+// What a character is doing, resolved to a single value by priority (see
+// project_anim_state). Stunned outranks the strike phases: a stun cancels a
+// wind-up outright, and during the non-cancellable recovery being staggered is
+// what the character visibly IS.
+enum class AnimAction : int32_t {
+    Idle = 0,
+    Locomotion,
+    AttackWindUp,     // committed, blow not yet landed (cancellable)
+    AttackRecovery,   // blow thrown, still committed (not cancellable)
+    CastFocus,        // a long cast in progress
+    Stunned,
+};
+
+struct CharacterAnim {
+    AnimAction action = AnimAction::Idle;
+    // The action's gameplay window, in sim ticks.
+    //
+    // end == start means UNBOUNDED -- a loop with no window to stretch to (Idle,
+    // Locomotion). The view drives those by `speed` instead of by ratio; a
+    // BOUNDED action always has end > start. One convention, checked once.
+    int64_t action_start_ticks = 0;
+    int64_t action_end_ticks = 0;
+    // Attack index for the strike phases, SkillId for CastFocus, else -1. It is
+    // what lets a mapper tell a sword swing from a spell.
+    int32_t action_param = -1;
+    // Planar speed in units/sec, from OWN-POWER movement only. A character
+    // shoved by crowd separation, or repositioned when it leaves a building,
+    // reads 0 here -- so a discontinuous move never spikes a walk cycle.
+    float speed = 0.0f;
+};
+
+// action_start_ticks is the EDGE DETECTOR: it is monotone per entity, so an
+// observer that remembers the last value it saw learns "a new action began"
+// without an event stream. Two back-to-back swings differ because their windows
+// differ; an unbounded action is stamped when its kind changes.
+
 // Run counters. NB: NOT `Stats` — badlands::Stats already exists (a sim
 // component, game/src/components.h:24). Use SimStats for the run counters.
 struct SimStats {

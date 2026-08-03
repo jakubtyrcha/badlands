@@ -345,6 +345,13 @@ struct StrikeInProgress {
 // rather than a delayed certainty.
 struct SkillFocus {
     int64_t resolve_at_ticks = 0;
+    // When the cast BEGAN. Nothing in the cast rules needs it -- the deadline
+    // alone decides the outcome -- but without it the commitment has an end and
+    // no beginning, so its progress cannot be expressed as a fraction. The
+    // animation projection (badlands_sim.hpp's CharacterAnim) needs the whole
+    // window, and it is the symmetry StrikeInProgress' declared_ticks already
+    // has on the other channel.
+    int64_t declared_ticks = 0;
     SkillId id = SkillId::Count;
     int32_t skill_index = -1;   // index into the caster's OWN Skills
     uint32_t target_slot = UINT32_MAX;

@@ -133,6 +133,57 @@ TEST_CASE("the same inputs produce the same state and the same command log") {
 
         }
 
+TEST_CASE("a render component in the shared registry cannot perturb the sim") {
+    // The renderer attaches its OWN components to sim entities through
+    // Sim::registry() (the animation overlay keeps per-character blend state
+    // there). That is only safe because no sim system ever reads one, and this
+    // is what pins it: two identical runs, one of which carries a render
+    // component on every character, must agree on state AND on the trace.
+    //
+    // NB this is the right shape for the invariant. Hashing the registry around
+    // the projector would not test it -- writing CharacterAnim into that
+    // registry is the projector's whole job, so the interesting question is not
+    // "did the registry change" but "did anything the sim decides depend on it".
+    struct FakeRenderComponent {
+        float blend_weight = 0.5f;
+        int64_t last_seen_start_ticks = -1;
+    };
+
+    auto plain_owned = make_world(BrainDesc{});
+    BadlandsGame* plain = plain_owned.get();
+    auto decorated_owned = make_world(BrainDesc{});
+    BadlandsGame* decorated = decorated_owned.get();
+    seed_town(plain);
+    seed_town(decorated);
+
+    for (int i = 0; i < kRunTicks; ++i) {
+        step_world(*plain);
+        step_world(*decorated);
+        // Attach/refresh render state every tick, as a view would, including on
+        // characters that appeared this tick.
+        for (uint32_t slot = 0; slot < decorated->slots.size(); ++slot) {
+            const entt::entity e = decorated->slots[slot];
+            if (!decorated->registry.valid(e)) continue;
+            auto& fake = decorated->registry.get_or_emplace<FakeRenderComponent>(e);
+            if (const auto* anim = decorated->registry.try_get<CharacterAnim>(e)) {
+                fake.last_seen_start_ticks = anim->action_start_ticks;
+            }
+        }
+    }
+
+    // Some characters must actually have been decorated, or this proves nothing.
+    REQUIRE(decorated->registry.view<FakeRenderComponent>().size() > 0);
+
+    require_same(snapshot(plain), snapshot(decorated));
+
+    REQUIRE(plain->command_log.size() == decorated->command_log.size());
+    REQUIRE(!plain->command_log.empty());
+    for (size_t i = 0; i < plain->command_log.size(); ++i) {
+        INFO("command " << i);
+        CHECK(same_command(plain->command_log[i], decorated->command_log[i]));
+    }
+}
+
 TEST_CASE("a recorded command log replays into a fresh sim exactly") {
     auto live_owned = make_world(BrainDesc{});
     BadlandsGame* live = live_owned.get();

@@ -7,6 +7,7 @@
 
 #include "sim_internal.hpp"
 
+#include "anim_projection.h"  // project_anim_state -- last in step_world
 #include "brain_kind.h"
 #include "combat.h"
 #include "components.h"
@@ -488,6 +489,17 @@ void step_world(BadlandsGame& g) {
             award_xp(g, d.slot, static_cast<int64_t>(d.texels) * per_texel);
         }
     }
+
+    // The animation projection, LAST and deliberately so. It summarises what
+    // each character ended the tick doing, so it must see every mechanic's
+    // final state -- and it reads moved_by_path_scratch, whose contract
+    // (game_state.h) is that it is "never read outside the tick that wrote it".
+    // Moving this call earlier reads a stale or half-filled buffer and reports
+    // actions that were superseded later in the same tick.
+    //
+    // Nothing in this file, or anywhere under game/, reads CharacterAnim back:
+    // it exists for the render layer, which picks it up off the shared registry.
+    project_anim_state(g);
 
     ++g.ticks;
 }
