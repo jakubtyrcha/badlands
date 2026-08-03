@@ -1410,8 +1410,6 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     // Flow direction is constant across the step (a straight segment); the
     // TERRAIN it crosses is not, so capacity is re-derived per cell below.
     const V2 fd = unit(speed);
-    const int dxi = fd.x > 0.4f ? 1 : (fd.x < -0.4f ? -1 : 0);
-    const int dyi = fd.y > 0.4f ? 1 : (fd.y < -0.4f ? -1 : 0);
 
     // Walk the swept segment. Cells are visited IN ORDER and written IN PLACE,
     // so the intra-step feedback the README requires is preserved: the first
@@ -1447,12 +1445,27 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       // The gradient is taken one cell along the flow FROM THIS CELL, so it is
       // step-independent and still contains this cell's own height -- eroding
       // it shrinks its own capacity, the negative feedback the scheme rests on.
-      const int ax = std::clamp(cx + dxi, 1, g.n - 2);
-      const int ay = std::clamp(cy + dyi, 1, g.n - 2);
-      const float dist_m = std::max(
-          cell_m * std::sqrt(float((ax - cx) * (ax - cx) +
-                                   (ay - cy) * (ay - cy))), cell_m);
-      const float drop_hu = g.height[ci] - g.height[g.idx(ax, ay)];
+      // Sampled one cell along the ACTUAL flow direction, interpolated -- NOT
+      // snapped to the nearest of 8 neighbours.
+      //
+      // The snap evaluated the gradient along a LATTICE direction rather than
+      // the flow, so its error aligned with the grid and erosion carved
+      // straight diagonals radiating from the corners. Confirmed generated
+      // here, not inherited: the initial terrain has none. T11 measures what is
+      // left rather than leaving it to the eye, which is how the snap was found.
+      //
+      // The near end stays the DISCRETE cell height. Interpolating both ends
+      // makes sensing continuous while erosion stays per-cell, which
+      // under-damps the feedback (7.5e5 m). Dropping the forward sample
+      // entirely for grad(h).heading -- the form with no sampling at all -- is
+      // the honest one and was tried twice: it ran to 1e11 m before the
+      // gradient limiter existed, and with the limiter it flattens the terrain
+      // until particles stall and burn max_age at 98% CPU. Recorded so the
+      // third attempt starts from the failure mode, not from the idea.
+      const float ahead_h = SampleHeight(g, float(cx) + 0.5f + fd.x,
+                                         float(cy) + 0.5f + fd.y);
+      const float dist_m = cell_m;
+      const float drop_hu = g.height[ci] - ahead_h;
       float c_eq = (1.0f + p.entrainment * g.discharge[ci]) *
                    (drop_hu / dist_m) * p.capacity_length_m;
       if (c_eq < 0.f) c_eq = 0.f;
@@ -3149,6 +3162,41 @@ void WaterFieldZeroLossLimit() {
         buf);
 }
 
+// --- T11. channel orientation is isotropic ---------------------------------
+// Guards against the grid biasing where water goes.
+//
+// |mean(exp(i*4*theta))| over cells carrying momentum -- the 4-fold Fourier
+// component of the flow-direction distribution. A lattice bias clusters
+// directions at 0/45/90 deg, which is exactly 4-fold, so this sits near the
+// noise floor (~1/sqrt(N)) for an isotropic model and rises toward 1 as flow
+// locks to the grid.
+//
+// It exists because the D8 snap it replaced was spotted BY EYE in a render.
+// That is not a way to notice a bias coming back.
+void ChannelOrientationIsotropy() {
+  Params p = Base(128);
+  p.terrain = Params::Terrain::Horseshoe;
+  p.world_m = 16.0f * 128.0f;
+  p.steps = 400;
+  p.drops = 128;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  double sr = 0, si = 0;
+  size_t n = 0;
+  for (size_t i = 0; i < g.cells; ++i) {
+    const float mx = g.momx[i], my = g.momy[i];
+    if (std::sqrt(mx * mx + my * my) < 1e-6f) continue;
+    const double th = std::atan2(double(my), double(mx));
+    sr += std::cos(4.0 * th);
+    si += std::sin(4.0 * th);
+    ++n;
+  }
+  const double a4 = n ? std::sqrt(sr * sr + si * si) / double(n) : 0.0;
+  Check("T11 channel orientation is isotropic", a4 < 0.15,
+        F("4-fold anisotropy %.3f over %.0f cells (noise floor %.3f)", a4,
+          double(n), n ? 1.0 / std::sqrt(double(n)) : 1.0));
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -3184,6 +3232,7 @@ int RunAll() {
   StepSizeIndependence();
   WaterRelaxationMatchesFlood();
   WaterFieldZeroLossLimit();
+  ChannelOrientationIsotropy();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)
