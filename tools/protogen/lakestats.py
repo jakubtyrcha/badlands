@@ -1,13 +1,30 @@
 #!/usr/bin/env python3
-"""Per-lake geometry from a priority-flood fill: area, depths, volume."""
+"""Per-lake geometry from a priority-flood fill: area, depths, volume.
+
+usage: lakestats.py <height.f32>
+       lakestats.py <height.f32> <n> <world_m>   (explicit override)
+
+Resolution and world size come from world.txt (src/mapgen/coarse_io.hpp) next
+to <height.f32> unless given explicitly.
+
+HEIGHT IS ALREADY IN METRES -- protogen's Dump() writes `height * relief_m`.
+This script used to take a <relief_m> argument and scale by it again, putting
+every depth and volume it reported out by that factor. See lakes.py.
+"""
+import os
 import sys
 import numpy as np
-from lakes import priority_flood, label
+from lakes import priority_flood, label, read_world_txt
 
-hp, n, world, relief = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+if len(sys.argv) >= 4:
+    hp, n, world = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+else:
+    hp = sys.argv[1]
+    n, world = read_world_txt(os.path.dirname(hp) or ".")
 cell = world / n
 ca = cell * cell
-h = np.fromfile(hp, dtype=np.float32).reshape(n, n).astype(np.float64) * relief
+# No scaling: the raster is metres already (see the module docstring).
+h = np.fromfile(hp, dtype=np.float32).reshape(n, n).astype(np.float64)
 depth = np.maximum(priority_flood(h) - h, 0.0)
 
 lab, cnt = label(depth > 0.01)

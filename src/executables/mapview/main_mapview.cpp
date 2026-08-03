@@ -1,24 +1,49 @@
-// badlands_mapview: the map tool. Two modes, one generator.
+// badlands_mapview: the map tool. Exactly one of three ways to get a map:
 //
-//   --preview-image-only   run the generator and dump a numbered PNG per
-//                          pipeline stage plus the legacy preview rasters
-//                          into --out, then exit. Pure CPU: no window, no GPU.
-//   --load DIR             render a map LOADED from rasters on disk instead of
-//                          generating one (see mapgen/map_io.hpp for the form).
-//                          --resolution/--size come from the manifest.
-//   (default)              generate the map and render it as the in-game
-//                          terrain (cluster-LOD, biome-colored) with a
-//                          fixed-angle camera.
+//   --load DIR     render a patch cut from a directory on disk -- which of
+//                  two kinds of directory it is gets DETECTED, not chosen:
+//                    - world.txt present -> a COARSE world (a whole
+//                      tools/protogen/ dump). Loaded as a
+//                      mapgen::CoarseWorldPatchSource, which can answer any
+//                      request inside the world's extent; geometry comes
+//                      from --patch-size / --patch-res / --patch-origin
+//                      (--tag picks which snapshot, default the latest).
+//                    - map.txt present -> a finished PATCH (mapgen/
+//                      patch_io.hpp's on-disk form). Loaded as a
+//                      mapgen::FilePatchSource; geometry (resolution,
+//                      world_size_m, origin_m) comes from the manifest, not
+//                      the CLI -- a directory is one patch, not a queryable
+//                      world.
+//                    - neither -> an error, not a guess.
+//   --synthetic    render a patch invented analytically
+//                  (mapgen/synthetic_patch_source.hpp) -- no files, no
+//                  upstream stage. Geometry comes from --patch-size /
+//                  --patch-res / --patch-origin.
+//   --test-map     skip the patch source entirely and render the synthetic
+//                  128 m forest map (game/map/forest_test_map_generator.hpp).
+//                  It exists to give the forest plopper a Biome::Forest to
+//                  plant into, which a fetched patch is not guaranteed to
+//                  have.
 //
 // Run from the repo root (shaders/ and assets/ resolve relative to cwd).
 //
-// Usage: badlands_mapview [--seed N] [--resolution WxH] [--size WxH] [--out DIR]
-//                         [--preview-image-only] [--load DIR]
+// Usage: badlands_mapview (--load DIR | --synthetic | --test-map)
+//                         [--tag NAME]
+//                         [--patch-size M] [--patch-res N]
+//                         [--patch-origin X,Y] [--seed N]
+//                         [--camera-height H] [--lod-tint N] [--serial-build]
 //                         [--screenshot out.png] [--record dir/]
 //
-//   --resolution WxH  map texels, square only: W must equal H (default 512x512)
-//   --size WxH        map extent in world METERS, square only: W must equal H
-//                     (default 512x512)
+//   --tag NAME         --load of a coarse world: which snapshot to read
+//                       (default: the latest step written).
+//   --patch-size M     patch extent in metres for --synthetic or a coarse
+//                       --load (default 128).
+//   --patch-res N      patch resolution in texels for --synthetic or a
+//                       coarse --load (default 128).
+//   --patch-origin X,Y patch origin in metres for --synthetic or a coarse
+//                       --load (default 0,0).
+//   --seed N          seeds foliage placement (and, with --test-map, the
+//                      synthetic forest layout) -- never terrain.
 //   --camera-height H starting camera height in metres (headless framing: a
 //                     small H for a near shot, a large one for a far shot).
 //   --lod-tint N      debug tint mode for cluster terrain: 0 shaded (default),
@@ -26,49 +51,31 @@
 //   --serial-build    build the cluster DAG single-threaded (default: parallel).
 //                     The output DAG is bit-identical either way; this is the
 //                     perf A/B baseline (build time shows in the stats log).
-//   --test-map        skip the generator and load the synthetic 128 m forest
-//                     map instead. It exists because classify_biomes emits no
-//                     Biome::Forest, so a GENERATED map has no forest for the
-//                     plopper to plant into and renders no trees at all.
-//                     --seed still applies (it varies the terrain and the
-//                     forest, not the forest's outline); --resolution/--size
-//                     are ignored, the map is always 128x128 m.
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
-#include <utility>
+
+#include <glm/glm.hpp>
 
 #include "engine/app/sdl_viewer_app.hpp"
-#include "mapgen/generator.hpp"
-#include "mapgen/map_io.hpp"
-#include "mapgen/outputs.hpp"
 #include "executables/mapview/map_view_view.hpp"
+#include "mapgen/coarse_world_patch_source.hpp"
+#include "mapgen/file_patch_source.hpp"
+#include "mapgen/synthetic_patch_source.hpp"
 
 namespace {
 
-using badlands::mapgen::MapGenParams;
-
-constexpr const char* kNonSquareMapError =
-    "mapview: non-square maps are not supported\n";
-
-// "WxH" -> the two values via `conv` (stoi for texels, stof for meters).
-template <typename T, typename Conv>
-std::optional<std::pair<T, T>> parse_wxh(const std::string& s, Conv conv) {
-  auto x = s.find('x');
-  if (x == std::string::npos) return std::nullopt;
-  try {
-    T w = conv(s.substr(0, x));
-    T h = conv(s.substr(x + 1));
-    if (w <= 0 || h <= 0) return std::nullopt;
-    return std::make_pair(w, h);
-  } catch (const std::exception&) {
-    return std::nullopt;
-  }
-}
+constexpr const char* kUsage =
+    "usage: badlands_mapview (--load DIR | --synthetic | --test-map) "
+    "[--tag NAME] "
+    "[--patch-size M] [--patch-res N] [--patch-origin X,Y] [--seed N] "
+    "[--camera-height H] [--lod-tint N] [--serial-build] "
+    "[--screenshot out.png] [--record dir/]\n";
 
 // Flags owned by the app layer (SdlViewerApp::Run parses these out of the raw
 // argv itself). We must skip them + their value rather than reject them as
@@ -77,43 +84,94 @@ bool is_app_flag_with_value(const std::string& a) {
   return a == "--screenshot" || a == "--record";
 }
 
-// Builds the map and dumps the rasters. Returns a process exit code.
-int RunPreviewOnly(const MapGenParams& params, const std::string& out_dir) {
-  std::error_code ec;
-  std::filesystem::create_directories(out_dir, ec);
-  if (ec) {
-    std::fprintf(stderr, "mapview: cannot create out dir '%s': %s\n",
-                 out_dir.c_str(), ec.message().c_str());
-    return 1;
+// THE single named selection boundary: exactly one PatchSource (or none, for
+// --test-map) and one PatchRequest, decided here and nowhere else -- main()
+// hands the result straight to MapViewView without ever inspecting which flag
+// won. Returns false (having already printed the reason to stderr) if --load
+// named a directory that failed to load, or that named neither kind of
+// manifest; true otherwise, including --test-map (where `source` stays null
+// and `request` stays default) and --synthetic.
+bool SelectPatchSource(
+    bool load, const std::string& load_dir, const std::string& tag,
+    bool synthetic, float patch_size_m, int patch_res,
+    glm::dvec2 patch_origin_m,
+    std::shared_ptr<const badlands::mapgen::PatchSource>& source,
+    badlands::mapgen::PatchRequest& request) {
+  if (load) {
+    // Which kind of directory this is gets DETECTED, not chosen: world.txt
+    // means a whole coarse world (any request inside its extent is
+    // answerable); map.txt means one finished patch (the manifest names its
+    // own geometry, full stop -- see mapgen/patch_io.hpp).
+    const bool has_world = std::filesystem::exists(load_dir + "/world.txt");
+    const bool has_patch = std::filesystem::exists(load_dir + "/map.txt");
+    if (has_world) {
+      std::string err;
+      std::unique_ptr<badlands::mapgen::CoarseWorldPatchSource> coarse_source =
+          badlands::mapgen::LoadCoarseWorldPatchSource(load_dir, tag, &err);
+      if (!coarse_source) {
+        std::fprintf(stderr, "mapview: %s\n", err.c_str());
+        return false;
+      }
+      const badlands::mapgen::CoarseManifest& man = coarse_source->manifest();
+      std::printf(
+          "mapview: loading coarse world %s (%dx%d texels, %.0f m, "
+          "%.2f m/texel)\n",
+          load_dir.c_str(), man.resolution, man.resolution, man.world_size_m,
+          man.texel_m);
+      request.world_size_m = patch_size_m;
+      request.resolution = patch_res;
+      request.origin_m = patch_origin_m;
+      source = std::move(coarse_source);
+    } else if (has_patch) {
+      std::string err;
+      std::unique_ptr<badlands::mapgen::FilePatchSource> file_source =
+          badlands::mapgen::LoadFilePatchSource(load_dir, &err);
+      if (!file_source) {
+        std::fprintf(stderr, "mapview: %s\n", err.c_str());
+        return false;
+      }
+      // A directory is a finished artifact, not a queryable world -- Fetch
+      // ignores the request and returns what the file holds, so the request
+      // we hand back out is the geometry the file actually has.
+      request = file_source->native_request();
+      std::printf("mapview: loading %s (%dx%d texels, %.0f m, %.2f m/texel)\n",
+                  load_dir.c_str(), request.resolution, request.resolution,
+                  request.world_size_m,
+                  badlands::mapgen::patch_texel_m(request));
+      if (!file_source->source().empty())
+        std::printf("mapview:   source: %s\n", file_source->source().c_str());
+      source = std::move(file_source);
+    } else {
+      std::fprintf(stderr,
+                   "mapview: %s has neither world.txt (a coarse world) nor "
+                   "map.txt (a patch)\n",
+                   load_dir.c_str());
+      return false;
+    }
+  } else if (synthetic) {
+    source = std::make_shared<badlands::mapgen::SyntheticPatchSource>();
+    request.world_size_m = patch_size_m;
+    request.resolution = patch_res;
+    request.origin_m = patch_origin_m;
   }
-  const float sim_texel_m =
-      params.world_size_m / static_cast<float>(params.erosion.sim_resolution);
-  const float out_texel_m =
-      params.world_size_m / static_cast<float>(params.resolution);
-  badlands::mapgen::PngDebugSink sink(out_dir, sim_texel_m, out_texel_m);
-  const badlands::mapgen::MapArtifacts artifacts =
-      badlands::mapgen::generate_map(params, &sink);
-  std::printf("mapview: %dx%d texels, %.0fx%.0f m, seed=%u -> %s\n",
-              params.resolution, params.resolution, params.world_size_m,
-              params.world_size_m, params.seed, out_dir.c_str());
-  badlands::mapgen::write_preview_images(
-      out_dir, artifacts,
-      params.world_size_m / static_cast<float>(params.resolution));
-  std::printf("mapview: done (%s)\n", out_dir.c_str());
-  return 0;
+  // else --test-map: source stays null, request stays default -- MapViewView
+  // never fetches from it.
+  return true;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  MapGenParams params;
-  std::string out_dir = "mapgen_out";
+  bool load = false, synthetic = false, test_map = false;
   std::string load_dir;
-  bool preview_only = false;
-  float camera_height = 0.0f;  // 0 = keep the default framing
-  int lod_tint = 0;            // 0 shaded / 1 triangle hash / 2 LOD level
-  bool serial_build = false;   // force single-threaded DAG build (perf A/B)
-  bool test_map = false;       // synthetic forest map instead of the generator
+  std::string tag;  // --load of a coarse world: which snapshot (default latest)
+  float patch_size_m = 128.0f;
+  int patch_res = 128;
+  double patch_origin_x = 0.0, patch_origin_y = 0.0;
+  uint32_t seed = 1;            // foliage placement, never terrain
+  float camera_height = 0.0f;   // 0 = keep the default framing
+  int lod_tint = 0;             // 0 shaded / 1 triangle hash / 2 LOD level
+  bool serial_build = false;    // force single-threaded DAG build (perf A/B)
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -137,50 +195,59 @@ int main(int argc, char** argv) {
         return false;
       }
     };
-    if (a == "--preview-image-only") {
-      preview_only = true;
-    } else if (a == "--serial-build") {
+    if (a == "--serial-build") {
       serial_build = true;
     } else if (a == "--test-map") {
       test_map = true;
+    } else if (a == "--synthetic") {
+      synthetic = true;
     } else if (a == "--seed") {
       if (!parse_num(
               "--seed", "a number",
               [](const std::string& s) { return static_cast<uint32_t>(std::stoul(s)); },
-              params.seed))
+              seed))
         return 2;
-    } else if (a == "--resolution") {
-      auto v = next("--resolution");
-      if (!v) return 2;
-      auto r = parse_wxh<int>(*v, [](const std::string& t) { return std::stoi(t); });
-      if (!r) {
-        std::fprintf(stderr, "mapview: bad --resolution '%s' (want WxH texels)\n",
-                     v->c_str());
-        return 2;
-      }
-      if (r->first != r->second) {
-        std::fprintf(stderr, "%s", kNonSquareMapError);
-        return 2;
-      }
-      params.resolution = r->first;
-    } else if (a == "--size") {
-      auto v = next("--size");
-      if (!v) return 2;
-      auto r = parse_wxh<float>(*v, [](const std::string& t) { return std::stof(t); });
-      if (!r) {
-        std::fprintf(stderr, "mapview: bad --size '%s' (want WxH meters)\n",
-                     v->c_str());
-        return 2;
-      }
-      if (r->first != r->second) {
-        std::fprintf(stderr, "%s", kNonSquareMapError);
-        return 2;
-      }
-      params.world_size_m = r->first;
     } else if (a == "--load") {
-      if (auto v = next("--load")) load_dir = *v; else return 2;
-    } else if (a == "--out") {
-      if (auto v = next("--out")) out_dir = *v; else return 2;
+      if (auto v = next("--load")) {
+        load = true;
+        load_dir = *v;
+      } else {
+        return 2;
+      }
+    } else if (a == "--tag") {
+      if (auto v = next("--tag")) {
+        tag = *v;
+      } else {
+        return 2;
+      }
+    } else if (a == "--patch-size") {
+      if (!parse_num(
+              "--patch-size", "metres",
+              [](const std::string& s) { return std::stof(s); }, patch_size_m))
+        return 2;
+    } else if (a == "--patch-res") {
+      if (!parse_num(
+              "--patch-res", "texels",
+              [](const std::string& s) { return std::stoi(s); }, patch_res))
+        return 2;
+    } else if (a == "--patch-origin") {
+      auto v = next("--patch-origin");
+      if (!v) return 2;
+      const size_t comma = v->find(',');
+      bool ok = comma != std::string::npos;
+      if (ok) {
+        try {
+          patch_origin_x = std::stod(v->substr(0, comma));
+          patch_origin_y = std::stod(v->substr(comma + 1));
+        } catch (const std::exception&) {
+          ok = false;
+        }
+      }
+      if (!ok) {
+        std::fprintf(stderr, "mapview: bad --patch-origin '%s' (want X,Y)\n",
+                     v->c_str());
+        return 2;
+      }
     } else if (a == "--camera-height") {
       if (!parse_num(
               "--camera-height", "metres",
@@ -204,54 +271,25 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (preview_only) {
-    // The preview dump renders the GENERATOR's debug rasters, and neither the
-    // loaded map nor the test map produces any. Combining the flags asks for
-    // something that does not exist, so say so rather than dumping a blank set.
-    if (!load_dir.empty() || test_map) {
-      std::fprintf(stderr,
-                   "mapview: --preview-image-only needs the generator; %s has no "
-                   "preview rasters\n",
-                   load_dir.empty() ? "--test-map" : "--load");
-      return 2;
-    }
-    return RunPreviewOnly(params, out_dir);
-  }
-
-  if (!load_dir.empty() && test_map) {
-    std::fprintf(stderr,
-                 "mapview: --load and --test-map are exclusive -- each names a "
-                 "different map\n");
+  const int mode_count = (load ? 1 : 0) + (synthetic ? 1 : 0) + (test_map ? 1 : 0);
+  if (mode_count != 1) {
+    std::fprintf(stderr, "%s", kUsage);
     return 2;
   }
 
-  // Read the manifest BEFORE constructing the view and write the geometry into
-  // `params`, so resolution/world_size_m have one source of truth and every
-  // existing params_ use inside MapViewView (splat texel size, camera framing)
-  // stays correct on the load path.
-  if (!load_dir.empty()) {
-    std::string err;
-    const auto man = badlands::mapgen::load_manifest(load_dir, &err);
-    if (!man) {
-      std::fprintf(stderr, "mapview: %s\n", err.c_str());
-      return 1;
-    }
-    params.resolution = man->resolution;
-    params.world_size_m = man->world_size_m;
-    std::printf("mapview: loading %s (%dx%d texels, %.0f m, %.2f m/texel)\n",
-                load_dir.c_str(), man->resolution, man->resolution,
-                man->world_size_m,
-                man->world_size_m / static_cast<float>(man->resolution));
-    if (!man->source.empty())
-      std::printf("mapview:   source: %s\n", man->source.c_str());
-  }
+  std::shared_ptr<const badlands::mapgen::PatchSource> source;
+  badlands::mapgen::PatchRequest request;
+  if (!SelectPatchSource(load, load_dir, tag, synthetic, patch_size_m, patch_res,
+                         glm::dvec2(patch_origin_x, patch_origin_y), source,
+                         request))
+    return 1;
 
   badlands::SdlViewerApp app({.window_title = "badlands_mapview"});
   return app.Run(argc, argv,
-                 [params, camera_height, lod_tint, serial_build,
-                  load_dir, test_map](const badlands::RenderContext&) {
+                 [request, source, seed, camera_height, lod_tint, serial_build,
+                  test_map](const badlands::RenderContext&) {
                    return std::make_unique<badlands::MapViewView>(
-                       params, camera_height, lod_tint, serial_build, load_dir,
-                       test_map);
+                       request, source, seed, camera_height, lod_tint,
+                       serial_build, test_map);
                  });
 }

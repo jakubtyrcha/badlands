@@ -4,7 +4,6 @@
 #include <cassert>
 #include <chrono>
 #include <limits>
-#include <optional>
 #include <cmath>
 #include <string>
 #include <string_view>
@@ -35,23 +34,13 @@
 #include "mapgen/biomes.hpp"
 #include "mapview/biome_manifest.hpp"
 #include "mapview/biome_splat.hpp"
-#include "mapgen/map_io.hpp"
 #include "mapgen/river_arcs.hpp"
-#include "mapgen/window_rivers.hpp"
 #include "mapview/lake_surface.hpp"
 #include "mapview/river_surface.hpp"
 
 namespace badlands {
 
 namespace {
-
-// Narrowest channel that counts as a river. Below this the network is a haze of
-// hairlines that tells you nothing; w = k_w*sqrt(Q) makes this Q >= 0.0036 m3/s.
-constexpr float kMinRiverWidthM = 0.3f;
-
-// Shortest headwater branch worth drawing. Leaf-only, so the network cannot be
-// severed; applied repeatedly, since removing one leaf exposes the next.
-constexpr float kMinRiverBranchM = 32.0f;
 
 // How far a fitted arc may stray from the reach polyline, in TEXELS. Half a
 // texel: the polyline itself came out of a Douglas-Peucker pass at ~1 texel, so
@@ -75,8 +64,8 @@ constexpr uint8_t kRiverDetailExponent = 3;
 // WeightsAtNode(i,j).Dominant() == the single biome and the cluster terrain's
 // per-vertex color is the crisp per-texel biome. Blended slices are the game's
 // symbolic generator's business.
-MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, glm::vec2 size_m) {
-  const int sw = art.bedrock.width, sh = art.bedrock.height;
+MapData MakeOneHotMapData(const mapgen::PatchData& patch, glm::vec2 size_m) {
+  const int sw = patch.height.width, sh = patch.height.height;
   if (sw <= 0 || sh <= 0) return {};
   const float tx = size_m.x / static_cast<float>(sw);
   const float ty = size_m.y / static_cast<float>(sh);
@@ -91,8 +80,8 @@ MapData MakeOneHotMapData(const mapgen::MapArtifacts& art, glm::vec2 size_m) {
   for (int j = 0; j <= sh; ++j) {
     for (int i = 0; i <= sw; ++i) {
       const int sx = std::min(i, sw - 1), sz = std::min(j, sh - 1);
-      map.mutable_height(i, j) = art.heightmap.at(sx, sz);
-      map.mutable_slice(art.biome.at(sx, sz), i, j) = 255;
+      map.mutable_height(i, j) = patch.height.at(sx, sz);
+      map.mutable_slice(patch.biome.at(sx, sz), i, j) = 255;
     }
   }
   return map;
@@ -126,7 +115,7 @@ void MapViewView::BuildRiverMesh() {
   // The SAME analytic field the terrain was tessellated from, so the surface
   // and the bed under it can never disagree.
   const std::vector<glm::vec3> tris = BuildRiverWaterTriangles(
-      map_, map_size_m_, rivers_.graph, river_arcs_,
+      patch_.height.width, map_size_m_, patch_.rivers, river_arcs_,
       [carve = river_carve_.get()](float wx, float wz) {
         return carve->HeightAt(wx, wz);
       });
@@ -187,8 +176,8 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     cum_ms += ms;
     spdlog::info("  {:<14} {:>8.1f} ms   (cum {:>8.1f} ms)", name, ms, cum_ms);
   };
-  spdlog::info("map load profile (seed {}, {}x{} texels):", params_.seed,
-               params_.resolution, params_.resolution);
+  spdlog::info("map load profile (seed {}, {}x{} texels):", foliage_seed_,
+               request_.resolution, request_.resolution);
 
   auto t = clock::now();
   // Start at noon, paused (an inspector holds still until you play/scrub).
@@ -198,79 +187,58 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   scene_context_.registry = &registry_;
   log_step("daylight", since(t));
 
-  // THREE map sources, mutually exclusive (main_mapview rejects combinations).
+  // TWO map sources, mutually exclusive (main_mapview rejects combinations,
+  // and requires one).
   t = clock::now();
   if (test_map_) {
-    // --test-map: the synthetic forest map instead of the generator. The
-    // generator's classify_biomes emits only Plains/Hills/Mountain, so a
-    // procedural map has zero Biome::Forest coverage and the forest plopper
-    // has nothing to plant into; this map exists to give it one.
+    // --test-map: the synthetic forest map instead of fetching from `source_`.
+    // A fetched patch is not guaranteed to carry Biome::Forest coverage, so
+    // the forest plopper may have nothing to plant into; this map exists to
+    // give it one.
     map_size_m_ = ForestTestMapGenerator::kMapSizeM;
-    params_.world_size_m = map_size_m_;
-    terrain_map_ = ForestTestMapGenerator(params_.seed).Generate();
+    request_.world_size_m = map_size_m_;
+    terrain_map_ = ForestTestMapGenerator(foliage_seed_).Generate();
     // The splat builder wants a HARD per-texel biome raster (it derives its own
     // blend from it), so hand it the argmax of the soft slices. The 3 m blur it
     // applies re-softens the boundary for the terrain material.
-    map_.biome = mapgen::Field2D<uint8_t>(terrain_map_.nodes_x(),
-                                          terrain_map_.nodes_z(), 0);
+    patch_.biome = mapgen::Field2D<uint8_t>(terrain_map_.nodes_x(),
+                                            terrain_map_.nodes_z(), 0);
     for (int j = 0; j < terrain_map_.nodes_z(); ++j) {
       for (int i = 0; i < terrain_map_.nodes_x(); ++i) {
-        map_.biome.at(i, j) =
+        patch_.biome.at(i, j) =
             static_cast<uint8_t>(terrain_map_.WeightsAtNode(i, j).Dominant());
       }
     }
     log_step("test map", since(t));
-  } else if (!load_dir_.empty()) {
-    // --load: rasters on disk. A LOADED map is by definition simulated
-    // elsewhere, so the generator's "terrain and preview PNGs can never
-    // disagree" guarantee does not apply to it.
-    std::string err;
-    std::optional<mapgen::MapArtifacts> loaded = mapgen::load_map(load_dir_, &err);
-    if (!loaded) {
-      spdlog::error("MapViewView: {}", err);
+  } else {
+    // `source_->Fetch` is the ONLY seam: a patch cut from a simulated world, a
+    // patch read off disk, or one invented analytically by a test all arrive
+    // here identically -- see mapgen/patch_source.hpp.
+    patch_ = source_->Fetch(request_);
+    if (mapgen::empty(patch_)) {
+      spdlog::error("MapViewView: source returned an empty patch for the request");
       return false;
     }
-    map_ = std::move(*loaded);
-    map_size_m_ = params_.world_size_m;
-    log_step("mg:load", since(t));
-  } else {
-    // Build the map in-process — the same generator --preview-image-only dumps,
-    // so the rendered terrain and the preview PNGs can never disagree.
-    map_ = mapgen::generate_map(params_);
-    map_size_m_ = params_.world_size_m;
-    log_step("mg:generate", since(t));
+    map_size_m_ = request_.world_size_m;
+    log_step("mg:fetch", since(t));
   }
 
-
-  // River network. Only a LOADED map carries the boundary inflows a windowed
-  // cutout needs; a generated map already owns its whole catchment and has its
-  // own river graph, so this is deliberately load-path only.
-  if (!load_dir_.empty()) {
+  // River network, carried by the patch (PatchData::rivers). A test map has
+  // no river graph of its own, so this is deliberately gated on there being
+  // one to fit.
+  if (!patch_.rivers.edges.empty()) {
     t = clock::now();
-    float runoff_m_per_yr = 1.0f;
-    const std::vector<mapgen::RiverInflow> inflows =
-        mapgen::load_inflows(load_dir_, &runoff_m_per_yr);
-    mapgen::ErosionParams rp;
-    rp.runoff_m_per_s = runoff_m_per_yr / 31557600.0f;
-    // Brooks are cut from the graph, not hidden at draw time: everything
-    // downstream should see the same network. w = k_w*sqrt(Q) with k_w = 5, so
-    // 0.5 m is Q >= 0.01 m3/s.
-    rivers_ = mapgen::build_window_rivers(map_, params_.world_size_m, inflows, rp,
-                                          kMinRiverWidthM, kMinRiverBranchM);
     const float texel_m =
-        params_.world_size_m / static_cast<float>(std::max(1, map_.heightmap.width));
+        request_.world_size_m / static_cast<float>(std::max(1, patch_.height.width));
     river_arcs_ = mapgen::build_river_arcs(
-        rivers_.graph, kRiverArcToleranceTexels * texel_m);
+        patch_.rivers, kRiverArcToleranceTexels * texel_m);
     log_step("rivers", since(t));
     float q_max = 0.0f;
-    for (const mapgen::RiverEdge& e : rivers_.graph.edges)
+    for (const mapgen::RiverEdge& e : patch_.rivers.edges)
       for (float q : e.discharge_m3_s) q_max = std::max(q_max, q);
     spdlog::info(
-        "rivers: {} nodes, {} reaches | inflow {:.4f} + rain {:.4f} "
-        "= {:.4f} m3/s | peak Q {:.4f} m3/s",
-        rivers_.graph.nodes.size(), rivers_.graph.edges.size(),
-        rivers_.inflow_m3_s, rivers_.rain_m3_s,
-        rivers_.inflow_m3_s + rivers_.rain_m3_s, q_max);
+        "rivers: {} nodes, {} reaches | peak Q {:.4f} m3/s",
+        patch_.rivers.nodes.size(), patch_.rivers.edges.size(), q_max);
 
     // The arc fit, reported as what it buys and what it costs.
     //
@@ -283,7 +251,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     float min_r = std::numeric_limits<float>::infinity();
     float arc_len = 0.0f, worst_fit = 0.0f;
     for (const mapgen::RiverArcChain& c : river_arcs_) {
-      const mapgen::RiverEdge& e = rivers_.graph.edges[c.edge];
+      const mapgen::RiverEdge& e = patch_.rivers.edges[c.edge];
       arcs += c.arcs.size();
       arc_len += c.length_m;
       pts += e.points_m.size();
@@ -330,8 +298,8 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     // it again on every toggle.
     t = clock::now();
     river_carve_ = std::make_unique<mapgen::RiverCarve>(
-        mapgen::build_river_carve(rivers_.graph, river_arcs_, map_.heightmap,
-                                  params_.world_size_m));
+        mapgen::build_river_carve(patch_.rivers, river_arcs_, patch_.height,
+                                  request_.world_size_m));
     // Mask texels and quads are DIFFERENT SQUARES, so this is a dilation, not
     // a copy. Mask texel (i, j) is CENTRED on node (i, j) -- RiverCarve::
     // HeightAt indexes it as floor(w/texel + 0.5) -- while quad (i, j) spans
@@ -383,7 +351,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
         100.0 * static_cast<double>(refined_quads) /
             static_cast<double>(mask_texels),
         static_cast<int>(kRiverDetailExponent),
-        (params_.world_size_m / static_cast<float>(std::max(1, map_.heightmap.width))) /
+        (request_.world_size_m / static_cast<float>(std::max(1, patch_.height.width))) /
             static_cast<float>(1 << kRiverDetailExponent));
   }
 
@@ -392,18 +360,18 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // the generator actually produces is a load-bearing input, not trivia.
   if (!test_map_) {
     std::vector<float> depths;
-    depths.reserve(map_.lakes.size());
-    for (const mapgen::LakeInfo& l : map_.lakes) depths.push_back(l.max_depth_m);
+    depths.reserve(patch_.lakes.size());
+    for (const mapgen::LakeInfo& l : patch_.lakes) depths.push_back(l.max_depth_m);
     std::sort(depths.begin(), depths.end());
     int wet = 0;
-    for (float d : map_.water_depth.data) {
+    for (float d : patch_.water_depth.data) {
       if (d > 0.0f) ++wet;
     }
     const float wet_frac =
-        map_.water_depth.data.empty()
+        patch_.water_depth.data.empty()
             ? 0.0f
             : static_cast<float>(wet) /
-                  static_cast<float>(map_.water_depth.data.size());
+                  static_cast<float>(patch_.water_depth.data.size());
     if (depths.empty()) {
       spdlog::info("lakes: none (wet {:.2f}%)", 100.0f * wet_frac);
     } else {
@@ -422,7 +390,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // density; LOD selection manages the triangle cost.
   if (!test_map_) {
     t = clock::now();
-    terrain_map_ = MakeOneHotMapData(map_, glm::vec2(params_.world_size_m));
+    terrain_map_ = MakeOneHotMapData(patch_, glm::vec2(request_.world_size_m));
     log_step("map->MapData", since(t));
   }
 
@@ -432,8 +400,18 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // own camera (game_view.cpp: pitch 50, height 42) rather than a bird's-eye
   // view. Scroll to zoom out; max_height reaches far enough to take in the whole
   // map.
-  const float map_depth_m = params_.world_size_m;
-  gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, 0.0f, map_depth_m * 0.5f);
+  //
+  // focus.y is the midpoint of the patch's elevation range, not a flat 0: at a
+  // fixed pitch the view ray crosses the terrain band at a constant multiple of
+  // the elevation away from the focus, so a patch sitting well above sea level
+  // (a real protogen world does) needs its own elevation to be framed at all --
+  // see PatchData::elevation_range (mapgen/patch_data.hpp). The test map sits
+  // near zero, where 0 already works.
+  const float map_depth_m = request_.world_size_m;
+  const float focus_y_m =
+      test_map_ ? 0.0f
+               : 0.5f * (patch_.elevation_range.min_m + patch_.elevation_range.max_m);
+  gamecam_.focus = glm::vec3(map_size_m_ * 0.5f, focus_y_m, map_depth_m * 0.5f);
   gamecam_.pitch_deg = 50.0f;
   gamecam_.height = 42.0f;
   gamecam_.min_height = 5.0f;
@@ -470,15 +448,15 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // fragment stage rather than carried on the vertices, so the coarsest LOD
   // cluster still gets full-resolution biome detail.
   t = clock::now();
-  // Texel size comes from the biome raster's OWN width, not params_.resolution:
+  // Texel size comes from the biome raster's OWN width, not request_.resolution:
   // the blur radius and the world->UV transform below must be derived from the
-  // same source, or they would disagree silently if the generator ever emitted
+  // same source, or they would disagree silently if the source ever emitted
   // the biome raster at a different resolution than requested.
   const float splat_texel_m =
-      map_.biome.width > 0
-          ? params_.world_size_m / static_cast<float>(map_.biome.width)
+      patch_.biome.width > 0
+          ? request_.world_size_m / static_cast<float>(patch_.biome.width)
           : 0.0f;
-  const BiomeSplat splat = BuildBiomeSplat(map_.biome, splat_texel_m);
+  const BiomeSplat splat = BuildBiomeSplat(patch_.biome, splat_texel_m);
   if (splat.empty()) {
     spdlog::error("MapViewView: empty biome splat");
     return false;
@@ -508,7 +486,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   splat_sampler_ = device_.CreateSampler(&splat_sd);
   // world XZ in [0, size] -> texel CENTRES in [0.5/N, 1 - 0.5/N].
   const float inv_n = 1.0f / static_cast<float>(splat.width);
-  const float splat_scale = (1.0f - inv_n) / params_.world_size_m;
+  const float splat_scale = (1.0f - inv_n) / request_.world_size_m;
   const glm::vec4 splat_uv(splat_scale, splat_scale, 0.5f * inv_n, 0.5f * inv_n);
   log_step("biome splat", since(t));
 
@@ -562,10 +540,10 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   // The test map has no lakes at all (its water level sits below the lowest
   // ground), so BuildLakeSurfaceTriangles has nothing to read -- skip it rather
-  // than hand it the empty artifacts left over from the skipped generator run.
+  // than hand it the empty patch left over from the skipped fetch.
   const std::vector<glm::vec3> water_tris =
       test_map_ ? std::vector<glm::vec3>{}
-                : BuildLakeSurfaceTriangles(map_, params_.world_size_m);
+                : BuildLakeSurfaceTriangles(patch_, request_.world_size_m);
   if (!water_tris.empty()) {
     std::vector<float> v;
     v.reserve(water_tris.size() * kTexturedMeshFloatsPerVertex);
@@ -599,7 +577,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     registry_.emplace<ForwardTransparentRenderable>(e);
   }
   spdlog::info("water: {} triangles over {} lakes", water_tris.size() / 3,
-               map_.lakes.size());
+               patch_.lakes.size());
   log_step("water", since(t));
 
   // The channel water. AFTER the lake water because it shares its factory, and
@@ -626,7 +604,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
 
   const MapDataTerrainQuery forest_query(terrain_map_, mapgen::Biome::Forest);
   foliage::FoliageGenParams foliage_params;
-  foliage_params.seed = params_.seed;
+  foliage_params.seed = foliage_seed_;
   foliage_params.origin_m = glm::vec2(0.0f);
   foliage_params.size_m = glm::vec2(terrain_map_.size_x_m(),
                                     terrain_map_.size_z_m());
@@ -670,7 +648,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   log_step("forest build", since(t));
 
   spdlog::info("map load: {:.1f} ms total  ({}x{} texels)", since(t_load),
-               params_.resolution, params_.resolution);
+               request_.resolution, request_.resolution);
 
   return true;
 }
@@ -750,18 +728,16 @@ void MapViewView::Update(float dt, const bool* keyboard_state) {
 void MapViewView::DrawUI() {
   if (ImGui::GetCurrentContext() == nullptr) return;
   ImGui::Begin("Map");
-  ImGui::Text("seed %u  %dx%d texels  %.0fx%.0f m", params_.seed,
-              params_.resolution, params_.resolution, params_.world_size_m,
-              params_.world_size_m);
+  ImGui::Text("seed %u  %dx%d texels  %.0fx%.0f m", foliage_seed_,
+              request_.resolution, request_.resolution, request_.world_size_m,
+              request_.world_size_m);
   cluster_terrain_.DrawDebugUI();
-  if (!rivers_.graph.edges.empty()) {
+  if (!patch_.rivers.edges.empty()) {
     if (ImGui::Checkbox("river water", &show_rivers_)) BuildRiverMesh();
     size_t arcs = 0;
     for (const mapgen::RiverArcChain& c : river_arcs_) arcs += c.arcs.size();
     ImGui::Text("  %zu reaches, %zu chains, %zu arcs",
-                rivers_.graph.edges.size(), river_arcs_.size(), arcs);
-    ImGui::Text("  inflow %.4f + rain %.4f m3/s", rivers_.inflow_m3_s,
-                rivers_.rain_m3_s);
+                patch_.rivers.edges.size(), river_arcs_.size(), arcs);
   }
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {

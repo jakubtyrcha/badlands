@@ -12,8 +12,10 @@
 #include <vector>
 
 #include "mapgen/biomes.hpp"
-#include "mapgen/map_io.hpp"
-#include "mapgen/window_rivers.hpp"
+#include "mapgen/patch_io.hpp"
+#include "mapgen/river_clip.hpp"
+#include "mapgen/river_io.hpp"
+#include "mapgen/river_prune.hpp"
 
 using namespace badlands::mapgen;
 
@@ -151,7 +153,7 @@ TEST_CASE("a lake surface loads exactly flat", "[map_io]") {
       CHECK(h.at(x, y) + depth.at(x, y) == 290.0f);
 }
 
-TEST_CASE("load_map round-trips a written directory", "[map_io]") {
+TEST_CASE("load_patch round-trips a written directory", "[map_io]") {
   TempDir dir("roundtrip");
   const int n = 8;
   const float size_m = 64.0f;
@@ -167,20 +169,18 @@ TEST_CASE("load_map round-trips a written directory", "[map_io]") {
   write_map(dir.str(), n, size_m, height, level, biome);
 
   std::string err;
-  const auto art = load_map(dir.str(), &err);
-  REQUIRE(art.has_value());
+  const auto p = load_patch(dir.str(), &err);
+  REQUIRE(p.has_value());
   CHECK(err.empty());
-  CHECK(art->heightmap.width == n);
-  CHECK(art->heightmap.height == n);
-  CHECK(art->heightmap.data == height);
-  CHECK(art->biome.data == biome);
-  // bedrock is set to the heightmap: mapview reads it only for dimensions.
-  CHECK(art->bedrock.width == n);
-  REQUIRE(art->lakes.size() == 1);
-  CHECK(art->lakes[0].max_depth_m == 10.0f);
-  CHECK(art->water_depth.data[20] == 10.0f);
-  CHECK(art->lake_id.data[20] == 0);
-  CHECK(art->lake_id.data[0] == -1);
+  CHECK(p->height.width == n);
+  CHECK(p->height.height == n);
+  CHECK(p->height.data == height);
+  CHECK(p->biome.data == biome);
+  REQUIRE(p->lakes.size() == 1);
+  CHECK(p->lakes[0].max_depth_m == 10.0f);
+  CHECK(p->water_depth.data[20] == 10.0f);
+  CHECK(p->lake_id.data[20] == 0);
+  CHECK(p->lake_id.data[0] == -1);
 }
 
 TEST_CASE("a raster whose size contradicts the manifest is rejected",
@@ -195,7 +195,7 @@ TEST_CASE("a raster whose size contradicts the manifest is rejected",
   write_manifest(dir.str(), 16, 64.0f);  // claims 16x16, files hold 8x8
 
   std::string err;
-  const auto art = load_map(dir.str(), &err);
+  const auto art = load_patch(dir.str(), &err);
   CHECK_FALSE(art.has_value());
   CHECK_THAT(err, Catch::Matchers::ContainsSubstring("expected"));
 }
@@ -211,7 +211,7 @@ TEST_CASE("an out-of-range biome is rejected", "[map_io]") {
   write_map(dir.str(), n, 16.0f, height, level, biome);
 
   std::string err;
-  CHECK_FALSE(load_map(dir.str(), &err).has_value());
+  CHECK_FALSE(load_patch(dir.str(), &err).has_value());
   CHECK_THAT(err, Catch::Matchers::ContainsSubstring("biome.u8"));
 }
 
@@ -219,12 +219,12 @@ TEST_CASE("a missing or malformed manifest is reported, not guessed",
           "[map_io]") {
   TempDir dir("nomanifest");
   std::string err;
-  CHECK_FALSE(load_manifest(dir.str(), &err).has_value());
+  CHECK_FALSE(load_patch_manifest(dir.str(), &err).has_value());
   CHECK_FALSE(err.empty());
 
   std::ofstream(dir.str() + "/map.txt") << "world_size_m 64\n";  // no resolution
   err.clear();
-  CHECK_FALSE(load_manifest(dir.str(), &err).has_value());
+  CHECK_FALSE(load_patch_manifest(dir.str(), &err).has_value());
   CHECK_THAT(err, Catch::Matchers::ContainsSubstring("resolution"));
 }
 
@@ -235,11 +235,173 @@ TEST_CASE("unknown manifest keys are ignored so the writer can add fields",
       << "# a comment\nresolution 4\nworld_size_m 32\nsource protogen tag=x\n"
          "future_key 1234\n";
   std::string err;
-  const auto man = load_manifest(dir.str(), &err);
+  const auto man = load_patch_manifest(dir.str(), &err);
   REQUIRE(man.has_value());
   CHECK(man->resolution == 4);
   CHECK(man->world_size_m == 32.0f);
   CHECK(man->source == "protogen tag=x");
+}
+
+TEST_CASE("write_patch + load_patch round-trips a PatchData bit-identically",
+          "[map_io]") {
+  // Unlike the raster round-trip above, this goes through write_patch itself
+  // -- the path a real provider uses -- rather than hand-written rasters.
+  TempDir dir("write_roundtrip");
+  const int n = 6;
+  const float size_m = 48.0f;
+
+  PatchData p;
+  p.texel_m = size_m / static_cast<float>(n);
+  p.origin_m = glm::dvec2(100.0, -50.0);
+  p.height = Field2D<float>(n, n);
+  p.level = Field2D<float>(n, n);
+  p.biome = Field2D<uint8_t>(n, n, uint8_t(Biome::Plains));
+  p.soil = Field2D<float>(n, n);
+  for (int i = 0; i < n * n; ++i) {
+    p.height.data[i] = 100.0f + 0.5f * static_cast<float>(i);
+    p.level.data[i] = p.height.data[i];  // dry by default
+    p.soil.data[i] = 0.1f * static_cast<float>(i);
+  }
+  p.level.data[7] = p.height.data[7] + 3.0f;  // one wet texel, 3 m deep
+  p.biome.data[7] = uint8_t(Biome::Lake);
+  derive_water(p.height, p.level, p.texel_m, p.water_depth, p.lake_id, p.lakes);
+
+  std::string err;
+  REQUIRE(write_patch(dir.str(), p, "unit-test", &err));
+  CHECK(err.empty());
+
+  const auto loaded = load_patch(dir.str(), &err);
+  REQUIRE(loaded.has_value());
+  CHECK(err.empty());
+  CHECK(loaded->height.data == p.height.data);
+  CHECK(loaded->level.data == p.level.data);
+  CHECK(loaded->biome.data == p.biome.data);
+  CHECK(loaded->soil.data == p.soil.data);
+  // The derived water block is not written -- load_patch reproduces it from
+  // height + level, so it must match what the same derivation gave `p`.
+  CHECK(loaded->water_depth.data == p.water_depth.data);
+  CHECK(loaded->lake_id.data == p.lake_id.data);
+  REQUIRE(loaded->lakes.size() == p.lakes.size());
+  for (size_t i = 0; i < p.lakes.size(); ++i) {
+    CHECK(loaded->lakes[i].level_m == p.lakes[i].level_m);
+    CHECK(loaded->lakes[i].max_depth_m == p.lakes[i].max_depth_m);
+  }
+  // `rivers` stays default-empty on both sides here; the dedicated rivers
+  // round-trip test below exercises a non-empty graph through this same path.
+  CHECK(loaded->rivers.nodes.empty());
+  CHECK(loaded->rivers.edges.empty());
+}
+
+TEST_CASE("soil absent on disk loads as zeros, correctly sized",
+          "[map_io]") {
+  // SOIL IS REQUIRED BY THE CONTRACT BUT OPTIONAL ON DISK (patch_io.hpp): a
+  // directory written before the two-layer substrate has no soil.f32 at all,
+  // and must still load with PatchData::soil present and zeroed rather than
+  // failing or leaving it empty.
+  TempDir dir("nosoil");
+  const int n = 5;
+  std::vector<float> height(n * n, 10.0f), level(n * n, 10.0f);
+  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
+  write_map(dir.str(), n, 40.0f, height, level, biome);  // no soil.f32 written
+
+  std::string err;
+  const auto p = load_patch(dir.str(), &err);
+  REQUIRE(p.has_value());
+  CHECK(err.empty());
+  CHECK(p->soil.width == n);
+  CHECK(p->soil.height == n);
+  for (float s : p->soil.data) CHECK(s == 0.0f);
+}
+
+TEST_CASE("write_patch + load_patch round-trips rivers exactly", "[map_io]") {
+  // Unlike river_io_tests.cpp's direct write_river_graph/read_river_graph
+  // round trip, this goes through the PATCH form -- rivers.bin sitting
+  // alongside the other rasters in the same directory write_patch produces.
+  TempDir dir("rivers_roundtrip");
+  const int n = 6;
+  const float size_m = 48.0f;
+
+  PatchData p;
+  p.texel_m = size_m / static_cast<float>(n);
+  p.height = Field2D<float>(n, n, 100.0f);
+  p.level = Field2D<float>(n, n, 100.0f);
+  p.biome = Field2D<uint8_t>(n, n, uint8_t(Biome::Plains));
+  p.soil = Field2D<float>(n, n, 1.0f);
+  derive_water(p.height, p.level, p.texel_m, p.water_depth, p.lake_id, p.lakes);
+
+  // A small graph with a Source and a FrameEntry -- the node kind most likely
+  // to be dropped by a lossy path, since it was appended last to the enum.
+  p.rivers.nodes.resize(3);
+  p.rivers.nodes[0].kind = RiverNodeKind::FrameEntry;
+  p.rivers.nodes[0].pos_m = glm::vec2(-2.0f, 20.0f);
+  p.rivers.nodes[1].kind = RiverNodeKind::Confluence;
+  p.rivers.nodes[1].pos_m = glm::vec2(10.0f, 20.0f);
+  p.rivers.nodes[1].ground_m = 95.0f;
+  p.rivers.nodes[2].kind = RiverNodeKind::Mouth;
+  p.rivers.nodes[2].pos_m = glm::vec2(40.0f, 20.0f);
+
+  RiverEdge e0;
+  e0.from = 0;
+  e0.to = 1;
+  e0.points_m = {{-2.0f, 20.0f}, {10.0f, 20.0f}};
+  e0.discharge_m3_s = {0.05f, 0.08f};
+  e0.width_m = {1.0f, 1.3f};
+  e0.depth_m = {0.2f, 0.25f};
+  e0.speed_m_s = {0.6f, 0.65f};
+  e0.strahler_order = 1;
+  e0.shreve_magnitude = 1;
+
+  RiverEdge e1;
+  e1.from = 1;
+  e1.to = 2;
+  e1.points_m = {{10.0f, 20.0f}, {40.0f, 20.0f}};
+  e1.discharge_m3_s = {0.08f, 0.10f};
+  e1.width_m = {1.3f, 1.5f};
+  e1.depth_m = {0.25f, 0.3f};
+  e1.speed_m_s = {0.65f, 0.7f};
+  e1.strahler_order = 1;
+  e1.shreve_magnitude = 1;
+  p.rivers.edges = {e0, e1};
+
+  std::string err;
+  REQUIRE(write_patch(dir.str(), p, "unit-test", &err));
+  CHECK(err.empty());
+  CHECK(std::filesystem::exists(dir.str() + "/rivers.bin"));
+
+  const auto loaded = load_patch(dir.str(), &err);
+  REQUIRE(loaded.has_value());
+  CHECK(err.empty());
+
+  REQUIRE(loaded->rivers.nodes.size() == p.rivers.nodes.size());
+  REQUIRE(loaded->rivers.edges.size() == p.rivers.edges.size());
+  for (size_t i = 0; i < p.rivers.nodes.size(); ++i) {
+    CHECK(loaded->rivers.nodes[i].kind == p.rivers.nodes[i].kind);
+    CHECK(loaded->rivers.nodes[i].pos_m == p.rivers.nodes[i].pos_m);
+  }
+  for (size_t i = 0; i < p.rivers.edges.size(); ++i) {
+    CHECK(loaded->rivers.edges[i].from == p.rivers.edges[i].from);
+    CHECK(loaded->rivers.edges[i].to == p.rivers.edges[i].to);
+    CHECK(loaded->rivers.edges[i].points_m == p.rivers.edges[i].points_m);
+  }
+}
+
+TEST_CASE("rivers.bin absent on disk loads as an empty graph", "[map_io]") {
+  // RIVERS ARE OPTIONAL ON DISK, THE SAME WAY SOIL IS (patch_io.hpp): a patch
+  // directory written before rivers.bin existed must still load, with
+  // PatchData::rivers empty rather than failing.
+  TempDir dir("norivers");
+  const int n = 5;
+  std::vector<float> height(n * n, 10.0f), level(n * n, 10.0f);
+  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
+  write_map(dir.str(), n, 40.0f, height, level, biome);  // no rivers.bin written
+  CHECK_FALSE(std::filesystem::exists(dir.str() + "/rivers.bin"));
+
+  std::string err;
+  const auto p = load_patch(dir.str(), &err);
+  REQUIRE(p.has_value());
+  CHECK(err.empty());
+  CHECK(p->rivers.nodes.empty());
+  CHECK(p->rivers.edges.empty());
 }
 
 // --- window_rivers graph surgery ------------------------------------------
@@ -270,7 +432,7 @@ TEST_CASE("clipping preserves geometry-less through-lake edges", "[window_rivers
   below.speed_m_s = {1.0f, 1.0f};
   g.edges = {through, below};
 
-  clip_river_graph_to_window(g, 100.0f);
+  clip_river_graph_to_rect(g, glm::vec2(0.0f, 0.0f), glm::vec2(100.0f, 100.0f));
   CHECK(g.edges.size() == 2);
   prune_river_graph_by_width(g, 0.5f);
   CHECK(g.edges.size() == 2);
@@ -299,7 +461,7 @@ TEST_CASE("every clipped reach is anchored at both ends", "[window_rivers]") {
   e.speed_m_s = {1.0f, 1.0f, 1.0f, 1.0f};
   g.edges = {e};
 
-  clip_river_graph_to_window(g, 100.0f);
+  clip_river_graph_to_rect(g, glm::vec2(0.0f, 0.0f), glm::vec2(100.0f, 100.0f));
   REQUIRE(!g.edges.empty());
   for (const RiverEdge& r : g.edges) {
     CHECK(r.from >= 0);
@@ -326,7 +488,7 @@ TEST_CASE("a reach entering the window gets a frame node too", "[window_rivers]"
   e.speed_m_s = {1.0f, 1.0f, 1.0f, 1.0f};
   g.edges = {e};
 
-  clip_river_graph_to_window(g, 100.0f);
+  clip_river_graph_to_rect(g, glm::vec2(0.0f, 0.0f), glm::vec2(100.0f, 100.0f));
   REQUIRE(g.edges.size() == 1);
   // The first point is ON the frame (x == 0), not at the first inside sample.
   CHECK(g.edges[0].points_m.front().x == Catch::Approx(0.0f).margin(1e-3));
@@ -361,4 +523,43 @@ TEST_CASE("length pruning never severs the network", "[window_rivers]") {
   }
   CHECK(interior);
   CHECK_FALSE(stub);
+}
+
+TEST_CASE("write_patch + load_patch round-trips AWKWARD geometry exactly",
+          "[map_io]") {
+  // THE MANIFEST IS THE LAYER BOUNDARY, not a human-readable summary. Every
+  // world-metre coordinate a patch carries follows from
+  // texel_m = world_size_m / resolution, so a decimal truncated on the way out
+  // does not produce a cosmetically-imperfect file -- it moves the geometry.
+  //
+  // The stream default is 6 SIGNIFICANT digits, which was harmless while every
+  // patch had a round extent. CoarseWorldPatchSource can cut at any origin and
+  // any extent, so this pins the round trip on values that expose the loss:
+  // 1234.5678 m would have reloaded as 1234.57 m, and an origin 11840.5 m out
+  // in a 16 km world needs double's 17 digits, not float's 9.
+  TempDir dir("awkward_geometry");
+
+  const int n = 8;
+  PatchData p;
+  p.texel_m = 1234.5678f / static_cast<float>(n);
+  p.origin_m = glm::dvec2(11840.546875, 11776.328125);
+  p.height = Field2D<float>(n, n, 100.0f);
+  p.level = p.height;
+  p.biome = Field2D<uint8_t>(n, n, static_cast<uint8_t>(Biome::Plains));
+  p.soil = Field2D<float>(n, n, 2.0f);
+
+  std::string err;
+  REQUIRE(write_patch(dir.str(), p, "unit-test", &err));
+
+  const auto man = load_patch_manifest(dir.str(), &err);
+  REQUIRE(man);
+  // BIT-equal, not approximately: the assertion is round-trip fidelity of
+  // whatever was written, which is what downstream arithmetic depends on.
+  REQUIRE(man->world_size_m == p.texel_m * static_cast<float>(n));
+  REQUIRE(man->origin_m.x == p.origin_m.x);
+  REQUIRE(man->origin_m.y == p.origin_m.y);
+
+  const auto reloaded = load_patch(dir.str(), &err);
+  REQUIRE(reloaded);
+  REQUIRE(reloaded->texel_m == p.texel_m);
 }

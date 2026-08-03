@@ -85,7 +85,8 @@ float RiverCarve::HeightAt(float wx, float wz) const {
   const float base = base_at(wx, wz);
   if (cand_offset_.empty()) return base;
   // Which texel's SQUARE holds the query: texel (x, y) is CENTRED at
-  // (x*texel, y*texel), matching rasterize_rivers.
+  // (x*texel, y*texel), matching segment_aabb_distance's "square, not centre"
+  // rule (river_graph.hpp).
   const int tx = static_cast<int>(std::floor(wx / texel_m_ + 0.5f));
   const int tz = static_cast<int>(std::floor(wz / texel_m_ + 0.5f));
   if (!mask.in_bounds(tx, tz)) return base;

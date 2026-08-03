@@ -439,38 +439,71 @@ target_include_directories(badlands_foliage_lib PUBLIC
 target_include_directories(badlands_foliage_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 
-# badlands_mapgen_lib: the map generator (bedrock+quantile biomes) + fog
-# generator + hillshade relief preview + PNG outputs, as a static lib. Links
-# badlands_engine for CpuImage (PNG write via the `assets` crate).
+# badlands_mapgen_lib: terrain data vocabulary + river algebra + on-disk raster
+# I/O. NOT a pipeline stage -- all three procgen stages sit on it.
+#
+# LINKS NOTHING, deliberately. It once linked badlands_engine for CpuImage (PNG
+# write via the `assets` crate), but the only users of that were outputs.cpp and
+# hillshade.cpp, both since deleted; no TU or header here reaches an engine
+# header any more. Keeping the link would drag Dawn into every consumer, which
+# is exactly why four test targets used to hand-compile these TUs instead of
+# linking this lib. They link it now.
+#
+# The same reasoning retires the FastNoiseLite include dir: nothing here samples
+# noise (the only mention left is a comment in distance_field.hpp).
 add_library(badlands_mapgen_lib STATIC
-    src/mapgen/fog_generator.cpp
-    src/mapgen/generator.cpp
-    # Exact EDT, split out of generator.cpp so a consumer can link the distance
-    # transform ALONE (src/foliage/ compiles this TU directly rather than
-    # linking this lib, which links badlands_engine).
+    # Exact EDT, its own TU so a consumer can link the distance transform ALONE
+    # (src/foliage/ compiles this TU directly rather than linking this lib).
     src/mapgen/distance_field.cpp
-    src/mapgen/hillshade.cpp
     src/mapgen/hydrology.cpp
-    src/mapgen/map_io.cpp
-    src/mapgen/window_rivers.cpp
-    src/mapgen/outputs.cpp
-    src/mapgen/erosion.cpp
-    src/mapgen/detail_filter.cpp
+    src/mapgen/river_clip.cpp
+    src/mapgen/river_prune.cpp
     src/mapgen/river_graph.cpp
     src/mapgen/river_arcs.cpp
     src/mapgen/river_carve.cpp
-    src/mapgen/canal_carve.cpp
-    src/mapgen/smooth.cpp)
-target_link_libraries(badlands_mapgen_lib PUBLIC badlands_engine)
-target_include_directories(badlands_mapgen_lib PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
+    # The coarse (protogen) artifact's on-disk form: world.txt's manifest and
+    # rivers.bin's binary RiverGraph dump. Both are also compiled directly
+    # into the standalone protogen TU (see tools/protogen/README.md) -- kept
+    # buildable with a bare `c++ -std=c++23 -I src -I third_party/glm`, no
+    # engine/spdlog/taskflow, so that stays possible.
+    src/mapgen/coarse_io.cpp
+    src/mapgen/river_io.cpp)
+target_compile_features(badlands_mapgen_lib PUBLIC cxx_std_23)
+target_include_directories(badlands_mapgen_lib PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
 
-# badlands_mapview: THE map tool. `--preview-image-only` runs the generator and
-# dumps the debug rasters (pure CPU, no window); otherwise it renders the
-# generated map as Nanite-style cluster-LOD terrain with the biome-blend
-# material.
-add_executable(badlands_mapview
-    src/executables/mapview/main_mapview.cpp
+# badlands_patch_lib: THE CONTRACT (mapgen/patch_data.hpp) -- PatchRequest,
+# PatchData, PatchSource, and compute_elevation_range. Every stage 3 consumer
+# may see this; it is the one frozen interface in the procgen split, so it gets
+# its own target rather than riding along in badlands_mapgen_lib.
+add_library(badlands_patch_lib STATIC
+    src/mapgen/patch_data.cpp)
+target_link_libraries(badlands_patch_lib PUBLIC badlands_mapgen_lib)
+
+# badlands_patch_providers: the IMPLEMENTATIONS of the contract above --
+# on-disk I/O (patch_io), the analytic fixture (synthetic_patch_source), and
+# the disk-backed PatchSource (file_patch_source). Only an app's main links
+# this: stage 3 proper (badlands_mapview_view below) links only
+# badlands_patch_lib, so it can see the PatchSource interface but never a
+# concrete provider.
+add_library(badlands_patch_providers STATIC
+    src/mapgen/patch_io.cpp
+    src/mapgen/synthetic_patch_source.cpp
+    src/mapgen/file_patch_source.cpp
+    src/mapgen/coarse_world_patch_source.cpp)
+target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
+
+# badlands_mapview_view: everything the map tool needs to fetch a patch and
+# render it, EXCEPT the main that picks which PatchSource to fetch from.
+#
+# THIS IS THE POINT: map_view_view.cpp compiles into a library that links
+# badlands_patch_lib (the PatchSource INTERFACE) but not badlands_patch_providers
+# (the concrete implementations), so it cannot reach around
+# mapgen::PatchSource to a concrete provider -- only main_mapview.cpp, which
+# links the providers directly, may choose one.
+add_library(badlands_mapview_view STATIC
     src/executables/mapview/map_view_view.cpp
     src/mapview/biome_manifest.cpp
     src/mapview/biome_splat.cpp
@@ -495,20 +528,30 @@ add_executable(badlands_mapview
     src/game/visual/forest_renderer.cpp
     src/game/visual/impostor_baker.cpp
     src/game/map/forest_test_map_generator.cpp)
-target_link_libraries(badlands_mapview PRIVATE badlands_engine badlands_game_lib badlands_mapgen_lib
-                                               badlands_foliage_lib meshoptimizer)
-target_include_directories(badlands_mapview PRIVATE
+target_link_libraries(badlands_mapview_view PUBLIC badlands_engine badlands_game_lib badlands_patch_lib
+                                                    badlands_foliage_lib meshoptimizer)
+target_include_directories(badlands_mapview_view PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite)
 if(APPLE)
-    target_link_options(badlands_mapview PRIVATE "-Wl,-ld_new")
+    # PUBLIC, not PRIVATE: target_link_options on a STATIC library are only
+    # honoured for consumers (PUBLIC/INTERFACE), never for the library's own
+    # (nonexistent) link step -- this must reach badlands_mapview's final link.
+    target_link_options(badlands_mapview_view PUBLIC "-Wl,-ld_new")
 endif()
+
+# badlands_mapview: THE map tool's executable. Its main (main_mapview.cpp) is
+# the only TU that picks a mapgen::PatchSource implementation (--load /
+# --synthetic / --test-map), so it is the only target that links
+# badlands_patch_providers alongside the view library above.
+add_executable(badlands_mapview
+    src/executables/mapview/main_mapview.cpp)
+target_link_libraries(badlands_mapview PRIVATE badlands_mapview_view badlands_patch_providers)
 
 # badlands_terrain_cluster_tests: Catch2 invariants for the terrain cluster-LOD
 # DAG build (error monotonicity, sphere nesting, crack-free seams, grid
 # arithmetic). Pure CPU on synthetic MapData heightfields — compiles just the
 # build TU + its deps (map_data for the frozen contract it samples, the
-# header-only Aabb) and links meshoptimizer; no Dawn/GPU. Pattern of
-# badlands_generator_tests.
+# header-only Aabb) and links meshoptimizer; no Dawn/GPU.
 add_executable(badlands_terrain_cluster_tests
     src/game/geometry/terrain_clusters_tests.cpp
     src/game/geometry/terrain_clusters.cpp
@@ -530,8 +573,8 @@ add_test(NAME badlands_terrain_cluster_tests COMMAND badlands_terrain_cluster_te
 # badlands_terrain_cluster_bench: the GOLDEN OUTPUT PIN + benchmarks for the same
 # build, on a fixture whose cost profile matches the production map. Separate
 # target from the invariant suite above because it needs the real mapgen river
-# carve (river_carve/river_arcs — both pure CPU, no engine link): an analytic
-# stand-in would not reproduce the per-hot-tile cost that dominates the build.
+# carve (river_carve/river_arcs — both pure CPU): an analytic stand-in would not
+# reproduce the per-hot-tile cost that dominates the build.
 # The BENCHMARK cases are tagged [.][bench] so ctest runs only the golden checks;
 # time them with `scripts/test.sh badlands_terrain_cluster_bench "[bench]"`.
 add_executable(badlands_terrain_cluster_bench
@@ -540,101 +583,56 @@ add_executable(badlands_terrain_cluster_bench
     src/game/map/map_data.cpp
     src/engine/rendering/geometry/aabb.cpp
     src/core/parallel.cpp
-    src/mapgen/river_carve.cpp
-    src/mapgen/river_arcs.cpp
-    # segment_aabb_distance lives in river_graph.cpp, which drags in the routing
-    # code's own deps. Compiled directly rather than via badlands_mapgen_lib
-    # because that lib links badlands_engine (Dawn/GPU) and this target must stay
-    # a pure-CPU, fast-to-build test binary.
-    src/mapgen/river_graph.cpp
-    src/mapgen/erosion.cpp
-    src/mapgen/hydrology.cpp
-    src/mapgen/distance_field.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_terrain_cluster_bench PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
-    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite  # erosion.cpp
     ${taskflow_SOURCE_DIR}
 )
-target_link_libraries(badlands_terrain_cluster_bench PRIVATE meshoptimizer)
+# river_carve/river_arcs/river_graph/hydrology come from the lib, which links
+# nothing -- so this stays a pure-CPU, fast-to-build test binary.
+target_link_libraries(badlands_terrain_cluster_bench PRIVATE
+    badlands_mapgen_lib meshoptimizer)
 add_test(NAME badlands_terrain_cluster_bench COMMAND badlands_terrain_cluster_bench WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_fog_generator_tests: the biome -> fog-emitter generator. Pure CPU
-# (fog_sim.hpp is header-only glm; biomes/field2d are headers), so it compiles
-# fog_generator.cpp directly with no engine link.
-add_executable(badlands_fog_generator_tests
-    src/mapgen/fog_generator_tests.cpp
-    src/mapgen/fog_generator.cpp
+# badlands_river_tests: routing/hydrology + the river chain (graph, arcs, carve)
+# — structural invariants on synthetic terrains (routing, spill levels,
+# hydraulics, network extraction, corridor carving). Pure CPU.
+#
+# Was badlands_erosion_tests. Renamed because it covers no erosion: the sim it
+# was named for is gone, and the name is a CMake target plus a scripts/test.sh
+# regex -- no #include anywhere depends on it.
+add_executable(badlands_river_tests
+    src/mapgen/hydrology_tests.cpp
+    src/mapgen/river_graph_tests.cpp
+    src/mapgen/river_clip_tests.cpp
+    src/mapgen/river_prune_tests.cpp
+    src/mapgen/river_arcs_tests.cpp
+    src/mapgen/river_carve_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
-target_include_directories(badlands_fog_generator_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
+target_include_directories(badlands_river_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-add_test(NAME badlands_fog_generator_tests COMMAND badlands_fog_generator_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-# badlands_generator_tests: the bedrock+quantile map generator — determinism,
-# structural area fractions, cutoff/classification logic, and
-# resolution-independent world-meter sampling. generate_map now orchestrates
-# the erosion+lakes pipeline, so this target compiles those TUs too. Pure CPU
-# (FastNoiseLite is header-only), pattern of badlands_fog_generator_tests.
-add_executable(badlands_generator_tests
-    src/mapgen/generator_tests.cpp
-    src/mapgen/generator.cpp
-    src/mapgen/distance_field.cpp
-    src/mapgen/hydrology.cpp
-    src/mapgen/erosion.cpp
-    src/mapgen/detail_filter.cpp
-    src/mapgen/river_graph.cpp
-    src/mapgen/canal_carve.cpp
-    src/mapgen/smooth.cpp
-    third_party/catch2/extras/catch_amalgamated.cpp
-)
-target_include_directories(badlands_generator_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
-    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-)
-add_test(NAME badlands_generator_tests COMMAND badlands_generator_tests
+target_link_libraries(badlands_river_tests PRIVATE badlands_mapgen_lib)
+add_test(NAME badlands_river_tests COMMAND badlands_river_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_erosion_tests: hydrology + erosion sim + detail filter — structural
-# invariants on synthetic terrains (routing, spill levels, solver bounds,
-# layer bookkeeping). Pure CPU, pattern of badlands_generator_tests.
-add_executable(badlands_erosion_tests
-    src/mapgen/hydrology_tests.cpp
-    src/mapgen/hydrology.cpp
-    src/mapgen/erosion_tests.cpp
-    src/mapgen/erosion.cpp
-    src/mapgen/generator.cpp
-    src/mapgen/distance_field.cpp
-    src/mapgen/detail_filter_tests.cpp
-    src/mapgen/detail_filter.cpp
-    src/mapgen/river_graph_tests.cpp
-    src/mapgen/river_graph.cpp
-    src/mapgen/river_arcs_tests.cpp
-    src/mapgen/river_arcs.cpp
-    src/mapgen/river_carve_tests.cpp
-    src/mapgen/river_carve.cpp
-    src/mapgen/canal_carve_tests.cpp
-    src/mapgen/canal_carve.cpp
-    src/mapgen/smooth_tests.cpp
-    src/mapgen/smooth.cpp
+# badlands_artifact_io_tests: the coarse (protogen) artifact's on-disk form --
+# world.txt's manifest and rivers.bin's binary river-graph dump. HARD RULE: no
+# test here runs the coarse sim; every fixture is hand-built. coarse_io.cpp /
+# river_io.cpp themselves come from badlands_mapgen_lib, not compiled again
+# here.
+add_executable(badlands_artifact_io_tests
+    src/mapgen/coarse_io_tests.cpp
+    src/mapgen/river_io_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
-target_include_directories(badlands_erosion_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
-    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
+target_include_directories(badlands_artifact_io_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-add_test(NAME badlands_erosion_tests COMMAND badlands_erosion_tests
+target_link_libraries(badlands_artifact_io_tests PRIVATE badlands_mapgen_lib)
+add_test(NAME badlands_artifact_io_tests COMMAND badlands_artifact_io_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_game_tests: the existing Catch2 game-sim suite (game/tests/),
@@ -1293,36 +1291,38 @@ target_include_directories(badlands_biome_splat_tests PRIVATE
 )
 add_test(NAME badlands_biome_splat_tests COMMAND badlands_biome_splat_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_map_io_tests: the on-disk map form -- the level convention
+# badlands_patch_io_tests: the on-disk patch form -- the level convention
 # (depth = max(0, level - height)), lake derivation, and the size/range checks
-# that stand between a wrong manifest and a silently reinterpreted map.
-add_executable(badlands_map_io_tests
-    src/mapgen/map_io_tests.cpp
-    src/mapgen/map_io.cpp
-    src/mapgen/window_rivers.cpp
-    src/mapgen/hydrology.cpp
-    src/mapgen/river_graph.cpp
-    src/mapgen/erosion.cpp
-    src/mapgen/smooth.cpp
-    src/mapgen/canal_carve.cpp
-    src/mapgen/generator.cpp
-    src/mapgen/detail_filter.cpp
-    # Exact EDT; split out of generator.cpp upstream, so it must be listed
-    # explicitly here too (carve_cavities and distance_to_plains both call it).
-    src/mapgen/distance_field.cpp
+# that stand between a wrong manifest and a silently reinterpreted patch.
+add_executable(badlands_patch_io_tests
+    src/mapgen/patch_io_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
-target_include_directories(badlands_map_io_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
+target_include_directories(badlands_patch_io_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-    ${CMAKE_SOURCE_DIR}/third_party/FastNoiseLite
 )
-add_test(NAME badlands_map_io_tests COMMAND badlands_map_io_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+target_link_libraries(badlands_patch_io_tests PRIVATE badlands_patch_providers)
+add_test(NAME badlands_patch_io_tests COMMAND badlands_patch_io_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_patch_tests: CoarseWorldPatchSource -- resample (both directions),
+# water rebuild, biome classification from the manifest cutoffs, and river
+# clip/rebase/prune, plus the cross-provider structural invariants shared with
+# SyntheticPatchSource. HARD RULE: no test here may run the coarse sim; every
+# fixture is a synthetic coarse artifact the test writes itself.
+add_executable(badlands_patch_tests
+    src/mapgen/coarse_world_patch_source_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_patch_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_patch_tests PRIVATE badlands_patch_providers)
+add_test(NAME badlands_patch_tests COMMAND badlands_patch_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
 # its buried skirt -- the overlap that keeps a later wave displacement from
-# opening a gap at the shoreline.
+# opening a gap at the shoreline. Builds PatchData fixtures now, so it links
+# badlands_patch_providers for the contract.
 add_executable(badlands_lake_surface_tests
     src/mapview/tests/lake_surface_tests.cpp
     src/mapview/lake_surface.cpp
@@ -1333,23 +1333,23 @@ target_include_directories(badlands_lake_surface_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
+target_link_libraries(badlands_lake_surface_tests PRIVATE badlands_patch_providers)
 add_test(NAME badlands_lake_surface_tests COMMAND badlands_lake_surface_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_river_surface_tests: pure-CPU tests for the river channel ribbon --
-# the arc-chain fit turned into draped, hydraulically-sized geometry. Compiles
-# river_arcs.cpp directly (rather than linking badlands_mapgen_lib, which pulls
-# in badlands_engine) so the whole check stays CPU-only.
+# the arc-chain fit turned into draped, hydraulically-sized geometry. Links
+# badlands_patch_providers (a superset of badlands_mapgen_lib, which river_arcs
+# still comes from) so it builds PatchData fixtures alongside the lake surface
+# suite above.
 add_executable(badlands_river_surface_tests
     src/mapview/tests/river_surface_tests.cpp
     src/mapview/river_surface.cpp
-    src/mapgen/river_arcs.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_river_surface_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
+target_link_libraries(badlands_river_surface_tests PRIVATE badlands_patch_providers)
 add_test(NAME badlands_river_surface_tests COMMAND badlands_river_surface_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_factors_manifest_tests: behaviour tuning loaded as data

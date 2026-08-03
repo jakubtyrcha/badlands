@@ -17,7 +17,7 @@ are touching:
 | WESL/WGSL shaders | `shaders/CLAUDE.md` |
 | Rust feature-libs and the C ABIs | `src/crates/CLAUDE.md` |
 | Apps, `AppView`s, AI-sandbox modes, CLI flags | `src/executables/CLAUDE.md` |
-| Procedural map generation | `src/mapgen/CLAUDE.md` |
+| Map data contract, patch extraction, rivers | `src/mapgen/CLAUDE.md` |
 | Nim→WASM brains | `scripts/brains/CLAUDE.md` |
 
 ## System Rules
@@ -56,7 +56,9 @@ Don't assume. Don't hide confusion. Surface tradeoffs. Before implementing:
 - **`game/`** — the EnTT world **simulation** (placement, movement, brains, combat, needs), built as `badlands_game_lib` and called through a C ABI. The `src/game/` vs `game/` split is a real trap: sim code never lives under `src/`.
 - **`src/core/`** — generic shared C++ (math glue, `GeometryType`, small utils).
 - **`src/crates/`** — Rust feature-libs behind narrow C ABIs, linked via Corrosion.
-- **`src/mapgen/` + `src/mapview/`** — procedural map generation and its terrain/biome presentation.
+- **`src/mapgen/`** — the map DATA CONTRACT (`PatchRequest` → `PatchData`), its providers, on-disk artifact I/O, and the river chain. **Not a pipeline stage** — all three procgen stages sit on it. There is no in-repo generator any more; the name is historical.
+- **`src/mapview/`** — terrain/biome presentation for `badlands_mapview`.
+- **Procgen is three stages with ONE interface between them:** `coarse-hydraulic-erosion-sim` (`tools/protogen/`, standalone, cached on disk) → `detailed-patch-extraction` (`PatchRequest` → `PatchData`) → `map-detailing` (a sink: the existing mapview/game render path). The boundary is enforced by CMake targets, not convention — stage 3 links the contract and not the providers. See `docs/superpowers/specs/2026-08-02-procgen-stage-split-design.md`.
 - **`src/executables/`** — the apps; each builds its scene from the world in its own `AppView`.
 
 Ownership: **C++ owns** window, GPU, render loop, renderer, world, geometry, camera,

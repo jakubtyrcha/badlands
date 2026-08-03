@@ -1,61 +1,91 @@
 # src/mapview/ — how a map reaches the screen
 
-`badlands_mapview` has **two ways** to get a map, and they are not variants of one
-pipeline. They come from different generators and meet only at `MapArtifacts`.
+`badlands_mapview` gets its map through **one interface**, and everything below
+it is interchangeable. There is no in-repo generator any more.
 
 ```
-  (A) generated          MapGenParams ──► mapgen::generate_map ──┐
-                         (seed, size, erosion)                   │
-                                                                 ├─► MapArtifacts ─► mapview
-  (B) loaded    protogen ─► window.cpp ─► rasters ─► load_map ────┘
-                (16 km sim)  (2 km cut)   on disk
+  STAGE 1                    STAGE 2                        STAGE 3
+  tools/protogen/            PatchRequest -> PatchData       this directory
+  cached on disk             the ONE frozen interface        a SINK
+
+  coarse sim  ──► world.txt ──► CoarseWorldPatchSource ──┐
+  (16 km, ~5 min)  rivers.bin                            │
+                                                         ├─► PatchData ─► mapview
+  a patch dir  ──────────────► FilePatchSource ──────────┤
+                                                         │
+  nothing at all ────────────► SyntheticPatchSource ─────┘
 ```
 
-- **(A) `--seed/--resolution/--size`** — the in-repo generator: bedrock fBm →
-  quantile-cut biomes → stream-power erosion + lakes. Documented in
-  `src/mapgen/CLAUDE.md`.
-- **(B) `--load DIR`** — a window cut out of a world simulated *outside* this
-  process. This is the direction the map work is moving, and it is where the
-  terrain in recent screenshots comes from.
+- **`--synthetic`** — a patch invented analytically: a valley, a river, a lake,
+  at a realistic elevation. No simulation, no files, instant and deterministic.
+  This is the styling loop, and it is why the rest of this document is no longer
+  gated on a 5-minute sim.
+- **`--load <coarse-dir>`** — an arbitrary cut out of a cached coarse world, at
+  any `--patch-size` and `--patch-res`.
+- **`--load <patch-dir>`** — a finished patch read off disk.
 
-## The loaded path, end to end
+Stage 3 cannot tell them apart, and that is enforced rather than hoped for:
+`map_view_view.cpp` compiles into a library that links the contract and **not**
+the providers, so reaching around the interface fails to link. Full design in
+`docs/superpowers/specs/2026-08-02-procgen-stage-split-design.md`.
 
-**Phase 1 — geological simulation.** `tools/protogen/` runs particle-based
-hydraulic erosion over **16 km at 1024²** (16 m cells), ~5 minutes. It produces
-height, standing water, discharge and **soil** (erodible cover over bedrock).
-Prototype, not in the build; see `tools/protogen/README.md`.
+## Stage 1 — the coarse world
 
-**Phase 2a — the gameplay window.** `tools/protogen/window.cpp` picks a square
-out of that world and resamples it to the gameplay grid.
+`tools/protogen/` runs particle-based hydraulic erosion over **16 km at 1024²**
+(16 m cells), ~5 minutes. Prototype, not in the build; see
+`tools/protogen/README.md`. Its output is **self-describing**: `world.txt`
+carries resolution, extent, the derived texel size, and the whole-world soil
+quantiles used for biome cutoffs; `rivers.bin` carries the river graph extracted
+over the whole world and culled by flow.
 
-- Geometry is forced, not chosen: `out_res × out_texel_m` must be a whole number
-  of source cells. 2048 × 1 m = 2048 m = exactly 128 cells at 16 m.
-- **The upscale invents nothing.** A 2 km window is 128×128 source cells
-  inflating to 2048² — **256 output texels per source sample**, so there is no
-  detail below 16 m by construction. It is a low-frequency BASE for a later
-  detail pass, not finished terrain.
-- **Catmull-Rom, not Lanczos-3.** Lanczos does not reproduce a linear ramp (~6 cm
-  error), and since a planar hillside *is* a linear ramp, that error is periodic
-  with the source grid and shows up as corduroy in the shading. Hillshade is a
-  derivative, so it amplifies what looks negligible in the heightfield.
-- **Pin a window with `--origin-cell X,Y`, not `--rank N`.** Ranking is for
-  discovery: the ordinal points somewhere else the moment the map or a gate
-  changes. Ranked output prints the `--origin-cell` needed to pin it.
+**No consumer hardcodes the coarse density**, and none takes it as a flag — it
+is read from the manifest, which is what lets the cell size change later without
+a silent misread.
 
-**Phase 2b — load and render.** `mapgen::load_map` (`src/mapgen/map_io.hpp`)
-reads the directory into `MapArtifacts`; everything downstream is the generated
-path's code unchanged.
+## Stage 2 — cutting a patch
+
+`CoarseWorldPatchSource` answers a `PatchRequest` (origin, extent, resolution)
+against that world.
+
+- **`world_size_m` and `resolution` are independent.** Raising the resolution at
+  a fixed extent is a config change, not a mode — every parameter is in world
+  metres, so the same request at two resolutions is the same terrain sampled
+  more finely.
+- **The upscale invents nothing.** A 2 km patch at 2048² is 128×128 source cells
+  inflated 256×; there is no detail below the coarse cell size by construction.
+  It is a low-frequency BASE for a later relief pass, not finished terrain.
+- **Catmull-Rom to refine, area-average to coarsen.** Lanczos-3 does not
+  reproduce a linear ramp (~6 cm error), and since a planar hillside *is* a
+  linear ramp, that error is periodic with the source grid and shows up as
+  corduroy in the shading — hillshade is a derivative, so it amplifies what looks
+  negligible in the heightfield. In the other direction a reconstruction filter
+  run backwards aliases, so coarsening area-averages instead.
+- **There is no integral-cell constraint.** The request is in world metres and
+  aligning to the coarse lattice is the provider's problem.
+- **Rivers are clipped, rebased to patch-local metres, then culled by length** —
+  never re-derived. Extracting from a window is what used to make rivers vanish
+  below ~1 km; a 128 m window has no catchment to extract from.
+
+Finding an interesting region is a **separate** job from cutting one:
+`tools/protogen/select.cpp` scans a coarse world against the gameplay gates and
+prints an origin to pass to `--patch-origin`. It is a discovery tool, run
+occasionally, never in the iteration loop.
 
 ## The on-disk form
 
+Two directories, one convention. A **coarse world** (stage 1's cached output)
+and a **patch** (stage 2's, when it is written down) both use headerless rasters
+plus a key/value manifest, so numpy reads them without a parser.
+
 ```
-mapdir/
-  map.txt      manifest: resolution, world_size_m, source provenance
-  height.f32   float32 metres — the BED, never the water surface
-  level.f32    float32 metres — LAKE SURFACE elevation
-  biome.u8     uint8, mapgen::Biome
-  soil.f32     float32 metres of erodible cover (optional)
-  inflows.txt  rivers crossing the boundary: texel_x texel_y discharge_m3_s
+worlddir/                              patchdir/
+  world.txt    resolution, extent,       map.txt      resolution, world_size_m,
+               texel_m, seed, runoff,                 origin_m, source
+               steps, soil cutoffs       height.f32   metres — the BED
+  <tag>-height.f32  and the other        level.f32    metres — LAKE SURFACE
+  <tag>-*.f32       snapshot rasters     biome.u8     mapgen::Biome
+  rivers.bin   whole-world graph,        soil.f32     erodible cover
+               culled by flow            rivers.bin   clipped graph
 ```
 
 - **Water rides in the LEVEL raster, not a depth field.** `depth = max(0, level −
@@ -67,7 +97,13 @@ mapdir/
 - **The rasters are headerless**, so the manifest's element count is the only
   thing between a wrong resolution and a silently reinterpreted map. A mismatch
   is an error, never a guess.
-- `--resolution`/`--size` are read from `map.txt`; passing them is unnecessary.
+- **`soil.f32` and `rivers.bin` are optional ON DISK, required by the contract.**
+  A directory written before either existed still loads — the field is present
+  and correctly sized, just empty. A present-but-malformed file is still an
+  error; only absence is tolerated, which is the same forward-compatibility rule
+  the manifests apply to unknown keys.
+- **Nothing is versioned.** Forward compatibility comes from ignored keys and
+  tolerated absence, which has covered every change so far.
 
 ## Biomes come from the substrate
 
@@ -85,27 +121,48 @@ physics puts it:
 | deep (> 4 m) | 29.1% | **7.1°** |
 
 A 4.4× slope separation, so "mountain = close to bedrock" falls out of the
-erosion rather than being imposed on it. Quantiles rather than absolute depths
-keep the split structural across windows.
+erosion rather than being imposed on it.
+
+**The quantiles are taken over the WHOLE WORLD, once, and the two resulting
+threshold values ride in `world.txt`.** Stage 2 applies them per patch. Taking
+them over the patch instead — which the old tool did — makes the same ground
+classify differently depending on what you cut, and fails the density- and
+resolution-independence guarantees outright. Two floats keep classification
+re-tunable in stage 2 without re-running the world.
 
 ## Rivers
 
-`src/mapgen/window_rivers.hpp` routes the loaded window and extracts its network
-(`route_flow` → `accumulate_drainage` → `extract_river_graph`).
+**Extracted once over the whole coarse world, then clipped per patch.** Stage 1
+runs `route_flow` → `accumulate_drainage` → `extract_river_graph` and culls by
+FLOW; stage 2 clips the result to the patch rect, rebases it to patch-local
+metres, and culls by LENGTH.
 
-- **A window is a cutout, so it needs boundary inflow.** Rivers cross into it
-  carrying catchment it cannot see; each crossing converts to the upstream area
-  it implies (`A_in = Q / runoff`) and is seeded at the entry cell. Staying in
-  AREA units lets it ride the existing accumulation untouched.
-- **A window is not automatically a catchment**, and this decides whether rivers
-  reach the lake at all. Measured as the fraction of cells whose flow terminates
-  in a lake rather than at the frame: one 2 km window scored **50%** and its
-  rivers ran off the edge, while another scored **93%** and carried a 4.2 m trunk
-  into the lake. The terrain is identical in kind; only the cut differs.
-- The frame is not a defect to fix. Water that leaves genuinely leaves — on the
-  parent map it travels on and reaches a lake kilometres away, outside the
-  window. Padding the routing does **not** change this (measured: identical), and
-  a window that drains outward will never show rivers reaching its own lake.
+That division is the fix for the defect this whole split exists to remove. The
+old code extracted the network **from the window**, and a small window has no
+catchment to extract from — measured at one origin, only the cut size varying:
+
+| patch | reaches |
+|---|---|
+| 2048 m | 146 |
+| 1024 m | 22 |
+| 512 m / 256 m / 128 m | **0** |
+
+At 128 m the window received 0.092 m³/s of boundary inflow against 0.0005 m³/s
+of local rain — a 180:1 ratio — and still produced nothing, because the prune
+constants are sized for a 1–2 km cut. Boundary inflow (`A_in = Q / runoff`
+seeded at the entry cell) existed only to paper over this and is gone with it.
+
+- **Length cannot be culled in stage 1**, because "too short to bother with" is a
+  question about a frame and stage 1 has no frame. Flow can, because it is
+  physical and patch-independent.
+- **A clipped trunk is not a headwater.** Clipping mints `RiverNodeKind::FrameEntry`
+  on an inbound crossing — the inbound twin of `Mouth` — and both culls exempt
+  it. Without that, a trunk merely *entering* a patch has `in_deg == 0`, reads as
+  a stubby headwater, and gets eaten (the same failure once cost a 700 m trunk,
+  peak Q 0.7183 → 0.0218 m³/s).
+- The frame is still not a defect to fix. Water that leaves genuinely leaves; on
+  the parent world it travels on and reaches a lake kilometres away, outside the
+  patch.
 
 ### From graph to geometry: arcs, a carve, and water in the cavity
 
@@ -144,8 +201,15 @@ bank spline would want the same curve and neither of the meshes.
 
 ## Known limits
 
-- **The 2 km window is 16,384 source samples.** Everything visible is 16 m or
-  coarser; the detail pass that would fix this does not exist yet.
+- **A patch carries only as much detail as its coarse world had.** A 2 km cut is
+  16,384 source samples at the current 16 m cell, so everything visible is 16 m
+  or coarser. The relief pass that would fill the gap — a stateless per-point
+  erosion FILTER composed onto the resampled bed, not a second simulation — is
+  designed but deliberately not implemented yet (spec §3.4).
+- **Screenshot comparison must use a tolerance, never a hash.**
+  `badlands_mapview --screenshot` is mildly non-deterministic, and was before
+  this work: three runs of one binary gave 54 differing pixels out of 1,474,560
+  (0.0037%), max channel delta 2/255.
 - **Lake bathymetry is not trustworthy.** Depths reach 250 m in a 2 km box on
   some windows. Harmless visually (past the visibility depth water reads the
   same) but wrong, and it constrains window selection — `--max-lake-depth` exists

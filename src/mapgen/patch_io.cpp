@@ -1,13 +1,15 @@
-#include "mapgen/map_io.hpp"
+#include "mapgen/patch_io.hpp"
 
+#include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <filesystem>
 #include <deque>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/river_io.hpp"
 
 namespace badlands::mapgen {
 
@@ -15,8 +17,8 @@ namespace {
 
 // Reads exactly `count` elements of T. Anything else -- short file, long file,
 // missing file -- is an error. The rasters are headerless, so this size check
-// against the manifest is the only thing standing between a wrong --resolution
-// and a silently reinterpreted map.
+// against the manifest is the only thing standing between a wrong resolution
+// and a silently reinterpreted patch.
 template <typename T>
 bool read_raster(const std::string& path, size_t count, std::vector<T>& out,
                  std::string* error) {
@@ -46,17 +48,34 @@ bool read_raster(const std::string& path, size_t count, std::vector<T>& out,
   return true;
 }
 
+template <typename T>
+bool write_raster(const std::string& path, const std::vector<T>& in,
+                  std::string* error) {
+  std::ofstream f(path, std::ios::binary | std::ios::trunc);
+  if (!f) {
+    if (error) *error = "cannot open " + path + " for writing";
+    return false;
+  }
+  f.write(reinterpret_cast<const char*>(in.data()),
+          static_cast<std::streamsize>(in.size() * sizeof(T)));
+  if (!f) {
+    if (error) *error = "short write on " + path;
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
-std::optional<MapManifest> load_manifest(const std::string& dir,
-                                         std::string* error) {
+std::optional<PatchManifest> load_patch_manifest(const std::string& dir,
+                                                 std::string* error) {
   const std::string path = dir + "/map.txt";
   std::ifstream f(path);
   if (!f) {
     if (error) *error = "cannot open " + path;
     return std::nullopt;
   }
-  MapManifest m;
+  PatchManifest m;
   bool have_res = false, have_size = false;
   std::string line;
   while (std::getline(f, line)) {
@@ -67,6 +86,11 @@ std::optional<MapManifest> load_manifest(const std::string& dir,
       have_res = static_cast<bool>(ls >> m.resolution);
     } else if (key == "world_size_m") {
       have_size = static_cast<bool>(ls >> m.world_size_m);
+    } else if (key == "origin_m") {
+      // Provenance: where this patch sat in its parent world. Optional, since
+      // a synthetic or hand-built patch has no parent.
+      double ox = 0.0, oy = 0.0;
+      if (ls >> ox >> oy) m.origin_m = glm::dvec2(ox, oy);
     } else if (key == "source") {
       std::getline(ls, m.source);
       if (!m.source.empty() && m.source[0] == ' ') m.source.erase(0, 1);
@@ -93,9 +117,9 @@ void derive_water(const Field2D<float>& heightmap, const Field2D<float>& level,
   lake_id = Field2D<int32_t>(w, h, -1);
   lakes.clear();
   if (w <= 0 || h <= 0) return;
-  // `level` is indexed over heightmap's extent below. load_map builds both n*n,
-  // but this is exported for other callers, and every other size assumption in
-  // this file is checked rather than assumed.
+  // `level` is indexed over heightmap's extent below. load_patch builds both
+  // n*n, but this is exported for other callers, and every other size
+  // assumption in this file is checked rather than assumed.
   if (level.width != w || level.height != h) return;
 
   for (size_t i = 0; i < water_depth.data.size(); ++i) {
@@ -142,8 +166,8 @@ void derive_water(const Field2D<float>& heightmap, const Field2D<float>& level,
   }
 }
 
-std::optional<MapArtifacts> load_map(const std::string& dir, std::string* error) {
-  const std::optional<MapManifest> man = load_manifest(dir, error);
+std::optional<PatchData> load_patch(const std::string& dir, std::string* error) {
+  const std::optional<PatchManifest> man = load_patch_manifest(dir, error);
   if (!man) return std::nullopt;
 
   const int n = man->resolution;
@@ -154,9 +178,9 @@ std::optional<MapArtifacts> load_map(const std::string& dir, std::string* error)
   if (!read_raster(dir + "/height.f32", count, height, error)) return std::nullopt;
   if (!read_raster(dir + "/level.f32", count, level, error)) return std::nullopt;
   if (!read_raster(dir + "/biome.u8", count, biome, error)) return std::nullopt;
-  // Soil is OPTIONAL: it arrived with the two-layer substrate, and a map written
-  // before it is still perfectly renderable. A present-but-malformed file is
-  // still an error -- only absence is tolerated.
+  // Soil is optional ON DISK (see the header): a patch written before the
+  // two-layer substrate is still perfectly renderable, and loads as zeros. A
+  // present-but-malformed file is still an error.
   const bool have_soil =
       std::filesystem::exists(std::filesystem::path(dir) / "soil.f32");
   if (have_soil && !read_raster(dir + "/soil.f32", count, soil, error))
@@ -181,28 +205,84 @@ std::optional<MapArtifacts> load_map(const std::string& dir, std::string* error)
     }
   }
 
-  MapArtifacts art;
-  art.heightmap = Field2D<float>(n, n);
-  art.heightmap.data = std::move(height);
-  art.biome = Field2D<uint8_t>(n, n);
-  art.biome.data = std::move(biome);
-  // mapview reads bedrock only for its dimensions; the latent field the biomes
-  // were cut from does not survive the raster form.
-  art.bedrock = art.heightmap;
-  if (have_soil) {
-    art.sediment = Field2D<float>(n, n);
-    art.sediment.data = std::move(soil);
+  PatchData p;
+  p.texel_m = man->world_size_m / static_cast<float>(n);
+  p.origin_m = man->origin_m;
+
+  p.height = Field2D<float>(n, n);
+  p.height.data = std::move(height);
+  p.level = Field2D<float>(n, n);
+  p.level.data = std::move(level);
+  p.biome = Field2D<uint8_t>(n, n);
+  p.biome.data = std::move(biome);
+  p.soil = Field2D<float>(n, n, 0.0f);
+  if (have_soil) p.soil.data = std::move(soil);
+
+  derive_water(p.height, p.level, p.texel_m, p.water_depth, p.lake_id, p.lakes);
+  p.elevation_range = compute_elevation_range(p.height);
+
+  // Rivers are optional on disk, the same way soil is: absence means a patch
+  // written before rivers.bin existed, not an error. A present-but-malformed
+  // file IS an error.
+  const std::string rivers_path = dir + "/rivers.bin";
+  if (std::filesystem::exists(rivers_path)) {
+    std::optional<RiverGraph> rivers = read_river_graph(rivers_path, error);
+    if (!rivers) return std::nullopt;
+    p.rivers = std::move(*rivers);
+  }
+  return p;
+}
+
+bool write_patch(const std::string& dir, const PatchData& patch,
+                 const std::string& source, std::string* error) {
+  const int n = patch.height.width;
+  if (n <= 0 || patch.height.height != n) {
+    if (error) *error = "write_patch: patch height raster is empty or non-square";
+    return false;
+  }
+  const size_t count = static_cast<size_t>(n) * n;
+  if (patch.level.data.size() != count || patch.biome.data.size() != count ||
+      patch.soil.data.size() != count) {
+    if (error) *error = "write_patch: rasters disagree with the height extent";
+    return false;
   }
 
-  Field2D<float> level_field(n, n);
-  level_field.data = std::move(level);
-  const float texel_m = man->world_size_m / static_cast<float>(n);
-  derive_water(art.heightmap, level_field, texel_m, art.water_depth, art.lake_id,
-               art.lakes);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    if (error) *error = "cannot create " + dir + ": " + ec.message();
+    return false;
+  }
 
-  // The remaining artifacts are river/flow products this form does not carry.
-  // They are left empty rather than faked; mapview does not read them.
-  return art;
+  {
+    std::ofstream f(dir + "/map.txt", std::ios::trunc);
+    if (!f) {
+      if (error) *error = "cannot open " + dir + "/map.txt for writing";
+      return false;
+    }
+    // ENOUGH DIGITS TO ROUND-TRIP. The stream default is 6 SIGNIFICANT digits,
+    // which was harmless while every patch had a round world_size_m -- but a
+    // CoarseWorldPatchSource patch can sit at any origin and any extent, and a
+    // 1234.5678 m patch reloading as 1234.57 m changes the derived texel_m and
+    // with it every world-metre coordinate the patch carries. 9 digits is
+    // float's round-trip guarantee; 17 is double's, which origin_m needs.
+    f << "resolution " << n << "\n";
+    f << std::setprecision(9)
+      << "world_size_m " << (patch.texel_m * static_cast<float>(n)) << "\n";
+    f << std::setprecision(17)
+      << "origin_m " << patch.origin_m.x << " " << patch.origin_m.y << "\n";
+    if (!source.empty()) f << "source " << source << "\n";
+    if (!f) {
+      if (error) *error = "short write on " + dir + "/map.txt";
+      return false;
+    }
+  }
+
+  return write_raster(dir + "/height.f32", patch.height.data, error) &&
+         write_raster(dir + "/level.f32", patch.level.data, error) &&
+         write_raster(dir + "/biome.u8", patch.biome.data, error) &&
+         write_raster(dir + "/soil.f32", patch.soil.data, error) &&
+         write_river_graph(dir + "/rivers.bin", patch.rivers, error);
 }
 
 }  // namespace badlands::mapgen

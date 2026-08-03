@@ -25,15 +25,13 @@ float sample_step_m(const mapgen::RiverArc& a, float texel_m) {
 }  // namespace
 
 std::vector<glm::vec3> BuildRiverWaterTriangles(
-    const mapgen::MapArtifacts& art, float world_size_m,
+    int lattice_texels, float world_size_m,
     const mapgen::RiverGraph& graph,
     const std::vector<mapgen::RiverArcChain>& chains,
     const std::function<float(float wx, float wz)>& height_at) {
   std::vector<glm::vec3> tris;
-  const int w = art.heightmap.width;
-  if (w <= 0 || art.heightmap.height <= 0 || world_size_m <= 0.0f ||
-      !height_at)
-    return tris;
+  const int w = lattice_texels;
+  if (w <= 0 || world_size_m <= 0.0f || !height_at) return tris;
   const float texel_m = world_size_m / static_cast<float>(w);
 
   // One cross-section of the free surface: two points at the SAME level, since

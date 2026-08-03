@@ -2,10 +2,10 @@
 
 // Builds the standing-water surface for every lake the generator produced.
 //
-// Read straight from MapArtifacts rather than from the frozen MapData contract:
-// MapData carries ONE global water_level_m, but the generator ponds multiple
-// lakes at DIFFERENT elevations (LakeInfo::level_m per lake, indexed by
-// lake_id). A single plane would be wrong for every lake but one.
+// Read straight from PatchData rather than from the frozen MapData contract:
+// MapData carries ONE global water_level_m, but a patch ponds multiple lakes
+// at DIFFERENT elevations (LakeInfo::level_m per lake, indexed by lake_id). A
+// single plane would be wrong for every lake but one.
 //
 // River channels carry lake_id == -1 and are therefore excluded -- rivers are
 // out of scope for this pass.
@@ -21,7 +21,7 @@
 
 #include <glm/glm.hpp>
 
-#include "mapgen/generator.hpp"
+#include "mapgen/patch_data.hpp"
 
 namespace badlands {
 
@@ -52,13 +52,13 @@ inline constexpr float kMaxSkirtM = 6.0f;
 // for this pass -- and the alternative, letting the skirt spill downhill, trades
 // a seam at the outlet for a floating sheet over the whole valley.
 
-// Flat, lattice-aligned water triangles for every lake in `art`, in map-local
+// Flat, lattice-aligned water triangles for every lake in `patch`, in map-local
 // world coordinates, wound CCW seen from +Y. Three vertices per triangle; each
 // vertex's Y is its own lake's level_m, so lakes at different elevations can
 // share one mesh. Texel (x, z) spans world [x*s, (x+1)*s] on both axes, where
 // s = world_size_m / lake_id.width -- the same cell lattice the terrain mesh
 // uses. Returns empty when there are no lakes.
-std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::MapArtifacts& art,
+std::vector<glm::vec3> BuildLakeSurfaceTriangles(const mapgen::PatchData& patch,
                                                  float world_size_m);
 
 }  // namespace badlands

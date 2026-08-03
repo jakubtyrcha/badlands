@@ -1,8 +1,34 @@
 #!/usr/bin/env python3
-"""Render protogen dumps. Height and water arrive in METRES; Q in m^3/s."""
+"""Render protogen dumps. Height and water arrive in METRES; Q in m^3/s.
+
+    python3 tools/protogen/show.py <dump-dir> [resolution world_m]
+
+Resolution and world size come from <dump-dir>/world.txt (written by
+src/mapgen/coarse_io.hpp) unless given explicitly -- which a window.cpp
+output still needs, since that tool writes a patch-style map.txt, not
+world.txt.
+"""
 import sys, os, glob
 import numpy as np
 from PIL import Image
+
+
+def read_world_txt(d):
+    """Reads resolution/world_size_m out of <d>/world.txt. Unknown keys are
+    ignored, matching coarse_io.cpp's own forward-compatibility rule."""
+    res, world = None, None
+    with open(os.path.join(d, "world.txt")) as f:
+        for line in f:
+            parts = line.split()
+            if not parts or parts[0].startswith("#"):
+                continue
+            if parts[0] == "resolution":
+                res = int(parts[1])
+            elif parts[0] == "world_size_m":
+                world = float(parts[1])
+    if res is None or world is None:
+        raise SystemExit(f"{d}/world.txt: missing resolution/world_size_m")
+    return res, world
 
 
 def load(p, n):
@@ -19,7 +45,11 @@ def hillshade(z, cell, az=315.0, alt=45.0):
 
 
 def main():
-    d, n, world = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+    d = sys.argv[1]
+    if len(sys.argv) >= 4:
+        n, world = int(sys.argv[2]), float(sys.argv[3])
+    else:
+        n, world = read_world_txt(d)
     cell = world / n
     for hp in sorted(glob.glob(os.path.join(d, "*-height.f32"))):
         tag = os.path.basename(hp)[: -len("-height.f32")]

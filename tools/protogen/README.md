@@ -15,20 +15,66 @@ plus standing water, a lake water balance, and sediment dispersion in lakes.
 
 ## Build and run
 
-Taskflow is header-only, so this stays a single standalone TU:
+Taskflow is header-only, so this is still a small, hand-listed set of TUs, no
+CMake. It now also pulls in the OUTPUT BOUNDARY (world.txt's manifest, the
+river extraction pipeline, rivers.bin's binary graph dump) straight from
+`src/mapgen/` -- see "Self-describing output" below:
 
 ```sh
-c++ -O3 -std=c++20 \
-  -I src -I third_party/FastNoiseLite -I build/_deps/taskflow-src \
-  tools/protogen/protogen.cpp src/core/parallel.cpp -o /tmp/protogen
+c++ -O3 -std=c++23 \
+  -I src -I third_party/FastNoiseLite -I third_party/glm -I build/_deps/taskflow-src \
+  tools/protogen/protogen.cpp src/core/parallel.cpp \
+  src/mapgen/hydrology.cpp src/mapgen/river_graph.cpp src/mapgen/river_prune.cpp \
+  src/mapgen/coarse_io.cpp src/mapgen/river_io.cpp \
+  -o /tmp/protogen
 
 mkdir -p /tmp/pg && /tmp/protogen --res 512 --world 8192 --steps 3000 \
   --drops 1024 --snapshot-every 750 --out /tmp/pg
-python3 tools/protogen/show.py /tmp/pg 512 8192
+python3 tools/protogen/show.py /tmp/pg
 ```
 
 `show.py` writes `-map.png` (hillshade + rivers + lakes) and `-hillshade.png`
 per snapshot. `lakes.py` / `lakestats.py` are post-hoc priority-flood analysis.
+All four now read resolution and world size from `world.txt` -- see below --
+instead of taking them as positional args: `show.py`/`soil.py` take the dump
+directory directly, `lakes.py`/`lakestats.py` take one `.f32` file and find
+`world.txt` next to it. The old explicit `<n> <world_m>` form still works as
+an override, for any dump directory without a `world.txt` of its own.
+
+## Self-describing output
+
+A dump used to be headerless rasters plus whatever `--res`/`--world` a
+consumer happened to pass on argv -- so its 16 m cell size existed nowhere in
+the data, and a wrong flag silently reinterpreted the bytes. protogen now
+writes two more things next to the `.f32` rasters, once the sim finishes:
+
+- **`world.txt`** -- a `src/mapgen/coarse_io.hpp` manifest: resolution, world
+  size (and the texel size derived from them, for readers that would rather
+  not divide), seed, runoff, steps, and the whole-world DRY-soil quantiles
+  (`soil_cut_mountain_m` / `soil_cut_hills_m`, the cutoffs
+  `src/mapgen/coarse_world_patch_source.cpp` classifies biomes against) -- so
+  a patch cut later from anywhere in the world classifies biomes the same way
+  regardless of what was cut.
+- **`rivers.bin`** -- a `src/mapgen/river_io.hpp` binary dump of the
+  WHOLE-WORLD `RiverGraph`: `route_flow` -> `accumulate_drainage` ->
+  `extract_river_graph` -> `prune_river_graph_by_width` ONLY. Not the length
+  prune -- a branch's length is only meaningful relative to a frame, and
+  there is none yet at whole-world scale; `window_rivers.cpp` applies that one
+  per patch, later. Binary because text would be ~35 MB at 16 km.
+
+```sh
+# Re-run ONLY the extraction + serialization above against an existing dump,
+# skipping the several-minute re-sim -- so an extraction bug costs seconds.
+# Calls the exact same code path a normal run does at the end, so the two
+# cannot diverge.
+/tmp/protogen --extract-rivers /tmp/pg
+```
+
+The duplication between `src/mapgen/*`'s `Field2D<T>` and protogen's own flat
+`std::vector<float>` fields (see `Grid` in protogen.cpp) is deliberate: a tiny
+adapter converts one to the other at the output boundary rather than protogen
+adopting `Field2D` internally, so a change to either representation cannot
+ripple into the other.
 
 ## Findings so far — read before changing anything
 
@@ -112,22 +158,34 @@ feeding chain from the north.
 supply. Earlier notes calling lakes "transient" were reporting a
 scale-dependent result as a general one.
 
-## Phase 2a — gameplay window (`window.cpp`)
+## Phase 2a — window selection (`select.cpp`)
 
-Picks a 1 km window out of a finished world and resamples it to the gameplay
-grid. Separate standalone TU, stdlib only:
+Scans a finished world for a gameplay-sized window against four gameplay
+gates, ranks the survivors, and prints an origin to pin. It only PICKS —
+extraction (resampling the picked origin into a gameplay patch: bed/water
+reconstruction, biome classification, the mapview load set) is no longer part
+of this tool. That is `src/mapgen/coarse_world_patch_source.hpp`, used
+through `badlands_mapview --load <coarse-dir>
+--patch-size/--patch-res/--patch-origin`; this tool's whole job ends at
+printing the origin to pass to `--patch-origin`.
+
+Separate standalone TU, stdlib only. Geometry (resolution, world size) is
+read from `<dump-dir>/world.txt` (`src/mapgen/coarse_io.hpp`'s format), not
+passed on argv — `--res`/`--world` remain as an explicit override for a dump
+that predates world.txt:
 
 ```sh
-c++ -O3 -std=c++20 tools/protogen/window.cpp -o /tmp/protogen_window
-/tmp/protogen_window --in /tmp/pg --tag 3000-step --res 1024 --world 16384 \
-                     --out /tmp/win --kernel-compare
-python3 tools/protogen/show.py /tmp/win 2048 1024
-/tmp/protogen_window --test      # 17 assertions, instant
+c++ -O3 -std=c++23 tools/protogen/select.cpp -o /tmp/select
+/tmp/select --in /tmp/pg --tag 3000-step
+/tmp/select --test      # 3 assertions, instant
 ```
 
-Geometry is forced, not chosen: 2048 texels x 0.5 m is 1024 m, which is exactly
-64 source cells at 16 m. A non-integer cell count is rejected rather than
-rounded.
+`--origin-cell X,Y` (source cells) re-scores one pinned origin instead of
+ranking. `--rank N` is an ordinal into the ranked list — it reshuffles
+whenever the map or a gate changes, so prefer pinning by coordinates once a
+location is chosen. The scanned window size is a world-metres flag
+(`--window-m`, default 1024) — alignment to the source grid is no longer this
+tool's concern, since it never resamples; that is the provider's problem now.
 
 Four gates, all satisfiable together — 449 of 58081 windows pass on M16b, 17
 distinct locations after overlap suppression:
@@ -147,69 +205,6 @@ distinct locations after overlap suppression:
   (map-wide median slope is 10.5 deg) — then overlap-suppressed, since windows
   one stride apart are the same place scored twice.
 
-### The upscale invents nothing
-
-32x from a 64x64 patch: every output texel is interpolated, and there is no
-detail below 16 m by construction. This is the LOW-FREQUENCY BASE for a later
-detail pass, not finished terrain.
-
-**Catmull-Rom, not Lanczos-3.** Two independent reasons, both measured:
-
-- Lanczos-3 **does not reproduce a linear ramp** — its weights sum to 1 only to
-  5.7e-3 and its first moment is off by 6.5e-2, giving a **6 cm** reconstruction
-  error. A planar hillside *is* a linear ramp, so that error is periodic with the
-  16 m source grid: it is the corduroy ripple visible in an upscaled hillshade.
-  Every cubic reproduces linear to machine epsilon.
-- Hillshade is a **derivative**, so ringing that looks negligible in height
-  (Lanczos overshoots 1.93 m on 160 m of relief) is obvious in the shading — and
-  normals are what the renderer consumes.
-
-On a hard 0..100 step Lanczos swings **-26.3 to +126.3**; B-spline stays exactly
-in range (all weights positive) and is the `--kernel bspline` escape hatch, at
-the cost of smoothing. `--kernel-compare` prints the trade on the chosen window.
-
-### Water is rebuilt, never resampled
-
-Depth has a hard shoreline step, and Lanczos on it went to **-2.01 m**. Instead
-the bed is resampled, each lake's surface elevation is carried as the constant it
-physically is, and depth is re-derived as `surface - bed`.
-
-- **The bed keeps the den.** `height` is the lake BED, so a basin stays a basin.
-- **The waterline is flood-filled at OUTPUT resolution**, so it lands on the
-  resampled bed's contour. Measured shoreline wobble on a cone: **0.006 texels**,
-  against 8 texels (one source cell) for a nearest-neighbour mask.
-- **The flood is bounded to 2 source cells around the sim's footprint.** The
-  sim's water field is NOT hydrostatically consistent: it ponds puddles sitting
-  above their own surroundings. One measured case — a 19-cell pond perched at
-  425.62 m with 2682 connected cells below it — drowned 66% of the window when
-  the flood was unbounded. The sim decides a lake's EXTENT; the resample may only
-  refine its BOUNDARY.
-
-### Viewing it in mapview
-
-The window tool also writes the load set `src/mapgen/map_io.hpp` reads:
-
-```sh
-./build/badlands_mapview --load /tmp/win     # resolution/size come from map.txt
-```
-
-Two things had to change on the engine side before a 2048² map would draw, both
-worth knowing because neither failed loudly:
-
-- **The lake surface was two triangles per TEXEL.** At 2048² that is 1.38M
-  triangles for a surface that is flat. Now merged into per-row runs — identical
-  geometry, 1382006 → 4198 triangles.
-- **WebGPU's default `maxBufferSize` is 256 MiB regardless of hardware.** An
-  11.9M-vertex cluster DAG needs 379 MB, and going over does not fail at the
-  allocation: the buffer comes back invalid, poisons the command buffer, and the
-  frame renders **black** with only a validation message. `GpuContext` now
-  requests the adapter's own ceiling (4 GiB here).
-
-Biomes are cut on ELEVATION quantiles over the dry texels (mapgen's 55%/12%
-fractions), wet → `Lake`. Deliberately a placeholder: in an eroded world slope
-reads as "mountain" better than elevation, and the honest source is what the sim
-produced (slope, discharge, sediment). One function, `ClassifyBiomes`.
-
 ## Open
 
 - **Deepest lake reports 308 m** at 16 km (M16b), which is far too deep for that
@@ -219,10 +214,20 @@ produced (slope, discharge, sediment). One function, `ClassifyBiomes`.
 - The particle pass is serial. Racy in-place writes would parallelise it the way
   the reference does, at the cost of reproducibility.
 - No hillslope diffusion, so divides lower only very slowly.
-- **The sim ponds single-cell puddles.** The rank-3 window holds 10 water
+- **The sim ponds single-cell puddles.** One measured window held 10 water
   components, 6 of them 1–3 cells. Each becomes a flat margin-bounded patch at
-  output resolution, which is what the blocky specks along a valley are. They are
+  patch resolution, which is what the blocky specks along a valley are. They are
   faithful to the data, not a resample artefact; culling them is a decision about
-  the sim's output, so `window.cpp` does not silently filter them.
-- **Phase 2b (the detail pass) does not exist.** The 2048^2 is a smooth base
-  surface, by design and by construction.
+  the SIM's output, so nothing downstream silently filters them.
+- **The relief pass does not exist yet.** A patch carries only what its coarse
+  world had, so everything visible is one coarse cell or larger. The fix is a
+  stateless per-point erosion FILTER composed onto the resampled bed — not a
+  second simulation — designed in
+  `docs/superpowers/specs/2026-08-02-procgen-stage-split-design.md` §3.4 and
+  deliberately deferred.
+- **`lakes.py` and `lakestats.py` print nonsense depths.** Both multiply the
+  loaded `height.f32` by `relief_m` a second time, though `Dump()` already writes
+  metres — so depths come out in the tens of thousands of metres. Pre-existing
+  and unrelated to the manifest change (it reproduces with the old explicit-argv
+  call style); `show.py` and `soil.py` are unaffected. Do not trust either
+  script's numbers until this is fixed.
