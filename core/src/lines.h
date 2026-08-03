@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 #include <shared_types.h>
+#include <ground_grid.h>   // kGroundAxisX/Y/Z -- the shared world-axis palette
 
 #include "gizmo.h"   // GizmoFrame/GizmoHandle for append_move_gizmo
 
@@ -14,19 +15,22 @@ inline constexpr simd_float4 kColorSubtract = {1.0f, 0.2f, 0.15f, 1.0f};
 inline constexpr simd_float4 kColorSelected = {0.6f, 0.8f, 1.0f, 1.0f};
 inline constexpr simd_float4 kColorGridLine = {1.0f, 1.0f, 1.0f, 0.18f};
 
-// Gizmo handle colors: RGB per axis, additive mix per plane (uv = red+green
-// = yellow, etc). Hot is WHITE — amber would collide with the yellow uv
-// plane.
+// Gizmo handle colors: one hue per axis, a pairwise mix per plane. Hot is
+// WHITE — amber would collide with the warm uv plane.
 //
-// The axis colors are the DESATURATED world-axis palette from ground_grid.h
-// (kGroundAxisX/Y/Z), not full-saturation primaries. Two reasons: full RGB at
-// this size read as a toy ("too cartoonish", user ruling), and sharing the
-// palette with the ground plate means an axis handle and a world axis of the
-// same hue look like the same idea. Plane colors are the pairwise additive
-// mixes of those, so the "uv = u + v" relationship survives desaturation.
-inline constexpr simd_float4 kColorAxisU    = {0.878f, 0.337f, 0.384f, 1.0f}; // == kGroundAxisX
-inline constexpr simd_float4 kColorAxisV    = {0.486f, 0.808f, 0.478f, 1.0f}; // == kGroundAxisY
-inline constexpr simd_float4 kColorAxisN    = {0.322f, 0.518f, 0.910f, 1.0f}; // == kGroundAxisZ
+// The axis colors ARE ground_grid.h's DESATURATED world-axis palette, aliased
+// rather than transcribed: full-saturation primaries at this size read as a
+// toy ("too cartoonish", user ruling), and sharing the constant means an axis
+// handle and a world axis of the same hue cannot drift apart the first time
+// either side is retuned.
+inline constexpr simd_float4 kColorAxisU    = kGroundAxisX;
+inline constexpr simd_float4 kColorAxisV    = kGroundAxisY;
+inline constexpr simd_float4 kColorAxisN    = kGroundAxisZ;
+// Hand-tuned toward each pair's additive mix rather than computed from one: a
+// literal component-wise max of two desaturated colours comes out brighter
+// than either parent, which would make the plane handles louder than the axes
+// they belong to. The u+v / u+n / v+n RELATIONSHIP is what has to survive, not
+// a formula.
 inline constexpr simd_float4 kColorPlaneUV  = {0.780f, 0.640f, 0.360f, 1.0f}; // u+v
 inline constexpr simd_float4 kColorPlaneUN  = {0.700f, 0.400f, 0.720f, 1.0f}; // u+n
 inline constexpr simd_float4 kColorPlaneVN  = {0.400f, 0.720f, 0.760f, 1.0f}; // v+n
