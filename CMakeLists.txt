@@ -284,6 +284,10 @@ target_include_directories(badlands_engine PUBLIC
 add_library(badlands_game_lib STATIC
     game/src/game.cpp
     game/src/sim.cpp
+    # The animation projection: summarises what each character is DOING into a
+    # CharacterAnim for the render layer. Runs last in step_world; nothing under
+    # game/ reads it back.
+    game/src/anim_projection.cpp
     game/src/combat.cpp
     game/src/command.cpp
     game/src/creature_catalog.cpp
@@ -706,6 +710,9 @@ add_executable(badlands_game_tests
     game/tests/hunter_tests.cpp
     game/tests/vision_tests.cpp
     game/tests/facing_tests.cpp
+    # The animation projection: what the render layer reads to pick a clip.
+    # Drives step_world so the projector runs in its real position (last).
+    game/tests/anim_projection_tests.cpp
     # Hero behavior, wasm-driven (Task 4: the C++ decision layer is gone --
     # the shipping brain is the sole hero decision-maker). Histogram-in-spirit
     # outcomes over a run, plus two smokes salvaged from the deleted

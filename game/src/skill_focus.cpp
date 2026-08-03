@@ -54,6 +54,7 @@ bool begin_focus(BadlandsGame& game, entt::entity e, int32_t skill_index,
         return false;
     }
     reg.emplace<SkillFocus>(e, SkillFocus{.resolve_at_ticks = game.world_ticks + duration,
+                                          .declared_ticks = game.world_ticks,
                                           .id = id,
                                           .skill_index = skill_index,
                                           .target_slot = target_slot,

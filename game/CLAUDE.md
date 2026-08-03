@@ -1,8 +1,11 @@
 # game/ — the world simulation
 
 `badlands_game_lib`: the EnTT world sim (placement, movement, brains, combat, needs,
-skills, progression), called by the apps through a C ABI. This is the only place
-gameplay state lives; `src/game/` is the render/scene layer, not this.
+skills, progression), called by the apps through the C++ `badlands::Sim` facade
+(`game/include/badlands_sim.hpp` — pimpl, POD snapshot vectors; the old C ABI is
+gone, and the surviving C ABIs are the Rust crates and the wasm brain contract).
+This is the only place gameplay state lives; `src/game/` is the render/scene layer,
+not this.
 
 Paths below are repo-relative. Sim sources are `game/src/…`; note that `game/tests/`
 holds render-layer tests too (see Tests).
@@ -31,6 +34,14 @@ Every duration, rate and timestamp belongs to exactly one base, and the name say
 - **Every mutation is a `Command`** (`game/src/command.h`) — player action and AI decision alike — applied at one point and appended to `command_log`.
 - **`state = f(initial config, command log, N ticks)`**, enforced by `game/tests/determinism_tests.cpp` (run-twice + replay-the-log).
 - **A new mechanic is a new `CommandKind` + handler.** A brain never writes the registry directly.
+
+## The registry is SHARED with the renderer, and the traffic is one-way
+- **`Sim::registry()` hands out the world, and the render layer puts its OWN components on sim entities** (per-character animation blend state). That is only safe because of the next rule.
+- **No sim system may ever read a render component.** It is not compiler-enforced — the accessor is a mutable reference — so it is pinned by a test in `game/tests/determinism_tests.cpp` that runs the same world with and without render components attached and requires identical state AND command log.
+- **`CharacterAnim` (`badlands_sim.hpp`) is the one thing the sim writes FOR the renderer**, produced by `project_anim_state` (`game/src/anim_projection.*`) as the last act of every tick. Nothing under `game/` reads it back.
+- **Animation observes state; it never consumes events.** An event can be retracted by a later mechanic, and a consumer that latched onto one must then cancel what it started; a state is what stuck, so an observer self-corrects. `GameEvent` stays the HUD's channel.
+- **The sim owns the TIMING, the view owns the CLIP.** A swing's window is authored data in ticks; the view stretches its clip to fit, so a blow and its animation cannot drift. No clip ever gets named under `game/`.
+- **The projector runs LAST in `step_world` and that placement is load-bearing.** It reads `moved_by_path_scratch`, whose contract is "never read outside the tick that wrote it"; earlier placement reads a half-filled buffer and reports actions later systems superseded.
 
 ## Brains and combat
 - **The hero brain is Nim→WASM and is the only hero brain** — run in a wasmtime host (`src/crates/brainhost`) behind the wire contract `game/src/brain_abi.h`. A world with no wasm bytes loaded simply idles its heroes; no mock/C++ hero decision layer exists.
