@@ -1,0 +1,934 @@
+// Metal backend. Compiled with -fobjc-arc (see CMakeLists.txt).
+//
+// Notes that are design, not incident:
+//
+//   * Buffers use MTLResourceStorageModeShared. On Apple silicon memory is
+//     unified, so readback is a memcpy from `contents` with no staging buffer
+//     and no async mapping. That is one of the things this port DELETES
+//     relative to Dawn, where the same operation needs MapAsync plus an event
+//     pump.
+//   * Binding tables apply as individual setBuffer/setTexture/setSamplerState
+//     calls at the reflected index, NOT as argument buffers. Slang emits flat
+//     [[buffer(N)]] bindings for plain globals, which is what the MVP shaders
+//     use; ParameterBlock's argument buffers arrive with bindless, together
+//     with the residency management they require.
+//   * Resource-state transitions are ACCEPTED AND IGNORED here. Metal tracks
+//     hazards itself. They exist for the validation decorator to check and for
+//     the eventual DX12 backend to emit -- see rhi_types.hpp.
+
+#include "engine/rhi/metal/metal_rhi.hpp"
+
+#import <Metal/Metal.h>
+
+#include <algorithm>
+#include <cstring>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <spdlog/spdlog.h>
+
+namespace badlands::rhi::metal {
+namespace {
+
+// ---------------------------------------------------------------------------
+// Enum mapping
+// ---------------------------------------------------------------------------
+
+MTLPixelFormat ToMtl(Format f) {
+  switch (f) {
+    case Format::R8Unorm: return MTLPixelFormatR8Unorm;
+    case Format::RGBA8Unorm: return MTLPixelFormatRGBA8Unorm;
+    case Format::RGBA8UnormSrgb: return MTLPixelFormatRGBA8Unorm_sRGB;
+    case Format::BGRA8Unorm: return MTLPixelFormatBGRA8Unorm;
+    case Format::BGRA8UnormSrgb: return MTLPixelFormatBGRA8Unorm_sRGB;
+    case Format::RG16Float: return MTLPixelFormatRG16Float;
+    case Format::RGBA16Float: return MTLPixelFormatRGBA16Float;
+    case Format::R32Float: return MTLPixelFormatR32Float;
+    case Format::R32Uint: return MTLPixelFormatR32Uint;
+    case Format::RG32Uint: return MTLPixelFormatRG32Uint;
+    case Format::RGBA32Float: return MTLPixelFormatRGBA32Float;
+    case Format::Depth32Float: return MTLPixelFormatDepth32Float;
+    case Format::Undefined: return MTLPixelFormatInvalid;
+  }
+  return MTLPixelFormatInvalid;
+}
+
+MTLCompareFunction ToMtl(CompareFunction c) {
+  switch (c) {
+    case CompareFunction::Never: return MTLCompareFunctionNever;
+    case CompareFunction::Less: return MTLCompareFunctionLess;
+    case CompareFunction::LessEqual: return MTLCompareFunctionLessEqual;
+    case CompareFunction::Greater: return MTLCompareFunctionGreater;
+    case CompareFunction::GreaterEqual: return MTLCompareFunctionGreaterEqual;
+    case CompareFunction::Equal: return MTLCompareFunctionEqual;
+    case CompareFunction::NotEqual: return MTLCompareFunctionNotEqual;
+    case CompareFunction::Always: return MTLCompareFunctionAlways;
+  }
+  return MTLCompareFunctionAlways;
+}
+
+MTLSamplerMinMagFilter ToMtlFilter(FilterMode m) {
+  return m == FilterMode::Nearest ? MTLSamplerMinMagFilterNearest
+                                  : MTLSamplerMinMagFilterLinear;
+}
+MTLSamplerMipFilter ToMtlMipFilter(FilterMode m) {
+  return m == FilterMode::Nearest ? MTLSamplerMipFilterNearest
+                                  : MTLSamplerMipFilterLinear;
+}
+MTLSamplerAddressMode ToMtl(AddressMode m) {
+  switch (m) {
+    case AddressMode::ClampToEdge: return MTLSamplerAddressModeClampToEdge;
+    case AddressMode::Repeat: return MTLSamplerAddressModeRepeat;
+    case AddressMode::MirrorRepeat: return MTLSamplerAddressModeMirrorRepeat;
+  }
+  return MTLSamplerAddressModeClampToEdge;
+}
+
+MTLLoadAction ToMtl(LoadOp op) {
+  switch (op) {
+    case LoadOp::Load: return MTLLoadActionLoad;
+    case LoadOp::Clear: return MTLLoadActionClear;
+    case LoadOp::DontCare: return MTLLoadActionDontCare;
+  }
+  return MTLLoadActionClear;
+}
+MTLStoreAction ToMtl(StoreOp op) {
+  return op == StoreOp::Store ? MTLStoreActionStore : MTLStoreActionDontCare;
+}
+
+MTLCullMode ToMtl(CullMode m) {
+  switch (m) {
+    case CullMode::None: return MTLCullModeNone;
+    case CullMode::Front: return MTLCullModeFront;
+    case CullMode::Back: return MTLCullModeBack;
+  }
+  return MTLCullModeNone;
+}
+
+MTLPrimitiveType ToMtl(PrimitiveTopology t) {
+  switch (t) {
+    case PrimitiveTopology::TriangleList: return MTLPrimitiveTypeTriangle;
+    case PrimitiveTopology::TriangleStrip: return MTLPrimitiveTypeTriangleStrip;
+    case PrimitiveTopology::LineList: return MTLPrimitiveTypeLine;
+  }
+  return MTLPrimitiveTypeTriangle;
+}
+
+NSString* Ns(const std::string& s) {
+  return [NSString stringWithUTF8String:s.c_str()];
+}
+
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+class MetalResource : public virtual IResource {
+ public:
+  explicit MetalResource(std::string label) : label_(std::move(label)) {}
+  bool IsDestroyed() const override { return destroyed_; }
+  const std::string& GetLabel() const override { return label_; }
+
+ protected:
+  void MarkDestroyed() { destroyed_ = true; }
+
+ private:
+  std::string label_;
+  bool destroyed_ = false;
+};
+
+class MetalBuffer final : public IBuffer, public MetalResource {
+ public:
+  MetalBuffer(id<MTLBuffer> buf, const BufferDesc& d)
+      : MetalResource(d.label), buffer_(buf), size_(d.size), usage_(d.usage) {}
+
+  void Destroy() override {
+    buffer_ = nil;
+    MarkDestroyed();
+  }
+
+  uint64_t GetSize() const override { return size_; }
+  BufferUsage GetUsage() const override { return usage_; }
+
+  void Write(uint64_t offset, std::span<const uint8_t> data) override {
+    if (!buffer_ || offset + data.size() > size_) return;
+    std::memcpy(static_cast<uint8_t*>(buffer_.contents) + offset, data.data(),
+                data.size());
+  }
+
+  // Unified memory: no staging copy, no async map.
+  bool Read(uint64_t offset, std::span<uint8_t> out) override {
+    if (!buffer_ || offset + out.size() > size_) return false;
+    std::memcpy(out.data(),
+                static_cast<const uint8_t*>(buffer_.contents) + offset,
+                out.size());
+    return true;
+  }
+
+  id<MTLBuffer> Handle() const { return buffer_; }
+
+ private:
+  id<MTLBuffer> buffer_;
+  uint64_t size_;
+  BufferUsage usage_;
+};
+
+class MetalTexture;
+
+class MetalTextureView final : public ITextureView, public MetalResource {
+ public:
+  MetalTextureView(MetalTexture* owner, id<MTLTexture> tex, Format fmt,
+                   std::string label)
+      : MetalResource(std::move(label)), owner_(owner), texture_(tex),
+        format_(fmt) {}
+
+  void Destroy() override {
+    texture_ = nil;
+    MarkDestroyed();
+  }
+  ITexture* GetTexture() const override;
+  Format GetFormat() const override { return format_; }
+  id<MTLTexture> Handle() const { return texture_; }
+
+ private:
+  MetalTexture* owner_;
+  id<MTLTexture> texture_;
+  Format format_;
+};
+
+class MetalTexture final : public ITexture, public MetalResource {
+ public:
+  MetalTexture(id<MTLTexture> tex, const TextureDesc& d)
+      : MetalResource(d.label), texture_(tex), desc_(d) {}
+
+  void Destroy() override {
+    views_.clear();
+    texture_ = nil;
+    MarkDestroyed();
+  }
+
+  uint32_t GetWidth() const override { return desc_.width; }
+  uint32_t GetHeight() const override { return desc_.height; }
+  uint32_t GetArrayLayers() const override { return desc_.array_layers; }
+  uint32_t GetMipLevels() const override { return desc_.mip_levels; }
+  Format GetFormat() const override { return desc_.format; }
+  TextureUsage GetUsage() const override { return desc_.usage; }
+
+  ITextureView* CreateView(const TextureViewDesc& vd) override {
+    const uint64_t key = (uint64_t(vd.base_mip) << 32) | vd.base_layer;
+    auto it = views_.find(key);
+    if (it != views_.end()) return it->second.get();
+
+    // The MVP only needs whole-resource views; a sliced view would use
+    // newTextureViewWithPixelFormat:textureType:levels:slices:.
+    auto view = std::make_unique<MetalTextureView>(this, texture_, desc_.format,
+                                                   desc_.label + ".view");
+    auto* raw = view.get();
+    views_.emplace(key, std::move(view));
+    return raw;
+  }
+
+  ITextureView* GetDefaultView() override { return CreateView({}); }
+
+  void Write(uint32_t mip, uint32_t layer,
+             std::span<const uint8_t> data) override {
+    if (!texture_) return;
+    const uint32_t w = std::max(1u, desc_.width >> mip);
+    const uint32_t h = std::max(1u, desc_.height >> mip);
+    const uint32_t bpr = w * FormatByteSize(desc_.format);
+    if (data.size() < size_t(bpr) * h) {
+      spdlog::error("rhi/metal: Write to '{}' is short ({} < {})",
+                    GetLabel(), data.size(), size_t(bpr) * h);
+      return;
+    }
+    [texture_ replaceRegion:MTLRegionMake2D(0, 0, w, h)
+                mipmapLevel:mip
+                      slice:layer
+                  withBytes:data.data()
+                bytesPerRow:bpr
+              bytesPerImage:size_t(bpr) * h];
+  }
+
+  id<MTLTexture> Handle() const { return texture_; }
+
+ private:
+  id<MTLTexture> texture_;
+  TextureDesc desc_;
+  std::map<uint64_t, std::unique_ptr<MetalTextureView>> views_;
+};
+
+ITexture* MetalTextureView::GetTexture() const { return owner_; }
+
+class MetalSampler final : public ISampler, public MetalResource {
+ public:
+  MetalSampler(id<MTLSamplerState> s, const SamplerDesc& d)
+      : MetalResource(d.label), sampler_(s), desc_(d) {}
+  void Destroy() override {
+    sampler_ = nil;
+    MarkDestroyed();
+  }
+  const SamplerDesc& GetDesc() const override { return desc_; }
+  id<MTLSamplerState> Handle() const { return sampler_; }
+
+ private:
+  id<MTLSamplerState> sampler_;
+  SamplerDesc desc_;
+};
+
+// A binding table is just the resolved entry list. Applying it is a handful of
+// set* calls at the reflected index; see the file header for why not argument
+// buffers.
+class MetalBindingTable final : public IBindingTable, public MetalResource {
+ public:
+  explicit MetalBindingTable(const BindingTableDesc& d)
+      : MetalResource(d.label), group_(d.group), entries_(d.entries) {}
+  void Destroy() override { MarkDestroyed(); }
+  uint32_t GetGroup() const override { return group_; }
+  const std::vector<BindingEntry>& Entries() const { return entries_; }
+
+ private:
+  uint32_t group_;
+  std::vector<BindingEntry> entries_;
+};
+
+// ---------------------------------------------------------------------------
+// Shaders and pipelines
+// ---------------------------------------------------------------------------
+
+class MetalShaderModule final : public IShaderModule {
+ public:
+  MetalShaderModule(id<MTLLibrary> lib, ShaderReflection r, std::string label)
+      : library_(lib), reflection_(std::move(r)), label_(std::move(label)) {}
+  const ShaderReflection& GetReflection() const override { return reflection_; }
+  const std::string& GetLabel() const override { return label_; }
+  id<MTLLibrary> Library() const { return library_; }
+
+ private:
+  id<MTLLibrary> library_;
+  ShaderReflection reflection_;
+  std::string label_;
+};
+
+ShaderReflection MergeReflection(const IShaderModule* a, const IShaderModule* b) {
+  ShaderReflection out;
+  auto append = [&out](const IShaderModule* m) {
+    if (!m) return;
+    const ShaderReflection& r = m->GetReflection();
+    for (const auto& bind : r.bindings) {
+      const bool dup = std::any_of(
+          out.bindings.begin(), out.bindings.end(), [&](const auto& e) {
+            return e.group == bind.group && e.slot == bind.slot;
+          });
+      if (!dup) out.bindings.push_back(bind);
+    }
+    for (const auto& ub : r.uniform_blocks) {
+      const bool dup =
+          std::any_of(out.uniform_blocks.begin(), out.uniform_blocks.end(),
+                      [&](const auto& e) {
+                        return e.group == ub.group && e.slot == ub.slot;
+                      });
+      if (!dup) out.uniform_blocks.push_back(ub);
+    }
+    out.entry_points.insert(out.entry_points.end(), r.entry_points.begin(),
+                            r.entry_points.end());
+  };
+  append(a);
+  append(b);
+  return out;
+}
+
+class MetalRenderPipeline final : public IRenderPipeline {
+ public:
+  MetalRenderPipeline(id<MTLRenderPipelineState> pso,
+                      id<MTLDepthStencilState> dss, const RenderPipelineDesc& d)
+      : pso_(pso), depth_(dss), desc_(d),
+        reflection_(MergeReflection(d.vertex_shader, d.fragment_shader)) {}
+
+  const ShaderReflection& GetReflection() const override { return reflection_; }
+  const RenderPipelineDesc& GetDesc() const override { return desc_; }
+  id<MTLRenderPipelineState> Pso() const { return pso_; }
+  id<MTLDepthStencilState> DepthState() const { return depth_; }
+  MTLCullMode Cull() const { return ToMtl(desc_.cull_mode); }
+  MTLWinding Winding() const {
+    return desc_.front_face == FrontFace::Ccw ? MTLWindingCounterClockwise
+                                              : MTLWindingClockwise;
+  }
+  MTLPrimitiveType Topology() const { return ToMtl(desc_.topology); }
+
+ private:
+  id<MTLRenderPipelineState> pso_;
+  id<MTLDepthStencilState> depth_;
+  RenderPipelineDesc desc_;
+  ShaderReflection reflection_;
+};
+
+class MetalComputePipeline final : public IComputePipeline {
+ public:
+  MetalComputePipeline(id<MTLComputePipelineState> pso,
+                       const ComputePipelineDesc& d)
+      : pso_(pso), reflection_(MergeReflection(d.shader, nullptr)),
+        entry_(d.entry) {}
+
+  const ShaderReflection& GetReflection() const override { return reflection_; }
+  void GetWorkgroupSize(uint32_t out[3]) const override {
+    out[0] = out[1] = out[2] = 1;
+    for (const auto& ep : reflection_.entry_points) {
+      if (ep.name != entry_) continue;
+      out[0] = ep.workgroup_size[0];
+      out[1] = ep.workgroup_size[1];
+      out[2] = ep.workgroup_size[2];
+      return;
+    }
+  }
+  id<MTLComputePipelineState> Pso() const { return pso_; }
+
+ private:
+  id<MTLComputePipelineState> pso_;
+  ShaderReflection reflection_;
+  std::string entry_;
+};
+
+// ---------------------------------------------------------------------------
+// Binding application
+// ---------------------------------------------------------------------------
+
+// `index` is the reflected Metal binding index. Slang emits flat
+// [[buffer(N)]] / [[texture(N)]] / [[sampler(N)]] for plain globals, and its
+// reflection reports the same N -- which is what BindingLocation carries.
+uint32_t IndexFor(const ShaderReflection& refl, uint32_t group, uint32_t slot) {
+  for (const auto& b : refl.bindings) {
+    if (b.group == group && b.slot == slot) return b.location.index;
+  }
+  return slot;  // no reflection entry: fall back to the slot itself
+}
+
+// Render and compute encoders are unrelated protocols with different
+// selectors, so this is two functions rather than one with a runtime branch --
+// a template would have to compile both selector sets against both encoders.
+
+// Every binding goes to BOTH stages: Slang's ProgramLayout does not report
+// which stages use a binding (probe B), so narrowing is not possible yet.
+// Correct, slightly wasteful, and revisited only on evidence.
+void ApplyTableGraphics(id<MTLRenderCommandEncoder> enc,
+                        const ShaderReflection& refl, uint32_t group,
+                        const MetalBindingTable& table) {
+  for (const auto& e : table.Entries()) {
+    const uint32_t index = IndexFor(refl, group, e.slot);
+    switch (e.kind) {
+      case BindingKind::UniformBuffer:
+      case BindingKind::StorageBuffer:
+      case BindingKind::ReadOnlyStorageBuffer: {
+        auto* b = static_cast<MetalBuffer*>(e.buffer);
+        if (!b) break;
+        [enc setVertexBuffer:b->Handle() offset:e.buffer_offset atIndex:index];
+        [enc setFragmentBuffer:b->Handle() offset:e.buffer_offset atIndex:index];
+        break;
+      }
+      case BindingKind::SampledTexture: {
+        auto* v = static_cast<MetalTextureView*>(e.texture_view);
+        if (!v) break;
+        [enc setVertexTexture:v->Handle() atIndex:index];
+        [enc setFragmentTexture:v->Handle() atIndex:index];
+        break;
+      }
+      case BindingKind::Sampler: {
+        auto* s = static_cast<MetalSampler*>(e.sampler);
+        if (!s) break;
+        [enc setVertexSamplerState:s->Handle() atIndex:index];
+        [enc setFragmentSamplerState:s->Handle() atIndex:index];
+        break;
+      }
+    }
+  }
+}
+
+void ApplyTableCompute(id<MTLComputeCommandEncoder> enc,
+                       const ShaderReflection& refl, uint32_t group,
+                       const MetalBindingTable& table) {
+  for (const auto& e : table.Entries()) {
+    const uint32_t index = IndexFor(refl, group, e.slot);
+    switch (e.kind) {
+      case BindingKind::UniformBuffer:
+      case BindingKind::StorageBuffer:
+      case BindingKind::ReadOnlyStorageBuffer: {
+        auto* b = static_cast<MetalBuffer*>(e.buffer);
+        if (!b) break;
+        [enc setBuffer:b->Handle() offset:e.buffer_offset atIndex:index];
+        break;
+      }
+      case BindingKind::SampledTexture: {
+        auto* v = static_cast<MetalTextureView*>(e.texture_view);
+        if (!v) break;
+        [enc setTexture:v->Handle() atIndex:index];
+        break;
+      }
+      case BindingKind::Sampler: {
+        auto* s = static_cast<MetalSampler*>(e.sampler);
+        if (!s) break;
+        [enc setSamplerState:s->Handle() atIndex:index];
+        break;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Passes
+// ---------------------------------------------------------------------------
+
+class MetalRenderPass final : public IRenderPass {
+ public:
+  MetalRenderPass(id<MTLRenderCommandEncoder> enc) : enc_(enc) {}
+
+  void SetPipeline(IRenderPipeline* p) override {
+    auto* mp = static_cast<MetalRenderPipeline*>(p);
+    if (!mp) return;
+    pipeline_ = mp;
+    [enc_ setRenderPipelineState:mp->Pso()];
+    if (mp->DepthState()) [enc_ setDepthStencilState:mp->DepthState()];
+    [enc_ setCullMode:mp->Cull()];
+    [enc_ setFrontFacingWinding:mp->Winding()];
+  }
+
+  void SetBindingTable(uint32_t group, IBindingTable* t) override {
+    auto* mt = static_cast<MetalBindingTable*>(t);
+    if (!mt || !pipeline_) return;
+    ApplyTableGraphics(enc_, pipeline_->GetReflection(), group, *mt);
+  }
+
+  void SetIndexBuffer(IBuffer* b, IndexFormat f, uint64_t offset) override {
+    index_buffer_ = static_cast<MetalBuffer*>(b);
+    index_offset_ = offset;
+    index_type_ = f == IndexFormat::Uint16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+    index_stride_ = f == IndexFormat::Uint16 ? 2 : 4;
+  }
+
+  void SetViewport(float x, float y, float w, float h) override {
+    [enc_ setViewport:(MTLViewport){x, y, w, h, 0.0, 1.0}];
+  }
+  void SetScissor(uint32_t x, uint32_t y, uint32_t w, uint32_t h) override {
+    [enc_ setScissorRect:(MTLScissorRect){x, y, w, h}];
+  }
+
+  void Draw(uint32_t vertex_count, uint32_t instance_count,
+            uint32_t first_vertex, uint32_t first_instance) override {
+    if (!pipeline_) return;
+    [enc_ drawPrimitives:pipeline_->Topology()
+             vertexStart:first_vertex
+             vertexCount:vertex_count
+           instanceCount:instance_count
+            baseInstance:first_instance];
+  }
+
+  void DrawIndexed(uint32_t index_count, uint32_t instance_count,
+                   uint32_t first_index, int32_t base_vertex,
+                   uint32_t first_instance) override {
+    if (!pipeline_ || !index_buffer_) return;
+    [enc_ drawIndexedPrimitives:pipeline_->Topology()
+                     indexCount:index_count
+                      indexType:index_type_
+                    indexBuffer:index_buffer_->Handle()
+              indexBufferOffset:index_offset_ + uint64_t(first_index) * index_stride_
+                  instanceCount:instance_count
+                     baseVertex:base_vertex
+                   baseInstance:first_instance];
+  }
+
+  void DrawIndexedIndirect(IBuffer* args, uint64_t offset) override {
+    auto* mb = static_cast<MetalBuffer*>(args);
+    if (!pipeline_ || !index_buffer_ || !mb) return;
+    [enc_ drawIndexedPrimitives:pipeline_->Topology()
+                      indexType:index_type_
+                    indexBuffer:index_buffer_->Handle()
+              indexBufferOffset:index_offset_
+                 indirectBuffer:mb->Handle()
+           indirectBufferOffset:offset];
+  }
+
+  void End() override {
+    if (ended_) return;
+    ended_ = true;
+    [enc_ endEncoding];
+  }
+  bool IsEnded() const override { return ended_; }
+
+ private:
+  id<MTLRenderCommandEncoder> enc_;
+  MetalRenderPipeline* pipeline_ = nullptr;
+  MetalBuffer* index_buffer_ = nullptr;
+  uint64_t index_offset_ = 0;
+  uint32_t index_stride_ = 4;
+  MTLIndexType index_type_ = MTLIndexTypeUInt32;
+  bool ended_ = false;
+};
+
+class MetalComputePass final : public IComputePass {
+ public:
+  explicit MetalComputePass(id<MTLComputeCommandEncoder> enc) : enc_(enc) {}
+
+  void SetPipeline(IComputePipeline* p) override {
+    auto* mp = static_cast<MetalComputePipeline*>(p);
+    if (!mp) return;
+    pipeline_ = mp;
+    [enc_ setComputePipelineState:mp->Pso()];
+    mp->GetWorkgroupSize(threads_);
+  }
+  void SetBindingTable(uint32_t group, IBindingTable* t) override {
+    auto* mt = static_cast<MetalBindingTable*>(t);
+    if (!mt || !pipeline_) return;
+    ApplyTableCompute(enc_, pipeline_->GetReflection(), group, *mt);
+  }
+  void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
+    if (!pipeline_) return;
+    [enc_ dispatchThreadgroups:MTLSizeMake(x, y, z)
+         threadsPerThreadgroup:MTLSizeMake(threads_[0], threads_[1], threads_[2])];
+  }
+  void End() override {
+    if (ended_) return;
+    ended_ = true;
+    [enc_ endEncoding];
+  }
+  bool IsEnded() const override { return ended_; }
+
+ private:
+  id<MTLComputeCommandEncoder> enc_;
+  MetalComputePipeline* pipeline_ = nullptr;
+  uint32_t threads_[3] = {1, 1, 1};
+  bool ended_ = false;
+};
+
+// ---------------------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------------------
+
+class MetalCommandEncoder final : public ICommandEncoder {
+ public:
+  MetalCommandEncoder(id<MTLCommandBuffer> cmd, std::string label)
+      : cmd_(cmd), label_(std::move(label)) {
+    if (!label_.empty()) cmd_.label = Ns(label_);
+  }
+
+  // Accepted and ignored: Metal auto-tracks hazards. See the file header.
+  void Transition(IResource*, ResourceState) override {}
+  void TransitionMany(std::span<const ResourceTransition>) override {}
+
+  IRenderPass* BeginRenderPass(const RenderPassDesc& desc) override {
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    for (size_t i = 0; i < desc.color_attachments.size(); ++i) {
+      const auto& a = desc.color_attachments[i];
+      auto* v = static_cast<MetalTextureView*>(a.view);
+      if (!v) continue;
+      rp.colorAttachments[i].texture = v->Handle();
+      rp.colorAttachments[i].loadAction = ToMtl(a.load_op);
+      rp.colorAttachments[i].storeAction = ToMtl(a.store_op);
+      rp.colorAttachments[i].clearColor =
+          MTLClearColorMake(a.clear_color[0], a.clear_color[1],
+                            a.clear_color[2], a.clear_color[3]);
+    }
+    if (auto* dv = static_cast<MetalTextureView*>(desc.depth_attachment.view)) {
+      rp.depthAttachment.texture = dv->Handle();
+      rp.depthAttachment.loadAction = ToMtl(desc.depth_attachment.load_op);
+      rp.depthAttachment.storeAction = ToMtl(desc.depth_attachment.store_op);
+      // Reversed-Z: far is 0.0.
+      rp.depthAttachment.clearDepth = desc.depth_attachment.clear_depth;
+    }
+
+    id<MTLRenderCommandEncoder> enc =
+        [cmd_ renderCommandEncoderWithDescriptor:rp];
+    if (!enc) {
+      spdlog::error("rhi/metal: renderCommandEncoder failed for '{}'", desc.label);
+      return nullptr;
+    }
+    if (!desc.label.empty()) enc.label = Ns(desc.label);
+    render_passes_.push_back(std::make_unique<MetalRenderPass>(enc));
+    return render_passes_.back().get();
+  }
+
+  IComputePass* BeginComputePass(const std::string& label) override {
+    id<MTLComputeCommandEncoder> enc = [cmd_ computeCommandEncoder];
+    if (!enc) {
+      spdlog::error("rhi/metal: computeCommandEncoder failed for '{}'", label);
+      return nullptr;
+    }
+    if (!label.empty()) enc.label = Ns(label);
+    compute_passes_.push_back(std::make_unique<MetalComputePass>(enc));
+    return compute_passes_.back().get();
+  }
+
+  void CopyBufferToBuffer(IBuffer* src, uint64_t so, IBuffer* dst, uint64_t dof,
+                          uint64_t size) override {
+    auto* s = static_cast<MetalBuffer*>(src);
+    auto* d = static_cast<MetalBuffer*>(dst);
+    if (!s || !d || size == 0) return;
+    id<MTLBlitCommandEncoder> blit = [cmd_ blitCommandEncoder];
+    [blit copyFromBuffer:s->Handle()
+            sourceOffset:so
+                toBuffer:d->Handle()
+       destinationOffset:dof
+                    size:size];
+    [blit endEncoding];
+  }
+
+  void CopyTextureToBuffer(ITexture* src, uint32_t mip, uint32_t layer,
+                           IBuffer* dst, uint64_t off) override {
+    auto* s = static_cast<MetalTexture*>(src);
+    auto* d = static_cast<MetalBuffer*>(dst);
+    if (!s || !d) return;
+    const uint32_t w = std::max(1u, s->GetWidth() >> mip);
+    const uint32_t h = std::max(1u, s->GetHeight() >> mip);
+    const uint32_t bpr = w * FormatByteSize(s->GetFormat());
+
+    id<MTLBlitCommandEncoder> blit = [cmd_ blitCommandEncoder];
+    [blit copyFromTexture:s->Handle()
+                sourceSlice:layer
+                sourceLevel:mip
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(w, h, 1)
+                   toBuffer:d->Handle()
+          destinationOffset:off
+     destinationBytesPerRow:bpr
+   destinationBytesPerImage:size_t(bpr) * h];
+    [blit endEncoding];
+  }
+
+  void Finish() override { finished_ = true; }
+  bool IsFinished() const override { return finished_; }
+
+  id<MTLCommandBuffer> CommandBuffer() const { return cmd_; }
+
+ private:
+  id<MTLCommandBuffer> cmd_;
+  std::string label_;
+  std::vector<std::unique_ptr<MetalRenderPass>> render_passes_;
+  std::vector<std::unique_ptr<MetalComputePass>> compute_passes_;
+  bool finished_ = false;
+};
+
+// ---------------------------------------------------------------------------
+// Device
+// ---------------------------------------------------------------------------
+
+MTLTextureUsage ToMtlUsage(TextureUsage u) {
+  MTLTextureUsage out = MTLTextureUsageUnknown;
+  if (Has(u, TextureUsage::Sampled)) out |= MTLTextureUsageShaderRead;
+  if (Has(u, TextureUsage::Storage)) out |= MTLTextureUsageShaderWrite;
+  if (Has(u, TextureUsage::RenderTarget) || Has(u, TextureUsage::DepthStencil)) {
+    out |= MTLTextureUsageRenderTarget;
+  }
+  return out;
+}
+
+class MetalDevice final : public IRhiDevice {
+ public:
+  MetalDevice(id<MTLDevice> dev, id<MTLCommandQueue> queue, std::string label)
+      : device_(dev), queue_(queue), label_(std::move(label)) {}
+
+  BackendKind GetBackend() const override { return BackendKind::Metal; }
+
+  BufferPtr CreateBuffer(const BufferDesc& d) override {
+    // Shared storage keeps readback a memcpy on unified memory.
+    id<MTLBuffer> buf = [device_ newBufferWithLength:std::max<uint64_t>(d.size, 1)
+                                             options:MTLResourceStorageModeShared];
+    if (!buf) {
+      spdlog::error("rhi/metal: newBuffer failed for '{}' ({} bytes)", d.label,
+                    d.size);
+      return nullptr;
+    }
+    if (!d.label.empty()) buf.label = Ns(d.label);
+    return std::make_shared<MetalBuffer>(buf, d);
+  }
+
+  TexturePtr CreateTexture(const TextureDesc& d) override {
+    MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+    td.textureType = d.array_layers > 1 ? MTLTextureType2DArray : MTLTextureType2D;
+    td.pixelFormat = ToMtl(d.format);
+    td.width = d.width;
+    td.height = d.height;
+    td.arrayLength = d.array_layers;
+    td.mipmapLevelCount = d.mip_levels;
+    td.usage = ToMtlUsage(d.usage);
+    // Depth and render targets must be private; everything else stays shared
+    // so Write() can go through replaceRegion.
+    td.storageMode = Has(d.usage, TextureUsage::DepthStencil)
+                         ? MTLStorageModePrivate
+                         : MTLStorageModeShared;
+
+    id<MTLTexture> tex = [device_ newTextureWithDescriptor:td];
+    if (!tex) {
+      spdlog::error("rhi/metal: newTexture failed for '{}'", d.label);
+      return nullptr;
+    }
+    if (!d.label.empty()) tex.label = Ns(d.label);
+    return std::make_shared<MetalTexture>(tex, d);
+  }
+
+  SamplerPtr CreateSampler(const SamplerDesc& d) override {
+    MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+    sd.minFilter = ToMtlFilter(d.min_filter);
+    sd.magFilter = ToMtlFilter(d.mag_filter);
+    sd.mipFilter = ToMtlMipFilter(d.mip_filter);
+    sd.sAddressMode = ToMtl(d.address_u);
+    sd.tAddressMode = ToMtl(d.address_v);
+    sd.maxAnisotropy = std::max<uint16_t>(1, d.max_anisotropy);
+    id<MTLSamplerState> s = [device_ newSamplerStateWithDescriptor:sd];
+    if (!s) {
+      spdlog::error("rhi/metal: newSamplerState failed for '{}'", d.label);
+      return nullptr;
+    }
+    return std::make_shared<MetalSampler>(s, d);
+  }
+
+  ShaderModulePtr CreateShaderModule(const std::string& source,
+                                     const ShaderReflection& refl,
+                                     const std::string& label) override {
+    NSError* err = nil;
+    MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
+    id<MTLLibrary> lib = [device_ newLibraryWithSource:Ns(source)
+                                               options:opts
+                                                 error:&err];
+    if (!lib) {
+      spdlog::error("rhi/metal: MSL compile failed for '{}': {}", label,
+                    err ? err.localizedDescription.UTF8String : "unknown");
+      return nullptr;
+    }
+    return std::make_shared<MetalShaderModule>(lib, refl, label);
+  }
+
+  RenderPipelinePtr CreateRenderPipeline(const RenderPipelineDesc& d) override {
+    auto* vsm = static_cast<MetalShaderModule*>(d.vertex_shader);
+    if (!vsm) {
+      spdlog::error("rhi/metal: '{}' has no vertex shader", d.label);
+      return nullptr;
+    }
+    auto* fsm = static_cast<MetalShaderModule*>(d.fragment_shader);
+
+    MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+    pd.vertexFunction = [vsm->Library() newFunctionWithName:Ns(d.vertex_entry)];
+    if (!pd.vertexFunction) {
+      spdlog::error("rhi/metal: '{}' has no vertex entry '{}'", d.label,
+                    d.vertex_entry);
+      return nullptr;
+    }
+    if (fsm) {
+      pd.fragmentFunction = [fsm->Library() newFunctionWithName:Ns(d.fragment_entry)];
+      if (!pd.fragmentFunction) {
+        spdlog::error("rhi/metal: '{}' has no fragment entry '{}'", d.label,
+                      d.fragment_entry);
+        return nullptr;
+      }
+    }
+    for (size_t i = 0; i < d.color_formats.size(); ++i) {
+      pd.colorAttachments[i].pixelFormat = ToMtl(d.color_formats[i]);
+    }
+    if (d.depth.format != Format::Undefined) {
+      pd.depthAttachmentPixelFormat = ToMtl(d.depth.format);
+    }
+    // No vertex descriptor: the MVP pulls vertex data from storage buffers.
+
+    NSError* err = nil;
+    id<MTLRenderPipelineState> pso =
+        [device_ newRenderPipelineStateWithDescriptor:pd error:&err];
+    if (!pso) {
+      spdlog::error("rhi/metal: render pipeline '{}' failed: {}", d.label,
+                    err ? err.localizedDescription.UTF8String : "unknown");
+      return nullptr;
+    }
+
+    id<MTLDepthStencilState> dss = nil;
+    if (d.depth.test_enabled || d.depth.write_enabled) {
+      MTLDepthStencilDescriptor* dd = [[MTLDepthStencilDescriptor alloc] init];
+      dd.depthCompareFunction =
+          d.depth.test_enabled ? ToMtl(d.depth.compare) : MTLCompareFunctionAlways;
+      dd.depthWriteEnabled = d.depth.write_enabled;
+      dss = [device_ newDepthStencilStateWithDescriptor:dd];
+    }
+    return std::make_shared<MetalRenderPipeline>(pso, dss, d);
+  }
+
+  ComputePipelinePtr CreateComputePipeline(
+      const ComputePipelineDesc& d) override {
+    auto* sm = static_cast<MetalShaderModule*>(d.shader);
+    if (!sm) {
+      spdlog::error("rhi/metal: compute pipeline '{}' has no shader", d.label);
+      return nullptr;
+    }
+    id<MTLFunction> fn = [sm->Library() newFunctionWithName:Ns(d.entry)];
+    if (!fn) {
+      // Slang renames an entry point called `main` to `main_0` on Metal, which
+      // is a real porting trap -- say so rather than just failing.
+      spdlog::error("rhi/metal: '{}' has no entry '{}' (note: Slang renames "
+                    "`main` to `main_0` for Metal)", d.label, d.entry);
+      return nullptr;
+    }
+    NSError* err = nil;
+    id<MTLComputePipelineState> pso =
+        [device_ newComputePipelineStateWithFunction:fn error:&err];
+    if (!pso) {
+      spdlog::error("rhi/metal: compute pipeline '{}' failed: {}", d.label,
+                    err ? err.localizedDescription.UTF8String : "unknown");
+      return nullptr;
+    }
+    return std::make_shared<MetalComputePipeline>(pso, d);
+  }
+
+  BindingTablePtr CreateBindingTable(const BindingTableDesc& d) override {
+    return std::make_shared<MetalBindingTable>(d);
+  }
+
+  std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
+      const std::string& label) override {
+    id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+    if (!cmd) {
+      spdlog::error("rhi/metal: commandBuffer failed for '{}'", label);
+      return nullptr;
+    }
+    return std::make_unique<MetalCommandEncoder>(cmd, label);
+  }
+
+  void Submit(ICommandEncoder& encoder) override {
+    auto* me = static_cast<MetalCommandEncoder*>(&encoder);
+    if (!me) return;
+    id<MTLCommandBuffer> cmd = me->CommandBuffer();
+    [cmd commit];
+    in_flight_.push_back(cmd);
+  }
+
+  void WaitIdle() override {
+    for (id<MTLCommandBuffer> cmd : in_flight_) [cmd waitUntilCompleted];
+    in_flight_.clear();
+  }
+
+  // The decorator owns validation; a bare Metal device observes nothing.
+  void BeginValidationScope() override {}
+  std::optional<std::string> EndValidationScope() override {
+    return std::nullopt;
+  }
+  bool IsValidationEnabled() const override { return false; }
+
+ private:
+  id<MTLDevice> device_;
+  id<MTLCommandQueue> queue_;
+  std::string label_;
+  std::vector<id<MTLCommandBuffer>> in_flight_;
+};
+
+}  // namespace
+
+std::unique_ptr<IRhiDevice> CreateMetalDevice(const std::string& label) {
+  id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+  if (!dev) {
+    spdlog::error("rhi/metal: no Metal device available");
+    return nullptr;
+  }
+  id<MTLCommandQueue> queue = [dev newCommandQueue];
+  if (!queue) {
+    spdlog::error("rhi/metal: newCommandQueue failed");
+    return nullptr;
+  }
+  spdlog::info("rhi/metal: {} ({})", dev.name.UTF8String,
+               label.empty() ? "unlabelled" : label.c_str());
+  return std::make_unique<MetalDevice>(dev, queue, label);
+}
+
+}  // namespace badlands::rhi::metal

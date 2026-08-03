@@ -26,21 +26,70 @@
 
 namespace badlands::rhi::test {
 
+// Minimal shader source per backend.
+//
+// Shader source is TARGET-NATIVE by contract -- the RHI never invokes a
+// compiler -- so a shared behavioural list cannot use one string for every
+// backend. Null ignores the source entirely; Metal must actually compile it.
+// DX12 adds an HLSL arm here rather than anywhere else.
+//
+// Entry points are named cs_/vs_/fs_main rather than `main`: Slang renames a
+// Metal entry called `main` to `main_0`, and matching that convention here
+// keeps the tests from encoding a trap the real shaders avoid.
+inline const char* MinimalComputeSource(BackendKind backend) {
+  switch (backend) {
+    case BackendKind::Metal:
+      return R"(
+#include <metal_stdlib>
+using namespace metal;
+kernel void cs_main(uint gid [[thread_position_in_grid]]) {}
+)";
+    case BackendKind::Null:
+      return "";
+  }
+  return "";
+}
+
+inline const char* MinimalGraphicsSource(BackendKind backend) {
+  switch (backend) {
+    case BackendKind::Metal:
+      return R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VOut { float4 pos [[position]]; };
+vertex VOut vs_main(uint vid [[vertex_id]]) {
+  VOut o; o.pos = float4(0.0, 0.0, 0.0, 1.0); return o;
+}
+fragment float4 fs_main() { return float4(1.0); }
+)";
+    case BackendKind::Null:
+      return "";
+  }
+  return "";
+}
+
 // A reflection covering one binding of every kind at group 0, plus a compute
 // entry point. Every kind is declared deliberately: the validation decorator
 // checks bound slots against reflection, so a test that binds a slot the
 // reflection never mentions would start failing the moment validation lands.
-inline ShaderReflection MakeTestReflection(const char* entry = "main",
+//
+// `location.index` mirrors the slot, which is what Slang reports for plain
+// globals and what the Metal backend binds at.
+inline ShaderReflection MakeTestReflection(const char* entry = "cs_main",
                                            ShaderStage stage = ShaderStage::Compute) {
   ShaderReflection r;
   r.bindings.push_back({.group = 0, .slot = 0, .name = "params",
-                        .kind = BindingKind::UniformBuffer});
+                        .kind = BindingKind::UniformBuffer,
+                        .location = {.space = 0, .index = 0}});
   r.bindings.push_back({.group = 0, .slot = 1, .name = "data",
-                        .kind = BindingKind::StorageBuffer});
+                        .kind = BindingKind::StorageBuffer,
+                        .location = {.space = 0, .index = 1}});
   r.bindings.push_back({.group = 0, .slot = 2, .name = "albedo",
-                        .kind = BindingKind::SampledTexture});
+                        .kind = BindingKind::SampledTexture,
+                        .location = {.space = 0, .index = 2}});
   r.bindings.push_back({.group = 0, .slot = 3, .name = "albedo_sampler",
-                        .kind = BindingKind::Sampler});
+                        .kind = BindingKind::Sampler,
+                        .location = {.space = 0, .index = 3}});
   r.uniform_blocks.push_back({.group = 0, .slot = 0, .name = "params",
                               .members = {{"scale", 0, 4, UniformType::Float}},
                               .total_size = 16});
@@ -127,11 +176,11 @@ inline void CheckTextureCreationAndViews(IRhiDevice& device) {
 // --- Pipelines and binding --------------------------------------------------
 
 inline void CheckComputePipelineReportsWorkgroupSize(IRhiDevice& device) {
-  auto module = device.CreateShaderModule("/* test */", MakeTestReflection(),
-                                          "compute_module");
+  auto module = device.CreateShaderModule(MinimalComputeSource(device.GetBackend()),
+                                          MakeTestReflection(), "compute_module");
   REQUIRE(module);
   auto pipe = device.CreateComputePipeline(
-      {.shader = module.get(), .entry = "main", .label = "compute"});
+      {.shader = module.get(), .entry = "cs_main", .label = "compute"});
   REQUIRE(pipe);
 
   uint32_t wg[3] = {0, 0, 0};
@@ -142,7 +191,8 @@ inline void CheckComputePipelineReportsWorkgroupSize(IRhiDevice& device) {
 }
 
 inline void CheckReflectionLookupByName(IRhiDevice& device) {
-  auto module = device.CreateShaderModule("", MakeTestReflection(), "m");
+  auto module = device.CreateShaderModule(MinimalComputeSource(device.GetBackend()),
+                                          MakeTestReflection(), "m");
   const ShaderReflection& r = module->GetReflection();
   // Name lookup is the hook the render graph's auto-binding attaches to.
   const auto* b = r.FindBinding("data");
@@ -159,8 +209,10 @@ inline void CheckReflectionLookupByName(IRhiDevice& device) {
 }
 
 inline void CheckBindingTableAcceptsEveryKind(IRhiDevice& device) {
-  auto module = device.CreateShaderModule("", MakeTestReflection(), "m");
-  auto pipe = device.CreateComputePipeline({.shader = module.get()});
+  auto module = device.CreateShaderModule(MinimalComputeSource(device.GetBackend()),
+                                          MakeTestReflection(), "m");
+  auto pipe = device.CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
 
   auto ubo = device.CreateBuffer({.size = 64, .usage = BufferUsage::Uniform});
   auto ssbo = device.CreateBuffer({.size = 64, .usage = BufferUsage::Storage});
@@ -270,10 +322,12 @@ inline void CheckIndirectDrawReadsArgsFromBuffer(IRhiDevice& device) {
                                      .usage = TextureUsage::RenderTarget});
   auto index = device.CreateBuffer(
       {.size = 256, .usage = BufferUsage::Index, .label = "indices"});
-  auto vs = device.CreateShaderModule("", ShaderReflection{}, "vs");
+  auto gfx = device.CreateShaderModule(MinimalGraphicsSource(device.GetBackend()),
+                                      ShaderReflection{}, "gfx");
   auto pipe = device.CreateRenderPipeline(
-      {.vertex_shader = vs.get(), .color_formats = {Format::RGBA8Unorm},
-       .label = "indirect_pipe"});
+      {.vertex_shader = gfx.get(), .vertex_entry = "vs_main",
+       .fragment_shader = gfx.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm}, .label = "indirect_pipe"});
 
   auto encoder = device.CreateCommandEncoder("indirect");
   encoder->Transition(args.get(), ResourceState::IndirectArg);
@@ -347,8 +401,10 @@ inline void CheckTransitionsAreRecorded(IRhiDevice& device) {
 
 inline void CheckComputeDispatchIsRecorded(IRhiDevice& device) {
   ResetLog(device);
-  auto module = device.CreateShaderModule("", MakeTestReflection(), "m");
-  auto pipe = device.CreateComputePipeline({.shader = module.get()});
+  auto module = device.CreateShaderModule(MinimalComputeSource(device.GetBackend()),
+                                          MakeTestReflection(), "m");
+  auto pipe = device.CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
   auto encoder = device.CreateCommandEncoder("dispatch");
   auto* pass = encoder->BeginComputePass("classify");
   pass->SetPipeline(pipe.get());

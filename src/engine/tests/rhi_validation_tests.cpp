@@ -74,8 +74,11 @@ TEST_CASE("validation: the full conformance list runs clean under validation",
 TEST_CASE("validation: a declared-but-unbound slot is reported",
           "[rhi][validation]") {
   auto device = MakeValidated();
-  auto module = device->CreateShaderModule("", rhitest::MakeTestReflection(), "m");
-  auto pipe = device->CreateComputePipeline({.shader = module.get()});
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
   auto ubo = device->CreateBuffer({.size = 64, .usage = BufferUsage::Uniform});
 
   auto observed = Observe(*device, [&] {
@@ -96,8 +99,11 @@ TEST_CASE("validation: a declared-but-unbound slot is reported",
 TEST_CASE("validation: a slot bound with the wrong kind is reported",
           "[rhi][validation]") {
   auto device = MakeValidated();
-  auto module = device->CreateShaderModule("", rhitest::MakeTestReflection(), "m");
-  auto pipe = device->CreateComputePipeline({.shader = module.get()});
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
   auto ubo = device->CreateBuffer({.size = 64, .usage = BufferUsage::Uniform});
   auto ssbo = device->CreateBuffer({.size = 64, .usage = BufferUsage::Storage});
   auto tex = device->CreateTexture({.width = 4, .height = 4,
@@ -154,8 +160,11 @@ TEST_CASE("validation: commands after Finish are reported", "[rhi][validation]")
 TEST_CASE("validation: commands after pass End are reported",
           "[rhi][validation]") {
   auto device = MakeValidated();
-  auto module = device->CreateShaderModule("", rhitest::MakeTestReflection(), "m");
-  auto pipe = device->CreateComputePipeline({.shader = module.get()});
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
 
   auto observed = Observe(*device, [&] {
     auto encoder = device->CreateCommandEncoder("e");
@@ -256,8 +265,11 @@ TEST_CASE("validation: submitting an unfinished encoder is reported",
 TEST_CASE("validation: reading a resource with no declared transition is reported",
           "[rhi][validation][state]") {
   auto device = MakeValidated();
-  auto module = device->CreateShaderModule("", rhitest::MakeTestReflection(), "m");
-  auto pipe = device->CreateComputePipeline({.shader = module.get()});
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
 
   auto ubo = device->CreateBuffer(
       {.size = 64, .usage = BufferUsage::Uniform, .label = "params"});
@@ -300,8 +312,11 @@ TEST_CASE("validation: reading a resource with no declared transition is reporte
 TEST_CASE("validation: declaring the right states runs clean",
           "[rhi][validation][state]") {
   auto device = MakeValidated();
-  auto module = device->CreateShaderModule("", rhitest::MakeTestReflection(), "m");
-  auto pipe = device->CreateComputePipeline({.shader = module.get()});
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
 
   auto ubo = device->CreateBuffer({.size = 64, .usage = BufferUsage::Uniform});
   auto ssbo = device->CreateBuffer({.size = 64, .usage = BufferUsage::Storage});

@@ -132,8 +132,11 @@ TEST_CASE("Null: command log preserves ordering across pass kinds", "[rhi]") {
   auto* log = badlands::rhi::null::GetCommandLog(*device);
   REQUIRE(log != nullptr);
 
-  auto module = device->CreateShaderModule("", rhitest::MakeTestReflection(), "m");
-  auto compute = device->CreateComputePipeline({.shader = module.get()});
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto compute = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
   auto color = device->CreateTexture({.width = 4, .height = 4,
                                       .format = Format::RGBA8Unorm,
                                       .usage = TextureUsage::RenderTarget});

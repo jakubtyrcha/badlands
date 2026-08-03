@@ -135,6 +135,17 @@ target_compile_features(badlands_rhi PUBLIC cxx_std_23)
 target_compile_definitions(badlands_rhi PUBLIC
     $<$<NOT:$<CONFIG:Release>>:BADLANDS_RHI_VALIDATION>)
 
+if(APPLE)
+    # ARC only for the Metal backend — the rest of the project is MRR, and a
+    # backend this size is far safer with automatic lifetimes.
+    target_sources(badlands_rhi PRIVATE src/engine/rhi/metal/metal_rhi.mm)
+    set_source_files_properties(src/engine/rhi/metal/metal_rhi.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    target_compile_definitions(badlands_rhi PUBLIC BADLANDS_RHI_METAL)
+    target_link_libraries(badlands_rhi PUBLIC
+        "-framework Metal" "-framework Foundation")
+endif()
+
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
 # types/logic live here — see src/engine/app/app_view.hpp.
@@ -1088,6 +1099,23 @@ if(APPLE)
     target_link_options(badlands_rhi_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_rhi_tests COMMAND badlands_rhi_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_rhi_metal_tests: the SAME conformance list against the real backend,
+# plus readback-based correctness Null cannot assert. Needs a Metal device.
+if(APPLE)
+    add_executable(badlands_rhi_metal_tests
+        src/engine/tests/rhi_metal_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp
+    )
+    target_include_directories(badlands_rhi_metal_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/src/engine/tests
+    )
+    target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi)
+    target_link_options(badlands_rhi_metal_tests PRIVATE "-Wl,-ld_new")
+    add_test(NAME badlands_rhi_metal_tests COMMAND badlands_rhi_metal_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
 
 add_executable(badlands_readback_tests
     src/engine/tests/readback_tests.cpp
