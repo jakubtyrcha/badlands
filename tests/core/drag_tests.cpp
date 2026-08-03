@@ -162,8 +162,10 @@ TEST_CASE("Editor: off-handle click does not activate a drag") {
     REQUIRE(spawned.node_id != kInvalidNode);
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
 
-    // Far corner: outside every handle (the gizmo spans ~±60pts around the
-    // viewport center at kGizmoScreenFraction = 0.12 of 500pts).
+    // Far corner: outside every handle (the gizmo spans ~±120pts around the
+    // viewport center at kGizmoScreenFraction = 0.24 of 500pts). The margin
+    // is wide either way, but the arithmetic here went stale when that
+    // fraction doubled in R2 and is corrected rather than left misleading.
     CHECK_FALSE(editor->beginDrag(60.0f, 60.0f));
     editor->updateDrag(400.0f, 250.0f);
     editor->endDrag();

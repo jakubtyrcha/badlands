@@ -65,10 +65,13 @@ std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_flo
 
 // Drawn geometry = hit geometry: axes 0..+he along u/v/n (positive half
 // only, R3 ruling; ray-to-segment distance vs the pts tolerance above),
-// plane patches origin + x*e1 + y*e2, x,y in [0.3he, 0.6he] (ray_plane +
-// bounds). Any axis hit beats any plane hit; among axes smallest distance
-// wins (ties: smaller ray-t, then declaration order); among planes nearest
-// ray-t wins.
+// plane patches origin + x*e1 + y*e2 with x, y in
+// [kGizmoPatchInner*he, kGizmoPatchOuter*he] (ray_plane + bounds). Named
+// rather than spelled out on purpose -- this comment previously restated the
+// bounds as literals and went stale the moment they moved, which is the exact
+// failure those constants exist to prevent. Any axis hit beats any plane hit;
+// among axes smallest distance wins (ties: smaller ray-t, then declaration
+// order); among planes nearest ray-t wins.
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
                               float fov_y_radians, float viewport_h_pts);
 
