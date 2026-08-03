@@ -768,35 +768,51 @@ void UpdateWater(Grid& g, const Params& p, int iters,
         if (g.water[i] > 0.f) g.water[i] = std::max(0.f, g.water[i] - loss);
       }
 
-    // --- conservative levelling -------------------------------------------
-    // Jacobi into a flux buffer so the pass is order-independent and the total
-    // is conserved exactly: every transfer debits one cell and credits another.
-    std::fill(flux.begin(), flux.end(), 0.f);
-    for (int y = 0; y < n; ++y)
-      for (int x = 0; x < n; ++x) {
-        const size_t i = g.idx(x, y);
-        if (g.water[i] <= 0.f) continue;
-        const float wi = g.height[i] + g.water[i];
-        for (int k = 0; k < 4; ++k) {
-          const int ax = x + dx4[k], ay = y + dy4[k];
-          if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;
-          const size_t j = g.idx(ax, ay);
-          const float wj = g.height[j] + g.water[j];
-          if (wi <= wj) continue;
-          // Quarter of the head difference, and at most a quarter of the
-          // column, so the four neighbours together can never move more water
-          // than the cell holds -- the stability bound for this kind of
-          // explicit relaxation.
-          const float t = std::min(0.25f * g.water[i], 0.25f * (wi - wj));
-          flux[i] -= t;
-          flux[j] += t;
+    // --- volume-conserving levelling, by ORDERED SWEEP ---------------------
+    //
+    // In place and in scan order, so water cascades the length of the scan line
+    // in ONE pass. A Jacobi pass instead moves a quarter of the head per
+    // iteration, which is diffusion: it converges in O(N^2), measured at 26.8 m
+    // of residual over-fill after 4000 iterations on 64^2, and 1024^2 would
+    // need ~1e6. Same machinery as RelaxWater's sweeps, different operator --
+    // this one conserves the water it has, where Planchon-Darboux fills to
+    // spill regardless of how much exists and so cannot level a finite volume.
+    //
+    // Convergence is NOT required. Partial levelling leaves a surface that is
+    // merely not yet flat; the accumulation it carries is still the physical
+    // one, which is the property worth having.
+    (void)flux;
+    for (int s = 0; s < 4; ++s) {
+      const bool rev_x = (s & 1) != 0, rev_y = (s & 2) != 0;
+      for (int yy = 0; yy < n; ++yy) {
+        const int y = rev_y ? n - 1 - yy : yy;
+        for (int xx = 0; xx < n; ++xx) {
+          const int x = rev_x ? n - 1 - xx : xx;
+          const size_t i = g.idx(x, y);
+          if (g.water[i] <= 0.f || pinned(x, y)) continue;
+          // Push to the LOWEST neighbouring surface only. Spreading over all
+          // four is what makes it diffusive; steepest descent is advective, so
+          // a column runs downhill rather than smearing outward.
+          int bk = -1;
+          float best = g.height[i] + g.water[i];
+          for (int k = 0; k < 4; ++k) {
+            const int ax = x + dx4[k], ay = y + dy4[k];
+            if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;
+            const size_t j = g.idx(ax, ay);
+            const float wj = g.height[j] + g.water[j];
+            if (wj < best) { best = wj; bk = k; }
+          }
+          if (bk < 0) continue;  // local minimum of the water surface: it ponds
+          const size_t j = g.idx(x + dx4[bk], y + dy4[bk]);
+          // Half the head difference equalises the pair without overshooting
+          // into oscillation; capped by what the cell actually holds.
+          const float head = (g.height[i] + g.water[i]) - best;
+          const float t = std::min(g.water[i], 0.5f * head);
+          g.water[i] -= t;
+          if (!pinned(x + dx4[bk], y + dy4[bk])) g.water[j] += t;
         }
       }
-    for (int y = 0; y < n; ++y)
-      for (int x = 0; x < n; ++x) {
-        const size_t i = g.idx(x, y);
-        g.water[i] = pinned(x, y) ? 0.f : std::max(0.f, g.water[i] + flux[i]);
-      }
+    }
   }
 }
 
