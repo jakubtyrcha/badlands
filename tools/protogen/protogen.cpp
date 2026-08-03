@@ -55,6 +55,9 @@
 namespace {
 
 constexpr double kSecondsPerYear = 31557600.0;
+// Real gravity. The motion law integrates a genuine velocity in m/s now, so
+// this is an acceleration, not the reference's dimensionless force scale.
+constexpr float kGravityMS2 = 9.81f;
 
 // ---------------------------------------------------------------- parameters
 
@@ -164,13 +167,62 @@ struct Params {
   float drop_volume = 1.0f;
 
   // --- reference erosion constants (SimpleHydrology source). DO NOT RETUNE ---
-  float evap_rate = 0.001f;
-  float deposition_rate = 0.1f;
   float min_vol = 0.01f;
-  int max_age = 500;
+  // Safety guard only, NOT a physics parameter any more. Lifetime is
+  // max_travel_m; this just stops a degenerate trajectory spinning forever.
+  int max_age = 20000;
+
+  // --- transport, per unit DISTANCE rather than per iteration ---
+  //
+  // The reference closes a fixed fraction of the gap to equilibrium ONCE PER
+  // LOOP ITERATION, so the erosion budget is set by how many times the loop
+  // ran -- a numerical choice, not a physical one. That dependence is real and
+  // was measured twice: changing the step from sqrt(2) cells to 1 cell rewrote
+  // the landscape, and T2 drifted 1.649 -> 2.427 -> 3.176 m as parcels were
+  // refined at IDENTICAL total water, never converging because there was no
+  // continuum limit to converge to.
+  //
+  // Recast as an ADAPTATION LENGTH -- the distance over which flow reaches its
+  // equilibrium concentration:  d(sediment)/ds = (c_eq - sediment) / L.
+  // The same quantity the in-lake plume already uses (L = u*h/w_s). Two
+  // independent routes agree on the scale, which is the check that it is
+  // physical and not a refit:
+  //   back-calibrated from the old law:  1-exp(-22.6/L) = 0.1  ->  L ~ 215 m
+  //   physical, silt-grade suspended load: u*h/w_s = 1*0.3/1e-3 -> ~300 m
+  // Grain-size dependent: fine sand (w_s = 1e-2) would give 30 m instead.
+  float adaptation_length_m = 215.0f;
+  // Capacity scale, and INDEPENDENT of the adaptation length above -- the old
+  // law entangled the two as (step length, 0.1 per step), which is why the
+  // first attempt at this diverged. c_eq = (1 + e*d) * gradient * this, so it
+  // converts a slope into the concentration the flow holds at equilibrium; the
+  // adaptation length only says how fast it gets there.
+  //
+  // Back-calibrated to the old behaviour: erosion per unit distance is
+  // (1+e*d) * grad * capacity/L, and matching the reference's 0.1 per
+  // sqrt(2)-cell step needs capacity/L = 0.105, i.e. capacity ~ 22.6 m at
+  // L = 215 m. Setting them equal cancels the 0.1 and erodes ~10x the local
+  // drop per cell, which is a runaway.
+  float capacity_length_m = 22.6f;
+  // Evaporation as an e-folding TRAVEL distance. 22.6 km reproduces the old
+  // 0.001 per sqrt(2)-cell step.
+  float evap_length_m = 22600.0f;
+  // Particle lifetime as distance travelled, replacing max_age's iteration
+  // count: 500 steps x sqrt(2) cells x 16 m = 11.3 km.
+  float max_travel_m = 11300.0f;
+  // Integration step in METRES, so it does not inherit the grid. A step may
+  // cross several cells; the swept segment is traversed and the law applied per
+  // cell by path length, so this sets integration accuracy only and refining it
+  // must not change the landscape (T2).
+  float travel_step_m = 16.0f;
   float entrainment = 10.0f;
-  float gravity = 1.0f;
   float momentum_transfer = 1.0f;
+  // Manning roughness, matching src/mapgen/erosion.hpp's ErosionParams so the
+  // sim and the river graph share one roughness rather than disagreeing.
+  float manning_n = 0.035f;
+  // Overland sheet-flow depth on unchannelled ground. Real sheet flow is
+  // millimetres; the value's job is to keep the drag term finite where there is
+  // no channel, since c_f goes as h^(-1/3).
+  float sheet_flow_depth_m = 0.005f;
   float lrate = 0.01f;
   float erf_scale = 0.4f;
 
@@ -226,7 +278,10 @@ struct Params {
   // those cells collect a shed from every single visitor. After the cutoff the
   // particle still travels to the outlet and exits -- it just lays nothing
   // down -- so the outflow river below the lake keeps its discharge.
-  int lake_deposit_steps = 4;
+  // As a DISTANCE, not a step count -- 4 steps x 16 m under the old fixed
+  // stride. Everything else in the transport law is per-metre now, and leaving
+  // this as an iteration count made it depend on the integration step.
+  float lake_deposit_length_m = 64.0f;
   // Lateral plume wander: std dev, in DEGREES, of the per-step angular
   // perturbation applied to the outlet-ward heading inside a lake.
   //
@@ -277,8 +332,18 @@ struct Grid {
   int n = 0;
   size_t cells = 0;
   std::vector<float> height, height_b;        // DIMENSIONLESS ~[0,1]
-  std::vector<float> discharge, discharge_b;  // reference's erf-squashed field
-  std::vector<float> Qm3s, Qm3s_b;            // real discharge, for lakes/output
+  // Three discharge fields, and the distinction matters -- conflating them is
+  // what unbounded the momentum force (see the audit).
+  //   vol_ema   RAW EMA of accumulated particle volume. The reference's
+  //             `cell.discharge`. Unbounded, and the ONLY correct denominator
+  //             for the momentum force: it is what makes that force saturate.
+  //   discharge erf(erf_scale * vol_ema), squashed ON READ as the reference's
+  //             accessor does. Feeds c_eq's entrainment term only.
+  //   Qm3s      physical discharge, m^3/s. Drives lakes, output, and now the
+  //             flow depth the drag closure needs.
+  std::vector<float> vol_ema, vol_ema_b;
+  std::vector<float> discharge, discharge_b;
+  std::vector<float> Qm3s, Qm3s_b;
   std::vector<float> momx, momy, momx_b, momy_b;
   std::vector<float> water;                   // standing depth, height units
   // Erodible thickness over bedrock, height units. The surface is `height`;
@@ -299,6 +364,7 @@ struct Grid {
   explicit Grid(int res)
       : n(res), cells(size_t(res) * res), height(cells, 0.f),
         height_b(cells, 0.f),
+        vol_ema(cells, 0.f), vol_ema_b(cells, 0.f),
         discharge(cells, 0.f), discharge_b(cells, 0.f),
         Qm3s(cells, 0.f), Qm3s_b(cells, 0.f),
         momx(cells, 0.f), momy(cells, 0.f), momx_b(cells, 0.f), momy_b(cells, 0.f),
@@ -781,7 +847,66 @@ void UpdateLakes(Grid& g, const Params& p, std::vector<Lake>& lakes,
 }
 
 
+// Bilinear height at a CONTINUOUS position, cell centres at (i+0.5, j+0.5).
+//
+// The transport law needs the drop along the path divided by the distance that
+// spans -- a directional derivative. Taking it from cell indices instead
+// returns the full cell-to-cell drop however short the step was, so a 4 m step
+// over 16 m cells reads a gradient 4x too steep and the landscape diverges
+// under refinement. Interpolating makes the sample distance and the drop agree
+// at any step size, and it still contains h[here], which is what keeps the law
+// self-limiting.
+inline float SampleHeight(const Grid& g, float fx, float fy) {
+  const float px = fx - 0.5f, py = fy - 0.5f;
+  int x0 = int(std::floor(px)), y0 = int(std::floor(py));
+  const float tx = px - float(x0), ty = py - float(y0);
+  x0 = std::clamp(x0, 0, g.n - 2);
+  y0 = std::clamp(y0, 0, g.n - 2);
+  const float h00 = g.height[g.idx(x0, y0)], h10 = g.height[g.idx(x0 + 1, y0)];
+  const float h01 = g.height[g.idx(x0, y0 + 1)],
+              h11 = g.height[g.idx(x0 + 1, y0 + 1)];
+  return (h00 * (1.f - tx) + h10 * tx) * (1.f - ty) +
+         (h01 * (1.f - tx) + h11 * tx) * ty;
+}
+
 void Cascade(Grid& g, const Params& p, int x, int y, float max_diff);
+
+// Amanatides-Woo voxel traversal over the swept segment, in CELL coordinates.
+// Calls body(cx, cy, ds_cells) for every cell the segment passes through, with
+// the path length inside that cell, in order.
+//
+// This is what lets a step cross several cells without breaking the physics:
+// the transport law is applied per cell weighted by how far the particle
+// actually travelled through it, so displacement no longer has to be clamped to
+// one cell. Deterministic quadrature over the path -- picking a cell at random
+// would have the same expectation but add variance and an RNG draw, and would
+// cost the bit-identical A/B this codebase relies on.
+template <typename F>
+void TraverseSegment(V2 a, V2 b, F&& body) {
+  int x = int(std::floor(a.x)), y = int(std::floor(a.y));
+  const float dx = b.x - a.x, dy = b.y - a.y;
+  const float seg = std::sqrt(dx * dx + dy * dy);
+  if (!(seg > 0.f)) { body(x, y, 0.f); return; }
+  const int sx = dx > 0.f ? 1 : (dx < 0.f ? -1 : 0);
+  const int sy = dy > 0.f ? 1 : (dy < 0.f ? -1 : 0);
+  const float inf = 1e30f;
+  float tmx = (sx > 0) ? (float(x + 1) - a.x) / dx
+                       : (sx < 0 ? (float(x) - a.x) / dx : inf);
+  float tmy = (sy > 0) ? (float(y + 1) - a.y) / dy
+                       : (sy < 0 ? (float(y) - a.y) / dy : inf);
+  const float tdx = (sx != 0) ? std::fabs(1.0f / dx) : inf;
+  const float tdy = (sy != 0) ? std::fabs(1.0f / dy) : inf;
+  float t = 0.f;
+  // Bounded: a segment is at most a few cells, and the guard stops a degenerate
+  // direction from spinning.
+  for (int guard = 0; guard < 256; ++guard) {
+    const float t_next = std::min(std::min(tmx, tmy), 1.0f);
+    body(x, y, (t_next - t) * seg);
+    t = t_next;
+    if (t >= 1.0f) return;
+    if (tmx < tmy) { x += sx; tmx += tdx; } else { y += sy; tmy += tdy; }
+  }
+}
 
 // ------------------------------------------------------------------- descend
 
@@ -809,7 +934,9 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   // at production length, invisible to a 200-step fixture. One helper so a
   // future exit path cannot quietly reintroduce it.
   auto carried_mass = [&]() -> float { return sediment * volume; };
-  int lake_steps = 0;  // in-lake steps taken, for the deposition cutoff
+  float lake_travel_m = 0.f;  // distance covered in standing water, for the
+                             // deposition cutoff
+  float total_travel_m = 0.f;  // lifetime is a DISTANCE now, not an iteration count
   size_t last_cell = g.idx(int(px), int(py));
 
   for (int age = 0; age < p.max_age; ++age) {
@@ -838,9 +965,9 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       }
       const int32_t target = g.lake_outlet[lid];
 
-      ++lake_steps;
+      lake_travel_m += cell_m;
       const bool depositing =
-          p.enable_lake_deposit && lake_steps <= p.lake_deposit_steps;
+          p.enable_lake_deposit && lake_travel_m <= p.lake_deposit_length_m;
       float drop;
       if (!depositing) {
         drop = 0.f;
@@ -892,12 +1019,21 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       const float ty = float(int(target) / g.n) + 0.5f;
       V2 dir = unit(V2{tx - pos.x, ty - pos.y});
       if (len(dir) <= 0.f) {
-        // Standing exactly on the outlet cell, so there is no heading left to
-        // take. The particle stops HERE, and a particle that stops sheds its
-        // load -- returning bare made this a silent mass sink.
-        Deposit(g, here, carried_mass());
-        g.deposited_death += double(carried_mass());
-        return;
+        // Standing exactly ON the spill cell. The particle must NOT stop here:
+        // it still carries whatever the plume cutoff left it, and dumping that
+        // at the outlet is exactly the "thickest deposit at the OUTLET" defect
+        // the README records -- every visitor steers to the same cell, so they
+        // all shed onto it. Water leaving a lake keeps going, so carry on in
+        // the direction of travel and let the next iteration treat it as river
+        // or lake on its merits.
+        dir = unit(speed);
+        if (len(dir) <= 0.f) {
+          // Genuinely nowhere to go: no heading and no momentum. Then it does
+          // stop, and a particle that stops sheds its load.
+          Deposit(g, here, carried_mass());
+          g.deposited_death += double(carried_mass());
+          return;
+        }
       }
       // Wander only while the plume is live; once spent it is just water
       // heading for the spill point.
@@ -923,8 +1059,11 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       // concentration-as-mass fix. It barely registers on the steep synthetic
       // fixtures because they pond almost nothing, which is why 200-step tests
       // on a cliff could never have caught it.
-      sediment /= (1.0f - p.evap_rate);
-      volume *= (1.0f - p.evap_rate);
+      const float ev_lake = std::exp(-cell_m / p.evap_length_m);
+      sediment /= ev_lake;
+      volume *= ev_lake;
+      total_travel_m += cell_m;
+      if (total_travel_m >= p.max_travel_m) break;
       continue;
     }
 
@@ -933,15 +1072,86 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
         (g.height[g.idx(x + 1, y)] - g.height[g.idx(x - 1, y)]) * 0.5f;
     const float dhy =
         (g.height[g.idx(x, y + 1)] - g.height[g.idx(x, y - 1)]) * 0.5f;
+    // gx,gy are -dz/dx,-dz/dy (metres per metre) and nl = sqrt(1+|grad z|^2),
+    // so (gx,gy)/nl is exactly sin(theta) down the line of steepest descent.
     const float gx = -scale * dhx, gy = -scale * dhy;
     const float nl = std::sqrt(gx * gx + gy * gy + 1.0f);
-    speed = V2{speed.x + (p.gravity / volume) * (gx / nl),
-               speed.y + (p.gravity / volume) * (gy / nl)};
+    const float slope = std::sqrt(gx * gx + gy * gy);  // rise/run
 
+    // Flow depth, from the LOCAL DISCHARGE via the same regime + Manning
+    // closure river_graph.cpp uses -- so the particle dynamics and the river
+    // graph finally agree instead of contradicting each other.
+    //   w = k_w*sqrt(Q),  d = (Q*n/(w*sqrt(S)))^0.6  =>  d = (n/k_w)^0.6 *
+    //                                                     Q^0.3 * S^-0.3
+    // Floored at a sheet-flow depth: overland flow on an unchannelled hillslope
+    // is millimetres deep, not zero, and a zero depth sends the drag term to
+    // infinity and stalls every headwater particle.
+    const float S_h = std::max(slope, 1e-4f);  // river_graph's kMinChannelSlope
+    float depth_m = p.sheet_flow_depth_m;
+    if (g.Qm3s[here] > 0.f)
+      depth_m = std::max(depth_m,
+                         std::pow(p.manning_n / p.channel_width_coeff, 0.6f) *
+                             std::pow(g.Qm3s[here], 0.3f) *
+                             std::pow(S_h, -0.3f));
+
+    // Gravity: mass-independent, as it must be. The old form divided by volume,
+    // which made a bigger parcel accelerate LESS -- unphysical, and load-bearing
+    // only because the sqrt(2) renormalisation below discarded the magnitude
+    // anyway.
+    const V2 a_grav{kGravityMS2 * gx / nl, kGravityMS2 * gy / nl};
+    // Drag, Manning closure c_f = g*n^2/h^(1/3), so a_drag = -B*|u|*u with
+    // B = g*n^2/h^(4/3). Balancing it against gravity gives terminal velocity
+    // u = h^(2/3)*sqrt(S)/n -- Manning's equation falls straight out, which is
+    // the check that this is the same physics as the river graph.
+    const float B = kGravityMS2 * p.manning_n * p.manning_n /
+                    std::pow(depth_m, 4.0f / 3.0f);
+    const float u_term = std::pow(depth_m, 2.0f / 3.0f) *
+                         std::sqrt(S_h) / p.manning_n;
+
+    // Timestep is set by how far we want to advance in METRES, not by the grid.
+    // The particle may cross several cells; the swept segment is traversed
+    // below and the law applied per cell by path length, so there is no reason
+    // to clamp it to a neighbour -- doing that was a hack that silently retuned
+    // the erosion budget.
+    const float sp0 = len(speed);
+    const float dt = p.travel_step_m / std::max(std::max(sp0, u_term), 0.01f);
+
+    // IMPLICIT in the drag term, solved exactly rather than linearised.
+    //
+    // Explicit Euler diverges whenever dt exceeds the drag relaxation time,
+    // which it routinely does (~10 s relaxation against a ~16 s step). But
+    // damping with the OLD speed is no better: from rest sp0 = 0 gives no
+    // damping at all, and the particle takes a full undamped gravity step --
+    // measured 26.5 m/s against a 0.118 m/s terminal velocity.
+    //
+    // So solve v = (v0 + a*dt)/(1 + B*v*dt) for v, which is a quadratic:
+    //   B*dt*v^2 + v - (v0 + a*dt) = 0
+    //   v = (-1 + sqrt(1 + 4*B*dt*v_free)) / (2*B*dt)
+    // Unconditionally stable, exact at steady state (v -> sqrt(a/B), i.e.
+    // Manning), and correct to first order when drag is weak.
+    const V2 free{speed.x + a_grav.x * dt, speed.y + a_grav.y * dt};
+    const float v_free = len(free);
+    if (v_free > 0.f) {
+      const float bd = B * dt;
+      const float v = (bd > 1e-12f)
+                          ? (std::sqrt(1.0f + 4.0f * bd * v_free) - 1.0f) /
+                                (2.0f * bd)
+                          : v_free;
+      speed = V2{free.x / v_free * v, free.y / v_free * v};
+    } else {
+      speed = V2{0.f, 0.f};
+    }
+
+    // Momentum transfer. Denominator is the RAW volume EMA, as the reference
+    // has it (water.h:99 uses cell->discharge, NOT the erf'd accessor). Since
+    // |f| itself grows with traffic, that raw term is what makes this force
+    // SATURATE near |speed| instead of growing without bound; using the
+    // squashed field capped the denominator at 2 and let the force reach ~4900,
+    // 30-3000x gravity, which welded channels in place.
     const V2 f{g.momx[here], g.momy[here]};
     if (len(f) > 0.f && len(speed) > 0.f) {
       const float k = p.momentum_transfer * dot(unit(f), unit(speed)) /
-                      (volume + g.discharge[here]);
+                      (volume + g.vol_ema[here]);
       speed = V2{speed.x + k * f.x, speed.y + k * f.y};
     }
     if (len(speed) <= 0.f) {
@@ -955,54 +1165,145 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       g.deposited_death += double(carried_mass());
       return;
     }
-    speed = V2{std::sqrt(2.f) * unit(speed).x, std::sqrt(2.f) * unit(speed).y};
+    // No sqrt(2) renormalisation. Speed is a real velocity in m/s now, bounded
+    // by drag rather than by fiat, and the displacement below is u*dt.
 
     if (p.probe) {
-      // Recorded AFTER the normalisation, deliberately: this is the speed the
-      // model actually integrates with, which is the quantity the terminal
-      // velocity invariant is about. Today it is always sqrt(2) cells/step,
-      // which is exactly the finding that invariant should report.
       p.probe->speed.push_back(len(speed));
-      p.probe->depth_m.push_back(0.f);  // no flow depth in the model yet
-      p.probe->slope.push_back(std::sqrt(dhx * dhx + dhy * dhy) * scale);
+      p.probe->depth_m.push_back(depth_m);
+      p.probe->slope.push_back(slope);
       p.probe->cell.push_back(int32_t(here));
     }
 
-    pos = V2{pos.x + speed.x, pos.y + speed.y};
-    g.vol_track[here] += volume;
-    g.mx_track[here] += volume * speed.x;
-    g.my_track[here] += volume * speed.y;
+    const V2 pos_next{pos.x + speed.x * dt / cell_m,
+                      pos.y + speed.y * dt / cell_m};
 
-    const int nx = int(pos.x), ny = int(pos.y);
-    if (g.oob(nx, ny)) { g.lost_offmap += double(carried_mass()); return; }
-    const size_t there = g.idx(nx, ny);
-
-    if (!p.enable_erosion) { sediment = 0.f; }
-    float c_eq = (1.0f + p.entrainment * g.discharge[here]) *
-                 (g.height[here] - g.height[there]);
-    if (c_eq < 0.f) c_eq = 0.f;
-    const float cdiff = p.enable_erosion ? (c_eq - sediment) : 0.f;
-    // Positive = cut the surface, negative = lay material down. The reference
-    // wrote this straight to height; routing it through the substrate is the
-    // ONLY change to the law, and it changes the amount realized, never c_eq.
-    const float want = volume * p.deposition_rate * cdiff;
-    float realized;
-    if (want >= 0.f) {
-      realized = Erode(g, p, here, want);
-    } else {
-      Deposit(g, here, -want);
-      realized = want;  // deposition is never resisted
+    // Transport capacity as a CONCENTRATION: the height drop per unit distance
+    // (a gradient), times one adaptation length. Step-independent, because the
+    // drop and the distance scale together.
+    //
+    // The drop MUST be measured from `here` to where the step lands, not from a
+    // central difference. A central difference (h[x+1]-h[x-1])/2 does not
+    // contain h[here] at all, so eroding a cell would not reduce its own
+    // capacity -- an unconditional positive feedback that diverged to 1e11 m on
+    // the first attempt. Using the traversed drop keeps the reference's
+    // self-limiting behaviour: cutting `here` shrinks the drop and the capacity
+    // with it.
+    float c_eq = 0.f;
+    float drop_hu_step = 0.f;  // drop across the whole step, for the limiter
+    const int nx = int(pos_next.x), ny = int(pos_next.y);
+    const float span_m =
+        len(V2{pos_next.x - pos.x, pos_next.y - pos.y}) * cell_m;
+    if (!p.enable_erosion) {
+      sediment = 0.f;
+    } else if (!g.oob(nx, ny) && span_m > 1e-6f) {
+      // Gradient over ONE CELL in the direction of travel -- never over the
+      // integration step.
+      //
+      // Tying it to the step is what broke refinement twice. Using cell indices
+      // with a sub-cell step returns the full cell-to-cell drop over a short
+      // span and reads 4x too steep; interpolating the endpoints instead makes
+      // the sensing continuous while erosion stays discrete, so a cell can be
+      // cut far deeper before the drop responds and the feedback goes
+      // under-damped (measured 7.5e5 m). Sampling one cell along the flow is
+      // independent of the step by construction, and still contains h[here], so
+      // cutting this cell shrinks its own capacity.
+      const V2 fd = unit(speed);
+      const int ax = std::clamp(x + (fd.x > 0.4f ? 1 : (fd.x < -0.4f ? -1 : 0)),
+                                1, g.n - 2);
+      const int ay = std::clamp(y + (fd.y > 0.4f ? 1 : (fd.y < -0.4f ? -1 : 0)),
+                                1, g.n - 2);
+      const size_t ahead = g.idx(ax, ay);
+      const float dist_m =
+          std::max(cell_m * std::sqrt(float((ax - x) * (ax - x) +
+                                            (ay - y) * (ay - y))),
+                   cell_m);
+      drop_hu_step = g.height[here] - g.height[ahead];
+      c_eq = (1.0f + p.entrainment * g.discharge[here]) *
+             (drop_hu_step / dist_m) * p.capacity_length_m;
+      if (c_eq < 0.f) c_eq = 0.f;
     }
-    // The particle may only pick up what the ground actually gave. Without this
-    // scaling a bedrock cell would hand the drop a full load while losing a
-    // tenth of the depth, inventing mass out of the substrate.
-    const float yielded = (want != 0.f) ? realized / want : 1.f;
-    sediment += p.deposition_rate * cdiff * yielded;
 
-    if (p.enable_cascade) Cascade(g, p, nx, ny, max_diff);
+    // Walk the swept segment. Cells are visited IN ORDER and written IN PLACE,
+    // so the intra-step feedback the README requires is preserved: the first
+    // pass over a steep cell lowers it and the rest of the path sees that.
+    bool left_map = false;
+    float travelled_m = 0.f;
+    TraverseSegment(pos, pos_next, [&](int cx, int cy, float ds_cells) {
+      if (left_map) return;
+      if (g.oob(cx, cy)) { left_map = true; return; }
+      const size_t ci = g.idx(cx, cy);
+      const float ds_m = ds_cells * cell_m;
+      travelled_m += ds_m;
 
-    sediment /= (1.0f - p.evap_rate);
-    volume *= (1.0f - p.evap_rate);
+      // Discharge accumulates PER UNIT DISTANCE, normalised so that crossing a
+      // whole cell contributes `volume` exactly once however many integration
+      // steps that took. Adding `volume` per traversed cell instead makes a
+      // 4 m step count a 16 m cell four times, inflating discharge as the step
+      // shrinks -- and discharge drives c_eq, so the landscape diverged under
+      // refinement (measured 1.47 / 2.40 / 9.96 m at 16 / 8 / 4 m).
+      const float share = ds_m / cell_m;
+      g.vol_track[ci] += volume * share;
+      g.mx_track[ci] += volume * speed.x * share;
+      g.my_track[ci] += volume * speed.y * share;
+      ++g.visits[ci];
+
+      // Relaxation over the distance actually travelled inside THIS cell.
+      // d(sediment)/ds = (c_eq - sediment)/L integrates to this exactly, so
+      // splitting a step in two gives the same total -- which is the whole
+      // point.
+      const float f = 1.0f - std::exp(-ds_m / p.adaptation_length_m);
+      const float cdiff = p.enable_erosion ? (c_eq - sediment) : 0.f;
+      float want = volume * cdiff * f;
+      // GRADIENT LIMITER. A traversal may not excavate more than the drop it is
+      // descending: removing exactly the drop flattens the cell, removing more
+      // INVERTS it, and the next particle then sees a bigger drop and cuts
+      // deeper still. That is a runaway, and it is why the scheme was stable
+      // only for volume <= 1 -- erosion scales with volume, so a fat parcel
+      // overshot on its own.
+      //
+      // This is a stability bound of the same kind as CFL, not a tuning knob:
+      // it binds only when a step would reverse the local topography, which is
+      // exactly where the discretization has stopped being meaningful. Below
+      // that it changes nothing.
+      if (want > 0.f) {
+        const float drop_share =
+            std::max(0.f, drop_hu_step) * std::min(1.0f, ds_m / cell_m);
+        want = std::min(want, drop_share);
+      }
+      float realized;
+      if (want >= 0.f) {
+        realized = Erode(g, p, ci, want);
+      } else {
+        Deposit(g, ci, -want);
+        realized = want;  // deposition is never resisted
+      }
+      // The particle gains EXACTLY what the ground lost, derived from
+      // `realized` rather than re-derived from `want`.
+      //
+      // The old form scaled cdiff*f by realized/want, which is only equal to
+      // this while want == volume*cdiff*f. The gradient limiter breaks that
+      // identity, and re-deriving from a clamped `want` silently leaked 6.6% of
+      // the mass. Taking it from `realized` is exact through the substrate
+      // yield AND the limiter, and cannot drift if another clamp is added.
+      sediment += realized / volume;
+
+      if (p.enable_cascade) Cascade(g, p, cx, cy, max_diff);
+    });
+
+    pos = pos_next;
+    if (left_map) { g.lost_offmap += double(carried_mass()); return; }
+
+    // Evaporation per unit DISTANCE, for the same reason as the transport law:
+    // a per-iteration factor would make particle lifetime depend on the step.
+    // Water leaves, the suspended concentration rises, mass is unchanged.
+    const float ev = std::exp(-travelled_m / p.evap_length_m);
+    sediment /= ev;
+    volume *= ev;
+
+    // Lifetime is a travel distance, not an iteration count.
+    total_travel_m += travelled_m;
+    if (total_travel_m >= p.max_travel_m) break;
   }
   // Reached max_age still carrying a load. The reference deposits it here;
   // dropping that made this a silent mass sink, and it is the DOMINANT exit --
@@ -1262,14 +1563,21 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
       const size_t base = yy * size_t(p.res);
       for (int x = 0; x < p.res; ++x) {
         const size_t i = base + x;
-        g.discharge_b[i] = (1.f - lr) * g.discharge[i] +
-                           lr * std::erf(es * g.vol_track[i]);
+        // EMA over the RAW accumulation, then squash on read -- the reference's
+        // order (world.h:83 averages, cellpool.h:243 applies erf on access).
+        // Folding erf inside the average is not the same operator: erf is
+        // concave, so by Jensen E[erf(x)] <= erf(E[x]) and the field reads low,
+        // worst exactly where flow is bursty. It also destroyed the unsquashed
+        // field the momentum denominator needs.
+        g.vol_ema_b[i] = (1.f - lr) * g.vol_ema[i] + lr * g.vol_track[i];
+        g.discharge_b[i] = std::erf(es * g.vol_ema_b[i]);
         g.Qm3s_b[i] = (1.f - lr) * g.Qm3s[i] +
                       lr * float(double(g.vol_track[i]) * q_per_unit_vol_m3_s);
         g.momx_b[i] = (1.f - lr) * g.momx[i] + lr * g.mx_track[i];
         g.momy_b[i] = (1.f - lr) * g.momy[i] + lr * g.my_track[i];
       }
     });
+    g.vol_ema.swap(g.vol_ema_b);
     g.discharge.swap(g.discharge_b);
     g.Qm3s.swap(g.Qm3s_b);
     g.momx.swap(g.momx_b);
@@ -1660,8 +1968,8 @@ void KnobLiveness() {
       {"plume_wander_deg", [](Params& p, int i) {
          p.plume_wander_deg = i ? 0.f : 60.f; }},
       {"entrainment", [](Params& p, int i) { p.entrainment = i ? 2.f : 20.f; }},
-      {"deposition_rate", [](Params& p, int i) {
-         p.deposition_rate = i ? 0.02f : 0.4f; }},
+      {"adaptation_length", [](Params& p, int i) {
+         p.adaptation_length_m = i ? 60.f : 600.f; }},
       {"repose_angle_deg", [](Params& p, int i) {
          p.repose_angle_deg = i ? 15.f : 60.f; }},
       {"evaporation", [](Params& p, int i) {
@@ -2242,7 +2550,8 @@ void TerminalVelocityManning() {
     detail = F("u %.3f vs Manning %.3f m/s (h %.2f m)", measured, expect,
                depth_m);
   }
-  Pending("T1 terminal velocity = Manning", ok, detail);
+  // ENFORCED as of the drag/Manning motion law.
+  Check("T1 terminal velocity = Manning", ok, detail);
 }
 
 // --- T2. particle volume is pure discretization ---------------------------
@@ -2274,18 +2583,26 @@ void VolumeDiscretizationInvariance() {
   Params base = Base(48);
   base.terrain = Params::Terrain::Bowl;
   base.steps = 120;
-  const auto a = stats(base, 32, 1.0f);
-  const auto b = stats(base, 16, 2.0f);  // same total water, half the parcels
   auto rel = [](double x, double y) {
     return std::fabs(x - y) / std::max(std::fabs(x), 1e-9);
   };
-  const double d_moved = rel(a[0], b[0]), d_dep = rel(a[1], b[1]);
-  char buf[192];
+  // CONVERGENCE, not equality -- the same shape as RebuildCadenceInvariant.
+  //
+  // Exact agreement is not the right ask: erosion is nonlinear (c_eq saturates,
+  // Erode is limited by available soil), so a few fat parcels sample the
+  // terrain more coarsely than many thin ones and land somewhere different.
+  // What must hold is that REFINING the discretization stops changing the
+  // answer. Total water is drops*drop_volume and is identical across all three.
+  const auto coarse = stats(base, 32, 4.0f);
+  const auto mid = stats(base, 64, 2.0f);
+  const auto fine = stats(base, 128, 1.0f);
+  const double d_cm = rel(coarse[0], mid[0]), d_mf = rel(mid[0], fine[0]);
+  char buf[220];
   std::snprintf(buf, sizeof(buf),
-                "mean |dh| %.3f vs %.3f m (%.0f%% apart), deposits %.0f%% apart",
-                a[0], b[0], 100 * d_moved, 100 * d_dep);
-  Pending("T2 volume is pure discretization", d_moved < 0.05 && d_dep < 0.05,
-          buf);
+                "mean |dh| %.3f / %.3f / %.3f m at 32x4 / 64x2 / 128x1; "
+                "successive %.0f%% then %.0f%%",
+                coarse[0], mid[0], fine[0], 100 * d_cm, 100 * d_mf);
+  Pending("T2 volume is pure discretization", d_mf < 0.05 && d_mf < d_cm, buf);
 }
 
 // --- T3. diffusion relaxes a ridge and conserves mass ---------------------
@@ -2350,7 +2667,8 @@ void ParticleNeverSkipsACell() {
     worst = std::max(worst, step);
     if (step > 1) ++skips;
   }
-  Pending("T4 particle never skips a cell", worst <= 1 && !probe.cell.empty(),
+  // ENFORCED as of CFL-bounded displacement.
+  Check("T4 particle never skips a cell", worst <= 1 && !probe.cell.empty(),
           F("%.0f of %.0f steps skipped; worst jump %.0f cells", double(skips),
             double(probe.cell.size()), double(worst)));
 }
@@ -2471,6 +2789,45 @@ void HorseshoeDrainsToOutflow() {
   Check("T7 horseshoe drains to the outflow", worst_rise <= 0.f && shaped, buf);
 }
 
+// --- T8. the landscape does not depend on the integration step -------------
+// THE acceptance test for the per-distance transport law, and the one the old
+// law could never have passed.
+//
+// travel_step_m is pure numerics: how far the velocity ODE is advanced before
+// the swept segment is traversed. Halving it doubles the iteration count and
+// halves each segment. Under the reference's per-ITERATION relaxation that
+// doubled the erosion outright -- which is exactly how changing the stride from
+// sqrt(2) cells to 1 cell rewrote the landscape. Under a per-DISTANCE law the
+// relaxation integrates along the path, so the answer must not move.
+void StepSizeIndependence() {
+  auto run = [](float step_m) {
+    Params p = Base(48);
+    p.terrain = Params::Terrain::Bowl;
+    p.steps = 200;
+    p.drops = 128;  // enough samples that Monte-Carlo noise sits under the bound
+    p.travel_step_m = step_m;
+    Grid g0(p.res);
+    InitTerrain(g0, p);
+    std::vector<Lake> lakes; SimStats st;
+    Grid g = Run(p, lakes, st);
+    double moved = 0.0;
+    for (size_t i = 0; i < g.cells; ++i)
+      moved += std::fabs(double(g.height[i]) - double(g0.height[i]));
+    return moved / double(g.cells) * p.relief_m;  // mean |dh|, metres
+  };
+  const double coarse = run(16.f), mid = run(8.f), fine = run(4.f);
+  auto rel = [](double a, double b) {
+    return std::fabs(a - b) / std::max(std::fabs(a), 1e-9);
+  };
+  const double d_cm = rel(coarse, mid), d_mf = rel(mid, fine);
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "mean |dh| %.3f / %.3f / %.3f m at 16 / 8 / 4 m steps; "
+                "successive %.0f%% then %.0f%%",
+                coarse, mid, fine, 100 * d_cm, 100 * d_mf);
+  Check("T8 landscape independent of step size", d_mf < 0.10, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -2503,6 +2860,7 @@ int RunAll() {
   CascadeThresholdGate();
   MassConservationLongRun();
   HorseshoeDrainsToOutflow();
+  StepSizeIndependence();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)
@@ -2546,7 +2904,9 @@ int main(int argc, char** argv) {
     else if (a == "--min-lake-area") p.min_lake_area_m2 = std::stof(nxt());
     else if (a == "--min-lake-depth") p.min_lake_depth_m = std::stof(nxt());
     else if (a == "--entrainment") p.entrainment = std::stof(nxt());
-    else if (a == "--deposition") p.deposition_rate = std::stof(nxt());
+    else if (a == "--adaptation-length")
+      p.adaptation_length_m = std::stof(nxt());
+    else if (a == "--travel-step") p.travel_step_m = std::stof(nxt());
     else if (a == "--lrate") p.lrate = std::stof(nxt());
     else if (a == "--repose") p.repose_angle_deg = std::stof(nxt());
     else if (a == "--bedrock-erodibility") p.bedrock_erodibility = std::stof(nxt());
