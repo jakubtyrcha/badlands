@@ -66,6 +66,23 @@ stands; the same spec's §3 restyles those axes and moves the plane-patch
 bounds from `[0.3, 0.6]·he` to `[0.24, 0.50]·he` (shared constants, so §2's
 "drawn = hit" invariant holds as written).
 
+AMENDMENT (R4, 2026-08-04, branch review + user ruling): the move gizmo is
+**hidden while the radial menu is on Scale**. Its handles never did anything
+there — a `.scale` mouse-down runs `beginScale`, not an axis drag — so
+drawing them advertised an affordance that did not exist, and the
+orientation-aids restyle made it worse by giving hover a much louder
+highlight. A scale-specific gizmo is planned; until then Scale has no gizmo.
+`syncGizmo()` gains `activeRadialTool == .move` and is now called after every
+`activeRadialTool` change, not just mode/selection changes.
+
+Core enforces the other half of the rule: `beginDrag` now checks
+`gizmo_visible` the way `updateGizmoHover` always did. That asymmetry was
+latent before this change but became reachable with it — a click at a hidden
+handle's last position started a real drag and **moved the node**. Pinned by
+`drag_tests`; several existing drag cases gained the `setGizmoVisible(true)`
+the app has always performed, including the off-handle case, which without it
+would have started passing for the wrong reason.
+
 ## 1. Gizmo frame — new `core/src/gizmo.h/.cpp`
 
 `GizmoFrame { simd_float3 origin; simd_float3 n, u, v; float half_extent; }`

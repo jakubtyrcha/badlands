@@ -106,9 +106,18 @@ final class EditorViewModel {
 
     /// Centralizes the gizmo-visibility rule (core owns the gizmo's placement
     /// math; the VM only tells it whether to show). Call after every mode or
-    /// selection change.
+    /// selection change — **and after every `activeRadialTool` change**, which
+    /// now feeds into it.
+    ///
+    /// The move gizmo is hidden while the radial menu is on `.scale`: its
+    /// handles do nothing there (a `.scale` mouse-down runs `beginScale`, not
+    /// an axis drag), so showing them advertised an affordance that did not
+    /// exist — and the restyle made that worse by giving hover a much louder
+    /// highlight. A scale-specific gizmo is planned; until then Scale simply
+    /// has no gizmo. Core enforces the other half: a hidden gizmo is neither
+    /// hoverable nor grabbable (`Editor::beginDrag`).
     private func syncGizmo() {
-        editor.setGizmoVisible(mode == .modify && selectedNodeID != nil)
+        editor.setGizmoVisible(mode == .modify && selectedNodeID != nil && activeRadialTool == .move)
     }
 
     // MARK: - Raw input, called by the viewport.
@@ -189,7 +198,13 @@ final class EditorViewModel {
             editor.updateGizmoHover(Float(p.x), Float(p.y))
         case .scale:
             editor.endScale()
+            // Reverting to .move brings the gizmo back, so re-sync and then
+            // re-derive hover from where the mouse actually is — same
+            // reasoning as the .move arm above, and it means the gizmo never
+            // reappears carrying a highlight left over from before the scale.
             activeRadialTool = .move
+            syncGizmo()
+            editor.updateGizmoHover(Float(p.x), Float(p.y))
         }
         isDragging = false
     }
@@ -230,10 +245,12 @@ final class EditorViewModel {
 
     func radialSelectMove() {
         activeRadialTool = .move
+        syncGizmo() // the gizmo is move-only; switching tools shows/hides it
     }
 
     func radialSelectScale() {
         activeRadialTool = .scale
+        syncGizmo() // hides the gizmo — Scale has no handles of its own yet
     }
 
     func radialToggleOp() {

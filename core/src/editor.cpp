@@ -309,7 +309,14 @@ GizmoHandle Editor::gizmoHoverHandle() const {
 }
 
 bool Editor::beginDrag(float x, float y) {
-    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
+    // Same guards as updateGizmoHover, gizmo visibility included: an
+    // invisible gizmo has no handles to hover AND none to grab. The two used
+    // to disagree, which meant a click at a hidden handle's last position
+    // still started a real drag and moved the node (branch review finding,
+    // pinned by drag_tests). Reachable in practice since the app hides the
+    // gizmo while the radial menu is on Scale.
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f ||
+        !impl_->gizmo_visible) {
         return false;
     }
     Node* node = impl_->scene.find(impl_->selected);

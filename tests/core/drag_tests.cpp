@@ -90,6 +90,7 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
     REQUIRE(spawned.snapped == false);
+    editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
 
     const GizmoFrame f = frame_for(editor, spawned.node_id, false);
     const float he = f.half_extent;
@@ -125,6 +126,7 @@ TEST_CASE("Editor: AxisU drag constrains the move to the grabbed axis") {
 
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.snapped == false);
+    editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
 
     const GizmoFrame f = frame_for(editor, spawned.node_id, false);
     const float he = f.half_extent;
@@ -160,6 +162,10 @@ TEST_CASE("Editor: off-handle click does not activate a drag") {
 
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
+    // Load-bearing: without a VISIBLE gizmo beginDrag would refuse for the
+    // wrong reason (nothing drawn) and this case would stop testing the
+    // off-handle rule it is named for.
+    editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
 
     // Far corner: outside every handle (the gizmo spans ~±120pts around the
@@ -187,6 +193,7 @@ TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; Axi
     REQUIRE(pr.node_id == a.node_id);
     const SpawnResult b = editor->spawn(Shape::Sphere, Op::Subtract, 400.0f, 250.0f);
     REQUIRE(b.snapped == true);
+    editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
 
     const GizmoFrame f = frame_for(editor, b.node_id, true, to_simd(pr.point), to_simd(pr.normal));
     const float he = f.half_extent;
@@ -248,6 +255,7 @@ TEST_CASE("Editor: updateDrag ignores a stale drag left active across a selectio
     // captures A's frame and start state while A is selected.
     const SpawnResult a = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(a.snapped == false);
+    editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
     const GizmoFrame fa = frame_for(editor, a.node_id, false);
     const ClickPoint pa = click_at(fa.origin + 0.45f * fa.half_extent * (fa.u + fa.v));
     REQUIRE(editor->beginDrag(pa.x, pa.y));
@@ -332,6 +340,45 @@ TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it po
     }
 }
 
+TEST_CASE("Editor: a hidden gizmo has no grabbable handles either — you cannot drag "
+          "what is not drawn") {
+    // Regression, branch review: beginDrag checked viewport and selection but
+    // NOT gizmo visibility, while updateGizmoHover right above it did. The
+    // asymmetry became reachable when the app started hiding the gizmo while
+    // the radial menu is on Scale: the handles are gone from the screen, so a
+    // click at their old position must not still grab one.
+    Editor* editor = Editor::create();
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+    REQUIRE(spawned.node_id != kInvalidNode);
+    editor->setGizmoVisible(true);
+
+    const GizmoFrame f = frame_for(editor, spawned.node_id, false);
+    const ClickPoint on_u = click_at(f.origin + 0.8f * f.half_extent * f.u);
+    const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
+
+    // Sanity: the point really is on a handle while the gizmo is shown.
+    REQUIRE(editor->beginDrag(on_u.x, on_u.y));
+    editor->endDrag();
+
+    SUBCASE("hidden: the same click is inert and the node does not move") {
+        editor->setGizmoVisible(false);
+        CHECK_FALSE(editor->beginDrag(on_u.x, on_u.y));
+        // updateDrag must be a no-op too, not resume a drag that never began.
+        editor->updateDrag(on_u.x + 60.0f, on_u.y + 40.0f);
+        editor->endDrag();
+        check_float3_approx(to_simd(editor->nodePosition(spawned.node_id)), before);
+    }
+
+    SUBCASE("shown again: the handle is grabbable once more") {
+        editor->setGizmoVisible(false);
+        editor->setGizmoVisible(true);
+        CHECK(editor->beginDrag(on_u.x, on_u.y));
+        editor->endDrag();
+    }
+}
+
 // --- Editor: radial-menu anchor projection ----------------------------------
 
 TEST_CASE("Editor: projectSelectedAnchor round-trips the selected node's screen position, "
@@ -370,6 +417,7 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
 
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.snapped == false);
+    editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
 
     // Pull along +u, which projects screen-LEFT for this camera (u == -camera
     // right for an unsnapped frame): the anchor must follow below x=400.
