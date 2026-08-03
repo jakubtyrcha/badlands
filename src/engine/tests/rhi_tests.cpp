@@ -253,3 +253,14 @@ TEST_CASE("Null: usage flags compose and test", "[rhi]") {
   CHECK(Has(ShaderStage::All, ShaderStage::Compute));
   CHECK(ReflectedBinding{}.visibility == ShaderStage::All);
 }
+
+TEST_CASE("Null: views survive Destroy on their texture", "[rhi]") {
+  auto d = MakeNull();
+  REQUIRE(d);
+  rhitest::CheckViewsSurviveTextureDestroy(*d);
+}
+TEST_CASE("Null: a binding table retains its resources", "[rhi]") {
+  auto d = MakeNull();
+  REQUIRE(d);
+  rhitest::CheckBindingTableRetainsItsResources(*d);
+}

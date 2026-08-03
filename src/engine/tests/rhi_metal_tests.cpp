@@ -401,3 +401,71 @@ fragment float4 fs_main(constant Push& p [[buffer(0)]]) {
   CHECK(pixels[centre + 0] < 32);
   CHECK(pixels[centre + 1] > 200);
 }
+
+TEST_CASE("metal: views survive Destroy on their texture", "[rhi][metal]") {
+  auto d = MakeMetal(false);
+  REQUIRE(d);
+  rhitest::CheckViewsSurviveTextureDestroy(*d);
+}
+TEST_CASE("metal: a binding table retains its resources", "[rhi][metal]") {
+  auto d = MakeMetal(false);
+  REQUIRE(d);
+  rhitest::CheckBindingTableRetainsItsResources(*d);
+}
+
+TEST_CASE("metal: submissions retire and stop accumulating", "[rhi][metal][gpu]") {
+  // Before this, Submit appended every command buffer and only WaitIdle ever
+  // cleared the list, so a long-running app retained every submission it had
+  // ever made. This also pins the retirement signal a frame model will use.
+  auto device = MakeMetal(/*validation=*/false);
+  REQUIRE(device);
+  CHECK(device->InFlightCount() == 0);
+
+  for (int i = 0; i < 8; ++i) {
+    auto encoder = device->CreateCommandEncoder("retire");
+    encoder->Finish();
+    device->Submit(*encoder);
+  }
+  device->WaitIdle();
+  CHECK(device->InFlightCount() == 0);
+
+  // Submitting again after everything retired must not resurrect the old ones.
+  auto encoder = device->CreateCommandEncoder("retire_again");
+  encoder->Finish();
+  device->Submit(*encoder);
+  CHECK(device->InFlightCount() <= 1);
+  device->WaitIdle();
+  CHECK(device->InFlightCount() == 0);
+}
+
+TEST_CASE("metal: a submission keeps its resources alive after the caller drops them",
+          "[rhi][metal][gpu]") {
+  // GPU-timeline lifetime. Metal provides this natively by retaining command
+  // buffer references, so this test cannot FAIL on Metal -- it exists to pin
+  // the contract that a DX12 backend has to implement itself, and to be the
+  // test that fails there if it does not.
+  auto device = MakeMetal(/*validation=*/false);
+  REQUIRE(device);
+
+  auto readback = device->CreateBuffer(
+      {.size = 64, .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "survivor"});
+  auto encoder = device->CreateCommandEncoder("inflight");
+  {
+    auto src = device->CreateBuffer(
+        {.size = 64, .usage = BufferUsage::CopySrc | BufferUsage::CopyDst,
+         .label = "dropped"});
+    std::vector<uint8_t> bytes(64, 0xA5);
+    src->Write(0, {bytes.data(), bytes.size()});
+    encoder->CopyBufferToBuffer(src.get(), 0, readback.get(), 0, 64);
+    encoder->Finish();
+    device->Submit(*encoder);
+    // `src` dies here, while the GPU may still be copying from it.
+  }
+  device->WaitIdle();
+
+  std::vector<uint8_t> out(64, 0);
+  REQUIRE(readback->Read(0, out));
+  CHECK(out[0] == 0xA5);
+  CHECK(out[63] == 0xA5);
+}

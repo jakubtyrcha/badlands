@@ -57,6 +57,7 @@ class NullTextureView final : public ITextureView, public NullResource {
   NullTextureView(NullTexture* tex, Format fmt, std::string label)
       : NullResource(std::move(label)), texture_(tex), format_(fmt) {}
   ITexture* GetTexture() const override;
+  bool IsDestroyed() const override;
   Format GetFormat() const override { return format_; }
 
  private:
@@ -104,6 +105,11 @@ class NullTexture final : public ITexture, public NullResource {
 };
 
 ITexture* NullTextureView::GetTexture() const { return texture_; }
+// Mirrors Metal: a view is destroyed once its texture is. Backends must not
+// disagree about a documented contract (rule 6).
+bool NullTextureView::IsDestroyed() const {
+  return NullResource::IsDestroyed() || (texture_ && texture_->IsDestroyed());
+}
 
 class NullSampler final : public ISampler, public NullResource {
  public:
@@ -118,13 +124,15 @@ class NullSampler final : public ISampler, public NullResource {
 class NullBindingTable final : public IBindingTable, public NullResource {
  public:
   explicit NullBindingTable(const BindingTableDesc& d)
-      : NullResource(d.label), group_(d.group), entries_(d.entries) {}
+      : NullResource(d.label), group_(d.group), entries_(d.entries),
+        retained_(RetainBindingResources(d.entries)) {}
   uint32_t GetGroup() const override { return group_; }
   const std::vector<BindingEntry>& Entries() const { return entries_; }
 
  private:
   uint32_t group_;
   std::vector<BindingEntry> entries_;
+  std::vector<std::shared_ptr<IResource>> retained_;
 };
 
 // ---------------------------------------------------------------------------
@@ -450,8 +458,10 @@ class NullDevice final : public IRhiDevice {
       const std::string& label) override {
     return std::make_unique<NullCommandEncoder>(&log_, label);
   }
+  // Nothing executes, so nothing is ever in flight.
   void Submit(ICommandEncoder&) override {}
   void WaitIdle() override {}
+  size_t InFlightCount() override { return 0; }
 
   // The Null backend never observes anything itself; the validation decorator
   // is what fills these in when it wraps a device.

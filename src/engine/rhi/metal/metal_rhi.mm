@@ -187,6 +187,10 @@ class MetalTextureView final : public ITextureView, public MetalResource {
     texture_ = nil;
     MarkDestroyed();
   }
+  // A view is destroyed once its texture is, even if nobody destroyed the view
+  // directly -- callers hold views as raw borrowed pointers, so this is how
+  // they find out rather than by dereferencing freed memory.
+  bool IsDestroyed() const override;
   ITexture* GetTexture() const override;
   Format GetFormat() const override { return format_; }
   id<MTLTexture> Handle() const { return texture_; }
@@ -203,7 +207,10 @@ class MetalTexture final : public ITexture, public MetalResource {
       : MetalResource(d.label), texture_(tex), desc_(d) {}
 
   void Destroy() override {
-    views_.clear();
+    // Release the GPU memory but KEEP the view objects: callers hold them as
+    // raw borrowed pointers, and freeing them here was a heap-use-after-free
+    // that ASan caught and that Null (which never freed them) could not.
+    for (auto& [key, view] : views_) view->Destroy();
     texture_ = nil;
     MarkDestroyed();
   }
@@ -259,6 +266,9 @@ class MetalTexture final : public ITexture, public MetalResource {
 };
 
 ITexture* MetalTextureView::GetTexture() const { return owner_; }
+bool MetalTextureView::IsDestroyed() const {
+  return MetalResource::IsDestroyed() || (owner_ && owner_->IsDestroyed());
+}
 
 class MetalSampler final : public ISampler, public MetalResource {
  public:
@@ -282,7 +292,8 @@ class MetalSampler final : public ISampler, public MetalResource {
 class MetalBindingTable final : public IBindingTable, public MetalResource {
  public:
   explicit MetalBindingTable(const BindingTableDesc& d)
-      : MetalResource(d.label), group_(d.group), entries_(d.entries) {}
+      : MetalResource(d.label), group_(d.group), entries_(d.entries),
+        retained_(RetainBindingResources(d.entries)) {}
   void Destroy() override { MarkDestroyed(); }
   uint32_t GetGroup() const override { return group_; }
   const std::vector<BindingEntry>& Entries() const { return entries_; }
@@ -290,6 +301,8 @@ class MetalBindingTable final : public IBindingTable, public MetalResource {
  private:
   uint32_t group_;
   std::vector<BindingEntry> entries_;
+  // Keeps everything the entries point at alive for as long as the table is.
+  std::vector<std::shared_ptr<IResource>> retained_;
 };
 
 // ---------------------------------------------------------------------------
@@ -889,6 +902,12 @@ class MetalDevice final : public IRhiDevice {
   void Submit(ICommandEncoder& encoder) override {
     auto* me = static_cast<MetalCommandEncoder*>(&encoder);
     if (!me) return;
+
+    // Drop anything that has already retired, so a long-running app does not
+    // accumulate every command buffer it has ever submitted. Without this the
+    // list only ever shrank in WaitIdle.
+    PruneRetired();
+
     id<MTLCommandBuffer> cmd = me->CommandBuffer();
     [cmd commit];
     in_flight_.push_back(cmd);
@@ -899,6 +918,11 @@ class MetalDevice final : public IRhiDevice {
     in_flight_.clear();
   }
 
+  size_t InFlightCount() override {
+    PruneRetired();
+    return in_flight_.size();
+  }
+
   // The decorator owns validation; a bare Metal device observes nothing.
   void BeginValidationScope() override {}
   std::optional<std::string> EndValidationScope() override {
@@ -907,9 +931,23 @@ class MetalDevice final : public IRhiDevice {
   bool IsValidationEnabled() const override { return false; }
 
  private:
+  void PruneRetired() {
+    in_flight_.erase(
+        std::remove_if(in_flight_.begin(), in_flight_.end(),
+                       [](id<MTLCommandBuffer> cmd) {
+                         const MTLCommandBufferStatus s = cmd.status;
+                         return s == MTLCommandBufferStatusCompleted ||
+                                s == MTLCommandBufferStatusError;
+                       }),
+        in_flight_.end());
+  }
+
   id<MTLDevice> device_;
   id<MTLCommandQueue> queue_;
   std::string label_;
+  // Submitted but not yet retired. Metal keeps the resources a command buffer
+  // references alive until it completes -- see the GPU-timeline note in
+  // src/engine/rhi/CLAUDE.md for why a DX12 backend must do that itself.
   std::vector<id<MTLCommandBuffer>> in_flight_;
 };
 

@@ -279,6 +279,12 @@ struct ComputePipelineDesc {
 // One entry in a binding table. Exactly one of the pointers is set; `kind`
 // says which, so the validation decorator can check it against reflection
 // without inspecting the union.
+//
+// The pointers are BORROWED for the duration of the CreateBindingTable call
+// only: the table takes a share of ownership of everything it is given, so a
+// caller may drop its own handle immediately afterwards. Without that, dropping
+// the last caller handle frees the object while the table still points at it --
+// a heap-use-after-free the first ASan run caught.
 enum class BindingKind : uint8_t {
   UniformBuffer, StorageBuffer, ReadOnlyStorageBuffer, SampledTexture, Sampler,
 };

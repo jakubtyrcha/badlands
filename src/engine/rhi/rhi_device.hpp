@@ -84,6 +84,18 @@ class IRhiDevice {
   // this; Metal and DX12 are both synchronous here, unlike Dawn.
   virtual void WaitIdle() = 0;
 
+  // Submissions that have not yet retired. The retirement signal a frame model
+  // will be built on, and the only way to observe that submissions are being
+  // reclaimed rather than accumulating.
+  //
+  // GPU-TIMELINE LIFETIME: a submitted command buffer must keep the resources
+  // it references alive until it retires. Metal provides this natively
+  // (`[queue commandBuffer]` retains references), so the Metal backend gets it
+  // for free -- which means Metal can never reveal a backend that fails to.
+  // A DX12 backend has to implement it, exactly as it has to emit the barriers
+  // Metal auto-tracks.
+  virtual size_t InFlightCount() { return 0; }
+
   // --- Validation ---
   // All 14 of the engine's existing Dawn validation sites assert "nothing went
   // wrong", none assert that an error is raised (probe C). So the contract is

@@ -210,6 +210,91 @@ inline void CheckBufferBoundsAreRefused(IRhiDevice& device) {
   CHECK_FALSE(buf->Read(0, out));
 }
 
+// A view must outlive Destroy() on its texture, because callers hold views as
+// raw borrowed pointers (BindingEntry::texture_view, ColorAttachment::view) and
+// the header promises destroyed-ness is a validation error rather than
+// undefined behaviour. Metal freed its views here and Null did not, so the two
+// backends disagreed about a documented contract with nothing to catch it.
+inline void CheckViewsSurviveTextureDestroy(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 8, .height = 8,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled |
+                                            TextureUsage::CopyDst,
+                                   .label = "destroyed_tex"});
+  REQUIRE(tex);
+  ITextureView* view = tex->GetDefaultView();
+  REQUIRE(view != nullptr);
+
+  tex->Destroy();
+
+  // The view object is still there to be asked; it just reports destroyed.
+  CHECK(tex->IsDestroyed());
+  CHECK(view->IsDestroyed());
+  CHECK(view->GetTexture() == tex.get());
+  CHECK(view->GetFormat() == Format::RGBA8Unorm);
+}
+
+// Binding tables keep their resources alive. Dropping the caller's last handle
+// while a table still references it must not free the object underneath the
+// table.
+inline void CheckBindingTableRetainsItsResources(IRhiDevice& device) {
+  auto module = device.CreateShaderModule(MinimalComputeSource(device.GetBackend()),
+                                          MakeTestReflection(), "retain");
+  auto pipe = device.CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+
+  auto encoder = device.CreateCommandEncoder("retained");
+  BindingTablePtr table;
+  {
+    auto ubo = device.CreateBuffer({.size = 64, .usage = BufferUsage::Uniform,
+                                    .label = "retained_ubo"});
+    auto ssbo = device.CreateBuffer({.size = 64, .usage = BufferUsage::Storage,
+                                     .label = "retained_ssbo"});
+    auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                     .format = Format::RGBA8Unorm,
+                                     .usage = TextureUsage::Sampled,
+                                     .label = "retained_tex"});
+    auto samp = device.CreateSampler({.label = "retained_samp"});
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = ubo.get()},
+                     {.slot = 1, .kind = BindingKind::StorageBuffer,
+                      .buffer = ssbo.get()},
+                     {.slot = 2, .kind = BindingKind::SampledTexture,
+                      .texture_view = tex->GetDefaultView()},
+                     {.slot = 3, .kind = BindingKind::Sampler,
+                      .sampler = samp.get()}},
+         .label = "retaining"});
+    REQUIRE(table);
+
+    // Declared while the handles are still alive. The state tracker keys on the
+    // resource, so this also proves it still resolves after the caller's handle
+    // is gone -- the table is the only owner by the time the bind happens.
+    encoder->Transition(ubo.get(), ResourceState::ShaderRead);
+    encoder->Transition(ssbo.get(), ResourceState::ShaderWrite);
+    encoder->Transition(tex.get(), ResourceState::ShaderRead);
+
+    // Every caller handle goes out of scope here. Without retention inside the
+    // table, everything below reads freed memory.
+  }
+  CHECK_FALSE(table->IsDestroyed());
+  CHECK(table->GetGroup() == 0);
+
+  // Actually USE it. Checking IsDestroyed()/GetGroup() alone passes vacuously,
+  // because neither touches the entries -- and the entries are where a dangling
+  // pointer lives. Binding walks every one of them.
+  auto* pass = encoder->BeginComputePass("retained");
+  REQUIRE(pass != nullptr);
+  pass->SetPipeline(pipe.get());
+  pass->SetBindingTable(0, table.get());
+  pass->Dispatch(1);
+  pass->End();
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.WaitIdle();
+}
+
 inline void CheckDestroyIsObservableAndIdempotent(IRhiDevice& device) {
   auto buf = device.CreateBuffer({.size = 16, .usage = BufferUsage::CopyDst});
   CHECK_FALSE(buf->IsDestroyed());
@@ -714,6 +799,8 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckBufferRoundTrip(device);
   CheckBufferBoundsAreRefused(device);
   CheckDestroyIsObservableAndIdempotent(device);
+  CheckViewsSurviveTextureDestroy(device);
+  CheckBindingTableRetainsItsResources(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

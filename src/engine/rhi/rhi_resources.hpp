@@ -25,9 +25,20 @@ namespace badlands::rhi {
 // implement Destroy/IsDestroyed/GetLabel once in a shared mixin instead of
 // repeating it per resource kind -- without that, a class deriving from both
 // IBuffer and such a mixin gets two IResource subobjects and stays abstract.
-class IResource {
+class IResource : public std::enable_shared_from_this<IResource> {
  public:
   virtual ~IResource() = default;
+
+  // A share of ownership, so a binding table (or anything else that outlives
+  // the caller's handle) can retain what it references. Returns null if the
+  // resource is not owned by a shared_ptr.
+  std::shared_ptr<IResource> Share() {
+    try {
+      return shared_from_this();
+    } catch (const std::bad_weak_ptr&) {
+      return nullptr;
+    }
+  }
 
   // Releases the backing GPU memory. Further use is a validation error, not
   // undefined behaviour, when the validation decorator is active. Idempotent.
@@ -99,6 +110,31 @@ class IBindingTable : public virtual IResource {
  public:
   virtual uint32_t GetGroup() const = 0;
 };
+
+// Shares in the ownership of everything `entries` references, so a binding
+// table can outlive the caller's handles. Every backend's table calls this.
+//
+// A texture VIEW is owned by its texture rather than by a shared_ptr, so the
+// TEXTURE is what gets retained -- keeping the owner alive keeps the view alive,
+// which is the whole point.
+inline std::vector<std::shared_ptr<IResource>> RetainBindingResources(
+    const std::vector<BindingEntry>& entries) {
+  std::vector<std::shared_ptr<IResource>> retained;
+  retained.reserve(entries.size());
+  for (const auto& e : entries) {
+    IResource* r = nullptr;
+    if (e.buffer) {
+      r = e.buffer;
+    } else if (e.texture_view) {
+      r = e.texture_view->GetTexture();  // retain the owner, not the view
+    } else if (e.sampler) {
+      r = e.sampler;
+    }
+    if (!r) continue;
+    if (auto owned = r->Share()) retained.push_back(std::move(owned));
+  }
+  return retained;
+}
 
 using BufferPtr = std::shared_ptr<IBuffer>;
 using TexturePtr = std::shared_ptr<ITexture>;

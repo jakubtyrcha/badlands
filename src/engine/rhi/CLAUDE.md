@@ -99,6 +99,13 @@ builds. If it cannot be compiled out, it is not validation — it is overhead.
   checks the declared intent as bookkeeping over the command stream, with no GPU. This
   is what the eventual DX12 backend will lean on, so do not "simplify" it away because
   Metal ignores it.
+- **Three lifetimes, not one.** (a) The C++ object — a binding table shares ownership
+  of everything it references, and a texture view outlives `Destroy()` on its texture
+  (the handle is released, the object is not). (b) The GPU timeline — a submitted
+  command buffer keeps its resources alive until it retires; **Metal provides this
+  natively, so Metal can never reveal a backend that fails to, and DX12 must implement
+  it.** (c) Frame pacing and deferred deletion — deliberately absent, because "a frame"
+  is defined by present cadence and there is no swapchain yet. Do not conflate them.
 - **Shader source is target-native by contract.** The RHI never compiles anything; a
   shared test needs per-backend source (see `MinimalComputeSource` in
   `rhi_conformance.hpp`), which is also where the HLSL arm goes.

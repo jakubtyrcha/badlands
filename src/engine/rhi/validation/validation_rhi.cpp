@@ -101,7 +101,9 @@ struct Context {
 class ValidationBindingTable final : public IBindingTable {
  public:
   ValidationBindingTable(BindingTablePtr inner, std::vector<BindingEntry> entries)
-      : inner_(std::move(inner)), entries_(std::move(entries)) {}
+      : inner_(std::move(inner)),
+        retained_(RetainBindingResources(entries)),
+        entries_(std::move(entries)) {}
 
   uint32_t GetGroup() const override { return inner_->GetGroup(); }
   void Destroy() override { inner_->Destroy(); }
@@ -113,6 +115,7 @@ class ValidationBindingTable final : public IBindingTable {
 
  private:
   BindingTablePtr inner_;
+  std::vector<std::shared_ptr<IResource>> retained_;
   std::vector<BindingEntry> entries_;
 };
 
@@ -652,6 +655,8 @@ class ValidationDevice final : public IRhiDevice {
   }
 
   void WaitIdle() override { inner_->WaitIdle(); }
+
+  size_t InFlightCount() override { return inner_->InFlightCount(); }
 
   void BeginValidationScope() override { ctx_.recorder.BeginScope(); }
   std::optional<std::string> EndValidationScope() override {
