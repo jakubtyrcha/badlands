@@ -95,8 +95,9 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const float he = f.half_extent;
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
 
-    // Grab the u-v patch center, pull it 0.3he along u (in-plane).
-    const simd_float3 grab = f.origin + 0.45f * he * (f.u + f.v);
+    // Grab the u-v patch center (derived from the shared bounds, not a
+    // literal -- those bounds moved once already), pull it 0.3he along u.
+    const simd_float3 grab = f.origin + kGizmoPatchCenter * he * (f.u + f.v);
     const ClickPoint p1 = click_at(grab);
     const ClickPoint p2 = click_at(grab + 0.3f * he * f.u);
     CHECK(editor->beginDrag(p1.x, p1.y));
@@ -190,7 +191,7 @@ TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; Axi
 
     SUBCASE("PlaneUV drag stays in the snap plane") {
         const simd_float3 before = to_simd(editor->nodePosition(b.node_id));
-        const simd_float3 grab = f.origin + 0.45f * he * (f.u + f.v);
+        const simd_float3 grab = f.origin + kGizmoPatchCenter * he * (f.u + f.v);
         const ClickPoint p1 = click_at(grab);
         const ClickPoint p2 = click_at(grab + 0.3f * he * f.v);
         CHECK(editor->beginDrag(p1.x, p1.y));

@@ -107,7 +107,10 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         }
         const float x = simd_dot(*hit - frame.origin, plane.e1);
         const float y = simd_dot(*hit - frame.origin, plane.e2);
-        if (x < 0.3f * he || x > 0.6f * he || y < 0.3f * he || y > 0.6f * he) {
+        // Same constants append_move_gizmo_handles draws the patch from, so
+        // the outline and its hit region cannot drift apart.
+        if (x < kGizmoPatchInner * he || x > kGizmoPatchOuter * he ||
+            y < kGizmoPatchInner * he || y > kGizmoPatchOuter * he) {
             continue;
         }
         const float t = simd_dot(*hit - ray.origin, ray.dir);

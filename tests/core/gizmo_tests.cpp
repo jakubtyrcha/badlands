@@ -2,9 +2,11 @@
 
 #include <cmath>
 #include <simd/simd.h>
+#include <vector>
 
 #include "camera.h"
 #include "gizmo.h"
+#include "lines.h" // append_move_gizmo_handles, for the drawn == hit case
 #include "scene.h"
 
 using namespace sq;
@@ -215,18 +217,49 @@ TEST_CASE("pick_gizmo_handle: plane patches hit at their centers, bounds respect
     // y=0.3 aiming at the u-n patch (in y=0) grazes the u axis at ~0.04,
     // inside tolerance. Asymmetric x/y also avoids accidentally crossing the
     // n axis (an x==y eye aimed at the uv patch center does exactly that).
-    CHECK(pick(f, simd_float3{0.8f, 0.3f, 6.0f}, f.origin + 0.45f * he * (f.u + f.v)) == GizmoHandle::PlaneUV);
-    CHECK(pick(f, simd_float3{0.3f, 5.0f, 4.0f}, f.origin + 0.45f * he * (f.u + f.n)) == GizmoHandle::PlaneUN);
-    CHECK(pick(f, simd_float3{5.0f, 0.3f, 4.0f}, f.origin + 0.45f * he * (f.v + f.n)) == GizmoHandle::PlaneVN);
+    // Every probe below is derived from kGizmoPatchInner/Outer rather than
+    // spelled out: these numbers moved once already (the [0.3, 0.6] -> [0.24,
+    // 0.50] restyle), and the literal 0.25 that used to sit safely outside the
+    // patch silently ended up INSIDE it.
+    const float c = kGizmoPatchCenter;
+    CHECK(pick(f, simd_float3{0.8f, 0.3f, 6.0f}, f.origin + c * he * (f.u + f.v)) == GizmoHandle::PlaneUV);
+    CHECK(pick(f, simd_float3{0.3f, 5.0f, 4.0f}, f.origin + c * he * (f.u + f.n)) == GizmoHandle::PlaneUN);
+    CHECK(pick(f, simd_float3{5.0f, 0.3f, 4.0f}, f.origin + c * he * (f.v + f.n)) == GizmoHandle::PlaneVN);
     const simd_float3 eye = {0.8f, 0.3f, 6.0f}; // uv-patch / bounds cases below
 
-    // Patch bounds [0.3he, 0.6he] per coordinate.
-    CHECK(pick(f, eye, f.origin + 0.35f * he * f.u + 0.35f * he * f.v) == GizmoHandle::PlaneUV);
-    CHECK(pick(f, eye, f.origin + 0.25f * he * f.u + 0.45f * he * f.v) == GizmoHandle::None);
-    CHECK(pick(f, eye, f.origin + 0.65f * he * f.u + 0.45f * he * f.v) == GizmoHandle::None);
+    // Patch bounds, just inside and just outside each edge.
+    const float inside = kGizmoPatchInner + 0.02f;
+    const float below  = kGizmoPatchInner - 0.02f;
+    const float above  = kGizmoPatchOuter + 0.02f;
+    CHECK(pick(f, eye, f.origin + inside * he * f.u + inside * he * f.v) == GizmoHandle::PlaneUV);
+    CHECK(pick(f, eye, f.origin + below * he * f.u + c * he * f.v) == GizmoHandle::None);
+    CHECK(pick(f, eye, f.origin + above * he * f.u + c * he * f.v) == GizmoHandle::None);
 
     // Off everything.
     CHECK(pick(f, eye, f.origin + 3.0f * he * f.u + 3.0f * he * f.v) == GizmoHandle::None);
+}
+
+TEST_CASE("pick_gizmo_handle: the patch it hit-tests is the patch lines.cpp draws") {
+    // Guards the "drawn = hit" invariant directly, rather than by inspection:
+    // walk the emitted uv-patch FILL vertices (the first 6 of that patch's
+    // block) and confirm every one lies within the pickable bounds. If a
+    // restyle moved the drawn quad without moving the pick, this fails.
+    const GizmoFrame f = test_frame();
+    const float he = f.half_extent;
+    std::vector<LineVertex> out;
+    append_move_gizmo_handles(out, f, GizmoHandle::None, simd_float3{0.8f, 0.3f, 6.0f});
+    REQUIRE(out.size() == 132);
+
+    for (size_t i = 36; i < 42; ++i) { // uv patch fill
+        CAPTURE(i);
+        const simd_float3 p = out[i].pos.xyz;
+        const float x = simd_dot(p - f.origin, f.u);
+        const float y = simd_dot(p - f.origin, f.v);
+        CHECK(x >= kGizmoPatchInner * he - 1e-5f);
+        CHECK(x <= kGizmoPatchOuter * he + 1e-5f);
+        CHECK(y >= kGizmoPatchInner * he - 1e-5f);
+        CHECK(y <= kGizmoPatchOuter * he + 1e-5f);
+    }
 }
 
 TEST_CASE("pick_gizmo_handle: an axis offset beyond the world tolerance at its depth "

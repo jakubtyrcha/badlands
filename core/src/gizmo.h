@@ -16,6 +16,20 @@ struct Node;
 // user ruling over the original 0.12.
 inline constexpr float kGizmoScreenFraction = 0.24f;
 
+// Plane-handle patch bounds, as fractions of half_extent: the patch is the
+// square origin + x*e1 + y*e2 with x, y in [inner*he, outer*he].
+//
+// SINGLE SOURCE OF TRUTH. "Drawn = hit" is load-bearing for this gizmo, and
+// before these existed the same two numbers were spelled out independently in
+// lines.cpp (the draw), gizmo.cpp (the pick) and three test files -- so a
+// restyle could silently move the drawn patch off its own hit region. Any
+// change here moves both halves together, by construction.
+inline constexpr float kGizmoPatchInner = 0.24f;
+inline constexpr float kGizmoPatchOuter = 0.50f;
+// The point a caller should aim at to hit a patch dead centre (tests, and any
+// future "grab the plane handle" affordance).
+inline constexpr float kGizmoPatchCenter = 0.5f * (kGizmoPatchInner + kGizmoPatchOuter);
+
 // The modify-mode move gizmo's tangent frame. origin/n follow
 // drag_plane_for_node (snapped -> snap frame, unsnapped -> camera-facing);
 // (u, v, n) is orthonormal and right-handed (u x v == n).

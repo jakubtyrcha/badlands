@@ -68,6 +68,21 @@ private:
     // ordering hazard against set_viewport_size).
     void ensure_depth_texture(uint32_t width, uint32_t height);
 
+    // Replaces `buffer` with a fresh one holding `verts`, or drops it when
+    // they're empty (Metal disallows zero-length buffers). Used for the
+    // per-frame overlay geometry that outgrew setVertexBytes' 4KB limit once
+    // the gizmo grid gained per-vertex fade subdivision.
+    //
+    // Allocating fresh every frame is safe even mid-flight for the same
+    // reason raymarch_nodes_ documents: an in-flight command buffer retains
+    // the old MTL::Buffer via ARC. Pooling these into a ring was considered
+    // and deliberately deferred -- ring-indexing alone does NOT guarantee the
+    // GPU has finished reading the slot being written, that needs a
+    // completion-handler semaphore, and this renderer has no CPU/GPU sync
+    // primitives at all. Revisit only if newBuffer shows up in a capture, and
+    // then for every transient upload here at once rather than just this one.
+    void upload_line_verts(NS::SharedPtr<MTL::Buffer>& buffer, const std::vector<LineVertex>& verts);
+
     CA::MetalLayer* layer_ = nullptr;
     NS::SharedPtr<MTL::Device> device_;
     NS::SharedPtr<MTL::CommandQueue> queue_;
@@ -109,6 +124,8 @@ private:
     bool gizmo_visible_ = false;
     std::vector<LineVertex> gizmo_grid_verts_;     // thin LINE primitives
     std::vector<LineVertex> gizmo_handle_verts_;   // thick-quad TRIANGLE primitives
+    NS::SharedPtr<MTL::Buffer> gizmo_grid_buffer_;
+    NS::SharedPtr<MTL::Buffer> gizmo_handle_buffer_;
 
     // Pivot marker geometry, one copy per pass (same quads, different baked
     // vertex color — kColorPivotFront/kColorPivotBehind).

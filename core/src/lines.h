@@ -14,21 +14,52 @@ inline constexpr simd_float4 kColorSubtract = {1.0f, 0.2f, 0.15f, 1.0f};
 inline constexpr simd_float4 kColorSelected = {0.6f, 0.8f, 1.0f, 1.0f};
 inline constexpr simd_float4 kColorGridLine = {1.0f, 1.0f, 1.0f, 0.18f};
 
-// Gizmo handle colors (user ruling): RGB per axis, additive mix per plane
-// (uv = red+green = yellow, etc). Hot is WHITE — amber would collide with
-// the yellow uv plane.
-inline constexpr simd_float4 kColorAxisU    = {1.0f, 0.0f, 0.0f, 1.0f};
-inline constexpr simd_float4 kColorAxisV    = {0.0f, 1.0f, 0.0f, 1.0f};
-inline constexpr simd_float4 kColorAxisN    = {0.0f, 0.0f, 1.0f, 1.0f};
-inline constexpr simd_float4 kColorPlaneUV  = {1.0f, 1.0f, 0.0f, 0.9f};
-inline constexpr simd_float4 kColorPlaneUN  = {1.0f, 0.0f, 1.0f, 0.9f};
-inline constexpr simd_float4 kColorPlaneVN  = {0.0f, 1.0f, 1.0f, 0.9f};
+// Gizmo handle colors: RGB per axis, additive mix per plane (uv = red+green
+// = yellow, etc). Hot is WHITE — amber would collide with the yellow uv
+// plane.
+//
+// The axis colors are the DESATURATED world-axis palette from ground_grid.h
+// (kGroundAxisX/Y/Z), not full-saturation primaries. Two reasons: full RGB at
+// this size read as a toy ("too cartoonish", user ruling), and sharing the
+// palette with the ground plate means an axis handle and a world axis of the
+// same hue look like the same idea. Plane colors are the pairwise additive
+// mixes of those, so the "uv = u + v" relationship survives desaturation.
+inline constexpr simd_float4 kColorAxisU    = {0.878f, 0.337f, 0.384f, 1.0f}; // == kGroundAxisX
+inline constexpr simd_float4 kColorAxisV    = {0.486f, 0.808f, 0.478f, 1.0f}; // == kGroundAxisY
+inline constexpr simd_float4 kColorAxisN    = {0.322f, 0.518f, 0.910f, 1.0f}; // == kGroundAxisZ
+inline constexpr simd_float4 kColorPlaneUV  = {0.780f, 0.640f, 0.360f, 1.0f}; // u+v
+inline constexpr simd_float4 kColorPlaneUN  = {0.700f, 0.400f, 0.720f, 1.0f}; // u+n
+inline constexpr simd_float4 kColorPlaneVN  = {0.400f, 0.720f, 0.760f, 1.0f}; // v+n
 inline constexpr simd_float4 kColorGizmoHot = {1.0f, 1.0f, 1.0f, 1.0f};
 
+// Resting vs highlighted opacity. Everything used to draw at full strength
+// all the time, which is most of why the gizmo shouted over the model; now
+// only the hovered/active handle does. Hover feedback is therefore carried by
+// brightness AND color, so it survives on any handle.
+inline constexpr float kGizmoHandleRestAlpha = 0.62f;
+
 // Handle line half-width as a fraction of the frame's half_extent. he is
-// screen-constant, so this is screen-constant thickness too (~4.8pts full
-// width at the default kGizmoScreenFraction on a 500pt-tall viewport).
-inline constexpr float kGizmoHandleHalfWidthFrac = 0.02f;
+// screen-constant, so this is screen-constant thickness too (~2.6pts full
+// width at the default kGizmoScreenFraction on a 500pt-tall viewport, down
+// from 4.8pts before the restyle).
+inline constexpr float kGizmoHandleHalfWidthFrac = 0.011f;
+// The hairline outlining a plane patch's translucent fill — thinner still, so
+// the patch reads as a surface rather than a second set of bars.
+inline constexpr float kGizmoPatchBorderHalfWidthFrac = 0.006f;
+// Axis shafts stop just short of he, and a camera-facing dot caps each one.
+inline constexpr float kGizmoAxisShaftFrac = 0.94f;
+inline constexpr float kGizmoAxisTipHalfSizeFrac = 0.030f;
+// Plane patches are filled at this alpha, with their outline at full weight.
+inline constexpr float kGizmoPatchFillAlpha = 0.16f;
+
+// Gizmo grid: peak alpha at the origin, fading radially to nothing between
+// these fractions of he. The hard square edge is gone (user ruling) — which
+// means the fade must be evaluated per vertex, so each grid line is
+// subdivided rather than drawn as a single 2-vertex segment.
+inline constexpr float kGizmoGridAlpha = 0.20f;
+inline constexpr float kGizmoGridFadeBegin = 0.45f;
+inline constexpr float kGizmoGridFadeEnd = 0.98f;
+inline constexpr int kGizmoGridSegmentsPerLine = 12;
 
 // Camera-pivot marker: mid gray, opaque where it beats the scene depth,
 // faded where occluded (user ruling: "mid gray in front, alpha blended
@@ -74,8 +105,16 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
 // Grid (thin LINE primitives, decoration): grid lines i in 0..divisions
 // along BOTH u and v directions, center lines included — the axis handles
 // only cover the positive halves (R3), so a skipped center would gap the
-// -he..0 halves: 2*(divisions+1) lines = 52 verts at divisions=12, color
-// kColorGridLine.
+// -he..0 halves.
+//
+// Each line is subdivided into kGizmoGridSegmentsPerLine pieces so the
+// radial alpha fade (kGizmoGridAlpha, falling to 0 between
+// kGizmoGridFadeBegin*he and kGizmoGridFadeEnd*he) can be evaluated per
+// vertex. Drawing a line as a single 2-vertex segment would interpolate that
+// fade linearly end-to-end, which is visibly wrong for a radial falloff — the
+// midpoint of a line passing near the origin would come out darker than its
+// ends. 2*(divisions+1) lines * segments * 2 verts = 624 verts at
+// divisions=12: past the 4KB setVertexBytes limit, hence the vertex buffer.
 void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions);
 //
 // Handles (TRIANGLE primitives): each handle line is expanded into a
@@ -83,16 +122,19 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 // no line width), endpoints extended by the half-width so segments sharing a
 // corner overlap instead of notching. Emits, in this order (pinned by
 // lines_tests):
-//  - 3 axis segments from the origin, POSITIVE half only: 0..+he along
-//    u/v/n (R3 user ruling; pick clamps to the same segment), colors
-//    kColorAxisU/V/N
-//  - 3 plane-patch outlines (uv, un, vn), the [0.3he, 0.6he]^2 square in
-//    each basis pair (4 segments each), colors kColorPlaneUV/UN/VN
-// The `highlighted` handle draws in kColorGizmoHot instead of its base
-// color (hover/active feedback). A segment pointing straight at the eye has
-// no on-screen extent and is skipped. Total: 15 segments * 6 = 90 verts
-// (2880B, under the 4KB setVertexBytes limit; the grid's 48 verts ride in a
-// separate draw).
+//  - 3 axis shafts from the origin, POSITIVE half only: 0..kGizmoAxisShaftFrac*he
+//    along u/v/n (R3 user ruling; pick clamps to the full 0..he segment),
+//    colors kColorAxisU/V/N — 6 verts each
+//  - 3 camera-facing tip dots capping those shafts — 6 verts each
+//  - 3 plane patches (uv, un, vn) over [kGizmoPatchInner, kGizmoPatchOuter]^2
+//    in each basis pair: a translucent fill quad (6 verts) then a 4-segment
+//    hairline outline (24 verts), colors kColorPlaneUV/UN/VN
+//  - 1 camera-facing origin pip — 6 verts
+// Handles rest at kGizmoHandleRestAlpha; the `highlighted` one draws opaque
+// in kColorGizmoHot instead (hover/active feedback). A segment pointing
+// straight at the eye has no on-screen extent and is skipped. Total:
+// 18 + 18 + 90 + 6 = 132 verts, which is why these ride a vertex buffer
+// rather than setVertexBytes.
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                GizmoHandle highlighted, simd_float3 eye);
 

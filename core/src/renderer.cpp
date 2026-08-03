@@ -312,6 +312,16 @@ void Renderer::hide_gizmo() {
     gizmo_handle_verts_.clear();
 }
 
+void Renderer::upload_line_verts(NS::SharedPtr<MTL::Buffer>& buffer,
+                                  const std::vector<LineVertex>& verts) {
+    if (verts.empty()) {
+        buffer.reset(); // Metal disallows zero-length buffers
+        return;
+    }
+    buffer = NS::TransferPtr(device_->newBuffer(verts.data(), verts.size() * sizeof(LineVertex),
+                                                 MTL::ResourceStorageModeShared));
+}
+
 void Renderer::set_origin_marker(float height, float half_width, float pip_half_size, simd_float3 eye) {
     origin_marker_verts_.clear();
     append_origin_marker(origin_marker_verts_, height, half_width, pip_half_size, eye);
@@ -503,18 +513,26 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     }
 
     // Gizmo pass: painter's order over the opaque scene lines, semi-transparent
-    // blend PSO, verts always via setVertexBytes (48 + 90 verts, never a
-    // buffer). The thin grid draws first as lines, the thick handle quads as
-    // triangles on top — same PSO, the primitive type is per-draw.
-    if (gizmo_visible_ && !gizmo_grid_verts_.empty()) {
+    // blend PSO. The thin grid draws first as lines, the handle triangles on
+    // top — same PSO, the primitive type is per-draw.
+    //
+    // Both ride real vertex buffers rather than setVertexBytes: the grid's
+    // per-vertex radial fade needs each line subdivided (624 verts) and the
+    // restyled handles come to 132, so both are past the 4KB inline limit.
+    // See upload_line_verts for the per-frame allocation reasoning.
+    if (gizmo_visible_) {
+        upload_line_verts(gizmo_grid_buffer_, gizmo_grid_verts_);
+        upload_line_verts(gizmo_handle_buffer_, gizmo_handle_verts_);
+    }
+    if (gizmo_visible_ && gizmo_grid_buffer_) {
         encoder->setRenderPipelineState(line_blend_pso_.get());
-        encoder->setVertexBytes(gizmo_grid_verts_.data(), gizmo_grid_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBuffer(gizmo_grid_buffer_.get(), 0, 0);
         encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
         encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), gizmo_grid_verts_.size());
     }
-    if (gizmo_visible_ && !gizmo_handle_verts_.empty()) {
+    if (gizmo_visible_ && gizmo_handle_buffer_) {
         encoder->setRenderPipelineState(line_blend_pso_.get());
-        encoder->setVertexBytes(gizmo_handle_verts_.data(), gizmo_handle_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setVertexBuffer(gizmo_handle_buffer_.get(), 0, 0);
         encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), gizmo_handle_verts_.size());
     }

@@ -232,10 +232,15 @@ TEST_CASE("build_scene_lines: subtract-always + selected-always-overrides policy
 
 // --- append_move_gizmo_grid / append_move_gizmo_handles ---------------------
 //
-// Handle emission order is pinned (the highlight cases below depend on it):
-// thick segments of 6 triangle verts each — axes u, v, n (1 segment each,
-// [0,18)), then patch outlines uv, un, vn (4 segments = 24 verts each:
-// [18,42), [42,66), [66,90)) = 90 verts total.
+// Handle emission order is pinned (the highlight cases below depend on it),
+// 132 verts total:
+//   [0,18)    3 axis shafts, one 6-vert thick segment each: u, v, n
+//   [18,36)   3 camera-facing tip dots capping those shafts: u, v, n
+//   [36,126)  3 plane patches, 30 verts each — a 6-vert fill quad followed by
+//             a 4-segment (24-vert) hairline outline: uv, un, vn
+//   [126,132) the origin pip
+// Note an axis handle's verts are NOT contiguous: its shaft and its tip dot
+// sit in different blocks, which the highlight cases below account for.
 // (The tangent-basis formula itself is pinned in gizmo_tests.cpp.)
 
 namespace {
@@ -256,6 +261,29 @@ bool color_is(const LineVertex& v, const simd_float4 expected) {
            v.color.w == doctest::Approx(expected.w);
 }
 
+// Hue only. Needed because the restyle made alpha carry meaning of its own:
+// a resting handle is its base color at kGizmoHandleRestAlpha, a highlighted
+// one is white — but a highlighted patch's FILL is white at the fill alpha,
+// not at 1.0. So "is this vertex hot?" is a question about rgb, and the
+// alphas get checked separately.
+bool rgb_is(const LineVertex& v, const simd_float4 expected) {
+    return v.color.x == doctest::Approx(expected.x) &&
+           v.color.y == doctest::Approx(expected.y) &&
+           v.color.z == doctest::Approx(expected.z);
+}
+
+// The base color a resting handle should carry: its own hue, dimmed.
+simd_float4 resting(simd_float4 base) {
+    base.w = kGizmoHandleRestAlpha;
+    return base;
+}
+
+// Returns alpha BY VALUE. `v.color.w` is a simd vector-element accessor, not
+// an lvalue, so doctest's expression decomposer cannot bind a reference to it
+// ("non-const reference cannot bind to vector element"). Going through a
+// function forces the copy.
+float alpha_of(const LineVertex& v) { return v.color.w; }
+
 // Every expanded vertex of a thick segment [a,b] lies within half_width of
 // the segment's line, inside the endpoint extension along it.
 void check_on_thick_segment(const simd_float3 p, const simd_float3 a, const simd_float3 b,
@@ -270,25 +298,54 @@ void check_on_thick_segment(const simd_float3 p, const simd_float3 a, const simd
 
 } // namespace
 
-TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — thin, coplanar, faint") {
+TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — coplanar, radially faded") {
     const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
+    const float he = f.half_extent;
     std::vector<LineVertex> out;
     append_move_gizmo_grid(out, f, 12);
 
     // 26 grid lines (2*(divisions+1), center lines included — the positive-
-    // only axis handles no longer cover their negative halves) = 52 verts.
-    REQUIRE(out.size() == 52);
+    // only axis handles no longer cover their negative halves), each split
+    // into kGizmoGridSegmentsPerLine 2-vertex segments so the radial fade can
+    // be evaluated per vertex.
+    REQUIRE(out.size() == 26 * kGizmoGridSegmentsPerLine * 2);
+
     for (size_t i = 0; i < out.size(); ++i) {
         CAPTURE(i);
-        const simd_float3 p = out[i].pos.xyz;
-        const simd_float4 c = out[i].color;
-        CHECK(std::fabs(simd_dot(f.n, p - f.origin)) < 1e-5f);
-        CHECK(c.w == doctest::Approx(0.18f));
+        CHECK(std::fabs(simd_dot(f.n, out[i].pos.xyz - f.origin)) < 1e-5f);
+        CHECK(alpha_of(out[i]) >= 0.0f);
+        CHECK(alpha_of(out[i]) <= kGizmoGridAlpha + 1e-5f);
+    }
+
+    SUBCASE("alpha is a function of radius: full at the center, gone past the fade end") {
+        for (const LineVertex& v : out) {
+            const simd_float3 d = v.pos.xyz - f.origin;
+            const float r = simd_length(d);
+            CAPTURE(r);
+            if (r < kGizmoGridFadeBegin * he - 1e-4f) {
+                CHECK(alpha_of(v) == doctest::Approx(kGizmoGridAlpha));
+            } else if (r > kGizmoGridFadeEnd * he + 1e-4f) {
+                CHECK(alpha_of(v) == doctest::Approx(0.0f));
+            }
+        }
+    }
+
+    SUBCASE("the origin vertex is at full grid alpha") {
+        bool found = false;
+        for (const LineVertex& v : out) {
+            if (simd_length(v.pos.xyz - f.origin) < 1e-4f) {
+                found = true;
+                CHECK(alpha_of(v) == doctest::Approx(kGizmoGridAlpha));
+            }
+        }
+        CHECK(found);
     }
 
     // Regression (post-R3 review): the center lines must reach the NEGATIVE
-    // ends — the positive-only axis handles no longer cover them.
-    for (const simd_float3 neg_end : {f.origin - 2.0f * f.u, f.origin - 2.0f * f.v}) {
+    // ends — the positive-only axis handles no longer cover them. They are
+    // fully faded out there, but the geometry has to exist or the fade would
+    // start from a hard cut instead.
+    for (const simd_float3 neg_end : {f.origin - he * f.u, f.origin - he * f.v}) {
         bool found = false;
         for (const LineVertex& v : out) {
             found = found || simd_length(v.pos.xyz - neg_end) < 1e-4f;
@@ -297,46 +354,94 @@ TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — thin, copla
     }
 }
 
-TEST_CASE("append_move_gizmo_handles: counts, thick-quad geometry, RGB axis colors and "
-          "additive-mix plane colors") {
+TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors and "
+          "filled plane patches") {
     const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
     const float he = f.half_extent;
     const float hw = kGizmoHandleHalfWidthFrac * he;
+    const float border_hw = kGizmoPatchBorderHalfWidthFrac * he;
+    const float tip = kGizmoAxisTipHalfSizeFrac * he;
     const simd_float3 eye = {3.0f, 8.0f, 2.0f}; // off every axis: no degenerate expansion
     std::vector<LineVertex> out;
     append_move_gizmo_handles(out, f, GizmoHandle::None, eye);
 
-    // (3 axes * 1 + 3 patches * 4) segments * 6 verts = 90.
-    REQUIRE(out.size() == 90);
+    // 3 shafts*6 + 3 tips*6 + 3 patches*(6 fill + 24 outline) + 6 pip = 132.
+    REQUIRE(out.size() == 132);
 
-    // Axes: 6 verts each, on the POSITIVE 0..+he segment only (R3 user
-    // ruling — no negative half), in their axis color.
-    const struct { simd_float3 dir; simd_float4 color; size_t base; } axes[] = {
-        {f.u, kColorAxisU, 0}, {f.v, kColorAxisV, 6}, {f.n, kColorAxisN, 12},
+    const struct { simd_float3 dir; simd_float4 color; size_t shaft; size_t tip; } axes[] = {
+        {f.u, kColorAxisU, 0, 18}, {f.v, kColorAxisV, 6, 24}, {f.n, kColorAxisN, 12, 30},
     };
-    for (const auto& axis : axes) {
-        for (size_t i = axis.base; i < axis.base + 6; ++i) {
-            CAPTURE(i);
-            check_on_thick_segment(out[i].pos.xyz, f.origin, f.origin + he * axis.dir, hw);
-            CHECK(color_is(out[i], axis.color));
+
+    SUBCASE("shafts run the POSITIVE half only, stopping short for the tip dot") {
+        for (const auto& axis : axes) {
+            const simd_float3 end = f.origin + kGizmoAxisShaftFrac * he * axis.dir;
+            for (size_t i = axis.shaft; i < axis.shaft + 6; ++i) {
+                CAPTURE(i);
+                check_on_thick_segment(out[i].pos.xyz, f.origin, end, hw);
+                CHECK(color_is(out[i], resting(axis.color)));
+                // R3: no negative half.
+                CHECK(simd_dot(out[i].pos.xyz - f.origin, axis.dir) > -hw - 1e-5f);
+            }
         }
     }
 
-    // Patches: 24 verts each, within the outline's thickened bounds, mixed color.
+    SUBCASE("tip dots cap the shafts and face the eye") {
+        for (const auto& axis : axes) {
+            const simd_float3 center = f.origin + kGizmoAxisShaftFrac * he * axis.dir;
+            for (size_t i = axis.tip; i < axis.tip + 6; ++i) {
+                CAPTURE(i);
+                // Corners of a square of half-size `tip`, so at most sqrt(2)*tip out.
+                CHECK(simd_length(out[i].pos.xyz - center) < 1.4143f * tip + 1e-5f);
+                CHECK(color_is(out[i], resting(axis.color)));
+            }
+        }
+    }
+
+    // Patches: 6 fill verts exactly on the patch bounds, then 24 outline verts
+    // within the thickened bounds. Bounds come from the SHARED constants that
+    // pick_gizmo_handle also reads — that is the drawn = hit invariant.
     const struct { simd_float3 e1, e2; simd_float4 color; size_t base; } patches[] = {
-        {f.u, f.v, kColorPlaneUV, 18}, {f.u, f.n, kColorPlaneUN, 42}, {f.v, f.n, kColorPlaneVN, 66},
+        {f.u, f.v, kColorPlaneUV, 36}, {f.u, f.n, kColorPlaneUN, 66}, {f.v, f.n, kColorPlaneVN, 96},
     };
-    for (const auto& patch : patches) {
-        for (size_t i = patch.base; i < patch.base + 24; ++i) {
+
+    SUBCASE("patch fills sit exactly on the pickable bounds") {
+        for (const auto& patch : patches) {
+            for (size_t i = patch.base; i < patch.base + 6; ++i) {
+                CAPTURE(i);
+                const simd_float3 p = out[i].pos.xyz;
+                const float x = simd_dot(p - f.origin, patch.e1);
+                const float y = simd_dot(p - f.origin, patch.e2);
+                CHECK(x >= kGizmoPatchInner * he - 1e-5f);
+                CHECK(x <= kGizmoPatchOuter * he + 1e-5f);
+                CHECK(y >= kGizmoPatchInner * he - 1e-5f);
+                CHECK(y <= kGizmoPatchOuter * he + 1e-5f);
+                CHECK(rgb_is(out[i], patch.color));
+                CHECK(alpha_of(out[i]) == doctest::Approx(kGizmoPatchFillAlpha));
+            }
+        }
+    }
+
+    SUBCASE("patch outlines are hairlines around those same bounds") {
+        for (const auto& patch : patches) {
+            for (size_t i = patch.base + 6; i < patch.base + 30; ++i) {
+                CAPTURE(i);
+                const simd_float3 p = out[i].pos.xyz;
+                const float x = simd_dot(p - f.origin, patch.e1);
+                const float y = simd_dot(p - f.origin, patch.e2);
+                CHECK(x > kGizmoPatchInner * he - 2.0f * border_hw - 1e-5f);
+                CHECK(x < kGizmoPatchOuter * he + 2.0f * border_hw + 1e-5f);
+                CHECK(y > kGizmoPatchInner * he - 2.0f * border_hw - 1e-5f);
+                CHECK(y < kGizmoPatchOuter * he + 2.0f * border_hw + 1e-5f);
+                CHECK(color_is(out[i], resting(patch.color)));
+            }
+        }
+    }
+
+    SUBCASE("origin pip closes the run") {
+        for (size_t i = 126; i < 132; ++i) {
             CAPTURE(i);
-            const simd_float3 p = out[i].pos.xyz;
-            const float x = simd_dot(p - f.origin, patch.e1);
-            const float y = simd_dot(p - f.origin, patch.e2);
-            CHECK(x > 0.3f * he - 2.0f * hw - 1e-5f);
-            CHECK(x < 0.6f * he + 2.0f * hw + 1e-5f);
-            CHECK(y > 0.3f * he - 2.0f * hw - 1e-5f);
-            CHECK(y < 0.6f * he + 2.0f * hw + 1e-5f);
-            CHECK(color_is(out[i], patch.color));
+            CHECK(simd_length(out[i].pos.xyz - f.origin) < 1.4143f * tip + 1e-5f);
+            CHECK(color_is(out[i], kColorOriginPip));
         }
     }
 }
@@ -348,24 +453,48 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
     const simd_float3 eye = {4.0f, 9.0f, 5.0f};
     std::vector<LineVertex> out;
 
-    auto check_hot_range = [&](GizmoHandle highlighted, size_t expect_begin, size_t expect_count) {
+    // An axis handle's verts are split across two blocks (shaft + tip dot),
+    // so ranges are given as a list rather than a single begin/count. The
+    // origin pip [126,132) is white too but is NOT a handle, so it is excluded
+    // everywhere -- hence the explicit exclusion in the sweep below.
+    auto check_hot = [&](GizmoHandle highlighted, std::vector<std::pair<size_t, size_t>> ranges) {
         out.clear();
         append_move_gizmo_handles(out, f, highlighted, eye);
-        REQUIRE(out.size() == 90);
-        size_t hot = 0;
+        REQUIRE(out.size() == 132);
+
         for (size_t i = 0; i < out.size(); ++i) {
             CAPTURE(i);
-            const bool should_be_hot = i >= expect_begin && i < expect_begin + expect_count;
-            CHECK(color_is(out[i], kColorGizmoHot) == should_be_hot);
-            hot += color_is(out[i], kColorGizmoHot) ? 1 : 0;
+            if (i >= 126) {
+                continue; // origin pip: always white, never a handle
+            }
+            bool in_range = false;
+            for (const auto& r : ranges) {
+                in_range = in_range || (i >= r.first && i < r.first + r.second);
+            }
+            CHECK(rgb_is(out[i], kColorGizmoHot) == in_range);
         }
-        CHECK(hot == expect_count);
     };
 
-    SUBCASE("AxisU") { check_hot_range(GizmoHandle::AxisU, 0, 6); }
-    SUBCASE("AxisN") { check_hot_range(GizmoHandle::AxisN, 12, 6); }
-    SUBCASE("PlaneUV") { check_hot_range(GizmoHandle::PlaneUV, 18, 24); }
-    SUBCASE("PlaneVN") { check_hot_range(GizmoHandle::PlaneVN, 66, 24); }
+    SUBCASE("AxisU: shaft and tip dot both") { check_hot(GizmoHandle::AxisU, {{0, 6}, {18, 6}}); }
+    SUBCASE("AxisN: shaft and tip dot both") { check_hot(GizmoHandle::AxisN, {{12, 6}, {30, 6}}); }
+    SUBCASE("PlaneUV: fill and outline both") { check_hot(GizmoHandle::PlaneUV, {{36, 30}}); }
+    SUBCASE("PlaneVN: fill and outline both") { check_hot(GizmoHandle::PlaneVN, {{96, 30}}); }
+
+    SUBCASE("a highlighted patch brightens its fill without making it opaque") {
+        out.clear();
+        append_move_gizmo_handles(out, f, GizmoHandle::PlaneUV, eye);
+        // Fill stays translucent (it sits over the model), outline goes solid.
+        CHECK(alpha_of(out[36]) == doctest::Approx(2.0f * kGizmoPatchFillAlpha));
+        CHECK(alpha_of(out[36]) < 1.0f);
+        CHECK(alpha_of(out[42]) == doctest::Approx(1.0f));
+    }
+
+    SUBCASE("unhighlighted handles rest below full opacity") {
+        out.clear();
+        append_move_gizmo_handles(out, f, GizmoHandle::None, eye);
+        CHECK(alpha_of(out[0]) == doctest::Approx(kGizmoHandleRestAlpha));
+        CHECK(alpha_of(out[0]) < 1.0f);
+    }
 }
 
 // --- append_spiked_cube (camera-pivot marker) --------------------------------
