@@ -128,16 +128,17 @@ rhi::ShaderReflection Extract(sl::ProgramLayout* layout) {
     rhi::ReflectedBinding b;
     b.name = p->getName() ? p->getName() : "";
     b.kind = KindFromLayout(tl);
-    // `group` is the ParameterBlock index and `slot` the index within it. With
-    // plain globals -- what the MVP shaders use -- Slang reports one flat
-    // space, so group stays 0 and the slot IS the reported index.
+    // `slot` is the engine's stable identifier and MUST be unique within a
+    // group; `location.index` is the target's, and is NOT unique because Slang
+    // numbers per category -- a constant buffer, a texture and a sampler can
+    // all report index 0. Conflating the two collapses distinct bindings onto
+    // one slot and silently drops all but the first.
     b.group = 0;
     b.slot = i;
     if (p->getCategoryCount() > 0) {
       const sl::ParameterCategory cat = p->getCategoryByIndex(0);
       b.location.space = uint32_t(p->getBindingSpace(cat));
       b.location.index = uint32_t(p->getOffset(cat));
-      b.slot = b.location.index;
     }
     // Always All: ProgramLayout reports every module global regardless of
     // entry point, so per-stage visibility is not derivable (probe B measured
@@ -253,6 +254,11 @@ class SlangCompilerImpl final : public SlangCompiler {
     sd.targetCount = 1;
     sd.searchPaths = search_path_ptrs_.data();
     sd.searchPathCount = SlangInt(search_path_ptrs_.size());
+    // glm is column-major and the engine uploads glm matrices verbatim, so the
+    // shader side must agree. Slang's default is row-major, which silently
+    // transposes every matrix in a uniform buffer -- geometry then lands
+    // somewhere off screen with no error anywhere.
+    sd.defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR;
     if (!macros.empty()) {
       sd.preprocessorMacros = macros.data();
       sd.preprocessorMacroCount = SlangInt(macros.size());

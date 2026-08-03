@@ -9,6 +9,16 @@ Each app owns an `AppView` and builds its scene from the world itself; the app s
 | `badlands_ai_sandbox` | the AI harness, driven by a `--mode` |
 | `badlands_viewer` | model/LOD viewer |
 | `badlands_mapview` | the map tool (see `src/mapgen/CLAUDE.md`) |
+| `badlands_rhi_lab` | the RHI/Slang/visibility-buffer MVP — **headless**, writes a PNG |
+
+## `badlands_rhi_lab` is not an `AppView`
+It builds on `badlands_rhi` + `badlands_slang`, not `badlands_engine`, and has no
+window: the MVP RHI has no swapchain, so it renders one frame and writes a PNG.
+Skipped by the build when the Slang SDK is absent (`tools/slang_probe/README.md`).
+```sh
+./build/badlands_rhi_lab --out /tmp/lab.png            # materials + lighting
+./build/badlands_rhi_lab --out /tmp/vis.png --debug-vis  # the visibility buffer
+```
 
 ## Common flags
 Run from the repo root — `shaders/` and `assets/` resolve relative to cwd.

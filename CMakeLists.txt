@@ -134,6 +134,12 @@ target_compile_features(badlands_rhi PUBLIC cxx_std_23)
 # CreateDevice warns loudly if someone asks for it anyway.
 target_compile_definitions(badlands_rhi PUBLIC
     $<$<NOT:$<CONFIG:Release>>:BADLANDS_RHI_VALIDATION>)
+# Reversed-Z is an RHI invariant (depth clears to 0, opaque compares
+# GreaterEqual), so anything built on the RHI that uses glm must produce
+# zero-to-one depth. Carried here rather than left to each consumer: without
+# it glm::perspective emits OpenGL [-1,1] depth and every fragment silently
+# fails the depth test, which is exactly how rhi_lab first rendered pure sky.
+target_compile_definitions(badlands_rhi PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 if(APPLE)
     # ARC only for the Metal backend — the rest of the project is MRR, and a
@@ -1141,6 +1147,33 @@ if(APPLE)
     target_link_options(badlands_rhi_metal_tests PRIVATE "-Wl,-ld_new")
     add_test(NAME badlands_rhi_metal_tests COMMAND badlands_rhi_metal_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
+# badlands_rhi_lab: the MVP that proves the RHI + Slang + visibility-buffer
+# stack end to end. Headless — the MVP RHI has no swapchain — so it renders a
+# frame and writes a PNG.
+if(BADLANDS_HAVE_SLANG AND APPLE)
+    # Compiles the cluster DAG build + its deps directly, the same way
+    # badlands_terrain_cluster_tests does — the lab wants the real Nanite-style
+    # DAG but none of the renderer it is replacing.
+    add_executable(badlands_rhi_lab
+        src/executables/rhi_lab/main.cpp
+        src/executables/rhi_lab/lab_scene.cpp
+        src/game/geometry/terrain_clusters.cpp
+        src/game/map/map_data.cpp
+        src/engine/rendering/geometry/aabb.cpp
+        src/core/parallel.cpp
+    )
+    target_link_libraries(badlands_rhi_lab PRIVATE
+        badlands_slang assets meshoptimizer)
+    target_include_directories(badlands_rhi_lab PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/glm
+        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+        ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+        ${taskflow_SOURCE_DIR})
+    target_link_options(badlands_rhi_lab PRIVATE "-Wl,-ld_new")
 endif()
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against

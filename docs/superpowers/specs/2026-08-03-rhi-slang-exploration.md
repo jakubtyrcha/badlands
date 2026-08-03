@@ -496,6 +496,50 @@ per-backend reflection system.
   `textureSampleGrad(t, s, …)` ordering.
 - An entry point named `main` is silently renamed to `main_0` on the Metal target.
 
+## Stage 1 as built (2026-08-03)
+
+All six steps landed. `badlands_rhi_lab` renders a GPU-driven terrain patch with
+instanced trees through a visibility buffer, resolving materials and lighting in screen
+space. Nothing under `src/engine/rendering/` or `game/` changed.
+
+- `src/engine/rhi/` — interface, `NullRhi`, validation decorator, Metal backend.
+  `badlands_rhi` deliberately does **not** link `webgpu`, so a `wgpu::` reference in the
+  seam is a link error.
+- `src/engine/slang/` — Slang compile + reflection behind a declaration-hash cache.
+- `src/executables/rhi_lab/` + `shaders/slang/rhi_lab/` — the MVP.
+
+### Traps found while building it
+
+Each cost real debugging time and would cost it again. All five are silent — no error,
+no validation message, just a wrong or empty image.
+
+- **`GLM_FORCE_DEPTH_ZERO_TO_ONE` is not inherited unless you link `badlands_engine`.**
+  Without it `glm::perspective` emits OpenGL `[-1,1]` depth and every fragment fails the
+  reversed-Z test. Now set `PUBLIC` on `badlands_rhi`, since reversed-Z is an RHI
+  invariant and any consumer using glm needs the matching convention.
+- **Slang defaults to ROW-major matrix layout; glm is column-major.** Every matrix in a
+  uniform buffer is silently transposed, and geometry lands off screen. Fixed once in the
+  compiler via `SessionDesc::defaultMatrixLayoutMode` rather than per shader.
+- **MSL pads `float3` to 16 bytes.** A vertex struct of `float3/float3/float/float` is 40
+  bytes in the shader against 32 on the CPU, shearing every read. Use `float4` pairs for
+  anything uploaded verbatim.
+- **Slang reports every module-level global in EVERY entry point's reflection** — probe B's
+  finding, biting again. Two passes sharing a module each appear to declare the other's
+  bindings, so the validation layer's "declared but not bound" check fires. **One Slang
+  module per pass** is the rule; the lab shaders are split that way.
+- **`slot` and `location.index` are not interchangeable.** Slang numbers bindings per
+  category, so a constant buffer, a texture and a sampler can all report index 0. The
+  engine's `slot` must be the parameter ordinal; conflating them collapses distinct
+  bindings and silently drops all but the first.
+
+### What the validation layer caught
+
+On the lab's first run, before any pixel was correct: two decorator bugs of its own (an
+`open_pass_` flag set but never cleared, and resource state tracked on a texture but
+checked on its view), plus every unbound-slot and missing-transition mistake in the app.
+The frame now runs with an empty validation scope — which is the bar for "this is
+declared correctly", not merely "this renders".
+
 ## Direction
 
 ### Shape

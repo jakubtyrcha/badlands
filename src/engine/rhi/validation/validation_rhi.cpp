@@ -50,14 +50,25 @@ class Recorder {
 // backend involvement.
 class StateTracker {
  public:
+  // State belongs to the underlying resource, not to a view of it: callers
+  // transition a texture but bind its view, and those must be the same thing
+  // as far as tracking is concerned.
+  static IResource* Canonical(IResource* r) {
+    if (auto* view = dynamic_cast<ITextureView*>(r)) {
+      if (auto* tex = view->GetTexture()) return tex;
+    }
+    return r;
+  }
+
   void Declare(IResource* r, ResourceState s) {
-    if (r) states_[r] = s;
+    if (r) states_[Canonical(r)] = s;
   }
 
   // Checks `r` is in `want`. Reports through `rec` if not.
   void Expect(Recorder& rec, IResource* r, ResourceState want,
               const char* context) {
     if (!r) return;
+    r = Canonical(r);
     auto it = states_.find(r);
     const ResourceState have =
         it == states_.end() ? ResourceState::Undefined : it->second;
@@ -347,7 +358,7 @@ class ValidationEncoder final : public ICommandEncoder {
 
   IRenderPass* BeginRenderPass(const RenderPassDesc& desc) override {
     if (Finished("BeginRenderPass")) return nullptr;
-    if (open_pass_) {
+    if (HasOpenPass()) {
       ctx_->recorder.Report("BeginRenderPass: a pass is already open");
     }
     CheckAttachments(desc);
@@ -356,20 +367,18 @@ class ValidationEncoder final : public ICommandEncoder {
     if (!inner) return nullptr;
     render_passes_.push_back(std::make_unique<ValidationRenderPass>(
         inner, ctx_, &states_, desc.label));
-    open_pass_ = true;
     return render_passes_.back().get();
   }
 
   IComputePass* BeginComputePass(const std::string& label) override {
     if (Finished("BeginComputePass")) return nullptr;
-    if (open_pass_) {
+    if (HasOpenPass()) {
       ctx_->recorder.Report("BeginComputePass: a pass is already open");
     }
     IComputePass* inner = inner_->BeginComputePass(label);
     if (!inner) return nullptr;
     compute_passes_.push_back(
         std::make_unique<ValidationComputePass>(inner, ctx_, &states_, label));
-    open_pass_ = true;
     return compute_passes_.back().get();
   }
 
@@ -428,6 +437,19 @@ class ValidationEncoder final : public ICommandEncoder {
   ICommandEncoder* Inner() const { return inner_.get(); }
 
  private:
+  // Derived rather than tracked with a flag: the flag version was set on
+  // Begin and never cleared on End, so every second pass on an encoder was
+  // wrongly reported. Asking the passes is impossible to get out of sync.
+  bool HasOpenPass() const {
+    for (const auto& p : render_passes_) {
+      if (!p->IsEnded()) return true;
+    }
+    for (const auto& p : compute_passes_) {
+      if (!p->IsEnded()) return true;
+    }
+    return false;
+  }
+
   bool Finished(const char* what) {
     if (!finished_) return false;
     ctx_->recorder.Report(std::string(what) + ": encoder '" + label_ +
@@ -481,7 +503,6 @@ class ValidationEncoder final : public ICommandEncoder {
   StateTracker states_;
   std::vector<std::unique_ptr<ValidationRenderPass>> render_passes_;
   std::vector<std::unique_ptr<ValidationComputePass>> compute_passes_;
-  bool open_pass_ = false;
   bool finished_ = false;
 };
 
