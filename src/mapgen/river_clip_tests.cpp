@@ -183,3 +183,37 @@ TEST_CASE(
   for (float q : g.edges[0].discharge_m3_s) peak_after = std::max(peak_after, q);
   REQUIRE(peak_after == peak_before);
 }
+
+TEST_CASE(
+    "clip_river_graph_to_rect: a through-lake connector outside the rect is "
+    "dropped, one inside is kept",
+    "[river]") {
+  // Connectors carry no geometry (an inlet -> outlet edge across a lake), so
+  // they cannot be clipped -- but they must still be CONTAINED. Passing them
+  // through unconditionally gave every patch one orphan edge per lake in the
+  // entire source world, which nothing draws and nothing else can prune.
+  auto connector = [](RiverGraph& g, glm::vec2 at_inlet, glm::vec2 at_outlet) {
+    RiverNode in_n, out_n;
+    in_n.pos_m = at_inlet;
+    in_n.kind = RiverNodeKind::LakeInlet;
+    out_n.pos_m = at_outlet;
+    out_n.kind = RiverNodeKind::LakeOutlet;
+    const int32_t a = static_cast<int32_t>(g.nodes.size());
+    g.nodes.push_back(in_n);
+    g.nodes.push_back(out_n);
+    RiverEdge e;
+    e.from = a;
+    e.to = a + 1;  // no points_m: this is topology, not geometry
+    g.edges.push_back(e);
+  };
+
+  RiverGraph g;
+  connector(g, glm::vec2(20.0f, 20.0f), glm::vec2(30.0f, 30.0f));      // inside
+  connector(g, glm::vec2(400.0f, 400.0f), glm::vec2(410.0f, 410.0f));  // far away
+  connector(g, glm::vec2(50.0f, 50.0f), glm::vec2(400.0f, 50.0f));     // straddles
+
+  clip_river_graph_to_rect(g, glm::vec2(0.0f, 0.0f), glm::vec2(100.0f, 100.0f));
+
+  REQUIRE(g.edges.size() == 1);
+  REQUIRE(g.nodes[g.edges[0].from].pos_m == glm::vec2(20.0f, 20.0f));
+}

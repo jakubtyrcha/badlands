@@ -75,11 +75,20 @@ double CatmullRom(double x) { return CubicWeight(x, 0.0, 0.5); }
 // caller's -- so taps are computed per output texel instead.
 std::vector<Tap> CubicTaps(double origin_axis_m, float out_texel_m, int j,
                            float src_texel_m, int src_n) {
-  // Pixel CENTRES map to pixel centres -- the -0.5/+0.5 is what keeps the
-  // resample from drifting half a texel, same convention as BuildTaps.
-  const double world_center =
-      origin_axis_m + (static_cast<double>(j) + 0.5) * static_cast<double>(out_texel_m);
-  const double u = world_center / static_cast<double>(src_texel_m) - 0.5;
+  // NODE registration, NOT pixel centres. Texel i IS world i*texel_m on both
+  // sides -- patch_data.hpp states it for the output, river_graph.cpp emits
+  // node coordinates into rivers.bin, river_carve.cpp rounds world->texel
+  // against the same lattice, and synthetic_patch_source samples that way.
+  //
+  // An earlier revision used the pixel-centre convention (j+0.5 out, -0.5 in),
+  // copied from window.cpp's BuildTaps. That is self-consistent but disagrees
+  // with everything else here by 0.5*(out_texel_m - src_texel_m): 7.5 m at a
+  // 16 m source and a 1 m patch, so every carved channel landed 7.5 m off its
+  // valley while the heightfield itself still looked perfectly sensible. See
+  // the ramp registration test.
+  const double world_pos =
+      origin_axis_m + static_cast<double>(j) * static_cast<double>(out_texel_m);
+  const double u = world_pos / static_cast<double>(src_texel_m);
   const int base = static_cast<int>(std::floor(u)) - kCubicSupport + 1;
   std::vector<Tap> taps;
   taps.reserve(2 * kCubicSupport);
@@ -105,10 +114,16 @@ std::vector<Tap> CubicTaps(double origin_axis_m, float out_texel_m, int j,
 // much of it the footprint covers.
 std::vector<Tap> BoxTaps(double origin_axis_m, float out_texel_m, int j,
                          float src_texel_m, int src_n) {
-  const double lo = origin_axis_m + static_cast<double>(j) * static_cast<double>(out_texel_m);
-  const double hi = lo + static_cast<double>(out_texel_m);
-  const double lo_i = lo / src_texel_m;
-  const double hi_i = hi / src_texel_m;
+  // NODE registration, matching CubicTaps: output node j sits AT
+  // origin + j*out_texel_m, so its averaging footprint is CENTRED there rather
+  // than starting there. Source node i likewise owns [(i-0.5), (i+0.5)] cells,
+  // not [i, i+1]. Both halves matter -- getting only one right reintroduces
+  // half the shift the cubic path just lost.
+  const double center =
+      origin_axis_m + static_cast<double>(j) * static_cast<double>(out_texel_m);
+  const double half = 0.5 * static_cast<double>(out_texel_m);
+  const double lo_i = (center - half) / src_texel_m + 0.5;
+  const double hi_i = (center + half) / src_texel_m + 0.5;
   const int i0 = static_cast<int>(std::floor(lo_i));
   const int i1 = static_cast<int>(std::ceil(hi_i)) - 1;
   std::vector<Tap> taps;
@@ -421,7 +436,23 @@ std::string FindLatestTag(const std::string& dir, std::string* error) {
     if (name.size() <= suffix_len) continue;
     if (name.compare(name.size() - suffix_len, suffix_len, kSuffix) != 0) continue;
     const std::string tag = name.substr(0, name.size() - suffix_len);
-    if (tag > best) best = tag;
+    // Compare the leading STEP NUMBER numerically, not the tag as a string.
+    // protogen pads to four digits ("%04d-step"), so a run past 9999 steps
+    // makes "10000-step" sort BELOW "9750-step" and this would silently select
+    // an earlier snapshot -- a wrong render with no diagnostic. Tags with no
+    // leading number fall back to lexicographic order among themselves.
+    auto step_of = [](const std::string& t) -> long long {
+      size_t k = 0;
+      while (k < t.size() && t[k] >= '0' && t[k] <= '9') ++k;
+      if (k == 0) return -1;
+      return std::stoll(t.substr(0, k));
+    };
+    if (best.empty()) {
+      best = tag;
+      continue;
+    }
+    const long long a = step_of(tag), b = step_of(best);
+    if (a != b ? a > b : tag > best) best = tag;
   }
   if (best.empty() && error) *error = dir + ": no *-height.f32 snapshot found";
   return best;

@@ -5,6 +5,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 #include "mapgen/biomes.hpp"
@@ -259,9 +260,17 @@ bool write_patch(const std::string& dir, const PatchData& patch,
       if (error) *error = "cannot open " + dir + "/map.txt for writing";
       return false;
     }
+    // ENOUGH DIGITS TO ROUND-TRIP. The stream default is 6 SIGNIFICANT digits,
+    // which was harmless while every patch had a round world_size_m -- but a
+    // CoarseWorldPatchSource patch can sit at any origin and any extent, and a
+    // 1234.5678 m patch reloading as 1234.57 m changes the derived texel_m and
+    // with it every world-metre coordinate the patch carries. 9 digits is
+    // float's round-trip guarantee; 17 is double's, which origin_m needs.
     f << "resolution " << n << "\n";
-    f << "world_size_m " << (patch.texel_m * static_cast<float>(n)) << "\n";
-    f << "origin_m " << patch.origin_m.x << " " << patch.origin_m.y << "\n";
+    f << std::setprecision(9)
+      << "world_size_m " << (patch.texel_m * static_cast<float>(n)) << "\n";
+    f << std::setprecision(17)
+      << "origin_m " << patch.origin_m.x << " " << patch.origin_m.y << "\n";
     if (!source.empty()) f << "source " << source << "\n";
     if (!f) {
       if (error) *error = "short write on " + dir + "/map.txt";

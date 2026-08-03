@@ -67,9 +67,26 @@ void clip_river_graph_to_rect(RiverGraph& g, glm::vec2 lo_m, glm::vec2 hi_m) {
     // channel across it would be wrong. Dropping them for having < 2 points
     // severed that link, which also left every lake's OUTFLOW reach with
     // in_deg == 0 -- so the length prune saw it as a headwater and could delete
-    // the trunk below a lake. They have nothing to clip; pass them through.
+    // the trunk below a lake. They have nothing to clip.
+    //
+    // But CONTAINMENT still applies. Passing them through unconditionally kept
+    // one orphan edge per lake in the WHOLE source graph: a 128 m patch cut
+    // from a 16 km world inherited every lake connector in that world, with
+    // endpoints that later rebase to wildly out-of-range patch-local
+    // coordinates. Nothing downstream draws them (build_river_arcs skips a
+    // geometry-free edge), so it never showed on screen -- it showed as an
+    // inflated reach count and a graph that disagreed with its own patch. The
+    // length prune cannot clean them up either: it never starts a chain on a
+    // connector.
+    //
+    // A connector is kept when BOTH its endpoints are in the rect, which is
+    // exactly when the lake it crosses belongs to this patch.
     if (e.points_m.size() < 2) {
-      kept.push_back(e);
+      const auto node_inside = [&](int32_t id) {
+        return id >= 0 && id < static_cast<int32_t>(g.nodes.size()) &&
+               inside_window(g.nodes[id].pos_m, lo_m, hi_m);
+      };
+      if (node_inside(e.from) && node_inside(e.to)) kept.push_back(e);
       continue;
     }
 

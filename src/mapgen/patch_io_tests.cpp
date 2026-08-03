@@ -524,3 +524,42 @@ TEST_CASE("length pruning never severs the network", "[window_rivers]") {
   CHECK(interior);
   CHECK_FALSE(stub);
 }
+
+TEST_CASE("write_patch + load_patch round-trips AWKWARD geometry exactly",
+          "[map_io]") {
+  // THE MANIFEST IS THE LAYER BOUNDARY, not a human-readable summary. Every
+  // world-metre coordinate a patch carries follows from
+  // texel_m = world_size_m / resolution, so a decimal truncated on the way out
+  // does not produce a cosmetically-imperfect file -- it moves the geometry.
+  //
+  // The stream default is 6 SIGNIFICANT digits, which was harmless while every
+  // patch had a round extent. CoarseWorldPatchSource can cut at any origin and
+  // any extent, so this pins the round trip on values that expose the loss:
+  // 1234.5678 m would have reloaded as 1234.57 m, and an origin 11840.5 m out
+  // in a 16 km world needs double's 17 digits, not float's 9.
+  TempDir dir("awkward_geometry");
+
+  const int n = 8;
+  PatchData p;
+  p.texel_m = 1234.5678f / static_cast<float>(n);
+  p.origin_m = glm::dvec2(11840.546875, 11776.328125);
+  p.height = Field2D<float>(n, n, 100.0f);
+  p.level = p.height;
+  p.biome = Field2D<uint8_t>(n, n, static_cast<uint8_t>(Biome::Plains));
+  p.soil = Field2D<float>(n, n, 2.0f);
+
+  std::string err;
+  REQUIRE(write_patch(dir.str(), p, "unit-test", &err));
+
+  const auto man = load_patch_manifest(dir.str(), &err);
+  REQUIRE(man);
+  // BIT-equal, not approximately: the assertion is round-trip fidelity of
+  // whatever was written, which is what downstream arithmetic depends on.
+  REQUIRE(man->world_size_m == p.texel_m * static_cast<float>(n));
+  REQUIRE(man->origin_m.x == p.origin_m.x);
+  REQUIRE(man->origin_m.y == p.origin_m.y);
+
+  const auto reloaded = load_patch(dir.str(), &err);
+  REQUIRE(reloaded);
+  REQUIRE(reloaded->texel_m == p.texel_m);
+}

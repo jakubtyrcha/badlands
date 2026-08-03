@@ -27,6 +27,11 @@ constexpr uint32_t kEdgeArrayCount = 5;        // points, Q, width, depth, speed
 constexpr uint64_t kNodeRecordBytes =
     8 * sizeof(float) + sizeof(int32_t) + 2 * sizeof(uint8_t);
 
+// An edge record is variable-length (its per-point arrays follow), but its
+// HEADER is fixed: from, to, strahler, shreve, point_count. That minimum is
+// enough to bound-check the edge count before allocating.
+constexpr uint64_t kEdgeHeaderBytes = 4 * sizeof(int32_t) + sizeof(uint64_t);
+
 template <typename T>
 bool write_pod(std::ofstream& f, const T& v) {
   f.write(reinterpret_cast<const char*>(&v), sizeof(T));
@@ -55,12 +60,17 @@ bool read_pod_vec(std::ifstream& f, uint64_t count, std::vector<T>& out,
                   uint64_t file_size, const std::string& path,
                   std::string* error) {
   const uint64_t pos = static_cast<uint64_t>(f.tellg());
-  const uint64_t want_bytes = count * sizeof(T);
-  if (pos > file_size || want_bytes > file_size - pos) {
-    if (error) *error = path + ": truncated (short " +
-                        std::to_string(want_bytes) + " bytes)";
+  // DIVIDE, do not multiply. `count * sizeof(T)` wraps for a count near
+  // 2^61 -- so a corrupt file could produce a small product, sail past the
+  // check, and reach resize() with the huge count. Comparing against the
+  // remaining bytes divided by the element size cannot overflow.
+  if (pos > file_size || count > (file_size - pos) / sizeof(T)) {
+    if (error) *error = path + ": truncated (claims " + std::to_string(count) +
+                        " elements, " + std::to_string(file_size - pos) +
+                        " bytes remain)";
     return false;
   }
+  const uint64_t want_bytes = count * sizeof(T);
   out.resize(count);
   if (count == 0) return true;
   f.read(reinterpret_cast<char*>(out.data()),
@@ -162,7 +172,7 @@ std::optional<RiverGraph> read_river_graph(const std::string& path,
 
   {
     const uint64_t pos = static_cast<uint64_t>(f.tellg());
-    if (pos > file_size || node_count * kNodeRecordBytes > file_size - pos) {
+    if (pos > file_size || node_count > (file_size - pos) / kNodeRecordBytes) {
       if (error) *error = path + ": truncated node block";
       return std::nullopt;
     }
@@ -188,6 +198,20 @@ std::optional<RiverGraph> read_river_graph(const std::string& path,
     }
     n.lake_kind = static_cast<LakeKind>(lake_kind);
     n.kind = static_cast<RiverNodeKind>(kind);
+  }
+
+  // Same guard the node block gets. An edge record is at least kEdgeHeaderBytes
+  // (from, to, strahler, shreve, point_count), so a count exceeding what the
+  // remaining bytes could possibly hold is corruption -- and resizing to it
+  // first would throw length_error/bad_alloc straight out of this function,
+  // which nothing catches. patch_io.hpp promises a malformed rivers.bin is an
+  // ERROR, and load_patch reads it from a user-supplied --load directory.
+  {
+    const uint64_t pos = static_cast<uint64_t>(f.tellg());
+    if (pos > file_size || edge_count > (file_size - pos) / kEdgeHeaderBytes) {
+      if (error) *error = path + ": truncated edge block";
+      return std::nullopt;
+    }
   }
 
   g.edges.resize(edge_count);

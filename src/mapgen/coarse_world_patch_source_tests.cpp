@@ -79,8 +79,14 @@ void write_coarse_world(const std::string& dir, int res, float world_size_m,
   std::vector<float> height(count), water(count, 0.0f), soil(count, 2.0f);
   for (int y = 0; y < res; ++y) {
     for (int x = 0; x < res; ++x) {
-      const float wx = (static_cast<float>(x) + 0.5f) * texel_m;
-      const float wz = (static_cast<float>(y) + 0.5f) * texel_m;
+      // NODE convention: texel (x, y) IS world (x*texel_m, y*texel_m), the
+      // same lattice patch_data.hpp and river_graph.cpp use. Writing the
+      // fixture at (x+0.5)*texel_m instead would encode the resampler's own
+      // assumption, so a disagreement with the rest of the pipeline could
+      // never show up here -- which is exactly how the half-texel
+      // misregistration survived until the ramp test below went looking.
+      const float wx = static_cast<float>(x) * texel_m;
+      const float wz = static_cast<float>(y) * texel_m;
       height[static_cast<size_t>(y) * res + x] = bed(wx, wz);
     }
   }
@@ -172,9 +178,21 @@ TEST_CASE("fetching the same world at two resolutions agrees after "
   const PatchData hi = source->Fetch(req_hi);
   REQUIRE_FALSE(empty(hi));
 
-  const Field2D<float> hi_downsampled = box_downsample_2x(hi.height, 64);
-  const float worst = max_interior_diff(lo.height, hi_downsampled, 3);
-  CHECK(worst < 0.2f);
+  // DECIMATE, do not box-average. Under node registration the 64-grid's node
+  // j sits at world j*16 m and the 128-grid's node 2j sits at world 2j*8 m --
+  // the SAME point, resampled from the same source with the same kernel. So
+  // the two must agree to float noise, not merely to within a tolerance.
+  //
+  // Box-averaging adjacent hi nodes instead (what this test used to do)
+  // silently re-introduces a half-cell shift, which is why it needed a 0.2 m
+  // slop that was large enough to hide the misregistration it was supposed to
+  // be insensitive to.
+  Field2D<float> hi_decimated(64, 64, 0.0f);
+  for (int j = 0; j < 64; ++j)
+    for (int i = 0; i < 64; ++i) hi_decimated.at(i, j) = hi.height.at(2 * i, 2 * j);
+
+  const float worst = max_interior_diff(lo.height, hi_decimated, 3);
+  CHECK(worst < 1e-3f);
 }
 
 TEST_CASE("fetching the same world_size_m/resolution agrees regardless of "
@@ -259,11 +277,22 @@ TEST_CASE("a request coarser than the source produces area-averages, not "
   REQUIRE_FALSE(empty(p));
   for (float h : p.height.data) CHECK(std::isfinite(h));
 
+  // Skip the first node on each axis: its 32 m averaging footprint is CENTRED
+  // on world 0, so half of it lies off the world and clamps to the edge value.
+  // That is correct border behaviour (and the same reason the ramp test starts
+  // clear of the cubic stencil); every interior node reproduces the plane
+  // exactly, because a symmetric box average of a linear function is its value
+  // at the centre.
   float worst = 0.0f;
-  for (int j = 0; j < req.resolution; ++j) {
-    for (int i = 0; i < req.resolution; ++i) {
-      const float centroid_x = (static_cast<float>(i) + 0.5f) * 32.0f;
-      const float expect = 100.0f + 0.5f * centroid_x;
+  for (int j = 1; j < req.resolution; ++j) {
+    for (int i = 1; i < req.resolution; ++i) {
+      // NODE registration: output node i IS world i*32 m, so a box average
+      // centred there reproduces the plane's value AT that node. The old
+      // expectation used (i+0.5)*32 -- the pixel-centre convention -- and so
+      // agreed with a resampler that disagreed with the rest of the pipeline
+      // by half a source cell.
+      const float node_x = static_cast<float>(i) * 32.0f;
+      const float expect = 100.0f + 0.5f * node_x;
       worst = std::max(worst, std::fabs(p.height.at(i, j) - expect));
     }
   }
@@ -374,4 +403,66 @@ TEST_CASE("a synthetic patch and a coarse-world patch satisfy the same "
   bool any_wet = false;
   for (float d : p.water_depth.data) any_wet = any_wet || d > 0.0f;
   CHECK(any_wet);
+}
+
+TEST_CASE("CoarseWorldPatchSource: a resampled ramp keeps NODE registration",
+          "[patch]") {
+  // THE REGISTRATION PIN.
+  //
+  // Every raster in this pipeline is NODE-sampled: texel (i, j) IS world
+  // (i*texel_m, j*texel_m). patch_data.hpp states it, synthetic_patch_source
+  // samples that way, river_graph emits node coordinates, and river_carve
+  // rounds world->texel against them. A resampler that instead treats indices
+  // as pixel CENTRES shifts the bed by 0.5*(out_texel - src_texel) relative to
+  // the river graph clipped out of the SAME world -- 7.5 m at a 16 m source
+  // and a 1 m patch, which cuts every channel that far off its valley.
+  //
+  // A linear ramp is the sharpest probe there is: Catmull-Rom reproduces a
+  // linear function to machine epsilon, so any residual here is registration
+  // error and nothing else. Note the fixture is written in NODE convention on
+  // purpose -- writing it at (x+0.5)*texel would express the resampler's own
+  // assumption and could never catch a disagreement with it.
+  TempDir dir("ramp_registration");
+  const int src_res = 64;
+  const float world_m = 1024.0f;
+  const float src_texel = world_m / static_cast<float>(src_res);  // 16 m
+
+  CoarseManifest man;
+  man.resolution = src_res;
+  man.world_size_m = world_m;
+  man.texel_m = src_texel;
+  man.soil_cut_mountain_m = 0.35f;
+  man.soil_cut_hills_m = 1.40f;
+  std::string err;
+  REQUIRE(write_coarse_manifest(dir.str(), man, &err));
+
+  const size_t count = static_cast<size_t>(src_res) * src_res;
+  std::vector<float> height(count), water(count, 0.0f), soil(count, 2.0f);
+  for (int y = 0; y < src_res; ++y)
+    for (int x = 0; x < src_res; ++x)
+      height[static_cast<size_t>(y) * src_res + x] =
+          static_cast<float>(x) * src_texel;  // height(wx) == wx
+  write_raw(dir.str() + "/0001-step-height.f32", height);
+  write_raw(dir.str() + "/0001-step-water.f32", water);
+  write_raw(dir.str() + "/0001-step-soil.f32", soil);
+
+  auto src = LoadCoarseWorldPatchSource(dir.str(), "0001-step", &err);
+  REQUIRE(src != nullptr);
+
+  PatchRequest req;
+  req.origin_m = glm::dvec2(0.0, 0.0);
+  req.world_size_m = 128.0f;
+  req.resolution = 128;  // 1 m out of 16 m in
+  const PatchData p = src->Fetch(req);
+  REQUIRE(p.height.width == 128);
+
+  // Interior only, and "interior" means clear of the CUBIC STENCIL, not of the
+  // patch: the kernel reaches 2 source cells (32 m) either side, so below
+  // j = 32 it clamps against the world edge at x = 0 and reads a flat 0 where
+  // the ramp would continue negative. That is correct border behaviour and
+  // would mask the registration error under test.
+  for (int j = 40; j < 120; ++j) {
+    const float want = static_cast<float>(j) * p.texel_m;
+    REQUIRE(p.height.at(j, 64) == Catch::Approx(want).margin(1e-3));
+  }
 }

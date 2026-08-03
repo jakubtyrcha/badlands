@@ -20,10 +20,20 @@
 //
 // Construction is where failure is reported (a missing/malformed manifest, a
 // raster whose size contradicts it, a malformed rivers.bin). By the time a
-// CoarseWorldPatchSource exists, it works; Fetch itself never fails -- an
-// out-of-bounds request just resamples off the edge of the clamped source
-// rasters and returns a river-free graph, since a bad request is a caller bug
-// worth a wrong-looking patch rather than a silent empty one.
+// CoarseWorldPatchSource exists, it works.
+//
+// FETCH NEVER FAILS, AND THIS IS A DELIBERATE NARROWING of what PatchSource
+// allows. That interface says a source unable to honour a request may return a
+// default-constructed PatchData, which `empty()` detects. This source does not
+// use that latitude: a request reaching past the world's edge resamples off the
+// clamped rasters rather than returning nothing, because a partly-outside
+// request is a caller bug and a visibly edge-smeared patch says so louder than
+// an empty one. `empty()` therefore only ever reports a DEGENERATE request here
+// (resolution <= 0, or a non-positive extent).
+//
+// The consequence worth knowing: a badly mistyped --patch-origin renders a
+// plausible-looking patch rather than erroring. Range validation belongs to the
+// caller; this source has no opinion about where a world "should" be sampled.
 
 #include <memory>
 #include <string>
