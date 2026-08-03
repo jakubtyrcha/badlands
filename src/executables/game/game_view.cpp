@@ -277,6 +277,10 @@ bool GameView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
+  // Character skeletons are an optional debug layer: if the assets are missing
+  // the overlay disables itself and the game runs exactly as before.
+  skeleton_debug_.Initialize();
+
   // Mode-appropriate proxy materials for the symbolic map's water + terrain.
   const bool blockout_mode = (mode_ == RenderMode::Blockout);
   water_factory_ =
@@ -1205,10 +1209,14 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // longer exists gets dropped, so the decals follow a validated selection.
   RefreshSelectionDecals();
 
-  // Pathfinding debug overlay (off unless toggled in the Gameplay Debug panel);
-  // rides the terrain height.
-  nav_debug_.Rebuild(sim_, scene_context_,
-                     [this](float x, float z) { return GroundAt(x, z); });
+  // Debug overlays (each off unless toggled in the Gameplay Debug panel), both
+  // riding the terrain height. ONE buffer for every overlay -- see frame_lines_'
+  // comment; SceneContext::debug_lines is a single pointer.
+  const auto ground = [this](float x, float z) { return GroundAt(x, z); };
+  frame_lines_.Clear();
+  nav_debug_.Rebuild(sim_, frame_lines_, ground);
+  skeleton_debug_.Rebuild(sim_, character_rows_, frame_lines_, ground, dt_);
+  scene_context_.debug_lines = frame_lines_.empty() ? nullptr : &frame_lines_;
 }
 
 uint32_t GameView::SnapshotBuildings() {
@@ -1510,6 +1518,9 @@ void GameView::DrawUI() {
 
     ImGui::Separator();
     nav_debug_.DrawControls();
+
+    ImGui::Separator();
+    skeleton_debug_.DrawControls();
   }
 
   // --- Fog (self-contained collapsing section) ---

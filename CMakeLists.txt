@@ -423,6 +423,10 @@ set(badlands_app_sources_game
     src/game/visual/vision_overlay_pass.cpp
     src/game/visual/cone_overlay_pass.cpp
     src/game/visual/nav_debug_overlay.cpp
+    # Character skeletons drawn over the capsules, toggled in the debug UI:
+    # the sim's CharacterAnim -> a clip -> the engine animation runtime.
+    src/game/visual/character_animation.cpp
+    src/game/visual/skeleton_debug_overlay.cpp
     src/game/visual/selection_decals.cpp
     src/game/visual/world_labels.cpp
     src/game/scene/building_composer.cpp
@@ -452,6 +456,8 @@ set(badlands_app_sources_ai_sandbox
     src/executables/ai_sandbox/sneak_mode.cpp
     src/executables/ai_sandbox/teleport_mode.cpp
     src/game/visual/nav_debug_overlay.cpp  # shared nav debug overlay (also in game)
+    src/game/visual/character_animation.cpp      # shared skeleton overlay (also in game)
+    src/game/visual/skeleton_debug_overlay.cpp
     src/game/brain_asset.cpp        # hero brain wasm bytes loaded as data
     src/game/factors_manifest.cpp   # behaviour tuning loaded as data
     src/game/creature_manifest.cpp  # creature-stat overrides loaded as data
@@ -896,12 +902,23 @@ add_test(NAME badlands_tree_field_gpu_tests COMMAND badlands_tree_field_gpu_test
 # shipped data can never break it. Pure CPU: no device, no window.
 add_executable(badlands_animation_tests
     src/engine/tests/animation_tests.cpp
+    # badlands' half of the chain: which clip a projected gameplay state plays.
+    # Pure functions over CharacterAnim, so they need no Sim and no device --
+    # the source is compiled in directly (as badlands_tree_field_gpu_tests does)
+    # rather than pulled from an app target.
+    src/game/tests/character_animation_tests.cpp
+    src/game/visual/character_animation.cpp
+    # The overlay end to end, minus the GPU: it needs only a Sim and the assets,
+    # so the WIRING is testable headlessly -- which a screenshot cannot do, since
+    # SaveScreenshot calls Update(0.0f) and the sim never ticks.
+    src/game/tests/skeleton_debug_overlay_tests.cpp
+    src/game/visual/skeleton_debug_overlay.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_animation_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-target_link_libraries(badlands_animation_tests PRIVATE badlands_engine ozz_animation_offline)
+target_link_libraries(badlands_animation_tests PRIVATE badlands_engine badlands_game_lib ozz_animation_offline)
 if(APPLE)
     target_link_options(badlands_animation_tests PRIVATE "-Wl,-ld_new")
 endif()

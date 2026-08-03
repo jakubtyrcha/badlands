@@ -1,13 +1,14 @@
 #include "game/visual/nav_debug_overlay.hpp"
 
-#include "engine/rendering/context/scene_context.hpp"
-
 #include <imgui.h>
 
 namespace badlands {
 
-void NavDebugOverlay::Rebuild(Sim& sim, SceneContext& ctx, const GroundHeightFn& ground_y) {
-  lines_.Clear();
+void NavDebugOverlay::Rebuild(Sim& sim, DebugLineBuffer& out,
+                              const GroundHeightFn& ground_y) {
+  // No Clear() and no SceneContext: the buffer is the host's and may already
+  // hold another overlay's lines. See the header.
+  DebugLineBuffer& lines = out;
   // Ride the terrain surface (+ a small lift) so the overlay hugs the ground.
   auto gy = [&](float x, float z, float lift) { return ground_y(x, z) + lift; };
 
@@ -26,10 +27,10 @@ void NavDebugOverlay::Rebuild(Sim& sim, SceneContext& ctx, const GroundHeightFn&
       const glm::vec3 d(c.max_x, gy(c.max_x, c.max_z, lift), c.max_z);
       const glm::vec3 e(c.min_x, gy(c.min_x, c.max_z, lift), c.max_z);
       if (c.tri_mask == 0 || c.tri_mask == 0xF) {
-        lines_.AddLine(a, b, col);
-        lines_.AddLine(b, d, col);
-        lines_.AddLine(d, e, col);
-        lines_.AddLine(e, a, col);
+        lines.AddLine(a, b, col);
+        lines.AddLine(b, d, col);
+        lines.AddLine(d, e, col);
+        lines.AddLine(e, a, col);
         continue;
       }
       // A PARTIAL cell: a diagonal footprint covers some corner triangles and
@@ -44,9 +45,9 @@ void NavDebugOverlay::Rebuild(Sim& sim, SceneContext& ctx, const GroundHeightFn&
       for (int t = 0; t < 4; ++t) {
         const bool solid = (c.tri_mask & (1u << t)) != 0;
         const glm::vec3 tc = solid ? glm::vec3(0.85f, 0.12f, 0.12f) : col;
-        lines_.AddLine(corner_edge[t][0], corner_edge[t][1], tc);
-        lines_.AddLine(corner_edge[t][0], centre, tc);
-        lines_.AddLine(corner_edge[t][1], centre, tc);
+        lines.AddLine(corner_edge[t][0], corner_edge[t][1], tc);
+        lines.AddLine(corner_edge[t][0], centre, tc);
+        lines.AddLine(corner_edge[t][1], centre, tc);
       }
     }
   }
@@ -57,7 +58,7 @@ void NavDebugOverlay::Rebuild(Sim& sim, SceneContext& ctx, const GroundHeightFn&
         path_.reachable ? glm::vec3(0.15f, 1.0f, 0.4f) : glm::vec3(1.0f, 0.2f, 0.2f);
     const std::vector<float>& w = path_.waypoints_xz;
     for (size_t i = 2; i < w.size(); i += 2) {
-      lines_.AddLine(glm::vec3(w[i - 2], gy(w[i - 2], w[i - 1], 0.25f), w[i - 1]),
+      lines.AddLine(glm::vec3(w[i - 2], gy(w[i - 2], w[i - 1], 0.25f), w[i - 1]),
                      glm::vec3(w[i], gy(w[i], w[i + 1], 0.25f), w[i + 1]), col, 3.0f);
     }
   }
@@ -65,13 +66,11 @@ void NavDebugOverlay::Rebuild(Sim& sim, SceneContext& ctx, const GroundHeightFn&
   auto marker = [&](glm::vec2 p, glm::vec3 col) {
     const float y = gy(p.x, p.y, 0.3f);
     constexpr float s = 0.6f;
-    lines_.AddLine(glm::vec3(p.x - s, y, p.y), glm::vec3(p.x + s, y, p.y), col, 3.0f);
-    lines_.AddLine(glm::vec3(p.x, y, p.y - s), glm::vec3(p.x, y, p.y + s), col, 3.0f);
+    lines.AddLine(glm::vec3(p.x - s, y, p.y), glm::vec3(p.x + s, y, p.y), col, 3.0f);
+    lines.AddLine(glm::vec3(p.x, y, p.y - s), glm::vec3(p.x, y, p.y + s), col, 3.0f);
   };
   if (a_) marker(*a_, glm::vec3(0.2f, 0.6f, 1.0f));
   if (b_) marker(*b_, glm::vec3(1.0f, 0.9f, 0.2f));
-
-  ctx.debug_lines = lines_.empty() ? nullptr : &lines_;
 }
 
 void NavDebugOverlay::Pick(glm::vec2 world_xz) {

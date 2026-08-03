@@ -7,9 +7,12 @@
 // not that walking is what a character does below some speed.
 //
 // Manifest shape (see assets/characters/quaternius/clips.json):
-//   { "skeleton": "skeleton.ozz", "clips": { "walk": "Rig_Walk_Loop.ozz", ... } }
-// Paths are relative to the manifest's own directory. Keys starting with '_'
-// are ignored, which is how the shipped manifest carries its comment block.
+//   { "skeleton": "skeleton.ozz",
+//     "clips": { "walk": "Rig_Walk_Loop.ozz",
+//                "attack": { "file": "Rig_Sword_Attack.ozz", "pivot": 0.45 } } }
+// A clip is either a bare filename or an object carrying that filename plus
+// metadata. Paths are relative to the manifest's own directory. Keys starting
+// with '_' are ignored, which is how the shipped manifest carries its comments.
 
 #include <memory>
 #include <optional>
@@ -41,6 +44,16 @@ class AnimationSet {
   const std::string& clip_name(int index) const { return clips_[index].name; }
   const AnimationClip& clip(int index) const { return *clips_[index].clip; }
 
+  // The clip's authored PIVOT: the normalized point at which its action
+  // culminates, for a caller that must split one clip across two phases (a
+  // swing's wind-up and its recovery meet exactly here).
+  //
+  // Defaults to 1.0 when the manifest does not say, which degrades to "the
+  // whole clip is the first phase" rather than to anything broken. The engine
+  // knows only that a clip has such a point; what the phases MEAN is the
+  // caller's business.
+  float clip_pivot(int index) const { return clips_[index].pivot; }
+
   // Index of a logical name, or -1. Callers resolve names to indices ONCE and
   // then work in indices; nothing samples by string per frame.
   int FindClip(const std::string& name) const;
@@ -49,6 +62,7 @@ class AnimationSet {
   struct Entry {
     std::string name;
     std::unique_ptr<AnimationClip> clip;
+    float pivot = 1.0f;
   };
 
   AnimationSet() = default;

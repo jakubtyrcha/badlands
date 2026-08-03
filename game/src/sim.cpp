@@ -1040,4 +1040,17 @@ PlacementProbe Sim::ProbePlacement(const PlacementDesc& desc,
 entt::registry& Sim::registry() { return world_->registry; }
 const entt::registry& Sim::registry() const { return world_->registry; }
 
+entt::handle Sim::HandleForSlot(uint32_t slot) {
+    // entity_for_slot (game.cpp) already range-checks and returns entt::null for
+    // a dead slot; wrapping null in a handle yields an invalid handle, which is
+    // exactly the "ask safely" contract in the header.
+    return entt::handle{world_->registry,
+                        entity_for_slot(*world_, static_cast<int32_t>(slot))};
+}
+
+entt::const_handle Sim::HandleForSlot(uint32_t slot) const {
+    return entt::const_handle{world_->registry,
+                              entity_for_slot(*world_, static_cast<int32_t>(slot))};
+}
+
 }  // namespace badlands

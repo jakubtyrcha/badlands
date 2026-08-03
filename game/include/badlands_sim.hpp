@@ -1285,6 +1285,24 @@ class Sim {
     entt::registry& registry();
     const entt::registry& registry() const;
 
+    // Slot (the id CharacterState rows carry) -> the entity holding it.
+    //
+    // EnTT keeps no external-id index of its own -- the entity IS the identity
+    // -- so anything needing a stable public handle keeps a map, which the world
+    // already does deliberately (see BadlandsGame::slots). This surfaces that
+    // map rather than inventing a second one.
+    //
+    // Returns an INVALID handle for an out-of-range or dead slot instead of
+    // asserting: a snapshot row is a copy and can outlive its entity by a frame,
+    // so a caller walking last frame's rows must be able to ask safely. Check
+    // the handle before use.
+    //
+    // A handle rather than a bare entity because the render layer attaches its
+    // OWN components here (see CharacterAnim's note on the shared registry), and
+    // a handle carries the registry with it.
+    entt::handle HandleForSlot(uint32_t slot);
+    entt::const_handle HandleForSlot(uint32_t slot) const;
+
    private:
     std::unique_ptr<::BadlandsGame> world_;  // the EXISTING internal world, unchanged
     ActivityHistogram activity_stats_;

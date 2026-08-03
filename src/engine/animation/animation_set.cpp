@@ -1,5 +1,6 @@
 #include "engine/animation/animation_set.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
@@ -52,17 +53,37 @@ std::optional<AnimationSet> AnimationSet::Load(const std::string& manifest_path)
 
   for (const auto& [name, value] : clips_it->items()) {
     if (!name.empty() && name.front() == '_') continue;  // comment key
-    if (!value.is_string()) {
-      spdlog::warn("AnimationSet::Load: clip \"{}\" is not a filename; skipped", name);
+
+    // A clip is either a bare filename or an object carrying one plus metadata.
+    // Both forms stay valid so adding a pivot to one clip does not require
+    // rewriting every other entry.
+    std::string file;
+    float pivot = 1.0f;
+    if (value.is_string()) {
+      file = value.get<std::string>();
+    } else if (value.is_object()) {
+      const auto file_it = value.find("file");
+      if (file_it == value.end() || !file_it->is_string()) {
+        spdlog::warn("AnimationSet::Load: clip \"{}\" has no \"file\"; skipped", name);
+        continue;
+      }
+      file = file_it->get<std::string>();
+      if (const auto pivot_it = value.find("pivot");
+          pivot_it != value.end() && pivot_it->is_number()) {
+        pivot = std::clamp(pivot_it->get<float>(), 0.0f, 1.0f);
+      }
+    } else {
+      spdlog::warn("AnimationSet::Load: clip \"{}\" is neither a filename nor an object; skipped",
+                   name);
       continue;
     }
-    const std::string clip_path = (dir / value.get<std::string>()).string();
-    std::optional<AnimationClip> clip = AnimationClip::Load(clip_path);
+
+    std::optional<AnimationClip> clip = AnimationClip::Load((dir / file).string());
     // One unreadable clip costs one animation, not the character: a viewer can
     // still show everything else, which is more useful than refusing to start.
     if (!clip) continue;
     set.clips_.push_back(
-        Entry{name, std::make_unique<AnimationClip>(std::move(*clip))});
+        Entry{name, std::make_unique<AnimationClip>(std::move(*clip)), pivot});
   }
 
   if (set.clips_.empty()) {
