@@ -339,3 +339,49 @@ TEST_CASE("the projection drops with the character", "[anim]") {
 
     CHECK_FALSE(g.registry.valid(g.slots[hero]));
 }
+
+TEST_CASE("an attacker turns to face what it is striking", "[anim]") {
+    // Facing is written in exactly one place -- the direction of TRAVEL
+    // (movement.cpp) -- so before this, a fighter that stopped moving kept
+    // whatever way it happened to be pointing and swung at empty air. Invisible
+    // on a symmetric capsule; unmissable once a skeleton is drawn on it.
+    //
+    // Facing also aims the vision cone, so turning to strike means a unit looks
+    // at what it is fighting. That is the intent, not a side effect.
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t attacker = spawn_fighter(g, {0.0f, 0.0f});
+    const uint32_t victim = spawn_fighter(g, {1.0f, 0.0f});  // due +X
+    g.registry.get<Team>(g.slots[victim]).id = 99;
+
+    const entt::entity e = g.slots[attacker];
+    // Point it deliberately AWAY from the target first.
+    g.registry.get<Facing>(e).dir = glm::vec2{-1.0f, 0.0f};
+
+    REQUIRE(declare_strike(g, e, 0, victim));
+
+    const glm::vec2 facing = g.registry.get<Facing>(e).dir;
+    CHECK(facing.x == Catch::Approx(1.0f).margin(1e-3f));
+    CHECK(facing.y == Catch::Approx(0.0f).margin(1e-3f));
+    CHECK(glm::length(facing) == Catch::Approx(1.0f).margin(1e-3f));
+}
+
+TEST_CASE("a strike at a target on top of the attacker keeps its facing",
+          "[anim]") {
+    // Degenerate case: no direction to turn toward, so the last facing stands
+    // rather than becoming a zero vector -- Facing is documented as always
+    // normalized, and the vision cone divides by it.
+    auto owned = make_flat_world();
+    BadlandsGame& g = *owned;
+    const uint32_t attacker = spawn_fighter(g, {0.0f, 0.0f});
+    const uint32_t victim = spawn_fighter(g, {0.0f, 0.0f});  // exactly coincident
+    g.registry.get<Team>(g.slots[victim]).id = 99;
+
+    const entt::entity e = g.slots[attacker];
+    g.registry.get<Facing>(e).dir = glm::vec2{0.0f, 1.0f};
+    REQUIRE(declare_strike(g, e, 0, victim));
+
+    const glm::vec2 facing = g.registry.get<Facing>(e).dir;
+    CHECK(glm::length(facing) == Catch::Approx(1.0f).margin(1e-3f));
+    CHECK(facing.y == Catch::Approx(1.0f).margin(1e-3f));
+}
