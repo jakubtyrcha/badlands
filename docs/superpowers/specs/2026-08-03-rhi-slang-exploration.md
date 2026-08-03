@@ -1,0 +1,367 @@
+# RHI + Slang: exploration and decision log
+
+**Status:** pre-plan exploration. No implementation has started.
+**Nature:** living document, spanning many sessions. Append decisions; don't rewrite history.
+
+This records why we are replacing Dawn/WebGPU with a native RHI, what we measured,
+what we decided, and what is still open. Read it before resuming the effort.
+
+## Motivation
+
+- Dawn/WebGPU blocks two capabilities we want: 64-bit atomics for compute-shader
+  rasterization, and mesh shaders.
+- Neither can be reached from WGSL. 64-bit atomics do not exist in the language, and
+  Tint will not grow them.
+- Owning the stack also removes the Dawn version pin as a gate on everything else.
+
+## Decisions
+
+Each entry records what was chosen and why. Supersede by appending, not editing.
+
+### D1 — Build a real RHI *and* switch shader language (2026-08-03)
+
+- Both, not one. The cheap alternative (Dawn/Metal interop via `GetMTLDevice` +
+  `SharedTextureMemoryIOSurface`) was considered and rejected as a destination.
+- That interop path remains available as a fallback if the RHI stalls.
+
+### D2 — Metal and DX12 are the core APIs (2026-08-03)
+
+- WebGPU is not a shipping target. Dawn survives only as a transitional backend.
+- **The RHI deliberately looks like WebGPU**, to minimise translation across ~3,350
+  existing call sites. This is a cost decision, not an endorsement of WebGPU's model.
+- DX12 is out of scope for the first plan. A stub backend keeps the seam honest.
+
+### D3 — Hardware floor (2026-08-03)
+
+| Platform | Floor | Gets us |
+|---|---|---|
+| PC | NVIDIA Turing+ / AMD RDNA2+ / Intel Arc | Mesh shaders, 64-bit atomics, DX12 Resource Binding Tier 3 |
+| macOS | Apple8 (M2)+ | Mesh shaders, 64-bit atomic min/max, Argument Buffers Tier 2 |
+
+- Steam Hardware Survey (July 2026): ~72.6% of PC is confidently capable, ~84% of the
+  classifiable population. Some of the unclassified "Other" is Steam Deck (RDNA2, capable).
+- macOS is 2.32% of Steam total, so dropping M1 costs almost nothing measurable.
+- **Apple8's 64-bit atomic min/max is exactly the compute-raster primitive** — a packed
+  depth+payload `atomicMin`/`atomicMax`. Apple9 is not required.
+- Consequence: both motivating features are baseline on every target. No capability
+  fallback paths are needed, and bindless is available everywhere.
+
+### D4 — Binding model: descriptor tables, not full bindless (2026-08-03)
+
+- Keep WebGPU's group/binding call shape so call sites port mechanically.
+- Define layouts as descriptor tables that a Metal argument buffer or a DX12 descriptor
+  heap can back directly.
+- Deferred rather than rejected. The reasons are sequencing, not capability:
+  - No resource allocator exists; Metal bindless needs heaps plus `useHeap`/residency sets.
+  - Bindless removes the error class Dawn validation currently catches.
+  - It reshapes the reflection contract and material system rather than re-pointing them.
+  - The GPU does not pick materials yet — instance-renderer buckets are CPU-known constants.
+- **Build the heap allocator first.** It improves the non-bindless path too, and is the
+  real prerequisite for going bindless later.
+
+### D9 — No strings at record time (2026-08-03)
+
+Rule: **strings are permitted at compile and resolve time, never at record time.**
+
+- Resolve once to an opaque id, then use the id per draw:
+  `auto p = GetParamId(pipeline, "Roughness"); SetFloat(p, x);`
+- **The id is a resolved dense index into that pipeline's parameter table, not a hash.**
+  A raw hash yields no offset and collides silently; hashing is fine as the lookup key
+  *during* resolution only.
+- The id carries its type (as `MaterialParameterId` already does) so setters can validate
+  cheaply, in debug builds at minimum.
+- The id belongs to a compiled pipeline or material, **not to the RHI**. Binding indices and
+  UBO offsets differ per shader variant, so a free `RHIGetParamUid` has nothing to resolve
+  against. The existing `RenderingMaterialInstance::GetParameterId` is the right shape.
+- The rule covers the graph too. D7's port-name-to-reflection matching is string work at
+  graph compile time, which is fine; record-time port binding must be index-based.
+
+#### Why this is structural, not a signature change
+
+Measured, and worse than it looks:
+
+- `SetParameterByName("modelMatrix", …)` is called **inside the per-entity draw loop** in
+  `render_textured_mesh.cpp` and `render_forward.cpp`, once per entity plus once per uniform
+  override, every frame.
+- **`SetParameter(id, value)` is currently slower than the string path.** It hashes
+  `handle_to_name_` to recover the name, then calls `MaterialInstance::SetFloat(name, …)`
+  which hashes `constant_map_` again. The handle is a facade over a string-keyed system.
+- `GetParameterId` is effectively unused in production — only tests call it.
+- `InstanceParams::uniform_overrides` is `unordered_map<std::string, MaterialParameterValue>`,
+  so the override *data* is string-keyed and iterated per entity per frame.
+
+So the fix is three changes, not one:
+
+1. The id resolves to a direct location (`{UniformType, index}`), never back to a name.
+2. `MaterialInstance`'s name→location map is consumed at instance creation, not per set.
+3. `uniform_overrides` becomes a `vector<{ParamId, value}>` resolved at instance creation.
+
+### D8 — Shared binding resolver; graph and MaterialInstance coexist (2026-08-03)
+
+Option C of the three considered. The graph does **not** subsume `MaterialInstance`.
+
+- Extract reflection name→binding resolution into one component that both the graph and
+  `MaterialInstance` call. Only the genuinely duplicated logic is unified.
+- The graph keeps pass-level binding: render targets, engine globals, group 0, compute I/O.
+  Ports are few and resolve at graph compile time.
+- `MaterialInstance` keeps per-draw work — UBO packing from reflected offsets, and the
+  `Bind`/`BindPerObject`/`BindInstanceData` protocol. Neither is distorted to fit the other.
+- Rejected: the graph subsuming materials (A) would need per-draw binding as a first-class
+  graph concept — a much larger graph, and a bet that should be deliberate rather than a
+  side effect of stage 3.
+
+**Correctness rider, not optional:** geometry nodes must declare their material texture set
+to the graph, even though `MaterialInstance` still binds it. Otherwise those textures'
+states are invisible to D7's barrier derivation, which on DX12 is a missing transition
+rather than an untidiness. One transition before the pass is enough.
+
+### D7 — A render graph is essential to the port, not optional (2026-08-03)
+
+Resolves R3 and the open render-graph question.
+
+The graph must:
+
+1. Automate bindings from shader reflection.
+2. Automate barriers and resource-state transitions for DX12.
+3. Minimise userspace boilerplate.
+4. Make porting between platforms easier.
+5. Talk to the GPU only through the RHI.
+
+Layering that follows: **engine passes → render graph → RHI → Metal / DX12.**
+
+- The RHI stays explicit, verbose and WebGPU-shaped (D2). The graph is where terseness
+  lives. Do not push convenience into the RHI to satisfy requirement 3.
+- The graph becomes the pass-authoring API. Requirement 4 is satisfied because passes never
+  see a backend.
+- **Requirement 1 also insulates D4.** If passes bind by name through the graph, moving to
+  bindless later changes the graph's binding layer rather than every pass — which is what
+  makes deferring bindless safe.
+
+#### What sampo's ProcessingGraph does and does not give us
+
+Measured, not assumed. It is a skeleton worth porting, not a solution.
+
+| Requirement | sampo today |
+|---|---|
+| 1. Reflection-driven binding | **Absent.** Nodes bind manually. |
+| 2. Barrier derivation | **Absent.** A `resource_producer` map orders nodes; no usage or state is tracked. |
+| 3. Minimal boilerplate | Partial — builder + `NodeHandle` + typed ports help; binding is still hand-written. |
+| 4. Platform portability | Partial — the node interface takes `wgpu::Device` and `wgpu::CommandEncoder` directly. |
+| 5. Via RHI | **Absent.** It speaks `wgpu::` throughout. |
+
+What it *does* give us, and why it is still worth porting: the DAG skeleton (`ResourceId`,
+Kahn topological sort, `TexturePool`, `Compile`/`Flush` watermarks, builder + `NodeHandle`,
+single-encoder execution), 2,189 LOC of tests, and ~30 worked node examples.
+
+#### The one extension that unlocks two requirements
+
+- `PortDesc` today is `{name, default_value, required}`. Access is implied only by whether
+  a port is an input or an output.
+- **Give ports an explicit usage** — sampled, storage-read, storage-write, render-target,
+  depth, indirect-arg. That single change feeds both barrier derivation (requirement 2) and
+  reflection matching by name (requirement 1).
+
+#### Known gap: geometry passes
+
+- sampo's graph models texture dataflow. Roughly 4-5 of badlands' 12 passes have node
+  analogues; shadow, gbuffer, forward, decals and debug lines have none.
+- Those need scene traversal, so the graph needs a node kind whose input is a draw list or
+  scene view rather than a texture. **This is the main design work beyond porting sampo.**
+
+### D6 — Branch-and-swap; no dependency on Slang's WGSL backend (2026-08-03)
+
+Supersedes R1, which was judged overblown.
+
+- The work happens on a branch. Slang targets MSL only; **Slang's WGSL backend is not used
+  and not depended on.**
+- `main` keeps WESL → WGSL → Dawn untouched, so game development proceeds there in parallel.
+- At cutover, shader development pauses while the remaining shader delta is translated.
+  The shader port is small and image-verifiable, so the freeze window is short.
+
+Consequences, which are the reason this is recorded rather than assumed:
+
+- **Dawn does not get an RHI backend.** A Dawn backend would need WGSL, which would
+  reintroduce exactly the dependency this decision removes.
+- **So there is no A/B backend comparison during the port.** Every ported subsystem is
+  verified through Metal alone.
+- **The property-based GPU tests are the verification spine.** The 19 suites assert on
+  numeric readback properties, not on stored reference images — so they stay meaningful
+  oracles across a backend swap.
+- Do **not** build a golden-image regression harness. Storing reference PNGs would mean
+  asserting on shipped data files, against this project's testing convention. Screenshots
+  stay a human-inspection tool.
+
+### D5 — Virtual dispatch, and do not rely on devirtualization (2026-08-03)
+
+- The RHI is a virtual interface. Devirtualization is treated as a bonus, never a plan.
+- Whole-program devirtualization only fires with LTO plus `-fwhole-program-vtables` and a
+  single implementation linked in. We will link several backends (real + null + validation),
+  so it will not fire.
+- **This does not matter.** Draw counts here are tens to low hundreds per frame — the
+  renderer is GPU-driven with one indirect draw per bucket. A few thousand virtual calls
+  per frame is microseconds against a 16 ms budget.
+- The decisive argument is different: **a virtual interface lets a validation layer be a
+  decorator backend** that forwards to the real one. That is how we replace the Dawn
+  validation we are giving up.
+- It also lets a null/mock backend coexist with Metal in one test binary.
+- If dispatch ever profiles hot, the fix is batching at the graph level, not devirtualization.
+
+## Measured state (as of 2026-08-03)
+
+Re-measure before trusting these; they are a snapshot, not a contract.
+
+### Coupling
+
+- ~3,350 `wgpu::` references over 106 distinct API symbols, across 139 files. There is no
+  existing abstraction layer — `wgpu::` *is* the abstraction.
+- `game/` (the EnTT simulation) is completely clean. The grep hits there are the English
+  word "dawn" in hero-schedule comments.
+
+| Bucket | Share | Fate under the RHI |
+|---|---|---|
+| Target-neutral (formats, usages, load/store ops, pass descriptors, blend, cull) | 57% | Maps 1:1 to Metal and DX12. Keep verbatim. |
+| Opaque handles (`Device`, `Buffer`, `Texture`, `Queue`, `TextureView`) | 32% | Mechanical rename. |
+| Binding model (`BindGroup*`, `PipelineLayout`) | 5% | The part worth designing — see D4. |
+| Async + validation (`CallbackMode`, `MapAsync`, error scopes) | 4% | Deletes. Metal and DX12 are synchronous here. |
+
+- Roughly 89% of the surface survives a WebGPU-shaped RHI unchanged.
+- Bind-group creation is ~35 sites; `SetBindGroup` ~43 sites. The 5% is concentrated.
+
+### Shaders
+
+- 63 `.wesl` files, ~6,760 LOC. 95 imports across 39 files, a shallow graph centred on
+  `common/frame` (44 of them).
+- ~180 `@if` conditional-compilation sites over 12 feature flags (`shadow_pass`,
+  `instanced`, `transparent`, `is_cubemap`, `sphere_mode`, `use_srgb`, `translucency`,
+  `still`). These map straight to Slang's preprocessor.
+- **The hard WGSL→Slang cases do not occur here:** zero `var<workgroup>`, zero barriers,
+  zero push constants, zero `ptr<>`, zero `override` constants.
+- Everything else is 1:1 — `textureLoad` ×52, `textureSampleCompare` ×10, `textureStore` ×9,
+  `@builtin` ×97, and only 6 atomic sites for Slang's `Atomic<T>`.
+- Densest file is `game/foliage_impostor.wesl` at 31 conditionals.
+
+### Tests
+
+- 19 GPU test suites. Device creation already funnels through one helper
+  (`test::RequestDevice` in `gpu_test_helpers.hpp`), so that part is a single port.
+- Their `wgpu::` usage is dominated by texture/buffer descriptors plus readback — exactly
+  the RHI's core surface. The bodies port mechanically once resources and passes exist.
+- **Exception: tests asserting on Dawn validation errors.** `RunCapturingValidationErrors`
+  is used across `gpu_instance_tests` to prove guards fire. Metal and DX12 have no error
+  scopes, so these must be re-expressed against the guard rather than the backend.
+
+## Direction
+
+### Shape
+
+- Virtual RHI interface (D5), WebGPU-shaped (D2), descriptor-table binding (D4).
+- Backends: `MetalRhi` (real), `Dx12Rhi` (stub), plus a null/mock and a validation
+  decorator for tests.
+- Dawn stays as a backend during the transition — see the parallel-development risk below.
+
+### Staging
+
+Each stage must be independently verifiable against current renders.
+
+1. **RHI interface + Metal backend + DX12 stub**, with RHI-level tests and one new Slang
+   shader. A vertical slice; nothing ported yet.
+2. **Slang toolchain + reflection contract.** Slang replaces the `wesl` crate's compile and
+   naga reflection. Reflection is expressed in engine-owned types, never `wgpu::`.
+   This must precede the graph, because the graph's auto-binding consumes it.
+3. **Render graph over the RHI.** Port sampo's DAG skeleton and its tests, retarget the node
+   interface from `wgpu::` to RHI types, add port usage, reflection-driven binding, and
+   barrier derivation. Add the geometry-pass node kind.
+4. **Port shaders to Slang, MSL only.** Verification is the Metal path itself — there is no
+   WGSL bridge (D6), so the Metal backend must render before shaders can be checked.
+5. **Port engine passes onto the graph**, each verified by its existing property-based GPU
+   tests.
+6. **DX12 backend**, once the seam and the barrier derivation have proven themselves.
+
+Stages 1 and 4 overlap by construction: the vertical slice already needs one Slang shader
+running through Metal.
+
+## Risks and open questions
+
+### R1 — Parallel game development — RESOLVED by D6
+
+Judged overblown. Branch-and-swap with a short shader freeze at cutover, and no use of
+Slang's WGSL backend. Left here so the reasoning is not re-litigated.
+
+The residual risk is not shaders but **C++ divergence**: game development on `main` touches
+`src/game/visual` (12 wgpu-coupled files) and may add render passes that must be ported at
+cutover. Keep an eye on how much engine-side surface `main` grows.
+
+### R2 — Losing Dawn's validation costs more than test churn
+
+- Dawn validation is load-bearing for day-to-day development, not just for tests.
+- The validation-decorator backend (D5) is the intended replacement, but its scope has not
+  been costed.
+
+### R3 — Resource state tracking for DX12 — RESOLVED by D7
+
+The render graph derives barriers from per-port usage, rather than the RHI tracking state
+internally. Residual risk: the graph must cover *every* GPU access, or the uncovered ones
+need hand-written barriers. `gpu_instance_renderer`'s compute→render dependency is the first
+case to check, since it currently relies on the encoder handling it implicitly.
+
+### Open questions
+
+- **badlands has no render graph today.** `SceneRenderer::Render` is a fixed imperative
+  sequence of ~12 passes (shadow → gbuffer → GTAO → contact → skybox → lighting → forward
+  opaque → forward transparent → decals → grade → debug lines → tonemap), each beginning a
+  pass inline with a locally-built descriptor. Dependencies are implicit in the ordering.
+- `scene_build.hpp` is a scene-composition helper and `scene/scene_graph.*` is the scene
+  graph — neither is a render graph.
+- **But sampo has one, and it was never ported.** See "sampo's ProcessingGraph" below.
+- **This is the same question as R3.** A render graph derives barriers from declared
+  resource use; automatic state tracking inside the RHI is the alternative. Pick one before
+  DX12, because doing neither means hand-inserting barriers into `scene_renderer.cpp`.
+
+## sampo's ProcessingGraph — the unported prior art
+
+`/Users/jakub/repos/sampo`, `src/image_processing/`, documented in its `docs/GPU_TASK_GRAPH.md`.
+
+- A compiled DAG over GPU textures and CPU images: typed ports, dependency inference from
+  port bindings, topological sort via Kahn, `ResourceId`/`ResourceView`/`TextureDesc`.
+- ~1,100 LOC for graph + builder, **2,189 LOC of tests**, and ~30 node types.
+- `TexturePool` gives transient-resource reuse, keyed by descriptor. Single-submission
+  scope, no GPU-timeline tracking.
+- `Compile()` / `Flush()` support incremental compilation via watermarks.
+- Nodes record into one shared command encoder; the graph submits once and runs
+  `OnPostSubmit()` for async readback mapping.
+
+**It is not only an image-processing tool.** The node inventory includes `gtao_node`,
+`contact_shadows_node`, `deferred_lighting_node`, `tonemapping_node` and
+`convolution_bloom_node` — roughly badlands' post-geometry pipeline, expressed as graph
+nodes. badlands re-implemented those inline in `scene_renderer.cpp` instead.
+
+Honest limits:
+
+- **It derives no barriers.** Like badlands, it leans on WebGPU's automatic hazards, so it
+  does not answer R3 as-is.
+- **It models texture dataflow, not geometry passes.** Roughly 4-5 of badlands' 12 passes
+  have direct node analogues; shadow, gbuffer, forward, decals and debug lines have none,
+  because they need scene traversal rather than texture inputs.
+
+Why this still matters for R3:
+
+- **The graph already infers reads and writes from port bindings** — today only to order
+  nodes. That is exactly the information barrier derivation needs.
+- Extending it to emit resource-state transitions is therefore far smaller than building
+  state tracking from scratch. The data is present and unused.
+- Per this project's convention, porting from sampo means porting sampo's tests too. The
+  2,189 LOC test suite comes with it.
+- **Slang integration shape:** runtime versus offline compile. Hot-reload via
+  `InvalidateAll()` is a current feature and a constraint to preserve.
+- **Can Slang's reflection produce what `MeshRenderingMaterial` consumes** — uniform member
+  offsets and auto-derived texture requirements? Worth a spike before committing.
+- Whether Dawn is deleted at the end or kept indefinitely as a portability backend.
+
+## References
+
+- [Slang supported targets](http://shader-slang.org/slang/user-guide/targets)
+- [Slang Metal specifics](http://shader-slang.org/slang/user-guide/metal-target-specific)
+- [Metal Feature Set Tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf)
+- [Go bindless with Metal 3 (WWDC22)](https://developer.apple.com/videos/play/wwdc2022/10101/)
+- [D3D12 Resource Binding spec](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html)
+- [Steam Hardware Survey](https://store.steampowered.com/hwsurvey)
