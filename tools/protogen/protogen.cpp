@@ -325,6 +325,25 @@ struct Params {
   // Ordered sweeps of the water relaxation per step, warm-started. Cold start
   // at t = 0 runs to convergence instead.
   int water_sweeps = 4;
+  // Total loss from standing water, amortised over dt_years: evaporation plus
+  // seepage plus unresolved sub-grid drainage. It exceeds pan evaporation for
+  // the same reason an effective roughness exceeds a grain diameter -- the
+  // model resolves less than reality and the parameter absorbs the rest.
+  //
+  // It is also the lake-size dial, exactly: equilibrium is an area balance,
+  //   loss * lake_area = runoff * catchment_area
+  // so lake_area/catchment_area = runoff/loss. A basin overflows iff its area
+  // at spill is below that ratio of its own catchment -- inflow scales with
+  // catchment while basin area does not, so trunk basins always spill and only
+  // a large lake on a small catchment becomes a sink. Which is what an
+  // endorheic lake is.
+  float standing_water_loss_m_per_yr = 33.0f;  // ~3% lake area at runoff 1 m/yr
+  // The water sub-system runs on its OWN clock: source and sink both dwarf
+  // storage at landscape pace (1 m/yr over 200 yr is 200 m of rain against
+  // ~10 m lakes), and water equilibrates in years while terrain takes 1e4-1e6.
+  float dt_water_yr = 2.0f;
+  int water_iters = 4;      // per landscape step, warm-started
+  int water_prime_iters = 400;  // once at t = 0, from dry
   float min_lake_area_m2 = 1.0e4f;  // 1 ha
   float min_lake_depth_m = 0.5f;
 
@@ -699,6 +718,85 @@ void RelaxWater(Grid& g, const Params& p, int sweeps, bool cold) {
         if (want < g.wsurf[i]) g.wsurf[i] = want;
       }
     }
+  }
+}
+
+// --------------------------------------------------------- per-cell water
+
+// Standing water as a FIELD, with no lake objects at all.
+//
+// Per cell: rain in, loss out where wet, and a conservative levelling transport
+// that moves water toward lower surfaces. Lakes are then simply cells with
+// depth > 0, and their extent is an equilibrium rather than something computed:
+// a basin grows until loss over its wet cells consumes its inflow, or until it
+// reaches its spill and the surplus runs off. One rule covers both regimes, and
+// the arid case is the same code with a different ratio.
+//
+// Replaces BuildLakes' hypsometry and UpdateLakes' per-lake budget: no
+// sorted_beds, no prefix sums, no LevelFromVolume, no shoreline inflow
+// accounting, no lake_interval.
+//
+// WHY A SUB-TIMESTEP. Source and sink both dwarf storage at landscape pace --
+// runoff 1 m/yr over dt_years = 200 puts 200 m of water on every cell in one
+// step, against lakes ~10 m deep. Water equilibrates in years, terrain over
+// 1e4-1e6 years, so the water sub-system is integrated on its own clock and
+// warm-started. That quasi-steady split is the load-bearing assumption here.
+void UpdateWater(Grid& g, const Params& p, int iters,
+                 std::vector<float>& flux) {
+  const int n = g.n;
+  const float cell_m = p.world_m / float(n);
+  const float sea_hu = p.sea_level_m / p.relief_m;
+  // Rain and loss for one water sub-step, in height units.
+  const float rain = p.runoff_m_per_yr * p.dt_water_yr / p.relief_m;
+  const float loss = p.standing_water_loss_m_per_yr * p.dt_water_yr / p.relief_m;
+  static const int dx4[4] = {1, -1, 0, 0}, dy4[4] = {0, 0, 1, -1};
+  auto pinned = [&](int x, int y) {
+    // Water leaves here and the level is held: the map edge, and anything at or
+    // below sea level. No source and no sink applies, so the sea cannot drift
+    // -- only water ABOVE sea level is subject to loss.
+    return x == 0 || y == 0 || x == n - 1 || y == n - 1 ||
+           g.height[g.idx(x, y)] <= sea_hu;
+  };
+
+  for (int it = 0; it < iters; ++it) {
+    // --- source and sink, per cell -----------------------------------------
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        if (pinned(x, y)) { g.water[i] = 0.f; continue; }
+        g.water[i] += rain;
+        if (g.water[i] > 0.f) g.water[i] = std::max(0.f, g.water[i] - loss);
+      }
+
+    // --- conservative levelling -------------------------------------------
+    // Jacobi into a flux buffer so the pass is order-independent and the total
+    // is conserved exactly: every transfer debits one cell and credits another.
+    std::fill(flux.begin(), flux.end(), 0.f);
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        if (g.water[i] <= 0.f) continue;
+        const float wi = g.height[i] + g.water[i];
+        for (int k = 0; k < 4; ++k) {
+          const int ax = x + dx4[k], ay = y + dy4[k];
+          if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;
+          const size_t j = g.idx(ax, ay);
+          const float wj = g.height[j] + g.water[j];
+          if (wi <= wj) continue;
+          // Quarter of the head difference, and at most a quarter of the
+          // column, so the four neighbours together can never move more water
+          // than the cell holds -- the stability bound for this kind of
+          // explicit relaxation.
+          const float t = std::min(0.25f * g.water[i], 0.25f * (wi - wj));
+          flux[i] -= t;
+          flux[j] += t;
+        }
+      }
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        g.water[i] = pinned(x, y) ? 0.f : std::max(0.f, g.water[i] + flux[i]);
+      }
   }
 }
 
@@ -2944,6 +3042,63 @@ void WaterRelaxationMatchesFlood() {
   Check("T9 water relaxation == priority flood", worst_m < 1e-3, buf);
 }
 
+// --- T10. per-cell water, zero-loss limit == the flood surface -------------
+// The limit test for the water field. With no loss and enough rain, every
+// basin must fill to its spill and nowhere else -- which is exactly the
+// priority-flood surface. So the emergent field is checked against an exact
+// algorithm rather than against itself.
+//
+// It also pins the two things that are easy to get wrong and hard to see:
+// water must not sit above a spill (over-fill), and must not pool on a slope
+// (failure to drain).
+void WaterFieldZeroLossLimit() {
+  Params p = Base(64);
+  p.terrain = Params::Terrain::Horseshoe;
+  // No loss AND no rain: charge the map once and let it settle. This isolates
+  // TRANSPORT, which is what the zero-loss limit is actually a claim about.
+  // Driving it with rain instead conflates it with a rate balance -- at
+  // dt_water = 2 yr each iteration adds 2 m of rain while levelling moves only
+  // ~0.3 m downhill, so the map floods (measured 2248 m of over-fill) no matter
+  // what the loss is. That rate constraint is real and calibrated separately.
+  p.standing_water_loss_m_per_yr = 0.f;
+  p.runoff_m_per_yr = 0.f;
+  Grid g(p.res);
+  InitTerrain(g, p);
+  std::vector<float> flux(g.cells, 0.f);
+  float hi = -1e30f, lo = 1e30f;
+  for (float h : g.height) { hi = std::max(hi, h); lo = std::min(lo, h); }
+  std::fill(g.water.begin(), g.water.end(), hi - lo);  // drown it
+  UpdateWater(g, p, 4000, flux);
+
+  std::vector<float> filled;
+  std::vector<int32_t> outlet;
+  PriorityFlood(g, filled, outlet);
+
+  // Compare only where the flood says there IS a basin: elsewhere the flood
+  // surface equals the terrain and both are trivially dry.
+  double over = 0.0, under = 0.0;
+  size_t basin = 0;
+  for (size_t i = 0; i < g.cells; ++i) {
+    if (filled[i] <= g.height[i] + 1e-7f) {
+      over = std::max(over, double(g.water[i]));  // pooled on a slope?
+      continue;
+    }
+    ++basin;
+    const double want = double(filled[i] - g.height[i]);
+    const double got = double(g.water[i]);
+    over = std::max(over, got - want);
+    under = std::max(under, want - got);
+  }
+  const double over_m = over * p.relief_m, under_m = under * p.relief_m;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "%zu basin cells; worst over-fill %.2f m, worst under-fill "
+                "%.2f m",
+                basin, over_m, under_m);
+  Check("T10 zero-loss water == flood surface", over_m < 0.5 && under_m < 0.5,
+        buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -2978,6 +3133,7 @@ int RunAll() {
   HorseshoeDrainsToOutflow();
   StepSizeIndependence();
   WaterRelaxationMatchesFlood();
+  WaterFieldZeroLossLimit();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)
