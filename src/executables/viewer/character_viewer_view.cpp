@@ -5,6 +5,7 @@
 #include <utility>
 
 #include <imgui.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <spdlog/spdlog.h>
 
 #include "engine/animation/skeleton_lines.hpp"
@@ -158,7 +159,13 @@ void CharacterViewerView::UpdateSkeleton() {
   if (!sampler_.Sample(clip, ratio, *pose_)) return;
   if (!LocalToModel(animation_->skeleton(), *pose_)) return;
 
-  EmitSkeletonLines(animation_->skeleton(), *pose_, glm::mat4(1.0f),
+  // Turn the rig onto +Z, the same correction the in-world overlay applies. A
+  // rig authored facing -Z would otherwise be inspected from behind, and every
+  // pose would read reversed here while looking correct in the game.
+  const glm::mat4 world = glm::rotate(glm::mat4(1.0f),
+                                      animation_->yaw_offset_radians(),
+                                      glm::vec3(0.0f, 1.0f, 0.0f));
+  EmitSkeletonLines(animation_->skeleton(), *pose_, world,
                     skeleton_lines_, kBoneColor, kBoneThickness);
 }
 

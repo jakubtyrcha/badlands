@@ -99,8 +99,9 @@ std::optional<AnimationSet> AnimationSet::Load(const std::string& manifest_path)
     return std::nullopt;
   }
 
-  spdlog::info("AnimationSet: {} -- {} joints, {} clips", manifest_path,
-               set.skeleton_->num_joints(), set.clips_.size());
+  spdlog::info("AnimationSet: {} -- {} joints, {} clips, rig yaw offset {:.0f} deg",
+               manifest_path, set.skeleton_->num_joints(), set.clips_.size(),
+               glm::degrees(set.yaw_offset_radians_));
   return set;
 }
 
