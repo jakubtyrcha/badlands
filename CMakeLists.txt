@@ -111,6 +111,30 @@ corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/ui/Cargo.tom
                        PROFILE release)
 corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
 
+# badlands_rhi: the native render-hardware interface replacing Dawn/WebGPU.
+# See docs/superpowers/specs/2026-08-03-rhi-slang-exploration.md.
+#
+# DELIBERATELY does NOT link `webgpu`. The whole point of this library is to be
+# the seam that has no backend vocabulary in it, so a `wgpu::` reference here
+# must be a link error rather than a code-review catch. It also keeps the RHI
+# test suite off Dawn entirely, which is what makes it fast enough to run on
+# every build.
+add_library(badlands_rhi STATIC
+    src/engine/rhi/rhi_common.cpp
+    src/engine/rhi/null/null_rhi.cpp
+    src/engine/rhi/validation/validation_rhi.cpp
+)
+target_include_directories(badlands_rhi PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+)
+target_compile_features(badlands_rhi PUBLIC cxx_std_23)
+# Validation is opt-in so it can never skew a profiling build. On for Debug and
+# for the test suites; a release/profiling build compiles it out entirely and
+# CreateDevice warns loudly if someone asks for it anyway.
+target_compile_definitions(badlands_rhi PUBLIC
+    $<$<NOT:$<CONFIG:Release>>:BADLANDS_RHI_VALIDATION>)
+
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
 # types/logic live here — see src/engine/app/app_view.hpp.
@@ -1046,6 +1070,25 @@ add_test(NAME badlands_fog_sim_gpu_test COMMAND badlands_fog_sim_gpu_test WORKIN
 # and the headless gpu_test_helpers. Unlike the two suites above this actually
 # creates a Dawn device and renders, so it needs a working GPU adapter (Metal
 # on macOS); there is no CI, so it runs locally via ctest.
+# badlands_rhi_tests: the RHI interface + Null-backend suite. No GPU, no Dawn,
+# no window — it links badlands_rhi only, so it runs anywhere and stays fast.
+# The shared conformance list in src/engine/tests/rhi_conformance.hpp is what
+# badlands_rhi_metal_tests will replay against Metal.
+add_executable(badlands_rhi_tests
+    src/engine/tests/rhi_tests.cpp
+    src/engine/tests/rhi_validation_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_rhi_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_rhi_tests PRIVATE badlands_rhi)
+if(APPLE)
+    target_link_options(badlands_rhi_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_rhi_tests COMMAND badlands_rhi_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(badlands_readback_tests
     src/engine/tests/readback_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
