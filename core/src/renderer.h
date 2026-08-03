@@ -45,10 +45,12 @@ public:
     // creating a zero-length one (Metal disallows those) -- see set_mesh's
     // definition for the replace-on-update ownership note.
     void set_mesh(const TriangleMesh& mesh);
-    // Modify-mode move gizmo. Rebuilds the (tiny, setVertexBytes-only) gizmo
-    // vertex vectors on every call — ~140 verts total is cheap enough that
-    // caching by param-equality would be over-engineering. `eye` feeds the
-    // camera-facing expansion of the thick handle quads.
+    // Modify-mode move gizmo. Rebuilds the gizmo vertex vectors on every call
+    // — ~760 verts total is cheap enough that caching by param-equality would
+    // be over-engineering. `eye` feeds the camera-facing expansion of the
+    // thick handle quads. Uploaded to vertex buffers at draw time (see
+    // upload_line_verts): the restyle put both halves past setVertexBytes'
+    // 4KB inline limit.
     void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye);   // shows the gizmo
     void hide_gizmo();
     // Camera-pivot marker (flat ring + crosshair at the orbit target),
@@ -96,7 +98,7 @@ private:
     NS::SharedPtr<MTL::RenderPipelineState> raymarch_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> ground_pso_;        // ground plate; PREMULTIPLIED blend
     NS::SharedPtr<MTL::DepthStencilState> depth_test_;         // Less, write ON -- the mesh, the raymarch pass
-    NS::SharedPtr<MTL::DepthStencilState> depth_ignore_;       // Always, write OFF -- lines + gizmo
+    NS::SharedPtr<MTL::DepthStencilState> depth_ignore_;       // Always, write OFF -- lines, gizmo, pivot
     NS::SharedPtr<MTL::DepthStencilState> depth_read_less_;    // Less, write OFF -- ground plate + origin marker
 
     NS::SharedPtr<MTL::Texture> depth_texture_;

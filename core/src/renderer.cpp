@@ -65,9 +65,11 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
         assert(false && "failed to create line render pipeline state");
     }
 
-    // Second PSO for the modify-mode gizmo: identical functions/attachment
-    // format (Metal validation requires the formats to match), plus alpha
-    // blending. This is the only blended draw in the renderer.
+    // Second PSO for the modify-mode gizmo, the pivot marker and the origin
+    // marker: identical functions/attachment format (Metal validation
+    // requires the formats to match), plus STRAIGHT-alpha blending. The other
+    // blended PSO, ground_pso_ below, uses premultiplied factors instead --
+    // see its comment for why.
     NS::SharedPtr<MTL::RenderPipelineDescriptor> blendPipelineDesc =
         NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
     blendPipelineDesc->setVertexFunction(vertex_fn.get());
