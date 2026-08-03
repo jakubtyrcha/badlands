@@ -51,10 +51,13 @@ public:
     // camera-facing expansion of the thick handle quads.
     void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye);   // shows the gizmo
     void hide_gizmo();
-    // Camera-pivot marker (spiked cube at the orbit target), refreshed every
-    // frame like the move gizmo. Drawn LAST in two depth-read passes: opaque
-    // where in front of the scene, alpha-faded where occluded.
-    void set_pivot_gizmo(simd_float3 center, float half_extent, float half_width, simd_float3 eye);
+    // Camera-pivot marker (flat ring + crosshair at the orbit target),
+    // refreshed every frame like the move gizmo. Drawn LAST and depth-ignored:
+    // it is gesture feedback, so it must never be occluded by the model it is
+    // helping you orbit around. `alpha` scales kColorPivot -- at or below 0
+    // the marker is dropped entirely, which is the resting state.
+    void set_pivot_marker(simd_float3 center, float radius, float half_width, simd_float3 eye,
+                          float alpha);
     // World-origin +Y axis and pip. Rebuilt every frame like the gizmo (12
     // verts); drawn in the ground plate's depth-tested pass so it occludes
     // against the scene the same way the plate's X/Z axes do.
@@ -94,8 +97,7 @@ private:
     NS::SharedPtr<MTL::RenderPipelineState> ground_pso_;        // ground plate; PREMULTIPLIED blend
     NS::SharedPtr<MTL::DepthStencilState> depth_test_;         // Less, write ON -- the mesh, the raymarch pass
     NS::SharedPtr<MTL::DepthStencilState> depth_ignore_;       // Always, write OFF -- lines + gizmo
-    NS::SharedPtr<MTL::DepthStencilState> depth_read_less_;    // Less, write OFF -- pivot's in-front pass
-    NS::SharedPtr<MTL::DepthStencilState> depth_read_greater_; // Greater, write OFF -- pivot's occluded pass
+    NS::SharedPtr<MTL::DepthStencilState> depth_read_less_;    // Less, write OFF -- ground plate + origin marker
 
     NS::SharedPtr<MTL::Texture> depth_texture_;
     uint32_t depth_texture_width_ = 0;
@@ -127,10 +129,11 @@ private:
     NS::SharedPtr<MTL::Buffer> gizmo_grid_buffer_;
     NS::SharedPtr<MTL::Buffer> gizmo_handle_buffer_;
 
-    // Pivot marker geometry, one copy per pass (same quads, different baked
-    // vertex color — kColorPivotFront/kColorPivotBehind).
-    std::vector<LineVertex> pivot_front_verts_;
-    std::vector<LineVertex> pivot_behind_verts_;
+    // Pivot marker geometry: one pass now (the old front/behind pair went
+    // away with the spiked cube -- a depth-ignored marker has nothing to
+    // split on).
+    std::vector<LineVertex> pivot_verts_;
+    NS::SharedPtr<MTL::Buffer> pivot_buffer_;
 
     std::vector<LineVertex> origin_marker_verts_; // +Y shaft + pip, TRIANGLE primitives
 };

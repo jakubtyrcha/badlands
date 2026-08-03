@@ -289,38 +289,36 @@ void append_origin_marker(std::vector<LineVertex>& out, float height, float half
     append_camera_facing_quad(out, origin, pip_half_size, eye, kColorOriginPip);
 }
 
-void append_spiked_cube(std::vector<LineVertex>& out, simd_float3 center, float half_extent,
-                        float half_width, simd_float3 eye, simd_float4 color) {
-    const float he = half_extent;
+void append_pivot_crosshair(std::vector<LineVertex>& out, simd_float3 center, float radius,
+                            float half_width, simd_float3 eye, simd_float4 color) {
+    simd_float3 n = eye - center;
+    const float len = simd_length(n);
+    if (len < 1e-6f) {
+        return; // eye exactly at the pivot: no facing plane to draw in
+    }
+    n /= len;
 
-    // 12 cube edges, world-axis-aligned corners at center ± he — reuses
-    // append_cube_edges' corner/edge tables scaled inline (that function
-    // bakes a transform + thin verts, this one needs thick segments).
-    static constexpr std::array<simd_float3, 8> kCorners = {{
-        {-1.0f, -1.0f, -1.0f}, { 1.0f, -1.0f, -1.0f},
-        { 1.0f,  1.0f, -1.0f}, {-1.0f,  1.0f, -1.0f},
-        {-1.0f, -1.0f,  1.0f}, { 1.0f, -1.0f,  1.0f},
-        { 1.0f,  1.0f,  1.0f}, {-1.0f,  1.0f,  1.0f},
-    }};
-    static constexpr std::array<std::array<int, 2>, 12> kEdges = {{
-        {0, 1}, {1, 5}, {5, 4}, {4, 0}, // bottom
-        {3, 2}, {2, 6}, {6, 7}, {7, 3}, // top
-        {0, 3}, {1, 2}, {5, 6}, {4, 7}, // verticals
-    }};
-    for (const auto& edge : kEdges) {
-        append_thick_segment(out, center + he * kCorners[edge[0]], center + he * kCorners[edge[1]],
-                             eye, half_width, color);
+    // Ring and ticks both live in the eye-facing plane, so the marker is a
+    // flat disc-shaped annotation from every angle -- the point of replacing
+    // the spiked cube, which changed silhouette as the camera moved and so
+    // read as an object in the scene.
+    simd_float3 u, v;
+    tangent_basis(n, u, v);
+
+    const auto ring_point = [&](int i) {
+        // i % segments makes the final segment land exactly on vertex 0.
+        const float t = static_cast<float>(i % kPivotRingSegments) /
+                        static_cast<float>(kPivotRingSegments) * 2.0f * float(M_PI);
+        return center + radius * (std::cos(t) * u + std::sin(t) * v);
+    };
+    for (int i = 0; i < kPivotRingSegments; ++i) {
+        append_thick_segment(out, ring_point(i), ring_point(i + 1), eye, half_width, color);
     }
 
-    // 6 spikes, one per face: from the wall's center out to 2he — the marker
-    // reads as a pivot from any view direction.
-    static constexpr std::array<simd_float3, 6> kFaceDirs = {{
-        { 1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
-        { 0.0f, 1.0f, 0.0f}, { 0.0f, -1.0f, 0.0f},
-        { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f, -1.0f},
-    }};
-    for (const simd_float3 dir : kFaceDirs) {
-        append_thick_segment(out, center + he * dir, center + 2.0f * he * dir,
+    const simd_float3 tick_dirs[] = {u, -u, v, -v};
+    for (const simd_float3 dir : tick_dirs) {
+        append_thick_segment(out, center + kPivotTickInnerFrac * radius * dir,
+                             center + kPivotTickOuterFrac * radius * dir,
                              eye, half_width, color);
     }
 }

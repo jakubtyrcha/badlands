@@ -4,6 +4,8 @@
 #include <cmath>
 #include <vector>
 
+#include <ground_grid.h> // kGroundAxisY, for the origin-marker colour case
+
 #include "gizmo.h"
 #include "lines.h"
 #include "scene.h"
@@ -497,47 +499,107 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
     }
 }
 
-// --- append_spiked_cube (camera-pivot marker) --------------------------------
+// --- append_pivot_crosshair (camera-pivot marker) ----------------------------
 
-TEST_CASE("append_spiked_cube: 12 world-axis-aligned edges + 6 face spikes, bounded, "
-          "single color") {
+TEST_CASE("append_pivot_crosshair: a flat eye-facing ring with four ticks crossing it") {
     const simd_float3 center = {1.0f, -2.0f, 3.0f};
-    const float he = 0.5f;
+    const float radius = 0.5f;
     const float hw = 0.02f;
     const simd_float3 eye = {5.0f, 3.0f, 9.0f};
-    const simd_float4 gray = {0.5f, 0.5f, 0.5f, 1.0f};
+    const simd_float4 white = {1.0f, 1.0f, 1.0f, 0.85f};
 
     std::vector<LineVertex> out;
-    append_spiked_cube(out, center, he, hw, eye, gray);
+    append_pivot_crosshair(out, center, radius, hw, eye, white);
 
-    // (12 cube edges + 6 spikes) thick segments * 6 verts = 108.
-    REQUIRE(out.size() == 108);
+    // (kPivotRingSegments ring + 4 tick) thick segments * 6 verts.
+    REQUIRE(out.size() == static_cast<size_t>(kPivotRingSegments + 4) * 6);
 
-    for (size_t i = 0; i < out.size(); ++i) {
-        CAPTURE(i);
-        const simd_float3 p = out[i].pos.xyz;
-        // Everything lives inside the spike envelope: 2he per world axis
-        // (+ expansion slack).
-        CHECK(std::fabs(p.x - center.x) < 2.0f * he + 2.0f * hw + 1e-5f);
-        CHECK(std::fabs(p.y - center.y) < 2.0f * he + 2.0f * hw + 1e-5f);
-        CHECK(std::fabs(p.z - center.z) < 2.0f * he + 2.0f * hw + 1e-5f);
-        CHECK(color_is(out[i], gray));
+    const simd_float3 n = simd_normalize(eye - center);
+
+    SUBCASE("everything is coplanar in the eye-facing plane") {
+        // This is what makes the marker read as a flat annotation rather than
+        // an object: its silhouette cannot change as the camera orbits.
+        for (size_t i = 0; i < out.size(); ++i) {
+            CAPTURE(i);
+            CHECK(std::fabs(simd_dot(out[i].pos.xyz - center, n)) < hw + 1e-5f);
+        }
     }
 
-    // Each spike reaches its tip at center + 2he along a world axis: some
-    // vertex must land within the expansion slack of every tip.
-    const simd_float3 axes_dirs[] = {
-        {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
-        {0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
-        {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
-    };
-    for (const simd_float3 dir : axes_dirs) {
-        CAPTURE(dir.x); CAPTURE(dir.y); CAPTURE(dir.z);
-        const simd_float3 tip = center + 2.0f * he * dir;
-        bool found = false;
-        for (const LineVertex& v : out) {
-            found = found || simd_length(v.pos.xyz - tip) < 2.0f * hw + 1e-4f;
+    SUBCASE("bounded by the outermost tick") {
+        for (size_t i = 0; i < out.size(); ++i) {
+            CAPTURE(i);
+            CHECK(simd_length(out[i].pos.xyz - center) <
+                  kPivotTickOuterFrac * radius + 2.0f * hw + 1e-5f);
+            CHECK(color_is(out[i], white));
         }
-        CHECK(found);
+    }
+
+    SUBCASE("the ring sits at the radius") {
+        for (size_t i = 0; i < static_cast<size_t>(kPivotRingSegments) * 6; ++i) {
+            CAPTURE(i);
+            CHECK(simd_length(out[i].pos.xyz - center) == doctest::Approx(radius).epsilon(0.1));
+        }
+    }
+
+    SUBCASE("the ticks cross the ring rather than stopping at it") {
+        // A tick must have vertices both inside and outside the ring radius,
+        // which is what makes this read as a crosshair and not a bare circle.
+        bool inside = false, outside = false;
+        for (size_t i = static_cast<size_t>(kPivotRingSegments) * 6; i < out.size(); ++i) {
+            const float r = simd_length(out[i].pos.xyz - center);
+            inside = inside || r < radius - 1e-3f;
+            outside = outside || r > radius + 1e-3f;
+        }
+        CHECK(inside);
+        CHECK(outside);
+    }
+}
+
+TEST_CASE("append_pivot_crosshair: eye exactly at the pivot emits nothing") {
+    const simd_float3 center = {1.0f, -2.0f, 3.0f};
+    std::vector<LineVertex> out;
+    append_pivot_crosshair(out, center, 0.5f, 0.02f, center, kColorPivot);
+    CHECK(out.empty());
+}
+
+// --- append_origin_marker ----------------------------------------------------
+
+TEST_CASE("append_origin_marker: +Y shaft in the shared world-axis green, plus a white pip") {
+    const simd_float3 eye = {5.0f, 3.0f, 9.0f};
+    const float height = 3.0f, hw = 0.02f, pip = 0.05f;
+
+    std::vector<LineVertex> out;
+    append_origin_marker(out, height, hw, pip, eye);
+
+    // 1 shaft segment + 1 pip quad, 6 verts each.
+    REQUIRE(out.size() == 12);
+
+    SUBCASE("the shaft runs from the origin up +Y only") {
+        for (size_t i = 0; i < 6; ++i) {
+            CAPTURE(i);
+            const simd_float3 p = out[i].pos.xyz;
+            CHECK(p.y > -hw - 1e-5f);
+            CHECK(p.y < height + hw + 1e-5f);
+            CHECK(std::fabs(p.x) < hw + 1e-5f);
+            CHECK(std::fabs(p.z) < hw + 1e-5f);
+        }
+    }
+
+    SUBCASE("the shaft's colour IS the shader's own Y-axis constant") {
+        // Not a copy of it: ground_grid.h is dual-compiled, so the +Y marker
+        // here and the X/Z lines the fragment shader draws read the same
+        // definition. If this ever needs a literal, the axes have drifted.
+        for (size_t i = 0; i < 6; ++i) {
+            CAPTURE(i);
+            CHECK(color_is(out[i], kGroundAxisY));
+        }
+    }
+
+    SUBCASE("the pip is a small white square at the origin") {
+        for (size_t i = 6; i < 12; ++i) {
+            CAPTURE(i);
+            CHECK(simd_length(out[i].pos.xyz) < 1.4143f * pip + 1e-5f);
+            CHECK(color_is(out[i], kColorOriginPip));
+        }
     }
 }

@@ -289,3 +289,41 @@ TEST_CASE("pick_gizmo_handle: gizmo entirely behind the ray origin is unpickable
     const Ray away{eye, simd_normalize(eye - f.origin)}; // pointing away from the gizmo
     CHECK(pick_gizmo_handle(f, away, kTestFov, kTestViewportH) == GizmoHandle::None);
 }
+
+TEST_CASE("pivot_marker_alpha: hold at full, then smoothstep to nothing") {
+    SUBCASE("full strength through the hold window") {
+        CHECK(pivot_marker_alpha(0.0f) == doctest::Approx(1.0f));
+        CHECK(pivot_marker_alpha(kPivotHoldSeconds * 0.5f) == doctest::Approx(1.0f));
+        CHECK(pivot_marker_alpha(kPivotHoldSeconds) == doctest::Approx(1.0f));
+    }
+
+    SUBCASE("gone once the fade completes, and stays gone") {
+        CHECK(pivot_marker_alpha(kPivotHoldSeconds + kPivotFadeSeconds) == doctest::Approx(0.0f));
+        CHECK(pivot_marker_alpha(10.0f) == doctest::Approx(0.0f));
+        // The resting state: Editor seeds last_camera_activity 10s in the past
+        // precisely so the marker starts hidden.
+        CHECK(pivot_marker_alpha(1000.0f) == doctest::Approx(0.0f));
+    }
+
+    SUBCASE("halfway through the fade is halfway down") {
+        CHECK(pivot_marker_alpha(kPivotHoldSeconds + 0.5f * kPivotFadeSeconds)
+              == doctest::Approx(0.5f));
+    }
+
+    SUBCASE("monotonic non-increasing across the whole range") {
+        float prev = 2.0f;
+        for (int i = 0; i <= 100; ++i) {
+            const float t = static_cast<float>(i) * 0.01f;
+            const float a = pivot_marker_alpha(t);
+            CAPTURE(t);
+            CHECK(a <= prev + 1e-6f);
+            CHECK(a >= 0.0f);
+            CHECK(a <= 1.0f);
+            prev = a;
+        }
+    }
+
+    SUBCASE("a negative elapsed time is treated as 'just moved', not as a fade") {
+        CHECK(pivot_marker_alpha(-1.0f) == doctest::Approx(1.0f));
+    }
+}

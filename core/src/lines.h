@@ -61,11 +61,17 @@ inline constexpr float kGizmoGridFadeBegin = 0.45f;
 inline constexpr float kGizmoGridFadeEnd = 0.98f;
 inline constexpr int kGizmoGridSegmentsPerLine = 12;
 
-// Camera-pivot marker: mid gray, opaque where it beats the scene depth,
-// faded where occluded (user ruling: "mid gray in front, alpha blended
-// behind").
-inline constexpr simd_float4 kColorPivotFront  = {0.5f, 0.5f, 0.5f, 1.0f};
-inline constexpr simd_float4 kColorPivotBehind = {0.5f, 0.5f, 0.5f, 0.25f};
+// Camera-pivot marker: a flat white ring + crosshair, shown only while a
+// camera gesture is in progress. It is feedback about a gesture, not part of
+// the model, so it draws depth-ignored (never occluded) and its alpha is
+// scaled by pivot_marker_alpha's fade at the call site.
+inline constexpr simd_float4 kColorPivot = {1.0f, 1.0f, 1.0f, 0.85f};
+inline constexpr int kPivotRingSegments = 24;
+// The four ticks span this fraction of the radius, so they cross the ring
+// rather than stopping at it — that crossing is what reads as a crosshair
+// instead of a bare circle.
+inline constexpr float kPivotTickInnerFrac = 0.45f;
+inline constexpr float kPivotTickOuterFrac = 1.35f;
 
 // World-origin marker. The pip is white; the +Y shaft's colour comes from
 // ground_grid.h's kGroundAxisY -- the same header the shader reads X and Z
@@ -150,13 +156,16 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
 void append_origin_marker(std::vector<LineVertex>& out, float height, float half_width,
                           float pip_half_size, simd_float3 eye);
 
-// Camera-pivot marker (the orbit target): a world-axis-aligned wireframe
-// cube (corners at center ± half_extent) with one spike protruding from the
-// center of each wall out to 2*half_extent — a "spiked cube". Same
-// camera-facing thick-quad expansion as the move-gizmo handles; one flat
-// color (the renderer draws it twice: opaque where it wins the scene depth
-// test, alpha-faded where occluded). 18 segments * 6 = 108 verts (3456B,
-// under the 4KB setVertexBytes limit).
-void append_spiked_cube(std::vector<LineVertex>& out, simd_float3 center, float half_extent,
-                        float half_width, simd_float3 eye, simd_float4 color);
+// Camera-pivot marker (the orbit target): a flat camera-facing ring of
+// `radius` with four ticks crossing it. Replaces the previous always-on
+// "spiked cube" (move-gizmo spec R3), which was 3D geometry parked at the
+// orbit target in every mode — permanent clutter that also read as part of
+// the model. The pivot answers a question only asked mid-gesture, so this
+// marker is shown only while one is running (see pivot_marker_alpha) and is
+// deliberately flat: it is a screen-space annotation, not an object.
+//
+// Same camera-facing thick-quad expansion as the move-gizmo handles.
+// kPivotRingSegments + 4 segments, 6 verts each = 168 verts.
+void append_pivot_crosshair(std::vector<LineVertex>& out, simd_float3 center, float radius,
+                            float half_width, simd_float3 eye, simd_float4 color);
 }

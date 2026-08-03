@@ -1,6 +1,7 @@
 #include <shapeshifter/ShapeshifterCore.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -13,12 +14,11 @@
 
 namespace sq {
 
-// Camera-pivot marker sizing, screen-constant like the move gizmo: the
-// spiked cube's half-extent as a fraction of viewport height at the orbit
-// target's depth, and its line half-width in view points ("2px" user
-// ruling -> 1pt half-width).
-inline constexpr float kPivotScreenFraction = 0.025f;
-inline constexpr float kPivotLineHalfWidthPts = 1.0f;
+// Camera-pivot marker sizing, screen-constant like the move gizmo: the ring's
+// radius and line half-width in view points, converted to world units at the
+// orbit target's depth.
+inline constexpr float kPivotRadiusPts = 14.0f;
+inline constexpr float kPivotLineHalfWidthPts = 0.75f;
 
 // World-origin marker sizing. The height is world-constant on purpose -- the
 // +Y axis is a world landmark like the plate's X/Z lines, so it should shrink
@@ -47,6 +47,18 @@ struct Editor::Impl {
         float start_axis_s = 0.0f;      // axis handles: ray_axis_param at mouse-down
         simd_float3 start_pos, start_hit, start_snap_point;
     } drag;
+
+    // When the camera last actually moved. The pivot marker is derived from
+    // this rather than from explicit gesture begin/end plumbing: scroll and
+    // magnify are discrete event streams with no end event, so there is no
+    // single place a "gesture ended" signal could come from. A timestamp
+    // covers drag-pan, scroll and pinch uniformly and needs no interop change.
+    //
+    // Initialised well in the past so the marker starts hidden (hold + fade is
+    // 0.6s total). Not time_point::min(), whose distance from now() would
+    // overflow the duration arithmetic below.
+    std::chrono::steady_clock::time_point last_camera_activity =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
     // Hovered gizmo handle (modify-mode mouse-moved feedback). Cleared
     // anywhere the gizmo it points at can go away: select(), gizmo hide,
@@ -121,13 +133,17 @@ void Editor::render(void* caMetalDrawable) {
             return 2.0f * d * std::tan(camera.fov_y_radians * 0.5f) / impl_->viewportHeightPts;
         };
 
-        // Camera-pivot marker (spiked cube at the orbit target), every frame
-        // in every mode.
+        // Camera-pivot marker: visible only around a camera gesture. Alpha
+        // reaches 0 shortly after the last camera move and set_pivot_marker
+        // then emits nothing, so the resting cost is a subtraction.
+        const float since_camera_move = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - impl_->last_camera_activity).count();
         const float pivot_scale = pts_to_world_at(camera.target);
-        impl_->renderer.set_pivot_gizmo(camera.target,
-                                        kPivotScreenFraction * impl_->viewportHeightPts * pivot_scale,
-                                        kPivotLineHalfWidthPts * pivot_scale,
-                                        camera.eye);
+        impl_->renderer.set_pivot_marker(camera.target,
+                                         kPivotRadiusPts * pivot_scale,
+                                         kPivotLineHalfWidthPts * pivot_scale,
+                                         camera.eye,
+                                         pivot_marker_alpha(since_camera_move));
 
         // World-origin +Y axis and pip. Height is world-constant (it is a
         // world-space landmark, like the plate's X/Z axes) while the shaft
@@ -147,18 +163,21 @@ void Editor::render(void* caMetalDrawable) {
 // camera move that actually happened invalidates the scene line buffer.
 void Editor::cameraOrbit(float dxPts, float dyPts) {
     if (impl_->controller.orbit(dxPts, dyPts)) {
+        impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->renderer.set_scene_lines_dirty();
     }
 }
 
 void Editor::cameraZoom(float delta) {
     if (impl_->controller.zoom(delta)) {
+        impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->renderer.set_scene_lines_dirty();
     }
 }
 
 void Editor::cameraPan(float dxPts, float dyPts) {
     if (impl_->viewportHeightPts > 0.0f && impl_->controller.pan_view(dxPts, dyPts, impl_->viewportHeightPts)) {
+        impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->renderer.set_scene_lines_dirty();
     }
 }

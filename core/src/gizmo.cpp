@@ -121,6 +121,20 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
     return best_plane ? best_plane->handle : GizmoHandle::None;
 }
 
+float pivot_marker_alpha(float seconds_since_activity) {
+    // `!(x > hold)` rather than `x <= hold` so a NaN elapsed time (which no
+    // caller should produce, but which would otherwise fall through to the
+    // fade and yield a NaN alpha) resolves to fully visible instead.
+    if (!(seconds_since_activity > kPivotHoldSeconds)) {
+        return 1.0f;
+    }
+    const float t = (seconds_since_activity - kPivotHoldSeconds) / kPivotFadeSeconds;
+    if (t >= 1.0f) {
+        return 0.0f;
+    }
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
 bool gizmo_handle_is_axis(GizmoHandle handle) {
     return handle == GizmoHandle::AxisU || handle == GizmoHandle::AxisV || handle == GizmoHandle::AxisN;
 }

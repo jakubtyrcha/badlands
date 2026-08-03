@@ -72,6 +72,21 @@ std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_flo
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
                               float fov_y_radians, float viewport_h_pts);
 
+// Camera-pivot marker visibility over time. Full strength while a gesture is
+// running and for kPivotHoldSeconds after the last camera move, then a
+// smoothstep to nothing over kPivotFadeSeconds.
+//
+// Time-based rather than frame-based on purpose: the caller feeds elapsed
+// seconds from a steady_clock, so the fade takes the same wall-clock duration
+// regardless of refresh rate. A per-frame decrement would quantize whenever
+// the display drops to a lower rate.
+//
+// Pure so it is directly testable; Editor supplies the elapsed time. Inputs
+// at or below zero return 1.0.
+inline constexpr float kPivotHoldSeconds = 0.25f;
+inline constexpr float kPivotFadeSeconds = 0.35f;
+float pivot_marker_alpha(float seconds_since_activity);
+
 // Handle -> frame-vector mapping shared by the drag solver and rendering.
 // axis_dir: the pull direction of an axis handle. plane_normal: the drag
 // plane of a plane handle is spanned by its two basis vectors, so its normal

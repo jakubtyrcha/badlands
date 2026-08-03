@@ -221,21 +221,16 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
     depthIgnoreDesc->setDepthWriteEnabled(false);
     depth_ignore_ = NS::TransferPtr(device_->newDepthStencilState(depthIgnoreDesc.get()));
 
-    // Read-only depth pair for the pivot marker's two passes: Less draws the
-    // fragments that beat the scene depth (in front, opaque), Greater the
-    // ones the scene occludes (behind, alpha-faded). Disjoint by
-    // construction, so the two passes never double-blend a pixel.
+    // Read-only depth for the world-space overlay layer (ground plate, origin
+    // marker): tests against what the raymarch/mesh passes wrote, so geometry
+    // on the floor occludes it, but writes nothing itself. The matching
+    // Greater state went away with the spiked-cube pivot, which was the only
+    // thing that ever split a draw into visible/occluded halves.
     NS::SharedPtr<MTL::DepthStencilDescriptor> depthReadLessDesc =
         NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
     depthReadLessDesc->setDepthCompareFunction(MTL::CompareFunctionLess);
     depthReadLessDesc->setDepthWriteEnabled(false);
     depth_read_less_ = NS::TransferPtr(device_->newDepthStencilState(depthReadLessDesc.get()));
-
-    NS::SharedPtr<MTL::DepthStencilDescriptor> depthReadGreaterDesc =
-        NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
-    depthReadGreaterDesc->setDepthCompareFunction(MTL::CompareFunctionGreater);
-    depthReadGreaterDesc->setDepthWriteEnabled(false);
-    depth_read_greater_ = NS::TransferPtr(device_->newDepthStencilState(depthReadGreaterDesc.get()));
 }
 
 void Renderer::set_viewport_size(float w_pts, float h_pts, float backing_scale) {
@@ -327,11 +322,15 @@ void Renderer::set_origin_marker(float height, float half_width, float pip_half_
     append_origin_marker(origin_marker_verts_, height, half_width, pip_half_size, eye);
 }
 
-void Renderer::set_pivot_gizmo(simd_float3 center, float half_extent, float half_width, simd_float3 eye) {
-    pivot_front_verts_.clear();
-    pivot_behind_verts_.clear();
-    append_spiked_cube(pivot_front_verts_, center, half_extent, half_width, eye, kColorPivotFront);
-    append_spiked_cube(pivot_behind_verts_, center, half_extent, half_width, eye, kColorPivotBehind);
+void Renderer::set_pivot_marker(simd_float3 center, float radius, float half_width, simd_float3 eye,
+                                 float alpha) {
+    pivot_verts_.clear();
+    if (alpha <= 0.0f) {
+        return; // faded out: the resting state, so this is the common path
+    }
+    simd_float4 color = kColorPivot;
+    color.w *= alpha;
+    append_pivot_crosshair(pivot_verts_, center, radius, half_width, eye, color);
 }
 
 RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
@@ -537,23 +536,19 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), gizmo_handle_verts_.size());
     }
 
-    // Camera-pivot marker: ALWAYS the last draws of the frame (user ruling).
-    // Two disjoint depth-read passes against the scene depth the raymarch/
-    // mesh passes wrote: occluded portion faded (Greater), visible portion
-    // opaque (Less). No depth writes, so the passes can't shadow each other.
-    if (!pivot_behind_verts_.empty()) {
+    // Camera-pivot marker: ALWAYS the last draw of the frame. Depth-IGNORED,
+    // single pass -- it is feedback about the gesture you are performing right
+    // now, so being occluded by the very model you are orbiting would defeat
+    // it. (The old spiked cube split into visible/occluded passes because it
+    // was persistent pseudo-geometry; a transient flat annotation has nothing
+    // to split.) Empty whenever the fade has run out, which is most frames.
+    upload_line_verts(pivot_buffer_, pivot_verts_);
+    if (pivot_buffer_) {
         encoder->setRenderPipelineState(line_blend_pso_.get());
-        encoder->setDepthStencilState(depth_read_greater_.get());
-        encoder->setVertexBytes(pivot_behind_verts_.data(), pivot_behind_verts_.size() * sizeof(LineVertex), 0);
+        encoder->setDepthStencilState(depth_ignore_.get());
+        encoder->setVertexBuffer(pivot_buffer_.get(), 0, 0);
         encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
-        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), pivot_behind_verts_.size());
-    }
-    if (!pivot_front_verts_.empty()) {
-        encoder->setRenderPipelineState(line_blend_pso_.get());
-        encoder->setDepthStencilState(depth_read_less_.get());
-        encoder->setVertexBytes(pivot_front_verts_.data(), pivot_front_verts_.size() * sizeof(LineVertex), 0);
-        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
-        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), pivot_front_verts_.size());
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), pivot_verts_.size());
     }
 
     encoder->endEncoding();
