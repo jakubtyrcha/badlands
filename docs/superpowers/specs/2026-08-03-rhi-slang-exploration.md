@@ -17,6 +17,23 @@ what we decided, and what is still open. Read it before resuming the effort.
 ## Decisions
 
 Each entry records what was chosen and why. Supersede by appending, not editing.
+**Newest first below D4**, so the most recent thinking is nearest the top.
+
+| | Decision | One line |
+|---|---|---|
+| D1 | Build a real RHI *and* switch shader language | Both; Dawn/Metal interop kept only as a fallback |
+| D2 | Metal and DX12 are the core APIs | RHI deliberately WebGPU-shaped to minimise translation |
+| D3 | Hardware floor | Turing/RDNA2+ on PC, Apple8 (M2)+ on macOS |
+| D4 | Binding model: descriptor tables | Bindless deferred, deadline = before vis-buffer material resolve |
+| D5 | Virtual dispatch | Devirtualization is a bonus, never a plan; enables a validation decorator |
+| D6 | Branch-and-swap | No dependency on Slang's WGSL backend; short shader freeze at cutover |
+| D7 | A render graph is essential | Auto-binding, auto-barriers, over the RHI |
+| D8 | Shared binding resolver | Graph and `MaterialInstance` coexist; only duplication is unified |
+| D9 | No strings at record time | Resolve once to a dense index; the current id API is a facade over strings |
+| D10 | Visibility-buffer, GPU-driven | Dissolves the geometry-pass problem; renderer rewrite accepted |
+| D11 | A new app is the integration testbed | Terrain patch + instanced trees, grown from stage 1 |
+
+Probe findings that touch these decisions are in **Probe findings** below.
 
 ### D1 — Build a real RHI *and* switch shader language (2026-08-03)
 
@@ -346,9 +363,138 @@ Re-measure before trusting these; they are a snapshot, not a contract.
   (`test::RequestDevice` in `gpu_test_helpers.hpp`), so that part is a single port.
 - Their `wgpu::` usage is dominated by texture/buffer descriptors plus readback — exactly
   the RHI's core surface. The bodies port mechanically once resources and passes exist.
-- **Exception: tests asserting on Dawn validation errors.** `RunCapturingValidationErrors`
-  is used across `gpu_instance_tests` to prove guards fire. Metal and DX12 have no error
-  scopes, so these must be re-expressed against the guard rather than the backend.
+- **Tests using Dawn's validation scope.** 14 sites across `gpu_instance_tests` — 8 via
+  `RunCapturingValidationErrors`, 6 raw `PushErrorScope`. Probe C found these are far less
+  of a problem than first assumed; see its findings below.
+
+## Probe findings (2026-08-03)
+
+Measured with `tools/slang_probe` against **Slang v2026.14.1**, macOS arm64, M5 Pro.
+Reproduce with that directory's README. Three shaders were hand-ported from WESL:
+`terrain_cluster` (+ `frame`, `terrain_layers`, `gbuffer_encode`) and `instance_classify`
+(+ `instance_common`). All compile clean to both the `metal` and `hlsl` targets.
+
+### Probe A — runtime compilation is viable
+
+| Step | Cost |
+|---|---|
+| `createGlobalSession` | **60-70 ms, once per process** |
+| `createSession` | **~0.01 ms** — effectively free |
+| Cold compile, per entry point (load + compose + link + codegen) | 13-44 ms |
+| Warm, same session (module cache hit) | 4-27 ms |
+| With `.slang-module` precompiled imports | 20-45% off cold, where imports dominate |
+| WESL baseline, same shaders | 17-23 ms `terrain_cluster`, 2.5-3.5 ms `instance_classify` |
+
+- **Verdict: keep runtime compilation.** Per-variant cost is tens of milliseconds and is
+  already cached by `GpuPipelineGenerator`'s declaration hash, so nothing forces an offline
+  pipeline.
+- Slang is slower than WESL — roughly 2× on the big shader, 6× on the small one. Both are
+  the same order of magnitude, and both are paid once per variant. Note the WESL baseline
+  links whatever `build/libwesl_ffi.a` was produced (a debug Rust build), so WESL's real
+  margin is *wider* than shown, not narrower.
+- Run-to-run variance is high (the WESL baseline itself moved 17→23 ms between runs). Treat
+  every number here as indicative, not as a budget.
+- **Preprocessor macros express the feature flags cleanly.** `SessionDesc.preprocessorMacros`
+  plus `#if`/`#ifdef` covers what WESL's `@if` does; the `SHADOW_PASS` variant compiles and
+  reflects correctly. Link-time constants were not needed.
+- **A fresh session per macro set costs nothing** (0.01 ms), so the existing per-variant
+  cache maps across unchanged — no need for one session to serve many macro sets.
+
+#### Hot-reload: drop the session
+
+- A session caches modules by name and **does not** notice a changed source file.
+- A **new** session does, and `createSession` is ~0.009 ms.
+- So `InvalidateAll()` must additionally drop the `ISession`. That is a one-line change and
+  free at runtime — hot-reload survives intact.
+
+### Probe B — reflection covers the data; the binding model does not survive
+
+**Everything the engine consumes is available**, and the layout is exact:
+
+| Engine field | Slang source | Status |
+|---|---|---|
+| `ReflectedUniformBuffer` members `{name, offset, size, type}` | `TypeLayoutReflection::getFieldByIndex` + `getOffset(Uniform)` | **Exact.** `frame` reflects to `shadowParams` at 576 + 16 = **592 bytes**, matching `static_assert(sizeof(UniformData)==592)` |
+| `ReflectedVertexInput` `{location, name}` | `EntryPointReflection` params + `getOffset(VaryingInput)` | Present, plus semantic names |
+| `ReflectedFragmentOutput` `{location, name}` | `getResultVarLayout()` fields | Present |
+| compute `workgroup_size[3]` | `EntryPointReflection::getComputeThreadGroupSize` | Present |
+| resource kind / shape / access | `TypeLayoutReflection::getResourceShape/getResourceAccess` | Present |
+| `ReflectedBinding` **visibility** (per-stage) | `ProgramLayout::getParameterByIndex` | **NOT AVAILABLE this way** — see below |
+
+#### Stage visibility is the one real gap
+
+- `ProgramLayout` reports **every global in the module, regardless of entry point.**
+  Measured: `terrain_cluster`'s `vs_main` and `fs_gbuffer` return byte-identical global
+  parameter lists, even though the vertex stage samples none of the five textures.
+- So composing module + one entry point does **not** prune to what that entry point uses.
+  naga's `collect_function_globals` walk, which the engine relies on today, has no
+  equivalent on this API path.
+- **This is load-bearing on Metal**, where `setVertexBuffer` and `setFragmentBuffer` are
+  separate calls, and on D3D12 root-signature visibility flags. Without it, every resource
+  binds to every stage — correct but wasteful.
+- Three ways out, in preference order: find a per-entry-point used-resource query in
+  Slang's reflection API; derive visibility from the generated MSL/HLSL source; or bind to
+  all stages and accept the cost. **Resolve before the stage-2 contract is fixed.**
+
+**But the `(group, binding)` model does not:**
+
+- **`[[vk::binding(b, set)]]` is ignored for both the `metal` and `hlsl` targets.** Every
+  parameter came back `space=0` with per-category sequential indices, regardless of what was
+  requested. WGSL-style unified group/binding pairs simply do not exist here.
+- **`ParameterBlock<T>` is the mechanism that does work.** It maps to one Metal argument
+  buffer (category `MetalBuffer`) and to one D3D12 register space (category
+  `SubElementRegisterSpace`). **That is exactly D4's descriptor-table model**, and it is the
+  construct the RHI should be built on.
+
+#### Metal vs D3D12: the divergence is narrow and predictable
+
+Diffing the full reflection dump for the same shaders across both targets:
+
+- **Graphics reflection is byte-identical.** Textures, samplers, constant buffers, vertex
+  inputs, fragment outputs, uniform member offsets — no difference at all.
+- **Only structured buffers diverge.** Metal puts them all in the buffer category with one
+  shared index space (1,2,3,4); D3D12 splits them into `srv` for read-only and `uav` for
+  read-write, each with its own space (srv 0,1 / uav 0,1).
+- **`ParameterBlock` index assignment order also differs** — Metal assigned material=0,
+  object=1, frame=2; HLSL put frame at cbuffer 0 with the blocks at spaces 1 and 2.
+- **Slang's category enum aliases across targets** (`MetalBuffer == ConstantBuffer == 2`,
+  `MetalTexture == ShaderResource == 3`), so a category value is only meaningful alongside
+  the target that produced it.
+
+**Recommendation for the stage-2 reflection contract:** normalize the stable half and keep
+the binding half target-specific. Names, member offsets and sizes, type kinds, varyings and
+workgroup size are identical across targets and belong in one engine-owned struct. Binding
+locations are not, and should be stored per target rather than forced into a single
+`(group, binding)` pair. The divergence is small enough to be a tagged variant, not a
+per-backend reflection system.
+
+### Probe C — the validation requirement is one query, not a subsystem
+
+**This corrects an earlier assumption in this document.**
+
+- 14 sites use Dawn's validation scope: 8 via `RunCapturingValidationErrors`, 6 raw
+  `PushErrorScope`.
+- **All 14 assert `NoError`. Not one asserts that an error is raised.**
+- So Dawn validation is used as a **correctness oracle for our own calls** — "run this and
+  prove the backend found nothing wrong" — not to prove that a guard fires. The earlier
+  claim that these tests "prove a guard fires via the backend's complaint" was wrong.
+- **The requirement is therefore a single scoped query on the RHI: "did the validation layer
+  observe anything during this scope?"** The D5 decorator provides it; 14 test sites consume
+  it. That is dramatically smaller than R2 assumed.
+- Metal's own layers cover the API-level cases per Apple's documentation — `MTL_DEBUG_LAYER`
+  for invalid or missing bindings, index mismatches and use-after-end;
+  `MTL_SHADER_VALIDATION` for nil textures, signature mismatches, non-resident resources and
+  out-of-bounds access.
+- **Deferred: empirically verifying that coverage.** The plan called for a deliberate-error
+  Metal program; that is meaningful work now and nearly free once the Metal backend exists.
+  Do it then, before relying on the gap analysis.
+
+### Porting gotchas worth knowing before stage 4
+
+- `module frame;` collides with that module's own `frame` global — Slang reports an ambiguous
+  reference. WESL has no module-name concept, so this hazard is new.
+- `SampleGrad` takes the sampler as its **first** argument, unlike WGSL's
+  `textureSampleGrad(t, s, …)` ordering.
+- An entry point named `main` is silently renamed to `main_0` on the Metal target.
 
 ## Direction
 
@@ -396,11 +542,13 @@ The residual risk is not shaders but **C++ divergence**: game development on `ma
 `src/game/visual` (12 wgpu-coupled files) and may add render passes that must be ported at
 cutover. Keep an eye on how much engine-side surface `main` grows.
 
-### R2 — Losing Dawn's validation costs more than test churn
+### R2 — Losing Dawn's validation — LARGELY RETIRED by probe C
 
-- Dawn validation is load-bearing for day-to-day development, not just for tests.
-- The validation-decorator backend (D5) is the intended replacement, but its scope has not
-  been costed.
+- The *test* half is settled: all 14 validation sites assert `NoError`, so the RHI needs one
+  scoped "did the validation layer observe anything?" query, not an error-raising contract.
+- What remains is the development-time half: Dawn validation catches mistakes while writing
+  code, and Metal's layers are documented to cover the API-level cases but that has not been
+  verified here. Verify when the Metal backend lands.
 
 ### R3 — Resource state tracking for DX12 — RESOLVED by D7
 
@@ -456,10 +604,11 @@ Why this still matters for R3:
   state tracking from scratch. The data is present and unused.
 - Per this project's convention, porting from sampo means porting sampo's tests too. The
   2,189 LOC test suite comes with it.
-- **Slang integration shape:** runtime versus offline compile. Hot-reload via
-  `InvalidateAll()` is a current feature and a constraint to preserve.
-- **Can Slang's reflection produce what `MeshRenderingMaterial` consumes** — uniform member
-  offsets and auto-derived texture requirements? Worth a spike before committing.
+- **Per-binding stage visibility** — probe B measured that `ProgramLayout` does not prune
+  globals per entry point, so this is a genuine gap rather than an unknown. Pick one of the
+  three routes in the probe B findings before the stage-2 contract is fixed.
+- **Empirical Metal validation coverage** — deferred from probe C to when the Metal backend
+  exists.
 - Whether Dawn is deleted at the end or kept indefinitely as a portability backend.
 
 ## References

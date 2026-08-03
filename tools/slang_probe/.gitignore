@@ -1,0 +1,4 @@
+# Probe build output and Slang's precompiled module binaries.
+build/
+*.slang-module
+shaders/common/hotreload_tmp.slang
