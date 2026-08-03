@@ -25,6 +25,16 @@ RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 
                                           float drawable_width_px, float drawable_height_px,
                                           int32_t node_count, float near, float far);
 
+// Same shape and same reasoning as build_raymarch_uniforms above: pure and
+// allocation-free so the packing is unit-testable with no Metal device. The
+// plate's extent/spacings ride in as plain values rather than being read from
+// ground_grid.h here, so a test can pin the field mapping independently of
+// the constants the renderer happens to pass.
+GroundGridUniforms build_ground_grid_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
+                                               float drawable_width_px, float drawable_height_px,
+                                               float half_extent, float minor_spacing,
+                                               float major_spacing);
+
 class Renderer {
 public:
     void attach_layer(CA::MetalLayer* layer);                  // borrowed
@@ -62,6 +72,7 @@ private:
     NS::SharedPtr<MTL::RenderPipelineState> line_blend_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> mesh_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> raymarch_pso_;
+    NS::SharedPtr<MTL::RenderPipelineState> ground_pso_;        // ground plate; PREMULTIPLIED blend
     NS::SharedPtr<MTL::DepthStencilState> depth_test_;         // Less, write ON -- the mesh, the raymarch pass
     NS::SharedPtr<MTL::DepthStencilState> depth_ignore_;       // Always, write OFF -- lines + gizmo
     NS::SharedPtr<MTL::DepthStencilState> depth_read_less_;    // Less, write OFF -- pivot's in-front pass

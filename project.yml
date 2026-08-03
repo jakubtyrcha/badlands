@@ -22,6 +22,8 @@ targets:
         buildPhase: none
       - path: shaders/sdf_scene.h
         buildPhase: none
+      - path: shaders/ground_grid.h
+        buildPhase: none
     settings:
       base:
         HEADER_SEARCH_PATHS:

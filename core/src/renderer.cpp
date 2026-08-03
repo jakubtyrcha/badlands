@@ -5,6 +5,7 @@
 
 #include "camera.h"
 #include "dcsdd.h" // TriangleMesh; kept out of renderer.h, see the forward declaration there
+#include "ground_grid.h" // kGroundHalfExtent / kGroundMinorSpacing / kGroundMajorSpacing
 #include "lines.h"
 #include "scene.h"
 #include "sdf.h" // pack_scene -- the raymarch pass's per-frame node upload
@@ -159,6 +160,51 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
         assert(false && "failed to create raymarch render pipeline state");
     }
 
+    // Ground-plate PSO: fullscreen-triangle pass over the y=0 orientation
+    // grid. Like raymarch it takes no vertex buffer and writes real depth --
+    // but unlike raymarch it BLENDS, and specifically with PREMULTIPLIED
+    // factors (One / OneMinusSourceAlpha) rather than line_blend_pso_'s
+    // straight-alpha SourceAlpha / OneMinusSourceAlpha, because
+    // ground_grid_shade composites its tiers front-to-back and hands back a
+    // premultiplied colour. Getting this pair wrong shows up as a plate that
+    // is too dark, not as a validation error, so it is called out here.
+    NS::SharedPtr<MTL::Function> ground_vertex_fn = NS::TransferPtr(
+        library_->newFunction(NS::String::string("ground_grid_vertex", NS::UTF8StringEncoding)));
+    NS::SharedPtr<MTL::Function> ground_fragment_fn = NS::TransferPtr(
+        library_->newFunction(NS::String::string("ground_grid_fragment", NS::UTF8StringEncoding)));
+    if (!ground_vertex_fn) {
+        fprintf(stderr, "failed to create ground_grid_vertex: missing from default.metallib\n");
+        assert(false && "ground_grid_vertex missing from default.metallib");
+    }
+    if (!ground_fragment_fn) {
+        fprintf(stderr, "failed to create ground_grid_fragment: missing from default.metallib\n");
+        assert(false && "ground_grid_fragment missing from default.metallib");
+    }
+
+    NS::SharedPtr<MTL::RenderPipelineDescriptor> groundPipelineDesc =
+        NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+    groundPipelineDesc->setVertexFunction(ground_vertex_fn.get());
+    groundPipelineDesc->setFragmentFunction(ground_fragment_fn.get());
+    MTL::RenderPipelineColorAttachmentDescriptor* groundColorAttachment =
+        groundPipelineDesc->colorAttachments()->object(0);
+    groundColorAttachment->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    groundColorAttachment->setBlendingEnabled(true);
+    groundColorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
+    groundColorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+    groundColorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+    groundColorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+    groundColorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+    groundColorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+    groundPipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+
+    NS::Error* ground_error = nullptr;
+    ground_pso_ = NS::TransferPtr(device_->newRenderPipelineState(groundPipelineDesc.get(), &ground_error));
+    if (!ground_pso_) {
+        fprintf(stderr, "failed to create ground_pso_: %s\n",
+                ground_error ? ground_error->localizedDescription()->utf8String() : "unknown error");
+        assert(false && "failed to create ground render pipeline state");
+    }
+
     // Two depth-stencil states, both created once here (stencil unused by
     // either -- default front/backFaceStencil is nil, i.e. disabled).
     // Depth convention: the pinned projection maps near->0/far->1 (see
@@ -285,6 +331,18 @@ RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 
     return uniforms;
 }
 
+GroundGridUniforms build_ground_grid_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
+                                               float drawable_width_px, float drawable_height_px,
+                                               float half_extent, float minor_spacing,
+                                               float major_spacing) {
+    GroundGridUniforms uniforms;
+    uniforms.view_proj = view_proj;
+    uniforms.inv_view_proj = inv_view_proj;
+    uniforms.params0 = simd_make_float4(drawable_width_px, drawable_height_px, half_extent, 0.0f);
+    uniforms.params1 = simd_make_float4(minor_spacing, major_spacing, 0.0f, 0.0f);
+    return uniforms;
+}
+
 void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int32_t selected_id,
                        const Camera& camera) {
     if (!device_ || !layer_ || !drawable) return;
@@ -349,12 +407,17 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     // R2's plan but the pipeline stays wired — then scene lines, then the
     // gizmo — both depth-ignored so they stay in painter's order on top of
     // everything.
+    // Shared by the raymarch and ground passes (both reconstruct world rays
+    // from it via sdf_ray_for_pixel). Hoisted out of the raymarch block
+    // because the ground plate draws even when the scene is empty -- which is
+    // exactly when the user most needs something to orient against.
+    const simd_float4x4 inv_view_proj = simd_inverse(uniforms.view_proj);
+
     if (raymarch_node_count > 0) {
         // Empty-scene skip: cheaper than dispatching a full-screen trace
         // that is guaranteed to march to `far` and miss on every pixel.
         // Reuses uniforms.view_proj (just computed above) instead of calling
         // camera.view_proj() a second time this frame.
-        const simd_float4x4 inv_view_proj = simd_inverse(uniforms.view_proj);
         const RaymarchUniforms raymarch_uniforms = build_raymarch_uniforms(
             uniforms.view_proj, inv_view_proj, static_cast<float>(drawable->texture()->width()),
             static_cast<float>(drawable->texture()->height()), raymarch_node_count, Camera::kNear, Camera::kFar);
@@ -389,6 +452,25 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
         encoder->setVertexBuffer(mesh_vertices_.get(), 0, 0);
         encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), mesh_vertex_count_);
+    }
+
+    // Ground plate: the world-space orientation layer, on y=0. Drawn AFTER
+    // the opaque scene passes and depth-tested read-only against what they
+    // wrote (depth_read_less_), so anything resting on the floor occludes the
+    // plate behind it -- that occlusion is the cue that answers "is this on
+    // the ground or floating?", and it is why this pass sits here rather than
+    // with the depth-ignored overlays below. No vertex buffer (fullscreen
+    // triangle from vertex_id); uniforms fit setFragmentBytes at 160 B.
+    {
+        const GroundGridUniforms ground_uniforms = build_ground_grid_uniforms(
+            uniforms.view_proj, inv_view_proj, static_cast<float>(drawable->texture()->width()),
+            static_cast<float>(drawable->texture()->height()), kGroundHalfExtent,
+            kGroundMinorSpacing, kGroundMajorSpacing);
+
+        encoder->setRenderPipelineState(ground_pso_.get());
+        encoder->setDepthStencilState(depth_read_less_.get());
+        encoder->setFragmentBytes(&ground_uniforms, sizeof(GroundGridUniforms), 0);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
     }
 
     encoder->setDepthStencilState(depth_ignore_.get());
