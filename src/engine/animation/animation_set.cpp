@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include <glm/trigonometric.hpp>  // glm::radians
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
@@ -44,6 +45,13 @@ std::optional<AnimationSet> AnimationSet::Load(const std::string& manifest_path)
   std::optional<Skeleton> skeleton = Skeleton::Load(skeleton_path);
   if (!skeleton) return std::nullopt;  // Skeleton::Load already logged why
   set.skeleton_ = std::make_unique<Skeleton>(std::move(*skeleton));
+
+  // Rig orientation: how far to turn this skeleton so its own forward axis
+  // lands on +Z. Optional; absent means the rig already faces +Z.
+  if (const auto yaw_it = manifest.find("yaw_offset_degrees");
+      yaw_it != manifest.end() && yaw_it->is_number()) {
+    set.yaw_offset_radians_ = glm::radians(yaw_it->get<float>());
+  }
 
   const auto clips_it = manifest.find("clips");
   if (clips_it == manifest.end() || !clips_it->is_object()) {

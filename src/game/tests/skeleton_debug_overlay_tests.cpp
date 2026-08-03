@@ -25,6 +25,51 @@ using namespace badlands::test;
 
 namespace {
 
+// A rig with a real FORWARD asymmetry: root at origin, one child out along +Z.
+// The ordinary fixture's children sit on +/-Y, which a rotation about Y cannot
+// move, so it cannot detect an orientation bug at all.
+ozz::unique_ptr<ozz::animation::Skeleton> BuildForwardMarkerSkeleton() {
+  ozz::animation::offline::RawSkeleton raw;
+  raw.roots.resize(1);
+  raw.roots[0].name = "root";
+  raw.roots[0].transform = ozz::math::Transform::identity();
+  raw.roots[0].children.resize(1);
+  raw.roots[0].children[0].name = "nose";
+  raw.roots[0].children[0].transform = ozz::math::Transform::identity();
+  raw.roots[0].children[0].transform.translation = ozz::math::Float3(0.0f, 0.0f, 1.0f);
+  REQUIRE(raw.Validate());
+  ozz::animation::offline::SkeletonBuilder builder;
+  return builder(raw);
+}
+
+// A manifest for that rig, with the given rig-forward correction.
+std::string WriteForwardMarkerManifest(int yaw_offset_degrees) {
+  const std::string skeleton =
+      WriteOzz(*BuildForwardMarkerSkeleton(), "forward_skeleton.ozz");
+  // Keyframe both joints explicitly. An EMPTY ozz track samples to identity and
+  // would overwrite the skeleton's rest offsets, collapsing the marker bone onto
+  // the origin -- so "hold the rest pose" has to be stated, not assumed.
+  ozz::animation::offline::RawAnimation raw;
+  raw.duration = 1.0f;
+  raw.tracks.resize(2);
+  raw.tracks[0].translations.push_back({0.0f, ozz::math::Float3(0.0f, 0.0f, 0.0f)});
+  raw.tracks[1].translations.push_back({0.0f, ozz::math::Float3(0.0f, 0.0f, 1.0f)});
+  REQUIRE(raw.Validate());
+  ozz::animation::offline::AnimationBuilder builder;
+  const std::string clip = WriteOzz(*builder(raw), "forward_clip.ozz");
+
+  const std::filesystem::path path =
+      TempDir() / ("forward_manifest_" + std::to_string(yaw_offset_degrees) + ".json");
+  std::ofstream out(path);
+  REQUIRE(out.good());
+  out << "{\n  \"skeleton\": \"" << std::filesystem::path(skeleton).filename().string()
+      << "\",\n  \"yaw_offset_degrees\": " << yaw_offset_degrees
+      << ",\n  \"clips\": { \"idle\": \""
+      << std::filesystem::path(clip).filename().string() << "\" }\n}\n";
+  out.close();
+  return path.string();
+}
+
 // Writes a manifest naming every logical clip the overlay resolves, all backed
 // by the same generated fixture clip. Built in-test so the suite never depends
 // on assets/characters/ (nor on git-lfs having been pulled).
@@ -209,4 +254,43 @@ TEST_CASE("the overlay stays disabled when its assets are missing", "[overlay]")
 
   overlay.mutable_enabled() = true;
   CHECK_FALSE(overlay.enabled());  // the toggle cannot enable a broken overlay
+}
+
+TEST_CASE("a rig is turned to face the way the sim says", "[overlay]") {
+  // The shipped Quaternius rig faces -Z while the sim's kCharacterForward is +Z,
+  // so without this correction every character walks backwards -- which is
+  // invisible on a symmetric capsule and was only caught by eye.
+  //
+  // The marker rig has one bone along its own +Z, so where that bone lands says
+  // exactly which way the rig ended up pointing.
+  Sim sim{FlatConfig(), BrainDesc{}};
+  SpawnAndStep(sim, 0.0f, 0.0f);
+  std::vector<CharacterState> rows = sim.Characters();
+  REQUIRE(rows.size() == 1);
+  // Face due +Z, so the sim's own yaw is zero and only the rig correction moves.
+  rows[0].facing_x = 0.0f;
+  rows[0].facing_z = 1.0f;
+
+  SECTION("a rig already facing +Z is left alone") {
+    SkeletonDebugOverlay overlay;
+    REQUIRE(overlay.Initialize(WriteForwardMarkerManifest(0)));
+    overlay.mutable_enabled() = true;
+
+    DebugLineBuffer lines;
+    overlay.Rebuild(sim, rows, lines, [](float, float) { return 0.0f; }, 0.0f);
+    REQUIRE(lines.lines.size() == 1);
+    CHECK(lines.lines[0].end.z > 0.5f);  // bone points the way the character faces
+  }
+
+  SECTION("a rig facing -Z is turned around") {
+    SkeletonDebugOverlay overlay;
+    REQUIRE(overlay.Initialize(WriteForwardMarkerManifest(180)));
+    overlay.mutable_enabled() = true;
+
+    DebugLineBuffer lines;
+    overlay.Rebuild(sim, rows, lines, [](float, float) { return 0.0f; }, 0.0f);
+    REQUIRE(lines.lines.size() == 1);
+    // Its own +Z bone now trails behind, which is what a -Z-facing rig means.
+    CHECK(lines.lines[0].end.z < -0.5f);
+  }
 }

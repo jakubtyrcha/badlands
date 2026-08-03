@@ -13,6 +13,13 @@
     "on the exact tick the sim resolves damage. Absent, it defaults to 1.0."
   ],
   "skeleton": "skeleton.ozz",
+  "_yaw_note": [
+    "This rig FACES -Z: both toes sit at smaller Z than their ankles in the rest",
+    "pose (DEF-toe.L z=-0.275 vs DEF-foot.L z=-0.127). The sim's forward is +Z",
+    "(kCharacterForward, game/src/components.h), so the rig is turned 180 to",
+    "agree with it -- otherwise every character walks backwards."
+  ],
+  "yaw_offset_degrees": 180,
   "clips": {
     "idle": "Rig_Idle_Loop.ozz",
     "walk": "Rig_Walk_Loop.ozz",

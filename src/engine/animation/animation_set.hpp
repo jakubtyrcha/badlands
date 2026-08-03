@@ -39,6 +39,15 @@ class AnimationSet {
 
   const Skeleton& skeleton() const { return *skeleton_; }
 
+  // Rotation about +Y, in radians, that turns the RIG'S OWN forward axis onto
+  // +Z. Authored as "yaw_offset_degrees" beside "skeleton"; 0 when unstated.
+  //
+  // A rig faces whichever way its author modelled it, and that is rarely the
+  // convention a game places characters with. This is where the two are
+  // reconciled, ONCE per rig, rather than by a rotation baked into every
+  // consumer -- swapping in a rig that faces the other way is then a data edit.
+  float yaw_offset_radians() const { return yaw_offset_radians_; }
+
   int clip_count() const { return static_cast<int>(clips_.size()); }
   // Logical names in load order — what a viewer lists and what an index means.
   const std::string& clip_name(int index) const { return clips_[index].name; }
@@ -67,6 +76,7 @@ class AnimationSet {
 
   AnimationSet() = default;
   std::unique_ptr<Skeleton> skeleton_;
+  float yaw_offset_radians_ = 0.0f;
   std::vector<Entry> clips_;
 };
 

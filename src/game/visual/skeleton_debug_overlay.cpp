@@ -174,11 +174,17 @@ void SkeletonDebugOverlay::Rebuild(Sim& sim, std::span<const CharacterState> row
     // it annotates; it does not make a squashed human a deer, and only a real
     // per-creature rig will.
     const float ground = ground_y(row.pos_x, row.pos_z);
+    // The sim's facing turns model +Z onto the direction of travel, exactly as
+    // the capsule pass does. The rig's OWN forward is then turned onto +Z first:
+    // the shipped Quaternius rig faces -Z, so without this every character walks
+    // backwards. It is asset metadata, not a constant -- see yaw_offset_radians.
     const float yaw = std::atan2(row.facing_x, row.facing_z);
     const float scale = rig_height_ > 0.0f ? row.size_y / rig_height_ : 1.0f;
     const glm::mat4 world =
         glm::translate(glm::mat4(1.0f), glm::vec3(row.pos_x, ground, row.pos_z)) *
         glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f)) *
+        glm::rotate(glm::mat4(1.0f), assets_->yaw_offset_radians(),
+                    glm::vec3(0.0f, 1.0f, 0.0f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(scale));
 
     EmitSkeletonLines(skeleton, *posed, world, out, kBoneColor, kBoneThickness);
