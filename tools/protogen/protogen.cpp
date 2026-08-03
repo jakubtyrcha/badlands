@@ -27,6 +27,7 @@
 //     protogen.cpp <repo>/src/core/parallel.cpp -o protogen
 
 #include <algorithm>
+#include <array>
 #include <numeric>
 #include <chrono>
 #include <cmath>
@@ -57,24 +58,91 @@ constexpr double kSecondsPerYear = 31557600.0;
 
 // ---------------------------------------------------------------- parameters
 
+// TEST SEAM. `Descend` appends one entry per particle step when a probe is
+// attached, so an invariant can watch a single particle's trajectory instead of
+// inferring it from the terrain afterwards. Null on every production path, and
+// the only thing the particle loop does with it is push_back.
+//
+// It exists because the velocity invariants (terminal velocity, swept path) are
+// statements about the PARTICLE, and the dumped rasters cannot express them.
+struct ParticleProbe {
+  std::vector<float> speed;     // |velocity|; model units today, m/s after the
+                                // dynamics rewrite
+  std::vector<float> depth_m;   // flow depth the drag term used; 0 while no
+                                // such concept exists
+  std::vector<float> slope;     // local downslope gradient (rise/run)
+  std::vector<int32_t> cell;    // cell index occupied at each step
+};
+
 struct Params {
   uint32_t seed = 1;
   int res = 1024;
   float world_m = 16384.0f;
-  float relief_m = 900.0f;  // height unit 1.0 == this many metres
+  // Height unit 1.0 == this many metres. The dimensionless field does NOT have
+  // to span [0,1]; `scale` and `max_diff` both derive from this consistently.
+  // 400 rather than the old 900 because the target landform is rocky hills, and
+  // 900 m over 16 km is a 5% mean gradient -- an alpine range, which is why the
+  // audit measured 17 cm deep torrents.
+  float relief_m = 400.0f;
   float noise_wavelength_m = 4096.0f;
   int noise_octaves = 8;
+
+  // --- horseshoe substrate ---
+  //
+  // Three edges lifted into a rim, the fourth (y = res-1) the OUTFLOW edge
+  // where all drainage leaves. Every term is multiplied by `u`, the normalised
+  // distance inland, so the rim vanishes at the outflow and the surface falls
+  // monotonically toward it. That monotonicity is load-bearing: an interior
+  // minimum makes priority-flood flood the entire map as one basin, which is
+  // the failure InitBowl's comment documents.
+  //
+  //   u        = (res-1 - y) / (res-1)
+  //   d_rim    = min(x, res-1-x, y) / (res/2), clipped to [0,1]
+  //   regional = tilt*u + rim*(1-d_rim)^p*u - trough*gauss(x)*u
+  //   amp(u)   = amp_low + (amp_high - amp_low)*u^q
+  //   z_m      = regional + amp(u)*fbm
+  //
+  // Defaults give ~300 m relief, ~1.6 deg median slope and ~61% of land under
+  // 2 deg, against 12.3% on the audit's eroded fBm map.
+  float tilt_m = 120.0f;       // ramp from the outflow edge to the far rim
+  float rim_m = 150.0f;        // extra lift on the three rim edges
+  float rim_exponent = 2.0f;   // NOT exposed: 1/2/4 measured indistinguishable
+  float amp_high_m = 150.0f;   // fBm amplitude at the rim
+  float amp_low_m = 25.0f;     // fBm amplitude at the outflow lowland
+  float amp_taper_q = 1.5f;    // how fast amplitude falls toward the outflow
+  // Optional master valley. OFF by default: at 150 m+ it cuts a trench the
+  // outflow drowns rather than a valley a river runs down, and above ~250 m it
+  // breaks the monotonicity the whole shape depends on.
+  float trough_m = 0.0f;
+  float trough_sigma_frac = 0.18f;
   // Synthetic fixture: a dish rising to `bowl_rim_m` at the edge with a gaussian
   // well at the centre, so everything drains inward to one closed basin. All
   // particles spawn at ONE point, which makes the flow path deterministic and
   // therefore gives "where should the sediment land" a right answer.
   // Synthetic terrains for the sanity tests. Each isolates ONE mechanism; the
   // toggles below let a test switch the others off so a failure has one cause.
-  enum class Terrain { Noise, Bowl, Flat, Plane, Valley, Cliff, Lobe };
-  Terrain terrain = Terrain::Noise;
+  enum class Terrain {
+    Noise, Bowl, Flat, Plane, Valley, Cliff, Lobe, Ridge, Horseshoe
+  };
+  // Horseshoe by default: bare fBm drains off all four edges, so flow disperses
+  // instead of combining and the main stem gathers only 31% of the map. `Noise`
+  // is kept, reachable with --fbm, so an A/B against the audit baseline in
+  // docs/2026-08-03-stage1-erosion-benchmark.md stays possible.
+  Terrain terrain = Terrain::Horseshoe;
   bool enable_erosion = true;
   bool enable_cascade = true;
   bool enable_lake_deposit = true;
+  // Hillslope diffusion (soil creep). Off until the mechanism exists; the
+  // invariant that describes it is already written and reports PEND.
+  bool enable_diffusion = false;
+  // Soil creep coefficient. Measured values sit at 1e-3..1e-2 m2/yr, which is
+  // also what a ~10 My relaxation of a ~300 m hillslope implies (t ~ L^2/D) --
+  // the two agree, which is the check that this is physics and not a fudge.
+  // It cannot be honestly calibrated until the dynamics rewrite supplies a real
+  // time axis; until then it is an unanchored constant and is off by default.
+  float diffusion_D_m2_per_yr = 0.0f;
+  // Attached only by tests. See ParticleProbe.
+  ParticleProbe* probe = nullptr;
   bool bowl = false;  // legacy alias for terrain == Bowl
   float bowl_rim_m = 200.0f;
   float bowl_well_m = 100.0f;
@@ -88,6 +156,12 @@ struct Params {
 
   int steps = 3000;
   int drops = 4096;
+  // Water carried by one particle. SHOULD be a pure discretization choice:
+  // halving `drops` while doubling this must give the same landscape, because
+  // the two only ever appear as the product (total water). It does not hold
+  // today -- `volume` leaks into gravity, momentum coupling, and erosion
+  // magnitude -- and the invariant that says so is written and reports PEND.
+  float drop_volume = 1.0f;
 
   // --- reference erosion constants (SimpleHydrology source). DO NOT RETUNE ---
   float evap_rate = 0.001f;
@@ -328,6 +402,15 @@ void InitAnalytic(Grid& g, const Params& p) {
           h = 0.25f * p.bowl_rim_m * (1.0f - (y * cell) / p.world_m) +
               ((y * cell < cy) ? p.bowl_rim_m : 0.0f);
           break;
+        case Params::Terrain::Ridge:
+          // A 1-D gaussian ridge running along y, on a DEAD FLAT base. Only x
+          // varies, so diffusion acts in one dimension and the analytic answer
+          // (peak falls, flanks rise, mass conserved) has no second axis to
+          // confound it. Deliberately not tilted: a slope would let particles
+          // and the cascade move material and the test would stop isolating
+          // diffusion.
+          h = p.bowl_rim_m * std::exp(-(wx * wx) / (2.0f * sigma * sigma));
+          break;
         case Params::Terrain::Lobe: {
           // Gaussian hill, centre offset by HALF A CELL. Centred exactly on a
           // cell it is perfectly symmetric, so central differences give an
@@ -354,9 +437,61 @@ void InitSoil(Grid& g, const Params& p) {
   std::fill(g.soil.begin(), g.soil.end(), s);
 }
 
+// Normalised fBm in [-0.5, 0.5], shared by the fBm and horseshoe terrains so
+// they see the identical noise field and an A/B isolates the SHAPE.
+void FbmCentred(const Params& p, int n, std::vector<float>& out) {
+  FastNoiseLite noise(int(p.seed));
+  noise.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
+  noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+  noise.SetFractalOctaves(p.noise_octaves);
+  noise.SetFrequency(1.0f / p.noise_wavelength_m);
+  const float cell = p.world_m / float(p.res);
+  out.assign(size_t(n) * n, 0.f);
+  float lo = 1e30f, hi = -1e30f;
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const float v = noise.GetNoise(x * cell, y * cell);
+      out[size_t(y) * n + x] = v;
+      lo = std::min(lo, v); hi = std::max(hi, v);
+    }
+  const float inv = (hi > lo) ? 1.0f / (hi - lo) : 1.0f;
+  for (float& v : out) v = (v - lo) * inv - 0.5f;
+}
+
+// The horseshoe: a rim on three edges opening onto one outflow edge, with the
+// noise amplitude tapering from high inland to subdued in the lowland. See the
+// Params block for the closed form and why every term carries `u`.
+void InitHorseshoe(Grid& g, const Params& p) {
+  const int n = g.n;
+  std::vector<float> fbm;
+  FbmCentred(p, n, fbm);
+  const float cxf = 0.5f * float(n - 1);
+  const float half = 0.5f * float(n);
+  const float sigma = std::max(p.trough_sigma_frac * float(n), 1e-3f);
+  for (int y = 0; y < n; ++y) {
+    // 0 at the outflow edge (y = n-1), 1 at the far rim.
+    const float u = float(n - 1 - y) / float(n - 1);
+    for (int x = 0; x < n; ++x) {
+      const float d_rim = std::clamp(
+          float(std::min(std::min(x, n - 1 - x), y)) / half, 0.f, 1.f);
+      float regional = p.tilt_m * u +
+                       p.rim_m * std::pow(1.0f - d_rim, p.rim_exponent) * u;
+      if (p.trough_m > 0.f) {
+        const float dx = float(x) - cxf;
+        regional -= p.trough_m * std::exp(-(dx * dx) / (2.0f * sigma * sigma)) * u;
+      }
+      const float amp = p.amp_low_m + (p.amp_high_m - p.amp_low_m) *
+                                          std::pow(u, p.amp_taper_q);
+      g.height[g.idx(x, y)] =
+          (regional + amp * fbm[size_t(y) * n + x]) / p.relief_m;
+    }
+  }
+}
+
 void InitTerrain(Grid& g, const Params& p) {
   InitSoil(g, p);
   if (p.bowl || p.terrain == Params::Terrain::Bowl) { InitBowl(g, p); return; }
+  if (p.terrain == Params::Terrain::Horseshoe) { InitHorseshoe(g, p); return; }
   if (p.terrain != Params::Terrain::Noise) { InitAnalytic(g, p); return; }
   FastNoiseLite n(int(p.seed));
   n.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
@@ -661,20 +796,32 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   const float max_diff = std::tan(p.repose_angle_deg * 3.14159265f / 180.0f) *
                          cell_m / p.relief_m;
   V2 pos{px, py}, speed{0.f, 0.f};
-  float volume = 1.0f, sediment = 0.0f;
+  float volume = p.drop_volume, sediment = 0.0f;
+  // `sediment` is a CONCENTRATION, not a mass: it is rescaled by /(1-evap_rate)
+  // in step with `volume *= (1-evap_rate)`, so the two only conserve as a
+  // PRODUCT. The transport step already respects this -- the terrain moves
+  // `volume * deposition_rate * cdiff` while the particle's concentration moves
+  // `deposition_rate * cdiff`.
+  //
+  // Every EXIT path must convert too. Booking the bare concentration deposits
+  // 1/volume too much (1.65x by max_age, which is the dominant exit) and
+  // overstates the off-map loss by the same factor. That was a 4.59% mass leak
+  // at production length, invisible to a 200-step fixture. One helper so a
+  // future exit path cannot quietly reintroduce it.
+  auto carried_mass = [&]() -> float { return sediment * volume; };
   int lake_steps = 0;  // in-lake steps taken, for the deposition cutoff
   size_t last_cell = g.idx(int(px), int(py));
 
   for (int age = 0; age < p.max_age; ++age) {
     const int x = int(pos.x), y = int(pos.y);
-    if (g.oob(x, y)) { g.lost_offmap += double(sediment); return; }
+    if (g.oob(x, y)) { g.lost_offmap += double(carried_mass()); return; }
     const size_t here = g.idx(x, y);
     last_cell = here;
     ++g.visits[here];
 
     if (volume < p.min_vol) {
-      Deposit(g, here, sediment);
-      g.deposited_death += double(sediment);
+      Deposit(g, here, carried_mass());
+      g.deposited_death += double(carried_mass());
       return;
     }
 
@@ -685,8 +832,8 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m) {
       const int32_t lid = g.lake_id[here];
       if (lid < 0 || lid >= int32_t(g.lake_outlet.size())) {
-        Deposit(g, here, sediment);
-        g.deposited_death += double(sediment);
+        Deposit(g, here, carried_mass());
+        g.deposited_death += double(carried_mass());
         return;
       }
       const int32_t target = g.lake_outlet[lid];
@@ -721,13 +868,17 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       }
       drop = std::min(drop, sediment);
       sediment -= drop;
-      Deposit(g, here, drop);
-      g.deposited_lake += double(drop);
+      // `drop` is a share of the CONCENTRATION; what lands on the bed is the
+      // corresponding mass.
+      const float drop_mass = drop * volume;
+      Deposit(g, here, drop_mass);
+      g.deposited_lake += double(drop_mass);
       // Sediment DISPLACES water: the deposit comes out of the lake's storage,
       // so the basin shallows as it fills rather than growing a bed under a
       // stale water field.
       if (lid < int32_t(g.lake_index.size())) {
-        lakes[g.lake_index[lid]].volume_m3 -= double(drop) * double(p.relief_m) *
+        lakes[g.lake_index[lid]].volume_m3 -= double(drop_mass) *
+                                double(p.relief_m) *
                                 double(cell_m) * double(cell_m);
         double& v = lakes[g.lake_index[lid]].volume_m3;
         if (v < 0.0) v = 0.0;
@@ -740,7 +891,14 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
       const float tx = float(int(target) % g.n) + 0.5f;
       const float ty = float(int(target) / g.n) + 0.5f;
       V2 dir = unit(V2{tx - pos.x, ty - pos.y});
-      if (len(dir) <= 0.f) return;
+      if (len(dir) <= 0.f) {
+        // Standing exactly on the outlet cell, so there is no heading left to
+        // take. The particle stops HERE, and a particle that stops sheds its
+        // load -- returning bare made this a silent mass sink.
+        Deposit(g, here, carried_mass());
+        g.deposited_death += double(carried_mass());
+        return;
+      }
       // Wander only while the plume is live; once spent it is just water
       // heading for the spill point.
       if (p.plume_wander_deg > 0.f && depositing) {
@@ -753,6 +911,19 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
         dir = V2{std::cos(a), std::sin(a)};
       }
       pos = V2{pos.x + dir.x, pos.y + dir.y};
+      // Evaporate exactly as the land path does (see the bottom of this loop):
+      // evaporation removes WATER, so the suspended concentration rises to
+      // match and sediment*volume is unchanged.
+      //
+      // Decaying volume alone -- which this branch did -- destroys evap_rate of
+      // the particle's carried MASS on every in-lake step. That is small per
+      // step and ruinous in aggregate: a particle random-walks across a lake at
+      // one cell per step, so a wide basin costs hundreds of steps, and it is
+      // the 0.774% production mass deficit that survived the
+      // concentration-as-mass fix. It barely registers on the steep synthetic
+      // fixtures because they pond almost nothing, which is why 200-step tests
+      // on a cliff could never have caught it.
+      sediment /= (1.0f - p.evap_rate);
       volume *= (1.0f - p.evap_rate);
       continue;
     }
@@ -773,8 +944,29 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
                       (volume + g.discharge[here]);
       speed = V2{speed.x + k * f.x, speed.y + k * f.y};
     }
-    if (len(speed) <= 0.f) return;
+    if (len(speed) <= 0.f) {
+      // Gravity and the momentum field cancelled, or the cell is dead flat with
+      // no stream to follow. Same rule as every other exit: what the particle
+      // is carrying must land somewhere. Returning bare destroyed it, which is
+      // the residual that survived the concentration-vs-mass fix -- it scales
+      // with how much flat ground a map has, so it barely shows on the steep
+      // synthetic fixtures and shows clearly at production scale.
+      Deposit(g, here, carried_mass());
+      g.deposited_death += double(carried_mass());
+      return;
+    }
     speed = V2{std::sqrt(2.f) * unit(speed).x, std::sqrt(2.f) * unit(speed).y};
+
+    if (p.probe) {
+      // Recorded AFTER the normalisation, deliberately: this is the speed the
+      // model actually integrates with, which is the quantity the terminal
+      // velocity invariant is about. Today it is always sqrt(2) cells/step,
+      // which is exactly the finding that invariant should report.
+      p.probe->speed.push_back(len(speed));
+      p.probe->depth_m.push_back(0.f);  // no flow depth in the model yet
+      p.probe->slope.push_back(std::sqrt(dhx * dhx + dhy * dhy) * scale);
+      p.probe->cell.push_back(int32_t(here));
+    }
 
     pos = V2{pos.x + speed.x, pos.y + speed.y};
     g.vol_track[here] += volume;
@@ -782,7 +974,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     g.my_track[here] += volume * speed.y;
 
     const int nx = int(pos.x), ny = int(pos.y);
-    if (g.oob(nx, ny)) { g.lost_offmap += double(sediment); return; }
+    if (g.oob(nx, ny)) { g.lost_offmap += double(carried_mass()); return; }
     const size_t there = g.idx(nx, ny);
 
     if (!p.enable_erosion) { sediment = 0.f; }
@@ -816,8 +1008,8 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   // dropping that made this a silent mass sink, and it is the DOMINANT exit --
   // volume only decays to 0.61 over 500 steps, so the volume < min_vol branch
   // above is unreachable in practice.
-  Deposit(g, last_cell, sediment);
-  g.deposited_death += double(sediment);
+  Deposit(g, last_cell, carried_mass());
+  g.deposited_death += double(carried_mass());
 }
 
 // ------------------------------------------------------------------- cascade
@@ -839,15 +1031,30 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff) {
   struct Nb { size_t i; float d; };
   Nb nb[8];
   int count = 0;
+  float steepest = 0.f;
   const size_t here = g.idx(x, y);
   for (int k = 0; k < 8; ++k) {
     const int ax = x + cdx[k], ay = y + cdy[k];
     if (g.oob(ax, ay)) continue;
     const size_t a = g.idx(ax, ay);
     const float d = g.height[here] - g.height[a];
-    if (d > 0.f) nb[count++] = {a, d};
+    if (d > 0.f) { nb[count++] = {a, d}; steepest = std::max(steepest, d); }
   }
   if (count == 0) return;
+  // Nothing is over the repose angle, so the settle loop below would take
+  // `continue` on every neighbour and touch nothing. Leaving before the sort is
+  // therefore BIT-IDENTICAL, and it is worth doing: the sort alone measured 17%
+  // of total runtime, and most cells sit under repose most of the time (23.6%
+  // of the map exceeded 40 deg at the end of the benchmark run, far less
+  // earlier).
+  if (steepest <= max_diff) return;
+  // NOT filtered to `d > max_diff` at gather time, though that looks tempting
+  // and would shrink the sort further. std::sort is UNSTABLE, so dropping
+  // elements can permute EQUAL drops differently -- and equal drops are the
+  // normal case on the synthetic fixtures (T5's neighbourhood has all eight
+  // identical). The result would stop being bit-identical exactly where the
+  // tests are most symmetric. The early-out above needs no such argument.
+  //
   // Steepest drop settles first.
   std::sort(nb, nb + count, [](const Nb& a, const Nb& b) { return a.d > b.d; });
   for (int k = 0; k < count; ++k) {
@@ -863,6 +1070,94 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff) {
     // rock slopes standing steeper than alluvial ones.
     Deposit(g, nb[k].i, Erode(g, p, here, transfer));
   }
+}
+
+// ----------------------------------------------------------------- diffusion
+
+// Hillslope diffusion -- soil creep. dz/dt = D * laplacian(z).
+//
+// This is the mechanism the sim has been missing, and it is why erosion made
+// terrain YOUNGER: the repose cascade fires only above 40 deg, so nothing at
+// all acted on the ~76% of the map below it and ridges could never round.
+// Creep is continuous on every slope. The two are different processes --
+// landsliding is a threshold event, creep is not -- so this runs ALONGSIDE the
+// cascade, never instead of it. (The README records that REPLACING the cascade
+// with a global smoothing pass cost 44 m of relief and the fine valley
+// structure; that is a result about replacement.)
+//
+// Conservative by construction: each edge contributes +k*(z_j - z_i) to i and
+// +k*(z_i - z_j) to j, which sum to zero. Out-of-bounds neighbours are simply
+// skipped, giving no-flux boundaries, so nothing leaves the map either.
+//
+// Two Jacobi sub-passes so it stays parallel AND respects the substrate:
+// creep moves SOIL, so a cell may not shed more than it has. Sub-pass 1 finds
+// each cell's outgoing demand and the fraction of it the soil can actually
+// supply; sub-pass 2 applies the per-edge flux scaled by the DONOR's fraction,
+// which both endpoints can compute identically. Scaling after the fact instead
+// would break conservation.
+void Diffuse(Grid& g, const Params& p, std::vector<float>& demand,
+             std::vector<float>& limit, std::vector<float>& delta) {
+  if (!p.enable_diffusion || p.diffusion_D_m2_per_yr <= 0.f) return;
+  const float cell_m = p.world_m / float(p.res);
+  // k = D*dt/cell^2, dimensionless. The explicit 4-neighbour Laplacian is
+  // stable only for k <= 0.25; beyond that it oscillates and diverges rather
+  // than smoothing, so clamp loudly rather than produce quiet garbage.
+  float k = p.diffusion_D_m2_per_yr * p.dt_years / (cell_m * cell_m);
+  if (k > 0.25f) k = 0.25f;
+  const int n = g.n;
+  static const int dx4[4] = {1, -1, 0, 0}, dy4[4] = {0, 0, 1, -1};
+
+  // Sub-pass 1: how much each cell wants to shed, and how much of that its soil
+  // can cover. Bedrock is not immobile, it just yields slowly -- same ratio the
+  // fluvial law uses -- so a stripped ridge creeps ~10x slower than a mantled one.
+  badlands::ParallelFor(size_t(n), [&](size_t yy) {
+    const int y = int(yy);
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      float out = 0.f;
+      for (int m = 0; m < 4; ++m) {
+        const int ax = x + dx4[m], ay = y + dy4[m];
+        if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;
+        const float d = g.height[i] - g.height[g.idx(ax, ay)];
+        if (d > 0.f) out += k * d;
+      }
+      demand[i] = out;
+      const float avail = g.soil[i] + (out > g.soil[i]
+                                           ? (out - g.soil[i]) * p.bedrock_erodibility
+                                           : 0.f);
+      limit[i] = (out > 0.f) ? std::min(1.0f, avail / out) : 1.0f;
+    }
+  });
+
+  // Sub-pass 2: per-edge flux, scaled by the DONOR's limit. Both endpoints see
+  // the same donor and the same factor, so the exchange balances exactly.
+  badlands::ParallelFor(size_t(n), [&](size_t yy) {
+    const int y = int(yy);
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      float d_sum = 0.f;
+      for (int m = 0; m < 4; ++m) {
+        const int ax = x + dx4[m], ay = y + dy4[m];
+        if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;
+        const size_t j = g.idx(ax, ay);
+        const float diff = g.height[i] - g.height[j];
+        if (diff > 0.f) d_sum -= k * diff * limit[i];        // i is the donor
+        else if (diff < 0.f) d_sum += k * (-diff) * limit[j];  // j is the donor
+      }
+      delta[i] = d_sum;
+    }
+  });
+
+  // Apply. Soil tracks the surface: what creeps away leaves the mantle, what
+  // arrives joins it, and soil may not go negative.
+  badlands::ParallelFor(size_t(n), [&](size_t yy) {
+    const size_t base = yy * size_t(n);
+    for (int x = 0; x < n; ++x) {
+      const size_t i = base + x;
+      g.height[i] += delta[i];
+      g.soil[i] = std::max(0.f, g.soil[i] + delta[i]);
+    }
+  });
 }
 
 // -------------------------------------------------------------------- output
@@ -898,12 +1193,21 @@ struct SimStats {
 void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
             bool verbose) {
   const float world_area = p.world_m * p.world_m;
+  // Divides by TOTAL water shed per step (drops x volume), not by the drop
+  // count. The runoff a map sheds is a physical quantity and must not change
+  // because the same water was chopped into a different number of parcels.
+  // Identical at the default drop_volume of 1.0.
+  // max(..., 1) guards the grid-pass-only fixtures, which run with drops = 0 to
+  // isolate a grid mechanism from the particles.
   const double q_per_unit_vol_m3_s =
-      double(p.runoff_m_per_yr) * double(world_area) / double(p.drops) /
-      kSecondsPerYear;
+      double(p.runoff_m_per_yr) * double(world_area) /
+      std::max(double(p.drops) * double(p.drop_volume), 1.0) / kSecondsPerYear;
   std::mt19937 rng(p.seed ^ 0x9e3779b9u);
   std::uniform_real_distribution<float> uni(1.0f, float(p.res - 2));
   std::vector<float> sx(p.drops), sy(p.drops);
+  // Diffusion scratch, allocated once rather than per step.
+  std::vector<float> diff_demand(g.cells), diff_limit(g.cells),
+      diff_delta(g.cells);
   int n_lakes = 0;
   float wet_frac = 0.f, deepest_m = 0.f;
   using clk = std::chrono::steady_clock;
@@ -970,6 +1274,8 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
     g.Qm3s.swap(g.Qm3s_b);
     g.momx.swap(g.momx_b);
     g.momy.swap(g.momy_b);
+
+    Diffuse(g, p, diff_demand, diff_limit, diff_delta);
 
     auto tD = clk::now(); t_grid += secs(tC, tD);
     if (step % p.lake_interval == 0 || step == 1)
@@ -1239,11 +1545,25 @@ int RunExtractRivers(const std::string& dir) {
 
 namespace test {
 
-int g_pass = 0, g_fail = 0;
+int g_pass = 0, g_fail = 0, g_pending = 0, g_pending_ready = 0;
 
 void Check(const char* name, bool ok, const std::string& detail) {
   std::printf("  [%s] %-38s %s\n", ok ? "PASS" : "FAIL", name, detail.c_str());
   if (ok) ++g_pass; else ++g_fail;
+}
+
+// An invariant for a mechanism that is not built yet.
+//
+// These are written BEFORE their phase, so they start red on purpose and must
+// not break --test as a regression gate. Reported, never fatal. When the owning
+// phase lands, flip the call to Check() and the contract becomes enforced.
+//
+// PEND! means it passed unexpectedly -- either the mechanism arrived or the
+// assertion is too weak to be worth having. Both are worth looking at.
+void Pending(const char* name, bool ok, const std::string& detail) {
+  std::printf("  [%s] %-38s %s\n", ok ? "PEND!" : "PEND ", name, detail.c_str());
+  ++g_pending;
+  if (ok) ++g_pending_ready;
 }
 
 std::string F(const char* fmt, double a, double b = 0, double c = 0) {
@@ -1830,7 +2150,24 @@ void RebuildCadenceInvariant() {
     Params p = Base();
     p.terrain = Params::Terrain::Bowl;
     p.prefill = true;
-    p.bowl_well_m = 120.0f;
+    // 200 m, not the 120 m this fixture used to carry.
+    //
+    // At 120 m the basin sits exactly ON the min-area/min-depth prune
+    // threshold, so whether a lake survives is decided by a hard cutoff and the
+    // answer is chaotic rather than convergent: measured 2.32 / 0.00 / 2.20 /
+    // 0.98 / 0.00 % wet at intervals 3 / 5 / 10 / 25 / 50. That is threshold
+    // noise, and it tests nothing about rebuild cadence.
+    //
+    // It used to PASS only because over-deposition (the concentration-as-mass
+    // leak) silted every interval to 0% wet, so the test compared 0 against 0.
+    // Fixing the leak removed that vacuous agreement and exposed the marginal
+    // fixture underneath.
+    //
+    // A basin that clearly survives converges properly: 7.86 / 8.76 / 8.03 % at
+    // intervals 5 / 10 / 25 for a 200 m well, and 12.82 / 12.33 / 12.79 % for
+    // 300 m. So the invariant holds; it just needs a fixture that is not
+    // balanced on the cutoff.
+    p.bowl_well_m = 200.0f;
     p.steps = 300;
     p.lake_interval = intervals[i];
     std::vector<Lake> lakes; SimStats st;
@@ -1845,6 +2182,293 @@ void RebuildCadenceInvariant() {
   Check("rebuild cadence has converged", rel < 0.25,
         F("interval 10 -> %.2f%% wet, interval 25 -> %.2f%%", 100 * wet[0],
           100 * wet[1]));
+}
+
+// ==========================================================================
+// PHYSICS INVARIANTS
+//
+// Written BEFORE the mechanisms they describe, so most start red and report
+// PEND rather than FAIL. They are the contract each phase is finished against;
+// a phase is done when its invariant flips from Pending() to Check() and
+// stays green. Runs on real terrain are the LAST step of a phase, never the
+// evidence it worked.
+// ==========================================================================
+
+// --- T1. terminal velocity matches Manning --------------------------------
+// A particle on a constant incline must accelerate under gravity until drag
+// balances it, settling at Manning's u = h^(2/3)*sqrt(S)/n -- the same closure
+// src/mapgen/river_graph.cpp already uses for the river graph. Today the motion
+// law renormalises speed to sqrt(2) cells/step every step, so there is neither
+// a velocity in m/s nor a flow depth to put in that formula.
+void TerminalVelocityManning() {
+  Params p = Base(32);
+  p.terrain = Params::Terrain::Plane;
+  const float slope = 0.02f;  // 2%: Plane is h = rim_m*(1 - y/world_m)
+  p.bowl_rim_m = slope * p.world_m;
+  p.enable_erosion = false;  // isolate the MOTION law
+  p.enable_cascade = false;
+  p.enable_lake_deposit = false;
+  p.steps = 1;
+  p.drops = 1;  // exactly one particle, so the probe is one trajectory
+  ParticleProbe probe;
+  p.probe = &probe;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+
+  const float n_manning = 0.035f;  // ErosionParams::manning_n
+  const size_t n = probe.speed.size();
+  const float depth_m = n ? probe.depth_m.back() : 0.f;
+  const float measured = n ? probe.speed.back() : 0.f;
+  const float expect = (depth_m > 0.f)
+                           ? std::pow(depth_m, 2.f / 3.f) * std::sqrt(slope) /
+                                 n_manning
+                           : 0.f;
+  // Converged means the last quarter of the trajectory is flat.
+  bool converged = n >= 8;
+  if (converged)
+    for (size_t i = n - n / 4; i < n; ++i)
+      if (std::fabs(probe.speed[i] - measured) > 0.01f * std::max(measured, 1e-6f))
+        converged = false;
+  const bool ok = depth_m > 0.f && converged &&
+                  std::fabs(measured - expect) <= 0.1f * expect;
+  std::string detail;
+  if (depth_m <= 0.f) {
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "no flow depth or time axis: speed pinned at %.3f cells/step "
+                  "over %zu steps", measured, n);
+    detail = buf;
+  } else {
+    detail = F("u %.3f vs Manning %.3f m/s (h %.2f m)", measured, expect,
+               depth_m);
+  }
+  Pending("T1 terminal velocity = Manning", ok, detail);
+}
+
+// --- T2. particle volume is pure discretization ---------------------------
+// Total water is drops x drop_volume. Chopping the same water into a different
+// number of parcels is a NUMERICAL choice and must not change the landscape.
+// Compared on aggregate statistics, not per cell: halving the drop count
+// changes the spawn sequence, so the fields cannot be pointwise identical and
+// asserting that would make the invariant unpassable by construction.
+void VolumeDiscretizationInvariance() {
+  // Metrics must measure the EROSION, not the terrain. Relief is set almost
+  // entirely by the starting fixture, so comparing it agrees to 4 digits
+  // whatever the particles did -- it passes without testing anything.
+  auto stats = [](const Params& base, int drops, float vol) {
+    Params p = base;
+    p.drops = drops;
+    p.drop_volume = vol;
+    Grid g0(p.res);
+    InitTerrain(g0, p);
+    std::vector<Lake> lakes; SimStats st;
+    Grid g = Run(p, lakes, st);
+    double moved = 0.0;
+    for (size_t i = 0; i < g.cells; ++i)
+      moved += std::fabs(double(g.height[i]) - double(g0.height[i]));
+    return std::array<double, 3>{
+        moved / double(g.cells) * base.relief_m,  // mean |dh|, metres
+        double(g.deposited_death + g.deposited_lake),
+        double(g.lost_offmap)};
+  };
+  Params base = Base(48);
+  base.terrain = Params::Terrain::Bowl;
+  base.steps = 120;
+  const auto a = stats(base, 32, 1.0f);
+  const auto b = stats(base, 16, 2.0f);  // same total water, half the parcels
+  auto rel = [](double x, double y) {
+    return std::fabs(x - y) / std::max(std::fabs(x), 1e-9);
+  };
+  const double d_moved = rel(a[0], b[0]), d_dep = rel(a[1], b[1]);
+  char buf[192];
+  std::snprintf(buf, sizeof(buf),
+                "mean |dh| %.3f vs %.3f m (%.0f%% apart), deposits %.0f%% apart",
+                a[0], b[0], 100 * d_moved, 100 * d_dep);
+  Pending("T2 volume is pure discretization", d_moved < 0.05 && d_dep < 0.05,
+          buf);
+}
+
+// --- T3. diffusion relaxes a ridge and conserves mass ---------------------
+// Soil creep on a 1-D gaussian ridge, with NO particles and no cascade, so the
+// only thing that can move material is the diffusion pass. The peak must fall,
+// the flanks must rise, and nothing may be created or destroyed.
+void DiffusionRelaxesRidge() {
+  Params p = Base(64);
+  p.terrain = Params::Terrain::Ridge;
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  p.enable_lake_deposit = false;
+  p.enable_diffusion = true;
+  p.diffusion_D_m2_per_yr = 5e-3f;
+  p.steps = 50;
+  p.drops = 0;  // pure grid pass
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+
+  const int mid = p.res / 2;
+  // Peak column and a flank column well off the crest.
+  const int crest = mid, flank = mid + p.res / 6;
+  const float peak0 = g0.height[g0.idx(crest, mid)];
+  const float peak1 = g.height[g.idx(crest, mid)];
+  const float side0 = g0.height[g0.idx(flank, mid)];
+  const float side1 = g.height[g.idx(flank, mid)];
+  const double m0 = SumH(g0), m1 = SumH(g);
+  const double mass_rel = std::fabs(m1 - m0) / std::max(std::fabs(m0), 1e-9);
+  const bool ok = peak1 < peak0 && side1 > side0 && mass_rel < 1e-4;
+  // ENFORCED as of the hillslope diffusion pass.
+  Check("T3 diffusion relaxes a ridge", ok,
+        F("peak %+.3f m, flank %+.3f m, mass drift %.2e",
+            double(peak1 - peak0) * p.relief_m,
+            double(side1 - side0) * p.relief_m, mass_rel));
+}
+
+// --- T4. a particle may never skip a cell ---------------------------------
+// The anti-tunnelling property, and the precondition for swept-path writes:
+// if a step lands two cells away, whatever it deposited along the way went
+// nowhere. Today speed is pinned at sqrt(2) cells/step, which overshoots a
+// cell boundary whenever the particle does not start near one.
+void ParticleNeverSkipsACell() {
+  Params p = Base(48);
+  p.terrain = Params::Terrain::Plane;
+  p.bowl_rim_m = 0.10f * p.world_m;  // 10%: fast, so skipping is likely
+  p.enable_cascade = false;
+  p.steps = 1;
+  p.drops = 1;
+  ParticleProbe probe;
+  p.probe = &probe;
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+
+  int worst = 0, skips = 0;
+  for (size_t i = 1; i < probe.cell.size(); ++i) {
+    const int a = probe.cell[i - 1], b = probe.cell[i];
+    const int dx = std::abs(a % p.res - b % p.res);
+    const int dy = std::abs(a / p.res - b / p.res);
+    const int step = std::max(dx, dy);  // Chebyshev: 1 == adjacent
+    worst = std::max(worst, step);
+    if (step > 1) ++skips;
+  }
+  Pending("T4 particle never skips a cell", worst <= 1 && !probe.cell.empty(),
+          F("%.0f of %.0f steps skipped; worst jump %.0f cells", double(skips),
+            double(probe.cell.size()), double(worst)));
+}
+
+// --- T5. cascade threshold gate -------------------------------------------
+// Calls Cascade DIRECTLY on a controlled neighbourhood rather than through a
+// sim run. ReposeAngle already documents why a full run cannot assert this:
+// the cascade is per-particle, so untouched cliff survives and the global
+// maximum slope says nothing about the operator itself.
+//
+// Below repose it must be a no-op -- which is exactly the precondition the
+// early-out optimisation relies on, so the optimisation and the invariant are
+// the same test.
+void CascadeThresholdGate() {
+  Params p = Base(8);
+  const float cell_m = p.world_m / float(p.res);
+  const float max_diff =
+      std::tan(p.repose_angle_deg * 3.14159265f / 180.0f) * cell_m / p.relief_m;
+  auto build = [&](float angle_deg) {
+    Grid g(p.res);
+    std::fill(g.height.begin(), g.height.end(), 0.f);
+    std::fill(g.soil.begin(), g.soil.end(), 1.0f);  // plenty of soil to move
+    g.height[g.idx(4, 4)] =
+        std::tan(angle_deg * 3.14159265f / 180.0f) * cell_m / p.relief_m;
+    return g;
+  };
+  auto max_drop = [&](const Grid& g) {
+    float m = 0.f;
+    for (int k = 0; k < 8; ++k) {
+      static const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+      static const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+      m = std::max(m, g.height[g.idx(4, 4)] - g.height[g.idx(4 + dx[k], 4 + dy[k])]);
+    }
+    return m;
+  };
+
+  Grid below = build(39.0f);
+  const std::vector<float> before = below.height;
+  Cascade(below, p, 4, 4, max_diff);
+  const bool inert = (below.height == before);
+
+  Grid above = build(41.5f);
+  const float drop0 = max_drop(above);
+  const float peak0 = above.height[above.idx(4, 4)];
+  Cascade(above, p, 4, 4, max_diff);
+  const float drop1 = max_drop(above);
+  const float peak1 = above.height[above.idx(4, 4)];
+  const bool relaxed = drop1 < drop0 && peak1 < peak0;
+
+  Check("T5 cascade is inert below repose", inert,
+        inert ? "39 deg: bit-identical" : "39 deg: MUTATED below repose");
+  Check("T5 cascade relaxes above repose", relaxed,
+        F("41.5 deg: drop %.4f -> %.4f, peak %+.4f", double(drop0),
+          double(drop1), double(peak1 - peak0)));
+}
+
+// --- T6. mass conservation at production length ---------------------------
+// The existing MassConservation covers a 200-step fixture and passes at 0.09%.
+// The leak is CUMULATIVE (measured 200 -> 0.09%, 400 -> 0.14%, 1200 -> 0.41%,
+// 3000 at 1024^2 -> 4.59%), so a short fixture cannot see it. This runs long
+// enough to expose it and asserts a threshold a correct implementation clears
+// by orders of magnitude -- 0.1%, not the 1% the short test uses.
+void MassConservationLongRun() {
+  Params p = Base(128);
+  p.world_m = 16.0f * 128.0f;
+  p.relief_m = 900.0f;
+  p.steps = 1200;
+  p.drops = 64;
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  const double before = SumH(g0);
+  std::vector<Lake> lakes; SimStats st;
+  Grid g = Run(p, lakes, st);
+  const double residual = (SumH(g) - before) + g.lost_offmap;
+  const double rel = std::fabs(residual) / std::max(std::fabs(before), 1e-9);
+  // ENFORCED. 0.410% -> 0.022% (concentration-as-mass) -> ~2e-9 (lake-branch
+  // evaporation). The bound is 1e-5, not the 1e-3 this started at: conservation
+  // is now exact to float noise, so anything looser would let a real leak back
+  // in unnoticed. It still leaves ~4 orders of magnitude of headroom.
+  Check("T6 mass conserves over a long run", rel < 1e-5,
+        F("residual %.3e of %.3e (%.3f%%) over 1200 steps", residual, before,
+          100 * rel));
+}
+
+// --- T7. the horseshoe drains to its outflow edge -------------------------
+// The regional trend must fall monotonically toward the outflow edge. If it
+// does not, some interior cell is a local minimum, priority-flood floods from
+// the map border inward, and the whole map becomes one basin -- the failure
+// InitBowl's comment records. Checked on the trend ALONE (noise amplitude
+// zeroed), because the noise is supposed to add local pits; those become lakes
+// and are the point. What must not exist is a REGIONAL sink.
+void HorseshoeDrainsToOutflow() {
+  Params p = Base(64);
+  p.terrain = Params::Terrain::Horseshoe;
+  p.amp_high_m = 0.f;  // trend only
+  p.amp_low_m = 0.f;
+  Grid g(p.res);
+  InitTerrain(g, p);
+  float worst_rise = -1e30f;
+  for (int y = 0; y + 1 < g.n; ++y)
+    for (int x = 0; x < g.n; ++x)
+      worst_rise = std::max(worst_rise, g.height[g.idx(x, y + 1)] -
+                                            g.height[g.idx(x, y)]);
+  // Also assert the shape is actually a horseshoe: rim high, outflow low, and
+  // the rim continuous across all three edges rather than only at the corners.
+  const int mid = g.n / 2;
+  const float rim_centre = g.height[g.idx(mid, 0)] * p.relief_m;
+  const float rim_corner = g.height[g.idx(0, 0)] * p.relief_m;
+  const float outflow = g.height[g.idx(mid, g.n - 1)] * p.relief_m;
+  const bool shaped = rim_centre > outflow + 50.f &&
+                      std::fabs(rim_centre - rim_corner) < 0.25f * rim_centre;
+  char buf[192];
+  std::snprintf(buf, sizeof(buf),
+                "worst rise %+.2e m; rim centre %.0f m, corner %.0f m, "
+                "outflow %.0f m",
+                double(worst_rise) * p.relief_m, double(rim_centre),
+                double(rim_corner), double(outflow));
+  Check("T7 horseshoe drains to the outflow", worst_rise <= 0.f && shaped, buf);
 }
 
 int RunAll() {
@@ -1870,7 +2494,20 @@ int RunAll() {
   ResolutionIndependence();
   DeltaProfile();
   RebuildCadenceInvariant();
-  std::printf("\n  %d passed, %d failed\n", g_pass, g_fail);
+
+  std::printf("\n  physics invariants (PEND = mechanism not built yet)\n");
+  TerminalVelocityManning();
+  VolumeDiscretizationInvariance();
+  DiffusionRelaxesRidge();
+  ParticleNeverSkipsACell();
+  CascadeThresholdGate();
+  MassConservationLongRun();
+  HorseshoeDrainsToOutflow();
+
+  std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
+  if (g_pending_ready)
+    std::printf(" (%d of them now PASS -- promote to Check())", g_pending_ready);
+  std::printf("\n");
   return g_fail == 0 ? 0 : 1;
 }
 
@@ -1917,6 +2554,16 @@ int main(int argc, char** argv) {
     else if (a == "--cascade-settling") p.settling = std::stof(nxt());
     else if (a == "--snapshot-every") p.snapshot_every = std::stoi(nxt());
     else if (a == "--bowl") p.bowl = true;
+    // The pre-horseshoe substrate, for A/B against the audit baseline.
+    else if (a == "--fbm") p.terrain = Params::Terrain::Noise;
+    // Soil creep coefficient, m2/yr. Non-zero enables the pass.
+    else if (a == "--diffusion") {
+      p.diffusion_D_m2_per_yr = std::stof(nxt());
+      p.enable_diffusion = p.diffusion_D_m2_per_yr > 0.f;
+    }
+    else if (a == "--tilt") p.tilt_m = std::stof(nxt());
+    else if (a == "--rim") p.rim_m = std::stof(nxt());
+    else if (a == "--trough") p.trough_m = std::stof(nxt());
     else if (a == "--no-disperse") p.disperse = false;
     else if (a == "--prefill") p.prefill = true;
     else if (a == "--wander") p.plume_wander_deg = std::stof(nxt());

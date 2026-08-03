@@ -124,6 +124,19 @@ ripple into the other.
   (`bedrock = height - initial_soil_m`), so step 0 is bit-identical to a
   no-substrate run and the A/B stays honest.
 
+- **The cascade is the simulation, not the erosion.** A sampling profile puts
+  62% of runtime in `Cascade` and 17% in its `std::sort` alone. Returning before
+  the sort when no neighbour exceeds the repose angle is bit-identical (the
+  settle loop would `continue` on every neighbour) and worth **1.20x** — which
+  is exactly the sort's share recovered.
+  - Do NOT also filter the gather to `d > max_diff`. `std::sort` is unstable, so
+    dropping elements can permute EQUAL drops differently, and equal drops are
+    the normal case on symmetric fixtures. It breaks bit-identity exactly where
+    the tests are most symmetric, for a few percent more.
+- **`-march=native` buys nothing here** — 22.0 s vs 21.7 s at 512^2/1200 steps,
+  inside the noise. An earlier 1.71x reading was taken on a loaded machine and
+  did not survive a best-of-N re-measure. Left off the build line deliberately.
+
 ## Verification
 
 `protogen --test` — 23 assertions on 32–64 cell grids at the production 16 m
