@@ -156,16 +156,42 @@ TEST_CASE("locomotion picks its clip by speed", "[anim]") {
   CHECK(ClipFor(Moving(100.0f)) == LogicalClip::Sprint);
 }
 
-TEST_CASE("only windowed actions are bounded", "[anim]") {
-  // Bounded actions are re-derived from ticks and keep no presentation memory;
-  // unbounded ones loop on presentation time. Getting this wrong makes a swing
-  // free-run instead of tracking its window.
-  CHECK(IsBoundedAction(AnimAction::AttackWindUp));
-  CHECK(IsBoundedAction(AnimAction::AttackRecovery));
-  CHECK(IsBoundedAction(AnimAction::CastFocus));
-  CHECK_FALSE(IsBoundedAction(AnimAction::Idle));
-  CHECK_FALSE(IsBoundedAction(AnimAction::Locomotion));
-  CHECK_FALSE(IsBoundedAction(AnimAction::Stunned));
+TEST_CASE("only the strike phases are driven by their window", "[anim]") {
+  // Window-driven actions are re-derived from ticks and keep no presentation
+  // memory; the rest loop on presentation time. Getting this wrong makes a swing
+  // free-run instead of tracking the blow it depicts.
+  CHECK(DrivenByWindow(AnimAction::AttackWindUp));
+  CHECK(DrivenByWindow(AnimAction::AttackRecovery));
+  CHECK_FALSE(DrivenByWindow(AnimAction::Idle));
+  CHECK_FALSE(DrivenByWindow(AnimAction::Locomotion));
+  CHECK_FALSE(DrivenByWindow(AnimAction::Stunned));
+
+  // A cast HAS a window but its clip is a channel loop, so stretching it would
+  // play a 1s loop once in slow motion across a 5s cast. It loops instead.
+  CHECK_FALSE(DrivenByWindow(AnimAction::CastFocus));
+}
+
+TEST_CASE("locomotion playback tracks the speed its clip was authored for",
+          "[anim]") {
+  // Every clip is scaled toward its OWN reference, not one shared anchor: a slow
+  // walk anchored to the jog speed crawled at a third rate, feet dragging.
+  CHECK(LocomotionRate(Moving(kWalkReferenceSpeed)) == Catch::Approx(1.0f));
+  CHECK(LocomotionRate(Moving(kJogReferenceSpeed)) == Catch::Approx(1.0f));
+  CHECK(LocomotionRate(Moving(kSprintReferenceSpeed)) == Catch::Approx(1.0f));
+
+  // Within a band, rate rises with speed.
+  CHECK(LocomotionRate(Moving(0.5f)) < LocomotionRate(Moving(1.4f)));
+
+  // Clamped at both ends: a near-still character does not freeze its clip, and
+  // an absurd speed does not blur it.
+  CHECK(LocomotionRate(Moving(0.0f)) == Catch::Approx(0.25f));
+  CHECK(LocomotionRate(Moving(1000.0f)) == Catch::Approx(2.0f));
+  for (float speed : {0.0f, 0.1f, 1.0f, 3.0f, 5.5f, 50.0f}) {
+    const float rate = LocomotionRate(Moving(speed));
+    CHECK(rate >= 0.25f);
+    CHECK(rate <= 2.0f);
+    CHECK(std::isfinite(rate));
+  }
 }
 
 TEST_CASE("every logical clip names a manifest key", "[anim]") {

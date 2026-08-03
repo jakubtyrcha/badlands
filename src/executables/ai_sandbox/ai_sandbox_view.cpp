@@ -518,7 +518,11 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   // therefore accelerates the day/night loop WITHOUT changing the fixed rate
   // the sim itself sees -- determinism is preserved (the sim never observes a
   // variable dt), only how fast we feed it changes.
-  sim_clock_.Advance(static_cast<double>(dt));
+  // The return is PRESENTATION time (real dt x speed, clamped): it stops at
+  // pause and scales with the speed control, which is what the overlay's
+  // looping clips must advance on. dt_ is real time and must not be used for
+  // animation -- see the four-clocks table in game/CLAUDE.md.
+  anim_dt_ = static_cast<float>(sim_clock_.Advance(static_cast<double>(dt)));
   const unsigned long long tick_target = sim_clock_.TickTarget();
   int budget = kMaxSimTicksPerFrame;
   while (sim_ticks_done_ < tick_target && budget-- > 0) {
@@ -568,7 +572,7 @@ void AiSandboxView::Update(float dt, const bool* keyboard_state) {
   const auto flat_ground = [](float, float) { return 0.0f; };
   frame_lines_.Clear();
   nav_debug_.Rebuild(sim_, frame_lines_, flat_ground);
-  skeleton_debug_.Rebuild(sim_, char_rows_, frame_lines_, flat_ground, dt_);
+  skeleton_debug_.Rebuild(sim_, char_rows_, frame_lines_, flat_ground, anim_dt_);
   scene_context_.debug_lines = frame_lines_.empty() ? nullptr : &frame_lines_;
 }
 

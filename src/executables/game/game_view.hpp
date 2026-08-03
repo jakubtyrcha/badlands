@@ -175,6 +175,10 @@ class GameView : public AppView {
   // buffer and assigning that pointer would silently clobber the others.
   DebugLineBuffer frame_lines_;
 
+  // Presentation seconds this frame (real x speed; 0 while paused). Looping
+  // animation advances on THIS, never on the real dt the debug panel shows.
+  float anim_dt_ = 0.0f;
+
   // Selection highlights: projected decals (a ring under the selected unit, a
   // rounded rect around the selected building), rebuilt every frame and handed
   // to the renderer through scene_context_.decals. Must outlive the frame --

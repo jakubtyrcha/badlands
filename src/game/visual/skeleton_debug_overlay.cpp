@@ -56,6 +56,17 @@ bool SkeletonDebugOverlay::Initialize(const std::string& manifest_path) {
   scratch_.sampler_a.Reset(assets_->skeleton());
   scratch_.sampler_b.Reset(assets_->skeleton());
 
+  // The rig's own standing height, so a character's capsule height can scale it
+  // (see Rebuild). Measured from the REST pose, which is what the skeleton
+  // reports before any clip is applied.
+  Pose rest(assets_->skeleton());
+  rig_height_ = 0.0f;
+  if (LocalToModel(assets_->skeleton(), rest)) {
+    for (const ozz::math::Float4x4& m : rest.models()) {
+      rig_height_ = std::max(rig_height_, ToMat4(m)[3].y);
+    }
+  }
+
   ready_ = true;
   return true;
 }
@@ -95,6 +106,10 @@ void SkeletonDebugOverlay::Rebuild(Sim& sim, std::span<const CharacterState> row
     if (clip != animator.clip) {
       if (animator.clip >= 0) {
         animator.fade_from_clip = animator.clip;
+        // Freeze the OUTGOING clip where it actually was, captured every frame
+        // rather than only when idle -- a second change inside one fade window
+        // would otherwise blend a stale, unrelated phase.
+        animator.fade_from_ratio = animator.last_ratio;
         animator.fade_remaining = kAnimFadeSeconds;
       }
       animator.clip = clip;
@@ -109,13 +124,13 @@ void SkeletonDebugOverlay::Rebuild(Sim& sim, std::span<const CharacterState> row
     // frame and keeps no memory, so it cannot drift from the gameplay window it
     // depicts. A loop advances on presentation time.
     float ratio = 0.0f;
-    if (IsBoundedAction(anim->action)) {
+    if (DrivenByWindow(anim->action)) {
       ratio = PhaseRatio(*anim, world_ticks, assets_->clip_pivot(clip));
     } else {
-      // Scale a locomotion loop by speed so feet do not slide; other loops run
-      // at their authored rate.
+      // Scale a locomotion loop toward the speed its clip was authored for, so
+      // feet do not slide; every other loop runs at its authored rate.
       const float rate = anim->action == AnimAction::Locomotion
-                             ? std::max(0.1f, anim->speed / kJogSpeed)
+                             ? LocomotionRate(*anim)
                              : 1.0f;
       animator.loop_seconds += anim_dt * rate;
       ratio = LoopRatioAt(assets_->clip(clip), animator.loop_seconds);
@@ -142,20 +157,29 @@ void SkeletonDebugOverlay::Rebuild(Sim& sim, std::span<const CharacterState> row
         }
       }
       if (animator.fade_remaining <= 0.0f) animator.fade_from_clip = -1;
-    } else {
-      // Remember where this clip is, so the NEXT change fades out of it.
-      animator.fade_from_ratio = ratio;
     }
+    // Where this clip is NOW, so the next change can fade out of it -- recorded
+    // unconditionally, fading or not.
+    animator.last_ratio = ratio;
 
     if (!LocalToModel(skeleton, *posed)) continue;
 
-    // The same transform the capsule pass builds: stand on the ground and face
-    // the direction of travel (kCharacterForward is +Z).
+    // The same transform the capsule pass builds -- stand on the ground, face
+    // the direction of travel (kCharacterForward is +Z) -- plus a scale the
+    // capsule pass gets for free from its own geometry.
+    //
+    // One human rig stands in for every creature, so a deer or a rat would
+    // otherwise get a full-height human skeleton inside a much smaller capsule.
+    // Matching the row's own height keeps the overlay agreeing with the blockout
+    // it annotates; it does not make a squashed human a deer, and only a real
+    // per-creature rig will.
     const float ground = ground_y(row.pos_x, row.pos_z);
     const float yaw = std::atan2(row.facing_x, row.facing_z);
+    const float scale = rig_height_ > 0.0f ? row.size_y / rig_height_ : 1.0f;
     const glm::mat4 world =
         glm::translate(glm::mat4(1.0f), glm::vec3(row.pos_x, ground, row.pos_z)) *
-        glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(scale));
 
     EmitSkeletonLines(skeleton, *posed, world, out, kBoneColor, kBoneThickness);
     ++drawn_;

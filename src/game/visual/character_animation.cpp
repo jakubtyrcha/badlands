@@ -38,18 +38,31 @@ LogicalClip ClipFor(const CharacterAnim& anim) {
   return LogicalClip::Idle;
 }
 
-bool IsBoundedAction(AnimAction action) {
+bool DrivenByWindow(AnimAction action) {
   switch (action) {
+    // One authored swing, split at the clip's pivot across the two phases.
     case AnimAction::AttackWindUp:
     case AnimAction::AttackRecovery:
-    case AnimAction::CastFocus:
       return true;
+    // CastFocus has a window but plays a channel LOOP -- see the header.
+    case AnimAction::CastFocus:
     case AnimAction::Idle:
     case AnimAction::Locomotion:
     case AnimAction::Stunned:
       return false;
   }
   return false;
+}
+
+float LocomotionRate(const CharacterAnim& anim) {
+  float reference = kWalkReferenceSpeed;
+  if (anim.speed >= kSprintSpeed) {
+    reference = kSprintReferenceSpeed;
+  } else if (anim.speed >= kJogSpeed) {
+    reference = kJogReferenceSpeed;
+  }
+  if (!(reference > 0.0f)) return 1.0f;
+  return std::clamp(anim.speed / reference, 0.25f, 2.0f);
 }
 
 float PhaseRatio(const CharacterAnim& anim, int64_t world_ticks, float pivot) {

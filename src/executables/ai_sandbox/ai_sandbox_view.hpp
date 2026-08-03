@@ -165,7 +165,10 @@ class AiSandboxView : public AppView {
   // buffer and assigning that pointer would silently clobber the others.
   DebugLineBuffer frame_lines_;
 
-  float dt_ = 0.0f;
+  float dt_ = 0.0f;       // real seconds, for the ImGui debug panel only
+  // Presentation seconds this frame (real x speed; 0 while paused). Animation
+  // advances on THIS, never on dt_ -- game/CLAUDE.md's four-clocks contract.
+  float anim_dt_ = 0.0f;
 };
 
 }  // namespace badlands

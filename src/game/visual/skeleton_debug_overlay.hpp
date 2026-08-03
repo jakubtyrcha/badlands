@@ -11,8 +11,14 @@
 // character blockout mesh -- this draws OVER them and is off by default.
 //
 // The per-character animator lives on the SIM entity (Sim::HandleForSlot), which
-// is safe only because no sim system reads a render component; the invariant is
-// pinned by a test in game/tests/determinism_tests.cpp.
+// is safe only because no sim system reads a render component.
+//
+// That invariant is pinned by "a render component in the shared registry cannot
+// perturb the sim" (game/tests/determinism_tests.cpp), which runs one world with
+// a render component on every character and one without, and requires identical
+// state and command log. It deliberately uses a STAND-IN component rather than
+// CharacterAnimator: the rule has to hold for any render component at all, so
+// binding the test to this one would prove less, not more.
 
 #include <functional>
 #include <optional>
@@ -88,6 +94,9 @@ class SkeletonDebugOverlay {
   Scratch scratch_;
   bool ready_ = false;
   bool show_ = false;
+  // The rig's rest-pose height, used to scale it to a character's own capsule
+  // height. 0 until Initialize succeeds.
+  float rig_height_ = 0.0f;
   // Manifest index per logical clip, resolved once so nothing looks up a clip by
   // string per character per frame. -1 when the manifest lacks that clip.
   std::vector<int> clip_index_;

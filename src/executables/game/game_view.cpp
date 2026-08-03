@@ -1124,7 +1124,11 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   // the day/night cycle and the fixed-rate game logic derive from this clock,
   // so they run together at the current speed, independent of framerate.
   const double real_dt = static_cast<double>(dt);
+  // PRESENTATION time: real dt x speed, 0 while paused. Animation advances on
+  // this, never on dt_ (which is real time, for the debug panel) -- see the
+  // four-clocks contract in game/CLAUDE.md.
   const double sim_dt = sim_clock_.Advance(real_dt);
+  anim_dt_ = static_cast<float>(sim_dt);
 
   // Feed the presentation clock to time-animated forward materials (water
   // waves). Deterministic under headless SeekToTimeOfDay (sim_seconds is set
@@ -1215,7 +1219,7 @@ void GameView::Update(float dt, const bool* keyboard_state) {
   const auto ground = [this](float x, float z) { return GroundAt(x, z); };
   frame_lines_.Clear();
   nav_debug_.Rebuild(sim_, frame_lines_, ground);
-  skeleton_debug_.Rebuild(sim_, character_rows_, frame_lines_, ground, dt_);
+  skeleton_debug_.Rebuild(sim_, character_rows_, frame_lines_, ground, anim_dt_);
   scene_context_.debug_lines = frame_lines_.empty() ? nullptr : &frame_lines_;
 }
 

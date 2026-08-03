@@ -36,12 +36,33 @@ const char* LogicalClipName(LogicalClip clip);
 inline constexpr float kJogSpeed = 3.0f;
 inline constexpr float kSprintSpeed = 5.5f;
 
+// The speed each locomotion clip was authored to look right at, so playback can
+// be scaled toward it and feet stop sliding.
+//
+// APPROXIMATE: the true value is a clip's stride length over its duration, which
+// nothing here measures. Each is the middle of that clip's own speed band, which
+// keeps every clip near 1x while it is selected -- far better than anchoring all
+// three to one reference, which left a slow walk crawling at a third rate.
+inline constexpr float kWalkReferenceSpeed = 0.5f * kJogSpeed;
+inline constexpr float kJogReferenceSpeed = 0.5f * (kJogSpeed + kSprintSpeed);
+inline constexpr float kSprintReferenceSpeed = 1.3f * kSprintSpeed;
+
+// Playback rate for a locomotion loop: how fast to run the selected clip so it
+// matches the speed the character is actually moving at. Clamped so a near-still
+// character does not freeze and a very fast one does not blur.
+float LocomotionRate(const CharacterAnim& anim);
+
 // Which clip a projected action plays.
 LogicalClip ClipFor(const CharacterAnim& anim);
 
-// True when this action drives its clip from its gameplay window (a swing)
-// rather than looping at its own rate (a walk cycle).
-bool IsBoundedAction(AnimAction action);
+// True when this action plays its clip ACROSS its gameplay window -- stretched
+// to fit, so the animation tracks the mechanic tick for tick.
+//
+// NB an action having a window is not enough. A long cast HAS one, but its clip
+// is a channel LOOP: stretching a 1s loop over a 5s cast would play it once in
+// slow motion, so CastFocus loops instead and only the strike phases, whose clip
+// is a single authored swing, are driven by their window.
+bool DrivenByWindow(AnimAction action);
 
 // How far into its clip a BOUNDED action is, in [0,1].
 //
@@ -71,6 +92,11 @@ struct CharacterAnimator {
   int fade_from_clip = -1;       // the outgoing clip, -1 = not fading
   float fade_from_ratio = 0.0f;  // frozen where it was when the change happened
   float fade_remaining = 0.0f;   // seconds of cross-fade left
+  // Where `clip` was sampled last frame. Recorded EVERY frame, including while
+  // a fade is already running: walk -> jog -> sprint inside one fade window
+  // would otherwise freeze the second outgoing clip at the ratio recorded for
+  // the first, blending two unrelated phases and popping.
+  float last_ratio = 0.0f;
   // The last action window this animator saw, for edge detection. Comparing
   // start ticks is what tells a NEW action from a continuing one, with no event
   // stream -- see CharacterAnim's note in badlands_sim.hpp.
