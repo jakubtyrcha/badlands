@@ -18,14 +18,19 @@ final class ViewportNSView: NSView {
     var onWindowChange: ((Bool) -> Void)?
 
     // Raw-input forwarding, wired up by MetalViewport to the EditorViewModel.
-    var onMouseDown: ((CGPoint) -> Void)?
+    /// (point, modifierFlags) — modifiers ride along because the camera verb is
+    /// chosen from them at mouse-down and held for the whole gesture.
+    var onMouseDown: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
     var onMouseDragged: ((CGPoint) -> Void)?
     var onMouseUp: ((CGPoint) -> Void)?
     var onMouseMoved: ((CGPoint) -> Void)?
     var onMouseExited: (() -> Void)?
-    /// (dx, dy, shiftHeld)
-    var onScroll: ((CGFloat, CGFloat, Bool) -> Void)?
-    var onMagnify: ((CGFloat) -> Void)?
+    /// (dx, dy, location, phase, momentumPhase). The phases are what let scroll
+    /// and pinch be real begin/update/end gestures on a trackpad; a legacy
+    /// wheel reports none, and the view model treats that as a one-shot.
+    var onScroll: ((CGFloat, CGFloat, CGPoint, NSEvent.Phase, NSEvent.Phase) -> Void)?
+    /// (magnification, location, phase)
+    var onMagnify: ((CGFloat, CGPoint, NSEvent.Phase) -> Void)?
     /// Returns true if the key was consumed.
     var onKeyDown: ((String) -> Bool)?
 
@@ -87,7 +92,7 @@ final class ViewportNSView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        onMouseDown?(convert(event.locationInWindow, from: nil))
+        onMouseDown?(convert(event.locationInWindow, from: nil), event.modifierFlags)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -99,11 +104,12 @@ final class ViewportNSView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        onScroll?(event.scrollingDeltaX, event.scrollingDeltaY, event.modifierFlags.contains(.shift))
+        onScroll?(event.scrollingDeltaX, event.scrollingDeltaY,
+                  convert(event.locationInWindow, from: nil), event.phase, event.momentumPhase)
     }
 
     override func magnify(with event: NSEvent) {
-        onMagnify?(event.magnification)
+        onMagnify?(event.magnification, convert(event.locationInWindow, from: nil), event.phase)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -174,13 +180,17 @@ struct MetalViewport: NSViewRepresentable {
             driver.isPaused = !inWindow
         }
 
-        view.onMouseDown = { [vm] p in vm.handleMouseDown(p) }
+        view.onMouseDown = { [vm] p, modifiers in vm.handleMouseDown(p, modifiers: modifiers) }
         view.onMouseDragged = { [vm] p in vm.handleMouseDragged(p) }
         view.onMouseUp = { [vm] p in vm.handleMouseUp(p) }
         view.onMouseMoved = { [vm] p in vm.handleMouseMoved(p) }
         view.onMouseExited = { [vm] in vm.handleMouseExited() }
-        view.onScroll = { [vm] dx, dy, shiftHeld in vm.handleScroll(dx: dx, dy: dy, shiftHeld: shiftHeld) }
-        view.onMagnify = { [vm] delta in vm.handleMagnify(delta) }
+        view.onScroll = { [vm] dx, dy, point, phase, momentumPhase in
+            vm.handleScroll(dx: dx, dy: dy, at: point, phase: phase, momentumPhase: momentumPhase)
+        }
+        view.onMagnify = { [vm] magnification, point, phase in
+            vm.handleMagnify(magnification, at: point, phase: phase)
+        }
         view.onKeyDown = { [vm] characters in vm.handleKeyDown(characters) }
 
         return view

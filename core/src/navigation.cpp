@@ -1,5 +1,6 @@
 #include "navigation.h"
 
+#include <cmath>
 #include <optional>
 
 #include "math.h" // is_finite3
@@ -56,6 +57,15 @@ FocusPoint resolve_focus(const SceneDocument& doc, const Ray& ray, simd_float3 f
     //    distinction with no consumer.
     return FocusPoint{is_finite3(fallback_target) ? fallback_target : kGroundPoint,
                       FocusSource::TargetPlane};
+}
+
+float frame_radius_for_bound(float bound, float fov_y_radians) {
+    const float half_fov = 0.5f * fov_y_radians;
+    const float sin_half = std::sin(half_fov);
+    if (!std::isfinite(bound) || !(sin_half > 1e-4f)) {
+        return kMinFrameRadius;
+    }
+    return std::fmax(bound * kFrameMargin / sin_half, kMinFrameRadius);
 }
 
 float node_bounding_radius(const Node& node) {

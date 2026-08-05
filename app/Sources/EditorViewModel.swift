@@ -1,28 +1,36 @@
 import SwiftUI
+import AppKit
 import ShapeshifterCore
 
-// Deviation from the brief's stub (`enum EditorMode: CaseIterable`): adding
-// Hashable is required both for `mode == .camera` guards below and for
-// ForEach(EditorMode.allCases, id: \.self) in ModeBar.
+/// The editing modes. Camera is deliberately **not** one of them: it is what
+/// empty space does, in every mode, so it never has to be travelled to. Select
+/// is gone too — Modify-with-nothing-selected already behaved exactly like it,
+/// so the two collapsed into `.edit`.
 enum EditorMode: CaseIterable, Hashable {
-    case select, spawn, modify, camera
+    case edit, spawn
 }
 
-/// Which of the two modify-mode drag gestures the radial menu currently
-/// routes mouse input to.
+/// Which manipulator the radial menu currently arms. Both are real gizmos with
+/// real handles, so both obey the same rule as everything else in the
+/// viewport: grab a handle, or the press drives the camera.
 enum RadialTool {
     case move, scale
 }
 
-/// Owns the core `Editor` and the 4-mode UI state machine, and is the single
-/// place raw input from the viewport gets routed and dispatched by mode.
+/// Owns the core `Editor` and the mode/gesture state machine, and is the single
+/// place raw input from the viewport gets routed and dispatched.
 @Observable @MainActor
 final class EditorViewModel {
     let editor = sq.Editor.create()!
-    var mode: EditorMode = .select
+    var mode: EditorMode = .edit
 
-    /// Spawn tool options, bound by SpawnOptionsBar; read by handleMouseDown
-    /// in `.spawn` mode.
+    /// How far the pointer must travel before a press stops being a click and
+    /// becomes a drag. AppKit publishes no system drag threshold (unlike
+    /// UIKit), so this is ours to own; it will want to grow for a stylus,
+    /// which jitters far more than a trackpad tap.
+    private static let dragThresholdPts: CGFloat = 4
+
+    /// Spawn tool options, bound by SpawnOptionsBar; read on a `.spawn` click.
     var spawnShape: sq.Shape = .Cube
     var spawnOp: sq.Op = .Add
 
@@ -31,100 +39,171 @@ final class EditorViewModel {
     var selectedNodeID: Int32? = nil
     var selectedNodeName: String? = nil
 
-    /// True between a `.modify`-mode mouse-down that started a drag
-    /// (`editor.beginDrag`/`editor.beginScale`) and the matching mouse-up.
+    /// True while a gizmo drag is running, so the radial menu can get out of
+    /// the way of the gesture it started.
     var isDragging = false
 
-    /// Which radial-menu tool `.modify` mode's mouse gestures currently
-    /// drive; flipped by the radial menu's Move/Scale buttons and reverted
-    /// to `.move` when a scale gesture ends (see `radialSelectScale`/
-    /// `handleMouseUp`).
+    /// Which gizmo the radial menu has armed.
     var activeRadialTool: RadialTool = .move
-    /// Radial-menu anchor: the selected node's position projected to the
-    /// viewport, or nil when there's nothing to project onto (hidden/
-    /// invisible) — mirrors `editor.projectSelectedAnchor()`.
+    /// Radial-menu anchor: the selected node's projected viewport position, or
+    /// nil when there's nothing to project onto.
     var radialAnchor: CGPoint? = nil
     /// Mirrors `editor.nodeOp(selectedNodeID)`; nil exactly when
     /// `selectedNodeID` is nil.
     var selectedNodeOp: sq.Op? = nil
 
-    /// Screen-space Y at the `.modify`-mode mouse-down that started the
-    /// current scale gesture; `updateScale` is driven by the cumulative
-    /// delta from this point (core's scale semantics are cumulative-from-
-    /// start, not incremental — see `Editor::updateScale`).
-    private var scaleDragStartY: CGFloat = 0
+    /// What the current press is doing.
+    ///
+    /// A press starts `.pending` because a click and a drag are the same event
+    /// until the pointer moves: below the threshold it keeps its mode meaning
+    /// (select, spawn), past it the camera takes over. `.manipulating` is the
+    /// one case decided at mouse-down, because `editor.beginDrag` has to
+    /// capture the gizmo frame at the press position, not wherever the pointer
+    /// has wandered to by the time the threshold is crossed.
+    private enum PointerGesture {
+        case pending(down: CGPoint, camera: sq.CameraGesture)
+        case manipulating
+        case camera(down: CGPoint)
+    }
+    private var pointer: PointerGesture? = nil
 
-    /// Previous mouse position of an in-progress `.camera`-mode drag-pan; nil
-    /// when no camera drag is active. Set only by a camera-mode mouse-down, so
-    /// it doubles as the mid-gesture guard: switching into `.camera` while the
-    /// button is already down leaves it nil and drags are ignored until the
-    /// next mouse-down (no huge first-delta jump). No core cleanup is needed
-    /// when switching out mid-drag — `cameraPan` is stateless per-event,
-    /// unlike modify-mode's begin/end drag pair — and a stale anchor left by
-    /// an out-switch is overwritten by the next camera-mode mouse-down before
-    /// any drag can read it.
-    private var lastCameraDragPoint: CGPoint? = nil
+    /// Cumulative scroll/pinch travel, and whether a phased gesture is open.
+    /// Trackpads report `.began/.changed/.ended`; a legacy wheel reports no
+    /// phase at all, so there each event becomes its own complete gesture.
+    private var scrollTotal: CGPoint = .zero
+    private var scrollActive = false
+    private var magnifyTotal: CGFloat = 0
+    private var magnifyActive = false
 
     /// Single entry point for every mode change (buttons, keys, future
-    /// shortcuts) — keep it that way so later milestones have one place to
-    /// hook mode-transition side effects (e.g. resetting spawn/gizmo state).
+    /// shortcuts) — keep it that way so later work has one place to hook
+    /// mode-transition side effects.
     func setMode(_ m: EditorMode) {
-        // A mode key can fire mid-gesture (mouse button still down from a
-        // .modify drag or scale). Without this, the eventual
-        // mouseDragged/mouseUp would fail the `mode == .modify` guard and
-        // never call endDrag()/endScale(), leaving core's drag/scale state
-        // pinned to whatever node was selected when the gesture began — a
-        // later gesture on a *different* node (after returning to .modify)
-        // would then silently apply that stale plane/start state. Core also
-        // guards both gestures defensively (Editor::updateDrag/updateScale
-        // no-op if the selection no longer matches the captured node), but
-        // the gesture should be cleanly ended here regardless.
-        if mode == .modify, m != .modify, isDragging {
-            switch activeRadialTool {
-            case .move: editor.endDrag()
-            case .scale:
-                editor.endScale()
-                // Mirror handleMouseUp's .scale arm: an aborted scale gesture
-                // reverts to .move too, so the radial menu doesn't keep
-                // showing "Scale" active (and the next modify-mode drag
-                // doesn't silently start a fresh beginScale) after returning
-                // to .modify with no radial-menu interaction to explain why.
-                activeRadialTool = .move
-            }
+        // A mode key can fire mid-gesture. Without this the eventual
+        // mouseUp would fail the mode guard and never call endDrag(), leaving
+        // core's drag state pinned to whatever node was selected when the
+        // gesture began. Core also guards defensively (updateDrag no-ops if
+        // the selection no longer matches the captured node), but the gesture
+        // should be cleanly ended here regardless.
+        if isDragging {
+            editor.endDrag()
             isDragging = false
+            if activeRadialTool == .scale {
+                activeRadialTool = .move // mirror handleMouseUp's revert
+            }
         }
+        pointer = nil
         mode = m
         syncGizmo()
-        if m != .modify {
+        if m != .edit {
             // Belt to core's suspenders: core self-clears hover on selection
-            // loss/gizmo hide/deletion, but a mode switch with the cursor
-            // parked on a handle would otherwise leave the highlight lit
-            // until the next mouse move.
+            // loss / gizmo hide / deletion, but a mode switch with the cursor
+            // parked on a handle would otherwise leave the highlight lit.
             editor.clearGizmoHover()
         }
     }
 
-    /// Centralizes the gizmo-visibility rule (core owns the gizmo's placement
-    /// math; the VM only tells it whether to show). Call after every mode or
-    /// selection change — **and after every `activeRadialTool` change**, which
-    /// now feeds into it.
+    /// Centralizes gizmo visibility **and kind**. Call after every mode,
+    /// selection or `activeRadialTool` change.
     ///
-    /// The move gizmo is hidden while the radial menu is on `.scale`: its
-    /// handles do nothing there (a `.scale` mouse-down runs `beginScale`, not
-    /// an axis drag), so showing them advertised an affordance that did not
-    /// exist — and the restyle made that worse by giving hover a much louder
-    /// highlight. A scale-specific gizmo is planned; until then Scale simply
-    /// has no gizmo. Core enforces the other half: a hidden gizmo is neither
-    /// hoverable nor grabbable (`Editor::beginDrag`).
+    /// Both tools now have real gizmos, so unlike before nothing is hidden
+    /// here to paper over a missing manipulator — Scale simply shows its own
+    /// handle set. That is what lets one rule cover the whole viewport: core
+    /// returns false from `beginDrag` off-handle, and the app hands the press
+    /// to the camera.
     private func syncGizmo() {
-        editor.setGizmoVisible(mode == .modify && selectedNodeID != nil && activeRadialTool == .move)
+        editor.setGizmoKind(activeRadialTool == .move ? .Move : .Scale)
+        editor.setGizmoVisible(mode == .edit && selectedNodeID != nil)
     }
 
     // MARK: - Raw input, called by the viewport.
 
-    func handleMouseDown(_ p: CGPoint) {
+    /// Which camera verb a modifier chord asks for. Held modifiers are read
+    /// once, at mouse-down, and kept for the whole gesture: sampling them
+    /// per-event would let a mid-drag ⌥ press silently turn an orbit into a pan.
+    private func cameraGesture(for modifiers: NSEvent.ModifierFlags) -> sq.CameraGesture {
+        if modifiers.contains(.command) { return .Dolly }
+        if modifiers.contains(.option) { return .Pan }
+        return .Orbit
+    }
+
+    func handleMouseDown(_ p: CGPoint, modifiers: NSEvent.ModifierFlags) {
+        let gesture = cameraGesture(for: modifiers)
+
+        // A modifier chord is an explicit request for the camera, so the gizmo
+        // is not even consulted — otherwise ⌥-dragging off a handle would be
+        // the one place the chord didn't work.
+        if gesture == .Orbit, mode == .edit, selectedNodeID != nil,
+           editor.beginDrag(Float(p.x), Float(p.y)) {
+            pointer = .manipulating
+            isDragging = true
+            return
+        }
+        pointer = .pending(down: p, camera: gesture)
+    }
+
+    func handleMouseDragged(_ p: CGPoint) {
+        switch pointer {
+        case .pending(let down, let gesture):
+            guard hypot(p.x - down.x, p.y - down.y) >= Self.dragThresholdPts else { return }
+            // Anchored at the mouse-DOWN point, not the current one: that is
+            // what makes "point at the feature and drag" rotate around the
+            // thing you aimed at rather than wherever you have dragged to.
+            editor.beginCameraGesture(gesture, Float(down.x), Float(down.y))
+            pointer = .camera(down: down)
+            updateCamera(from: down, to: p)
+
+        case .camera(let down):
+            updateCamera(from: down, to: p)
+
+        case .manipulating:
+            editor.updateDrag(Float(p.x), Float(p.y))
+            refreshOverlayState()
+
+        case nil:
+            break
+        }
+    }
+
+    func handleMouseUp(_ p: CGPoint) {
+        switch pointer {
+        case .pending(let down, _):
+            performClick(at: down) // never crossed the threshold: it was a click
+
+        case .camera:
+            editor.endCameraGesture()
+
+        case .manipulating:
+            editor.endDrag()
+            if activeRadialTool == .scale {
+                // A scale gesture reverts to Move on release, so the menu
+                // doesn't keep showing Scale armed with no interaction to
+                // explain why. syncGizmo swaps the gizmo back.
+                activeRadialTool = .move
+                syncGizmo()
+            }
+            // endDrag cleared the (stale) pre-drag hover; re-derive it from
+            // where the mouse actually is, so a handle still under the cursor
+            // stays lit without waiting for the next move.
+            editor.updateGizmoHover(Float(p.x), Float(p.y))
+            isDragging = false
+
+        case nil:
+            break
+        }
+        pointer = nil
+    }
+
+    private func updateCamera(from down: CGPoint, to p: CGPoint) {
+        // Cumulative from the press, which is the contract core expects.
+        editor.updateCameraGesture(Float(p.x - down.x), Float(p.y - down.y))
+        refreshOverlayState()
+    }
+
+    /// A press that never became a drag keeps its mode's meaning.
+    private func performClick(at p: CGPoint) {
         switch mode {
-        case .select:
+        case .edit:
             let r = editor.pick(Float(p.x), Float(p.y))
             editor.select(r.node_id) // miss returns kInvalidNode -> clears
             refreshSelectionMirrors()
@@ -132,85 +211,15 @@ final class EditorViewModel {
         case .spawn:
             let s = editor.spawn(spawnShape, spawnOp, Float(p.x), Float(p.y))
             guard s.node_id != sq.kInvalidNode else { return } // zero-size viewport guard in core
-            // Selection was already made by core (Editor::spawn calls
-            // select() internally); the mirrors + mode switch are the VM's
-            // job, same division of labor as .select's pick+select above.
+            // Selection was already made by core (Editor::spawn calls select()
+            // internally); the mirrors + mode switch are the VM's job.
             refreshSelectionMirrors()
-            setMode(.modify) // selectedNodeID is already set above, so this also syncs the gizmo on
-        case .modify:
-            if selectedNodeID == nil {
-                // Modify-awaiting-selection: behave exactly like select mode
-                // until something is correctly clicked.
-                let r = editor.pick(Float(p.x), Float(p.y))
-                editor.select(r.node_id)
-                refreshSelectionMirrors()
-                syncGizmo()
-            } else {
-                switch activeRadialTool {
-                case .move:
-                    // Off-handle clicks are inert (core returns false): moving
-                    // happens only by grabbing a gizmo handle.
-                    isDragging = editor.beginDrag(Float(p.x), Float(p.y))
-                case .scale:
-                    editor.beginScale()
-                    scaleDragStartY = p.y
-                    isDragging = true
-                }
-            }
-        case .camera:
-            lastCameraDragPoint = p
+            setMode(.edit)
         }
-    }
-
-    func handleMouseDragged(_ p: CGPoint) {
-        if mode == .camera {
-            // Grab-the-world pan: raw p − last deltas keep the clicked
-            // point under the cursor (see pan_view's sign convention;
-            // flipped view coords, no negation needed).
-            guard let last = lastCameraDragPoint else { return }
-            editor.cameraPan(Float(p.x - last.x), Float(p.y - last.y))
-            lastCameraDragPoint = p
-            refreshOverlayState()
-            return
-        }
-        guard mode == .modify, isDragging else { return }
-        switch activeRadialTool {
-        case .move:
-            editor.updateDrag(Float(p.x), Float(p.y))
-        case .scale:
-            editor.updateScale(Float(p.y - scaleDragStartY))
-        }
-        refreshOverlayState()
-    }
-
-    func handleMouseUp(_ p: CGPoint) {
-        if mode == .camera {
-            lastCameraDragPoint = nil
-            return
-        }
-        guard mode == .modify, isDragging else { return }
-        switch activeRadialTool {
-        case .move:
-            editor.endDrag()
-            // endDrag cleared the (stale) pre-drag hover; re-derive it from
-            // where the mouse actually is so a handle still under the cursor
-            // stays lit without waiting for the next mouse move.
-            editor.updateGizmoHover(Float(p.x), Float(p.y))
-        case .scale:
-            editor.endScale()
-            // Reverting to .move brings the gizmo back, so re-sync and then
-            // re-derive hover from where the mouse actually is — same
-            // reasoning as the .move arm above, and it means the gizmo never
-            // reappears carrying a highlight left over from before the scale.
-            activeRadialTool = .move
-            syncGizmo()
-            editor.updateGizmoHover(Float(p.x), Float(p.y))
-        }
-        isDragging = false
     }
 
     func handleMouseMoved(_ p: CGPoint) {
-        guard mode == .modify, selectedNodeID != nil else { return }
+        guard mode == .edit else { return }
         editor.updateGizmoHover(Float(p.x), Float(p.y))
     }
 
@@ -218,25 +227,75 @@ final class EditorViewModel {
         editor.clearGizmoHover()
     }
 
-    func handleScroll(dx: CGFloat, dy: CGFloat, shiftHeld: Bool) {
-        guard mode == .camera else { return }
-        if shiftHeld {
-            editor.cameraPan(Float(dx), Float(dy))
-        } else {
-            editor.cameraOrbit(Float(dx), Float(dy))
+    /// Two-finger scroll pans. Phases let this be a real begin/update/end
+    /// gesture on a trackpad; a legacy wheel reports none, so there each event
+    /// is a complete one-shot gesture through the same contract.
+    func handleScroll(dx: CGFloat, dy: CGFloat, at point: CGPoint,
+                      phase: NSEvent.Phase, momentumPhase: NSEvent.Phase) {
+        guard !phase.isEmpty || !momentumPhase.isEmpty else {
+            oneShotCameraGesture(.Pan, at: point, dx: dx, dy: dy)
+            return
         }
+
+        // Momentum arrives as its own phase run after the fingers lift, so it
+        // begins a fresh gesture rather than being dropped — otherwise flicking
+        // to pan would stop dead the instant you let go.
+        if phase.contains(.began) || momentumPhase.contains(.began) {
+            scrollTotal = .zero
+            editor.beginCameraGesture(.Pan, Float(point.x), Float(point.y))
+            scrollActive = true
+        }
+        guard scrollActive else { return }
+
+        scrollTotal.x += dx
+        scrollTotal.y += dy
+        editor.updateCameraGesture(Float(scrollTotal.x), Float(scrollTotal.y))
+        refreshOverlayState()
+
+        if phase.contains(.ended) || phase.contains(.cancelled)
+            || momentumPhase.contains(.ended) || momentumPhase.contains(.cancelled) {
+            editor.endCameraGesture()
+            scrollActive = false
+        }
+    }
+
+    /// Pinch dollies toward the cursor. `magnification` is per-event, so it is
+    /// accumulated and handed to core as one cumulative value; core converts
+    /// magnification to drag points itself, so no sensitivity constant lives here.
+    func handleMagnify(_ magnification: CGFloat, at point: CGPoint, phase: NSEvent.Phase) {
+        guard !phase.isEmpty else {
+            let points = editor.dollyPointsForMagnification(Float(magnification))
+            oneShotCameraGesture(.Dolly, at: point, dx: 0, dy: CGFloat(points))
+            return
+        }
+
+        if phase.contains(.began) {
+            magnifyTotal = 0
+            editor.beginCameraGesture(.Dolly, Float(point.x), Float(point.y))
+            magnifyActive = true
+        }
+        guard magnifyActive else { return }
+
+        magnifyTotal += magnification
+        editor.updateCameraGesture(0, editor.dollyPointsForMagnification(Float(magnifyTotal)))
+        refreshOverlayState()
+
+        if phase.contains(.ended) || phase.contains(.cancelled) {
+            editor.endCameraGesture()
+            magnifyActive = false
+        }
+    }
+
+    private func oneShotCameraGesture(_ kind: sq.CameraGesture, at point: CGPoint,
+                                      dx: CGFloat, dy: CGFloat) {
+        editor.beginCameraGesture(kind, Float(point.x), Float(point.y))
+        editor.updateCameraGesture(Float(dx), Float(dy))
+        editor.endCameraGesture()
         refreshOverlayState()
     }
 
-    func handleMagnify(_ delta: CGFloat) {
-        guard mode == .camera else { return }
-        editor.cameraZoom(Float(delta))
-        refreshOverlayState()
-    }
-
-    /// Hook for MetalViewport's onSizeChange: a viewport resize can move the
-    /// selected node's projected screen anchor even though nothing else
-    /// (selection, camera, node transform) changed.
+    /// Hook for MetalViewport's onSizeChange: a resize can move the selected
+    /// node's projected anchor even though nothing else changed.
     func handleViewportSizeChange() {
         refreshOverlayState()
     }
@@ -245,12 +304,12 @@ final class EditorViewModel {
 
     func radialSelectMove() {
         activeRadialTool = .move
-        syncGizmo() // the gizmo is move-only; switching tools shows/hides it
+        syncGizmo()
     }
 
     func radialSelectScale() {
         activeRadialTool = .scale
-        syncGizmo() // hides the gizmo — Scale has no handles of its own yet
+        syncGizmo()
     }
 
     func radialToggleOp() {
@@ -259,22 +318,24 @@ final class EditorViewModel {
         refreshOverlayState()
     }
 
-    /// Deletes the selected node (permanent — no undo) and switches to
-    /// camera mode (user ruling).
+    /// Deletes the selected node (permanent — no undo). Stays in `.edit`:
+    /// there is no camera mode to fall back to any more, and none is needed.
     func deleteSelected() {
         editor.deleteSelectedNode()
         refreshSelectionMirrors()
-        setMode(.camera)
+        syncGizmo()
     }
 
     /// Returns true if the key was consumed (so the caller skips
     /// `super.keyDown`).
     func handleKeyDown(_ characters: String) -> Bool {
         switch characters {
-        case "1": setMode(.select); return true
+        case "1": setMode(.edit); return true
         case "2": setMode(.spawn); return true
-        case "3": setMode(.modify); return true
-        case "4": setMode(.camera); return true
+        case "f", "F":
+            editor.frameSelected()
+            refreshOverlayState()
+            return true
         default: return false
         }
     }
@@ -282,14 +343,10 @@ final class EditorViewModel {
     // MARK: - Selection mirrors
 
     /// Single obvious refresh path: updates the selection mirrors (id/name)
-    /// and then, since the radial-menu overlay's anchor/op both depend on
-    /// what's selected, folds in `refreshOverlayState()` too — callers never
-    /// need to remember to call both.
+    /// and then folds in `refreshOverlayState()`, since the radial menu's
+    /// anchor and op both depend on what's selected.
     private func refreshSelectionMirrors() {
         let id = editor.selectedNode()
-        // M4 deferred finding resolved: kInvalidNode moved to the interop
-        // header (ShapeshifterCore.h) in this milestone specifically so
-        // Swift could import it as a named sentinel instead of hardcoding -1.
         if id == sq.kInvalidNode {
             selectedNodeID = nil
             selectedNodeName = nil
@@ -297,10 +354,8 @@ final class EditorViewModel {
             var buf = [CChar](repeating: 0, count: 64)
             editor.nodeName(id, &buf, 64)
             selectedNodeID = id
-            // Deviation from the brief's `String(cString: buf)`: that overload
-            // (String from a value-type [CChar] array) is deprecated on this
-            // toolchain. Going through the buffer pointer instead calls the
-            // non-deprecated `String(cString: UnsafePointer<CChar>)` overload.
+            // Deviation from `String(cString: buf)`: that overload (String from
+            // a value-type [CChar] array) is deprecated on this toolchain.
             selectedNodeName = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
         }
         refreshOverlayState()
@@ -309,10 +364,9 @@ final class EditorViewModel {
     // MARK: - Radial-menu overlay mirrors
 
     /// Refreshes `radialAnchor`/`selectedNodeOp` from core. Called by
-    /// `refreshSelectionMirrors()` above (selection changes) and directly
-    /// after anything else that can move the anchor or change the op without
-    /// changing the selection itself: camera gestures, drag/scale updates,
-    /// viewport size changes, and op toggles.
+    /// `refreshSelectionMirrors()` and directly after anything else that can
+    /// move the anchor without changing the selection: camera gestures, drag
+    /// updates, viewport resizes, and op toggles.
     private func refreshOverlayState() {
         let anchor = editor.projectSelectedAnchor()
         radialAnchor = anchor.visible ? CGPoint(x: CGFloat(anchor.x), y: CGFloat(anchor.y)) : nil

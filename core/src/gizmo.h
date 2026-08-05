@@ -82,6 +82,14 @@ inline constexpr float kUniformPickTolerancePts = 14.0f;
 // handle never wants.
 inline constexpr float kScaleAxisMinGrabFrac = 0.15f;
 
+// The uniform handle's drag rate (per view point of vertical travel) and the
+// per-component bounds every scale drag clamps to. The rate is unchanged from
+// the pre-gizmo scale gesture: the centre handle IS that gesture, now anchored
+// to a real affordance instead of swallowing every drag in the viewport.
+inline constexpr float kUniformScaleSens = 0.005f;
+inline constexpr float kNodeScaleMin = 0.05f;
+inline constexpr float kNodeScaleMax = 50.0f;
+
 // Floored closest-approach parameter for an axis handle, per the above.
 // nullopt only when ray_axis_param itself is singular (near-parallel).
 std::optional<float> scale_axis_param(const Ray& ray, const GizmoFrame& frame, GizmoHandle handle);

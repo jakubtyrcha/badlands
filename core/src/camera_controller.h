@@ -33,11 +33,21 @@ float pan_vertical_gain(float pitch);
 // moves. Pure math, no windowing/AppKit/Metal — the input plumbing lives in
 // the app layer (Editor forwards to this).
 //
-// State is kept in spherical coordinates around the orbit `target`. World up
+// State is kept in spherical coordinates around the look-at `target`. World up
 // is assumed to be +Y, so eye = target + radius * (cos(pitch)*sin(yaw),
 // sin(pitch), cos(pitch)*cos(yaw)). Keeping yaw/pitch/radius rather than a
 // raw eye position means orbiting and zooming never drift, and the pitch
 // clamp that stops the view flipping through the pole is trivial.
+//
+// The orbit PIVOT is tracked separately from that look-at target, and the
+// distinction is load-bearing. `target` is where the camera points: to_camera()
+// derives the view direction from it, so moving it re-aims the camera. The
+// pivot is merely what orbit() swings around. They coincide by default, but
+// cursor-anchored orbit needs to rotate about a point that is NOT on the view
+// axis — aiming at a feature means aiming off-centre — and folding the two
+// together would snap that feature to the middle of the screen the instant you
+// pressed. Every gesture that translates the rig moves both; only
+// set_pivot_preserving_eye moves the pivot alone.
 //
 // Every gesture method returns whether it actually moved the camera, so the
 // caller can skip redundant work for no-op input (a zero delta, or a
@@ -74,10 +84,16 @@ public:
     // sets up = {0,1,0}.
     Camera to_camera() const;
 
-    // Rotates the eye around the target. dx/dy are raw pointer deltas in
-    // view points (y grows downward): dx>0 increases yaw, dy<0 (drag up in
-    // flipped coords) increases pitch (camera rises). Pitch is clamped short
-    // of the pole. Returns whether the camera moved.
+    // Rotates the rig around the PIVOT. dx/dy are raw pointer deltas in view
+    // points (y grows downward): dx>0 increases yaw, dy<0 (drag up in flipped
+    // coords) increases pitch (camera rises). Pitch is clamped short of the
+    // pole. Returns whether the camera moved.
+    //
+    // The arm (pivot -> eye) and the view direction take the SAME angular
+    // deltas. When the pivot is the look-at target the two angle pairs are
+    // identical and this reduces exactly to rotating the view — the historical
+    // behaviour, unchanged. When the pivot sits off the view axis, the rig
+    // swings around it while the camera keeps aiming where it already was.
     bool orbit(float dx_pts, float dy_pts);
 
     // Dollies along the view ray. Positive delta (pinch-out) zooms in:
@@ -95,23 +111,17 @@ public:
 
     // --- cursor-anchored navigation ---------------------------------------
 
-    // Re-centres the orbit on `pivot` WITHOUT moving the eye: yaw/pitch/radius
-    // are recomputed from the same eye position, so nothing on screen shifts
-    // and only the meaning of a subsequent orbit() changes. That invariant is
-    // the entire reason it is safe to re-derive the pivot at every gesture
-    // rather than making the user place one.
+    // Points a subsequent orbit() at a new centre and changes NOTHING ELSE —
+    // not the eye, not the view direction, not the target or radius. Because
+    // the pivot is separate state rather than the look-at point, honouring
+    // that is a single assignment; there is no pose it cannot express and no
+    // case where it has to compromise. That is what makes it safe to
+    // re-derive the pivot at the start of every gesture instead of asking the
+    // user to place one.
     //
-    // Returns false, state untouched, when it cannot honour that guarantee:
-    //  - a non-finite pivot (see is_finite3 in math.h — a NaN here would
-    //    corrupt the camera unrecoverably, so it is refused rather than clamped)
-    //  - a pivot at the eye (no direction to decompose)
-    //  - a pivot that would need a pitch past kPitchLimit; clamping the pitch
-    //    would move the eye, breaking the one promise this makes. Reachable by
-    //    aiming low on screen from an already-steep view; the caller simply
-    //    keeps orbiting around the previous pivot.
-    // Otherwise the eye->pivot DISTANCE is clamped into [kRadiusMin,
-    // kRadiusMax] along the same direction, so a far pivot is pulled nearer
-    // rather than discarded.
+    // Returns false, state untouched, only for a non-finite pivot (see
+    // is_finite3 in math.h): a NaN here would corrupt the camera with no
+    // user-visible recovery, so it is refused rather than clamped.
     bool set_pivot_preserving_eye(simd_float3 pivot);
 
     // World-axis pan. dx maps to the camera's right vector — already
@@ -146,16 +156,23 @@ public:
         return magnification * (kZoomSens / kDollySens);
     }
 
+    // Re-centres and re-ranges WITHOUT reorienting: framing answers "where am
+    // I looking", never "from where". Radius is clamped to the usual bounds; a
+    // non-finite target or radius is refused outright.
+    bool frame_on(simd_float3 target, float radius);
+
     void set_aspect(float aspect);
 
     // Accessors for tests.
     simd_float3 target() const { return target_; }
+    simd_float3 pivot() const { return pivot_; }   // what orbit() swings around
     float yaw() const { return yaw_; }
     float pitch() const { return pitch_; }
     float radius() const { return radius_; }
 
 private:
-    simd_float3 target_;
+    simd_float3 target_;   // look-at point: sets the view direction
+    simd_float3 pivot_;    // orbit centre: what a rotation swings around
     float yaw_, pitch_, radius_;
     float fov_y_radians_, aspect_;
 };

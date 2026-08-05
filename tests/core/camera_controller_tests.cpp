@@ -173,14 +173,21 @@ TEST_CASE("pan_view moves target in screen space, perpendicular to the view dire
 
 // --- cursor-anchored navigation --------------------------------------------
 
-TEST_CASE("set_pivot_preserving_eye leaves the eye exactly where it was") {
-    // The whole justification for re-deriving the pivot on EVERY gesture: if
-    // it could shift the eye, each drag would begin with a visible jolt.
+TEST_CASE("set_pivot_preserving_eye changes the orbit centre and nothing else") {
+    // The invariant auto-pivot rests on. Not just the eye: the view direction,
+    // target and radius must all hold, because re-deriving the pivot happens at
+    // the START of every gesture and any change there is a visible jolt before
+    // the user has dragged at all.
+    //
+    // An earlier draft folded the pivot into the look-at target. It preserved
+    // the eye and still failed this: to_camera() derives the view direction
+    // from the target, so an off-axis pivot swung the camera to centre it —
+    // and aiming at a feature is by definition aiming off-centre.
     const Camera cam = make_camera(simd_float3{4.0f, 3.0f, 6.0f}, simd_float3{0.0f, 0.5f, 0.0f});
-    const simd_float3 eye_before = cam.eye;
 
     const simd_float3 pivots[] = {
-        {0.0f, 0.0f, 0.0f}, {1.0f, 2.0f, -1.0f}, {3.9f, 2.9f, 5.0f}, {-4.0f, -2.0f, -3.0f},
+        {0.0f, 0.0f, 0.0f},   {1.0f, 2.0f, -1.0f}, {3.9f, 2.9f, 5.0f},
+        {-4.0f, -2.0f, -3.0f}, {0.0f, -3.0f, 5.9f}, {0.0f, 0.0f, -500.0f},
     };
 
     for (const simd_float3 pivot : pivots) {
@@ -188,61 +195,79 @@ TEST_CASE("set_pivot_preserving_eye leaves the eye exactly where it was") {
         CAPTURE(pivot.y);
         CAPTURE(pivot.z);
         CameraController c = CameraController::from_camera(cam);
+        const Camera before = c.to_camera();
+
         REQUIRE(c.set_pivot_preserving_eye(pivot));
 
         const Camera after = c.to_camera();
-        CHECK(after.eye.x == doctest::Approx(eye_before.x));
-        CHECK(after.eye.y == doctest::Approx(eye_before.y));
-        CHECK(after.eye.z == doctest::Approx(eye_before.z));
-        // And the pivot really did move: the target is now on the eye->pivot
-        // ray, at the (possibly clamped) distance.
-        const simd_float3 to_pivot = simd_normalize(pivot - eye_before);
-        const simd_float3 to_target = simd_normalize(c.target() - eye_before);
-        CHECK(simd_dot(to_pivot, to_target) == doctest::Approx(1.0f).epsilon(1e-4));
+        CHECK(after.eye.x == doctest::Approx(before.eye.x));
+        CHECK(after.eye.y == doctest::Approx(before.eye.y));
+        CHECK(after.eye.z == doctest::Approx(before.eye.z));
+        // The view direction, which is what the old conflated model broke.
+        const simd_float3 f0 = simd_normalize(before.target - before.eye);
+        const simd_float3 f1 = simd_normalize(after.target - after.eye);
+        CHECK(simd_dot(f0, f1) == doctest::Approx(1.0f).epsilon(1e-5));
+        CHECK(c.radius() == doctest::Approx(CameraController::from_camera(cam).radius()));
+
+        // And the pivot really did take.
+        CHECK(c.pivot().x == doctest::Approx(pivot.x));
+        CHECK(c.pivot().y == doctest::Approx(pivot.y));
+        CHECK(c.pivot().z == doctest::Approx(pivot.z));
     }
 }
 
-TEST_CASE("set_pivot_preserving_eye refuses what it cannot honour") {
+TEST_CASE("set_pivot_preserving_eye refuses only a non-finite pivot") {
     const Camera cam = make_camera(simd_float3{0.0f, 0.0f, 5.0f}, simd_float3{0.0f, 0.0f, 0.0f});
-    const float nan = std::nanf("");
+    CameraController c = CameraController::from_camera(cam);
+    const simd_float3 before = c.pivot();
 
-    SUBCASE("non-finite pivot is refused, not clamped") {
+    CHECK_FALSE(c.set_pivot_preserving_eye(simd_float3{std::nanf(""), 0.0f, 0.0f}));
+    CHECK_FALSE(c.set_pivot_preserving_eye(simd_float3{0.0f, INFINITY, 0.0f}));
+    CHECK(c.pivot().z == doctest::Approx(before.z)); // state untouched
+
+    // Everything else is representable now that the pivot is separate state:
+    // at the eye, straight below it, or far outside the radius clamp.
+    CHECK(c.set_pivot_preserving_eye(cam.eye));
+    CHECK(c.set_pivot_preserving_eye(simd_float3{0.0f, -3.0f, 5.0f}));
+    CHECK(c.set_pivot_preserving_eye(simd_float3{0.0f, 0.0f, -500.0f}));
+}
+
+TEST_CASE("orbit around an off-axis pivot swings the rig without re-aiming the camera") {
+    const Camera cam = make_camera(simd_float3{0.0f, 0.0f, 5.0f}, simd_float3{0.0f, 0.0f, 0.0f});
+
+    SUBCASE("with the pivot at the look-at target, behaviour is unchanged") {
+        // The compatibility guarantee: the arm and view angle pairs are equal
+        // by construction there, so the new path collapses onto the old one.
         CameraController c = CameraController::from_camera(cam);
-        const simd_float3 before = c.target();
-        CHECK_FALSE(c.set_pivot_preserving_eye(simd_float3{nan, 0.0f, 0.0f}));
-        CHECK_FALSE(c.set_pivot_preserving_eye(simd_float3{0.0f, INFINITY, 0.0f}));
-        CHECK(c.target().x == doctest::Approx(before.x)); // state untouched
-        CHECK(c.target().z == doctest::Approx(before.z));
+        CHECK(c.orbit(100.0f, 0.0f));
+        CHECK(c.yaw() == doctest::Approx(0.5f));
+        CHECK(c.target().x == doctest::Approx(0.0f));
+        CHECK(c.target().y == doctest::Approx(0.0f));
+        CHECK(c.target().z == doctest::Approx(0.0f));
+        CHECK(c.radius() == doctest::Approx(5.0f));
     }
 
-    SUBCASE("a pivot at the eye has no direction to decompose") {
+    SUBCASE("an off-axis pivot keeps the eye on a sphere around THAT point") {
         CameraController c = CameraController::from_camera(cam);
-        CHECK_FALSE(c.set_pivot_preserving_eye(cam.eye));
-    }
+        const simd_float3 pivot = {1.5f, 0.5f, 0.0f}; // off the view axis
+        REQUIRE(c.set_pivot_preserving_eye(pivot));
 
-    SUBCASE("a pivot needing a pitch past the pole clamp is refused") {
-        // Almost straight down from the eye: the orbit arm would be near
-        // vertical, i.e. pitch ~90 degrees. Clamping it would move the eye, so
-        // the pivot is declined and the caller keeps the previous one.
-        CameraController c = CameraController::from_camera(cam);
-        const simd_float3 before = c.target();
-        CHECK_FALSE(c.set_pivot_preserving_eye(simd_float3{0.0f, -3.0f, 5.0f}));
-        CHECK(c.target().y == doctest::Approx(before.y));
-    }
+        const simd_float3 eye0 = c.to_camera().eye;
+        const float arm0 = simd_length(eye0 - pivot);
+        const simd_float3 forward0 = simd_normalize(c.to_camera().target - eye0);
 
-    SUBCASE("a distant pivot is pulled to kRadiusMax rather than refused") {
-        CameraController c = CameraController::from_camera(cam);
-        CHECK(c.set_pivot_preserving_eye(simd_float3{0.0f, 0.0f, -500.0f}));
-        CHECK(c.radius() == doctest::Approx(CameraController::kRadiusMax));
-        // Eye still fixed even though the pivot moved along the ray.
-        CHECK(c.to_camera().eye.z == doctest::Approx(5.0f));
-    }
+        REQUIRE(c.orbit(80.0f, -40.0f));
 
-    SUBCASE("a very near pivot is pushed out to kRadiusMin rather than refused") {
-        CameraController c = CameraController::from_camera(cam);
-        CHECK(c.set_pivot_preserving_eye(simd_float3{0.0f, 0.0f, 4.99f}));
-        CHECK(c.radius() == doctest::Approx(CameraController::kRadiusMin));
-        CHECK(c.to_camera().eye.z == doctest::Approx(5.0f));
+        const Camera after = c.to_camera();
+        // Rigid: the distance to the pivot is preserved...
+        CHECK(simd_length(after.eye - pivot) == doctest::Approx(arm0));
+        // ...the eye actually moved...
+        CHECK(simd_length(after.eye - eye0) > 0.1f);
+        // ...and the view turned by the same angles the arm did, so the camera
+        // never snapped its aim onto the pivot.
+        const simd_float3 forward1 = simd_normalize(after.target - after.eye);
+        CHECK(simd_dot(forward0, forward1) < 0.9999f); // it did rotate
+        CHECK(c.yaw() == doctest::Approx(0.4f));       // 80 * kOrbitSens
     }
 }
 

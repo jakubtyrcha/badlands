@@ -47,4 +47,16 @@ FocusPoint resolve_focus(const SceneDocument& doc, const Ray& ray, simd_float3 f
 // MVP (scene.h), so no basis is involved.
 float node_bounding_radius(const Node& node);
 
+// Orbit radius that frames a bounding sphere of `bound`: the vertical fit
+// bound*kFrameMargin/sin(fov_y/2), floored at kMinFrameRadius.
+//
+// The floor is the load-bearing part. Without it, framing a nostril-scale node
+// fills the screen with featureless surface and strands you with no landmarks
+// — the opposite of what framing is for. A single floor achieves what scaling
+// the padding by the node's share of the model would, and needs no notion of a
+// parent the scene document does not have.
+inline constexpr float kFrameMargin = 1.6f;
+inline constexpr float kMinFrameRadius = 0.6f;
+float frame_radius_for_bound(float bound, float fov_y_radians);
+
 } // namespace sq

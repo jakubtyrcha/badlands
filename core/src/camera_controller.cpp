@@ -19,6 +19,22 @@ simd_float3 direction(float yaw, float pitch) {
     return simd_float3{cp * sy, sp, cp * cy};
 }
 
+// Shrinks `delta` so `angle + delta` stays within the pole clamp, never
+// reversing or creating motion. Deliberately NOT
+// `clamp(angle+delta) - angle`: an angle sitting a hair outside the limit
+// (float noise left by an earlier rotation) would make that expression return
+// a small correction even for delta == 0, so a gesture that asked for nothing
+// would nudge the camera and report that it moved.
+float clamp_pitch_delta(float angle, float delta) {
+    if (delta == 0.0f) {
+        return 0.0f;
+    }
+    const float allowed = clampf(angle + delta, -CameraController::kPitchLimit,
+                                 CameraController::kPitchLimit) - angle;
+    return (delta > 0.0f) ? std::fmax(0.0f, std::fmin(allowed, delta))
+                          : std::fmin(0.0f, std::fmax(allowed, delta));
+}
+
 } // namespace
 
 CameraController CameraController::from_camera(const Camera& cam) {
@@ -37,6 +53,7 @@ CameraController CameraController::from_camera(const Camera& cam) {
     }
 
     c.target_        = cam.target;
+    c.pivot_         = cam.target; // coincident until a gesture re-derives it
     c.yaw_           = std::atan2(offset.x, offset.z); // atan2(0, 0) == 0, so safe when degenerate
     c.pitch_         = pitch;
     c.radius_        = radius;
@@ -56,10 +73,49 @@ Camera CameraController::to_camera() const {
 }
 
 bool CameraController::orbit(float dx_pts, float dy_pts) {
-    const float before_yaw = yaw_, before_pitch = pitch_;
-    yaw_   = yaw_ + dx_pts * kOrbitSens;
-    pitch_ = clampf(pitch_ - dy_pts * kOrbitSens, -kPitchLimit, kPitchLimit);
-    return yaw_ != before_yaw || pitch_ != before_pitch;
+    const float d_yaw = dx_pts * kOrbitSens;
+
+    // Decompose the arm (pivot -> eye) the same way the view is decomposed. If
+    // the pivot IS the look-at target these two angle pairs are equal by
+    // construction, so everything below collapses to the original
+    // "rotate the view" behaviour.
+    const simd_float3 eye0 = to_camera().eye;
+    const simd_float3 arm = eye0 - pivot_;
+    const float arm_len = simd_length(arm);
+    const bool have_arm = arm_len > kRadiusEps;
+    float arm_yaw = 0.0f, arm_pitch = 0.0f;
+    if (have_arm) {
+        arm_yaw   = std::atan2(arm.x, arm.z);
+        arm_pitch = std::asin(clampf(arm.y / arm_len, -1.0f, 1.0f));
+    }
+
+    // Shrink the pitch delta so NEITHER angle crosses the pole. Letting one
+    // saturate while the other kept turning would desync the arm from the
+    // view, and the camera would slowly drift its aim over a long drag.
+    float d_pitch = -dy_pts * kOrbitSens;
+    d_pitch = clamp_pitch_delta(pitch_, d_pitch);
+    if (have_arm) {
+        d_pitch = clamp_pitch_delta(arm_pitch, d_pitch);
+    }
+
+    if (d_yaw == 0.0f && d_pitch == 0.0f) {
+        return false;
+    }
+
+    yaw_   += d_yaw;
+    pitch_ += d_pitch;
+
+    // Only when the pivot is genuinely off the look-at target: there, the eye
+    // has to be re-placed from the rotated arm and target_ re-derived to match.
+    // When the two coincide the yaw_/pitch_ update above already swings the eye
+    // around the target correctly, and running the round trip anyway would feed
+    // a float ulp of drift into target_ on every single call.
+    if (have_arm && simd_distance_squared(pivot_, target_) > kRadiusEps * kRadiusEps) {
+        // radius_ is untouched: the rotation is rigid.
+        const simd_float3 eye1 = pivot_ + arm_len * direction(arm_yaw + d_yaw, arm_pitch + d_pitch);
+        target_ = eye1 - radius_ * direction(yaw_, pitch_);
+    }
+    return true;
 }
 
 bool CameraController::zoom(float delta) {
@@ -107,32 +163,12 @@ float pan_vertical_gain(float pitch) {
 
 bool CameraController::set_pivot_preserving_eye(simd_float3 pivot) {
     if (!is_finite3(pivot)) {
-        return false;
+        return false; // a NaN pivot would corrupt the camera unrecoverably
     }
-
-    const simd_float3 eye = to_camera().eye;
-    const simd_float3 offset = eye - pivot; // pivot -> eye: the orbit arm
-    const float len = simd_length(offset);
-    // Negated comparison so a NaN length falls into the reject branch too
-    // (every IEEE comparison against NaN is false).
-    if (!(len > kRadiusEps)) {
-        return false;
-    }
-
-    const simd_float3 dir = offset / len;
-    const float pitch = std::asin(clampf(dir.y, -1.0f, 1.0f));
-    if (std::fabs(pitch) > kPitchLimit) {
-        return false; // see header: clamping here would move the eye
-    }
-
-    const float radius = clampf(len, kRadiusMin, kRadiusMax);
-    // direction(yaw, pitch) reconstructs `dir` exactly from these two angles
-    // (asin/atan2 are its inverse), so to_camera().eye comes back to `eye`
-    // whatever the radius clamp did.
-    target_ = eye - radius * dir;
-    radius_ = radius;
-    pitch_  = pitch;
-    yaw_    = std::atan2(dir.x, dir.z);
+    // Deliberately the whole implementation. Nothing observable changes here:
+    // the eye, the view direction, target_ and radius_ are all untouched, so
+    // re-deriving the pivot at every gesture start is invisible on screen.
+    pivot_ = pivot;
     return true;
 }
 
@@ -166,6 +202,7 @@ bool CameraController::pan_world(float dx_pts, float dy_pts, float depth, float 
         return false;
     }
     target_ += step;
+    pivot_  += step; // the rig translates as a whole
     return true;
 }
 
@@ -198,7 +235,18 @@ bool CameraController::dolly_toward(simd_float3 focus, float factor) {
         return false;
     }
     target_ += step;
+    pivot_  += step; // the rig translates as a whole
     return true;
+}
+
+bool CameraController::frame_on(simd_float3 target, float radius) {
+    if (!is_finite3(target) || !std::isfinite(radius)) {
+        return false;
+    }
+    target_ = target;
+    pivot_  = target; // framing re-centres both: the framed node IS the new orbit centre
+    radius_ = clampf(radius, kRadiusMin, kRadiusMax);
+    return true; // yaw_/pitch_ untouched by design
 }
 
 void CameraController::set_aspect(float aspect) {

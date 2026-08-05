@@ -32,7 +32,7 @@ struct ContentView: View {
             // with zero safe-area insets; if window chrome ever changes that
             // (e.g. a toolbar), this anchor would need reconciling against
             // the viewport's actual frame instead of assuming they match.
-            if vm.mode == .modify, let anchor = vm.radialAnchor, vm.selectedNodeID != nil, !vm.isDragging {
+            if vm.mode == .edit, let anchor = vm.radialAnchor, vm.selectedNodeID != nil, !vm.isDragging {
                 RadialMenu(vm: vm)
                     .position(anchor)
             }
