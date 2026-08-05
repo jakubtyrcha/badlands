@@ -15,16 +15,46 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <span>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <catch_amalgamated.hpp>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include "engine/rhi/null/null_rhi.hpp"
 #include "engine/rhi/rhi_device.hpp"
 
 namespace badlands::rhi::test {
+
+// Captures everything logged during `fn` and returns it.
+//
+// Rule 1 says every failure path logs, and rule 9 says every feature is
+// tested -- which together mean a refusal that logs needs a way to assert that
+// it logged. Without this the diagnostics ARE the fix for a whole class of
+// silent-fallback defects, and none of them can be tested, so the rule decays
+// into a convention.
+template <typename Fn>
+inline std::string CaptureLog(Fn&& fn) {
+  std::ostringstream oss;
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+  auto capture = std::make_shared<spdlog::logger>("capture", sink);
+  capture->set_level(spdlog::level::trace);
+
+  auto previous = spdlog::default_logger();
+  spdlog::set_default_logger(capture);
+  try {
+    fn();
+  } catch (...) {
+    spdlog::set_default_logger(previous);
+    throw;
+  }
+  spdlog::set_default_logger(previous);
+  return oss.str();
+}
 
 // Minimal shader source per backend.
 //
@@ -36,6 +66,17 @@ namespace badlands::rhi::test {
 // Entry points are named cs_/vs_/fs_main rather than `main`: Slang renames a
 // Metal entry called `main` to `main_0`, and matching that convention here
 // keeps the tests from encoding a trap the real shaders avoid.
+// A backend with no arm here would otherwise get an empty shader source, which
+// compiles on Null, "succeeds" on a real backend often enough to pass
+// REQUIRE(shader), and then shows up as a wrong centre pixel. Refuse loudly
+// instead -- this is the file the DX12/HLSL arm goes in, and forgetting one of
+// these functions must be impossible to miss.
+inline const char* UnhandledBackend(const char* fn, BackendKind backend) {
+  FAIL("rhi_conformance: " << fn << " has no source for backend "
+                           << ToString(backend));
+  return "";
+}
+
 inline const char* MinimalComputeSource(BackendKind backend) {
   switch (backend) {
     case BackendKind::Metal:
@@ -51,7 +92,7 @@ kernel void cs_main(uint3 gid [[thread_position_in_grid]]) {}
     case BackendKind::Null:
       return "";
   }
-  return "";
+  return UnhandledBackend("MinimalComputeSource", backend);
 }
 
 inline const char* MinimalGraphicsSource(BackendKind backend) {
@@ -69,7 +110,7 @@ fragment float4 fs_main() { return float4(1.0); }
     case BackendKind::Null:
       return "";
   }
-  return "";
+  return UnhandledBackend("MinimalGraphicsSource", backend);
 }
 
 // Draws a real triangle by pulling positions from a storage buffer via the
@@ -91,7 +132,7 @@ fragment float4 fs_main() { return float4(0.0, 1.0, 0.0, 1.0); }
     case BackendKind::Null:
       return "";
   }
-  return "";
+  return UnhandledBackend("PullingGraphicsSource", backend);
 }
 
 // Samples a texture across a fullscreen triangle, so an upload can be proven to
@@ -116,7 +157,7 @@ fragment float4 fs_main(VOut i [[stage_in]],
     case BackendKind::Null:
       return "";
   }
-  return "";
+  return UnhandledBackend("SamplingGraphicsSource", backend);
 }
 
 // Whether this backend actually rasterizes, so readback assertions mean
@@ -232,6 +273,155 @@ inline void CheckViewsSurviveTextureDestroy(IRhiDevice& device) {
   CHECK(view->IsDestroyed());
   CHECK(view->GetTexture() == tex.get());
   CHECK(view->GetFormat() == Format::RGBA8Unorm);
+}
+
+// A binding table matching MakeTestReflection exactly, plus the resources it
+// references and the transitions SetBindingTable will expect. Several tests
+// need "a table that is entirely correct" as a starting point, so that a
+// failure they DO provoke is the only thing reported.
+struct FullBindingSet {
+  BindingTablePtr table;
+  BufferPtr ubo;
+  BufferPtr ssbo;
+  TexturePtr tex;
+  SamplerPtr sampler;
+
+  explicit operator bool() const { return table != nullptr; }
+
+  void TransitionAll(ICommandEncoder& e) const {
+    e.Transition(ubo.get(), ResourceState::ShaderRead);
+    e.Transition(ssbo.get(), ResourceState::ShaderWrite);
+    e.Transition(tex.get(), ResourceState::ShaderRead);
+  }
+};
+
+inline FullBindingSet MakeFullBindingSet(IRhiDevice& d, IComputePipeline* pipe,
+                                         const char* label) {
+  FullBindingSet s;
+  s.ubo = d.CreateBuffer(
+      {.size = 64, .usage = BufferUsage::Uniform, .label = "set_ubo"});
+  s.ssbo = d.CreateBuffer(
+      {.size = 64, .usage = BufferUsage::Storage, .label = "set_ssbo"});
+  s.tex = d.CreateTexture({.width = 4, .height = 4,
+                           .format = Format::RGBA8Unorm,
+                           .usage = TextureUsage::Sampled,
+                           .label = "set_tex"});
+  s.sampler = d.CreateSampler({.label = "set_samp"});
+  s.table = d.CreateBindingTable(
+      {.compute_pipeline = pipe,
+       .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                    .buffer = s.ubo.get()},
+                   {.slot = 1, .kind = BindingKind::StorageBuffer,
+                    .buffer = s.ssbo.get()},
+                   {.slot = 2, .kind = BindingKind::SampledTexture,
+                    .texture_view = s.tex->GetDefaultView()},
+                   {.slot = 3, .kind = BindingKind::Sampler,
+                    .sampler = s.sampler.get()}},
+       .label = label});
+  return s;
+}
+
+// Submitted work must retire rather than accumulate.
+//
+// Honest about its own strength: the load-bearing part is that InFlightCount()
+// is PURE, so a backend cannot inherit a `0` that looks exactly like success --
+// that is a compile-time guarantee, not something this case proves. What the
+// case itself adds is cross-backend coverage of the contract, and coverage of
+// the validation decorator's forwarding, which had none. The Metal-specific
+// "submissions retire and stop accumulating" case is what actually watches the
+// count fall.
+inline void CheckSubmissionsRetire(IRhiDevice& device) {
+  CHECK(device.InFlightCount() == 0);
+
+  for (int i = 0; i < 4; ++i) {
+    auto encoder = device.CreateCommandEncoder("retire");
+    REQUIRE(encoder);
+    encoder->Finish();
+    device.Submit(*encoder);
+  }
+  device.WaitIdle();
+  CHECK(device.InFlightCount() == 0);
+
+  // And again, to catch a backend that only ever drains in WaitIdle: the
+  // count must not have grown across rounds.
+  for (int i = 0; i < 4; ++i) {
+    auto encoder = device.CreateCommandEncoder("retire2");
+    encoder->Finish();
+    device.Submit(*encoder);
+  }
+  device.WaitIdle();
+  CHECK(device.InFlightCount() == 0);
+}
+
+// TextureViewDesc's slicing fields were accepted and ignored: every backend
+// handed back a whole-resource view whatever the caller asked for, and the view
+// cache was keyed on (base_mip, base_layer) so two views differing only in
+// COUNT collided. A descriptor field that is read and discarded is a trap with
+// a delayed fuse -- the caller believes it is sampling layer 3.
+inline void CheckSlicedViewsHonourTheirRange(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 8, .height = 8,
+                                   .array_layers = 4,
+                                   .mip_levels = 3,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled |
+                                            TextureUsage::CopyDst,
+                                   .label = "sliced"});
+  REQUIRE(tex);
+
+  // The default view resolves the "0 = all remaining" counts rather than
+  // reporting 0, so a caller never has to know the texture to read them.
+  ITextureView* whole = tex->GetDefaultView();
+  REQUIRE(whole != nullptr);
+  CHECK(whole->GetDesc().base_mip == 0);
+  CHECK(whole->GetDesc().mip_count == 3);
+  CHECK(whole->GetDesc().base_layer == 0);
+  CHECK(whole->GetDesc().layer_count == 4);
+
+  ITextureView* layer3 =
+      tex->CreateView({.base_layer = 3, .layer_count = 1, .label = "layer3"});
+  REQUIRE(layer3 != nullptr);
+  CHECK(layer3->GetDesc().base_layer == 3);
+  CHECK(layer3->GetDesc().layer_count == 1);
+  CHECK(layer3->GetDesc().mip_count == 3);
+  CHECK(layer3 != whole);
+
+  // Same base, different count: a distinct view, not a cache hit on the first.
+  ITextureView* layers2to3 = tex->CreateView({.base_layer = 2});
+  ITextureView* layer2 = tex->CreateView({.base_layer = 2, .layer_count = 1});
+  REQUIRE(layers2to3 != nullptr);
+  REQUIRE(layer2 != nullptr);
+  CHECK(layers2to3 != layer2);
+  CHECK(layers2to3->GetDesc().layer_count == 2);
+  CHECK(layer2->GetDesc().layer_count == 1);
+
+  // Mip slicing resolves the same way.
+  ITextureView* mip1 = tex->CreateView({.base_mip = 1});
+  REQUIRE(mip1 != nullptr);
+  CHECK(mip1->GetDesc().base_mip == 1);
+  CHECK(mip1->GetDesc().mip_count == 2);
+
+  // Identical descriptors still share one view.
+  CHECK(tex->CreateView({.base_layer = 3, .layer_count = 1}) == layer3);
+}
+
+// A range the texture cannot satisfy is refused, not clamped. Clamping would
+// hand back a whole-resource view for `base_layer = 9`, which reads as success
+// and samples the wrong thing (rules 2 and 8).
+inline void CheckOutOfRangeViewsAreRefused(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 8, .height = 8,
+                                   .array_layers = 2,
+                                   .mip_levels = 2,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled,
+                                   .label = "small"});
+  REQUIRE(tex);
+  CHECK(tex->CreateView({.base_layer = 9}) == nullptr);
+  CHECK(tex->CreateView({.base_mip = 5}) == nullptr);
+  CHECK(tex->CreateView({.base_layer = 1, .layer_count = 4}) == nullptr);
+  CHECK(tex->CreateView({.base_mip = 1, .mip_count = 3}) == nullptr);
+  // The in-range case still works, so the checks are not just refusing
+  // everything.
+  CHECK(tex->CreateView({.base_layer = 1, .layer_count = 1}) != nullptr);
 }
 
 // Binding tables keep their resources alive. Dropping the caller's last handle
@@ -764,7 +954,9 @@ inline void CheckLoadOpPreservesPreviousContents(IRhiDevice& device) {
   clear_pass.color_attachments.push_back(
       {.view = color->GetDefaultView(), .load_op = LoadOp::Clear,
        .store_op = StoreOp::Store, .clear_color = {1.0f, 0.5f, 0.0f, 1.0f}});
-  encoder->BeginRenderPass(clear_pass)->End();
+  auto* p1 = encoder->BeginRenderPass(clear_pass);
+  REQUIRE(p1 != nullptr);
+  p1->End();
 
   // Pass 2: load, draw nothing, store. The colour must survive.
   RenderPassDesc load_pass;
@@ -772,7 +964,9 @@ inline void CheckLoadOpPreservesPreviousContents(IRhiDevice& device) {
   load_pass.color_attachments.push_back(
       {.view = color->GetDefaultView(), .load_op = LoadOp::Load,
        .store_op = StoreOp::Store});
-  encoder->BeginRenderPass(load_pass)->End();
+  auto* p2 = encoder->BeginRenderPass(load_pass);
+  REQUIRE(p2 != nullptr);
+  p2->End();
 
   encoder->Transition(color.get(), ResourceState::CopySrc);
   encoder->Transition(readback.get(), ResourceState::CopyDst);
@@ -800,7 +994,10 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckBufferBoundsAreRefused(device);
   CheckDestroyIsObservableAndIdempotent(device);
   CheckViewsSurviveTextureDestroy(device);
+  CheckSlicedViewsHonourTheirRange(device);
+  CheckOutOfRangeViewsAreRefused(device);
   CheckBindingTableRetainsItsResources(device);
+  CheckSubmissionsRetire(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

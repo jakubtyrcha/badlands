@@ -402,6 +402,61 @@ fragment float4 fs_main(constant Push& p [[buffer(0)]]) {
   CHECK(pixels[centre + 1] > 200);
 }
 
+// No comma in the name: Catch2 splits its -filter argument on commas, so a
+// test named with one cannot be selected individually.
+TEST_CASE("metal: a slot absent from reflection is refused rather than guessed",
+          "[rhi][metal][gpu]") {
+  // The trap this replaced: IndexFor fell back to the slot index, so an entry
+  // with no reflection behind it bound at whatever index the slot happened to
+  // be. That is how a sampler once landed at index 1 and MTL_DEBUG_LAYER
+  // reported "missing Sampler binding at index 0" -- a wrong bind, reported
+  // three layers away from its cause.
+  //
+  // Unvalidated device on purpose: the decorator has its own report for this,
+  // and this case is about the BACKEND refusing rather than guessing.
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  auto module = d->CreateShaderModule(
+      rhitest::MinimalComputeSource(d->GetBackend()),
+      rhitest::MakeTestReflection(), "absent");
+  auto pipe =
+      d->CreateComputePipeline({.shader = module.get(), .entry = "cs_main"});
+  REQUIRE(pipe);
+  auto ubo = d->CreateBuffer({.size = 64, .usage = BufferUsage::Uniform,
+                              .label = "absent_ubo"});
+
+  // Slot 9 exists in no reflection anywhere.
+  auto table = d->CreateBindingTable(
+      {.compute_pipeline = pipe.get(),
+       .entries = {{.slot = 9, .kind = BindingKind::UniformBuffer,
+                    .buffer = ubo.get()}},
+       .label = "absent_table"});
+  REQUIRE(table);
+
+  const std::string log = rhitest::CaptureLog([&] {
+    auto encoder = d->CreateCommandEncoder("absent");
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetPipeline(pipe.get());
+    pass->SetBindingTable(0, table.get());
+    pass->Dispatch(1, 1, 1);
+    pass->End();
+    encoder->Finish();
+    d->Submit(*encoder);
+    d->WaitIdle();
+  });
+  INFO(log);
+  CHECK(log.find("slot 9") != std::string::npos);
+  CHECK(log.find("absent from the pipeline's reflection") != std::string::npos);
+}
+
+TEST_CASE("metal: sliced views honour their range", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckSlicedViewsHonourTheirRange(*d);
+}
+TEST_CASE("metal: out-of-range views are refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckOutOfRangeViewsAreRefused(*d);
+}
 TEST_CASE("metal: views survive Destroy on their texture", "[rhi][metal]") {
   auto d = MakeMetal(false);
   REQUIRE(d);

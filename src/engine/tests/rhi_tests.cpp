@@ -54,6 +54,18 @@ TEST_CASE("Null: textures and views", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckTextureCreationAndViews(*d);
 }
+TEST_CASE("Null: sliced views honour their range", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckSlicedViewsHonourTheirRange(*d);
+}
+TEST_CASE("Null: out-of-range views are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckOutOfRangeViewsAreRefused(*d);
+}
+TEST_CASE("Null: submissions retire", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckSubmissionsRetire(*d);
+}
 TEST_CASE("Null: compute pipeline reports its workgroup size", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckComputePipelineReportsWorkgroupSize(*d);

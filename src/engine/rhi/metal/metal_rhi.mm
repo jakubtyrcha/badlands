@@ -25,6 +25,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -179,9 +180,9 @@ class MetalTexture;
 class MetalTextureView final : public ITextureView, public MetalResource {
  public:
   MetalTextureView(MetalTexture* owner, id<MTLTexture> tex, Format fmt,
-                   std::string label)
+                   std::string label, const TextureViewDesc& resolved)
       : MetalResource(std::move(label)), owner_(owner), texture_(tex),
-        format_(fmt) {}
+        format_(fmt), desc_(resolved) {}
 
   void Destroy() override {
     texture_ = nil;
@@ -193,12 +194,14 @@ class MetalTextureView final : public ITextureView, public MetalResource {
   bool IsDestroyed() const override;
   ITexture* GetTexture() const override;
   Format GetFormat() const override { return format_; }
+  const TextureViewDesc& GetDesc() const override { return desc_; }
   id<MTLTexture> Handle() const { return texture_; }
 
  private:
   MetalTexture* owner_;
   id<MTLTexture> texture_;
   Format format_;
+  TextureViewDesc desc_;
 };
 
 class MetalTexture final : public ITexture, public MetalResource {
@@ -223,14 +226,48 @@ class MetalTexture final : public ITexture, public MetalResource {
   TextureUsage GetUsage() const override { return desc_.usage; }
 
   ITextureView* CreateView(const TextureViewDesc& vd) override {
-    const uint64_t key = (uint64_t(vd.base_mip) << 32) | vd.base_layer;
+    const auto r = ResolveViewDesc(vd, desc_, GetLabel());
+    if (!r) return nullptr;  // ResolveViewDesc logged why
+
+    // Keyed on the whole resolved range: keying on (base_mip, base_layer)
+    // alone made two views that differ only in COUNT collide, so the second
+    // request silently got the first one's range.
+    const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count};
     auto it = views_.find(key);
     if (it != views_.end()) return it->second.get();
 
-    // The MVP only needs whole-resource views; a sliced view would use
-    // newTextureViewWithPixelFormat:textureType:levels:slices:.
-    auto view = std::make_unique<MetalTextureView>(this, texture_, desc_.format,
-                                                   desc_.label + ".view");
+    if (!texture_) {
+      spdlog::error("rhi/metal: CreateView on destroyed texture '{}'",
+                    GetLabel());
+      return nullptr;
+    }
+
+    // A whole-resource view is the texture itself. Anything narrower needs a
+    // real Metal view object -- without this the slicing was accepted and
+    // ignored, and every view sampled the whole resource.
+    id<MTLTexture> handle = texture_;
+    const bool whole = r->base_mip == 0 && r->base_layer == 0 &&
+                       r->mip_count == std::max(1u, desc_.mip_levels) &&
+                       r->layer_count == std::max(1u, desc_.array_layers);
+    if (!whole) {
+      handle = [texture_
+          newTextureViewWithPixelFormat:texture_.pixelFormat
+                            textureType:texture_.textureType
+                                 levels:NSMakeRange(r->base_mip, r->mip_count)
+                                 slices:NSMakeRange(r->base_layer,
+                                                    r->layer_count)];
+      if (!handle) {
+        spdlog::error(
+            "rhi/metal: newTextureView on '{}' failed for mips [{}, {}) "
+            "layers [{}, {})",
+            GetLabel(), r->base_mip, r->base_mip + r->mip_count, r->base_layer,
+            r->base_layer + r->layer_count);
+        return nullptr;
+      }
+    }
+
+    auto view = std::make_unique<MetalTextureView>(
+        this, handle, desc_.format, desc_.label + ".view", *r);
     auto* raw = view.get();
     views_.emplace(key, std::move(view));
     return raw;
@@ -260,9 +297,12 @@ class MetalTexture final : public ITexture, public MetalResource {
   id<MTLTexture> Handle() const { return texture_; }
 
  private:
+  // base_mip, mip_count, base_layer, layer_count -- all four, see CreateView.
+  using ViewKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
+
   id<MTLTexture> texture_;
   TextureDesc desc_;
-  std::map<uint64_t, std::unique_ptr<MetalTextureView>> views_;
+  std::map<ViewKey, std::unique_ptr<MetalTextureView>> views_;
 };
 
 ITexture* MetalTextureView::GetTexture() const { return owner_; }
@@ -293,7 +333,7 @@ class MetalBindingTable final : public IBindingTable, public MetalResource {
  public:
   explicit MetalBindingTable(const BindingTableDesc& d)
       : MetalResource(d.label), group_(d.group), entries_(d.entries),
-        retained_(RetainBindingResources(d.entries)) {}
+        retained_(RetainBindingResources(d.entries, d.label)) {}
   void Destroy() override { MarkDestroyed(); }
   uint32_t GetGroup() const override { return group_; }
   const std::vector<BindingEntry>& Entries() const { return entries_; }
@@ -409,11 +449,23 @@ class MetalComputePipeline final : public IComputePipeline {
 // `index` is the reflected Metal binding index. Slang emits flat
 // [[buffer(N)]] / [[texture(N)]] / [[sampler(N)]] for plain globals, and its
 // reflection reports the same N -- which is what BindingLocation carries.
-uint32_t IndexFor(const ShaderReflection& refl, uint32_t group, uint32_t slot) {
+//
+// No reflection entry means REFUSE, not "use the slot". Slang numbers bindings
+// per category, so a constant buffer, a texture and a sampler can all report
+// index 0 -- guessing the slot index lands the resource on whatever the shader
+// happens to declare there. That is not hypothetical: an empty reflection once
+// bound a sampler at index 1, and only MTL_DEBUG_LAYER's "missing Sampler
+// binding at index 0" revealed it.
+std::optional<uint32_t> IndexFor(const ShaderReflection& refl, uint32_t group,
+                                 uint32_t slot, std::string_view table_label) {
   for (const auto& b : refl.bindings) {
     if (b.group == group && b.slot == slot) return b.location.index;
   }
-  return slot;  // no reflection entry: fall back to the slot itself
+  spdlog::error(
+      "rhi/metal: binding table '{}' slot {} (group {}) is absent from the "
+      "pipeline's reflection -- skipping it rather than guessing an index",
+      table_label, slot, group);
+  return std::nullopt;
 }
 
 // Render and compute encoders are unrelated protocols with different
@@ -427,7 +479,9 @@ void ApplyTableGraphics(id<MTLRenderCommandEncoder> enc,
                         const ShaderReflection& refl, uint32_t group,
                         const MetalBindingTable& table) {
   for (const auto& e : table.Entries()) {
-    const uint32_t index = IndexFor(refl, group, e.slot);
+    const auto resolved = IndexFor(refl, group, e.slot, table.GetLabel());
+    if (!resolved) continue;
+    const uint32_t index = *resolved;
     switch (e.kind) {
       case BindingKind::UniformBuffer:
       case BindingKind::StorageBuffer:
@@ -460,7 +514,9 @@ void ApplyTableCompute(id<MTLComputeCommandEncoder> enc,
                        const ShaderReflection& refl, uint32_t group,
                        const MetalBindingTable& table) {
   for (const auto& e : table.Entries()) {
-    const uint32_t index = IndexFor(refl, group, e.slot);
+    const auto resolved = IndexFor(refl, group, e.slot, table.GetLabel());
+    if (!resolved) continue;
+    const uint32_t index = *resolved;
     switch (e.kind) {
       case BindingKind::UniformBuffer:
       case BindingKind::StorageBuffer:
@@ -914,7 +970,10 @@ class MetalDevice final : public IRhiDevice {
   }
 
   void WaitIdle() override {
-    for (id<MTLCommandBuffer> cmd : in_flight_) [cmd waitUntilCompleted];
+    for (id<MTLCommandBuffer> cmd : in_flight_) {
+      [cmd waitUntilCompleted];
+      ReportIfFailed(cmd);
+    }
     in_flight_.clear();
   }
 
@@ -931,13 +990,29 @@ class MetalDevice final : public IRhiDevice {
   bool IsValidationEnabled() const override { return false; }
 
  private:
+  // A command buffer that faulted -- shader trap, timeout, page fault -- is
+  // still "retired", so it must be dropped from in_flight_. But dropping it
+  // quietly turns a GPU fault into a readback full of zeroes, which surfaces
+  // as an inexplicable value mismatch three layers up. Say it here, once.
+  static void ReportIfFailed(id<MTLCommandBuffer> cmd) {
+    if (cmd.status != MTLCommandBufferStatusError) return;
+    NSError* err = cmd.error;
+    spdlog::error("rhi/metal: command buffer '{}' FAILED on the GPU: {} ({})",
+                  cmd.label ? cmd.label.UTF8String : "<unlabelled>",
+                  err ? err.localizedDescription.UTF8String : "no error object",
+                  err ? long(err.code) : 0L);
+  }
+
   void PruneRetired() {
     in_flight_.erase(
         std::remove_if(in_flight_.begin(), in_flight_.end(),
                        [](id<MTLCommandBuffer> cmd) {
                          const MTLCommandBufferStatus s = cmd.status;
-                         return s == MTLCommandBufferStatusCompleted ||
-                                s == MTLCommandBufferStatusError;
+                         if (s == MTLCommandBufferStatusError) {
+                           ReportIfFailed(cmd);
+                           return true;
+                         }
+                         return s == MTLCommandBufferStatusCompleted;
                        }),
         in_flight_.end());
   }

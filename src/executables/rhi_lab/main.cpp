@@ -20,6 +20,8 @@
 #include <cstring>
 #include <numbers>
 #include <string>
+#include <initializer_list>
+#include <optional>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -112,22 +114,40 @@ bool ParseArgs(int argc, char** argv, Options& o) {
 // A preview of what the render graph will do automatically (D7): resolve a
 // binding by NAME against reflection rather than hard-coding slots. Getting
 // this wrong by hand is precisely the class of bug the graph removes.
-BindingEntry BindByName(const ShaderReflection& refl, const char* name,
-                        IBuffer* buffer = nullptr,
-                        ITextureView* view = nullptr,
-                        ISampler* sampler = nullptr) {
-  BindingEntry e;
+// Returns nullopt on a name the shader does not declare. A default-constructed
+// entry would carry slot 0 and BindingKind's first enumerator -- a plausible
+// binding pointing at the wrong thing, which is the failure mode that costs an
+// afternoon. There is no useful way to continue, so callers bail.
+std::optional<BindingEntry> BindByName(const ShaderReflection& refl,
+                                       const char* name,
+                                       IBuffer* buffer = nullptr,
+                                       ITextureView* view = nullptr,
+                                       ISampler* sampler = nullptr) {
   const auto* b = refl.FindBinding(name);
   if (!b) {
     spdlog::error("rhi_lab: shader has no binding named '{}'", name);
-    return e;
+    return std::nullopt;
   }
+  BindingEntry e;
   e.slot = b->slot;
   e.kind = b->kind;
   e.buffer = buffer;
   e.texture_view = view;
   e.sampler = sampler;
   return e;
+}
+
+// Collapses a table's worth of lookups: nullopt if ANY name failed, so a
+// half-built table never reaches CreateBindingTable.
+std::optional<std::vector<BindingEntry>> Entries(
+    std::initializer_list<std::optional<BindingEntry>> es) {
+  std::vector<BindingEntry> out;
+  out.reserve(es.size());
+  for (const auto& e : es) {
+    if (!e) return std::nullopt;
+    out.push_back(*e);
+  }
+  return out;
 }
 
 template <typename T>
@@ -432,47 +452,36 @@ int main(int argc, char** argv) {
 
   // --- Binding tables ----------------------------------------------------
   const auto& sel_refl = select_pipe->GetReflection();
-  auto select_table = device->CreateBindingTable(
-      {.compute_pipeline = select_pipe.get(),
-       .entries = {BindByName(sel_refl, "frame", frame_ubo.get()),
-                   BindByName(sel_refl, "clusters", clu.get()),
-                   BindByName(sel_refl, "selected", sel.get()),
-                   BindByName(sel_refl, "draw_args", args.get()),
-                   BindByName(sel_refl, "draw_counter", counter.get())},
-       .label = "select"});
-
   const auto& fin_refl = finalize_pipe->GetReflection();
-  auto finalize_table = device->CreateBindingTable(
-      {.compute_pipeline = finalize_pipe.get(),
-       .entries = {BindByName(fin_refl, "frame", frame_ubo.get()),
-                   BindByName(fin_refl, "draw_args", args.get()),
-                   BindByName(fin_refl, "draw_counter", counter.get())},
-       .label = "finalize"});
-
   const auto& terrain_refl = terrain_pipe->GetReflection();
-  auto terrain_table = device->CreateBindingTable(
-      {.render_pipeline = terrain_pipe.get(),
-       .entries = {BindByName(terrain_refl, "frame", frame_ubo.get()),
-                   BindByName(terrain_refl, "vertices", vtx.get()),
-                   BindByName(terrain_refl, "indices", idx.get()),
-                   BindByName(terrain_refl, "clusters", clu.get()),
-                   BindByName(terrain_refl, "selected", sel.get())},
-       .label = "terrain"});
-
   const auto& tree_refl = tree_pipe->GetReflection();
-  auto tree_table = device->CreateBindingTable(
-      {.render_pipeline = tree_pipe.get(),
-       .entries = {BindByName(tree_refl, "frame", frame_ubo.get()),
-                   BindByName(tree_refl, "trees", tree_inst.get()),
-                   BindByName(tree_refl, "tree_vertices", tree_vtx.get()),
-                   BindByName(tree_refl, "tree_indices", tree_idx.get())},
-       .label = "trees"});
-
   const auto& res_refl = resolve_pipe->GetReflection();
+
+  auto sel_entries =
+      Entries({BindByName(sel_refl, "frame", frame_ubo.get()),
+               BindByName(sel_refl, "clusters", clu.get()),
+               BindByName(sel_refl, "selected", sel.get()),
+               BindByName(sel_refl, "draw_args", args.get()),
+               BindByName(sel_refl, "draw_counter", counter.get())});
+  auto fin_entries =
+      Entries({BindByName(fin_refl, "frame", frame_ubo.get()),
+               BindByName(fin_refl, "draw_args", args.get()),
+               BindByName(fin_refl, "draw_counter", counter.get())});
+  auto terrain_entries =
+      Entries({BindByName(terrain_refl, "frame", frame_ubo.get()),
+               BindByName(terrain_refl, "vertices", vtx.get()),
+               BindByName(terrain_refl, "indices", idx.get()),
+               BindByName(terrain_refl, "clusters", clu.get()),
+               BindByName(terrain_refl, "selected", sel.get())});
+  auto tree_entries =
+      Entries({BindByName(tree_refl, "frame", frame_ubo.get()),
+               BindByName(tree_refl, "trees", tree_inst.get()),
+               BindByName(tree_refl, "tree_vertices", tree_vtx.get()),
+               BindByName(tree_refl, "tree_indices", tree_idx.get())});
   // resolve.slang keeps both fragment entries, so reflection reports every
   // global whichever one is selected. Bind the full set rather than tracking
   // which entry uses what -- that is the graph's job later, not the app's.
-  const std::vector<BindingEntry> res_entries = {
+  auto res_entries = Entries({
       BindByName(res_refl, "frame", frame_ubo.get()),
       BindByName(res_refl, "visbuffer", nullptr, visbuf->GetDefaultView()),
       BindByName(res_refl, "depthbuffer", nullptr, depth->GetDefaultView()),
@@ -484,9 +493,31 @@ int main(int argc, char** argv) {
                  terrain_sampler.get()),
       BindByName(res_refl, "splat_sampler", nullptr, nullptr,
                  splat_sampler.get()),
-  };
+  });
+
+  // Bail before creating a single table: a name that did not resolve has
+  // already been logged, and a table built from the rest would render
+  // something subtly wrong rather than nothing at all.
+  if (!sel_entries || !fin_entries || !terrain_entries || !tree_entries ||
+      !res_entries) {
+    spdlog::error("rhi_lab: binding resolution failed, aborting");
+    return 1;
+  }
+
+  auto select_table = device->CreateBindingTable(
+      {.compute_pipeline = select_pipe.get(), .entries = *sel_entries,
+       .label = "select"});
+  auto finalize_table = device->CreateBindingTable(
+      {.compute_pipeline = finalize_pipe.get(), .entries = *fin_entries,
+       .label = "finalize"});
+  auto terrain_table = device->CreateBindingTable(
+      {.render_pipeline = terrain_pipe.get(), .entries = *terrain_entries,
+       .label = "terrain"});
+  auto tree_table = device->CreateBindingTable(
+      {.render_pipeline = tree_pipe.get(), .entries = *tree_entries,
+       .label = "trees"});
   auto resolve_table = device->CreateBindingTable(
-      {.render_pipeline = resolve_pipe.get(), .entries = res_entries,
+      {.render_pipeline = resolve_pipe.get(), .entries = *res_entries,
        .label = "resolve"});
 
   if (!select_table || !finalize_table || !terrain_table || !tree_table ||

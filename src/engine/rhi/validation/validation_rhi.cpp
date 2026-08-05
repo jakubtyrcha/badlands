@@ -102,7 +102,7 @@ class ValidationBindingTable final : public IBindingTable {
  public:
   ValidationBindingTable(BindingTablePtr inner, std::vector<BindingEntry> entries)
       : inner_(std::move(inner)),
-        retained_(RetainBindingResources(entries)),
+        retained_(RetainBindingResources(entries, inner_->GetLabel())),
         entries_(std::move(entries)) {}
 
   uint32_t GetGroup() const override { return inner_->GetGroup(); }
@@ -321,12 +321,58 @@ void CheckBoundTable(Recorder& rec, StateTracker& states, uint32_t group,
   }
 }
 
+// Every slot must resolve against the bound pipeline's reflection. A slot the
+// shader does not declare is not a harmless extra: the backend has to bind it
+// SOMEWHERE, and the only guess available -- the slot index itself -- lands on
+// whatever the shader happens to declare at that index. Metal now refuses such
+// a slot outright (see IndexFor); this is how the front end finds out WHY its
+// resource never arrived.
+void CheckTableResolves(Recorder& rec, const ShaderReflection& refl,
+                        uint32_t group, IBindingTable* table) {
+  auto* wrapped = dynamic_cast<ValidationBindingTable*>(table);
+  if (!wrapped) return;
+  for (const auto& e : wrapped->Entries()) {
+    const bool found =
+        std::any_of(refl.bindings.begin(), refl.bindings.end(),
+                    [&](const ReflectedBinding& b) {
+                      return b.group == group && b.slot == e.slot;
+                    });
+    if (!found) {
+      rec.Report(fmt::format(
+          "SetBindingTable: binding table '{}' slot {} (group {}) is absent "
+          "from the bound pipeline's reflection",
+          table->GetLabel(), e.slot, group));
+    }
+  }
+}
+
+// Reported rather than refused, deliberately. Binding before the pipeline is
+// harmless on Metal, so refusing it here would make a validation build behave
+// differently from a release build -- worse than the contract violation. It is
+// a violation because DX12 needs the root signature set first, and the whole
+// point of validating on the Mac is to make that arrive already correct.
+template <typename Pipeline>
+void CheckTableOrder(Recorder& rec, Pipeline* pipeline,
+                     uint32_t group, IBindingTable* table) {
+  if (pipeline) {
+    CheckTableResolves(rec, pipeline->GetReflection(), group, table);
+    return;
+  }
+  rec.Report(fmt::format(
+      "SetBindingTable: binding table '{}' bound at group {} before any "
+      "SetPipeline -- bindings resolve against the pipeline's reflection, so "
+      "the pipeline must be set first",
+      table ? table->GetLabel() : "<null>", group));
+}
+
 void ValidationRenderPass::CheckTableUsable(uint32_t group,
                                             IBindingTable* table) {
+  CheckTableOrder(ctx_->recorder, pipeline_, group, table);
   CheckBoundTable(ctx_->recorder, *states_, group, table, "SetBindingTable");
 }
 void ValidationComputePass::CheckTableUsable(uint32_t group,
                                              IBindingTable* table) {
+  CheckTableOrder(ctx_->recorder, pipeline_, group, table);
   CheckBoundTable(ctx_->recorder, *states_, group, table, "SetBindingTable");
 }
 
@@ -609,6 +655,25 @@ class ValidationDevice final : public IRhiDevice {
               "CreateBindingTable '{}': group {} slot {} ('{}') bound as kind "
               "{} but the shader declares kind {}",
               d.label, d.group, rb.slot, rb.name, int(e.kind), int(rb.kind)));
+        }
+      }
+
+      // And the other direction. The loop above finds slots the shader
+      // declares but nobody bound; this finds slots bound that the shader does
+      // not declare, which used to be accepted here and then guessed at by the
+      // backend. Metal now refuses such a slot outright, so without this the
+      // resource would simply never arrive with nothing said about it.
+      for (const auto& e : d.entries) {
+        const bool declared = std::any_of(
+            refl->bindings.begin(), refl->bindings.end(),
+            [&](const ReflectedBinding& rb) {
+              return rb.group == d.group && rb.slot == e.slot;
+            });
+        if (!declared) {
+          ctx_.recorder.Report(fmt::format(
+              "CreateBindingTable '{}': group {} slot {} is bound but the "
+              "shader declares no such binding",
+              d.label, d.group, e.slot));
         }
       }
     }

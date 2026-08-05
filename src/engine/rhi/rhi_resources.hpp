@@ -13,8 +13,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "engine/rhi/rhi_types.hpp"
 
@@ -32,13 +35,11 @@ class IResource : public std::enable_shared_from_this<IResource> {
   // A share of ownership, so a binding table (or anything else that outlives
   // the caller's handle) can retain what it references. Returns null if the
   // resource is not owned by a shared_ptr.
-  std::shared_ptr<IResource> Share() {
-    try {
-      return shared_from_this();
-    } catch (const std::bad_weak_ptr&) {
-      return nullptr;
-    }
-  }
+  //
+  // `weak_from_this().lock()` rather than `shared_from_this()` in a try/catch:
+  // "not shared-owned" is an expected answer here, not an error, so it must
+  // not cost a throw.
+  std::shared_ptr<IResource> Share() { return weak_from_this().lock(); }
 
   // Releases the backing GPU memory. Further use is a validation error, not
   // undefined behaviour, when the validation decorator is active. Idempotent.
@@ -71,6 +72,12 @@ class ITextureView : public virtual IResource {
  public:
   virtual class ITexture* GetTexture() const = 0;
   virtual Format GetFormat() const = 0;
+
+  // The RESOLVED range this view covers: `mip_count` and `layer_count` are
+  // never 0 here, unlike in the descriptor that requested it. Exists so a
+  // caller can tell a sliced view from a whole-resource one, which is also
+  // what makes slicing testable rather than merely claimed.
+  virtual const TextureViewDesc& GetDesc() const = 0;
 };
 
 class ITexture : public virtual IResource {
@@ -117,24 +124,25 @@ class IBindingTable : public virtual IResource {
 // A texture VIEW is owned by its texture rather than by a shared_ptr, so the
 // TEXTURE is what gets retained -- keeping the owner alive keeps the view alive,
 // which is the whole point.
-inline std::vector<std::shared_ptr<IResource>> RetainBindingResources(
-    const std::vector<BindingEntry>& entries) {
-  std::vector<std::shared_ptr<IResource>> retained;
-  retained.reserve(entries.size());
-  for (const auto& e : entries) {
-    IResource* r = nullptr;
-    if (e.buffer) {
-      r = e.buffer;
-    } else if (e.texture_view) {
-      r = e.texture_view->GetTexture();  // retain the owner, not the view
-    } else if (e.sampler) {
-      r = e.sampler;
-    }
-    if (!r) continue;
-    if (auto owned = r->Share()) retained.push_back(std::move(owned));
-  }
-  return retained;
-}
+//
+// Defined out of line (rhi_common.cpp) because an entry it cannot retain is a
+// LOGGED error, not a skipped iteration: silently under-retaining reintroduces
+// exactly the use-after-free this function exists to prevent, and the caller
+// has already been told it may drop its handle.
+std::vector<std::shared_ptr<IResource>> RetainBindingResources(
+    const std::vector<BindingEntry>& entries, std::string_view owner_label);
+
+// Turns a requested view range into a concrete one: fills in the "0 = all
+// remaining" counts and bounds-checks the result against the texture.
+//
+// Shared by every backend so the two cannot disagree about what `base_layer=3`
+// on a 2-layer texture means (rule 6), and so the bounds check exists exactly
+// once (rule 8). Returns nullopt, after logging, when the range does not fit --
+// a view onto layers the texture does not have is a caller bug, and silently
+// clamping it to the whole resource is how "accepted and ignored" starts.
+std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
+                                               const TextureDesc& texture,
+                                               std::string_view texture_label);
 
 using BufferPtr = std::shared_ptr<IBuffer>;
 using TexturePtr = std::shared_ptr<ITexture>;

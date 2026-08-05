@@ -94,7 +94,12 @@ class IRhiDevice {
   // for free -- which means Metal can never reveal a backend that fails to.
   // A DX12 backend has to implement it, exactly as it has to emit the barriers
   // Metal auto-tracks.
-  virtual size_t InFlightCount() { return 0; }
+  //
+  // Pure, not defaulted to 0: a default would answer "nothing is in flight"
+  // for a backend that has not implemented retirement at all, which is
+  // indistinguishable from "everything retired" and makes any test of it pass
+  // vacuously. Each backend states its answer deliberately.
+  virtual size_t InFlightCount() = 0;
 
   // --- Validation ---
   // All 14 of the engine's existing Dawn validation sites assert "nothing went

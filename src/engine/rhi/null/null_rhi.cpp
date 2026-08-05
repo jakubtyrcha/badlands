@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <tuple>
 
 namespace badlands::rhi::null {
 namespace {
@@ -54,15 +55,19 @@ class NullTexture;
 
 class NullTextureView final : public ITextureView, public NullResource {
  public:
-  NullTextureView(NullTexture* tex, Format fmt, std::string label)
-      : NullResource(std::move(label)), texture_(tex), format_(fmt) {}
+  NullTextureView(NullTexture* tex, Format fmt, std::string label,
+                  const TextureViewDesc& resolved)
+      : NullResource(std::move(label)), texture_(tex), format_(fmt),
+        desc_(resolved) {}
   ITexture* GetTexture() const override;
   bool IsDestroyed() const override;
   Format GetFormat() const override { return format_; }
+  const TextureViewDesc& GetDesc() const override { return desc_; }
 
  private:
   NullTexture* texture_;
   Format format_;
+  TextureViewDesc desc_;
 };
 
 class NullTexture final : public ITexture, public NullResource {
@@ -76,12 +81,16 @@ class NullTexture final : public ITexture, public NullResource {
   Format GetFormat() const override { return desc_.format; }
   TextureUsage GetUsage() const override { return desc_.usage; }
 
+  // Same resolution, same refusals, same cache key as Metal -- the two must
+  // not disagree about what a view descriptor means (rule 6).
   ITextureView* CreateView(const TextureViewDesc& vd) override {
-    const uint64_t key = (uint64_t(vd.base_mip) << 32) | vd.base_layer;
+    const auto r = ResolveViewDesc(vd, desc_, GetLabel());
+    if (!r) return nullptr;  // ResolveViewDesc logged why
+    const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count};
     auto it = views_.find(key);
     if (it != views_.end()) return it->second.get();
-    auto view = std::make_unique<NullTextureView>(this, desc_.format,
-                                                  desc_.label + ".view");
+    auto view = std::make_unique<NullTextureView>(
+        this, desc_.format, desc_.label + ".view", *r);
     auto* raw = view.get();
     views_.emplace(key, std::move(view));
     return raw;
@@ -99,8 +108,10 @@ class NullTexture final : public ITexture, public NullResource {
   uint64_t WrittenBytes() const { return written_bytes_; }
 
  private:
+  using ViewKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
+
   TextureDesc desc_;
-  std::map<uint64_t, std::unique_ptr<NullTextureView>> views_;
+  std::map<ViewKey, std::unique_ptr<NullTextureView>> views_;
   uint64_t written_bytes_ = 0;
 };
 
@@ -125,7 +136,7 @@ class NullBindingTable final : public IBindingTable, public NullResource {
  public:
   explicit NullBindingTable(const BindingTableDesc& d)
       : NullResource(d.label), group_(d.group), entries_(d.entries),
-        retained_(RetainBindingResources(d.entries)) {}
+        retained_(RetainBindingResources(d.entries, d.label)) {}
   uint32_t GetGroup() const override { return group_; }
   const std::vector<BindingEntry>& Entries() const { return entries_; }
 
@@ -461,6 +472,8 @@ class NullDevice final : public IRhiDevice {
   // Nothing executes, so nothing is ever in flight.
   void Submit(ICommandEncoder&) override {}
   void WaitIdle() override {}
+  // Null executes on Submit, so nothing is ever in flight. This is a real
+  // answer, not a stub -- which is why the base declares it pure.
   size_t InFlightCount() override { return 0; }
 
   // The Null backend never observes anything itself; the validation decorator

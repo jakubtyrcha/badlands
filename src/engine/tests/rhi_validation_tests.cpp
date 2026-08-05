@@ -163,6 +163,102 @@ TEST_CASE("validation: using a destroyed resource is reported",
   CHECK(observed->find("destroyed") != std::string::npos);
 }
 
+// --- Bindings must resolve, and must resolve against something --------------
+
+TEST_CASE("validation: a slot the shader does not declare is reported",
+          "[rhi][validation]") {
+  // The reverse of the "declared but not bound" case above, and the direction
+  // that was missing: an entry with no reflection behind it used to be
+  // accepted here and then guessed at by the backend, landing the resource on
+  // whatever the shader declared at that index.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  auto ubo = device->CreateBuffer({.size = 64, .usage = BufferUsage::Uniform});
+  auto ssbo = device->CreateBuffer({.size = 64, .usage = BufferUsage::Storage});
+  auto tex = device->CreateTexture({.width = 4, .height = 4,
+                                    .format = Format::RGBA8Unorm,
+                                    .usage = TextureUsage::Sampled});
+  auto samp = device->CreateSampler({});
+
+  auto observed = Observe(*device, [&] {
+    BindingTableDesc d;
+    d.compute_pipeline = pipe.get();
+    d.label = "extra";
+    // Reflection declares slots 0..3. Bind all of them, plus a slot 7 that
+    // exists nowhere in the shader.
+    d.entries = {
+        {.slot = 0, .kind = BindingKind::UniformBuffer, .buffer = ubo.get()},
+        {.slot = 1, .kind = BindingKind::StorageBuffer, .buffer = ssbo.get()},
+        {.slot = 2, .kind = BindingKind::SampledTexture,
+         .texture_view = tex->GetDefaultView()},
+        {.slot = 3, .kind = BindingKind::Sampler, .sampler = samp.get()},
+        {.slot = 7, .kind = BindingKind::UniformBuffer, .buffer = ubo.get()},
+    };
+    (void)device->CreateBindingTable(d);
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("slot 7") != std::string::npos);
+  CHECK(observed->find("no such binding") != std::string::npos);
+}
+
+TEST_CASE("validation: binding before SetPipeline is reported",
+          "[rhi][validation]") {
+  // Harmless on Metal, wrong on DX12 (the root signature has to be set first),
+  // and wrong everywhere in principle: bindings resolve against the bound
+  // pipeline's reflection, so there is nothing to resolve against yet.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  auto set = rhitest::MakeFullBindingSet(*device, pipe.get(), "ordered");
+  REQUIRE(set);
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    set.TransitionAll(*encoder);
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetBindingTable(0, set.table.get());  // before SetPipeline
+    pass->SetPipeline(pipe.get());
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("before any SetPipeline") != std::string::npos);
+}
+
+TEST_CASE("validation: the right order reports nothing", "[rhi][validation]") {
+  // The paired green: same calls, correct order, silent. Without this the test
+  // above would pass just as well against a check that fires unconditionally.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  auto set = rhitest::MakeFullBindingSet(*device, pipe.get(), "ordered");
+  REQUIRE(set);
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    set.TransitionAll(*encoder);
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetPipeline(pipe.get());
+    pass->SetBindingTable(0, set.table.get());
+    pass->End();
+    encoder->Finish();
+  });
+  INFO(observed.value_or("<clean>"));
+  CHECK_FALSE(observed.has_value());
+}
+
 TEST_CASE("validation: commands after Finish are reported", "[rhi][validation]") {
   auto device = MakeValidated();
   auto observed = Observe(*device, [&] {

@@ -57,6 +57,86 @@ const ReflectedUniformBlock* ShaderReflection::FindUniformBlock(
   return it == uniform_blocks.end() ? nullptr : &*it;
 }
 
+std::vector<std::shared_ptr<IResource>> RetainBindingResources(
+    const std::vector<BindingEntry>& entries, std::string_view owner_label) {
+  std::vector<std::shared_ptr<IResource>> retained;
+  retained.reserve(entries.size());
+  for (size_t i = 0; i < entries.size(); ++i) {
+    const BindingEntry& e = entries[i];
+    IResource* r = nullptr;
+    if (e.buffer) {
+      r = e.buffer;
+    } else if (e.texture_view) {
+      r = e.texture_view->GetTexture();  // retain the owner, not the view
+      if (!r) {
+        spdlog::error(
+            "rhi: binding table '{}' entry {} (slot {}): view '{}' has no "
+            "owning texture, so it cannot be retained -- it will dangle if the "
+            "caller drops its handle",
+            owner_label, i, e.slot, e.texture_view->GetLabel());
+        continue;
+      }
+    } else if (e.sampler) {
+      r = e.sampler;
+    }
+    // A null entry is the caller's business (SetBindingTable reports it); an
+    // entry that exists but cannot be retained is ours.
+    if (!r) continue;
+
+    auto owned = r->Share();
+    if (!owned) {
+      spdlog::error(
+          "rhi: binding table '{}' entry {} (slot {}): resource '{}' is not "
+          "shared_ptr-owned, so the table cannot retain it -- it will dangle "
+          "if the caller drops its handle",
+          owner_label, i, e.slot, r->GetLabel());
+      continue;
+    }
+    retained.push_back(std::move(owned));
+  }
+  return retained;
+}
+
+std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
+                                               const TextureDesc& texture,
+                                               std::string_view texture_label) {
+  const uint32_t mips = std::max(1u, texture.mip_levels);
+  const uint32_t layers = std::max(1u, texture.array_layers);
+
+  if (requested.base_mip >= mips) {
+    spdlog::error(
+        "rhi: CreateView on '{}': base_mip {} is out of range (texture has {} "
+        "mip level(s))",
+        texture_label, requested.base_mip, mips);
+    return std::nullopt;
+  }
+  if (requested.base_layer >= layers) {
+    spdlog::error(
+        "rhi: CreateView on '{}': base_layer {} is out of range (texture has "
+        "{} layer(s))",
+        texture_label, requested.base_layer, layers);
+    return std::nullopt;
+  }
+
+  TextureViewDesc r = requested;
+  if (r.mip_count == 0) r.mip_count = mips - r.base_mip;
+  if (r.layer_count == 0) r.layer_count = layers - r.base_layer;
+
+  if (r.base_mip + r.mip_count > mips) {
+    spdlog::error(
+        "rhi: CreateView on '{}': mips [{}, {}) exceed the texture's {}",
+        texture_label, r.base_mip, r.base_mip + r.mip_count, mips);
+    return std::nullopt;
+  }
+  if (r.base_layer + r.layer_count > layers) {
+    spdlog::error(
+        "rhi: CreateView on '{}': layers [{}, {}) exceed the texture's {}",
+        texture_label, r.base_layer, r.base_layer + r.layer_count, layers);
+    return std::nullopt;
+  }
+  return r;
+}
+
 std::unique_ptr<IRhiDevice> CreateDevice(const DeviceDesc& desc) {
   std::unique_ptr<IRhiDevice> device;
 
