@@ -121,9 +121,11 @@ helpers handle it:
   camera-up mixed in. **0** below ~50° (pure world Y, where nearly all character
   work happens), easing to 1 by ~76°.
 - `pan_vertical_gain(pitch) = mix(1/max(|cos pitch|, 0.6), 1.0, blend)` —
-  world-Y motion of length `L` only shows `L·cos(pitch)` on screen. Bounded at
-  1.56×, and the blend retires it before the clamp binds. **Equals 1.0 at both
-  pitch 0 and full blend**; it does not hold its maximum out to the limit.
+  world-Y motion of length `L` only shows `L·cos(pitch)` on screen. Since it is
+  a mix of `raw ≤ 1/0.6` with 1, the provable bound is **1/kPanGainCosFloor ≈
+  1.67** (the actual peak is ≈1.62, near `|sin p| = 0.8`); the blend retires the
+  correction before the floor can bind. **Equals 1.0 at both pitch 0 and full
+  blend**; it does not hold its maximum out to the limit.
 
 **Dolly.** With the pivot on a surface, scaling `radius` is the wrong operation.
 The right one is a rigid translation of the whole orbit rig along the eye→focus
