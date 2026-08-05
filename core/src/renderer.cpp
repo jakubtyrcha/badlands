@@ -295,12 +295,20 @@ void Renderer::ensure_depth_texture(uint32_t width, uint32_t height) {
     depth_texture_height_ = height;
 }
 
-void Renderer::set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye) {
+void Renderer::set_gizmo(const GizmoFrame& frame, GizmoKind kind, GizmoHandle highlighted,
+                          simd_float3 eye) {
     gizmo_visible_ = true;
     gizmo_grid_verts_.clear();
     gizmo_handle_verts_.clear();
-    append_move_gizmo_grid(gizmo_grid_verts_, frame, 12);
-    append_move_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
+    if (kind == GizmoKind::Scale) {
+        // No grid: it is a drag-PLANE affordance and scale has no drag plane.
+        // gizmo_grid_verts_ therefore stays empty, which the draw path already
+        // handles (upload_line_verts drops the buffer for an empty vector).
+        append_scale_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
+    } else {
+        append_move_gizmo_grid(gizmo_grid_verts_, frame, 12);
+        append_move_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
+    }
 }
 
 void Renderer::hide_gizmo() {

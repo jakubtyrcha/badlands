@@ -51,7 +51,10 @@ public:
     // thick handle quads. Uploaded to vertex buffers at draw time (see
     // upload_line_verts): the restyle put both halves past setVertexBytes'
     // 4KB inline limit.
-    void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye);   // shows the gizmo
+    // `kind` picks the handle set and whether a grid is drawn at all — scale
+    // has no drag plane, so no grid.
+    void set_gizmo(const GizmoFrame& frame, GizmoKind kind, GizmoHandle highlighted,
+                   simd_float3 eye);                                                    // shows the gizmo
     void hide_gizmo();
     // Camera-pivot marker (flat ring + crosshair at the orbit target),
     // refreshed every frame like the move gizmo. Drawn LAST and depth-ignored:

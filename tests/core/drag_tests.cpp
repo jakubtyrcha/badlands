@@ -48,7 +48,7 @@ GizmoFrame frame_for(Editor* editor, int32_t node_id, bool snapped,
     stub.snapped = snapped;
     stub.snap_point = snap_point;
     stub.snap_normal = snap_normal;
-    return gizmo_frame_for_node(stub, editor_test_camera());
+    return gizmo_frame_for_node(stub, editor_test_camera(), GizmoKind::Move);
 }
 
 // Projects a world point and returns its view coords, REQUIREing visibility.

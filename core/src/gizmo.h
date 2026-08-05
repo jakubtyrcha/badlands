@@ -30,14 +30,66 @@ inline constexpr float kGizmoPatchOuter = 0.50f;
 // future "grab the plane handle" affordance).
 inline constexpr float kGizmoPatchCenter = 0.5f * (kGizmoPatchInner + kGizmoPatchOuter);
 
-// The modify-mode move gizmo's tangent frame. origin/n follow
-// drag_plane_for_node (snapped -> snap frame, unsnapped -> camera-facing);
-// (u, v, n) is orthonormal and right-handed (u x v == n).
+// A gizmo's frame. (u, v, n) is orthonormal and right-handed (u x v == n) for
+// both kinds; what differs is where it comes from.
+//
+// Move: origin/n follow drag_plane_for_node (snapped -> snap frame, unsnapped
+// -> camera-facing), because a move handle drags along a surface.
+//
+// Scale: the node's own local axes -- world X/Y/Z while Node::rotation stays
+// identity (scene.h) -- centred on the node. A camera-facing basis would be
+// meaningless here: a scale handle has to map onto a scale COMPONENT, and
+// u/v/n then land on scale.x/y/z directly. It also makes the colours correct
+// for free, since kColorAxisU/V/N already alias the world-axis palette.
 struct GizmoFrame {
     simd_float3 origin;
     simd_float3 n, u, v;
     float half_extent;
 };
+
+// --- scale gizmo -----------------------------------------------------------
+//
+// Three axis shafts plus a centre box for uniform scale. No plane patches and
+// no grid: the grid is a drag-PLANE affordance, and scale has no drag plane.
+
+// The centre (uniform) handle's drawn half-size, and where the axis shafts
+// start, both as fractions of half_extent. Together they PARTITION the gizmo:
+// the centre owns the disc around the origin, the axes own everything outboard
+// of it, so "aim at the middle" can never be answered by an axis.
+inline constexpr float kGizmoUniformHalfSizeFrac = 0.09f;
+inline constexpr float kScaleAxisInnerFrac = 0.18f;
+// Box tips, larger than the move gizmo's terminator dots: box-tipped axes are
+// the universal scale convention, and the size difference is what tells the
+// two gizmos apart at a glance without new 3D geometry.
+inline constexpr float kGizmoScaleTipHalfSizeFrac = 0.055f;
+
+// Scale's axis grab tolerance, deliberately wider than Move's
+// kAxisPickTolerancePts. With no plane patches and no grid, the scale gizmo's
+// interactable footprint is far smaller than Move's -- and under the always-on
+// camera a near-miss now spins the view rather than doing nothing, so these
+// handles have to be MORE forgiving, not less. The hover highlight
+// (updateGizmoHover) is the pre-press signal that a handle is live, which is
+// what keeps this from needing an invisible dead zone around the gizmo.
+inline constexpr float kScaleAxisPickTolerancePts = 14.0f;
+inline constexpr float kUniformPickTolerancePts = 14.0f;
+
+// Axis-scale drag reads the closest-approach parameter as a ratio:
+// factor = s_now / s_start. Flooring BOTH the captured start and every update
+// at this fraction of he keeps that factor positive, finite, and exactly 1 at
+// mouse-down -- so there is no divide-by-zero at the origin, no sign flip when
+// dragged through it, and no jump on grab. Rejecting the grab instead would
+// hand the gesture to the camera, which is the one outcome a user aiming at a
+// handle never wants.
+inline constexpr float kScaleAxisMinGrabFrac = 0.15f;
+
+// Floored closest-approach parameter for an axis handle, per the above.
+// nullopt only when ray_axis_param itself is singular (near-parallel).
+std::optional<float> scale_axis_param(const Ray& ray, const GizmoFrame& frame, GizmoHandle handle);
+
+// Component index (0=x, 1=y, 2=z) an axis handle scales, following the frame's
+// u/v/n -> local x/y/z mapping documented on GizmoFrame. Non-axis handles
+// return -1.
+int gizmo_scale_axis_index(GizmoHandle handle);
 
 // u = normalize(cross(n, ref)), v = cross(n, u), ref = {0,1,0} unless n is
 // nearly vertical (|n.y| >= 0.99), then {1,0,0} — the single source of the
@@ -46,7 +98,7 @@ struct GizmoFrame {
 // construction, so this is defense-in-depth only.
 void tangent_basis(simd_float3 n, simd_float3& u, simd_float3& v);
 
-GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera);
+GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoKind kind);
 
 // Screen-constant axis grab tolerance, converted to world units at the
 // candidate point's depth inside pick_gizmo_handle (same scale family as
@@ -72,8 +124,15 @@ std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_flo
 // failure those constants exist to prevent. Any axis hit beats any plane hit;
 // among axes smallest distance wins (ties: smaller ray-t, then declaration
 // order); among planes nearest ray-t wins.
+// `kind` selects the handle set, and is REQUIRED rather than defaulted: which
+// manipulator is being hit-tested is exactly the kind of thing that must not
+// be decided silently at a call site.
+//
+// Move: axes over 0..he, then plane patches. Scale: the uniform centre first
+// (it owns the disc the axes are pulled back from), then axes over
+// kScaleAxisInnerFrac*he..he at the wider scale tolerance, and no planes.
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
-                              float fov_y_radians, float viewport_h_pts);
+                              float fov_y_radians, float viewport_h_pts, GizmoKind kind);
 
 // Camera-pivot marker visibility over time. Full strength while a gesture is
 // running and for kPivotHoldSeconds after the last camera move, then a

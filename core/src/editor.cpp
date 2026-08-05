@@ -114,11 +114,11 @@ void Editor::render(void* caMetalDrawable) {
     // just gets an origin/normal/extent to draw a grid at.
     const Node* selectedNode = impl_->gizmo_visible ? impl_->scene.find(impl_->selected) : nullptr;
     if (selectedNode != nullptr) {
-        const GizmoFrame frame = gizmo_frame_for_node(*selectedNode, camera);
+        const GizmoFrame frame = gizmo_frame_for_node(*selectedNode, camera, GizmoKind::Move);
         // Mid-drag the active handle owns the highlight (mouseMoved doesn't
         // fire while the button is down, so hover would be stale anyway).
         const GizmoHandle highlighted = impl_->drag.active ? impl_->drag.handle : impl_->hover;
-        impl_->renderer.set_gizmo(frame, highlighted, camera.eye);
+        impl_->renderer.set_gizmo(frame, GizmoKind::Move, highlighted, camera.eye);
     } else {
         impl_->renderer.hide_gizmo();
     }
@@ -295,9 +295,9 @@ void Editor::updateGizmoHover(float x, float y) {
     }
 
     const Camera camera = impl_->controller.to_camera();
-    const GizmoFrame frame = gizmo_frame_for_node(*node, camera);
+    const GizmoFrame frame = gizmo_frame_for_node(*node, camera, GizmoKind::Move);
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    impl_->hover = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts);
+    impl_->hover = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts, GizmoKind::Move);
 }
 
 void Editor::clearGizmoHover() {
@@ -328,10 +328,10 @@ bool Editor::beginDrag(float x, float y) {
     // Captured NOW: the frame (basis AND half_extent) is fixed for the whole
     // drag, even though the node (and, for a snapped node, its snap fields)
     // moves as the drag proceeds.
-    const GizmoFrame frame = gizmo_frame_for_node(*node, camera);
+    const GizmoFrame frame = gizmo_frame_for_node(*node, camera, GizmoKind::Move);
 
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    const GizmoHandle handle = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts);
+    const GizmoHandle handle = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts, GizmoKind::Move);
     if (handle == GizmoHandle::None) {
         return false; // off-handle: moving is deliberate, via handles only (user ruling)
     }
