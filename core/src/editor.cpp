@@ -19,6 +19,9 @@ namespace sq {
 // radius and line half-width in view points, converted to world units at the
 // orbit target's depth.
 inline constexpr float kPivotRadiusPts = 14.0f;
+// Predictive pivot dot. Small on purpose: it redraws on every mouse move, so
+// anything louder would be a permanent distraction rather than an affordance.
+inline constexpr float kFocusPreviewRadiusPts = 3.0f;
 inline constexpr float kPivotLineHalfWidthPts = 0.75f;
 
 // World-origin marker sizing. The height is world-constant on purpose -- the
@@ -83,6 +86,11 @@ struct Editor::Impl {
     // overflow the duration arithmetic below.
     std::chrono::steady_clock::time_point last_camera_activity =
         std::chrono::steady_clock::now() - std::chrono::seconds(10);
+
+    // Predictive pivot dot. Only ever set from a FocusSource::Scene hit, so
+    // "valid" means "the cursor is over the model", not merely "resolved".
+    bool focus_preview_valid = false;
+    simd_float3 focus_preview{};
 
     // Hovered gizmo handle (modify-mode mouse-moved feedback). Cleared
     // anywhere the gizmo it points at can go away: select(), gizmo hide,
@@ -163,6 +171,16 @@ void Editor::render(void* caMetalDrawable) {
                                          kPivotLineHalfWidthPts * pivot_scale,
                                          camera.eye,
                                          pivot_marker_alpha(since_camera_move));
+
+        // Predictive pivot dot, screen-constant like the pivot ring.
+        if (impl_->focus_preview_valid) {
+            impl_->renderer.set_focus_preview(impl_->focus_preview,
+                                              kFocusPreviewRadiusPts *
+                                                  pts_to_world_at(impl_->focus_preview),
+                                              camera.eye);
+        } else {
+            impl_->renderer.hide_focus_preview();
+        }
 
         // World-origin +Y axis and pip. Height is world-constant (it is a
         // world-space landmark, like the plate's X/Z axes) while the shaft
@@ -393,6 +411,26 @@ void Editor::updateGizmoHover(float x, float y) {
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
     impl_->hover = pick_gizmo_handle(frame, ray, camera.fov_y_radians, impl_->viewportHeightPts,
                                      impl_->gizmo_kind);
+}
+
+void Editor::updateFocusPreview(float x, float y) {
+    impl_->focus_preview_valid = false;
+    if (impl_->viewportWidthPts <= 0.0f || impl_->viewportHeightPts <= 0.0f) {
+        return;
+    }
+    const Camera camera = impl_->controller.to_camera();
+    const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts,
+                                                   impl_->viewportHeightPts);
+    const FocusPoint focus = resolve_focus(impl_->scene, ray, camera.target);
+    if (focus.source != FocusSource::Scene) {
+        return; // fallbacks are real focus points but not things worth pointing at
+    }
+    impl_->focus_preview = focus.point;
+    impl_->focus_preview_valid = true;
+}
+
+void Editor::clearFocusPreview() {
+    impl_->focus_preview_valid = false;
 }
 
 void Editor::clearGizmoHover() {

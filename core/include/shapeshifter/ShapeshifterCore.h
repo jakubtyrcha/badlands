@@ -128,6 +128,15 @@ public:
     void updateDrag(float x, float y);
     void endDrag();
 
+    // Predictive pivot dot: the surface point under the cursor — what the next
+    // orbit would rotate around. Answers "how will this drag behave?" BEFORE
+    // the press, which the pivot marker cannot: that only appears once a
+    // gesture is already running. Lights ONLY on a real surface hit; a ground
+    // or target-plane fallback draws nothing, because a dot floating in space
+    // is noise rather than information.
+    void updateFocusPreview(float x, float y);
+    void clearFocusPreview();
+
     // Gizmo hover (modify-mode mouse-moved feedback). Hover state never
     // outlives the gizmo it points at: it self-clears on selection change,
     // gizmo hide, and node deletion — the app layer's clears are only a

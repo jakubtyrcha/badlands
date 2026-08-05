@@ -182,6 +182,19 @@ void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& 
 void append_origin_marker(std::vector<LineVertex>& out, float height, float half_width,
                           float pip_half_size, simd_float3 eye);
 
+// Predictive pivot dot: the surface point under the cursor, i.e. what the next
+// orbit would rotate around. Answers "how will this drag behave?" BEFORE the
+// press, which the pivot crosshair cannot — that only appears once a gesture is
+// already running.
+//
+// Deliberately the quietest thing in the viewport: one small camera-facing
+// quad, low alpha, drawn depth-ignored with the rest of the gesture chrome. It
+// competes with the model for attention every time the cursor moves, so it has
+// to earn its place by being nearly subliminal until you look for it.
+inline constexpr simd_float4 kColorFocusPreview = {1.0f, 1.0f, 1.0f, 0.35f};
+void append_focus_dot(std::vector<LineVertex>& out, simd_float3 center, float half_size,
+                      simd_float3 eye, simd_float4 color);
+
 // Camera-pivot marker (the orbit target): a flat camera-facing ring of
 // `radius` with four ticks crossing it. Replaces the previous always-on
 // "spiked cube" (move-gizmo spec R3), which was 3D geometry parked at the

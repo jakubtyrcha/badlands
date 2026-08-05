@@ -221,10 +221,15 @@ final class EditorViewModel {
     func handleMouseMoved(_ p: CGPoint) {
         guard mode == .edit else { return }
         editor.updateGizmoHover(Float(p.x), Float(p.y))
+        // Two analytic raycasts per move (gizmo handles, then the scene). Both
+        // are ray-primitive solves over the node list, not raymarches -- see
+        // core/src/picking.cpp -- so this is a handful of flops per node.
+        editor.updateFocusPreview(Float(p.x), Float(p.y))
     }
 
     func handleMouseExited() {
         editor.clearGizmoHover()
+        editor.clearFocusPreview()
     }
 
     /// Two-finger scroll pans. Phases let this be a real begin/update/end

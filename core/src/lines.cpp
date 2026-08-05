@@ -318,6 +318,11 @@ void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& 
                               color_for(GizmoHandle::Uniform, kColorGizmoUniform));
 }
 
+void append_focus_dot(std::vector<LineVertex>& out, simd_float3 center, float half_size,
+                      simd_float3 eye, simd_float4 color) {
+    append_camera_facing_quad(out, center, half_size, eye, color);
+}
+
 void append_origin_marker(std::vector<LineVertex>& out, float height, float half_width,
                           float pip_half_size, simd_float3 eye) {
     const simd_float3 origin = {0.0f, 0.0f, 0.0f};
