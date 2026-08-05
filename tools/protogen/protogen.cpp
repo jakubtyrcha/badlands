@@ -1210,35 +1210,23 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     const float u_term = std::pow(depth_m, 2.0f / 3.0f) *
                          std::sqrt(S_h) / p.manning_n;
 
-    // ONE ITERATION = ONE CELL CROSSING. dt is however long that takes.
+    // ONE TAP = ONE CELL LENGTH, physics re-derived every tap.
     //
-    // Displacement is NOT fixed. `dt = travel_step_m / speed` made every step
-    // advance exactly travel_step_m whatever the velocity -- the sqrt(2)
-    // normalisation again, in metres instead of cells. Speed had no effect on
-    // how far a particle went.
-    //
-    // The particle now runs to the next cell BOUNDARY and re-derives the
-    // gradient there, so it turns exactly where the terrain changes. Distance
-    // per iteration is geometry; time per iteration varies with speed.
+    // NOT aligned to cell boundaries. Running to the next boundary made every
+    // particle change direction ON A GRID LINE -- a grid synchronisation, and
+    // the likely source of the vertical striping, since the sweep scans rows.
+    // A fixed step of one cell length has no such alignment: where the tap ends
+    // depends on where the particle started, not on the lattice.
     const float sp0 = len(speed);
     const V2 hdg = (sp0 > 0.f) ? V2{speed.x / sp0, speed.y / sp0}
                                : V2{gx / std::max(slope, 1e-9f),
                                     gy / std::max(slope, 1e-9f)};
-    const float inf_t = 1e30f;
-    const float bx = (hdg.x > 1e-6f)  ? (std::floor(pos.x) + 1.f - pos.x) / hdg.x
-                   : (hdg.x < -1e-6f) ? (std::floor(pos.x) - pos.x) / hdg.x
-                                      : inf_t;
-    const float by = (hdg.y > 1e-6f)  ? (std::floor(pos.y) + 1.f - pos.y) / hdg.y
-                   : (hdg.y < -1e-6f) ? (std::floor(pos.y) - pos.y) / hdg.y
-                                      : inf_t;
-    // +1e-4 lands strictly inside the next cell rather than on the edge.
-    float cross_cells = std::min(std::min(bx, by), 1.5f) + 1e-4f;
-    if (!std::isfinite(cross_cells) || !(cross_cells > 0.f) ||
-        (std::fabs(hdg.x) < 1e-6f && std::fabs(hdg.y) < 1e-6f)) {
+    if (std::fabs(hdg.x) < 1e-6f && std::fabs(hdg.y) < 1e-6f) {
       Deposit(g, here, carried_mass());
       g.deposited_death += double(carried_mass());
       return;
     }
+    const float cross_cells = 1.0f;
     const float ds_step_m = cross_cells * cell_m;
     const float dt = ds_step_m / std::max(std::max(sp0, u_term), 0.01f);
 
