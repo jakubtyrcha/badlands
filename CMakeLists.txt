@@ -81,6 +81,55 @@ set(ozz_build_data OFF CACHE BOOL "" FORCE)
 set(ozz_build_postfix OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/ozz-animation)
 
+# tinyusdz: the USD reader behind src/engine/assets (badlands_usd_lib), vendored
+# as a pinned submodule (tag v0.9.9-rc7, third_party/tinyusdz). It is the only
+# dependency-free USDC parser going; OpenUSD would dwarf every other dep here.
+#
+# The pin is an RC on purpose, not carelessness. Our Poly Haven props are Blender
+# USD exports carrying a MaterialX ND_standard_surface_surfaceshader, and the
+# last stable tag (v0.9.4) types MtlxAutodeskStandardSurface::subsurface_radius
+# as `float` while these files author it as `color3f` -- a type mismatch that
+# fails Stage reconstruction and so rejects the ENTIRE file, geometry included.
+# v0.9.9-rc7 corrects the field to color3f (matching the MaterialX spec). Moving
+# back to a stable tag means waiting for one that carries that fix.
+#
+# We take the STATIC lib (`tinyusdz::tinyusdz_static`) with Tydra ON — Tydra is
+# the layer that turns a Stage into render-ready meshes (triangulation, the
+# facevarying -> vertex split, normals and tangents), so without it we would be
+# walking raw prims ourselves.
+#
+# Tests/examples/tools are already off by default for an add_subdirectory build
+# (upstream keys that off PROJECT_IS_TOP_LEVEL); the sets below turn off what
+# stays ON by default and that we do not read: audio decoding, MaterialX, the
+# USD->glTF example, the pxr compatibility shim, and both writers (we only ever
+# read a .usdc).
+set(TINYUSDZ_WITH_TYDRA ON CACHE BOOL "" FORCE)
+# Upstream compiles ITSELF with -Weverything -Werror, which our clang rejects
+# (-Wthread-safety-negative on its own logger's std::lock_guard). That is a
+# warning policy for tinyusdz's own CI, not a signal about our use of it, so we
+# turn it off rather than patch a vendored submodule.
+set(TINYUSDZ_NO_WERROR ON CACHE BOOL "" FORCE)
+set(TINYUSDZ_WITH_AUDIO OFF CACHE BOOL "" FORCE)
+set(TINYUSDZ_WITH_USDMTLX OFF CACHE BOOL "" FORCE)
+set(TINYUSDZ_WITH_USD_TO_GLTF OFF CACHE BOOL "" FORCE)
+set(TINYUSDZ_WITH_PXR_COMPAT_API OFF CACHE BOOL "" FORCE)
+# The writers stay ON even though we only ever read. Turning them off in
+# v0.9.9-rc7 leaves tinyusdz's own USDZ serialization path referencing
+# usdc::SaveAsUSDCToMemory, which then fails to link -- an upstream wiring bug,
+# not something our use triggers. The cost of leaving them in is build time.
+set(TINYUSDZ_WITH_MODULE_USDA_WRITER ON CACHE BOOL "" FORCE)
+set(TINYUSDZ_WITH_MODULE_USDC_WRITER ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/tinyusdz)
+# tinyusdz v0.9.4 predates C++23 and calls nonstd::make_unexpected(), which the
+# vendored expected-lite only provides in its OWN implementation. We compile at
+# gnu++23, where the header auto-selects std::expected instead and that function
+# does not exist. Pin the selection back to nonstd (1 = nsel_EXPECTED_NONSTD).
+#
+# PUBLIC, and it has to be: usd_loader.cpp includes the same Tydra headers, so
+# if the two sides disagreed about which `expected` they mean, the types in
+# tinyusdz's signatures would not be the types we call them with.
+target_compile_definitions(tinyusdz_static PUBLIC nsel_CONFIG_SELECT_EXPECTED=1)
+
 # wesl_ffi: .wesl -> WGSL shader compilation (src/crates/wesl), Rust staticlib.
 # The crate's Cargo package is named "wesl_ffi", not "wesl" — it depends on
 # the `wesl` 0.2 crate, and Corrosion invokes `cargo rustc --package <name>`,
@@ -142,6 +191,30 @@ corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
 # types/logic live here — see src/engine/app/app_view.hpp.
+# badlands_usd_lib: the USD import layer (src/engine/assets). Deliberately its
+# OWN target rather than a handful of files inside badlands_engine, because it
+# links tinyusdz and NOT SDL3/Dawn/badlands_engine — which is what lets
+# badlands_usd_tests exercise the parser with no GPU and no window system in
+# the link line. Every other "pure CPU" suite here still drags in all of
+# badlands_engine; this one does not.
+#
+# Keep it that way: usd_scene.hpp exposes plain arrays and strings precisely so
+# nothing here needs the engine's mesh type (which pulls in <dawn/webgpu_cpp.h>).
+# The conversion to TexturedMeshResult lives in badlands_engine, one layer up.
+add_library(badlands_usd_lib STATIC
+    src/engine/assets/usd_loader.cpp
+)
+target_include_directories(badlands_usd_lib PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+# tinyusdz PRIVATE — both the link and the include path. Its headers are an
+# implementation detail of usd_loader.cpp, and keeping them off this target's
+# INTERFACE is what stops a tinyusdz type reaching a consumer through
+# usd_scene.hpp. (Upstream does not export its own include dir, so we name it.)
+target_include_directories(badlands_usd_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/tinyusdz/src)
+target_link_libraries(badlands_usd_lib PRIVATE tinyusdz::tinyusdz_static)
+
 add_library(badlands_engine STATIC
     src/engine/rendering/gpu_context.cpp
     src/engine/rendering/vertex_layout.cpp
@@ -929,6 +1002,24 @@ add_test(NAME badlands_animation_tests COMMAND badlands_animation_tests WORKING_
 # shaders/passes/decals.wesl. Pure CPU (header-only math + glm), so it runs the
 # SDFs / perimeter parameterisation / dash pattern without a GPU; it is the
 # oracle the shader transcription is checked against.
+# badlands_usd_tests: Catch2 suite for the USD import layer
+# (src/engine/assets/). The ONLY test target here that does not link
+# badlands_engine — it takes badlands_usd_lib alone, so there is no Dawn and no
+# SDL3 in the link line and a failure can only be the parser's. It reads the
+# real assets/models/*.usdc, hence the source-dir working directory.
+add_executable(badlands_usd_tests
+    src/engine/tests/usd_loader_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_usd_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_usd_tests PRIVATE badlands_usd_lib)
+if(APPLE)
+    target_link_options(badlands_usd_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_usd_tests COMMAND badlands_usd_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(badlands_decal_math_tests
     src/engine/tests/decal_math_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
