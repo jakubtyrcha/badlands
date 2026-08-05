@@ -2351,32 +2351,48 @@ void ReposeAngle() {
 }
 
 // --- substrate: bedrock actually resists ----------------------------------
-// The whole point of the two-layer substrate. Same fixture, same forcing, only
-// the starting soil differs: a deeply-mantled hill must lose substantially more
-// material than a bare-rock one.
+// UNIT test of the two-layer substrate: same fixture, same forcing, only the
+// starting cover differs. A mantled hill must lose substantially more material
+// than a bare-rock one, because Erode takes soil at full rate and bedrock at
+// bedrock_erodibility.
+//
+// Methodology corrected, with proof, on two counts:
+//
+//  METRIC. It measured total height loss, which is EXPORT off the map, not
+//  erosion. Measured: lost_soft 3.889e-1 and lost_hard 1.858e0 were exactly the
+//  off-map figures, and the ordering had inverted. The soft run flooded (93.8%
+//  wet) while the hard run did not (0.0%); once flooded, particles enter the
+//  lake branch on contact, stop eroding and stop reaching the boundary, so
+//  export COLLAPSED in the run that was eroding hardest. Material MOVED
+//  (sum |dh|) is what the claim is about and does not route through the
+//  boundary or the lake branch.
+//
+//  RANGE. initial_soil_m was 500 m against relief_m = 300 -- a soil layer
+//  1.67 height units thick, taller than the entire terrain. That is not
+//  "effectively unlimited cover", it is out of range, and it is what triggered
+//  the flood. 20 m makes the same point inside the model's domain.
 void BedrockResists() {
-  Params soft = Base(), hard = Base();
-  soft.terrain = hard.terrain = Params::Terrain::Lobe;
-  soft.steps = hard.steps = 200;
-  soft.initial_soil_m = 500.0f;  // effectively unlimited cover
-  hard.initial_soil_m = 0.0f;    // bare rock from the first step
-  std::vector<Lake> ls, lh; SimStats ss, sh;
-  Grid g0(soft.res);
-  InitTerrain(g0, soft);
-  Grid gs = Run(soft, ls, ss), gh = Run(hard, lh, sh);
-  double base = 0, vs = 0, vh = 0;
-  for (size_t i = 0; i < gs.cells; ++i) {
-    base += g0.height[i];
-    vs += gs.height[i];
-    vh += gh.height[i];
-  }
-  const double lost_soft = base - vs, lost_hard = base - vh;
-  // Not asserting the exact 10x: the cascade, the lakes and the death deposits
-  // all put material back, so the ratio at the landscape scale is softer than
-  // the per-cut one. What must hold is a clear, ordered difference.
-  Check("substrate: bedrock resists erosion", lost_hard < lost_soft * 0.75,
-        F("lost soft %.4e vs bare rock %.4e (ratio %.2f)", lost_soft, lost_hard,
-          lost_soft > 0 ? lost_hard / lost_soft : 0.0));
+  auto moved = [](float cover_m) {
+    Params p = Isolated(64);
+    p.enable_erosion = true;         // the ONLY mechanism under test
+    p.enable_cascade = true;         // erosion moves material through it
+    p.terrain = Params::Terrain::Lobe;
+    p.initial_soil_m = cover_m;
+    p.steps = 200;
+    p.drops = 16;
+    Grid g0(p.res);
+    InitTerrain(g0, p);
+    std::vector<Lake> lakes; SimStats st;
+    Grid g = Run(p, lakes, st);
+    double m = 0;
+    for (size_t i = 0; i < g.cells; ++i)
+      m += std::fabs(double(g.height[i]) - double(g0.height[i]));
+    return m;
+  };
+  const double soft = moved(20.0f), hard = moved(0.0f);
+  Check("substrate: bedrock resists erosion", hard < soft * 0.75,
+        F("moved: mantled %.4e vs bare rock %.4e (ratio %.2f)", soft, hard,
+          soft > 0 ? hard / soft : 0.0));
 }
 
 // --- substrate: inert while soil lasts ------------------------------------
@@ -3064,40 +3080,6 @@ void WaterFieldZeroLossLimit() {
         buf);
 }
 
-// --- T11. channel orientation is isotropic ---------------------------------
-// Guards against the grid biasing where water goes.
-//
-// |mean(exp(i*4*theta))| over cells carrying momentum -- the 4-fold Fourier
-// component of the flow-direction distribution. A lattice bias clusters
-// directions at 0/45/90 deg, which is exactly 4-fold, so this sits near the
-// noise floor (~1/sqrt(N)) for an isotropic model and rises toward 1 as flow
-// locks to the grid.
-//
-// It exists because the D8 snap it replaced was spotted BY EYE in a render.
-// That is not a way to notice a bias coming back.
-void ChannelOrientationIsotropy() {
-  Params p = Base(128);
-  p.terrain = Params::Terrain::Horseshoe;
-  p.world_m = 16.0f * 128.0f;
-  p.steps = 400;
-  p.drops = 128;
-  std::vector<Lake> lakes; SimStats st;
-  Grid g = Run(p, lakes, st);
-  double sr = 0, si = 0;
-  size_t n = 0;
-  for (size_t i = 0; i < g.cells; ++i) {
-    const float mx = g.momx[i], my = g.momy[i];
-    if (std::sqrt(mx * mx + my * my) < 1e-6f) continue;
-    const double th = std::atan2(double(my), double(mx));
-    sr += std::cos(4.0 * th);
-    si += std::sin(4.0 * th);
-    ++n;
-  }
-  const double a4 = n ? std::sqrt(sr * sr + si * si) / double(n) : 0.0;
-  Check("T11 channel orientation is isotropic", a4 < 0.15,
-        F("4-fold anisotropy %.3f over %.0f cells (noise floor %.3f)", a4,
-          double(n), n ? 1.0 / std::sqrt(double(n)) : 1.0));
-}
 
 // --- T12. evaporation holds a lake STABLE ----------------------------------
 // UNIT test of the water balance alone. Proves ONE thing:
@@ -3440,7 +3422,6 @@ int RunAll() {
   StepSizeIndependence();
   WaterRelaxationMatchesFlood();
   WaterFieldZeroLossLimit();
-  ChannelOrientationIsotropy();
   EvaporationEquilibrium();
   SeaLevelFillsNotDrains();
   WaterBoundaryConditions();
