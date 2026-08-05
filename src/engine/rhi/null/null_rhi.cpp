@@ -470,16 +470,21 @@ class NullDevice final : public IRhiDevice {
     return std::make_unique<NullCommandEncoder>(&log_, label);
   }
   // Nothing executes, so nothing is ever in flight.
-  void Submit(ICommandEncoder&) override {}
+  void Submit(ICommandEncoder& encoder) override {
+    log_.Record(
+        {.kind = RecordedCommand::Kind::Submit, .object = &encoder});
+  }
   void WaitIdle() override {}
   // Null executes on Submit, so nothing is ever in flight. This is a real
   // answer, not a stub -- which is why the base declares it pure.
   size_t InFlightCount() override { return 0; }
 
   // The Null backend never observes anything itself; the validation decorator
-  // is what fills these in when it wraps a device.
+  // is what fills these in when it wraps a device. nullopt here means exactly
+  // "nothing checked" -- NOT a clean run, which is the distinction the report
+  // type exists to preserve.
   void BeginValidationScope() override {}
-  std::optional<std::string> EndValidationScope() override {
+  std::optional<ValidationReport> EndValidationScope() override {
     return std::nullopt;
   }
   bool IsValidationEnabled() const override { return false; }

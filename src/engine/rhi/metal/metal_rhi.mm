@@ -555,7 +555,9 @@ class MetalRenderPass final : public IRenderPass {
     if (!mp) return;
     pipeline_ = mp;
     [enc_ setRenderPipelineState:mp->Pso()];
-    if (mp->DepthState()) [enc_ setDepthStencilState:mp->DepthState()];
+    // Unconditional: see CreateRenderPipeline. Skipping this when a pipeline
+    // has no depth state is how the previous draw's state leaked into it.
+    [enc_ setDepthStencilState:mp->DepthState()];
     [enc_ setCullMode:mp->Cull()];
     [enc_ setFrontFacingWinding:mp->Winding()];
   }
@@ -904,13 +906,20 @@ class MetalDevice final : public IRhiDevice {
       return nullptr;
     }
 
-    id<MTLDepthStencilState> dss = nil;
-    if (d.depth.test_enabled || d.depth.write_enabled) {
-      MTLDepthStencilDescriptor* dd = [[MTLDepthStencilDescriptor alloc] init];
-      dd.depthCompareFunction =
-          d.depth.test_enabled ? ToMtl(d.depth.compare) : MTLCompareFunctionAlways;
-      dd.depthWriteEnabled = d.depth.write_enabled;
-      dss = [device_ newDepthStencilStateWithDescriptor:dd];
+    // ALWAYS a state, even when depth is off entirely. A nil state meant
+    // SetPipeline skipped setDepthStencilState:, so a depth-less pipeline
+    // inherited whatever the previous draw left bound -- pipeline state has to
+    // be fully determined by the pipeline (rule 7). "Off" is Always + no
+    // write, stated explicitly.
+    MTLDepthStencilDescriptor* dd = [[MTLDepthStencilDescriptor alloc] init];
+    dd.depthCompareFunction = d.depth.test_enabled ? ToMtl(d.depth.compare)
+                                                   : MTLCompareFunctionAlways;
+    dd.depthWriteEnabled = d.depth.write_enabled;
+    id<MTLDepthStencilState> dss =
+        [device_ newDepthStencilStateWithDescriptor:dd];
+    if (!dss) {
+      spdlog::error("rhi/metal: depth-stencil state for '{}' failed", d.label);
+      return nullptr;
     }
     return std::make_shared<MetalRenderPipeline>(pso, dss, d);
   }
@@ -982,9 +991,10 @@ class MetalDevice final : public IRhiDevice {
     return in_flight_.size();
   }
 
-  // The decorator owns validation; a bare Metal device observes nothing.
+  // The decorator owns validation; a bare Metal device observes nothing, so
+  // nullopt means "nothing checked" rather than "clean".
   void BeginValidationScope() override {}
-  std::optional<std::string> EndValidationScope() override {
+  std::optional<ValidationReport> EndValidationScope() override {
     return std::nullopt;
   }
   bool IsValidationEnabled() const override { return false; }

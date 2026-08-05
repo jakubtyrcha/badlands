@@ -43,6 +43,10 @@ struct RecordedCommand {
     Dispatch,
     CopyBufferToBuffer, CopyTextureToBuffer,
     Finish,
+    // Recorded by the DEVICE, not the encoder, so a test can ask whether a
+    // submission actually reached the backend -- which is how the validation
+    // decorator's refusals are told apart from its reports.
+    Submit,
   };
 
   Kind kind = Kind::Finish;

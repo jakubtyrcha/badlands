@@ -31,11 +31,14 @@ class Recorder {
     if (scope_depth_++ == 0) scope_message_.clear();
   }
 
-  std::optional<std::string> EndScope() {
+  // nullopt means "no report to give": no scope was open, or this End closed
+  // an INNER nesting level and the outer one is still collecting. A scope that
+  // actually completed always yields a report, clean or not -- that is the
+  // difference the caller needs and could not previously see.
+  std::optional<ValidationReport> EndScope() {
     if (scope_depth_ == 0) return std::nullopt;
     if (--scope_depth_ > 0) return std::nullopt;
-    if (scope_message_.empty()) return std::nullopt;
-    return scope_message_;
+    return ValidationReport{scope_message_};
   }
 
   uint64_t TotalViolations() const { return total_; }
@@ -152,6 +155,11 @@ class ValidationRenderPass final : public IRenderPass {
       ctx_->recorder.Report("SetIndexBuffer: buffer '" + b->GetLabel() +
                             "' was destroyed");
     }
+    // Kept, not just flagged: DrawIndexed cannot bounds-check first_index
+    // without knowing the buffer it indexes into.
+    index_buffer_ = b;
+    index_format_ = f;
+    index_offset_ = off;
     index_bound_ = b != nullptr;
     inner_->SetIndexBuffer(b, f, off);
   }
@@ -175,6 +183,24 @@ class ValidationRenderPass final : public IRenderPass {
     if (Ended("DrawIndexed") || NoPipeline("DrawIndexed")) return;
     if (!index_bound_) {
       ctx_->recorder.Report("DrawIndexed: no index buffer bound");
+      return;
+    }
+    // first_index became load-bearing when the backend started honouring it;
+    // nothing checked that the range it selects exists. Metal reads past the
+    // MTLBuffer with no complaint, which is precisely the class of bug Dawn
+    // used to catch for us (rule 8).
+    if (index_buffer_) {
+      const uint64_t stride = index_format_ == IndexFormat::Uint16 ? 2 : 4;
+      const uint64_t count = uint64_t(fi) + uint64_t(ic);
+      const uint64_t end = index_offset_ + count * stride;
+      if (end > index_buffer_->GetSize()) {
+        ctx_->recorder.Report(fmt::format(
+            "DrawIndexed: indices [{}, {}) at offset {} need {} bytes but "
+            "index buffer '{}' is only {} bytes",
+            fi, fi + ic, index_offset_, end, index_buffer_->GetLabel(),
+            index_buffer_->GetSize()));
+        return;  // refuse: the read would be out of bounds
+      }
     }
     inner_->DrawIndexed(ic, inst, fi, bv, finst);
   }
@@ -220,6 +246,9 @@ class ValidationRenderPass final : public IRenderPass {
   StateTracker* states_;
   std::string label_;
   IRenderPipeline* pipeline_ = nullptr;
+  IBuffer* index_buffer_ = nullptr;
+  IndexFormat index_format_ = IndexFormat::Uint32;
+  uint64_t index_offset_ = 0;
   bool index_bound_ = false;
   bool ended_ = false;
 };
@@ -446,6 +475,22 @@ class ValidationEncoder final : public ICommandEncoder {
       ctx_->recorder.Report("CopyBufferToBuffer: dst '" + dst->GetLabel() +
                             "' lacks BufferUsage::CopyDst");
     }
+    // Subtraction, not addition: `offset + size` wraps, and a wrapped compare
+    // passes a check it should fail.
+    if (src && (size > src->GetSize() || so > src->GetSize() - size)) {
+      ctx_->recorder.Report(fmt::format(
+          "CopyBufferToBuffer: reading {} bytes at offset {} from src '{}' "
+          "runs past its {} bytes",
+          size, so, src->GetLabel(), src->GetSize()));
+      return;
+    }
+    if (dst && (size > dst->GetSize() || dof > dst->GetSize() - size)) {
+      ctx_->recorder.Report(fmt::format(
+          "CopyBufferToBuffer: writing {} bytes at offset {} into dst '{}' "
+          "runs past its {} bytes",
+          size, dof, dst->GetLabel(), dst->GetSize()));
+      return;
+    }
     inner_->CopyBufferToBuffer(src, so, dst, dof, size);
   }
 
@@ -459,6 +504,36 @@ class ValidationEncoder final : public ICommandEncoder {
     if (src && !Has(src->GetUsage(), TextureUsage::CopySrc)) {
       ctx_->recorder.Report("CopyTextureToBuffer: texture '" +
                             src->GetLabel() + "' lacks TextureUsage::CopySrc");
+    }
+    if (src) {
+      const uint32_t mips = std::max(1u, src->GetMipLevels());
+      const uint32_t layers = std::max(1u, src->GetArrayLayers());
+      if (mip >= mips) {
+        ctx_->recorder.Report(fmt::format(
+            "CopyTextureToBuffer: mip {} of '{}' does not exist (it has {})",
+            mip, src->GetLabel(), mips));
+        return;
+      }
+      if (layer >= layers) {
+        ctx_->recorder.Report(fmt::format(
+            "CopyTextureToBuffer: layer {} of '{}' does not exist (it has {})",
+            layer, src->GetLabel(), layers));
+        return;
+      }
+      if (dst) {
+        // Rows arrive tightly packed, per the ICommandEncoder contract.
+        const uint64_t w = std::max(1u, src->GetWidth() >> mip);
+        const uint64_t h = std::max(1u, src->GetHeight() >> mip);
+        const uint64_t need = w * h * FormatByteSize(src->GetFormat());
+        if (need > dst->GetSize() || off > dst->GetSize() - need) {
+          ctx_->recorder.Report(fmt::format(
+              "CopyTextureToBuffer: mip {} of '{}' is {} bytes and will not "
+              "fit at offset {} in dst '{}' of {} bytes",
+              mip, src->GetLabel(), need, off, dst->GetLabel(),
+              dst->GetSize()));
+          return;
+        }
+      }
     }
     inner_->CopyTextureToBuffer(src, mip, layer, dst, off);
   }
@@ -484,6 +559,7 @@ class ValidationEncoder final : public ICommandEncoder {
 
   bool IsFinished() const override { return finished_; }
   ICommandEncoder* Inner() const { return inner_.get(); }
+  const std::string& Label() const { return label_; }
 
  private:
   // Derived rather than tracked with a flag: the flag version was set on
@@ -709,12 +785,22 @@ class ValidationDevice final : public IRhiDevice {
   void Submit(ICommandEncoder& encoder) override {
     auto* v = dynamic_cast<ValidationEncoder*>(&encoder);
     if (!v) {
-      ctx_.recorder.Report("Submit: encoder did not come from this device");
-      inner_->Submit(encoder);
+      // Refused, not reported-and-forwarded. The backend's Submit
+      // static_casts to its own encoder type, so handing it something from
+      // another device is a wrong-type cast -- reporting and then doing it
+      // anyway converts a diagnosable mistake into undefined behaviour, which
+      // is worse than not checking (rule 3).
+      ctx_.recorder.Report(
+          "Submit: encoder did not come from this device -- refusing to "
+          "submit it");
       return;
     }
     if (!v->IsFinished()) {
-      ctx_.recorder.Report("Submit: encoder was not finished");
+      // Also refused: an unfinished encoder has no complete command buffer to
+      // submit, and Metal raises on committing one still being encoded.
+      ctx_.recorder.Report("Submit: encoder '" + v->Label() +
+                           "' was not finished -- refusing to submit it");
+      return;
     }
     inner_->Submit(*v->Inner());
   }
@@ -724,7 +810,7 @@ class ValidationDevice final : public IRhiDevice {
   size_t InFlightCount() override { return inner_->InFlightCount(); }
 
   void BeginValidationScope() override { ctx_.recorder.BeginScope(); }
-  std::optional<std::string> EndValidationScope() override {
+  std::optional<ValidationReport> EndValidationScope() override {
     return ctx_.recorder.EndScope();
   }
   bool IsValidationEnabled() const override { return true; }

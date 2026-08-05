@@ -20,12 +20,21 @@ std::unique_ptr<IRhiDevice> MakeValidated() {
                        .label = "validated"});
 }
 
-// Runs `fn` inside a validation scope and returns whatever was observed.
+// Runs `fn` inside a validation scope and returns what it observed, or nullopt
+// if the scope was clean.
+//
+// The REQUIRE is the point: EndValidationScope returns nullopt when NO check
+// ran, and a test that reads that as "clean" asserts nothing at all. Having
+// proved a report exists, this collapses it back to the optional<string> the
+// cases below read, where nullopt now means clean and only clean.
 template <typename Fn>
 std::optional<std::string> Observe(IRhiDevice& device, Fn&& fn) {
   device.BeginValidationScope();
   fn();
-  return device.EndValidationScope();
+  auto report = device.EndValidationScope();
+  REQUIRE(report.has_value());
+  if (report->IsClean()) return std::nullopt;
+  return report->violations;
 }
 
 // A texture usable as a color attachment.
@@ -529,19 +538,263 @@ TEST_CASE("validation: several violations accumulate into one scope",
   CHECK(observed->find(';') != std::string::npos);
 }
 
-TEST_CASE("validation: a device without validation observes nothing",
+// --- Bounds Dawn used to check for us ---------------------------------------
+
+TEST_CASE("validation: an out-of-bounds buffer copy is refused",
           "[rhi][validation]") {
-  auto device = CreateDevice({.backend = BackendKind::Null,
-                              .enable_validation = false});
-  REQUIRE(device);
-  CHECK_FALSE(device->IsValidationEnabled());
+  auto device = MakeValidated();
+  auto src = device->CreateBuffer({.size = 64,
+                                   .usage = BufferUsage::CopySrc,
+                                   .label = "src64"});
+  auto dst = device->CreateBuffer({.size = 32,
+                                   .usage = BufferUsage::CopyDst,
+                                   .label = "dst32"});
+
   auto observed = Observe(*device, [&] {
-    // Provoke something the validated device would report.
     auto encoder = device->CreateCommandEncoder("e");
-    encoder->Finish();
+    encoder->Transition(src.get(), ResourceState::CopySrc);
+    encoder->Transition(dst.get(), ResourceState::CopyDst);
+    encoder->CopyBufferToBuffer(src.get(), 0, dst.get(), 0, 64);  // dst is 32
     encoder->Finish();
   });
-  // nullopt here means "no validation ran", not "everything was fine" --
-  // IsValidationEnabled() is how a caller tells those apart.
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("dst32") != std::string::npos);
+  CHECK(observed->find("runs past") != std::string::npos);
+
+  // And the copy did not happen: refuse, do not report-and-proceed (rule 3).
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       CopyBufferToBuffer) == 0);
+}
+
+TEST_CASE("validation: a copy offset that would wrap is refused",
+          "[rhi][validation]") {
+  // `offset + size` overflows to a small number and passes a naive check.
+  auto device = MakeValidated();
+  auto src = device->CreateBuffer(
+      {.size = 64, .usage = BufferUsage::CopySrc, .label = "wrapsrc"});
+  auto dst = device->CreateBuffer(
+      {.size = 64, .usage = BufferUsage::CopyDst, .label = "wrapdst"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(src.get(), ResourceState::CopySrc);
+    encoder->Transition(dst.get(), ResourceState::CopyDst);
+    encoder->CopyBufferToBuffer(src.get(), ~uint64_t(0) - 8, dst.get(), 0, 16);
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("runs past") != std::string::npos);
+}
+
+TEST_CASE("validation: a texture copy into too small a buffer is refused",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto tex = device->CreateTexture({.width = 8, .height = 8,
+                                    .format = Format::RGBA8Unorm,
+                                    .usage = TextureUsage::CopySrc,
+                                    .label = "tex8"});
+  // 8*8*4 = 256 bytes needed; give it 64.
+  auto dst = device->CreateBuffer(
+      {.size = 64, .usage = BufferUsage::CopyDst, .label = "tiny"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(tex.get(), ResourceState::CopySrc);
+    encoder->Transition(dst.get(), ResourceState::CopyDst);
+    encoder->CopyTextureToBuffer(tex.get(), 0, 0, dst.get(), 0);
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("will not fit") != std::string::npos);
+}
+
+TEST_CASE("validation: a copy from a mip or layer that does not exist is refused",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto tex = device->CreateTexture({.width = 8, .height = 8,
+                                    .format = Format::RGBA8Unorm,
+                                    .usage = TextureUsage::CopySrc,
+                                    .label = "flat"});
+  auto dst = device->CreateBuffer(
+      {.size = 4096, .usage = BufferUsage::CopyDst, .label = "big"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(tex.get(), ResourceState::CopySrc);
+    encoder->Transition(dst.get(), ResourceState::CopyDst);
+    encoder->CopyTextureToBuffer(tex.get(), /*mip=*/4, 0, dst.get(), 0);
+    encoder->CopyTextureToBuffer(tex.get(), 0, /*layer=*/3, dst.get(), 0);
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("mip 4") != std::string::npos);
+  CHECK(observed->find("layer 3") != std::string::npos);
+}
+
+TEST_CASE("validation: an indexed draw past the end of its index buffer is refused",
+          "[rhi][validation]") {
+  // first_index became load-bearing when the backend started honouring it,
+  // and nothing checked that the range it selects exists.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalGraphicsSource(device->GetBackend()),
+      rhitest::MakeTestReflection("vs_main", ShaderStage::Vertex), "g");
+  auto pipe = device->CreateRenderPipeline(
+      {.vertex_shader = module.get(), .vertex_entry = "vs_main",
+       .fragment_shader = module.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm},
+       .cull_mode = CullMode::None, .label = "idx"});
+  REQUIRE(pipe);
+  auto color = MakeColorTarget(*device);
+  // Room for 6 uint32 indices.
+  auto ibuf = device->CreateBuffer(
+      {.size = 24, .usage = BufferUsage::Index, .label = "six_indices"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(color.get(), ResourceState::RenderTarget);
+    RenderPassDesc desc;
+    desc.color_attachments.push_back({.view = color->GetDefaultView()});
+    auto* pass = encoder->BeginRenderPass(desc);
+    REQUIRE(pass != nullptr);
+    pass->SetPipeline(pipe.get());
+    pass->SetIndexBuffer(ibuf.get(), IndexFormat::Uint32);
+    pass->DrawIndexed(/*index_count=*/3, 1, /*first_index=*/4);  // needs 7
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("six_indices") != std::string::npos);
+  CHECK(observed->find("indices [4, 7)") != std::string::npos);
+}
+
+TEST_CASE("validation: an in-bounds indexed draw is not refused",
+          "[rhi][validation]") {
+  // The paired green: exactly the range that fits reports nothing, so the
+  // case above cannot pass against a check that always fires.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalGraphicsSource(device->GetBackend()),
+      rhitest::MakeTestReflection("vs_main", ShaderStage::Vertex), "g");
+  auto pipe = device->CreateRenderPipeline(
+      {.vertex_shader = module.get(), .vertex_entry = "vs_main",
+       .fragment_shader = module.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm},
+       .cull_mode = CullMode::None, .label = "idx"});
+  auto color = MakeColorTarget(*device);
+  auto ibuf = device->CreateBuffer(
+      {.size = 24, .usage = BufferUsage::Index, .label = "six_indices"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(color.get(), ResourceState::RenderTarget);
+    RenderPassDesc desc;
+    desc.color_attachments.push_back({.view = color->GetDefaultView()});
+    auto* pass = encoder->BeginRenderPass(desc);
+    pass->SetPipeline(pipe.get());
+    pass->SetIndexBuffer(ibuf.get(), IndexFormat::Uint32);
+    pass->DrawIndexed(/*index_count=*/3, 1, /*first_index=*/3);  // needs 6
+    pass->End();
+    encoder->Finish();
+  });
+  INFO(observed.value_or("<clean>"));
   CHECK_FALSE(observed.has_value());
+}
+
+TEST_CASE("validation: a foreign encoder is refused rather than forwarded",
+          "[rhi][validation]") {
+  // Reporting and then forwarding converted a diagnosable mistake into
+  // undefined behaviour: the backend's Submit static_casts to its own encoder
+  // type, so a foreign one is a wrong-type cast (rule 3).
+  auto validated = MakeValidated();
+  auto other = CreateDevice({.backend = BackendKind::Null,
+                             .enable_validation = false, .label = "other"});
+  REQUIRE(validated);
+  REQUIRE(other);
+
+  auto foreign = other->CreateCommandEncoder("foreign");
+  foreign->Finish();
+
+  auto observed = Observe(*validated, [&] { validated->Submit(*foreign); });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("did not come from this device") != std::string::npos);
+  CHECK(observed->find("refusing") != std::string::npos);
+
+  // The submission did not reach the inner device.
+  auto* log = badlands::rhi::null::GetCommandLog(*validated);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::Submit) == 0);
+}
+
+TEST_CASE("validation: an unfinished encoder is refused rather than submitted",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("unfinished");
+    device->Submit(*encoder);  // never Finish()ed
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("was not finished") != std::string::npos);
+
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::Submit) == 0);
+}
+
+TEST_CASE("validation: unchecked is distinguishable from clean",
+          "[rhi][validation]") {
+  // The whole reason EndValidationScope returns a report rather than an
+  // optional<string>. Before, "nothing was checked" and "everything was fine"
+  // were the same value, and a caller had to ask IsValidationEnabled()
+  // separately to tell them apart -- which is exactly the workaround rule 5
+  // says to replace with a type that cannot express the confusion.
+  auto provoke = [](IRhiDevice& d) {
+    auto encoder = d.CreateCommandEncoder("e");
+    encoder->Finish();
+    encoder->Finish();  // second Finish: the validated device reports this
+  };
+
+  // Validation off: no report at all.
+  auto bare = CreateDevice({.backend = BackendKind::Null,
+                            .enable_validation = false});
+  REQUIRE(bare);
+  CHECK_FALSE(bare->IsValidationEnabled());
+  bare->BeginValidationScope();
+  provoke(*bare);
+  CHECK_FALSE(bare->EndValidationScope().has_value());
+
+  // Validation on, same calls: a report, and a dirty one.
+  auto checked = MakeValidated();
+  REQUIRE(checked);
+  checked->BeginValidationScope();
+  provoke(*checked);
+  auto dirty = checked->EndValidationScope();
+  REQUIRE(dirty.has_value());
+  CHECK_FALSE(dirty->IsClean());
+
+  // Validation on, nothing provoked: a report, and a clean one. This is the
+  // value that used to be indistinguishable from the bare device's above.
+  checked->BeginValidationScope();
+  auto clean = checked->EndValidationScope();
+  REQUIRE(clean.has_value());
+  CHECK(clean->IsClean());
+  CHECK(clean->violations.empty());
+}
+
+TEST_CASE("validation: ending a scope that never began yields no report",
+          "[rhi][validation]") {
+  // Also nullopt, and correctly so: there is nothing to report on. A caller
+  // that mismatches Begin/End learns it here rather than reading a clean run.
+  auto device = MakeValidated();
+  REQUIRE(device);
+  CHECK_FALSE(device->EndValidationScope().has_value());
 }

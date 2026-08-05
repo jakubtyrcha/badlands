@@ -32,6 +32,21 @@ enum class BackendKind : uint8_t {
 
 const char* ToString(BackendKind k);
 
+// What a completed validation scope observed.
+//
+// A distinct type rather than an optional<string>, because "clean" and "never
+// checked" are different facts and a caller that conflates them will report a
+// device with validation compiled out as verified.
+struct ValidationReport {
+  // Empty exactly when the scope was clean; the two cannot disagree.
+  std::string violations;
+
+  bool IsClean() const { return violations.empty(); }
+};
+// Deliberately no operator bool: this type is almost always held in an
+// optional, and two bools in one expression is the ambiguity the type exists
+// to remove.
+
 struct DeviceDesc {
   BackendKind backend = BackendKind::Null;
   // Wraps the device in the validation decorator. Off in release/profiling
@@ -107,10 +122,14 @@ class IRhiDevice {
   // a scoped query, not an error channel: begin a scope, do work, end it and
   // find out whether anything was observed.
   //
-  // Returns nullopt when validation is disabled, so callers cannot mistake a
-  // compiled-out check for a clean run.
+  // The optional distinguishes "no check ran" from "a check ran"; the
+  // ValidationReport inside distinguishes clean from dirty. Those are two
+  // different questions and the old signature answered both with nullopt --
+  // so a caller on a device with validation compiled out read the same value
+  // a clean run produced, and could not tell it had verified nothing
+  // (rule 5).
   virtual void BeginValidationScope() = 0;
-  virtual std::optional<std::string> EndValidationScope() = 0;
+  virtual std::optional<ValidationReport> EndValidationScope() = 0;
   virtual bool IsValidationEnabled() const = 0;
 };
 

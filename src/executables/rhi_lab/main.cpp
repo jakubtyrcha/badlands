@@ -22,6 +22,7 @@
 #include <string>
 #include <initializer_list>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -72,6 +73,35 @@ struct Options {
   bool debug_vis = false;
 };
 
+// std::stof and friends THROW on unparseable input, so `--tau x` used to end
+// the process in std::terminate with no indication which flag was wrong.
+// These say what they could not parse and refuse.
+bool ParseFloat(const char* text, const char* what, float& out) {
+  try {
+    size_t used = 0;
+    const float v = std::stof(text, &used);
+    if (used != std::strlen(text)) throw std::invalid_argument("trailing");
+    out = v;
+    return true;
+  } catch (const std::exception&) {
+    spdlog::error("rhi_lab: {} needs a number, got '{}'", what, text);
+    return false;
+  }
+}
+
+bool ParseInt(const char* text, const char* what, long& out) {
+  try {
+    size_t used = 0;
+    const long v = std::stol(text, &used);
+    if (used != std::strlen(text)) throw std::invalid_argument("trailing");
+    out = v;
+    return true;
+  } catch (const std::exception&) {
+    spdlog::error("rhi_lab: {} needs an integer, got '{}'", what, text);
+    return false;
+  }
+}
+
 bool ParseArgs(int argc, char** argv, Options& o) {
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -82,6 +112,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
       }
       return argv[++i];
     };
+    long n = 0;
     // --screenshot is the project-wide flag scripts/screenshot.sh passes; this
     // app is headless so it means the same thing as --out.
     if (a == "--out" || a == "--screenshot") {
@@ -89,12 +120,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
       if (!v) return false;
       o.out = v;
     }
-    else if (a == "--width") { const char* v = next("--width"); if (!v) return false; o.width = uint32_t(std::stoul(v)); }
-    else if (a == "--height") { const char* v = next("--height"); if (!v) return false; o.height = uint32_t(std::stoul(v)); }
-    else if (a == "--nodes") { const char* v = next("--nodes"); if (!v) return false; o.nodes = std::stoi(v); }
-    else if (a == "--trees") { const char* v = next("--trees"); if (!v) return false; o.trees = std::stoi(v); }
-    else if (a == "--tau") { const char* v = next("--tau"); if (!v) return false; o.tau = std::stof(v); }
-    else if (a == "--seed") { const char* v = next("--seed"); if (!v) return false; o.seed = uint32_t(std::stoul(v)); }
+    else if (a == "--width") { const char* v = next("--width"); if (!v || !ParseInt(v, "--width", n)) return false; o.width = uint32_t(n); }
+    else if (a == "--height") { const char* v = next("--height"); if (!v || !ParseInt(v, "--height", n)) return false; o.height = uint32_t(n); }
+    else if (a == "--nodes") { const char* v = next("--nodes"); if (!v || !ParseInt(v, "--nodes", n)) return false; o.nodes = int(n); }
+    else if (a == "--trees") { const char* v = next("--trees"); if (!v || !ParseInt(v, "--trees", n)) return false; o.trees = int(n); }
+    else if (a == "--tau") { const char* v = next("--tau"); if (!v || !ParseFloat(v, "--tau", o.tau)) return false; }
+    else if (a == "--seed") { const char* v = next("--seed"); if (!v || !ParseInt(v, "--seed", n)) return false; o.seed = uint32_t(n); }
     else if (a == "--debug-vis") { o.debug_vis = true; }
     else if (a == "--help" || a == "-h") {
       std::printf(
@@ -105,6 +136,23 @@ bool ParseArgs(int argc, char** argv, Options& o) {
       spdlog::error("rhi_lab: unknown argument '{}'", a);
       return false;
     }
+  }
+
+  // cluster_select.slang keeps a cluster when `own_error <= tau < parent_error`.
+  // Cluster errors are non-negative, so a tau of 0 or less keeps NOTHING, and
+  // a NaN tau fails every comparison and also keeps nothing -- either way the
+  // app renders empty terrain and says nothing about why.
+  if (!(o.tau > 0.0f)) {  // written to catch NaN, which fails every compare
+    constexpr float kMinTau = 0.01f;
+    spdlog::warn("rhi_lab: --tau {} selects no clusters at all; clamping to {}",
+                 o.tau, kMinTau);
+    o.tau = kMinTau;
+  }
+  if (o.nodes < 2 || o.trees < 0 || o.width == 0 || o.height == 0) {
+    spdlog::error("rhi_lab: need --nodes >= 2, --trees >= 0, and a non-zero "
+                  "--width/--height (got {}, {}, {}x{})",
+                  o.nodes, o.trees, o.width, o.height);
+    return false;
   }
   return true;
 }
@@ -622,8 +670,14 @@ int main(int argc, char** argv) {
   device->Submit(*encoder);
   device->WaitIdle();
 
-  if (auto complaint = device->EndValidationScope()) {
-    spdlog::warn("rhi_lab: validation observed: {}", *complaint);
+  if (auto report = device->EndValidationScope()) {
+    if (!report->IsClean()) {
+      spdlog::warn("rhi_lab: validation observed: {}", report->violations);
+    }
+  } else if (device->IsValidationEnabled()) {
+    // Validation is on but the scope produced no report -- a mismatched
+    // Begin/End, not a clean frame. Silence here would read as success.
+    spdlog::error("rhi_lab: validation scope produced no report");
   }
 
   // --- Report and write --------------------------------------------------
