@@ -96,19 +96,6 @@ public:
     // swings around it while the camera keeps aiming where it already was.
     bool orbit(float dx_pts, float dy_pts);
 
-    // Dollies along the view ray. Positive delta (pinch-out) zooms in:
-    // radius *= exp(-delta * kZoomSens), clamped to [kRadiusMin, kRadiusMax].
-    // Returns whether the radius changed.
-    bool zoom(float delta);
-
-    // Screen-space pan (deviation from the ported Rust original's world-XZ
-    // pan): target += (-dx * right + dy * up) * (2 * radius * tan(fov_y/2) /
-    // viewport_h_pts), where right/up are the camera basis vectors (same
-    // s/u as the view matrix). Content tracks the fingers 1:1 at target
-    // depth; view coords have a top-left origin. Returns whether the target
-    // moved.
-    bool pan_view(float dx_pts, float dy_pts, float viewport_h_pts);
-
     // --- cursor-anchored navigation ---------------------------------------
 
     // Points a subsequent orbit() at a new centre and changes NOTHING ELSE —

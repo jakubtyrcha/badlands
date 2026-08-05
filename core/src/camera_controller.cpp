@@ -118,34 +118,6 @@ bool CameraController::orbit(float dx_pts, float dy_pts) {
     return true;
 }
 
-bool CameraController::zoom(float delta) {
-    if (!std::isfinite(delta)) {
-        return false;
-    }
-    const float before = radius_;
-    radius_ = clampf(radius_ * std::exp(-delta * kZoomSens), kRadiusMin, kRadiusMax);
-    return radius_ != before;
-}
-
-bool CameraController::pan_view(float dx_pts, float dy_pts, float viewport_h_pts) {
-    // Same f/s/u basis as Camera::view_proj's look-at matrix (world up is
-    // always {0,1,0} for this controller).
-    const simd_float3 dir      = direction(yaw_, pitch_); // target -> eye
-    const simd_float3 f        = -dir;                    // eye -> target
-    const simd_float3 world_up = simd_float3{0.0f, 1.0f, 0.0f};
-    const simd_float3 right    = simd_normalize(simd_cross(f, world_up));
-    const simd_float3 up       = simd_cross(right, f);
-
-    const float scale = 2.0f * radius_ * std::tan(fov_y_radians_ * 0.5f) / viewport_h_pts;
-    const simd_float3 step = (-dx_pts * right + dy_pts * up) * scale;
-
-    if (step.x == 0.0f && step.y == 0.0f && step.z == 0.0f) {
-        return false;
-    }
-    target_ += step;
-    return true;
-}
-
 float pan_up_blend(float pitch) {
     const float s = std::fabs(std::sin(pitch));
     const float t = clampf((s - kPanBlendBeginSin) / (kPanBlendEndSin - kPanBlendBeginSin), 0.0f, 1.0f);
@@ -178,8 +150,9 @@ bool CameraController::pan_world(float dx_pts, float dy_pts, float depth, float 
         return false;
     }
 
-    // Same f/s/u basis as pan_view's, but only `right` is taken from it: the
-    // vertical axis is world up, blended toward camera up near the pole.
+    // Same f/s/u basis Camera::view_proj's look-at matrix builds (world up is
+    // always {0,1,0} here), but only `right` is taken from it: the vertical
+    // axis is world up, blended toward camera up near the pole.
     const simd_float3 dir      = direction(yaw_, pitch_); // target -> eye
     const simd_float3 f        = -dir;                    // eye -> target
     const simd_float3 world_up = simd_float3{0.0f, 1.0f, 0.0f};

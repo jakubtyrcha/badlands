@@ -109,8 +109,8 @@ void tangent_basis(simd_float3 n, simd_float3& u, simd_float3& v);
 GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoKind kind);
 
 // Screen-constant axis grab tolerance, converted to world units at the
-// candidate point's depth inside pick_gizmo_handle (same scale family as
-// CameraController::pan_view).
+// candidate point's depth inside pick_gizmo_handle (same points-to-world
+// scale family as CameraController::pan_world).
 inline constexpr float kAxisPickTolerancePts = 8.0f;
 // An axis seen nearly end-on (|dot(ray, axis)| above this) is skipped
 // entirely: the drag solver's parameter explodes long before its 1e-6
