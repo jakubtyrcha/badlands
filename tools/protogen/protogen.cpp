@@ -143,6 +143,12 @@ struct Params {
   // Hillslope diffusion (soil creep). Off until the mechanism exists; the
   // invariant that describes it is already written and reports PEND.
   bool enable_diffusion = false;
+  // Toggles for the two mechanisms that had none. Without them a "water" test
+  // silently included the particle pass, and a change to particle stepping
+  // moved T12 from 4.17% to 0.76% -- a water result altered by a non-water
+  // commit, with nothing in the test to reveal it.
+  bool enable_water = true;
+  bool enable_momentum = true;
   // Soil creep coefficient. Measured values sit at 1e-3..1e-2 m2/yr, which is
   // also what a ~10 My relaxation of a ~300 m hillslope implies (t ~ L^2/D) --
   // the two agree, which is the check that this is physics and not a fudge.
@@ -151,6 +157,15 @@ struct Params {
   float diffusion_D_m2_per_yr = 0.0f;
   // Attached only by tests. See ParticleProbe.
   ParticleProbe* probe = nullptr;
+  // TEST SEAM: a standing-water source, in m3/s, delivered at `test_inflow_cell`.
+  //
+  // Inflow reaches the water field ONLY by particles converting on contact or
+  // at rest -- the field does not read Qm3s any more. So a unit test of the
+  // balance cannot supply inflow by injecting discharge; with drops = 0 there
+  // are no particles and the injection is a no-op. This seam delivers water the
+  // way the model does, without dragging the whole particle pass in.
+  float test_inflow_m3_s = 0.0f;
+  int test_inflow_cell = -1;
   bool bowl = false;  // legacy alias for terrain == Bowl
   float bowl_rim_m = 200.0f;
   float bowl_well_m = 100.0f;
@@ -241,6 +256,13 @@ struct Params {
   //
   // The ratio is k_bedrock/k_sediment from src/mapgen/erosion.hpp (5e-4 / 5e-3),
   // so the two generators agree on how much harder rock is.
+  // --- soil production (bedrock weathering) ---
+  // DECLARED, NOT YET IMPLEMENTED: P1-P4 are written against these and are red
+  // until the mechanism lands.
+  bool enable_soil_production = false;
+  float soil_production_m_per_yr = 1e-4f;  // P0, bare-rock rate
+  float soil_efold_m = 0.5f;               // h*, cover thickness that slows it
+  float soil_strip_m_per_yr = 0.0f;        // synthetic constant removal, for P4
   float bedrock_erodibility = 0.1f;
   // Uniform starting soil, matching mapgen's initial_sediment_m. Applied as a
   // layer WITHIN the initial surface (bedrock = height - soil) rather than on
@@ -799,47 +821,29 @@ void UpdateWater(Grid& g, const Params& p, int iters,
   };
 
   for (int it = 0; it < iters; ++it) {
-    // --- inflow where flow is TRAPPED, loss from STANDING water ------------
+    // --- loss from STANDING water only -------------------------------------
     //
-    // Two different processes on two different timescales, and putting them in
-    // one loop is what killed the water.
+    // The field no longer PULLS inflow from the discharge field. It used to ask
+    // "am I a pit?" and reach into Qm3s, which was wrong three ways: the water
+    // field decided a conversion that belongs to the particle; a cell already
+    // holding water has a FLAT surface, so contact with standing water --
+    // the clearest conversion signal there is -- disqualified it (measured:
+    // gated off 96.7% of iterations, a 30x throttle); and Qm3s is a persistent
+    // rate field, so re-reading it every iteration re-delivered the same water.
     //
-    // Water running downhill crosses a catchment in hours; a lake equilibrates
-    // over years. Transit water is ALREADY transported -- that is the discharge
-    // field the particles build -- and it has no residence time in the cells it
-    // passes through, so it cannot evaporate at the standing rate. Adding rain
-    // everywhere and then taxing it made every parcel die in transit: loss was
-    // 0.2 m per iteration against 0.01 m of rain, and nothing ever arrived.
-    //
-    // So the field only handles water that gets TRAPPED: a cell where the water
-    // surface has no downhill neighbour is a bottom, and the discharge arriving
-    // there stops being transit and starts being storage. Everything else is
-    // handled by the particles.
-    const double dt_s = double(p.dt_water_yr) * kSecondsPerYear;
-    const double cell_area = double(cell_m) * double(cell_m);
+    // Particles now PUSH their water across on contact (see Descend), once, and
+    // this pass only loses and levels what it already holds.
     for (int y = 0; y < n; ++y)
       for (int x = 0; x < n; ++x) {
         const size_t i = g.idx(x, y);
         if (is_boundary(x, y)) { g.water[i] = held_depth(i); continue; }
-        const float wi = g.height[i] + g.water[i];
-        bool trapped = true;
-        for (int k = 0; k < 4; ++k) {
-          const int ax = x + dx4[k], ay = y + dy4[k];
-          if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;
-          if (g.height[g.idx(ax, ay)] + g.water[g.idx(ax, ay)] < wi) {
-            trapped = false;
-            break;
-          }
-        }
-        if (trapped) {
-          // Depth the arriving discharge adds over this sub-step.
-          g.water[i] += float(double(g.Qm3s[i]) * dt_s / cell_area /
-                              double(p.relief_m));
-        }
-        // Loss applies to STANDING water only -- which, now that transit is not
-        // stored here, is all this field contains.
         if (g.water[i] > 0.f) g.water[i] = std::max(0.f, g.water[i] - loss);
       }
+    if (p.test_inflow_cell >= 0 && p.test_inflow_cell < int(g.cells))
+      g.water[size_t(p.test_inflow_cell)] +=
+          float(double(p.test_inflow_m3_s) * double(p.dt_water_yr) *
+                kSecondsPerYear / (double(cell_m) * double(cell_m)) /
+                double(p.relief_m));
 
     // --- volume-conserving levelling, by ORDERED SWEEP ---------------------
     //
@@ -1024,7 +1028,8 @@ void TraverseSegment(V2 a, V2 b, F&& body) {
 // particles interact through the terrain within a step and that coupling is
 // part of the physics (see README).
 void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
-             std::mt19937& rng, float px, float py) {
+             std::mt19937& rng, float px, float py,
+             double q_per_unit_vol_m3_s) {
   const float cell_m = p.world_m / float(p.res);
   const float scale = p.relief_m / cell_m;  // height units per cell width
   // Repose threshold in height units: tan(angle) * cell / relief.
@@ -1044,6 +1049,21 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   // at production length, invisible to a 200-step fixture. One helper so a
   // future exit path cannot quietly reintroduce it.
   auto carried_mass = [&]() -> float { return sediment * volume; };
+  bool converted = false;     // has this particle's water joined the field?
+  // Transit -> storage, ONCE. Two triggers, and both are needed:
+  //   contact  -- the particle enters standing water
+  //   rest     -- it stops, with nowhere downhill to continue
+  // Contact alone cannot bootstrap: on a dry map no particle ever meets water,
+  // so nothing converts and no water is ever created (measured: 0 wet cells
+  // everywhere). Rest is what seeds it; contact is what feeds an existing lake.
+  auto convert_water = [&](size_t cell) {
+    if (converted || !p.enable_water) return;
+    converted = true;
+    const double cell_area = double(cell_m) * double(cell_m);
+    g.water[cell] += float(double(volume) * q_per_unit_vol_m3_s *
+                           double(p.dt_years) * kSecondsPerYear / cell_area /
+                           double(p.relief_m));
+  };
   float lake_travel_m = 0.f;  // distance covered in standing water, for the
                              // deposition cutoff
   float total_travel_m = 0.f;  // lifetime is a DISTANCE now, not an iteration count
@@ -1057,6 +1077,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     ++g.visits[here];
 
     if (volume < p.min_vol) {
+      convert_water(here);
       Deposit(g, here, carried_mass());
       g.deposited_death += double(carried_mass());
       return;
@@ -1066,6 +1087,12 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     // THRESHOLD: only water deep enough to be a lake engages the plume path.
     // Transient sheet flow over a damp cell is not standing water and must keep
     // behaving as a river, or dispersion fires on every wet-ish channel cell.
+    // CONVERSION ON CONTACT: transit becomes storage. The particle hands its
+    // remaining water to the standing-water field, once, and stops being
+    // transit. This is the only path by which the two sub-sims are coupled --
+    // previously the particle gave up only its SEDIMENT here and its water was
+    // simply lost, while the water field invented its own inflow.
+    if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m) convert_water(here);
     if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m) {
       const int32_t lid = g.lake_id[here];
       if (lid < 0 || lid >= int32_t(g.lake_outlet.size())) {
@@ -1222,6 +1249,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
                                : V2{gx / std::max(slope, 1e-9f),
                                     gy / std::max(slope, 1e-9f)};
     if (std::fabs(hdg.x) < 1e-6f && std::fabs(hdg.y) < 1e-6f) {
+      convert_water(here);
       Deposit(g, here, carried_mass());
       g.deposited_death += double(carried_mass());
       return;
@@ -1263,7 +1291,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     // squashed field capped the denominator at 2 and let the force reach ~4900,
     // 30-3000x gravity, which welded channels in place.
     const V2 f{g.momx[here], g.momy[here]};
-    if (len(f) > 0.f && len(speed) > 0.f) {
+    if (p.enable_momentum && len(f) > 0.f && len(speed) > 0.f) {
       const float k = p.momentum_transfer * dot(unit(f), unit(speed)) /
                       (volume + g.vol_ema[here]);
       speed = V2{speed.x + k * f.x, speed.y + k * f.y};
@@ -1407,6 +1435,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   // dropping that made this a silent mass sink, and it is the DOMINANT exit --
   // volume only decays to 0.61 over 500 steps, so the volume < min_vol branch
   // above is unreachable in practice.
+  convert_water(last_cell);
   Deposit(g, last_cell, carried_mass());
   g.deposited_death += double(carried_mass());
 }
@@ -1469,6 +1498,44 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff) {
     // rock slopes standing steeper than alluvial ones.
     Deposit(g, nb[k].i, Erode(g, p, here, transfer));
   }
+}
+
+// ---------------------------------------------------------- soil production
+
+// Bedrock weathering into regolith:  d(soil)/dt = P0 * exp(-soil / h_star).
+//
+// The missing source. Soil was a finite stock seeded once and only depleted --
+// 4.00 -> 1.19 m with 40% of cells stripped bare, after which hillslopes stop
+// evolving because bedrock only yields at bedrock_erodibility. Nothing turned
+// rock into regolith.
+//
+// The exponential is what makes it self-limiting and is not decoration: bare
+// rock weathers fastest, and a thick mantle insulates the rock beneath it. That
+// is what gives a hillslope a STEADY-STATE thickness under erosion,
+// h_eq = h_star * ln(P0 / E), which P4 checks against two erosion rates.
+//
+// Soil comes FROM bedrock, so bedrock lowers by exactly what soil gains and the
+// surface does not move. Real regolith bulks up ~1.5x as it weathers; 1:1 is
+// the conservative choice and avoids inventing volume. Since `height` is the
+// surface and bedrock is implicit (height - soil), leaving height untouched
+// while raising soil IS the conversion.
+void ProduceSoil(Grid& g, const Params& p) {
+  if (!p.enable_soil_production) return;
+  const float h_star = std::max(p.soil_efold_m, 1e-6f);
+  const float dt = p.dt_years;
+  badlands::ParallelFor(size_t(p.res), [&](size_t yy) {
+    const size_t base = yy * size_t(p.res);
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = base + x;
+      const float soil_m = g.soil[i] * p.relief_m;
+      // Production, and the synthetic constant removal P4 uses to hold an
+      // erosion rate fixed while the balance settles.
+      const float d_m = (p.soil_production_m_per_yr *
+                             std::exp(-soil_m / h_star) -
+                         p.soil_strip_m_per_yr) * dt;
+      g.soil[i] = std::max(0.f, g.soil[i] + d_m / p.relief_m);
+    }
+  });
 }
 
 // ----------------------------------------------------------------- diffusion
@@ -1653,43 +1720,54 @@ void RunSim(const Params& p, Grid& g, std::vector<Lake>& lakes, SimStats& st,
     std::fill(g.mx_track.begin(), g.mx_track.end(), 0.f);
     std::fill(g.my_track.begin(), g.my_track.end(), 0.f);
     std::fill(g.visits.begin(), g.visits.end(), 0u);
-    for (int d = 0; d < p.drops; ++d) Descend(g, p, lakes, rng, sx[d], sy[d]);
+    for (int d = 0; d < p.drops; ++d)
+      Descend(g, p, lakes, rng, sx[d], sy[d], q_per_unit_vol_m3_s);
 
     auto tC = clk::now(); t_drops += secs(tA, tC);
     // EMA, double buffered: one writer per cell, so no atomics. Averaging is
     // what lets a channel persist between steps and attract later drops.
-    const float lr = p.lrate, es = p.erf_scale;
-    badlands::ParallelFor(size_t(p.res), [&](size_t yy) {
-      const size_t base = yy * size_t(p.res);
-      for (int x = 0; x < p.res; ++x) {
-        const size_t i = base + x;
-        // EMA over the RAW accumulation, then squash on read -- the reference's
-        // order (world.h:83 averages, cellpool.h:243 applies erf on access).
-        // Folding erf inside the average is not the same operator: erf is
-        // concave, so by Jensen E[erf(x)] <= erf(E[x]) and the field reads low,
-        // worst exactly where flow is bursty. It also destroyed the unsquashed
-        // field the momentum denominator needs.
-        g.vol_ema_b[i] = (1.f - lr) * g.vol_ema[i] + lr * g.vol_track[i];
-        g.discharge_b[i] = std::erf(es * g.vol_ema_b[i]);
-        g.Qm3s_b[i] = (1.f - lr) * g.Qm3s[i] +
-                      lr * float(double(g.vol_track[i]) * q_per_unit_vol_m3_s);
-        g.momx_b[i] = (1.f - lr) * g.momx[i] + lr * g.mx_track[i];
-        g.momy_b[i] = (1.f - lr) * g.momy[i] + lr * g.my_track[i];
-      }
-    });
-    g.vol_ema.swap(g.vol_ema_b);
-    g.discharge.swap(g.discharge_b);
-    g.Qm3s.swap(g.Qm3s_b);
-    g.momx.swap(g.momx_b);
-    g.momy.swap(g.momy_b);
+    // With NO particles there is nothing to average, and the EMA would decay an
+    // INJECTED discharge field to zero. Holding the fields as given is what lets
+    // a water test supply its own inflow instead of generating it with the
+    // particle pass -- which is how T12 came to depend on particle stepping.
+    if (p.drops > 0) {
+      const float lr = p.lrate, es = p.erf_scale;
+      badlands::ParallelFor(size_t(p.res), [&](size_t yy) {
+        const size_t base = yy * size_t(p.res);
+        for (int x = 0; x < p.res; ++x) {
+          const size_t i = base + x;
+          // EMA over the RAW accumulation, then squash on read -- the reference's
+          // order (world.h:83 averages, cellpool.h:243 applies erf on access).
+          // Folding erf inside the average is not the same operator: erf is
+          // concave, so by Jensen E[erf(x)] <= erf(E[x]) and the field reads low,
+          // worst exactly where flow is bursty. It also destroyed the unsquashed
+          // field the momentum denominator needs.
+          g.vol_ema_b[i] = (1.f - lr) * g.vol_ema[i] + lr * g.vol_track[i];
+          g.discharge_b[i] = std::erf(es * g.vol_ema_b[i]);
+          g.Qm3s_b[i] = (1.f - lr) * g.Qm3s[i] +
+                        lr * float(double(g.vol_track[i]) * q_per_unit_vol_m3_s);
+          g.momx_b[i] = (1.f - lr) * g.momx[i] + lr * g.mx_track[i];
+          g.momy_b[i] = (1.f - lr) * g.momy[i] + lr * g.my_track[i];
+        }
+      });
+      g.vol_ema.swap(g.vol_ema_b);
+      g.discharge.swap(g.discharge_b);
+      g.Qm3s.swap(g.Qm3s_b);
+      g.momx.swap(g.momx_b);
+      g.momy.swap(g.momy_b);
+    }
 
+    ProduceSoil(g, p);
     Diffuse(g, p, diff_demand, diff_limit, diff_delta);
 
     auto tD = clk::now(); t_grid += secs(tC, tD);
     // Water is a FIELD: accumulate it physically, then label the bodies. Both
     // every step -- there is no rebuild cadence any more.
-    UpdateWater(g, p, step == 1 ? p.water_prime_iters : p.water_iters, water_flux);
-    LabelWater(g, p, lakes, n_lakes, wet_frac, deepest_m);
+    if (p.enable_water) {
+      UpdateWater(g, p, step == 1 ? p.water_prime_iters : p.water_iters,
+                  water_flux);
+      LabelWater(g, p, lakes, n_lakes, wet_frac, deepest_m);
+    }
     t_lake += secs(tD, clk::now());
 
     if (verbose && (step % p.snapshot_every == 0 || step == p.steps)) {
@@ -1991,6 +2069,24 @@ Params Base(int res = 64) {
   p.drops = 16;
   p.snapshot_every = 1 << 30;  // never
   p.lake_interval = 25;  // production default: tests must match it
+  return p;
+}
+
+// EVERYTHING off. A unit test enables ONLY the mechanism it exercises, so a
+// mechanism added later cannot silently join a test written before it existed.
+// The old style listed what to DISABLE, which made every new mechanism opt-out
+// rather than opt-in -- that is how T12 ended up depending on particle
+// stepping.
+Params Isolated(int res = 64) {
+  Params p = Base(res);
+  p.enable_erosion = false;
+  p.enable_cascade = false;
+  p.enable_lake_deposit = false;
+  p.enable_diffusion = false;
+  p.enable_soil_production = false;
+  p.enable_water = false;
+  p.enable_momentum = false;
+  p.drops = 0;
   return p;
 }
 
@@ -3003,40 +3099,65 @@ void ChannelOrientationIsotropy() {
           double(n), n ? 1.0 / std::sqrt(double(n)) : 1.0));
 }
 
-// --- T12. evaporation reaches a real equilibrium -----------------------------
-// Fills a basin from DRY and checks where it settles.
+// --- T12. evaporation holds a lake STABLE ----------------------------------
+// UNIT test of the water balance alone. Proves ONE thing:
+//     inflow == evaporation  =>  the lake stops changing
+// and stops at the size the balance predicts, which is shape-independent:
+//     loss * area = Q   ->   area = Q / loss
 //
-// Equilibrium is an area balance: loss * lake_area = runoff * catchment_area,
-// so the lake should stabilise covering runoff/loss of the map. Nothing tested
-// this before -- LakeFillRate looks like it does but sets evaporation to ZERO
-// and asserts a capacity bound, so the balance itself was never exercised.
+// Two samples at different run lengths, because STABILITY is the claim. A
+// single snapshot cannot distinguish "settled" from "still moving".
 //
-// Erosion, cascade and lake deposition are off: this is the water budget alone.
+// Methodology corrected twice, each time with proof:
+//  - it ran the particle pass for inflow, so the unit-tap commit moved it from
+//    4.17% to 0.76% -- a water result changed by a non-water commit. Inflow is
+//    now INJECTED.
+//  - I had raised bowl_rim_m 200 -> 900 to lift the basin above sea level,
+//    which made the ramp 4.5x steeper and destroyed the closed depression: the
+//    measured minimum sat against the outflow edge with a lower neighbour, so
+//    nothing could pond at all. The default bowl IS a sink; the fix is to put
+//    the SEA out of reach instead of moving the terrain.
 void EvaporationEquilibrium() {
-  Params p = Base(64);
-  p.terrain = Params::Terrain::Bowl;
-  // Basin must sit ABOVE sea level: sea_level_m = 0 pins anything at or below
-  // zero as a drain, and the default bowl's floor is at -300 m, so the whole
-  // basin was being treated as ocean and forced dry.
-  p.bowl_rim_m = 900.0f;
-  p.bowl_well_m = 300.0f;
-  p.prefill = false;        // must FILL to equilibrium, not start at it
-  p.enable_erosion = false;
-  p.enable_cascade = false;
-  p.enable_lake_deposit = false;
-  p.runoff_m_per_yr = 1.0f;
-  p.evaporation_m_per_yr = 20.0f;   // -> equilibrium area = 1/20 = 5% of the map
-  p.steps = 800;
-  std::vector<Lake> lakes; SimStats st;
-  Grid g = Run(p, lakes, st);
-  size_t wet = 0;
-  for (float w : g.water) if (w > 0.f) ++wet;
-  const double got = double(wet) / double(g.cells);
-  const double want = double(p.runoff_m_per_yr) / double(p.evaporation_m_per_yr);
-  const double err = std::fabs(got - want) / want;
-  Check("T12 evaporation reaches equilibrium", err < 0.30,
-        F("wet %.2f%% vs predicted %.2f%% (runoff/loss); %.0f%% off", 100 * got,
-          100 * want, 100 * err));
+  const double cell_m = 16.0, cell_area = cell_m * cell_m;
+  const double loss_m_yr = 20.0;
+  // Sized so the predicted lake is ~400 cells on a 64^2 grid. The earlier
+  // Q = 2.0 predicted 12,300 cells against a 4,096-cell grid -- 3x the map, so
+  // it could not have passed however good the water code was.
+  const double target_cells = 400.0;
+  const double Q_m3_s = target_cells * cell_area * loss_m_yr / kSecondsPerYear;
+
+  auto lake_area = [&](int steps) {
+    Params p = Isolated(64);
+    p.enable_water = true;              // the ONLY mechanism under test
+    p.terrain = Params::Terrain::Bowl;  // default rim/well: a genuine sink
+    p.sea_level_m = -1e6f;              // put the sea out of reach
+    p.evaporation_m_per_yr = float(loss_m_yr);
+    p.steps = steps;
+    Grid g(p.res);
+    InitTerrain(g, p);
+    size_t sink = g.idx(1, 1);
+    for (int y = 1; y < g.n - 1; ++y)
+      for (int x = 1; x < g.n - 1; ++x)
+        if (g.height[g.idx(x, y)] < g.height[sink]) sink = g.idx(x, y);
+    p.test_inflow_cell = int(sink);
+    p.test_inflow_m3_s = float(Q_m3_s);
+    std::vector<Lake> lakes; SimStats st;
+    RunSim(p, g, lakes, st, false);
+    size_t wet = 0;
+    for (float w : g.water) if (w > 0.f) ++wet;
+    return double(wet) * cell_area;
+  };
+
+  const double a1 = lake_area(300), a2 = lake_area(600);
+  const double want = Q_m3_s * kSecondsPerYear / loss_m_yr;
+  const double drift = (a1 > 0) ? std::fabs(a2 - a1) / a1 : 1.0;
+  const double err = std::fabs(a2 - want) / want;
+  char buf[220];
+  std::snprintf(buf, sizeof(buf),
+                "area %.3e -> %.3e m2 (drift %.0f%%), predicted Q/loss %.3e "
+                "(%.0f%% off)", a1, a2, 100 * drift, want, 100 * err);
+  Check("T12 [unit] evaporation holds a lake stable",
+        drift < 0.10 && err < 0.30, buf);
 }
 
 // --- T13. a basin below sea level holds water, it does not drain -------------
@@ -3158,6 +3279,135 @@ void WaterDoesNotAccumulate() {
         growth < 0.10 && band < 0.35, buf);
 }
 
+// ===========================================================================
+// SOIL PRODUCTION -- bedrock weathering into regolith.
+//
+//   d(soil)/dt = P0 * exp(-soil / h_star)
+//
+// The missing term. Soil is currently a finite stock seeded once and only ever
+// depleted: measured 4.00 -> 1.19 m with 40% of cells stripped to bare rock,
+// after which hillslopes stop evolving because bedrock yields at 0.1x. Nothing
+// converts rock to regolith.
+//
+// Soil comes FROM bedrock, so bedrock lowers by exactly what soil gains and the
+// surface is unchanged. Real regolith bulks up ~1.5x as it weathers; 1:1 is the
+// conservative choice and avoids inventing volume.
+// ===========================================================================
+
+// --- P1. bare rock gains soil at the full rate -------------------------------
+void SoilProductionOnBareRock() {
+  Params p = Base(16);
+  p.enable_erosion = false; p.enable_cascade = false; p.drops = 0;
+  p.enable_soil_production = true;
+  p.soil_production_m_per_yr = 1e-4f;
+  p.soil_efold_m = 0.5f;
+  p.steps = 20;
+  Grid g(p.res);
+  InitTerrain(g, p);
+  std::fill(g.soil.begin(), g.soil.end(), 0.f);   // bare rock everywhere
+  std::vector<Lake> lakes; SimStats st;
+  RunSim(p, g, lakes, st, false);
+  const double got = double(g.soil[g.idx(8, 8)]) * p.relief_m;
+  // Against the EXACT solution, not P0*t. Integrating
+  // d(soil)/dt = P0*exp(-soil/h*) from bare rock gives
+  //     soil(t) = h* * ln(1 + P0*t/h*)
+  // and self-limitation bites immediately, so P0*t overshoots by 26% even at
+  // this short duration. Asserting the closed form makes this a much stronger
+  // test than the linear approximation it replaces -- it pins the whole
+  // trajectory, not just that soil appears.
+  const double t_yr = double(p.dt_years) * p.steps;
+  const double want = p.soil_efold_m *
+                      std::log(1.0 + p.soil_production_m_per_yr * t_yr /
+                                         p.soil_efold_m);
+  Check("P1 bare rock gains soil at P0",
+        std::fabs(got - want) < 0.05 * want,
+        F("gained %.4f m over %.0f yr, exact h*ln(1+P0t/h*) = %.4f", got, t_yr,
+          want));
+}
+
+// --- P2. production is SELF-LIMITING -----------------------------------------
+// The one that separates the physical form from a constant source. Gain at
+// soil = 2*h_star must be exp(-2) = 0.135 of the gain on bare rock. Without
+// this soil grows linearly for ever.
+void SoilProductionSelfLimiting() {
+  Params p = Base(16);
+  p.enable_erosion = false; p.enable_cascade = false; p.drops = 0;
+  p.enable_soil_production = true;
+  p.soil_production_m_per_yr = 1e-4f;
+  p.soil_efold_m = 0.5f;
+  p.steps = 10;
+  auto gain = [&](float start_m) {
+    Grid g(p.res);
+    InitTerrain(g, p);
+    std::fill(g.soil.begin(), g.soil.end(), start_m / p.relief_m);
+    std::vector<Lake> lakes; SimStats st;
+    RunSim(p, g, lakes, st, false);
+    return (double(g.soil[g.idx(8, 8)]) * p.relief_m) - double(start_m);
+  };
+  const double bare = gain(0.f), thick = gain(2.0f * p.soil_efold_m);
+  const double ratio = (bare > 0) ? thick / bare : 0.0;
+  Check("P2 production is self-limiting",
+        std::fabs(ratio - std::exp(-2.0)) < 0.25 * std::exp(-2.0),
+        F("gain ratio %.4f at 2*h_star, expected exp(-2) = %.4f", ratio,
+          std::exp(-2.0)));
+}
+
+// --- P3. mass is conserved: rock becomes soil, surface unmoved ---------------
+void SoilProductionConservesMass() {
+  Params p = Base(16);
+  p.enable_erosion = false; p.enable_cascade = false; p.drops = 0;
+  p.enable_soil_production = true;
+  p.soil_production_m_per_yr = 1e-3f;
+  p.soil_efold_m = 0.5f;
+  p.steps = 30;
+  Grid g(p.res);
+  InitTerrain(g, p);
+  std::fill(g.soil.begin(), g.soil.end(), 0.f);
+  const double h_before = SumH(g);
+  const double soil_before = std::accumulate(g.soil.begin(), g.soil.end(), 0.0);
+  std::vector<Lake> lakes; SimStats st;
+  RunSim(p, g, lakes, st, false);
+  const double dh = std::fabs(SumH(g) - h_before) / std::max(h_before, 1e-9);
+  const double dsoil = std::accumulate(g.soil.begin(), g.soil.end(), 0.0) - soil_before;
+  Check("P3 rock becomes soil, surface unmoved",
+        dh < 1e-6 && dsoil > 0.0,
+        F("surface drift %.2e (want 0), soil gained %.4e", dh, dsoil));
+}
+
+// --- P4. soil reaches the ANALYTIC steady state under erosion ----------------
+// The invariant that proves this is physics rather than a source term:
+// production P0*exp(-h/h*) balancing removal E gives h_eq = h* * ln(P0/E),
+// a NUMBER, not a direction. Checked at two erosion rates.
+void SoilProductionSteadyState() {
+  Params p = Base(16);
+  p.enable_erosion = false; p.enable_cascade = false; p.drops = 0;
+  p.enable_soil_production = true;
+  p.soil_production_m_per_yr = 1e-3f;
+  p.soil_efold_m = 0.5f;
+  p.steps = 4000;   // long enough to settle
+  auto equilibrium = [&](float E_m_per_yr) {
+    Params q = p;
+    q.soil_strip_m_per_yr = E_m_per_yr;   // synthetic constant removal
+    Grid g(q.res);
+    InitTerrain(g, q);
+    std::fill(g.soil.begin(), g.soil.end(), 0.f);
+    std::vector<Lake> lakes; SimStats st;
+    RunSim(q, g, lakes, st, false);
+    return double(g.soil[g.idx(8, 8)]) * q.relief_m;
+  };
+  const double E1 = 2e-4, E2 = 5e-4;
+  const double got1 = equilibrium(float(E1)), got2 = equilibrium(float(E2));
+  const double want1 = p.soil_efold_m * std::log(p.soil_production_m_per_yr / E1);
+  const double want2 = p.soil_efold_m * std::log(p.soil_production_m_per_yr / E2);
+  const bool ok = std::fabs(got1 - want1) < 0.25 * want1 &&
+                  std::fabs(got2 - want2) < 0.25 * want2;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "E=2e-4: %.3f m vs h*ln(P0/E)=%.3f;  E=5e-4: %.3f vs %.3f",
+                got1, want1, got2, want2);
+  Check("P4 soil reaches h* ln(P0/E)", ok, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -3195,6 +3445,10 @@ int RunAll() {
   SeaLevelFillsNotDrains();
   WaterBoundaryConditions();
   WaterDoesNotAccumulate();
+  SoilProductionOnBareRock();
+  SoilProductionSelfLimiting();
+  SoilProductionConservesMass();
+  SoilProductionSteadyState();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)
@@ -3243,6 +3497,7 @@ int main(int argc, char** argv) {
     else if (a == "--travel-step") p.travel_step_m = std::stof(nxt());
     else if (a == "--momentum") p.momentum_transfer = std::stof(nxt());
     else if (a == "--sea-level") p.sea_level_m = std::stof(nxt());
+    else if (a == "--water-iters") p.water_iters = std::stoi(nxt());
     else if (a == "--amp-low") p.amp_low_m = std::stof(nxt());
     else if (a == "--lrate") p.lrate = std::stof(nxt());
     else if (a == "--repose") p.repose_angle_deg = std::stof(nxt());
