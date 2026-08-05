@@ -99,10 +99,35 @@ corrupts camera state with no user-visible recovery.
 
 ## 2. The three verbs
 
-**Orbit.** `set_pivot_preserving_eye(focus)` recomputes `yaw/pitch/radius` from
-the *unchanged* eye, then today's `orbit()` runs untouched. Re-pivoting never
-moves the camera; it only redefines what rotation does, which is what makes
-auto-pivot safe to apply on every gesture.
+**Orbit.** `set_pivot_preserving_eye(focus)` moves the orbit centre and nothing
+else. Re-pivoting never moves the camera; it only redefines what a rotation
+does, which is what makes auto-pivot safe to apply on every gesture.
+
+> **Corrected during implementation.** This section originally said the pivot
+> was recomputed as `yaw/pitch/radius` from the unchanged eye. That is wrong,
+> and pinned by a test that failed before the fix: `CameraController` conflated
+> the orbit pivot with the look-at target, and `to_camera()` derives the view
+> direction from that target — so re-pivoting to an off-axis point **swung the
+> camera to centre it**, jolting the image ~30 px at every press. Since aiming
+> at a feature is by definition aiming off-centre, this would have broken the
+> headline behaviour outright. The parameterization simply cannot express an
+> off-axis pivot.
+>
+> The pivot is now separate state from the look-at target, and `orbit()`
+> rotates the arm (pivot → eye) and the view direction by the *same* angular
+> deltas. When the two coincide the angle pairs are equal by construction, so
+> this collapses exactly onto the previous behaviour — a compatible extension,
+> not a rewrite. Two consequences worth recording:
+>
+> - The pitch delta is *shrunk* (`clamp_pitch_delta`) rather than recomputed as
+>   `clamp(angle+delta) − angle`. The latter returns a nonzero correction for a
+>   zero request whenever an angle sits an ulp outside the limit, so a gesture
+>   asking for nothing would nudge the camera and report that it moved.
+> - The look-at target is re-derived only when the pivot genuinely differs from
+>   it; doing it unconditionally fed a float ulp of drift in on every call.
+>
+> The pivot marker now draws at the pivot rather than at `camera.target`, since
+> those are different points and showing the rotation centre is its whole job.
 
 **Pan.** Two findings shaped this:
 
