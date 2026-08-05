@@ -124,6 +124,22 @@ builds. If it cannot be compiled out, it is not validation — it is overhead.
   pattern is fine, but anything Null cannot observe needs a Metal-side assertion too,
   or rule 6 goes unenforced.
 
+## Tests owed when DX12 lands
+
+Rule 10 says an untestable fix is declared, not skipped. These are the declared
+ones — each ships working and unasserted because nothing on this platform can
+reach its failure path. **Write them as part of the DX12 backend, not after.**
+
+| Owed test | Blocked on | Where |
+|---|---|---|
+| A faulted command buffer is reported, not silently dropped | Provoking a GPU fault (shader trap, timeout, page fault) | `ReportIfFailed`, `metal_rhi.mm` |
+| An unhandled backend refuses instead of returning empty shader source | A third `BackendKind` existing, which makes the switch non-exhaustive | `UnhandledBackend`, `rhi_conformance.hpp` |
+
+A refusal that cannot be reached from the public API is not automatically
+untestable — a test-local fake resource is usually enough, and that is how
+`RetainBindingResources`' two refusals are covered (`rhi_tests.cpp`). Exhaust
+that option before adding a row here.
+
 ## Code review must validate these
 
 A review of this directory is not complete without checking, explicitly:
