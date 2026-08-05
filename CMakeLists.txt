@@ -240,6 +240,7 @@ add_library(badlands_engine STATIC
     src/engine/rendering/geometry/lake_surface_builder.cpp
     src/engine/rendering/water_material.cpp
     src/engine/rendering/geometry/building_parts_builder.cpp
+    src/engine/rendering/geometry/usd_mesh_adapter.cpp
     src/engine/rendering/components/mesh_components.cpp
     src/engine/scene/scene_graph.cpp
     src/engine/rendering/frustum.cpp
@@ -307,6 +308,11 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
 target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json
+    # USD import (src/engine/assets). PUBLIC because usd_mesh_adapter.hpp is an
+    # engine header that exposes UsdSceneData/UsdMaterialBinding by value, so
+    # every consumer needs those declarations. The dependency points this way
+    # and only this way: badlands_usd_lib knows nothing about the engine.
+    badlands_usd_lib
     # Skeletal animation runtime (src/engine/animation). PUBLIC because the
     # engine's animation headers expose ozz types (Skeleton::raw(), the SoA
     # locals a Pose holds), so every consumer needs ozz's include path.
@@ -874,6 +880,11 @@ add_test(NAME badlands_game_tests COMMAND badlands_game_tests WORKING_DIRECTORY 
 # carries wgpu::TextureView/Sampler members that are never touched here).
 add_executable(badlands_geometry_tests
     game/tests/geometry_tests.cpp
+    # USD -> engine mesh conversion. It lives here rather than in
+    # badlands_usd_tests because TexturedMeshResult pulls in Dawn headers, and
+    # keeping badlands_usd_tests free of those is the whole point of that
+    # target. Inputs are hand-built, so no .usdc is opened here.
+    src/engine/tests/usd_mesh_adapter_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_geometry_tests PRIVATE
