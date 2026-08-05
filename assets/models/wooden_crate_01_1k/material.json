@@ -1,0 +1,6 @@
+{
+  "albedo": "textures/wooden_crate_01_diff_1k.jpg",
+  "normal": "textures/wooden_crate_01_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/wooden_crate_01_arm_1k.jpg"
+}

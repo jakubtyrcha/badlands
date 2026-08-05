@@ -1,0 +1,6 @@
+{
+  "albedo": "textures/brass_vase_01_diff_1k.jpg",
+  "normal": "textures/brass_vase_01_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/brass_vase_01_arm_1k.jpg"
+}
