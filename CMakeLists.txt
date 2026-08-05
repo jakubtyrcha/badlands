@@ -203,6 +203,7 @@ corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
 # The conversion to TexturedMeshResult lives in badlands_engine, one layer up.
 add_library(badlands_usd_lib STATIC
     src/engine/assets/usd_loader.cpp
+    src/engine/assets/usd_material_binding.cpp
 )
 target_include_directories(badlands_usd_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/src
@@ -1009,6 +1010,7 @@ add_test(NAME badlands_animation_tests COMMAND badlands_animation_tests WORKING_
 # real assets/models/*.usdc, hence the source-dir working directory.
 add_executable(badlands_usd_tests
     src/engine/tests/usd_loader_tests.cpp
+    src/engine/tests/usd_material_binding_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_usd_tests PRIVATE
