@@ -206,6 +206,211 @@ TEST_CASE("raycast_scene: nearest node wins, miss-all is nullopt, Subtract nodes
     }
 }
 
+// --- raycast_scene: validation for camera-navigation use -------------------
+//
+// resolve_focus (navigation.h) runs raycast_scene at every camera-gesture start
+// and on every mouse-move that feeds the focus-preview dot, so the cases below
+// pin the properties that whole path leans on. Worth recording because it is
+// easy to assume otherwise in an SDF editor: raycast_scene does NOT raymarch.
+// It solves analytic ray-primitive intersections per node (ray_unit_sphere is a
+// quadratic, ray_unit_cube a slab test) in each node's local space; sphere
+// tracing lives only in shaders/raymarch.metal, on the GPU.
+
+TEST_CASE("raycast_scene: oblique ellipsoid normal matches the closed form") {
+    // A sphere scaled (2,1,1) is the ellipsoid (x/a)^2 + (y/b)^2 + (z/c)^2 = 1
+    // with a=1, b=c=0.5. The gradient of that implicit function gives the exact
+    // world normal at P: normalize((Px/a^2, Py/b^2, Pz/c^2)).
+    //
+    // This case exists because the non-uniform test above hits ALONG the scale
+    // axis, where the expected normal is trivially +x and every plausible
+    // implementation agrees. Here they diverge: the correct
+    // transpose(inverse(M)) normal comes out (1,2,0)/sqrt(5), while both common
+    // mistakes -- the radial direction normalize(P), and the local normal
+    // pushed through M's linear part -- give (2,1,0)/sqrt(5), components
+    // swapped.
+    constexpr float a = 1.0f, b = 0.5f, c = 0.5f;
+
+    // A point on the ellipsoid: local (0.5cos, 0.5sin, 0) -> world (cos, 0.5sin, 0),
+    // at 45 degrees so neither component can be confused for the other.
+    const float k = std::sqrt(0.5f);
+    const simd_float3 P = {k, 0.5f * k, 0.0f};
+
+    const simd_float3 expected_normal =
+        simd_normalize(simd_float3{P.x / (a * a), P.y / (b * b), P.z / (c * c)});
+
+    // Approach along the outward normal. For a convex body every point of
+    // P + (d-t)*n with t < d lies strictly outside the supporting plane at P,
+    // so the first surface crossing is exactly P, at t == d.
+    const simd_float3 origin = P + 3.0f * expected_normal;
+
+    SceneDocument doc;
+    Node node;
+    node.id = 3;
+    node.shape = Shape::Sphere;
+    node.scale = {2.0f, 1.0f, 1.0f};
+    doc.add(node);
+
+    const auto hit = raycast_scene(doc, Ray{origin, -expected_normal});
+    REQUIRE(hit.has_value());
+    CHECK(hit->node_id == 3);
+    CHECK(hit->hit.t == doctest::Approx(3.0f));
+    check_float3_approx(hit->hit.point, P);
+    check_float3_approx(hit->hit.normal, expected_normal);
+    CHECK(simd_length(hit->hit.normal) == doctest::Approx(1.0f));
+    // Explicit discrimination against the swapped-component answer, so a
+    // regression to either wrong transform fails on an obvious comparison
+    // rather than only on the approx check above.
+    CHECK(hit->hit.normal.x < hit->hit.normal.y);
+}
+
+TEST_CASE("raycast_scene: world_t is a true distance and the hit lies on the query ray") {
+    // world_t is derived as dot(world_point - origin, dir), a real distance
+    // only because `dir` is unit (Camera::ray_through_view_point normalizes,
+    // and resolve_focus feeds it those same rays). Pan and dolly scale their
+    // step by this distance, so an error here surfaces as gestures moving the
+    // wrong AMOUNT rather than as a visibly wrong pick.
+    //
+    // The related invariant, worth recording because it explains why the local
+    // ray's direction is deliberately left un-renormalized after the inverse
+    // transform: M*(Minv*o + t*Minv_lin*d) == o + t*d, so the local parameter
+    // and the world parameter coincide. That is what lets nearest-wins compare
+    // across nodes with wildly different, non-uniform scales at all.
+    SceneDocument doc;
+
+    Node squashed; // world semi-axes (0.1, 1.5, 0.5); reaches z=+0.5
+    squashed.id = 1;
+    squashed.shape = Shape::Sphere;
+    squashed.position = {0.0f, 0.0f, 0.0f};
+    squashed.scale = {0.2f, 3.0f, 1.0f};
+    doc.add(squashed);
+
+    Node stretched; // world half-extents (4, 0.25, 1); near face at z=-5
+    stretched.id = 2;
+    stretched.shape = Shape::Cube;
+    stretched.position = {0.0f, 0.0f, -6.0f};
+    stretched.scale = {8.0f, 0.5f, 2.0f};
+    doc.add(stretched);
+
+    const simd_float3 origin = {0.0f, 0.0f, 9.0f};
+    const simd_float3 dir = {0.0f, 0.0f, -1.0f};
+
+    const auto hit = raycast_scene(doc, Ray{origin, dir});
+    REQUIRE(hit.has_value());
+    CHECK(hit->node_id == 1); // the sphere is nearer despite the cube being far larger
+    CHECK(hit->hit.t == doctest::Approx(8.5f));
+    CHECK(hit->hit.t == doctest::Approx(simd_length(hit->hit.point - origin)));
+    check_float3_approx(hit->hit.point, origin + hit->hit.t * dir);
+
+    SUBCASE("removing the nearer node promotes the farther one, still with a true t") {
+        doc.remove_node(1);
+        const auto far_hit = raycast_scene(doc, Ray{origin, dir});
+        REQUIRE(far_hit.has_value());
+        CHECK(far_hit->node_id == 2);
+        CHECK(far_hit->hit.t == doctest::Approx(14.0f));
+        CHECK(far_hit->hit.t == doctest::Approx(simd_length(far_hit->hit.point - origin)));
+        check_float3_approx(far_hit->hit.point, origin + far_hit->hit.t * dir);
+    }
+}
+
+TEST_CASE("raycast_scene: an origin inside a node returns its exit face, in front of the ray") {
+    // Newly reachable: dolly translates the whole rig along the eye->focus ray,
+    // so the eye can end up inside geometry. Whatever comes back must stay in
+    // FRONT of the camera -- a focus point behind the eye would invert the next
+    // orbit rather than merely misplace it.
+    SceneDocument doc;
+    Node node;
+    node.id = 5;
+    node.shape = Shape::Sphere;
+    node.scale = {4.0f, 4.0f, 4.0f}; // world radius 2
+    doc.add(node);
+
+    const simd_float3 origin = {0.0f, 0.0f, 0.0f}; // dead centre, inside
+    const auto hit = raycast_scene(doc, Ray{origin, {0.0f, 0.0f, -1.0f}});
+    REQUIRE(hit.has_value());
+    CHECK(hit->node_id == 5);
+    CHECK(hit->hit.t > 0.0f);
+    CHECK(hit->hit.t == doctest::Approx(2.0f));
+    check_float3_approx(hit->hit.point, simd_float3{0.0f, 0.0f, -2.0f});
+}
+
+TEST_CASE("raycast_scene round-trips against the camera: ray -> hit -> project returns the pixel") {
+    // Cross-validation with no hand-computed literals: whatever
+    // ray_through_view_point aims at, projecting the resulting hit must land
+    // back on the pixel it was fired through. Catches sign, aspect and y-flip
+    // errors that the per-function tests agree on individually -- and it is
+    // precisely the property auto-pivot rests on, since a pivot that isn't
+    // under the cursor makes "point at the feature and drag" silently wrong.
+    Camera camera;
+    camera.eye = {4.0f, 3.0f, 6.0f};
+    camera.target = {0.0f, 0.5f, 0.0f};
+    camera.up = {0.0f, 1.0f, 0.0f};
+    camera.fov_y_radians = 1.0472f;
+    camera.aspect = 1.6f;
+    constexpr float w = 800.0f, h = 500.0f;
+
+    SceneDocument doc;
+    Node node;
+    node.id = 11;
+    node.shape = Shape::Sphere;
+    node.position = camera.target;
+    node.scale = {3.0f, 3.0f, 3.0f}; // world radius 1.5 -- covers the sampled pixels
+    doc.add(node);
+
+    for (const float x : {350.0f, 400.0f, 450.0f}) {
+        for (const float y : {200.0f, 250.0f, 300.0f}) {
+            CAPTURE(x);
+            CAPTURE(y);
+            const Ray ray = camera.ray_through_view_point(x, y, w, h);
+            const auto hit = raycast_scene(doc, ray);
+            REQUIRE(hit.has_value());
+
+            const ViewPoint vp = camera.project(hit->hit.point, w, h);
+            CHECK(vp.visible);
+            CHECK(vp.x == doctest::Approx(x).epsilon(1e-3));
+            CHECK(vp.y == doctest::Approx(y).epsilon(1e-3));
+        }
+    }
+}
+
+TEST_CASE("raycast_scene: both ends of the scale clamp hit finitely with unit normals") {
+    // Editor's scale gesture clamps each component to [0.05, 50]. Those bounds
+    // are what simd_inverse actually has to invert here, and a degenerate
+    // inverse would poison the focus point with NaN -- which, since the pivot
+    // is derived from it, breaks the camera unrecoverably rather than merely
+    // failing a pick. resolve_focus rejects non-finite candidates, but the
+    // cheapest place to know they cannot arise is here.
+    struct Case {
+        const char* label;
+        simd_float3 scale;
+        float origin_z;
+        float expect_t;
+    };
+    const std::array<Case, 3> cases = {{
+        {"min uniform", {0.05f, 0.05f, 0.05f}, 5.0f, 4.975f},          // world radius 0.025
+        {"max uniform", {50.0f, 50.0f, 50.0f}, 50.0f, 25.0f},          // world radius 25
+        {"extreme non-uniform", {0.05f, 50.0f, 0.05f}, 5.0f, 4.975f},  // needle along +y
+    }};
+
+    for (const Case& c : cases) {
+        INFO("case: " << c.label); // CAPTURE on a const char* logs the pointer, not the text
+        SceneDocument doc;
+        Node node;
+        node.id = 1;
+        node.shape = Shape::Sphere;
+        node.scale = c.scale;
+        doc.add(node);
+
+        const auto hit = raycast_scene(doc, Ray{{0.0f, 0.0f, c.origin_z}, {0.0f, 0.0f, -1.0f}});
+        REQUIRE(hit.has_value());
+        CHECK(std::isfinite(hit->hit.t));
+        CHECK(hit->hit.t == doctest::Approx(c.expect_t));
+        CHECK(std::isfinite(hit->hit.point.x));
+        CHECK(std::isfinite(hit->hit.point.y));
+        CHECK(std::isfinite(hit->hit.point.z));
+        CHECK(simd_length(hit->hit.normal) == doctest::Approx(1.0f));
+    }
+}
+
 // --- ray_plane -------------------------------------------------------------
 
 TEST_CASE("ray_plane: literals from the task brief") {
