@@ -57,6 +57,91 @@ inline std::string CaptureLog(Fn&& fn) {
   return oss.str();
 }
 
+// A device that starts refusing resource creation after N successes.
+//
+// Error paths are where the hardest defects live -- an allocator that leaves
+// an index past the end, a loop that exits between BeginFrame and EndFrame --
+// and none of them are reachable while every CreateBuffer succeeds. Nothing
+// else in the suite can provoke a creation failure, so those paths were
+// entirely untested.
+//
+// Forwards everything else, so a test can point it at either backend.
+class FailAfterNDevice final : public IRhiDevice {
+ public:
+  FailAfterNDevice(IRhiDevice& inner, int successes_before_failure)
+      : inner_(inner), remaining_(successes_before_failure) {}
+
+  BackendKind GetBackend() const override { return inner_.GetBackend(); }
+  IRhiDevice* Inner() override { return &inner_; }
+
+  BufferPtr CreateBuffer(const BufferDesc& d) override {
+    if (!Allow()) return nullptr;
+    return inner_.CreateBuffer(d);
+  }
+  TexturePtr CreateTexture(const TextureDesc& d) override {
+    if (!Allow()) return nullptr;
+    return inner_.CreateTexture(d);
+  }
+  SamplerPtr CreateSampler(const SamplerDesc& d) override {
+    return inner_.CreateSampler(d);
+  }
+  ShaderModulePtr CreateShaderModule(const std::string& s,
+                                     const ShaderReflection& r,
+                                     const std::string& l) override {
+    return inner_.CreateShaderModule(s, r, l);
+  }
+  RenderPipelinePtr CreateRenderPipeline(const RenderPipelineDesc& d) override {
+    return inner_.CreateRenderPipeline(d);
+  }
+  ComputePipelinePtr CreateComputePipeline(
+      const ComputePipelineDesc& d) override {
+    return inner_.CreateComputePipeline(d);
+  }
+  BindingTablePtr CreateBindingTable(const BindingTableDesc& d) override {
+    return inner_.CreateBindingTable(d);
+  }
+  SwapchainPtr CreateSwapchain(const SwapchainDesc& d) override {
+    return inner_.CreateSwapchain(d);
+  }
+  std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
+      const std::string& l) override {
+    return inner_.CreateCommandEncoder(l);
+  }
+  void Submit(ICommandEncoder& e) override { inner_.Submit(e); }
+  void WaitIdle() override { inner_.WaitIdle(); }
+  size_t InFlightCount() override { return inner_.InFlightCount(); }
+  uint64_t BeginFrame() override { return inner_.BeginFrame(); }
+  void EndFrame() override { inner_.EndFrame(); }
+  uint64_t CurrentFrame() const override { return inner_.CurrentFrame(); }
+  uint64_t LastRetiredFrame() const override {
+    return inner_.LastRetiredFrame();
+  }
+  uint32_t FramesInFlight() const override { return inner_.FramesInFlight(); }
+  size_t PendingDeletions() const override {
+    return inner_.PendingDeletions();
+  }
+  uint64_t MinBufferOffsetAlignment() const override {
+    return inner_.MinBufferOffsetAlignment();
+  }
+  void BeginValidationScope() override { inner_.BeginValidationScope(); }
+  std::optional<ValidationReport> EndValidationScope() override {
+    return inner_.EndValidationScope();
+  }
+  bool IsValidationEnabled() const override {
+    return inner_.IsValidationEnabled();
+  }
+
+ private:
+  bool Allow() {
+    if (remaining_ <= 0) return false;
+    --remaining_;
+    return true;
+  }
+
+  IRhiDevice& inner_;
+  int remaining_;
+};
+
 // Minimal shader source per backend.
 //
 // Shader source is TARGET-NATIVE by contract -- the RHI never invokes a
@@ -984,6 +1069,8 @@ inline void CheckSwapchainResize(IRhiDevice& device) {
   device.BeginFrame();
   auto before = sc->Acquire();
   REQUIRE(before.status == AcquireStatus::Ok);
+  REQUIRE(before.view != nullptr);
+  REQUIRE(before.view->GetTexture() != nullptr);
   CHECK(before.view->GetTexture()->GetWidth() == 64);
   sc->Present();
   device.EndFrame();
@@ -994,9 +1081,95 @@ inline void CheckSwapchainResize(IRhiDevice& device) {
   CHECK(sc->GetHeight() == 96);
   auto after = sc->Acquire();
   REQUIRE(after.status == AcquireStatus::Ok);
+  REQUIRE(after.view != nullptr);
+  REQUIRE(after.view->GetTexture() != nullptr);
   CHECK(after.view->GetTexture()->GetWidth() == 128);
   CHECK(after.view->GetTexture()->GetHeight() == 96);
   sc->Present();
+  device.EndFrame();
+  device.WaitIdle();
+}
+
+// A wild offset must be refused, not wrapped past the guard.
+//
+// `offset + size > capacity` is unsigned arithmetic: an offset near
+// UINT64_MAX sums to something small, passes, and memcpys through a wild
+// pointer. These are the two functions in the whole RHI that actually write
+// memory, and they were the ones still on the addition form after rule 8 was
+// written.
+inline void CheckWildBufferOffsetsAreRefused(IRhiDevice& device) {
+  auto buf = device.CreateBuffer({.size = 256,
+                                  .usage = BufferUsage::CopyDst |
+                                           BufferUsage::MapRead,
+                                  .label = "wild"});
+  REQUIRE(buf);
+
+  std::vector<uint8_t> known(64, 0xAB);
+  buf->Write(0, AsBytes(known));
+
+  std::vector<uint8_t> one(1, 0xFF);
+  std::vector<uint8_t> out(1, 0);
+  const std::string log = CaptureLog([&] {
+    buf->Write(~uint64_t(0), AsBytes(one));       // wraps to 0
+    buf->Write(~uint64_t(0) - 4, AsBytes(one));   // wraps just past
+    CHECK_FALSE(buf->Read(~uint64_t(0), out));
+  });
+  INFO(log);
+  CHECK(log.find("runs past") != std::string::npos);
+
+  // The refusals wrote nothing: the known bytes are intact.
+  std::vector<uint8_t> check(64, 0);
+  REQUIRE(buf->Read(0, check));
+  CHECK(check == known);
+}
+
+// WaitIdle drains submitted work; it does not END the open frame. Declaring
+// it retired let a Destroy()ed handle be released while the caller could still
+// bind it into that very frame -- and Null, whose WaitIdle only retires ended
+// frames, gave the opposite answer to the same call.
+inline void CheckWaitIdleDoesNotRetireTheOpenFrame(IRhiDevice& device) {
+  device.WaitIdle();
+  device.BeginFrame();
+  device.WaitIdle();  // nothing submitted, but the frame is still OPEN
+
+  auto buf = device.CreateBuffer(
+      {.size = 1024, .usage = BufferUsage::Storage, .label = "open_frame"});
+  REQUIRE(buf);
+  buf->Destroy();
+
+  // Still held, because this frame has not retired and the caller could have
+  // bound it before destroying it.
+  CHECK(device.PendingDeletions() == 1);
+
+  device.EndFrame();
+  device.WaitIdle();
+  CHECK(device.PendingDeletions() == 0);
+}
+
+// A transient allocation that cannot grow must refuse and leave the allocator
+// usable. The caller's contract is that a refused allocation skips one draw
+// and the frame carries on, so the very next Allocate has to be safe.
+inline void CheckFrameAllocatorSurvivesGrowthFailure(IRhiDevice& device) {
+  // Enough successes for the per-slot blocks, then every further create fails.
+  FailAfterNDevice failing(device, int(device.FramesInFlight()));
+  auto alloc = FrameAllocator::Create(failing, {.block_size = 1024,
+                                                .max_bytes_per_frame = 65536,
+                                                .label = "growthfail"});
+  REQUIRE(alloc);
+
+  device.BeginFrame();
+  alloc->BeginFrame(device.CurrentFrame());
+
+  const std::string log = CaptureLog([&] {
+    CHECK(alloc->Allocate(1024).has_value());          // fills the block
+    CHECK_FALSE(alloc->Allocate(512).has_value());     // growth fails
+    // The allocator must still be in a usable state. Un-fixed, block_index was
+    // left one past the end and this read off the end of the vector.
+    CHECK_FALSE(alloc->Allocate(512).has_value());
+    CHECK_FALSE(alloc->Allocate(64).has_value());
+  });
+  INFO(log);
+
   device.EndFrame();
   device.WaitIdle();
 }
@@ -1696,6 +1869,9 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckFrameAllocatorRefusals(device);
   CheckFrameAllocatorGrowsThenCaps(device);
   CheckFrameAllocatorRecyclesPerSlot(device);
+  CheckFrameAllocatorSurvivesGrowthFailure(device);
+  CheckWildBufferOffsetsAreRefused(device);
+  CheckWaitIdleDoesNotRetireTheOpenFrame(device);
   CheckDynamicOffsetsReachTheBackend(device);
   CheckSwapchainAcquirePresentCycle(device);
   CheckSwapchainSkipsWhenZeroSized(device);

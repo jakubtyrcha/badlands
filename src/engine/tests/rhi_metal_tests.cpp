@@ -478,6 +478,19 @@ TEST_CASE("metal: frame allocator recycles per slot", "[rhi]") {
   rhitest::CheckFrameAllocatorRecyclesPerSlot(*d);
 }
 
+TEST_CASE("metal: frame allocator survives growth failure", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckFrameAllocatorSurvivesGrowthFailure(*d);
+}
+TEST_CASE("metal: wild buffer offsets are refused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckWildBufferOffsetsAreRefused(*d);
+}
+TEST_CASE("metal: WaitIdle does not retire the open frame", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckWaitIdleDoesNotRetireTheOpenFrame(*d);
+}
+
 TEST_CASE("metal: dynamic offsets reach the backend", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckDynamicOffsetsReachTheBackend(*d);
@@ -599,6 +612,22 @@ TEST_CASE("metal: a deferred handle is really released rather than stranded",
   REQUIRE(d);
   CHECK(badlands::rhi::metal::WeakHandleClearedAfterRetire(*d));
 }
+TEST_CASE("metal: destroying a device mid-frame is diagnosed not fatal",
+          "[rhi][metal]") {
+  // BeginFrame takes a semaphore count that only EndFrame returns. libdispatch
+  // TRAPS on destroying a semaphore below its initial value, so an error path
+  // that returned between the two crashed inside libdispatch with none of the
+  // caller's frames in the backtrace -- pointing at the wrong thing entirely.
+  const std::string log = rhitest::CaptureLog([&] {
+    auto d = MakeMetal(/*validation=*/false);
+    REQUIRE(d);
+    d->BeginFrame();
+    // Destroyed here, with the frame still open.
+  });
+  INFO(log);
+  CHECK(log.find("still open") != std::string::npos);
+}
+
 TEST_CASE("metal: sliced views honour their range", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckSlicedViewsHonourTheirRange(*d);

@@ -140,6 +140,19 @@ TEST_CASE("Null: frame allocator recycles per slot", "[rhi]") {
   rhitest::CheckFrameAllocatorRecyclesPerSlot(*d);
 }
 
+TEST_CASE("Null: frame allocator survives growth failure", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckFrameAllocatorSurvivesGrowthFailure(*d);
+}
+TEST_CASE("Null: wild buffer offsets are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckWildBufferOffsetsAreRefused(*d);
+}
+TEST_CASE("Null: WaitIdle does not retire the open frame", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckWaitIdleDoesNotRetireTheOpenFrame(*d);
+}
+
 TEST_CASE("Null: dynamic offsets reach the backend", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckDynamicOffsetsReachTheBackend(*d);

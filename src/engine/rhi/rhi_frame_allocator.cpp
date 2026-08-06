@@ -146,9 +146,14 @@ std::optional<FrameAlloc> FrameAllocator::Allocate(uint64_t size,
       return std::nullopt;
     }
 
-    ++s.block_index;
-    if (s.block_index >= s.blocks.size()) {
-      auto block = MakeBlock(needed, current_slot_, s.block_index);
+    // The index advances only once a usable block EXISTS. Incrementing first
+    // and then failing to create the block left block_index one past the end,
+    // and the next Allocate in the same frame -- the contract says a refused
+    // allocation skips one draw and carries on -- indexed the vector out of
+    // bounds and called a virtual through the garbage it read.
+    const size_t next_index = s.block_index + 1;
+    if (next_index >= s.blocks.size()) {
+      auto block = MakeBlock(needed, current_slot_, next_index);
       if (!block) return std::nullopt;
       s.blocks.push_back(std::move(block));
       // Warn once: repeating it every frame would bury the signal it is.
@@ -159,12 +164,13 @@ std::optional<FrameAlloc> FrameAllocator::Allocate(uint64_t size,
             "byte request -- the ring is undersized for this workload",
             desc_.label, desc_.block_size, size);
       }
-    } else if (s.blocks[s.block_index]->GetSize() < size) {
+    } else if (s.blocks[next_index]->GetSize() < size) {
       // A recycled extra block that is too small for this request.
-      auto block = MakeBlock(needed, current_slot_, s.block_index);
+      auto block = MakeBlock(needed, current_slot_, next_index);
       if (!block) return std::nullopt;
-      s.blocks[s.block_index] = std::move(block);
+      s.blocks[next_index] = std::move(block);
     }
+    s.block_index = next_index;
     offset = 0;
   }
 

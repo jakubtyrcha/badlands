@@ -134,45 +134,99 @@ NSString* Ns(const std::string& s) {
 // Resources
 // ---------------------------------------------------------------------------
 
-// Where Destroy() hands a GPU handle so the frame timeline, not the caller,
-// decides when it is released. Shared between the device and every resource it
-// creates; held by shared_ptr so a resource outliving its device is merely
-// wasteful rather than a dangling write.
-struct RetireQueue {
-  mutable std::mutex mutex;
-  std::vector<std::pair<uint64_t, id>> pending;  // (frame, held object)
+// The frame timeline: everything a Metal completion handler touches, plus the
+// deferred-release queue keyed on it.
+//
+// One object, owned by shared_ptr, because completion handlers run on
+// Metal-owned threads and MUST NOT capture the device. PruneRetired drops a
+// command buffer as soon as its status reads Completed, and Metal sets that
+// status BEFORE invoking the handler blocks -- so a buffer can leave
+// in_flight_ while its handler is still pending, and the destructor's
+// WaitIdle would then never wait for it. Capturing this instead means a late
+// handler touches a live object no matter when the device died.
+struct FrameTimeline {
+  struct FrameState {
+    uint32_t pending = 0;  // submitted buffers not yet completed
+    bool ended = false;
+  };
+
+  // --- frame bookkeeping ---
+  std::mutex frame_mutex;
+  std::map<uint64_t, FrameState> frames;
   std::atomic<uint64_t> current_frame{0};
   std::atomic<uint64_t> last_retired{0};
+  dispatch_semaphore_t sem = nil;
+
+  // --- deferred release ---
+  mutable std::mutex release_mutex;
+  std::vector<std::pair<uint64_t, id>> pending_release;  // (frame, held object)
+
+  // Monotonic: a frame that retires never un-retires, and out-of-order
+  // completion (which one queue does not produce, but a second would) must not
+  // move the watermark backwards.
+  //
+  // Deliberately does NOT signal the semaphore. Advancing the watermark and
+  // returning a pacing slot are different things: WaitIdle does the first
+  // without the second, because a slot it never took is not its to give back.
+  void AdvanceRetired(uint64_t frame) {
+    uint64_t seen = last_retired.load(std::memory_order_relaxed);
+    while (frame > seen && !last_retired.compare_exchange_weak(
+                               seen, frame, std::memory_order_release,
+                               std::memory_order_relaxed)) {
+    }
+  }
+
+  void RetireAndSignal(uint64_t frame) {
+    AdvanceRetired(frame);
+    dispatch_semaphore_signal(sem);
+  }
+
+  // Runs on a Metal-owned thread.
+  void OnBufferComplete(uint64_t frame) {
+    bool retire_now = false;
+    {
+      std::lock_guard<std::mutex> lock(frame_mutex);
+      auto it = frames.find(frame);
+      if (it == frames.end()) return;  // already retired
+      if (--it->second.pending == 0 && it->second.ended) {
+        frames.erase(it);
+        retire_now = true;
+      }
+    }
+    if (retire_now) RetireAndSignal(frame);
+  }
 
   // Holds `obj` until the frame currently in flight retires. Conservative on
-  // purpose: we do not track which frames actually referenced the resource, and
-  // waiting for the newest one also covers every older one, since frames retire
-  // in order.
+  // purpose: we do not track which frames actually referenced the resource,
+  // and waiting for the newest one also covers every older one, since frames
+  // retire in order.
   void Defer(id obj) {
     if (!obj) return;
     const uint64_t frame = current_frame.load(std::memory_order_acquire);
     // Destroyed outside any frame, or with nothing outstanding: no GPU can be
     // reading it, so ARC may release it right now.
     if (frame <= last_retired.load(std::memory_order_acquire)) return;
-    std::lock_guard<std::mutex> lock(mutex);
-    pending.emplace_back(frame, obj);
+    std::lock_guard<std::mutex> lock(release_mutex);
+    pending_release.emplace_back(frame, obj);
   }
 
   // Drops everything whose frame has retired. ARC releases as the entries go.
   void Collect() {
     const uint64_t retired = last_retired.load(std::memory_order_acquire);
-    std::lock_guard<std::mutex> lock(mutex);
-    std::erase_if(pending,
+    std::lock_guard<std::mutex> lock(release_mutex);
+    std::erase_if(pending_release,
                   [retired](const auto& e) { return e.first <= retired; });
   }
 
-  size_t Count() const {
-    std::lock_guard<std::mutex> lock(mutex);
-    return pending.size();
+  size_t PendingCount() const {
+    std::lock_guard<std::mutex> lock(release_mutex);
+    return pending_release.size();
   }
 };
 
-using RetireQueuePtr = std::shared_ptr<RetireQueue>;
+using FrameTimelinePtr = std::shared_ptr<FrameTimeline>;
+// The old name, kept for the resource constructors that only use Defer().
+using RetireQueuePtr = FrameTimelinePtr;
 
 class MetalResource : public virtual IResource {
  public:
@@ -209,15 +263,39 @@ class MetalBuffer final : public IBuffer, public MetalResource {
   uint64_t GetSize() const override { return size_; }
   BufferUsage GetUsage() const override { return usage_; }
 
+  // Subtraction, not `offset + data.size() > size_`. That addition WRAPS: an
+  // offset near UINT64_MAX sums to a small number, passes the guard, and
+  // memcpys through a wild pointer. Rule 8 exists for exactly this, and these
+  // two are the functions that actually write memory.
   void Write(uint64_t offset, std::span<const uint8_t> data) override {
-    if (!buffer_ || offset + data.size() > size_) return;
+    if (!buffer_) {
+      spdlog::error("rhi/metal: Write to destroyed buffer '{}'", GetLabel());
+      return;
+    }
+    if (data.size() > size_ || offset > size_ - data.size()) {
+      spdlog::error(
+          "rhi/metal: Write of {} bytes at offset {} runs past buffer '{}' of "
+          "{} bytes",
+          data.size(), offset, GetLabel(), size_);
+      return;
+    }
     std::memcpy(static_cast<uint8_t*>(buffer_.contents) + offset, data.data(),
                 data.size());
   }
 
   // Unified memory: no staging copy, no async map.
   bool Read(uint64_t offset, std::span<uint8_t> out) override {
-    if (!buffer_ || offset + out.size() > size_) return false;
+    if (!buffer_) {
+      spdlog::error("rhi/metal: Read from destroyed buffer '{}'", GetLabel());
+      return false;
+    }
+    if (out.size() > size_ || offset > size_ - out.size()) {
+      spdlog::error(
+          "rhi/metal: Read of {} bytes at offset {} runs past buffer '{}' of "
+          "{} bytes",
+          out.size(), offset, GetLabel(), size_);
+      return false;
+    }
     std::memcpy(out.data(),
                 static_cast<const uint8_t*>(buffer_.contents) + offset,
                 out.size());
@@ -1061,14 +1139,30 @@ class MetalDevice final : public IRhiDevice {
   MetalDevice(id<MTLDevice> dev, id<MTLCommandQueue> queue, std::string label,
               uint32_t frames_in_flight)
       : device_(dev), queue_(queue), label_(std::move(label)),
-        frames_in_flight_(frames_in_flight),
-        frame_sem_(dispatch_semaphore_create(frames_in_flight)) {}
+        frames_in_flight_(frames_in_flight) {
+    // The TIMELINE owns the semaphore, because the timeline is what signals
+    // it from completion handlers. A second handle on the device left the
+    // timeline's nil and dispatch_semaphore_signal(nil) crashed on the first
+    // frame that retired.
+    retire_->sem = dispatch_semaphore_create(frames_in_flight);
+  }
 
   ~MetalDevice() override {
-    // Completion handlers capture the address of last_retired_ and the
-    // semaphore, so none may outlive this object. waitUntilCompleted returns
-    // only after a buffer's completion handlers have run.
     WaitIdle();
+    // A frame left open -- an error path that returned between BeginFrame and
+    // EndFrame -- means one semaphore count was taken and never returned.
+    // libdispatch TRAPS on destroying a semaphore below its initial value
+    // ("Semaphore object deallocated while in use"), so the caller's mistake
+    // would surface as a crash inside libdispatch with none of its own frames
+    // in the backtrace. Say what actually happened, and rebalance.
+    if (in_frame_) {
+      spdlog::error(
+          "rhi/metal: device destroyed with frame {} still open -- every "
+          "BeginFrame must be matched by an EndFrame",
+          current_frame_);
+      in_frame_ = false;
+      dispatch_semaphore_signal(retire_->sem);
+    }
   }
 
   BackendKind GetBackend() const override { return BackendKind::Metal; }
@@ -1279,11 +1373,16 @@ class MetalDevice final : public IRhiDevice {
     if (in_frame_) {
       const uint64_t frame = current_frame_;
       {
-        std::lock_guard<std::mutex> lock(frame_mutex_);
-        ++frames_[frame].pending;
+        std::lock_guard<std::mutex> lock(retire_->frame_mutex);
+        ++retire_->frames[frame].pending;
       }
+      // Captures the shared timeline BY VALUE, not `this`. PruneRetired can
+      // drop a buffer from in_flight_ before its handler runs, so the
+      // destructor cannot guarantee it waited for every handler -- but a
+      // handler holding a shared_ptr keeps what it touches alive regardless.
+      FrameTimelinePtr timeline = retire_;
       [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
-        OnBufferComplete(frame);
+        timeline->OnBufferComplete(frame);
       }];
     }
 
@@ -1297,12 +1396,19 @@ class MetalDevice final : public IRhiDevice {
       ReportIfFailed(cmd);
     }
     in_flight_.clear();
-    // Every frame has retired, so nothing is left to hold back.
-    retire_->last_retired.store(current_frame_, std::memory_order_release);
+    // Every ENDED frame has now retired -- but a frame that is still open has
+    // not, and the caller can go on binding resources into it. Declaring it
+    // retired let Defer take its early-out and release a handle ARC was the
+    // last owner of, which Null (whose WaitIdle only retires ended frames)
+    // correctly refused to do. Same call, two answers, on a documented
+    // observable.
+    retire_->AdvanceRetired(in_frame_ ? current_frame_ - 1 : current_frame_);
     retire_->Collect();
   }
 
-  size_t PendingDeletions() const override { return retire_->Count(); }
+  size_t PendingDeletions() const override {
+    return retire_->PendingCount();
+  }
 
   // 32, not 256. Metal has no query for this -- the requirement is documented
   // per GPU family -- and the project's hardware floor is Apple silicon (M2+),
@@ -1320,7 +1426,7 @@ class MetalDevice final : public IRhiDevice {
 
   uint64_t BeginFrame() override {
     // Blocks here, at the TOP of the frame, rather than at nextDrawable.
-    dispatch_semaphore_wait(frame_sem_, DISPATCH_TIME_FOREVER);
+    dispatch_semaphore_wait(retire_->sem, DISPATCH_TIME_FOREVER);
     ++current_frame_;
     in_frame_ = true;
     retire_->current_frame.store(current_frame_, std::memory_order_release);
@@ -1335,24 +1441,24 @@ class MetalDevice final : public IRhiDevice {
 
     bool retire_now = false;
     {
-      std::lock_guard<std::mutex> lock(frame_mutex_);
-      auto& st = frames_[frame];
+      std::lock_guard<std::mutex> lock(retire_->frame_mutex);
+      auto& st = retire_->frames[frame];
       st.ended = true;
       // A frame that submitted nothing -- a skipped frame, which a minimized
       // or occluded window produces every tick -- has no completion handler
       // to retire it. Retire it here, or the semaphore count is never
       // returned and the Nth skipped frame blocks forever in BeginFrame.
       if (st.pending == 0) {
-        frames_.erase(frame);
+        retire_->frames.erase(frame);
         retire_now = true;
       }
     }
-    if (retire_now) Retire(frame);
+    if (retire_now) retire_->RetireAndSignal(frame);
   }
 
   uint64_t CurrentFrame() const override { return current_frame_; }
   uint64_t LastRetiredFrame() const override {
-    return last_retired_.load(std::memory_order_acquire);
+    return retire_->last_retired.load(std::memory_order_acquire);
   }
   uint32_t FramesInFlight() const override { return frames_in_flight_; }
 
@@ -1378,36 +1484,6 @@ class MetalDevice final : public IRhiDevice {
                   err ? long(err.code) : 0L);
   }
 
-  // Runs on a Metal-owned thread. `this` outlives it because ~MetalDevice
-  // waits idle, and waitUntilCompleted returns only after handlers have run.
-  void OnBufferComplete(uint64_t frame) {
-    bool retire_now = false;
-    {
-      std::lock_guard<std::mutex> lock(frame_mutex_);
-      auto it = frames_.find(frame);
-      if (it == frames_.end()) return;  // already retired
-      if (--it->second.pending == 0 && it->second.ended) {
-        frames_.erase(it);
-        retire_now = true;
-      }
-    }
-    if (retire_now) Retire(frame);
-  }
-
-  // Monotonic: a frame that retires never un-retires, and out-of-order
-  // completion (which one queue does not produce, but a second one would)
-  // must not move the watermark backwards.
-  void Retire(uint64_t frame) {
-    uint64_t seen = last_retired_.load(std::memory_order_relaxed);
-    while (frame > seen && !last_retired_.compare_exchange_weak(
-                               seen, frame, std::memory_order_release,
-                               std::memory_order_relaxed)) {
-    }
-    retire_->last_retired.store(last_retired_.load(std::memory_order_acquire),
-                                std::memory_order_release);
-    dispatch_semaphore_signal(frame_sem_);
-  }
-
   void PruneRetired() {
     in_flight_.erase(
         std::remove_if(in_flight_.begin(), in_flight_.end(),
@@ -1430,23 +1506,18 @@ class MetalDevice final : public IRhiDevice {
   // src/engine/rhi/CLAUDE.md for why a DX12 backend must do that itself.
   std::vector<id<MTLCommandBuffer>> in_flight_;
 
-  // Frame model. `frame_sem_` starts at frames_in_flight_ and is what
-  // BeginFrame blocks on. `frames_` tracks, per open frame, how many of its
-  // submitted command buffers are still outstanding and whether EndFrame has
-  // been called -- a frame retires when both reach zero/true.
+  // Frame model. The pacing semaphore and the per-frame bookkeeping live on
+  // the shared FrameTimeline, not here, because completion handlers touch them
+  // from Metal-owned threads and must not capture the device.
   struct FrameState {
     uint32_t pending = 0;  // submitted buffers not yet completed
     bool ended = false;
   };
 
-  RetireQueuePtr retire_ = std::make_shared<RetireQueue>();
+  RetireQueuePtr retire_ = std::make_shared<FrameTimeline>();
   uint32_t frames_in_flight_ = 3;
-  dispatch_semaphore_t frame_sem_ = nil;
   uint64_t current_frame_ = 0;
   bool in_frame_ = false;
-  std::atomic<uint64_t> last_retired_{0};  // written from a Metal thread
-  std::mutex frame_mutex_;                 // guards frames_
-  std::map<uint64_t, FrameState> frames_;
 };
 
 }  // namespace

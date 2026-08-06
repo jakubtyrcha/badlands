@@ -84,13 +84,27 @@ class NullBuffer final : public IBuffer, public NullResource {
   uint64_t GetSize() const override { return data_.size(); }
   BufferUsage GetUsage() const override { return usage_; }
 
+  // Subtraction, matching Metal: `offset + size` wraps and lets a wild offset
+  // through the guard. See the note in metal_rhi.mm.
   void Write(uint64_t offset, std::span<const uint8_t> data) override {
-    if (offset + data.size() > data_.size()) return;
+    if (data.size() > data_.size() || offset > data_.size() - data.size()) {
+      spdlog::error(
+          "rhi/null: Write of {} bytes at offset {} runs past buffer '{}' of "
+          "{} bytes",
+          data.size(), offset, GetLabel(), data_.size());
+      return;
+    }
     std::memcpy(data_.data() + offset, data.data(), data.size());
   }
 
   bool Read(uint64_t offset, std::span<uint8_t> out) override {
-    if (offset + out.size() > data_.size()) return false;
+    if (out.size() > data_.size() || offset > data_.size() - out.size()) {
+      spdlog::error(
+          "rhi/null: Read of {} bytes at offset {} runs past buffer '{}' of "
+          "{} bytes",
+          out.size(), offset, GetLabel(), data_.size());
+      return false;
+    }
     std::memcpy(out.data(), data_.data() + offset, out.size());
     return true;
   }
