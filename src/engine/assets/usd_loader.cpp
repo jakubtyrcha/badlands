@@ -39,7 +39,9 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
   const size_t packed_bytes =
       attr.format == tydra::VertexAttributeFormat::Half4
           ? 4 * sizeof(uint16_t)
-          : (attr.format == tydra::VertexAttributeFormat::Vec2 ? 2 : 3) *
+          : (attr.format == tydra::VertexAttributeFormat::Vec2   ? 2
+             : attr.format == tydra::VertexAttributeFormat::Vec4 ? 4
+                                                                 : 3) *
                 sizeof(float);
   if (attr.stride != 0 && attr.stride != packed_bytes) {
     spdlog::warn("LoadUsdScene: mesh '{}' {} has stride {} but packs into {}"
@@ -49,8 +51,9 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
   }
 
   const tydra::VertexAttributeFormat expected =
-      components == 2 ? tydra::VertexAttributeFormat::Vec2
-                      : tydra::VertexAttributeFormat::Vec3;
+      components == 2   ? tydra::VertexAttributeFormat::Vec2
+      : components == 4 ? tydra::VertexAttributeFormat::Vec4
+                        : tydra::VertexAttributeFormat::Vec3;
 
   // Half4 is the one alternative worth decoding rather than rejecting: these
   // props carry Blender-authored `tangents` primvars as half4 (xyz plus a
@@ -125,7 +128,12 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
 // guess.
 std::vector<float> CopyTangents(const tydra::VertexAttribute& attr,
                                 size_t vertex_count, const std::string& mesh) {
-  if (attr.format == tydra::VertexAttributeFormat::Half4) {
+  // Half4 (Blender) and Vec4 (what glTF -> USD conversions emit) both already
+  // carry handedness in w. Vec4 is worth accepting explicitly: rejecting a
+  // usable tangent format costs the WHOLE MESH downstream, since the adapter
+  // drops any mesh with a missing attribute rather than shipping zeroes.
+  if (attr.format == tydra::VertexAttributeFormat::Half4 ||
+      attr.format == tydra::VertexAttributeFormat::Vec4) {
     return CopyFloatAttribute(attr, 4, vertex_count, "tangents", mesh);
   }
 
@@ -222,6 +230,19 @@ UsdSceneData LoadUsdScene(const std::string& path) {
       for (const auto& child : node.children) walk(child);
     };
     for (const auto& node : scene.nodes) walk(node);
+  }
+
+  // USD native instancing is NOT handled: mesh_transforms is keyed by mesh
+  // index, so several instance nodes sharing one mesh collapse to whichever
+  // placement the walk visited last, and every other copy silently vanishes.
+  // No shipped prop instances, and supporting it means emitting one
+  // UsdMeshData per instance rather than per mesh -- so say so rather than
+  // leave a model half-loaded with nothing in the log.
+  if (!scene.instances.empty()) {
+    spdlog::warn("LoadUsdScene: '{}' uses USD instancing ({} instances), which"
+                 " this loader does not expand -- only one placement per mesh"
+                 " will be imported",
+                 path, scene.instances.size());
   }
 
   result.meters_per_unit = static_cast<float>(scene.meta.metersPerUnit);

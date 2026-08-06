@@ -37,6 +37,23 @@ glm::vec3 SafeNormalize(const glm::vec3& v, const glm::vec3& fallback) {
   return v * glm::inversesqrt(len2);
 }
 
+// Some unit vector perpendicular to `n`.
+//
+// A CONSTANT fallback tangent is not good enough, and the shader is why:
+// gbuffer_encode.wesl re-orthogonalises with normalize(T - N * dot(T, N)), so a
+// tangent parallel to the normal makes that normalize(vec3(0)) -> NaN. A
+// degenerate-UV triangle whose normal happens to point along the constant is
+// exactly the case the fallback exists to survive, so the fallback has to be
+// derived from the normal rather than fixed.
+//
+// Cross with whichever axis `n` is least aligned to, so the product is never
+// near-zero.
+glm::vec3 AnyPerpendicular(const glm::vec3& n) {
+  const glm::vec3 axis = std::abs(n.x) < 0.9f ? glm::vec3(1.0f, 0.0f, 0.0f)
+                                              : glm::vec3(0.0f, 1.0f, 0.0f);
+  return glm::normalize(glm::cross(axis, n));
+}
+
 }  // namespace
 
 std::vector<ImportedModel> BuildImportedModels(
@@ -108,7 +125,7 @@ std::vector<ImportedModel> BuildImportedModels(
       const glm::vec3 tangent_xyz{src.tangents[i * 4 + 0], src.tangents[i * 4 + 1],
                                   src.tangents[i * 4 + 2]};
       glm::vec3 tangent =
-          SafeNormalize(tangent_xform * tangent_xyz, glm::vec3(1.0f, 0.0f, 0.0f));
+          SafeNormalize(tangent_xform * tangent_xyz, AnyPerpendicular(normal));
       // Handedness describes the UV parameterisation, so a placement transform
       // leaves it alone -- except a MIRRORING one, which reverses the frame's
       // chirality and so flips it.

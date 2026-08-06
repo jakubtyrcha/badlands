@@ -264,6 +264,38 @@ TEST_CASE("a degenerate tangent yields a finite vector, never NaN",
   }
 }
 
+TEST_CASE("a degenerate tangent survives the shader's Gram-Schmidt",
+          "[usd][adapter]") {
+  // Finite is NOT sufficient. gbuffer_encode.wesl re-orthogonalises with
+  // normalize(T - N * dot(T, N)), so a fallback tangent PARALLEL to the normal
+  // is finite on the CPU and NaN on the GPU. This reproduces that: a quad whose
+  // normal points along +X, which a constant (1,0,0) fallback would match
+  // exactly.
+  UsdMeshData mesh = MakeQuad();
+  for (size_t i = 0; i < 4; ++i) {
+    mesh.normals[i * 3 + 0] = 1.0f;  // N = +X
+    mesh.normals[i * 3 + 1] = 0.0f;
+    mesh.normals[i * 3 + 2] = 0.0f;
+    mesh.tangents[i * 4 + 0] = 0.0f;  // degenerate tangent
+    mesh.tangents[i * 4 + 1] = 0.0f;
+    mesh.tangents[i * 4 + 2] = 0.0f;
+  }
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  REQUIRE(models.size() == 1);
+
+  const auto& v = models[0].mesh.mesh.vertices;
+  for (size_t i = 0; i < 4; ++i) {
+    const glm::vec3 n{v[i * kStride + 5], v[i * kStride + 6], v[i * kStride + 7]};
+    const glm::vec3 t{v[i * kStride + 8], v[i * kStride + 9], v[i * kStride + 10]};
+    CAPTURE(i, t.x, t.y, t.z);
+    // The shader's own expression, evaluated on the CPU.
+    const glm::vec3 orthogonalized = t - n * glm::dot(t, n);
+    REQUIRE(glm::length(orthogonalized) > 1e-3f);
+  }
+}
+
 TEST_CASE("tangent handedness reaches the vertex buffer", "[usd][adapter]") {
   UsdMeshData mesh = MakeQuad();
   mesh.tangents[3] = -1.0f;  // vertex 0's w: a mirrored UV island

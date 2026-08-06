@@ -49,6 +49,10 @@ std::vector<std::filesystem::path> ShippedModels() {
 TEST_CASE("every shipped prop loads with the attributes the adapter needs",
           "[usd]") {
   const auto models = ShippedModels();
+  // Pinned deliberately, not incidentally: an LFS checkout that silently
+  // fetched pointers instead of content, or a model that stopped being
+  // discovered, both show up here as a count change rather than as a subtly
+  // emptier scene. Bump it when a prop is genuinely added.
   REQUIRE(models.size() == 10);
 
   for (const auto& path : models) {

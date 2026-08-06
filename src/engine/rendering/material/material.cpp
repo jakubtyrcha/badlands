@@ -44,7 +44,7 @@ RenderPipelineDeclaration MeshRenderingMaterial::BuildDeclaration(
       break;
     case GeometryType::kTexturedMesh:
     case GeometryType::kInstancedMesh:
-      // kInstancedMesh's MESH vertex buffer is the normal 11-float textured
+      // kInstancedMesh's MESH vertex buffer is the normal 12-float textured
       // layout — instances are NOT a vertex stream; the per-instance
       // transform is read from a group-1 storage array in the vertex stage
       // (gated by the "instanced" feature pushed below).
