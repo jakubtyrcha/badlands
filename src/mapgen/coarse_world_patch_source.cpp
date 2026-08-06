@@ -13,6 +13,7 @@
 #include "mapgen/biomes.hpp"
 #include "mapgen/cubic_sample.hpp"
 #include "mapgen/patch_io.hpp"
+#include "mapgen/relief_filter.hpp"
 #include "mapgen/river_clip.hpp"
 #include "mapgen/river_io.hpp"
 #include "mapgen/river_prune.hpp"
@@ -477,6 +478,16 @@ PatchData CoarseWorldPatchSource::Fetch(const PatchRequest& req) const {
   out.height = std::move(bed);
   out.soil = std::move(soil);
 
+  // --- relief detail (2026-08-06 spec): step 2 of the §3.4 chain. The
+  // filter's delta rides on the resampled bed BEFORE the water rebuild, so
+  // lake margins and levels see the detailed ground; the filter itself is
+  // masked off standing water, so a lake bed is never touched. At or below
+  // source density the octave band sits under the output Nyquist and the
+  // delta is exactly zero -- Box/Crop requests stay bit-identical.
+  const ReliefContext relief_ctx{&height_,       &soil_,      &biome_,
+                                 &water_depth_,  src_texel_m, manifest_.seed};
+  apply_relief(relief_ctx, req.origin_m, out_texel_m, out.height);
+
   // --- water -----------------------------------------------------------
   const Field2D<float> depth =
       ReconstructWater(height_, water_depth_, out.height, req.origin_m, src_texel_m, out_texel_m, n);
@@ -572,6 +583,19 @@ std::unique_ptr<CoarseWorldPatchSource> LoadCoarseWorldPatchSource(
   src->water_depth_.data = std::move(water);
   src->soil_ = Field2D<float>(n, n);
   src->soil_.data = std::move(soil);
+  src->biome_ = Field2D<uint8_t>(n, n);
+  for (size_t i = 0; i < count; ++i) {
+    Biome b;
+    if (src->water_depth_.data[i] > 0.0f) {
+      b = Biome::Lake;
+    } else {
+      const float s = src->soil_.data[i];
+      b = s < man->soil_cut_mountain_m  ? Biome::Mountain
+          : s < man->soil_cut_hills_m   ? Biome::Hills
+                                        : Biome::Plains;
+    }
+    src->biome_.data[i] = static_cast<uint8_t>(b);
+  }
   src->rivers_ = std::move(rivers);
   return src;
 }

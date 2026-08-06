@@ -64,6 +64,11 @@ class CoarseWorldPatchSource final : public PatchSource {
                                 // raster; see tools/protogen/protogen.cpp's
                                 // Dump -- it is a depth, not a surface)
   Field2D<float> soil_;         // erodible cover
+  // Whole-world biome, classified ONCE at load from soil vs the manifest
+  // cutoffs (wet cells -> Lake) -- the same rule Fetch applies per patch.
+  // Exists for the relief filter, whose per-biome styling reads the COARSE
+  // world, not the patch being produced.
+  Field2D<uint8_t> biome_;
   RiverGraph rivers_;           // whole-world graph, world coordinates
 };
 
