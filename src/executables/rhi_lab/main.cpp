@@ -26,7 +26,6 @@
 #include <numbers>
 #include <string>
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_metal.h>
 
 #include <initializer_list>
 #include <optional>
@@ -48,7 +47,7 @@ extern "C" {
 #include "engine/slang/slang_compiler.hpp"
 #include "game/geometry/terrain_clusters.hpp"
 #include "src/executables/rhi_lab/lab_scene.hpp"
-#include "src/executables/rhi_lab/surface_size.hpp"
+#include "engine/app/rhi_app_shell.hpp"
 
 using namespace badlands;
 using namespace badlands::rhi;
@@ -855,232 +854,128 @@ int main(int argc, char** argv) {
   };  // record_frame
 
   if (opt.windowed) {
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-      spdlog::error("rhi_lab: SDL_Init failed: {}", SDL_GetError());
-      return 1;
-    }
-    // Without this, clicks that give the window focus are swallowed rather
-    // than delivered -- part of the same macOS input problem as the raise
-    // below.
-    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
-
-    SDL_Window* window = SDL_CreateWindow(
-        "badlands rhi_lab", int(opt.width), int(opt.height),
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-    if (!window) {
-      spdlog::error("rhi_lab: SDL_CreateWindow failed: {}", SDL_GetError());
-      return 1;
-    }
-    SDL_MetalView metal_view = SDL_Metal_CreateView(window);
-    if (!metal_view) {
-      spdlog::error("rhi_lab: SDL_Metal_CreateView failed: {}", SDL_GetError());
-      return 1;
-    }
-
-    // PIXELS, not points. On a HiDPI display these differ by the backing
-    // scale, and using points renders at half resolution into a full-size
-    // drawable -- which looks plausible rather than wrong.
-    int pw = 0, ph = 0;
-    SDL_GetWindowSizeInPixels(window, &pw, &ph);
-
-    auto swapchain = device->CreateSwapchain(
-        {.native_window = SDL_Metal_GetLayer(metal_view),
-         .width = uint32_t(pw), .height = uint32_t(ph),
-         .format = Format::BGRA8Unorm, .vsync = true, .label = "lab"});
-    if (!swapchain) return 1;
-    if (!MakeTargets(*device, uint32_t(pw), uint32_t(ph), targets)) return 1;
+    // The window, the swapchain, the resize coalescing and the frame pacing all
+    // live in AppShell now -- shared with object_viewer, because a second copy
+    // of that loop is a second copy of every macOS input and HiDPI bug it took
+    // several rounds to get right.
+    auto shell = rhi_app::AppShell::Create(
+        *device, {.title = "badlands rhi_lab",
+                  .width = opt.width,
+                  .height = opt.height,
+                  .present_format = Format::BGRA8Unorm});
+    if (!shell) return 1;
+    if (!MakeTargets(*device, shell->Width(), shell->Height(), targets)) return 1;
     if (!rebuild_resolve()) return 1;
 
     spdlog::info(
         "rhi_lab: WASD/QE to move, hold right mouse to look, shift to go "
         "faster, Esc to quit");
 
-    // Coalesced: a live drag streams size events, and recreating the layer per
-    // event fights the frame in flight. One recreate per frame, at a defined
-    // point.
-    uint32_t pending_w = uint32_t(pw), pending_h = uint32_t(ph);
-    rhi_lab::SurfaceSizeTracker surface{uint32_t(pw), uint32_t(ph)};
-    bool raised_on_show = false;
-    bool running = true;
-    int frame_no = 0;
-    uint32_t rendered = 0;
     // Self-test bookkeeping. The request is in POINTS, because that is what
     // SDL_SetWindowSize takes; everything downstream is in PIXELS, which on a
     // HiDPI display is a different number. Asserting against the requested
     // value compares the two and fails on a correct implementation -- which is
     // exactly what this test did on its first run.
     int point_w = 0, point_h = 0;
-    SDL_GetWindowSize(window, &point_w, &point_h);
+    SDL_GetWindowSize(shell->Window(), &point_w, &point_h);
     const int test_point_w = point_w / 2 + 64;
     const int test_point_h = point_h / 2 + 32;
-    const uint32_t initial_pixel_w = uint32_t(pw);
+    const uint32_t initial_pixel_w = shell->Width();
     uint32_t rendered_after_resize = 0;
     // Which uniform slices the frames actually used. If consecutive frames
     // share one, the CPU is overwriting bytes the GPU may still be reading --
     // the hazard the ring exists to remove, and one that renders a plausible
     // image while it happens.
     std::set<uint32_t> frame_offsets_seen;
-    uint64_t last_ticks = SDL_GetPerformanceCounter();
-    const double tick_freq = double(SDL_GetPerformanceFrequency());
 
-    while (running) {
-      // Metal hands back autoreleased objects every frame -- nextDrawable and
-      // each command buffer. Without a pool per frame they accumulate for the
-      // life of the run and it looks like a GPU memory leak.
-      metal::AutoreleasePoolScope pool;
-
-      SDL_Event e;
-      while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_EVENT_QUIT) {
-          running = false;
-        } else if (e.type == SDL_EVENT_WINDOW_SHOWN ||
-                   e.type == SDL_EVENT_WINDOW_EXPOSED) {
-          // Raised only once the OS reports the window visible. A pre-loop
-          // raise is too early on macOS -- Cocoa only activates a visible
-          // window -- and without this the app starts without keyboard focus,
-          // so WASD does nothing and it reads as a broken camera.
-          if (!raised_on_show) {
-            SDL_RaiseWindow(window);
-            raised_on_show = true;
-          }
-        } else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
-          int nw = 0, nh = 0;
-          SDL_GetWindowSizeInPixels(window, &nw, &nh);
-          pending_w = uint32_t(std::max(0, nw));
-          pending_h = uint32_t(std::max(0, nh));
-        } else if (e.type == SDL_EVENT_KEY_DOWN &&
-                   e.key.scancode == SDL_SCANCODE_ESCAPE) {
-          running = false;
-        } else if (e.type == SDL_EVENT_MOUSE_MOTION &&
-                   (e.motion.state & SDL_BUTTON_RMASK)) {
-          constexpr float kLookRate = 0.0035f;
-          cam.Turn(-e.motion.xrel * kLookRate, -e.motion.yrel * kLookRate);
-        }
+    rhi_app::AppShellCallbacks cb;
+    cb.OnEvent = [&](const SDL_Event& e) {
+      if (e.type == SDL_EVENT_MOUSE_MOTION && (e.motion.state & SDL_BUTTON_RMASK)) {
+        constexpr float kLookRate = 0.0035f;
+        cam.Turn(-e.motion.xrel * kLookRate, -e.motion.yrel * kLookRate);
+        return true;
       }
+      return false;
+    };
+    cb.OnUpdate = [&](const rhi_app::FrameInfo& f) {
+      const float boost = f.keys[SDL_SCANCODE_LSHIFT] ? 4.0f : 1.0f;
+      const float step = cam.speed * boost * std::min(f.dt, 0.1f);
+      if (f.keys[SDL_SCANCODE_W]) cam.position += cam.Forward() * step;
+      if (f.keys[SDL_SCANCODE_S]) cam.position -= cam.Forward() * step;
+      if (f.keys[SDL_SCANCODE_D]) cam.position += cam.Right() * step;
+      if (f.keys[SDL_SCANCODE_A]) cam.position -= cam.Right() * step;
+      if (f.keys[SDL_SCANCODE_E]) cam.position.y += step;
+      if (f.keys[SDL_SCANCODE_Q]) cam.position.y -= step;
 
-      const uint64_t now = SDL_GetPerformanceCounter();
-      const float dt = float(double(now - last_ticks) / tick_freq);
-      last_ticks = now;
-
-      const bool* keys = SDL_GetKeyboardState(nullptr);
-      const float boost = keys[SDL_SCANCODE_LSHIFT] ? 4.0f : 1.0f;
-      const float step = cam.speed * boost * std::min(dt, 0.1f);
-      if (keys[SDL_SCANCODE_W]) cam.position += cam.Forward() * step;
-      if (keys[SDL_SCANCODE_S]) cam.position -= cam.Forward() * step;
-      if (keys[SDL_SCANCODE_D]) cam.position += cam.Right() * step;
-      if (keys[SDL_SCANCODE_A]) cam.position -= cam.Right() * step;
-      if (keys[SDL_SCANCODE_E]) cam.position.y += step;
-      if (keys[SDL_SCANCODE_Q]) cam.position.y -= step;
-
-      // Scripted resize, partway through a self-test run. Requested through
-      // the SAME pending-size path a real event uses, so the test exercises
-      // the coalescing rather than bypassing it.
-      if (opt.self_test_frames > 0) {
-        if (frame_no == opt.self_test_frames / 2) {
-          // Only the request. The new PIXEL size arrives as an event, through
-          // the same coalescing path a user drag uses -- which is the thing
-          // worth testing.
-          SDL_SetWindowSize(window, test_point_w, test_point_h);
-        }
-        if (frame_no >= opt.self_test_frames) running = false;
+      // Scripted resize, partway through a self-test run. Requested through the
+      // SAME window-manager path a user drag uses, so the test exercises the
+      // coalescing rather than bypassing it.
+      if (opt.self_test_frames > 0 &&
+          f.index == uint64_t(opt.self_test_frames / 2)) {
+        shell->RequestResizePoints(uint32_t(test_point_w),
+                                   uint32_t(test_point_h));
       }
-      ++frame_no;
+    };
+    cb.OnFrameBegin = [&](uint64_t frame_index) {
+      // Recycles this frame's slot. Safe without a check: the shell's
+      // BeginFrame already blocked until the frame that owned it retired.
+      frame_alloc->BeginFrame(frame_index);
+    };
+    cb.OnResize = [&](uint32_t w, uint32_t h) {
+      if (!MakeTargets(*device, w, h, targets)) return false;
+      // The resolve table is immutable and holds the OLD visbuffer and depth
+      // views, so it has to be rebuilt too.
+      return rebuild_resolve();
+    };
+    cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo& f) {
+      if (!update_frame_uniforms(f.width, f.height)) return false;
+      record_frame(target, f.width, f.height, /*want_readback=*/false);
+      frame_offsets_seen.insert(frame_offset);
+      if (f.width != initial_pixel_w) ++rendered_after_resize;
+      return true;
+    };
 
-      // Paced HERE, at the top of the frame, not at Acquire.
-      device->BeginFrame();
-      // Recycles this frame's slot. Safe without a check: BeginFrame above
-      // already blocked until the frame that previously owned it retired.
-      frame_alloc->BeginFrame(device->CurrentFrame());
+    const auto stats = shell->Run(cb, opt.self_test_frames);
 
-      // RESIZE RULE 1: applied at exactly one point, after the pacing wait and
-      // before any acquire or encoding. Nothing is recreated mid-frame.
-      //
-      // Gated on what was last applied TO THE SWAPCHAIN, not on the targets:
-      // the targets are deliberately not rebuilt at zero size, so gating on
-      // them meant a minimize-then-restore-to-the-same-size never told the
-      // swapchain to come back from 0x0.
-      bool fatal = false;
-      if (const auto action = surface.Update(pending_w, pending_h);
-          action.resize_swapchain) {
-        swapchain->Resize(pending_w, pending_h);
-        if (action.rebuild_targets) {
-          if (!MakeTargets(*device, pending_w, pending_h, targets)) fatal = true;
-          // The resolve table is immutable and holds the OLD visbuffer and
-          // depth views, so it has to be rebuilt too.
-          else if (!rebuild_resolve()) fatal = true;
-        }
-      }
-
-      // RESIZE RULE 2: the size is captured once and used for everything --
-      // viewport, uniforms, swapchain. Re-reading it mid-frame is what makes
-      // half a frame use each size.
-      const uint32_t fw = targets.width, fh = targets.height;
-
-      auto frame = fatal ? AcquiredFrame{} : swapchain->Acquire();
-      if (frame.status == AcquireStatus::Ok && update_frame_uniforms(fw, fh)) {
-        record_frame(frame.view, fw, fh, /*want_readback=*/false);
-        swapchain->Present();
-        ++rendered;
-        frame_offsets_seen.insert(frame_offset);
-        if (opt.self_test_frames > 0 && fw != initial_pixel_w) {
-          ++rendered_after_resize;
-        }
-      } else if (frame.status == AcquireStatus::Lost) {
-        spdlog::warn("rhi_lab: surface lost, recreating");
-        swapchain->Resize(0, 0);
-        swapchain->Resize(fw, fh);
-      }
-      // Skip needs no handling at all: EndFrame retires a frame that submitted
-      // nothing, which is what keeps a minimized window from exhausting the
-      // pacing budget.
-      device->EndFrame();
-
-      // Leaving the loop here rather than at the failure itself. A `break`
-      // between BeginFrame and EndFrame takes a semaphore count that is never
-      // returned, and the destructor then trips libdispatch's
-      // "deallocated while in use" trap -- a crash that points nowhere near
-      // the allocation failure that caused it.
-      if (fatal) {
-        spdlog::error("rhi_lab: could not rebuild for {}x{}, stopping",
-                      pending_w, pending_h);
-        break;
-      }
+    // Checked BEFORE anything else, and outside the self-test: the shell sets
+    // this when a target rebuild failed, and the self-test's own size checks
+    // cannot see it -- MakeTargets assigns the requested width before it tries
+    // to create anything, so after a failure targets.width still equals the
+    // size that was asked for and the comparison passes against itself.
+    if (stats.aborted) {
+      spdlog::error("rhi_lab: the render loop aborted");
+      return 1;
     }
-
-    device->WaitIdle();
-    int final_pw = 0, final_ph = 0;
-    SDL_GetWindowSizeInPixels(window, &final_pw, &final_ph);
-    SDL_Metal_DestroyView(metal_view);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
 
     if (opt.self_test_frames > 0) {
       // Exit status IS the assertion: this runs as a ctest with no test
       // framework around it.
-      if (rendered == 0) {
+      if (stats.frames_presented == 0) {
         spdlog::error("rhi_lab self-test: no frame ever rendered");
         return 1;
       }
-      if (uint32_t(final_pw) == initial_pixel_w) {
+      if (stats.final_width == initial_pixel_w) {
         spdlog::error(
             "rhi_lab self-test: the window never actually resized (still {} "
             "pixels wide) -- the test proved nothing",
-            final_pw);
+            stats.final_width);
         return 1;
       }
       // The invariant: everything sized to the frame follows the reported
       // PIXEL size, whatever the backing scale turns the request into.
-      if (targets.width != uint32_t(final_pw) ||
-          targets.height != uint32_t(final_ph)) {
+      if (targets.width != stats.final_width ||
+          targets.height != stats.final_height) {
         spdlog::error("rhi_lab self-test: targets are {}x{}, window is {}x{}",
-                      targets.width, targets.height, final_pw, final_ph);
+                      targets.width, targets.height, stats.final_width,
+                      stats.final_height);
         return 1;
       }
-      if (swapchain->GetWidth() != uint32_t(final_pw) ||
-          swapchain->GetHeight() != uint32_t(final_ph)) {
+      if (shell->Swapchain()->GetWidth() != stats.final_width ||
+          shell->Swapchain()->GetHeight() != stats.final_height) {
         spdlog::error("rhi_lab self-test: swapchain is {}x{}, window is {}x{}",
-                      swapchain->GetWidth(), swapchain->GetHeight(), final_pw,
-                      final_ph);
+                      shell->Swapchain()->GetWidth(),
+                      shell->Swapchain()->GetHeight(), stats.final_width,
+                      stats.final_height);
         return 1;
       }
       if (rendered_after_resize == 0) {
@@ -1095,14 +990,15 @@ int main(int argc, char** argv) {
             "rhi_lab self-test: only {} distinct uniform slice(s) across {} "
             "frames with {} in flight -- the ring is not rotating and frame "
             "N is overwriting what N-1 is still reading",
-            frame_offsets_seen.size(), rendered, device->FramesInFlight());
+            frame_offsets_seen.size(), stats.frames_presented,
+            device->FramesInFlight());
         return 1;
       }
       spdlog::info(
           "rhi_lab self-test OK: {} frames, {} after resizing {} -> {} pixels "
           "wide, {} distinct uniform slices",
-          rendered, rendered_after_resize, initial_pixel_w, final_pw,
-          frame_offsets_seen.size());
+          stats.frames_presented, rendered_after_resize, initial_pixel_w,
+          stats.final_width, frame_offsets_seen.size());
     }
     return 0;
   }

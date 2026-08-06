@@ -1419,6 +1419,104 @@ inline void CheckDrawWithoutPipelineIsRefused(IRhiDevice& device) {
   }
 }
 
+// Blend states must line up one-to-one with the colour attachments, or the
+// pipeline must not exist.
+//
+// Creation-time, so it holds in release builds too (rule 13), and shared so
+// the backends cannot disagree about which pipelines are constructible. Null
+// runs no shaders and has no opinion on blending -- it makes this check anyway,
+// because "what can exist" is the contract, not "what draws correctly".
+inline void CheckMismatchedBlendStateCountIsRefused(IRhiDevice& device) {
+  auto module = device.CreateShaderModule(
+      MinimalGraphicsSource(device.GetBackend()), ShaderReflection{},
+      "blend_counts");
+  REQUIRE(module);
+
+  RenderPipelinePtr pipe;
+  const std::string log = CaptureLog([&] {
+    pipe = device.CreateRenderPipeline(
+        {.vertex_shader = module.get(), .vertex_entry = "vs_main",
+         .fragment_shader = module.get(), .fragment_entry = "fs_main",
+         .color_formats = {Format::RGBA8Unorm},
+         // Two states, one attachment.
+         .blend_states = {AlphaBlend(), AlphaBlend()},
+         .label = "too_many_blend_states"});
+  });
+  INFO(log);
+  CHECK(pipe == nullptr);
+  CHECK(log.find("too_many_blend_states") != std::string::npos);
+  CHECK(log.find("2 blend state(s) for 1 colour attachment(s)") !=
+        std::string::npos);
+}
+
+// Empty blend_states is the opaque default and must stay legal, since every
+// existing call site relies on it.
+inline void CheckOpaquePipelineNeedsNoBlendState(IRhiDevice& device) {
+  auto module = device.CreateShaderModule(
+      MinimalGraphicsSource(device.GetBackend()), ShaderReflection{},
+      "blend_opaque");
+  REQUIRE(module);
+  const std::string log = CaptureLog([&] {
+    auto pipe = device.CreateRenderPipeline(
+        {.vertex_shader = module.get(), .vertex_entry = "vs_main",
+         .fragment_shader = module.get(), .fragment_entry = "fs_main",
+         .color_formats = {Format::RGBA8Unorm},
+         .label = "opaque"});
+    CHECK(pipe != nullptr);
+    // The desc round-trips, so a caller can tell opaque from "blending I
+    // forgot to read back".
+    if (pipe) CHECK(pipe->GetDesc().blend_states.empty());
+  });
+  INFO(log);
+  CHECK(log.empty());
+}
+
+// Indirect arguments that do not fit their buffer.
+//
+// Unvalidated, because this is a BACKEND precondition rather than validation:
+// the GPU reads these bytes itself, so an offset past the end is a read of
+// whatever follows the buffer, and the decorator that would catch it compiles
+// out of a shipping build.
+//
+// Both backends, because this is precisely where they came apart: Null has to
+// resolve the counts on the CPU so it was forced to check, while Metal encoded
+// the call unchecked. The Null suite stayed green while Metal faulted.
+inline void CheckOutOfRangeIndirectArgsAreRefused(IRhiDevice& device) {
+  REQUIRE_FALSE(device.IsValidationEnabled());
+  ResetLog(device);
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+
+  // 20-byte draw args and 12-byte dispatch args; neither fits at offset 56 of a
+  // 64-byte buffer.
+  auto args = device.CreateBuffer(
+      {.size = 64,
+       .usage = BufferUsage::Indirect | BufferUsage::Storage |
+                BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "short_args"});
+  REQUIRE(args);
+
+  const std::string log = CaptureLog([&] {
+    auto encoder = device.CreateCommandEncoder("oob");
+    auto* pass = encoder->BeginComputePass("cs");
+    pass->SetPipeline(pipe.get());
+    pass->DispatchIndirect(args.get(), 56);
+    pass->End();
+    encoder->Finish();
+    device.Submit(*encoder);
+    device.WaitIdle();
+  });
+  INFO(log);
+  CHECK(log.find("short_args") != std::string::npos);
+  CHECK(log.find("past the end") != std::string::npos);
+
+  // Rule 3: refused means it did not happen.
+  if (auto* l = badlands::rhi::null::GetCommandLog(device)) {
+    CHECK(l->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       DispatchIndirect) == 0);
+  }
+}
+
 // The optional capability query.
 //
 // Untested on both Null and the decorator until now, which is worse than the
@@ -2147,6 +2245,7 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckDispatchIndirectReadsItsCount(device);
   CheckZeroIndirectDispatchIsAllowed(device);
   CheckFeatureQueryAnswers(device);
+  CheckOpaquePipelineNeedsNoBlendState(device);
   CheckSwapchainAcquirePresentCycle(device);
   CheckSwapchainSkipsWhenZeroSized(device);
   CheckSwapchainResize(device);

@@ -504,14 +504,13 @@ class NullRenderPass final : public IRenderPass {
       return;
     }
     DrawIndexedIndirectArgs resolved{};
-    std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
-                           sizeof(resolved));
-    if (!nb->Read(offset, dst)) {
-      spdlog::error(
-          "rhi/null: DrawIndexedIndirect cannot read {} bytes at offset {} of "
-          "buffer '{}'", sizeof(resolved), offset, nb->GetLabel());
+    if (!IndirectArgsInBounds(nb, offset, sizeof(resolved),
+                              "rhi/null: DrawIndexedIndirect")) {
       return;
     }
+    std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
+                           sizeof(resolved));
+    if (!nb->Read(offset, dst)) return;  // Read logged why
     RecordedCommand c{.kind = RecordedCommand::Kind::DrawIndexedIndirect,
                       .label = label_, .object = args};
     c.draw_args = resolved;
@@ -582,14 +581,13 @@ class NullComputePass final : public IComputePass {
       return;
     }
     DispatchIndirectArgs resolved{};
-    std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
-                           sizeof(resolved));
-    if (!nb->Read(offset, dst)) {
-      spdlog::error(
-          "rhi/null: DispatchIndirect cannot read {} bytes at offset {} of "
-          "buffer '{}'", sizeof(resolved), offset, nb->GetLabel());
+    if (!IndirectArgsInBounds(nb, offset, sizeof(resolved),
+                              "rhi/null: DispatchIndirect")) {
       return;
     }
+    std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
+                           sizeof(resolved));
+    if (!nb->Read(offset, dst)) return;  // Read logged why
     RecordedCommand c{.kind = RecordedCommand::Kind::DispatchIndirect,
                       .label = label_, .object = args};
     c.dispatch[0] = resolved.x;
@@ -732,6 +730,11 @@ class NullDevice final : public IRhiDevice {
   }
   RenderPipelinePtr CreateRenderPipeline(
       const RenderPipelineDesc& d) override {
+    // The SAME shared check Metal makes. Null runs no shaders and could not
+    // care less what the blend states say -- but "which pipelines can exist"
+    // is a contract, and a backend that accepts what another refuses is the
+    // divergence rule 6 exists to stop.
+    if (!ValidateBlendStates(d)) return nullptr;  // logged there
     return std::make_shared<NullRenderPipeline>(d);
   }
   ComputePipelinePtr CreateComputePipeline(

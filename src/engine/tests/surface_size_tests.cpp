@@ -9,9 +9,9 @@
 
 #include <catch_amalgamated.hpp>
 
-#include "src/executables/rhi_lab/surface_size.hpp"
+#include "engine/app/surface_size.hpp"
 
-using badlands::rhi_lab::SurfaceSizeTracker;
+using badlands::rhi_app::SurfaceSizeTracker;
 
 TEST_CASE("surface size: no change asks for nothing", "[rhi_lab]") {
   SurfaceSizeTracker t{800, 600};
