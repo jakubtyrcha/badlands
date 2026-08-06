@@ -57,44 +57,104 @@ const ReflectedUniformBlock* ShaderReflection::FindUniformBlock(
   return it == uniform_blocks.end() ? nullptr : &*it;
 }
 
-std::vector<std::shared_ptr<IResource>> RetainBindingResources(
-    const std::vector<BindingEntry>& entries, std::string_view owner_label) {
-  std::vector<std::shared_ptr<IResource>> retained;
-  retained.reserve(entries.size());
-  for (size_t i = 0; i < entries.size(); ++i) {
-    const BindingEntry& e = entries[i];
-    IResource* r = nullptr;
-    if (e.buffer) {
-      r = e.buffer;
-    } else if (e.texture_view) {
-      r = e.texture_view->GetTexture();  // retain the owner, not the view
-      if (!r) {
-        spdlog::error(
-            "rhi: binding table '{}' entry {} (slot {}): view '{}' has no "
-            "owning texture, so it cannot be retained -- it will dangle if the "
-            "caller drops its handle",
-            owner_label, i, e.slot, e.texture_view->GetLabel());
-        continue;
-      }
-    } else if (e.sampler) {
-      r = e.sampler;
-    }
-    // A null entry is the caller's business (SetBindingTable reports it); an
-    // entry that exists but cannot be retained is ours.
-    if (!r) continue;
+namespace {
 
-    auto owned = r->Share();
+// The resource an entry's ownership hangs off. A texture VIEW is owned by its
+// texture rather than by a shared_ptr, so the TEXTURE is what gets retained --
+// keeping the owner alive keeps the view alive, which is the whole point.
+IResource* OwnerOf(const BindingEntry& e) {
+  if (e.buffer) return e.buffer;
+  if (e.texture_view) return e.texture_view->GetTexture();
+  return e.sampler;
+}
+
+const ShaderReflection* ReflectionOf(const BindingTableDesc& d) {
+  if (d.render_pipeline) return &d.render_pipeline->GetReflection();
+  if (d.compute_pipeline) return &d.compute_pipeline->GetReflection();
+  return nullptr;
+}
+
+}  // namespace
+
+std::optional<ResolvedBindingTable> ResolveBindingTable(
+    const BindingTableDesc& d) {
+  const ShaderReflection* refl = ReflectionOf(d);
+  if (!refl) {
+    spdlog::error(
+        "rhi: binding table '{}' has no pipeline, so its slots cannot be "
+        "resolved against anything", d.label);
+    return std::nullopt;
+  }
+
+  ResolvedBindingTable out;
+  out.entries = d.entries;
+  out.indices.reserve(d.entries.size());
+  out.retained.reserve(d.entries.size());
+
+  for (size_t i = 0; i < d.entries.size(); ++i) {
+    const BindingEntry& e = d.entries[i];
+
+    // --- Resolve. Guessing an index is not an option: Slang numbers bindings
+    // per category, so a constant buffer, a texture and a sampler can all
+    // report index 0, and the slot number lands on whichever the shader
+    // happens to declare there.
+    const ReflectedBinding* b = nullptr;
+    for (const auto& cand : refl->bindings) {
+      if (cand.group == d.group && cand.slot == e.slot) { b = &cand; break; }
+    }
+    if (!b) {
+      spdlog::error(
+          "rhi: binding table '{}' entry {}: group {} slot {} is absent from "
+          "the pipeline's reflection, so it has no target index",
+          d.label, i, d.group, e.slot);
+      return std::nullopt;
+    }
+    if (b->kind != e.kind) {
+      spdlog::error(
+          "rhi: binding table '{}' entry {}: slot {} ('{}') is bound as kind "
+          "{} but the shader declares kind {}",
+          d.label, i, e.slot, b->name, int(e.kind), int(b->kind));
+      return std::nullopt;
+    }
+
+    // --- Retain. An entry that cannot be retained would dangle the moment the
+    // caller drops its handle, which rhi_types.hpp explicitly invites it to do.
+    IResource* owner = OwnerOf(e);
+    if (!owner) {
+      // Distinguish "you bound nothing" from "you bound a view whose texture
+      // is gone" -- the second reads as a caller bug against the first's
+      // message and wastes the reader's time.
+      if (e.texture_view) {
+        spdlog::error(
+            "rhi: binding table '{}' entry {}: slot {} view '{}' has no owning "
+            "texture, so nothing can keep it alive",
+            d.label, i, e.slot, e.texture_view->GetLabel());
+      } else {
+        spdlog::error(
+            "rhi: binding table '{}' entry {}: slot {} has no resource",
+            d.label, i, e.slot);
+      }
+      return std::nullopt;
+    }
+    if (owner->IsDestroyed()) {
+      spdlog::error(
+          "rhi: binding table '{}' entry {}: slot {} references destroyed "
+          "resource '{}'", d.label, i, e.slot, owner->GetLabel());
+      return std::nullopt;
+    }
+    auto owned = owner->Share();
     if (!owned) {
       spdlog::error(
-          "rhi: binding table '{}' entry {} (slot {}): resource '{}' is not "
-          "shared_ptr-owned, so the table cannot retain it -- it will dangle "
-          "if the caller drops its handle",
-          owner_label, i, e.slot, r->GetLabel());
-      continue;
+          "rhi: binding table '{}' entry {}: slot {} resource '{}' is not "
+          "shared_ptr-owned, so the table cannot retain it",
+          d.label, i, e.slot, owner->GetLabel());
+      return std::nullopt;
     }
-    retained.push_back(std::move(owned));
+
+    out.indices.push_back(b->location.index);
+    out.retained.push_back(std::move(owned));
   }
-  return retained;
+  return out;
 }
 
 std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
@@ -122,16 +182,20 @@ std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
   if (r.mip_count == 0) r.mip_count = mips - r.base_mip;
   if (r.layer_count == 0) r.layer_count = layers - r.base_layer;
 
-  if (r.base_mip + r.mip_count > mips) {
+  // Subtraction, not addition. `base + count` is uint32 arithmetic and wraps,
+  // so a count of 0xFFFFFFFF sums to something small and passes the very check
+  // it has to fail. The bases are already known in range, so the subtractions
+  // cannot underflow.
+  if (r.mip_count > mips - r.base_mip) {
     spdlog::error(
-        "rhi: CreateView on '{}': mips [{}, {}) exceed the texture's {}",
-        texture_label, r.base_mip, r.base_mip + r.mip_count, mips);
+        "rhi: CreateView on '{}': {} mips from {} exceed the texture's {}",
+        texture_label, r.mip_count, r.base_mip, mips);
     return std::nullopt;
   }
-  if (r.base_layer + r.layer_count > layers) {
+  if (r.layer_count > layers - r.base_layer) {
     spdlog::error(
-        "rhi: CreateView on '{}': layers [{}, {}) exceed the texture's {}",
-        texture_label, r.base_layer, r.base_layer + r.layer_count, layers);
+        "rhi: CreateView on '{}': {} layers from {} exceed the texture's {}",
+        texture_label, r.layer_count, r.base_layer, layers);
     return std::nullopt;
   }
   return r;

@@ -20,38 +20,6 @@ std::unique_ptr<IRhiDevice> MakeNull() {
   return CreateDevice({.backend = BackendKind::Null, .label = "null_tests"});
 }
 
-// Resources the public API cannot produce, so that the paths guarding against
-// them are reachable. CreateBuffer always returns a shared_ptr and every view
-// has an owning texture -- which is exactly why the refusals below were
-// untestable until something stood in for a backend that breaks the rule.
-class UnownedBuffer final : public IBuffer {
- public:
-  void Destroy() override {}
-  bool IsDestroyed() const override { return false; }
-  const std::string& GetLabel() const override { return label_; }
-  uint64_t GetSize() const override { return 64; }
-  BufferUsage GetUsage() const override { return BufferUsage::Uniform; }
-  void Write(uint64_t, std::span<const uint8_t>) override {}
-  bool Read(uint64_t, std::span<uint8_t>) override { return false; }
-
- private:
-  std::string label_ = "unowned_buffer";
-};
-
-class OwnerlessView final : public ITextureView {
- public:
-  void Destroy() override {}
-  bool IsDestroyed() const override { return false; }
-  const std::string& GetLabel() const override { return label_; }
-  ITexture* GetTexture() const override { return nullptr; }
-  Format GetFormat() const override { return Format::RGBA8Unorm; }
-  const TextureViewDesc& GetDesc() const override { return desc_; }
-
- private:
-  std::string label_ = "ownerless_view";
-  TextureViewDesc desc_;
-};
-
 }  // namespace
 
 TEST_CASE("Null device is created through the common factory", "[rhi]") {
@@ -86,58 +54,35 @@ TEST_CASE("Null: textures and views", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckTextureCreationAndViews(*d);
 }
-TEST_CASE("rhi: an entry that cannot be retained is refused loudly", "[rhi]") {
-  // RetainBindingResources exists to stop a binding table outliving the
-  // resources it references. Skipping an entry it cannot retain reintroduces
-  // that exact use-after-free -- and the caller has already been told it may
-  // drop its handle, so silence here is the worst possible answer.
-  UnownedBuffer buf;
-  OwnerlessView view;
-  std::vector<BindingEntry> entries = {
-      {.slot = 0, .kind = BindingKind::UniformBuffer, .buffer = &buf},
-      {.slot = 1, .kind = BindingKind::SampledTexture, .texture_view = &view},
-  };
-
-  std::vector<std::shared_ptr<IResource>> retained;
-  const std::string log = rhitest::CaptureLog(
-      [&] { retained = RetainBindingResources(entries, "fake_table"); });
-
-  INFO(log);
-  CHECK(retained.empty());
-  CHECK(log.find("not shared_ptr-owned") != std::string::npos);
-  CHECK(log.find("no owning texture") != std::string::npos);
-  // Names the table and the slot, or the message cannot be acted on.
-  CHECK(log.find("fake_table") != std::string::npos);
-  CHECK(log.find("slot 0") != std::string::npos);
-  CHECK(log.find("slot 1") != std::string::npos);
+// Creation-time refusals. Shared with the Metal suite so the two backends
+// cannot disagree about which tables and views are constructible (rule 6).
+TEST_CASE("Null: an unretainable entry is refused at creation", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckUnretainableEntryIsRefused(*d);
 }
-
-TEST_CASE("rhi: a retainable entry is retained silently", "[rhi]") {
-  // The paired green. Without it the case above would pass just as well
-  // against a version that refuses everything.
-  auto device = MakeNull();
-  auto ubo = device->CreateBuffer(
-      {.size = 64, .usage = BufferUsage::Uniform, .label = "real_ubo"});
-  auto tex = device->CreateTexture({.width = 4, .height = 4,
-                                    .format = Format::RGBA8Unorm,
-                                    .usage = TextureUsage::Sampled,
-                                    .label = "real_tex"});
-  std::vector<BindingEntry> entries = {
-      {.slot = 0, .kind = BindingKind::UniformBuffer, .buffer = ubo.get()},
-      {.slot = 1, .kind = BindingKind::SampledTexture,
-       .texture_view = tex->GetDefaultView()},
-  };
-
-  std::vector<std::shared_ptr<IResource>> retained;
-  const std::string log = rhitest::CaptureLog(
-      [&] { retained = RetainBindingResources(entries, "real_table"); });
-
-  INFO(log);
-  CHECK(retained.size() == 2);
-  CHECK(log.empty());
-  // The view's OWNER is what gets retained -- keeping the texture alive keeps
-  // the view alive, which is the point.
-  CHECK(retained[1].get() == static_cast<IResource*>(tex.get()));
+TEST_CASE("Null: a view with no owning texture is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckOwnerlessViewIsRefused(*d);
+}
+TEST_CASE("Null: an unresolvable slot is refused at creation", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckUnresolvableSlotIsRefused(*d);
+}
+TEST_CASE("Null: a mismatched binding kind is refused at creation", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckMismatchedKindIsRefused(*d);
+}
+TEST_CASE("Null: a table with no pipeline is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckTableWithNoPipelineIsRefused(*d);
+}
+TEST_CASE("Null: a resolvable table is created silently", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckResolvableTableIsCreatedSilently(*d);
+}
+TEST_CASE("Null: CreateView after Destroy is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckCreateViewAfterDestroyIsRefused(*d);
 }
 
 TEST_CASE("Null: sliced views honour their range", "[rhi]") {

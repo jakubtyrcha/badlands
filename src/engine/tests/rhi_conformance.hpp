@@ -275,6 +275,217 @@ inline void CheckViewsSurviveTextureDestroy(IRhiDevice& device) {
   CHECK(view->GetFormat() == Format::RGBA8Unorm);
 }
 
+// --- Creation-time refusals -------------------------------------------------
+//
+// These deliberately provoke errors, so they are NOT part of
+// RunAllConformanceChecks -- that aggregate runs inside a validation scope and
+// asserts it stays clean. Each suite calls them as its own TEST_CASE instead,
+// which still gets them run against every backend (rule 6).
+
+// Resources the public API cannot produce, so that the paths guarding against
+// them are reachable. CreateBuffer always returns a shared_ptr and every view
+// has an owning texture -- which is exactly why these refusals were untestable
+// until something stood in for a backend that breaks the rule.
+class UnownedBuffer final : public IBuffer {
+ public:
+  void Destroy() override {}
+  bool IsDestroyed() const override { return false; }
+  const std::string& GetLabel() const override { return label_; }
+  uint64_t GetSize() const override { return 64; }
+  BufferUsage GetUsage() const override { return BufferUsage::Uniform; }
+  void Write(uint64_t, std::span<const uint8_t>) override {}
+  bool Read(uint64_t, std::span<uint8_t>) override { return false; }
+
+ private:
+  std::string label_ = "unowned_buffer";
+};
+
+class OwnerlessView final : public ITextureView {
+ public:
+  void Destroy() override {}
+  bool IsDestroyed() const override { return false; }
+  const std::string& GetLabel() const override { return label_; }
+  ITexture* GetTexture() const override { return nullptr; }
+  Format GetFormat() const override { return Format::RGBA8Unorm; }
+  const TextureViewDesc& GetDesc() const override { return desc_; }
+
+ private:
+  std::string label_ = "ownerless_view";
+  TextureViewDesc desc_;
+};
+
+inline ComputePipelinePtr MakeTestPipeline(IRhiDevice& d) {
+  auto module = d.CreateShaderModule(MinimalComputeSource(d.GetBackend()),
+                                     MakeTestReflection(), "resolve_tests");
+  return d.CreateComputePipeline({.shader = module.get(), .entry = "cs_main"});
+}
+
+// A table that cannot keep its resources alive must not EXIST. Building it and
+// logging is still a use-after-free waiting to happen: rhi_types.hpp tells the
+// caller it may drop its handle immediately, and a log line does not stop it.
+inline void CheckUnretainableEntryIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  UnownedBuffer buf;
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = &buf}},
+         .label = "unretainable"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("not shared_ptr-owned") != std::string::npos);
+  // Names the table and the slot, or the message cannot be acted on.
+  CHECK(log.find("unretainable") != std::string::npos);
+  CHECK(log.find("slot 0") != std::string::npos);
+}
+
+inline void CheckOwnerlessViewIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  OwnerlessView view;
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 2, .kind = BindingKind::SampledTexture,
+                      .texture_view = &view}},
+         .label = "ownerless"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("no owning texture") != std::string::npos);
+}
+
+// Resolution happens once, at creation, so the record path cannot meet an
+// unresolvable slot at all -- there is no later point where a backend has to
+// choose between guessing an index and dropping the binding.
+inline void CheckUnresolvableSlotIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 64, .usage = BufferUsage::Uniform, .label = "ubo"});
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 9, .kind = BindingKind::UniformBuffer,
+                      .buffer = ubo.get()}},
+         .label = "absent"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("slot 9") != std::string::npos);
+  CHECK(log.find("absent from the pipeline's reflection") != std::string::npos);
+}
+
+inline void CheckMismatchedKindIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 64, .usage = BufferUsage::Uniform, .label = "ubo"});
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    // Slot 0 is a UniformBuffer in reflection.
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 0, .kind = BindingKind::StorageBuffer,
+                      .buffer = ubo.get()}},
+         .label = "wrongkind"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("kind") != std::string::npos);
+}
+
+inline void CheckTableWithNoPipelineIsRefused(IRhiDevice& device) {
+  auto ubo = device.CreateBuffer({.size = 64, .usage = BufferUsage::Uniform});
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = ubo.get()}},
+         .label = "pipelineless"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("no pipeline") != std::string::npos);
+}
+
+// The paired green for every refusal above. Without it they would all pass
+// just as well against a resolver that refuses everything.
+//
+// Binds all four declared slots, not a convenient subset: a partial table is
+// itself a reported problem on a validated device, which would make "log is
+// empty" fail for a reason that has nothing to do with resolution.
+inline void CheckResolvableTableIsCreatedSilently(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 64, .usage = BufferUsage::Uniform, .label = "real_ubo"});
+  auto ssbo = device.CreateBuffer(
+      {.size = 64, .usage = BufferUsage::Storage, .label = "real_ssbo"});
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled,
+                                   .label = "real_tex"});
+  auto samp = device.CreateSampler({.label = "real_samp"});
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = ubo.get()},
+                     {.slot = 1, .kind = BindingKind::StorageBuffer,
+                      .buffer = ssbo.get()},
+                     {.slot = 2, .kind = BindingKind::SampledTexture,
+                      .texture_view = tex->GetDefaultView()},
+                     {.slot = 3, .kind = BindingKind::Sampler,
+                      .sampler = samp.get()}},
+         .label = "good"});
+  });
+  INFO(log);
+  CHECK(table != nullptr);
+  CHECK(log.empty());
+}
+
+// Destroy() keeps the view OBJECTS alive (callers hold them as raw borrowed
+// pointers), so the cache outlives the GPU handle. A cache hit must not slip
+// past the destroyed check -- populating the cache FIRST is the whole point of
+// this case, and without it the bug hides.
+inline void CheckCreateViewAfterDestroyIsRefused(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 8, .height = 8,
+                                   .array_layers = 2,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled,
+                                   .label = "dead_tex"});
+  REQUIRE(tex);
+  ITextureView* before = tex->GetDefaultView();  // populates the cache
+  REQUIRE(before != nullptr);
+
+  tex->Destroy();
+
+  const std::string log = CaptureLog([&] {
+    CHECK(tex->GetDefaultView() == nullptr);          // the CACHED range
+    CHECK(tex->CreateView({.base_layer = 1}) == nullptr);  // an uncached one
+  });
+  INFO(log);
+  CHECK(log.find("destroyed texture") != std::string::npos);
+
+  // The view handed out before Destroy still exists and reports destroyed --
+  // that contract is unchanged.
+  CHECK(before->IsDestroyed());
+}
+
 // A binding table matching MakeTestReflection exactly, plus the resources it
 // references and the transitions SetBindingTable will expect. Several tests
 // need "a table that is entirely correct" as a starting point, so that a
@@ -419,6 +630,15 @@ inline void CheckOutOfRangeViewsAreRefused(IRhiDevice& device) {
   CHECK(tex->CreateView({.base_mip = 5}) == nullptr);
   CHECK(tex->CreateView({.base_layer = 1, .layer_count = 4}) == nullptr);
   CHECK(tex->CreateView({.base_mip = 1, .mip_count = 3}) == nullptr);
+
+  // Counts near UINT32_MAX -- what a caller lands on when a count is computed
+  // by an underflowing subtraction. `base + count` is uint32 arithmetic and
+  // WRAPS, so a naive check sums to something small and passes the very test
+  // it has to fail.
+  constexpr uint32_t kMax = 0xFFFFFFFFu;
+  CHECK(tex->CreateView({.base_mip = 1, .mip_count = kMax}) == nullptr);
+  CHECK(tex->CreateView({.base_layer = 1, .layer_count = kMax}) == nullptr);
+  CHECK(tex->CreateView({.base_mip = 0, .mip_count = kMax}) == nullptr);
   // The in-range case still works, so the checks are not just refusing
   // everything.
   CHECK(tex->CreateView({.base_layer = 1, .layer_count = 1}) != nullptr);

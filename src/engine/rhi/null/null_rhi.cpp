@@ -5,6 +5,8 @@
 #include <map>
 #include <tuple>
 
+#include <spdlog/spdlog.h>
+
 namespace badlands::rhi::null {
 namespace {
 
@@ -84,6 +86,14 @@ class NullTexture final : public ITexture, public NullResource {
   // Same resolution, same refusals, same cache key as Metal -- the two must
   // not disagree about what a view descriptor means (rule 6).
   ITextureView* CreateView(const TextureViewDesc& vd) override {
+    // Before the cache lookup, and before resolution -- same order as Metal.
+    // Null has no GPU handle to go nil, so without this check the two backends
+    // answered differently for a destroyed texture and only Metal refused.
+    if (IsDestroyed()) {
+      spdlog::error("rhi/null: CreateView on destroyed texture '{}'",
+                    GetLabel());
+      return nullptr;
+    }
     const auto r = ResolveViewDesc(vd, desc_, GetLabel());
     if (!r) return nullptr;  // ResolveViewDesc logged why
     const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count};
@@ -132,18 +142,20 @@ class NullSampler final : public ISampler, public NullResource {
   SamplerDesc desc_;
 };
 
+// Built only from an already-resolved table, exactly as Metal is: the shared
+// resolver is what stops the two backends disagreeing about which tables are
+// constructible (rule 6).
 class NullBindingTable final : public IBindingTable, public NullResource {
  public:
-  explicit NullBindingTable(const BindingTableDesc& d)
-      : NullResource(d.label), group_(d.group), entries_(d.entries),
-        retained_(RetainBindingResources(d.entries, d.label)) {}
+  NullBindingTable(ResolvedBindingTable r, uint32_t group, std::string label)
+      : NullResource(std::move(label)), group_(group), resolved_(std::move(r)) {}
   uint32_t GetGroup() const override { return group_; }
-  const std::vector<BindingEntry>& Entries() const { return entries_; }
+  const std::vector<BindingEntry>& Entries() const { return resolved_.entries; }
+  const std::vector<uint32_t>& Indices() const { return resolved_.indices; }
 
  private:
   uint32_t group_;
-  std::vector<BindingEntry> entries_;
-  std::vector<std::shared_ptr<IResource>> retained_;
+  ResolvedBindingTable resolved_;
 };
 
 // ---------------------------------------------------------------------------
@@ -462,7 +474,10 @@ class NullDevice final : public IRhiDevice {
     return std::make_shared<NullComputePipeline>(d);
   }
   BindingTablePtr CreateBindingTable(const BindingTableDesc& d) override {
-    return std::make_shared<NullBindingTable>(d);
+    auto resolved = ResolveBindingTable(d);
+    if (!resolved) return nullptr;  // ResolveBindingTable logged why
+    return std::make_shared<NullBindingTable>(std::move(*resolved), d.group,
+                                              d.label);
   }
 
   std::unique_ptr<ICommandEncoder> CreateCommandEncoder(

@@ -103,10 +103,12 @@ struct Context {
 
 class ValidationBindingTable final : public IBindingTable {
  public:
+  // Does NOT retain separately. The inner table already owns a share of
+  // everything its entries reference (ResolveBindingTable), and this wrapper
+  // holds the inner table by shared_ptr -- so a second copy of the retention
+  // logic here would be one more place for the backends to drift from.
   ValidationBindingTable(BindingTablePtr inner, std::vector<BindingEntry> entries)
-      : inner_(std::move(inner)),
-        retained_(RetainBindingResources(entries, inner_->GetLabel())),
-        entries_(std::move(entries)) {}
+      : inner_(std::move(inner)), entries_(std::move(entries)) {}
 
   uint32_t GetGroup() const override { return inner_->GetGroup(); }
   void Destroy() override { inner_->Destroy(); }
@@ -118,7 +120,6 @@ class ValidationBindingTable final : public IBindingTable {
 
  private:
   BindingTablePtr inner_;
-  std::vector<std::shared_ptr<IResource>> retained_;
   std::vector<BindingEntry> entries_;
 };
 
@@ -189,30 +190,39 @@ class ValidationRenderPass final : public IRenderPass {
     // nothing checked that the range it selects exists. Metal reads past the
     // MTLBuffer with no complaint, which is precisely the class of bug Dawn
     // used to catch for us (rule 8).
-    if (index_buffer_) {
-      const uint64_t stride = index_format_ == IndexFormat::Uint16 ? 2 : 4;
-      const uint64_t count = uint64_t(fi) + uint64_t(ic);
-      const uint64_t end = index_offset_ + count * stride;
-      if (end > index_buffer_->GetSize()) {
-        ctx_->recorder.Report(fmt::format(
-            "DrawIndexed: indices [{}, {}) at offset {} need {} bytes but "
-            "index buffer '{}' is only {} bytes",
-            fi, fi + ic, index_offset_, end, index_buffer_->GetLabel(),
-            index_buffer_->GetSize()));
-        return;  // refuse: the read would be out of bounds
-      }
-    }
+    if (index_buffer_ && !IndexRangeFits(fi, ic, "DrawIndexed")) return;
     inner_->DrawIndexed(ic, inst, fi, bv, finst);
   }
 
   void DrawIndexedIndirect(IBuffer* args, uint64_t offset) override {
     if (Ended("DrawIndexedIndirect") || NoPipeline("DrawIndexedIndirect")) return;
+    // Refused, not reported-and-performed: the sibling DrawIndexed refuses on
+    // the same condition, and this is the path the GPU-driven MVP actually
+    // uses (rule 3).
     if (!index_bound_) {
       ctx_->recorder.Report("DrawIndexedIndirect: no index buffer bound");
+      return;
     }
-    if (args && !Has(args->GetUsage(), BufferUsage::Indirect)) {
+    if (!args) {
+      ctx_->recorder.Report("DrawIndexedIndirect: no argument buffer");
+      return;
+    }
+    if (!Has(args->GetUsage(), BufferUsage::Indirect)) {
       ctx_->recorder.Report("DrawIndexedIndirect: buffer '" + args->GetLabel() +
                             "' lacks BufferUsage::Indirect");
+      return;
+    }
+    // The args themselves live on the GPU and cannot be checked here, but the
+    // OFFSET is a CPU-side value crossing the API, so rule 8 applies to it.
+    // Subtraction, for the same wrap reason as everywhere else.
+    constexpr uint64_t kArgsSize = sizeof(DrawIndexedIndirectArgs);
+    const uint64_t size = args->GetSize();
+    if (size < kArgsSize || offset > size - kArgsSize) {
+      ctx_->recorder.Report(fmt::format(
+          "DrawIndexedIndirect: {}-byte args at offset {} do not fit in "
+          "buffer '{}' of {} bytes",
+          kArgsSize, offset, args->GetLabel(), size));
+      return;
     }
     // The intent check that Metal cannot make for us.
     states_->Expect(ctx_->recorder, args, ResourceState::IndirectArg,
@@ -238,6 +248,26 @@ class ValidationRenderPass final : public IRenderPass {
     if (pipeline_) return false;
     ctx_->recorder.Report(std::string(what) + ": no pipeline bound");
     return true;
+  }
+
+  // True if indices [first, first + count) lie inside the bound index buffer.
+  //
+  // Every step avoids addition on values that can be near their type's
+  // maximum: `index_offset_ + count * stride` wraps, and a wrapped compare
+  // passes the check it has to fail. `first + count` is the one safe addition,
+  // because both are uint32 widened to uint64.
+  bool IndexRangeFits(uint32_t first, uint32_t count, const char* what) {
+    const uint64_t size = index_buffer_->GetSize();
+    const uint64_t stride = index_format_ == IndexFormat::Uint16 ? 2 : 4;
+    const uint64_t needed = uint64_t(first) + uint64_t(count);
+    if (index_offset_ <= size && needed <= (size - index_offset_) / stride) {
+      return true;
+    }
+    ctx_->recorder.Report(fmt::format(
+        "{}: indices [{}, {}) at byte offset {} do not fit in index buffer "
+        "'{}' of {} bytes",
+        what, first, needed, index_offset_, index_buffer_->GetLabel(), size));
+    return false;
   }
   void CheckTableUsable(uint32_t group, IBindingTable* table);
 
@@ -276,7 +306,12 @@ class ValidationComputePass final : public IComputePass {
       return;
     }
     if (x == 0 || y == 0 || z == 0) {
-      ctx_->recorder.Report("Dispatch: zero workgroup count");
+      // Refused, not reported-and-performed. Metal's debug layer aborts the
+      // process on a zero-sized dispatch, so forwarding it after reporting
+      // turned a diagnosable mistake into a dead test binary (rule 3).
+      ctx_->recorder.Report(fmt::format(
+          "Dispatch: zero workgroup count ({}, {}, {})", x, y, z));
+      return;
     }
     inner_->Dispatch(x, y, z);
   }

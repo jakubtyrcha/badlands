@@ -675,6 +675,154 @@ TEST_CASE("validation: an indexed draw past the end of its index buffer is refus
   CHECK(observed->find("indices [4, 7)") != std::string::npos);
 }
 
+TEST_CASE("validation: an indexed draw at a wrapping offset is refused",
+          "[rhi][validation]") {
+  // `index_offset_ + count * stride` wraps to a small number and passes a
+  // check it has to fail. This is the offset a caller lands on when it is
+  // computed as an underflowing subtraction.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalGraphicsSource(device->GetBackend()),
+      rhitest::MakeTestReflection("vs_main", ShaderStage::Vertex), "g");
+  auto pipe = device->CreateRenderPipeline(
+      {.vertex_shader = module.get(), .vertex_entry = "vs_main",
+       .fragment_shader = module.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm},
+       .cull_mode = CullMode::None, .label = "idx"});
+  auto color = MakeColorTarget(*device);
+  auto ibuf = device->CreateBuffer(
+      {.size = 24, .usage = BufferUsage::Index, .label = "six_indices"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(color.get(), ResourceState::RenderTarget);
+    RenderPassDesc desc;
+    desc.color_attachments.push_back({.view = color->GetDefaultView()});
+    auto* pass = encoder->BeginRenderPass(desc);
+    REQUIRE(pass != nullptr);
+    pass->SetPipeline(pipe.get());
+    pass->SetIndexBuffer(ibuf.get(), IndexFormat::Uint32, ~uint64_t(0) - 8);
+    pass->DrawIndexed(3);
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("do not fit") != std::string::npos);
+}
+
+TEST_CASE("validation: an indirect draw past its argument buffer is refused",
+          "[rhi][validation]") {
+  // DrawIndexed gained a range check; its indirect sibling had none, on the
+  // path the GPU-driven MVP actually uses. The ARGS live on the GPU and cannot
+  // be checked here, but the OFFSET is a CPU-side value crossing the API.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalGraphicsSource(device->GetBackend()),
+      rhitest::MakeTestReflection("vs_main", ShaderStage::Vertex), "g");
+  auto pipe = device->CreateRenderPipeline(
+      {.vertex_shader = module.get(), .vertex_entry = "vs_main",
+       .fragment_shader = module.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm},
+       .cull_mode = CullMode::None, .label = "ind"});
+  auto color = MakeColorTarget(*device);
+  auto ibuf = device->CreateBuffer(
+      {.size = 24, .usage = BufferUsage::Index, .label = "indices"});
+  auto args = device->CreateBuffer(
+      {.size = sizeof(DrawIndexedIndirectArgs),
+       .usage = BufferUsage::Indirect, .label = "args"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(color.get(), ResourceState::RenderTarget);
+    encoder->Transition(args.get(), ResourceState::IndirectArg);
+    RenderPassDesc desc;
+    desc.color_attachments.push_back({.view = color->GetDefaultView()});
+    auto* pass = encoder->BeginRenderPass(desc);
+    pass->SetPipeline(pipe.get());
+    pass->SetIndexBuffer(ibuf.get(), IndexFormat::Uint32);
+    // One struct's worth of room, asked to read a struct starting 4 bytes in.
+    pass->DrawIndexedIndirect(args.get(), 4);
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("do not fit") != std::string::npos);
+
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       DrawIndexedIndirect) == 0);
+}
+
+TEST_CASE("validation: an indirect draw with no index buffer is refused",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalGraphicsSource(device->GetBackend()),
+      rhitest::MakeTestReflection("vs_main", ShaderStage::Vertex), "g");
+  auto pipe = device->CreateRenderPipeline(
+      {.vertex_shader = module.get(), .vertex_entry = "vs_main",
+       .fragment_shader = module.get(), .fragment_entry = "fs_main",
+       .color_formats = {Format::RGBA8Unorm},
+       .cull_mode = CullMode::None, .label = "ind"});
+  auto color = MakeColorTarget(*device);
+  auto args = device->CreateBuffer(
+      {.size = sizeof(DrawIndexedIndirectArgs),
+       .usage = BufferUsage::Indirect, .label = "args"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(color.get(), ResourceState::RenderTarget);
+    encoder->Transition(args.get(), ResourceState::IndirectArg);
+    RenderPassDesc desc;
+    desc.color_attachments.push_back({.view = color->GetDefaultView()});
+    auto* pass = encoder->BeginRenderPass(desc);
+    pass->SetPipeline(pipe.get());
+    pass->DrawIndexedIndirect(args.get(), 0);  // no SetIndexBuffer
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("no index buffer bound") != std::string::npos);
+
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       DrawIndexedIndirect) == 0);
+}
+
+TEST_CASE("validation: a zero-workgroup dispatch is refused",
+          "[rhi][validation]") {
+  // Metal's debug layer aborts the process on a zero-sized dispatch, so
+  // reporting and then forwarding turned a diagnosable mistake into a dead
+  // test binary.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetPipeline(pipe.get());
+    pass->Dispatch(0, 1, 1);
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("zero workgroup count") != std::string::npos);
+
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::Dispatch) == 0);
+}
+
 TEST_CASE("validation: an in-bounds indexed draw is not refused",
           "[rhi][validation]") {
   // The paired green: exactly the range that fits reports nothing, so the

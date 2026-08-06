@@ -405,179 +405,37 @@ fragment float4 fs_main(constant Push& p [[buffer(0)]]) {
   CHECK(pixels[centre + 1] > 200);
 }
 
-// No comma in the name: Catch2 splits its -filter argument on commas, so a
-// test named with one cannot be selected individually.
-TEST_CASE("metal: a depth-less pipeline does not inherit depth state",
-          "[rhi][metal][gpu]") {
-  // The leak: CreateRenderPipeline built no MTLDepthStencilState when depth
-  // was off entirely, so SetPipeline skipped setDepthStencilState: and the
-  // previous pipeline's state stayed bound. Pipeline state has to be fully
-  // determined by the pipeline (rule 7).
-  //
-  // The probe: draw green at z=0.75 with reversed-Z depth writing, then draw
-  // red at z=0.25 with depth OFF. Under a leaked GreaterEqual test the red
-  // fragment loses to the stored 0.75 and the pixel stays green. With depth
-  // genuinely off it always wins and the pixel is red.
-  auto device = MakeMetal(/*validation=*/false);
-  REQUIRE(device);
-
-  constexpr const char* kShader = R"(
-#include <metal_stdlib>
-using namespace metal;
-struct VOut { float4 pos [[position]]; };
-struct Push { float z; float r; float g; float b; };
-vertex VOut vs_main(uint vid [[vertex_id]], constant Push& p [[buffer(0)]]) {
-  float2 uv = float2(float((vid << 1) & 2), float(vid & 2));
-  VOut o; o.pos = float4(uv * 2.0 - 1.0, p.z, 1.0); return o;
+// Creation-time refusals, the same list the Null suite runs. Metal used to be
+// the only backend that refused a destroyed texture, and only a shared list
+// makes that kind of divergence visible (rule 6).
+TEST_CASE("metal: an unretainable entry is refused at creation", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckUnretainableEntryIsRefused(*d);
 }
-fragment float4 fs_main(constant Push& p [[buffer(0)]]) {
-  return float4(p.r, p.g, p.b, 1.0);
+TEST_CASE("metal: a view with no owning texture is refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckOwnerlessViewIsRefused(*d);
 }
-)";
-  ShaderReflection refl;
-  refl.bindings.push_back({.group = 0, .slot = 0, .name = "p",
-                           .kind = BindingKind::UniformBuffer,
-                           .location = {.space = 0, .index = 0}});
-  auto module = device->CreateShaderModule(kShader, refl, "leak");
-  REQUIRE(module);
-
-  auto depth_pipe = device->CreateRenderPipeline(
-      {.vertex_shader = module.get(), .vertex_entry = "vs_main",
-       .fragment_shader = module.get(), .fragment_entry = "fs_main",
-       .color_formats = {Format::RGBA8Unorm},
-       .depth = {.test_enabled = true, .write_enabled = true,
-                 .compare = CompareFunction::GreaterEqual,
-                 .format = Format::Depth32Float},
-       .cull_mode = CullMode::None, .label = "with_depth"});
-  // Same attachments, but depth entirely off.
-  auto flat_pipe = device->CreateRenderPipeline(
-      {.vertex_shader = module.get(), .vertex_entry = "vs_main",
-       .fragment_shader = module.get(), .fragment_entry = "fs_main",
-       .color_formats = {Format::RGBA8Unorm},
-       .depth = {.test_enabled = false, .write_enabled = false,
-                 .format = Format::Depth32Float},
-       .cull_mode = CullMode::None, .label = "no_depth"});
-  REQUIRE(depth_pipe);
-  REQUIRE(flat_pipe);
-
-  constexpr uint32_t kW = 8, kH = 8;
-  auto color = device->CreateTexture({.width = kW, .height = kH,
-                                      .format = Format::RGBA8Unorm,
-                                      .usage = TextureUsage::RenderTarget |
-                                               TextureUsage::CopySrc});
-  auto depth = device->CreateTexture({.width = kW, .height = kH,
-                                      .format = Format::Depth32Float,
-                                      .usage = TextureUsage::DepthStencil});
-  auto readback = device->CreateBuffer(
-      {.size = kW * kH * 4,
-       .usage = BufferUsage::CopyDst | BufferUsage::MapRead});
-
-  struct Push { float z, r, g, b; };
-  const Push far_green{0.75f, 0.0f, 1.0f, 0.0f};
-  const Push near_red{0.25f, 1.0f, 0.0f, 0.0f};
-  auto green_ubo = device->CreateBuffer(
-      {.size = sizeof(Push), .usage = BufferUsage::Uniform});
-  auto red_ubo = device->CreateBuffer(
-      {.size = sizeof(Push), .usage = BufferUsage::Uniform});
-  green_ubo->Write(0, {reinterpret_cast<const uint8_t*>(&far_green),
-                       sizeof(far_green)});
-  red_ubo->Write(0, {reinterpret_cast<const uint8_t*>(&near_red),
-                     sizeof(near_red)});
-
-  auto make_table = [&](IRenderPipeline* p, IBuffer* b) {
-    return device->CreateBindingTable(
-        {.render_pipeline = p,
-         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
-                      .buffer = b}}});
-  };
-  auto green_table = make_table(depth_pipe.get(), green_ubo.get());
-  auto red_table = make_table(flat_pipe.get(), red_ubo.get());
-
-  auto encoder = device->CreateCommandEncoder("depth_leak");
-  encoder->Transition(color.get(), ResourceState::RenderTarget);
-  encoder->Transition(depth.get(), ResourceState::DepthWrite);
-  RenderPassDesc desc;
-  desc.color_attachments.push_back({.view = color->GetDefaultView(),
-                                    .load_op = LoadOp::Clear,
-                                    .store_op = StoreOp::Store,
-                                    .clear_color = {0, 0, 1, 1}});
-  desc.depth_attachment = {.view = depth->GetDefaultView(),
-                           .load_op = LoadOp::Clear,
-                           .store_op = StoreOp::Store,
-                           .clear_depth = 0.0f};  // reversed-Z: 0 is far
-  auto* pass = encoder->BeginRenderPass(desc);
-  REQUIRE(pass != nullptr);
-  pass->SetViewport(0, 0, float(kW), float(kH));
-
-  pass->SetPipeline(depth_pipe.get());
-  pass->SetBindingTable(0, green_table.get());
-  pass->Draw(3);  // green at 0.75, writes depth
-
-  pass->SetPipeline(flat_pipe.get());
-  pass->SetBindingTable(0, red_table.get());
-  pass->Draw(3);  // red at 0.25, depth off -- must win
-
-  pass->End();
-  encoder->Transition(color.get(), ResourceState::CopySrc);
-  encoder->Transition(readback.get(), ResourceState::CopyDst);
-  encoder->CopyTextureToBuffer(color.get(), 0, 0, readback.get(), 0);
-  encoder->Finish();
-  device->Submit(*encoder);
-  device->WaitIdle();
-
-  std::vector<uint8_t> px(kW * kH * 4, 0);
-  REQUIRE(readback->Read(0, px));
-  const auto c = rhitest::CentrePixel(px, kW, kH);
-  INFO("centre = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
-  // Red means the second pipeline's own state applied. Green means it
-  // inherited the first pipeline's depth test.
-  CHECK(c.r > 200);
-  CHECK(c.g < 50);
+TEST_CASE("metal: an unresolvable slot is refused at creation", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckUnresolvableSlotIsRefused(*d);
 }
-
-TEST_CASE("metal: a slot absent from reflection is refused rather than guessed",
-          "[rhi][metal][gpu]") {
-  // The trap this replaced: IndexFor fell back to the slot index, so an entry
-  // with no reflection behind it bound at whatever index the slot happened to
-  // be. That is how a sampler once landed at index 1 and MTL_DEBUG_LAYER
-  // reported "missing Sampler binding at index 0" -- a wrong bind, reported
-  // three layers away from its cause.
-  //
-  // Unvalidated device on purpose: the decorator has its own report for this,
-  // and this case is about the BACKEND refusing rather than guessing.
-  auto d = MakeMetal(/*validation=*/false);
-  REQUIRE(d);
-  auto module = d->CreateShaderModule(
-      rhitest::MinimalComputeSource(d->GetBackend()),
-      rhitest::MakeTestReflection(), "absent");
-  auto pipe =
-      d->CreateComputePipeline({.shader = module.get(), .entry = "cs_main"});
-  REQUIRE(pipe);
-  auto ubo = d->CreateBuffer({.size = 64, .usage = BufferUsage::Uniform,
-                              .label = "absent_ubo"});
-
-  // Slot 9 exists in no reflection anywhere.
-  auto table = d->CreateBindingTable(
-      {.compute_pipeline = pipe.get(),
-       .entries = {{.slot = 9, .kind = BindingKind::UniformBuffer,
-                    .buffer = ubo.get()}},
-       .label = "absent_table"});
-  REQUIRE(table);
-
-  const std::string log = rhitest::CaptureLog([&] {
-    auto encoder = d->CreateCommandEncoder("absent");
-    auto* pass = encoder->BeginComputePass("cp");
-    pass->SetPipeline(pipe.get());
-    pass->SetBindingTable(0, table.get());
-    pass->Dispatch(1, 1, 1);
-    pass->End();
-    encoder->Finish();
-    d->Submit(*encoder);
-    d->WaitIdle();
-  });
-  INFO(log);
-  CHECK(log.find("slot 9") != std::string::npos);
-  CHECK(log.find("absent from the pipeline's reflection") != std::string::npos);
+TEST_CASE("metal: a mismatched binding kind is refused at creation",
+          "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckMismatchedKindIsRefused(*d);
+}
+TEST_CASE("metal: a table with no pipeline is refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckTableWithNoPipelineIsRefused(*d);
+}
+TEST_CASE("metal: a resolvable table is created silently", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckResolvableTableIsCreatedSilently(*d);
+}
+TEST_CASE("metal: CreateView after Destroy is refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckCreateViewAfterDestroyIsRefused(*d);
 }
 
 TEST_CASE("metal: sliced views honour their range", "[rhi][metal]") {

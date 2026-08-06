@@ -118,19 +118,39 @@ class IBindingTable : public virtual IResource {
   virtual uint32_t GetGroup() const = 0;
 };
 
-// Shares in the ownership of everything `entries` references, so a binding
-// table can outlive the caller's handles. Every backend's table calls this.
+// A binding table, resolved and validated once, ready for a backend to store.
 //
-// A texture VIEW is owned by its texture rather than by a shared_ptr, so the
-// TEXTURE is what gets retained -- keeping the owner alive keeps the view alive,
-// which is the whole point.
+// CREATION-TIME validity, not validation: a table that cannot be encoded must
+// not exist, in release builds as much as in debug ones. That is why this
+// returns an optional and why every backend refuses on nullopt, rather than
+// leaving the decorator to notice later -- the decorator compiles out.
+struct ResolvedBindingTable {
+  std::vector<BindingEntry> entries;
+  // Target-native binding index per entry, parallel to `entries`. Resolved
+  // HERE rather than at record time: names and slots become indices once, at
+  // resolve time (D9), so recording is a straight indexed walk with no
+  // reflection scan and no way to encounter an unresolvable slot.
+  std::vector<uint32_t> indices;
+  // Shared ownership of everything the entries reference, so the table can
+  // outlive the caller's handles.
+  std::vector<std::shared_ptr<IResource>> retained;
+};
+
+// Resolves `desc` against its pipeline's reflection, retains what it
+// references, and refuses -- returning nullopt after logging -- if any entry
+// cannot be resolved or cannot be retained.
 //
-// Defined out of line (rhi_common.cpp) because an entry it cannot retain is a
-// LOGGED error, not a skipped iteration: silently under-retaining reintroduces
-// exactly the use-after-free this function exists to prevent, and the caller
-// has already been told it may drop its handle.
-std::vector<std::shared_ptr<IResource>> RetainBindingResources(
-    const std::vector<BindingEntry>& entries, std::string_view owner_label);
+// ONE implementation for every backend, deliberately. Three copies of
+// "resolve, retain, refuse" is precisely how Null and Metal came to disagree
+// about a documented contract with nothing to catch it (rule 6). This is the
+// shared binding resolver D8 called for, and the render graph's auto-binding
+// will call it too.
+//
+// `location.index` is already the per-target field (Metal unifies the buffer
+// index space, D3D12 splits srv/uav), so resolving here stays correct for a
+// DX12 backend without a second implementation.
+std::optional<ResolvedBindingTable> ResolveBindingTable(
+    const BindingTableDesc& desc);
 
 // Turns a requested view range into a concrete one: fills in the "0 = all
 // remaining" counts and bounds-checks the result against the texture.

@@ -54,13 +54,42 @@ Null and Metal must behave identically for everything the interface documents. A
 behavioural difference is a bug in whichever one is wrong — and, separately, a gap in
 the conformance list, which should have caught it. Fix both.
 
+**Prefer one implementation over two that agree.** Logic duplicated per backend is how
+they drift; `ResolveBindingTable` and `ResolveViewDesc` exist because "resolve, retain,
+refuse" written twice had already produced a divergence nothing caught.
+
 ### 7. Pipeline state is fully determined by the pipeline
 No state leaks between draws. If a pipeline does not set something, the backend binds
 an explicit default rather than inheriting the last one's.
 
 ### 8. Every size, offset and index crossing the API is bounds-checked
-In the validation layer, against the actual resource. Dawn did this for us; nothing
-does now unless we write it.
+Against the actual resource, at the layer rule 13 assigns it to. Dawn did this for us;
+nothing does now unless we write it.
+
+**Always by subtraction, never by addition.** `offset + count > size` is unsigned
+arithmetic that wraps, so a huge count sums to something small and passes the very
+check it exists to fail. Write `count > size - offset`, having first established that
+`offset <= size`. This has been got wrong three times.
+
+### 13. Creation-time refusal is not validation
+The two are different layers and the distinction decides where every new check goes:
+
+| | Where it lives | Compiled out? |
+|---|---|---|
+| **Can this object exist at all?** | Backend, via the shared resolver | **No** — it is a constructor precondition |
+| **Is this call valid against live state?** | Validation decorator | Yes (rule 12) |
+
+An object that cannot be encoded must not be constructed, in release builds as much as
+in debug ones — so `CreateBindingTable` and `CreateView` return null rather than leaving
+the decorator to notice, because the decorator is not there in release. Per-call checks
+(copy extents, index ranges, resource state, pass ordering) are the decorator's, because
+they are per-call and must not cost anything in a shipping build.
+
+Corollary: **resolve once, at creation.** `ResolveBindingTable` turns slots into
+target-native indices when the table is built, so the record path is an indexed walk
+that cannot encounter an unresolvable slot — there is no later point where a backend
+must choose between guessing an index and dropping a binding. That is also what makes
+rule 11 hold without effort.
 
 ### 9. All functionality has unit tests
 Every feature is tested at RHI level, on **every** backend, through the shared

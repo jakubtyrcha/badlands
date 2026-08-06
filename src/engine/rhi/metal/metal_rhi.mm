@@ -226,6 +226,16 @@ class MetalTexture final : public ITexture, public MetalResource {
   TextureUsage GetUsage() const override { return desc_.usage; }
 
   ITextureView* CreateView(const TextureViewDesc& vd) override {
+    // BEFORE the cache lookup. Destroy() keeps the view objects alive (callers
+    // hold them as raw borrowed pointers), so a cache hit would otherwise hand
+    // back a view wrapping a nil MTLTexture while an uncached range correctly
+    // refused -- the same call answering two ways depending on cache history.
+    if (IsDestroyed()) {
+      spdlog::error("rhi/metal: CreateView on destroyed texture '{}'",
+                    GetLabel());
+      return nullptr;
+    }
+
     const auto r = ResolveViewDesc(vd, desc_, GetLabel());
     if (!r) return nullptr;  // ResolveViewDesc logged why
 
@@ -235,12 +245,6 @@ class MetalTexture final : public ITexture, public MetalResource {
     const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count};
     auto it = views_.find(key);
     if (it != views_.end()) return it->second.get();
-
-    if (!texture_) {
-      spdlog::error("rhi/metal: CreateView on destroyed texture '{}'",
-                    GetLabel());
-      return nullptr;
-    }
 
     // A whole-resource view is the texture itself. Anything narrower needs a
     // real Metal view object -- without this the slicing was accepted and
@@ -329,20 +333,23 @@ class MetalSampler final : public ISampler, public MetalResource {
 // A binding table is just the resolved entry list. Applying it is a handful of
 // set* calls at the reflected index; see the file header for why not argument
 // buffers.
+// Built only from an already-resolved table, so an unresolvable slot cannot
+// reach the record path: it fails at CreateBindingTable, which returns null.
 class MetalBindingTable final : public IBindingTable, public MetalResource {
  public:
-  explicit MetalBindingTable(const BindingTableDesc& d)
-      : MetalResource(d.label), group_(d.group), entries_(d.entries),
-        retained_(RetainBindingResources(d.entries, d.label)) {}
+  MetalBindingTable(ResolvedBindingTable r, uint32_t group, std::string label)
+      : MetalResource(std::move(label)), group_(group),
+        resolved_(std::move(r)) {}
   void Destroy() override { MarkDestroyed(); }
   uint32_t GetGroup() const override { return group_; }
-  const std::vector<BindingEntry>& Entries() const { return entries_; }
+  const std::vector<BindingEntry>& Entries() const { return resolved_.entries; }
+  const std::vector<uint32_t>& Indices() const { return resolved_.indices; }
 
  private:
   uint32_t group_;
-  std::vector<BindingEntry> entries_;
-  // Keeps everything the entries point at alive for as long as the table is.
-  std::vector<std::shared_ptr<IResource>> retained_;
+  // Entries, their target indices, and shared ownership of everything they
+  // reference -- all decided once, at creation.
+  ResolvedBindingTable resolved_;
 };
 
 // ---------------------------------------------------------------------------
@@ -449,25 +456,6 @@ class MetalComputePipeline final : public IComputePipeline {
 // `index` is the reflected Metal binding index. Slang emits flat
 // [[buffer(N)]] / [[texture(N)]] / [[sampler(N)]] for plain globals, and its
 // reflection reports the same N -- which is what BindingLocation carries.
-//
-// No reflection entry means REFUSE, not "use the slot". Slang numbers bindings
-// per category, so a constant buffer, a texture and a sampler can all report
-// index 0 -- guessing the slot index lands the resource on whatever the shader
-// happens to declare there. That is not hypothetical: an empty reflection once
-// bound a sampler at index 1, and only MTL_DEBUG_LAYER's "missing Sampler
-// binding at index 0" revealed it.
-std::optional<uint32_t> IndexFor(const ShaderReflection& refl, uint32_t group,
-                                 uint32_t slot, std::string_view table_label) {
-  for (const auto& b : refl.bindings) {
-    if (b.group == group && b.slot == slot) return b.location.index;
-  }
-  spdlog::error(
-      "rhi/metal: binding table '{}' slot {} (group {}) is absent from the "
-      "pipeline's reflection -- skipping it rather than guessing an index",
-      table_label, slot, group);
-  return std::nullopt;
-}
-
 // Render and compute encoders are unrelated protocols with different
 // selectors, so this is two functions rather than one with a runtime branch --
 // a template would have to compile both selector sets against both encoders.
@@ -476,12 +464,12 @@ std::optional<uint32_t> IndexFor(const ShaderReflection& refl, uint32_t group,
 // which stages use a binding (probe B), so narrowing is not possible yet.
 // Correct, slightly wasteful, and revisited only on evidence.
 void ApplyTableGraphics(id<MTLRenderCommandEncoder> enc,
-                        const ShaderReflection& refl, uint32_t group,
                         const MetalBindingTable& table) {
-  for (const auto& e : table.Entries()) {
-    const auto resolved = IndexFor(refl, group, e.slot, table.GetLabel());
-    if (!resolved) continue;
-    const uint32_t index = *resolved;
+  const auto& entries = table.Entries();
+  const auto& indices = table.Indices();
+  for (size_t i = 0; i < entries.size(); ++i) {
+    const BindingEntry& e = entries[i];
+    const uint32_t index = indices[i];
     switch (e.kind) {
       case BindingKind::UniformBuffer:
       case BindingKind::StorageBuffer:
@@ -511,12 +499,12 @@ void ApplyTableGraphics(id<MTLRenderCommandEncoder> enc,
 }
 
 void ApplyTableCompute(id<MTLComputeCommandEncoder> enc,
-                       const ShaderReflection& refl, uint32_t group,
                        const MetalBindingTable& table) {
-  for (const auto& e : table.Entries()) {
-    const auto resolved = IndexFor(refl, group, e.slot, table.GetLabel());
-    if (!resolved) continue;
-    const uint32_t index = *resolved;
+  const auto& entries = table.Entries();
+  const auto& indices = table.Indices();
+  for (size_t i = 0; i < entries.size(); ++i) {
+    const BindingEntry& e = entries[i];
+    const uint32_t index = indices[i];
     switch (e.kind) {
       case BindingKind::UniformBuffer:
       case BindingKind::StorageBuffer:
@@ -562,10 +550,17 @@ class MetalRenderPass final : public IRenderPass {
     [enc_ setFrontFacingWinding:mp->Winding()];
   }
 
+  // No pipeline needed, and none consulted: the table's indices were resolved
+  // when it was created, so binding before SetPipeline is genuinely harmless
+  // here rather than a silent loss of every binding.
   void SetBindingTable(uint32_t group, IBindingTable* t) override {
     auto* mt = static_cast<MetalBindingTable*>(t);
-    if (!mt || !pipeline_) return;
-    ApplyTableGraphics(enc_, pipeline_->GetReflection(), group, *mt);
+    if (!mt) {
+      spdlog::error("rhi/metal: SetBindingTable at group {} with no table",
+                    group);
+      return;
+    }
+    ApplyTableGraphics(enc_, *mt);
   }
 
   void SetIndexBuffer(IBuffer* b, IndexFormat f, uint64_t offset) override {
@@ -645,10 +640,15 @@ class MetalComputePass final : public IComputePass {
     [enc_ setComputePipelineState:mp->Pso()];
     mp->GetWorkgroupSize(threads_);
   }
+  // See MetalRenderPass::SetBindingTable -- indices are resolved at creation.
   void SetBindingTable(uint32_t group, IBindingTable* t) override {
     auto* mt = static_cast<MetalBindingTable*>(t);
-    if (!mt || !pipeline_) return;
-    ApplyTableCompute(enc_, pipeline_->GetReflection(), group, *mt);
+    if (!mt) {
+      spdlog::error("rhi/metal: SetBindingTable at group {} with no table",
+                    group);
+      return;
+    }
+    ApplyTableCompute(enc_, *mt);
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
     if (!pipeline_) return;
@@ -951,7 +951,10 @@ class MetalDevice final : public IRhiDevice {
   }
 
   BindingTablePtr CreateBindingTable(const BindingTableDesc& d) override {
-    return std::make_shared<MetalBindingTable>(d);
+    auto resolved = ResolveBindingTable(d);
+    if (!resolved) return nullptr;  // ResolveBindingTable logged why
+    return std::make_shared<MetalBindingTable>(std::move(*resolved), d.group,
+                                               d.label);
   }
 
   std::unique_ptr<ICommandEncoder> CreateCommandEncoder(

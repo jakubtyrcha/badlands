@@ -1179,6 +1179,26 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
         ${CMAKE_SOURCE_DIR}/src/crates/assets/include
         ${taskflow_SOURCE_DIR})
     target_link_options(badlands_rhi_lab PRIVATE "-Wl,-ld_new")
+
+    # Argument rejection, asserted through the exit code. The lab is an
+    # executable with no test binary of its own, so this is the honest
+    # mechanism -- and these arguments used to be ACCEPTED: an out-of-range
+    # count truncated into a valid-looking value and rendered silently wrong
+    # geometry with exit status 0.
+    foreach(bad_args
+        "--nodes;4294967298"      # truncates to 2 without a range check
+        "--width;4294967297"      # truncates to 1
+        "--nodes;-5"              # wraps huge when narrowed
+        "--tau;notanumber"        # used to reach std::terminate
+        "--height;0")
+        string(REPLACE ";" "_" bad_name "${bad_args}")
+        string(REPLACE "-" "" bad_name "${bad_name}")
+        add_test(NAME rhi_lab_rejects_${bad_name}
+                 COMMAND badlands_rhi_lab ${bad_args}
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(rhi_lab_rejects_${bad_name}
+                             PROPERTIES WILL_FAIL TRUE)
+    endforeach()
 endif()
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against

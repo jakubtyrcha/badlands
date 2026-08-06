@@ -89,17 +89,28 @@ bool ParseFloat(const char* text, const char* what, float& out) {
   }
 }
 
-bool ParseInt(const char* text, const char* what, long& out) {
+// Takes the accepted range explicitly, because the caller narrows the result
+// into an int or a uint32_t. Without the range check `--nodes 4294967298`
+// parses fine, truncates to 2, passes every later guard, and renders a 2x2
+// terrain with exit status 0 -- a silently wrong success, which is worse than
+// the std::out_of_range this replaced.
+bool ParseInt(const char* text, const char* what, long lo, long hi, long& out) {
+  long v = 0;
   try {
     size_t used = 0;
-    const long v = std::stol(text, &used);
+    v = std::stol(text, &used);
     if (used != std::strlen(text)) throw std::invalid_argument("trailing");
-    out = v;
-    return true;
   } catch (const std::exception&) {
     spdlog::error("rhi_lab: {} needs an integer, got '{}'", what, text);
     return false;
   }
+  if (v < lo || v > hi) {
+    spdlog::error("rhi_lab: {} must be between {} and {}, got {}", what, lo, hi,
+                  v);
+    return false;
+  }
+  out = v;
+  return true;
 }
 
 bool ParseArgs(int argc, char** argv, Options& o) {
@@ -120,12 +131,12 @@ bool ParseArgs(int argc, char** argv, Options& o) {
       if (!v) return false;
       o.out = v;
     }
-    else if (a == "--width") { const char* v = next("--width"); if (!v || !ParseInt(v, "--width", n)) return false; o.width = uint32_t(n); }
-    else if (a == "--height") { const char* v = next("--height"); if (!v || !ParseInt(v, "--height", n)) return false; o.height = uint32_t(n); }
-    else if (a == "--nodes") { const char* v = next("--nodes"); if (!v || !ParseInt(v, "--nodes", n)) return false; o.nodes = int(n); }
-    else if (a == "--trees") { const char* v = next("--trees"); if (!v || !ParseInt(v, "--trees", n)) return false; o.trees = int(n); }
+    else if (a == "--width") { const char* v = next("--width"); if (!v || !ParseInt(v, "--width", 1, 16384, n)) return false; o.width = uint32_t(n); }
+    else if (a == "--height") { const char* v = next("--height"); if (!v || !ParseInt(v, "--height", 1, 16384, n)) return false; o.height = uint32_t(n); }
+    else if (a == "--nodes") { const char* v = next("--nodes"); if (!v || !ParseInt(v, "--nodes", 2, 8193, n)) return false; o.nodes = int(n); }
+    else if (a == "--trees") { const char* v = next("--trees"); if (!v || !ParseInt(v, "--trees", 0, 1'000'000, n)) return false; o.trees = int(n); }
     else if (a == "--tau") { const char* v = next("--tau"); if (!v || !ParseFloat(v, "--tau", o.tau)) return false; }
-    else if (a == "--seed") { const char* v = next("--seed"); if (!v || !ParseInt(v, "--seed", n)) return false; o.seed = uint32_t(n); }
+    else if (a == "--seed") { const char* v = next("--seed"); if (!v || !ParseInt(v, "--seed", 0, 0xFFFFFFFFL, n)) return false; o.seed = uint32_t(n); }
     else if (a == "--debug-vis") { o.debug_vis = true; }
     else if (a == "--help" || a == "-h") {
       std::printf(
