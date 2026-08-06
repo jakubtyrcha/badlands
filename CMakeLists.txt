@@ -193,6 +193,74 @@ corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/crates/ui/Cargo.tom
                        PROFILE release)
 corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
 
+# badlands_rhi: the native render-hardware interface replacing Dawn/WebGPU.
+# See docs/superpowers/specs/2026-08-03-rhi-slang-exploration.md.
+#
+# DELIBERATELY does NOT link `webgpu`. The whole point of this library is to be
+# the seam that has no backend vocabulary in it, so a `wgpu::` reference here
+# must be a link error rather than a code-review catch. It also keeps the RHI
+# test suite off Dawn entirely, which is what makes it fast enough to run on
+# every build.
+add_library(badlands_rhi STATIC
+    src/engine/rhi/rhi_common.cpp
+    src/engine/rhi/rhi_frame_allocator.cpp
+    src/engine/rhi/null/null_rhi.cpp
+    src/engine/rhi/validation/validation_rhi.cpp
+)
+target_include_directories(badlands_rhi PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+)
+target_compile_features(badlands_rhi PUBLIC cxx_std_23)
+# Validation is opt-in so it can never skew a profiling build. On for Debug and
+# for the test suites; a release/profiling build compiles it out entirely and
+# CreateDevice warns loudly if someone asks for it anyway.
+target_compile_definitions(badlands_rhi PUBLIC
+    $<$<NOT:$<CONFIG:Release>>:BADLANDS_RHI_VALIDATION>)
+# Reversed-Z is an RHI invariant (depth clears to 0, opaque compares
+# GreaterEqual), so anything built on the RHI that uses glm must produce
+# zero-to-one depth. Carried here rather than left to each consumer: without
+# it glm::perspective emits OpenGL [-1,1] depth and every fragment silently
+# fails the depth test, which is exactly how rhi_lab first rendered pure sky.
+target_compile_definitions(badlands_rhi PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
+if(APPLE)
+    # ARC only for the Metal backend — the rest of the project is MRR, and a
+    # backend this size is far safer with automatic lifetimes.
+    target_sources(badlands_rhi PRIVATE src/engine/rhi/metal/metal_rhi.mm)
+    set_source_files_properties(src/engine/rhi/metal/metal_rhi.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    target_compile_definitions(badlands_rhi PUBLIC BADLANDS_RHI_METAL)
+    target_link_libraries(badlands_rhi PUBLIC
+        "-framework Metal" "-framework Foundation")
+endif()
+
+# badlands_slang: Slang -> (target source + engine reflection). Sits ABOVE the
+# RHI; the RHI never invokes a compiler, so the dependency runs one way.
+#
+# The SDK is gitignored (see tools/slang_probe/README.md for how to fetch it),
+# so this target and its tests are SKIPPED when it is absent rather than
+# breaking the build for a fresh clone.
+set(BADLANDS_SLANG_ROOT "${CMAKE_SOURCE_DIR}/third_party/toolchains/slang"
+    CACHE PATH "Prebuilt Slang SDK root")
+if(EXISTS "${BADLANDS_SLANG_ROOT}/include/slang.h")
+    message(STATUS "badlands_slang: enabled (${BADLANDS_SLANG_ROOT})")
+    add_library(badlands_slang STATIC src/engine/slang/slang_compiler.cpp)
+    target_include_directories(badlands_slang PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+        ${BADLANDS_SLANG_ROOT}/include
+        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+    target_link_libraries(badlands_slang PUBLIC
+        badlands_rhi "${BADLANDS_SLANG_ROOT}/lib/libslang.dylib")
+    set_target_properties(badlands_slang PROPERTIES
+        BUILD_RPATH "${BADLANDS_SLANG_ROOT}/lib"
+        INSTALL_RPATH "${BADLANDS_SLANG_ROOT}/lib")
+    set(BADLANDS_HAVE_SLANG ON)
+else()
+    message(STATUS "badlands_slang: skipped (no SDK at ${BADLANDS_SLANG_ROOT})")
+    set(BADLANDS_HAVE_SLANG OFF)
+endif()
+
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
 # types/logic live here — see src/engine/app/app_view.hpp.
@@ -1293,6 +1361,144 @@ add_test(NAME badlands_fog_sim_gpu_test COMMAND badlands_fog_sim_gpu_test WORKIN
 # and the headless gpu_test_helpers. Unlike the two suites above this actually
 # creates a Dawn device and renders, so it needs a working GPU adapter (Metal
 # on macOS); there is no CI, so it runs locally via ctest.
+# badlands_rhi_tests: the RHI interface + Null-backend suite. No GPU, no Dawn,
+# no window — it links badlands_rhi only, so it runs anywhere and stays fast.
+# The shared conformance list in src/engine/tests/rhi_conformance.hpp is what
+# badlands_rhi_metal_tests will replay against Metal.
+add_executable(badlands_rhi_tests
+    src/engine/tests/rhi_tests.cpp
+    src/engine/tests/rhi_validation_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_rhi_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_rhi_tests PRIVATE badlands_rhi)
+if(APPLE)
+    target_link_options(badlands_rhi_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_rhi_tests COMMAND badlands_rhi_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_rhi_metal_tests: the SAME conformance list against the real backend,
+# plus readback-based correctness Null cannot assert. Needs a Metal device.
+if(APPLE)
+    add_executable(badlands_rhi_metal_tests
+        src/engine/tests/rhi_metal_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp
+    )
+    target_include_directories(badlands_rhi_metal_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/src/engine/tests
+    )
+    target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi)
+    target_link_options(badlands_rhi_metal_tests PRIVATE "-Wl,-ld_new")
+    add_test(NAME badlands_rhi_metal_tests COMMAND badlands_rhi_metal_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # Metal's own validation layers, always on for this suite. They catch
+    # invalid API use that a passing test otherwise hides — the first time they
+    # were switched on they aborted the suite on an invalid dispatch.
+    set_tests_properties(badlands_rhi_metal_tests PROPERTIES
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
+endif()
+
+# badlands_rhi_lab: the MVP that proves the RHI + Slang + visibility-buffer
+# stack end to end. Headless — the MVP RHI has no swapchain — so it renders a
+# frame and writes a PNG.
+if(BADLANDS_HAVE_SLANG AND APPLE)
+    # Compiles the cluster DAG build + its deps directly, the same way
+    # badlands_terrain_cluster_tests does — the lab wants the real Nanite-style
+    # DAG but none of the renderer it is replacing.
+    add_executable(badlands_rhi_lab
+        src/executables/rhi_lab/main.cpp
+        src/executables/rhi_lab/lab_scene.cpp
+        src/game/geometry/terrain_clusters.cpp
+        src/game/map/map_data.cpp
+        src/engine/rendering/geometry/aabb.cpp
+        src/core/parallel.cpp
+    )
+    target_link_libraries(badlands_rhi_lab PRIVATE
+        badlands_slang assets meshoptimizer SDL3::SDL3)
+    target_include_directories(badlands_rhi_lab PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/glm
+        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+        ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+        ${taskflow_SOURCE_DIR})
+    target_link_options(badlands_rhi_lab PRIVATE "-Wl,-ld_new")
+
+    # Argument rejection, asserted through the exit code. The lab is an
+    # executable with no test binary of its own, so this is the honest
+    # mechanism -- and these arguments used to be ACCEPTED: an out-of-range
+    # count truncated into a valid-looking value and rendered silently wrong
+    # geometry with exit status 0.
+    # The resize DECISION, tested without a window. The loop's own bug -- gating
+    # on the render targets, which are not rebuilt at zero size -- is invisible
+    # to a windowed test unless you happen to minimize and restore to exactly
+    # the same size, so it gets a deterministic test of its own.
+    add_executable(badlands_rhi_lab_tests
+        src/executables/rhi_lab/surface_size_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp)
+    target_include_directories(badlands_rhi_lab_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras)
+    add_test(NAME badlands_rhi_lab_tests COMMAND badlands_rhi_lab_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # Windowed resize, end to end: open a window, ask for a different size,
+    # and assert everything sized to the frame followed the reported PIXEL
+    # size. LABELLED and excluded from the default run because it needs a
+    # display -- over SSH or with the screen locked it would fail for reasons
+    # that say nothing about the code, and a suite that flakes gets ignored.
+    # Run it with: ctest -L display
+    add_test(NAME rhi_lab_windowed_resize
+             COMMAND badlands_rhi_lab --self-test 40 --width 800 --height 600
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(rhi_lab_windowed_resize PROPERTIES
+                         LABELS display
+                         TIMEOUT 120)
+
+    foreach(bad_args
+        "--nodes;4294967298"      # truncates to 2 without a range check
+        "--width;4294967297"      # truncates to 1
+        "--nodes;-5"              # wraps huge when narrowed
+        "--tau;notanumber"        # used to reach std::terminate
+        "--height;0")
+        string(REPLACE ";" "_" bad_name "${bad_args}")
+        string(REPLACE "-" "" bad_name "${bad_name}")
+        # --out into the build tree: these must exit before rendering, but if
+        # one ever stops rejecting it writes its PNG here rather than dropping
+        # an untracked LFS-matching file into the repo root. That is exactly
+        # what happened while proving these tests fail without their fix.
+        add_test(NAME rhi_lab_rejects_${bad_name}
+                 COMMAND badlands_rhi_lab ${bad_args}
+                         --out ${CMAKE_BINARY_DIR}/rhi_lab_reject_check.png
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(rhi_lab_rejects_${bad_name}
+                             PROPERTIES WILL_FAIL TRUE)
+    endforeach()
+endif()
+
+# badlands_slang_tests: compile, cache, hot-reload and reflection, against
+# test-local fixtures. Skipped along with badlands_slang when the SDK is absent.
+if(BADLANDS_HAVE_SLANG)
+    add_executable(badlands_slang_tests
+        src/engine/tests/slang_compiler_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp
+    )
+    target_include_directories(badlands_slang_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/src/engine/tests
+    )
+    target_link_libraries(badlands_slang_tests PRIVATE badlands_slang)
+    if(APPLE)
+        target_link_options(badlands_slang_tests PRIVATE "-Wl,-ld_new")
+    endif()
+    add_test(NAME badlands_slang_tests COMMAND badlands_slang_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
 add_executable(badlands_readback_tests
     src/engine/tests/readback_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
