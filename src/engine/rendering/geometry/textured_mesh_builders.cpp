@@ -52,6 +52,7 @@ TexturedMeshResult GenerateSphereTexturedMesh(float radius, int resolution) {
     result.vertices.push_back(tangent.x);
     result.vertices.push_back(tangent.y);
     result.vertices.push_back(tangent.z);
+    result.vertices.push_back(kDefaultTangentHandedness);
   }
 
   result.vertex_count = static_cast<uint32_t>(sphere.indices.size());
@@ -87,6 +88,7 @@ TexturedMeshResult GenerateQuadTexturedMesh(float size, int resolution,
       result.vertices.push_back(tangent.x);
       result.vertices.push_back(tangent.y);
       result.vertices.push_back(tangent.z);
+      result.vertices.push_back(kDefaultTangentHandedness);
     };
 
     // Triangle 1
@@ -123,6 +125,7 @@ TexturedMeshResult GenerateQuadTexturedMesh(float size, int resolution,
       result.vertices.push_back(tangent.x);
       result.vertices.push_back(tangent.y);
       result.vertices.push_back(tangent.z);
+      result.vertices.push_back(kDefaultTangentHandedness);
     }
 
     result.vertex_count = static_cast<uint32_t>(quad.indices.size());
@@ -185,7 +188,7 @@ TexturedMeshResult GenerateHeightmapMesh(
   struct GridVertex {
     glm::vec3 pos;
     glm::vec3 normal;
-    glm::vec3 tangent;
+    glm::vec4 tangent;
     glm::vec2 uv;
   };
   std::vector<GridVertex> grid(static_cast<size_t>(samples) * samples);
@@ -201,7 +204,8 @@ TexturedMeshResult GenerateHeightmapMesh(
       grid[static_cast<size_t>(j) * samples + i] = {
           glm::vec3(x, y, z),
           glm::normalize(glm::vec3(-dhdx, 1.0f, -dhdz)),
-          glm::normalize(glm::vec3(1.0f, dhdx, 0.0f)),
+          glm::vec4(glm::normalize(glm::vec3(1.0f, dhdx, 0.0f)),
+                    kDefaultTangentHandedness),
           glm::vec2((x + half) / size, (z + half) / size) * uv_scale};
     }
   }

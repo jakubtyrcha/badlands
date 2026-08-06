@@ -31,6 +31,8 @@ scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 5
 ```sh
 scripts/screenshot.sh badlands_viewer /tmp/c.png --character --clip walk --anim-time 0.5
 ```
+- **`ModelViewerView`'s generator list is: sphere, then `TreeCatalog()`, then one entry per prop** discovered under `assets/models/*/*.usdc` and **sorted by name** — `--generator <n>` indexes it, so an unsorted order would change which model a headless screenshot captures. The `.usdc` parses lazily inside `generate` (7 MB / 100k tris each); materials resolve eagerly via the `MaterialLibrary` cache.
+- **A prop's prims are merged into ONE mesh** (treasure_chest is 5, rock_moss_set_01 is 6, all sharing one pack). That merge is a viewer presentation choice — `BuildImportedModels` still returns the list.
 - **The character viewer needs no `Sim`.** It drives `src/engine/animation/` directly, which is the separation that layer exists to keep — the runtime knows nothing about EnTT, characters or badlands.
 - The shipped Quaternius rig is 53 joints and is **grounded at y=0** (joint origins span y=[0.000, 1.513]), so a character placed at a terrain height needs no vertical offset.
 

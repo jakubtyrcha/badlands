@@ -1,0 +1,6 @@
+{
+  "albedo": "textures/treasure_chest_diff_1k.jpg",
+  "normal": "textures/treasure_chest_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/treasure_chest_arm_1k.jpg"
+}

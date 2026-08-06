@@ -268,10 +268,10 @@ std::unique_ptr<TreeField> BuildTreeField(
     // the local uv into the baked tile.
     const std::vector<float> quad = {
         // pos            uv          normal        tangent
-        0, 0, 0,   0, 0,   0, 0, 1,   1, 0, 0,
-        0, 0, 0,   1, 0,   0, 0, 1,   1, 0, 0,
-        0, 0, 0,   0, 1,   0, 0, 1,   1, 0, 0,
-        0, 0, 0,   1, 1,   0, 0, 1,   1, 0, 0,
+        0, 0, 0,   0, 0,   0, 0, 1,   1, 0, 0, 1,
+        0, 0, 0,   1, 0,   0, 0, 1,   1, 0, 0, 1,
+        0, 0, 0,   0, 1,   0, 0, 1,   1, 0, 0, 1,
+        0, 0, 0,   1, 1,   0, 0, 1,   1, 0, 0, 1,
     };
     const std::vector<uint32_t> quad_indices = {0, 1, 2, 2, 1, 3};
     tf->impostor_vertex_buffer = UploadVertexBuffer(device, quad);

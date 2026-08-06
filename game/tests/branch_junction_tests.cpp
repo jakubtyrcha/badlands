@@ -327,8 +327,11 @@ TEST_CASE("SmoothVertexNormals: averages only its targets and never moves a vert
   // faces' normals stored as-is; vertex 1 and 2 are on the crease.
   std::vector<float> verts;
   auto push = [&](glm::vec3 p, glm::vec3 n) {
+    // pos(3) uv(2) normal(3) tangent(4) -- the trailing 1.0f is the tangent's
+    // handedness, without which this fixture writes a short vertex and every
+    // subsequent one reads its attributes from its neighbour.
     verts.insert(verts.end(), {p.x, p.y, p.z, 0.0f, 0.0f,
-                               n.x, n.y, n.z, 1.0f, 0.0f, 0.0f});
+                               n.x, n.y, n.z, 1.0f, 0.0f, 0.0f, 1.0f});
   };
   push({0, 0, 0}, {0, 0, 1});
   push({1, 0, 0}, {0, 0, 1});

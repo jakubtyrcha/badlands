@@ -8,7 +8,7 @@
 // indexed by @builtin(instance_index); material constants (tint, params,
 // transmission) live in a group-0 UBO.
 //
-// Feature: `instanced`. Vertex layout: pos(3)+uv(2)+normal(3)+tangent(3).
+// Feature: `instanced`. Vertex layout: pos(3)+uv(2)+normal(3)+tangent(4).
 
 @if(!shadow_pass)
 import package::common::frame::{frame, worldSpaceToClipSpace, worldSpaceToWorldCameraOffsetedSpace};

@@ -8,7 +8,7 @@
 //
 // Feature: `instanced` (pushed by MeshRenderingMaterial::BuildDeclaration for
 // GeometryType::kInstancedMesh). Vertex layout: the standard textured-mesh
-// stream pos(3)+uv(2)+normal(3)+tangent(3) — instances are NOT a vertex stream.
+// stream pos(3)+uv(2)+normal(3)+tangent(4) — instances are NOT a vertex stream.
 //
 // Textures (group 0): albedo (RGB), normal (tangent-space, GL convention),
 // ARM (R=AO, G=roughness, B=metallic unused) — identical to normalmapped.
@@ -46,7 +46,7 @@ struct VertexInput {
     @location(0) pos: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) normal: vec3<f32>,
-    @location(3) tangent: vec3<f32>,
+    @location(3) tangent: vec4<f32>,
 }
 
 @if(!shadow_pass)
@@ -54,7 +54,7 @@ struct VertexOutputGBuffer {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) worldNormal: vec3<f32>,
-    @location(2) worldTangent: vec3<f32>,
+    @location(2) worldTangent: vec4<f32>,
 }
 
 @if(shadow_pass)
@@ -77,7 +77,8 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
     // Uniform-scale assumption (fine for instanced meshes): use m directly for
     // normal/tangent rather than the inverse-transpose.
     output.worldNormal = normalize((m * vec4<f32>(input.normal, 0.0)).xyz);
-    output.worldTangent = normalize((m * vec4<f32>(input.tangent, 0.0)).xyz);
+    output.worldTangent = vec4<f32>(
+        normalize((m * vec4<f32>(input.tangent.xyz, 0.0)).xyz), input.tangent.w);
     output.uv = input.uv;
 
     return output;

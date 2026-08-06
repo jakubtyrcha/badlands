@@ -9,7 +9,7 @@ namespace {
 constexpr float kUvMeters = 4.0f;
 
 void PushExtrusionVertex(std::vector<float>& out, const glm::vec3& pos, const glm::vec3& normal,
-                         const glm::vec3& tangent) {
+                         const glm::vec4& tangent) {
   PushVertex(out, pos, glm::vec2(pos.x / kUvMeters, pos.z / kUvMeters), normal, tangent);
 }
 
@@ -43,9 +43,12 @@ TexturedMeshResult BuildExtrusionMesh(const std::vector<glm::vec2>& ring, float 
   for (size_t i = 0; i < n; ++i) {
     glm::vec3 a(top[i].x, top_y, top[i].y);
     glm::vec3 b(top[(i + 1) % n].x, top_y, top[(i + 1) % n].y);
-    PushExtrusionVertex(verts, a, glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
-    PushExtrusionVertex(verts, c_top, glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
-    PushExtrusionVertex(verts, b, glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
+    PushExtrusionVertex(verts, a, glm::vec3(0, 1, 0),
+                        glm::vec4(1, 0, 0, kDefaultTangentHandedness));
+    PushExtrusionVertex(verts, c_top, glm::vec3(0, 1, 0),
+                        glm::vec4(1, 0, 0, kDefaultTangentHandedness));
+    PushExtrusionVertex(verts, b, glm::vec3(0, 1, 0),
+                        glm::vec4(1, 0, 0, kDefaultTangentHandedness));
   }
 
   // Angled walls (one quad per base edge). Normals point outward for a mesa
@@ -74,7 +77,8 @@ TexturedMeshResult BuildExtrusionMesh(const std::vector<glm::vec2>& ring, float 
     }
 
     glm::vec3 edge = base_j - base_i;
-    glm::vec3 tangent = glm::length(edge) > 1e-8f ? glm::normalize(edge) : glm::vec3(1, 0, 0);
+    const glm::vec3 t3 = glm::length(edge) > 1e-8f ? glm::normalize(edge) : glm::vec3(1, 0, 0);
+    const glm::vec4 tangent(t3, kDefaultTangentHandedness);
 
     for (const glm::vec3& v : {base_i, top_j, base_j, base_i, top_i, top_j}) {
       PushExtrusionVertex(verts, v, normal, tangent);

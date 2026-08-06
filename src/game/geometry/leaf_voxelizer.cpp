@@ -274,7 +274,8 @@ TexturedMeshResult EmitTetMesh(const LeafVoxelGrid& grid, const LeafVoxelizeOpti
     const uint32_t base = mesh.vertex_count;
     for (const glm::vec3& p : canonical) {
       const glm::vec3 world = cell_center + radius * (basis * (roll * p));
-      PushVertex(mesh.vertices, world, uv, a_prime, t);
+      PushVertex(mesh.vertices, world, uv, a_prime,
+                 glm::vec4(t, kDefaultTangentHandedness));
     }
     mesh.vertex_count = static_cast<uint32_t>(mesh.vertices.size() / kTexturedMeshFloatsPerVertex);
     for (uint32_t k : kTetTriIndices) mesh.indices.push_back(base + k);

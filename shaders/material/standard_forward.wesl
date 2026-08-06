@@ -3,7 +3,7 @@
 // IBL, so it "follows the G-buffer". Alpha-tested (params.x = cutoff; 0 = never
 // discards -> plain opaque); shaded double-sided when the material is cull-None
 // (foliage). Casts an (alpha-tested) shadow via the shadow_pass variant.
-// Vertex layout: pos(3)+uv(2)+normal(3)+tangent(3).
+// Vertex layout: pos(3)+uv(2)+normal(3)+tangent(4).
 
 @if(!shadow_pass)
 import package::common::frame::{frame, worldCameraOffsetedSpaceToClipSpace};

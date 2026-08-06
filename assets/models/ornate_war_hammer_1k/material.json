@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/ornate_war_hammer_diff_1k.jpg",
+  "normal": "textures/ornate_war_hammer_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/ornate_war_hammer_arm_1k.jpg",
+  "displacement": "textures/ornate_war_hammer_disp_1k.png"
+}

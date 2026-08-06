@@ -758,7 +758,8 @@ TexturedMeshResult GenerateTreeMesh(const TreeOptions& o,
         const float u = charts.u_offset[b] +
                         (static_cast<float>(j) / static_cast<float>(segments)) *
                             static_cast<float>(charts.wraps[b]);
-        PushVertex(mesh.vertices, pos, glm::vec2(u, v), nrm, tng);
+        PushVertex(mesh.vertices, pos, glm::vec2(u, v), nrm,
+                   glm::vec4(tng, kDefaultTangentHandedness));
       }
     }
     mesh.vertex_count = static_cast<uint32_t>(mesh.vertices.size() / kTexturedMeshFloatsPerVertex);
@@ -899,7 +900,8 @@ TexturedMeshResult GenerateLeafMesh(const TreeOptions& o,
         const glm::vec3 tangent = glm::normalize(rot * glm::vec3(1, 0, 0));
         const uint32_t base = mesh.vertex_count;
         for (int c = 0; c < 4; ++c) {
-          PushVertex(mesh.vertices, origin + rot * local[c], uv[c], rnormal, tangent);
+          PushVertex(mesh.vertices, origin + rot * local[c], uv[c], rnormal,
+                     glm::vec4(tangent, kDefaultTangentHandedness));
         }
         mesh.vertex_count =
             static_cast<uint32_t>(mesh.vertices.size() / kTexturedMeshFloatsPerVertex);

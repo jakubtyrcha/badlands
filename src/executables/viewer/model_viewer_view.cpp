@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <string>
 #include <utility>
 
@@ -10,6 +11,8 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/app/sdl_input_util.hpp"  // NormalizedWheelY
+#include "engine/assets/usd_loader.hpp"
+#include "engine/rendering/geometry/usd_mesh_adapter.hpp"
 #include "engine/rendering/gpu_instance_renderer.hpp"  // GpuInstanceRenderer::InstanceInput
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/scene_build.hpp"
@@ -108,10 +111,10 @@ TexturedMeshResult MakeImpostorQuad() {
   TexturedMeshResult out;
   out.mesh.geometry_type = GeometryType::kTexturedMesh;
   out.mesh.vertices = {
-      0, 0, 0,  0, 0,  0, 0, 1,  1, 0, 0,
-      0, 0, 0,  1, 0,  0, 0, 1,  1, 0, 0,
-      0, 0, 0,  0, 1,  0, 0, 1,  1, 0, 0,
-      0, 0, 0,  1, 1,  0, 0, 1,  1, 0, 0,
+      0, 0, 0,  0, 0,  0, 0, 1,  1, 0, 0, 1,
+      0, 0, 0,  1, 0,  0, 0, 1,  1, 0, 0, 1,
+      0, 0, 0,  0, 1,  0, 0, 1,  1, 0, 0, 1,
+      0, 0, 0,  1, 1,  0, 0, 1,  1, 0, 0, 1,
   };
   out.mesh.vertex_count = 4;
   out.mesh.indices = {0, 1, 2, 2, 1, 3};
@@ -119,6 +122,56 @@ TexturedMeshResult MakeImpostorQuad() {
   // Bounds are only used for entity culling; the real extent is the placement
   // radius the material expands the quad to.
   out.local_bounds = Aabb{glm::vec3(-1.0f), glm::vec3(1.0f)};
+  return out;
+}
+
+// Every .usdc under assets/models/, sorted by path.
+//
+// Sorted because `--generator <n>` indexes this list, so a directory-iteration
+// order that varies by filesystem would silently change which model a headless
+// screenshot captures.
+//
+// EVERY file, not the first per directory: badlands_usd_tests' ShippedModels()
+// enumerates the same tree the same way, and the two lists have to agree for a
+// test's index to mean the same model the viewer shows. Stopping at the first
+// hit here would desynchronise them the moment a directory shipped two.
+std::vector<std::filesystem::path> DiscoverPropModels() {
+  std::vector<std::filesystem::path> out;
+  const std::filesystem::path root{"assets/models"};
+  std::error_code ec;
+  if (!std::filesystem::exists(root, ec)) return out;
+
+  for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+    if (!entry.is_directory()) continue;
+    for (const auto& file : std::filesystem::directory_iterator(entry.path(), ec)) {
+      if (file.path().extension() == ".usdc") out.push_back(file.path());
+    }
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// Concatenates every mesh of an imported prop into one.
+//
+// A prop is shown as a whole object, but three of the shipped ones are several
+// prims (treasure_chest is 5, rock_moss_set_01 is 6). Since every prim of a
+// given model resolves to the SAME material pack, one draw is both correct and
+// what a viewer entry should be -- splitting a chest into five separately
+// selectable pieces would be worse, not more faithful.
+TexturedMeshResult MergeImportedMeshes(std::vector<ImportedModel>& models) {
+  TexturedMeshResult out;
+  out.mesh.geometry_type = GeometryType::kTexturedMesh;
+
+  for (auto& model : models) {
+    const auto& src = model.mesh.mesh;
+    const uint32_t base = out.mesh.vertex_count;
+    out.mesh.vertices.insert(out.mesh.vertices.end(), src.vertices.begin(),
+                             src.vertices.end());
+    for (uint32_t index : src.indices) out.mesh.indices.push_back(base + index);
+    out.mesh.vertex_count += src.vertex_count;
+  }
+  out.mesh.dirty = true;
+  out.local_bounds = ComputeLocalAabb(out.mesh);
   return out;
 }
 
@@ -290,6 +343,36 @@ void ModelViewerView::BuildGenerators() {
   // than a single-mesh `generate` lambda.
   for (const NamedTreeOptions& setup : TreeCatalog()) {
     generators_.push_back({.name = setup.name, .tree = setup.options});
+  }
+  // One entry per imported prop. The material is resolved eagerly (MaterialLibrary
+  // caches per pack directory), but the .usdc is parsed lazily inside `generate`
+  // -- these files run to 7 MB and 100k triangles, so parsing all ten at startup
+  // to show one would be most of a second wasted per launch.
+  for (const std::filesystem::path& usdc : DiscoverPropModels()) {
+    const std::string pack_dir = usdc.parent_path().string();
+    generators_.push_back(
+        {.name = usdc.parent_path().filename().string(),
+         .generate = [usdc, pack_dir] {
+           UsdSceneData scene = LoadUsdScene(usdc.string());
+           UsdMaterialBinding binding;
+           // Every shipped prop is single-material, so the default answers for
+           // all of its prims; by_material stays empty until one is not.
+           binding.default_pack_dir = pack_dir;
+
+           std::vector<ImportedModel> models = BuildImportedModels(scene, binding);
+           if (models.empty()) {
+             spdlog::error("ModelViewerView: '{}' imported no meshes",
+                           usdc.string());
+             return GeneratedMesh{};
+           }
+           TexturedMeshResult mesh = MergeImportedMeshes(models);
+           // Same contract as the sphere: rest the mesh on the y=0 floor via a
+           // transform, never by baking the offset into the vertices.
+           const glm::mat4 transform = glm::translate(
+               glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
+           return GeneratedMesh{std::move(mesh), transform};
+         },
+         .pack_dir = pack_dir});
   }
 }
 
@@ -619,7 +702,12 @@ void ModelViewerView::RebuildScene() {
   } else if (gen.generate) {
     GeneratedMesh generated = gen.generate();
     world_bounds = generated.mesh.local_bounds.TransformedBy(generated.transform);
-    AddMeshEntity(scene_, "mesh", std::move(generated.mesh), gen.material,
+    // Imported props carry a pack directory and resolve their material here, so
+    // the texture load (and any manifest failure) is confined to the entry
+    // actually being shown -- see MeshGenerator::pack_dir.
+    const DeferredMaterial material =
+        gen.pack_dir.empty() ? gen.material : matlib_.Get(gen.pack_dir);
+    AddMeshEntity(scene_, "mesh", std::move(generated.mesh), material,
                   generated.transform);
   } else {
     // A MeshGenerator must set exactly one of `tree`/`generate`. Guard the

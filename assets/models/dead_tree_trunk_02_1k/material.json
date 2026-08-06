@@ -1,0 +1,7 @@
+{
+  "albedo": "textures/dead_tree_trunk_02_diff_1k.jpg",
+  "normal": "textures/dead_tree_trunk_02_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/dead_tree_trunk_02_arm_1k.jpg",
+  "displacement": "textures/dead_tree_trunk_02_disp_1k.png"
+}

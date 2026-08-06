@@ -22,7 +22,8 @@
 //     output (opaque, no alpha test: voxel leaves are solid tets).
 //
 // Vertex layout: the standard textured-mesh stream pos(3)+uv(2)+normal(3)+
-// tangent(3) -- tangent is unused (no TBN, no normal map); for `instanced`,
+// tangent(4) -- tangent is unused (no TBN, no normal map), so this shader
+// declares it vec3 and lets the 4th component go unread; for `instanced`,
 // instances are NOT a vertex stream (matches instanced_gbuffer.wesl).
 
 @if(!instanced && !shadow_pass)

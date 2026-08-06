@@ -1,0 +1,6 @@
+{
+  "albedo": "textures/ornate_medieval_mace_diff_1k.jpg",
+  "normal": "textures/ornate_medieval_mace_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/ornate_medieval_mace_arm_1k.jpg"
+}

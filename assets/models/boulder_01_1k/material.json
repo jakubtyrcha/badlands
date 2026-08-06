@@ -1,0 +1,6 @@
+{
+  "albedo": "textures/boulder_01_diff_1k.jpg",
+  "normal": "textures/boulder_01_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/boulder_01_arm_1k.jpg"
+}

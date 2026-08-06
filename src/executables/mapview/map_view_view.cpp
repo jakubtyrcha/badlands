@@ -128,7 +128,7 @@ void MapViewView::BuildRiverMesh() {
     // convention, and correct for the same reason: each cross-section is FLAT
     // at its own water level, so the surface has no slope to shade.
     PushVertex(v, p, glm::vec2(p.x, p.z), glm::vec3(0.0f, 1.0f, 0.0f),
-               glm::vec3(1.0f, 0.0f, 0.0f));
+               glm::vec4(1.0f, 0.0f, 0.0f, kDefaultTangentHandedness));
   }
 
   river_mesh_ = registry_.create();
@@ -550,7 +550,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     for (const glm::vec3& p : water_tris) {
       // uv = world XZ, normal +Y, tangent +X -- a flat plane needs no more.
       PushVertex(v, p, glm::vec2(p.x, p.z), glm::vec3(0.0f, 1.0f, 0.0f),
-                 glm::vec3(1.0f, 0.0f, 0.0f));
+                 glm::vec4(1.0f, 0.0f, 0.0f, kDefaultTangentHandedness));
     }
     // Created directly in the registry, mirroring what SceneGraph's
     // MeshAttachment path emplaces (mesh + AABB + material + the pass tag).

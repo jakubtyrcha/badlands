@@ -1,0 +1,6 @@
+{
+  "albedo": "textures/tree_stump_01_diff_1k.jpg",
+  "normal": "textures/tree_stump_01_nor_dx_1k.jpg",
+  "normal_format": "dx",
+  "arm": "textures/tree_stump_01_arm_1k.jpg"
+}

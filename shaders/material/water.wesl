@@ -35,7 +35,7 @@
 //     present so the kDeferred variant's shadow pipeline compiles). `still` never
 //     reaches it: kForwardTransparent registers only RenderPassType::kForward.
 //
-// Vertex layout: pos(3)+uv(2)+normal(3)+tangent(3); waves are a function of TRUE
+// Vertex layout: pos(3)+uv(2)+normal(3)+tangent(4); waves are a function of TRUE
 // world XZ (offset + camera) so they are camera-stationary.
 
 @if(!shadow_pass)

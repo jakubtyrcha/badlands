@@ -93,7 +93,7 @@ TexturedMeshResult BuildTriangleCasterMesh(const std::vector<glm::vec3>& local_t
     const glm::vec3& p1 = local_triangles[i + 1];
     const glm::vec3& p2 = local_triangles[i + 2];
     const glm::vec3 normal = glm::normalize(glm::cross(p1 - p0, p2 - p0));
-    const glm::vec3 tangent = glm::normalize(p1 - p0);
+    const glm::vec4 tangent(glm::normalize(p1 - p0), kDefaultTangentHandedness);
     PushVertex(verts, p0, glm::vec2(0.0f), normal, tangent);
     PushVertex(verts, p1, glm::vec2(0.0f), normal, tangent);
     PushVertex(verts, p2, glm::vec2(0.0f), normal, tangent);

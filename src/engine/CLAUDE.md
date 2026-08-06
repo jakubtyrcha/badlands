@@ -26,6 +26,19 @@ mips → sampled.
 - **`SceneGraph::SyncToRegistry` starts with `registry.clear()`.** An app that creates entities directly in its registry (mapview: the cluster terrain, the lake water) cannot also drive a SceneGraph over that same registry — the sync would wipe them every frame.
 - **`SceneContext::debug_lines` is ONE pointer, so a frame has ONE debug-line buffer.** The HOST owns it, clears it once, lets every overlay append, and points the context at it last. An overlay that owns its own buffer and assigns that pointer silently erases whatever another overlay drew, with no error anywhere — which is exactly what happened when the skeleton overlay joined the navmesh one (`src/game/visual/*_debug_overlay.*`).
 
+## The kTexturedMesh vertex is 12 floats, and the 12th is load-bearing
+- **`pos(3) + uv(2) + normal(3) + tangent(4)` = 48 bytes.** `tangent.w` is bitangent handedness; `gbuffer_encode.wesl` computes `B = tangent.w * cross(N, T)`. Three components cannot express it — negating `T` inverts the normal map's U response instead of its V.
+- **Never write vertices positionally against a hardcoded stride.** Use `PushVertex` (it takes a `vec4` precisely so a stride change breaks the build) or `kTexturedMeshFloatsPerVertex`. A short write shears the mesh and nothing else reports it.
+- **`AddMeshEntity` checks `vertices.size() == vertex_count * stride`** and logs the offending mesh. That check is what caught the floor and both impostor quads when the tangent widened; leave it in.
+- **`kCubeMapMesh` stays 9 floats with a 3-component tangent** — it has no UVs, so no handedness to carry.
+
+## USD import (`src/engine/assets/`) — the one target that is NOT badlands_engine
+- **`badlands_usd_lib` links tinyusdz and deliberately not SDL3/Dawn/`badlands_engine`**, so `badlands_usd_tests` exercises the parser with no GPU in the link line. Every other "pure CPU" suite here still drags in all of `badlands_engine`; keep this one clean.
+- **`usd_scene.hpp` must stay free of tinyusdz AND Dawn types.** `TexturedMeshResult` includes `<dawn/webgpu_cpp.h>` via `mesh_components.hpp`, so the conversion to it lives one layer up in `rendering/geometry/usd_mesh_adapter.cpp` and the Dawn dependency starts there.
+- **The tinyusdz pin is an untagged dev commit, on purpose.** No release can read our props: v0.9.4 types MaterialX `subsurface_radius` as `float` where the assets author `color3f` (rejects the whole stage), and v0.9.9-rc7's material converter only accepts `ND_open_pbr_surface_surfaceshader`. See the CMakeLists comment before bumping.
+- **A prop's material never comes from its USD.** The files reference `_nor_gl_*.exr`/`_rough_*.exr` that the Poly Haven download does not contain; the real material is the `material.json` pack beside the model, and `UsdMaterialBinding` maps USD material name → pack dir.
+- **Tydra supplies tangents; do not write your own.** It computes them when absent and passes authored ones through — these assets author `tangents` as **half4**, which the loader decodes (rejecting the format would discard tangents on exactly the meshes that shipped good ones).
+
 ## Verifying rendering work
 - Verify through the existing G-buffer debug views and the R/G/B debug materials rather than new tooling.
 - Test generators and geometry on small patches; keep structural parameters compile-time and only size runtime.

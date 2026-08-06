@@ -126,7 +126,7 @@ RenderGpu& GetRenderGpu() {
 // voxel_foliage.wesl), and a generated sphere's spherical uv would otherwise
 // make it vary with longitude -- fine for a tree, useless for an assertion.
 void FlattenBrightness(TexturedMeshResult& mesh) {
-  constexpr size_t kStride = 11;  // pos3 + uv2 + normal3 + tangent3
+  constexpr size_t kStride = kTexturedMeshFloatsPerVertex;
   for (size_t v = 0; v + kStride <= mesh.mesh.vertices.size(); v += kStride) {
     mesh.mesh.vertices[v + 3] = 1.0f;  // uv.x
     mesh.mesh.vertices[v + 4] = 0.0f;  // uv.y
@@ -144,7 +144,7 @@ void AddIdentityIndices(TexturedMeshResult& mesh) {
 }
 
 void Translate(TexturedMeshResult& mesh, glm::vec3 by) {
-  constexpr size_t kStride = 11;
+  constexpr size_t kStride = kTexturedMeshFloatsPerVertex;
   for (size_t v = 0; v + kStride <= mesh.mesh.vertices.size(); v += kStride) {
     mesh.mesh.vertices[v + 0] += by.x;
     mesh.mesh.vertices[v + 1] += by.y;

@@ -42,7 +42,7 @@ TexturedMeshResult GenerateLakeSurfaceMesh(const std::vector<glm::vec2>& path,
   const int nz = static_cast<int>(std::ceil((hi.y - z0) / density)) + 1;
 
   const glm::vec3 normal(0.0f, 1.0f, 0.0f);
-  const glm::vec3 tangent(1.0f, 0.0f, 0.0f);
+  const glm::vec4 tangent(1.0f, 0.0f, 0.0f, kDefaultTangentHandedness);
   auto& v = result.mesh.vertices;
 
   for (int iz = 0; iz + 1 < nz; ++iz) {

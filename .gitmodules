@@ -16,3 +16,6 @@
 [submodule "third_party/ozz-animation"]
 	path = third_party/ozz-animation
 	url = https://github.com/guillaumeblanc/ozz-animation
+[submodule "third_party/tinyusdz"]
+	path = third_party/tinyusdz
+	url = https://github.com/lighttransport/tinyusdz

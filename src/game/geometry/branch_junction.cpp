@@ -310,6 +310,12 @@ std::vector<uint32_t> StitchLoops(const std::vector<uint32_t>& a_ids,
 void SmoothVertexNormals(std::vector<float>& vertices, size_t floats_per_vertex,
                          const std::vector<uint32_t>& indices,
                          const std::vector<uint32_t>& vertex_ids) {
+  // 11 is this function's own BOUNDS requirement, not the kTexturedMesh stride:
+  // it touches offsets 0..2 (position), 5..7 (normal) and 8..10 (tangent xyz),
+  // so 11 floats is the least it can safely index. Deliberately not
+  // kTexturedMeshFloatsPerVertex -- the parameter exists so this stays layout-
+  // agnostic, and tying the guard to one layout would reject a caller whose
+  // own stride is fine.
   if (vertex_ids.empty() || floats_per_vertex < 11) return;
   const std::unordered_set<uint32_t> targets(vertex_ids.begin(), vertex_ids.end());
   const size_t vertex_count = vertices.size() / floats_per_vertex;
