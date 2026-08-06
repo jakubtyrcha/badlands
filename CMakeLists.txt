@@ -1979,6 +1979,15 @@ target_link_libraries(shapeshifter_core PUBLIC
     "-framework Metal" "-framework Foundation"
     "-framework QuartzCore" "-framework CoreGraphics")
 
+# Match the app's deployment target (editors/shapeshifter/project.yml says
+# macOS 15.0). Without this the archive builds at the SDK default and the link
+# warns that it was "built for newer 'macOS' version (26.0) than being linked
+# (15.0)" -- which is not cosmetic: the app would declare a 15.0 minimum while
+# carrying objects free to use APIs that do not exist there. Only this target
+# is constrained; the rest of the repo has no such contract to honour.
+target_compile_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
+target_link_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
+
 # shapeshifter_core_tests: the editor core's own suite, moved across as-is.
 # It is still on doctest rather than this repo's Catch2 — porting 15 files is
 # mechanical but it does not belong in a commit whose claim is "only paths and
