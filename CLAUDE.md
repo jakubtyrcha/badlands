@@ -81,6 +81,7 @@ input, scene construction. **Rust owns** the feature-libs.
 
 ## Rules you can break before you open the directory
 - **Dawn is pinned** (SHA in `cmake/FetchDawn.cmake`). Do not bump it without approval.
+- **Slang is pinned too** (version + sha256 in `scripts/fetch_slang.sh`), and REQUIRED — configure fails without it. Same rule: do not bump without approval.
 - **Binary assets are git LFS** (`.gitattributes`: `*.bin/*.exr/*.jpg/*.jpeg/*.png/*.ttf/*.wasm`); a plain `git add` on one stores an LFS pointer, so stage asset paths deliberately.
 - **Four time bases, and they never mix:** `real_*` (app shell only), `anim_*` (views only), `*_ticks` (int64, 1 tick = 1/120 s — everything under `game/`), narrative `*_hours` (derived). Full contract in `game/CLAUDE.md`; nothing under `game/` may see a real or presentation `dt`.
 - **FFI is data-only.** Cross-language seams are narrow C ABIs with no game concepts leaking into the Rust libs.

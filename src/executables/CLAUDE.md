@@ -16,7 +16,7 @@ It builds on `badlands_rhi` + `badlands_slang`, not `badlands_engine`, and owns 
 own SDL loop. That is deliberate, not temporary: `SdlViewerApp` is Dawn all the way
 through (`RenderContext` hands views a `wgpu::Device`), so the RHI-era app shell is a
 separate decision, taken when the render graph gives an `RhiView` something to mean.
-Skipped by the build when the Slang SDK is absent (`tools/slang_probe/README.md`).
+The Slang SDK it needs is a required prerequisite — `scripts/fetch_slang.sh`.
 ```sh
 ./build/badlands_rhi_lab --out /tmp/lab.png              # materials + lighting
 ./build/badlands_rhi_lab --out /tmp/vis.png --debug-vis  # the visibility buffer

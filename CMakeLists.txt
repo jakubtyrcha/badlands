@@ -238,28 +238,32 @@ endif()
 # badlands_slang: Slang -> (target source + engine reflection). Sits ABOVE the
 # RHI; the RHI never invokes a compiler, so the dependency runs one way.
 #
-# The SDK is gitignored (see tools/slang_probe/README.md for how to fetch it),
-# so this target and its tests are SKIPPED when it is absent rather than
-# breaking the build for a fresh clone.
+# The SDK is gitignored (third_party/toolchains/), and REQUIRED: fetch it with
+# scripts/fetch_slang.sh, which pins a version and verifies its checksum.
+#
+# It used to be optional, skipping when absent -- right while this was a probe
+# nothing depended on, wrong now. The editor is a Slang consumer that cannot
+# skip: editors/shapeshifter is an Xcode project, and an .app target has no
+# equivalent of "configured out". Failing here with the command to run beats
+# failing later at a link error that reads like a code fault.
 set(BADLANDS_SLANG_ROOT "${CMAKE_SOURCE_DIR}/third_party/toolchains/slang"
     CACHE PATH "Prebuilt Slang SDK root")
-if(EXISTS "${BADLANDS_SLANG_ROOT}/include/slang.h")
-    message(STATUS "badlands_slang: enabled (${BADLANDS_SLANG_ROOT})")
-    add_library(badlands_slang STATIC src/engine/slang/slang_compiler.cpp)
-    target_include_directories(badlands_slang PUBLIC
-        ${CMAKE_SOURCE_DIR}/src
-        ${BADLANDS_SLANG_ROOT}/include
-        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
-    target_link_libraries(badlands_slang PUBLIC
-        badlands_rhi "${BADLANDS_SLANG_ROOT}/lib/libslang.dylib")
-    set_target_properties(badlands_slang PROPERTIES
-        BUILD_RPATH "${BADLANDS_SLANG_ROOT}/lib"
-        INSTALL_RPATH "${BADLANDS_SLANG_ROOT}/lib")
-    set(BADLANDS_HAVE_SLANG ON)
-else()
-    message(STATUS "badlands_slang: skipped (no SDK at ${BADLANDS_SLANG_ROOT})")
-    set(BADLANDS_HAVE_SLANG OFF)
+if(NOT EXISTS "${BADLANDS_SLANG_ROOT}/include/slang.h")
+    message(FATAL_ERROR
+        "Slang SDK not found at ${BADLANDS_SLANG_ROOT}.\n"
+        "  Run: scripts/fetch_slang.sh")
 endif()
+message(STATUS "badlands_slang: ${BADLANDS_SLANG_ROOT}")
+add_library(badlands_slang STATIC src/engine/slang/slang_compiler.cpp)
+target_include_directories(badlands_slang PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${BADLANDS_SLANG_ROOT}/include
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+target_link_libraries(badlands_slang PUBLIC
+    badlands_rhi "${BADLANDS_SLANG_ROOT}/lib/libslang.dylib")
+set_target_properties(badlands_slang PROPERTIES
+    BUILD_RPATH "${BADLANDS_SLANG_ROOT}/lib"
+    INSTALL_RPATH "${BADLANDS_SLANG_ROOT}/lib")
 
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
@@ -1405,7 +1409,7 @@ endif()
 # badlands_rhi_lab: the MVP that proves the RHI + Slang + visibility-buffer
 # stack end to end. Headless — the MVP RHI has no swapchain — so it renders a
 # frame and writes a PNG.
-if(BADLANDS_HAVE_SLANG AND APPLE)
+if(APPLE)
     # Compiles the cluster DAG build + its deps directly, the same way
     # badlands_terrain_cluster_tests does — the lab wants the real Nanite-style
     # DAG but none of the renderer it is replacing.
@@ -1481,23 +1485,21 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
 endif()
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against
-# test-local fixtures. Skipped along with badlands_slang when the SDK is absent.
-if(BADLANDS_HAVE_SLANG)
-    add_executable(badlands_slang_tests
-        src/engine/tests/slang_compiler_tests.cpp
-        third_party/catch2/extras/catch_amalgamated.cpp
-    )
-    target_include_directories(badlands_slang_tests PRIVATE
-        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-        ${CMAKE_SOURCE_DIR}/src/engine/tests
-    )
-    target_link_libraries(badlands_slang_tests PRIVATE badlands_slang)
-    if(APPLE)
-        target_link_options(badlands_slang_tests PRIVATE "-Wl,-ld_new")
-    endif()
-    add_test(NAME badlands_slang_tests COMMAND badlands_slang_tests
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+# test-local fixtures.
+add_executable(badlands_slang_tests
+    src/engine/tests/slang_compiler_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_slang_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_slang_tests PRIVATE badlands_slang)
+if(APPLE)
+    target_link_options(badlands_slang_tests PRIVATE "-Wl,-ld_new")
 endif()
+add_test(NAME badlands_slang_tests COMMAND badlands_slang_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_splat_tests: the Dreams-style splat chain, proven by reading pixels.
 # Slang for three of the four passes and hand-written MSL for the atomic one --
@@ -1505,7 +1507,7 @@ endif()
 # on a 64-bit type. It needs BOTH a Slang SDK and a Metal device, so it cannot
 # live in badlands_slang_tests (no device) or badlands_rhi_metal_tests (no
 # compiler).
-if(BADLANDS_HAVE_SLANG AND APPLE)
+if(APPLE)
     add_executable(badlands_splat_tests
         src/engine/tests/splat_tests.cpp
         third_party/catch2/extras/catch_amalgamated.cpp

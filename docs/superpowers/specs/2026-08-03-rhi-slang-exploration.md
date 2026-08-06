@@ -370,7 +370,9 @@ Re-measure before trusting these; they are a snapshot, not a contract.
 ## Probe findings (2026-08-03)
 
 Measured with `tools/slang_probe` against **Slang v2026.14.1**, macOS arm64, M5 Pro.
-Reproduce with that directory's README. Three shaders were hand-ported from WESL:
+(That directory has since been deleted. It existed to answer the three questions
+below and they are answered; the version it measured is the one
+`scripts/fetch_slang.sh` now pins.) Three shaders were hand-ported from WESL:
 `terrain_cluster` (+ `frame`, `terrain_layers`, `gbuffer_encode`) and `instance_classify`
 (+ `instance_common`). All compile clean to both the `metal` and `hlsl` targets.
 
