@@ -21,6 +21,7 @@ are touching:
 | Apps, `AppView`s, AI-sandbox modes, CLI flags | `src/executables/CLAUDE.md` |
 | Map data contract, patch extraction, rivers | `src/mapgen/CLAUDE.md` |
 | Nim→WASM brains | `scripts/brains/CLAUDE.md` |
+| Shapeshifter, the SDF editor — Swift/SwiftUI shell, two build systems | `editors/shapeshifter/CLAUDE.md` |
 
 ## System Rules
 * Use **bullet points**.
@@ -62,6 +63,7 @@ Don't assume. Don't hide confusion. Surface tradeoffs. Before implementing:
 - **`src/mapview/`** — terrain/biome presentation for `badlands_mapview`.
 - **Procgen is three stages with ONE interface between them:** `coarse-hydraulic-erosion-sim` (`tools/protogen/`, standalone, cached on disk) → `detailed-patch-extraction` (`PatchRequest` → `PatchData`) → `map-detailing` (a sink: the existing mapview/game render path). The boundary is enforced by CMake targets, not convention — stage 3 links the contract and not the providers. See `docs/superpowers/specs/2026-08-02-procgen-stage-split-design.md`.
 - **`src/executables/`** — the apps; each builds its scene from the world in its own `AppView`.
+- **`editors/`** — authoring tools, outside the `src/` layer rules. Only `editors/shapeshifter/` today: the SDF editor, moved in from its own repo. It is the one place with a Swift/SwiftUI app and a second build system (XcodeGen), and the one place that still drives Metal through metal-cpp rather than `src/engine/rhi`. Read `editors/shapeshifter/CLAUDE.md` before touching it.
 
 Ownership: **C++ owns** window, GPU, render loop, renderer, world, geometry, camera,
 input, scene construction. **Rust owns** the feature-libs.

@@ -6,31 +6,40 @@ files). The viewport is a per-pixel sphere-traced render of the CSG scene,
 evaluated every frame (see Rendering below), navigated by an always-on
 cursor-anchored camera.
 
+Shapeshifter is the editor for badlands and lives in that repo, at
+`editors/shapeshifter/`. Its C++ core is a CMake target alongside the engine;
+only the Swift app is still an Xcode project.
+
 ## Requirements
 
 - macOS 15+
 - Xcode (current)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
+- The repo's usual CMake + Ninja toolchain
 
 ## Build & run
 
+From this directory:
+
 ```sh
-xcodegen generate                                             # regenerate Shapeshifter.xcodeproj from project.yml
-xcodebuild -scheme Shapeshifter build -derivedDataPath build  # build the app
-open build/Build/Products/Debug/Shapeshifter.app
+xcodegen generate                                                   # regenerate Shapeshifter.xcodeproj from project.yml
+xcodebuild -scheme Shapeshifter build -derivedDataPath DerivedData  # build the app
+open DerivedData/Build/Products/Debug/Shapeshifter.app
 ```
 
-(Or open `Shapeshifter.xcodeproj` in Xcode and run the `Shapeshifter` scheme
-directly.)
+The app target's pre-build phase runs `scripts/build.sh shapeshifter_core` and
+links the `build/libshapeshifter_core.a` that produces, so the single
+`xcodebuild` above builds both halves. (Or open `Shapeshifter.xcodeproj` in
+Xcode and run the `Shapeshifter` scheme directly — same phase, same result.)
 
 `project.yml` is the source of truth for the Xcode project — never hand-edit
 the generated `.xcodeproj`; re-run `xcodegen generate` after changing it.
 
-To build and run the core test suite:
+The core and its test suite are CMake targets, driven from the repo root:
 
 ```sh
-xcodebuild -scheme CoreTests build -derivedDataPath build
-./build/Build/Products/Debug/CoreTests
+scripts/build.sh shapeshifter_core        # just the core
+scripts/test.sh shapeshifter_core_tests   # 211 cases, via ctest
 ```
 
 ## Using the editor
@@ -149,9 +158,9 @@ pipeline and its tunables.
 
 ## Architecture
 
-Three targets: `ShapeshifterCore` (C++ static library), `Shapeshifter` (the
-Swift app), and `CoreTests` (a doctest-based command-line test runner for
-the core).
+Three targets: `shapeshifter_core` (C++ static library, CMake),
+`shapeshifter_core_tests` (a doctest-based command-line runner for the core,
+CMake/ctest), and `Shapeshifter` (the Swift app, XcodeGen).
 
 - **Core** (`core/src`) owns the scene document, orbit camera and its
   controller, cursor-anchored navigation (`navigation.h`), SDF-traced picking,

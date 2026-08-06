@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-#include "math.h" // is_finite3
+#include "math_util.h" // is_finite3
 
 namespace sq {
 

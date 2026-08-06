@@ -7,7 +7,7 @@
 #include <ground_grid.h> // kGroundAxisY -- shared with the ground plate's shader
 
 #include "gizmo.h"
-#include "math.h"      // trs_matrix
+#include "math_util.h"      // trs_matrix
 #include "scene.h"
 #include "sdf.h"        // local_sdf_node -- profiles are measured off the shape's own field
 #include "sdf_scene.h"  // sdf_eval_node

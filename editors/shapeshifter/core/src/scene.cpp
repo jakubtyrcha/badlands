@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "math.h"
+#include "math_util.h"
 
 namespace sq {
 
