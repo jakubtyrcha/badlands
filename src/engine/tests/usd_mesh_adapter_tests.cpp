@@ -117,9 +117,30 @@ TEST_CASE("UVs land in the right slots of the interleave", "[usd][adapter]") {
   const auto models =
       BuildImportedModels(MakeScene(MakeQuad(), false, 1.0f), DefaultBinding());
   const auto& v = models[0].mesh.mesh.vertices;
-  // Vertex 1's UV was (1, 0), at floats 3 and 4 of its 11.
+  // Vertex 1's UV was (1, 0) in USD, at floats 3 and 4 of its 11. V is flipped
+  // on import (see the next test), so it arrives as (1, 1).
   CHECK(v[1 * kStride + 3] == Catch::Approx(1.0f));
-  CHECK(v[1 * kStride + 4] == Catch::Approx(0.0f));
+  CHECK(v[1 * kStride + 4] == Catch::Approx(1.0f));
+}
+
+TEST_CASE("V is flipped from USD's lower-left origin to the sampler's upper-left",
+          "[usd][adapter]") {
+  // USD's `st` puts (0,0) at the texture's LOWER-left; WebGPU samples with row
+  // 0 at the TOP. Passing V through unflipped mirrors every model vertically.
+  //
+  // That is not a subtle wrongness on atlased models: rock_moss_set_01's
+  // diffuse is a 3x3 atlas whose bottom third is pure black and whose six
+  // meshes all live in v >= 1/3, so the unflipped read sampled the black band
+  // and the rocks rendered as black blobs.
+  const auto models =
+      BuildImportedModels(MakeScene(MakeQuad(), false, 1.0f), DefaultBinding());
+  const auto& v = models[0].mesh.mesh.vertices;
+
+  // U is untouched; only V mirrors.
+  CHECK(v[0 * kStride + 3] == Catch::Approx(0.0f));  // vertex 0 was (0, 0)
+  CHECK(v[0 * kStride + 4] == Catch::Approx(1.0f));
+  CHECK(v[2 * kStride + 3] == Catch::Approx(1.0f));  // vertex 2 was (1, 1)
+  CHECK(v[2 * kStride + 4] == Catch::Approx(0.0f));
 }
 
 TEST_CASE("local bounds cover the converted geometry", "[usd][adapter]") {

@@ -16,7 +16,10 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <cmath>
 #include <iostream>
+#include <limits>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -97,12 +100,44 @@ TEST_CASE("report what each shipped prop contains", "[usd][.report]") {
     size_t total_tris = 0;
     for (const auto& mesh : scene.meshes) {
       total_tris += mesh.triangle_count();
+
+      // Ranges, because a size check only proves an array is present -- these
+      // are what show whether its CONTENTS are sane.
+      auto range = [](const std::vector<float>& a, size_t stride, size_t c) {
+        float lo = std::numeric_limits<float>::infinity(), hi = -lo;
+        for (size_t i = c; i < a.size(); i += stride) {
+          lo = std::min(lo, a[i]);
+          hi = std::max(hi, a[i]);
+        }
+        return std::pair{lo, hi};
+      };
+      const auto [u_lo, u_hi] = range(mesh.uvs, 2, 0);
+      const auto [v_lo, v_hi] = range(mesh.uvs, 2, 1);
+
+      // Unit-length is what the shading maths assumes; a zero or NaN normal
+      // reads as an unlit black surface with nothing logged.
+      float n_lo = std::numeric_limits<float>::infinity(), n_hi = -n_lo;
+      size_t bad_normals = 0, bad_tangents = 0;
+      for (size_t i = 0; i < mesh.vertex_count(); ++i) {
+        const float nl = std::sqrt(mesh.normals[i * 3 + 0] * mesh.normals[i * 3 + 0] +
+                                   mesh.normals[i * 3 + 1] * mesh.normals[i * 3 + 1] +
+                                   mesh.normals[i * 3 + 2] * mesh.normals[i * 3 + 2]);
+        const float tl = std::sqrt(mesh.tangents[i * 3 + 0] * mesh.tangents[i * 3 + 0] +
+                                   mesh.tangents[i * 3 + 1] * mesh.tangents[i * 3 + 1] +
+                                   mesh.tangents[i * 3 + 2] * mesh.tangents[i * 3 + 2]);
+        n_lo = std::min(n_lo, nl);
+        n_hi = std::max(n_hi, nl);
+        if (!(nl > 0.9f && nl < 1.1f)) ++bad_normals;
+        if (!(tl > 0.9f && tl < 1.1f)) ++bad_tangents;
+      }
+
       std::cout << "  mesh '" << mesh.name << "' mat='" << mesh.material_name
                 << "' verts=" << mesh.vertex_count()
                 << " tris=" << mesh.triangle_count()
-                << " n=" << (mesh.normals.empty() ? '-' : 'y')
-                << " uv=" << (mesh.uvs.empty() ? '-' : 'y')
-                << " tan=" << (mesh.tangents.empty() ? '-' : 'y') << "\n";
+                << " u=[" << u_lo << "," << u_hi << "]"
+                << " v=[" << v_lo << "," << v_hi << "]"
+                << " |n|=[" << n_lo << "," << n_hi << "]"
+                << " badN=" << bad_normals << " badT=" << bad_tangents << "\n";
     }
     std::cout << "  TOTAL tris=" << total_tris << "\n";
 

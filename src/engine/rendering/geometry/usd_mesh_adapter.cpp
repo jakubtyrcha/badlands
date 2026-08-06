@@ -72,7 +72,12 @@ std::vector<ImportedModel> BuildImportedModels(
       v[1] = position.y;
       v[2] = position.z;
       v[3] = src.uvs[i * 2 + 0];
-      v[4] = src.uvs[i * 2 + 1];
+      // V flips: USD's `st` puts (0,0) at the texture's LOWER-left, while the
+      // sampler addresses row 0 at the TOP. Passing it through would mirror
+      // every model vertically -- which on an atlased texture is not a subtle
+      // error but a wrong-region read (rock_moss_set_01's atlas has a black
+      // bottom third that the unflipped V sampled directly).
+      v[4] = 1.0f - src.uvs[i * 2 + 1];
       v[5] = normal.x;
       v[6] = normal.y;
       v[7] = normal.z;
