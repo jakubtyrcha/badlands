@@ -1193,8 +1193,13 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
         "--height;0")
         string(REPLACE ";" "_" bad_name "${bad_args}")
         string(REPLACE "-" "" bad_name "${bad_name}")
+        # --out into the build tree: these must exit before rendering, but if
+        # one ever stops rejecting it writes its PNG here rather than dropping
+        # an untracked LFS-matching file into the repo root. That is exactly
+        # what happened while proving these tests fail without their fix.
         add_test(NAME rhi_lab_rejects_${bad_name}
                  COMMAND badlands_rhi_lab ${bad_args}
+                         --out ${CMAKE_BINARY_DIR}/rhi_lab_reject_check.png
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
         set_tests_properties(rhi_lab_rejects_${bad_name}
                              PROPERTIES WILL_FAIL TRUE)
