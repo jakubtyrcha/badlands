@@ -44,11 +44,13 @@ std::unique_ptr<FrameAllocator> FrameAllocator::Create(
   auto allocator = std::unique_ptr<FrameAllocator>(
       new FrameAllocator(device, desc, std::move(slots)));
 
-  // One block per slot up front, so the steady state never allocates.
+  // ONE primary buffer, partitioned per slot, so a binding table built once
+  // keeps naming the same buffer while only the offset moves.
+  auto primary = allocator->MakeBlock(desc.block_size * slot_count, 0, 0);
+  if (!primary) return nullptr;  // MakeBlock logged why
   for (size_t i = 0; i < slot_count; ++i) {
-    auto block = allocator->MakeBlock(desc.block_size, i, 0);
-    if (!block) return nullptr;  // MakeBlock logged why
-    allocator->slots_[i].blocks.push_back(std::move(block));
+    allocator->slots_[i].blocks.push_back(primary);
+    allocator->slots_[i].base_offset = uint64_t(i) * desc.block_size;
   }
   return allocator;
 }
@@ -126,7 +128,11 @@ std::optional<FrameAlloc> FrameAllocator::Allocate(uint64_t size,
   }
 
   uint64_t offset = *aligned;
-  const uint64_t block_capacity = s.blocks[s.block_index]->GetSize();
+  // The primary is shared, so this slot's capacity is its window, not the
+  // whole buffer. Growth blocks are this slot's alone and use all of theirs.
+  const bool on_primary = s.block_index == 0;
+  const uint64_t block_capacity =
+      on_primary ? desc_.block_size : s.blocks[s.block_index]->GetSize();
 
   // Does it fit in the block being bumped?
   if (size > block_capacity || offset > block_capacity - size) {
@@ -176,8 +182,10 @@ std::optional<FrameAlloc> FrameAllocator::Allocate(uint64_t size,
 
   s.cursor = offset + size;
   s.bytes_used += size;
+  // Only the primary carries this slot's base; a growth block is all ours.
+  const uint64_t base = s.block_index == 0 ? s.base_offset : 0;
   return FrameAlloc{.buffer = s.blocks[s.block_index].get(),
-                    .offset = offset,
+                    .offset = base + offset,
                     .size = size};
 }
 
@@ -187,6 +195,12 @@ std::optional<FrameAlloc> FrameAllocator::Write(std::span<const uint8_t> data,
   if (!alloc) return std::nullopt;  // Allocate logged why
   alloc->buffer->Write(alloc->offset, data);
   return alloc;
+}
+
+IBuffer* FrameAllocator::PrimaryBuffer() const {
+  return slots_.empty() || slots_[0].blocks.empty()
+             ? nullptr
+             : slots_[0].blocks[0].get();
 }
 
 uint64_t FrameAllocator::BytesUsedThisFrame() const {

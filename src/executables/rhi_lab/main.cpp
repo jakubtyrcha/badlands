@@ -30,6 +30,7 @@
 
 #include <initializer_list>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -43,9 +44,11 @@ extern "C" {
 
 #include "engine/rhi/metal/metal_rhi.hpp"
 #include "engine/rhi/rhi_device.hpp"
+#include "engine/rhi/rhi_frame_allocator.hpp"
 #include "engine/slang/slang_compiler.hpp"
 #include "game/geometry/terrain_clusters.hpp"
 #include "src/executables/rhi_lab/lab_scene.hpp"
+#include "src/executables/rhi_lab/surface_size.hpp"
 
 using namespace badlands;
 using namespace badlands::rhi;
@@ -203,7 +206,8 @@ std::optional<BindingEntry> BindByName(const ShaderReflection& refl,
                                        const char* name,
                                        IBuffer* buffer = nullptr,
                                        ITextureView* view = nullptr,
-                                       ISampler* sampler = nullptr) {
+                                       ISampler* sampler = nullptr,
+                                       bool dynamic = false) {
   const auto* b = refl.FindBinding(name);
   if (!b) {
     spdlog::error("rhi_lab: shader has no binding named '{}'", name);
@@ -215,6 +219,7 @@ std::optional<BindingEntry> BindByName(const ShaderReflection& refl,
   e.buffer = buffer;
   e.texture_view = view;
   e.sampler = sampler;
+  e.dynamic_offset = dynamic;
   return e;
 }
 
@@ -583,7 +588,27 @@ int main(int argc, char** argv) {
     cam.speed = std::max(20.0f, dist * 0.35f);
   }
 
+  // Per-frame uniforms come from the ring, not from one buffer rewritten in
+  // place. With three frames in flight, `frame_ubo->Write(0, ...)` at the top
+  // of frame N memcpys over bytes the GPU is still reading for N-1 and N-2:
+  // the camera a frame renders with is whichever write happened to land, so
+  // geometry from one position gets resolved with another's inv_view_proj.
+  // The tear is subtle enough that the image still looks right, which is why
+  // it survived a windowed run and two reviews.
+  auto frame_alloc = FrameAllocator::Create(
+      *device, {.block_size = 64 * 1024,
+                .usage = BufferUsage::Uniform,
+                .label = "lab_frame_ring"});
+  if (!frame_alloc) return 1;
+
+  // The tables name this buffer once; only the offset moves per frame.
+  IBuffer* frame_ring = frame_alloc->PrimaryBuffer();
+  if (!frame_ring) return 1;
+
   size_t cpu_selected = 0;
+  // The slice this frame's uniforms live in. Every table binds the ring with
+  // this as a dynamic offset.
+  uint32_t frame_offset = 0;
   auto update_frame_uniforms = [&](uint32_t w, uint32_t h) {
     const float aspect = float(w) / float(std::max(1u, h));
     const glm::mat4 view = cam.View();
@@ -607,7 +632,16 @@ int main(int argc, char** argv) {
     f.splat_uv = glm::vec4(1.0f / std::max(scene.size_x_m, 1.0f),
                            1.0f / std::max(scene.size_z_m, 1.0f), 0.0f, 0.0f);
     f.limits = glm::vec4(float(capacity), 0, 0, 0);
-    frame_ubo->Write(0, Bytes(f));
+
+    auto slice = frame_alloc->Write(Bytes(f));
+    if (!slice) {
+      // Logged by the allocator. Reusing the previous offset would render the
+      // previous frame's camera, which reads as stutter rather than as an
+      // error.
+      spdlog::error("rhi_lab: no room for this frame's uniforms");
+      return false;
+    }
+    frame_offset = uint32_t(slice->offset);
 
     // Oracle: the CPU selector this pass replaces. Same camera, same tau. If
     // the GPU picks a different number the port of the rule is wrong, and that
@@ -616,8 +650,8 @@ int main(int argc, char** argv) {
     SelectClusters(scene.dag, cam.position, fov_deg, float(h), opt.tau,
                    cpu_cut);
     cpu_selected = cpu_cut.size();
+    return true;
   };
-  update_frame_uniforms(opt.width, opt.height);
 
   // --- Binding tables ----------------------------------------------------
   const auto& sel_refl = select_pipe->GetReflection();
@@ -627,23 +661,23 @@ int main(int argc, char** argv) {
   const auto& res_refl = resolve_pipe->GetReflection();
 
   auto sel_entries =
-      Entries({BindByName(sel_refl, "frame", frame_ubo.get()),
+      Entries({BindByName(sel_refl, "frame", frame_ring, nullptr, nullptr, /*dynamic=*/true),
                BindByName(sel_refl, "clusters", clu.get()),
                BindByName(sel_refl, "selected", sel.get()),
                BindByName(sel_refl, "draw_args", args.get()),
                BindByName(sel_refl, "draw_counter", counter.get())});
   auto fin_entries =
-      Entries({BindByName(fin_refl, "frame", frame_ubo.get()),
+      Entries({BindByName(fin_refl, "frame", frame_ring, nullptr, nullptr, /*dynamic=*/true),
                BindByName(fin_refl, "draw_args", args.get()),
                BindByName(fin_refl, "draw_counter", counter.get())});
   auto terrain_entries =
-      Entries({BindByName(terrain_refl, "frame", frame_ubo.get()),
+      Entries({BindByName(terrain_refl, "frame", frame_ring, nullptr, nullptr, /*dynamic=*/true),
                BindByName(terrain_refl, "vertices", vtx.get()),
                BindByName(terrain_refl, "indices", idx.get()),
                BindByName(terrain_refl, "clusters", clu.get()),
                BindByName(terrain_refl, "selected", sel.get())});
   auto tree_entries =
-      Entries({BindByName(tree_refl, "frame", frame_ubo.get()),
+      Entries({BindByName(tree_refl, "frame", frame_ring, nullptr, nullptr, /*dynamic=*/true),
                BindByName(tree_refl, "trees", tree_inst.get()),
                BindByName(tree_refl, "tree_vertices", tree_vtx.get()),
                BindByName(tree_refl, "tree_indices", tree_idx.get())});
@@ -657,7 +691,7 @@ int main(int argc, char** argv) {
   BindingTablePtr resolve_table;
   auto rebuild_resolve = [&]() {
     auto res_entries = Entries({
-        BindByName(res_refl, "frame", frame_ubo.get()),
+        BindByName(res_refl, "frame", frame_ring, nullptr, nullptr, /*dynamic=*/true),
         BindByName(res_refl, "visbuffer", nullptr,
                    targets.visbuf->GetDefaultView()),
         BindByName(res_refl, "depthbuffer", nullptr,
@@ -719,7 +753,7 @@ int main(int argc, char** argv) {
   // Selection: classify then publish. Both write the args buffer, so it is
   // declared ShaderWrite here and IndirectArg before the draw -- the sort of
   // transition Metal ignores and the validation layer checks.
-  encoder->Transition(frame_ubo.get(), ResourceState::ShaderRead);
+  encoder->Transition(frame_ring, ResourceState::ShaderRead);
   encoder->Transition(clu.get(), ResourceState::ShaderRead);
   encoder->Transition(sel.get(), ResourceState::ShaderWrite);
   encoder->Transition(args.get(), ResourceState::ShaderWrite);
@@ -731,13 +765,13 @@ int main(int argc, char** argv) {
 
   auto* cs = encoder->BeginComputePass("select");
   cs->SetPipeline(select_pipe.get());
-  cs->SetBindingTable(0, select_table.get());
+  cs->SetBindingTable(0, select_table.get(), {&frame_offset, 1});
   cs->Dispatch(groups);
   cs->End();
 
   auto* cf = encoder->BeginComputePass("finalize");
   cf->SetPipeline(finalize_pipe.get());
-  cf->SetBindingTable(0, finalize_table.get());
+  cf->SetBindingTable(0, finalize_table.get(), {&frame_offset, 1});
   cf->Dispatch(1);
   cf->End();
 
@@ -766,12 +800,12 @@ int main(int argc, char** argv) {
   auto* vp = encoder->BeginRenderPass(vis_pass);
   vp->SetViewport(0, 0, float(w), float(h));
   vp->SetPipeline(terrain_pipe.get());
-  vp->SetBindingTable(0, terrain_table.get());
+  vp->SetBindingTable(0, terrain_table.get(), {&frame_offset, 1});
   vp->SetIndexBuffer(dummy_idx.get(), IndexFormat::Uint32);
   vp->DrawIndexedIndirect(args.get(), 0);
 
   vp->SetPipeline(tree_pipe.get());
-  vp->SetBindingTable(0, tree_table.get());
+  vp->SetBindingTable(0, tree_table.get(), {&frame_offset, 1});
   vp->SetIndexBuffer(tree_draw_idx.get(), IndexFormat::Uint32);
   vp->DrawIndexed(uint32_t(scene.tree_indices.size()),
                   uint32_t(scene.trees.size()));
@@ -802,7 +836,7 @@ int main(int argc, char** argv) {
   if (!rp) return;
   rp->SetViewport(0, 0, float(w), float(h));
   rp->SetPipeline(resolve_pipe.get());
-  rp->SetBindingTable(0, resolve_table.get());
+  rp->SetBindingTable(0, resolve_table.get(), {&frame_offset, 1});
   rp->Draw(3);
   rp->End();
 
@@ -865,6 +899,7 @@ int main(int argc, char** argv) {
     // event fights the frame in flight. One recreate per frame, at a defined
     // point.
     uint32_t pending_w = uint32_t(pw), pending_h = uint32_t(ph);
+    rhi_lab::SurfaceSizeTracker surface{uint32_t(pw), uint32_t(ph)};
     bool raised_on_show = false;
     bool running = true;
     int frame_no = 0;
@@ -880,6 +915,11 @@ int main(int argc, char** argv) {
     const int test_point_h = point_h / 2 + 32;
     const uint32_t initial_pixel_w = uint32_t(pw);
     uint32_t rendered_after_resize = 0;
+    // Which uniform slices the frames actually used. If consecutive frames
+    // share one, the CPU is overwriting bytes the GPU may still be reading --
+    // the hazard the ring exists to remove, and one that renders a plausible
+    // image while it happens.
+    std::set<uint32_t> frame_offsets_seen;
     uint64_t last_ticks = SDL_GetPerformanceCounter();
     const double tick_freq = double(SDL_GetPerformanceFrequency());
 
@@ -948,16 +988,26 @@ int main(int argc, char** argv) {
 
       // Paced HERE, at the top of the frame, not at Acquire.
       device->BeginFrame();
+      // Recycles this frame's slot. Safe without a check: BeginFrame above
+      // already blocked until the frame that previously owned it retired.
+      frame_alloc->BeginFrame(device->CurrentFrame());
 
       // RESIZE RULE 1: applied at exactly one point, after the pacing wait and
       // before any acquire or encoding. Nothing is recreated mid-frame.
-      if (pending_w != targets.width || pending_h != targets.height) {
+      //
+      // Gated on what was last applied TO THE SWAPCHAIN, not on the targets:
+      // the targets are deliberately not rebuilt at zero size, so gating on
+      // them meant a minimize-then-restore-to-the-same-size never told the
+      // swapchain to come back from 0x0.
+      bool fatal = false;
+      if (const auto action = surface.Update(pending_w, pending_h);
+          action.resize_swapchain) {
         swapchain->Resize(pending_w, pending_h);
-        if (pending_w > 0 && pending_h > 0) {
-          if (!MakeTargets(*device, pending_w, pending_h, targets)) break;
+        if (action.rebuild_targets) {
+          if (!MakeTargets(*device, pending_w, pending_h, targets)) fatal = true;
           // The resolve table is immutable and holds the OLD visbuffer and
           // depth views, so it has to be rebuilt too.
-          if (!rebuild_resolve()) break;
+          else if (!rebuild_resolve()) fatal = true;
         }
       }
 
@@ -966,12 +1016,12 @@ int main(int argc, char** argv) {
       // half a frame use each size.
       const uint32_t fw = targets.width, fh = targets.height;
 
-      auto frame = swapchain->Acquire();
-      if (frame.status == AcquireStatus::Ok) {
-        update_frame_uniforms(fw, fh);
+      auto frame = fatal ? AcquiredFrame{} : swapchain->Acquire();
+      if (frame.status == AcquireStatus::Ok && update_frame_uniforms(fw, fh)) {
         record_frame(frame.view, fw, fh, /*want_readback=*/false);
         swapchain->Present();
         ++rendered;
+        frame_offsets_seen.insert(frame_offset);
         if (opt.self_test_frames > 0 && fw != initial_pixel_w) {
           ++rendered_after_resize;
         }
@@ -984,6 +1034,17 @@ int main(int argc, char** argv) {
       // nothing, which is what keeps a minimized window from exhausting the
       // pacing budget.
       device->EndFrame();
+
+      // Leaving the loop here rather than at the failure itself. A `break`
+      // between BeginFrame and EndFrame takes a semaphore count that is never
+      // returned, and the destructor then trips libdispatch's
+      // "deallocated while in use" trap -- a crash that points nowhere near
+      // the allocation failure that caused it.
+      if (fatal) {
+        spdlog::error("rhi_lab: could not rebuild for {}x{}, stopping",
+                      pending_w, pending_h);
+        break;
+      }
     }
 
     device->WaitIdle();
@@ -1027,16 +1088,29 @@ int main(int argc, char** argv) {
             "rhi_lab self-test: resize took, but nothing rendered afterwards");
         return 1;
       }
+      // Distinct slices, one per frame in flight. A single reused offset means
+      // the per-frame uniforms are being overwritten under the GPU.
+      if (frame_offsets_seen.size() < device->FramesInFlight()) {
+        spdlog::error(
+            "rhi_lab self-test: only {} distinct uniform slice(s) across {} "
+            "frames with {} in flight -- the ring is not rotating and frame "
+            "N is overwriting what N-1 is still reading",
+            frame_offsets_seen.size(), rendered, device->FramesInFlight());
+        return 1;
+      }
       spdlog::info(
           "rhi_lab self-test OK: {} frames, {} after resizing {} -> {} pixels "
-          "wide",
-          rendered, rendered_after_resize, initial_pixel_w, final_pw);
+          "wide, {} distinct uniform slices",
+          rendered, rendered_after_resize, initial_pixel_w, final_pw,
+          frame_offsets_seen.size());
     }
     return 0;
   }
 
   device->BeginValidationScope();
   device->BeginFrame();
+  frame_alloc->BeginFrame(device->CurrentFrame());
+  if (!update_frame_uniforms(opt.width, opt.height)) return 1;
   record_frame(nullptr, opt.width, opt.height, /*want_readback=*/true);
   device->EndFrame();
   device->WaitIdle();

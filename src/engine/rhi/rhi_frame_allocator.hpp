@@ -21,6 +21,14 @@
 // RECYCLING IS SAFE BY CONSTRUCTION, not by checking: a slot is reset in
 // BeginFrame, and IRhiDevice::BeginFrame has already blocked until the frame
 // that previously owned that slot retired.
+//
+// ONE BUFFER, PARTITIONED BY SLOT -- not one buffer per slot. Binding tables
+// are immutable and hold a BUFFER, so a table built once can only follow the
+// frame if the buffer stays the same and just the offset moves. An allocator
+// handing out a different buffer each frame cannot back a per-frame binding at
+// all, which is the whole reason it exists. Growth blocks past the primary are
+// separate buffers and cannot be bound into an already-built table; that is
+// the exceptional path, and the warning says the ring is undersized.
 
 #include <cstdint>
 #include <memory>
@@ -72,6 +80,9 @@ class FrameAllocator {
   std::optional<FrameAlloc> Write(std::span<const uint8_t> data,
                                   uint64_t alignment = 0);
 
+  // The buffer every ordinary allocation comes from. Stable for the life of
+  // the allocator, so a binding table can name it once.
+  IBuffer* PrimaryBuffer() const;
   uint64_t BytesUsedThisFrame() const;
   // Blocks backing the current frame. More than one means the ring grew, which
   // is a sizing signal rather than an error.
@@ -79,10 +90,13 @@ class FrameAllocator {
 
  private:
   struct Slot {
+    // blocks[0] is always the shared primary; later entries are this slot's
+    // own growth buffers.
     std::vector<BufferPtr> blocks;
-    size_t block_index = 0;  // block currently being bumped
-    uint64_t cursor = 0;     // offset within blocks[block_index]
-    uint64_t bytes_used = 0; // across every block this frame
+    uint64_t base_offset = 0;  // this slot's window into the primary
+    size_t block_index = 0;    // block currently being bumped
+    uint64_t cursor = 0;       // offset within the current block's window
+    uint64_t bytes_used = 0;   // across every block this frame
   };
 
   FrameAllocator(IRhiDevice& device, const FrameAllocatorDesc& desc,

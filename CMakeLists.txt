@@ -1186,6 +1186,19 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
     # mechanism -- and these arguments used to be ACCEPTED: an out-of-range
     # count truncated into a valid-looking value and rendered silently wrong
     # geometry with exit status 0.
+    # The resize DECISION, tested without a window. The loop's own bug -- gating
+    # on the render targets, which are not rebuilt at zero size -- is invisible
+    # to a windowed test unless you happen to minimize and restore to exactly
+    # the same size, so it gets a deterministic test of its own.
+    add_executable(badlands_rhi_lab_tests
+        src/executables/rhi_lab/surface_size_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp)
+    target_include_directories(badlands_rhi_lab_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras)
+    add_test(NAME badlands_rhi_lab_tests COMMAND badlands_rhi_lab_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     # Windowed resize, end to end: open a window, ask for a different size,
     # and assert everything sized to the frame followed the reported PIXEL
     # size. LABELLED and excluded from the default run because it needs a

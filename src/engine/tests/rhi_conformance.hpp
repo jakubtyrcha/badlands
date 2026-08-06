@@ -850,11 +850,14 @@ inline void CheckFrameAllocatorRecyclesPerSlot(IRhiDevice& device) {
   REQUIRE(second);
   device.EndFrame();
 
-  // Different frames, so different slots: the same offset is fine, the same
-  // BUFFER is not, or the second frame is overwriting bytes the first may
-  // still be having read.
+  // The SAME buffer, at a DIFFERENT offset. That is the whole point of the
+  // partitioned primary: a binding table is immutable and names one buffer, so
+  // an allocator handing out a different buffer per frame could not back a
+  // per-frame binding at all. Distinct offsets are what stop frame N
+  // overwriting what N-1 is still being read from.
+  CHECK(first->buffer == second->buffer);
   if (device.FramesInFlight() > 1) {
-    CHECK(first->buffer != second->buffer);
+    CHECK(first->offset != second->offset);
   }
 
   // Advance until the FIRST slot comes round again -- exactly
@@ -869,6 +872,8 @@ inline void CheckFrameAllocatorRecyclesPerSlot(IRhiDevice& device) {
   auto wrapped = alloc->Allocate(256);
   REQUIRE(wrapped);
   CHECK(wrapped->buffer == first->buffer);
+  // Back on the first slot, so back at its base -- the slice is reused only
+  // now, once the frame that held it has retired.
   CHECK(wrapped->offset == first->offset);
   device.EndFrame();
   device.WaitIdle();
@@ -1150,8 +1155,9 @@ inline void CheckWaitIdleDoesNotRetireTheOpenFrame(IRhiDevice& device) {
 // usable. The caller's contract is that a refused allocation skips one draw
 // and the frame carries on, so the very next Allocate has to be safe.
 inline void CheckFrameAllocatorSurvivesGrowthFailure(IRhiDevice& device) {
-  // Enough successes for the per-slot blocks, then every further create fails.
-  FailAfterNDevice failing(device, int(device.FramesInFlight()));
+  // Exactly one success: the shared primary. Every growth block after that
+  // fails, which is the path under test.
+  FailAfterNDevice failing(device, 1);
   auto alloc = FrameAllocator::Create(failing, {.block_size = 1024,
                                                 .max_bytes_per_frame = 65536,
                                                 .label = "growthfail"});
