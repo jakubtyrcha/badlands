@@ -16,7 +16,16 @@
 
 #include "shared_types.h" // sq_float4
 
-#ifdef __METAL_VERSION__
+// sq_float2 may already be typedef'd by sdf_scene.h, which the ground-grid
+// shader also includes. An identical typedef repeats harmlessly in C++ and MSL;
+// the guard keeps Slang out of that question entirely.
+#if defined(SDF_SLANG)
+#ifndef SQ_FLOAT2_DEFINED
+#define SQ_FLOAT2_DEFINED
+typedef float2 sq_float2;
+#endif
+#define GG_CONST static const
+#elif defined(__METAL_VERSION__)
 typedef metal::float2 sq_float2;
 #define GG_CONST constant
 #else
@@ -72,7 +81,16 @@ GG_CONST float kGroundMaxRayT = 1.0e4f;
 // this file needs. Vector/scalar arithmetic (+ - * /) is spelled directly:
 // both simd_float2 and metal::float2 broadcast scalars, so no wrapper needed.
 
-#ifdef __METAL_VERSION__
+#if defined(SDF_SLANG)
+inline float     gg_abs(float v)                { return abs(v); }
+inline sq_float2 gg_abs2(sq_float2 v)           { return abs(v); }
+inline float     gg_min(float a, float b)       { return min(a, b); }
+inline float     gg_max(float a, float b)       { return max(a, b); }
+inline sq_float2 gg_max2(sq_float2 a, float b)  { return max(a, sq_float2(b, b)); }
+inline sq_float2 gg_fract2(sq_float2 v)         { return frac(v); }
+inline sq_float2 gg_make2(float x, float y)     { return sq_float2(x, y); }
+inline sq_float4 gg_make4(float x, float y, float z, float w) { return sq_float4(x, y, z, w); }
+#elif defined(__METAL_VERSION__)
 inline float     gg_abs(float v)                { return metal::abs(v); }
 inline sq_float2 gg_abs2(sq_float2 v)           { return metal::abs(v); }
 inline float     gg_min(float a, float b)       { return metal::min(a, b); }

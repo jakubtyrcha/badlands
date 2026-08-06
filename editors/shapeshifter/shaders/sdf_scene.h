@@ -28,7 +28,13 @@
 // desync from the host layout. Nothing below is ever a struct field; the 2D
 // types exist because most of the shape SDFs work in a (radial, axial) plane.
 #if defined(SDF_SLANG)
+// ground_grid.h typedefs sq_float2 too, and the ground-grid shader includes
+// both headers. C++ and MSL accept an identical typedef twice; Slang reports it
+// as an AMBIGUOUS REFERENCE at every use site, so the two agree on one guard.
+#ifndef SQ_FLOAT2_DEFINED
+#define SQ_FLOAT2_DEFINED
 typedef float2 sq_float2;
+#endif
 typedef float3 sq_float3;
 #elif defined(__METAL_VERSION__)
 typedef metal::float2 sq_float2;

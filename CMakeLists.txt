@@ -2183,3 +2183,25 @@ endif()
 add_test(NAME shapeshifter_core_tests COMMAND shapeshifter_core_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# The editor's Slang entry points, compiled as a test rather than by a target.
+#
+# THIS IS WHAT KEEPS THE SLANG ARM OF sdf_scene.h HONEST. That header now
+# compiles as C++, MSL and Slang; the first two are exercised by
+# shapeshifter_core and by the Xcode app respectively, and without these the
+# third would be exercised by nothing until the renderer port lands -- an arm
+# that only rots. Slang is a required prerequisite, so these always run.
+#
+# One test per entry point, not one per file: a shader whose vertex stage
+# compiles and whose fragment stage does not should say which.
+foreach(shader debug_lines mesh raymarch ground_grid)
+    foreach(entry vs_main fs_main)
+        add_test(NAME shapeshifter_slang_${shader}_${entry}
+                 COMMAND ${BADLANDS_SLANG_ROOT}/bin/slangc
+                         ${SHAPESHIFTER_DIR}/shaders/slang/shapeshifter/${shader}.slang
+                         -target metal -entry ${entry}
+                         -I ${SHAPESHIFTER_DIR}/shaders
+                         -o ${CMAKE_CURRENT_BINARY_DIR}/shapeshifter_${shader}_${entry}.metal
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endforeach()
+endforeach()
+
