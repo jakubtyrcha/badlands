@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <string>
 #include <vector>
 
 #include <shapeshifter/ShapeshifterCore.h>
@@ -454,4 +455,286 @@ TEST_CASE("sample_scene: flat index<->(x,y,z) is the documented x-fastest biject
     CHECK(grid.values[far_idx] == doctest::Approx(0.45262794416288266f).epsilon(1e-5));
     CHECK(grid.values[near_idx] < 0.0f);
     CHECK(grid.values[far_idx] > 0.0f);
+}
+
+// =============================================================================
+// The six shapes added on top of cube and sphere.
+//
+// Literals below are derived with an independent numpy transcription of the
+// same published formulas -- never by running this codebase's C++ -- following
+// the convention the sd_box/sd_ellipsoid cases above set. The reusable snippet:
+//
+//   python3 -c "
+//   import numpy as np
+//   def sd_capped_cone(p, h, r1, r2):
+//       q = np.array([np.hypot(p[0], p[2]), p[1]])
+//       k1, k2 = np.array([r2, h]), np.array([r2 - r1, 2.0 * h])
+//       ca = np.array([q[0] - min(q[0], r1 if q[1] < 0 else r2), abs(q[1]) - h])
+//       cb = q - k1 + k2 * np.clip(np.dot(k1 - q, k2) / np.dot(k2, k2), 0.0, 1.0)
+//       s = -1.0 if (cb[0] < 0.0 and ca[1] < 0.0) else 1.0
+//       return s * np.sqrt(min(np.dot(ca, ca), np.dot(cb, cb)))
+//   def sd_rounded_cylinder(p, r, h, rb):
+//       d = np.array([np.hypot(p[0], p[2]) - (r - rb), abs(p[1]) - (h - rb)])
+//       return min(max(d[0], d[1]), 0.0) + np.linalg.norm(np.maximum(d, 0.0)) - rb
+//   # ... octahedron, regular polygon, vesica and square frustum likewise
+//   "
+//
+// The GEOMETRIC cases (zero set, extent, endpoint equivalences, Lipschitz) are
+// worth more than the literals and are derived from the shapes' definitions
+// rather than from any formula, so they would survive swapping an evaluator.
+
+namespace {
+
+// One node of the given shape at the origin, evaluated through the full
+// pack -> fold path: this exercises the shape id packing, params.x and the
+// cross-section contraction, not just the raw primitive.
+float eval_shape(Shape shape, float param, simd_float3 scale, simd_float3 p) {
+    SceneDocument doc;
+    Node node;
+    node.id = 1;
+    node.shape = shape;
+    node.shape_param = param;
+    node.scale = scale;
+    doc.add(node);
+    const std::optional<float> d = evaluate_scene_sdf(doc, p);
+    REQUIRE(d.has_value());
+    return *d;
+}
+
+// Deterministic, self-contained, and not std::mt19937: a fixed sequence keeps a
+// failure reproducible, and the distribution does not matter here -- the
+// Lipschitz claim is universal, so any spread of points is a valid probe.
+struct Lcg {
+    uint32_t state;
+    float next(float lo, float hi) {
+        state = state * 1664525u + 1013904223u;
+        return lo + (hi - lo) * (static_cast<float>(state >> 8) / 16777216.0f);
+    }
+    simd_float3 next3(float lo, float hi) {
+        const float x = next(lo, hi), y = next(lo, hi), z = next(lo, hi);
+        return simd_float3{x, y, z};
+    }
+};
+
+} // namespace
+
+TEST_CASE("new shape primitives, pinned against numpy") {
+    // Cone: h=2, base radius 1, sharp tip.
+    CHECK(sdf_sd_capped_cone(simd_float3{0, 0, 0}, 2.0f, 1.0f, 0.0f)
+          == doctest::Approx(-0.485071250f));
+    CHECK(sdf_sd_capped_cone(simd_float3{2, 1, 0}, 2.0f, 1.0f, 0.0f)
+          == doctest::Approx(1.697749375f));
+    // Rounded cylinder: r=1, h=3. rb=0 is a flat cylinder, rb=1 a capsule.
+    CHECK(sdf_sd_rounded_cylinder(simd_float3{2, 4, 0}, 1.0f, 3.0f, 0.0f)
+          == doctest::Approx(1.414213562f));
+    CHECK(sdf_sd_rounded_cylinder(simd_float3{0, 0, 0}, 1.0f, 3.0f, 1.0f)
+          == doctest::Approx(-1.0f));
+    CHECK(sdf_sd_octahedron(simd_float3{1, 1, 1}, 1.0f) == doctest::Approx(1.154700540f));
+    // Prism centre -> minus the apothem, r*cos(pi/n): the distance to the
+    // NEAREST edge, which is what pins the circumradius reading of `r`.
+    CHECK(sdf_sd_prism(simd_float3{0, 0, 0}, 1.0f, 1.0f, 6)
+          == doctest::Approx(-0.866025404f));
+    CHECK(sdf_sd_prism(simd_float3{0, 0, 0}, 1.0f, 1.0f, 4)
+          == doctest::Approx(-0.707106781f));
+    CHECK(sdf_sd_prism(simd_float3{2, 0, 0}, 1.0f, 1.0f, 6)
+          == doctest::Approx(1.133974596f));
+    CHECK(sdf_sd_vesica(simd_float3{0, 0, 0}, 2.0f, 1.0f) == doctest::Approx(-1.0f));
+    CHECK(sdf_sd_vesica(simd_float3{0, 3, 0}, 2.0f, 1.0f) == doctest::Approx(1.0f));
+    CHECK(sdf_sd_square_frustum(simd_float3{0, 0, 0}, 1.0f, 0.0f, 1.0f)
+          == doctest::Approx(-0.447213595f));
+    CHECK(sdf_sd_square_frustum(simd_float3{2, 0, 0}, 1.0f, 0.5f, 1.0f)
+          == doctest::Approx(1.212678125f));
+}
+
+TEST_CASE("the prism's `r` is its CIRCUMRADIUS, with a vertex facing +z") {
+    // The hazard this shape was flagged for: reading iq's parameter as the
+    // apothem instead puts the vertices at r/cos(pi/n) -- outside the node's own
+    // box, by a factor of two for a triangle. Both readings are pinned, since
+    // either one alone can be satisfied by the wrong convention.
+    for (const int n : {3, 4, 6, 12}) {
+        INFO("n = " << n);
+        const float an = static_cast<float>(M_PI) / static_cast<float>(n);
+        // A vertex sits on +z at exactly r ...
+        CHECK(sdf_sd_prism(simd_float3{0, 0, 1}, 1.0f, 1.0f, n) == doctest::Approx(0.0f));
+        // ... and the adjacent edge midpoint at pi/n, at only r*cos(pi/n).
+        const float a = std::cos(an);
+        CHECK(sdf_sd_prism(simd_float3{a * std::sin(an), 0.0f, a * std::cos(an)}, 1.0f, 1.0f, n)
+              == doctest::Approx(0.0f));
+        // Discriminating: the apothem reading would put a vertex out here.
+        CHECK(sdf_sd_prism(simd_float3{0, 0, 1.0f / a}, 1.0f, 1.0f, n) > 0.01f);
+    }
+}
+
+TEST_CASE("every new shape's zero set lands where its box says it should") {
+    // Points derived from each shape's DEFINITION against half-extents
+    // (r, hy, r) = (1, 2, 1), not from any formula -- so these survive swapping
+    // an evaluator for a different one that claims the same shape.
+    const simd_float3 scale = {2.0f, 4.0f, 2.0f}; // -> h = (1, 2, 1), r = 1, hy = 2
+
+    struct Case { const char* label; Shape shape; float param; simd_float3 surface; };
+    const Case cases[] = {
+        {"cone apex",             Shape::Cone,       0.0f, {0, 2, 0}},
+        {"cone base rim",         Shape::Cone,       0.0f, {1, -2, 0}},
+        {"cone base centre",      Shape::Cone,       0.0f, {0, -2, 0}},
+        {"truncated cone top",    Shape::Cone,       0.5f, {0.5f, 2, 0}},
+        {"cylinder side",         Shape::Capsule,    0.0f, {1, 0, 0}},
+        {"cylinder rim corner",   Shape::Capsule,    0.0f, {1, 2, 0}},
+        {"capsule side",          Shape::Capsule,    1.0f, {1, 0, 0}},
+        {"capsule pole",          Shape::Capsule,    1.0f, {0, 2, 0}},
+        {"octahedron +x vertex",  Shape::Octahedron, 0.0f, {1, 0, 0}},
+        {"octahedron +y vertex",  Shape::Octahedron, 0.0f, {0, 2, 0}},
+        {"pyramid apex",          Shape::Pyramid,    0.0f, {0, 2, 0}},
+        {"pyramid base corner",   Shape::Pyramid,    0.0f, {1, -2, 1}},
+        {"frustum top corner",    Shape::Pyramid,    0.5f, {0.5f, 2, 0.5f}},
+        {"prism vertex, +z",      Shape::Prism,      6.0f, {0, 0, 1}},
+        {"prism top edge",        Shape::Prism,      6.0f, {0, 2, 1}},
+        {"vesica pole",           Shape::Vesica,     0.0f, {0, 2, 0}},
+        {"vesica equator",        Shape::Vesica,     0.0f, {1, 0, 0}},
+    };
+
+    for (const Case& c : cases) {
+        INFO("case: " << c.label);
+        CHECK(eval_shape(c.shape, c.param, scale, c.surface) == doctest::Approx(0.0f).epsilon(1e-4));
+        // Discriminating: nudging outward along the same ray must read positive,
+        // so a degenerate evaluator returning ~0 everywhere cannot pass.
+        CHECK(eval_shape(c.shape, c.param, scale, c.surface * 1.2f) > 0.01f);
+    }
+}
+
+TEST_CASE("no shape escapes its own bounding box, and each one reaches it") {
+    // What sdf.cpp's scene_aabb and navigation.cpp's node_bounding_radius both
+    // assume: every shape is inscribed in position +- scale*0.5. Anisotropic on
+    // purpose -- this is also the cross-section contraction's containment claim.
+    const simd_float3 scale = {3.0f, 5.0f, 2.0f}; // h = (1.5, 2.5, 1)
+    const simd_float3 h = scale * 0.5f;
+
+    // widest_y: the height at which the cross-section reaches its full radius,
+    // as a fraction of h.y. Zero for the shapes with a waist at mid-height, but
+    // -1 (the base) for the two tapered ones -- a cone at mid-height is at HALF
+    // its base radius, so probing there would assert something false about a
+    // correct shape.
+    struct Case { const char* label; Shape shape; float param; float widest_y; };
+    const Case cases[] = {
+        {"cone", Shape::Cone, 0.35f, -1.0f},      {"capsule", Shape::Capsule, 0.6f, 0.0f},
+        {"octahedron", Shape::Octahedron, 0.0f, 0.0f}, {"pyramid", Shape::Pyramid, 0.25f, -1.0f},
+        {"prism", Shape::Prism, 5.0f, 0.0f},      {"vesica", Shape::Vesica, 0.0f, 0.0f},
+    };
+
+    Lcg rng{20260806u};
+    for (const Case& c : cases) {
+        INFO("case: " << std::string(c.label));
+        // Nothing outside the box may be inside the shape.
+        for (int i = 0; i < 400; ++i) {
+            const simd_float3 dir = simd_normalize(rng.next3(-1.0f, 1.0f) + simd_float3{1e-3f, 0, 0});
+            const simd_float3 outside = dir * (simd_length(h) * 1.05f + 0.01f);
+            CHECK(eval_shape(c.shape, c.param, scale, outside) > 0.0f);
+        }
+        // And the shape genuinely fills the box's height and cross-section
+        // rather than shrinking inside it -- the failure mode a contraction
+        // written with the wrong ratio would produce.
+        const float r = std::fmin(h.x, h.z);
+        CHECK(eval_shape(c.shape, c.param, scale, simd_float3{0, h.y, 0}) <= 1e-4f);
+        CHECK(eval_shape(c.shape, c.param, scale, simd_float3{0, -h.y, 0}) <= 1e-4f);
+        CHECK(eval_shape(c.shape, c.param, scale, simd_float3{0, c.widest_y * h.y, r}) <= 1e-4f);
+    }
+}
+
+TEST_CASE("every shape's field is 1-Lipschitz, which is what the sphere trace rests on") {
+    // THE contract of sdf_eval_node's cross-section scheme. A field that grows
+    // faster than distance overestimates, and an overestimating field makes the
+    // sphere trace step THROUGH surfaces -- so this is the assertion that fails
+    // if anyone rewrites the contraction as a division by half-extents (which
+    // dilates the two smaller axes instead of shrinking the larger ones).
+    //
+    // Deliberately includes strongly anisotropic half-extents, since that is the
+    // only regime where the contraction is not the identity.
+    struct Case { const char* label; Shape shape; float param; };
+    const Case cases[] = {
+        {"cone, sharp", Shape::Cone, 0.0f},        {"cone, truncated", Shape::Cone, 0.4f},
+        {"cone, cylinder", Shape::Cone, 1.0f},     {"capsule, flat", Shape::Capsule, 0.0f},
+        {"capsule, round", Shape::Capsule, 1.0f},  {"octahedron", Shape::Octahedron, 0.0f},
+        {"pyramid, sharp", Shape::Pyramid, 0.0f},  {"pyramid, frustum", Shape::Pyramid, 0.6f},
+        {"prism, 3", Shape::Prism, 3.0f},          {"prism, 12", Shape::Prism, 12.0f},
+        {"vesica, spindle", Shape::Vesica, 0.0f},
+    };
+
+    Lcg rng{7u};
+    for (const Case& c : cases) {
+        INFO("case: " << c.label);
+        float worst = 0.0f;
+        for (int i = 0; i < 600; ++i) {
+            const simd_float3 scale = rng.next3(0.3f, 6.0f);
+            const simd_float3 a = rng.next3(-5.0f, 5.0f);
+            const simd_float3 b = rng.next3(-5.0f, 5.0f);
+            const float dist = simd_length(a - b);
+            if (dist < 1e-3f) {
+                continue;
+            }
+            const float da = eval_shape(c.shape, c.param, scale, a);
+            const float db = eval_shape(c.shape, c.param, scale, b);
+            worst = std::fmax(worst, std::fabs(da - db) / dist);
+        }
+        INFO("worst ratio: " << worst);
+        CHECK(worst <= 1.0f + 1e-4f);
+    }
+}
+
+TEST_CASE("a shape at a parameter endpoint becomes a shape we already trust") {
+    // Cross-checks that cost nothing and catch a parameter wired to the wrong
+    // argument -- each one is a different evaluator arriving at the same answer.
+    SUBCASE("vesica with width == half-length is exactly a sphere") {
+        for (const simd_float3 p : {simd_float3{0.4f, 0.3f, -0.2f}, simd_float3{2.0f, 0, 0},
+                                    simd_float3{0, -1.7f, 0.9f}}) {
+            CHECK(sdf_sd_vesica(p, 1.0f, 1.0f)
+                  == doctest::Approx(simd_length(p) - 1.0f).epsilon(1e-5));
+        }
+    }
+    SUBCASE("capsule with full roundness on a cube-shaped box is exactly a sphere") {
+        const simd_float3 scale = {2.0f, 2.0f, 2.0f}; // h = (1,1,1) -> r = hy = 1
+        for (const simd_float3 p : {simd_float3{0.4f, 0.3f, -0.2f}, simd_float3{2.0f, 0, 0},
+                                    simd_float3{0, -1.7f, 0.9f}}) {
+            CHECK(eval_shape(Shape::Capsule, 1.0f, scale, p)
+                  == doctest::Approx(simd_length(p) - 1.0f).epsilon(1e-5));
+        }
+    }
+    SUBCASE("cone with tip ratio 1 is exactly a flat-capped cylinder") {
+        for (const simd_float3 p : {simd_float3{0.5f, 1.0f, 0}, simd_float3{2.0f, 0, 0},
+                                    simd_float3{0, 4.0f, 0}, simd_float3{1.4f, 3.5f, 0}}) {
+            CHECK(sdf_sd_capped_cone(p, 3.0f, 1.0f, 1.0f)
+                  == doctest::Approx(sdf_sd_rounded_cylinder(p, 1.0f, 3.0f, 0.0f)).epsilon(1e-5));
+        }
+    }
+    SUBCASE("pyramid with tip ratio 1 has a box's zero set (its field is weaker)") {
+        // Only the SIGN is compared: the frustum is a max-of-planes, so away
+        // from the surface it underestimates where sd_box is exact. The zero set
+        // is what has to agree, and it does.
+        const simd_float3 scale = {2.0f, 4.0f, 2.0f};
+        Lcg rng{99u};
+        for (int i = 0; i < 300; ++i) {
+            const simd_float3 p = rng.next3(-3.0f, 3.0f);
+            const float pyramid = eval_shape(Shape::Pyramid, 1.0f, scale, p);
+            const float box = eval_shape(Shape::Cube, 0.0f, scale, p);
+            CHECK((pyramid < 0.0f) == (box < 0.0f));
+            // ... and never overestimates the exact answer.
+            CHECK(std::fabs(pyramid) <= std::fabs(box) + 1e-4f);
+        }
+    }
+}
+
+TEST_CASE("the cross-section contraction is the identity when hx == hz") {
+    // The claim that makes the scheme worth having: an axially stretched capsule
+    // or cone -- the common case in this domain -- is measured EXACTLY, not
+    // conservatively. h = (1, 3, 1), so r = 1 and the contraction's two factors
+    // are both exactly 1.
+    const simd_float3 scale = {2.0f, 6.0f, 2.0f};
+    Lcg rng{31u};
+    for (int i = 0; i < 200; ++i) {
+        const simd_float3 p = rng.next3(-5.0f, 5.0f);
+        CHECK(eval_shape(Shape::Cone, 0.0f, scale, p)
+              == doctest::Approx(sdf_sd_capped_cone(p, 3.0f, 1.0f, 0.0f)).epsilon(1e-5));
+        CHECK(eval_shape(Shape::Capsule, 1.0f, scale, p)
+              == doctest::Approx(sdf_sd_rounded_cylinder(p, 1.0f, 3.0f, 1.0f)).epsilon(1e-5));
+        CHECK(eval_shape(Shape::Vesica, 0.0f, scale, p)
+              == doctest::Approx(sdf_sd_vesica(p, 3.0f, 1.0f)).epsilon(1e-5));
+    }
 }

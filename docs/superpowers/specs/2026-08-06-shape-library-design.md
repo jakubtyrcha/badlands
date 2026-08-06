@@ -1,5 +1,14 @@
 # Eight shapes, and a dial for what the box cannot say — design
 
+**Corrected during implementation (2026-08-06).** §1 claimed iq's
+`sdVesicaSegment` "handles `r > hy` … without special-casing". It does not, and
+the shape now uses a rewritten region test — see §1's vesica entry and the
+function's own comment. Found by checking every formula against an independent
+numpy transcription *before* writing the C++, which is also how §9's first
+hazard was caught: the prism's radius convention is indeed easy to read
+backwards, though it turned out the code had it right and the first probe
+points were the thing that was wrong.
+
 Approved 2026-08-06. Takes the primitive set from two (cube, sphere) to eight,
 adding **cone, capsule, octahedron, pyramid, prism and vesica segment**, and
 gives four of them a single extra parameter driven by an arc dial on the radial
@@ -99,9 +108,17 @@ specialised to the Y axis so the general endpoint math drops out:
   cheap bound.
 - **Prism** → iq's exact regular-polygon 2D distance (sector fold via `atan`),
   then convex extrusion against `|p.y| − hy`. Exact.
-- **Vesica** → `sdVesicaSegment` with `a = (0, −hy, 0)`, `b = (0, +hy, 0)`,
-  `w = r`, inlined. Handles `r == hy` (a sphere) and `r > hy` (a valid
-  bi-cusped spinning-top, not a degenerate case) without special-casing.
+- **Vesica** → the profile arc through `(0, ±hy)` and `(r, 0)`, revolved.
+  `r == hy` degenerates to a sphere and `r > hy` to a bi-cusped spinning-top,
+  both valid shapes that a user can reach by dragging the box — so neither may
+  be clamped away. **This is NOT iq's `sdVesicaSegment` inlined.** His region
+  test is a single angular comparison, valid only while the profile arc is the
+  minor one; once `r > hy` the arc becomes major, the test wraps, and points
+  deep inside the solid near the axis come back with a *positive* distance.
+  The replacement projects onto the full circle and asks whether that
+  projection lands on the arc, which is orientation-free and so holds for the
+  minor arc, the major arc and the semicircle alike — and reproduces his answer
+  exactly wherever his is valid.
 - **Pyramid frustum** → **max of six half-space distances** with unit normals:
   four slant planes plus top and bottom. This is the one approximation being
   added — exact on the surface and throughout the interior, conservative
