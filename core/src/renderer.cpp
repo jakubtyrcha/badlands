@@ -295,12 +295,20 @@ void Renderer::ensure_depth_texture(uint32_t width, uint32_t height) {
     depth_texture_height_ = height;
 }
 
-void Renderer::set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye) {
+void Renderer::set_gizmo(const GizmoFrame& frame, GizmoKind kind, GizmoHandle highlighted,
+                          simd_float3 eye) {
     gizmo_visible_ = true;
     gizmo_grid_verts_.clear();
     gizmo_handle_verts_.clear();
-    append_move_gizmo_grid(gizmo_grid_verts_, frame, 12);
-    append_move_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
+    if (kind == GizmoKind::Scale) {
+        // No grid: it is a drag-PLANE affordance and scale has no drag plane.
+        // gizmo_grid_verts_ therefore stays empty, which the draw path already
+        // handles (upload_line_verts drops the buffer for an empty vector).
+        append_scale_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
+    } else {
+        append_move_gizmo_grid(gizmo_grid_verts_, frame, 12);
+        append_move_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
+    }
 }
 
 void Renderer::hide_gizmo() {
@@ -333,6 +341,15 @@ void Renderer::set_pivot_marker(simd_float3 center, float radius, float half_wid
     simd_float4 color = kColorPivot;
     color.w *= alpha;
     append_pivot_crosshair(pivot_verts_, center, radius, half_width, eye, color);
+}
+
+void Renderer::set_focus_preview(simd_float3 center, float half_size, simd_float3 eye) {
+    focus_preview_verts_.clear();
+    append_focus_dot(focus_preview_verts_, center, half_size, eye, kColorFocusPreview);
+}
+
+void Renderer::hide_focus_preview() {
+    focus_preview_verts_.clear();
 }
 
 RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
@@ -536,6 +553,19 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
         encoder->setVertexBuffer(gizmo_handle_buffer_.get(), 0, 0);
         encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), gizmo_handle_verts_.size());
+    }
+
+    // Predictive pivot dot, just before the pivot marker: same depth-ignored
+    // gesture-chrome pass, and it must not be occluded by the surface it is
+    // sitting on. Empty unless the cursor is over the model.
+    upload_line_verts(focus_preview_buffer_, focus_preview_verts_);
+    if (focus_preview_buffer_) {
+        encoder->setRenderPipelineState(line_blend_pso_.get());
+        encoder->setDepthStencilState(depth_ignore_.get());
+        encoder->setVertexBuffer(focus_preview_buffer_.get(), 0, 0);
+        encoder->setVertexBytes(&uniforms, sizeof(LineUniforms), 1);
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0),
+                                focus_preview_verts_.size());
     }
 
     // Camera-pivot marker: ALWAYS the last draw of the frame. Depth-IGNORED,

@@ -35,6 +35,10 @@ inline constexpr simd_float4 kColorPlaneUV  = {0.780f, 0.640f, 0.360f, 1.0f}; //
 inline constexpr simd_float4 kColorPlaneUN  = {0.700f, 0.400f, 0.720f, 1.0f}; // u+n
 inline constexpr simd_float4 kColorPlaneVN  = {0.400f, 0.720f, 0.760f, 1.0f}; // v+n
 inline constexpr simd_float4 kColorGizmoHot = {1.0f, 1.0f, 1.0f, 1.0f};
+// The scale gizmo's uniform (centre) handle. Neutral on purpose: it drives all
+// three components at once, so borrowing any single axis hue would misread as
+// that axis.
+inline constexpr simd_float4 kColorGizmoUniform = {0.86f, 0.86f, 0.90f, 1.0f};
 
 // Resting vs highlighted opacity. Everything used to draw at full strength
 // all the time, which is most of why the gizmo shouted over the model; now
@@ -148,6 +152,24 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                GizmoHandle highlighted, simd_float3 eye);
 
+// The scale gizmo's handles (TRIANGLE primitives), from the same GizmoFrame
+// pick_gizmo_handle hit-tests with GizmoKind::Scale. No grid and no plane
+// patches: the grid is a drag-PLANE affordance and scale has no drag plane.
+//
+// Emits, in this order (pinned by lines_tests):
+//  - 3 axis shafts running kScaleAxisInnerFrac*he .. kGizmoAxisShaftFrac*he
+//    along u/v/n, colors kColorAxisU/V/N — 6 verts each. They start OUTBOARD
+//    of the centre box rather than at the origin, which is what lets the
+//    uniform handle own the middle unambiguously (gizmo.h).
+//  - 3 camera-facing box tips capping those shafts — 6 verts each. Larger than
+//    the move gizmo's terminator dots: box-tipped axes are the scale
+//    convention, and the size difference is what distinguishes the two gizmos
+//    at a glance.
+//  - 1 camera-facing centre box, the uniform handle — 6 verts.
+// Total 42 verts. Same rest/hot alpha treatment as the move gizmo.
+void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                                GizmoHandle highlighted, simd_float3 eye);
+
 // The world origin's vertical marker: the +Y axis plus a small pip at the
 // origin itself. X and Z are drawn by the ground plate's fragment shader
 // (they lie in the plate's plane); Y is above it, so it has to be geometry.
@@ -159,6 +181,19 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
 // 1 shaft segment + 1 camera-facing pip quad = 12 verts (TRIANGLE primitives).
 void append_origin_marker(std::vector<LineVertex>& out, float height, float half_width,
                           float pip_half_size, simd_float3 eye);
+
+// Predictive pivot dot: the surface point under the cursor, i.e. what the next
+// orbit would rotate around. Answers "how will this drag behave?" BEFORE the
+// press, which the pivot crosshair cannot — that only appears once a gesture is
+// already running.
+//
+// Deliberately the quietest thing in the viewport: one small camera-facing
+// quad, low alpha, drawn depth-ignored with the rest of the gesture chrome. It
+// competes with the model for attention every time the cursor moves, so it has
+// to earn its place by being nearly subliminal until you look for it.
+inline constexpr simd_float4 kColorFocusPreview = {1.0f, 1.0f, 1.0f, 0.35f};
+void append_focus_dot(std::vector<LineVertex>& out, simd_float3 center, float half_size,
+                      simd_float3 eye, simd_float4 color);
 
 // Camera-pivot marker (the orbit target): a flat camera-facing ring of
 // `radius` with four ticks crossing it. Replaces the previous always-on

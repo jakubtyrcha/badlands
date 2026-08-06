@@ -1,10 +1,20 @@
 #pragma once
 #include <simd/simd.h>
+#include <cmath>
 
 // Small math helpers shared across core/. Keep this header-only and minimal —
 // anything with real logic belongs in its own .h/.cpp.
 
 namespace sq {
+
+// Finiteness guard for the camera-navigation path. Focus points resolved from
+// a raycast feed the orbit pivot, and unlike a failed pick — which merely
+// fails to select — a NaN pivot corrupts the camera with no user-visible
+// recovery. So every hop from a raycast into CameraController screens its
+// input here rather than trusting upstream.
+inline bool is_finite3(simd_float3 v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
 
 // TRS composition: translate ∘ rotate ∘ scale (i.e. world_from_local applies
 // scale first, then rotation, then translation).

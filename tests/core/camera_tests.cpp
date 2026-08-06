@@ -120,12 +120,16 @@ TEST_CASE("project reports a world point behind the camera as not visible") {
 // caught. These two cases instead pin literal numbers computed completely
 // outside this codebase, by a standalone python3/numpy script implementing
 // the same brief formulas from scratch (eye {4,3,6}, target {0,0.5,0},
-// up {0,1,0}, fov_y_radians 1.0472, aspect 1.6, near 0.1, far 100):
+// up {0,1,0}, fov_y_radians 1.0472, aspect 1.6, near 0.05, far 100):
+//
+// (near was 0.1 until the cursor-anchored camera work lowered Camera::kNear to
+// 0.05; only row 2 of each column — the depth row — moved, which is the whole
+// of what a near-plane change may touch.)
 //
 //   python3 -c "
 //   import numpy as np
 //   eye=np.array([4.,3.,6.]); target=np.array([0.,.5,0.]); up=np.array([0.,1.,0.])
-//   fov_y=1.0472; aspect=1.6; near,far=0.1,100.0
+//   fov_y=1.0472; aspect=1.6; near,far=0.05,100.0
 //   f=(target-eye)/np.linalg.norm(target-eye)
 //   s=np.cross(f,up); s=s/np.linalg.norm(s)
 //   u=np.cross(s,f)
@@ -153,25 +157,25 @@ TEST_CASE("Camera::view_proj matches independently computed (python/numpy) liter
     const simd_float4x4 expected = {(simd_float4){
                                          0.9007183182495269f,
                                          -0.31470943456219075f,
-                                         -0.5246220477120467f,
+                                         -0.5243596054670683f,
                                          -0.5240974256643347f,
                                      },
                                      (simd_float4){
                                          0.0f,
                                          1.6364890597233914f,
-                                         -0.3278887798200292f,
+                                         -0.32772475341691765f,
                                          -0.3275608910402092f,
                                      },
                                      (simd_float4){
                                          -0.600478878833018f,
                                          -0.472064151843286f,
-                                         -0.78693307156807f,
+                                         -0.7865394082006024f,
                                          -0.7861461384965021f,
                                      },
                                      (simd_float4){
                                          0.0f,
                                          -0.8182445298616959f,
-                                         7.703652859616595f,
+                                         7.749824118816388f,
                                          7.795949206756979f,
                                      }};
 

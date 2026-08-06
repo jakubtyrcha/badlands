@@ -278,6 +278,51 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
     append_camera_facing_quad(out, origin, kGizmoAxisTipHalfSizeFrac * he, eye, kColorOriginPip);
 }
 
+void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                                GizmoHandle highlighted, simd_float3 eye) {
+    const simd_float3 origin = frame.origin;
+    const float he = frame.half_extent;
+    const float hw = kGizmoHandleHalfWidthFrac * he;
+
+    // Same rest/hot treatment as the move gizmo, so hover reads identically
+    // across both manipulators.
+    auto color_for = [&](GizmoHandle handle, simd_float4 base) {
+        if (handle == highlighted) {
+            return kColorGizmoHot;
+        }
+        base.w = kGizmoHandleRestAlpha;
+        return base;
+    };
+
+    // Shafts start at kScaleAxisInnerFrac*he, not at the origin: the centre box
+    // owns the middle, and pick_gizmo_handle clamps to the same segment, so
+    // drawn geometry = hit geometry here too. Emission order (u, v, n) matches
+    // the pick tie-break order; lines_tests pins the layout.
+    const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
+        {frame.u, kColorAxisU, GizmoHandle::AxisU},
+        {frame.v, kColorAxisV, GizmoHandle::AxisV},
+        {frame.n, kColorAxisN, GizmoHandle::AxisN},
+    };
+    for (const auto& axis : axes) {
+        const simd_float4 c = color_for(axis.handle, axis.color);
+        append_thick_segment(out, origin + kScaleAxisInnerFrac * he * axis.dir,
+                             origin + kGizmoAxisShaftFrac * he * axis.dir, eye, hw, c);
+    }
+    for (const auto& axis : axes) {
+        append_camera_facing_quad(out, origin + kGizmoAxisShaftFrac * he * axis.dir,
+                                  kGizmoScaleTipHalfSizeFrac * he, eye,
+                                  color_for(axis.handle, axis.color));
+    }
+
+    append_camera_facing_quad(out, origin, kGizmoUniformHalfSizeFrac * he, eye,
+                              color_for(GizmoHandle::Uniform, kColorGizmoUniform));
+}
+
+void append_focus_dot(std::vector<LineVertex>& out, simd_float3 center, float half_size,
+                      simd_float3 eye, simd_float4 color) {
+    append_camera_facing_quad(out, center, half_size, eye, color);
+}
+
 void append_origin_marker(std::vector<LineVertex>& out, float height, float half_width,
                           float pip_half_size, simd_float3 eye) {
     const simd_float3 origin = {0.0f, 0.0f, 0.0f};

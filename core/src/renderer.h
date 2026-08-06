@@ -51,7 +51,10 @@ public:
     // thick handle quads. Uploaded to vertex buffers at draw time (see
     // upload_line_verts): the restyle put both halves past setVertexBytes'
     // 4KB inline limit.
-    void set_gizmo(const GizmoFrame& frame, GizmoHandle highlighted, simd_float3 eye);   // shows the gizmo
+    // `kind` picks the handle set and whether a grid is drawn at all — scale
+    // has no drag plane, so no grid.
+    void set_gizmo(const GizmoFrame& frame, GizmoKind kind, GizmoHandle highlighted,
+                   simd_float3 eye);                                                    // shows the gizmo
     void hide_gizmo();
     // Camera-pivot marker (flat ring + crosshair at the orbit target),
     // refreshed every frame like the move gizmo. Drawn LAST and depth-ignored:
@@ -60,6 +63,12 @@ public:
     // the marker is dropped entirely, which is the resting state.
     void set_pivot_marker(simd_float3 center, float radius, float half_width, simd_float3 eye,
                           float alpha);
+    // Predictive pivot dot: the surface point under the cursor, i.e. what the
+    // next orbit would rotate around. Drawn depth-ignored with the gesture
+    // chrome. The caller only sets it for a real surface hit -- a dot floating
+    // in space on a ground or target-plane fallback would be noise.
+    void set_focus_preview(simd_float3 center, float half_size, simd_float3 eye);
+    void hide_focus_preview();
     // World-origin +Y axis and pip. Rebuilt every frame like the gizmo (12
     // verts); drawn in the ground plate's depth-tested pass so it occludes
     // against the scene the same way the plate's X/Z axes do.
@@ -136,6 +145,10 @@ private:
     // split on).
     std::vector<LineVertex> pivot_verts_;
     NS::SharedPtr<MTL::Buffer> pivot_buffer_;
+
+    // Predictive pivot dot: one camera-facing quad, refreshed on mouse-moved.
+    std::vector<LineVertex> focus_preview_verts_;
+    NS::SharedPtr<MTL::Buffer> focus_preview_buffer_;
 
     std::vector<LineVertex> origin_marker_verts_; // +Y shaft + pip, TRIANGLE primitives
 };

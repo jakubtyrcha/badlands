@@ -18,12 +18,25 @@ struct Vec3f { float x, y, z; };
 enum class Shape : int32_t { Cube = 0, Sphere = 1 };
 enum class Op    : int32_t { Add = 0, Subtract = 1 };
 
-// Move-gizmo handles (modify mode). Crosses the boundary like Shape/Op: the
-// canonical definition lives here, core/src/gizmo.h consumes it. Axis order
-// is also the pick tie-break order (see pick_gizmo_handle).
+// Gizmo handles. Crosses the boundary like Shape/Op: the canonical definition
+// lives here, core/src/gizmo.h consumes it. Axis order is also the pick
+// tie-break order (see pick_gizmo_handle). The move gizmo uses the axis and
+// plane handles; the scale gizmo uses the axes plus Uniform, and no planes.
 enum class GizmoHandle : int32_t {
-    None = 0, AxisU = 1, AxisV = 2, AxisN = 3, PlaneUV = 4, PlaneUN = 5, PlaneVN = 6
+    None = 0, AxisU = 1, AxisV = 2, AxisN = 3, PlaneUV = 4, PlaneUN = 5, PlaneVN = 6,
+    Uniform = 7
 };
+
+// Which manipulator modify-mode is showing. The two differ in more than
+// styling — Move works in the node's tangent frame and offers plane handles,
+// Scale works in the node's local axes and offers a uniform centre handle — so
+// this selects the frame, the drawn geometry AND what beginDrag hit-tests, all
+// from one value.
+enum class GizmoKind : int32_t { Move = 0, Scale = 1 };
+
+// Camera gesture verbs. Each has exactly one trackpad gesture and one pointer
+// chord in the app layer; nothing is bound twice.
+enum class CameraGesture : int32_t { Orbit = 0, Pan = 1, Dolly = 2 };
 
 // Miss/no-selection/no-parent sentinel for the picking, selection, and
 // spawning APIs below, and for SceneDocument's own Node::id/snap_parent
@@ -54,10 +67,40 @@ public:
     void setViewportSize(float widthPts, float heightPts, float backingScale);
     void render(void* caMetalDrawable);
 
-    // camera tool (deltas in view points; delta semantics match CameraController)
-    void cameraOrbit(float dxPts, float dyPts);
-    void cameraZoom(float delta);
-    void cameraPan(float dxPts, float dyPts);
+    // --- camera gestures ---------------------------------------------------
+    //
+    // Every gesture is begin/update/end. `begin` resolves the world point
+    // under (anchorX, anchorY) ONCE — the model, else the ground plate, else
+    // the target's depth — and everything the gesture does is expressed
+    // against that one point, so the frame of reference cannot shift under the
+    // user mid-drag. Orbit additionally re-centres on it, which never moves the
+    // eye (see CameraController::set_pivot_preserving_eye).
+    //
+    // The anchor is the mouse-down point for drags and the cursor position for
+    // scroll/pinch. Passing the mouse-down point rather than the current one is
+    // what makes "point at the feature and drag" work.
+    void beginCameraGesture(CameraGesture kind, float anchorX, float anchorY);
+
+    // CUMULATIVE displacement from the gesture's start, in view points — the
+    // same convention the drag/scale gestures use. Each call re-derives the
+    // camera from the state captured at `begin` rather than integrating, so
+    // the result depends only on the current total: repeated or coalesced
+    // events cannot drift, and a delta that returns to zero returns the camera
+    // exactly to where the gesture started. Dolly reads dyTotal only.
+    void updateCameraGesture(float dxTotal, float dyTotal);
+    void endCameraGesture();
+
+    // Points of dolly drag equivalent to a cumulative pinch magnification, so
+    // a pinch and the matching drag zoom identically and no sensitivity
+    // constant has to be duplicated in the app layer.
+    float dollyPointsForMagnification(float cumulativeMagnification) const;
+
+    // Re-centres the camera on the selected node and ranges to fit it, WITHOUT
+    // reorienting — framing answers "where", not "from where". No-op without a
+    // selection. The fitted radius has a floor, so framing a very small node
+    // leaves surrounding context rather than filling the view with
+    // featureless surface.
+    void frameSelected();
 
     // selection / picking (coords: view points, top-left origin)
     PickResult pick(float x, float y) const;   // pure query; does NOT change selection
@@ -72,13 +115,27 @@ public:
     // selection; clears selection and refreshes line colors
     void deleteSelectedNode();
 
-    // modify tool — core owns all gizmo/plane math. beginDrag hit-tests the
-    // move-gizmo handles and returns whether a drag activated: off-handle
-    // clicks are inert by design (user ruling, move-gizmo spec).
+    // modify tool — core owns all gizmo math. beginDrag hit-tests whichever
+    // gizmo is showing (see setGizmoKind) and returns whether a drag
+    // activated; off-handle presses return false, which is what lets the app
+    // layer hand the gesture to the camera instead. One drag path serves both
+    // kinds: move solves an axis/plane, scale solves an axis ratio or a
+    // screen-space vertical drag for the uniform handle, and core captures the
+    // press position so the cumulative-from-start arithmetic lives in one place.
     void setGizmoVisible(bool visible);
+    void setGizmoKind(GizmoKind kind);   // also clears hover: it belonged to the other handle set
     bool beginDrag(float x, float y);
     void updateDrag(float x, float y);
     void endDrag();
+
+    // Predictive pivot dot: the surface point under the cursor — what the next
+    // orbit would rotate around. Answers "how will this drag behave?" BEFORE
+    // the press, which the pivot marker cannot: that only appears once a
+    // gesture is already running. Lights ONLY on a real surface hit; a ground
+    // or target-plane fallback draws nothing, because a dot floating in space
+    // is noise rather than information.
+    void updateFocusPreview(float x, float y);
+    void clearFocusPreview();
 
     // Gizmo hover (modify-mode mouse-moved feedback). Hover state never
     // outlives the gizmo it points at: it self-clears on selection change,
@@ -98,12 +155,6 @@ public:
     // op (menu toggle + color coding)
     Op nodeOp(int32_t nodeId) const;                // Op::Add for unknown id (documented)
     void setNodeOp(int32_t nodeId, Op op);          // marks scene lines dirty
-
-    // scale tool — cumulative-delta semantics
-    void beginScale();                              // captures the selected node's scale; no-op without selection
-    void updateScale(float pixelDeltaY);            // scale = start_scale * exp(-pixelDeltaY * 0.005), per component,
-                                                     // each component clamped to [0.05, 50]; no-op unless active; marks lines dirty
-    void endScale();
 
     // node info (tests)
     Vec3f nodeScale(int32_t nodeId) const;          // {0,0,0} for unknown id

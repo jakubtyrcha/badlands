@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Top-left bar of the 4 mode buttons. Buttons call `vm.setMode` — the
+/// Top-left bar of the mode buttons. Buttons call `vm.setMode` — the
 /// single entry point for mode changes — so this view never needs to know
 /// about anything besides which mode is currently active.
 struct ModeBar: View {
@@ -14,10 +14,8 @@ struct ModeBar: View {
 
     private func info(for mode: EditorMode) -> Info {
         switch mode {
-        case .select: return Info(symbol: "cursorarrow", name: "Select", key: "1")
+        case .edit: return Info(symbol: "arrow.up.and.down.and.arrow.left.and.right", name: "Edit", key: "1")
         case .spawn: return Info(symbol: "plus.square", name: "Spawn", key: "2")
-        case .modify: return Info(symbol: "arrow.up.and.down.and.arrow.left.and.right", name: "Modify", key: "3")
-        case .camera: return Info(symbol: "rotate.3d", name: "Camera", key: "4")
         }
     }
 

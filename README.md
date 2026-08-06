@@ -3,8 +3,8 @@
 Shapeshifter is a native macOS 3D SDF editor MVP: a SwiftUI + AppKit shell
 over a C++20 metal-cpp core, joined by direct Swift↔C++ interop (no bridge
 files). The viewport is a per-pixel sphere-traced render of the CSG scene,
-evaluated every frame (see Rendering below); the full spawn/select/
-modify/camera interaction model, including delete, is in place.
+evaluated every frame (see Rendering below), navigated by an always-on
+cursor-anchored camera.
 
 ## Requirements
 
@@ -35,24 +35,41 @@ xcodebuild -scheme CoreTests build -derivedDataPath build
 
 ## Using the editor
 
-Four modes, selected via the icon bar top-left or keys **1–4**:
+**The camera is always available.** There is no camera mode: a drag that
+doesn't grab a gizmo handle drives the camera, in every mode. A press only
+becomes a drag once it travels ~4pt, so clicking still means click.
 
-1. **Select (1)** — click a shape to inspect it; the name appears in the
-   top-right info panel. Click empty space to deselect.
-2. **Spawn (2)** — a second row of options appears below the mode bar to
-   choose the shape (cube/sphere) and operation (additive/subtract) for the
-   next spawn. Click in the viewport to place it: clicking on an existing
-   shape snaps the new one onto that surface; a miss lands it a fixed
-   distance ahead of the camera along the click ray. Either way the new node
-   is selected and the editor auto-switches to Modify mode.
-3. **Modify (3)** — drag the selected shape to move it, constrained to its
-   tangent plane (or a camera-facing plane if unsnapped). Entering Modify
-   with nothing selected behaves like Select mode until you click something.
-   A radial menu anchored on the selected shape offers: Move, Scale (drag
-   vertically; cumulative, clamped per-axis to [0.05, 50]), toggle
-   additive/subtract, and Delete (removes the shape permanently — no undo —
-   and switches to Camera mode).
-4. **Camera (4)** — two-finger scroll orbits, pinch zooms, shift+scroll pans.
+| Gesture | Does |
+|---|---|
+| drag from empty space | **orbit**, around whatever you pressed on |
+| `⌥` drag | **pan**, on world axes |
+| `⌘` drag (vertical) | **dolly**, toward the cursor |
+| two-finger scroll | pan |
+| pinch | dolly |
+| drag from a gizmo handle | move / scale |
+| click (no drag) | select, or spawn |
+| `F` | frame the selection |
+
+Orbit re-centres on the surface point under the press, so pointing at a
+feature and dragging spins around *that feature*. Doing so never moves the
+camera — it only changes what a rotation means — and a quiet dot tracks the
+surface as you hover, showing where the pivot would land before you commit.
+Pan runs on world axes: drag up and you travel up, whatever the camera angle.
+Dolly converges on the point under the cursor rather than the screen centre.
+
+Two modes, selected by the icons top-left or keys **1**–**2**:
+
+1. **Edit (1)** — click a shape to select it; the name appears in the
+   top-right info panel, and a radial menu anchored on the shape offers Move,
+   Scale, additive/subtract toggle, and Delete (permanent — no undo). Move
+   drags along the gizmo's axis and plane handles; Scale has its own gizmo,
+   three axis handles plus a centre box for uniform scale. Clicking empty
+   space deselects.
+2. **Spawn (2)** — a second row of options chooses the shape (cube/sphere) and
+   operation (additive/subtract). Click in the viewport to place it: clicking
+   an existing shape snaps the new one onto that surface; a miss lands it a
+   fixed distance ahead of the camera. Either way the new node is selected and
+   the editor returns to Edit.
 
 Color legend: pale blue = selected; red = a subtracted shape's wireframe
 (shown even unselected); surface = normal-colored debug (see Rendering below).
@@ -82,10 +99,12 @@ Swift app), and `CoreTests` (a doctest-based command-line test runner for
 the core).
 
 - **Core** (`core/src`) owns the scene document, orbit camera and its
-  controller, ray-based picking, drag/scale math, DCSDD mesh reconstruction
+  controller, cursor-anchored navigation (`navigation.h`), ray-based picking,
+  gizmo drag/scale math, DCSDD mesh reconstruction
   (dormant, background thread), and all Metal rendering (raymarch + wireframe
   + shaded-mesh pipelines, depth buffer, per-frame encode) via metal-cpp.
-- **Swift** (`app/Sources`) owns the 4-mode state machine, raw AppKit input
+- **Swift** (`app/Sources`) owns the 2-mode state machine and the pointer
+  gesture state machine, raw AppKit input
   (mouse/keyboard/gesture events on the `CAMetalLayer`-backed viewport), and
   the SwiftUI chrome/overlays (mode bar, spawn options, info panel, radial
   menu). It talks to core only through `Editor`, the single C++↔Swift
@@ -103,6 +122,6 @@ See `CLAUDE.md` for interop and coding conventions.
 - No materials or lighting — shading is normal-colored debug only.
 - No export/saving.
 - Single window.
-- Camera mode is trackpad-oriented: a mouse wheel only supplies vertical
-  scroll deltas (no horizontal component), and a mouse has no pinch gesture,
-  so zoom is unavailable.
+- Picking (and therefore the orbit pivot and the hover dot) intersects the
+  analytic primitives and ignores CSG, so a region carved away by a Subtract
+  node still reports a hit.

@@ -92,7 +92,7 @@ TEST_CASE("gizmo_frame_for_node: snapped node uses the snap frame; unsnapped fac
     node.position = {0.5f, 1.0f, -0.25f};
 
     SUBCASE("unsnapped: origin = position, n = -camera_forward") {
-        const GizmoFrame f = gizmo_frame_for_node(node, cam);
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
         check_float3_approx(f.origin, node.position);
         check_float3_approx(f.n, -forward);
 
@@ -107,13 +107,13 @@ TEST_CASE("gizmo_frame_for_node: snapped node uses the snap frame; unsnapped fac
         node.snap_point = {1.0f, 0.0f, 1.0f};
         node.snap_normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
 
-        const GizmoFrame f = gizmo_frame_for_node(node, cam);
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
         check_float3_approx(f.origin, node.snap_point);
         check_float3_approx(f.n, node.snap_normal);
     }
 
     SUBCASE("half_extent = kGizmoScreenFraction * d * 2*tan(fov/2)") {
-        const GizmoFrame f = gizmo_frame_for_node(node, cam);
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
         const float d = simd_length(node.position - cam.eye);
         const float expected = kGizmoScreenFraction * d * 2.0f * std::tan(cam.fov_y_radians * 0.5f);
         CHECK(f.half_extent == doctest::Approx(expected));
@@ -147,8 +147,24 @@ Ray ray_through(simd_float3 eye, simd_float3 target) {
     return Ray{eye, simd_normalize(target - eye)};
 }
 
-GizmoHandle pick(const GizmoFrame& f, simd_float3 eye, simd_float3 target) {
-    return pick_gizmo_handle(f, ray_through(eye, target), kTestFov, kTestViewportH);
+// Test-local convenience; the kind defaults to Move because most cases here
+// predate the scale gizmo. The production entry point takes it explicitly.
+GizmoHandle pick(const GizmoFrame& f, simd_float3 eye, simd_float3 target,
+                 GizmoKind kind = GizmoKind::Move) {
+    return pick_gizmo_handle(f, ray_through(eye, target), kTestFov, kTestViewportH, kind);
+}
+
+// A scale gizmo's frame: node-local axes (world X/Y/Z at identity rotation),
+// matching what gizmo_frame_for_node builds for GizmoKind::Scale.
+GizmoFrame make_scale_frame(simd_float3 origin = simd_float3{0.0f, 0.0f, 0.0f},
+                            float half_extent = 1.5f) {
+    GizmoFrame f;
+    f.origin = origin;
+    f.u = {1.0f, 0.0f, 0.0f};
+    f.v = {0.0f, 1.0f, 0.0f};
+    f.n = {0.0f, 0.0f, 1.0f};
+    f.half_extent = half_extent;
+    return f;
 }
 
 } // namespace
@@ -183,7 +199,7 @@ TEST_CASE("ray_axis_param/pick: near-parallel fuzz — finite or rejected, and t
         }
         // cos(0.05) ~= 0.99875 > kAxisViewAlignLimit: all three fuzz angles are
         // inside the guard, so the u axis must never be the pick result.
-        CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH) != GizmoHandle::AxisU);
+        CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH, GizmoKind::Move) != GizmoHandle::AxisU);
     }
 }
 
@@ -279,7 +295,7 @@ TEST_CASE("pick_gizmo_handle: a ray grazing an axis while crossing a plane patch
     // from the u-axis line (within tolerance) and then lands inside the u-n
     // patch at (u,n) ~ (0.675, 0.7). Axis priority must win.
     const Ray ray = ray_through(simd_float3{-0.675f, 0.08f, 5.0f}, simd_float3{-0.675f, 0.0f, 0.7f});
-    CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH) == GizmoHandle::AxisU);
+    CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH, GizmoKind::Move) == GizmoHandle::AxisU);
 }
 
 TEST_CASE("pick_gizmo_handle: gizmo entirely behind the ray origin is unpickable "
@@ -287,7 +303,7 @@ TEST_CASE("pick_gizmo_handle: gizmo entirely behind the ray origin is unpickable
     const GizmoFrame f = test_frame();
     const simd_float3 eye = {0.2f, 0.1f, 5.0f};
     const Ray away{eye, simd_normalize(eye - f.origin)}; // pointing away from the gizmo
-    CHECK(pick_gizmo_handle(f, away, kTestFov, kTestViewportH) == GizmoHandle::None);
+    CHECK(pick_gizmo_handle(f, away, kTestFov, kTestViewportH, GizmoKind::Move) == GizmoHandle::None);
 }
 
 TEST_CASE("pivot_marker_alpha: hold at full, then smoothstep to nothing") {
@@ -326,4 +342,182 @@ TEST_CASE("pivot_marker_alpha: hold at full, then smoothstep to nothing") {
     SUBCASE("a negative elapsed time is treated as 'just moved', not as a fade") {
         CHECK(pivot_marker_alpha(-1.0f) == doctest::Approx(1.0f));
     }
+}
+
+// --- scale gizmo -----------------------------------------------------------
+
+TEST_CASE("gizmo_frame_for_node: the scale frame is node-local, not the drag plane") {
+    Camera cam;
+    cam.eye = {0.0f, 0.0f, 6.0f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.up = {0.0f, 1.0f, 0.0f};
+    cam.fov_y_radians = kTestFov;
+    cam.aspect = 1.6f;
+
+    // A snapped node: its MOVE frame follows the snap normal, which is exactly
+    // the frame a scale gizmo must NOT use — scale handles have to land on
+    // scale components, and a tangent basis maps to none of them.
+    Node node;
+    node.position = {1.0f, 2.0f, 0.0f};
+    node.snapped = true;
+    node.snap_point = {1.0f, 1.5f, 0.0f};
+    node.snap_normal = simd_normalize(simd_float3{1.0f, 1.0f, 0.0f});
+
+    const GizmoFrame move = gizmo_frame_for_node(node, cam, GizmoKind::Move);
+    const GizmoFrame scale = gizmo_frame_for_node(node, cam, GizmoKind::Scale);
+
+    check_float3_approx(move.origin, node.snap_point); // move rides the snap frame
+    check_float3_approx(scale.origin, node.position);  // scale is centred on the node
+
+    check_float3_approx(scale.u, simd_float3{1.0f, 0.0f, 0.0f});
+    check_float3_approx(scale.v, simd_float3{0.0f, 1.0f, 0.0f});
+    check_float3_approx(scale.n, simd_float3{0.0f, 0.0f, 1.0f});
+    // Right-handed like every GizmoFrame: u x v == n.
+    check_float3_approx(simd_cross(scale.u, scale.v), scale.n);
+
+    SUBCASE("the scale frame ignores the camera entirely for an unsnapped node") {
+        Node loose;
+        loose.position = {1.0f, 2.0f, 0.0f};
+        loose.snapped = false;
+
+        Camera other = cam;
+        other.eye = {5.0f, -4.0f, 2.0f};
+        const GizmoFrame a = gizmo_frame_for_node(loose, cam, GizmoKind::Scale);
+        const GizmoFrame b = gizmo_frame_for_node(loose, other, GizmoKind::Scale);
+        check_float3_approx(a.u, b.u);
+        check_float3_approx(a.v, b.v);
+        check_float3_approx(a.n, b.n);
+        // Only the screen-constant size tracks the camera.
+        CHECK(a.half_extent != doctest::Approx(b.half_extent));
+    }
+}
+
+TEST_CASE("pick_gizmo_handle (Scale): centre owns the middle, axes own outboard, no planes") {
+    const GizmoFrame f = make_scale_frame();
+    const simd_float3 eye = {0.0f, 0.0f, 8.0f};
+
+    SUBCASE("dead centre is the uniform handle, never an axis") {
+        CHECK(pick(f, eye, f.origin, GizmoKind::Scale) == GizmoHandle::Uniform);
+    }
+
+    SUBCASE("each axis is picked through a point on its drawn shaft") {
+        const float mid = 0.5f * (kScaleAxisInnerFrac + kGizmoAxisShaftFrac) * f.half_extent;
+        CHECK(pick(f, eye, f.origin + mid * f.u, GizmoKind::Scale) == GizmoHandle::AxisU);
+        CHECK(pick(f, eye, f.origin + mid * f.v, GizmoKind::Scale) == GizmoHandle::AxisV);
+        // n points at the eye here, so aim from off-axis for a usable view of it.
+        CHECK(pick(f, simd_float3{7.0f, 1.0f, 1.0f}, f.origin + mid * f.n, GizmoKind::Scale) ==
+              GizmoHandle::AxisN);
+    }
+
+    SUBCASE("the scale gizmo has no plane handles where the move gizmo does") {
+        // Dead centre of the uv patch: a real handle under Move, nothing under
+        // Scale (the ray still misses the axes out there).
+        const simd_float3 patch =
+            f.origin + kGizmoPatchCenter * f.half_extent * (f.u + f.v);
+        CHECK(pick(f, eye, patch, GizmoKind::Move) == GizmoHandle::PlaneUV);
+        CHECK(pick(f, eye, patch, GizmoKind::Scale) == GizmoHandle::None);
+    }
+
+    SUBCASE("scale's wider tolerance catches grabs that move's would drop") {
+        // Offset perpendicular to the u axis by more than Move's 8pt tolerance
+        // but less than Scale's 14pt, at the same depth — the near-miss the
+        // wider tolerance exists for, now that a miss drives the camera.
+        const float mid = 0.5f * (kScaleAxisInnerFrac + kGizmoAxisShaftFrac) * f.half_extent;
+        const simd_float3 on_axis = f.origin + mid * f.u;
+        const float pts_to_world = 2.0f * std::tan(kTestFov * 0.5f) / kTestViewportH;
+        const float world_per_pt = simd_length(on_axis - eye) * pts_to_world;
+        const simd_float3 near_miss = on_axis + (11.0f * world_per_pt) * f.v;
+
+        CHECK(pick(f, eye, near_miss, GizmoKind::Scale) == GizmoHandle::AxisU);
+        CHECK(pick(f, eye, near_miss, GizmoKind::Move) != GizmoHandle::AxisU);
+    }
+}
+
+TEST_CASE("pick_gizmo_handle (Scale): the shafts it hit-tests are the shafts lines.cpp draws") {
+    // Same drawn == hit invariant the move gizmo's patch case pins, for the
+    // segment bounds that moved when the centre box took over the middle.
+    const GizmoFrame f = make_scale_frame();
+    const simd_float3 eye = {0.8f, 0.3f, 8.0f};
+
+    std::vector<LineVertex> out;
+    append_scale_gizmo_handles(out, f, GizmoHandle::None, eye);
+    CHECK(out.size() == 42); // 3 shafts + 3 tips + 1 centre box, 6 verts each
+
+    // Just inboard of the drawn shaft start belongs to the centre, not the axis.
+    const simd_float3 inboard = f.origin + 0.5f * kScaleAxisInnerFrac * f.half_extent * f.u;
+    CHECK(pick(f, eye, inboard, GizmoKind::Scale) == GizmoHandle::Uniform);
+}
+
+TEST_CASE("scale_axis_param floors the parameter so the drag ratio stays sane") {
+    const GizmoFrame f = make_scale_frame();
+    const float floor_s = kScaleAxisMinGrabFrac * f.half_extent;
+
+    SUBCASE("a grab out on the shaft is returned unfloored") {
+        const simd_float3 target = f.origin + 0.8f * f.half_extent * f.u;
+        const Ray ray = ray_through(simd_float3{0.0f, 0.0f, 8.0f}, target);
+        const auto s = scale_axis_param(ray, f, GizmoHandle::AxisU);
+        REQUIRE(s.has_value());
+        CHECK(*s == doctest::Approx(0.8f * f.half_extent));
+    }
+
+    SUBCASE("aiming at, or past, the origin saturates instead of hitting zero or flipping") {
+        for (const float along : {0.01f, 0.0f, -0.5f, -5.0f}) {
+            CAPTURE(along);
+            const simd_float3 target = f.origin + along * f.half_extent * f.u;
+            const Ray ray = ray_through(simd_float3{0.0f, 0.0f, 8.0f}, target);
+            const auto s = scale_axis_param(ray, f, GizmoHandle::AxisU);
+            REQUIRE(s.has_value());
+            CHECK(*s == doctest::Approx(floor_s));
+            CHECK(*s > 0.0f); // the property the ratio depends on
+        }
+    }
+
+    SUBCASE("start and update use the same floor, so a grab begins at factor 1") {
+        // The reason the floor is applied on BOTH sides rather than only at
+        // capture: an asymmetric floor would make s_now/s_start != 1 on
+        // mouse-down and jump the node before any drag happened.
+        const simd_float3 target = f.origin + 0.005f * f.half_extent * f.u;
+        const Ray ray = ray_through(simd_float3{0.0f, 0.0f, 8.0f}, target);
+        const auto start = scale_axis_param(ray, f, GizmoHandle::AxisU);
+        const auto now = scale_axis_param(ray, f, GizmoHandle::AxisU);
+        REQUIRE(start.has_value());
+        REQUIRE(now.has_value());
+        CHECK((*now / *start) == doctest::Approx(1.0f));
+    }
+}
+
+TEST_CASE("a grab at the innermost pickable point still has real shrink range") {
+    // The failure this pins: the most a drag can shrink an axis is
+    // floor / s_start, and s_start is bounded below by the innermost grabbable
+    // point. With the floor set close to that bound (0.15 against an inner
+    // bound of 0.18) the worst case was 0.83x -- dragging inboard from the
+    // inner end of the shaft barely moved the node and read as a dead gesture.
+    const GizmoFrame f = make_scale_frame();
+    const simd_float3 eye = {0.0f, 0.0f, 8.0f};
+
+    // Grab as far inboard as the pick will allow, then drag through the origin.
+    const simd_float3 grab = f.origin + kScaleAxisInnerFrac * f.half_extent * f.u;
+    const auto start = scale_axis_param(ray_through(eye, grab), f, GizmoHandle::AxisU);
+    REQUIRE(start.has_value());
+
+    const simd_float3 pull = f.origin - 5.0f * f.half_extent * f.u; // well past the origin
+    const auto now = scale_axis_param(ray_through(eye, pull), f, GizmoHandle::AxisU);
+    REQUIRE(now.has_value());
+
+    const float min_factor = *now / *start;
+    CHECK(min_factor > 0.0f);   // still positive: no flip
+    CHECK(min_factor < 0.2f);   // and genuinely useful range, not ~0.83
+}
+
+TEST_CASE("gizmo_scale_axis_index maps u/v/n onto scale.x/y/z, and nothing else") {
+    CHECK(gizmo_scale_axis_index(GizmoHandle::AxisU) == 0);
+    CHECK(gizmo_scale_axis_index(GizmoHandle::AxisV) == 1);
+    CHECK(gizmo_scale_axis_index(GizmoHandle::AxisN) == 2);
+    for (const GizmoHandle h : {GizmoHandle::None, GizmoHandle::Uniform, GizmoHandle::PlaneUV,
+                                GizmoHandle::PlaneUN, GizmoHandle::PlaneVN}) {
+        CHECK(gizmo_scale_axis_index(h) == -1);
+    }
+    // Uniform drives a screen-space drag, not an axis solve, so anything
+    // branching on "is this an axis?" must route it elsewhere.
+    CHECK_FALSE(gizmo_handle_is_axis(GizmoHandle::Uniform));
 }

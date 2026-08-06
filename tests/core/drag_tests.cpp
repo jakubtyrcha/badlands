@@ -48,7 +48,7 @@ GizmoFrame frame_for(Editor* editor, int32_t node_id, bool snapped,
     stub.snapped = snapped;
     stub.snap_point = snap_point;
     stub.snap_normal = snap_normal;
-    return gizmo_frame_for_node(stub, editor_test_camera());
+    return gizmo_frame_for_node(stub, editor_test_camera(), GizmoKind::Move);
 }
 
 // Projects a world point and returns its view coords, REQUIREing visibility.
@@ -434,8 +434,30 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
 }
 
 // --- Editor: scale tool ------------------------------------------------------
+//
+// Scale now runs through the SAME begin/update/endDrag path as move, selected
+// by setGizmoKind. The uniform (centre) handle carries the gesture that used to
+// be beginScale/updateScale: a screen-space vertical drag, cumulative from the
+// press. Because the scale gizmo's frame is centred on the node, the node's
+// projected anchor IS the uniform handle's screen position, which is what these
+// tests aim at.
 
-TEST_CASE("Editor: beginScale/updateScale applies a cumulative exponential factor "
+namespace {
+
+// Arms the scale gizmo and grabs its uniform handle at the node's anchor.
+// Returns the press point so updates can be expressed as offsets from it.
+ClickPoint grab_uniform_handle(Editor* editor) {
+    editor->setGizmoKind(GizmoKind::Scale);
+    editor->setGizmoVisible(true);
+    const ScreenPoint anchor = editor->projectSelectedAnchor();
+    REQUIRE(anchor.visible);
+    REQUIRE(editor->beginDrag(anchor.x, anchor.y));
+    return ClickPoint{anchor.x, anchor.y};
+}
+
+} // namespace
+
+TEST_CASE("Editor: the uniform scale handle applies a cumulative exponential factor "
           "from the captured start scale") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
@@ -444,71 +466,119 @@ TEST_CASE("Editor: beginScale/updateScale applies a cumulative exponential facto
     REQUIRE(spawned.node_id != kInvalidNode);
     check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), simd_float3{1.0f, 1.0f, 1.0f});
 
-    editor->beginScale();
+    const ClickPoint press = grab_uniform_handle(editor);
 
-    // factor = exp(-pixelDeltaY * 0.005): updateScale(200) -> exp(-1.0) ~= 0.36788.
-    editor->updateScale(200.0f);
+    // factor = exp(-dy * kUniformScaleSens): dy = 200 -> exp(-1) ~= 0.36788.
+    editor->updateDrag(press.x, press.y + 200.0f);
     const float exp_neg1 = std::exp(-1.0f);
-    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), simd_float3{exp_neg1, exp_neg1, exp_neg1});
+    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)),
+                        simd_float3{exp_neg1, exp_neg1, exp_neg1});
 
     // Cumulative from the captured START scale (still {1,1,1}), not from the
-    // scale after the first update: updateScale(400) -> exp(-2.0) ~= 0.13534,
-    // NOT exp(-1) applied again (which would give exp(-3), the incremental-
-    // implementation bug this test guards against).
-    editor->updateScale(400.0f);
+    // scale after the first update: dy = 400 -> exp(-2), NOT exp(-1) applied
+    // twice (exp(-3)), the incremental-implementation bug this guards against.
+    editor->updateDrag(press.x, press.y + 400.0f);
     const float exp_neg2 = std::exp(-2.0f);
-    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), simd_float3{exp_neg2, exp_neg2, exp_neg2});
+    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)),
+                        simd_float3{exp_neg2, exp_neg2, exp_neg2});
 
-    editor->endScale();
+    // And dragging back to the press point restores the start scale exactly,
+    // which only holds because every update re-derives from start_scale.
+    editor->updateDrag(press.x, press.y);
+    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), simd_float3{1.0f, 1.0f, 1.0f});
+
+    editor->endDrag();
 }
 
-TEST_CASE("Editor: updateScale clamps each scale component to [0.05, 50]") {
+TEST_CASE("Editor: a scale drag clamps each component to [kNodeScaleMin, kNodeScaleMax]") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
 
-    editor->beginScale();
+    const ClickPoint press = grab_uniform_handle(editor);
 
-    // exp(-1200*0.005) = exp(-6) ~= 0.00248 -> clamped up to the 0.05 floor.
-    editor->updateScale(1200.0f);
-    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), simd_float3{0.05f, 0.05f, 0.05f});
+    // exp(-1200*0.005) = exp(-6) ~= 0.00248 -> clamped up to the floor.
+    editor->updateDrag(press.x, press.y + 1200.0f);
+    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)),
+                        simd_float3{kNodeScaleMin, kNodeScaleMin, kNodeScaleMin});
 
     // Still cumulative from the same start scale ({1,1,1}):
-    // exp(2000*0.005) = exp(10) ~= 22026 -> clamped down to the 50 ceiling.
-    editor->updateScale(-2000.0f);
-    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), simd_float3{50.0f, 50.0f, 50.0f});
+    // exp(2000*0.005) = exp(10) ~= 22026 -> clamped down to the ceiling.
+    editor->updateDrag(press.x, press.y - 2000.0f);
+    check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)),
+                        simd_float3{kNodeScaleMax, kNodeScaleMax, kNodeScaleMax});
 
-    editor->endScale();
+    editor->endDrag();
 }
 
-TEST_CASE("Editor: updateScale is a safe no-op outside an active beginScale/endScale bracket") {
+TEST_CASE("Editor: an axis scale handle scales only its own component") {
+    Editor* editor = Editor::create();
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+    REQUIRE(spawned.node_id != kInvalidNode);
+
+    editor->setGizmoKind(GizmoKind::Scale);
+    editor->setGizmoVisible(true);
+
+    // The scale frame is the node's local axes centred on it, so build the
+    // grab and drag points directly in world space along +x.
+    const simd_float3 origin = to_simd(editor->nodePosition(spawned.node_id));
+    const Camera cam = editor_test_camera();
+    const float he = kGizmoScreenFraction * simd_length(origin - cam.eye) * 2.0f *
+                     std::tan(cam.fov_y_radians * 0.5f);
+    const simd_float3 x_axis = {1.0f, 0.0f, 0.0f};
+
+    const ClickPoint grab = click_at(origin + 0.6f * he * x_axis);
+    REQUIRE(editor->beginDrag(grab.x, grab.y));
+
+    // Pull out to twice the grabbed parameter: factor = s_now / s_start = 2.
+    const ClickPoint pull = click_at(origin + 1.2f * he * x_axis);
+    editor->updateDrag(pull.x, pull.y);
+
+    const simd_float3 scale = to_simd(editor->nodeScale(spawned.node_id));
+    CHECK(scale.x == doctest::Approx(2.0f).epsilon(0.02));
+    CHECK(scale.y == doctest::Approx(1.0f)); // untouched
+    CHECK(scale.z == doctest::Approx(1.0f)); // untouched
+
+    editor->endDrag();
+}
+
+TEST_CASE("Editor: a scale drag is a safe no-op outside an active begin/endDrag bracket") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
     const simd_float3 unit_scale = {1.0f, 1.0f, 1.0f};
+    editor->setGizmoKind(GizmoKind::Scale);
+    editor->setGizmoVisible(true);
 
-    SUBCASE("updateScale without a prior beginScale changes nothing") {
-        editor->updateScale(200.0f);
+    SUBCASE("updateDrag without a prior beginDrag changes nothing") {
+        editor->updateDrag(400.0f, 450.0f);
         check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), unit_scale);
     }
 
-    SUBCASE("beginScale with no selection is a safe no-op, and the following updateScale changes nothing") {
+    SUBCASE("beginDrag with no selection does not activate, and the following update is inert") {
         editor->select(kInvalidNode);
-        editor->beginScale(); // must not crash despite no selection
-        editor->updateScale(200.0f);
+        CHECK_FALSE(editor->beginDrag(400.0f, 250.0f));
+        editor->updateDrag(400.0f, 450.0f);
         CHECK(editor->selectedNode() == kInvalidNode);
         check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), unit_scale);
     }
 
-    SUBCASE("after endScale, further updateScale calls change nothing") {
-        editor->beginScale();
-        editor->updateScale(200.0f);
-        editor->endScale();
+    SUBCASE("a press away from every handle does not activate — the seam the camera takes over at") {
+        CHECK_FALSE(editor->beginDrag(20.0f, 20.0f));
+        editor->updateDrag(20.0f, 220.0f);
+        check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), unit_scale);
+    }
+
+    SUBCASE("after endDrag, further updates change nothing") {
+        const ClickPoint press = grab_uniform_handle(editor);
+        editor->updateDrag(press.x, press.y + 200.0f);
+        editor->endDrag();
         const simd_float3 after_end = to_simd(editor->nodeScale(spawned.node_id));
 
-        editor->updateScale(400.0f);
+        editor->updateDrag(press.x, press.y + 400.0f);
         check_float3_approx(to_simd(editor->nodeScale(spawned.node_id)), after_end);
     }
 }
@@ -520,9 +590,9 @@ TEST_CASE("Editor: pick still hits the node at its anchor after scaling up "
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
 
-    editor->beginScale();
-    editor->updateScale(-2000.0f); // scales up to the 50x ceiling, so max(scale) > 1
-    editor->endScale();
+    const ClickPoint press = grab_uniform_handle(editor);
+    editor->updateDrag(press.x, press.y - 2000.0f); // up to the ceiling, so max(scale) > 1
+    editor->endDrag();
 
     const ScreenPoint anchor = editor->projectSelectedAnchor();
     REQUIRE(anchor.visible);
@@ -553,35 +623,32 @@ TEST_CASE("Editor: nodeOp/setNodeOp round-trip, and nodeOp defaults to Add for a
 
 // --- Regression: stale scale state must not leak across a selection change -
 //
-// Mirror of the drag regression test above (same class of bug the M6 drag
-// fix addressed): a caller can legally drive beginScale() for node A and
-// then, without an interleaving endScale(), change the selection to a
-// different node B. A later updateScale() must NOT apply A's captured
-// start_scale to B.
-TEST_CASE("Editor: updateScale ignores a stale scale gesture left active across a selection change "
+// Mirror of the drag regression test above (same class of bug the M6 drag fix
+// addressed): a caller can legally begin a scale drag on node A and then,
+// without an interleaving endDrag(), change the selection to a different node
+// B. A later updateDrag() must NOT apply A's captured start_scale to B.
+TEST_CASE("Editor: a scale drag ignores a stale gesture left active across a selection change "
           "onto a different node") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
     const SpawnResult a = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(a.snapped == false);
-    editor->beginScale();
+    const ClickPoint press = grab_uniform_handle(editor);
 
-    // Selection moves to a second, unrelated node B with no endScale() in
-    // between — spawning always selects the new node (Editor::spawn), same
-    // effect as a radial-menu scale-tool switch landing on a different
-    // object via a select-mode pick.
-    const SpawnResult b = editor->spawn(Shape::Sphere, Op::Subtract, 100.0f, 100.0f); // far corner: misses A, unsnapped
+    // Selection moves to a second, unrelated node B with no endDrag() in
+    // between — spawning always selects the new node (Editor::spawn), the same
+    // effect as a select-mode pick landing on a different object mid-gesture.
+    const SpawnResult b = editor->spawn(Shape::Sphere, Op::Subtract, 100.0f, 100.0f);
     REQUIRE(b.snapped == false);
     REQUIRE(editor->selectedNode() == b.node_id);
 
     const simd_float3 a_before = to_simd(editor->nodeScale(a.node_id));
     const simd_float3 b_before = to_simd(editor->nodeScale(b.node_id));
 
-    editor->updateScale(200.0f); // must be a no-op: selected (B) != the scale gesture's captured node (A)
+    editor->updateDrag(press.x, press.y + 200.0f); // selected (B) != the gesture's captured node (A)
 
     check_float3_approx(to_simd(editor->nodeScale(a.node_id)), a_before); // A untouched (not selected)
-    check_float3_approx(to_simd(editor->nodeScale(b.node_id)), b_before); // B did NOT get rescaled by A's factor
-
-    editor->endScale();
+    check_float3_approx(to_simd(editor->nodeScale(b.node_id)), b_before); // B not rescaled by A's factor
 }
+
