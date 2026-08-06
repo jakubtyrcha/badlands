@@ -128,9 +128,12 @@ TEST_CASE("report what each shipped prop contains", "[usd][.report]") {
         const float nl = std::sqrt(mesh.normals[i * 3 + 0] * mesh.normals[i * 3 + 0] +
                                    mesh.normals[i * 3 + 1] * mesh.normals[i * 3 + 1] +
                                    mesh.normals[i * 3 + 2] * mesh.normals[i * 3 + 2]);
-        const float tl = std::sqrt(mesh.tangents[i * 3 + 0] * mesh.tangents[i * 3 + 0] +
-                                   mesh.tangents[i * 3 + 1] * mesh.tangents[i * 3 + 1] +
-                                   mesh.tangents[i * 3 + 2] * mesh.tangents[i * 3 + 2]);
+        // Stride 4, not 3: tangents are xyzw. Reading them three at a time
+        // mixes components across vertices, which makes the badT column below
+        // report noise -- and badT is the whole point of this report.
+        const float tl = std::sqrt(mesh.tangents[i * 4 + 0] * mesh.tangents[i * 4 + 0] +
+                                   mesh.tangents[i * 4 + 1] * mesh.tangents[i * 4 + 1] +
+                                   mesh.tangents[i * 4 + 2] * mesh.tangents[i * 4 + 2]);
         n_lo = std::min(n_lo, nl);
         n_hi = std::max(n_hi, nl);
         if (!(nl > 0.9f && nl < 1.1f)) ++bad_normals;

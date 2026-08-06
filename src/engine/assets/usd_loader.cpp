@@ -28,6 +28,26 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
                                       const char* what, const std::string& mesh) {
   if (attr.empty()) return {};
 
+  // Everything below copies as if the data were tightly packed. Tydra's own
+  // convention is `0 = tightly packed`, but it also sets an EXPLICIT stride
+  // equal to the packed item size, which is equally tight -- so only a stride
+  // that disagrees with the packed size is padding we cannot handle.
+  //
+  // The check matters because vertex_count() divides by the stride when one is
+  // set: a padded attribute would satisfy the count comparison below while the
+  // copy walked off the end of the buffer.
+  const size_t packed_bytes =
+      attr.format == tydra::VertexAttributeFormat::Half4
+          ? 4 * sizeof(uint16_t)
+          : (attr.format == tydra::VertexAttributeFormat::Vec2 ? 2 : 3) *
+                sizeof(float);
+  if (attr.stride != 0 && attr.stride != packed_bytes) {
+    spdlog::warn("LoadUsdScene: mesh '{}' {} has stride {} but packs into {}"
+                 " bytes -- padded attributes are not unpacked, skipping",
+                 mesh, what, attr.stride, packed_bytes);
+    return {};
+  }
+
   const tydra::VertexAttributeFormat expected =
       components == 2 ? tydra::VertexAttributeFormat::Vec2
                       : tydra::VertexAttributeFormat::Vec3;
@@ -250,10 +270,21 @@ UsdSceneData LoadUsdScene(const std::string& path) {
     // adapter and get sliced into triangles three at a time -- garbage
     // geometry with nothing in the log.
     const std::vector<uint32_t>& indices = src.faceVertexIndices();
-    if (indices.size() % 3 != 0) {
-      spdlog::warn("LoadUsdScene: '{}' mesh '{}' has {} indices, not a whole"
-                   " number of triangles -- skipping",
-                   path, src.prim_name, indices.size());
+    // Check the FACE COUNTS, not `indices.size() % 3`. A divisibility test
+    // passes for plenty of n-gon meshes -- three quads is twelve indices -- so
+    // it would wave through exactly the untriangulated geometry it is meant to
+    // stop. Counting per face also accepts a mesh that arrived already
+    // triangular, which `is_triangulated()` alone would reject (Tydra leaves
+    // its triangulated arrays empty when there was nothing to do).
+    const std::vector<uint32_t>& face_counts = src.faceVertexCounts();
+    const bool all_triangles =
+        !face_counts.empty() &&
+        std::all_of(face_counts.begin(), face_counts.end(),
+                    [](uint32_t c) { return c == 3; });
+    if (!all_triangles) {
+      spdlog::warn("LoadUsdScene: '{}' mesh '{}' is not triangulated ({} faces,"
+                   " {} indices) -- skipping",
+                   path, src.prim_name, face_counts.size(), indices.size());
       continue;
     }
     const bool indices_in_range =

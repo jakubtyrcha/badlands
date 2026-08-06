@@ -60,7 +60,10 @@ std::vector<glm::vec3> ExtractVertexPositions(const StaticMeshComponent& mesh);
 // Static textured mesh component with UV coordinates (CPU-side)
 struct StaticTexturedMeshComponent {
   // Raw interleaved vertex floats; the layout follows `geometry_type`:
-  //   kTexturedMesh: pos(3) + uv(2) + normal(3) + tangent(3)  (11 floats)
+  //   kTexturedMesh: pos(3) + uv(2) + normal(3) + tangent(4)  (12 floats)
+  //                  tangent.w is bitangent handedness (+1/-1); see
+  //                  kTexturedMeshFloatsPerVertex, which is the ONLY place this
+  //                  stride should ever be read from.
   //   kTerrainBlend: pos(3) + normal(3) + layer_indices(Uint8x4 packed as 1
   //                  float) + blend_weights(Unorm8x4 packed as 1 float) (8)
   std::vector<float> vertices;

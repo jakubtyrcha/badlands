@@ -3868,7 +3868,7 @@ TEST_CASE("SceneRenderer Pass 0 draws instanced-field shadow submeshes onto "
 namespace {
 
 // One hand-built Phase-1-style tet: 4 vertices / 12 indices, the 44-byte
-// textured-mesh layout (pos3, uv2 with uv.x = brightness, normal3, tangent3
+// textured-mesh layout (pos3, uv2 with uv.x = brightness, normal3, tangent4
 // -- see leaf_voxelizer.hpp's EmitTetMesh). v0,v1,v2 form the "near" face
 // (facing the camera, dead-center on the view axis -- its centroid projects
 // to the exact center pixel, see BuildVoxelFoliageFrame); v3 is placed FAR

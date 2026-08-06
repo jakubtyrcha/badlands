@@ -1,5 +1,5 @@
 // Textured mesh rendering shader
-// Uses pos(3) + uv(2) + normal(3) + tangent(3) vertex layout
+// Uses pos(3) + uv(2) + normal(3) + tangent(4) vertex layout
 // For flat/unlit rendering, set ambient SH L0 to (1,1,1) and sun color to (0,0,0)
 //
 // Ported from sampo's src/shaders/material/textured_mesh.wesl. Deviation:

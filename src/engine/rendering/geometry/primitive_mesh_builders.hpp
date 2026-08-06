@@ -2,7 +2,7 @@
 
 // Parameterized building-block primitives for game geometry (Task S2.C):
 // cube/cylinder/cone/gable-roof/capsule, all emitting the kTexturedMesh
-// vertex format (pos3+uv2+normal3+tangent3, see textured_mesh_builders.hpp)
+// vertex format (pos3+uv2+normal3+tangent4, see textured_mesh_builders.hpp)
 // with real per-vertex tangents. Game-agnostic — dimensions and shape only,
 // no material/game types.
 //

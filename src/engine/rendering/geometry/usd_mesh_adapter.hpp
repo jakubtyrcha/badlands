@@ -26,7 +26,7 @@ namespace badlands {
 // material it should be drawn with.
 struct ImportedModel {
   std::string name;         // source prim name, for logging and scene-node names
-  TexturedMeshResult mesh;  // 11-float interleaved, indexed, Y-up, metres
+  TexturedMeshResult mesh;  // 12-float interleaved, indexed, Y-up, metres
   std::string pack_dir;     // feeds MaterialLibrary::Get
 };
 
@@ -34,7 +34,9 @@ struct ImportedModel {
 //   1. `meters_per_unit` scaling, so the result is in metres;
 //   2. the Z-up -> Y-up rotation when the stage says Z-up (every prop shipped
 //      today does, so this path is the norm rather than the exception);
-//   3. interleaving into pos(3) + uv(2) + normal(3) + tangent(3).
+//   3. interleaving into pos(3) + uv(2) + normal(3) + tangent(4), where
+//      tangent.w is the authored bitangent handedness (flipped when the prim's
+//      transform mirrors).
 //
 // A mesh missing normals, UVs or tangents is SKIPPED and logged rather than
 // emitted with zeroed attributes: a vertex short of its normal renders as a

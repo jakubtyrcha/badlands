@@ -194,7 +194,7 @@ std::vector<uint32_t> StitchLoops(const std::vector<uint32_t>& a_ids,
 // AABB, and with it CrownRadiusM and the whole forest's spacing.
 //
 // `vertices` is interleaved at `floats_per_vertex`, laid out
-// pos(3) uv(2) normal(3) tangent(3) -- kTexturedMeshFloatsPerVertex.
+// pos(3) uv(2) normal(3) tangent(4) -- kTexturedMeshFloatsPerVertex.
 void SmoothVertexNormals(std::vector<float>& vertices, size_t floats_per_vertex,
                          const std::vector<uint32_t>& indices,
                          const std::vector<uint32_t>& vertex_ids);

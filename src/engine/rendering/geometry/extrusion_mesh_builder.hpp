@@ -2,7 +2,7 @@
 
 // Ring-extrusion mesh for rock mesas / lake basins (Task S2.C). Ported from
 // the reference build_extrusion (src/scene/ploppable.rs @ 8ee93cc), dropping
-// its per-vertex terrain material `layer` float (kTexturedMesh's 11-float
+// its per-vertex terrain material `layer` float (kTexturedMesh's 12-float
 // format has no such slot; the reference's terrain_pbr triplanar material
 // system isn't ported yet — surface-material assignment is a game/material
 // concern, out of scope for this engine-side, game-agnostic generator).
