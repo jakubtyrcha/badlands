@@ -60,17 +60,52 @@ struct GizmoFrame {
     float half_extent;
 };
 
-// --- scale gizmo -----------------------------------------------------------
+// --- radius bands ----------------------------------------------------------
+//
+// Both gizmos are live at once, and when their anchors coincide their handles
+// share an origin. Every handle therefore owns a disjoint band of radius, as a
+// fraction of half_extent, so the combined gizmo is exactly the union of the
+// two separate ones -- nothing overlaps, and neither gizmo restructures itself
+// as the pair merges or splits.
+//
+//   0.00 .. 0.09   Shape: uniform scale (the centre disc)
+//   0.00 .. 0.60   Placement: move axes
+//   0.24 .. 0.50   Placement: move plane patches (off-axis, so no conflict)
+//   0.70 .. 1.00   Shape: scale axes
+//
+// The gap between the move and scale axis bands is deliberate: they lie on the
+// SAME three lines when coalesced, so without it a sloppy grab near 0.6 he
+// would flip between translating and scaling.
+inline constexpr float kMoveAxisOuterFrac  = 0.60f;  // pick clamp
+inline constexpr float kMoveAxisShaftFrac  = 0.55f;  // drawn shaft end, and where its tip dot sits
+inline constexpr float kScaleAxisInnerFrac = 0.70f;
+inline constexpr float kScaleAxisShaftFrac = 0.94f;  // drawn shaft end, and where its box tip sits
+inline constexpr float kScaleAxisOuterFrac = 1.00f;  // pick clamp
+static_assert(kMoveAxisOuterFrac < kScaleAxisInnerFrac,
+              "the move and scale axis bands share three lines and must not overlap");
+static_assert(kMoveAxisShaftFrac <= kMoveAxisOuterFrac &&
+                  kScaleAxisShaftFrac <= kScaleAxisOuterFrac,
+              "a drawn shaft must stay inside its own pickable band (drawn = hit)");
+
+// How close the two anchors have to be before the pair reads as one gizmo.
+// Compared in WORLD units against half_extent, which is itself screen-constant
+// -- so this is a screen-space test with none of a projection's behind-camera
+// or w-near-zero edge cases. Its only consumer is the tether: coalescing needs
+// no other special case, because two gizmos at the same origin already draw
+// and hit-test as their union.
+inline constexpr float kGizmoCoalesceFrac = 0.35f;
+bool gizmos_coalesce(const GizmoFrame& placement, const GizmoFrame& shape);
+
+// --- shape (scale) gizmo ---------------------------------------------------
 //
 // Three axis shafts plus a centre box for uniform scale. No plane patches and
-// no grid: the grid is a drag-PLANE affordance, and scale has no drag plane.
+// no grid: the grid is a reference plane the Placement gizmo owns, and scale
+// has no drag plane of its own.
 
-// The centre (uniform) handle's drawn half-size, and where the axis shafts
-// start, both as fractions of half_extent. Together they PARTITION the gizmo:
-// the centre owns the disc around the origin, the axes own everything outboard
-// of it, so "aim at the middle" can never be answered by an axis.
+// The centre (uniform) handle's drawn half-size. With the axis shafts pulled
+// out to kScaleAxisInnerFrac, the centre owns the disc around the origin
+// outright, so "aim at the middle" can never be answered by an axis.
 inline constexpr float kGizmoUniformHalfSizeFrac = 0.09f;
-inline constexpr float kScaleAxisInnerFrac = 0.18f;
 // Box tips, larger than the move gizmo's terminator dots: box-tipped axes are
 // the universal scale convention, and the size difference is what tells the
 // two gizmos apart at a glance without new 3D geometry.
@@ -98,8 +133,8 @@ inline constexpr float kUniformPickTolerancePts = 14.0f;
 // drag can ever shrink an axis is floor/s_start, and s_start is bounded below
 // by the innermost grabbable point -- so a floor close to the inner bound caps
 // the achievable shrink near 1 and the gesture feels dead exactly where the
-// handle is hardest to grab. At 0.02 against an inner bound of 0.18 the worst
-// case is still ~9x, and the per-component clamp takes over long before that.
+// handle is hardest to grab. At 0.02 against the inner bound the worst case is
+// tens of times, and the per-component clamp takes over long before that.
 inline constexpr float kScaleAxisMinGrabFrac = 0.02f;
 static_assert(kScaleAxisMinGrabFrac * 8.0f < kScaleAxisInnerFrac,
               "the axis floor must stay far below the innermost grabbable point, or a "
@@ -129,7 +164,7 @@ int gizmo_scale_axis_index(GizmoHandle handle);
 // construction, so this is defense-in-depth only.
 void tangent_basis(simd_float3 n, simd_float3& u, simd_float3& v);
 
-GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoKind kind);
+GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlot slot);
 
 // Screen-constant axis grab tolerance, converted to world units at the
 // candidate point's depth inside pick_gizmo_handle (same points-to-world
@@ -146,24 +181,41 @@ inline constexpr float kAxisViewAlignLimit = 0.995f;
 // callers keep the last position, mirroring ray_plane's parallel guard.
 std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_float3 axis_dir);
 
-// Drawn geometry = hit geometry: axes 0..+he along u/v/n (positive half
-// only, R3 ruling; ray-to-segment distance vs the pts tolerance above),
-// plane patches origin + x*e1 + y*e2 with x, y in
-// [kGizmoPatchInner*he, kGizmoPatchOuter*he] (ray_plane + bounds). Named
-// rather than spelled out on purpose -- this comment previously restated the
+// Hit-tests ONE gizmo's handle set. Drawn geometry = hit geometry: axes over
+// their slot's band along u/v/n (positive half only, R3 ruling; ray-to-segment
+// distance vs the pts tolerance above), plane patches origin + x*e1 + y*e2 with
+// x, y in [kGizmoPatchInner*he, kGizmoPatchOuter*he] (ray_plane + bounds). All
+// named rather than spelled out on purpose -- this comment once restated the
 // bounds as literals and went stale the moment they moved, which is the exact
 // failure those constants exist to prevent. Any axis hit beats any plane hit;
 // among axes smallest distance wins (ties: smaller ray-t, then declaration
 // order); among planes nearest ray-t wins.
-// `kind` selects the handle set, and is REQUIRED rather than defaulted: which
-// manipulator is being hit-tested is exactly the kind of thing that must not
-// be decided silently at a call site.
 //
-// Move: axes over 0..he, then plane patches. Scale: the uniform centre first
-// (it owns the disc the axes are pulled back from), then axes over
-// kScaleAxisInnerFrac*he..he at the wider scale tolerance, and no planes.
+// `slot` selects the handle set, and is REQUIRED rather than defaulted: which
+// manipulator is being hit-tested is exactly the kind of thing that must not be
+// decided silently at a call site.
+//
+// Placement: axes over 0..kMoveAxisOuterFrac*he, then plane patches. Shape: the
+// uniform centre first (it owns the disc the axes are pulled back from), then
+// axes over kScaleAxisInnerFrac..kScaleAxisOuterFrac at the wider scale
+// tolerance, and no planes.
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
-                              float fov_y_radians, float viewport_h_pts, GizmoKind kind);
+                              float fov_y_radians, float viewport_h_pts, GizmoSlot slot);
+
+// Hit-tests BOTH gizmos and resolves the winner. This is what input should
+// call; the single-slot version above exists for the pieces it is built from
+// and for tests.
+//
+// Resolution is by radius band, innermost first: Shape's uniform centre, then
+// Placement's move axes, then Shape's scale axes, then Placement's planes.
+// Fixed priority rather than a distance comparison across the two, because the
+// bands are disjoint by construction (see the band table above) -- so when the
+// gizmos are coalesced a ray can essentially only satisfy one, and when they
+// are apart at most one is anywhere near the cursor. The order matters only for
+// the grazing cases, where "the innermost thing you could plausibly have meant"
+// is the reading a user has.
+GizmoHit pick_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, const Ray& ray,
+                     float fov_y_radians, float viewport_h_pts);
 
 // Camera-pivot marker visibility over time. Full strength while a gesture is
 // running and for kPivotHoldSeconds after the last camera move, then a

@@ -45,16 +45,21 @@ public:
     // creating a zero-length one (Metal disallows those) -- see set_mesh's
     // definition for the replace-on-update ownership note.
     void set_mesh(const TriangleMesh& mesh);
-    // Modify-mode move gizmo. Rebuilds the gizmo vertex vectors on every call
-    // — ~760 verts total is cheap enough that caching by param-equality would
-    // be over-engineering. `eye` feeds the camera-facing expansion of the
-    // thick handle quads. Uploaded to vertex buffers at draw time (see
-    // upload_line_verts): the restyle put both halves past setVertexBytes'
-    // 4KB inline limit.
-    // `kind` picks the handle set and whether a grid is drawn at all — scale
-    // has no drag plane, so no grid.
-    void set_gizmo(const GizmoFrame& frame, GizmoKind kind, GizmoHandle highlighted,
-                   simd_float3 eye);                                                    // shows the gizmo
+    // The selected node's two manipulators, drawn together. Rebuilds the gizmo
+    // vertex vectors on every call — ~800 verts total is cheap enough that
+    // caching by param-equality would be over-engineering. `eye` feeds the
+    // camera-facing expansion of the thick handle quads. Uploaded to vertex
+    // buffers at draw time (see upload_line_verts): the restyle put both halves
+    // past setVertexBytes' 4KB inline limit.
+    //
+    // Both handle sets share one vertex vector — they are the same primitive
+    // type, and their radius bands are disjoint, so when the two anchors
+    // coincide the result IS the combined gizmo with no compositing step.
+    // `hover` selects which gizmo keeps full strength and which dims; only the
+    // grid (Placement's) and the tether (drawn when the pair is apart) are
+    // decided here rather than by the caller.
+    void set_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, GizmoHit hover,
+                    simd_float3 eye);                                                   // shows the gizmos
     void hide_gizmo();
     // Camera-pivot marker (flat ring + crosshair at the orbit target),
     // refreshed every frame like the move gizmo. Drawn LAST and depth-ignored:

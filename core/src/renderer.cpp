@@ -295,20 +295,38 @@ void Renderer::ensure_depth_texture(uint32_t width, uint32_t height) {
     depth_texture_height_ = height;
 }
 
-void Renderer::set_gizmo(const GizmoFrame& frame, GizmoKind kind, GizmoHandle highlighted,
+void Renderer::set_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, GizmoHit hover,
                           simd_float3 eye) {
     gizmo_visible_ = true;
     gizmo_grid_verts_.clear();
     gizmo_handle_verts_.clear();
-    if (kind == GizmoKind::Scale) {
-        // No grid: it is a drag-PLANE affordance and scale has no drag plane.
-        // gizmo_grid_verts_ therefore stays empty, which the draw path already
-        // handles (upload_line_verts drops the buffer for an empty vector).
-        append_scale_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
-    } else {
-        append_move_gizmo_grid(gizmo_grid_verts_, frame, 12);
-        append_move_gizmo_handles(gizmo_handle_verts_, frame, highlighted, eye);
+
+    // Only the gizmo the cursor is on keeps its full rest alpha; the other one
+    // drops back so a coalesced pair does not fight itself for attention. With
+    // nothing hovered, both rest normally.
+    const bool hovering = hover.handle != GizmoHandle::None;
+    const bool on_placement = hovering && hover.slot == GizmoSlot::Placement;
+    const bool on_shape = hovering && hover.slot == GizmoSlot::Shape;
+    const auto rest_for = [&](bool owns_hover) {
+        return (hovering && !owns_hover) ? kGizmoHandleDimAlpha : kGizmoHandleRestAlpha;
+    };
+
+    // Only Placement has a grid: it is a reference plane belonging to where the
+    // node sits, and Shape answers a question about size that no plane informs.
+    append_move_gizmo_grid(gizmo_grid_verts_, placement, 12);
+
+    // The tether goes down before the handles, so the handles draw over it.
+    if (!gizmos_coalesce(placement, shape)) {
+        append_anchor_tether(gizmo_handle_verts_, placement.origin, shape.origin,
+                             kGizmoPatchBorderHalfWidthFrac * placement.half_extent, eye);
     }
+
+    append_move_gizmo_handles(gizmo_handle_verts_, placement,
+                              on_placement ? hover.handle : GizmoHandle::None, eye,
+                              rest_for(on_placement));
+    append_scale_gizmo_handles(gizmo_handle_verts_, shape,
+                               on_shape ? hover.handle : GizmoHandle::None, eye,
+                               rest_for(on_shape));
 }
 
 void Renderer::hide_gizmo() {

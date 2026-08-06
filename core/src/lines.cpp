@@ -207,28 +207,31 @@ void append_camera_facing_quad(std::vector<LineVertex>& out, simd_float3 center,
 } // namespace
 
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
-                               GizmoHandle highlighted, simd_float3 eye) {
+                               GizmoHandle highlighted, simd_float3 eye, float rest_alpha) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float hw = kGizmoHandleHalfWidthFrac * he;
     const float border_hw = kGizmoPatchBorderHalfWidthFrac * he;
+    // Plane fills track the handles' own opacity, so a dimmed gizmo dims as a
+    // whole rather than keeping its largest, loudest element at full strength.
+    const float fill_scale = rest_alpha / kGizmoHandleRestAlpha;
 
-    // A resting handle is its own color at kGizmoHandleRestAlpha; the
-    // highlighted one goes opaque white. Hover therefore reads as both a
-    // brightness and a color change, which is what lets it stay legible on
-    // every handle regardless of that handle's base color.
+    // A resting handle is its own color at `rest_alpha`; the highlighted one
+    // goes opaque white. Hover therefore reads as both a brightness and a color
+    // change, which is what lets it stay legible on every handle regardless of
+    // that handle's base color.
     auto color_for = [&](GizmoHandle handle, simd_float4 base) {
         if (handle == highlighted) {
             return kColorGizmoHot;
         }
-        base.w = kGizmoHandleRestAlpha;
+        base.w = rest_alpha;
         return base;
     };
 
-    // Axis shafts from the origin, POSITIVE half only (R3 user ruling). The
-    // shaft stops at kGizmoAxisShaftFrac*he and a camera-facing dot caps it;
-    // pick_gizmo_handle still clamps to the full 0..he segment, so the dot is
-    // grabbable rather than being dead space past the end of the target.
+    // Axis shafts from the origin, POSITIVE half only (R3 user ruling), over
+    // the Placement band. The shaft stops at kMoveAxisShaftFrac*he and a
+    // camera-facing dot caps it; the pick clamps to kMoveAxisOuterFrac, so the
+    // dot is grabbable rather than being dead space past the end of the target.
     // Emission order (u, v, n) matches the pick tie-break order; lines_tests
     // pins the layout.
     const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
@@ -237,11 +240,11 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
         {frame.n, kColorAxisN, GizmoHandle::AxisN},
     };
     for (const auto& axis : axes) {
-        append_thick_segment(out, origin, origin + kGizmoAxisShaftFrac * he * axis.dir,
+        append_thick_segment(out, origin, origin + kMoveAxisShaftFrac * he * axis.dir,
                              eye, hw, color_for(axis.handle, axis.color));
     }
     for (const auto& axis : axes) {
-        append_camera_facing_quad(out, origin + kGizmoAxisShaftFrac * he * axis.dir,
+        append_camera_facing_quad(out, origin + kMoveAxisShaftFrac * he * axis.dir,
                                   kGizmoAxisTipHalfSizeFrac * he, eye,
                                   color_for(axis.handle, axis.color));
     }
@@ -265,7 +268,8 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
         const simd_float3 p01 = origin + a * patch.e1 + b * patch.e2;
 
         simd_float4 fill = c;
-        fill.w = (patch.handle == highlighted) ? (2.0f * kGizmoPatchFillAlpha) : kGizmoPatchFillAlpha;
+        fill.w = ((patch.handle == highlighted) ? (2.0f * kGizmoPatchFillAlpha)
+                                                : kGizmoPatchFillAlpha) * fill_scale;
         auto push_fill = [&](simd_float3 p) {
             LineVertex vertex;
             vertex.pos = (simd_float4){p.x, p.y, p.z, 1.0f};
@@ -282,30 +286,35 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
     }
 
     // Origin pip: anchors the three shafts at a single visible point, which
-    // matters more now that they are thin.
-    append_camera_facing_quad(out, origin, kGizmoAxisTipHalfSizeFrac * he, eye, kColorOriginPip);
+    // matters more now that they are thin. Dims with the rest of the gizmo --
+    // when the pair is coalesced this sits inside the Shape gizmo's uniform
+    // box, and a full-strength white dot there would read as a handle of its
+    // own rather than as the Placement gizmo's centre.
+    simd_float4 pip = kColorOriginPip;
+    pip.w *= rest_alpha / kGizmoHandleRestAlpha;
+    append_camera_facing_quad(out, origin, kGizmoAxisTipHalfSizeFrac * he, eye, pip);
 }
 
 void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
-                                GizmoHandle highlighted, simd_float3 eye) {
+                                GizmoHandle highlighted, simd_float3 eye, float rest_alpha) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float hw = kGizmoHandleHalfWidthFrac * he;
 
-    // Same rest/hot treatment as the move gizmo, so hover reads identically
-    // across both manipulators.
+    // Same rest/hot treatment as the placement gizmo, so hover reads
+    // identically across both manipulators.
     auto color_for = [&](GizmoHandle handle, simd_float4 base) {
         if (handle == highlighted) {
             return kColorGizmoHot;
         }
-        base.w = kGizmoHandleRestAlpha;
+        base.w = rest_alpha;
         return base;
     };
 
-    // Shafts start at kScaleAxisInnerFrac*he, not at the origin: the centre box
-    // owns the middle, and pick_gizmo_handle clamps to the same segment, so
-    // drawn geometry = hit geometry here too. Emission order (u, v, n) matches
-    // the pick tie-break order; lines_tests pins the layout.
+    // Shafts run the Shape band, outboard of both the centre box and the
+    // Placement gizmo's own shafts; pick_gizmo_handle clamps to the same band,
+    // so drawn geometry = hit geometry here too. Emission order (u, v, n)
+    // matches the pick tie-break order; lines_tests pins the layout.
     const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
         {frame.u, kColorAxisU, GizmoHandle::AxisU},
         {frame.v, kColorAxisV, GizmoHandle::AxisV},
@@ -314,16 +323,21 @@ void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& 
     for (const auto& axis : axes) {
         const simd_float4 c = color_for(axis.handle, axis.color);
         append_thick_segment(out, origin + kScaleAxisInnerFrac * he * axis.dir,
-                             origin + kGizmoAxisShaftFrac * he * axis.dir, eye, hw, c);
+                             origin + kScaleAxisShaftFrac * he * axis.dir, eye, hw, c);
     }
     for (const auto& axis : axes) {
-        append_camera_facing_quad(out, origin + kGizmoAxisShaftFrac * he * axis.dir,
+        append_camera_facing_quad(out, origin + kScaleAxisShaftFrac * he * axis.dir,
                                   kGizmoScaleTipHalfSizeFrac * he, eye,
                                   color_for(axis.handle, axis.color));
     }
 
     append_camera_facing_quad(out, origin, kGizmoUniformHalfSizeFrac * he, eye,
                               color_for(GizmoHandle::Uniform, kColorGizmoUniform));
+}
+
+void append_anchor_tether(std::vector<LineVertex>& out, simd_float3 anchor, simd_float3 centre,
+                          float half_width, simd_float3 eye) {
+    append_thick_segment(out, anchor, centre, eye, half_width, kColorAnchorTether);
 }
 
 void append_focus_dot(std::vector<LineVertex>& out, simd_float3 center, float half_size,

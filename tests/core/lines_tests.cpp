@@ -402,7 +402,7 @@ TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors 
     const float tip = kGizmoAxisTipHalfSizeFrac * he;
     const simd_float3 eye = {3.0f, 8.0f, 2.0f}; // off every axis: no degenerate expansion
     std::vector<LineVertex> out;
-    append_move_gizmo_handles(out, f, GizmoHandle::None, eye);
+    append_move_gizmo_handles(out, f, GizmoHandle::None, eye, kGizmoHandleRestAlpha);
 
     // 3 shafts*6 + 3 tips*6 + 3 patches*(6 fill + 24 outline) + 6 pip = 132.
     REQUIRE(out.size() == 132);
@@ -413,7 +413,7 @@ TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors 
 
     SUBCASE("shafts run the POSITIVE half only, stopping short for the tip dot") {
         for (const auto& axis : axes) {
-            const simd_float3 end = f.origin + kGizmoAxisShaftFrac * he * axis.dir;
+            const simd_float3 end = f.origin + kMoveAxisShaftFrac * he * axis.dir;
             for (size_t i = axis.shaft; i < axis.shaft + 6; ++i) {
                 CAPTURE(i);
                 check_on_thick_segment(out[i].pos.xyz, f.origin, end, hw);
@@ -426,7 +426,7 @@ TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors 
 
     SUBCASE("tip dots cap the shafts and face the eye") {
         for (const auto& axis : axes) {
-            const simd_float3 center = f.origin + kGizmoAxisShaftFrac * he * axis.dir;
+            const simd_float3 center = f.origin + kMoveAxisShaftFrac * he * axis.dir;
             for (size_t i = axis.tip; i < axis.tip + 6; ++i) {
                 CAPTURE(i);
                 // Corners of a square of half-size `tip`, so at most sqrt(2)*tip out.
@@ -498,7 +498,7 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
     // everywhere -- hence the explicit exclusion in the sweep below.
     auto check_hot = [&](GizmoHandle highlighted, std::vector<std::pair<size_t, size_t>> ranges) {
         out.clear();
-        append_move_gizmo_handles(out, f, highlighted, eye);
+        append_move_gizmo_handles(out, f, highlighted, eye, kGizmoHandleRestAlpha);
         REQUIRE(out.size() == 132);
 
         for (size_t i = 0; i < out.size(); ++i) {
@@ -521,7 +521,7 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
 
     SUBCASE("a highlighted patch brightens its fill without making it opaque") {
         out.clear();
-        append_move_gizmo_handles(out, f, GizmoHandle::PlaneUV, eye);
+        append_move_gizmo_handles(out, f, GizmoHandle::PlaneUV, eye, kGizmoHandleRestAlpha);
         // Fill stays translucent (it sits over the model), outline goes solid.
         CHECK(alpha_of(out[36]) == doctest::Approx(2.0f * kGizmoPatchFillAlpha));
         CHECK(alpha_of(out[36]) < 1.0f);
@@ -530,7 +530,7 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
 
     SUBCASE("unhighlighted handles rest below full opacity") {
         out.clear();
-        append_move_gizmo_handles(out, f, GizmoHandle::None, eye);
+        append_move_gizmo_handles(out, f, GizmoHandle::None, eye, kGizmoHandleRestAlpha);
         CHECK(alpha_of(out[0]) == doctest::Approx(kGizmoHandleRestAlpha));
         CHECK(alpha_of(out[0]) < 1.0f);
     }

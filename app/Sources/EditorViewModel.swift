@@ -10,13 +10,6 @@ enum EditorMode: CaseIterable, Hashable {
     case edit, spawn
 }
 
-/// Which manipulator the radial menu currently arms. Both are real gizmos with
-/// real handles, so both obey the same rule as everything else in the
-/// viewport: grab a handle, or the press drives the camera.
-enum RadialTool {
-    case move, scale
-}
-
 /// Owns the core `Editor` and the mode/gesture state machine, and is the single
 /// place raw input from the viewport gets routed and dispatched.
 @Observable @MainActor
@@ -43,8 +36,6 @@ final class EditorViewModel {
     /// the way of the gesture it started.
     var isDragging = false
 
-    /// Which gizmo the radial menu has armed.
-    var activeRadialTool: RadialTool = .move
     /// Radial-menu anchor: the selected node's projected viewport position, or
     /// nil when there's nothing to project onto.
     var radialAnchor: CGPoint? = nil
@@ -88,9 +79,6 @@ final class EditorViewModel {
         if isDragging {
             editor.endDrag()
             isDragging = false
-            if activeRadialTool == .scale {
-                activeRadialTool = .move // mirror handleMouseUp's revert
-            }
         }
         pointer = nil
         mode = m
@@ -103,16 +91,14 @@ final class EditorViewModel {
         }
     }
 
-    /// Centralizes gizmo visibility **and kind**. Call after every mode,
-    /// selection or `activeRadialTool` change.
+    /// Centralizes gizmo visibility. Call after every mode or selection change.
     ///
-    /// Both tools now have real gizmos, so unlike before nothing is hidden
-    /// here to paper over a missing manipulator — Scale simply shows its own
-    /// handle set. That is what lets one rule cover the whole viewport: core
-    /// returns false from `beginDrag` off-handle, and the app hands the press
-    /// to the camera.
+    /// There is no kind to select any more: a selected node shows both of its
+    /// manipulators at once, and which one you get is decided by the handle you
+    /// grab. That is what lets one rule cover the whole viewport — core returns
+    /// false from `beginDrag` off-handle, and the app hands the press to the
+    /// camera.
     private func syncGizmo() {
-        editor.setGizmoKind(activeRadialTool == .move ? .Move : .Scale)
         editor.setGizmoVisible(mode == .edit && selectedNodeID != nil)
     }
 
@@ -175,13 +161,6 @@ final class EditorViewModel {
 
         case .manipulating:
             editor.endDrag()
-            if activeRadialTool == .scale {
-                // A scale gesture reverts to Move on release, so the menu
-                // doesn't keep showing Scale armed with no interaction to
-                // explain why. syncGizmo swaps the gizmo back.
-                activeRadialTool = .move
-                syncGizmo()
-            }
             // endDrag cleared the (stale) pre-drag hover; re-derive it from
             // where the mouse actually is, so a handle still under the cursor
             // stays lit without waiting for the next move.
@@ -312,16 +291,10 @@ final class EditorViewModel {
     }
 
     // MARK: - Radial menu actions
-
-    func radialSelectMove() {
-        activeRadialTool = .move
-        syncGizmo()
-    }
-
-    func radialSelectScale() {
-        activeRadialTool = .scale
-        syncGizmo()
-    }
+    //
+    // No Move/Scale entries: both manipulators are live on every selection, so
+    // there is nothing to arm. What is left is what the gizmos cannot express —
+    // the node's CSG op, and deleting it.
 
     func radialToggleOp() {
         guard let id = selectedNodeID, let current = selectedNodeOp else { return }

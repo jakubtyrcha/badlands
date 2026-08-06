@@ -29,10 +29,10 @@ float gizmo_half_extent(simd_float3 origin, const Camera& camera) {
 
 } // namespace
 
-GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoKind kind) {
+GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlot slot) {
     GizmoFrame f;
 
-    if (kind == GizmoKind::Move && node.snapped) {
+    if (slot == GizmoSlot::Placement && node.snapped) {
         // The surface the detail was placed on. Fixed in world space, so
         // "pull it out along the normal" means the same thing from every
         // camera angle.
@@ -51,15 +51,20 @@ GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoKin
         f.u = simd_act(node.rotation, simd_float3{1.0f, 0.0f, 0.0f});
         f.v = simd_act(node.rotation, simd_float3{0.0f, 1.0f, 0.0f});
         f.n = simd_act(node.rotation, simd_float3{0.0f, 0.0f, 1.0f});
-        // Scale draws no grid, so its value is inert -- set to n rather than
+        // Shape draws no grid, so its value is inert -- set to n rather than
         // left unset, so there is no "meaningless unless" state to reason
-        // about. A free Move node gets a world-horizontal reference plane
+        // about. A free Placement node gets a world-horizontal reference plane
         // instead of the u-v plane; see GizmoFrame's header comment.
-        f.grid_normal = (kind == GizmoKind::Move) ? simd_float3{0.0f, 1.0f, 0.0f} : f.n;
+        f.grid_normal = (slot == GizmoSlot::Placement) ? simd_float3{0.0f, 1.0f, 0.0f} : f.n;
     }
 
     f.half_extent = gizmo_half_extent(f.origin, camera);
     return f;
+}
+
+bool gizmos_coalesce(const GizmoFrame& placement, const GizmoFrame& shape) {
+    return simd_distance(placement.origin, shape.origin) <
+           kGizmoCoalesceFrac * placement.half_extent;
 }
 
 std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_float3 axis_dir) {
@@ -78,14 +83,15 @@ std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_flo
 
 namespace {
 
-// Shared axis hit-test for both gizmo kinds. `inner_frac`/`tolerance_pts` are
+// Shared axis hit-test for both slots. The band bounds and the tolerance are
 // the only things that differ, so the "drawn = hit" segment definition lives
-// here once rather than being spelled out per kind.
+// here once rather than being spelled out per slot.
 struct AxisPick { GizmoHandle handle; float dist; float t; };
 
 std::optional<AxisPick> pick_axis_handle(const GizmoFrame& frame, const Ray& ray,
                                           float pts_to_world_at_unit_depth,
-                                          float inner_frac, float tolerance_pts) {
+                                          float inner_frac, float outer_frac,
+                                          float tolerance_pts) {
     const float he = frame.half_extent;
     std::optional<AxisPick> best;
     const struct { simd_float3 dir; GizmoHandle handle; } axes[] = {
@@ -101,9 +107,9 @@ std::optional<AxisPick> pick_axis_handle(const GizmoFrame& frame, const Ray& ray
         if (!s) {
             continue;
         }
-        // Positive half only (R3): the drawn axis runs inner_frac*he..+he, so
-        // the pickable segment does too — drawn geometry = hit geometry.
-        const float s_clamped = std::clamp(*s, inner_frac * he, he);
+        // Positive half only (R3): the drawn axis runs within this slot's band,
+        // so the pickable segment does too — drawn geometry = hit geometry.
+        const float s_clamped = std::clamp(*s, inner_frac * he, outer_frac * he);
         const simd_float3 p_axis = frame.origin + s_clamped * axis.dir;
         // Forward-clamp the ray parameter: geometry behind the ray origin can
         // only be "closest" at t = 0, where it is far outside tolerance.
@@ -131,11 +137,11 @@ std::optional<AxisPick> pick_axis_handle(const GizmoFrame& frame, const Ray& ray
 } // namespace
 
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
-                              float fov_y_radians, float viewport_h_pts, GizmoKind kind) {
+                              float fov_y_radians, float viewport_h_pts, GizmoSlot slot) {
     const float he = frame.half_extent;
     const float pts_to_world_at_unit_depth = 2.0f * std::tan(fov_y_radians * 0.5f) / viewport_h_pts;
 
-    if (kind == GizmoKind::Scale) {
+    if (slot == GizmoSlot::Shape) {
         // The uniform centre is tested FIRST and the axes start outboard of it
         // (kScaleAxisInnerFrac), so the two never contend: aiming at the middle
         // always means uniform scale, which is the only reading a user has.
@@ -146,13 +152,15 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         if (dist <= tol) {
             return GizmoHandle::Uniform;
         }
-        const std::optional<AxisPick> axis = pick_axis_handle(
-            frame, ray, pts_to_world_at_unit_depth, kScaleAxisInnerFrac, kScaleAxisPickTolerancePts);
-        return axis ? axis->handle : GizmoHandle::None; // no plane handles on scale
+        const std::optional<AxisPick> axis =
+            pick_axis_handle(frame, ray, pts_to_world_at_unit_depth, kScaleAxisInnerFrac,
+                             kScaleAxisOuterFrac, kScaleAxisPickTolerancePts);
+        return axis ? axis->handle : GizmoHandle::None; // no plane handles on Shape
     }
 
     if (const std::optional<AxisPick> axis =
-            pick_axis_handle(frame, ray, pts_to_world_at_unit_depth, 0.0f, kAxisPickTolerancePts)) {
+            pick_axis_handle(frame, ray, pts_to_world_at_unit_depth, 0.0f, kMoveAxisOuterFrac,
+                             kAxisPickTolerancePts)) {
         return axis->handle;
     }
 
@@ -182,6 +190,30 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         }
     }
     return best_plane ? best_plane->handle : GizmoHandle::None;
+}
+
+GizmoHit pick_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, const Ray& ray,
+                     float fov_y_radians, float viewport_h_pts) {
+    const GizmoHandle on_shape =
+        pick_gizmo_handle(shape, ray, fov_y_radians, viewport_h_pts, GizmoSlot::Shape);
+    const GizmoHandle on_placement =
+        pick_gizmo_handle(placement, ray, fov_y_radians, viewport_h_pts, GizmoSlot::Placement);
+
+    // Innermost band first (see pick_gizmos' header comment for why fixed
+    // priority rather than a distance race across the two frames).
+    if (on_shape == GizmoHandle::Uniform) {
+        return GizmoHit{GizmoSlot::Shape, on_shape};
+    }
+    if (gizmo_handle_is_axis(on_placement)) {
+        return GizmoHit{GizmoSlot::Placement, on_placement};
+    }
+    if (gizmo_handle_is_axis(on_shape)) {
+        return GizmoHit{GizmoSlot::Shape, on_shape};
+    }
+    if (on_placement != GizmoHandle::None) {
+        return GizmoHit{GizmoSlot::Placement, on_placement}; // a plane patch
+    }
+    return GizmoHit{GizmoSlot::Placement, GizmoHandle::None};
 }
 
 float pivot_marker_alpha(float seconds_since_activity) {

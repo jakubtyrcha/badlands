@@ -48,7 +48,7 @@ GizmoFrame frame_for(Editor* editor, int32_t node_id, bool snapped,
     stub.snapped = snapped;
     stub.snap_point = snap_point;
     stub.snap_normal = snap_normal;
-    return gizmo_frame_for_node(stub, editor_test_camera(), GizmoKind::Move);
+    return gizmo_frame_for_node(stub, editor_test_camera(), GizmoSlot::Placement);
 }
 
 // Projects a world point and returns its view coords, REQUIREing visibility.
@@ -138,8 +138,11 @@ TEST_CASE("Editor: AxisU drag constrains the move to the grabbed axis") {
     const float he = f.half_extent;
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
 
-    const ClickPoint p1 = click_at(f.origin + 0.8f * he * f.u);
-    const ClickPoint p2 = click_at(f.origin + 1.2f * he * f.u);
+    // Both points inside Placement's own axis band: past it lies Shape's scale
+    // axis, and on a free node the two gizmos are coalesced, so an out-of-band
+    // grab would silently become a scale drag.
+    const ClickPoint p1 = click_at(f.origin + 0.2f * he * f.u);
+    const ClickPoint p2 = click_at(f.origin + 0.6f * he * f.u);
     CHECK(editor->beginDrag(p1.x, p1.y));
     editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
@@ -220,8 +223,11 @@ TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; Axi
 
     SUBCASE("AxisN pull moves along the surface normal; a second grab on the moved frame works") {
         const simd_float3 before = to_simd(editor->nodePosition(b.node_id));
-        const ClickPoint p1 = click_at(f.origin + 0.8f * he * f.n);
-        const ClickPoint p2 = click_at(f.origin + 1.2f * he * f.n);
+        // Inside Placement's axis band. A freshly snapped node is centred on
+        // its own snap point, so the two gizmos start coalesced and a grab out
+        // at 0.8 he would land on Shape's scale axis instead of moving it.
+        const ClickPoint p1 = click_at(f.origin + 0.2f * he * f.n);
+        const ClickPoint p2 = click_at(f.origin + 0.6f * he * f.n);
         CHECK(editor->beginDrag(p1.x, p1.y));
         editor->updateDrag(p2.x, p2.y);
         editor->endDrag();
@@ -234,7 +240,7 @@ TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; Axi
         // this is the observable proof snap_point tracked the move.
         const GizmoFrame f2 = frame_for(editor, b.node_id, true,
                                         to_simd(pr.point) + delta, to_simd(pr.normal));
-        const ClickPoint p3 = click_at(f2.origin + 0.8f * f2.half_extent * f2.n);
+        const ClickPoint p3 = click_at(f2.origin + 0.2f * f2.half_extent * f2.n);
         CHECK(editor->beginDrag(p3.x, p3.y));
         editor->endDrag();
     }
@@ -289,11 +295,11 @@ TEST_CASE("Editor: updateDrag ignores a stale drag left active across a selectio
 TEST_CASE("Editor: updateGizmoHover with no viewport or no selection stays None") {
     Editor* editor = Editor::create();
     editor->updateGizmoHover(400.0f, 250.0f); // zero viewport
-    CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
 
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
     editor->updateGizmoHover(400.0f, 250.0f); // no selection
-    CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
 }
 
 TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it points at") {
@@ -308,33 +314,33 @@ TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it po
     const ClickPoint on_u = click_at(f.origin + 0.8f * f.half_extent * f.u);
 
     editor->updateGizmoHover(on_u.x, on_u.y);
-    CHECK(editor->gizmoHoverHandle() == GizmoHandle::AxisU);
+    CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::AxisU);
 
     SUBCASE("moving off every handle resets to None") {
         editor->updateGizmoHover(60.0f, 60.0f);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("clearGizmoHover resets") {
         editor->clearGizmoHover();
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("hiding the gizmo clears hover, and hover stays None while hidden") {
         editor->setGizmoVisible(false);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
         editor->updateGizmoHover(on_u.x, on_u.y);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("selection change clears hover") {
         editor->select(kInvalidNode);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("deleting the selected node clears hover (deletion bypasses select())") {
         editor->deleteSelectedNode();
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("endDrag clears hover — a drag can move the gizmo out from under the cursor, "
@@ -342,7 +348,7 @@ TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it po
         REQUIRE(editor->beginDrag(on_u.x, on_u.y));
         editor->updateDrag(on_u.x + 40.0f, on_u.y);
         editor->endDrag();
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 }
 
@@ -435,8 +441,8 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
     // screen-left, which held only while a free node's u was the camera's own
     // right vector.)
     const GizmoFrame f = frame_for(editor, spawned.node_id, false);
-    const ClickPoint p1 = click_at(f.origin + 0.8f * f.half_extent * f.u);
-    const ClickPoint p2 = click_at(f.origin + 1.2f * f.half_extent * f.u);
+    const ClickPoint p1 = click_at(f.origin + 0.2f * f.half_extent * f.u);
+    const ClickPoint p2 = click_at(f.origin + 0.6f * f.half_extent * f.u);
     REQUIRE(editor->beginDrag(p1.x, p1.y));
     editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
@@ -451,7 +457,7 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
 // --- Editor: scale tool ------------------------------------------------------
 //
 // Scale now runs through the SAME begin/update/endDrag path as move, selected
-// by setGizmoKind. The uniform (centre) handle carries the gesture that used to
+// by setGizmoSlot. The uniform (centre) handle carries the gesture that used to
 // be beginScale/updateScale: a screen-space vertical drag, cumulative from the
 // press. Because the scale gizmo's frame is centred on the node, the node's
 // projected anchor IS the uniform handle's screen position, which is what these
@@ -462,7 +468,6 @@ namespace {
 // Arms the scale gizmo and grabs its uniform handle at the node's anchor.
 // Returns the press point so updates can be expressed as offsets from it.
 ClickPoint grab_uniform_handle(Editor* editor) {
-    editor->setGizmoKind(GizmoKind::Scale);
     editor->setGizmoVisible(true);
     const ScreenPoint anchor = editor->projectSelectedAnchor();
     REQUIRE(anchor.visible);
@@ -533,7 +538,6 @@ TEST_CASE("Editor: an axis scale handle scales only its own component") {
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
 
-    editor->setGizmoKind(GizmoKind::Scale);
     editor->setGizmoVisible(true);
 
     // The scale frame is the node's local axes centred on it, so build the
@@ -544,11 +548,13 @@ TEST_CASE("Editor: an axis scale handle scales only its own component") {
                      std::tan(cam.fov_y_radians * 0.5f);
     const simd_float3 x_axis = {1.0f, 0.0f, 0.0f};
 
-    const ClickPoint grab = click_at(origin + 0.6f * he * x_axis);
+    // Grab on Shape's own axis band (outboard of Placement's), or the press
+    // would land on the move axis instead and translate the node.
+    const ClickPoint grab = click_at(origin + 0.8f * he * x_axis);
     REQUIRE(editor->beginDrag(grab.x, grab.y));
 
     // Pull out to twice the grabbed parameter: factor = s_now / s_start = 2.
-    const ClickPoint pull = click_at(origin + 1.2f * he * x_axis);
+    const ClickPoint pull = click_at(origin + 1.6f * he * x_axis);
     editor->updateDrag(pull.x, pull.y);
 
     const simd_float3 scale = to_simd(editor->nodeScale(spawned.node_id));
@@ -565,7 +571,6 @@ TEST_CASE("Editor: a scale drag is a safe no-op outside an active begin/endDrag 
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
     const simd_float3 unit_scale = {1.0f, 1.0f, 1.0f};
-    editor->setGizmoKind(GizmoKind::Scale);
     editor->setGizmoVisible(true);
 
     SUBCASE("updateDrag without a prior beginDrag changes nothing") {
