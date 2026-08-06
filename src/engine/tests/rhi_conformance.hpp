@@ -123,6 +123,7 @@ class FailAfterNDevice final : public IRhiDevice {
   uint64_t MinBufferOffsetAlignment() const override {
     return inner_.MinBufferOffsetAlignment();
   }
+  bool Supports(DeviceFeature f) const override { return inner_.Supports(f); }
   void BeginValidationScope() override { inner_.BeginValidationScope(); }
   std::optional<ValidationReport> EndValidationScope() override {
     return inner_.EndValidationScope();
@@ -1249,6 +1250,80 @@ inline void CheckUnimplementedBufferSizeIsRefused(IRhiDevice& device) {
   CHECK(log.find("no backend implements") != std::string::npos);
 }
 
+// A dispatch sized by a count only the GPU knows.
+//
+// Null resolves the args from the buffer's real bytes, so the recorded
+// workgroup counts are assertable with no GPU at all -- which is what makes
+// this a shared case rather than a Metal-only one.
+inline void CheckDispatchIndirectReadsItsCount(IRhiDevice& device) {
+  ResetLog(device);
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+
+  auto args = device.CreateBuffer(
+      {.size = sizeof(DispatchIndirectArgs),
+       .usage = BufferUsage::Indirect | BufferUsage::Storage |
+                BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "dispatch_args"});
+  REQUIRE(args);
+
+  // Seeded on the CPU here; in the real pipeline a compute pass writes it.
+  const DispatchIndirectArgs seeded{.x = 7, .y = 2, .z = 1};
+  args->Write(0, {reinterpret_cast<const uint8_t*>(&seeded), sizeof(seeded)});
+
+  auto encoder = device.CreateCommandEncoder("indirect_dispatch");
+  encoder->Transition(args.get(), ResourceState::IndirectArg);
+  auto* pass = encoder->BeginComputePass("cs");
+  REQUIRE(pass != nullptr);
+  pass->SetPipeline(pipe.get());
+  pass->DispatchIndirect(args.get(), 0);
+  pass->End();
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.WaitIdle();
+
+  if (auto* log = badlands::rhi::null::GetCommandLog(device)) {
+    const auto* rec = log->Find(
+        badlands::rhi::null::RecordedCommand::Kind::DispatchIndirect);
+    REQUIRE(rec != nullptr);
+    CHECK(rec->dispatch[0] == 7);
+    CHECK(rec->dispatch[1] == 2);
+    CHECK(rec->dispatch[2] == 1);
+  }
+}
+
+// Zero groups is LEGAL for an indirect dispatch and refused for a direct one.
+// The counts live in GPU memory, so nothing at record time can see them, and an
+// empty cull result produces exactly this every frame in a working program.
+inline void CheckZeroIndirectDispatchIsAllowed(IRhiDevice& device) {
+  ResetLog(device);
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+
+  auto args = device.CreateBuffer(
+      {.size = sizeof(DispatchIndirectArgs),
+       .usage = BufferUsage::Indirect | BufferUsage::Storage |
+                BufferUsage::CopyDst,
+       .label = "zero_args"});
+  const DispatchIndirectArgs zero{};
+  args->Write(0, {reinterpret_cast<const uint8_t*>(&zero), sizeof(zero)});
+
+  auto encoder = device.CreateCommandEncoder("zero_dispatch");
+  encoder->Transition(args.get(), ResourceState::IndirectArg);
+  auto* pass = encoder->BeginComputePass("cs");
+  pass->SetPipeline(pipe.get());
+  pass->DispatchIndirect(args.get(), 0);  // must NOT be refused
+  pass->End();
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.WaitIdle();
+
+  if (auto* log = badlands::rhi::null::GetCommandLog(device)) {
+    CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
+                         DispatchIndirect) == 1);
+  }
+}
+
 // Submitted work must retire rather than accumulate.
 //
 // Honest about its own strength: the load-bearing part is that InFlightCount()
@@ -1948,6 +2023,8 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckWildBufferOffsetsAreRefused(device);
   CheckWaitIdleDoesNotRetireTheOpenFrame(device);
   CheckDynamicOffsetsReachTheBackend(device);
+  CheckDispatchIndirectReadsItsCount(device);
+  CheckZeroIndirectDispatchIsAllowed(device);
   CheckSwapchainAcquirePresentCycle(device);
   CheckSwapchainSkipsWhenZeroSized(device);
   CheckSwapchainResize(device);

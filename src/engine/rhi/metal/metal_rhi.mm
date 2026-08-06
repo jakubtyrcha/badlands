@@ -1021,9 +1021,29 @@ class MetalComputePass final : public IComputePass {
     ApplyTableCompute(enc_, *mt, dynamic_offsets);
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
-    if (!pipeline_) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: Dispatch with no pipeline bound");
+      return;
+    }
     [enc_ dispatchThreadgroups:MTLSizeMake(x, y, z)
          threadsPerThreadgroup:MTLSizeMake(threads_[0], threads_[1], threads_[2])];
+  }
+
+  void DispatchIndirect(IBuffer* args, uint64_t offset) override {
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: DispatchIndirect with no pipeline bound");
+      return;
+    }
+    auto* mb = static_cast<MetalBuffer*>(args);
+    if (!mb || !mb->Handle()) {
+      spdlog::error("rhi/metal: DispatchIndirect with no argument buffer");
+      return;
+    }
+    [enc_ dispatchThreadgroupsWithIndirectBuffer:mb->Handle()
+                           indirectBufferOffset:offset
+                          threadsPerThreadgroup:MTLSizeMake(threads_[0],
+                                                            threads_[1],
+                                                            threads_[2])];
   }
   void End() override {
     if (ended_) return;
@@ -1442,6 +1462,18 @@ class MetalDevice final : public IRhiDevice {
   // Macs needed 256, and DX12 needs 256 for CBVs, so a DX12 backend will
   // report that instead.
   uint64_t MinBufferOffsetAlignment() const override { return 32; }
+
+  bool Supports(DeviceFeature f) const override {
+    switch (f) {
+      case DeviceFeature::Atomic64MinMax:
+        // Apple8 is where 64-bit atomic min/max on buffers arrives, and it is
+        // the project's recorded hardware floor. Asked of the device rather
+        // than assumed from the floor, because an older Mac would otherwise
+        // render garbage with no diagnostic.
+        return [device_ supportsFamily:MTLGPUFamilyApple8];
+    }
+    return false;
+  }
 
   size_t InFlightCount() override {
     PruneRetired();

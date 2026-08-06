@@ -40,7 +40,7 @@ struct RecordedCommand {
     SetBindingTable, SetIndexBuffer,
     SetViewport, SetScissor,
     Draw, DrawIndexed, DrawIndexedIndirect,
-    Dispatch,
+    Dispatch, DispatchIndirect,
     CopyBufferToBuffer, CopyTextureToBuffer,
     Finish,
     // Recorded by the DEVICE, not the encoder, so a test can ask whether a

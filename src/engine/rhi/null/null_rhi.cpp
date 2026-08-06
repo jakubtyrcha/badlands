@@ -519,6 +519,26 @@ class NullComputePass final : public IComputePass {
     c.dispatch[0] = x; c.dispatch[1] = y; c.dispatch[2] = z;
     log_->Record(std::move(c));
   }
+
+  // Resolves the counts from the buffer's REAL bytes, exactly as
+  // DrawIndexedIndirect does. That is what makes a GPU-driven dispatch count
+  // assertable with no GPU: a test seeds the args and reads back what would
+  // have been dispatched.
+  void DispatchIndirect(IBuffer* args, uint64_t offset) override {
+    RecordedCommand c{.kind = RecordedCommand::Kind::DispatchIndirect,
+                      .label = label_, .object = args};
+    if (auto* nb = dynamic_cast<NullBuffer*>(args)) {
+      DispatchIndirectArgs resolved{};
+      std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
+                             sizeof(resolved));
+      if (nb->Read(offset, dst)) {
+        c.dispatch[0] = resolved.x;
+        c.dispatch[1] = resolved.y;
+        c.dispatch[2] = resolved.z;
+      }
+    }
+    log_->Record(std::move(c));
+  }
   void End() override {
     if (ended_) return;
     ended_ = true;
@@ -690,6 +710,10 @@ class NullDevice final : public IRhiDevice {
   // satisfies every backend. Null is where portability problems should surface
   // first, not last.
   uint64_t MinBufferOffsetAlignment() const override { return 256; }
+
+  // Null executes no shaders, so it supports no shader-level feature. Claiming
+  // otherwise would let a test "pass" against a backend that ran nothing.
+  bool Supports(DeviceFeature) const override { return false; }
   // Null executes on Submit, so nothing is ever in flight. This is a real
   // answer, not a stub -- which is why the base declares it pure.
   size_t InFlightCount() override { return 0; }

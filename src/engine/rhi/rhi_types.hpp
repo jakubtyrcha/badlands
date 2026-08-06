@@ -340,4 +340,15 @@ struct DrawIndexedIndirectArgs {
 static_assert(sizeof(DrawIndexedIndirectArgs) == 20,
               "indirect args must stay the standard 20-byte layout");
 
+// Mirrors the standard 12-byte dispatch indirect args. A compute shader writes
+// this to drive a later dispatch from a count only the GPU knows -- how many
+// points survived a cull, how many splats an SDF produced.
+struct DispatchIndirectArgs {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t z = 0;
+};
+static_assert(sizeof(DispatchIndirectArgs) == 12,
+              "dispatch indirect args must stay the standard 12-byte layout");
+
 }  // namespace badlands::rhi

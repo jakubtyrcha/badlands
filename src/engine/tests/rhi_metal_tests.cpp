@@ -509,6 +509,15 @@ TEST_CASE("metal: dynamic offsets reach the backend", "[rhi]") {
   rhitest::CheckDynamicOffsetsReachTheBackend(*d);
 }
 
+TEST_CASE("metal: indirect dispatch reads its count", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckDispatchIndirectReadsItsCount(*d);
+}
+TEST_CASE("metal: a zero indirect dispatch is allowed", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckZeroIndirectDispatchIsAllowed(*d);
+}
+
 TEST_CASE("metal: swapchain acquire/present cycle", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckSwapchainAcquirePresentCycle(*d);

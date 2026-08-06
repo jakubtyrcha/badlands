@@ -45,6 +45,13 @@ const char* ToString(AcquireStatus s) {
   return "?";
 }
 
+const char* ToString(DeviceFeature f) {
+  switch (f) {
+    case DeviceFeature::Atomic64MinMax: return "Atomic64MinMax";
+  }
+  return "?";
+}
+
 const char* ToString(BackendKind k) {
   switch (k) {
     case BackendKind::Null: return "Null";

@@ -73,6 +73,15 @@ class IComputePass {
   // Workgroup counts, not thread counts.
   virtual void Dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) = 0;
 
+  // Dispatch with the workgroup counts read from `args` on the GPU, so a pass
+  // can be sized by something only the GPU knows.
+  //
+  // A ZERO count is legal here, unlike Dispatch, which refuses one. The counts
+  // live in GPU memory and cannot be inspected at record time, and a zero-group
+  // indirect dispatch is a well-defined no-op -- which is exactly what an empty
+  // cull result produces, every frame, in a working program.
+  virtual void DispatchIndirect(IBuffer* args, uint64_t offset = 0) = 0;
+
   virtual void End() = 0;
   virtual bool IsEnded() const = 0;
 };

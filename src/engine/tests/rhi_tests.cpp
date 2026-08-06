@@ -171,6 +171,15 @@ TEST_CASE("Null: dynamic offsets reach the backend", "[rhi]") {
   rhitest::CheckDynamicOffsetsReachTheBackend(*d);
 }
 
+TEST_CASE("Null: indirect dispatch reads its count", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckDispatchIndirectReadsItsCount(*d);
+}
+TEST_CASE("Null: a zero indirect dispatch is allowed", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckZeroIndirectDispatchIsAllowed(*d);
+}
+
 TEST_CASE("Null: swapchain acquire/present cycle", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckSwapchainAcquirePresentCycle(*d);

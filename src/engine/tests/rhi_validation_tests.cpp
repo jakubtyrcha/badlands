@@ -794,6 +794,80 @@ TEST_CASE("validation: an indirect draw with no index buffer is refused",
                        DrawIndexedIndirect) == 0);
 }
 
+TEST_CASE("validation: a zero indirect dispatch is NOT refused",
+          "[rhi][validation]") {
+  // The asymmetry, asserted where it lives. Dispatch(0,1,1) is refused because
+  // Metal's debug layer aborts on it; DispatchIndirect cannot see the counts,
+  // which are in GPU memory, and a zero-group indirect dispatch is a legal
+  // no-op that an empty cull produces every frame.
+  //
+  // The conformance case for this runs on an UNVALIDATED device, so it could
+  // never have caught a decorator that refused zero -- which is exactly what
+  // its red proof revealed.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  auto args = device->CreateBuffer(
+      {.size = sizeof(DispatchIndirectArgs),
+       .usage = BufferUsage::Indirect | BufferUsage::CopyDst,
+       .label = "zero_args"});
+  const DispatchIndirectArgs zero{};
+  args->Write(0, {reinterpret_cast<const uint8_t*>(&zero), sizeof(zero)});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(args.get(), ResourceState::IndirectArg);
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetPipeline(pipe.get());
+    pass->DispatchIndirect(args.get(), 0);
+    pass->End();
+    encoder->Finish();
+  });
+  INFO(observed.value_or("<clean>"));
+  CHECK_FALSE(observed.has_value());
+
+  // And it actually reached the backend.
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       DispatchIndirect) == 1);
+}
+
+TEST_CASE("validation: an unaligned indirect offset is refused",
+          "[rhi][validation]") {
+  // Metal requires an indirect buffer offset to be 4-byte aligned. Nothing
+  // checked it before, for dispatches OR draws.
+  auto device = MakeValidated();
+  auto module = device->CreateShaderModule(
+      rhitest::MinimalComputeSource(device->GetBackend()),
+      rhitest::MakeTestReflection(), "m");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  auto args = device->CreateBuffer(
+      {.size = 64, .usage = BufferUsage::Indirect, .label = "args"});
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(args.get(), ResourceState::IndirectArg);
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetPipeline(pipe.get());
+    pass->DispatchIndirect(args.get(), 2);  // aligned to 2, not 4
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("not 4-byte aligned") != std::string::npos);
+
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       DispatchIndirect) == 0);
+}
+
 TEST_CASE("validation: a zero-workgroup dispatch is refused",
           "[rhi][validation]") {
   // Metal's debug layer aborts the process on a zero-sized dispatch, so
