@@ -1028,6 +1028,154 @@ TEST_CASE("validation: a correct dynamic offset reports nothing",
   CHECK_FALSE(observed.has_value());
 }
 
+// --- Swapchain misuse -------------------------------------------------------
+
+TEST_CASE("validation: acquiring twice without a present is refused",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto sc = device->CreateSwapchain({.width = 32, .height = 32, .label = "sc"});
+  REQUIRE(sc);
+
+  auto observed = Observe(*device, [&] {
+    device->BeginFrame();
+    auto a = sc->Acquire();
+    CHECK(a.status == AcquireStatus::Ok);
+    auto b = sc->Acquire();  // still holding the first
+    CHECK(b.status == AcquireStatus::Skip);
+    CHECK(b.view == nullptr);
+    sc->Present();
+    device->EndFrame();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("not been presented") != std::string::npos);
+}
+
+TEST_CASE("validation: presenting without an acquire is refused",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto sc = device->CreateSwapchain({.width = 32, .height = 32, .label = "sc"});
+  REQUIRE(sc);
+
+  auto observed = Observe(*device, [&] {
+    device->BeginFrame();
+    sc->Present();  // nothing acquired
+    device->EndFrame();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("nothing was acquired") != std::string::npos);
+  // And the inner swapchain never saw it.
+  CHECK(badlands::rhi::null::PresentCount(*sc) == 0);
+}
+
+TEST_CASE("validation: presenting twice is refused", "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto sc = device->CreateSwapchain({.width = 32, .height = 32, .label = "sc"});
+  REQUIRE(sc);
+
+  auto observed = Observe(*device, [&] {
+    device->BeginFrame();
+    REQUIRE(sc->Acquire().status == AcquireStatus::Ok);
+    sc->Present();
+    sc->Present();  // the second has nothing to present
+    device->EndFrame();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(badlands::rhi::null::PresentCount(*sc) == 1);
+}
+
+TEST_CASE("validation: rendering into a pre-resize backbuffer is refused",
+          "[rhi][validation]") {
+  // The resize hazard. The stale view is the RIGHT object at the WRONG size,
+  // so nothing about it looks broken until the frame comes out stretched --
+  // or, on Metal, until an attachment turns out to be nil.
+  auto device = MakeValidated();
+  auto sc = device->CreateSwapchain({.width = 64, .height = 64, .label = "sc"});
+  REQUIRE(sc);
+
+  device->BeginFrame();
+  auto stale = sc->Acquire();
+  REQUIRE(stale.status == AcquireStatus::Ok);
+  sc->Present();
+  device->EndFrame();
+
+  auto observed = Observe(*device, [&] {
+    device->BeginFrame();
+    sc->Resize(128, 128);
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(stale.view->GetTexture(), ResourceState::RenderTarget);
+    RenderPassDesc desc;
+    desc.color_attachments.push_back({.view = stale.view});
+    auto* pass = encoder->BeginRenderPass(desc);
+    CHECK(pass == nullptr);  // refused, not merely reported
+    encoder->Finish();
+    device->EndFrame();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("before a resize") != std::string::npos);
+}
+
+TEST_CASE("validation: a freshly acquired backbuffer is fine after a resize",
+          "[rhi][validation]") {
+  // The paired green: the case above must not be satisfied by refusing every
+  // swapchain view.
+  auto device = MakeValidated();
+  auto sc = device->CreateSwapchain({.width = 64, .height = 64, .label = "sc"});
+  REQUIRE(sc);
+
+  auto observed = Observe(*device, [&] {
+    device->BeginFrame();
+    sc->Resize(128, 128);
+    auto fresh = sc->Acquire();
+    REQUIRE(fresh.status == AcquireStatus::Ok);
+    auto encoder = device->CreateCommandEncoder("e");
+    encoder->Transition(fresh.view->GetTexture(), ResourceState::RenderTarget);
+    RenderPassDesc desc;
+    desc.color_attachments.push_back({.view = fresh.view});
+    auto* pass = encoder->BeginRenderPass(desc);
+    CHECK(pass != nullptr);
+    pass->End();
+    encoder->Finish();
+    sc->Present();
+    device->EndFrame();
+  });
+  INFO(observed.value_or("<clean>"));
+  CHECK_FALSE(observed.has_value());
+}
+
+TEST_CASE("validation: an injected Lost is reported as Lost, not Skip",
+          "[rhi][validation]") {
+  // Skip means "try again next frame"; Lost means "recreate the surface".
+  // Telling a caller to retry a surface that will never come back is an
+  // infinite loop of black frames.
+  auto device = MakeValidated();
+  auto sc = device->CreateSwapchain({.width = 32, .height = 32, .label = "sc"});
+  REQUIRE(sc);
+
+  badlands::rhi::null::SetSwapchainFault(
+      *sc, badlands::rhi::null::SwapchainFault::Lost);
+  device->BeginFrame();
+  auto lost = sc->Acquire();
+  CHECK(lost.status == AcquireStatus::Lost);
+  CHECK(lost.view == nullptr);
+  device->EndFrame();
+
+  badlands::rhi::null::SetSwapchainFault(
+      *sc, badlands::rhi::null::SwapchainFault::Skip);
+  device->BeginFrame();
+  auto skip = sc->Acquire();
+  CHECK(skip.status == AcquireStatus::Skip);
+  CHECK(skip.view == nullptr);
+  device->EndFrame();
+
+  // A skipped frame must not have presented anything.
+  CHECK(badlands::rhi::null::PresentCount(*sc) == 0);
+  device->WaitIdle();
+}
+
 TEST_CASE("validation: unchecked is distinguishable from clean",
           "[rhi][validation]") {
   // The whole reason EndValidationScope returns a report rather than an

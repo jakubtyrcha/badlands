@@ -919,6 +919,88 @@ inline void CheckDynamicOffsetOnANonBufferIsRefused(IRhiDevice& device) {
   CHECK(log.find("only buffer bindings") != std::string::npos);
 }
 
+// The acquire/present cycle, headless. A swapchain with no native window
+// hands out its own images, which is what makes this state machine testable
+// on every backend with no display attached.
+inline void CheckSwapchainAcquirePresentCycle(IRhiDevice& device) {
+  auto sc = device.CreateSwapchain({.width = 64, .height = 32,
+                                    .format = Format::BGRA8Unorm,
+                                    .label = "headless"});
+  REQUIRE(sc);
+  CHECK(sc->GetWidth() == 64);
+  CHECK(sc->GetHeight() == 32);
+
+  // More cycles than the pool is deep, so an implementation that leaks a
+  // backbuffer per frame runs out.
+  std::vector<ITextureView*> seen;
+  for (uint32_t i = 0; i < device.FramesInFlight() * 3; ++i) {
+    device.BeginFrame();
+    auto frame = sc->Acquire();
+    REQUIRE(frame.status == AcquireStatus::Ok);
+    REQUIRE(frame.view != nullptr);
+    seen.push_back(frame.view);
+    sc->Present();
+    device.EndFrame();
+  }
+  device.WaitIdle();
+
+  // A real pool rotates. Handing back one image forever would pass every
+  // other assertion here.
+  if (device.FramesInFlight() > 1) {
+    CHECK(seen[0] != seen[1]);
+  }
+}
+
+// A zero-sized surface is what a minimized window reports. Skip, never a 0x0
+// texture and never an error.
+inline void CheckSwapchainSkipsWhenZeroSized(IRhiDevice& device) {
+  auto sc = device.CreateSwapchain({.width = 0, .height = 0,
+                                    .label = "minimized"});
+  REQUIRE(sc);
+  device.BeginFrame();
+  auto frame = sc->Acquire();
+  CHECK(frame.status == AcquireStatus::Skip);
+  CHECK(frame.view == nullptr);
+  device.EndFrame();
+
+  // And it recovers when the window comes back.
+  sc->Resize(32, 32);
+  device.BeginFrame();
+  auto back = sc->Acquire();
+  CHECK(back.status == AcquireStatus::Ok);
+  CHECK(back.view != nullptr);
+  sc->Present();
+  device.EndFrame();
+  device.WaitIdle();
+}
+
+// Resize hands out differently-sized backbuffers, and the old ones go through
+// deferred deletion rather than being freed under a frame still reading them.
+inline void CheckSwapchainResize(IRhiDevice& device) {
+  auto sc = device.CreateSwapchain({.width = 64, .height = 64,
+                                    .label = "resizing"});
+  REQUIRE(sc);
+
+  device.BeginFrame();
+  auto before = sc->Acquire();
+  REQUIRE(before.status == AcquireStatus::Ok);
+  CHECK(before.view->GetTexture()->GetWidth() == 64);
+  sc->Present();
+  device.EndFrame();
+
+  device.BeginFrame();
+  sc->Resize(128, 96);
+  CHECK(sc->GetWidth() == 128);
+  CHECK(sc->GetHeight() == 96);
+  auto after = sc->Acquire();
+  REQUIRE(after.status == AcquireStatus::Ok);
+  CHECK(after.view->GetTexture()->GetWidth() == 128);
+  CHECK(after.view->GetTexture()->GetHeight() == 96);
+  sc->Present();
+  device.EndFrame();
+  device.WaitIdle();
+}
+
 // Submitted work must retire rather than accumulate.
 //
 // Honest about its own strength: the load-bearing part is that InFlightCount()
@@ -1615,6 +1697,9 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckFrameAllocatorGrowsThenCaps(device);
   CheckFrameAllocatorRecyclesPerSlot(device);
   CheckDynamicOffsetsReachTheBackend(device);
+  CheckSwapchainAcquirePresentCycle(device);
+  CheckSwapchainSkipsWhenZeroSized(device);
+  CheckSwapchainResize(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

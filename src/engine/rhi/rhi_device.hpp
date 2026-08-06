@@ -18,6 +18,7 @@
 #include "engine/rhi/rhi_commands.hpp"
 #include "engine/rhi/rhi_pipeline.hpp"
 #include "engine/rhi/rhi_resources.hpp"
+#include "engine/rhi/rhi_swapchain.hpp"
 #include "engine/rhi/rhi_types.hpp"
 
 namespace badlands::rhi {
@@ -101,6 +102,9 @@ class IRhiDevice {
   // One Slang ParameterBlock's worth of bindings, resolved against the
   // pipeline's reflection.
   virtual BindingTablePtr CreateBindingTable(const BindingTableDesc& desc) = 0;
+
+  // Returns null (after logging) if the surface cannot be created.
+  virtual SwapchainPtr CreateSwapchain(const SwapchainDesc& desc) = 0;
 
   // --- Commands ---
   virtual std::unique_ptr<ICommandEncoder> CreateCommandEncoder(

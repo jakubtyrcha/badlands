@@ -144,6 +144,19 @@ TEST_CASE("Null: dynamic offsets reach the backend", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckDynamicOffsetsReachTheBackend(*d);
 }
+
+TEST_CASE("Null: swapchain acquire/present cycle", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckSwapchainAcquirePresentCycle(*d);
+}
+TEST_CASE("Null: swapchain skips when zero-sized", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckSwapchainSkipsWhenZeroSized(*d);
+}
+TEST_CASE("Null: swapchain resize", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckSwapchainResize(*d);
+}
 TEST_CASE("Null: too many dynamic offsets are refused", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckTooManyDynamicOffsetsAreRefused(*d);

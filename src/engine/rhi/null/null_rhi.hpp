@@ -125,4 +125,20 @@ void SetRetirementMode(IRhiDevice& device, RetirementMode mode);
 // waiting on it. Returns false (after logging) if nothing is outstanding.
 bool RetireOldestFrame(IRhiDevice& device);
 
+// --- Swapchain fault injection ----------------------------------------------
+//
+// Skip and Lost are the states a real surface reaches when the window is
+// minimized, occluded, or moved to another display -- normal conditions that a
+// developer cannot reproduce on demand and that a caller almost always gets
+// wrong the first time. Injecting them is how the caller's handling is
+// exercised at all.
+enum class SwapchainFault : uint8_t { None, Skip, Lost };
+
+// No-op (after logging) on a swapchain that is not Null's.
+void SetSwapchainFault(ISwapchain& swapchain, SwapchainFault fault);
+
+// How many times this swapchain has presented. Lets a test prove a frame was
+// really skipped rather than quietly presented anyway.
+uint64_t PresentCount(const ISwapchain& swapchain);
+
 }  // namespace badlands::rhi::null

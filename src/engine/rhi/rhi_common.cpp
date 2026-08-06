@@ -36,6 +36,15 @@ const char* ToString(ResourceState s) {
   return "?";
 }
 
+const char* ToString(AcquireStatus s) {
+  switch (s) {
+    case AcquireStatus::Ok: return "Ok";
+    case AcquireStatus::Skip: return "Skip";
+    case AcquireStatus::Lost: return "Lost";
+  }
+  return "?";
+}
+
 const char* ToString(BackendKind k) {
   switch (k) {
     case BackendKind::Null: return "Null";

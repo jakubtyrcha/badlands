@@ -89,12 +89,34 @@ class StateTracker {
   std::unordered_map<uint64_t, ResourceState> states_;
 };
 
+// Views handed out by a swapchain, and which resize generation each belongs
+// to. Keyed on the resource id rather than the pointer, because a recreated
+// backbuffer can land on a freed one's address (see IResource::Id).
+struct SwapchainViewRegistry {
+  std::unordered_map<uint64_t, uint64_t> view_generation;
+  uint64_t generation = 0;
+
+  void Acquired(ITextureView* view) {
+    if (view) view_generation[view->Id()] = generation;
+  }
+  // nullopt when this view did not come from a swapchain at all.
+  std::optional<bool> IsStale(ITextureView* view) const {
+    if (!view) return std::nullopt;
+    auto it = view_generation.find(view->Id());
+    if (it == view_generation.end()) return std::nullopt;
+    return it->second != generation;
+  }
+};
+
 // Shared state handed down from the device to encoders and passes.
 struct Context {
   Recorder recorder;
   // Cached from the backend so passes can check offsets without reaching back
   // through the device.
   uint64_t min_offset_alignment = 256;
+  // Which swapchain views are current, so a render pass can refuse one left
+  // over from before a resize.
+  SwapchainViewRegistry swapchain_views;
 };
 
 // ---------------------------------------------------------------------------
@@ -148,6 +170,81 @@ IBindingTable* Unwrap(IBindingTable* t) {
   if (auto* v = dynamic_cast<ValidationBindingTable*>(t)) return v->Inner();
   return t;
 }
+
+// ---------------------------------------------------------------------------
+// Swapchain
+// ---------------------------------------------------------------------------
+
+class ValidationSwapchain final : public ISwapchain {
+ public:
+  ValidationSwapchain(SwapchainPtr inner, Context* ctx)
+      : inner_(std::move(inner)), ctx_(ctx) {}
+
+  AcquiredFrame Acquire() override {
+    if (acquired_) {
+      // Refused rather than forwarded: a second drawable held at once starves
+      // the pool, and the stall lands a frame or two later with nothing
+      // pointing back here.
+      ctx_->recorder.Report(
+          "Acquire: the previous backbuffer has not been presented");
+      return {AcquireStatus::Skip, nullptr};
+    }
+    auto frame = inner_->Acquire();
+    if (frame.status == AcquireStatus::Ok) {
+      if (!frame.view) {
+        ctx_->recorder.Report(
+            "Acquire: reported Ok but returned no view -- Ok means there is a "
+            "view to render into");
+        return {AcquireStatus::Skip, nullptr};
+      }
+      acquired_ = true;
+      ctx_->swapchain_views.Acquired(frame.view);
+    } else if (frame.view) {
+      ctx_->recorder.Report(fmt::format(
+          "Acquire: reported {} but still returned a view -- a skipped frame "
+          "has nothing to render into",
+          ToString(frame.status)));
+      frame.view = nullptr;
+    }
+    return frame;
+  }
+
+  void Present() override {
+    if (!acquired_) {
+      ctx_->recorder.Report(
+          "Present: nothing was acquired -- every Present pairs with exactly "
+          "one successful Acquire");
+      return;
+    }
+    acquired_ = false;
+    inner_->Present();
+  }
+
+  void Resize(uint32_t width, uint32_t height) override {
+    if (acquired_) {
+      ctx_->recorder.Report(
+          "Resize: a backbuffer is still acquired -- resize at the top of the "
+          "frame, before acquiring");
+      return;
+    }
+    if (width != inner_->GetWidth() || height != inner_->GetHeight()) {
+      // Everything handed out before this point is now the wrong size.
+      ++ctx_->swapchain_views.generation;
+    }
+    inner_->Resize(width, height);
+  }
+
+  uint32_t GetWidth() const override { return inner_->GetWidth(); }
+  uint32_t GetHeight() const override { return inner_->GetHeight(); }
+  Format GetFormat() const override { return inner_->GetFormat(); }
+
+  ISwapchain* Inner() override { return inner_.get(); }
+
+ private:
+  SwapchainPtr inner_;
+  Context* ctx_;
+  bool acquired_ = false;
+};
 
 // ---------------------------------------------------------------------------
 // Passes
@@ -547,6 +644,18 @@ class ValidationEncoder final : public ICommandEncoder {
       ctx_->recorder.Report("BeginRenderPass: a pass is already open");
     }
     CheckAttachments(desc);
+    // A backbuffer view from before a resize is the WRONG SIZE now. Rendering
+    // into it produces a stretched or clipped frame against everything else
+    // sized for this one -- and on Metal, a nil-texture attachment.
+    for (const auto& a : desc.color_attachments) {
+      if (ctx_->swapchain_views.IsStale(a.view).value_or(false)) {
+        ctx_->recorder.Report(fmt::format(
+            "BeginRenderPass: colour attachment '{}' is a swapchain view from "
+            "before a resize -- acquire a fresh one after resizing",
+            a.view->GetLabel()));
+        return nullptr;
+      }
+    }
 
     IRenderPass* inner = inner_->BeginRenderPass(desc);
     if (!inner) return nullptr;
@@ -882,6 +991,12 @@ class ValidationDevice final : public IRhiDevice {
     if (!inner) return nullptr;
     return std::make_shared<ValidationBindingTable>(std::move(inner),
                                                     d.entries);
+  }
+
+  SwapchainPtr CreateSwapchain(const SwapchainDesc& d) override {
+    auto inner = inner_->CreateSwapchain(d);
+    if (!inner) return nullptr;
+    return std::make_unique<ValidationSwapchain>(std::move(inner), &ctx_);
   }
 
   std::unique_ptr<ICommandEncoder> CreateCommandEncoder(

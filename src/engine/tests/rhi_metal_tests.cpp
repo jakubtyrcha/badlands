@@ -482,6 +482,19 @@ TEST_CASE("metal: dynamic offsets reach the backend", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckDynamicOffsetsReachTheBackend(*d);
 }
+
+TEST_CASE("metal: swapchain acquire/present cycle", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckSwapchainAcquirePresentCycle(*d);
+}
+TEST_CASE("metal: swapchain skips when zero-sized", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckSwapchainSkipsWhenZeroSized(*d);
+}
+TEST_CASE("metal: swapchain resize", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckSwapchainResize(*d);
+}
 TEST_CASE("metal: too many dynamic offsets are refused", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckTooManyDynamicOffsetsAreRefused(*d);

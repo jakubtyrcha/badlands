@@ -216,6 +216,110 @@ class NullBindingTable final : public IBindingTable, public NullResource {
 };
 
 // ---------------------------------------------------------------------------
+// Swapchain
+// ---------------------------------------------------------------------------
+
+// Models a real drawable pool rather than handing back one texture forever:
+// consecutive frames must get DIFFERENT backbuffers, or a test that thinks it
+// proved double-buffering proved nothing.
+class NullSwapchain final : public ISwapchain {
+ public:
+  NullSwapchain(IRhiDevice& device, const SwapchainDesc& desc, uint32_t depth)
+      : device_(device), desc_(desc), depth_(std::max(1u, depth)) {
+    Recreate();
+  }
+
+  AcquiredFrame Acquire() override {
+    if (fault_ == SwapchainFault::Lost) return {AcquireStatus::Lost, nullptr};
+    if (fault_ == SwapchainFault::Skip) return {AcquireStatus::Skip, nullptr};
+    // A zero-sized surface is what a minimized window reports. Never a 0x0
+    // texture, and never an error -- just nothing to draw into this frame.
+    if (desc_.width == 0 || desc_.height == 0) {
+      return {AcquireStatus::Skip, nullptr};
+    }
+    if (acquired_) {
+      spdlog::error(
+          "rhi/null: swapchain '{}' acquired twice without a Present",
+          desc_.label);
+      return {AcquireStatus::Skip, nullptr};
+    }
+    CollectRetired();
+    acquired_ = true;
+    auto* view = images_[next_ % images_.size()]->GetDefaultView();
+    next_ = (next_ + 1) % images_.size();
+    return {AcquireStatus::Ok, view};
+  }
+
+  void Present() override {
+    if (!acquired_) {
+      spdlog::error("rhi/null: swapchain '{}' presented without an acquire",
+                    desc_.label);
+      return;
+    }
+    acquired_ = false;
+    ++presented_;
+  }
+
+  void Resize(uint32_t width, uint32_t height) override {
+    if (width == desc_.width && height == desc_.height) return;
+    desc_.width = width;
+    desc_.height = height;
+    Recreate();
+  }
+
+  uint32_t GetWidth() const override { return desc_.width; }
+  uint32_t GetHeight() const override { return desc_.height; }
+  Format GetFormat() const override { return desc_.format; }
+
+  void SetFault(SwapchainFault f) { fault_ = f; }
+  uint64_t PresentCount() const { return presented_; }
+
+ private:
+  // Old backbuffers whose frame has retired can finally go.
+  void CollectRetired() {
+    const uint64_t retired = device_.LastRetiredFrame();
+    std::erase_if(retired_,
+                  [retired](const auto& e) { return e.first <= retired; });
+  }
+
+  void Recreate() {
+    // Destroy() releases the memory through the frame timeline -- but the
+    // texture OBJECTS have to outlive that, because callers hold views into
+    // them as raw borrowed pointers and a view must outlive Destroy() on its
+    // texture. Dropping them here dangled every view handed out before a
+    // resize, which a test found by segfaulting.
+    for (auto& img : images_) img->Destroy();
+    if (!images_.empty()) {
+      retired_.emplace_back(device_.CurrentFrame(), std::move(images_));
+    }
+    images_.clear();
+    acquired_ = false;
+    next_ = 0;
+    if (desc_.width == 0 || desc_.height == 0) return;
+    for (uint32_t i = 0; i < depth_; ++i) {
+      images_.push_back(device_.CreateTexture(
+          {.width = desc_.width,
+           .height = desc_.height,
+           .format = desc_.format,
+           .usage = TextureUsage::RenderTarget | TextureUsage::CopySrc,
+           .label = desc_.label + ".image" + std::to_string(i)}));
+    }
+  }
+
+  IRhiDevice& device_;
+  SwapchainDesc desc_;
+  uint32_t depth_;
+  std::vector<TexturePtr> images_;
+  // (frame at which they were replaced, the images). Views into these stay
+  // dereferenceable -- they report destroyed -- until the frame retires.
+  std::vector<std::pair<uint64_t, std::vector<TexturePtr>>> retired_;
+  size_t next_ = 0;
+  bool acquired_ = false;
+  uint64_t presented_ = 0;
+  SwapchainFault fault_ = SwapchainFault::None;
+};
+
+// ---------------------------------------------------------------------------
 // Shaders and pipelines
 // ---------------------------------------------------------------------------
 
@@ -548,6 +652,10 @@ class NullDevice final : public IRhiDevice {
                                               d.label, retire_);
   }
 
+  SwapchainPtr CreateSwapchain(const SwapchainDesc& d) override {
+    return std::make_unique<NullSwapchain>(*this, d, frames_in_flight_);
+  }
+
   std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
       const std::string& label) override {
     return std::make_unique<NullCommandEncoder>(&log_, label);
@@ -713,6 +821,34 @@ void SetRetirementMode(IRhiDevice& device, RetirementMode mode) {
     return;
   }
   nd->SetMode(mode);
+}
+
+namespace {
+
+// Walks the decorator chain, exactly as FindNull does for devices.
+NullSwapchain* FindNullSwapchain(ISwapchain& swapchain) {
+  for (ISwapchain* s = &swapchain; s != nullptr; s = s->Inner()) {
+    if (auto* ns = dynamic_cast<NullSwapchain*>(s)) return ns;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+void SetSwapchainFault(ISwapchain& swapchain, SwapchainFault fault) {
+  auto* ns = FindNullSwapchain(swapchain);
+  if (!ns) {
+    spdlog::error(
+        "rhi/null: SetSwapchainFault on a swapchain that is not Null's -- "
+        "faults are only injectable there");
+    return;
+  }
+  ns->SetFault(fault);
+}
+
+uint64_t PresentCount(const ISwapchain& swapchain) {
+  auto* ns = FindNullSwapchain(const_cast<ISwapchain&>(swapchain));
+  return ns ? ns->PresentCount() : 0;
 }
 
 bool RetireOldestFrame(IRhiDevice& device) {

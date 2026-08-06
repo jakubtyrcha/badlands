@@ -19,6 +19,7 @@
 #include "engine/rhi/metal/metal_rhi.hpp"
 
 #import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
 #include <atomic>
@@ -412,6 +413,182 @@ class MetalBindingTable final : public IBindingTable, public MetalResource {
   // Entries, their target indices, and shared ownership of everything they
   // reference -- all decided once, at creation.
   ResolvedBindingTable resolved_;
+};
+
+// ---------------------------------------------------------------------------
+// Swapchain
+// ---------------------------------------------------------------------------
+
+// Two modes. With a CAMetalLayer it presents for real; without one it hands
+// out its own textures, which keeps the acquire/present state machine
+// exercised on Metal in a headless test run.
+class MetalSwapchain final : public ISwapchain {
+ public:
+  MetalSwapchain(id<MTLDevice> device, id<MTLCommandQueue> queue,
+                 const SwapchainDesc& desc, uint32_t depth,
+                 RetireQueuePtr retire)
+      : device_(device), queue_(queue), desc_(desc), depth_(depth),
+        retire_(std::move(retire)) {
+    if (desc_.native_window) {
+      layer_ = (__bridge CAMetalLayer*)desc_.native_window;
+      layer_.device = device_;
+      layer_.pixelFormat = ToMtl(desc_.format);
+      layer_.framebufferOnly = NO;  // the lab copies the backbuffer for tests
+      layer_.maximumDrawableCount = depth_;
+      layer_.displaySyncEnabled = desc_.vsync;
+    }
+    Recreate();
+  }
+
+  AcquiredFrame Acquire() override {
+    if (acquired_) {
+      // Two drawables held at once starves the pool and stalls the next
+      // frame; on the headless path it simply means the caller lost track.
+      spdlog::error(
+          "rhi/metal: swapchain '{}' acquired twice without a Present",
+          desc_.label);
+      return {AcquireStatus::Skip, nullptr};
+    }
+    // A minimized window reports zero. Not an error, and never a 0x0 texture.
+    if (desc_.width == 0 || desc_.height == 0) {
+      return {AcquireStatus::Skip, nullptr};
+    }
+
+    CollectRetired();
+
+    if (!layer_) {  // headless
+      acquired_ = true;
+      auto* view = images_[next_ % images_.size()]->GetDefaultView();
+      next_ = (next_ + 1) % images_.size();
+      return {AcquireStatus::Ok, view};
+    }
+
+    id<CAMetalDrawable> drawable = [layer_ nextDrawable];
+    if (!drawable) {
+      // allowsNextDrawableTimeout returns nil after roughly a second when the
+      // pool is exhausted or the window is occluded. Transient: Skip, not
+      // Lost -- recreating the surface here would be a pointless hitch.
+      return {AcquireStatus::Skip, nullptr};
+    }
+    // CAMetalLayer does NOT guarantee the drawable matches the layer's new
+    // bounds immediately after a resize, so a frame can arrive at the old
+    // size. Rendering into it would stretch the image against everything else
+    // sized for this frame.
+    if (drawable.texture.width != desc_.width ||
+        drawable.texture.height != desc_.height) {
+      return {AcquireStatus::Skip, nullptr};
+    }
+
+    drawable_ = drawable;
+    acquired_ = true;
+    // A wrapper per acquire: the drawable's texture changes every frame, so
+    // there is nothing stable to cache. One shared_ptr against a present is
+    // not a cost worth designing around.
+    current_ = std::make_shared<MetalTexture>(
+        drawable.texture,
+        TextureDesc{.width = desc_.width,
+                    .height = desc_.height,
+                    .format = desc_.format,
+                    .usage = TextureUsage::RenderTarget | TextureUsage::CopySrc,
+                    .label = desc_.label + ".drawable"},
+        retire_);
+    return {AcquireStatus::Ok, current_->GetDefaultView()};
+  }
+
+  void Present() override {
+    if (!acquired_) {
+      spdlog::error("rhi/metal: swapchain '{}' presented without an acquire",
+                    desc_.label);
+      return;
+    }
+    acquired_ = false;
+    ++presented_;
+    if (!drawable_) return;  // headless
+
+    // presentDrawable: on a command buffer rather than [drawable present],
+    // which shows the surface as soon as the CPU asks -- possibly before the
+    // GPU has finished rendering into it. An empty buffer is enough: Metal
+    // orders it after everything already committed on this queue.
+    id<MTLCommandBuffer> cmd = [queue_ commandBuffer];
+    cmd.label = @"present";
+    [cmd presentDrawable:drawable_];
+    [cmd commit];
+    drawable_ = nil;
+    current_.reset();
+  }
+
+  void Resize(uint32_t width, uint32_t height) override {
+    if (width == desc_.width && height == desc_.height) return;
+    desc_.width = width;
+    desc_.height = height;
+    if (layer_) layer_.drawableSize = CGSizeMake(width, height);
+    Recreate();
+  }
+
+  uint32_t GetWidth() const override { return desc_.width; }
+  uint32_t GetHeight() const override { return desc_.height; }
+  Format GetFormat() const override { return desc_.format; }
+
+ private:
+  // See the Null swapchain: the texture OBJECTS must outlive Destroy(),
+  // because callers hold views into them as raw borrowed pointers.
+  void CollectRetired() {
+    const uint64_t retired = retire_->last_retired.load(std::memory_order_acquire);
+    std::erase_if(retired_,
+                  [retired](const auto& e) { return e.first <= retired; });
+  }
+
+  void Recreate() {
+    for (auto& img : images_) img->Destroy();
+    if (!images_.empty()) {
+      retired_.emplace_back(retire_->current_frame.load(std::memory_order_acquire),
+                            std::move(images_));
+    }
+    images_.clear();
+    acquired_ = false;
+    drawable_ = nil;
+    current_.reset();
+    next_ = 0;
+    if (layer_ || desc_.width == 0 || desc_.height == 0) return;
+
+    for (uint32_t i = 0; i < depth_; ++i) {
+      MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+      td.pixelFormat = ToMtl(desc_.format);
+      td.width = desc_.width;
+      td.height = desc_.height;
+      td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+      td.storageMode = MTLStorageModePrivate;
+      id<MTLTexture> tex = [device_ newTextureWithDescriptor:td];
+      if (!tex) {
+        spdlog::error("rhi/metal: swapchain '{}' could not create image {}",
+                      desc_.label, i);
+        return;
+      }
+      images_.push_back(std::make_shared<MetalTexture>(
+          tex,
+          TextureDesc{.width = desc_.width,
+                      .height = desc_.height,
+                      .format = desc_.format,
+                      .usage = TextureUsage::RenderTarget | TextureUsage::CopySrc,
+                      .label = desc_.label + ".image" + std::to_string(i)},
+          retire_));
+    }
+  }
+
+  id<MTLDevice> device_;
+  id<MTLCommandQueue> queue_;
+  SwapchainDesc desc_;
+  uint32_t depth_;
+  RetireQueuePtr retire_;
+  CAMetalLayer* layer_ = nil;
+  id<CAMetalDrawable> drawable_ = nil;
+  std::shared_ptr<MetalTexture> current_;
+  std::vector<std::shared_ptr<MetalTexture>> images_;
+  std::vector<std::pair<uint64_t, std::vector<std::shared_ptr<MetalTexture>>>>
+      retired_;
+  size_t next_ = 0;
+  bool acquired_ = false;
+  uint64_t presented_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1226,23 @@ class MetalDevice final : public IRhiDevice {
     if (!resolved) return nullptr;  // ResolveBindingTable logged why
     return std::make_shared<MetalBindingTable>(std::move(*resolved), d.group,
                                                d.label, retire_);
+  }
+
+  SwapchainPtr CreateSwapchain(const SwapchainDesc& d) override {
+    // maximumDrawableCount accepts only 2 or 3. Refused rather than clamped:
+    // a caller who asked for 4 and silently got 3 has a frame model that
+    // disagrees with its own presentation depth.
+    if (d.native_window &&
+        (frames_in_flight_ < 2 || frames_in_flight_ > 3)) {
+      spdlog::error(
+          "rhi/metal: a presenting swapchain needs frames_in_flight of 2 or "
+          "3, got {} -- CAMetalLayer.maximumDrawableCount accepts no other "
+          "value",
+          frames_in_flight_);
+      return nullptr;
+    }
+    return std::make_unique<MetalSwapchain>(device_, queue_, d,
+                                            frames_in_flight_, retire_);
   }
 
   std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
