@@ -33,6 +33,17 @@ float sd_ellipsoid(simd_float3 q, simd_float3 radii) {
     return sdf_sd_ellipsoid(q, radii);
 }
 
+SdfNode local_sdf_node(const Node& node) {
+    const simd_float3 half = node.scale * 0.5f;
+    SdfNode sn;
+    sn.pos_shape = sdf_make4(0.0f, 0.0f, 0.0f,
+                             static_cast<float>(static_cast<int32_t>(node.shape)));
+    sn.half_extents_op = sdf_make4(half.x, half.y, half.z, 0.0f); // op is not read by sdf_eval_node
+    sn.inv_rotation = sdf_make4(0.0f, 0.0f, 0.0f, 1.0f);          // identity
+    sn.params = sdf_make4(node.shape_param, 0.0f, 0.0f, 0.0f);
+    return sn;
+}
+
 void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
     out.clear();
     const std::vector<Node>& nodes = doc.nodes();

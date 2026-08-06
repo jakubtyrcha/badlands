@@ -332,16 +332,29 @@ inline float sdf_sd_vesica(sq_float3 p, float h, float w) {
     const float arc_radius = d + w;
     const sq_float2 v = q - sdf_make2(-d, 0.0f);
     const float len = sdf_length(v);
-    // Projection onto the circle has rho >= 0, i.e. lands on the arc:
-    // -d + arc_radius * v.x / len >= 0, multiplied through by len (>= 0).
-    if (arc_radius * v.x >= d * len) {
-        return len - arc_radius;
+
+    // Distance to the circle, written as (len^2 - arc_radius^2) / (len +
+    // arc_radius) rather than the obvious len - arc_radius. THE DIFFERENCE IS
+    // NOT COSMETIC. A slender vesica -- which is exactly what full roundness
+    // produces, since rounding shrinks the underlying spindle towards a
+    // segment -- sends d towards 1e5, and subtracting two float32 values that
+    // large loses every digit that mattered: the branch test below then picks
+    // the wrong region and the shape reads as inside-out. Expanding the
+    // difference of squares cancels d analytically instead of numerically.
+    // arc_radius > 0 always (it is a radius), so the denominator cannot vanish.
+    const float dist = (q.x * q.x + q.y * q.y - w * w + 2.0f * d * (q.x - w)) / (len + arc_radius);
+
+    // Does the projection onto the full circle land on the arc (rho >= 0)?
+    // Algebraically arc_radius * v.x - d * len, rearranged in terms of `dist`
+    // so it inherits the same cancellation fix rather than reintroducing it.
+    if (d * (q.x - dist) + w * q.x >= 0.0f) {
+        return dist;
     }
     // Cusp region: nearest surface point is the pole itself. The sign still
     // comes from the disc, and cannot be zero here -- a point ON the circle
     // always projects to itself, which lands on the arc and takes the branch
     // above -- so this stays continuous across the boundary.
-    return sdf_sign(len - arc_radius) * sdf_length(q - sdf_make2(0.0f, h));
+    return sdf_sign(dist) * sdf_length(q - sdf_make2(0.0f, h));
 }
 
 // Square frustum: base half-size a at y = -h, top half-size b at y = +h.
@@ -418,13 +431,20 @@ inline sq_float3 sdf_contract_xz(sq_float3 q, sq_float3 h, float r) {
 //
 // SHAPE PARAMETER (params.x): the one profile degree of freedom the box cannot
 // state. Cone and pyramid read it as a tip ratio in [0, 1] (0 = point,
-// 1 = untapered), capsule as cap roundness in [0, 1] (0 = flat, 1 = fully
-// round), prism as a side count in [3, 12]. Core clamps and snaps it in
+// 1 = untapered), prism as a side count in [3, 12], and cube, capsule,
+// octahedron and vesica as ROUNDNESS in [0, 1]. Core clamps and snaps it in
 // setNodeShapeParam, but every read below is defensive anyway: this function
 // also runs on GPU against a buffer, where a bad value would produce NaNs
 // across the whole fold rather than one wrong node.
 //
-// Cube and sphere keep their own exact evaluators and ignore params.x.
+// Roundness is one idea applied four times, and it is exact and bbox-tight in
+// every case by the same argument: shrink the shape by rb, then subtract rb
+// from its distance. Offsetting an exact SDF by a constant is exact, and a
+// convex body's extent along every direction grows by exactly rb under that
+// offset -- so (extent - rb) + rb is the box you started with, and the rounded
+// shape still fills it. The sphere is the only shape with no parameter at all,
+// because an ellipsoid is already the roundest thing its box allows.
+inline float sdf_shape_roundness(float param) { return sdf_clamp(param, 0.0f, 1.0f); }
 inline float sdf_eval_node(SdfNode node, sq_float3 p) {
     const sq_float3 q = sdf_rotate(node.inv_rotation, p - node.pos_shape.xyz);
     // NOT named `half`: that's a reserved MSL type keyword (the 16-bit float
@@ -434,7 +454,10 @@ inline float sdf_eval_node(SdfNode node, sq_float3 p) {
     const float param = node.params.x;
 
     if (shape == SDF_SHAPE_CUBE) {
-        return sdf_sd_box(q, half_extents);
+        // No safe half-extents and no division here, so a zero-scale cube still
+        // behaves exactly as it did before rounding existed.
+        const float rb = sdf_shape_roundness(param) * sdf_reduce_min(sdf_abs(half_extents));
+        return sdf_sd_box(q, half_extents - sdf_make3(rb, rb, rb)) - rb;
     }
     if (shape == SDF_SHAPE_SPHERE) {
         return sdf_sd_ellipsoid(q, half_extents);
@@ -445,7 +468,32 @@ inline float sdf_eval_node(SdfNode node, sq_float3 p) {
         // The one shape that distinguishes no axis, so it contracts all three
         // onto s = min(h) rather than just the cross-section.
         const float s = sdf_reduce_min(h);
-        return sdf_sd_octahedron(sdf_make3(q.x * (s / h.x), q.y * (s / h.y), q.z * (s / h.z)), s);
+        const float rb = sdf_shape_roundness(param) * s;
+        const sq_float3 c = sdf_make3(q.x * (s / h.x), q.y * (s / h.y), q.z * (s / h.z));
+        // s - rb reaches 0 at full roundness, where sdf_sd_octahedron collapses
+        // to the distance to the origin and the offset turns it into a sphere
+        // of radius s. No guard needed: nothing divides by it.
+        return sdf_sd_octahedron(c, s - rb) - rb;
+    }
+    if (shape == SDF_SHAPE_VESICA) {
+        // THE VESICA CAPS ITS OWN CROSS-SECTION AT h.y, and must. Its profile
+        // arc's centre crosses the axis once the mid-width passes the
+        // half-length, which puts the arc's topmost point inside the revolved
+        // region -- so the solid reaches (w^2 + hy^2) / 2w in y, past the box
+        // that was supposed to contain it. Capping w keeps the contracted shape
+        // a spindle (or, at the limit, a sphere), whose y extent IS hy.
+        //
+        // Contracting by the capped w rather than min(hx, hz) is what stops
+        // that being a dead zone on the x handle: a box wider than it is tall
+        // still fills in x and z, as a flattened lens rather than a spindle,
+        // and the squeeze factors stay <= 1 either way.
+        const float w = sdf_min(sdf_min(h.x, h.z), h.y);
+        const sq_float3 c = sdf_contract_xz(q, h, w);
+        const float rb = sdf_shape_roundness(param) * w;
+        // Both floors bite only at full roundness, where the underlying spindle
+        // degenerates to a segment and the offset makes it a capsule.
+        return sdf_sd_vesica(c, sdf_max(h.y - rb, SDF_MIN_HALF_EXTENT),
+                             sdf_max(w - rb, SDF_MIN_HALF_EXTENT)) - rb;
     }
 
     const float r = sdf_min(h.x, h.z);
@@ -458,13 +506,11 @@ inline float sdf_eval_node(SdfNode node, sq_float3 p) {
             // so the dial's top end is a capsule when tall and a fully rounded
             // rim when flat -- and never an out-of-range rb.
             return sdf_sd_rounded_cylinder(c, r, h.y,
-                                           sdf_clamp(param, 0.0f, 1.0f) * sdf_min(r, h.y));
+                                           sdf_shape_roundness(param) * sdf_min(r, h.y));
         case SDF_SHAPE_PYRAMID:
             return sdf_sd_square_frustum(c, r, r * sdf_clamp(param, 0.0f, 1.0f), h.y);
         case SDF_SHAPE_PRISM:
             return sdf_sd_prism(c, r, h.y, int(sdf_clamp(sdf_floor(param + 0.5f), 3.0f, 12.0f)));
-        case SDF_SHAPE_VESICA:
-            return sdf_sd_vesica(c, h.y, r);
         default:
             // Unknown id: an empty half-space rather than a hard zero, so a
             // corrupt node cannot union a surface into the scene at the origin.

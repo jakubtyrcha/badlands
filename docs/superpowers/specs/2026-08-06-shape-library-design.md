@@ -1,5 +1,32 @@
 # Eight shapes, and a dial for what the box cannot say — design
 
+**Revised after hands-on review (2026-08-06).** Two rulings did not survive
+seeing it work.
+
+1. **"A dial only where the box leaves a DOF free" was right; "the vesica has
+   none" was wrong.** The argument held for *pointiness* — that really is the
+   box's aspect ratio — and then stopped one step short. **Roundness** is free
+   for every convex shape, and is the same dial the capsule already carried.
+   So the vesica, the octahedron and the cube gain one, and the sphere becomes
+   the only shape without: an ellipsoid is already the roundest thing its box
+   allows. Roundness is exact and bbox-tight everywhere by one argument —
+   shrink by `rb`, subtract `rb` — so this costs one line per shape.
+2. **The dial belongs in the menu, not beneath it.** §7 put it on its own arc
+   on the lower semicircle, which read as a separate control bolted under the
+   radial menu rather than as part of it. It is now a third button in the same
+   ring, in a fixed seat between the op toggle and Delete, showing its value
+   the way the op button shows its op. See §7 for what replaced the
+   knob-rides-the-resting-arc trick that seat cost us.
+
+Chasing (1) turned up a **containment bug**: a vesica wider than it is tall
+escaped its own bounding box in y. Past `w = h` its profile arc's centre
+crosses the axis, lifting the arc's topmost point into the revolved region and
+pushing the solid out to `(w² + h²) / 2w`. Both bbox tests had only ever run a
+tall box. Fixed by capping the vesica's cross-section radius at its own
+half-height and contracting by *that*, which also keeps a wide box filling in x
+and z instead of going dead. A second, numerical bug fell out of the same work
+and is recorded in §1.
+
 **Corrected during implementation (2026-08-06).** §1 claimed iq's
 `sdVesicaSegment` "handles `r > hy` … without special-casing". It does not, and
 the shape now uses a rewritten region test — see §1's vesica entry and the
@@ -11,8 +38,8 @@ points were the thing that was wrong.
 
 Approved 2026-08-06. Takes the primitive set from two (cube, sphere) to eight,
 adding **cone, capsule, octahedron, pyramid, prism and vesica segment**, and
-gives four of them a single extra parameter driven by an arc dial on the radial
-menu's lower semicircle.
+gives every shape but the sphere a single extra parameter, driven by a dial
+seated in the radial menu alongside the op toggle and Delete.
 
 Motivation: the app targets **stylized character/creature models and procedural
 face generation**. Two primitives cover volume and mass and nothing else — a
@@ -41,9 +68,10 @@ extended:
 
 Settled by a question-at-a-time design pass:
 
-- **A dial only where the box leaves a degree of freedom genuinely free.** Cone,
-  pyramid, capsule and prism get one. Cube, sphere, octahedron and vesica do
-  not. The vesica is the interesting rejection: its pointiness *is* its box
+- **A dial only where the box leaves a degree of freedom genuinely free.**
+  *(The rule stands; the list below was wrong — see revision 1 at the top.)*
+  Cone, pyramid, capsule and prism get one. Cube, sphere, octahedron and vesica
+  do not. The vesica is the interesting rejection: its pointiness *is* its box
   aspect — length from `scale.y`, width from `scale.x` — so a dial would
   duplicate the Shape gizmo and give two controls one meaning. Rejected
   alternatives: a dial on every shape (invents a DOF for the two that have
@@ -51,7 +79,9 @@ Settled by a question-at-a-time design pass:
 - **Continuous dials snap to 0.05; the prism's side count snaps to whole
   numbers.** 21 detents across the sweep for the former, 10 for the latter.
 - **The dial is an arc on the radial menu's lower semicircle**, at the same
-  64 pt radius the two action buttons use. **Upper half acts** (op, delete),
+  64 pt radius the two action buttons use. *(Superseded — see revision 2 at the
+  top. The reasoning below about jump-on-grab still holds and is what §7's
+  press-anchoring replaces it with.)* **Upper half acts** (op, delete),
   **lower half sets**. The knob's resting angle *is* the value, which is what
   makes absolute mapping and "no jump on grab" the same thing rather than
   opposites — you always grab the knob where it already is, and one 180° sweep
@@ -79,14 +109,14 @@ Local frame, **Y is the distinguished axis** for every new shape.
 
 | Shape | id | Local definition | Dial | Default |
 |---|---|---|---|---|
-| Cube | 0 | exact box — **unchanged** | — | — |
+| Cube | 0 | exact box, shrunk by `rb` and offset back | roundness `c` 0…1 | 0 |
 | Sphere | 1 | ellipsoid approximation — **unchanged** | — | — |
 | Cone | 2 | capped cone, base radius `r` at −hy, top radius `k·r` at +hy | tip `k` 0…1 | 0 |
 | Capsule | 3 | rounded cylinder: radius `r`, half-height `hy`, edge round `rb = c·min(r, hy)` | round `c` 0…1 | 1 |
-| Octahedron | 4 | `‖q‖₁ = s`, `s = min(hx, hy, hz)` | — | — |
+| Octahedron | 4 | `‖q‖₁ = s − rb`, offset by `rb`; `s = min(hx, hy, hz)` | roundness `c` 0…1 | 0 |
 | Pyramid | 5 | square frustum, base half-size `r`, top half-size `k·r`, half-height `hy` | tip `k` 0…1 | 0 |
 | Prism | 6 | regular N-gon inscribed in the xz box, extruded to ±hy | sides `N` 3…12 | 6 |
-| Vesica | 7 | vesica of revolution, half-length `hy`, mid half-width `r` | — | — |
+| Vesica | 7 | vesica of revolution, half-length `hy`, mid half-width `w = min(r, hy)`, shrunk by `rb` and offset back | tip roundness `c` 0…1 | 0 |
 
 Ids 0 and 1 must not move: the shader compares `pos_shape.w` against them.
 
@@ -108,10 +138,14 @@ specialised to the Y axis so the general endpoint math drops out:
   cheap bound.
 - **Prism** → iq's exact regular-polygon 2D distance (sector fold via `atan`),
   then convex extrusion against `|p.y| − hy`. Exact.
-- **Vesica** → the profile arc through `(0, ±hy)` and `(r, 0)`, revolved.
-  `r == hy` degenerates to a sphere and `r > hy` to a bi-cusped spinning-top,
-  both valid shapes that a user can reach by dragging the box — so neither may
-  be clamped away. **This is NOT iq's `sdVesicaSegment` inlined.** His region
+- **Vesica** → the profile arc through `(0, ±hy)` and `(w, 0)`, revolved,
+  with **`w = min(hx, hz, hy)`**. Capping the width at the half-height is not
+  cosmetic: past `w = hy` the arc's centre crosses the axis and the solid
+  reaches `(w² + hy²) / 2w` in y, outside the box everything else assumes it is
+  inscribed in. Contracting by the capped `w` rather than `min(hx, hz)` is what
+  keeps a wide box filling in x and z — as a flattened lens rather than a
+  spindle — instead of the x handle going dead.
+  Two further notes. **This is NOT iq's `sdVesicaSegment` inlined.** His region
   test is a single angular comparison, valid only while the profile arc is the
   minor one; once `r > hy` the arc becomes major, the test wraps, and points
   deep inside the solid near the axis come back with a *positive* distance.
@@ -119,6 +153,13 @@ specialised to the Y axis so the general endpoint math drops out:
   projection lands on the arc, which is orientation-free and so holds for the
   minor arc, the major arc and the semicircle alike — and reproduces his answer
   exactly wherever his is valid.
+  And the distance to the arc is written as
+  `(len² − arc_radius²) / (len + arc_radius)`, **not** `len − arc_radius`. Full
+  roundness shrinks the underlying spindle towards a segment, which sends the
+  arc's centre towards 1e5; subtracting two float32 values that large loses
+  every digit that mattered, and the region test then picks the wrong branch
+  and the shape renders inside-out. Expanding the difference of squares cancels
+  the large term analytically instead of numerically.
 - **Pyramid frustum** → **max of six half-space distances** with unit normals:
   four slant planes plus top and bottom. This is the one approximation being
   added — exact on the surface and throughout the interior, conservative
@@ -246,26 +287,39 @@ framing behaviour does not shift for existing scenes.
 `SpawnOptionsBar` grows to eight icons in the existing segmented row (~252 pt,
 which still fits under the mode bar).
 
-## 7. The arc dial
+## 7. The dial is a third button
 
-The two action buttons stay exactly where they are, at 135° and 45° on radius
-64. When the selected shape's spec has a parameter, a knob is drawn on the
-**lower** semicircle at the same radius, at
+Three fixed seats on the upper semicircle at 150°/90°/30°: op, dial, Delete.
+The seats never move — a shape with no parameter leaves the middle one empty —
+and the dial is styled as a peer of the other two, showing its value the way
+the op button shows its op: a ring gauge around the rim with the number inside.
+It is the same kind of thing as the op toggle (something about the node that no
+gizmo handle can reach), so it reads as part of the menu rather than as a
+separate control beneath it.
 
-```
-angle = 180° + 180° · (value − min) / (max − min)
-```
+Held, it becomes the thing you turn. **The arc is laid out so the value at the
+moment of the press sits exactly under the press point**, which is what makes
+the mapping absolute and the grab jump-free at once: at zero sweep the value is
+unchanged no matter where on the button you pressed. A full range is 180° of
+sweep either side, so both ends are always within half a turn of wherever you
+grabbed.
 
-so its resting position reads the value without a number. A `DragGesture` in
-the menu's local coordinate space gives the cursor's offset from the frame
-centre — which *is* the anchor — so the value is an `atan2` of that offset, with
-no round trip through the viewport and no coordinate-space reconciliation.
+Cursor angles **accumulate unwrapped** rather than being folded into a fixed
+span. Folding is what an earlier draft did, and it made part of the range
+unreachable whenever the knob was grabbed off its centre — the fold clamped the
+sweep before it could get there. Unwrapping also lets the cursor circle the
+anchor freely without a 360° jump reading as most of the range in one event.
+
 Track, detents and a numeric readout draw **only while held**, the way the
-placement grid draws only during a Placement drag.
+placement grid draws only during a Placement drag, and none of them is
+hit-testable — the gesture already has capture, and leaving them grabbable
+would claim menu area that should reach the viewport underneath.
 
-The existing `.frame(extent · 2)` already contains a 64 pt radius knob, and the
-lower half stays click-through apart from the knob's own circle — so the
-"no full-screen `contentShape`" property `ContentView` documents survives.
+The gesture state is one optional struct, cleared on `onEnded` **and on the
+knob's `onDisappear`**. The knob only exists while the selection has a
+parameter, so a delete or a selection change mid-drag never delivers `onEnded`;
+a surviving offset would then apply to the next press and jump the value on
+touch-down, which is the exact failure the press-anchoring exists to prevent.
 
 **The dial drag must not set `isDragging`.** `ContentView` hides the entire
 radial menu while that flag is up — it exists so the menu does not fight a

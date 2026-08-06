@@ -366,11 +366,18 @@ TEST_CASE("snap_shape_param clamps first, then snaps to the spec's step") {
     CHECK(snap_shape_param(prism, 0.0f) == doctest::Approx(3.0f));    // below the minimum
     CHECK(snap_shape_param(prism, 100.0f) == doctest::Approx(12.0f));
 
-    // A shape with no parameter snaps everything to zero, so nothing downstream
-    // has to ask whether the value means anything.
-    const ShapeParamSpec vesica = shape_param_spec(Shape::Vesica);
-    CHECK_FALSE(vesica.has_param);
-    CHECK(snap_shape_param(vesica, 0.7f) == doctest::Approx(0.0f));
+    // The sphere is the ONLY shape without a parameter -- an ellipsoid is
+    // already the roundest thing its box allows, so there is nothing left to
+    // vary. It snaps everything to zero, so nothing downstream has to ask
+    // whether the value means anything.
+    const ShapeParamSpec sphere = shape_param_spec(Shape::Sphere);
+    CHECK_FALSE(sphere.has_param);
+    CHECK(snap_shape_param(sphere, 0.7f) == doctest::Approx(0.0f));
+    for (int32_t i = 0; i < kShapeCount; ++i) {
+        const Shape shape = static_cast<Shape>(i);
+        INFO("shape id: " << i);
+        CHECK(shape_param_spec(shape).has_param == (shape != Shape::Sphere));
+    }
 }
 
 TEST_CASE("Editor::setNodeShapeParam is the only way in, and it snaps") {

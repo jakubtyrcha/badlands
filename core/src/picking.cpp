@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "scene.h"
+#include "sdf.h"        // local_sdf_node -- the shared world-transform-stripped node
 #include "sdf_scene.h"  // SdfNode, sdf_eval_node -- the same evaluator the renderer traces
 
 namespace sq {
@@ -25,22 +26,6 @@ constexpr float kTraceMinStep = 1e-6f;
 // the four taps straddle the surface rather than all landing inside its
 // tolerance band, which would leave the gradient dominated by float noise.
 constexpr float kNormalEps = 1e-3f;
-
-// The node as the evaluator sees it, with the world transform stripped out:
-// centred at the origin with identity rotation, because raycast_node has
-// already moved the ray into that frame. Reusing sdf_eval_node rather than
-// re-deriving a local evaluator is the point -- it is what makes picking and
-// rendering answer with the same surface by construction.
-SdfNode local_node(const Node& node) {
-    const simd_float3 half = node.scale * 0.5f;
-    SdfNode sn;
-    sn.pos_shape = sdf_make4(0.0f, 0.0f, 0.0f,
-                             static_cast<float>(static_cast<int32_t>(node.shape)));
-    sn.half_extents_op = sdf_make4(half.x, half.y, half.z, 0.0f); // op is not read here
-    sn.inv_rotation = sdf_make4(0.0f, 0.0f, 0.0f, 1.0f);          // identity
-    sn.params = sdf_make4(node.shape_param, 0.0f, 0.0f, 0.0f);
-    return sn;
-}
 
 // Tetrahedron-offset gradient (iq's): 4 evaluations rather than the 6 a naive
 // central difference needs, and the same pattern raymarch.metal shades with.
@@ -74,7 +59,10 @@ std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
     const simd_float3 o = simd_act(inv_rotation, world.origin - node.position);
     const simd_float3 d = simd_act(inv_rotation, dir);
 
-    const SdfNode sn = local_node(node);
+    // Reusing sdf_eval_node rather than re-deriving a local evaluator is the
+    // point: it is what makes picking and rendering answer with the same
+    // surface by construction.
+    const SdfNode sn = local_sdf_node(node);
 
     // Start at kEps rather than 0, which is what makes a hit at or behind the
     // origin impossible by construction -- the guard the analytic version

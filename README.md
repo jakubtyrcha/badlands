@@ -74,26 +74,27 @@ Two modes, selected by the icons top-left or keys **1**–**2**:
 
 | Shape | Dial | |
 |---|---|---|
-| Cube, Sphere, Octahedron, Vesica | — | fully described by their box |
-| Cone | tip ratio | 0 = point, 1 = cylinder |
-| Pyramid | tip ratio | 0 = point, 1 = box |
+| Cone, Pyramid | tip ratio | 0 = point, 1 = cylinder / box |
+| Cube, Octahedron | roundness | 0 = sharp, 1 = ball |
 | Capsule | cap roundness | 0 = flat cylinder, 1 = capsule |
+| Vesica | tip roundness | 0 = cusps, 1 = capsule |
 | Prism | side count | 3 to 12 |
+| Sphere | — | already the roundest thing its box allows |
 
 A shape's **size** is its box — position, rotation and the three scale handles.
 What a box cannot say is a shape's *profile*: how blunt a cone's tip is, how
 round a capsule's caps are, how many faces a prism has. That one leftover
-degree of freedom gets a dial, and only the four shapes that have one carry it.
-The vesica is the interesting omission — its pointiness *is* its box aspect, so
-a dial would give it and the scale handles one meaning between them.
+degree of freedom gets a dial. Every shape has one except the sphere, and
+roundness is the same idea on four of them.
 
-**Upper half of the radial menu acts; lower half sets.** When the selected
-shape has a parameter, a knob rides the lower semicircle, and its resting angle
-*is* the value — left is the minimum, right the maximum. Press and turn: the
-knob stays under the cursor, so there is no jump on grab, and one sweep reaches
-both ends. The track, its detents and the numeric readout appear only while you
-hold it. Continuous dials step in 0.05; the prism's side count steps in whole
-numbers.
+The dial is the **third seat in the radial menu**, between the op toggle and
+Delete — it is the same kind of thing as those, something about the shape that
+no gizmo handle can reach. At rest it shows its value: a ring gauge around the
+rim with the number inside. Press and hold, and it becomes the thing you turn.
+The arc lays itself out so the value you started on sits under your cursor, so
+there is no jump on grab, and both ends are within half a turn of wherever you
+grabbed. The track, its detents and the readout appear only while you hold it.
+Continuous dials step in 0.05; the prism's side count steps in whole numbers.
 
 ### The two manipulators
 

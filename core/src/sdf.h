@@ -9,6 +9,14 @@
 namespace sq {
 
 class SceneDocument;
+struct Node;
+
+// The node as sdf_eval_node sees it once its world transform is stripped off:
+// centred at the origin with identity rotation, half-extents and shape
+// parameter intact. Callers that have already moved a query point into the
+// node's rigid frame -- picking's trace, the wireframe's profile sampling --
+// evaluate against this, so there is exactly one place that mapping is written.
+SdfNode local_sdf_node(const Node& node);
 
 // Regular sampling grid: n samples per axis over a cubic domain, sample
 // (0,0,0) at `origin`, `spacing` between adjacent samples along each axis.

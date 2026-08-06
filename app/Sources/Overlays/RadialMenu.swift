@@ -1,64 +1,67 @@
 import SwiftUI
 import ShapeshifterCore
 
-/// Sims-style menu anchored to the selected node's projected screen position
-/// (`vm.radialAnchor`). Two ~36pt circular buttons sit on the UPPER semicircle
-/// of radius 64pt around the anchor, at 135°/45° (measured from +x, y up in
-/// screen terms) — i.e. top-left / top-right.
+/// Sims-style semicircle menu anchored to the selected node's projected screen
+/// position (`vm.radialAnchor`). Circular ~36pt buttons sit on the upper
+/// semicircle of radius 64pt around the anchor, in three fixed seats at
+/// 150°/90°/30° (measured from +x, y up in screen terms).
 ///
 /// It held four until both gizmos went live: Move and Scale were tool arming,
 /// and there is no tool to arm now that a selected node shows both of its
 /// manipulators at once. What is left is what no handle can express — the
-/// node's CSG op, and deleting it.
+/// node's CSG op, its shape parameter, and deleting it.
 ///
-/// **Upper half acts, lower half sets.** The LOWER semicircle carries the shape
-/// dial: a knob riding the same 64pt radius, whose resting angle *is* the
-/// selected shape's profile parameter. That placement is what makes absolute
-/// mapping and "no jump on grab" the same thing rather than opposites — you
-/// always grab the knob where it already is, and one 180° sweep still reaches
-/// both ends. Putting it on the upper semicircle instead would have meant
-/// pressing a fixed button at 90° with the knob elsewhere, which is exactly the
-/// jump-on-grab `gizmo.h` rules out for the scale handles.
+/// **The three seats are peers.** An earlier draft gave the shape dial its own
+/// arc on the lower semicircle, which read as a separate control bolted beneath
+/// the menu rather than as part of it. The dial is the same kind of thing as
+/// the op toggle — something about the selected node that no gizmo handle can
+/// reach — so it sits in the same ring, at the same radius, styled the same
+/// way, and shows its current value the way the op button shows its current op.
+/// The seats never move: a shape with no parameter simply leaves the middle one
+/// empty, so the op and delete buttons are always in the same place.
 ///
-/// Shapes whose proportions are fully described by their box (cube, sphere,
-/// octahedron, vesica) have no parameter, so the lower half stays empty and
-/// click-through for them, exactly as it was before the dial existed.
+/// What makes the dial a dial is what happens when you *hold* it — see
+/// `knob(...)`.
 ///
 /// `ContentView` centers this view on the anchor via `.position(anchor)`,
 /// which places the anchor at the CENTER of this view's own layout frame.
-/// The `.frame` below is therefore a full square, so that center lands exactly
-/// on the anchor; everything outside the buttons and the knob has no background
-/// and no `contentShape`, so — per SwiftUI's default hit-testing — it stays
+/// The `.frame` below is therefore a full square (radius+buttonRadius on
+/// every side, not just the upper half actually used) so that center lands
+/// exactly on the anchor; the empty lower half has no background or
+/// `contentShape`, so — per SwiftUI's default hit-testing — it stays
 /// click-through to the viewport rather than intercepting clicks.
 struct RadialMenu: View {
     let vm: EditorViewModel
 
     private static let radius: CGFloat = 64
     private static let buttonSize: CGFloat = 36
-    private static let knobSize: CGFloat = 30
     private static let extent = radius + buttonSize / 2 // half of the enclosing square's side
     private static let space = "radialMenu"
 
-    /// True only while the dial is held. The track, its detents and the numeric
-    /// readout draw during that and no other time — the same bargain the
-    /// placement grid strikes, where the thing that answers a mid-drag question
-    /// is not on screen when nobody is asking it.
-    @State private var dialActive = false
-    /// Angle between the cursor and the knob at the moment of the press, held
-    /// for the whole gesture. Without it, grabbing the knob anywhere but dead
-    /// centre would snap the value by up to a detent before the drag even
-    /// starts; with it the grab is exactly neutral. Captured at press and never
-    /// re-read, the same idiom every drag in core uses.
-    @State private var grabOffsetDegrees: Double? = nil
+    /// Fixed seats. 60° apart rather than the 90° the two-button menu used, so
+    /// three 36pt buttons on a 64pt radius keep a comfortable gap.
+    private static let opSeat: Double = 150
+    private static let dialSeat: Double = 90
+    private static let deleteSeat: Double = 30
+
+    /// Everything a dial gesture needs, in one optional so it is all-or-nothing:
+    /// there is no state to leave half-set if the gesture ends abnormally.
+    private struct DialDrag {
+        let startFraction: CGFloat  // where the value was when the press landed
+        let startAngle: Double      // and where the cursor was, unwrapped
+        var lastRawAngle: Double    // previous atan2 result, for unwrapping
+        var unwrappedAngle: Double  // accumulated, so sweeping past ±180° is continuous
+    }
+    @State private var drag: DialDrag? = nil
 
     var body: some View {
         ZStack {
-            button(angleDegrees: 135,
+            button(seat: Self.opSeat,
                    symbol: vm.selectedNodeOp == .Subtract ? "minus.circle.fill" : "plus.circle.fill",
                    help: "Additive / Subtract") {
                 vm.radialToggleOp()
             }
-            button(angleDegrees: 45, symbol: "xmark", help: "Delete") {
+            button(seat: Self.deleteSeat, symbol: "xmark", help: "Delete") {
                 vm.deleteSelected()
             }
             if let spec = vm.selectedNodeParamSpec {
@@ -72,16 +75,16 @@ struct RadialMenu: View {
     // MARK: - The two action buttons
 
     /// One radial-menu button, offset from the ZStack's center by `radius`
-    /// along `angleDegrees` (standard math convention: 0° = +x, 90° = +y-up).
+    /// along its seat angle (standard math convention: 0° = +x, 90° = +y-up).
     /// Screen space has y increasing downward, so the vertical offset is
     /// negated to turn "up" in the angle convention into "up" on screen.
     ///
     /// No `active` state: it existed to show which of Move/Scale was armed, and
-    /// both entries went away with tool arming itself. Neither remaining button
-    /// is a mode — they act and are done.
-    private func button(angleDegrees: Double, symbol: String, help: String,
+    /// both entries went away with tool arming itself. Neither button is a
+    /// mode — they act and are done.
+    private func button(seat: Double, symbol: String, help: String,
                          action: @escaping () -> Void) -> some View {
-        let offset = Self.offset(angleDegrees: angleDegrees)
+        let offset = Self.offset(degrees: seat)
         return Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .medium))
@@ -90,9 +93,9 @@ struct RadialMenu: View {
         }
         .buttonStyle(.plain)
         .help(help)
-        // Dimmed while the dial is turning, so the half of the menu being used
-        // is the half that reads. Mirrors how hovering one gizmo dims the other.
-        .opacity(dialActive ? 0.35 : 1.0)
+        // Dimmed while the dial is turning, so the control being used is the
+        // one that reads. Mirrors how hovering one gizmo dims the other.
+        .opacity(drag == nil ? 1.0 : 0.35)
         .offset(x: offset.x, y: offset.y)
     }
 
@@ -102,54 +105,89 @@ struct RadialMenu: View {
     private func dial(spec: sq.ShapeParamSpec, value: Float) -> some View {
         let fraction = Self.fraction(of: value, in: spec)
         ZStack {
-            if dialActive {
+            if let drag {
                 // Drawn, never grabbed: the gesture already has capture by the
                 // time any of this exists, and leaving it hit-testable would
-                // claim a chunk of the lower half that should reach the
-                // viewport underneath.
-                track(spec: spec, fraction: fraction)
+                // claim a chunk of the menu that should reach the viewport
+                // underneath.
+                track(spec: spec, drag: drag, fraction: fraction)
                     .allowsHitTesting(false)
-                readout(spec: spec, value: value, fraction: fraction)
+                readout(spec: spec, drag: drag, value: value, fraction: fraction)
                     .allowsHitTesting(false)
             }
-            knob(spec: spec, fraction: fraction)
+            knob(spec: spec, value: value, fraction: fraction)
         }
     }
 
-    private func knob(spec: sq.ShapeParamSpec, fraction: CGFloat) -> some View {
-        let offset = Self.offset(angleDegrees: Self.angleDegrees(fraction: fraction))
-        return Circle()
-            .fill(dialActive ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.regularMaterial))
-            .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: dialActive ? 0 : 1.5))
-            .frame(width: Self.knobSize, height: Self.knobSize)
-            .offset(x: offset.x, y: offset.y)
-            .help(spec.integral ? "Sides" : "Shape")
-            .gesture(
-                // minimumDistance 0 so the press itself opens the track: the
-                // dial is a hold-and-turn, and waiting for travel would leave
-                // the first few degrees unexplained.
-                DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
-                    .onChanged { gesture in
-                        let cursor = Self.cursorDegrees(at: gesture.location)
-                        if grabOffsetDegrees == nil {
-                            dialActive = true
-                            grabOffsetDegrees = cursor - Self.angleDegrees(fraction: fraction)
-                        }
-                        let target = cursor - (grabOffsetDegrees ?? 0)
-                        vm.setSelectedShapeParam(Self.value(atAngle: target, in: spec))
+    /// At rest this is a button like the other two, in its own seat, showing its
+    /// value — a ring gauge around the rim and the number in the middle, so the
+    /// parameter is legible without touching anything.
+    ///
+    /// Held, it becomes the thing you turn. The arc is laid out so the CURRENT
+    /// VALUE sits exactly under the press point, which is what makes the
+    /// mapping absolute and the grab jump-free at the same time: at zero sweep
+    /// the value is unchanged no matter where on the button you pressed. Angles
+    /// accumulate unwrapped rather than being folded into a fixed span, so the
+    /// cursor can circle the anchor freely and every value stays reachable from
+    /// any starting point.
+    private func knob(spec: sq.ShapeParamSpec, value: Float, fraction: CGFloat) -> some View {
+        let angle = drag.map { Self.angle(ofFraction: fraction, in: $0) } ?? Self.dialSeat
+        let offset = Self.offset(degrees: angle)
+        let active = drag != nil
+        return ZStack {
+            Circle().fill(active ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.regularMaterial))
+            Circle()
+                .trim(from: 0, to: fraction)
+                .stroke(active ? Color.white.opacity(0.9) : Color.accentColor,
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90)) // start the gauge at 12 o'clock
+                .padding(2)
+            Text(Self.label(spec: spec, value: value))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(active ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+        }
+        .frame(width: Self.buttonSize, height: Self.buttonSize)
+        .help(Self.help(for: vm.selectedNodeShape))
+        .offset(x: offset.x, y: offset.y)
+        .gesture(
+            // minimumDistance 0 so the press itself opens the dial: it is a
+            // hold-and-turn, and waiting for travel would leave the first few
+            // degrees unexplained.
+            DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
+                .onChanged { gesture in
+                    let raw = Self.rawDegrees(at: gesture.location)
+                    if drag == nil {
+                        drag = DialDrag(startFraction: fraction, startAngle: raw,
+                                        lastRawAngle: raw, unwrappedAngle: raw)
+                    } else {
+                        // Unwrap: atan2 jumps by 360° across the -x axis, and a
+                        // raw difference there would read as most of the range
+                        // travelled in one event.
+                        var step = raw - drag!.lastRawAngle
+                        if step > 180 { step -= 360 } else if step < -180 { step += 360 }
+                        drag!.unwrappedAngle += step
+                        drag!.lastRawAngle = raw
                     }
-                    .onEnded { _ in
-                        dialActive = false
-                        grabOffsetDegrees = nil
-                    }
-            )
+                    guard let drag else { return }
+                    // Clockwise (rightward) increases, matching the gauge.
+                    let swept = drag.startAngle - drag.unwrappedAngle
+                    let target = drag.startFraction + CGFloat(swept / 180.0)
+                    vm.setSelectedShapeParam(Self.value(atFraction: target, in: spec))
+                }
+                .onEnded { _ in drag = nil }
+        )
+        // The knob only exists while the selection has a parameter. If that
+        // stops being true mid-gesture — a delete, a selection change — onEnded
+        // never arrives, and a surviving `drag` would apply the previous
+        // gesture's offset to the next press and jump the value on touch-down.
+        .onDisappear { drag = nil }
     }
 
-    private func track(spec: sq.ShapeParamSpec, fraction: CGFloat) -> some View {
+    private func track(spec: sq.ShapeParamSpec, drag: DialDrag, fraction: CGFloat) -> some View {
         ZStack {
-            Self.arc(from: 0, to: 1)
+            Self.arc(from: 0, to: 1, drag: drag)
                 .stroke(Color.primary.opacity(0.18), style: StrokeStyle(lineWidth: 6, lineCap: .round))
-            Self.arc(from: 0, to: fraction)
+            Self.arc(from: 0, to: fraction, drag: drag)
                 .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 6, lineCap: .round))
             // One dot per reachable value, so the snapping is visible as
             // detents rather than felt as stickiness. The step comes from the
@@ -159,33 +197,34 @@ struct RadialMenu: View {
                 Circle()
                     .fill(Color.primary.opacity(0.35))
                     .frame(width: 3, height: 3)
-                    .offset(Self.offsetSize(angleDegrees: Self.angleDegrees(fraction: f)))
+                    .offset(Self.offsetSize(degrees: Self.angle(ofFraction: f, in: drag)))
             }
         }
     }
 
-    private func readout(spec: sq.ShapeParamSpec, value: Float, fraction: CGFloat) -> some View {
-        // Sits just outside the knob, on the same ray, so it never covers the
-        // track it is describing.
-        let offset = Self.offset(angleDegrees: Self.angleDegrees(fraction: fraction),
-                                 radius: Self.radius + 26)
-        return Text(spec.integral ? String(Int(value.rounded())) : String(format: "%.2f", value))
-            .font(.system(size: 12, weight: .semibold, design: .rounded))
+    private func readout(spec: sq.ShapeParamSpec, drag: DialDrag,
+                         value: Float, fraction: CGFloat) -> some View {
+        // Just outside the knob on the same ray, so it never covers the track
+        // it is describing.
+        let offset = Self.offset(degrees: Self.angle(ofFraction: fraction, in: drag),
+                                 radius: Self.radius + 28)
+        return Text("\(Self.help(for: vm.selectedNodeShape))  \(Self.label(spec: spec, value: value))")
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
             .foregroundStyle(.white)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(Capsule().fill(Color.accentColor))
+            .fixedSize()
             .offset(x: offset.x, y: offset.y)
     }
 
     // MARK: - Angle <-> value
 
-    /// The dial sweeps the LOWER semicircle: 180° (straight left) is the
-    /// minimum, 270° (straight down) the middle, 360° (straight right) the
-    /// maximum. Angles are the same math convention the two buttons use, so
-    /// nothing on this menu measures angles two different ways.
-    private static func angleDegrees(fraction: CGFloat) -> Double {
-        180 + 180 * Double(fraction)
+    /// Where a value sits during a gesture. The press angle anchors the value
+    /// the press started on, and a full range is 180° of sweep either side of
+    /// it — so both ends are always within half a turn of wherever you grabbed.
+    private static func angle(ofFraction fraction: CGFloat, in drag: DialDrag) -> Double {
+        drag.startAngle - Double(fraction - drag.startFraction) * 180
     }
 
     private static func fraction(of value: Float, in spec: sq.ShapeParamSpec) -> CGFloat {
@@ -194,26 +233,16 @@ struct RadialMenu: View {
         return CGFloat(min(max((value - spec.min_value) / span, 0), 1))
     }
 
-    private static func value(atAngle degrees: Double, in spec: sq.ShapeParamSpec) -> Float {
-        let fraction = (degrees - 180) / 180
+    private static func value(atFraction fraction: CGFloat, in spec: sq.ShapeParamSpec) -> Float {
         let clamped = min(max(fraction, 0), 1)
         return spec.min_value + Float(clamped) * (spec.max_value - spec.min_value)
     }
 
-    /// Cursor angle about the menu's centre, folded onto the dial's [180, 360]
-    /// sweep. Dragging up into the acted-on half holds whichever end is nearer
-    /// rather than jumping to the other one, which is what keeps an overshoot
-    /// past either end from reading as a wrap-around.
-    private static func cursorDegrees(at location: CGPoint) -> Double {
-        let dx = location.x - extent
-        let dy = location.y - extent
-        var degrees = atan2(-dy, dx) * 180 / .pi   // (-180, 180], y-up convention
-        if degrees > 0 {
-            degrees = degrees > 90 ? 180 : 360
-        } else {
-            degrees += 360
-        }
-        return degrees
+    /// Cursor angle about the menu's centre. Deliberately NOT folded into any
+    /// span — the caller unwraps it instead. Folding was how an earlier version
+    /// made part of the range unreachable when the knob was grabbed off-centre.
+    private static func rawDegrees(at location: CGPoint) -> Double {
+        atan2(-(location.y - extent), location.x - extent) * 180 / .pi
     }
 
     private static func detentCount(_ spec: sq.ShapeParamSpec) -> Int {
@@ -221,34 +250,49 @@ struct RadialMenu: View {
         return Int(((spec.max_value - spec.min_value) / spec.step).rounded()) + 1
     }
 
+    /// Compact enough for a 36pt button: whole numbers for a side count, and a
+    /// leading-dot fraction otherwise.
+    private static func label(spec: sq.ShapeParamSpec, value: Float) -> String {
+        if spec.integral { return String(Int(value.rounded())) }
+        if value >= 0.995 { return "1" }
+        return String(format: ".%02d", Int((value * 100).rounded()))
+    }
+
+    /// What the dial adjusts, per shape. Roundness is one idea on four shapes,
+    /// which is why several of these read the same.
+    private static func help(for shape: sq.Shape?) -> String {
+        switch shape {
+        case .Cone, .Pyramid: return "Tip"
+        case .Prism: return "Sides"
+        case .Cube, .Capsule, .Octahedron, .Vesica: return "Roundness"
+        default: return "Shape"
+        }
+    }
+
     // MARK: - Geometry
 
-    private static func offset(angleDegrees: Double, radius: CGFloat = radius) -> CGPoint {
-        let radians = angleDegrees * .pi / 180
+    private static func offset(degrees: Double, radius: CGFloat = radius) -> CGPoint {
+        let radians = degrees * .pi / 180
         return CGPoint(x: radius * cos(radians), y: -radius * sin(radians))
     }
 
-    private static func offsetSize(angleDegrees: Double) -> CGSize {
-        let point = offset(angleDegrees: angleDegrees)
+    private static func offsetSize(degrees: Double) -> CGSize {
+        let point = offset(degrees: degrees)
         return CGSize(width: point.x, height: point.y)
-    }
-
-    private static func point(fraction: CGFloat) -> CGPoint {
-        let offset = offset(angleDegrees: angleDegrees(fraction: fraction))
-        return CGPoint(x: extent + offset.x, y: extent + offset.y)
     }
 
     /// Built from line segments rather than `Path.addArc`, whose sweep
     /// direction has to be reasoned about against SwiftUI's flipped y before it
     /// can be trusted. At this radius the polyline is indistinguishable, and it
-    /// shares `point(fraction:)` with the knob and the detents — so the drawn
-    /// arc cannot drift away from the thing riding it.
-    private static func arc(from start: CGFloat, to end: CGFloat) -> Path {
+    /// shares `angle(ofFraction:in:)` with the knob and the detents — so the
+    /// drawn arc cannot drift away from the things riding it.
+    private static func arc(from start: CGFloat, to end: CGFloat, drag: DialDrag) -> Path {
         var path = Path()
         let steps = 48
         for i in 0...steps {
             let f = start + (end - start) * CGFloat(i) / CGFloat(steps)
-            let p = point(fraction: f)
+            let o = offset(degrees: angle(ofFraction: f, in: drag))
+            let p = CGPoint(x: extent + o.x, y: extent + o.y)
             if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
         }
         return path

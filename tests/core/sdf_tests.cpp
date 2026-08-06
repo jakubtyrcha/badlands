@@ -605,8 +605,21 @@ TEST_CASE("no shape escapes its own bounding box, and each one reaches it") {
     // What sdf.cpp's scene_aabb and navigation.cpp's node_bounding_radius both
     // assume: every shape is inscribed in position +- scale*0.5. Anisotropic on
     // purpose -- this is also the cross-section contraction's containment claim.
-    const simd_float3 scale = {3.0f, 5.0f, 2.0f}; // h = (1.5, 2.5, 1)
+    //
+    // BOTH ASPECTS, and that is the point. An earlier version of this case ran
+    // only the tall box, and a vesica wider than it is tall escaped in y for as
+    // long as that was true: past w = h its profile arc's centre crosses the
+    // axis, which lifts the arc's topmost point into the revolved region and
+    // pushes the solid out to (w^2 + h^2) / 2w. One shape, one aspect ratio, no
+    // test.
+    const simd_float3 aspects[] = {
+        {3.0f, 5.0f, 2.0f},  // taller than wide
+        {5.0f, 1.5f, 4.0f},  // wider than tall -- the case that used to escape
+        {2.0f, 2.0f, 2.0f},  // cube-shaped, where every contraction is identity
+    };
+    for (const simd_float3& scale : aspects) {
     const simd_float3 h = scale * 0.5f;
+    INFO("scale: (" << scale.x << ", " << scale.y << ", " << scale.z << ")");
 
     // widest_y: the height at which the cross-section reaches its full radius,
     // as a fraction of h.y. Zero for the shapes with a waist at mid-height, but
@@ -636,6 +649,7 @@ TEST_CASE("no shape escapes its own bounding box, and each one reaches it") {
         CHECK(eval_shape(c.shape, c.param, scale, simd_float3{0, h.y, 0}) <= 1e-4f);
         CHECK(eval_shape(c.shape, c.param, scale, simd_float3{0, -h.y, 0}) <= 1e-4f);
         CHECK(eval_shape(c.shape, c.param, scale, simd_float3{0, c.widest_y * h.y, r}) <= 1e-4f);
+    }
     }
 }
 
@@ -736,5 +750,69 @@ TEST_CASE("the cross-section contraction is the identity when hx == hz") {
               == doctest::Approx(sdf_sd_rounded_cylinder(p, 1.0f, 3.0f, 1.0f)).epsilon(1e-5));
         CHECK(eval_shape(Shape::Vesica, 0.0f, scale, p)
               == doctest::Approx(sdf_sd_vesica(p, 3.0f, 1.0f)).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("roundness rounds a shape without letting it leave its box") {
+    // The dial four shapes share: shrink by rb, then subtract rb. It is exact
+    // and bbox-tight for any convex shape, and these are the cases that would
+    // fail if the shrink and the offset ever stopped matching.
+    struct Case { const char* label; Shape shape; };
+    const Case cases[] = {
+        {"cube", Shape::Cube}, {"capsule", Shape::Capsule},
+        {"octahedron", Shape::Octahedron}, {"vesica", Shape::Vesica},
+    };
+    const simd_float3 scale = {2.0f, 5.0f, 2.0f}; // h = (1, 2.5, 1)
+    const simd_float3 h = scale * 0.5f;
+
+    Lcg rng{4242u};
+    for (const Case& c : cases) {
+        INFO("case: " << std::string(c.label));
+        for (const float roundness : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            INFO("roundness: " << roundness);
+            // Still inside the box at every setting...
+            for (int i = 0; i < 200; ++i) {
+                const simd_float3 dir =
+                    simd_normalize(rng.next3(-1.0f, 1.0f) + simd_float3{1e-3f, 0, 0});
+                CHECK(eval_shape(c.shape, roundness, scale, dir * (simd_length(h) * 1.05f)) > 0.0f);
+            }
+            // ... and still reaching the box's two ends, which is what makes
+            // this rounding rather than shrinking.
+            CHECK(eval_shape(c.shape, roundness, scale, simd_float3{0, h.y, 0})
+                  == doctest::Approx(0.0f).epsilon(1e-3));
+            CHECK(eval_shape(c.shape, roundness, scale, simd_float3{h.x, 0, 0})
+                  == doctest::Approx(0.0f).epsilon(1e-3));
+        }
+    }
+
+    SUBCASE("a fully rounded cube on a cube-shaped box is exactly a sphere") {
+        const simd_float3 cubic = {2.0f, 2.0f, 2.0f};
+        for (const simd_float3 p : {simd_float3{0.4f, 0.3f, -0.2f}, simd_float3{2.0f, 0, 0},
+                                    simd_float3{0, -1.7f, 0.9f}}) {
+            CHECK(eval_shape(Shape::Cube, 1.0f, cubic, p)
+                  == doctest::Approx(simd_length(p) - 1.0f).epsilon(1e-5));
+        }
+    }
+
+    SUBCASE("a fully rounded octahedron on a cube-shaped box is exactly a sphere") {
+        const simd_float3 cubic = {2.0f, 2.0f, 2.0f};
+        for (const simd_float3 p : {simd_float3{0.4f, 0.3f, -0.2f}, simd_float3{2.0f, 0, 0},
+                                    simd_float3{0, -1.7f, 0.9f}}) {
+            CHECK(eval_shape(Shape::Octahedron, 1.0f, cubic, p)
+                  == doctest::Approx(simd_length(p) - 1.0f).epsilon(1e-5));
+        }
+    }
+
+    SUBCASE("roundness 0 leaves the sharp shape untouched") {
+        // The regression guard for every pinned expectation elsewhere in this
+        // file: the default is 0, so if rounding leaked in at zero, the whole
+        // suite would have moved.
+        const simd_float3 s = {2.0f, 3.0f, 4.0f};
+        Lcg probe{8u};
+        for (int i = 0; i < 100; ++i) {
+            const simd_float3 p = probe.next3(-4.0f, 4.0f);
+            CHECK(eval_shape(Shape::Cube, 0.0f, s, p)
+                  == doctest::Approx(sd_box(p, s * 0.5f)).epsilon(1e-5));
+        }
     }
 }

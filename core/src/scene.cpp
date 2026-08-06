@@ -17,23 +17,28 @@ constexpr const char* kShapeNames[kShapeCount] = {
     "Cube", "Sphere", "Cone", "Capsule", "Octahedron", "Pyramid", "Prism", "Vesica",
 };
 
-// The dial table. Four shapes have a profile degree of freedom the box cannot
-// state; the other four are fully described by their half-extents and carry no
-// dial. The vesica is the interesting omission -- its pointiness IS its box
-// aspect (length from scale.y, width from scale.x), so a dial would give the
-// Shape gizmo and the dial one meaning between them.
+// The dial table. Every shape but the sphere has one profile degree of freedom
+// its bounding box cannot state, and carries a dial for it. The sphere is the
+// sole exception because an ellipsoid is already the roundest thing its box
+// allows -- there is nothing left to vary.
+//
+// ROUNDNESS is the same idea on four different shapes (see sdf_eval_node), and
+// is why the vesica and the octahedron are not the parameterless oddities an
+// earlier draft made them: their POINTINESS is indeed their box aspect, and a
+// dial for that would have duplicated the Shape gizmo -- but how sharp their
+// tips are is free, and the box says nothing about it.
 //
 // Defaults are chosen so a freshly spawned shape looks like its own name: a
-// cone is a cone (sharp), a capsule is a capsule (fully round).
+// cone is a cone (sharp), a cube has square corners, a capsule is a capsule.
 constexpr ShapeParamSpec kShapeParams[kShapeCount] = {
-    /* Cube       */ {false, 0.0f, 0.0f,  0.0f,  0.0f, false},
+    /* Cube       */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // roundness: box -> ball
     /* Sphere     */ {false, 0.0f, 0.0f,  0.0f,  0.0f, false},
     /* Cone       */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // tip ratio: point -> cylinder
     /* Capsule    */ {true,  0.0f, 1.0f,  0.05f, 1.0f, false},  // cap roundness: flat -> capsule
-    /* Octahedron */ {false, 0.0f, 0.0f,  0.0f,  0.0f, false},
+    /* Octahedron */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // roundness: faceted -> ball
     /* Pyramid    */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // tip ratio: point -> box
     /* Prism      */ {true,  3.0f, 12.0f, 1.0f,  6.0f, true},   // side count
-    /* Vesica     */ {false, 0.0f, 0.0f,  0.0f,  0.0f, false},
+    /* Vesica     */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // tip roundness: cusps -> capsule
 };
 
 // Shape -> table index, guarding against a value from outside the enum (an id

@@ -49,6 +49,8 @@ final class EditorViewModel {
     /// into one optional rather than needing the view to check `has_param`.
     var selectedNodeParamSpec: sq.ShapeParamSpec? = nil
     var selectedNodeParam: Float? = nil
+    /// What the selected shape is, so the dial can say what it adjusts.
+    var selectedNodeShape: sq.Shape? = nil
 
     /// What the current press is doing.
     ///
@@ -379,9 +381,11 @@ final class EditorViewModel {
 
         if let id = selectedNodeID {
             let spec = editor.nodeShapeParamSpec(id)
+            selectedNodeShape = editor.nodeShape(id)
             selectedNodeParamSpec = spec.has_param ? spec : nil
             selectedNodeParam = spec.has_param ? editor.nodeShapeParam(id) : nil
         } else {
+            selectedNodeShape = nil
             selectedNodeParamSpec = nil
             selectedNodeParam = nil
         }
