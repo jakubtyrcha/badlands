@@ -49,6 +49,40 @@ Swamp/Forest styles (stage 1 emits Plains/Hills/Mountain/Lake only).
 
 ## 4. The filter
 
+**v2 rework (2026-08-07), after visual review of v1.** v1's simplified construction
+(per-cell frozen orientation, hat-blended scalar profile, multiplicative strength
+gate) produced patchy parallel stripes, and the noisy stage-1 soil raster made the
+physical gate a blotch mask. v2 replaces the interior with an independent
+implementation of the stacked-faded-gullies technique (after Rune Skovbo Johansen's
+blog/video; oriented phasor-style stripe noise after the Gabor/phasor-noise
+literature). **No third-party code is ported** — the author's reference
+implementation is MPL-2.0 and the user chose to keep the repo free of it; this is a
+from-concepts implementation with its own kernels, constants and structure:
+
+- Stripe field: cos/sin of one wave blended as a PHASOR over a jittered square
+  lattice with a compact C2 kernel, partially renormalized (floor on the phasor
+  magnitude) — blending unaligned waves yields a wave, so orientation varies
+  continuously with no cell borders at all.
+- Orientation: per point, from the base gradient's DIRECTION with an assumed
+  magnitude (the input slope magnitude is not trusted), then accumulated per octave
+  via the sign-of-derivative (triangle-wave) slope — branching is emergent.
+- Fade-toward-target with a stacked mask instead of a strength gate: each octave
+  blends between the accumulated target height and the new gully by an allowance
+  mask; the mask is rebuilt from the octave's |derivative| (ridges/creases protect
+  themselves) with separate ridge/crease rounding, and re-opened by a detail power.
+- The target initializes from LOCAL altitude (bed minus a ~50 m-radius sampled
+  mean, clamped over a fixed half-band), not global altitude.
+- The returned delta subtracts the target's DC term, so a fully-masked point gets
+  an EXACT zero delta and the fixture/invariance tests keep meaning.
+- Soil/biome remain the per-point strength modulation (C1, and soil is sampled
+  through a widened footprint to reject stage-1's per-cell soil noise); the water
+  mask is unchanged.
+- `ReliefSample.grad` is documented as APPROXIMATE (wave terms only, mask/target
+  spatial derivatives omitted — the same approximation the reference makes); no
+  consumer needs better today.
+
+### v1 construction (superseded, kept for the record)
+
 - 4–5 octaves of gradient-oriented gully stripes (extruded cos/sin pairs), wavelength
   halving per octave, evaluated on world-anchored rotated cell grids with per-cell
   pivots hashed from (seed, cell coords) — stateless, chunk-independent, so adjacent

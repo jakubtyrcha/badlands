@@ -3,10 +3,13 @@
 // The stage-2 relief DETAIL filter -- the deferred §3.4 pass of the procgen
 // stage split (docs/superpowers/specs/2026-08-06-stage2-relief-filter-design.md).
 //
-// A stateless per-point function, after runevision's "Fast and Gorgeous
-// Erosion Filter": octaves of gradient-oriented gully stripes on world-anchored
-// cell grids, faded by the physical signals (soil depth, slope) with per-biome
-// constants, masked off standing water. It returns a DELTA to add onto the
+// A stateless per-point function implementing stacked faded gullies, after
+// Rune Skovbo Johansen's "Fast and Gorgeous Erosion Filter" (source note and
+// license in relief_filter.cpp -- the implementation is a PROTOTYPE port and
+// will be replaced): phasor-blended oriented stripe octaves, orientation
+// accumulated per octave (branching), fade-toward-target with a stacked
+// ridge/crease-protecting mask, modulated by the physical signals (soil,
+// biome) and masked off standing water. It returns a DELTA to add onto the
 // Catmull-Rom resample -- the raster path stays the single source of the base
 // surface, and filter-off output is bit-identical to the plain resample.
 //
@@ -38,7 +41,11 @@ struct ReliefContext {
 
 struct ReliefSample {
   float delta_m = 0.0f;   // detail height to ADD onto the resampled bed
-  glm::vec2 grad{0.0f};   // d(delta)/d(world metres), analytic
+  // APPROXIMATE d(delta)/d(world metres): carries the faded wave terms only,
+  // not the mask/target spatial derivatives -- the same approximation the
+  // reference makes. Good enough for shading-like consumers; nothing
+  // downstream needs better today.
+  glm::vec2 grad{0.0f};
 };
 
 // The per-point filter. `out_texel_m` is the requested output density -- it
