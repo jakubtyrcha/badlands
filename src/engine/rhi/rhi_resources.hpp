@@ -30,7 +30,16 @@ namespace badlands::rhi {
 // IBuffer and such a mixin gets two IResource subobjects and stays abstract.
 class IResource : public std::enable_shared_from_this<IResource> {
  public:
+  IResource();
   virtual ~IResource() = default;
+
+  // A process-unique, monotonically increasing identity.
+  //
+  // Tracking keyed on `IResource*` aliases: free a resource, allocate another,
+  // and the allocator may hand back the same address -- so the new resource
+  // inherits the old one's tracked state. Deferred deletion widens that window
+  // considerably. An id is never reused, so it cannot.
+  uint64_t Id() const { return id_; }
 
   // A share of ownership, so a binding table (or anything else that outlives
   // the caller's handle) can retain what it references. Returns null if the
@@ -41,12 +50,22 @@ class IResource : public std::enable_shared_from_this<IResource> {
   // not cost a throw.
   std::shared_ptr<IResource> Share() { return weak_from_this().lock(); }
 
-  // Releases the backing GPU memory. Further use is a validation error, not
-  // undefined behaviour, when the validation decorator is active. Idempotent.
+  // Gives up the caller's claim on the backing GPU memory. Idempotent.
+  //
+  // DEFERRED, not immediate. `IsDestroyed()` becomes true at once and further
+  // use is a validation error, but the memory itself is released only when the
+  // frame in flight at this moment retires. That is the only coherent meaning
+  // once frames overlap: the GPU still reading a resource the caller has
+  // finished with is NORMAL, not misuse, and freeing underneath it is a
+  // use-after-free -- one Metal happens to survive, because a command buffer
+  // retains what it references, and DX12 does not.
   virtual void Destroy() = 0;
   virtual bool IsDestroyed() const = 0;
 
   virtual const std::string& GetLabel() const = 0;
+
+ private:
+  uint64_t id_;
 };
 
 class IBuffer : public virtual IResource {

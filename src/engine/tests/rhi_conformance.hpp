@@ -600,6 +600,71 @@ inline void CheckSkippedFramesStillRetire(IRhiDevice& device) {
   CHECK(device.LastRetiredFrame() == device.CurrentFrame());
 }
 
+// Destroy() gives up the CALLER's claim, not the GPU's.
+//
+// Metal survives an immediate free because a command buffer retains what it
+// references, so this mechanism could be entirely absent there and every
+// pixel would still be correct -- which is exactly why PendingDeletions()
+// exists to be asserted on. DX12 has no such safety net, and these assertions
+// are its specification.
+inline void CheckDestroyIsDeferredToFrameRetirement(IRhiDevice& device) {
+  CHECK(device.PendingDeletions() == 0);
+
+  device.BeginFrame();
+  auto buf = device.CreateBuffer(
+      {.size = 4096, .usage = BufferUsage::Storage, .label = "deferred"});
+  REQUIRE(buf);
+
+  buf->Destroy();
+  // Observable at once...
+  CHECK(buf->IsDestroyed());
+  // ...but the memory is still held, because this frame may still be reading it.
+  CHECK(device.PendingDeletions() == 1);
+
+  // Idempotent, and must not enqueue a second time.
+  buf->Destroy();
+  CHECK(device.PendingDeletions() == 1);
+
+  device.EndFrame();
+  device.WaitIdle();
+  CHECK(device.PendingDeletions() == 0);
+}
+
+// Destroyed with nothing in flight, there is nothing to wait for.
+inline void CheckDestroyOutsideAFrameIsImmediate(IRhiDevice& device) {
+  device.WaitIdle();
+  const size_t before = device.PendingDeletions();
+  auto buf = device.CreateBuffer(
+      {.size = 256, .usage = BufferUsage::Storage, .label = "immediate"});
+  buf->Destroy();
+  CHECK(buf->IsDestroyed());
+  CHECK(device.PendingDeletions() == before);
+}
+
+// Two resources cannot share tracked state just because the allocator reused
+// an address. Ids are never reused; pointers are.
+inline void CheckResourceIdsAreUnique(IRhiDevice& device) {
+  uint64_t first_id = 0;
+  const void* first_address = nullptr;
+  {
+    auto a = device.CreateBuffer({.size = 64, .usage = BufferUsage::Storage});
+    REQUIRE(a);
+    first_id = a->Id();
+    first_address = a.get();
+    CHECK(first_id != 0);
+  }
+  // `a` is gone; `b` may well land on its address.
+  auto b = device.CreateBuffer({.size = 64, .usage = BufferUsage::Storage});
+  REQUIRE(b);
+  CHECK(b->Id() != first_id);
+  INFO("reused address: " << (static_cast<const void*>(b.get()) == first_address));
+
+  auto c = device.CreateTexture({.width = 4, .height = 4,
+                                 .format = Format::RGBA8Unorm,
+                                 .usage = TextureUsage::Sampled});
+  CHECK(c->Id() != b->Id());
+}
+
 // Submitted work must retire rather than accumulate.
 //
 // Honest about its own strength: the load-bearing part is that InFlightCount()
@@ -1288,6 +1353,9 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckSubmissionsRetire(device);
   CheckFramesAdvanceAndPace(device);
   CheckSkippedFramesStillRetire(device);
+  CheckDestroyIsDeferredToFrameRetirement(device);
+  CheckDestroyOutsideAFrameIsImmediate(device);
+  CheckResourceIdsAreUnique(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

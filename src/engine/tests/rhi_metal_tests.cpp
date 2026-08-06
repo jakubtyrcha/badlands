@@ -11,6 +11,7 @@
 
 #include <catch_amalgamated.hpp>
 
+#include "engine/rhi/metal/metal_rhi.hpp"
 #include "engine/tests/rhi_conformance.hpp"
 
 using namespace badlands::rhi;
@@ -445,6 +446,31 @@ TEST_CASE("metal: frames advance and pace", "[rhi][metal][gpu]") {
 TEST_CASE("metal: skipped frames still retire", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckSkippedFramesStillRetire(*d);
+}
+
+TEST_CASE("metal: Destroy is deferred to frame retirement", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckDestroyIsDeferredToFrameRetirement(*d);
+}
+TEST_CASE("metal: Destroy outside a frame is immediate", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckDestroyOutsideAFrameIsImmediate(*d);
+}
+TEST_CASE("metal: resource ids are never reused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckResourceIdsAreUnique(*d);
+}
+
+TEST_CASE("metal: a deferred handle is really released rather than stranded",
+          "[rhi][metal]") {
+  // ASan cannot see this. It catches memory freed and then touched, but an
+  // Objective-C object whose retain count never reaches zero is not freed at
+  // all -- it just leaks, and every test still passes. A __weak reference goes
+  // nil exactly when the last strong reference goes away, so it is the only
+  // automated way to assert that deferring a handle does not also strand it.
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  CHECK(badlands::rhi::metal::WeakHandleClearedAfterRetire(*d));
 }
 TEST_CASE("metal: sliced views honour their range", "[rhi][metal]") {
   auto d = MakeMetal();

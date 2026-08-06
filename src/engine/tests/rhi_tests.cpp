@@ -110,6 +110,19 @@ TEST_CASE("Null: skipped frames still retire", "[rhi]") {
   rhitest::CheckSkippedFramesStillRetire(*d);
 }
 
+TEST_CASE("Null: Destroy is deferred to frame retirement", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckDestroyIsDeferredToFrameRetirement(*d);
+}
+TEST_CASE("Null: Destroy outside a frame is immediate", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckDestroyOutsideAFrameIsImmediate(*d);
+}
+TEST_CASE("Null: resource ids are never reused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckResourceIdsAreUnique(*d);
+}
+
 // --- Pacing, proven deterministically under manual retirement ---------------
 //
 // This is what Null's manual retirement mode is FOR. Immediate mode retires at

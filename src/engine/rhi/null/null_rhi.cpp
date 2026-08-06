@@ -17,22 +17,68 @@ namespace {
 // Resources
 // ---------------------------------------------------------------------------
 
+// Mirrors the Metal backend's RetireQueue. Null has no GPU handles, but it
+// must model the same OBSERVABLE behaviour or PendingDeletions() would mean
+// two different things per backend (rule 6) -- and the DX12 backend's
+// specification is written against exactly these assertions.
+struct RetireQueue {
+  mutable std::mutex mutex;
+  // (frame that must retire first, the memory being held). Buffers move their
+  // real bytes in here, so the memory genuinely outlives Destroy().
+  std::vector<std::pair<uint64_t, std::vector<uint8_t>>> pending;
+  uint64_t current_frame = 0;
+  uint64_t last_retired = 0;
+
+  void Defer(std::vector<uint8_t> held) {
+    std::lock_guard<std::mutex> lock(mutex);
+    // Destroyed outside any frame: nothing can be reading it.
+    if (current_frame <= last_retired) return;
+    pending.emplace_back(current_frame, std::move(held));
+  }
+
+  void Collect() {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::erase_if(pending,
+                  [this](const auto& e) { return e.first <= last_retired; });
+  }
+
+  size_t Count() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return pending.size();
+  }
+};
+
+using RetireQueuePtr = std::shared_ptr<RetireQueue>;
+
 class NullResource : public virtual IResource {
  public:
-  explicit NullResource(std::string label) : label_(std::move(label)) {}
-  void Destroy() override { destroyed_ = true; }
+  NullResource(std::string label, RetireQueuePtr retire)
+      : label_(std::move(label)), retire_(std::move(retire)) {}
+
+  void Destroy() override {
+    if (destroyed_) return;  // idempotent, and must not defer twice
+    destroyed_ = true;
+    if (retire_) retire_->Defer(TakeMemory());
+  }
   bool IsDestroyed() const override { return destroyed_; }
   const std::string& GetLabel() const override { return label_; }
 
+ protected:
+  // The bytes this resource is holding, moved out. Only buffers have any; the
+  // rest defer an empty payload so the COUNT still matches Metal's.
+  virtual std::vector<uint8_t> TakeMemory() { return {}; }
+
  private:
   std::string label_;
+  RetireQueuePtr retire_;
   bool destroyed_ = false;
 };
 
 class NullBuffer final : public IBuffer, public NullResource {
  public:
-  explicit NullBuffer(const BufferDesc& d)
-      : NullResource(d.label), usage_(d.usage), data_(d.size, 0) {}
+  NullBuffer(const BufferDesc& d, RetireQueuePtr retire)
+      : NullResource(d.label, std::move(retire)), usage_(d.usage),
+        data_(d.size, 0) {}
 
   uint64_t GetSize() const override { return data_.size(); }
   BufferUsage GetUsage() const override { return usage_; }
@@ -51,6 +97,9 @@ class NullBuffer final : public IBuffer, public NullResource {
   // Real bytes, so an indirect draw can resolve its args without a GPU.
   const std::vector<uint8_t>& Bytes() const { return data_; }
 
+ protected:
+  std::vector<uint8_t> TakeMemory() override { return std::move(data_); }
+
  private:
   BufferUsage usage_;
   std::vector<uint8_t> data_;
@@ -61,9 +110,9 @@ class NullTexture;
 class NullTextureView final : public ITextureView, public NullResource {
  public:
   NullTextureView(NullTexture* tex, Format fmt, std::string label,
-                  const TextureViewDesc& resolved)
-      : NullResource(std::move(label)), texture_(tex), format_(fmt),
-        desc_(resolved) {}
+                  const TextureViewDesc& resolved, RetireQueuePtr retire)
+      : NullResource(std::move(label), std::move(retire)), texture_(tex),
+        format_(fmt), desc_(resolved) {}
   ITexture* GetTexture() const override;
   bool IsDestroyed() const override;
   Format GetFormat() const override { return format_; }
@@ -77,7 +126,8 @@ class NullTextureView final : public ITextureView, public NullResource {
 
 class NullTexture final : public ITexture, public NullResource {
  public:
-  explicit NullTexture(const TextureDesc& d) : NullResource(d.label), desc_(d) {}
+  NullTexture(const TextureDesc& d, RetireQueuePtr retire)
+      : NullResource(d.label, retire), desc_(d), retire_(std::move(retire)) {}
 
   uint32_t GetWidth() const override { return desc_.width; }
   uint32_t GetHeight() const override { return desc_.height; }
@@ -103,7 +153,7 @@ class NullTexture final : public ITexture, public NullResource {
     auto it = views_.find(key);
     if (it != views_.end()) return it->second.get();
     auto view = std::make_unique<NullTextureView>(
-        this, desc_.format, desc_.label + ".view", *r);
+        this, desc_.format, desc_.label + ".view", *r, retire_);
     auto* raw = view.get();
     views_.emplace(key, std::move(view));
     return raw;
@@ -124,6 +174,7 @@ class NullTexture final : public ITexture, public NullResource {
   using ViewKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
 
   TextureDesc desc_;
+  RetireQueuePtr retire_;
   std::map<ViewKey, std::unique_ptr<NullTextureView>> views_;
   uint64_t written_bytes_ = 0;
 };
@@ -137,8 +188,8 @@ bool NullTextureView::IsDestroyed() const {
 
 class NullSampler final : public ISampler, public NullResource {
  public:
-  explicit NullSampler(const SamplerDesc& d)
-      : NullResource(d.label), desc_(d) {}
+  NullSampler(const SamplerDesc& d, RetireQueuePtr retire)
+      : NullResource(d.label, std::move(retire)), desc_(d) {}
   const SamplerDesc& GetDesc() const override { return desc_; }
 
  private:
@@ -150,8 +201,10 @@ class NullSampler final : public ISampler, public NullResource {
 // constructible (rule 6).
 class NullBindingTable final : public IBindingTable, public NullResource {
  public:
-  NullBindingTable(ResolvedBindingTable r, uint32_t group, std::string label)
-      : NullResource(std::move(label)), group_(group), resolved_(std::move(r)) {}
+  NullBindingTable(ResolvedBindingTable r, uint32_t group, std::string label,
+                   RetireQueuePtr retire)
+      : NullResource(std::move(label), std::move(retire)), group_(group),
+        resolved_(std::move(r)) {}
   uint32_t GetGroup() const override { return group_; }
   const std::vector<BindingEntry>& Entries() const { return resolved_.entries; }
   const std::vector<uint32_t>& Indices() const { return resolved_.indices; }
@@ -454,13 +507,13 @@ class NullDevice final : public IRhiDevice {
   BackendKind GetBackend() const override { return BackendKind::Null; }
 
   BufferPtr CreateBuffer(const BufferDesc& d) override {
-    return std::make_shared<NullBuffer>(d);
+    return std::make_shared<NullBuffer>(d, retire_);
   }
   TexturePtr CreateTexture(const TextureDesc& d) override {
-    return std::make_shared<NullTexture>(d);
+    return std::make_shared<NullTexture>(d, retire_);
   }
   SamplerPtr CreateSampler(const SamplerDesc& d) override {
-    return std::make_shared<NullSampler>(d);
+    return std::make_shared<NullSampler>(d, retire_);
   }
 
   ShaderModulePtr CreateShaderModule(const std::string& source,
@@ -481,7 +534,7 @@ class NullDevice final : public IRhiDevice {
     auto resolved = ResolveBindingTable(d);
     if (!resolved) return nullptr;  // ResolveBindingTable logged why
     return std::make_shared<NullBindingTable>(std::move(*resolved), d.group,
-                                              d.label);
+                                              d.label, retire_);
   }
 
   std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
@@ -493,7 +546,12 @@ class NullDevice final : public IRhiDevice {
     log_.Record(
         {.kind = RecordedCommand::Kind::Submit, .object = &encoder});
   }
-  void WaitIdle() override { RetireAll(); }
+  void WaitIdle() override {
+    RetireAll();
+    retire_->Collect();
+  }
+
+  size_t PendingDeletions() const override { return retire_->Count(); }
   // Null executes on Submit, so nothing is ever in flight. This is a real
   // answer, not a stub -- which is why the base declares it pure.
   size_t InFlightCount() override { return 0; }
@@ -507,11 +565,17 @@ class NullDevice final : public IRhiDevice {
   // of blocking, would make Null and Metal disagree about the contract
   // (rule 6).
   uint64_t BeginFrame() override {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] {
-      return current_frame_ - last_retired_ < frames_in_flight_;
-    });
-    return ++current_frame_;
+    uint64_t frame = 0;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [this] {
+        return current_frame_ - last_retired_ < frames_in_flight_;
+      });
+      frame = ++current_frame_;
+      PublishFrameLocked();
+    }
+    retire_->Collect();
+    return frame;
   }
 
   void EndFrame() override {
@@ -563,8 +627,17 @@ class NullDevice final : public IRhiDevice {
     if (ended_.empty()) return false;
     last_retired_ = ended_.front();
     ended_.pop_front();
+    PublishFrameLocked();
     cv_.notify_all();
     return true;
+  }
+
+  // The retire queue has its own lock, so it carries a copy of the watermarks
+  // rather than reaching back into this one.
+  void PublishFrameLocked() {
+    std::lock_guard<std::mutex> lock(retire_->mutex);
+    retire_->current_frame = current_frame_;
+    retire_->last_retired = last_retired_;
   }
 
   void RetireAll() {
@@ -575,6 +648,7 @@ class NullDevice final : public IRhiDevice {
 
   std::string label_;
   CommandLog log_;
+  RetireQueuePtr retire_ = std::make_shared<RetireQueue>();
 
   // Frame model. `mutable` because the observers are const but must lock.
   mutable std::mutex mutex_;

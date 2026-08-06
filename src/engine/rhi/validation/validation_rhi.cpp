@@ -64,7 +64,7 @@ class StateTracker {
   }
 
   void Declare(IResource* r, ResourceState s) {
-    if (r) states_[Canonical(r)] = s;
+    if (r) states_[Canonical(r)->Id()] = s;
   }
 
   // Checks `r` is in `want`. Reports through `rec` if not.
@@ -72,7 +72,9 @@ class StateTracker {
               const char* context) {
     if (!r) return;
     r = Canonical(r);
-    auto it = states_.find(r);
+    // Keyed on the ID, not the pointer: a freed resource's address can be
+    // reused, and the next resource to land there would inherit its state.
+    auto it = states_.find(r->Id());
     const ResourceState have =
         it == states_.end() ? ResourceState::Undefined : it->second;
     if (have == want) return;
@@ -84,7 +86,7 @@ class StateTracker {
   }
 
  private:
-  std::unordered_map<IResource*, ResourceState> states_;
+  std::unordered_map<uint64_t, ResourceState> states_;
 };
 
 // Shared state handed down from the device to encoders and passes.
@@ -872,6 +874,9 @@ class ValidationDevice final : public IRhiDevice {
     return inner_->LastRetiredFrame();
   }
   uint32_t FramesInFlight() const override { return inner_->FramesInFlight(); }
+  size_t PendingDeletions() const override {
+    return inner_->PendingDeletions();
+  }
 
   void BeginValidationScope() override { ctx_.recorder.BeginScope(); }
   std::optional<ValidationReport> EndValidationScope() override {

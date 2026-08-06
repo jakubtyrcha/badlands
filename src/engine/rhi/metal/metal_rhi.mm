@@ -127,26 +127,74 @@ NSString* Ns(const std::string& s) {
 // Resources
 // ---------------------------------------------------------------------------
 
+// Where Destroy() hands a GPU handle so the frame timeline, not the caller,
+// decides when it is released. Shared between the device and every resource it
+// creates; held by shared_ptr so a resource outliving its device is merely
+// wasteful rather than a dangling write.
+struct RetireQueue {
+  mutable std::mutex mutex;
+  std::vector<std::pair<uint64_t, id>> pending;  // (frame, held object)
+  std::atomic<uint64_t> current_frame{0};
+  std::atomic<uint64_t> last_retired{0};
+
+  // Holds `obj` until the frame currently in flight retires. Conservative on
+  // purpose: we do not track which frames actually referenced the resource, and
+  // waiting for the newest one also covers every older one, since frames retire
+  // in order.
+  void Defer(id obj) {
+    if (!obj) return;
+    const uint64_t frame = current_frame.load(std::memory_order_acquire);
+    // Destroyed outside any frame, or with nothing outstanding: no GPU can be
+    // reading it, so ARC may release it right now.
+    if (frame <= last_retired.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(mutex);
+    pending.emplace_back(frame, obj);
+  }
+
+  // Drops everything whose frame has retired. ARC releases as the entries go.
+  void Collect() {
+    const uint64_t retired = last_retired.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(mutex);
+    std::erase_if(pending,
+                  [retired](const auto& e) { return e.first <= retired; });
+  }
+
+  size_t Count() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return pending.size();
+  }
+};
+
+using RetireQueuePtr = std::shared_ptr<RetireQueue>;
+
 class MetalResource : public virtual IResource {
  public:
-  explicit MetalResource(std::string label) : label_(std::move(label)) {}
+  MetalResource(std::string label, RetireQueuePtr retire)
+      : label_(std::move(label)), retire_(std::move(retire)) {}
   bool IsDestroyed() const override { return destroyed_; }
   const std::string& GetLabel() const override { return label_; }
 
  protected:
   void MarkDestroyed() { destroyed_ = true; }
+  // Hands `obj` to the frame timeline instead of letting ARC release it now.
+  void Defer(id obj) {
+    if (retire_) retire_->Defer(obj);
+  }
 
  private:
   std::string label_;
+  RetireQueuePtr retire_;
   bool destroyed_ = false;
 };
 
 class MetalBuffer final : public IBuffer, public MetalResource {
  public:
-  MetalBuffer(id<MTLBuffer> buf, const BufferDesc& d)
-      : MetalResource(d.label), buffer_(buf), size_(d.size), usage_(d.usage) {}
+  MetalBuffer(id<MTLBuffer> buf, const BufferDesc& d, RetireQueuePtr retire)
+      : MetalResource(d.label, std::move(retire)), buffer_(buf), size_(d.size),
+        usage_(d.usage) {}
 
   void Destroy() override {
+    Defer(buffer_);  // released when the frame in flight retires
     buffer_ = nil;
     MarkDestroyed();
   }
@@ -182,11 +230,13 @@ class MetalTexture;
 class MetalTextureView final : public ITextureView, public MetalResource {
  public:
   MetalTextureView(MetalTexture* owner, id<MTLTexture> tex, Format fmt,
-                   std::string label, const TextureViewDesc& resolved)
-      : MetalResource(std::move(label)), owner_(owner), texture_(tex),
-        format_(fmt), desc_(resolved) {}
+                   std::string label, const TextureViewDesc& resolved,
+                   RetireQueuePtr retire)
+      : MetalResource(std::move(label), std::move(retire)), owner_(owner),
+        texture_(tex), format_(fmt), desc_(resolved) {}
 
   void Destroy() override {
+    Defer(texture_);
     texture_ = nil;
     MarkDestroyed();
   }
@@ -208,14 +258,16 @@ class MetalTextureView final : public ITextureView, public MetalResource {
 
 class MetalTexture final : public ITexture, public MetalResource {
  public:
-  MetalTexture(id<MTLTexture> tex, const TextureDesc& d)
-      : MetalResource(d.label), texture_(tex), desc_(d) {}
+  MetalTexture(id<MTLTexture> tex, const TextureDesc& d, RetireQueuePtr retire)
+      : MetalResource(d.label, retire), texture_(tex), desc_(d),
+        retire_(std::move(retire)) {}
 
   void Destroy() override {
     // Release the GPU memory but KEEP the view objects: callers hold them as
     // raw borrowed pointers, and freeing them here was a heap-use-after-free
     // that ASan caught and that Null (which never freed them) could not.
     for (auto& [key, view] : views_) view->Destroy();
+    Defer(texture_);
     texture_ = nil;
     MarkDestroyed();
   }
@@ -273,7 +325,7 @@ class MetalTexture final : public ITexture, public MetalResource {
     }
 
     auto view = std::make_unique<MetalTextureView>(
-        this, handle, desc_.format, desc_.label + ".view", *r);
+        this, handle, desc_.format, desc_.label + ".view", *r, retire_);
     auto* raw = view.get();
     views_.emplace(key, std::move(view));
     return raw;
@@ -308,6 +360,7 @@ class MetalTexture final : public ITexture, public MetalResource {
 
   id<MTLTexture> texture_;
   TextureDesc desc_;
+  RetireQueuePtr retire_;
   std::map<ViewKey, std::unique_ptr<MetalTextureView>> views_;
 };
 
@@ -318,9 +371,11 @@ bool MetalTextureView::IsDestroyed() const {
 
 class MetalSampler final : public ISampler, public MetalResource {
  public:
-  MetalSampler(id<MTLSamplerState> s, const SamplerDesc& d)
-      : MetalResource(d.label), sampler_(s), desc_(d) {}
+  MetalSampler(id<MTLSamplerState> s, const SamplerDesc& d,
+               RetireQueuePtr retire)
+      : MetalResource(d.label, std::move(retire)), sampler_(s), desc_(d) {}
   void Destroy() override {
+    Defer(sampler_);
     sampler_ = nil;
     MarkDestroyed();
   }
@@ -339,8 +394,9 @@ class MetalSampler final : public ISampler, public MetalResource {
 // reach the record path: it fails at CreateBindingTable, which returns null.
 class MetalBindingTable final : public IBindingTable, public MetalResource {
  public:
-  MetalBindingTable(ResolvedBindingTable r, uint32_t group, std::string label)
-      : MetalResource(std::move(label)), group_(group),
+  MetalBindingTable(ResolvedBindingTable r, uint32_t group, std::string label,
+                    RetireQueuePtr retire)
+      : MetalResource(std::move(label), std::move(retire)), group_(group),
         resolved_(std::move(r)) {}
   void Destroy() override { MarkDestroyed(); }
   uint32_t GetGroup() const override { return group_; }
@@ -819,7 +875,7 @@ class MetalDevice final : public IRhiDevice {
       return nullptr;
     }
     if (!d.label.empty()) buf.label = Ns(d.label);
-    return std::make_shared<MetalBuffer>(buf, d);
+    return std::make_shared<MetalBuffer>(buf, d, retire_);
   }
 
   TexturePtr CreateTexture(const TextureDesc& d) override {
@@ -843,7 +899,7 @@ class MetalDevice final : public IRhiDevice {
       return nullptr;
     }
     if (!d.label.empty()) tex.label = Ns(d.label);
-    return std::make_shared<MetalTexture>(tex, d);
+    return std::make_shared<MetalTexture>(tex, d, retire_);
   }
 
   SamplerPtr CreateSampler(const SamplerDesc& d) override {
@@ -859,7 +915,7 @@ class MetalDevice final : public IRhiDevice {
       spdlog::error("rhi/metal: newSamplerState failed for '{}'", d.label);
       return nullptr;
     }
-    return std::make_shared<MetalSampler>(s, d);
+    return std::make_shared<MetalSampler>(s, d, retire_);
   }
 
   ShaderModulePtr CreateShaderModule(const std::string& source,
@@ -966,7 +1022,7 @@ class MetalDevice final : public IRhiDevice {
     auto resolved = ResolveBindingTable(d);
     if (!resolved) return nullptr;  // ResolveBindingTable logged why
     return std::make_shared<MetalBindingTable>(std::move(*resolved), d.group,
-                                               d.label);
+                                               d.label, retire_);
   }
 
   std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
@@ -1016,7 +1072,12 @@ class MetalDevice final : public IRhiDevice {
       ReportIfFailed(cmd);
     }
     in_flight_.clear();
+    // Every frame has retired, so nothing is left to hold back.
+    retire_->last_retired.store(current_frame_, std::memory_order_release);
+    retire_->Collect();
   }
+
+  size_t PendingDeletions() const override { return retire_->Count(); }
 
   size_t InFlightCount() override {
     PruneRetired();
@@ -1030,6 +1091,9 @@ class MetalDevice final : public IRhiDevice {
     dispatch_semaphore_wait(frame_sem_, DISPATCH_TIME_FOREVER);
     ++current_frame_;
     in_frame_ = true;
+    retire_->current_frame.store(current_frame_, std::memory_order_release);
+    // Anything whose frame retired while we were away can go now.
+    retire_->Collect();
     return current_frame_;
   }
 
@@ -1107,6 +1171,8 @@ class MetalDevice final : public IRhiDevice {
                                seen, frame, std::memory_order_release,
                                std::memory_order_relaxed)) {
     }
+    retire_->last_retired.store(last_retired_.load(std::memory_order_acquire),
+                                std::memory_order_release);
     dispatch_semaphore_signal(frame_sem_);
   }
 
@@ -1141,6 +1207,7 @@ class MetalDevice final : public IRhiDevice {
     bool ended = false;
   };
 
+  RetireQueuePtr retire_ = std::make_shared<RetireQueue>();
   uint32_t frames_in_flight_ = 3;
   dispatch_semaphore_t frame_sem_ = nil;
   uint64_t current_frame_ = 0;
@@ -1151,6 +1218,49 @@ class MetalDevice final : public IRhiDevice {
 };
 
 }  // namespace
+
+bool WeakHandleClearedAfterRetire(IRhiDevice& device) {
+  __weak id<MTLBuffer> weak_handle = nil;
+  bool held_while_in_flight = false;
+
+  @autoreleasepool {
+    device.BeginFrame();
+    auto buf = device.CreateBuffer({.size = 4096,
+                                    .usage = BufferUsage::Storage,
+                                    .label = "weak_probe"});
+    if (!buf) {
+      spdlog::error("rhi/metal: weak probe could not create a buffer");
+      return false;
+    }
+    weak_handle = static_cast<MetalBuffer*>(buf.get())->Handle();
+    if (!weak_handle) {
+      spdlog::error("rhi/metal: weak probe got a nil handle");
+      return false;
+    }
+
+    buf->Destroy();
+    buf.reset();  // drop the C++ object too; only the retire queue holds it now
+    held_while_in_flight = weak_handle != nil;
+    device.EndFrame();
+  }
+
+  device.WaitIdle();  // retires the frame and collects the queue
+  @autoreleasepool {
+  }
+  const bool released = weak_handle == nil;
+
+  if (!held_while_in_flight) {
+    spdlog::error(
+        "rhi/metal: a Destroy()ed handle was released while its frame was "
+        "still in flight -- deferral is not happening");
+  }
+  if (!released) {
+    spdlog::error(
+        "rhi/metal: a Destroy()ed handle was never released after its frame "
+        "retired -- the retire queue is stranding it");
+  }
+  return held_while_in_flight && released;
+}
 
 std::unique_ptr<IRhiDevice> CreateMetalDevice(const std::string& label,
                                               uint32_t frames_in_flight) {

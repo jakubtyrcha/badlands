@@ -155,6 +155,15 @@ class IRhiDevice {
   virtual uint64_t LastRetiredFrame() const = 0;
   virtual uint32_t FramesInFlight() const = 0;
 
+  // Resources that have been Destroy()ed but whose memory is still held,
+  // waiting for the frame that may still be reading them to retire.
+  //
+  // Exists so deferred deletion is OBSERVABLE. Metal releases these correctly
+  // whether or not we defer, because a command buffer retains what it
+  // references -- so without a count to assert on, the mechanism DX12 depends
+  // on could be entirely broken here and every test would still pass.
+  virtual size_t PendingDeletions() const = 0;
+
   // --- Validation ---
   // All 14 of the engine's existing Dawn validation sites assert "nothing went
   // wrong", none assert that an error is raised (probe C). So the contract is

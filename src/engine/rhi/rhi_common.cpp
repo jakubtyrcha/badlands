@@ -3,6 +3,7 @@
 // interface.
 
 #include <algorithm>
+#include <atomic>
 
 #include <spdlog/spdlog.h>
 
@@ -55,6 +56,14 @@ const ReflectedUniformBlock* ShaderReflection::FindUniformBlock(
   auto it = std::find_if(uniform_blocks.begin(), uniform_blocks.end(),
                          [name](const auto& b) { return b.name == name; });
   return it == uniform_blocks.end() ? nullptr : &*it;
+}
+
+// Never reused, so a freed resource's id cannot be inherited by whatever lands
+// at its address next. Atomic because resources are created from whatever
+// thread the caller is on.
+IResource::IResource() {
+  static std::atomic<uint64_t> next{1};
+  id_ = next.fetch_add(1, std::memory_order_relaxed);
 }
 
 namespace {
