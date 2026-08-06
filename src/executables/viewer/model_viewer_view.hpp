@@ -83,7 +83,13 @@ class ModelViewerView : public AppView {
   // the selected tree with dynamic GPU LOD). Call before Initialize() --
   // RebuildScene() reads lod_level_ when generating tree meshes.
   void SetInitialLod(int lod) {
-    lod_level_ = std::clamp(lod, 0, kMultiLodLevel);
+    // Only floored, NOT clamped to kMultiLodLevel: that constant is the TREE's
+    // maximum, and a prop's chain length is derived per model (see
+    // lod_screen_space.hpp). The shipped props top out at Multi == 5, exactly
+    // at the tree's cap with no margin, so a denser prop's Multi level would
+    // silently become its impostor in a headless screenshot. RebuildScene
+    // clamps against the selected generator's own maximum instead.
+    lod_level_ = std::max(lod, 0);
   }
 
  private:
@@ -99,6 +105,7 @@ class ModelViewerView : public AppView {
   //   - `generate`: a single-material mesh entity (the sphere test object).
   //   - `tree`: a catalog tree, built in RebuildScene as TWO materials --
   //     deferred solid bark + forward-opaque alpha-cutout leaf cards.
+  //   - `usdc_path`: an imported prop, shown through its own LOD chain.
   struct MeshGenerator {
     std::string name;
     std::function<GeneratedMesh()> generate;

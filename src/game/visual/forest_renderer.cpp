@@ -64,7 +64,11 @@ void ParallelFor(size_t n, F&& body) {
 // crowns straight through each other -- with nothing in the log but a small,
 // entirely plausible-looking number.
 Aabb SilhouetteBounds(const InstancedLodModel& model) {
-  if (model.levels.empty()) return Aabb::Empty();
+  // Both extents guarded, not just the outer one -- the crown loop below
+  // already checks its submesh index and the asymmetry would be an oversight.
+  if (model.levels.empty() || model.levels[0].size() <= kTreeBarkSubmesh) {
+    return Aabb::Empty();
+  }
   // Submesh 0 is the tree's bark at every level; submesh 1 is its crown. This
   // is the one place the forest still reads the tree producer's submesh layout
   // directly, and it is why kTreeBarkSubmesh/kTreeCrownSubmesh are named in

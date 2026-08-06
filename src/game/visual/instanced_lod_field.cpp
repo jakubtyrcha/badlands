@@ -11,7 +11,6 @@
 
 #include "engine/rendering/gbuffer.hpp"
 #include "engine/rendering/texture_loader.hpp"  // CreateSolidColorTexture
-#include "game/visual/foliage_voxel_config.hpp"  // kFoliageImpostorThresholdPreviewM
 
 namespace badlands {
 
@@ -131,12 +130,21 @@ class SolidTexturePool {
   std::vector<std::array<uint8_t, 4>> colors_;
 };
 
-// The material-cache key namespace for a submesh. Falls back to the shader
-// name so a spec that leaves it unset still gets a stable, non-colliding key.
-uint32_t NamespaceHash(const InstancedMaterialSpec& spec) {
+// The cache key namespace for a submesh. Falls back to the shader name so a
+// spec that leaves it unset still gets a stable key.
+//
+// The SUBMESH INDEX is mixed in because the rest of the key is only
+// (namespace, geometry, pass, bucket) and `bucket` encodes (model, lod) alone.
+// Two submeshes of one model sharing a namespace would otherwise collide, and
+// the second would silently receive the first's resolved instance -- its own
+// textures and uniforms dropped, with nothing logged. The shipping producers
+// happen to use distinct namespaces; nothing enforces that, and adding a
+// producer is the documented extension path.
+uint32_t NamespaceHash(const InstancedMaterialSpec& spec, uint32_t submesh) {
   const std::string& name =
       spec.cache_namespace.empty() ? spec.shader_name : spec.cache_namespace;
-  return entt::hashed_string::value(name.c_str());
+  const uint32_t base = entt::hashed_string::value(name.c_str());
+  return base ^ (submesh * 0x9E3779B9u);
 }
 
 // A submesh's InstanceParams for one bucket: the spec's uniforms and textures,
@@ -213,6 +221,22 @@ std::unique_ptr<InstancedLodField> BuildInstancedLodField(
           mi, models[mi].lod_count(), GpuInstanceRenderer::kMaxLods);
       return nullptr;
     }
+    // The appended impostor cutoff has to keep the chain strictly ascending.
+    // GpuInstanceRenderer only LOGS that and carries on, so a bad pair here
+    // would surface as levels that never draw rather than as a build failure.
+    if (with_impostor) {
+      const float last = models[mi].thresholds.empty()
+                             ? 0.0f
+                             : models[mi].thresholds.back();
+      if (!(models[mi].impostor.threshold_m > last)) {
+        spdlog::error(
+            "BuildInstancedLodField: model {}'s impostor threshold {} does not "
+            "exceed its last mesh cutoff {} -- the level between them could "
+            "never be selected",
+            mi, models[mi].impostor.threshold_m, last);
+        return nullptr;
+      }
+    }
     max_submeshes = std::max(max_submeshes, models[mi].submesh_count());
   }
 
@@ -276,10 +300,9 @@ std::unique_ptr<InstancedLodField> BuildInstancedLodField(
     chain.lod_count = static_cast<uint32_t>(model.lod_count()) + extra_lods;
     std::vector<float> cutoffs = model.thresholds;
     if (with_impostor) {
-      // Height-scaled like every other level: a taller model is legitimately
-      // legible from further away, so its switch distances are further too.
-      cutoffs.push_back(kFoliageImpostorThresholdPreviewM *
-                        model.target_height_m / kFoliagePreviewHeight);
+      // The producer's own number -- see ImpostorBakeSpec::threshold_m for why
+      // this is not derived here.
+      cutoffs.push_back(model.impostor.threshold_m);
     }
     std::copy(cutoffs.begin(), cutoffs.end(), chain.thresholds.begin());
     model_lods.push_back(chain);
@@ -343,7 +366,7 @@ std::unique_ptr<InstancedLodField> BuildInstancedLodField(
         if (!factory) return nullptr;
 
         const InstanceParams params = BuildParams(spec, bucket, solids);
-        const uint32_t ns = NamespaceHash(spec);
+        const uint32_t ns = NamespaceHash(spec, s);
 
         // The cache key already encodes `bucket`, i.e. (model, lod), so every
         // model gets its own instances without a second key dimension.

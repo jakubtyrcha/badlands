@@ -46,16 +46,20 @@ std::string ValidateLodModel(const InstancedLodModel& model) {
         "adjacent pair, i.e. {})",
         model.thresholds.size(), lod_count, lod_count - 1);
   }
-  for (size_t i = 1; i < model.thresholds.size(); ++i) {
-    // Strictly ascending, not merely sorted: GpuInstanceRenderer treats an
-    // equal pair as a malformed chain rather than as a way to retire the level
-    // between them, and says so loudly at construction.
-    if (!(model.thresholds[i] > model.thresholds[i - 1])) {
+  // Seeded at 0 and starting at index 0, matching GpuInstanceRenderer exactly
+  // (see its ctor): it requires strictly ascending AND POSITIVE, so a chain
+  // whose first cutoff is 0 or negative is malformed too. Starting at 1 let
+  // that through, and the renderer only LOGS it -- the failure then surfaces as
+  // levels that never draw rather than as a build error.
+  float prev = 0.0f;
+  for (size_t i = 0; i < model.thresholds.size(); ++i) {
+    if (!(model.thresholds[i] > prev)) {
       return fmt::format(
-          "has non-ascending thresholds at index {} ({} then {}) -- the level "
-          "between an equal pair is unreachable",
-          i, model.thresholds[i - 1], model.thresholds[i]);
+          "has a non-ascending or non-positive threshold at index {} ({} does "
+          "not exceed {}) -- the level below it can never be selected",
+          i, model.thresholds[i], prev);
     }
+    prev = model.thresholds[i];
   }
 
   for (size_t lod = 0; lod < lod_count; ++lod) {

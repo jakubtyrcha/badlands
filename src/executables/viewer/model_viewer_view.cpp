@@ -438,17 +438,10 @@ void ModelViewerView::BuildGenerators() {
     const std::string pack_dir = usdc.parent_path().string();
     generators_.push_back(
         {.name = usdc.parent_path().filename().string(),
-         .generate = [usdc, pack_dir] {
-           ImportedModel imported = LoadProp(usdc, pack_dir);
-           if (imported.mesh.mesh.vertex_count == 0) return GeneratedMesh{};
-           // Same contract as the sphere: rest the mesh on the y=0 floor via a
-           // transform, never by baking the offset into the vertices.
-           const glm::mat4 transform =
-               glm::translate(glm::mat4(1.0f),
-                              glm::vec3(0.0f, -imported.mesh.local_bounds.min.y,
-                                        0.0f));
-           return GeneratedMesh{std::move(imported.mesh), transform};
-         },
+         // No `generate`: a prop is shown through its LOD chain, and
+         // RebuildScene dispatches on `usdc_path`. Keeping a lambda here too
+         // would be a second import path that never runs and quietly drifts
+         // from the live one.
          .usdc_path = usdc.string(),
          .pack_dir = pack_dir});
   }
@@ -720,6 +713,16 @@ void ModelViewerView::RebuildScene() {
             im.factory = impostor_preview_factory_.get();
             im.params = std::move(params);
             AddMeshEntity(scene_, "impostor", MakeImpostorQuad(), im, xf);
+          } else {
+            // Falling through here would reach the framing code below with
+            // world_bounds still Aabb::Empty(), whose max-min is -FLT_MAX --
+            // the radius is then inf, passes the > 0.01f guard, and hands the
+            // orbit a NaN camera. Every other failure path in this function
+            // returns for exactly this reason.
+            spdlog::error(
+                "ModelViewerView::RebuildScene: impostor atlas bind failed; "
+                "showing floor only");
+            return;
           }
         }
       }
@@ -815,6 +818,13 @@ void ModelViewerView::RebuildScene() {
         im.params = std::move(params);
         world_bounds = base_bounds.TransformedBy(xf);
         AddMeshEntity(scene_, "impostor", MakeImpostorQuad(), im, xf);
+      } else {
+        // See the tree path above: an empty world_bounds frames on an infinite
+        // radius rather than merely showing nothing.
+        spdlog::error(
+            "ModelViewerView::RebuildScene: prop impostor atlas bind failed; "
+            "showing floor only");
+        return;
       }
     } else {
       // Multi: the same instanced field the game would use, so the GPU picks

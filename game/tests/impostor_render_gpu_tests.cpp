@@ -180,6 +180,12 @@ InstancedLodModel MakeTreeLikeModel(TexturedMeshResult trunk,
 
   model.impostor.transmission_strength = options.leaves.transmission_strength;
   model.impostor.roughness = kTreeBarkRoughness;
+  // The producer's own formula. Required, not optional: with one mesh level and
+  // no thresholds, a cutoff of 0 would leave the impostor unreachable, and
+  // BuildInstancedLodField now rejects that instead of letting
+  // GpuInstanceRenderer log it and carry on.
+  model.impostor.threshold_m = kFoliageImpostorThresholdPreviewM *
+                               kFixtureHeight / kFoliagePreviewHeight;
   model.impostor.opaque = false;
   model.impostor.submeshes.push_back(ImpostorBakeSubmesh{
       .lod = 0, .submesh = kTreeBarkSubmesh, .tint = kTreeBarkColor,

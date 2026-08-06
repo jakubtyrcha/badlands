@@ -445,8 +445,13 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
     const InstancedLodModel& model = models[m];
 
     // Resolve the spec's (lod, submesh) references into drawables, dropping
-    // any that turned out empty. ValidateLodModel has already range-checked
-    // the indices, so an out-of-range one cannot reach here.
+    // any that turned out empty.
+    //
+    // Range-checked HERE rather than relying on ValidateLodModel: that runs
+    // inside BuildInstancedLodField, and every real caller bakes BEFORE
+    // building the field (the field needs the atlas this produces), so an
+    // out-of-range index would read out of bounds here with nothing having
+    // checked it.
     struct Drawable {
       const ImpostorBakeSubmesh* spec = nullptr;
       const TexturedMeshResult* mesh = nullptr;
@@ -461,6 +466,14 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
     Aabb bounds = Aabb::Empty();
 
     for (const ImpostorBakeSubmesh& sub : model.impostor.submeshes) {
+      if (sub.lod >= model.levels.size() ||
+          sub.submesh >= model.levels[sub.lod].size()) {
+        spdlog::error(
+            "BakeImpostorAtlas: model {} bakes (lod {}, submesh {}), outside "
+            "its {} levels",
+            m, sub.lod, sub.submesh, model.levels.size());
+        return result;
+      }
       const TexturedMeshResult& mesh = model.levels[sub.lod][sub.submesh];
       if (mesh.mesh.vertex_count == 0 || mesh.mesh.indices.empty()) continue;
       bounds = bounds.Union(mesh.local_bounds);

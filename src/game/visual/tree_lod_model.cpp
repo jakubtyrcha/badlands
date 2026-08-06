@@ -129,6 +129,10 @@ InstancedLodModel BuildTreeFieldModel(const TreeOptions& options,
   // change the tree's appearance rather than only its cost.
   out.impostor.transmission_strength = options.leaves.transmission_strength;
   out.impostor.roughness = kTreeBarkRoughness;
+  // Height-scaled like every other level: a taller tree is legitimately legible
+  // from further away, so its switch distances are further too.
+  out.impostor.threshold_m = kFoliageImpostorThresholdPreviewM *
+                             target_height_m / kFoliagePreviewHeight;
   // Leaves transmit, so the thickness pass earns its cost here.
   out.impostor.opaque = false;
   out.impostor.submeshes.push_back(ImpostorBakeSubmesh{

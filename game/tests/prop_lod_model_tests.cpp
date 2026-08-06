@@ -197,6 +197,90 @@ TEST_CASE("every level's tangent frame is finite, unit and orthogonal",
   }
 }
 
+TEST_CASE("a mirrored UV island gets negative handedness", "[prop_lod]") {
+  // Two coplanar triangles with OPPOSITE UV winding -- the shape a modeller
+  // makes by mirroring an island to reuse texture space. The shader rebuilds
+  // B = w * cross(N, T), so the mirrored half needs w = -1; hardcoding +1
+  // inverts its normal map's V response, which the plain "w is +1 or -1" check
+  // below cannot see.
+  ImportedModel model;
+  model.name = "mirrored_uv";
+  auto& mesh = model.mesh.mesh;
+  mesh.geometry_type = GeometryType::kTexturedMesh;
+  const auto emit = [&](float x, float z, float u, float vv) {
+    const float v[kStride] = {x, 0, z, u, vv, 0, 1, 0, 1, 0, 0, 1};
+    mesh.vertices.insert(mesh.vertices.end(), v, v + kStride);
+    mesh.indices.push_back(mesh.vertex_count++);
+  };
+  // Normal winding.
+  emit(0, 0, 0, 0); emit(1, 0, 1, 0); emit(0, 1, 0, 1);
+  // Mirrored in U: same geometry, reversed texture direction.
+  emit(2, 0, 1, 0); emit(3, 0, 0, 0); emit(2, 1, 1, 1);
+  model.mesh.local_bounds = ComputeLocalAabbFromVertices(mesh.vertices, kStride);
+
+  const InstancedLodModel built =
+      BuildPropLodModel(model, PropMaterialTextures{});
+  REQUIRE_FALSE(built.levels.empty());
+  const auto& v = built.levels[0][0].mesh.vertices;
+  const size_t count = v.size() / kStride;
+
+  bool saw_negative = false;
+  for (size_t i = 0; i < count; ++i) {
+    const float w = v[i * kStride + 11];
+    REQUIRE((w == 1.0f || w == -1.0f));
+    if (w < 0.0f) saw_negative = true;
+  }
+  CHECK(saw_negative);
+}
+
+TEST_CASE("a UV seam does not become a shading crease", "[prop_lod]") {
+  // A bent strip whose middle edge is split in UV but shared in POSITION -- a
+  // texture seam across a continuous surface. Normals must be accumulated over
+  // the POSITION group, or each side of the seam averages only its own faces
+  // and the surface creases exactly where the authored normals were smooth.
+  ImportedModel model;
+  model.name = "uv_seam";
+  auto& mesh = model.mesh.mesh;
+  mesh.geometry_type = GeometryType::kTexturedMesh;
+  const auto emit = [&](glm::vec3 p, glm::vec2 t) {
+    const float v[kStride] = {p.x, p.y, p.z, t.x, t.y, 0, 1, 0, 1, 0, 0, 1};
+    mesh.vertices.insert(mesh.vertices.end(), v, v + kStride);
+    mesh.indices.push_back(mesh.vertex_count++);
+  };
+  // Two quads meeting along z=0 at a bend, with u restarting at the seam.
+  const glm::vec3 a0(0, 0, -1), a1(1, 0, -1), b0(0, 0, 0), b1(1, 0, 0);
+  const glm::vec3 c0(0, 0.5f, 1), c1(1, 0.5f, 1);  // bent up
+  emit(a0, {0, 0}); emit(a1, {1, 0}); emit(b0, {0, 1});
+  emit(a1, {1, 0}); emit(b1, {1, 1}); emit(b0, {0, 1});
+  // Same positions b0/b1, DIFFERENT uv -- the seam.
+  emit(b0, {0, 0}); emit(b1, {1, 0}); emit(c0, {0, 1});
+  emit(b1, {1, 0}); emit(c1, {1, 1}); emit(c0, {0, 1});
+  model.mesh.local_bounds = ComputeLocalAabbFromVertices(mesh.vertices, kStride);
+
+  const InstancedLodModel built =
+      BuildPropLodModel(model, PropMaterialTextures{});
+  REQUIRE_FALSE(built.levels.empty());
+  const auto& v = built.levels[0][0].mesh.vertices;
+  const size_t count = v.size() / kStride;
+
+  // Collect the normals at position b0 (0,0,0). Both seam copies survive the
+  // position+UV weld, and they must agree.
+  std::vector<glm::vec3> at_seam;
+  for (size_t i = 0; i < count; ++i) {
+    const glm::vec3 p(v[i * kStride], v[i * kStride + 1], v[i * kStride + 2]);
+    if (glm::length(p - b0) < 1e-5f) {
+      at_seam.emplace_back(v[i * kStride + 5], v[i * kStride + 6],
+                           v[i * kStride + 7]);
+    }
+  }
+  REQUIRE(at_seam.size() >= 2);
+  for (size_t i = 1; i < at_seam.size(); ++i) {
+    CAPTURE(i, at_seam[0].x, at_seam[0].y, at_seam[0].z, at_seam[i].x,
+            at_seam[i].y, at_seam[i].z);
+    CHECK(glm::length(at_seam[i] - at_seam[0]) < 1e-4f);
+  }
+}
+
 TEST_CASE("the impostor spec is opaque and points at real geometry",
           "[prop_lod]") {
   const ImportedModel grid = MakeFlatShadedGrid(24);

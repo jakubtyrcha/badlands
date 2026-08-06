@@ -1,7 +1,9 @@
 #include "game/visual/prop_lod_model.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <map>
 #include <utility>
 
 #include <glm/glm.hpp>
@@ -58,6 +60,18 @@ glm::vec3 AnyPerpendicular(const glm::vec3& n) {
 // inconsistent with its normal flips the normal map's response rather than
 // merely tilting it.
 //
+// NORMALS ARE ACCUMULATED PER POSITION, NOT PER VERTEX, and that distinction is
+// the difference between a smooth surface and one creased along every UV seam.
+// The weld splits on position+UV, so two vertices at one position either side
+// of a seam are distinct entries here; accumulating into them separately gives
+// each only the faces on its own side, and the two normals then disagree
+// exactly where the authored ones were continuous. Grouping by position first
+// and scattering the result back is what keeps the seam invisible.
+//
+// TANGENTS stay per vertex, deliberately: a UV seam is precisely where the
+// parameterization changes, so the two sides legitimately have different
+// tangent frames and merging them would be wrong.
+//
 // Cross products are NOT normalized before accumulation: their magnitude is
 // twice the triangle's area, which is exactly the weighting a smooth normal
 // wants, so a sliver contributes proportionally to how much surface it is.
@@ -66,8 +80,23 @@ void RegenerateNormalsAndTangents(std::vector<float>& vertices,
   const size_t count = vertices.size() / kStride;
   if (count == 0 || indices.size() < 3) return;
 
-  std::vector<glm::vec3> normals(count, glm::vec3(0.0f));
+  // Position -> group. Bitwise on the three position floats, which is the same
+  // identity meshopt's remap uses, so this grouping and the weld agree.
+  using PosKey = std::array<float, 3>;
+  std::map<PosKey, uint32_t> groups;
+  std::vector<uint32_t> group_of(count, 0);
+  for (size_t i = 0; i < count; ++i) {
+    const PosKey key{vertices[i * kStride + kPosOffset],
+                     vertices[i * kStride + kPosOffset + 1],
+                     vertices[i * kStride + kPosOffset + 2]};
+    const auto [it, inserted] =
+        groups.emplace(key, static_cast<uint32_t>(groups.size()));
+    group_of[i] = it->second;
+  }
+
+  std::vector<glm::vec3> group_normals(groups.size(), glm::vec3(0.0f));
   std::vector<glm::vec3> tangents(count, glm::vec3(0.0f));
+  std::vector<glm::vec3> bitangents(count, glm::vec3(0.0f));
 
   for (size_t t = 0; t + 2 < indices.size(); t += 3) {
     const uint32_t i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
@@ -80,9 +109,9 @@ void RegenerateNormalsAndTangents(std::vector<float>& vertices,
     const glm::vec3 e2 = p2 - p0;
 
     const glm::vec3 face = glm::cross(e1, e2);
-    normals[i0] += face;
-    normals[i1] += face;
-    normals[i2] += face;
+    group_normals[group_of[i0]] += face;
+    group_normals[group_of[i1]] += face;
+    group_normals[group_of[i2]] += face;
 
     const glm::vec2 uv0(vertices[i0 * kStride + kUvOffset],
                         vertices[i0 * kStride + kUvOffset + 1]);
@@ -98,13 +127,16 @@ void RegenerateNormalsAndTangents(std::vector<float>& vertices,
     // neighbours rather than injecting an infinity that poisons them.
     if (std::abs(det) < 1e-12f) continue;
     const glm::vec3 tangent = (e1 * d2.y - e2 * d1.y) / det;
-    tangents[i0] += tangent;
-    tangents[i1] += tangent;
-    tangents[i2] += tangent;
+    // The BITANGENT is accumulated too, purely to recover handedness below.
+    const glm::vec3 bitangent = (e2 * d1.x - e1 * d2.x) / det;
+    for (uint32_t i : {i0, i1, i2}) {
+      tangents[i] += tangent;
+      bitangents[i] += bitangent;
+    }
   }
 
   for (size_t i = 0; i < count; ++i) {
-    glm::vec3 n = normals[i];
+    glm::vec3 n = group_normals[group_of[i]];
     const float n_len = glm::length(n);
     // An unreferenced or fully-degenerate vertex keeps a usable frame rather
     // than a zero one: a zero normal reads as an unlit black surface with
@@ -115,15 +147,21 @@ void RegenerateNormalsAndTangents(std::vector<float>& vertices,
     // own orthogonalization expects to receive.
     glm::vec3 t = tangents[i] - n * glm::dot(n, tangents[i]);
     const float t_len = glm::length(t);
-    t = t_len > 1e-12f ? t / t_len : AnyPerpendicular(n);
+    const bool have_tangent = t_len > 1e-12f;
+    t = have_tangent ? t / t_len : AnyPerpendicular(n);
 
     WriteVec3(vertices, i, kNormalOffset, n);
     WriteVec3(vertices, i, kTangentOffset, t);
-    // Handedness. The weld can merge across a mirrored seam, so this is
-    // recomputed rather than carried over; +1 is the right answer whenever the
-    // accumulated tangent survived, and the fallback frame is right-handed by
-    // construction (cross(axis, n) then n x t).
-    vertices[i * kStride + kTangentOffset + 3] = 1.0f;
+    // Handedness, DERIVED rather than assumed +1. A mirrored UV island has its
+    // bitangent opposite to cross(N, T), and the shader reconstructs
+    // B = w * cross(N, T) -- so writing +1 there inverts the normal map's V
+    // response across exactly the islands a modeller mirrored to save texture
+    // space. usd_mesh_adapter goes to some trouble to carry authored handedness
+    // through (and to flip it for a mirroring prim transform); throwing it away
+    // here and then hardcoding a sign would undo that.
+    const bool flipped =
+        have_tangent && glm::dot(glm::cross(n, t), bitangents[i]) < 0.0f;
+    vertices[i * kStride + kTangentOffset + 3] = flipped ? -1.0f : 1.0f;
   }
 }
 
@@ -247,6 +285,11 @@ InstancedLodModel BuildPropLodModel(const ImportedModel& imported,
 
   // --- The impostor. ---
   out.impostor.roughness = options.impostor_roughness;
+  // The ladder's own cutoff, which its stop rule already guaranteed exceeds the
+  // last mesh threshold. Taking it from here rather than letting the field
+  // builder re-derive one is what keeps props independent of the foliage
+  // constants -- see ImpostorBakeSpec::threshold_m.
+  out.impostor.threshold_m = ladder.impostor_threshold_m;
   out.impostor.transmission_strength = 0.0f;
   // A prop has no transmitted term, so the thickness pass would render every
   // view and read back an R16Float target to fill a channel the runtime then

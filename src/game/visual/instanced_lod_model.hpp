@@ -97,6 +97,19 @@ struct ImpostorBakeSpec {
   // model's ARM cannot follow it to this level. One value per model is the
   // honest approximation at impostor range.
   float roughness = 0.9f;
+  // Where this impostor takes over, in WORLD METRES, at native scale.
+  //
+  // Supplied by the producer rather than derived by the field builder, and that
+  // is a layering fix rather than a convenience: the builder used to compute it
+  // from kFoliageImpostorThresholdPreviewM, so the "neutral" layer included
+  // foliage_voxel_config.hpp and every prop's cutoff silently depended on a
+  // constant documented as independently screenshot-tunable. Retuning the
+  // foliage number would have pushed props' cutoffs under their own last mesh
+  // threshold, and GpuInstanceRenderer only LOGS a non-ascending chain -- the
+  // field still builds and those levels simply never draw.
+  //
+  // Must exceed the model's last entry in `thresholds`.
+  float threshold_m = 0.0f;
   // Skips the thickness pass entirely. A model with no transmitted term gets
   // nothing from it but pays a full render plus an R16Float readback per view
   // for a channel that would stay zero -- and `transmission_strength` 0 means
