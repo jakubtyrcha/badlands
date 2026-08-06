@@ -265,12 +265,28 @@ endif()
 # skip: editors/shapeshifter is an Xcode project, and an .app target has no
 # equivalent of "configured out". Failing here with the command to run beats
 # failing later at a link error that reads like a code fault.
+#
+# That makes this the point where the repo's platform contract becomes
+# load-bearing, so it is stated rather than implied: macOS on Apple silicon is
+# the only host this configures on today. Dawn is fetched for macOS/Metal only
+# (cmake/FetchDawn.cmake), the RHI ships a Metal backend and a Null one, and
+# scripts/fetch_slang.sh pins a single macOS-arm64 asset. A non-Apple host used
+# to get as far as configuring the CPU-only test targets; it no longer does, and
+# the message says why instead of sending someone to a script that will refuse.
 set(BADLANDS_SLANG_ROOT "${CMAKE_SOURCE_DIR}/third_party/toolchains/slang"
     CACHE PATH "Prebuilt Slang SDK root")
 if(NOT EXISTS "${BADLANDS_SLANG_ROOT}/include/slang.h")
-    message(FATAL_ERROR
-        "Slang SDK not found at ${BADLANDS_SLANG_ROOT}.\n"
-        "  Run: scripts/fetch_slang.sh")
+    if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+        message(FATAL_ERROR
+            "Slang SDK not found at ${BADLANDS_SLANG_ROOT}.\n"
+            "  Run: scripts/fetch_slang.sh")
+    else()
+        message(FATAL_ERROR
+            "This project builds on macOS / Apple silicon only.\n"
+            "  Host is ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}, and the pinned Slang SDK\n"
+            "  (scripts/fetch_slang.sh) has no asset for it. Dawn is fetched for\n"
+            "  macOS/Metal only too -- porting is a real piece of work, not a flag.")
+    endif()
 endif()
 message(STATUS "badlands_slang: ${BADLANDS_SLANG_ROOT}")
 add_library(badlands_slang STATIC src/engine/slang/slang_compiler.cpp)
