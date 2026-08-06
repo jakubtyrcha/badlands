@@ -54,10 +54,10 @@ Camera make_camera(float aspect) {
 
 // --- SdfNode layout -----------------------------------------------------------
 
-TEST_CASE("SdfNode is 32 bytes (compile-time; static_assert in sdf_scene.h covers both "
+TEST_CASE("SdfNode is 48 bytes (compile-time; static_assert in sdf_scene.h covers both "
           "the C++ and MSL sides -- this test just confirms the C++ side is actually "
           "exercised by this binary)") {
-    CHECK(sizeof(SdfNode) == 32u);
+    CHECK(sizeof(SdfNode) == 48u);
 }
 
 // --- pack_scene: exact packing ---------------------------------------------
@@ -117,6 +117,35 @@ TEST_CASE("pack_scene: 3-node document (cube add / sphere subtract / cube add, "
         check_float3_approx(packed[2].half_extents_op.xyz, simd_float3{1.5f, 1.5f, 1.5f});
         CHECK(packed[2].half_extents_op.w == doctest::Approx(0.0f));
     }
+    SUBCASE("every node's inv_rotation is identity: none of them set a rotation") {
+        for (const SdfNode& sn : packed) {
+            check_float3_approx(sn.inv_rotation.xyz, simd_float3{0.0f, 0.0f, 0.0f});
+            CHECK(sn.inv_rotation.w == doctest::Approx(1.0f));
+        }
+    }
+}
+
+TEST_CASE("pack_scene: inv_rotation is the CONJUGATE of the node's rotation, not a copy") {
+    // The direction matters and is invisible at identity, which is why it gets
+    // its own case: packing the rotation itself instead of its inverse would
+    // spin every rotated node the wrong way, and every other test in this file
+    // leaves rotation at identity where the two are indistinguishable.
+    SceneDocument doc;
+    Node n;
+    n.id = 1;
+    n.shape = Shape::Cube;
+    n.scale = {1.0f, 1.0f, 1.0f};
+    n.rotation = simd_quaternion(0.5f, simd_normalize(simd_float3{1.0f, 2.0f, 3.0f}));
+    doc.add(n);
+
+    const std::vector<SdfNode> packed = pack_scene(doc);
+    REQUIRE(packed.size() == 1u);
+
+    const simd_float4 expected = simd_conjugate(n.rotation).vector;
+    check_float3_approx(packed[0].inv_rotation.xyz, expected.xyz);
+    CHECK(packed[0].inv_rotation.w == doctest::Approx(expected.w));
+    // And it really is the opposite handedness from the rotation itself.
+    CHECK(packed[0].inv_rotation.x == doctest::Approx(-n.rotation.vector.x));
 }
 
 // --- pack_scene: no cap (fka >128-node cap) ---------------------------------

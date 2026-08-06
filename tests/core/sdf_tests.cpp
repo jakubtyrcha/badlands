@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <cmath>
 #include <vector>
 
 #include <shapeshifter/ShapeshifterCore.h>
@@ -202,6 +203,111 @@ TEST_CASE("evaluate_scene_sdf: Add sphere then Subtract box carves the box out; 
         REQUIRE(d.has_value());
         CHECK(*d == doctest::Approx(-1.0f));
     }
+}
+
+// --- evaluate_scene_sdf: node rotation -----------------------------------------
+//
+// These go through evaluate_scene_sdf rather than sdf_eval_node directly, on
+// purpose: that path runs pack_scene too, so a rotation packed the wrong way
+// round (the rotation instead of its conjugate) fails here as well. Every
+// expectation below is paired with the value a rotation-BLIND implementation
+// would return, so the case is self-evidently discriminating rather than merely
+// passing -- one of them even differs in sign.
+//
+// Derivation extends this file's shared numpy snippet with a Rodrigues rotation
+// and applies it INVERSELY to the world offset, which is what evaluating in the
+// node's own frame means:
+//
+//   def rot(axis, ang, v):
+//       a = np.array(axis, float); a /= np.linalg.norm(a); v = np.array(v, float)
+//       c, s = np.cos(ang), np.sin(ang)
+//       return v*c + np.cross(a, v)*s + a*np.dot(a, v)*(1-c)
+//   q = rot(axis, -angle, p - position);  sd_box(q, half)   # or sd_ellipsoid(q, radii)
+
+TEST_CASE("evaluate_scene_sdf: a rotated box is measured in its own frame") {
+    // Cube at the origin, scale (2, 1, 6) -> half = (1, 0.5, 3), turned 45 deg
+    // about +Y. The long axis is local z, so after the turn it runs diagonally
+    // through world xz -- which is why an unrotated evaluation is wrong by a
+    // lot at every probe below rather than only near the corners.
+    SceneDocument doc;
+    Node box;
+    box.id = 1;
+    box.shape = Shape::Cube;
+    box.op = Op::Add;
+    box.position = {0.0f, 0.0f, 0.0f};
+    box.scale = {2.0f, 1.0f, 6.0f};
+    box.rotation = simd_quaternion(static_cast<float>(M_PI_4), simd_float3{0.0f, 1.0f, 0.0f});
+    doc.add(box);
+
+    struct Case { simd_float3 p; float expected; float blind; };
+    const Case cases[] = {
+        // q = (1.41421356, 0, 1.41421356)
+        {{2.0f, 0.0f, 0.0f}, 0.414213562f, 1.0f},
+        // q = (-1.41421356, 0, 1.41421356) -- blind evaluation puts this INSIDE
+        {{0.0f, 0.0f, 2.0f}, 0.414213562f, -0.5f},
+        // q = (1.76776695, 0.25, 0.35355339)
+        {{1.5f, 0.25f, -1.0f}, 0.767766953f, 0.5f},
+    };
+    for (const Case& c : cases) {
+        INFO("probe: (" << c.p.x << ", " << c.p.y << ", " << c.p.z << ")");
+        const auto d = evaluate_scene_sdf(doc, c.p);
+        REQUIRE(d.has_value());
+        CHECK(*d == doctest::Approx(c.expected));
+        // The guard that makes this case worth having: the rotated answer is
+        // nowhere near the unrotated one.
+        CHECK(*d != doctest::Approx(c.blind));
+    }
+}
+
+TEST_CASE("evaluate_scene_sdf: a rotated ellipsoid is measured in its own frame") {
+    // Oblique axis and non-uniform radii together, so neither the axis nor the
+    // shape can accidentally be symmetric about the rotation.
+    SceneDocument doc;
+    Node ellipsoid;
+    ellipsoid.id = 1;
+    ellipsoid.shape = Shape::Sphere;
+    ellipsoid.op = Op::Add;
+    ellipsoid.position = {0.0f, 0.0f, 0.0f};
+    ellipsoid.scale = {1.0f, 3.0f, 2.0f}; // radii = (0.5, 1.5, 1.0)
+    ellipsoid.rotation =
+        simd_quaternion(0.7f, simd_normalize(simd_float3{1.0f, 2.0f, 3.0f}));
+    doc.add(ellipsoid);
+
+    struct Case { simd_float3 p; float expected; float blind; };
+    const Case cases[] = {
+        {{1.0f, 0.5f, -0.75f}, 0.797427161f, 0.616266097f},
+        {{-0.3f, 1.2f, 0.4f}, 0.038813708f, 0.060438534f},
+    };
+    for (const Case& c : cases) {
+        INFO("probe: (" << c.p.x << ", " << c.p.y << ", " << c.p.z << ")");
+        const auto d = evaluate_scene_sdf(doc, c.p);
+        REQUIRE(d.has_value());
+        CHECK(*d == doctest::Approx(c.expected));
+        CHECK(*d != doctest::Approx(c.blind));
+    }
+}
+
+TEST_CASE("evaluate_scene_sdf: identity rotation is exactly the unrotated result") {
+    // The regression guard for every pinned expectation in this file: Node's
+    // default rotation is identity, so if the new rotation term were wrong in a
+    // way that survives at identity, everything above would have moved too.
+    SceneDocument rotated;
+    SceneDocument plain;
+    Node n;
+    n.id = 1;
+    n.shape = Shape::Cube;
+    n.position = {0.5f, -1.0f, 2.0f};
+    n.scale = {2.0f, 4.0f, 6.0f};
+    plain.add(n);
+    n.rotation = simd_quaternion(0.0f, simd_float3{0.0f, 1.0f, 0.0f}); // explicit identity
+    rotated.add(n);
+
+    const simd_float3 probe = {1.25f, 0.5f, 3.0f};
+    const auto a = evaluate_scene_sdf(plain, probe);
+    const auto b = evaluate_scene_sdf(rotated, probe);
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    CHECK(*a == *b); // bitwise, not Approx: identity must be a true no-op
 }
 
 // --- evaluate_scene_sdf: no node cap (wave-B fix 2) ----------------------------
