@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <cmath>
 #include <string>
 
 #include <shapeshifter/ShapeshifterCore.h>
@@ -304,4 +305,98 @@ TEST_CASE("Editor: deleteSelectedNode during an active drag leaves the editor in
     const simd_float3 before = to_simd(editor->nodePosition(respawned.node_id));
     editor->updateDrag(300.0f, 300.0f); // still no active drag for this node: no-op
     check_float3_approx(to_simd(editor->nodePosition(respawned.node_id)), before);
+}
+
+// --- the shape parameter ------------------------------------------------------
+
+TEST_CASE("SceneDocument: every shape auto-names from its own counter") {
+    // The counters became a table when the shape list went from two to eight;
+    // this pins that each shape still counts independently, and that the names
+    // match the enum's order rather than being off by one.
+    SceneDocument doc;
+    struct Case { Shape shape; const char* expected; };
+    const Case cases[] = {
+        {Shape::Cube, "Cube 1"},         {Shape::Sphere, "Sphere 1"},
+        {Shape::Cone, "Cone 1"},         {Shape::Capsule, "Capsule 1"},
+        {Shape::Octahedron, "Octahedron 1"}, {Shape::Pyramid, "Pyramid 1"},
+        {Shape::Prism, "Prism 1"},       {Shape::Vesica, "Vesica 1"},
+        {Shape::Cone, "Cone 2"},         {Shape::Cube, "Cube 2"},
+    };
+    for (const Case& c : cases) {
+        const int32_t id = doc.spawn_unsnapped(c.shape, Op::Add, simd_float3{0, 0, 0});
+        const Node* node = doc.find(id);
+        REQUIRE(node != nullptr);
+        CHECK(node->name == std::string(c.expected));
+    }
+}
+
+TEST_CASE("a freshly spawned shape gets its spec's default parameter") {
+    // Defaults are chosen so a shape looks like its own name on arrival: a cone
+    // is sharp, a capsule is fully round, a prism is a hexagon.
+    SceneDocument doc;
+    struct Case { Shape shape; float expected; };
+    const Case cases[] = {
+        {Shape::Cone, 0.0f}, {Shape::Capsule, 1.0f}, {Shape::Pyramid, 0.0f},
+        {Shape::Prism, 6.0f}, {Shape::Cube, 0.0f}, {Shape::Vesica, 0.0f},
+    };
+    for (const Case& c : cases) {
+        const int32_t id = doc.spawn_unsnapped(c.shape, Op::Add, simd_float3{0, 0, 0});
+        const Node* node = doc.find(id);
+        REQUIRE(node != nullptr);
+        CHECK(node->shape_param == doctest::Approx(c.expected));
+    }
+}
+
+TEST_CASE("snap_shape_param clamps first, then snaps to the spec's step") {
+    const ShapeParamSpec cone = shape_param_spec(Shape::Cone);
+    REQUIRE(cone.has_param);
+    CHECK(snap_shape_param(cone, 0.47f) == doctest::Approx(0.45f));
+    CHECK(snap_shape_param(cone, 0.475f) == doctest::Approx(0.5f));   // ties round up
+    CHECK(snap_shape_param(cone, -3.0f) == doctest::Approx(0.0f));    // clamped to the low end
+    CHECK(snap_shape_param(cone, 99.0f) == doctest::Approx(1.0f));    // and to the high end
+    // NaN cannot be allowed through: it would reach params.x, and one NaN in
+    // the fold takes the whole scene's surface with it.
+    CHECK(snap_shape_param(cone, std::nanf("")) == doctest::Approx(0.0f));
+
+    const ShapeParamSpec prism = shape_param_spec(Shape::Prism);
+    REQUIRE(prism.has_param);
+    CHECK(prism.integral);
+    CHECK(snap_shape_param(prism, 6.4f) == doctest::Approx(6.0f));
+    CHECK(snap_shape_param(prism, 6.6f) == doctest::Approx(7.0f));
+    CHECK(snap_shape_param(prism, 0.0f) == doctest::Approx(3.0f));    // below the minimum
+    CHECK(snap_shape_param(prism, 100.0f) == doctest::Approx(12.0f));
+
+    // A shape with no parameter snaps everything to zero, so nothing downstream
+    // has to ask whether the value means anything.
+    const ShapeParamSpec vesica = shape_param_spec(Shape::Vesica);
+    CHECK_FALSE(vesica.has_param);
+    CHECK(snap_shape_param(vesica, 0.7f) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Editor::setNodeShapeParam is the only way in, and it snaps") {
+    Editor* editor = Editor::create();
+    REQUIRE(editor != nullptr);
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+
+    const SpawnResult cone = editor->spawn(Shape::Cone, Op::Add, 400.0f, 250.0f);
+    REQUIRE(cone.node_id != kInvalidNode);
+    CHECK(editor->nodeShape(cone.node_id) == Shape::Cone);
+    CHECK(editor->nodeShapeParam(cone.node_id) == doctest::Approx(0.0f));
+
+    editor->setNodeShapeParam(cone.node_id, 0.63f);
+    CHECK(editor->nodeShapeParam(cone.node_id) == doctest::Approx(0.65f));
+    editor->setNodeShapeParam(cone.node_id, 5.0f);
+    CHECK(editor->nodeShapeParam(cone.node_id) == doctest::Approx(1.0f));
+
+    const ShapeParamSpec spec = editor->nodeShapeParamSpec(cone.node_id);
+    CHECK(spec.has_param);
+    CHECK(spec.min_value == doctest::Approx(0.0f));
+    CHECK(spec.max_value == doctest::Approx(1.0f));
+    CHECK(spec.step == doctest::Approx(0.05f));
+    CHECK_FALSE(spec.integral);
+
+    // An unknown id reports no parameter rather than a default-looking one:
+    // "there is no dial here" is the only question the caller is asking.
+    CHECK_FALSE(editor->nodeShapeParamSpec(kInvalidNode).has_param);
+    editor->setNodeShapeParam(kInvalidNode, 0.5f); // no-op, must not crash
 }
