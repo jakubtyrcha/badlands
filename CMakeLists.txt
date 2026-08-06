@@ -926,6 +926,10 @@ add_executable(badlands_tree_tests
     game/tests/foliage_cell_cull_tests.cpp
     # Bounding box -> spacing circle, likewise header-only and GPU-free.
     game/tests/crown_bounds_tests.cpp
+    # The screen-space LOD ladder: pure math over a model's size and triangle
+    # count, so its structural guarantees (ascending cutoffs, falling budgets,
+    # room for the impostor) are pinned with no device.
+    game/tests/lod_screen_space_tests.cpp
     # The impostor's hemi-octahedral view parameterization: shared by the baker
     # and the material, so it is pinned where neither needs a device.
     game/tests/octahedral_tests.cpp
