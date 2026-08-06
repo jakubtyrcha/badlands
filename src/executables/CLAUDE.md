@@ -40,6 +40,16 @@ sink, which is the whole of the graph's sink abstraction.
 The headless run **verifies its own pixels and exits non-zero on mismatch** — exit status
 is the assertion, since there is no test framework around it. Writing a PNG and exiting 0
 would pass just as well against a graph that recorded no pass at all.
+
+- **`--scene clear|lines|grid`, and each scene carries its OWN assertion.** "Every texel is
+  the clear colour" and "a segment covers these texels" are different claims; a run that
+  could not say which it checked would be checking neither.
+- **The debug UI is Dear ImGui through `imgui_impl_rhi`, not `imgui_impl_metal`.** One
+  backend serves Metal, DX12 and Null, and it keeps the RHI seam sealed — a native encoder
+  handed out of the RHI is a compile error on purpose. ImGui is added to the graph LAST, so
+  the debug UI always sits on top.
+- **ImGui gets first refusal on input** (`io.WantCaptureMouse`/`WantCaptureKeyboard`) via
+  the shell's `OnEvent` hook, so a drag inside a panel does not also move the camera.
 Skipped by the build when the Slang SDK is absent (`tools/slang_probe/README.md`).
 ```sh
 ./build/badlands_rhi_lab --out /tmp/lab.png              # materials + lighting

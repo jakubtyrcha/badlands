@@ -30,7 +30,11 @@
 #include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rhi/rhi_device.hpp"
 #include "engine/slang/slang_compiler.hpp"
+#include "engine/ui/imgui_impl_rhi.hpp"
 #include "executables/object_viewer/line_pass.hpp"
+
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
 
 using namespace badlands;
 using namespace badlands::rhi;
@@ -214,7 +218,10 @@ bool BuildGraph(RenderGraph& graph, ITexture* sink, const Options& opt,
 // The Slang compiler, created only when a scene needs a shader. The clear scene
 // does not, so a run without a Slang SDK still proves the graph.
 std::unique_ptr<slang::SlangCompiler> MakeCompiler() {
-  const std::vector<std::string> paths = {"shaders/slang/object_viewer"};
+  // Both roots: the line shader lives with the viewer, the ImGui shader with
+  // the other UI shaders, and each resolves its own imports.
+  const std::vector<std::string> paths = {"shaders/slang/object_viewer",
+                                          "shaders/slang/ui"};
   return slang::CreateSlangCompiler(paths);
 }
 
@@ -432,11 +439,43 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   auto lines = LinePass::Create(device, *compiler, Format::BGRA8Unorm);
   if (!lines) return 1;
 
+  // The DEBUG UI surface, distinct from any in-world game UI. imgui_impl_sdl3
+  // is the platform half (already vendored); imgui_impl_rhi is the renderer.
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGui::StyleColorsDark();
+  if (!ImGui_ImplSDL3_InitForMetal(shell->Window())) {
+    spdlog::error("object_viewer: ImGui_ImplSDL3_InitForMetal failed");
+    return 1;
+  }
+  if (!ImGui_ImplRHI_Init({.device = &device,
+                           .compiler = compiler.get(),
+                           .target_format = Format::BGRA8Unorm,
+                           .framebuffer_width = shell->Width(),
+                           .framebuffer_height = shell->Height()})) {
+    return 1;
+  }
+
   Camera cam = CameraFor(Scene::Grid);
   spdlog::info("object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
 
   rhi_app::AppShellCallbacks cb;
   cb.OnEvent = [&](const SDL_Event& e) {
+    ImGui_ImplSDL3_ProcessEvent(&e);
+    // ImGui gets first refusal on input it is using. Without this the camera
+    // also acts on a drag inside a panel, which is the two-surfaces confusion
+    // the debug/game UI split exists to avoid.
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse &&
+        (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_WHEEL ||
+         e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+         e.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
+      return true;
+    }
+    if (io.WantCaptureKeyboard && (e.type == SDL_EVENT_KEY_DOWN ||
+                                   e.type == SDL_EVENT_KEY_UP)) {
+      return true;
+    }
     if (e.type == SDL_EVENT_MOUSE_WHEEL) {
       cam.extent =
           std::clamp(cam.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
@@ -445,6 +484,7 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     return false;
   };
   cb.OnUpdate = [&](const rhi_app::FrameInfo& f) {
+    if (ImGui::GetIO().WantCaptureKeyboard) return;
     const float step = cam.extent * std::min(f.dt, 0.1f);
     if (f.keys[SDL_SCANCODE_W]) cam.position.z -= step;
     if (f.keys[SDL_SCANCODE_S]) cam.position.z += step;
@@ -456,6 +496,7 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   cb.OnFrameBegin = [&](uint64_t frame_index) {
     // After BeginFrame, so a SKIPPED frame still recycles its slot.
     lines->BeginFrame(frame_index);
+    ImGui_ImplRHI_NewFrame(frame_index);
   };
   cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo& f) {
     const float aspect = float(f.width) / float(std::max(1u, f.height));
@@ -467,8 +508,30 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     // Cheap at this size, and the alternative -- caching a graph keyed on a
     // resource that changes every frame -- is how a stale view gets rendered
     // into.
+    ImGui_ImplRHI_SetFramebufferSize(f.width, f.height);
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+    ImGui::Begin("object_viewer");
+    ImGui::Text("%u x %u  |  %.1f fps", f.width, f.height,
+                f.dt > 0.0f ? 1.0f / f.dt : 0.0f);
+    ImGui::Text("camera %.1f %.1f %.1f", cam.position.x, cam.position.y,
+                cam.position.z);
+    ImGui::SliderFloat("zoom", &cam.extent, 1.0f, 60.0f);
+    ImGui::End();
+    ImGui::Render();
+
     RenderGraph graph(device);
-    if (!BuildGraph(graph, target->GetTexture(), opt, lines.get())) return false;
+    auto out = graph.ImportTexture(target->GetTexture(),
+                                   ResourceState::Undefined, "sink");
+    if (!out.IsValid()) return false;
+    graph.AddRasterPass("clear")
+        .ColorTarget(out, LoadOp::Clear, StoreOp::Store, opt.clear)
+        .Execute([](const RasterContext&) {});
+    lines->AddToGraph(graph, out, LoadOp::Load);
+    // ImGui LAST, so the debug UI always sits on top -- the same ordering rule
+    // the Dawn path had, now expressed as pass order rather than call order.
+    ImGui_ImplRHI_AddPass(ImGui::GetDrawData(), graph, out);
+    if (!graph.Compile()) return false;
     auto encoder = device.CreateCommandEncoder("frame");
     graph.Execute(*encoder);
     encoder->Finish();
@@ -477,6 +540,9 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   };
 
   const auto stats = shell->Run(cb, opt.max_frames);
+  ImGui_ImplRHI_Shutdown();
+  ImGui_ImplSDL3_Shutdown();
+  ImGui::DestroyContext();
   if (stats.aborted) return 1;
   if (opt.max_frames > 0 && stats.frames_presented == 0) {
     spdlog::error("object_viewer: ran {} frames and presented none",

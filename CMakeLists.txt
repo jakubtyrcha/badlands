@@ -1484,7 +1484,10 @@ if(APPLE)
         src/engine/rendering/debug_line_buffer.cpp
         src/engine/rendering/debug_line_expand.cpp)
     target_link_libraries(badlands_object_viewer PRIVATE
-        badlands_render_graph badlands_rhi_app badlands_slang assets)
+        badlands_render_graph badlands_rhi_app badlands_slang
+        badlands_imgui_rhi assets)
+    target_sources(badlands_object_viewer PRIVATE
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp)
     target_include_directories(badlands_object_viewer PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party/glm
@@ -1531,6 +1534,39 @@ if(APPLE)
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(object_viewer_windowed PROPERTIES
                          LABELS display TIMEOUT 120)
+endif()
+
+# badlands_imgui_rhi: the Dear ImGui renderer backend against the RHI, replacing
+# imgui_impl_wgpu_custom. Needs Slang (its shader) and the graph (it adds a
+# pass); the imgui SOURCES come from the same FetchContent the engine uses.
+if(BADLANDS_HAVE_SLANG AND APPLE)
+    add_library(badlands_imgui_rhi STATIC
+        src/engine/ui/imgui_impl_rhi.cpp
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    )
+    target_link_libraries(badlands_imgui_rhi PUBLIC
+        badlands_render_graph badlands_slang)
+    target_include_directories(badlands_imgui_rhi PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends)
+
+    # Pixels, not eyeballs: a fixed-coordinate draw list plus a readback turns
+    # "the UI looks right" into numbers a regression can fail.
+    add_executable(badlands_imgui_rhi_tests
+        src/engine/tests/imgui_rhi_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp)
+    target_include_directories(badlands_imgui_rhi_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/src/engine/tests)
+    target_link_libraries(badlands_imgui_rhi_tests PRIVATE badlands_imgui_rhi)
+    target_link_options(badlands_imgui_rhi_tests PRIVATE "-Wl,-ld_new")
+    add_test(NAME badlands_imgui_rhi_tests COMMAND badlands_imgui_rhi_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(badlands_imgui_rhi_tests PROPERTIES
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
 endif()
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against
