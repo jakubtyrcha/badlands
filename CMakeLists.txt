@@ -1994,9 +1994,14 @@ add_executable(shapeshifter_core_tests
     ${SHAPESHIFTER_DIR}/tests/core/picking_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/renderer_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/scene_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/sdf_scene_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/sdf_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/test_main.cpp
 )
+# Keep this list in sync with `ls editors/shapeshifter/tests/core/*.cpp`. It is
+# spelled out rather than globbed to match the rest of this file, which means a
+# new test file is silently not built until it is added here -- sdf_scene_tests
+# was dropped exactly that way when the list was first transcribed.
 target_include_directories(shapeshifter_core_tests PRIVATE
     ${SHAPESHIFTER_DIR}/tests/vendor)
 target_compile_options(shapeshifter_core_tests PRIVATE
