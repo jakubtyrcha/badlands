@@ -107,10 +107,12 @@ ripple into the other.
   steers at the same spill cell, so shedding all the way there put the thickest
   deposit at the OUTLET. 4 steps is right: 2 is too short to deposit near the
   inlet, none reproduces the defect.
-- **Rebuild cadence must be in the converged regime.** `lake_interval` sets how
-  stale the hypsometry is, so a coarse value keeps a silted-up basin looking
-  alive. Intervals 5/10/25 agree (0% wet); 50 and 100 report 2.66%/2.25%. The
-  old default of 50 was in the lagging regime.
+- **Rebuild cadence must be in the converged regime.** HISTORICAL: this
+  finding was about `lake_interval`, deleted with the per-lake budget it
+  served -- standing water is now labeled every step and relaxed toward its
+  fixed-terrain equilibrium, so there is no rebuild cadence to be stale. The
+  lesson (a lagging hypsometry keeps silted basins looking alive) is why the
+  replacement recomputes rather than caches.
 
 - **The substrate is a two-layer one: bedrock + soil.** The surface is
   `bedrock + soil`; erosion takes soil at full rate, then bites bedrock at
@@ -124,13 +126,27 @@ ripple into the other.
   (`bedrock = height - initial_soil_m`), so step 0 is bit-identical to a
   no-substrate run and the A/B stays honest.
 
+- **The cascade is the simulation, not the erosion.** A sampling profile puts
+  62% of runtime in `Cascade` and 17% in its `std::sort` alone. Returning before
+  the sort when no neighbour exceeds the repose angle is bit-identical (the
+  settle loop would `continue` on every neighbour) and worth **1.20x** — which
+  is exactly the sort's share recovered.
+  - Do NOT also filter the gather to `d > max_diff`. `std::sort` is unstable, so
+    dropping elements can permute EQUAL drops differently, and equal drops are
+    the normal case on symmetric fixtures. It breaks bit-identity exactly where
+    the tests are most symmetric, for a few percent more.
+- **`-march=native` buys nothing here** — 22.0 s vs 21.7 s at 512^2/1200 steps,
+  inside the noise. An earlier 1.71x reading was taken on a loaded machine and
+  did not survive a best-of-N re-measure. Left off the build line deliberately.
+
 ## Verification
 
-`protogen --test` — 23 assertions on 32–64 cell grids at the production 16 m
-cell size, under a second. Every bug above has one. Absolute numbers check
-against analytic answers: mass conserves to 0.16%, discharge matches
-`runoff × area`, lake volume equals basin capacity, lake surfaces level to
-0.0000 m.
+`protogen --test` — ~57 assertions on 32–256 cell grids at (mostly) the
+production 16 m cell size. Every bug above has one, and the two-phase water
+suite (W1–W10) checks the interleaved relaxation against the exact
+fill-spill-merge oracle: fixed-terrain convergence, clock and resolution
+invariance, both conversion directions (river→lake, lake→river), re-emission
+rate conservation, the water ledger, and breach transients.
 
 **The single most productive diagnostic in this work: a real logic change that
 produces bit-identical output.** It caught two masked parameters (the lobe-length
