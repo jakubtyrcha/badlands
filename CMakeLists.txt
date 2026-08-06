@@ -224,6 +224,18 @@ target_compile_definitions(badlands_rhi PUBLIC
 # fails the depth test, which is exactly how rhi_lab first rendered pure sky.
 target_compile_definitions(badlands_rhi PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
+# badlands_rhi_app: the windowed render loop on the RHI, shared by every app
+# that opens a window. Separate from badlands_rhi so the RHI itself never links
+# SDL — the RHI runs headless, and a swapchain is only one of its consumers.
+# APPLE-gated because acquiring a native surface is per-platform; the loop above
+# it is not, so DX12 adds an arm rather than a second shell.
+if(APPLE)
+    add_library(badlands_rhi_app STATIC src/engine/app/rhi_app_shell.cpp)
+    target_link_libraries(badlands_rhi_app PUBLIC badlands_rhi SDL3::SDL3)
+    target_include_directories(badlands_rhi_app PUBLIC ${CMAKE_SOURCE_DIR}/src)
+endif()
+
+
 if(APPLE)
     # ARC only for the Metal backend — the rest of the project is MRR, and a
     # backend this size is far safer with automatic lifetimes.
@@ -1374,7 +1386,7 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
         src/core/parallel.cpp
     )
     target_link_libraries(badlands_rhi_lab PRIVATE
-        badlands_slang assets meshoptimizer SDL3::SDL3)
+        badlands_slang badlands_rhi_app assets meshoptimizer SDL3::SDL3)
     target_include_directories(badlands_rhi_lab PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/src
@@ -1393,13 +1405,13 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
     # on the render targets, which are not rebuilt at zero size -- is invisible
     # to a windowed test unless you happen to minimize and restore to exactly
     # the same size, so it gets a deterministic test of its own.
-    add_executable(badlands_rhi_lab_tests
-        src/executables/rhi_lab/surface_size_tests.cpp
+    add_executable(badlands_rhi_app_tests
+        src/engine/tests/surface_size_tests.cpp
         third_party/catch2/extras/catch_amalgamated.cpp)
-    target_include_directories(badlands_rhi_lab_tests PRIVATE
-        ${CMAKE_SOURCE_DIR}
+    target_include_directories(badlands_rhi_app_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party/catch2/extras)
-    add_test(NAME badlands_rhi_lab_tests COMMAND badlands_rhi_lab_tests
+    add_test(NAME badlands_rhi_app_tests COMMAND badlands_rhi_app_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     # Windowed resize, end to end: open a window, ask for a different size,

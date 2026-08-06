@@ -15,7 +15,7 @@
 
 #include <cstdint>
 
-namespace badlands::rhi_lab {
+namespace badlands::rhi_app {
 
 struct ResizeAction {
   // Tell the swapchain about the new size.
@@ -47,4 +47,4 @@ class SurfaceSizeTracker {
   uint32_t applied_h_ = 0;
 };
 
-}  // namespace badlands::rhi_lab
+}  // namespace badlands::rhi_app
