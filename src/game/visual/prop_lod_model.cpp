@@ -218,15 +218,29 @@ InstancedLodModel BuildPropLodModel(const ImportedModel& imported,
   for (size_t i = 0; i < ladder.triangle_budgets.size(); ++i) {
     const float ratio = static_cast<float>(ladder.triangle_budgets[i]) /
                         static_cast<float>(source_tris);
-    // Edge collapse while the target is within its reach, vertex clustering
-    // past that. Clustering ignores topology, which is what lets it hit an
-    // aggressive target on a mesh of separate shells, at the cost of a blobby
-    // silhouette and no attribute fidelity -- the right trade only once the
-    // model is small on screen.
-    const SimplifiedMesh level =
-        i < options.last_edge_collapse_level
-            ? SimplifyMesh(base_vertices, kStride, base_indices, ratio)
-            : SimplifyMeshSloppy(base_vertices, kStride, base_indices, ratio);
+    // Try error-bounded edge collapse first: it preserves the silhouette and
+    // keeps every surviving vertex's exact attributes. Fall back to vertex
+    // clustering only when collapse MISSES -- it cannot merge disconnected
+    // components, so a model that is several separate pieces floors well above
+    // its target no matter how low the ratio goes.
+    //
+    // Measured rather than assumed per level, because which one wins is a
+    // property of the individual model: boulder_01 collapses to its target
+    // exactly, while the mace and the chest floor around 4x it. Clustering has
+    // no attribute fidelity, so using it where collapse would have done is a
+    // visible UV smear bought for nothing.
+    SimplifiedMesh level =
+        SimplifyMesh(base_vertices, kStride, base_indices, ratio);
+    const size_t budget = static_cast<size_t>(ladder.triangle_budgets[i]);
+    const size_t achieved = level.indices.size() / 3;
+    if (achieved > static_cast<size_t>(static_cast<float>(budget) *
+                                       options.sloppy_fallback_ratio)) {
+      spdlog::debug(
+          "prop lod '{}': level {} edge collapse floored at {} tris against a "
+          "{} budget -- re-cutting with vertex clustering",
+          imported.name, i + 1, achieved, budget);
+      level = SimplifyMeshSloppy(base_vertices, kStride, base_indices, ratio);
+    }
     out.levels.push_back(
         {FinalizeLevel(level.vertices, level.indices, level.vertex_count)});
   }

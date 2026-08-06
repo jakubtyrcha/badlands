@@ -14,6 +14,7 @@ are touching:
 |---|---|
 | EnTT world sim — clocks, commands, brains, combat | `game/CLAUDE.md` |
 | Renderer, GPU, materials, scene graph | `src/engine/CLAUDE.md` |
+| Render/scene layer — geometry, LOD chains, impostors | `src/game/CLAUDE.md` |
 | WESL/WGSL shaders | `shaders/CLAUDE.md` |
 | Rust feature-libs and the C ABIs | `src/crates/CLAUDE.md` |
 | Apps, `AppView`s, AI-sandbox modes, CLI flags | `src/executables/CLAUDE.md` |

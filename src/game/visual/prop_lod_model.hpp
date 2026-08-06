@@ -42,12 +42,19 @@ struct PropMaterialTextures {
 
 struct PropLodOptions {
   LodLadderOptions ladder;
-  // Levels at or below this index use error-bounded edge collapse
-  // (SimplifyMesh), which preserves the silhouette; coarser ones use vertex
-  // clustering (SimplifyMeshSloppy), which ignores topology and so actually
-  // reaches an aggressive target on a mesh of separate shells. Same policy
-  // split, for the same reason, as the tree's bark.
-  size_t last_edge_collapse_level = 2;
+  // How far past its budget error-bounded edge collapse may land before the
+  // level is re-cut with vertex clustering instead.
+  //
+  // MEASURED, not a fixed level index, because the two simplifiers each win on
+  // different props and a fixed cutoff is wrong in both directions. Post-weld,
+  // boulder_01's edge collapse hits its target exactly (0.015 asked, 0.015
+  // achieved) -- clustering there would smear its UVs for nothing, since it
+  // carries no attribute fidelity at all. The mace and the treasure chest are
+  // genuinely several disconnected pieces (head and handle, lid and body), and
+  // edge collapse cannot merge components, so they floor around 4x their target
+  // and only clustering reaches it. See game/tests/prop_lod_report_tests.cpp
+  // for the numbers.
+  float sloppy_fallback_ratio = 1.5f;
   // Impostor surface roughness -- the atlas has no roughness channel, so a
   // textured prop's ARM cannot follow it to that level.
   float impostor_roughness = 0.7f;

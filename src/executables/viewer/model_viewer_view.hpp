@@ -35,6 +35,7 @@
 #include "game/geometry/tree_options.hpp"
 #include "game/visual/impostor_baker.hpp"       // ImpostorBakeResult, BakeImpostorAtlas
 #include "game/visual/instanced_lod_field.hpp"  // InstancedLodField, BuildInstancedLodField
+#include "game/visual/prop_lod_model.hpp"       // BuildPropLodModel
 #include "game/visual/tree_lod_model.hpp"       // BuildTreeFieldModel
 
 namespace badlands {
@@ -111,9 +112,23 @@ class ModelViewerView : public AppView {
     // a bad manifest would stop the viewer from starting at all, sphere and
     // trees included.
     std::string pack_dir;
+    // The prop's source file, kept so the LOD path can re-import it without
+    // going through `generate` (which returns one merged, already-transformed
+    // mesh rather than the chain). Empty for non-prop entries.
+    std::string usdc_path;
   };
 
   void BuildGenerators();
+  // The imported prop's LOD chain for `generator_index_`, built on first use
+  // and cached: parsing a .usdc plus welding and decimating it is ~a second,
+  // and RebuildScene runs on every LOD radio click. Null for a non-prop
+  // generator or if the import produced nothing.
+  const InstancedLodModel* EnsurePropModel();
+  // Highest valid lod_level_ for the current generator. Per-generator because
+  // a prop's chain length is derived from its own size and triangle count, so
+  // unlike the tree's fixed ladder it is not a constant -- see
+  // game/visual/lod_screen_space.hpp.
+  int MaxLodLevel();
   // Re-derives env_'s sky/SH/sun into scene_context_ and mirrors it into scene_.
   void ApplyEnvironment();
   // Fresh graph: re-mirror lighting, add the gray floor at y=0, then add the
@@ -157,6 +172,9 @@ class ModelViewerView : public AppView {
   int lod_level_ = 0;
   int bark_tris_ = 0;
   int leaf_tris_ = 0;
+  // Triangle count of the prop level currently shown; 0 in Multi mode, where
+  // the GPU picks the level per instance.
+  int prop_tris_ = 0;
 
   DeferredMaterial checker_mat_;  // UV-checker debug material for the sphere
   DeferredMaterial bark_mat_;     // Solid bark color for catalog tree meshes
@@ -201,6 +219,19 @@ class ModelViewerView : public AppView {
   // Exposed so a caller can skip building the InstancedLodModel that
   // EnsureImpostorPreview would otherwise be handed and discard.
   bool ImpostorPreviewIsCurrent() const;
+
+  // Builds the non-instanced foliage_impostor factory on first use. Shared by
+  // the tree and prop single-model impostor previews -- the shader reads the
+  // atlas, which neither model type varies.
+  bool EnsureImpostorPreviewFactory();
+
+  // See EnsurePropModel. `generator` is the index it was built for, so a
+  // generator change invalidates it without a separate dirty flag.
+  struct PropPreview {
+    int generator = -1;
+    InstancedLodModel model;
+  };
+  PropPreview prop_preview_;
 
   // GPU pipeline generator, stashed from Initialize()'s RenderContext --
   // BuildInstancedLodField (called from RebuildScene, not Initialize, since it needs

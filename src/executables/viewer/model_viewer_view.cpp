@@ -59,6 +59,10 @@ constexpr int kMultiLodLevel = ModelViewerView::kMultiLodLevel;
 // single-tree levels now walk the SAME chain, L0..L3.
 constexpr int kGridN = 16;
 constexpr float kGridSpacing = 8.0f;
+// Props are metre-scale rather than the tree preview's 8 m, so the tree's
+// spacing would scatter them across a field of empty floor. Tight enough that
+// the grid reads as a group, wide enough that neighbours do not intersect.
+constexpr float kPropGridSpacing = 2.5f;
 // Golden angle: a constant per-instance yaw increment that avoids any
 // repeating row/column alignment across the grid.
 const float kYawIncrement = glm::radians(137.508f);
@@ -158,20 +162,58 @@ std::vector<std::filesystem::path> DiscoverPropModels() {
 // given model resolves to the SAME material pack, one draw is both correct and
 // what a viewer entry should be -- splitting a chest into five separately
 // selectable pieces would be worse, not more faithful.
-TexturedMeshResult MergeImportedMeshes(std::vector<ImportedModel>& models) {
-  TexturedMeshResult out;
-  out.mesh.geometry_type = GeometryType::kTexturedMesh;
+ImportedModel MergeImportedMeshes(std::vector<ImportedModel>& models) {
+  ImportedModel out;
+  out.mesh.mesh.geometry_type = GeometryType::kTexturedMesh;
+  if (!models.empty()) {
+    out.name = models[0].name;
+    out.pack_dir = models[0].pack_dir;
+  }
 
   for (auto& model : models) {
     const auto& src = model.mesh.mesh;
-    const uint32_t base = out.mesh.vertex_count;
-    out.mesh.vertices.insert(out.mesh.vertices.end(), src.vertices.begin(),
-                             src.vertices.end());
-    for (uint32_t index : src.indices) out.mesh.indices.push_back(base + index);
-    out.mesh.vertex_count += src.vertex_count;
+    const uint32_t base = out.mesh.mesh.vertex_count;
+    out.mesh.mesh.vertices.insert(out.mesh.mesh.vertices.end(),
+                                  src.vertices.begin(), src.vertices.end());
+    for (uint32_t index : src.indices) {
+      out.mesh.mesh.indices.push_back(base + index);
+    }
+    out.mesh.mesh.vertex_count += src.vertex_count;
   }
-  out.mesh.dirty = true;
-  out.local_bounds = ComputeLocalAabb(out.mesh);
+  out.mesh.mesh.dirty = true;
+  out.mesh.local_bounds = ComputeLocalAabb(out.mesh.mesh);
+  return out;
+}
+
+// Loads and merges one prop's .usdc. Separate from the generator lambda so the
+// LOD path can call it too without going through GeneratedMesh.
+ImportedModel LoadProp(const std::filesystem::path& usdc,
+                       const std::string& pack_dir) {
+  UsdSceneData scene = LoadUsdScene(usdc.string());
+  UsdMaterialBinding binding;
+  // Every shipped prop is single-material, so the default answers for all of
+  // its prims; by_material stays empty until one is not.
+  binding.default_pack_dir = pack_dir;
+  std::vector<ImportedModel> models = BuildImportedModels(scene, binding);
+  if (models.empty()) {
+    spdlog::error("ModelViewerView: '{}' imported no meshes", usdc.string());
+    return ImportedModel{};
+  }
+  return MergeImportedMeshes(models);
+}
+
+// The pack's three maps, pulled out of the material MaterialLibrary already
+// built. Reusing them rather than re-decoding is the point: LoadPack owns the
+// mip chains and the DX->GL normal flip, and the slot names here are
+// normalmapped's, which instanced_gbuffer now shares (material_requirements.cpp).
+PropMaterialTextures PropTexturesFrom(const DeferredMaterial& material) {
+  PropMaterialTextures out;
+  for (const DefaultTextureView& t : material.params.texture_overrides) {
+    if (t.sampler && !out.sampler) out.sampler = t.sampler;
+    if (t.param_name == "albedo") out.albedo = t.view;
+    else if (t.param_name == "normal") out.normal = t.view;
+    else if (t.param_name == "arm") out.arm = t.view;
+  }
   return out;
 }
 
@@ -189,6 +231,50 @@ bool ModelViewerView::EnsureImpostorPreview(
   impostor_preview_ = BakeImpostorAtlas(device_, queue_, *pipeline_gen_, models);
   impostor_preview_generator_ = generator_index_;
   return impostor_preview_.ok;
+}
+
+bool ModelViewerView::EnsureImpostorPreviewFactory() {
+  if (impostor_preview_factory_) return true;
+  FactoryDescriptor desc;
+  desc.shader_name = "foliage_impostor";
+  desc.shader_path = "game/foliage_impostor";
+  desc.supported_pass_types = {MaterialPassType::kDeferred};
+  desc.supported_geometry_types = {GeometryType::kTexturedMesh};
+  desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
+                        GBuffer::kMaterialFormat};
+  desc.depth_format = GBuffer::kDepthFormat;
+  desc.cull_mode = wgpu::CullMode::None;
+  desc.casts_shadow = true;
+  impostor_preview_factory_ =
+      BuildMaterialInstanceFactory(desc, device_, queue_, pipeline_gen_);
+  return impostor_preview_factory_ != nullptr;
+}
+
+const InstancedLodModel* ModelViewerView::EnsurePropModel() {
+  const MeshGenerator& gen = generators_[generator_index_];
+  if (gen.usdc_path.empty()) return nullptr;
+  if (prop_preview_.generator == generator_index_) {
+    return prop_preview_.model.levels.empty() ? nullptr : &prop_preview_.model;
+  }
+
+  const ImportedModel imported = LoadProp(gen.usdc_path, gen.pack_dir);
+  prop_preview_.generator = generator_index_;
+  prop_preview_.model = InstancedLodModel{};
+  if (imported.mesh.mesh.vertex_count == 0) return nullptr;
+
+  prop_preview_.model =
+      BuildPropLodModel(imported, PropTexturesFrom(matlib_.Get(gen.pack_dir)));
+  return prop_preview_.model.levels.empty() ? nullptr : &prop_preview_.model;
+}
+
+int ModelViewerView::MaxLodLevel() {
+  if (generators_.empty()) return 0;
+  const MeshGenerator& gen = generators_[generator_index_];
+  if (gen.tree) return kMultiLodLevel;
+  const InstancedLodModel* prop = EnsurePropModel();
+  if (!prop) return 0;
+  // levels 0..N-1, then the impostor, then Multi.
+  return static_cast<int>(prop->levels.size()) + 1;
 }
 
 bool ModelViewerView::Initialize(const RenderContext& ctx) {
@@ -353,25 +439,17 @@ void ModelViewerView::BuildGenerators() {
     generators_.push_back(
         {.name = usdc.parent_path().filename().string(),
          .generate = [usdc, pack_dir] {
-           UsdSceneData scene = LoadUsdScene(usdc.string());
-           UsdMaterialBinding binding;
-           // Every shipped prop is single-material, so the default answers for
-           // all of its prims; by_material stays empty until one is not.
-           binding.default_pack_dir = pack_dir;
-
-           std::vector<ImportedModel> models = BuildImportedModels(scene, binding);
-           if (models.empty()) {
-             spdlog::error("ModelViewerView: '{}' imported no meshes",
-                           usdc.string());
-             return GeneratedMesh{};
-           }
-           TexturedMeshResult mesh = MergeImportedMeshes(models);
+           ImportedModel imported = LoadProp(usdc, pack_dir);
+           if (imported.mesh.mesh.vertex_count == 0) return GeneratedMesh{};
            // Same contract as the sphere: rest the mesh on the y=0 floor via a
            // transform, never by baking the offset into the vertices.
-           const glm::mat4 transform = glm::translate(
-               glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
-           return GeneratedMesh{std::move(mesh), transform};
+           const glm::mat4 transform =
+               glm::translate(glm::mat4(1.0f),
+                              glm::vec3(0.0f, -imported.mesh.local_bounds.min.y,
+                                        0.0f));
+           return GeneratedMesh{std::move(imported.mesh), transform};
          },
+         .usdc_path = usdc.string(),
          .pack_dir = pack_dir});
   }
 }
@@ -627,21 +705,7 @@ void ModelViewerView::RebuildScene() {
         have_impostor = EnsureImpostorPreview(one);
       }
       if (have_impostor) {
-        if (!impostor_preview_factory_) {
-          FactoryDescriptor desc;
-          desc.shader_name = "foliage_impostor";
-          desc.shader_path = "game/foliage_impostor";
-          desc.supported_pass_types = {MaterialPassType::kDeferred};
-          desc.supported_geometry_types = {GeometryType::kTexturedMesh};
-          desc.color_formats = {GBuffer::kNormalsFormat, GBuffer::kAlbedoFormat,
-                                GBuffer::kMaterialFormat};
-          desc.depth_format = GBuffer::kDepthFormat;
-          desc.cull_mode = wgpu::CullMode::None;
-          desc.casts_shadow = true;
-          impostor_preview_factory_ = BuildMaterialInstanceFactory(
-              desc, device_, queue_, pipeline_gen_);
-        }
-        if (impostor_preview_factory_) {
+        if (EnsureImpostorPreviewFactory()) {
           InstanceParams params;
           if (BindImpostorAtlas(impostor_preview_.atlas, params)) {
             const ImpostorPlacement& place = impostor_preview_.placement[0];
@@ -700,15 +764,111 @@ void ModelViewerView::RebuildScene() {
             xf);
       }
     }
+  } else if (!gen.usdc_path.empty()) {
+    // An imported prop, shown at one of its own LOD levels. Unlike the tree's
+    // fixed ladder, the level COUNT is per model (derived from its size and
+    // triangle count -- see lod_screen_space.hpp), so the switch is clamped
+    // against this generator's own maximum rather than a constant.
+    const InstancedLodModel* prop = EnsurePropModel();
+    if (!prop) {
+      spdlog::error("ModelViewerView::RebuildScene: prop '{}' produced no LODs",
+                    gen.name);
+      return;  // floor-only scene
+    }
+    const int levels = static_cast<int>(prop->levels.size());
+    const int lod = std::clamp(lod_level_, 0, levels + 1);
+    // Materials resolve here, not in BuildGenerators: the texture load (and any
+    // manifest failure) stays confined to the entry actually being shown.
+    const DeferredMaterial material = matlib_.Get(gen.pack_dir);
+
+    // Rest on the floor from LOD 0's bounds for EVERY level, so switching level
+    // does not also shift the model -- a decimated silhouette has a slightly
+    // different min.y, and re-deriving per level would read as the prop
+    // sinking.
+    const Aabb& base_bounds = prop->levels[0][0].local_bounds;
+    const glm::mat4 xf = glm::translate(
+        glm::mat4(1.0f), glm::vec3(0.0f, -base_bounds.min.y, 0.0f));
+
+    if (lod < levels) {
+      TexturedMeshResult mesh = prop->levels[lod][0];
+      world_bounds = mesh.local_bounds.TransformedBy(xf);
+      prop_tris_ = static_cast<int>(mesh.mesh.indices.size() / 3);
+      AddMeshEntity(scene_, "mesh", std::move(mesh), material, xf);
+    } else if (lod == levels) {
+      prop_tris_ = 2;
+      const std::array<InstancedLodModel, 1> one = {*prop};
+      if (!EnsureImpostorPreview(one)) {
+        spdlog::error("ModelViewerView::RebuildScene: prop impostor bake failed");
+        return;
+      }
+      if (!EnsureImpostorPreviewFactory()) return;
+      InstanceParams params;
+      if (BindImpostorAtlas(impostor_preview_.atlas, params)) {
+        const ImpostorPlacement& place = impostor_preview_.placement[0];
+        params.uniform_overrides["placement"] = MaterialParameterValue(
+            glm::vec4(place.local_center, place.radius));
+        params.uniform_overrides["params"] = MaterialParameterValue(
+            glm::vec4(prop->impostor.roughness, 0.0f, kImpostorAlphaCutoff,
+                      0.0f));
+        DeferredMaterial im;
+        im.factory = impostor_preview_factory_.get();
+        im.params = std::move(params);
+        world_bounds = base_bounds.TransformedBy(xf);
+        AddMeshEntity(scene_, "impostor", MakeImpostorQuad(), im, xf);
+      }
+    } else {
+      // Multi: the same instanced field the game would use, so the GPU picks
+      // the level rather than the radio button.
+      const uint32_t capacity = static_cast<uint32_t>(kGridN * kGridN);
+      const std::array<InstancedLodModel, 1> one = {*prop};
+      InstancedLodImpostor impostor_slot;
+      if (EnsureImpostorPreview(one)) {
+        impostor_slot.atlas = &impostor_preview_.atlas;
+        impostor_slot.placement = impostor_preview_.placement;
+      }
+      std::unique_ptr<InstancedLodField> field = BuildInstancedLodField(
+          device_, queue_, *pipeline_gen_, one, capacity, impostor_slot);
+      if (!field) {
+        spdlog::error(
+            "ModelViewerView::RebuildScene: prop field build failed; showing "
+            "floor only");
+        return;
+      }
+      prop_tris_ = 0;
+      const Aabb combined = field->model_bounds[0].Combined();
+      std::vector<GpuInstanceRenderer::InstanceInput> instances;
+      instances.reserve(capacity);
+      const float half_extent = (kGridN - 1) * kPropGridSpacing * 0.5f;
+      for (int gz = 0; gz < kGridN; ++gz) {
+        for (int gx = 0; gx < kGridN; ++gx) {
+          const int i = gz * kGridN + gx;
+          const glm::mat4 transform =
+              glm::translate(glm::mat4(1.0f),
+                             glm::vec3(gx * kPropGridSpacing - half_extent, 0.0f,
+                                       gz * kPropGridSpacing - half_extent)) *
+              glm::rotate(glm::mat4(1.0f), i * kYawIncrement,
+                          glm::vec3(0.0f, 1.0f, 0.0f)) *
+              xf;
+          const Aabb b = combined.TransformedBy(transform);
+          world_bounds = world_bounds.Union(b);
+          GpuInstanceRenderer::InstanceInput input;
+          input.transform = transform;
+          input.bounds_sphere =
+              glm::vec4(b.Center(), glm::length(b.max - b.Center()));
+          input.model_info = glm::uvec4(0u);
+          instances.push_back(input);
+        }
+      }
+      field->field->UploadInstances(instances);
+      tree_field_ = std::move(field);
+      field_ptr_ = tree_field_->field.get();
+      scene_context_.instanced_fields = &field_ptr_;
+      scene_context_.instanced_field_count = 1;
+    }
   } else if (gen.generate) {
     GeneratedMesh generated = gen.generate();
     world_bounds = generated.mesh.local_bounds.TransformedBy(generated.transform);
-    // Imported props carry a pack directory and resolve their material here, so
-    // the texture load (and any manifest failure) is confined to the entry
-    // actually being shown -- see MeshGenerator::pack_dir.
-    const DeferredMaterial material =
-        gen.pack_dir.empty() ? gen.material : matlib_.Get(gen.pack_dir);
-    AddMeshEntity(scene_, "mesh", std::move(generated.mesh), material,
+    AddMeshEntity(scene_, "mesh", std::move(generated.mesh), gen.material,
                   generated.transform);
   } else {
     // A MeshGenerator must set exactly one of `tree`/`generate`. Guard the
@@ -794,11 +954,37 @@ void ModelViewerView::DrawUI() {
       ImGui::Text("bark: %d   leaves: %d   total: %d tris", bark_tris_,
                   leaf_tris_, bark_tris_ + leaf_tris_);
     }
+  } else if (!generators_[generator_index_].usdc_path.empty()) {
+    // A prop's chain length is DERIVED (see lod_screen_space.hpp), so the list
+    // is built from the model rather than from a constant the way the tree's
+    // is. Levels 0..N-1 are meshes, then the impostor, then Multi.
+    const InstancedLodModel* prop = EnsurePropModel();
+    if (prop) {
+      const int levels = static_cast<int>(prop->levels.size());
+      ImGui::Separator();
+      ImGui::TextUnformatted("LOD");
+      for (int level = 0; level < levels; ++level) {
+        const std::string label =
+            level == 0 ? "Source"
+                       : "Tri L" + std::to_string(level) + "  (" +
+                             std::to_string(static_cast<int>(
+                                 prop->thresholds[level - 1])) +
+                             " m)";
+        ImGui::RadioButton(label.c_str(), &lod, level);
+      }
+      ImGui::RadioButton("Impostor", &lod, levels);
+      ImGui::RadioButton("Multi", &lod, levels + 1);
+      if (lod < levels) ImGui::Text("%d tris", prop_tris_);
+    }
   }
   ImGui::End();
 
   if (selected != generator_index_) {
     generator_index_ = selected;
+    // Chain lengths differ per generator (a prop's is derived from its own
+    // size and triangle count), so a level valid for the previous entry may
+    // not exist here.
+    lod_level_ = std::clamp(lod_level_, 0, MaxLodLevel());
     RebuildScene();
   } else if (lod != lod_level_) {
     lod_level_ = lod;

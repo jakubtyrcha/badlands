@@ -88,7 +88,7 @@ size_t TriangleCount(const badlands::SimplifiedMesh& mesh) {
 
 TEST_CASE("how far the shipped props actually decimate", "[proplod][.report]") {
   constexpr size_t kStride = badlands::kTexturedMeshFloatsPerVertex;
-  constexpr std::array<float, 3> kRatios{0.5f, 0.2f, 0.05f};
+  constexpr std::array<float, 4> kRatios{0.5f, 0.2f, 0.05f, 0.015f};
 
   for (const auto& path : ShippedModels()) {
     const badlands::UsdSceneData scene =
@@ -119,6 +119,12 @@ TEST_CASE("how far the shipped props actually decimate", "[proplod][.report]") {
           static_cast<double>(mesh.vertex_count) /
               static_cast<double>(std::max<size_t>(pos_weld, 1)));
 
+      // The producer's own weld (position+UV), so the second block below
+      // reports what BuildPropLodModel actually decimates rather than what the
+      // raw import would.
+      const badlands::SimplifiedMesh welded = badlands::WeldMeshByPrefix(
+          mesh.vertices, kStride, mesh.indices, 5);
+
       for (float ratio : kRatios) {
         const size_t target = static_cast<size_t>(
             static_cast<double>(source_tris) * static_cast<double>(ratio));
@@ -126,17 +132,28 @@ TEST_CASE("how far the shipped props actually decimate", "[proplod][.report]") {
             badlands::SimplifyMesh(mesh.vertices, kStride, mesh.indices, ratio);
         const badlands::SimplifiedMesh sloppy = badlands::SimplifyMeshSloppy(
             mesh.vertices, kStride, mesh.indices, ratio);
+        // Post-weld edge collapse: whether the producer needs SimplifyMeshSloppy
+        // for its coarse tail at all. Bark does, because a tree is ~200
+        // disconnected tubes and edge collapse cannot merge components; a
+        // welded prop is one connected surface, and clustering costs real UV
+        // fidelity (it has none), so using it where collapse would do is a
+        // visible smear for nothing.
+        const badlands::SimplifiedMesh weld_collapse = badlands::SimplifyMesh(
+            welded.vertices, kStride, welded.indices, ratio);
 
         // "achieved" is the ratio actually reached; a value far above `ratio`
         // is the floor this report exists to detect.
         std::printf(
             "      ratio %.2f  target=%7zu   collapse=%7zu (%.3f)   "
-            "sloppy=%7zu (%.3f)\n",
+            "sloppy=%7zu (%.3f)   WELDED collapse=%7zu (%.3f)\n",
             static_cast<double>(ratio), target, TriangleCount(collapse),
             static_cast<double>(TriangleCount(collapse)) /
                 static_cast<double>(source_tris),
             TriangleCount(sloppy),
             static_cast<double>(TriangleCount(sloppy)) /
+                static_cast<double>(source_tris),
+            TriangleCount(weld_collapse),
+            static_cast<double>(TriangleCount(weld_collapse)) /
                 static_cast<double>(source_tris));
       }
     }
