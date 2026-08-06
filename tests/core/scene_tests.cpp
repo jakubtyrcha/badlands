@@ -400,3 +400,52 @@ TEST_CASE("Editor::setNodeShapeParam is the only way in, and it snaps") {
     CHECK_FALSE(editor->nodeShapeParamSpec(kInvalidNode).has_param);
     editor->setNodeShapeParam(kInvalidNode, 0.5f); // no-op, must not crash
 }
+
+TEST_CASE("Editor: every shape survives the whole app-facing round trip") {
+    // The path the app layer actually walks, per shape: spawn -> select ->
+    // turn the dial -> pick it again. Each step is covered in isolation
+    // elsewhere; what this adds is that they compose, which is the thing a
+    // per-shape bug would break without failing any single-purpose test.
+    struct Case { const char* label; Shape shape; float dial; };
+    const Case cases[] = {
+        {"cube", Shape::Cube, 0.0f},              {"sphere", Shape::Sphere, 0.0f},
+        {"cone", Shape::Cone, 0.55f},             {"capsule", Shape::Capsule, 0.3f},
+        {"octahedron", Shape::Octahedron, 0.0f},  {"pyramid", Shape::Pyramid, 0.7f},
+        {"prism", Shape::Prism, 9.0f},            {"vesica", Shape::Vesica, 0.0f},
+    };
+
+    for (const Case& c : cases) {
+        INFO("case: " << std::string(c.label));
+        Editor* editor = Editor::create();
+        REQUIRE(editor != nullptr);
+        editor->setViewportSize(800.0f, 500.0f, 2.0f);
+
+        // Spawn at the viewport centre: nothing is there yet, so this is the
+        // unsnapped path, landing the node on the centre ray.
+        const SpawnResult spawned = editor->spawn(c.shape, Op::Add, 400.0f, 250.0f);
+        REQUIRE(spawned.node_id != kInvalidNode);
+        CHECK_FALSE(spawned.snapped);
+        CHECK(editor->selectedNode() == spawned.node_id);
+        CHECK(editor->nodeShape(spawned.node_id) == c.shape);
+
+        editor->setNodeShapeParam(spawned.node_id, c.dial);
+        const ShapeParamSpec spec = editor->nodeShapeParamSpec(spawned.node_id);
+        if (spec.has_param) {
+            CHECK(editor->nodeShapeParam(spawned.node_id)
+                  == doctest::Approx(snap_shape_param(spec, c.dial)));
+        }
+
+        // And it can be picked back off the screen it was placed on -- the
+        // round trip that fails if a shape's SDF and its spawn placement
+        // disagree about where the surface is.
+        const PickResult picked = editor->pick(400.0f, 250.0f);
+        CHECK(picked.node_id == spawned.node_id);
+
+        // A second shape snapped onto the first: spawn_snapped centres the new
+        // node on the surface point picking just reported, so this exercises
+        // the pick -> spawn handoff for every shape as the placement target.
+        const SpawnResult attached = editor->spawn(Shape::Sphere, Op::Add, 400.0f, 250.0f);
+        REQUIRE(attached.node_id != kInvalidNode);
+        CHECK(attached.snapped);
+    }
+}
