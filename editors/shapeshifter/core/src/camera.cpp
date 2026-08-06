@@ -22,13 +22,30 @@ Basis look_at_basis(const Camera& camera) {
     return {f, s, u};
 }
 
+// REVERSED-Z: the near plane maps to depth 1 and the far plane to 0, the
+// opposite of the usual Metal [0,1] mapping.
+//
+// Two reasons, one of them binding. It is an invariant of the engine's RHI
+// (src/engine/rhi) -- depth clears to 0 and opaque geometry compares
+// GreaterEqual there -- and this renderer is being ported onto it, so the
+// convention is not ours to choose. It is also simply better: float32 packs its
+// exponent near zero, and reversing puts that precision at the far plane where
+// 1/z has thrown it away, instead of at the near plane where 1/z already
+// concentrates it.
+//
+// Derivation, so the columns are checkable rather than magic. With clip.w = -z
+// (the -1 in column 2), we need clip.z = a*z + b such that z = -near maps to
+// depth 1 and z = -far maps to 0:
+//     (-a*near + b) / near = 1  and  (-a*far + b) / far = 0
+//     => b = a*far, and a*(far - near) = near
+//     => a = near / (far - near), b = near*far / (far - near)
 simd_float4x4 perspective_matrix(float fov_y_radians, float aspect, float near, float far) {
     const float h = 1.0f / std::tan(fov_y_radians * 0.5f);
     simd_float4x4 m;
     m.columns[0] = (simd_float4){h / aspect, 0.0f, 0.0f, 0.0f};
     m.columns[1] = (simd_float4){0.0f, h, 0.0f, 0.0f};
-    m.columns[2] = (simd_float4){0.0f, 0.0f, -far / (far - near), -1.0f};
-    m.columns[3] = (simd_float4){0.0f, 0.0f, -near * far / (far - near), 0.0f};
+    m.columns[2] = (simd_float4){0.0f, 0.0f, near / (far - near), -1.0f};
+    m.columns[3] = (simd_float4){0.0f, 0.0f, near * far / (far - near), 0.0f};
     return m;
 }
 

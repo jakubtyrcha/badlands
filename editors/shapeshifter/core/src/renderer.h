@@ -115,9 +115,10 @@ private:
     NS::SharedPtr<MTL::RenderPipelineState> mesh_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> raymarch_pso_;
     NS::SharedPtr<MTL::RenderPipelineState> ground_pso_;        // ground plate; PREMULTIPLIED blend
-    NS::SharedPtr<MTL::DepthStencilState> depth_test_;         // Less, write ON -- the mesh, the raymarch pass
+    // Reversed-Z (near->1, far->0, see camera.cpp), so "closer" is Greater.
+    NS::SharedPtr<MTL::DepthStencilState> depth_test_;         // Greater, write ON -- the mesh, the raymarch pass
     NS::SharedPtr<MTL::DepthStencilState> depth_ignore_;       // Always, write OFF -- lines, gizmo, pivot
-    NS::SharedPtr<MTL::DepthStencilState> depth_read_less_;    // Less, write OFF -- ground plate + origin marker
+    NS::SharedPtr<MTL::DepthStencilState> depth_read_only_;    // Greater, write OFF -- ground plate + origin marker
 
     NS::SharedPtr<MTL::Texture> depth_texture_;
     uint32_t depth_texture_width_ = 0;

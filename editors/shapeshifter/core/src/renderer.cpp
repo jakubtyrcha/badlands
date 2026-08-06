@@ -207,13 +207,19 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
         assert(false && "failed to create ground render pipeline state");
     }
 
-    // Two depth-stencil states, both created once here (stencil unused by
-    // either -- default front/backFaceStencil is nil, i.e. disabled).
-    // Depth convention: the pinned projection maps near->0/far->1 (see
-    // camera.cpp), so "closer" compares Less.
+    // Three depth-stencil states, all created once here (stencil unused by any
+    // of them -- default front/backFaceStencil is nil, i.e. disabled).
+    //
+    // Depth convention: REVERSED-Z. The projection maps near->1/far->0 (see
+    // camera.cpp for why and for the derivation), so "closer" compares Greater
+    // and the buffer clears to 0, not 1.
+    //
+    // Greater rather than the RHI's stated GreaterEqual default: Greater is the
+    // exact mirror of the Less this replaced, so the flip changes precision and
+    // nothing else. Equal-depth behaviour stays a rejection.
     NS::SharedPtr<MTL::DepthStencilDescriptor> depthTestDesc =
         NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
-    depthTestDesc->setDepthCompareFunction(MTL::CompareFunctionLess);
+    depthTestDesc->setDepthCompareFunction(MTL::CompareFunctionGreater);
     depthTestDesc->setDepthWriteEnabled(true);
     depth_test_ = NS::TransferPtr(device_->newDepthStencilState(depthTestDesc.get()));
 
@@ -226,13 +232,13 @@ void Renderer::attach_layer(CA::MetalLayer* layer) {
     // Read-only depth for the world-space overlay layer (ground plate, origin
     // marker): tests against what the raymarch/mesh passes wrote, so geometry
     // on the floor occludes it, but writes nothing itself. The matching
-    // Greater state went away with the spiked-cube pivot, which was the only
-    // thing that ever split a draw into visible/occluded halves.
-    NS::SharedPtr<MTL::DepthStencilDescriptor> depthReadLessDesc =
+    // opposite-sense state went away with the spiked-cube pivot, which was the
+    // only thing that ever split a draw into visible/occluded halves.
+    NS::SharedPtr<MTL::DepthStencilDescriptor> depthReadOnlyDesc =
         NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
-    depthReadLessDesc->setDepthCompareFunction(MTL::CompareFunctionLess);
-    depthReadLessDesc->setDepthWriteEnabled(false);
-    depth_read_less_ = NS::TransferPtr(device_->newDepthStencilState(depthReadLessDesc.get()));
+    depthReadOnlyDesc->setDepthCompareFunction(MTL::CompareFunctionGreater);
+    depthReadOnlyDesc->setDepthWriteEnabled(false);
+    depth_read_only_ = NS::TransferPtr(device_->newDepthStencilState(depthReadOnlyDesc.get()));
 }
 
 void Renderer::set_viewport_size(float w_pts, float h_pts, float backing_scale) {
@@ -452,7 +458,8 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
     depthAttachment->setTexture(depth_texture_.get());
     depthAttachment->setLoadAction(MTL::LoadActionClear);
     depthAttachment->setStoreAction(MTL::StoreActionDontCare);
-    depthAttachment->setClearDepth(1.0);
+    // Reversed-Z clears to the FAR value, which is 0 (see camera.cpp).
+    depthAttachment->setClearDepth(0.0);
 
     MTL::RenderCommandEncoder* encoder = commandBuffer->renderCommandEncoder(passDescriptor.get());
 
@@ -522,7 +529,7 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
 
     // Ground plate: the world-space orientation layer, on y=0. Drawn AFTER
     // the opaque scene passes and depth-tested read-only against what they
-    // wrote (depth_read_less_), so anything resting on the floor occludes the
+    // wrote (depth_read_only_), so anything resting on the floor occludes the
     // plate behind it -- that occlusion is the cue that answers "is this on
     // the ground or floating?", and it is why this pass sits here rather than
     // with the depth-ignored overlays below. No vertex buffer (fullscreen
@@ -534,7 +541,7 @@ void Renderer::render(CA::MetalDrawable* drawable, const SceneDocument& doc, int
             kGroundMinorSpacing, kGroundMajorSpacing);
 
         encoder->setRenderPipelineState(ground_pso_.get());
-        encoder->setDepthStencilState(depth_read_less_.get());
+        encoder->setDepthStencilState(depth_read_only_.get());
         encoder->setFragmentBytes(&ground_uniforms, sizeof(GroundGridUniforms), 0);
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
     }

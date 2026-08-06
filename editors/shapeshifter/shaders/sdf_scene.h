@@ -550,11 +550,21 @@ struct SdfRay {
 // viewport size and the inverse view-projection matrix (compute via
 // simd_inverse/metal::inverse on the caller's side; not recomputed here).
 //
-// direction: unprojects the pixel at Metal clip z=0 (near) and z=1 (far),
+// direction: unprojects the pixel at clip z=1 (near) and z=0 (far),
 // perspective-divides both to world space, and normalizes (far - near).
 //
+// THOSE TWO CONSTANTS ARE REVERSED-Z (see camera.cpp), and they are
+// load-bearing: swapping them negates the ray, which aims every trace behind
+// the camera and renders nothing at all. tests/core/sdf_scene_tests.cpp pins
+// this against Camera::ray_through_view_point, which is how the flip to
+// reversed-Z was caught.
+//
+// The eye recovery below needs no such change: it depends only on P's 4th
+// column being (0, 0, c, 0) for some nonzero c, and on row 3 being (0,0,-1,0).
+// Reversed-Z changes c's value and sign, both of which cancel.
+//
 // origin: the eye (center of projection), *not* the near-plane point --
-// Camera::kNear is 0.1, so the near point sits a non-negligible distance
+// Camera::kNear is 0.05, so the near point sits a non-negligible distance
 // from eye along the ray and would not agree with
 // Camera::ray_through_view_point's origin to tight tolerance. Recovered
 // algebraically from inv_view_proj alone (no separate eye/near/far input):
@@ -572,8 +582,8 @@ inline SdfRay sdf_ray_for_pixel(float px, float py, float viewport_w, float view
     const float ndc_x = 2.0f * px / viewport_w - 1.0f;
     const float ndc_y = 1.0f - 2.0f * py / viewport_h;
 
-    const sq_float4 clip_near = sdf_make4(ndc_x, ndc_y, 0.0f, 1.0f);
-    const sq_float4 clip_far = sdf_make4(ndc_x, ndc_y, 1.0f, 1.0f);
+    const sq_float4 clip_near = sdf_make4(ndc_x, ndc_y, 1.0f, 1.0f);
+    const sq_float4 clip_far = sdf_make4(ndc_x, ndc_y, 0.0f, 1.0f);
 
     const sq_float4 world_near_h = sdf_transform(inv_view_proj, clip_near);
     const sq_float4 world_far_h = sdf_transform(inv_view_proj, clip_far);

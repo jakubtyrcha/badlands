@@ -18,8 +18,8 @@ simd_float4x4 reference_projection(float fov_y_radians, float aspect, float near
     simd_float4x4 m;
     m.columns[0] = (simd_float4){h / aspect, 0.0f, 0.0f, 0.0f};
     m.columns[1] = (simd_float4){0.0f, h, 0.0f, 0.0f};
-    m.columns[2] = (simd_float4){0.0f, 0.0f, -far / (far - near), -1.0f};
-    m.columns[3] = (simd_float4){0.0f, 0.0f, -near * far / (far - near), 0.0f};
+    m.columns[2] = (simd_float4){0.0f, 0.0f, near / (far - near), -1.0f};
+    m.columns[3] = (simd_float4){0.0f, 0.0f, near * far / (far - near), 0.0f};
     return m;
 }
 
@@ -60,6 +60,42 @@ TEST_CASE("Camera::view_proj matches the pinned P*V formula") {
             CAPTURE(row);
             CHECK(actual.columns[col][row] == doctest::Approx(expected.columns[col][row]).epsilon(1e-5));
         }
+    }
+}
+
+TEST_CASE("Camera::view_proj is REVERSED-Z: near maps to 1, far maps to 0") {
+    // The test above re-derives the matrix, so it moves whenever the matrix
+    // does. This one pins the CONVENTION instead, in terms a wrong matrix
+    // cannot satisfy -- which is what makes it the guard. Reversed-Z is an
+    // invariant of the engine's RHI (depth clears to 0, opaque compares
+    // GreaterEqual), so a silent flip back would break the renderer port and
+    // nothing else would notice.
+    const Camera camera = make_camera(1.6f);
+    const simd_float4x4 vp = camera.view_proj();
+    const simd_float3 forward = simd_normalize(camera.target - camera.eye);
+
+    // Depth of a world point sitting `d` in front of the eye, down the view
+    // axis -- so it stays on screen and clip.w is exactly d.
+    auto depth_at = [&](float d) {
+        const simd_float3 p = camera.eye + d * forward;
+        const simd_float4 clip = simd_mul(vp, simd_make_float4(p.x, p.y, p.z, 1.0f));
+        REQUIRE(clip.w > 0.0f);
+        return clip.z / clip.w;
+    };
+
+    CHECK(depth_at(Camera::kNear) == doctest::Approx(1.0f).epsilon(1e-4));
+    CHECK(depth_at(Camera::kFar) == doctest::Approx(0.0f).epsilon(1e-4));
+
+    // Strictly decreasing with distance, which is the whole content of
+    // "reversed" and what the Greater depth compare rests on.
+    float previous = depth_at(Camera::kNear);
+    for (const float d : {0.5f, 1.0f, 5.0f, 25.0f, 90.0f}) {
+        CAPTURE(d);
+        const float current = depth_at(d);
+        CHECK(current < previous);
+        CHECK(current >= 0.0f);
+        CHECK(current <= 1.0f);
+        previous = current;
     }
 }
 
@@ -124,7 +160,9 @@ TEST_CASE("project reports a world point behind the camera as not visible") {
 //
 // (near was 0.1 until the cursor-anchored camera work lowered Camera::kNear to
 // 0.05; only row 2 of each column — the depth row — moved, which is the whole
-// of what a near-plane change may touch.)
+// of what a near-plane change may touch. Row 2 moved again for reversed-Z, and
+// again nothing else did, which is the same evidence in the same place: a
+// depth-convention change must not disturb x or y.)
 //
 //   python3 -c "
 //   import numpy as np
@@ -135,7 +173,7 @@ TEST_CASE("project reports a world point behind the camera as not visible") {
 //   u=np.cross(s,f)
 //   h=1.0/np.tan(fov_y/2.0)
 //   P=np.zeros((4,4)); P[:,0]=[h/aspect,0,0,0]; P[:,1]=[0,h,0,0]
-//   P[:,2]=[0,0,-far/(far-near),-1]; P[:,3]=[0,0,-near*far/(far-near),0]
+//   P[:,2]=[0,0,near/(far-near),-1]; P[:,3]=[0,0,near*far/(far-near),0]
 //   V=np.zeros((4,4)); V[:,0]=[s[0],u[0],-f[0],0]; V[:,1]=[s[1],u[1],-f[1],0]
 //   V[:,2]=[s[2],u[2],-f[2],0]; V[:,3]=[-np.dot(eye,s),-np.dot(eye,u),np.dot(eye,f),1]
 //   VP=P@V
@@ -157,25 +195,25 @@ TEST_CASE("Camera::view_proj matches independently computed (python/numpy) liter
     const simd_float4x4 expected = {(simd_float4){
                                          0.9007183182495269f,
                                          -0.31470943456219075f,
-                                         -0.5243596054670683f,
+                                         0.0002621798027335341f,
                                          -0.5240974256643347f,
                                      },
                                      (simd_float4){
                                          0.0f,
                                          1.6364890597233914f,
-                                         -0.32772475341691765f,
+                                         0.0001638623767084588f,
                                          -0.3275608910402092f,
                                      },
                                      (simd_float4){
                                          -0.600478878833018f,
                                          -0.472064151843286f,
-                                         -0.7865394082006024f,
+                                         0.00039326970410030114f,
                                          -0.7861461384965021f,
                                      },
                                      (simd_float4){
                                          0.0f,
                                          -0.8182445298616959f,
-                                         7.749824118816388f,
+                                         0.0461250879405918f,
                                          7.795949206756979f,
                                      }};
 
