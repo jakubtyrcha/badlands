@@ -50,3 +50,18 @@ ctest --test-dir build           # C++ Catch2 test suites
 The C++ suite covers the hero brain (`scripts/brains/nim/hero.nim`, built to
 `assets/brains/hero.wasm`); see `docs/superpowers/specs/2026-07-23-wasm-brain-contract-design.md`
 for the wasm brain contract.
+
+## Shapeshifter — the SDF editor
+
+`editors/shapeshifter/` is the SDF editor for this project, moved in from its own
+repo. Its C++ core is a normal CMake target here (`shapeshifter_core`, tested by
+`shapeshifter_core_tests`); its SwiftUI app shell stays on XcodeGen, because CMake
+is a poor fit for a `.app` bundle. Building the app builds both halves:
+
+```sh
+cd editors/shapeshifter
+xcodegen generate                                                   # needs `brew install xcodegen`
+xcodebuild -scheme Shapeshifter build -derivedDataPath DerivedData
+```
+
+See `editors/shapeshifter/README.md`.

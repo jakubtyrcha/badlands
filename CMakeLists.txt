@@ -1919,3 +1919,92 @@ target_include_directories(badlands_ray_tests PRIVATE
 target_compile_definitions(badlands_ray_tests PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 add_test(NAME badlands_ray_tests COMMAND badlands_ray_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# ============================================================================
+# editors/shapeshifter — the SDF editor, moved in from its own repo.
+#
+# Its C++ core builds here so there is one source of truth for it; the SwiftUI
+# app shell around it stays on XcodeGen (editors/shapeshifter/project.yml),
+# which links the static library this produces. That split is deliberate: CMake
+# is a poor fit for a SwiftUI .app bundle, and Xcode is a poor fit for the rest
+# of this repo, so each keeps what it is good at.
+#
+# This target deliberately does NOT link badlands_rhi yet. Shapeshifter still
+# talks to Metal through vendored metal-cpp; porting it onto the RHI is the next
+# step, not this one, and an unused link dependency would only advertise an
+# integration that does not exist.
+# ============================================================================
+set(SHAPESHIFTER_DIR ${CMAKE_SOURCE_DIR}/editors/shapeshifter)
+
+add_library(shapeshifter_core STATIC
+    ${SHAPESHIFTER_DIR}/core/src/camera.cpp
+    ${SHAPESHIFTER_DIR}/core/src/camera_controller.cpp
+    ${SHAPESHIFTER_DIR}/core/src/dcsdd.cpp
+    ${SHAPESHIFTER_DIR}/core/src/editor.cpp
+    ${SHAPESHIFTER_DIR}/core/src/gizmo.cpp
+    ${SHAPESHIFTER_DIR}/core/src/lines.cpp
+    ${SHAPESHIFTER_DIR}/core/src/mesh_job.cpp
+    ${SHAPESHIFTER_DIR}/core/src/metal_impl.cpp
+    ${SHAPESHIFTER_DIR}/core/src/navigation.cpp
+    ${SHAPESHIFTER_DIR}/core/src/picking.cpp
+    ${SHAPESHIFTER_DIR}/core/src/renderer.cpp
+    ${SHAPESHIFTER_DIR}/core/src/scene.cpp
+    ${SHAPESHIFTER_DIR}/core/src/sdf.cpp
+)
+# core/include is PUBLIC because the Swift app consumes ShapeshifterCore.h and
+# its module.modulemap from there. core/src is PRIVATE and quote-only (-iquote):
+# its headers are included as "camera.h", and putting that directory on the
+# angle-bracket path is what used to let core/src/math.h shadow the C library's
+# <math.h> in any TU that pulled in <cmath>. The header is now math_util.h so
+# the collision cannot recur, but the narrower path is still the right default.
+target_include_directories(shapeshifter_core
+    PUBLIC
+        ${SHAPESHIFTER_DIR}/core/include
+        ${SHAPESHIFTER_DIR}/shaders          # shared_types.h, ground_grid.h, sdf_scene.h
+        ${SHAPESHIFTER_DIR}/vendor/metal-cpp
+)
+target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core/src)
+
+# DCSDD reconstruction is expensive numerical code (dense per-cell least-squares
+# solves x hundreds of cells x outer iterations). Unoptimized it runs ~43x slower
+# than -O2 — measured on a single-cube remesh at the editor's config, 243.6s vs
+# 5.6s — which makes the app unusable for interactive editing. This project sets
+# no CMAKE_BUILD_TYPE, so the default config carries no -O flag at all; opt this
+# one target in rather than changing the whole repo's defaults.
+target_compile_options(shapeshifter_core PRIVATE
+    $<$<OR:$<CONFIG:>,$<CONFIG:Debug>>:-O2>)
+
+target_link_libraries(shapeshifter_core PUBLIC
+    "-framework Metal" "-framework Foundation"
+    "-framework QuartzCore" "-framework CoreGraphics")
+
+# shapeshifter_core_tests: the editor core's own suite, moved across as-is.
+# It is still on doctest rather than this repo's Catch2 — porting 15 files is
+# mechanical but it does not belong in a commit whose claim is "only paths and
+# build files moved". ctest runs it either way, so scripts/test.sh covers it.
+add_executable(shapeshifter_core_tests
+    ${SHAPESHIFTER_DIR}/tests/core/camera_controller_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/camera_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/dcsdd_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/drag_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/gizmo_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/ground_grid_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/lines_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/mesh_job_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/navigation_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/picking_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/renderer_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/scene_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/sdf_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/test_main.cpp
+)
+target_include_directories(shapeshifter_core_tests PRIVATE
+    ${SHAPESHIFTER_DIR}/tests/vendor)
+target_compile_options(shapeshifter_core_tests PRIVATE
+    -iquote${SHAPESHIFTER_DIR}/core/src)
+target_link_libraries(shapeshifter_core_tests PRIVATE shapeshifter_core)
+if(APPLE)
+    target_link_options(shapeshifter_core_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME shapeshifter_core_tests COMMAND shapeshifter_core_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+

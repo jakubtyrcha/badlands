@@ -1,0 +1,5 @@
+module ShapeshifterCore {
+    header "shapeshifter/ShapeshifterCore.h"
+    requires cplusplus
+    export *
+}

@@ -1,0 +1,72 @@
+name: Shapeshifter
+options:
+  bundleIdPrefix: com.jakubtyrcha
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    CLANG_CXX_LANGUAGE_STANDARD: c++20
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+
+targets:
+  # The C++ core and its test suite are NOT built here any more. They are CMake
+  # targets in the repo root's CMakeLists.txt (`shapeshifter_core`,
+  # `shapeshifter_core_tests`), so the editor core and the engine it will be
+  # ported onto are described by one build system rather than two that can
+  # disagree. The DCSDD Debug -O2 opt-in and the -iquote treatment of core/src
+  # moved there with them, comments and all.
+  #
+  # What stays in Xcode is the part CMake is genuinely bad at: a SwiftUI .app
+  # bundle with Swift/C++ interop. This target compiles the Swift shell and the
+  # Metal shaders, and links the static library CMake produced.
+  Shapeshifter:
+    type: application
+    platform: macOS
+    sources:
+      - app/Sources
+      - path: shaders
+        includes: ["*.metal"]
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Foundation.framework
+    # Build the CMake half first. Dependency analysis is off because the inputs
+    # live outside this project (all of core/src, plus the CMakeLists that
+    # describes them); with it on, Xcode would skip the phase and the stale
+    # archive would surface as a link error that reads like a code error.
+    preBuildScripts:
+      - name: Build shapeshifter_core (CMake)
+        script: |
+          "$SRCROOT/../../scripts/build.sh" shapeshifter_core
+        basedOnDependencyAnalysis: false
+    info:
+      path: app/Info.plist
+      properties:
+        NSHighResolutionCapable: true
+    settings:
+      SWIFT_VERSION: "6.0"
+      SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+      SWIFT_OBJC_INTEROP_MODE: objcxx
+      SWIFT_INCLUDE_PATHS: "$(SRCROOT)/core/include"
+      OTHER_SWIFT_FLAGS: "-Xcc -std=gnu++20"
+      HEADER_SEARCH_PATHS:
+        - "$(SRCROOT)/core/include"
+      # -lshapeshifter_core via a search path rather than an XcodeGen
+      # `framework:` dependency: the archive is a build product, so it does not
+      # exist when the project is generated on a fresh clone. A search-path link
+      # tolerates that; a file reference makes generation depend on build order.
+      LIBRARY_SEARCH_PATHS:
+        - "$(SRCROOT)/../../build"
+      OTHER_LDFLAGS: "-lshapeshifter_core"
+      MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE
+
+schemes:
+  Shapeshifter:
+    build:
+      targets:
+        Shapeshifter: all
+    run:
+      config: Debug
