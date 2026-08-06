@@ -138,6 +138,10 @@ builds. If it cannot be compiled out, it is not validation — it is overhead.
 - **Shader source is target-native by contract.** The RHI never compiles anything; a
   shared test needs per-backend source (see `MinimalComputeSource` in
   `rhi_conformance.hpp`), which is also where the HLSL arm goes.
+- **A shader may be split per target where Slang is wrong, and only there.** Slang 2026.14.1
+  emits the 32-bit atomic intrinsic for Metal, so 64-bit atomic min/max has to be hand-written
+  MSL; HLSL is correct. Each split names the Slang version that forced it, so it can be
+  retired. Full account in the spec's "Toolchain gap" section.
 
 ## Testing
 
@@ -147,6 +151,9 @@ builds. If it cannot be compiled out, it is not validation — it is overhead.
   readback-based correctness Null cannot assert. **Run it under
   `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`**; the layers catch invalid API use that
   a passing test otherwise hides.
+- **`badlands_splat_tests`** — the Dreams-style splat chain (SDF → points → indirect
+  dispatch → 64-bit-atomic visibility buffer → resolve), asserted on pixels. Needs both a
+  Slang SDK and a Metal device, which is why it is its own target.
 - **Assert on values, not images.** Readback plus numeric assertions. No golden-image
   harness — that would mean asserting on shipped data files.
 - **A check that only one backend can make must say so.** The `GetCommandLog()`-guarded

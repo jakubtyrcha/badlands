@@ -587,6 +587,42 @@ is never built without something drawing through it.
 Stages 1-4 are all one app growing. Nothing from the existing renderer is ported until
 stage 6, so `main` stays untouched (D6).
 
+## Toolchain gap: Slang cannot emit Metal 64-bit atomics (2026-08-06)
+
+**The pinned SDK is Slang 2026.14.1**, unpacked into `third_party/toolchains/slang`
+(`BADLANDS_SLANG_ROOT`). That directory is gitignored, so the version is recorded HERE —
+without it, nothing in the tree says which release the workaround below is for, and a
+future reader cannot tell whether it has been fixed.
+
+2026.14.1 was the newest release when this was found, so "bump Slang" was already a no-op.
+
+### What fails
+
+64-bit atomic min/max is the primitive a visibility buffer is built on: pack depth above
+the payload and one atomic resolves the depth test and commits the payload indivisibly.
+Metal supports it from **Apple8 (M2)**, which is this project's hardware floor.
+
+Slang emits `atomic_fetch_max_explicit` for Metal. That is the 32-bit family; MSL rejects
+it on a 64-bit type. Both Slang spellings produce it:
+
+- `InterlockedMax(buffer[i], value, original)` on an `RWStructuredBuffer<uint64_t>`
+- `Atomic<uint64_t>` and its `.max()` method
+
+The correct MSL is `atomic_max_explicit` on a `device atomic_ulong*` — void return, device
+address space only. **The same Slang source emits a correct `InterlockedMax` for HLSL**, so
+the gap is Metal-specific, not Slang-wide, and a DX12 backend will not need the workaround.
+
+### The rule this establishes
+
+**A shader may be split into Metal and DX12 versions where Slang is incorrect.** Slang is
+here to avoid maintaining two of everything, not as an end in itself. The split is per
+shader and per defect, and each one carries a comment saying which Slang version made it
+necessary — so the split can be retired when the bug is.
+
+The only split today is pass 3 of the splat chain (`kSplatKernel` in
+`src/engine/tests/splat_tests.cpp`). Passes 1, 2 and 4 stay in Slang, including one that
+*reads* a `uint64_t` — only the atomic is missing, not the type.
+
 ## Risks and open questions
 
 ### R1 — Parallel game development — RESOLVED by D6
