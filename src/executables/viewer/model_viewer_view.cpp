@@ -182,7 +182,7 @@ bool ModelViewerView::ImpostorPreviewIsCurrent() const {
 }
 
 bool ModelViewerView::EnsureImpostorPreview(
-    std::span<const TreeFieldModel> models) {
+    std::span<const InstancedLodModel> models) {
   if (ImpostorPreviewIsCurrent()) {
     return true;
   }
@@ -425,7 +425,7 @@ void ModelViewerView::RebuildScene() {
     // requested display height. At kTreePreviewHeight that retargeting is the
     // identity, so the meshes here are byte-identical to what this call site
     // built by hand before.
-    const std::array<TreeFieldModel, 1> field_models{
+    const std::array<InstancedLodModel, 1> field_models{
         BuildTreeFieldModel(*gen.tree, kTreePreviewHeight)};
     const float s = field_models[0].native_to_world_scale;
 
@@ -433,22 +433,22 @@ void ModelViewerView::RebuildScene() {
     // otherwise the mode that exists to show dynamic LOD would stop one level
     // short of what the game actually draws at distance, and the retired L3
     // would still be its coarsest level.
-    TreeFieldImpostor impostor_slot;
+    InstancedLodImpostor impostor_slot;
     if (EnsureImpostorPreview(field_models)) {
       impostor_slot.atlas = &impostor_preview_.atlas;
       impostor_slot.placement = impostor_preview_.placement;
     }
 
-    std::unique_ptr<TreeField> field =
-        BuildTreeField(device_, queue_, *pipeline_gen_, field_models, capacity,
-                       impostor_slot);
+    std::unique_ptr<InstancedLodField> field =
+        BuildInstancedLodField(device_, queue_, *pipeline_gen_, field_models,
+                               capacity, impostor_slot);
     if (!field) {
       // Mirrors the malformed-generator branch further down: log and bail
       // with a floor-only scene, leaving the orbit framing unchanged (an
       // empty world_bounds here would otherwise frame on a degenerate
       // Aabb::Empty()).
       spdlog::error(
-          "ModelViewerView::RebuildScene: BuildTreeField failed; Multi mode "
+          "ModelViewerView::RebuildScene: BuildInstancedLodField failed; Multi mode "
           "shows floor only");
       return;
     }
@@ -457,10 +457,11 @@ void ModelViewerView::RebuildScene() {
     // from bark.local_bounds (the `else` branch below), so a Multi-mode
     // grid cell at the origin matches the single-tree preview exactly. `s`
     // came from BuildTreeFieldModel above rather than being re-derived here.
-    const TreeModelBounds& bounds = field->model_bounds[0];
+    const LodModelBounds& bounds = field->model_bounds[0];
     const glm::mat4 xf =
         glm::translate(glm::mat4(1.0f),
-                      glm::vec3(0.0f, -bounds.bark_local_bounds.min.y * s,
+                      glm::vec3(0.0f,
+                                -bounds.submesh_bounds[kTreeBarkSubmesh].min.y * s,
                                 0.0f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(s));
 
@@ -621,7 +622,7 @@ void ModelViewerView::RebuildScene() {
       // would otherwise pay for a model the bake then discards.
       bool have_impostor = ImpostorPreviewIsCurrent();
       if (!have_impostor) {
-        const std::array<TreeFieldModel, 1> one = {
+        const std::array<InstancedLodModel, 1> one = {
             BuildTreeFieldModel(*gen.tree, kTreePreviewHeight)};
         have_impostor = EnsureImpostorPreview(one);
       }

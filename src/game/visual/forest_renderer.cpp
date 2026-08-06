@@ -49,7 +49,7 @@ void ParallelFor(size_t n, F&& body) {
 // What the model looks like CLOSE UP: its bark, unioned with its LOD0 crown
 // only.
 //
-// Deliberately not TreeModelBounds::Combined(), which unions every crown LOD.
+// Deliberately not LodModelBounds::Combined(), which unions every crown LOD.
 // That union is the right answer for the GPU bounds sphere -- a coarse LOD's
 // voxels overscale past the cards they came from, and an instance's sphere has
 // to cover whichever LOD is actually drawn. It is the wrong answer for spacing,
@@ -63,9 +63,16 @@ void ParallelFor(size_t n, F&& body) {
 // trunk's half-width, and that species would then pack at trunk distance with
 // crowns straight through each other -- with nothing in the log but a small,
 // entirely plausible-looking number.
-Aabb SilhouetteBounds(const TreeFieldModel& model) {
-  Aabb bounds = model.bark_lod0.local_bounds;
-  for (const TexturedMeshResult& crown : model.leaf_lod_meshes) {
+Aabb SilhouetteBounds(const InstancedLodModel& model) {
+  if (model.levels.empty()) return Aabb::Empty();
+  // Submesh 0 is the tree's bark at every level; submesh 1 is its crown. This
+  // is the one place the forest still reads the tree producer's submesh layout
+  // directly, and it is why kTreeBarkSubmesh/kTreeCrownSubmesh are named in
+  // tree_lod_model.hpp rather than being bare literals.
+  Aabb bounds = model.levels[0][kTreeBarkSubmesh].local_bounds;
+  for (const std::vector<TexturedMeshResult>& level : model.levels) {
+    if (level.size() <= kTreeCrownSubmesh) continue;
+    const TexturedMeshResult& crown = level[kTreeCrownSubmesh];
     if (crown.mesh.vertex_count == 0) continue;
     bounds = bounds.Union(crown.local_bounds);
     break;
@@ -75,8 +82,8 @@ Aabb SilhouetteBounds(const TreeFieldModel& model) {
 
 }  // namespace
 
-std::vector<TreeFieldModel> BuildForestModels(ForestCatalog& catalog) {
-  std::vector<TreeFieldModel> models(catalog.models.size());
+std::vector<InstancedLodModel> BuildForestModels(ForestCatalog& catalog) {
+  std::vector<InstancedLodModel> models(catalog.models.size());
   ParallelFor(catalog.models.size(), [&](size_t i) {
     models[i] = BuildTreeFieldModel(catalog.models[i].options,
                                     catalog.models[i].target_height_m);
@@ -115,7 +122,8 @@ std::vector<TreeFieldModel> BuildForestModels(ForestCatalog& catalog) {
 glm::mat4 ForestRenderer::InstanceTransform(
     const foliage::FoliageInstance& inst) const {
   const float s = tree_field_->native_to_world_scale[inst.model] * inst.scale;
-  const float base_y = tree_field_->model_bounds[inst.model].bark_local_bounds.min.y;
+  const float base_y =
+      tree_field_->model_bounds[inst.model].submesh_bounds[kTreeBarkSubmesh].min.y;
   // Rest-on-ground: the generated tree's base sits at local base_y, so lift by
   // -base_y * s to put it exactly on the instance position. Same derivation the
   // model viewer uses for its preview transform.
@@ -128,7 +136,7 @@ glm::mat4 ForestRenderer::InstanceTransform(
 bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
                            GpuPipelineGenerator& pipeline_gen,
                            ForestCatalog catalog,
-                           std::vector<TreeFieldModel> models,
+                           std::vector<InstancedLodModel> models,
                            foliage::FoliageField field) {
   catalog_ = std::move(catalog);
   field_ = std::move(field);
@@ -174,7 +182,7 @@ bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
   // which is the behaviour that existed before LOD4 and is far better than
   // refusing to render a forest at all.
   impostor_ = BakeImpostorAtlas(device, queue, pipeline_gen, models);
-  TreeFieldImpostor impostor_slot;
+  InstancedLodImpostor impostor_slot;
   if (impostor_.ok) {
     impostor_slot.atlas = &impostor_.atlas;
     impostor_slot.placement = impostor_.placement;
@@ -184,12 +192,11 @@ bool ForestRenderer::Build(wgpu::Device device, wgpu::Queue queue,
         "voxel-only LOD chain");
   }
 
-  tree_field_ =
-      BuildTreeField(device, queue, pipeline_gen, models,
-                     static_cast<uint32_t>(stats_.total_instances),
-                     impostor_slot);
+  tree_field_ = BuildInstancedLodField(
+      device, queue, pipeline_gen, models,
+      static_cast<uint32_t>(stats_.total_instances), impostor_slot);
   if (!tree_field_) {
-    spdlog::error("ForestRenderer: BuildTreeField failed for {} models",
+    spdlog::error("ForestRenderer: BuildInstancedLodField failed for {} models",
                   models.size());
     return false;
   }

@@ -29,7 +29,8 @@
 #include "foliage/foliage_types.hpp"
 #include "game/visual/forest_catalog.hpp"
 #include "game/visual/impostor_baker.hpp"
-#include "game/visual/tree_field.hpp"
+#include "game/visual/instanced_lod_field.hpp"
+#include "game/visual/tree_lod_model.hpp"
 
 namespace badlands {
 
@@ -59,7 +60,7 @@ struct ForestRendererStats {
 //
 // The measurement is the model's bark unioned with its FINEST non-empty crown
 // LOD, at scale 1 (the sampler applies each instance's own scale). Deliberately
-// not the union over every LOD, which is what TreeField::model_bounds holds:
+// not the union over every LOD, which is what InstancedLodField::model_bounds holds:
 // coarse voxel crowns overscale past the cards they came from, so that union
 // runs 25-40% wide as a silhouette and spacing by it opens the stand to 1.8x
 // the ground area per tree for geometry no one can see. The all-LOD union is
@@ -69,7 +70,7 @@ struct ForestRendererStats {
 //
 // Returns the prepared models to hand straight to ForestRenderer::Build, so
 // nothing is generated twice.
-std::vector<TreeFieldModel> BuildForestModels(ForestCatalog& catalog);
+std::vector<InstancedLodModel> BuildForestModels(ForestCatalog& catalog);
 
 class ForestRenderer {
  public:
@@ -90,7 +91,7 @@ class ForestRenderer {
   // produce, and it costs no GPU resources.
   bool Build(wgpu::Device device, wgpu::Queue queue,
              GpuPipelineGenerator& pipeline_gen, ForestCatalog catalog,
-             std::vector<TreeFieldModel> models, foliage::FoliageField field);
+             std::vector<InstancedLodModel> models, foliage::FoliageField field);
 
   // Culls cells and re-uploads only if the visible set changed. Cheap to call
   // every frame.
@@ -119,7 +120,7 @@ class ForestRenderer {
   // offset that puts the trunk base at the instance position.
   glm::mat4 InstanceTransform(const foliage::FoliageInstance& inst) const;
 
-  std::unique_ptr<TreeField> tree_field_;
+  std::unique_ptr<InstancedLodField> tree_field_;
   // The LOD4 impostor atlas, baked in Build. Held here because TreeField's
   // materials bind its views and only reference them.
   ImpostorBakeResult impostor_;

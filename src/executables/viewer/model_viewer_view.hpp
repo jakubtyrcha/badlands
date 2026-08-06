@@ -33,8 +33,9 @@
 #include "engine/scene/scene_graph.hpp"
 #include "game/geometry/leaf_texture.hpp"
 #include "game/geometry/tree_options.hpp"
-#include "game/visual/impostor_baker.hpp"  // ImpostorBakeResult, BakeImpostorAtlas
-#include "game/visual/tree_field.hpp"       // TreeField, BuildTreeField
+#include "game/visual/impostor_baker.hpp"       // ImpostorBakeResult, BakeImpostorAtlas
+#include "game/visual/instanced_lod_field.hpp"  // InstancedLodField, BuildInstancedLodField
+#include "game/visual/tree_lod_model.hpp"       // BuildTreeFieldModel
 
 namespace badlands {
 
@@ -194,15 +195,15 @@ class ModelViewerView : public AppView {
   // the same preview height, so a second bake would be pure duplicate work.
   // Returns false if the bake failed; the caller then falls back to the
   // voxel-only chain.
-  bool EnsureImpostorPreview(std::span<const TreeFieldModel> models);
+  bool EnsureImpostorPreview(std::span<const InstancedLodModel> models);
 
   // Whether impostor_preview_ already holds the current generator's atlas.
-  // Exposed so a caller can skip building the TreeFieldModel that
+  // Exposed so a caller can skip building the InstancedLodModel that
   // EnsureImpostorPreview would otherwise be handed and discard.
   bool ImpostorPreviewIsCurrent() const;
 
   // GPU pipeline generator, stashed from Initialize()'s RenderContext --
-  // BuildTreeField (called from RebuildScene, not Initialize, since it needs
+  // BuildInstancedLodField (called from RebuildScene, not Initialize, since it needs
   // the currently-selected TreeOptions) needs it to build the instanced
   // material factories. Not owned; outlives this view (see render_context.hpp).
   GpuPipelineGenerator* pipeline_gen_ = nullptr;
@@ -212,7 +213,7 @@ class ModelViewerView : public AppView {
   // field_ptr_ is the stable single-element array scene_context_.
   // instanced_fields points at (SceneContext::instanced_fields is
   // InstancedMeshField* const*, an array of field pointers).
-  std::unique_ptr<TreeField> tree_field_;
+  std::unique_ptr<InstancedLodField> tree_field_;
   InstancedMeshField* field_ptr_ = nullptr;
 
   ShadowDebugMode initial_shadow_debug_mode_ = ShadowDebugMode::Off;

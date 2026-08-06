@@ -489,7 +489,9 @@ set(badlands_app_sources_viewer
     src/game/geometry/leaf_voxelizer.cpp
     # Multi-mode instanced tree grid (Task 4): builds an InstancedMeshField
     # from a catalog TreeOptions -- see game/visual/tree_field.hpp.
-    src/game/visual/tree_field.cpp
+    src/game/visual/instanced_lod_model.cpp
+    src/game/visual/instanced_lod_field.cpp
+    src/game/visual/tree_lod_model.cpp
     src/game/visual/impostor_atlas.cpp
     src/game/visual/impostor_baker.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
@@ -662,7 +664,9 @@ add_library(badlands_mapview_view STATIC
     src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
-    src/game/visual/tree_field.cpp
+    src/game/visual/instanced_lod_model.cpp
+    src/game/visual/instanced_lod_field.cpp
+    src/game/visual/tree_lod_model.cpp
     src/game/visual/impostor_atlas.cpp
     src/game/visual/forest_catalog.cpp
     src/game/visual/forest_renderer.cpp
@@ -960,7 +964,7 @@ add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY 
 # badlands_game_lib (neither is a member of that library -- see
 # badlands_app_sources_viewer). Phase 5 extends this suite to exercise
 # TreeField/BuildTreeField (voxel-crown instanced field + field shadows), so
-# also compiles src/game/visual/tree_field.cpp directly for the same reason
+# also compiles the instanced-LOD sources directly for the same reason
 # (also only a member of badlands_app_sources_viewer, not badlands_game_lib).
 add_executable(badlands_tree_field_gpu_tests
     game/tests/tree_field_gpu_tests.cpp
@@ -977,7 +981,9 @@ add_executable(badlands_tree_field_gpu_tests
     src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
-    src/game/visual/tree_field.cpp
+    src/game/visual/instanced_lod_model.cpp
+    src/game/visual/instanced_lod_field.cpp
+    src/game/visual/tree_lod_model.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_field_gpu_tests PRIVATE
