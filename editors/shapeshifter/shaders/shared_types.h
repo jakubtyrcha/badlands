@@ -1,10 +1,17 @@
 #pragma once
 
-// Structs shared between MSL and C++. Layout rule: only float, float4 and
-// float4x4 fields allowed. float3 is banned: MSL gives it 16-byte
+// Structs shared between Slang, MSL and C++. Layout rule: only float, float4
+// and float4x4 fields allowed. float3 is banned: MSL gives it 16-byte
 // size/alignment, which silently desyncs from the host layout.
+//
+// THREE ARMS, and the third is why the shaders need no mirrored struct
+// declarations: a .slang file includes this header and gets the same types the
+// host packs, rather than a hand-copy that agrees until someone edits one side.
 
-#ifdef __METAL_VERSION__
+#if defined(SDF_SLANG)
+typedef float4          sq_float4;
+typedef float4x4        sq_float4x4;
+#elif defined(__METAL_VERSION__)
 #include <metal_stdlib>
 typedef metal::float4   sq_float4;
 typedef metal::float4x4 sq_float4x4;
@@ -12,6 +19,16 @@ typedef metal::float4x4 sq_float4x4;
 #include <simd/simd.h>
 typedef simd_float4     sq_float4;
 typedef simd_float4x4   sq_float4x4;
+#endif
+
+// Slang has no `sizeof` and cannot parse a static_assert built on one. What
+// these asserts pin is a CPU<->GPU layout contract, so the CPU asserting it is
+// what matters -- the shader cannot disagree about a struct it takes from this
+// same header. Empty on the Slang arm.
+#if defined(SDF_SLANG)
+#define SDF_STATIC_ASSERT(cond, msg)
+#else
+#define SDF_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
 #endif
 
 typedef struct {
@@ -30,7 +47,7 @@ typedef struct {
 
 // Compiled under both __METAL_VERSION__ (mesh.metal) and plain C++ (core/tests),
 // via the dual-compile typedefs above -- so this one assert covers both sides.
-static_assert(sizeof(MeshVertex) == 32, "MeshVertex must be 32 bytes");
+SDF_STATIC_ASSERT(sizeof(MeshVertex) == 32, "MeshVertex must be 32 bytes");
 
 // Per-frame uniforms for the raymarch pass (shaders/raymarch.metal), uploaded
 // via setFragmentBytes alongside the packed SdfNode array.
@@ -60,7 +77,7 @@ typedef struct {
 
 // Compiled under both __METAL_VERSION__ (raymarch.metal) and plain C++
 // (core/tests) -- same precedent as MeshVertex above.
-static_assert(sizeof(RaymarchUniforms) == 160, "RaymarchUniforms must be 160 bytes");
+SDF_STATIC_ASSERT(sizeof(RaymarchUniforms) == 160, "RaymarchUniforms must be 160 bytes");
 
 // Per-frame uniforms for the ground-plate pass (shaders/ground_grid.metal),
 // uploaded via setFragmentBytes. Same shape and same reasoning as
@@ -75,4 +92,4 @@ typedef struct {
     sq_float4   params1;        // (minor_spacing, major_spacing, 0, 0)
 } GroundGridUniforms;
 
-static_assert(sizeof(GroundGridUniforms) == 160, "GroundGridUniforms must be 160 bytes");
+SDF_STATIC_ASSERT(sizeof(GroundGridUniforms) == 160, "GroundGridUniforms must be 160 bytes");
