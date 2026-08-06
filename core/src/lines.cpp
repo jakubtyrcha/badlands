@@ -1,12 +1,16 @@
 #include "lines.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
 #include <ground_grid.h> // kGroundAxisY -- shared with the ground plate's shader
 
 #include "gizmo.h"
+#include "math.h"      // trs_matrix
 #include "scene.h"
+#include "sdf.h"        // local_sdf_node -- profiles are measured off the shape's own field
+#include "sdf_scene.h"  // sdf_eval_node
 
 namespace sq {
 
@@ -20,6 +24,245 @@ LineVertex make_vertex(simd_float3 local, const simd_float4x4& world_from_local,
     return v;
 }
 
+// --- unit-local shape wireframes ---------------------------------------------
+//
+// WHY THESE CAN IGNORE SCALE. Every shape's evaluator works in the contracted
+// frame, where the cross-section is the circle of radius r = min(hx, hz) and the
+// height is hy (see sdf_contract_xz). Dividing that frame by the node's own
+// half-extents -- which is exactly what world_from_local's S undoes -- sends the
+// cross-section to the circle of radius 0.5 and the height to +-0.5 for ANY
+// half-extents. So the shapes below are drawn once, in the unit box, and the
+// node's transform stretches them into the ellipse-sectioned real thing.
+//
+// The capsule and the vesica are the exceptions, because their profile CURVES
+// bend as both the box's aspect and the dial change. Rather than re-deriving
+// those curves, they are measured off the node's own SDF -- see sample_profile.
+
+// One closed loop of `segments` points at height y and radius rad. Segment 0
+// sits on +z, which is where sdf_sd_regular_polygon's sector fold puts a
+// vertex -- so passing segments = n draws exactly the prism's cross-section,
+// correctly clocked, and no separate polygon builder is needed.
+void append_ring(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                 float y, float rad, int segments) {
+    auto point = [&](int i) -> simd_float3 {
+        const float t = 2.0f * float(M_PI) * static_cast<float>(i % segments) /
+                        static_cast<float>(segments);
+        return simd_float3{rad * std::sin(t), y, rad * std::cos(t)};
+    };
+    for (int i = 0; i < segments; ++i) {
+        out.push_back(make_vertex(point(i), m, color));
+        out.push_back(make_vertex(point(i + 1), m, color));
+    }
+}
+
+// Samples a surface-of-revolution's half-profile from the node's OWN SDF, by
+// bisecting outward from the centre over a fan of polar angles running pole to
+// pole. Returns unit-local (rho, y), which is what append_lathe consumes.
+//
+// Sampled rather than derived, for two reasons. The profile has to track the
+// dial -- a capsule's caps and a vesica's tips both change shape as roundness
+// turns -- and hand-deriving each offset curve is exactly how this file first
+// shipped a vesica arc that swept past its own poles and out of its box. And
+// this way the drawn outline cannot disagree with the rendered surface: it is
+// measured from it.
+//
+// Sound because every shape here is convex, hence star-shaped about its centre,
+// so each ray meets the surface exactly once.
+std::vector<simd_float2> sample_profile(const Node& node) {
+    const SdfNode sn = local_sdf_node(node);
+    // abs, matching sdf_safe_half_extents: a negative scale component mirrors
+    // the shape rather than inverting it, and the profile must agree.
+    const simd_float3 scale = simd_abs(node.scale); // unit-local -> the node's rigid frame
+    // Every shape is inscribed in the unit box, so no surface sits beyond its
+    // half-diagonal; 0.9 brackets that with room to spare.
+    constexpr float kOutside = 0.9f;
+    constexpr int kBisectionSteps = 24;
+
+    std::vector<simd_float2> profile;
+    const int steps = 2 * kShapeProfileSegments;
+    for (int i = 0; i <= steps; ++i) {
+        // -pi/2 is the bottom pole, 0 the equator, +pi/2 the top pole.
+        const float angle = float(M_PI) * (static_cast<float>(i) / static_cast<float>(steps) - 0.5f);
+        const simd_float2 dir = simd_make_float2(std::cos(angle), std::sin(angle));
+        float inside = 0.0f;
+        float outside = kOutside;
+        for (int k = 0; k < kBisectionSteps; ++k) {
+            const float mid = 0.5f * (inside + outside);
+            const simd_float3 unit{mid * dir.x, mid * dir.y, 0.0f};
+            if (sdf_eval_node(sn, unit * scale) < 0.0f) {
+                inside = mid;
+            } else {
+                outside = mid;
+            }
+        }
+        profile.push_back(0.5f * (inside + outside) * dir);
+    }
+    return profile;
+}
+
+// Revolves a profile into `meridians` cross-sections. `profile` runs from the
+// -y pole to the +y pole with rho >= 0; each meridian draws it on both sides of
+// the axis, so the pair closes into one loop through both poles.
+void append_lathe(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                  const std::vector<simd_float2>& profile, int meridians) {
+    for (int k = 0; k < meridians; ++k) {
+        const float t = float(M_PI) * static_cast<float>(k) / static_cast<float>(meridians);
+        const simd_float3 dir{std::sin(t), 0.0f, std::cos(t)};
+        for (const float side : {1.0f, -1.0f}) {
+            for (size_t i = 0; i + 1 < profile.size(); ++i) {
+                const simd_float3 a = side * profile[i].x * dir + simd_float3{0, profile[i].y, 0};
+                const simd_float3 b =
+                    side * profile[i + 1].x * dir + simd_float3{0, profile[i + 1].y, 0};
+                out.push_back(make_vertex(a, m, color));
+                out.push_back(make_vertex(b, m, color));
+            }
+        }
+    }
+}
+
+// Cone / capped cone: base ring, top ring once the tip is blunted, and four
+// slant lines at the cardinal azimuths to carry the taper.
+void append_cone_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                       float tip) {
+    const float top = 0.5f * tip;
+    append_ring(out, m, color, -0.5f, 0.5f, kShapeRingSegments);
+    if (top > 1e-4f) {
+        append_ring(out, m, color, 0.5f, top, kShapeRingSegments);
+    }
+    for (int i = 0; i < 4; ++i) {
+        const float t = 0.5f * float(M_PI) * static_cast<float>(i);
+        const simd_float3 dir{std::sin(t), 0.0f, std::cos(t)};
+        out.push_back(make_vertex(0.5f * dir + simd_float3{0, -0.5f, 0}, m, color));
+        out.push_back(make_vertex(top * dir + simd_float3{0, 0.5f, 0}, m, color));
+    }
+}
+
+// Square frustum: base quad, top quad once blunted, four slant edges.
+void append_pyramid_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                          float tip) {
+    const float top = 0.5f * tip;
+    const std::array<simd_float2, 4> corners = {{{1, 1}, {1, -1}, {-1, -1}, {-1, 1}}};
+    for (int i = 0; i < 4; ++i) {
+        const simd_float2 c = corners[i];
+        const simd_float2 n = corners[(i + 1) % 4];
+        const simd_float3 base_c{0.5f * c.x, -0.5f, 0.5f * c.y};
+        const simd_float3 base_n{0.5f * n.x, -0.5f, 0.5f * n.y};
+        const simd_float3 top_c{top * c.x, 0.5f, top * c.y};
+        const simd_float3 top_n{top * n.x, 0.5f, top * n.y};
+        out.push_back(make_vertex(base_c, m, color));
+        out.push_back(make_vertex(base_n, m, color));
+        out.push_back(make_vertex(base_c, m, color));
+        out.push_back(make_vertex(top_c, m, color));
+        if (top > 1e-4f) {
+            out.push_back(make_vertex(top_c, m, color));
+            out.push_back(make_vertex(top_n, m, color));
+        }
+    }
+}
+
+// n-gon prism: the two end faces plus one vertical per vertex.
+void append_prism_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                        int sides) {
+    append_ring(out, m, color, -0.5f, 0.5f, sides);
+    append_ring(out, m, color, 0.5f, 0.5f, sides);
+    for (int i = 0; i < sides; ++i) {
+        const float t = 2.0f * float(M_PI) * static_cast<float>(i) / static_cast<float>(sides);
+        const float x = 0.5f * std::sin(t);
+        const float z = 0.5f * std::cos(t);
+        out.push_back(make_vertex(simd_float3{x, -0.5f, z}, m, color));
+        out.push_back(make_vertex(simd_float3{x, 0.5f, z}, m, color));
+    }
+}
+
+// Rounded box: the six FLAT FACES, each a rectangle bounded by where that face
+// meets the rounded edge around it. Every corner of every rectangle lies on the
+// surface, and at full roundness each rectangle collapses to a point at its
+// face's centre -- which is exactly where the resulting ball touches its box.
+//
+// Not used at zero roundness: the six rectangles degenerate to the box's own
+// edges there, drawn twice over, so append_cube_edges' single pass is both
+// cheaper and what the existing vertex-count expectations pin.
+void append_rounded_box_edges(std::vector<LineVertex>& out, const simd_float4x4& m,
+                              simd_float4 color, simd_float3 half, float roundness) {
+    const float rb = roundness * simd_reduce_min(half);
+    // Unit-local half-width of each face's flat portion. Anisotropic, because
+    // the rounding radius is a single world length while unit-local space
+    // divides each axis by its own half-extent.
+    const simd_float3 flat = 0.5f * (simd_float3{1.0f, 1.0f, 1.0f} - rb / half);
+    for (int axis = 0; axis < 3; ++axis) {
+        const int b = (axis + 1) % 3;
+        const int c = (axis + 2) % 3;
+        for (const float side : {0.5f, -0.5f}) {
+            std::array<simd_float3, 4> corner{};
+            for (int k = 0; k < 4; ++k) {
+                const float sb = (k == 0 || k == 3) ? 1.0f : -1.0f;
+                const float sc = (k < 2) ? 1.0f : -1.0f;
+                corner[k] = simd_float3{0.0f, 0.0f, 0.0f};
+                corner[k][axis] = side;
+                corner[k][b] = sb * flat[b];
+                corner[k][c] = sc * flat[c];
+            }
+            for (int k = 0; k < 4; ++k) {
+                out.push_back(make_vertex(corner[k], m, color));
+                out.push_back(make_vertex(corner[(k + 1) % 4], m, color));
+            }
+        }
+    }
+}
+
+// Rounded octahedron: the eight flat triangular faces. In unit-local space the
+// evaluator reduces to an octahedron of vertex distance (1-c)/2 offset by c/2 --
+// isotropic, whatever the node's half-extents, because that shape contracts all
+// three axes onto one. So the core shrinks and the offset grows as the dial
+// turns, and at full roundness all eight triangles collapse onto the sphere the
+// shape has become. Sharp case excluded for the same reason as the box above.
+void append_rounded_octahedron_edges(std::vector<LineVertex>& out, const simd_float4x4& m,
+                                     simd_float4 color, float roundness) {
+    const float core = 0.5f * (1.0f - roundness);          // vertex distance of the core
+    const float offset = 0.5f * roundness / std::sqrt(3.0f); // face offset, per component
+    for (int sx = -1; sx <= 1; sx += 2) {
+        for (int sy = -1; sy <= 1; sy += 2) {
+            for (int sz = -1; sz <= 1; sz += 2) {
+                const simd_float3 n{static_cast<float>(sx), static_cast<float>(sy),
+                                    static_cast<float>(sz)};
+                const std::array<simd_float3, 3> tri = {{
+                    simd_float3{n.x * core, 0.0f, 0.0f} + offset * n,
+                    simd_float3{0.0f, n.y * core, 0.0f} + offset * n,
+                    simd_float3{0.0f, 0.0f, n.z * core} + offset * n,
+                }};
+                for (int k = 0; k < 3; ++k) {
+                    out.push_back(make_vertex(tri[k], m, color));
+                    out.push_back(make_vertex(tri[(k + 1) % 3], m, color));
+                }
+            }
+        }
+    }
+}
+
+// Octahedron: the 12 edges joining its 6 axis vertices.
+void append_octahedron_edges(std::vector<LineVertex>& out, const simd_float4x4& m,
+                             simd_float4 color) {
+    const std::array<simd_float3, 2> poles = {{{0, 0.5f, 0}, {0, -0.5f, 0}}};
+    const std::array<simd_float3, 4> belt = {{{0.5f, 0, 0}, {0, 0, 0.5f}, {-0.5f, 0, 0}, {0, 0, -0.5f}}};
+    for (int i = 0; i < 4; ++i) {
+        out.push_back(make_vertex(belt[i], m, color));
+        out.push_back(make_vertex(belt[(i + 1) % 4], m, color));
+        for (const simd_float3& pole : poles) {
+            out.push_back(make_vertex(belt[i], m, color));
+            out.push_back(make_vertex(pole, m, color));
+        }
+    }
+}
+
+// Both surfaces of revolution draw the same way: their profile measured off
+// the SDF, revolved, plus the equator ring at full radius. What differs between
+// a capsule and a vesica is entirely in that profile, so nothing here has to
+// know which it is drawing.
+void append_lathe_shape(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                        const Node& node) {
+    append_lathe(out, m, color, sample_profile(node), 2);
+    append_ring(out, m, color, 0.0f, 0.5f, kShapeRingSegments);
+}
 
 } // namespace
 
@@ -436,14 +679,44 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
         } else {
             continue; // unselected Add: already visible live via the raymarch
         }
-        const simd_float4x4 world_from_local = node.world_from_local();
-        if (node.shape == Shape::Cube) {
-            append_cube_edges(out, world_from_local, color);
-        } else {
-            append_sphere_outline(out, world_from_local, color, eye_world);
-        }
+        append_node_wireframe(out, node, color, eye_world);
     }
     return out;
+}
+
+void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_float4 color,
+                           simd_float3 eye_world) {
+    // simd_abs, NOT node.world_from_local(). The evaluator measures against
+    // abs(half_extents) (sdf_safe_half_extents), so a negative scale component
+    // mirrors the solid; passing the raw scale here would flip the outline
+    // instead and draw an asymmetric shape -- a cone, a pyramid -- tip-down
+    // against a tip-up surface. Unreachable through the UI, where every drag
+    // clamps to kNodeScaleMin, but SceneDocument::add takes a Node verbatim.
+    const simd_float4x4 m = trs_matrix(node.position, node.rotation, simd_abs(node.scale));
+    const simd_float3 half = 0.5f * simd_abs(node.scale);
+    const float param = node.shape_param;
+    // Zero-roundness threshold: below it the rounded builders would draw every
+    // edge twice for no visible gain, so the sharp forms take over.
+    const bool rounded = param > 1e-4f;
+    switch (node.shape) {
+        case Shape::Cube:
+            if (rounded) { append_rounded_box_edges(out, m, color, half, param); }
+            else { append_cube_edges(out, m, color); }
+            break;
+        case Shape::Sphere:     append_sphere_outline(out, m, color, eye_world); break;
+        case Shape::Cone:       append_cone_edges(out, m, color, param); break;
+        case Shape::Capsule:    append_lathe_shape(out, m, color, node); break;
+        case Shape::Octahedron:
+            if (rounded) { append_rounded_octahedron_edges(out, m, color, param); }
+            else { append_octahedron_edges(out, m, color); }
+            break;
+        case Shape::Pyramid:    append_pyramid_edges(out, m, color, param); break;
+        case Shape::Prism:
+            append_prism_edges(out, m, color,
+                               static_cast<int>(std::lround(std::clamp(param, 3.0f, 12.0f))));
+            break;
+        case Shape::Vesica:     append_lathe_shape(out, m, color, node); break;
+    }
 }
 
 } // namespace sq

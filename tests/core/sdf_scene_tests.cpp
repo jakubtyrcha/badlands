@@ -54,10 +54,10 @@ Camera make_camera(float aspect) {
 
 // --- SdfNode layout -----------------------------------------------------------
 
-TEST_CASE("SdfNode is 48 bytes (compile-time; static_assert in sdf_scene.h covers both "
+TEST_CASE("SdfNode is 64 bytes (compile-time; static_assert in sdf_scene.h covers both "
           "the C++ and MSL sides -- this test just confirms the C++ side is actually "
           "exercised by this binary)") {
-    CHECK(sizeof(SdfNode) == 48u);
+    CHECK(sizeof(SdfNode) == 64u);
 }
 
 // --- pack_scene: exact packing ---------------------------------------------

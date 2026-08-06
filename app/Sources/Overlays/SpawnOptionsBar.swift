@@ -1,9 +1,13 @@
 import SwiftUI
 import ShapeshifterCore
 
-/// Second row below the ModeBar, visible only in `.spawn` mode: shape
-/// (cube/sphere) and operation (additive/subtract) pickers for the next
-/// spawn. Styled to match ModeBar's compact segmented buttons.
+/// Second row below the ModeBar, visible only in `.spawn` mode: shape and
+/// operation (additive/subtract) pickers for the next spawn. Styled to match
+/// ModeBar's compact segmented buttons.
+///
+/// Eight shapes at 28pt with 4pt gaps is ~252pt, which still sits comfortably
+/// under the mode bar in the 800pt minimum window — so the row stays flat
+/// rather than becoming a grid or a menu.
 struct SpawnOptionsBar: View {
     let vm: EditorViewModel
 
@@ -19,9 +23,18 @@ struct SpawnOptionsBar: View {
         let value: sq.Op
     }
 
+    /// Order matches `sq.Shape`'s own, so the row reads in the same order as
+    /// every table in core. `oval` for the vesica is the weakest of the eight —
+    /// SF Symbols has no lens/almond glyph — and is the one to revisit first.
     private let shapes: [ShapeInfo] = [
         ShapeInfo(symbol: "cube", help: "Cube", value: .Cube),
         ShapeInfo(symbol: "circle", help: "Sphere", value: .Sphere),
+        ShapeInfo(symbol: "cone", help: "Cone", value: .Cone),
+        ShapeInfo(symbol: "capsule", help: "Capsule", value: .Capsule),
+        ShapeInfo(symbol: "diamond", help: "Octahedron", value: .Octahedron),
+        ShapeInfo(symbol: "pyramid", help: "Pyramid", value: .Pyramid),
+        ShapeInfo(symbol: "hexagon", help: "Prism", value: .Prism),
+        ShapeInfo(symbol: "oval", help: "Vesica", value: .Vesica),
     ]
 
     private let ops: [OpInfo] = [

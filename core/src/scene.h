@@ -1,5 +1,6 @@
 #pragma once
 #include <simd/simd.h>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -23,6 +24,12 @@ struct Node {
     // quaternion.
     simd_quatf rotation = simd_quaternion(0.f, 0.f, 0.f, 1.f);
     simd_float3 scale = {1, 1, 1};
+    // The shape's one profile parameter -- see ShapeParamSpec. Meaningless for
+    // a shape whose spec has no param, and left at 0 for those. make_node
+    // seeds it from the spec's default; Editor::setNodeShapeParam is the only
+    // thing that should write it afterwards, because it is also what clamps
+    // and snaps.
+    float shape_param = 0.0f;
     bool snapped = false;
     simd_float3 snap_point = {0, 0, 0};
     simd_float3 snap_normal = {0, 1, 0};
@@ -51,22 +58,23 @@ public:
     int32_t spawn_unsnapped(Shape shape, Op op, simd_float3 position);
 
     // Removes the node with this id from the flat vector; unknown id is a
-    // no-op. Per-shape name counters (cube_count_/sphere_count_) are NOT
-    // reset or decremented, so a later spawn of that shape always gets the
-    // next number, never a reused name.
+    // no-op. Per-shape name counters are NOT reset or decremented, so a later
+    // spawn of that shape always gets the next number, never a reused name.
     void remove_node(int32_t id);
 
 private:
     // Allocates id (next_id_++) and an auto name ("<Shape> <per-shape count>",
     // counting spawns of that shape independent of ids/removals); shape, op
-    // set; rotation/scale/snap fields left at Node's defaults for the caller
-    // to fill in as needed.
+    // and shape_param (from the shape's spec default) set; rotation/scale/snap
+    // fields left at Node's defaults for the caller to fill in as needed.
     Node make_node(Shape shape, Op op);
 
     std::vector<Node> nodes_;
     int32_t next_id_ = 1;
-    int32_t cube_count_ = 0;
-    int32_t sphere_count_ = 0;
+    // One counter per shape, indexed by the enum's own value. Was a pair of
+    // named ints back when there were two shapes; a table is what keeps adding
+    // a ninth shape from being an edit in three places.
+    std::array<int32_t, kShapeCount> shape_counts_ = {};
 };
 
 } // namespace sq

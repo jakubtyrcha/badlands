@@ -1,5 +1,7 @@
 #include "scene.h"
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -8,10 +10,73 @@
 namespace sq {
 
 namespace {
-const char* shape_name(Shape shape) {
-    return (shape == Shape::Cube) ? "Cube" : "Sphere";
+
+// Indexed by Shape's own value, so a new shape is one row here and one enum
+// case -- never a chain of ternaries to extend.
+constexpr const char* kShapeNames[kShapeCount] = {
+    "Cube", "Sphere", "Cone", "Capsule", "Octahedron", "Pyramid", "Prism", "Vesica",
+};
+
+// The dial table. Every shape but the sphere has one profile degree of freedom
+// its bounding box cannot state, and carries a dial for it. The sphere is the
+// sole exception because an ellipsoid is already the roundest thing its box
+// allows -- there is nothing left to vary.
+//
+// ROUNDNESS is the same idea on four different shapes (see sdf_eval_node), and
+// is why the vesica and the octahedron are not the parameterless oddities an
+// earlier draft made them: their POINTINESS is indeed their box aspect, and a
+// dial for that would have duplicated the Shape gizmo -- but how sharp their
+// tips are is free, and the box says nothing about it.
+//
+// Defaults are chosen so a freshly spawned shape looks like its own name: a
+// cone is a cone (sharp), a cube has square corners, a capsule is a capsule.
+constexpr ShapeParamSpec kShapeParams[kShapeCount] = {
+    /* Cube       */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // roundness: box -> ball
+    /* Sphere     */ {false, 0.0f, 0.0f,  0.0f,  0.0f, false},
+    /* Cone       */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // tip ratio: point -> cylinder
+    /* Capsule    */ {true,  0.0f, 1.0f,  0.05f, 1.0f, false},  // cap roundness: flat -> capsule
+    /* Octahedron */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // roundness: faceted -> ball
+    /* Pyramid    */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // tip ratio: point -> box
+    /* Prism      */ {true,  3.0f, 12.0f, 1.0f,  6.0f, true},   // side count
+    /* Vesica     */ {true,  0.0f, 1.0f,  0.05f, 0.0f, false},  // tip roundness: cusps -> capsule
+};
+
+// Shape -> table index, guarding against a value from outside the enum (an id
+// crossing the interop boundary is just an int32).
+int shape_index(Shape shape) {
+    const int32_t raw = static_cast<int32_t>(shape);
+    return (raw >= 0 && raw < kShapeCount) ? static_cast<int>(raw) : 0;
 }
+
+const char* shape_name(Shape shape) {
+    return kShapeNames[shape_index(shape)];
+}
+
 } // namespace
+
+ShapeParamSpec shape_param_spec(Shape shape) {
+    return kShapeParams[shape_index(shape)];
+}
+
+float snap_shape_param(const ShapeParamSpec& spec, float value) {
+    if (!spec.has_param || !(spec.step > 0.0f)) {
+        return 0.0f;
+    }
+    // Clamp BEFORE snapping: snapping first could round a just-out-of-range
+    // value onto a valid multiple and hide that it was out of range at all.
+    // NaN is clamped to min_value rather than propagating -- std::clamp on a
+    // NaN is undefined, so this is a comparison chain instead.
+    float v = value;
+    if (!(v >= spec.min_value)) {
+        v = spec.min_value;
+    } else if (v > spec.max_value) {
+        v = spec.max_value;
+    }
+    const float snapped = std::round(v / spec.step) * spec.step;
+    // Re-clamp: the round can step outside the range when an end is not itself
+    // a multiple of the step.
+    return std::clamp(snapped, spec.min_value, spec.max_value);
+}
 
 simd_float4x4 Node::world_from_local() const {
     return trs_matrix(position, rotation, scale);
@@ -41,7 +106,8 @@ Node SceneDocument::make_node(Shape shape, Op op) {
     node.id = next_id_++;
     node.shape = shape;
     node.op = op;
-    int32_t& count = (shape == Shape::Cube) ? cube_count_ : sphere_count_;
+    node.shape_param = shape_param_spec(shape).default_value;
+    int32_t& count = shape_counts_[shape_index(shape)];
     node.name = std::string(shape_name(shape)) + " " + std::to_string(++count);
     return node;
 }

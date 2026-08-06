@@ -64,11 +64,37 @@ Two modes, selected by the icons top-left or keys **1**–**2**:
    additive/subtract toggle and Delete (permanent — no undo). Clicking empty
    space deselects. There is no tool to arm: a selected shape shows **both**
    of its manipulators at once, and the handle you grab decides what happens.
-2. **Spawn (2)** — a second row of options chooses the shape (cube/sphere) and
-   operation (additive/subtract). Click in the viewport to place it: clicking
-   an existing shape snaps the new one onto that surface; a miss lands it a
-   fixed distance ahead of the camera. Either way the new node is selected and
-   the editor returns to Edit.
+2. **Spawn (2)** — a second row of options chooses the shape and operation
+   (additive/subtract). Click in the viewport to place it: clicking an existing
+   shape snaps the new one onto that surface; a miss lands it a fixed distance
+   ahead of the camera. Either way the new node is selected and the editor
+   returns to Edit.
+
+### The eight shapes, and the dial
+
+| Shape | Dial | |
+|---|---|---|
+| Cone, Pyramid | tip ratio | 0 = point, 1 = cylinder / box |
+| Cube, Octahedron | roundness | 0 = sharp, 1 = ball |
+| Capsule | cap roundness | 0 = flat cylinder, 1 = capsule |
+| Vesica | tip roundness | 0 = cusps, 1 = capsule |
+| Prism | side count | 3 to 12 |
+| Sphere | — | already the roundest thing its box allows |
+
+A shape's **size** is its box — position, rotation and the three scale handles.
+What a box cannot say is a shape's *profile*: how blunt a cone's tip is, how
+round a capsule's caps are, how many faces a prism has. That one leftover
+degree of freedom gets a dial. Every shape has one except the sphere, and
+roundness is the same idea on four of them.
+
+The dial is the **third seat in the radial menu**, between the op toggle and
+Delete — it is the same kind of thing as those, something about the shape that
+no gizmo handle can reach. At rest it shows its value: a ring gauge around the
+rim with the number inside. Press and hold, and it becomes the thing you turn.
+The arc lays itself out so the value you started on sits under your cursor, so
+there is no jump on grab, and both ends are within half a turn of wherever you
+grabbed. The track, its detents and the readout appear only while you hold it.
+Continuous dials step in 0.05; the prism's side count steps in whole numbers.
 
 ### The two manipulators
 
@@ -128,7 +154,7 @@ Swift app), and `CoreTests` (a doctest-based command-line test runner for
 the core).
 
 - **Core** (`core/src`) owns the scene document, orbit camera and its
-  controller, cursor-anchored navigation (`navigation.h`), ray-based picking,
+  controller, cursor-anchored navigation (`navigation.h`), SDF-traced picking,
   gizmo drag/scale math, DCSDD mesh reconstruction
   (dormant, background thread), and all Metal rendering (raymarch + wireframe
   + shaded-mesh pipelines, depth buffer, per-frame encode) via metal-cpp.
@@ -156,6 +182,8 @@ See `CLAUDE.md` for interop and coding conventions.
 - No materials or lighting — shading is normal-colored debug only.
 - No export/saving.
 - Single window.
-- Picking (and therefore the orbit pivot and the hover dot) intersects the
-  analytic primitives and ignores CSG, so a region carved away by a Subtract
-  node still reports a hit.
+- Picking (and therefore the orbit pivot and the hover dot) sphere-traces each
+  node's own SDF and ignores CSG, so a region carved away by a Subtract node
+  still reports a hit. Hits land within the trace's epsilon of the surface
+  rather than exactly on it, and a ray grazing a silhouette can exhaust its
+  step budget and miss.

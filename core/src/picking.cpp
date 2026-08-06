@@ -1,9 +1,10 @@
 #include "picking.h"
 
 #include <cmath>
-#include <limits>
 
 #include "scene.h"
+#include "sdf.h"        // local_sdf_node -- the shared world-transform-stripped node
+#include "sdf_scene.h"  // SdfNode, sdf_eval_node -- the same evaluator the renderer traces
 
 namespace sq {
 
@@ -11,134 +12,89 @@ namespace {
 
 constexpr float kEps = 1e-4f;
 
-float sign_nonzero(float v) {
-    return (v >= 0.0f) ? 1.0f : -1.0f;
+// Sphere-trace tunables. Tighter than the viewport's (raymarch.metal uses a
+// distance-scaled 5e-4) because this runs a handful of times per mouse move
+// rather than once per pixel, and because the hit point becomes a spawn's
+// position -- so the budget is better spent here than there.
+constexpr float kTraceHitEps = 1e-5f;
+constexpr float kTraceMaxDist = 1e3f;   // far beyond the camera's 90-unit radius clamp
+constexpr int kTraceMaxSteps = 192;
+// Floor on a step, so a ray running exactly along a surface cannot stall and
+// burn the whole budget without advancing.
+constexpr float kTraceMinStep = 1e-6f;
+// Central-difference offset for the normal. Comfortably above kTraceHitEps so
+// the four taps straddle the surface rather than all landing inside its
+// tolerance band, which would leave the gradient dominated by float noise.
+constexpr float kNormalEps = 1e-3f;
+
+// Tetrahedron-offset gradient (iq's): 4 evaluations rather than the 6 a naive
+// central difference needs, and the same pattern raymarch.metal shades with.
+// Points outward on an exit hit as well as an entry one, which is the
+// convention the analytic face normals used to produce by hand.
+simd_float3 local_normal(const SdfNode& sn, simd_float3 q) {
+    const simd_float3 e1 = {1.0f, -1.0f, -1.0f};
+    const simd_float3 e2 = {-1.0f, -1.0f, 1.0f};
+    const simd_float3 e3 = {-1.0f, 1.0f, -1.0f};
+    const simd_float3 e4 = {1.0f, 1.0f, 1.0f};
+    return simd_normalize(e1 * sdf_eval_node(sn, q + e1 * kNormalEps) +
+                          e2 * sdf_eval_node(sn, q + e2 * kNormalEps) +
+                          e3 * sdf_eval_node(sn, q + e3 * kNormalEps) +
+                          e4 * sdf_eval_node(sn, q + e4 * kNormalEps));
 }
 
 } // namespace
 
-std::optional<RayHit> ray_unit_sphere(const Ray& local) {
-    const simd_float3& o = local.origin;
-    const simd_float3& d = local.dir;
-
-    // |o + t d|^2 = 0.25  =>  a t^2 + b t + c = 0
-    const float a = simd_dot(d, d);
-    const float b = 2.0f * simd_dot(o, d);
-    const float c = simd_dot(o, o) - 0.25f;
-
-    const float disc = b * b - 4.0f * a * c;
-    if (disc < 0.0f) {
-        return std::nullopt; // no real roots: ray misses the sphere entirely
-    }
-
-    const float sqrt_disc = std::sqrt(disc);
-    const float root_near = (-b - sqrt_disc) / (2.0f * a);
-    const float root_far  = (-b + sqrt_disc) / (2.0f * a);
-
-    // Smallest root > kEps: an origin inside the sphere makes root_near <=
-    // kEps (often negative), so this naturally falls through to the exit
-    // root (root_far).
-    float t;
-    if (root_near > kEps) {
-        t = root_near;
-    } else if (root_far > kEps) {
-        t = root_far;
-    } else {
+std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
+    const float dir_len = simd_length(world.dir);
+    if (!(dir_len > 0.0f)) {
         return std::nullopt;
     }
+    const simd_float3 dir = world.dir / dir_len;
 
-    const simd_float3 point = o + t * d;
-    const simd_float3 normal = simd_normalize(point); // point / 0.5, then normalized == normalize(point)
-    return RayHit{t, point, normal};
-}
+    // Rigid world -> local. No simd_inverse and no scale division: scale stays
+    // baked into the half-extents the evaluator measures against, exactly as it
+    // does for rendering, so this frame differs from world by a rotation and a
+    // translation only -- which is what lets `t` mean a world distance.
+    const simd_quatf inv_rotation = simd_conjugate(node.rotation);
+    const simd_float3 o = simd_act(inv_rotation, world.origin - node.position);
+    const simd_float3 d = simd_act(inv_rotation, dir);
 
-std::optional<RayHit> ray_unit_cube(const Ray& local) {
-    const float o[3] = {local.origin.x, local.origin.y, local.origin.z};
-    const float d[3] = {local.dir.x, local.dir.y, local.dir.z};
+    // Reusing sdf_eval_node rather than re-deriving a local evaluator is the
+    // point: it is what makes picking and rendering answer with the same
+    // surface by construction.
+    const SdfNode sn = local_sdf_node(node);
 
-    float tmin = -std::numeric_limits<float>::infinity();
-    float tmax = std::numeric_limits<float>::infinity();
-    int tmin_axis = -1;
-    int tmax_axis = -1;
-
-    for (int axis = 0; axis < 3; ++axis) {
-        if (std::fabs(d[axis]) < 1e-12f) {
-            if (o[axis] < -0.5f || o[axis] > 0.5f) {
-                return std::nullopt; // parallel to this pair of slab planes and outside them
-            }
-            continue; // parallel but inside: this axis doesn't constrain tmin/tmax
+    // Start at kEps rather than 0, which is what makes a hit at or behind the
+    // origin impossible by construction -- the guard the analytic version
+    // spelled out as an explicit `world_t <= kEps` rejection afterwards.
+    float t = kEps;
+    for (int step = 0; step < kTraceMaxSteps && t < kTraceMaxDist; ++step) {
+        const simd_float3 q = o + t * d;
+        const float dist = sdf_eval_node(sn, q);
+        // ABSOLUTE value, which is the whole of what preserves the behaviour
+        // that an origin INSIDE a node returns that node's exit face -- and the
+        // eye really does end up inside geometry, because dollying in is
+        // unclamped. From inside, |d| is still a lower bound on the distance to
+        // the boundary, so stepping by it cannot overshoot the exit surface.
+        const float advance = std::fabs(dist);
+        if (advance < kTraceHitEps) {
+            const simd_float3 normal = local_normal(sn, q);
+            return RayHit{t, node.position + simd_act(node.rotation, q),
+                          simd_act(node.rotation, normal)};
         }
-        const float t1 = (-0.5f - o[axis]) / d[axis];
-        const float t2 = (0.5f - o[axis]) / d[axis];
-        const float axis_near = std::fmin(t1, t2);
-        const float axis_far  = std::fmax(t1, t2);
-        if (axis_near > tmin) {
-            tmin = axis_near;
-            tmin_axis = axis;
-        }
-        if (axis_far < tmax) {
-            tmax = axis_far;
-            tmax_axis = axis;
-        }
+        t += std::fmax(advance, kTraceMinStep);
     }
-
-    if (tmax < std::fmax(tmin, kEps)) {
-        return std::nullopt;
-    }
-
-    const bool entry = tmin > kEps;
-    const float t = entry ? tmin : tmax;
-    const int axis = entry ? tmin_axis : tmax_axis;
-
-    // Face normal: unit axis vector of the crossing axis, signed toward the
-    // side the ray crossed — opposite the ray's direction component on entry
-    // (the ray arrives from outside, moving against the outward normal),
-    // along it on exit (the ray leaves moving with the outward normal).
-    const float comp = entry ? -sign_nonzero(d[axis]) : sign_nonzero(d[axis]);
-    simd_float3 normal = {0.0f, 0.0f, 0.0f};
-    normal[axis] = comp;
-
-    const simd_float3 point = local.origin + t * local.dir;
-    return RayHit{t, point, normal};
+    return std::nullopt;
 }
 
 std::optional<PickHit> raycast_scene(const SceneDocument& doc, const Ray& world) {
     std::optional<PickHit> best;
-
     for (const Node& node : doc.nodes()) {
-        const simd_float4x4 M = node.world_from_local();
-        const simd_float4x4 Minv = simd_inverse(M);
-
-        const simd_float4 local_origin4 =
-            simd_mul(Minv, (simd_float4){world.origin.x, world.origin.y, world.origin.z, 1.0f});
-        const simd_float4 local_dir4 =
-            simd_mul(Minv, (simd_float4){world.dir.x, world.dir.y, world.dir.z, 0.0f}); // NOT re-normalized
-        const Ray local{local_origin4.xyz, local_dir4.xyz};
-
-        const std::optional<RayHit> hit =
-            (node.shape == Shape::Cube) ? ray_unit_cube(local) : ray_unit_sphere(local);
-        if (!hit) {
-            continue;
-        }
-
-        const simd_float4 world_point4 =
-            simd_mul(M, (simd_float4){hit->point.x, hit->point.y, hit->point.z, 1.0f});
-        const simd_float3 world_point = world_point4.xyz;
-        const float world_t = simd_dot(world_point - world.origin, world.dir);
-        if (world_t <= kEps) {
-            continue;
-        }
-
-        const simd_float4x4 Minv_t = simd_transpose(Minv);
-        const simd_float4 world_normal4 =
-            simd_mul(Minv_t, (simd_float4){hit->normal.x, hit->normal.y, hit->normal.z, 0.0f});
-        const simd_float3 world_normal = simd_normalize(world_normal4.xyz);
-
-        if (!best || world_t < best->hit.t) {
-            best = PickHit{node.id, RayHit{world_t, world_point, world_normal}};
+        const std::optional<RayHit> hit = raycast_node(node, world);
+        if (hit && (!best || hit->t < best->hit.t)) {
+            best = PickHit{node.id, *hit};
         }
     }
-
     return best;
 }
 

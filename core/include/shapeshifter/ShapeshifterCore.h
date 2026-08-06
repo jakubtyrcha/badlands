@@ -18,8 +18,45 @@ struct Vec4f { float x, y, z, w; };
 // core/src/scene.h), so their canonical definitions live here rather than in
 // a core/src-private header. scene.h includes this header instead of
 // redefining them.
-enum class Shape : int32_t { Cube = 0, Sphere = 1 };
+// Ids must match the SDF_SHAPE_* defines in shaders/sdf_scene.h, which is the
+// MSL-side copy (that header compiles as Metal and cannot include this one).
+// core/src/sdf.cpp static_asserts every pair, so the two cannot drift.
+enum class Shape : int32_t {
+    Cube = 0, Sphere = 1, Cone = 2, Capsule = 3,
+    Octahedron = 4, Pyramid = 5, Prism = 6, Vesica = 7
+};
+inline constexpr int32_t kShapeCount = 8;
 enum class Op    : int32_t { Add = 0, Subtract = 1 };
+
+// The one profile parameter a shape may carry -- the degree of freedom its
+// bounding box cannot state (how blunt a cone's tip is, how round a capsule's
+// caps are, how many faces a prism has). Shapes whose proportions are fully
+// determined by the box report has_param == false; for them every other field
+// is zero and there is no dial to draw.
+//
+// SINGLE SOURCE OF TRUTH, and deliberately so: core clamps and snaps against
+// these numbers in setNodeShapeParam, and the app layer reads the same struct
+// for the dial's ends, its detents and its readout format. Spelling the range
+// out independently on both sides of the boundary is exactly the drift the
+// gizmo's shared kGizmoPatch* constants exist to prevent.
+struct ShapeParamSpec {
+    bool  has_param;
+    float min_value;
+    float max_value;
+    float step;           // snap granularity: 0.05 continuous, 1 integral
+    float default_value;  // what a freshly spawned node of this shape gets
+    bool  integral;       // formatting hint: show "6", not "6.00"
+};
+
+// The table itself (core/src/scene.cpp). A pure function of Shape, so it sits
+// beside the type rather than behind Editor; Editor::nodeShapeParamSpec is the
+// per-node convenience the app layer actually calls.
+ShapeParamSpec shape_param_spec(Shape shape);
+
+// Clamps to [min_value, max_value] and snaps to the nearest multiple of `step`.
+// A paramless shape's spec snaps everything to 0. Shared so core's setter and
+// any caller that wants to predict the result cannot disagree about rounding.
+float snap_shape_param(const ShapeParamSpec& spec, float value);
 
 // Gizmo handles. Crosses the boundary like Shape/Op: the canonical definition
 // lives here, core/src/gizmo.h consumes it. Axis order is also the pick
@@ -190,6 +227,21 @@ public:
     // node info (tests)
     Vec3f nodeScale(int32_t nodeId) const;          // {0,0,0} for unknown id
     Vec4f nodeRotation(int32_t nodeId) const;       // identity {0,0,0,1} for unknown id
+
+    // --- shape parameter (the radial menu's arc dial) ----------------------
+    //
+    // The dial's whole contract lives here: the spec says what the range is,
+    // the setter is the only thing that writes the value, and it clamps and
+    // snaps on the way in — so the app layer can send raw cursor-derived
+    // values and cannot put a node into a state the renderer has to defend
+    // against.
+    Shape nodeShape(int32_t nodeId) const;               // Shape::Cube for unknown id
+    float nodeShapeParam(int32_t nodeId) const;          // 0 for unknown id
+    void setNodeShapeParam(int32_t nodeId, float value); // clamps, snaps, dirties the lines
+    // has_param == false for an unknown id as well as for a paramless shape:
+    // either way there is no dial to draw, which is the only question the
+    // caller is asking.
+    ShapeParamSpec nodeShapeParamSpec(int32_t nodeId) const;
 
 private:
     Editor();

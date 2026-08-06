@@ -70,7 +70,12 @@ float frame_radius_for_bound(float bound, float fov_y_radians) {
 
 float node_bounding_radius(const Node& node) {
     const simd_float3 half = 0.5f * simd_abs(node.scale);
-    return (node.shape == Shape::Cube) ? simd_length(half) : simd_reduce_max(half);
+    // The ellipsoid is the one shape that cannot reach its box's corners, so it
+    // gets the tighter bound. Everything else can (a cube at its corners, a
+    // pyramid at its base corners, a prism at its vertices), and the six shapes
+    // added after this function was written are all inscribed in the same box --
+    // so the corner distance is the correct bound for all of them.
+    return (node.shape == Shape::Sphere) ? simd_reduce_max(half) : simd_length(half);
 }
 
 } // namespace sq

@@ -7,6 +7,20 @@
 
 namespace sq {
 
+// sq::Shape (the interop enum) and SDF_SHAPE_* (sdf_scene.h's MSL-visible
+// copy) are two spellings of one numbering, and the shader reads the second
+// out of pos_shape.w. This is where they are welded together: the packing
+// below casts straight from one to the other, so a mismatch would repaint
+// every scene silently rather than failing to build.
+static_assert(static_cast<int32_t>(Shape::Cube) == SDF_SHAPE_CUBE, "shape id mismatch: Cube");
+static_assert(static_cast<int32_t>(Shape::Sphere) == SDF_SHAPE_SPHERE, "shape id mismatch: Sphere");
+static_assert(static_cast<int32_t>(Shape::Cone) == SDF_SHAPE_CONE, "shape id mismatch: Cone");
+static_assert(static_cast<int32_t>(Shape::Capsule) == SDF_SHAPE_CAPSULE, "shape id mismatch: Capsule");
+static_assert(static_cast<int32_t>(Shape::Octahedron) == SDF_SHAPE_OCTAHEDRON, "shape id mismatch: Octahedron");
+static_assert(static_cast<int32_t>(Shape::Pyramid) == SDF_SHAPE_PYRAMID, "shape id mismatch: Pyramid");
+static_assert(static_cast<int32_t>(Shape::Prism) == SDF_SHAPE_PRISM, "shape id mismatch: Prism");
+static_assert(static_cast<int32_t>(Shape::Vesica) == SDF_SHAPE_VESICA, "shape id mismatch: Vesica");
+
 // Both thin wrappers over sdf_scene.h's dual-compile math (sq_float3 ==
 // simd_float3 in plain C++ builds, so no conversion is needed) -- kept as
 // free functions here because sdf_tests.cpp pins them directly by this exact
@@ -17,6 +31,17 @@ float sd_box(simd_float3 q, simd_float3 half_extents) {
 
 float sd_ellipsoid(simd_float3 q, simd_float3 radii) {
     return sdf_sd_ellipsoid(q, radii);
+}
+
+SdfNode local_sdf_node(const Node& node) {
+    const simd_float3 half = node.scale * 0.5f;
+    SdfNode sn;
+    sn.pos_shape = sdf_make4(0.0f, 0.0f, 0.0f,
+                             static_cast<float>(static_cast<int32_t>(node.shape)));
+    sn.half_extents_op = sdf_make4(half.x, half.y, half.z, 0.0f); // op is not read by sdf_eval_node
+    sn.inv_rotation = sdf_make4(0.0f, 0.0f, 0.0f, 1.0f);          // identity
+    sn.params = sdf_make4(node.shape_param, 0.0f, 0.0f, 0.0f);
+    return sn;
 }
 
 void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
@@ -36,10 +61,11 @@ void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
         const simd_float4 inv = simd_conjugate(node.rotation).vector;
         SdfNode sn;
         sn.pos_shape = sdf_make4(node.position.x, node.position.y, node.position.z,
-                                  (node.shape == Shape::Cube) ? 0.0f : 1.0f);
+                                  static_cast<float>(static_cast<int32_t>(node.shape)));
         sn.half_extents_op =
             sdf_make4(half.x, half.y, half.z, (node.op == Op::Add) ? 0.0f : 1.0f);
         sn.inv_rotation = sdf_make4(inv.x, inv.y, inv.z, inv.w);
+        sn.params = sdf_make4(node.shape_param, 0.0f, 0.0f, 0.0f);
         out.push_back(sn);
     }
 }
@@ -68,9 +94,11 @@ struct Aabb {
     simd_float3 max;
 };
 
-// Scene AABB = union over nodes of position +/- scale*0.5. Correct bound for
-// both shapes: exact for the box, and a (loose but correct) bound for the
-// ellipsoid, whose extent along each axis never exceeds its radius on that axis.
+// Scene AABB = union over nodes of position +/- scale*0.5. A correct bound for
+// every shape: each one is inscribed in its own half-extent box (exactly so for
+// the cube, loosely for the rest), which is what the cross-section contraction
+// in sdf_eval_node guarantees. Rotation is NOT accounted for -- a pre-existing
+// looseness, and the reason this is only used by the dormant DCSDD sampler.
 Aabb scene_aabb(const SceneDocument& doc) {
     const std::vector<Node>& nodes = doc.nodes();
     Aabb box{nodes[0].position - nodes[0].scale * 0.5f, nodes[0].position + nodes[0].scale * 0.5f};

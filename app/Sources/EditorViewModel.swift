@@ -43,6 +43,15 @@ final class EditorViewModel {
     /// `selectedNodeID` is nil.
     var selectedNodeOp: sq.Op? = nil
 
+    /// The selected shape's profile parameter and its spec, or nil when there
+    /// is no selection OR the selected shape has no parameter — those are the
+    /// same answer to the radial menu ("no dial to draw"), so they collapse
+    /// into one optional rather than needing the view to check `has_param`.
+    var selectedNodeParamSpec: sq.ShapeParamSpec? = nil
+    var selectedNodeParam: Float? = nil
+    /// What the selected shape is, so the dial can say what it adjusts.
+    var selectedNodeShape: sq.Shape? = nil
+
     /// What the current press is doing.
     ///
     /// A press starts `.pending` because a click and a drag are the same event
@@ -302,6 +311,20 @@ final class EditorViewModel {
         refreshOverlayState()
     }
 
+    /// Drives the arc dial. `value` is raw — straight off the cursor's angle —
+    /// because core clamps and snaps it; reading the mirror back afterwards is
+    /// what makes the knob sit on a detent rather than wherever the cursor is.
+    ///
+    /// Deliberately does NOT set `isDragging`. That flag hides the whole radial
+    /// menu so it cannot fight a gizmo drag, and this gesture IS the menu —
+    /// raising it here would make the dial vanish from under the cursor
+    /// turning it.
+    func setSelectedShapeParam(_ value: Float) {
+        guard let id = selectedNodeID else { return }
+        editor.setNodeShapeParam(id, value)
+        refreshOverlayState()
+    }
+
     /// Deletes the selected node (permanent — no undo). Stays in `.edit`:
     /// there is no camera mode to fall back to any more, and none is needed.
     func deleteSelected() {
@@ -355,5 +378,16 @@ final class EditorViewModel {
         let anchor = editor.projectSelectedAnchor()
         radialAnchor = anchor.visible ? CGPoint(x: CGFloat(anchor.x), y: CGFloat(anchor.y)) : nil
         selectedNodeOp = selectedNodeID.map { editor.nodeOp($0) }
+
+        if let id = selectedNodeID {
+            let spec = editor.nodeShapeParamSpec(id)
+            selectedNodeShape = editor.nodeShape(id)
+            selectedNodeParamSpec = spec.has_param ? spec : nil
+            selectedNodeParam = spec.has_param ? editor.nodeShapeParam(id) : nil
+        } else {
+            selectedNodeShape = nil
+            selectedNodeParamSpec = nil
+            selectedNodeParam = nil
+        }
     }
 }

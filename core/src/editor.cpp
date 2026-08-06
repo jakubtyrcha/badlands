@@ -720,4 +720,38 @@ Vec4f Editor::nodeRotation(int32_t nodeId) const {
     return Vec4f{q.x, q.y, q.z, q.w};
 }
 
+Shape Editor::nodeShape(int32_t nodeId) const {
+    const Node* node = impl_->scene.find(nodeId);
+    return node != nullptr ? node->shape : Shape::Cube;
+}
+
+float Editor::nodeShapeParam(int32_t nodeId) const {
+    const Node* node = impl_->scene.find(nodeId);
+    return node != nullptr ? node->shape_param : 0.0f;
+}
+
+ShapeParamSpec Editor::nodeShapeParamSpec(int32_t nodeId) const {
+    const Node* node = impl_->scene.find(nodeId);
+    if (node == nullptr) {
+        return ShapeParamSpec{false, 0.0f, 0.0f, 0.0f, 0.0f, false};
+    }
+    return shape_param_spec(node->shape);
+}
+
+void Editor::setNodeShapeParam(int32_t nodeId, float value) {
+    Node* node = impl_->scene.find(nodeId);
+    if (node == nullptr) {
+        return;
+    }
+    // Clamped and snapped HERE rather than at the call site, so the app layer
+    // can hand over a raw cursor-derived angle and no caller can put a node
+    // into a state the evaluator has to defend against. A paramless shape
+    // snaps to 0, which is what its evaluator ignores anyway.
+    node->shape_param = snap_shape_param(shape_param_spec(node->shape), value);
+    // Unlike setNodeOp's, this one is load-bearing: the wireframe builders read
+    // shape_param (a cone's slant lines and a prism's side count both move with
+    // it), so a stale line buffer would show the previous value.
+    impl_->renderer.set_scene_lines_dirty();
+}
+
 } // namespace sq
