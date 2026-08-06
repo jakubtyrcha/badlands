@@ -66,48 +66,67 @@ float hash01(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
 }
 
 // --- point sampling of the coarse context rasters -----------------------
+//
+// EVERY gate input is sampled C1-SMOOTHLY (per-axis smoothstep weights over
+// the 2x2 coarse cells, node registration, clamped edges). The gates
+// multiply the whole delta, so any kink in them prints an axis-aligned
+// crease along every coarse-cell border once hillshade differentiates the
+// field -- plain bilinear did exactly that, and nearest-biome sampling was
+// worse: a hard amplitude STEP at each biome boundary.
 
-// Bilinear at world pos, node registration (texel i at world i*texel_m),
-// clamped edges -- the same convention resample_bilinear uses.
-float bilinear_point(const Field2D<float>& f, float texel_m, glm::dvec2 p) {
+// The 2x2 smooth-blend stencil at world pos p over an n_w x n_h raster.
+struct SmoothTaps {
+  int x0, x1, y0, y1;
+  float wx1, wy1;  // smoothstep weight of the +1 corner per axis
+};
+
+SmoothTaps smooth_taps(int n_w, int n_h, float texel_m, glm::dvec2 p) {
   const double sx = std::clamp(p.x / texel_m, 0.0,
-                               static_cast<double>(f.width - 1));
+                               static_cast<double>(n_w - 1));
   const double sy = std::clamp(p.y / texel_m, 0.0,
-                               static_cast<double>(f.height - 1));
-  const int x0 = static_cast<int>(sx), y0 = static_cast<int>(sy);
-  const int x1 = std::min(x0 + 1, f.width - 1);
-  const int y1 = std::min(y0 + 1, f.height - 1);
-  const float fx = static_cast<float>(sx - x0), fy = static_cast<float>(sy - y0);
-  const float a = f.at(x0, y0) * (1 - fx) + f.at(x1, y0) * fx;
-  const float b = f.at(x0, y1) * (1 - fx) + f.at(x1, y1) * fx;
-  return a * (1 - fy) + b * fy;
+                               static_cast<double>(n_h - 1));
+  SmoothTaps t;
+  t.x0 = static_cast<int>(sx);
+  t.y0 = static_cast<int>(sy);
+  t.x1 = std::min(t.x0 + 1, n_w - 1);
+  t.y1 = std::min(t.y0 + 1, n_h - 1);
+  const float fx = static_cast<float>(sx - t.x0);
+  const float fy = static_cast<float>(sy - t.y0);
+  t.wx1 = fx * fx * (3.0f - 2.0f * fx);
+  t.wy1 = fy * fy * (3.0f - 2.0f * fy);
+  return t;
 }
 
-// Bilinear on the WET indicator (depth > 0), not on depth: a 300 m-deep lake
-// must not feather 40x further than a pond.
+template <typename At>
+float smooth_blend(const SmoothTaps& t, At&& at) {
+  const float a = at(t.x0, t.y0) * (1 - t.wx1) + at(t.x1, t.y0) * t.wx1;
+  const float b = at(t.x0, t.y1) * (1 - t.wx1) + at(t.x1, t.y1) * t.wx1;
+  return a * (1 - t.wy1) + b * t.wy1;
+}
+
+float smooth_point(const Field2D<float>& f, float texel_m, glm::dvec2 p) {
+  const SmoothTaps t = smooth_taps(f.width, f.height, texel_m, p);
+  return smooth_blend(t, [&](int x, int y) { return f.at(x, y); });
+}
+
+// The WET indicator (depth > 0), not depth itself: a 300 m-deep lake must
+// not feather 40x further than a pond. At a wet node all four corners are 1,
+// so the exact-zero mask contract survives the smoothing.
 float wet_fraction(const Field2D<float>& depth, float texel_m, glm::dvec2 p) {
-  const double sx = std::clamp(p.x / texel_m, 0.0,
-                               static_cast<double>(depth.width - 1));
-  const double sy = std::clamp(p.y / texel_m, 0.0,
-                               static_cast<double>(depth.height - 1));
-  const int x0 = static_cast<int>(sx), y0 = static_cast<int>(sy);
-  const int x1 = std::min(x0 + 1, depth.width - 1);
-  const int y1 = std::min(y0 + 1, depth.height - 1);
-  const float fx = static_cast<float>(sx - x0), fy = static_cast<float>(sy - y0);
-  const auto wet = [&](int x, int y) {
-    return depth.at(x, y) > 0.0f ? 1.0f : 0.0f;
-  };
-  const float a = wet(x0, y0) * (1 - fx) + wet(x1, y0) * fx;
-  const float b = wet(x0, y1) * (1 - fx) + wet(x1, y1) * fx;
-  return a * (1 - fy) + b * fy;
+  const SmoothTaps t = smooth_taps(depth.width, depth.height, texel_m, p);
+  return smooth_blend(
+      t, [&](int x, int y) { return depth.at(x, y) > 0.0f ? 1.0f : 0.0f; });
 }
 
-Biome biome_at(const Field2D<uint8_t>& biome, float texel_m, glm::dvec2 p) {
-  const int x = std::clamp(static_cast<int>(std::lround(p.x / texel_m)), 0,
-                           biome.width - 1);
-  const int y = std::clamp(static_cast<int>(std::lround(p.y / texel_m)), 0,
-                           biome.height - 1);
-  return static_cast<Biome>(std::min<uint8_t>(biome.at(x, y), kBiomeCount - 1));
+// Per-biome style, interpolated in RATIO space: each coarse cell contributes
+// its biome's depth ratio and the blend is C1, so a Mountain/Hills border
+// grades over a cell instead of stepping 57% in amplitude.
+float depth_ratio_at(const Field2D<uint8_t>& biome, float texel_m,
+                     glm::dvec2 p) {
+  const SmoothTaps t = smooth_taps(biome.width, biome.height, texel_m, p);
+  return smooth_blend(t, [&](int x, int y) {
+    return kDepthRatio[std::min<uint8_t>(biome.at(x, y), kBiomeCount - 1)];
+  });
 }
 
 // --- the gully profile ---------------------------------------------------
@@ -130,7 +149,7 @@ Profile gully_profile(float t) {
 
 // One octave's oriented-stripe field at p: the 2x2 surrounding orientation
 // cells each carve their own stripe train (downhill direction frozen at the
-// cell's hashed pivot), blended with bilinear hats so cell borders are C0.
+// cell's hashed pivot), blended C1 across cell borders (see below).
 struct OctaveSample {
   float value = 0.0f;   // dimensionless profile height
   glm::vec2 grad{0.0f}; // d(value)/d(world metres)
@@ -144,27 +163,36 @@ OctaveSample octave_stripes(const ReliefContext& ctx, int octave,
   const int cx0 = static_cast<int>(std::floor(gx));
   const int cy0 = static_cast<int>(std::floor(gy));
 
+  // Per-axis SMOOTHSTEP blend between the two cells, not a linear hat: the
+  // pair (1-s, s) still sums to 1, but the blend is C1 across cell borders.
+  // A linear hat left visible axis-aligned creases at every cell edge of
+  // every octave once hillshade (a derivative) got hold of the field.
+  const float ux = static_cast<float>(gx - cx0);
+  const float uy = static_cast<float>(gy - cy0);
+  const float sx = ux * ux * (3.0f - 2.0f * ux);
+  const float sy = uy * uy * (3.0f - 2.0f * uy);
+  const float dsx = 6.0f * ux * (1.0f - ux) / cell;
+  const float dsy = 6.0f * uy * (1.0f - uy) / cell;
+
   OctaveSample out;
   for (int j = 0; j < 2; ++j) {
     for (int i = 0; i < 2; ++i) {
       const int cxi = cx0 + i, cyi = cy0 + j;
-      const uint32_t ux = static_cast<uint32_t>(cxi);
-      const uint32_t uy = static_cast<uint32_t>(cyi);
+      const uint32_t ucx = static_cast<uint32_t>(cxi);
+      const uint32_t ucy = static_cast<uint32_t>(cyi);
 
-      // Hat weights and their world derivatives.
-      const float fx = static_cast<float>(gx - cx0) - i;
-      const float fy = static_cast<float>(gy - cy0) - j;
-      const float wx = 1.0f - std::fabs(fx), wy = 1.0f - std::fabs(fy);
+      const float wx = i ? sx : 1.0f - sx;
+      const float wy = j ? sy : 1.0f - sy;
       if (wx <= 0.0f || wy <= 0.0f) continue;
-      const float dwx = (fx < 0.0f ? 1.0f : -1.0f) / cell;
-      const float dwy = (fy < 0.0f ? 1.0f : -1.0f) / cell;
+      const float dwx = i ? dsx : -dsx;
+      const float dwy = j ? dsy : -dsy;
 
       // The cell's pivot, and the downhill direction frozen there. On flat
       // ground the direction is the pivot's hash -- stripes still form, they
       // just stop pretending to follow drainage.
       const glm::dvec2 pivot{
-          (cxi + hash01(ctx.seed, octave, ux, uy * 3u + 1u)) * double(cell),
-          (cyi + hash01(ctx.seed, octave, ux, uy * 3u + 2u)) * double(cell)};
+          (cxi + hash01(ctx.seed, octave, ucx, ucy * 3u + 1u)) * double(cell),
+          (cyi + hash01(ctx.seed, octave, ucx, ucy * 3u + 2u)) * double(cell)};
       const CubicSample base = cubic_sample(*ctx.bed, ctx.src_texel_m, pivot);
       glm::vec2 down;
       const float g2 = base.grad.x * base.grad.x + base.grad.y * base.grad.y;
@@ -172,7 +200,7 @@ OctaveSample octave_stripes(const ReliefContext& ctx, int octave,
         down = base.grad / std::sqrt(g2);
       } else {
         const float a =
-            2.0f * float(M_PI) * hash01(ctx.seed, octave, ux, uy * 3u);
+            2.0f * float(M_PI) * hash01(ctx.seed, octave, ucx, ucy * 3u);
         down = {std::cos(a), std::sin(a)};
       }
       const glm::vec2 across{-down.y, down.x};
@@ -209,13 +237,12 @@ ReliefSample sample_relief_delta(const ReliefContext& ctx,
   const float water_gate = 1.0f - smoothstep01(0.0f, kWetGateHi, wet);
   if (water_gate <= 0.0f) return {};
 
-  const float soil = bilinear_point(*ctx.soil, ctx.src_texel_m, world_pos_m);
+  const float soil = smooth_point(*ctx.soil, ctx.src_texel_m, world_pos_m);
   const float soil_gate = 1.0f - smoothstep01(kSoilGateLoM, kSoilGateHiM, soil);
   if (soil_gate <= 0.0f) return {};
 
   const float depth_ratio =
-      kDepthRatio[static_cast<int>(biome_at(*ctx.biome, ctx.src_texel_m,
-                                            world_pos_m))];
+      depth_ratio_at(*ctx.biome, ctx.src_texel_m, world_pos_m);
   if (depth_ratio <= 0.0f) return {};
 
   const CubicSample base =
