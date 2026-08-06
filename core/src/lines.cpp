@@ -1,5 +1,6 @@
 #include "lines.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -20,6 +21,190 @@ LineVertex make_vertex(simd_float3 local, const simd_float4x4& world_from_local,
     return v;
 }
 
+// --- unit-local shape wireframes ---------------------------------------------
+//
+// WHY THESE CAN IGNORE SCALE. Every shape's evaluator works in the contracted
+// frame, where the cross-section is the circle of radius r = min(hx, hz) and the
+// height is hy (see sdf_contract_xz). Dividing that frame by the node's own
+// half-extents -- which is exactly what world_from_local's S undoes -- sends the
+// cross-section to the circle of radius 0.5 and the height to +-0.5 for ANY
+// half-extents. So the shapes below are drawn once, in the unit box, and the
+// node's transform stretches them into the ellipse-sectioned real thing.
+//
+// The two exceptions are the capsule and the vesica, whose profile CURVES bend
+// differently as the box's aspect changes; those take the half-extents and use
+// unit_profile below.
+
+// One closed loop of `segments` points at height y and radius rad. Segment 0
+// sits on +z, which is where sdf_sd_regular_polygon's sector fold puts a
+// vertex -- so passing segments = n draws exactly the prism's cross-section,
+// correctly clocked, and no separate polygon builder is needed.
+void append_ring(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                 float y, float rad, int segments) {
+    auto point = [&](int i) -> simd_float3 {
+        const float t = 2.0f * float(M_PI) * static_cast<float>(i % segments) /
+                        static_cast<float>(segments);
+        return simd_float3{rad * std::sin(t), y, rad * std::cos(t)};
+    };
+    for (int i = 0; i < segments; ++i) {
+        out.push_back(make_vertex(point(i), m, color));
+        out.push_back(make_vertex(point(i + 1), m, color));
+    }
+}
+
+// A contracted-frame profile point (rho, y) in unit-local coordinates. rho
+// divides by the cross-section radius and y by the half-height, which is why a
+// circular arc in the contracted frame comes out elliptical here -- correctly
+// so, since that is what the node's scale does to it.
+simd_float2 unit_profile(float rho, float y, float r, float hy) {
+    return simd_make_float2(rho / (2.0f * r), y / (2.0f * hy));
+}
+
+// Revolves a profile into `meridians` cross-sections. `profile` runs from the
+// -y pole to the +y pole with rho >= 0; each meridian draws it on both sides of
+// the axis, so the pair closes into one loop through both poles.
+void append_lathe(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                  const std::vector<simd_float2>& profile, int meridians) {
+    for (int k = 0; k < meridians; ++k) {
+        const float t = float(M_PI) * static_cast<float>(k) / static_cast<float>(meridians);
+        const simd_float3 dir{std::sin(t), 0.0f, std::cos(t)};
+        for (const float side : {1.0f, -1.0f}) {
+            for (size_t i = 0; i + 1 < profile.size(); ++i) {
+                const simd_float3 a = side * profile[i].x * dir + simd_float3{0, profile[i].y, 0};
+                const simd_float3 b =
+                    side * profile[i + 1].x * dir + simd_float3{0, profile[i + 1].y, 0};
+                out.push_back(make_vertex(a, m, color));
+                out.push_back(make_vertex(b, m, color));
+            }
+        }
+    }
+}
+
+// Cone / capped cone: base ring, top ring once the tip is blunted, and four
+// slant lines at the cardinal azimuths to carry the taper.
+void append_cone_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                       float tip) {
+    const float top = 0.5f * tip;
+    append_ring(out, m, color, -0.5f, 0.5f, kShapeRingSegments);
+    if (top > 1e-4f) {
+        append_ring(out, m, color, 0.5f, top, kShapeRingSegments);
+    }
+    for (int i = 0; i < 4; ++i) {
+        const float t = 0.5f * float(M_PI) * static_cast<float>(i);
+        const simd_float3 dir{std::sin(t), 0.0f, std::cos(t)};
+        out.push_back(make_vertex(0.5f * dir + simd_float3{0, -0.5f, 0}, m, color));
+        out.push_back(make_vertex(top * dir + simd_float3{0, 0.5f, 0}, m, color));
+    }
+}
+
+// Square frustum: base quad, top quad once blunted, four slant edges.
+void append_pyramid_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                          float tip) {
+    const float top = 0.5f * tip;
+    const std::array<simd_float2, 4> corners = {{{1, 1}, {1, -1}, {-1, -1}, {-1, 1}}};
+    for (int i = 0; i < 4; ++i) {
+        const simd_float2 c = corners[i];
+        const simd_float2 n = corners[(i + 1) % 4];
+        const simd_float3 base_c{0.5f * c.x, -0.5f, 0.5f * c.y};
+        const simd_float3 base_n{0.5f * n.x, -0.5f, 0.5f * n.y};
+        const simd_float3 top_c{top * c.x, 0.5f, top * c.y};
+        const simd_float3 top_n{top * n.x, 0.5f, top * n.y};
+        out.push_back(make_vertex(base_c, m, color));
+        out.push_back(make_vertex(base_n, m, color));
+        out.push_back(make_vertex(base_c, m, color));
+        out.push_back(make_vertex(top_c, m, color));
+        if (top > 1e-4f) {
+            out.push_back(make_vertex(top_c, m, color));
+            out.push_back(make_vertex(top_n, m, color));
+        }
+    }
+}
+
+// n-gon prism: the two end faces plus one vertical per vertex.
+void append_prism_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                        int sides) {
+    append_ring(out, m, color, -0.5f, 0.5f, sides);
+    append_ring(out, m, color, 0.5f, 0.5f, sides);
+    for (int i = 0; i < sides; ++i) {
+        const float t = 2.0f * float(M_PI) * static_cast<float>(i) / static_cast<float>(sides);
+        const float x = 0.5f * std::sin(t);
+        const float z = 0.5f * std::cos(t);
+        out.push_back(make_vertex(simd_float3{x, -0.5f, z}, m, color));
+        out.push_back(make_vertex(simd_float3{x, 0.5f, z}, m, color));
+    }
+}
+
+// Octahedron: the 12 edges joining its 6 axis vertices.
+void append_octahedron_edges(std::vector<LineVertex>& out, const simd_float4x4& m,
+                             simd_float4 color) {
+    const std::array<simd_float3, 2> poles = {{{0, 0.5f, 0}, {0, -0.5f, 0}}};
+    const std::array<simd_float3, 4> belt = {{{0.5f, 0, 0}, {0, 0, 0.5f}, {-0.5f, 0, 0}, {0, 0, -0.5f}}};
+    for (int i = 0; i < 4; ++i) {
+        out.push_back(make_vertex(belt[i], m, color));
+        out.push_back(make_vertex(belt[(i + 1) % 4], m, color));
+        for (const simd_float3& pole : poles) {
+            out.push_back(make_vertex(belt[i], m, color));
+            out.push_back(make_vertex(pole, m, color));
+        }
+    }
+}
+
+// Rounded cylinder, drawn as a lathe: the straight side, the two cap arcs, and
+// the flat ends that survive while the rounding is partial. `half` is needed
+// because the cap radius is min(r, hy)-relative, so the profile genuinely
+// changes shape as the box's aspect does.
+void append_capsule_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                          float roundness, simd_float3 half) {
+    const float r = std::fmin(half.x, half.z);
+    const float hy = half.y;
+    const float rb = roundness * std::fmin(r, hy);
+
+    std::vector<simd_float2> profile;
+    profile.push_back(unit_profile(0.0f, -hy, r, hy));           // bottom pole
+    for (int i = 0; i <= kShapeProfileSegments; ++i) {           // bottom cap arc
+        const float a = 0.5f * float(M_PI) * static_cast<float>(i) /
+                        static_cast<float>(kShapeProfileSegments);
+        profile.push_back(unit_profile(r - rb + rb * std::sin(a), -(hy - rb) - rb * std::cos(a),
+                                        r, hy));
+    }
+    for (int i = 0; i <= kShapeProfileSegments; ++i) {           // top cap arc
+        const float a = 0.5f * float(M_PI) * static_cast<float>(i) /
+                        static_cast<float>(kShapeProfileSegments);
+        profile.push_back(unit_profile(r - rb + rb * std::cos(a), (hy - rb) + rb * std::sin(a),
+                                        r, hy));
+    }
+    profile.push_back(unit_profile(0.0f, hy, r, hy));            // top pole
+    append_lathe(out, m, color, profile, 2);
+    append_ring(out, m, color, 0.0f, 0.5f, kShapeRingSegments);  // the equator, always at full radius
+}
+
+// Vesica: the profile is a single circular arc through the two poles and the
+// equator, so the lathe takes it directly. See sdf_sd_vesica for the geometry
+// (and for why the arc becomes the major one once the box is wider than tall).
+void append_vesica_edges(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
+                         simd_float3 half) {
+    const float r = std::fmin(half.x, half.z);
+    const float hy = half.y;
+    const float d = 0.5f * (hy * hy - r * r) / r;
+    const float arc_radius = d + r;
+    // Angular half-sweep from the equator to a pole, about the arc's own centre
+    // at rho = -d. The pole (0, hy) sits at (d, hy) relative to that centre --
+    // note the sign: it is +d, and getting it backwards sends the arc sweeping
+    // past its own poles and straight out of the box. Once the box is wider
+    // than it is tall d goes negative, and this angle correctly exceeds pi/2,
+    // which is what draws the major arc.
+    const float sweep = std::atan2(hy, d);
+
+    std::vector<simd_float2> profile;
+    const int steps = 2 * kShapeProfileSegments;
+    for (int i = 0; i <= steps; ++i) {
+        const float a = -sweep + 2.0f * sweep * static_cast<float>(i) / static_cast<float>(steps);
+        profile.push_back(unit_profile(-d + arc_radius * std::cos(a), arc_radius * std::sin(a),
+                                        r, hy));
+    }
+    append_lathe(out, m, color, profile, 2);
+    append_ring(out, m, color, 0.0f, 0.5f, kShapeRingSegments);
+}
 
 } // namespace
 
@@ -436,14 +621,29 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
         } else {
             continue; // unselected Add: already visible live via the raymarch
         }
-        const simd_float4x4 world_from_local = node.world_from_local();
-        if (node.shape == Shape::Cube) {
-            append_cube_edges(out, world_from_local, color);
-        } else {
-            append_sphere_outline(out, world_from_local, color, eye_world);
-        }
+        append_node_wireframe(out, node, color, eye_world);
     }
     return out;
+}
+
+void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_float4 color,
+                           simd_float3 eye_world) {
+    const simd_float4x4 m = node.world_from_local();
+    const simd_float3 half = 0.5f * simd_abs(node.scale);
+    const float param = node.shape_param;
+    switch (node.shape) {
+        case Shape::Cube:       append_cube_edges(out, m, color); break;
+        case Shape::Sphere:     append_sphere_outline(out, m, color, eye_world); break;
+        case Shape::Cone:       append_cone_edges(out, m, color, param); break;
+        case Shape::Capsule:    append_capsule_edges(out, m, color, param, half); break;
+        case Shape::Octahedron: append_octahedron_edges(out, m, color); break;
+        case Shape::Pyramid:    append_pyramid_edges(out, m, color, param); break;
+        case Shape::Prism:
+            append_prism_edges(out, m, color,
+                               static_cast<int>(std::lround(std::clamp(param, 3.0f, 12.0f))));
+            break;
+        case Shape::Vesica:     append_vesica_edges(out, m, color, half); break;
+    }
 }
 
 } // namespace sq

@@ -97,6 +97,12 @@ inline constexpr float kPivotTickOuterFrac = 1.35f;
 inline constexpr simd_float4 kColorOriginPip = {1.0f, 1.0f, 1.0f, 0.9f};
 
 inline constexpr int kSphereOutlineSegments = 48;
+// Rings (a cone's base, a capsule's equator) and samples along a lathe profile.
+// Lower than the sphere's outline because these are structural lines drawn
+// alongside other structural lines, not a single silhouette carrying the whole
+// read of the shape.
+inline constexpr int kShapeRingSegments = 32;
+inline constexpr int kShapeProfileSegments = 12;
 
 // 12 edges -> 24 vertices. Unit cube corners at ±0.5.
 void append_cube_edges(std::vector<LineVertex>& out, const simd_float4x4& world_from_local, simd_float4 color);
@@ -120,6 +126,17 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
 // this exception it would be entirely unpickable-by-sight). eye_world feeds
 // the sphere outline, making the result view-dependent.
 std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world);
+
+// One node's wireframe, dispatched on its shape. Every builder works in the
+// UNIT box and lets world_from_local's scale stretch the result -- which is
+// exact for all eight shapes, because the contracted frame each SDF is written
+// in normalizes to that same unit box (see the note above the builders in
+// lines.cpp). Reads shape_param, so the drawn outline tracks the dial live.
+//
+// eye_world only reaches the sphere's view-dependent silhouette; the rest are
+// real edges or lathe profiles and do not depend on where you are looking from.
+void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_float4 color,
+                           simd_float3 eye_world);
 
 // The modify-mode move gizmo, drawn from the same GizmoFrame the hit-testing
 // uses (gizmo.h) so drawn geometry and pick geometry cannot drift. Split into

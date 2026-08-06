@@ -636,3 +636,99 @@ TEST_CASE("append_origin_marker: +Y shaft in the shared world-axis green, plus a
         }
     }
 }
+
+// --- wireframes for the six shapes added after cube and sphere ---------------
+
+TEST_CASE("append_node_wireframe: every shape draws, and stays inside its own box") {
+    // The containment claim the wireframe shares with scene_aabb and
+    // node_bounding_radius: each shape is inscribed in position +- scale*0.5.
+    // Non-uniform scale on purpose -- the builders draw in the unit box and let
+    // the transform stretch them, so this is also the check that they are being
+    // stretched rather than drawn at some fixed size.
+    const simd_float3 scale = {3.0f, 5.0f, 2.0f};
+    const simd_float3 position = {1.0f, -2.0f, 0.5f};
+    const simd_float3 eye = {0.0f, 0.0f, 12.0f};
+
+    struct Case { const char* label; Shape shape; float param; };
+    const Case cases[] = {
+        {"cone, sharp", Shape::Cone, 0.0f},        {"cone, truncated", Shape::Cone, 0.5f},
+        {"capsule, flat", Shape::Capsule, 0.0f},   {"capsule, round", Shape::Capsule, 1.0f},
+        {"octahedron", Shape::Octahedron, 0.0f},   {"pyramid, sharp", Shape::Pyramid, 0.0f},
+        {"pyramid, frustum", Shape::Pyramid, 0.4f},{"prism, 3", Shape::Prism, 3.0f},
+        {"prism, 12", Shape::Prism, 12.0f},        {"vesica", Shape::Vesica, 0.0f},
+    };
+
+    for (const Case& c : cases) {
+        INFO("case: " << std::string(c.label));
+        Node node;
+        node.id = 1;
+        node.shape = c.shape;
+        node.shape_param = c.param;
+        node.position = position;
+        node.scale = scale;
+
+        std::vector<LineVertex> lines;
+        append_node_wireframe(lines, node, kColorSelected, eye);
+
+        REQUIRE_FALSE(lines.empty());
+        CHECK(lines.size() % 2 == 0); // LINE primitives: vertices come in pairs
+        const simd_float3 half = 0.5f * scale;
+        for (const LineVertex& v : lines) {
+            const simd_float3 local = simd_float3{v.pos.x, v.pos.y, v.pos.z} - position;
+            CHECK(std::fabs(local.x) <= half.x + 1e-4f);
+            CHECK(std::fabs(local.y) <= half.y + 1e-4f);
+            CHECK(std::fabs(local.z) <= half.z + 1e-4f);
+        }
+    }
+}
+
+TEST_CASE("append_node_wireframe: the drawn outline tracks the shape parameter") {
+    // What makes setNodeShapeParam's set_scene_lines_dirty() load-bearing: the
+    // wireframe genuinely changes with the dial, so a stale line buffer would
+    // show the previous value.
+    const simd_float3 eye = {0.0f, 0.0f, 12.0f};
+
+    SUBCASE("a prism's side count changes its vertex count") {
+        Node node;
+        node.id = 1;
+        node.shape = Shape::Prism;
+
+        std::vector<LineVertex> triangle;
+        node.shape_param = 3.0f;
+        append_node_wireframe(triangle, node, kColorSelected, eye);
+
+        std::vector<LineVertex> dodecagon;
+        node.shape_param = 12.0f;
+        append_node_wireframe(dodecagon, node, kColorSelected, eye);
+
+        // Two end rings plus one vertical per side -> 3 segments per side.
+        CHECK(triangle.size() == 2u * 3u * 3u);
+        CHECK(dodecagon.size() == 2u * 3u * 12u);
+    }
+
+    SUBCASE("blunting a cone's tip adds its top ring") {
+        Node node;
+        node.id = 1;
+        node.shape = Shape::Cone;
+
+        std::vector<LineVertex> sharp;
+        node.shape_param = 0.0f;
+        append_node_wireframe(sharp, node, kColorSelected, eye);
+
+        std::vector<LineVertex> truncated;
+        node.shape_param = 0.5f;
+        append_node_wireframe(truncated, node, kColorSelected, eye);
+
+        CHECK(truncated.size() == sharp.size() + 2u * kShapeRingSegments);
+
+        // And the tip really is blunt: the sharp cone's apex is a single point
+        // on the axis, the truncated one's top ring is not.
+        int on_axis_at_top = 0;
+        for (const LineVertex& v : truncated) {
+            if (v.pos.y > 0.49f && std::hypot(v.pos.x, v.pos.z) < 1e-3f) {
+                ++on_axis_at_top;
+            }
+        }
+        CHECK(on_axis_at_top == 0);
+    }
+}
