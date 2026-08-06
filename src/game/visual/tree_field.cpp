@@ -368,24 +368,22 @@ std::unique_ptr<TreeField> BuildTreeField(
           static_cast<uint32_t>(bark_mesh.indices.size());
 
       InstanceParams bark_params;
-      // instanced_gbuffer's group-0 texture bindings (albedo@1, normal@3,
-      // arm@4 -- see shaders/material/instanced_gbuffer.wesl) have no
-      // material_requirements.cpp entry, so StandardMaterialFactory derives
-      // slot names from reflection as "tex_<binding>" (see the .hpp's
-      // deviation note). Albedo (tex_1) is left unset -- its "white" factory
+      // instanced_gbuffer's group-0 texture slots (albedo@1, normal@3, arm@4)
+      // are registered in material_requirements.cpp, so they carry the same
+      // names normalmapped's do. `albedo` is left unset -- its "white" factory
       // default * `tint` below reproduces a flat solid bark color. Reused
       // as-is for the shadow-pass instance below (its bindings are declared
       // unconditionally in the WESL, not gated on shadow_pass -- see the
       // .wesl file) -- bucketId is what the shadow vertex path actually needs
       // (bucketBase[mat_params.bucketId]).
       bark_params.texture_overrides.push_back(DefaultTextureView{
-          .param_name = "tex_3",
+          .param_name = "normal",
           .view = tf->bark_normal_view,
           .sampler = tf->bark_support_sampler,
           .type = TextureType::k2D,
       });
       bark_params.texture_overrides.push_back(DefaultTextureView{
-          .param_name = "tex_4",
+          .param_name = "arm",
           .view = tf->bark_arm_view,
           .sampler = tf->bark_support_sampler,
           .type = TextureType::k2D,

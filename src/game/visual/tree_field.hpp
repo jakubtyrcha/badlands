@@ -15,22 +15,16 @@
 // pattern), and the per-LOD GPU vertex/index buffers (SetSubmesh does not
 // take ownership of these -- see instanced_mesh_field.hpp).
 //
-// Deviation from a literal reading of the task brief: `instanced_gbuffer`
-// has NO entry in engine/rendering/material/material_requirements.cpp
-// (unlike "normalmapped"/"standard_forward"), so StandardMaterialFactory
-// falls back to DeriveRequirementsFromReflection, which names group-0
-// texture slots "tex_<binding>" (not "albedo"/"normal"/"arm") and always
-// defaults them to "white". BuildTreeField below targets those
-// reflection-derived names directly (see the per-shader binding-index
-// comments in the .cpp) for the BARK material's normal/ARM support textures,
-// rather than "albedo"/"normal"/"arm" -- using the literal names would
-// silently no-op the override, leaving the flat reflection-derived default
-// instead of the intended solid-bark look. This stays entirely within this
-// game-side file; no engine file is touched. (The leaf material,
-// `voxel_foliage`, declares NO textures at all -- see
-// shaders/material/voxel_foliage.wesl -- so this deviation no longer applies
-// to leaves as of volumetric-foliage Phase 5; the leaf card + its "tex_1"
-// albedo override are gone.)
+// Bark's material overrides use the ordinary slot names "albedo"/"normal"/
+// "arm": `instanced_gbuffer` is registered in
+// engine/rendering/material/material_requirements.cpp alongside
+// "normalmapped", whose group-0 texture layout it shares byte for byte. It
+// previously was not, and StandardMaterialFactory's
+// DeriveRequirementsFromReflection fallback named the slots "tex_<binding>"
+// instead -- so the literal names silently no-op'd and this file had to target
+// binding indices. The leaf material, `voxel_foliage`, declares no textures at
+// all (see shaders/material/voxel_foliage.wesl), so it needs no overrides
+// either way.
 
 #include <array>
 #include <cstdint>
