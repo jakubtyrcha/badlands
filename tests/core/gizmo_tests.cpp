@@ -461,7 +461,7 @@ TEST_CASE("scale_axis_param floors the parameter so the drag ratio stays sane") 
     }
 
     SUBCASE("aiming at, or past, the origin saturates instead of hitting zero or flipping") {
-        for (const float along : {0.05f, 0.0f, -0.5f, -5.0f}) {
+        for (const float along : {0.01f, 0.0f, -0.5f, -5.0f}) {
             CAPTURE(along);
             const simd_float3 target = f.origin + along * f.half_extent * f.u;
             const Ray ray = ray_through(simd_float3{0.0f, 0.0f, 8.0f}, target);
@@ -476,7 +476,7 @@ TEST_CASE("scale_axis_param floors the parameter so the drag ratio stays sane") 
         // The reason the floor is applied on BOTH sides rather than only at
         // capture: an asymmetric floor would make s_now/s_start != 1 on
         // mouse-down and jump the node before any drag happened.
-        const simd_float3 target = f.origin + 0.02f * f.half_extent * f.u;
+        const simd_float3 target = f.origin + 0.005f * f.half_extent * f.u;
         const Ray ray = ray_through(simd_float3{0.0f, 0.0f, 8.0f}, target);
         const auto start = scale_axis_param(ray, f, GizmoHandle::AxisU);
         const auto now = scale_axis_param(ray, f, GizmoHandle::AxisU);
@@ -484,6 +484,29 @@ TEST_CASE("scale_axis_param floors the parameter so the drag ratio stays sane") 
         REQUIRE(now.has_value());
         CHECK((*now / *start) == doctest::Approx(1.0f));
     }
+}
+
+TEST_CASE("a grab at the innermost pickable point still has real shrink range") {
+    // The failure this pins: the most a drag can shrink an axis is
+    // floor / s_start, and s_start is bounded below by the innermost grabbable
+    // point. With the floor set close to that bound (0.15 against an inner
+    // bound of 0.18) the worst case was 0.83x -- dragging inboard from the
+    // inner end of the shaft barely moved the node and read as a dead gesture.
+    const GizmoFrame f = make_scale_frame();
+    const simd_float3 eye = {0.0f, 0.0f, 8.0f};
+
+    // Grab as far inboard as the pick will allow, then drag through the origin.
+    const simd_float3 grab = f.origin + kScaleAxisInnerFrac * f.half_extent * f.u;
+    const auto start = scale_axis_param(ray_through(eye, grab), f, GizmoHandle::AxisU);
+    REQUIRE(start.has_value());
+
+    const simd_float3 pull = f.origin - 5.0f * f.half_extent * f.u; // well past the origin
+    const auto now = scale_axis_param(ray_through(eye, pull), f, GizmoHandle::AxisU);
+    REQUIRE(now.has_value());
+
+    const float min_factor = *now / *start;
+    CHECK(min_factor > 0.0f);   // still positive: no flip
+    CHECK(min_factor < 0.2f);   // and genuinely useful range, not ~0.83
 }
 
 TEST_CASE("gizmo_scale_axis_index maps u/v/n onto scale.x/y/z, and nothing else") {

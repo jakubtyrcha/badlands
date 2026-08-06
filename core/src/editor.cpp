@@ -247,6 +247,14 @@ void Editor::updateCameraGesture(float dxTotal, float dyTotal) {
     // all land on the same camera, and a gesture dragged back to its start
     // returns exactly there instead of accumulating rounding.
     impl_->controller = impl_->camera_gesture.start_controller;
+    // Aspect is viewport state, not gesture state, and the controller happens
+    // to hold both. Without this, a resize landing mid-gesture would be undone
+    // by the very next update and never re-applied (no further resize event
+    // follows), leaving a stretched projection and picking rays that disagree
+    // with what is on screen. Reachable via a momentum scroll, which keeps a
+    // gesture open for about a second after the fingers lift, or a move between
+    // displays of different backing scale.
+    impl_->controller.set_aspect(impl_->viewportWidthPts / impl_->viewportHeightPts);
     switch (impl_->camera_gesture.kind) {
         case CameraGesture::Orbit:
             impl_->controller.orbit(dxTotal, dyTotal);

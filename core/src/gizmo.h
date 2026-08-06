@@ -80,7 +80,17 @@ inline constexpr float kUniformPickTolerancePts = 14.0f;
 // dragged through it, and no jump on grab. Rejecting the grab instead would
 // hand the gesture to the camera, which is the one outcome a user aiming at a
 // handle never wants.
-inline constexpr float kScaleAxisMinGrabFrac = 0.15f;
+//
+// It has to sit WELL below kScaleAxisInnerFrac, not just below it. The most a
+// drag can ever shrink an axis is floor/s_start, and s_start is bounded below
+// by the innermost grabbable point -- so a floor close to the inner bound caps
+// the achievable shrink near 1 and the gesture feels dead exactly where the
+// handle is hardest to grab. At 0.02 against an inner bound of 0.18 the worst
+// case is still ~9x, and the per-component clamp takes over long before that.
+inline constexpr float kScaleAxisMinGrabFrac = 0.02f;
+static_assert(kScaleAxisMinGrabFrac * 8.0f < kScaleAxisInnerFrac,
+              "the axis floor must stay far below the innermost grabbable point, or a "
+              "grab near the inner end of the shaft can barely shrink the node");
 
 // The uniform handle's drag rate (per view point of vertical travel) and the
 // per-component bounds every scale drag clamps to. The rate is unchanged from

@@ -22,10 +22,16 @@ inline constexpr float kPanBlendEndSin   = 0.97f; // ~76 degrees
 float pan_up_blend(float pitch);
 
 // World-Y motion of length L only shows L*cos(pitch) on screen, so the drag is
-// divided by cos(pitch) to keep tracking honest. The floor stops that
-// exploding toward the pole, and the blend above retires the whole correction
-// before the floor can bind — so this is exactly 1 at pitch 0 AND at full
-// blend, and bounded by 1/kPanGainCosFloor in between.
+// divided by cos(pitch) to keep tracking honest, and this floor stops that
+// dividing by ~0 toward the pole.
+//
+// The floor and the blend OVERLAP rather than handing off cleanly: the floor
+// starts binding at |sin(pitch)| > 0.8, where the blend has only reached ~0.06
+// and does not finish until 0.97. That is fine — between them the gain is
+// bounded by 1/kPanGainCosFloor (peak ~1.63 in practice) and is exactly 1 at
+// pitch 0 and again at full blend. Stated explicitly because an earlier version
+// of this comment claimed the blend retired the correction *before* the floor
+// could bind, which is simply not true of these two constants.
 inline constexpr float kPanGainCosFloor = 0.6f;
 float pan_vertical_gain(float pitch);
 

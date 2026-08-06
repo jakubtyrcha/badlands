@@ -219,12 +219,18 @@ final class EditorViewModel {
     }
 
     func handleMouseMoved(_ p: CGPoint) {
-        guard mode == .edit else { return }
-        editor.updateGizmoHover(Float(p.x), Float(p.y))
+        // The dot predicts what an ORBIT will rotate around, and orbit works in
+        // every mode, so it updates in every mode. Gating it on `.edit` (as an
+        // earlier draft did) also left it frozen at its last Edit-mode position
+        // for as long as you stayed in Spawn, since nothing then refreshed or
+        // cleared it.
+        //
         // Two analytic raycasts per move (gizmo handles, then the scene). Both
         // are ray-primitive solves over the node list, not raymarches -- see
         // core/src/picking.cpp -- so this is a handful of flops per node.
         editor.updateFocusPreview(Float(p.x), Float(p.y))
+        guard mode == .edit else { return }
+        editor.updateGizmoHover(Float(p.x), Float(p.y))
     }
 
     func handleMouseExited() {
