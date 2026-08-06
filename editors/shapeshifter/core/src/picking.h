@@ -16,10 +16,19 @@ struct RayHit {
 };
 
 // Sphere-traces ONE node's own SDF -- the same sdf_eval_node the renderer
-// evaluates, so picking cannot disagree with what is on screen about where a
-// surface is. Replaces the hand-written ray_unit_cube/ray_unit_sphere pair,
-// which had no general form for the six shapes added after them and would have
-// needed a bespoke intersector each.
+// evaluates, since sdf_scene.h compiles as C++, MSL and Slang from one source.
+// Replaces the hand-written ray_unit_cube/ray_unit_sphere pair, which had no
+// general form for the six shapes added after them and would have needed a
+// bespoke intersector each.
+//
+// THAT AGREEMENT IS FREE, NOT REQUIRED, and the difference matters. It used to
+// be stated here as the guarantee picking rests on. It no longer is: rendering
+// may move to a splat representation sharing nothing with this evaluator, and
+// picking has to survive that. What picking actually rests on is finding the
+// PRIMITIVE where the primitive is -- pinned per shape, to a stated tolerance,
+// in tests/core/picking_tests.cpp. Nothing here needs to match the rendered
+// image pixel for pixel: a click selects a node, and a snapped spawn places the
+// new node's centre on the hit.
 //
 // The returned hit is WORLD-SPACE, `t` in world units. That falls out of doing
 // the transform rigidly: world -> local here is rotation and translation only
