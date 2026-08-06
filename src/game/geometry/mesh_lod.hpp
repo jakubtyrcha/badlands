@@ -33,6 +33,36 @@ struct SimplifiedMesh {
   uint32_t vertex_count = 0;
 };
 
+// Merge vertices whose FIRST `compare_floats` floats are bitwise equal,
+// rewriting the index buffer accordingly. Survivors keep their whole vertex
+// (all `floats_per_vertex` of it) taken from the first occurrence.
+//
+// This exists because SimplifyMesh's internal weld compares the WHOLE vertex,
+// and a mesh authored with flat shading has no two vertices alike: every
+// triangle carries its own three, each with a face normal. Edge collapse then
+// has no shared edge to collapse and the mesh cannot decimate at all --
+// measured on the shipped props, boulder_01 and brass_vase_03 return 1.000 of
+// their source triangles at every ratio down to 0.05 (see
+// game/tests/prop_lod_report_tests.cpp).
+//
+// Welding on a PREFIX is the fix, and it is meshoptimizer's own advice
+// ("If not all attributes from the input mesh are required, it's recommended
+// to reindex the mesh without them prior to simplification" --
+// meshoptimizer.h). Note that meshopt_simplifyWithAttributes is NOT an
+// alternative here: it operates on whatever index buffer it is handed and
+// cannot merge vertices the buffer keeps apart.
+//
+// The caller chooses the prefix, which is the whole design: 3 welds by
+// position alone (merging UV seams, so textures smear across them), while 5 on
+// the standard textured layout welds by position+uv and keeps seams intact.
+// Attributes past the prefix are no longer trustworthy after this -- the
+// survivor's normal is one arbitrary member of the set that merged -- so the
+// caller is expected to regenerate them.
+SimplifiedMesh WeldMeshByPrefix(const std::vector<float>& vertices,
+                                size_t floats_per_vertex,
+                                const std::vector<uint32_t>& indices,
+                                size_t compare_floats);
+
 // Simplify an indexed triangle mesh to ~target_ratio of its triangles using
 // meshoptimizer. Position is the first 3 floats of each vertex. target_ratio
 // in (0,1]; >=1.0 returns the mesh unchanged (identity). Welds by the

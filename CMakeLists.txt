@@ -492,6 +492,9 @@ set(badlands_app_sources_viewer
     src/game/visual/instanced_lod_model.cpp
     src/game/visual/instanced_lod_field.cpp
     src/game/visual/tree_lod_model.cpp
+    # Triangle LODs for imported props -- the viewer is its only consumer, so
+    # it is not in the mapview list beside the tree producer.
+    src/game/visual/prop_lod_model.cpp
     src/game/visual/impostor_atlas.cpp
     src/game/visual/impostor_baker.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
@@ -900,6 +903,13 @@ add_executable(badlands_geometry_tests
     # edge collapse floor out on unwelded prop geometry?) cannot be asked of
     # hand-built input.
     game/tests/prop_lod_report_tests.cpp
+    # The prop triangle-LOD producer. CPU only -- its fixture is a hand-built
+    # flat-shaded grid, which reproduces the shipped props' pathology without
+    # opening one. Its sources are compiled in directly because they belong to
+    # the viewer app's list, not badlands_game_lib.
+    game/tests/prop_lod_model_tests.cpp
+    src/game/visual/prop_lod_model.cpp
+    src/game/visual/instanced_lod_model.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_geometry_tests PRIVATE
