@@ -539,6 +539,115 @@ TEST_CASE("metal: a dynamic offset on a non-buffer is refused", "[rhi]") {
   rhitest::CheckDynamicOffsetOnANonBufferIsRefused(*d);
 }
 
+// --- The primitive the splat technique rests on ----------------------------
+
+TEST_CASE("metal: 64-bit atomic max carries its payload indivisibly",
+          "[rhi][metal][gpu]") {
+  // Pack depth above payload and ONE atomic resolves the depth test and
+  // commits the payload together. That indivisibility is the whole point: with
+  // a 32-bit depth atomic plus a separate payload write, thread A can win the
+  // depth test and thread B can write the payload between A's two stores.
+  //
+  // This is hand-written MSL, not Slang, because Slang 2026.14.1 emits
+  // atomic_fetch_max_explicit (the 32-bit family) for Metal, which MSL rejects
+  // for 64-bit types. The correct spelling is atomic_max_explicit on a
+  // device atomic_ulong*, which returns void and is device-address-space only.
+  constexpr const char* kAtomicMax = R"(
+#include <metal_stdlib>
+using namespace metal;
+kernel void cs_main(device atomic_ulong* slot [[buffer(0)]],
+                    device const uint* depths [[buffer(1)]],
+                    uint tid [[thread_position_in_grid]]) {
+  // Payload is the thread index, so the winner is identifiable.
+  ulong packed = (ulong(depths[tid]) << 32) | ulong(tid);
+  atomic_max_explicit(&slot[0], packed, memory_order_relaxed);
+}
+)";
+  auto device = MakeMetal(/*validation=*/false);
+  REQUIRE(device);
+  // REQUIRED, not skipped: a Metal device below the recorded M2 floor is a
+  // configuration error, and skipping would leave a silent hole exactly where
+  // the port's founding claim is tested.
+  REQUIRE(device->Supports(DeviceFeature::Atomic64MinMax));
+
+  ShaderReflection refl;
+  refl.bindings.push_back({.group = 0, .slot = 0, .name = "slot",
+                           .kind = BindingKind::StorageBuffer,
+                           .location = {.space = 0, .index = 0}});
+  refl.bindings.push_back({.group = 0, .slot = 1, .name = "depths",
+                           .kind = BindingKind::ReadOnlyStorageBuffer,
+                           .location = {.space = 0, .index = 1}});
+  ReflectedEntryPoint ep;
+  ep.name = "cs_main";
+  ep.stage = ShaderStage::Compute;
+  ep.workgroup_size[0] = 64;
+  refl.entry_points.push_back(ep);
+
+  auto module = device->CreateShaderModule(kAtomicMax, refl, "atomic64");
+  REQUIRE(module);
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  REQUIRE(pipe);
+
+  // A hash, so the maximum is NOT the last thread -- a kernel that simply let
+  // the final write win would pass against a monotonic sequence.
+  constexpr uint32_t kThreads = 64 * 16;
+  std::vector<uint32_t> depths(kThreads);
+  uint32_t best_depth = 0, best_tid = 0;
+  for (uint32_t i = 0; i < kThreads; ++i) {
+    depths[i] = uint32_t(i * 2654435761u) >> 8;  // >>8 keeps ties impossible
+    if (depths[i] > best_depth) { best_depth = depths[i]; best_tid = i; }
+  }
+
+  auto slot = device->CreateBuffer({.size = sizeof(uint64_t),
+                                    .usage = BufferUsage::Storage |
+                                             BufferUsage::MapRead |
+                                             BufferUsage::CopyDst,
+                                    .label = "slot"});
+  auto depth_buf = device->CreateBuffer(
+      {.size = kThreads * sizeof(uint32_t),
+       .usage = BufferUsage::Storage | BufferUsage::CopyDst,
+       .label = "depths"});
+  REQUIRE(slot);
+  REQUIRE(depth_buf);
+  const uint64_t zero = 0;
+  slot->Write(0, {reinterpret_cast<const uint8_t*>(&zero), sizeof(zero)});
+  depth_buf->Write(0, {reinterpret_cast<const uint8_t*>(depths.data()),
+                       depths.size() * sizeof(uint32_t)});
+
+  auto table = device->CreateBindingTable(
+      {.compute_pipeline = pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::StorageBuffer,
+                    .buffer = slot.get()},
+                   {.slot = 1, .kind = BindingKind::ReadOnlyStorageBuffer,
+                    .buffer = depth_buf.get()}},
+       .label = "atomic64"});
+  REQUIRE(table);
+
+  auto encoder = device->CreateCommandEncoder("atomic64");
+  encoder->Transition(slot.get(), ResourceState::ShaderWrite);
+  encoder->Transition(depth_buf.get(), ResourceState::ShaderRead);
+  auto* pass = encoder->BeginComputePass("cs");
+  pass->SetPipeline(pipe.get());
+  pass->SetBindingTable(0, table.get());
+  pass->Dispatch(kThreads / 64);
+  pass->End();
+  encoder->Finish();
+  device->Submit(*encoder);
+  device->WaitIdle();
+
+  uint64_t result = 0;
+  REQUIRE(slot->Read(0, {reinterpret_cast<uint8_t*>(&result), sizeof(result)}));
+  const uint32_t got_depth = uint32_t(result >> 32);
+  const uint32_t got_tid = uint32_t(result & 0xFFFFFFFFu);
+  INFO("packed=" << result << " depth=" << got_depth << " tid=" << got_tid
+                 << " expected depth=" << best_depth << " tid=" << best_tid);
+  CHECK(got_depth == best_depth);
+  // The payload must be the WINNER'S, not some other thread's. This is the
+  // half a 32-bit depth atomic cannot guarantee.
+  CHECK(got_tid == best_tid);
+}
+
 TEST_CASE("metal: a dynamic offset changes what the shader reads",
           "[rhi][metal][gpu]") {
   // The conformance case only inspects Null's command log, which does not
