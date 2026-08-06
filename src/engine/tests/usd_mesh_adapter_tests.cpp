@@ -220,6 +220,48 @@ TEST_CASE("the transform rotates normals, and scale does not shrink them",
   CHECK(std::sqrt(nx * nx + ny * ny + nz * nz) == Catch::Approx(1.0f));
 }
 
+TEST_CASE("leftHanded orientation flips winding", "[usd][adapter]") {
+  UsdMeshData mesh = MakeQuad();
+  mesh.right_handed = false;
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  // Without the flip the mesh keeps reversed winding and vanishes under
+  // backface culling, with nothing logged.
+  CHECK(models[0].mesh.mesh.indices == std::vector<uint32_t>{0, 2, 1, 0, 3, 2});
+}
+
+TEST_CASE("a mirroring transform and leftHanded cancel out", "[usd][adapter]") {
+  UsdMeshData mesh = MakeQuad();
+  mesh.right_handed = false;
+  // Negative determinant (mirror on X) -- reverses winding a second time.
+  mesh.transform = {-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  CHECK(models[0].mesh.mesh.indices == std::vector<uint32_t>{0, 1, 2, 0, 2, 3});
+}
+
+TEST_CASE("a degenerate tangent yields a finite vector, never NaN",
+          "[usd][adapter]") {
+  UsdMeshData mesh = MakeQuad();
+  // Tydra's solver emits a zero tangent for any triangle with zero UV area.
+  mesh.tangents[3] = 0.0f;
+  mesh.tangents[4] = 0.0f;
+  mesh.tangents[5] = 0.0f;
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  REQUIRE(models.size() == 1);
+
+  const auto& v = models[0].mesh.mesh.vertices;
+  // A NaN here poisons the Gram-Schmidt frame in gbuffer_encode.wesl and
+  // renders as garbage with no diagnostic.
+  for (size_t c = 8; c < 11; ++c) {
+    CHECK(std::isfinite(v[1 * kStride + c]));
+  }
+}
+
 TEST_CASE("a failed load converts to nothing", "[usd][adapter]") {
   UsdSceneData scene = MakeScene(MakeQuad(), false, 1.0f);
   scene.ok = false;

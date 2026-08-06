@@ -125,10 +125,16 @@ TexturedMeshResult MakeImpostorQuad() {
   return out;
 }
 
-// Every model directory under assets/models/ that holds a .usdc, sorted by
-// name. Sorted because `--generator <n>` indexes this list, so a
-// directory-iteration order that varies by filesystem would silently change
-// which model a headless screenshot captures.
+// Every .usdc under assets/models/, sorted by path.
+//
+// Sorted because `--generator <n>` indexes this list, so a directory-iteration
+// order that varies by filesystem would silently change which model a headless
+// screenshot captures.
+//
+// EVERY file, not the first per directory: badlands_usd_tests' ShippedModels()
+// enumerates the same tree the same way, and the two lists have to agree for a
+// test's index to mean the same model the viewer shows. Stopping at the first
+// hit here would desynchronise them the moment a directory shipped two.
 std::vector<std::filesystem::path> DiscoverPropModels() {
   std::vector<std::filesystem::path> out;
   const std::filesystem::path root{"assets/models"};
@@ -138,10 +144,7 @@ std::vector<std::filesystem::path> DiscoverPropModels() {
   for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
     if (!entry.is_directory()) continue;
     for (const auto& file : std::filesystem::directory_iterator(entry.path(), ec)) {
-      if (file.path().extension() == ".usdc") {
-        out.push_back(file.path());
-        break;  // one model per directory
-      }
+      if (file.path().extension() == ".usdc") out.push_back(file.path());
     }
   }
   std::sort(out.begin(), out.end());
@@ -369,7 +372,7 @@ void ModelViewerView::BuildGenerators() {
                glm::mat4(1.0f), glm::vec3(0.0f, -mesh.local_bounds.min.y, 0.0f));
            return GeneratedMesh{std::move(mesh), transform};
          },
-         .material = matlib_.Get(pack_dir)});
+         .pack_dir = pack_dir});
   }
 }
 
@@ -699,7 +702,12 @@ void ModelViewerView::RebuildScene() {
   } else if (gen.generate) {
     GeneratedMesh generated = gen.generate();
     world_bounds = generated.mesh.local_bounds.TransformedBy(generated.transform);
-    AddMeshEntity(scene_, "mesh", std::move(generated.mesh), gen.material,
+    // Imported props carry a pack directory and resolve their material here, so
+    // the texture load (and any manifest failure) is confined to the entry
+    // actually being shown -- see MeshGenerator::pack_dir.
+    const DeferredMaterial material =
+        gen.pack_dir.empty() ? gen.material : matlib_.Get(gen.pack_dir);
+    AddMeshEntity(scene_, "mesh", std::move(generated.mesh), material,
                   generated.transform);
   } else {
     // A MeshGenerator must set exactly one of `tree`/`generate`. Guard the

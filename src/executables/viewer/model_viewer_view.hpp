@@ -102,6 +102,14 @@ class ModelViewerView : public AppView {
     std::function<GeneratedMesh()> generate;
     DeferredMaterial material;
     std::optional<TreeOptions> tree;
+    // Set for imported props instead of `material`: the pack directory whose
+    // material.json backs this entry, resolved in RebuildScene rather than
+    // here. Resolving all of them up front would decode and upload every
+    // prop's three textures just to show one, and -- worse -- MaterialLibrary's
+    // load_failed_ flag is sticky and gates Initialize(), so a single prop with
+    // a bad manifest would stop the viewer from starting at all, sphere and
+    // trees included.
+    std::string pack_dir;
   };
 
   void BuildGenerators();

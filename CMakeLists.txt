@@ -82,16 +82,21 @@ set(ozz_build_postfix OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/ozz-animation)
 
 # tinyusdz: the USD reader behind src/engine/assets (badlands_usd_lib), vendored
-# as a pinned submodule (tag v0.9.9-rc7, third_party/tinyusdz). It is the only
-# dependency-free USDC parser going; OpenUSD would dwarf every other dep here.
+# as a pinned submodule (third_party/tinyusdz). It is the only dependency-free
+# USDC parser going; OpenUSD would dwarf every other dep here.
 #
-# The pin is an RC on purpose, not carelessness. Our Poly Haven props are Blender
-# USD exports carrying a MaterialX ND_standard_surface_surfaceshader, and the
-# last stable tag (v0.9.4) types MtlxAutodeskStandardSurface::subsurface_radius
-# as `float` while these files author it as `color3f` -- a type mismatch that
-# fails Stage reconstruction and so rejects the ENTIRE file, geometry included.
-# v0.9.9-rc7 corrects the field to color3f (matching the MaterialX spec). Moving
-# back to a stable tag means waiting for one that carries that fix.
+# The pin is an UNTAGGED dev commit (v0.9.9-rc7-1250-ge3a7b8369) on purpose, not
+# carelessness. NO released tag can read our Poly Haven props, which are Blender
+# USD exports carrying a MaterialX ND_standard_surface_surfaceshader:
+#   - v0.9.4 (last stable) types MtlxAutodeskStandardSurface::subsurface_radius
+#     as `float` while these files author `color3f`. The mismatch fails Stage
+#     reconstruction, rejecting the ENTIRE file, geometry included.
+#   - v0.9.9-rc7 fixes that field but its Tydra material converter then hard-
+#     errors on anything that is not ND_open_pbr_surface_surfaceshader.
+# The dev commit handles standard_surface and adds `strict_material_check`.
+#
+# So do NOT "restore" this to rc7 or any current tag -- both break the import.
+# Moving to a stable tag means waiting for a release that carries both fixes.
 #
 # We take the STATIC lib (`tinyusdz::tinyusdz_static`) with Tydra ON — Tydra is
 # the layer that turns a Stage into render-ready meshes (triangulation, the
@@ -1009,11 +1014,6 @@ if(APPLE)
 endif()
 add_test(NAME badlands_animation_tests COMMAND badlands_animation_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_decal_math_tests: Catch2 suite for the projected-decal math
-# (engine/rendering/decal_math.hpp) — the CPU mirror of
-# shaders/passes/decals.wesl. Pure CPU (header-only math + glm), so it runs the
-# SDFs / perimeter parameterisation / dash pattern without a GPU; it is the
-# oracle the shader transcription is checked against.
 # badlands_usd_tests: Catch2 suite for the USD import layer
 # (src/engine/assets/). The ONLY test target here that does not link
 # badlands_engine — it takes badlands_usd_lib alone, so there is no Dawn and no
@@ -1033,6 +1033,11 @@ if(APPLE)
 endif()
 add_test(NAME badlands_usd_tests COMMAND badlands_usd_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_decal_math_tests: Catch2 suite for the projected-decal math
+# (engine/rendering/decal_math.hpp) — the CPU mirror of
+# shaders/passes/decals.wesl. Pure CPU (header-only math + glm), so it runs the
+# SDFs / perimeter parameterisation / dash pattern without a GPU; it is the
+# oracle the shader transcription is checked against.
 add_executable(badlands_decal_math_tests
     src/engine/tests/decal_math_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp

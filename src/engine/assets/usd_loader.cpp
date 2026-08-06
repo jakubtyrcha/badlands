@@ -1,5 +1,6 @@
 #include "engine/assets/usd_loader.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -40,6 +41,16 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
   // The w handedness is dropped: the engine's vertex layout is tangent(3) and
   // every procedural mesh here already relies on the implied convention.
   if (attr.format == tydra::VertexAttributeFormat::Half4 && components == 3) {
+    // Same guard the float path applies below, and it is not redundant:
+    // vertex_count() divides by elementSize * format_size, so an elementSize
+    // of 2 still passes the count check while the indexing below reads
+    // halves[i * 4 + c] -- every value silently taken from the wrong sample.
+    if (attr.elementSize != 1) {
+      spdlog::warn("LoadUsdScene: mesh '{}' {} has elementSize {} (expected 1)"
+                   " -- skipping",
+                   mesh, what, attr.elementSize);
+      return {};
+    }
     if (attr.vertex_count() != vertex_count) {
       spdlog::warn("LoadUsdScene: mesh '{}' {} has {} entries but {} vertices"
                    " -- skipping",
@@ -205,9 +216,35 @@ UsdSceneData LoadUsdScene(const std::string& path) {
       continue;
     }
 
+    // faceVertexIndices() falls back to the raw, UNTRIANGULATED indices
+    // whenever both triangulated arrays are empty, so "Tydra was asked to
+    // triangulate" is not a guarantee. Left unchecked, n-gon indices reach the
+    // adapter and get sliced into triangles three at a time -- garbage
+    // geometry with nothing in the log.
+    const std::vector<uint32_t>& indices = src.faceVertexIndices();
+    if (indices.size() % 3 != 0) {
+      spdlog::warn("LoadUsdScene: '{}' mesh '{}' has {} indices, not a whole"
+                   " number of triangles -- skipping",
+                   path, src.prim_name, indices.size());
+      continue;
+    }
+    const bool indices_in_range =
+        std::all_of(indices.begin(), indices.end(),
+                    [vertex_count](uint32_t i) { return i < vertex_count; });
+    if (!indices_in_range) {
+      spdlog::warn("LoadUsdScene: '{}' mesh '{}' has an index past its {}"
+                   " vertices -- skipping",
+                   path, src.prim_name, vertex_count);
+      continue;
+    }
+
     UsdMeshData mesh;
     mesh.name = src.prim_name;
     mesh.transform = mesh_transforms[mesh_index];
+    // USD's `orientation`. Tydra records the flag but never acts on it (it only
+    // copies it when merging), so a leftHanded prop keeps reversed winding and
+    // would vanish under backface culling with nothing logged.
+    mesh.right_handed = src.is_rightHanded;
     if (src.material_id >= 0 &&
         static_cast<size_t>(src.material_id) < result.materials.size()) {
       mesh.material_name = result.materials[static_cast<size_t>(src.material_id)].name;
@@ -217,7 +254,7 @@ UsdSceneData LoadUsdScene(const std::string& path) {
     std::memcpy(mesh.positions.data(), src.points.data(),
                 mesh.positions.size() * sizeof(float));
 
-    mesh.indices = src.faceVertexIndices();
+    mesh.indices = indices;
     mesh.normals = CopyFloatAttribute(src.normals, 3, vertex_count, "normals",
                                       src.prim_name);
     mesh.tangents = CopyFloatAttribute(src.tangents, 3, vertex_count, "tangents",

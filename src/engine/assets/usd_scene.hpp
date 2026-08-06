@@ -52,6 +52,11 @@ struct UsdMeshData {
   std::vector<float> tangents;    // xyz triples
   std::vector<uint32_t> indices;  // triangle list, indexes the arrays above
 
+  // USD's `orientation`. false means the winding is reversed relative to what
+  // the engine treats as front-facing, so the consumer must flip it or the
+  // mesh disappears under backface culling.
+  bool right_handed = true;
+
   size_t vertex_count() const { return positions.size() / 3; }
   size_t triangle_count() const { return indices.size() / 3; }
 };

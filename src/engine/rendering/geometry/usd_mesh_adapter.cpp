@@ -24,6 +24,19 @@ glm::vec3 Vec3At(const std::vector<float>& src, size_t i) {
   return {src[i * 3 + 0], src[i * 3 + 1], src[i * 3 + 2]};
 }
 
+// glm::normalize on a zero-length vector divides by zero and yields NaN, and a
+// NaN tangent poisons the Gram-Schmidt frame in gbuffer_encode.wesl -- black or
+// garbage pixels with nothing logged, the exact failure the missing-attribute
+// guard exists to prevent. Zero tangents are not hypothetical: Tydra's solver
+// produces one for any triangle whose UVs have zero area.
+//
+// `fallback` is returned instead, which is wrong for that vertex but bounded.
+glm::vec3 SafeNormalize(const glm::vec3& v, const glm::vec3& fallback) {
+  const float len2 = glm::dot(v, v);
+  if (!(len2 > 1e-20f)) return fallback;  // also catches NaN input
+  return v * glm::inversesqrt(len2);
+}
+
 }  // namespace
 
 std::vector<ImportedModel> BuildImportedModels(
@@ -62,16 +75,19 @@ std::vector<ImportedModel> BuildImportedModels(
     // so they take the matrix itself.
     const glm::mat3 normal_xform = glm::inverseTranspose(glm::mat3(xform));
     const glm::mat3 tangent_xform{xform};
-    // A mirroring transform (negative determinant) reverses triangle winding,
-    // which would backface-cull the part. Flip the indices back.
+    // Two independent things reverse triangle winding, so they XOR: a
+    // mirroring transform (negative determinant), and USD `orientation` being
+    // leftHanded. Either alone needs the indices flipped back or the part is
+    // backface-culled into invisibility; both together cancel out.
     const bool mirrored = glm::determinant(glm::mat3(xform)) < 0.0f;
+    const bool flip_winding = mirrored != !src.right_handed;
 
     StaticTexturedMeshComponent& mesh = model.mesh.mesh;
     mesh.vertices.resize(vertex_count * kTexturedMeshFloatsPerVertex);
     mesh.vertex_count = static_cast<uint32_t>(vertex_count);
     mesh.indices = src.indices;
     mesh.geometry_type = GeometryType::kTexturedMesh;
-    if (mirrored) {
+    if (flip_winding) {
       for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
         std::swap(mesh.indices[t + 1], mesh.indices[t + 2]);
       }
@@ -84,10 +100,13 @@ std::vector<ImportedModel> BuildImportedModels(
       glm::vec3 position =
           glm::vec3(xform * glm::vec4(Vec3At(src.positions, i), 1.0f)) * scale;
       // Re-normalized because the transform may carry scale, and a shortened
-      // normal darkens the surface.
-      glm::vec3 normal = glm::normalize(normal_xform * Vec3At(src.normals, i));
-      glm::vec3 tangent =
-          glm::normalize(tangent_xform * Vec3At(src.tangents, i));
+      // normal darkens the surface. The fallbacks only fire on a degenerate
+      // input (see SafeNormalize); they are arbitrary but finite, which a
+      // NaN is not.
+      glm::vec3 normal = SafeNormalize(normal_xform * Vec3At(src.normals, i),
+                                       glm::vec3(0.0f, 0.0f, 1.0f));
+      glm::vec3 tangent = SafeNormalize(tangent_xform * Vec3At(src.tangents, i),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
 
       if (scene.z_up) {
         position = ZUpToYUp(position);
