@@ -18,6 +18,24 @@ void tangent_basis(simd_float3 n, simd_float3& u, simd_float3& v) {
     v = simd_cross(n, u);
 }
 
+void grid_basis(simd_float3 grid_normal, simd_float3 u, simd_float3 v, simd_float3 n,
+                simd_float3& grid_u, simd_float3& grid_v) {
+    const simd_float3 axes[] = {u, v, n};
+    // Strict < keeps the tie on declaration order, which is what makes the u-v
+    // case come back as exactly (u, v) rather than (v, u).
+    simd_float3 best = axes[0];
+    float best_align = std::fabs(simd_dot(axes[0], grid_normal));
+    for (int i = 1; i < 3; ++i) {
+        const float align = std::fabs(simd_dot(axes[i], grid_normal));
+        if (align < best_align) {
+            best = axes[i];
+            best_align = align;
+        }
+    }
+    grid_u = simd_normalize(best - simd_dot(best, grid_normal) * grid_normal);
+    grid_v = simd_cross(grid_normal, grid_u);
+}
+
 namespace {
 
 // Screen-constant apparent size: half_extent as a fraction of viewport height
@@ -40,8 +58,10 @@ GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlo
         f.n = node.snap_normal;
         tangent_basis(f.n, f.u, f.v);
         // Both readings of the grid coincide here: the tangent plane IS the
-        // surface and IS the u-v drag plane.
+        // surface and IS the plane handle's drag plane.
         f.grid_normal = f.n;
+        f.grid_u = f.u;
+        f.grid_v = f.v;
     } else {
         // The node's own local axes. Right-handed by construction (a rotation
         // preserves X x Y == Z), and exactly world X/Y/Z while the node's
@@ -51,11 +71,18 @@ GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlo
         f.u = simd_act(node.rotation, simd_float3{1.0f, 0.0f, 0.0f});
         f.v = simd_act(node.rotation, simd_float3{0.0f, 1.0f, 0.0f});
         f.n = simd_act(node.rotation, simd_float3{0.0f, 0.0f, 1.0f});
-        // Shape draws no grid, so its value is inert -- set to n rather than
-        // left unset, so there is no "meaningless unless" state to reason
-        // about. A free Placement node gets a world-horizontal reference plane
-        // instead of the u-v plane; see GizmoFrame's header comment.
-        f.grid_normal = (slot == GizmoSlot::Placement) ? simd_float3{0.0f, 1.0f, 0.0f} : f.n;
+        // Shape has no grid and no plane handle, so these are inert -- set to
+        // (n, u, v) rather than left unset, so there is no "meaningless unless"
+        // state to reason about. A free Placement node gets a world-horizontal
+        // plane instead of the u-v one; see GizmoFrame's header comment.
+        if (slot == GizmoSlot::Placement) {
+            f.grid_normal = simd_float3{0.0f, 1.0f, 0.0f};
+            grid_basis(f.grid_normal, f.u, f.v, f.n, f.grid_u, f.grid_v);
+        } else {
+            f.grid_normal = f.n;
+            f.grid_u = f.u;
+            f.grid_v = f.v;
+        }
     }
 
     f.half_extent = gizmo_half_extent(f.origin, camera);
@@ -173,8 +200,8 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         return axis->handle;
     }
 
-    // Rings and plane patches both sit off-axis, and a single ray can pass near
-    // one and then the other -- the bands are disjoint in RADIUS from the
+    // The rings and the plane patch both sit off-axis, and a single ray can pass
+    // near one and then the other -- the bands are disjoint in RADIUS from the
     // origin, which says nothing about what a ray meets on its way through. So
     // they are gathered as candidates and the NEAREST ALONG THE RAY wins, which
     // is what "I clicked the thing in front" means. (Axes still beat both
@@ -232,40 +259,27 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         }
     }
 
-    struct PlanePick { GizmoHandle handle; float t; };
-    std::optional<PlanePick> best_plane;
-    const struct { simd_float3 e1, e2, normal; GizmoHandle handle; } planes[] = {
-        {frame.u, frame.v, frame.n, GizmoHandle::PlaneUV},
-        {frame.u, frame.n, frame.v, GizmoHandle::PlaneUN},
-        {frame.v, frame.n, frame.u, GizmoHandle::PlaneVN},
-    };
-    for (const auto& plane : planes) {
-        const std::optional<simd_float3> hit = ray_plane(ray, frame.origin, plane.normal);
-        if (!hit) {
-            continue;
-        }
-        const float x = simd_dot(*hit - frame.origin, plane.e1);
-        const float y = simd_dot(*hit - frame.origin, plane.e2);
-        // Same constants append_move_gizmo_handles draws the patch from, so
-        // the outline and its hit region cannot drift apart.
-        if (x < kGizmoPatchInner * he || x > kGizmoPatchOuter * he ||
-            y < kGizmoPatchInner * he || y > kGizmoPatchOuter * he) {
-            continue;
-        }
-        const float t = simd_dot(*hit - ray.origin, ray.dir);
-        if (!best_plane || t < best_plane->t) {
-            best_plane = PlanePick{plane.handle, t};
+    // The single plane patch, in the grid plane -- the same square
+    // append_move_gizmo_handles draws, from the same constants and the same
+    // basis, so the outline and its hit region cannot drift apart.
+    std::optional<float> plane_t;
+    if (const std::optional<simd_float3> hit = ray_plane(ray, frame.origin, frame.grid_normal)) {
+        const float x = simd_dot(*hit - frame.origin, frame.grid_u);
+        const float y = simd_dot(*hit - frame.origin, frame.grid_v);
+        if (x >= kGizmoPatchInner * he && x <= kGizmoPatchOuter * he &&
+            y >= kGizmoPatchInner * he && y <= kGizmoPatchOuter * he) {
+            plane_t = simd_dot(*hit - ray.origin, ray.dir);
         }
     }
 
     // Nearest of the two families along the ray.
-    if (ring_hit && best_plane) {
-        return (ring_hit->t <= best_plane->t) ? ring_hit->handle : best_plane->handle;
+    if (ring_hit && plane_t) {
+        return (ring_hit->t <= *plane_t) ? ring_hit->handle : GizmoHandle::Plane;
     }
     if (ring_hit) {
         return ring_hit->handle;
     }
-    return best_plane ? best_plane->handle : GizmoHandle::None;
+    return plane_t ? GizmoHandle::Plane : GizmoHandle::None;
 }
 
 GizmoHit pick_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, const Ray& ray,
@@ -397,11 +411,8 @@ simd_float3 gizmo_axis_dir(const GizmoFrame& frame, GizmoHandle handle) {
 }
 
 simd_float3 gizmo_plane_normal(const GizmoFrame& frame, GizmoHandle handle) {
-    switch (handle) {
-        case GizmoHandle::PlaneUV: return frame.n;
-        case GizmoHandle::PlaneUN: return frame.v;
-        default:                   return frame.u;
-    }
+    (void)handle; // there is exactly one plane handle; the parameter documents the precondition
+    return frame.grid_normal;
 }
 
 } // namespace sq

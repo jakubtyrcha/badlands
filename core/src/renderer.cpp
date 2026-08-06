@@ -296,7 +296,7 @@ void Renderer::ensure_depth_texture(uint32_t width, uint32_t height) {
 }
 
 void Renderer::set_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, GizmoHit hover,
-                          simd_float3 eye) {
+                          simd_float3 eye, bool show_grid) {
     gizmo_visible_ = true;
     gizmo_grid_verts_.clear();
     gizmo_handle_verts_.clear();
@@ -313,11 +313,19 @@ void Renderer::set_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, 
 
     // Only Placement has a grid: it is a reference plane belonging to where the
     // node sits, and Shape answers a question about size that no plane informs.
-    // It dims with the rest of its own gizmo -- it is the largest element on
-    // screen, so it would otherwise stay loud while every handle around it
-    // receded.
-    append_move_gizmo_grid(gizmo_grid_verts_, placement, 12,
-                           rest_for(on_placement) / kGizmoHandleRestAlpha);
+    // Drawn only while a Placement drag is running (`show_grid`) -- it is the
+    // largest thing the gizmo puts on screen and it answers a question only
+    // asked mid-drag, so at rest it was occluding the surface being modelled for
+    // nothing. The plane patch stays put as its resting affordance.
+    //
+    // It still dims with the rest of its own gizmo. That matters less now that
+    // it only appears mid-drag, but the drag's own handle is highlighted, so
+    // leaving the grid at full strength would have it competing with the very
+    // handle it is meant to be backing.
+    if (show_grid) {
+        append_move_gizmo_grid(gizmo_grid_verts_, placement, 12,
+                               rest_for(on_placement) / kGizmoHandleRestAlpha);
+    }
 
     // The tether goes down before the handles, so the handles draw over it.
     if (!gizmos_coalesce(placement, shape)) {

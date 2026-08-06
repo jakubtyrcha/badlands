@@ -26,14 +26,14 @@ inline constexpr simd_float4 kColorGridLine = {1.0f, 1.0f, 1.0f, 0.18f};
 inline constexpr simd_float4 kColorAxisU    = kGroundAxisX;
 inline constexpr simd_float4 kColorAxisV    = kGroundAxisY;
 inline constexpr simd_float4 kColorAxisN    = kGroundAxisZ;
-// Hand-tuned toward each pair's additive mix rather than computed from one: a
-// literal component-wise max of two desaturated colours comes out brighter
-// than either parent, which would make the plane handles louder than the axes
-// they belong to. The u+v / u+n / v+n RELATIONSHIP is what has to survive, not
-// a formula.
-inline constexpr simd_float4 kColorPlaneUV  = {0.780f, 0.640f, 0.360f, 1.0f}; // u+v
-inline constexpr simd_float4 kColorPlaneUN  = {0.700f, 0.400f, 0.720f, 1.0f}; // u+n
-inline constexpr simd_float4 kColorPlaneVN  = {0.400f, 0.720f, 0.760f, 1.0f}; // v+n
+// The one plane handle. It used to be three, coloured as each basis pair's
+// additive mix; with a single patch in the grid plane there is no pair to mix,
+// and a colour borrowed from one would misread as belonging to those two axes.
+// This warm neutral is the old u+v value kept as-is: already tuned to sit at the
+// same weight as the axes, distinct from all three of their hues, and distinct
+// from the white the hover highlight uses -- which is why hot is white and not
+// amber in the first place.
+inline constexpr simd_float4 kColorPlane    = {0.780f, 0.640f, 0.360f, 1.0f};
 inline constexpr simd_float4 kColorGizmoHot = {1.0f, 1.0f, 1.0f, 1.0f};
 // The scale gizmo's uniform (centre) handle. Neutral on purpose: it drives all
 // three components at once, so borrowing any single axis hue would misread as
@@ -125,10 +125,15 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
 // uses (gizmo.h) so drawn geometry and pick geometry cannot drift. Split into
 // two appends because the two halves draw with different primitives:
 //
-// Grid (thin LINE primitives, decoration): grid lines i in 0..divisions
-// along BOTH u and v directions, center lines included — the axis handles
-// only cover the positive halves (R3), so a skipped center would gap the
-// -he..0 halves.
+// Grid (thin LINE primitives, decoration): grid lines i in 0..divisions along
+// BOTH grid_u and grid_v, center lines included — the axis handles only cover
+// the positive halves (R3), so a skipped center would gap the -he..0 halves.
+//
+// The renderer draws this ONLY while a Placement drag is running. It is by far
+// the largest thing the gizmo puts on screen, and it answers a mid-drag question
+// ("what plane am I sliding in") that nobody is asking of a resting selection —
+// so at rest it was pure occlusion over the surface being modelled. The plane
+// patch stays visible at rest as the affordance for it.
 //
 // Each line is subdivided into kGizmoGridSegmentsPerLine pieces so the
 // radial alpha fade (kGizmoGridAlpha, falling to 0 between
@@ -154,9 +159,13 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 //    along u/v/n (R3 user ruling; pick clamps to kMoveAxisOuterFrac, so the tip
 //    dot below is grabbable), colors kColorAxisU/V/N — 6 verts each
 //  - 3 camera-facing tip dots capping those shafts — 6 verts each
-//  - 3 plane patches (uv, un, vn) over [kGizmoPatchInner, kGizmoPatchOuter]^2
-//    in each basis pair: a translucent fill quad (6 verts) then a 4-segment
-//    hairline outline (24 verts), colors kColorPlaneUV/UN/VN
+//  - 1 plane patch over [kGizmoPatchInner, kGizmoPatchOuter]^2 in the GRID
+//    plane (grid_u, grid_v): a translucent fill quad (6 verts) then a
+//    4-segment hairline outline (24 verts), color kColorPlane. One, not the
+//    three basis-pair patches this had before: filled squares in three planes
+//    at once were the widest-area, most occluding thing on a coalesced gizmo,
+//    for the gesture used least. The survivor is the tangent-plane drag an
+//    attached detail actually slides on.
 //  - 1 camera-facing origin pip — 6 verts
 // Handles rest at `rest_alpha` -- kGizmoHandleRestAlpha normally, or
 // kGizmoHandleDimAlpha when the OTHER gizmo owns the hover, which is what keeps
@@ -164,27 +173,25 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 // kColorGizmoHot instead (hover/active feedback), so pass None for whichever
 // gizmo is not hovered. Plane fills and the origin pip scale with rest_alpha
 // too, so a dimmed gizmo dims whole. A segment pointing straight at the eye has
-// no on-screen extent and is skipped. Total: 18 + 18 + 90 + 6 = 132 verts,
-// which is why these ride a vertex buffer rather than setVertexBytes.
+// no on-screen extent and is skipped. Total: 18 + 18 + 30 + 6 = 72 verts.
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
 
 // The Shape gizmo's handles (TRIANGLE primitives), from the same GizmoFrame
 // pick_gizmo_handle hit-tests with GizmoSlot::Shape. No grid and no plane
-// patches: the grid is a reference plane belonging to the Placement gizmo, and
-// scale has no drag plane of its own.
+// handle: the grid plane belongs to the Placement gizmo, and scale has no drag
+// plane of its own.
 //
 // Emits, in this order (pinned by lines_tests):
-//  - 3 axis shafts running kScaleAxisInnerFrac*he .. kScaleAxisShaftFrac*he
-//    along u/v/n, colors kColorAxisU/V/N — 6 verts each. They start OUTBOARD
-//    of the centre box rather than at the origin, which is what lets the
-//    uniform handle own the middle unambiguously (gizmo.h).
-//  - 3 camera-facing box tips capping those shafts — 6 verts each. Larger than
-//    the move gizmo's terminator dots: box-tipped axes are the scale
-//    convention, and the size difference is what distinguishes the two gizmos
-//    at a glance.
+//  - 3 camera-facing boxes at kScaleTipCenterFrac*he along u/v/n, colors
+//    kColorAxisU/V/N — 6 verts each. They float on the axis ray with NO SHAFT
+//    behind them: a shaft would put a second bar of the same hue on the same
+//    line as the move axis, and telling two collinear same-coloured bars apart
+//    by their inner radius is exactly the reading that made a coalesced gizmo
+//    unreadable. The eye connects box to axis by colour and collinearity, which
+//    is the convention Blender's combined gizmo uses.
 //  - 1 camera-facing centre box, the uniform handle — 6 verts.
-// Total 42 verts. Same rest/hot/dim alpha treatment as the move gizmo.
+// Total 24 verts. Same rest/hot/dim alpha treatment as the move gizmo.
 void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                 GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
 

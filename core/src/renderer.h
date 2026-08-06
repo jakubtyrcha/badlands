@@ -55,11 +55,15 @@ public:
     // Both handle sets share one vertex vector — they are the same primitive
     // type, and their radius bands are disjoint, so when the two anchors
     // coincide the result IS the combined gizmo with no compositing step.
-    // `hover` selects which gizmo keeps full strength and which dims; only the
-    // grid (Placement's) and the tether (drawn when the pair is apart) are
-    // decided here rather than by the caller.
+    // `hover` selects which gizmo keeps full strength and which dims; the tether
+    // (drawn when the pair is apart) is decided here rather than by the caller.
+    //
+    // `show_grid` is the caller's, though: the grid appears only while a
+    // Placement drag is running, and whether one is running is Editor's state,
+    // not something a frame can be asked. Passing it rather than inferring it is
+    // what keeps the renderer free of gesture state.
     void set_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, GizmoHit hover,
-                    simd_float3 eye);                                                   // shows the gizmos
+                    simd_float3 eye, bool show_grid);                                   // shows the gizmos
     void hide_gizmo();
     // Camera-pivot marker (flat ring + crosshair at the orbit target),
     // refreshed every frame like the move gizmo. Drawn LAST and depth-ignored:

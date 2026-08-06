@@ -77,13 +77,19 @@ handle you grab — nothing is armed, and nothing is a mode.
 
 | Gizmo | Sits at | Handles | Axes follow |
 |---|---|---|---|
-| **Placement** | the shape's attachment point, or its centre if it has none | 3 move axes, 3 plane patches, 3 rotation rings | the surface it was placed on, or the shape's own axes |
-| **Shape** | the shape's centre, always | 3 scale axes, 1 centre box for uniform scale | the shape's own axes |
+| **Placement** | the shape's attachment point, or its centre if it has none | 3 move axes, 1 plane patch, 3 rotation rings | the surface it was placed on, or the shape's own axes |
+| **Shape** | the shape's centre, always | 3 scale boxes, 1 centre box for uniform scale | the shape's own axes |
 
 Their handles sit in disjoint rings of radius — uniform scale at the centre,
-move axes inside, scale axes outside, rotation rings outermost — so when the
+move axes inside, scale boxes outside, rotation rings outermost — so when the
 two anchors coincide the pair simply reads as one gizmo. That is the usual
 case: a shape spawned onto a surface is centred on the point you clicked.
+
+The plane patch drags in two axes at once. There is one, not one per axis pair,
+and it always lies in the same plane as the reference grid: the tangent plane
+for an attached shape — the "slide the nose across the face" gesture — and
+world-horizontal for a free one. The grid itself appears only while you are
+dragging the Placement gizmo, which is the only time it answers anything.
 
 Pull it off that surface and the pair separates, joined by a thin tether: the
 Placement gizmo stays on the skin where the shape is attached, the Shape gizmo

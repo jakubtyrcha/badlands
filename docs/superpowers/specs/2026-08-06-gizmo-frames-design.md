@@ -1,5 +1,71 @@
 # Gizmo frames, two anchors and rotation — design
 
+**Declutter pass (2026-08-06, after hands-on review).** §9's first hazard came
+true: "the clutter is too much" (user, on seeing it). The count was part of it,
+but the diagnosis split into three distinct problems, and it is worth keeping
+them apart because they wanted different fixes.
+
+- **Area.** The grid was the largest thing on screen (2·`he` across, ~48% of
+  viewport height) and the only element that was never grabbable.
+- **Redundancy.** Six coloured bars sat on three lines. A move axis and a scale
+  axis of the same hue, collinear, told apart only by which radius each started
+  at. Slot dimming cannot fix this, because the two bars belong to *different*
+  gizmos — hovering one dims the other to 0.22 and leaves you guessing which
+  stub is which.
+- **Occlusion.** Three filled plane patches plus three full rings crossed the
+  model in six planes at once, against a hazard note that said seeing the
+  surface curve matters more than seeing the manipulator.
+
+The industry reading, revisited: Maya, Blender, Unity and Unreal all *have* a
+universal manipulator and all ship separate move/rotate/scale tools by default.
+ZBrush's Gizmo 3D is the counter-example and the closest to this domain — and it
+carries three arrows, three boxes, three rings, and no grid or plane patches at
+all. A universal manipulator is viable here; it just cannot also carry
+decoration.
+
+Three changes, none of which reintroduces a mode:
+
+1. **The grid draws only while a Placement drag is running.** It answers "what
+   plane am I sliding in", which nobody asks of a resting selection. `set_gizmos`
+   takes a `show_grid` flag rather than inferring it, because whether a drag is
+   running is Editor's state and a frame cannot be asked.
+2. **The scale shafts are gone; the box tips stay.** One line per axis ending in
+   a dot, with a box floating beyond it — Blender's convention for the same
+   problem. `kScaleAxisShaftFrac` became `kScaleTipCenterFrac`, and the pickable
+   band is now *derived* as the box's own extent (0.885–0.995 `he`), so drawn =
+   hit survives. A side effect worth naming: the gap between the move and scale
+   bands went from 0.10 `he` — narrower than the 8 + 14 pt of tolerance meeting
+   inside it, per the review note below — to 0.285 `he`, so the axis bands
+   genuinely do not overlap now. The explicit ordering in `pick_gizmos` stays
+   regardless, since it is also what handles the split-pair case.
+3. **Three plane patches became one, in the grid plane.** This is the change with
+   a second motive. The patches were the widest-area, most-occluding thing on the
+   gizmo, for the least-used gesture — but §3 had also left the grid and the
+   patches describing *different* planes for a free node (grid world-horizontal,
+   `PlaneUV` dragging in the node's XY). One patch in the grid plane makes the
+   grid the patch's affordance and the patch the grabbable part of the grid.
+   `GizmoHandle::PlaneUV/UN/VN` collapse to `Plane`; a free node loses vertical
+   plane dragging and moves up and down on the V axis, as it would in any of the
+   four packages above.
+
+**This reverses correction 1 below.** `grid_u, grid_v` come back onto
+`GizmoFrame`, for a reason the original spec did not have: they are now read by
+the patch's draw *and* its hit-test, not just the grid, so deriving them three
+times invites exactly the drift the shared constants exist to prevent. They are
+not `tangent_basis(grid_normal)` either — a new `grid_basis` projects the frame's
+own least-aligned axis into the plane, so the patch lands beside an axis handle
+the user can already see instead of wherever the world reference vector points.
+It still reproduces `(u, v)` exactly in the attached case, which is what
+correction 1 was right about.
+
+Left alone deliberately: `kGizmoScreenFraction` (0.24) and `kRotateRingFrac`
+(1.15), which together put the gizmo's footprint at ~55% of viewport height.
+Shrinking the whole manipulator was the available alternative to cutting
+geometry, and it treats the symptom — a smaller version of a cluttered gizmo is
+still cluttered, and it makes every handle harder to hit. If the density still
+reads wrong after this, that knob is the next thing to reach for, and dropping
+the rings behind a modifier is after that.
+
 **Corrected during implementation (2026-08-06).** Four things below did not
 survive contact with the code. Recorded here rather than silently edited into
 the body, because each was a real mistake in the design:

@@ -82,6 +82,87 @@ TEST_CASE("tangent_basis: degenerate zero normal falls back to {0,1,0} instead o
     CHECK(std::isfinite(v.x)); CHECK(std::isfinite(v.y)); CHECK(std::isfinite(v.z));
 }
 
+// --- grid_basis -------------------------------------------------------------
+
+TEST_CASE("grid_basis: reproduces (u, v) exactly when the grid plane IS the u-v plane") {
+    // The property the attached case depends on. gizmo_frame_for_node assigns
+    // (u, v) directly there rather than calling this, so if the two ever
+    // disagreed the same node would draw its patch in one place and hit-test it
+    // in another depending on which branch built the frame.
+    const simd_float3 normals[] = {
+        {0.0f, 1.0f, 0.0f},
+        simd_normalize(simd_float3{0.3f, 1.0f, 0.2f}),
+        simd_normalize(simd_float3{-0.9f, 0.1f, 0.4f}),
+        {0.0f, -1.0f, 0.0f},
+    };
+    for (const simd_float3 n : normals) {
+        CAPTURE(n.x); CAPTURE(n.y); CAPTURE(n.z);
+        simd_float3 u, v;
+        tangent_basis(n, u, v);
+        simd_float3 gu, gv;
+        grid_basis(n, u, v, n, gu, gv);
+        check_float3_approx(gu, u);
+        check_float3_approx(gv, v);
+    }
+}
+
+TEST_CASE("grid_basis: a world-horizontal plane over the node's own axes") {
+    // The free-node case. Identity axes against +Y: u and n both lie in the
+    // plane and tie at zero alignment, so declaration order picks u.
+    simd_float3 gu, gv;
+    grid_basis(simd_float3{0.0f, 1.0f, 0.0f}, simd_float3{1.0f, 0.0f, 0.0f},
+               simd_float3{0.0f, 1.0f, 0.0f}, simd_float3{0.0f, 0.0f, 1.0f}, gu, gv);
+    check_float3_approx(gu, simd_float3{1.0f, 0.0f, 0.0f});
+    check_float3_approx(gv, simd_float3{0.0f, 0.0f, -1.0f}); // cross(+Y, +X)
+
+    // And when u is the axis that CANNOT be used -- pointing straight up the
+    // grid normal -- the pick falls to one that can, rather than normalizing a
+    // vector of length zero.
+    grid_basis(simd_float3{0.0f, 1.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f},
+               simd_float3{0.0f, 0.0f, 1.0f}, simd_float3{1.0f, 0.0f, 0.0f}, gu, gv);
+    CHECK(std::fabs(simd_dot(gu, simd_float3{0.0f, 1.0f, 0.0f})) < 1e-5f);
+    CHECK(simd_length(gu) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("grid_basis: orthonormal and axis-aligned for every frame/normal pairing") {
+    const simd_float3 grid_normals[] = {
+        {0.0f, 1.0f, 0.0f},
+        simd_normalize(simd_float3{1.0f, 1.0f, 1.0f}), // the worst case: all three axes tie
+        simd_normalize(simd_float3{0.05f, 1.0f, -0.02f}),
+        simd_normalize(simd_float3{-0.7f, 0.7f, 0.14f}),
+    };
+    // Frames from a spread of rotations, so the "frame axis" being projected is
+    // not always a world axis.
+    const simd_quatf rotations[] = {
+        simd_quaternion(0.0f, simd_float3{0.0f, 1.0f, 0.0f}),
+        simd_quaternion(0.7f, simd_float3{0.0f, 1.0f, 0.0f}),
+        simd_quaternion(1.2f, simd_normalize(simd_float3{1.0f, 0.4f, -0.3f})),
+        simd_quaternion(2.9f, simd_normalize(simd_float3{-0.2f, 0.5f, 0.8f})),
+    };
+    for (const simd_float3 gn : grid_normals) {
+        for (const simd_quatf q : rotations) {
+            CAPTURE(gn.x); CAPTURE(gn.y); CAPTURE(gn.z);
+            const simd_float3 u = simd_act(q, simd_float3{1.0f, 0.0f, 0.0f});
+            const simd_float3 v = simd_act(q, simd_float3{0.0f, 1.0f, 0.0f});
+            const simd_float3 n = simd_act(q, simd_float3{0.0f, 0.0f, 1.0f});
+            simd_float3 gu, gv;
+            grid_basis(gn, u, v, n, gu, gv);
+
+            check_basis(gn, gu, gv); // orthonormal, right-handed, in the plane
+
+            // The point of deriving this from the frame rather than from
+            // tangent_basis: grid_u stays close to a drawn axis, so the patch
+            // lands beside a handle the user can already see. sqrt(2/3) is the
+            // documented floor -- the worst any of three orthonormal axes can do
+            // against a unit normal -- and is hit exactly by the (1,1,1) case.
+            const float best = std::fmax(std::fabs(simd_dot(gu, u)),
+                                         std::fmax(std::fabs(simd_dot(gu, v)),
+                                                   std::fabs(simd_dot(gu, n))));
+            CHECK(best >= std::sqrt(2.0f / 3.0f) - 1e-5f);
+        }
+    }
+}
+
 // --- gizmo_frame_for_node ---------------------------------------------------
 
 TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything else uses the "
@@ -102,6 +183,13 @@ TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything el
         check_float3_approx(f.n, simd_float3{0.0f, 0.0f, 1.0f});
         // ...and its grid is world-horizontal, not the u-v plane.
         check_float3_approx(f.grid_normal, simd_float3{0.0f, 1.0f, 0.0f});
+        // The in-plane basis the grid AND the plane patch both read, from the
+        // frame's own axes (grid_basis, not tangent_basis).
+        simd_float3 gu, gv;
+        grid_basis(f.grid_normal, f.u, f.v, f.n, gu, gv);
+        check_float3_approx(f.grid_u, gu);
+        check_float3_approx(f.grid_v, gv);
+        check_basis(f.grid_normal, f.grid_u, f.grid_v);
     }
 
     SUBCASE("snapped Move: origin = snap_point, n = snap_normal, grid = the tangent plane") {
@@ -118,6 +206,9 @@ TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything el
         tangent_basis(node.snap_normal, u, v);
         check_float3_approx(f.u, u);
         check_float3_approx(f.v, v);
+        // Attached: the two planes coincide, so the patch lands on (u, v).
+        check_float3_approx(f.grid_u, u);
+        check_float3_approx(f.grid_v, v);
     }
 
     SUBCASE("Scale ignores snapping entirely: always the node's centre and own axes") {
@@ -265,11 +356,16 @@ namespace {
 constexpr float kTestFov = 1.0472f;
 constexpr float kTestViewportH = 500.0f;
 
+// An ATTACHED node's Placement frame: the grid plane and the u-v plane are the
+// same plane, which is what makes the single plane patch land on (u, v) here.
 GizmoFrame test_frame() {
     GizmoFrame f;
     f.origin = {0.0f, 0.0f, 0.0f};
     f.n = {0.0f, 0.0f, 1.0f};
     tangent_basis(f.n, f.u, f.v);
+    f.grid_normal = f.n;
+    f.grid_u = f.u;
+    f.grid_v = f.v;
     f.half_extent = 1.5f;
     return f;
 }
@@ -295,6 +391,11 @@ GizmoFrame make_scale_frame(simd_float3 origin = simd_float3{0.0f, 0.0f, 0.0f},
     f.u = {1.0f, 0.0f, 0.0f};
     f.v = {0.0f, 1.0f, 0.0f};
     f.n = {0.0f, 0.0f, 1.0f};
+    // Shape has no grid and no plane handle; gizmo_frame_for_node leaves these
+    // at (n, u, v) rather than unset, and so does this.
+    f.grid_normal = f.n;
+    f.grid_u = f.u;
+    f.grid_v = f.v;
     f.half_extent = half_extent;
     return f;
 }
@@ -359,26 +460,31 @@ TEST_CASE("pick_gizmo_handle: each axis picked through a point on it; origin tie
     CHECK(pick(f, eye, f.origin - 0.8f * he * f.u) == GizmoHandle::None);
 }
 
-TEST_CASE("pick_gizmo_handle: plane patches hit at their centers, bounds respected, "
+TEST_CASE("pick_gizmo_handle: the plane patch hits at its center, bounds respected, "
           "clean miss is None") {
-    const GizmoFrame f = test_frame();
+    const GizmoFrame f = test_frame();  // attached: grid plane == u-v plane
     const float he = f.half_extent;
-    // Each patch gets an eye well OFF its own plane so the ray meets it
-    // steeply: a ray that hugs a patch's plane also hugs the axes lying in
-    // that plane and axis-priority (correctly) steals the pick — an eye at
-    // y=0.3 aiming at the u-n patch (in y=0) grazes the u axis at ~0.04,
-    // inside tolerance. Asymmetric x/y also avoids accidentally crossing the
-    // n axis (an x==y eye aimed at the uv patch center does exactly that).
-    // Every probe below is derived from kGizmoPatchInner/Outer rather than
-    // spelled out: these numbers moved once already (the [0.3, 0.6] -> [0.24,
-    // 0.50] restyle), and the literal 0.25 that used to sit safely outside the
-    // patch silently ended up INSIDE it.
+    // The eye sits well OFF the patch's own plane so the ray meets it steeply:
+    // a ray that hugs the patch's plane also hugs the axes lying in that plane
+    // and axis-priority (correctly) steals the pick. Asymmetric x/y also avoids
+    // accidentally crossing the n axis (an x==y eye aimed at the patch centre
+    // does exactly that). Every probe below is derived from
+    // kGizmoPatchInner/Outer rather than spelled out: these numbers moved once
+    // already (the [0.3, 0.6] -> [0.24, 0.50] restyle), and the literal 0.25
+    // that used to sit safely outside the patch silently ended up INSIDE it.
     const float c = kGizmoPatchCenter;
-    CHECK(pick(f, simd_float3{0.8f, 0.3f, 6.0f}, f.origin + c * he * (f.u + f.v)) == GizmoHandle::PlaneUV);
-    CHECK(pick(f, simd_float3{0.3f, 5.0f, 4.0f}, f.origin + c * he * (f.u + f.n)) == GizmoHandle::PlaneUN);
-    CHECK(pick(f, simd_float3{5.0f, 0.3f, 4.0f}, f.origin + c * he * (f.v + f.n)) == GizmoHandle::PlaneVN);
+    CHECK(pick(f, simd_float3{0.8f, 0.3f, 6.0f}, f.origin + c * he * (f.grid_u + f.grid_v)) ==
+          GizmoHandle::Plane);
+    // There is exactly ONE plane handle now, in the grid plane. The other two
+    // basis-pair patches are gone, so their centres are empty space -- which
+    // this pins, because "we deleted two handles" is otherwise invisible to a
+    // test suite that only ever asks about the one that stayed.
+    CHECK(pick(f, simd_float3{0.3f, 5.0f, 4.0f}, f.origin + c * he * (f.u + f.n)) !=
+          GizmoHandle::Plane);
+    CHECK(pick(f, simd_float3{5.0f, 0.3f, 4.0f}, f.origin + c * he * (f.v + f.n)) !=
+          GizmoHandle::Plane);
     // Bounds cases below: eye on the SAME side of both the x=0 and y=0 planes
-    // as the uv patch (which sits at negative u and v). Those two planes are
+    // as the patch (which sits at negative u and v). Those two planes are
     // where RingU and RingV live, and a ray that crosses one of them can pass
     // within tolerance of that ring's circle BEFORE reaching the patch -- in
     // which case the ring is genuinely the nearer handle and correctly wins.
@@ -390,34 +496,73 @@ TEST_CASE("pick_gizmo_handle: plane patches hit at their centers, bounds respect
     const float inside = kGizmoPatchInner + 0.02f;
     const float below  = kGizmoPatchInner - 0.02f;
     const float above  = kGizmoPatchOuter + 0.02f;
-    CHECK(pick(f, eye, f.origin + inside * he * f.u + inside * he * f.v) == GizmoHandle::PlaneUV);
+    CHECK(pick(f, eye, f.origin + inside * he * f.grid_u + inside * he * f.grid_v) ==
+          GizmoHandle::Plane);
     // Outside the patch means NOT the patch -- not necessarily nothing at all.
     // A ray aimed just inboard of the patch still travels on and can cross a
     // rotation ring's plane at ring radius, which is a real hit on a real
     // handle. The claim here is bounds enforcement, so that is what it asserts.
-    CHECK(pick(f, eye, f.origin + below * he * f.u + c * he * f.v) != GizmoHandle::PlaneUV);
-    CHECK(pick(f, eye, f.origin + above * he * f.u + c * he * f.v) != GizmoHandle::PlaneUV);
+    CHECK(pick(f, eye, f.origin + below * he * f.grid_u + c * he * f.grid_v) != GizmoHandle::Plane);
+    CHECK(pick(f, eye, f.origin + above * he * f.grid_u + c * he * f.grid_v) != GizmoHandle::Plane);
 
     // Off everything.
     CHECK(pick(f, eye, f.origin + 3.0f * he * f.u + 3.0f * he * f.v) == GizmoHandle::None);
 }
 
+TEST_CASE("pick_gizmo_handle: a FREE node's plane patch follows the grid plane, not u-v") {
+    // The incoherence this fixes: a free node's grid is world-horizontal while
+    // its u-v plane is vertical. With three basis-pair patches the grid
+    // advertised one plane and every patch dragged in another. One patch, in the
+    // grid plane, is the only arrangement where the drawn reference and the
+    // grabbable handle agree.
+    GizmoFrame f;
+    f.origin = {0.0f, 0.0f, 0.0f};
+    f.u = {1.0f, 0.0f, 0.0f};
+    f.v = {0.0f, 1.0f, 0.0f};
+    f.n = {0.0f, 0.0f, 1.0f};
+    f.grid_normal = {0.0f, 1.0f, 0.0f};
+    grid_basis(f.grid_normal, f.u, f.v, f.n, f.grid_u, f.grid_v);
+    f.half_extent = 1.5f;
+
+    const float he = f.half_extent;
+    const float c = kGizmoPatchCenter;
+    const simd_float3 patch = f.origin + c * he * (f.grid_u + f.grid_v);
+    // From above, looking down at the horizontal patch.
+    CHECK(pick(f, simd_float3{-0.9f, 6.0f, -1.3f}, patch) == GizmoHandle::Plane);
+    // The patch really is horizontal: it lies in y == 0 and spans nothing above.
+    CHECK(std::fabs(patch.y) < 1e-6f);
+    // And the u-v centre -- where the patch used to be -- is not a plane hit.
+    CHECK(pick(f, simd_float3{0.8f, 0.3f, 6.0f}, f.origin + c * he * (f.u + f.v)) !=
+          GizmoHandle::Plane);
+}
+
 TEST_CASE("pick_gizmo_handle: the patch it hit-tests is the patch lines.cpp draws") {
     // Guards the "drawn = hit" invariant directly, rather than by inspection:
-    // walk the emitted uv-patch FILL vertices (the first 6 of that patch's
-    // block) and confirm every one lies within the pickable bounds. If a
-    // restyle moved the drawn quad without moving the pick, this fails.
-    const GizmoFrame f = test_frame();
+    // walk the emitted patch FILL vertices (the first 6 of that block) and
+    // confirm every one lies within the pickable bounds. If a restyle moved the
+    // drawn quad without moving the pick, this fails. Uses a FREE node's frame,
+    // where the grid plane and the u-v plane differ -- on an attached frame the
+    // two coincide and the case would still pass with the draw reading the wrong
+    // basis, which is precisely the drift being guarded against.
+    GizmoFrame f;
+    f.origin = {0.0f, 0.0f, 0.0f};
+    f.u = {1.0f, 0.0f, 0.0f};
+    f.v = {0.0f, 1.0f, 0.0f};
+    f.n = {0.0f, 0.0f, 1.0f};
+    f.grid_normal = {0.0f, 1.0f, 0.0f};
+    grid_basis(f.grid_normal, f.u, f.v, f.n, f.grid_u, f.grid_v);
+    f.half_extent = 1.5f;
+
     const float he = f.half_extent;
     std::vector<LineVertex> out;
     append_move_gizmo_handles(out, f, GizmoHandle::None, simd_float3{0.8f, 0.3f, 6.0f}, kGizmoHandleRestAlpha);
-    REQUIRE(out.size() == 132);
+    REQUIRE(out.size() == 72);
 
-    for (size_t i = 36; i < 42; ++i) { // uv patch fill
+    for (size_t i = 36; i < 42; ++i) { // patch fill
         CAPTURE(i);
         const simd_float3 p = out[i].pos.xyz;
-        const float x = simd_dot(p - f.origin, f.u);
-        const float y = simd_dot(p - f.origin, f.v);
+        const float x = simd_dot(p - f.origin, f.grid_u);
+        const float y = simd_dot(p - f.origin, f.grid_v);
         CHECK(x >= kGizmoPatchInner * he - 1e-5f);
         CHECK(x <= kGizmoPatchOuter * he + 1e-5f);
         CHECK(y >= kGizmoPatchInner * he - 1e-5f);
@@ -435,13 +580,24 @@ TEST_CASE("pick_gizmo_handle: an axis offset beyond the world tolerance at its d
           == GizmoHandle::None);
 }
 
-TEST_CASE("pick_gizmo_handle: a ray grazing an axis while crossing a plane patch "
+TEST_CASE("pick_gizmo_handle: a ray grazing an axis while crossing the plane patch "
           "prefers the axis") {
-    const GizmoFrame f = test_frame();
-    // Shallow ray almost along -n from just above the u axis: passes ~0.013
-    // from the u-axis line (within tolerance) and then lands inside the u-n
-    // patch at (u,n) ~ (0.675, 0.7). Axis priority must win.
-    const Ray ray = ray_through(simd_float3{-0.675f, 0.08f, 5.0f}, simd_float3{-0.675f, 0.0f, 0.7f});
+    // A free node's frame, so the patch is horizontal (y == 0) and the u axis
+    // lies in it -- the configuration where a ray can graze the axis and land
+    // inside the patch on the same trip. Shallow ray from just above the u axis:
+    // passes ~0.007 from the axis line (well inside the ~0.11 tolerance at this
+    // depth), then lands inside the patch at world (0.5, 0, -0.5). Axis priority
+    // must win.
+    GizmoFrame f;
+    f.origin = {0.0f, 0.0f, 0.0f};
+    f.u = {1.0f, 0.0f, 0.0f};
+    f.v = {0.0f, 1.0f, 0.0f};
+    f.n = {0.0f, 0.0f, 1.0f};
+    f.grid_normal = {0.0f, 1.0f, 0.0f};
+    grid_basis(f.grid_normal, f.u, f.v, f.n, f.grid_u, f.grid_v);  // (1,0,0), (0,0,-1)
+    f.half_extent = 1.5f;
+
+    const Ray ray = ray_through(simd_float3{0.5f, 0.08f, 5.0f}, simd_float3{0.5f, 0.0f, -0.5f});
     CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH, GizmoSlot::Placement) == GizmoHandle::AxisU);
 }
 
@@ -547,8 +703,8 @@ TEST_CASE("pick_gizmo_handle (Scale): centre owns the middle, axes own outboard,
         CHECK(pick(f, eye, f.origin, GizmoSlot::Shape) == GizmoHandle::Uniform);
     }
 
-    SUBCASE("each axis is picked through a point on its drawn shaft") {
-        const float mid = 0.5f * (kScaleAxisInnerFrac + kScaleAxisShaftFrac) * f.half_extent;
+    SUBCASE("each axis is picked through the centre of its drawn box") {
+        const float mid = kScaleTipCenterFrac * f.half_extent;
         CHECK(pick(f, eye, f.origin + mid * f.u, GizmoSlot::Shape) == GizmoHandle::AxisU);
         CHECK(pick(f, eye, f.origin + mid * f.v, GizmoSlot::Shape) == GizmoHandle::AxisV);
         // n points at the eye here, so aim from off-axis for a usable view of it.
@@ -556,12 +712,12 @@ TEST_CASE("pick_gizmo_handle (Scale): centre owns the middle, axes own outboard,
               GizmoHandle::AxisN);
     }
 
-    SUBCASE("the scale gizmo has no plane handles where the move gizmo does") {
-        // Dead centre of the uv patch: a real handle under Move, nothing under
-        // Scale (the ray still misses the axes out there).
+    SUBCASE("the scale gizmo has no plane handle where the move gizmo does") {
+        // Dead centre of the patch: a real handle under Move, nothing under
+        // Scale (the ray still misses the boxes out there).
         const simd_float3 patch =
-            f.origin + kGizmoPatchCenter * f.half_extent * (f.u + f.v);
-        CHECK(pick(f, eye, patch, GizmoSlot::Placement) == GizmoHandle::PlaneUV);
+            f.origin + kGizmoPatchCenter * f.half_extent * (f.grid_u + f.grid_v);
+        CHECK(pick(f, eye, patch, GizmoSlot::Placement) == GizmoHandle::Plane);
         CHECK(pick(f, eye, patch, GizmoSlot::Shape) == GizmoHandle::None);
     }
 
@@ -569,7 +725,7 @@ TEST_CASE("pick_gizmo_handle (Scale): centre owns the middle, axes own outboard,
         // Offset perpendicular to the u axis by more than Move's 8pt tolerance
         // but less than Scale's 14pt, at the same depth — the near-miss the
         // wider tolerance exists for, now that a miss drives the camera.
-        const float mid = 0.5f * (kScaleAxisInnerFrac + kScaleAxisShaftFrac) * f.half_extent;
+        const float mid = kScaleTipCenterFrac * f.half_extent;
         const simd_float3 on_axis = f.origin + mid * f.u;
         const float pts_to_world = 2.0f * std::tan(kTestFov * 0.5f) / kTestViewportH;
         const float world_per_pt = simd_length(on_axis - eye) * pts_to_world;
@@ -580,22 +736,32 @@ TEST_CASE("pick_gizmo_handle (Scale): centre owns the middle, axes own outboard,
     }
 }
 
-TEST_CASE("pick_gizmo_handle (Scale): the shafts it hit-tests are the shafts lines.cpp draws") {
-    // Same drawn == hit invariant the move gizmo's patch case pins, for the
-    // segment bounds that moved when the centre box took over the middle.
+TEST_CASE("pick_gizmo_handle (Scale): the boxes it hit-tests are the boxes lines.cpp draws") {
+    // Same drawn == hit invariant the move gizmo's patch case pins. With the
+    // shafts gone the pickable band IS the box, so this is the case that fails
+    // if a restyle moves the box without moving kScaleTipCenterFrac.
     const GizmoFrame f = make_scale_frame();
     const simd_float3 eye = {0.8f, 0.3f, 8.0f};
 
     std::vector<LineVertex> out;
     append_scale_gizmo_handles(out, f, GizmoHandle::None, eye, kGizmoHandleRestAlpha);
-    CHECK(out.size() == 42); // 3 shafts + 3 tips + 1 centre box, 6 verts each
+    CHECK(out.size() == 24); // 3 boxes + 1 centre box, 6 verts each -- no shafts
 
-    // Dead centre belongs to the uniform handle, never an axis: the shafts
-    // start at kScaleAxisInnerFrac and the centre owns the disc inside that.
+    // Every vertex of the u box lies within the pickable band along u.
+    for (size_t i = 0; i < 6; ++i) {
+        CAPTURE(i);
+        const float along = simd_dot(out[i].pos.xyz - f.origin, f.u);
+        CHECK(along >= kScaleAxisInnerFrac * f.half_extent - 1e-5f);
+        CHECK(along <= kScaleAxisOuterFrac * f.half_extent + 1e-5f);
+    }
+
+    // Dead centre belongs to the uniform handle, never an axis: the boxes sit
+    // way out at kScaleTipCenterFrac and the centre owns the disc inside that.
     CHECK(pick(f, eye, f.origin, GizmoSlot::Shape) == GizmoHandle::Uniform);
-    // And a point in the band's inner GAP -- past the uniform handle's grab
-    // radius but short of the drawn shaft -- hits nothing on this gizmo, which
-    // is what leaves it free for Placement's axes when the two are coalesced.
+    // And the wide GAP between them -- past the uniform handle's grab radius,
+    // well short of the box -- hits nothing on this gizmo, which is what leaves
+    // it free for Placement's axes when the two are coalesced. That gap is real
+    // now: it used to be the width of a tolerance, and is now ~0.285 he.
     const simd_float3 gap = f.origin + 0.5f * kScaleAxisInnerFrac * f.half_extent * f.u;
     CHECK(pick(f, eye, gap, GizmoSlot::Shape) == GizmoHandle::None);
 }
@@ -665,8 +831,8 @@ TEST_CASE("gizmo_scale_axis_index maps u/v/n onto scale.x/y/z, and nothing else"
     CHECK(gizmo_scale_axis_index(GizmoHandle::AxisU) == 0);
     CHECK(gizmo_scale_axis_index(GizmoHandle::AxisV) == 1);
     CHECK(gizmo_scale_axis_index(GizmoHandle::AxisN) == 2);
-    for (const GizmoHandle h : {GizmoHandle::None, GizmoHandle::Uniform, GizmoHandle::PlaneUV,
-                                GizmoHandle::PlaneUN, GizmoHandle::PlaneVN}) {
+    for (const GizmoHandle h : {GizmoHandle::None, GizmoHandle::Uniform, GizmoHandle::Plane,
+                                GizmoHandle::RingU, GizmoHandle::RingN}) {
         CHECK(gizmo_scale_axis_index(h) == -1);
     }
     // Uniform drives a screen-space drag, not an axis solve, so anything
@@ -707,23 +873,37 @@ TEST_CASE("pick_gizmos: a coalesced pair resolves by radius band") {
         CHECK(hit.handle == GizmoHandle::AxisU);
     }
 
-    SUBCASE("the outer shaft is Shape's scale axis") {
-        const float mid = 0.5f * (kScaleAxisInnerFrac + kScaleAxisShaftFrac);
-        const GizmoHit hit = hit_at(shape.origin + mid * he * shape.u);
+    SUBCASE("the outer box is Shape's scale axis") {
+        const GizmoHit hit = hit_at(shape.origin + kScaleTipCenterFrac * he * shape.u);
         CHECK(hit.slot == GizmoSlot::Shape);
         CHECK(hit.handle == GizmoHandle::AxisU);
     }
 
     SUBCASE("the plane patch is Placement's, and loses to no axis out there") {
-        const GizmoHit hit =
-            hit_at(placement.origin + kGizmoPatchCenter * he * (placement.u + placement.v));
+        const GizmoHit hit = hit_at(placement.origin +
+                                    kGizmoPatchCenter * he * (placement.grid_u + placement.grid_v));
         CHECK(hit.slot == GizmoSlot::Placement);
-        CHECK(hit.handle == GizmoHandle::PlaneUV);
+        CHECK(hit.handle == GizmoHandle::Plane);
     }
 
     SUBCASE("well clear of everything hits nothing") {
         const GizmoHit hit = hit_at(placement.origin + 4.0f * he * placement.u);
         CHECK(hit.handle == GizmoHandle::None);
+    }
+
+    SUBCASE("the gap the deleted scale shaft opened is genuinely dead") {
+        // Before the shaft came out, the move band ended at 0.60 he and the
+        // scale band began at 0.70 he -- a gap narrower than the 8 + 14 pts of
+        // tolerance that met inside it, so pick_gizmos' explicit ordering was
+        // the only thing keeping the two apart. The scale box starts at ~0.885
+        // now, and everything from the move axis's outer clamp to the box is
+        // empty. Which matters beyond tidiness: on a coalesced gizmo an empty
+        // band is where a press falls through to the camera, so a user aiming
+        // between the two handles orbits instead of silently scaling.
+        const float between = 0.5f * (kMoveAxisOuterFrac + kScaleAxisInnerFrac);
+        REQUIRE(between > kMoveAxisOuterFrac);
+        REQUIRE(between < kScaleAxisInnerFrac);
+        CHECK(hit_at(placement.origin + between * he * placement.u).handle == GizmoHandle::None);
     }
 }
 

@@ -77,7 +77,7 @@ void check_float3_close(const simd_float3 actual, const simd_float3 expected, co
 // same two literals rather than hardcoded, so the test stays correct if the
 // camera setup ever changes.
 
-TEST_CASE("Editor: PlaneUV drag moves a free node within its own world-fixed u-v plane") {
+TEST_CASE("Editor: the plane drag moves a free node within its world-horizontal grid plane") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
@@ -97,17 +97,20 @@ TEST_CASE("Editor: PlaneUV drag moves a free node within its own world-fixed u-v
     const float he = f.half_extent;
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
 
-    // The plane this drag runs in is world XY, and stays world XY whatever the
-    // camera does. It used to be the camera-orthogonal plane, which is the
-    // behaviour this rework reverses.
-    check_float3_close(f.n, simd_float3{0.0f, 0.0f, 1.0f}, 1e-5f);
-    REQUIRE(std::fabs(simd_dot(f.n, camera_forward)) > 0.1f); // genuinely not the camera plane
+    // The plane this drag runs in is world-HORIZONTAL, and stays horizontal
+    // whatever the camera does. Two rulings meet here: it used to be the
+    // camera-orthogonal plane (reversed by the frame rework), and then the u-v
+    // plane while the grid drawn around it was horizontal (reversed by the
+    // declutter, which collapsed three patches into one and put it in the plane
+    // the grid already advertised).
+    check_float3_close(f.grid_normal, simd_float3{0.0f, 1.0f, 0.0f}, 1e-5f);
+    REQUIRE(std::fabs(simd_dot(f.grid_normal, camera_forward)) > 0.1f); // not the camera plane
 
-    // Grab the u-v patch center (derived from the shared bounds, not a
-    // literal -- those bounds moved once already), pull it 0.3he along u.
-    const simd_float3 grab = f.origin + kGizmoPatchCenter * he * (f.u + f.v);
+    // Grab the patch center (derived from the shared bounds, not a literal --
+    // those bounds moved once already), pull it 0.3he along grid_u.
+    const simd_float3 grab = f.origin + kGizmoPatchCenter * he * (f.grid_u + f.grid_v);
     const ClickPoint p1 = click_at(grab);
-    const ClickPoint p2 = click_at(grab + 0.3f * he * f.u);
+    const ClickPoint p2 = click_at(grab + 0.3f * he * f.grid_u);
     CHECK(editor->beginDrag(p1.x, p1.y));
     editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
@@ -115,11 +118,13 @@ TEST_CASE("Editor: PlaneUV drag moves a free node within its own world-fixed u-v
     const simd_float3 after = to_simd(editor->nodePosition(spawned.node_id));
     const simd_float3 delta = after - before;
 
-    check_float3_close(delta, 0.3f * he * f.u, 5e-3f);
+    check_float3_close(delta, 0.3f * he * f.grid_u, 5e-3f);
     // Both the drag-start hit and every subsequent hit lie on the same stored
     // plane, so the delta between any two of them is exactly in-plane --
-    // orthogonal to the plane's normal, which is now the frame's n.
-    CHECK(std::fabs(simd_dot(delta, f.n)) < 1e-4f);
+    // orthogonal to that plane's normal.
+    CHECK(std::fabs(simd_dot(delta, f.grid_normal)) < 1e-4f);
+    // Which, concretely, is that the node did not change height.
+    CHECK(std::fabs(delta.y) < 1e-4f);
 
     SUBCASE("a second updateDrag after endDrag does nothing") {
         editor->updateDrag(200.0f, 450.0f);
@@ -189,7 +194,7 @@ TEST_CASE("Editor: off-handle click does not activate a drag") {
     check_float3_approx(to_simd(editor->nodePosition(spawned.node_id)), before);
 }
 
-TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; AxisN pull lifts "
+TEST_CASE("Editor: snapped node — the plane drag moves it in the snap plane; AxisN pull lifts "
           "it off the surface and the frame follows") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
@@ -208,18 +213,20 @@ TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; Axi
     const GizmoFrame f = frame_for(editor, b.node_id, true, to_simd(pr.point), to_simd(pr.normal));
     const float he = f.half_extent;
 
-    SUBCASE("PlaneUV drag stays in the snap plane") {
+    SUBCASE("the plane drag stays in the snap plane") {
+        // Attached, so the grid plane IS the u-v plane and the patch lands on
+        // (u, v) -- the one configuration where the declutter changed nothing.
         const simd_float3 before = to_simd(editor->nodePosition(b.node_id));
-        const simd_float3 grab = f.origin + kGizmoPatchCenter * he * (f.u + f.v);
+        const simd_float3 grab = f.origin + kGizmoPatchCenter * he * (f.grid_u + f.grid_v);
         const ClickPoint p1 = click_at(grab);
-        const ClickPoint p2 = click_at(grab + 0.3f * he * f.v);
+        const ClickPoint p2 = click_at(grab + 0.3f * he * f.grid_v);
         CHECK(editor->beginDrag(p1.x, p1.y));
         editor->updateDrag(p2.x, p2.y);
         editor->endDrag();
 
         const simd_float3 delta = to_simd(editor->nodePosition(b.node_id)) - before;
-        check_float3_close(delta, 0.3f * he * f.v, 5e-3f);
-        CHECK(std::fabs(simd_dot(delta, f.n)) < 5e-3f);
+        check_float3_close(delta, 0.3f * he * f.grid_v, 5e-3f);
+        CHECK(std::fabs(simd_dot(delta, f.grid_normal)) < 5e-3f);
     }
 
     SUBCASE("AxisN pull moves along the surface normal; a second grab on the moved frame works") {
@@ -263,13 +270,14 @@ TEST_CASE("Editor: updateDrag ignores a stale drag left active across a selectio
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
-    // A: unsnapped cube at the center ray; beginDrag on A's u-v patch
+    // A: unsnapped cube at the center ray; beginDrag on A's plane patch
     // captures A's frame and start state while A is selected.
     const SpawnResult a = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(a.snapped == false);
     editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
     const GizmoFrame fa = frame_for(editor, a.node_id, false);
-    const ClickPoint pa = click_at(fa.origin + 0.45f * fa.half_extent * (fa.u + fa.v));
+    const ClickPoint pa =
+        click_at(fa.origin + kGizmoPatchCenter * fa.half_extent * (fa.grid_u + fa.grid_v));
     REQUIRE(editor->beginDrag(pa.x, pa.y));
 
     // Selection moves to a second, unrelated node B with no endDrag() in
