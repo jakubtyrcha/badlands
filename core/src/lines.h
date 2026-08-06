@@ -145,9 +145,9 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 // no line width), endpoints extended by the half-width so segments sharing a
 // corner overlap instead of notching. Emits, in this order (pinned by
 // lines_tests):
-//  - 3 axis shafts from the origin, POSITIVE half only: 0..kGizmoAxisShaftFrac*he
-//    along u/v/n (R3 user ruling; pick clamps to the full 0..he segment),
-//    colors kColorAxisU/V/N — 6 verts each
+//  - 3 axis shafts from the origin, POSITIVE half only: 0..kMoveAxisShaftFrac*he
+//    along u/v/n (R3 user ruling; pick clamps to kMoveAxisOuterFrac, so the tip
+//    dot below is grabbable), colors kColorAxisU/V/N — 6 verts each
 //  - 3 camera-facing tip dots capping those shafts — 6 verts each
 //  - 3 plane patches (uv, un, vn) over [kGizmoPatchInner, kGizmoPatchOuter]^2
 //    in each basis pair: a translucent fill quad (6 verts) then a 4-segment
@@ -164,12 +164,13 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
 
-// The scale gizmo's handles (TRIANGLE primitives), from the same GizmoFrame
-// pick_gizmo_handle hit-tests with GizmoKind::Scale. No grid and no plane
-// patches: the grid is a drag-PLANE affordance and scale has no drag plane.
+// The Shape gizmo's handles (TRIANGLE primitives), from the same GizmoFrame
+// pick_gizmo_handle hit-tests with GizmoSlot::Shape. No grid and no plane
+// patches: the grid is a reference plane belonging to the Placement gizmo, and
+// scale has no drag plane of its own.
 //
 // Emits, in this order (pinned by lines_tests):
-//  - 3 axis shafts running kScaleAxisInnerFrac*he .. kGizmoAxisShaftFrac*he
+//  - 3 axis shafts running kScaleAxisInnerFrac*he .. kScaleAxisShaftFrac*he
 //    along u/v/n, colors kColorAxisU/V/N — 6 verts each. They start OUTBOARD
 //    of the centre box rather than at the origin, which is what lets the
 //    uniform handle own the middle unambiguously (gizmo.h).

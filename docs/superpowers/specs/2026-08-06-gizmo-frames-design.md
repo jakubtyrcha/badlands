@@ -1,5 +1,29 @@
 # Gizmo frames, two anchors and rotation — design
 
+**Corrected during implementation (2026-08-06).** Four things below did not
+survive contact with the code. Recorded here rather than silently edited into
+the body, because each was a real mistake in the design:
+
+1. **§3's `grid_u, grid_v` became a single `grid_normal`.** Two vectors where
+   one will do: `tangent_basis(grid_normal)` reproduces `(u, v)` exactly in the
+   attached case, because it is the same call the frame used to build them.
+2. **The attachment had to stop following the node.** The spec said nothing
+   about `updateDrag`'s rigid `snap_point` ride, and combined with the
+   spawn-placement ruling it made the Placement/Shape split unobservable —
+   the two anchors would have been equal at spawn and equal forever. Settled
+   by user ruling mid-implementation: the attachment is a fact about the
+   surface, so it stays put and the node moves off it.
+3. **§5's "resolution is by radius band, innermost first" was wrong for rings
+   vs plane patches.** The bands are disjoint in radius *from the origin*,
+   which says nothing about what a ray meets on its way through: a ring really
+   can sit in front of a patch. Those two now resolve by nearest-along-the-ray.
+   Axes still win outright, and Shape's uniform centre is still tested first.
+4. **Rings resolve among themselves by 3D distance to the circle**, not by
+   where the ray crosses each ring's plane. A ray aimed squarely at one ring
+   crosses the other two rings' planes as it travels and can cross one at very
+   nearly ring radius — picking a ring the cursor was nowhere near, and then
+   reading the drag's angle in the wrong plane entirely.
+
 Approved 2026-08-06. Replaces the single tool-modal manipulator with two live
 gizmos — **Placement** (move + rotate) at the node's attachment point and
 **Shape** (scale) at its centre — that merge into one when those points

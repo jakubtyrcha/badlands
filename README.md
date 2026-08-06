@@ -46,7 +46,7 @@ becomes a drag once it travels ~4pt, so clicking still means click.
 | `⌘` drag (vertical) | **dolly**, toward the cursor |
 | two-finger scroll | pan |
 | pinch | dolly |
-| drag from a gizmo handle | move / scale |
+| drag from a gizmo handle | move / rotate / scale |
 | click (no drag) | select, or spawn |
 | `F` | frame the selection |
 
@@ -60,16 +60,39 @@ Dolly converges on the point under the cursor rather than the screen centre.
 Two modes, selected by the icons top-left or keys **1**–**2**:
 
 1. **Edit (1)** — click a shape to select it; the name appears in the
-   top-right info panel, and a radial menu anchored on the shape offers Move,
-   Scale, additive/subtract toggle, and Delete (permanent — no undo). Move
-   drags along the gizmo's axis and plane handles; Scale has its own gizmo,
-   three axis handles plus a centre box for uniform scale. Clicking empty
-   space deselects.
+   top-right info panel, and a radial menu anchored on the shape offers the
+   additive/subtract toggle and Delete (permanent — no undo). Clicking empty
+   space deselects. There is no tool to arm: a selected shape shows **both**
+   of its manipulators at once, and the handle you grab decides what happens.
 2. **Spawn (2)** — a second row of options chooses the shape (cube/sphere) and
    operation (additive/subtract). Click in the viewport to place it: clicking
    an existing shape snaps the new one onto that surface; a miss lands it a
    fixed distance ahead of the camera. Either way the new node is selected and
    the editor returns to Edit.
+
+### The two manipulators
+
+A selected shape carries two gizmos, and which one you get is decided by which
+handle you grab — nothing is armed, and nothing is a mode.
+
+| Gizmo | Sits at | Handles | Axes follow |
+|---|---|---|---|
+| **Placement** | the shape's attachment point, or its centre if it has none | 3 move axes, 3 plane patches, 3 rotation rings | the surface it was placed on, or the shape's own axes |
+| **Shape** | the shape's centre, always | 3 scale axes, 1 centre box for uniform scale | the shape's own axes |
+
+Their handles sit in disjoint rings of radius — uniform scale at the centre,
+move axes inside, scale axes outside, rotation rings outermost — so when the
+two anchors coincide the pair simply reads as one gizmo. That is the usual
+case: a shape spawned onto a surface is centred on the point you clicked.
+
+Pull it off that surface and the pair separates, joined by a thin tether: the
+Placement gizmo stays on the skin where the shape is attached, the Shape gizmo
+rides the shape. Rotating turns the shape about the Placement anchor, so a
+detail attached to a surface swings around its contact point instead of
+drifting off it. Hovering either gizmo dims the other.
+
+No gizmo axis depends on the camera. Orbit all the way around and the handles
+mean exactly what they meant before — only their on-screen size changes.
 
 Color legend: pale blue = selected; red = a subtracted shape's wireframe
 (shown even unselected); surface = normal-colored debug (see Rendering below).
@@ -118,7 +141,12 @@ See `CLAUDE.md` for interop and coding conventions.
   (affects raymarch step sizes there; sphere tracing tolerates the resulting
   underestimates by design).
 - No undo (delete is permanent).
-- No rotations.
+- A single rotation drag is capped at half a turn; past ±180° it reverses, and
+  a further drag continues the spin. The tradeoff buys a gesture that is a pure
+  function of cursor position, so it can never miscount a winding.
+- Attachment is inert: a shape remembers the surface point it was spawned on,
+  but moving its parent does not carry it, and dragging it onto a different
+  surface does not re-attach it.
 - No materials or lighting — shading is normal-colored debug only.
 - No export/saving.
 - Single window.
