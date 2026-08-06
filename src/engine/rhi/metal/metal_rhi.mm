@@ -20,6 +20,11 @@
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <objc/objc.h>
+
+// objc_autoreleasePoolPush/Pop, for AutoreleasePoolScope.
+extern "C" void* objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void*);
 
 #include <algorithm>
 #include <atomic>
@@ -1445,6 +1450,12 @@ class MetalDevice final : public IRhiDevice {
 };
 
 }  // namespace
+
+AutoreleasePoolScope::AutoreleasePoolScope()
+    : pool_(objc_autoreleasePoolPush()) {}
+AutoreleasePoolScope::~AutoreleasePoolScope() {
+  objc_autoreleasePoolPop(pool_);
+}
 
 bool WeakHandleClearedAfterRetire(IRhiDevice& device) {
   __weak id<MTLBuffer> weak_handle = nil;

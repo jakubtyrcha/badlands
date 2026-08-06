@@ -1,8 +1,13 @@
 // rhi_lab: the MVP that proves the RHI + Slang + visibility-buffer stack.
 //
-// Headless by design. The MVP RHI has no swapchain -- adding one would be
-// surface built for a demo rather than for the renderer -- so this writes a
-// PNG and exits. That also makes it reproducible and diffable.
+// Two modes. Without --window it renders one frame to a PNG and exits, which
+// keeps it reproducible and diffable and is what scripts/screenshot.sh drives.
+// With --window it opens a resizable window and flies a camera around, which
+// is what exercises the frame model, the swapchain and resize.
+//
+// The window loop deliberately lives here rather than in the engine's SDL app
+// shell: that shell is Dawn in its signatures (RenderContext hands out a
+// wgpu::Device), so the RHI-era shell is a later, separate decision.
 //
 // The frame is the whole architecture in miniature:
 //
@@ -20,6 +25,9 @@
 #include <cstring>
 #include <numbers>
 #include <string>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_metal.h>
+
 #include <initializer_list>
 #include <optional>
 #include <stdexcept>
@@ -33,6 +41,7 @@ extern "C" {
 #include "badlands_assets.h"
 }
 
+#include "engine/rhi/metal/metal_rhi.hpp"
 #include "engine/rhi/rhi_device.hpp"
 #include "engine/slang/slang_compiler.hpp"
 #include "game/geometry/terrain_clusters.hpp"
@@ -71,6 +80,11 @@ struct Options {
   float tau = 1.5f;
   uint32_t seed = 7;
   bool debug_vis = false;
+  bool windowed = false;
+  // >0 runs that many windowed frames, resizing partway, and exits with a
+  // status that says whether resize actually took. Needs a display, so it
+  // is an opt-in ctest rather than part of the default suite.
+  int self_test_frames = 0;
 };
 
 // std::stof and friends THROW on unparseable input, so `--tau x` used to end
@@ -138,10 +152,18 @@ bool ParseArgs(int argc, char** argv, Options& o) {
     else if (a == "--tau") { const char* v = next("--tau"); if (!v || !ParseFloat(v, "--tau", o.tau)) return false; }
     else if (a == "--seed") { const char* v = next("--seed"); if (!v || !ParseInt(v, "--seed", 0, 0xFFFFFFFFL, n)) return false; o.seed = uint32_t(n); }
     else if (a == "--debug-vis") { o.debug_vis = true; }
+    else if (a == "--window") { o.windowed = true; }
+    else if (a == "--self-test") {
+      const char* v = next("--self-test");
+      if (!v || !ParseInt(v, "--self-test", 2, 10000, n)) return false;
+      o.self_test_frames = int(n);
+      o.windowed = true;
+    }
     else if (a == "--help" || a == "-h") {
       std::printf(
           "rhi_lab [--out|--screenshot FILE] [--width N] [--height N]\n"
-          "        [--trees N] [--tau PX] [--seed N] [--debug-vis]\n");
+          "        [--trees N] [--tau PX] [--seed N] [--debug-vis]\n"
+          "        [--window]   open a window; WASD/QE move, right-drag turns\n");
       return false;
     } else {
       spdlog::error("rhi_lab: unknown argument '{}'", a);
@@ -222,6 +244,86 @@ std::span<const uint8_t> Bytes(const T& v) {
 //
 // Eight distinct layers so the splat blend is visible. Real packs would come
 // from MaterialLibrary; the point here is the blend, not the textures.
+// Everything whose size follows the frame. Rebuilt as one unit on resize, at
+// one point in the frame, so half a frame can never use each size.
+struct Targets {
+  uint32_t width = 0, height = 0;
+  TexturePtr visbuf, depth, colour;
+  BufferPtr readback, vis_readback;
+};
+
+bool MakeTargets(IRhiDevice& dev, uint32_t w, uint32_t h, Targets& out) {
+  // Destroy() rather than drop: deferred deletion keeps the old ones alive for
+  // frames still in flight, which is what lets a live resize skip WaitIdle and
+  // not hitch.
+  if (out.visbuf) out.visbuf->Destroy();
+  if (out.depth) out.depth->Destroy();
+  if (out.colour) out.colour->Destroy();
+  if (out.readback) out.readback->Destroy();
+  if (out.vis_readback) out.vis_readback->Destroy();
+
+  out.width = w;
+  out.height = h;
+  out.visbuf = dev.CreateTexture({.width = w, .height = h,
+                                  .format = Format::R32Uint,
+                                  .usage = TextureUsage::RenderTarget |
+                                           TextureUsage::Sampled |
+                                           TextureUsage::CopySrc,
+                                  .label = "visbuffer"});
+  out.depth = dev.CreateTexture({.width = w, .height = h,
+                                 .format = Format::Depth32Float,
+                                 .usage = TextureUsage::DepthStencil |
+                                          TextureUsage::Sampled,
+                                 .label = "depth"});
+  out.colour = dev.CreateTexture({.width = w, .height = h,
+                                  .format = Format::RGBA8Unorm,
+                                  .usage = TextureUsage::RenderTarget |
+                                           TextureUsage::CopySrc,
+                                  .label = "colour"});
+  out.readback = dev.CreateBuffer(
+      {.size = uint64_t(w) * h * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "readback"});
+  out.vis_readback = dev.CreateBuffer(
+      {.size = uint64_t(w) * h * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "vis_readback"});
+  if (!out.visbuf || !out.depth || !out.colour || !out.readback ||
+      !out.vis_readback) {
+    spdlog::error("rhi_lab: could not create {}x{} targets", w, h);
+    return false;
+  }
+  return true;
+}
+
+// A free-fly camera. WASD moves in the look plane, QE up and down, and the
+// right mouse button turns.
+struct FlyCamera {
+  glm::vec3 position{0, 0, 0};
+  float yaw = 0.0f;    // radians, around +Y
+  float pitch = 0.0f;  // radians, clamped away from straight up/down
+  float speed = 60.0f;
+
+  glm::vec3 Forward() const {
+    return glm::normalize(glm::vec3(std::cos(pitch) * std::sin(yaw),
+                                    std::sin(pitch),
+                                    std::cos(pitch) * std::cos(yaw)));
+  }
+  glm::vec3 Right() const {
+    return glm::normalize(glm::cross(Forward(), glm::vec3(0, 1, 0)));
+  }
+  glm::mat4 View() const {
+    return glm::lookAt(position, position + Forward(), glm::vec3(0, 1, 0));
+  }
+  void Turn(float dyaw, float dpitch) {
+    yaw += dyaw;
+    // Clamped short of vertical: at exactly +-90 degrees the up vector and the
+    // look direction are parallel and lookAt produces NaNs.
+    constexpr float kLimit = 1.55f;
+    pitch = std::clamp(pitch + dpitch, -kLimit, kLimit);
+  }
+};
+
 TexturePtr MakeLayerArray(IRhiDevice& dev, const char* label, bool arm) {
   auto tex = dev.CreateTexture({.width = kLayerSize,
                                 .height = kLayerSize,
@@ -368,11 +470,17 @@ int main(int argc, char** argv) {
                  .compare = CompareFunction::GreaterEqual,
                  .format = Format::Depth32Float},
        .cull_mode = CullMode::None, .label = "tree_vis"});
+  // The resolve writes straight into the backbuffer when there is a window, so
+  // its colour format has to match one. CAMetalLayer accepts BGRA8Unorm and
+  // not RGBA8Unorm -- the channel order is the hardware's business, so the
+  // shader is unchanged either way.
+  const Format present_format =
+      opt.windowed ? Format::BGRA8Unorm : Format::RGBA8Unorm;
   auto resolve_pipe = device->CreateRenderPipeline(
       {.vertex_shader = res_vs.get(), .vertex_entry = "vs_fullscreen",
        .fragment_shader = res_fs.get(),
        .fragment_entry = opt.debug_vis ? "fs_visbuffer_debug" : "fs_resolve",
-       .color_formats = {Format::RGBA8Unorm},
+       .color_formats = {present_format},
        .cull_mode = CullMode::None, .label = "resolve"});
   if (!select_pipe || !finalize_pipe || !terrain_pipe || !tree_pipe ||
       !resolve_pipe) {
@@ -449,65 +557,67 @@ int main(int argc, char** argv) {
        .address_v = AddressMode::ClampToEdge, .label = "splat_sampler"});
   if (!albedo || !arm || !splat0 || !splat1) return 1;
 
-  auto visbuf = device->CreateTexture({.width = opt.width, .height = opt.height,
-                                       .format = Format::R32Uint,
-                                       .usage = TextureUsage::RenderTarget |
-                                                TextureUsage::Sampled |
-                                                TextureUsage::CopySrc,
-                                       .label = "visbuffer"});
-  auto depth = device->CreateTexture({.width = opt.width, .height = opt.height,
-                                      .format = Format::Depth32Float,
-                                      .usage = TextureUsage::DepthStencil |
-                                               TextureUsage::Sampled,
-                                      .label = "depth"});
-  auto colour = device->CreateTexture({.width = opt.width, .height = opt.height,
-                                       .format = Format::RGBA8Unorm,
-                                       .usage = TextureUsage::RenderTarget |
-                                                TextureUsage::CopySrc,
-                                       .label = "colour"});
-  auto readback = device->CreateBuffer(
-      {.size = uint64_t(opt.width) * opt.height * 4,
-       .usage = BufferUsage::CopyDst | BufferUsage::MapRead, .label = "readback"});
-  auto vis_readback = device->CreateBuffer(
-      {.size = uint64_t(opt.width) * opt.height * 4,
-       .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
-       .label = "vis_readback"});
-  if (!visbuf || !depth || !colour || !readback) return 1;
+  // Everything sized to the frame lives in one struct, so a resize rebuilds
+  // exactly this set and nothing else -- including the resolve table, which
+  // references the visbuffer and depth views and is immutable.
+  Targets targets;
+  if (!MakeTargets(*device, opt.width, opt.height, targets)) return 1;
 
   // --- Frame constants ---------------------------------------------------
   LabFrame f{};
   const float cx = scene.size_x_m * 0.5f, cz = scene.size_z_m * 0.5f;
   const float dist = std::max(scene.size_x_m, scene.size_z_m) * 0.85f;
-  const glm::vec3 eye{cx - dist * 0.6f, scene.max_height_m + dist * 0.45f,
-                      cz - dist * 0.6f};
-  const glm::vec3 target{cx, scene.max_height_m * 0.3f, cz};
+  const glm::vec3 start_eye{cx - dist * 0.6f, scene.max_height_m + dist * 0.45f,
+                            cz - dist * 0.6f};
+  const glm::vec3 start_target{cx, scene.max_height_m * 0.3f, cz};
   const float fov_deg = 55.0f;
-  const float aspect = float(opt.width) / float(opt.height);
-  const glm::mat4 view = glm::lookAt(eye, target, glm::vec3(0, 1, 0));
-  // Reversed-Z: swapping near and far in a zero-to-one projection maps near->1
-  // and far->0, which is the project-wide convention.
-  const glm::mat4 proj =
-      glm::perspective(glm::radians(fov_deg), aspect, 4000.0f, 0.1f);
-  f.view_proj = proj * view;
-  f.inv_view_proj = glm::inverse(f.view_proj);
-  f.camera_pos = glm::vec4(eye, 1.0f);
-  f.sun_direction = glm::vec4(glm::normalize(glm::vec3(0.45f, 0.75f, 0.35f)), 0);
-  f.sun_color = glm::vec4(1.9f, 1.75f, 1.5f, 0.0f);
-  // A plain sky-ish ambient: DC term plus a gentle vertical gradient.
-  f.ambient_sh[0] = glm::vec4(0.32f, 0.38f, 0.48f, 0.0f);
-  f.ambient_sh[2] = glm::vec4(0.10f, 0.12f, 0.16f, 0.0f);
-  f.params = glm::vec4(opt.tau, float(opt.height), fov_deg, float(capacity));
-  f.splat_uv = glm::vec4(1.0f / std::max(scene.size_x_m, 1.0f),
-                         1.0f / std::max(scene.size_z_m, 1.0f), 0.0f, 0.0f);
-  f.limits = glm::vec4(float(capacity), 0, 0, 0);
-  frame_ubo->Write(0, Bytes(f));
 
-  // Oracle: the CPU selector this pass replaces. Same camera, same tau. If the
-  // GPU picks a different number the port of the rule is wrong, and that shows
-  // up as holes in the terrain rather than as an error.
-  std::vector<uint32_t> cpu_cut;
-  SelectClusters(scene.dag, eye, fov_deg, float(opt.height), opt.tau, cpu_cut);
-  const size_t cpu_selected = cpu_cut.size();
+  // The windowed camera starts exactly where the headless shot looks from, so
+  // the two views are comparable.
+  FlyCamera cam;
+  cam.position = start_eye;
+  {
+    const glm::vec3 dir = glm::normalize(start_target - start_eye);
+    cam.yaw = std::atan2(dir.x, dir.z);
+    cam.pitch = std::asin(std::clamp(dir.y, -1.0f, 1.0f));
+    cam.speed = std::max(20.0f, dist * 0.35f);
+  }
+
+  size_t cpu_selected = 0;
+  auto update_frame_uniforms = [&](uint32_t w, uint32_t h) {
+    const float aspect = float(w) / float(std::max(1u, h));
+    const glm::mat4 view = cam.View();
+    // Reversed-Z: swapping near and far in a zero-to-one projection maps
+    // near->1 and far->0, which is the project-wide convention.
+    const glm::mat4 proj =
+        glm::perspective(glm::radians(fov_deg), aspect, 4000.0f, 0.1f);
+    f.view_proj = proj * view;
+    f.inv_view_proj = glm::inverse(f.view_proj);
+    f.camera_pos = glm::vec4(cam.position, 1.0f);
+    f.sun_direction =
+        glm::vec4(glm::normalize(glm::vec3(0.45f, 0.75f, 0.35f)), 0);
+    f.sun_color = glm::vec4(1.9f, 1.75f, 1.5f, 0.0f);
+    // A plain sky-ish ambient: DC term plus a gentle vertical gradient.
+    f.ambient_sh[0] = glm::vec4(0.32f, 0.38f, 0.48f, 0.0f);
+    f.ambient_sh[2] = glm::vec4(0.10f, 0.12f, 0.16f, 0.0f);
+    // Screen height drives the cluster error threshold, so it MUST be this
+    // frame's height rather than the startup one, or a resized window selects
+    // clusters for a size it is no longer rendering at.
+    f.params = glm::vec4(opt.tau, float(h), fov_deg, float(capacity));
+    f.splat_uv = glm::vec4(1.0f / std::max(scene.size_x_m, 1.0f),
+                           1.0f / std::max(scene.size_z_m, 1.0f), 0.0f, 0.0f);
+    f.limits = glm::vec4(float(capacity), 0, 0, 0);
+    frame_ubo->Write(0, Bytes(f));
+
+    // Oracle: the CPU selector this pass replaces. Same camera, same tau. If
+    // the GPU picks a different number the port of the rule is wrong, and that
+    // shows up as holes in the terrain rather than as an error.
+    std::vector<uint32_t> cpu_cut;
+    SelectClusters(scene.dag, cam.position, fov_deg, float(h), opt.tau,
+                   cpu_cut);
+    cpu_selected = cpu_cut.size();
+  };
+  update_frame_uniforms(opt.width, opt.height);
 
   // --- Binding tables ----------------------------------------------------
   const auto& sel_refl = select_pipe->GetReflection();
@@ -540,25 +650,41 @@ int main(int argc, char** argv) {
   // resolve.slang keeps both fragment entries, so reflection reports every
   // global whichever one is selected. Bind the full set rather than tracking
   // which entry uses what -- that is the graph's job later, not the app's.
-  auto res_entries = Entries({
-      BindByName(res_refl, "frame", frame_ubo.get()),
-      BindByName(res_refl, "visbuffer", nullptr, visbuf->GetDefaultView()),
-      BindByName(res_refl, "depthbuffer", nullptr, depth->GetDefaultView()),
-      BindByName(res_refl, "albedo_array", nullptr, albedo->GetDefaultView()),
-      BindByName(res_refl, "arm_array", nullptr, arm->GetDefaultView()),
-      BindByName(res_refl, "biome_splat0", nullptr, splat0->GetDefaultView()),
-      BindByName(res_refl, "biome_splat1", nullptr, splat1->GetDefaultView()),
-      BindByName(res_refl, "terrain_sampler", nullptr, nullptr,
-                 terrain_sampler.get()),
-      BindByName(res_refl, "splat_sampler", nullptr, nullptr,
-                 splat_sampler.get()),
-  });
+  //
+  // A lambda because this is the ONLY table referencing size-dependent views.
+  // Binding tables are immutable, so a resize cannot patch it -- it has to be
+  // built again against the new visbuffer and depth.
+  BindingTablePtr resolve_table;
+  auto rebuild_resolve = [&]() {
+    auto res_entries = Entries({
+        BindByName(res_refl, "frame", frame_ubo.get()),
+        BindByName(res_refl, "visbuffer", nullptr,
+                   targets.visbuf->GetDefaultView()),
+        BindByName(res_refl, "depthbuffer", nullptr,
+                   targets.depth->GetDefaultView()),
+        BindByName(res_refl, "albedo_array", nullptr, albedo->GetDefaultView()),
+        BindByName(res_refl, "arm_array", nullptr, arm->GetDefaultView()),
+        BindByName(res_refl, "biome_splat0", nullptr, splat0->GetDefaultView()),
+        BindByName(res_refl, "biome_splat1", nullptr, splat1->GetDefaultView()),
+        BindByName(res_refl, "terrain_sampler", nullptr, nullptr,
+                   terrain_sampler.get()),
+        BindByName(res_refl, "splat_sampler", nullptr, nullptr,
+                   splat_sampler.get()),
+    });
+    if (!res_entries) {
+      spdlog::error("rhi_lab: resolve binding resolution failed");
+      return false;
+    }
+    resolve_table = device->CreateBindingTable(
+        {.render_pipeline = resolve_pipe.get(), .entries = *res_entries,
+         .label = "resolve"});
+    return resolve_table != nullptr;
+  };
 
   // Bail before creating a single table: a name that did not resolve has
   // already been logged, and a table built from the rest would render
   // something subtly wrong rather than nothing at all.
-  if (!sel_entries || !fin_entries || !terrain_entries || !tree_entries ||
-      !res_entries) {
+  if (!sel_entries || !fin_entries || !terrain_entries || !tree_entries) {
     spdlog::error("rhi_lab: binding resolution failed, aborting");
     return 1;
   }
@@ -575,17 +701,19 @@ int main(int argc, char** argv) {
   auto tree_table = device->CreateBindingTable(
       {.render_pipeline = tree_pipe.get(), .entries = *tree_entries,
        .label = "trees"});
-  auto resolve_table = device->CreateBindingTable(
-      {.render_pipeline = resolve_pipe.get(), .entries = *res_entries,
-       .label = "resolve"});
 
-  if (!select_table || !finalize_table || !terrain_table || !tree_table ||
-      !resolve_table) {
+  if (!select_table || !finalize_table || !terrain_table || !tree_table) {
     return 1;
   }
+  if (!rebuild_resolve()) return 1;
 
   // --- Frame -------------------------------------------------------------
-  device->BeginValidationScope();
+  //
+  // One body, two callers: the headless path renders into `colour` and reads
+  // it back for the PNG; the windowed path renders straight into the acquired
+  // backbuffer. `present` selects which.
+  auto record_frame = [&](ITextureView* present, uint32_t w, uint32_t h,
+                          bool want_readback) {
   auto encoder = device->CreateCommandEncoder("lab_frame");
 
   // Selection: classify then publish. Both write the args buffer, so it is
@@ -622,21 +750,21 @@ int main(int argc, char** argv) {
   encoder->Transition(tree_vtx.get(), ResourceState::ShaderRead);
   encoder->Transition(tree_idx.get(), ResourceState::ShaderRead);
   encoder->Transition(tree_inst.get(), ResourceState::ShaderRead);
-  encoder->Transition(visbuf.get(), ResourceState::RenderTarget);
-  encoder->Transition(depth.get(), ResourceState::DepthWrite);
+  encoder->Transition(targets.visbuf.get(), ResourceState::RenderTarget);
+  encoder->Transition(targets.depth.get(), ResourceState::DepthWrite);
 
   RenderPassDesc vis_pass;
   vis_pass.label = "visbuffer";
-  vis_pass.color_attachments.push_back({.view = visbuf->GetDefaultView(),
+  vis_pass.color_attachments.push_back({.view = targets.visbuf->GetDefaultView(),
                                         .load_op = LoadOp::Clear,
                                         .store_op = StoreOp::Store,
                                         .clear_color = {0, 0, 0, 0}});
-  vis_pass.depth_attachment = {.view = depth->GetDefaultView(),
+  vis_pass.depth_attachment = {.view = targets.depth->GetDefaultView(),
                                .load_op = LoadOp::Clear,
                                .store_op = StoreOp::Store,
                                .clear_depth = 0.0f};  // reversed-Z far
   auto* vp = encoder->BeginRenderPass(vis_pass);
-  vp->SetViewport(0, 0, float(opt.width), float(opt.height));
+  vp->SetViewport(0, 0, float(w), float(h));
   vp->SetPipeline(terrain_pipe.get());
   vp->SetBindingTable(0, terrain_table.get());
   vp->SetIndexBuffer(dummy_idx.get(), IndexFormat::Uint32);
@@ -651,34 +779,266 @@ int main(int argc, char** argv) {
 
   // Resolve: every material in the scene, in screen space, from a fixed set of
   // bindings.
-  encoder->Transition(visbuf.get(), ResourceState::ShaderRead);
-  encoder->Transition(depth.get(), ResourceState::ShaderRead);
+  encoder->Transition(targets.visbuf.get(), ResourceState::ShaderRead);
+  encoder->Transition(targets.depth.get(), ResourceState::ShaderRead);
   encoder->Transition(albedo.get(), ResourceState::ShaderRead);
   encoder->Transition(arm.get(), ResourceState::ShaderRead);
   encoder->Transition(splat0.get(), ResourceState::ShaderRead);
   encoder->Transition(splat1.get(), ResourceState::ShaderRead);
-  encoder->Transition(colour.get(), ResourceState::RenderTarget);
+  // The RESOLVE TARGET, which is the backbuffer when there is a window. A
+  // freshly acquired drawable is a new resource every frame, so its state
+  // starts Undefined every frame and has to be declared each time.
+  ITexture* resolve_target =
+      present ? present->GetTexture() : targets.colour.get();
+  encoder->Transition(resolve_target, ResourceState::RenderTarget);
 
   RenderPassDesc res_pass;
   res_pass.label = "resolve";
-  res_pass.color_attachments.push_back({.view = colour->GetDefaultView(),
-                                        .load_op = LoadOp::Clear,
-                                        .store_op = StoreOp::Store});
+  res_pass.color_attachments.push_back(
+      {.view = present ? present : targets.colour->GetDefaultView(),
+       .load_op = LoadOp::Clear,
+       .store_op = StoreOp::Store});
   auto* rp = encoder->BeginRenderPass(res_pass);
-  rp->SetViewport(0, 0, float(opt.width), float(opt.height));
+  if (!rp) return;
+  rp->SetViewport(0, 0, float(w), float(h));
   rp->SetPipeline(resolve_pipe.get());
   rp->SetBindingTable(0, resolve_table.get());
   rp->Draw(3);
   rp->End();
 
-  encoder->Transition(colour.get(), ResourceState::CopySrc);
-  encoder->Transition(readback.get(), ResourceState::CopyDst);
-  encoder->CopyTextureToBuffer(colour.get(), 0, 0, readback.get(), 0);
-  encoder->Transition(visbuf.get(), ResourceState::CopySrc);
-  encoder->Transition(vis_readback.get(), ResourceState::CopyDst);
-  encoder->CopyTextureToBuffer(visbuf.get(), 0, 0, vis_readback.get(), 0);
+  if (want_readback) {
+    encoder->Transition(targets.colour.get(), ResourceState::CopySrc);
+    encoder->Transition(targets.readback.get(), ResourceState::CopyDst);
+    encoder->CopyTextureToBuffer(targets.colour.get(), 0, 0,
+                                 targets.readback.get(), 0);
+    encoder->Transition(targets.visbuf.get(), ResourceState::CopySrc);
+    encoder->Transition(targets.vis_readback.get(), ResourceState::CopyDst);
+    encoder->CopyTextureToBuffer(targets.visbuf.get(), 0, 0,
+                                 targets.vis_readback.get(), 0);
+  }
   encoder->Finish();
   device->Submit(*encoder);
+  };  // record_frame
+
+  if (opt.windowed) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+      spdlog::error("rhi_lab: SDL_Init failed: {}", SDL_GetError());
+      return 1;
+    }
+    // Without this, clicks that give the window focus are swallowed rather
+    // than delivered -- part of the same macOS input problem as the raise
+    // below.
+    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+
+    SDL_Window* window = SDL_CreateWindow(
+        "badlands rhi_lab", int(opt.width), int(opt.height),
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    if (!window) {
+      spdlog::error("rhi_lab: SDL_CreateWindow failed: {}", SDL_GetError());
+      return 1;
+    }
+    SDL_MetalView metal_view = SDL_Metal_CreateView(window);
+    if (!metal_view) {
+      spdlog::error("rhi_lab: SDL_Metal_CreateView failed: {}", SDL_GetError());
+      return 1;
+    }
+
+    // PIXELS, not points. On a HiDPI display these differ by the backing
+    // scale, and using points renders at half resolution into a full-size
+    // drawable -- which looks plausible rather than wrong.
+    int pw = 0, ph = 0;
+    SDL_GetWindowSizeInPixels(window, &pw, &ph);
+
+    auto swapchain = device->CreateSwapchain(
+        {.native_window = SDL_Metal_GetLayer(metal_view),
+         .width = uint32_t(pw), .height = uint32_t(ph),
+         .format = Format::BGRA8Unorm, .vsync = true, .label = "lab"});
+    if (!swapchain) return 1;
+    if (!MakeTargets(*device, uint32_t(pw), uint32_t(ph), targets)) return 1;
+    if (!rebuild_resolve()) return 1;
+
+    spdlog::info(
+        "rhi_lab: WASD/QE to move, hold right mouse to look, shift to go "
+        "faster, Esc to quit");
+
+    // Coalesced: a live drag streams size events, and recreating the layer per
+    // event fights the frame in flight. One recreate per frame, at a defined
+    // point.
+    uint32_t pending_w = uint32_t(pw), pending_h = uint32_t(ph);
+    bool raised_on_show = false;
+    bool running = true;
+    int frame_no = 0;
+    uint32_t rendered = 0;
+    // Self-test bookkeeping. The request is in POINTS, because that is what
+    // SDL_SetWindowSize takes; everything downstream is in PIXELS, which on a
+    // HiDPI display is a different number. Asserting against the requested
+    // value compares the two and fails on a correct implementation -- which is
+    // exactly what this test did on its first run.
+    int point_w = 0, point_h = 0;
+    SDL_GetWindowSize(window, &point_w, &point_h);
+    const int test_point_w = point_w / 2 + 64;
+    const int test_point_h = point_h / 2 + 32;
+    const uint32_t initial_pixel_w = uint32_t(pw);
+    uint32_t rendered_after_resize = 0;
+    uint64_t last_ticks = SDL_GetPerformanceCounter();
+    const double tick_freq = double(SDL_GetPerformanceFrequency());
+
+    while (running) {
+      // Metal hands back autoreleased objects every frame -- nextDrawable and
+      // each command buffer. Without a pool per frame they accumulate for the
+      // life of the run and it looks like a GPU memory leak.
+      metal::AutoreleasePoolScope pool;
+
+      SDL_Event e;
+      while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_EVENT_QUIT) {
+          running = false;
+        } else if (e.type == SDL_EVENT_WINDOW_SHOWN ||
+                   e.type == SDL_EVENT_WINDOW_EXPOSED) {
+          // Raised only once the OS reports the window visible. A pre-loop
+          // raise is too early on macOS -- Cocoa only activates a visible
+          // window -- and without this the app starts without keyboard focus,
+          // so WASD does nothing and it reads as a broken camera.
+          if (!raised_on_show) {
+            SDL_RaiseWindow(window);
+            raised_on_show = true;
+          }
+        } else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+          int nw = 0, nh = 0;
+          SDL_GetWindowSizeInPixels(window, &nw, &nh);
+          pending_w = uint32_t(std::max(0, nw));
+          pending_h = uint32_t(std::max(0, nh));
+        } else if (e.type == SDL_EVENT_KEY_DOWN &&
+                   e.key.scancode == SDL_SCANCODE_ESCAPE) {
+          running = false;
+        } else if (e.type == SDL_EVENT_MOUSE_MOTION &&
+                   (e.motion.state & SDL_BUTTON_RMASK)) {
+          constexpr float kLookRate = 0.0035f;
+          cam.Turn(-e.motion.xrel * kLookRate, -e.motion.yrel * kLookRate);
+        }
+      }
+
+      const uint64_t now = SDL_GetPerformanceCounter();
+      const float dt = float(double(now - last_ticks) / tick_freq);
+      last_ticks = now;
+
+      const bool* keys = SDL_GetKeyboardState(nullptr);
+      const float boost = keys[SDL_SCANCODE_LSHIFT] ? 4.0f : 1.0f;
+      const float step = cam.speed * boost * std::min(dt, 0.1f);
+      if (keys[SDL_SCANCODE_W]) cam.position += cam.Forward() * step;
+      if (keys[SDL_SCANCODE_S]) cam.position -= cam.Forward() * step;
+      if (keys[SDL_SCANCODE_D]) cam.position += cam.Right() * step;
+      if (keys[SDL_SCANCODE_A]) cam.position -= cam.Right() * step;
+      if (keys[SDL_SCANCODE_E]) cam.position.y += step;
+      if (keys[SDL_SCANCODE_Q]) cam.position.y -= step;
+
+      // Scripted resize, partway through a self-test run. Requested through
+      // the SAME pending-size path a real event uses, so the test exercises
+      // the coalescing rather than bypassing it.
+      if (opt.self_test_frames > 0) {
+        if (frame_no == opt.self_test_frames / 2) {
+          // Only the request. The new PIXEL size arrives as an event, through
+          // the same coalescing path a user drag uses -- which is the thing
+          // worth testing.
+          SDL_SetWindowSize(window, test_point_w, test_point_h);
+        }
+        if (frame_no >= opt.self_test_frames) running = false;
+      }
+      ++frame_no;
+
+      // Paced HERE, at the top of the frame, not at Acquire.
+      device->BeginFrame();
+
+      // RESIZE RULE 1: applied at exactly one point, after the pacing wait and
+      // before any acquire or encoding. Nothing is recreated mid-frame.
+      if (pending_w != targets.width || pending_h != targets.height) {
+        swapchain->Resize(pending_w, pending_h);
+        if (pending_w > 0 && pending_h > 0) {
+          if (!MakeTargets(*device, pending_w, pending_h, targets)) break;
+          // The resolve table is immutable and holds the OLD visbuffer and
+          // depth views, so it has to be rebuilt too.
+          if (!rebuild_resolve()) break;
+        }
+      }
+
+      // RESIZE RULE 2: the size is captured once and used for everything --
+      // viewport, uniforms, swapchain. Re-reading it mid-frame is what makes
+      // half a frame use each size.
+      const uint32_t fw = targets.width, fh = targets.height;
+
+      auto frame = swapchain->Acquire();
+      if (frame.status == AcquireStatus::Ok) {
+        update_frame_uniforms(fw, fh);
+        record_frame(frame.view, fw, fh, /*want_readback=*/false);
+        swapchain->Present();
+        ++rendered;
+        if (opt.self_test_frames > 0 && fw != initial_pixel_w) {
+          ++rendered_after_resize;
+        }
+      } else if (frame.status == AcquireStatus::Lost) {
+        spdlog::warn("rhi_lab: surface lost, recreating");
+        swapchain->Resize(0, 0);
+        swapchain->Resize(fw, fh);
+      }
+      // Skip needs no handling at all: EndFrame retires a frame that submitted
+      // nothing, which is what keeps a minimized window from exhausting the
+      // pacing budget.
+      device->EndFrame();
+    }
+
+    device->WaitIdle();
+    int final_pw = 0, final_ph = 0;
+    SDL_GetWindowSizeInPixels(window, &final_pw, &final_ph);
+    SDL_Metal_DestroyView(metal_view);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    if (opt.self_test_frames > 0) {
+      // Exit status IS the assertion: this runs as a ctest with no test
+      // framework around it.
+      if (rendered == 0) {
+        spdlog::error("rhi_lab self-test: no frame ever rendered");
+        return 1;
+      }
+      if (uint32_t(final_pw) == initial_pixel_w) {
+        spdlog::error(
+            "rhi_lab self-test: the window never actually resized (still {} "
+            "pixels wide) -- the test proved nothing",
+            final_pw);
+        return 1;
+      }
+      // The invariant: everything sized to the frame follows the reported
+      // PIXEL size, whatever the backing scale turns the request into.
+      if (targets.width != uint32_t(final_pw) ||
+          targets.height != uint32_t(final_ph)) {
+        spdlog::error("rhi_lab self-test: targets are {}x{}, window is {}x{}",
+                      targets.width, targets.height, final_pw, final_ph);
+        return 1;
+      }
+      if (swapchain->GetWidth() != uint32_t(final_pw) ||
+          swapchain->GetHeight() != uint32_t(final_ph)) {
+        spdlog::error("rhi_lab self-test: swapchain is {}x{}, window is {}x{}",
+                      swapchain->GetWidth(), swapchain->GetHeight(), final_pw,
+                      final_ph);
+        return 1;
+      }
+      if (rendered_after_resize == 0) {
+        spdlog::error(
+            "rhi_lab self-test: resize took, but nothing rendered afterwards");
+        return 1;
+      }
+      spdlog::info(
+          "rhi_lab self-test OK: {} frames, {} after resizing {} -> {} pixels "
+          "wide",
+          rendered, rendered_after_resize, initial_pixel_w, final_pw);
+    }
+    return 0;
+  }
+
+  device->BeginValidationScope();
+  device->BeginFrame();
+  record_frame(nullptr, opt.width, opt.height, /*want_readback=*/true);
+  device->EndFrame();
   device->WaitIdle();
 
   if (auto report = device->EndValidationScope()) {
@@ -714,7 +1074,7 @@ int main(int argc, char** argv) {
   }
 
   std::vector<uint32_t> vis(size_t(opt.width) * opt.height, 0);
-  if (vis_readback->Read(0, {reinterpret_cast<uint8_t*>(vis.data()),
+  if (targets.vis_readback->Read(0, {reinterpret_cast<uint8_t*>(vis.data()),
                              vis.size() * 4})) {
     size_t nonzero = 0;
     uint32_t sample = 0;
@@ -726,7 +1086,7 @@ int main(int argc, char** argv) {
   }
 
   std::vector<uint8_t> pixels(size_t(opt.width) * opt.height * 4);
-  if (!readback->Read(0, pixels)) {
+  if (!targets.readback->Read(0, pixels)) {
     spdlog::error("rhi_lab: readback failed");
     return 1;
   }

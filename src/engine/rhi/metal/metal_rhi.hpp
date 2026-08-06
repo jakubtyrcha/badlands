@@ -28,4 +28,22 @@ std::unique_ptr<IRhiDevice> CreateMetalDevice(const std::string& label = {},
 // from the outside.
 bool WeakHandleClearedAfterRetire(IRhiDevice& device);
 
+// An @autoreleasepool for a translation unit that is not Objective-C++.
+//
+// Metal hands back autoreleased objects -- nextDrawable and every command
+// buffer among them -- and without a pool around each frame they accumulate
+// for the entire life of the run. The leak looks like a GPU memory bug rather
+// than a missing pool, which is why this exists as a type a plain C++ render
+// loop can put at the top of its frame.
+class AutoreleasePoolScope {
+ public:
+  AutoreleasePoolScope();
+  ~AutoreleasePoolScope();
+  AutoreleasePoolScope(const AutoreleasePoolScope&) = delete;
+  AutoreleasePoolScope& operator=(const AutoreleasePoolScope&) = delete;
+
+ private:
+  void* pool_ = nullptr;
+};
+
 }  // namespace badlands::rhi::metal

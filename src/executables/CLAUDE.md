@@ -9,16 +9,21 @@ Each app owns an `AppView` and builds its scene from the world itself; the app s
 | `badlands_ai_sandbox` | the AI harness, driven by a `--mode` |
 | `badlands_viewer` | model/LOD viewer |
 | `badlands_mapview` | the map tool (see `src/mapgen/CLAUDE.md`) |
-| `badlands_rhi_lab` | the RHI/Slang/visibility-buffer MVP — **headless**, writes a PNG |
+| `badlands_rhi_lab` | the RHI/Slang/visibility-buffer MVP — PNG by default, `--window` for a live camera |
 
 ## `badlands_rhi_lab` is not an `AppView`
-It builds on `badlands_rhi` + `badlands_slang`, not `badlands_engine`, and has no
-window: the MVP RHI has no swapchain, so it renders one frame and writes a PNG.
+It builds on `badlands_rhi` + `badlands_slang`, not `badlands_engine`, and owns its
+own SDL loop. That is deliberate, not temporary: `SdlViewerApp` is Dawn all the way
+through (`RenderContext` hands views a `wgpu::Device`), so the RHI-era app shell is a
+separate decision, taken when the render graph gives an `RhiView` something to mean.
 Skipped by the build when the Slang SDK is absent (`tools/slang_probe/README.md`).
 ```sh
-./build/badlands_rhi_lab --out /tmp/lab.png            # materials + lighting
+./build/badlands_rhi_lab --out /tmp/lab.png              # materials + lighting
 ./build/badlands_rhi_lab --out /tmp/vis.png --debug-vis  # the visibility buffer
+./build/badlands_rhi_lab --window                        # live: WASD/QE, right-drag to look
 ```
+`ctest -L display` runs the windowed resize test; it is out of the default suite
+because it needs a real display.
 
 ## Common flags
 Run from the repo root — `shaders/` and `assets/` resolve relative to cwd.

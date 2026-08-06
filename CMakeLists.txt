@@ -1171,7 +1171,7 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
         src/core/parallel.cpp
     )
     target_link_libraries(badlands_rhi_lab PRIVATE
-        badlands_slang assets meshoptimizer)
+        badlands_slang assets meshoptimizer SDL3::SDL3)
     target_include_directories(badlands_rhi_lab PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/src
@@ -1186,6 +1186,19 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
     # mechanism -- and these arguments used to be ACCEPTED: an out-of-range
     # count truncated into a valid-looking value and rendered silently wrong
     # geometry with exit status 0.
+    # Windowed resize, end to end: open a window, ask for a different size,
+    # and assert everything sized to the frame followed the reported PIXEL
+    # size. LABELLED and excluded from the default run because it needs a
+    # display -- over SSH or with the screen locked it would fail for reasons
+    # that say nothing about the code, and a suite that flakes gets ignored.
+    # Run it with: ctest -L display
+    add_test(NAME rhi_lab_windowed_resize
+             COMMAND badlands_rhi_lab --self-test 40 --width 800 --height 600
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(rhi_lab_windowed_resize PROPERTIES
+                         LABELS display
+                         TIMEOUT 120)
+
     foreach(bad_args
         "--nodes;4294967298"      # truncates to 2 without a range check
         "--width;4294967297"      # truncates to 1
