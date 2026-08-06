@@ -357,19 +357,6 @@ struct Params {
   // Ordered sweeps of the water relaxation per step, warm-started. Cold start
   // at t = 0 runs to convergence instead.
   int water_sweeps = 4;
-  // Total loss from standing water, amortised over dt_years: evaporation plus
-  // seepage plus unresolved sub-grid drainage. It exceeds pan evaporation for
-  // the same reason an effective roughness exceeds a grain diameter -- the
-  // model resolves less than reality and the parameter absorbs the rest.
-  //
-  // It is also the lake-size dial, exactly: equilibrium is an area balance,
-  //   loss * lake_area = runoff * catchment_area
-  // so lake_area/catchment_area = runoff/loss. A basin overflows iff its area
-  // at spill is below that ratio of its own catchment -- inflow scales with
-  // catchment while basin area does not, so trunk basins always spill and only
-  // a large lake on a small catchment becomes a sink. Which is what an
-  // endorheic lake is.
-  float standing_water_loss_m_per_yr = 0.0f;  // UNUSED: evaporation_m_per_yr is the one
   // The water sub-system runs on its OWN clock: source and sink both dwarf
   // storage at landscape pace (1 m/yr over 200 yr is 200 m of rain against
   // ~10 m lakes), and water equilibrates in years while terrain takes 1e4-1e6.
@@ -1056,8 +1043,37 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   // Contact alone cannot bootstrap: on a dry map no particle ever meets water,
   // so nothing converts and no water is ever created (measured: 0 wet cells
   // everywhere). Rest is what seeds it; contact is what feeds an existing lake.
-  auto convert_water = [&](size_t cell) {
+  // require_trapped distinguishes STOPPED from TRAPPED, which are not the same
+  // thing and were treated as if they were.
+  //
+  //   contact / no-heading -> genuinely a sink. Convert unconditionally.
+  //   out of lifetime      -> a MODEL ARTEFACT. The particle exhausted
+  //                           max_travel or min_vol, not the terrain; in
+  //                           reality its water flows on. Converting it seeded
+  //                           standing water wherever a particle happened to
+  //                           expire, which floods almost everything: measured
+  //                           97.3% wet, after which particles meet water on
+  //                           their first step, enter the lake branch, and stop
+  //                           accumulating discharge -- so the channels that
+  //                           would drain it never form and the flood locks
+  //                           itself in.
+  //
+  // Water that does not convert simply stays TRANSIT, which is what the
+  // discharge field already represents. Nothing is lost from the model, only
+  // from the standing-water field it never belonged in.
+  auto convert_water = [&](size_t cell, bool require_trapped) {
     if (converted || !p.enable_water) return;
+    if (require_trapped) {
+      const int cx = int(cell) % g.n, cy = int(cell) / g.n;
+      static const int dx4[4] = {1, -1, 0, 0}, dy4[4] = {0, 0, 1, -1};
+      const float here_surf = g.height[cell] + g.water[cell];
+      for (int k = 0; k < 4; ++k) {
+        const int ax = cx + dx4[k], ay = cy + dy4[k];
+        if (ax < 0 || ay < 0 || ax >= g.n || ay >= g.n) continue;
+        const size_t j = g.idx(ax, ay);
+        if (g.height[j] + g.water[j] < here_surf) return;  // can still flow on
+      }
+    }
     converted = true;
     const double cell_area = double(cell_m) * double(cell_m);
     g.water[cell] += float(double(volume) * q_per_unit_vol_m3_s *
@@ -1077,7 +1093,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     ++g.visits[here];
 
     if (volume < p.min_vol) {
-      convert_water(here);
+      convert_water(here, true);   // out of lifetime -- only if truly trapped
       Deposit(g, here, carried_mass());
       g.deposited_death += double(carried_mass());
       return;
@@ -1092,7 +1108,8 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
     // transit. This is the only path by which the two sub-sims are coupled --
     // previously the particle gave up only its SEDIMENT here and its water was
     // simply lost, while the water field invented its own inflow.
-    if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m) convert_water(here);
+    if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m)
+      convert_water(here, false);
     if (g.water[here] * p.relief_m >= p.min_dispersion_depth_m) {
       const int32_t lid = g.lake_id[here];
       if (lid < 0 || lid >= int32_t(g.lake_outlet.size())) {
@@ -1249,7 +1266,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
                                : V2{gx / std::max(slope, 1e-9f),
                                     gy / std::max(slope, 1e-9f)};
     if (std::fabs(hdg.x) < 1e-6f && std::fabs(hdg.y) < 1e-6f) {
-      convert_water(here);
+      convert_water(here, false);  // no heading at all: a genuine sink
       Deposit(g, here, carried_mass());
       g.deposited_death += double(carried_mass());
       return;
@@ -1435,7 +1452,7 @@ void Descend(Grid& g, const Params& p, std::vector<Lake>& lakes,
   // dropping that made this a silent mass sink, and it is the DOMINANT exit --
   // volume only decays to 0.61 over 500 steps, so the volume < min_vol branch
   // above is unreachable in practice.
-  convert_water(last_cell);
+  convert_water(last_cell, true);  // out of travel budget -- only if trapped
   Deposit(g, last_cell, carried_mass());
   g.deposited_death += double(carried_mass());
 }
@@ -3033,16 +3050,16 @@ void WaterRelaxationMatchesFlood() {
 // water must not sit above a spill (over-fill), and must not pool on a slope
 // (failure to drain).
 void WaterFieldZeroLossLimit() {
-  Params p = Base(64);
+  // Isolated(), so a mechanism repointed later cannot silently re-enable
+  // itself here. This test used to zero `standing_water_loss_m_per_yr`, which
+  // became a DEAD field when loss was repointed onto evaporation_m_per_yr --
+  // so the "zero-loss" test had been running with loss at the default 0.8 m/yr
+  // and quietly measuring the wrong configuration. Disabling a mechanism BY
+  // NAME breaks silently when the name moves; default-deny does not.
+  Params p = Isolated(64);
+  p.enable_water = true;                 // the ONLY mechanism under test
   p.terrain = Params::Terrain::Horseshoe;
-  // No loss AND no rain: charge the map once and let it settle. This isolates
-  // TRANSPORT, which is what the zero-loss limit is actually a claim about.
-  // Driving it with rain instead conflates it with a rate balance -- at
-  // dt_water = 2 yr each iteration adds 2 m of rain while levelling moves only
-  // ~0.3 m downhill, so the map floods (measured 2248 m of over-fill) no matter
-  // what the loss is. That rate constraint is real and calibrated separately.
-  p.standing_water_loss_m_per_yr = 0.f;
-  p.runoff_m_per_yr = 0.f;
+  p.evaporation_m_per_yr = 0.f;          // the LIVE parameter
   Grid g(p.res);
   InitTerrain(g, p);
   std::vector<float> flux(g.cells, 0.f);
@@ -3055,27 +3072,37 @@ void WaterFieldZeroLossLimit() {
   std::vector<int32_t> outlet;
   PriorityFlood(g, filled, outlet);
 
-  // Compare only where the flood says there IS a basin: elsewhere the flood
-  // surface equals the terrain and both are trivially dry.
+  // Compared only where the oracle can SPEAK. PriorityFlood has no concept of a
+  // sea, while the water field holds anything at or below sea level AT sea
+  // level, so the two differ there by exactly the sea depth. Identical defect
+  // to the one already fixed in T9, which took its disagreement from 9.18 m to
+  // 0.00 -- fixed in one place and left standing in the other.
+  const float sea_hu = p.sea_level_m / p.relief_m;
+  auto comparable = [&](int x, int y) {
+    return x > 0 && y > 0 && x < g.n - 1 && y < g.n - 1 &&
+           g.height[g.idx(x, y)] >= sea_hu;
+  };
+
   double over = 0.0, under = 0.0;
   size_t basin = 0;
-  for (size_t i = 0; i < g.cells; ++i) {
-    if (filled[i] <= g.height[i] + 1e-7f) {
-      over = std::max(over, double(g.water[i]));  // pooled on a slope?
-      continue;
+  for (int y = 0; y < g.n; ++y)
+    for (int x = 0; x < g.n; ++x) {
+      if (!comparable(x, y)) continue;
+      const size_t i = g.idx(x, y);
+      if (filled[i] <= g.height[i] + 1e-7f) {
+        over = std::max(over, double(g.water[i]));  // pooled on a slope?
+        continue;
+      }
+      ++basin;
+      const double want = double(filled[i] - g.height[i]);
+      over = std::max(over, double(g.water[i]) - want);
+      under = std::max(under, want - double(g.water[i]));
     }
-    ++basin;
-    const double want = double(filled[i] - g.height[i]);
-    const double got = double(g.water[i]);
-    over = std::max(over, got - want);
-    under = std::max(under, want - got);
-  }
   const double over_m = over * p.relief_m, under_m = under * p.relief_m;
   char buf[200];
   std::snprintf(buf, sizeof(buf),
                 "%zu basin cells; worst over-fill %.2f m, worst under-fill "
-                "%.2f m",
-                basin, over_m, under_m);
+                "%.2f m", basin, over_m, under_m);
   Check("T10 zero-loss water == flood surface", over_m < 0.5 && under_m < 0.5,
         buf);
 }
@@ -3390,6 +3417,52 @@ void SoilProductionSteadyState() {
   Check("P4 soil reaches h* ln(P0/E)", ok, buf);
 }
 
+// --- T16. water placed inland DRAINS OFF THE MAP ---------------------------
+// UNIT test of transport across distance, which nothing covered. T14 proves a
+// cell already AT the edge drains; T10 proves levelling settles a drowned map;
+// neither moves water anywhere. The mechanism that decides whether a landscape
+// can shed its runoff at all was untested.
+//
+// No inflow, no loss, no erosion: a slab of water on a tilted plane must run
+// off and leave. Also REPORTS the rate, in cells per iteration, because that is
+// the number that says whether drainage can keep pace with runoff on a real
+// map -- at 12 iterations per step against a 512-cell map, it cannot if the
+// rate is anywhere near 1.
+void WaterDrainsOffTheMap() {
+  Params p = Isolated(64);
+  p.enable_water = true;
+  p.terrain = Params::Terrain::Plane;   // uniform slope to the outflow edge
+  p.bowl_rim_m = 0.06f * p.world_m;     // 6% grade
+  p.evaporation_m_per_yr = 0.f;         // ONLY drainage can remove water
+  p.sea_level_m = -1e6f;                // and only at the map edge
+  Grid g(p.res);
+  InitTerrain(g, p);
+  // A slab well inland: 8 cells square, 5 m deep, ~40 cells from the outflow.
+  const float slab_m = 5.0f;
+  for (int y = 6; y < 14; ++y)
+    for (int x = 28; x < 36; ++x) g.water[g.idx(x, y)] = slab_m / p.relief_m;
+  double v0 = 0;
+  for (float w : g.water) v0 += double(w);
+
+  std::vector<float> flux(g.cells, 0.f);
+  int iters_to_drain = -1;
+  double v = v0;
+  for (int it = 1; it <= 2000 && iters_to_drain < 0; ++it) {
+    UpdateWater(g, p, 1, flux);
+    v = 0;
+    for (float w : g.water) v += double(w);
+    if (v < 0.01 * v0) iters_to_drain = it;
+  }
+  const double left = v / v0;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "%.1f%% left after 2000 iters; drained in %d iters (~%.2f "
+                "cells/iter over ~50 cells)",
+                100 * left, iters_to_drain,
+                iters_to_drain > 0 ? 50.0 / iters_to_drain : 0.0);
+  Check("T16 water inland drains off the map", iters_to_drain > 0, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -3426,6 +3499,7 @@ int RunAll() {
   SeaLevelFillsNotDrains();
   WaterBoundaryConditions();
   WaterDoesNotAccumulate();
+  WaterDrainsOffTheMap();
   SoilProductionOnBareRock();
   SoilProductionSelfLimiting();
   SoilProductionConservesMass();
