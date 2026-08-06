@@ -191,6 +191,30 @@ std::optional<ResolvedBindingTable> ResolveBindingTable(
 // once (rule 8). Returns nullopt, after logging, when the range does not fit --
 // a view onto layers the texture does not have is a caller bug, and silently
 // clamping it to the whole resource is how "accepted and ignored" starts.
+// Checks that a pipeline's blend states line up with its colour attachments,
+// logging and returning false when they do not.
+//
+// Shared, and called by every backend BEFORE it builds anything, for the same
+// reason ResolveBindingTable is shared: two copies of "check, log, refuse" is
+// how Null and Metal came to disagree about a documented contract with nothing
+// to catch it (rule 6).
+bool ValidateBlendStates(const RenderPipelineDesc& desc);
+
+// Whether `struct_size` bytes of indirect arguments fit in `args` at `offset`,
+// logging and returning false when they do not. `what` names the call.
+//
+// A BACKEND precondition, not validation, so it must NOT compile out: the GPU
+// reads these bytes itself, and an offset past the end is a read of whatever
+// follows the buffer -- garbage draw counts, a corrupt frame, and a command
+// buffer fault under Metal's debug layer.
+//
+// Shared because Null STRUCTURALLY has to check (it reads the bytes on the CPU
+// to resolve the counts) while Metal does not, so a check written only where it
+// was forced left the two backends disagreeing: Null dropped the call and its
+// suite stayed green while Metal encoded it and faulted.
+bool IndirectArgsInBounds(const IBuffer* args, uint64_t offset,
+                          uint64_t struct_size, const char* what);
+
 std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
                                                const TextureDesc& texture,
                                                std::string_view texture_label);

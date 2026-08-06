@@ -60,6 +60,71 @@ const char* ToString(BackendKind k) {
   return "?";
 }
 
+const char* ToString(BlendFactor f) {
+  switch (f) {
+    case BlendFactor::Zero: return "Zero";
+    case BlendFactor::One: return "One";
+    case BlendFactor::Src: return "Src";
+    case BlendFactor::OneMinusSrc: return "OneMinusSrc";
+    case BlendFactor::SrcAlpha: return "SrcAlpha";
+    case BlendFactor::OneMinusSrcAlpha: return "OneMinusSrcAlpha";
+    case BlendFactor::SrcAlphaSaturated: return "SrcAlphaSaturated";
+    case BlendFactor::Dst: return "Dst";
+    case BlendFactor::OneMinusDst: return "OneMinusDst";
+    case BlendFactor::DstAlpha: return "DstAlpha";
+    case BlendFactor::OneMinusDstAlpha: return "OneMinusDstAlpha";
+  }
+  return "?";
+}
+
+const char* ToString(BlendOp op) {
+  switch (op) {
+    case BlendOp::Add: return "Add";
+    case BlendOp::Subtract: return "Subtract";
+    case BlendOp::ReverseSubtract: return "ReverseSubtract";
+    case BlendOp::Min: return "Min";
+    case BlendOp::Max: return "Max";
+  }
+  return "?";
+}
+
+bool IndirectArgsInBounds(const IBuffer* args, uint64_t offset,
+                          uint64_t struct_size, const char* what) {
+  if (!args) {
+    spdlog::error("rhi: {} has no argument buffer", what);
+    return false;
+  }
+  const uint64_t size = args->GetSize();
+  // By SUBTRACTION, having first established that the struct fits at all:
+  // `offset + struct_size` wraps, and a huge offset then sums to something
+  // small and passes the very check it exists to fail (rule 8).
+  if (size < struct_size || offset > size - struct_size) {
+    spdlog::error(
+        "rhi: {} reads {}-byte args at offset {} of buffer '{}', which is only "
+        "{} bytes -- the GPU would read past the end",
+        what, struct_size, offset, args->GetLabel(), size);
+    return false;
+  }
+  return true;
+}
+
+bool ValidateBlendStates(const RenderPipelineDesc& d) {
+  // Empty is the opaque default and always legal. Anything else must line up
+  // one-to-one with the attachments, because the alternative -- padding with
+  // defaults or dropping the excess -- blends some attachments and not others
+  // and reports nothing (rule 13: an object that cannot be encoded must not be
+  // constructed, in release builds as much as in debug ones).
+  if (d.blend_states.empty()) return true;
+  if (d.blend_states.size() != d.color_formats.size()) {
+    spdlog::error(
+        "rhi: render pipeline '{}' declares {} blend state(s) for {} colour "
+        "attachment(s) -- supply one per attachment, or none at all for opaque",
+        d.label, d.blend_states.size(), d.color_formats.size());
+    return false;
+  }
+  return true;
+}
+
 const ReflectedBinding* ShaderReflection::FindBinding(
     std::string_view name) const {
   auto it = std::find_if(bindings.begin(), bindings.end(),

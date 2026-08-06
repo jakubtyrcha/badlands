@@ -224,6 +224,25 @@ target_compile_definitions(badlands_rhi PUBLIC
 # fails the depth test, which is exactly how rhi_lab first rendered pure sky.
 target_compile_definitions(badlands_rhi PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
+# badlands_render_graph: pass declaration, ordering, and barrier derivation.
+# Depends on the RHI and NOTHING else -- in particular not on badlands_slang.
+# The graph is handed pipelines; it never compiles a shader, so the dependency
+# runs one way and a headless test needs no shader toolchain.
+add_library(badlands_render_graph STATIC src/engine/graph/render_graph.cpp)
+target_link_libraries(badlands_render_graph PUBLIC badlands_rhi)
+
+# badlands_rhi_app: the windowed render loop on the RHI, shared by every app
+# that opens a window. Separate from badlands_rhi so the RHI itself never links
+# SDL — the RHI runs headless, and a swapchain is only one of its consumers.
+# APPLE-gated because acquiring a native surface is per-platform; the loop above
+# it is not, so DX12 adds an arm rather than a second shell.
+if(APPLE)
+    add_library(badlands_rhi_app STATIC src/engine/app/rhi_app_shell.cpp)
+    target_link_libraries(badlands_rhi_app PUBLIC badlands_rhi SDL3::SDL3)
+    target_include_directories(badlands_rhi_app PUBLIC ${CMAKE_SOURCE_DIR}/src)
+endif()
+
+
 if(APPLE)
     # ARC only for the Metal backend — the rest of the project is MRR, and a
     # backend this size is far safer with automatic lifetimes.
@@ -1380,6 +1399,25 @@ if(APPLE)
 endif()
 add_test(NAME badlands_rhi_tests COMMAND badlands_rhi_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_render_graph_tests: the graph against Null, with no GPU. The
+# transitions it derives are only observable through the validation decorator —
+# Metal renders correctly whether or not any were declared — so this is where
+# the graph's barrier derivation is actually checked.
+add_executable(badlands_render_graph_tests
+    src/engine/tests/render_graph_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_render_graph_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_render_graph_tests PRIVATE badlands_render_graph)
+if(APPLE)
+    target_link_options(badlands_render_graph_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_render_graph_tests COMMAND badlands_render_graph_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_rhi_metal_tests: the SAME conformance list against the real backend,
 # plus readback-based correctness Null cannot assert. Needs a Metal device.
 if(APPLE)
@@ -1389,6 +1427,7 @@ if(APPLE)
     )
     target_include_directories(badlands_rhi_metal_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/third_party/glm
         ${CMAKE_SOURCE_DIR}/src/engine/tests
     )
     target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi)
@@ -1418,7 +1457,7 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
         src/core/parallel.cpp
     )
     target_link_libraries(badlands_rhi_lab PRIVATE
-        badlands_slang assets meshoptimizer SDL3::SDL3)
+        badlands_slang badlands_rhi_app assets meshoptimizer SDL3::SDL3)
     target_include_directories(badlands_rhi_lab PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/src
@@ -1437,13 +1476,13 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
     # on the render targets, which are not rebuilt at zero size -- is invisible
     # to a windowed test unless you happen to minimize and restore to exactly
     # the same size, so it gets a deterministic test of its own.
-    add_executable(badlands_rhi_lab_tests
-        src/executables/rhi_lab/surface_size_tests.cpp
+    add_executable(badlands_rhi_app_tests
+        src/engine/tests/surface_size_tests.cpp
         third_party/catch2/extras/catch_amalgamated.cpp)
-    target_include_directories(badlands_rhi_lab_tests PRIVATE
-        ${CMAKE_SOURCE_DIR}
+    target_include_directories(badlands_rhi_app_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party/catch2/extras)
-    add_test(NAME badlands_rhi_lab_tests COMMAND badlands_rhi_lab_tests
+    add_test(NAME badlands_rhi_app_tests COMMAND badlands_rhi_app_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     # Windowed resize, end to end: open a window, ask for a different size,
@@ -1478,6 +1517,125 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
         set_tests_properties(rhi_lab_rejects_${bad_name}
                              PROPERTIES WILL_FAIL TRUE)
     endforeach()
+endif()
+
+# badlands_object_viewer: the next iteration of badlands_viewer, on the RHI and
+# the render graph. Windowed and headless run the SAME graph — only the imported
+# output texture differs — so the headless test exercises the real path.
+#
+# BOTH halves of the guard: it links badlands_slang and badlands_imgui_rhi, and
+# neither target EXISTS when the Slang SDK is absent. CMake does not refuse the
+# link at generate time — an unknown plain name becomes a raw -l flag — so the
+# target gets created anyway and fails to COMPILE on a missing <imgui.h>, taking
+# the whole default build down with it on a fresh clone.
+if(BADLANDS_HAVE_SLANG AND APPLE)
+    add_executable(badlands_object_viewer
+        src/executables/object_viewer/main.cpp
+        src/executables/object_viewer/line_pass.cpp
+        src/engine/rendering/debug_line_buffer.cpp
+        src/engine/rendering/debug_line_expand.cpp)
+    target_link_libraries(badlands_object_viewer PRIVATE
+        badlands_render_graph badlands_rhi_app badlands_slang
+        badlands_imgui_rhi assets)
+    target_sources(badlands_object_viewer PRIVATE
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp)
+    target_include_directories(badlands_object_viewer PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/glm
+        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+        ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
+    target_link_options(badlands_object_viewer PRIVATE "-Wl,-ld_new")
+
+    # Headless render, asserted through the exit code and a pixel check. Writes
+    # into the BUILD tree: a stray .png in the repo root would match an LFS
+    # pattern in .gitattributes and get committed as a pointer.
+    add_test(NAME object_viewer_headless
+             COMMAND badlands_object_viewer --headless --width 64 --height 64
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_headless.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # The debug-line pass, asserted on pixels: the segment covers the middle row
+    # and half the width, the centre texel is the red it was given, and the
+    # corners stay the clear colour.
+    add_test(NAME object_viewer_grid
+             COMMAND badlands_object_viewer --headless --scene grid
+                     --width 256 --height 192
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_grid.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME object_viewer_lines
+             COMMAND badlands_object_viewer --headless --scene lines
+                     --width 64 --height 64
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_lines.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    foreach(bad_args "--width;0" "--height;4294967297" "--frames;-1" "--nope")
+        string(REPLACE ";" "_" bad_name "${bad_args}")
+        string(REPLACE "-" "" bad_name "${bad_name}")
+        add_test(NAME object_viewer_rejects_${bad_name}
+                 COMMAND badlands_object_viewer ${bad_args} --headless
+                         --out ${CMAKE_BINARY_DIR}/object_viewer_reject.png
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(object_viewer_rejects_${bad_name}
+                             PROPERTIES WILL_FAIL TRUE)
+    endforeach()
+
+    # Windowed, behind the display label like rhi_lab's: over SSH or with the
+    # screen locked it would fail for reasons that say nothing about the code.
+    add_test(NAME object_viewer_windowed
+             COMMAND badlands_object_viewer --frames 20 --width 640 --height 480
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_windowed PROPERTIES
+                         LABELS display TIMEOUT 120)
+    # --scene really reaches the windowed path. It used to be parsed and then
+    # ignored there, which is rule 4's accepted-and-ignored trap; a run that
+    # renders is the cheapest thing that can tell the difference.
+    # Escape must survive an event consumer that takes everything -- an ImGui
+    # widget with keyboard focus is exactly that, and it used to swallow the
+    # documented quit key.
+    add_test(NAME object_viewer_escape_survives_capture
+             COMMAND badlands_object_viewer --self-test-escape --frames 60
+                     --width 320 --height 240
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_escape_survives_capture PROPERTIES
+                         LABELS display TIMEOUT 120)
+    add_test(NAME object_viewer_windowed_scene
+             COMMAND badlands_object_viewer --scene clear --frames 10
+                     --width 320 --height 240
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_windowed_scene PROPERTIES
+                         LABELS display TIMEOUT 120)
+endif()
+
+# badlands_imgui_rhi: the Dear ImGui renderer backend against the RHI, replacing
+# imgui_impl_wgpu_custom. Needs Slang (its shader) and the graph (it adds a
+# pass); the imgui SOURCES come from the same FetchContent the engine uses.
+if(BADLANDS_HAVE_SLANG AND APPLE)
+    add_library(badlands_imgui_rhi STATIC
+        src/engine/ui/imgui_impl_rhi.cpp
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    )
+    target_link_libraries(badlands_imgui_rhi PUBLIC
+        badlands_render_graph badlands_slang)
+    target_include_directories(badlands_imgui_rhi PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends)
+
+    # Pixels, not eyeballs: a fixed-coordinate draw list plus a readback turns
+    # "the UI looks right" into numbers a regression can fail.
+    add_executable(badlands_imgui_rhi_tests
+        src/engine/tests/imgui_rhi_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp)
+    target_include_directories(badlands_imgui_rhi_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/src/engine/tests)
+    target_link_libraries(badlands_imgui_rhi_tests PRIVATE badlands_imgui_rhi)
+    target_link_options(badlands_imgui_rhi_tests PRIVATE "-Wl,-ld_new")
+    add_test(NAME badlands_imgui_rhi_tests COMMAND badlands_imgui_rhi_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(badlands_imgui_rhi_tests PROPERTIES
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
 endif()
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against

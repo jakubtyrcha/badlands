@@ -117,6 +117,38 @@ MTLCullMode ToMtl(CullMode m) {
   return MTLCullModeNone;
 }
 
+MTLBlendFactor ToMtl(BlendFactor f) {
+  switch (f) {
+    case BlendFactor::Zero: return MTLBlendFactorZero;
+    case BlendFactor::One: return MTLBlendFactorOne;
+    case BlendFactor::Src: return MTLBlendFactorSourceColor;
+    case BlendFactor::OneMinusSrc: return MTLBlendFactorOneMinusSourceColor;
+    case BlendFactor::SrcAlpha: return MTLBlendFactorSourceAlpha;
+    case BlendFactor::OneMinusSrcAlpha:
+      return MTLBlendFactorOneMinusSourceAlpha;
+    case BlendFactor::SrcAlphaSaturated:
+      return MTLBlendFactorSourceAlphaSaturated;
+    case BlendFactor::Dst: return MTLBlendFactorDestinationColor;
+    case BlendFactor::OneMinusDst:
+      return MTLBlendFactorOneMinusDestinationColor;
+    case BlendFactor::DstAlpha: return MTLBlendFactorDestinationAlpha;
+    case BlendFactor::OneMinusDstAlpha:
+      return MTLBlendFactorOneMinusDestinationAlpha;
+  }
+  return MTLBlendFactorOne;
+}
+
+MTLBlendOperation ToMtl(BlendOp op) {
+  switch (op) {
+    case BlendOp::Add: return MTLBlendOperationAdd;
+    case BlendOp::Subtract: return MTLBlendOperationSubtract;
+    case BlendOp::ReverseSubtract: return MTLBlendOperationReverseSubtract;
+    case BlendOp::Min: return MTLBlendOperationMin;
+    case BlendOp::Max: return MTLBlendOperationMax;
+  }
+  return MTLBlendOperationAdd;
+}
+
 MTLPrimitiveType ToMtl(PrimitiveTopology t) {
   switch (t) {
     case PrimitiveTopology::TriangleList: return MTLPrimitiveTypeTriangle;
@@ -997,6 +1029,13 @@ class MetalRenderPass final : public IRenderPass {
       spdlog::error("rhi/metal: DrawIndexedIndirect with no argument buffer");
       return;
     }
+    // Metal does not bounds-check this and the GPU reads the bytes itself, so
+    // an offset past the end is silent memory corruption. Null has to check
+    // (it resolves the counts on the CPU); this is what keeps the two agreeing.
+    if (!IndirectArgsInBounds(mb, offset, sizeof(DrawIndexedIndirectArgs),
+                              "rhi/metal: DrawIndexedIndirect")) {
+      return;
+    }
     [enc_ drawIndexedPrimitives:pipeline_->Topology()
                       indexType:index_type_
                     indexBuffer:index_buffer_->Handle()
@@ -1062,6 +1101,10 @@ class MetalComputePass final : public IComputePass {
     auto* mb = dynamic_cast<MetalBuffer*>(args);
     if (!mb || !mb->Handle()) {
       spdlog::error("rhi/metal: DispatchIndirect with no argument buffer");
+      return;
+    }
+    if (!IndirectArgsInBounds(mb, offset, sizeof(DispatchIndirectArgs),
+                              "rhi/metal: DispatchIndirect")) {
       return;
     }
     [enc_ dispatchThreadgroupsWithIndirectBuffer:mb->Handle()
@@ -1308,6 +1351,10 @@ class MetalDevice final : public IRhiDevice {
   }
 
   RenderPipelinePtr CreateRenderPipeline(const RenderPipelineDesc& d) override {
+    // Descriptor-level checks first, before anything is compiled or looked up.
+    // A caller with two mistakes should be told about the cheap one rather than
+    // having it masked by whichever failure the backend happens to reach first.
+    if (!ValidateBlendStates(d)) return nullptr;  // logged there
     auto* vsm = static_cast<MetalShaderModule*>(d.vertex_shader);
     if (!vsm) {
       spdlog::error("rhi/metal: '{}' has no vertex shader", d.label);
@@ -1332,6 +1379,19 @@ class MetalDevice final : public IRhiDevice {
     }
     for (size_t i = 0; i < d.color_formats.size(); ++i) {
       pd.colorAttachments[i].pixelFormat = ToMtl(d.color_formats[i]);
+      // Empty means opaque; Metal's default is already blendingEnabled = NO, so
+      // an untouched attachment is exactly the previous behaviour.
+      if (d.blend_states.empty()) continue;
+      const BlendState& b = d.blend_states[i];
+      if (!b.enabled) continue;
+      MTLRenderPipelineColorAttachmentDescriptor* ca = pd.colorAttachments[i];
+      ca.blendingEnabled = YES;
+      ca.sourceRGBBlendFactor = ToMtl(b.color.src);
+      ca.destinationRGBBlendFactor = ToMtl(b.color.dst);
+      ca.rgbBlendOperation = ToMtl(b.color.op);
+      ca.sourceAlphaBlendFactor = ToMtl(b.alpha.src);
+      ca.destinationAlphaBlendFactor = ToMtl(b.alpha.dst);
+      ca.alphaBlendOperation = ToMtl(b.alpha.op);
     }
     if (d.depth.format != Format::Undefined) {
       pd.depthAttachmentPixelFormat = ToMtl(d.depth.format);

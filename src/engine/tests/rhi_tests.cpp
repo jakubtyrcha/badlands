@@ -187,9 +187,21 @@ TEST_CASE("Null: a draw with no pipeline is refused", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckDrawWithoutPipelineIsRefused(*d);
 }
+TEST_CASE("Null: out-of-range indirect args are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckOutOfRangeIndirectArgsAreRefused(*d);
+}
 TEST_CASE("Null: the feature query answers", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckFeatureQueryAnswers(*d);
+}
+TEST_CASE("Null: a mismatched blend state count is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckMismatchedBlendStateCountIsRefused(*d);
+}
+TEST_CASE("Null: an opaque pipeline needs no blend state", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckOpaquePipelineNeedsNoBlendState(*d);
 }
 
 TEST_CASE("Null: swapchain acquire/present cycle", "[rhi]") {

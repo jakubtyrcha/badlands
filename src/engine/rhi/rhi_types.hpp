@@ -180,6 +180,69 @@ enum class AddressMode : uint8_t { ClampToEdge, Repeat, MirrorRepeat };
 enum class LoadOp : uint8_t { Load, Clear, DontCare };
 enum class StoreOp : uint8_t { Store, Discard };
 
+// ----------------------------------------------------------------------------
+// Blending
+// ----------------------------------------------------------------------------
+
+// The MVP was opaque-only. Blending arrives with its first callers -- the debug
+// line pass (a conical antialias fringe) and the ImGui pass -- and every
+// enumerator listed here is implemented and tested, because rule 4 makes an
+// accepted-and-ignored field a trap with a delayed fuse.
+//
+// `Constant` and `OneMinusConstant` are DELIBERATELY ABSENT. They need a
+// blend-constant setter on the render pass, which is interface surface with no
+// caller; they land with their first user rather than sitting here unreachable.
+enum class BlendFactor : uint8_t {
+  Zero,
+  One,
+  Src,
+  OneMinusSrc,
+  SrcAlpha,
+  OneMinusSrcAlpha,
+  SrcAlphaSaturated,
+  Dst,
+  OneMinusDst,
+  DstAlpha,
+  OneMinusDstAlpha,
+};
+
+// Min and Max IGNORE their factors on both Metal and D3D12. That is a real
+// asymmetry rather than a quirk of one backend, so it is tested rather than
+// merely noted here.
+enum class BlendOp : uint8_t { Add, Subtract, ReverseSubtract, Min, Max };
+
+const char* ToString(BlendFactor f);
+const char* ToString(BlendOp op);
+
+// One side of the blend equation: result = (src * src_factor) op (dst * dst_factor).
+struct BlendComponent {
+  BlendFactor src = BlendFactor::One;
+  BlendFactor dst = BlendFactor::Zero;
+  BlendOp op = BlendOp::Add;
+};
+
+// Colour and alpha blend independently, which is the whole reason this is two
+// components rather than one. A backend that wires alpha from the colour
+// component renders plausibly and is wrong only where alpha matters.
+struct BlendState {
+  // False is EXACTLY the previous behaviour, bit for bit -- asserted, because
+  // every existing pass takes this path and a regression there is silent.
+  bool enabled = false;
+  BlendComponent color;
+  BlendComponent alpha;
+};
+
+// Standard source-over blending, premultiplied by the shader's own alpha.
+inline constexpr BlendState AlphaBlend() {
+  return {.enabled = true,
+          .color = {.src = BlendFactor::SrcAlpha,
+                    .dst = BlendFactor::OneMinusSrcAlpha,
+                    .op = BlendOp::Add},
+          .alpha = {.src = BlendFactor::One,
+                    .dst = BlendFactor::OneMinusSrcAlpha,
+                    .op = BlendOp::Add}};
+}
+
 // ============================================================================
 // Descriptors
 // ============================================================================
@@ -257,12 +320,21 @@ struct RenderPipelineDesc {
   std::string fragment_entry = "fs_main";
 
   std::vector<Format> color_formats;
+  // One per colour attachment, or EMPTY meaning every attachment is opaque.
+  // Empty rather than "a vector of defaults" so existing call sites are
+  // untouched and so "I did not think about blending" and "I chose opaque" are
+  // the same, cheap, correct thing.
+  //
+  // Any other size is refused at creation on every backend: a state count that
+  // does not match the attachment count cannot be encoded, and silently
+  // padding or truncating it would blend some attachments and not others with
+  // nothing to say why (rule 13).
+  std::vector<BlendState> blend_states;
   DepthState depth;
   PrimitiveTopology topology = PrimitiveTopology::TriangleList;
   CullMode cull_mode = CullMode::Back;
   FrontFace front_face = FrontFace::Ccw;
-  // No blend state and no vertex layout in the MVP: the terrain path is opaque
-  // and pulls its vertices from storage buffers.
+  // Still no vertex layout: the MVP pulls its vertices from storage buffers.
   std::string label;
 };
 

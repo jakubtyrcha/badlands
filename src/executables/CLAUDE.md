@@ -10,12 +10,46 @@ Each app owns an `AppView` and builds its scene from the world itself; the app s
 | `badlands_viewer` | model/LOD viewer, plus the character/skeleton viewer (`--character`) |
 | `badlands_mapview` | the map tool (see `src/mapgen/CLAUDE.md`) |
 | `badlands_rhi_lab` | the RHI/Slang/visibility-buffer MVP — PNG by default, `--window` for a live camera |
+| `badlands_object_viewer` | the RHI + render-graph successor to `badlands_viewer` |
 
-## `badlands_rhi_lab` is not an `AppView`
-It builds on `badlands_rhi` + `badlands_slang`, not `badlands_engine`, and owns its
-own SDL loop. That is deliberate, not temporary: `SdlViewerApp` is Dawn all the way
-through (`RenderContext` hands views a `wgpu::Device`), so the RHI-era app shell is a
-separate decision, taken when the render graph gives an `RhiView` something to mean.
+## The RHI apps are not `AppView`s, and they share a shell
+`badlands_rhi_lab` and `badlands_object_viewer` build on `badlands_rhi` (+
+`badlands_slang`, + `badlands_render_graph`), not `badlands_engine`. That is deliberate,
+not temporary: `SdlViewerApp` is Dawn all the way through (`RenderContext` hands views a
+`wgpu::Device`), so the RHI-era app shell is a separate decision.
+
+- **The window, swapchain, resize coalescing and frame pacing live in
+  `engine/app/rhi_app_shell.hpp` (`badlands_rhi_app`), shared by both.** Everything in
+  it was learned the hard way once — macOS focus-on-show, click-through, pixels vs
+  points, coalesced resize, the per-frame autorelease pool — and a second copy is a
+  second copy of every one of those bugs. Add an app by supplying callbacks, not by
+  forking the loop.
+- **`OnFrameBegin` fires after `BeginFrame`, so a SKIPPED frame still recycles its
+  allocator slot.** Doing that work in `OnRender` leaks slots on a minimized window.
+- **`badlands_rhi_app` is separate from `badlands_rhi` because the RHI must never link
+  SDL** — it runs headless, and a swapchain is only one of its consumers.
+
+## `badlands_object_viewer` runs the SAME graph headless and windowed
+Only the imported output texture differs: an acquired drawable, or a plain texture that
+gets read back. There is no headless *mode* to rot — it is the real path with a different
+sink, which is the whole of the graph's sink abstraction.
+```sh
+./build/badlands_object_viewer --headless --out /tmp/ov.png   # asserts every texel
+./build/badlands_object_viewer                                # live, Esc to quit
+```
+The headless run **verifies its own pixels and exits non-zero on mismatch** — exit status
+is the assertion, since there is no test framework around it. Writing a PNG and exiting 0
+would pass just as well against a graph that recorded no pass at all.
+
+- **`--scene clear|lines|grid`, and each scene carries its OWN assertion.** "Every texel is
+  the clear colour" and "a segment covers these texels" are different claims; a run that
+  could not say which it checked would be checking neither.
+- **The debug UI is Dear ImGui through `imgui_impl_rhi`, not `imgui_impl_metal`.** One
+  backend serves Metal, DX12 and Null, and it keeps the RHI seam sealed — a native encoder
+  handed out of the RHI is a compile error on purpose. ImGui is added to the graph LAST, so
+  the debug UI always sits on top.
+- **ImGui gets first refusal on input** (`io.WantCaptureMouse`/`WantCaptureKeyboard`) via
+  the shell's `OnEvent` hook, so a drag inside a panel does not also move the camera.
 Skipped by the build when the Slang SDK is absent (`tools/slang_probe/README.md`).
 ```sh
 ./build/badlands_rhi_lab --out /tmp/lab.png              # materials + lighting
