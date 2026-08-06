@@ -289,11 +289,24 @@ enum class BindingKind : uint8_t {
   UniformBuffer, StorageBuffer, ReadOnlyStorageBuffer, SampledTexture, Sampler,
 };
 
+// The most dynamic offsets one table may declare.
+//
+// Metal is flexible here, but a DX12 root signature has a 64-DWORD budget and
+// a root CBV costs 2, so eight leaves ample room for everything else a
+// signature carries. Bounded on the Mac, where exceeding it is cheap to fix,
+// rather than discovered on the DX12 machine later.
+inline constexpr uint32_t kMaxDynamicOffsetsPerTable = 8;
+
 struct BindingEntry {
   uint32_t slot = 0;
   BindingKind kind = BindingKind::UniformBuffer;
   class IBuffer* buffer = nullptr;
+  // Base offset, fixed for the life of the table.
   uint64_t buffer_offset = 0;
+  // When true, SetBindingTable supplies an ADDITIONAL offset per call, and
+  // this entry consumes one value from its `dynamic_offsets` span. Buffers
+  // only; a texture or sampler cannot be re-pointed this way.
+  bool dynamic_offset = false;
   uint64_t buffer_size = 0;  // 0 = to the end of the buffer
   class ITextureView* texture_view = nullptr;
   class ISampler* sampler = nullptr;

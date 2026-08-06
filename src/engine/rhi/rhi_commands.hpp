@@ -32,7 +32,13 @@ class IRenderPass {
   virtual ~IRenderPass() = default;
 
   virtual void SetPipeline(IRenderPipeline* pipeline) = 0;
-  virtual void SetBindingTable(uint32_t group, IBindingTable* table) = 0;
+  // `dynamic_offsets` supplies one value per entry marked
+  // BindingEntry::dynamic_offset, in increasing slot order. This is WebGPU's
+  // setBindGroup model (D2), and it is how per-frame data reaches a shader:
+  // binding tables are immutable, so without it the only way to point at a
+  // different slice each frame would be N tables per frame slot.
+  virtual void SetBindingTable(uint32_t group, IBindingTable* table,
+                               std::span<const uint32_t> dynamic_offsets = {}) = 0;
   virtual void SetIndexBuffer(IBuffer* buffer, IndexFormat format,
                               uint64_t offset = 0) = 0;
 
@@ -57,7 +63,13 @@ class IComputePass {
   virtual ~IComputePass() = default;
 
   virtual void SetPipeline(IComputePipeline* pipeline) = 0;
-  virtual void SetBindingTable(uint32_t group, IBindingTable* table) = 0;
+  // `dynamic_offsets` supplies one value per entry marked
+  // BindingEntry::dynamic_offset, in increasing slot order. This is WebGPU's
+  // setBindGroup model (D2), and it is how per-frame data reaches a shader:
+  // binding tables are immutable, so without it the only way to point at a
+  // different slice each frame would be N tables per frame slot.
+  virtual void SetBindingTable(uint32_t group, IBindingTable* table,
+                               std::span<const uint32_t> dynamic_offsets = {}) = 0;
   // Workgroup counts, not thread counts.
   virtual void Dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) = 0;
 

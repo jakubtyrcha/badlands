@@ -92,6 +92,9 @@ class StateTracker {
 // Shared state handed down from the device to encoders and passes.
 struct Context {
   Recorder recorder;
+  // Cached from the backend so passes can check offsets without reaching back
+  // through the device.
+  uint64_t min_offset_alignment = 256;
 };
 
 // ---------------------------------------------------------------------------
@@ -110,7 +113,8 @@ class ValidationBindingTable final : public IBindingTable {
   // holds the inner table by shared_ptr -- so a second copy of the retention
   // logic here would be one more place for the backends to drift from.
   ValidationBindingTable(BindingTablePtr inner, std::vector<BindingEntry> entries)
-      : inner_(std::move(inner)), entries_(std::move(entries)) {}
+      : inner_(std::move(inner)), entries_(std::move(entries)),
+        dynamic_entries_(DynamicEntryOrder(entries_)) {}
 
   uint32_t GetGroup() const override { return inner_->GetGroup(); }
   void Destroy() override { inner_->Destroy(); }
@@ -119,11 +123,26 @@ class ValidationBindingTable final : public IBindingTable {
 
   IBindingTable* Inner() const { return inner_.get(); }
   const std::vector<BindingEntry>& Entries() const { return entries_; }
+  // Computed by the SAME function the resolver uses, so the decorator and the
+  // backend cannot disagree about which offset belongs to which binding.
+  const std::vector<uint32_t>& DynamicEntries() const {
+    return dynamic_entries_;
+  }
 
  private:
   BindingTablePtr inner_;
   std::vector<BindingEntry> entries_;
+  std::vector<uint32_t> dynamic_entries_;
 };
+
+// Every dynamic offset must be supplied, aligned, and inside its buffer.
+//
+// Refused rather than reported, because there is no safe way to proceed: too
+// few offsets shifts every subsequent binding onto the wrong slice, and an
+// unaligned one is rejected by the backend at draw time with a message that
+// names neither the table nor the slot.
+bool CheckDynamicOffsets(Context& ctx, IBindingTable* table,
+                         std::span<const uint32_t> offsets);
 
 IBindingTable* Unwrap(IBindingTable* t) {
   if (auto* v = dynamic_cast<ValidationBindingTable*>(t)) return v->Inner();
@@ -146,10 +165,14 @@ class ValidationRenderPass final : public IRenderPass {
     inner_->SetPipeline(p);
   }
 
-  void SetBindingTable(uint32_t group, IBindingTable* table) override {
+  void SetBindingTable(uint32_t group, IBindingTable* table,
+                       std::span<const uint32_t> dynamic_offsets) override {
     if (Ended("SetBindingTable")) return;
     CheckTableUsable(group, table);
-    inner_->SetBindingTable(group, Unwrap(table));
+    if (!CheckDynamicOffsets(*ctx_, table, dynamic_offsets)) {
+      return;  // refused: binding at a wrong offset renders wrong, silently
+    }
+    inner_->SetBindingTable(group, Unwrap(table), dynamic_offsets);
   }
 
   void SetIndexBuffer(IBuffer* b, IndexFormat f, uint64_t off) override {
@@ -296,10 +319,14 @@ class ValidationComputePass final : public IComputePass {
     pipeline_ = p;
     inner_->SetPipeline(p);
   }
-  void SetBindingTable(uint32_t group, IBindingTable* table) override {
+  void SetBindingTable(uint32_t group, IBindingTable* table,
+                       std::span<const uint32_t> dynamic_offsets) override {
     if (Ended("SetBindingTable")) return;
     CheckTableUsable(group, table);
-    inner_->SetBindingTable(group, Unwrap(table));
+    if (!CheckDynamicOffsets(*ctx_, table, dynamic_offsets)) {
+      return;
+    }
+    inner_->SetBindingTable(group, Unwrap(table), dynamic_offsets);
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
     if (Ended("Dispatch")) return;
@@ -429,6 +456,49 @@ void CheckTableOrder(Recorder& rec, Pipeline* pipeline,
       "SetPipeline -- bindings resolve against the pipeline's reflection, so "
       "the pipeline must be set first",
       table ? table->GetLabel() : "<null>", group));
+}
+
+bool CheckDynamicOffsets(Context& ctx, IBindingTable* table,
+                         std::span<const uint32_t> offsets) {
+  auto* wrapped = dynamic_cast<ValidationBindingTable*>(table);
+  if (!wrapped) return true;  // nothing to check against
+
+  const auto& order = wrapped->DynamicEntries();
+  if (offsets.size() != order.size()) {
+    ctx.recorder.Report(fmt::format(
+        "SetBindingTable: table '{}' declares {} dynamic offset(s) but {} "
+        "were supplied -- every one shifts a later binding onto the wrong "
+        "slice",
+        table->GetLabel(), order.size(), offsets.size()));
+    return false;
+  }
+
+  const auto& entries = wrapped->Entries();
+  for (size_t k = 0; k < order.size(); ++k) {
+    const BindingEntry& e = entries[order[k]];
+    const uint32_t off = offsets[k];
+
+    if (off % ctx.min_offset_alignment != 0) {
+      ctx.recorder.Report(fmt::format(
+          "SetBindingTable: table '{}' slot {} dynamic offset {} is not a "
+          "multiple of the backend's {}-byte alignment",
+          table->GetLabel(), e.slot, off, ctx.min_offset_alignment));
+      return false;
+    }
+
+    if (!e.buffer) continue;  // resolution already refused this case
+    const uint64_t size = e.buffer->GetSize();
+    // Subtraction, as everywhere: base + off can wrap.
+    if (e.buffer_offset > size || off > size - e.buffer_offset) {
+      ctx.recorder.Report(fmt::format(
+          "SetBindingTable: table '{}' slot {} would bind at {} + {} in "
+          "buffer '{}' of {} bytes",
+          table->GetLabel(), e.slot, e.buffer_offset, off,
+          e.buffer->GetLabel(), size));
+      return false;
+    }
+  }
+  return true;
 }
 
 void ValidationRenderPass::CheckTableUsable(uint32_t group,
@@ -675,7 +745,9 @@ class ValidationEncoder final : public ICommandEncoder {
 class ValidationDevice final : public IRhiDevice {
  public:
   explicit ValidationDevice(std::unique_ptr<IRhiDevice> inner)
-      : inner_(std::move(inner)) {}
+      : inner_(std::move(inner)) {
+    ctx_.min_offset_alignment = inner_->MinBufferOffsetAlignment();
+  }
 
   BackendKind GetBackend() const override { return inner_->GetBackend(); }
 

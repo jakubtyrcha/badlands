@@ -140,6 +140,19 @@ TEST_CASE("Null: frame allocator recycles per slot", "[rhi]") {
   rhitest::CheckFrameAllocatorRecyclesPerSlot(*d);
 }
 
+TEST_CASE("Null: dynamic offsets reach the backend", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckDynamicOffsetsReachTheBackend(*d);
+}
+TEST_CASE("Null: too many dynamic offsets are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckTooManyDynamicOffsetsAreRefused(*d);
+}
+TEST_CASE("Null: a dynamic offset on a non-buffer is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckDynamicOffsetOnANonBufferIsRefused(*d);
+}
+
 // --- Pacing, proven deterministically under manual retirement ---------------
 //
 // This is what Null's manual retirement mode is FOR. Immediate mode retires at

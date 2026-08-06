@@ -52,6 +52,10 @@ struct RecordedCommand {
   Kind kind = Kind::Finish;
   std::string label;
 
+  // SetBindingTable only: exactly what the caller passed, so a test can prove
+  // the right offsets reached the backend in the right order.
+  std::vector<uint32_t> dynamic_offsets;
+
   // Identity of the object involved, for "was this the table I bound?" checks.
   const void* object = nullptr;
   uint32_t group = 0;

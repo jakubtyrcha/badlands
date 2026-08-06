@@ -26,6 +26,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -402,6 +403,9 @@ class MetalBindingTable final : public IBindingTable, public MetalResource {
   uint32_t GetGroup() const override { return group_; }
   const std::vector<BindingEntry>& Entries() const { return resolved_.entries; }
   const std::vector<uint32_t>& Indices() const { return resolved_.indices; }
+  const std::vector<uint32_t>& DynamicEntries() const {
+    return resolved_.dynamic_entries;
+  }
 
  private:
   uint32_t group_;
@@ -514,6 +518,22 @@ class MetalComputePipeline final : public IComputePipeline {
 // `index` is the reflected Metal binding index. Slang emits flat
 // [[buffer(N)]] / [[texture(N)]] / [[sampler(N)]] for plain globals, and its
 // reflection reports the same N -- which is what BindingLocation carries.
+// The byte offset an entry binds at: its fixed base, plus the caller's
+// dynamic value if it declared one. A count mismatch is reported by the
+// validation layer; here a short span simply contributes nothing, so a
+// release build binds the base offset rather than reading past the span.
+uint64_t OffsetFor(const MetalBindingTable& table, size_t entry,
+                   std::span<const uint32_t> dynamic_offsets) {
+  const uint64_t base = table.Entries()[entry].buffer_offset;
+  if (!table.Entries()[entry].dynamic_offset) return base;
+  const auto& order = table.DynamicEntries();
+  for (size_t k = 0; k < order.size(); ++k) {
+    if (order[k] != entry) continue;
+    return k < dynamic_offsets.size() ? base + dynamic_offsets[k] : base;
+  }
+  return base;
+}
+
 // Render and compute encoders are unrelated protocols with different
 // selectors, so this is two functions rather than one with a runtime branch --
 // a template would have to compile both selector sets against both encoders.
@@ -522,20 +542,22 @@ class MetalComputePipeline final : public IComputePipeline {
 // which stages use a binding (probe B), so narrowing is not possible yet.
 // Correct, slightly wasteful, and revisited only on evidence.
 void ApplyTableGraphics(id<MTLRenderCommandEncoder> enc,
-                        const MetalBindingTable& table) {
+                        const MetalBindingTable& table,
+                        std::span<const uint32_t> dynamic_offsets) {
   const auto& entries = table.Entries();
   const auto& indices = table.Indices();
   for (size_t i = 0; i < entries.size(); ++i) {
     const BindingEntry& e = entries[i];
     const uint32_t index = indices[i];
+    const uint64_t offset = OffsetFor(table, i, dynamic_offsets);
     switch (e.kind) {
       case BindingKind::UniformBuffer:
       case BindingKind::StorageBuffer:
       case BindingKind::ReadOnlyStorageBuffer: {
         auto* b = static_cast<MetalBuffer*>(e.buffer);
         if (!b) break;
-        [enc setVertexBuffer:b->Handle() offset:e.buffer_offset atIndex:index];
-        [enc setFragmentBuffer:b->Handle() offset:e.buffer_offset atIndex:index];
+        [enc setVertexBuffer:b->Handle() offset:offset atIndex:index];
+        [enc setFragmentBuffer:b->Handle() offset:offset atIndex:index];
         break;
       }
       case BindingKind::SampledTexture: {
@@ -557,19 +579,21 @@ void ApplyTableGraphics(id<MTLRenderCommandEncoder> enc,
 }
 
 void ApplyTableCompute(id<MTLComputeCommandEncoder> enc,
-                       const MetalBindingTable& table) {
+                       const MetalBindingTable& table,
+                       std::span<const uint32_t> dynamic_offsets) {
   const auto& entries = table.Entries();
   const auto& indices = table.Indices();
   for (size_t i = 0; i < entries.size(); ++i) {
     const BindingEntry& e = entries[i];
     const uint32_t index = indices[i];
+    const uint64_t offset = OffsetFor(table, i, dynamic_offsets);
     switch (e.kind) {
       case BindingKind::UniformBuffer:
       case BindingKind::StorageBuffer:
       case BindingKind::ReadOnlyStorageBuffer: {
         auto* b = static_cast<MetalBuffer*>(e.buffer);
         if (!b) break;
-        [enc setBuffer:b->Handle() offset:e.buffer_offset atIndex:index];
+        [enc setBuffer:b->Handle() offset:offset atIndex:index];
         break;
       }
       case BindingKind::SampledTexture: {
@@ -611,14 +635,15 @@ class MetalRenderPass final : public IRenderPass {
   // No pipeline needed, and none consulted: the table's indices were resolved
   // when it was created, so binding before SetPipeline is genuinely harmless
   // here rather than a silent loss of every binding.
-  void SetBindingTable(uint32_t group, IBindingTable* t) override {
+  void SetBindingTable(uint32_t group, IBindingTable* t,
+                       std::span<const uint32_t> dynamic_offsets) override {
     auto* mt = static_cast<MetalBindingTable*>(t);
     if (!mt) {
       spdlog::error("rhi/metal: SetBindingTable at group {} with no table",
                     group);
       return;
     }
-    ApplyTableGraphics(enc_, *mt);
+    ApplyTableGraphics(enc_, *mt, dynamic_offsets);
   }
 
   void SetIndexBuffer(IBuffer* b, IndexFormat f, uint64_t offset) override {
@@ -699,14 +724,15 @@ class MetalComputePass final : public IComputePass {
     mp->GetWorkgroupSize(threads_);
   }
   // See MetalRenderPass::SetBindingTable -- indices are resolved at creation.
-  void SetBindingTable(uint32_t group, IBindingTable* t) override {
+  void SetBindingTable(uint32_t group, IBindingTable* t,
+                       std::span<const uint32_t> dynamic_offsets) override {
     auto* mt = static_cast<MetalBindingTable*>(t);
     if (!mt) {
       spdlog::error("rhi/metal: SetBindingTable at group {} with no table",
                     group);
       return;
     }
-    ApplyTableCompute(enc_, *mt);
+    ApplyTableCompute(enc_, *mt, dynamic_offsets);
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
     if (!pipeline_) return;

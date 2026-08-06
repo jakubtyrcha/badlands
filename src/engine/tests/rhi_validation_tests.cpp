@@ -898,6 +898,136 @@ TEST_CASE("validation: an unfinished encoder is refused rather than submitted",
   CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::Submit) == 0);
 }
 
+// --- Dynamic offsets --------------------------------------------------------
+
+namespace {
+
+// A compute table whose slot 0 takes a dynamic offset, plus the resources it
+// needs kept alive.
+struct DynamicSet {
+  ComputePipelinePtr pipe;
+  BufferPtr ubo, ssbo;
+  TexturePtr tex;
+  SamplerPtr samp;
+  BindingTablePtr table;
+};
+
+DynamicSet MakeDynamicSet(IRhiDevice& d) {
+  DynamicSet s;
+  s.pipe = rhitest::MakeTestPipeline(d);
+  s.ubo = d.CreateBuffer(
+      {.size = 1024, .usage = BufferUsage::Uniform, .label = "dyn_ubo"});
+  s.ssbo = d.CreateBuffer({.size = 1024, .usage = BufferUsage::Storage});
+  s.tex = d.CreateTexture({.width = 4, .height = 4,
+                           .format = Format::RGBA8Unorm,
+                           .usage = TextureUsage::Sampled});
+  s.samp = d.CreateSampler({});
+  s.table = d.CreateBindingTable(
+      {.compute_pipeline = s.pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                    .buffer = s.ubo.get(), .dynamic_offset = true},
+                   {.slot = 1, .kind = BindingKind::StorageBuffer,
+                    .buffer = s.ssbo.get()},
+                   {.slot = 2, .kind = BindingKind::SampledTexture,
+                    .texture_view = s.tex->GetDefaultView()},
+                   {.slot = 3, .kind = BindingKind::Sampler,
+                    .sampler = s.samp.get()}},
+       .label = "dyn"});
+  return s;
+}
+
+// Binds `s` with the given offsets inside a validation scope.
+template <typename Fn>
+void WithDynamicPass(IRhiDevice& d, DynamicSet& s, Fn&& bind) {
+  auto encoder = d.CreateCommandEncoder("e");
+  encoder->Transition(s.ubo.get(), ResourceState::ShaderRead);
+  encoder->Transition(s.ssbo.get(), ResourceState::ShaderWrite);
+  encoder->Transition(s.tex.get(), ResourceState::ShaderRead);
+  auto* pass = encoder->BeginComputePass("cp");
+  pass->SetPipeline(s.pipe.get());
+  bind(pass);
+  pass->End();
+  encoder->Finish();
+}
+
+}  // namespace
+
+TEST_CASE("validation: a missing dynamic offset is refused",
+          "[rhi][validation]") {
+  // Too few offsets shifts every later binding onto the wrong slice, so there
+  // is no partial-credit way to proceed.
+  auto device = MakeValidated();
+  auto s = MakeDynamicSet(*device);
+  REQUIRE(s.table);
+
+  auto observed = Observe(*device, [&] {
+    WithDynamicPass(*device, s, [&](IComputePass* pass) {
+      pass->SetBindingTable(0, s.table.get());  // declares one, supplies none
+    });
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("dynamic offset") != std::string::npos);
+
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       SetBindingTable) == 0);
+}
+
+TEST_CASE("validation: an unaligned dynamic offset is refused",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto s = MakeDynamicSet(*device);
+  REQUIRE(s.table);
+  const uint32_t bad[1] = {1};  // never a multiple of any real alignment
+
+  auto observed = Observe(*device, [&] {
+    WithDynamicPass(*device, s, [&](IComputePass* pass) {
+      pass->SetBindingTable(0, s.table.get(), bad);
+    });
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("not a multiple") != std::string::npos);
+}
+
+TEST_CASE("validation: a dynamic offset past the buffer is refused",
+          "[rhi][validation]") {
+  auto device = MakeValidated();
+  auto s = MakeDynamicSet(*device);
+  REQUIRE(s.table);
+  // Aligned, but well past the 1024-byte buffer.
+  const uint32_t far[1] = {4096};
+
+  auto observed = Observe(*device, [&] {
+    WithDynamicPass(*device, s, [&](IComputePass* pass) {
+      pass->SetBindingTable(0, s.table.get(), far);
+    });
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("would bind at") != std::string::npos);
+}
+
+TEST_CASE("validation: a correct dynamic offset reports nothing",
+          "[rhi][validation]") {
+  // The paired green: the three refusals above would all pass against a check
+  // that fires unconditionally.
+  auto device = MakeValidated();
+  auto s = MakeDynamicSet(*device);
+  REQUIRE(s.table);
+  const uint32_t good[1] = {256};  // aligned for every backend, inside 1024
+
+  auto observed = Observe(*device, [&] {
+    WithDynamicPass(*device, s, [&](IComputePass* pass) {
+      pass->SetBindingTable(0, s.table.get(), good);
+    });
+  });
+  INFO(observed.value_or("<clean>"));
+  CHECK_FALSE(observed.has_value());
+}
+
 TEST_CASE("validation: unchecked is distinguishable from clean",
           "[rhi][validation]") {
   // The whole reason EndValidationScope returns a report rather than an

@@ -789,6 +789,136 @@ inline void CheckFrameAllocatorRecyclesPerSlot(IRhiDevice& device) {
   device.WaitIdle();
 }
 
+// A table with a dynamic offset, so per-frame data reaches a shader without
+// one table per frame slot.
+inline void CheckDynamicOffsetsReachTheBackend(IRhiDevice& device) {
+  // The shared list runs every check against one device, so Find() would
+  // otherwise return the FIRST SetBindingTable of the whole run rather than
+  // this one -- the same accumulation that made an earlier aggregate fail
+  // while its individual case passed.
+  ResetLog(device);
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 4096, .usage = BufferUsage::Uniform, .label = "dyn_ubo"});
+  auto ssbo = device.CreateBuffer(
+      {.size = 4096, .usage = BufferUsage::Storage, .label = "dyn_ssbo"});
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled});
+  auto samp = device.CreateSampler({});
+
+  // Slots 0 and 1 are dynamic; 2 and 3 are not. The span is read in slot
+  // order, so slot 0's offset comes first.
+  auto table = device.CreateBindingTable(
+      {.compute_pipeline = pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                    .buffer = ubo.get(), .dynamic_offset = true},
+                   {.slot = 1, .kind = BindingKind::StorageBuffer,
+                    .buffer = ssbo.get(), .dynamic_offset = true},
+                   {.slot = 2, .kind = BindingKind::SampledTexture,
+                    .texture_view = tex->GetDefaultView()},
+                   {.slot = 3, .kind = BindingKind::Sampler,
+                    .sampler = samp.get()}},
+       .label = "dynamic"});
+  REQUIRE(table);
+
+  const uint64_t align = device.MinBufferOffsetAlignment();
+  const uint32_t offsets[2] = {uint32_t(align), uint32_t(align * 2)};
+
+  auto encoder = device.CreateCommandEncoder("dyn");
+  encoder->Transition(ubo.get(), ResourceState::ShaderRead);
+  encoder->Transition(ssbo.get(), ResourceState::ShaderWrite);
+  encoder->Transition(tex.get(), ResourceState::ShaderRead);
+  auto* pass = encoder->BeginComputePass("dyn");
+  REQUIRE(pass != nullptr);
+  pass->SetPipeline(pipe.get());
+  pass->SetBindingTable(0, table.get(), offsets);
+  pass->End();
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.WaitIdle();
+
+  if (auto* log = badlands::rhi::null::GetCommandLog(device)) {
+    const auto* rec = log->Find(
+        badlands::rhi::null::RecordedCommand::Kind::SetBindingTable);
+    REQUIRE(rec != nullptr);
+    REQUIRE(rec->dynamic_offsets.size() == 2);
+    CHECK(rec->dynamic_offsets[0] == offsets[0]);
+    CHECK(rec->dynamic_offsets[1] == offsets[1]);
+  }
+}
+
+// A table declaring more dynamic offsets than any target can carry is refused
+// at creation, where it is cheap to fix.
+inline void CheckTooManyDynamicOffsetsAreRefused(IRhiDevice& device) {
+  // The reflection must DECLARE all of these slots. Using the shared
+  // 4-slot reflection made this pass for the wrong reason -- slot 4 simply
+  // failed to resolve -- which the red proof caught.
+  ShaderReflection refl;
+  for (uint32_t i = 0; i <= kMaxDynamicOffsetsPerTable; ++i) {
+    refl.bindings.push_back({.group = 0, .slot = i,
+                             .name = "b" + std::to_string(i),
+                             .kind = BindingKind::UniformBuffer,
+                             .location = {.space = 0, .index = i}});
+  }
+  ReflectedEntryPoint ep;
+  ep.name = "cs_main";
+  ep.stage = ShaderStage::Compute;
+  ep.workgroup_size[0] = 64;
+  refl.entry_points.push_back(ep);
+
+  auto module = device.CreateShaderModule(MinimalComputeSource(device.GetBackend()),
+                                          refl, "manydyn");
+  auto pipe = device.CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 256, .usage = BufferUsage::Uniform, .label = "u"});
+
+  std::vector<BindingEntry> entries;
+  for (uint32_t i = 0; i <= kMaxDynamicOffsetsPerTable; ++i) {
+    entries.push_back({.slot = i, .kind = BindingKind::UniformBuffer,
+                       .buffer = ubo.get(), .dynamic_offset = true});
+  }
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable({.compute_pipeline = pipe.get(),
+                                       .entries = entries,
+                                       .label = "toomany"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  // Assert the REASON, not just the refusal -- otherwise any other resolution
+  // failure satisfies this case.
+  CHECK(log.find("cross-platform maximum") != std::string::npos);
+}
+
+// A dynamic offset re-points a buffer. Marking a texture or sampler dynamic
+// would silently consume a value from the caller's span and shift every later
+// offset onto the wrong binding.
+inline void CheckDynamicOffsetOnANonBufferIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled});
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 2, .kind = BindingKind::SampledTexture,
+                      .texture_view = tex->GetDefaultView(),
+                      .dynamic_offset = true}},
+         .label = "dyntex"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("only buffer bindings") != std::string::npos);
+}
+
 // Submitted work must retire rather than accumulate.
 //
 // Honest about its own strength: the load-bearing part is that InFlightCount()
@@ -1484,6 +1614,7 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckFrameAllocatorRefusals(device);
   CheckFrameAllocatorGrowsThenCaps(device);
   CheckFrameAllocatorRecyclesPerSlot(device);
+  CheckDynamicOffsetsReachTheBackend(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

@@ -6,6 +6,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <span>
 #include <tuple>
 
 #include <spdlog/spdlog.h>
@@ -308,9 +309,14 @@ class NullRenderPass final : public IRenderPass {
     log_->Record({.kind = RecordedCommand::Kind::SetRenderPipeline,
                   .label = label_, .object = p});
   }
-  void SetBindingTable(uint32_t group, IBindingTable* t) override {
-    log_->Record({.kind = RecordedCommand::Kind::SetBindingTable,
-                  .label = label_, .object = t, .group = group});
+  void SetBindingTable(uint32_t group, IBindingTable* t,
+                       std::span<const uint32_t> dynamic_offsets) override {
+    RecordedCommand c{.kind = RecordedCommand::Kind::SetBindingTable,
+                      .label = label_, .object = t, .group = group};
+    // Recorded so a test can assert WHICH offsets reached the backend, with no
+    // GPU. Otherwise dynamic offsets are only observable in pixels.
+    c.dynamic_offsets.assign(dynamic_offsets.begin(), dynamic_offsets.end());
+    log_->Record(std::move(c));
   }
   void SetIndexBuffer(IBuffer* b, IndexFormat, uint64_t) override {
     index_buffer_ = b;
@@ -381,9 +387,14 @@ class NullComputePass final : public IComputePass {
     log_->Record({.kind = RecordedCommand::Kind::SetComputePipeline,
                   .label = label_, .object = p});
   }
-  void SetBindingTable(uint32_t group, IBindingTable* t) override {
-    log_->Record({.kind = RecordedCommand::Kind::SetBindingTable,
-                  .label = label_, .object = t, .group = group});
+  void SetBindingTable(uint32_t group, IBindingTable* t,
+                       std::span<const uint32_t> dynamic_offsets) override {
+    RecordedCommand c{.kind = RecordedCommand::Kind::SetBindingTable,
+                      .label = label_, .object = t, .group = group};
+    // Recorded so a test can assert WHICH offsets reached the backend, with no
+    // GPU. Otherwise dynamic offsets are only observable in pixels.
+    c.dynamic_offsets.assign(dynamic_offsets.begin(), dynamic_offsets.end());
+    log_->Record(std::move(c));
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
     RecordedCommand c{.kind = RecordedCommand::Kind::Dispatch, .label = label_};

@@ -153,7 +153,19 @@ struct ResolvedBindingTable {
   // Shared ownership of everything the entries reference, so the table can
   // outlive the caller's handles.
   std::vector<std::shared_ptr<IResource>> retained;
+  // Indices into `entries` for the entries that take a dynamic offset, in
+  // increasing slot order. SetBindingTable's span is read in this order, so it
+  // must be computed the same way everywhere -- see DynamicEntryOrder.
+  std::vector<uint32_t> dynamic_entries;
 };
+
+// Which entries take a dynamic offset, in the order SetBindingTable's span
+// supplies them (increasing slot).
+//
+// One implementation, shared by the resolver and the validation layer, because
+// the two disagreeing about the ORDER would silently apply each offset to the
+// wrong binding -- a wrong image with no error anywhere.
+std::vector<uint32_t> DynamicEntryOrder(const std::vector<BindingEntry>& entries);
 
 // Resolves `desc` against its pipeline's reflection, retains what it
 // references, and refuses -- returning nullopt after logging -- if any entry

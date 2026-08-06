@@ -478,6 +478,103 @@ TEST_CASE("metal: frame allocator recycles per slot", "[rhi]") {
   rhitest::CheckFrameAllocatorRecyclesPerSlot(*d);
 }
 
+TEST_CASE("metal: dynamic offsets reach the backend", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckDynamicOffsetsReachTheBackend(*d);
+}
+TEST_CASE("metal: too many dynamic offsets are refused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckTooManyDynamicOffsetsAreRefused(*d);
+}
+TEST_CASE("metal: a dynamic offset on a non-buffer is refused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckDynamicOffsetOnANonBufferIsRefused(*d);
+}
+
+TEST_CASE("metal: a dynamic offset changes what the shader reads",
+          "[rhi][metal][gpu]") {
+  // The conformance case only inspects Null's command log, which does not
+  // exist on Metal -- so on this backend it asserts nothing about the offset
+  // actually being applied. Its red proof caught that. This reads the value
+  // back off the GPU: same table, two offsets, two different results.
+  constexpr const char* kReadAtOffset = R"(
+#include <metal_stdlib>
+using namespace metal;
+kernel void cs_main(constant uint* src [[buffer(0)]],
+                    device uint* dst [[buffer(1)]],
+                    uint gid [[thread_position_in_grid]]) {
+  dst[0] = src[0];
+}
+)";
+  ShaderReflection refl;
+  refl.bindings.push_back({.group = 0, .slot = 0, .name = "src",
+                           .kind = BindingKind::UniformBuffer,
+                           .location = {.space = 0, .index = 0}});
+  refl.bindings.push_back({.group = 0, .slot = 1, .name = "dst",
+                           .kind = BindingKind::StorageBuffer,
+                           .location = {.space = 0, .index = 1}});
+  ReflectedEntryPoint ep;
+  ep.name = "cs_main";
+  ep.stage = ShaderStage::Compute;
+  ep.workgroup_size[0] = 1;
+  refl.entry_points.push_back(ep);
+
+  auto device = MakeMetal(/*validation=*/false);
+  REQUIRE(device);
+  auto module = device->CreateShaderModule(kReadAtOffset, refl, "readoff");
+  auto pipe = device->CreateComputePipeline(
+      {.shader = module.get(), .entry = "cs_main"});
+  REQUIRE(pipe);
+
+  const uint64_t align = device->MinBufferOffsetAlignment();
+  auto src = device->CreateBuffer({.size = align * 4,
+                                   .usage = BufferUsage::Uniform,
+                                   .label = "src"});
+  auto dst = device->CreateBuffer({.size = sizeof(uint32_t),
+                                   .usage = BufferUsage::Storage |
+                                            BufferUsage::MapRead,
+                                   .label = "dst"});
+  REQUIRE(src);
+  REQUIRE(dst);
+
+  // Distinct values one alignment apart, so the offset is the only thing that
+  // can select between them.
+  const uint32_t kFirst = 0xAAAA1111u, kSecond = 0xBBBB2222u;
+  src->Write(0, {reinterpret_cast<const uint8_t*>(&kFirst), sizeof(kFirst)});
+  src->Write(align,
+             {reinterpret_cast<const uint8_t*>(&kSecond), sizeof(kSecond)});
+
+  auto table = device->CreateBindingTable(
+      {.compute_pipeline = pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                    .buffer = src.get(), .dynamic_offset = true},
+                   {.slot = 1, .kind = BindingKind::StorageBuffer,
+                    .buffer = dst.get()}},
+       .label = "dyn_read"});
+  REQUIRE(table);
+
+  auto run_with = [&](uint32_t offset) {
+    const uint32_t offsets[1] = {offset};
+    auto encoder = device->CreateCommandEncoder("dyn");
+    encoder->Transition(src.get(), ResourceState::ShaderRead);
+    encoder->Transition(dst.get(), ResourceState::ShaderWrite);
+    auto* pass = encoder->BeginComputePass("dyn");
+    pass->SetPipeline(pipe.get());
+    pass->SetBindingTable(0, table.get(), offsets);
+    pass->Dispatch(1);
+    pass->End();
+    encoder->Finish();
+    device->Submit(*encoder);
+    device->WaitIdle();
+    uint32_t out = 0;
+    REQUIRE(dst->Read(0, {reinterpret_cast<uint8_t*>(&out), sizeof(out)}));
+    return out;
+  };
+
+  CHECK(run_with(0) == kFirst);
+  CHECK(run_with(uint32_t(align)) == kSecond);
+}
+
 TEST_CASE("metal: a deferred handle is really released rather than stranded",
           "[rhi][metal]") {
   // ASan cannot see this. It catches memory freed and then touched, but an

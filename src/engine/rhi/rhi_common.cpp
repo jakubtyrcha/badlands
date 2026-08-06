@@ -85,6 +85,18 @@ const ShaderReflection* ReflectionOf(const BindingTableDesc& d) {
 
 }  // namespace
 
+std::vector<uint32_t> DynamicEntryOrder(
+    const std::vector<BindingEntry>& entries) {
+  std::vector<uint32_t> out;
+  for (uint32_t i = 0; i < entries.size(); ++i) {
+    if (entries[i].dynamic_offset) out.push_back(i);
+  }
+  std::stable_sort(out.begin(), out.end(), [&entries](uint32_t a, uint32_t b) {
+    return entries[a].slot < entries[b].slot;
+  });
+  return out;
+}
+
 std::optional<ResolvedBindingTable> ResolveBindingTable(
     const BindingTableDesc& d) {
   const ShaderReflection* refl = ReflectionOf(d);
@@ -160,8 +172,30 @@ std::optional<ResolvedBindingTable> ResolveBindingTable(
       return std::nullopt;
     }
 
+    // A dynamic offset re-points a BUFFER binding. There is nothing to
+    // re-point on a texture or a sampler, and accepting the flag there would
+    // silently consume a value from the caller's span and shift every
+    // subsequent offset onto the wrong binding.
+    if (e.dynamic_offset && !e.buffer) {
+      spdlog::error(
+          "rhi: binding table '{}' entry {}: slot {} is marked dynamic_offset "
+          "but binds no buffer -- only buffer bindings can take one",
+          d.label, i, e.slot);
+      return std::nullopt;
+    }
+
     out.indices.push_back(b->location.index);
     out.retained.push_back(std::move(owned));
+  }
+
+  out.dynamic_entries = DynamicEntryOrder(d.entries);
+  if (out.dynamic_entries.size() > kMaxDynamicOffsetsPerTable) {
+    spdlog::error(
+        "rhi: binding table '{}' declares {} dynamic offsets, above the "
+        "cross-platform maximum of {} -- a DX12 root signature has a 64-DWORD "
+        "budget and would reject it",
+        d.label, out.dynamic_entries.size(), kMaxDynamicOffsetsPerTable);
+    return std::nullopt;
   }
   return out;
 }
